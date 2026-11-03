@@ -46,6 +46,7 @@ export const ATTENDANCE_APPROVAL_REQUEST_TYPES = [
   'missed_check_out',
   'time_correction',
   'leave',
+  'business_trip',
   'overtime',
   'outdoor_punch',
   'shift_swap',

@@ -13,6 +13,7 @@
 //   - Returns the typed data payload; callers translate to their cell shape.
 
 import { apiFetch } from '../../utils/api'
+import type { AttendanceDayTimeContext } from '../../views/attendance/attendanceDayTimeContext'
 
 export type CalendarEffectiveMode = 'userId' | 'groupId' | 'orgOnly'
 
@@ -22,6 +23,7 @@ export type CalendarEffectiveBaseSource =
   | 'rotation'
   | 'national'
   | 'manual'
+  | 'stored_record'
 
 export type CalendarEffectivePolicySource = 'org' | 'group' | 'role' | 'user'
 
@@ -84,6 +86,7 @@ export interface CalendarEffectiveOverlay {
 }
 
 export interface CalendarEffectiveItem {
+  attendanceTimeContext?: AttendanceDayTimeContext | null
   date: string
   base: CalendarEffectiveBase
   effective: CalendarEffectiveResult
@@ -95,7 +98,8 @@ export interface CalendarEffectiveResponse {
   mode: CalendarEffectiveMode
   from: string
   to: string
-  timezone: string
+  timezone: string | null
+  timezoneMode?: 'single' | 'per_day'
   items: CalendarEffectiveItem[]
 }
 

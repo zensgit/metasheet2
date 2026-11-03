@@ -113,6 +113,8 @@ metasheet/
   packages/core-backend/migrations/
   plugins/plugin-attendance/
   plugins/plugin-integration-core/
+  plugins/plugin-elearning/
+  vendor/xlsx-0.20.3.tgz
   scripts/ops/
     multitable-onprem-bootstrap-admin.ps1
     multitable-onprem-apply-package.sh
@@ -138,6 +140,8 @@ Current plugin policy:
 
 - ships `plugin-attendance` alongside the core app
 - ships `plugin-integration-core` so K3 WISE setup and `/api/integration/*` routes work in packaged deployments
+- ships `plugin-elearning` (learning center / cloud classroom) switched off: its `activate()` returns before registering any route or job unless `ELEARNING_ENABLED` is exactly `true`, and no package default sets that flag; with the flag off, global administrators still see its card in the app catalog
+  - once the learning center is on, `ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS` bounds one database statement: the scan that finds the self-study courses a learner may see (`GET /api/elearning/me/courses`). It is a whole number of milliseconds, default `5000`; unset, blank or anything that is not a plain whole number also means `5000`, and `0` turns this timeout off so only the database connection's own statement timeout applies. When the scan runs out of time the request answers `503` with `{"error":"unavailable"}`, nothing is retried, and the backend logs one warning line `elearning_audience_scan_canceled` with the org id and the timeout. The usual cause is planner statistics that are stale right after a bulk import; they refresh with the next automatic or manual `ANALYZE` of the e-learning catalog tables (issue #6175). Raise the value only if a large catalog keeps hitting it; it is clamped to `DB_QUERY_TIMEOUT` (the pool's client-side query timeout, default `30000`) minus 1000 ms, because above that the pg client would give up first, without the 503/log path, and leave the statement running on the server. If the connection's own `DB_STATEMENT_TIMEOUT` is lower than this value, this value raises the server-side bound for that one statement.
 - does not restrict the app shell to `/attendance`
 
 ## Customer delivery checklist
@@ -173,6 +177,9 @@ default `InstallDeps=1` uses the exact pnpm version recorded in
 `PACKAGE-METADATA.json` and the packaged root `packageManager`. Corrective
 rerolls must use `deploy.bat` or the PowerShell apply helper; hand-copying files
 or using `--no-frozen-lockfile` bypasses the preflight/rollback contract.
+The SheetJS tarball (`xlsx` 0.20.3) ships inside the package at
+`vendor/xlsx-0.20.3.tgz` and is checked against the lockfile sha512, so the
+staging preflight needs only the npm registry.
 
 On Windows, both dependency phases are logged child processes. The apply helper
 logs the resolved `pnpm` path/version, writes staging preflight logs to

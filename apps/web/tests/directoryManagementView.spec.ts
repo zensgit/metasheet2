@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import DirectoryManagementView from '../src/views/DirectoryManagementView.vue'
+import AttendanceDingTalkMicroappHelpView from '../src/views/AttendanceDingTalkMicroappHelpView.vue'
 
 const apiFetchMock = vi.fn()
 
@@ -82,7 +83,14 @@ function createIntegration(overrides: Record<string, unknown> = {}) {
 }
 
 function createAccount(overrides: Record<string, unknown> = {}) {
+  // Stand-in for the server's grantOpenIdAvailable when a fixture does not set it: what the server
+  // answers for an account with no linked DingTalk-login openId on file (corp member ⇒ needs its
+  // own openId). Tests about the linked-openId path set grantOpenIdAvailable explicitly.
+  const corpId = 'corpId' in overrides ? overrides.corpId as string | null : 'dingcorp'
+  const openId = 'openId' in overrides ? overrides.openId as string | null : 'open-1'
+  const grantOpenIdAvailable = !(corpId && corpId.trim()) || Boolean(openId && openId.trim())
   return {
+    grantOpenIdAvailable,
     id: 'account-1',
     integrationId: 'dir-1',
     provider: 'dingtalk',
@@ -258,6 +266,239 @@ describe('DirectoryManagementView', () => {
     window.history.replaceState({}, '', '/')
     app = null
     container = null
+  })
+
+  it('distinguishes loading, list failure and confirmed empty, and allows a read-only retry', async () => {
+    let finish!: (value: unknown) => void
+    apiFetchMock.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    expect(container!.textContent).toContain('正在加载目录集成')
+    expect(container!.textContent).not.toContain('暂无目录集成')
+
+    finish(createJsonResponse({ error: { code: 'DIRECTORY_LIST_FAILED', message: 'Failed to load directory integrations' } }, 500))
+    await flushUi()
+    expect(container!.querySelector('[data-testid="directory-list-error"]')?.textContent).toContain('无法确认当前集成')
+    expect(container!.textContent).not.toContain('暂无目录集成')
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+    container!.querySelector<HTMLButtonElement>('[data-testid="directory-list-error"] button')!.click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="directory-list-error"]')).toBeNull()
+    expect(container!.textContent).toContain('暂无目录集成')
+    expect(apiFetchMock.mock.calls).toEqual([
+      ['/api/admin/directory/integrations'],
+      ['/api/admin/directory/integrations'],
+    ])
+  })
+
+  it.each(['network', 'malformed'])('does not interpret a %s failure as an empty integration list', async (kind) => {
+    if (kind === 'network') apiFetchMock.mockRejectedValue(new Error('network failed'))
+    else apiFetchMock.mockResolvedValue(createJsonResponse({ ok: true, data: {} }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    expect(container!.querySelector('[data-testid="directory-list-error"]')).not.toBeNull()
+    expect(container!.textContent).not.toContain('暂无目录集成')
+  })
+
+  it.each([null, '合成企业'])('labels the enterprise name, Corp ID and local organization separately (%s)', async (corpName) => {
+    const integration = createIntegration({ orgId: 'synthetic-org' })
+    apiFetchMock.mockImplementation(async (url: string) => createJsonResponse({ ok: true, data: {
+      items: url === '/api/admin/directory/integrations'
+        ? [{ ...integration, config: { ...integration.config, corpName } }] : [],
+    } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const item = container!.querySelector('.directory-admin__item')!
+    expect(item.textContent).toContain(`钉钉 · ${corpName || '企业名称未提供'}`)
+    expect(item.textContent).toContain('应用名称未提供')
+    expect(item.textContent).toContain('身份：未核验')
+    expect(item.textContent).toContain('Corp ID：dingcorp')
+    expect(item.textContent).toContain('本地组织：synthetic-org')
+    expect(container!.querySelector<HTMLInputElement>('input[placeholder="填写已确认的企业名称"]')?.value).toBe(corpName || '')
+    expect(apiFetchMock.mock.calls.every((call) => call.length === 1)).toBe(true)
+  })
+
+  it.each(['verified', 'mismatch', 'unverified'])('shows enterprise, application and independent identity status (%s)', async (identityStatus) => {
+    const base = createIntegration({ syncEnabled: false })
+    const integration = { ...base, config: { ...base.config, corpName: '合成企业', appName: '合成应用', identityStatus,
+      identityVerification: identityStatus === 'unverified' ? null : { appCorpId: 'other-synthetic-corp', appCorpName: '应用所属企业', checkedAt: '2026-10-30T00:00:00Z' },
+    } }
+    apiFetchMock.mockImplementation(async (url: string) => createJsonResponse({ ok: true, data: { items: url === '/api/admin/directory/integrations' ? [integration] : [] } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const item = container!.querySelector('.directory-admin__item')!
+    expect(item.querySelector('strong')?.textContent).toContain('合成企业')
+    expect(item.textContent).toContain('应用：合成应用')
+    expect(item.textContent).toContain('用途：DingTalk CN')
+    expect(item.textContent).toContain('自动同步：关闭')
+    expect(item.querySelector('[data-testid="directory-identity-status"]')?.textContent).toContain(identityStatus === 'verified' ? '管理员已核验' : identityStatus === 'mismatch' ? '企业与应用归属不一致' : '未核验')
+    expect(item.querySelector('[role="alert"]') !== null).toBe(identityStatus === 'mismatch')
+    expect(apiFetchMock.mock.calls.every((call) => call.length === 1)).toBe(true)
+  })
+
+  it.each([null, '合成企业'])('omits an unchanged enterprise name on unrelated saves (%s)', async (corpName) => {
+    const base = createIntegration()
+    const integration = { ...base, config: { ...base.config, corpName } }
+    apiFetchMock.mockImplementation(async (url: string) => createJsonResponse({ ok: true, data: {
+      items: url === '/api/admin/directory/integrations' ? [integration] : [],
+    } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.trim() === '保存变更')!.click()
+    await flushUi()
+    const writes = apiFetchMock.mock.calls.filter((call) => call[1]?.method)
+    expect(writes).toHaveLength(1)
+    expect(JSON.parse(writes[0][1].body)).not.toHaveProperty('corpName')
+  })
+
+  it.each([' 新企业 ', ''])('sends enterprise name changes only on explicit form save (%s)', async (name) => {
+    const base = createIntegration()
+    const integration = { ...base, config: { ...base.config, corpName: '原企业' } }
+    apiFetchMock.mockImplementation(async (url: string) => createJsonResponse({ ok: true, data: {
+      items: url === '/api/admin/directory/integrations' ? [integration] : [],
+    } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const nameInput = container!.querySelector<HTMLInputElement>('input[placeholder="填写已确认的企业名称"]')!
+    nameInput.value = name
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(apiFetchMock.mock.calls.every((call) => call.length === 1)).toBe(true)
+    Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.trim() === '保存变更')!.click()
+    await flushUi()
+    const writes = apiFetchMock.mock.calls.filter((call) => call[1]?.method)
+    expect(writes).toHaveLength(1)
+    expect(writes[0][0]).toBe('/api/admin/directory/integrations/dir-1')
+    expect(writes[0][1].method).toBe('PUT')
+    expect(JSON.parse(writes[0][1].body)).toMatchObject({ corpName: name.trim(), corpId: integration.corpId, syncEnabled: integration.syncEnabled })
+  })
+
+  it('offers server OAuth configuration guidance before a directory integration exists', async () => {
+    apiFetchMock.mockResolvedValue(createJsonResponse({ ok: true, data: { items: [] } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    const hint = container!.querySelector('[data-testid="dingtalk-login-config-hint"]')
+    expect(hint?.textContent).toContain('不会配置钉钉登录')
+    expect(hint?.textContent).toContain('服务端环境变量')
+    expect(hint?.querySelector('a')?.getAttribute('href')).toBe('/help/attendance/dingtalk-microapp#server-login')
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations')
+  })
+
+  it('#6467 names the separate OAuth env variables in the directory credential note', async () => {
+    apiFetchMock.mockResolvedValue(createJsonResponse({ ok: true, data: { items: [] } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    const hint = container!.querySelector('[data-testid="dingtalk-login-config-hint"]')!
+    const text = hint.textContent!.replace(/\s+/g, ' ')
+    expect(text).toContain('目录集成（通讯录拉取）的凭据')
+    expect(text).toContain('DINGTALK_CLIENT_ID / DINGTALK_CLIENT_SECRET / DINGTALK_REDIRECT_URI')
+    expect(text).toContain('两者互不相通')
+    expect(hint.querySelector('[data-testid="dingtalk-login-probe-status"]')).toBeNull()
+    // Opening the page does not probe; only the integrations list is fetched.
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    [
+      'available',
+      { success: true, data: { available: true, unavailableReason: null, missingEnv: [] } },
+      '当前钉钉登录：可用。',
+    ],
+    [
+      'several missing',
+      {
+        success: true,
+        data: {
+          available: false,
+          unavailableReason: 'missing_client_id',
+          missingEnv: ['DINGTALK_CLIENT_ID|DINGTALK_APP_KEY', 'private-secret-value', 'DINGTALK_REDIRECT_URI'],
+        },
+      },
+      '当前钉钉登录：不可用，缺少服务端环境变量 DINGTALK_CLIENT_ID（或 DINGTALK_APP_KEY）、DINGTALK_REDIRECT_URI；DINGTALK_REDIRECT_URI 须与钉钉开放平台的登录回调地址一致。',
+    ],
+    [
+      'older backend without missingEnv',
+      { success: true, data: { available: false, unavailableReason: 'missing_client_secret' } },
+      '当前钉钉登录：不可用，缺少服务端环境变量 DINGTALK_CLIENT_SECRET（或 DINGTALK_APP_SECRET）。',
+    ],
+    [
+      'corp not allowed',
+      { success: true, data: { available: false, unavailableReason: 'corp_not_allowed', missingEnv: [], corpId: 'private-corp-value' } },
+      '当前钉钉登录：不可用，企业白名单未放行，请检查 DINGTALK_CORP_ID 与 DINGTALK_ALLOWED_CORP_IDS。',
+    ],
+    [
+      'unknown reason',
+      { success: true, data: { available: false, unavailableReason: 'unexpected-private-value' } },
+      '当前钉钉登录：不可用。',
+    ],
+    [
+      'probe failure',
+      { success: false, error: 'private-error-value' },
+      '当前钉钉登录：无法获取状态，请稍后重试。',
+    ],
+  ])('#6467 login probe button reports %s', async (_label, probePayload, expected) => {
+    apiFetchMock.mockImplementation(async (url: string) => (
+      url === '/api/auth/dingtalk/launch?probe=1'
+        ? createJsonResponse(probePayload)
+        : createJsonResponse({ ok: true, data: { items: [] } })
+    ))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-testid="dingtalk-login-probe-button"]')!.click()
+    await flushUi()
+
+    const statusNode = container!.querySelector('[data-testid="dingtalk-login-probe-status"]')
+    expect(statusNode?.textContent).toBe(expected)
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/auth/dingtalk/launch?probe=1',
+      expect.objectContaining({ method: 'GET' }),
+    )
+    for (const value of ['private-secret-value', 'private-corp-value', 'private-error-value', 'unexpected-private-value']) {
+      expect(container!.textContent).not.toContain(value)
+    }
+  })
+
+  it('renders the linked OAuth help without fetching or editing credentials', async () => {
+    app = createApp(AttendanceDingTalkMicroappHelpView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    const section = container!.querySelector('#server-login')
+    expect(section).not.toBeNull()
+    expect(Array.from(section!.querySelectorAll('code'), (node) => node.textContent)).toEqual([
+      'docker/app.env',
+      'DINGTALK_CLIENT_ID', 'DINGTALK_APP_KEY',
+      'DINGTALK_CLIENT_SECRET', 'DINGTALK_APP_SECRET',
+      'DINGTALK_REDIRECT_URI', '/login/dingtalk/callback',
+      'DINGTALK_CORP_ID', 'DINGTALK_ALLOWED_CORP_IDS',
+    ])
+    expect(section!.textContent).toContain('保存目录集成不会同步这些变量')
+    expect(section!.textContent).toContain('不要通过清空白名单绕过限制')
+    expect(section!.querySelector('input, textarea, form')).toBeNull()
+    expect(apiFetchMock).not.toHaveBeenCalled()
   })
 
   it('loads integrations and recent runs on mount', async () => {
@@ -554,7 +795,7 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('部门 ID 2')
     expect(container?.textContent).toContain('当前可见 1 个部门')
     const visibleDepartmentPreview = container!.querySelector('.directory-admin__visible-department-preview') as HTMLTextAreaElement | null
-    expect(visibleDepartmentPreview?.value).toBe('2')
+    expect(visibleDepartmentPreview?.value).toBe('项目组 · 信息化团队 / 项目组')
 
     const copyVisibleDepartmentIdsButton = Array.from(container!.querySelectorAll('button'))
       .find((button) => button.textContent?.includes('复制当前可见部门 ID'))
@@ -1037,8 +1278,14 @@ describe('DirectoryManagementView', () => {
     app.mount(container!)
     await flushUi()
 
-    expect(container?.textContent).toContain('openId 缺失，当前无法同时开通钉钉登录')
-    expect(container?.textContent).toContain('修复建议：若该成员刚完成钉钉登录/绑定，先刷新当前成员')
+    expect(container?.textContent).toContain('暂时拿不到该成员的 openId（成员完成绑定或激活后用钉钉扫码登录一次才会补齐）')
+    expect(container?.textContent).toContain('修复建议：先不勾选开通，完成绑定或激活 → 让成员用钉钉扫码登录一次 → 刷新当前成员后再开通（或到用户管理开通）。')
+    // field item 3: a bound member who logged in before the upgrade rescans once; the admin refreshes
+    // and grants on this page (user management is not equivalent for these members)
+    const rescanHints = Array.from(container!.querySelectorAll('p.directory-admin__hint'))
+      .filter((hint) => hint.textContent?.includes('已绑定、升级前用钉钉登录过的成员：升级后请让成员再用钉钉扫码登录一次，点「刷新当前成员」后在本页开通（这类成员不要到用户管理开通）。'))
+    expect(rescanHints.length).toBeGreaterThanOrEqual(2)
+    expect(container?.textContent).not.toContain('检查钉钉目录同步返回值')
     const refreshButtons = Array.from(container!.querySelectorAll('button')).filter((button) => button.textContent?.includes('刷新当前成员'))
     expect(refreshButtons.length).toBeGreaterThanOrEqual(2)
     const userLinks = Array.from(container!.querySelectorAll('a')).filter((link) => link.textContent?.includes('前往用户管理'))
@@ -1052,6 +1299,95 @@ describe('DirectoryManagementView', () => {
       expect(input?.disabled).toBe(true)
       expect(input?.checked).toBe(false)
     }
+  })
+
+  it('follows the server verdict: a member whose openId is known only from their DingTalk login can be bound WITH the grant', async () => {
+    // directory row has no openId (通讯录 never returns one) but the member already scanned in, so
+    // the server's grant predicate says the grant is available — the page must not block it.
+    const scannedInAccount = createAccount({ openId: null, grantOpenIdAvailable: true })
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([scannedInAccount])))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          account: createAccount({
+            openId: null,
+            grantOpenIdAvailable: true,
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha' },
+          }),
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([createAccount({
+        openId: null,
+        grantOpenIdAvailable: true,
+        linkStatus: 'linked',
+        matchStrategy: 'manual_admin',
+        localUser: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha' },
+      })])))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const accountsSection = findAccountsSection(container!)
+    expect(accountsSection.textContent).not.toContain('暂时拿不到该成员的 openId')
+    const grantInput = Array.from(accountsSection.querySelectorAll('label.directory-admin__toggle'))
+      .find((label) => label.textContent?.includes('绑定后同时开通钉钉登录'))
+      ?.querySelector('input[type="checkbox"]') as HTMLInputElement | null
+    expect(grantInput?.disabled).toBe(false)
+    expect(grantInput?.checked).toBe(true)
+
+    const bindInput = accountsSection.querySelector('input[placeholder="例如 user-123 或 alpha@example.com"]') as HTMLInputElement | null
+    bindInput!.value = 'alpha@example.com'
+    bindInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+    Array.from(accountsSection.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('绑定用户'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(10)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/account-1/bind',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ localUserRef: 'alpha@example.com', enableDingTalkGrant: true }),
+      }),
+    )
+  })
+
+  it('a server verdict of false blocks the grant even when the row carries an openId', async () => {
+    const blockedAccount = createAccount({ grantOpenIdAvailable: false })
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([blockedAccount])))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const accountsSection = findAccountsSection(container!)
+    const grantInput = Array.from(accountsSection.querySelectorAll('label.directory-admin__toggle'))
+      .find((label) => label.textContent?.includes('绑定后同时开通钉钉登录'))
+      ?.querySelector('input[type="checkbox"]') as HTMLInputElement | null
+    expect(grantInput?.disabled).toBe(true)
+    expect(accountsSection.textContent).toContain('暂时拿不到该成员的 openId')
+    // the field-item-3 rescan hint is for members who are already bound; this account is not
+    expect(accountsSection.textContent).not.toContain('已绑定、升级前用钉钉登录过的成员')
   })
 
   it('binds an openId-missing account without enabling DingTalk grant', async () => {
@@ -1957,6 +2293,140 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('新用户临时密码：Temp#888888')
     expect(container?.textContent).toContain('账号：wangwu')
     expect(container?.textContent).toContain('目录成员 王武 已创建本地用户并完成绑定')
+  })
+
+  // #6259: the admit-user route answers a login-name rule failure with 400 INVALID_USERNAME +
+  // details.rule (it used to be a 500 with the English sentence). Both create-and-bind forms label
+  // the field 登录名 like the create-user form, state the rule up front, and show Chinese copy for
+  // that code; anything without the rule code keeps the server message.
+  const LOGIN_NAME_RULE_ZH = '登录名只能用小写字母、数字和 . _ -，3–64 位且至少一个字母；中文姓名请填「姓名」栏'
+  const LOGIN_NAME_HINT_ZH = '登录名：只能用小写字母、数字和 . _ -，3–64 位且至少一个字母；中文姓名请填「姓名」栏。'
+  const LOGIN_NAME_RULE_EN = 'Username must be 3-64 characters and include at least one letter. Only lowercase letters, numbers, dot, underscore, and dash are allowed'
+
+  function mockDirectoryLoadWithPendingAccount(accountId: string, withReviewItem: boolean) {
+    const account = createAccount({ id: accountId, name: '测试员', email: null, mobile: '13900000000' })
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload(withReviewItem
+        ? [{
+          kind: 'pending_binding',
+          reason: '目录成员尚未绑定本地用户。',
+          account,
+          flags: { missingUnionId: false, missingOpenId: false },
+          actionable: { canBatchUnbind: false, canConfirmRecommendation: false },
+          recommendations: [],
+          recommendationStatus: { code: 'no_exact_match', message: '未匹配到本地用户' },
+        }]
+        : [])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([account], { total: 1 })))
+  }
+
+  it('labels both create-and-bind forms 登录名 with the rule hint and shows Chinese copy for INVALID_USERNAME (#6259)', async () => {
+    mockDirectoryLoadWithPendingAccount('account-zh-login', true)
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({
+      ok: false,
+      error: {
+        code: 'INVALID_USERNAME',
+        message: LOGIN_NAME_RULE_EN,
+        details: { rule: 'login_name_ascii' },
+      },
+    }, 400))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const toggleButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('手动创建用户'))
+    expect(toggleButton).toBeTruthy()
+    toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(2)
+
+    // Same account expanded => the review-queue form AND the account-list form are both rendered.
+    const forms = Array.from(container!.querySelectorAll('.directory-admin__review-admission'))
+      .filter((form) => form.textContent?.includes('创建本地用户') || form.querySelector('input[placeholder="例如 liqing"]'))
+    expect(forms).toHaveLength(2)
+    for (const form of forms) {
+      const labels = Array.from(form.querySelectorAll('.directory-admin__field > span')).map((span) => span.textContent?.trim())
+      expect(labels).toContain('登录名（可选）')
+      expect(labels).not.toContain('用户名（可选）')
+      const hint = form.querySelector('[data-directory-admission-rule="login-name"]')
+      expect(hint?.textContent?.trim()).toBe(LOGIN_NAME_HINT_ZH)
+      expect(form.textContent).toContain('邮箱、登录名、手机号至少填写一项')
+      expect(form.textContent).not.toContain('用户名')
+    }
+
+    const usernameInput = forms[0].querySelector('input[placeholder="例如 liqing"]') as HTMLInputElement | null
+    expect(usernameInput).toBeTruthy()
+    usernameInput!.value = '测试员'
+    usernameInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const createAndBindButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('创建用户并绑定'))
+    expect(createAndBindButton).toBeTruthy()
+    createAndBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(12)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/account-zh-login/admit-user',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          name: '测试员',
+          username: '测试员',
+          mobile: '13900000000',
+          enableDingTalkGrant: true,
+        }),
+      }),
+    )
+    const status = container!.querySelector('.directory-admin__status.directory-admin__status--error')
+    expect(status?.textContent?.trim()).toBe(LOGIN_NAME_RULE_ZH)
+    expect(container?.textContent).not.toContain('Username must be')
+    expect(container?.textContent).not.toContain('最近创建并绑定结果')
+  })
+
+  it('keeps the server message for an admission error without the login-name rule code (#6259)', async () => {
+    mockDirectoryLoadWithPendingAccount('account-en-fallback', false)
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({
+      ok: false,
+      error: {
+        // Same code but no details.rule: localisation is keyed by the rule code, never by prose.
+        code: 'INVALID_USERNAME',
+        message: LOGIN_NAME_RULE_EN,
+      },
+    }, 400))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const accountCard = findAccountsSection(container!).querySelector('.directory-admin__account') as HTMLElement
+    expect(accountCard).toBeTruthy()
+    const toggleButton = Array.from(accountCard.querySelectorAll('button')).find((button) => button.textContent?.includes('手动创建用户'))
+    toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(2)
+
+    const usernameInput = accountCard.querySelector('input[placeholder="例如 liqing"]') as HTMLInputElement | null
+    expect(usernameInput).toBeTruthy()
+    usernameInput!.value = 'li qing'
+    usernameInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const createAndBindButton = Array.from(accountCard.querySelectorAll('button')).find((button) => button.textContent?.includes('创建用户并绑定'))
+    createAndBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(12)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/account-en-fallback/admit-user',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    const status = container!.querySelector('.directory-admin__status.directory-admin__status--error')
+    expect(status?.textContent?.trim()).toBe(LOGIN_NAME_RULE_EN)
+    expect(container?.textContent).not.toContain(LOGIN_NAME_RULE_ZH)
   })
 
   it('focuses a reviewed account and quick-binds it from the accounts banner', async () => {
@@ -6581,8 +7051,59 @@ describe('DirectoryManagementView', () => {
           })],
         },
       }))
+      // Realistic reload: committed rows keep their link row with the local user cleared, so they
+      // come back as pending_binding, with the previous user recommended back.
       .mockResolvedValueOnce(createJsonResponse(
-        createReviewItemsPayload([]),
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-1',
+              isActive: false,
+              linkStatus: 'unmatched',
+              matchStrategy: 'manual_unbound',
+              localUser: null,
+            }),
+            recommendations: [{
+              localUser: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', isActive: true },
+              reasons: ['email'],
+            }],
+            flags: {
+              missingUnionId: false,
+              missingOpenId: false,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: true,
+            },
+          },
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-2',
+              externalUserId: '0447654442691175',
+              name: '次页成员',
+              isActive: false,
+              linkStatus: 'unmatched',
+              matchStrategy: 'manual_unbound',
+              localUser: null,
+            }),
+            recommendations: [{
+              localUser: { id: 'user-2', email: 'beta@example.com', name: 'Beta', role: 'user', isActive: true },
+              reasons: ['email'],
+            }],
+            flags: {
+              missingUnionId: false,
+              missingOpenId: false,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: true,
+            },
+          },
+        ]),
       ))
       .mockResolvedValueOnce(createJsonResponse(
         createAccountListPayload([
@@ -6641,7 +7162,622 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('处理进度')
     expect(container?.textContent).toContain('已完成')
     expect(container?.textContent).toContain('进度 2 / 2')
-    expect(container?.textContent).toContain('暂无待处理项')
+    const statusEl = container!.querySelector('.directory-admin__status')
+    expect(statusEl?.textContent?.trim()).toBe('已完成 2 个目录成员的批量停权处理')
+    expect(statusEl?.className).not.toContain('directory-admin__status--error')
+
+    // Full success keeps the selection state the reload produces, as before the partial-failure
+    // change: the recommended view is chosen and its rows are auto-selected. This pins that the
+    // partial-failure retry path leaves full success alone; it does not endorse the auto-selection.
+    const findButton = (label: string) => Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.trim().startsWith(label))
+    expect(findButton('全部待处理')?.className).toContain('directory-admin__button--active')
+    expect(findButton('可推荐处理')?.className).toContain('directory-admin__button--active')
+    const reloadedCheckboxes = Array.from(container!.querySelectorAll('.directory-admin__review-item .directory-admin__review-select input[type="checkbox"]')) as HTMLInputElement[]
+    expect(reloadedCheckboxes).toHaveLength(2)
+    expect(reloadedCheckboxes.map((checkbox) => checkbox.checked)).toEqual([true, true])
+    expect(findButton('批量确认推荐')?.textContent).toContain('批量确认推荐 (2)')
+    expect(findButton('批量停权处理')?.textContent).toContain('批量停权处理 (0)')
+  })
+
+  it('reports a partial-failure status and re-selects the still-eligible failed rows when batch-unbind commits some items but not all', async () => {
+    const inactiveLinkedReviewItem = (id: string, externalUserId: string, name: string, localUser: Record<string, unknown>) => ({
+      kind: 'inactive_linked',
+      reason: '目录成员已停用，但仍绑定本地用户，需要停权处理。',
+      account: createAccount({
+        id,
+        externalUserId,
+        name,
+        isActive: false,
+        linkStatus: 'linked',
+        matchStrategy: 'external_identity',
+        localUser,
+      }),
+      flags: {
+        missingUnionId: false,
+        missingOpenId: false,
+      },
+      actionable: {
+        canBatchUnbind: true,
+      },
+    })
+    const alpha = { id: 'user-1', email: 'alpha@example.com', name: 'Alpha' }
+    const beta = { id: 'user-2', email: 'beta@example.com', name: 'Beta' }
+    const gamma = { id: 'user-3', email: 'gamma@example.com', name: 'Gamma' }
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          inactiveLinkedReviewItem('account-1', '0447654442691174', '成员一', alpha),
+          inactiveLinkedReviewItem('account-2', '0447654442691175', '成员二', beta),
+          inactiveLinkedReviewItem('account-3', '0447654442691176', '成员三', gamma),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({ id: 'account-1', name: '成员一', isActive: false, linkStatus: 'linked', localUser: alpha }),
+          createAccount({ id: 'account-2', name: '成员二', isActive: false, linkStatus: 'linked', localUser: beta }),
+          createAccount({ id: 'account-3', name: '成员三', isActive: false, linkStatus: 'linked', localUser: gamma }),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            { id: 'account-1' },
+          ],
+          updatedCount: 1,
+          failedCount: 2,
+          failed: [
+            { accountId: 'account-2', error: 'Failed to unbind directory account' },
+            { accountId: 'account-3', error: 'Directory account not found' },
+          ],
+          disableDingTalkGrant: true,
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      // Realistic reload: the committed row comes back as pending_binding (link kept, local user
+      // cleared), with a recommendation; the failed row is unchanged; the missing row is gone.
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-1',
+              externalUserId: '0447654442691174',
+              name: '成员一',
+              isActive: false,
+              linkStatus: 'unmatched',
+              matchStrategy: 'manual_unbound',
+              localUser: null,
+            }),
+            recommendations: [{
+              localUser: { ...alpha, role: 'user', isActive: true },
+              reasons: ['email'],
+            }],
+            flags: {
+              missingUnionId: false,
+              missingOpenId: false,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: true,
+            },
+          },
+          inactiveLinkedReviewItem('account-2', '0447654442691175', '成员二', beta),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({ id: 'account-1', name: '成员一', isActive: false, linkStatus: 'unmatched', matchStrategy: 'manual_unbound', localUser: null }),
+          createAccount({ id: 'account-2', name: '成员二', isActive: false, linkStatus: 'linked', localUser: beta }),
+        ]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const readReviewCheckboxes = () => Array.from(container!.querySelectorAll('.directory-admin__review-item .directory-admin__review-select input[type="checkbox"]')) as HTMLInputElement[]
+    const findButton = (label: string) => Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.trim().startsWith(label))
+    const reviewCheckboxes = readReviewCheckboxes()
+    expect(reviewCheckboxes).toHaveLength(3)
+    for (const checkbox of reviewCheckboxes) {
+      checkbox.checked = true
+      checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    await flushUi(2)
+
+    const batchButton = findButton('批量停权处理')
+    expect(batchButton?.textContent).toContain('批量停权处理 (3)')
+    batchButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(8)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/batch-unbind',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          accountIds: ['account-1', 'account-2', 'account-3'],
+          disableDingTalkGrant: true,
+        }),
+      }),
+    )
+    // Must NOT claim blanket success for a batch that only partially committed.
+    expect(container?.textContent).not.toContain('已完成 3 个目录成员的批量停权处理')
+    expect(container?.textContent).toContain('进度 1 / 3')
+
+    const statusEl = container!.querySelector('.directory-admin__status')
+    expect(statusEl?.className).toContain('directory-admin__status--error')
+    expect(statusEl?.textContent?.trim()).toBe(
+      '已停权处理 1 个目录成员，另有 2 个失败：account-2: Failed to unbind directory account；account-3: Directory account not found',
+    )
+
+    // The still-eligible failed row is re-selected and shown under 停用待停权 (the reload would
+    // otherwise switch to the pending-binding view and hide it).
+    expect(findButton('停用待停权')?.className).toContain('directory-admin__button--active')
+    const retryCheckboxes = readReviewCheckboxes()
+    expect(retryCheckboxes).toHaveLength(1)
+    expect(retryCheckboxes[0].closest('.directory-admin__review-item')?.textContent).toContain('成员二')
+    expect(retryCheckboxes[0].checked).toBe(true)
+    expect(findButton('批量停权处理')?.textContent).toContain('批量停权处理 (1)')
+
+    // The committed row (now pending_binding with a recommendation) is not pre-selected.
+    findButton('全部待处理')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(2)
+    const pendingCheckboxes = readReviewCheckboxes()
+    expect(pendingCheckboxes).toHaveLength(1)
+    expect(pendingCheckboxes[0].closest('.directory-admin__review-item')?.textContent).toContain('成员一')
+    expect(pendingCheckboxes[0].checked).toBe(false)
+    expect(findButton('批量确认推荐')?.textContent).toContain('批量确认推荐 (0)')
+
+    // Nothing else is selected: neither the committed row nor the failed row missing from the queue.
+    findButton('停用待停权')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(2)
+    const retryCheckbox = readReviewCheckboxes()[0]
+    retryCheckbox.checked = false
+    retryCheckbox.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+    expect((findButton('清空选择') as HTMLButtonElement | undefined)?.disabled).toBe(true)
+  })
+
+  it('does not re-select a committed row or a failed row that is no longer eligible after a partial batch-unbind', async () => {
+    const inactiveLinkedReviewItem = (id: string, externalUserId: string, name: string, localUser: Record<string, unknown>) => ({
+      kind: 'inactive_linked',
+      reason: '目录成员已停用，但仍绑定本地用户，需要停权处理。',
+      account: createAccount({
+        id,
+        externalUserId,
+        name,
+        isActive: false,
+        linkStatus: 'linked',
+        matchStrategy: 'external_identity',
+        localUser,
+      }),
+      flags: {
+        missingUnionId: false,
+        missingOpenId: false,
+      },
+      actionable: {
+        canBatchUnbind: true,
+      },
+    })
+    const alpha = { id: 'user-1', email: 'alpha@example.com', name: 'Alpha' }
+    const beta = { id: 'user-2', email: 'beta@example.com', name: 'Beta' }
+    const gamma = { id: 'user-3', email: 'gamma@example.com', name: 'Gamma' }
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          inactiveLinkedReviewItem('account-1', '0447654442691174', '成员一', alpha),
+          inactiveLinkedReviewItem('account-2', '0447654442691175', '成员二', beta),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({ id: 'account-1', name: '成员一', isActive: false, linkStatus: 'linked', localUser: alpha }),
+          createAccount({ id: 'account-2', name: '成员二', isActive: false, linkStatus: 'linked', localUser: beta }),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            { id: 'account-1' },
+          ],
+          updatedCount: 1,
+          failedCount: 1,
+          failed: [
+            { accountId: 'account-2', error: 'Directory account binding changed' },
+          ],
+          disableDingTalkGrant: true,
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      // Concurrent changes: the committed row was linked again and is still eligible; the failed
+      // row was unlinked elsewhere and is now pending_binding without a recommendation.
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          inactiveLinkedReviewItem('account-1', '0447654442691174', '成员一', gamma),
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-2',
+              externalUserId: '0447654442691175',
+              name: '成员二',
+              isActive: false,
+              linkStatus: 'unmatched',
+              matchStrategy: 'manual_unbound',
+              localUser: null,
+            }),
+            recommendations: [],
+            flags: {
+              missingUnionId: false,
+              missingOpenId: false,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: false,
+            },
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({ id: 'account-1', name: '成员一', isActive: false, linkStatus: 'linked', localUser: gamma }),
+          createAccount({ id: 'account-2', name: '成员二', isActive: false, linkStatus: 'unmatched', matchStrategy: 'manual_unbound', localUser: null }),
+        ]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const findButton = (label: string) => Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.trim().startsWith(label))
+    const reviewCheckboxes = Array.from(container!.querySelectorAll('.directory-admin__review-item .directory-admin__review-select input[type="checkbox"]')) as HTMLInputElement[]
+    expect(reviewCheckboxes).toHaveLength(2)
+    for (const checkbox of reviewCheckboxes) {
+      checkbox.checked = true
+      checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    await flushUi(2)
+    findButton('批量停权处理')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(8)
+
+    const statusEl = container!.querySelector('.directory-admin__status')
+    expect(statusEl?.className).toContain('directory-admin__status--error')
+    expect(statusEl?.textContent?.trim()).toBe(
+      '已停权处理 1 个目录成员，另有 1 个失败：account-2: Directory account binding changed',
+    )
+    // No row is selected and the queue filter is left as the reload set it.
+    expect(findButton('全部待处理')?.className).toContain('directory-admin__button--active')
+    expect(findButton('停用待停权')?.className).not.toContain('directory-admin__button--active')
+    expect((findButton('清空选择') as HTMLButtonElement | undefined)?.disabled).toBe(true)
+    expect(findButton('批量创建并绑定')?.textContent).toContain('批量创建并绑定 (0)')
+    expect(findButton('批量停权处理')?.textContent).toContain('批量停权处理 (0)')
+  })
+
+  it('keeps the queue view when the re-selected batch-unbind retry row is already visible', async () => {
+    const inactiveLinkedReviewItem = (id: string, externalUserId: string, name: string, localUser: Record<string, unknown>) => ({
+      kind: 'inactive_linked',
+      reason: '目录成员已停用，但仍绑定本地用户，需要停权处理。',
+      account: createAccount({
+        id,
+        externalUserId,
+        name,
+        isActive: false,
+        linkStatus: 'linked',
+        matchStrategy: 'external_identity',
+        localUser,
+      }),
+      flags: {
+        missingUnionId: false,
+        missingOpenId: false,
+      },
+      actionable: {
+        canBatchUnbind: true,
+      },
+    })
+    const recommendedPendingReviewItem = (id: string, externalUserId: string, name: string, localUser: Record<string, unknown>) => ({
+      kind: 'pending_binding',
+      reason: '目录成员尚未绑定本地用户。',
+      account: createAccount({
+        id,
+        externalUserId,
+        name,
+        isActive: false,
+        linkStatus: 'unmatched',
+        matchStrategy: 'manual_unbound',
+        localUser: null,
+      }),
+      recommendations: [{
+        localUser: { ...localUser, role: 'user', isActive: true },
+        reasons: ['email'],
+      }],
+      flags: {
+        missingUnionId: false,
+        missingOpenId: false,
+      },
+      actionable: {
+        canBatchUnbind: false,
+        canConfirmRecommendation: true,
+      },
+    })
+    const zeta = { id: 'user-0', email: 'zeta@example.com', name: 'Zeta' }
+    const alpha = { id: 'user-1', email: 'alpha@example.com', name: 'Alpha' }
+    const beta = { id: 'user-2', email: 'beta@example.com', name: 'Beta' }
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          inactiveLinkedReviewItem('account-1', '0447654442691174', '成员一', alpha),
+          inactiveLinkedReviewItem('account-2', '0447654442691175', '成员二', beta),
+          recommendedPendingReviewItem('account-0', '0447654442691173', '成员零', zeta),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({ id: 'account-0', name: '成员零', isActive: false, linkStatus: 'unmatched', matchStrategy: 'manual_unbound', localUser: null }),
+          createAccount({ id: 'account-1', name: '成员一', isActive: false, linkStatus: 'linked', localUser: alpha }),
+          createAccount({ id: 'account-2', name: '成员二', isActive: false, linkStatus: 'linked', localUser: beta }),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            { id: 'account-1' },
+          ],
+          updatedCount: 1,
+          failedCount: 1,
+          failed: [
+            { accountId: 'account-2', error: 'Failed to unbind directory account' },
+          ],
+          disableDingTalkGrant: true,
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      // Realistic reload: the committed row comes back as pending_binding with a recommendation; the
+      // failed row is unchanged.
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          inactiveLinkedReviewItem('account-2', '0447654442691175', '成员二', beta),
+          recommendedPendingReviewItem('account-0', '0447654442691173', '成员零', zeta),
+          recommendedPendingReviewItem('account-1', '0447654442691174', '成员一', alpha),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({ id: 'account-0', name: '成员零', isActive: false, linkStatus: 'unmatched', matchStrategy: 'manual_unbound', localUser: null }),
+          createAccount({ id: 'account-1', name: '成员一', isActive: false, linkStatus: 'unmatched', matchStrategy: 'manual_unbound', localUser: null }),
+          createAccount({ id: 'account-2', name: '成员二', isActive: false, linkStatus: 'linked', localUser: beta }),
+        ]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const readReviewCheckboxes = () => Array.from(container!.querySelectorAll('.directory-admin__review-item .directory-admin__review-select input[type="checkbox"]')) as HTMLInputElement[]
+    const findButton = (label: string) => Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.trim().startsWith(label))
+    const findReviewCheckbox = (name: string) => readReviewCheckboxes().find((checkbox) => checkbox.closest('.directory-admin__review-item')?.textContent?.includes(name))
+
+    // The user opens 全部待绑定, which shows every row, and selects the two inactive linked rows.
+    findButton('全部待绑定')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(2)
+    expect(readReviewCheckboxes()).toHaveLength(3)
+    for (const name of ['成员一', '成员二']) {
+      const checkbox = findReviewCheckbox(name)!
+      checkbox.checked = true
+      checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    await flushUi(2)
+    const batchButton = findButton('批量停权处理')
+    expect(batchButton?.textContent).toContain('批量停权处理 (2)')
+    batchButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(8)
+
+    const statusEl = container!.querySelector('.directory-admin__status')
+    expect(statusEl?.className).toContain('directory-admin__status--error')
+    expect(statusEl?.textContent?.trim()).toBe(
+      '已停权处理 1 个目录成员，另有 1 个失败：account-2: Failed to unbind directory account',
+    )
+    // The retry row is already visible in this view, so the view does not switch.
+    expect(findButton('全部待处理')?.className).toContain('directory-admin__button--active')
+    expect(findButton('停用待停权')?.className).not.toContain('directory-admin__button--active')
+    expect(findButton('全部待绑定')?.className).toContain('directory-admin__button--active')
+    expect(readReviewCheckboxes()).toHaveLength(3)
+    expect(findReviewCheckbox('成员二')?.checked).toBe(true)
+    expect(findReviewCheckbox('成员一')?.checked).toBe(false)
+    expect(findReviewCheckbox('成员零')?.checked).toBe(false)
+    expect(findButton('批量停权处理')?.textContent).toContain('批量停权处理 (1)')
+    expect(findButton('批量确认推荐')?.textContent).toContain('批量确认推荐 (0)')
+  })
+
+  it('keeps the review reload error visible when it fails after a fully successful batch-unbind', async () => {
+    const alpha = { id: 'user-1', email: 'alpha@example.com', name: 'Alpha' }
+    const beta = { id: 'user-2', email: 'beta@example.com', name: 'Beta' }
+    const inactiveLinkedReviewItem = (id: string, externalUserId: string, name: string, localUser: Record<string, unknown>) => ({
+      kind: 'inactive_linked',
+      reason: '目录成员已停用，但仍绑定本地用户，需要停权处理。',
+      account: createAccount({
+        id,
+        externalUserId,
+        name,
+        isActive: false,
+        linkStatus: 'linked',
+        matchStrategy: 'external_identity',
+        localUser,
+      }),
+      flags: {
+        missingUnionId: false,
+        missingOpenId: false,
+      },
+      actionable: {
+        canBatchUnbind: true,
+      },
+    })
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          inactiveLinkedReviewItem('account-1', '0447654442691174', '成员一', alpha),
+          inactiveLinkedReviewItem('account-2', '0447654442691175', '成员二', beta),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({ id: 'account-1', name: '成员一', isActive: false, linkStatus: 'linked', localUser: alpha }),
+          createAccount({ id: 'account-2', name: '成员二', isActive: false, linkStatus: 'linked', localUser: beta }),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            { id: 'account-1' },
+            { id: 'account-2' },
+          ],
+          updatedCount: 2,
+          failedCount: 0,
+          failed: [],
+          disableDingTalkGrant: true,
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load directory review items' } },
+        500,
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({ id: 'account-1', name: '成员一', isActive: false, linkStatus: 'unmatched', matchStrategy: 'manual_unbound', localUser: null }),
+          createAccount({ id: 'account-2', name: '成员二', isActive: false, linkStatus: 'unmatched', matchStrategy: 'manual_unbound', localUser: null }),
+        ]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const reviewCheckboxes = Array.from(container!.querySelectorAll('.directory-admin__review-item .directory-admin__review-select input[type="checkbox"]')) as HTMLInputElement[]
+    expect(reviewCheckboxes).toHaveLength(2)
+    for (const checkbox of reviewCheckboxes) {
+      checkbox.checked = true
+      checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    await flushUi(2)
+    Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.trim().startsWith('批量停权处理'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(8)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/batch-unbind',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    // The batch result is still on the progress card; the status line reports the failed reload.
+    expect(container?.textContent).toContain('进度 2 / 2')
+    const statusEl = container!.querySelector('.directory-admin__status')
+    expect(statusEl?.textContent?.trim()).toBe('Failed to load directory review items')
+    expect(statusEl?.className).toContain('directory-admin__status--error')
   })
 
   it('acknowledges a pending directory alert and refreshes the alert list', async () => {

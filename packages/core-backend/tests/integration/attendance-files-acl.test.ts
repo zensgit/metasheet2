@@ -80,6 +80,7 @@ describeDb('F1 files-acl-tombstone: resource-level ACL matrix (real DB, route-le
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   let pool: Pool
+  const scopedActorIds: string[] = []
 
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
 
@@ -92,6 +93,30 @@ describeDb('F1 files-acl-tombstone: resource-level ACL matrix (real DB, route-le
   }
   const mintUserToken = (userId: string) => mintToken(userId, 'attendance:read,attendance:write', 'employee')
   const mintAdminToken = (userId: string) => mintToken(userId, 'attendance:read,attendance:write,attendance:admin,attendance:approve', 'admin')
+
+  async function mintScopedActor(userId: string, perms: string, roles: string): Promise<string> {
+    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(ORG)}&roles=${encodeURIComponent(roles)}&perms=${encodeURIComponent(perms)}`)
+    const codes = perms.split(',').map((code) => code.trim()).filter(Boolean)
+    scopedActorIds.push(userId)
+    await pool.query(
+      `INSERT INTO users (id, email, username, name, password_hash, role, permissions, is_active, is_admin)
+       VALUES ($1, $2, $1, 'files acl fixture', 'disabled', 'user', '[]'::jsonb, true, false)
+       ON CONFLICT (id) DO UPDATE SET is_active = true`,
+      [userId, `${userId}@files-acl-fixture.test`],
+    )
+    await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code)
+       SELECT $1, unnest($2::text[])
+       ON CONFLICT DO NOTHING`,
+      [userId, codes],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [userId, ORG],
+    )
+    return (res.body as { token?: string } | undefined)?.token ?? ''
+  }
 
   function uploadFile(token: string, part: { filename: string; contentType: string; content: Buffer }): Promise<HttpResponse> {
     return new Promise((resolve, reject) => {
@@ -179,6 +204,11 @@ describeDb('F1 files-acl-tombstone: resource-level ACL matrix (real DB, route-le
   })
 
   afterAll(async () => {
+    if (pool && scopedActorIds.length > 0) {
+      await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [scopedActorIds]).catch(() => undefined)
+      await pool.query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[]) AND org_id = $2', [scopedActorIds, ORG]).catch(() => undefined)
+      await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [scopedActorIds]).catch(() => undefined)
+    }
     if (server && (server as unknown as { stop?: () => Promise<void> }).stop) await (server as unknown as { stop: () => Promise<void> }).stop()
     await pool?.end().catch(() => undefined)
   })
@@ -335,9 +365,12 @@ describeDb('F1 files-acl-tombstone: resource-level ACL matrix (real DB, route-le
   // G2 check (which never goes through these HTTP routes at all).
   it('S2 regression: owner uploads a real photo and punches with it — unaffected by the new ACL gate', async () => {
     const admin = uid('s2reg-admin')
-    const tAdmin = await mintAdminToken(admin)
-    const putSettings = (body: Record<string, unknown>) =>
-      requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: authHeaders(tAdmin), body: JSON.stringify(body) })
+    const tAdmin = await mintScopedActor(admin, 'attendance:read,attendance:write,attendance:admin,attendance:approve', 'admin')
+    const putSettings = async (body: Record<string, unknown>, requireSuccess = true) => {
+      const response = await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: authHeaders(tAdmin), body: JSON.stringify(body) })
+      if (requireSuccess) expect(response.status).toBe(200)
+      return response
+    }
     const before = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: authHeaders(tAdmin) })
     const beforeData = (before.body as { data?: { punchPolicy?: unknown; geoFence?: unknown } } | undefined)?.data
     const originalPunchPolicy = beforeData?.punchPolicy
@@ -351,17 +384,7 @@ describeDb('F1 files-acl-tombstone: resource-level ACL matrix (real DB, route-le
     expect(flowId).toBeTruthy()
 
     const owner = uid('s2reg-owner')
-    const tOwner = await mintUserToken(owner)
-    // Lock-11 §10 W-4 fixture delta (mirrors the same-shaped seed in attendance-outdoor-punch.test.ts):
-    // this owner drives an outdoor-approval punch below with no org selector (arm a), and the writer's
-    // org-derivation now refuses arm (a) with zero active `user_orgs` memberships — seed exactly one
-    // active 'default' membership so the derivation resolves and the pre-existing 202/pendingApproval
-    // regression assertion stays true.
-    await pool.query(
-      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, 'default', TRUE)
-       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
-      [owner],
-    )
+    const tOwner = await mintScopedActor(owner, 'attendance:read,attendance:write', 'employee')
     try {
       await putSettings({
         geoFence: FENCE,
@@ -380,7 +403,7 @@ describeDb('F1 files-acl-tombstone: resource-level ACL matrix (real DB, route-le
       expect(punchRes.status).toBe(202)
       expect((punchRes.body as { data?: { pendingApproval?: boolean } })?.data?.pendingApproval).toBe(true)
     } finally {
-      await putSettings({ geoFence: originalGeoFence ?? null, punchPolicy: originalPunchPolicy ?? {} }).catch(() => undefined)
+      await putSettings({ geoFence: originalGeoFence ?? null, punchPolicy: originalPunchPolicy ?? {} }, false).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_approval_flows WHERE org_id = $1 AND request_type = 'outdoor_punch'`, [ORG]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_requests WHERE user_id = $1`, [owner]).catch(() => undefined)
       await cleanupFiles(owner)

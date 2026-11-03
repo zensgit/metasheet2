@@ -11,6 +11,10 @@ import { canReadApprovalInstance } from '../services/approval-instance-readabili
 import { parsePagination } from '../util/response'
 import { APPROVAL_POLICY_DENIED_ACTION } from '../types/approval-product'
 import { isApprovalAttachmentsEnabled } from './approval-attachments'
+import {
+  projectCancelRoundCancellationOutcomeForReadV1,
+  projectCancelRoundCloseReasonForReadV1,
+} from '../core/attendance-cancellation-execution-port'
 
 interface ApprovalHistoryRouterOptions {
   injector?: Injector
@@ -114,6 +118,70 @@ function extractRiderAttachmentIds(raw: unknown): string[] {
   return value.filter((entry): entry is string => typeof entry === 'string')
 }
 
+/**
+ * Test report 2026-10-08, T4cd — camelCase copies of the platform branch's row fields. ADDITIVE ONLY.
+ *
+ * The platform branch returns the raw `approval_records` columns (snake_case), while the history
+ * DTO every member surface reads is camelCase: `UnifiedApprovalHistoryDTO` (both the web type and
+ * the backend's), the `plm:` branch above (`ApprovalBridgeService.loadLocalHistory`), and the
+ * OpenAPI contract, which names the camelCase fields canonical and the snake_case ones deprecated
+ * aliases. The approval-centre detail page reads only the camelCase names, so on every platform
+ * instance it rendered no action time and attributed every row, the requester's own submission
+ * included, to 「系统」.
+ *
+ * The five copies are derived from columns the SELECT below already reads — no new column, no
+ * metadata key, no change to the WHERE clause, the row set or the order. The snake_case fields stay
+ * byte-for-byte for the readers that consume them (the multitable record approval card reads both
+ * spellings). `occurredAt` is always an ISO-8601 string (the driver hands `occurred_at` over as a
+ * `Date`); a value that is not a valid timestamp becomes `null`, never `"Invalid Date"`.
+ */
+function toIsoTimestampOrNull(value: unknown): string | null {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString()
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = new Date(value)
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString()
+  }
+  return null
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
+}
+
+export function camelCaseHistoryRowFields(row: Record<string, unknown>): {
+  actorId: string | null
+  actorName: string | null
+  occurredAt: string | null
+  fromStatus: string | null
+  toStatus: string | null
+} {
+  return {
+    actorId: stringOrNull(row.actor_id),
+    actorName: stringOrNull(row.actor_name),
+    occurredAt: toIsoTimestampOrNull(row.occurred_at),
+    fromStatus: stringOrNull(row.from_status),
+    toStatus: stringOrNull(row.to_status),
+  }
+}
+
+/**
+ * Test report 2026-10-08, T4cd (node half) — two more SINGLE-KEY projections onto `metadata`, added
+ * under the owner's 2026-09-20 whitelist rule (「修复应白名单投影业务字段,不能直接暴露整个 metadata」),
+ * each rebuilt here from its own key path, never from the stored object:
+ *   - `nodeKey`: the graph node a row was recorded at. Only a non-empty string crosses. The detail
+ *     page names the node from the instance's own template and never prints the key itself; the
+ *     same key already reaches the same readers on `GET /api/approvals/:id` (`currentNodeKey`,
+ *     `assignments[].nodeKey`), under the same per-instance admission as this route.
+ *   - `autoApproved`: whether the engine, not a person, approved the row. Only the boolean `true`
+ *     crosses; any other stored value is dropped.
+ * Every other metadata key stays off the wire, exactly as before.
+ */
+export function projectHistoryNodeKeyForRead(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const nodeKey = raw.trim()
+  return nodeKey.length > 0 ? nodeKey : null
+}
+
 export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): Router {
   const r = Router()
 
@@ -203,11 +271,17 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
         [id, APPROVAL_POLICY_DENIED_ACTION],
       )
       const total = Number(countRes.rows[0]?.c || 0)
-      // Lock-9 FE read-half companion — the ONLY new projection is `metadata->'attachmentIds'`
-      // (a single jsonb key path, never `metadata` itself). This changes neither the WHERE clause
-      // (S2's pointer-row exclusion, `metadata->>'commentId' IS NULL`, is untouched on both queries
-      // above/below) nor the row set nor the ORDER/LIMIT/OFFSET — only one additional expression is
-      // read per row, aliased so it never collides with a real column name.
+      // Lock-9 FE read-half companion + the owner's 2026-09-20 ruling on the cancel-round durable
+      // read — every metadata projection here is a SINGLE JSONB KEY PATH, never `metadata` itself.
+      // FIVE key paths now (`attachmentIds`, `cancellationOutcome`, `cancelRoundCloseReason`, and —
+      // test report 2026-10-08 T4cd — `nodeKey`, `autoApproved`), and the list is exhaustive at
+      // this head: no other metadata key is projected, so the internal ones (`w4ActorPosture`,
+      // `parallelCancelledAssignees`, `cancelRoundBlockDetail`, `approvalThreshold`, `approvalMode`,
+      // `aggregateComplete`, `requestNo`, `channel`/`cardDeliveryId`, …) cannot reach a client from
+      // this route even if the map below were wrong. This changes neither the WHERE clause (S2's
+      // pointer-row exclusion, `metadata->>'commentId' IS NULL`, is untouched on both queries
+      // above/below) nor the row set nor the ORDER/LIMIT/OFFSET — only additional expressions are
+      // read per row, each aliased so it never collides with a real column name.
       const { rows } = await pool.query(
         `SELECT
            id,
@@ -221,7 +295,11 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
            COALESCE(to_version, version) AS version,
            from_version,
            to_version,
-           metadata->'attachmentIds' AS lock9_attachment_ids_raw
+           metadata->'attachmentIds' AS lock9_attachment_ids_raw,
+           metadata->'cancellationOutcome' AS cancel_round_outcome_raw,
+           metadata->>'cancelRoundCloseReason' AS cancel_round_close_reason_raw,
+           metadata->'nodeKey' AS history_node_key_raw,
+           metadata->'autoApproved' AS history_auto_approved_raw
          FROM approval_records
          WHERE instance_id = $1
            AND action <> $4
@@ -232,26 +310,64 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
       )
 
       // The row shape is bounded by the explicit SELECT list above (no bare `metadata` column is
-      // ever projected there) — the destructure below only strips the ONE internal
-      // `lock9_attachment_ids_raw` alias so it can never itself leak onto the wire; it is not what
-      // keeps other metadata keys out (the SELECT list already never asked the DB for them).
+      // ever projected there) — the destructure below only strips the FIVE internal `*_raw`
+      // aliases so they can never themselves leak onto the wire; it is not what keeps other
+      // metadata keys out (the SELECT list already never asked the DB for them). Each projector
+      // then REBUILDS its value field by field from a fixed key set (see
+      // `projectCancelRoundCancellationOutcomeForReadV1`), so a key nested INSIDE a whitelisted
+      // object — which the SELECT list cannot exclude on its own — is dropped here.
       //
-      // Fix-round P2-1: gated on `isApprovalAttachmentsEnabled()`, checked ONCE per request (the
-      // flag can't change mid-request) so that with the flag OFF this map produces byte-for-byte
-      // the SAME `item` shape as before this field existed — no `metadata` key is ever attached,
-      // regardless of what a row's `lock9_attachment_ids_raw` holds. This matches the "Flag OFF
-      // remains a byte-for-byte no-op" doctrine this route's SQL comment above already claimed but
-      // did not, until now, enforce in code (see `isApprovalAttachmentsEnabled` in
-      // `./approval-attachments`, the SAME flag `/refs`, `/download` and `dispatchAction` gate on).
+      // TWO INDEPENDENT GATES, deliberately not one:
+      //  - `attachmentIds` stays gated on `isApprovalAttachmentsEnabled()`, checked ONCE per
+      //    request (the flag can't change mid-request) — the SAME flag `/refs`, `/download` and
+      //    `dispatchAction` gate on (`./approval-attachments`).
+      //  - the cancel-round keys are NOT gated on it. The attachments flag is a different feature
+      //    and reusing it would make the durable read of a cancellation outcome depend on whether
+      //    approval attachments happen to be switched on (`M-1`'s own warning in
+      //    `verify-c2-history-dto-cancellation-outcome-20260920.md` §5: 「不该复用(语义无关)」).
+      //
+      // ⚠️ CORRECTED CLAIM (owner ruling 2026-09-20). Until this change the comment here said the
+      // flag-OFF map produces 「byte-for-byte the SAME `item` shape as before this field existed」.
+      // That was true while `attachmentIds` was the only projected key and is NOT true any more:
+      // a row carrying `cancellationOutcome` or `cancelRoundCloseReason` now gets a `metadata` key
+      // with the flag OFF. What remains exactly true, and is what the flag is for, is narrower:
+      // with the flag OFF no `attachmentIds` key is ever attached, regardless of what a row's
+      // `lock9_attachment_ids_raw` holds.
+      //
+      // A row with none of the five whitelisted values gets NO `metadata` key at all (omitted,
+      // never `metadata: {}`) — Lock-9's original shape choice, preserved.
       const attachmentsEnabled = isApprovalAttachmentsEnabled()
       const items = rows.map((row) => {
         const {
           lock9_attachment_ids_raw: attachmentIdsRaw,
+          cancel_round_outcome_raw: cancellationOutcomeRaw,
+          cancel_round_close_reason_raw: cancelRoundCloseReasonRaw,
+          history_node_key_raw: nodeKeyRaw,
+          history_auto_approved_raw: autoApprovedRaw,
           ...item
-        } = row as Record<string, unknown> & { lock9_attachment_ids_raw?: unknown }
-        if (!attachmentsEnabled) return item
-        const attachmentIds = extractRiderAttachmentIds(attachmentIdsRaw)
-        return attachmentIds.length > 0 ? { ...item, metadata: { attachmentIds } } : item
+        } = row as Record<string, unknown> & {
+          lock9_attachment_ids_raw?: unknown
+          cancel_round_outcome_raw?: unknown
+          cancel_round_close_reason_raw?: unknown
+          history_node_key_raw?: unknown
+          history_auto_approved_raw?: unknown
+        }
+        // T4cd: camelCase copies beside the unchanged snake_case fields (see camelCaseHistoryRowFields).
+        const dto = { ...item, ...camelCaseHistoryRowFields(item) }
+        const metadata: Record<string, unknown> = {}
+        const cancellationOutcome = projectCancelRoundCancellationOutcomeForReadV1(cancellationOutcomeRaw)
+        if (cancellationOutcome) metadata.cancellationOutcome = cancellationOutcome
+        const cancelRoundCloseReason = projectCancelRoundCloseReasonForReadV1(cancelRoundCloseReasonRaw)
+        if (cancelRoundCloseReason !== null) metadata.cancelRoundCloseReason = cancelRoundCloseReason
+        if (attachmentsEnabled) {
+          const attachmentIds = extractRiderAttachmentIds(attachmentIdsRaw)
+          if (attachmentIds.length > 0) metadata.attachmentIds = attachmentIds
+        }
+        // T4cd (node half): see projectHistoryNodeKeyForRead's docblock — two single-key projections.
+        const nodeKey = projectHistoryNodeKeyForRead(nodeKeyRaw)
+        if (nodeKey !== null) metadata.nodeKey = nodeKey
+        if (autoApprovedRaw === true) metadata.autoApproved = true
+        return Object.keys(metadata).length > 0 ? { ...dto, metadata } : dto
       })
 
       return res.json({

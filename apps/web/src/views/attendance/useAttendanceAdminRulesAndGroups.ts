@@ -717,10 +717,10 @@ export function useAttendanceAdminRulesAndGroups({
         orgId: getOrgId(),
       }
       const endpoint = ruleSetEditingId.value
-        ? `/api/attendance/rule-sets/${ruleSetEditingId.value}`
+        ? `/api/attendance/rule-sets/${ruleSetEditingId.value}/update`
         : '/api/attendance/rule-sets'
       const response = await apiFetch(endpoint, {
-        method: ruleSetEditingId.value ? 'PUT' : 'POST',
+        method: 'POST',
         body: JSON.stringify(payload),
       })
       if (response.status === 403) {
@@ -1037,10 +1037,10 @@ export function useAttendanceAdminRulesAndGroups({
         throw new Error(tr('Attendance group name is required', '考勤分组名称为必填项'))
       }
       const endpoint = attendanceGroupEditingId.value
-        ? `/api/attendance/groups/${attendanceGroupEditingId.value}`
+        ? `/api/attendance/groups/${attendanceGroupEditingId.value}/update`
         : '/api/attendance/groups'
       const response = await apiFetch(endpoint, {
-        method: attendanceGroupEditingId.value ? 'PUT' : 'POST',
+        method: 'POST',
         body: JSON.stringify(payload),
       })
       if (response.status === 403) {

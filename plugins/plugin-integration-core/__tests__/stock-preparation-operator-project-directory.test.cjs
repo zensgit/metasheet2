@@ -44,6 +44,11 @@ const path = require('node:path')
 const LIB = path.join(__dirname, '..', 'lib')
 
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
+// Batch-refresh step 4 PR-5: the directory's `pendingDecisionCount` is the UNION of the confirmation ledger and the
+// open refresh holds, counted through the REAL continuation store over the kit's empty step-4 tables (=> zero
+// holds, `ledgerReady` as before), wired here with a lock for the reader's generation read.
+const { createInMemoryProjectWriteLock } = require('./support/stock-preparation-project-write-lock-kit.cjs')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const {
   STOCK_PREP_ADMIN,
   STOCK_PREP_OPERATE,
@@ -106,12 +111,12 @@ const LEDGER_SHEET_A = 'sheet_ledger_a'
 
 // Tenant A's real-shaped project: the number an operator would otherwise have to memorise, and the
 // name that makes memorising it unnecessary.
-const PROJECT_A_NO = '230920006'
-const PROJECT_A_NAME = 'RY2注射水缓冲罐部件'
+const PROJECT_A_NO = '200000006'
+const PROJECT_A_NAME = '示例乙型容器'
 const PROJECT_A_ID = 'stockprep_project_a1'
 // A second tenant-A project with NOTHING pending — G-10's "genuinely nothing pending" case.
-const PROJECT_A2_NO = '230920007'
-const PROJECT_A2_NAME = 'RY2纯化水储罐部件'
+const PROJECT_A2_NO = '200000007'
+const PROJECT_A2_NAME = '示例甲型支架'
 const PROJECT_A2_ID = 'stockprep_project_a2'
 
 // ---------------------------------------------------------------------------
@@ -132,8 +137,8 @@ const MAIN_FIELD_ID_MAP = Object.freeze({
 })
 
 /** Two projects that exist ONLY in the pull target — the self-service main line F1 describes. */
-const PROJECT_A3_NO = '230920008'
-const PROJECT_A4_NO = '230920009'
+const PROJECT_A3_NO = '200000008'
+const PROJECT_A4_NO = '200000009'
 
 /**
  * A PART NAME planted in the pull target's own `componentName` column.
@@ -183,7 +188,7 @@ function inertService(methods) {
 
 function baseServices() {
   return {
-    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
+    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
     adapterRegistry: inertService(['createAdapter', 'listAdapterKinds']),
     pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
     pipelineRunner: inertService(['runPipeline']),
@@ -491,15 +496,17 @@ function mount({
   if (typeof sourceBindingGet === 'function') {
     services.stockPreparationSourceBindingStore = { get: sourceBindingGet }
   }
+  services.stockPreparationProjectWriteLock = createInMemoryProjectWriteLock({ timers: 'real' }).lock
 
   httpRoutes.registerIntegrationRoutes({
     context,
-    services,
+    services: withRefreshGovernance(services),
     logger: { info() {}, warn() {}, error() {} },
   })
   return {
     routes,
     auditAppends,
+    services,
     auditListCalls,
     auditProbes,
     hostCallCount: () => hostCalls,
@@ -1003,6 +1010,41 @@ async function main() {
     assert.equal(idle.pendingDecisionCount, 0)
   })
 
+  // Batch-refresh step 4 PR-5 (design §11): `pendingDecisionCount` is the UNION of the confirmation ledger's
+  // pending rows and the project's OPEN refresh holds (the second pending-work ledger), read through the REAL
+  // continuation store; a hold table that cannot be read makes `ledgerReady` false — never "zero holds".
+  await run('G-PR5a an open refresh hold (seeded through the REAL store) joins the project\'s pending count and the pending-project count; the response key sets are unchanged', async () => {
+    const refreshKit = require('./support/stock-preparation-refresh-store-kit.cjs')
+    const { hold } = await refreshKit.candidateHoldFixture()
+    const h = mount()
+    const before = await call(h.routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    const idleBefore = before.body.data.projects.find((project) => project.projectNo === PROJECT_A2_NO)
+    assert.equal(idleBefore.pendingDecisionCount, 0)
+    await h.services.refreshGovernanceEnv.seedHolds({ tenantId: TENANT_A, sheetId: MAIN_SHEET_A, projectNo: PROJECT_A2_NO }, [hold])
+    h.auditAppends.length = 0
+    const res = await call(h.routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    const idle = res.body.data.projects.find((project) => project.projectNo === PROJECT_A2_NO)
+    assert.equal(idle.pendingDecisionCount, 1, 'the open hold counts as pending work')
+    assert.equal(res.body.data.pendingProjectCount, before.body.data.pendingProjectCount + 1)
+    assert.equal(res.body.data.ledgerReady, true)
+    assert.deepEqual(Object.keys(res.body.data).sort(), Object.keys(before.body.data).sort(), 'no new top-level key (S-02a)')
+    assert.deepEqual(Object.keys(idle).sort(), Object.keys(idleBefore).sort(), 'no new row key')
+    assert.equal(h.auditAppends[0].detail.pendingProjectCount, before.body.data.pendingProjectCount + 1)
+    assert.equal(JSON.stringify(res.body).includes('D100-01'), false, 'no hold value crosses the directory')
+  })
+
+  await run('G-PR5b the hold table cannot be read: ledgerReady false and the ledger-only count — never "zero holds" dressed as all clear', async () => {
+    const refreshKit = require('./support/stock-preparation-refresh-store-kit.cjs')
+    const h = mount()
+    h.services.refreshGovernanceEnv.db.faults.select = (args) => (args && /integration_stock_prep_refresh_hold/.test(args.table) ? refreshKit.sqlError('42P01', 'relation does not exist') : null)
+    const res = await call(h.routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(res.body.data.directoryReady, true)
+    assert.equal(res.body.data.ledgerReady, false, 'the pending counts cannot be trusted')
+    h.services.refreshGovernanceEnv.db.faults.select = null
+  })
+
   // -------------------------------------------------------------------------
   // 设计稿 N1 — THE UNION, AND THE FLAG THAT FORBIDS A SILENT TRUNCATION
   // -------------------------------------------------------------------------
@@ -1398,8 +1440,8 @@ async function main() {
     // this feature goes through — coerces a number to its string, and a business number arriving out
     // of a spreadsheet cell as a number is ordinary. The sentinel rule tightens the EMPTY cases; it
     // does not invent a stricter type discipline than the rest of the module keeps.
-    assert.equal((await scanPullTargetProjects(recordsApi, ownSheet, BOUND_TARGET_A, 230920006)).ready, true)
-    assert.deepEqual(seen.at(-1), { [MAIN_FIELD_ID_MAP.projectNo]: '230920006' })
+    assert.equal((await scanPullTargetProjects(recordsApi, ownSheet, BOUND_TARGET_A, 200000006)).ready, true)
+    assert.deepEqual(seen.at(-1), { [MAIN_FIELD_ID_MAP.projectNo]: '200000006' })
 
     // The case this rule exists for: a caller that MEANT to narrow and lost its number. Widening to
     // the whole sheet here would report the whole table's rows and max timestamp under one project's
@@ -2020,7 +2062,6 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error)
-  process.exitCode = 1
-})
+// S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — `main` runs as one test
+// under the exit sentinel and the whole-suite timeout, so a check that hangs can never end this suite with exit 0.
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-operator-project-directory.test.cjs', main)

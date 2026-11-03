@@ -1,6 +1,7 @@
 import type { Request } from 'express'
 
 import { deriveCanManageFields } from './manage-schema-permission'
+import { deriveCanSubmitApproval } from './submit-approval-permission'
 import { isAdmin, listUserPermissions } from '../rbac/service'
 
 export type MultitableCapabilities = {
@@ -17,6 +18,11 @@ export type MultitableCapabilities = {
   // Sheet-level "send notification" capability (B1-S1 button send_notification gate).
   // Full sheet write/admin only — NOT write-own (notify is member fan-out, not record-scoped).
   canSendNotification: boolean
+  // Record-level "submit for approval" capability (multitable x approval phase 2). Its OWN permission
+  // code (`multitable:submit-approval`) — NOT implied by `multitable:write`: starting an approval is a
+  // cross-product action, and the approval product independently re-checks `approvals:write` on its own
+  // side (ApprovalProductService.createApproval), so this is the MULTITABLE-side door only.
+  canSubmitApproval: boolean
 }
 
 export type MultitableFieldPermission = {
@@ -34,6 +40,13 @@ export type MultitableRowActions = {
   canEdit: boolean
   canDelete: boolean
   canComment: boolean
+  /** R-66 (plm-row-delete-guard.ts): set only where `canDelete` was turned false because the row is a PLM row the
+   *  stock-preparation pull maintains — the web shows the delete entry disabled with the reason. Absent elsewhere. */
+  deleteBlockedReason?: 'plm_row'
+  /** 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7, OQ3): set only on a row satisfying M, on GET /view and
+   *  GET /records/:id, for EVERY actor who can read the row (the grid's 「人工补充」 label). A display mark only —
+   *  editing controls are gated on /context's `stockPreparationManualRows` block, never on this. Absent elsewhere. */
+  manualSupplement?: true
 }
 
 export function normalizePermissionCodes(value: unknown): string[] {
@@ -123,6 +136,9 @@ export function deriveCapabilities(
     hasPermission(permissions, 'workflow:write') ||
     hasPermission(permissions, 'workflow:create') ||
     hasPermission(permissions, 'workflow:execute')
+  // Record-level submit-for-approval: its OWN code, never implied by write/automation. Shared helper so
+  // this file and its sheet-capabilities.ts clone cannot drift apart.
+  const canSubmitApproval = deriveCanSubmitApproval(permissions, isAdminRole, hasPermission)
 
   return {
     canRead,
@@ -136,6 +152,7 @@ export function deriveCapabilities(
     canManageAutomation,
     canExport: canRead,
     canSendNotification: canWrite,
+    canSubmitApproval,
   }
 }
 

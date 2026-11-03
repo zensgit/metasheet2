@@ -13,25 +13,21 @@
       </label>
       <label class="attendance__field" for="attendance-rule-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
-        <select id="attendance-rule-timezone" v-model="ruleForm.timezone" name="ruleTimezone">
-          <optgroup
-            v-for="group in ruleTimezoneOptionGroups"
-            :key="group.id"
-            :label="tr(group.labelEn, group.labelZh)"
-          >
-            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
-              {{ timezone.label }}
-            </option>
-          </optgroup>
-        </select>
+        <AttendanceTimezoneSelect
+          id="attendance-rule-timezone"
+          name="ruleTimezone"
+          v-model="ruleForm.timezone"
+          :tr="tr"
+          :groups="ruleTimezoneOptionGroups"
+        />
       </label>
       <label class="attendance__field" for="attendance-rule-start">
         <span>{{ tr('Work start', '上班时间') }}</span>
-        <input id="attendance-rule-start" v-model="ruleForm.workStartTime" name="ruleWorkStartTime" type="time" />
+        <AttendanceLocaleTimeInput id="attendance-rule-start" v-model="ruleForm.workStartTime" name="ruleWorkStartTime" />
       </label>
       <label class="attendance__field" for="attendance-rule-end">
         <span>{{ tr('Work end', '下班时间') }}</span>
-        <input id="attendance-rule-end" v-model="ruleForm.workEndTime" name="ruleWorkEndTime" type="time" />
+        <AttendanceLocaleTimeInput id="attendance-rule-end" v-model="ruleForm.workEndTime" name="ruleWorkEndTime" />
       </label>
       <label class="attendance__field" for="attendance-rule-late-grace">
         <span>{{ tr('Late grace (min)', '迟到宽限（分钟）') }}</span>
@@ -45,9 +41,9 @@
         <span>{{ tr('Rounding (min)', '取整（分钟）') }}</span>
         <input id="attendance-rule-rounding" v-model.number="ruleForm.roundingMinutes" name="ruleRoundingMinutes" type="number" min="0" />
       </label>
-      <label class="attendance__field attendance__field--full" for="attendance-rule-working-days">
-        <span>{{ tr('Working days (0-6)', '工作日（0-6）') }}</span>
-        <input id="attendance-rule-working-days" v-model="ruleForm.workingDays" name="ruleWorkingDays" type="text" placeholder="1,2,3,4,5" />
+      <label class="attendance__field" for="attendance-rule-working-days">
+        <span>{{ tr('Working days', '工作日') }}</span>
+        <AttendanceWeekdayChipField id="attendance-rule-working-days" v-model="ruleForm.workingDays" name="ruleWorkingDays" />
       </label>
     </div>
     <button class="attendance__btn attendance__btn--primary" :disabled="ruleLoading" @click="saveRule">
@@ -73,21 +69,13 @@
       </label>
       <label class="attendance__field" for="attendance-rotation-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
-        <select
+        <AttendanceTimezoneSelect
           id="attendance-rotation-timezone"
-          v-model="rotationRuleForm.timezone"
           name="rotationTimezone"
-        >
-          <optgroup
-            v-for="group in rotationRuleTimezoneOptionGroups"
-            :key="group.id"
-            :label="tr(group.labelEn, group.labelZh)"
-          >
-            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
-              {{ timezone.label }}
-            </option>
-          </optgroup>
-        </select>
+          v-model="rotationRuleForm.timezone"
+          :tr="tr"
+          :groups="rotationRuleTimezoneOptionGroups"
+        />
       </label>
       <label class="attendance__field attendance__field--full" for="attendance-rotation-sequence">
         <span>{{ tr('Shift sequence (IDs)', '班次序列（ID）') }}</span>
@@ -186,7 +174,7 @@
         <tbody>
           <tr v-for="rule in rotationRules" :key="rule.id">
             <td>{{ rule.name }}</td>
-            <td>{{ formatTimezoneOptionLabel(rule.timezone) }}</td>
+            <td>{{ timezoneLabel(rule.timezone) }}</td>
             <td>{{ rule.shiftSequence.join(', ') }}</td>
             <td>{{ rule.isActive ? tr('Yes', '是') : tr('No', '否') }}</td>
             <td class="attendance__table-actions">
@@ -285,10 +273,11 @@
       <AttendanceUserPickerField
         v-model="rotationAssignmentForm.userId"
         :tr="tr"
+        typeahead
         :label="tr('User', '用户')"
         name="rotationUserId"
-        :help-text="tr('Search by email, name, or user ID, then pick a user for this rotation.', '按邮箱、姓名或用户 ID 搜索，然后为该轮班选择用户。')"
-        :search-placeholder="tr('Search users for rotation assignment', '搜索轮班分配用户')"
+        :help-text="tr('Type a name or email. Matches appear as you type.', '输入姓名或邮箱，输入时自动匹配。')"
+        :search-placeholder="tr('Name or email', '姓名或邮箱')"
         :full-width="false"
         input-id="attendance-rotation-user"
         endpoint="/api/attendance-admin/users/search"
@@ -311,20 +300,18 @@
       </label>
       <label class="attendance__field" for="attendance-rotation-start">
         <span>{{ tr('Start date', '开始日期') }}</span>
-        <input
+        <AttendanceLocaleDateInput
           id="attendance-rotation-start"
           v-model="rotationAssignmentForm.startDate"
           name="rotationStartDate"
-          type="date"
         />
       </label>
       <label class="attendance__field" for="attendance-rotation-end">
         <span>{{ tr('End date', '结束日期') }}</span>
-        <input
+        <AttendanceLocaleDateInput
           id="attendance-rotation-end"
           v-model="rotationAssignmentForm.endDate"
           name="rotationEndDate"
-          type="date"
         />
       </label>
       <label class="attendance__field attendance__field--checkbox" for="attendance-rotation-active">
@@ -411,25 +398,21 @@
       </label>
       <label class="attendance__field" for="attendance-shift-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
-        <select id="attendance-shift-timezone" v-model="shiftForm.timezone" name="shiftTimezone">
-          <optgroup
-            v-for="group in shiftTimezoneOptionGroups"
-            :key="group.id"
-            :label="tr(group.labelEn, group.labelZh)"
-          >
-            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
-              {{ timezone.label }}
-            </option>
-          </optgroup>
-        </select>
+        <AttendanceTimezoneSelect
+          id="attendance-shift-timezone"
+          name="shiftTimezone"
+          v-model="shiftForm.timezone"
+          :tr="tr"
+          :groups="shiftTimezoneOptionGroups"
+        />
       </label>
       <label class="attendance__field" for="attendance-shift-start">
         <span>{{ tr('Work start', '上班开始') }}</span>
-        <input id="attendance-shift-start" v-model="shiftForm.workStartTime" name="shiftWorkStartTime" type="time" />
+        <AttendanceLocaleTimeInput id="attendance-shift-start" v-model="shiftForm.workStartTime" name="shiftWorkStartTime" />
       </label>
       <label class="attendance__field" for="attendance-shift-end">
         <span>{{ tr('Work end', '下班结束') }}</span>
-        <input id="attendance-shift-end" v-model="shiftForm.workEndTime" name="shiftWorkEndTime" type="time" />
+        <AttendanceLocaleTimeInput id="attendance-shift-end" v-model="shiftForm.workEndTime" name="shiftWorkEndTime" />
       </label>
       <label class="attendance__field attendance__field--checkbox" for="attendance-shift-overnight">
         <span>{{ tr('Overnight shift', '跨夜班次') }}</span>
@@ -473,14 +456,12 @@
           min="0"
         />
       </label>
-      <label class="attendance__field attendance__field--full" for="attendance-shift-working-days">
-        <span>{{ tr('Working days (0-6)', '工作日（0-6）') }}</span>
-        <input
+      <label class="attendance__field" for="attendance-shift-working-days">
+        <span>{{ tr('Working days', '工作日') }}</span>
+        <AttendanceWeekdayChipField
           id="attendance-shift-working-days"
           v-model="shiftForm.workingDays"
           name="shiftWorkingDays"
-          type="text"
-          :placeholder="tr('1,2,3,4,5', '1,2,3,4,5')"
         />
       </label>
     </div>
@@ -508,7 +489,7 @@
         <tbody>
           <tr v-for="shift in shifts" :key="shift.id">
             <td>{{ shift.name }}</td>
-            <td>{{ formatTimezoneOptionLabel(shift.timezone) }}</td>
+            <td>{{ timezoneLabel(shift.timezone) }}</td>
             <td>{{ formatShiftSchedule(shift) }}</td>
             <td>{{ shift.isOvernight ? tr('Yes', '是') : tr('No', '否') }}</td>
             <td>{{ shift.workingDays.join(',') }}</td>
@@ -617,16 +598,15 @@
       </label>
       <label class="attendance__field" for="attendance-assignment-start-date">
         <span>{{ tr('Start date', '开始日期') }}</span>
-        <input
+        <AttendanceLocaleDateInput
           id="attendance-assignment-start-date"
           v-model="assignmentForm.startDate"
           name="assignmentStartDate"
-          type="date"
         />
       </label>
       <label class="attendance__field" for="attendance-assignment-end-date">
         <span>{{ tr('End date', '结束日期') }}</span>
-        <input id="attendance-assignment-end-date" v-model="assignmentForm.endDate" name="assignmentEndDate" type="date" />
+        <AttendanceLocaleDateInput id="attendance-assignment-end-date" v-model="assignmentForm.endDate" name="assignmentEndDate" />
       </label>
       <label class="attendance__field attendance__field--checkbox" for="attendance-assignment-active">
         <span>{{ tr('Active', '启用') }}</span>
@@ -686,6 +666,10 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceLocaleTimeInput from './AttendanceLocaleTimeInput.vue'
+import AttendanceTimezoneSelect from './AttendanceTimezoneSelect.vue'
+import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
+import AttendanceWeekdayChipField from './AttendanceWeekdayChipField.vue'
 import { computed, type Ref } from 'vue'
 import type {
   AttendanceAssignmentItem,
@@ -693,6 +677,7 @@ import type {
   AttendanceRotationRule,
   AttendanceShift,
 } from './useAttendanceAdminScheduling'
+import { useLocale } from '../../composables/useLocale'
 import AttendanceUserPickerField from './AttendanceUserPickerField.vue'
 import {
   buildTimezoneOptionGroups,
@@ -826,9 +811,14 @@ const props = defineProps<{
 }>()
 
 const tr = props.tr
+const { isZh } = useLocale()
+const timezoneLocale = computed(() => (isZh.value ? 'zh' : 'en') as 'zh' | 'en')
+function timezoneLabel(value?: string | null): string {
+  return formatTimezoneOptionLabel(value, new Date(), timezoneLocale.value)
+}
 const loadRule = () => props.scheduling.loadRule()
 const ruleForm = props.scheduling.ruleForm
-const ruleTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(ruleForm.timezone))
+const ruleTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(ruleForm.timezone, timezoneLocale.value))
 const ruleLoading = props.scheduling.ruleLoading
 const saveRule = () => props.scheduling.saveRule()
 const rotationRules = props.scheduling.rotationRules
@@ -836,7 +826,7 @@ const rotationRuleLoading = props.scheduling.rotationRuleLoading
 const rotationRuleSaving = props.scheduling.rotationRuleSaving
 const rotationRuleEditingId = props.scheduling.rotationRuleEditingId
 const rotationRuleForm = props.scheduling.rotationRuleForm
-const rotationRuleTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(rotationRuleForm.timezone))
+const rotationRuleTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(rotationRuleForm.timezone, timezoneLocale.value))
 const resetRotationRuleForm = () => props.scheduling.resetRotationRuleForm()
 const editRotationRule = (rule: AttendanceRotationRule) => props.scheduling.editRotationRule(rule)
 const loadRotationRules = () => props.scheduling.loadRotationRules()
@@ -857,7 +847,7 @@ const shiftLoading = props.scheduling.shiftLoading
 const shiftSaving = props.scheduling.shiftSaving
 const shiftEditingId = props.scheduling.shiftEditingId
 const shiftForm = props.scheduling.shiftForm
-const shiftTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(shiftForm.timezone))
+const shiftTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(shiftForm.timezone, timezoneLocale.value))
 const resetShiftForm = () => props.scheduling.resetShiftForm()
 const editShift = (shift: AttendanceShift) => props.scheduling.editShift(shift)
 const loadShifts = () => props.scheduling.loadShifts()
@@ -1069,7 +1059,13 @@ const assignmentEditingLabel = computed(() => {
 }
 
 .attendance__field--checkbox {
-  justify-content: flex-end;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  justify-self: start;
+  width: fit-content;
+  max-width: 100%;
+  gap: 8px;
 }
 
 .attendance__btn {

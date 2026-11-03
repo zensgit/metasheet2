@@ -116,3 +116,55 @@ describe('ApprovalMobileList — i18n retrofit (T3-1 build-contract must-fix)', 
       .toBe('未找到匹配的审批')
   })
 })
+
+// ---------------------------------------------------------------------------------------------
+// O-8 / slice F8-1, acceptance gate 2 — English render scan of ApprovalMobileList: pending rows
+// waiting under an hour / hours / days (relativeWait.ts + the waited label), and terminal rows.
+// ASCII fixtures; the whole container (text + every attribute value) must carry no CJK; zh-CN then
+// shows Chinese and a flip back restores English.
+// ---------------------------------------------------------------------------------------------
+describe('O-8 / F8-1 — ApprovalMobileList English render scan', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    window.localStorage.setItem('metasheet_locale', 'zh-CN')
+    useLocale().setLocale('zh-CN')
+  })
+
+  it('cards render English chrome only; en -> zh -> en restores', async () => {
+    const { CJK, expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    window.localStorage.setItem('metasheet_locale', 'en')
+    useLocale().setLocale('en')
+    const ago = (ms: number) => new Date(Date.now() - ms).toISOString()
+    const rows = [
+      { ...pendingRow('1', 'Travel claim'), createdAt: ago(10 * 60 * 1000) },
+      { ...pendingRow('2', 'Laptop'), createdAt: ago(5 * 3600 * 1000), currentStep: 1, totalSteps: 3 },
+      { ...pendingRow('3', undefined), createdAt: ago(4 * 86400 * 1000) },
+      { ...pendingRow('4', 'Done'), status: 'approved' },
+      { ...pendingRow('5', 'No'), status: 'rejected' },
+      { ...pendingRow('6', 'Pulled'), status: 'revoked' },
+    ]
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({ render: () => h(ApprovalMobileList as any, { approvals: rows }) })
+    app.mount(container)
+    await flushUi()
+    expect(container.querySelectorAll('[data-testid="approval-mobile-card"]').length).toBe(6)
+    const text = container.textContent ?? ''
+    for (const phrase of ['Waiting < 1 hour', 'Waiting 5 hours', 'Waiting 4 days']) expect(text).toContain(phrase)
+    expectNoCjkOutside(renderedTextAndAttributes(container), [], 'mobile list (en)')
+
+    useLocale().setLocale('zh-CN')
+    await flushUi()
+    expect(CJK.test(renderedTextAndAttributes(container))).toBe(true)
+
+    useLocale().setLocale('en')
+    await flushUi()
+    expectNoCjkOutside(renderedTextAndAttributes(container), [], 'mobile list (en again)')
+  })
+})

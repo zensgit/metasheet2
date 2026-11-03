@@ -527,8 +527,11 @@ Scope:
 - Keep Bridge filters primitive-only and parameterized; no raw SQL, operator
   objects, arrays, joins, CTEs, stored procedures, or vendor API calls.
 - Update package verification and the Bridge Agent runbook so future packages
-  validate the new filter contract instead of the retired
-  `UNSUPPORTED_FILTERS` behavior.
+  validate the new filter contract (`INVALID_FILTERS`) instead of the retired
+  `UNSUPPORTED_FILTERS` behavior. This scope did not extend to
+  `scripts/ops/bridge-agent-readonly-contract.test.mjs`, which kept asserting
+  the retired `UNSUPPORTED_FILTERS` marker and went stale (red) until a later
+  fix aligned it with `INVALID_FILTERS`.
 
 Acceptance locks:
 

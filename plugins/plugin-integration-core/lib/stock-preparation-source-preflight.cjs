@@ -568,12 +568,75 @@ function looksNumeric(value) {
   return Number.isFinite(parsed) && parsed >= 0
 }
 
+// THE HOST'S OWN CONNECT REFUSAL. Since #5586 every failure of `connectDataSource` is replaced,
+// before any caller sees it, by a fixed values-free error carrying `code: 'SOURCE_UNAVAILABLE'`
+// (packages/core-backend/src/data-adapters/DataSourceManager.ts — `sourceUnavailableError`, thrown
+// from the two connect seams and nowhere else). Its message is a fixed bilingual sentence and the
+// driver's own `.code`/`.number` are dropped on the way, so NOTHING below can classify it: before
+// this branch existed it read as `unknown_error`, which is not in CONNECTIVITY_ERROR_CODES, and the
+// reachability check therefore reported "could not connect" as OBJECT_MISSING — the very confusion
+// the comment at CHECK 1 warns about, in reverse. Matched on the CODE (an exact equality), never on
+// the sentence, so a translation of that sentence cannot break this the way prose matching broke.
+const HOST_SOURCE_UNAVAILABLE_CODE = 'SOURCE_UNAVAILABLE'
+
+// tedious (the MSSQL driver) reports every server-side failure with `.code === 'EREQUEST'` — that
+// tells us nothing. The real SQL Server error number lives in `.number` and is locale-invariant: a
+// Chinese-locale SQL Server raises 对象名 'x' 无效 for the exact same 208 an English server spells
+// "Invalid object name". The English-prose regexes below never match the Chinese text, so a driver
+// number takes priority and prose is kept only as the fallback for errors that carry none (e.g. a
+// PG driver, or a raw socket failure with no server-assigned number at all).
+//
+// WHICH OF THESE ARE LIVE ON TODAY'S STACK — stated so nobody reads this table as a coverage claim.
+// A read reaches this module through `adapter.read` -> the host read-only facade -> MSSQLAdapter,
+// where a REQUEST failure comes back as `{ data: [], error }` carrying tedious's RequestError with
+// `.number` intact (mssql/lib/error/request-error.js sets it; connection-error.js does NOT). So
+// 208 / 2812 / 229 — request-time numbers — are the ones this table actually decides today.
+// 18456 (login failed) and 4060 (cannot open database) are CONNECT-time numbers: on this stack they
+// are swallowed by the SOURCE_UNAVAILABLE normalization above and never arrive here with a number
+// at all. They are kept for a caller that hands this module a direct driver error (a future
+// non-facade probe, or a driver that reports a login refusal on a request), and are NOT evidence
+// that connect-time failures classify by number today.
+//
+// THE SEAM THAT KEEPS `.number` ALIVE, traced end to end (2026-09-10) so a later refactor can see
+// what would silently turn this whole table into dead code:
+//   tedious RequestError (`.number` set in mssql/lib/error/request-error.js)
+//   -> MSSQLAdapter.query's catch returns `{ data: [], error }` WITHOUT rewrapping the driver error
+//      (packages/core-backend/src/data-adapters/MSSQLAdapter.ts), and `select()` returns that result
+//   -> DataSourceManager.select and the read-only plugin facade pass the result through untouched
+//   -> lib/adapters/data-source-sql-readonly-source-adapter.cjs `read()` rethrows `result.error`
+//      AS-IS when it is an Error. That single `throw result.error` is the load-bearing link: wrap it
+//      in a `new Error(...)` anywhere on this path and every number below stops arriving.
+//   -> probeObject's catch -> classifyReadError.
+// ONE KNOWN BLIND SPOT on that same seam, recorded rather than papered over here: a source configured
+// with `lookupProjection` deliberately coarsens EVERY read failure into `lookup projection base read
+// failed`, which carries neither a number nor matchable prose, so such a source still classifies as
+// UNKNOWN whatever the server said. That coarsening is the adapter's values-free choice; undoing it
+// belongs there, not in this classifier.
+const MSSQL_ERROR_NUMBER_CODES = Object.freeze({
+  208: 'OBJECT_MISSING', // Invalid object name
+  2812: 'OBJECT_MISSING', // Could not find stored procedure
+  229: 'PERMISSION_DENIED', // The SELECT permission was denied
+  18456: 'AUTH_REFUSED', // Login failed for user
+  4060: 'AUTH_REFUSED', // Cannot open database requested by the login
+})
+
 /**
  * Collapse ANY read failure into one closed code. The error's message is read here and NOWHERE ELSE:
  * it is matched against patterns and then dropped on the floor. Nothing downstream is ever handed the
  * text, so no later filter has to be trusted to remove a host or a login from it.
  */
 function classifyReadError(error) {
+  // The host's connect refusal first: it carries no number and no classifiable prose, and it means
+  // exactly one thing — the source could not be talked to at all.
+  if (optionalString(error && error.code) === HOST_SOURCE_UNAVAILABLE_CODE) {
+    return READ_ERROR_CODES.UNREACHABLE
+  }
+
+  const number = Number.isInteger(error && error.number) ? error.number : null
+  if (number !== null && Object.prototype.hasOwnProperty.call(MSSQL_ERROR_NUMBER_CODES, number)) {
+    return READ_ERROR_CODES[MSSQL_ERROR_NUMBER_CODES[number]]
+  }
+
   const code = optionalString(error && error.code) || ''
   const text = `${optionalString(error && error.message) || ''} ${code}`.toLowerCase()
 

@@ -176,6 +176,12 @@ describe('Attendance admin anchor navigation', () => {
 
     const homeContext = container!.querySelector<HTMLElement>('[data-admin-home-context="true"]')
     const sectionWorkspace = container!.querySelector<HTMLElement>('[data-admin-section-workspace="true"]')
+    const homeHeader = container!.querySelector<HTMLElement>('.attendance__admin-header')
+    expect(homeHeader?.textContent).toContain('Admin Console')
+    expect(homeHeader?.querySelector('[data-admin-page-search="true"]')).toBeTruthy()
+    expect(homeHeader?.querySelector('[data-admin-reload="true"]')).toBeTruthy()
+    expect(homeHeader?.querySelector('[data-attendance-admin-guide]')).toBeTruthy()
+    expect(homeContext?.querySelector('[data-attendance-admin-guide]')).toBeNull()
     const taskHome = container!.querySelector<HTMLElement>('[data-admin-task-home="true"]')
     expect(homeContext?.style.display).not.toBe('none')
     expect(sectionWorkspace?.style.display).toBe('none')
@@ -218,15 +224,9 @@ describe('Attendance admin anchor navigation', () => {
     expect(sectionWorkspace?.style.display).not.toBe('none')
     const currentSectionBar = container!.querySelector<HTMLElement>('[data-admin-current-section="true"]')
     expect(currentSectionBar?.textContent).toContain('Import')
-
-    container!.querySelector<HTMLButtonElement>('[data-admin-task-home-return="true"]')!.click()
-    await flushUi(2)
-
-    expect(homeContext?.style.display).not.toBe('none')
-    expect(sectionWorkspace?.style.display).toBe('none')
-    expect(window.location.hash).toBe('')
-    expect(document.activeElement?.id).toBe('attendance-admin-task-home-title')
-    expect(clearSection).toHaveBeenCalledTimes(1)
+    expect(currentSectionBar?.textContent).not.toContain('Management home')
+    expect(container!.querySelector('[data-admin-task-home-return]')).toBeNull()
+    expect(clearSection).not.toHaveBeenCalled()
   })
 
   it('pins the parent navigate wiring for task-home link actions (fix 4, GATE-5086 P2-2)', async () => {
@@ -938,52 +938,49 @@ describe('Attendance admin anchor navigation', () => {
 
     const currentSectionBar = container!.querySelector<HTMLElement>('[data-admin-current-section="true"]')
     expect(currentSectionBar).toBeTruthy()
-    expect(currentSectionBar?.textContent).toContain('Current section')
     expect(currentSectionBar?.textContent).toContain('Workspace · Settings')
-    expect(currentSectionBar?.textContent).toContain('Management home')
-    expect(currentSectionBar?.textContent).not.toContain('Quick switch')
-    expect(currentSectionBar?.querySelector('[data-admin-quick-jump="true"]')).toBeTruthy()
-    expect(currentSectionBar?.querySelector('[data-admin-focus-toggle="true"]')).toBeNull()
-    expect(currentSectionBar?.querySelector('[data-admin-prev-section]')?.getAttribute('data-admin-prev-section-id')).toBe('')
-    expect(currentSectionBar?.querySelector('[data-admin-next-section]')?.getAttribute('data-admin-next-section-id')).toBe('attendance-admin-user-access')
+    expect(currentSectionBar?.textContent).not.toContain('Current section')
+    expect(currentSectionBar?.textContent).not.toContain('Management home')
+    expect(currentSectionBar?.querySelector('[data-admin-quick-jump="true"]')).toBeNull()
+    expect(currentSectionBar?.querySelector('[data-admin-prev-section]')).toBeNull()
+    expect(currentSectionBar?.querySelector('[data-admin-next-section]')).toBeNull()
+    expect(currentSectionBar?.querySelector('[data-admin-task-home-return]')).toBeNull()
+    expect(currentSectionBar?.querySelector('[data-admin-page-search="true"]')).toBeTruthy()
+    expect(currentSectionBar?.querySelector('[data-admin-reload="true"]')).toBeTruthy()
+    expect(currentSectionBar?.querySelector('[data-attendance-admin-guide]')).toBeTruthy()
+    expect(container!.querySelector('.attendance__admin-header')).toBeNull()
+    expect(container!.querySelector('[data-admin-reload="true"]')?.previousElementSibling?.getAttribute('data-admin-page-search')).toBe('true')
   })
 
-  it('lets operators move to the previous and next section from the current-section bar', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+  it('lets operators move between sections from the rail after the jump bar is removed', async () => {
+    app = createApp(AttendanceView, { mode: 'admin', initialSectionId: 'attendance-admin-settings' })
     app.mount(container!)
     await flushUi()
 
-    const nextButton = container!.querySelector<HTMLButtonElement>('[data-admin-next-section]')
-    expect(nextButton?.getAttribute('data-admin-next-section-id')).toBe('attendance-admin-user-access')
-    nextButton!.click()
+    expect(container!.querySelector('[data-admin-prev-section]')).toBeNull()
+    expect(container!.querySelector('[data-admin-next-section]')).toBeNull()
+    expect(container!.querySelector('[data-admin-quick-jump]')).toBeNull()
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-user-access"]')!.click()
     await flushUi(2)
 
     expect(window.location.hash).toBe('#attendance-admin-user-access')
     expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Workspace · User Access')
-    expect(container!.querySelector('[data-admin-prev-section]')?.getAttribute('data-admin-prev-section-id')).toBe('attendance-admin-settings')
 
-    const previousButton = container!.querySelector<HTMLButtonElement>('[data-admin-prev-section]')
-    previousButton!.click()
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-settings"]')!.click()
     await flushUi(2)
 
     expect(window.location.hash).toBe('#attendance-admin-settings')
     expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Workspace · Settings')
   })
 
-  it('lets operators jump directly to a deep section from the current-section bar selector', async () => {
+  it('lets operators open a deep section from the rail after the quick selector is removed', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
-    const jumpSelect = container!.querySelector<HTMLSelectElement>('[data-admin-quick-jump="true"]')
-    expect(jumpSelect).toBeTruthy()
-    // 33 → 34: W4-1 registered the setup-readiness wizard section (attendance-admin-setup).
-    // 34 → 35: W5-1 registered the decision-trace section (attendance-admin-decision-trace).
-    // 35 → 34: A4 (A-class batch 2, 2026-08-22) deleted the dead "Group members" section.
-    expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(34)
-
-    jumpSelect!.value = 'attendance-admin-advanced-scheduling-workbench'
-    jumpSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(container!.querySelector('[data-admin-quick-jump="true"]')).toBeNull()
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-advanced-scheduling-workbench"]')!.click()
     await flushUi(2)
 
     expect(window.location.hash).toBe('#attendance-admin-advanced-scheduling-workbench')
@@ -991,16 +988,12 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('[data-attendance-advanced-scheduling-workbench]')).toBeTruthy()
   })
 
-  it('jumps to the comprehensive hours preview from the quick selector', async () => {
+  it('opens the comprehensive hours preview from the rail', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
-    const jumpSelect = container!.querySelector<HTMLSelectElement>('[data-admin-quick-jump="true"]')
-    expect(jumpSelect).toBeTruthy()
-
-    jumpSelect!.value = 'attendance-admin-comprehensive-hours-preview'
-    jumpSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-comprehensive-hours-preview"]')!.click()
     await flushUi(2)
 
     expect(window.location.hash).toBe('#attendance-admin-comprehensive-hours-preview')
@@ -1432,5 +1425,135 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-shifts"]')).toBeTruthy()
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-user-access"]')).toBeNull()
     expect(container!.querySelector('[data-admin-shortcut="attendance-admin-shifts"]')?.textContent).toContain('Scheduling · Shifts')
+  })
+
+  it('filters the jump block by Chinese label and keeps the active section highlighted', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const search = container!.querySelector<HTMLInputElement>('[data-admin-nav-search]')
+    expect(search).toBeTruthy()
+    expect(container!.querySelector('[data-admin-page-search-input]')).toBeNull()
+
+    const shifts = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-shifts"]')
+    expect(shifts).toBeTruthy()
+    shifts!.click()
+    await flushUi(2)
+    expect(shifts!.classList.contains('attendance__admin-nav-link--active')).toBe(true)
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-user-access"]')).toBeNull()
+
+    search!.value = '班次'
+    search!.dispatchEvent(new Event('input'))
+    await flushUi()
+    const visible = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-admin-anchor]'))
+    expect(visible.map(item => item.textContent?.trim())).toEqual(['Shifts'])
+    expect(visible[0]?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
+    expect(container!.querySelector('[data-admin-anchor-group="scheduling"] .attendance__admin-nav-group-header')?.getAttribute('aria-expanded')).toBe('true')
+
+    search!.value = '用户权限'
+    search!.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-user-access"]')?.textContent).toContain('User Access')
+    expect(container!.querySelector('[data-admin-anchor-group="workspace"] .attendance__admin-nav-group-header')?.getAttribute('aria-expanded')).toBe('true')
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-shifts"]')).toBeNull()
+
+    search!.value = 'zzz-no-such-section'
+    search!.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(container!.querySelector('[data-admin-anchor]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-search-empty]')?.textContent).toContain('No matches')
+
+    search!.value = ''
+    search!.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(container!.querySelector('[data-attendance-search-empty]')).toBeNull()
+    expect(container!.querySelectorAll('[data-admin-anchor="attendance-admin-shifts"]').length).toBe(1)
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-shifts"]')?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-user-access"]')).toBeNull()
+  })
+
+  it('searches the workbench catalog from the page search scope and jumps to the section', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const toggle = container!.querySelector<HTMLButtonElement>('[data-admin-page-search-toggle]')
+    expect(toggle?.textContent).toContain('Search this page')
+    expect(container!.querySelector('[data-admin-page-search-input]')).toBeNull()
+    expect(container!.querySelector('[data-admin-page-search-scope]')).toBeNull()
+
+    toggle!.click()
+    await flushUi()
+
+    const pageScope = container!.querySelector<HTMLButtonElement>('[data-admin-page-search-scope="page"]')
+    const workbenchScope = container!.querySelector<HTMLButtonElement>('[data-admin-page-search-scope="workbench"]')
+    const input = container!.querySelector<HTMLInputElement>('[data-admin-page-search-input]')
+    expect(pageScope?.textContent).toContain('This page')
+    expect(pageScope?.getAttribute('aria-pressed')).toBe('true')
+    expect(workbenchScope?.textContent).toContain('All workbench')
+    expect(workbenchScope?.getAttribute('aria-pressed')).toBe('false')
+    expect(input).toBeTruthy()
+    expect(container!.querySelectorAll('[data-admin-page-search-input]')).toHaveLength(1)
+    expect(container!.querySelector('[data-admin-page-search-results]')).toBeNull()
+
+    input!.value = 'zzz-no-such-page-text'
+    input!.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(container!.querySelector('[data-admin-page-search-hidden]')).toBeNull()
+    expect(container!.querySelector('[data-admin-page-search-status]')?.textContent).toContain('No matches')
+    expect(container!.querySelector('[data-admin-page-search-status]')?.hasAttribute('data-attendance-search-empty')).toBe(true)
+    expect(container!.querySelector('[data-admin-page-search-results]')).toBeNull()
+
+    workbenchScope!.click()
+    await flushUi()
+    expect(workbenchScope?.getAttribute('aria-pressed')).toBe('true')
+    expect(pageScope?.getAttribute('aria-pressed')).toBe('false')
+    expect(container!.querySelector('[data-admin-page-search-hidden]')).toBeNull()
+    expect(container!.querySelector('[data-admin-page-search-results] [data-attendance-search-empty]')?.textContent).toContain('No matches')
+    expect(container!.querySelector('[data-admin-page-search-status]')?.textContent).toContain('No matches')
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-page-search-clear]')!.click()
+    await flushUi()
+    expect(container!.querySelector('[data-admin-page-search-results]')).toBeNull()
+    expect(container!.querySelector('[data-admin-page-search-status]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+    input!.value = '排班执行'
+    input!.dispatchEvent(new Event('input'))
+    await flushUi()
+    const schedulingHits = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-admin-page-search-result]'))
+    expect(schedulingHits.map(item => item.textContent?.trim())).toEqual([
+      'Scheduling · Advanced scheduling',
+      'Scheduling · Comprehensive hours',
+      'Scheduling · Rotation Rules',
+      'Scheduling · Rotation Assignments',
+      'Scheduling · Shifts',
+      'Scheduling · Assignments',
+      'Scheduling · Scheduler scope mgmt',
+      'Scheduling · Holidays',
+    ])
+    expect(container!.querySelector('[data-admin-page-search-status]')?.textContent).toContain('Workbench matches: 8')
+    expect(container!.querySelector('[data-admin-page-search-hidden]')).toBeNull()
+
+    input!.value = '班次'
+    input!.dispatchEvent(new Event('input'))
+    await flushUi()
+    const shiftHits = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-admin-page-search-result]'))
+    expect(shiftHits.map(item => item.getAttribute('data-admin-page-search-result'))).toEqual(['attendance-admin-shifts'])
+    expect(shiftHits[0]?.textContent).toContain('Scheduling · Shifts')
+    expect(container!.querySelector('[data-admin-nav-search]')?.value ?? '').toBe('')
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-user-access"]')).toBeTruthy()
+
+    shiftHits[0]!.click()
+    await flushUi(2)
+
+    expect(window.location.hash).toBe('#attendance-admin-shifts')
+    expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Scheduling · Shifts')
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-shifts"]')?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
+    expect(container!.querySelectorAll('[data-admin-page-search-input]')).toHaveLength(1)
+    expect(container!.querySelector('[data-admin-page-search-scope="workbench"]')?.getAttribute('aria-pressed')).toBe('true')
+    expect(container!.querySelector('[data-admin-page-search-hidden]')).toBeNull()
+    expect(container!.querySelector('.attendance__admin-header')).toBeNull()
   })
 })

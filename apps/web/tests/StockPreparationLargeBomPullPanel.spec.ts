@@ -140,7 +140,7 @@ describe('StockPreparationLargeBomPullPanel', () => {
     expect(onOpenMultitable).toHaveBeenCalledTimes(1)
   })
 
-  it('D-02: the link NAMES the 备料主表 when the parent holds a handle, and the workbench when it does not', async () => {
+  it('D-02: the link NAMES the 备料主表 when the parent holds a handle, and the multitable home when it does not', async () => {
     // The panel routes nothing and invents no destination — it is told. What it must not do is
     // promise the 备料主表 on a deployment where the parent can only open the chooser.
     const bound = mountPanel({ api: doneApi(), fillTarget: { sheetId: 'sheet_x', viewId: 'view_x' } })
@@ -148,6 +148,7 @@ describe('StockPreparationLargeBomPullPanel', () => {
     const boundLink = bound.querySelector('[data-testid="stock-prep-large-bom-open-multitable"]') as HTMLButtonElement
     expect(boundLink.getAttribute('data-fill-target')).toBe('bound')
     expect(boundLink.textContent).toContain('打开备料多维表')
+    expect(bound.querySelector('[data-testid="stock-prep-large-bom-no-sheet-link-hint"]')).toBeNull()
     app?.unmount()
     app = null
     container!.innerHTML = ''
@@ -156,7 +157,19 @@ describe('StockPreparationLargeBomPullPanel', () => {
     await flushUi()
     const plainLink = plain.querySelector('[data-testid="stock-prep-large-bom-open-multitable"]') as HTMLButtonElement
     expect(plainLink.getAttribute('data-fill-target')).toBe('none')
-    expect(plainLink.textContent).toContain('打开多维表工作台')
+    expect(plainLink.textContent).toContain('打开多维表首页')
+    expect(plain.querySelector('[data-testid="stock-prep-large-bom-no-sheet-link-hint"]')?.textContent).toContain('不用在首页选模板')
+    expect(plain.querySelector('[data-testid="stock-prep-large-bom-no-sheet-link-hint"]')?.textContent).toContain('请在「项目备料」页打开这个项目')
+    app?.unmount()
+    app = null
+    container!.innerHTML = ''
+
+    // Review round 1 (F1): inside 项目备料 the sentence points down the page instead.
+    const onBoard = mountPanel({ api: doneApi(), noLinkHintContext: 'board' })
+    await flushUi()
+    const boardHint = onBoard.querySelector('[data-testid="stock-prep-large-bom-no-sheet-link-hint"]') as HTMLElement
+    expect(boardHint.textContent).toContain('见本页下方另一个「打开多维表首页」按钮旁的说明')
+    expect(boardHint.textContent).not.toContain('「项目备料」页')
   })
   it('D-02: no open-multitable link renders before done', async () => {
     const api = doneApi({
@@ -189,6 +202,59 @@ describe('StockPreparationLargeBomPullPanel', () => {
     const errorCode = root.querySelector('[data-testid="stock-prep-large-bom-tech-error-code"]') as HTMLElement
     expect(errorCode).not.toBeNull()
     expect(errorCode.textContent).toBe('LARGE_BOM_APPLY_TARGET_REQUIRED')
+  })
+
+  // PR #6501 (Codex review P1-b): in the large lane a superseded plan is fixed only by expanding again —
+  // the generation is bound at expansion time, so the panel says so (never "re-approve").
+  it('D-03b: a superseded plan (stale expansion) tells the operator to expand again before planning', async () => {
+    const api = doneApi({
+      planExpansion: vi.fn().mockRejectedValue(
+        new StockPreparationProjectSyncCallError(409, 'plan', { code: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED', detailReason: 'expansion_stale', detailPartial: false }),
+      ),
+    })
+    const root = mountPanel({ api })
+    await flushUi()
+
+    expect(phaseOf(root)).toBe('failed')
+    const status = root.querySelector('[data-testid="stock-prep-large-bom-status"]') as HTMLElement
+    expect(status.textContent).toContain('BOM 已有更新的试算或写入，请重新展开后再规划')
+    expect(status.textContent).not.toContain('重新批准')
+    expect(status.textContent).not.toContain('STOCK_PREP_PROJECT_PLAN_SUPERSEDED')
+    expect(api.startApply).not.toHaveBeenCalled()
+  })
+
+  // PR #6501 round 6 (N1): an expansion or job left over by an OLDER version (no write observation / no
+  // binding) is not "a newer preview or write exists" — nothing newer happened. Its own sentence, same remedy.
+  it('D-03c: a superseded plan whose reason is expansion_unbound / job_unbound says the job is left over by an older version, not that a newer write exists', async () => {
+    for (const [reason, failing] of [
+      ['expansion_unbound', 'planExpansion'],
+      ['job_unbound', 'runApplyChunk'],
+    ] as const) {
+      const api = doneApi({
+        [failing]: vi.fn().mockRejectedValue(
+          new StockPreparationProjectSyncCallError(409, failing, { code: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED', detailReason: reason, detailPartial: false }),
+        ),
+      })
+      const root = mountPanel({ api })
+      await flushUi()
+      expect(phaseOf(root), reason).toBe('failed')
+      const status = root.querySelector('[data-testid="stock-prep-large-bom-status"]') as HTMLElement
+      expect(status.textContent, reason).toContain('这个作业是旧版本留下的，需要重新展开后再规划')
+      expect(status.textContent, reason).not.toContain('更新的试算')
+      expect(status.textContent, reason).not.toContain('重新批准')
+      expect(status.textContent, reason).not.toContain('STOCK_PREP_PROJECT_PLAN_SUPERSEDED')
+      const errorCode = root.querySelector('[data-testid="stock-prep-large-bom-tech-error-code"]') as HTMLElement
+      expect(errorCode.textContent, reason).toBe('STOCK_PREP_PROJECT_PLAN_SUPERSEDED')
+    }
+    // control: the stale-expansion reason keeps D-03b's sentence, and no reason keeps the code-only one
+    const stale = doneApi({ planExpansion: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(409, 'plan', { code: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED', detailReason: 'expansion_stale', detailPartial: false })) })
+    const staleRoot = mountPanel({ api: stale })
+    await flushUi()
+    expect((staleRoot.querySelector('[data-testid="stock-prep-large-bom-status"]') as HTMLElement).textContent).toContain('BOM 已有更新的试算或写入')
+    const bare = doneApi({ planExpansion: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(409, 'plan', { code: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED' })) })
+    const bareRoot = mountPanel({ api: bare })
+    await flushUi()
+    expect((bareRoot.querySelector('[data-testid="stock-prep-large-bom-status"]') as HTMLElement).textContent).toContain('BOM 已有更新的试算或写入')
   })
 
   // ---- D-04 --------------------------------------------------------------------------------

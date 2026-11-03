@@ -1,13 +1,56 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick } from 'vue'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createApp, h, nextTick, ref } from 'vue'
 import MetaGalleryView from '../src/multitable/components/MetaGalleryView.vue'
 import { useLocale } from '../src/composables/useLocale'
+import { apiFetch } from '../src/utils/api'
+
+vi.mock('../src/utils/api', () => ({ apiFetch: vi.fn() }))
 
 describe('MetaGalleryView', () => {
+  beforeEach(() => {
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = vi.fn(() => 'blob:gallery-cover')
+      static revokeObjectURL = vi.fn()
+    })
+    vi.mocked(apiFetch).mockImplementation(async () => new Response('image', { status: 200 }))
+  })
   afterEach(() => {
     useLocale().setLocale('en')
     document.body.innerHTML = ''
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    vi.mocked(apiFetch).mockReset()
+  })
+
+  it.each(['success', 'denied', 'removed'] as const)('owns authenticated cover lifecycle: %s', async mode => {
+    let resolve!: (response: Response) => void
+    vi.mocked(apiFetch).mockReturnValue(new Promise<Response>(done => { resolve = done }))
+    const rows = ref([{ id: 'row', version: 1, data: { cover: ['att/image'] } }])
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp({ render: () => h(MetaGalleryView, {
+      rows: rows.value, fields: [{ id: 'cover', name: 'Cover', type: 'attachment' }],
+      loading: false, currentPage: 1, totalPages: 1, viewConfig: { coverFieldId: 'cover' },
+      attachmentSummaries: { row: { cover: [{ id: 'att/image', filename: 'image.png',
+        mimeType: 'image/png', size: 5, url: 'https://untrusted.invalid/image', uploadedAt: '2026-09-20T00:00:00.000Z' }] } },
+    }) })
+    app.mount(container)
+    try {
+      expect(apiFetch).toHaveBeenCalledWith('/api/multitable/attachments/att%2Fimage?thumbnail=true', { signal: expect.any(AbortSignal) })
+      expect(container.querySelector('img')).toBeNull()
+      const signal = vi.mocked(apiFetch).mock.calls[0][1]?.signal
+      if (mode === 'removed') { rows.value = []; await nextTick(); expect(signal?.aborted).toBe(true) }
+      resolve(new Response('image', { status: mode === 'denied' ? 403 : 200 }))
+      await new Promise(done => setTimeout(done, 0))
+      await nextTick()
+      if (mode === 'success') {
+        expect(container.querySelector('img')?.getAttribute('src')).toBe('blob:gallery-cover')
+      } else {
+        expect(URL.createObjectURL).not.toHaveBeenCalled()
+        expect(container.querySelector('img')).toBeNull()
+      }
+    } finally { app.unmount(); container.remove() }
+    if (mode === 'success') expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:gallery-cover')
   })
 
   it('renders persisted gallery config including cover image and configured fields', async () => {
@@ -70,7 +113,7 @@ describe('MetaGalleryView', () => {
     })
 
     app.mount(container)
-    await nextTick()
+    await vi.waitFor(() => expect(container.querySelector('img')?.getAttribute('src')).toBe('blob:gallery-cover'))
 
     const grid = container.querySelector('.meta-gallery__grid') as HTMLElement | null
     const image = container.querySelector('.meta-gallery__cover-image') as HTMLImageElement | null
@@ -78,7 +121,7 @@ describe('MetaGalleryView', () => {
     const cardBody = container.querySelector('.meta-gallery__card-body') as HTMLElement | null
 
     expect(grid?.style.gridTemplateColumns).toContain('repeat(2')
-    expect(image?.getAttribute('src')).toContain('thumbnail=true')
+    expect(image?.getAttribute('src')).toBe('blob:gallery-cover')
     expect(card?.classList.contains('meta-gallery__card--large')).toBe(true)
     expect(container.textContent).toContain('Launch plan')
     expect(container.textContent).toContain('Status')

@@ -8,26 +8,28 @@
           type="button"
           class="meta-attachment-list__card meta-attachment-list__card--preview"
           :title="previewAttachmentTitle(attachment.filename, isZh)"
+          :disabled="!imageUrls.has(attachment.id)"
           @click="previewAttachment = attachment"
         >
           <img
             class="meta-attachment-list__thumb"
-            :src="attachment.thumbnailUrl || attachment.url || ''"
+            :src="imageUrls.get(attachment.id)"
             :alt="attachment.filename"
           />
           <span class="meta-attachment-list__name">{{ attachment.filename }}</span>
         </button>
-        <a
+        <button
           v-else-if="attachment.url"
+          type="button"
           class="meta-attachment-list__card"
-          :href="attachment.url"
+          data-attachment-download
           :title="attachment.filename"
-          target="_blank"
-          rel="noopener noreferrer"
+          :disabled="downloads.has(attachment.id)"
+          @click="downloadAttachment(attachment)"
         >
           <span class="meta-attachment-list__icon">{{ mimeIcon(attachment.mimeType) }}</span>
           <span class="meta-attachment-list__name">{{ attachment.filename }}</span>
-        </a>
+        </button>
         <span v-else class="meta-attachment-list__card" :title="attachment.filename">
           <span class="meta-attachment-list__icon">{{ mimeIcon(attachment.mimeType) }}</span>
           <span class="meta-attachment-list__name">{{ attachment.filename }}</span>
@@ -41,6 +43,8 @@
         >&times;</button>
       </div>
     </div>
+    <span v-if="downloadFailed" role="alert">{{ attachmentLabel('attachment.downloadFailed', isZh) }}</span>
+    <span v-if="imageFailed" role="alert">{{ attachmentLabel('attachment.previewFailed', isZh) }}</span>
     <Teleport to="body">
       <div
         v-if="previewAttachment"
@@ -51,13 +55,13 @@
           <div class="meta-attachment-list__lightbox-header">
             <strong class="meta-attachment-list__lightbox-title">{{ previewAttachment.filename }}</strong>
             <div class="meta-attachment-list__lightbox-actions">
-              <a
+              <button
                 v-if="previewAttachment.url"
+                type="button"
                 class="meta-attachment-list__lightbox-link"
-                :href="previewAttachment.url"
-                target="_blank"
-                rel="noopener noreferrer"
-              >{{ attachmentLabel('attachment.openOriginal', isZh) }}</a>
+                :disabled="downloads.has(previewAttachment.id)"
+                @click="downloadAttachment(previewAttachment)"
+              >{{ attachmentLabel('attachment.openOriginal', isZh) }}</button>
               <button
                 type="button"
                 class="meta-attachment-list__lightbox-close"
@@ -68,7 +72,7 @@
           </div>
           <img
             class="meta-attachment-list__lightbox-image"
-            :src="previewAttachment.url || previewAttachment.thumbnailUrl || ''"
+            :src="imageUrls.get(previewAttachment.id)"
             :alt="previewAttachment.filename"
           />
         </div>
@@ -78,12 +82,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
+import { apiFetch } from '../../utils/api'
 import { useLocale } from '../../composables/useLocale'
 import type { MetaAttachment } from '../types'
 import { attachmentLabel, previewAttachmentTitle, removeAttachmentTitle } from '../utils/meta-attachment-labels'
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   attachments: MetaAttachment[]
   variant?: 'compact' | 'comfortable'
   removable?: boolean
@@ -100,6 +105,80 @@ const emit = defineEmits<{
 
 const previewAttachment = ref<MetaAttachment | null>(null)
 const { isZh } = useLocale()
+const downloads = ref(new Map<string, AbortController>())
+const downloadFailed = ref(false)
+const imageUrls = ref(new Map<string, string>())
+const imageRequests = new Map<string, AbortController>()
+const imageFailed = ref(false)
+
+function clearImages(): void {
+  for (const controller of imageRequests.values()) controller.abort()
+  imageRequests.clear()
+  for (const url of imageUrls.value.values()) URL.revokeObjectURL(url)
+  imageUrls.value.clear()
+  previewAttachment.value = null
+}
+
+watch(() => JSON.stringify(props.attachments.map(item => [item.id, item.url, item.thumbnailUrl, item.mimeType, item.uploadedAt, item.size])), () => {
+  clearImages()
+  imageFailed.value = false
+  for (const attachment of props.attachments) {
+    if (!isPreviewableImage(attachment) || imageRequests.has(attachment.id)) continue
+    const controller = new AbortController()
+    imageRequests.set(attachment.id, controller)
+    void loadImage(attachment, controller)
+  }
+}, { immediate: true })
+
+async function loadImage(attachment: MetaAttachment, controller: AbortController): Promise<void> {
+  try {
+    if (!attachment.id || attachment.id === '.' || attachment.id === '..') throw new Error('INVALID_ATTACHMENT_ID')
+    const response = await apiFetch(`/api/multitable/attachments/${encodeURIComponent(attachment.id)}?thumbnail=true`, {
+      signal: controller.signal,
+    })
+    if (!response.ok) throw new Error('ATTACHMENT_PREVIEW_REFUSED')
+    const blob = await response.blob()
+    if (!controller.signal.aborted) imageUrls.value.set(attachment.id, URL.createObjectURL(blob))
+  } catch {
+    if (!controller.signal.aborted) imageFailed.value = true
+  }
+}
+
+onBeforeUnmount(() => {
+  clearImages()
+  for (const controller of downloads.value.values()) controller.abort()
+})
+
+async function downloadAttachment(attachment: MetaAttachment): Promise<void> {
+  if (downloads.value.has(attachment.id)) return
+  const controller = new AbortController()
+  downloads.value.set(attachment.id, controller)
+  downloadFailed.value = false
+  try {
+    if (!attachment.id || attachment.id === '.' || attachment.id === '..') throw new Error('INVALID_ATTACHMENT_ID')
+    // Derive the authenticated route from identity; never send credentials to a stored URL.
+    const response = await apiFetch(`/api/multitable/attachments/${encodeURIComponent(attachment.id)}`, {
+      signal: controller.signal,
+    })
+    if (!response.ok) throw new Error('ATTACHMENT_DOWNLOAD_REFUSED')
+    const blob = await response.blob()
+    if (controller.signal.aborted) return
+    const objectUrl = URL.createObjectURL(blob)
+    try {
+      const link = document.createElement('a')
+      link.href = objectUrl
+      link.download = attachment.filename
+      link.rel = 'noopener noreferrer'
+      link.click()
+    } finally {
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+    }
+  } catch {
+    if (!controller.signal.aborted) downloadFailed.value = true
+  } finally {
+    downloads.value.delete(attachment.id)
+  }
+}
 
 function isPreviewableImage(attachment: MetaAttachment): boolean {
   return attachment.mimeType.startsWith('image/') && !!(attachment.thumbnailUrl || attachment.url)

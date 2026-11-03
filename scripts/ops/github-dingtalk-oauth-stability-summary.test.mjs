@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { spawnPythonOrThrow } from './python-interpreter.mjs'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const scriptPath = path.join(repoRoot, 'scripts', 'ops', 'github-dingtalk-oauth-stability-summary.py')
@@ -13,15 +13,18 @@ function makeTmpDir() {
   return mkdtempSync(path.join(tmpdir(), 'github-dingtalk-oauth-stability-summary-'))
 }
 
-function runSummary(args, env = {}) {
+async function runSummary(args, env = {}) {
+  // `spawnPythonOrThrow` tries python3 → py -3 → python, falling through ONLY on ENOENT (see
+  // ./python-interpreter.mjs); it rejects with a clear, fail-closed message when NONE of them
+  // exist, instead of letting a raw ENOENT `child.on('error', reject)` surface as an opaque crash.
+  const child = await spawnPythonOrThrow([scriptPath, ...args], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      ...env,
+    },
+  })
   return new Promise((resolve, reject) => {
-    const child = spawn('python3', [scriptPath, ...args], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        ...env,
-      },
-    })
     let stdout = ''
     let stderr = ''
     const timer = setTimeout(() => {

@@ -790,6 +790,60 @@ describe('AttendanceReportFieldsSection', () => {
     expect(container!.textContent).toContain('net_anomaly_minutes')
     expect(container!.textContent).toContain('={total_minutes}-{leave_minutes}')
     expect(container!.textContent).toContain('Summary scope')
+    const createSave = container!.querySelector<HTMLButtonElement>('[data-report-field-formula-create-save]')!
+    expect(createSave.disabled).toBe(false)
+    expect(createSave.textContent).toContain('Create formula')
+    expect(createSave.textContent).not.toContain('Saving')
+  })
+
+  it('keeps the create-formula button idle until a save request is actually in flight', async () => {
+    let resolveSave: ((response: Response) => void) | null = null
+    vi.mocked(apiFetch).mockImplementation((url) => {
+      if (String(url).includes('/formula')) {
+        return new Promise<Response>((resolve) => {
+          resolveSave = resolve
+        })
+      }
+      return Promise.resolve(jsonResponse(200, populatedCatalogPayload()))
+    })
+
+    mountSection()
+    await flushUi()
+
+    const saveButton = () => container!.querySelector<HTMLButtonElement>('[data-report-field-formula-create-save]')!
+    expect(saveButton()).toBeTruthy()
+    expect(saveButton().disabled).toBe(false)
+    expect(saveButton().textContent).toContain('Create formula')
+    expect(saveButton().textContent).not.toContain('Saving')
+
+    saveButton().click()
+    await flushUi()
+    expect(saveButton().disabled).toBe(false)
+    expect(saveButton().textContent).toContain('Create formula')
+    expect(saveButton().textContent).not.toContain('Saving')
+    expect(container!.querySelector('[data-report-field-formula-status]')?.textContent).toContain('Formula field code is required.')
+    expect(vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes('/formula'))).toBe(false)
+
+    const codeInput = container!.querySelector<HTMLInputElement>('[data-report-field-formula-create-code]')!
+    codeInput.value = 'net_work_minutes'
+    codeInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(saveButton().disabled).toBe(false)
+    expect(saveButton().textContent).toContain('Create formula')
+
+    saveButton().click()
+    await flushUi()
+    expect(saveButton().disabled).toBe(true)
+    expect(saveButton().textContent).toContain('Saving...')
+    expect(resolveSave).toBeTruthy()
+
+    resolveSave!(jsonResponse(400, { ok: false, error: { message: 'Formula rejected' } }))
+    await flushUi()
+    expect(saveButton().disabled).toBe(false)
+    expect(saveButton().textContent).toContain('Create formula')
+    expect(saveButton().textContent).not.toContain('Saving')
+    expect(container!.querySelector('[data-report-field-formula-status]')?.textContent).toContain('Formula rejected')
+    expect(codeInput.value).toBe('net_work_minutes')
   })
 
   it('filters report fields by text and operational state', async () => {

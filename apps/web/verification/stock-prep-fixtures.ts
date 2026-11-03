@@ -37,23 +37,35 @@ export const SYN_PROJECT_B = 'SYN-PROJ-0002'
 export const SYN_PROJECT_A_NAME = '示例项目 A'
 export const SYN_PROJECT_B_NAME = '示例项目 B'
 export const SYN_DECISION_ID = 'syn-decision-0001'
+/** The registered external data source ①a asks about. A NAME, never a host — see synDataSources. */
+export const SYN_DATA_SOURCE_ID = 'syn-datasource-0001'
+export const SYN_DATA_SOURCE_NAME = '示例数据源 A'
 export const SYN_FINGERPRINT = 'synfingerprint0001'
+/** R67 ④: the one background dry-run job id this world ever hands out. */
+export const SYN_DRY_RUN_JOB_ID = 'syn-dry-run-job-0001'
 
 /**
  * The five fixture worlds.
  *
  *   fresh        —— 未装完. Preflight NOT ready with exactly one `http` blocker and one `env`
  *                   blocker (the pair I-8/I-9 splits on), a provisioned project directory whose
- *                   confirmation LEDGER is missing (the `ledger_missing` dead end P0-4 closes).
+ *                   confirmation LEDGER is missing (the `ledger_missing` dead end P0-4 closes),
+ *                   and NO registered data source — so 向导①a reads 「需要别人做」 rather than ✔.
  *   ready        —— 装完. Preflight ready, two projects, one of them carrying three pending
  *                   decisions, a board with missing components, and audit rows to read back.
  *   readerOnly   —— the values-free `stock-prep:read` queue watcher's world: the directory read is
- *                   refused the way the server refuses a principal with no tenant of its own.
+ *                   refused the way the server refuses a principal with no tenant of its own, and
+ *                   `/api/data-sources` is refused the way `rbacGuard('data_sources','read')`
+ *                   refuses a principal holding no such code — ①a's 「? 看不到」, not 「没登记」.
  *   defaults500  —— the manifest/defaults read 500s. Everything else answers, so the spec can tell
  *                   「这一页读不到清单」 apart from 「整页坏了」.
  *   noProjects   —— 装完, but the operator's directory is empty: the `no_projects` home empty state.
+ *   governed     —— 备料分批拉取第一期 step 4 PR-7: `ready`, but project A is a GOVERNED pilot project whose pull is
+ *                   suspended — the board's `refresh` stanza says pending_confirmation with two open holds, and
+ *                   「拉取待确认」 lists them (one candidate over two pair pages, one relationship to re-confirm).
+ *                   Every other world's board answers `not_governed` (the real server shape since PR-5).
  */
-export type StockPrepScenario = 'fresh' | 'ready' | 'readerOnly' | 'defaults500' | 'noProjects'
+export type StockPrepScenario = 'fresh' | 'ready' | 'readerOnly' | 'defaults500' | 'noProjects' | 'governed'
 
 export interface StockPrepRouteOptions {
   /**
@@ -95,6 +107,36 @@ function envelope(data: unknown): string {
 
 function refusal(code: string, reason?: string): string {
   return JSON.stringify({ ok: false, error: { code, details: reason ? { reason } : undefined } })
+}
+
+/**
+ * `GET /api/data-sources`'s list projection, as `DataSourceManager.listDataSources` shapes it:
+ * `{ id, name, type, connected }` plus `ownerId` (management metadata a platform admin sees).
+ *
+ * NO `connection` subtree and no credential of any kind — not because this fixture is being careful,
+ * but because the production route does not return one either (credentials are write-only across the
+ * wire, A1). `type` is the only field the wizard's ①a actually reads: `dataSourceRegistry.ts`
+ * projects the list down to a state and two integers before anything renders, so a NAME planted here
+ * has no path to the DOM — which is exactly what the spec's values-free assertions rely on.
+ */
+function synDataSources(state: ScenarioState): Record<string, unknown> {
+  return {
+    items: state.dataSources,
+    total: state.dataSources.length,
+  }
+}
+
+function synDataSourceRow(): Record<string, unknown> {
+  return {
+    id: SYN_DATA_SOURCE_ID,
+    name: SYN_DATA_SOURCE_NAME,
+    // A RELATIONAL type on purpose: `STOCK_PREP_SQL_DATA_SOURCE_TYPES` counts postgres/postgresql/
+    // sqlserver/mysql and skips `http`/`plm`, so an `http` row here would leave ①a reading
+    // 「需要别人做」 and quietly turn every ✔ assertion into a vacuous one.
+    type: 'sqlserver',
+    ownerId: 'syn-owner-0001',
+    connected: true,
+  }
 }
 
 function synManifest(): Record<string, unknown> {
@@ -302,6 +344,111 @@ function synBoard(projectNo: string, state: ScenarioState): Record<string, unkno
     fillTarget: { sheetId: 'syn-sheet-0001', viewId: 'syn-view-0001' },
     directoryReady: state.directoryReady,
     ledgerReady: state.ledgerReady,
+    // PR-7: the real server shape since PR-5 — `readProjectRefreshState`'s own values-free object. Every world is
+    // `not_governed` (the board renders exactly as before) except the governed project of the `governed` world.
+    refresh: synRefreshStanza(projectNo, state),
+  }
+}
+
+/** PR-7: the board's `refresh` stanza (plugins/plugin-integration-core/lib/stock-preparation-refresh-state.cjs). */
+function synRefreshStanza(projectNo: string, state: ScenarioState): Record<string, unknown> {
+  const counts = (pending: number) => ({ pendingConfirm: pending, confirmable: pending, openExecutions: 0, pendingReviews: 0, continuations: 1 })
+  if (state.governedProjectNo !== projectNo) {
+    return { readable: true, status: 'not_governed', statusLabel: '未启用', governed: 'none', exportAllowed: true, settled: false, counts: { pendingConfirm: 0, confirmable: 0, openExecutions: 0, pendingReviews: 0, continuations: 0 } }
+  }
+  const open = state.refreshHolds.length
+  return open > 0
+    ? { readable: true, status: 'pending_confirmation', statusLabel: '待确认', governed: 'pilot', exportAllowed: false, settled: false, counts: counts(open) }
+    : { readable: true, status: 'confirmed_pending_execution', statusLabel: '已确认待执行', governed: 'pilot', exportAllowed: false, settled: false, counts: counts(0) }
+}
+
+/** PR-7: synthetic hold payloads, shaped like the PR-4 route's `holdPayload` (values: SYN-PART-* only). */
+function synComparison(): Record<string, unknown> {
+  return {
+    outcome: 'match',
+    items: [{ relativePath: [], componentSourceId: 'SYN-PART-0001', root: true, fields: { componentCode: { item: 1, status: 'equal', old: 'SYN-PART-0001', new: 'SYN-PART-0001' } } }],
+    parentEdgeUsage: null,
+  }
+}
+
+function synCandidateHold(): Record<string, unknown> {
+  return {
+    id: 'syn-hold-candidate-0001',
+    kind: 'continuation_candidate',
+    status: 'open',
+    confirmable: true,
+    notConfirmableReason: null,
+    shapeToken: 'moved_under_new_parent',
+    runbookOnly: false,
+    continuationId: null,
+    fingerprint: 'a'.repeat(64),
+    comparisonFingerprint: 'b'.repeat(64),
+    evidenceFingerprint: 'c'.repeat(64),
+    pairingFingerprint: 'd'.repeat(64),
+    openedAt: '2026-10-26T00:00:00.000Z',
+    lastSeenAt: '2026-10-26T00:00:00.000Z',
+    history: 'history_unknown',
+    candidates: [{ candidateId: 'd'.repeat(64), pairs: [{ relativePath: [], componentSourceId: 'SYN-PART-0001' }], comparison: synComparison(), history: 'history_unknown' }],
+    verification: null,
+    contentChanges: [],
+    detail: null,
+    pairPage: { index: 0, count: 2, size: 200, next: 1 },
+  }
+}
+
+function synRelationshipHold(): Record<string, unknown> {
+  return {
+    id: 'syn-hold-relationship-0001',
+    kind: 'relationship_reconfirm',
+    status: 'open',
+    confirmable: true,
+    notConfirmableReason: null,
+    shapeToken: null,
+    runbookOnly: false,
+    continuationId: 'syn-continuation-0001',
+    fingerprint: 'e'.repeat(64),
+    comparisonFingerprint: 'f'.repeat(64),
+    evidenceFingerprint: '1'.repeat(64),
+    pairingFingerprint: null,
+    openedAt: '2026-10-26T00:00:00.000Z',
+    lastSeenAt: '2026-10-26T00:00:00.000Z',
+    history: 'relationship_snapshot',
+    candidates: [],
+    verification: { verdict: 'new_position_removed', statusReason: 'new_position_removed', steps: {}, pairs: [], comparison: synComparison(), demand: null, componentNewPositionCount: 0 },
+    contentChanges: [],
+    detail: null,
+    pairPage: { index: 0, count: 1, size: 200, next: null },
+  }
+}
+
+/** PR-7: `GET …/refresh/holds` — page 1 (every hold's pair page 0) or one hold's pair page; the receipt accumulates. */
+function synHoldsPage(projectNo: string, url: URL, state: ScenarioState): Record<string, unknown> {
+  const governed = state.governedProjectNo === projectNo
+  const holdId = url.searchParams.get('holdId')
+  const pairCursor = Number(url.searchParams.get('pairCursor') ?? 0)
+  let holds = governed ? state.refreshHolds : []
+  if (holdId) {
+    holds = holds.filter((hold) => hold.id === holdId).map((hold) => {
+      const count = (hold.pairPage as { count: number }).count
+      return { ...hold, pairPage: { index: pairCursor, count, size: 200, next: pairCursor + 1 < count ? pairCursor + 1 : null } }
+    })
+    state.refreshServed[holdId] = Array.from(new Set([...(state.refreshServed[holdId] ?? []), pairCursor]))
+  } else {
+    for (const hold of holds) state.refreshServed[String(hold.id)] = Array.from(new Set([...(state.refreshServed[String(hold.id)] ?? []), 0]))
+  }
+  const receiptHolds: Record<string, unknown> = {}
+  for (const hold of governed ? state.refreshHolds : []) {
+    const count = (hold.pairPage as { count: number }).count
+    const served = state.refreshServed[String(hold.id)] ?? []
+    receiptHolds[String(hold.id)] = { pageCount: count, pagesServed: served.slice().sort(), complete: served.length >= count }
+  }
+  const stanza = synRefreshStanza(projectNo, state)
+  return {
+    refresh: { readable: true, status: stanza.status, governed: stanza.governed, counts: stanza.counts, pilot: governed },
+    holdSetFingerprint: governed ? '9'.repeat(64) : null,
+    decisionVersion: 1,
+    page: { holds, next: null, limit: 20, pairLimit: 200 },
+    readReceipt: governed ? { id: '0123456789abcdef0123456789abcdef', expiresAt: '2026-10-27T00:00:00.000Z', holds: receiptHolds } : null,
   }
 }
 
@@ -461,6 +608,17 @@ interface ScenarioState {
   roleCatalog: 'ok' | 'forbidden'
   sourceVerdict: 'go' | 'no-go'
   manifestStatus: number
+  /** What `GET /api/data-sources` lists — 向导①a's only evidence. */
+  dataSources: Array<Record<string, unknown>>
+  /** Non-null makes that route refuse, which is ①a's 「? 看不到」 third state. */
+  dataSourceRefusal: string | null
+  /** R67 ④: set by the first background dry-run enqueue; until then the poll finds no job. */
+  dryRunJobStarted: boolean
+  /** PR-7: the project whose pull is suspended (governed world only), and its open holds. */
+  governedProjectNo: string | null
+  refreshHolds: Array<Record<string, unknown>>
+  /** PR-7: pair pages served per hold (the read receipt the holds route issues). */
+  refreshServed: Record<string, number[]>
 }
 
 function createScenarioState(scenario: StockPrepScenario, options: StockPrepRouteOptions): ScenarioState {
@@ -475,6 +633,12 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
     roleCatalog: options.roleCatalog ?? 'ok',
     sourceVerdict: options.sourceVerdict ?? 'go',
     manifestStatus: 200,
+    dataSources: [synDataSourceRow()],
+    dataSourceRefusal: null,
+    dryRunJobStarted: false,
+    governedProjectNo: null,
+    refreshHolds: [],
+    refreshServed: {},
   }
 
   if (scenario === 'fresh') {
@@ -483,6 +647,9 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
       ...base,
       preflightReady: false,
       ledgerReady: false,
+      // 未装完 —— nothing registered under 数据工厂 · 连接管理 yet. This is the branch that makes
+      // ①a a REAL assertion rather than a constant ✔ in every scenario.
+      dataSources: [],
       projects: [
         synProjectRow({ projectNo: SYN_PROJECT_A, projectName: SYN_PROJECT_A_NAME, pendingDecisionCount: 0, heldLineCount: 0, readyLineCount: 0 }),
         synProjectRow({ projectNo: SYN_PROJECT_B, projectName: SYN_PROJECT_B_NAME, pendingDecisionCount: 0, heldLineCount: 0, readyLineCount: 0 }),
@@ -492,7 +659,16 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
   }
 
   if (scenario === 'readerOnly') {
-    return { ...base, directoryRefusal: 'OPERATOR_SCOPE_TENANT_REQUIRED', projects: [], queueRows: [] }
+    return {
+      ...base,
+      directoryRefusal: 'OPERATOR_SCOPE_TENANT_REQUIRED',
+      // A `stock-prep:read` watcher holds no `data_sources:read`, so the registry route refuses
+      // them exactly like the server does. ①a reads 「? 看不到」 — never 「还没登记」.
+      dataSourceRefusal: 'FORBIDDEN',
+      dataSources: [],
+      projects: [],
+      queueRows: [],
+    }
   }
 
   if (scenario === 'defaults500') {
@@ -508,6 +684,18 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
 
   if (scenario === 'noProjects') {
     return { ...base, projects: [], queueRows: [] }
+  }
+
+  if (scenario === 'governed') {
+    return {
+      ...base,
+      projects: [
+        synProjectRow({ projectNo: SYN_PROJECT_A, projectName: SYN_PROJECT_A_NAME, pendingDecisionCount: 2, heldLineCount: 0, readyLineCount: 1240 }),
+      ],
+      queueRows: [],
+      governedProjectNo: SYN_PROJECT_A,
+      refreshHolds: [synCandidateHold(), synRelationshipHold()],
+    }
   }
 
   // ready
@@ -697,6 +885,38 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
     respond: ({ route }) => json(route, 200, envelope({ rowCount: 3, entries: synAuditEntries() })),
   },
   {
+    // S2 (#6286): the board's home face lists the project sheets on first render and the pull panel probes
+    // one project's sheet before a run. The acceptance deployment keeps MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+    // OFF, so the server answers the switch-off refusal with zero IO; the web client treats it as 'disabled'
+    // and renders the pre-S2 surface. Mocking the real answer keeps the P0/P1 scenarios on the old flow.
+    method: 'GET',
+    path: '/api/integration/stock-preparation/project-targets',
+    respond: ({ route }) => json(route, 404, refusal('STOCK_PREPARATION_PROJECT_SHEETS_DISABLED')),
+  },
+  {
+    // S3 (R-37): 今天要处理's 「刷新项目总览」. Rendered only once the list above answered (switch on), so the
+    // switch-off lanes never press it — answered anyway with the same switch-off refusal, so a component
+    // that grows a first-render call to it stays on the old surface instead of hitting VERIFY_UNMOCKED_ROUTE.
+    method: 'POST',
+    path: '/api/integration/stock-preparation/project-overview/refresh',
+    respond: ({ route }) => json(route, 404, refusal('STOCK_PREPARATION_PROJECT_SHEETS_DISABLED')),
+  },
+  {
+    // S3 fix round 1 (R6): 「建立项目总览」 (PULL). Like the refresh it renders only once the list answered with
+    // the switch on, so the switch-off lanes never press it — answered with the same refusal regardless.
+    method: 'POST',
+    path: '/api/integration/stock-preparation/project-overview/ensure',
+    respond: ({ route }) => json(route, 404, refusal('STOCK_PREPARATION_PROJECT_SHEETS_DISABLED')),
+  },
+  {
+    // S5b (R-39): the workbench-admin shell reads the members page once on first render to decide whether
+    // the 「成员与权限」 rail item exists. The acceptance deployment keeps STOCK_PREP_MEMBERS_PAGE_ENABLED
+    // OFF, so the server answers the switch-off refusal with zero IO and the item stays hidden.
+    method: 'GET',
+    path: '/api/integration/stock-preparation/members',
+    respond: ({ route }) => json(route, 404, refusal('STOCK_PREP_MEMBERS_PAGE_DISABLED')),
+  },
+  {
     method: 'GET',
     path: '/api/integration/stock-preparation/prep-lines/export',
     respond: ({ route }) => route.fulfill({
@@ -710,6 +930,17 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
     }),
   },
   {
+    // 向导①a「登记外接数据源」(2026-09-10). A CORE-BACKEND route, so the envelope is the core
+    // `{ ok, data }` shape and `data.items` is what `data-sources/api.ts` `listDataSources` reads.
+    // Refused rather than empty in `readerOnly`: the two are different answers to ①a, and a fixture
+    // that collapsed them would let the 「看不到≠没完成」 branch rot untested.
+    method: 'GET',
+    path: '/api/data-sources',
+    respond: ({ route, state }) => (state.dataSourceRefusal
+      ? json(route, 403, refusal(state.dataSourceRefusal))
+      : json(route, 200, envelope(synDataSources(state)))),
+  },
+  {
     method: 'GET',
     path: '/api/admin/roles',
     respond: ({ route, state }) => (state.roleCatalog === 'ok'
@@ -719,12 +950,61 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
 ]
 
 /** `/projects/<no>/board` and the table-action run steps need a pattern rather than a literal. */
+// PR B: `…/target/pilot` (GET state + readiness, POST enable) answers the same switch-off refusal; the board
+// reads it lazily (only for an ADMIN, only after the sheet state said active), so the lanes never reach it.
+// 人工补充行 B4 (R-68): `…/target/manual-rows` (GET the switch + the last pull's reminder, POST set) — the project sync
+// panel reads it for an ADMIN as soon as it is about a project; with the acceptance deployment's switch off the server
+// answers the same refusal, and the panel shows nothing (the pre-B4 surface).
+const PROJECT_TARGET_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/target(?:\/(?:archive|restore|project-fields|pilot|manual-rows))?$/
+/** S3 (R-37): the project-level columns — GET and PATCH (fix round 1, R9) on `…/target/project-fields`. */
+const PROJECT_FIELDS_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/target\/project-fields$/
 const BOARD_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/board$/
+/** PR-7: the puller's six routes under `…/projects/:projectNo/refresh/…` (PR-4). */
+const REFRESH_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/refresh\/(holds|holds\/([^/]+)\/(evidence|keep)|continuations\/confirm|continuations\/([^/]+)(\/end)?)$/
 const TABLE_ACTION_PATTERN = /^\/api\/integration\/table-actions\/([^/]+)\/(.+)$/
 
 function resolveResponder(method: string, path: string): Responder | null {
   for (const entry of ROUTES) {
     if (entry.method === method && path === entry.path) return entry.respond
+  }
+  if (((method === 'GET' || method === 'POST') && PROJECT_TARGET_PATTERN.test(path))
+    || (method === 'PATCH' && PROJECT_FIELDS_PATTERN.test(path))) {
+    // Switch off in the acceptance deployment: every project-sheet route answers the same refusal (S1 §8),
+    // the S3 project-fields pair included (GET is lazy — only after the sheet state said active/archived —
+    // so the switch-off lanes never reach it; it is answered all the same).
+    return ({ route }) => json(route, 404, refusal('STOCK_PREPARATION_PROJECT_SHEETS_DISABLED'))
+  }
+  // PR-7: 「拉取待确认」's six routes. A project the world does not govern answers the not-governed page (no
+  // receipt, no holds); every decision answers `nextStep: 'preview_again'` and resolves the hold it decided.
+  if (REFRESH_PATTERN.test(path)) {
+    const match = REFRESH_PATTERN.exec(path)!
+    const projectNo = decodeURIComponent(match[1])
+    const tail = match[2]
+    if (method === 'GET' && tail === 'holds') {
+      return ({ route, url, state }) => json(route, 200, envelope(synHoldsPage(projectNo, url, state)))
+    }
+    if (method === 'GET' && match[4] === 'evidence') {
+      return ({ route }) => json(route, 200, envelope({ holdId: match[3], kind: 'continuation_candidate', status: 'open', current: { observations: [{ role: 'old_root', componentSourceId: 'SYN-PART-0001' }], completeness: { status: 'complete' } }, history: { status: 'history_unknown' }, next: null }))
+    }
+    if (method === 'POST' && match[4] === 'keep') {
+      return ({ route }) => json(route, 200, envelope({ kept: true, holdId: match[3] }))
+    }
+    if (method === 'POST' && tail === 'continuations/confirm') {
+      return async ({ route, state }) => {
+        const body = JSON.parse(route.request().postData() ?? '{}') as { holdId?: string }
+        state.refreshHolds = state.refreshHolds.filter((hold) => hold.id !== body.holdId)
+        await json(route, 201, envelope({ continuationId: 'syn-continuation-0002', revision: 1, state: 'confirmed_pending_execution', nextStep: 'preview_again' }))
+      }
+    }
+    if (method === 'GET' && match[5] && !match[6]) {
+      return ({ route }) => json(route, 200, envelope({ continuation: { id: match[5], status: 'needs_reconfirmation', revision: 2, statusReason: 'new_position_removed' }, members: [{ recordId: 'syn-record-0001' }], holds: [] }))
+    }
+    if (method === 'POST' && match[5] && match[6]) {
+      return async ({ route, state }) => {
+        state.refreshHolds = state.refreshHolds.filter((hold) => hold.continuationId !== match[5])
+        await json(route, 200, envelope({ continuationId: match[5], status: 'ended', endedOutcome: 'release_to_normal_refresh', nextStep: 'preview_again' }))
+      }
+    }
   }
   if (method === 'GET' && BOARD_PATTERN.test(path)) {
     return ({ route, state }) => {
@@ -734,9 +1014,28 @@ function resolveResponder(method: string, path: string): Responder | null {
       return json(route, 200, envelope(synBoard(projectNo, state)))
     }
   }
+  // R67 ④: the background dry-run lane. The poll (GET) finds nothing until a page enqueues — so a
+  // mount that only asks 「is a trial of this project still running?」 is answered 「no」 — and the
+  // finished job carries exactly what the synchronous route's generic answer below always carried.
+  if (method === 'GET' && TABLE_ACTION_PATTERN.test(path) && TABLE_ACTION_PATTERN.exec(path)![2] === 'dry-run-jobs') {
+    return ({ route, state }) => (state.dryRunJobStarted
+      ? json(route, 200, envelope({
+        jobId: SYN_DRY_RUN_JOB_ID,
+        status: 'succeeded',
+        startedAt: '2026-10-19T00:00:00.000Z',
+        finishedAt: '2026-10-19T00:00:01.000Z',
+        elapsedMs: 1000,
+        result: { ok: true, step: 'dry-run', synthetic: true },
+      }))
+      : json(route, 404, refusal('STOCK_PREPARATION_DRY_RUN_JOB_NOT_FOUND')))
+  }
   if (method === 'POST' && TABLE_ACTION_PATTERN.test(path)) {
     const step = TABLE_ACTION_PATTERN.exec(path)![2]
     return ({ route, state }) => {
+      if (step === 'dry-run-jobs') {
+        state.dryRunJobStarted = true
+        return json(route, 202, envelope({ jobId: SYN_DRY_RUN_JOB_ID, status: 'running', startedAt: '2026-10-19T00:00:00.000Z', finishedAt: null, elapsedMs: 0 }))
+      }
       if (step === 'confirmation-decisions/reconcile') {
         // 对账成功之后队列必须被重新读一次 —— P0-9 就是靠这个断言的。
         return json(route, 200, envelope({ scanned: 1, pending: state.queueRows.length }))
@@ -853,7 +1152,7 @@ export async function primaryFilledButtonCount(
 
 export const STOCK_PREP_HARNESS = '/verification/stock-prep-workbench-harness.html'
 
-export type StockPrepActor = 'reader' | 'operator' | 'stockadmin' | 'platform'
+export type StockPrepActor = 'reader' | 'operator' | 'stockadmin' | 'platform' | 'puller'
 
 export interface StockPrepOpenOptions {
   actor: StockPrepActor

@@ -34,6 +34,13 @@ import {
   type QueryFn,
 } from '../multitable/permission-service'
 import {
+  boundEnumeratedRows,
+  boundPageMeta,
+  boundReadWindow,
+  resolvePeopleSheetReadBound,
+  type PeopleSheetReadBound,
+} from '../multitable/people-sheet-read-bound'
+import {
   RECORD_LINK_TARGET_AUTH_STAGES,
   resolveRecordLinkTargetAuthOnQuery,
 } from './approval-record-link-txn-auth'
@@ -235,7 +242,7 @@ export async function listApprovalRecordLinkOptions(input: {
   if (!baseId || !sheetId) {
     return { ok: false, status: 400, code: 'VALIDATION_ERROR', message: 'baseId and sheetId are required' }
   }
-  const limit = clampPageInt(input.limit, 20, 1, 100)
+  const requestedLimit = clampPageInt(input.limit, 20, 1, 100)
   const offset = clampPageInt(input.offset, 0, 0)
   const searchRaw = typeof input.search === 'string' ? input.search.trim() : ''
   const search = searchRaw.toLowerCase()
@@ -260,6 +267,24 @@ export async function listApprovalRecordLinkOptions(input: {
   }
   const isAdminRole = targetAuth.isAdminRole
   const capabilities = targetAuth.capabilities
+
+  // #5960 (#5807 second cut): the People system sheet answers at most the FIRST
+  // PEOPLE_SHEET_READ_MAX_ITEMS rows, no paging past that window, and never its exact size.
+  // Resolved only AFTER the authority refusal above (no oracle for a caller that cannot read the
+  // sheet). A pure quantity bound: it can only shrink the page, never grant anything.
+  let peopleBound: PeopleSheetReadBound
+  try {
+    peopleBound = await resolvePeopleSheetReadBound(queryFn, sheetId)
+  } catch {
+    return {
+      ok: false,
+      status: 503,
+      code: 'DATABASE_UNAVAILABLE',
+      message: APPROVAL_RECORD_LINK_DATABASE_UNAVAILABLE_MESSAGE,
+    }
+  }
+  const readWindow = boundReadWindow(peopleBound, { limit: requestedLimit, offset })
+  const limit = readWindow.limit ?? requestedLimit
 
   // Visible non-computed source fields for THIS actor (admin included -- no field_permissions bypass).
   let preferredFieldIds: string[] = []
@@ -336,7 +361,8 @@ export async function listApprovalRecordLinkOptions(input: {
   const limitParam = selectParams.length - 1
   const offsetParam = selectParams.length
   let rows: Array<{ id: string; data: unknown; display_label?: unknown }> = []
-  try {
+  // Beyond the People window: skip the read entirely -- the answer is an empty page.
+  if (!readWindow.beyondWindow) try {
     const recRes = await queryFn(
       `SELECT id, data, ${displayExpr} AS display_label FROM meta_records
        WHERE ${where}
@@ -359,6 +385,9 @@ export async function listApprovalRecordLinkOptions(input: {
     }
   }
 
+  // Authoritative post-read chokepoint (a no-op for every ordinary sheet).
+  rows = boundEnumeratedRows(peopleBound, rows, offset)
+
   const records: ApprovalRecordLinkOption[] = rows.map((row) => {
     // Prefer the SQL effective label (same expression as search); fall back to pure formatter.
     let display = typeof row.display_label === 'string' && row.display_label.trim()
@@ -379,11 +408,11 @@ export async function listApprovalRecordLinkOptions(input: {
   return {
     ok: true,
     records,
-    page: {
+    page: boundPageMeta(peopleBound, {
       limit,
       offset,
       total,
       hasMore: offset + records.length < total,
-    },
+    }),
   }
 }

@@ -49,6 +49,7 @@ import {
   APPROVAL_PROJECTION_BASE_ID,
   restrictApprovalProjectionCapabilitiesPerRow,
   isApprovalProjectionBaseId,
+  approvalProjectionParticipantPredicateSql,
 } from './approval-projection-constants'
 import {
   canAccessElearningProjectionBase,
@@ -56,7 +57,12 @@ import {
   loadElearningProjectionBaseOrg,
   loadElearningProjectionSheetOrgMap,
 } from './elearning-projection-access'
-import { restrictElearningProjectionCapabilities } from './elearning-projection-constants'
+import { isElearningProjectionBaseIdCandidate, restrictElearningProjectionCapabilities } from './elearning-projection-constants'
+import {
+  restrictStockPreparationOverviewCapabilities,
+} from './stock-preparation-overview-contract'
+import { loadStockPreparationSheetStamps, restrictGridExportCapabilities } from './sheet-grid-export-closure'
+import { applyStockPreparationProjectSheetSchemaClamp } from './stock-preparation-project-sheet-schema-clamp'
 import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
 import {
   parseConditionalRules,
@@ -220,6 +226,8 @@ export const PUBLIC_FORM_CAPABILITIES: MultitableCapabilities = {
   canExport: false,
   // Anonymous public-form submitter must NEVER be able to send notifications.
   canSendNotification: false,
+  // ... nor start an approval instance in someone else's name (no identity, no approvals:write).
+  canSubmitApproval: false,
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────────
@@ -413,12 +421,46 @@ export async function listSheetPermissionEntries(
     .filter((entry): entry is MultitableSheetPermissionEntry => !!entry)
 }
 
+/**
+ * 客户反馈 2026-10-21 (b) — the candidate roster is read in pages and the eligibility filter (active
+ * multitable read/write or admin) is applied to EACH page, so ineligible matches can no longer use up the
+ * caller's window. Before this, `LIMIT limit` ran in SQL and eligibility ran afterwards in JS: a term whose
+ * first `limit` matches were all ineligible (e.g. many similarly-named accounts without a multitable role)
+ * answered "no match" even though an eligible user matched further down. The ELIGIBLE SET is unchanged —
+ * this only stops it being truncated early. Bounded: at most CANDIDATE_SCAN_MAX_ROWS rows are scanned
+ * (or `limit`, when a caller asks for more — loadSheetMemberUserIdSet's 10000 is still one page, as before),
+ * and the result never exceeds `limit` (the route-level ceilings in univer-meta.ts are untouched).
+ */
+const CANDIDATE_SCAN_PAGE_SIZE = 200
+const CANDIDATE_SCAN_MAX_ROWS = 1000
+
 export async function listSheetPermissionCandidates(
   query: QueryFn,
   sheetId: string,
   params: { q?: string; limit: number },
 ): Promise<MultitableSheetPermissionCandidate[]> {
-  const q = params.q?.trim() ?? ''
+  const limit = Math.max(0, Math.floor(params.limit))
+  const pageSize = Math.max(limit, CANDIDATE_SCAN_PAGE_SIZE)
+  const scanCeiling = Math.max(limit, CANDIDATE_SCAN_MAX_ROWS)
+  const eligible: MultitableSheetPermissionCandidate[] = []
+  let offset = 0
+  while (eligible.length < limit && offset < scanCeiling) {
+    const page = await readSheetPermissionCandidatePage(query, sheetId, params.q, pageSize, offset)
+    eligible.push(...page.eligible)
+    offset += page.rowCount
+    if (page.rowCount < pageSize) break
+  }
+  return eligible.slice(0, limit)
+}
+
+async function readSheetPermissionCandidatePage(
+  query: QueryFn,
+  sheetId: string,
+  rawQ: string | undefined,
+  pageSize: number,
+  offset: number,
+): Promise<{ eligible: MultitableSheetPermissionCandidate[]; rowCount: number }> {
+  const q = rawQ?.trim() ?? ''
   const term = q ? `%${q}%` : '%'
   const result = await query(
     `WITH user_candidates AS (
@@ -427,6 +469,7 @@ export async function listSheetPermissionCandidates(
           u.id AS subject_id,
           u.name AS user_name,
           u.email AS user_email,
+          u.username AS user_username,
           u.is_active AS user_is_active,
           NULL::text AS role_name,
           NULL::text AS group_name,
@@ -441,8 +484,8 @@ export async function listSheetPermissionCandidates(
           ON sp.sheet_id = $1
          AND sp.subject_type = 'user'
          AND sp.subject_id = u.id
-        WHERE ($2 = '' OR u.id ILIKE $3 OR u.email ILIKE $3 OR COALESCE(u.name, '') ILIKE $3)
-        GROUP BY u.id, u.name, u.email, u.is_active
+        WHERE ($2 = '' OR u.id ILIKE $3 OR u.email ILIKE $3 OR COALESCE(u.name, '') ILIKE $3 OR COALESCE(u.username, '') ILIKE $3)
+        GROUP BY u.id, u.name, u.email, u.username, u.is_active
       ),
       member_group_candidates AS (
         SELECT
@@ -450,6 +493,7 @@ export async function listSheetPermissionCandidates(
           g.id::text AS subject_id,
           NULL::text AS user_name,
           NULL::text AS user_email,
+          NULL::text AS user_username,
           true AS user_is_active,
           NULL::text AS role_name,
           g.name AS group_name,
@@ -475,6 +519,7 @@ export async function listSheetPermissionCandidates(
           r.id AS subject_id,
           NULL::text AS user_name,
           NULL::text AS user_email,
+          NULL::text AS user_username,
           true AS user_is_active,
           r.name AS role_name,
           NULL::text AS group_name,
@@ -507,16 +552,19 @@ export async function listSheetPermissionCandidates(
           ELSE 2
         END,
         CASE WHEN user_is_active THEN 0 ELSE 1 END,
-        COALESCE(NULLIF(user_name, ''), NULLIF(user_email, ''), NULLIF(group_name, ''), NULLIF(role_name, ''), subject_id) ASC
-      LIMIT $4`,
-    [sheetId, q, term, params.limit],
+        COALESCE(NULLIF(user_name, ''), NULLIF(user_email, ''), NULLIF(user_username, ''), NULLIF(group_name, ''), NULLIF(role_name, ''), subject_id) ASC,
+        subject_id ASC
+      LIMIT $4 OFFSET $5`,
+    [sheetId, q, term, pageSize, offset],
   )
 
+  const rowCount = result.rows.length
   const candidates = (result.rows as Array<{
     subject_type: string
     subject_id: string
     user_name?: string | null
     user_email?: string | null
+    user_username?: string | null
     user_is_active?: boolean | null
     role_name?: string | null
     group_name?: string | null
@@ -529,6 +577,7 @@ export async function listSheetPermissionCandidates(
       const subjectId = String(row.subject_id)
       const name = typeof row.user_name === 'string' ? row.user_name.trim() : ''
       const email = typeof row.user_email === 'string' ? row.user_email.trim() : ''
+      const username = typeof row.user_username === 'string' ? row.user_username.trim() : ''
       const roleName = typeof row.role_name === 'string' ? row.role_name.trim() : ''
       const groupName = typeof row.group_name === 'string' ? row.group_name.trim() : ''
       const groupDescription = typeof row.group_description === 'string' ? row.group_description.trim() : ''
@@ -536,15 +585,17 @@ export async function listSheetPermissionCandidates(
       return {
         subjectType,
         subjectId,
+        // (b) a user with no display name but a login name is labelled by the login name (the admin user
+        // list does the same), not by the opaque id; email still wins when present, as before.
         label:
           subjectType === 'user'
-            ? (name || email || subjectId)
+            ? (name || email || username || subjectId)
             : subjectType === 'member-group'
               ? (groupName || subjectId)
               : (roleName || subjectId),
         subtitle:
           subjectType === 'user'
-            ? (email || (name && name !== subjectId ? subjectId : null))
+            ? (email || ((name || username) && (name || username) !== subjectId ? subjectId : null))
             : subjectType === 'member-group'
               ? (groupDescription || (memberCount != null ? `${memberCount} member${memberCount === 1 ? '' : 's'}` : 'Member group'))
               : (roleName && roleName !== subjectId ? subjectId : 'Role'),
@@ -591,7 +642,7 @@ export async function listSheetPermissionCandidates(
     }),
   )
 
-  return candidates.filter((_candidate, index) => eligibility[index])
+  return { eligible: candidates.filter((_candidate, index) => eligibility[index]), rowCount }
 }
 
 /**
@@ -937,6 +988,12 @@ export async function loadRowLevelReadDenyEnabled(query: QueryFn, sheetId: strin
  * T36-1 (Plan A): of the given sheet ids, the approval-projection sheets where `userId` is a
  * PARTICIPANT in ≥1 row (row's own requesterId/approverId — zero new storage). Fail-closed: any
  * error → empty set → the caller treats the actor as a non-participant (full fence).
+ *
+ * Project-key fix: the projection WRITER namespaces every column by the row's OWN sheet id
+ * (`deriveProjectionFieldId` — `${sheetId}__${columnKey}`), so the match is derived IN SQL from
+ * `r.sheet_id` (a JOIN spans every sheet in `sheetIds`, each potentially a different template
+ * family) via the ONE shared `approvalProjectionParticipantPredicateSql` — never a bare
+ * `'requesterId'`/`'approverId'` literal, which the writer never stores a row under.
  */
 export async function loadApprovalProjectionParticipantSheetIds(
   query: QueryFn,
@@ -951,7 +1008,7 @@ export async function loadApprovalProjectionParticipantSheetIds(
          JOIN meta_records r ON r.sheet_id = s.id
         WHERE s.id = ANY($1::text[])
           AND s.base_id = $2
-          AND (r.data->>'requesterId' = $3 OR r.data->>'approverId' = $3)`,
+          AND ${approvalProjectionParticipantPredicateSql('r.data', 'r.sheet_id', '$3')}`,
       [sheetIds, APPROVAL_PROJECTION_BASE_ID, userId],
     )
     return new Set((result.rows as Array<{ id: string }>).map((row) => row.id))
@@ -1048,11 +1105,11 @@ export async function loadApprovalProjectionDeniedRecordIds(
   if (requested && requested.length === 0) return { isProjection: false, denied: new Set() }
   const projectionIds = await loadApprovalProjectionSheetIds(query, [sheetId])
   if (!projectionIds.has(sheetId)) return { isProjection: false, denied: new Set() }
-  // COALESCE closes the SQL three-valued-logic hole: a row with a MISSING participant field
-  // yields NULL comparisons, and `NOT (NULL OR NULL)` is NULL — the corrupt row would silently
-  // escape the denied set (fail-OPEN). With COALESCE to '' it can never equal a real user id, so
-  // corrupt rows are always denied (lock §3 fail-closed). An empty/absent actor id denies every
-  // row for the same reason ('' is matched against COALESCE'd '' explicitly guarded out below).
+  // The COALESCE-to-'' fail-closed handling of a row with a MISSING/corrupt participant field
+  // (three-valued-logic: `NOT (NULL OR NULL)` is NULL, which a bare WHERE would drop from the
+  // denied set — fail-OPEN) now lives ONCE inside `approvalProjectionParticipantPredicateSql`,
+  // not re-spelled here. An empty/absent actor id denies every row for the same reason ('' is
+  // explicitly guarded out below before it could match a COALESCE'd '').
   const normalizedUserId = typeof userId === 'string' ? userId.trim() : ''
   if (!normalizedUserId) {
     const all = requested
@@ -1060,18 +1117,21 @@ export async function loadApprovalProjectionDeniedRecordIds(
       : await query('SELECT id FROM meta_records WHERE sheet_id = $1', [sheetId])
     return { isProjection: true, denied: new Set((all.rows as Array<{ id: string }>).map((row) => row.id)) }
   }
+  // Project-key fix: `sheetId` is already a bound single-sheet parameter here ($1), so the shared
+  // predicate derives the namespaced key from that placeholder directly (no per-row JOIN needed,
+  // unlike the multi-sheet carve-out above) — same ONE definition, same fail-closed COALESCE.
   const result = requested
     ? await query(
       `SELECT id FROM meta_records
         WHERE sheet_id = $1
           AND id = ANY($3::text[])
-          AND NOT (COALESCE(data->>'requesterId', '') = $2 OR COALESCE(data->>'approverId', '') = $2)`,
+          AND NOT ${approvalProjectionParticipantPredicateSql('data', '$1', '$2')}`,
       [sheetId, normalizedUserId, requested],
     )
     : await query(
       `SELECT id FROM meta_records
         WHERE sheet_id = $1
-          AND NOT (COALESCE(data->>'requesterId', '') = $2 OR COALESCE(data->>'approverId', '') = $2)`,
+          AND NOT ${approvalProjectionParticipantPredicateSql('data', '$1', '$2')}`,
       [sheetId, normalizedUserId],
     )
   return { isProjection: true, denied: new Set((result.rows as Array<{ id: string }>).map((row) => row.id)) }
@@ -1487,6 +1547,9 @@ export function applySheetPermissionScope(
     // Notify = full sheet write/admin only (scope.canWrite), NOT write-own: a
     // record-scoped write must not imply notifying members from any row.
     canSendNotification: capabilities.canSendNotification && scope.canWrite,
+    // Submit-for-approval rides the READ plane (you submit a record you can read) AND still needs the
+    // global `multitable:submit-approval` code — a sheet grant alone never confers it.
+    canSubmitApproval: capabilities.canSubmitApproval && scope.canRead,
   }
 }
 
@@ -1561,6 +1624,7 @@ const MULTITABLE_CAPABILITY_KEYS: Array<keyof MultitableCapabilities> = [
   'canComment',
   'canManageAutomation',
   'canSendNotification',
+  'canSubmitApproval',
 ]
 
 export function deriveCapabilityOrigin(
@@ -1744,6 +1808,16 @@ export async function resolveSheetCapabilities(
    * legitimately needs to see a deleted sheet. See multitable/sheet-liveness.ts.
    */
   sheetLiveness: SheetLiveness
+  /** S3 fix round 1: present (true) only when the sheet is the stock-preparation project overview. */
+  stockPrepOverview?: true
+  /** 备料分批拉取第一期 step 3: present (true) only when the sheet carries a grid-export closure stamp. */
+  gridExportClosed?: true
+  /**
+   * Option B (owner 2026-10-29, R-66 ②): present (true) only on a registered stock-preparation project sheet for
+   * an actor who is not a platform admin — field management was taken away there, and view management too unless
+   * the actor holds `stock-prep:admin` (R-66 ③, which keeps the resolved view bit).
+   */
+  stockPrepProjectSheetSchemaClamped?: true
 }> {
   const access = await resolveRequestAccess(req)
   return resolveSheetCapabilitiesForAccess(query, sheetId, access)
@@ -1774,6 +1848,16 @@ export async function resolveSheetCapabilitiesForAccess(
    * legitimately needs to see a deleted sheet. See multitable/sheet-liveness.ts.
    */
   sheetLiveness: SheetLiveness
+  /** S3 fix round 1: present (true) only when the sheet is the stock-preparation project overview. */
+  stockPrepOverview?: true
+  /** 备料分批拉取第一期 step 3: present (true) only when the sheet carries a grid-export closure stamp. */
+  gridExportClosed?: true
+  /**
+   * Option B (owner 2026-10-29, R-66 ②): present (true) only on a registered stock-preparation project sheet for
+   * an actor who is not a platform admin — field management was taken away there, and view management too unless
+   * the actor holds `stock-prep:admin` (R-66 ③, which keeps the resolved view bit).
+   */
+  stockPrepProjectSheetSchemaClamped?: true
 }> {
   const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
   const sheetLiveness = await loadSheetLiveness(query, sheetId)
@@ -1799,12 +1883,54 @@ export async function resolveSheetCapabilitiesForAccess(
       ),
     )
   }
+  // S3 (ADR adr-stock-prep-project-sheets-20261008 §5, Q5 宿主级只读): the stock-preparation project
+  // overview is plugin-maintained. Whatever the grants resolved, a person keeps read / export / access
+  // management only — for EVERY access, administrators included (no isAdminRole short-circuit, unlike the
+  // projection fence). Readability and listing are untouched: canRead passes through as resolved.
+  // Fix round 1 (R12): the lookup issues NO statement for an id that cannot be an overview (the derived-id
+  // prefilter in stock-preparation-overview-contract.ts), so an ordinary sheet costs what it cost before.
+  // 备料分批拉取第一期 step 3 (review round 1, fix 2): the overview kind and the grid-export closure are read in
+  // ONE statement (multitable/sheet-grid-export-closure.ts `loadStockPreparationSheetStamps`), so a derived-id
+  // sheet still costs one statement and a client-id sheet none.
+  const stamps = await loadStockPreparationSheetStamps(query, [sheetId])
+  const stockPrepOverview = stamps.overviewSheetIds.has(sheetId)
+  if (stockPrepOverview) {
+    capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
+  }
+  // Option B (owner 2026-10-29, R-66 ②; ADR §11.7): on a REGISTERED stock-preparation project sheet only a
+  // platform admin manages fields and views — every other actor loses canManageFields / canManageViews, whatever
+  // the grants resolved; nothing else changes (multitable/stock-preparation-project-sheet-schema-clamp.ts). R-66 ③
+  // (owner 2026-10-29, R78): a `stock-prep:admin` holder (effective code AND held through a role) keeps canManageViews
+  // as resolved; the role statement runs only on a registered project sheet for an actor whose effective codes carry
+  // it. No statement for an admin or a client-id sheet.
+  const projectSheetClamp = await applyStockPreparationProjectSheetSchemaClamp(query, sheetId, capabilities, access.isAdminRole, {
+    userId: access.userId,
+    permissions: access.permissions,
+  })
+  capabilities = projectSheetClamp.capabilities
+  const stockPrepProjectSheetSchemaClamped = projectSheetClamp.clamped
+  // 备料分批拉取第一期 step 3: a sheet the host stamped closed for generic grid export loses `canExport` for EVERY
+  // access, administrators included; nothing else changes.
+  const gridExportClosed = stamps.gridExportClosedSheetIds.has(sheetId)
+  if (gridExportClosed) {
+    capabilities = restrictGridExportCapabilities(capabilities, true)
+  }
   return {
     access,
     capabilities,
     capabilityOrigin: deriveCapabilityOrigin(baseCapabilities, capabilities, sheetScope, access.isAdminRole),
     sheetLiveness,
     ...(sheetScope ? { sheetScope } : {}),
+    // Fix round 1 (R1 / R11): the fact the clamp acted on, for the two callers that must refuse MORE than
+    // a capability bit says — the grant routes (no level above read) and the comment writes. Present only
+    // on an overview, so every other caller's result is unchanged in shape.
+    ...(stockPrepOverview ? { stockPrepOverview: true as const } : {}),
+    // Present only on a closed sheet, so every other caller's result is unchanged in shape (the export route
+    // names the closure to a reader; `/context` sends its marker).
+    ...(gridExportClosed ? { gridExportClosed: true as const } : {}),
+    // Present only on a clamped project sheet, so every other caller's result is unchanged in shape (the members
+    // page's grantor bound reads it: services/stock-preparation-members-host.ts).
+    ...(stockPrepProjectSheetSchemaClamped ? { stockPrepProjectSheetSchemaClamped: true as const } : {}),
   }
 }
 
@@ -1825,19 +1951,31 @@ export async function resolveSheetReadableCapabilities(
    * legitimately needs to see a deleted sheet. See multitable/sheet-liveness.ts.
    */
   sheetLiveness: SheetLiveness
+  /** S3 fix round 1: present (true) only when the sheet is the stock-preparation project overview. */
+  stockPrepOverview?: true
+  /** 备料分批拉取第一期 step 3: present (true) only when the sheet carries a grid-export closure stamp. */
+  gridExportClosed?: true
+  /**
+   * Option B (owner 2026-10-29, R-66 ②): present (true) only on a registered stock-preparation project sheet for
+   * an actor who is not a platform admin — field management was taken away there, and view management too unless
+   * the actor holds `stock-prep:admin` (R-66 ③, which keeps the resolved view bit).
+   */
+  stockPrepProjectSheetSchemaClamped?: true
 }> {
   return resolveSheetCapabilities(req, query, sheetId)
 }
 
 export async function resolveReadableSheetIds(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sheetIds: Iterable<string>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<Set<string>> {
   const uniqueSheetIds = Array.from(new Set(Array.from(sheetIds).map((sheetId) => sheetId.trim()).filter(Boolean)))
   if (uniqueSheetIds.length === 0) return new Set()
 
-  const access = await resolveRequestAccess(req)
+  const access = authorityAccess ?? (req ? await resolveRequestAccess(req) : null)
+  if (!access) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
   if (access.isAdminRole) {
     return new Set(uniqueSheetIds)
   }
@@ -1887,6 +2025,17 @@ export async function resolveBaseReadable(
   if (!normalizedBaseId) return false
 
   const access = await resolveRequestAccess(req)
+  return resolveBaseReadableForAccess(query, normalizedBaseId, access)
+}
+
+/** Same base-read policy for an already-adjudicated, transaction-bound access snapshot. */
+export async function resolveBaseReadableForAccess(
+  query: QueryFn,
+  baseId: string,
+  access: ResolvedRequestAccess,
+): Promise<boolean> {
+  const normalizedBaseId = baseId.trim()
+  if (!normalizedBaseId) return false
 
   // Symmetry with `resolveBaseWritable`'s NIT-1: resolve target-base EXISTENCE FIRST. A missing /
   // soft-deleted base is NOT readable by ANYONE — including an admin / base-read-grant holder — which is
@@ -1978,4 +2127,46 @@ export async function resolveBaseWritable(
   // base ownership (symmetric with resolveBaseReadable) — reuses the existence row resolved above.
   const ownerId = typeof baseRow.owner_id === 'string' ? baseRow.owner_id.trim() : ''
   return Boolean(ownerId) && ownerId === normalizedUserId
+}
+
+/**
+ * Copy-sheet TARGET gate (ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md CS-3 / §4.2, amended
+ * 2026-09-28): **platform admin role ∨ `resolveBaseWritable`**, with the two projection refusals folded in so the
+ * three enforcement sites (fast route gate, in-transaction DB-fresh re-check, `/context` `canCopySheet` probe) share
+ * ONE predicate and cannot drift.
+ *
+ * Why the admin arm exists: the SOURCE gate (`hasFullTableReadAccess` axis ①) admits only an admin role on a sheet
+ * whose row-level read switch is on, while `resolveBaseWritable` consults only the base owner and the base-write
+ * codes — never the role. A row-level sheet in a base owned by someone else was therefore copyable by NOBODY. The
+ * owner accepted admitting the platform admin role on 2026-09-28. The admin predicate is the codebase's canonical
+ * one (`ResolvedRequestAccess.isAdminRole`, `access.ts`), the same axis-① test the source gate applies.
+ *
+ * FAIL-CLOSED, for the admin too:
+ *   - no identity / empty base id → false;
+ *   - the approval projection base and any e-learning projection base id (id shape, stricter than the registry
+ *     lookup `resolveBaseWritable` performs) → false, no matter who asks;
+ *   - a missing / soft-deleted base → false (the same existence read `resolveBaseWritable` starts with — NIT-1).
+ * `resolveBaseWritable` itself is NOT changed; its other callers (automation cross-base write, C1/C2) keep the
+ * owner-or-code policy without the role arm.
+ */
+export async function resolveCopyTargetWritable(
+  access: Pick<ResolvedRequestAccess, 'userId' | 'isAdminRole'>,
+  query: QueryFn,
+  baseId: string,
+): Promise<boolean> {
+  const normalizedUserId = typeof access.userId === 'string' ? access.userId.trim() : ''
+  if (!normalizedUserId) return false // fail-closed: no identity → no write (admin flag alone is not an identity)
+  const normalizedBaseId = typeof baseId === 'string' ? baseId.trim() : ''
+  if (!normalizedBaseId) return false
+  if (isApprovalProjectionBaseId(normalizedBaseId) || isElearningProjectionBaseIdCandidate(normalizedBaseId)) return false
+
+  if (!access.isAdminRole) return resolveBaseWritable(normalizedUserId, query, normalizedBaseId)
+
+  // Admin arm: existence + liveness only (no grant / owner lookup). A missing / soft-deleted target base is not
+  // writable by ANYONE — the same read `resolveBaseWritable` resolves first, so the two arms refuse identically here.
+  const baseRes = await query(
+    'SELECT id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL',
+    [normalizedBaseId],
+  )
+  return baseRes.rows.length > 0
 }

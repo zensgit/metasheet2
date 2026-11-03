@@ -1,3 +1,4 @@
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
@@ -27,7 +28,10 @@ function canListen(): Promise<boolean> {
   })
 }
 
-function requestJson(
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(
   url: string,
   options: { method?: string; headers?: Record<string, string>; body?: Record<string, unknown> } = {},
 ): Promise<JsonResponse> {
@@ -61,6 +65,8 @@ function requestJson(
 describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real PostgreSQL)', () => {
   let server: MetaSheetServer | undefined
   let pool: Pool
+  const seededDefaultRuleIds: string[] = []
+  const seededAdminPermissionUserIds: string[] = []
   let baseUrl = ''
   let settingsRowSnapshot: AttendanceSettingsRowSnapshot | undefined
   const pluginRequire = createRequire(import.meta.url)
@@ -94,6 +100,13 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       [userId, `w4c3b-request-${userId}@example.test`, JSON.stringify([permission])],
     )
     await pool.query('INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)', [userId, orgId])
+    if (permission === 'attendance:admin') {
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'attendance:admin')`,
+        [userId],
+      )
+      seededAdminPermissionUserIds.push(userId)
+    }
     await pool.query(
       `INSERT INTO attendance_calculation_rollout_state
        (org_id, state, engine_version, reason_code, actor_id, version, prior_state, scope)
@@ -129,6 +142,15 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       )
     }
     process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = orgId
+    const defaultRule = await pool.query<{ id: string }>(
+      `INSERT INTO attendance_rules
+       (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, $2, 'owned timezone fixture', $3, 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
+       RETURNING id`,
+      [randomUUID(), orgId, 'UTC'],
+    )
+    seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id))
     return { orgId, userId, token: await mintToken(userId, orgId) }
   }
 
@@ -297,6 +319,11 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
   })
 
   afterAll(async () => {
+    await pool?.query(
+      "DELETE FROM user_permissions WHERE user_id = ANY($1::text[]) AND permission_code = 'attendance:admin'",
+      [seededAdminPermissionUserIds],
+    ).catch(() => undefined)
+    await pool?.query('DELETE FROM attendance_rules WHERE id = ANY($1::uuid[])', [seededDefaultRuleIds]).catch(() => undefined)
     await pool?.end().catch(() => undefined)
     if (server) await server.stop()
     for (const [key, value] of Object.entries({
@@ -1164,6 +1191,19 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       expect(replay.status, replay.raw).toBe(202)
       expect(replay.body).toEqual(punch.body)
       expect(punch.body?.data?.pendingApproval).toBe(true)
+      const pairedReceipts = await pool.query(
+        `SELECT entrypoint, identity_source_kind, state, source_ref, response_snapshot,
+                normalized_business_input_snapshot FROM attendance_result_operations
+         WHERE org_id=$1 AND operation_id=$2::uuid ORDER BY entrypoint`, [fixture.orgId, operationId],
+      )
+      expect(pairedReceipts.rows).toEqual([
+        { entrypoint: 'live_punch', identity_source_kind: 'direct_live_punch', state: 'completed',
+          source_ref: 'plugin-attendance:POST /api/attendance/punch:online-v1', normalized_business_input_snapshot: null,
+          response_snapshot: { version: 'attendance-online-punch-v1', status: 202, body: punch.body } },
+        { entrypoint: 'request_create', identity_source_kind: 'direct_request_create', state: 'completed',
+          source_ref: 'plugin-attendance:POST /api/attendance/punch#outdoor-approval',
+          normalized_business_input_snapshot: expect.any(Object), response_snapshot: punch.body },
+      ])
       const residue = await createResidue(fixture.orgId, operationId)
       expect(residue).toMatchObject({
         requests: 1,
@@ -1764,6 +1804,23 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
   it('P13 source guard: specialized terminal routes stay delegated and approval updates keep OCC', () => {
     const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
     const source = readFileSync(path.join(repoRoot, 'plugins/plugin-attendance/index.cjs'), 'utf8')
+    const registrars = ['context.api.http.addRoute(', 'addAttendanceIdUpdateRoute(']
+    const nextRegistration = (from: number): number => {
+      let next = -1
+      for (const marker of registrars) {
+        const at = source.indexOf(marker, from)
+        if (at !== -1 && (next === -1 || at < next)) next = at
+      }
+      return next
+    }
+    const previousRegistration = (from: number): number => {
+      let previous = -1
+      for (const marker of registrars) {
+        const at = source.lastIndexOf(marker, from)
+        if (at > previous) previous = at
+      }
+      return previous
+    }
     const routeContracts = [
       ['/api/attendance/schedule-dispatch-requests/:id/cancel', 'w4RequestOperationBoundary.execute({', "routeVariant: 'schedule_dispatch_cancel'"],
       ['/api/attendance/shift-swap-requests/:id/accept', "respondShiftSwapConsent(req, res, 'accepted')", null],
@@ -1772,8 +1829,8 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     ] as const
     for (const [route, delegate, variant] of routeContracts) {
       const pathIndex = source.lastIndexOf(`'${route}'`)
-      const start = source.lastIndexOf('context.api.http.addRoute(', pathIndex)
-      const end = source.indexOf('context.api.http.addRoute(', pathIndex + route.length)
+      const start = previousRegistration(pathIndex)
+      const end = nextRegistration(pathIndex + route.length)
       expect(pathIndex, `${route} must remain registered`).toBeGreaterThan(-1)
       expect(start, `${route} must remain a host route`).toBeGreaterThan(-1)
       const body = source.slice(start, end < 0 ? source.length : end)
@@ -1782,7 +1839,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       expect(body).not.toMatch(/\b(?:trx|db|client)\.query\s*\(/)
     }
     const consentStart = source.indexOf('async function respondShiftSwapConsent(')
-    const consentEnd = source.indexOf('context.api.http.addRoute(', consentStart)
+    const consentEnd = nextRegistration(consentStart)
     const consentBody = source.slice(consentStart, consentEnd)
     expect(consentStart).toBeGreaterThan(-1)
     expect(consentBody).toContain('w4RequestOperationBoundary.execute({')

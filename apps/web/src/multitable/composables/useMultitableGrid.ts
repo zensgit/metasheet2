@@ -15,9 +15,12 @@ import type {
   PersonalViewConfigOverlay,
 } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
-import { isPropertyHiddenField } from '../utils/field-permissions'
+import { isFieldAlwaysReadOnly, isPropertyHiddenField } from '../utils/field-permissions'
+import { cloneRangeValue, isRangeWritableFieldType, type RangeChange } from '../utils/grid-range-fill'
 import { writePersonalConfigMerged } from '../utils/personal-config-write'
 import { metaCoreLabel } from '../utils/meta-core-labels'
+import { workbenchLabel } from '../utils/workbench-labels'
+import { DEFAULT_GRID_PAGE_SIZE, clampGridPageSize } from '../utils/grid-page-size'
 import { resolveRollupFieldProperty, rollupResultType } from '../utils/field-config'
 
 // --- Sort / Filter types ---
@@ -62,6 +65,18 @@ export interface CellEdit {
   version: number
   oldLinkSummaries?: LinkedRecordSummary[]
   newLinkSummaries?: LinkedRecordSummary[]
+  /** 人工补充行 B3: the edit went through PATCH /records/:recordId/manual-fields (undo / redo must too). */
+  route?: 'manual'
+}
+
+/**
+ * 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.4, N12): a cell that writes through
+ * PATCH /records/:recordId/manual-fields — one of the six fillable columns of a manual row — as the workbench decides it
+ * from /context's `stockPreparationManualRows` block. `required`: the column must not be cleared (名称 / 总用量 — the
+ * route answers 422 to an empty value), so an edit whose undo would clear it never enters the undo stack.
+ */
+export interface ManualCellWrite {
+  required: boolean
 }
 
 export interface GridConflictState {
@@ -72,6 +87,34 @@ export interface GridConflictState {
   serverVersion?: number
   previousLinkSummaries?: LinkedRecordSummary[]
   nextLinkSummaries?: LinkedRecordSummary[]
+}
+
+/**
+ * Record inspector v3 PR-B2 (docs/development/multitable-record-inspector-v3-design-20260905.md §1.3
+ * "Field-anchored server errors", §4 item 11): a patchCell REJECTION, kept with the HTTP status / error
+ * code / server `fieldErrors` map that `client.ts`'s parseJson already attaches to the thrown
+ * MultitableApiError but that the composable used to flatten into the single `error.value` string.
+ * `patchCell` RETURNS it (round 2: per call — `null` on success and on the local row-action refusal),
+ * so a caller (the workbench's `onDrawerPatch`) routes on exactly ITS OWN call's outcome; two in-flight
+ * patches can never read each other's failure, which a shared "last failure" ref read after `await`
+ * allowed. `fieldErrors` is whatever the server sent, normalised by client.ts (`normalizeFieldErrors`)
+ * — this composable never synthesises a map from `message` text (the /patch route on this head emits
+ * none; see the PR body pre-check). `message` is the server's text verbatim (may be '' if the server
+ * sent none — the caller decides what to show then).
+ */
+export interface GridPatchFailure {
+  recordId: string
+  fieldId: string
+  attemptedValue: unknown
+  status?: number
+  code?: string
+  message: string
+  fieldErrors?: Record<string, string>
+}
+
+/** 人工补充行 B3: the value the manual-fields route treats as CLEARING a column (its isClearingManualRowValue rule). */
+function isClearingCellValue(value: unknown): boolean {
+  return value === null || value === undefined || (typeof value === 'string' && value.trim() === '')
 }
 
 type RemoteRecordMergeOptions = {
@@ -86,6 +129,25 @@ type RemoteRecordPatchOptions = {
 }
 
 // --- Serialisation helpers ---
+
+// The explicit "no sort" / "no filter" payloads persistSortFilter sends when the toolbar holds no rules.
+// buildSortInfo / buildFilterInfoFromNodes return `undefined` for an empty list, and `undefined` is dropped
+// by JSON.stringify — the PATCH then carries no such key and the server KEEPS the stored rules, so clearing
+// the last sort/filter was never saved (客户反馈 2026-09-24 #5). An explicit empty value is stored as-is by
+// PATCH /views/:id and, on the personal path, overrides the shared facet instead of falling back to it.
+export function emptySortInfo(): { rules: [] } {
+  return { rules: [] }
+}
+export function emptyFilterInfo(conjunction: FilterConjunction = 'and'): { conjunction: FilterConjunction; conditions: [] } {
+  return { conjunction, conditions: [] }
+}
+// Same shape as the two above, for grouping (#6084): setGroupFields sent `groupInfo: undefined` for "no
+// group", which JSON.stringify drops — the PATCH then carried no such key and the server KEPT the stored
+// grouping, so clearing it was never saved. `{}` is what `normalizeJson` already treats as "no grouping"
+// (server GET /views and syncFromView both read groupInfo.fieldId / .fieldIds off it, absent on `{}`).
+export function emptyGroupInfo(): Record<string, unknown> {
+  return {}
+}
 
 export function buildSortInfo(rules: SortRule[]): { rules: Array<{ fieldId: string; desc: boolean }> } | undefined {
   if (!rules.length) return undefined
@@ -302,8 +364,24 @@ export function effectiveFilterTypeKey(field: { type: string; property?: unknown
 
 // --- Main composable ---
 
-const DEFAULT_PAGE_SIZE = 50
+const DEFAULT_PAGE_SIZE: number = DEFAULT_GRID_PAGE_SIZE
 const SEARCH_DEBOUNCE_MS = 150
+
+// #6075 round 3 (S1): the longest a load waits for sort/filter writes to its view that it did not send itself — an
+// earlier 应用's still in flight, or one queued ahead of this load's own. apiFetch has no timeout and the proxy's is
+// 300 s, so an unbounded wait let ONE stalled PATCH freeze every later load of that view. Past the bound the load
+// reads anyway and the late write still lands (or fails) behind it; persistSortFilter's compare-and-set keeps a late
+// settle from touching the state that read installed.
+export const SORT_FILTER_WRITE_WAIT_MS = 4000
+
+// Resolves when `pending` settles or after `ms`, whichever is first; never rejects.
+function settleWithin(pending: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    const done = () => { clearTimeout(timer); resolve() }
+    pending.then(done, done)
+  })
+}
 
 // A1 infinite-scroll accumulation safety ceiling. Each loadMore() fetches only one page (pageSize rows)
 // via offset pagination, so we never approach the server view-load `limit` clamp (max 5000) per fetch —
@@ -461,7 +539,12 @@ export function useMultitableGrid(opts: {
   sheetId: Ref<string>
   viewId: Ref<string>
   client?: MultitableApiClient
+  // Initial rows per server page. Taken as given (specs drive small/large pages through it); a viewer's own choice
+  // goes through setPageSize / resolvePageSize, which only ever apply GRID_PAGE_SIZE_OPTIONS.
   pageSize?: number
+  // Rows-per-page the viewer stored for a sheet (客户反馈 2026-10-21), read when a load starts on a sheet other than
+  // the one the current size was resolved for. null/undefined => the default. Snapped into GRID_PAGE_SIZE_OPTIONS.
+  resolvePageSize?: (sheetId: string) => number | null | undefined
   // Slice 3 (design-lock multitable-personal-views-slice3-fe-toggle-design-lock-20260706.md §3 P2 / G-FE-2):
   // a single toggle-driven write-routing switch. When it returns true for the CURRENT viewId, the in-place
   // config edits below (filter/sort/group/hidden) route to `putPersonalViewConfig` instead of the shared
@@ -469,9 +552,27 @@ export function useMultitableGrid(opts: {
   // this option set at all (usePersonalViewToggle.isPersonalMode is itself flag-gated), so a disabled
   // session never emits a personal-config request from here (G-FE-4).
   isPersonalMode?: (viewId: string) => boolean
+  // #6075 round 3 (S2): called once for EVERY sort/filter write the server rejected — 403 for a viewer without
+  // canManageViews, 400 for a hidden-filter mismatch, a network failure — whichever path sent it (应用, header click,
+  // 清除筛选, or any reload that flushes staged edits). The load that sent it goes on to read the view and re-syncs the
+  // stored rules over the edit, so without this the edit just vanished. Values-free: the view id only, never the
+  // rules or the server's message. A callback rather than `error`: the write can settle during any other grid call,
+  // and `error` set then would read as THAT call's failure (e.g. a picker's patchCell), while every loadViewData
+  // caller would have to check it. The workbench shows it as a toast.
+  onSortFilterWriteFailed?: (viewId: string) => void
+  // 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.4, N12): which cells write through
+  // PATCH /records/:recordId/manual-fields instead of /patch (the six fillable columns of a manual row; the workbench
+  // decides from /context's block, never from the row mark alone). patchCell, undo, redo and the conflict retry all
+  // ask it; undo / redo of a cell that can no longer take that route drop the entry instead of replaying it to /patch
+  // (which would answer 403). Absent ⇒ every cell writes through /patch, exactly as before. Range fill / paste
+  // (patchRange) never consult it: those keep treating the cells as read-only.
+  resolveManualCellWrite?: (recordId: string, fieldId: string) => ManualCellWrite | null
 }) {
   const client = opts.client ?? multitableClient
-  const pageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE
+  const initialPageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE
+  const pageSize = ref<number>(initialPageSize)
+  // The sheet the current pageSize was resolved for (resolvePageSize); a load on another sheet re-resolves it.
+  let pageSizeResolvedFor: string | null = null
   const { isZh } = useLocale()
   const fallback = (key: Parameters<typeof metaCoreLabel>[0]) => metaCoreLabel(key, isZh.value)
 
@@ -507,11 +608,21 @@ export function useMultitableGrid(opts: {
   // rows onto the freshly-reset set. This is the single guard that keeps the masked/filtered/sorted
   // per-fetch contract intact under interleaving (scroll-append racing a filter/sort/search/view change).
   let latestLoadRequestId = 0
+  // Append-only token (PR #6479 review): a grouping change must drop an in-flight scroll-append WITHOUT touching
+  // latestLoadRequestId — bumping the shared id would also orphan a reset in flight (its rows never land and
+  // `loading` is never cleared). loadMore checks both; setGroupFields bumps only this one.
+  let appendGeneration = 0
+  let rangePending = false
+  let activeGridWrites = 0
+  let rangeContextId = 0
+  let loadedRangeContextId = -1
+  // Invalidate immediately, including an away/back roundtrip hidden by Vue's batched watcher.
+  watch([opts.sheetId, opts.viewId], () => { rangeContextId++ }, { flush: 'sync' })
 
   // Pagination
-  const page = ref<MetaPage>({ offset: 0, limit: pageSize, total: 0, hasMore: false })
-  const currentPage = computed(() => Math.floor(page.value.offset / pageSize) + 1)
-  const totalPages = computed(() => Math.max(1, Math.ceil(page.value.total / pageSize)))
+  const page = ref<MetaPage>({ offset: 0, limit: initialPageSize, total: 0, hasMore: false })
+  const currentPage = computed(() => Math.floor(page.value.offset / pageSize.value) + 1)
+  const totalPages = computed(() => Math.max(1, Math.ceil(page.value.total / pageSize.value)))
 
   // Field visibility
   const hiddenFieldIds = ref<string[]>([])
@@ -567,11 +678,41 @@ export function useMultitableGrid(opts: {
   // faithful passthrough, and ANY edit clears it so the editable filterRules+filterGroups become the truth.
   const filterGroups = ref<FilterGroup[]>([])
   const sortFilterDirty = ref(false)
+  // WHICH view the sort/filter state above belongs to, plus what this client believes that view stores, exactly
+  // as this client serialises it (客户反馈 2026-09-24 #5). Set from the loaded view by syncFromView, and moved to
+  // the SENT state by persistSortFilter BEFORE its write's await (#6075 round 2), so a 应用 pressed while a write
+  // is in flight diffs against the pending, not-yet-acknowledged state. null ⇒ NOT KNOWN: the view has just
+  // switched and its load is still in flight or has FAILED (an empty toolbar means "not loaded yet", not "no
+  // rules"), or a 视图管理 save / config revert has just rewritten the view's rules behind the toolbar
+  // (discardUnappliedSortFilterEdits). persistSortFilter writes only when this names the target view — otherwise
+  // it would wipe the target's stored sort/filter with the unknown/empty state, or, on the create-view path
+  // (selectView + an explicit loadViewData that runs BEFORE the view-switch watcher), write the PREVIOUS view's
+  // staged rules into the new view — and it writes only the facet(s) that differ from this baseline. Every
+  // assignment installs a NEW object, so object identity doubles as the generation for compare-and-set.
+  type SortFilterBaseline = { viewId: string; sortKey: string; filterKey: string }
+  let sortFilterBaseline: SortFilterBaseline | null = null
+  // Sort/filter writes still in flight, per view: the tail of that view's write chain (#6075 round 2). Writes to
+  // one view are SERIALISED — each is sent only after the previous one settled — so the server applies them in
+  // the order the user pressed 应用 (last write wins); and loadViewData reads a view only after the writes to it have
+  // settled, so a reload does not show (and re-baseline from) the pre-write rules — waiting at most
+  // SORT_FILTER_WRITE_WAIT_MS for writes it did not send itself (#6075 round 3, S1).
+  const sortFilterWriteTails = new Map<string, Promise<void>>()
+  // The live discardUnappliedSortFilterEdits call (#6075 round 3, S3): only ITS restore may put the discarded
+  // baseline / dirty flag back. syncFromView and resetSortFilterState retire it (the state was re-established or
+  // forgotten since), and so does a newer discard.
+  let liveDiscard: object | null = null
+  // WHICH view the column / grouping state (hiddenFieldIds, groupFieldIds, fieldOrder) was loaded from (#6075
+  // round 2). null ⇒ not known: the view has just switched and its load is in flight or failed, or the response
+  // carried no view. Those facets are written as WHOLE lists (hiding one column PATCHes the full hidden list), so
+  // writing them into a view they were not read from replaces that view's own list with the previous view's.
+  let viewStateLoadedFor: string | null = null
 
   // GroupBy — ordered 1..MAX_GROUP_LEVELS group fields (nested / multi-level grouping). The array is the
   // source of truth; `groupFieldId` (level-1, legacy single-field reader) and `groupField` are derived.
   const MAX_GROUP_LEVELS = 3
   const groupFieldIds = ref<string[]>([])
+  // The grouping of the most recent setGroupFields call — what every overlapping edit re-asserts once it settles.
+  let newestGroupEdit: string[] = []
   const groupFieldId = computed<string | null>(() => groupFieldIds.value[0] ?? null)
   // Ordered, de-referenced group fields (drops ids that no longer resolve to a loaded field).
   const groupFields = computed(() =>
@@ -607,22 +748,50 @@ export function useMultitableGrid(opts: {
 
   // --- Data loading ---
 
-  async function loadViewData(offset = 0) {
+  // `size` (setPageSize): read at that page size and adopt it only when the read lands — a failed or superseded
+  // read leaves the size, page and rows as they were (never page-N rows labelled with the new size's page math).
+  async function loadViewData(offset = 0, size?: number) {
     const sid = opts.sheetId.value
     const vid = opts.viewId.value
     if (!sid) return
     const requestId = ++latestLoadRequestId
+    const contextId = rangeContextId
+    if (opts.resolvePageSize && pageSizeResolvedFor !== sid) {
+      pageSizeResolvedFor = sid
+      const resolved = clampGridPageSize(opts.resolvePageSize(sid) ?? DEFAULT_PAGE_SIZE)
+      if (resolved !== pageSize.value) {
+        pageSize.value = resolved
+        offset = 0
+      }
+    }
+    const limit = size ?? pageSize.value
     loading.value = true
     error.value = null
     try {
-      // Persist dirty sort/filter before loading
+      // Persist dirty sort/filter before loading — but ONLY state that was loaded from `vid` itself. Anything
+      // else is either the previous view's (create-view path: selectView + an explicit loadViewData run before
+      // the view-switch watcher resets) or not known yet (vid's load in flight / failed). Writing it would put
+      // foreign rules into vid, or wipe vid's stored rules with an empty toolbar — drop it instead; the load
+      // below establishes vid's real state (客户反馈 2026-09-24 #5).
+      // Writes to vid already in flight BEFORE this load (captured before persistSortFilter queues this load's own).
+      const writesAhead = vid ? sortFilterWriteTails.get(vid) : undefined
+      let ownWrite: Promise<void> | undefined
       if (sortFilterDirty.value && vid) {
-        await persistSortFilter(vid)
+        if (sortFilterBaseline?.viewId === vid) ownWrite = persistSortFilter(vid)
+        else resetSortFilterState()
       }
+      // Read-after-write (#6075 round 2): do not read vid while a sort/filter write to it is in flight — a GET that
+      // overtakes the PATCH returns the pre-write rules, and syncing from it would show (and baseline) a state the
+      // server is about to replace. This load's OWN write, sent at once, is awaited in full, as it always was (a 应用
+      // then reads what it wrote). Anything it did not send — an earlier write, or one its own is queued behind —
+      // is waited for at most SORT_FILTER_WRITE_WAIT_MS (#6075 round 3, S1): past that the load reads anyway.
+      // (Both are awaited: an own write with nothing to send resolves at once, and must not cut the wait short.)
+      if (writesAhead) await settleWithin(Promise.all([writesAhead, ownWrite]), SORT_FILTER_WRITE_WAIT_MS)
+      else if (ownWrite) await ownWrite
       const data = await client.loadView({
         sheetId: sid,
         viewId: vid || undefined,
-        limit: pageSize,
+        limit,
         offset,
         includeLinkSummaries: true,
         search: searchQuery.value || undefined,
@@ -631,12 +800,13 @@ export function useMultitableGrid(opts: {
       const serverPage = data.page
       const serverRows = data.rows ?? []
       if (serverPage && !serverRows.length && offset > 0 && offset >= serverPage.total) {
-        const fallbackOffset = Math.max(0, Math.floor(Math.max(serverPage.total - 1, 0) / pageSize) * pageSize)
+        const fallbackOffset = Math.max(0, Math.floor(Math.max(serverPage.total - 1, 0) / limit) * limit)
         if (fallbackOffset !== offset) {
-          await loadViewData(fallbackOffset)
+          await loadViewData(fallbackOffset, size)
           return
         }
       }
+      if (limit !== pageSize.value) pageSize.value = limit
       fields.value = data.fields ?? []
       rows.value = serverRows
       // A1: this is the RESET/REPLACE path (filter/sort/search/view/sheet change, pagination, mutation
@@ -656,10 +826,18 @@ export function useMultitableGrid(opts: {
       rowActions.value = data.meta?.permissions?.rowActions ?? null
       rowActionOverrides.value = data.meta?.permissions?.rowActionOverrides ?? {}
       if (serverPage) page.value = serverPage
-      if (data.view) syncFromView(data.view)
+      // No view ⇒ the server applied no sort/filter/hidden columns/grouping, so the grid must not claim any
+      // (客户反馈 2026-09-24 #5). It stays "not known" too (no baseline, no viewStateLoadedFor): with no view to
+      // compare against, nothing may be persisted.
+      if (data.view) syncFromView(data.view, vid || undefined)
+      else resetViewState()
+      if (contextId === rangeContextId) loadedRangeContextId = contextId
     } catch (e: any) {
       if (requestId !== latestLoadRequestId) return
       error.value = e.message ?? fallback('grid.errorLoadViewData')
+      // This reset superseded any append in flight (whose own `finally` therefore leaves the flag alone) and will
+      // not land to clear it: clear it here, or scrolling stays blocked until some later reset succeeds.
+      loadingMore.value = false
     } finally {
       if (requestId === latestLoadRequestId) loading.value = false
     }
@@ -669,7 +847,13 @@ export function useMultitableGrid(opts: {
   // rows server-side and we haven't hit the in-memory ceiling. The grid (MetaGridTable) additionally
   // gates the scroll trigger on the FLAT path (not grouped / not expanded / not printing) — those modes
   // keep the classic footer pager — so this stays a pure "is there a next page" predicate.
-  const canLoadMore = computed(() => page.value.hasMore && !accumulationCapped.value)
+  //
+  // Only from the top of the set (offset 0, where loadMore pins it): loadMore appends at `rows.length`, which is the
+  // next unread row ONLY when the held rows start at row 0. A grid holding a later page (page 4 of a grouped view
+  // whose grouping was just removed, or one a reload brought back) would append rows it already holds or skip
+  // some (客户反馈 2026-10-21: 100 rows on page 3, 4 rows and no way on from page 4). Such a grid pages with the
+  // classic pager instead — MetaGridTable keeps it visible past page 1 even on the flat path.
+  const canLoadMore = computed(() => page.value.hasMore && !accumulationCapped.value && page.value.offset === 0)
 
   // A1: shallow-merge a per-record summary map (recordId → fieldMap) onto the accumulated one. APPEND
   // must MERGE, never replace: a replace would drop every earlier page's link/person/attachment chips
@@ -697,13 +881,14 @@ export function useMultitableGrid(opts: {
     if (loadingMore.value || loading.value || !canLoadMore.value) return
 
     const requestId = ++latestLoadRequestId
+    const appendToken = appendGeneration
     loadingMore.value = true
     const startCount = rows.value.length
     try {
       const data = await client.loadView({
         sheetId: sid,
         viewId: opts.viewId.value || undefined,
-        limit: pageSize,
+        limit: pageSize.value,
         offset: startCount,
         includeLinkSummaries: true,
         search: searchQuery.value || undefined,
@@ -711,7 +896,8 @@ export function useMultitableGrid(opts: {
       // A reset (filter/sort/search/view/sheet change, or a mutation reload) bumped the id while we were
       // in flight → DROP this page. Appending it would mix stale, cross-filter rows onto the fresh set,
       // breaking the "masked/filtered/sorted per fetch" contract. The reset already replaced rows.
-      if (requestId !== latestLoadRequestId) return
+      // A grouping change since (appendGeneration) drops it too: grouped page 1 is one page, not two.
+      if (requestId !== latestLoadRequestId || appendToken !== appendGeneration) return
       const serverPage = data.page
       const serverRows = data.rows ?? []
 
@@ -736,10 +922,10 @@ export function useMultitableGrid(opts: {
       // Pin offset at 0 (infinite path) so row numbers + mutation reloads behave; carry the server total
       // and hasMore forward. End-of-data backstop: a short page (< pageSize) means no more rows even if
       // the server's hasMore lagged.
-      const nextHasMore = serverPage ? serverPage.hasMore && serverRows.length >= pageSize : false
+      const nextHasMore = serverPage ? serverPage.hasMore && serverRows.length >= pageSize.value : false
       page.value = {
         offset: 0,
-        limit: pageSize,
+        limit: pageSize.value,
         total: serverPage?.total ?? rows.value.length,
         hasMore: nextHasMore,
       }
@@ -762,26 +948,104 @@ export function useMultitableGrid(opts: {
     }
   }
 
-  function syncFromView(view: { filterInfo?: Record<string, unknown>; sortInfo?: Record<string, unknown>; hiddenFieldIds?: string[]; fieldOrder?: string[] }) {
-    // Parse server sort
-    if (view.sortInfo && Array.isArray((view.sortInfo as any).rules)) {
-      sortRules.value = ((view.sortInfo as any).rules as any[]).map((r: any) => ({
-        fieldId: String(r.fieldId ?? ''),
-        direction: r.desc ? 'desc' as const : 'asc' as const,
-      })).filter((r) => r.fieldId)
+  // Empty sort/filter state — what a view with no stored rules (e.g. a freshly created, blank view) shows.
+  // It also forgets WHICH view the state came from (sortFilterBaseline = null): until a load establishes the
+  // current view's real state, nothing may be persisted.
+  function resetSortFilterState() {
+    sortRules.value = []
+    filterRules.value = []
+    filterGroups.value = []
+    filterConjunction.value = 'and'
+    nestedFilterNodes.value = null
+    sortFilterDirty.value = false
+    sortFilterBaseline = null
+    liveDiscard = null
+  }
+
+  // Everything a view switch must forget (客户反馈 2026-09-24 #5, #6075 round 2): the sort/filter state AND the
+  // column / grouping state. Until the incoming view's load lands — or for good, if it fails — the grid shows it
+  // blank (all columns, entry order, no grouping, no sort/filter: what the 新视图 hint promises) instead of the
+  // previous view's, and none of that state may be written into it (viewStateLoadedFor = null).
+  function resetViewState() {
+    resetSortFilterState()
+    hiddenFieldIds.value = []
+    groupFieldIds.value = []
+    fieldOrder.value = []
+    viewStateLoadedFor = null
+  }
+
+  // True only when the column / grouping state was loaded from `viewId` itself — the gate for writing it back.
+  // Exposed for the workbench's personal column-reorder write, which derives a whole order from that state.
+  function isViewStateLoadedFor(viewId: string): boolean {
+    return !!viewId && viewStateLoadedFor === viewId
+  }
+
+  // A 视图管理 save or a config revert is about to rewrite stored view config — possibly the current view's sort/filter
+  // — behind the toolbar (#6075 round 2). The toolbar's staged, unapplied edits were made against the OLD rules: drop
+  // them — no load may PATCH them over what the dialog / revert saves (an unapplied "remove the last sort rule" would
+  // send `{ rules: [] }` and wipe the sort the dialog saved), and the caller's follow-up loadViewData re-syncs the
+  // toolbar from the view it returns. The baseline is stale too, so it becomes "not known": nothing is written for
+  // this view until a load re-establishes it. The caller discards BEFORE it sends its write (#6075 round 3, S3): a
+  // realtime reload or a pending search reload running while that write is in flight would otherwise still PATCH the
+  // staged edits. The returned `restore` puts the discarded baseline and dirty flag back for a write that FAILED —
+  // unless a load re-synced (or a view switch reset) the state meantime, or a newer discard ran; then it does nothing.
+  // The toolbar's rules themselves are never touched here, so restoring the flag and baseline brings the edit back.
+  function discardUnappliedSortFilterEdits(): () => void {
+    const token = {}
+    const discardedBaseline = sortFilterBaseline
+    const discardedDirty = sortFilterDirty.value
+    liveDiscard = token
+    sortFilterDirty.value = false
+    sortFilterBaseline = null
+    return () => {
+      if (liveDiscard !== token) return
+      liveDiscard = null
+      sortFilterBaseline = discardedBaseline
+      if (discardedDirty) sortFilterDirty.value = true
     }
+  }
+
+  // The toolbar's sort / filter as a persist payload. An empty list is the explicit empty
+  // (emptySortInfo / emptyFilterInfo), never `undefined`, so a cleared facet is actually saved.
+  function currentSortInfo(): Record<string, unknown> {
+    return buildSortInfo(sortRules.value) ?? emptySortInfo()
+  }
+  function currentFilterInfo(): Record<string, unknown> {
+    return (nestedFilterNodes.value
+      ? buildFilterInfoFromNodes(nestedFilterNodes.value, filterConjunction.value)
+      : buildFilterInfoFromNodes([...filterRules.value, ...filterGroups.value], filterConjunction.value))
+      ?? emptyFilterInfo(filterConjunction.value)
+  }
+
+  // `forViewId`: the view the caller asked for (loadViewData passes its request's viewId). The view's own
+  // `id` wins when present, so state is only ever attributed to the view it was actually read from.
+  function syncFromView(view: { id?: string; filterInfo?: Record<string, unknown>; sortInfo?: Record<string, unknown>; hiddenFieldIds?: string[]; fieldOrder?: string[] }, forViewId?: string) {
+    // The loaded view is AUTHORITATIVE for sort + filter (客户反馈 2026-09-24 #5): a view whose sortInfo has no
+    // `rules` array (a new view is created with `sortInfo: {}`) or whose filterInfo has no `conditions` means
+    // "no sort" / "no filter", NOT "keep whatever the previous view left in the toolbar". Keeping it showed the
+    // previous view's 排序 badge + header arrows on the new view, and the next 应用 / header click / 清除筛选
+    // then PERSISTED those foreign rules into it.
+    // Parse server sort
+    const rawSortRules = view.sortInfo && Array.isArray((view.sortInfo as any).rules)
+      ? ((view.sortInfo as any).rules as any[])
+      : []
+    sortRules.value = rawSortRules.map((r: any) => ({
+      fieldId: String(r?.fieldId ?? ''),
+      direction: r?.desc ? 'desc' as const : 'asc' as const,
+    })).filter((r) => r.fieldId)
     // Parse server filter (nesting-aware). The flat `filterRules` mirror the top-level LEAF conditions for
     // the current flat toolbar; if the stored filter has any subgroup, the full ordered tree is kept in
     // `nestedFilterNodes` so save round-trips faithfully (the old flat parse silently dropped group nodes —
     // a group has no fieldId, so `.filter(r => r.fieldId)` discarded it and the next save lost it).
-    if (view.filterInfo && Array.isArray((view.filterInfo as any).conditions)) {
-      const tree = parseFilterTree(view.filterInfo)
-      filterConjunction.value = tree?.conjunction ?? 'and'
-      filterRules.value = tree ? tree.nodes.filter((n): n is FilterRule => !isFilterGroup(n)) : []
-      filterGroups.value = tree ? tree.nodes.filter((n): n is FilterGroup => isFilterGroup(n)) : []
-      nestedFilterNodes.value = tree && tree.nodes.some(isFilterGroup) ? tree.nodes : null
-    }
-    if (view.hiddenFieldIds) hiddenFieldIds.value = [...view.hiddenFieldIds]
+    // parseFilterTree returns null for an absent / `{}` / no-conditions filterInfo ⇒ everything cleared.
+    const tree = parseFilterTree(view.filterInfo)
+    filterConjunction.value = tree?.conjunction ?? 'and'
+    filterRules.value = tree ? tree.nodes.filter((n): n is FilterRule => !isFilterGroup(n)) : []
+    filterGroups.value = tree ? tree.nodes.filter((n): n is FilterGroup => isFilterGroup(n)) : []
+    nestedFilterNodes.value = tree && tree.nodes.some(isFilterGroup) ? tree.nodes : null
+    // Authoritative like sort/filter (#6075 round 2): no hidden list on the loaded view ⇒ every column shown,
+    // never "keep the previous view's hidden columns".
+    hiddenFieldIds.value = Array.isArray(view.hiddenFieldIds) ? [...view.hiddenFieldIds] : []
     // Slice 3b: capture the effective (server-resolved, personal-overlay-applied) column order for this view.
     // Only string ids are kept; membership is NOT validated here — visibleFields fail-softs stale/unknown ids.
     fieldOrder.value = Array.isArray(view.fieldOrder)
@@ -797,6 +1061,15 @@ export function useMultitableGrid(opts: {
         : []
     groupFieldIds.value = normalizeGroupFieldIds(rawIds)
     sortFilterDirty.value = false
+    // Re-established from the server: a pending discard's restore must not put the stale baseline back over it.
+    liveDiscard = null
+    // This state now IS the named view's stored sort/filter — the baseline persistSortFilter diffs against.
+    const loadedViewId = typeof view.id === 'string' && view.id ? view.id : (forViewId ?? opts.viewId.value)
+    sortFilterBaseline = loadedViewId
+      ? { viewId: loadedViewId, sortKey: JSON.stringify(currentSortInfo()), filterKey: JSON.stringify(currentFilterInfo()) }
+      : null
+    // …and the column / grouping state now IS that view's too (the gate persistHiddenFields / setGroupFields use).
+    viewStateLoadedFor = loadedViewId || null
   }
 
   // Slice 3 G-FE-2 write-routing: the ONE switch every in-place config edit below funnels through. ON (for
@@ -814,17 +1087,58 @@ export function useMultitableGrid(opts: {
     }
   }
 
+  // Queue a sort/filter write behind any write to the same view that is still in flight (see sortFilterWriteTails).
+  // With nothing in flight it is sent immediately.
+  function enqueueSortFilterWrite(viewId: string, send: () => Promise<void>): Promise<void> {
+    const previous = sortFilterWriteTails.get(viewId)
+    const write = previous ? previous.then(send) : send()
+    const tail: Promise<void> = write.then(() => undefined, () => undefined)
+    sortFilterWriteTails.set(viewId, tail)
+    void tail.then(() => { if (sortFilterWriteTails.get(viewId) === tail) sortFilterWriteTails.delete(viewId) })
+    return write
+  }
+
   async function persistSortFilter(viewId: string) {
+    // Fail closed: never write sort/filter state that was not loaded FROM this view (see sortFilterBaseline).
+    const baseline = sortFilterBaseline
+    if (!baseline || baseline.viewId !== viewId) return
+    // Send ONLY the facet(s) the user changed against the baseline: a header click must not rewrite the stored
+    // filter (nor, in personal mode, pin the shared filter into the overlay). A changed facet goes out with an
+    // explicit value — the explicit empty included — so clearing the last rule is actually saved: an omitted key
+    // leaves the stored rules in place (shared PATCH) or falls back to the shared rules (personal).
+    const sortInfo = currentSortInfo()
+    const filterInfo = currentFilterInfo()
+    const sortKey = JSON.stringify(sortInfo)
+    const filterKey = JSON.stringify(filterInfo)
+    const input: PersonalViewConfigOverlay = {}
+    if (sortKey !== baseline.sortKey) input.sortInfo = sortInfo
+    if (filterKey !== baseline.filterKey) input.filterInfo = filterInfo
+    // The staged edits are captured now (sent below, or nothing to send). Cleared HERE, before any await (#6075
+    // round 2): an edit made while the write is in flight sets the flag again and must keep it, and a write that
+    // settles after a view switch must never clear the NEXT view's flag.
+    sortFilterDirty.value = false
+    if (!input.sortInfo && !input.filterInfo) return
+    // Record what is being sent BEFORE the await (#6075 round 2): from here on this client believes the view
+    // stores `sent`, so a 应用 pressed while this write is in flight diffs against it — re-adding the rule this
+    // write removes is a real change and is sent (last write wins), not "unchanged" against the stale pre-write
+    // baseline and silently dropped.
+    const sent: SortFilterBaseline = { viewId, sortKey, filterKey }
+    sortFilterBaseline = sent
     try {
-      await persistViewConfig(viewId, {
-        sortInfo: buildSortInfo(sortRules.value) as Record<string, unknown> | undefined,
-        filterInfo: (nestedFilterNodes.value
-          ? buildFilterInfoFromNodes(nestedFilterNodes.value, filterConjunction.value)
-          : buildFilterInfoFromNodes([...filterRules.value, ...filterGroups.value], filterConjunction.value)) as Record<string, unknown> | undefined,
-      })
-      sortFilterDirty.value = false
+      await enqueueSortFilterWrite(viewId, () => persistViewConfig(viewId, input))
     } catch {
-      // silent — will retry on next load
+      // The write failed, so the view still stores `baseline`. Compare-and-set: roll back ONLY while `sent` is
+      // still the current generation. A later 应用 (it diffed against `sent`), a load's re-sync, a view switch or a
+      // discard have each installed a newer object, and restoring over it would put a stale — possibly another
+      // view's — baseline and dirty flag under the current view. Rolled back, the edit is staged again — but the
+      // load that sent it goes on to read the view, and its re-sync replaces the staged edit with the stored rules.
+      // Only when that read fails too does the edit stay staged for the next load to retry. So the failure is
+      // always surfaced (#6075 round 3, S2), whether or not the rollback applied.
+      if (sortFilterBaseline === sent) {
+        sortFilterBaseline = baseline
+        sortFilterDirty.value = true
+      }
+      opts.onSortFilterWriteFailed?.(viewId)
     }
   }
 
@@ -838,7 +1152,7 @@ export function useMultitableGrid(opts: {
 
   function goToPage(p: number) {
     const safePage = Math.min(Math.max(1, p), totalPages.value)
-    const offset = Math.max(0, (safePage - 1) * pageSize)
+    const offset = Math.max(0, (safePage - 1) * pageSize.value)
     if (offset === page.value.offset) return
     loadViewData(offset)
   }
@@ -867,17 +1181,64 @@ export function useMultitableGrid(opts: {
 
   // Set the ordered group fields (1..MAX_GROUP_LEVELS). Persists groupInfo.fieldIds (NEW shape) and the
   // legacy groupInfo.fieldId = level-1 so other views (Kanban/Gantt) reading the single-field shape and
-  // any older reader keep working. Empty list clears grouping (groupInfo: undefined).
+  // any older reader keep working. Empty list clears grouping — sent as the explicit emptyGroupInfo()
+  // (`{}`), never `undefined` (#6084: `undefined` is dropped by JSON.stringify, the PATCH then carries no
+  // groupInfo key, and the server KEPT the stored grouping — clearing was never saved). Same fix shape as
+  // #6075's emptySortInfo()/emptyFilterInfo(): a changed facet always goes out with an explicit value.
+  //
+  // A changed grouping goes back to page 1 (客户反馈 2026-10-21). The grouped grid pages with the footer pager over
+  // one server page; the flat grid scrolls, appending from the top of the set. Switching modes on page N kept the
+  // page-N rows and offset: un-grouping on page 4 showed its 4 rows with the pager hidden, on pages 2-3 the
+  // appends mixed pages; grouping a flat grid that had scrolled in 154 rows grouped all 154 under "1 / 4". So
+  // unless the grid already holds exactly page 1, the change reloads page 1 — AFTER the write, so the read sees
+  // the new grouping (a read that overtakes it would sync the old grouping back).
+  //
+  // Edits overlap (PR #6479 review): the toolbar's add-level emits a placeholder level and the field pick emits
+  // again at once, so an edit's page-1 reload can land AFTER a newer edit was made — and its syncFromView then
+  // puts the grouping stored at read time (the older edit's) over the newer local one, while the newer edit sees
+  // page 1 already held and sends no read of its own. So every edit, after its write and after any reload of its
+  // own, re-asserts the NEWEST edit's grouping (newestGroupEdit), whichever of them settles last. The same keeps
+  // a refused write's grouping local, as it was before this reset (the reload syncs the stored grouping back).
   async function setGroupFields(fieldIds: string[]) {
     const next = normalizeGroupFieldIds(fieldIds)
+    const changed = next.length !== groupFieldIds.value.length || next.some((id, i) => id !== groupFieldIds.value[i])
+    newestGroupEdit = next
     groupFieldIds.value = next
+    // A scroll-append in flight was fetched for the flat grid's next rows; landing after a grouping change it
+    // would put a second page under grouped "1 / N" (and Next would show it again). Drop it via the append-only
+    // token — never the shared request id, which would also orphan a reset in flight. Its own finally still clears
+    // loadingMore (the shared id did not move).
+    if (changed) appendGeneration++
     const vid = opts.viewId.value
     if (!vid) return
+    // Only into the view this grouping was loaded from (#6075 round 2): while the view's load is in flight or has
+    // failed, `next` is built on the reset (or another view's) levels and would replace the view's own grouping.
+    if (viewStateLoadedFor !== vid) return
+    const contextId = rangeContextId
+    // Queued behind the view's other writes in flight (enqueueSortFilterWrite): overlapping edits must reach the
+    // server in the order they were made, or an older one committing last leaves stored != screen. Reads of this
+    // view (loadViewData) wait for the queue, so a page-1 reload sees the last of them.
     try {
-      await persistViewConfig(vid, {
-        groupInfo: next.length ? ({ fieldIds: next, fieldId: next[0] } as Record<string, unknown>) : undefined,
-      })
+      await enqueueSortFilterWrite(vid, () => persistViewConfig(vid, {
+        groupInfo: next.length ? ({ fieldIds: next, fieldId: next[0] } as Record<string, unknown>) : emptyGroupInfo(),
+      }))
     } catch { /* silent */ }
+    if (contextId !== rangeContextId) return
+    // Reload page 1 unless it is already held — and also when a load is still in flight: that read may have gone
+    // out before this write and would sync the old grouping back when it lands; a newer read supersedes it.
+    if (changed && (loading.value || !(page.value.offset === 0 && rows.value.length <= pageSize.value))) {
+      await loadViewData(0)
+      if (contextId !== rangeContextId) return
+    }
+    groupFieldIds.value = newestGroupEdit
+  }
+
+  // The viewer picked a rows-per-page option (客户反馈 2026-10-21). Snapped into GRID_PAGE_SIZE_OPTIONS; a new size
+  // reloads page 1 — the old offset is a multiple of the old size and would land mid-page.
+  async function setPageSize(size: unknown) {
+    const next = clampGridPageSize(size)
+    if (next === pageSize.value) return
+    await loadViewData(0, next)
   }
 
   // Back-compat single-field setter (level-1 only) kept for callers that still group by one field.
@@ -888,6 +1249,9 @@ export function useMultitableGrid(opts: {
   async function persistHiddenFields() {
     const vid = opts.viewId.value
     if (!vid) return
+    // Only into the view this hidden list was loaded from (#6075 round 2): the WHOLE list is sent, so toggling a
+    // column while the view's load is in flight or has failed would replace its stored hidden columns.
+    if (viewStateLoadedFor !== vid) return
     try {
       await persistViewConfig(vid, { hiddenFieldIds: [...hiddenFieldIds.value] })
     } catch { /* silent — will retry on next toggle */ }
@@ -968,8 +1332,11 @@ export function useMultitableGrid(opts: {
     return false
   }
 
-  function rejectRowDelete(): false {
-    error.value = fallback('grid.errorDeleteRowBlocked')
+  function rejectRowDelete(reason?: MetaRowActions['deleteBlockedReason']): false {
+    // R-66: a PLM row says why (zh = the server's refusal copy); every other refusal keeps the generic text.
+    error.value = reason === 'plm_row'
+      ? workbenchLabel('notice.plmRowDeleteBlocked', isZh.value)
+      : fallback('grid.errorDeleteRowBlocked')
     return false
   }
 
@@ -980,7 +1347,9 @@ export function useMultitableGrid(opts: {
     return rowActions.value
   }
 
-  async function createRecord(data?: Record<string, unknown>) {
+  // Returns the NEW record id on success (客户反馈 2026-10-27: the workbench opens it, so a person does not have to
+  // scroll to the bottom to find the empty row), or null with `error` set. Callers that ignore it are unchanged.
+  async function createRecord(data?: Record<string, unknown>): Promise<string | null> {
     error.value = null
     const context = resolveCreateRecordContext({
       sheetId: opts.sheetId.value,
@@ -988,19 +1357,21 @@ export function useMultitableGrid(opts: {
     })
     if (!context.sheetId && !context.viewId) {
       error.value = fallback('grid.errorContextRequired')
-      return
+      return null
     }
     if (!opts.sheetId.value && context.sheetId) opts.sheetId.value = context.sheetId
     if (!opts.viewId.value && context.viewId) opts.viewId.value = context.viewId
     try {
-      await client.createRecord({
+      const { record } = await client.createRecord({
         sheetId: context.sheetId,
         viewId: context.viewId,
         data,
       })
       await loadViewData(page.value.offset)
+      return record?.id ?? null
     } catch (e: any) {
       error.value = e.message ?? fallback('grid.errorCreateRecord')
+      return null
     }
   }
 
@@ -1029,7 +1400,8 @@ export function useMultitableGrid(opts: {
 
   async function deleteRecord(recordId: string): Promise<boolean> {
     error.value = null
-    if (resolveRowActions(recordId)?.canDelete === false) return rejectRowDelete()
+    const deleteActions = resolveRowActions(recordId)
+    if (deleteActions?.canDelete === false) return rejectRowDelete(deleteActions.deleteBlockedReason)
     try {
       const row = rows.value.find((r) => r.id === recordId)
       await client.deleteRecord(recordId, row?.version)
@@ -1053,15 +1425,29 @@ export function useMultitableGrid(opts: {
     options?: {
       previousLinkSummaries?: LinkedRecordSummary[]
       nextLinkSummaries?: LinkedRecordSummary[]
+      /** 人工补充行 B3: told the record's version the server returned for THIS write (the drawer's two-step save). */
+      onCommitted?: (version: number) => void
     },
-  ) {
+  ): Promise<GridPatchFailure | null> {
+    if (rangePending) return {
+      recordId, fieldId, attemptedValue: value, status: 409, code: 'RANGE_BUSY',
+      message: fallback('grid.errorPatchCell'),
+    }
+    // 人工补充行 B3: a fillable cell of a manual row writes through its own route (resolved once, before the write).
+    const manualWrite = opts.resolveManualCellWrite?.(recordId, fieldId) ?? null
     error.value = null
     conflict.value = null
-    if (resolveRowActions(recordId)?.canEdit === false) return rejectRowEdit()
+    // PR-B2 (§1.3): the LOCAL row-action refusal never reaches the server and yields no structured
+    // failure — `error.value` is set exactly as before (rejectRowEdit) and the caller toasts it.
+    if (resolveRowActions(recordId)?.canEdit === false) {
+      rejectRowEdit()
+      return null
+    }
     const row = rows.value.find((r) => r.id === recordId)
     const oldValue = row?.data[fieldId]
     const oldLinkSummaries = options?.previousLinkSummaries ?? linkSummaries.value[recordId]?.[fieldId]
     let nextLinkSummaries: LinkedRecordSummary[] | undefined
+    activeGridWrites++
 
     // Optimistic update
     if (row) row.data[fieldId] = value
@@ -1071,19 +1457,33 @@ export function useMultitableGrid(opts: {
     }
 
     try {
-      const result = await client.patchRecords({
-        sheetId: opts.sheetId.value || undefined,
-        viewId: opts.viewId.value || undefined,
-        changes: [{ recordId, fieldId, value, expectedVersion: version }],
-      })
+      const result = manualWrite
+        ? await client.patchManualRowFields(recordId, {
+          sheetId: opts.sheetId.value || undefined,
+          expectedVersion: version,
+          data: { [fieldId]: value },
+        })
+        : await client.patchRecords({
+          sheetId: opts.sheetId.value || undefined,
+          viewId: opts.viewId.value || undefined,
+          changes: [{ recordId, fieldId, value, expectedVersion: version }],
+        })
       applyPatchResult(result)
       // W3-5: record the commit's batchId (undefined for a server that predates the seam) so a caller can
       // offer a "view in history" deep-link for THIS commit only — never carries a prior commit's id forward.
       lastBatchId.value = result.batchId ?? null
-      // Push to undo history
-      editHistory.value = editHistory.value.slice(0, historyIndex.value + 1)
-      editHistory.value.push({ recordId, fieldId, oldValue, newValue: value, version, oldLinkSummaries, newLinkSummaries: nextLinkSummaries })
-      historyIndex.value = editHistory.value.length - 1
+      const committedVersion = (result.updated ?? []).find((update) => update.recordId === recordId)?.version
+      if (typeof committedVersion === 'number') options?.onCommitted?.(committedVersion)
+      // Push to undo history — 人工补充行 B3 (N12): except a manual cell whose undo would CLEAR a column that must not be
+      // cleared (its route refuses it), which is left out of the stack instead of becoming an undo that cannot work.
+      if (!(manualWrite?.required && isClearingCellValue(oldValue))) {
+        editHistory.value = editHistory.value.slice(0, historyIndex.value + 1)
+        editHistory.value.push({
+          recordId, fieldId, oldValue, newValue: value, version, oldLinkSummaries, newLinkSummaries: nextLinkSummaries,
+          ...(manualWrite ? { route: 'manual' as const } : {}),
+        })
+        historyIndex.value = editHistory.value.length - 1
+      }
     } catch (e: any) {
       // Revert optimistic update
       if (row) row.data[fieldId] = oldValue
@@ -1101,47 +1501,95 @@ export function useMultitableGrid(opts: {
         }
       }
       error.value = e.message ?? fallback('grid.errorPatchCell')
+      // PR-B2 (§1.3): additive — return status/code/fieldErrors for THIS call's routing decision.
+      // Nothing above this line changed (rollback + conflict + error.value stay as-is).
+      return {
+        recordId,
+        fieldId,
+        attemptedValue: value,
+        status: typeof e?.status === 'number' ? e.status : undefined,
+        code: typeof e?.code === 'string' ? e.code : undefined,
+        message: e?.message ?? fallback('grid.errorPatchCell'),
+        fieldErrors: e?.fieldErrors && typeof e.fieldErrors === 'object' ? { ...(e.fieldErrors as Record<string, string>) } : undefined,
+      }
+    } finally {
+      activeGridWrites--
     }
+    return null
   }
 
   // --- Undo / Redo ---
 
+  // 人工补充行 B3 (ADR §3.4, N12): undo / redo use the SAME route choice as the edit. An entry written through
+  // PATCH …/manual-fields whose cell can no longer take that route (the block changed, the row is no longer a manual
+  // row, the column is no longer writable for this actor) is DROPPED from the stack — never replayed to /patch, which
+  // would answer 403 on the locked column.
+  function manualReplayRoute(edit: CellEdit): 'manual' | 'default' | 'drop' {
+    const manual = opts.resolveManualCellWrite?.(edit.recordId, edit.fieldId) ?? null
+    if (manual) return 'manual'
+    return edit.route === 'manual' ? 'drop' : 'default'
+  }
+
+  function dropHistoryEntry(index: number) {
+    const next = [...editHistory.value]
+    next.splice(index, 1)
+    editHistory.value = next
+    if (index <= historyIndex.value) historyIndex.value -= 1
+  }
+
+  function replayCell(edit: CellEdit, value: unknown, expectedVersion: number | undefined, route: 'manual' | 'default') {
+    return route === 'manual'
+      ? client.patchManualRowFields(edit.recordId, {
+        sheetId: opts.sheetId.value || undefined,
+        expectedVersion,
+        data: { [edit.fieldId]: value },
+      })
+      : client.patchRecords({
+        sheetId: opts.sheetId.value || undefined,
+        changes: [{ recordId: edit.recordId, fieldId: edit.fieldId, value, expectedVersion }],
+      })
+  }
+
   async function undo() {
-    if (!canUndo.value) return
+    if (rangePending || !canUndo.value) return
     const edit = editHistory.value[historyIndex.value]
     if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()
+    const route = manualReplayRoute(edit)
+    if (route === 'drop') return void dropHistoryEntry(historyIndex.value)
+    activeGridWrites++
     historyIndex.value--
     const row = rows.value.find((r) => r.id === edit.recordId)
     if (row) row.data[edit.fieldId] = edit.oldValue
     setLinkSummaries(edit.recordId, edit.fieldId, edit.oldLinkSummaries)
     try {
-      const result = await client.patchRecords({
-        sheetId: opts.sheetId.value || undefined,
-        changes: [{ recordId: edit.recordId, fieldId: edit.fieldId, value: edit.oldValue, expectedVersion: row?.version }],
-      })
+      const result = await replayCell(edit, edit.oldValue, row?.version, route)
       applyPatchResult(result)
     } catch {
       // silent
+    } finally {
+      activeGridWrites--
     }
   }
 
   async function redo() {
-    if (!canRedo.value) return
+    if (rangePending || !canRedo.value) return
     const nextHistoryIndex = historyIndex.value + 1
     const edit = editHistory.value[nextHistoryIndex]
     if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()
+    const route = manualReplayRoute(edit)
+    if (route === 'drop') return void dropHistoryEntry(nextHistoryIndex)
+    activeGridWrites++
     historyIndex.value = nextHistoryIndex
     const row = rows.value.find((r) => r.id === edit.recordId)
     if (row) row.data[edit.fieldId] = edit.newValue
     setLinkSummaries(edit.recordId, edit.fieldId, edit.newLinkSummaries)
     try {
-      const result = await client.patchRecords({
-        sheetId: opts.sheetId.value || undefined,
-        changes: [{ recordId: edit.recordId, fieldId: edit.fieldId, value: edit.newValue, expectedVersion: row?.version }],
-      })
+      const result = await replayCell(edit, edit.newValue, row?.version, route)
       applyPatchResult(result)
     } catch {
       // silent
+    } finally {
+      activeGridWrites--
     }
   }
 
@@ -1150,6 +1598,7 @@ export function useMultitableGrid(opts: {
     value: unknown
     recordIds: string[]
   }): Promise<{ updated: string[]; failed: Array<{ recordId: string; reason: string }> }> {
+    if (rangePending) throw new Error('RANGE_BUSY')
     const changes = args.recordIds
       .map((recordId) => {
         const row = rows.value.find((r) => r.id === recordId)
@@ -1165,20 +1614,170 @@ export function useMultitableGrid(opts: {
 
     if (changes.length === 0) return { updated: [], failed: [] }
 
-    const result = await client.patchRecords({
-      sheetId: opts.sheetId.value || undefined,
-      viewId: opts.viewId.value || undefined,
-      partialSuccess: true,
-      changes,
-    })
-    applyPatchResult(result)
-    lastBatchId.value = result.batchId ?? null
-    const updated = (result.updated ?? []).map((u) => u.recordId)
-    const failed = (result.failed ?? []).map((failure) => ({
-      recordId: failure.recordId,
-      reason: failure.message || failure.code || fallback('grid.errorPatchFailed'),
-    }))
-    return { updated, failed }
+    activeGridWrites++
+    try {
+      const result = await client.patchRecords({
+        sheetId: opts.sheetId.value || undefined,
+        viewId: opts.viewId.value || undefined,
+        partialSuccess: true,
+        changes,
+      })
+      applyPatchResult(result)
+      lastBatchId.value = result.batchId ?? null
+      const updated = (result.updated ?? []).map((u) => u.recordId)
+      const failed = (result.failed ?? []).map((failure) => ({
+        recordId: failure.recordId,
+        reason: failure.message || failure.code || fallback('grid.errorPatchFailed'),
+      }))
+      return { updated, failed }
+    } finally {
+      activeGridWrites--
+    }
+  }
+
+  async function patchRange(changes: RangeChange[]): Promise<PatchResult> {
+    if (rangePending || activeGridWrites) throw new Error('RANGE_BUSY')
+    rangePending = true
+    try {
+      const sheetId = opts.sheetId.value
+      const viewId = opts.viewId.value
+      const loadRequestId = latestLoadRequestId
+      const contextId = rangeContextId
+      if (!sheetId || !viewId || !changes.length || changes.length > 1000) {
+        throw new Error('RANGE_INVALID')
+      }
+      if (loading.value || loadedRangeContextId !== contextId) throw new Error('RANGE_STALE')
+      const rowsById = new Map(rows.value.map((row) => [row.id, row]))
+      const fieldsById = new Map(fields.value.map((field) => [field.id, field]))
+      const visibleIds = new Set(visibleFields.value.map((field) => field.id))
+      const seen = new Set<string>()
+      const capturedChanges = changes.map(({ recordId, fieldId, value, expectedVersion }) => {
+        const row = rowsById.get(recordId)
+        const field = fieldsById.get(fieldId)
+        const cell = JSON.stringify([recordId, fieldId])
+        if (!row || !field || seen.has(cell)) throw new Error('RANGE_INVALID')
+        seen.add(cell)
+        if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0 || row.version !== expectedVersion) {
+          throw new Error('RANGE_STALE')
+        }
+        if (row.locked === true || resolveRowActions(recordId)?.canEdit === false
+          || viewPermission.value?.canAccess === false || !visibleIds.has(fieldId)
+          || fieldPermissions.value[fieldId]?.readOnly === true || isFieldAlwaysReadOnly(field)
+          || !isRangeWritableFieldType(field.type)) {
+          throw new Error('RANGE_READ_ONLY')
+        }
+        return { recordId, fieldId, value: cloneRangeValue(value), expectedVersion }
+      })
+      const result = await client.patchRecords({
+        sheetId,
+        viewId,
+        partialSuccess: false,
+        changes: capturedChanges,
+      })
+      const isMap = (value: unknown): value is Record<string, unknown> =>
+        value !== null && typeof value === 'object' && !Array.isArray(value)
+      const expectedVersions = new Map(capturedChanges.map(change => [change.recordId, change.expectedVersion]))
+      const updatedIds = new Set<string>()
+      const echoIds = new Set<string>()
+      if (!isMap(result) || !Array.isArray(result.updated)
+        || result.updated.length !== expectedVersions.size
+        || (result.failed !== undefined && (!Array.isArray(result.failed) || result.failed.length > 0))
+        || (result.batchId !== undefined && typeof result.batchId !== 'string')
+        || result.updated.some(update => {
+          if (!isMap(update) || !expectedVersions.has(update.recordId) || updatedIds.has(update.recordId)
+            || !Number.isSafeInteger(update.version) || update.version <= expectedVersions.get(update.recordId)!) return true
+          updatedIds.add(update.recordId)
+          return false
+        })
+        || (result.records !== undefined && (!Array.isArray(result.records) || result.records.some(record => {
+          if (!isMap(record) || typeof record.recordId !== 'string' || !isMap(record.data) || echoIds.has(record.recordId)) return true
+          echoIds.add(record.recordId)
+          return false
+        })))
+        || [result.linkSummaries, result.attachmentSummaries].some(summaries => summaries !== undefined
+          && (!isMap(summaries) || Object.values(summaries).some(fieldMap => !isMap(fieldMap)
+            || Object.values(fieldMap).some(value => !Array.isArray(value)))))) {
+        throw new Error('RANGE_INVALID')
+      }
+      // A navigation or reload can replace rows while the atomic server write is pending.
+      if (opts.sheetId.value === sheetId && opts.viewId.value === viewId
+        && latestLoadRequestId === loadRequestId && rangeContextId === contextId) {
+        // Realtime may already have installed a newer revision for part of this batch.
+        const liveVersions = new Map(rows.value.map(row => [row.id, row.version]))
+        const superseded = new Set((result.updated ?? [])
+          .filter(update => !liveVersions.has(update.recordId) || liveVersions.get(update.recordId)! > update.version)
+          .map(update => update.recordId))
+        // The API acknowledges primitive writes by version; optional echoes contain computed/canonical data.
+        const committedData = new Map<string, Record<string, unknown>>()
+        for (const change of capturedChanges) {
+          let value = change.value
+          // Range dateTime inputs are epoch milliseconds or explicitly zoned text; storage is UTC ISO.
+          if (fieldsById.get(change.fieldId)?.type === 'dateTime'
+            && (typeof value === 'number' || (typeof value === 'string' && /(?:Z|[+-]\d{2}:\d{2})$/.test(value)))) {
+            value = new Date(value).toISOString()
+          }
+          committedData.set(change.recordId, { ...committedData.get(change.recordId), [change.fieldId]: value })
+        }
+        for (const record of result.records ?? []) {
+          if (updatedIds.has(record.recordId)) {
+            committedData.set(record.recordId, { ...committedData.get(record.recordId), ...record.data })
+          }
+        }
+        applyPatchResult({
+          ...result,
+          updated: (result.updated ?? []).filter(update => !superseded.has(update.recordId)),
+          records: [...committedData].filter(([recordId]) => !superseded.has(recordId))
+            .map(([recordId, data]) => ({ recordId, data })),
+          linkSummaries: result.linkSummaries && Object.fromEntries(
+            Object.entries(result.linkSummaries).filter(([recordId]) => updatedIds.has(recordId) && !superseded.has(recordId)),
+          ),
+          attachmentSummaries: result.attachmentSummaries && Object.fromEntries(
+            Object.entries(result.attachmentSummaries).filter(([recordId]) => updatedIds.has(recordId) && !superseded.has(recordId)),
+          ),
+        })
+        lastBatchId.value = result.batchId ?? null
+        clearEditHistory()
+        // Extended types can be normalized server-side and people need directory-backed display names.
+        // Read only affected records, with bounded concurrency; never reload or replace another view.
+        const scalarTypes = new Set(['string', 'number', 'boolean', 'date', 'dateTime', 'select'])
+        const refreshIds = [...new Set(capturedChanges.filter(change =>
+          !superseded.has(change.recordId) && !scalarTypes.has(fieldsById.get(change.fieldId)!.type),
+        ).map(change => change.recordId))]
+        const sameContext = () => opts.sheetId.value === sheetId && opts.viewId.value === viewId
+          && latestLoadRequestId === loadRequestId && rangeContextId === contextId
+        let next = 0
+        let refreshFailed = false
+        await Promise.all(Array.from({ length: Math.min(4, refreshIds.length) }, async () => {
+          while (next < refreshIds.length && sameContext()) {
+            const recordId = refreshIds[next++]
+            try {
+              const context = await client.getRecord(recordId, { sheetId, viewId })
+              if (!sameContext()) return
+              const record = context.record
+              const acknowledged = result.updated.find(update => update.recordId === recordId)!
+              if (!record || record.id !== recordId || !Number.isSafeInteger(record.version)
+                || record.version < acknowledged.version || !isMap(record.data)) {
+                throw new Error('RANGE_REFRESH_REQUIRED')
+              }
+              const live = rows.value.find(row => row.id === recordId)
+              if (live && live.version <= record.version) {
+                // This is a complete server record, including lock/unlock metadata, not a data-only patch.
+                rows.value = rows.value.map(row => row.id === recordId ? { ...record, data: { ...record.data } } : row)
+                replaceRecordLinkSummaries(recordId, context.linkSummaries)
+                replaceRecordPersonSummaries(recordId, context.personSummaries)
+                replaceRecordAttachmentSummaries(recordId, context.attachmentSummaries)
+              }
+            } catch {
+              refreshFailed = true
+            }
+          }
+        }))
+        if (refreshFailed && sameContext()) throw new Error('RANGE_REFRESH_REQUIRED')
+      }
+      return result
+    } finally {
+      rangePending = false
+    }
   }
 
   function applyPatchResult(result?: PatchResult) {
@@ -1380,7 +1979,13 @@ export function useMultitableGrid(opts: {
   watch(
     [opts.sheetId, opts.viewId],
     () => {
-      sortFilterDirty.value = false
+      // Drop the previous view's sort/filter when the view changes (客户反馈 2026-09-24 #5): until the load's
+      // syncFromView lands — or forever, if the load fails — the toolbar and header arrows would otherwise show
+      // the OLD view's rules. This watcher is pre-flush, so a caller that switches the view and calls
+      // loadViewData in the same tick (onCreateView) runs BEFORE it; that path is covered by loadViewData's
+      // sortFilterBaseline check, which is what actually keeps foreign/unknown state from being persisted.
+      // The hidden columns / grouping / column order go too (#6075 round 2), and with them the right to write them.
+      resetViewState()
       clearEditHistory()
       dismissConflict()
       if (opts.sheetId.value) loadViewData(0)
@@ -1398,21 +2003,22 @@ export function useMultitableGrid(opts: {
     editHistory, historyIndex, canUndo, canRedo,
     searchQuery,
     // Computed
-    currentPage, totalPages, canLoadMore,
+    currentPage, totalPages, canLoadMore, pageSize,
     // Methods
     loadViewData, loadMore, syncFromView, reloadCurrentPage, goToPage,
+    discardUnappliedSortFilterEdits, isViewStateLoadedFor,
     toggleFieldVisibility,
     addSortRule, removeSortRule,
     addFilterRule, updateFilterRule, removeFilterRule, clearFilters,
     addFilterGroup, updateFilterGroup, removeFilterGroup,
     applySortFilter,
-    createRecord, duplicateRecord, deleteRecord, patchCell, bulkPatch,
+    createRecord, duplicateRecord, deleteRecord, patchCell, bulkPatch, patchRange,
     // A3: exposed as the single echo-application seam for the AI shortcut
     // run adapter (useAiShortcut synthesizes a PatchResult and feeds it here).
     applyPatchResult,
     mergeRemoteRecord, applyRemoteRecordPatch, removeRemoteRecord,
     undo, redo, clearEditHistory, dismissConflict, retryConflict,
-    setGroupField, setGroupFields,
+    setGroupField, setGroupFields, setPageSize,
     setSearchQuery, resolveRowActions,
   }
 }

@@ -48,6 +48,9 @@ async function mountFormulaConfig(opts: {
           { id: 'fld_tax', name: 'Tax Rate', type: 'percent' },
           { id: 'fld_total', name: 'Total', type: 'formula', property: { expression: '' } },
         ],
+        // A11: this suite covers the AVAILABLE state (the prop is fail-closed; the hidden state
+        // is covered by multitable-ai-availability-gate.spec.ts).
+        aiAvailable: true,
         ...(opts.formulaSuggestFn ? { formulaSuggestFn: opts.formulaSuggestFn } : {}),
         ...(opts.dryRunFn ? { dryRunFn: opts.dryRunFn } : {}),
         ...(opts.aiPreviewBusy !== undefined ? { aiPreviewBusy: opts.aiPreviewBusy } : {}),

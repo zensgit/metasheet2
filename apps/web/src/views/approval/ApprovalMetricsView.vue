@@ -73,10 +73,10 @@
 
     <el-card class="approval-metrics__section">
       <template #header>
-        <span>按模板汇总</span>
+        <span>按表单汇总</span>
       </template>
       <el-table :data="summary.byTemplate" stripe v-loading="loading">
-        <el-table-column prop="templateId" label="模板" min-width="240">
+        <el-table-column prop="templateId" label="表单" min-width="240">
           <template #default="{ row }">
             <el-link
               v-if="row.templateId"
@@ -86,7 +86,7 @@
             >
               {{ templateDisplayName(row.templateId) }}
             </el-link>
-            <span v-else class="metric-muted">未关联模板</span>
+            <span v-else class="metric-muted">未关联表单</span>
           </template>
         </el-table-column>
         <el-table-column prop="total" label="总量" width="100" />
@@ -223,12 +223,12 @@
               </el-link>
             </template>
           </el-table-column>
-          <el-table-column label="模板" min-width="180">
+          <el-table-column label="表单" min-width="180">
             <template #default="{ row }">
               <el-link v-if="row.templateId" type="primary" @click="goTemplate(row.templateId)">
                 {{ templateDisplayName(row.templateId) }}
               </el-link>
-              <span v-else class="metric-muted">未关联模板</span>
+              <span v-else class="metric-muted">未关联表单</span>
             </template>
           </el-table-column>
           <el-table-column label="耗时" width="120">
@@ -245,15 +245,15 @@
 
       <el-card class="approval-metrics__section">
         <template #header>
-          <span>TopN SLA 风险模板</span>
+          <span>TopN SLA 风险表单</span>
         </template>
-        <el-table :data="breachedTemplates" stripe v-loading="reportLoading" empty-text="暂无 SLA 模板数据">
-          <el-table-column label="模板" min-width="220">
+        <el-table :data="breachedTemplates" stripe v-loading="reportLoading" empty-text="暂无 SLA 表单数据">
+          <el-table-column label="表单" min-width="220">
             <template #default="{ row }">
               <el-link v-if="row.templateId" type="primary" @click="goTemplate(row.templateId)">
                 {{ templateDisplayName(row.templateId) }}
               </el-link>
-              <span v-else class="metric-muted">未关联模板</span>
+              <span v-else class="metric-muted">未关联表单</span>
             </template>
           </el-table-column>
           <el-table-column prop="total" label="总量" width="90" />

@@ -7,6 +7,7 @@ import {
   type DingTalkWorkNotificationResult,
   type DingTalkWorkNotificationRuntimeStatus,
 } from './client'
+import { DingTalkConfigValidationError } from './config-validation-error'
 
 const DEFAULT_PROVIDER = 'dingtalk'
 const AGENT_ID_CONFIG_KEY = 'workNotificationAgentId'
@@ -121,7 +122,7 @@ export function normalizeDingTalkWorkNotificationAgentId(value: unknown): string
   const normalized = normalizeText(value)
   if (!normalized) return ''
   if (!/^\d{1,32}$/.test(normalized)) {
-    throw new Error('DingTalk Agent ID must be 1-32 numeric characters')
+    throw new DingTalkConfigValidationError('DingTalk Agent ID must be 1-32 numeric characters')
   }
   return normalized
 }
@@ -298,7 +299,7 @@ export async function testDingTalkWorkNotificationAgentId(
   input: DingTalkWorkNotificationAgentIdTestInput,
 ): Promise<DingTalkWorkNotificationAgentIdTestResult> {
   const stored = await loadStoredWorkNotificationConfig(input.integrationId)
-  if (!stored) throw new Error('DingTalk directory integration not found')
+  if (!stored) throw new DingTalkConfigValidationError('DingTalk directory integration not found')
 
   const suppliedAgentId = normalizeText(input.agentId)
   const agentId = suppliedAgentId
@@ -311,9 +312,9 @@ export async function testDingTalkWorkNotificationAgentId(
     baseUrl: readStringEnv('DINGTALK_BASE_URL') || stored.baseUrl,
   }
 
-  if (!config.appKey) throw new Error('DingTalk appKey is required')
-  if (!config.appSecret) throw new Error('DingTalk appSecret is required')
-  if (!config.agentId) throw new Error('DingTalk Agent ID is required')
+  if (!config.appKey) throw new DingTalkConfigValidationError('DingTalk appKey is required')
+  if (!config.appSecret) throw new DingTalkConfigValidationError('DingTalk appSecret is required')
+  if (!config.agentId) throw new DingTalkConfigValidationError('DingTalk Agent ID is required')
 
   const accessToken = await fetchDingTalkAppAccessToken(config)
   const recipientUserId = normalizeText(input.recipientUserId)
@@ -359,9 +360,9 @@ export async function saveDingTalkWorkNotificationAgentId(
   input: DingTalkWorkNotificationAgentIdTestInput,
 ): Promise<DingTalkWorkNotificationAgentIdSaveResult> {
   const integrationId = normalizeText(input.integrationId)
-  if (!integrationId) throw new Error('integrationId is required')
+  if (!integrationId) throw new DingTalkConfigValidationError('integrationId is required')
   const agentId = normalizeDingTalkWorkNotificationAgentId(input.agentId)
-  if (!agentId) throw new Error('DingTalk Agent ID is required')
+  if (!agentId) throw new DingTalkConfigValidationError('DingTalk Agent ID is required')
 
   const testResult = await testDingTalkWorkNotificationAgentId({
     ...input,

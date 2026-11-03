@@ -41,7 +41,7 @@ resolve_home_path() {
 
 STAGING_DIR="$(resolve_home_path "$STAGING_DEPLOY_PATH")"
 PROD_REPO_DIR="$(resolve_home_path "$DEPLOY_PATH")"
-STAGING_ENV_FILE="${STAGING_DIR}/docker/app.staging.env"
+STAGING_ENV_FILE=""
 LEGACY_COMPOSE_FILE="${STAGING_DIR}/docker-compose.app.staging.yml"
 ATTENDANCE_DIR="${HOME}/.metasheet2/window-runner"
 PERSISTENT_COMPOSE_FILE="${ATTENDANCE_DIR}/docker-compose.app.staging.yml"
@@ -62,7 +62,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 assert_staging_only() {
-  [[ -d "$STAGING_DIR" && -f "$STAGING_COMPOSE_FILE" && -f "$STAGING_ENV_FILE" ]] \
+  [[ -d "$STAGING_DIR" && -f "$STAGING_COMPOSE_FILE" ]] \
     || fail "staging stack/env is missing; refusing to guess"
   [[ "$STAGING_DIR" != "$PROD_REPO_DIR" ]] || fail "staging path equals production path"
   grep -q "container_name: ${BACKEND_CONTAINER}" "$STAGING_COMPOSE_FILE" \
@@ -155,6 +155,7 @@ write_status() {
     echo "deployed_sha_match=${sha_match}"
     echo "backend_health=$(backend_health)"
     echo "lifecycle_flags_all_off=$(lifecycle_all_off)"
+    echo "stream_flag_off=$(if is_true "$(container_value DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED)"; then printf false; else printf true; fi)"
     echo "client_id_matches=$(value_matches DINGTALK_CLIENT_ID "$EXPECTED_CLIENT_ID")"
     echo "client_secret_present=$(secret_present DINGTALK_CLIENT_SECRET)"
     echo "corp_id_matches=$(value_matches DINGTALK_CORP_ID "$EXPECTED_CORP_ID")"
@@ -173,15 +174,222 @@ resolve_image_pin() {
   printf '%s %s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
 }
 
-compose_with_env() {
-  local env_file="$1"; shift
+# Resolve the running container's Compose inputs instead of guessing an env path.
+ACTIVE_COMPOSE_ARGS=()
+ACTIVE_COMPOSE_JSON=""
+ACTIVE_RENDERED_JSON=""
+
+compose_current() {
   local owner tag pin
   pin="$(resolve_image_pin)"; read -r owner tag <<< "$pin"
-  local -a files=(-f "$STAGING_COMPOSE_FILE")
-  [[ -f "$ATTENDANCE_OVERRIDE_FILE" ]] && files+=(-f "$ATTENDANCE_OVERRIDE_FILE")
-  [[ -f "$LIFECYCLE_OVERRIDE_FILE" ]] && files+=(-f "$LIFECYCLE_OVERRIDE_FILE")
-  (cd "$STAGING_DIR" && IMAGE_OWNER="$owner" IMAGE_TAG="$tag" APP_ENV_FILE="$env_file" \
-    docker compose --project-directory "$STAGING_DIR" --env-file "$env_file" "${files[@]}" "$@")
+  (cd "$STAGING_DIR" && unset APP_ENV_FILE && IMAGE_OWNER="$owner" IMAGE_TAG="$tag" \
+    docker compose "${ACTIVE_COMPOSE_ARGS[@]}" "$@")
+}
+
+# Interpolated config output doubles literal dollars for Compose round-tripping.
+# Decode that representation once before comparing it with actual container bytes.
+compose_json() {
+  compose_current config --format json "$@" \
+    | python3 -c 'import sys; sys.stdout.write(sys.stdin.read().replace("$$", "$"))'
+}
+
+# Compose 2.x discards env_file even with --no-env-resolution unless interpolation
+# is disabled. Recover its source paths with a temporary label probe: Compose itself
+# still performs interpolation using the original project's inputs.
+recover_compose_sources() {
+  local raw="$1" rendered="$2" unresolved probe mapping resolved
+  unresolved="$(mktemp "${PERSIST_DIR}/.compose-unresolved.XXXXXX")"
+  probe="$(mktemp "${PERSIST_DIR}/.compose-probe.XXXXXX")"
+  mapping="$(mktemp "${PERSIST_DIR}/.compose-mapping.XXXXXX")"
+  resolved="$(mktemp "${PERSIST_DIR}/.compose-probed.XXXXXX")"
+  cleanup_files+=("$unresolved" "$probe" "$mapping" "$resolved")
+  compose_current config --no-interpolate --no-env-resolution --no-path-resolution --format json \
+    > "$unresolved" 2>/dev/null || return 1
+  python3 - "$unresolved" "$probe" "$mapping" <<'PY'
+import json, sys
+source, probe, mapping = sys.argv[1:]
+services = {}
+entries = []
+for name, service in json.load(open(source))["services"].items():
+    for field in ("env_file", "label_file"):
+        for entry in service.get(field, []) or []:
+            value = dict(entry) if isinstance(entry, dict) else {"path": entry}
+            if not isinstance(value.get("path"), str):
+                raise SystemExit(1)
+            key = "io.metasheet.oauth-source-" + str(len(entries))
+            services.setdefault(name, {"labels": {}})["labels"][key] = value["path"]
+            entries.append({"service": name, "field": field, "entry": value, "key": key})
+if not entries:
+    raise SystemExit(1)
+with open(probe, "w") as fh:
+    json.dump({"services": services}, fh)
+with open(mapping, "w") as fh:
+    json.dump(entries, fh)
+PY
+  (ACTIVE_COMPOSE_ARGS=("${ACTIVE_COMPOSE_ARGS[@]}" -f "$probe"); compose_json) \
+    > "$resolved" 2>/dev/null || return 1
+  python3 - "$rendered" "$resolved" "$mapping" "$raw" "$STAGING_DIR" <<'PY'
+import json, os, sys
+baseline, probed, mapping, destination, directory = sys.argv[1:]
+model = json.load(open(baseline))
+probe = json.load(open(probed))
+entries = json.load(open(mapping))
+for service in model["services"].values():
+    service.pop("env_file", None)
+    service.pop("label_file", None)
+for item in entries:
+    value = item["entry"]
+    path = probe["services"][item["service"]]["labels"][item["key"]]
+    if not isinstance(path, str):
+        raise SystemExit(1)
+    if path.startswith("~/"):
+        path = os.path.expanduser(path)
+    value["path"] = os.path.abspath(os.path.join(directory, path))
+    model["services"][item["service"]].setdefault(item["field"], []).append(value)
+with open(destination, "w") as fh:
+    json.dump(model, fh)
+PY
+}
+
+resolve_active_env() {
+  local working_dir project files env_files file raw live image_env
+  working_dir="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$BACKEND_CONTAINER")"
+  project="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$BACKEND_CONTAINER")"
+  files="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.config_files" }}' "$BACKEND_CONTAINER")"
+  env_files="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.environment_file" }}' "$BACKEND_CONTAINER")"
+  [[ -d "$working_dir" && "$(cd "$working_dir" && pwd -P)" == "$(cd "$STAGING_DIR" && pwd -P)" ]] \
+    || fail "active Compose working directory does not match staging"
+  [[ -n "$project" && "$project" != "<no value>" && -n "$files" && "$files" != "<no value>" ]] \
+    || fail "active Compose labels are missing"
+  ACTIVE_COMPOSE_ARGS=(--project-directory "$STAGING_DIR" --project-name "$project")
+  local -a paths=()
+  IFS=',' read -r -a paths <<< "$files"
+  for file in "${paths[@]}"; do
+    [[ "$file" == /* && -f "$file" ]] || fail "active Compose file is unavailable"
+    ACTIVE_COMPOSE_ARGS+=(-f "$file")
+  done
+  if [[ -n "$env_files" && "$env_files" != "<no value>" ]]; then
+    IFS=',' read -r -a paths <<< "$env_files"
+    for file in "${paths[@]}"; do
+      [[ "$file" == /* && -f "$file" ]] || fail "active Compose interpolation env is unavailable"
+      ACTIVE_COMPOSE_ARGS+=(--env-file "$file")
+    done
+  fi
+  raw="$(mktemp "${PERSIST_DIR}/.compose-source.XXXXXX")"
+  ACTIVE_COMPOSE_JSON="$raw"; cleanup_files+=("$raw")
+  ACTIVE_RENDERED_JSON="$(mktemp "${PERSIST_DIR}/.compose-rendered.XXXXXX")"
+  live="$(mktemp "${PERSIST_DIR}/.live-env.XXXXXX")"
+  image_env="$(mktemp "${PERSIST_DIR}/.image-env.XXXXXX")"
+  cleanup_files+=("$ACTIVE_RENDERED_JSON" "$live" "$image_env")
+  compose_json --no-env-resolution > "$raw" 2>/dev/null \
+    || fail "cannot resolve active Compose env source"
+  compose_json > "$ACTIVE_RENDERED_JSON" 2>/dev/null \
+    || fail "cannot render active Compose environment"
+  if ! python3 - "$raw" <<'PY'
+import json, sys
+raise SystemExit(0 if "env_file" in json.load(open(sys.argv[1]))["services"]["backend"] else 1)
+PY
+  then
+    recover_compose_sources "$raw" "$ACTIVE_RENDERED_JSON" 2>/dev/null \
+      || fail "cannot recover active Compose source metadata"
+  fi
+  docker inspect -f '{{json .Config.Env}}' "$BACKEND_CONTAINER" > "$live"
+  docker image inspect -f '{{json .Config.Env}}' "$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER")" > "$image_env"
+  STAGING_ENV_FILE="$(python3 - "$raw" "$ACTIVE_RENDERED_JSON" "$live" "$image_env" 2>/dev/null <<'PY'
+import json, os, sys
+raw, rendered, live, image = (json.load(open(p)) for p in sys.argv[1:])
+backend = raw["services"]["backend"]
+if backend.get("container_name") != "metasheet-staging-backend":
+    raise SystemExit(1)
+sources = backend.get("env_file", [])
+if len(sources) != 1:
+    raise SystemExit(1)
+source = sources[0].get("path") if isinstance(sources[0], dict) else sources[0]
+if not isinstance(source, str) or not os.path.isabs(source) or not os.path.isfile(source) or os.path.islink(source) or "\n" in source:
+    raise SystemExit(1)
+for service in raw["services"].values():
+    for label_file in service.get("label_file", []):
+        path = label_file.get("path") if isinstance(label_file, dict) else label_file
+        if isinstance(path, str) and os.path.isfile(path) and os.path.samefile(path, source):
+            raise SystemExit(1)
+def env(items):
+    return dict(item.split("=", 1) for item in (items or []))
+expected = env(image)
+for key, value in rendered["services"]["backend"].get("environment", {}).items():
+    if value is None:
+        expected.pop(key, None)
+    else:
+        expected[key] = str(value)
+if expected != env(live):
+    raise SystemExit(1)
+print(source)
+PY
+  )" || fail "active env source is ambiguous or differs from running configuration"
+}
+
+compose_with_env() {
+  local env_file="$1"; shift
+  if [[ "$env_file" == "$STAGING_ENV_FILE" ]]; then
+    compose_current "$@"
+    return
+  fi
+  # Substitute every env_file consumer; reject effects outside backend environment.
+  [[ $# == 1 && "$1" == config ]] || fail "candidate Compose operation is not validation"
+  local model rendered
+  model="$(mktemp "${PERSIST_DIR}/.candidate-compose.XXXXXX")"
+  rendered="$(mktemp "${PERSIST_DIR}/.candidate-rendered.XXXXXX")"
+  cleanup_files+=("$model" "$rendered")
+  python3 - "$ACTIVE_COMPOSE_JSON" "$model" "$env_file" "$STAGING_ENV_FILE" <<'PY'
+import json, os, sys
+source, destination, candidate, active = sys.argv[1:]
+model = json.load(open(source))
+with open(destination, "w") as fh:
+    fh.write("services:\n")
+    for name, service in model["services"].items():
+        entries = service.get("env_file", [])
+        replaced = []
+        changed = False
+        for entry in entries:
+            value = dict(entry) if isinstance(entry, dict) else {"path": entry}
+            path = value.get("path")
+            if isinstance(path, str) and os.path.isfile(path) and os.path.samefile(path, active):
+                value["path"] = candidate
+                changed = True
+            replaced.append(value)
+        if changed:
+            fh.write("  " + json.dumps(name) + ":\n    env_file: !override " + json.dumps(replaced) + "\n")
+
+PY
+  local -a candidate_args=("${ACTIVE_COMPOSE_ARGS[@]}")
+  local i explicit_env=false
+  for ((i=1; i<${#candidate_args[@]}; i+=1)); do
+    if [[ "${candidate_args[i-1]}" == --env-file ]]; then
+      explicit_env=true
+      [[ ! "${candidate_args[i]}" -ef "$STAGING_ENV_FILE" ]] || candidate_args[i]="$env_file"
+    fi
+  done
+  if [[ "$explicit_env" == false && "$STAGING_ENV_FILE" -ef "${STAGING_DIR}/.env" ]]; then
+    candidate_args+=(--env-file "$env_file")
+  fi
+  (ACTIVE_COMPOSE_ARGS=("${candidate_args[@]}" -f "$model"); compose_json) \
+    > "$rendered" 2>/dev/null || return 1
+  python3 - "$ACTIVE_RENDERED_JSON" "$rendered" "$OAUTH_CLIENT_ID_FILE" "$OAUTH_CLIENT_SECRET_FILE" \
+    "$EXPECTED_CORP_ID" "$EXPECTED_REDIRECT_URI" "$EXPECTED_APP_URL" <<'PY'
+import json, sys
+before, after, cid, secret, corp, redirect, app = sys.argv[1:]
+expected = json.load(open(before))
+expected["services"]["backend"].setdefault("environment", {}).update({
+    "DINGTALK_CLIENT_ID": open(cid).read().rstrip("\r\n"),
+    "DINGTALK_CLIENT_SECRET": open(secret).read().rstrip("\r\n"),
+    "DINGTALK_CORP_ID": corp, "DINGTALK_REDIRECT_URI": redirect,
+    "PUBLIC_APP_URL": app, "CORS_ORIGIN": app,
+    "AUTH_LOGIN_USE_ALIASES": "false", "DIRECTORY_PENDING_ACTIVATION_ENABLED": "false",
+    "DIRECTORY_DEPROVISION_ENABLED": "false", "DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED": "false",
+})
+actual = json.load(open(after))
+if actual != expected:
+    raise SystemExit("candidate changes unrelated configuration or target values are overridden")
+PY
 }
 
 atomic_install_env() {
@@ -216,6 +424,7 @@ updates={
  "PUBLIC_APP_URL": "https://metasheet-staging.ddns.net", "CORS_ORIGIN": "https://metasheet-staging.ddns.net",
  "AUTH_LOGIN_USE_ALIASES": "false", "DIRECTORY_PENDING_ACTIVATION_ENABLED": "false",
  "DIRECTORY_DEPROVISION_ENABLED": "false",
+ "DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED": "false",
 }
 lines=open(src, encoding="utf-8", errors="replace").read().splitlines(); out=[]; seen=set()
 for line in lines:
@@ -259,11 +468,14 @@ action_prepare() {
   [[ "$(deployed_sha)" == "$DEPLOY_SHA" ]] || fail "deployed SHA does not match"
   [[ "$(lifecycle_all_off)" == true ]] || fail "all lifecycle flags must be OFF"
   [[ "$(backend_health)" == true ]] || fail "backend is not healthy"
+  ! is_true "$(container_value DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED)" || fail "Stream must be OFF"
   require_secret_file "$OAUTH_CLIENT_ID_FILE" client_id
   require_secret_file "$OAUTH_CLIENT_SECRET_FILE" client_secret
   [[ "$(<"$OAUTH_CLIENT_ID_FILE")" == "$EXPECTED_CLIENT_ID" ]] || fail "client_id is not MetaSheetCanary"
 
+  umask 077
   mkdir -p "$PERSIST_DIR"; chmod 700 "$PERSIST_DIR"
+  resolve_active_env
   local candidate backup
   candidate="$(mktemp "${PERSIST_DIR}/.app.staging.env.XXXXXX")"; cleanup_files+=("$candidate")
   backup="${PERSIST_DIR}/app.staging.env.backup-${RUN_STAMP}"
@@ -275,6 +487,7 @@ action_prepare() {
   if ! restart_backend \
     || [[ "$(deployed_sha)" != "$DEPLOY_SHA" ]] \
     || [[ "$(lifecycle_all_off)" != true ]] \
+    || is_true "$(container_value DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED)" \
     || [[ "$(backend_health)" != true ]] \
     || [[ "$(value_matches DINGTALK_CLIENT_ID "$EXPECTED_CLIENT_ID")" != true ]] \
     || ! container_secret_matches_file DINGTALK_CLIENT_SECRET "$OAUTH_CLIENT_SECRET_FILE" \

@@ -32,6 +32,9 @@ const CREATOR_C = `oapi_cmt_creator_${TS}` // has comments:read RBAC + multitabl
 const CREATOR_M = `oapi_cmt_nombac_${TS}`  // has multitable:read, NOT comments RBAC → 403 (rbacGuard)
 const CREATOR_N = `oapi_cmt_noread_${TS}`  // has comments:read but NO sheet read → 403 (G-8 sheet-visibility gate)
 const SHEET = `oapi_cmt_sheet_${TS}`
+// The comment routes now refuse a sheet that does not exist or was soft-deleted (404, after the capability
+// 403), so the fixture must create a LIVE sheet instead of addressing a made-up id.
+const BASE = `oapi_cmt_base_${TS}`
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 
@@ -74,6 +77,8 @@ describeIfDatabase('OAPI-1 comments:read API-token routes (real DB, full server)
              VALUES ($1,$2,$3,'x','member',$4::jsonb, TRUE, FALSE)
              ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions`,
       [CREATOR_N, `${CREATOR_N}@t.local`, 'CmtNoRead', JSON.stringify(['comments:read'])])
+    await q(`INSERT INTO meta_bases (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, [BASE, 'OAPI-1 Comments Base'])
+    await q(`INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [SHEET, BASE, 'OAPI-1 Comments Sheet'])
 
     const svc = new ApiTokenService(db)
     tokCommentsC = (await svc.createToken(CREATOR_C, { name: 'c-read', scopes: ['comments:read'] })).plainTextToken
@@ -92,6 +97,9 @@ describeIfDatabase('OAPI-1 comments:read API-token routes (real DB, full server)
   afterAll(async () => {
     await db.deleteFrom('multitable_api_tokens').where('created_by', 'in', [CREATOR_C, CREATOR_M, CREATOR_N]).execute().catch(() => {})
     await q('DELETE FROM users WHERE id = ANY($1)', [[CREATOR_C, CREATOR_M, CREATOR_N]]).catch(() => {})
+    await q('DELETE FROM meta_comments WHERE spreadsheet_id = $1', [SHEET]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
     if (server) await server.stop()
   })
 

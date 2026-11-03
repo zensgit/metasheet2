@@ -1,5 +1,9 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // O2 / R-11 — the `/stock-prep` confirmation-queue workbench PERMISSION MATRIX.
 //
 // R-11 (decision-register.md) approves the vocabulary `stock-prep:read | :operate | :admin` with a
@@ -39,6 +43,9 @@
 //        stock-prep operator tier for ONE frozen action id (reconcile joined in round-2 C13); only
 //        mvp-persist did not move and still refuses it; the split is not a wildcard over the
 //        table-action namespace; and every refusal still costs no host work
+//   M-12 (S2 fix round 1; S4) the five project-target routes with the switch ON: gate cells refused
+//        by the gate, pass cells served a real 2xx (create 201, read 200, list 200; S4: archive of
+//        an active row 200, restore of an archived row 200 — each with its typed confirmation)
 //   M-11 W4 THE TENANT-CLAIM HARD DOOR, over the whole manifest: with
 //        MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED armed, the capabilities whose tenancy the shared
 //        helpers decide refuse a CARRIED tenant (403 OPERATOR_SCOPE_TENANT_REQUIRED, zero host work,
@@ -50,6 +57,7 @@
 // touch is stubbed to throw.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const fs = require('node:fs')
 const path = require('node:path')
 
@@ -63,8 +71,10 @@ const {
   STOCK_PREP_OPERATE,
   STOCK_PREP_PERMISSION_CODES,
   STOCK_PREP_PERMISSION_DESCRIPTORS,
+  STOCK_PREP_PULL,
   STOCK_PREP_RAIL_GATES,
   STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+  STOCK_PREP_RAIL_GATE_PULL,
   STOCK_PREP_RAIL_GATE_ROUTE,
   STOCK_PREP_RAIL_GROUPS,
   STOCK_PREP_READ,
@@ -115,6 +125,13 @@ const OPERATOR_CONFIRM = Object.freeze({ id: 'u_op_confirm', tenantId: TENANT_ID
 const OPERATOR_ORPHAN_OPERATE = Object.freeze({ id: 'u_op_orphan', tenantId: TENANT_ID, permissions: [STOCK_PREP_OPERATE] })
 const WORKBENCH_ADMIN = Object.freeze({ id: 'u_wb_admin', tenantId: TENANT_ID, permissions: [STOCK_PREP_ADMIN] })
 const PLATFORM_ADMIN = Object.freeze({ id: 'u_admin', tenantId: TENANT_ID, roles: ['admin'], permissions: ['integration:admin'] })
+// R-33 (2026-10-08): the 拉取人员 — read + operate + pull. The pull-bom routes are not manifest
+// members (see the operator-pull-gate suite); since S2 (R-36) the manifest carries pull-tier
+// capabilities — `projectTarget.create`, and since S4 (R-38) `projectTarget.archive` /
+// `projectTarget.restore` — so this actor answers as `operatorConfirm` plus exactly those three.
+const PULLER = Object.freeze({ id: 'u_puller', tenantId: TENANT_ID, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] })
+// The DEGENERATE pull grant: pull alone. Must confer nothing — it is a pull code, not a value code.
+const PULL_ORPHAN = Object.freeze({ id: 'u_pull_orphan', tenantId: TENANT_ID, permissions: [STOCK_PREP_PULL] })
 
 function permissionsOf(user) {
   if (!user) return []
@@ -139,7 +156,9 @@ function inertService(methods) {
 
 function baseServices() {
   return {
-    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
+    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
     adapterRegistry: inertService(['createAdapter', 'listAdapterKinds']),
     pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
     pipelineRunner: inertService(['runPipeline']),
@@ -232,7 +251,7 @@ function mount({
       },
       multitable: { provisioning: countedProvisioning, records: countedRecords },
     },
-    storage: new Map(),
+    storage: consumableMap({ durable: false }),
     config: {},
   }
   const services = baseServices()
@@ -262,7 +281,7 @@ function mount({
   }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services,
+    services: withRefreshGovernance(services),
     logger: { info() {}, warn() {}, error() {} },
   })
   return {
@@ -346,6 +365,58 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   // read and then 404s downstream (the shared mount()'s provisioning knows only the LEDGER object),
   // which is exactly the "gate let it through, something else happened" case M-01 measures.
   'confirmationQueue.projectBoard': () => ({ params: { projectNo: PROJECT_NO } }),
+  // 一个项目一张备料表 (S2, R-36). The shared mount() leaves MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+  // unset, so a 'pass' actor lands PAST the gate on 404 STOCK_PREPARATION_PROJECT_SHEETS_DISABLED —
+  // a refusal by CONFIG, not by permission (the routes check the gate first, the switch second), which
+  // is exactly the "gate let it through, something else happened" case M-01 measures. The routes
+  // themselves, switch on, are driven tier by tier in stock-preparation-project-target-routes.test.cjs.
+  'projectTarget.read': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'projectTarget.create': () => ({ params: { projectNo: PROJECT_NO }, body: {} }),
+  'projectTarget.list': () => ({ query: {} }),
+  // S4 (R-38): the lifecycle routes carry their typed confirmation, so a 'pass' actor lands on the
+  // switch-off 404 for the same reason the three above do — not on a 400 about the body.
+  'projectTarget.archive': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO } }),
+  'projectTarget.restore': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO } }),
+  // PR B (R-53 / R-54): the pilot read and the typed-confirmation enable — ADMIN; past the gate they land
+  // on the same switch-off 404 (gate first, switch second). Switch on, tier by tier, in
+  // stock-preparation-pilot-routes.test.cjs; the read also joins M-12 below.
+  'projectTarget.pilotRead': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'projectTarget.pilotEnable': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO } }),
+  // 人工补充行 B4 (R-68): the switch read (PULL) and the typed-confirmation set (ADMIN); past the gate they land on the
+  // same switch-off 404 (gate first, switch second), and the set carries a well-formed body so a 'pass' cell never
+  // meets a 400 that could mask the gate. Switch on, tier by tier, in stock-preparation-manual-rows-switch-routes.test.cjs;
+  // the read also joins M-12 below.
+  'projectTarget.manualRowsRead': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'projectTarget.manualRowsSet': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, policy: 'disabled' } }),
+  // PR-4 (R-59): the six refresh routes. Well-formed shapes, so a 'pass' cell reaches the route's own answer
+  // (an unconfigured action / no such hold on this bare mount) and never a 400 that could mask the gate.
+  'refresh.holds': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'refresh.evidence': () => ({ params: { projectNo: PROJECT_NO, holdId: 'hold_synthetic' }, query: {} }),
+  'refresh.keep': () => ({ params: { projectNo: PROJECT_NO, holdId: 'hold_synthetic' }, body: { confirmProjectNo: PROJECT_NO } }),
+  'refresh.confirm': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, holdId: 'hold_synthetic', holdFingerprint: 'a'.repeat(64), comparisonFingerprint: 'b'.repeat(64), evidenceFingerprint: 'c'.repeat(64), candidateId: 'd'.repeat(64), readReceipt: 'e'.repeat(32), basis: { kind: 'puller_confirmed_same_demand' }, acknowledge: { historyUnknown: true } } }),
+  'refresh.continuation': () => ({ params: { projectNo: PROJECT_NO, id: 'cont_synthetic' }, query: {} }),
+  'refresh.end': () => ({ params: { projectNo: PROJECT_NO, id: 'cont_synthetic' }, body: { confirmProjectNo: PROJECT_NO, revision: 1, outcome: 'escalate_special_repair' } }),
+  // PR-8 (R-63): the three change-plan routes, PULL tier. Well-formed shapes (a 'pass' cell reaches the route's own
+  // answer on this bare mount, never a 400 that could mask the gate).
+  'refresh.changePlan': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'refresh.changePlanConfirm': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, holdIds: ['hold_synthetic'], holdSetFingerprint: 'a'.repeat(64), planFingerprint: 'b'.repeat(64), sourceContentDigest: 'c'.repeat(32), readReceipt: 'e'.repeat(32) } }),
+  'refresh.reviewComplete': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, changePlanId: 'chp_synthetic', contentDigest: 'd'.repeat(64), conclusion: 'handled', readReceipt: 'e'.repeat(32) } }),
+  // S3 (R-37): the project-fields pair and the overview refresh — OPERATE, and past the gate they land
+  // on the same switch-off 404 (gate first, switch second, body third). The PUT carries one whitelisted
+  // key so a switch-ON mount (M-12) is a real 200 rather than a 422 about an empty patch.
+  'projectFields.read': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'projectFields.update': () => ({ params: { projectNo: PROJECT_NO }, body: { note: 'synthetic note' } }),
+  'projectOverview.refresh': () => ({ body: {} }),
+  // S3 fix round 1 (R6): the PULL-tier overview ensure — an empty body, like the create.
+  'projectOverview.ensure': () => ({ body: {} }),
+  // S5b (R-39) 「成员与权限」. The shared mount() leaves STOCK_PREP_MEMBERS_PAGE_ENABLED unset and injects no
+  // members port, so a 'pass' actor lands PAST the gate on 404 STOCK_PREP_MEMBERS_PAGE_DISABLED — a refusal
+  // by CONFIG after the WORKBENCH_ADMIN gate, exactly the "gate let it through, something else happened"
+  // case M-01 measures. Switch on, tier by tier, in stock-preparation-members-routes.test.cjs.
+  'members.read': () => ({ query: {} }),
+  'members.customRoleCreate': () => ({ body: { name: 'syn-role', permissionCodes: [STOCK_PREP_READ] } }),
+  'members.customRoleUpdate': () => ({ params: { roleId: 'stock-prep_c_0a1b2c3d' }, body: { name: 'syn-role' } }),
+  'members.customRoleProjectTargets': () => ({ params: { roleId: 'stock-prep_c_0a1b2c3d' }, body: { projectNos: [PROJECT_NO] } }),
 })
 
 async function callCapability(routes, capability, user, extra = {}) {
@@ -383,6 +454,32 @@ const MATRIX = Object.freeze({
     'handoff.read': 'gate',
     'handoff.advance': 'gate',
     'confirmationQueue.projectBoard': 'gate',
+    'projectTarget.read': 'gate',
+    'projectTarget.create': 'gate',
+    'projectTarget.list': 'gate',
+    'projectTarget.archive': 'gate',
+    'projectTarget.restore': 'gate',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
+    'projectTarget.manualRowsRead': 'gate',
+    'projectTarget.manualRowsSet': 'gate',
+    'refresh.holds': 'gate',
+    'refresh.evidence': 'gate',
+    'refresh.keep': 'gate',
+    'refresh.confirm': 'gate',
+    'refresh.continuation': 'gate',
+    'refresh.end': 'gate',
+    'refresh.changePlan': 'gate',
+    'refresh.changePlanConfirm': 'gate',
+    'refresh.reviewComplete': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
+    'projectOverview.ensure': 'gate',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -396,6 +493,32 @@ const MATRIX = Object.freeze({
     'handoff.read': 'gate',
     'handoff.advance': 'gate',
     'confirmationQueue.projectBoard': 'gate',
+    'projectTarget.read': 'gate',
+    'projectTarget.create': 'gate',
+    'projectTarget.list': 'gate',
+    'projectTarget.archive': 'gate',
+    'projectTarget.restore': 'gate',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
+    'projectTarget.manualRowsRead': 'gate',
+    'projectTarget.manualRowsSet': 'gate',
+    'refresh.holds': 'gate',
+    'refresh.evidence': 'gate',
+    'refresh.keep': 'gate',
+    'refresh.confirm': 'gate',
+    'refresh.continuation': 'gate',
+    'refresh.end': 'gate',
+    'refresh.changePlan': 'gate',
+    'refresh.changePlanConfirm': 'gate',
+    'refresh.reviewComplete': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
+    'projectOverview.ensure': 'gate',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -409,6 +532,32 @@ const MATRIX = Object.freeze({
     'handoff.read': 'gate',
     'handoff.advance': 'gate',
     'confirmationQueue.projectBoard': 'gate',
+    'projectTarget.read': 'gate',
+    'projectTarget.create': 'gate',
+    'projectTarget.list': 'gate',
+    'projectTarget.archive': 'gate',
+    'projectTarget.restore': 'gate',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
+    'projectTarget.manualRowsRead': 'gate',
+    'projectTarget.manualRowsSet': 'gate',
+    'refresh.holds': 'gate',
+    'refresh.evidence': 'gate',
+    'refresh.keep': 'gate',
+    'refresh.confirm': 'gate',
+    'refresh.continuation': 'gate',
+    'refresh.end': 'gate',
+    'refresh.changePlan': 'gate',
+    'refresh.changePlanConfirm': 'gate',
+    'refresh.reviewComplete': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
+    'projectOverview.ensure': 'gate',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -422,6 +571,32 @@ const MATRIX = Object.freeze({
     'handoff.read': 'pass',
     'handoff.advance': 'gate',
     'confirmationQueue.projectBoard': 'gate',
+    'projectTarget.read': 'gate',
+    'projectTarget.create': 'gate',
+    'projectTarget.list': 'gate',
+    'projectTarget.archive': 'gate',
+    'projectTarget.restore': 'gate',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
+    'projectTarget.manualRowsRead': 'gate',
+    'projectTarget.manualRowsSet': 'gate',
+    'refresh.holds': 'gate',
+    'refresh.evidence': 'gate',
+    'refresh.keep': 'gate',
+    'refresh.confirm': 'gate',
+    'refresh.continuation': 'gate',
+    'refresh.end': 'gate',
+    'refresh.changePlan': 'gate',
+    'refresh.changePlanConfirm': 'gate',
+    'refresh.reviewComplete': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
+    'projectOverview.ensure': 'gate',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -435,6 +610,32 @@ const MATRIX = Object.freeze({
     'handoff.read': 'pass',
     'handoff.advance': 'pass',
     'confirmationQueue.projectBoard': 'pass',
+    'projectTarget.read': 'pass',
+    'projectTarget.create': 'gate',
+    'projectTarget.list': 'pass',
+    'projectTarget.archive': 'gate',
+    'projectTarget.restore': 'gate',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
+    'projectTarget.manualRowsRead': 'gate',
+    'projectTarget.manualRowsSet': 'gate',
+    'refresh.holds': 'gate',
+    'refresh.evidence': 'gate',
+    'refresh.keep': 'gate',
+    'refresh.confirm': 'gate',
+    'refresh.continuation': 'gate',
+    'refresh.end': 'gate',
+    'refresh.changePlan': 'gate',
+    'refresh.changePlanConfirm': 'gate',
+    'refresh.reviewComplete': 'gate',
+    'projectFields.read': 'pass',
+    'projectFields.update': 'pass',
+    'projectOverview.refresh': 'pass',
+    'projectOverview.ensure': 'gate',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -448,6 +649,32 @@ const MATRIX = Object.freeze({
     'handoff.read': 'gate',
     'handoff.advance': 'gate',
     'confirmationQueue.projectBoard': 'gate',
+    'projectTarget.read': 'gate',
+    'projectTarget.create': 'gate',
+    'projectTarget.list': 'gate',
+    'projectTarget.archive': 'gate',
+    'projectTarget.restore': 'gate',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
+    'projectTarget.manualRowsRead': 'gate',
+    'projectTarget.manualRowsSet': 'gate',
+    'refresh.holds': 'gate',
+    'refresh.evidence': 'gate',
+    'refresh.keep': 'gate',
+    'refresh.confirm': 'gate',
+    'refresh.continuation': 'gate',
+    'refresh.end': 'gate',
+    'refresh.changePlan': 'gate',
+    'refresh.changePlanConfirm': 'gate',
+    'refresh.reviewComplete': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
+    'projectOverview.ensure': 'gate',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -461,6 +688,32 @@ const MATRIX = Object.freeze({
     'handoff.read': 'pass',
     'handoff.advance': 'pass',
     'confirmationQueue.projectBoard': 'pass',
+    'projectTarget.read': 'pass',
+    'projectTarget.create': 'pass',
+    'projectTarget.list': 'pass',
+    'projectTarget.archive': 'pass',
+    'projectTarget.restore': 'pass',
+    'projectTarget.pilotRead': 'pass',
+    'projectTarget.pilotEnable': 'pass',
+    'projectTarget.manualRowsRead': 'pass',
+    'projectTarget.manualRowsSet': 'pass',
+    'refresh.holds': 'pass',
+    'refresh.evidence': 'pass',
+    'refresh.keep': 'pass',
+    'refresh.confirm': 'pass',
+    'refresh.continuation': 'pass',
+    'refresh.end': 'pass',
+    'refresh.changePlan': 'pass',
+    'refresh.changePlanConfirm': 'pass',
+    'refresh.reviewComplete': 'pass',
+    'projectFields.read': 'pass',
+    'projectFields.update': 'pass',
+    'projectOverview.refresh': 'pass',
+    'projectOverview.ensure': 'pass',
+    'members.read': 'pass',
+    'members.customRoleCreate': 'pass',
+    'members.customRoleUpdate': 'pass',
+    'members.customRoleProjectTargets': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -474,8 +727,116 @@ const MATRIX = Object.freeze({
     'handoff.read': 'pass',
     'handoff.advance': 'pass',
     'confirmationQueue.projectBoard': 'pass',
+    'projectTarget.read': 'pass',
+    'projectTarget.create': 'pass',
+    'projectTarget.list': 'pass',
+    'projectTarget.archive': 'pass',
+    'projectTarget.restore': 'pass',
+    'projectTarget.pilotRead': 'pass',
+    'projectTarget.pilotEnable': 'pass',
+    'projectTarget.manualRowsRead': 'pass',
+    'projectTarget.manualRowsSet': 'pass',
+    'refresh.holds': 'pass',
+    'refresh.evidence': 'pass',
+    'refresh.keep': 'pass',
+    'refresh.confirm': 'pass',
+    'refresh.continuation': 'pass',
+    'refresh.end': 'pass',
+    'refresh.changePlan': 'pass',
+    'refresh.changePlanConfirm': 'pass',
+    'refresh.reviewComplete': 'pass',
+    'projectFields.read': 'pass',
+    'projectFields.update': 'pass',
+    'projectOverview.refresh': 'pass',
+    'projectOverview.ensure': 'pass',
+    'members.read': 'pass',
+    'members.customRoleCreate': 'pass',
+    'members.customRoleUpdate': 'pass',
+    'members.customRoleProjectTargets': 'pass',
     'confirmationQueue.ensure': 'pass',
     'confirmationQueue.reconcile': 'pass',
+  }),
+  // R-33 / R-36 / R-38: the 拉取人员 answers as the confirming operator plus the three pull-tier
+  // members of this manifest — the project-sheet create (S2), archive and restore (S4). The pull-bom
+  // routes stay non-members.
+  puller: Object.freeze({
+    'confirmationQueue.readiness': 'pass',
+    'confirmationQueue.list': 'pass',
+    'confirmationQueue.valueEntry': 'pass',
+    'confirmationQueue.confirm': 'pass',
+    'confirmationQueue.export': 'pass',
+    'confirmationQueue.projectDirectory': 'pass',
+    'handoff.read': 'pass',
+    'handoff.advance': 'pass',
+    'confirmationQueue.projectBoard': 'pass',
+    'projectTarget.read': 'pass',
+    'projectTarget.create': 'pass',
+    'projectTarget.list': 'pass',
+    'projectTarget.archive': 'pass',
+    'projectTarget.restore': 'pass',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
+    // 人工补充行 B4 fix round 1 (OQ4): the 拉取人员 READS the switch and the last pull's reminder; only the SET is ADMIN.
+    'projectTarget.manualRowsRead': 'pass',
+    'projectTarget.manualRowsSet': 'gate',
+    'refresh.holds': 'pass',
+    'refresh.evidence': 'pass',
+    'refresh.keep': 'pass',
+    'refresh.confirm': 'pass',
+    'refresh.continuation': 'pass',
+    'refresh.end': 'pass',
+    'refresh.changePlan': 'pass',
+    'refresh.changePlanConfirm': 'pass',
+    'refresh.reviewComplete': 'pass',
+    'projectFields.read': 'pass',
+    'projectFields.update': 'pass',
+    'projectOverview.refresh': 'pass',
+    'projectOverview.ensure': 'pass',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
+    'confirmationQueue.ensure': 'gate',
+    'confirmationQueue.reconcile': 'gate',
+  }),
+  orphanPull: Object.freeze({
+    'confirmationQueue.readiness': 'gate',
+    'confirmationQueue.list': 'gate',
+    'confirmationQueue.valueEntry': 'gate',
+    'confirmationQueue.confirm': 'gate',
+    'confirmationQueue.export': 'gate',
+    'confirmationQueue.projectDirectory': 'gate',
+    'handoff.read': 'gate',
+    'handoff.advance': 'gate',
+    'confirmationQueue.projectBoard': 'gate',
+    'projectTarget.read': 'gate',
+    'projectTarget.create': 'gate',
+    'projectTarget.list': 'gate',
+    'projectTarget.archive': 'gate',
+    'projectTarget.restore': 'gate',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
+    'projectTarget.manualRowsRead': 'gate',
+    'projectTarget.manualRowsSet': 'gate',
+    'refresh.holds': 'gate',
+    'refresh.evidence': 'gate',
+    'refresh.keep': 'gate',
+    'refresh.confirm': 'gate',
+    'refresh.continuation': 'gate',
+    'refresh.end': 'gate',
+    'refresh.changePlan': 'gate',
+    'refresh.changePlanConfirm': 'gate',
+    'refresh.reviewComplete': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
+    'projectOverview.ensure': 'gate',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
+    'confirmationQueue.ensure': 'gate',
+    'confirmationQueue.reconcile': 'gate',
   }),
 })
 
@@ -488,6 +849,8 @@ const ACTORS = Object.freeze({
   orphanOperate: OPERATOR_ORPHAN_OPERATE,
   workbenchAdmin: WORKBENCH_ADMIN,
   platformAdmin: PLATFORM_ADMIN,
+  puller: PULLER,
+  orphanPull: PULL_ORPHAN,
 })
 
 async function matrixGoldenHolds() {
@@ -657,9 +1020,12 @@ async function theConfirmAuditRowCarriesTheProjectFromTheLedger() {
       },
     })
     assert.equal(res.statusCode, 500, `confirm projectId: a dead records service still fails the request, got ${JSON.stringify(res.body)}`)
-    // The failure the CALLER sees is the downstream read's, verbatim — the soft lookup contributed
-    // no error of its own, which is the difference between "swallowed" and "hidden".
-    assert.equal(res.body.error.message, 'records service unavailable', JSON.stringify(res.body))
+    // The failure the CALLER sees is the request's own untyped 500 — since the 2026-10-10 values-free
+    // audit that is ONE fixed code with no echo of the downstream text (lib/http-routes.cjs
+    // VALUES_FREE_ROUTE_ERROR_MAPPERS). The soft lookup still contributes no error of its own: the
+    // request failed on the downstream read, and the intent row below is still on the trail.
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_ROUTE_FAILED', JSON.stringify(res.body))
+    assert.ok(!JSON.stringify(res.body).includes('records service unavailable'), 'the downstream text is not echoed')
     assert.equal(auditAppends.length, 1, 'confirm projectId: …and the intent row is STILL on the trail, which is the whole point')
     assert.equal(auditAppends[0].projectId, null, 'confirm projectId: a failed lookup fills nothing rather than blocking')
     assert.equal(auditAppends[0].actor, OPERATOR_CONFIRM.id, 'confirm projectId: the principal is stamped either way')
@@ -714,7 +1080,8 @@ async function platformAdminLosesNothing() {
 async function nobodyGainsAnything() {
   // R-11's zero-automatic mapping, asserted: no pre-existing integration scope becomes a stock-prep
   // scope. These three actors could reach NOTHING here before this change and must reach nothing now.
-  for (const user of [LOGGED_IN, INTEGRATION_READER, INTEGRATION_WRITER]) {
+  // A bare `stock-prep:pull` (R-33) joins them: it is a pull code, and opens nothing in this manifest.
+  for (const user of [LOGGED_IN, INTEGRATION_READER, INTEGRATION_WRITER, PULL_ORPHAN]) {
     for (const capability of STOCK_PREP_WORKBENCH_CAPABILITIES) {
       const { routes } = mount()
       const res = await callCapability(routes, capability, user)
@@ -805,14 +1172,18 @@ async function alignmentHoldsForEverySubsetOfTheVocabulary() {
 //
 // The set is DERIVED from the route source: every handler whose body opens with a
 // `requireAccess(req, STOCK_PREP_…)` gate is, by construction, an operator-facing stock-prep route.
+function handlerBodyInSource(src, handler) {
+  const start = src.indexOf(`    async ${handler}(req, res) {`)
+  const end = src.indexOf('\n    },', start)
+  return src.slice(start, end).replace(/\/\/[^\n]*/g, '')
+}
+
 function stockPrepGatedHandlersInSource(src) {
   const gated = []
   const pattern = /\n {4}async ([A-Za-z0-9_$]+)\(req, res\) \{/g
   let match = pattern.exec(src)
   while (match) {
-    const start = src.indexOf(`    async ${match[1]}(req, res) {`)
-    const end = src.indexOf('\n    },', start)
-    const body = src.slice(start, end).replace(/\/\/[^\n]*/g, '')
+    const body = handlerBodyInSource(src, match[1])
     if (/requireAccess\(req,\s*STOCK_PREP_[A-Z_]+\)/.test(body)) gated.push(match[1])
     match = pattern.exec(src)
   }
@@ -829,8 +1200,22 @@ function stockPrepGatedHandlersInSource(src) {
  * confirmation-queue view that R-11's alignment is measured against: its consumer is the 安装/体检
  * page, whose own gate is `canOpenStockPrepInstallView`. Putting it in this manifest would make the
  * control-for-control alignment assertion measure a control that is not on that DOM.
+ *
+ * `stockPreparationManagedTableRelabel` (「把系统表的英文表头改成中文」, 客户反馈 2026-09-24 #4a) is exempt
+ * for the SAME reason: its one control lives on that same 安装/体检 page, not on the confirmation
+ * queue, and it renders under `canOpenStockPrepInstallView` — which is exactly
+ * `satisfiesStockPrepAccess(…, STOCK_PREP_ADMIN)`, the route's own gate, so R-11's visible ==
+ * actionable holds for it on its own page (pinned by the web suite
+ * StockPreparationManagedTableRelabelPanel.spec.ts and by the plugin suite
+ * stock-preparation-managed-table-relabel.test.cjs L1/L2).
  */
-const MANIFEST_EXEMPT_STOCK_PREP_HANDLERS = Object.freeze(['stockPreparationPreflight'])
+const MANIFEST_EXEMPT_STOCK_PREP_HANDLERS = Object.freeze([
+  'stockPreparationPreflight',
+  'stockPreparationManagedTableRelabel',
+  // (S1's three project-sheet handlers were exempt here until S2 shipped their controls; S2 / R-36
+  // moved them into STOCK_PREP_WORKBENCH_CAPABILITIES as projectTarget.read / .create / .list and
+  // deleted the exemption, as the S1 note required.)
+])
 
 function everyStockPrepGatedRouteIsInTheManifest() {
   const gated = stockPrepGatedHandlersInSource(HTTP_ROUTES_SOURCE)
@@ -876,6 +1261,52 @@ async function orphanOperateGrantConfersNothing() {
     const res = await callCapability(routes, capability, OPERATOR_ORPHAN_OPERATE)
     assert.ok(refusedByGate(res), `M-05: operate-without-read must be refused ${capability.capability}`)
   }
+  // R-33: the PULL tier is the same shape one rung up — pull without the operate conjunction is
+  // nothing, and the pull code satisfies no other code.
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_PULL], STOCK_PREP_PULL), false, 'M-05: pull alone does not satisfy pull')
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_PULL, STOCK_PREP_READ], STOCK_PREP_PULL), false, 'M-05: pull without operate does not satisfy pull')
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_PULL, STOCK_PREP_OPERATE], STOCK_PREP_PULL), false, 'M-05: pull without read does not satisfy pull')
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_PULL, STOCK_PREP_OPERATE, STOCK_PREP_READ], STOCK_PREP_PULL), true, 'M-05: the 拉取人员 satisfies pull')
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_READ, STOCK_PREP_OPERATE], STOCK_PREP_PULL), false, 'M-05: the floor operator does not satisfy pull')
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_ADMIN], STOCK_PREP_PULL), true, 'M-05: stock-prep:admin satisfies pull through the ladder')
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_PULL], STOCK_PREP_READ), false, 'M-05: pull alone does not satisfy read')
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_PULL], STOCK_PREP_OPERATE), false, 'M-05: pull alone does not satisfy operate')
+  assert.deepEqual(grantedStockPrepCapabilities([STOCK_PREP_PULL]), [], 'M-05: pull alone renders nothing')
+  // S2 (R-36) / S4 (R-38): the pull code adds EXACTLY the project-sheet create, archive and restore to
+  // the operator tier on this manifest — the three PULL-gated members — and nothing else.
+  assert.deepEqual(
+    grantedStockPrepCapabilities([STOCK_PREP_PULL, STOCK_PREP_OPERATE, STOCK_PREP_READ]).sort(),
+    [
+      ...grantedStockPrepCapabilities([STOCK_PREP_OPERATE, STOCK_PREP_READ]),
+      // S3 fix round 1 (R6): creating the read-only overview is provisioning — the PULL tier's.
+      'projectOverview.ensure',
+      'projectTarget.archive',
+      'projectTarget.create',
+      'projectTarget.restore',
+      // Batch-refresh step 4 PR-4 (R-59, D-14): the puller confirms — the six refresh routes are PULL members.
+      'refresh.confirm',
+      'refresh.continuation',
+      'refresh.end',
+      'refresh.evidence',
+      'refresh.holds',
+      'refresh.keep',
+      // Batch-refresh step 5 PR-8 (R-63): the change plan — the puller confirms the plan and reviews the change.
+      'refresh.changePlan',
+      'refresh.changePlanConfirm',
+      'refresh.reviewComplete',
+      // 人工补充行 B4 fix round 1 (OQ4): the puller reads the switch and the last pull's reminder (the SET stays ADMIN).
+      'projectTarget.manualRowsRead',
+    ].sort(),
+    'M-05: on this manifest the pull code adds exactly projectTarget.create / .archive / .restore / .manualRowsRead, projectOverview.ensure, the six refresh routes and the three change-plan routes to the operator tier',
+  )
+  // …and the floor operator holds none of the five (archive / restore are the 拉取人员's, Q2; the reminder is for the
+  // people who pull, OQ4).
+  for (const pullOnly of ['projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore', 'projectTarget.manualRowsRead']) {
+    assert.ok(
+      !grantedStockPrepCapabilities([STOCK_PREP_OPERATE, STOCK_PREP_READ]).includes(pullOnly),
+      `M-05: the floor operator (read + operate) is not granted ${pullOnly}`,
+    )
+  }
   // And the conjunction is the ONLY thing standing between that grant and a misaligned actor: adding
   // read turns it into the full operator tier.
   assert.deepEqual(
@@ -899,6 +1330,16 @@ async function orphanOperateGrantConfersNothing() {
       // both appear here and neither appears for the orphan-operate grant above.
       'handoff.advance',
       'handoff.read',
+      // S3 (R-37): the O2(a) project-level columns and the overview refresh are OPERATE (ADR §5) —
+      // the floor sets 负责人 / 备注 / 计划完成 and rebuilds the read-only overview; none of the
+      // three pulls anything or creates a project sheet.
+      'projectFields.read',
+      'projectFields.update',
+      'projectOverview.refresh',
+      // 一个项目一张备料表 (S2, R-36): the floor reads its project's sheet state and the tenant's
+      // registry list (both OPERATE); creating a sheet is PULL and is NOT here.
+      'projectTarget.list',
+      'projectTarget.read',
     ],
     'M-05: operate + read is the full operator tier',
   )
@@ -966,13 +1407,82 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
     [],
     'M-08: no requireAccess gate hand-types a stock-prep token — they reference the frozen constants',
   )
+  // STOCK_PREP_ADMIN joined the set with exactly ONE handler — the 安装/体检 page's
+  // 「把系统表的英文表头改成中文」 relabel (客户反馈 2026-09-24 #4a), manifest-exempt with its reason
+  // above. Any second ADMIN-gated handler must be argued the same way, which is why the exact set
+  // stays pinned here rather than relaxed to "any frozen constant".
   assert.deepEqual(
     gates.identifiers,
-    ['STOCK_PREP_OPERATE', 'STOCK_PREP_READ'],
-    'M-08: exactly the read and operate constants are used as gate expressions',
+    ['STOCK_PREP_ADMIN', 'STOCK_PREP_OPERATE', 'STOCK_PREP_PULL', 'STOCK_PREP_READ'],
+    'M-08: exactly the admin, operate, pull and read constants are used as gate expressions',
+  )
+  // S5b (R-39) added exactly the four 「成员与权限」 handlers, each a manifest member (members.*) whose
+  // plugin gate is necessary and never sufficient: the host's narrow members port re-derives the caller
+  // (platform admin or the admitted stock-prep delegated admin) before anything is read or written.
+  assert.deepEqual(
+    stockPrepGatedHandlersInSource(HTTP_ROUTES_SOURCE).filter((handler) => (
+      /requireAccess\(req,\s*STOCK_PREP_ADMIN\)/.test(handlerBodyInSource(HTTP_ROUTES_SOURCE, handler))
+    )).sort(),
+    [
+      'stockPreparationManagedTableRelabel',
+      'stockPreparationMembersCustomRoleCreate',
+      'stockPreparationMembersCustomRoleProjectTargets',
+      'stockPreparationMembersCustomRoleUpdate',
+      'stockPreparationMembersRead',
+      // PR B (R-53 ② / R-54): the two PILOT handlers — reading a project's pilot state + readiness and
+      // ENABLING the pilot (set-once, no unset). Both manifest members (projectTarget.pilotRead /
+      // .pilotEnable) with controls on 项目备料页; the enable additionally refuses unless every readiness
+      // check passes, bumps the plan generation and holds the sheet write lease around the host stamp.
+      // 人工补充行 B4 (OQ6 / R-68): SETTING the per-sheet switch 「允许人工补充行」 (typed confirmation, one key-column
+      // property through the host's provisioning port, read back) — manifest member projectTarget.manualRowsSet, its
+      // control on the project sync panel. Its READ is the PULL tier (below).
+      'stockPreparationProjectManualRowsSet',
+      'stockPreparationProjectPilotEnable',
+      'stockPreparationProjectPilotGet',
+    ],
+    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler, the four members handlers, the manual-rows switch SET and the two pilot handlers',
+  )
+  // STOCK_PREP_PULL joined the set with the S1 project-sheet CREATE, the named R-11 exception (R-35),
+  // and S4 (R-38) added exactly two more — ARCHIVE and RESTORE, which the owner gave to the 拉取人员
+  // (Q2). The pull-bom split itself is NOT a `requireAccess` gate (it is the `requireTableActionAccess`
+  // disjunction, pinned by the operator-pull-gate suite), so any further PULL-gated handler must be
+  // argued here the way the ADMIN one is. S3 fix round 1 (R6) argues ONE: the overview ENSURE — creating
+  // the read-only overview is provisioning, which R-35 gives to the PULL tier (the OPERATE refresh no
+  // longer provisions anything).
+  assert.deepEqual(
+    stockPrepGatedHandlersInSource(HTTP_ROUTES_SOURCE).filter((handler) => (
+      /requireAccess\(req,\s*STOCK_PREP_PULL\)/.test(handlerBodyInSource(HTTP_ROUTES_SOURCE, handler))
+    )).sort(),
+    [
+      // 人工补充行 B4 fix round 1 (OQ4; R-68): READING the per-sheet switch and the last pull's reminder — the reminder is
+      // on the project sync panel for the people who pull (manifest member projectTarget.manualRowsRead); its `may.set`
+      // still needs the ADMIN tier the SET's gate admits.
+      'stockPreparationProjectManualRowsGet',
+      'stockPreparationProjectOverviewEnsure',
+      'stockPreparationProjectTargetArchive',
+      'stockPreparationProjectTargetCreate',
+      'stockPreparationProjectTargetRestore',
+      // Batch-refresh step 4 PR-4 (design §13 / D-14; R-59): the six refresh routes — the puller's private
+      // hold page, the evidence behind a hold, a relationship's detail, and the three decisions (confirm /
+      // 「暂不处理」 / end). The puller confirms (D-14); all six are manifest members (refresh.*), their tenant
+      // is the host-vouched operator scope at the PULL tier, and every value read is audited before its
+      // response. The gate is applied in the ONE shared context builder (stockPreparationRefreshDecisionContext),
+      // which every handler body calls first.
+      // Batch-refresh step 5 PR-8 (R-63): the change-plan page, its confirm and the review — the same shared context.
+      'stockPreparationRefreshChangePlanConfirm',
+      'stockPreparationRefreshChangePlanCurrent',
+      'stockPreparationRefreshChangeReviewComplete',
+      'stockPreparationRefreshContinuationConfirm',
+      'stockPreparationRefreshContinuationEnd',
+      'stockPreparationRefreshContinuationGet',
+      'stockPreparationRefreshHoldEvidence',
+      'stockPreparationRefreshHoldKeep',
+      'stockPreparationRefreshHolds',
+    ],
+    'M-08: STOCK_PREP_PULL gates exactly the project-sheet create, archive and restore handlers, the manual-rows switch READ, the overview ensure, the six refresh routes and the three change-plan routes',
   )
   // ...and those identifiers really carry the frozen codes (the names alone prove nothing).
-  for (const code of [STOCK_PREP_READ, STOCK_PREP_OPERATE]) {
+  for (const code of [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN]) {
     assert.ok(STOCK_PREP_PERMISSION_CODES.includes(code), `M-08: ${code} is in the frozen vocabulary`)
   }
   // The legacy tokens are untouched: the three-tier integration vocabulary still gates everything else.
@@ -1003,9 +1513,70 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
     path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'src', 'db', 'migrations', 'zzzz20260830100000_add_stock_prep_permissions.ts'),
     'utf8',
   )
-  for (const code of STOCK_PREP_PERMISSION_CODES) {
+  // The three R-11 codes come from the 0830 seed; `stock-prep:pull` (R-33, 2026-10-08) from its own
+  // migration, whose single row must be the descriptor BYTE FOR BYTE (name and description), and
+  // which — like the seed — binds NO role.
+  for (const code of [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN]) {
     assert.ok(migration.includes(`'${code}'`), `M-08: the migration seeds ${code}`)
   }
+  assert.ok(!migration.includes(`'${STOCK_PREP_PULL}'`), 'M-08: the 0830 seed is untouched — pull has its own migration')
+  const pullMigration = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'src', 'db', 'migrations', 'zzzz20261008120000_add_stock_prep_pull_permission.ts'),
+    'utf8',
+  )
+  const pullDescriptor = STOCK_PREP_PERMISSION_DESCRIPTORS.find((descriptor) => descriptor.code === STOCK_PREP_PULL)
+  assert.ok(pullDescriptor, 'M-08: the pull code has a descriptor')
+  assert.ok(
+    pullMigration.includes(`('${STOCK_PREP_PULL}', '${pullDescriptor.name}', '${pullDescriptor.description}')`),
+    'M-08: the pull migration inserts exactly the PULL descriptor row',
+  )
+  assert.match(pullMigration, /INSERT INTO permissions \(code, name, description\)\s+VALUES/, 'M-08: the pull migration uses the raw INSERT … VALUES form the catalogue guard reads')
+  assert.ok(!/INSERT INTO role_permissions/.test(pullMigration), 'M-08: the pull migration grants the code to NO role — roles are site data')
+  for (const code of [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN]) {
+    assert.ok(!pullMigration.includes(`'${code}'`), `M-08: the pull migration touches only its own code, not ${code}`)
+  }
+  assert.equal(
+    (pullMigration.split(/export\s+async\s+function\s+down\b/)[1].match(/DELETE FROM/g) || []).length,
+    3,
+    'M-08: down() removes the pull code from role_permissions, user_permissions and permissions, in FK order',
+  )
+  // The ADMIN description gained the relabel write scope; the seed is ON CONFLICT DO NOTHING, so a
+  // compare-and-set migration carries it to existing rows. Its AFTER text must be the descriptor's,
+  // byte for byte, and its BEFORE text must be exactly what the seed wrote — otherwise the CAS would
+  // match nothing and the role editor would keep describing a read-only tier.
+  const adminDescriptor = STOCK_PREP_PERMISSION_DESCRIPTORS.find((descriptor) => descriptor.code === STOCK_PREP_ADMIN)
+  const descriptionMigration = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'src', 'db', 'migrations', 'zzzz20260927120000_update_stock_prep_admin_permission_description.ts'),
+    'utf8',
+  )
+  // THE CHAIN, pinned link by link: seed → 0927 (relabel) → 1009 (S1 project sheets) → descriptor.
+  // Each compare-and-set's BEFORE must be exactly the previous link's text or it matches nothing
+  // on a real deployment and the role editor keeps describing a tier that no longer exists.
+  const seededAdminDescription = (migration.match(/\('stock-prep:admin', 'Stock Prep Admin', '([^']+)'\)/) || [])[1]
+  assert.ok(seededAdminDescription, 'M-08: the seed row for stock-prep:admin is readable')
+  assert.ok(
+    descriptionMigration.includes(`'${seededAdminDescription}'`),
+    'M-08: the 0927 description migration compare-and-sets FROM exactly the seeded text',
+  )
+  const relabelAdminDescription = (descriptionMigration.match(/STOCK_PREP_ADMIN_DESCRIPTION_AFTER =\s*'([^']+)'/) || [])[1]
+  assert.ok(relabelAdminDescription, 'M-08: the 0927 migration exports its AFTER text')
+  const projectSheetsDescriptionMigration = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'src', 'db', 'migrations', 'zzzz20261009120000_update_stock_prep_admin_permission_description_project_sheets.ts'),
+    'utf8',
+  )
+  assert.ok(
+    projectSheetsDescriptionMigration.includes(`STOCK_PREP_ADMIN_DESCRIPTION_BEFORE =\n  '${relabelAdminDescription}'`),
+    'M-08: the S1 description migration compare-and-sets FROM exactly the 0927 text',
+  )
+  assert.ok(
+    projectSheetsDescriptionMigration.includes(`STOCK_PREP_ADMIN_DESCRIPTION_AFTER =\n  '${adminDescriptor.description}'`),
+    'M-08: the S1 description migration writes exactly the ADMIN descriptor text',
+  )
+  assert.match(adminDescriptor.description, /relabel/, 'M-08: the ADMIN description names the relabel write scope')
+  // R-35: "no provisioning" is GONE from the description — the ladder short-circuits ADMIN into
+  // PULL, and PULL may create one per-project sheet — and the exception is named in its place.
+  assert.ok(!/no provisioning/.test(adminDescriptor.description), 'M-08: the ADMIN description no longer claims "no provisioning"')
+  assert.match(adminDescriptor.description, /per-project stock-preparation sheet/, 'M-08: the ADMIN description names the R-35 provisioning exception')
   // R-11: zero holders. The migration must NOT bind any role to these codes.
   assert.ok(
     !/INSERT INTO role_permissions/.test(migration),
@@ -1145,10 +1716,11 @@ async function projectSyncRefusesTheTiersItAlwaysRefused() {
   const { routes, hostCallCount } = mount()
   const before = hostCallCount()
 
-  // Everything BELOW the operator tier, refused on all four routes exactly as before. The orphan
-  // operate grant is in this list on purpose: the tier is a conjunction, so the split confers
-  // nothing on it either.
-  for (const user of [OPERATOR_READ, OPERATOR_ORPHAN_OPERATE, LOGGED_IN, ANONYMOUS]) {
+  // Everything BELOW the pull tier, refused on all four routes. The orphan operate grant is in this
+  // list on purpose: the tier is a conjunction, so the split confers nothing on it either. Since
+  // R-33 (2026-10-08) the CONFIRMING OPERATOR (read + operate, no pull) is below the pull tier too —
+  // that is the reversal — and so is a bare `stock-prep:pull`.
+  for (const user of [OPERATOR_READ, OPERATOR_ORPHAN_OPERATE, OPERATOR_CONFIRM, PULL_ORPHAN, LOGGED_IN, ANONYMOUS]) {
     for (const route of PROJECT_SYNC_ROUTES) {
       const res = await call(routes, 'POST', route.path, {
         user,
@@ -1166,7 +1738,7 @@ async function projectSyncRefusesTheTiersItAlwaysRefused() {
   // WHAT STAYED: mvp-persist alone. Reconcile moved with the rest of the pull (C13) because it is
   // the step that fills the queue an operator is sent to; mvp-persist writes the snapshot archive,
   // whose absence costs an operator nothing on their own run, and the page says so in words.
-  for (const user of [OPERATOR_CONFIRM, WORKBENCH_ADMIN]) {
+  for (const user of [PULLER, WORKBENCH_ADMIN]) {
     for (const route of PROJECT_SYNC_ROUTES.filter((entry) => !entry.operatorMayRun)) {
       const res = await call(routes, 'POST', route.path, {
         user,
@@ -1182,7 +1754,7 @@ async function projectSyncRefusesTheTiersItAlwaysRefused() {
   }
 
   // M-10c: on any OTHER table action the operator is refused on all four, split included.
-  for (const user of [OPERATOR_CONFIRM, WORKBENCH_ADMIN]) {
+  for (const user of [PULLER, WORKBENCH_ADMIN]) {
     for (const route of PROJECT_SYNC_ROUTES) {
       const res = await call(routes, 'POST', route.path, {
         user,
@@ -1268,6 +1840,46 @@ const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
   'confirmationQueue.projectBoard',
   'handoff.read',
   'handoff.advance',
+  // 一个项目一张备料表 (S2): all three derive the tenant through `resolveOperatorValueScope`.
+  'projectTarget.read',
+  'projectTarget.create',
+  'projectTarget.list',
+  // S4 (R-38): archive / restore resolve the same host-vouched scope.
+  'projectTarget.archive',
+  'projectTarget.restore',
+  // S3 (R-37): the project-level fields (read / update) and the overview refresh — and, fix round 1, the
+  // PULL-tier overview ensure — all derive the tenant through `resolveOperatorValueScope`.
+  'projectFields.read',
+  'projectFields.update',
+  'projectOverview.refresh',
+  'projectOverview.ensure',
+  // PR-4 (R-59): the six refresh routes resolve the host-vouched operator scope at the PULL tier, before any
+  // host work; a carried tenant is already refused with the door open.
+  'refresh.holds',
+  'refresh.evidence',
+  'refresh.keep',
+  'refresh.confirm',
+  'refresh.continuation',
+  'refresh.end',
+  // PR-8 (R-63): the three change-plan routes share that context (the same PULL-tier host-vouched scope).
+  'refresh.changePlan',
+  'refresh.changePlanConfirm',
+  'refresh.reviewComplete',
+  // PR B (R-53 / R-54): both pilot routes resolve the host-vouched operator scope (never a header-fillable
+  // tenant), so the door adds nothing to them.
+  'projectTarget.pilotRead',
+  'projectTarget.pilotEnable',
+  // 人工补充行 B4 (R-68): both switch routes resolve the host-vouched operator scope (never a header-fillable tenant),
+  // so the door adds nothing to them.
+  'projectTarget.manualRowsRead',
+  'projectTarget.manualRowsSet',
+  // S5b (R-39): three of the four touch no tenant at all (roles and memberships are platform-global and the
+  // host port scopes visibility by the delegation scope); the project-sheet add resolves the host-vouched
+  // operator scope like the project-target routes above. None runs a shared tenant helper.
+  'members.read',
+  'members.customRoleCreate',
+  'members.customRoleUpdate',
+  'members.customRoleProjectTargets',
 ])
 
 function outcomeOf(res) {
@@ -1445,10 +2057,12 @@ function theRailVocabularyAndTheLandingRuleHold() {
   // directory union 今天要处理 reads plus the selected project's own board, and a `stock-prep:read`
   // queue watcher must not be handed a page of project numbers.
   const work = STOCK_PREP_RAIL_GROUPS.find((group) => group.group === 'work')
+  // 备料分批拉取第一期 step 4 PR-7 (register R-62 ①): 拉取待确认 is appended LAST, on the PULL gate — exactly the
+  // six refresh routes' own `requireAccess(req, STOCK_PREP_PULL)`.
   assert.deepEqual(
     work.items.map((item) => item.key),
-    ['home', 'project-board', 'project-query', 'confirmation-queue'],
-    'rail: 【工作】 lists 项目查询 between 项目备料 and 确认队列',
+    ['home', 'project-board', 'project-query', 'confirmation-queue', 'refresh-queue'],
+    'rail: 【工作】 lists 项目查询 between 项目备料 and 确认队列, and 拉取待确认 last',
   )
   assert.deepEqual(
     work.items.map((item) => item.gate),
@@ -1457,33 +2071,39 @@ function theRailVocabularyAndTheLandingRuleHold() {
       STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
       STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
       STOCK_PREP_RAIL_GATE_ROUTE,
+      STOCK_PREP_RAIL_GATE_PULL,
     ],
-    'rail: 项目查询 rides the operator tier, like the two items it sits beside',
+    'rail: 项目查询 rides the operator tier, like the two items it sits beside; 拉取待确认 rides PULL',
   )
+  assert.equal(STOCK_PREP_RAIL_GATE_PULL, 'pull', 'rail: the PULL gate token')
 
-  // 不下线 — the seven legacy MVP keys are FOLDED into 深度工具, not removed, and they are still on
-  // the platform-admin gate they were always on.
+  // The remaining legacy MVP keys are FOLDED into 深度工具 and still on the platform-admin gate they
+  // were always on. 旧「仪表盘」(dashboard), 旧「备料行」(prep-line) and 旧「异常队列」(exception-queue) were
+  // retired on 2026-10-27 (owner: 「不用就去掉」); their backend routes and tables stay.
   const deploy = STOCK_PREP_RAIL_GROUPS.find((group) => group.group === 'deploy')
   assert.equal(deploy.advancedGate, 'platform-admin', 'rail: 深度工具 stays platform-admin')
   assert.deepEqual([...deploy.advanced].sort(), [
     'bom-snapshot-diff',
-    'dashboard',
-    'exception-queue',
     'material-mapping',
-    'prep-line',
     'project-workspace',
     'unit-conversion',
-  ], 'rail: all seven legacy MVP tabs are folded, none dropped')
+  ], 'rail: the four remaining legacy MVP tabs are folded; dashboard, prep-line and exception-queue are retired')
 
   // THE GATE RESOLVER. Per actor, per token, plus the refusal an unknown token must produce for
   // EVERYONE — a mistyped gate must hide a group, never open one.
   const cases = [
-    { name: 'anonymous', permissions: [], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
-    { name: 'read', permissions: [STOCK_PREP_READ], expected: { route: true, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
-    { name: 'orphan operate', permissions: [STOCK_PREP_OPERATE], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
-    { name: 'confirm', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false } },
-    { name: 'workbench admin', permissions: [STOCK_PREP_ADMIN], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': false } },
-    { name: 'platform admin', permissions: ['role:admin', 'integration:admin'], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': true } },
+    { name: 'anonymous', permissions: [], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    { name: 'read', permissions: [STOCK_PREP_READ], expected: { route: true, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    { name: 'orphan operate', permissions: [STOCK_PREP_OPERATE], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    { name: 'confirm', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    // R-33 said "the pull code re-tiers NO rail item". PR-7 (R-62 ①) reverses that for exactly ONE item: the 拉取人员
+    // additionally opens 拉取待确认 (the `pull` gate); every other item answers exactly as for the operator.
+    { name: 'puller', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false, pull: true } },
+    { name: 'orphan pull', permissions: [STOCK_PREP_PULL], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    // The legacy write tier is NOT the pull tier (design §13's "or legacy integration:write" corrected, R-62 ①).
+    { name: 'integration:write only', permissions: ['integration:write'], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false, pull: false } },
+    { name: 'workbench admin', permissions: [STOCK_PREP_ADMIN], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': false, pull: true } },
+    { name: 'platform admin', permissions: ['role:admin', 'integration:admin'], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': true, pull: true } },
   ]
   for (const testCase of cases) {
     for (const gate of STOCK_PREP_RAIL_GATES) {
@@ -1516,6 +2136,11 @@ function theRailVocabularyAndTheLandingRuleHold() {
       stockPrepWorkbenchLandingKey([STOCK_PREP_READ, STOCK_PREP_OPERATE], posture),
       'home',
       `D2: 一线落 home @ ${String(posture)}`,
+    )
+    assert.equal(
+      stockPrepWorkbenchLandingKey([STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL], posture),
+      'home',
+      `D2: 拉取人员也落 home @ ${String(posture)} (R-33 re-tiers no landing)`,
     )
     assert.equal(
       stockPrepWorkbenchLandingKey([STOCK_PREP_READ], posture),
@@ -1580,8 +2205,95 @@ function theRailVocabularyAndTheLandingRuleHold() {
   )
 }
 
+// ---------------------------------------------------------------------------
+// M-12 — 一个项目一张备料表 (S2 fix round 1): THE THREE PROJECT-TARGET ROUTES WITH THE SWITCH ON
+// ---------------------------------------------------------------------------
+//
+// The golden matrix above runs with MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED unset, so a 'pass'
+// cell for projectTarget.* means "past the gate, then 404 DISABLED" — true, but it says nothing about
+// whether a permitted actor is actually SERVED. This pass mounts the real routes over the shared
+// project-sheet substrate (a host that can provision, a real registry store) with the switch ON and
+// asks the same matrix question: every 'gate' cell is a 401/403 from the gate, and every 'pass' cell
+// is a real 2xx — the create a 201 for a fresh project, the read and the list a 200.
+const projectSheetHarness = require(path.join(__dirname, 'support', 'stock-preparation-project-sheet-harness.cjs'))
+
+async function projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn() {
+  const shapes = {
+    'projectTarget.read': { method: 'GET', path: '/api/integration/stock-preparation/projects/:projectNo/target', params: { projectNo: PROJECT_NO }, okStatuses: [200] },
+    'projectTarget.create': { method: 'POST', path: '/api/integration/stock-preparation/projects/:projectNo/target', params: { projectNo: PROJECT_NO }, okStatuses: [201] },
+    'projectTarget.list': { method: 'GET', path: '/api/integration/stock-preparation/project-targets', params: {}, okStatuses: [200] },
+    // S4 (R-38): each lifecycle route against the one state it may start from — a registered ACTIVE
+    // row for archive, an ARCHIVED one for restore — with its typed confirmation. 200 = the
+    // transition happened, which is the only honest meaning of "served" for these two.
+    'projectTarget.archive': { method: 'POST', path: '/api/integration/stock-preparation/projects/:projectNo/target/archive', params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO }, seed: 'active', flips: true, okStatuses: [200] },
+    'projectTarget.restore': { method: 'POST', path: '/api/integration/stock-preparation/projects/:projectNo/target/restore', params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO }, seed: 'archived', flips: true, okStatuses: [200] },
+    // S3 (R-37): the project-fields read (absent project → 200 absent), the update against a seeded
+    // ACTIVE row (200, the row stays active — a fields update is not a lifecycle transition), and the
+    // overview refresh over an empty registry (200: the sheet is created, zero rows projected).
+    'projectFields.read': { method: 'GET', path: '/api/integration/stock-preparation/projects/:projectNo/target/project-fields', params: { projectNo: PROJECT_NO }, okStatuses: [200] },
+    'projectFields.update': { method: 'PATCH', path: '/api/integration/stock-preparation/projects/:projectNo/target/project-fields', params: { projectNo: PROJECT_NO }, body: { note: 'synthetic note' }, seed: 'active', flips: false, okStatuses: [200] },
+    // Fix round 1 (R6): the refresh projects into an EXISTING overview (ensured first, on a host that
+    // declares the stamp) — 200 over an empty registry; the ensure creates it (PULL), 200.
+    'projectOverview.refresh': { method: 'POST', path: '/api/integration/stock-preparation/project-overview/refresh', params: {}, body: {}, stampingHost: true, overviewFirst: true, okStatuses: [200] },
+    'projectOverview.ensure': { method: 'POST', path: '/api/integration/stock-preparation/project-overview/ensure', params: {}, body: {}, stampingHost: true, okStatuses: [200] },
+    // PR B (R-53 / R-54): the pilot READ over an empty registry — 200 `status: 'absent'` (ADMIN only). The
+    // ENABLE is deliberately NOT a shape here: on a plain mount its readiness refuses by construction (the
+    // step-4 stores and the continuation marker are later PRs), so its "served" leg is proven in
+    // stock-preparation-pilot-routes.test.cjs over a mount whose every readiness input is satisfied.
+    'projectTarget.pilotRead': { method: 'GET', path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot', params: { projectNo: PROJECT_NO }, okStatuses: [200] },
+    // 人工补充行 B4 (R-68): the switch READ over an empty registry — 200 `status: 'absent'` (PULL tier: the puller and
+    // both admins). The SET (ADMIN) is deliberately not a shape here: it needs a registered sheet whose key column the
+    // host can read and write, so its "served" leg is proven in stock-preparation-manual-rows-switch-routes.test.cjs.
+    'projectTarget.manualRowsRead': { method: 'GET', path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows', params: { projectNo: PROJECT_NO }, okStatuses: [200] },
+  }
+  let served = 0
+  for (const [actorName, expectations] of Object.entries(MATRIX)) {
+    const user = ACTORS[actorName]
+    for (const [capabilityId, shape] of Object.entries(shapes)) {
+      const capability = STOCK_PREP_WORKBENCH_CAPABILITIES.find((entry) => entry.capability === capabilityId)
+      assert.ok(capability, `M-12: ${capabilityId} is a manifest member`)
+      assert.equal(capability.path, shape.path, `M-12: ${capabilityId} path`)
+      const harness = projectSheetHarness.mountProjectSheetRoutes({ tenantId: TENANT_ID, projectNo: PROJECT_NO, switchOn: true, stampsSystemKind: shape.stampingHost === true })
+      try {
+        if (shape.seed) harness.seedRegistryRow(PROJECT_NO, { archived: shape.seed === 'archived' })
+        if (shape.overviewFirst) {
+          const ensured = await projectSheetHarness.call(harness.routes, 'POST', '/api/integration/stock-preparation/project-overview/ensure', { user: ACTORS.platformAdmin || PLATFORM_ADMIN, body: {} })
+          assert.equal(ensured.statusCode, 200, `M-12: the overview is ensured before ${capabilityId} (${JSON.stringify(ensured.body && ensured.body.error)})`)
+          harness.provisioning.calls.length = 0
+        }
+        const res = await projectSheetHarness.call(harness.routes, shape.method, shape.path, { user, params: shape.params, body: shape.body || {} })
+        if (expectations[capabilityId] === 'gate') {
+          assert.ok(refusedByGate(res), `M-12: ${actorName} must be REFUSED at ${capabilityId} with the switch on, got ${res.statusCode} ${JSON.stringify(res.body && res.body.error)}`)
+          assert.deepEqual(harness.provisioning.calls, [], `M-12: a refused ${actorName} costs no host call at ${capabilityId}`)
+          if (shape.seed) {
+            assert.equal(harness.registryRows()[0].status, shape.seed, `M-12: a refused ${actorName} leaves the registry row ${shape.seed} at ${capabilityId}`)
+          }
+        } else {
+          assert.ok(
+            shape.okStatuses.includes(res.statusCode),
+            `M-12: ${actorName} must be SERVED at ${capabilityId} with the switch on (expected ${shape.okStatuses.join('/')}), got ${res.statusCode} ${JSON.stringify(res.body && res.body.error)}`,
+          )
+          if (shape.seed) {
+            const expectedStatus = shape.flips ? (shape.seed === 'active' ? 'archived' : 'active') : shape.seed
+            assert.equal(harness.registryRows()[0].status, expectedStatus, `M-12: ${actorName} left the registry row ${expectedStatus} at ${capabilityId}`)
+            assert.deepEqual(harness.provisioning.calls, [], `M-12: ${capabilityId} makes no host call — the sheet and its grants are not touched`)
+          }
+          served += 1
+        }
+      } finally {
+        harness.restore()
+      }
+    }
+  }
+  // Anti-vacuity: puller is served the nine S1–S4 routes plus the B4 switch read (PULL); workbench admin and platform
+  // admin those ten plus the PR B pilot read; the confirming operator the two reads plus the three S3 OPERATE routes.
+  // 10 + 11 + 11 + 5.
+  assert.equal(served, 37, 'M-12: the served cells are exactly the matrix\'s pass cells for the eleven routes')
+}
+
 async function main() {
   await matrixGoldenHolds()
+  await projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn()
   await authorizedOperatorGetsRealResponses()
   await theConfirmAuditRowCarriesTheProjectFromTheLedger()
   await platformAdminLosesNothing()
@@ -1604,7 +2316,6 @@ async function main() {
   console.log('stock-preparation permission matrix (O2/R-11): all assertions passed')
 }
 
-main().catch((error) => {
-  console.error(error)
-  process.exit(1)
-})
+// S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — `main` runs as one test
+// under the exit sentinel and the whole-suite timeout, so a check that hangs can never end this suite with exit 0.
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-permission-matrix.test.cjs', main)

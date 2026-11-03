@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
+import ApprovalCenterView from '../src/views/approval/ApprovalCenterView.vue'
 
 // ---------------------------------------------------------------------------
 // T3-1 v0 — mobile approval CENTER responsive adaptation (ballot Q10/Q11).
@@ -227,7 +228,6 @@ describe('ApprovalCenterView — T3-1 mobile responsive gate', () => {
   })
 
   async function mountView() {
-    const { default: ApprovalCenterView } = await import('../src/views/approval/ApprovalCenterView.vue')
     const Host = defineComponent({ setup() { return () => h(ApprovalCenterView as any) } })
     app = createApp(Host)
     app.component('ElTabs', ElTabs)
@@ -259,6 +259,9 @@ describe('ApprovalCenterView — T3-1 mobile responsive gate', () => {
 
     expect(container!.querySelector('[data-testid="approval-mobile-list"]')).toBeNull()
     expect(container!.querySelector('[data-el-table]')).toBeTruthy()
+    // F3-E1: the 导出 CSV chrome belongs to the desktop layout, which is what renders here.
+    expect(container!.querySelector('[data-testid="approval-export-csv"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="approval-export-hint"]')).toBeTruthy()
   })
 
   it('flag ON + narrow viewport → renders the mobile card list, hides the desktop table + batch toolbar', async () => {
@@ -277,6 +280,10 @@ describe('ApprovalCenterView — T3-1 mobile responsive gate', () => {
     // Desktop widgets are gone on the mobile surface.
     expect(container!.querySelector('[data-el-table]')).toBeNull()
     expect(container!.querySelector('[data-testid="approval-batch-approve"]')).toBeNull()
+    // F3-E1: so is the 导出 CSV button together with its hint line (the mobile action set is
+    // approve / reject / comment / initiate).
+    expect(container!.querySelector('[data-testid="approval-export-csv"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-export-hint"]')).toBeNull()
   })
 
   it('flag ON + WIDE viewport → stays on the desktop table (gate does not force mobile chrome)', async () => {

@@ -188,7 +188,26 @@ function makeFakeDb(
     },
   }
 
+  // #5828 — outside the transaction the handler first asks whether the PARENT spreadsheet is live and
+  // whether `:sheetId` belongs to it (loadLiveSpreadsheetSheet); these suites use the live/bound case.
+  const parentGate = {
+    selectFrom(table: 'spreadsheets' | 'sheets') {
+      const chain: any = {
+        select() { return chain },
+        selectAll() { return chain },
+        where() { return chain },
+        async executeTakeFirst() {
+          if (table === 'spreadsheets') return { id: 'sh_1' }
+          if (table === 'sheets') return { id: 'sheet_1', spreadsheet_id: 'sh_1' }
+          throw new Error(`unexpected table ${table}`)
+        },
+      }
+      return chain
+    },
+  }
+
   const db = {
+    selectFrom: parentGate.selectFrom,
     transaction() {
       return {
         async execute<T>(cb: (trx: typeof trx) => Promise<T>): Promise<T> {

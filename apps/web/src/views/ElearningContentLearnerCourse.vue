@@ -77,7 +77,7 @@ import {
   openElearningContentItem,
   type ElearningContentOpenResult,
 } from '../services/elearningContent'
-import { elearningFailure, elearningLabel } from './elearningLabels'
+import { elearningErrorMessage, elearningFailure, elearningLabel } from './elearningLabels'
 
 const props = defineProps<{ course: ElearningLearnerContentCourse }>()
 const emit = defineEmits<{ completed: [] }>()
@@ -90,7 +90,7 @@ const statusTone = ref<'info' | 'error'>('info')
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
-    return elearningFailure(error.code, error.status, isZh.value)
+    return elearningErrorMessage(error.code, error.status, isZh.value)
   }
   return elearningFailure('request_failed', 0, isZh.value)
 }

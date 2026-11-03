@@ -16,23 +16,35 @@ import type { Kysely } from 'kysely'
 import { z } from 'zod'
 import { rbacGuard } from '../rbac/rbac'
 import { auditLog } from '../audit/audit'
+import { Logger } from '../core/logger'
 import {
   c6WriteTargetQueryDisabledMessage,
   DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE,
-  DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY_CODE,
+  DATA_SOURCE_CREDENTIALS_REQUIRED_CODE,
+  DATA_SOURCE_LOAD_FAILED_NOT_RESEALABLE_CODE,
   DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
   DataSourceManager,
   isGenericQueryDisabledConfig,
   SUPPORTED_DATA_SOURCE_TYPES
 } from '../data-adapters/DataSourceManager'
 import type { DataSourceActorContext } from '../data-adapters/DataSourceManager'
-import type { DataSourceConfig, QueryOptions } from '../data-adapters/BaseAdapter'
+import type { DataSourceConfig, QueryOptions, QueryResult } from '../data-adapters/BaseAdapter'
 import {
   attemptsToClearK3Marker,
   K3_DESTINATION_MARKER_IMMUTABLE,
   K3_DESTINATION_MARKER_IMMUTABLE_MESSAGE,
 } from '../data-adapters/k3-destination-write-fence'
 import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapters/BaseAdapter'
+
+const logger = new Logger('DataSourcesRouter')
+
+// Re-seal refusals whose values-free `details` (missing credential KEY names / a load state) reach
+// the client on PUT /:id/credentials. A closed set, so no other coded refusal on that route changes
+// its body shape.
+const RESEAL_DETAIL_CODES: ReadonlySet<string> = new Set([
+  DATA_SOURCE_CREDENTIALS_REQUIRED_CODE,
+  DATA_SOURCE_LOAD_FAILED_NOT_RESEALABLE_CODE,
+])
 
 // A deliberate gate refusal — the outbound-SQL-write arm/provisioning guard, the K3 destination fence —
 // throws an Error carrying a numeric `status` and a fixed `code`. Surface those verbatim so the refusal
@@ -65,7 +77,7 @@ export function wantsSchemaColumns(query: Record<string, unknown>): boolean {
 
 // A generic (non-coded) data-plane failure must NOT forward the driver's own text to the client:
 // mssql / pg / mysql connect and query errors embed host:port, database name and the login that was
-// tried (`Failed to connect to SQL Server: ConnectionError: Login failed for user 'x' ... 10.10.52.16:1433`).
+// tried (`Failed to connect to SQL Server: ConnectionError: Login failed for user 'x' ... 10.99.99.16:1433`).
 // The detail goes to the server log; the client gets a fixed, values-free sentence and can use
 // `POST /:id/test`, the one endpoint that deliberately reports the redacted cause.
 export const SCHEMA_FAILURE_MESSAGE =
@@ -74,6 +86,136 @@ export const TABLE_INFO_FAILURE_MESSAGE =
   '读取数据表信息失败，请先「测试连接」查看原因 / Failed to read the table information; run "Test connection" for details'
 export const CONNECT_FAILURE_MESSAGE =
   '连接数据源失败，请先「测试连接」查看原因 / Could not connect the data source; run "Test connection" for details'
+
+// R-41 (docs/development/takeover-beiliao-20260821/decision-register.md) applied to this router: no body, of
+// any status, carries what an adapter, a driver or a transport said. Two shapes used to:
+//  - the READ RESULT of /query and /select (200). An adapter answers a failed read with its QueryResult whose
+//    `error` is the caught value itself: for the HTTP adapter an AxiosError, whose toJSON() serializes the
+//    request config (headers built from the stored write-only credentials: Authorization, X-API-Key), the stack
+//    and the message; for the SQL adapters the driver error (detail, schema / table / constraint, position).
+//    publicReadResult copies the typed QueryResult fields only and answers a failed read with a fixed sentence.
+//  - every GENERIC 500 arm answered `error.message`. Each now answers its literal status, its unchanged code and
+//    a fixed sentence below. The typed refusals ahead of it (codedGateRefusal, validation, not found) are as
+//    they were.
+// The server log gets values-free tokens only (logDataSourceFailure).
+export const SOURCE_READ_FAILED_CODE = 'SOURCE_READ_FAILED'
+export const SOURCE_READ_FAILURE_MESSAGE =
+  '读取数据源失败，请先「测试连接」查看原因 / Failed to read from the data source; run "Test connection" for details'
+
+/** The fixed sentence of each generic 500 arm (one per route; the codes are unchanged). */
+export const DATA_SOURCE_FAILURE_MESSAGES = Object.freeze({
+  list: '读取数据源列表失败 / Failed to list data sources',
+  health: '数据源健康检查失败 / Health check failed',
+  get: '读取数据源失败 / Failed to get data source',
+  create: '创建数据源失败 / Failed to create data source',
+  draftTest: '连接测试失败 / Connection test failed',
+  update: '更新数据源失败 / Failed to update data source',
+  credentials: '更新数据源凭据失败 / Failed to update data source credentials',
+  remove: '删除数据源失败 / Failed to remove data source',
+  disconnect: '断开数据源失败 / Failed to disconnect',
+  test: '连接测试失败 / Connection test failed',
+  query: '查询执行失败 / Query execution failed',
+  select: '读取数据失败 / Select query failed',
+} as const)
+
+/** A class name as the log may carry it: an identifier, nothing else. */
+const LOG_CLASS_NAME = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/
+/** A driver / transport code as the log may carry it: SQLSTATE `42P01`, `ECONNREFUSED`, axios `ERR_BAD_REQUEST`, mysql `ER_…`. */
+const LOG_CODE_TOKEN = /^[A-Za-z0-9_]{1,64}$/
+
+function logCodeToken(value: unknown): string | number | undefined {
+  if (typeof value === 'number') return Number.isSafeInteger(value) ? value : undefined
+  return typeof value === 'string' && LOG_CODE_TOKEN.test(value) ? value : undefined
+}
+
+/**
+ * Server-log line for a failure this router answers with a fixed sentence: the operation (a literal), the data
+ * source id the caller addressed, the error's class and its driver / transport codes — each code only when it
+ * has the shape of a code (an integer, or a bare token without dots, colons or spaces), so an address, a host,
+ * a path or a sentence that a driver put there is dropped. Never the message, the stack, a config or a body.
+ */
+function logDataSourceFailure(operation: string, dataSourceId: string | undefined, error: unknown): void {
+  try {
+    const record = error !== null && typeof error === 'object' ? (error as Record<string, unknown>) : undefined
+    const ctorName = record ? (record.constructor as { name?: unknown } | undefined)?.name : undefined
+    const errorClass = record
+      ? (typeof ctorName === 'string' && LOG_CLASS_NAME.test(ctorName) ? ctorName : 'unknown')
+      : error === null ? 'null' : typeof error
+    const response = record?.response
+    const httpStatus = response !== null && typeof response === 'object'
+      ? (response as { status?: unknown }).status
+      : undefined
+    logger.warn(`data source ${operation} failed`, {
+      ...(dataSourceId === undefined ? {} : { dataSourceId: dataSourceId.slice(0, 128) }),
+      errorClass,
+      code: logCodeToken(record?.code),
+      errno: logCodeToken(record?.errno),
+      sqlState: logCodeToken(record?.sqlState),
+      httpStatus: typeof httpStatus === 'number' && Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus < 600
+        ? httpStatus
+        : undefined,
+    })
+  } catch {
+    // Logging must never change the answer.
+  }
+}
+
+type ReadResultMetadata = NonNullable<QueryResult<unknown>['metadata']>
+
+interface PublicReadResult {
+  data: unknown[]
+  metadata?: ReadResultMetadata
+  error?: { code: typeof SOURCE_READ_FAILED_CODE; message: string }
+}
+
+/**
+ * The body form of an adapter's QueryResult: the TYPED fields, copied by name (an adapter's extra fields do
+ * not travel), and a failed read as `{ code: SOURCE_READ_FAILED, message: <fixed sentence> }` instead of the
+ * caught value. The rows (`data`) are the read's answer and travel as they are.
+ */
+function publicReadResult(result: QueryResult<unknown>, operation: 'query' | 'select', dataSourceId: string): PublicReadResult {
+  const out: PublicReadResult = { data: result.data }
+  const meta = result.metadata
+  if (meta) {
+    const metadata: ReadResultMetadata = {}
+    if (meta.totalCount !== undefined) metadata.totalCount = meta.totalCount
+    if (meta.pageCount !== undefined) metadata.pageCount = meta.pageCount
+    if (meta.currentPage !== undefined) metadata.currentPage = meta.currentPage
+    if (Array.isArray(meta.sources)) {
+      metadata.sources = meta.sources.map((source) => ({
+        name: source.name,
+        ok: source.ok,
+        count: source.count,
+        // A sub-source's failure text is adapter text too: present → the same fixed sentence.
+        ...(source.error ? { error: SOURCE_READ_FAILURE_MESSAGE } : {}),
+      }))
+    }
+    if (Array.isArray(meta.columns)) {
+      metadata.columns = meta.columns.map((column) => ({
+        name: column.name,
+        type: column.type,
+        ...(column.nullable === undefined ? {} : { nullable: column.nullable }),
+      }))
+    }
+    out.metadata = metadata
+  }
+  if (result.error !== undefined && result.error !== null) {
+    logDataSourceFailure(operation, dataSourceId, result.error)
+    out.error = { code: SOURCE_READ_FAILED_CODE, message: SOURCE_READ_FAILURE_MESSAGE }
+  }
+  return out
+}
+
+/**
+ * A3 (data-source-test-error-fidelity.test.ts): the two test routes deliberately show the adapter's REDACTED
+ * cause, a string. That contract is unchanged here; this only makes sure nothing but a string reaches
+ * `error.message` — any other value (an Error object some adapter or manager path hands back) is answered with
+ * the route's fixed sentence instead of being serialized with its config, headers and stack.
+ */
+function testCauseMessage(cause: unknown, fallback: string): string | undefined {
+  if (!cause) return undefined
+  return typeof cause === 'string' ? cause : fallback
+}
 
 // Zod schemas for request validation
 const ConnectionConfigSchema = z.record(z.union([z.string(), z.number(), z.boolean()]))
@@ -326,6 +468,40 @@ function sanitizeConfig(config: DataSourceConfig): Omit<DataSourceConfig, 'crede
   }
 }
 
+/**
+ * Reference counts for a whole READ surface, in ONE pair of grouped queries.
+ *
+ * Two properties this wrapper exists to hold:
+ * - NOT N+1: the counts for every listed source come from a single batched
+ *   call, so adding a source adds rows to a GROUP BY, not a round trip.
+ * - "unknown" is not "zero": if the count query fails, the listing still
+ *   answers (it is the management surface for these sources, and its own data
+ *   is intact) but referenceCount is OMITTED for every item. A displayed 0
+ *   would read as "safe to delete" — a claim we cannot make when the reference
+ *   table did not answer. The authoritative refusal is the DELETE guard, which
+ *   recomputes the count server-side and fails closed on the same error.
+ *
+ * values-free: the result carries integers only — never the name, tenant,
+ * owner or config of any referencing external system, and on failure only
+ * the SQLSTATE and the id count are logged (an error message here could name
+ * referencing rows).
+ */
+async function referenceCountsForDisplay(
+  manager: { countExternalSystemReferencesByIds(ids: readonly string[]): Promise<Map<string, number>> },
+  ids: readonly string[]
+): Promise<Map<string, number>> {
+  if (ids.length === 0) return new Map()
+  try {
+    return await manager.countExternalSystemReferencesByIds(ids)
+  } catch (err) {
+    logger.warn('reference count query failed; degrading to unknown for every listed id', {
+      sqlstate: (err as { code?: string } | null)?.code ?? 'unknown',
+      ids: ids.length,
+    })
+    return new Map()
+  }
+}
+
 export function dataSourcesRouter(): Router {
   const router = Router()
 
@@ -343,22 +519,39 @@ export function dataSourcesRouter(): Router {
         })
       }
       const manager = getManager()
+      const actor = resolveActor(req)
       // Authority model: owners see their own sources; platform admins see
       // every source (management metadata only — never credentials).
-      const sources = manager.listDataSources({ actor: resolveActor(req) })
+      const sources = manager.listDataSources({ actor })
+      // ONE grouped count for the whole page (never one query per row). The
+      // integer is management metadata like `connected`/`ownerId`: it says HOW
+      // MANY integration bindings point here, never WHICH ones.
+      const referenceCounts = await referenceCountsForDisplay(manager, sources.map((s) => s.id))
+      const items = sources.map((source) => {
+        const referenceCount = referenceCounts.get(source.id)
+        // Omitted, not 0, when unknown — see referenceCountsForDisplay.
+        return referenceCount === undefined ? source : { ...source, referenceCount }
+      })
+      // Sources that exist but FAILED TO LOAD (#6079): a SIBLING of `items`, never inside it, so no
+      // consumer that treats an `items` entry as a usable source can receive one. Same visibility
+      // as `items` (stored owner, or platform admin). Omitted when empty: for every caller with
+      // nothing to see, the body stays byte-identical to what it was before this field existed.
+      const loadFailed = manager.listLoadFailedDataSources({ actor })
       return res.json({
         ok: true,
         data: {
-          items: sources,
-          total: sources.length
+          items,
+          total: items.length,
+          ...(loadFailed.length > 0 ? { loadFailed } : {})
         }
       })
     } catch (error) {
+      logDataSourceFailure('list', undefined, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to list data sources'
+          message: DATA_SOURCE_FAILURE_MESSAGES.list
         }
       })
     }
@@ -404,11 +597,12 @@ export function dataSourcesRouter(): Router {
         }
       })
     } catch (error) {
+      logDataSourceFailure('health', undefined, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Health check failed'
+          message: DATA_SOURCE_FAILURE_MESSAGES.health
         }
       })
     }
@@ -431,12 +625,17 @@ export function dataSourcesRouter(): Router {
         await auditCrossOwnerAdminAction(req, 'read', req.params.id, ownerId)
       }
 
+      // Same batched helper with a single id, so detail and listing can never
+      // disagree about what "referenced" means.
+      const referenceCount = (await referenceCountsForDisplay(manager, [req.params.id])).get(req.params.id)
+
       return res.json({
         ok: true,
         data: {
           ...sanitizeConfig(config),
           ownerId,
-          connected: adapter.isConnected()
+          connected: adapter.isConnected(),
+          ...(referenceCount === undefined ? {} : { referenceCount })
         }
       })
     } catch (error) {
@@ -446,11 +645,12 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      logDataSourceFailure('get', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to get data source'
+          message: DATA_SOURCE_FAILURE_MESSAGES.get
         }
       })
     }
@@ -525,11 +725,12 @@ export function dataSourcesRouter(): Router {
       if (coded) {
         return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
       }
+      logDataSourceFailure('create', parse.data.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to create data source'
+          message: DATA_SOURCE_FAILURE_MESSAGES.create
         }
       })
     }
@@ -581,12 +782,13 @@ export function dataSourcesRouter(): Router {
       })
       // RESULT-ONLY surface (design-lock 钉子②): success / latency / redacted error — NEVER echo the
       // submitted config, connection, or credentials back to the caller.
+      const cause = testCauseMessage(result.error, DATA_SOURCE_FAILURE_MESSAGES.draftTest)
       return res.json({
         ok: true,
         data: {
           success: result.success,
           ...(typeof result.latency === 'number' ? { latency: `${result.latency}ms` } : {}),
-          ...(result.error ? { error: { message: result.error } } : {})
+          ...(cause !== undefined ? { error: { message: cause } } : {})
         }
       })
     } catch (error) {
@@ -598,11 +800,12 @@ export function dataSourcesRouter(): Router {
           error: { code: 'VALIDATION_ERROR', message: error.message }
         })
       }
+      logDataSourceFailure('draft test', parse.data.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'TEST_FAILED',
-          message: error instanceof Error ? error.message : 'Connection test failed'
+          message: DATA_SOURCE_FAILURE_MESSAGES.draftTest
         }
       })
     }
@@ -699,11 +902,12 @@ export function dataSourcesRouter(): Router {
       if (coded) {
         return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
       }
+      logDataSourceFailure('update', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to update data source'
+          message: DATA_SOURCE_FAILURE_MESSAGES.update
         }
       })
     }
@@ -712,6 +916,11 @@ export function dataSourcesRouter(): Router {
   /**
    * PUT /api/data-sources/:id/credentials
    * Rotate write-only credentials. Non-secret config updates stay on PUT /:id.
+   *
+   * Also the ONE route that addresses a source which exists but FAILED TO LOAD (#6079): for such an
+   * id, the stored owner or a platform admin can re-seal an unreadable credential in place (see
+   * DataSourceManager.resealLoadFailedDataSource). Every other id-addressed route keeps answering
+   * 404 for a load-failed id.
    */
   router.put('/api/data-sources/:id/credentials', rbacGuard('data_sources', 'write'), async (req: Request, res: Response) => {
     const parse = DataSourceCredentialsUpdateSchema.safeParse(req.body)
@@ -739,6 +948,44 @@ export function dataSourcesRouter(): Router {
       const manager = getManager()
       const id = req.params.id
       const actor = resolveActor(req)
+
+      // ONE access decision for both kinds of id, FIRST, synchronously and from memory only. A
+      // non-owner non-admin of a load-failed id and anyone naming a nonexistent id run the SAME
+      // lookups to the SAME "not found" (→ the same 404 body below): no database statement, no
+      // audit row, no extra work on either path (existence non-disclosure, incl. timing).
+      const target = manager.resolveCredentialRouteTarget(id, actor)
+
+      // RE-SEAL BRANCH (#6079): the id is not loaded but its row failed to load, and the actor is
+      // its stored owner or a platform admin. Loaded ids never enter this branch — their behavior
+      // is unchanged below.
+      if (target === 'load_failed') {
+        const resealed = await manager.resealLoadFailedDataSource(id, parse.data.credentials, actor)
+        await auditLog({
+          actorId: req.user?.id?.toString(),
+          actorType: 'user',
+          action: 'update_credentials',
+          resourceType: 'data_source',
+          resourceId: id,
+          meta: {
+            resealed: true,
+            loadState: resealed.priorLoadState,
+            restartRequired: resealed.restartRequired,
+            changedCredentialKeys,
+            ownerId: resealed.ownerId,
+            ...(isCrossOwnerAdminAction(actor, resealed.ownerId ?? undefined) ? { crossOwnerAdmin: true } : {})
+          }
+        })
+        return res.json({
+          ok: true,
+          data: {
+            ...sanitizeConfig(resealed.config),
+            connected: resealed.connected,
+            resealed: true,
+            restartRequired: resealed.restartRequired
+          }
+        })
+      }
+
       manager.assertAccess(id, actor)
 
       const existing = manager.getDataSource(id)
@@ -792,13 +1039,24 @@ export function dataSourcesRouter(): Router {
       }
       const coded = codedGateRefusal(error)
       if (coded) {
-        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+        // The re-seal refusals carry values-free `details` (key NAMES / a load state) the client
+        // needs; every other coded refusal on this route keeps its pre-existing body shape.
+        const details = RESEAL_DETAIL_CODES.has(coded.code) ? (error as { details?: unknown }).details : undefined
+        return res.status(coded.status).json({
+          ok: false,
+          error: {
+            code: coded.code,
+            message: coded.message,
+            ...(details && typeof details === 'object' ? { details } : {})
+          }
+        })
       }
+      logDataSourceFailure('credential update', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to update data source credentials'
+          message: DATA_SOURCE_FAILURE_MESSAGES.credentials
         }
       })
     }
@@ -808,12 +1066,20 @@ export function dataSourcesRouter(): Router {
    * DELETE /api/data-sources/:id
    * Remove a data source configuration.
    *
-   * Referential guard: a source referenced by any
-   * integration_external_systems.config->>'dataSourceId' refuses deletion
-   * with a coded 409 naming the reference COUNT (never the referencing
-   * config), so an external system's binding cannot be silently dangled.
-   * `?force=true` (platform-admin only) breaks the reference deliberately
-   * and is audited as such. The check is server-side, before removal.
+   * Referential guard: a source referenced by any integration external system
+   * (canonical connection_id, or an owner-attributed legacy config.dataSourceId)
+   * refuses deletion with a coded 409 naming the reference COUNT (never the
+   * referencing config), so an external system's binding cannot be silently
+   * dangled. There is NO force bypass (owner ruling 2026-09-20, ①): a
+   * `?force=true` query is ignored for every tier — admins included — and the
+   * answer is the same 409; the operator unbinds the external systems first.
+   * The former admin-only-force 403 code no longer exists.
+   *
+   * Three layers, outermost first: this ADVISORY pre-count on the autocommit
+   * connection (shapes the 409 with the count), the manager's own count inside
+   * its FOR UPDATE delete transaction (the gate), and the database's
+   * live-connection foreign key, which refuses the soft delete itself while a
+   * canonical binding exists (mapped by the manager to the same 409).
    */
   router.delete('/api/data-sources/:id', rbacGuard('data_sources', 'write'), async (req: Request, res: Response) => {
     try {
@@ -821,7 +1087,7 @@ export function dataSourcesRouter(): Router {
       const id = req.params.id
       const actor = resolveActor(req)
       // Access first: a non-owner non-admin gets the uniform 404 before any
-      // referential detail (force=true included) can leak existence.
+      // referential detail can leak existence.
       manager.assertAccess(id, actor)
 
       // Get config before removal for audit
@@ -830,30 +1096,20 @@ export function dataSourcesRouter(): Router {
       const ownerId = manager.getScope(id)?.ownerId
 
       const referenceCount = await manager.countExternalSystemReferences(id)
-      const forceRequested = String(req.query.force ?? '') === 'true'
-      const forcedReferenceBreak = referenceCount > 0 && forceRequested
       if (referenceCount > 0) {
-        if (forceRequested && actor.platformAdmin !== true) {
-          return res.status(403).json({
-            ok: false,
-            error: {
-              code: DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY_CODE,
-              message: `force=true is restricted to platform admins; data source '${id}' remains referenced by ${referenceCount} external system(s)`
-            }
-          })
-        }
-        if (!forceRequested) {
-          return res.status(409).json({
-            ok: false,
-            error: {
-              code: DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
-              message: `Data source '${id}' is referenced by ${referenceCount} external system(s) (integration_external_systems.config.dataSourceId) and deleting it would leave dangling references. A platform admin may repeat the request with force=true to break the reference deliberately.`,
-              details: { referenceCount }
-            }
-          })
-        }
+        return res.status(409).json({
+          ok: false,
+          error: {
+            code: DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
+            message: `Data source '${id}' is referenced by ${referenceCount} external system(s); unbind them first — 请先解绑 ${referenceCount} 个外部系统。Deleting a referenced source is refused; force=true is no longer accepted.`,
+            details: { referenceCount }
+          }
+        })
       }
 
+      // Durable-first removal (PERM-04): the manager writes the row FIRST and only then
+      // clears memory, and it re-runs the referential count itself inside its transaction.
+      // Nothing from the request can relax that check.
       await manager.removeDataSource(id)
 
       await auditLog({
@@ -865,8 +1121,7 @@ export function dataSourcesRouter(): Router {
         meta: {
           ...sanitizeConfig(config),
           ownerId,
-          ...(isCrossOwnerAdminAction(actor, ownerId) ? { crossOwnerAdmin: true } : {}),
-          ...(forcedReferenceBreak ? { forcedReferenceBreak: true, referenceCount } : {})
+          ...(isCrossOwnerAdminAction(actor, ownerId) ? { crossOwnerAdmin: true } : {})
         }
       })
 
@@ -881,11 +1136,29 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      // The manager's own durable-first refusals (referential 409 on a TOCTOU race or from the
+      // database's live-connection FK, and the values-free DATA_SOURCE_DELETE_NOT_PERSISTED when
+      // the row write fails) keep their code and status instead of collapsing into a generic 500
+      // that reads like a partial delete. The referential 409 also keeps its `details`
+      // (`referenceCount`, a number or null) so the client sees the same shape as the pre-count's.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        const details = (error as { details?: unknown }).details
+        return res.status(coded.status).json({
+          ok: false,
+          error: {
+            code: coded.code,
+            message: coded.message,
+            ...(details && typeof details === 'object' ? { details } : {})
+          }
+        })
+      }
+      logDataSourceFailure('remove', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to remove data source'
+          message: DATA_SOURCE_FAILURE_MESSAGES.remove
         }
       })
     }
@@ -972,11 +1245,12 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      logDataSourceFailure('disconnect', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to disconnect'
+          message: DATA_SOURCE_FAILURE_MESSAGES.disconnect
         }
       })
     }
@@ -1004,13 +1278,14 @@ export function dataSourcesRouter(): Router {
 
       // A3: keep request-layer ok:true (a completed test is a successful request); the connection
       // outcome is data.success, with a redacted cause in data.error.message on failure.
+      const cause = testCauseMessage(result.error, DATA_SOURCE_FAILURE_MESSAGES.test)
       return res.json({
         ok: true,
         data: {
           id,
           success: result.success,
           latency: `${latency}ms`,
-          ...(result.error ? { error: { message: result.error } } : {})
+          ...(cause !== undefined ? { error: { message: cause } } : {})
         }
       })
     } catch (error) {
@@ -1020,11 +1295,12 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      logDataSourceFailure('test', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'TEST_FAILED',
-          message: error instanceof Error ? error.message : 'Connection test failed'
+          message: DATA_SOURCE_FAILURE_MESSAGES.test
         }
       })
     }
@@ -1108,7 +1384,7 @@ export function dataSourcesRouter(): Router {
 
       return res.json({
         ok: true,
-        data: result,
+        data: publicReadResult(result, 'query', req.params.id),
         ...(warning ? { warning } : {})
       })
     } catch (error) {
@@ -1126,11 +1402,12 @@ export function dataSourcesRouter(): Router {
       if (coded) {
         return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
       }
+      logDataSourceFailure('query', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'QUERY_ERROR',
-          message: error instanceof Error ? error.message : 'Query execution failed'
+          message: DATA_SOURCE_FAILURE_MESSAGES.query
         }
       })
     }
@@ -1171,7 +1448,7 @@ export function dataSourcesRouter(): Router {
 
       return res.json({
         ok: true,
-        data: result
+        data: publicReadResult(result, 'select', req.params.id)
       })
     } catch (error) {
       if (error instanceof Error && error.message.includes('not found')) {
@@ -1186,11 +1463,12 @@ export function dataSourcesRouter(): Router {
       if (coded) {
         return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
       }
+      logDataSourceFailure('select', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'SELECT_ERROR',
-          message: error instanceof Error ? error.message : 'Select query failed'
+          message: DATA_SOURCE_FAILURE_MESSAGES.select
         }
       })
     }

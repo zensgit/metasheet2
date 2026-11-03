@@ -177,6 +177,18 @@ interface KnownSite {
 
 // prettier-ignore
 const KNOWN_SITES: KnownSite[] = [
+  {
+    // IANA validity probe only; formatted date is discarded, no hour is consumed.
+    file: 'plugins/plugin-attendance/lib/attendance-timezone-policy-store.cjs',
+    lineText: "new Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date(0))",
+    kind: 'display',
+  },
+  {
+    // IANA validity probe only; formatted date is discarded, no hour is consumed.
+    file: 'plugins/plugin-attendance/lib/attendance-timezone-policy.cjs',
+    lineText: "new Intl.DateTimeFormat('en-US', { timeZone: value.trim() }).format(new Date(0))",
+    kind: 'display',
+  },
   // ---------------------------------------------------------------------------------
   // PARSING sites — output reaches formatToParts() with numeric consumption, or a
   // format() string is split/Number-parsed. Every entry MUST carry explicit
@@ -192,6 +204,13 @@ const KNOWN_SITES: KnownSite[] = [
     // workday-calendar-port.ts `tzParts()` — formatToParts, `Number(get('hour')) % 24`.
     file: 'packages/core-backend/src/core/workday-calendar-port.ts',
     lineText: "const fmt = new Intl.DateTimeFormat('en-US', {",
+    kind: 'parsing',
+  },
+  {
+    // tasks/task-dates.ts `getFormatter()` -> `getZonedParts()` formatToParts, Number(part.value)
+    // per part. PARSING and compliant (`hourCycle: 'h23'`).
+    file: 'packages/core-backend/src/tasks/task-dates.ts',
+    lineText: "fmt = new Intl.DateTimeFormat('en-US', {",
     kind: 'parsing',
   },
   {
@@ -230,6 +249,69 @@ const KNOWN_SITES: KnownSite[] = [
   // discarded, or a date-only (no `hour`) formatter, or (one exception) an audited
   // display-only interpolation. Every non-exception entry MUST NOT carry `hour:`.
   // ---------------------------------------------------------------------------------
+  {
+    // prepare() derives the request workDate from year/month/day parts only.
+    // No hour is requested or consumed; retain the display-class no-hour guard.
+    file: 'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs',
+    lineText: "const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: route.input.destinationTimezone,",
+    kind: 'display',
+  },
+  {
+    // assertWholeShifts() dateKey() builds the stored-record lookup date bounds
+    // from year/month/day only. This is date parsing, never hour parsing.
+    file: 'plugins/plugin-attendance/lib/attendance-business-trip.cjs',
+    lineText: "const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone:row.destination_timezone,",
+    kind: 'display',
+  },
+  {
+    // normalizeCreate() IANA validity probe; the formatted output is discarded.
+    // No hour option or downstream numeric consumption.
+    file: 'plugins/plugin-attendance/lib/attendance-business-trip.cjs',
+    lineText: "try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date(0)) } catch (_) { fail('INVALID_ZONE') }",
+    kind: 'display',
+  },
+  {
+    // localDateKey() reads year/month/day only for scheduler calendar keys.
+    // 'display' is this guard's no-hour classification, not a UI-use claim.
+    file: 'plugins/plugin-attendance/lib/attendance-daily-calendar.cjs',
+    lineText: "const parts = new Intl.DateTimeFormat('en-CA', {",
+    kind: 'display',
+  },
+  {
+    // localDate() reads only ISO year/month/day parts to build a date key.
+    // calendar/numberingSystem are explicit; no hour part is requested.
+    file: 'plugins/plugin-attendance/lib/attendance-timezone-read-context.cjs',
+    lineText: "const parts = new Intl.DateTimeFormat('en-CA', {",
+    kind: 'display',
+  },
+  {
+    // Target DTO IANA validity probe. Constructor-only; no formatter escapes
+    // and no output is formatted or parsed.
+    file: 'plugins/plugin-attendance/lib/attendance-timezone-target-routes.cjs',
+    lineText: "try { new Intl.DateTimeFormat('en-US', { timeZone: target.timezone }) } catch {",
+    kind: 'display',
+  },
+  {
+    // Transition-date input IANA validity probe; format(from) is discarded.
+    // Actual date bounds use UTC ISO dates, not this formatter's output.
+    file: 'plugins/plugin-attendance/lib/attendance-trip-context-transition-dates.cjs',
+    lineText: "try { new Intl.DateTimeFormat('en-US',{timeZone:timezone}).format(from) } catch (_) { fail() }",
+    kind: 'display',
+  },
+  {
+    // tasks/task-dates.ts `getFormatter()` cache key — resolvedOptions().timeZone only
+    // canonicalizes the zone name; the formatter is never formatted or parsed.
+    file: 'packages/core-backend/src/tasks/task-dates.ts',
+    lineText: "cacheKey = new Intl.DateTimeFormat('en-US', { timeZone }).resolvedOptions().timeZone",
+    kind: 'display',
+  },
+  {
+    // tasks/task-dates.ts `canonicalTimeZoneName()` — resolvedOptions().timeZone only
+    // canonicalizes the zone name; the formatter is never formatted or parsed.
+    file: 'packages/core-backend/src/tasks/task-dates.ts',
+    lineText: "return new Intl.DateTimeFormat('en-US', { timeZone }).resolvedOptions().timeZone",
+    kind: 'display',
+  },
   {
     // elearning-credit-policy.ts `normalizeElearningCreditTimeZone()` — the formatter
     // output is never formatted or parsed; resolvedOptions() only canonicalizes the
@@ -302,6 +384,13 @@ const KNOWN_SITES: KnownSite[] = [
     // attendance-work-date-resolver.cjs `isValidTimeZone()` — validity probe.
     file: 'plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs',
     lineText: "new Intl.DateTimeFormat('en-US', { timeZone: value.trim() }).format(new Date(0))",
+    kind: 'display',
+  },
+  {
+    // attendance-history-reconcile.mjs `localDay()` — formatToParts consumed,
+    // but only year/month/day parts; no `hour` requested.
+    file: 'scripts/ops/attendance-history-reconcile.mjs',
+    lineText: "const parts = new Intl.DateTimeFormat('en-CA', {",
     kind: 'display',
   },
   {
@@ -663,7 +752,13 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     expect(candidates.length).toBe(KNOWN_SITES.length)
     // 25 = the previously audited 23 sites + the two display-class credit-policy sites
     // above: IANA canonicalization and the hour-free local credit-day key.
-    expect(KNOWN_SITES.length).toBe(25)
+    // 28 = 25 + the three task-dates.ts sites (one parsing formatter with hourCycle 'h23', two
+    // resolvedOptions-only canonicalizations).
+    // 29 = 28 + the hour-free history-reconcile local-day key.
+    // 31 = 29 + two hour-free attendance timezone validity probes.
+    // 37 = 31 + three hour-free multi-timezone date keys and three validity probes.
+    // 38 = 37 + the daily scheduler's hour-free year/month/day key.
+    expect(KNOWN_SITES.length).toBe(38)
   })
 
   it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {

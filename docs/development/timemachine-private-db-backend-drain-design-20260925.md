@@ -1,0 +1,31 @@
+# Private-database backend drain before the checkpoint clean assertion
+
+Base: `main` @ `5e3e0b25ad45ce50cf73331fbf5170fb30015673`, merged into this branch. The earlier merge of `ba6300ce4034515320026ec365bbc6e43f858cb4` is an ancestor of that commit.
+
+## Contract
+
+`packages/core-backend/scripts/verify-recovery-manual-checkpoint.mts` drops its private database only after `assertPrivateDatabaseBackendsExited` reports no backend whose `datname` is that database. The function lives in `packages/core-backend/scripts/private-db-backend-drain.js`. The checkpoint script imports it by name. The helper is plain CommonJS (`exports.name =`) because that is a shape Node can link from an ESM importer. A neighboring `.ts` file is compiled by tsx as CommonJS in a shape that hides the named export, and the checkpoint then fails at startup. `client.end()` and Kysely `db.destroy()` return when the client has asked to quit. PostgreSQL removes the backend from `pg_stat_activity` later. One immediate count can observe a backend that is already exiting.
+
+The clean check polls for up to 10 seconds (200 ms interval). Zero rows ends the wait and the existing `DROP DATABASE` follows. A backend that is still attached when the deadline passes throws. The script does not call `pg_terminate_backend`. A held client, an autovacuum worker, or any other backend still counts as a failure.
+
+The census connection is the script's admin client on the `postgres` database, so it is not a row in this count.
+
+## Values-free failure text
+
+The census SQL is `SELECT pid, backend_type, state, round(extract(epoch FROM now()-backend_start))::int AS age_seconds`. It does not select `query`. Statement text can embed row values, which is the same rule as review #4799 P2-2 on the scratch-database drain. `usename` is omitted: that residual census does not log role names. The caller-chosen connection label is omitted too, matching the diagnostic #6059 prints for a remaining synthetic connection. `pid` is a server-assigned integer. `backend_type` and `state` are server categories, not client text. `age_seconds` is a non-negative integer, so the start timestamp itself is not printed.
+
+Each emitted field is charset-bounded. `pid` and `age_seconds` are integers or `unknown`. `backend_type` and `state` keep letters, digits, dot, underscore, hyphen, and single spaces. Anything else is dropped before the string is thrown. On failure the helper writes those rows to stderr with the marker `SYNTHETIC_DATABASE_CONNECTIONS_REMAIN`, then throws.
+
+## Observation this wait is aimed at
+
+On draft #6051 head `abfb1f824`, `test (20.x)` job `108158496668` failed the previous one-shot assertion with `1 !== 0` after the checkpoint PASS lines. The same commit's `test (18.x)` job `108158496843` and `main` `4189aa096` `test (20.x)` job `108170710632` both printed `CLEAN: owned database and connections = 0`. A later attempt of the same head failed the same way. This change does not edit #6051.
+
+## Tests
+
+The source-string test is only a wiring guard. Behavior is proved on a throwaway database:
+
+- Positive: a client stays connected for about 1.5 seconds and is then closed. The call passes `drainTimeoutMs: 8000` and `pollIntervalMs: 100`. The helper returns inside that 8 second limit, and the elapsed time shows it waited. That limit is not the default.
+- Negative, short limit: a client runs `pg_sleep` past an explicit `drainTimeoutMs: 400` (`pollIntervalMs: 50`). The helper throws. Stderr contains `SYNTHETIC_DATABASE_CONNECTIONS_REMAIN`. The message contains `pid`, `backend_type`, `state`, and `age_seconds`, and it does not contain the caller-chosen connection label or the statement text. That 400 ms limit is not the default.
+- Negative, default limit: the same held client, and the call passes no options. The helper uses `PRIVATE_DB_BACKEND_DRAIN_MS` (10 seconds) and `PRIVATE_DB_BACKEND_POLL_MS` (200 ms). It throws at about 10 seconds with the same values-free identifiers, the same stderr marker, and without the statement text.
+
+CI runs that file from plugin-tests.yml job `test` (check names `test (18.x)` and `test (20.x)`), step `Run private-db backend drain proof`, after Postgres is up. The default unit Vitest config excludes the file so the no-database job cannot skip it.

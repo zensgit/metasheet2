@@ -182,6 +182,8 @@ export interface AttendanceW7GroupEffectiveResolverDepsV1 {
 }
 
 export interface AttendanceW7GroupEffectiveResolverInputV1 {
+  /** Trusted live authority; absent preserves existing producer semantics. */
+  effectiveTimezone?: string
   orgId: string
   userId: string
   workDate: string
@@ -478,7 +480,7 @@ export async function resolveW7GroupEffectiveFactsInTransactionV1(
       // shift's own timezone wins, then the caller's. The group row's
       // timezone is the fallback between them — it is group POLICY, which the
       // legacy per-user path never had.
-      timezone: shiftTimezone ?? groupTimezone ?? input.timezone,
+      timezone: input.effectiveTimezone ?? shiftTimezone ?? groupTimezone ?? input.timezone,
       calculationGroupId,
       shiftId,
       isWorkday: input.isWorkday !== false,

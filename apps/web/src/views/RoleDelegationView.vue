@@ -144,9 +144,15 @@
 
           <div class="delegation-page__section">
             <h3>委派操作</h3>
+            <!--
+              Two lists on purpose. The server answers two different sets: `roleCatalog` is what
+              this delegate may ASSIGN, `delegableRoles` is the member's roles this delegate may
+              REVOKE. They differ (a role carrying ordinary codes outside the namespace may be
+              revoked but not granted), so a single dropdown fed by the catalog hid revocable roles.
+            -->
             <div class="delegation-page__role-actions">
-              <select v-model="selectedRoleId" class="delegation-page__input">
-                <option value="">请选择角色</option>
+              <select v-model="selectedRoleId" class="delegation-page__input" data-testid="delegation-assign-role">
+                <option value="">请选择要分配的角色</option>
                 <option v-for="role in selectedAccess.roleCatalog" :key="role.id" :value="role.id">
                   {{ role.name }} ({{ role.id }})
                 </option>
@@ -154,7 +160,15 @@
               <button class="delegation-page__button" type="button" :disabled="busy || !selectedRoleId" @click="void updateRole('assign')">
                 分配角色
               </button>
-              <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="busy || !selectedRoleId" @click="void updateRole('unassign')">
+            </div>
+            <div class="delegation-page__role-actions">
+              <select v-model="selectedRevokeRoleId" class="delegation-page__input" data-testid="delegation-revoke-role">
+                <option value="">请选择要撤销的角色</option>
+                <option v-for="roleId in selectedAccess.delegableRoles" :key="roleId" :value="roleId">
+                  {{ revocableRoleLabel(roleId) }}
+                </option>
+              </select>
+              <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="busy || !selectedRevokeRoleId" @click="void updateRole('unassign')">
                 撤销角色
               </button>
             </div>
@@ -622,6 +636,7 @@ const templates = ref<ScopeTemplateSummary[]>([])
 const memberGroups = ref<MemberGroupSummary[]>([])
 const selectedUserId = ref('')
 const selectedRoleId = ref('')
+const selectedRevokeRoleId = ref('')
 const selectedScopeNamespace = ref('')
 const selectedDepartmentId = ref('')
 const selectedAudienceGroupId = ref('')
@@ -906,6 +921,7 @@ async function loadUsers(): Promise<void> {
       selectedAccess.value = null
       selectedScopeConfig.value = null
       selectedRoleId.value = ''
+      selectedRevokeRoleId.value = ''
       selectedDepartmentId.value = ''
       selectedAudienceGroupId.value = ''
     }
@@ -922,6 +938,7 @@ async function loadUsers(): Promise<void> {
 async function selectUser(userId: string): Promise<void> {
   selectedUserId.value = userId
   selectedRoleId.value = ''
+  selectedRevokeRoleId.value = ''
   selectedDepartmentId.value = ''
   selectedAudienceGroupId.value = ''
   try {
@@ -1001,13 +1018,21 @@ async function loadScopeConfig(userId: string): Promise<void> {
   }
 }
 
+/** A revocable role id, named from the assignable catalog when it is there (it may not be). */
+function revocableRoleLabel(roleId: string): string {
+  const role = selectedAccess.value?.roleCatalog.find((candidate) => candidate.id === roleId)
+  return role ? `${role.name} (${role.id})` : roleId
+}
+
 async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
-  if (!selectedUserId.value || !selectedRoleId.value) return
+  // Assign picks from the assignable catalog, revoke from the server's revocable list.
+  const roleId = action === 'assign' ? selectedRoleId.value : selectedRevokeRoleId.value
+  if (!selectedUserId.value || !roleId) return
   busy.value = true
   try {
     const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(selectedUserId.value)}/roles/${action}`, {
       method: 'POST',
-      body: JSON.stringify({ roleId: selectedRoleId.value }),
+      body: JSON.stringify({ roleId }),
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
@@ -1015,6 +1040,9 @@ async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
     }
 
     selectedAccess.value = payload.data as DelegatedUserAccess
+    if (!selectedAccess.value.delegableRoles.includes(selectedRevokeRoleId.value)) {
+      selectedRevokeRoleId.value = ''
+    }
     if (summary.value?.isPlatformAdmin) {
       await loadScopeConfig(selectedUserId.value)
     }

@@ -159,6 +159,7 @@ function requestJson(
 describeDb('W7-1b — issuance seam, mirror gate and ruling-7 controls (real host, real DB)', () => {
   let server: MetaSheetServer | undefined
   let pool: Pool
+  const seededDefaultRuleIds: string[] = []
   let seam: SeamFn
   let vectors: { entries: Record<string, { context: string }> }
 
@@ -259,6 +260,16 @@ describeDb('W7-1b — issuance seam, mirror gate and ruling-7 controls (real hos
       `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true) ON CONFLICT DO NOTHING`,
       [userId, orgId],
     )
+    if (orgId === 'default') return
+    const defaultRule = await pool.query<{ id: string }>(
+      `INSERT INTO attendance_rules
+       (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, $2, 'owned timezone fixture', $3, 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
+       RETURNING id`,
+      [randomUUID(), orgId, 'Asia/Shanghai'],
+    )
+    seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id))
   }
 
   /** A group that the facts resolver will accept as FULLY EFFECTIVE. Every
@@ -418,6 +429,7 @@ describeDb('W7-1b — issuance seam, mirror gate and ruling-7 controls (real hos
     await pool
       ?.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[groupUser, gapUser]])
       .catch(() => undefined)
+    await pool?.query('DELETE FROM attendance_rules WHERE id = ANY($1::uuid[])', [seededDefaultRuleIds]).catch(() => undefined)
     await pool?.end()
     await server?.stop?.()
     if (priorW4 === undefined) delete process.env[W4_ENV]

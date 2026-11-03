@@ -46,10 +46,40 @@
             @click="onSheetActivate(s)"
             @keydown="onTreeKeydown($event, { key: sheetKey(s.id), type: 'sheet', id: s.id })"
           >
-            <span class="meta-view-rail__chevron" aria-hidden="true">
-              <el-icon><component :is="s.id === activeSheetId ? IconCaretBottom : IconCaretRight" /></el-icon>
+            <!--
+              Customer field report 2026-10-21 (#6): the chevron of the ACTIVE sheet toggles its view
+              list open/closed (local fold state) and still emits the same-id select-sheet the button
+              would have emitted (MultitableWorkbench.vue's onSelectSheet uses it to leave the dashboard;
+              for the active sheet it never switches anything). On any other sheet the click falls
+              through to the button and activates that sheet, which auto-expands it.
+            -->
+            <span
+              class="meta-view-rail__chevron"
+              data-testid="rail-sheet-chevron"
+              aria-hidden="true"
+              @click="onChevronClick($event, s)"
+            >
+              <el-icon><component :is="isSheetExpanded(s) ? IconCaretBottom : IconCaretRight" /></el-icon>
             </span>
             <span class="meta-view-rail__sheet-name">{{ s.name }}</span>
+            <!--
+              复制数据表 S1 provenance badges (ADR CS-14 / §3): driven ONLY by the server's copiedFrom,
+              read through the api client's single adapter (readSheetCopiedFrom) — absent/null/malformed
+              renders nothing. 「不随 PLM 刷新」 only for the exact 'plugin-managed' kind.
+            -->
+            <template v-if="copiedFromBySheetId.get(s.id)">
+              <span
+                class="meta-view-rail__copy-badge"
+                data-testid="rail-sheet-copy-badge"
+                :title="railLabel('rail.badgeSnapshotCopyTitle', isZh)"
+              >{{ railLabel('rail.badgeSnapshotCopy', isZh) }}</span>
+              <span
+                v-if="copiedFromBySheetId.get(s.id)?.pluginManaged"
+                class="meta-view-rail__copy-badge meta-view-rail__copy-badge--plm"
+                data-testid="rail-sheet-no-plm-refresh-badge"
+                :title="railLabel('rail.badgeNoPlmRefreshTitle', isZh)"
+              >{{ railLabel('rail.badgeNoPlmRefresh', isZh) }}</span>
+            </template>
           </button>
           <!--
             Rename affordance (feat/multitable-rename). Hiding is UX only — the server is the real
@@ -92,6 +122,22 @@
             @click.stop="startRenameSheet(s)"
           >&#x270E;</button>
           <!--
+            Copy affordance (复制数据表 S1, ADR CS-2 entry ①). Same single-sheet discipline as delete below:
+            `canCopySheet` is the server-derived /context bit for the CURRENT sheet (full-table read on it ∧
+            its Base writable), so it renders on the SELECTED row only, never on the rail's other rows.
+            Hidden while that row is being renamed. Hiding is UX only — POST /sheets/:id/copy re-runs
+            both gates. Click only emits; the dialog lives in MultitableWorkbench.vue.
+          -->
+          <button
+            v-if="canCopySheet && s.id === activeSheetId && renamingSheetId !== s.id"
+            type="button"
+            class="meta-view-rail__sheet-rename-btn"
+            data-testid="rail-sheet-copy"
+            :title="railLabel('rail.copySheet', isZh)"
+            :aria-label="railLabel('rail.copySheet', isZh)"
+            @click.stop="emit('copy-sheet', s.id)"
+          ><el-icon><IconCopyDocument /></el-icon></button>
+          <!--
             Delete affordance. Rendered for the SELECTED sheet only: `canDeleteSheet` is the
             server-derived, single-sheet authority bit /context computes for the current sheet
             (hasSheetLifecycleAuthority — NOT canManageFields), so it says nothing about the rail's
@@ -110,7 +156,7 @@
             @click.stop="emit('delete-sheet', s.id)"
           >&#x1F5D1;</button>
         </div>
-        <ul v-if="s.id === activeSheetId && views.length" role="group" class="meta-view-rail__views">
+        <ul v-if="isSheetExpanded(s) && views.length" role="group" class="meta-view-rail__views">
           <li v-for="v in views" :key="v.id" class="meta-view-rail__view-row">
             <button
               role="treeitem"
@@ -161,6 +207,7 @@ import type { Component } from 'vue'
 import type { MetaSheet, MetaView } from '../types'
 import { useLocale } from '../../composables/useLocale'
 import { railLabel } from '../utils/meta-sheet-view-rail-labels'
+import { readSheetCopiedFrom } from '../api/client'
 import { ElIcon } from 'element-plus'
 import {
   Grid as IconGrid,
@@ -173,6 +220,7 @@ import {
   Share as IconHierarchy,
   CaretRight as IconCaretRight,
   CaretBottom as IconCaretBottom,
+  CopyDocument as IconCopyDocument,
 } from '@element-plus/icons-vue'
 
 const props = defineProps<{
@@ -188,6 +236,9 @@ const props = defineProps<{
   // Delete affordance: the server-derived MetaCapabilities.canDeleteSheet bit for the CURRENT sheet
   // (single-sheet by construction — see /context). Absent/false hides the trash button (fail-closed).
   canDeleteSheet?: boolean
+  // 复制数据表 S1: the server-derived MetaCapabilities.canCopySheet bit for the CURRENT sheet (/context).
+  // Absent/false hides the copy button (fail-closed, same discipline as canDeleteSheet).
+  canCopySheet?: boolean
   // Slice 3: flag-derived session capability (MetaCapabilities.personalViewsEnabled) — absent/false hides
   // the toggle entirely (G-FE-4). NOT a client-side env const.
   personalViewsEnabled?: boolean
@@ -201,10 +252,14 @@ const emit = defineEmits<{
   (e: 'toggle-personal', viewId: string): void
   (e: 'rename-sheet', id: string, name: string): void
   (e: 'delete-sheet', id: string): void
+  (e: 'copy-sheet', id: string): void
 }>()
 
 const { isZh } = useLocale()
 const personalToggleLabel = computed(() => (isZh.value ? '个人视图' : 'My view'))
+
+// Copy provenance per sheet, mapped ONCE per sheets change through the api client's single adapter.
+const copiedFromBySheetId = computed(() => new Map(props.sheets.map((s) => [s.id, readSheetCopiedFrom(s)])))
 
 function onAddSheet() {
   const name = `Sheet ${props.sheets.length + 1}`
@@ -243,6 +298,16 @@ interface FlatNode {
   id: string
 }
 
+// Customer field report 2026-10-21 (#6): only the active sheet can be expanded (its views are the only
+// ones loaded), and it is expanded by default — activating a sheet always shows its views. The user can
+// fold the active sheet via its chevron (or ArrowLeft); that fold is local UI state and is cleared
+// whenever the active sheet changes, so the next activation auto-expands again.
+const collapsedSheetId = ref<string | null>(null)
+watch(() => props.activeSheetId, () => { collapsedSheetId.value = null })
+function isSheetExpanded(s: MetaSheet): boolean {
+  return s.id === props.activeSheetId && collapsedSheetId.value !== s.id
+}
+
 // Flattened, DOM-order list of every focusable tree node: each sheet, and — immediately after the
 // ACTIVE sheet only — its view leaves. `views` only ever holds the active sheet's views (§1.3 data
 // invariant, enforced by the consumer), so this iteration order already matches the design's key map
@@ -251,7 +316,7 @@ const flatNodes = computed<FlatNode[]>(() => {
   const nodes: FlatNode[] = []
   for (const s of props.sheets) {
     nodes.push({ key: sheetKey(s.id), type: 'sheet', id: s.id })
-    if (s.id === props.activeSheetId) {
+    if (isSheetExpanded(s)) {
       for (const v of props.views) {
         nodes.push({ key: viewKey(v.id), type: 'view', id: v.id })
       }
@@ -299,7 +364,8 @@ function sheetAriaExpanded(s: MetaSheet): 'true' | 'false' | undefined {
   // views must not claim to be expanded (nothing is actually shown). Non-active sheets are "false"
   // (collapsed, but expandable via activation). See design §5.3.
   if (s.id !== props.activeSheetId) return 'false'
-  return props.views.length > 0 ? 'true' : undefined
+  if (props.views.length === 0) return undefined
+  return isSheetExpanded(s) ? 'true' : 'false'
 }
 
 async function moveFocusTo(key: string) {
@@ -312,6 +378,17 @@ async function moveFocusTo(key: string) {
 
 function onSheetActivate(s: MetaSheet) {
   focusedKey.value = sheetKey(s.id)
+  // Clicking a folded active sheet's name unfolds it again (same as activating any sheet).
+  if (collapsedSheetId.value === s.id) collapsedSheetId.value = null
+  emit('select-sheet', s.id)
+}
+
+function onChevronClick(event: MouseEvent, s: MetaSheet) {
+  if (s.id !== props.activeSheetId) return // fall through: the button click activates (and expands) it
+  event.stopPropagation() // the button's own handler would unfold a folded sheet
+  focusedKey.value = sheetKey(s.id)
+  collapsedSheetId.value = collapsedSheetId.value === s.id ? null : s.id
+  // Keep the button's same-id emit: the workbench returns from the dashboard to the grid on it.
   emit('select-sheet', s.id)
 }
 
@@ -367,9 +444,14 @@ function onTreeKeydown(event: KeyboardEvent, node: FlatNode) {
     }
     case 'ArrowRight': {
       event.preventDefault()
-      // Only the ACTIVE (already-expanded) sheet has a first view leaf to move into; a non-active
-      // sheet is a no-op (expanding it would require activating it, which arrow keys never do).
+      // Only the ACTIVE sheet has view leaves; a non-active sheet is a no-op (expanding it would
+      // require activating it, which arrow keys never do). A folded active sheet unfolds first
+      // (focus stays on it), an unfolded one moves focus into its first view.
       if (node.type === 'sheet' && node.id === props.activeSheetId) {
+        if (collapsedSheetId.value === node.id) {
+          collapsedSheetId.value = null
+          break
+        }
         const firstView = nodes.find((n) => n.type === 'view')
         if (firstView) void moveFocusTo(firstView.key)
       }
@@ -377,9 +459,10 @@ function onTreeKeydown(event: KeyboardEvent, node: FlatNode) {
     }
     case 'ArrowLeft': {
       event.preventDefault()
-      // A view leaf's parent is always the active sheet (§1.3); a sheet node is a no-op (collapse is
-      // a derived state, not something arrow keys can "undo").
+      // A view leaf's parent is always the active sheet (§1.3). On the active sheet node itself
+      // ArrowLeft folds its view list (focus stays put); on any other sheet it is a no-op.
       if (node.type === 'view') void moveFocusTo(sheetKey(props.activeSheetId))
+      else if (node.id === props.activeSheetId && props.views.length > 0) collapsedSheetId.value = node.id
       break
     }
     case 'Home': {
@@ -476,6 +559,22 @@ function onTreeKeydown(event: KeyboardEvent, node: FlatNode) {
 .meta-view-rail__sheet-rename-cancel:hover { background: var(--ms-bg-card); color: var(--ms-color-danger); }
 .meta-view-rail__chevron { display: inline-flex; align-items: center; width: 14px; flex-shrink: 0; font-size: 12px; color: var(--ms-text-3); }
 .meta-view-rail__sheet-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 复制数据表 S1 provenance badges — token-only like the rest of this file (T6 gate). */
+.meta-view-rail__copy-badge {
+  flex-shrink: 0;
+  padding: 0 var(--ms-space-1);
+  border-radius: var(--ms-radius-sm);
+  background: var(--el-color-info-light-9);
+  color: var(--ms-color-info);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.meta-view-rail__copy-badge--plm {
+  background: var(--el-color-warning-light-9);
+  color: var(--ms-color-warning);
+}
 .meta-view-rail__views { list-style: none; margin: 0; padding: 0; }
 .meta-view-rail__view-row { display: flex; align-items: center; gap: var(--ms-space-1); padding-right: var(--ms-space-2); }
 .meta-view-rail__view {

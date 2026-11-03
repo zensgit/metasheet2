@@ -236,7 +236,7 @@ export class ApprovalBreachNotifier {
   }
 
   private composeMessage(instanceId: string, ctx: ApprovalBreachContext | undefined): BreachMessage {
-    const templateName = ctx?.templateName?.trim() || '未命名模板'
+    const templateName = ctx?.templateName?.trim() || '未命名表单'
     const requester = ctx?.requesterName?.trim() || '未知申请人'
     const node = ctx?.currentNodeKey?.trim() || '未知节点'
     const startedAt = ctx?.startedAt ? formatTimestamp(ctx.startedAt) : '未知'
@@ -261,7 +261,7 @@ export class ApprovalBreachNotifier {
     ctx: ApprovalBreachContext | undefined,
     assigneeIds: string[],
   ): BreachMessage {
-    const templateName = ctx?.templateName?.trim() || '未命名模板'
+    const templateName = ctx?.templateName?.trim() || '未命名表单'
     const node = ctx?.currentNodeKey?.trim() || '未知节点'
     const approvers = Array.isArray(assigneeIds) && assigneeIds.length > 0 ? assigneeIds.join('、') : '当前审批人'
     const shortId = abbreviateId(instanceId)

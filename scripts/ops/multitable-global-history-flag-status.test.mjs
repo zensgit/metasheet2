@@ -175,6 +175,23 @@ test('buildAssessment stops (without --strict) on side-door-without-capture', ()
   assert.match(assessment.stops.join('\n'), /side-door-without-capture/)
 })
 
+test('buildAssessment stops on archive ON with a non-literal writer-fence value', () => {
+  const assessment = buildAssessment({
+    backend: { image: 'backend:abc', status: 'running' },
+    web: { image: 'web:abc', status: 'running' },
+    flags: collectFlagMapFromEnvText([
+      'MULTITABLE_RECOVERY_ARCHIVE_ENABLED=true',
+      'MULTITABLE_ENABLE_WRITER_FENCE=TRUE',
+    ].join('\n')),
+    health: null,
+  })
+  assert.equal(assessment.ok, false)
+  assert.deepEqual(assessment.violations.map(({ id, missing }) => ({ id, missing })), [{
+    id: 'archive-without-exact-writer-fence',
+    missing: ['MULTITABLE_ENABLE_WRITER_FENCE'],
+  }])
+})
+
 test('buildAssessment stops (without --strict) on undelete-without-revert-gate (#4261 follow-up)', () => {
   const assessment = buildAssessment({
     backend: { image: 'backend:abc', status: 'running' },

@@ -296,14 +296,15 @@ describeIfDatabase('W4C-3b P12 request snapshots (real PostgreSQL)', () => {
           [orgId],
         )
         await client.query(
-          `INSERT INTO approval_instances (id, status, version)
-           VALUES ($1, 'pending', 0), ($2, 'pending', 0)`,
+          `INSERT INTO approval_instances (id, status, version, workflow_key)
+           VALUES ($1, 'pending', 0, 'attendance.request'), ($2, 'pending', 0, 'attendance.request')`,
           [approvalId, unrelatedApprovalId],
         )
         await client.query(
           `INSERT INTO attendance_requests
-             (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id)
-           VALUES ($1::uuid, $2, $3, '2026-08-01', 'leave', 'terminal', 'pending', $4)`,
+             (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id,
+              approval_workflow_key)
+           VALUES ($1::uuid, $2, $3, '2026-08-01', 'leave', 'terminal', 'pending', $4, 'attendance.request')`,
           [requestId, subjectUserId, orgId, approvalId],
         )
 
@@ -405,14 +406,15 @@ describeIfDatabase('W4C-3b P12 request snapshots (real PostgreSQL)', () => {
           [orgId],
         )
         await client.query(
-          `INSERT INTO approval_instances (id, status, version)
-           VALUES ($1, 'pending', 0)`,
+          `INSERT INTO approval_instances (id, status, version, workflow_key)
+           VALUES ($1, 'pending', 0, 'attendance.request')`,
           [approvalId],
         )
         await client.query(
           `INSERT INTO attendance_requests
-             (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id)
-           VALUES ($1::uuid, $2, $3, '2026-08-01', 'leave', 'pre-w4', 'pending', $4)`,
+             (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id,
+              approval_workflow_key)
+           VALUES ($1::uuid, $2, $3, '2026-08-01', 'leave', 'pre-w4', 'pending', $4, 'attendance.request')`,
           [requestId, subjectUserId, orgId, approvalId],
         )
 

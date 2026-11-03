@@ -45,7 +45,7 @@ async function assertExpandedFiltersFit(page: Page, viewport: { width: number; h
     page.locator('#attendance-to-date'),
     page.locator('#attendance-org-id'),
     page.locator('#attendance-user-id'),
-    page.locator('[data-attendance-history-filters] button'),
+    page.locator('[data-attendance-history-filters] button.attendance-ew__history-filter-control'),
   ]
   for (const control of controls) {
     await expect(control).toBeVisible()

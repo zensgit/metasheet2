@@ -1,7 +1,10 @@
+import { Kysely, PostgresDialect } from 'kysely'
+import { up as timezonePolicyUp } from '../../src/db/migrations/zzzz20261012100000_create_attendance_timezone_policy'
 /**
  * P2-G: real SQL count legs for OD-W4C-60 group/batch result semantics.
  */
 import crypto from 'node:crypto'
+import { acquireAttendanceImportTimezonePrefixV1, prepareAttendanceImportTimezoneSourceV1, registerAttendanceRequestTimezoneSourceGuardV1 } from '../../src/attendance/attendance-business-trip-locks'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Pool, type PoolClient } from 'pg'
 import { applyAttendanceLegacyGroupEffectsV1 } from '../../src/attendance/w4c3a-legacy-plan-group-effects'
@@ -10,6 +13,7 @@ import {
 } from '../../src/attendance/w4c3a-legacy-plan-batch-effects'
 import type { VerifiedAttendanceLegacyPlanV1 } from '../../src/attendance/w4c3a-legacy-plan-worker'
 import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
+import { createAttendanceLegacyPlanCommitConnectionV1 } from '../../src/attendance/w4c3a-legacy-plan-commit-connection'
 
 const dbUrl =
   process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -17,12 +21,7 @@ const describeIfDatabase = dbUrl ? describe : describe.skip
 const run = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
 
 function trx(client: PoolClient): AttendanceW4TransactionClientV1 {
-  return {
-    query: (text, values) =>
-      client.query(text, values as unknown[]) as unknown as Promise<{
-        rows: Array<Record<string, unknown>>
-      }>,
-  }
+  return createAttendanceLegacyPlanCommitConnectionV1(client)
 }
 
 function plan(
@@ -105,9 +104,27 @@ describeIfDatabase('W4C-3a group effect SQL counts (real PostgreSQL)', () => {
         updated_at timestamptz DEFAULT now(),
         UNIQUE (org_id, group_id, user_id)
       )`)
+    await pool.query(`
+      CREATE TABLE users (
+        id text PRIMARY KEY,
+        is_active boolean NOT NULL DEFAULT true
+      )`)
+    await pool.query(`
+      CREATE TABLE user_orgs (
+        user_id text NOT NULL,
+        org_id text NOT NULL,
+        is_active boolean NOT NULL DEFAULT true,
+        PRIMARY KEY (user_id, org_id)
+      )`)
+    await pool.query("CREATE TABLE attendance_rules (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), timezone text NOT NULL DEFAULT 'UTC')")
+    await timezonePolicyUp(new Kysely({ dialect: new PostgresDialect({ pool }) }))
+    // This counts-only fixture has no runtime/calendar data. Real resolver
+    // integration is exercised separately in attendance-timezone-runtime.db.test.
+    registerAttendanceRequestTimezoneSourceGuardV1(async () => async () => {})
   }, 60_000)
 
   afterAll(async () => {
+    registerAttendanceRequestTimezoneSourceGuardV1(null)
     await pool?.end().catch(() => undefined)
     if (adminPool) {
       await adminPool.query(`DROP DATABASE IF EXISTS ${scratchName}`).catch(() => undefined)
@@ -126,6 +143,9 @@ describeIfDatabase('W4C-3a group effect SQL counts (real PostgreSQL)', () => {
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
+      const prepared = trx(client)
+      await acquireAttendanceImportTimezonePrefixV1(prepared, orgId)
+      await prepareAttendanceImportTimezoneSourceV1(prepared, orgId)
       // Frozen ensure_group against an existing name (conflict-update path).
       const withEnsure = plan(orgId, [
         {
@@ -140,7 +160,7 @@ describeIfDatabase('W4C-3a group effect SQL counts (real PostgreSQL)', () => {
         },
       ])
       const created = await applyAttendanceLegacyGroupEffectsV1(
-        trx(client),
+        prepared,
         withEnsure,
       )
       expect(created.groupCreated).toBe(1)
@@ -148,7 +168,7 @@ describeIfDatabase('W4C-3a group effect SQL counts (real PostgreSQL)', () => {
 
       // Existing frozen-map group with no ensure_group effect → 0.
       const noEnsure = plan(orgId, [])
-      const none = await applyAttendanceLegacyGroupEffectsV1(trx(client), noEnsure)
+      const none = await applyAttendanceLegacyGroupEffectsV1(prepared, noEnsure)
       expect(none).toEqual({ groupCreated: 0, groupMembersAdded: 0 })
       await client.query('ROLLBACK')
     } finally {
@@ -170,9 +190,20 @@ describeIfDatabase('W4C-3a group effect SQL counts (real PostgreSQL)', () => {
        VALUES ($1, $2, $3)`,
       [orgId, groupId, userId],
     )
+    await pool.query(
+      `INSERT INTO users (id, is_active) VALUES ($1, true)`,
+      [userId],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`,
+      [userId, orgId],
+    )
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
+      const prepared = trx(client)
+      await acquireAttendanceImportTimezonePrefixV1(prepared, orgId)
+      await prepareAttendanceImportTimezoneSourceV1(prepared, orgId)
       const withMember = plan(
         orgId,
         [
@@ -187,7 +218,7 @@ describeIfDatabase('W4C-3a group effect SQL counts (real PostgreSQL)', () => {
         { groupCreated: 42, groupMembersAdded: 99, extra: true },
       )
       const result = await applyAttendanceLegacyGroupEffectsV1(
-        trx(client),
+        prepared,
         withMember,
       )
       expect(result.groupCreated).toBe(0)
@@ -201,6 +232,200 @@ describeIfDatabase('W4C-3a group effect SQL counts (real PostgreSQL)', () => {
       expect(meta.extra).toBe(true)
       await client.query('ROLLBACK')
     } finally {
+      client.release()
+    }
+  })
+
+  it('enqueue then deactivate does not insert ensure_member', async () => {
+    const groupId = crypto.randomUUID()
+    const memberId = crypto.randomUUID()
+    const userId = `queued-${run}`
+    await pool.query(
+      `INSERT INTO attendance_groups (id, org_id, name, timezone)
+       VALUES ($1, $2, $3, 'UTC')`,
+      [groupId, orgId, `Queued ${run}`],
+    )
+    await pool.query(`INSERT INTO users (id, is_active) VALUES ($1, true)`, [userId])
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`,
+      [userId, orgId],
+    )
+    await pool.query(
+      `UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2`,
+      [userId, orgId],
+    )
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const prepared = trx(client)
+      await acquireAttendanceImportTimezonePrefixV1(prepared, orgId)
+      await prepareAttendanceImportTimezoneSourceV1(prepared, orgId)
+      await expect(applyAttendanceLegacyGroupEffectsV1(
+        prepared,
+        plan(orgId, [{
+          kind: 'ensure_member',
+          memberId,
+          groupRef: groupId,
+          userId,
+          membershipExistedAtPrepare: false,
+        }]),
+      )).rejects.toThrow('W4C3A_MEMBER_NOT_ACTIVE_IN_ORG')
+      await client.query('ROLLBACK')
+    } finally {
+      client.release()
+    }
+    const written = await pool.query(
+      `SELECT 1 FROM attendance_group_members WHERE org_id = $1 AND user_id = $2`,
+      [orgId, userId],
+    )
+    expect(written.rows).toHaveLength(0)
+  })
+
+  it('holds FOR SHARE on user_orgs and users until the member insert commits', async () => {
+    const groupId = crypto.randomUUID()
+    const memberId = crypto.randomUUID()
+    const userId = `share-${run}`
+    await pool.query(
+      `INSERT INTO attendance_groups (id, org_id, name, timezone)
+       VALUES ($1, $2, $3, 'UTC')`,
+      [groupId, orgId, `Share ${run}`],
+    )
+    await pool.query(`INSERT INTO users (id, is_active) VALUES ($1, true)`, [userId])
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`,
+      [userId, orgId],
+    )
+    const writer = await pool.connect()
+    const deactivator = await pool.connect()
+    try {
+      await writer.query('BEGIN')
+      const prepared = trx(writer)
+      await acquireAttendanceImportTimezonePrefixV1(prepared, orgId)
+      await prepareAttendanceImportTimezoneSourceV1(prepared, orgId)
+      const inserted = await applyAttendanceLegacyGroupEffectsV1(
+        prepared,
+        plan(orgId, [{
+          kind: 'ensure_member',
+          memberId,
+          groupRef: groupId,
+          userId,
+          membershipExistedAtPrepare: false,
+        }]),
+      )
+      expect(inserted.groupMembersAdded).toBe(1)
+      const deactivation = (async () => {
+        await deactivator.query('BEGIN')
+        await deactivator.query(
+          `UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2`,
+          [userId, orgId],
+        )
+        await deactivator.query('COMMIT')
+      })()
+      const pid = Number((await deactivator.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      let blocked = false
+      for (let attempt = 0; attempt < 150; attempt += 1) {
+        const state = await pool.query(
+          `SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1`,
+          [pid],
+        )
+        if (state.rows[0]?.wait_event_type === 'Lock') {
+          blocked = true
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      expect(blocked).toBe(true)
+      const stillActive = await writer.query(
+        `SELECT is_active FROM user_orgs WHERE user_id = $1 AND org_id = $2`,
+        [userId, orgId],
+      )
+      expect(stillActive.rows[0]?.is_active).toBe(true)
+      const member = await writer.query(
+        `SELECT 1 FROM attendance_group_members WHERE org_id = $1 AND user_id = $2`,
+        [orgId, userId],
+      )
+      expect(member.rows).toHaveLength(1)
+      await writer.query('COMMIT')
+      await deactivation
+    } finally {
+      await writer.query('ROLLBACK').catch(() => undefined)
+      await deactivator.query('ROLLBACK').catch(() => undefined)
+      writer.release()
+      deactivator.release()
+    }
+  })
+
+  it('refuses an unprepared group writer before any group insert', async () => {
+    const groupId = crypto.randomUUID()
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await expect(applyAttendanceLegacyGroupEffectsV1(trx(client), plan(orgId, [{
+        kind: 'ensure_group', groupId, normalizedName: 'unprepared', displayName: 'Unprepared',
+        code: null, timezone: 'UTC', ruleSetId: null, groupExistedAtPrepare: false,
+      }]))).rejects.toThrow('ATTENDANCE_TIMEZONE_IMPORT_SOURCE_REQUIRED')
+      expect((await client.query('SELECT COUNT(*)::int AS count FROM attendance_groups WHERE id=$1', [groupId])).rows).toEqual([{ count: 0 }])
+      await client.query('ROLLBACK')
+    } finally {
+      client.release()
+    }
+  })
+
+  it('refuses reuse of a prepared proof after its transaction ended', async () => {
+    const client = await pool.connect()
+    const prepared = trx(client)
+    const groupId = crypto.randomUUID()
+    try {
+      await client.query('BEGIN')
+      await acquireAttendanceImportTimezonePrefixV1(prepared, orgId)
+      await prepareAttendanceImportTimezoneSourceV1(prepared, orgId)
+      await client.query('ROLLBACK')
+      await client.query('BEGIN')
+      await expect(applyAttendanceLegacyGroupEffectsV1(prepared, plan(orgId, [{
+        kind: 'ensure_group', groupId, normalizedName: 'stale-proof', displayName: 'Stale proof',
+        code: null, timezone: 'UTC', ruleSetId: null, groupExistedAtPrepare: false,
+      }]))).rejects.toThrow('ATTENDANCE_TIMEZONE_IMPORT_SOURCE_REQUIRED')
+      expect((await client.query('SELECT COUNT(*)::int AS count FROM attendance_groups WHERE id=$1', [groupId])).rows).toEqual([{ count: 0 }])
+      await client.query('ROLLBACK')
+    } finally {
+      client.release()
+    }
+  })
+
+  it('rolls back actual group DML when the trusted enabled-mode verifier rejects it', async () => {
+    // This minimal SQL fixture proves host delegation and rollback, not timezone resolution.
+    await pool.query("INSERT INTO attendance_timezone_policies(org_id,enabled,updated_by) VALUES ($1,true,'synthetic-native')", [orgId])
+    const client = await pool.connect()
+    const prepared = trx(client)
+    const groupId = crypto.randomUUID()
+    let captured = false
+    let verified = false
+    registerAttendanceRequestTimezoneSourceGuardV1(async (sameTransaction, input) => {
+      expect(sameTransaction).toBe(prepared)
+      expect(input).toEqual({ orgId, userIds: null })
+      expect((await sameTransaction.query('SELECT COUNT(*)::int AS count FROM attendance_groups WHERE id=$1', [groupId])).rows).toEqual([{ count: 0 }])
+      captured = true
+      return async () => {
+        expect((await sameTransaction.query('SELECT COUNT(*)::int AS count FROM attendance_groups WHERE id=$1', [groupId])).rows).toEqual([{ count: 1 }])
+        verified = true
+        throw new Error('ATTENDANCE_TIMEZONE_STARTED_CONTEXT_CONFLICT')
+      }
+    })
+    try {
+      await client.query('BEGIN')
+      await acquireAttendanceImportTimezonePrefixV1(prepared, orgId)
+      await prepareAttendanceImportTimezoneSourceV1(prepared, orgId)
+      await expect(applyAttendanceLegacyGroupEffectsV1(prepared, plan(orgId, [{
+        kind: 'ensure_group', groupId, normalizedName: 'rollback', displayName: 'Rollback',
+        code: null, timezone: 'UTC', ruleSetId: null, groupExistedAtPrepare: false,
+      }]))).rejects.toThrow('ATTENDANCE_TIMEZONE_STARTED_CONTEXT_CONFLICT')
+      expect(captured).toBe(true)
+      expect(verified).toBe(true)
+      await client.query('ROLLBACK')
+      expect((await pool.query('SELECT COUNT(*)::int AS count FROM attendance_groups WHERE id=$1', [groupId])).rows).toEqual([{ count: 0 }])
+    } finally {
+      registerAttendanceRequestTimezoneSourceGuardV1(null)
+      await client.query('ROLLBACK')
       client.release()
     }
   })

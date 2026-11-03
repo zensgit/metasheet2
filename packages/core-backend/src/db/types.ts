@@ -1108,7 +1108,7 @@ export interface AttendanceRequestsTable {
   user_id: string
   org_id: string
   work_date: ColumnType<string, string | undefined, string>
-  request_type: 'missed_check_in' | 'missed_check_out' | 'time_correction' | 'leave' | 'overtime' | 'outdoor_punch' | 'shift_swap' | 'schedule_dispatch'
+  request_type: 'missed_check_in' | 'missed_check_out' | 'time_correction' | 'leave' | 'overtime' | 'outdoor_punch' | 'shift_swap' | 'schedule_dispatch' | 'business_trip'
   requested_in_at: NullableTimestamp
   requested_out_at: NullableTimestamp
   reason: string | null
@@ -1556,6 +1556,8 @@ export interface MultitableWebhooksTable {
   max_retries: number
   retry_base_delay_ms: number | null
   retry_max_delay_ms: number | null
+  /** The sheet this subscription webhook is bound to; NULL = unbound (receives no events). */
+  sheet_id: string | null
 }
 
 export interface MultitableWebhookDeliveriesTable {

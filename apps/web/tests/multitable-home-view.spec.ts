@@ -281,6 +281,48 @@ describe('MultitableHomeView', () => {
     })
   })
 
+  // #5861 回归锁 —— 「使用模板」在途时的第二下点击不许再打一次 installTemplate。
+  // 客户就是在响应被静默丢掉时连点,装出了 4 个同名 Base(222 只读核对)。闸门本体是
+  // useTemplateInstall.installAndOpen 开头的 `if (installingTemplateId.value) return null`
+  // 加卡片的 :disabled="installing";本用例把它钉住 —— 去掉任一条本用例就红。
+  // (权威去重在服务端:同一意图窗口内只落一个 Base，见 core-backend 的
+  //  multitable-template-install-dedupe.test.ts;客户端另有在途合并，见 multitable-phase3.spec.ts。)
+  it('ignores a second 使用模板 click while an install is still running', async () => {
+    mocks.listBases.mockResolvedValue({ bases: [] })
+    mocks.listTemplates.mockResolvedValue({
+      templates: [
+        {
+          id: 'project-tracker',
+          name: 'Project Tracker',
+          description: 'Track launch tasks and owners.',
+          category: 'Project management',
+          icon: 'P',
+          color: '#2563eb',
+          sheets: [{ id: 'template-sheet', name: 'Tasks', fields: [], views: [{ id: 'template-view-grid', name: 'Grid', type: 'grid' }] }],
+        },
+      ],
+    })
+    // 永不 resolve —— 模拟「响应被网络静默吞掉」,installing 一直是 true。
+    mocks.installTemplate.mockImplementation(() => new Promise(() => {}))
+
+    const root = mountView()
+    await flushUi()
+
+    const button = findButton(root, '使用模板')
+    button.click()
+    await flushUi()
+    expect(mocks.installTemplate).toHaveBeenCalledTimes(1)
+
+    // 第二下、第三下:即使绕开按钮的 disabled 直接派发 click,也不许再发一次请求。
+    button.click()
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    expect(mocks.installTemplate).toHaveBeenCalledTimes(1)
+    // 按钮本身也处于禁用态(卡片的 :installing 绑定)。
+    expect(button.disabled).toBe(true)
+  })
+
   it('loads templates and opens an installed template base', async () => {
     mocks.listBases.mockResolvedValue({ bases: [] })
     mocks.listTemplates.mockResolvedValue({

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect } from 'vitest'
 
 import {
   buildRecordFormattingMap,
@@ -10,6 +10,8 @@ import {
   sanitizeRule,
   sanitizeRules,
 } from '../src/multitable/utils/conditional-formatting'
+import { formatDateOnlyValue } from '../src/multitable/utils/field-display'
+import { resetBusinessTimezone, setBusinessTimezone } from '../src/multitable/utils/business-timezone'
 import type {
   ConditionalFormattingRule,
   MetaField,
@@ -195,6 +197,47 @@ describe('evaluateRule — date variants', () => {
     const rule = makeRule({ fieldId: DATE_FIELD.id, operator: 'is_in_last_n_days', value: 7 })
     expect(evaluateRule(rule, onDay(-6), DATE_FIELD, { now: FIXED_NOW })).toBe(true)
     expect(evaluateRule(rule, onDay(-7), DATE_FIELD, { now: FIXED_NOW })).toBe(false)
+  })
+})
+
+// #6204 item 1: a `date` cell holding a stored INSTANT (the PLM refresh writes ISO instants into date columns) is
+// judged on the day the grid shows it on — its business-timezone day (Asia/Shanghai default) — not on its UTC day.
+// 2026-09-17T16:00Z is 2026-09-18 00:00 北京时间; its UTC day (the text's first ten characters) is 09-17.
+describe('evaluateRule — date-only instants use the day the grid shows', () => {
+  const NOW_0918 = Date.parse('2026-09-18T04:00:00.000Z') // 2026-09-18 12:00 北京时间 (UTC day 09-18 too)
+  const cell = (value: unknown) => ({ [DATE_FIELD.id]: value })
+  const rule = (operator: ConditionalFormattingRule['operator'], value?: unknown) =>
+    makeRule({ fieldId: DATE_FIELD.id, operator, value })
+
+  beforeEach(() => resetBusinessTimezone())
+  afterEach(() => resetBusinessTimezone())
+
+  it('an instant at 16:00Z is TODAY on the next business day, not overdue on its UTC day', () => {
+    const instant = '2026-09-17T16:00:00.000Z'
+    expect(formatDateOnlyValue(instant)).toBe('2026-09-18') // the grid cell text — the day the rules must use
+    expect(evaluateRule(rule('is_today'), cell(instant), DATE_FIELD, { now: NOW_0918 })).toBe(true)
+    expect(evaluateRule(rule('is_overdue'), cell(instant), DATE_FIELD, { now: NOW_0918 })).toBe(false)
+    expect(evaluateRule(rule('is_in_last_n_days', 1), cell(instant), DATE_FIELD, { now: NOW_0918 })).toBe(true)
+    expect(evaluateRule(rule('is_in_next_n_days', 1), cell(instant), DATE_FIELD, { now: NOW_0918 })).toBe(true)
+  })
+
+  it('one second earlier (15:59:59Z) is still the previous business day', () => {
+    const instant = '2026-09-17T15:59:59.000Z' // 2026-09-17 23:59:59 北京时间
+    expect(evaluateRule(rule('is_today'), cell(instant), DATE_FIELD, { now: NOW_0918 })).toBe(false)
+    expect(evaluateRule(rule('is_overdue'), cell(instant), DATE_FIELD, { now: NOW_0918 })).toBe(true)
+  })
+
+  it('a day as written keeps that day (no zone math)', () => {
+    expect(evaluateRule(rule('is_today'), cell('2026-09-18'), DATE_FIELD, { now: NOW_0918 })).toBe(true)
+    expect(evaluateRule(rule('is_today'), cell('2026/9/18'), DATE_FIELD, { now: NOW_0918 })).toBe(true)
+    expect(evaluateRule(rule('is_overdue'), cell('2026-09-17'), DATE_FIELD, { now: NOW_0918 })).toBe(true)
+    expect(evaluateRule(rule('is_overdue'), cell('2026-09-18'), DATE_FIELD, { now: NOW_0918 })).toBe(false)
+  })
+
+  it('follows the business timezone, not a fixed offset: the same instant is 09-17 in New York', () => {
+    expect(setBusinessTimezone('America/New_York')).toBe(true)
+    const nowNy = Date.parse('2026-09-17T20:00:00.000Z') // 2026-09-17 16:00 New York
+    expect(evaluateRule(rule('is_today'), cell('2026-09-17T16:00:00.000Z'), DATE_FIELD, { now: nowNy })).toBe(true)
   })
 })
 

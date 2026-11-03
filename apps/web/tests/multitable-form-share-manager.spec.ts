@@ -460,4 +460,101 @@ describe('MetaFormShareManager', () => {
     expect(JSON.stringify(patchCalls)).not.toContain('"accessMode":"public"')
     expect(document.body.textContent).toContain('Clear the allowed users and member groups before switching back to a fully public form.')
   })
+
+  // #5795 — the candidate endpoint is search-required and capped. This mock mirrors that contract.
+  describe('search-required candidates (#5795)', () => {
+    function searchRequiredClient(config = fakeConfig({ accessMode: 'dingtalk' }), opts: { hasMore?: boolean } = {}) {
+      const ok = (body: unknown) =>
+        new Response(JSON.stringify({ data: body }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        if (method === 'GET' && url.includes('/form-share-candidates')) {
+          const q = new URL(url, 'http://fake.invalid').searchParams.get('q') ?? ''
+          if (!q.trim()) {
+            return ok({ items: [], total: 0, limit: 20, query: '', hasMore: false, requiresQuery: true, minQueryLength: 1 })
+          }
+          return ok({
+            items: [
+              { subjectType: 'user', subjectId: 'user_fake_found', label: 'Fake Found', subtitle: 'fake.found@example.invalid', isActive: true, accessLevel: null, dingtalkBound: true, dingtalkGrantEnabled: true, dingtalkPersonDeliveryAvailable: true },
+            ],
+            total: 1,
+            limit: 20,
+            query: q,
+            hasMore: opts.hasMore === true,
+            requiresQuery: false,
+            minQueryLength: 1,
+          })
+        }
+        if (method === 'GET' && url.includes('/form-share')) return ok(config)
+        if (method === 'PATCH' && url.includes('/form-share')) {
+          const body = JSON.parse(init?.body as string)
+          return ok({ ...config, ...body })
+        }
+        return ok({})
+      })
+      return { client: new MultitableApiClient({ fetchFn }), fetchFn }
+    }
+
+    async function typeSearch(value: string) {
+      const search = document.querySelector('[data-form-share-allowlist-search]') as HTMLInputElement
+      search.value = value
+      search.dispatchEvent(new Event('input'))
+      await new Promise<void>((resolve) => setTimeout(resolve, 260))
+      await flushPromises()
+    }
+
+    it('opening the allowlist renders a type-to-search prompt, not "no matching candidates"', async () => {
+      const { client, fetchFn } = searchRequiredClient()
+      mount({ visible: true, sheetId: 'sh_1', viewId: 'v_1', client })
+      await flushPromises()
+
+      const candidateCalls = fetchFn.mock.calls.filter((c: [string, RequestInit?]) => c[0].includes('/form-share-candidates'))
+      expect(candidateCalls.length).toBeGreaterThan(0)
+      expect(candidateCalls[0][0]).not.toContain('q=')
+      const prompt = document.querySelector('[data-form-share-candidates-search-required]')
+      expect(prompt).toBeTruthy()
+      expect(prompt!.textContent).toContain('Type a name, email or group to search.')
+      expect(document.body.textContent).not.toContain('No matching candidates.')
+      expect(document.querySelector('[data-form-share-add-subject]')).toBeNull()
+      expect(document.querySelector('[data-form-share-candidates-truncated]')).toBeNull()
+    })
+
+    it('a typed term fetches with q, drops the prompt, and the result is still addable', async () => {
+      const { client, fetchFn } = searchRequiredClient()
+      mount({ visible: true, sheetId: 'sh_1', viewId: 'v_1', client })
+      await flushPromises()
+      await typeSearch('fake')
+
+      const candidateCalls = fetchFn.mock.calls.filter((c: [string, RequestInit?]) => c[0].includes('/form-share-candidates'))
+      expect(candidateCalls.at(-1)?.[0]).toContain('q=fake')
+      expect(document.querySelector('[data-form-share-candidates-search-required]')).toBeNull()
+      const add = document.querySelector('[data-form-share-add-subject="user:user_fake_found"]') as HTMLButtonElement
+      expect(add).toBeTruthy()
+      add.click()
+      await flushPromises()
+      const patchCalls = fetchFn.mock.calls.filter(
+        (c: [string, RequestInit?]) => c[1]?.method === 'PATCH' && c[0].includes('/form-share'),
+      )
+      expect(JSON.parse(String(patchCalls.at(-1)?.[1]?.body ?? '{}')).allowedUserIds).toEqual(['user_fake_found'])
+    })
+
+    it('a clamped answer shows the refine-search hint', async () => {
+      const { client } = searchRequiredClient(fakeConfig({ accessMode: 'dingtalk' }), { hasMore: true })
+      mount({ visible: true, sheetId: 'sh_1', viewId: 'v_1', client })
+      await flushPromises()
+      await typeSearch('f')
+
+      const hint = document.querySelector('[data-form-share-candidates-truncated]')
+      expect(hint).toBeTruthy()
+      expect(hint!.textContent).toContain('narrow your search')
+    })
+
+    it('localizes the prompt to zh-CN', async () => {
+      useLocale().setLocale('zh-CN')
+      const { client } = searchRequiredClient()
+      mount({ visible: true, sheetId: 'sh_1', viewId: 'v_1', client })
+      await flushPromises()
+      expect(document.querySelector('[data-form-share-candidates-search-required]')!.textContent).toContain('输入姓名、邮箱或成员组名称以搜索。')
+    })
+  })
 })

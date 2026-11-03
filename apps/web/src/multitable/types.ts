@@ -12,6 +12,8 @@ import type { MetaCommentMentionSuggestion, MultitableCommentReaction, Multitabl
 import { COMMENT_REACTION_PALETTE } from '../shared/comments/types'
 
 export type { MetaCommentMentionSuggestion, MultitableCommentReaction, MultitableComment }
+// #5795: the server-side mention search contract (see shared/comments/types.ts).
+export type { MetaCommentMentionSearch, MetaCommentMentionSearchResult } from '../shared/comments/types'
 export { COMMENT_REACTION_PALETTE }
 
 // --- Field types ---
@@ -66,6 +68,31 @@ export interface MetaSheet {
   baseId?: string | null
   name: string
   description?: string | null
+  /**
+   * 「复制数据表」provenance, as the server sends it on /context `sheets[]` / `sheet` and GET /sheets
+   * (ADR multitable-copy-sheet-with-data-adr-20260926.md §6: `copiedFrom: { kind, at, sheetId? }`).
+   * Never read this directly — go through `readSheetCopiedFrom` in api/client.ts, the ONE place the
+   * wire shape is mapped (so a backend casing change is a one-line fix there). Absent/null = not a copy.
+   */
+  copiedFrom?: MetaSheetCopiedFromWire | null
+}
+
+/** Wire shape of `MetaSheet.copiedFrom` (ADR §6). Loosely typed on purpose: the adapter validates it. */
+export interface MetaSheetCopiedFromWire {
+  kind?: unknown
+  at?: unknown
+  sheetId?: unknown
+}
+
+/**
+ * Normalized copy provenance (output of `readSheetCopiedFrom`). `kind` is the server's
+ * `copied_from_kind` ('user' | 'plugin-managed' in S1); `pluginManaged` is true only for the exact
+ * 'plugin-managed' kind — the 「不随 PLM 刷新」 badge keys on it. `at` is the copy timestamp, if sent.
+ */
+export interface MetaSheetCopiedFrom {
+  kind: string
+  pluginManaged: boolean
+  at: string | null
 }
 
 export interface MetaField {
@@ -305,6 +332,49 @@ export interface MetaRowActions {
   canEdit: boolean
   canDelete: boolean
   canComment: boolean
+  /** R-66: set by the server only where `canDelete` is false because the row is a PLM row the stock-preparation
+   *  pull maintains (nobody may delete it). The delete entry is then shown disabled with the reason. */
+  deleteBlockedReason?: 'plm_row'
+  /** 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7, OQ3): set by GET /view and GET /records/:id only on a
+   *  manual supplementary row, for every actor who can read it — the grid's 「人工补充」 label. A DISPLAY mark only:
+   *  no editing control is ever gated on it alone (#6664 note N2); they read /context's `stockPreparationManualRows`. */
+  manualSupplement?: true
+}
+
+/** 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7): the state of a registered project sheet's manual rows. */
+export type MetaManualRowsState = 'allowed' | 'disabled' | 'unavailable'
+/** The closed reasons the host sends with `unavailable` (ADR §3.1). */
+export type MetaManualRowsUnavailableReason =
+  | 'lock_missing'
+  | 'project_archived'
+  | 'project_sheets_off'
+  | 'contract_mismatch'
+  | 'registry_unreadable'
+
+/**
+ * /context `capabilities.stockPreparationManualRows` as the host sends it (multitable/stock-preparation-manual-rows-gate.ts
+ * ManualRowsContextBlock): only on a registered project sheet (P_reg), only to an actor who can create, edit or delete.
+ * Every id list is SHEET-level; the web narrows them by the actor's field permissions (utils/manual-rows.ts, N5).
+ */
+export interface MetaManualRowsContextBlock {
+  state: MetaManualRowsState
+  /** Only with `unavailable`. */
+  reason?: string
+  /** The six fillable columns (physical ids) PATCH /records/:recordId/manual-fields may write on a manual row. */
+  editableFieldIds: string[]
+  /** The columns a manual-row create needs a value for (名称, then every column whose own validation requires it). */
+  requiredFieldIds: string[]
+  /** The 新增人工补充行 dialog's columns in its order (名称, 总用量, 图号, 规格, 材料, 用量, 备注 — the present ones). */
+  dialogFieldIds?: string[]
+}
+
+/** The block as the web reads it (utils/manual-rows.ts readManualRowsBlock): every list present, malformed → unavailable. */
+export interface MetaManualRowsBlock {
+  state: MetaManualRowsState
+  reason?: string
+  editableFieldIds: string[]
+  requiredFieldIds: string[]
+  dialogFieldIds: string[]
 }
 
 export interface MetaScopedPermissions {
@@ -328,6 +398,9 @@ export interface MetaContext {
   // `views`). The FE "My view" toggle initializes from this so its state reflects the server, not local
   // guesswork. Absent/empty ⇒ no personal rows / flag-off. Actor-scoped — never another user's rows.
   personalOverrideViewIds?: string[]
+  // 客户反馈 2026-09-24 #4c: the instance business timezone (IANA id) date-times are shown and parsed in.
+  // Server-provided (MULTITABLE_BUSINESS_TIMEZONE, default Asia/Shanghai); absent from an older server.
+  businessTimezone?: string
 }
 
 // --- Record context (GET /api/multitable/records/:recordId) ---
@@ -345,6 +418,8 @@ export interface MetaRecordContext {
   linkSummaries?: Record<string, LinkedRecordSummary[]>
   personSummaries?: Record<string, PersonSummary[]>
   attachmentSummaries?: Record<string, MetaAttachment[]>
+  // 客户反馈 2026-09-24 #4c: the instance business timezone — same value and meaning as MetaContext's.
+  businessTimezone?: string
 }
 
 export type MetaRecordRevisionAction = 'create' | 'update' | 'delete'
@@ -360,6 +435,9 @@ export interface MetaDeletedRecord {
   /** Backend-resolved display name (name → email) for `deletedBy`; null when unresolved → fall back to the id. */
   deletedByName?: string | null
   deletedAt: string
+  /** R-66: on a stock-preparation template sheet, why the server would refuse restoring this row (a live row holds
+   *  its key, or the key column is unresolvable). Absent ⇒ restorable as before. Display only; the route decides. */
+  restoreBlocked?: 'plm_key_active' | 'plm_key_unresolved'
 }
 
 export interface MetaRecordRevision {
@@ -492,6 +570,8 @@ export interface MetaFormContext {
   // allowlist / validated redirect / confirmation). Absent ⇒ the form renders
   // exactly today's flat single-page form (backward-compatible).
   formLayout?: FormLayoutConfig | null
+  // 客户反馈 2026-09-24 #4c: the instance business timezone — same value and meaning as MetaContext's.
+  businessTimezone?: string
 }
 
 // --- Capabilities ---
@@ -529,6 +609,54 @@ export interface MetaCapabilities {
   // (the route is authoritative); the FE mirror is OPTIONAL so existing capability fixtures
   // need not set it — treat absent as false. Full sheet write/admin only (not write-own).
   canSendNotification?: boolean
+  /**
+   * 记录级送审 (多维表 × 审批 阶段二, design §4.2): server-derived from the multitable-namespaced
+   * `multitable:submit-approval` permission. OPTIONAL and fail-closed — absent/false hides the
+   * drawer's 送审 entry entirely, and the route re-enforces it (plus `approvals:write`, which
+   * `createApproval` checks on its own side). Never derived from canEditRecord or a role string.
+   */
+  canSubmitApproval?: boolean
+  /**
+   * 「复制数据表」entry visibility (ADR multitable-copy-sheet-with-data-adr-20260926.md §3): set by
+   * /context as `hasFullTableReadAccess` on the CURRENT sheet ∧ `resolveBaseWritable` on its Base.
+   * OPTIONAL and fail-closed — absent/false hides every copy entry (rail action + the 存为模板 hand-off
+   * link). Display only: POST /sheets/:id/copy re-runs both gates server-side. Single-sheet by
+   * construction, like canDeleteSheet — never applied to the rail's other rows.
+   */
+  canCopySheet?: boolean
+  /**
+   * Customer feedback 2026-10-27: set by /context ONLY when true — the sheet's rows are maintained by the
+   * stock-preparation plugin (a `stockPreparation*` field namespace ∧ a plugin registry row), and
+   * `POST /records/:id/duplicate` answers 409 RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET there. Sent only
+   * to an actor who could otherwise create. The drawer's duplicate entry is shown disabled with the reason.
+   * Absent ⇒ unchanged. Display only: the route refuses on its own.
+   */
+  recordDuplicateBlocked?: boolean
+  /**
+   * R68 (#6454 judge note): set by /context ONLY when true — the sheet has a column people may not write
+   * (`property.humanWriteLock`, the 备料 project sheet's PLM columns) that its own validation also marks
+   * required, so a person-created record can never pass (empty fails the rule, filled is a locked write).
+   * Sent only to an actor who could otherwise create. The workbench then hides its hand-create entries
+   * (toolbar add / import, grid "+ row", duplicate, new form submission) and says why. Absent ⇒ unchanged.
+   * Display only: every create route keeps its own refusal.
+   */
+  recordCreateBlockedByLock?: boolean
+  /**
+   * 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7): set by /context ONLY on a registered project sheet, to an
+   * actor who can create, edit or delete. While it is present — whatever its state — the workbench hides EVERY generic
+   * create entry and shows either 「新增人工补充行」 (state `allowed`) or the state's reason; the drawer offers
+   * 「复制为新行」 (`allowed`); the six fillable cells of a manual row write through PATCH …/manual-fields. Absent ⇒
+   * unchanged. Display only: every route re-gates on its own (generic create answers 409 / 503 by state).
+   */
+  stockPreparationManualRows?: MetaManualRowsContextBlock
+  /**
+   * 备料分批拉取第一期 step 3: set by /context ONLY on a sheet the host stamped closed for generic grid export
+   * (a stock-preparation pilot project sheet; `canExport` is then already false for everyone). The workbench
+   * keeps its export buttons visible but DISABLED with the reason, and re-checks before it builds a
+   * selected-rows CSV / XLSX in the browser. Absent ⇒ unchanged. Display only: the export route refuses itself
+   * (403 MULTITABLE_GRID_EXPORT_CLOSED) and copy-with-data refuses too. Print and copy-selection stay open.
+   */
+  gridExportClosure?: { reason: string }
 }
 
 export interface YjsPresenceUser {
@@ -558,6 +686,17 @@ export interface MetaSheetPermissionEntry {
   label: string
   subtitle?: string | null
   isActive: boolean
+}
+
+/**
+ * 客户反馈 2026-10-21 item 1: whether the DingTalk person-message sender would reach a local user id
+ * (POST …/automations/dingtalk-person-recipient-status). Booleans only — the server sends no name.
+ */
+export interface DingTalkPersonRecipientStatus {
+  userId: string
+  exists: boolean
+  active: boolean
+  dingtalkLinked: boolean
 }
 
 export interface MetaSheetPermissionCandidate {
@@ -788,6 +927,55 @@ export interface MetaTemplate {
   icon: string
   color: string
   sheets: MetaTemplateSheet[]
+  /**
+   * 用户自定义模板(「把这张 Base 存为模板」存下来的)。内置模板不带这个字段。
+   * 服务端按租户过滤后才返回,前端只用它做「自定义」角标与删除入口的显隐。
+   */
+  custom?: boolean
+  createdBy?: string | null
+  createdAt?: string | null
+  /**
+   * 自定义模板的可见性:'private' = 只有建它的人看得见(默认),'tenant' = 共享给本租户。
+   * 服务端才是执行者(list/get/delete 三处 SQL 都带这个谓词),前端只用它显示角标。
+   */
+  visibility?: 'private' | 'tenant'
+}
+
+/**
+ * GET /api/multitable/templates 的返回。customTemplatesUnavailable = 服务端读不出自定义模板
+ * 那一段(表没迁移 / 库没起来)时的降级标志位 —— 前端必须显式提示,不能表现成「你没建过模板」。
+ */
+export interface ListTemplatesResult {
+  templates: MetaTemplate[]
+  customTemplatesUnavailable?: boolean
+}
+
+/** POST /api/multitable/templates —— 从一个 Base 抽结构存成模板(不含任何记录数据)。 */
+export interface CreateTemplateFromBaseInput {
+  baseId: string
+  name?: string
+  description?: string
+  category?: string
+  /** 省略 = private(只有自己看得见)。只有显式 'tenant' 才把模板发布给整个租户。 */
+  visibility?: 'private' | 'tenant'
+  /**
+   * 只存这几张数据表(**省略** = 整个 Base)。服务端把它下推进 SQL 的 WHERE 并且只做交集 ——
+   * 这是**收窄**参数,读不到的表不会因为被点名就进模板。上限 50 张,超限 400。
+   * 注意:显式传 `[]`(或只有空白字符的 id)= 零匹配 → 400,**不会**退化成「整个 Base」。
+   */
+  sheetIds?: string[]
+  /**
+   * 只存这几个字段(**省略** = 选中表的全部可读字段)。同样只做交集,服务端在抽取**之前**过滤,
+   * 所以被剔掉的字段不会在模板视图里留下悬空引用。上限 500 个,超限 400。
+   * 同样地,显式传 `[]` = 零匹配 → 400:一个「什么都没勾」的请求绝不会被放大成「全都要」。
+   */
+  fieldIds?: string[]
+}
+
+export interface CreateTemplateFromBaseResult {
+  template: MetaTemplate
+  /** 服务端的降级说明(比如关联字段被转成文本),原样展示给用户。 */
+  warnings: string[]
 }
 
 export interface InstallTemplateInput {
@@ -835,6 +1023,79 @@ export interface TemplateDryRunResult {
   wouldCreate: TemplateDryRunWouldCreate
   conflicts: TemplateDryRunConflict[]
   installable: boolean
+}
+
+// --- 复制数据表（含数据）S1 (ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md) ---
+// Request body of BOTH `POST /api/multitable/sheets/:sheetId/copy` and `…/copy/dry-run` (ADR §7.1).
+// S1 accepts only `permissionMode: 'inherit'` and always targets the source sheet's own Base (no
+// `targetBaseId` until S2). The api client builds the body — callers never hand-assemble it.
+export type CopySheetPermissionMode = 'inherit'
+
+export interface CopySheetInput {
+  name?: string
+  withData: boolean
+  permissionMode: CopySheetPermissionMode
+}
+
+/** Per-column disclosure reason codes the dry-run returns (ADR §3). Unknown codes are kept as strings. */
+export type CopySheetFieldDisclosureReason =
+  | 'ATTACHMENT_BLANKED'
+  | 'SELF_LINK_BLANKED'
+  | 'MIRROR_NOT_BUILT'
+  | 'DEPENDS_ON_BLANKED_COLUMN'
+  | 'BUTTON_DISABLED'
+  | 'PROPERTY_HIDDEN_BLANKED'
+
+export interface CopySheetFieldDisclosure {
+  fieldId: string
+  reason: string
+}
+
+export interface CopySheetViewFilterDrop {
+  viewId: string
+  count: number
+}
+
+/**
+ * Normalized dry-run answer (zero-write). Only produced AFTER the server's two-sided gate passed —
+ * a gate refusal is a 403 with no counts at all, so every count here is safe to show the caller.
+ * `rowCount`/`fieldCount`/`rowLimit` are null when the server did not send them.
+ */
+export interface CopySheetDryRunResult {
+  rowCount: number | null
+  fieldCount: number | null
+  /** Columns the copy will actually build (mirror columns are not built); null when the server sent none. */
+  builtFieldCount: number | null
+  viewCount: number | null
+  overLimit: boolean
+  rowLimit: number | null
+  fieldDisclosures: CopySheetFieldDisclosure[]
+  viewFilterLeavesDropped: CopySheetViewFilterDrop[]
+  autoNumberRenumberedRows: number
+}
+
+/** Post-commit formula recompute status carried by the 201 body (ADR §3/§8). */
+export interface CopySheetFormulaRecompute {
+  attempted: number | null
+  recomputed: number | null
+  failed: boolean
+  errorCode: string | null
+}
+
+/** Optional values-free counts for the success toast (ADR §3). Each is null when not sent. */
+export interface CopySheetResultSummary {
+  rowCount: number | null
+  fieldCount: number | null
+  permissionRowCount: number | null
+  recordPermissionRowCount: number | null
+}
+
+export interface CopySheetResult {
+  sheet: MetaSheet
+  /** True when the server answered 201 with `Idempotent-Replayed: true` (same intent within the window). */
+  replayed: boolean
+  formulaRecompute: CopySheetFormulaRecompute | null
+  summary: CopySheetResultSummary
 }
 
 // --- Input types ---
@@ -909,6 +1170,14 @@ export interface PatchRecordsInput {
   sheetId?: string
   partialSuccess?: boolean
   changes: CellChange[]
+}
+
+/** 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.4): PATCH /records/:recordId/manual-fields — the six fillable
+ *  columns of ONE manual row; the answer has the /patch shape (`updated` carries the new version). */
+export interface PatchManualRowFieldsInput {
+  sheetId?: string
+  expectedVersion?: number
+  data: Record<string, unknown>
 }
 
 export interface FormSubmitInput {
@@ -1094,6 +1363,36 @@ export interface AutomationAction {
   config: Record<string, unknown>
 }
 
+/**
+ * start_approval 的后端 config 契约（镜像 packages/core-backend/src/multitable/automation-actions.ts
+ * 的 StartApprovalConfig + automation-service.ts validateStartApprovalConfig 接受的可选键）。
+ * 编辑器只建模 templateId / formDataMapping / resultWriteback 的三个字段选择器；其余键在保存时
+ * 按原样透传（见 MetaAutomationRuleEditor.vue 的 DraftAction.originalConfig + ACTION_OWNED_CONFIG_KEYS，
+ * #5739 泛化后所有动作类型共用同一套保留语义）。
+ */
+export interface StartApprovalResultWritebackConfig {
+  statusField?: string
+  approverField?: string
+  completedAtField?: string
+  /** 非 approved 的终态结果是否也回写（默认 false）。 */
+  onNonApproved?: boolean
+  /** T3-5 跨 base 回写目标：三件要么全无要么全有（字面 id，不支持表达式）。 */
+  targetBaseId?: string
+  targetSheetId?: string
+  targetRecordId?: string
+  [key: string]: unknown
+}
+
+export interface StartApprovalConfig {
+  templateId: string
+  formDataMapping: Record<string, string>
+  requester?: {
+    mode?: 'trigger_actor' | 'rule_creator'
+  }
+  resultWriteback?: StartApprovalResultWritebackConfig
+  [key: string]: unknown
+}
+
 export interface AutomationRule {
   id: string
   sheetId: string
@@ -1116,6 +1415,8 @@ export interface AutomationRule {
 export interface AutomationStepResult {
   actionType: AutomationActionType
   status: 'success' | 'failed' | 'skipped'
+  /** Test-run simulation marker: the step was planned but nothing was dispatched (backend AutomationStepResult.simulated). */
+  simulated?: boolean
   output?: unknown
   error?: string
   durationMs?: number
@@ -1447,6 +1748,8 @@ export interface Webhook {
   maxRetries?: number
   retryBaseDelayMs?: number
   retryMaxDelayMs?: number
+  /** The sheet the webhook is bound to; null = not bound yet (receives no events). */
+  sheetId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -1455,6 +1758,8 @@ export interface WebhookCreateInput {
   name: string
   url: string
   events: string[]
+  /** The sheet the webhook is bound to. Required on create; on update only to bind an unbound webhook. */
+  sheetId: string
   secret?: string
   active?: boolean
   maxRetries?: number
@@ -1462,14 +1767,18 @@ export interface WebhookCreateInput {
   retryMaxDelayMs?: number
 }
 
+/** Delivery history item: status fields only (no stored request or response body). */
 export interface WebhookDelivery {
   id: string
   webhookId: string
   event: string
-  httpStatus: number | null
-  success: boolean
-  retryCount: number
-  timestamp: string
+  status: 'pending' | 'success' | 'failed'
+  httpStatus?: number | null
+  /** Attempts made so far, the first attempt included. */
+  attemptCount: number
+  createdAt: string
+  deliveredAt?: string
+  nextRetryAt?: string
 }
 
 // --- DingTalk Group Destinations ---
@@ -1539,7 +1848,12 @@ export interface DingTalkPersonDelivery {
   deliveredAt?: string
   localUserLabel?: string
   localUserSubtitle?: string
-  localUserIsActive: boolean
+  /** Review round 2: false when no user has this id (a mistyped id) — the viewer says 未找到该用户. */
+  localUserExists?: boolean
+  /** null when the user does not exist (unknown, not "inactive"). */
+  localUserIsActive: boolean | null
+  /** Codex review P2: linked to DingTalk NOW (a current fact, never the cause of a past skip); null if no user. */
+  localUserDingTalkLinked?: boolean | null
 }
 
 // --- Field Validation ---
@@ -1549,4 +1863,128 @@ export interface FieldValidationRule {
   type: FieldValidationRuleType
   value?: string | number | string[]
   message?: string
+}
+
+// --- 记录级送审 / Record-level approval submit (多维表 × 审批 阶段二, design
+//     docs/development/takeover-beiliao-20260821/multitable-approval-phase2-record-submit-design-20260915.md §5) ---
+// These mirror the phase-2b BACKEND contract (design §4.1) rather than the approval centre's own DTOs:
+// the wire shapes the record dialog needs are declared — deliberately narrow and VALUES-FREE — here
+// rather than reusing the approval centre's DTOs (separate window, separate lifecycle). The dialog DOES
+// reuse the approval centre's visibility EVALUATOR (`src/approvals/fieldVisibility.ts`), so both
+// surfaces hide exactly the same fields.
+
+/** A published approval template as the multitable template picker sees it (id + display name only). */
+export interface MetaApprovalTemplateSummary {
+  id: string
+  name?: string
+  /** `published` / `draft` / `archived` when the server sends it; absent on older payloads. */
+  status?: string
+}
+
+/** One renderable option of a `select` form field. */
+export interface MetaApprovalFormOption {
+  label: string
+  value: string
+}
+
+/** The five operators the approval product's visibility evaluator understands (server + types/approval.ts). */
+export type MetaApprovalFormVisibilityOperator = 'eq' | 'neq' | 'in' | 'isEmpty' | 'notEmpty'
+
+/**
+ * A field's 显示条件 exactly as the template authored it — carried VERBATIM (no coercion of `value` /
+ * `values`), because the dialog evaluates it with the approval centre's own evaluator and the server
+ * evaluates the same rule with `===` / `includes`: coercing here would make the dialog disagree with
+ * the server. `value` / `values` are template-authored constants (option values, thresholds), never a
+ * record value or something a user typed.
+ */
+export interface MetaApprovalFormVisibilityRule {
+  fieldId: string
+  operator: MetaApprovalFormVisibilityOperator
+  value?: unknown
+  values?: unknown[]
+}
+
+/**
+ * One form field of the version the template read serves (the LATEST one — see
+ * activeVersionId/latestVersionId below), normalized down to what the generic submit dialog can
+ * render. `type` is kept as the RAW server string (normalization to a render kind happens in the
+ * dialog) so an unknown type is visible as itself rather than silently coerced into a text box.
+ * No `defaultValue` on purpose: the picker is values-free until the user types.
+ */
+export interface MetaApprovalFormField {
+  id: string
+  type: string
+  label: string
+  required?: boolean
+  placeholder?: string
+  options?: MetaApprovalFormOption[]
+  /** The field's 显示条件 — present only when the template authored one. */
+  visibilityRule?: MetaApprovalFormVisibilityRule
+}
+
+/** A template + its served (latest) version's form fields (GET /api/approval-templates/:id). */
+export interface MetaApprovalTemplateDetail {
+  id: string
+  name?: string
+  status?: string
+  /**
+   * The published version the SERVER validates a submission against, and the newest authored version
+   * whose form schema this read actually returns. They differ exactly when the template has an
+   * unpublished draft edit — the dialog warns in that case (the fields on screen are then not the
+   * fields the create path prunes/validates against). Ids only; never a schema, never a value.
+   */
+  activeVersionId?: string
+  latestVersionId?: string
+  formFields: MetaApprovalFormField[]
+  /**
+   * True when the SERVED version's approval graph has an approval or handler node whose assignee
+   * sources include `requester_choice` (the same scan as the server's
+   * collectRuntimeGraphRequesterChoiceSources). A boolean only — never the graph, node keys or scopes.
+   * Only meaningful for the ACTIVE version when activeVersionId === latestVersionId; the dialog applies
+   * that gate, not the normalizer. Absent ⇒ false / unknown.
+   */
+  servedGraphRequiresRequesterChoice?: true
+}
+
+/**
+ * Drift of the record since it was submitted (design §4.1): the backend compares the stored snapshot
+ * with the live row and returns only the CHANGED FIELD IDS — never a value, on either side.
+ */
+export interface MetaRecordApprovalDrift {
+  changed: boolean
+  changedFieldIds: string[]
+}
+
+/** One `multitable_record_approval_submissions` row as the record drawer reads it (design §3/§4.1). */
+export interface MetaRecordApprovalSubmission {
+  id: string
+  templateId: string
+  /** Present only when the backend joins the template name; the panel falls back to `templateId`. */
+  templateName?: string
+  status: string
+  outcome?: string
+  approvalInstanceId?: string
+  requestNo?: string
+  submittedBy?: string
+  submittedByName?: string
+  recordVersionAtSubmit?: number
+  createdAt?: string
+  completedAt?: string
+  /**
+   * Values-free error CODE (never a message carrying record data). A `failed` row carries its refusal
+   * code; a TERMINAL row can carry `RECORD_APPROVAL_NOTIFICATION_FAILED`, which means the submission
+   * itself is correct and only the requester's notification is missing (backend #5763).
+   */
+  error?: string
+  drift: MetaRecordApprovalDrift
+}
+
+/**
+ * One PAGE of a record's approval submissions. The route answers `{ submissions, hasMore }` (backend
+ * #5763): `hasMore` is derived from a `limit + 1` fetch whose extra row is never returned, so it means
+ * "this record has more submissions than the page you asked for", never a count.
+ */
+export interface MetaRecordApprovalListPage {
+  submissions: MetaRecordApprovalSubmission[]
+  hasMore: boolean
 }

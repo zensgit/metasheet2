@@ -174,4 +174,13 @@ describe('ElearningPracticeLearnerSection', () => {
     expect(view.querySelector('[data-testid="elearning-practice-learner-status"]')?.textContent)
       .toContain('Select at least one answer')
   })
+
+  it('explains a 403 ORG_CONTEXT_REQUIRED on load instead of printing the raw code', async () => {
+    useLocale().setLocale('zh-CN')
+    h.list.mockReset().mockRejectedValue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+    const view = await mount()
+    expect(view.querySelector('[data-testid="elearning-practice-learner-status"]')?.textContent?.trim())
+      .toBe('当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。')
+    useLocale().setLocale('en')
+  })
 })

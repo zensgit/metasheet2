@@ -82,11 +82,11 @@
           </label>
           <label class="attendance__field" for="attendance-import-batch-created-from">
             <span>{{ tr('Created from', '创建起始') }}</span>
-            <input id="attendance-import-batch-created-from" v-model="batchCreatedFrom" type="date" @input="markBatchTimeSliceCustom" />
+            <AttendanceLocaleDateInput id="attendance-import-batch-created-from" v-model="batchCreatedFrom" @input="markBatchTimeSliceCustom" />
           </label>
           <label class="attendance__field" for="attendance-import-batch-created-to">
             <span>{{ tr('Created to', '创建截止') }}</span>
-            <input id="attendance-import-batch-created-to" v-model="batchCreatedTo" type="date" @input="markBatchTimeSliceCustom" />
+            <AttendanceLocaleDateInput id="attendance-import-batch-created-to" v-model="batchCreatedTo" @input="markBatchTimeSliceCustom" />
           </label>
           <label class="attendance__field attendance__field--full">
             <span>{{ tr('Time slice', '时间切片') }}</span>
@@ -200,8 +200,10 @@
             <td class="attendance__table-actions">
               <button class="attendance__btn" @click="loadImportBatchItems(batch.id)">{{ tr('View items', '查看条目') }}</button>
               <button
+                v-if="canRollbackImportBatch(batch)"
                 class="attendance__btn attendance__btn--danger"
                 :disabled="importBatchLoading"
+                data-attendance-import-batch-rollback
                 @click="requestRollbackImportBatch(batch)"
               >
                 {{ tr('Rollback', '回滚') }}
@@ -292,9 +294,11 @@
               }}
             </button>
             <button
+              v-if="canRollbackImportBatch(selectedBatch)"
               class="attendance__btn attendance__btn--danger"
               type="button"
               :disabled="!selectedBatch || importBatchLoading || importBatchImpactLoading"
+              data-attendance-import-batch-rollback
               @click="requestRollbackImportBatch(selectedBatch)"
             >
               {{ selectedBatchRollbackActionLabel }}
@@ -527,6 +531,8 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../../utils/clipboard'
+import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
 import { computed, ref, type Ref } from 'vue'
 import {
   buildImportBatchRollbackConfirmationMessage,
@@ -1095,8 +1101,12 @@ function resolveRollbackEstimateForBatch(
   }
 }
 
+function canRollbackImportBatch(batch: AttendanceImportBatch | null | undefined): boolean {
+  return Boolean(batch) && String(batch?.status || '').trim().toLowerCase() !== 'rolled_back'
+}
+
 function requestRollbackImportBatch(batch: AttendanceImportBatch | null) {
-  if (!batch) return
+  if (!batch || !canRollbackImportBatch(batch)) return
   const { estimate, mode } = resolveRollbackEstimateForBatch(batch)
   const confirmMessage = buildImportBatchRollbackConfirmationMessage(batch, estimate, mode, tr)
   return rollbackImportBatch(batch.id, confirmMessage)
@@ -1256,20 +1266,14 @@ function selectImportBatchRow(item: AttendanceImportItem) {
 async function copySelectedImportBatchSnapshot() {
   if (!selectedImportBatchSnapshot.value) return
   const payload = JSON.stringify(selectedImportBatchSnapshot.value, null, 2)
-  try {
-    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(payload)
-      snapshotActionMessage.value = tr('Snapshot JSON copied.', '快照 JSON 已复制。')
-      return
-    }
-    throw new Error('clipboard-unavailable')
-  } catch {
+  if (await copyText(payload)) {
+    snapshotActionMessage.value = tr('Snapshot JSON copied.', '快照 JSON 已复制。')
+  } else {
     snapshotActionMessage.value = tr('Clipboard is unavailable in this browser. Open the raw snapshot and copy it manually.', '当前浏览器无法直接写入剪贴板，请展开原始快照后手动复制。')
-  } finally {
-    globalThis.setTimeout(() => {
-      snapshotActionMessage.value = ''
-    }, 3000)
   }
+  globalThis.setTimeout(() => {
+    snapshotActionMessage.value = ''
+  }, 3000)
 }
 </script>
 
@@ -1393,20 +1397,38 @@ async function copySelectedImportBatchSnapshot() {
   font-weight: 700;
 }
 
+.attendance__admin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  align-items: end;
+  gap: 10px 12px;
+}
+
 .attendance__field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
+  min-width: 0;
+  font-size: 12px;
 }
 
 .attendance__field--full {
   grid-column: 1 / -1;
 }
 
-.attendance__field input {
-  padding: 8px 10px;
-  border: 1px solid #d7dfe9;
-  border-radius: 8px;
+.attendance__field input,
+.attendance__field select,
+.attendance__field :deep(.attendance-locale-date__input) {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  min-height: var(--ms-control-height, 32px);
+  padding: 6px 10px;
+  border: 1px solid var(--ms-border, #d7dfe9);
+  border-radius: var(--ms-radius-md, 8px);
+  background: var(--ms-bg-card, #fff);
+  color: inherit;
+  font: inherit;
 }
 
 .attendance__filter-chip-row {

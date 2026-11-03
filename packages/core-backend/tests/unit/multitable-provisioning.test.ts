@@ -8,6 +8,10 @@ import {
   ensureObject,
   ensureView,
   findObjectSheet,
+  findObjectView,
+  getObjectSheetId,
+  getObjectViewId,
+  getObjectFieldId as getProvisionedObjectFieldId,
   patchObjectFieldProperty,
   getObjectField,
   resolveObjectFieldIds,
@@ -320,6 +324,8 @@ describe('multitable provisioning helper', () => {
         baseId: DEFAULT_BASE_ID,
         name: 'Vendor Intake',
         description: 'Main vendor list',
+        // S3: the loaded sheet now carries the server-owned kind; an unstamped sheet reads null.
+        systemKind: null,
       },
     })
     expect(second).toEqual({
@@ -502,6 +508,66 @@ describe('multitable provisioning helper', () => {
     expect(first.hiddenFieldIds).toEqual(['fld_internal'])
     expect(first.config).toEqual({ density: 'compact' })
     expect(views).toHaveLength(1)
+  })
+
+  it('findObjectView reads ONE provisioned view by its derived id, read-only, null when absent', async () => {
+    // The read sibling of `ensureView`. It exists because `getObjectViewId` only COMPOSES an id and
+    // deliberately says nothing about whether the view is there — so a caller deep-linking to a
+    // provisioned view (备料's 「打开项目备料」) could not tell "provisioned" from "composed" and would
+    // hand out a link to a view that resolves to nothing.
+    const { query, views, fields, sheets } = createQuery()
+    const projectId = 'tenant_9:integration-core'
+    const objectId = 'plm_stock_preparation'
+
+    // absent BEFORE it is ensured — the negative half, and the one the fallback depends on.
+    await expect(
+      findObjectView({ query, projectId, objectId, viewId: 'prep-fill' }),
+    ).resolves.toBeNull()
+
+    await ensureObject({
+      query,
+      projectId,
+      descriptor: { id: objectId, name: 'Stock Preparation', fields: [{ id: 'active', name: 'Active', type: 'checkbox' }] },
+    })
+    const hiddenId = getProvisionedObjectFieldId(projectId, objectId, 'active')
+    await ensureView({
+      query,
+      projectId,
+      sheetId: getObjectSheetId(projectId, objectId),
+      descriptor: {
+        id: 'prep-fill',
+        objectId,
+        name: '备料填写视图',
+        type: 'grid',
+        hiddenFieldIds: [hiddenId],
+        sortInfo: { rules: [{ fieldId: hiddenId, desc: false }] },
+        groupInfo: { fieldIds: [hiddenId], fieldId: hiddenId },
+        filterInfo: { conjunction: 'and', conditions: [{ fieldId: hiddenId, operator: 'is', value: true }] },
+      },
+    })
+
+    const before = JSON.parse(JSON.stringify({ views, fields, sheets }))
+    const got = await findObjectView({ query, projectId, objectId, viewId: 'prep-fill' })
+    expect(got).toMatchObject({
+      id: getObjectViewId(projectId, objectId, 'prep-fill'),
+      name: '备料填写视图',
+      hiddenFieldIds: [hiddenId],
+    })
+    expect(got?.sortInfo).toEqual({ rules: [{ fieldId: hiddenId, desc: false }] })
+    expect(got?.groupInfo).toEqual({ fieldIds: [hiddenId], fieldId: hiddenId })
+    expect(got?.filterInfo).toEqual({ conjunction: 'and', conditions: [{ fieldId: hiddenId, operator: 'is', value: true }] })
+    // READ-ONLY: nothing in the store moved.
+    expect(JSON.parse(JSON.stringify({ views, fields, sheets }))).toEqual(before)
+
+    // A view id nobody provisioned stays null even on a sheet that HAS views — the probe answers
+    // about ONE derived id, never "does this sheet have any view".
+    await expect(
+      findObjectView({ query, projectId, objectId, viewId: 'not-provisioned' }),
+    ).resolves.toBeNull()
+    // And an object in ANOTHER project derives a different id, so it cannot read this one's view.
+    await expect(
+      findObjectView({ query, projectId: 'tenant_8:integration-core', objectId, viewId: 'prep-fill' }),
+    ).resolves.toBeNull()
   })
 
   it('persists kanban group metadata for default board views', async () => {
@@ -903,5 +969,49 @@ describe('ensureFields pre-read rides the caller-supplied query fn (P0-S S3)', (
     ).rejects.toBeInstanceOf(MultitableEnsureFieldsRefusedError)
 
     expect(fields).toEqual(before)
+  })
+})
+
+// ── the plugin's own provisioning paths never traverse the managed-field delete guard ───────────
+// routes/univer-meta.ts `DELETE /fields/:fieldId` refuses every field on a registry-registered sheet
+// (src/multitable/managed-field-delete-guard.ts). That guard lives on the HTTP route; `ensureObject`
+// and `ensureMissingObjectFields` are called by plugins with a query function and never pass through
+// an Express router, so the guard cannot affect them BY CONSTRUCTION. This cell pins the observable
+// half of that claim: the whole SQL set the two paths issue contains no DELETE at all (there is no
+// plugin "deprovision" of multitable fields) and never the guard's registry read.
+describe('plugin provisioning path vs the managed-field delete guard (DELETE /fields/:fieldId)', () => {
+  const PROJECT = 'tenant_42:after-sales'
+  const DESCRIPTOR = {
+    id: 'installedAsset',
+    name: 'Installed Asset',
+    fields: [
+      { id: 'assetCode', name: 'Asset Code', type: 'string' as const },
+      { id: 'serialNo', name: 'Serial No', type: 'string' as const },
+    ],
+  }
+
+  it('ensureObject + ensureMissingObjectFields issue no DELETE and never the guard\'s plugin_multitable_object_registry read', async () => {
+    const { query: inner, fields } = createQuery()
+    const issued: string[] = []
+    const query: MultitableProvisioningQueryFn = async (sql, params) => {
+      issued.push(sql.replace(/\s+/g, ' ').trim())
+      return inner(sql, params)
+    }
+
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+    const repaired = await ensureMissingObjectFields({
+      query,
+      projectId: PROJECT,
+      objectId: DESCRIPTOR.id,
+      fields: [{ id: 'warrantyEnd', name: 'Warranty End', type: 'date' as const }],
+    })
+
+    expect(repaired.addedFieldIds).toHaveLength(1)
+    expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial No', 'Warranty End'])
+    expect(issued.length).toBeGreaterThan(0)
+    expect(issued.filter((sql) => /^DELETE\b/i.test(sql))).toEqual([])
+    expect(issued.filter((sql) => /plugin_multitable_object_registry/i.test(sql))).toEqual([])
+    // every provisioned field id has the deterministic shape the guard module documents
+    for (const id of repaired.addedFieldIds) expect(id).toMatch(/^fld_[0-9a-f]{24}$/)
   })
 })

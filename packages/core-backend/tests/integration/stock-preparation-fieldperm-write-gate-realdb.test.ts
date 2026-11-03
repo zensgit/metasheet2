@@ -17,17 +17,40 @@
  * A port that hid columns would break the flow and be worse than the status quo; this suite is the
  * assertion that would go red if it ever did.
  *
+ * THIRD BLOCK (2026-09-11) — 特征化 golden「网格红 / 插件绿」: the same column, denied to EVERY role in
+ * its fixture, is 403 through the grid and WRITABLE through the production plugin SDK. That green is a
+ * CHARACTERIZATION of today's behaviour, never an endorsement — see that block's own header for what to
+ * do when it changes colour.
+ *
+ * WHERE THIS RUNS. Nowhere without a database — by construction, and on purpose: this file is in
+ * `packages/core-backend/vitest.config.ts`'s `exclude:` list, so the no-DB default job cannot collect it
+ * and skip-green it, and it is named WHOLE-FILE in the `multitable-real-db-integration` step of
+ * `.github/workflows/plugin-tests.yml` (the step that sets DATABASE_URL and METASHEET_REAL_DB_TEST_STEP).
+ * Both halves of that wiring are asserted, not just described, by the `wiring:` test in
+ * `tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts` — so losing either one reds a unit
+ * test that DOES run on every PR, instead of silently turning this file into decoration.
+ * Corollary worth stating plainly: on a developer machine with no PostgreSQL this whole file reports
+ * `skipped`, and a green local run says NOTHING about the legs below.
+ *
  * Runs only with DATABASE_URL. The fail-not-skip sentinel is TOP-LEVEL (outside describeIfDatabase)
  * and scoped to the real-DB allowlist step via METASHEET_REAL_DB_TEST_STEP, which is the pattern
  * that actually holds: a sentinel INSIDE describeIfDatabase skips together with the goldens it is
  * supposed to be guarding, so a step that lost DATABASE_URL would read green. See
  * multitable-exact-anchor-recovery-realdb.test.ts for the same wiring.
  */
+import { createRequire } from 'node:module'
+
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
+import type { LoadedPlugin } from '../../src/core/plugin-loader'
+import type { PluginContext } from '../../src/types/plugin'
+
 import { poolManager } from '../../src/integration/db/connection-pool'
+// 特征化 golden 的腿 2 用它取到生产插件 SDK(createCoreAPI),而不是手搓 query 直连 records.ts。
+import { MetaSheetServer } from '../../src/index'
+import { buildXlsxBuffer, type XlsxModule } from '../../src/multitable/xlsx-service'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 import {
   StockPreparationFieldPermissionsError,
@@ -749,6 +772,160 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
   })
 
   /**
+   * ═══ C0 AGAINST REAL POSTGRES: THE UPSERT'S OWNERSHIP GUARD, BOTH BRANCHES. ═══
+   *
+   * The guard is a `CASE WHEN created_by = ANY($5::text[])` inside an `ON CONFLICT DO UPDATE`, and
+   * its whole behaviour is Postgres semantics no in-memory model can settle: whether the ELSE branch
+   * really leaves the row's own `visible`/`read_only`/`created_by` bytes alone, and whether the
+   * marker set really excludes the bare legacy marker when adoption was not proven.
+   *
+   * TWO rows are seeded, both carrying this plugin's BARE marker with an operator's pre-stamping
+   * decision layered on top, because the two shapes have DIFFERENT consequences at the write gate
+   * and conflating them is how "no protection is lost" was asserted without being true:
+   *   · RC_MOVING — `visible = true, read_only = false`: the operator RELAXED the denial. This is
+   *     the ONE shape where the conservative fix gives something up: the denial this install
+   *     declares does NOT come into force and the column stays writable (asserted below: 200).
+   *   · RC_STABLE — `visible = false, read_only = false`: the operator HID the column. Hidden is
+   *     itself unwritable at the gate (`isFieldWriteForbidden`: `!perm || visible === false ||
+   *     readOnly === true`), so the patch is 403 either way. What this fix protects THERE is the
+   *     operator's two dimensions and the row's provenance — not its writability.
+   *
+   * Before this fix the bare marker was bound to the guard unconditionally, so an entries-only
+   * install put both dimensions back to true and re-stamped both rows with its own pack id —
+   * un-hiding a column a human hid, reverting a relaxation, counting both in `applied`, and
+   * reporting them in nothing at all.
+   */
+  test('C0 real-DB: an ADDITIVE install leaves an unclaimable pack-less row byte-identical', async () => {
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [RC_SHEET])
+    const service = new StockPreparationFieldPermissionsService()
+
+    await q(
+      `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
+       VALUES ($1,$2,'role',$3,true,false,$5), ($1,$4,'role',$3,false,false,$5)`,
+      [
+        RC_SHEET, RC_MOVING, RC_PURCHASING, RC_STABLE,
+        STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+      ],
+    )
+
+    // NO REGION, NO PROOF — the additive path, which classifies nothing and therefore has only the
+    // upsert's guard between it and the operator's row.
+    const result = await service.applyRoleWriteScopes({
+      sheetId: RC_SHEET,
+      entries: [
+        { fieldId: RC_MOVING, roleId: RC_PURCHASING },
+        { fieldId: RC_STABLE, roleId: RC_PURCHASING },
+      ],
+      packId: RC_PACK,
+    })
+    expect(result.removed).toEqual([])
+
+    // ALL THREE COLUMNS TOOK THE ELSE BRANCH, in the database rather than in a model of it.
+    expect(await rcRow(RC_MOVING, RC_PURCHASING)).toEqual({
+      visible: true,
+      read_only: false,
+      created_by: STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+    })
+    expect(await rcRow(RC_STABLE, RC_PURCHASING)).toEqual({
+      visible: false,
+      read_only: false,
+      created_by: STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+    })
+
+    // ═══ THE COST, NAMED — this is the fail-open direction and it is not free. ═══
+    // Neither declaration came into force, so neither is counted in `applied`, and both pairs come
+    // back so the installer can say exactly which (column, role) it declared and did not get.
+    expect(result.skippedUnattributed).toEqual([
+      { fieldId: RC_MOVING, roleId: RC_PURCHASING, packId: null },
+      { fieldId: RC_STABLE, roleId: RC_PURCHASING, packId: null },
+    ])
+    expect(result.applied).toBe(0)
+
+    // 采购 really can still write the RELAXED column — the declared denial did not land. Before the
+    // fix this was a 403, and that protection is exactly what the conservative reading gives up.
+    expect((await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_MOVING, 'still-relaxed')).status)
+      .toBe(200)
+    // The HIDDEN column is refused — because it is hidden, which is the host's own rule and not
+    // something this install asserted. The bytes checked above are what the fix preserved there.
+    expect((await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_STABLE, 'hidden-is-not-writable')).status)
+      .toBe(403)
+
+    // WITH THE PROOF the same call adopts both rows — the fix narrows WHEN, it does not remove the
+    // capability. `visible` comes back up (this port can only ever widen read) and the denial is
+    // re-asserted under this pack's marker.
+    const adopted = await service.applyRoleWriteScopes({
+      sheetId: RC_SHEET,
+      entries: [
+        { fieldId: RC_MOVING, roleId: RC_PURCHASING },
+        { fieldId: RC_STABLE, roleId: RC_PURCHASING },
+      ],
+      packId: RC_PACK,
+      legacyAdoptable: true,
+    })
+    expect(adopted.skippedUnattributed).toEqual([])
+    expect(adopted.applied).toBe(2)
+    for (const fieldId of [RC_MOVING, RC_STABLE]) {
+      expect(await rcRow(fieldId, RC_PURCHASING)).toEqual({
+        visible: true,
+        read_only: true,
+        created_by: `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_PACK}`,
+      })
+    }
+    expect((await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_MOVING, 'now-denied')).status)
+      .toBe(403)
+  })
+
+  /**
+   * THE OTHER TWO SHAPES THE GUARD MUST REFUSE, against real Postgres: `created_by` NULL (what every
+   * operator row in the field carries) and a SIBLING pack's marker. `NULL = ANY(...)` is NULL, not
+   * true — the ELSE branch — and that is load-bearing rather than incidental: a `NOT IN`-shaped
+   * guard would make the same row take the THEN branch.
+   */
+  test('C0 real-DB: a NULL-provenance row and a sibling pack\'s row both take the ELSE branch', async () => {
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [RC_SHEET])
+    const service = new StockPreparationFieldPermissionsService()
+
+    await q(
+      `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
+       VALUES ($1,$2,'role',$3,false,false,NULL), ($1,$4,'role',$3,false,false,$5)`,
+      [
+        RC_SHEET, RC_MOVING, RC_PURCHASING, RC_STABLE,
+        `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_OTHER_PACK}`,
+      ],
+    )
+
+    const result = await service.applyRoleWriteScopes({
+      sheetId: RC_SHEET,
+      entries: [
+        { fieldId: RC_MOVING, roleId: RC_PURCHASING },
+        { fieldId: RC_STABLE, roleId: RC_PURCHASING },
+      ],
+      packId: RC_PACK,
+      // Even WITH the proof: adoption covers the pack-less marker, never a human's row and never a
+      // sibling pack's.
+      legacyAdoptable: true,
+    })
+
+    // BOTH ARE REPORTED, AND THE SIBLING IS REPORTED BY NAME — `packId` is decoded from the marker
+    // Postgres actually returned, so the owner in the report is the owner in the row rather than a
+    // guess made from the request. Neither declaration is counted as applied.
+    expect(result.skippedUnattributed).toEqual([
+      { fieldId: RC_MOVING, roleId: RC_PURCHASING, packId: null },
+      { fieldId: RC_STABLE, roleId: RC_PURCHASING, packId: RC_OTHER_PACK },
+    ])
+    expect(result.applied).toBe(0)
+
+    expect(await rcRow(RC_MOVING, RC_PURCHASING)).toEqual({
+      visible: false, read_only: false, created_by: null,
+    })
+    expect(await rcRow(RC_STABLE, RC_PURCHASING)).toEqual({
+      visible: false,
+      read_only: false,
+      created_by: `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_OTHER_PACK}`,
+    })
+  })
+
+  /**
    * ═══ THE CROSS-PACK REFUSAL, INSIDE THE WRITE'S OWN TRANSACTION. ═══
    *
    * The installer refuses this in its pre-flight, over an untouched sheet. The port refuses it AGAIN
@@ -902,5 +1079,750 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
     // the whole point — `field_permissions.field_id` must reference a field OF THIS SHEET.
     expect(await service.findMissingFieldIds({ sheetId: RC_TWIN_SHEET, fieldIds: [RC_MOVING] }))
       .toEqual({ missing: [RC_MOVING] })
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// 特征化 GOLDEN — 列权限墙不在插件写路径上(网格红 / 插件绿)
+//
+// 这不是背书。这是把一个"已经成立但没有任何可执行断言"的事实钉成一条会变红的测试。
+//
+// 同一张表、同一行、同一列、同一个值,两条腿并排跑:
+//   腿 1(网格/HTTP):`POST /api/multitable/patch` —— 该列对本 fixture 里的每一个角色都是 read_only,
+//                     所以 403,`meta_records.data` 一个字节都没动。这条腿与本文件上方的既有 403 腿
+//                     同形,是"墙确实存在于网格路径上"的证据。
+//   腿 2(插件 SDK):生产环境的 `MetaSheetServer.createCoreAPI().multitable.records.patchRecord`
+//                     —— 同一列写入成功。插件通道自始至终不带 actor,所以根本没有任何一行
+//                     `field_permissions` 会被读到(见
+//                     tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts 的
+//                     `records.ts.patchRecord` 端口与它的 characterization 断言)。
+//
+// 如果腿 2 哪天变红:说明有人给插件写路径加了列级权限门。那是行为变更,不是测试坏了 —— 请回到这里
+// 改断言,并同步 docs/development/takeover-beiliao-20260821/stock-preparation-overall-plan-20260902.md
+// §10 的那一条结论,以及上面那支 unit 守卫里 `UNGATED_CHARACTERIZED` 的措辞。
+//
+// 反之如果腿 1 变红(插件绿而网格也绿),说明列权限墙整个塌了 —— 那是 P0。
+//
+// 自带 base / sheet / fields / roles / user / express app,不碰上面两个 block 的夹具。
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+const PG_BASE = `base_bliao_pg_${TS}`
+const PG_SHEET = `sheet_bliao_pg_${TS}`
+const PG_REC = `rec_bliao_pg_${TS}`
+
+/** 被"对所有角色"置为 read_only 的那一列 —— 两条腿写的都是它。 */
+const PG_LOCKED = `fld_bliao_pg_locked_${TS}`
+/** 没有任何策略的对照列 —— 用来证明 403 是因为这一列,而不是夹具整体坏掉。 */
+const PG_FREE = `fld_bliao_pg_free_${TS}`
+const PG_FIELDS = [PG_LOCKED, PG_FREE]
+
+const PG_ROLE_A = `role_bliao_pg_a_${TS}`
+const PG_ROLE_B = `role_bliao_pg_b_${TS}`
+/** 本 fixture 宇宙里存在的全部角色 —— "对所有角色 read_only" 就是对这个集合而言。 */
+const PG_ROLES = [PG_ROLE_A, PG_ROLE_B]
+const PG_USER = `u_bliao_pg_${TS}`
+
+/** 两条腿写同一个值 —— 触发量与边界量必须同量,否则"网格红/插件绿"的对照就不成立。 */
+const PG_PROBE_VALUE = 'wall-probe-same-column-same-value'
+
+/** 生产插件 SDK 的真实入口:`index.ts` 注入 IoC 容器的那个对象,不是手搓的 query 直连 records.ts。
+ *  与 multitable-d1c-plugin-revision-realdb.test.ts 的 realSdk() 同技法 —— 只有走这里,
+ *  "插件真的能写"才是关于生产接线的陈述。 */
+type PluginRecordsSdk = {
+  patchRecord: (input: {
+    sheetId: string
+    recordId: string
+    changes: Record<string, unknown>
+    expectedVersion?: number
+  }) => Promise<{ id: string; sheetId: string; version: number; data: Record<string, unknown> }>
+}
+function realPluginRecordsSdk(): PluginRecordsSdk {
+  const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+  const coreApi = (server as unknown as {
+    createCoreAPI: () => { multitable: { records: PluginRecordsSdk } }
+  }).createCoreAPI()
+  return coreApi.multitable.records
+}
+
+describeIfDatabase('备料 列权限墙不在插件写路径上 — 特征化 golden(网格红 / 插件绿)', () => {
+  let pgApp: Express
+  let sdk: PluginRecordsSdk
+
+  const pgGridPatch = (fieldId: string, value: unknown) =>
+    request(pgApp)
+      .post('/api/multitable/patch')
+      .send({ sheetId: PG_SHEET, changes: [{ recordId: PG_REC, fieldId, value }] })
+
+  const pgCell = async (fieldId: string): Promise<unknown> => {
+    const r = await q('SELECT data FROM meta_records WHERE id = $1', [PG_REC])
+    return (r.rows[0] as { data?: Record<string, unknown> } | undefined)?.data?.[fieldId]
+  }
+
+  beforeAll(async () => {
+    pgApp = express()
+    pgApp.use(express.json())
+    pgApp.use((req, _res, next) => {
+      ;(req as { user?: unknown }).user = {
+        id: PG_USER,
+        roles: PG_ROLES, // 这个人持有本 fixture 里的每一个角色
+        perms: ['multitable:read', 'multitable:write'],
+      }
+      next()
+    })
+    pgApp.use('/api/multitable', univerMetaRouter())
+    sdk = realPluginRecordsSdk()
+
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [PG_BASE, '备料 Plugin-Path Base'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [PG_SHEET, PG_BASE, '备料 Plugin-Path Sheet'])
+    for (const [index, fieldId] of PG_FIELDS.entries()) {
+      await q(
+        'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+        [fieldId, PG_SHEET, fieldId, 'string', '{}', index + 1],
+      )
+    }
+    for (const roleId of PG_ROLES) {
+      await q('INSERT INTO roles (id, name) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [roleId, roleId])
+    }
+    await q(
+      `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+       VALUES ($1,$2,$1,'x','member',$3::jsonb, TRUE, FALSE)
+       ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions`,
+      [PG_USER, `${PG_USER}@t.local`, JSON.stringify(['multitable:read', 'multitable:write'])],
+    )
+    for (const roleId of PG_ROLES) {
+      await q('INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [PG_USER, roleId])
+    }
+
+    // 真端口、真表:把 PG_LOCKED 对本 fixture 的每一个角色置 read_only。
+    const applied = await new StockPreparationFieldPermissionsService().applyRoleWriteScopes({
+      sheetId: PG_SHEET,
+      entries: PG_ROLES.map((roleId) => ({ fieldId: PG_LOCKED, roleId })),
+    })
+    expect(applied.applied).toBe(PG_ROLES.length)
+  })
+
+  afterAll(async () => {
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [PG_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [PG_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [PG_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = $1', [PG_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = $1', [PG_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [PG_BASE]).catch(() => {})
+    await q('DELETE FROM user_roles WHERE user_id = $1', [PG_USER]).catch(() => {})
+    await q('DELETE FROM users WHERE id = $1', [PG_USER]).catch(() => {})
+    await q('DELETE FROM roles WHERE id = ANY($1::text[])', [PG_ROLES]).catch(() => {})
+  })
+
+  beforeEach(async () => {
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [PG_SHEET])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [
+      PG_REC,
+      PG_SHEET,
+      JSON.stringify(Object.fromEntries(PG_FIELDS.map((fieldId) => [fieldId, seedValue(fieldId)]))),
+    ])
+  })
+
+  // ── 反空转:先证明"墙真的立着",否则下面的"插件绿"什么也不说明 ────────────────────────────────
+  test('前置:该列对本 fixture 的每一个角色都有 read_only 行(否则整条对照是空转)', async () => {
+    const rows = (await q(
+      `SELECT subject_id, read_only, visible FROM field_permissions
+        WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'role' ORDER BY subject_id`,
+      [PG_SHEET, PG_LOCKED],
+    )).rows as Array<{ subject_id: string; read_only: boolean; visible: boolean }>
+    expect(rows.map((r) => r.subject_id)).toEqual([...PG_ROLES].sort())
+    for (const row of rows) {
+      expect(row.read_only).toBe(true)
+      expect(row.visible).toBe(true) // 只收窄写,不动读
+    }
+  })
+
+  // ── 腿 1:网格路径 —— 墙在这里 ─────────────────────────────────────────────────────────────────
+  test('腿 1(既有腿,确认仍绿):网格 HTTP 写这一列 → 403,值没动', async () => {
+    const res = await pgGridPatch(PG_LOCKED, PG_PROBE_VALUE)
+    expect(res.status).toBe(403)
+    expect(await pgCell(PG_LOCKED)).toBe(seedValue(PG_LOCKED))
+  })
+
+  test('腿 1 的对照:同一个人、同一行、没有策略的那一列 → 200,值落地(403 是列的事,不是夹具坏了)', async () => {
+    const res = await pgGridPatch(PG_FREE, PG_PROBE_VALUE)
+    expect(res.status).toBe(200)
+    expect(await pgCell(PG_FREE)).toBe(PG_PROBE_VALUE)
+  })
+
+  // ── 腿 2:插件 SDK —— 墙不在这里(特征化,不是背书) ──────────────────────────────────────────
+  test('腿 2(特征化当前行为):插件 SDK patchRecord 写同一列 → 成功;这条绿代表列权限墙不在插件路径上', async () => {
+    // 同一列、同一值、同一行 —— 与腿 1 逐项同量。
+    //
+    // M1(行为级变异断言,不是文本代理):如果有人在插件写路径上加了列权限门,已知的表现有三种 ——
+    // ① patchRecord 抛(门 throw/403);② 不抛,但悄悄把这一列从 payload 里滤掉;③ 返回值带着新值、
+    // 库里却没变(写在下游被吞)。三种都必须让这条腿变红,而且红出来要说人话,不能只留一个
+    // "expected undefined to be …"。下面依次是:try/catch 接 ①、紧随的返回值断言接 ②、回库读接 ③。
+    // 这是“已知三种”,不是穷举:一个既不抛、又改写返回值、又同步改写库里那一列的门(等于把写改成别的
+    // 值)会骗过 ①②③ 中的前两条,但仍会被 ③ 的等值断言接住;真正逃逸需要门把库里也写成同一个探针值,
+    // 那已经不是“门”了。
+    let patched: Awaited<ReturnType<PluginRecordsSdk['patchRecord']>>
+    try {
+      patched = await sdk.patchRecord({
+        sheetId: PG_SHEET,
+        recordId: PG_REC,
+        changes: { [PG_LOCKED]: PG_PROBE_VALUE },
+      })
+    } catch (err) {
+      throw new Error(
+        'M1 行为变更:插件 SDK patchRecord 在写这一列时抛了 —— 说明列权限门已经出现在插件写路径上(或者这条' +
+          '路径上多了别的拒绝)。这不是测试坏了,是本 golden 特征化的那句话("墙不在插件上")不再成立。' +
+          '请同步改写本 describe、守卫里 records.ts.patchRecord / records.ts.createRecord 的 ' +
+          'UNGATED_CHARACTERIZED 措辞,以及 ' +
+          'docs/development/takeover-beiliao-20260821/stock-preparation-overall-plan-20260902.md §10。' +
+          `原始错误:${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`,
+      )
+    }
+
+    expect(
+      patched.data[PG_LOCKED],
+      'M1 行为变更:插件 SDK patchRecord 没有抛,但这一列的值没进去 —— 说明插件路径上出现了一个"只过滤不' +
+        '报错"的列权限门。处理方式与抛错分支相同(改写本 golden + 守卫措辞 + 设计文档 §10)。',
+    ).toBe(PG_PROBE_VALUE)
+    // 版本必须前进(证明真的发生了一次写),但不钉死成 2:任何 post-commit 钩子(自动编号/派生回写/
+    // 自动化)再 bump 一次版本都不该让这条特征化 golden 变红 —— 它要断言的是"写成功了",不是版本算术。
+    expect(patched.version).toBeGreaterThan(1)
+    // 真的落到了库里 —— 不是 SDK 返回值自说自话。第三种"门"的形态:SDK 回了成功但库里没变。
+    expect(
+      await pgCell(PG_LOCKED),
+      'M1 行为变更:插件 SDK 报成功、返回值也带着新值,但 meta_records.data 里这一列没变 —— 写被下游吞了。' +
+        '同样按"墙出现在插件路径上"处理。',
+    ).toBe(PG_PROBE_VALUE)
+
+    // 而且策略行此刻仍然在原地:插件不是"因为门被拆了"才写进去的,是因为这条路上压根没有门。
+    const still = (await q(
+      `SELECT count(*)::int AS c FROM field_permissions
+        WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'role' AND read_only = TRUE`,
+      [PG_SHEET, PG_LOCKED],
+    )).rows[0] as { c: number }
+    expect(still.c).toBe(PG_ROLES.length)
+
+    // 同一条策略、同一列,网格此刻依然 403 —— 两条腿在同一个世界状态下给出不同答案,这正是本 golden
+    // 要钉住的那句话:"墙在网格上,不在插件上"。
+    const gridAgain = await pgGridPatch(PG_LOCKED, 'grid-still-refused')
+    expect(gridAgain.status).toBe(403)
+    expect(await pgCell(PG_LOCKED)).toBe(PG_PROBE_VALUE) // 插件写的值仍在,网格没能覆盖它
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// 备料 OPTION B (awaiting the owner's A/B/C ruling) — 项目备料表的 PLM 列:对人只读,对插件可写(real DB)
+//
+// The production path end to end, nothing mocked between the plugin and PostgreSQL:
+//   * the REAL plugin create path (`provisionProjectSheet`, stock-preparation-project-targets.cjs) through the
+//     PRODUCTION plugin context (`MetaSheetServer.createPluginContext` — the plugin-scoped multitable API index.ts
+//     hands plugin-integration-core) provisions a project sheet and marks its plm_system columns
+//     `humanWriteLock: 'plm_system'`, and no human_preserved column;
+//   * the REAL apply writer (`applyStockPreparationPlan`) writes ADD + UPDATE rows through that context's records
+//     SDK AFTER the marking — the plugin path keeps writing the locked columns;
+//   * people, through the mounted `univerMetaRouter()` (the routes the grid uses), are refused on those columns
+//     with FIELD_READONLY_PLM_SYSTEM — single PATCH, bulk /patch (range paste / fill), POST /records — a platform
+//     administrator included; human_preserved columns stay writable; GET /view reports the columns read-only;
+//   * a person can neither clear the lock through PATCH /fields nor set one through POST /fields;
+//   * THE ROLLOUT: a sheet shaped like the demo's A/B (created before the lock: markers absent) is editable by
+//     people, the repair marking locks it, a second run writes nothing, and no row changes;
+//   * 人工补充行 B3 (PB-05b, ADR adr-stock-prep-manual-rows-20261030 §3.1): on a project sheet that is also REGISTERED
+//     in the plugin's own registry (migration 087), generic create (POST /records — session and mst_ token requests —
+//     and the xlsx import) is refused by the manual-rows state before any row, in every state; A / B stay only
+//     provisioned and keep PB-05's answers.
+// Synthetic identifiers only; everything it creates is deleted in afterAll.
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+const pbRequire = createRequire(import.meta.url)
+type PbProvisioned = {
+  sheetId: string
+  objectId: string
+  fieldIdMap: Record<string, string>
+  plmColumnLock: { fieldCount: number; marked: number; alreadyMarked: number; missing: number; readBeforeWrite: boolean }
+}
+const pbProjectTargets = pbRequire('../../../../plugins/plugin-integration-core/lib/stock-preparation-project-targets.cjs') as {
+  provisionProjectSheet: (input: Record<string, unknown>) => Promise<PbProvisioned>
+  markProjectSheetPlmSystemColumns: (input: Record<string, unknown>) => Promise<PbProvisioned['plmColumnLock']>
+  PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS: string[]
+}
+const pbApplyWriter = pbRequire('../../../../plugins/plugin-integration-core/lib/stock-preparation-apply-writer.cjs') as {
+  applyStockPreparationPlan: (input: Record<string, unknown>) => Promise<{
+    ok: boolean
+    status: string
+    counts: Record<string, number>
+    results: Array<{ status: string; recordId?: string }>
+    errors: unknown[]
+  }>
+}
+const pbTemplates = pbRequire('../../../../plugins/plugin-integration-core/lib/stock-preparation-templates.cjs') as {
+  STOCK_PREPARATION_MAIN_TABLE_TEMPLATE: { fields: Array<{ id: string; ownership: string }> }
+}
+
+const PB_TENANT = `plmro_t_${TS}`
+const PB_STAGING = `${PB_TENANT}:integration-core`
+const PB_PROJECT_A = `PB-A-${TS}`
+const PB_PROJECT_B = `PB-B-${TS}`
+// PB-05b (人工补充行 B3): a third project sheet, REGISTERED in the plugin's own registry (migration 087).
+const PB_PROJECT_C = `PB-C-${TS}`
+const PB_SWITCH = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'
+const PB_TARGET_TABLE = 'integration_stock_prep_project_target'
+type PbTargetRegistry = {
+  create: (input: Record<string, unknown>) => Promise<unknown>
+  archive: (input: Record<string, unknown>) => Promise<unknown>
+  restore: (input: Record<string, unknown>) => Promise<unknown>
+}
+const pbTargetStore = pbRequire('../../../../plugins/plugin-integration-core/lib/stock-preparation-project-target-store.cjs') as {
+  createStockPreparationProjectTargetStore: (input: { db: unknown }) => PbTargetRegistry
+}
+const pbDb = pbRequire('../../../../plugins/plugin-integration-core/lib/db.cjs') as { createDb: (input: { database: unknown }) => unknown }
+const pbXlsx = await import('xlsx') as unknown as XlsxModule
+const PB_FRONTLINE = `u_plmro_front_${TS}`
+const PB_ADMIN = `u_plmro_admin_${TS}`
+const PB_PLM_IDS = pbTemplates.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.filter((f) => f.ownership === 'plm_system').map((f) => f.id)
+const PB_HUMAN_IDS = pbTemplates.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.filter((f) => f.ownership === 'human_preserved').map((f) => f.id)
+// The identity columns a range fill would corrupt first, plus a quantity — the 403 legs walk these.
+const PB_PROBE_PLM_IDS = ['projectNo', 'idempotencyKey', 'componentSourceId', 'path', 'componentCode', 'totalQuantity']
+
+function pbProductionPluginContext(): PluginContext {
+  const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+  const loaded: LoadedPlugin = {
+    manifest: { name: 'plugin-integration-core', version: 'plm-lock-realdb' },
+    plugin: { activate: async () => {} },
+    path: 'realdb://stock-preparation-plm-column-lock',
+    loadedAt: new Date(),
+  }
+  return (server as unknown as { createPluginContext: (plugin: LoadedPlugin) => PluginContext }).createPluginContext(loaded)
+}
+
+describeIfDatabase('备料 option B — PLM columns of a project sheet: read-only for people, written by the plugin (real DB)', () => {
+  let pbApp: Express
+  let ctx: PluginContext
+  let a: PbProvisioned
+  let b: PbProvisioned
+  let c: PbProvisioned
+  let pbUser: { id: string; roles: string[] } = { id: PB_FRONTLINE, roles: [] }
+  const rowIds: string[] = []
+
+  const asUser = (id: string, roles: string[] = []) => { pbUser = { id, roles } }
+  const phys = (sheet: PbProvisioned, logical: string) => {
+    const id = sheet.fieldIdMap[logical]
+    expect(id, `physical id for ${logical}`).toBeTruthy()
+    return id
+  }
+  const rowData = async (recordId: string) =>
+    ((await q('SELECT data FROM meta_records WHERE id = $1', [recordId])).rows[0] as { data: Record<string, unknown> }).data
+  const sheetData = async (sheetId: string) =>
+    (await q('SELECT id, data FROM meta_records WHERE sheet_id = $1 ORDER BY id', [sheetId])).rows
+  const lockedPhysicalIds = async (sheetId: string) =>
+    ((await q("SELECT id FROM meta_fields WHERE sheet_id = $1 AND property->>'humanWriteLock' = 'plm_system' ORDER BY id", [sheetId])).rows as Array<{ id: string }>).map((r) => r.id)
+  const recordsApi = () => (ctx.api.multitable as unknown as { records: unknown }).records
+  const provisioningApi = () => (ctx.api.multitable as unknown as { provisioning: unknown }).provisioning
+  const target = (sheet: PbProvisioned) => ({ sheetId: sheet.sheetId, objectId: sheet.objectId, keyField: 'idempotencyKey', fieldIdMap: sheet.fieldIdMap })
+  const addDecision = (projectNo: string, i: number) => ({
+    decision: 'add',
+    idempotencyKey: `${projectNo}:K${i}`,
+    record: {
+      projectNo,
+      idempotencyKey: `${projectNo}:K${i}`,
+      componentSourceId: `SRC-${i}`,
+      path: `/root/P${i}`,
+      componentCode: `CODE-${i}`,
+      componentName: `Part ${i}`,
+      totalQuantity: i * 2,
+      active: true,
+      lastPlmRefreshDecision: 'add',
+    },
+  })
+
+  beforeAll(async () => {
+    pbApp = express()
+    pbApp.use(express.json())
+    pbApp.use((req, _res, next) => {
+      ;(req as { user?: unknown }).user = { id: pbUser.id, roles: pbUser.roles, perms: ['multitable:read', 'multitable:write'] }
+      next()
+    })
+    pbApp.use('/api/multitable', univerMetaRouter())
+    for (const [userId, isAdmin] of [[PB_FRONTLINE, false], [PB_ADMIN, true]] as Array<[string, boolean]>) {
+      await q(
+        `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+         VALUES ($1,$2,$1,'x',$4,$3::jsonb, TRUE, $5)
+         ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions`,
+        [userId, `${userId}@t.local`, JSON.stringify(['multitable:read', 'multitable:write']), isAdmin ? 'admin' : 'member', isAdmin],
+      )
+    }
+    ctx = pbProductionPluginContext()
+    a = await pbProjectTargets.provisionProjectSheet({ context: ctx, projectId: PB_STAGING, tenantId: PB_TENANT, projectNo: PB_PROJECT_A, env: process.env })
+    b = await pbProjectTargets.provisionProjectSheet({ context: ctx, projectId: PB_STAGING, tenantId: PB_TENANT, projectNo: PB_PROJECT_B, env: process.env })
+  })
+
+  afterAll(async () => {
+    // PB-05b's plugin registry rows (and any audit row its store transitions wrote) — this tenant only.
+    await q(`DELETE FROM ${PB_TARGET_TABLE} WHERE tenant_id = $1`, [PB_TENANT]).catch(() => {})
+    await q('DELETE FROM integration_stock_prep_audit WHERE tenant_id = $1', [PB_TENANT]).catch(() => {})
+    const sheets = [a?.sheetId, b?.sheetId, c?.sheetId].filter(Boolean) as string[]
+    if (sheets.length) {
+      const bases = ((await q('SELECT DISTINCT base_id FROM meta_sheets WHERE id = ANY($1::text[])', [sheets]).catch(() => ({ rows: [] }))).rows as Array<{ base_id: string | null }>)
+        .map((r) => r.base_id).filter((id): id is string => typeof id === 'string' && id.startsWith('base_integration-core_sp_'))
+      await q('DELETE FROM meta_record_revisions WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await q('DELETE FROM meta_config_revisions WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await q('DELETE FROM field_permissions WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await q('DELETE FROM plugin_multitable_object_registry WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await q('DELETE FROM meta_views WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [sheets]).catch(() => {})
+      // The own base is per TENANT (synthetic here), so nothing else lives in it.
+      for (const baseId of bases) {
+        const others = (await q('SELECT count(*)::int AS n FROM meta_sheets WHERE base_id = $1', [baseId]).catch(() => ({ rows: [{ n: 1 }] }))).rows[0] as { n: number }
+        if (others.n === 0) await q('DELETE FROM meta_bases WHERE id = $1', [baseId]).catch(() => {})
+      }
+    }
+    await q('DELETE FROM users WHERE id = ANY($1::text[])', [[PB_FRONTLINE, PB_ADMIN]]).catch(() => {})
+  })
+
+  test('PB-01 create marks EVERY plm_system column and no human_preserved column (real host property)', async () => {
+    expect(PB_PLM_IDS.length).toBe(pbProjectTargets.PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS.length)
+    expect(a.plmColumnLock).toEqual({ fieldCount: PB_PLM_IDS.length, marked: PB_PLM_IDS.length, alreadyMarked: 0, missing: 0, readBeforeWrite: true, markedFieldIds: PB_PLM_IDS })
+    expect(await lockedPhysicalIds(a.sheetId)).toEqual(PB_PLM_IDS.map((id) => phys(a, id)).sort())
+    for (const id of PB_HUMAN_IDS) {
+      expect((await lockedPhysicalIds(a.sheetId)).includes(phys(a, id)), `${id} must stay editable`).toBe(false)
+    }
+  })
+
+  test('PB-02 the plugin apply (ADD then UPDATE) still writes the locked PLM columns after the marking', async () => {
+    const added = await pbApplyWriter.applyStockPreparationPlan({
+      permission: 'admin',
+      plan: { decisions: [addDecision(PB_PROJECT_A, 1), addDecision(PB_PROJECT_A, 2)] },
+      target: target(a),
+      recordsApi: recordsApi(),
+    })
+    expect(added.errors).toEqual([])
+    expect(added.counts.created).toBe(2)
+    for (const result of added.results) if (result.recordId) rowIds.push(result.recordId)
+    expect(rowIds).toHaveLength(2)
+    const first = await rowData(rowIds[0])
+    expect(first[phys(a, 'idempotencyKey')]).toBe(`${PB_PROJECT_A}:K1`)
+    expect(first[phys(a, 'componentCode')]).toBe('CODE-1')
+
+    const updated = await pbApplyWriter.applyStockPreparationPlan({
+      permission: 'admin',
+      plan: { decisions: [{ decision: 'update', idempotencyKey: `${PB_PROJECT_A}:K1`, patch: { totalQuantity: 99, componentCode: 'CODE-1R', lastPlmRefreshDecision: 'update' } }] },
+      target: target(a),
+      recordsApi: recordsApi(),
+    })
+    expect(updated.errors).toEqual([])
+    expect(updated.counts.updated).toBe(1)
+    const after = await rowData(rowIds[0])
+    expect(after[phys(a, 'totalQuantity')]).toBe(99)
+    expect(after[phys(a, 'componentCode')]).toBe('CODE-1R')
+    expect(await lockedPhysicalIds(a.sheetId)).toHaveLength(PB_PLM_IDS.length) // the write did not lift the lock
+  })
+
+  test('PB-03 single-record PATCH: every probed PLM column → 403 FIELD_READONLY_PLM_SYSTEM (frontline AND admin), value untouched; human_preserved → 200', async () => {
+    const recordId = rowIds[0]
+    for (const [userId, roles] of [[PB_FRONTLINE, []], [PB_ADMIN, ['admin']]] as Array<[string, string[]]>) {
+      asUser(userId, roles)
+      for (const logical of PB_PROBE_PLM_IDS) {
+        const fieldId = phys(a, logical)
+        const before = (await rowData(recordId))[fieldId]
+        const res = await request(pbApp).patch(`/api/multitable/records/${recordId}`).send({ sheetId: a.sheetId, data: { [fieldId]: logical === 'totalQuantity' ? 1 : 'HACK' } })
+        expect(res.status, `${userId} ${logical}: ${JSON.stringify(res.body)}`).toBe(403)
+        expect(res.body.error.code).toBe('FIELD_READONLY_PLM_SYSTEM')
+        expect(res.body.error.fieldIds).toEqual([fieldId])
+        expect((await rowData(recordId))[fieldId]).toEqual(before)
+      }
+    }
+    asUser(PB_FRONTLINE)
+    const notes = phys(a, 'notes')
+    const ok = await request(pbApp).patch(`/api/multitable/records/${recordId}`).send({ sheetId: a.sheetId, data: { [notes]: 'frontline note' } })
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+    expect((await rowData(recordId))[notes]).toBe('frontline note')
+  })
+
+  test('PB-04 bulk /patch (the range paste / fill route): a batch touching a PLM column is refused WHOLE; a human-only batch lands', async () => {
+    asUser(PB_FRONTLINE)
+    const notes = phys(a, 'notes')
+    const key = phys(a, 'idempotencyKey')
+    const before = await sheetData(a.sheetId)
+    const mixed = await request(pbApp).post('/api/multitable/patch').send({
+      sheetId: a.sheetId,
+      changes: rowIds.flatMap((recordId) => [
+        { recordId, fieldId: notes, value: 'fill' },
+        { recordId, fieldId: key, value: 'FILLED-KEY' },
+      ]),
+    })
+    expect(mixed.status, JSON.stringify(mixed.body)).toBe(403)
+    expect(mixed.body.error.code).toBe('FIELD_READONLY_PLM_SYSTEM')
+    expect(mixed.body.error.fieldIds).toEqual([key])
+    expect(await sheetData(a.sheetId)).toEqual(before) // atomic: not even the human column moved
+
+    const humanOnly = await request(pbApp).post('/api/multitable/patch').send({
+      sheetId: a.sheetId,
+      changes: rowIds.map((recordId) => ({ recordId, fieldId: notes, value: 'filled note' })),
+    })
+    expect(humanOnly.status, JSON.stringify(humanOnly.body)).toBe(200)
+    for (const recordId of rowIds) expect((await rowData(recordId))[notes]).toBe('filled note')
+  })
+
+  test('PB-05 POST /records (and so xlsx import, which shares RecordService.createRecord): seeding a PLM column → 403 FIELD_READONLY_PLM_SYSTEM, no row', async () => {
+    asUser(PB_FRONTLINE)
+    const countBefore = (await sheetData(a.sheetId)).length
+    const res = await request(pbApp).post('/api/multitable/records').send({ sheetId: a.sheetId, data: { [phys(a, 'idempotencyKey')]: 'FAKE-KEY', [phys(a, 'notes')]: 'x' } })
+    expect(res.status, JSON.stringify(res.body)).toBe(403)
+    expect(res.body.error.code).toBe('FIELD_READONLY_PLM_SYSTEM')
+    expect((await sheetData(a.sheetId)).length).toBe(countBefore)
+    // A cost of option B, stated in the PR: six plm_system columns are template-`required`, so a hand-made row
+    // without them is refused by the host's ordinary required-field validation. This sheet is only PROVISIONED — it has
+    // no plugin registry row (migration 087), so it is not a registered project sheet (P_reg, ADR
+    // adr-stock-prep-manual-rows-20261030 §3.0) and keeps exactly these answers. On a REGISTERED project sheet people
+    // add rows through 「新增人工补充行」 (人工补充行, POST /sheets/:sheetId/manual-rows) and the generic create is refused
+    // earlier, by the manual-rows state — PB-05b below.
+    const humanOnly = await request(pbApp).post('/api/multitable/records').send({ sheetId: a.sheetId, data: { [phys(a, 'notes')]: 'x' } })
+    expect(humanOnly.status, JSON.stringify(humanOnly.body).slice(0, 200)).toBe(422)
+    expect((await sheetData(a.sheetId)).length).toBe(countBefore)
+  })
+
+  test('PB-05b a REGISTERED project sheet (P_reg: the plugin registry row of migration 087): generic create — POST /records (session and mst_ token) and the xlsx import — is refused by the manual-rows state before any row, in every state of ADR adr-stock-prep-manual-rows-20261030 §3.1', async () => {
+    const switchBefore = process.env[PB_SWITCH]
+    process.env[PB_SWITCH] = 'true'
+    // c: provisioned exactly like a (the PLM lock included), then registered through the plugin's own registry store.
+    c = await pbProjectTargets.provisionProjectSheet({ context: ctx, projectId: PB_STAGING, tenantId: PB_TENANT, projectNo: PB_PROJECT_C, env: process.env })
+    const registry = pbTargetStore.createStockPreparationProjectTargetStore({ db: pbDb.createDb({ database: (ctx.api as unknown as { database: unknown }).database }) })
+    await registry.create({ tenantId: PB_TENANT, projectNo: PB_PROJECT_C, sheetId: c.sheetId, objectId: c.objectId, createdBy: 'syn' })
+    const provisioning = provisioningApi() as { patchObjectFieldProperty: (input: Record<string, unknown>) => Promise<unknown> }
+    const setSwitch = (value: unknown) =>
+      provisioning.patchObjectFieldProperty({ projectId: PB_STAGING, objectId: c.objectId, fieldId: 'idempotencyKey', propertyPatch: { stockPreparationManualRows: value } })
+    const xlsxBuffer = buildXlsxBuffer(pbXlsx, { sheetName: 'Rows', headers: ['plmro-pb05b-header'], rows: [['x']] })
+    asUser(PB_FRONTLINE)
+
+    const expectRefused = async (label: string, status: number, code: string, details: Record<string, string>) => {
+      const before = (await sheetData(c.sheetId)).length
+      // A human-only body and one that names locked columns: the state decides before any field check.
+      for (const data of [{ [phys(c, 'notes')]: 'x' }, { [phys(c, 'componentName')]: 'SYN', [phys(c, 'totalQuantity')]: 1 }]) {
+        const res = await request(pbApp).post('/api/multitable/records').send({ sheetId: c.sheetId, data })
+        expect(res.status, `${label} POST /records: ${JSON.stringify(res.body).slice(0, 300)}`).toBe(status)
+        expect(res.body.error.code, label).toBe(code)
+        expect(res.body.error.details, label).toEqual(details)
+      }
+      const imported = await request(pbApp).post(`/api/multitable/sheets/${c.sheetId}/import-xlsx`).attach('file', xlsxBuffer, 'rows.xlsx')
+      expect(imported.status, `${label} import-xlsx: ${JSON.stringify(imported.body).slice(0, 300)}`).toBe(status)
+      expect(imported.body.error.code, label).toBe(code)
+      expect(imported.body.error.details, label).toEqual(details)
+      expect((await sheetData(c.sheetId)).length, `${label}: nothing written`).toBe(before)
+    }
+    const UNAVAILABLE = 'STOCK_PREP_MANUAL_ROWS_UNAVAILABLE'
+
+    try {
+      // allowed — the one state that points at 「新增人工补充行」.
+      await expectRefused('allowed', 409, 'STOCK_PREP_PROJECT_SHEET_CREATE_USE_MANUAL_ROW', { state: 'allowed' })
+      const allowedRes = await request(pbApp).post('/api/multitable/records').send({ sheetId: c.sheetId, data: { [phys(c, 'notes')]: 'x' } })
+      expect(allowedRes.body.error.message).toContain('新增人工补充行')
+      // An `mst_` API token request lands in the SAME POST /records handler and is refused the same way, before any row.
+      {
+        const { ApiTokenService } = await import('../../src/multitable/api-token-service')
+        const { db: tokenDb } = await import('../../src/db/db')
+        const minted = await new ApiTokenService(tokenDb).createToken(PB_FRONTLINE, { name: 'pb05b-token', scopes: ['records:write'] })
+        try {
+          const before = (await sheetData(c.sheetId)).length
+          const viaToken = await request(pbApp)
+            .post('/api/multitable/records')
+            .set('Authorization', `Bearer ${minted.plainTextToken}`)
+            .send({ sheetId: c.sheetId, data: { [phys(c, 'notes')]: 'x' } })
+          expect(viaToken.status, `mst_ token POST /records: ${JSON.stringify(viaToken.body).slice(0, 300)}`).toBe(409)
+          expect(viaToken.body.error.code).toBe('STOCK_PREP_PROJECT_SHEET_CREATE_USE_MANUAL_ROW')
+          expect(viaToken.body.error.details).toEqual({ state: 'allowed' })
+          expect((await sheetData(c.sheetId)).length, 'mst_ token: nothing written').toBe(before)
+        } finally {
+          await q('DELETE FROM oapi_write_audit WHERE token_id = $1', [minted.token.id]).catch(() => {})
+          await q('DELETE FROM multitable_api_tokens WHERE id = $1', [minted.token.id]).catch(() => {})
+        }
+      }
+
+      // disabled — the switch written through the plugin's own provisioning port (a junk value reads as disabled).
+      await setSwitch('nope')
+      try {
+        await expectRefused('disabled', 409, 'STOCK_PREP_MANUAL_ROWS_DISABLED', { state: 'disabled', reason: 'disabled' })
+      } finally {
+        await setSwitch('allowed')
+      }
+
+      // lock_missing — 项目号 lost its lock (a sheet the repair has not reached yet).
+      const projectNoId = phys(c, 'projectNo')
+      const projectNoProperty = ((await q('SELECT property FROM meta_fields WHERE sheet_id = $1 AND id = $2', [c.sheetId, projectNoId])).rows[0] as { property: Record<string, unknown> }).property
+      await q("UPDATE meta_fields SET property = property - 'humanWriteLock' WHERE sheet_id = $1 AND id = $2", [c.sheetId, projectNoId])
+      try {
+        await expectRefused('lock_missing', 409, UNAVAILABLE, { state: 'unavailable', reason: 'lock_missing' })
+      } finally {
+        await q('UPDATE meta_fields SET property = $3::jsonb WHERE sheet_id = $1 AND id = $2', [c.sheetId, projectNoId, JSON.stringify(projectNoProperty)])
+      }
+
+      // project_archived — the store's own transition, then restored.
+      await registry.archive({ tenantId: PB_TENANT, projectNo: PB_PROJECT_C, actorId: 'syn' })
+      try {
+        await expectRefused('project_archived', 409, UNAVAILABLE, { state: 'unavailable', reason: 'project_archived' })
+      } finally {
+        await registry.restore({ tenantId: PB_TENANT, projectNo: PB_PROJECT_C, actorId: 'syn' })
+      }
+
+      // project_sheets_off — the deployment switch is not exactly 'true'.
+      process.env[PB_SWITCH] = 'TRUE'
+      try {
+        await expectRefused('project_sheets_off', 409, UNAVAILABLE, { state: 'unavailable', reason: 'project_sheets_off' })
+      } finally {
+        process.env[PB_SWITCH] = 'true'
+      }
+
+      // contract_mismatch — the plugin registry row names another object than the host registry row.
+      await q(`UPDATE ${PB_TARGET_TABLE} SET object_id = $2 WHERE sheet_id = $1`, [c.sheetId, `${c.objectId}_pb05b_other`])
+      try {
+        await expectRefused('contract_mismatch', 409, UNAVAILABLE, { state: 'unavailable', reason: 'contract_mismatch' })
+      } finally {
+        await q(`UPDATE ${PB_TARGET_TABLE} SET object_id = $2 WHERE sheet_id = $1`, [c.sheetId, c.objectId])
+      }
+
+      // registry_unreadable — a column the fixed statement reads is missing (42703): 503, fail closed.
+      await q(`ALTER TABLE ${PB_TARGET_TABLE} RENAME COLUMN tenant_id TO tenant_id_pb05b_probe`)
+      try {
+        await expectRefused('registry_unreadable', 503, UNAVAILABLE, { state: 'unavailable', reason: 'registry_unreadable' })
+      } finally {
+        await q(`ALTER TABLE ${PB_TARGET_TABLE} RENAME COLUMN tenant_id_pb05b_probe TO tenant_id`)
+      }
+
+      // 42P01 — the registry table is not there: NOT registered, so PB-05's old answers come back (403 / 422).
+      await q(`ALTER TABLE ${PB_TARGET_TABLE} RENAME TO ${PB_TARGET_TABLE}_pb05b_probe`)
+      try {
+        const locked = await request(pbApp).post('/api/multitable/records').send({ sheetId: c.sheetId, data: { [phys(c, 'idempotencyKey')]: 'FAKE-KEY', [phys(c, 'notes')]: 'x' } })
+        expect(locked.status, JSON.stringify(locked.body).slice(0, 300)).toBe(403)
+        expect(locked.body.error.code).toBe('FIELD_READONLY_PLM_SYSTEM')
+        const humanOnly = await request(pbApp).post('/api/multitable/records').send({ sheetId: c.sheetId, data: { [phys(c, 'notes')]: 'x' } })
+        expect(humanOnly.status, JSON.stringify(humanOnly.body).slice(0, 300)).toBe(422)
+      } finally {
+        await q(`ALTER TABLE ${PB_TARGET_TABLE}_pb05b_probe RENAME TO ${PB_TARGET_TABLE}`)
+      }
+
+      // And the refusal is back once the registry reads again.
+      await expectRefused('allowed again', 409, 'STOCK_PREP_PROJECT_SHEET_CREATE_USE_MANUAL_ROW', { state: 'allowed' })
+      // The manual-row route itself creates on this sheet (the generic door closed, the manual one open).
+      const manual = await request(pbApp).post(`/api/multitable/sheets/${c.sheetId}/manual-rows`).send({ data: { [phys(c, 'componentName')]: 'Synthetic manual part', [phys(c, 'totalQuantity')]: 2 } })
+      expect(manual.status, JSON.stringify(manual.body).slice(0, 300)).toBe(200)
+    } finally {
+      if (switchBefore === undefined) delete process.env[PB_SWITCH]
+      else process.env[PB_SWITCH] = switchBefore
+    }
+  })
+
+  test('PB-06 GET /view reports every PLM column read-only and every human_preserved column writable (what the grid renders)', async () => {
+    asUser(PB_FRONTLINE)
+    const res = await request(pbApp).get('/api/multitable/view').query({ sheetId: a.sheetId })
+    expect(res.status, JSON.stringify(res.body).slice(0, 400)).toBe(200)
+    const perms = res.body.data.meta.permissions.fieldPermissions as Record<string, { visible: boolean; readOnly: boolean }>
+    for (const id of PB_PLM_IDS) expect(perms[phys(a, id)], id).toEqual({ visible: true, readOnly: true })
+    for (const id of PB_HUMAN_IDS) expect(perms[phys(a, id)], id).toEqual({ visible: true, readOnly: false })
+    const fields = res.body.data.fields as Array<{ id: string; property?: Record<string, unknown> }>
+    expect(fields.find((f) => f.id === phys(a, 'componentCode'))?.property?.humanWriteLock).toBe('plm_system')
+  })
+
+  test('PB-07 no override through the field routes: PATCH /fields cannot clear the lock; POST /fields cannot set one', async () => {
+    asUser(PB_ADMIN, ['admin'])
+    const fieldId = phys(a, 'componentName')
+    // The field-manager PATCH is ACCEPTED (an administrator may still edit the column's other settings) — and the
+    // body that tries to clear the lock simply does not: the stored value is carried over (carryHumanWriteLock).
+    const cleared = await request(pbApp).patch(`/api/multitable/fields/${fieldId}`).send({ property: {} })
+    expect(cleared.status, JSON.stringify(cleared.body)).toBe(200)
+    expect(cleared.body.data.field.property.humanWriteLock).toBe('plm_system')
+    const stored = (await q('SELECT property FROM meta_fields WHERE id = $1', [fieldId])).rows[0] as { property: Record<string, unknown> }
+    expect(stored.property.humanWriteLock).toBe('plm_system')
+    // ...and the column is still refused to people after that edit.
+    asUser(PB_FRONTLINE)
+    const stillRefused = await request(pbApp).patch(`/api/multitable/records/${rowIds[1]}`).send({ sheetId: a.sheetId, data: { [fieldId]: 'HACK' } })
+    expect(stillRefused.status).toBe(403)
+    expect(stillRefused.body.error.code).toBe('FIELD_READONLY_PLM_SYSTEM')
+
+    // A person creating a column cannot mint a lock (only plugin provisioning writes it).
+    asUser(PB_ADMIN, ['admin'])
+    const created = await request(pbApp).post('/api/multitable/fields').send({ sheetId: a.sheetId, name: `plmro-extra-${TS}`, type: 'string', property: { humanWriteLock: 'plm_system' } })
+    expect(created.status, JSON.stringify(created.body)).toBe(201)
+    const newId = String(created.body.data.field.id)
+    expect('humanWriteLock' in (created.body.data.field.property ?? {})).toBe(false)
+    const row = (await q('SELECT property FROM meta_fields WHERE id = $1', [newId])).rows[0] as { property: Record<string, unknown> }
+    expect('humanWriteLock' in row.property).toBe(false)
+  })
+
+  test('PB-09 a form on the project sheet (POST /views/:viewId/submit — its own field guard, direct SQL write): a PLM column is refused (edit and create)', async () => {
+    const viewId = `view_plmro_form_${TS}`
+    await q('INSERT INTO meta_views (id, sheet_id, name, type, config) VALUES ($1,$2,$3,$4,$5::jsonb)', [viewId, a.sheetId, 'PLM lock form', 'form', '{}'])
+    asUser(PB_FRONTLINE)
+    const recordId = rowIds[1]
+    const code = phys(a, 'componentCode')
+    const before = (await rowData(recordId))[code]
+    const edit = await request(pbApp).post(`/api/multitable/views/${viewId}/submit`).send({ recordId, data: { [code]: 'FORM-HACK' } })
+    expect(edit.status, JSON.stringify(edit.body)).toBe(403)
+    expect(edit.body.error.code).toBe('FIELD_READONLY')
+    expect(edit.body.error.fieldErrors).toEqual({ [code]: 'Field is readonly' })
+    expect((await rowData(recordId))[code]).toEqual(before)
+
+    const countBefore = (await sheetData(a.sheetId)).length
+    const create = await request(pbApp).post(`/api/multitable/views/${viewId}/submit`).send({ data: { [phys(a, 'idempotencyKey')]: 'FORM-FAKE-KEY' } })
+    expect(create.status, JSON.stringify(create.body)).toBe(403)
+    expect(create.body.error.code).toBe('FIELD_READONLY')
+    expect((await sheetData(a.sheetId)).length).toBe(countBefore)
+    // NOTE (a cost of option B, stated in the PR): the form route validates `required` over the SUBMITTED data,
+    // and six plm_system columns are template-`required`, so a form submission on a project sheet can no longer
+    // pass at all once people cannot send those columns. The grid / bulk / single-record paths are unaffected.
+  })
+
+  test('PB-10 the lock survives the route read serializer even for a closed-allowlist type (person): reported read-only, refused', async () => {
+    // No PLM column is a person column; this pins the cross-cutting sanitizer rule in routes/univer-meta.ts —
+    // the serializer every person write route reads fields through — for the one branch there that rebuilds
+    // `property` from scratch. A lock that a branch dropped would fail OPEN.
+    const personFieldId = `fld_plmro_person_${TS}`
+    await q(
+      'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [personFieldId, a.sheetId, 'Locked person', 'person', JSON.stringify({ humanWriteLock: 'plm_system', limitSingleRecord: true }), 900],
+    )
+    asUser(PB_FRONTLINE)
+    const res = await request(pbApp).get('/api/multitable/view').query({ sheetId: a.sheetId })
+    expect(res.status).toBe(200)
+    const field = (res.body.data.fields as Array<{ id: string; property?: Record<string, unknown> }>).find((f) => f.id === personFieldId)
+    expect(field?.property?.humanWriteLock).toBe('plm_system')
+    expect(res.body.data.meta.permissions.fieldPermissions[personFieldId]).toEqual({ visible: true, readOnly: true })
+    const patch = await request(pbApp).post('/api/multitable/patch').send({ sheetId: a.sheetId, changes: [{ recordId: rowIds[0], fieldId: personFieldId, value: [PB_FRONTLINE] }] })
+    expect(patch.status, JSON.stringify(patch.body)).toBe(403)
+    expect(patch.body.error.code).toBe('FIELD_READONLY_PLM_SYSTEM')
+  })
+
+  test('PB-08 THE ROLLOUT on a pre-lock sheet (the demo A/B shape): editable before, the repair marks it once, idempotent, rows untouched, plugin still writes', async () => {
+    // B was created by the same path; strip its markers to reproduce a sheet created BEFORE this change.
+    await q("UPDATE meta_fields SET property = property - 'humanWriteLock' WHERE sheet_id = $1", [b.sheetId])
+    expect(await lockedPhysicalIds(b.sheetId)).toEqual([])
+    const added = await pbApplyWriter.applyStockPreparationPlan({
+      permission: 'admin', plan: { decisions: [addDecision(PB_PROJECT_B, 1)] }, target: target(b), recordsApi: recordsApi(),
+    })
+    expect(added.counts.created).toBe(1)
+    const recordId = String(added.results[0].recordId)
+
+    asUser(PB_FRONTLINE)
+    const code = phys(b, 'componentCode')
+    const exposed = await request(pbApp).patch(`/api/multitable/records/${recordId}`).send({ sheetId: b.sheetId, data: { [code]: 'EDITED-BEFORE-ROLLOUT' } })
+    expect(exposed.status, 'the pre-lock sheet is exactly the exposure field review found').toBe(200)
+
+    const dataBefore = await sheetData(b.sheetId)
+    const first = await pbProjectTargets.markProjectSheetPlmSystemColumns({ provisioning: provisioningApi(), projectId: PB_STAGING, objectId: b.objectId })
+    expect(first).toMatchObject({ fieldCount: PB_PLM_IDS.length, marked: PB_PLM_IDS.length, alreadyMarked: 0, missing: 0, readBeforeWrite: true })
+    const second = await pbProjectTargets.markProjectSheetPlmSystemColumns({ provisioning: provisioningApi(), projectId: PB_STAGING, objectId: b.objectId })
+    expect(second).toMatchObject({ marked: 0, alreadyMarked: PB_PLM_IDS.length, missing: 0 })
+    expect(await lockedPhysicalIds(b.sheetId)).toEqual(PB_PLM_IDS.map((id) => phys(b, id)).sort())
+    expect(await sheetData(b.sheetId)).toEqual(dataBefore) // metadata only — no row changed
+
+    const refused = await request(pbApp).patch(`/api/multitable/records/${recordId}`).send({ sheetId: b.sheetId, data: { [code]: 'EDITED-AFTER-ROLLOUT' } })
+    expect(refused.status).toBe(403)
+    expect(refused.body.error.code).toBe('FIELD_READONLY_PLM_SYSTEM')
+
+    const repaired = await pbApplyWriter.applyStockPreparationPlan({
+      permission: 'admin',
+      plan: { decisions: [{ decision: 'update', idempotencyKey: `${PB_PROJECT_B}:K1`, patch: { componentCode: 'CODE-1', lastPlmRefreshDecision: 'update' } }] },
+      target: target(b),
+      recordsApi: recordsApi(),
+    })
+    expect(repaired.counts.updated).toBe(1)
+    expect((await rowData(recordId))[code]).toBe('CODE-1') // the next pull restores the PLM value; people cannot move it again
   })
 })

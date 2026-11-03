@@ -113,6 +113,7 @@ const STRUCTURE_WRITE_HANDLERS = [
   'stockPreparationSandboxTargetEnsure',
   'stockPreparationOptionsSync',
   'stockPreparationMvpEnsure',
+  'stockPreparationMvpRepair',
   'stockPreparationMvpOptionsSync',
   'fieldOptionsSync',
 ]
@@ -178,8 +179,9 @@ for (const [readHandler, sharedNormalizer] of [
   })
 }
 
-// GHSA-m6qv step-1 follow-up (owner decision A): the 3 WRITE-path normalizers must reject an explicit
-// request baseId (fail-closed, third steering axis) and must NOT forward a request baseId to provisioning.
+// GHSA-m6qv step-1 follow-up (owner decision A): the WRITE-path normalizers (the original three plus the
+// #5721 终审 MVP repair one) must reject an explicit request baseId (fail-closed, third steering axis) and
+// must NOT forward a request baseId to provisioning.
 function writeVariantBody(src, name) {
   const startMarker = `function ${name}(req, rawInput = {}) {`
   const start = src.indexOf(startMarker)
@@ -187,7 +189,7 @@ function writeVariantBody(src, name) {
   const end = src.indexOf('\n}', start)
   return src.slice(start, end).replace(/\/\/[^\n]*/g, '')  // strip comments — guards reason about code, not prose
 }
-for (const name of ['stockPreparationTargetWriteInput', 'stockPreparationSandboxTargetWriteInput', 'stockPreparationMvpTargetWriteInput']) {
+for (const name of ['stockPreparationTargetWriteInput', 'stockPreparationSandboxTargetWriteInput', 'stockPreparationMvpTargetWriteInput', 'stockPreparationMvpRepairInput']) {
   const body = writeVariantBody(ROUTES_SRC, name)
   check(`${name}: rejects an explicit request baseId (assertNoRequestBaseId)`, () => {
     assert.equal(body.includes('assertNoRequestBaseId(rawInput)'), true, `${name} must call assertNoRequestBaseId(rawInput) before building the input`)
@@ -346,6 +348,53 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   'stockPreparationOperatorProjectBoard',
   'stockPreparationOperatorProjectDirectory',
   'stockPreparationPrepLineExport',
+  // 一个项目一张备料表 (S1, ADR adr-stock-prep-project-sheets-20261008). All three derive their tenant
+  // through the host-vouched operator scope, exactly like the board: the registry they read is keyed
+  // by that tenant, so ABSENT / ACTIVE / ARCHIVED is only ever a fact about the caller's own tenant.
+  // The CREATE is a WRITE (it provisions a sheet and registers it) and, like the confirm, is pinned
+  // here because the scope it resolves is what decides which tenant's staging project the sheet
+  // lands in. All three are behind the default-OFF switch and refuse 404 before any IO without it.
+  'stockPreparationProjectTargetCreate',
+  'stockPreparationProjectTargetGet',
+  'stockPreparationProjectTargetList',
+  // S4 (ADR §6, register R-38). ARCHIVE and RESTORE are WRITES to the registry row of the caller's
+  // own tenant — the tenant the scope proves keys the row they flip, so a header-fillable tenant
+  // here would archive another tenant's project. Neither derives a staging project (they touch no
+  // sheet), so neither is in the inline-staging set below.
+  'stockPreparationProjectTargetArchive',
+  'stockPreparationProjectTargetRestore',
+  // S3 (ADR §5, register R-37). The project-fields GET / PATCH are the ONLY surfaces that carry the
+  // three free-text project-level columns (负责人 / 备注 / 计划完成), so WHOSE registry row they read
+  // or write must come from the host-vouched scope — a header-fillable tenant here would read or
+  // overwrite another tenant's texts. Neither derives a staging project (they touch no sheet). The
+  // overview REFRESH derives the staging project whose overview it projects into and every project
+  // sheet is counted through, so it IS in the inline-staging set below — and so is the fix-round-1
+  // overview ENSURE (PULL), which creates the overview in that staging project.
+  'stockPreparationProjectFieldsGet',
+  'stockPreparationProjectFieldsUpdate',
+  // 备料分批拉取第一期 step 3 PR B (register R-53 / R-54). The pilot READ answers a readiness list about the
+  // caller's OWN tenant's registry row and sheet (values-free, but WHOSE row is decided by the scope), and
+  // the ENABLE is a WRITE — it bumps the sheet's generation, asks the host to stamp the sheet closed for
+  // grid export and marks the registry row — keyed by the tenant this scope proves: a header-fillable
+  // tenant here would mark another tenant's project pilot. Both derive their staging project in the shared
+  // readiness helper (`evaluateStockPreparationProjectPilotReadiness`, from the scope's tenant with no
+  // request projectId), not inline, so neither is in the inline-staging set below.
+  'stockPreparationProjectPilotEnable',
+  'stockPreparationProjectPilotGet',
+  // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; register R-68). The switch READ answers the caller's
+  // OWN tenant's project sheet switch and its last pull's reminder (record handles), and the SET is a WRITE — one field
+  // property of that sheet's key column, through the host's provisioning port — keyed by the tenant this scope proves:
+  // a header-fillable tenant here would read or flip another tenant's project switch. Both derive the staging project
+  // the provisioning port is addressed to INLINE, from the scope with no request projectId (the inline set below).
+  'stockPreparationProjectManualRowsGet',
+  'stockPreparationProjectManualRowsSet',
+  'stockPreparationProjectOverviewRefresh',
+  'stockPreparationProjectOverviewEnsure',
+  // S5b (R-39) 「成员与权限」. Adding project sheets to a custom role is a WRITE (a G1 grant per sheet) and
+  // the sheets it may name are the caller's OWN tenant's registry rows — keyed by the tenant this scope
+  // proves, so a header-fillable tenant here would grant a role on another tenant's project sheet. The
+  // other three members handlers resolve no tenant at all (roles are platform-global) and are not here.
+  'stockPreparationMembersCustomRoleProjectTargets',
   // 对账限本人可见项目 WAS PINNED HERE AND IS NOT ANY MORE — said out loud, because the assertion
   // below asks whoever removes a member to say so. #5516 gave reconcile a project-visibility gate
   // that resolved an operator scope to decide WHOSE project directory answered "is this projectNo one
@@ -379,6 +428,10 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   // `read`-tier trial it has always been, counts and hashes only, and it must stay reachable by the
   // legacy `integration:read` tier that has always run it.
   'tableActionDryRun',
+  // R67 ④ — the background dry-run's POLL. Its stored result is `tableActionDryRun`'s response, so a
+  // job enqueued with the opt-in carries the same part numbers; the poll that may read it back proves
+  // the same scope, under the same carve-out below, and is otherwise the same values-free read.
+  'tableActionDryRunJobGet',
 ].sort()
 
 const VALUE_BEARING_READ_HANDLERS = handlersCallingOperatorValueScope(ROUTES_SRC)
@@ -401,10 +454,13 @@ check('the derived set equals the pinned set (a new value-bearing read must be p
   )
 })
 
-// The three that derive their staging project inline. (The export does not: its sheet is the bound
-// table action's deploy-time target, which is why its own handler comment spells out what the
-// verified tenant does and does not decide there.)
+// The ones that derive their staging project inline.
 const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
+  // The export's SHEET is the bound table action's deploy-time target, but it now derives the
+  // staging project that sheet must belong to (its tenant wall, shared with the carry) — and that
+  // derivation must come from the resolved scope with no request projectId, or a caller could name
+  // the project the wall compares against.
+  'stockPreparationPrepLineExport',
   'stockPreparationConfirmationDecisionsValueEntry',
   // The confirm derives its staging project inline too, and it WRITES into it — so the check that
   // the project comes from the resolved scope with no request projectId matters more here than on
@@ -412,6 +468,30 @@ const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
   'stockPreparationConfirmationDecisionsConfirm',
   'stockPreparationOperatorProjectDirectory',
   'stockPreparationOperatorProjectBoard',
+  // S3 (R-37): the overview refresh projects into the overview of, and counts every project sheet
+  // through, the staging project it derives — from the resolved scope with no request projectId. The
+  // fix-round-1 ENSURE creates the overview in that same staging project, derived the same way.
+  'stockPreparationProjectOverviewRefresh',
+  'stockPreparationProjectOverviewEnsure',
+  // 通知下一步 (#6121). The advance probes the deploy-global bound sheet for "does this project have
+  // rows" before it writes, so it now runs the shared target tenant wall first — and the staging
+  // project that wall compares against must come from the resolved scope with no request projectId,
+  // or a caller could name the project the registry is asked about.
+  'stockPreparationHandoffAdvance',
+  // 一个项目一张备料表 (S1). The GET derives the staging project for the deep-link handles and the
+  // row scan; the CREATE derives the staging project the new sheet is PROVISIONED INTO and the
+  // registry row is keyed by — a request projectId here would let a caller plant a sheet in another
+  // tenant's staging project. (The list route derives none: it reads registry rows by tenant only.)
+  'stockPreparationProjectTargetCreate',
+  'stockPreparationProjectTargetGet',
+  // 人工补充行 B4 (R-68): the switch read and set address the host's provisioning port (the key column's field read and
+  // its one-key patch) in the staging project derived from the scope — a request projectId here would let a caller
+  // read or flip a switch in another tenant's staging project.
+  'stockPreparationProjectManualRowsGet',
+  'stockPreparationProjectManualRowsSet',
+  // S5b (R-39): the project-sheet add derives the staging project the G1 grant names (the plugin-scope
+  // wrapper then requires the sheet to be the one derived for it) — from the scope, never the request.
+  'stockPreparationMembersCustomRoleProjectTargets',
 ])
 
 /**
@@ -433,6 +513,9 @@ const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
  */
 const VALUE_BEARING_READS_WITH_GATED_LEGACY_TENANT = new Map([
   ['tableActionDryRun', 'const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})'],
+  // R67 ④: the poll derives the tenant its job record is keyed by in the SAME gated form — the value
+  // job (opt-in) is only addressable through the proven scope.
+  ['tableActionDryRunJobGet', 'const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})'],
 ])
 
 /**

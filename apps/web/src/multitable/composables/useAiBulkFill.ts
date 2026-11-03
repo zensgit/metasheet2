@@ -34,6 +34,7 @@ import type {
   AiBulkJobCommitData,
   AiBulkJobPoll,
   AiBulkJobRow,
+  AiBulkJobStatus,
   AiBulkPreviewData,
   AiBulkPreviewInput,
   AiBulkPreviewStart,
@@ -55,10 +56,43 @@ export type AiBulkFillPhase =
   | 'jobCommitting'
   | 'jobDone'
 
-/** Statuses on which the worker is done mutating the job → it's committable. */
-const COMMITTABLE_STATUSES = new Set<AiBulkJobPoll['state']>(['suspended', 'errored', 'rejected'])
-/** Statuses on which polling must STOP (terminal-for-this-session). */
-const POLL_STOP_STATUSES = new Set<AiBulkJobPoll['state']>(['suspended', 'resolved', 'rejected', 'errored'])
+/**
+ * The TWO decisions this composable makes about a SERVER job status, one row per status of the
+ * `AiBulkJobStatus` union (#5842).
+ *
+ * A `Record<AiBulkJobStatus, …>` on purpose, not the two exclusion `Set`s this replaced: with a
+ * set, a status added to the union later falls silently into the "not committable, keep polling"
+ * default, which is exactly how `committing` would have been handled — offered for commit after a
+ * cancel, then refused by the server with a 409. As a record, a new status is a COMPILE error
+ * here until both questions are answered.
+ *
+ *  · committable — the server would let a commit be CLAIMED now (the worker is done mutating the
+ *    job). Mirrors the backend's BULK_JOB_COMMITTABLE_STATUSES exactly: `committing` is excluded
+ *    because another commit request already holds the claim, `queued`/`running` because the
+ *    worker is still generating, `resolved` because it is done.
+ *  · stopPolling — terminal FOR THIS SESSION (stop the poll loop). `committing` is NOT: the
+ *    outcome (resolved / errored) is still coming, so we keep polling rather than freeze on a
+ *    status that will change.
+ */
+const JOB_STATUS_POLICY: Record<AiBulkJobStatus, { committable: boolean; stopPolling: boolean }> = {
+  queued: { committable: false, stopPolling: false },
+  running: { committable: false, stopPolling: false },
+  committing: { committable: false, stopPolling: false },
+  suspended: { committable: true, stopPolling: true },
+  rejected: { committable: true, stopPolling: true },
+  errored: { committable: true, stopPolling: true },
+  resolved: { committable: false, stopPolling: true },
+}
+
+/** true when the SERVER status says a commit may be claimed. Unknown status → fail-closed false. */
+function isCommittableJobStatus(status: AiBulkJobStatus | null | undefined): boolean {
+  return status != null && JOB_STATUS_POLICY[status]?.committable === true
+}
+
+/** true when polling must STOP on this status. Unknown status → keep polling (never a silent stop). */
+function stopsPolling(status: AiBulkJobStatus): boolean {
+  return JOB_STATUS_POLICY[status]?.stopPolling === true
+}
 /** Hard cap on row pages we will follow (defence against a non-advancing cursor). */
 const MAX_ROW_PAGES = 1000
 
@@ -183,6 +217,13 @@ export function useAiBulkFill(opts: UseAiBulkFillOptions) {
   const failures = computed(() => state.preview?.failures ?? [])
   /** Whether the INLINE preview broke early (partial). NOT the over-cap path (that's a job). */
   const partial = computed(() => state.preview?.capped === true)
+  /**
+   * #5838: the batch stopped because the TABLE could not be confirmed available mid-run, not because a
+   * quota/provider limit was hit. `capped` alone cannot tell the two apart, and the generic partial
+   * advice ("write these, then run AI fill again") is wrong here: a write and a re-run BOTH refuse on a
+   * table that is gone. The distinguishing fact is already on the wire, in the skipped bucket.
+   */
+  const stoppedSheetNotLive = computed(() => skipped.value.some((s) => s.reason === 'sheet_not_live'))
   /** Already-charged cost — inline preview's settledCost, or the job's running settledCost. */
   const settledCost = computed(() => (isJob.value ? state.job?.settledCost ?? 0 : state.preview?.settledCost ?? 0))
 
@@ -198,6 +239,25 @@ export function useAiBulkFill(opts: UseAiBulkFillOptions) {
   /** Never-generated (cancelled before reach — UNCHARGED) job rows. */
   const jobPendingNotGeneratedRows = computed(() => state.jobRows.filter((r) => r.state === 'pending_not_generated'))
   const quotaPaused = computed(() => state.job?.quotaPaused === true)
+
+  /**
+   * May the user commit this job RIGHT NOW? (#5842)
+   *
+   * The decision is the SERVER's, not "we reached the review screen": the commit phase has its
+   * own status (`committing`) and the server refuses a commit on it with 409
+   * BULK_JOB_COMMIT_IN_PROGRESS. `cancelJob()` enters review on ANY cancel outcome (so the user
+   * still sees the truthful row diff), which means review can be reached on a status the server
+   * will not commit — before this, the page offered the write anyway and the click became a 409.
+   *
+   * Two conjuncts, both required:
+   *  · we are IN the committable review (`jobReview`) — never from `polling` (the worker is
+   *    still generating) and never from `jobLoadError` (fail-closed: the diff is incomplete);
+   *  · the last SERVER status says a commit may be claimed ({@link JOB_STATUS_POLICY}).
+   * Selection size is deliberately NOT part of it — "nothing selected" is a separate, already
+   * handled reason the button is disabled, and conflating them would make this say "the server
+   * refuses" when the truth is "you picked no rows".
+   */
+  const canCommitJob = computed(() => state.phase === 'jobReview' && isCommittableJobStatus(state.job?.state))
 
   // --- Unified selection (the ONE source of "what is selectable") ---
   // Inline mode: confirmable rows[] (masked included). Job mode: `generated` rows
@@ -298,7 +358,7 @@ export function useAiBulkFill(opts: UseAiBulkFillOptions) {
     if (token !== pollToken) return
     state.job = header
 
-    if (!POLL_STOP_STATUSES.has(header.state)) {
+    if (!stopsPolling(header.state)) {
       // Still generating → reschedule the next tick.
       pollTimer = setTimeout(() => {
         void pollStep(token)
@@ -317,7 +377,7 @@ export function useAiBulkFill(opts: UseAiBulkFillOptions) {
       state.phase = 'jobDone'
       return
     }
-    if (COMMITTABLE_STATUSES.has(header.state)) {
+    if (isCommittableJobStatus(header.state)) {
       await loadAllJobRows(jobId, token)
       return
     }
@@ -423,9 +483,14 @@ export function useAiBulkFill(opts: UseAiBulkFillOptions) {
    * Returns the commit result (counts + state:'resolved'), or null on a guarded
    * no-op / error. A 409 (not committable / already committing) surfaces and
    * stays in jobReview.
+   *
+   * #5842: gated on {@link canCommitJob}, i.e. on the SERVER status — a job the server would
+   * refuse (notably `committing`, a commit already in flight) issues NO request at all, so a
+   * racing second write can never be started from this page.
    */
   async function commitJob(): Promise<AiBulkJobCommitData | null> {
     if (busy.value) return null
+    if (!canCommitJob.value) return null
     const jobId = state.jobId
     if (!jobId) return null
     const recordIds = [...selected.value]
@@ -456,8 +521,9 @@ export function useAiBulkFill(opts: UseAiBulkFillOptions) {
     if (!jobId) return false
     clearPoll()
     const token = pollToken
+    let cancelled: { cancelled: boolean; state: AiBulkJobStatus }
     try {
-      await opts.client.cancelBulkJob(opts.sheetId(), jobId)
+      cancelled = await opts.client.cancelBulkJob(opts.sheetId(), jobId)
     } catch (err) {
       if (token !== pollToken) return false
       fail(err)
@@ -471,12 +537,19 @@ export function useAiBulkFill(opts: UseAiBulkFillOptions) {
       return false
     }
     if (token !== pollToken) return false
-    // Read the post-cancel header for truthful counts, then load the committable
+    // #5842: the cancel RESPONSE already carries the server's authoritative post-cancel status
+    // (`rejected` when it landed; the real one — e.g. `committing` — when the server refused it).
+    // Apply it FIRST, so the committable decision below can never be made on the pre-cancel
+    // status: the header re-read right after is best-effort and its failure used to leave
+    // `state.job` saying `running`, which is neither true nor committable.
+    if (state.job) state.job = { ...state.job, state: cancelled.state }
+    // Then read the post-cancel header for truthful counts, and load the committable
     // (already-generated) rows into review.
     try {
       state.job = await opts.client.getBulkJob(opts.sheetId(), jobId)
     } catch {
-      // Non-fatal — the rows fetch still drives review.
+      // Non-fatal — the status from the cancel response above stands, and the rows fetch still
+      // drives review.
     }
     if (token !== pollToken) return false
     await loadAllJobRows(jobId, token)
@@ -521,6 +594,7 @@ export function useAiBulkFill(opts: UseAiBulkFillOptions) {
     skipped,
     failures,
     partial,
+    stoppedSheetNotLive,
     settledCost,
     confirmableCount,
     selectedCount,
@@ -532,6 +606,7 @@ export function useAiBulkFill(opts: UseAiBulkFillOptions) {
     jobFailureRows,
     jobPendingNotGeneratedRows,
     quotaPaused,
+    canCommitJob,
     // actions
     preview,
     commit,

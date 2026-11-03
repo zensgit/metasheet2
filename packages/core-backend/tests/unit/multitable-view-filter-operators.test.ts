@@ -2,7 +2,7 @@
  * 2a (view filter operators) — is_any_of / is_none_of set membership on select/text fields.
  * First 2a slice: backend evaluator engine (the FE picker follows). Pure function, no DB.
  */
-import { describe, test, expect } from 'vitest'
+import { afterEach, beforeEach, describe, test, expect, vi } from 'vitest'
 
 import { evaluateMetaFilterCondition } from '../../src/routes/univer-meta'
 
@@ -69,5 +69,60 @@ describe('view filter — between (2a)', () => {
   test('date between (epoch comparison)', () => {
     expect(date('2026-02-15', ['2026-02-01', '2026-02-28'])).toBe(true)
     expect(date('2026-03-15', ['2026-02-01', '2026-02-28'])).toBe(false)
+  })
+})
+
+// #6204 item 3: a `date` (date-only) filter compares the DAY each side shows — the grid's day (formatDateOnlyValue
+// in the business timezone, Asia/Shanghai by default) — never the raw timestamp. A cell stored
+// `2026-09-17T16:00:00.000Z` shows 2026-09-18 (00:00 北京时间; its UTC day is 09-17), so `is 2026-09-18` matches it.
+describe('view filter — date-only fields compare the day the cell shows (#6204)', () => {
+  const INSTANT_0918 = '2026-09-17T16:00:00.000Z' // 2026-09-18 00:00 北京时间
+  const d = (cell: unknown, operator: string, value: unknown) =>
+    evaluateMetaFilterCondition('date', cell, { fieldId: 'd', operator, value })
+
+  beforeEach(() => vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', ''))
+  afterEach(() => vi.unstubAllEnvs())
+
+  test('is / isNot: an instant matches the business day it shows on, not its UTC day', () => {
+    expect(d(INSTANT_0918, 'is', '2026-09-18')).toBe(true)
+    expect(d(INSTANT_0918, 'is', '2026-09-17')).toBe(false)
+    expect(d(INSTANT_0918, 'isNot', '2026-09-18')).toBe(false)
+    expect(d('2026-09-17T15:59:59.000Z', 'is', '2026-09-17')).toBe(true) // 23:59:59 北京时间 on 09-17
+    expect(d('2026-09-18T15:00:00.000Z', 'is', '2026-09-18')).toBe(true) // 23:00 北京时间, still 09-18
+    expect(d(Date.parse(INSTANT_0918), 'is', '2026-09-18')).toBe(true) // epoch-ms number: same rule
+  })
+
+  test('a day as written keeps that day, in any accepted spelling, on either side', () => {
+    expect(d('2026-09-18', 'is', '2026-09-18')).toBe(true)
+    expect(d('2026/9/18', 'is', '2026-09-18')).toBe(true)
+    expect(d('2026年9月18日', 'is', '2026-09-18')).toBe(true)
+    expect(d('2026-09-18', 'is', INSTANT_0918)).toBe(true) // an instant as the filter value: its business day
+  })
+
+  test('greater / less / between compare whole days', () => {
+    expect(d(INSTANT_0918, 'less', '2026-09-18')).toBe(false) // was true: 16:00Z on 09-17 < 09-18T00:00Z
+    expect(d(INSTANT_0918, 'greaterEqual', '2026-09-18')).toBe(true)
+    expect(d(INSTANT_0918, 'lessEqual', '2026-09-18')).toBe(true)
+    expect(d(INSTANT_0918, 'greater', '2026-09-17')).toBe(true)
+    expect(d(INSTANT_0918, 'between', ['2026-09-18', '2026-09-18'])).toBe(true) // single-day range, inclusive
+    expect(d('2026-09-18T15:00:00.000Z', 'between', ['2026-09-01', '2026-09-18'])).toBe(true)
+    expect(d('2026-09-18T16:00:00.000Z', 'between', ['2026-09-01', '2026-09-18'])).toBe(false) // 09-19 北京时间
+  })
+
+  test('the business timezone decides: the same instant is 09-17 in New York', () => {
+    vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'America/New_York')
+    expect(d(INSTANT_0918, 'is', '2026-09-17')).toBe(true)
+    expect(d(INSTANT_0918, 'is', '2026-09-18')).toBe(false)
+  })
+
+  test('a value that names no day never matches (and an unparseable between bound stays inactive)', () => {
+    expect(d('not a date', 'is', '2026-09-18')).toBe(false)
+    expect(d('not a date', 'isNot', '2026-09-18')).toBe(true)
+    expect(d('2026-09-18', 'is', 'whenever')).toBe(false)
+    expect(d('2026-09-18', 'between', ['x', 'y'])).toBe(true)
+  })
+
+  test('number fields are untouched (still numeric)', () => {
+    expect(evaluateMetaFilterCondition('number', 20260918, { fieldId: 'n', operator: 'is', value: '20260918' })).toBe(true)
   })
 })

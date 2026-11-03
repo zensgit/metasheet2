@@ -176,6 +176,16 @@ describe('canonical scalar parsers', () => {
     }
   })
 
+  it('keeps legacy text users outside the strict W4 target identity domain', async () => {
+    const org = await orgIdentity(ORG, null)
+    expectCode(() => parseCanonicalAttendanceUserIdV1('legacy-text-user'), 'W4C0_USER_ID_INVALID')
+    expectCode(() => createVerifiedAttendanceCalculationTargetIdentityV1({
+      org, userId: 'legacy-text-user', workDate: SCHED_DATE,
+    }), 'W4C0_USER_ID_INVALID')
+    const target = createVerifiedAttendanceCalculationTargetIdentityV1({ org, userId: SCHED_USER, workDate: SCHED_DATE })
+    expect(target.userId).toBe(SCHED_USER)
+  })
+
   it('validates calendar dates strictly (ASCII digits, real calendar days, leap years)', () => {
     expect(parseCanonicalAttendanceWorkDateV1('2028-02-29')).toBe('2028-02-29')
     expect(parseCanonicalAttendanceWorkDateV1('2000-02-29')).toBe('2000-02-29')

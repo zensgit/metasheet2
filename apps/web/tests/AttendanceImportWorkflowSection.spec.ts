@@ -223,9 +223,13 @@ describe('AttendanceImportWorkflowSection', () => {
     const importGroupTimezone = container!.querySelector<HTMLSelectElement>('#attendance-import-group-timezone')
     expect(importTimezone).toBeTruthy()
     expect(importGroupTimezone).toBeTruthy()
-    expect(importTimezone!.selectedOptions[0]?.textContent).toContain('Asia/Shanghai (UTC+08:00)')
-    expect(Array.from(importTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Common timezones')
-    expect(Array.from(importGroupTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Asia')
+    expect(importTimezone!.value).toContain('Asia/Shanghai (UTC+08:00)')
+    expect(importTimezone!.closest('[data-attendance-timezone-field]')!.querySelector('select')).toBeNull()
+    importTimezone!.dispatchEvent(new Event('focus'))
+    importGroupTimezone!.dispatchEvent(new Event('focus'))
+    await flushUi()
+    expect(importTimezone!.closest('[data-attendance-timezone-field]')!.textContent).toContain('Common timezones')
+    expect(importGroupTimezone!.closest('[data-attendance-timezone-field]')!.textContent).toContain('Asia')
   })
 
   it('shows manual-plan fallbacks when mapping, user map, and group sync are unset', async () => {

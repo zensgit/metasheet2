@@ -9,6 +9,7 @@ import {
   createEmptyStepDraft,
   insertStepAt,
   isDefaultStepName,
+  setStepApprovalType,
   type ApprovalStepDraft,
 } from '../src/approvals/templateAuthoring'
 
@@ -174,6 +175,33 @@ describe('templateAuthoring — isDefaultStepName', () => {
     expect(isDefaultStepName('审批人 2', 3)).toBe(false)
     expect(isDefaultStepName('财务复核', 2)).toBe(false)
     expect(isDefaultStepName('', 2)).toBe(false)
+  })
+})
+
+// Lock-4 §1 F4-A — an auto_approve step decides without a person. Its chip must say so, and its
+// hidden scratch source (whatever the author configured before choosing 自动通过) must be neither
+// described nor flagged unresolvable: the save omits it (`stepOmitsAssigneeSources`).
+describe('linearStepSpine — Lock-4 §1 F4-A auto_approve steps', () => {
+  it('an auto_approve step reads 自动通过 and is never flagged unresolved for its hidden scratch source', () => {
+    const step = makeStep({ sourceKind: 'static_user', idsText: '' })
+    setStepApprovalType(step, 'auto_approve')
+    const chip = buildLinearStepSpine([step])[1]
+    expect(chip).toMatchObject({ role: 'step', sourceSummary: '自动通过', resolvable: true })
+  })
+
+  it('POSITIVE CONTROL — the SAME step back on 人工审批 is described by its source and flagged unresolved again', () => {
+    const step = makeStep({ sourceKind: 'static_user', idsText: '' })
+    setStepApprovalType(step, 'auto_approve')
+    setStepApprovalType(step, 'manual')
+    const chip = buildLinearStepSpine([step])[1]
+    expect(chip?.sourceSummary).not.toBe('自动通过')
+    expect(chip?.resolvable).toBe(false)
+  })
+
+  it('an auto_approve step that still CARRIES a source keeps that source\'s completeness flag (the source is saved and validated)', () => {
+    const step = makeStep({ sourceKind: 'static_user', idsText: '', approvalType: 'auto_approve' })
+    const chip = buildLinearStepSpine([step])[1]
+    expect(chip).toMatchObject({ sourceSummary: '自动通过', resolvable: false })
   })
 })
 

@@ -21,6 +21,12 @@
             <span class="meta-log-viewer__stat-label">{{ automationLabel('log.failed', isZh) }}</span>
             <span class="meta-log-viewer__stat-value meta-log-viewer__stat-value--failed">{{ stats.failed }}</span>
           </div>
+          <!-- 客户反馈 2026-09-24 #3 final review F1: skipped runs (e.g. a record.deleted rule whose trigger record is
+               gone) were counted in 总计 but in no other column. The backend stats already carry `skipped`. -->
+          <div class="meta-log-viewer__stat" data-stat="skipped">
+            <span class="meta-log-viewer__stat-label">{{ automationLabel('log.skipped', isZh) }}</span>
+            <span class="meta-log-viewer__stat-value meta-log-viewer__stat-value--skipped" data-field="stat-skipped">{{ stats.skipped ?? 0 }}</span>
+          </div>
           <div class="meta-log-viewer__stat">
             <span class="meta-log-viewer__stat-label">{{ automationLabel('log.avgDuration', isZh) }}</span>
             <span class="meta-log-viewer__stat-value">{{ stats.avgDuration }}ms</span>
@@ -33,7 +39,7 @@
             <option value="">{{ automationLabel('status.all', isZh) }}</option>
             <option value="success">{{ automationStatusLabel('success', isZh) }}</option>
             <option value="failed">{{ automationStatusLabel('failed', isZh) }}</option>
-            <option value="skipped">{{ automationStatusLabel('skipped', isZh) }}</option>
+            <option value="skipped">{{ logStatusLabel('skipped') }}</option>
           </select>
           <MtButton class="meta-log-viewer__btn" data-action="refresh" @click="loadData">{{ automationLabel('log.refresh', isZh) }}</MtButton>
         </div>
@@ -70,7 +76,7 @@
               class="meta-log-viewer__badge"
               :class="`meta-log-viewer__badge--${log.status}`"
               :data-status="log.status"
-            >{{ automationStatusLabel(log.status, isZh) }}</span>
+            >{{ logStatusLabel(log.status) }}</span>
             <span class="meta-log-viewer__log-trigger" data-field="triggeredBy">{{ log.triggeredBy }}</span>
             <span class="meta-log-viewer__log-duration">{{ log.duration ?? '-' }}ms</span>
           </div>
@@ -102,18 +108,34 @@
               <span
                 class="meta-log-viewer__badge meta-log-viewer__badge--sm"
                 :class="`meta-log-viewer__badge--${step.status}`"
-              >{{ automationStatusLabel(step.status, isZh) }}</span>
+              >{{ logStatusLabel(step.status) }}</span>
               <span v-if="step.durationMs" class="meta-log-viewer__step-dur">{{ step.durationMs }}ms</span>
+              <!-- 客户反馈 2026-10-21 item 1 follow-up: no English error line under a zh DingTalk count sentence,
+                   and a legacy error that listed user ids renders as a values-free sentence. -->
               <div
-                v-if="step.error"
+                v-if="stepErrorText(step)"
                 class="meta-log-viewer__step-error"
                 data-field="step-error"
-              >{{ summarizeStepError(step.error) }}</div>
+              >{{ stepErrorText(step) }}</div>
+              <!-- F1: a recognised values-free reason code renders as a sentence, and is dropped from the JSON below. -->
               <div
-                v-if="step.output"
+                v-if="stepOutputView(step).reason"
+                class="meta-log-viewer__step-reason"
+                data-field="step-reason"
+              >{{ stepOutputView(step).reason }}</div>
+              <!-- 客户反馈 2026-10-21 item 1 (review round 1): the log names no recipient; who was skipped is in the
+                   rule's 钉钉个人消息投递记录 — one click away, opened on 跳过（未绑定）. -->
+              <MtButton
+                v-if="showsPersonDeliveriesLink(step)"
+                class="meta-log-viewer__btn meta-log-viewer__btn--support"
+                data-action="open-person-deliveries"
+                @click.stop="$emit('open-person-deliveries', ruleId)"
+              >{{ automationLabel('log.openPersonDeliveries', isZh) }}</MtButton>
+              <div
+                v-if="stepOutputView(step).output"
                 class="meta-log-viewer__step-output"
                 data-field="step-output"
-              >{{ summarizeStepOutput(step.output) }}</div>
+              >{{ summarizeStepOutput(stepOutputView(step).output) }}</div>
             </div>
           </div>
         </div>
@@ -123,16 +145,22 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../../utils/clipboard'
 import { ref, computed, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
-import type { AutomationExecution, AutomationStats } from '../types'
+import type { AutomationExecution, AutomationStats, AutomationStepResult } from '../types'
+import { formatBusinessTimestamp } from '../utils/business-timezone'
 import type { MultitableApiClient } from '../api/client'
 import {
   automationActionTypeLabel,
   automationLabel,
   automationStatusLabel,
+  automationStepErrorText,
+  automationStepOutputView,
+  readDingTalkRecipientOutcome,
   supportCopyFailed,
   supportDownloadFailed,
+  type AutomationStepOutputView,
 } from '../utils/meta-automation-labels'
 import {
   redactString,
@@ -155,6 +183,7 @@ const props = defineProps<{
 
 defineEmits<{
   (e: 'close'): void
+  (e: 'open-person-deliveries', ruleId: string): void
 }>()
 
 const loading = ref(false)
@@ -175,12 +204,27 @@ function toggleExpand(id: string) {
   expandedId.value = expandedId.value === id ? null : id
 }
 
+// F1: this panel says 已跳过 for a skipped run / step (and in the filter). The shared `status.skipped` wording is
+// left alone: the delivery viewers and the manager's last-run chip use it for other kinds of "skipped".
+function logStatusLabel(status: string): string {
+  return status === 'skipped' ? automationLabel('log.statusSkipped', isZh.value) : automationStatusLabel(status, isZh.value)
+}
+
+function stepOutputView(step: AutomationStepResult): AutomationStepOutputView {
+  return automationStepOutputView(step.output, isZh.value)
+}
+
+function showsPersonDeliveriesLink(step: AutomationStepResult): boolean {
+  return step.actionType === 'send_dingtalk_person_message' && readDingTalkRecipientOutcome(step.output) !== null
+}
+
+function stepErrorText(step: AutomationStepResult): string {
+  return summarizeStepError(automationStepErrorText(step.error, step.output, isZh.value))
+}
+
+// 客户反馈 2026-09-24 #4c follow-up: the business timezone, fixed 24-hour format — not the browser's zone / locale.
 function formatTime(ts: string): string {
-  try {
-    return new Date(ts).toLocaleString()
-  } catch {
-    return ts
-  }
+  return formatBusinessTimestamp(ts, { precision: 'second' }) ?? ts
 }
 
 function setSupportPacketStatus(executionId: string, message: string) {
@@ -192,11 +236,11 @@ function setSupportPacketStatus(executionId: string, message: string) {
 
 async function copySupportPacket(log: AutomationExecution) {
   try {
-    const clipboard = navigator?.clipboard
-    if (!clipboard?.writeText) {
+    // copyText never rejects and already falls back to execCommand('copy') on plain-HTTP deployments;
+    // `false` means no copy mechanism worked at all.
+    if (!(await copyText(renderAutomationLogSupportPacketMarkdown(log)))) {
       throw new Error(automationLabel('support.clipboardUnavailable', isZh.value))
     }
-    await clipboard.writeText(renderAutomationLogSupportPacketMarkdown(log))
     setSupportPacketStatus(log.id, automationLabel('support.copied', isZh.value))
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
@@ -319,6 +363,7 @@ watch(
 .meta-log-viewer__stat-value { font-size: 18px; font-weight: 700; color: #0f172a; }
 .meta-log-viewer__stat-value--success { color: #16a34a; }
 .meta-log-viewer__stat-value--failed { color: #dc2626; }
+.meta-log-viewer__stat-value--skipped { color: #64748b; }
 
 .meta-log-viewer__toolbar { display: flex; gap: 8px; align-items: center; }
 
@@ -418,5 +463,6 @@ watch(
 .meta-log-viewer__step-type { color: #475569; }
 .meta-log-viewer__step-dur { color: #94a3b8; margin-left: auto; }
 .meta-log-viewer__step-error { width: 100%; padding: 4px 8px; background: #fef2f2; color: #dc2626; border-radius: 4px; font-size: 11px; }
+.meta-log-viewer__step-reason { width: 100%; padding: 4px 8px; background: #f1f5f9; color: #334155; border-radius: 4px; font-size: 12px; }
 .meta-log-viewer__step-output { width: 100%; padding: 4px 8px; background: #f8fafc; color: #475569; border-radius: 4px; font-size: 11px; word-break: break-all; }
 </style>

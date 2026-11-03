@@ -152,11 +152,13 @@
         >
           <MetaCommentActionChip :label="l('record.comments')" :state="drawerCommentAffordance" />
         </button>
-        <!-- Copy-link icon: PR-A scope is the button + `copy-link` emit only (§3 PR-A file line);
-             the clipboard write, the disabled-when-absent gate, and the copied/failed live region
-             are PR-B1 (§3 PR-B1 WB line names the copy-link handler) — WB has no listener for this
-             emit yet, by design, until that slice lands. -->
-        <MtIconButton size="sm" :aria-label="l('record.copyLink')" :title="l('record.copyLink')" data-testid="record-inspector-copy-link" @click="emit('copy-link')">&#x1F517;</MtIconButton>
+        <!-- Copy-link icon: PR-A shipped the button + `copy-link` emit; record inspector v3 PR-B1
+             (§1.3 "Copy link") adds the disabled-when-absent gate here (`copyLinkAvailable`, read once
+             at setup via `canCopyText()` — a page-lifetime capability, not a live signal) and, in the
+             workbench, the `copyText(window.location.href)` write plus the
+             `record.copyLinkDone` / `record.copyLinkFailed` status through MetaToast's existing
+             `aria-live="polite"` region. This component still only EMITS — no clipboard access here. -->
+        <MtIconButton size="sm" :disabled="!copyLinkAvailable" :aria-label="l('record.copyLink')" :title="l('record.copyLink')" data-testid="record-inspector-copy-link" @click="emit('copy-link')">&#x1F517;</MtIconButton>
         <button
           type="button"
           class="meta-record-drawer__btn meta-record-drawer__expand"
@@ -210,12 +212,72 @@
           </RouterLink>
           <MtMenuItem v-if="canManageAutomation" class="meta-record-drawer__btn" :title="l('record.workflowTitle')" @select="emit('open-automation')">&#x2699; {{ l('record.workflow') }}</MtMenuItem>
           <MtMenuItem v-if="canManageRecordPermissions" class="meta-record-drawer__btn" :title="l('record.permissionsTitle')" @select="showRecordPermissions = true">&#x1F512; {{ l('record.permissions') }}</MtMenuItem>
-          <MtMenuItem v-if="record && canCreate" class="meta-record-drawer__btn meta-record-drawer__btn--duplicate" :title="l('record.duplicateTitle')" @select="emit('duplicate')">{{ l('record.duplicate') }}</MtMenuItem>
+          <!-- 记录级送审 (多维表 × 审批 阶段二 design §5): the gate is FOUR-fold and every part is load-bearing —
+               `canSubmitApproval` is the server-derived capability (absent ⇒ false ⇒ hidden, fail-closed),
+               and `apiClient`/`sheetId`/`record` are the three things the submit route needs, none of which
+               the deprecated MetaRecordDrawer shell or the frozen router-less specs are guaranteed to pass.
+               The server re-enforces the capability (plus `approvals:write` inside createApproval) — this is
+               an entry-point gate, not the authority. -->
+          <MtMenuItem
+            v-if="canSubmitApproval && apiClient && sheetId && record"
+            class="meta-record-drawer__btn"
+            data-testid="record-inspector-submit-approval"
+            :title="l('record.submitApprovalTitle')"
+            @select="showApprovalSubmit = true"
+          >{{ l('record.submitApproval') }}</MtMenuItem>
+          <!-- 派发任务 (R-45 step 1): creates a real task in the task centre from this record. Shown only
+               where the top bar's 任务 entry is (same rule, `canDispatchTasks` in tasks/tasksAccess.ts)
+               and the viewer holds tasks:write, only when the page hands a dispatch binding, and only
+               with the ids the source link needs (sheetId + viewId + record). Otherwise the menu is
+               unchanged. -->
+          <MtMenuItem
+            v-if="canDispatchTask && dispatchBinding && sheetId && viewId && record"
+            class="meta-record-drawer__btn"
+            data-testid="record-inspector-dispatch-task"
+            :title="l('record.dispatchTaskTitle')"
+            @select="showTaskDispatch = true"
+          >{{ l('record.dispatchTask') }}</MtMenuItem>
+          <!-- Customer feedback 2026-10-27: on a sheet whose rows a plugin maintains, /context marks duplicate
+               blocked; the entry stays visible but DISABLED with the reason shown inline (a disabled
+               button's tooltip is unreliable). The workbench asks for confirmation before it duplicates. -->
+          <MtMenuItem
+            v-if="record && canCreate"
+            class="meta-record-drawer__btn meta-record-drawer__btn--duplicate"
+            :disabled="!!duplicateBlockedReason"
+            :title="duplicateBlockedReason || l('record.duplicateTitle')"
+            @select="emit('duplicate')"
+          >{{ l('record.duplicate') }}<span
+            v-if="duplicateBlockedReason"
+            class="meta-record-drawer__menu-reason"
+            data-testid="record-inspector-duplicate-blocked-reason"
+          >{{ duplicateBlockedReason }}</span></MtMenuItem>
+          <!-- 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.3, §8 B3.3): 「复制为新行」 — offered only when the
+               workbench says so (/context's manual-rows block in state `allowed`, for an actor who can create); any row of
+               the sheet can be the source. The workbench asks first and calls POST /records/:recordId/manual-copy. -->
+          <MtMenuItem
+            v-if="record && manualCopyAvailable"
+            class="meta-record-drawer__btn"
+            data-testid="record-inspector-manual-copy"
+            :title="manualRowLabel('entry.copyTitle', isZh)"
+            @select="emit('manual-copy')"
+          >{{ manualRowLabel('entry.copy', isZh) }}</MtMenuItem>
           <!-- gate P2 (kept verbatim): the danger class anchor stays a stable spec/test anchor even
                though the bespoke `--danger` background rule it once fought is gone in this MtMenuItem
                host — see this class's own style rule below for the current (menu-row) styling. -->
-          <hr v-if="resolvedCanDelete" class="meta-record-drawer__menu-separator" />
+          <hr v-if="resolvedCanDelete || deleteBlockedReason" class="meta-record-drawer__menu-separator" />
           <MtMenuItem v-if="resolvedCanDelete" class="meta-record-drawer__btn--danger" @select="emit('delete')">{{ l('record.delete') }}</MtMenuItem>
+          <!-- R-66: a PLM row (rowActions.deleteBlockedReason, server-derived) cannot be deleted by anyone; the entry
+               stays visible but DISABLED with the reason inline, and it emits nothing (the route refuses anyway). -->
+          <MtMenuItem
+            v-else-if="deleteBlockedReason"
+            class="meta-record-drawer__btn--danger"
+            data-testid="record-inspector-delete-blocked"
+            :disabled="true"
+            :title="deleteBlockedReason"
+          >{{ l('record.delete') }}<span
+            class="meta-record-drawer__menu-reason"
+            data-testid="record-inspector-delete-blocked-reason"
+          >{{ deleteBlockedReason }}</span></MtMenuItem>
         </MtMenu>
         <button class="meta-record-drawer__close" :aria-label="l('record.close')" @click="emit('close')">&times;</button>
       </div>
@@ -224,7 +286,12 @@
            graft from P3 §2) — primary-field value sits below it, editable when the primary field is
            an editable `string`. -->
       <div class="meta-record-drawer__titleblock">
-        <p class="meta-record-drawer__eyebrow">{{ l('record.title') }}</p>
+        <p class="meta-record-drawer__eyebrow">{{ l('record.title') }}<span
+          v-if="rowActions?.manualSupplement === true"
+          class="meta-record-drawer__manual-row-tag"
+          data-testid="record-inspector-manual-supplement-tag"
+          :title="manualRowLabel('tag.manualTitle', isZh)"
+        >{{ manualRowLabel('tag.manual', isZh) }}</span></p>
         <input
           v-if="canEditPrimaryTitle"
           ref="titleInputRef"
@@ -282,6 +349,23 @@
             @click="selectTab(tab.id)"
           >{{ tab.label }}</button>
         </div>
+        <!-- Record inspector v3 (PR-B1 §1.3 "Tabs bar"): right-aligned hide-empty toggle, details tab
+             only. Session-only state (`hideEmpty`, this component's own ref — NO storage read/write,
+             OD-W2-2; a remount starts unpressed), forwarded to MetaRecordFieldsPanel as a prop, which
+             owns the predicate/snapshot/exemptions. APG toggle-button shape (round 2, refuter NIT):
+             a CONSTANT visible label (`record.hideEmpty`) with `aria-pressed` carrying the state —
+             round 1 flipped the label to a "show" copy while pressed, which reads as two different
+             controls to AT. DOM position = after the tablist, before the tabpanel: Tab order tabs →
+             hide-empty → tabpanel → field controls → splitter (design §1.5, "ahead of the field
+             controls"), so the splitter stays the LAST focusable. -->
+        <MtButton
+          v-if="activeTab === 'details'"
+          size="sm"
+          class="meta-record-drawer__hide-empty"
+          :aria-pressed="hideEmpty"
+          data-testid="record-inspector-hide-empty"
+          @click="hideEmpty = !hideEmpty"
+        >{{ l('record.hideEmpty') }}</MtButton>
       </div>
       <div v-if="subscriptionError" class="meta-record-drawer__watch-error">{{ subscriptionError }}</div>
       <div v-if="record?.locked" class="meta-record-drawer__lock-banner" data-test="record-lock-banner">
@@ -305,8 +389,12 @@
         class="meta-record-drawer__tabpanel"
       >
         <MetaRecordFieldsPanel
+          ref="fieldsPanelRef"
           :record="record"
           :fields="fields"
+          :inspector-field-layout="inspectorFieldLayout"
+          :hide-empty="hideEmpty"
+          :fetch-record="fetchRecord"
           :can-edit="canEdit"
           :can-comment="canComment"
           :field-permissions="fieldPermissions"
@@ -318,8 +406,11 @@
           :upload-fn="uploadFn"
           :delete-attachment-fn="deleteAttachmentFn"
           :ai-shortcut="aiShortcut"
+          :ai-available="aiAvailable"
           :button-run-pending="buttonRunPending"
           :mention-suggestions="mentionSuggestions"
+          :mention-search="mentionSearch"
+          :field-errors="fieldErrors"
           @patch="(fieldId, value) => emit('patch', fieldId, value)"
           @ai-preview="(field) => emit('ai-preview', field)"
           @ai-run="(field) => emit('ai-run', field)"
@@ -336,6 +427,16 @@
           :record="record"
           :fields="fields"
           :field-permissions="fieldPermissions"
+        />
+        <!-- 审批 / Record approvals (阶段二 §5): same self-gating lazy discipline as 数据来源 above — it
+             renders nothing without record+sheetId+apiClient and fetches only on first expand.
+             `refreshToken` is bumped after a successful submit so an OPEN panel re-reads the list from the
+             server (with its server-computed drift + request number) instead of guessing a new row. -->
+        <MetaRecordApprovalPanel
+          :record="record"
+          :sheet-id="sheetId"
+          :api-client="apiClient"
+          :refresh-token="approvalRefreshToken"
         />
       </div>
       <div
@@ -369,6 +470,7 @@
       >
         <MetaCommentsPanel
           :comments="comments"
+          :timestamp-formatter="formatCommentTimestamp"
           :loading="commentsLoading"
           :can-comment="canComment"
           :can-resolve="canResolveComments"
@@ -386,7 +488,10 @@
           :reacting-keys="commentReactingKeys"
           :current-user-id="currentUserId"
           :mention-suggestions="mentionSuggestions"
+          :mention-search="mentionSearch"
           :composer-initial-mentions="commentComposerInitialMentions"
+          :composer-mention-selection="commentMentionSelection"
+          @update:composer-mention-selection="onCommentMentionSelection"
           @submit="(payload: { content: string; mentions: string[] }) => emit('comment-submit', payload)"
           @resolve="(commentId: string) => emit('comment-resolve', commentId)"
           @reply="(commentId: string) => emit('comment-reply', commentId)"
@@ -431,6 +536,38 @@
       @close="showRecordPermissions = false"
       @updated="emit('navigate', record!.id)"
     />
+    <!-- 记录级送审 dialog (阶段二 §5.2): a CHILD dialog of this component with its own local open state,
+         exactly like MetaRecordPermissionManager above (same v-if shape, same `client` pass-through) —
+         the workbench owns neither dialog, it only supplies the capability and reacts to the result. -->
+    <MetaRecordApprovalSubmitDialog
+      v-if="canSubmitApproval && record && sheetId && apiClient"
+      :visible="showApprovalSubmit"
+      :sheet-id="sheetId"
+      :record-id="record.id"
+      :client="apiClient"
+      @close="showApprovalSubmit = false"
+      @submitted="onApprovalSubmitted"
+    />
+    <!-- 派发任务 dialog: a child with its own local open state, like the 送审 dialog above. Keyed by
+         record id so each record gets a fresh form. The state of a dispatch that is out or done
+         (in flight / created) is NOT in the child: it is kept per identity and record under `run-key`
+         (tasks/recordTaskDispatchRuns.ts), so closing the dialog or moving between records cannot
+         lose a result or allow a second create, and the dialog captures the record link at submit.
+         `binding` is the page's dispatch binding (the signed-in user and org the page was set up
+         under, changed for good once another is seen); the dialog sends nothing under any other
+         (tasks/recordTaskDispatchIdentity.ts). -->
+    <MetaRecordTaskDispatchDialog
+      v-if="canDispatchTask && dispatchBinding && sheetId && viewId && record"
+      :key="record.id"
+      :visible="showTaskDispatch"
+      :default-title="dispatchDefaultTitle"
+      :person-fields="dispatchPersonFields"
+      :person-summaries="personSummariesByField"
+      :record-link="dispatchRecordLink"
+      :binding="dispatchBinding"
+      :run-key="dispatchRunKey(dispatchBinding.identity, sheetId, record.id)"
+      @close="showTaskDispatch = false"
+    />
     <!-- Record inspector v3 (2026-09-05, PR-A §1.2): moved from the FIRST child (pre-PR-A) to the
          LAST — absolute positioning (unchanged, see this element's own style rule) keeps it
          visually pinned to the panel's left edge either way, but DOM order also drives Tab order,
@@ -453,49 +590,75 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
+import { canCopyText } from '../../utils/clipboard'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useId, watch } from 'vue'
+import { RouterLink, routerKey } from 'vue-router'
 import type {
   LinkedRecordSummary,
   PersonSummary,
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaCommentMentionSearch,
   MetaCommentMentionSuggestion,
   MultitableComment,
   MultitableCommentPresenceSummary,
   MetaFieldPermission,
   MetaField,
   MetaRecord,
+  MetaRecordContext,
+  MetaRecordApprovalSubmission,
   MetaRecordSubscriptionStatus,
   MetaRowActions,
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
+import type { MetaCommentMentionSelection } from '../../shared/comments/types'
 import { MtButton, MtIconButton, MtMenu, MtMenuItem } from '../ui'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaRecordPermissionManager from './MetaRecordPermissionManager.vue'
 import MetaRecordFieldsPanel from './MetaRecordFieldsPanel.vue'
 import MetaRecordProvenancePanel from './MetaRecordProvenancePanel.vue'
+import MetaRecordApprovalPanel from './MetaRecordApprovalPanel.vue'
+import MetaRecordApprovalSubmitDialog from './MetaRecordApprovalSubmitDialog.vue'
+import MetaRecordTaskDispatchDialog, { type DispatchPersonField } from './MetaRecordTaskDispatchDialog.vue'
 import MetaRecordHistoryPanel from './MetaRecordHistoryPanel.vue'
 // S3a: MetaCommentsPanel's real implementation now lives in shared/comments/components/ —
 // imported directly here rather than through the old-path re-export shim.
 import MetaCommentsPanel from '../../shared/comments/components/MetaCommentsPanel.vue'
+import { formatBusinessTimestamp } from '../utils/business-timezone'
 import MetaRecordAttachmentsPanel from './MetaRecordAttachmentsPanel.vue'
 import {
   resolveCommentAffordanceStateClass,
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
 import { useLocale } from '../../composables/useLocale'
+import { useAuth } from '../../composables/useAuth'
+import { useFeatureFlags } from '../../stores/featureFlags'
+import { canDispatchTasks } from '../../tasks/tasksAccess'
+import { personValueAssigneeIds } from '../../tasks/recordTaskDispatch'
+import { dispatchRunKey } from '../../tasks/recordTaskDispatchRuns'
+import type { DispatchBinding } from '../../tasks/recordTaskDispatchIdentity'
+import { filterPropertyVisibleFields } from '../utils/field-permissions'
+import { AppRouteNames } from '../../router/types'
+import { isNativePersonField } from '../utils/link-fields'
 import {
   recordLabel,
   recordPosition,
   type MetaRecordLabelKey,
 } from '../utils/meta-record-labels'
 import { commentLabel } from '../utils/meta-comment-labels'
+import { workbenchLabel } from '../utils/workbench-labels'
+import { manualRowLabel } from '../utils/manual-row-labels'
 import type { AiShortcutState } from '../composables/useAiShortcut'
-import { formatRecordFieldValue, resolveCanComment, resolvePrimaryField, textControlValue } from '../utils/recordDisplay'
-import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
-import { isSystemField } from '../utils/system-fields'
+import {
+  canEditField,
+  formatRecordFieldValue,
+  resolveCanComment,
+  resolvePrimaryField,
+  textControlValue,
+  visibleRecordFields,
+  type MetaRecordInspectorFieldLayout,
+} from '../utils/recordDisplay'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -507,7 +670,18 @@ const props = withDefaults(defineProps<{
   // Duplicate / clone record (design 2026-06-16): sheet-level canCreateRecord (a duplicate is a create).
   // Gates the drawer's Duplicate button; the server re-enforces it (no FE permission mirror).
   canCreate?: boolean
+  /** Customer feedback 2026-10-27: set when /context reports `recordDuplicateBlocked` — the duplicate entry is
+   *  rendered disabled with this text as its reason. null/absent ⇒ unchanged. */
+  duplicateBlockedReason?: string | null
+  /** 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.3): show 「复制为新行」. The workbench decides it from
+   *  /context's `stockPreparationManualRows` block (state `allowed`, an actor who can create) — never from the row's
+   *  `manualSupplement` mark. Default false: no entry. */
+  manualCopyAvailable?: boolean
   canManageAutomation?: boolean
+  /** 记录级送审 (阶段二 §5): server-derived `multitable:submit-approval`. Default false — an older
+   *  backend, the deprecated MetaRecordDrawer shell's own caller, or any harness that omits it gets NO
+   *  送审 entry at all (fail-closed; the route re-enforces it anyway). */
+  canSubmitApproval?: boolean
   fieldPermissions?: Record<string, MetaFieldPermission> | null
   rowActions?: MetaRowActions | null
   commentPresence?: MultitableCommentPresenceSummary | null
@@ -519,9 +693,22 @@ const props = withDefaults(defineProps<{
   deleteAttachmentFn?: MetaAttachmentDeleteFn
   canManageRecordPermissions?: boolean
   sheetId?: string
+  /** 派发任务 (R-45 step 1): the ids of the record's deep link written into the task description.
+   *  Without `viewId` there is no link to write, so the 派发任务 entry stays hidden. The deprecated
+   *  MetaRecordDrawer shell does not declare it (a caller of that shell that passes `view-id` still
+   *  reaches this prop through attribute fallthrough). `baseId` is added to the link when known. */
+  viewId?: string
+  baseId?: string
+  /** 派发任务: the binding of the page holding this drawer (`createDispatchBinding()`, made by the
+   *  workbench, which also checks it before each multitable request). Without it 派发任务 is not
+   *  offered: only the owner of the record data can say which identity it was read under. */
+  dispatchBinding?: DispatchBinding | null
   apiClient?: MultitableApiClient
   /** A3: shared AI shortcut UI state from the workbench useAiShortcut instance. */
   aiShortcut?: AiShortcutState | null
+  /** A11: forwarded 1:1 to MetaRecordFieldsPanel's own prop (fail-closed default false ⇒ no AI
+   *  preview/run buttons). The workbench sets it from GET /api/multitable/ai/availability. */
+  aiAvailable?: boolean
   /** B1-e: in-flight button runs keyed `${recordId}:${fieldId}` — the SAME ref
    *  the grid (MetaGridTable) receives, so a run from either surface disables
    *  the button on both. Matches the workbench `onRunButton` pending-key format. */
@@ -532,6 +719,8 @@ const props = withDefaults(defineProps<{
    *  `commentMentionSuggestions` ref the workbench already threads in for the fields panel, no
    *  second copy. */
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  /** #5795: server-side mention search (host-bound); forwarded untouched to the mention editors. */
+  mentionSearch?: MetaCommentMentionSearch | null
   // --- W2 S4 (design-lock §2 评论面板 row, §7 S4): comments-tab pass-through props. All sourced
   // from the workbench's existing `commentsState` (useMultitableComments) + `selectedRecordCommentsScope`
   // (server G-8 gated) -- the SAME data the pre-S4 second `<MetaCommentsDrawer>` consumed; only the
@@ -572,8 +761,28 @@ const props = withDefaults(defineProps<{
    *  between the gesture and mount — see `onMounted` below for the fallback when this prop is
    *  absent, e.g. a deep-link mount with no interactive opener at all). */
   openerEl?: HTMLElement | null
+  /** Record inspector v3 (PR-B1 §1.3 sections): workbench-computed `{ ordered, hiddenInView }` field
+   *  layout, passed through UNCHANGED to MetaRecordFieldsPanel. Absent → the panel's legacy flat
+   *  `fields` path (the deprecated MetaRecordDrawer shell never sets it). */
+  inspectorFieldLayout?: MetaRecordInspectorFieldLayout | null
+  /** Record inspector v3 (PR-B1 §1.3 link chips, HI-1): the workbench's existing `fetchLinkedRecordFn`
+   *  (the SAME `client.getRecord` closure MetaGridTable receives), passed through UNCHANGED to
+   *  MetaRecordFieldsPanel → MetaCellRenderer. This shell never calls it (see the HI-1 source scan in
+   *  multitable-record-inspector.spec.ts). */
+  fetchRecord?: (recordId: string) => Promise<MetaRecordContext>
+  /** Record inspector v3 PR-B2 (2026-09-05, §1.3 "Field-anchored server errors"): per-field server
+   *  rejection messages keyed by fieldId, OWNED by the workbench (`inspectorFieldErrors`, written by
+   *  its `onDrawerPatch` routing) and passed through to MetaRecordFieldsPanel unchanged — this shell
+   *  neither writes nor interprets it (same pass-through shape as `fieldPermissions`). The header
+   *  title input above deliberately does NOT read it: it keeps its uncontrolled snap-back-on-prop-
+   *  change behaviour (pinned in multitable-record-inspector-header.spec.ts); a title-originated
+   *  rejection surfaces under the primary field's row in the details tab like any other field —
+   *  IF that row is rendered right now: the workbench asks `canAnchorFieldError` (exposed below)
+   *  before writing an entry and toasts instead when the answer is no (round 2). */
+  fieldErrors?: Record<string, string> | null
 }>(), {
   recordIds: () => [],
+  aiAvailable: false,
   buttonRunPending: () => [],
   comments: () => [],
   commentsLoading: false,
@@ -595,12 +804,19 @@ const props = withDefaults(defineProps<{
   commentComposerInitialMentions: () => [],
   openComments: false,
   openerEl: null,
+  inspectorFieldLayout: null,
+  fetchRecord: undefined,
+  fieldErrors: null,
+  canSubmitApproval: false,
+  manualCopyAvailable: false,
 })
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'delete'): void
   (e: 'duplicate'): void
+  /** 人工补充行 B3: 「复制为新行」 of this record (the workbench confirms and calls the manual-copy route). */
+  (e: 'manual-copy'): void
   /** Record inspector v3 (2026-09-05, PR-A §1.2 Row A): copy-link icon. PR-A scope is this emit
    *  only — the clipboard write + copied/failed live-region text are PR-B1 (see the button's own
    *  template comment); WB has no listener for it yet. */
@@ -646,17 +862,34 @@ const emit = defineEmits<{
   (e: 'comment-retry'): void
   (e: 'comment-react', commentId: string, emoji: string): void
   (e: 'comment-unreact', commentId: string, emoji: string): void
+  /** 记录级送审 (阶段二 §5): a submission was created for THIS record. The dialog + the panel refresh are
+   * owned here; this emit exists so the workbench can toast the request number (and, later, do anything
+   * else a sheet-level surface needs) — same "the shell emits, the workbench decides" split as 'restore'. */
+  (e: 'approval-submitted', submission: MetaRecordApprovalSubmission): void
 }>()
 
 const { isZh } = useLocale()
 const l = (key: MetaRecordLabelKey) => recordLabel(key, isZh.value)
 const inboxLabel = computed(() => commentLabel('comment.inbox', isZh.value))
-// See the inbox-link template comment above: `useRouter()` is a plain (non-throwing) `inject()`, so
-// capturing it once here is safe even in the several pre-existing router-less test harnesses that
-// mount this shell.
-const hasRouter = !!useRouter()
+// See the inbox-link template comment above: `inject(routerKey, null)` is a defaulted (non-throwing)
+// `inject()`, so capturing it once here is safe even in the several pre-existing router-less test
+// harnesses that mount this shell.
+const injectedRouter = inject(routerKey, null)
+const hasRouter = !!injectedRouter
 
 const showRecordPermissions = ref(false)
+// 记录级送审 (阶段二 §5): local open state for the child submit dialog + the counter that tells the
+// approvals panel to re-read after a successful submit (see both components' own comments).
+const showApprovalSubmit = ref(false)
+const approvalRefreshToken = ref(0)
+// 派发任务 (R-45 step 1): local open state for the child dispatch dialog.
+const showTaskDispatch = ref(false)
+
+function onApprovalSubmitted(submission: MetaRecordApprovalSubmission): void {
+  showApprovalSubmit.value = false
+  approvalRefreshToken.value += 1
+  emit('approval-submitted', submission)
+}
 const kebabMenuRef = ref<InstanceType<typeof MtMenu> | null>(null)
 const titleInputRef = ref<HTMLInputElement | null>(null)
 const titleTextRef = ref<HTMLDivElement | null>(null)
@@ -778,6 +1011,16 @@ const activeTab = ref<InspectorTab>(resolveDefaultTab())
 watch(() => props.openComments, (isOpen) => {
   if (isOpen) activeTab.value = 'comments'
 })
+
+// #5813: the comments tabpanel is `v-else-if`, so every tab switch unmounts the comment composer. The
+// draft lives in the workbench and survives; the composer's picked (or removed) mentions are kept here,
+// in this always-mounted shell, and handed back when the tab remounts. The composer itself decides
+// whether they still apply (same `initialMentions`, text-bound chips still in the draft), so a send, a
+// record switch or another edit made while the tab was away clears them as it does on the tab.
+const commentMentionSelection = shallowRef<MetaCommentMentionSelection | null>(null)
+function onCommentMentionSelection(value: MetaCommentMentionSelection) {
+  commentMentionSelection.value = value
+}
 const tabRefs = ref<Partial<Record<InspectorTab, HTMLButtonElement | null>>>({})
 const inspectorId = useId()
 
@@ -1226,9 +1469,30 @@ const subscriptionLoading = ref(false)
 const subscriptionError = ref('')
 let subscriptionRequestId = 0
 
-watch(() => props.record, () => {
+// Per-record state must not leak into the next row. The subscription half resets on EVERY replacement
+// (unchanged: a re-read can legitimately carry a new subscription state for the same row, so it is
+// re-fetched by the watcher below).
+//
+// The two CHILD DIALOG flags are the part that was missing. This shell is mounted UNCONDITIONALLY by
+// MultitableWorkbench.vue and NEVER unmounts (see the open/focus section's own comment above) — only
+// `visible` toggles — so a local `ref(false)` here lives for the whole workbench session. Both dialogs
+// are `v-if`-gated on `record` (plus sheetId/apiClient/capability), which means a record vanishing
+// underneath an OPEN dialog — a realtime delete, or the workbench clearing the selection, both of which
+// set `record` to null — DESTROYS the dialog element without its `@close` ever running, and the flag
+// stays `true`. Open the next record and the `v-if` is satisfied again: the dialog springs open unasked,
+// now bound to the NEXT record's id, where a single confirm would 送审 (or re-permission) a record the
+// user never chose. Reset whenever the id actually MOVES, null included.
+//
+// Deliberately NOT on every replacement: the grid hands this shell a fresh `record` object for the same
+// row after any patch/re-read, and slamming a half-filled 送审 form shut on an unrelated background
+// refresh would be its own bug. `next?.id === prev?.id` is the line between the two.
+watch(() => props.record, (next, prev) => {
   recordSubscribed.value = false
   subscriptionError.value = ''
+  if (next?.id === prev?.id) return
+  showApprovalSubmit.value = false
+  showRecordPermissions.value = false
+  showTaskDispatch.value = false
 })
 
 watch(
@@ -1247,6 +1511,12 @@ const currentRecordIndex = computed(() => {
 const canLoadSubscription = computed(() => !!props.apiClient && !!props.sheetId && !!props.record?.id)
 const resolvedCanComment = computed(() => resolveCanComment(props.rowActions, props.canComment))
 const resolvedCanDelete = computed(() => props.rowActions?.canDelete ?? props.canDelete)
+// R-66: the reason text for a PLM row's disabled delete entry (zh = the server's refusal copy verbatim).
+const deleteBlockedReason = computed(() => (
+  !resolvedCanDelete.value && props.rowActions?.deleteBlockedReason === 'plm_row'
+    ? workbenchLabel('notice.plmRowDeleteBlocked', isZh.value)
+    : null
+))
 const drawerCommentAffordance = computed(() => resolveRecordCommentAffordance(props.commentPresence))
 const drawerCommentButtonClass = computed(() =>
   resolveCommentAffordanceStateClass('meta-record-drawer__btn--comment', drawerCommentAffordance.value),
@@ -1257,21 +1527,30 @@ const recordPositionText = computed(() => recordPosition(currentRecordIndex.valu
 // `resolvePrimaryField` (utils/recordDisplay.ts) is the single hoisted definition WB's own
 // `bulkFillRecordName`/`captureSelectionLabels` now also read — see that helper's own comment.
 const primaryField = computed(() => resolvePrimaryField(props.fields))
-// PR-A-local editability check for the title ONLY — deliberately not exported as a second
-// `canEditField`: MetaRecordFieldsPanel.vue's own `canEditField` (the per-field-loop predicate,
-// identical logic) is hoisted to `utils/recordDisplay.ts` in PR-B1 per the design's own file list;
-// duplicating the four-clause body here (rather than pre-emptively naming a shared symbol PR-A
-// does not own) avoids a second GLOBAL name that could drift from the real one before that hoist
-// lands.
+// Title editability = `canEditField(primary) && type === 'string'` (design §1.2). PR-A carried an
+// inline copy of the four-clause body; record inspector v3 PR-B1 hoisted it to
+// `utils/recordDisplay.ts` (`canEditField`, the design's own file list) so this title input and
+// MetaRecordFieldsPanel.vue's per-field rows read ONE rule and cannot drift.
 const canEditPrimaryTitle = computed(() => {
   const field = primaryField.value
   if (!field || field.type !== 'string') return false
-  return props.canEdit
-    && props.rowActions?.canEdit !== false
-    && props.fieldPermissions?.[field.id]?.readOnly !== true
-    && !isSystemField(field)
-    && !isFieldAlwaysReadOnly(field)
+  return canEditField(field, {
+    canEdit: props.canEdit,
+    rowActions: props.rowActions,
+    fieldPermissions: props.fieldPermissions,
+  })
 })
+
+// --- Record inspector v3 (PR-B1 §1.3) -------------------------------------------------------------
+// Hide-empty toggle state: session-only, this component's own ref (OD-W2-2 — no storage). Lives here
+// (not in the fields panel) because the control sits in the tabs bar, outside the details tabpanel,
+// and must survive tab switches + record navigation within one open panel; a remount resets it.
+const hideEmpty = ref(false)
+// Copy-link availability: any copy mechanism (the async Clipboard API, or the execCommand fallback
+// that plain-HTTP intranet deployments rely on — see utils/clipboard.ts) is a page-lifetime
+// capability, read ONCE at setup; the icon is disabled only when neither exists (design §1.3 "item
+// disabled when clipboard API absent"). The write itself lives in the workbench.
+const copyLinkAvailable = canCopyText()
 const primaryFieldRawValue = computed(() => {
   const field = primaryField.value
   return field && props.record ? props.record.data[field.id] : undefined
@@ -1290,6 +1569,66 @@ const primaryFieldDisplayText = computed(() => {
     attachmentSummariesByField: props.attachmentSummariesByField,
     isZh: isZh.value,
   })
+})
+
+// --- 派发任务 (R-45 step 1) -----------------------------------------------------------------------
+// The entry's gate is the top bar's 任务 rule plus tasks:write (`canDispatchTasks`). `hasPermission`
+// reads the stored access snapshot, which is not reactive, so the gate is re-read on every open and
+// record move, the way App.vue re-reads it on every route change.
+const featureFlags = useFeatureFlags()
+const auth = useAuth()
+const canDispatchTask = computed(() => {
+  void props.visible
+  void props.record?.id
+  return canDispatchTasks({
+    hasFeature: featureFlags.hasFeature,
+    hasPermission: auth.hasPermission,
+    isAttendanceFocused: featureFlags.isAttendanceFocused,
+    isPlmWorkbenchFocused: featureFlags.isPlmWorkbenchFocused,
+  })
+})
+// The page's dispatch binding (tasks/recordTaskDispatchIdentity.ts): a dispatch is sent only under the
+// identity it holds, and not at all once another identity has been seen on the page. No binding, no
+// 派发任务 (see the prop).
+const dispatchBinding = computed(() => props.dispatchBinding ?? null)
+// The title the dispatcher confirms: the header's own display text of the primary field, or nothing
+// when that value is empty (the header's '—' placeholder is not a title).
+const dispatchDefaultTitle = computed(() => {
+  const raw = primaryFieldRawValue.value
+  const empty = raw === null || raw === undefined
+    || (typeof raw === 'string' && raw.trim() === '')
+    || (Array.isArray(raw) && raw.length === 0)
+  return empty ? '' : primaryFieldDisplayText.value
+})
+// Native person fields the viewer can see (a legacy link-backed person stores record ids, not user
+// ids, so it is not offered), each with this record's valid user ids. "Can see" is both masks the
+// details tab applies: the field permission and the field's own hidden property.
+const dispatchPersonFields = computed<DispatchPersonField[]>(() => {
+  const record = props.record
+  if (!record) return []
+  return filterPropertyVisibleFields(visibleRecordFields(props.fields, props.fieldPermissions))
+    .filter((field) => isNativePersonField(field))
+    .map((field) => ({ id: field.id, name: field.name, ids: personValueAssigneeIds(record.data[field.id]) }))
+})
+// The record's deep link, ids only: the same route + `?recordId=` query the comment inbox opens a
+// record with. Resolved through the router when there is one (the app may be served under a base
+// path), built by hand otherwise.
+const dispatchRecordLink = computed(() => {
+  const sheetId = props.sheetId
+  const viewId = props.viewId
+  const recordId = props.record?.id
+  if (!sheetId || !viewId || !recordId) return ''
+  const query: Record<string, string> = {}
+  if (props.baseId) query.baseId = props.baseId
+  query.recordId = recordId
+  if (injectedRouter) {
+    try {
+      return injectedRouter.resolve({ name: AppRouteNames.MULTITABLE, params: { sheetId, viewId }, query }).href
+    } catch {
+      // A router without the multitable route (a test harness): fall through to the plain path.
+    }
+  }
+  return `/multitable/${encodeURIComponent(sheetId)}/${encodeURIComponent(viewId)}?${new URLSearchParams(query).toString()}`
 })
 
 function onTitleChange(event: Event) {
@@ -1372,6 +1711,38 @@ async function toggleRecordSubscription() {
   }
 }
 
+// --- Record inspector v3 PR-B2 round 2 (2026-09-05, §1.3 "Field-anchored server errors") ---
+// The details tabpanel is `v-if="activeTab === 'details'"` (mutually exclusive with the other three), and
+// MetaRecordFieldsPanel owns visibility, sections, collapse state and hide-empty filtering. So a
+// `fieldErrors` entry written while another tab is active (a `patch` re-emitted from the attachments
+// panel; the header title input, which is visible on EVERY tab), or for a field the panel does not
+// render, has NO node in the DOM — nothing for sighted users, nothing for AT — until the user happens
+// to open the details tab. Round-1 verification graded that a P2 (a user action failing with zero
+// feedback; pre-B2 it toasted). This is the ONE place that knows both facts, so it answers the
+// question synchronously for the workbench's `onDrawerPatch`, which asks it through a template ref
+// (the same imperative-query idiom the workbench already uses for `toastRef.showError`) right after
+// resolving the `field` / `conflict` route and BEFORE writing the entry: `false` → the workbench keeps
+// today's toast and writes nothing. Asking-before-writing (rather than watching `fieldErrors` and
+// emitting back) means no round trip, no prev/next diffing of the map, and no way to report the same
+// rejection twice (e.g. when the user later opens the details tab).
+const fieldsPanelRef = ref<InstanceType<typeof MetaRecordFieldsPanel> | null>(null)
+
+/** Can a server rejection for (`recordId`, `fieldId`) render as the details-tab `role=alert` RIGHT NOW?
+ *  True only when this inspector is visible, showing THAT record, on the details tab, and the panel
+ *  renders a row for that field. Pure read of current state — no side effects, no caching. */
+function canAnchorFieldError(recordId: string, fieldId: string): boolean {
+  return props.visible
+    && props.record?.id === recordId
+    && activeTab.value === 'details'
+    && fieldsPanelRef.value?.hasRenderedField(fieldId) === true
+}
+
+defineExpose({ canAnchorFieldError })
+
+// 客户反馈 2026-09-24 #4c follow-up: comment times in the business timezone, 24-hour (raw text if unreadable).
+function formatCommentTimestamp(iso: string): string {
+  return formatBusinessTimestamp(iso) ?? iso
+}
 </script>
 
 <style scoped>
@@ -1467,6 +1838,8 @@ async function toggleRecordSubscription() {
 }
 .meta-record-drawer__titleblock { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .meta-record-drawer__eyebrow { margin: 0; font-size: 11px; line-height: 1.3; color: var(--ms-text-3, #999); text-transform: uppercase; letter-spacing: 0.02em; }
+/* 人工补充行 (OQ3): the same label the grid shows at the row head. */
+.meta-record-drawer__manual-row-tag { display: inline-block; margin-left: 6px; padding: 0 4px; font-size: 10px; line-height: 14px; color: #8a5a00; background: #fdf6ec; border: 1px solid #f5dab1; border-radius: 3px; text-transform: none; letter-spacing: 0; vertical-align: middle; }
 .meta-record-drawer__title-input, .meta-record-drawer__title-text {
   font-size: 18px; font-weight: 600; line-height: 1.3; min-width: 0; box-sizing: border-box;
 }
@@ -1476,6 +1849,11 @@ async function toggleRecordSubscription() {
 }
 .meta-record-drawer__title-input:focus-visible { outline: 2px solid var(--ms-color-primary); outline-offset: -1px; }
 .meta-record-drawer__menu-separator { margin: var(--ms-space-1, 4px) 0; border: none; border-top: 1px solid var(--ms-border, #e5e7eb); }
+/* Customer feedback 2026-10-27: the reason under a disabled duplicate entry — wraps inside the menu. */
+.meta-record-drawer__menu-reason {
+  display: block; max-width: 240px; padding-bottom: var(--ms-space-1, 4px);
+  font-size: 12px; line-height: 1.4; white-space: normal; color: var(--ms-text-3);
+}
 /* Resizable panel (2026-09-05): the drag/keyboard splitter on the panel's left edge (see the
    component's `onSplitterPointerDown`/`onSplitterKeydown`). Absolutely positioned against
    `.meta-record-drawer`'s own `position: relative` (added above) so it never participates in the
@@ -1649,7 +2027,12 @@ async function toggleRecordSubscription() {
    `.meta-record-drawer__body` below) -- `barRect.top === bodyRect.top` held at `scrollTop` 0 and 300
    alike, matching the P3-A comment's own established verification idiom just above; this half of the
    repro's finding IS general (it does not depend on tab-label content). */
-.meta-record-drawer__tabs-bar { position: sticky; top: 0; z-index: 2; margin: 0 -16px; padding: 12px 16px 14px; background: #fff; container-type: inline-size; }
+.meta-record-drawer__tabs-bar { position: sticky; top: 0; z-index: 2; margin: 0 -16px; padding: 12px 16px 14px; background: #fff; container-type: inline-size; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 8px; }
+/* Record inspector v3 (PR-B1 §1.3 tabs bar): the hide-empty toggle sits right-aligned beside the tab
+   pill; `.meta-record-drawer__tabs-bar` is now a wrapping flex row (`space-between`) so at the 360px
+   floor the toggle wraps UNDER the pill (design §1.6 mock: "wraps under pill only at 360") instead of
+   squeezing the four tabs. `margin-left: auto` keeps it on the right whenever it shares the row. */
+.meta-record-drawer__hide-empty { margin-left: auto; flex: 0 0 auto; }
 /* P2 (2026-09-05 follow-up, verifier P2): was `inline-flex` with no wrapping -- at the (then-320px,
    now 360px) panel minimum the 4-tab pill's un-wrapped content width (355px measured in Chromium) ran
    PAST the panel's own content box, forcing a page-level horizontal scrollbar (the pill's right edge
@@ -1685,6 +2068,13 @@ async function toggleRecordSubscription() {
    deliberately LEFT IN PLACE (harmless, inert): the design brief §1.3 and the header spec's source
    pin both name them, and removing them is a separate, visible change to that pin -- not a layout
    fix. The one-row OUTCOME is unchanged by this correction (comment-only).
+   PR-B1 update (record inspector v3, 2026-09-05): `.meta-record-drawer__tabs-bar` IS now a wrapping
+   flex row (it hosts the hide-empty toggle beside the pill — see its own rule/comment above), so the
+   pill IS a flex item and this block's `flex: 1; min-width: 0` on it is no longer inert below 420px:
+   the pill fills the row there and the toggle wraps under it — the design's own 360px mock ("wraps
+   under pill only at 360"). At >=420px the pill keeps its shrink-to-fit width (default `flex: 0 1
+   auto`), so the "pill look" at normal/wide widths is unchanged. The four-tabs-on-one-row outcome is
+   unchanged either way; still jsdom-unverifiable, same caveat as below.
    PLACEMENT (real-browser-verified defect, caught and fixed before landing): this block must come
    AFTER both `.meta-record-drawer__tabs` and `.meta-record-drawer__tab`'s own base rules above, not
    between them -- an earlier draft placed it right after `.tabs` and before `.tab`, and the tab's own

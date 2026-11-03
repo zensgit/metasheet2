@@ -22,6 +22,12 @@ function createFakeDb() {
       calls.push(['selectOne', table, { ...where }])
       return rows.find((r) => r._table === table && matches(r, where)) || null
     },
+    // Writer's half of the external-system delete lock protocol: writePipelineRow reads both
+    // endpoint systems FOR KEY SHARE on the transaction handle. Same lookup as selectOne here.
+    async selectOneForKeyShare(table, where) {
+      calls.push(['selectOneForKeyShare', table, { ...where }])
+      return rows.find((r) => r._table === table && matches(r, where)) || null
+    },
     async insertOne(table, row) {
       calls.push(['insertOne', table, { ...row }])
       const rec = { ...row, _table: table, created_at: 'now', updated_at: 'now' }
@@ -52,6 +58,12 @@ function createFakeDb() {
       }
       return before - rows.length
     },
+    // The lock protocol's isolation pin (external-system-pointer-lock.cjs pinLockProtocolIsolation →
+    // SET TRANSACTION ISOLATION LEVEL READ COMMITTED, the FIRST statement of every participating
+    // transaction). A no-op here — this fake has no isolation level to set; the pin's ordering and
+    // its effect are the subject of external-systems-delete-bind-lock-protocol.test.cjs and the
+    // real-Postgres suite.
+    async setTransactionIsolationLevel() {},
     // Real rollback semantics: snapshot the rows before the callback; on throw, restore them.
     // This lets the atomicity test prove no orphan pipeline row survives a mid-tx failure.
     async transaction(fn) {

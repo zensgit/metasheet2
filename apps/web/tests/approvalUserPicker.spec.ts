@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createApp, defineComponent, h, nextTick, type App as VueApp } from 'vue'
 
 // B3-04 D-2 — ApprovalUserPicker is the ONE reusable remote participant picker wired into
@@ -69,6 +70,12 @@ async function flushUi(cycles = 5): Promise<void> {
     await nextTick()
   }
 }
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalUserPicker', () => {
   let app: VueApp<Element> | null = null

@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { planArchiveAttachmentCells, projectArchiveAttachmentCells, type ArchiveAttachmentCellPlan } from './recovery-archive-attachment-plan'
+import { applyArchiveAttachmentBatch, type RecoveryArchiveAttachmentBatch } from './recovery-archive-attachment-batch'
 
 import type { QueryFn } from './permission-service'
 import { assertInTransaction } from './pg-transaction-guard'
@@ -458,7 +460,7 @@ export type ExactAnchorMutationTxnHook = (query: QueryFn, mutation: ExactAnchorA
  * against ordinary shared-lease writers. Only that channel is eligible for the bounded backoff re-attempt;
  * every other refusal (including a genuine preview drift, which shares the same PUBLIC reason) stays
  * single-attempt so the retry loop can never mask a real drift/authorization refusal. */
-class ApplyRefusalError extends Error {
+export class ApplyRefusalError extends Error {
   constructor(
     readonly reason: ExactAnchorApplyRefusal,
     readonly leaseBusy: boolean = false,
@@ -840,6 +842,7 @@ export interface ExactAnchorApplyInput {
 }
 
 export interface MaterializedArchiveApplyOptions {
+  readonly attachments?: RecoveryArchiveAttachmentBatch
   readonly workspaceId: string
   readonly baseId: string
   readonly targetRecords: ReadonlyMap<string, RecordStateAtT>
@@ -1017,6 +1020,7 @@ type ExactAnchorApplyExecution =
   | { readonly kind: 'hot' }
   | {
       readonly kind: 'archive_sync'
+      readonly attachments?: RecoveryArchiveAttachmentBatch
       readonly claims: ExactArchiveRecoveryIdentityClaims
       readonly workspaceId: string
       readonly baseId: string
@@ -1226,10 +1230,11 @@ function requireMaterializedArchiveAsyncFenceLease(
   }
 }
 
-async function lockArchiveSyncBinding(
+/** Shared by file preparation reservations and final canonical apply; requires a live transaction. */
+export async function lockArchiveSyncBinding(
   query: QueryFn,
-  input: ExactAnchorApplyInput,
-  execution: Extract<ExactAnchorApplyExecution, { kind: 'archive_sync' }>,
+  input: Pick<ExactAnchorApplyInput, 'sheetId'>,
+  execution: Pick<Extract<ExactAnchorApplyExecution, { kind: 'archive_sync' }>, 'claims' | 'workspaceId' | 'baseId'>,
 ): Promise<void> {
   const key = await query(
     `SELECT key_id
@@ -1612,7 +1617,9 @@ export async function applyMaterializedExactArchiveRecoverySyncInternal(
     return { ok: false, reason: 'identity-invalid' }
   }
   let plan
+  let attachments: RecoveryArchiveAttachmentBatch | undefined
   try {
+    attachments = options.attachments === undefined ? undefined : structuredClone(options.attachments)
     plan = compileRecoveryArchiveSyncPlan({
       workspaceId: options.workspaceId,
       baseId: options.baseId,
@@ -1627,6 +1634,7 @@ export async function applyMaterializedExactArchiveRecoverySyncInternal(
       keyId: verified.claims.archiveKeyId,
       selectedRecordIds: options.selectedRecordIds,
       selectedFieldIds: options.selectedFieldIds,
+      ...(attachments ? { attachmentMetadata: attachments.metadata } : {}),
     })
     assertRecoveryArchiveSyncPlanMatchesClaims(plan, verified.claims)
   } catch {
@@ -1643,6 +1651,7 @@ export async function applyMaterializedExactArchiveRecoverySyncInternal(
   }
   return applyExactAnchorRecoveryWithExecution(transaction, input, verified.claims, {
     kind: 'archive_sync',
+    ...(attachments ? { attachments: { ...attachments, metadata: plan.attachmentMetadata! } } : {}),
     claims: verified.claims,
     workspaceId: plan.workspaceId,
     baseId: plan.baseId,
@@ -2091,7 +2100,7 @@ async function applyExactAnchorRecoveryAttempt(
 
       // Restorable PROJECTION only (no value/target validation yet — no-oracle ordering).
       // Build the exact write delta first; planAuth adjudicates it before any sensitive validator can leak.
-      const revertWrites: ExactAnchorRevertWriteIntent[] = []
+      let revertWrites: ExactAnchorRevertWriteIntent[] = []
       for (const r of plan.reverts) {
         const live = liveById.get(r.recordId)
         if (!live) continue
@@ -2113,6 +2122,15 @@ async function applyExactAnchorRecoveryAttempt(
           projectedData: projection.data,
           linkUpdates: projection.linkUpdates,
         })
+      }
+
+      let attachmentCells: readonly ArchiveAttachmentCellPlan[] = []
+      if (execution.kind === 'archive_sync' && execution.attachments) {
+        try {
+          attachmentCells = planArchiveAttachmentCells({ targets: composed, live: liveById,
+            fieldTypes: rawTypeById, index: execution.attachments.index })
+          revertWrites = projectArchiveAttachmentCells(revertWrites, liveById, attachmentCells)
+        } catch { throw new ApplyRefusalError('recovery-trust-required') }
       }
 
       if (execution.kind === 'archive_sync') {
@@ -2195,6 +2213,7 @@ async function applyExactAnchorRecoveryAttempt(
             const field = fieldById.get(fid)
             if (!field) continue
             if (field.type === 'link') continue // dedicated link path below
+            if (field.type === 'attachment' && execution.kind === 'archive_sync' && execution.attachments) continue
             const hist = rw.patch[fid]
             if (hist === null || hist === undefined) continue // unset; whole-record check covers required
             assertExactRestorableScalarValue(
@@ -2489,6 +2508,15 @@ async function applyExactAnchorRecoveryAttempt(
           }
           deletes++
         }
+      }
+
+      if (execution.kind === 'archive_sync' && execution.attachments) {
+        try {
+          await applyArchiveAttachmentBatch(query, { actorId: input.actorId, tokenHash: tokenSha!,
+            operationId: op.operationId!,
+            generationId: execution.claims.archiveGenerationId, workspaceId: execution.workspaceId,
+            baseId: execution.baseId, sheetId: input.sheetId, cells: attachmentCells, batch: execution.attachments })
+        } catch { throw new ApplyRefusalError('preview-drift') }
       }
 
       let revertsApplied = 0

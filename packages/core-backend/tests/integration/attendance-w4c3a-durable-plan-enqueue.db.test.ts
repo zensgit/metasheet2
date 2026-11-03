@@ -5,6 +5,11 @@ import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import { up as w4c3aUp } from '../../src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan'
+import { up as memberSourcesUp } from '../../src/db/migrations/zzzz20261013090000_attendance_roster_member_source_ordinals'
+import { up as rosterOrgReasonUp } from '../../src/db/migrations/zzzz20260924180000_attendance_roster_org_gate_job_reason'
+import { up as timezonePolicyUp } from '../../src/db/migrations/zzzz20261012100000_create_attendance_timezone_policy'
+import { registerAttendanceRequestTimezoneSourceGuardV1 } from '../../src/attendance/attendance-business-trip-locks'
+import { createAttendanceLegacyPlanProcessorV1 } from '../../src/attendance/w4c3a-legacy-plan-processor'
 import {
   type LegacyImportGroupEffectDraftV1,
   type LegacyImportItemDraftV1,
@@ -228,6 +233,11 @@ async function createBase(pool: Pool): Promise<void> {
     CREATE TABLE attendance_import_items (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), batch_id uuid NOT NULL, org_id text NOT NULL,
       record_id uuid
+    )`)
+  await pool.query(`
+    CREATE TABLE attendance_rules (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      timezone text NOT NULL DEFAULT 'UTC'
     )`)
   await pool.query(`
     CREATE TABLE attendance_groups (
@@ -705,6 +715,10 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     await createBase(pool)
     await w4c0Up(db)
     await w4c3aUp(db)
+    await rosterOrgReasonUp(db)
+    await memberSourcesUp(db)
+    await timezonePolicyUp(db)
+    registerAttendanceRequestTimezoneSourceGuardV1(async () => async () => {})
     await pool.query(
       `INSERT INTO users (id) VALUES ($1), ($2), ($3), ($4), ($5), ($6)`,
       [
@@ -792,6 +806,7 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     for (const current of [pool, migrationPool, adminPool]) {
       current?.on('error', ignoreForcedScratchDrop)
     }
+    registerAttendanceRequestTimezoneSourceGuardV1(null)
     await db?.destroy()
     await pool?.end()
     await adminPool?.query(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`).catch(() => undefined)
@@ -2754,4 +2769,84 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
       legacyWaiter.release()
     }
   }, 30000)
+
+  it.each([true, false])('fails the real worker after deactivation with legacy provenance=%s', async (legacy) => {
+    const groupId = crypto.randomUUID()
+    const batchId = crypto.randomUUID()
+    const memberUser = TARGET_USER
+    const groupName = `Roster Gate ${run}-${legacy}`
+    await pool.query(`UPDATE users SET is_active = true WHERE id = $1`, [memberUser])
+    await pool.query(`UPDATE user_orgs SET is_active = true WHERE user_id = $1 AND org_id = $2`, [memberUser, ORG])
+    await pool.query(
+      `INSERT INTO attendance_groups (id, org_id, name, timezone) VALUES ($1, $2, $3, 'UTC')`,
+      [groupId, ORG, groupName],
+    )
+    const { input } = strictInput(legacyOrgWitness, batchId, ADMIN_A)
+    const created = await runSerializable(pool, (client) =>
+      reserveAttendanceLegacyImportPlanJobV1(
+        trx(client),
+        auth(ADMIN_A, ORG),
+        {
+          ...input,
+          groupEffects: [{
+            kind: 'ensure_member',
+            groupRef: groupName,
+            userId: memberUser,
+            firstSourceOrdinal: 0,
+            ...(legacy ? {} : { sourceOrdinals: [0] }),
+          }],
+        },
+      ),
+    )
+    if (created.kind !== 'created') throw new Error('expected enqueue to create a job')
+    await pool.query(
+      `UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2`,
+      [memberUser, ORG],
+    )
+
+    const processor = createAttendanceLegacyPlanProcessorV1({
+      acquireConnection: async () => {
+        const client = await pool.connect()
+        return { client, release: () => client.release() }
+      },
+    })
+    await expect(processor.processLegacyImportPlanV1(created.jobId)).resolves.toEqual({
+      kind: 'failed',
+      reason: 'USER_NOT_IN_ORG',
+    })
+
+    const job = await pool.query(
+      `SELECT status, w4_execution_reason_code, error
+         FROM attendance_import_jobs
+        WHERE id = $1 AND org_id = $2`,
+      [created.jobId, ORG],
+    )
+    expect(job.rows[0]?.status).toBe('failed')
+    expect(job.rows[0]?.w4_execution_reason_code).toBe('USER_NOT_IN_ORG')
+    const stored = JSON.parse(String(job.rows[0]?.error))
+    expect(stored).toMatchObject({
+      code: 'USER_NOT_IN_ORG',
+      message: 'Target user is not an active member of this org',
+      details: legacy ? [] : [{
+        code: 'USER_NOT_IN_ORG',
+        rejectedCount: 1,
+        indexes: [0],
+      }],
+    })
+    const members = await pool.query(
+      `SELECT 1 FROM attendance_group_members WHERE org_id = $1 AND user_id = $2`,
+      [ORG, memberUser],
+    )
+    expect(members.rows).toHaveLength(0)
+    const records = await pool.query(
+      `SELECT 1 FROM attendance_records WHERE org_id = $1 AND source_batch_id = $2`,
+      [ORG, batchId],
+    )
+    expect(records.rows).toHaveLength(0)
+    const seededGroup = await pool.query(
+      `SELECT id::text AS id FROM attendance_groups WHERE org_id = $1 AND name = $2`,
+      [ORG, groupName],
+    )
+    expect(seededGroup.rows).toEqual([{ id: groupId }])
+  }, 60_000)
 })

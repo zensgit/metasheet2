@@ -57,6 +57,10 @@ const IDENTITY_FIELD_IDS = Object.freeze([
   'sourceVersion',
 ])
 
+// Batch-refresh step 5 PR-8: the conflict type of an UPDATE a confirmed change plan authorizes (the continuation
+// pairing module's post-condition admits it only as the plan authorizes it).
+const CHANGE_PLAN_UPDATE_TYPE = 'change_plan_update'
+
 // Frozen persisted vocabulary. Tokens are NEVER removed from this list: table-scope policy
 // selections are persisted under `integration:table-action:conflict-policies:` and re-validated
 // against this list on read, so dropping a token would turn "this selection does nothing" into
@@ -102,6 +106,47 @@ const DUPLICATE_EXPANDED_KEY_UNSUPPORTED_HELD_REASON = 'unsupported_policy'
 // (stock-preparation-bom-expansion.cjs makeIdempotencyKey), so it always starts
 // with '{' and can never produce this prefix. The ledger fences both directions.
 const ANONYMOUS_HOLD_IDENTITY_PREFIX = 'anon-hold:v1:'
+
+// GOV-05 (#5647 方案 (c) 第一刀, 读侧打标). An existing row without an idempotencyKey is one of two
+// things, and until now the planner could not tell them apart: a row the plugin wrote (or a legacy
+// row from before keys existed), or a FOREIGN row that a person put into the managed table through
+// the generic record write (bulk import, manual add, xlsx import, duplicate, form submit). The
+// discriminator is `meta_records.created_by`: the plugin's INSERT (core-backend records.ts) does not
+// name that column, so it is NULL; the REST create (record-service.ts) stamps the actorId. The read
+// side already surfaces it as `record.createdBy` (query-service.ts mapRecordRow), and the ONLY place
+// it was dropped was `unmapRecordFields` in stock-preparation-table-actions.cjs, which projects a
+// record down to its `data`.
+//
+// It rides on a Symbol key, deliberately: (i) it can never be forged from jsonb `data` (a `createdBy`
+// CELL is just another column); (ii) stableStringify / JSON.stringify / Object.keys skip it, so it
+// stays OUT of buildRevision's `existingRows` projection and every outstanding dry-run token keeps
+// matching (a string key would move every revision the moment it was set); (iii) object spread copies
+// own enumerable symbols, so `normalizeRows`' `{ ...row }` copy keeps it.
+//
+// FIRST CUT IS READ-SIDE ONLY: the split below changes the conflictType token and adds two summary
+// counts. Both rows are still `manual_confirm` holds, nothing is written, nothing is deactivated,
+// and `canApply` does not consult holds. `counts` (hashed) gains no key.
+const EXISTING_ROW_CREATED_BY = Symbol.for('metasheet.stock-preparation.existingRow.createdBy')
+
+// Batch-refresh step 4 (PR-1, design §6.5): the meta_records `id` and `version` of an existing row,
+// which `unmapRecordFields` drops (it projects a record down to its `data`). Attached by the
+// project-scoped reader (stock-preparation-table-actions.cjs `readExistingStockPreparationRows`) on
+// the SAME terms as EXISTING_ROW_CREATED_BY above: a Symbol key, so stableStringify / JSON.stringify /
+// Object.keys never see it and buildRevision, the archive revision, the ledger revision and every
+// golden digest stay byte-identical (pinned by stock-preparation-continuation-golden.test.cjs); copied
+// by `normalizeRows`' spread; read from the record ENVELOPE only, so a cell named `id` cannot forge it.
+// Read ONLY by the continuation pairing module (through `recordRefOf`) to bind a continuation's members
+// to concrete record ids and to name hold subjects. Value: frozen `{ id: string, version: number|null }`.
+const EXISTING_ROW_RECORD_REF = Symbol.for('metasheet.stock-preparation.existingRow.recordRef')
+const EXISTING_MISSING_KEY_CONFLICT_TYPES = Object.freeze({
+  pluginOrLegacy: 'missing_existing_idempotency_key',
+  foreign: 'foreign_existing_row_missing_idempotency_key',
+})
+
+function isForeignExistingRow(row) {
+  const createdBy = isPlainObject(row) ? row[EXISTING_ROW_CREATED_BY] : undefined
+  return typeof createdBy === 'string' && createdBy.trim() !== ''
+}
 
 // Row-granularity context for the two keyless-ROW families. projectNo is folded
 // in but does NOT count as a discriminator: a row carrying nothing but the
@@ -832,6 +877,26 @@ function duplicateGroupDiscriminator(rows) {
   return null
 }
 
+// THE BASE of a duplicate-resolved key (`duplicateResolvedKey` below appends `::duplicate:<kind>:<hash>` to the
+// expansion's own idempotency key, a JSON object that EMBEDS its projectNo — bom-expansion makeIdempotencyKey).
+// The readers that strip the suffix do it through this ONE helper: the continuation core's claim maps (pairing
+// `baseKeyOf`), the carry route's project number and the carry executor's key-vs-rows project check (batch-refresh
+// step 4 PR-3a review round 1, V50B-16). Two key parsers do NOT strip it and fail closed on a suffixed key BY
+// DESIGN (batch-refresh step 4 PR-4, design §23.8 F-15): the pairing's `keyPathTokens` (a continuation root key
+// => `structure_changed`) and the continuation store's `parseKey` (a candidate hold's new root key =>
+// `new_root_key_unparsable`). A relationship whose ROOT row is duplicate-resolved is UNSUPPORTED: the claim maps
+// are base-keyed, so a stripped root would protect / suppress BOTH duplicate twins, one of which is an
+// independent row. The candidate detector therefore never emits a confirmable candidate on such a root (it
+// answers `candidate_ambiguous`, pairing `detectCandidates`), and the two parsers are the pinned backstops
+// (planner suite F-15a / F-15b, store suite ST-F15). A key without the suffix is returned unchanged; a non-string
+// is returned as given.
+const DUPLICATE_RESOLVED_KEY_SEPARATOR = '::duplicate:'
+function baseIdempotencyKeyOf(key) {
+  if (typeof key !== 'string') return key
+  const at = key.indexOf(DUPLICATE_RESOLVED_KEY_SEPARATOR)
+  return at === -1 ? key : key.slice(0, at)
+}
+
 function duplicateResolvedKey(baseKey, groupFingerprint, discriminatorKind, discriminatorValue) {
   const discriminatorHash = stableFingerprint(`${groupFingerprint}\0${discriminatorKind}\0${stableStringify(stableValue(discriminatorValue))}`)
   return `${baseKey}::duplicate:${discriminatorKind}:${discriminatorHash}`
@@ -985,8 +1050,27 @@ function resolveDuplicateExpandedRows({ expandedKeyed, existingKeyed, duplicateP
   }
 }
 
+// X6 — 来料**没有**这个键 ≠ 变更。
+//
+// 「来料给了值」的判据与下游 `pickFields` 的投影判据(`row[field] !== undefined`)是同一个量:
+// 键缺席 / 键在但值为 `undefined` ⇒ 这一格根本不会被写进 add 记录或 update 补丁,所以也不能
+// 算作变更。此前 `nextRow[field]` 取到 `undefined`,经 `comparableValue` 折成 `null` 后与存量的
+// 空串或真值比较必然「不等」⇒ 判成 update,而 patch 里却没有这一列 —— 一条「说变了、什么也
+// 没写」、每轮 dry-run 都重现的空 update(#5625 大 BOM 接带的代价 (a)(b);F1c-b 终审 r2 的
+// 根行/孤儿行存量空串)。
+//
+// `null` 是值,不是缺席:键在且值为 `null` / 空串 ⇒ 照 `valuesEqualForTemplateField` 比较
+// (`pickFields` 同样会把 `null` 投影进 patch)。存量那一侧不看键的在与不在:来料给了值、存量
+// 没有这一列 ⇒ 仍是变更(re-pull 回填改前写入的老行,testExistingRowsAreBackfilledByAReRun)。
+function intakeProvidesField(row, field) {
+  return row !== null && typeof row === 'object'
+    && Object.prototype.hasOwnProperty.call(row, field)
+    && row[field] !== undefined
+}
+
 function changedFields(nextRow, existingRow, fields, templateFields = new Map()) {
-  return fields.filter((field) => !valuesEqualForTemplateField(nextRow[field], existingRow[field], templateFields.get(field)))
+  return fields.filter((field) => intakeProvidesField(nextRow, field)
+    && !valuesEqualForTemplateField(nextRow[field], existingRow[field], templateFields.get(field)))
 }
 
 function pickFields(row, fields) {
@@ -1020,7 +1104,73 @@ function pickFields(row, fields) {
 // GRACEFUL ABSENCE throughout: a root row (no parentSourceId), a row whose parent is not in this
 // batch, and a deployment with no declared spec slot each add NO key at all. pickFields then
 // writes nothing for that column, so an UPDATE never blanks a value that is already there.
-const DENORMALIZED_PLM_FIELD_IDS = Object.freeze(['parentComponentCode', 'parentComponentName', 'componentSpec'])
+// ── F1c: 排序号 / 名称及规格 -> 客户包 ext_ 列 ────────────────────────────────
+//
+// THE GAP THIS CLOSES. The customer pack already declares 父组件排序号
+// (`ext_parentSortNo`), 当前组件排序号 (`ext_componentSortNo`) and 名称及规格
+// (`ext_nameAndSpec`) — 21 such ext_ columns were measured on the customer's own
+// sheet — and NOT ONE of them was ever written: the only writer of ext_ columns is
+// `applyExtFieldMapping`, which reads the PART row, while 明细排序号 lives on the
+// BOM DETAIL row (the expansion carries it as `sortLine`) and 名称及规格 is the
+// UNSPLIT name (`nameAndSpec` since F1c). Neither is reachable from a part-column
+// mapping, so the columns stayed empty on every deployment.
+//
+// WHY HERE, and not by widening the ext mapping: this is the same seam 父组件图号/
+// 父组件名称/规格 already use — the point where the add record / update patch is
+// built, AFTER everything that keys, fingerprints and adjudicates on the expansion
+// row. Deriving it here moves no persisted identity (see the header below).
+//
+// THE PACK IS STILL THE AUTHORITY. These three ids only survive `pickFields`, whose
+// field list is the PACK-AWARE writable band (`plmWritableFieldIds`): a deployment
+// whose pack does not declare the column — or declares it human_preserved, or
+// pinned `preserveOnRefresh` — gets nothing written, exactly as before. This code
+// can add a KEY to an in-memory row; it cannot add a COLUMN to anybody's sheet and
+// cannot promote one into the writable band.
+//
+// A MAPPED VALUE ALWAYS WINS. If a deployment's own ext mapping already fills one
+// of them from a source column, the row arrives carrying it and the
+// derivation stands down (`isBlank` check per id) — the deployment's declared
+// mapping is measured, this is derived.
+//
+// F1c-b(已撤,owner 2026-09-15)— 客户包那一对同名副本 `ext_parentDrawingNo` / `ext_parentName`
+// 曾在这里从刚写进 `out` 的模板对抄值派生。裁决「留模板对做正本,改中文名,备料包去掉那一对,导出
+// 改读模板对」之后,派生连同登记一起撤掉:本函数对这两个 id **既不写也不读**。既有安装上的两列与
+// 其值原样保留(受管字段守卫也不允许删),只是不再有写手;部署自己 ext 映射带上来的值照旧由
+// pickFields 原样透传 —— 那是测得的,不是这里派生的。派生集合缩小,身份/血缘语义一字未动。
+//
+// 不派生 `ext_spec`,尽管它与模板 `componentSpec` 同为 规格 二字。模板列今天有两个来源:部署
+// 声明的 readPlan.part.specField,以及没声明时由 名称 按第一个空格切出的后段(bom-expansion
+// createRow)。包列 `ext_spec` 这条链上从来没有写手,也没有任何一处把两者判定为同义 —— 导出
+// (stock-preparation-prep-line-export.cjs:126)只把它当 `componentSpec` 不在时的兼容兜底,而
+// 演示脚本把它绑到源的 Specification 列。同名不等于同义,把一个填进另一个是改语义、不是补
+// 缺口,留 owner 裁决(见 PR 正文 owner 待办)。
+const DENORMALIZED_PLM_FIELD_IDS = Object.freeze([
+  'parentComponentCode',
+  'parentComponentName',
+  'componentSpec',
+  'ext_componentSortNo',
+  'ext_parentSortNo',
+  'ext_nameAndSpec',
+])
+
+// 明细排序号 as the pack declares it: a NUMBER column. A source `sort_id` reaches the
+// expansion as whatever the driver handed over ('1' as often as 1), so it is coerced
+// here and REFUSED when it is not numeric — writing '甲' into a number column is a
+// broken cell, and a silently dropped one is the honest outcome (the column is
+// display/ordering only; nothing adjudicates on it).
+// CLOSED vocabularies, same discipline as the mapper's SPEC_KEYS: the keys an expansion row may
+// legitimately carry the 明细排序号 / 名称及规格 under, listed rather than guessed at.
+const EXPANSION_SORT_KEYS = Object.freeze(['sortLine', 'componentSortNo'])
+const EXPANSION_NAME_AND_SPEC_KEYS = Object.freeze(['nameAndSpec', 'nameAndStandard'])
+
+function sortNumberOrUndefined(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value.trim())
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return undefined
+}
 
 function firstPresentValue(row, keys) {
   for (const key of keys) {
@@ -1029,28 +1179,99 @@ function firstPresentValue(row, keys) {
   return undefined
 }
 
-function denormalizedPlmFields(row, parentIndex) {
+// THE SECOND GATE ON THE DERIVED ext_ COLUMNS (three since F1c; the two F1c-b parent copies were
+// retired on 2026-09-15), and the one that
+// keeps a pull from FAILING.
+//
+// `pickFields` already refuses an id outside the pack-aware writable band. That is not enough on
+// its own: a deployment can have the pack column INSTALLED (so the band contains it) while the
+// table action neither declares nor BINDS it — and an unbound `ext_` id is a hard refusal at the
+// write boundary (apply-writer `mapFieldName`, 'unmapped_extension_field'), i.e. the whole row
+// fails to write rather than the column coming out empty. Deriving a value into a column the
+// target does not bind would therefore turn "this column stays empty" into "this project cannot be
+// applied at all".
+//
+// `extensionFieldIds` is the action's DECLARED extension band. IN EXPLICIT BINDING MODE
+// (`target.fieldIdMap` carries explicit bindings) it is the exact list
+// `assertTargetFieldMapCompleteness` requires that map to bind — declaring without binding is an
+// up-front 422, so on those deployments "declared" really does mean "bound".
+//
+// NOT UNCONDITIONAL. In implicit mode that whole guarantee is off: the completeness check returns
+// early (stock-preparation-table-actions.cjs:559 `if (!targetFieldMapHasExplicitBindings(...))
+// return`) and the writer's hard refusal is gated on the same flag
+// (stock-preparation-apply-writer.cjs:146 `if (explicit && isTenantExtensionField(field))`), so a
+// logical `ext_` id passes through as-is instead of failing. What keeps a derived value off those
+// tables is the OTHER gate on its own: the pack-aware writable band `pickFields` applies below
+// (pack not installed / column not plm_system-writable => not one character is written).
+//
+// FAIL-CLOSED: a caller that passes nothing derives nothing, so a future call site that forgets to
+// thread it leaves those three columns empty instead of breaking apply.
+function canDeriveExtensionField(fieldId, declaredExtensionFieldIds) {
+  return declaredExtensionFieldIds instanceof Set && declaredExtensionFieldIds.has(fieldId)
+}
+
+function denormalizedPlmFields(row, parentIndex, declaredExtensionFieldIds) {
   const out = {}
   const parentSourceId = row && row.parentSourceId
   // buildParentIndex keys on `optionalString(componentSourceId)`, i.e. trimmed non-empty STRINGS
   // only. The lookup mirrors that exactly rather than coercing, so the two can never disagree
   // about which ids are joinable.
+  //
+  // FIRST OCCURRENCE WINS when the same 父件 appears more than once in a batch (it does — one
+  // component can sit under several paths): the index is built with
+  // `if (sourceId && !index.has(sourceId))` (stock-preparation-expansion-snapshot-mapper.cjs:133),
+  // so a later occurrence never replaces an earlier one. The same component record carries the same
+  // code/name on every path it appears on (a property of the source data, not a code guarantee),
+  // and the template pair below reads this one index (the snapshot line's parentDrawingNo /
+  // parentName read the same index in the mapper, so the two pipelines agree on who the parent is).
   if (parentIndex && typeof parentSourceId === 'string' && parentSourceId.trim() !== '') {
     const parent = parentIndex.get(parentSourceId.trim())
     if (parent) {
       if (!isBlank(parent.componentCode)) out.parentComponentCode = parent.componentCode
-      if (!isBlank(parent.componentName)) out.parentComponentName = parent.componentName
+      // 父组件名称 = 父件的 **未切分** 名称及规格(老系统 StockInfoController 754-755:
+      //   stockInfo.setParentComponentName(parentBomInfo.getIdentityName())  —— identityName 全串),
+      // 不是 F1c 切出来的首段。切分只改了 当前组件 那一侧的 名称 列(createRow 的
+      // splitNameAndSpec),父件这一侧老系统从来没切过,导出第 5 列打印的就是全串。行上现成有
+      // 全串(展开层 createRow 落的 `nameAndSpec`),所以这里先取它,取不到才退回 componentName
+      // —— 退回路径覆盖两种行:改前写进去的老行(componentName 本来就是全串),以及源行没有
+      // 名称及规格 的行(两个键都空,什么也不写)。
+      const parentName = firstPresentValue(parent, EXPANSION_NAME_AND_SPEC_KEYS)
+      if (!isBlank(parentName)) out.parentComponentName = parentName
+      else if (!isBlank(parent.componentName)) out.parentComponentName = parent.componentName
+      // 父组件排序号 — THE PARENT ROW'S OWN 明细排序号, resolved through the same in-batch join
+      // as 父组件图号/父组件名称 just above.
+      //
+      // DELIBERATELY NOT WHAT 老系统 WROTE. `fillBasicStockInfo` 756 sets
+      // `parentComponentSortId = bomInfo.getSortId()` — the CHILD's own sort id — so the legacy
+      // column holds a copy of 当前组件排序号 and says nothing about the parent. That is a bug we
+      // are not copying into a column labelled 父组件排序号: the value that makes the column mean
+      // its own label (and makes a parent band sortable) is the parent's sort id.
+      if (canDeriveExtensionField('ext_parentSortNo', declaredExtensionFieldIds) && isBlank(row.ext_parentSortNo)) {
+        const parentSortNo = sortNumberOrUndefined(firstPresentValue(parent, EXPANSION_SORT_KEYS))
+        if (parentSortNo !== undefined) out.ext_parentSortNo = parentSortNo
+      }
     }
   }
   const spec = firstPresentValue(row, EXPANSION_SPEC_KEYS)
   if (spec !== undefined) out.componentSpec = spec
+  // 当前组件排序号 — the 明细栏 `sort_id` the expansion已经读进内存 (`sortLine`) 却一直无处可落。
+  if (canDeriveExtensionField('ext_componentSortNo', declaredExtensionFieldIds) && isBlank(row && row.ext_componentSortNo)) {
+    const componentSortNo = sortNumberOrUndefined(firstPresentValue(row, EXPANSION_SORT_KEYS))
+    if (componentSortNo !== undefined) out.ext_componentSortNo = componentSortNo
+  }
+  // 名称及规格 — the UNSPLIT PLM identityName. 图号 + 名称 + 规格 are the split halves; this is the
+  // cell the customer's own workbook prints, and the column 老系统 exports at index 6.
+  if (canDeriveExtensionField('ext_nameAndSpec', declaredExtensionFieldIds) && isBlank(row && row.ext_nameAndSpec)) {
+    const nameAndSpec = firstPresentValue(row, EXPANSION_NAME_AND_SPEC_KEYS)
+    if (nameAndSpec !== undefined) out.ext_nameAndSpec = nameAndSpec
+  }
   return Object.keys(out).length > 0 ? out : null
 }
 
 // Returns the row unchanged (same object identity) when nothing resolves, so a plan over a batch
 // with no resolvable parents and no declared spec slot is byte-identical to the pre-change one.
-function withDenormalizedPlmFields(row, parentIndex) {
-  const derived = denormalizedPlmFields(row, parentIndex)
+function withDenormalizedPlmFields(row, parentIndex, declaredExtensionFieldIds) {
+  const derived = denormalizedPlmFields(row, parentIndex, declaredExtensionFieldIds)
   return derived ? { ...row, ...derived } : row
 }
 
@@ -1156,6 +1377,27 @@ function makeSkipDecision(row) {
   }
 }
 
+// Batch-refresh step 5 PR-8 — THE CONTROLLED UPDATE (design §10.3 (2); plan §3.4 step 3 「受控更新机器字段。不改键、
+// 不搬结构、不覆盖人工填写」): ONE UPDATE per record a confirmed change plan authorizes, patching EXACTLY the plan's
+// fields with the plan's after values (+ the RUN stamps) — never the whole plm band (no `active`, no lineage, no key,
+// path or parent), never a human column. `key` is the existing row's own key (for a continued relationship's row: its
+// OLD key — the one exception to "continued rows receive no patch", plan §4). The values are THIS computation's (the
+// first pass observed them); the version the writer fences on comes from the apply's in-lease read, never from here.
+function makeChangePlanUpdateDecision(key, entry, runId, plannedAt, humanFields, changePlanId) {
+  const changed = Object.keys(entry.writeFields).sort()
+  const patch = {}
+  for (const fieldId of changed) patch[fieldId] = entry.writeFields[fieldId].after
+  Object.assign(patch, runPatch(runId, plannedAt, DECISIONS.UPDATE, JSON.stringify({ type: CHANGE_PLAN_UPDATE_TYPE, changePlanId, changedFields: changed })))
+  assertNoHumanFields(patch, humanFields, 'change plan patch')
+  return {
+    decision: DECISIONS.UPDATE,
+    idempotencyKey: key,
+    patch,
+    changedFields: changed,
+    conflictSummary: makeConflictSummary(CHANGE_PLAN_UPDATE_TYPE, { changePlanId, changedFieldCount: changed.length }),
+  }
+}
+
 // ── W4 carry wiring (execution-plan W4a; adjudication Layer 3) ───────────────
 //
 // The carry-policy module is required LAZILY, inside the plan pass, because it
@@ -1165,6 +1407,23 @@ let lazyCarryPolicyModule = null
 function carryPolicyModule() {
   if (!lazyCarryPolicyModule) lazyCarryPolicyModule = require('./stock-preparation-carry-policy.cjs')
   return lazyCarryPolicyModule
+}
+
+// Batch-refresh step 4 (PR-1): the continuation pairing module imports THIS module at its top (for the
+// field bands, `changedFields`, the record-ref Symbol), so it is required LAZILY here — the same
+// arrangement as the carry-policy module above. Reached only when a caller passes `continuation`.
+let lazyContinuationModule = null
+function continuationModule() {
+  if (!lazyContinuationModule) lazyContinuationModule = require('./stock-preparation-continuation-pairing.cjs')
+  return lazyContinuationModule
+}
+
+function makeContinuationSkipDecision(key, type, details) {
+  return {
+    decision: DECISIONS.SKIP,
+    idempotencyKey: key,
+    conflictSummary: makeConflictSummary(type, details),
+  }
 }
 
 // Map ONE planCarry outcome for an ADD row into plan artifacts. The write
@@ -1240,6 +1499,39 @@ function makeInactiveDecision(existing, runId, plannedAt, humanFields) {
 }
 
 function planStockPreparationConflicts(input = {}) {
+  // Batch-refresh step 4 (PR-1) — the GOVERNED-PROJECT input (design §6.1). Server-held, never
+  // request-supplied. ONLY `undefined` means "not governed": the plan below is then BYTE-IDENTICAL to the
+  // pre-step-4 planner (invariant (i), pinned on a second-pull sheet by
+  // stock-preparation-continuation-golden.test.cjs). Anything else is validated through the pairing
+  // module's closed key set; a store state other than 'ok' — or `null` — refuses rather than planning
+  // "without continuations" (invariant (ii)).
+  const continuationInput = input.continuation === undefined
+    ? null
+    : continuationModule().normalizeContinuationInput(input.continuation)
+  if (!continuationInput || !continuationInput.changePlan) return planOnce(input, continuationInput, null)
+  // Batch-refresh step 5 PR-8 (design §10.3 (2)) — A CONFIRMED CHANGE PLAN, TWO PASSES. Pass 1 is the governed plan
+  // exactly as without the plan (content detection kept on for the plan's records, M4); the pairing core compares its
+  // content-class holds with the plan (`changePlanAuthorizationOf`). `matches` => pass 2 plans with the plan's
+  // AUTHORIZATION (those changes become the controlled-update UPDATEs; every other hold stays); `stale` => pass 1
+  // stands (its holds re-open, the reconciliation invalidates the plan). Either way the values-free verdict rides
+  // `plan.continuation.changePlan` (the lanes bind the token / execution to it). Pure CPU, twice the planning cost
+  // for a project that holds a confirmed plan (stated in the PR body).
+  const first = planOnce(input, continuationInput, null)
+  const verdict = continuationModule().changePlanAuthorizationOf({ input: continuationInput, holds: first.holds || [] })
+  const chosen = verdict.verdict === 'matches' ? planOnce(input, continuationInput, verdict.authorization) : first
+  const stanza = Object.freeze({
+    id: continuationInput.changePlan.id,
+    verdict: verdict.verdict,
+    ...(verdict.reason ? { reason: verdict.reason } : {}),
+    recordCount: verdict.observedRecordCount,
+    authorizedUpdates: chosen.decisions.filter((decision) => decision.conflictSummary && decision.conflictSummary.type === CHANGE_PLAN_UPDATE_TYPE).length,
+  })
+  chosen.summary.continuation = { ...chosen.summary.continuation, changePlan: { ...stanza } }
+  chosen.continuation = { ...chosen.continuation, changePlan: { ...stanza } }
+  return chosen
+}
+
+function planOnce(input, continuationInput, changePlanAuthorization) {
   const template = normalizeTemplate(input.template)
   const strategy = normalizeStrategy(template, input.conflictStrategy)
   const runId = normalizeRunId(input.runId)
@@ -1266,6 +1558,13 @@ function planStockPreparationConflicts(input = {}) {
     templateFields: template.fields,
     installedFieldProperties: input.installedFieldProperties,
   })
+  // F1c — the action's DECLARED extension band, threaded by the two call sites that have it
+  // (table-actions' dry-run and the large-BOM job planner). Read ONLY by `denormalizedPlmFields`'s
+  // derived ext_ columns (F1c: 排序号两列 + 名称及规格; F1c-b: 父组件图号/父组件名称 的包列);
+  // absent => nothing is derived (see canDeriveExtensionField).
+  const declaredExtensionFieldIds = Array.isArray(input.extensionFieldIds)
+    ? new Set(input.extensionFieldIds.filter((fieldId) => typeof fieldId === 'string' && fieldId !== ''))
+    : null
   const humanFields = ownership.humanPreservedFieldIds
   const plmFields = ownership.plmWritableFieldIds
   const templateFields = fieldMapForTemplate(template)
@@ -1302,11 +1601,16 @@ function planStockPreparationConflicts(input = {}) {
       derivedRowIdentity: anonymousRowIdentity('missing_expanded_idempotency_key', row, row.projectNo),
     })
   }
+  const existingRowsMissingKey = { pluginOrLegacy: 0, foreign: 0 }
   for (const row of existing.missing) {
+    // GOV-05: same hold, same source, same identity recipe — only the NAME differs by created_by.
+    const origin = isForeignExistingRow(row) ? 'foreign' : 'pluginOrLegacy'
+    const conflictType = EXISTING_MISSING_KEY_CONFLICT_TYPES[origin]
+    existingRowsMissingKey[origin] += 1
     manualConfirm(decisions, counts, {
-      type: 'missing_existing_idempotency_key',
+      type: conflictType,
       source: 'existing_row',
-      derivedRowIdentity: anonymousRowIdentity('missing_existing_idempotency_key', row, row.projectNo),
+      derivedRowIdentity: anonymousRowIdentity(conflictType, row, row.projectNo),
     })
   }
   for (const rowError of rowErrors) {
@@ -1348,6 +1652,28 @@ function planStockPreparationConflicts(input = {}) {
     }
   }
 
+  // Batch-refresh step 4 (PR-1) — governed planning, computed ONCE from the same grouped maps: the
+  // continuation projection (design §6.2), the verification of every continuation (§6.3, pilot or
+  // not), and on pilot projects the candidate / dropped-head detection (§6.6). `null` for an
+  // ungoverned plan, and then nothing below reads it.
+  const governed = continuationInput
+    ? continuationModule().prepareGovernedPlanning({
+        input: continuationInput,
+        template,
+        installedFieldProperties: input.installedFieldProperties,
+        expandedRows,
+        existingRows,
+        expanded,
+        existing,
+        duplicateExistingKeys,
+        parentIndex,
+        declaredExtensionFieldIds,
+        humanFields,
+        // Step 5 PR-8: the second pass's authorization (null on every other plan).
+        authorization: changePlanAuthorization,
+      })
+    : null
+
   // W4 carry: the pool of carry SOURCES is exactly the prior-batch rows this
   // plan's missing-from-PLM sweep treats as inactive — the already-inactive ones
   // (SKIP already_inactive below) as they stand, and the ones the sweep is ABOUT
@@ -1366,6 +1692,9 @@ function planStockPreparationConflicts(input = {}) {
     }
     for (const [key, rows] of existing.keyed.entries()) {
       if (expanded.keyed.has(key) || resolvedExpanded.keyed.has(key) || duplicateExistingKeys.has(key)) continue
+      // Step 4: a row a continuation protects (or a suspended candidate's old row) is NOT swept, so it
+      // is not a predecessor either (design §6.2, third consumer).
+      if (governed && (governed.continuedRefFor(key) || governed.candidateProtectHoldFor(key))) continue
       const existingRow = rows[0]
       carrySources.push(existingRow.active === false ? existingRow : { ...existingRow, active: false })
     }
@@ -1378,10 +1707,35 @@ function planStockPreparationConflicts(input = {}) {
     // derived parent columns, which is also why a re-pull BACKFILLS them onto rows written
     // before this change: an existing row with no parentDrawing and a resolvable parent is a
     // plm_system-field change like any other.
-    const row = withDenormalizedPlmFields(rows[0], parentIndex)
+    const row = withDenormalizedPlmFields(rows[0], parentIndex, declaredExtensionFieldIds)
     const existingGroup = existing.keyed.get(key)
     const existingRow = existingGroup && existingGroup[0]
+    if (governed) {
+      // Step 4, design §6.2 consumer 1 (the ADD branch) — and stricter: a key a continuation claims, from
+      // EITHER end, receives no write decision on ANY branch it can reach (an occupied new position would
+      // otherwise UPDATE / revive a copy; a protected old row would otherwise be patched).
+      const continued = governed.continuedRefFor(key)
+      if (continued) {
+        // Step 5 PR-8: NO change-plan exception on this branch. A continued OLD key that is still in the expansion (its own
+        // order line came back) makes the relationship verify `demand_changed` (a reconfirm, not content), so no confirmed
+        // plan matches and nothing could be authorized here; a plan's old-row UPDATEs come from the sweep below only.
+        addDecision(decisions, counts, makeContinuationSkipDecision(key, continued.type, { continuationId: continued.ref.continuationId }))
+        continue
+      }
+      // PR-3a (TD-15(i), O-5; TD-14, O-4): a candidate's new-subtree key — free (would be ADDed) OR already
+      // occupied by an inactive tombstone / an active copy (would be revived / patched) — is SKIPped, compared
+      // as its BASE key so a resolved duplicate group cannot escape.
+      const candidateHold = governed.candidatePositionHoldFor(key)
+      if (candidateHold) {
+        addDecision(decisions, counts, makeContinuationSkipDecision(key, 'suspended_continuation_candidate', { holdFingerprint: candidateHold }))
+        continue
+      }
+    }
     if (!existingRow) {
+      // Step 5 PR-8 review fix N3-a (round 2): on a governed project, a key whose reviewed / written content is gone from
+      // the sheet (the row deleted) is HELD when the source no longer carries the reviewed value — the decision below
+      // stays as computed and the suspension dominates (no token), as for every content hold.
+      if (governed) governed.noteMissingReviewedRow(row, key)
       if (strategy.addMissing) {
         addDecision(decisions, counts, makeAddDecision(row, runId, plannedAt, plmFields, humanFields))
         if (carryPolicy) {
@@ -1415,11 +1769,21 @@ function planStockPreparationConflicts(input = {}) {
         changedFields: lineageChanges,
         details: { changedFieldCount: lineageChanges.length },
       })
+      // Step 4, D-4: on a governed project the legacy hold is ALSO a step-4 structure hold (suspends;
+      // never acknowledgeable, never the content path — C07).
+      if (governed) governed.noteStructureChange(existingRow, lineageChanges)
       continue
     }
 
     const identityChanges = changedFields(row, existingRow, IDENTITY_FIELD_IDS, templateFields)
     if (identityChanges.length > 0) {
+      // Step 5 PR-8 (correction C1): a material / version / code / name change is a held identity conflict — unless a
+      // confirmed change plan authorizes exactly it, which makes it the plan's controlled UPDATE.
+      const authorized = governed ? governed.authorizedChangeFor(existingRow) : null
+      if (authorized) {
+        addDecision(decisions, counts, makeChangePlanUpdateDecision(existingRow.idempotencyKey, authorized, runId, plannedAt, humanFields, governed.authorization.changePlanId))
+        continue
+      }
       manualConfirm(decisions, counts, {
         idempotencyKey: key,
         type: 'component_identity_conflict',
@@ -1427,10 +1791,31 @@ function planStockPreparationConflicts(input = {}) {
         changedFields: identityChanges,
         details: { changedFieldCount: identityChanges.length },
       })
+      // Step 4, D-4: governed => a step-4 content hold (identity fields are content triggers; a changed
+      // part id would be structure, and never reaches here — the key carries it).
+      if (governed) governed.noteContentChange(row, existingRow, { reason: 'component_identity_conflict' })
       continue
     }
 
     const refreshChanges = strategy.refreshPlmSystemFields ? changedFields(row, existingRow, plmFields, templateFields) : []
+    // Step 4, design §6.7 (pilot projects only): a change in a content-trigger field suspends the whole
+    // pull; the decision itself stays what the planner computed (the suspension dominates). PR-3a (O-3,
+    // TD-13): detected REGARDLESS of `conflictStrategy.refreshPlmSystemFields` — with the strategy off a
+    // material change would otherwise reach a governed pilot sheet unheld. `noteContentChange` compares the
+    // trigger fields itself and returns when none changed.
+    // Step 5 PR-8: detection also covers the records a confirmed plan writes, pilot or not (M4); the plan's own
+    // change of this row is its controlled UPDATE (REGARDLESS of `refreshPlmSystemFields`, like the detection, O-3).
+    // Review fix N3-a (round 2): an INACTIVE row is skipped (a revive is not a content change) — except under a key the
+    // reviews / the written plan left content on: its revive with other content is held like any content change, and the
+    // plan's UPDATE writes it without reviving (the revive comes on the pass after the review).
+    if (governed && governed.detectsContentOf(existingRow) && (existingRow.active !== false || governed.isReviewedKey(existingRow))) {
+      const authorized = governed.authorizedChangeFor(existingRow)
+      if (authorized) {
+        addDecision(decisions, counts, makeChangePlanUpdateDecision(existingRow.idempotencyKey, authorized, runId, plannedAt, humanFields, governed.authorization.changePlanId))
+        continue
+      }
+      governed.noteContentChange(row, existingRow, { reason: 'plm_system_refresh' })
+    }
     if (refreshChanges.length === 0) {
       addDecision(decisions, counts, makeSkipDecision(row))
       continue
@@ -1440,6 +1825,27 @@ function planStockPreparationConflicts(input = {}) {
 
   for (const [key, rows] of existing.keyed.entries()) {
     if (expanded.keyed.has(key) || resolvedExpanded.keyed.has(key) || duplicateExistingKeys.has(key)) continue
+    if (governed) {
+      // Step 4, design §6.2 consumer 2 (the sweep), placed BEFORE `already_inactive`: an inactive old
+      // row under a continuation is a verification failure (old_record_inactive), not a silent skip.
+      const continued = governed.continuedRefFor(key)
+      if (continued) {
+        // Step 5 PR-8 (correction C2): the continued relationship's OLD row a confirmed change plan updates — its
+        // authorized fields + RUN stamps only, on its OLD key (never the new position's path / parent / key).
+        const authorizedOld = governed.authorizedContinuedUpdateFor(key, rows[0])
+        if (authorizedOld) {
+          addDecision(decisions, counts, makeChangePlanUpdateDecision(rows[0].idempotencyKey, authorizedOld, runId, plannedAt, humanFields, governed.authorization.changePlanId))
+          continue
+        }
+        addDecision(decisions, counts, makeContinuationSkipDecision(key, continued.type, { continuationId: continued.ref.continuationId }))
+        continue
+      }
+      const protectHold = governed.candidateProtectHoldFor(key)
+      if (protectHold) {
+        addDecision(decisions, counts, makeContinuationSkipDecision(key, 'suspended_continuation_candidate', { holdFingerprint: protectHold }))
+        continue
+      }
+    }
     const existingRow = rows[0]
     if (existingRow.active === false) {
       addDecision(decisions, counts, {
@@ -1468,8 +1874,18 @@ function planStockPreparationConflicts(input = {}) {
       }
     : undefined
 
+  // Step 4 — invariant (iii) over the EMITTED decisions (fail closed), then the hold set. A governed
+  // plan with any hold is SUSPENDED as a whole (design D4): never a manual_confirm hold, so nothing that
+  // acknowledges manual_confirm can push it, and `valid` is false (invariant (iv)).
+  let continuationOutcome = null
+  if (governed) {
+    continuationModule().assertContinuationPostCondition(decisions, governed)
+    continuationOutcome = governed.finalize(decisions)
+  }
+  const suspended = continuationOutcome ? continuationOutcome.suspended : false
+
   return {
-    valid: counts[DECISIONS.MANUAL_CONFIRM] === 0,
+    valid: counts[DECISIONS.MANUAL_CONFIRM] === 0 && !suspended,
     runId,
     plannedAt,
     decisions,
@@ -1484,11 +1900,27 @@ function planStockPreparationConflicts(input = {}) {
       humanPreservedFields: humanFields.slice(),
       plmSystemFields: plmFields.slice(),
       conflictTypes: Array.from(new Set(decisions.map((decision) => decision.conflictSummary && decision.conflictSummary.type).filter(Boolean))).sort(),
+      // GOV-05: two counts, NOT in `counts` (which buildRevision hashes) — summary-only, and
+      // spread CONDITIONALLY: a batch with no keyless existing row keeps its whole-plan JSON
+      // byte-identical to the pre-GOV-05 planner (the carry pre-wiring golden and the pack-aware
+      // control digest both pin that). Absent => both counts are zero.
+      ...(existing.missing.length > 0 ? { existingRowsMissingKey: { ...existingRowsMissingKey } } : {}),
       duplicateExpandedKeyDiagnostics: duplicateExpandedKeyDiagnostics(expanded.keyed),
       duplicateExpandedKeyResolution: resolvedExpanded.resolution,
       ...(packAwareOwnership ? { packAwareOwnership } : {}),
       ...(carrySummary ? { carry: carrySummary } : {}),
+      // Step 4 — values-free (counts, closed tokens, continuation ids); spread ONLY for a governed plan.
+      ...(continuationOutcome ? { continuation: { ...continuationOutcome.summary } } : {}),
     },
+    // Step 4 — ONLY for a governed plan (design §6.8). `holds` are PRIVATE (values-bearing): they never
+    // enter `summary`, `summarizeConflictPlanForEvidence`, dry-run evidence or any revision.
+    ...(continuationOutcome
+      ? {
+          suspended,
+          holds: continuationOutcome.holds,
+          continuation: { ...continuationOutcome.summary },
+        }
+      : {}),
   }
 }
 
@@ -1505,6 +1937,16 @@ function summarizeConflictPlanForEvidence(plan = {}) {
     humanPreservedFields: Array.isArray(summary.humanPreservedFields) ? summary.humanPreservedFields.slice() : [],
     plmSystemFields: Array.isArray(summary.plmSystemFields) ? summary.plmSystemFields.slice() : [],
     conflictTypes: Array.isArray(summary.conflictTypes) ? summary.conflictTypes.slice() : [],
+    // GOV-05: passed through ONLY when the planner produced it, so evidence summarized from an
+    // older plan stays byte-identical.
+    ...(isPlainObject(summary.existingRowsMissingKey)
+      ? {
+          existingRowsMissingKey: {
+            pluginOrLegacy: Number(summary.existingRowsMissingKey.pluginOrLegacy || 0),
+            foreign: Number(summary.existingRowsMissingKey.foreign || 0),
+          },
+        }
+      : {}),
     duplicateExpandedKeyDiagnostics: isPlainObject(summary.duplicateExpandedKeyDiagnostics)
       ? JSON.parse(JSON.stringify(summary.duplicateExpandedKeyDiagnostics))
       : undefined,
@@ -1517,16 +1959,22 @@ function summarizeConflictPlanForEvidence(plan = {}) {
     // W4 carry: values-free stanza, passed through ONLY when present so
     // no-config evidence stays byte-identical.
     ...(isPlainObject(summary.carry) ? { carry: JSON.parse(JSON.stringify(summary.carry)) } : {}),
+    // Step 4: the values-free continuation stanza, ONLY when present. `plan.holds` is never read here.
+    ...(isPlainObject(summary.continuation) ? { continuation: JSON.parse(JSON.stringify(summary.continuation)) } : {}),
   }
 }
 
 module.exports = {
   DECISIONS,
   RUN_FIELD_IDS,
+  CHANGE_PLAN_UPDATE_TYPE,
   LINEAGE_FIELD_IDS,
   IDENTITY_FIELD_IDS,
   DENORMALIZED_PLM_FIELD_IDS,
   ANONYMOUS_HOLD_IDENTITY_PREFIX,
+  EXISTING_ROW_CREATED_BY,
+  EXISTING_ROW_RECORD_REF,
+  EXISTING_MISSING_KEY_CONFLICT_TYPES,
   CARRY_PROPOSAL_CONFLICT_TYPE,
   CARRY_PROPOSAL_CONFLICT_SUMMARY,
   CARRY_PROPOSAL_CHANGED_FIELDS,
@@ -1537,11 +1985,13 @@ module.exports = {
   UNIMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES,
   PACK_FIELD_OWNERSHIP_REASONS,
   StockPreparationConflictPlannerError,
+  baseIdempotencyKeyOf,
   derivePackAwarePlmWritableFields,
   duplicateExpandedKeyDiagnosticsForRows,
   planStockPreparationConflicts,
   summarizeConflictPlanForEvidence,
   __internals: {
+    makeChangePlanUpdateDecision,
     anonymousHoldIdentity,
     anonymousRowErrorIdentity,
     anonymousRowIdentity,
@@ -1558,6 +2008,7 @@ module.exports = {
     duplicateResolvedKey,
     fieldMapForTemplate,
     groupByKey,
+    isForeignExistingRow,
     normalizeStrategy,
     normalizeIsoTime,
     normalizeComparableValueForField,

@@ -6,6 +6,7 @@ import MetaGalleryView from '../src/multitable/components/MetaGalleryView.vue'
 import MetaHierarchyView from '../src/multitable/components/MetaHierarchyView.vue'
 import MetaKanbanView from '../src/multitable/components/MetaKanbanView.vue'
 import MetaTimelineView from '../src/multitable/components/MetaTimelineView.vue'
+import { businessTodayKey } from '../src/multitable/utils/business-timezone'
 
 const titleField = { id: 'fld_title', name: 'Title', type: 'string' }
 const dateField = { id: 'fld_date', name: 'Date', type: 'date' }
@@ -18,9 +19,10 @@ const statusField = {
   options: [{ value: 'Todo', color: '#409eff' }],
 }
 
+// The calendar's day view opens on the BUSINESS today (客户反馈 2026-09-24 #4c follow-up) — seed the record on
+// that day, not the browser's: from 16:00 to 24:00 UTC every day the two differ on a UTC runner.
 function todayIso(): string {
-  const today = new Date()
-  return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+  return businessTodayKey()
 }
 
 async function mountComponent(component: Component, props: Record<string, unknown>) {

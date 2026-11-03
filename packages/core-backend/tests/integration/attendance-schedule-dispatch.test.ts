@@ -65,8 +65,68 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
   // suite's leaked shiftCompliance state (W4 wave-verification MD §7.5). Snapshot once, restore
   // the EXACT prior row after every test (see tests/utils/attendance-settings-row.ts).
   let settingsRowSnapshot: AttendanceSettingsRowSnapshot | undefined
+  let ownedDefaultRuleId: string | null = null
+  const seededMemberIds = new Set<string>()
+  const seededAdminGrantIds = new Set<string>()
 
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
+
+  function tokenClaimsAttendanceAdmin(perms: string): boolean {
+    return perms.split(',').some(item => item.trim() === 'attendance:admin')
+  }
+
+  async function ensureSyntheticMember(userId: string, attendanceAdmin = false): Promise<void> {
+    seededMemberIds.add(userId)
+    if (attendanceAdmin) seededAdminGrantIds.add(userId)
+    await pool.query(
+      `INSERT INTO users (
+         id, email, username, name, password_hash, role, permissions,
+         is_active, is_admin, activation_status, created_at, updated_at
+       ) VALUES (
+         $1, $2, $1, 'schedule-dispatch fixture', 'x', 'user', '[]'::jsonb,
+         true, false, 'activated', now(), now()
+       )
+       ON CONFLICT (id) DO UPDATE
+         SET is_active = true,
+             activation_status = 'activated',
+             updated_at = now()`,
+      [userId, `${userId}@schedule-dispatch-fixture.test`],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [userId, ORG],
+    )
+    if (attendanceAdmin) {
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         VALUES ($1, 'attendance:admin')
+         ON CONFLICT DO NOTHING`,
+        [userId],
+      )
+    }
+  }
+
+  async function ensureAuthoritativeDefault(): Promise<void> {
+    const existing = await pool.query(
+      `SELECT id FROM attendance_rules WHERE org_id = $1 AND is_default = true`,
+      [ORG],
+    )
+    if (existing.rows.length !== 0) return
+    const id = randomUUID()
+    const inserted = await pool.query(
+      `INSERT INTO attendance_rules
+         (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes,
+          severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default)
+       SELECT $1, $2, $3, 'UTC', '09:00', '18:00', 5, 5, 30, 60, 5, $4::jsonb, true
+        WHERE NOT EXISTS (
+          SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true
+        )
+       RETURNING id`,
+      [id, ORG, `schedule-dispatch-default-${id}`, JSON.stringify([0, 1, 2, 3, 4, 5, 6])],
+    )
+    if (inserted.rows[0]?.id) ownedDefaultRuleId = String(inserted.rows[0].id)
+  }
 
   async function mintToken(userId: string, perms: string): Promise<string> {
     const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(ORG)}&roles=admin&perms=${encodeURIComponent(perms)}`)
@@ -74,11 +134,9 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
     // (getAuthenticatedOrgId) — per the punch-route precedent, session fields are NEVER a
     // "named" selector, so arm (a) always applies here regardless of `tenantId` above. Seed
     // exactly one active membership in ORG so arm (a) resolves for every subject/actor minted.
-    await pool.query(
-      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
-       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
-      [userId, ORG],
-    )
+    // Timezone manage ignores token roles, is_admin, and RBAC_BYPASS. Grant attendance:admin
+    // only when this token already claims that permission.
+    await ensureSyntheticMember(userId, tokenClaimsAttendanceAdmin(perms))
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
 
@@ -176,11 +234,7 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
     // mints this request and may never have had mintToken called for it. Seed the target too.
     const targetUserId = payload.userId
     if (typeof targetUserId === 'string' && targetUserId) {
-      await pool.query(
-        `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
-         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
-        [targetUserId, ORG],
-      )
+      await ensureSyntheticMember(targetUserId)
     }
     const create = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
       method: 'POST',
@@ -223,6 +277,7 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
     settingsRowSnapshot = await snapshotAttendanceSettingsRow(pool)
+    await ensureAuthoritativeDefault()
   })
 
   afterEach(async () => {
@@ -241,6 +296,38 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
       await restoreAttendanceSettingsRow(pool, settingsRowSnapshot).catch(() => undefined)
     }
     await cleanupPrefix('dispatch-').catch(() => undefined)
+    if (pool) {
+      const memberIds = [...seededMemberIds]
+      const adminGrantIds = [...seededAdminGrantIds]
+      if (adminGrantIds.length > 0) {
+        await pool.query(
+          `DELETE FROM user_permissions WHERE user_id = ANY($1::text[]) AND permission_code = 'attendance:admin'`,
+          [adminGrantIds],
+        ).catch(() => undefined)
+      }
+      if (memberIds.length > 0) {
+        await pool.query(
+          `DELETE FROM user_orgs WHERE user_id = ANY($1::text[]) AND org_id = $2`,
+          [memberIds, ORG],
+        ).catch(() => undefined)
+        await pool.query(
+          `DELETE FROM users WHERE id = ANY($1::text[])`,
+          [memberIds],
+        ).catch(() => undefined)
+      }
+      // Same retain predicate as the live-scheduled fixture: keep this owned default when an
+      // active assignment, active rotation, companion, or trip arrangement still uses the org.
+      if (ownedDefaultRuleId) {
+        await pool.query(
+          `DELETE FROM attendance_rules r WHERE r.id=ANY($1::uuid[])
+             AND NOT EXISTS (SELECT 1 FROM attendance_shift_assignments a WHERE a.org_id=r.org_id AND a.is_active=true)
+             AND NOT EXISTS (SELECT 1 FROM attendance_rotation_assignments a WHERE a.org_id=r.org_id AND a.is_active=true)
+             AND NOT EXISTS (SELECT 1 FROM attendance_timezone_context_companions c WHERE c.org_id=r.org_id)
+             AND NOT EXISTS (SELECT 1 FROM attendance_business_trip_arrangements b WHERE b.org_id=r.org_id)`,
+          [[ownedDefaultRuleId]],
+        ).catch(() => undefined)
+      }
+    }
     if (server && (server as unknown as { stop?: () => Promise<void> }).stop) await (server as unknown as { stop: () => Promise<void> }).stop()
     await pool?.end().catch(() => undefined)
   })
@@ -337,11 +424,7 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
     }
     // Lock-11 §10 W-4: schedule-dispatch's derivation subject is the dispatch TARGET
     // (payload.userId), which bypasses mintToken here (this test drives the raw HTTP call).
-    await pool.query(
-      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
-       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
-      [userId, ORG],
-    )
+    await ensureSyntheticMember(userId)
     try {
       const create = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
         method: 'POST',
@@ -734,11 +817,7 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
     }
     // Lock-11 §10 W-4: schedule-dispatch's derivation subject is the dispatch TARGET
     // (payload.userId), which bypasses mintToken here (this test drives the raw HTTP call).
-    await pool.query(
-      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
-       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
-      [userId, ORG],
-    )
+    await ensureSyntheticMember(userId)
     try {
       const [first, second] = await Promise.all([
         requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
@@ -834,11 +913,7 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
     // (payload.userId), which bypasses mintToken here (this test drives the raw HTTP call).
     // Membership does not bypass the scheduler-scope checks this test exercises earlier
     // (those refuse 403 before the writer is ever reached).
-    await pool.query(
-      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
-       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
-      [dispatchedUserId, ORG],
-    )
+    await ensureSyntheticMember(dispatchedUserId)
     try {
       process.env.RBAC_BYPASS = 'false'
       const noScope = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {

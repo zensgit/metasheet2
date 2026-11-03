@@ -56,10 +56,12 @@ function formatUserLabel(user: AttendanceAdminUserSearchItem, tr: Translate): st
   ) {
     return `${tr('Current value', '当前值')}: ${user.id}`
   }
-  const primary = user.name?.trim() || user.email.trim() || user.id
-  const secondary = user.email.trim() && user.email.trim() !== primary ? user.email.trim() : user.id
+  // Email is optional when a user is created, and the server answers null for it (#6344); never trim it raw.
+  const email = typeof user.email === 'string' ? user.email.trim() : ''
+  const primary = user.name?.trim() || email || user.id
+  const secondary = email && email !== primary ? email : (user.id !== primary ? user.id : '')
   const profileParts = [user.employeeNo?.trim(), user.department?.trim()].filter(Boolean)
-  return user.id ? [primary, ...profileParts, secondary].join(' · ') : tr('Unknown user', '未知用户')
+  return user.id ? [primary, ...profileParts, secondary].filter(Boolean).join(' · ') : tr('Unknown user', '未知用户')
 }
 
 export function useAttendanceAdminUsers({
@@ -116,7 +118,12 @@ export function useAttendanceAdminUsers({
       const items = data?.data && typeof data.data === 'object'
         ? (data.data as Record<string, unknown>).items
         : []
-      users.value = Array.isArray(items) ? items as AttendanceAdminUserSearchItem[] : []
+      // Normalise the optional email at the boundary: users created without one come back with null (#6344).
+      users.value = Array.isArray(items)
+        ? (items as AttendanceAdminUserSearchItem[]).map((item) => (
+          typeof item?.email === 'string' ? item : { ...item, email: '' }
+        ))
+        : []
     } catch (error: unknown) {
       if (!isSessionCurrent()) return
       statusMessage.value = error instanceof Error && error.message

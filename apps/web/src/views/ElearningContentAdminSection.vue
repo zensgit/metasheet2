@@ -98,16 +98,15 @@
         </button>
       </div>
 
-      <label v-if="assignmentEnabled" class="elearning-content-field">
-        <span>{{ elearningLabel('contentAdmin.optionalAssignee', isZh) }}</span>
-        <input
-          v-model="targetUserId"
-          data-testid="elearning-content-target-user"
-          type="text"
-          :disabled="busy"
-          autocomplete="off"
-        >
-      </label>
+      <ElearningAssigneePicker
+        v-if="assignmentEnabled"
+        v-model="targetUserId"
+        :label="elearningLabel('contentAdmin.optionalAssignee', isZh)"
+        :is-zh="isZh"
+        test-id-prefix="elearning-content-assignee"
+        paste-test-id="elearning-content-target-user"
+        :disabled="busy"
+      />
 
       <button
         class="elearning-content-admin__publish"
@@ -137,7 +136,9 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import { randomUuid } from '../utils/uuid'
 import { assignElearningDirect, ElearningApiError } from '../services/elearning'
+import ElearningAssigneePicker from './ElearningAssigneePicker.vue'
 import {
   createElearningContentRequestIdTracker,
   createElearningContentRevision,
@@ -147,6 +148,7 @@ import {
 } from '../services/elearningContent'
 import {
   elearningAssignIncomplete,
+  elearningErrorMessage,
   elearningFailure,
   elearningLabel,
 } from './elearningLabels'
@@ -184,15 +186,12 @@ function newItem(itemType: ElearningContentItemType): ContentDraft {
 }
 
 function newUuid(): string {
-  if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') {
-    throw new ElearningApiError('request_failed', 0)
-  }
-  return crypto.randomUUID()
+  return randomUuid()
 }
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
-    return elearningFailure(error.code, error.status, isZh.value)
+    return elearningErrorMessage(error.code, error.status, isZh.value)
   }
   return elearningFailure('request_failed', 0, isZh.value)
 }

@@ -7,6 +7,10 @@ name: Approval real-DB acceptance (Lock-9 process attachments)
 #     cross-instance refusal), G-7 (staged uploader-only reads), G-8 (process-scoped caps), G-11
 #     (values-free scoping), G-12 (flag-OFF byte-for-byte no-op, both gates), G-13 (GC reuse), G-14
 #     (DDL relaxation + ordering + rollback, isolated schema), G-16 (read scope posture).
+#     Also carries the `canAttachProcessEvidence` detail-DTO field cases (the uploader affordance
+#     for role-seated approvers — not a Lock-9 gate): both DTO builders, which is why
+#     ApprovalBridgeService.ts / approval-seat-authorization.ts / approval-bridge-types.ts are in
+#     the `paths` filters below.
 # No-DB gates (G-3, G-9, G-10, G-15, the G-4/G-16 absence grep) live in
 # tests/unit/approval-lock9-process-attachment-unit.test.ts, auto-collected by the required
 # test (18.x)/(20.x) jobs — no workflow wiring needed for those.
@@ -55,6 +59,9 @@ on:
       - 'packages/core-backend/src/services/approval-attachment-validation.ts'
       - 'packages/core-backend/src/services/approval-instance-readability.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      - 'packages/core-backend/src/services/ApprovalBridgeService.ts'
+      - 'packages/core-backend/src/services/approval-seat-authorization.ts'
+      - 'packages/core-backend/src/services/approval-bridge-types.ts'
       - 'packages/core-backend/src/routes/approval-attachments.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/types/approval-product.ts'
@@ -78,6 +85,9 @@ on:
       - 'packages/core-backend/src/services/approval-attachment-validation.ts'
       - 'packages/core-backend/src/services/approval-instance-readability.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      - 'packages/core-backend/src/services/ApprovalBridgeService.ts'
+      - 'packages/core-backend/src/services/approval-seat-authorization.ts'
+      - 'packages/core-backend/src/services/approval-bridge-types.ts'
       - 'packages/core-backend/src/routes/approval-attachments.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/types/approval-product.ts'

@@ -30,6 +30,11 @@ import {
   applyContextSheetSchemaWriteGrant,
   type MultitableCapabilities,
 } from '../multitable/sheet-capabilities'
+import {
+  restrictStockPreparationOverviewCapabilities,
+} from '../multitable/stock-preparation-overview-contract'
+import { loadStockPreparationSheetStamps, restrictGridExportCapabilities } from '../multitable/sheet-grid-export-closure'
+import { applyStockPreparationProjectSheetSchemaClamp } from '../multitable/stock-preparation-project-sheet-schema-clamp'
 
 /** Ordered stages for base-authority probes (always all four, even when base is missing). */
 export const RECORD_LINK_BASE_AUTH_STAGES = [
@@ -690,6 +695,11 @@ export async function resolveSheetCapabilitiesForUserOnQuery(
   isAdminRole: boolean
   capabilities: MultitableCapabilities
   permissions: string[]
+  /** 备料分批拉取第一期 step 3: present (true) only on a sheet stamped closed for generic grid export. */
+  gridExportClosed?: true
+  /** Option B (owner 2026-10-29, R-66 ②): present (true) only on a registered project sheet for a non-admin (R-66 ③: a
+   *  `stock-prep:admin` holder there keeps the resolved canManageViews; canManageFields is false for every non-admin). */
+  stockPrepProjectSheetSchemaClamped?: true
 }> {
   const normalizedUserId = userId.trim()
   const normalizedSheetId = sheetId.trim()
@@ -731,10 +741,37 @@ export async function resolveSheetCapabilitiesForUserOnQuery(
     )
   }
 
+  // S3 (ADR adr-stock-prep-project-sheets-20261008 §5, Q5): the stock-preparation overview clamp, the same
+  // as the request-bound resolver's. This query-bound path gates the automation FWB record writes, the
+  // FWB activation gates and the record-permission routes, so it must not hand out a write the REST
+  // resolver refuses. Every person, admins included. Rides the `sheet_cap_eval` stage (no new stage).
+  // 备料分批拉取第一期 step 3 (review round 1, fix 2): both host stamps in ONE statement.
+  const stamps = await loadStockPreparationSheetStamps(query, [normalizedSheetId])
+  if (stamps.overviewSheetIds.has(normalizedSheetId)) {
+    capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
+  }
+  // Option B (owner 2026-10-29, R-66 ②): the project-sheet structure clamp, the same as the request-bound
+  // resolver's (only canManageFields / canManageViews change; platform admins untouched; R-66 ③ keeps the resolved
+  // view bit for a `stock-prep:admin` holder: `permissions` above plus a role check on this query, so it reads what
+  // the transaction sees). Rides the `sheet_cap_eval` stage (no new stage).
+  const projectSheetClamp = await applyStockPreparationProjectSheetSchemaClamp(query, normalizedSheetId, capabilities, isAdminRole, {
+    userId: normalizedUserId,
+    permissions,
+  })
+  capabilities = projectSheetClamp.capabilities
+  // 备料分批拉取第一期 step 3: the grid-export closure clamp, the same as the request-bound resolver's (only
+  // `canExport` changes; every person, admins included). Rides the `sheet_cap_eval` stage (no new stage).
+  const gridExportClosed = stamps.gridExportClosedSheetIds.has(normalizedSheetId)
+  if (gridExportClosed) {
+    capabilities = restrictGridExportCapabilities(capabilities, true)
+  }
+
   return {
     isAdminRole,
     capabilities,
     permissions,
+    ...(gridExportClosed ? { gridExportClosed: true as const } : {}),
+    ...(projectSheetClamp.clamped ? { stockPrepProjectSheetSchemaClamped: true as const } : {}),
   }
 }
 

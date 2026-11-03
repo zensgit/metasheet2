@@ -1,7 +1,7 @@
 /**
- * Time Machine Phase D2a/D2b/D2d2-PREP-A: pure recovery-archive contract and flag shape.
+ * Time Machine recovery-archive contract and exact flag gate.
  *
- * This module has no production caller. It does not implement archive creation,
+ * Runtime callers use this contract; this module does not implement archive creation,
  * canonical serialization, MAC/AEAD, storage, database, or prune behavior.
  */
 
@@ -155,7 +155,7 @@ export class RecoveryArchiveContractError extends Error {
   }
 }
 
-/** D2a only: no production caller currently makes archive behavior reachable. */
+/** Exact-literal archive gate; server startup additionally requires the writer fence and custody. */
 export function isMultitableRecoveryArchiveEnabled(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): boolean {

@@ -21,8 +21,74 @@ const {
   OWNERSHIP_GUARD_PROTECTED_KEY_FIELD,
   createMultitableOwnershipGuard,
 } = require('./multitable-ownership-guard.cjs')
+const {
+  GOVERNED_SHEET_WRITE_CODES,
+  GOVERNED_SHEET_WRITE_SURFACES,
+  StockPreparationGovernedSheetWriteError,
+  assertProbeWiredFor,
+  refuseIfGoverned,
+} = require('../stock-preparation-governed-sheet-probe.cjs')
 
 const INTERNAL_FIELD_PREFIX = '_integration_'
+
+// S3 fix round 2 (F3; register R-37): the typed refusal of a write to a READ-ONLY SYSTEM SHEET (today: the
+// stock-preparation project overview, written only by its own plugin port). DEFENSE IN DEPTH: the host's
+// plugin-scope wrapper already refuses a generic record write to such a sheet for every plugin; this adapter asks
+// the host's read-only probe (`records.isReadOnlySystemSheet`, absent on an older host) once per object per
+// run, BEFORE any write, so a pipeline whose external-system config names such a sheet fails as one typed
+// refusal instead of one host error per row. Values-free: the configured object key only, never a sheet id.
+const METASHEET_MULTITABLE_SYSTEM_SHEET_READ_ONLY = 'METASHEET_MULTITABLE_SYSTEM_SHEET_READ_ONLY'
+
+class MultitableSystemSheetWriteError extends AdapterValidationError {
+  constructor(objectId) {
+    super('MetaSheet multitable target cannot write a read-only system sheet; choose an ordinary sheet for this object', {
+      object: objectId,
+      code: METASHEET_MULTITABLE_SYSTEM_SHEET_READ_ONLY,
+    })
+    this.name = 'MultitableSystemSheetWriteError'
+    this.code = METASHEET_MULTITABLE_SYSTEM_SHEET_READ_ONLY
+  }
+}
+
+/**
+ * Refuse BEFORE any write when the host says the configured sheet is a read-only system sheet. `cache` is the
+ * adapter instance's per-object verdict (one probe per object per run). A host without the probe: no verdict,
+ * the host's own refusal still stands behind every write.
+ */
+async function assertNotReadOnlySystemSheet(recordsApi, objectConfig, cache) {
+  if (!recordsApi || typeof recordsApi.isReadOnlySystemSheet !== 'function') return
+  if (!cache.has(objectConfig.objectId)) {
+    cache.set(objectConfig.objectId, (await recordsApi.isReadOnlySystemSheet({ sheetId: objectConfig.sheetId })) === true)
+  }
+  if (cache.get(objectConfig.objectId) === true) throw new MultitableSystemSheetWriteError(objectConfig.objectId)
+}
+
+// Batch-refresh step 4 PR-6 (design §7.1 row 17, D-21; F-6): a sheet GOVERNED by the stock-preparation batch refresh
+// (a pilot registry row, or any persisted continuation / open hold / refresh-state / execution row on it) is refused
+// BEFORE any records IO — one typed 409 METASHEET_MULTITABLE_STOCK_PREP_GOVERNED_SHEET for the whole batch, not a
+// write. The config names the sheet, so a pipeline or a C6 write configured after a project was enabled would
+// otherwise write its machine columns unrefused (the ownership guard strips HUMAN columns only). `governance.probe`
+// is the plugin's governed-sheet probe (lib/stock-preparation-governed-sheet-probe.cjs), injected by index.cjs (the
+// adapter factory) and lib/http-routes.cjs (the C6 write-source) — never request-supplied. `cache` is the instance's
+// per-object ANSWER (one probe per object per run / per request); a probe that throws (503 unreadable, 501 not
+// wired) is never an answer, so it is never cached and the next call probes again. A writer built WITHOUT the probe
+// refuses an object in the stock-prep namespace (501 STOCK_PREP_GOVERNED_SHEET_PROBE_UNWIRED) and passes any other
+// object exactly as before PR-6.
+async function assertSheetNotGoverned({ governance, objectConfig, cache, surface }) {
+  if (!assertProbeWiredFor({ governedSheetProbe: governance.probe, surface, objectId: objectConfig.objectId })) return
+  if (!cache.has(objectConfig.objectId)) {
+    cache.set(objectConfig.objectId, await governance.probe.probe({ sheetId: objectConfig.sheetId, tenantId: governance.tenantId }))
+  }
+  refuseIfGoverned({ answer: cache.get(objectConfig.objectId), surface, objectId: objectConfig.objectId })
+}
+
+// The ONE pre-write assertion of every write seam of this file (upsert, insertRows, updateRows): the host's
+// read-only system-sheet refusal first (S3 F3, unchanged, keeps its precedence), then the governed-sheet refusal.
+// Called before the field map, the ownership read and any records call.
+async function assertTargetSheetWritable({ recordsApi, objectConfig, caches, governance, surface }) {
+  await assertNotReadOnlySystemSheet(recordsApi, objectConfig, caches.systemSheet)
+  await assertSheetNotGoverned({ governance, objectConfig, cache: caches.governedSheet, surface })
+}
 
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
@@ -336,10 +402,14 @@ async function writeOne({ recordsApi, objectConfig, request, record, index, logi
   }
 }
 
-function createMetaSheetMultitableTargetAdapter({ system, context } = {}) {
+function createMetaSheetMultitableTargetAdapter({ system, context, governedSheetProbe } = {}) {
   const normalizedSystem = normalizeExternalSystemForAdapter(system)
   const objects = normalizeObjects(normalizedSystem.config)
   const fieldMapCache = new Map()
+  // S3 fix round 2 (F3): per object, is the configured sheet a read-only system sheet (host probe, once per run).
+  // PR-6: per object, the governed-sheet probe's answer (once per run; failures never cached).
+  const caches = { systemSheet: new Map(), governedSheet: new Map() }
+  const governance = { probe: governedSheetProbe === undefined ? null : governedSheetProbe, tenantId: normalizedSystem.tenantId }
   // One guard per adapter instance = one per run, the same scope fieldMapCache already uses.
   const ownershipGuard = createMultitableOwnershipGuard({ context })
 
@@ -475,6 +545,9 @@ function createMetaSheetMultitableTargetAdapter({ system, context } = {}) {
       const request = normalizeUpsertRequest(input)
       const objectConfig = getObjectConfig(objects, request.object)
       const recordsApi = getRecordsApi(context)
+      // S3 fix round 2 (F3): a read-only system sheet is refused for the WHOLE batch, before any write.
+      // PR-6: so is a sheet governed by the stock-preparation batch refresh (one probe per object per run).
+      await assertTargetSheetWritable({ recordsApi, objectConfig, caches, governance, surface: 'pipeline_upsert' })
       const logicalToPhysical = await fieldMapForObject(objectConfig)
       // Resolved ONCE for the whole batch, BEFORE the row loop: a metadata read that fails
       // must refuse the entire write (fail closed), not degrade into per-row errors that a
@@ -532,8 +605,10 @@ function createMetaSheetMultitableTargetAdapter({ system, context } = {}) {
   }
 }
 
-function createMetaSheetMultitableTargetAdapterFactory({ context } = {}) {
-  return ({ system }) => createMetaSheetMultitableTargetAdapter({ system, context })
+// PR-6: `governedSheetProbe` is the plugin's governed-sheet probe, built once at activation (index.cjs) and handed
+// to every adapter instance; absent => the not-wired rule (namespace objects 501, everything else as before).
+function createMetaSheetMultitableTargetAdapterFactory({ context, governedSheetProbe } = {}) {
+  return ({ system }) => createMetaSheetMultitableTargetAdapter({ system, context, governedSheetProbe })
 }
 
 // ---------------------------------------------------------------------------
@@ -603,10 +678,15 @@ function mapRecordFieldsToLogical(data, physicalToLogical) {
 // context.api.dataSourceWrites facade), backed by context.api.multitable.records over our
 // own plugin sheets. Field names are mapped logical<->physical so the planner's value-diff
 // classifier (logical) and the record store (physical) agree.
-function createMetaSheetMultitableWriteSource({ system, context } = {}) {
+function createMetaSheetMultitableWriteSource({ system, context, governedSheetProbe } = {}) {
   const normalizedSystem = normalizeExternalSystemForAdapter(system)
   const objects = normalizeObjects(normalizedSystem.config)
   const fieldMapCache = new Map()
+  // S3 fix round 2 (F3): per object, is the configured sheet a read-only system sheet (host probe, once per run).
+  // PR-6: per object, the governed-sheet probe's answer — SHARED by `test()` and the row writes, so a C6 request
+  // probes each object once (failures never cached).
+  const caches = { systemSheet: new Map(), governedSheet: new Map() }
+  const governance = { probe: governedSheetProbe === undefined ? null : governedSheetProbe, tenantId: normalizedSystem.tenantId }
   // The C6 planner drives insertRows/updateRows one row at a time, so the guard's per-object
   // cache is what keeps the ownership read to ONE call for the whole apply.
   const ownershipGuard = createMultitableOwnershipGuard({ context })
@@ -633,6 +713,18 @@ function createMetaSheetMultitableWriteSource({ system, context } = {}) {
       )
       // fail closed: a missing/partial records API or no configured objects -> success:false
       // -> the planner raises C6_WRITE_TARGET_TEST_FAILED before any write.
+      //
+      // PR-6: the C6 planner calls `test()` FIRST in both phases (dry-run: before the source read and the token
+      // mint; apply: right after the token is consumed, before any row), and nothing catches it — so a governed
+      // sheet is refused HERE as one typed 409 (no token minted; at apply no row written). A refusal thrown from
+      // insertRows / updateRows would instead be caught per row and become dead letters. `test()` is not told
+      // which object the plan writes, so it probes EVERY configured object (fail closed). Throwing, not
+      // `success: false`, keeps the code (success:false would collapse into 422 C6_WRITE_TARGET_TEST_FAILED).
+      if (ready) {
+        for (const objectConfig of Object.values(objects)) {
+          await assertSheetNotGoverned({ governance, objectConfig, cache: caches.governedSheet, surface: 'c6_target_test' })
+        }
+      }
       return {
         success: ready,
         capabilityState: { ownSheetTarget: true, externalWrite: false },
@@ -664,6 +756,7 @@ function createMetaSheetMultitableWriteSource({ system, context } = {}) {
     async insertRows(dataSourceId, object, rows, policy, principal) {
       const recordsApi = getRecordsApi(context)
       const objectConfig = getObjectConfig(objects, object)
+      await assertTargetSheetWritable({ recordsApi, objectConfig, caches, governance, surface: 'c6_insert_rows' })
       const logicalToPhysical = await fieldMapForObject(objectConfig)
       const shield = await ownershipGuard.forObject(objectConfig, candidateWriteFields(rows, objectConfig))
       // REVIEW (C6): the CREATE path needs this refusal even more than the update path does.
@@ -684,6 +777,7 @@ function createMetaSheetMultitableWriteSource({ system, context } = {}) {
     async updateRows(dataSourceId, object, rows, policy, principal) {
       const recordsApi = getRecordsApi(context)
       const objectConfig = getObjectConfig(objects, object)
+      await assertTargetSheetWritable({ recordsApi, objectConfig, caches, governance, surface: 'c6_update_rows' })
       const logicalToPhysical = await fieldMapForObject(objectConfig)
       const keyFields = writeSourceKeyFields(policy, objectConfig)
       const shield = await ownershipGuard.forObject(objectConfig, candidateWriteFields(rows, objectConfig))
@@ -786,6 +880,14 @@ module.exports = {
   // wouldRefuse[].code against the same constant - without reaching into the guard module.
   MultitableOwnershipGuardError,
   OWNERSHIP_GUARD_PROTECTED_KEY_FIELD,
+  // S3 fix round 2 (F3): the read-only system-sheet refusal, catchable by type / code.
+  MultitableSystemSheetWriteError,
+  METASHEET_MULTITABLE_SYSTEM_SHEET_READ_ONLY,
+  // Batch-refresh step 4 PR-6: the governed-sheet refusal (409) and the not-wired refusal (501), catchable by type /
+  // code, and the closed list of seams that raise them.
+  StockPreparationGovernedSheetWriteError,
+  GOVERNED_SHEET_WRITE_CODES,
+  GOVERNED_SHEET_WRITE_SURFACES,
   createMetaSheetMultitableWriteSource,
   deriveMultitablePlannerTargetConfig,
   createMetaSheetMultitableTargetAdapter,

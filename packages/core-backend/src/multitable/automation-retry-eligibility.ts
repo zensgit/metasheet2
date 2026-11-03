@@ -3,6 +3,7 @@ import {
   EVENT_DEDUP_LEDGER_SWEEP_INTERVAL_MS,
   EVENT_DEDUP_RETENTION_DAYS,
 } from './automation-event-dedup'
+import { TARGET_RECORD_MISSING_SKIP_REASON } from './automation-executor'
 import { isClassBOutboundEnabled } from './automation-outbound-intent'
 import { enumerateRuleActions } from './automation-rule-fingerprint'
 
@@ -50,7 +51,12 @@ export type RealFireTestRunEligibility =
 /**
  * #4196 §6 real-fire admission. Every action is inspected, including branch children. Later action
  * families that are absent from #4196 (currently FWB) remain fail-closed until their own lock admits
- * test-run dispatch; non-durable send_notification is explicitly forbidden by Q-A.
+ * test-run dispatch. send_notification is DURABLE since F9b (the rule path writes
+ * `meta_record_subscription_notifications` rows), but the RULE path has NO dedup ledger - the
+ * button's `multitable_button_run_dedup` is deliberately NOT borrowed - so every real-fire test run
+ * would write a fresh set of notification rows to real people. It stays TEST_RUN_ACTION_UNSUPPORTED
+ * until a rule-side dedup ledger exists; the verdict below is unchanged, only its reason is restated
+ * (the old wording said 'non-durable', which since F9b would argue for ADMITTING it).
  */
 export function realFireTestRunEligibility(
   actions: ReadonlyArray<{ type: string; config?: unknown }> | undefined,
@@ -106,6 +112,33 @@ export async function claimFirstAutomationRetryAttempt(
     [rootExecutionId],
   )
   return (result.rows[0] as { first_retry_attempt?: unknown } | undefined)?.first_retry_attempt === true
+}
+
+/**
+ * 客户反馈 2026-09-24 #3, final review F2 — a whole-execution retry that can never do anything. An execution
+ * is `skipped` only when EVERY step was skipped (automation-executor.ts: `allSkipped`); when every one of
+ * those steps carries the values-free `target_record_missing` reason, each step addressed the TRIGGER record
+ * and found it gone (the canonical case: a `record.deleted → delete_record` rule). A retry replays the same
+ * stored trigger event against the same record id, so it can only skip again — or, if the record has since
+ * been restored from the recycle bin, act on a record the operator brought back. retryExecution refuses it
+ * with a stable code, like the other non-retryable states it can decide from the stored row alone
+ * (NOT_RETRYABLE / TEST_RUN_NOT_RETRYABLE / MISSING_TRIGGER_EVENT), before any side effect. A skipped
+ * execution with any OTHER skip reason, and a `failed` execution that merely contains such a step, stay
+ * retryable: their other steps can still change outcome.
+ */
+export function isTargetRecordMissingSkippedExecution(execution: {
+  status: string
+  steps?: ReadonlyArray<{ status: string; output?: unknown }> | null
+}): boolean {
+  if (execution.status !== 'skipped') return false
+  const steps = execution.steps ?? []
+  return steps.length > 0 && steps.every((step) => (
+    step.status === 'skipped'
+    && typeof step.output === 'object'
+    && step.output !== null
+    && !Array.isArray(step.output)
+    && (step.output as Record<string, unknown>).reason === TARGET_RECORD_MISSING_SKIP_REASON
+  ))
 }
 
 export function isWithinAutomationRetryWindow(triggeredAt: string, nowMs = Date.now()): boolean {

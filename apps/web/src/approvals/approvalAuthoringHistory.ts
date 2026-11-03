@@ -9,7 +9,7 @@
  *
  * The view is I/O only: it never invents a parallel graph model.
  */
-import type { ApprovalGraph } from '../types/approval'
+import type { ApprovalGraph, ApprovalNode, ConditionNodeConfig, ParallelNodeConfig } from '../types/approval'
 import {
   applyApprovalCanvasCommand,
   createApprovalCanvasHistory,
@@ -56,6 +56,14 @@ export function mergeLiveNodeConfigsOntoTopology(
     nodes: base.nodes.map((node) => {
       const liveNode = liveByKey.get(node.key)
       if (!liveNode) return cloneJson(node)
+      if (liveNode.type === node.type && (node.type === 'condition' || node.type === 'parallel')) {
+        return {
+          key: node.key,
+          type: node.type,
+          ...(node.name !== undefined ? { name: node.name } : {}),
+          config: reconcileGatewayConfig(node, liveNode, base),
+        }
+      }
       return {
         key: node.key,
         type: node.type,
@@ -72,6 +80,49 @@ export function mergeLiveNodeConfigsOntoTopology(
     }),
     edges: cloneJson(base.edges),
   }
+}
+
+/**
+ * T5a/T5b (test report 2026-10-08): a gateway's branch list IS topology. Branch add/delete changes
+ * the surviving gateway's `config.branches` (and, for a condition, which edge is the default) along
+ * with the edges, so blindly copying the LIVE config onto the restored edges left the two out of
+ * sync — undoing a branch add kept a branch whose edge no longer existed; undoing a branch delete
+ * restored the edge and node but not the branch (its rules were lost). The topology-bearing fields
+ * now come from the restored graph (`base`): the branch list/order and parallel `joinNodeKey`.
+ * Inspector edits still survive: a branch present on both sides keeps its LIVE rules/formula/
+ * conjunction, parallel keeps its live `joinMode`, and a live default-branch choice is kept while
+ * it still names one of the gateway's own non-branch edges in `base`.
+ */
+function reconcileGatewayConfig(
+  baseNode: ApprovalNode,
+  liveNode: ApprovalNode,
+  base: ApprovalGraph,
+): ApprovalNode['config'] {
+  if (baseNode.type === 'parallel') {
+    const baseConfig = baseNode.config as ParallelNodeConfig
+    return {
+      ...cloneJson(liveNode.config as ParallelNodeConfig),
+      branches: cloneJson(baseConfig.branches),
+      joinNodeKey: baseConfig.joinNodeKey,
+    } as ApprovalNode['config']
+  }
+  const baseConfig = baseNode.config as ConditionNodeConfig
+  const liveConfig = liveNode.config as ConditionNodeConfig
+  const liveBranchByEdge = new Map((liveConfig.branches ?? []).map((branch) => [branch.edgeKey, branch]))
+  const branches = (baseConfig.branches ?? []).map((branch) => cloneJson(liveBranchByEdge.get(branch.edgeKey) ?? branch))
+  const branchEdgeKeys = new Set(branches.map((branch) => branch.edgeKey))
+  const ownEdgeKeys = new Set(base.edges.filter((edge) => edge.source === baseNode.key).map((edge) => edge.key))
+  const liveDefault = typeof liveConfig.defaultEdgeKey === 'string' ? liveConfig.defaultEdgeKey.trim() : ''
+  const baseDefault = typeof baseConfig.defaultEdgeKey === 'string' ? baseConfig.defaultEdgeKey.trim() : ''
+  const defaultEdgeKey = !liveDefault
+    ? ''
+    : ownEdgeKeys.has(liveDefault) && !branchEdgeKeys.has(liveDefault) ? liveDefault : baseDefault
+  const { branches: _liveBranches, defaultEdgeKey: _liveDefault, ...rest } = cloneJson(liveConfig)
+  return {
+    ...rest,
+    branches,
+    ...(defaultEdgeKey ? { defaultEdgeKey } : {}),
+  } as ApprovalNode['config']
 }
 
 export interface CanvasCommandHistoryEntry {

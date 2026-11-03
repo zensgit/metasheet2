@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
+import { storeAttachment } from '../../src/multitable/attachment-service'
 import {
   StorageServiceImpl,
   toSafeStorageBasename,
@@ -32,6 +33,69 @@ afterEach(async () => {
 function makeService(): StorageServiceImpl {
   return StorageServiceImpl.createLocalService(basePath, BASE_URL)
 }
+
+describe('archive attachment content-addressed sources', () => {
+  it.each(['true', 'false'])('persists the upload-time source key only with both exact flags: %s', async (flag) => {
+    const previousArchive = process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+    const previousFence = process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    try {
+      process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = flag
+      process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+      const service = makeService()
+      let persisted: unknown[] = []
+      const result = await storeAttachment({
+        storage: service, sheetId: 'synthetic-sheet', recordId: null, fieldId: null,
+        uploaderId: 'synthetic-user', idGenerator: () => 'synthetic-attachment',
+        file: { buffer: Buffer.from('owned'), originalname: 'display.txt', mimetype: 'text/plain', size: 5 },
+        query: async (_text, params) => { persisted = params ?? []; return { rows: [{ id: 'synthetic-attachment' }] } },
+      })
+      expect(persisted[9]).toBe(result.uploaded.path)
+      expect(persisted[5]).toBe('display.txt')
+      if (flag === 'true') {
+        expect((await makeService().readContentAddressed(result.uploaded.path)).bytes).toEqual(Buffer.from('owned'))
+      } else {
+        expect(result.uploaded.path).not.toContain('/sha256-')
+        expect(await service.downloadByKey(result.uploaded.path)).toEqual(Buffer.from('owned'))
+      }
+    } finally {
+      if (previousArchive === undefined) delete process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+      else process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = previousArchive
+      if (previousFence === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+      else process.env.MULTITABLE_ENABLE_WRITER_FENCE = previousFence
+    }
+  })
+
+  it('binds identity at upload and reads the exact bytes after reopening the provider', async () => {
+    const service = makeService()
+    const source = Buffer.from('synthetic-source-bytes')
+    const uploaded = await service.uploadContentAddressed(source, { filename: '../shown.txt', contentType: 'text/plain' })
+    expect(uploaded.path).toMatch(/^[0-9a-f-]{36}\/sha256-[0-9a-f]{64}$/)
+    const read = await makeService().readContentAddressed(uploaded.path)
+    expect(read.bytes).toEqual(source)
+    expect(read.immutableVersion).toBe(`sha256:${uploaded.path.split('sha256-')[1]}`)
+    expect(read.contentSha256).toBe(uploaded.path.split('sha256-')[1])
+    expect(read.sizeBytes).toBe(source.length)
+    await expect(service.uploadByKey(uploaded.path, Buffer.from('overwrite'))).rejects.toThrow()
+  })
+
+  it('rejects modified or missing bytes instead of deriving a fresh identity at read time', async () => {
+    const service = makeService()
+    const uploaded = await service.uploadContentAddressed(Buffer.from('original'), { filename: 'file' })
+    await fs.writeFile(path.join(basePath, uploaded.path), 'tampered')
+    await expect(service.readContentAddressed(uploaded.path)).rejects.toThrow('ATTACHMENT_SOURCE_DRIFTED')
+    await fs.unlink(path.join(basePath, uploaded.path))
+    await expect(service.readContentAddressed(uploaded.path)).rejects.toThrow('ATTACHMENT_SOURCE_UNAVAILABLE')
+  })
+
+  it('refuses legacy and malformed source keys without upgrading them by hashing', async () => {
+    const service = makeService()
+    const legacy = await service.upload(Buffer.from('legacy'), { filename: 'legacy.txt' })
+    for (const key of [legacy.path, '../outside', 'sha256-' + '0'.repeat(64)]) {
+      await expect(service.readContentAddressed(key)).rejects.toThrow('ATTACHMENT_SOURCE_VERSION_UNAVAILABLE')
+    }
+    expect(await service.downloadByKey(legacy.path)).toEqual(Buffer.from('legacy'))
+  })
+})
 
 describe('toSafeStorageBasename (G1)', () => {
   it('keeps a plain filename, strips any directory component and traversal', () => {

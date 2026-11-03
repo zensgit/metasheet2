@@ -1,0 +1,240 @@
+{
+  "preMergeHead": "8ad4e943a31d3ee3757fbb17e80b087112de2397",
+  "fixedMain": "00caf5f639050700cb4590448d9261f0fef2b101",
+  "beforeHashes": {
+    "apps/web/src/views/AttendanceView.vue": "1f902bda0090eeaf1bed21dd6c7ac6697745953b50479848c952ab93f4389ae5",
+    "apps/web/tests/attendance-selfservice-dashboard.spec.ts": "ba3245306fd942910ca26bc7bbf95f7877a3b731339ed8219762e4dd95e9e4f1",
+    "apps/web/src/views/attendance/attendanceTodayWorkbench.ts": "fe5dbcc75627756b859d89e374fcaea39b23624438903e06b669aaaff1fc6fe9",
+    "apps/web/src/views/attendance/attendanceRecordRequestPrefill.ts": "09fa2876e77e4f44bf7e50a9c724627ae88cdd2ea42bf3d3d3fec97294dc0885",
+    ".github/workflows/attendance-web-guard.yml": "069b800f1b63248536dd63beb79c77fefd701fb86dbe23c396da8535ffdc206b",
+    ".github/workflows/plugin-tests.yml": "0471022de2d065f9e1e9f74fdef1e8535e5e7c8becf037c5c0fd364972f925aa",
+    ".github/workflows/web-tests.yml": "e868fb3c47494876461f532160da032a9222b3c1f20a3215f6bd7a2c4bf94df4",
+    "apps/web/scripts/run-required-web-tests.sh": "fc7963299281c92dbde7ad53e85c4654a864303538b18b5d380e7ff64567688b",
+    "apps/web/scripts/run-required-web-tests.tokens": "9176c346b7adab114f8a55df348d42851a6f5861a39cd4d93ad7b69abcae50f1",
+    "packages/core-backend/vitest.config.ts": "2dbb008caa3655916e576f70500f86a3bb6698d4c972ba121abae251eb5715ae",
+    "plugins/plugin-integration-core/test-chain.txt": "f2fc5312c48cb34f726ef3179be4b0caa6b28bec1bf5edbade113a3c9f9159ac"
+  },
+  "afterHashes": {
+    "apps/web/src/views/AttendanceView.vue": "1f902bda0090eeaf1bed21dd6c7ac6697745953b50479848c952ab93f4389ae5",
+    "apps/web/tests/attendance-selfservice-dashboard.spec.ts": "ba3245306fd942910ca26bc7bbf95f7877a3b731339ed8219762e4dd95e9e4f1",
+    "apps/web/src/views/attendance/attendanceTodayWorkbench.ts": "fe5dbcc75627756b859d89e374fcaea39b23624438903e06b669aaaff1fc6fe9",
+    "apps/web/src/views/attendance/attendanceRecordRequestPrefill.ts": "09fa2876e77e4f44bf7e50a9c724627ae88cdd2ea42bf3d3d3fec97294dc0885",
+    ".github/workflows/attendance-web-guard.yml": "069b800f1b63248536dd63beb79c77fefd701fb86dbe23c396da8535ffdc206b",
+    ".github/workflows/plugin-tests.yml": "0471022de2d065f9e1e9f74fdef1e8535e5e7c8becf037c5c0fd364972f925aa",
+    ".github/workflows/web-tests.yml": "e868fb3c47494876461f532160da032a9222b3c1f20a3215f6bd7a2c4bf94df4",
+    "apps/web/scripts/run-required-web-tests.sh": "bda0fd55cdfa301fc4bbf6d36e79a048d92df6d7344c6172dafc251a28ffe913",
+    "apps/web/scripts/run-required-web-tests.tokens": "9176c346b7adab114f8a55df348d42851a6f5861a39cd4d93ad7b69abcae50f1",
+    "packages/core-backend/vitest.config.ts": "2dbb008caa3655916e576f70500f86a3bb6698d4c972ba121abae251eb5715ae",
+    "plugins/plugin-integration-core/test-chain.txt": "f2fc5312c48cb34f726ef3179be4b0caa6b28bec1bf5edbade113a3c9f9159ac"
+  },
+  "hashPreservation": {
+    "apps/web/src/views/AttendanceView.vue": {
+      "byteIdentical": true
+    },
+    "apps/web/tests/attendance-selfservice-dashboard.spec.ts": {
+      "byteIdentical": true
+    },
+    "apps/web/src/views/attendance/attendanceTodayWorkbench.ts": {
+      "byteIdentical": true
+    },
+    "apps/web/src/views/attendance/attendanceRecordRequestPrefill.ts": {
+      "byteIdentical": true
+    },
+    ".github/workflows/attendance-web-guard.yml": {
+      "byteIdentical": true
+    },
+    ".github/workflows/plugin-tests.yml": {
+      "byteIdentical": true
+    },
+    ".github/workflows/web-tests.yml": {
+      "byteIdentical": true
+    },
+    "apps/web/scripts/run-required-web-tests.sh": {
+      "byteIdentical": false
+    },
+    "apps/web/scripts/run-required-web-tests.tokens": {
+      "byteIdentical": true
+    },
+    "packages/core-backend/vitest.config.ts": {
+      "byteIdentical": true
+    },
+    "plugins/plugin-integration-core/test-chain.txt": {
+      "byteIdentical": true
+    }
+  },
+  "requiredScriptCommentOnly": true,
+  "testChainUnion": {
+    ".github/workflows/plugin-tests.yml": {
+      "finalCount": 795,
+      "sourceSets": {
+        "8ad4e943a31d3ee3757fbb17e80b087112de2397": {
+          "priorCount": 795,
+          "missingFromMerged": []
+        },
+        "00caf5f639050700cb4590448d9261f0fef2b101": {
+          "priorCount": 792,
+          "missingFromMerged": []
+        }
+      }
+    },
+    ".github/workflows/attendance-web-guard.yml": {
+      "finalCount": 154,
+      "sourceSets": {
+        "8ad4e943a31d3ee3757fbb17e80b087112de2397": {
+          "priorCount": 154,
+          "missingFromMerged": []
+        },
+        "00caf5f639050700cb4590448d9261f0fef2b101": {
+          "priorCount": 149,
+          "missingFromMerged": []
+        }
+      }
+    },
+    ".github/workflows/approval-web-guard.yml": {
+      "finalCount": 259,
+      "sourceSets": {
+        "8ad4e943a31d3ee3757fbb17e80b087112de2397": {
+          "priorCount": 259,
+          "missingFromMerged": []
+        },
+        "00caf5f639050700cb4590448d9261f0fef2b101": {
+          "priorCount": 259,
+          "missingFromMerged": []
+        }
+      }
+    },
+    "apps/web/scripts/run-required-web-tests.sh": {
+      "finalCount": 559,
+      "sourceSets": {
+        "8ad4e943a31d3ee3757fbb17e80b087112de2397": {
+          "priorCount": 559,
+          "missingFromMerged": []
+        },
+        "00caf5f639050700cb4590448d9261f0fef2b101": {
+          "priorCount": 556,
+          "missingFromMerged": []
+        }
+      }
+    },
+    "apps/web/scripts/run-required-web-tests.tokens": {
+      "finalCount": 559,
+      "sourceSets": {
+        "8ad4e943a31d3ee3757fbb17e80b087112de2397": {
+          "priorCount": 559,
+          "missingFromMerged": []
+        },
+        "00caf5f639050700cb4590448d9261f0fef2b101": {
+          "priorCount": 556,
+          "missingFromMerged": []
+        }
+      }
+    },
+    "plugins/plugin-integration-core/test-chain.txt": {
+      "finalCount": 241,
+      "sourceSets": {
+        "8ad4e943a31d3ee3757fbb17e80b087112de2397": {
+          "priorCount": 241,
+          "missingFromMerged": []
+        },
+        "00caf5f639050700cb4590448d9261f0fef2b101": {
+          "priorCount": 241,
+          "missingFromMerged": []
+        }
+      }
+    }
+  },
+  "requiredAttendanceTrio": [
+    {
+      "token": "attendanceTodayWorkbench",
+      "required": true,
+      "domain": true
+    },
+    {
+      "token": "attendanceRecordRequestPrefill",
+      "required": true,
+      "domain": true
+    },
+    {
+      "token": "attendance-record-timeline",
+      "required": true,
+      "domain": true
+    }
+  ],
+  "conflicts": "",
+  "head": "703c3c233e54a0100222581c1e0d07c2d1bf04fe",
+  "mergeHead": "00caf5f639050700cb4590448d9261f0fef2b101",
+  "indexTree": "70addd34eaaf28a21f7ee10e4ecc776f9dc3da31",
+  "validation": {
+    "node": "v20.20.2",
+    "pnpm": "10.33.0",
+    "affectedFrontend": {
+      "exitCode": 0,
+      "files": 2,
+      "passed": 20,
+      "failed": 0,
+      "skipped": 0,
+      "perFile": [
+        {
+          "file": "tests/approval-detail-return-candidates.spec.ts",
+          "tests": 11
+        },
+        {
+          "file": "tests/approval-detail-can-decide-current-node.spec.ts",
+          "tests": 9
+        }
+      ],
+      "log": "approval-main-affected-frontend.log"
+    },
+    "webTypecheck": {
+      "command": "pnpm --filter @metasheet/web type-check",
+      "appProjectBuild": true,
+      "approvalVerification": true,
+      "stockPreparationVerification": true,
+      "exitCode": 0,
+      "log": "approval-main-web-typecheck.log"
+    },
+    "stagedOwnedWhitespaceCheck": {
+      "exitCode": 0
+    },
+    "approvalBrowserCiContract": {
+      "command": "node --test scripts/ops/approval-browser-ci-wiring.test.mjs",
+      "exitCode": 0,
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "log": "approval-main-ci-contract.log",
+      "pathPriority": "Existing pnpm 10.33 launcher before Node 20 Corepack shim",
+      "initialEnvironmentFailure": {
+        "exitCode": 1,
+        "passed": 2,
+        "failed": 1,
+        "code": "ERR_PNPM_LOCKFILE_CONFIG_MISMATCH",
+        "cause": "PATH selected Corepack pnpm instead of the existing 10.33 launcher",
+        "log": "approval-main-ci-contract-initial.log",
+        "resolution": "Pin existing pnpm 10.33 launcher first in PATH and rerun without dependency or lockfile edits"
+      }
+    },
+    "approvalBrowserCollection": {
+      "command": "node ../../node_modules/@playwright/test/cli.js test --list --config playwright.approval-verification.config.ts",
+      "cwd": "apps/web",
+      "exitCode": 0,
+      "tests": 60,
+      "files": 9,
+      "returnCandidatesTests": 6,
+      "executed": false,
+      "log": "approval-main-browser-list.log"
+    },
+    "provenance": {
+      "command": "node plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs",
+      "exitCode": 0,
+      "result": "OK",
+      "log": "approval-main-provenance.log"
+    }
+  },
+  "state": "COMMITTED",
+  "manualConflictResolutions": [],
+  "finalIndexTree": "70addd34eaaf28a21f7ee10e4ecc776f9dc3da31",
+  "trackedUnstaged": "",
+  "committedTree": "70addd34eaaf28a21f7ee10e4ecc776f9dc3da31",
+  "evidenceBoundary": "Fixed main 00caf5f639 approval increment only. Attendance source and runtime test chains retain prior identities; unchanged attendance/backend/database/browser results were not rerun. Approval browser cases were collected, not executed. No public PR, remote CI, deployment, or original QA/history/performance acceptance."
+}

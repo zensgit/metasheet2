@@ -136,6 +136,36 @@ test('on-prem package ships the verifier but keeps the builder repository-only',
   )
 })
 
+test('on-prem package ships plugin-elearning beside the other packaged plugins', () => {
+  const requiredPaths = buildScript.match(
+    /REQUIRED_PATHS=\(\n([\s\S]*?)\n\)/,
+  )
+  assert.ok(requiredPaths)
+  const copied = requiredPaths[1].split('\n').map((line) => line.trim())
+  for (const plugin of ['plugin-attendance', 'plugin-integration-core', 'plugin-elearning']) {
+    assert.ok(
+      copied.includes(`"plugins/${plugin}"`),
+      `the build must copy plugins/${plugin} into the package`,
+    )
+  }
+  assert.ok(
+    buildScript.includes(
+      '"includedPlugins": ["plugin-attendance", "plugin-integration-core", "plugin-elearning"],',
+    ),
+    'the release metadata must list plugin-elearning among the included plugins',
+  )
+
+  const verifyRequired = verifyScript.match(/\nrequired=\(\n([\s\S]*?)\n\)/)
+  assert.ok(verifyRequired)
+  const checked = verifyRequired[1].split('\n').map((line) => line.trim())
+  for (const rel of ['plugin.json', 'app.manifest.json', 'index.cjs', 'lib/feature-flags.cjs']) {
+    assert.ok(
+      checked.includes(`"plugins/plugin-elearning/${rel}"`),
+      `the verifier must require plugins/plugin-elearning/${rel} inside the package`,
+    )
+  }
+})
+
 test('on-prem verifier rejects native bcrypt build dependencies', () => {
   const clean = runNativeBcryptVerifier(
     {

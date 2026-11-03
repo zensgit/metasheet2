@@ -1,5 +1,34 @@
 import { apiFetch } from '../utils/api'
 
+/**
+ * Thrown for every transport or HTTP failure. The message stays the closed token
+ * `request_failed` (existing callers match on it); `status` is the HTTP status (0 for
+ * a network failure) and `code` is `ORG_CONTEXT_REQUIRED` for the org-context gate's
+ * 403, else `request_failed`. No other part of an error body is ever surfaced.
+ */
+export class ElearningAppRequestError extends Error {
+  readonly status: number
+  readonly code: string
+
+  constructor(status: number, code = 'request_failed') {
+    super('request_failed')
+    this.name = 'ElearningAppRequestError'
+    this.status = status
+    this.code = code
+  }
+}
+
+async function readFailureCode(response: Response): Promise<string> {
+  try {
+    const payload: unknown = await response.json()
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)
+      && (payload as Record<string, unknown>).error === 'ORG_CONTEXT_REQUIRED') {
+      return 'ORG_CONTEXT_REQUIRED'
+    }
+  } catch { /* Non-JSON error bodies stay opaque. */ }
+  return 'request_failed'
+}
+
 export interface ElearningAppInstallation {
   status: 'not-installed' | 'inactive' | 'active'
   notificationsEnabled: boolean
@@ -29,9 +58,9 @@ async function request(method: 'GET' | 'POST' | 'PUT', body?: object): Promise<E
       ...(body ? { body: JSON.stringify(body) } : {}),
     })
   } catch {
-    throw new Error('request_failed')
+    throw new ElearningAppRequestError(0)
   }
-  if (!response.ok) throw new Error('request_failed')
+  if (!response.ok) throw new ElearningAppRequestError(response.status, await readFailureCode(response))
   let payload: unknown
   try {
     payload = await response.json()

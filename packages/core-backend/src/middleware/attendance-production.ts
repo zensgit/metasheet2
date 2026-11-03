@@ -157,10 +157,17 @@ const ATTENDANCE_OPERATION_LABELS: readonly { method: string; route: string; ope
   { method: 'POST', route: `${ATTENDANCE_ADMIN_PREFIX}/notification-deliveries/:id/redeliver`, operation: 'notification_redeliver' },
 ]
 
-function resolveAttendanceOperation(req: Request, normalizedRoute: string): string {
-  const method = req.method.toUpperCase()
+/**
+ * `method` is passed in — never read off `req` — because this runs inside `res.on('finish')`, and by
+ * then `middleware/method-override.ts` (mounted BELOW this middleware) may have rewritten
+ * `req.method` from POST to DELETE. Reading it live made the label disagree with the `action` and
+ * `meta.request.method` of the SAME audit row, which are captured from the wire verb at request
+ * time. One row, one verb: the caller hands this the verb the row claims.
+ */
+function resolveAttendanceOperation(method: string, normalizedRoute: string): string {
+  const wanted = method.toUpperCase()
   const hit = ATTENDANCE_OPERATION_LABELS.find(
-    (entry) => entry.method === method && apiPathEquals(normalizedRoute, entry.route),
+    (entry) => entry.method === wanted && apiPathEquals(normalizedRoute, entry.route),
   )
   return hit ? hit.operation : 'other'
 }
@@ -321,7 +328,14 @@ export function attendanceAuditMiddleware(): RequestHandler {
 
         const durMs = Number(process.hrtime.bigint() - startNs) / 1e6
         const statusCode = res.statusCode
-        const op = resolveAttendanceOperation(req, normalizedRoute)
+        const op = resolveAttendanceOperation(method, normalizedRoute)
+        // Set by middleware/method-override.ts, which is mounted BELOW this middleware so the
+        // limiter sees the wire verb. Consequence: `method`/`action` above name the POST that
+        // arrived, and WITHOUT this marker a tunnelled delete is indistinguishable from an ordinary
+        // POST in operation_audit_logs — an investigator querying for deletes of attendance data
+        // would find none. Values-free: the verb name only, and only the literal 'DELETE' is ever
+        // accepted by that middleware.
+        const methodOverride = req.methodOverride === 'DELETE' ? 'DELETE' : null
         const requestResult = (statusCode >= 400 || responseOk === false) ? 'error' : 'ok'
 
         attendanceOperationRequestsTotal.inc({ operation: op, result: requestResult })
@@ -393,6 +407,7 @@ export function attendanceAuditMiddleware(): RequestHandler {
           error: errorCode ? { code: errorCode, message: errorMessage } : null,
           request: {
             method,
+            ...(methodOverride ? { methodOverride } : {}),
             route: normalizedRoute,
             path: req.path,
             queryKeys: Object.keys(req.query || {}).slice(0, 50),

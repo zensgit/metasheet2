@@ -1,5 +1,6 @@
+import { requiredSuiteJobBody } from './plugin-tests-workflow-contract.mjs'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync as readFileSyncRaw } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -10,6 +11,24 @@ import {
   requireExecutableRealDbStep,
   wholeFileVitestArgs,
 } from './ci-realdb-step-contract.mjs'
+
+/**
+ * LINE ENDINGS: every repo source this guard parses is read through this wrapper, which
+ * normalizes CRLF to LF. The guard's parsers and its in-memory mutation fixtures are all
+ * line-oriented over LF-joined literals (`.split('\n')`, `/.*$/`, `"...\n    name: ...\n"`),
+ * and none of those match a line that ends in a carriage return. On a Windows checkout
+ * (`core.autocrlf=true`) that made the whole file read red for a reason unrelated to any
+ * change under test, while CI stayed green. Normalizing at the READ boundary is a no-op on
+ * CI (Linux checkouts are already LF, so `String#replace` returns the identical string), so
+ * this widens nothing: the same bytes are parsed, and every assertion below is unchanged.
+ *
+ * @param {Parameters<typeof readFileSyncRaw>[0]} path
+ * @param {Parameters<typeof readFileSyncRaw>[1]} [encoding]
+ */
+function readFileSync(path, encoding) {
+  const text = readFileSyncRaw(path, encoding)
+  return typeof text === 'string' ? text.replace(/\r\n?/g, '\n') : text
+}
 
 // Time Machine D2-D5 archive authority is DATABASE_URL-gated real-DB proof. Each load-bearing spec must stay in both
 // placements: direct `test.exclude` keeps the no-DB job from skip-greening it, and the exact-id
@@ -38,19 +57,6 @@ const CONFIG = join(repoRoot, 'packages/core-backend/vitest.config.ts')
 const WORKFLOW = join(repoRoot, '.github/workflows/plugin-tests.yml')
 const INSTALL_STEP_MARKER = '      - name: Install dependencies (with log)\n'
 const BEHAVIOR_STEP_MARKER = '      - name: Time Machine D2 archive real-DB fail-not-skip behavior\n'
-
-function jobBody(workflow, jobName) {
-  const marker = `  ${jobName}:\n`
-  assert.equal(
-    workflow.split(marker).length - 1,
-    1,
-    `plugin-tests.yml must contain exactly one ${jobName} job`,
-  )
-  const start = workflow.indexOf(marker) + marker.length
-  const remainder = workflow.slice(start)
-  const nextJob = remainder.match(/^  [A-Za-z0-9_-]+:\s*$/m)
-  return nextJob ? remainder.slice(0, nextJob.index) : remainder
-}
 
 function archiveRoster(paths) {
   return paths.filter((path) => ARCHIVE_REALDB_RE.test(path))
@@ -82,7 +88,7 @@ function assertD2ArchiveWiring(config, workflow) {
   assert.notEqual(excludeBody, null, 'vitest.config.ts must have a direct test.exclude array')
   assertExactRoster(quotedExcludeEntries(excludeBody), 'test.exclude')
 
-  const testJob = jobBody(workflow, 'test')
+  const testJob = requiredSuiteJobBody(workflow, 'unit')
   assert.equal(
     testJob.split(INSTALL_STEP_MARKER).length - 1,
     1,

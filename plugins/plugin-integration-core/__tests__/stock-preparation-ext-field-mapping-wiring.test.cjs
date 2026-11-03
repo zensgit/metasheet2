@@ -1,5 +1,9 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // THE WIRING, not the mapper.
 //
 // stock-preparation-ext-field-mapping.test.cjs already pins what the mapper DOES. This suite pins
@@ -29,6 +33,7 @@
 // literals are schema ids, frozen reason tokens and synthetic cell text.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -227,20 +232,45 @@ function inertService(methods) {
   return service
 }
 
+// The row as the registry hands it to an ADAPTER: the whole config, including the private
+// `lookupProjection` subtree that `publicRow()` deletes for `data-source:sql-readonly`
+// (external-systems.cjs PRIVATE_CONFIG_KEYS_BY_KIND). Having the private key present here is what
+// makes the two accessors below distinguishable at all.
+function adapterReadyRow(input = {}) {
+  return {
+    id: input.id,
+    tenantId: input.tenantId,
+    name: 'Readonly PLM SQL',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    config: {
+      dataSourceId: 'ds_plm',
+      object: 'DN_PDM_PathExAttrInfo',
+      lookupProjection: { table: 'DN_PDM_PathExAttrInfo' },
+    },
+  }
+}
+
 function baseServices(sourceAdapter) {
   return {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
+      // G4/M2 (#5553 §3): the two accessors are DIFFERENT objects here, not an alias, because the
+      // route under test (`loadTableActionSourceAdapter`) now reads the decrypting one and only the
+      // decrypting one. `getExternalSystem` returns the public projection the registry really
+      // returns — private config subtree deleted (`lookupProjection` for this kind), no
+      // credentials — so a call site that degraded back to it would hand the adapter a different
+      // object, not the same one under another name.
       async getExternalSystem(input = {}) {
-        return {
-          id: input.id,
-          tenantId: input.tenantId,
-          name: 'Readonly PLM SQL',
-          kind: 'data-source:sql-readonly',
-          role: 'source',
-          status: 'active',
-          config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
-        }
+        const row = adapterReadyRow(input)
+        const { lookupProjection, ...publicConfig } = row.config
+        return { ...row, config: publicConfig }
+      },
+      async getExternalSystemForAdapter(input = {}) {
+        return adapterReadyRow(input)
       },
     },
     adapterRegistry: {
@@ -291,17 +321,17 @@ function mount({ config = {}, sourceAdapter, records, provisioning } = {}) {
       },
       multitable: {
         provisioning: provisioning || createProvisioning(),
-        records: records ? records.api : createRecordsApi().api,
+        records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records ? records.api : createRecordsApi().api),
       },
     },
     // `durable: true` is what the large-BOM job store demands before it accepts a job; the
     // small-BOM token/policy store ignores the flag entirely.
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config,
   }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: baseServices(sourceAdapter || createSourceAdapter()),
+    services: withRefreshGovernance(baseServices(sourceAdapter || createSourceAdapter())),
     logger: { info() {}, warn() {}, error() {} },
   })
   return { routes, context }
@@ -355,7 +385,7 @@ async function absentConfigIsInertAndUnchanged() {
     records,
   })
 
-  const res = await routeDryRun(routes)
+  const res = await routeDryRun(routes, ADMIN_USER) // review round 1: the applied token must be planned by a caller who may apply
   assert.equal(res.statusCode, 200, JSON.stringify(res.body))
   assert.equal(res.body.data.status, 'ready')
   assert.equal('extFieldMapping' in res.body.data.evidence, false, 'evidence gains no key when no mapping is configured')
@@ -414,7 +444,7 @@ async function configuredMappingReachesTheWrittenRecord() {
     records,
   })
 
-  const dry = await routeDryRun(routes)
+  const dry = await routeDryRun(routes, ADMIN_USER) // review round 1: see above
   assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
   assert.equal(dry.body.data.status, 'ready')
 
@@ -618,7 +648,7 @@ async function oneUnparseableCellDoesNotCostTheRow() {
     records,
   })
 
-  const dry = await routeDryRun(routes)
+  const dry = await routeDryRun(routes, ADMIN_USER) // review round 1: see above
   assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
   // The refusal reaches the values-free summary as a frozen type token, never as the cell.
   assert.ok(dry.body.data.evidence.expansion.errorTypes.includes('SOURCE_VALUE_NOT_A_NUMBER'))
@@ -651,12 +681,16 @@ async function oneUnparseableCellDoesNotCostTheRow() {
 
 // ── 7. the large-BOM path announces that it does NOT apply the mapping ───────
 //
-// That path supplies neither `extFieldMapping` nor `installedFieldProperties`, and the second
-// omission is what makes the first dangerous: with template-only bands the planner leaves `ext_` out
-// of the update patch entirely, and a patch does not blank what it omits — so whatever a previous
-// SMALL-path refresh wrote SURVIVES while every canonical column around it moves to today's source.
-// Stale-but-plausible, not absent. Nor is the path chosen by anyone: a slow source alone
-// (`read_time_limit_exceeded`) moves an unchanged project from one path to the other.
+// That path supplies `installedFieldProperties` (see
+// stock-preparation-large-bom-installed-fields-wiring.test.cjs) but still no `extFieldMapping`, and
+// the band does not make the missing mapping harmless: with no mapper filling an `ext_` cell the row
+// carries no such key, `pickFields` skips it and the planner leaves every mapper-territory `ext_` id
+// out of the update patch (the only exception is the <=5 planner-derived pack columns, see
+// stock-preparation-large-bom-installed-fields-wiring.test.cjs) —
+// and a patch does not blank what it omits, so whatever a previous SMALL-path refresh wrote SURVIVES
+// while every canonical column around it moves to today's source. Stale-but-plausible, not absent.
+// Nor is the path chosen by anyone: a slow source alone (`read_time_limit_exceeded`) moves an
+// unchanged project from one path to the other.
 
 const LARGE_BOM_START_ROUTE = '/api/integration/table-actions/:actionId/large-bom/expansion-jobs'
 const DIVERGENCE_KEY = 'extFieldMappingConfiguredButNotAppliedOnThisPath'
@@ -743,9 +777,6 @@ async function main() {
   await falseIsAnOffSwitchAndNotAFatalValue()
 }
 
-main().then(() => {
-  console.log('stock-preparation-ext-field-mapping-wiring.test.cjs OK')
-}, (error) => {
-  console.error(error)
-  process.exit(1)
-})
+// S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — `main` runs as one test
+// under the exit sentinel and the whole-suite timeout, so a check that hangs can never end this suite with exit 0.
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-ext-field-mapping-wiring.test.cjs', main, { passLine: 'stock-preparation-ext-field-mapping-wiring.test.cjs OK' })

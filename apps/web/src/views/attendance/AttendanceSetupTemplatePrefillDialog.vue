@@ -68,17 +68,15 @@
         <div class="setup-template-dialog__field" data-setup-template-timezone-block>
           <label for="attendance-setup-template-timezone">
             <span>{{ tr('Group / shift timezone', '考勤组与班次时区') }}</span>
-            <select
+            <AttendanceTimezoneSelect
               id="attendance-setup-template-timezone"
               data-setup-template-timezone-select
-              :value="timezone"
-              @change="emit('update:timezone', ($event.target as HTMLSelectElement).value)"
-            >
-              <option value="" disabled>{{ tr('Choose the organization timezone...', '请选择组织时区…') }}</option>
-              <option v-for="option in timezoneOptions" :key="option.value" :value="option.value">
-                {{ option.label }}
-              </option>
-            </select>
+              :model-value="timezone"
+              :options="timezoneOptions"
+              :empty-label="tr('Choose the organization timezone...', '请选择组织时区…')"
+              empty-disabled
+              @update:model-value="emit('update:timezone', $event)"
+            />
           </label>
           <p v-if="orgTimezone" class="setup-template-dialog__hint" data-setup-template-timezone-org>
             {{ tr('Organization current value (from this org\'s saved attendance groups)', '组织现值（取自本组织已保存的考勤组）') }}: {{ orgTimezone }}
@@ -236,6 +234,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import AttendanceTimezoneSelect from './AttendanceTimezoneSelect.vue'
 import {
   ATTENDANCE_SETUP_GROUP_FORM_FIELDS,
   ATTENDANCE_SETUP_SHIFT_FORM_FIELDS,

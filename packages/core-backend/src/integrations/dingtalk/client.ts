@@ -1,6 +1,8 @@
 import { assertDingTalkCorpAllowed } from './runtime-policy'
+import { parseDingTalkDepartmentIds } from './directory-response-ids'
 import {
   DingTalkBusinessError,
+  DingTalkIncompleteResponseError,
   normalizeErrorMessage,
   readNumericField,
   requestDingTalkTransportJson,
@@ -14,6 +16,7 @@ import {
 export {
   DINGTALK_REQUEST_TIMEOUT_MS,
   DingTalkBusinessError,
+  DingTalkIncompleteResponseError,
   DingTalkMalformedResponseError,
   DingTalkRequestError,
   DingTalkTimeoutError,
@@ -94,6 +97,12 @@ interface DingTalkRequestOptions {
   timeoutMs?: number
   /** Overall abort signal: cancels the in-flight attempt AND any retry backoff immediately. */
   signal?: AbortSignal
+  /**
+   * `false`: the transport's log line for a rejected (non-2xx) response carries the status and a
+   * fixed note instead of the upstream message (callers that store a redacted form themselves).
+   * Default: the message is logged, as before.
+   */
+  logUpstreamMessage?: boolean
 }
 
 export interface DingTalkDepartment {
@@ -198,6 +207,7 @@ async function requestDingTalkJson(
     fetchFn: options?.fetchFn,
     timeoutMs: options?.timeoutMs,
     signal: options?.signal,
+    logUpstreamMessage: options?.logUpstreamMessage,
   })
 }
 
@@ -223,6 +233,7 @@ async function requestDingTalkDirectoryJson(
     fetchFn: options?.fetchFn,
     timeoutMs: options?.timeoutMs,
     signal: options?.signal,
+    logUpstreamMessage: options?.logUpstreamMessage,
   })
 }
 
@@ -335,7 +346,7 @@ export async function exchangeCodeForUserAccessToken(
       : ''
 
   if (!accessToken) {
-    throw new Error(normalizeErrorMessage(payload, 'Failed to obtain access token from DingTalk'))
+    throw new DingTalkIncompleteResponseError(normalizeErrorMessage(payload, 'Failed to obtain access token from DingTalk'), payload)
   }
 
   return {
@@ -385,7 +396,7 @@ export async function fetchDingTalkCurrentUser(accessToken: string): Promise<Din
       : ''
 
   if (!openId) {
-    throw new Error(normalizeErrorMessage(payload, 'Failed to resolve DingTalk openId'))
+    throw new DingTalkIncompleteResponseError(normalizeErrorMessage(payload, 'Failed to resolve DingTalk openId'), payload)
   }
 
   return {
@@ -456,7 +467,7 @@ async function fetchDingTalkAppAccessTokenUncached(
       : ''
 
   if (!token) {
-    throw new Error(normalizeErrorMessage(payload, 'Failed to obtain DingTalk app access token'))
+    throw new DingTalkIncompleteResponseError(normalizeErrorMessage(payload, 'Failed to obtain DingTalk app access token'), payload)
   }
 
   const expiresRaw = Number(payload.expires_in ?? payload.expiresIn)
@@ -518,21 +529,43 @@ export async function listDingTalkDepartments(
     ? nestedResult
     : nestedResult && typeof nestedResult === 'object' && Array.isArray((nestedResult as Record<string, unknown>).list)
       ? (nestedResult as Record<string, unknown>).list as unknown[]
-      : []
+      : null
+  if (!rawList) {
+    throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', payload)
+  }
   return rawList
-    .map((entry) => (entry && typeof entry === 'object' ? entry as Record<string, unknown> : null))
-    .filter((entry): entry is Record<string, unknown> => Boolean(entry))
-    .map((entry) => ({
-      id: String(entry.dept_id ?? entry.id ?? '').trim(),
-      parentId:
-        entry.parent_id === null || entry.parent_id === undefined
-          ? null
-          : String(entry.parent_id).trim() || null,
-      name: String(entry.name ?? '').trim(),
-      order: readNumericField(entry, 'order', 'order_index') ?? 0,
-      source: entry,
-    }))
-    .filter((entry) => entry.id.length > 0 && entry.name.length > 0)
+    .map((value) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', payload)
+      }
+      const entry = value as Record<string, unknown>
+      const rawId = entry.dept_id ?? entry.id
+      const id = typeof rawId === 'string'
+        ? rawId.trim()
+        : typeof rawId === 'number' && Number.isSafeInteger(rawId) && rawId >= 0 ? String(rawId) : ''
+      const name = typeof entry.name === 'string' ? entry.name.trim() : ''
+      if (!id || !name) {
+        throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', payload)
+      }
+      const rawParent = entry.parent_id
+      let parentId: string | null
+      if (rawParent === null || rawParent === undefined) {
+        parentId = null
+      } else if (typeof rawParent === 'string') {
+        parentId = rawParent.trim() || null
+      } else if (typeof rawParent === 'number' && Number.isSafeInteger(rawParent) && rawParent >= 0) {
+        parentId = String(rawParent)
+      } else {
+        throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', payload)
+      }
+      return {
+        id,
+        parentId,
+        name,
+        order: readNumericField(entry, 'order', 'order_index') ?? 0,
+        source: entry,
+      }
+    })
 }
 
 export async function getDingTalkDepartmentDetail(
@@ -540,13 +573,14 @@ export async function getDingTalkDepartmentDetail(
   departmentId: string,
   config?: { baseUrl?: string },
 ): Promise<{ deptManagerUserIdList: string[] }> {
+  const requestedDepartmentId = Number.isNaN(Number(departmentId)) ? departmentId : Number(departmentId)
   const payload = await requestDingTalkDirectoryJson(
     `/topapi/v2/department/get?access_token=${encodeURIComponent(accessToken)}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        dept_id: Number.isNaN(Number(departmentId)) ? departmentId : Number(departmentId),
+        dept_id: requestedDepartmentId,
       }),
     },
     'Failed to read DingTalk department detail',
@@ -555,6 +589,17 @@ export async function getDingTalkDepartmentDetail(
   )
 
   const result = readNestedPayload(payload)
+  const returnedIds = parseDingTalkDepartmentIds(
+    [result.dept_id, result.id].filter((id) => id !== undefined && id !== null),
+    [],
+  )
+  if (
+    (typeof requestedDepartmentId === 'number' && !Number.isFinite(requestedDepartmentId))
+    || returnedIds === null
+    || returnedIds.some((id) => id !== String(requestedDepartmentId).trim())
+  ) {
+    throw new DingTalkIncompleteResponseError('Failed to read DingTalk department detail', {})
+  }
   // DingTalk `/topapi/v2/department/get` returns `dept_manager_userid_list` as a
   // comma-separated string of userids; tolerate an array too for forward-compat.
   const rawManagers = result.dept_manager_userid_list ?? result.deptManagerUseridList
@@ -564,6 +609,23 @@ export async function getDingTalkDepartmentDetail(
       ? rawManagers.split(',').map((item) => item.trim()).filter(Boolean)
       : []
   return { deptManagerUserIdList }
+}
+
+/**
+ * DingTalk directory members can carry a personal `email` and/or an
+ * enterprise-issued `org_email`. Owner call (2026-10-15): take the member's
+ * email when DingTalk has one; fall back to the enterprise email when the
+ * personal one is absent; otherwise leave it unset (never persist an empty
+ * string as "the email").
+ */
+export function pickDingTalkUserEmail(result: Record<string, unknown>): string | undefined {
+  const email = typeof result.email === 'string' ? result.email.trim() : ''
+  if (email.length > 0) {
+    return email
+  }
+  const orgEmailRaw = result.org_email ?? result.orgEmail
+  const orgEmail = typeof orgEmailRaw === 'string' ? orgEmailRaw.trim() : ''
+  return orgEmail.length > 0 ? orgEmail : undefined
 }
 
 export async function listDingTalkDepartmentUsers(
@@ -592,38 +654,50 @@ export async function listDingTalkDepartmentUsers(
   )
 
   const result = readNestedPayload(payload)
-  const rawList = Array.isArray(result.list) ? result.list : []
-  const users = rawList
-    .map((entry) => (entry && typeof entry === 'object' ? entry as Record<string, unknown> : null))
-    .filter((entry): entry is Record<string, unknown> => Boolean(entry))
-    .map((entry) => {
-      const departmentIds = Array.isArray(entry.dept_id_list)
-        ? entry.dept_id_list.map((item) => String(item ?? '').trim()).filter(Boolean)
-        : [departmentId]
+  const hasMore = result.has_more
+  if (!Array.isArray(result.list) || typeof hasMore !== 'boolean') {
+    throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk department users', payload)
+  }
+  const users = result.list.map((value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk department users', payload)
+    }
+    const entry = value as Record<string, unknown>
+    const rawUserId = entry.userid ?? entry.userId
+    const userId = typeof rawUserId === 'string'
+      ? rawUserId.trim()
+      : typeof rawUserId === 'number' && Number.isSafeInteger(rawUserId) && rawUserId >= 0 ? String(rawUserId) : ''
+    const name = typeof entry.name === 'string' ? entry.name.trim() : ''
+    if (!userId || !name) {
+      throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk department users', payload)
+    }
+    const departmentIds = parseDingTalkDepartmentIds(entry.dept_id_list, [departmentId])
+    if (departmentIds === null) {
+      throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk department users', payload)
+    }
 
-      return {
-        userId: String(entry.userid ?? entry.userId ?? '').trim(),
-        name: String(entry.name ?? '').trim(),
-        unionId: typeof entry.unionid === 'string' ? entry.unionid : typeof entry.unionId === 'string' ? entry.unionId : undefined,
-        mobile: typeof entry.mobile === 'string' ? entry.mobile : undefined,
-        email: typeof entry.email === 'string' ? entry.email : undefined,
-        title: typeof entry.title === 'string' ? entry.title : undefined,
-        avatarUrl:
-          typeof entry.avatar === 'string'
-            ? entry.avatar
-            : typeof entry.avatarUrl === 'string'
-              ? entry.avatarUrl
-              : undefined,
-        departmentIds,
-        source: entry,
-      }
-    })
-    .filter((entry) => entry.userId.length > 0 && entry.name.length > 0)
+    return {
+      userId,
+      name,
+      unionId: typeof entry.unionid === 'string' ? entry.unionid : typeof entry.unionId === 'string' ? entry.unionId : undefined,
+      mobile: typeof entry.mobile === 'string' ? entry.mobile : undefined,
+      email: pickDingTalkUserEmail(entry),
+      title: typeof entry.title === 'string' ? entry.title : undefined,
+      avatarUrl:
+        typeof entry.avatar === 'string'
+          ? entry.avatar
+          : typeof entry.avatarUrl === 'string'
+            ? entry.avatarUrl
+            : undefined,
+      departmentIds,
+      source: entry,
+    }
+  })
 
   return {
     users,
     nextCursor: readNumericField(result, 'next_cursor', 'nextCursor'),
-    hasMore: Boolean(result.has_more),
+    hasMore,
   }
 }
 
@@ -648,14 +722,18 @@ export async function getDingTalkUserDetail(
   )
 
   const result = readNestedPayload(payload)
-  const departmentIds = Array.isArray(result.dept_id_list)
-    ? result.dept_id_list.map((item) => String(item ?? '').trim()).filter(Boolean)
-    : []
+  const departmentIds = parseDingTalkDepartmentIds(result.dept_id_list, [])
+  if (departmentIds === null) {
+    throw new DingTalkIncompleteResponseError('Failed to resolve DingTalk user detail', payload)
+  }
 
-  const resolvedUserId = String(result.userid ?? result.userId ?? userId).trim()
-  const name = String(result.name ?? '').trim()
-  if (!resolvedUserId || !name) {
-    throw new Error('Failed to resolve DingTalk user detail')
+  const rawUserId = result.userid ?? result.userId ?? userId
+  const resolvedUserId = typeof rawUserId === 'string'
+    ? rawUserId.trim()
+    : typeof rawUserId === 'number' && Number.isSafeInteger(rawUserId) && rawUserId >= 0 ? String(rawUserId) : ''
+  const name = typeof result.name === 'string' ? result.name.trim() : ''
+  if (!resolvedUserId || resolvedUserId !== userId.trim() || !name) {
+    throw new DingTalkIncompleteResponseError('Failed to resolve DingTalk user detail', payload)
   }
 
   return {
@@ -665,7 +743,7 @@ export async function getDingTalkUserDetail(
     unionId: typeof result.unionid === 'string' ? result.unionid : typeof result.unionId === 'string' ? result.unionId : undefined,
     openId: typeof result.openId === 'string' ? result.openId : typeof result.open_id === 'string' ? result.open_id : undefined,
     mobile: typeof result.mobile === 'string' ? result.mobile : undefined,
-    email: typeof result.email === 'string' ? result.email : undefined,
+    email: pickDingTalkUserEmail(result),
     jobNumber: typeof result.job_number === 'string' ? result.job_number : typeof result.jobNumber === 'string' ? result.jobNumber : undefined,
     title: typeof result.title === 'string' ? result.title : undefined,
     avatarUrl:
@@ -1125,4 +1203,181 @@ export async function sendDingTalkWorkNotification(
           : undefined,
     raw: payload,
   }
+}
+
+/* ================================================================================================
+ * DingTalk TODO (待办) — the one-way approval-todo mirror's three calls (plan B, design §6).
+ *
+ * v1.0 api.dingtalk.com endpoints: HTTP-status based, NO oapi errcode envelope (`envelope: 'none'`,
+ * inherited from requestDingTalkJson), authenticated with the app access token in the
+ * `x-acs-dingtalk-access-token` header. All three are `kind: 'send'` — SIDE-EFFECT writes that the
+ * transport must never auto-resend: a timeout/network error/5xx/malformed-2xx comes back marked
+ * `isDingTalkOutcomeUnknown`, and the mirror ledger records `outcome_unknown` (terminal, never
+ * resent) instead of duplicating someone's todo. Definite rejections stay DingTalkBusinessError /
+ * DingTalkRequestError, which the ledger records as a DEFINITE failure (redelivery-safe).
+ *
+ * `operatorUnionId` is the DingTalk "操作者" the todo is created as (owner prerequisite §8.2, read
+ * from directory_integrations.config.todoOperatorUnionId — plaintext, not a secret). It is a PATH
+ * segment, so it is URL-encoded, never interpolated raw.
+ *
+ * VALUES-FREE CALLERS: this module builds no copy of its own; `subject` / `detailUrl` arrive fully
+ * formed from the mirror worker (which builds them from ids + the template name only) and are never
+ * logged here — the transport logs status codes and errcodes, not bodies.
+ * ============================================================================================== */
+
+export interface DingTalkTodoTaskInput {
+  /** Stable dedup id on DingTalk's side = our ledger `source_key` (the task_created eventId). */
+  sourceId: string
+  /** Values-free title built server-side (template name + request no). */
+  subject: string
+  /** unionId shown as the todo's creator (the app operator, §8.2). */
+  creatorUnionId: string
+  /** The recipient's unionId — exactly one per mirrored task. */
+  executorUnionIds: string[]
+  /** Deep link back to the platform approval detail (same URL for app and PC). */
+  detailUrl?: string
+}
+
+export interface DingTalkTodoTaskResult {
+  taskId?: string
+  raw: Record<string, unknown>
+}
+
+function todoTasksBaseUrl(config: DingTalkInteractiveCardConfig): string {
+  return `${normalizeDingTalkOpenApiBaseUrl(config.openApiBaseUrl)}/v1.0/todo/users`
+}
+
+function readTodoTaskId(payload: Record<string, unknown>): string | undefined {
+  const result = readNestedPayload(payload)
+  return readStringField(payload, 'id', 'taskId', 'task_id')
+    ?? readStringField(result, 'id', 'taskId', 'task_id')
+}
+
+/**
+ * Create ONE todo for ONE executor. `sourceId` is DingTalk's own dedup handle for the creating app —
+ * we still never rely on it for idempotency (the ledger's UNIQUE (org_id, source_key) is what makes a
+ * redelivery a no-op); it exists so an operator can reconcile a todo back to a ledger row.
+ */
+export async function createDingTalkTodoTask(
+  accessToken: string,
+  operatorUnionId: string,
+  input: DingTalkTodoTaskInput,
+  config: DingTalkInteractiveCardConfig = {},
+  options?: DingTalkRequestOptions,
+): Promise<DingTalkTodoTaskResult> {
+  const operator = operatorUnionId.trim()
+  const sourceId = input.sourceId.trim()
+  const subject = input.subject.trim()
+  const creatorId = input.creatorUnionId.trim()
+  const executorIds = Array.from(new Set(
+    input.executorUnionIds.map((value) => String(value ?? '').trim()).filter(Boolean),
+  ))
+  const detailUrl = typeof input.detailUrl === 'string' ? input.detailUrl.trim() : ''
+
+  if (!accessToken.trim()) throw new Error('DingTalk access token is required')
+  if (!operator) throw new Error('DingTalk todo operator unionId is required')
+  if (!sourceId) throw new Error('DingTalk todo sourceId is required')
+  if (!subject) throw new Error('DingTalk todo subject is required')
+  if (!creatorId) throw new Error('DingTalk todo creatorId is required')
+  if (executorIds.length === 0) throw new Error('DingTalk todo executorIds is required')
+
+  const body: Record<string, unknown> = {
+    sourceId,
+    subject,
+    creatorId,
+    executorIds,
+    // The todo is an executor-only mirror: it must not show up in the operator's own list.
+    isOnlyShowExecutor: true,
+    notifyConfigs: { dingNotify: '1' },
+  }
+  if (detailUrl) {
+    body.detailUrl = { appUrl: detailUrl, pcUrl: detailUrl }
+  }
+
+  const payload = await requestDingTalkJson(
+    `${todoTasksBaseUrl(config)}/${encodeURIComponent(operator)}/tasks`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-acs-dingtalk-access-token': accessToken,
+      },
+      body: JSON.stringify(body),
+    },
+    'Failed to create DingTalk todo task',
+    'send',
+    options,
+  )
+
+  return { taskId: readTodoTaskId(payload), raw: payload }
+}
+
+/**
+ * Mark a mirrored todo done (the "下一节点激活 / 实例终态" half of the mirror). Idempotent on
+ * DingTalk's side for our purposes: completing an already-done task is not an error, and a
+ * "task does not exist" business error is treated by the ledger as already-cleaned-up.
+ */
+export async function completeDingTalkTodoTask(
+  accessToken: string,
+  operatorUnionId: string,
+  taskId: string,
+  config: DingTalkInteractiveCardConfig = {},
+  options?: DingTalkRequestOptions,
+): Promise<DingTalkTodoTaskResult> {
+  const operator = operatorUnionId.trim()
+  const task = taskId.trim()
+  if (!accessToken.trim()) throw new Error('DingTalk access token is required')
+  if (!operator) throw new Error('DingTalk todo operator unionId is required')
+  if (!task) throw new Error('DingTalk todo taskId is required')
+
+  const payload = await requestDingTalkJson(
+    `${todoTasksBaseUrl(config)}/${encodeURIComponent(operator)}/tasks/${encodeURIComponent(task)}`,
+    {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-acs-dingtalk-access-token': accessToken,
+      },
+      body: JSON.stringify({ done: true }),
+    },
+    'Failed to complete DingTalk todo task',
+    'send',
+    options,
+  )
+
+  return { taskId: task, raw: payload }
+}
+
+/**
+ * Delete a mirrored todo. NOT used by the mirror's state machine (a finished task is COMPLETED, never
+ * deleted — deleting would erase the recipient's own history); it exists for the operator-side
+ * reconciliation tool described in design §6.
+ */
+export async function deleteDingTalkTodoTask(
+  accessToken: string,
+  operatorUnionId: string,
+  taskId: string,
+  config: DingTalkInteractiveCardConfig = {},
+  options?: DingTalkRequestOptions,
+): Promise<DingTalkTodoTaskResult> {
+  const operator = operatorUnionId.trim()
+  const task = taskId.trim()
+  if (!accessToken.trim()) throw new Error('DingTalk access token is required')
+  if (!operator) throw new Error('DingTalk todo operator unionId is required')
+  if (!task) throw new Error('DingTalk todo taskId is required')
+
+  const payload = await requestDingTalkJson(
+    `${todoTasksBaseUrl(config)}/${encodeURIComponent(operator)}/tasks/${encodeURIComponent(task)}`,
+    {
+      method: 'DELETE',
+      headers: {
+        'x-acs-dingtalk-access-token': accessToken,
+      },
+    },
+    'Failed to delete DingTalk todo task',
+    'send',
+    options,
+  )
+
+  return { taskId: task, raw: payload }
 }

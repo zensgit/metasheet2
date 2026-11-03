@@ -1,6 +1,6 @@
 <template>
   <div class="approval-department-picker" data-testid="approval-department-picker">
-    <div class="approval-department-picker__mode" role="group" aria-label="部门选择方式">
+    <div class="approval-department-picker__mode" :aria-label="t.modeGroupLabel" role="group">
       <button
         type="button"
         :aria-pressed="!browseMode"
@@ -8,7 +8,7 @@
         data-testid="approval-department-search-mode"
         @click="browseMode = false"
       >
-        搜索
+        {{ t.modeSearch }}
       </button>
       <button
         type="button"
@@ -17,7 +17,7 @@
         data-testid="approval-department-tree-mode"
         @click="openTreeBrowse"
       >
-        浏览
+        {{ t.modeBrowse }}
       </button>
     </div>
 
@@ -31,8 +31,8 @@
       :remote-method="handleSearch"
       :loading="loading"
       :disabled="disabled"
-      :placeholder="placeholder"
-      :aria-label="ariaLabel"
+      :placeholder="effectivePlaceholder"
+      :aria-label="effectiveAriaLabel"
       data-testid="approval-department-search"
       @update:model-value="onSelect"
       @visible-change="onVisibleChange"
@@ -52,15 +52,15 @@
           v-if="browseStack.length > 0"
           type="button"
           :disabled="disabled || browseLoading"
-          aria-label="返回上级部门"
+          :aria-label="t.browseUpLabel"
           @click="browseUp"
         >
-          返回上级
+          {{ t.browseUp }}
         </button>
-        <span>{{ browseStack.at(-1)?.name || '全部部门' }}</span>
+        <span>{{ browseStack.at(-1)?.name || (isZh ? '全部部门' : 'All departments') }}</span>
       </div>
-      <p v-if="browseLoading" role="status">正在加载部门</p>
-      <p v-else-if="browseOptions.length === 0" class="approval-department-picker__empty">暂无部门</p>
+      <p v-if="browseLoading" role="status">{{ t.loading }}</p>
+      <p v-else-if="browseOptions.length === 0" class="approval-department-picker__empty">{{ t.empty }}</p>
       <ul v-else class="approval-department-picker__tree-list">
         <li v-for="(option, index) in browseOptions" :key="option.id">
           <button
@@ -75,10 +75,10 @@
             v-if="option.hasChildren"
             type="button"
             :disabled="disabled"
-            :aria-label="`浏览${option.name}下级部门`"
+            :aria-label="isZh ? `浏览${option.name}下级部门` : `Browse sub-departments of ${option.name}`"
             @click="browseInto(option)"
           >
-            下级
+            {{ t.browseChildren }}
           </button>
         </li>
       </ul>
@@ -88,6 +88,8 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useLocale } from '../../composables/useLocale'
+import { DEPARTMENT_PICKER_EN, DEPARTMENT_PICKER_ZH } from './approvalPickerLabels'
 import {
   searchApprovalDirectoryDepartments,
   type ApprovalDirectoryDepartment,
@@ -116,10 +118,17 @@ const props = withDefaults(defineProps<{
   maxSelections: undefined,
   defaultMode: undefined,
   defaultDepartmentIds: () => [],
-  placeholder: '搜索并选择部门',
-  ariaLabel: '选择部门',
+  placeholder: undefined,
+  ariaLabel: undefined,
   disabled: false,
 })
+
+// O-8 / F8-1: picker chrome follows the shell locale; a host-supplied placeholder / aria-label
+// still wins (the host localizes its own copy), otherwise the picker's own default is used.
+const { isZh } = useLocale()
+const t = computed(() => (isZh.value ? DEPARTMENT_PICKER_ZH : DEPARTMENT_PICKER_EN))
+const effectivePlaceholder = computed(() => props.placeholder ?? t.value.defaultPlaceholder)
+const effectiveAriaLabel = computed(() => props.ariaLabel ?? t.value.defaultAriaLabel)
 
 const emit = defineEmits<{
   (event: 'update:modelValue', value: Array<{ id: string }>): void
@@ -161,7 +170,7 @@ const displayOptions = computed<ApprovalDirectoryDepartment[]>(() => {
 
 function optionLabel(option: ApprovalDirectoryDepartment, index: number): string {
   const label = props.display === 'full_path' ? option.fullPath.trim() : option.name.trim()
-  return label || `部门 ${index + 1}`
+  return label || (isZh.value ? `部门 ${index + 1}` : `Department ${index + 1}`)
 }
 
 function isUnidentifiable(option: ApprovalDirectoryDepartment): boolean {

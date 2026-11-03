@@ -1,0 +1,20 @@
+{
+  "sourceFiles": 61,
+  "integrations": 3,
+  "keyPresentFiles": 0,
+  "saltPresentFiles": 0,
+  "results": [
+    {
+      "materialIndex": 1,
+      "legacyDefaults": true,
+      "productionMaterialValid": false,
+      "total": 4,
+      "successes": 4,
+      "failures": 0,
+      "wrongKeyRejected": 4,
+      "damagedRejected": 4
+    }
+  ],
+  "copiedInputUnchanged": true,
+  "onlineWrites": false
+}

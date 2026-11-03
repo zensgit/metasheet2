@@ -2,13 +2,16 @@ import type {
   RecoveryArchiveRouterDatabaseRuntime,
   UniverMetaRouterOptions,
 } from '../routes/univer-meta'
-import type { RecoveryArchiveKeyCustodyAdapter } from './recovery-archive-crypto'
+import type { RecoveryArchiveCustodyInput, RecoveryArchiveKeyCustodyAdapter } from './recovery-archive-crypto'
+import { resolveLocalArchiveCustody, resolveLocalArchiveCustodyRelease } from './recovery-local-custody'
 import type { RecoveryArchiveObjectStoreProvider } from './recovery-archive-object-store'
+import { snapshotRecoveryArchiveManualPolicy, type RecoveryArchiveManualAdmissionPolicy } from './recovery-archive-manual-admission'
 import type {
   RecoveryArchiveObservability,
   RecoveryArchiveWorkerLifecycle,
 } from './recovery-archive-observability'
 import type { RecoveryArchivePreviewRuntime } from './recovery-archive-preview'
+import { retireExpiredArchiveAttachmentStage } from './recovery-archive-attachment-stage-ledger'
 import {
   bootRecoveryArchiveRestoreWorker,
   createRecoveryArchiveRestoreWorker,
@@ -23,6 +26,7 @@ export type RecoveryArchiveApplicationWorkerDependencies = Pick<
   CreateRecoveryArchiveRestoreWorkerInput,
   | 'recheckAuthority'
   | 'apply'
+  | 'processDerivedWork'
   | 'leaseMs'
   | 'replayHorizonMs'
   | 'sweepLimit'
@@ -32,12 +36,15 @@ export type RecoveryArchiveApplicationWorkerDependencies = Pick<
 >
 
 export interface RecoveryArchiveApplicationComposition {
-  readonly keyCustody: RecoveryArchiveKeyCustodyAdapter
+  readonly keyCustody: RecoveryArchiveCustodyInput
   readonly objectStore: RecoveryArchiveObjectStoreProvider
   readonly auditedReplayHorizonMs: number
   readonly asyncResumeHorizonMs: number
   readonly workerIntervalMs: number
   readonly worker: RecoveryArchiveApplicationWorkerDependencies
+  readonly manualCapture?: RecoveryArchiveManualAdmissionPolicy
+  readonly attachmentStorage?: RecoveryArchivePreviewRuntime['attachmentStorage']
+  readonly attachmentCleanupStorage?: { retireRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void> }
 }
 
 export type RecoveryArchiveApplicationCompositionFactory = () => RecoveryArchiveApplicationComposition
@@ -46,14 +53,18 @@ export interface RecoveryArchiveApplication {
   readonly routerOptions: UniverMetaRouterOptions | undefined
   startWorker(): void
   stopWorker(): Promise<void>
+  releaseCustody(): void
+  retireExpiredAttachmentStage(objectId: string): Promise<void>
 }
 
 const COMPOSITION_INVALID = 'RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_INVALID'
 const COMPOSITION_FACTORY_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_FACTORY_FAILED'
 const DATABASE_RUNTIME_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_DATABASE_RUNTIME_FAILED'
 const WORKER_BOOT_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_BOOT_FAILED'
+const WORKER_STOPPED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_STOPPED'
 const WORKER_STOP_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_STOP_FAILED'
 const WORKER_STOP_TIMEOUT_MS = 10_000
+const ATTACHMENT_CLEANUP_REFUSED = 'RECOVERY_ARCHIVE_ATTACHMENT_CLEANUP_REFUSED'
 
 export function createRecoveryArchiveApplication(
   factory: RecoveryArchiveApplicationCompositionFactory | undefined,
@@ -70,6 +81,8 @@ export function createRecoveryArchiveApplication(
       routerOptions: undefined,
       startWorker() {},
       async stopWorker() {},
+      releaseCustody() {},
+      async retireExpiredAttachmentStage() { throw new Error(ATTACHMENT_CLEANUP_REFUSED) },
     })
   }
   if (!factory) throw new Error(COMPOSITION_INVALID)
@@ -92,6 +105,7 @@ export function createRecoveryArchiveApplication(
     keyCustody: composition.keyCustody,
     objectStore: composition.objectStore,
     transactionDepth: database.transactionDepthProbe,
+    ...(composition.attachmentStorage ? { attachmentStorage: composition.attachmentStorage } : {}),
   })
   const workerInput: Readonly<CreateRecoveryArchiveRestoreWorkerInput> = Object.freeze({
     transaction: database.transaction,
@@ -99,6 +113,7 @@ export function createRecoveryArchiveApplication(
     runtime,
     recheckAuthority: composition.worker.recheckAuthority,
     apply: composition.worker.apply,
+    processDerivedWork: composition.worker.processDerivedWork,
     leaseMs: composition.worker.leaseMs,
     replayHorizonMs: composition.worker.replayHorizonMs,
     sweepLimit: composition.worker.sweepLimit,
@@ -111,16 +126,33 @@ export function createRecoveryArchiveApplication(
     recoveryArchiveDatabaseRuntime: database,
     recoveryArchiveAuditedReplayHorizonMs: composition.auditedReplayHorizonMs,
     recoveryArchiveAsyncResumeHorizonMs: composition.asyncResumeHorizonMs,
+    ...(composition.manualCapture ? { recoveryArchiveManualPolicy: composition.manualCapture } : {}),
   })
-  let workerStarted = false
+  let workerState: 'idle' | 'started' | 'failed' | 'stopped' = 'idle'
   let workerLoop: RecoveryArchiveRestoreWorkerLoop | null = null
   let workerStop: Promise<void> | null = null
+  let workerDrained = false
+  const activeCleanups = new Set<Promise<void>>()
+  const releaseCustody = resolveLocalArchiveCustodyRelease(composition.keyCustody)
 
   return Object.freeze({
     routerOptions,
+    async retireExpiredAttachmentStage(objectId: string) {
+      if (workerState === 'stopped' || workerState === 'failed' || !composition.attachmentCleanupStorage) {
+        throw new Error(ATTACHMENT_CLEANUP_REFUSED)
+      }
+      const pending = retireExpiredArchiveAttachmentStage({ objectId,
+        transaction: database.transaction, transactionDepth: database.transactionDepthProbe,
+        storage: composition.attachmentCleanupStorage })
+      activeCleanups.add(pending)
+      try { await pending } catch { throw new Error(ATTACHMENT_CLEANUP_REFUSED) }
+      finally { activeCleanups.delete(pending) }
+    },
     startWorker() {
-      if (workerStarted) return
-      workerStarted = true
+      if (workerState === 'stopped') throw new Error(WORKER_STOPPED)
+      if (workerState === 'failed') throw new Error(WORKER_BOOT_FAILED)
+      if (workerState === 'started') return
+      workerState = 'started'
       try {
         workerLoop = bootRecoveryArchiveRestoreWorker({
           env: activationEnv,
@@ -128,18 +160,27 @@ export function createRecoveryArchiveApplication(
           createWorker: () => createRecoveryArchiveRestoreWorker(workerInput),
           onResult: (result) => observability?.recordRun(result),
         })
+        if (!workerLoop) throw new Error(WORKER_BOOT_FAILED)
       } catch {
+        workerState = 'failed'
         throw new Error(WORKER_BOOT_FAILED)
       }
-      if (!workerLoop) throw new Error(WORKER_BOOT_FAILED)
       recordLifecycleSafely(observability, 'started')
     },
     async stopWorker() {
+      workerState = 'stopped'
       if (workerStop) return workerStop
-      if (!workerLoop) return
+      if (!workerLoop && activeCleanups.size === 0) {
+        workerDrained = true
+        return
+      }
       const loop = workerLoop
-      workerStop = stopRecoveryArchiveWorkerLoop(loop).then(
+      workerStop = stopRecoveryArchiveWorkerLoop({ async stop() {
+        await loop?.stop()
+        await Promise.allSettled([...activeCleanups])
+      } }).then(
         () => {
+          workerDrained = true
           recordLifecycleSafely(observability, 'drained')
         },
         (error: unknown) => {
@@ -152,6 +193,10 @@ export function createRecoveryArchiveApplication(
       } finally {
         workerLoop = null
       }
+    },
+    releaseCustody() {
+      if (!workerDrained) throw new Error(WORKER_STOP_FAILED)
+      releaseCustody?.()
     },
   })
 }
@@ -167,7 +212,7 @@ function recordLifecycleSafely(
   }
 }
 
-function stopRecoveryArchiveWorkerLoop(loop: RecoveryArchiveRestoreWorkerLoop): Promise<void> {
+function stopRecoveryArchiveWorkerLoop(loop: Pick<RecoveryArchiveRestoreWorkerLoop, 'stop'>): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(WORKER_STOP_FAILED))
@@ -196,12 +241,27 @@ function snapshotComposition(
     asyncResumeHorizonMs: source.asyncResumeHorizonMs,
     workerIntervalMs: source.workerIntervalMs,
     worker: snapshotWorkerDependencies(source.worker),
+    ...(source.manualCapture === undefined ? {} : { manualCapture: snapshotRecoveryArchiveManualPolicy(source.manualCapture) }),
+    ...(source.attachmentStorage === undefined ? {} : { attachmentStorage: snapshotAttachmentStorage(source.attachmentStorage) }),
+    ...(source.attachmentCleanupStorage === undefined ? {} : { attachmentCleanupStorage: snapshotAttachmentCleanupStorage(source.attachmentCleanupStorage) }),
   }
+  if (!composition.keyCustody || typeof composition.keyCustody !== 'object') throw new Error(COMPOSITION_INVALID)
+  // Resolve only authentic local capabilities; preserve the original input and its revocation checks.
+  const custody = resolveLocalArchiveCustody(composition.keyCustody)
+    ?? composition.keyCustody as RecoveryArchiveKeyCustodyAdapter
   if (
-    !composition.keyCustody ||
-    typeof composition.keyCustody !== 'object' ||
+    typeof custody.produceGenerationDek !== 'function' ||
+    typeof custody.unwrapGenerationDek !== 'function' ||
+    typeof custody.deriveDekFingerprint !== 'function' ||
+    typeof custody.macManifestRoot !== 'function' ||
+    typeof custody.verifyManifestRootMac !== 'function' ||
     !composition.objectStore ||
     typeof composition.objectStore !== 'object' ||
+    typeof composition.objectStore.put !== 'function' ||
+    typeof composition.objectStore.get !== 'function' ||
+    typeof composition.objectStore.head !== 'function' ||
+    typeof composition.objectStore.deleteExpired !== 'function' ||
+    typeof composition.objectStore.pin !== 'function' ||
     !Number.isSafeInteger(composition.auditedReplayHorizonMs) ||
     composition.auditedReplayHorizonMs < 0 ||
     !Number.isSafeInteger(composition.asyncResumeHorizonMs) ||
@@ -212,6 +272,20 @@ function snapshotComposition(
     throw new Error(COMPOSITION_INVALID)
   }
   return Object.freeze(composition)
+}
+
+function snapshotAttachmentCleanupStorage(source: NonNullable<RecoveryArchiveApplicationComposition['attachmentCleanupStorage']>) {
+  if (!source || typeof source.retireRecoveryAttachment !== 'function') throw new Error(COMPOSITION_INVALID)
+  return Object.freeze({ retireRecoveryAttachment: source.retireRecoveryAttachment.bind(source) })
+}
+
+function snapshotAttachmentStorage(source: NonNullable<RecoveryArchivePreviewRuntime['attachmentStorage']>):
+  NonNullable<RecoveryArchivePreviewRuntime['attachmentStorage']> {
+  if (!source || typeof source.uploadByKey !== 'function' || typeof source.readRecoveryAttachment !== 'function'
+    || typeof source.reserveRecoveryAttachment !== 'function') throw new Error(COMPOSITION_INVALID)
+  return Object.freeze({ uploadByKey: source.uploadByKey.bind(source),
+    readRecoveryAttachment: source.readRecoveryAttachment.bind(source),
+    reserveRecoveryAttachment: source.reserveRecoveryAttachment.bind(source) })
 }
 
 function snapshotDatabaseRuntime(
@@ -242,6 +316,7 @@ function snapshotWorkerDependencies(
   const apply = snapshotApplyDependencies(source.apply)
   const worker: RecoveryArchiveApplicationWorkerDependencies = {
     recheckAuthority: source.recheckAuthority,
+    processDerivedWork: source.processDerivedWork,
     apply,
     leaseMs: source.leaseMs,
     replayHorizonMs: source.replayHorizonMs,
@@ -252,6 +327,7 @@ function snapshotWorkerDependencies(
   }
   if (
     typeof worker.recheckAuthority !== 'function' ||
+    typeof worker.processDerivedWork !== 'function' ||
     !Number.isSafeInteger(worker.leaseMs) || worker.leaseMs < 1 ||
     !Number.isSafeInteger(worker.replayHorizonMs) || worker.replayHorizonMs < 0 ||
     (worker.sweepLimit !== undefined &&
@@ -271,6 +347,7 @@ function snapshotApplyDependencies(
 ): RecoveryArchiveApplicationWorkerDependencies['apply'] {
   if (!source || typeof source !== 'object') throw new Error(COMPOSITION_INVALID)
   const onMutationApplied = source.onMutationApplied
+  const afterCommit = source.afterCommit
   const apply: RecoveryArchiveApplicationWorkerDependencies['apply'] = {
     preliminaryFullRead: source.preliminaryFullRead,
     stabilizeAuthorization: source.stabilizeAuthorization,
@@ -279,13 +356,15 @@ function snapshotApplyDependencies(
     ...(onMutationApplied
       ? { onMutationApplied }
       : {}),
+    ...(afterCommit !== undefined ? { afterCommit } : {}),
   }
   if (
     typeof apply.preliminaryFullRead !== 'function' ||
     typeof apply.stabilizeAuthorization !== 'function' ||
     typeof apply.finalLockedFullRead !== 'function' ||
     typeof apply.evaluatePlanAuthorization !== 'function' ||
-    (apply.onMutationApplied !== undefined && typeof apply.onMutationApplied !== 'function')
+    (apply.onMutationApplied !== undefined && typeof apply.onMutationApplied !== 'function') ||
+    (apply.afterCommit !== undefined && typeof apply.afterCommit !== 'function')
   ) {
     throw new Error(COMPOSITION_INVALID)
   }

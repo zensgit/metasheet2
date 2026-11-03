@@ -32,6 +32,9 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //   F-10 两侧同形,不吃通配: the four principals that used to separate the sides (a bare
 //        `integration:admin`, `stock-prep:*`, `*:*` without an admin role, `stock-prep:write`) are
 //        answered identically by both, value by value
+//   F-11 项目备料页's two 宜搭 entries render for exactly the literal platform admin the core live
+//        gate admits (never for an expanding grant), everyone else keeps main's disabled placeholder,
+//        and the single-row CREATE entry waits for the server's own send-switch bit
 
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
@@ -88,6 +91,7 @@ import {
   STOCK_PREP_LANDING_KEYS,
   STOCK_PREP_OPERATE,
   STOCK_PREP_PERMISSION_CODES,
+  STOCK_PREP_PULL,
   STOCK_PREP_RAIL_GROUPS,
   STOCK_PREP_READ,
   STOCK_PREP_ROUTE_PERMISSION,
@@ -97,8 +101,11 @@ import {
   canOpenStockPrepHome,
   canOpenStockPrepInstallView,
   canOpenStockPrepOpsPanel,
+  canOpenStockPrepMembersPage,
   canOpenStockPrepProjectQuery,
   canOpenStockPrepRailItem,
+  canOpenStockPrepRefreshQueue,
+  canOpenStockPrepYidaEntries,
   canUseLegacyMvpTabs,
   grantedStockPrepCapabilities,
   holdsPlatformAdmin,
@@ -164,6 +171,12 @@ const ACTORS: Actor[] = [
   { name: 'orphan operate (no read)', roles: [], permissions: [STOCK_PREP_OPERATE] },
   { name: 'workbench admin', roles: [], permissions: [STOCK_PREP_ADMIN] },
   { name: 'platform admin', roles: ['admin'], permissions: ['integration:admin'] },
+  // R-33 (2026-10-08): the 拉取人员 (read+operate+pull) and the two degenerate pull grants. On the
+  // confirmation-queue manifest the pull code adds nothing, so the puller must equal
+  // 'operator with read+confirm' cell for cell, and the degenerate grants must equal 'orphan operate'.
+  { name: 'puller (read+operate+pull)', roles: [], permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] },
+  { name: 'pull without operate', roles: [], permissions: [STOCK_PREP_READ, STOCK_PREP_PULL] },
+  { name: 'orphan pull', roles: [], permissions: [STOCK_PREP_PULL] },
   // THE FOUR PRINCIPALS THAT USED TO SIT OUTSIDE THIS TABLE, now inside it — which is the whole
   // point of the change that put them here. Each one separates 「the code the server matches」 from
   // 「the code `useAuth().hasPermission` would expand to」, and the browser predicates are now
@@ -198,8 +211,14 @@ function asActor(actor: Actor): void {
  * permissions }`, which is what the browser mirror computes its literal ladder over.
  *
  * `probe()` (the expanding `hasPermission`) is deliberately NOT what these predicates receive any
- * more, and the two are kept separate here on purpose: `probe()` still drives the ROUTE GUARD in
- * F-03, which is app-wide machinery this wave did not change, so the file needs both.
+ * more, and the two are kept separate here on purpose — but NOT for the reason an earlier version
+ * of this comment gave. It said `probe()` "still drives the ROUTE GUARD in F-03, which is app-wide
+ * machinery this wave did not change", and as of the gate-alignment change that is simply false:
+ * `buildStockPrepAwarePermissionProbe` now answers the three `stock-prep:*` codes from the
+ * PRINCIPAL, so in F-03 `probe()` is handed to the adapter and then deliberately BYPASSED for
+ * exactly the code that route declares. The file still needs both because `probe()` is what every
+ * OTHER permission on every other route still goes through, and F-03 passes it in to prove that the
+ * bypass is scoped rather than total.
  */
 function principal(): { roles: string[]; permissions: string[] } {
   return { roles: [...h.roles], permissions: [...h.permissions] }
@@ -271,6 +290,59 @@ describe('O2 / R-11 — /stock-prep permission matrix (front end)', () => {
  */
 const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   'stock-prep-operator-project-board',
+  // 一个项目一张备料表 (S2, R-36). The three project-sheet controls live on 项目备料页 (the sheet-state
+  // line), on the pull panel (the 「新建备料表并拉取」 confirmation) and on 今天要处理 (the
+  // 「每个项目一张备料表」 line) — never on this view — and each renders only once the server has
+  // answered with the default-OFF switch on. Their alignment, both directions, per actor, is asserted
+  // on those surfaces in apps/web/tests/StockPreparationProjectTarget.spec.ts (PT-ALIGN).
+  'stock-prep-project-target-status',
+  'stock-prep-project-target-create',
+  'stock-prep-project-target-list',
+  // S4 (R-38): archive / restore live on 项目备料页's sheet-state line, PULL tier, rendered only on the
+  // state the server says the action fits. Their alignment, both directions, per actor, is asserted
+  // on that line in apps/web/tests/StockPreparationProjectArchive.spec.ts (PA-ALIGN).
+  'stock-prep-project-target-archive',
+  'stock-prep-project-target-restore',
+  // PR B (R-53 / R-54): the pilot status line and the 「启用试点」 button live on 项目备料页's sheet-state
+  // line, ADMIN tier, rendered only once the server's pilot read answered for an active sheet. Their
+  // alignment, both directions, per actor, is asserted on that line in
+  // apps/web/tests/StockPreparationProjectArchive.spec.ts (PB-ALIGN).
+  'stock-prep-project-pilot-status',
+  'stock-prep-project-pilot-enable',
+  // 人工补充行 B4 (R-68): the switch-state line and the typed-confirmation switch button live on the project sync
+  // panel (StockPreparationProjectTargetManualRows.vue), ADMIN tier, rendered only once the server's read answered for
+  // a registered sheet. Their alignment, both directions, per actor, is asserted there in
+  // apps/web/tests/StockPreparationProjectTargetManualRows.spec.ts (MR-ALIGN).
+  'stock-prep-project-manual-rows-status',
+  'stock-prep-project-manual-rows-set',
+  // S3 (R-37): the project-level fields form and its 「保存」 live on 项目备料页's sheet-state line, the
+  // 「刷新项目总览」 button on 今天要处理's project-sheets line — OPERATE, each rendered only once the
+  // server answered with the switch on. Their alignment, both directions, per actor, is asserted on
+  // those surfaces in apps/web/tests/StockPreparationProjectOverview.spec.ts (PO-ALIGN).
+  'stock-prep-project-fields',
+  'stock-prep-project-fields-save',
+  'stock-prep-project-overview-refresh',
+  // S3 fix round 1 (R6): 「建立项目总览」 (PULL) lives on the same home line, rendered only while the server says
+  // the overview is absent; PO-ALIGN asserts it renders for exactly the actors the server grants.
+  'stock-prep-project-overview-ensure',
+  // S5b (R-39) 「成员与权限」: the four members controls live on StockPreparationMembersView.vue — its own
+  // rail item, rendered only after the server's members read answered — never on this view. Their
+  // alignment against the SERVER's grant is asserted there, in apps/web/tests/StockPreparationMembers.spec.ts
+  // (SMW-ALIGN), together with the shell's switch-off and below-tier invisibility (SMW-SHELL).
+  'stock-prep-members-page',
+  'stock-prep-members-custom-role-create',
+  'stock-prep-members-custom-role-save',
+  'stock-prep-members-custom-role-add-tables',
+  // 备料分批拉取第一期 step 4 PR-7 (R-62): the six refresh controls (PR-4's rows, `control: null` until now) live
+  // on 「拉取待确认」 — StockPreparationRefreshQueueView.vue, its own PULL-tier rail item — never on this view.
+  // Their alignment, both directions, per actor, through the real shell, is asserted where they live:
+  // apps/web/tests/StockPreparationRefreshQueue.spec.ts (RQ-ALIGN).
+  'stock-prep-refresh-holds',
+  'stock-prep-refresh-evidence',
+  'stock-prep-refresh-keep',
+  'stock-prep-refresh-confirm',
+  'stock-prep-refresh-continuation',
+  'stock-prep-refresh-end',
 ])
 
   /** The control testids actually present in the DOM, restricted to the manifest's control set. */
@@ -333,6 +405,9 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     expect(STOCK_PREP_READ).toBe(backendAccess.STOCK_PREP_READ)
     expect(STOCK_PREP_OPERATE).toBe(backendAccess.STOCK_PREP_OPERATE)
     expect(STOCK_PREP_ADMIN).toBe(backendAccess.STOCK_PREP_ADMIN)
+    // R-33 (2026-10-08): the 拉取人员 code, mirrored like the other three.
+    expect(STOCK_PREP_PULL).toBe(backendAccess.STOCK_PREP_PULL)
+    expect(STOCK_PREP_PULL).toBe('stock-prep:pull')
     expect(PLATFORM_ADMIN_GATE).toBe(backendAccess.PLATFORM_ADMIN_GATE)
     expect(STOCK_PREP_ROUTE_PERMISSION).toBe(backendAccess.STOCK_PREP_ROUTE_PERMISSION)
     expect([...STOCK_PREP_PERMISSION_CODES]).toEqual([...backendAccess.STOCK_PREP_PERMISSION_CODES])
@@ -381,17 +456,19 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     expect(STOCK_PREP_ROUTE_PERMISSION).toBe('stock-prep:read')
   })
 
-  it('F-07: the nav link is gated on the route permission, not on integration:write', () => {
+  it('F-07: the nav link is gated on the workbench gate itself, not on integration:write and not on the expanding probe', () => {
     expect(APP_VUE_SOURCE).toContain('v-if="canUseStockPreparation" to="/stock-prep"')
     expect(APP_VUE_SOURCE).not.toContain('v-if="canUseIntegration" to="/stock-prep"')
-    expect(APP_VUE_SOURCE).toContain('hasPermission(STOCK_PREP_ROUTE_PERMISSION)')
+    expect(APP_VUE_SOURCE).toContain('canReachStockPrepWorkbench(getAccessSnapshot())')
+    // The expanding app-wide probe must not be what decides this link — that was the divergence.
+    expect(APP_VUE_SOURCE).not.toContain('hasPermission(STOCK_PREP_ROUTE_PERMISSION)')
   })
 
   it('F-08: /stock-prep declares NO requiredFeature (a flag would be a second gate on admins too)', () => {
     const block = APP_ROUTES_SOURCE.slice(APP_ROUTES_SOURCE.indexOf("path: '/stock-prep'")).slice(0, 400)
     expect(block).not.toContain('requiredFeature')
-    // And no stock-prep feature was smuggled into the known set.
-    expect([...KNOWN_REQUIRED_FEATURES]).toEqual(['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm', 'elearning'])
+    // And no stock-prep feature was smuggled into the known set ('tasks' gates /tasks only).
+    expect([...KNOWN_REQUIRED_FEATURES]).toEqual(['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm', 'elearning', 'tasks'])
   })
 
   // ---------------------------------------------------------------------------
@@ -409,23 +486,31 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
       'orphan operate (no read)': 'redirect',
       'workbench admin': 'allow',
       'platform admin': 'allow',
-      // THE ROUTE GUARD IS NOT THIS WAVE'S TO CHANGE, and these four rows say so out loud. It runs on
-      // `useAuth().hasPermission`, which expands `*:*`, `stock-prep:*` and `stock-prep:write` → read
-      // — so three of the four reach `/stock-prep` while the workbench (now literal) shows them
-      // nothing, and the bare `integration:admin` is refused the route while the workbench opens
-      // everything. Both residues are named in the PR body's 「没做/偏离」; narrowing the app-wide
-      // guard is a platform change, not a stock-prep one.
-      'integration:admin without role': 'redirect',
-      'stock-prep:* wildcard': 'allow',
-      '*:* without the admin role': 'allow',
-      'stock-prep:write holder': 'allow',
+      // R-33: reachability is still exactly the READ code — the pull code neither opens nor closes
+      // the page. The puller holds read; the two degenerate pull grants answer by whether they do.
+      'puller (read+operate+pull)': 'allow',
+      'pull without operate': 'allow',
+      'orphan pull': 'redirect',
+      // THE FOUR ROWS THAT USED TO DIVERGE, now closed. They used to read
+      // redirect/allow/allow/allow, because the guard ran on `useAuth().hasPermission`, which
+      // expands `*:*`, `stock-prep:*` and `stock-prep:write` → read and treats `users:write` as
+      // admin — so three principals reached `/stock-prep` and found every panel refusing them,
+      // while a bare `integration:admin` (a platform admin to the server) was redirected away from
+      // a page it may use in full. `buildStockPrepAwarePermissionProbe` now answers the three
+      // stock-prep codes with `satisfiesStockPrepAccess`, so the guard and the workbench give ONE
+      // answer per principal. Three of the four moved STRICTLY NARROWER; the fourth stopped hiding
+      // a page the server already serves.
+      'integration:admin without role': 'allow',
+      'stock-prep:* wildcard': 'redirect',
+      '*:* without the admin role': 'redirect',
+      'stock-prep:write holder': 'redirect',
     }
     for (const actor of ACTORS) {
       asActor(actor)
       const decision = resolveRouteGuardDecision(
         buildRouteGuardInput({ path: '/stock-prep', meta }),
         buildRouteGuardContext({
-          auth: { hasPermission: probe() },
+          auth: { hasPermission: probe(), getAccessSnapshot: () => principal() },
           flags: {
             hasFeature: () => true,
             isAttendanceFocused: () => false,
@@ -568,8 +653,9 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     expect(workspace).toContain('canUseLegacyMvpTabs')
     expect(workspace).toContain("effectiveKey === 'confirmation-queue'")
     expect(workspace).not.toContain("v-if=\"activeKey === 'dashboard'\"")
-    // Exactly the seven legacy MVP tabs are marked; the confirmation queue is not.
-    expect(workspace.split('legacyMvp: true').length - 1).toBe(7)
+    // Exactly the four remaining legacy MVP tabs are marked; the confirmation queue is not. 7 -> 4:
+    // 旧「仪表盘」, 旧「备料行」 and 旧「异常队列」 were retired on 2026-10-27 (owner: 「不用就去掉」).
+    expect(workspace.split('legacyMvp: true').length - 1).toBe(4)
   })
   // ---------------------------------------------------------------------------
   // F-09 the RAIL manifest and the D2 landing — the second thing the mirror pins
@@ -605,17 +691,25 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
       for (const item of group.items) keys.push(item.key)
       for (const key of group.advanced ?? []) keys.push(key)
     }
-    // 15 today: 4 【工作】 + 3 【部署与接入】 + 7 深度工具 + 1 【帮助】. Stated as a number so that
+    // 16 today: 4 【工作】 + 4 【部署与接入】 + 7 深度工具 + 1 【帮助】. Stated as a number so that
     // adding a rail item without a view — or a view without a rail item — has to be deliberate.
     // 14 -> 15 是 P2-1 的 项目查询(设计稿 §6.3 第一行),【工作】里排在 项目备料 之后。
-    expect(keys.length).toBe(15)
+    // 15 -> 16 是 S5b(R-39)的 成员与权限,【部署与接入】的最后一项;它另外受服务端开关约束(见 SMW-SHELL)。
+    // 16 -> 17 是 备料分批拉取第一期 step 4 PR-7(R-62 ①)的 拉取待确认,【工作】的最后一项,PULL 档(`pull` 闸)。
+    // 17 -> 14:旧 仪表盘 / 异常队列 / 备料行 下线(owner 2026-10-27 不用就去掉),深度工具 7 -> 4。
+    expect(keys.length).toBe(14)
     expect(new Set(keys).size).toBe(keys.length)
     for (const key of keys) {
       expect(workspace, `${key} must be a view key in the shell`).toContain(`key: '${key}',`)
     }
-    // 不下线: every legacy MVP key is still in the manifest, folded rather than removed.
-    for (const key of ['dashboard', 'project-workspace', 'bom-snapshot-diff', 'material-mapping', 'unit-conversion', 'prep-line', 'exception-queue']) {
+    // Every remaining legacy MVP key is still in the manifest, folded rather than removed.
+    for (const key of ['project-workspace', 'bom-snapshot-diff', 'material-mapping', 'unit-conversion']) {
       expect(keys, `${key} must still be reachable`).toContain(key)
+    }
+    // ...and the three the owner retired on 2026-10-27 (「不用就去掉」) are gone from both the rail and the shell.
+    for (const key of ['dashboard', 'prep-line', 'exception-queue']) {
+      expect(keys, `${key} was retired`).not.toContain(key)
+      expect(workspace, `${key} must not be a view key in the shell`).not.toContain(`key: '${key}',`)
     }
   })
 
@@ -660,11 +754,25 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
         .toBe(canOpenStockPrepInstallView(principal()))
       expect(canOpenStockPrepOpsPanel(principal()), `${actor.name} ops`)
         .toBe(canOpenStockPrepInstallView(principal()))
+      // S5b (R-39): 成员与权限's permission half is the same workbench ceiling (the switch is the other half).
+      expect(canOpenStockPrepMembersPage(principal()), `${actor.name} members`)
+        .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'workbench-admin'))
       expect(canOpenStockPrepHelp(principal()), `${actor.name} help`)
         .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'route'))
       expect(canUseLegacyMvpTabs(principal()), `${actor.name} 深度工具`)
         .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'platform-admin'))
+      // PR-7 (R-62 ①): 拉取待确认 rides the PULL tier exactly — the server's `pull` gate, which is the six refresh
+      // routes' own `requireAccess(req, STOCK_PREP_PULL)`. An `integration:write` holder is NOT admitted (the
+      // server never grants a stock-prep code to it), and that actor is a row of ACTORS.
+      expect(canOpenStockPrepRefreshQueue(principal()), `${actor.name} refresh-queue`)
+        .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'pull'))
+      expect(canOpenStockPrepRefreshQueue(principal()), `${actor.name} refresh-queue = the routes' code`)
+        .toBe(backendAccess.satisfiesStockPrepAccess(flattened(), STOCK_PREP_PULL))
     }
+    // The named actor the design text once admitted ("pull or legacy integration:write"): refused on both sides.
+    asActor({ name: 'integration:write only', roles: [], permissions: ['integration:write'] })
+    expect(canOpenStockPrepRefreshQueue(principal())).toBe(false)
+    expect(backendAccess.satisfiesStockPrepRailGate(flattened(), 'pull')).toBe(false)
   })
 
   it('F-09 / D2=A: the landing key agrees with the server for EVERY actor and all three postures', () => {
@@ -808,5 +916,48 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     // ...and the platform-admin list is the server's, verbatim.
     expect(source).toContain("Object.freeze(['role:admin', INTEGRATION_ADMIN])")
     expect([...PLATFORM_ADMIN_PERMISSIONS]).toEqual([...backendAccess.PLATFORM_ADMIN_PERMISSIONS])
+  })
+
+  // ---------------------------------------------------------------------------
+  // F-11 the 宜搭 entries on 项目备料页
+  // ---------------------------------------------------------------------------
+  //
+  // The entries mirror the plugin's `holdsPlatformAdmin` over the flattened principal: the admin role,
+  // `role:admin`, or the literal `integration:admin` code. Every server action behind them runs the
+  // stricter core live gate (automation-live-authority.ts), which also checks namespace admission, active
+  // tenant membership and the anchored owner. The DOM half, per actor, is StockPreparationProjectBoard.spec.ts B-04.
+
+  it('F-11: the 宜搭 entries open for exactly the literal platform admin, for EVERY actor', () => {
+    for (const actor of ACTORS) {
+      asActor(actor)
+      expect(canOpenStockPrepYidaEntries(principal()), `${actor.name} yida entries`)
+        .toBe(backendAccess.holdsPlatformAdmin(flattened()))
+    }
+    // THE SEAM: the expanding probe says yes to `*:*` and `integration:*`; the server and the board say no.
+    for (const permissions of [['*:*'], ['integration:*']]) {
+      asActor({ name: 'expanding', roles: [], permissions })
+      expect(realHasPermission('integration:admin'), `${permissions[0]}: hasPermission expands`).toBe(true)
+      expect(canOpenStockPrepYidaEntries(principal()), `${permissions[0]} yida entries`).toBe(false)
+    }
+  })
+
+  it('F-11: the board gates both 宜搭 entries on that predicate, keeps main\'s placeholder, and CREATE waits for the server switch (source pin)', () => {
+    const board = readFileSync(
+      resolve(REPO_ROOT, 'apps/web/src/components/integration/stockPreparation/StockPreparationProjectBoardView.vue'),
+      'utf8',
+    )
+    const preview = readFileSync(
+      resolve(REPO_ROOT, 'apps/web/src/components/integration/stockPreparation/StockPreparationYidaPreviewPanel.vue'),
+      'utf8',
+    )
+    expect(board).toContain('canOpenStockPrepYidaEntries(auth.getAccessSnapshot())')
+    expect(board).toContain('<template v-if="yidaEntriesVisible">')
+    expect(board).toContain('<StockPreparationYidaPreviewPanel v-if="yidaPreviewOpen && yidaEntriesVisible" />')
+    expect(board).toContain("{{ bi('推送宜搭(暂未接入)', 'Push to Yida (not connected yet)') }}")
+    expect(board).not.toContain('hasPermission')
+    // The board label promises no single-row send; only the preview's server-switch-gated entry does.
+    expect(board).not.toContain('单行确认')
+    expect(preview).toContain('v-if="ownerSendEnabled && !ownerSendOpen"')
+    expect(preview).toContain('@send-enabled-change="ownerSendEnabled = $event"')
   })
 })

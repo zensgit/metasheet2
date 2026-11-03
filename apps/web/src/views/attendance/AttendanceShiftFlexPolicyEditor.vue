@@ -59,19 +59,15 @@
         </label>
         <label class="shift-flex__field">
           <span>{{ tr('Core start (optional)', '核心开始（可选）') }}</span>
-          <input
+          <AttendanceLocaleTimeInput
             v-model="coreStartTime"
-            type="time"
-            step="60"
             data-attendance-shift-flex-core-start
           />
         </label>
         <label class="shift-flex__field">
           <span>{{ tr('Core end (optional)', '核心结束（可选）') }}</span>
-          <input
+          <AttendanceLocaleTimeInput
             v-model="coreEndTime"
-            type="time"
-            step="60"
             data-attendance-shift-flex-core-end
           />
         </label>
@@ -102,6 +98,7 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceLocaleTimeInput from './AttendanceLocaleTimeInput.vue'
 import { computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import {

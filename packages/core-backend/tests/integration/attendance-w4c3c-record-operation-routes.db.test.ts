@@ -1,3 +1,4 @@
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 /**
  * W4C-3c P05/P15/P16 plugin HTTP route tests through the actual plugin loader.
  * Covers auth, capability mismatch, org boundary, stable operationId requirement,
@@ -39,7 +40,10 @@ function canListen(): Promise<boolean> {
   })
 }
 
-function requestJson(
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(
   url: string,
   options: { method?: string; headers?: Record<string, string>; body?: Record<string, unknown> } = {},
 ): Promise<JsonResponse> {
@@ -1811,6 +1815,18 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
   it('live punch cannot reactivate an operator-retired parent and rolls back its event', async () => {
     requireServer()
     const fixture = await seedUser({ permission: 'attendance:admin' })
+    const defaultRuleId = randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_rules
+         (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes,
+          severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default)
+       SELECT $1, $2, $3, 'UTC', '09:00', '18:00', 5, 5, 30, 60, 5, $4::jsonb, true
+        WHERE NOT EXISTS (
+          SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true
+        )`,
+      [defaultRuleId, fixture.orgId, `w4c3c-default-${defaultRuleId}`, JSON.stringify([0, 1, 2, 3, 4, 5, 6])],
+    )
+    try {
     await seedOrgRollout(fixture.orgId, fixture.userId, 'legacy')
     const { recordId, workDate } = await seedRecord(fixture.orgId, fixture.userId)
 
@@ -1878,6 +1894,16 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     expect(after.rows[0]?.record).toEqual(before.rows[0]?.record)
     expect(after.rows[0]?.event_count).toBe(before.rows[0]?.event_count)
     expect(after.rows[0]?.calculation_count).toBe(before.rows[0]?.calculation_count)
+    } finally {
+      await pool.query(
+        `DELETE FROM attendance_rules r WHERE r.id=ANY($1::uuid[])
+           AND NOT EXISTS (SELECT 1 FROM attendance_shift_assignments a WHERE a.org_id=r.org_id AND a.is_active=true)
+           AND NOT EXISTS (SELECT 1 FROM attendance_rotation_assignments a WHERE a.org_id=r.org_id AND a.is_active=true)
+           AND NOT EXISTS (SELECT 1 FROM attendance_timezone_context_companions c WHERE c.org_id=r.org_id)
+           AND NOT EXISTS (SELECT 1 FROM attendance_business_trip_arrangements b WHERE b.org_id=r.org_id)`,
+        [[defaultRuleId]],
+      ).catch(() => undefined)
+    }
   })
 
   it('in-tx auth: inactive user is rejected with zero W4 result DML', async () => {

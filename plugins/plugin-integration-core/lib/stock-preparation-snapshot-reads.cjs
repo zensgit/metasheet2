@@ -30,6 +30,9 @@ const {
 const { planBomSnapshotDiff, CHANGE_TYPES, DIFF_TYPES, REVIEW_STATUSES } = require('./stock-preparation-snapshot-diff.cjs')
 const { optionalString, isPlainObject } = require('./stock-preparation-common.cjs')
 const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
+// The persist module's own strict version parser, so "newest" below means exactly what the persist's
+// monotonic-version rule means by it.
+const { parseStrictVersion } = require('./stock-preparation-sync-run-plan.cjs')
 const {
   StockPreparationTargetProvisioningError,
   __internals: { assertAdminPermission },
@@ -260,6 +263,53 @@ async function listSnapshotBatches({ recordsApi, provisioning, targetProjectId, 
   return { projectId, batchCount: batches.length, batches }
 }
 
+/**
+ * #6475 fix round 2 — WHICH BATCH IS THIS PROJECT'S NEWEST, by identity only.
+ *
+ * Returns `{ snapshotBatchId, syncRunId }` of the project's single highest-`snapshotVersion` batch
+ * row, or `null` when there is nothing to name: the batch sheet is not provisioned, the project has no
+ * batch row, a row's version is not a strict positive integer, the top version is shared by two rows,
+ * or the top row lacks either id. Every `null` means "no candidate", never "no batch": the caller (the
+ * table-action mvp-persist route) only uses an answer to ask the persist module, under its own lock and
+ * with its full exact-replay check, whether this sync's content IS that batch — so a wrong or missing
+ * answer here can cost that shortcut, never store or skip anything on its own.
+ *
+ * Batch rows only — no line or run scan (`listSnapshotBatches` reads every line of every batch to
+ * count them; this runs on every archive). Same admin gate, same frozen-object assertion, same bounded
+ * paging and the same staging/business project split as every other read in this module.
+ */
+async function readNewestSnapshotBatchIdentity({ recordsApi, provisioning, targetProjectId, businessProjectId, permission } = {}) {
+  assertAdminPermission(permission)
+  const api = ensureReadOnlyRecordsApi(recordsApi)
+  const prov = ensureProvisioningApi(provisioning)
+  const stagingProjectId = requiredString(targetProjectId, 'targetProjectId')
+  const projectId = requiredString(businessProjectId, 'businessProjectId')
+  const batchSheet = await findMvpSheet(api, prov, stagingProjectId, BATCH_OBJECT_ID)
+  if (!batchSheet) return null
+  const batchRows = await queryAllRecords(batchSheet, { projectId })
+  let newest = null
+  let newestVersion = 0
+  let tied = false
+  for (const batchRow of batchRows) {
+    const version = parseStrictVersion(readCell(batchRow, 'snapshotVersion'))
+    if (version === null) return null
+    if (version > newestVersion) {
+      newest = batchRow
+      newestVersion = version
+      tied = false
+    } else if (version === newestVersion) {
+      tied = true
+    }
+  }
+  if (!newest || tied) return null
+  // The ids exactly as stored (never trimmed): they are compared and replayed verbatim.
+  const storedId = (value) => (typeof value === 'string' && value !== '' ? value : null)
+  const snapshotBatchId = storedId(readCell(newest, 'snapshotBatchId'))
+  const syncRunId = storedId(readCell(newest, 'syncRunId'))
+  if (!snapshotBatchId || !syncRunId) return null
+  return { snapshotBatchId, syncRunId }
+}
+
 function changeCountsFromEvidence(diff) {
   const byChangeType = (diff && diff.evidence && diff.evidence.result && diff.evidence.result.byChangeType) || {}
   return {
@@ -271,6 +321,15 @@ function changeCountsFromEvidence(diff) {
     pathChanged: byChangeType[CHANGE_TYPES.PATH_CHANGED] || 0,
     missingChildBom: byChangeType[CHANGE_TYPES.MISSING_CHILD_BOM] || 0,
     fingerprintChanged: byChangeType[CHANGE_TYPES.SOURCE_FINGERPRINT_CHANGED] || 0,
+    // Q3c: the fingerprint-decomposition change types (component-code swap / material substitution at
+    // an otherwise unchanged path) were computed by the engine (compareMatchedRows) and tallied into
+    // evidence.byChangeType all along, but this summary vocabulary never surfaced them — an in-place
+    // swap only ever showed up here folded into fingerprintChanged, and a reviewer had to open the
+    // row-by-row drill-down to learn WHICH kind of swap it was. Both counts are independent of
+    // fingerprintChanged (a row can carry more than one changeType), so adding them here does not
+    // change any existing count.
+    componentCodeChanged: byChangeType[CHANGE_TYPES.COMPONENT_CODE_CHANGED] || 0,
+    materialChanged: byChangeType[CHANGE_TYPES.MATERIAL_CHANGED] || 0,
   }
 }
 
@@ -660,6 +719,7 @@ async function listSnapshotDiffRows({ recordsApi, provisioning, targetProjectId,
 
 module.exports = {
   listSnapshotBatches,
+  readNewestSnapshotBatchIdentity,
   getSnapshotDiff,
   listSnapshotDiffRows,
   BATCH_OBJECT_ID,

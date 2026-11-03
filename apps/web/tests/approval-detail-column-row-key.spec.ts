@@ -139,7 +139,12 @@ const ElInput = defineComponent({
       value: this.modelValue ?? '',
       disabled: this.disabled,
       'data-testid': (this.$attrs as any)?.['data-testid'],
-      onInput: (event: Event) => this.$emit('update:modelValue', (event.target as HTMLInputElement).value),
+      // Element Plus 2.11.8 fidelity (R-43 gate r3): no update when the typed text is unchanged.
+      onInput: (event: Event) => {
+        const text = (event.target as HTMLInputElement).value
+        if (text === String(this.modelValue ?? '')) return
+        this.$emit('update:modelValue', text)
+      },
     })
   },
 })
@@ -402,7 +407,6 @@ async function addDetailFieldAndFillBasics() {
   await mountView()
   ;(container!.querySelector('[data-testid="approval-field-palette-detail"]') as HTMLButtonElement).click()
   await flushUi()
-  setInput('approval-template-key', 'detail_row_key_repro')
   setInput('approval-template-name', '明细子字段行键回归')
   await flushUi()
 }

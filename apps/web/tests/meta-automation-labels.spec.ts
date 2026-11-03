@@ -19,11 +19,15 @@ import {
   automationDingTalkPersonStatusLabel,
   automationDingTalkPersonSubjectLabel,
   automationDingTalkPresetLabel,
+  automationDingTalkSaveNotice,
+  automationDingTalkSelectedNotLinkedSummary,
   automationDingTalkTemplateTokenLabel,
   automationLabel,
   automationLastRunChip,
   automationLastRunRelativeTime,
   automationStatusLabel,
+  automationStepErrorText,
+  automationStepOutputView,
   automationTestRunFailed,
   automationTestRunRequestFailed,
   automationTestRunSkipped,
@@ -107,7 +111,11 @@ describe('meta-automation-labels', () => {
     expect(automationTriggerConditionLabel('future_condition', true)).toBe('future_condition')
 
     expect(automationCronPresetLabel('*/5 * * * *', true)).toBe('每 5 分钟')
-    expect(automationCronPresetLabel('0 0 * * 1', true)).toBe('每周一')
+    // A7a: wall-clock presets name their clock — default = the business timezone new rules are saved with;
+    // a legacy UTC rule shows both clocks (the old "每天午夜" fired at 08:00 Beijing).
+    expect(automationCronPresetLabel('0 0 * * 1', true)).toBe('每周一 00:00（北京时间）')
+    expect(automationCronPresetLabel('0 0 * * *', true)).toBe('每天 00:00（北京时间）')
+    expect(automationCronPresetLabel('0 0 * * *', true, 'UTC')).toBe('每天 00:00 UTC（北京时间 08:00）')
     expect(automationCronPresetLabel('custom', true)).toBe('自定义')
     expect(automationCronPresetLabel('0 30 9 * *', true)).toBe('0 30 9 * *')
   })
@@ -156,6 +164,9 @@ describe('meta-automation-labels', () => {
     expect(automationCardActionSummary('notify', '', true)).toBe('发送通知')
     expect(automationCardActionSummary('update_field', '状态', false)).toBe('Update "状态"')
     expect(automationCardActionSummary('update_field', 'Status', true)).toBe('更新“Status”')
+    // F9: update_field folded into update_record — a single-field update still names its field.
+    expect(automationCardActionSummary('update_record', 'Status', true)).toBe('更新“Status”')
+    expect(automationCardActionSummary('update_record', '', true)).toBe('更新记录')
     expect(automationCardActionSummary('future_action', '', true)).toBe('future_action')
 
     expect(automationCardLinkLabel('publicForm', '我的视图', false)).toBe('Open public form: 我的视图')
@@ -285,5 +296,149 @@ describe('meta-automation-labels', () => {
     expect(automationDingTalkAllowlistSummary(1, 0, false)).toBe('1 local user')
     expect(automationDingTalkAllowlistSummary(2, 1, false)).toBe('2 local users and 1 local member group')
     expect(automationDingTalkAllowlistSummary(1, 2, true)).toBe('1 个本地用户和 2 个本地成员组')
+  })
+})
+
+// 客户反馈 2026-09-24 #3 final review F1 — the three values-free markers the #3 fix writes into a step output.
+describe('automationStepOutputView', () => {
+  it('skipped delete of a vanished trigger record → the 已跳过 sentence, reason key dropped, ids kept', () => {
+    const output = { recordId: 'rec_gone', sheetId: 'sheet_1', reason: 'target_record_missing' }
+    expect(automationStepOutputView(output, true)).toEqual({
+      reason: '触发记录已不存在，已跳过（未做任何修改）',
+      output: { recordId: 'rec_gone', sheetId: 'sheet_1' },
+    })
+    expect(automationStepOutputView(output, false).reason).toBe('The trigger record no longer exists; skipped (nothing was changed).')
+    expect(output).toEqual({ recordId: 'rec_gone', sheetId: 'sheet_1', reason: 'target_record_missing' }) // not mutated
+  })
+
+  it('update_record no-op (status success) → its own sentence without "skipped", reason + noop dropped', () => {
+    expect(automationStepOutputView({ updatedFields: ['fld_1'], noop: true, reason: 'target_record_missing' }, true)).toEqual({
+      reason: '触发记录已不存在，未做任何修改',
+      output: { updatedFields: ['fld_1'] },
+    })
+    expect(automationStepOutputView({ noop: true, reason: 'target_record_missing' }, false)).toEqual({
+      reason: 'The trigger record no longer exists; nothing was changed.',
+      output: null,
+    })
+  })
+
+  it('same-base approval writeback marker → the writeback sentence, marker dropped', () => {
+    expect(automationStepOutputView({ outcome: 'approved', backwriteSkipped: 'target_record_missing' }, true)).toEqual({
+      reason: '审批结果未写回：触发记录已不存在（未做任何修改）',
+      output: { outcome: 'approved' },
+    })
+  })
+
+  it('leaves everything else untouched (same reference), including a cross-base backwriteSkipped sentence', () => {
+    const others: unknown[] = [
+      null,
+      undefined,
+      'target_record_missing',
+      ['target_record_missing'],
+      { reason: 'APPROVAL_FWB_WRITEBACK_ENABLED is OFF' },
+      { backwriteSkipped: 'cross-base resultWriteback target record not found: rec_1 ∉ sheet_1' },
+      { ok: true },
+    ]
+    for (const output of others) {
+      const view = automationStepOutputView(output, true)
+      expect(view.reason, JSON.stringify(output)).toBeNull()
+      expect(view.output).toBe(output)
+    }
+  })
+
+  // 客户反馈 2026-10-21 (a): DingTalk person message recipient outcome — counts only, never ids.
+  it('all-skipped DingTalk person message → 「0 人收到：…」 with the link hint; reason, counts and stored ids dropped', () => {
+    const output = {
+      reason: 'dingtalk_recipients_unreachable',
+      notifiedUsers: 0,
+      skippedRecipientCount: 3,
+      skippedUserIds: ['user_fake_a', 'user_fake_b', 'user_fake_c'],
+      skippedReasonCounts: { notLinked: 1, inactive: 1, notFound: 1 },
+    }
+    const zh = automationStepOutputView(output, true)
+    expect(zh.reason).toBe('0 人收到：1 人未绑定钉钉，1 人已停用，1 人不存在。成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。')
+    // 客户反馈 2026-10-21 item 1 follow-up: the run log never renders who was skipped, only how many.
+    expect(zh.output).toEqual({ notifiedUsers: 0, skippedRecipientCount: 3 })
+    const en = automationStepOutputView(output, false)
+    expect(en.reason).toBe('0 received: 1 not linked to DingTalk, 1 inactive, 1 not found. Each member must be linked to DingTalk in the directory and sign in with DingTalk once.')
+    for (const id of output.skippedUserIds) expect(`${zh.reason}${en.reason}`).not.toContain(id)
+  })
+
+  it('partial DingTalk delivery (success step) still gets the count sentence', () => {
+    expect(automationStepOutputView({ notifiedUsers: 4, skippedRecipientCount: 1, skippedUserIds: ['user_fake_a'], skippedReasonCounts: { notLinked: 1, inactive: 0, notFound: 0 } }, true).reason)
+      .toBe('4 人收到：1 人未绑定钉钉。成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。')
+    // only inactive/not-found: no link hint
+    expect(automationStepOutputView({ notifiedUsers: 1, skippedRecipientCount: 1, skippedReasonCounts: { notLinked: 0, inactive: 1, notFound: 0 } }, true).reason)
+      .toBe('1 人收到：1 人已停用。')
+  })
+
+  it('an execution stored before the per-cause counts falls back to the total', () => {
+    expect(automationStepOutputView({ notifiedUsers: 0, skippedRecipientCount: 2, skippedUserIds: ['user_fake_a', 'user_fake_b'] }, true).reason)
+      .toBe('0 人收到：2 人未绑定钉钉或已停用。成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。')
+  })
+
+  // 客户反馈 2026-10-21 item 1 follow-up: the step error line.
+  it('step error text: zh hides the English line under the count sentence; a legacy id-listing error becomes values-free', () => {
+    const unreachable = {
+      reason: 'dingtalk_recipients_unreachable',
+      notifiedUsers: 0,
+      skippedRecipientCount: 1,
+      skippedUserIds: ['user_fake_a'],
+      skippedReasonCounts: { notLinked: 1, inactive: 0, notFound: 0 },
+    }
+    const englishError = 'No DingTalk recipient was reached: 1 skipped (not linked: 1, inactive: 0, not found: 0) (DINGTALK_RECIPIENTS_UNREACHABLE)'
+    expect(automationStepErrorText(englishError, unreachable, true)).toBe('')
+    expect(automationStepErrorText(englishError, unreachable, false)).toBe(englishError)
+    // no count sentence to stand in for it (unrecognised output) → the error line stays
+    expect(automationStepErrorText(englishError, { reason: 'dingtalk_recipients_unreachable' }, true)).toBe(englishError)
+    // any other step error is untouched in zh
+    expect(automationStepErrorText('Webhook returned 500', { status: 500 }, true)).toBe('Webhook returned 500')
+    expect(automationStepErrorText(undefined, unreachable, true)).toBe('')
+
+    const legacy = 'DingTalk account not linked for users: user_fake_a, user_fake_b'
+    expect(automationStepErrorText(legacy, { notifiedUsers: 0, skippedRecipientCount: 2 }, true)).toBe('有收件人未绑定钉钉（旧记录，未列出具体用户）。')
+    expect(automationStepErrorText(legacy, undefined, false)).toBe('Some recipients were not linked to DingTalk (older record; the users are not listed).')
+  })
+
+  it('a person message that skipped nobody, or a send_notification output, is left untouched', () => {
+    for (const output of [{ notifiedUsers: 3, skippedRecipientCount: 0, skippedUserIds: [] }, { notifiedUsers: 2, persisted: true }]) {
+      const view = automationStepOutputView(output, true)
+      expect(view.reason).toBeNull()
+      expect(view.output).toBe(output)
+    }
+  })
+
+  // 客户反馈 2026-10-21 item 1 (review round 1): inactive and unknown ids count too; save notice.
+  it('selected-recipient summary counts not-linked, inactive and unknown ids; save notice never names anyone', () => {
+    expect(automationDingTalkSelectedNotLinkedSummary({ notLinked: 0, inactive: 0, notFound: 0 }, true)).toBe('')
+    expect(automationDingTalkSelectedNotLinkedSummary({ notLinked: 2, inactive: 0, notFound: 0 }, true))
+      .toBe(automationDingTalkSelectedNotLinkedSummary(2, true))
+    expect(automationDingTalkSelectedNotLinkedSummary({ notLinked: 1, inactive: 2, notFound: 3 }, true))
+      .toBe('已选收件人中 1 位未绑定钉钉，2 位已停用，3 个 ID 未找到用户，规则触发时他们收不到消息。成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。')
+    // no link hint when nobody is merely unlinked
+    expect(automationDingTalkSelectedNotLinkedSummary({ notLinked: 0, inactive: 1, notFound: 0 }, false))
+      .toBe('Selected recipients: 1 inactive — they will not receive the message when the rule fires.')
+    expect(automationDingTalkSaveNotice({ notLinked: 0, inactive: 0, notFound: 0, checking: 0 }, true)).toBe('')
+    // review round 2: "still checking" keeps the counts already known; a failed check is said out loud
+    expect(automationDingTalkSaveNotice({ notLinked: 1, inactive: 0, notFound: 0, checking: 2 }, true))
+      .toBe('已保存。部分钉钉收件人仍在检查中，可重新打开规则查看他们能否收到消息。1 位已选用户未绑定钉钉，规则触发时他们收不到消息。成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。')
+    expect(automationDingTalkSaveNotice({ notLinked: 0, inactive: 0, notFound: 0, checking: 0, unchecked: 2 }, true))
+      .toBe('已保存。2 位收件人无法检查钉钉绑定，保存后请在「钉钉个人消息投递记录」中确认。')
+    expect(automationDingTalkSaveNotice({ notLinked: 0, inactive: 0, notFound: 0, checking: 0, unchecked: 1 }, false))
+      .toBe('Saved. 1 recipient(s) could not be checked for a DingTalk link — after saving, check this rule’s DingTalk person delivery records.')
+    expect(automationDingTalkSaveNotice({ notLinked: 0, inactive: 0, notFound: 1, checking: 0 }, false))
+      .toBe('Saved. Selected recipients: 1 with no matching user — they will not receive the message when the rule fires.')
+  })
+
+  it('rule editor summary for selected users without a DingTalk link is a count', () => {
+    expect(automationDingTalkSelectedNotLinkedSummary(0, true)).toBe('')
+    expect(automationDingTalkSelectedNotLinkedSummary(2, true)).toBe('2 位已选用户未绑定钉钉，规则触发时他们收不到消息。成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。')
+    expect(automationDingTalkSelectedNotLinkedSummary(1, false)).toContain('1 selected user is not linked to DingTalk')
+  })
+
+  it('the log panel wording for a skipped run is 已跳过 in zh', () => {
+    expect(automationLabel('log.skipped', true)).toBe('已跳过')
+    expect(automationLabel('log.statusSkipped', true)).toBe('已跳过')
+    expect(automationLabel('log.skipped', false)).toBe('Skipped')
   })
 })

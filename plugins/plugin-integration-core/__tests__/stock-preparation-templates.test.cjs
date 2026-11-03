@@ -72,7 +72,7 @@ function main() {
   for (const [fieldId, labelZh] of [
     ['parentComponentCode', '父组件图号'],
     ['parentComponentName', '父组件名称'],
-    ['componentSpec', '规格'],
+    ['componentSpec', '组件规格'],
   ]) {
     assert.ok(byId[fieldId], `备料主表 persists ${fieldId}`)
     assert.equal(byId[fieldId].type, 'string', `${fieldId} is a string`)

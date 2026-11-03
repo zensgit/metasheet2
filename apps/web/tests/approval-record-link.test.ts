@@ -17,6 +17,7 @@ import {
   isValidRecordLinkValue,
   parseRecordLinkValue,
   recordLinkBaseId,
+  recordLinkSheetAfterBaseChange,
   recordLinkSheetId,
   resolvePinnedTargetLabel,
   validateRecordLinkPinAgainstLoadedCatalog,
@@ -375,5 +376,37 @@ describe('record-link — prefillFromSnapshot fail-closed (no pin metadata)', ()
     expect(prefillFromSnapshot(schema, {
       linked: { recordId: 'a', sheetId: 'nope' },
     })).toEqual({})
+  })
+})
+
+describe('record-link — sheet pin after a target-base change (Canvas V2 inspector picker)', () => {
+  // Same membership rule as the flag-OFF inline editor's base-change handler: the current sheet
+  // survives ONLY when a loaded catalog row proves it belongs to the NEW base. The caller submits
+  // { baseId, sheetId } as one committed edit, so this helper must be pure and catalog-driven.
+  const sheets = [
+    { id: 'sheet_alpha_1', name: '订单表', baseId: 'base_alpha' },
+    { id: 'sheet_beta_1', name: '客户表', baseId: 'base_beta' },
+    { id: 'sheet_orphan', name: '无空间归属', baseId: null },
+  ]
+
+  it('clears a sheet that does not belong to the new base', () => {
+    expect(recordLinkSheetAfterBaseChange(sheets, 'base_beta', 'sheet_alpha_1')).toBe('')
+  })
+
+  it('keeps a sheet the catalog proves belongs to the new base (hydrated base/sheet mismatch repaired by re-picking the base)', () => {
+    expect(recordLinkSheetAfterBaseChange(sheets, 'base_beta', 'sheet_beta_1')).toBe('sheet_beta_1')
+    expect(recordLinkSheetAfterBaseChange(sheets, '  base_beta ', ' sheet_beta_1 ')).toBe('sheet_beta_1')
+  })
+
+  it('clearing the base always clears the sheet, even for a catalog row without base membership', () => {
+    expect(recordLinkSheetAfterBaseChange(sheets, '', 'sheet_alpha_1')).toBe('')
+    expect(recordLinkSheetAfterBaseChange(sheets, '', 'sheet_orphan')).toBe('')
+    expect(recordLinkSheetAfterBaseChange(sheets, null, 'sheet_orphan')).toBe('')
+  })
+
+  it('an unknown sheet, a blank sheet, or an unloaded (empty) catalog yields a blank sheet', () => {
+    expect(recordLinkSheetAfterBaseChange(sheets, 'base_alpha', 'sheet_missing')).toBe('')
+    expect(recordLinkSheetAfterBaseChange(sheets, 'base_alpha', '')).toBe('')
+    expect(recordLinkSheetAfterBaseChange([], 'base_alpha', 'sheet_alpha_1')).toBe('')
   })
 })

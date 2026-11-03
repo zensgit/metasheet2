@@ -34,18 +34,39 @@ function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
   }
 }
 
+const RECIPIENT_STATUS: Record<string, { userId: string; exists: boolean; active: boolean; dingtalkLinked: boolean }> = {
+  user_1: { userId: 'user_1', exists: true, active: true, dingtalkLinked: true },
+  user_2: { userId: 'user_2', exists: true, active: true, dingtalkLinked: false },
+  user_fake_synced: { userId: 'user_fake_synced', exists: true, active: true, dingtalkLinked: false },
+  user_fake_inactive: { userId: 'user_fake_inactive', exists: true, active: false, dingtalkLinked: true },
+  user_fake_roleless_linked: { userId: 'user_fake_roleless_linked', exists: true, active: true, dingtalkLinked: true },
+}
+
 function mockClient(
   rules: AutomationRule[] = [],
   options: {
     testExecution?: Record<string, unknown> | Promise<Record<string, unknown>>
-    testErrorMessage?: string
+    /**
+     * The test-run route's failure body (#5812 and its follow-up): `{ ok:false, error:{ code, message } }`
+     * with a FIXED, values-free message — the route never echoes raw error text any more.
+     */
+    testError?: { status: number; code: string; message: string }
     groupDeliveryErrorMessage?: string
     personDeliveryErrorMessage?: string
     rulesErrorMessage?: string | null
     stats?: Record<string, unknown>
     dingTalkGroups?: Array<Record<string, unknown>>
+    /** #6155: the rule PATCH answers this error body (`{ ok:false, error:{ code, message } }`) instead of 204. */
+    patchError?: { status: number; code: string; message: string }
+    /** #6155: once a PATCH has been attempted, the rule list the SERVER answers (what it really stored). */
+    rulesAfterPatch?: AutomationRule[]
+    /** #6155: the rule PATCH does not answer until this settles (lets a spec look at the in-flight state). */
+    patchGate?: Promise<void>
+    /** 客户反馈 2026-10-21 item 1 (review round 1): the rule's run log. */
+    logs?: Array<Record<string, unknown>>
   } = {},
 ) {
+  let patchAttempted = false
   const ok = (body: unknown) => new Response(JSON.stringify({ data: body }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   const apiError = (message: string) => new Response(
     JSON.stringify({ error: { code: 'INTERNAL_ERROR', message } }),
@@ -121,10 +142,11 @@ function mockClient(
       })
     }
     if (method === 'POST' && url.includes('/automations/') && url.endsWith('/test')) {
-      if (options.testErrorMessage) {
+      if (options.testError) {
+        const { status, code, message } = options.testError
         return new Response(
-          JSON.stringify({ error: options.testErrorMessage }),
-          { status: 500, headers: { 'Content-Type': 'application/json' } },
+          JSON.stringify({ ok: false, error: { code, message } }),
+          { status, headers: { 'Content-Type': 'application/json' } },
         )
       }
       return ok(await (options.testExecution ?? {
@@ -137,7 +159,13 @@ function mockClient(
         steps: [],
       }))
     }
+    // 客户反馈 2026-10-21 item 1 (review round 1): the sender-side recipient preflight (booleans only).
+    if (method === 'POST' && url.includes('/automations/dingtalk-person-recipient-status')) {
+      const body = JSON.parse(init?.body as string) as { userIds: string[] }
+      return ok({ items: body.userIds.map((userId) => RECIPIENT_STATUS[userId] ?? { userId, exists: false, active: false, dingtalkLinked: false }) })
+    }
     if (method === 'GET' && url.includes('/automations')) {
+      if (url.includes('/logs')) return ok({ executions: options.logs ?? [] })
       if (url.includes('/dingtalk-group-deliveries')) {
         if (options.groupDeliveryErrorMessage) return apiError(options.groupDeliveryErrorMessage)
         return ok({ deliveries: groupDeliveries })
@@ -155,7 +183,7 @@ function mockClient(
         }
         return apiError(options.rulesErrorMessage)
       }
-      return ok({ rules })
+      return ok({ rules: patchAttempted && options.rulesAfterPatch ? options.rulesAfterPatch : rules })
     }
     if (method === 'POST' && url.includes('/automations')) {
       const body = JSON.parse(init?.body as string)
@@ -171,6 +199,15 @@ function mockClient(
       })
     }
     if (method === 'PATCH' && url.includes('/automations/')) {
+      patchAttempted = true
+      if (options.patchGate) await options.patchGate
+      if (options.patchError) {
+        const { status, code, message } = options.patchError
+        return new Response(
+          JSON.stringify({ ok: false, error: { code, message } }),
+          { status, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
       return noContent()
     }
     if (method === 'DELETE' && url.includes('/automations/')) {
@@ -372,22 +409,27 @@ describe('MetaAutomationManager', () => {
     const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
     expect(container.querySelector('.meta-automation__form-title')?.textContent).toContain('新建自动化')
     expect(nameInput.placeholder).toBe('自动化名称')
-    expect(epSelectValue(actionSelect)).toBe('notify')
+    // F9: these values used to be the v0 aliases (notify / update_field), which the executor has NO
+    // dispatch case for — the quick form was minting rules that could never run. The expectation below
+    // is the corrected one; the labels are unchanged ('发送通知' covers both).
+    expect(epSelectValue(actionSelect)).toBe('send_notification')
     expect(epOptions(actionSelect).map((option) => option.value)).toEqual([
-      'notify',
-      'update_field',
+      'send_notification',
+      'update_record',
       'send_dingtalk_group_message',
       'send_dingtalk_person_message',
     ])
     expect(actionSelect.textContent).toContain('发送通知')
+    expect((container.querySelector('[data-automation-field="notifyRecipientSearch"]') as HTMLInputElement).placeholder).toBe('输入姓名或邮箱搜索')
+    expect((container.querySelector('[data-automation-field="notifyUserIds"]') as HTMLInputElement).placeholder).toBe('用户 ID，逗号或换行分隔')
     expect((container.querySelector('[data-automation-field="notifyMessage"]') as HTMLInputElement).placeholder).toBe('通知内容')
     // UF-4 shape adaptation: el-drawer's built-in close button carries a localized aria-label by
     // design; the guard below still asserts the AUTHORED surface adds no aria-label noise.
     expect(container.querySelectorAll('[aria-label]:not(.el-drawer__close-btn)')).toHaveLength(0)
     expect(container.querySelectorAll('[title]')).toHaveLength(0)
-    expect(container.querySelectorAll('[placeholder]')).toHaveLength(2)
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(4) // name + recipient search + manual recipient ids + message
 
-    epSetSelect(actionSelect, 'update_field')
+    epSetSelect(actionSelect, 'update_record')
     await nextTick()
 
     const targetField = container.querySelector('[data-automation-field="targetFieldId"]') as HTMLElement
@@ -455,7 +497,7 @@ describe('MetaAutomationManager', () => {
     expect(container.textContent).toContain('搜索并添加用户或成员组')
     expect(container.textContent).toContain('模板令牌')
     expect((container.querySelector('[data-automation-field="dingtalkPersonUserSearch"]') as HTMLInputElement).placeholder)
-      .toBe('按用户、成员组、邮箱或主体 ID 搜索')
+      .toBe('按姓名、登录名、邮箱、成员组或主体 ID 搜索')
     expect((container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement).placeholder)
       .toBe('例如：record.assigneeUserIds, record.reviewerUserId')
     expect((container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement).placeholder)
@@ -902,14 +944,23 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'My Rule'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    // Fill message for notify action
+    // F9: recipients are required before the message — a notification rule without them can never
+    // deliver, so the save button stays disabled until one is entered.
+    const saveBtnBefore = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
+    const recipientsInput = container.querySelector('[data-automation-field="notifyUserIds"]') as HTMLInputElement
     const msgInput = container.querySelector('[data-automation-field="notifyMessage"]') as HTMLInputElement
     msgInput.value = 'Hello!'
     msgInput.dispatchEvent(new Event('input', { bubbles: true }))
     await nextTick()
+    expect(saveBtnBefore.disabled).toBe(true)
+
+    recipientsInput.value = 'u1, u2'
+    recipientsInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
 
     // Save
     const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
     saveBtn.click()
     await flushPromises()
 
@@ -918,8 +969,44 @@ describe('MetaAutomationManager', () => {
     const body = JSON.parse(postCalls[0][1]?.body as string)
     expect(body.name).toBe('My Rule')
     expect(body.triggerType).toBe('record.created')
-    expect(body.actionType).toBe('notify')
-    expect(body.actionConfig.message).toBe('Hello!')
+    // F9 corrected expectation: this used to assert 'notify' + { message } — a rule shape the executor
+    // fails on. The config is now byte-identical to what the advanced editor emits.
+    expect(body.actionType).toBe('send_notification')
+    expect(body.actionConfig).toEqual({ userIds: ['u1', 'u2'], message: 'Hello!' })
+  })
+
+  it('F9: the quick form refuses to save an update_record without a target field + value', async () => {
+    const { client, fetchFn } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    ;(container.querySelector('.meta-automation__btn-add') as HTMLButtonElement).click()
+    await nextTick()
+
+    const nameInput = container.querySelector('[data-automation-field="name"]') as HTMLInputElement
+    nameInput.value = 'Update rule'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    epSetSelect(container.querySelector('[data-automation-field="actionType"]') as HTMLElement, 'update_record')
+    await nextTick()
+
+    const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+
+    epSetSelect(container.querySelector('[data-automation-field="targetFieldId"]') as HTMLElement, 'fld_1')
+    const targetValue = container.querySelector('[data-automation-field="targetValue"]') as HTMLInputElement
+    targetValue.value = 'Done'
+    targetValue.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    expect(saveBtn.disabled).toBe(false)
+
+    saveBtn.click()
+    await flushPromises()
+
+    const postCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'POST')
+    const body = JSON.parse(postCalls[0][1]?.body as string)
+    // UpdateRecordConfig's real shape — the legacy { fieldId, value } had no executor case at all.
+    expect(body.actionType).toBe('update_record')
+    expect(body.actionConfig).toEqual({ fields: { fld_1: 'Done' } })
   })
 
   it('toggles rule enabled/disabled', async () => {
@@ -937,6 +1024,156 @@ describe('MetaAutomationManager', () => {
     expect(patchCalls.length).toBe(1)
     const body = JSON.parse(patchCalls[0][1]?.body as string)
     expect(body.enabled).toBe(false)
+  })
+
+  // #6155: a refused toggle used to leave the native checkbox CHECKED (the click flipped it and nothing re-synced
+  // it, because the rule's `enabled` never changed) while the text still said the rule was off.
+  describe('#6155 — the panel toggle and notice for a record-deleted rule', () => {
+    const SERVER_SENTENCE = '记录删除时触发记录已不存在，不能再修改/删除/锁定它'
+    const deletedTriggerRule = (overrides: Partial<AutomationRule> = {}) => fakeRule({
+      name: 'On delete, delete record',
+      triggerType: 'record.deleted',
+      actionType: 'delete_record',
+      actionConfig: {},
+      actions: [{ type: 'delete_record', config: {} }],
+      enabled: false,
+      ...overrides,
+    })
+    // Re-queried every time: the fix re-creates the control after a failed toggle.
+    const toggleInput = (container: HTMLElement) => container.querySelector('[data-automation-toggle] input') as HTMLInputElement
+    const toggleRoot = (container: HTMLElement) => container.querySelector('[data-automation-toggle]') as HTMLElement
+    const listCallsAfterPatch = (fetchFn: ReturnType<typeof vi.fn>) => {
+      const calls = fetchFn.mock.calls as Array<[string, RequestInit | undefined]>
+      const patchIndex = calls.findIndex(([, init]) => init?.method === 'PATCH')
+      return calls.filter(([url, init], index) => (
+        index > patchIndex && (init?.method ?? 'GET') === 'GET' && /\/sheets\/sheet_1\/automations$/.test(url)
+      )).length
+    }
+
+    it('a refused switch-on: the request carries only `enabled`; checkbox, text and stored state agree (off) and the server sentence is shown', async () => {
+      const { client, fetchFn } = mockClient([deletedTriggerRule()], {
+        patchError: { status: 400, code: 'DELETED_TRIGGER_SELF_MUTATION', message: SERVER_SENTENCE },
+      })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+      expect(toggleInput(container).checked).toBe(false)
+      expect(toggleRoot(container).textContent).toContain('Disabled')
+
+      toggleInput(container).click()
+      await flushPromises()
+
+      const patchCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'PATCH')
+      expect(patchCalls.length).toBe(1)
+      expect(JSON.parse(patchCalls[0][1]?.body as string)).toEqual({ enabled: true })
+
+      expect(toggleInput(container).checked).toBe(false)
+      expect(toggleRoot(container).classList.contains('is-checked')).toBe(false)
+      expect(toggleRoot(container).textContent).toContain('Disabled')
+      expect(toggleRoot(container).textContent).not.toContain('Enabled')
+      // The server's own sentence, verbatim — not a generic "failed to update".
+      expect(container.querySelector('.meta-automation__error[role="alert"]')?.textContent?.trim()).toBe(SERVER_SENTENCE)
+      // The panel asked the server what it stored instead of trusting its own copy.
+      expect(listCallsAfterPatch(fetchFn)).toBe(1)
+    })
+
+    it('a switch-on that failed in transit but was stored: the panel shows what the SERVER has (on), not what it assumed', async () => {
+      const { client } = mockClient([deletedTriggerRule({ triggerType: 'record.created' })], {
+        patchError: { status: 503, code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' },
+        rulesAfterPatch: [deletedTriggerRule({ triggerType: 'record.created', enabled: true })],
+      })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+      expect(toggleInput(container).checked).toBe(false)
+
+      toggleInput(container).click()
+      await flushPromises()
+
+      expect(toggleInput(container).checked).toBe(true)
+      expect(toggleRoot(container).classList.contains('is-checked')).toBe(true)
+      expect(toggleRoot(container).textContent).toContain('Enabled')
+      expect(container.querySelector('.meta-automation__error[role="alert"]')?.textContent?.trim()).toBe('Automation service is not available')
+    })
+
+    // #6155 panel notice: a rule of this shape that is on (or being switched on) runs, and an update/delete/lock
+    // action of it aimed at the deleted trigger record changes no table record; the panel says so without blocking
+    // anything. The shape is decided by the editor's own save-block detector.
+    const NOTICE_EN = 'This rule runs when a record is deleted, so any update, delete or lock action in it aimed at that deleted record has no effect. If that is not intended, change the action or the trigger.'
+    const NOTICE_ZH = '此规则在记录删除时运行，所以其中针对这条已删除记录的修改、删除或锁定动作不会生效。如非预期，请改用其他动作，或换一个触发条件。'
+    const notice = (container: HTMLElement) => container.querySelector('[data-automation-deleted-trigger-notice]') as HTMLElement | null
+
+    it('an ENABLED rule of this shape shows the notice, in English and in Chinese', async () => {
+      const { client } = mockClient([deletedTriggerRule({ enabled: true })])
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+
+      expect(notice(container)?.textContent?.trim()).toBe(NOTICE_EN)
+      expect(notice(container)?.getAttribute('role')).toBe('note')
+
+      useLocale().setLocale('zh-CN')
+      await nextTick()
+      expect(notice(container)?.textContent?.trim()).toBe(NOTICE_ZH)
+    })
+
+    it('a switched-OFF rule shows none; switching it on shows the notice while the request is in flight and after, and is not blocked', async () => {
+      let release!: () => void
+      const patchGate = new Promise<void>((resolve) => { release = resolve })
+      const { client, fetchFn } = mockClient([deletedTriggerRule({ enabled: false })], { patchGate })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+      expect(notice(container)).toBeNull()
+
+      toggleInput(container).click()
+      await nextTick()
+      // Not blocking: the request left immediately (no confirm step), and the notice is up while it is in flight.
+      expect(fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'PATCH').length).toBe(1)
+      expect(notice(container)?.textContent?.trim()).toBe(NOTICE_EN)
+
+      release()
+      await flushPromises()
+      expect(toggleRoot(container).textContent).toContain('Enabled')
+      expect(notice(container)?.textContent?.trim()).toBe(NOTICE_EN)
+    })
+
+    it('a REFUSED switch-on takes the notice down again (the rule stays off)', async () => {
+      const { client } = mockClient([deletedTriggerRule({ enabled: false })], {
+        patchError: { status: 400, code: 'DELETED_TRIGGER_SELF_MUTATION', message: SERVER_SENTENCE },
+      })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+
+      toggleInput(container).click()
+      await flushPromises()
+
+      expect(toggleRoot(container).textContent).toContain('Disabled')
+      expect(notice(container)).toBeNull()
+    })
+
+    it('decides the shape like the editor: nested branch mutation and the v0 alias count; other triggers, other actions and a complete cross-base target do not', async () => {
+      const complete = { targetBaseId: 'base_b', targetSheetId: 'sheet_b', targetRecordId: 'rec_b' }
+      const branchConfig = {
+        branches: [{ key: 'hit', conditions: { conjunction: 'AND', conditions: [] }, actions: [{ type: 'update_record', config: { fields: { fld_1: 'x' } } }] }],
+        defaultBranch: { key: 'fallback', actions: [] },
+      }
+      const rules: AutomationRule[] = [
+        deletedTriggerRule({ id: 'r_nested', enabled: true, actionType: 'condition_branch', actionConfig: branchConfig, actions: [{ type: 'condition_branch', config: branchConfig }] }),
+        deletedTriggerRule({ id: 'r_alias', enabled: true, actionType: 'update_field' as never, actionConfig: { fieldId: 'fld_1', value: 'x' }, actions: undefined }),
+        deletedTriggerRule({ id: 'r_lock_legacy_pair', enabled: true, actionType: 'lock_record', actionConfig: { locked: true }, actions: [] }),
+        deletedTriggerRule({ id: 'r_created', enabled: true, triggerType: 'record.created' }),
+        deletedTriggerRule({ id: 'r_webhook', enabled: true, actionType: 'send_webhook', actionConfig: { url: 'https://example.test/hook' }, actions: [{ type: 'send_webhook', config: { url: 'https://example.test/hook' } }] }),
+        deletedTriggerRule({ id: 'r_cross_base', enabled: true, actionConfig: complete, actions: [{ type: 'delete_record', config: complete }] }),
+      ]
+      const { client } = mockClient(rules)
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+
+      const hasNotice = (id: string) => Boolean(container.querySelector(`[data-automation-rule="${id}"] [data-automation-deleted-trigger-notice]`))
+      expect(hasNotice('r_nested')).toBe(true)
+      expect(hasNotice('r_alias')).toBe(true)
+      expect(hasNotice('r_lock_legacy_pair')).toBe(true)
+      expect(hasNotice('r_created')).toBe(false)
+      expect(hasNotice('r_webhook')).toBe(false)
+      expect(hasNotice('r_cross_base')).toBe(false)
+    })
   })
 
   it('deletes rule after confirmation naming the rule', async () => {
@@ -1011,15 +1248,17 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    // Default action is notify — should show message input
+    // Default action is send_notification — should show recipients + message inputs
+    expect(container.querySelector('[data-automation-field="notifyUserIds"]')).not.toBeNull()
     expect(container.querySelector('[data-automation-field="notifyMessage"]')).not.toBeNull()
     expect(container.querySelector('[data-automation-field="targetFieldId"]')).toBeNull()
 
-    // Switch to update_field
+    // Switch to update_record
     const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
-    epSetSelect(actionSelect, 'update_field')
+    epSetSelect(actionSelect, 'update_record')
     await nextTick()
 
+    expect(container.querySelector('[data-automation-field="notifyUserIds"]')).toBeNull()
     expect(container.querySelector('[data-automation-field="notifyMessage"]')).toBeNull()
     expect(container.querySelector('[data-automation-field="targetFieldId"]')).not.toBeNull()
     expect(container.querySelector('[data-automation-field="targetValue"]')).not.toBeNull()
@@ -1162,7 +1401,7 @@ describe('MetaAutomationManager', () => {
 
     const emptyState = container.querySelector('[data-automation-field="dingtalkDestinationEmpty"]')
     expect(emptyState?.textContent).toContain('No DingTalk groups are available for this table yet')
-    expect(emptyState?.textContent).toContain('API Tokens & Webhooks')
+    expect(emptyState?.textContent).toContain('API & Webhooks > DingTalk Groups')
     expect(emptyState?.textContent).toContain('record group field path')
 
     const titleInput = container.querySelector('[data-automation-field="dingtalkTitleTemplate"]') as HTMLInputElement
@@ -2176,8 +2415,11 @@ describe('MetaAutomationManager', () => {
     saveBtn.click()
     await flushPromises()
 
-    const postCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'POST')
+    const isPreflight = (url: string) => url.includes('/automations/dingtalk-person-recipient-status')
+    const postCalls = fetchFn.mock.calls.filter(([url, init]: [string, RequestInit | undefined]) => init?.method === 'POST' && !isPreflight(url))
     expect(postCalls.length).toBe(1)
+    // the picked user was checked with the sender-side preflight
+    expect(fetchFn.mock.calls.some(([url, init]: [string, RequestInit | undefined]) => isPreflight(url) && JSON.parse(init?.body as string).userIds.includes('user_1'))).toBe(true)
     const body = JSON.parse(postCalls[0][1]?.body as string)
     expect(body.actionConfig.userIds).toEqual(['user_1'])
     expect(body.actionConfig.memberGroupIds).toEqual(['group_1'])
@@ -2265,6 +2507,175 @@ describe('MetaAutomationManager', () => {
     const memberGroupIdsInput = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupIds"]') as HTMLTextAreaElement
     expect(memberGroupIdsInput.value).toBe('group_1')
     expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'inactive', limit: 8 })
+  })
+
+  // 客户反馈 2026-10-21 item 1 (review round 1, F2): the quick legacy form's 本地用户 ID box gets the same
+  // sender-side preflight as the rule editor.
+  it('quick legacy form: typed local user ids are checked on blur and a save with unreachable ones shows a notice', async () => {
+    const { client, fetchFn } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    ;(container.querySelector('.meta-automation__btn-add') as HTMLButtonElement).click()
+    await nextTick()
+    const nameInput = container.querySelector('[data-automation-field="name"]') as HTMLInputElement
+    nameInput.value = 'Typed recipients'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    epSetSelect(container.querySelector('[data-automation-field="actionType"]') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+
+    const idsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    idsInput.value = 'user_fake_synced, user_fake_inactive, user_fake_unknown'
+    idsInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+    expect(container.querySelector('[data-automation-field="dingtalkPersonNotLinkedSummary"]')).toBeNull()
+    idsInput.dispatchEvent(new FocusEvent('blur'))
+    await flushPromises()
+    // round 1b: no name known → no name slot (the id is not shown as if it were a name)
+    for (const id of ['user_fake_synced', 'user_fake_inactive', 'user_fake_unknown']) {
+      expect(container.querySelector(`[data-automation-person-recipient="${id}"] strong`)).toBeNull()
+    }
+
+    const preflights = fetchFn.mock.calls.filter(([url]: [string]) => url.includes('/automations/dingtalk-person-recipient-status'))
+    expect(preflights).toHaveLength(1)
+    expect(JSON.parse(preflights[0][1]?.body as string)).toEqual({ userIds: ['user_fake_synced', 'user_fake_inactive', 'user_fake_unknown'] })
+    const states = [...container.querySelectorAll('[data-automation-field="dingtalkPersonRecipientState"]')].map((el) => el.textContent)
+    expect(states).toEqual(['Not linked to DingTalk', 'Inactive', 'No user with this ID'])
+    const summary = container.querySelector('[data-automation-field="dingtalkPersonNotLinkedSummary"]')?.textContent ?? ''
+    expect(summary).toContain('Selected recipients: 1 not linked to DingTalk, 1 inactive, 1 with no matching user')
+    for (const id of ['user_fake_synced', 'user_fake_inactive', 'user_fake_unknown']) expect(summary).not.toContain(id)
+
+    const titleInput = container.querySelector('[data-automation-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'T'
+    titleInput.dispatchEvent(new Event('input', { bubbles: true }))
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'B'
+    bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+    ;(container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement).click()
+    await flushPromises()
+
+    // saved (not blocked) and told
+    const saves = fetchFn.mock.calls.filter(([url, init]: [string, RequestInit | undefined]) => init?.method === 'POST' && !url.includes('dingtalk-person-recipient-status'))
+    expect(saves).toHaveLength(1)
+    expect(document.body.textContent).toContain('Saved. Selected recipients: 1 not linked to DingTalk, 1 inactive, 1 with no matching user')
+  })
+
+  it('quick legacy form: a typed id the roster knows is shown by name (status still from the preflight)', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    ;(container.querySelector('.meta-automation__btn-add') as HTMLButtonElement).click()
+    await nextTick()
+    epSetSelect(container.querySelector('[data-automation-field="actionType"]') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+    const idsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    idsInput.value = 'user_2'
+    idsInput.dispatchEvent(new Event('input', { bubbles: true }))
+    idsInput.dispatchEvent(new FocusEvent('blur'))
+    await flushPromises()
+
+    expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'user_2', limit: 50 })
+    const chip = container.querySelector('[data-automation-person-recipient="user_2"]') as HTMLElement
+    expect(chip.querySelector('[data-automation-field="dingtalkPersonRecipientName"]')?.textContent).toBe('Zhao Ming')
+    expect(chip.querySelector('[data-automation-field="dingtalkPersonRecipientState"]')?.textContent).toBe('Not linked to DingTalk')
+  })
+
+  it('quick legacy form: a roleless user the sender reaches reads as outside the member list, not 未找到该用户', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    ;(container.querySelector('.meta-automation__btn-add') as HTMLButtonElement).click()
+    await nextTick()
+    epSetSelect(container.querySelector('[data-automation-field="actionType"]') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+    const idsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    idsInput.value = 'user_fake_roleless_linked'
+    idsInput.dispatchEvent(new Event('input', { bubbles: true }))
+    idsInput.dispatchEvent(new FocusEvent('blur'))
+    await flushPromises()
+
+    const chip = container.querySelector('[data-automation-person-recipient="user_fake_roleless_linked"]') as HTMLElement
+    expect(chip.querySelector('[data-automation-field="dingtalkPersonRecipientOutsideMemberList"]')?.textContent)
+      .toBe('User exists, but is not in this table’s member list')
+    expect(chip.querySelector('[data-automation-field="dingtalkPersonRecipientState"]')).toBeNull()
+    expect(container.querySelector('[data-automation-field="dingtalkPersonNotLinkedSummary"]')).toBeNull()
+  })
+
+  // Review round 2: the advanced editor's DingTalk recipient notice is shown by the HOST only after the save
+  // really succeeded — a refused save (400 / 503) must never read 「已保存」.
+  for (const outcome of ['fails', 'succeeds'] as const) {
+    it(`advanced editor: when the save ${outcome}, the 「已保存」 DingTalk notice is ${outcome === 'fails' ? 'NOT ' : ''}shown`, async () => {
+      const personRule = fakeRule({
+        name: 'DingTalk person notify',
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: { userIds: ['user_2'], titleTemplate: 'T', bodyTemplate: 'B' },
+        actions: [{ type: 'send_dingtalk_person_message', config: { userIds: ['user_2'], titleTemplate: 'T', bodyTemplate: 'B' } }],
+      })
+      const { client, fetchFn } = mockClient([personRule], outcome === 'fails'
+        ? { patchError: { status: 400, code: 'VALIDATION_ERROR', message: 'Rejected by the server' } }
+        : {})
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+      ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+      await flushPromises()
+      // the preflight says user_2 is not linked
+      expect(document.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')?.textContent).toContain('1 selected user is not linked to DingTalk')
+
+      ;(document.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+      await flushPromises()
+
+      expect(fetchFn.mock.calls.some(([, init]: [string, RequestInit | undefined]) => init?.method === 'PATCH')).toBe(true)
+      if (outcome === 'fails') {
+        expect(document.body.textContent).not.toContain('Saved. 1 selected user is not linked')
+        // the editor stays open for a fix
+        expect(document.querySelector('[data-action="save"]')).toBeTruthy()
+      } else {
+        expect(document.body.textContent).toContain('Saved. 1 selected user is not linked to DingTalk')
+      }
+    })
+  }
+
+  it('a run log row that skipped DingTalk recipients opens the rule’s person delivery records on 跳过（未绑定）', async () => {
+    const { client, fetchFn } = mockClient([
+      fakeRule({
+        name: 'DingTalk person notify',
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: { userIds: ['user_1'], titleTemplate: 'T', bodyTemplate: 'B' },
+      }),
+    ], {
+      logs: [{
+        id: 'exec_skip',
+        ruleId: 'rule_1',
+        status: 'skipped',
+        triggeredBy: 'event',
+        triggeredAt: '2026-10-21T10:00:00Z',
+        duration: 5,
+        steps: [{
+          actionType: 'send_dingtalk_person_message',
+          status: 'skipped',
+          output: { reason: 'dingtalk_recipients_unreachable', notifiedUsers: 0, skippedRecipientCount: 1, skippedUserIds: ['user_unbound'], skippedReasonCounts: { notLinked: 1, inactive: 0, notFound: 0 } },
+        }],
+      }],
+    })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    ;(container.querySelector('[data-automation-logs="true"]') as HTMLButtonElement).click()
+    await flushPromises()
+    ;(document.querySelector('[data-log-id="exec_skip"]') as HTMLElement).click()
+    await flushPromises()
+    expect(document.querySelector('.meta-log-viewer')?.textContent ?? '').not.toContain('user_unbound')
+
+    ;(document.querySelector('[data-action="open-person-deliveries"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(document.querySelector('.meta-log-viewer')).toBeNull()
+    const statusFilter = document.querySelector('.meta-person-delivery [data-field="statusFilter"]') as HTMLSelectElement
+    expect(statusFilter.value).toBe('skipped')
+    // review round 2: the skipped filter is asked of the SERVER (not only applied to the latest page)
+    expect(fetchFn.mock.calls.some(([url]: [string]) => url.includes('/dingtalk-person-deliveries') && url.includes('status=skipped'))).toBe(true)
+    expect(document.querySelector('[data-person-delivery-id="dpd_skipped"]')?.textContent).toContain('Unbound User')
+    expect(document.querySelector('[data-person-delivery-id="dpd_1"]')).toBeNull()
+
   })
 
   it('opens DingTalk person delivery viewer for person message rules', async () => {
@@ -2509,7 +2920,9 @@ describe('MetaAutomationManager', () => {
 
     const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
     expect(testBtn.disabled).toBe(false)
-    expect(container.textContent).toContain('can send real DingTalk messages')
+    // 客户反馈 2026-10-21 item 1 follow-up: the UI test run is a simulation; the copy no longer claims real sends.
+    expect(container.textContent).toContain('Test Run simulates the saved rule: it sends no DingTalk messages')
+    expect(container.textContent).not.toContain('can send real DingTalk messages')
 
     testBtn.click()
     await flushPromises()
@@ -2552,7 +2965,8 @@ describe('MetaAutomationManager', () => {
 
     const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
     expect(testBtn.disabled).toBe(false)
-    expect(container.textContent).toContain('可能向已配置的钉钉群或用户发送真实消息')
+    expect(container.textContent).toContain('测试运行是对已保存规则的模拟：不会发送任何钉钉消息')
+    expect(container.textContent).not.toContain('发送真实消息')
 
     testBtn.click()
     // UF-8: the test-run confirm is now async (ElMessageBox) — flush microtasks so the handler
@@ -2561,7 +2975,7 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
-      .toContain('正在运行测试。钉钉动作可能发送真实消息。')
+      .toContain('正在模拟运行测试，不会发送钉钉消息。')
 
     resolveExecution({
       id: 'exec_1',
@@ -2578,7 +2992,130 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-automation-test-status="rule_1"]')?.textContent).toContain('测试运行成功 (32 ms)。')
   })
 
-  it('localizes zh-CN automation test run request failures with raw backend messages', async () => {
+  // 客户反馈 2026-10-21 (a): a DingTalk person message that reached nobody must not read as success.
+  describe('DingTalk person message test-run outcome (customer feedback 2026-10-21)', () => {
+    const personRule = () => fakeRule({
+      name: 'DingTalk person notify',
+      actionType: 'send_dingtalk_person_message',
+      actionConfig: { userIds: ['user_fake_1'], titleTemplate: 'T', bodyTemplate: 'B' },
+      actions: [{
+        type: 'send_dingtalk_person_message',
+        config: { userIds: ['user_fake_1'], titleTemplate: 'T', bodyTemplate: 'B' },
+      }],
+    })
+    async function runTest(testExecution: Record<string, unknown>) {
+      vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+      const { client } = mockClient([personRule()], { testExecution })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+      ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+      await flushPromises()
+      ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+      await flushPromises()
+      return container
+    }
+    const skippedStep = {
+      actionType: 'send_dingtalk_person_message',
+      status: 'skipped',
+      error: 'No DingTalk recipient was reached: 1 skipped (not linked: 1, inactive: 0, not found: 0) (DINGTALK_RECIPIENTS_UNREACHABLE)',
+      output: {
+        reason: 'dingtalk_recipients_unreachable',
+        notifiedUsers: 0,
+        skippedRecipientCount: 1,
+        skippedUserIds: ['user_fake_1'],
+        skippedReasonCounts: { notLinked: 1, inactive: 0, notFound: 0 },
+      },
+    }
+
+    it('all recipients skipped -> a warning "0 received: N not linked" with the link hint, no ids, never "succeeded"', async () => {
+      const container = await runTest({
+        id: 'exec_1', ruleId: 'rule_1', status: 'skipped', triggeredBy: 'test',
+        triggeredAt: '2026-10-21T00:00:00.000Z', duration: 12, steps: [skippedStep],
+      })
+      const banner = container.querySelector('[data-automation-test-status="rule_1"]')
+      expect(banner?.getAttribute('data-status')).toBe('warning')
+      expect(banner?.textContent).toContain('0 received: 1 not linked to DingTalk.')
+      expect(banner?.textContent).toContain('must be linked to DingTalk in the directory and sign in with DingTalk once')
+      expect(banner?.textContent).not.toContain('succeeded')
+      expect(banner?.textContent).not.toContain('user_fake_1')
+      expect(container.querySelector('[data-field="testRunStatus"]')?.getAttribute('data-status')).toBe('warning')
+    })
+
+    it('zh: 「0 人收到：N 人未绑定钉钉」', async () => {
+      useLocale().setLocale('zh-CN')
+      const container = await runTest({
+        id: 'exec_1', ruleId: 'rule_1', status: 'skipped', triggeredBy: 'test',
+        triggeredAt: '2026-10-21T00:00:00.000Z', duration: 12, steps: [skippedStep],
+      })
+      const text = container.querySelector('[data-automation-test-status="rule_1"]')?.textContent ?? ''
+      expect(text).toContain('0 人收到：1 人未绑定钉钉。')
+      expect(text).toContain('成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。')
+      expect(text).not.toContain('测试运行成功')
+    })
+
+    it('a partial delivery inside a successful run is still a warning with the counts', async () => {
+      const container = await runTest({
+        id: 'exec_1', ruleId: 'rule_1', status: 'success', triggeredBy: 'test',
+        triggeredAt: '2026-10-21T00:00:00.000Z', duration: 12,
+        steps: [{
+          actionType: 'send_dingtalk_person_message',
+          status: 'success',
+          output: { notifiedUsers: 2, skippedRecipientCount: 1, skippedUserIds: ['user_fake_1'], skippedReasonCounts: { notLinked: 1, inactive: 0, notFound: 0 } },
+        }],
+      })
+      const banner = container.querySelector('[data-automation-test-status="rule_1"]')
+      expect(banner?.getAttribute('data-status')).toBe('warning')
+      expect(banner?.textContent).toContain('2 received: 1 not linked to DingTalk.')
+    })
+
+    it('a simulated person message says it neither sent nor checked DingTalk links', async () => {
+      const container = await runTest({
+        id: 'exec_1', ruleId: 'rule_1', status: 'success', triggeredBy: 'test', dryRun: true,
+        triggeredAt: '2026-10-21T00:00:00.000Z', duration: 3,
+        steps: [{ actionType: 'send_dingtalk_person_message', status: 'success', simulated: true, output: { dryRun: true, dispatched: false } }],
+      })
+      const text = container.querySelector('[data-automation-test-status="rule_1"]')?.textContent ?? ''
+      expect(text).toContain('Test run succeeded (3 ms).')
+      expect(text).toContain('This was a simulated run: no DingTalk person message was sent and recipients were not checked for a DingTalk link.')
+    })
+  })
+
+  // 客户反馈 2026-10-21 (c): the empty group list links straight to API & Webhooks > DingTalk Groups.
+  it('quick form: empty DingTalk group list offers "open API & Webhooks > DingTalk Groups" and a reload', async () => {
+    const onOpenDingtalkGroups = vi.fn()
+    const { client, fetchFn } = mockClient([], { dingTalkGroups: [] })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, canOpenDingTalkGroupSettings: true, onOpenDingtalkGroups })
+    await flushPromises()
+    ;(container.querySelector('.meta-automation__btn-add') as HTMLButtonElement).click()
+    await nextTick()
+    epSetSelect(container.querySelector('[data-automation-field="actionType"]') as HTMLElement, 'send_dingtalk_group_message')
+    await flushPromises()
+
+    const open = container.querySelector('[data-automation-field="dingtalkOpenGroupSettings"]') as HTMLButtonElement
+    expect(open?.textContent).toContain('Open API & Webhooks > DingTalk Groups')
+    open.click()
+    expect(onOpenDingtalkGroups).toHaveBeenCalledTimes(1)
+
+    const groupReads = () => fetchFn.mock.calls.filter(([url, init]) => String(url).includes('/dingtalk-groups') && (init?.method ?? 'GET') === 'GET').length
+    const before = groupReads()
+    ;(container.querySelector('[data-automation-field="dingtalkReloadGroups"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(groupReads()).toBe(before + 1)
+  })
+
+  it('quick form: without a host that can open the settings, the empty state shows text + reload only', async () => {
+    const { client } = mockClient([], { dingTalkGroups: [] })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    ;(container.querySelector('.meta-automation__btn-add') as HTMLButtonElement).click()
+    await nextTick()
+    epSetSelect(container.querySelector('[data-automation-field="actionType"]') as HTMLElement, 'send_dingtalk_group_message')
+    await flushPromises()
+    expect(container.querySelector('[data-automation-field="dingtalkOpenGroupSettings"]')).toBeNull()
+    expect(container.querySelector('[data-automation-field="dingtalkReloadGroups"]')).not.toBeNull()
+  })
+
+  it('localizes a zh-CN automation test run request failure by its code, not the English backend message', async () => {
     useLocale().setLocale('zh-CN')
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { client } = mockClient([
@@ -2588,7 +3125,7 @@ describe('MetaAutomationManager', () => {
         actionConfig: { userIds: ['user_1'], titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
         actions: [{ type: 'send_dingtalk_person_message', config: { userIds: ['user_1'] } }],
       }),
-    ], { testErrorMessage: 'Automation service unavailable' })
+    ], { testError: { status: 500, code: 'TEST_RUN_FAILED', message: 'Test run failed' } })
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
 
@@ -2598,7 +3135,8 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
-      .toContain('测试运行请求失败：Automation service unavailable')
+      .toContain('测试运行请求失败：测试运行在服务端失败，请稍后重试。')
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).not.toContain('Test run failed')
     expect(container.querySelector('[data-field="testRunStatus"]')?.getAttribute('data-status')).toBe('failed')
   })
 
@@ -2624,7 +3162,7 @@ describe('MetaAutomationManager', () => {
 
     const runningStatus = container.querySelector('[data-field="testRunStatus"]')
     expect(runningStatus?.textContent).toContain('Running test.')
-    expect(runningStatus?.textContent).not.toContain('DingTalk actions may send real messages')
+    expect(runningStatus?.textContent).not.toContain('No DingTalk messages are sent')
 
     resolveExecution({
       id: 'exec_1',
@@ -2683,7 +3221,7 @@ describe('MetaAutomationManager', () => {
         actionConfig: { userIds: ['user_1'], titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
         actions: [{ type: 'send_dingtalk_person_message', config: { userIds: ['user_1'] } }],
       }),
-    ], { testErrorMessage: 'Automation service unavailable' })
+    ], { testError: { status: 500, code: 'TEST_RUN_FAILED', message: 'Test run failed' } })
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
 
@@ -2692,8 +3230,171 @@ describe('MetaAutomationManager', () => {
     ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
     await flushPromises()
 
-    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).toContain('Automation service unavailable')
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
+      .toContain('Test run request failed: The test run failed on the server. Try again later.')
     expect(container.querySelector('[data-field="testRunStatus"]')?.getAttribute('data-status')).toBe('failed')
+  })
+
+  // #5817 follow-up: the route answers `{ ok:false, error:{ code, message } }` with FIXED English
+  // messages. The button maps the code to localized copy (TEST_RUN_ERROR_LABELS); it never shows the
+  // server's message for a known code, and never the code itself. The client still carries both.
+  const TYPED_TEST_RUN_REFUSALS = [
+    {
+      // The test button is clickable for a DISABLED rule and the service answers that with this 404 too,
+      // so the copy cannot only say "refresh".
+      testError: { status: 404, code: 'TEST_RUN_RULE_NOT_FOUND', message: 'Automation rule not found or not enabled' },
+      en: 'Test run request failed: The rule was not found or is disabled. Enable it, or refresh and try again.',
+      zh: '测试运行请求失败：规则不存在或已停用。请确认规则已启用，或刷新后重试。',
+    },
+    {
+      testError: {
+        status: 404,
+        code: 'SHEET_DELETED',
+        message: 'This sheet has been deleted. It can be restored with POST /api/multitable/sheets/{sheetId}/restore by an actor with schema authority.',
+      },
+      en: 'Test run request failed: This sheet has been deleted, so the test did not run. Restore the sheet and try again.',
+      zh: '测试运行请求失败：该表已被删除，测试未运行。请先恢复该表后重试。',
+    },
+    {
+      testError: { status: 500, code: 'TEST_RUN_FAILED', message: 'Test run failed' },
+      en: 'Test run request failed: The test run failed on the server. Try again later.',
+      zh: '测试运行请求失败：测试运行在服务端失败，请稍后重试。',
+    },
+    {
+      // A code this build does not know gets the generic label, not the message and not the code.
+      testError: { status: 409, code: 'TEST_RUN_SOMETHING_NEW', message: 'Some new English refusal' },
+      en: 'Test run request failed. Try again later.',
+      zh: '测试运行请求失败，请稍后重试。',
+    },
+  ] as const
+
+  async function clickTestRun(client: MultitableApiClient) {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+    await flushPromises()
+    ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+    await flushPromises()
+    return container.querySelector('[data-field="testRunStatus"]')
+  }
+
+  for (const refusal of TYPED_TEST_RUN_REFUSALS) {
+    const { testError } = refusal
+    for (const locale of ['en', 'zh-CN'] as const) {
+      it(`shows the ${locale} label of a typed ${testError.code} test-run refusal, not its message or code`, async () => {
+        useLocale().setLocale(locale)
+        const { client } = mockClient([fakeRule()], { testError })
+        await expect(client.testAutomationRule('sheet_1', 'rule_1')).rejects.toMatchObject({
+          name: 'MultitableApiError',
+          status: testError.status,
+          code: testError.code,
+          message: testError.message,
+        })
+
+        const status = await clickTestRun(client)
+        const text = status?.textContent ?? ''
+        expect(text).toContain(locale === 'en' ? refusal.en : refusal.zh)
+        expect(text).not.toContain(locale === 'en' ? refusal.zh : refusal.en)
+        expect(text).not.toContain(testError.message)
+        expect(text).not.toContain(testError.code)
+        expect(status?.getAttribute('data-status')).toBe('failed')
+      })
+    }
+  }
+
+  function clientAnsweringTestRun(response: () => Response) {
+    const { fetchFn } = mockClient([fakeRule()])
+    return new MultitableApiClient({
+      fetchFn: (url, init) => (init?.method === 'POST' && url.endsWith('/test')
+        ? Promise.resolve(response())
+        : fetchFn(url, init)),
+    })
+  }
+
+  // A gateway / proxy failure carries no code (an nginx HTML page, an empty body): the service is
+  // unavailable, which the button says instead of the generic label.
+  const GATEWAY_FAILURES = [
+    { name: 'an HTML 502', status: 502, body: '<html><body><h1>502 Bad Gateway</h1></body></html>', contentType: 'text/html', code: undefined },
+    { name: 'an empty 503', status: 503, body: '', contentType: 'text/plain', code: undefined },
+    { name: 'a 504 with an empty object', status: 504, body: '{}', contentType: 'application/json', code: undefined },
+    {
+      // A blank code is no code.
+      name: 'a 503 with a blank code',
+      status: 503,
+      body: JSON.stringify({ ok: false, error: { code: ' ', message: '' } }),
+      contentType: 'application/json',
+      code: ' ',
+    },
+  ] as const
+
+  for (const failure of GATEWAY_FAILURES) {
+    for (const locale of ['en', 'zh-CN'] as const) {
+      it(`shows the ${locale} service-unavailable label for ${failure.name}`, async () => {
+        useLocale().setLocale(locale)
+        const client = clientAnsweringTestRun(() => new Response(failure.body, {
+          status: failure.status,
+          headers: { 'Content-Type': failure.contentType },
+        }))
+        await expect(client.testAutomationRule('sheet_1', 'rule_1')).rejects.toMatchObject({
+          name: 'MultitableApiError',
+          status: failure.status,
+          code: failure.code,
+        })
+
+        const status = await clickTestRun(client)
+        const text = status?.textContent ?? ''
+        expect(text).toContain(locale === 'en'
+          ? 'Test run request failed: The service is temporarily unavailable. Try again later.'
+          : '测试运行请求失败：服务暂时不可用，请稍后重试。')
+        expect(text).not.toContain(locale === 'en' ? 'Test run request failed. Try again later.' : '测试运行请求失败，请稍后重试。')
+        expect(text).not.toContain('Bad Gateway')
+        expect(text).not.toContain(String(failure.status))
+        expect(status?.getAttribute('data-status')).toBe('failed')
+      })
+    }
+  }
+
+  const GENERIC_NOT_UNAVAILABLE = [
+    {
+      // Only the gateway statuses mean "unavailable": a code-less 500 stays generic.
+      name: 'a 500 without a code',
+      response: () => new Response('', { status: 500 }),
+    },
+    {
+      // A code this build does not know stays generic even on a 503.
+      name: 'a 503 with an unknown code',
+      response: () => new Response(
+        JSON.stringify({ ok: false, error: { code: 'TEST_RUN_SOMETHING_NEW', message: 'Some new English refusal' } }),
+        { status: 503, headers: { 'Content-Type': 'application/json' } },
+      ),
+    },
+  ] as const
+
+  for (const answer of GENERIC_NOT_UNAVAILABLE) {
+    for (const locale of ['en', 'zh-CN'] as const) {
+      it(`shows the ${locale} generic label, not service-unavailable, for ${answer.name}`, async () => {
+        useLocale().setLocale(locale)
+        const status = await clickTestRun(clientAnsweringTestRun(answer.response))
+        const text = status?.textContent ?? ''
+        expect(text).toContain(locale === 'en' ? 'Test run request failed. Try again later.' : '测试运行请求失败，请稍后重试。')
+        expect(text).not.toContain(locale === 'en' ? 'temporarily unavailable' : '服务暂时不可用')
+        expect(text).not.toContain('TEST_RUN_SOMETHING_NEW')
+        expect(text).not.toContain('Some new English refusal')
+        expect(status?.getAttribute('data-status')).toBe('failed')
+      })
+    }
+  }
+
+  it('keeps showing a network failure behind the localized prefix', async () => {
+    const { fetchFn } = mockClient([fakeRule()])
+    const client = new MultitableApiClient({
+      fetchFn: (url, init) => (init?.method === 'POST' && url.endsWith('/test')
+        ? Promise.reject(new TypeError('Failed to fetch'))
+        : fetchFn(url, init)),
+    })
+    const status = await clickTestRun(client)
+    expect(status?.textContent).toContain('Test run request failed: Failed to fetch')
+    expect(status?.getAttribute('data-status')).toBe('failed')
   })
 
   it('applies DingTalk group presets in the inline create form', async () => {
@@ -3077,5 +3778,55 @@ describe('MetaAutomationManager', () => {
     expect(navigator.clipboard?.writeText).toHaveBeenCalledTimes(1)
     expect(vi.mocked(navigator.clipboard!.writeText).mock.calls[0]?.[0]).toBe('Handle Sample field value')
     expect(container.textContent).toContain('Copied')
+  })
+
+  it('quick form: picks notification recipients by name/email search and saves user ids only', async () => {
+    const { client, fetchFn } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const nameInput = container.querySelector('[data-automation-field="name"]') as HTMLInputElement
+    nameInput.value = 'Picked recipients'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const searchInput = container.querySelector('[data-automation-field="notifyRecipientSearch"]') as HTMLInputElement
+    searchInput.value = 'lin'
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+    expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'lin', limit: 8 })
+
+    const suggestion = container.querySelector('[data-automation-notify-suggestion="user_1"]') as HTMLButtonElement
+    expect(suggestion).toBeTruthy()
+    expect(suggestion.textContent).toContain('Lin Lan')
+    expect(suggestion.textContent).toContain('lin@example.com')
+    expect(container.querySelector('[data-automation-notify-suggestion="group_1"]')).toBeNull()
+    suggestion.click()
+    await flushPromises()
+
+    const chip = container.querySelector('[data-automation-notify-recipient="user_1"]') as HTMLElement
+    expect(chip.textContent).toContain('Lin Lan')
+    expect(chip.getAttribute('data-automation-notify-recipient-unresolved')).toBeNull()
+    expect((container.querySelector('[data-automation-field="notifyUserIds"]') as HTMLInputElement).value).toBe('user_1')
+
+    const msgInput = container.querySelector('[data-automation-field="notifyMessage"]') as HTMLInputElement
+    msgInput.value = 'Hello!'
+    msgInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+
+    const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    const postCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'POST')
+    expect(postCalls.length).toBe(1)
+    const body = JSON.parse(postCalls[0][1]?.body as string)
+    expect(body.actionType).toBe('send_notification')
+    expect(body.actionConfig).toEqual({ userIds: ['user_1'], message: 'Hello!' })
+    expect(JSON.stringify(body)).not.toContain('lin@example.com')
   })
 })

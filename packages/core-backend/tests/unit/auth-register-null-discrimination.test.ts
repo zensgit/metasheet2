@@ -6,16 +6,18 @@
  * (42P01, permission errors, …) also surfaced as null → a fabricated "exists" 409.
  *
  * The null-path enumeration at this head (AuthService.register):
- *   1. getUserByEmail pre-check hit                        → null  (exists — truthful)
+ *   1. users.email existence pre-check hit                 → null  (exists — truthful)
  *   2. ALIAS_CONFLICT LoginAliasClaimError (email claim)   → null  (exists race twin)
  *   3. Postgres 23505 (users email unique index)           → null  (exists race twin)
  *   4. every OTHER transaction failure                     → RETHROWS (was: null)
  *   5. busy-lease exhaustion                               → UserRoleAssignmentRecoveryBusyError (unchanged)
  *   6. outer failures (e.g. post-commit invalidate throw)  → RETHROWS (was: null)
  *
- * (getUserByIdentifier swallows its OWN infrastructure errors internally and reports
- * "no user" — pre-existing behaviour, untouched here; such a failure then surfaces from
- * the transaction write and takes path 4.)
+ * Path 1 is a single users identity existence read with the legacy username/mobile
+ * reservation before alias cutover. It does not call getUserByIdentifier, so it does not swallow
+ * read failures, resolve an RBAC profile, or open the attendance backfill transaction.
+ * A non-duplicate failure of that read rethrows (never null) and does not start the
+ * creation transaction. Login's profile and alias resolution stays there.
  *
  * These tests pin each side with exact positive assertions — the discrimination is the
  * mutation target: restoring the old swallow (`return null` for case 4/6) reds the
@@ -135,6 +137,7 @@ function installRegisterQueries(options: {
 }
 
 beforeEach(() => {
+  vi.unstubAllEnvs()
   process.env.NODE_ENV = 'test'
   process.env.PRODUCT_MODE = 'platform'
   poolMocks.query.mockReset()
@@ -223,5 +226,129 @@ describe('AuthService.register — null is exists-only (O2-A3)', () => {
     const result = await auth.register('new@example.com', 'WelcomePass9A', 'New User')
     expect(result).toBeTruthy()
     expect(result?.email).toBe('new@example.com')
+  })
+
+  it('existing email does not resolve RBAC or write a user, role, permission, or alias', async () => {
+    installRegisterQueries({ existingUser: true })
+    const auth = new AuthService()
+    await expect(auth.register('taken@example.com', 'WelcomePass9A', 'Taken')).resolves.toBeNull()
+    expect(poolMocks.transaction).not.toHaveBeenCalled()
+    expect(rbacMocks.isAdmin).not.toHaveBeenCalled()
+    expect(rbacMocks.listUserPermissions).not.toHaveBeenCalled()
+    expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    const statements = poolMocks.query.mock.calls.map(([sql]) => String(sql))
+    expect(statements).toHaveLength(1)
+    expect(statements[0]).toContain('FROM users')
+    expect(statements[0]).toContain('lower(email)')
+    expect(statements[0]).toMatch(/SELECT 1\s+FROM users/)
+    expect(statements[0]).not.toMatch(/user_login_aliases|user_roles/i)
+    expect(statements.join('\n')).not.toMatch(/INSERT INTO/i)
+  })
+
+  it('folds case and surrounding whitespace on the users.email precheck, and does not treat a different address as existing', async () => {
+    const stored = 'taken@example.com'
+    let createdId = ''
+    poolMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const text = String(sql)
+      if (text.includes('FROM users') && text.includes('email')) {
+        const raw = String(params?.[0] ?? '')
+        const sqlFoldsCaseAndSpace =
+          /lower\s*\(\s*email\s*\)/i.test(text)
+          && /lower\s*\(\s*btrim\s*\(\s*\$1/i.test(text)
+        // Equivalent shape: caller already trimmed and lowercased, SQL still case-folds the column.
+        const paramAlreadyNormalized =
+          /lower\s*\(\s*email\s*\)\s*=\s*\$1\b/i.test(text) && raw === stored
+        const hit = sqlFoldsCaseAndSpace ? raw.trim().toLowerCase() === stored : paramAlreadyNormalized
+        return { rows: hit ? [{ present: 1 }] : [] }
+      }
+      if (text.includes('INSERT INTO users')) {
+        createdId = String(params?.[0] ?? 'user-new')
+        return {
+          rows: [{
+            id: createdId,
+            email: String(params?.[1] ?? 'other@example.com'),
+            name: 'Other',
+            role: 'user',
+            permissions: [],
+            created_at: new Date('2026-04-03T00:00:00.000Z'),
+            updated_at: new Date('2026-04-03T00:00:00.000Z'),
+          }],
+        }
+      }
+      if (text.includes('INSERT INTO user_login_aliases')) return { rows: [] }
+      if (text.includes('SELECT user_id FROM user_login_aliases')) {
+        return { rows: [{ user_id: createdId }] }
+      }
+      return { rows: [] }
+    })
+
+    const auth = new AuthService()
+    await expect(
+      auth.register('  Taken@Example.COM  ', 'WelcomePass9A', 'Taken'),
+    ).resolves.toBeNull()
+    expect(poolMocks.transaction).not.toHaveBeenCalled()
+    expect(rbacMocks.isAdmin).not.toHaveBeenCalled()
+    expect(rbacMocks.listUserPermissions).not.toHaveBeenCalled()
+
+    poolMocks.transaction.mockClear()
+    const created = await auth.register('other@example.com', 'WelcomePass9A', 'Other')
+    expect(created?.email).toBe('other@example.com')
+    expect(poolMocks.transaction).toHaveBeenCalled()
+  })
+
+  it('a non-duplicate existence-read failure rethrows the same error and does not open a transaction', async () => {
+    const original = Object.assign(new Error('relation "users" does not exist'), { code: '42P01' })
+    poolMocks.query.mockImplementation(async (sql: string) => {
+      const text = String(sql)
+      if (text.includes('FROM users') && text.includes('lower(email)')) {
+        throw original
+      }
+      throw new Error('existence read must fail before any later statement')
+    })
+    const auth = new AuthService()
+    await expect(
+      auth.register('taken@example.com', 'WelcomePass9A', 'Taken'),
+    ).rejects.toBe(original)
+    expect(poolMocks.transaction).not.toHaveBeenCalled()
+    expect(rbacMocks.isAdmin).not.toHaveBeenCalled()
+    expect(rbacMocks.listUserPermissions).not.toHaveBeenCalled()
+  })
+
+  it.each(['username', 'mobile'])('reserves an unbackfilled legacy %s without resolving a profile', async (column) => {
+    vi.stubEnv('AUTH_LOGIN_USE_ALIASES', 'false')
+    installRegisterQueries()
+    const dispatch = poolMocks.query.getMockImplementation()!
+    const reserved = 'legacy@example.com'
+    poolMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (String(sql).includes('FROM users') && String(sql).includes('lower(email)')) {
+        const predicate = column === 'username'
+          ? String(sql).includes('lower(username) = $1')
+          : String(sql).includes("regexp_replace(COALESCE(mobile, ''),")
+        const value = params?.[column === 'username' ? 0 : 2]
+        return { rows: predicate && params?.[1] === true && value === reserved ? [{ present: 1 }] : [] }
+      }
+      return dispatch(sql, params)
+    })
+    const auth = new AuthService()
+    const identifier = column === 'username' ? ' Legacy@Example.COM ' : ' le gacy@example.com '
+    await expect(auth.register(identifier, 'WelcomePass9A', 'Legacy')).resolves.toBeNull()
+    expect(poolMocks.transaction).not.toHaveBeenCalled()
+    expect(poolMocks.query).toHaveBeenCalledTimes(1)
+    expect(rbacMocks.isAdmin).not.toHaveBeenCalled()
+    expect(rbacMocks.listUserPermissions).not.toHaveBeenCalled()
+    expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    const created = await auth.register('different@example.com', 'WelcomePass9A', 'Different')
+    expect(created?.id).toBeTruthy()
+    expect(poolMocks.transaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not reserve legacy username/mobile columns after alias-only cutover', async () => {
+    vi.stubEnv('AUTH_LOGIN_USE_ALIASES', 'true')
+    installRegisterQueries()
+    const auth = new AuthService()
+    await expect(auth.register('new@example.com', 'WelcomePass9A', 'New User')).resolves.toBeTruthy()
+    const precheck = poolMocks.query.mock.calls[0]
+    expect(precheck[1]).toEqual(['new@example.com', false, 'new@example.com'])
+    expect(poolMocks.transaction).toHaveBeenCalledTimes(1)
   })
 })

@@ -217,7 +217,7 @@
               :data-who="entry.who"
             >
               <span data-testid="stock-prep-ops-audit-row-time">{{ formatAuditTime(entry.createdAt) }}</span>
-              <span data-testid="stock-prep-ops-audit-row-action">{{ auditActionLabel(entry.action) }}</span>
+              <span data-testid="stock-prep-ops-audit-row-action">{{ auditActionLabel(entry.action, entry.technical.mode) }}</span>
               <!-- THREE outcomes, not two. An unreadable current account or an actor-less row must not
                    be rendered as the positive claim 「其他同事」 — see audit.ts's `StockPrepAuditWho`. -->
               <span data-testid="stock-prep-ops-audit-row-who">{{ auditWhoLabel(entry.who) }}</span>
@@ -392,6 +392,8 @@ import {
   stockPrepAuditActionPlain,
   stockPrepPosturePlain,
   stockPrepSourceCheckPlain,
+  stockPrepSourcePreflightRefusalPlain,
+  type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = withDefaults(defineProps<{ scope?: IntegrationScope }>(), { scope: () => ({}) })
@@ -758,14 +760,34 @@ const fencesView = computed<CellView>(() => {
 // ---------------------------------------------------------------------------
 const sourcePreflightCell = ref<CellState<StockPrepSourcePreflight>>(idleCell())
 const sourcePreflightManual = ref(false)
+// WHICH REFUSAL, when the route named one of its own (plainLanguage.ts, 「检查这个源」's four
+// refusals). Only a constant entry from that table reaches state — never the server's code or text.
+// `null` keeps the cell's generic status sentence, which is still right for a missing permission
+// (403 FORBIDDEN) or an outage.
+const sourcePreflightRefusal = ref<StockPrepPlainEntry | null>(null)
 const sourceCheckPlain = stockPrepSourceCheckPlain
 const sourceCheckRows = computed(() => (
   sourcePreflightCell.value.data ? stockPrepSourceCheckRows(sourcePreflightCell.value.data) : []
 ))
 
+function codeOfError(error: unknown): string | null {
+  if (error && typeof error === 'object' && 'code' in error) {
+    const value = (error as { code?: unknown }).code
+    if (typeof value === 'string') return value
+  }
+  return null
+}
+
 const sourcePreflightView = computed<CellView>(() => {
   if (sourcePreflightCell.value.status === 'loading') return loadingView({ zh: '正在检查…', en: 'Checking…' })
   if (isFailedStatus(sourcePreflightCell.value.status)) {
+    const refusal = sourcePreflightRefusal.value
+    if (refusal) {
+      return {
+        ...failureView(sourcePreflightCell.value.status, STOCK_PREP_OPS_NEEDS_INTEGRATION_READ, sourcePreflightManual.value),
+        note: bi(`${refusal.zh}${refusal.zhNext ?? ''}`, `${refusal.en} ${refusal.enNext ?? ''}`.trim()),
+      }
+    }
     return failureView(sourcePreflightCell.value.status, STOCK_PREP_OPS_NEEDS_INTEGRATION_READ, sourcePreflightManual.value)
   }
   const data = sourcePreflightCell.value.data
@@ -786,6 +808,7 @@ async function onCheckSourcePreflight(): Promise<void> {
     const data = await readStockPreparationSourcePreflight(scope.value)
     sourcePreflightCell.value = { status: 'ready', data }
   } catch (error) {
+    sourcePreflightRefusal.value = stockPrepSourcePreflightRefusalPlain(statusOfError(error), codeOfError(error))
     sourcePreflightCell.value = cellFromError(error)
   }
 }
@@ -879,8 +902,10 @@ const auditEntries = computed(() => {
   return outcome !== null && outcome.ok ? outcome.entries : []
 })
 
-function auditActionLabel(action: string): string {
-  const plain = stockPrepAuditActionPlain(action)
+// A row's sentence depends on its mode too (R68: the repair leg's rows share the create action); the
+// action-filter list passes no mode and keeps the action's own line (it lists no project_target_* action today).
+function auditActionLabel(action: string, mode?: string | null): string {
+  const plain = stockPrepAuditActionPlain(action, mode)
   if (plain) return bi(plain.zh, plain.en)
   return bi(`其他动作(${action})`, `Other action (${action})`)
 }

@@ -543,10 +543,10 @@ export function useAttendanceAdminPayroll({
       const isEditing = Boolean(payrollTemplateEditingId.value)
       const response = await apiFetch(
         isEditing
-          ? `/api/attendance/payroll-templates/${payrollTemplateEditingId.value}`
+          ? `/api/attendance/payroll-templates/${payrollTemplateEditingId.value}/update`
           : '/api/attendance/payroll-templates',
         {
-          method: isEditing ? 'PUT' : 'POST',
+          method: 'POST',
           body: JSON.stringify(payload),
         },
       )
@@ -723,10 +723,10 @@ export function useAttendanceAdminPayroll({
       const isEditing = Boolean(payrollCycleEditingId.value)
       const response = await apiFetch(
         isEditing
-          ? `/api/attendance/payroll-cycles/${payrollCycleEditingId.value}`
+          ? `/api/attendance/payroll-cycles/${payrollCycleEditingId.value}/update`
           : '/api/attendance/payroll-cycles',
         {
-          method: isEditing ? 'PUT' : 'POST',
+          method: 'POST',
           body: JSON.stringify(payload),
         },
       )

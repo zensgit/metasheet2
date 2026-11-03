@@ -109,6 +109,9 @@ export class ApprovalSlaScheduler {
   private running = false
   private started = false
   private isLeader = false
+  private stopping = false
+  private inFlightTick: Promise<string[]> | null = null
+  private stopPromise: Promise<void> | null = null
   public readonly ready: Promise<void>
 
   constructor(options: ApprovalSlaSchedulerOptions = {}) {
@@ -141,7 +144,7 @@ export class ApprovalSlaScheduler {
   }
 
   start(): void {
-    if (this.started) return
+    if (this.started || this.stopping) return
     this.started = true
     this.ready.then(() => {
       if (!this.started) return
@@ -155,7 +158,13 @@ export class ApprovalSlaScheduler {
     })
   }
 
-  stop(): void {
+  stop(): Promise<void> {
+    this.stopPromise ??= this.stopOnce()
+    return this.stopPromise
+  }
+
+  private async stopOnce(): Promise<void> {
+    this.stopping = true
     this.started = false
     if (this.timer) {
       clearInterval(this.timer)
@@ -169,9 +178,11 @@ export class ApprovalSlaScheduler {
       clearInterval(this.acquisitionTimer)
       this.acquisitionTimer = null
     }
+    await this.ready
+    if (this.inFlightTick) await this.inFlightTick
     if (this.leaderOptions && this.isLeader) {
       const { leaderLock, ownerId } = this.leaderOptions
-      leaderLock.release(this.lockKey, ownerId).catch(() => {})
+      await leaderLock.release(this.lockKey, ownerId).catch(() => false)
       this.isLeader = false
     }
     this.setLeaderGauge('relinquished')
@@ -278,6 +289,11 @@ export class ApprovalSlaScheduler {
     const won = await leaderLock.acquire(this.lockKey, ownerId, this.ttlMs)
     this.isLeader = won
     if (won) {
+      if (this.stopping) {
+        await leaderLock.release(this.lockKey, ownerId).catch(() => false)
+        this.isLeader = false
+        return
+      }
       this.logger.info(`Acquired SLA scheduler leader lock ${this.lockKey} (owner=${ownerId}, ttl=${this.ttlMs}ms)`)
       this.setLeaderGauge('leader')
       this.stopAcquisitionRetryLoop()
@@ -301,9 +317,17 @@ export class ApprovalSlaScheduler {
   }
 
   private startTickLoop(): void {
-    if (!this.started || !this.isLeader || this.timer) return
+    if (!this.started || this.stopping || !this.isLeader || this.timer) return
     this.logger.info(`SLA scheduler starting with interval ${this.intervalMs}ms`)
-    this.timer = setInterval(() => { void this.tick() }, this.intervalMs)
+    this.timer = setInterval(() => {
+      if (this.inFlightTick) return
+      const task = this.tick()
+      this.inFlightTick = task
+      void task.then(
+        () => { if (this.inFlightTick === task) this.inFlightTick = null },
+        () => { if (this.inFlightTick === task) this.inFlightTick = null },
+      )
+    }, this.intervalMs)
     if (typeof this.timer.unref === 'function') this.timer.unref()
   }
 
@@ -385,11 +409,11 @@ export function startApprovalSlaScheduler(options: ApprovalSlaSchedulerOptions =
   return sharedScheduler
 }
 
-export function stopApprovalSlaScheduler(): void {
-  if (sharedScheduler) {
-    sharedScheduler.stop()
-    sharedScheduler = null
-  }
+export async function stopApprovalSlaScheduler(): Promise<void> {
+  const scheduler = sharedScheduler
+  if (!scheduler) return
+  await scheduler.stop()
+  if (sharedScheduler === scheduler) sharedScheduler = null
 }
 
 export async function resolveApprovalSlaSchedulerLeaderOptions(): Promise<ApprovalSlaSchedulerLeaderOptions | null> {

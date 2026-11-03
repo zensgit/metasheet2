@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaTimelineView from '../src/multitable/components/MetaTimelineView.vue'
 import { useLocale } from '../src/composables/useLocale'
+import { resetBusinessTimezone } from '../src/multitable/utils/business-timezone'
 
 describe('MetaTimelineView', () => {
   afterEach(() => {
@@ -185,6 +186,46 @@ describe('MetaTimelineView', () => {
     expect(container.querySelectorAll('[aria-label]')).toHaveLength(2)
     expect(container.querySelectorAll('[title]')).toHaveLength(1)
     expect(container.querySelectorAll('[placeholder]')).toHaveLength(0)
+
+    app.unmount()
+  })
+
+  // #6181 (the rule #6178 applies to `date` cells): the bar title names the day a `date` value shows — a stored
+  // INSTANT on its business-timezone day (Asia/Shanghai default: `2026-09-17T16:00:00.000Z` is 09-18), never the
+  // UTC day of the instant (09-17); a day as written keeps its day and its bar position.
+  it('#6181: date start / end holding instants title and place the bar on their business-timezone days', async () => {
+    resetBusinessTimezone()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaTimelineView, {
+          rows: [
+            { id: 'rec_instant', version: 1, data: { fld_name: 'PLM refresh', fld_start: '2026-09-17T16:00:00.000Z', fld_end: '2026-09-19T16:00:00.000Z' } },
+            { id: 'rec_written', version: 1, data: { fld_name: 'Written days', fld_start: '2026-09-18', fld_end: '2026-09-20' } },
+          ],
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+            { id: 'fld_end', name: 'End', type: 'date' },
+          ],
+          loading: false,
+          viewConfig: { startFieldId: 'fld_start', endFieldId: 'fld_end', labelFieldId: 'fld_name', zoom: 'week' },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const bars = Array.from(container.querySelectorAll('.meta-timeline__bar')) as HTMLElement[]
+    expect(bars).toHaveLength(2)
+    expect(bars.map((bar) => bar.getAttribute('title'))).toEqual([
+      '2026-09-18 → 2026-09-20', // the instants — UTC days would be 2026-09-17 → 2026-09-19
+      '2026-09-18 → 2026-09-20', // the days as written
+    ])
+    expect(bars[0]!.getAttribute('style')).toBe(bars[1]!.getAttribute('style'))
 
     app.unmount()
   })

@@ -8,13 +8,17 @@
 // helpers below for strings with scores / ids / error codes.
 //
 // NOT translated (user/data values): course titles, question prompts,
-// already-entered choice option texts, deadlines, ids, URLs, learner
-// answers, and backend error codes. Error codes and HTTP statuses are
+// already-entered choice option texts, ids, URLs, learner answers, and
+// backend error codes. Timestamps (deadlines, issue/submit/expiry times) are
+// not translated either, but are rendered through `formatElearningDate`
+// below (viewer's local timezone; `YYYY-MM-DD HH:mm` in zh) instead of as
+// raw ISO strings. Error codes and HTTP statuses are
 // interpolated raw. True/false option drafts are UI-owned defaults (not
 // user data) and are localized when the question type is switched to
 // true_false.
 
 import type { ElearningLearnerVideoStatus } from '../services/elearning'
+import type { ElearningAppInstallation } from '../services/elearningApp'
 
 export type ElearningLabelKey =
   // --- Learner chrome ---
@@ -107,6 +111,15 @@ export type ElearningLabelKey =
   | 'contentAdmin.publish'
   | 'contentAdmin.publishing'
   | 'contentAdmin.publishSuccess'
+  | 'assigneePicker.searchPlaceholder'
+  | 'assigneePicker.searching'
+  | 'assigneePicker.noMatch'
+  | 'assigneePicker.forbidden'
+  | 'assigneePicker.failed'
+  | 'assigneePicker.clear'
+  | 'assigneePicker.pasteToggle'
+  | 'assigneePicker.pasteLabel'
+  | 'assigneePicker.unnamed'
   // --- Objective practice chrome ---
   | 'practiceAdmin.title'
   | 'practiceAdmin.subtitle'
@@ -198,6 +211,36 @@ export type ElearningLabelKey =
   | 'grading.scoreRequired'
   | 'grading.scoreInteger'
   | 'grading.clientIdUnavailable'
+  // --- No-video deployment copy (F11) + app installation panel (F12) ---
+  | 'learner.subtitleNoMedia'
+  | 'learner.noMediaContentAndPractice'
+  | 'learner.noMediaContent'
+  | 'learner.noMediaPractice'
+  | 'admin.subtitleNoMedia'
+  | 'admin.videoUnavailable'
+  | 'admin.videoUnavailableContent'
+  | 'installation.title'
+  | 'installation.intro'
+  | 'installation.working'
+  | 'installation.statusNotInstalled'
+  | 'installation.statusInactive'
+  | 'installation.statusActive'
+  | 'installation.notificationsEnabled'
+  | 'installation.notificationsDisabled'
+  | 'installation.notificationsNotOffered'
+  | 'installation.notificationsOptIn'
+  | 'installation.saveNotifications'
+  | 'installation.install'
+  | 'installation.enable'
+  | 'installation.disable'
+  | 'installation.retry'
+  | 'installation.requestFailed'
+  // --- Shared request errors ---
+  | 'error.orgContextRequired'
+  | 'error.orgContextStaleLogin'
+  | 'error.analyticsExportStorageUnavailable'
+  | 'sessionOrg.staleNotice'
+  | 'sessionOrg.discardAndReload'
   // --- Shared statuses ---
   | 'status.completed'
   | 'status.incomplete'
@@ -329,7 +372,7 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'admin.falseOption': { en: 'False', zh: '错误' },
   'admin.passScore': { en: 'Passing score', zh: '及格分' },
   'admin.maxAttempts': { en: 'Maximum attempts', zh: '最大尝试次数' },
-  'admin.targetUser': { en: 'Assignee (user ID)', zh: '指派对象（用户 ID）' },
+  'admin.targetUser': { en: 'Assignee', zh: '指派对象' },
   'admin.deadline': { en: 'Deadline (optional)', zh: '截止日期（可选）' },
   'admin.publishing': { en: 'Publishing...', zh: '正在发布…' },
   'admin.publish': { en: 'Publish and assign', zh: '发布并指派' },
@@ -360,12 +403,28 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'contentAdmin.moveUp': { en: 'Move up', zh: '上移' },
   'contentAdmin.moveDown': { en: 'Move down', zh: '下移' },
   'contentAdmin.optionalAssignee': {
-    en: 'Assignee (optional user ID)',
-    zh: '指派对象（可选用户 ID）',
+    en: 'Assignee (optional)',
+    zh: '指派对象（可选）',
   },
   'contentAdmin.publish': { en: 'Publish content course', zh: '发布内容课程' },
   'contentAdmin.publishing': { en: 'Publishing content course...', zh: '正在发布内容课程…' },
   'contentAdmin.publishSuccess': { en: 'Content course published.', zh: '内容课程已发布。' },
+
+  'assigneePicker.searchPlaceholder': { en: 'Search by name or email', zh: '按姓名或邮箱搜索' },
+  'assigneePicker.searching': { en: 'Searching...', zh: '正在搜索…' },
+  'assigneePicker.noMatch': { en: 'No matching people.', zh: '没有匹配的人员。' },
+  'assigneePicker.forbidden': {
+    en: 'You cannot search people here. Paste a user ID instead.',
+    zh: '你没有搜索人员的权限，可改为粘贴用户 ID。',
+  },
+  'assigneePicker.failed': {
+    en: 'People search is unavailable. Try again, or paste a user ID instead.',
+    zh: '暂时无法搜索人员，请重试，或改为粘贴用户 ID。',
+  },
+  'assigneePicker.clear': { en: 'Clear', zh: '清除' },
+  'assigneePicker.pasteToggle': { en: 'Paste a user ID instead', zh: '改为粘贴用户 ID' },
+  'assigneePicker.pasteLabel': { en: 'User ID', zh: '用户 ID' },
+  'assigneePicker.unnamed': { en: 'Unnamed user', zh: '未命名用户' },
 
   'practiceAdmin.title': { en: 'Objective practice', zh: '客观题练习' },
   'practiceAdmin.subtitle': {
@@ -498,6 +557,81 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'grading.clientIdUnavailable': {
     en: 'Your browser does not support the secure identifier required to submit a grade.',
     zh: '您的浏览器不支持提交评分所需的安全标识符。',
+  },
+
+  // --- No-video deployment copy (F11) + app installation panel (F12) ---
+  // Clause pieces: composed by elearningLearnerNoMediaSubtitle / elearningAdminVideoUnavailable
+  // (zh pieces carry no final punctuation; the composer adds 「；」 and 「。」).
+  'learner.subtitleNoMedia': {
+    en: 'Video is not enabled on this deployment, so there are no formal exams yet.',
+    zh: '本部署未开启视频，暂无正式考试',
+  },
+  'learner.noMediaContentAndPractice': {
+    en: 'You can study article / external-link courses and do practice.',
+    zh: '可学习文章 / 外链课程并做练习',
+  },
+  'learner.noMediaContent': {
+    en: 'You can study article / external-link courses.',
+    zh: '可学习文章 / 外链课程',
+  },
+  'learner.noMediaPractice': { en: 'You can do practice.', zh: '可做练习' },
+  'admin.subtitleNoMedia': {
+    en: 'Manage the learning resources enabled on this deployment below.',
+    zh: '在下方管理本部署已开启的学习资源。',
+  },
+  'admin.videoUnavailable': {
+    en: 'Video is not enabled on this deployment, so video courses are unavailable and learners have no formal exam entry.',
+    zh: '本部署未开启视频，视频课程不可用；学员端无正式考试入口',
+  },
+  'admin.videoUnavailableContent': {
+    en: 'You can publish article / external-link courses.',
+    zh: '可发布文章 / 外链课程',
+  },
+  'installation.title': { en: 'Cloud classroom installation', zh: '云课堂安装' },
+  'installation.intro': {
+    en: 'Installation starts disabled. Deployment flags remain the upper bound; storage is managed separately.',
+    zh: '安装后默认停用。可用功能以部署开关为上限；存储另行配置。',
+  },
+  'installation.working': { en: 'Working...', zh: '处理中…' },
+  'installation.statusNotInstalled': { en: 'Not installed', zh: '未安装' },
+  'installation.statusInactive': { en: 'Installed, not enabled', zh: '已安装未启用' },
+  'installation.statusActive': { en: 'Enabled', zh: '已启用' },
+  'installation.notificationsEnabled': { en: 'Notifications: enabled', zh: '学习通知：已开启' },
+  'installation.notificationsDisabled': { en: 'Notifications: disabled', zh: '学习通知：未开启' },
+  'installation.notificationsNotOffered': {
+    en: 'Notification settings: not offered here (decided by operations through the deployment flag)',
+    zh: '学习通知设置：本界面不提供（由运维按部署开关决定）',
+  },
+  'installation.notificationsOptIn': { en: 'Opt in to learning notifications', zh: '开启学习通知' },
+  'installation.saveNotifications': { en: 'Save notifications', zh: '保存通知设置' },
+  'installation.install': { en: 'Install', zh: '安装' },
+  'installation.enable': { en: 'Enable', zh: '启用' },
+  'installation.disable': { en: 'Disable', zh: '停用' },
+  'installation.retry': { en: 'Retry', zh: '重试' },
+  'installation.requestFailed': {
+    en: 'elearning_installation_request_failed',
+    zh: '云课堂安装状态请求失败，请重试。',
+  },
+
+  'error.orgContextRequired': {
+    en: 'This account does not have exactly one active organization: if you belong to none, ask an administrator to add you to one; if you belong to several, choose an organization above first.',
+    zh: '当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。',
+  },
+  'error.analyticsExportStorageUnavailable': {
+    en: 'This deployment has no export storage configured, so analytics export is unavailable. To export, ask your operations team to configure object storage.',
+    zh: '当前部署未配置导出存储，分析导出不可用；需要导出请联系运维配置对象存储。',
+  },
+  'error.orgContextStaleLogin': {
+    en: 'Your sign-in predates your organization membership. Please sign out and sign in again.',
+    zh: '您的登录状态早于组织归属，请退出后重新登录。',
+  },
+  'sessionOrg.staleNotice': {
+    en: 'The organization was switched. This page still belongs to the previous organization; actions are disabled and unsaved input stays here until you reload.',
+    zh: '组织已切换。本页面仍属于切换前的组织，操作已停用；未保存的内容保留在此，直到您重新加载。',
+  },
+  'sessionOrg.discardAndReload': {
+    en: 'Discard unsaved input and reload',
+    zh: '放弃未保存内容并重新加载',
   },
 
   'status.completed': { en: 'Completed', zh: '已完成' },
@@ -646,6 +780,57 @@ export function elearningVideoStatusLabel(
   }
 }
 
+// F12: the installation panel shows a word for each status the installation API can return
+// (services/elearningApp.ts parseElearningAppInstallation), never the raw status token.
+export function elearningInstallationStatusLabel(
+  status: ElearningAppInstallation['status'],
+  isZh: boolean,
+): string {
+  switch (status) {
+    case 'not-installed':
+      return elearningLabel('installation.statusNotInstalled', isZh)
+    case 'inactive':
+      return elearningLabel('installation.statusInactive', isZh)
+    case 'active':
+      return elearningLabel('installation.statusActive', isZh)
+  }
+}
+
+function elearningNoMediaClauses(base: string, clause: string | null, isZh: boolean): string {
+  if (isZh) return clause ? `${base}；${clause}。` : `${base}。`
+  return clause ? `${base} ${clause}` : base
+}
+
+// F11: learner subtitle on a no-video deployment. Only names the surfaces the capabilities
+// response actually enables (content = article / external-link courses; practice = the
+// objective practice section, gated by isElearningPracticeReady).
+export function elearningLearnerNoMediaSubtitle(
+  contentEnabled: boolean,
+  practiceEnabled: boolean,
+  isZh: boolean,
+): string {
+  const clause = contentEnabled && practiceEnabled
+    ? elearningLabel('learner.noMediaContentAndPractice', isZh)
+    : contentEnabled
+      ? elearningLabel('learner.noMediaContent', isZh)
+      : practiceEnabled
+        ? elearningLabel('learner.noMediaPractice', isZh)
+        : null
+  return elearningNoMediaClauses(elearningLabel('learner.subtitleNoMedia', isZh), clause, isZh)
+}
+
+// F11: admin notice in place of the video-course form. Exam authoring stays available with
+// media off (server: isElearningAssessmentSurfaceEnabled), but the learner exam runtime needs
+// media (isElearningExamSurfaceEnabled; the learner view drops assessment courses), so the
+// notice only says learners have no exam entry. The article / link clause needs content.
+export function elearningAdminVideoUnavailable(contentEnabled: boolean, isZh: boolean): string {
+  return elearningNoMediaClauses(
+    elearningLabel('admin.videoUnavailable', isZh),
+    contentEnabled ? elearningLabel('admin.videoUnavailableContent', isZh) : null,
+    isZh,
+  )
+}
+
 // durationMs is already server-validated >= 1; in-progress stays 0..99 until status=completed.
 export function elearningWatchProgressPercent(effectiveMs: number, durationMs: number): number {
   if (!Number.isFinite(effectiveMs) || !Number.isFinite(durationMs) || durationMs < 1) return 0
@@ -676,6 +861,35 @@ export function elearningTrueFalseOptions(isZh: boolean): ElearningTrueFalseOpti
 
 export function elearningFailure(code: string, status: number, isZh: boolean): string {
   return isZh ? `失败：${code}（${status}）` : `Failed: ${code} (${status})`
+}
+
+// The org-context gate on the /api/elearning* and /api/elearning-app routes answers
+// 403 {"error":"ORG_CONTEXT_REQUIRED"} when the session carries no organization
+// claim (the account has zero, or more than one, active organization). The raw
+// `失败：ORG_CONTEXT_REQUIRED（403）` tells a learner nothing, so this one code is
+// explained; every other code keeps the generic elearningFailure() text.
+export const ELEARNING_ORG_CONTEXT_REQUIRED = 'ORG_CONTEXT_REQUIRED'
+
+export function isElearningOrgContextRequired(code: unknown, status: unknown): boolean {
+  return status === 403 && code === ELEARNING_ORG_CONTEXT_REQUIRED
+}
+
+// 409 {"error":"ANALYTICS_EXPORT_STORAGE_UNAVAILABLE"}: the deployment has no export
+// storage, so the export request is refused before any task is created.
+export const ELEARNING_ANALYTICS_EXPORT_STORAGE_UNAVAILABLE = 'ANALYTICS_EXPORT_STORAGE_UNAVAILABLE'
+
+export function isElearningAnalyticsExportStorageUnavailable(code: unknown, status: unknown): boolean {
+  return status === 409 && code === ELEARNING_ANALYTICS_EXPORT_STORAGE_UNAVAILABLE
+}
+
+export function elearningErrorMessage(code: string, status: number, isZh: boolean): string {
+  if (isElearningOrgContextRequired(code, status)) {
+    return elearningLabel('error.orgContextRequired', isZh)
+  }
+  if (isElearningAnalyticsExportStorageUnavailable(code, status)) {
+    return elearningLabel('error.analyticsExportStorageUnavailable', isZh)
+  }
+  return elearningFailure(code, status, isZh)
 }
 
 export function elearningQuestionPoints(points: number, isZh: boolean): string {
@@ -750,6 +964,39 @@ export function elearningAssignIncomplete(errorText: string, isZh: boolean): str
   return isZh
     ? `课程已发布，指派未完成。${errorText} 可重试指派，无需重新发布。`
     : `The course was published, but assignment did not complete. ${errorText} You can retry assignment without publishing again.`
+}
+
+/**
+ * The one timestamp formatter for the e-learning views (F13): renders an ISO instant in the
+ * viewer's local timezone — `YYYY-MM-DD HH:mm` in zh, the `en` medium date + short time
+ * otherwise. null / undefined / blank -> '' (callers supply their own "none" label); a value
+ * that does not parse is returned unchanged rather than hidden.
+ */
+export function formatElearningDate(value: string | null | undefined, isZh: boolean): string {
+  if (value === null || value === undefined) return ''
+  const raw = String(value)
+  if (raw.trim() === '') return ''
+  const ms = Date.parse(raw)
+  if (!Number.isFinite(ms)) return raw
+  const date = new Date(ms)
+  if (!isZh) {
+    return new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+  }
+  const pad = (part: number): string => String(part).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+    + `${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+/** Picker label for one search hit: the name, else the email, else a generic label — never the id. */
+export function elearningAssigneeDisplayName(
+  candidate: { name: string | null; email: string | null },
+  isZh: boolean,
+): string {
+  return candidate.name ?? candidate.email ?? elearningLabel('assigneePicker.unnamed', isZh)
+}
+
+export function elearningAssigneeSelected(displayName: string, isZh: boolean): string {
+  return isZh ? `已选择：${displayName}` : `Selected: ${displayName}`
 }
 
 export function elearningSelectedFile(fileName: string, isZh: boolean): string {
@@ -827,6 +1074,10 @@ export function elearningManualGradingErrorMessage(
   code: string,
   isZh: boolean,
 ): string {
+  // The org-context gate's 403 is not a grading permission problem: explain it first.
+  if (isElearningOrgContextRequired(code, status)) {
+    return elearningLabel('error.orgContextRequired', isZh)
+  }
   if (status === 403) return elearningLabel('grading.error403', isZh)
   if (status === 404) return elearningLabel('grading.error404', isZh)
   if (status === 409) return elearningLabel('grading.error409', isZh)

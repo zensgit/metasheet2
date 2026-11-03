@@ -37,6 +37,7 @@ const {
     templateFieldCounts,
     missingLogicalFields,
     assertNoExistingFieldMutated,
+    isObjectScopeError,
   },
 } = require('./stock-preparation-target-provisioning.cjs')
 
@@ -382,6 +383,40 @@ function getMvpRepairApi(context) {
   return provisioning
 }
 
+// 反驳 r1 (#5721 终审 route PR): the host's tx surface asserts PLUGIN OBJECT SCOPE on every content
+// read and on the additive write (`packages/core-backend/src/multitable/plugin-scope.ts:436-460`;
+// `findObjectSheet` is discovery-only). An object this plugin never claimed in
+// `plugin_multitable_object_registry` — a hand-made or dump-restored sheet, i.e. exactly the state the
+// 222 pre-check is for — makes the host throw `MultitableObjectScopeError`: NO `status`, and a message
+// that names `${projectId}/${objectId}` (the tenant's project id). Left alone it escaped `sendError` as
+// an opaque 500 that ECHOED the project id. Readiness DEGRADES that error to `computed_scope_unavailable`
+// (target-provisioning `resolveFieldExistence`); a REPAIR must not degrade — writing through the
+// compute-only map is the very hole #5721 closed — so it REFUSES, typed and values-free: 409
+// `MVP_REPAIR_SCOPE_UNAVAILABLE`, details = the template objectId + the host method that refused.
+// The typed throw still propagates out of the runner, so the transaction rolls back and nothing is
+// written (proven by the route suite's R10 and the unit suite's (j)).
+const MVP_REPAIR_TX_METHODS = Object.freeze(['findObjectSheet', 'resolveExistingObjectFieldIds', 'readObjectFieldsContent', 'ensureMissingObjectFields'])
+
+function mvpRepairScopeGuardedSurface(tx) {
+  const guarded = {}
+  for (const method of MVP_REPAIR_TX_METHODS) {
+    guarded[method] = async (input) => {
+      try {
+        return await tx[method](input)
+      } catch (error) {
+        if (!isObjectScopeError(error)) throw error
+        throw new StockPreparationTargetProvisioningError(
+          409,
+          'MVP_REPAIR_SCOPE_UNAVAILABLE',
+          'stock-preparation MVP repair requires this plugin to own the object in plugin_multitable_object_registry; the host refused the object scope and nothing was written',
+          { objectId: input && input.objectId, hostMethod: method },
+        )
+      }
+    }
+  }
+  return guarded
+}
+
 // W2 template-evolution rung — the EXPLICIT repair verb (never folded into ensure;
 // the `:232` MVP_TARGET_SCHEMA_INCOMPLETE throw stays a hard fail-closed). Governance:
 //   1. admin-gated;
@@ -410,7 +445,8 @@ async function repairStockPreparationMvpTargets({ context, projectId, permission
   // absent) propagates out and ROLLS BACK the whole sweep, so a partial multi-table repair
   // never commits — atomic fail-close, not a post-commit detection canary. Every DB touch
   // goes through `tx`; pure prep (admin gate, template resolution, ownership) needs no tx.
-  const tables = await provisioning.runObjectFieldsRepairTransaction(async (tx) => {
+  const tables = await provisioning.runObjectFieldsRepairTransaction(async (rawTx) => {
+    const tx = mvpRepairScopeGuardedSurface(rawTx)
     const acc = []
     for (const template of templates) {
       const sheet = await tx.findObjectSheet({ projectId: scopedProjectId, objectId: template.objectId })
@@ -455,11 +491,16 @@ async function repairStockPreparationMvpTargets({ context, projectId, permission
         const found = descriptor.fields.find((field) => field.id === id)
         if (found) missingDescriptors.push(found)
       }
-      const result = await tx.ensureMissingObjectFields({
-        projectId: scopedProjectId,
-        objectId: template.objectId,
-        fields: missingDescriptors,
-      })
+      // #5721 终审: nothing missing => NO host write call at all (the route's "repair 0 = zero
+      // writes" claim is literal, not "an INSERT of an empty list"). The post-write re-verify and
+      // the before/after content comparison below still run, so "already ready" stays PROVEN.
+      const result = missingDescriptors.length
+        ? await tx.ensureMissingObjectFields({
+          projectId: scopedProjectId,
+          objectId: template.objectId,
+          fields: missingDescriptors,
+        })
+        : { addedFieldIds: [], skippedExistingFieldIds: [] }
       // CONCURRENCY fail-close (round-5 review P2): we submitted ONLY this round's missing
       // set, so a skipped-existing id means a competing writer inserted that column between
       // our resolve and our write. We neither added it nor content-verified its row against
@@ -485,14 +526,25 @@ async function repairStockPreparationMvpTargets({ context, projectId, permission
         )
       }
       assertNoExistingFieldMutated(beforeContent, await tx.readObjectFieldsContent({ projectId: scopedProjectId, objectId: template.objectId, fieldIds: existingIds }), template.objectId)
+      // #5721 终审 / 反驳 r1: ONE 口径 for repaired / mode / addedFieldCount / addedFieldIds — the
+      // LOGICAL template ids this sweep submitted (== the probe's missingFields 口径:
+      // missingLogicalFields over the DB read), which the re-verify above has just PROVEN present.
+      // The host's returned physical fld_* ids feed only the two fail-close checks (skipped-existing
+      // => 409, still-missing => 409) and are never reported, so a host that under-reports its
+      // `addedFieldIds` can no longer produce `mvp_already_ready` next to a non-empty id list.
+      const addedFieldIds = missingDescriptors.map((field) => field.id)
       acc.push({
         objectId: template.objectId,
         role: template.role,
-        repaired: result.addedFieldIds.length > 0,
-        mode: result.addedFieldIds.length > 0 ? 'mvp_repaired' : 'mvp_already_ready',
-        addedFieldCount: result.addedFieldIds.length,
+        repaired: addedFieldIds.length > 0,
+        mode: addedFieldIds.length > 0 ? 'mvp_repaired' : 'mvp_already_ready',
+        addedFieldCount: addedFieldIds.length,
+        addedFieldIds,
         skippedExistingFieldCount: result.skippedExistingFieldIds.length,
         schemaCompleteAfter: true,
+        // Repair only ever judges existence through the tx-bound DB read; there is no computed
+        // fallback here (an old host is refused at getMvpRepairApi before this runs).
+        fieldExistenceMode: 'db',
         templateVersion: template.version,
       })
     }
@@ -508,6 +560,7 @@ async function repairStockPreparationMvpTargets({ context, projectId, permission
         objectId: table.objectId,
         mode: table.mode,
         addedFieldCount: table.addedFieldCount,
+        addedFieldIds: table.addedFieldIds.slice(),
         templateVersion: table.templateVersion,
       })),
     },

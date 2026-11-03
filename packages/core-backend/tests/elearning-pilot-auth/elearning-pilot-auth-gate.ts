@@ -311,7 +311,9 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
   const legacyId = randomUUID()
   const outsiderId = randomUUID()
   const forgedId = randomUUID()
-  const createdUserIds = [readerId, writerId, adminId, legacyId, outsiderId, forgedId]
+  // F13: a member of ORG_B only, so an ORG_A caller leaking ORG_B rows is observable.
+  const orgBOnlyId = randomUUID()
+  const createdUserIds = [readerId, writerId, adminId, legacyId, outsiderId, forgedId, orgBOnlyId]
   const pinned = usePinnedServer()
   const learnerCalls: Array<{ orgId: string; userId: string }> = []
   const trainingPlanPublishCalls: PublishElearningTrainingPlanInput[] = []
@@ -366,6 +368,7 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
     await insertUser(legacyId, 'legacy')
     await insertUser(outsiderId, 'outsider')
     await insertUser(forgedId, 'forged')
+    await insertUser(orgBOnlyId, 'org-b-only')
 
     await pool.query(
       `INSERT INTO user_orgs (user_id, org_id, is_active)
@@ -375,8 +378,9 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
          ($4, $2, TRUE),
          ($4, $5, TRUE),
          ($6, $2, TRUE),
-         ($7, $2, TRUE)`,
-      [readerId, ORG_A, writerId, adminId, ORG_B, legacyId, forgedId],
+         ($7, $2, TRUE),
+         ($8, $5, TRUE)`,
+      [readerId, ORG_A, writerId, adminId, ORG_B, legacyId, forgedId, orgBOnlyId],
     )
 
     for (const userId of [readerId, legacyId, outsiderId]) {
@@ -1044,6 +1048,88 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
     expect(res.body).toEqual({ error: 'ORG_CONTEXT_REQUIRED' })
     expect(await scopeRevisionCount()).toBe(before)
     valuesFree(res.body)
+  })
+
+  // F13 assignee picker: GET /api/elearning/admin/assignees through the production runtime's
+  // real rbacGuard('elearning', 'admin') and JWT-bound org, against real users/user_orgs rows.
+  const ASSIGNEE_SEARCH = `/api/elearning/admin/assignees?q=${encodeURIComponent(NS)}&limit=50`
+
+  it('F13 assignee search: elearning:write without admin is 403 and learns no people', async () => {
+    const token = signToken({
+      userId: writerId,
+      email: `${writerId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_A,
+    })
+    const res = await request(pinned.url())
+      .get(ASSIGNEE_SEARCH)
+      .set('Authorization', `Bearer ${token}`)
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'Insufficient permissions' })
+    expect(JSON.stringify(res.body)).not.toContain(NS)
+    valuesFree(res.body)
+  })
+
+  it('F13 assignee search: tenant-less admin token plus forged x-tenant-id is 403 ORG_CONTEXT_REQUIRED', async () => {
+    const token = signToken({
+      userId: adminId,
+      email: `${adminId}@el-auth-gate.test`,
+      role: 'user',
+    })
+    const res = await request(pinned.url())
+      .get(ASSIGNEE_SEARCH)
+      .set('Authorization', `Bearer ${token}`)
+      .set('x-tenant-id', ORG_B)
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'ORG_CONTEXT_REQUIRED' })
+    expect(JSON.stringify(res.body)).not.toContain(NS)
+    valuesFree(res.body)
+  })
+
+  it('F13 assignee search: an org-A admin forging x-tenant-id ORG_B gets only org-A members', async () => {
+    const tokenA = signToken({
+      userId: adminId,
+      email: `${adminId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_A,
+    })
+    const res = await request(pinned.url())
+      .get(`${ASSIGNEE_SEARCH}&orgId=${encodeURIComponent(ORG_B)}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+      .set('x-tenant-id', ORG_B)
+    // A client-supplied orgId is not even accepted as a parameter.
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'invalid_input' })
+
+    const forgedHeader = await request(pinned.url())
+      .get(ASSIGNEE_SEARCH)
+      .set('Authorization', `Bearer ${tokenA}`)
+      .set('x-tenant-id', ORG_B)
+    expect(forgedHeader.status).toBe(200)
+    const items = forgedHeader.body.items as Array<Record<string, unknown>>
+    expect(items.map((item) => item.id).sort())
+      .toEqual([readerId, writerId, adminId, legacyId, forgedId].sort())
+    for (const item of items) {
+      expect(Object.keys(item).sort()).toEqual(['email', 'id', 'name'])
+      expect(item.email).toBe(`${String(item.id)}@el-auth-gate.test`)
+    }
+    expect(JSON.stringify(forgedHeader.body)).not.toContain(orgBOnlyId)
+    expect(JSON.stringify(forgedHeader.body)).not.toContain(outsiderId)
+    valuesFree(forgedHeader.body)
+
+    // Positive control: the same admin bound to ORG_B sees exactly ORG_B's members.
+    const tokenB = signToken({
+      userId: adminId,
+      email: `${adminId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_B,
+    })
+    const orgB = await request(pinned.url())
+      .get(ASSIGNEE_SEARCH)
+      .set('Authorization', `Bearer ${tokenB}`)
+    expect(orgB.status).toBe(200)
+    expect((orgB.body.items as Array<{ id: string }>).map((item) => item.id).sort())
+      .toEqual([adminId, orgBOnlyId].sort())
   })
 
   it('tenant-bound elearning:read receives flag AND hydrated-RBAC capabilities', async () => {

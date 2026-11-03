@@ -96,6 +96,7 @@ describeIfDatabase('S7-1 dynamic-kind step contract + fail-closed (authoring + r
   const createdFlowIds: string[] = []
   const createdInstanceIds: string[] = []
   const createdRequestIds: string[] = []
+  const ownedDefaultRuleIds: string[] = []
 
   function setFlag(on: boolean): void {
     if (on) process.env[DYNAMIC_FLAG] = 'true'
@@ -181,6 +182,47 @@ describeIfDatabase('S7-1 dynamic-kind step contract + fail-closed (authoring + r
     baseUrl = `http://127.0.0.1:${address.port}`
 
     adminToken = await devToken(requester, 'user', 'attendance:admin,attendance:write,attendance:approve')
+    await pool.query(
+      `INSERT INTO users (
+         id, email, username, name, password_hash, role, permissions,
+         is_active, is_admin, activation_status, created_at, updated_at
+       ) VALUES (
+         $1, $2, $1, 's7-1 fixture', 'x', 'user', '[]'::jsonb,
+         true, false, 'activated', now(), now()
+       )
+       ON CONFLICT (id) DO UPDATE
+         SET is_active = true,
+             activation_status = 'activated',
+             updated_at = now()`,
+      [requester, `${requester}@s7-1-fixture.test`],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, true), ($1, $3, true)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+      [requester, orgId, breadthOrgId],
+    )
+    await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code)
+       SELECT $1, unnest($2::text[])
+       ON CONFLICT DO NOTHING`,
+      [requester, ['attendance:admin', 'attendance:write', 'attendance:approve']],
+    )
+    for (const ruleOrgId of [orgId, breadthOrgId]) {
+      const ruleId = randomUUID()
+      const inserted = await pool.query(
+        `INSERT INTO attendance_rules
+           (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes,
+            severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default)
+         SELECT $1, $2, $3, 'UTC', '09:00', '18:00', 5, 5, 30, 60, 5, $4::jsonb, true
+          WHERE NOT EXISTS (
+            SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true
+          )
+         RETURNING id`,
+        [ruleId, ruleOrgId, `s7-1-default-${ruleId}`, JSON.stringify([0, 1, 2, 3, 4, 5, 6])],
+      )
+      if (inserted.rows[0]?.id) ownedDefaultRuleIds.push(String(inserted.rows[0].id))
+    }
   })
 
   afterAll(async () => {
@@ -198,6 +240,25 @@ describeIfDatabase('S7-1 dynamic-kind step contract + fail-closed (authoring + r
         }
         await pool.query('DELETE FROM attendance_approval_flows WHERE org_id = $1', [orgId]).catch(() => undefined)
         await pool.query('DELETE FROM attendance_approval_flows WHERE org_id = $1', [breadthOrgId]).catch(() => undefined)
+        if (ownedDefaultRuleIds.length > 0) {
+          await pool.query(
+            `DELETE FROM attendance_rules r WHERE r.id=ANY($1::uuid[])
+               AND NOT EXISTS (SELECT 1 FROM attendance_shift_assignments a WHERE a.org_id=r.org_id AND a.is_active=true)
+               AND NOT EXISTS (SELECT 1 FROM attendance_rotation_assignments a WHERE a.org_id=r.org_id AND a.is_active=true)
+               AND NOT EXISTS (SELECT 1 FROM attendance_timezone_context_companions c WHERE c.org_id=r.org_id)
+               AND NOT EXISTS (SELECT 1 FROM attendance_business_trip_arrangements b WHERE b.org_id=r.org_id)`,
+            [ownedDefaultRuleIds],
+          ).catch(() => undefined)
+        }
+        await pool.query(
+          `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = ANY($2::text[])`,
+          [requester, ['attendance:admin', 'attendance:write', 'attendance:approve']],
+        ).catch(() => undefined)
+        await pool.query(
+          `DELETE FROM user_orgs WHERE user_id = $1 AND org_id = ANY($2::text[])`,
+          [requester, [orgId, breadthOrgId]],
+        ).catch(() => undefined)
+        await pool.query('DELETE FROM users WHERE id = $1', [requester]).catch(() => undefined)
       } finally {
         await pool.end()
       }
@@ -402,8 +463,9 @@ describeIfDatabase('S7-1 dynamic-kind step contract + fail-closed (authoring + r
 
     await client.query(
       `INSERT INTO attendance_requests
-         (id, user_id, work_date, request_type, status, org_id, approval_instance_id, metadata)
-       VALUES ($1, $2, CURRENT_DATE, 'missed_check_in', 'pending', $3, $4, $5::jsonb)`,
+         (id, user_id, work_date, request_type, status, org_id, approval_instance_id,
+          approval_workflow_key, metadata)
+       VALUES ($1, $2, CURRENT_DATE, 'missed_check_in', 'pending', $3, $4, 'attendance_request_approval', $5::jsonb)`,
       [
         requestId,
         requester,

@@ -22,6 +22,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
+import { defineCopySheetRealDbCases } from './multitable-copy-sheet-realdb.cases'
+import { defineGridExportClosureRealDbCases } from './multitable-grid-export-closure-realdb.cases'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -212,3 +214,12 @@ describeIfDatabase('#18 phase-2 conditional read-deny rule enforcement (real DB)
     expect(JSON.stringify(all.body)).toContain(REC_SECRET)
   })
 })
+
+// 「复制数据表（含数据）」S1 real-DB cases (ADR #6094 §9; PR #6112 review A4) ride in this already-wired real-DB host so
+// they execute in the existing "Run multitable real-DB integration" step without a new lane file (the pushing token
+// has no `workflow` scope). Self-contained fixtures (own base / users / sheets, unique ids), own cleanup.
+defineCopySheetRealDbCases()
+
+// 备料分批拉取第一期 step 3 (PR A): the sheet-level grid-export closure stamp — migration + CHECKs, the host stamp,
+// export 403 vs an unstamped sibling, /context marker, copy-with-data refusal, down() refusal. Same hosting rule as above.
+defineGridExportClosureRealDbCases()

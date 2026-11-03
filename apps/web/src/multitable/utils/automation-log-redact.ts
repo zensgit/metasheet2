@@ -152,6 +152,9 @@ const STRUCTURED_FIELDS_TO_REDACT = new Set([
   'receiver_user_ids',
   'userIds',
   'user_ids',
+  // 客户反馈 2026-10-21 item 1 (review round 1): the local user ids a DingTalk person message skipped.
+  'skippedUserIds',
+  'skipped_user_ids',
   // Subject (may contain real customer names / order ids when send_email
   // populates from record fields)
   'subject',

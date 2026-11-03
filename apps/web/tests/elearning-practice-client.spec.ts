@@ -232,4 +232,12 @@ describe('e-learning practice client', () => {
       title: 'Safety practice',
     })).rejects.toMatchObject({ code: 'request_failed', status: 409 })
   })
+
+  it('passes the org-context gate code through to the learner view', async () => {
+    apiFetchMock.mockResolvedValueOnce(response(403, { error: 'ORG_CONTEXT_REQUIRED' }))
+    await expect(listElearningPracticeSets()).rejects.toMatchObject({
+      code: 'ORG_CONTEXT_REQUIRED',
+      status: 403,
+    })
+  })
 })

@@ -1,0 +1,260 @@
+{
+  "synthetic_only": true,
+  "roles": [
+    {
+      "id": "admin",
+      "name": "admin"
+    },
+    {
+      "id": "attendance_admin",
+      "name": "Attendance Admin"
+    },
+    {
+      "id": "attendance_approver",
+      "name": "Attendance Approver"
+    },
+    {
+      "id": "attendance_employee",
+      "name": "Attendance Employee"
+    },
+    {
+      "id": "attendance_importer",
+      "name": "Attendance Importer"
+    },
+    {
+      "id": "plugin_elearning_admin",
+      "name": "E-learning Admin"
+    },
+    {
+      "id": "plugin_elearning_operator",
+      "name": "E-learning Operator"
+    },
+    {
+      "id": "plugin_elearning_viewer",
+      "name": "E-learning Viewer"
+    },
+    {
+      "id": "stock-prep_admin",
+      "name": "备料主管理员"
+    },
+    {
+      "id": "stock-prep_developer",
+      "name": "开发成员"
+    },
+    {
+      "id": "stock-prep_frontline",
+      "name": "操作人员"
+    },
+    {
+      "id": "stock-prep_puller",
+      "name": "数据管理员（拉取人员）"
+    }
+  ],
+  "permissions": [
+    {
+      "code": "admin:all",
+      "name": "Admin All",
+      "description": "Full admin access"
+    },
+    {
+      "code": "approval-templates:manage",
+      "name": "Approval Templates Manage",
+      "description": "Author and manage approval templates (create, edit, publish, archive, template groups) and administer approval delegations; the same template-admin guard also accepts approvals:admin-templates"
+    },
+    {
+      "code": "approvals:act",
+      "name": "Approvals Act",
+      "description": "Take decision actions on approval instances (approve, reject, return, transfer, add/reduce sign) through the approval action endpoints. Route-level capability: each route evaluates whether the holder may act on a given instance"
+    },
+    {
+      "code": "approvals:admin",
+      "name": "Approvals Admin",
+      "description": "Perform administrative approval recovery actions"
+    },
+    {
+      "code": "approvals:admin-data",
+      "name": "Approval Data Recovery Admin",
+      "description": "Perform approval data recovery operations without template administration privileges"
+    },
+    {
+      "code": "approvals:admin-templates",
+      "name": "Approval Template Admin",
+      "description": "Manage approval templates without approval process recovery privileges"
+    },
+    {
+      "code": "approvals:analytics",
+      "name": "Approvals Analytics",
+      "description": "View person-level approval process analytics (performance aggregations)"
+    },
+    {
+      "code": "approvals:read",
+      "name": "Approvals Read",
+      "description": "Read approval instances, history, comments, delegations, and pending/todo queues — also gates a few write-shaped actions sharing this same guard (see the migration file header); not a pure read-only grant"
+    },
+    {
+      "code": "approvals:write",
+      "name": "Approvals Write",
+      "description": "Start approvals: create and preview approval instances from published templates, keep form drafts and upload draft attachments. Does not allow acting on an approval (approvals:act) or authoring templates (approval-templates:manage)"
+    },
+    {
+      "code": "attendance:admin",
+      "name": "Attendance Admin",
+      "description": "Manage attendance rules, settings, and schedules"
+    },
+    {
+      "code": "attendance:approve",
+      "name": "Attendance Approve",
+      "description": "Approve or reject attendance adjustments"
+    },
+    {
+      "code": "attendance:import",
+      "name": "Attendance Import",
+      "description": "Import attendance records and manage import batches"
+    },
+    {
+      "code": "attendance:read",
+      "name": "Attendance Read",
+      "description": "Read attendance records and summaries"
+    },
+    {
+      "code": "attendance:write",
+      "name": "Attendance Write",
+      "description": "Create attendance punches and adjustment requests"
+    },
+    {
+      "code": "comments:read",
+      "name": "Comments Read",
+      "description": "Read comments and discussion threads"
+    },
+    {
+      "code": "comments:write",
+      "name": "Comments Write",
+      "description": "Create, update, resolve, and delete comments"
+    },
+    {
+      "code": "demo:read",
+      "name": "Demo Read",
+      "description": "Read access for demo purposes"
+    },
+    {
+      "code": "demo:write",
+      "name": "Demo Write",
+      "description": "Write access for demo purposes"
+    },
+    {
+      "code": "elearning:admin",
+      "name": "E-learning Admin",
+      "description": "Global e-learning administration"
+    },
+    {
+      "code": "elearning:grade",
+      "name": "E-learning Grade",
+      "description": "Grade exam attempts within authorized scope"
+    },
+    {
+      "code": "elearning:read",
+      "name": "E-learning Read",
+      "description": "Read published learning content and own attempts"
+    },
+    {
+      "code": "elearning:stats",
+      "name": "E-learning Stats",
+      "description": "Read learning statistics"
+    },
+    {
+      "code": "elearning:write",
+      "name": "E-learning Write",
+      "description": "Create and edit learning content and exams"
+    },
+    {
+      "code": "multitable:manage-schema",
+      "name": "Multitable Manage Schema",
+      "description": "Create, rename, retype and delete multitable fields (table structure) — NOT implied by multitable:write"
+    },
+    {
+      "code": "multitable:read",
+      "name": "Multitable Read",
+      "description": "Read multitable bases, sheets, views, and records"
+    },
+    {
+      "code": "multitable:share",
+      "name": "Multitable Share",
+      "description": "Manage sheet-level multitable access overrides"
+    },
+    {
+      "code": "multitable:submit-approval",
+      "name": "Multitable Submit Approval",
+      "description": "Submit a multitable record to an approval template (record-level send-for-approval) — NOT implied by multitable:write; the approval product still requires approvals:write"
+    },
+    {
+      "code": "multitable:write",
+      "name": "Multitable Write",
+      "description": "Manage multitable bases, fields, views, and records"
+    },
+    {
+      "code": "spreadsheet:read",
+      "name": "Spreadsheet Read",
+      "description": "Read spreadsheet resources and cell data"
+    },
+    {
+      "code": "spreadsheet:write",
+      "name": "Spreadsheet Write",
+      "description": "Create and update spreadsheet resources and cell data"
+    },
+    {
+      "code": "spreadsheets:read",
+      "name": "Spreadsheets Read",
+      "description": "Read spreadsheet resources and cell data"
+    },
+    {
+      "code": "spreadsheets:write",
+      "name": "Spreadsheets Write",
+      "description": "Create and update spreadsheet resources and cell data"
+    },
+    {
+      "code": "stock-prep:admin",
+      "name": "Stock Prep Admin",
+      "description": "Workbench-scoped stock-preparation administration (no pack install; may relabel still-English managed-table headers to their Chinese template names when the operator switch is on; includes the puller tier, which may create one per-project stock-preparation sheet from the frozen template when the project-sheets switch is on)"
+    },
+    {
+      "code": "stock-prep:operate",
+      "name": "Stock Prep Operate",
+      "description": "Confirm stock-preparation queue decisions and read back own value entry"
+    },
+    {
+      "code": "stock-prep:pull",
+      "name": "Stock Prep Pull",
+      "description": "Pull from PLM into the stock-preparation sheet (dry-run, apply, large-BOM background channel, reconcile); in later slices also create project sheets and archive/restore them. The holder must also hold stock-prep:operate and stock-prep:read"
+    },
+    {
+      "code": "stock-prep:read",
+      "name": "Stock Prep Read",
+      "description": "Read the values-free stock-preparation confirmation queue"
+    },
+    {
+      "code": "tasks:admin",
+      "name": "Tasks Admin",
+      "description": "Administer task settings in the caller org"
+    },
+    {
+      "code": "tasks:read",
+      "name": "Tasks Read",
+      "description": "Read tasks in the caller org"
+    },
+    {
+      "code": "tasks:write",
+      "name": "Tasks Write",
+      "description": "Create and update tasks in the caller org"
+    },
+    {
+      "code": "test:read",
+      "name": "Test Read",
+      "description": "Read access for testing"
+    },
+    {
+      "code": "test:write",
+      "name": "Test Write",
+      "description": "Write access for testing"
+    }
+  ]
+}

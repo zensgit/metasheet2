@@ -357,3 +357,86 @@ export function independentDiscoverBeginCallSitesV1(source: ts.SourceFile): Inde
   }
   return out
 }
+
+
+/** Pool-owned acquisitions outside the caller-client domain. Recognize only
+ * unconditional own-body connect statements; every unproven BEGIN remains in
+ * the broad independent census and causes a mismatch.
+ */
+export function discoverPoolOwnedBeginSitesV1(source: ts.SourceFile): IndependentBeginCallSiteV1[] {
+  const out: IndependentBeginCallSiteV1[] = []
+  const bindingContains = (binding: ts.BindingName, name: string): boolean => ts.isIdentifier(binding)
+    ? binding.text === name : binding.elements.some(element => !ts.isOmittedExpression(element) && bindingContains(element.name,name))
+  for (const fn of exportedFunctionDeclarations(source)) {
+    const parameters = new Set(fn.parameters.map(paramName).filter(Boolean))
+    const bindings: ts.VariableDeclaration[] = []
+    const assignments: {target:ts.Node,end:number}[] = []
+    const localNames = new Set<string>()
+    const walk = (node:ts.Node):void => {
+      if (ts.isVariableDeclaration(node)) bindings.push(node)
+      if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) localNames.add(node.name.text)
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+        && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) assignments.push({target:node.left,end:node.end})
+      if ((ts.isForInStatement(node) || ts.isForOfStatement(node)) && !ts.isVariableDeclarationList(node.initializer)) {
+        assignments.push({target:node.initializer,end:node.end})
+      }
+      if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node))
+        && (node.operator===ts.SyntaxKind.PlusPlusToken || node.operator===ts.SyntaxKind.MinusMinusToken)) {
+        assignments.push({target:node.operand,end:node.end})
+      }
+      node.forEachChild(walk)
+    }
+    fn.body!.forEachChild(walk)
+    const neverCall = (statement:ts.Statement):boolean => {
+      if (!ts.isExpressionStatement(statement) || !ts.isCallExpression(statement.expression)
+        || !ts.isIdentifier(statement.expression.expression)) return false
+      const name=statement.expression.expression.text
+      return !fn.parameters.some(parameter=>bindingContains(parameter.name,name)) && !localNames.has(name) && !bindings.some(binding=>bindingContains(binding.name,name))
+        && source.statements.some(node=>ts.isFunctionDeclaration(node) && node.name?.text===name && node.type?.kind===ts.SyntaxKind.NeverKeyword)
+    }
+    const acquired: {name:string,end:number,declaration:ts.VariableDeclaration}[] = []
+    const isConnect = (value:ts.Expression):boolean => ts.isAwaitExpression(value)
+      && ts.isCallExpression(value.expression) && value.expression.arguments.length===0
+      && ts.isPropertyAccessExpression(value.expression.expression) && value.expression.expression.name.text==='connect'
+      && ts.isIdentifier(value.expression.expression.expression) && parameters.has(value.expression.expression.expression.text)
+    for (const statement of fn.body!.statements) {
+      if (ts.isVariableStatement(statement) && statement.declarationList.flags & ts.NodeFlags.Const) {
+        for (const declaration of statement.declarationList.declarations) {
+          if (ts.isIdentifier(declaration.name) && declaration.initializer && isConnect(declaration.initializer)) {
+            acquired.push({name:declaration.name.text,end:statement.end,declaration})
+          }
+        }
+      }
+      if (ts.isTryStatement(statement) && !statement.finallyBlock && statement.tryBlock.statements.length===1
+        && statement.catchClause?.block.statements.length===1 && neverCall(statement.catchClause.block.statements[0])) {
+        const body=statement.tryBlock.statements[0]
+        if (!ts.isExpressionStatement(body) || !ts.isBinaryExpression(body.expression)
+          || body.expression.operatorToken.kind!==ts.SyntaxKind.EqualsToken || !ts.isIdentifier(body.expression.left)
+          || !isConnect(body.expression.right)) continue
+        const name=body.expression.left.text
+        const declaration=bindings.find(binding=>ts.isIdentifier(binding.name) && binding.name.text===name && !binding.initializer
+          && ts.isVariableDeclarationList(binding.parent) && ts.isVariableStatement(binding.parent.parent)
+          && binding.parent.parent.parent===fn.body && binding.parent.parent.end<=statement.pos)
+        if (declaration) acquired.push({name,end:statement.end,declaration})
+      }
+    }
+    for (const acquisition of acquired) {
+      if (fn.parameters.some(parameter=>bindingContains(parameter.name,acquisition.name)) || bindings.some(binding=>binding!==acquisition.declaration && bindingContains(binding.name,acquisition.name))
+        || localNames.has(acquisition.name)) continue
+      const writesTarget = (target:ts.Node):boolean => {
+        if(ts.isIdentifier(target)) return target.text===acquisition.name
+        if(ts.isPropertyAccessExpression(target) || ts.isElementAccessExpression(target)) return false
+        let found=false
+        target.forEachChild(child=>{if(writesTarget(child)) found=true})
+        return found
+      }
+      const writes=assignments.filter(assignment=>writesTarget(assignment.target))
+      if (writes.some(write=>write.end>acquisition.end) || writes.length>1) continue
+      for (const {node} of collectOwnScopeCalls(fn,call=>matchBeginCall(call,acquisition.name)!==null)) {
+        if (node.getStart()<=acquisition.end) continue
+        out.push({enclosingFunction:fn.name!.text,receiverName:acquisition.name,statementText:matchBeginCall(node,acquisition.name)!})
+      }
+    }
+  }
+  return out
+}

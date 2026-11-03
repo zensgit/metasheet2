@@ -250,6 +250,15 @@ describe('redactValue (structured object masking)', () => {
     expect(o.receiver_user_ids).toEqual(['<redacted>'])
   })
 
+  // 客户反馈 2026-10-21 item 1 (review round 1): the local user ids a DingTalk person message skipped.
+  it('masks the skipped DingTalk recipient id list', () => {
+    const out = redactValue({ notifiedUsers: 0, skippedRecipientCount: 2, skippedUserIds: ['user_fake_a', 'user_fake_b'], skipped_user_ids: ['user_fake_c'] })
+    const o = out as { skippedUserIds: unknown; skipped_user_ids: unknown; skippedRecipientCount: unknown }
+    expect(o.skippedUserIds).toEqual(['<redacted>', '<redacted>'])
+    expect(o.skipped_user_ids).toEqual(['<redacted>'])
+    expect(o.skippedRecipientCount).toBe(2)
+  })
+
   it('masks subject field (may contain customer names / order ids)', () => {
     const out = redactValue({ subject: 'Order 12345 for Acme Corp' })
     expect((out as { subject: unknown }).subject).toBe('<redacted>')

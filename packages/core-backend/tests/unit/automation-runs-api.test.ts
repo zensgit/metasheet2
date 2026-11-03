@@ -189,6 +189,25 @@ describe('A2 runs API — GET /automation-executions (list)', () => {
     expect(svc.logs.listExecutions).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'success' }))
   })
 
+  // 客户反馈 2026-09-24 #4c follow-up: the runs page loads no /context, so the list carries the instance business
+  // timezone (same resolver and env contract as /context) — on the data branch and the empty-filter branch.
+  it('carries the instance businessTimezone (default, env override, invalid env → default; empty branch too)', async () => {
+    const svc = makeMockService()
+    pinned.setApp(buildApp(svc))
+    try {
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', '')
+      expect((await request(pinned.url()).get('/api/multitable/automation-executions').expect(200)).body.businessTimezone).toBe('Asia/Shanghai')
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Asia/Tokyo')
+      expect((await request(pinned.url()).get('/api/multitable/automation-executions').expect(200)).body.businessTimezone).toBe('Asia/Tokyo')
+      expect((await request(pinned.url()).get('/api/multitable/automation-executions?status=suspended').expect(200)).body)
+        .toEqual({ executions: [], businessTimezone: 'Asia/Tokyo' })
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Not/AZone')
+      expect((await request(pinned.url()).get('/api/multitable/automation-executions').expect(200)).body.businessTimezone).toBe('Asia/Shanghai')
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   it('future-state C1 filter (suspended) is legal but returns empty WITHOUT querying', async () => {
     const svc = makeMockService()
     pinned.setApp(buildApp(svc))

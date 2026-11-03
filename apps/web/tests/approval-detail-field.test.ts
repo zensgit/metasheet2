@@ -4,12 +4,14 @@ import {
   buildDetailColumns,
   buildDetailRowsForDisplay,
   buildDisplayFields,
+  collectFormUserIds,
   createEmptyDetailColumnDraft,
   createEmptyDetailRow,
   detailColumnDraftsFromField,
   DETAIL_LEAF_FIELD_TYPES,
   findDetailFieldInSchema,
   formatSummaryLine,
+  formatUserFieldValue,
   isDetailCellVisible,
   isDetailField,
   isDetailLeafFieldType,
@@ -17,6 +19,7 @@ import {
   pruneHiddenDetailRow,
   pruneHiddenFormDataWithDetail,
   summaryFields,
+  userFieldValueIds,
   validateDetailColumnsDraft,
   validateDetailRows,
   visibleDetailColumnsForRow,
@@ -429,6 +432,158 @@ describe('detailField — buildDisplayFields (B1-02 humanized scalar snapshot)',
     expect(malformed[0].value).toBe('-')
   })
 
+  // Test report 2026-10-08, T4a-E2. A `date` value is a floating civil date stored as the strict
+  // `YYYY-MM-DD` string the server validates. Read as an instant it is UTC midnight, so the old
+  // rendering always carried a time of day (08:00:00 at UTC+8, 00:00:00 at UTC) and, west of UTC,
+  // the previous day. The expected strings below carry no time part at all, so the base rendering
+  // fails them on any host timezone.
+  describe('T4a-E2: a civil date (YYYY-MM-DD) renders date-only, as the day that was entered', () => {
+    const civilSchema: FormSchema = {
+      fields: [
+        { id: 'fld_day', type: 'date', label: '出发日期' },
+        { id: 'fld_dt', type: 'datetime', label: '会议时间' },
+      ],
+    }
+
+    it('a date field shows the calendar day only, in both shell locales', () => {
+      expect(buildDisplayFields(civilSchema, { fld_day: '2026-10-08' })[0].value).toBe('2026/10/8')
+      expect(buildDisplayFields(civilSchema, { fld_day: '2026-10-08' }, { isZh: false })[0].value).toBe('10/8/2026')
+      // Year/month boundaries are where a UTC-midnight reading shifts the visible day west of UTC.
+      expect(buildDisplayFields(civilSchema, { fld_day: '2027-01-01' })[0].value).toBe('2027/1/1')
+      expect(buildDisplayFields(civilSchema, { fld_day: '2024-02-29' })[0].value).toBe('2024/2/29')
+    })
+
+    it('only a real strict calendar string takes the civil path; anything else keeps the instant path', () => {
+      // A legacy instant stored in a date field keeps the pre-existing rendering.
+      expect(buildDisplayFields(civilSchema, { fld_day: '2026-01-02T03:04:05Z' })[0].value)
+        .toBe(new Date('2026-01-02T03:04:05Z').toLocaleString('zh-CN'))
+      // Unparsable text still passes through unchanged.
+      expect(buildDisplayFields(civilSchema, { fld_day: 'not-a-date' })[0].value).toBe('not-a-date')
+      // Gate r1 P3-1: a string of the civil SHAPE that is not a real calendar day is not a civil date
+      // either. The read-back check refuses the roll-over, so it keeps the instant path and never
+      // renders a rolled-over day (2026/3/2, 2027/1/1). V8 reads '2026-02-30' leniently as an instant
+      // (so it shows a time of day) and cannot read '2026-13-01' at all (so it passes through as is).
+      expect(buildDisplayFields(civilSchema, { fld_day: '2026-02-30' })[0].value)
+        .toBe(new Date('2026-02-30').toLocaleString('zh-CN'))
+      expect(buildDisplayFields(civilSchema, { fld_day: '2026-02-30' })[0].value).not.toBe('2026/3/2')
+      expect(buildDisplayFields(civilSchema, { fld_day: '2026-13-01' })[0].value).toBe('2026-13-01')
+      // A datetime field is an instant (Lock-8 D-2): even a bare date string stays on the instant path.
+      expect(buildDisplayFields(civilSchema, { fld_dt: '2026-10-08' })[0].value)
+        .toBe(new Date('2026-10-08').toLocaleString('zh-CN'))
+    })
+
+    it('a date_range with dateType "date" renders both civil endpoints date-only; other granularities are unchanged', () => {
+      const civilRange: FormSchema = {
+        fields: [{ id: 'fld_trip', type: 'date_range', label: '行程', props: { dateType: 'date' } } as FormField],
+      }
+      expect(buildDisplayFields(civilRange, { fld_trip: { start: '2026-10-08', end: '2026-10-09' } })[0].value)
+        .toBe('2026/10/8 ~ 2026/10/9')
+
+      const minuteRange: FormSchema = {
+        fields: [{ id: 'fld_trip', type: 'date_range', label: '行程', props: { dateType: 'date_minute' } } as FormField],
+      }
+      expect(buildDisplayFields(minuteRange, { fld_trip: { start: '2026-10-08T09:30:00', end: '2026-10-09T18:00:00' } })[0].value)
+        .toBe(`${new Date('2026-10-08T09:30:00').toLocaleString('zh-CN')} ~ ${new Date('2026-10-09T18:00:00').toLocaleString('zh-CN')}`)
+    })
+  })
+
+  // Test report 2026-10-08, T4b. A `user` (人员) value is stored as member ids; the detail page used
+  // to print them verbatim (`default: String(value)`). The fixtures are UUID-shaped on purpose: the
+  // discriminating negative is "the id never appears", and its positive control is the same id
+  // rendering the resolved name.
+  describe('T4b: a user value renders display names resolved by id — never the stored id', () => {
+    const ALICE = '3f2b8c1e-5a7d-4e9b-8c21-0d4f6a7b9e10'
+    const BOB = '9a1c4e7f-2b6d-4f8a-9e3c-5d7b1a2c4e60'
+    const userSchema: FormSchema = {
+      fields: [
+        { id: 'fld_owner', type: 'user', label: '人员' },
+        { id: 'fld_members', type: 'user', label: '参与人', props: { selection: 'multi' } },
+      ],
+    }
+    const names: Record<string, string> = { [ALICE]: '张三' }
+    const resolve = (id: string) => names[id] ?? null
+
+    it('a resolvable id renders the name; the id itself never reaches the display', () => {
+      const [field] = buildDisplayFields(userSchema, { fld_owner: ALICE }, { resolveUserName: resolve })
+      expect(field).toEqual({ key: 'fld_owner', label: '人员', value: '张三' })
+    })
+
+    it('an unresolvable id (inactive / nameless account, or a lookup still in flight) renders the unknown-user label', () => {
+      const [field] = buildDisplayFields(userSchema, { fld_owner: BOB }, { resolveUserName: resolve })
+      expect(field.value).toBe('未知用户')
+      expect(field.value).not.toContain(BOB)
+      const [en] = buildDisplayFields(userSchema, { fld_owner: BOB }, { resolveUserName: resolve, isZh: false })
+      expect(en.value).toBe('Unknown user')
+    })
+
+    it('without a resolver the value is still never the raw id', () => {
+      const [field] = buildDisplayFields(userSchema, { fld_owner: ALICE })
+      expect(field.value).toBe('未知用户')
+    })
+
+    it('several ids render one label each, in order, with the locale separator', () => {
+      const [, multi] = buildDisplayFields(userSchema, { fld_owner: ALICE, fld_members: [ALICE, BOB] }, { resolveUserName: resolve })
+      expect(multi.value).toBe('张三、未知用户')
+      const [, multiEn] = buildDisplayFields(userSchema, { fld_owner: ALICE, fld_members: [ALICE, BOB] }, { resolveUserName: resolve, isZh: false })
+      expect(multiEn.value).toBe('张三, Unknown user')
+    })
+
+    it('a historical {id, name} value is resolved by id — the stored name is not authoritative and never renders', () => {
+      const stored = { id: ALICE, name: '旧名字' }
+      expect(buildDisplayFields(userSchema, { fld_owner: stored }, { resolveUserName: resolve })[0].value).toBe('张三')
+      const unresolved = buildDisplayFields(userSchema, { fld_owner: { id: BOB, name: '旧名字' } }, { resolveUserName: resolve })[0].value
+      expect(unresolved).toBe('未知用户')
+      expect(unresolved).not.toContain('旧名字')
+      expect(unresolved).not.toContain('[object Object]')
+    })
+
+    it('an empty selection is "-"; a value with no usable id is the unknown-user label, never "[object Object]"', () => {
+      expect(formatUserFieldValue([], resolve)).toBe('-')
+      expect(formatUserFieldValue(null, resolve)).toBe('-')
+      expect(formatUserFieldValue({ name: '没有 id' }, resolve)).toBe('未知用户')
+      expect(formatUserFieldValue(42, resolve)).toBe('未知用户')
+    })
+
+    it('the list summary line resolves user values the same way', () => {
+      const summary = summaryFields(userSchema, { fld_owner: ALICE }, 3, true, resolve)
+      expect(formatSummaryLine(summary)).toBe('人员：张三')
+      expect(formatSummaryLine(summaryFields(userSchema, { fld_owner: BOB }, 3, true, resolve))).toBe('人员：未知用户')
+    })
+
+    it('userFieldValueIds reads ids from a string, an {id} object, or an array of either — deduplicated, blanks dropped', () => {
+      expect(userFieldValueIds(` ${ALICE} `)).toEqual([ALICE])
+      expect(userFieldValueIds({ id: ALICE, name: 'x' })).toEqual([ALICE])
+      expect(userFieldValueIds([ALICE, { id: BOB }, ALICE, '', { name: 'no id' }, 7])).toEqual([ALICE, BOB])
+    })
+
+    it('collectFormUserIds gathers top-level user values and 明细 user columns, deduplicated', () => {
+      const schema: FormSchema = {
+        fields: [
+          { id: 'fld_owner', type: 'user', label: '人员' },
+          { id: 'fld_reason', type: 'text', label: '事由' },
+          {
+            id: 'items',
+            type: 'detail',
+            label: '明细',
+            columns: [
+              { id: 'who', type: 'user', label: '负责人' },
+              { id: 'note', type: 'text', label: '备注' },
+            ],
+          },
+        ],
+      }
+      const snapshot = {
+        fld_owner: ALICE,
+        fld_reason: BOB,
+        items: [{ who: BOB, note: 'n' }, { who: { id: ALICE } }],
+      }
+      expect(collectFormUserIds(schema, snapshot).sort()).toEqual([ALICE, BOB].sort())
+      // A text field holding an id-shaped string is not a member reference.
+      expect(collectFormUserIds(schema, { fld_reason: BOB })).toEqual([])
+      expect(collectFormUserIds(schema, snapshot, { includeDetailColumns: false })).toEqual([ALICE])
+    })
+  })
+
   it('appends snapshot keys absent from the schema after schema-ordered entries, using the raw key as label', () => {
     const fields = buildDisplayFields(displaySchema, {
       fld_reason: '原因内容',
@@ -631,7 +786,7 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
     const violations = validateDetailRows(expenseSchema, {
       reason: '出差',
       items: [{ item_name: '机票', amount: 1000 }, { item_name: '', amount: 500 }],
-    })
+    }, true)
     expect(violations).toEqual(['"报销明细" 第 2 行缺少 "项目"'])
   })
 
@@ -639,7 +794,7 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
     const violations = validateDetailRows(expenseSchema, {
       reason: '出差',
       items: [{ item_name: '', amount: undefined }, { item_name: '酒店', amount: 300 }],
-    })
+    }, true)
     expect(violations).toEqual([
       '"报销明细" 第 1 行缺少 "项目"',
       '"报销明细" 第 1 行缺少 "金额"',
@@ -650,26 +805,26 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
     const violations = validateDetailRows(expenseSchema, {
       reason: '出差',
       items: [{ item_name: '机票', amount: 1000, note: '' }],
-    })
+    }, true)
     expect(violations).toEqual([])
   })
 
   it('a non-detail field (even top-level required) is never checked here — that is el-form’s job', () => {
-    const violations = validateDetailRows(expenseSchema, { reason: '', items: [] })
+    const violations = validateDetailRows(expenseSchema, { reason: '', items: [] }, true)
     expect(violations).toEqual([])
   })
 
   it('no rows at all (empty array, or missing entirely) -> no violations', () => {
-    expect(validateDetailRows(expenseSchema, { reason: 'x', items: [] })).toEqual([])
-    expect(validateDetailRows(expenseSchema, { reason: 'x' })).toEqual([])
-    expect(validateDetailRows(expenseSchema, { reason: 'x', items: 'not-an-array' })).toEqual([])
+    expect(validateDetailRows(expenseSchema, { reason: 'x', items: [] }, true)).toEqual([])
+    expect(validateDetailRows(expenseSchema, { reason: 'x' }, true)).toEqual([])
+    expect(validateDetailRows(expenseSchema, { reason: 'x', items: 'not-an-array' }, true)).toEqual([])
   })
 
   it('a detail field with no required columns is skipped without inspecting rows', () => {
     const noRequiredSchema: FormSchema = {
       fields: [{ id: 'items', type: 'detail', label: '明细', columns: [{ id: 'note', type: 'text', label: '备注' }] }],
     }
-    expect(validateDetailRows(noRequiredSchema, { items: [{ note: '' }, {}] })).toEqual([])
+    expect(validateDetailRows(noRequiredSchema, { items: [{ note: '' }, {}] }, true)).toEqual([])
   })
 
   it('a cell hidden for THIS row by its own visibilityRule is never flagged, even if required and empty', () => {
@@ -688,7 +843,7 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
     // an 'other' row -> flagged.
     const violations = validateDetailRows(gatedSchema, {
       items: [{ kind: 'normal', note: undefined }, { kind: 'other', note: undefined }],
-    })
+    }, true)
     expect(violations).toEqual(['"明细" 第 2 行缺少 "备注"'])
   })
 
@@ -715,7 +870,7 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
     // into it directly, so it must never be the reported violation even though it's still empty.
     const violations = validateDetailRows(derivedSchema, {
       items: [{ qty: 2, price: 10, subtotal: undefined }],
-    })
+    }, true)
     expect(violations).toEqual([])
   })
 
@@ -728,7 +883,19 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
         columns: [{ id: 'col_a', type: 'text', label: '', required: true }],
       }],
     }
-    const violations = validateDetailRows(noLabelSchema, { items: [{ col_a: '' }] })
+    const violations = validateDetailRows(noLabelSchema, { items: [{ col_a: '' }] }, true)
     expect(violations).toEqual(['"items" 第 1 行缺少 "col_a"'])
+  })
+})
+
+// O-8 / F8-1: the same violation in English (ApprovalNewView follows the shell locale).
+describe('validateDetailRows — en (O-8 / F8-1)', () => {
+  it('names the table, the 1-based row and the column in English', () => {
+    const schema: FormSchema = {
+      fields: [{ id: 'items', type: 'detail', label: 'Expenses', columns: [{ id: 'amount', type: 'number', label: 'Amount', required: true }] }],
+    }
+    const violations = validateDetailRows(schema, { items: [{ amount: 1 }, { amount: undefined }] }, false)
+    expect(violations).toEqual(['"Expenses" row 2 is missing "Amount"'])
+    expect(violations.join(' ')).not.toMatch(/[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/)
   })
 })

@@ -35,9 +35,9 @@ import {
 } from '../src/views/attendance/attendanceApprovalSteps'
 
 describe('ATTENDANCE_APPROVAL_REQUEST_TYPES', () => {
-  it('exposes all eight backend request types, including outdoor_punch and schedule_dispatch', () => {
+  it('exposes all nine backend request types, including outdoor_punch and schedule_dispatch', () => {
     expect(ATTENDANCE_APPROVAL_REQUEST_TYPES).toEqual([
-      'missed_check_in', 'missed_check_out', 'time_correction', 'leave',
+      'missed_check_in', 'missed_check_out', 'time_correction', 'leave', 'business_trip',
       'overtime', 'outdoor_punch', 'shift_swap', 'schedule_dispatch',
     ])
   })
@@ -51,6 +51,7 @@ describe('ATTENDANCE_APPROVAL_REQUEST_TYPES', () => {
     expect(block, 'REQUEST_TYPES array not found in backend').toBeTruthy()
     const backendTypes = Array.from(block![1].matchAll(/'([a-z_]+)'/g)).map(m => m[1])
     expect([...ATTENDANCE_APPROVAL_REQUEST_TYPES].sort()).toEqual([...backendTypes].sort())
+    expect(ATTENDANCE_APPROVAL_REQUEST_TYPES).not.toContain('unsupported_request_type')
   })
 })
 

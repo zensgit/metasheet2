@@ -101,7 +101,12 @@ const ElInput = defineComponent({
       value: this.modelValue ?? '',
       disabled: this.disabled,
       'data-testid': (this.$attrs as any)?.['data-testid'],
-      onInput: (event: Event) => this.$emit('update:modelValue', (event.target as HTMLInputElement).value),
+      // Element Plus 2.11.8 fidelity (R-43 gate r3): no update when the typed text is unchanged.
+      onInput: (event: Event) => {
+        const text = (event.target as HTMLInputElement).value
+        if (text === String(this.modelValue ?? '')) return
+        this.$emit('update:modelValue', text)
+      },
     })
   },
 })
@@ -340,7 +345,6 @@ describe('TemplateAuthoringView static assignee picker', () => {
       { id: 'u2', name: 'Bob', email: 'b@x.io' },
     ]
     await mountView()
-    setTopInput('approval-template-key', 'leave')
     setTopInput('approval-template-name', '请假审批')
 
     setInputValueOnSelect('static_user') // switch sourceKind
@@ -371,7 +375,6 @@ describe('TemplateAuthoringView static assignee picker', () => {
 
   it('free-text input remains editable as a fallback and feeds the same carrier', async () => {
     await mountView()
-    setTopInput('approval-template-key', 'leave')
     setTopInput('approval-template-name', '请假审批')
     setInputValueOnSelect('static_user')
     await flushUi()

@@ -1,18 +1,18 @@
 <template>
   <aside
     class="approval-detail-pane"
-    aria-label="审批详情"
+    :aria-label="t.paneLabel"
     data-testid="approval-detail-pane"
   >
     <header class="approval-detail-pane__header">
       <div class="approval-detail-pane__title-row">
-        <StatusTag domain="approvalInstance" :status="row.status" />
+        <StatusTag v-bind="statusTag" />
         <h3 class="approval-detail-pane__title">{{ row.title }}</h3>
       </div>
       <button
         type="button"
         class="approval-detail-pane__close"
-        aria-label="关闭详情面板"
+        :aria-label="t.closeLabel"
         data-testid="approval-detail-pane-close"
         @click="$emit('close')"
       >
@@ -24,9 +24,9 @@
 
     <p v-if="summaryLine" class="approval-detail-pane__summary">{{ summaryLine }}</p>
 
-    <section class="approval-detail-pane__node" aria-label="当前节点与待处理人">
+    <section class="approval-detail-pane__node" :aria-label="t.nodeLabel">
       <div v-if="detailLoading" class="approval-detail-pane__node-loading" data-testid="approval-detail-pane-loading">
-        加载中…
+        {{ t.loading }}
       </div>
       <div v-else-if="detailError" class="approval-detail-pane__node-error" data-testid="approval-detail-pane-error">
         {{ detailError }}
@@ -36,19 +36,26 @@
           v-if="detail.currentStep !== null || detail.totalSteps !== null"
           class="approval-detail-pane__node-current"
         >
-          第 {{ detail.currentStep ?? '-' }} / {{ detail.totalSteps ?? '-' }} 步
+          {{ stepProgressText(detail.currentStep ?? '-', detail.totalSteps ?? '-') }}
         </div>
-        <div v-if="pendingApproverLabels.length" class="approval-detail-pane__node-approvers">
-          待处理人：{{ pendingApproverLabels.join('、') }}
+        <div
+          v-if="cancelRoundPendingWord"
+          class="approval-detail-pane__node-approvers"
+          data-testid="approval-detail-pane-cancel-round-pending"
+        >
+          {{ cancelRoundPendingWord }}
+        </div>
+        <div v-else-if="pendingApproverLabels.length" class="approval-detail-pane__node-approvers">
+          {{ pendingApproversText }}
         </div>
       </template>
     </section>
 
     <div v-if="showQuickActions" class="approval-detail-pane__actions">
       <el-popconfirm
-        :title="`确认通过「${row.title}」？`"
-        confirm-button-text="确认"
-        cancel-button-text="取消"
+        :title="approveConfirmTitle"
+        :confirm-button-text="t.confirm"
+        :cancel-button-text="t.cancel"
         @confirm="$emit('quick-approve', row)"
       >
         <template #reference>
@@ -58,7 +65,7 @@
             :disabled="actionsDisabled"
             data-testid="approval-detail-pane-approve"
           >
-            通过
+            {{ t.approve }}
           </el-button>
         </template>
       </el-popconfirm>
@@ -69,7 +76,7 @@
         data-testid="approval-detail-pane-reject"
         @click="$emit('quick-reject', row)"
       >
-        驳回
+        {{ t.reject }}
       </el-button>
     </div>
 
@@ -80,7 +87,7 @@
       data-testid="approval-detail-pane-full-link"
       @click="$emit('open-full-detail', row)"
     >
-      打开完整详情
+      {{ t.openFull }}
     </el-button>
   </aside>
 </template>
@@ -90,6 +97,10 @@ import { computed, watch } from 'vue'
 import type { ApprovalAssignmentDTO, UnifiedApprovalDTO } from '../../types/approval'
 import StatusTag from '../../components/status/StatusTag.vue'
 import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
+import { approvalStatusTagProps, isCancelRoundWorkflow, needsCancelRoundCloseReason } from '../../approvals/cancelRound'
+import { resolveStatusDisplay } from '../../utils/statusDomains'
+import { useLocale } from '../../composables/useLocale'
+import { CENTER_PANE_EN, CENTER_PANE_ZH } from './approvalCenterLabels'
 
 // UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7) — the desktop master-detail pane's
 // read-only content. Presentation only: every mutating action is EMITTED to the parent
@@ -113,6 +124,25 @@ const props = defineProps<{
   actionsDisabled: boolean
 }>()
 
+// 撤销锁 P-2: the pane shows the list row immediately and the single-fetch detail once it lands. The
+// detail read whitelist-projects `cancelRoundCloseReason`, so for a cancel-round instance it is the
+// source of the V-word; before it lands (or if it fails) a REJECTED cancel-round row says 「读取中」 /
+// 「暂时无法读取」 rather than guessing between an approver's rejection and a system closure.
+// O-8 / F8-1: pane chrome follows the shell locale (module-scope `useLocale()` singleton).
+const { isZh } = useLocale()
+const t = computed(() => (isZh.value ? CENTER_PANE_ZH : CENTER_PANE_EN))
+const approveConfirmTitle = computed(() => (isZh.value ? `确认通过「${props.row.title}」？` : `Approve "${props.row.title}"?`))
+function stepProgressText(current: number | string, total: number | string): string {
+  return isZh.value ? `第 ${current} / ${total} 步` : `Step ${current} / ${total}`
+}
+
+const statusTag = computed(() => {
+  const detail = props.detail
+  if (detail && detail.id === props.row.id) return approvalStatusTagProps(detail)
+  if (!needsCancelRoundCloseReason(props.row)) return approvalStatusTagProps(props.row)
+  return approvalStatusTagProps(props.row, props.detailError ? { kind: 'unavailable' } : { kind: 'resolving' })
+})
+
 defineEmits<{
   (e: 'quick-approve', row: UnifiedApprovalDTO): void
   (e: 'quick-reject', row: UnifiedApprovalDTO): void
@@ -131,7 +161,7 @@ function assigneeLabel(assignment: ApprovalAssignmentDTO, ordinal: number): stri
   if (typeof metaName === 'string' && metaName.trim()) return metaName.trim()
   const resolved = getResolvedUserName(assignment.assigneeId)
   if (resolved) return resolved
-  return `成员 ${ordinal}`
+  return isZh.value ? `成员 ${ordinal}` : `Member ${ordinal}`
 }
 
 // Every ACTIVE assignment at the current node(s) — linear (`currentNodeKey`) or parallel
@@ -150,6 +180,17 @@ const pendingApproverLabels = computed<string[]>(() => {
   return detail.assignments
     .filter((a) => a.isActive && !!a.nodeKey && keys.has(a.nodeKey))
     .map((a, index) => assigneeLabel(a, index + 1))
+})
+const pendingApproversText = computed(() => {
+  const names = pendingApproverLabels.value
+  return isZh.value ? `待处理人：${names.join('、')}` : `Pending approvers: ${names.join(', ')}`
+})
+
+// 撤销轮 — ratified 撤销锁 §15.6 (P-6) seat display boundary, lift conditions not met: the pane
+// names no current approver for a cancel round; the V1 word stands in for the 待处理人 line.
+const cancelRoundPendingWord = computed<string>(() => {
+  if (!isCancelRoundWorkflow(props.detail) || pendingApproverLabels.value.length === 0) return ''
+  return resolveStatusDisplay('cancelRound', 'cancellation_pending_approval', true).label
 })
 
 // member-display-identity (2026-08-19): a `watch` side effect (never inside the `computed` above)

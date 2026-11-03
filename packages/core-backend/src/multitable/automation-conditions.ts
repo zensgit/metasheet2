@@ -5,7 +5,38 @@
  * accepts both the older backend `logic: 'and' | 'or'` shape and the current
  * frontend `conjunction: 'AND' | 'OR'` shape, then recurses through nested
  * groups when API clients send them.
+ *
+ * 客户反馈 2026-09-24 #4b（自动化条件按字段类型比较），裁定见 PR #6074 — TYPED evaluation.
+ * When the caller hands in the sheet's fields (`ConditionEvaluationOptions.fields`), a condition on a
+ * typed field is compared the way the grid shows the value, not by raw `===`:
+ *
+ *   - `date`      → by CALENDAR DAY. A bare `YYYY-MM-DD` is a floating day (#3417) and is never shifted;
+ *                   a stored ISO instant (e.g. an `openedAt` written as `2026-09-24T18:00:00.000Z`) is
+ *                   bucketed into the field's zone (`resolveDateTimeFieldTimeZone`: explicit non-'UTC'
+ *                   `property.timezone`, else the instance business timezone, default Asia/Shanghai) —
+ *                   so 18:00Z on the 24th IS the 25th for a China customer.
+ *   - `dateTime`  → by INSTANT floored to the MINUTE (the displayed precision), zone-less condition text
+ *                   read as a wall clock in the field's zone (`date-time-wall-clock.ts`, same rule as a
+ *                   cell edit and the view filter).
+ *   - `person` / `user` / `link` / `multiSelect` → SET semantics over the stored `id[]`: equals = same
+ *                   set, in/not_in = intersection, contains = membership, is_empty also true for `[]`.
+ *   - `boolean`   → `true`/`false` and the strings `'true'`/`'false'` compare equal — and the save gate
+ *                   accepts the same spellings, so what saves is exactly what evaluates.
+ *   - number-like (`number`, `currency`, `percent`, `rating`, `duration`, `autoNumber`) → numeric compare
+ *                   with safe string→number coercion (`'5'` equals `5`; `'abc'` never matches).
+ *
+ * Every OTHER field type, an unknown field, and a call WITHOUT `fields` keep the legacy untyped path
+ * byte-for-byte (`evaluateLegacyCondition`). A typed path NEVER throws on a legacy / malformed stored
+ * value: the side that cannot be read as the type is reported through `onUnreadableValue` (values-free —
+ * ids and type names only) and the comparison evaluates as "no match" (`equals` false, `not_equals` true).
+ * Two layers keep that promise: an epoch-ms value outside the representable `Date` range (|ms| > 8.64e15,
+ * where `Intl` throws `RangeError`) is unreadable by construction, and `evaluateCondition` wraps the typed
+ * comparison so an exception from any comparator still evaluates as unmatched (reported with side
+ * `'unknown'`) instead of failing the automation run.
  */
+import { getZonedParts } from './automation-timezone'
+import { resolveDateTimeFieldTimeZone } from './business-timezone'
+import { dateTimeMinuteKey, isValidWallClockParts, parseDateTimeText } from './date-time-wall-clock'
 
 export type ConditionOperator =
   | 'equals'
@@ -91,6 +122,15 @@ const MULTI_VALUE_OPERATORS = new Set<ConditionOperator>([
   'is_not_empty',
 ])
 
+/**
+ * Stable refusal code for "the condition VALUE does not fit the field's type" (a number field given
+ * `'abc'`, a date field given `'yesterday'`, …). Field-existence and operator refusals keep the generic
+ * `VALIDATION_ERROR`. Mirrored in the web label table (apps/web/src/multitable/utils/meta-api-error-labels.ts).
+ */
+export const AUTOMATION_CONDITION_VALUE_INVALID_CODE = 'AUTOMATION_CONDITION_VALUE_INVALID' as const
+
+export type ConditionGroupValidationCode = 'VALIDATION_ERROR' | typeof AUTOMATION_CONDITION_VALUE_INVALID_CODE
+
 export interface AutomationCondition {
   fieldId: string
   operator: ConditionOperator
@@ -112,10 +152,36 @@ export interface ConditionGroup {
 }
 
 export class ConditionGroupValidationError extends Error {
-  constructor(message: string) {
+  readonly code: ConditionGroupValidationCode
+
+  constructor(message: string, code: ConditionGroupValidationCode = 'VALIDATION_ERROR') {
     super(message)
     this.name = 'ConditionGroupValidationError'
+    this.code = code
   }
+}
+
+/**
+ * Which side of a typed comparison could not be read as the field's type (values-free diagnostics).
+ * `'unknown'` = a comparator threw (the never-throws safety net caught it), so the side is not known.
+ */
+export interface ConditionUnreadableValueInfo {
+  fieldId: string
+  fieldType: string
+  operator: ConditionOperator
+  side: 'record' | 'condition' | 'unknown'
+}
+
+export interface ConditionEvaluationOptions {
+  /**
+   * The sheet's fields (array or id-keyed map). A condition whose field is absent here — or a call with
+   * no `fields` at all — evaluates on the legacy untyped path, byte-identical to before #4b.
+   */
+  fields?: ReadonlyMap<string, AutomationConditionField> | readonly AutomationConditionField[] | null
+  /** Called when a stored cell or a condition value cannot be read as the field's type. Never receives values. */
+  onUnreadableValue?: (info: ConditionUnreadableValueInfo) => void
+  /** Environment used to resolve the business timezone (tests). Defaults to `process.env`. */
+  env?: NodeJS.ProcessEnv
 }
 
 function isConditionGroup(node: AutomationConditionNode): node is ConditionGroup {
@@ -291,7 +357,7 @@ function allowedOperatorsForFieldType(fieldType: string): ReadonlySet<ConditionO
   }
 }
 
-function expectedValueKindForFieldType(fieldType: string): 'number' | 'boolean' | 'string' | null {
+function expectedValueKindForFieldType(fieldType: string): 'number' | 'boolean' | 'string' | 'date' | 'dateTime' | null {
   switch (fieldType) {
     case 'number':
     case 'currency':
@@ -302,6 +368,10 @@ function expectedValueKindForFieldType(fieldType: string): 'number' | 'boolean' 
       return 'number'
     case 'boolean':
       return 'boolean'
+    case 'date':
+      return 'date'
+    case 'dateTime':
+      return 'dateTime'
     case 'attachment':
       return null
     default:
@@ -309,13 +379,78 @@ function expectedValueKindForFieldType(fieldType: string): 'number' | 'boolean' 
   }
 }
 
-function assertNumericValue(value: unknown, path: string, allowNumericString: boolean): void {
-  if (typeof value === 'number' && Number.isFinite(value)) return
-  if (allowNumericString && typeof value === 'string') {
+/** `5` or `'5'` (a finite numeric string is what a text input produces) — never `'abc'`, `''`, `NaN`. */
+function isNumericConditionValue(value: unknown): boolean {
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (typeof value === 'string') {
     const trimmed = value.trim()
-    if (trimmed && Number.isFinite(Number(trimmed))) return
+    return trimmed !== '' && Number.isFinite(Number(trimmed))
   }
-  throw new ConditionGroupValidationError(`${path} must be a number`)
+  return false
+}
+
+function assertNumericValue(value: unknown, path: string): void {
+  if (isNumericConditionValue(value)) return
+  throw new ConditionGroupValidationError(`${path} must be a number`, AUTOMATION_CONDITION_VALUE_INVALID_CODE)
+}
+
+/**
+ * `true`/`false`, or the strings `'true'`/`'false'` (any case, trimmed) — exactly the spellings
+ * `booleanKeyOf` evaluates, so a value the save gate accepts is a value the evaluator can compare. The
+ * strings matter because the branch-condition editor's value control is a text input: refusing `'true'`
+ * at save while evaluating it at run time made an existing checkbox-branch rule impossible to re-save.
+ */
+function isBooleanConditionValue(value: unknown): boolean {
+  if (typeof value === 'boolean') return true
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    return normalized === 'true' || normalized === 'false'
+  }
+  return false
+}
+
+function assertBooleanValue(value: unknown, path: string): void {
+  if (isBooleanConditionValue(value)) return
+  throw new ConditionGroupValidationError(`${path} must be a boolean (true/false)`, AUTOMATION_CONDITION_VALUE_INVALID_CODE)
+}
+
+/**
+ * The largest |epoch ms| a `Date` can represent (ECMAScript §21.4.1.1). `Intl.DateTimeFormat#formatToParts`
+ * throws `RangeError: Invalid time value` beyond it, and a `date` cell gets no write-side validation
+ * (field-codecs.ts only coerces `dateTime`), so a stored `1e20` must be treated as unreadable, not thrown on.
+ */
+const MAX_EPOCH_MS = 8.64e15
+
+function isRepresentableEpochMs(value: number): boolean {
+  return Number.isFinite(value) && Math.abs(value) <= MAX_EPOCH_MS
+}
+
+// A bare calendar day — the #3417 floating-day spelling a `date` field stores and a person types.
+const CALENDAR_DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/
+
+/** The zone used only to test whether a date-time TEXT is well-formed (validity is zone-independent). */
+const FORMAT_CHECK_ZONE = 'Etc/UTC'
+
+/** Is `value` text a `date` condition can hold: `YYYY-MM-DD`, or any date-time text the wall-clock grammar reads. */
+export function isValidDateConditionText(value: string): boolean {
+  const trimmed = value.trim()
+  const day = CALENDAR_DAY_RE.exec(trimmed)
+  if (day) {
+    return isValidWallClockParts({
+      year: Number(day[1]),
+      month: Number(day[2]),
+      day: Number(day[3]),
+      hour: 0,
+      minute: 0,
+      second: 0,
+    })
+  }
+  return parseDateTimeText(trimmed, FORMAT_CHECK_ZONE).kind === 'instant'
+}
+
+/** Is `value` text a `dateTime` condition can hold: ISO-8601 with zone, or a zone-less `YYYY-MM-DD[ HH:mm[:ss]]` wall clock. */
+export function isValidDateTimeConditionText(value: string): boolean {
+  return parseDateTimeText(value, FORMAT_CHECK_ZONE).kind === 'instant'
 }
 
 function assertConditionValueType(
@@ -340,17 +475,27 @@ function assertConditionValueType(
   values.forEach((value, index) => {
     const valuePath = isArrayOperator ? `${path}.value[${index}]` : `${path}.value`
     if (expectedKind === 'number') {
-      assertNumericValue(value, valuePath, isArrayOperator)
+      assertNumericValue(value, valuePath)
       return
     }
     if (expectedKind === 'boolean') {
-      if (typeof value !== 'boolean') {
-        throw new ConditionGroupValidationError(`${valuePath} must be a boolean`)
-      }
+      assertBooleanValue(value, valuePath)
       return
     }
     if (typeof value !== 'string') {
-      throw new ConditionGroupValidationError(`${valuePath} must be a string`)
+      throw new ConditionGroupValidationError(`${valuePath} must be a string`, AUTOMATION_CONDITION_VALUE_INVALID_CODE)
+    }
+    if (expectedKind === 'date' && !isValidDateConditionText(value)) {
+      throw new ConditionGroupValidationError(
+        `${valuePath} must be a date (YYYY-MM-DD)`,
+        AUTOMATION_CONDITION_VALUE_INVALID_CODE,
+      )
+    }
+    if (expectedKind === 'dateTime' && !isValidDateTimeConditionText(value)) {
+      throw new ConditionGroupValidationError(
+        `${valuePath} must be a date-time (YYYY-MM-DD HH:mm or ISO-8601)`,
+        AUTOMATION_CONDITION_VALUE_INVALID_CODE,
+      )
     }
   })
 }
@@ -422,15 +567,323 @@ export function validateConditionGroupAgainstFields(
   )
 }
 
-/**
- * Evaluate a single condition against a field value.
- */
-export function evaluateCondition(
-  condition: AutomationCondition,
-  recordData: Record<string, unknown>,
-): boolean {
-  const fieldValue = recordData[condition.fieldId]
+// ─── Typed evaluation (客户反馈 2026-09-24 #4b) ─────────────────────────────────────────────────────────
 
+/** Build the id-keyed field map the evaluator reads (`null` when there is nothing to key on). */
+export function normalizeConditionFields(
+  fields: ReadonlyMap<string, AutomationConditionField> | readonly AutomationConditionField[] | null | undefined,
+): ReadonlyMap<string, AutomationConditionField> | null {
+  if (!fields) return null
+  if (fields instanceof Map) return fields
+  const map = new Map<string, AutomationConditionField>()
+  for (const field of fields as readonly AutomationConditionField[]) {
+    if (field && typeof field.id === 'string' && typeof field.type === 'string') map.set(field.id, field)
+  }
+  return map
+}
+
+type TypedComparisonKind = 'day' | 'instant' | 'set' | 'boolean' | 'number'
+
+function typedComparisonKind(fieldType: string): TypedComparisonKind | null {
+  switch (fieldType) {
+    case 'date':
+      return 'day'
+    case 'dateTime':
+      return 'instant'
+    case 'person':
+    case 'user':
+    case 'link':
+    case 'multiSelect':
+      return 'set'
+    case 'boolean':
+      return 'boolean'
+    case 'number':
+    case 'currency':
+    case 'percent':
+    case 'rating':
+    case 'duration':
+    case 'autoNumber':
+      return 'number'
+    default:
+      return null
+  }
+}
+
+/** `null`/`undefined`/`''`/`[]` — what `is_empty` means on every typed field. */
+function isEmptyTypedValue(value: unknown): boolean {
+  if (value === null || value === undefined || value === '') return true
+  if (Array.isArray(value)) return value.length === 0
+  return typeof value === 'string' && value.trim() === ''
+}
+
+/**
+ * A comparison key. `undefined` = the side is EMPTY (nothing to compare), `null` = the side has content
+ * that cannot be read as the field's type (legacy / malformed — reported, never thrown), otherwise the
+ * ordered key (a `yyyymmdd` day, a UTC minute, a number, or 0/1 for a boolean).
+ */
+type OrderedKey = number | null | undefined
+
+function calendarDayKey(year: number, month: number, day: number): number {
+  return year * 10_000 + month * 100 + day
+}
+
+function dayKeyOf(value: unknown, timeZone: string): OrderedKey {
+  if (isEmptyTypedValue(value)) return undefined
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    const day = CALENDAR_DAY_RE.exec(trimmed)
+    if (day) {
+      const parts = { year: Number(day[1]), month: Number(day[2]), day: Number(day[3]), hour: 0, minute: 0, second: 0 }
+      return isValidWallClockParts(parts) ? calendarDayKey(parts.year, parts.month, parts.day) : null
+    }
+    const parsed = parseDateTimeText(trimmed, timeZone)
+    if (parsed.kind !== 'instant') return null
+    const zoned = getZonedParts(parsed.ms, timeZone)
+    return calendarDayKey(zoned.year, zoned.month, zoned.day)
+  }
+  if (typeof value === 'number') {
+    // Out of the representable range ⇒ unreadable (`null`), never handed to `Intl` (which would throw).
+    if (!isRepresentableEpochMs(value)) return null
+    const zoned = getZonedParts(value, timeZone)
+    return calendarDayKey(zoned.year, zoned.month, zoned.day)
+  }
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    // A Date's time value is always representable or NaN — the NaN case was excluded above.
+    const zoned = getZonedParts(value.getTime(), timeZone)
+    return calendarDayKey(zoned.year, zoned.month, zoned.day)
+  }
+  return null
+}
+
+function minuteKeyOf(value: unknown, timeZone: string): OrderedKey {
+  if (isEmptyTypedValue(value)) return undefined
+  // Same range rule as `dayKeyOf`: a number no `Date` can hold is not an instant.
+  if (typeof value === 'number' && !isRepresentableEpochMs(value)) return null
+  return dateTimeMinuteKey(value, timeZone)
+}
+
+function numberKeyOf(value: unknown): OrderedKey {
+  if (isEmptyTypedValue(value)) return undefined
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    const parsed = Number(trimmed)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function booleanKeyOf(value: unknown): OrderedKey {
+  if (isEmptyTypedValue(value)) return undefined
+  if (typeof value === 'boolean') return value ? 1 : 0
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'true') return 1
+    if (normalized === 'false') return 0
+  }
+  return null
+}
+
+/**
+ * The stored `id[]` of a person/link/multiSelect cell as a set of ids. A legacy SCALAR (a single id
+ * stored before the array shape) reads as a one-element set; an object with a string `id` reads as that
+ * id. `null` = the value has content but none of it is an id.
+ */
+function idSetOf(value: unknown): Set<string> | null | undefined {
+  if (isEmptyTypedValue(value)) return undefined
+  const items = Array.isArray(value) ? value : [value]
+  const set = new Set<string>()
+  let unreadable = false
+  for (const item of items) {
+    if (typeof item === 'string') {
+      const trimmed = item.trim()
+      if (trimmed) set.add(trimmed)
+      continue
+    }
+    if (typeof item === 'number' && Number.isFinite(item)) {
+      set.add(String(item))
+      continue
+    }
+    if (isPlainObject(item) && typeof item.id === 'string' && item.id.trim()) {
+      set.add(item.id.trim())
+      continue
+    }
+    unreadable = true
+  }
+  if (set.size === 0) return unreadable ? null : undefined
+  return set
+}
+
+function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false
+  for (const item of a) if (!b.has(item)) return false
+  return true
+}
+
+function setsIntersect(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  for (const item of a) if (b.has(item)) return true
+  return false
+}
+
+function isSubset(subset: ReadonlySet<string>, superset: ReadonlySet<string>): boolean {
+  for (const item of subset) if (!superset.has(item)) return false
+  return true
+}
+
+type UnreadableReporter = (side: 'record' | 'condition') => void
+
+/** Negated operators are TRUE when nothing could be compared (`not_equals`, `not_in`, `not_contains`). */
+const NEGATED_OPERATORS = new Set<ConditionOperator>(['not_equals', 'not_in', 'not_contains'])
+
+/** The "no match" outcome for `operator` — what every unreadable typed comparison evaluates to. */
+function unmatchedResult(operator: ConditionOperator): boolean {
+  return NEGATED_OPERATORS.has(operator)
+}
+
+/**
+ * Ordered comparison shared by day / minute / number / boolean keys. `null` when the operator has no typed
+ * meaning for this kind (the caller falls back to the legacy path).
+ */
+function compareOrderedKeys(
+  operator: ConditionOperator,
+  left: OrderedKey,
+  conditionValue: unknown,
+  keyOf: (value: unknown) => OrderedKey,
+  report: UnreadableReporter,
+): boolean | null {
+  if (left === null) report('record')
+  const rightOf = (value: unknown): OrderedKey => {
+    const key = keyOf(value)
+    if (key === null) report('condition')
+    return key
+  }
+  const present = (key: OrderedKey): key is number => typeof key === 'number'
+
+  switch (operator) {
+    case 'equals': {
+      const right = rightOf(conditionValue)
+      return present(left) && present(right) && left === right
+    }
+    case 'not_equals': {
+      const right = rightOf(conditionValue)
+      return !(present(left) && present(right) && left === right)
+    }
+    case 'greater_than': {
+      const right = rightOf(conditionValue)
+      return present(left) && present(right) && left > right
+    }
+    case 'less_than': {
+      const right = rightOf(conditionValue)
+      return present(left) && present(right) && left < right
+    }
+    case 'greater_or_equal': {
+      const right = rightOf(conditionValue)
+      return present(left) && present(right) && left >= right
+    }
+    case 'less_or_equal': {
+      const right = rightOf(conditionValue)
+      return present(left) && present(right) && left <= right
+    }
+    case 'in': {
+      if (!Array.isArray(conditionValue)) return false
+      if (!present(left)) return false
+      return conditionValue.some((value) => rightOf(value) === left)
+    }
+    case 'not_in': {
+      if (!Array.isArray(conditionValue)) return true
+      if (!present(left)) return true
+      return !conditionValue.some((value) => rightOf(value) === left)
+    }
+    default:
+      return null
+  }
+}
+
+function compareIdSets(
+  operator: ConditionOperator,
+  fieldValue: unknown,
+  conditionValue: unknown,
+  report: UnreadableReporter,
+): boolean | null {
+  const left = idSetOf(fieldValue)
+  if (left === null) report('record')
+  const leftSet: ReadonlySet<string> = left ?? new Set<string>()
+  const rightSetOf = (value: unknown): ReadonlySet<string> => {
+    const set = idSetOf(value)
+    if (set === null) report('condition')
+    return set ?? new Set<string>()
+  }
+
+  switch (operator) {
+    case 'equals':
+      return left !== null && setsEqual(leftSet, rightSetOf(conditionValue))
+    case 'not_equals':
+      return !(left !== null && setsEqual(leftSet, rightSetOf(conditionValue)))
+    case 'contains': {
+      const right = rightSetOf(conditionValue)
+      return right.size > 0 && isSubset(right, leftSet)
+    }
+    case 'not_contains': {
+      const right = rightSetOf(conditionValue)
+      return !(right.size > 0 && isSubset(right, leftSet))
+    }
+    case 'in':
+      return setsIntersect(leftSet, rightSetOf(conditionValue))
+    case 'not_in':
+      return !setsIntersect(leftSet, rightSetOf(conditionValue))
+    default:
+      return null
+  }
+}
+
+function fieldTimeZone(field: AutomationConditionField, env: NodeJS.ProcessEnv | undefined): string {
+  return resolveDateTimeFieldTimeZone(normalizeJsonObject(field.property), env)
+}
+
+/**
+ * The typed comparison for `condition` on `field`, or `null` when the field type / operator has no typed
+ * rule (the caller then runs the legacy path). Never throws.
+ */
+function evaluateTypedCondition(
+  condition: AutomationCondition,
+  fieldValue: unknown,
+  field: AutomationConditionField,
+  options: ConditionEvaluationOptions,
+): boolean | null {
+  const kind = typedComparisonKind(field.type)
+  if (!kind) return null
+
+  if (condition.operator === 'is_empty') return isEmptyTypedValue(fieldValue)
+  if (condition.operator === 'is_not_empty') return !isEmptyTypedValue(fieldValue)
+
+  const report: UnreadableReporter = (side) => {
+    options.onUnreadableValue?.({ fieldId: field.id, fieldType: field.type, operator: condition.operator, side })
+  }
+
+  switch (kind) {
+    case 'day': {
+      const zone = fieldTimeZone(field, options.env)
+      const keyOf = (value: unknown): OrderedKey => dayKeyOf(value, zone)
+      return compareOrderedKeys(condition.operator, keyOf(fieldValue), condition.value, keyOf, report)
+    }
+    case 'instant': {
+      const zone = fieldTimeZone(field, options.env)
+      const keyOf = (value: unknown): OrderedKey => minuteKeyOf(value, zone)
+      return compareOrderedKeys(condition.operator, keyOf(fieldValue), condition.value, keyOf, report)
+    }
+    case 'number':
+      return compareOrderedKeys(condition.operator, numberKeyOf(fieldValue), condition.value, numberKeyOf, report)
+    case 'boolean':
+      return compareOrderedKeys(condition.operator, booleanKeyOf(fieldValue), condition.value, booleanKeyOf, report)
+    case 'set':
+      return compareIdSets(condition.operator, fieldValue, condition.value, report)
+    default:
+      return null
+  }
+}
+
+/** The pre-#4b untyped comparison — kept byte-for-byte for unknown fields and untyped callers. */
+function evaluateLegacyCondition(condition: AutomationCondition, fieldValue: unknown): boolean {
   switch (condition.operator) {
     case 'equals':
       return fieldValue === condition.value
@@ -519,13 +972,58 @@ export function evaluateCondition(
   }
 }
 
+function lookupField(
+  options: ConditionEvaluationOptions | undefined,
+  fieldId: string,
+): AutomationConditionField | undefined {
+  const fields = options?.fields
+  if (!fields) return undefined
+  if (fields instanceof Map) return fields.get(fieldId)
+  for (const field of fields as readonly AutomationConditionField[]) {
+    if (field?.id === fieldId) return field
+  }
+  return undefined
+}
+
+/**
+ * Evaluate a single condition against a field value. With `options.fields` the comparison is typed (see
+ * the module header); without them, or for a field not in the map, it is the legacy untyped comparison.
+ */
+export function evaluateCondition(
+  condition: AutomationCondition,
+  recordData: Record<string, unknown>,
+  options?: ConditionEvaluationOptions,
+): boolean {
+  const fieldValue = recordData[condition.fieldId]
+
+  const field = lookupField(options, condition.fieldId)
+  if (field && options) {
+    let typed: boolean | null
+    try {
+      typed = evaluateTypedCondition(condition, fieldValue, field, options)
+    } catch {
+      // The never-throws safety net. The comparators are written not to throw (range-guarded epoch ms,
+      // `null` for every unreadable shape), so this is reached only by a value shape nobody anticipated —
+      // e.g. a `Date` subclass whose getter throws. The run must not fail on it (handleEvent would log it
+      // as an action failure and a workflow_job_v1 execution would be left 'running'); it is reported
+      // values-free with side `'unknown'` and evaluates as unmatched.
+      options.onUnreadableValue?.({ fieldId: field.id, fieldType: field.type, operator: condition.operator, side: 'unknown' })
+      return unmatchedResult(condition.operator)
+    }
+    if (typed !== null) return typed
+  }
+
+  return evaluateLegacyCondition(condition, fieldValue)
+}
+
 function evaluateConditionNode(
   node: AutomationConditionNode,
   recordData: Record<string, unknown>,
+  options?: ConditionEvaluationOptions,
 ): boolean {
   return isConditionGroup(node)
-    ? evaluateConditions(node, recordData)
-    : evaluateCondition(node, recordData)
+    ? evaluateConditions(node, recordData, options)
+    : evaluateCondition(node, recordData, options)
 }
 
 /**
@@ -536,6 +1034,7 @@ function evaluateConditionNode(
 export function evaluateConditions(
   conditionGroup: ConditionGroup,
   recordData: Record<string, unknown>,
+  options?: ConditionEvaluationOptions,
 ): boolean {
   const { conditions } = conditionGroup
 
@@ -545,9 +1044,9 @@ export function evaluateConditions(
 
   const logic = resolveGroupLogic(conditionGroup)
   if (logic === 'and') {
-    return conditions.every((c) => evaluateConditionNode(c, recordData))
+    return conditions.every((c) => evaluateConditionNode(c, recordData, options))
   }
 
   // logic === 'or'
-  return conditions.some((c) => evaluateConditionNode(c, recordData))
+  return conditions.some((c) => evaluateConditionNode(c, recordData, options))
 }

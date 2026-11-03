@@ -3,7 +3,9 @@ import { sql } from 'kysely'
 import {
   ICollabService,
   ILogger,
+  type CommentAddressRecord,
   type CommentInboxItem,
+  type CommentInboxScope,
   type CommentMentionCandidate,
   type CommentPresenceViewer,
   type CommentQueryOptions,
@@ -16,6 +18,23 @@ import { nowTimestamp } from '../db/type-helpers'
 import { buildCommentInboxRoom, buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms'
 import { insertCommittedAuditKysely, type OapiWriteAuditContext } from '../multitable/oapi-write-audit'
 import { notifyRecordSubscribersWithKysely } from '../multitable/record-subscription-service'
+import { JS_TRIM_WHITESPACE } from '../utils/js-trim-whitespace'
+import {
+  escapeMentionLikeTerm,
+  MENTION_CANDIDATES_MAX_ITEMS,
+  MENTION_CANDIDATES_MIN_QUERY_LENGTH,
+  MENTION_LABELS_MAX_IDS,
+} from './comment-mention-bounds'
+
+/**
+ * The label a mention editor shows for a user — ONE derivation shared by the mention search
+ * (listMentionCandidates) and the edit-time labels (#5808), so the name a picked person gets written
+ * into `@[label](id)` with is the name an old comment's untokenised mention is shown with. Empty when
+ * the row has neither a name nor an email.
+ */
+function mentionUserLabel(row: { name?: string | null; email?: string | null }): string {
+  return row.name?.trim() || row.email?.trim() || ''
+}
 
 /**
  * Server-side emoji allowlist for comment reactions (B6, design-lock §3.2).
@@ -75,6 +94,12 @@ export class CommentConflictError extends Error {
   }
 }
 
+/**
+ * #5831 — the one answer to a reply whose `parentId` is unknown OR names a comment outside the reply's
+ * own record thread (another sheet or another row). Keeps "same record thread" for existing clients.
+ */
+export const REPLY_PARENT_OUTSIDE_THREAD_MESSAGE = 'Reply must target an existing comment in the same record thread'
+
 export interface Comment {
   id: string
   spreadsheetId: string
@@ -95,6 +120,8 @@ export interface Comment {
   mentions: string[]
   /** Aggregated emoji reactions (B6); populated by getComments, else undefined. */
   reactions?: CommentReactionSummary[]
+  /** #5808: labels for this comment's own `mentions`; see CommentQueryOptions.mentionLabelsAuthorId. */
+  mentionLabels?: Record<string, string>
 }
 
 export interface CommentPresenceSummary {
@@ -167,6 +194,88 @@ type CommentActivityPayload = {
   fieldId?: string
   commentId: string
   authorId?: string
+}
+
+/** #5831 part B — a CommentInboxScope that admits at least one sheet, as the SQL predicate takes it. */
+type AdmittedInboxScope = {
+  sheetIds: string[]
+  /** Sheets with row-level read deny on: a comment there is admitted only through the allowed pairs. */
+  rowDenySheetIds: string[]
+  /** Parallel arrays: (sheet, trimmed row) pairs admitted on the row-deny sheets. */
+  allowedSheetIds: string[]
+  allowedRowIds: string[]
+}
+
+/**
+ * #5831 part B — null when the scope admits nothing (missing, malformed or without a sheet): the
+ * cross-sheet aggregates then answer empty WITHOUT a query, so a caller that forgets the scope gets
+ * nothing rather than every sheet. Ids are taken as given (they come from the database through the
+ * route); only non-strings and empty strings are dropped. A malformed row-deny entry (no sheet id) is
+ * dropped whole; a row-deny sheet with no usable allowed row stays a row-deny sheet (nothing admitted
+ * on it), so a malformed allow list can only narrow the scope, never widen it.
+ */
+function admitInboxScope(scope: CommentInboxScope | undefined): AdmittedInboxScope | null {
+  const rawSheetIds: readonly unknown[] = Array.isArray(scope?.sheetIds) ? scope.sheetIds : []
+  const sheetIds = [...new Set(rawSheetIds.filter((id): id is string => typeof id === 'string' && id.length > 0))]
+  if (sheetIds.length === 0) return null
+  const rowDenySheetIds = new Set<string>()
+  const allowedSheetIds: string[] = []
+  const allowedRowIds: string[] = []
+  const rawRowDeny: readonly unknown[] = Array.isArray(scope?.rowDenySheets) ? scope.rowDenySheets : []
+  for (const entry of rawRowDeny) {
+    const rowDeny = entry as { spreadsheetId?: unknown; allowedRowIds?: unknown } | null
+    const sheetId = typeof rowDeny?.spreadsheetId === 'string' ? rowDeny.spreadsheetId : ''
+    if (sheetId.length === 0) continue
+    rowDenySheetIds.add(sheetId)
+    const rawRows: readonly unknown[] = Array.isArray(rowDeny?.allowedRowIds) ? rowDeny.allowedRowIds : []
+    for (const rowId of rawRows) {
+      if (typeof rowId !== 'string' || rowId.length === 0) continue
+      allowedSheetIds.push(sheetId)
+      allowedRowIds.push(rowId)
+    }
+  }
+  return { sheetIds, rowDenySheetIds: [...rowDenySheetIds], allowedSheetIds, allowedRowIds }
+}
+
+/**
+ * #5831 part B — the WHERE fragment every user-scoped cross-sheet aggregate applies to `meta_comments as c`
+ * (in the COUNT and in the page query, i.e. before LIMIT/OFFSET): the comment's sheet is one of the
+ * admitted (readable, live) sheets, and — on a sheet with row-level read deny on — its row is one of
+ * the rows the route checked and found allowed. An ALLOW list (fail-closed): a comment whose row the
+ * route never checked (it arrived after the candidate lookup) is left out rather than let in. The row
+ * is compared trimmed the way the comment-id gate compares it (`isRowDenied` trims the stored row id;
+ * JS_TRIM_WHITESPACE is JS `trim()` for SQL).
+ */
+function inboxScopePredicate(scope: AdmittedInboxScope) {
+  const rowDenyPredicate = scope.rowDenySheetIds.length > 0
+    ? sql`and (c.spreadsheet_id <> all(${scope.rowDenySheetIds}::text[]) or exists (
+        select 1
+        from unnest(${scope.allowedSheetIds}::text[], ${scope.allowedRowIds}::text[]) as allowed(spreadsheet_id, row_id)
+        where allowed.spreadsheet_id = c.spreadsheet_id
+          and allowed.row_id = btrim(c.row_id, ${JS_TRIM_WHITESPACE})
+      ))`
+    : sql``
+  return sql<boolean>`(c.spreadsheet_id = any(${scope.sheetIds}::text[]) ${rowDenyPredicate})`
+}
+
+/**
+ * The inbox's own selection: a comment by someone else that `userId` is @-mentioned in or has no read
+ * record for. The unread counts use the unread half only.
+ */
+function inboxMentionPredicate(userId: string) {
+  return sql<boolean>`c.mentions @> ${JSON.stringify([userId])}::jsonb`
+}
+
+/**
+ * #5831 part B — parenthesized AS A WHOLE. Kysely joins successive `.where()` calls with a bare `and`,
+ * so the former unwrapped `(mentioned) or r.comment_id is null` compiled to
+ * `author_id != $u and (mentioned) or r.comment_id is null and …`, i.e. `(… and mentioned) or (unread and …)`:
+ * the unread branch skipped the author filter (the caller's own unread comments were listed) and any
+ * filter placed before it, and the mentioned branch skipped every filter placed after it — the inbox
+ * scope included.
+ */
+function inboxCandidatePredicate(userId: string) {
+  return sql<boolean>`((${inboxMentionPredicate(userId)}) or r.comment_id is null)`
 }
 
 export type CommentTargetReadChecker = (input: {
@@ -298,14 +407,15 @@ export class CommentService {
         .where('id', '=', data.parentId)
         .executeTakeFirst()
 
-      if (!parent) {
-        throw new CommentValidationError('Parent comment not found')
+      // #5831: the route gated only THIS record thread (its sheet and row). An unknown parent and a
+      // parent anywhere else get the same answer, and the reply-depth check runs only on a parent inside
+      // the thread — otherwise the message would tell whether a comment id exists on a sheet or row the
+      // caller may not read (the approval-comment parent check follows the same rule).
+      if (!parent || parent.spreadsheet_id !== data.spreadsheetId || parent.row_id !== data.rowId) {
+        throw new CommentValidationError(REPLY_PARENT_OUTSIDE_THREAD_MESSAGE)
       }
       if (parent.parent_id) {
         throw new CommentValidationError('Replying to replies is not supported')
-      }
-      if (parent.spreadsheet_id !== data.spreadsheetId || parent.row_id !== data.rowId) {
-        throw new CommentValidationError('Reply must target the same record thread')
       }
 
       const parentFieldId = parent.field_id ?? undefined
@@ -447,54 +557,147 @@ export class CommentService {
       item.reactions = reactionsByComment.get(item.id) ?? []
     }
 
+    // #5808: edit-time mention labels — see hydrateOwnMentionLabels.
+    const labelAuthorId = options?.mentionLabelsAuthorId?.trim()
+    if (labelAuthorId) {
+      await this.hydrateOwnMentionLabels(items, labelAuthorId)
+    }
+
     return { items, total }
   }
 
+  /**
+   * #5808 — labels for mentions an edit has to keep.
+   *
+   * A comment created with an explicit `mentions` array (e.g. through the API) need not carry its
+   * mentions as `@[label](id)` tokens in the body, and since #5795 the UI no longer preloads a roster
+   * to find their names. This puts the name next to the id the caller already receives.
+   *
+   * WHAT IT CAN NAME (all four hold):
+   *  - only ids in the `mentions` of a comment ON THIS PAGE — a page the route has already filtered
+   *    by the G-8 sheet-read gate and the row-level read deny;
+   *  - only on comments AUTHORED BY `authorId` (the only comments the UI lets that user edit), and
+   *    each comment gets labels for its OWN mentions only;
+   *  - only ACTIVE users (`is_active = true`, the same set the mention search returns). A deactivated
+   *    or deleted user gets no entry, deterministically — the client shows a neutral placeholder;
+   *  - at most MENTION_LABELS_MAX_IDS distinct ids per page (first appearance in page order), the
+   *    mention search's own per-request ceiling. Later ids get no entry.
+   * The label is the one the mention search already returns for the same person (name, else email).
+   * ONE batched `users` query per page; none when there is nothing to resolve.
+   */
+  private async hydrateOwnMentionLabels(items: Comment[], authorId: string): Promise<void> {
+    const ownItems = items.filter((item) => item.authorId === authorId)
+    for (const item of ownItems) {
+      item.mentionLabels = {}
+    }
+    const ids: string[] = []
+    const seen = new Set<string>()
+    for (const item of ownItems) {
+      for (const id of item.mentions) {
+        if (seen.has(id)) continue
+        if (ids.length >= MENTION_LABELS_MAX_IDS) break
+        seen.add(id)
+        ids.push(id)
+      }
+    }
+    if (ids.length === 0) return
+
+    const rows = await db
+      .selectFrom('users')
+      .select(['id', 'name', 'email'])
+      .where('id', 'in', ids)
+      .where('is_active', '=', true)
+      .execute()
+
+    // Only ids this call asked for, and only a non-empty label (never the raw id as a "name").
+    const labelById = new Map<string, string>()
+    for (const row of rows) {
+      const label = mentionUserLabel(row)
+      if (label && seen.has(row.id)) labelById.set(row.id, label)
+    }
+    for (const item of ownItems) {
+      const labels: Record<string, string> = {}
+      for (const id of item.mentions) {
+        const label = labelById.get(id)
+        if (label !== undefined) labels[id] = label
+      }
+      item.mentionLabels = labels
+    }
+  }
+
+  /**
+   * @-mention candidates: active users matching `q` (name / email / id substring).
+   *
+   * #5795 — BOUNDED DISCLOSURE, ELIGIBILITY UNCHANGED. The candidate set is still "every active user
+   * in the deployment" (the predicate below is untouched: `is_active = true` plus the term); what
+   * changed is how much of it one call can see:
+   *  - no term ⇒ no rows. A term-less call used to return the first active users of the deployment
+   *    (50 by default, up to 100 on request; label + email subtitle); it now returns an empty list
+   *    WITHOUT issuing any query. The routes answer such a
+   *    call before reaching here (with a `requiresQuery` marker); this is the second layer, so the
+   *    service stays bounded for any other caller.
+   *  - the term is a LITERAL substring (LIKE metacharacters escaped), so a typed `%` / `_` searches
+   *    for that character. That is search correctness, not a disclosure bound: the term is matched
+   *    against name, email AND id, so `-` (in every UUID-shaped id) or `@` (in every well-formed
+   *    email address) still matches (almost) every active user, and — since only a name/email/id that
+   *    STARTS with the character ranks earlier below, which a UUID or an email never does — comes back
+   *    essentially in the old term-less created_at, id order. Against a deliberate caller the
+   *    per-request bound is the LIMIT alone (see comment-mention-bounds.ts).
+   *  - SQL LIMIT is capped at MENTION_CANDIDATES_MAX_ITEMS + 1 (the +1 is the route's `hasMore`
+   *    probe row), so no call hydrates more than that many names/emails.
+   *  - no COUNT. The old `total` was a deployment-wide count of matching active users (for a
+   *    term-less call: the size of the whole user base) and was returned to any comments:read
+   *    holder. It is no longer computed at all; the routes report the clamped page size instead.
+   *
+   * #5809 — `match: 'exact-email'` swaps the substring predicate for EMAIL EQUALITY: the stored email,
+   * trimmed with the characters JS `trim()` strips (JS_TRIM_WHITESPACE, bound as a parameter) and
+   * lower-cased, must equal the trimmed, lower-cased term. It is used by the legacy person importer,
+   * which must know whether THE owner of an address exists — a substring page of 50 can be filled by
+   * `wangli@…`, `zhangli@…` before `li@…` shows up. It only narrows: a row whose trimmed email equals
+   * the term also contains it, so (with per-character case folding) the exact rows for a term are a
+   * subset of the substring rows for the same term. Everything else is shared: the term requirement,
+   * `is_active`, the LIMIT ceiling, the ordering and the row mapping. Any other `match` is the
+   * substring search.
+   */
   async listMentionCandidates(
     spreadsheetId: string,
-    options?: { q?: string; limit?: number },
-  ): Promise<{ items: CommentMentionCandidate[]; total: number }> {
+    options?: { q?: string; limit?: number; match?: 'exact-email' },
+  ): Promise<{ items: CommentMentionCandidate[] }> {
     const normalizedSheetId = spreadsheetId.trim()
-    if (!normalizedSheetId) return { items: [], total: 0 }
+    if (!normalizedSheetId) return { items: [] }
 
-    const limit = Math.min(100, Math.max(1, Number(options?.limit ?? 50)))
     const normalizedQuery = options?.q?.trim().toLowerCase() ?? ''
-    const likeQuery = `%${normalizedQuery}%`
-    const startsWithQuery = `${normalizedQuery}%`
+    if (normalizedQuery.length < MENTION_CANDIDATES_MIN_QUERY_LENGTH) return { items: [] }
 
-    let baseQuery = db
+    const requestedLimit = Number(options?.limit ?? MENTION_CANDIDATES_MAX_ITEMS)
+    const limit = Math.min(
+      MENTION_CANDIDATES_MAX_ITEMS + 1,
+      Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : MENTION_CANDIDATES_MAX_ITEMS),
+    )
+    const escapedQuery = escapeMentionLikeTerm(normalizedQuery)
+    const likeQuery = `%${escapedQuery}%`
+    const startsWithQuery = `${escapedQuery}%`
+    const exactEmail = options?.match === 'exact-email'
+
+    const rows = await db
       .selectFrom('users')
       .where('is_active', '=', true)
-
-    if (normalizedQuery) {
-      baseQuery = baseQuery.where((eb) => eb.or([
-        sql<boolean>`lower(coalesce(name, '')) like ${likeQuery}`,
-        sql<boolean>`lower(email) like ${likeQuery}`,
-        sql<boolean>`lower(id) like ${likeQuery}`,
-      ]))
-    }
-
-    const totalRow = await baseQuery
-      .select(({ fn }) => fn.countAll<number>().as('c'))
-      .executeTakeFirst()
-    const total = totalRow ? Number((totalRow as { c: string | number }).c) : 0
-
-    let rowsQuery = baseQuery
+      .where((eb) => eb.or(exactEmail
+        ? [sql<boolean>`lower(btrim(coalesce(email, ''), ${JS_TRIM_WHITESPACE})) = ${normalizedQuery}`]
+        : [
+          sql<boolean>`lower(coalesce(name, '')) like ${likeQuery}`,
+          sql<boolean>`lower(email) like ${likeQuery}`,
+          sql<boolean>`lower(id) like ${likeQuery}`,
+        ]))
       .select(['id', 'name', 'email'])
-
-    if (normalizedQuery) {
-      rowsQuery = rowsQuery
-        .orderBy(
-          sql<number>`case
-            when lower(coalesce(name, '')) like ${startsWithQuery} then 0
-            when lower(email) like ${startsWithQuery} then 1
-            when lower(id) like ${startsWithQuery} then 2
-            else 3
-          end`,
-        )
-    }
-
-    const rows = await rowsQuery
+      .orderBy(
+        sql<number>`case
+          when lower(coalesce(name, '')) like ${startsWithQuery} then 0
+          when lower(email) like ${startsWithQuery} then 1
+          when lower(id) like ${startsWithQuery} then 2
+          else 3
+        end`,
+      )
       .orderBy('created_at', 'asc')
       .orderBy('id', 'asc')
       .limit(limit)
@@ -502,7 +705,7 @@ export class CommentService {
 
     return {
       items: rows.map((row) => {
-        const label = row.name?.trim() || row.email.trim() || row.id
+        const label = mentionUserLabel(row) || row.id
         const subtitle = row.name?.trim() && row.email.trim() && row.name.trim() !== row.email.trim()
           ? row.email.trim()
           : undefined
@@ -512,36 +715,81 @@ export class CommentService {
           subtitle,
         }
       }),
-      total,
     }
   }
 
   /**
-   * G-10 (docket #68, G-10 audit #4323) name-projection note:
-   *
-   * This method's WHERE clause is UNCHANGED by the name projection below — every predicate line is
-   * untouched, so the row set returned is identical, row for row, to what it was before this change.
-   * The new `base_name`/`sheet_name`/`view_name`/`field_name` columns are pure SELECT-list additions
-   * (LEFT JOINs / correlated scalar subqueries keyed off ids already in the row), so they cannot
-   * surface a row that wasn't already being returned, and cannot attach a name to any row this
-   * endpoint wasn't already serializing the id (and content) for.
-   *
-   * That said: unlike `getComments`/`getCommentPresenceSummary`/etc., THIS aggregate has no per-sheet
-   * `resolveSheetReadableCapabilities` gate — see the G-8 doc comment on `ensureSheetReadable` in
-   * `routes/comments.ts` ("user-scoped cross-sheet `inbox`/`unread-count` aggregates... would need
-   * result filtering by the actor's readable-sheet set") and
-   * `docs/development/multitable-g8-comments-sheet-read-gate-verification-20260706.md` ("Residual
-   * follow-up... NOT in this PR"). That gap is pre-existing, already tracked, and out of scope here —
-   * this change does not widen it (no WHERE relaxation), and the projected names carry exactly the
-   * same boundary the existing id/content fields already have on this endpoint today, no more and no
-   * less. This PR makes no independent claim, positive or negative, about this method's row-selection
-   * robustness beyond that — it is verified unchanged, not verified correct.
+   * #5831 part B — the distinct sheets holding an inbox candidate for `userId` (a comment by someone
+   * else that `userId` has not read or is mentioned in), BEFORE any authority filter. The route turns
+   * them into the CommentInboxScope (readable, live) and never returns them; one grouped query.
    */
-  async getInbox(userId: string, options?: Pick<CommentQueryOptions, 'limit' | 'offset'>): Promise<{ items: CommentInboxItem[]; total: number }> {
+  async listInboxCandidateSheetIds(userId: string): Promise<string[]> {
+    if (userId.trim().length === 0) return []
+    const rows = await db
+      .selectFrom('meta_comments as c')
+      .leftJoin('meta_comment_reads as r', (join) => join.onRef('r.comment_id', '=', 'c.id').on('r.user_id', '=', userId))
+      .select('c.spreadsheet_id')
+      .where('c.author_id', '!=', userId)
+      .where(inboxCandidatePredicate(userId))
+      .groupBy('c.spreadsheet_id')
+      .execute()
+    return rows
+      .map((row) => (row as { spreadsheet_id?: unknown }).spreadsheet_id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)
+  }
+
+  /**
+   * #5831 part B — the same candidates' distinct rows, for `sheetIds` only (sheet id → row ids): the
+   * bound the route hands to the row-level read deny, so it never evaluates a whole sheet. One grouped
+   * query; nothing when `sheetIds` is empty.
+   */
+  async listInboxCandidateRowIds(userId: string, sheetIds: readonly string[]): Promise<Map<string, string[]>> {
+    const result = new Map<string, string[]>()
+    const ids = [...new Set(sheetIds.filter((id) => typeof id === 'string' && id.length > 0))]
+    if (userId.trim().length === 0 || ids.length === 0) return result
+    const rows = await db
+      .selectFrom('meta_comments as c')
+      .leftJoin('meta_comment_reads as r', (join) => join.onRef('r.comment_id', '=', 'c.id').on('r.user_id', '=', userId))
+      .select(['c.spreadsheet_id', 'c.row_id'])
+      .where('c.author_id', '!=', userId)
+      .where(inboxCandidatePredicate(userId))
+      .where(sql<boolean>`c.spreadsheet_id = any(${ids}::text[])`)
+      .groupBy(['c.spreadsheet_id', 'c.row_id'])
+      .execute()
+    for (const row of rows as Array<{ spreadsheet_id?: unknown; row_id?: unknown }>) {
+      if (typeof row.spreadsheet_id !== 'string' || typeof row.row_id !== 'string' || row.row_id.length === 0) continue
+      const list = result.get(row.spreadsheet_id) ?? []
+      list.push(row.row_id)
+      result.set(row.spreadsheet_id, list)
+    }
+    return result
+  }
+
+  /**
+   * The caller's comment inbox: comments by someone else that `userId` is @-mentioned in or has not
+   * read, newest first.
+   *
+   * #5831 part B — ONLY inside `scope` (required; see CommentInboxScope): the comment's sheet is
+   * readable by the caller and live, and its row is not row-level denied to them. The scope is part of
+   * the WHERE of BOTH the COUNT and the page query, so `total` counts exactly what the pages list and
+   * no page comes back short. A missing or empty scope returns nothing, without a query.
+   *
+   * G-10 (docket #68, G-10 audit #4323): the `base_name`/`sheet_name`/`view_name`/`field_name` columns
+   * are pure SELECT-list additions (LEFT JOINs / correlated scalar subqueries keyed off ids already in the
+   * row); they cannot add a row, and they are now served only for rows inside the scope.
+   */
+  async getInbox(
+    userId: string,
+    options: Pick<CommentQueryOptions, 'limit' | 'offset'> | undefined,
+    scope: CommentInboxScope,
+  ): Promise<{ items: CommentInboxItem[]; total: number }> {
     const limit = Math.min(200, Math.max(1, Number(options?.limit ?? 50)))
     const offset = Math.max(0, Number(options?.offset ?? 0))
-    const mentionPredicate = sql<boolean>`c.mentions @> ${JSON.stringify([userId])}::jsonb`
-    const inboxPredicate = sql<boolean>`(${mentionPredicate}) or r.comment_id is null`
+    const admitted = admitInboxScope(scope)
+    if (!admitted || userId.trim().length === 0) return { items: [], total: 0 }
+    const mentionPredicate = inboxMentionPredicate(userId)
+    const inboxPredicate = inboxCandidatePredicate(userId)
+    const scopePredicate = inboxScopePredicate(admitted)
 
     const totalRow = await db
       .selectFrom('meta_comments as c')
@@ -549,6 +797,7 @@ export class CommentService {
       .select(({ fn }) => fn.countAll<number>().as('c'))
       .where('c.author_id', '!=', userId)
       .where(inboxPredicate)
+      .where(scopePredicate)
       .executeTakeFirst()
     const total = totalRow ? Number((totalRow as { c: string | number }).c) : 0
 
@@ -613,6 +862,7 @@ export class CommentService {
       ])
       .where('c.author_id', '!=', userId)
       .where(inboxPredicate)
+      .where(scopePredicate)
       .orderBy('c.created_at', 'desc')
       .limit(limit)
       .offset(offset)
@@ -624,13 +874,17 @@ export class CommentService {
     }
   }
 
-  async getUnreadCount(userId: string): Promise<number> {
+  /** #5831 part B: counts only inside `scope` (required; missing or empty ⇒ 0 without a query). */
+  async getUnreadCount(userId: string, scope: CommentInboxScope): Promise<number> {
+    const admitted = admitInboxScope(scope)
+    if (!admitted || userId.trim().length === 0) return 0
     const row = await db
       .selectFrom('meta_comments as c')
       .leftJoin('meta_comment_reads as r', (join) => join.onRef('r.comment_id', '=', 'c.id').on('r.user_id', '=', userId))
       .select(({ fn }) => fn.countAll<number>().as('c'))
       .where('c.author_id', '!=', userId)
       .where(sql<boolean>`r.comment_id is null`)
+      .where(inboxScopePredicate(admitted))
       .executeTakeFirst()
 
     return row ? Number((row as { c: string | number }).c) : 0
@@ -642,9 +896,14 @@ export class CommentService {
    *
    * - `unreadCount`: comments the user has not read (no read record, excluding own).
    * - `mentionUnreadCount`: subset of the above where the user is @-mentioned.
+   *
+   * #5831 part B: both count only comments inside `scope` (required; the same scope the inbox lists
+   * with, so the badge never counts an item the inbox cannot show). Missing or empty ⇒ zeros, no query.
    */
-  async getUnreadSummary(userId: string): Promise<CommentUnreadSummary> {
-    const mentionPredicate = sql<boolean>`c.mentions @> ${JSON.stringify([userId])}::jsonb`
+  async getUnreadSummary(userId: string, scope: CommentInboxScope): Promise<CommentUnreadSummary> {
+    const admitted = admitInboxScope(scope)
+    if (!admitted || userId.trim().length === 0) return { unreadCount: 0, mentionUnreadCount: 0 }
+    const mentionPredicate = inboxMentionPredicate(userId)
 
     const row = await db
       .selectFrom('meta_comments as c')
@@ -657,12 +916,29 @@ export class CommentService {
       ])
       .where('c.author_id', '!=', userId)
       .where(sql<boolean>`r.comment_id is null`)
+      .where(inboxScopePredicate(admitted))
       .executeTakeFirst()
 
     return {
       unreadCount: row ? Number((row as { unread_count: string | number }).unread_count) : 0,
       mentionUnreadCount: row ? Number((row as { mention_unread_count: string | number }).mention_unread_count) : 0,
     }
+  }
+
+  /**
+   * #5831 — the comment's sheet and row (or null for an unknown id). The comment-id routes
+   * (edit/delete/read/reactions/resolve) call this BEFORE their sheet gate, so it deliberately reads
+   * only these two immutable addressing columns of `meta_comments` by primary key: no content, no
+   * author, no other table. The closure guard pins that shape (PRE_GATE_CALLS).
+   */
+  async getCommentAddress(commentId: string): Promise<CommentAddressRecord | null> {
+    const row = await db
+      .selectFrom('meta_comments')
+      .select(['spreadsheet_id', 'row_id'])
+      .where('id', '=', commentId)
+      .executeTakeFirst()
+    if (!row) return null
+    return { spreadsheetId: row.spreadsheet_id, rowId: row.row_id }
   }
 
   async markCommentRead(commentId: string, userId: string): Promise<void> {
@@ -1233,8 +1509,8 @@ export class CommentService {
       sheetId: row.sheet_id ?? row.spreadsheet_id,
       viewId: row.view_id,
       recordId: row.record_id ?? row.row_id,
-      // G-10 (docket #68): additive display names — see getInbox()'s doc comment for the
-      // no-WHERE-relaxation boundary and the pre-existing G-8 caveat these inherit.
+      // G-10 (docket #68): additive display names — see getInbox()'s doc comment (they add no row, and
+      // since #5831 part B they are served only inside the caller's readable, live scope).
       baseName: row.base_name,
       sheetName: row.sheet_name,
       viewName: row.view_name,

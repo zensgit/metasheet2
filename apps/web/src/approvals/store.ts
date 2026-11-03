@@ -5,6 +5,7 @@
  */
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { useLocale } from '../composables/useLocale'
 import type {
   UnifiedApprovalDTO,
   UnifiedApprovalHistoryDTO,
@@ -21,6 +22,9 @@ import {
 import type { ApprovalListQuery } from './api'
 
 export const useApprovalStore = defineStore('approval', () => {
+  // O-8 / F8-1: fallback error copy (used only when an error carries no message) follows the
+  // shell locale — the same module-scope singleton every approval view reads.
+  const { isZh } = useLocale()
   // ---------------------------------------------------------------------------
   // State
   // ---------------------------------------------------------------------------
@@ -112,7 +116,7 @@ export const useApprovalStore = defineStore('approval', () => {
       pendingApprovals.value = result.data
       totalPending.value = result.total
     } catch (e: any) {
-      error.value = e.message ?? '加载待处理审批失败'
+      error.value = e.message ?? (isZh.value ? '加载待处理审批失败' : 'Failed to load pending approvals')
     } finally {
       loading.value = false
     }
@@ -126,7 +130,7 @@ export const useApprovalStore = defineStore('approval', () => {
       myApprovals.value = result.data
       totalMine.value = result.total
     } catch (e: any) {
-      error.value = e.message ?? '加载我发起的审批失败'
+      error.value = e.message ?? (isZh.value ? '加载我发起的审批失败' : 'Failed to load your requests')
     } finally {
       loading.value = false
     }
@@ -140,7 +144,7 @@ export const useApprovalStore = defineStore('approval', () => {
       ccApprovals.value = result.data
       totalCc.value = result.total
     } catch (e: any) {
-      error.value = e.message ?? '加载抄送审批失败'
+      error.value = e.message ?? (isZh.value ? '加载抄送审批失败' : 'Failed to load approvals that CC you')
     } finally {
       loading.value = false
     }
@@ -154,7 +158,7 @@ export const useApprovalStore = defineStore('approval', () => {
       completedApprovals.value = result.data
       totalCompleted.value = result.total
     } catch (e: any) {
-      error.value = e.message ?? '加载已完成审批失败'
+      error.value = e.message ?? (isZh.value ? '加载已完成审批失败' : 'Failed to load completed approvals')
     } finally {
       loading.value = false
     }
@@ -168,7 +172,7 @@ export const useApprovalStore = defineStore('approval', () => {
       processedApprovals.value = result.data
       totalProcessed.value = result.total
     } catch (e: any) {
-      error.value = e.message ?? '加载我已处理的审批失败'
+      error.value = e.message ?? (isZh.value ? '加载我已处理的审批失败' : 'Failed to load approvals you processed')
     } finally {
       loading.value = false
     }
@@ -229,7 +233,7 @@ export const useApprovalStore = defineStore('approval', () => {
       if (generation !== detailGeneration) return
       // Only ANOTHER instance is dropped here — never the one this load was for (see the doc above).
       if (activeApproval.value && activeApproval.value.id !== id) activeApproval.value = null
-      error.value = e.message ?? '加载审批详情失败'
+      error.value = e.message ?? (isZh.value ? '加载审批详情失败' : 'Failed to load the approval details')
       // Round 3 (B12): record WHICH instance could not be re-read, so the view can refuse write
       // verbs against data whose last refresh is known to have failed without having to guess from
       // the shared `error` string.
@@ -285,7 +289,7 @@ export const useApprovalStore = defineStore('approval', () => {
       history.value = result
     } catch (e: any) {
       if (generation !== historyGeneration) return
-      error.value = e.message ?? '加载审批历史失败'
+      error.value = e.message ?? (isZh.value ? '加载审批历史失败' : 'Failed to load the approval history')
     } finally {
       if (generation === historyGeneration) loading.value = false
     }
@@ -298,7 +302,7 @@ export const useApprovalStore = defineStore('approval', () => {
       const result = await createApproval(req)
       return result
     } catch (e: any) {
-      error.value = e.message ?? '提交审批失败'
+      error.value = e.message ?? (isZh.value ? '提交审批失败' : 'Failed to submit the approval')
       throw e
     } finally {
       loading.value = false
@@ -382,7 +386,7 @@ export const useApprovalStore = defineStore('approval', () => {
       }
       return result
     } catch (e: any) {
-      if (actedInstanceStillDisplayed()) error.value = e.message ?? '执行审批操作失败'
+      if (actedInstanceStillDisplayed()) error.value = e.message ?? (isZh.value ? '执行审批操作失败' : 'Failed to perform the approval action')
       throw e
     } finally {
       if (generation === detailGeneration) loading.value = false

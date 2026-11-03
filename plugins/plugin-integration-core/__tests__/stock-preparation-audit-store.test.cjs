@@ -188,7 +188,7 @@ async function main() {
     // NOT GATED: the columns that carry caller/customer data. A free-text projectNo is exactly what
     // the export route stamps, and refusing it would refuse the export.
     for (const [column, value] of [
-      ['projectId', '注射水缓冲罐 / RY2-2023'],
+      ['projectId', '示例乙型 / EX0-2000'],
       ['workspaceId', 'my workspace (2026)'],
       ['actor', 'ops.lead+beiliao@example.com'],
       ['actor', '张三'],
@@ -240,6 +240,31 @@ async function main() {
     await expectAuditError(store.list({}), 'AUDIT_CONFIG_INVALID')
   })
 
+  await run('(f) appendWithin (pre-enable hardening F-4(c)): the SAME row on the caller\'s transaction handle, never on the store db; the same gates; no handle ⇒ 500 before anything', async () => {
+    const { db, store } = newStore()
+    const trxInserted = []
+    const trx = { async insertOne(table, row) { trxInserted.push({ table, row: { ...row } }); return { ...row } } }
+    const entry = { tenantId: 'tenant_1', projectId: 'proj_1', action: 'project_pilot_enable', subjectId: 'sheet_syn_1', mode: 'enabled', actor: 'u_1', detail: { readinessVersion: 2, generationBumped: true } }
+    const within = await store.appendWithin(trx, entry)
+    assert.deepEqual(within, { id: 'audit_1', action: 'project_pilot_enable' })
+    assert.equal(db.inserted.length, 0, 'nothing on the store db: the row rides the caller\'s transaction')
+    assert.equal(trxInserted.length, 1)
+    assert.equal(trxInserted[0].table, AUDIT_TABLE)
+    // Byte-identical to what `append` stores for the same entry (same id sequence position aside).
+    await store.append(entry)
+    assert.deepEqual({ ...trxInserted[0].row, id: null }, { ...db.inserted[0].row, id: null })
+    // The same gates refuse on the transaction path too, before the insert.
+    await expectAuditError(store.appendWithin(trx, { ...entry, action: 'bogus' }), 'AUDIT_ACTION_INVALID')
+    await expectAuditError(store.appendWithin(trx, { ...entry, detail: { note: SECRET } }), 'AUDIT_DETAIL_INVALID')
+    await expectAuditError(store.appendWithin(trx, { ...entry, tenantId: '' }), 'AUDIT_CONFIG_INVALID')
+    assert.equal(trxInserted.length, 1, 'a refused row is never inserted')
+    for (const bad of [null, undefined, {}, { insertOne: 'no' }]) {
+      const caught = await expectAuditError(store.appendWithin(bad, entry), 'AUDIT_TRANSACTION_INVALID')
+      assert.equal(caught.status, 500)
+    }
+    assert.equal(db.inserted.length, 1, 'a missing handle never falls back to the store db')
+  })
+
   const total = passed + failed
   console.log(`\nstock-preparation-audit-store: ${passed}/${total} passed`)
   if (failed > 0) {
@@ -249,7 +274,6 @@ async function main() {
   console.log('✓ stock-preparation-audit-store')
 }
 
-main().catch((error) => {
-  console.error(error && error.stack ? error.stack : error)
-  process.exit(1)
-})
+// S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — `main` runs as one test
+// under the exit sentinel and the whole-suite timeout, so a check that hangs can never end this suite with exit 0.
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-audit-store.test.cjs', main)

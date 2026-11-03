@@ -380,11 +380,15 @@ async function ignoredFiltersCannotWidenTheTraversal() {
   // test that does, with a two-row entry table — without it, this assertion would pass on a build
   // whose seeds were never filtered at all.
   //
-  // WHAT IS NOT PINNED, and deliberately: what `expandChildren` does under an unfiltered source. It
-  // re-reads bomHead/bomDetail WITHOUT a client-side re-filter, and it has always done so — the
-  // ORDER path runs through the identical code and has the identical exposure today. That is a
-  // pre-existing, shared property of child expansion, not something root discovery introduces, and
-  // fixing it belongs in its own change with its own regressions rather than being smuggled in here.
+  // RE-PINNED (R67 ③ fix round 2): this used to be "WHAT IS NOT PINNED" — `expandChildren` re-read
+  // bomHead/bomDetail without a client-side re-filter, so an unfiltered source could hand it another
+  // part's heads. The page loop now filters EVERY declared-unfiltered (`filtersApplied: false`) answer
+  // against the read's own equality filter (stock-preparation-bom-expansion.cjs `readPages`), so the
+  // WHOLE expansion under a source that lies on every table is the honoured one — rows, row errors and
+  // global errors — not just its root set.
+  assert.deepEqual(ignored.result.rows, honoured.result.rows, 'an unfiltered source expands exactly like a filtering one')
+  assert.deepEqual(ignored.result.rowErrors, honoured.result.rowErrors)
+  assert.deepEqual(ignored.result.errors, honoured.result.errors)
   const rootsOf = (result) => result.rows.filter((row) => row.depth === 0).map((row) => row.componentSourceId)
   assert.deepEqual(
     rootsOf(ignored.result),
@@ -1202,7 +1206,6 @@ async function main() {
   console.log('stock-preparation-project-subtree-bridge: OK')
 }
 
-main().catch((error) => {
-  console.error(error)
-  process.exit(1)
-})
+// S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — `main` runs as one test
+// under the exit sentinel and the whole-suite timeout, so a check that hangs can never end this suite with exit 0.
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-project-subtree-bridge.test.cjs', main)

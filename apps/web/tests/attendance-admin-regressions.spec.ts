@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App } from 'vue'
+import { routerKey } from 'vue-router'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import AttendanceAdminCenter from '../src/views/attendance/AttendanceAdminCenter.vue'
 import { apiFetch } from '../src/utils/api'
+import { useLocale } from '../src/composables/useLocale'
 import {
   canRunBatchAnomalyResolution,
   runBatchAnomalyResolution,
@@ -167,10 +169,55 @@ function emptyAttendanceResponse(): Response {
   })
 }
 
+// A router-less AttendanceView mount hits useRouter()'s bare inject(routerKey). Vue warns
+// on every mount, and vitest ships each warn to the main thread on the worker RPC. This file
+// is one worker's whole job (144 mounts). On a slow runner those calls, plus the 1s hero-clock
+// re-render, sit unanswered longer than birpc's 60s onTaskUpdate timeout — the guard goes red
+// with every assertion green. Providing the key as undefined keeps the location.assign fallback.
+function createAttendanceApp(...args: Parameters<typeof createApp>): ReturnType<typeof createApp> {
+  const instance = createApp(...args)
+  instance.provide(routerKey, undefined)
+  return instance
+}
+
+// Vitest debounces onTaskUpdate by 10ms and the worker only reads the ack on a macrotask.
+// flushUi() is microtasks, so a stretch of mounts can pass 60s of wall clock without a poll
+// phase. Yielding here lets the previous test's update ack land before the next mount.
+const WORKER_RPC_DRAIN_MS = 20
+
+function drainWorkerRpc(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, WORKER_RPC_DRAIN_MS)
+  })
+}
+
+const nativeSetInterval = window.setInterval.bind(window)
+let heroClockSilenced = false
+
+function silenceAttendanceHeroClock(): void {
+  if (heroClockSilenced) return
+  heroClockSilenced = true
+  window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+    if (typeof handler === 'function' && timeout === 1000) {
+      const source = String(handler)
+      if (source.includes('heroClockNow')) {
+        return 0 as unknown as ReturnType<typeof setInterval>
+      }
+    }
+    return nativeSetInterval(handler, timeout as number, ...(args as []))
+  }) as typeof window.setInterval
+}
+
+function restoreAttendanceHeroClock(): void {
+  if (!heroClockSilenced) return
+  window.setInterval = nativeSetInterval
+  heroClockSilenced = false
+}
+
 describe('Attendance admin regressions', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
-  let originalScrollIntoView: typeof HTMLElement.prototype.scrollIntoView | undefined
+  let originalScrollIntoView: PropertyDescriptor | undefined
   let exportReportFieldFingerprint = 'records-unit-test-fingerprint'
   let exportReportFieldCodes = 'work_date,employee_name'
   let exportReportFieldCount = '2'
@@ -199,7 +246,9 @@ describe('Attendance admin regressions', () => {
   let autoShiftAutoWriteRunsData: Record<string, unknown> | null = null
   let attendanceNotificationDeliveriesData: Record<string, unknown> | null = null
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await drainWorkerRpc()
+    silenceAttendanceHeroClock()
     vi.clearAllMocks()
     pluginHarness.initialPlugins = [{ name: 'plugin-attendance', status: 'active' }]
     if (pluginHarness.plugins) pluginHarness.plugins.value = pluginHarness.initialPlugins
@@ -887,9 +936,10 @@ describe('Attendance admin regressions', () => {
 
     container = document.createElement('div')
     document.body.appendChild(container)
-    originalScrollIntoView = HTMLElement.prototype.scrollIntoView
+    originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
+      writable: true,
       value: vi.fn(),
     })
   })
@@ -897,12 +947,12 @@ describe('Attendance admin regressions', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     if (app) app.unmount()
+    restoreAttendanceHeroClock()
     if (container) container.remove()
     if (originalScrollIntoView) {
-      Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
-        configurable: true,
-        value: originalScrollIntoView,
-      })
+      Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', originalScrollIntoView)
+    } else {
+      Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView')
     }
     app = null
     container = null
@@ -944,10 +994,11 @@ describe('Attendance admin regressions', () => {
         writes.push({ url, method, body })
         return jsonResponse(201, { ok: true, data: { shift: { id: 'shift-created', ...body } } })
       }
-      if (/^\/api\/attendance\/shifts\/[^/]+$/.test(url) && method === 'PUT') {
+      if (/^\/api\/attendance\/shifts\/[^/]+\/update$/.test(url) && method === 'POST') {
         const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
         writes.push({ url, method, body })
-        return jsonResponse(200, { ok: true, data: { shift: { id: url.split('/').pop(), ...body } } })
+        const id = url.slice('/api/attendance/shifts/'.length, -'/update'.length)
+        return jsonResponse(200, { ok: true, data: { shift: { id, ...body } } })
       }
       if (/^\/api\/attendance\/shifts\/[^/]+$/.test(url) && method === 'DELETE') {
         writes.push({ url, method, body: {} })
@@ -959,7 +1010,7 @@ describe('Attendance admin regressions', () => {
   }
 
   async function mountShiftAdmin(): Promise<HTMLElement> {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const shiftsNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-shifts"]')
@@ -1021,8 +1072,8 @@ describe('Attendance admin regressions', () => {
     await flushUi(6)
     expect(writes).toHaveLength(1)
     expect(writes[0]).toMatchObject({
-      url: '/api/attendance/shifts/shift-split',
-      method: 'PUT',
+      url: '/api/attendance/shifts/shift-split/update',
+      method: 'POST',
       body: {
         name: 'Split shift',
         timezone: 'Asia/Shanghai',
@@ -1129,7 +1180,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('does not preload admin-only attendance data on the employee overview surface', async () => {
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi()
 
@@ -1194,7 +1245,7 @@ describe('Attendance admin regressions', () => {
       },
     ]
 
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(12)
 
@@ -1236,7 +1287,7 @@ describe('Attendance admin regressions', () => {
       },
     ]
 
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(12)
 
@@ -1285,7 +1336,7 @@ describe('Attendance admin regressions', () => {
       },
     ]
 
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(12)
 
@@ -1357,7 +1408,7 @@ describe('Attendance admin regressions', () => {
       },
     ]
 
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(12)
 
@@ -1400,7 +1451,7 @@ describe('Attendance admin regressions', () => {
   ) {
     attendanceSettingsData = settings
     attendanceAnomaliesData = rows
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(12)
     // Probe admin capability through the batch toolbar → checkboxes become enabled.
@@ -1494,7 +1545,7 @@ describe('Attendance admin regressions', () => {
   it('#3531 owed-punch filter defaults to all anomalies without sending a filter', async () => {
     attendanceAnomaliesData = [makeBatchAnomaly('record-a')]
 
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(12)
 
@@ -1509,7 +1560,7 @@ describe('Attendance admin regressions', () => {
   it('#3531 owed-punch filter clears stale rows while loading and preserves pending request chips', async () => {
     attendanceAnomaliesData = [makeBatchAnomaly('record-late')]
 
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(12)
 
@@ -1568,7 +1619,7 @@ describe('Attendance admin regressions', () => {
       }
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(10)
     const card = container!.querySelector('[data-selfservice-card="annual-balance"]')
@@ -1591,7 +1642,7 @@ describe('Attendance admin regressions', () => {
       return defaultImpl(input, init)
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(32)
 
@@ -1600,29 +1651,23 @@ describe('Attendance admin regressions', () => {
     expect(container!.querySelector('[data-admin-task-action]')).toBeNull()
   })
 
-  it('W3/4353 wiring: AttendanceAdminCenter re-emits clear-section from the real return-home flow (review P3-1)', async () => {
-    // Mounts the REAL wrapper (not a mock): entering with an explicit section keeps the task home
-    // closed; clicking Management home must propagate clear-section through AdminCenter to its
-    // parent. A regression that drops the template re-emit turns exactly this leg red.
+  it('W3/4353 wiring: the management-home return control is gone and the open section stays put', async () => {
     const onClearSection = vi.fn()
-    app = createApp(AttendanceAdminCenter, {
+    app = createAttendanceApp(AttendanceAdminCenter, {
       initialSectionId: 'attendance-admin-groups',
       onClearSection,
     })
     app.mount(container!)
     await flushUi(16)
 
-    // Task home lives under v-show: with an explicit section it must be present-but-hidden.
     const homeContext = container!.querySelector('[data-admin-home-context]') as HTMLElement
     expect(homeContext).toBeTruthy()
     expect(homeContext.style.display).toBe('none')
+    expect(container!.querySelector('[data-admin-task-home-return]')).toBeNull()
     const returnHome = [...container!.querySelectorAll('button')].find(b => (b.textContent || '').includes('Management home'))
-    expect(returnHome, 'expected the Management home button').toBeTruthy()
-    returnHome!.click()
-    await flushUi(4)
-
-    expect(onClearSection).toHaveBeenCalledTimes(1)
-    expect((container!.querySelector('[data-admin-home-context]') as HTMLElement).style.display).not.toBe('none')
+    expect(returnHome).toBeUndefined()
+    expect(onClearSection).not.toHaveBeenCalled()
+    expect(homeContext.style.display).toBe('none')
   })
 
   it('admin notification deliveries — reminds selected owed-punch candidates with an authoritative confirm snapshot', async () => {
@@ -1683,7 +1728,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -1745,8 +1790,11 @@ describe('Attendance admin regressions', () => {
     expect(section!.querySelector('[data-missed-punch-reminder-error]')?.textContent).toContain('candidate stale')
   })
 
-  it('exposes shift_swap as an approval-flow type and saves it through the admin form', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+  it.each([
+    { type: 'shift_swap', label: 'Shift-swap request', name: 'Shift swap approval' },
+    { type: 'business_trip', label: 'Business trip request', name: 'Business trip approval' },
+  ])('exposes $type as an approval-flow type and saves it through the admin form', async ({ type, label, name: flowName }) => {
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -1755,7 +1803,16 @@ describe('Attendance admin regressions', () => {
     expect(name).toBeTruthy()
     expect(requestType).toBeTruthy()
     const typeValues = Array.from(requestType!.options).map(option => option.value)
-    expect(typeValues).toContain('shift_swap')
+    expect(typeValues).toContain(type)
+    expect(typeValues).not.toContain('unsupported_request_type')
+    expect(Array.from(requestType!.options).find(option => option.value === type)?.textContent).toBe(label)
+    if (type === 'business_trip') {
+      useLocale().setLocale('zh-CN')
+      await flushUi(2)
+      expect(Array.from(requestType!.options).find(option => option.value === type)?.textContent).toBe('出差申请')
+      useLocale().setLocale('en')
+      await flushUi(2)
+    }
     // A1 wire-level fix: the dropdown must now expose every backend REQUEST_TYPE,
     // including the two that were missing (outdoor_punch / schedule_dispatch).
     expect(typeValues).toContain('outdoor_punch')
@@ -1765,9 +1822,9 @@ describe('Attendance admin regressions', () => {
     expect(container!.querySelector('[data-testid="attendance-approval-steps-preview"]')).toBeTruthy()
     expect(container!.querySelector('#attendance-approval-steps')).toBeNull()
 
-    name!.value = 'Shift swap approval'
+    name!.value = flowName
     name!.dispatchEvent(new Event('input', { bubbles: true }))
-    requestType!.value = 'shift_swap'
+    requestType!.value = type
     requestType!.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi(2)
 
@@ -1783,15 +1840,15 @@ describe('Attendance admin regressions', () => {
     )
     expect(postCall).toBeTruthy()
     expect(JSON.parse(String((postCall![1] as RequestInit | undefined)?.body || '{}'))).toEqual({
-      name: 'Shift swap approval',
-      requestType: 'shift_swap',
+      name: flowName,
+      requestType: type,
       steps: [],
       isActive: true,
     })
   })
 
   it('renders scheduler scopes as a read-only registry under scheduling admin', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -1842,7 +1899,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -1860,7 +1917,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input) => {
       const url = String(input)
       if (url.includes('/api/attendance-admin/users/search')) {
-        if (url.includes('q=userA')) return userSearchResponse([{ id: 'userA' }])
+        if (url.includes('q=userA')) return userSearchResponse([{ id: 'userA', name: '备料一线测试账号' }])
         if (url.includes('q=userB')) return userSearchResponse([{ id: 'userB' }])
         return userSearchResponse([])
       }
@@ -1883,7 +1940,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -1905,6 +1962,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(4)
     const shown = section!.querySelector('.attendance__annual-balance')
     expect(shown).toBeTruthy()
+    expect(shown?.textContent || '').toContain('备料一线测试账号')
     expect(shown?.textContent || '').toContain('userA')
 
     // (B) query userB → failure → A's balance MUST disappear (cleared up front; the view renders on v-if).
@@ -1931,7 +1989,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -1970,7 +2028,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -2015,7 +2073,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8) // loadSettings() on admin init must hydrate the policy form (no manual Reload)
 
@@ -2023,8 +2081,10 @@ describe('Attendance admin regressions', () => {
     await flushUi(4)
     const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-policy')
     expect(section).toBeTruthy()
+    expect(section!.querySelector('[data-attendance-help="annual-policy"]')?.textContent).toContain('Attendance help')
+    expect(section!.textContent).toContain('ATTENDANCE_SCHEDULER_ENABLED')
     const tzInput = section!.querySelector<HTMLInputElement>('#attendance-annual-policy-tz')!
-    expect(tzInput.value).toBe('Asia/Shanghai') // hydrated on first screen via loadSettings, NOT a Reload click
+    expect(tzInput.getAttribute('data-attendance-timezone-value')).toBe('Asia/Shanghai') // hydrated on first screen via loadSettings, NOT a Reload click
     const saveBtn = Array.from(section!.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Save policy'))!
 
     // FIRST save WITHOUT ever clicking Reload → must PUT the real (hydrated) policy, never the local defaults.
@@ -2038,7 +2098,7 @@ describe('Attendance admin regressions', () => {
     // enabled + empty timezone → blocked client-side (no PUT).
     savedPayload = null
     tzInput.value = ''
-    tzInput.dispatchEvent(new Event('input'))
+    tzInput.dispatchEvent(new Event('change'))
     await flushUi(2)
     saveBtn.click()
     await flushUi(4)
@@ -2047,7 +2107,7 @@ describe('Attendance admin regressions', () => {
     // restore timezone but make the ladder malformed (a closed last band) → blocked client-side, surfacing what the
     // backend would otherwise silently revert to the statutory preset with a 200 "saved".
     tzInput.value = 'Asia/Shanghai'
-    tzInput.dispatchEvent(new Event('input'))
+    tzInput.dispatchEvent(new Event('change'))
     const maxYearsInput = section!.querySelector<HTMLInputElement>('tbody tr td:nth-child(2) input')!
     maxYearsInput.value = '10'
     maxYearsInput.dispatchEvent(new Event('input'))
@@ -2074,7 +2134,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -2115,7 +2175,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -2164,12 +2224,20 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
     const card = section.querySelector<HTMLElement>('[data-annual-ops-card="adjust"]')!
     const inputs = card.querySelectorAll<HTMLInputElement>('input')
+    inputs[0].value = '没有此人'
+    inputs[0].dispatchEvent(new Event('input'))
+    await flushUi(6)
+    expect(card.querySelector('[data-annual-ops-adjust-person-menu] [data-attendance-search-empty]')?.textContent).toContain('No matches')
+    inputs[0].value = ''
+    inputs[0].dispatchEvent(new Event('input'))
+    await flushUi(2)
+    expect(card.querySelector('[data-attendance-search-empty]')).toBeNull()
     inputs[0].value = 'u1'; inputs[0].dispatchEvent(new Event('input'))
     inputs[1].value = '240'; inputs[1].dispatchEvent(new Event('input'))
     inputs[2].value = 'comp grant'; inputs[2].dispatchEvent(new Event('input'))
@@ -2198,7 +2266,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2227,7 +2295,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2269,7 +2337,7 @@ describe('Attendance admin regressions', () => {
       }
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2302,7 +2370,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2339,7 +2407,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2386,7 +2454,7 @@ describe('Attendance admin regressions', () => {
         if (url.includes('/api/attendance/leave-balances/me')) return jsonResponse(200, balanceSummaryPayload('annual', 'self'))
         return emptyAttendanceResponse()
       })
-      app = createApp(AttendanceView, { mode: 'overview' })
+      app = createAttendanceApp(AttendanceView, { mode: 'overview' })
       app.mount(container!)
       await flushUi(10)
       const meCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.includes('/leave-balances/me'))
@@ -2402,7 +2470,7 @@ describe('Attendance admin regressions', () => {
         }
         return emptyAttendanceResponse()
       })
-      app = createApp(AttendanceView, { mode: 'overview' })
+      app = createAttendanceApp(AttendanceView, { mode: 'overview' })
       const vm: any = app.mount(container!)
       await flushUi(10) // let the mount-time default ('annual') auto-fetch settle first
       vi.mocked(apiFetch).mockClear()
@@ -2422,7 +2490,7 @@ describe('Attendance admin regressions', () => {
         if (url.includes('/api/attendance/leave-balances')) return jsonResponse(200, balanceSummaryPayload('annual', 'u1'))
         return emptyAttendanceResponse()
       })
-      app = createApp(AttendanceView, { mode: 'admin' })
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
       app.mount(container!)
       await flushUi(8)
       container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
@@ -2448,7 +2516,7 @@ describe('Attendance admin regressions', () => {
         }
         return emptyAttendanceResponse()
       })
-      app = createApp(AttendanceView, { mode: 'admin' })
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
       const vm: any = app.mount(container!)
       await flushUi(8)
       container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
@@ -2473,7 +2541,7 @@ describe('Attendance admin regressions', () => {
         if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
         return emptyAttendanceResponse()
       })
-      app = createApp(AttendanceView, { mode: 'admin' })
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
       app.mount(container!)
       await flushUi(8)
       const section = await openOpsSection()
@@ -2497,7 +2565,7 @@ describe('Attendance admin regressions', () => {
         if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
         return emptyAttendanceResponse()
       })
-      app = createApp(AttendanceView, { mode: 'admin' })
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
       const vm: any = app.mount(container!)
       await flushUi(8)
       const section = await openOpsSection()
@@ -2535,7 +2603,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2569,7 +2637,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2600,7 +2668,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2637,7 +2705,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2694,7 +2762,7 @@ describe('Attendance admin regressions', () => {
       }
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2728,7 +2796,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -2807,7 +2875,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -2886,7 +2954,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -2912,7 +2980,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('clears the scheduler scope subject ref when the subject type changes', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -2948,7 +3016,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = String(input)
       const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
-      if (url.includes('/api/attendance/scheduler-scopes/scope-7') && method === 'PUT') {
+      if (url.includes('/api/attendance/scheduler-scopes/scope-7/update') && method === 'POST') {
         puts.push({ url, body: JSON.parse(String((init as { body?: string } | undefined)?.body || '{}')) })
         return jsonResponse(200, { ok: true, data: { ...existing } })
       }
@@ -2958,7 +3026,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -2980,7 +3048,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(4)
 
     expect(puts).toHaveLength(1)
-    expect(puts[0].url).toContain('/api/attendance/scheduler-scopes/scope-7')
+    expect(puts[0].url).toContain('/api/attendance/scheduler-scopes/scope-7/update')
     // toEqual: no orgId (rides the query) and no isActive (backend merge preserves the flag).
     expect(puts[0].body).toEqual({
       subjectType: 'role',
@@ -3011,7 +3079,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = String(input)
       const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
-      if (url.includes('/api/attendance/scheduler-scopes/scope-u') && method === 'PUT') {
+      if (url.includes('/api/attendance/scheduler-scopes/scope-u/update') && method === 'POST') {
         puts.push(JSON.parse(String((init as { body?: string } | undefined)?.body || '{}')))
         return jsonResponse(200, { ok: true, data: { ...existing } })
       }
@@ -3021,7 +3089,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -3061,7 +3129,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -3099,7 +3167,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -3116,7 +3184,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('keeps the clicked admin section focused and retires the show-all toggle', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -3183,7 +3251,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -3243,7 +3311,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('renders attendance groups as a list-detail manager with people inside the selected group', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -3516,7 +3584,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -3664,7 +3732,7 @@ describe('Attendance admin regressions', () => {
     })
 
     try {
-      app = createApp(AttendanceView, { mode: 'admin' })
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
       app.mount(container!)
       await flushUi(8)
 
@@ -3784,7 +3852,7 @@ describe('Attendance admin regressions', () => {
       pluginHarness.plugins!.value = [{ name: 'plugin-attendance', status: 'active' }]
     })
 
-    app = createApp(AttendanceView, {
+    app = createAttendanceApp(AttendanceView, {
       mode: 'admin',
       routeGroupContext: {
         group: routeGroup,
@@ -3846,7 +3914,7 @@ describe('Attendance admin regressions', () => {
         })
       },
     })
-    app = createApp(Root)
+    app = createAttendanceApp(Root)
     app.mount(container!)
     await flushUi(8)
 
@@ -3896,7 +3964,7 @@ describe('Attendance admin regressions', () => {
     attendanceGroupsData = [routeGroup, staleGroup]
     const openGroupRoute = vi.fn()
 
-    app = createApp(AttendanceView, {
+    app = createAttendanceApp(AttendanceView, {
       mode: 'admin',
       routeGroupContext: {
         group: routeGroup,
@@ -3945,7 +4013,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
       const method = String(init?.method || 'GET').toUpperCase()
-      if (url === '/api/attendance/groups/group-a' && method === 'PUT') {
+      if (url === '/api/attendance/groups/group-a/update' && method === 'POST') {
         const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
         Object.assign(routeGroup, body)
         return jsonResponse(200, { ok: true, data: { ...routeGroup } })
@@ -3963,7 +4031,7 @@ describe('Attendance admin regressions', () => {
     })
 
     try {
-      app = createApp(AttendanceView, {
+      app = createAttendanceApp(AttendanceView, {
         mode: 'admin',
         routeGroupContext: {
           group: { ...routeGroup },
@@ -4034,7 +4102,7 @@ describe('Attendance admin regressions', () => {
         if (listCalls === 1) return oldestList
         return jsonResponse(200, { ok: true, data: { items: [], total: 250, page: 1, pageSize: 200 } })
       }
-      if (url === '/api/attendance/groups/group-a' && method === 'PUT') {
+      if (url === '/api/attendance/groups/group-a/update' && method === 'POST') {
         const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
         savedNames.push(String(body.name))
         return jsonResponse(200, { ok: true, data: { ...routeGroup, ...body } })
@@ -4042,7 +4110,7 @@ describe('Attendance admin regressions', () => {
       return fallback(input, init)
     })
 
-    app = createApp(AttendanceView, {
+    app = createAttendanceApp(AttendanceView, {
       mode: 'admin',
       routeGroupContext: {
         group: routeGroup,
@@ -4192,7 +4260,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(10)
 
@@ -4229,7 +4297,7 @@ describe('Attendance admin regressions', () => {
   })
 
   async function openAttendanceGroupPunchCard(): Promise<HTMLElement> {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')!.click()
@@ -4347,7 +4415,7 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsData = {
       shiftCompliance: { enforcement: 'block', dailyMaxMinutes: 480, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     // Drain BOTH admin loads — fetchPlugins→loadAdminData and the orgId-watch reload — before reading or
     // editing, so settingsLoading has settled (a late load would otherwise disable the save button and
@@ -4400,7 +4468,7 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsData = {
       overtimeBankPolicy: { enabled: true, pooledSources: ['restday'], maxMinutesPerPeriod: 600, validityDays: 90 },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4455,7 +4523,7 @@ describe('Attendance admin regressions', () => {
         rules: [{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' }],
       },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4506,7 +4574,7 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsData = {
       attendanceBonusPolicy: { enabled: true, anyLeaveBreaksFullAttendance: true, lateBeyondThresholdBreaksFullAttendance: false },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4548,7 +4616,7 @@ describe('Attendance admin regressions', () => {
         },
       },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4569,7 +4637,9 @@ describe('Attendance admin regressions', () => {
 
     // Hydrated by loadSettings() on the first screen; no "reload section" action is required.
     expect(enabled!.checked).toBe(true)
-    expect(timezone!.value).toBe('America/Los_Angeles')
+    expect(timezone!.getAttribute('data-attendance-timezone-value')).toBe('America/Los_Angeles')
+    expect(timezone!.value).toContain('America/Los_Angeles')
+    expect(timezone!.closest('[data-attendance-timezone-field]')!.querySelector('select')).toBeNull()
     expect(channel!.value).toBe('email_smtp')
     expect(dailySendAt!.value).toBe('18:45')
     expect(weeklyWeekday!.value).toBe('5')
@@ -4633,7 +4703,7 @@ describe('Attendance admin regressions', () => {
         requireAttachment: true,
       },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4669,7 +4739,9 @@ describe('Attendance admin regressions', () => {
     expect(Boolean(enabled && timezone && cycleType && cycleStartDay && quotaMax && countPending && countApproved && quotaPrincipal && windowUnit && windowDays && missingCheckIn && earlyLeave && normal && requestTypesReadonly && missedCheckIn && missedCheckOut && timeCorrection && requireReason && requireAttachment)).toBe(true)
 
     expect(enabled!.checked).toBe(true)
-    expect(timezone!.value).toBe('America/Los_Angeles')
+    expect(timezone!.getAttribute('data-attendance-timezone-value')).toBe('America/Los_Angeles')
+    expect(timezone!.value).toContain('America/Los_Angeles')
+    expect(timezone!.closest('[data-attendance-timezone-field]')!.querySelector('select')).toBeNull()
     expect(cycleType!.textContent).toContain('Calendar month')
     expect(cycleStartDay!.value).toBe('15')
     expect(quotaMax!.value).toBe('5')
@@ -4743,7 +4815,7 @@ describe('Attendance admin regressions', () => {
         requireAttachment: false,
       },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4754,8 +4826,9 @@ describe('Attendance admin regressions', () => {
     expect(section).toBeTruthy()
     const timezone = section!.querySelector<HTMLInputElement>('[data-makeup-punch="timezone"]')
     expect(timezone).toBeTruthy()
+    expect(timezone!.closest('[data-attendance-timezone-field]')!.querySelector('select')).toBeNull()
     timezone!.value = 'Not/AZone'
-    timezone!.dispatchEvent(new Event('input', { bubbles: true }))
+    timezone!.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi(2)
     section!.querySelector<HTMLButtonElement>('[data-makeup-punch="save"]')!.click()
     await flushUi(6)
@@ -4785,7 +4858,7 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsData = {
       multiShiftDay: { enabled: true, maxSlots: 3 },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4887,7 +4960,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4964,7 +5037,7 @@ describe('Attendance admin regressions', () => {
         minConfidenceToApply: 'medium',
       },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5046,7 +5119,7 @@ describe('Attendance admin regressions', () => {
         { userId: 'user-2', workDate: '2026-06-03', reason: 'already_scheduled' },
       ],
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5146,7 +5219,7 @@ describe('Attendance admin regressions', () => {
       applied: [{ userId: 'user-1', workDate: '2026-06-03', candidateShiftId: 'shift-1' }],
       skipped: [{ userId: 'user-2', workDate: '2026-06-03', candidateShiftId: 'shift-2', reason: 'already_scheduled' }],
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5205,7 +5278,7 @@ describe('Attendance admin regressions', () => {
 
   it('shows disabled feedback when the auto shift preview endpoint rejects the preview gate', async () => {
     autoShiftPreviewStatus = 403
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5251,7 +5324,7 @@ describe('Attendance admin regressions', () => {
         },
       },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5315,7 +5388,7 @@ describe('Attendance admin regressions', () => {
       page: 1,
       pageSize: 5,
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5326,6 +5399,7 @@ describe('Attendance admin regressions', () => {
     expect(text).toContain('scheduler_scope_forbidden × 2')
     expect(text).toContain('max_assignments_per_run × 1')
     expect(text).toContain('scanned 8; candidates 4; applied 2; skipped 2; errors 1')
+    expect(text).toContain(new Date('2026-06-14T00:00:00.000Z').toLocaleString('en'))
     expect(container!.querySelector('[data-auto-shift-auto="runs-cap"]')?.textContent || '').toContain('Showing first 1 of 3')
     expect(
       vi.mocked(apiFetch).mock.calls.some(([url]) =>
@@ -5372,7 +5446,7 @@ describe('Attendance admin regressions', () => {
       counters: { pending: 1, sending: 0, sent: 1, retrying: 2, failed: 1, skipped: 0 },
     }
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5421,7 +5495,7 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsData = {
       punchPolicy: { outdoor: { requireApproval: true, requireNote: true, requirePhoto: false, approvalFlowId: 'flow-out-7' } },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5453,7 +5527,7 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsData = {
       punchPolicy: { outdoor: { requireApproval: true, requireNote: false, requirePhoto: false, approvalFlowId: 'flow-out-7' } },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5477,7 +5551,7 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsData = {
       punchPolicy: { merge: { internalWinsOnIn: true, externalWinsOnOut: true } },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5502,7 +5576,7 @@ describe('Attendance admin regressions', () => {
 
   it('toggles one merge key from off and PUTs the exact partial body (asymmetric, default-off)', async () => {
     attendanceSettingsData = { punchPolicy: { merge: { internalWinsOnIn: false, externalWinsOnOut: false } } }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5525,7 +5599,7 @@ describe('Attendance admin regressions', () => {
 
   it('enabling outdoor approval from off PUTs requireApproval/requireNote=true + auto (empty) flow', async () => {
     attendanceSettingsData = { punchPolicy: { outdoor: { requireApproval: false, requireNote: false, approvalFlowId: '' } } }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5547,7 +5621,7 @@ describe('Attendance admin regressions', () => {
 
   it('disabling requireApproval PUTs requireApproval=false (default-off, no regression)', async () => {
     attendanceSettingsData = { punchPolicy: { outdoor: { requireApproval: true, requireNote: false, approvalFlowId: '' } } }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5571,7 +5645,7 @@ describe('Attendance admin regressions', () => {
       { id: 'flow-leave', name: 'Leave Flow', requestType: 'leave', isActive: true, steps: [] },
     ]
     attendanceSettingsData = { punchPolicy: { outdoor: { requireApproval: true, requireNote: false, approvalFlowId: '' } } }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5639,7 +5713,7 @@ describe('Attendance admin regressions', () => {
 
   it('navigates from attendance group summary cards without issuing API writes', async () => {
     const openGroupRoute = vi.fn()
-    app = createApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
     app.mount(container!)
     await flushUi(8)
 
@@ -5687,7 +5761,7 @@ describe('Attendance admin regressions', () => {
 
   it('opens the Holidays surface from the fixed-shift work-time drawer without writes', async () => {
     const openGroupRoute = vi.fn()
-    app = createApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
     app.mount(container!)
     await flushUi(8)
 
@@ -5719,7 +5793,7 @@ describe('Attendance admin regressions', () => {
 
   it('routes the fixed-shift drawer and schedule-stage controls through the group route event', async () => {
     const openGroupRoute = vi.fn()
-    app = createApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
     app.mount(container!)
     await flushUi(8)
 
@@ -5784,7 +5858,7 @@ describe('Attendance admin regressions', () => {
   // sets" / "Open Holidays" — that silently did nothing on an unsaved group.
   it('surfaces a visible message when a group-editing drawer jump-off button is used on an unsaved group (A3, narrowed)', async () => {
     const openGroupRoute = vi.fn()
-    app = createApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
     app.mount(container!)
     await flushUi(8)
 
@@ -5833,7 +5907,7 @@ describe('Attendance admin regressions', () => {
       memberCount: 1,
     }]
     const openGroupRoute = vi.fn()
-    app = createApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
     app.mount(container!)
     await flushUi(8)
 
@@ -5855,6 +5929,14 @@ describe('Attendance admin regressions', () => {
     const previewBodies: unknown[] = []
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/editor')) {
+        return jsonResponse(200, { ok: true, data: {
+          groupId: 'group-a', state: 'pending_apply', reasonCodes: ['TARGET_MEMBER_MISSING'],
+          desired: { shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', revision: 3 },
+          drift: { managedSets: [] },
+          referenceEligibility: { shiftId: 'shift-a', allowed: false, reasonCode: 'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED' },
+        } })
+      }
       if (url.includes('/api/attendance/rule-sets')) {
         return jsonResponse(200, {
           ok: true,
@@ -5879,6 +5961,7 @@ describe('Attendance admin regressions', () => {
             shift: {
               id: 'shift-a',
               name: 'Day shift',
+                segments: [{ startTime: '08:00', endTime: '12:00', endDayOffset: 0 }, { startTime: '13:00', endTime: '17:00', endDayOffset: 0 }],
               timezone: 'Asia/Shanghai',
               workStartTime: '09:00',
               workEndTime: '18:00',
@@ -5949,6 +6032,7 @@ describe('Attendance admin regressions', () => {
               {
                 id: 'shift-a',
                 name: 'Day shift',
+                segments: [{ startTime: '08:00', endTime: '12:00', endDayOffset: 0 }, { startTime: '13:00', endTime: '17:00', endDayOffset: 0 }],
                 timezone: 'Asia/Shanghai',
                 workStartTime: '09:00',
                 workEndTime: '18:00',
@@ -5964,7 +6048,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -5986,10 +6070,13 @@ describe('Attendance admin regressions', () => {
     const weekMatrix = previewPanel!.querySelector<HTMLElement>('[data-attendance-group-fixed-schedule-week-matrix]')
     expect(weekMatrix).toBeTruthy()
     expect(weekMatrix!.textContent).toContain('Day shift')
-    expect(weekMatrix!.textContent).toContain('09:00-18:00')
+    expect(weekMatrix!.textContent).toContain('08:00-12:00 / 13:00-17:00')
+    expect(shiftSelect!.textContent).toContain('08:00-12:00 / 13:00-17:00')
     expect(weekMatrix!.textContent).toContain('Sun')
     expect(weekMatrix!.textContent).toContain('Rest')
 
+    expect(previewPanel!.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-rebuild-submit]')?.disabled).toBe(true)
+    expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-eligibility]')?.textContent).toContain('cannot apply or rebuild multi-segment')
     const previewButton = previewPanel!.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-preview-submit]')
     expect(previewButton).toBeTruthy()
     previewButton!.click()
@@ -6024,6 +6111,7 @@ describe('Attendance admin regressions', () => {
       shift: {
         id: 'shift-a',
         name: 'Day shift',
+        segments: [{ startTime: '08:00', endTime: '12:00', endDayOffset: 0 }, { startTime: '13:00', endTime: '17:00', endDayOffset: 0 }],
         timezone: 'Asia/Shanghai',
         workStartTime: '09:00',
         workEndTime: '18:00',
@@ -6044,6 +6132,14 @@ describe('Attendance admin regressions', () => {
     }
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/editor')) {
+        return jsonResponse(200, { ok: true, data: {
+          groupId: 'group-a', state: 'pending_apply', reasonCodes: ['TARGET_MEMBER_MISSING'],
+          desired: { shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', revision: 3 },
+          drift: { managedSets: [] },
+          referenceEligibility: { shiftId: 'shift-a', allowed: true, reasonCode: null },
+        } })
+      }
       if (url.includes('/api/attendance/rule-sets')) {
         return jsonResponse(200, {
           ok: true,
@@ -6109,6 +6205,7 @@ describe('Attendance admin regressions', () => {
               {
                 id: 'shift-a',
                 name: 'Day shift',
+        segments: [{ startTime: '08:00', endTime: '12:00', endDayOffset: 0 }, { startTime: '13:00', endTime: '17:00', endDayOffset: 0 }],
                 timezone: 'Asia/Shanghai',
                 workStartTime: '09:00',
                 workEndTime: '18:00',
@@ -6124,7 +6221,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -6157,12 +6254,12 @@ describe('Attendance admin regressions', () => {
       endDate: '2026-06-30',
     }
     expect(previewBodies).toEqual([expectedBody])
-    expect(applyBodies).toEqual([expectedBody])
+    expect(applyBodies).toEqual([{ ...expectedBody, expectedConfigRevision: 3 }])
     expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-apply-created]')?.textContent).toContain('1')
     expect(applyButton!.disabled).toBe(true)
     applyButton!.click()
     await flushUi(2)
-    expect(applyBodies).toEqual([expectedBody])
+    expect(applyBodies).toEqual([{ ...expectedBody, expectedConfigRevision: 3 }])
     expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
       String(input) === '/api/attendance/assignments' && init?.method === 'POST'
     )).toBe(false)
@@ -6171,6 +6268,9 @@ describe('Attendance admin regressions', () => {
   it('rebuilds and clears managed fixed schedule rows through group routes', async () => {
     const rebuildBodies: unknown[] = []
     const clearBodies: unknown[] = []
+    let captureAssignmentRefresh = false
+    let resolveOldAssignmentRefresh!: (response: Response) => void
+    const oldAssignmentRefresh = new Promise<Response>((resolve) => { resolveOldAssignmentRefresh = resolve })
     const confirmSpy = vi.spyOn(window, 'confirm')
       .mockReturnValueOnce(false)
       .mockReturnValueOnce(true)
@@ -6208,6 +6308,18 @@ describe('Attendance admin regressions', () => {
 
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
+      if (url.startsWith('/api/attendance/assignments?') && captureAssignmentRefresh) {
+        captureAssignmentRefresh = false
+        return oldAssignmentRefresh
+      }
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/editor')) {
+        return jsonResponse(200, { ok: true, data: {
+          groupId: 'group-a', state: 'pending_apply', reasonCodes: ['TARGET_MEMBER_MISSING'],
+          desired: { shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', revision: 3 },
+          drift: { managedSets: [] },
+          referenceEligibility: { shiftId: 'shift-a', allowed: true, reasonCode: null },
+        } })
+      }
       if (url.includes('/api/attendance/rule-sets')) {
         return jsonResponse(200, {
           ok: true,
@@ -6293,7 +6405,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -6326,7 +6438,8 @@ describe('Attendance admin regressions', () => {
       rebuildButton!.click()
       await flushUi(8)
 
-      expect(rebuildBodies).toEqual([expectedBody])
+      await vi.waitFor(() => expect(clearButton!.disabled).toBe(false))
+      expect(rebuildBodies).toEqual([{ ...expectedBody, expectedConfigRevision: 3 }])
       expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-rebuild-created]')?.textContent).toContain('1')
       expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-deactivated]')?.textContent).toContain('1')
 
@@ -6340,7 +6453,31 @@ describe('Attendance admin regressions', () => {
 
       expect(clearBodies).toEqual([expectedBody])
       expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-preview-result]')).toBeNull()
-      expect(container!.textContent).toContain('Cleared 2 managed fixed schedule rows.')
+      await vi.waitFor(() => expect(container!.textContent).toContain('Cleared 2 managed fixed schedule rows.'))
+      await vi.waitFor(() => expect(rebuildButton!.disabled).toBe(false))
+      captureAssignmentRefresh = true
+      rebuildButton!.click()
+      await vi.waitFor(() => expect(captureAssignmentRefresh).toBe(false))
+      const schedulingGroup = container!.querySelector<HTMLButtonElement>('[data-admin-anchor-group="scheduling"] > button')
+      expect(schedulingGroup).toBeTruthy()
+      expect(schedulingGroup!.getAttribute('aria-expanded')).toBe('false')
+      schedulingGroup!.click()
+      await flushUi(2)
+      const assignmentsNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-assignments"]')
+      expect(assignmentsNav).toBeTruthy()
+      assignmentsNav!.click()
+      await flushUi(4)
+      const filter = container!.querySelector<HTMLSelectElement>('#attendance-assignment-publish-status-filter')!
+      filter.value = 'published'
+      filter.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi(8)
+      resolveOldAssignmentRefresh(jsonResponse(200, { ok: true, data: { items: [{
+        assignment: { ...rebuiltData.created[0], id: 'stale-scope-assignment', userId: 'stale-scope-user' },
+        shift: rebuiltData.shift,
+      }] } }))
+      await flushUi(12)
+      expect(container!.querySelector('[data-attendance-assignment-user-id]')).toBeNull()
+      expect(container!.textContent).not.toContain('stale-scope-user')
       expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
         String(input) === '/api/attendance/assignments' && init?.method === 'POST'
       )).toBe(false)
@@ -6352,6 +6489,14 @@ describe('Attendance admin regressions', () => {
   it('shows a clear-first hint when a managed fixed schedule blocks the selected window', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/editor')) {
+        return jsonResponse(200, { ok: true, data: {
+          groupId: 'group-a', state: 'pending_apply', reasonCodes: ['TARGET_MEMBER_MISSING'],
+          desired: { shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', revision: 3 },
+          drift: { managedSets: [] },
+          referenceEligibility: { shiftId: 'shift-a', allowed: true, reasonCode: null },
+        } })
+      }
       if (url.includes('/api/attendance/rule-sets')) {
         return jsonResponse(200, {
           ok: true,
@@ -6453,7 +6598,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -6477,69 +6622,117 @@ describe('Attendance admin regressions', () => {
     expect(previewPanel!.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-apply-submit]')?.disabled).toBe(true)
   })
 
-  it('renders the production calendar-policy quick-add panel and appends a group day-index row', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+  it('moves effective calendar overrides off Settings and saves them from Holidays on the same settings API', async () => {
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
     const settings = container!.querySelector<HTMLElement>('#attendance-admin-settings')
     expect(settings).toBeTruthy()
     expect(window.getComputedStyle(settings!).display).not.toBe('none')
-    expect(settings!.querySelector('[data-attendance-calendar-policy-quick-add]')).toBeTruthy()
+    expect(settings!.querySelector('[data-attendance-calendar-policy-quick-add]')).toBeNull()
+    expect(settings!.querySelector('[data-calendar-policy-override-date]')).toBeNull()
+    expect(settings!.querySelector('[data-attendance-calendar-policy-jump]')?.textContent).toContain('Holidays')
+    const jump = settings!.querySelector<HTMLAnchorElement>('[data-attendance-calendar-policy-open-holidays]')
+    expect(jump?.getAttribute('href')).toBe('#attendance-admin-holidays')
+    jump!.click()
+    await flushUi(4)
 
-    setInput(settings!, '[data-calendar-policy-quick-holiday]', 'National Day')
-    setInput(settings!, '[data-calendar-policy-quick-group]', 'day-shift')
+    const holidays = container!.querySelector<HTMLElement>('#attendance-admin-holidays')
+    expect(holidays).toBeTruthy()
+    expect(window.getComputedStyle(holidays!).display).not.toBe('none')
+    expect(window.getComputedStyle(settings!).display).toBe('none')
+    expect(window.location.hash).toBe('#attendance-admin-holidays')
+    expect(holidays!.querySelector('[data-attendance-calendar-policy-host="holidays"]')).toBeTruthy()
+    expect(holidays!.querySelector('[data-attendance-calendar-policy-quick-add]')).toBeTruthy()
+    expect(holidays!.textContent).toContain('Effective calendar overrides')
+
+    holidays!.querySelector<HTMLButtonElement>('[data-attendance-calendar-policy-save]')!.click()
+    await flushUi(6)
+
+    const put = vi.mocked(apiFetch).mock.calls.find((call) => {
+      const url = String(call[0])
+      const init = call[1] as { method?: string } | undefined
+      return url.includes('/api/attendance/settings') && String(init?.method || '').toUpperCase() === 'PUT'
+    })
+    expect(put, 'calendar rules still save through PUT /api/attendance/settings').toBeTruthy()
+    const body = JSON.parse(String((put![1] as { body?: string }).body))
+    expect(body.calendarPolicy).toEqual({ overrides: [] })
+  })
+
+  it('renders the production calendar-policy quick-add panel and appends a group day-index row', async () => {
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const settings = container!.querySelector<HTMLElement>('#attendance-admin-settings')
+    expect(settings!.querySelector('[data-attendance-calendar-policy-quick-add]')).toBeNull()
+    settings!.querySelector<HTMLAnchorElement>('[data-attendance-calendar-policy-open-holidays]')!.click()
+    await flushUi(4)
+
+    const holidays = container!.querySelector<HTMLElement>('#attendance-admin-holidays')
+    expect(holidays).toBeTruthy()
+    expect(window.getComputedStyle(holidays!).display).not.toBe('none')
+    expect(holidays!.querySelector('[data-attendance-calendar-policy-quick-add]')).toBeTruthy()
+
+    setInput(holidays!, '[data-calendar-policy-quick-holiday]', 'National Day')
+    setInput(holidays!, '[data-calendar-policy-quick-group]', 'day-shift')
     await flushUi(2)
 
-    const quickAddButton = settings!.querySelector<HTMLButtonElement>('button[data-calendar-policy-quick-add]')
+    const quickAddButton = holidays!.querySelector<HTMLButtonElement>('button[data-calendar-policy-quick-add]')
     expect(quickAddButton).toBeTruthy()
     expect(quickAddButton!.disabled).toBe(false)
     quickAddButton!.click()
     await flushUi(4)
 
-    expect(settings!.textContent).toContain('Will add a group workday exception for holiday day 4-5.')
-    const policyRows = settings!.querySelectorAll('template, tbody tr')
+    expect(holidays!.textContent).toContain('Will add a group workday exception for holiday day 4-5.')
+    const policyRows = holidays!.querySelectorAll('template, tbody tr')
     expect(policyRows.length).toBeGreaterThan(0)
-    const groupInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-attendance-groups]'))
+    const groupInputs = Array.from(holidays!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-attendance-groups]'))
     expect(groupInputs.some(input => input.value === 'day-shift')).toBe(true)
-    const dayIndexStartInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-day-index-start]'))
-    const dayIndexEndInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-day-index-end]'))
+    const dayIndexStartInputs = Array.from(holidays!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-day-index-start]'))
+    const dayIndexEndInputs = Array.from(holidays!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-day-index-end]'))
     expect(dayIndexStartInputs.some(input => input.value === '4')).toBe(true)
     expect(dayIndexEndInputs.some(input => input.value === '5')).toBe(true)
   })
 
   it('renders the production quick-add panel and appends a longer-rest date range row', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
     const settings = container!.querySelector<HTMLElement>('#attendance-admin-settings')
-    expect(settings).toBeTruthy()
-    expect(window.getComputedStyle(settings!).display).not.toBe('none')
-    expect(settings!.querySelector('[data-attendance-calendar-policy-quick-add]')).toBeTruthy()
+    expect(settings!.querySelector('[data-attendance-calendar-policy-quick-add]')).toBeNull()
+    settings!.querySelector<HTMLAnchorElement>('[data-attendance-calendar-policy-open-holidays]')!.click()
+    await flushUi(4)
 
-    setInput(settings!, '[data-calendar-policy-quick-holiday]', 'National Day')
-    setInput(settings!, '[data-calendar-policy-quick-group]', 'long-rest-shift')
-    setInput(settings!, '[data-calendar-policy-quick-base-days]', '3')
-    setInput(settings!, '[data-calendar-policy-quick-target-days]', '5')
-    setInput(settings!, '[data-calendar-policy-quick-base-start-date]', '2026-10-01')
+    const holidays = container!.querySelector<HTMLElement>('#attendance-admin-holidays')
+    expect(holidays).toBeTruthy()
+    expect(window.getComputedStyle(holidays!).display).not.toBe('none')
+    expect(holidays!.querySelector('[data-attendance-calendar-policy-quick-add]')).toBeTruthy()
+
+    setInput(holidays!, '[data-calendar-policy-quick-holiday]', 'National Day')
+    setInput(holidays!, '[data-calendar-policy-quick-group]', 'long-rest-shift')
+    setInput(holidays!, '[data-calendar-policy-quick-base-days]', '3')
+    setInput(holidays!, '[data-calendar-policy-quick-target-days]', '5')
+    setInput(holidays!, '[data-calendar-policy-quick-base-start-date]', '2026-10-01')
     await flushUi(2)
 
-    const quickAddButton = settings!.querySelector<HTMLButtonElement>('button[data-calendar-policy-quick-add]')
+    const quickAddButton = holidays!.querySelector<HTMLButtonElement>('button[data-calendar-policy-quick-add]')
     expect(quickAddButton).toBeTruthy()
     expect(quickAddButton!.disabled).toBe(false)
     quickAddButton!.click()
     await flushUi(4)
 
-    expect(settings!.textContent).toContain('Will add a group rest exception from 2026-10-04 to 2026-10-05.')
-    const groupInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-attendance-groups]'))
+    expect(holidays!.textContent).toContain('Will add a group rest exception from 2026-10-04 to 2026-10-05.')
+    const groupInputs = Array.from(holidays!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-attendance-groups]'))
     expect(groupInputs.some(input => input.value === 'long-rest-shift')).toBe(true)
-    const fromInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-from]'))
-    const toInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-to]'))
+    const fromInputs = Array.from(holidays!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-from]'))
+    const toInputs = Array.from(holidays!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-to]'))
     expect(fromInputs.some(input => input.value === '2026-10-04')).toBe(true)
     expect(toInputs.some(input => input.value === '2026-10-05')).toBe(true)
-    const dayIndexStartInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-day-index-start]'))
-    const dayIndexEndInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-day-index-end]'))
+    const dayIndexStartInputs = Array.from(holidays!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-day-index-start]'))
+    const dayIndexEndInputs = Array.from(holidays!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-day-index-end]'))
     expect(dayIndexStartInputs.some(input => input.value === '4')).toBe(false)
     expect(dayIndexEndInputs.some(input => input.value === '5')).toBe(false)
   })
@@ -6554,7 +6747,7 @@ describe('Attendance admin regressions', () => {
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
 
     try {
-      app = createApp(AttendanceView, { mode: 'reports' })
+      app = createAttendanceApp(AttendanceView, { mode: 'reports' })
       app.mount(container!)
       await flushUi()
 
@@ -6630,7 +6823,7 @@ describe('Attendance admin regressions', () => {
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
 
     try {
-      app = createApp(AttendanceView, { mode: 'reports' })
+      app = createAttendanceApp(AttendanceView, { mode: 'reports' })
       app.mount(container!)
       await flushUi()
 
@@ -6669,7 +6862,7 @@ describe('Attendance admin regressions', () => {
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
 
     try {
-      app = createApp(AttendanceView, { mode: 'reports' })
+      app = createAttendanceApp(AttendanceView, { mode: 'reports' })
       app.mount(container!)
       await flushUi()
 
@@ -6707,7 +6900,7 @@ describe('Attendance admin regressions', () => {
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
 
     try {
-      app = createApp(AttendanceView, { mode: 'reports' })
+      app = createAttendanceApp(AttendanceView, { mode: 'reports' })
       app.mount(container!)
       await flushUi()
 
@@ -6743,7 +6936,7 @@ describe('Attendance admin regressions', () => {
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
 
     try {
-      app = createApp(AttendanceView, { mode: 'reports' })
+      app = createAttendanceApp(AttendanceView, { mode: 'reports' })
       app.mount(container!)
       await flushUi()
 
@@ -6782,7 +6975,7 @@ describe('Attendance admin regressions', () => {
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
 
     try {
-      app = createApp(AttendanceView, { mode: 'reports' })
+      app = createAttendanceApp(AttendanceView, { mode: 'reports' })
       app.mount(container!)
       await flushUi()
 
@@ -6809,7 +7002,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('shows the active record report field config fingerprint', async () => {
-    app = createApp(AttendanceView, { mode: 'reports' })
+    app = createAttendanceApp(AttendanceView, { mode: 'reports' })
     app.mount(container!)
     await flushUi()
 
@@ -6823,7 +7016,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('keeps edit buttons visible for the active section while focused mode hides inactive sections', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -6862,7 +7055,7 @@ describe('Attendance admin regressions', () => {
         isActive: true,
       },
     ]
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -6951,7 +7144,7 @@ describe('Attendance admin regressions', () => {
       pageSize: 200,
     }
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -7074,7 +7267,7 @@ describe('Attendance admin regressions', () => {
       },
     ]
 
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(8)
 
@@ -7176,7 +7369,7 @@ describe('Attendance admin regressions', () => {
           },
         })
       }
-      if (url.includes('/api/attendance/schedule-groups/sg-child') && method === 'PUT') {
+      if (url.includes('/api/attendance/schedule-groups/sg-child/update') && method === 'POST') {
         const body = JSON.parse(String((init as { body?: string } | undefined)?.body || '{}'))
         puts.push(body)
         groups = groups.map(group => group.id === 'sg-child' ? { ...group, ...body } : group)
@@ -7202,7 +7395,7 @@ describe('Attendance admin regressions', () => {
     })
 
     try {
-      app = createApp(AttendanceView, { mode: 'admin' })
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
       app.mount(container!)
       await flushUi(8)
       container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-advanced-scheduling-workbench"]')!.click()
@@ -7366,7 +7559,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-advanced-scheduling-workbench"]')!.click()
@@ -7463,7 +7656,7 @@ describe('Attendance admin regressions', () => {
     })
 
     try {
-      app = createApp(AttendanceView, { mode: 'admin' })
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
       app.mount(container!)
       await flushUi(8)
       container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-advanced-scheduling-workbench"]')!.click()
@@ -7483,7 +7676,8 @@ describe('Attendance admin regressions', () => {
   })
 
   it('runs the read-only comprehensive hours preview without write controls', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    window.localStorage.setItem('tenantId', 'default')
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -7496,11 +7690,53 @@ describe('Attendance admin regressions', () => {
     expect(section).toBeTruthy()
     expect(window.getComputedStyle(section!).display).not.toBe('none')
 
-    const userInput = section!.querySelector<HTMLInputElement>('[data-attendance-comprehensive-hours-user-id]')
-    expect(userInput).toBeTruthy()
-    userInput!.value = 'user-1'
-    userInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-empty]')?.textContent).toContain('Not previewed yet')
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-aggregate]')).toBeNull()
+    expect(section!.querySelector('.attendance__admin-section-header [data-attendance-comprehensive-hours-preview-run]')).toBeNull()
+    expect(section!.querySelector('.attendance__form-actions [data-attendance-comprehensive-hours-preview-run]')).toBeTruthy()
+    expect(section!.querySelector('.attendance__admin-grid [data-attendance-comprehensive-hours-save-block-mode]')).toBeNull()
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-save-block-mode]')?.textContent).toContain('Save-time strong control')
+    const nameInput = section!.querySelector<HTMLInputElement>('#attendance-comprehensive-hours-user-id')
+    expect(nameInput).toBeTruthy()
+    expect(nameInput?.getAttribute('placeholder')).toContain('Type a name')
+    expect(nameInput?.closest('.attendance__field')?.textContent).toContain('Employee name')
+    expect(nameInput?.closest('.attendance__user-picker')?.classList.contains('attendance__user-picker--typeahead')).toBe(true)
+    expect(section!.textContent).not.toContain('User ID')
+
+    const previousFetch = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance-admin/users/search')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{
+              id: 'user-1',
+              name: '张三',
+              email: 'zhang@example.com',
+              role: 'user',
+              is_active: true,
+              is_admin: false,
+              last_login_at: null,
+              created_at: '',
+            }],
+          },
+        })
+      }
+      if (previousFetch) return previousFetch(input, init)
+      return emptyAttendanceResponse()
+    })
+    nameInput!.value = '张三'
+    nameInput!.dispatchEvent(new Event('input'))
+    nameInput!.closest('.attendance__field')!.querySelector<HTMLButtonElement>('.attendance__user-picker-controls button')!.click()
+    await flushUi(4)
+    const nameSelect = nameInput!.closest('.attendance__field')!.querySelector<HTMLSelectElement>('select')
+    expect(nameSelect).toBeTruthy()
+    nameSelect!.value = 'user-1'
+    nameSelect!.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi(2)
+    expect(nameInput!.value).toContain('张三')
+    expect(nameInput!.value).not.toContain('user-1')
 
     const runButton = section!.querySelector<HTMLButtonElement>('[data-attendance-comprehensive-hours-preview-run]')
     expect(runButton).toBeTruthy()
@@ -7521,7 +7757,10 @@ describe('Attendance admin regressions', () => {
     })
 
     expect(section!.textContent).toContain('Read-only preview')
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-empty]')).toBeNull()
     expect(section!.querySelector('[data-attendance-comprehensive-hours-status]')?.textContent).toContain('No policy was saved')
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-aggregate-item="ok"]')).toBeNull()
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-aggregate-item="warning"]')).toBeNull()
     expect(section!.querySelector('[data-attendance-comprehensive-hours-aggregate-item="violation"]')?.textContent).toContain('1')
     expect(section!.querySelector('[data-attendance-comprehensive-hours-rows]')?.textContent).toContain('user-1')
     expect(section!.querySelector('[data-attendance-comprehensive-hours-rows]')?.textContent).toContain('Violation')
@@ -7602,7 +7841,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -7705,7 +7944,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -7765,7 +8004,7 @@ describe('Attendance admin regressions', () => {
   }
 
   async function mountBulkApplyAdmin() {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-assignments"]')!.click()
@@ -8061,7 +8300,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -8166,7 +8405,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -8271,7 +8510,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(10)
 
@@ -8359,7 +8598,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -8437,7 +8676,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -8532,7 +8771,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -8656,7 +8895,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -8764,7 +9003,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -8832,7 +9071,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -8926,7 +9165,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -9038,7 +9277,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -9104,7 +9343,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -9147,7 +9386,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('restores the run21 holiday calendar, rule builder, and import template guidance', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -9212,7 +9451,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('restores template version details and import batch diagnostics from the split admin sections', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -9221,8 +9460,10 @@ describe('Attendance admin regressions', () => {
     templateLibraryNav!.click()
     await flushUi(2)
 
-    const viewVersionButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('View'))
+    const templateSection = container!.querySelector<HTMLElement>('[data-admin-section="attendance-admin-rule-template-library"]')
+    expect(templateSection).toBeTruthy()
+    const viewVersionButton = Array.from(templateSection!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === 'View')
     expect(viewVersionButton).toBeTruthy()
     viewVersionButton!.click()
     await flushUi(2)

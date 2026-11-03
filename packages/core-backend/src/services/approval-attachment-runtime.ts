@@ -254,7 +254,7 @@ export async function isAttachmentFieldInTemplate(db: Queryable, templateId: str
  * `visibility_scope` / subquery `id` references stay valid without fragile string rewriting.
  */
 export async function templateVisibleToRequester(db: Queryable, req: Request, templateId: string): Promise<boolean> {
-  const actor = resolveApprovalTemplateVisibilityActor(req)
+  const actor = await resolveApprovalTemplateVisibilityActor(req)
   if (!actor) return false
   const conditions: string[] = [
     'id = $1',
@@ -466,11 +466,11 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
     // Lock-9 §5.2: fail-fast-only seat re-derivation (NOT the authority — see
     // actorHasActiveSeatAtInstance's own docblock; P2-2 fix-round closed the parallel-region
     // categorical-403 gap by resolving the same pending-branch frontier dispatchAction resolves).
-    actorHasActiveSeat: (req, instanceId) => {
+    actorHasActiveSeat: async (req, instanceId) => {
       const candidate = req.user?.id ?? req.user?.userId ?? (req.user as { sub?: unknown } | undefined)?.sub
       const actorId = typeof candidate === 'string' && candidate.trim() ? candidate.trim() : null
-      if (!actorId) return Promise.resolve(false)
-      return actorHasActiveSeatAtInstance(db, instanceId, actorId, resolveApprovalActorRoles(req))
+      if (!actorId) return false
+      return actorHasActiveSeatAtInstance(db, instanceId, actorId, await resolveApprovalActorRoles(req))
     },
     resolveAttachmentField: (templateId, fieldId) => isAttachmentFieldInTemplate(db, templateId, fieldId),
     templateVisible: (req, templateId) => templateVisibleToRequester(db, req, templateId),

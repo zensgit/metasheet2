@@ -40,6 +40,10 @@ on:
     # filter keeps it off unrelated PRs.
     paths:
       - 'packages/core-backend/tests/integration/approval-can-decide-current-node.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-role-seat-user-roles.db.test.ts'
+      - 'packages/core-backend/src/routes/todo.ts'
+      - 'packages/core-backend/src/services/approval-pending-query.ts'
+      - 'packages/core-backend/src/services/approval-pending-source.ts'
       - 'packages/core-backend/src/services/approval-seat-authorization.ts'
       - 'packages/core-backend/src/services/approval-effective-node-operations.ts'
       - 'packages/core-backend/src/services/ApprovalBridgeService.ts'
@@ -55,6 +59,10 @@ on:
     branches: [main]
     paths:
       - 'packages/core-backend/tests/integration/approval-can-decide-current-node.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-role-seat-user-roles.db.test.ts'
+      - 'packages/core-backend/src/routes/todo.ts'
+      - 'packages/core-backend/src/services/approval-pending-query.ts'
+      - 'packages/core-backend/src/services/approval-pending-source.ts'
       - 'packages/core-backend/src/services/approval-seat-authorization.ts'
       - 'packages/core-backend/src/services/approval-effective-node-operations.ts'
       - 'packages/core-backend/src/services/ApprovalBridgeService.ts'
@@ -134,11 +142,21 @@ jobs:
           tests/integration/approval-can-decide-current-node.db.test.ts
           --reporter=verbose
 
+      - name: Run role-seat-via-user_roles real-DB acceptance (whole file)
+        # Role seats matched through `user_roles` role ids (ids only) on the pending tab,
+        # pending-count, todo count/items, canDecideCurrentNode and the decision door; a viewer
+        # outside the role and a seat naming the role's display name are refused.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-role-seat-user-roles.db.test.ts
+          --reporter=verbose
+
       - name: Values-free evidence (this job)
         run: |
           {
             echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
-            echo "suites=approval-can-decide-current-node.db.test.ts"
+            echo "suites=approval-can-decide-current-node.db.test.ts,approval-role-seat-user-roles.db.test.ts"
             echo "scope=detail DTO canDecideCurrentNode asserted together with the decision endpoint's own verdict for the same viewer; user/role/delegated seats, requester, non-current node, closed instance, no-seat-gate door, create response, action response on both sides"
             echo "sentinelArmed=EXPECT_DB=1"
             echo "customerSourceAccess=NOT_INVOLVED"

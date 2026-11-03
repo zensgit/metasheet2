@@ -2,11 +2,19 @@ import { expect, test, type Page } from '@playwright/test'
 
 const cardSelector = '[data-attendance-makeup-request-card]'
 const proof = 'https://example.com/synthetic-proof.png'
+const targetFingerprint = 'a'.repeat(64)
 
-async function mockAttendance(page: Page) {
+async function mockAttendance(page: Page, withLeave = false, clock: { serverAt?: string; browserAt?: string; timezone?: string; unavailable?: boolean } = {}) {
   const posts: Record<string, unknown>[] = []
   const unexpected: string[] = []
-  await page.clock.setFixedTime(new Date('2026-04-15T10:00:00+08:00'))
+  const rulesRequests: string[] = []
+  const serverAt = clock.serverAt ?? '2026-04-15T02:00:00.000Z'
+  const timezone = clock.timezone ?? 'Asia/Shanghai'
+  const localDateParts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date(serverAt)).map(part => [part.type, part.value]))
+  const currentLocalDate = [localDateParts.year, localDateParts.month, localDateParts.day].join('-')
+  await page.clock.setFixedTime(new Date(clock.browserAt ?? '2026-04-15T10:00:00+08:00'))
   await page.addInitScript(() => {
     localStorage.setItem('auth_token', 'synthetic-browser-test-token')
     localStorage.setItem('tenantId', 'synthetic-org')
@@ -48,6 +56,9 @@ async function mockAttendance(page: Page) {
         { recordId: 'yesterday-out', workDate: '2026-04-14', state: 'open', status: 'partial', suggestedRequestType: 'missed_check_out', request: null },
       ] } })
     }
+    if (withLeave && path === '/api/attendance/leave-types') {
+      return reply({ ok: true, data: { items: [{ id: 'annual', name: 'Annual', code: 'annual', defaultMinutesPerDay: 450, requiresAttachment: true, isActive: true }] } })
+    }
     if (emptyLists.has(path)) return reply({ ok: true, data: { items: [], total: 0 } })
     if (path === '/api/attendance/summary') {
       return reply({ ok: true, data: { total_days: 0, total_minutes: 0 } })
@@ -56,10 +67,36 @@ async function mockAttendance(page: Page) {
       return reply({ ok: true, data: { makeup: 'clock-plus', leave: 'calendar', overtime: 'moon', swap: 'swap' } })
     }
     if (path === '/api/attendance/rules/me') {
+      rulesRequests.push(new URL(request.url()).search)
       return reply({ ok: true, data: {
-        userId: 'synthetic-employee', orgId: 'synthetic-org', resolvedForDate: '2026-04-15',
+        userId: 'synthetic-employee', orgId: 'synthetic-org',
+        resolvedForDate: new URL(request.url()).searchParams.get('asOf') ?? serverAt.slice(0, 10),
+        resolvedAt: clock.unavailable ? undefined : serverAt,
+        attendanceTimeContext: {
+          resolvedForInstant: serverAt, effectiveTimezone: timezone, timezoneSource: 'system_default',
+          mode: 'default_only', policyVersion: 0, referenceId: 'synthetic-default-rule', version: 1,
+          currentLocalDate, nextEffectiveBoundary: null,
+        },
         assignment: { attendanceGroups: [], scheduleGroups: [] },
-        runtimeRule: { timezone: 'Asia/Shanghai' }, punchPolicy: { merge: {} }, warnings: [],
+        runtimeRule: { timezone: clock.timezone ?? 'Asia/Shanghai', ...(withLeave ? { workStartTime: '09:00', workEndTime: '18:00' } : {}) }, punchPolicy: { merge: {} }, warnings: [],
+      } })
+    }
+    if (path === '/api/attendance/timezone-context/me') {
+      const workDate = new URL(request.url()).searchParams.get('workDate')
+      if (!workDate || !/^\d{4}-\d{2}-\d{2}$/.test(workDate)) {
+        unexpected.push(`${request.method()} ${path}`)
+        return route.abort()
+      }
+      return reply({ ok: true, data: {
+        orgId: 'synthetic-org', userId: 'synthetic-employee', workDate, timezone,
+        contextFingerprint: targetFingerprint, frozen: false, referenceId: 'synthetic-default-rule',
+        provenance: {
+          timezone, source: 'system_default', mode: 'default_only',
+          referenceId: 'synthetic-default-rule', version: 1, policyVersion: 0, calculationGroupMembership: null,
+        },
+        // Both fixture zones use UTC+08; the target window is the same 09:00–18:00 shift.
+        window: { startAt: workDate + 'T01:00:00.000Z', endAt: workDate + 'T10:00:00.000Z' },
+        rule: { workStartTime: '09:00', workEndTime: '18:00' }, isWorkingDay: true,
       } })
     }
     if (path === '/api/attendance/effective-calendar') {
@@ -71,14 +108,14 @@ async function mockAttendance(page: Page) {
     unexpected.push(`${request.method()} ${path}`)
     return route.abort()
   })
-  return { posts, unexpected }
+  return { posts, unexpected, rulesRequests }
 }
 
-async function assertFits(page: Page) {
-  const card = page.locator(cardSelector)
+async function assertFits(page: Page, selector = cardSelector) {
+  const card = page.locator(selector)
   const outer = await card.boundingBox()
   expect(outer).not.toBeNull()
-  for (const control of await card.locator('input, select, button').all()) {
+  for (const control of await card.locator('input, select, button, textarea').all()) {
     await expect(control).toBeVisible()
     const box = await control.boundingBox()
     expect(box!.x).toBeGreaterThanOrEqual(outer!.x - 1)
@@ -89,6 +126,44 @@ async function assertFits(page: Page) {
 }
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`${viewport.width}x${viewport.height}: leave duration and mutually exclusive makeup cards`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport)
+    const { posts, unexpected } = await mockAttendance(page, true)
+    await page.goto('/verification/attendance-makeup-request-harness.html')
+    const leave = page.locator('[data-attendance-leave-request-card]')
+    await page.locator('[data-selfservice-action="leave"]').click()
+    await expect(leave).toBeVisible()
+    await expect(page.locator(cardSelector)).toHaveCount(0)
+    await leave.locator('[data-leave-card-preset="full_day"]').click()
+    await leave.locator('[data-leave-card-unit-switch]').click()
+    await expect(leave.locator('[data-leave-card-duration-value]')).toContainText('450')
+    await leave.locator('[data-leave-card-end]').fill('')
+    await expect(leave.locator('[data-leave-card-duration-value]')).toHaveText('—')
+    await expect(page.locator('#attendance-request-minutes')).toHaveValue('')
+    await leave.locator('[data-leave-card-end]').fill('2026-04-15T16:30')
+    await leave.locator('[data-leave-card-attachment]').fill(proof)
+    await leave.locator('[data-leave-card-reason]').fill('Synthetic leave')
+    await assertFits(page, '[data-attendance-leave-request-card]')
+    await leave.screenshot({ path: testInfo.outputPath(`leave-${viewport.width}.png`) })
+    await leave.locator('[data-leave-card-submit]').click()
+    await expect(leave).toHaveCount(0)
+    expect(posts).toEqual([{ workDate: '2026-04-15', requestType: 'leave', requestedInAt: '2026-04-15T01:00:00.000Z', requestedOutAt: '2026-04-15T08:30:00.000Z', expectedTimezoneContextFingerprint: targetFingerprint, leaveTypeId: 'annual', minutes: 450, reason: 'Synthetic leave', attachmentUrl: proof, orgId: 'synthetic-org' }])
+    await page.locator('[data-selfservice-action="missing-punch"]').click()
+    await expect(page.locator(cardSelector)).toBeVisible()
+    await expect(leave).toHaveCount(0)
+    await expect(page.locator('[data-makeup-card-time]')).toHaveValue('')
+    await page.locator('[data-makeup-card-time]').fill('2026-04-15T09:30')
+    await page.locator('[data-makeup-card-submit]').click()
+    await expect(page.locator(cardSelector)).toHaveCount(0)
+    expect(posts[1]).toEqual({ workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T01:30:00.000Z', expectedTimezoneContextFingerprint: targetFingerprint, reason: 'Synthetic leave', attachmentUrl: proof, orgId: 'synthetic-org' })
+    await page.locator('[data-selfservice-action="leave"]').click()
+    await expect(leave).toBeVisible()
+    await expect(page.locator(cardSelector)).toHaveCount(0)
+    await expect(leave.locator('[data-leave-card-duration-value]')).toHaveText('—')
+    expect(posts).toHaveLength(2)
+    expect(unexpected).toEqual([])
+  })
+
   test(`${viewport.width}x${viewport.height}: reopening clears a different-date draft before submitting`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport)
     const { posts, unexpected } = await mockAttendance(page)
@@ -112,7 +187,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await card.locator('[data-makeup-card-submit]').click()
     await expect(card).toHaveCount(0)
     expect(posts).toEqual([
-      { workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T09:00', attachmentUrl: proof, orgId: 'synthetic-org' },
+      { workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T01:00:00.000Z', expectedTimezoneContextFingerprint: targetFingerprint, attachmentUrl: proof, orgId: 'synthetic-org' },
     ])
     expect(unexpected).toEqual([])
   })
@@ -161,8 +236,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expect(card).toHaveCount(0)
     await expect(page.locator('body')).toContainText('申请已提交。')
     expect(posts).toEqual([
-      { workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T09:00', reason: 'Synthetic proof', orgId: 'synthetic-org' },
-      { workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T09:00', reason: 'Synthetic proof', orgId: 'synthetic-org', attachmentUrl: proof },
+      { workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T01:00:00.000Z', expectedTimezoneContextFingerprint: targetFingerprint, reason: 'Synthetic proof', orgId: 'synthetic-org' },
+      { workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T01:00:00.000Z', expectedTimezoneContextFingerprint: targetFingerprint, reason: 'Synthetic proof', orgId: 'synthetic-org', attachmentUrl: proof },
     ])
     await expect(tools).toHaveJSProperty('open', false)
     await page.locator('[data-selfservice-action="missing-punch"]').click()
@@ -171,5 +246,48 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     expect(posts).toHaveLength(2)
     expect(unexpected).toEqual([])
     expect(errors).toEqual([])
+  })
+}
+
+// Synthetic browser acceptance: server fixtures are independent from device wall time.
+for (const scenario of [
+  { name: 'available-shanghai', width: 1440, serverAt: '2026-04-15T02:00:00.000Z', timezone: 'Asia/Shanghai', expectedTime: /^10:00:/ },
+  { name: 'available-singapore-correction', width: 390, serverAt: '2026-04-14T16:30:00.000Z', timezone: 'Asia/Singapore', expectedTime: /^00:30:/ },
+  { name: 'unavailable-sample', width: 1440, serverAt: '2026-04-15T02:00:00.000Z', timezone: 'Asia/Shanghai', unavailable: true },
+  { name: 'unavailable-bfcache-recovery', width: 390, serverAt: '2026-04-15T02:00:00.000Z', timezone: 'Asia/Shanghai', recovery: true },
+]) {
+  test(`server clock: ${scenario.name}`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: scenario.width, height: scenario.width === 390 ? 844 : 900 })
+    const fixture = await mockAttendance(page, false, { ...scenario, browserAt: '2026-04-20T20:00:00Z' })
+    const errors: string[] = []
+    page.on('pageerror', error => errors.push(error.message))
+    await page.goto('/verification/attendance-makeup-request-harness.html')
+    const hero = page.locator('[data-testid="attendance-hero-punch"]')
+    const time = hero.locator('[data-testid="attendance-hero-time"]')
+    if (scenario.recovery) {
+      await expect(time).toHaveText(/^10:00:/)
+      // Freeze the monotonic input and fail the new sample: old calibration cannot survive recovery.
+      await page.route('**/api/attendance/rules/me*', route => route.fulfill({ status: 503, json: { ok: false, error: { code: 'SYNTHETIC_UNAVAILABLE' } } }))
+      await page.evaluate(() => {
+        const frozen = performance.now()
+        Object.defineProperty(performance, 'now', { value: () => frozen })
+        window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }))
+      })
+    }
+    if (scenario.unavailable || scenario.recovery) {
+      await expect(time).toHaveText('服务器时间不可用')
+      await expect(page.locator('[data-attendance-hero-timezone]')).toHaveText('考勤时区不可用')
+      await expect(page.locator('[data-attendance-overview-greeting]')).toContainText('服务器日期不可用')
+    } else {
+      await expect(time).toHaveText(scenario.expectedTime!)
+      await expect(page.locator('[data-attendance-hero-timezone]')).toHaveText(`考勤时区：${scenario.timezone} · 系统默认`)
+      await expect(page.locator('[data-attendance-overview-greeting]')).toContainText('2026-04-15')
+      expect(fixture.rulesRequests).toEqual(scenario.timezone === 'Asia/Singapore' ? ['', '?asOf=2026-04-15'] : [''])
+    }
+    for (const button of await hero.locator('.attendance__hero-actions button').all()) await expect(button).toBeEnabled()
+    await assertFits(page, '[data-testid="attendance-hero-punch"]')
+    await page.locator('[data-attendance-overview-primary]').screenshot({ path: testInfo.outputPath(`${scenario.name}.png`) })
+    expect(errors).toEqual([])
+    expect(fixture.unexpected).toEqual([])
   })
 }

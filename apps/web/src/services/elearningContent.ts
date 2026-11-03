@@ -1,4 +1,5 @@
 import { apiFetch } from '../utils/api'
+import { randomUuid } from '../utils/uuid'
 import { ElearningApiError } from './elearning'
 
 const UUID_RE =
@@ -55,6 +56,16 @@ export interface ElearningContentOpenResult extends ElearningContentRevisionDraf
   completedAt: string
   assurance: 'weak_server_recorded_open' | 'weak_server_recorded_launch'
 }
+
+// F13 assignee picker: one row of GET /api/elearning/admin/assignees (id + display name +
+// email only; name/email may be null). The picker shows the name, the request carries the id.
+export interface ElearningAssigneeCandidate {
+  id: string
+  name: string | null
+  email: string | null
+}
+
+export const ELEARNING_ASSIGNEE_SEARCH_MAX_QUERY_LENGTH = 100
 
 export interface ElearningContentRequestIdTracker {
   forRevision(slotId: string, draft: ElearningContentRevisionDraft): string
@@ -164,6 +175,9 @@ function validateRevisionDraft(
 function readErrorCode(payload: unknown): string {
   if (isPlainObject(payload) && typeof payload.error === 'string') {
     const code = payload.error.trim()
+    // Same pass-through the sibling elearning clients already make: the one
+    // uppercase code the org-context gate answers with must reach the view.
+    if (code === 'ORG_CONTEXT_REQUIRED') return code
     if (STABLE_ERROR_CODE_RE.test(code)) return code
   }
   return 'request_failed'
@@ -365,10 +379,58 @@ export async function openElearningContentItem(
 }
 
 function defaultRequestId(): string {
-  if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') {
-    fail('request_failed', 0)
+  return randomUuid()
+}
+
+function optionalCandidateText(value: unknown, status: number): string | null {
+  if (value === null) return null
+  if (typeof value !== 'string' || value.length > 512 || value.includes('\0')) failShape(status)
+  return value.trim() === '' ? null : value
+}
+
+function parseAssigneeCandidate(value: unknown, status: number): ElearningAssigneeCandidate {
+  if (!isPlainObject(value) || !exactKeys(value, ['id', 'name', 'email'])) failShape(status)
+  const id = value.id
+  if (typeof id !== 'string' || id.trim() === '' || id.length > 255 || id.includes('\0')) {
+    failShape(status)
   }
-  return crypto.randomUUID()
+  return {
+    id,
+    name: optionalCandidateText(value.name, status),
+    email: optionalCandidateText(value.email, status),
+  }
+}
+
+/**
+ * Searches the caller org's active members by name or email for the assignment forms.
+ * Blank queries resolve to [] without a request; the server enforces the elearning:admin
+ * guard and the org scope, this client only validates the closed response shape.
+ */
+export async function searchElearningAssignees(
+  query: string,
+  limit = 20,
+): Promise<ElearningAssigneeCandidate[]> {
+  const term = query.trim()
+  if (term === '') return []
+  if (term.length > ELEARNING_ASSIGNEE_SEARCH_MAX_QUERY_LENGTH) failInput()
+  const params = new URLSearchParams({ q: term, limit: String(limit) })
+  let response: Response
+  try {
+    response = await apiFetch(`/api/elearning/admin/assignees?${params.toString()}`, { method: 'GET' })
+  } catch {
+    fail('network_error', 0)
+  }
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    payload = undefined
+  }
+  if (response.status !== 200) fail(readErrorCode(payload), response.status)
+  if (!isPlainObject(payload) || !exactKeys(payload, ['items']) || !Array.isArray(payload.items)) {
+    failShape(response.status)
+  }
+  return payload.items.map((item) => parseAssigneeCandidate(item, response.status))
 }
 
 export function createElearningContentRequestIdTracker(

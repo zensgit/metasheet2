@@ -79,3 +79,46 @@ describe('MetaGridTable inline create row', () => {
     expect(onCreateRecord).toHaveBeenCalledTimes(1)
   })
 })
+
+// 客户反馈 2026-10-27 (R74): 「页面拉到底才有新增记录，如有1000行，我一定要拉到1000行后才可以新增」. The inline row above
+// only appears once every row is loaded (the flat grid appends as it scrolls), so the footer — outside the scroll
+// area, always on screen — carries its own 「+ 新建记录」, under the same canCreate gate (which the workbench already
+// turns off when a sheet's required columns are PLM-locked, R68).
+describe('MetaGridTable footer add-record entry', () => {
+  const footerBtn = (root: HTMLElement) => root.querySelector('[data-testid="grid-footer-add-record"]') as HTMLButtonElement | null
+  const text = (el: Element | null) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim()
+
+  it('is in the footer on a one-page sheet with no pager or page-size select, and emits create-record', () => {
+    const onCreateRecord = vi.fn()
+    const root = mountGrid({ canCreate: true, rows: ONE_ROW, onCreateRecord })
+    const btn = footerBtn(root)
+    expect(btn).not.toBeNull()
+    expect(btn!.closest('.meta-grid__pagination')).not.toBeNull()
+    expect(btn!.closest('.meta-grid__table-wrap')).toBeNull()
+    expect(text(btn)).toBe('+ New record')
+    btn!.click()
+    expect(onCreateRecord).toHaveBeenCalledTimes(1)
+  })
+
+  it('stays in the footer while the flat grid has more rows to scroll-load (where the inline row is not reachable yet)', () => {
+    const root = mountGrid({ canCreate: true, rows: ONE_ROW, canLoadMore: true, infiniteScroll: true, totalPages: 20, currentPage: 1, totalRows: 1000, pageSize: 50 })
+    expect(footerBtn(root)).not.toBeNull()
+  })
+
+  it('is hidden when canCreate is false (the workbench passes false for a PLM-locked sheet and for readers)', () => {
+    const root = mountGrid({ canCreate: false, rows: ONE_ROW })
+    expect(footerBtn(root)).toBeNull()
+    expect(root.querySelector('.meta-grid__pagination')).toBeNull()
+  })
+
+  it('is hidden on an empty sheet (the empty state owns that case)', () => {
+    const root = mountGrid({ canCreate: true, rows: [] })
+    expect(footerBtn(root)).toBeNull()
+  })
+
+  it('zh: 「+ 新建记录」', () => {
+    useLocale().setLocale('zh-CN')
+    const root = mountGrid({ canCreate: true, rows: ONE_ROW })
+    expect(text(footerBtn(root))).toBe('+ 新建记录')
+  })
+})

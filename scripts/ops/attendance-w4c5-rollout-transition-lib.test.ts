@@ -923,6 +923,21 @@ test('ACP connection uncertainty keeps its inherited registry name and internal-
   assert.equal(exitCodeForAttendanceW4C5ErrorV1(error), ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1)
 })
 
+test('a thrown primitive marked as leaving its connection uncertain keeps the internal-error exit', () => {
+  // AttendanceW4ConnectionUncertainPrimitiveError (w4c0-operation-registry.ts) sets its own name and
+  // carries the thrown non-object as `cause`. This primitive wrapper is not a confirmed boundary
+  // refusal or success; a boundary error that is only marked uncertain keeps its own class and maps
+  // by that class.
+  const code = 'W4C0_CONNECTION_UNCERTAIN'
+  const error = Object.assign(new Error(code), {
+    name: 'AttendanceW4ConnectionUncertainPrimitiveError',
+    code,
+    cause: 'SYNTHETIC_PRIVATE_DETAIL',
+  })
+  assert.equal(describeAttendanceW4C5ErrorV1(error), code)
+  assert.equal(exitCodeForAttendanceW4C5ErrorV1(error), ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1)
+})
+
 test('exitCodeForAttendanceW4C5ErrorV1 does not fire on a raw driver-shaped error (negative control: `.name` is never one of the three boundary class names)', () => {
   // A real PostgreSQL/pg-driver error has `.code` as a 5-character SQLSTATE, `.message` as a
   // distinct human-readable sentence, and a driver-assigned `.name` (never one of this repo's own
@@ -966,6 +981,9 @@ const ATTENDANCE_W4C5_KNOWN_NOT_BOUNDARY_ERROR_NAMES = [
   'AttendanceW4RegistryError',
   // Inherits registry name; uncertain commit/connection remains INTERNAL_ERROR, never refusal.
   'AttendanceCleaningConnectionUncertainError',
+  // Sets its own name and carries a thrown non-object as `cause`. This primitive wrapper is
+  // INTERNAL_ERROR, never refusal; a marked boundary error keeps its own class and exit code.
+  'AttendanceW4ConnectionUncertainPrimitiveError',
 ]
 // The base-class alternation is load-bearing, not defensive breadth. With `extends Error` alone,
 // `export class AttendanceW4FooError extends AttendanceW4IdentityError` — a subclass of a class

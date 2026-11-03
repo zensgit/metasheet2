@@ -73,14 +73,16 @@
             </div>
             <p class="ai-bulk__quota-note ai-bulk__quota-note--compact" role="note">{{ l('aibulk.quotaNote') }}</p>
 
-            <!-- Partial (capped) — broke early, NO count (oracle guard). -->
+            <!-- Partial (capped) — broke early, NO count (oracle guard). #5838: when the batch stopped
+                 because the TABLE could not be confirmed available, the generic advice ("write these,
+                 then re-run") is wrong — both refuse on a table that is gone — so the notice differs. -->
             <p
               v-if="ctrl.partial.value"
               class="ai-bulk__alert ai-bulk__alert--warn"
               role="alert"
               data-test="ai-bulk-partial"
             >
-              {{ l('aibulk.partialNotice') }}
+              {{ l(ctrl.stoppedSheetNotLive.value ? 'aibulk.partialNoticeSheetNotLive' : 'aibulk.partialNotice') }}
             </p>
 
             <!-- Confirmable rows — the ONLY selectable rows (masked included, badged). -->
@@ -183,7 +185,7 @@
           <!-- ───────────────────────── Phase: polling (async job generating) ───────────────────────── -->
           <template v-else-if="ctrl.state.phase === 'polling'">
             <p class="ai-bulk__job-status" data-test="ai-bulk-job-status">
-              {{ ctrl.state.job && ctrl.state.job.state === 'running' ? l('aibulk.jobRunning') : l('aibulk.jobQueued') }}
+              {{ l(jobProgressStatusKey) }}
             </p>
             <div
               class="ai-bulk__progress"
@@ -476,7 +478,7 @@
             <button
               type="button"
               class="ai-bulk__btn ai-bulk__btn--primary"
-              :disabled="ctrl.busy.value || ctrl.selectedCount.value === 0"
+              :disabled="ctrl.busy.value || ctrl.selectedCount.value === 0 || !ctrl.canCommitJob.value"
               data-test="ai-bulk-job-confirm"
               @click="onJobConfirm"
             >
@@ -621,6 +623,20 @@ const jobProgressPct = computed(() => {
   if (!j || j.total <= 0) return 0
   return Math.min(100, Math.round((j.generated / j.total) * 100))
 })
+/**
+ * Status line while the job is still being polled. `committing` (#5842) is a commit request
+ * writing records — neither "queued" nor "generating", and saying either would be untrue.
+ */
+const jobProgressStatusKey = computed<MetaAiBulkLabelKey>(() => {
+  switch (job.value?.state) {
+    case 'running':
+      return 'aibulk.jobRunning'
+    case 'committing':
+      return 'aibulk.jobCommitting'
+    default:
+      return 'aibulk.jobQueued'
+  }
+})
 /** Terminal banner for a committable-but-not-clean job (cancelled / errored). null = no banner. */
 const jobReviewBannerKey = computed<MetaAiBulkLabelKey | null>(() => {
   switch (job.value?.state) {
@@ -628,6 +644,10 @@ const jobReviewBannerKey = computed<MetaAiBulkLabelKey | null>(() => {
       return 'aibulk.jobCancelledNotice'
     case 'errored':
       return 'aibulk.jobErroredNotice'
+    case 'committing':
+      // #5842: a cancel the server refused still enters review (the row diff is truthful), but a
+      // commit is already in flight — say so instead of silently disabling the button.
+      return 'aibulk.jobCommitInFlightNotice'
     default:
       return null
   }
@@ -644,7 +664,7 @@ function jobOutcomeBadgeClass(outcome: string): string {
   return outcome === 'committed' ? 'ai-bulk__badge--ready' : 'ai-bulk__badge--warn'
 }
 async function onJobConfirm(): Promise<void> {
-  if (ctrl.busy.value || ctrl.selectedCount.value === 0) return
+  if (ctrl.busy.value || ctrl.selectedCount.value === 0 || !ctrl.canCommitJob.value) return
   const result = await ctrl.commitJob()
   // A commit wrote records server-side; the open grid is stale until reloaded.
   if (result) emit('committed')

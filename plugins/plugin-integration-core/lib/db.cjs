@@ -25,6 +25,26 @@
 const ALLOWED_PREFIX = 'integration_'
 const IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/
 
+// Transaction isolation levels a caller may PIN on a transaction handle
+// (`setTransactionIsolationLevel`), each mapped to the ONE fixed statement it renders. The level
+// is a lookup key, never interpolated: anything outside this table is refused before any SQL is
+// built. READ UNCOMMITTED is deliberately absent (PostgreSQL runs it as READ COMMITTED, so naming
+// it would only mislead a reader).
+const TRANSACTION_ISOLATION_STATEMENTS = Object.freeze({
+  'read committed': 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED',
+  'repeatable read': 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ',
+  serializable: 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE',
+})
+
+// The ONE statement `setLocalLockTimeout` renders (handle-only, see below). `SET LOCAL lock_timeout = $1`
+// is not valid SQL (SET takes no bind parameter), so the value rides as the one parameter of set_config
+// with is_local = true — the same form packages/core-backend/src/attendance/w4c0-identity.ts uses.
+const LOCAL_LOCK_TIMEOUT_STATEMENT = "SELECT set_config('lock_timeout', $1, true)"
+// Bounds for the ONE parameter: a positive integer number of milliseconds, never above the host pool's
+// statement_timeout (30 s, DB_STATEMENT_TIMEOUT) — a lock wait longer than that is the statement timeout
+// anyway, and a caller naming one has the wrong tool.
+const LOCAL_LOCK_TIMEOUT_MAX_MS = 30_000
+
 class ScopeViolationError extends Error {
   constructor(message, { table, column } = {}) {
     super(message)
@@ -88,6 +108,19 @@ function prepareParamValue(value) {
   // text and let PostgreSQL cast them to JSONB.
   if (Array.isArray(value) || isPlainObject(value)) return JSON.stringify(value)
   return value
+}
+
+function transactionIsolationStatement(level) {
+  const statement = typeof level === 'string' && Object.prototype.hasOwnProperty.call(TRANSACTION_ISOLATION_STATEMENTS, level)
+    ? TRANSACTION_ISOLATION_STATEMENTS[level]
+    : null
+  if (!statement) {
+    throw new ScopeViolationError(
+      'plugin-integration-core: transaction isolation level is not one of the whitelisted levels',
+      {},
+    )
+  }
+  return statement
 }
 
 function buildWhereClause(where, startParamIndex) {
@@ -210,6 +243,45 @@ function createDb({ database, logger } = {}) {
     const whereClause = buildWhereClause(where, 1)
     const result = await database.query(
       `SELECT * FROM ${tableIdent}${whereClause.sql} LIMIT 1 FOR UPDATE`,
+      whereClause.params,
+    )
+    const rows = Array.isArray(result)
+      ? result
+      : (result && Array.isArray(result.rows) ? result.rows : [])
+    return rows[0] || null
+  }
+
+  /**
+   * `SELECT ... LIMIT 1 FOR KEY SHARE` — the WRITER'S half of a row-existence lock protocol.
+   *
+   * Added under the module header's own extension clause ("added here as a new validated method"),
+   * not as a raw-SQL escape hatch: the table and every where column pass the same identifier
+   * whitelist as selectOneForUpdate, and every value is parameterized.
+   *
+   * WHY KEY SHARE and not FOR SHARE. A caller that is about to persist a POINTER at this row (a
+   * stock-prep source binding, a read-source config version, a pipeline endpoint) needs exactly one
+   * thing: that the row is not DELETED (nor has its key changed) between this read and the caller's
+   * own COMMIT. FOR KEY SHARE conflicts with FOR UPDATE — which is what a delete-side guard takes and
+   * what DELETE itself takes — and with nothing weaker: an ordinary UPDATE of a non-key column takes
+   * FOR NO KEY UPDATE, which KEY SHARE does NOT block. So a binding being written never stalls an
+   * admin renaming the same system, and vice versa. FOR SHARE would conflict with FOR NO KEY UPDATE
+   * too, serializing pointer writes against every config edit for no protection gained. This is the
+   * same lock PostgreSQL's own referential-integrity check takes on a referenced row, which is what
+   * makes an application-level participant exactly as strong as a foreign key for THIS purpose,
+   * on a table that deliberately carries none.
+   *
+   * Only meaningful INSIDE `transaction`: a lock taken in autocommit is released at statement end.
+   * PostgreSQL requires UPDATE privilege on at least one column for any locking clause (same rule
+   * that made migration 075 necessary for the sealed-export runtime role's FOR UPDATE).
+   */
+  async function selectOneForKeyShare(table, where) {
+    const tableIdent = quoteIdent(assertTable(table))
+    if (!where || typeof where !== 'object' || Array.isArray(where)) {
+      throw new Error('selectOneForKeyShare: where clause is required')
+    }
+    const whereClause = buildWhereClause(where, 1)
+    const result = await database.query(
+      `SELECT * FROM ${tableIdent}${whereClause.sql} LIMIT 1 FOR KEY SHARE`,
       whereClause.params,
     )
     const rows = Array.isArray(result)
@@ -363,10 +435,104 @@ function createDb({ database, logger } = {}) {
           transaction: database.transaction.bind(database),
         },
       })
+      /**
+       * `SET TRANSACTION ISOLATION LEVEL <whitelisted level>` on THIS transaction.
+       *
+       * Added under the module header's extension clause ("added here as a new validated method"):
+       * the level is a key into TRANSACTION_ISOLATION_STATEMENTS and the statement is a fixed
+       * literal from that table — no caller text reaches the SQL, and nothing is parameterized
+       * because nothing varies.
+       *
+       * It exists so a caller whose correctness DEPENDS on an isolation level can pin it instead of
+       * inheriting whatever the server / database / role default is (a bare BEGIN inherits
+       * `default_transaction_isolation`; `ALTER DATABASE ... SET default_transaction_isolation =
+       * 'repeatable read'` silently changes every such transaction). The external-system delete
+       * lock protocol is the first such caller (`external-system-pointer-lock.cjs`
+       * pinLockProtocolIsolation).
+       *
+       * MUST be the transaction's FIRST statement. PostgreSQL enforces it where it matters: when the
+       * inherited level differs from the requested one, a SET issued after any query fails with SQLSTATE
+       * 25001 and aborts the transaction; when it already IS the requested one, a late SET is a no-op
+       * (the transaction ran at that level all along) — a caller that gets the order wrong never completes
+       * at another level. Offered ONLY on the transaction handle: outside a block PostgreSQL merely WARNS.
+       */
+      async function setTransactionIsolationLevel(level) {
+        const statement = transactionIsolationStatement(level)
+        await trx.query(statement, [])
+      }
+      /**
+       * `SELECT pg_advisory_xact_lock(hashtext($1))` on THIS transaction — a per-key mutex PostgreSQL
+       * releases at COMMIT / ROLLBACK, for "count, then insert under a cap" sequences that have no
+       * row to lock (the handoff cursor locks its row with selectOneForUpdate; a per-tenant cap has
+       * no parent row — stock-preparation-project-target-store.cjs `create` is the first caller).
+       *
+       * Added under the module header's extension clause: the statement is a fixed literal, the key
+       * is its ONE parameter and never reaches the SQL text, and `hashtext` keys the lock space by a
+       * string a caller can name (`<table>:<tenant>`) instead of an integer a caller must allocate
+       * (a hash collision only serializes two unrelated callers, it never admits one). The key must
+       * be a non-empty string. Offered ONLY on the transaction handle: `pg_advisory_xact_lock` is
+       * transaction-scoped by definition, so outside a block it would guard nothing.
+       */
+      async function advisoryXactLock(key) {
+        if (typeof key !== 'string' || key.trim().length === 0) {
+          throw new ScopeViolationError('plugin-integration-core: advisory lock key must be a non-empty string', {})
+        }
+        await trx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [key])
+      }
+      /**
+       * The NON-BLOCKING sibling of `advisoryXactLock`: `SELECT pg_try_advisory_xact_lock(hashtext($1)) AS
+       * locked` on THIS transaction. `true` = the lock is now held until COMMIT / ROLLBACK; `false` = another
+       * transaction holds it, answered AT ONCE — this never queues. For a caller that must not hold a pooled
+       * connection while it waits: the stock-preparation project overview writers (S3 fix round 2, F4), whose
+       * lock holder needs MORE pool connections for its host calls, so N blocked waiters each holding one could
+       * starve the very holder they wait on. Same key rules as `advisoryXactLock` (the key is the ONE parameter
+       * of a fixed literal); only an explicit boolean `true` from PostgreSQL counts as acquired.
+       */
+      async function tryAdvisoryXactLock(key) {
+        if (typeof key !== 'string' || key.trim().length === 0) {
+          throw new ScopeViolationError('plugin-integration-core: advisory lock key must be a non-empty string', {})
+        }
+        const result = await trx.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', [key])
+        const rows = Array.isArray(result)
+          ? result
+          : (result && Array.isArray(result.rows) ? result.rows : [])
+        return Boolean(rows[0] && rows[0].locked === true)
+      }
+      /**
+       * `SELECT set_config('lock_timeout', $1, true)` on THIS transaction — bound how long the statements
+       * that follow in it may WAIT for a row lock. Past the bound PostgreSQL aborts the waiting statement
+       * with SQLSTATE 55P03 (lock_not_available) and the transaction, and the pooled connection is given
+       * back at once instead of being pinned until statement_timeout (30 s). First caller: the stock-prep
+       * sheet write lock (stock-preparation-project-write-lock.cjs), whose takeover / abandoned-lease clear /
+       * release are non-key UPDATEs of a row a stalled holder's fenced write may be holding FOR SHARE
+       * inside an open transaction; without a bound every contender blocked for 30 s on one of the 20
+       * pool connections and then answered "store failed" instead of "a holder is writing" (PR #6501, S1).
+       *
+       * Added under the module header's extension clause: the statement is a fixed literal and the
+       * timeout is its ONE parameter — a positive integer number of milliseconds, at most
+       * LOCAL_LOCK_TIMEOUT_MAX_MS, rendered as its decimal text (set_config takes text; a bare integer is
+       * read as milliseconds). `is_local = true` scopes it to this transaction, so nothing leaks to the next
+       * user of the pooled connection. Offered ONLY on the transaction handle: in autocommit a local
+       * setting ends with the statement that made it and bounds nothing.
+       */
+      async function setLocalLockTimeout(ms) {
+        if (!Number.isInteger(ms) || ms <= 0 || ms > LOCAL_LOCK_TIMEOUT_MAX_MS) {
+          throw new ScopeViolationError(
+            `plugin-integration-core: lock timeout must be an integer between 1 and ${LOCAL_LOCK_TIMEOUT_MAX_MS} milliseconds`,
+            {},
+          )
+        }
+        await trx.query(LOCAL_LOCK_TIMEOUT_STATEMENT, [String(ms)])
+      }
       return callback({
+        setTransactionIsolationLevel,
+        advisoryXactLock,
+        tryAdvisoryXactLock,
+        setLocalLockTimeout,
         select: scoped.select,
         selectOne: scoped.selectOne,
         selectOneForUpdate: scoped.selectOneForUpdate,
+        selectOneForKeyShare: scoped.selectOneForKeyShare,
         insertOne: scoped.insertOne,
         upsertOne: scoped.upsertOne,
         insertMany: scoped.insertMany,
@@ -384,6 +550,7 @@ function createDb({ database, logger } = {}) {
     select,
     selectOne,
     selectOneForUpdate,
+    selectOneForKeyShare,
     insertOne,
     upsertOne,
     insertMany,
@@ -407,6 +574,10 @@ module.exports = {
     buildRangeClause,
     quoteIdent,
     prepareParamValue,
+    transactionIsolationStatement,
+    TRANSACTION_ISOLATION_STATEMENTS,
+    LOCAL_LOCK_TIMEOUT_STATEMENT,
+    LOCAL_LOCK_TIMEOUT_MAX_MS,
     IDENT_RE,
   },
 }

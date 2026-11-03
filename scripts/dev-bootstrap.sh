@@ -281,6 +281,8 @@ if [ $? -eq 0 ]; then
 else
     echo -e "  ${RED}❌ 数据库迁移失败${NC}"
     echo "  尝试重置: pnpm db:reset"
+    echo "  (若本地库跑过 approval-template-groups backfill 真库用例, db:reset 可能撞上"
+    echo "   ATG_BACKFILL_DOWN_BLOCKED —— 见该错误信息里的环境变量名)"
     exit 1
 fi
 
@@ -370,6 +372,8 @@ echo "常用命令:"
 echo "  - 停止服务: ./scripts/dev-cleanup.sh"
 echo "  - 查看日志: tail -f logs/backend.log"
 echo "  - 重置数据库: pnpm --filter @metasheet/core-backend db:reset"
+echo "    (若本地库跑过 approval-template-groups backfill 真库用例, db:reset 可能撞上"
+echo "     ATG_BACKFILL_DOWN_BLOCKED —— 见该错误信息里的环境变量名)"
 echo ""
 
 echo "下一步:"

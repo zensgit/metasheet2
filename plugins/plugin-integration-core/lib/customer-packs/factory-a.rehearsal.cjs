@@ -9,7 +9,7 @@
 // regenerated sheet still leave human work alone?".
 //
 // This pack is the FULL-SHAPE input to that rehearsal. It is structurally real
-// (21 extension columns, the same ownership split, the same two select
+// (19 extension columns, the same ownership split, the same two select
 // dictionaries a real 备料 sheet carries) and synthetically valued: the column
 // set is derived from the real customer sheet's SHAPE, but nothing tenant-
 // identifying is committed here. A real deployment still loads its pack as
@@ -31,13 +31,14 @@
 // belongs ONLY in the uncommitted deploy-time pack file.
 //
 // TOTAL SHAPE the rehearsal proves out:
-//   25 frozen canonical columns (stock-preparation-templates.cjs, untouched)
-// + 21 pack extension columns (below)
-// = 46 logical columns on plm_stock_preparation_main.
+//   33 frozen canonical columns (stock-preparation-templates.cjs, untouched)
+// + 19 pack extension columns (below; 21 until 2026-09-15, when the owner retired
+//      the pack's 父组件图号 / 父组件名称 copy in favour of the template pair)
+// = 52 logical columns on plm_stock_preparation_main.
 //
 // Ownership follows the frozen template's own rule and nothing else:
 //   plm_system      — re-derived by every PLM refresh; a refresh OVERWRITES
-//                     these, so a human must never own one (13 columns here)
+//                     these, so a human must never own one (11 columns here)
 //   human_preserved — filled by a person on the sheet; survives every PLM
 //                     refresh, because `preserveOnRefresh` is DERIVED from
 //                     ownership, never authored (8 columns here)
@@ -71,8 +72,12 @@ const FACTORY_A_REHEARSAL_PACK = {
 
   extensionFields: [
     // --- PLM-derived attributes: a refresh re-writes every one of these ------
-    { id: 'ext_parentDrawingNo', label: '父组件图号', type: 'string', ownership: 'plm_system' },
-    { id: 'ext_parentName', label: '父组件名称', type: 'string', ownership: 'plm_system' },
+    // 父组件图号 / 父组件名称 are NOT declared here (owner ruling 2026-09-15): the frozen
+    // template's `parentComponentCode` / `parentComponentName` is the one holder of that
+    // pair, and the planner no longer derives a pack copy. A deployment whose OWN
+    // (uncommitted, deploy-time) pack still declares `ext_parentDrawingNo` /
+    // `ext_parentName` keeps those columns and their values untouched — nothing writes
+    // them any more, nothing reads them, nothing deletes them.
     { id: 'ext_spec', label: '规格', type: 'string', ownership: 'plm_system' },
     { id: 'ext_nameAndSpec', label: '名称及规格', type: 'string', ownership: 'plm_system' },
     { id: 'ext_standard', label: '标准', type: 'string', ownership: 'plm_system' },
@@ -270,8 +275,6 @@ const FACTORY_A_REHEARSAL_PACK = {
         'ext_designer',
         'ext_createdSource',
         'ext_standard',
-        'ext_parentDrawingNo',
-        'ext_parentName',
         'ext_parentSortNo',
         'ext_componentSortNo',
       ],

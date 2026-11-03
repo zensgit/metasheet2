@@ -255,7 +255,7 @@ describe('MetaFieldManager — MtButton migration (UI-P2-1c batch-3, AI preview 
 
   it('AI-preview renders as a native <button>, :disabled without a record, and calls aiPreviewFn with the record', async () => {
     const aiPreviewFn = vi.fn().mockResolvedValue({ data: { output: 'ok' } })
-    mount({ fields: aiFields(), aiPreviewFn, currentRecordId: 'rec_1' })
+    mount({ fields: aiFields(), aiPreviewFn, currentRecordId: 'rec_1', aiAvailable: true }) // A11: available state
     await nextTick()
     configureBtn().click() // fld_target (persisted aiShortcut)
     await nextTick()
@@ -274,7 +274,7 @@ describe('MetaFieldManager — MtButton migration (UI-P2-1c batch-3, AI preview 
 
   it('AI-bulk-fill trigger renders as a native <button> and clicking it emits `bulk-fill` with the fieldId', async () => {
     const onBulkFill = vi.fn()
-    mount({ fields: aiFields(), onBulkFill })
+    mount({ fields: aiFields(), onBulkFill, aiAvailable: true }) // A11: available state
     await nextTick()
     configureBtn().click() // fld_target (persisted aiShortcut → aiBulkFillVisible true)
     await nextTick()
