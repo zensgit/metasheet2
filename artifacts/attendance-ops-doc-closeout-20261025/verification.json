@@ -1,0 +1,53 @@
+{
+  "scope": "offline source snapshot and documented anchors; not HTTP/TS execution",
+  "baseline": "8a426818804897a20f7674c39c56b3a445909c3a",
+  "source_slices_checked": 18,
+  "doc_fragments_checked": 34,
+  "failures": [],
+  "failure_probes": [
+    {
+      "probe": "doc_wrong_http_status",
+      "detected": true
+    },
+    {
+      "probe": "doc_wrong_route",
+      "detected": true
+    },
+    {
+      "probe": "doc_wrong_disabled_code",
+      "detected": true
+    },
+    {
+      "probe": "doc_flat_recovery",
+      "detected": true
+    },
+    {
+      "probe": "source_wrong_mount",
+      "detected": true
+    },
+    {
+      "probe": "source_wrong_status",
+      "detected": true
+    },
+    {
+      "probe": "source_wrong_exception",
+      "detected": true
+    },
+    {
+      "probe": "source_flat_response",
+      "detected": true
+    }
+  ],
+  "pass": true,
+  "live_smoke": "not_run",
+  "disposition": "Draft/HOLD; source review completed and main corrected three initialP2 plus exact-code omissions; local offline evidence complete; requiredCI pending publication",
+  "main_checks": {
+    "outside_E1_byte_hashes_equal_pinned_base": true,
+    "synthetic_filter_probes": 25,
+    "actual_shell_fake_curl_probes": 3,
+    "shell_syntax_blocks": 3,
+    "real_HTTP_calls": 0,
+    "runtime_or_flag_changes": false,
+    "source_inspection_review_not_runtime_proof": true
+  }
+}
