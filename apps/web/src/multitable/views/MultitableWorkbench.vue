@@ -1076,6 +1076,13 @@ const caps = useMultitableCapabilities(capabilitySource)
 // canDeleteSheet (`=== true` off the /context object): absent ⇒ exactly the old `caps.canCreateRecord`.
 const recordCreateBlockedByLock = computed(() => capabilitySource.value?.recordCreateBlockedByLock === true)
 const canCreateRecordByHand = computed(() => caps.canCreateRecord.value && !recordCreateBlockedByLock.value)
+// R-line port of #6507's `capabilitiesStale` (this line has no grid-export closure): `selectSheet` switches the
+// active sheet at once while the capabilities stay the PREVIOUS sheet's until its `/context` lands. Only a string
+// owner can be stale: before any context it is null. The `?.` tolerates the spec doubles that predate the ref.
+const capabilitiesStale = computed(() => {
+  const owner = workbench.capabilitiesSheetId?.value
+  return typeof owner === 'string' && owner !== workbench.activeSheetId.value
+})
 const featureFlags = useFeatureFlags()
 // The workflow designer lives at a route gated by the global `workflow` product
 // feature (appRoutes.ts requiredFeature). On deployments without that feature the
