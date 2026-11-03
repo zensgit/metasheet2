@@ -13,9 +13,12 @@
 //
 // What it DOES (and nothing else):
 //   - reads docker\app.env and checks whether a root app.env exists;
-//   - runs `pm2 jlist` once, only when a live PM2 daemon is found (see readPm2Daemon), so it never
-//     makes pm2 spawn a daemon;
-//   - reads the last encrypted-store-probe line of output\logs\metasheet-backend.out.log.
+//   - runs `pm2 jlist` once, and only when pm2's RPC endpoint already exists (on Windows the
+//     machine-level pipe \\.\pipe\rpc.sock, which `pm2 jlist` pings before it would launch a daemon)
+//     and the pm2 home of this window is already set up (so pm2 creates no folder or file there);
+//     see pm2Gate. So it never makes pm2 spawn a daemon;
+//   - reads the last encrypted-store-probe line of the backend out log (pm2's pm_out_log_path, else
+//     output\logs\metasheet-backend.out.log) and requires it to be newer than the backend's start.
 //
 // What it NEVER does: write a file, open a network connection (no http/https/net/dns/fetch), start,
 // restart or stop anything, or call the backend. It never prints a value, part of a value, a length,
@@ -38,7 +41,7 @@
 //     carries its own list (yida-initialization-runtime.ts, PR #6691) the test also requires every
 //     backend sample to be in this list, so this operator-side check is never weaker than the backend.
 
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, openSync, readSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -135,11 +138,12 @@ export function readAppEnvFile(root) {
   const file = path.join(root, ...APP_ENV_RELATIVE_PARTS)
   try {
     if (!existsSync(file)) return { status: 'missing', text: '' }
-    let bytes = readFileSync(file)
+    const bytes = readFileSync(file)
     if (bytes.length >= 2 && ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff))) {
       return { status: 'unsupported_encoding', text: '' }
     }
-    if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) bytes = bytes.subarray(3)
+    // A UTF-8 BOM needs no handling: it decodes to U+FEFF, which String.prototype.trim removes in
+    // readAppEnvEntry exactly as the backend loader's line.trim() does (ecosystem.config.cjs).
     return { status: 'present', text: bytes.toString('utf8') }
   } catch {
     return { status: 'unreadable', text: '' }
@@ -186,25 +190,53 @@ export function resolvePm2Home(env = process.env) {
 }
 
 /**
- * `pm2 jlist` launches a PM2 daemon when none is running. To stay read-only, look for pm2's pid file
- * first and check the pid is alive (signal 0 sends nothing). No live daemon = do not run pm2.
+ * pm2's RPC endpoint (pm2/paths.js): on Windows the machine-level pipe \\.\pipe\rpc.sock whatever
+ * PM2_HOME is; elsewhere <PM2_HOME>/rpc.sock (or PM2_DAEMON_RPC_PORT, which paths.js also honours).
  */
-export function readPm2Daemon(env = process.env) {
+export function pm2RpcEndpoint(env = process.env, platform = process.platform) {
+  if (platform === 'win32' || platform === 'win64') return '\\\\.\\pipe\\rpc.sock'
+  return env.PM2_DAEMON_RPC_PORT || path.join(resolvePm2Home(env), 'rpc.sock')
+}
+
+/**
+ * `pm2 jlist` pings the RPC endpoint (pm2/lib/Client.js pingDaemon) and LAUNCHES a daemon when nothing
+ * answers; its client constructor also creates logs/, pids/, modules/ and module_conf.json in PM2_HOME
+ * when they are missing (Client.js initFileStructure). So pm2 is run only when:
+ *   - the endpoint exists: statSync succeeds or throws EBUSY (a busy pipe exists); ENOENT means no
+ *     daemon (existsSync cannot be used: it reports a busy pipe as absent); any other error is treated
+ *     as unreachable, never as present;
+ *   - PM2_HOME already holds everything initFileStructure would create.
+ * Returns a fixed category: 'ok' | 'daemon_not_found' | 'daemon_unreachable' | 'pm2_home_not_initialized'.
+ */
+export function pm2Gate(env = process.env, { rpcEndpoint, platform = process.platform } = {}) {
+  const endpoint = rpcEndpoint ?? pm2RpcEndpoint(env, platform)
   try {
-    const pidFile = path.join(resolvePm2Home(env), 'pm2.pid')
-    if (!existsSync(pidFile)) return false
-    const pid = Number.parseInt(readFileSync(pidFile, 'utf8').trim(), 10)
-    if (!Number.isInteger(pid) || pid <= 0) return false
-    try {
-      process.kill(pid, 0)
-      return true
-    } catch (error) {
-      return error?.code === 'EPERM'
+    statSync(endpoint)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return 'daemon_not_found'
+    if (error?.code !== 'EBUSY') return 'daemon_unreachable'
+  }
+  try {
+    const home = resolvePm2Home(env)
+    const isDir = rel => statSync(path.join(home, rel)).isDirectory()
+    if (!isDir('logs') || !isDir('pids') || !isDir('modules') || !statSync(path.join(home, 'module_conf.json')).isFile()) {
+      return 'pm2_home_not_initialized'
     }
   } catch {
-    return false
+    return 'pm2_home_not_initialized'
   }
+  return 'ok'
 }
+
+export const PM2_HINTS = Object.freeze({
+  daemon_not_found:
+    'HINT no pm2 daemon is listening on this machine, so pm2 was not run (it would start a new one). Start nothing; report to the owner.',
+  daemon_unreachable:
+    'HINT the pm2 daemon endpoint exists but cannot be opened from this window. Run this command as the Windows user that started the backend.',
+  pm2_home_not_initialized:
+    'HINT the pm2 home of this window (PM2_HOME, default .pm2 in the user folder) is not set up, so pm2 was not run (it would create files there). ' +
+    'If the backend runs under pm2-runtime, set PM2_HOME in this window to the home it was started with (for example the .pm2-runtime folder) and rerun.',
+})
 
 function windowsCmd() {
   const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT
@@ -254,19 +286,28 @@ export function parsePm2List(stdout) {
   return { status: 'ok', apps: parsed.value }
 }
 
-/** Returns { source, status, app }. status is a fixed category word; app is the parsed pm2 entry or null. */
-export function readBackendFromPm2(root, { testStub, env = process.env, timeoutMs = PM2_TIMEOUT_MS } = {}) {
+/**
+ * Returns { source, status, app, entries }. status is a fixed category word; entries is how many pm2
+ * entries are named metasheet-backend; app is that entry only when there is exactly one (more than one
+ * is ambiguous and checked as a stop, never resolved by list order).
+ */
+export function readBackendFromPm2(root, { testStub, rpcEndpoint, env = process.env, timeoutMs = PM2_TIMEOUT_MS } = {}) {
   let invocation
   try {
     invocation = resolvePm2Invocation(root, { testStub })
   } catch {
-    return { source: 'unknown', status: 'resolve_failed', app: null }
+    return { source: 'unknown', status: 'resolve_failed', app: null, entries: 0 }
   }
-  if (!readPm2Daemon(env)) return { source: invocation.source, status: 'daemon_not_found', app: null }
+  const gate = pm2Gate(env, { rpcEndpoint })
+  if (gate !== 'ok') return { source: invocation.source, status: gate, app: null, entries: 0 }
+  const childEnv = { ...env }
+  // PM2_DISCRETE_MODE makes the pm2 client write PM2_HOME/touch (Client.js initFileStructure).
+  delete childEnv.PM2_DISCRETE_MODE
   let result
   try {
     result = spawnSync(invocation.command, invocation.args, {
       cwd: root,
+      env: childEnv,
       encoding: 'utf8',
       timeout: timeoutMs,
       maxBuffer: PM2_MAX_BUFFER,
@@ -275,18 +316,44 @@ export function readBackendFromPm2(root, { testStub, env = process.env, timeoutM
       stdio: ['ignore', 'pipe', 'pipe'],
     })
   } catch {
-    return { source: invocation.source, status: 'spawn_failed', app: null }
+    return { source: invocation.source, status: 'spawn_failed', app: null, entries: 0 }
   }
   if (result.error) {
     const code = result.error.code
     const status = code === 'ETIMEDOUT' ? 'timeout' : code === 'ENOENT' ? 'not_found' : code === 'ENOBUFS' ? 'output_too_large' : 'spawn_failed'
-    return { source: invocation.source, status, app: null }
+    return { source: invocation.source, status, app: null, entries: 0 }
   }
-  if (result.status !== 0) return { source: invocation.source, status: 'exit_nonzero', app: null }
+  if (result.status !== 0) return { source: invocation.source, status: 'exit_nonzero', app: null, entries: 0 }
   const list = parsePm2List(result.stdout)
-  if (list.status !== 'ok') return { source: invocation.source, status: list.status, app: null }
-  const app = list.apps.find(entry => isObject(entry) && entry.name === BACKEND_APP_NAME) ?? null
-  return { source: invocation.source, status: 'ok', app }
+  if (list.status !== 'ok') return { source: invocation.source, status: list.status, app: null, entries: 0 }
+  const matches = list.apps.filter(entry => isObject(entry) && entry.name === BACKEND_APP_NAME)
+  return { source: invocation.source, status: 'ok', app: matches.length === 1 ? matches[0] : null, entries: matches.length }
+}
+
+/** Same comparison as attendance-onprem-start-pm2.ps1 ConvertTo-ComparablePath: full path, no trailing separator, case-folded on Windows. */
+export function comparablePath(candidate, platform = process.platform) {
+  if (typeof candidate !== 'string' || candidate.trim() === '') return ''
+  let full = path.resolve(candidate.trim())
+  while (full.length > 1 && /[\\/]$/.test(full) && !/^[A-Za-z]:[\\/]$/.test(full)) full = full.slice(0, -1)
+  return platform === 'win32' ? full.toLowerCase() : full
+}
+
+function realComparablePath(candidate, platform) {
+  try {
+    return comparablePath(realpathSync.native(candidate), platform)
+  } catch {
+    return ''
+  }
+}
+
+/** pm2_env.pm_cwd is this deploy root (as given, or after resolving junctions / links on both sides). */
+export function backendCwdIsRoot(app, root, platform = process.platform) {
+  if (!isObject(app) || !isObject(app.pm2_env) || typeof app.pm2_env.pm_cwd !== 'string') return false
+  const cwd = app.pm2_env.pm_cwd
+  const direct = comparablePath(cwd, platform)
+  if (direct !== '' && direct === comparablePath(root, platform)) return true
+  const real = realComparablePath(cwd, platform)
+  return real !== '' && real === realComparablePath(root, platform)
 }
 
 function lookupKey(object, name) {
@@ -321,22 +388,64 @@ export function tlsOverridesInRunningBackend(app) {
 
 // ── backend out log ─────────────────────────────────────────────────────────────────────────────
 
+// The backend logger (core/logger.ts) adds an ISO UTC "timestamp" to every line's JSON tail; pm2 with
+// `time: true` (ecosystem.config.cjs) prefixes each line with local 'YYYY-MM-DDTHH:mm:ss: '.
+const WINSTON_TIMESTAMP_PATTERN = /"timestamp":"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z)"/
+const PM2_TIMESTAMP_PATTERN = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}): /
+/** A probe line older than the backend start by more than this is from an earlier start. */
+export const PROBE_START_TOLERANCE_MS = 2000
+
+/** Epoch ms of a log line (winston UTC timestamp, else pm2 local prefix); null when neither parses. */
+export function probeLineTime(line) {
+  const winston = WINSTON_TIMESTAMP_PATTERN.exec(line)
+  if (winston) {
+    const ms = Date.parse(winston[1])
+    if (Number.isFinite(ms)) return ms
+  }
+  const pm2 = PM2_TIMESTAMP_PATTERN.exec(line)
+  if (pm2) {
+    const ms = Date.parse(pm2[1]) // no offset: parsed as local time, the zone pm2 wrote it in
+    if (Number.isFinite(ms)) return ms
+  }
+  return null
+}
+
 /** Classifies one log line; null when it is not a probe summary / could-not-run line. */
 export function classifyProbeLine(line) {
-  if (line.includes(PROBE_COULD_NOT_RUN_PHRASE)) return { category: 'could_not_run', undecryptable: null, unreadable: null }
+  const timeMs = probeLineTime(line)
+  if (line.includes(PROBE_COULD_NOT_RUN_PHRASE)) return { category: 'could_not_run', undecryptable: null, unreadable: null, timeMs }
   if (!PROBE_SUMMARY_PATTERN.test(line)) return null
   const unreadableMatch = PROBE_UNREADABLE_PATTERN.exec(line)
   const unreadable = unreadableMatch ? Number(unreadableMatch[1]) : null
-  if (line.includes(PROBE_MATERIAL_UNAVAILABLE_PHRASE)) return { category: 'material_unavailable', undecryptable: null, unreadable }
+  if (line.includes(PROBE_MATERIAL_UNAVAILABLE_PHRASE)) return { category: 'material_unavailable', undecryptable: null, unreadable, timeMs }
   const match = PROBE_UNDECRYPTABLE_PATTERN.exec(line)
-  if (!match) return { category: 'unrecognized', undecryptable: null, unreadable }
+  if (!match) return { category: 'unrecognized', undecryptable: null, unreadable, timeMs }
   const undecryptable = Number(match[1])
-  return { category: undecryptable === 0 ? 'ok' : 'undecryptable', undecryptable, unreadable }
+  return { category: undecryptable === 0 ? 'ok' : 'undecryptable', undecryptable, unreadable, timeMs }
+}
+
+/**
+ * An 'ok' probe line counts only when it was written after the running backend started
+ * (pm2_env.pm_uptime): otherwise it may describe an earlier start under other material.
+ */
+export function probeFreshness(probe, app) {
+  if (probe.category !== 'ok') return probe
+  const uptime = isObject(app) && isObject(app.pm2_env) ? Number(app.pm2_env.pm_uptime) : Number.NaN
+  if (!Number.isFinite(uptime) || uptime <= 0) return { ...probe, category: 'start_time_unknown' }
+  if (probe.timeMs === null || probe.timeMs === undefined) return { ...probe, category: 'no_timestamp' }
+  if (probe.timeMs < uptime - PROBE_START_TOLERANCE_MS) return { ...probe, category: 'stale' }
+  return probe
+}
+
+/** The out log pm2 writes for the backend (pm_out_log_path), else the ecosystem default under root. */
+export function backendOutLogPath(root, app) {
+  const fromPm2 = isObject(app) && isObject(app.pm2_env) ? app.pm2_env.pm_out_log_path : undefined
+  if (typeof fromPm2 === 'string' && fromPm2.trim() !== '') return { source: 'pm2', file: path.resolve(root, fromPm2) }
+  return { source: 'default', file: path.join(root, ...BACKEND_OUT_LOG_RELATIVE_PARTS) }
 }
 
 /** Scans the out log from the end in 1 MiB chunks; latin1 keeps the bytes exact for ASCII matching. */
-export function readLastProbeLine(root) {
-  const file = path.join(root, ...BACKEND_OUT_LOG_RELATIVE_PARTS)
+export function readLastProbeLine(file) {
   let fd
   try {
     if (!existsSync(file)) return { category: 'log_missing', undecryptable: null, unreadable: null }
@@ -386,7 +495,7 @@ export function readLastProbeLine(root) {
  * Pure: turns what was read into output lines and a verdict. Only check names, True/False, counts and
  * fixed category words ever reach `lines`.
  */
-export function evaluate({ appEnv, rootAppEnvExists, pm2, probe }) {
+export function evaluate({ root, appEnv, rootAppEnvExists, pm2, probe, probeLogSource = 'default', testOverrides = false }) {
   const lines = []
   const failing = []
   const warnings = []
@@ -394,12 +503,19 @@ export function evaluate({ appEnv, rootAppEnvExists, pm2, probe }) {
     if (!ok) failing.push(name)
     return ok
   }
-  const app = pm2.app
+  const entries = Number.isInteger(pm2.entries) ? pm2.entries : 0
+  const app = entries === 1 ? pm2.app : null
   const hasApp = isObject(app)
   const online = hasApp && isObject(app.pm2_env) && app.pm2_env.status === 'online'
 
+  if (testOverrides) lines.push('INFO test overrides in use (not an operator run)')
   lines.push(`pm2Source=${pm2.source} pm2Status=${pm2.status}`)
-  lines.push(`backendInPm2=${tf(check('backendInPm2', hasApp))} backendOnline=${tf(check('backendOnline', online))} rootAppEnvExists=${tf(!check('rootAppEnvExists', !rootAppEnvExists))}`)
+  if (PM2_HINTS[pm2.status]) lines.push(PM2_HINTS[pm2.status])
+  lines.push(
+    `backendInPm2=${tf(check('backendInPm2', hasApp))} backendEntries=${entries} backendOnline=${tf(check('backendOnline', online))} ` +
+      `backendCwdIsThisRoot=${tf(check('backendCwdIsThisRoot', hasApp && backendCwdIsRoot(app, root)))} ` +
+      `rootAppEnvExists=${tf(!check('rootAppEnvExists', !rootAppEnvExists))}`,
+  )
   lines.push(`appEnvFile=${appEnv.status}`)
   check('appEnvFile', appEnv.status === 'present')
 
@@ -457,9 +573,10 @@ export function evaluate({ appEnv, rootAppEnvExists, pm2, probe }) {
   const connectionTest = runningEnvValue(app, CONNECTION_TEST_SWITCH_FLAG)
   lines.push(`INFO connectionTestSwitchInRunningBackend=${!hasApp ? 'unknown' : connectionTest === 'true' ? 'on' : 'off'} (information only, not a check)`)
 
+  probe = probeFreshness(probe, app)
   const probeOk = check('encryptedStoreProbe', probe.category === 'ok')
   lines.push(
-    `encryptedStoreProbe=${probe.category}` +
+    `encryptedStoreProbe=${probe.category} probeLog=${probeLogSource}` +
       (probe.undecryptable === null ? '' : ` undecryptable=${probe.undecryptable}`) +
       (probe.unreadable === null ? '' : ` unreadableStoreFields=${probe.unreadable}`),
   )
@@ -474,15 +591,17 @@ export function evaluate({ appEnv, rootAppEnvExists, pm2, probe }) {
 }
 
 export function parseArgs(argv) {
-  const options = { help: false, testStub: null }
+  const options = { help: false, testStub: null, testRpc: null }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--help' || arg === '-h') options.help = true
-    else if (arg === '--test-pm2-command') {
-      // Test-only: replaces pm2 with `node <file> jlist`. The output then says pm2Source=test_stub.
+    else if (arg === '--test-pm2-command' || arg === '--test-pm2-rpc') {
+      // Test-only. --test-pm2-command replaces pm2 with `node <file> jlist` (pm2Source=test_stub);
+      // --test-pm2-rpc replaces pm2's RPC endpoint for the daemon gate. Either prints an INFO line.
       const value = argv[index + 1]
       if (!value || value.startsWith('--')) return { error: true }
-      options.testStub = value
+      if (arg === '--test-pm2-command') options.testStub = value
+      else options.testRpc = value
       index += 1
     } else return { error: true }
   }
@@ -509,9 +628,11 @@ export function main(argv = process.argv.slice(2), { root = process.cwd(), env =
     } catch {
       rootAppEnvExists = true
     }
-    const pm2 = readBackendFromPm2(root, { testStub: options.testStub, env })
-    const probe = readLastProbeLine(root)
-    const result = evaluate({ appEnv, rootAppEnvExists, pm2, probe })
+    const pm2 = readBackendFromPm2(root, { testStub: options.testStub, rpcEndpoint: options.testRpc ?? undefined, env })
+    const outLog = backendOutLogPath(root, pm2.entries === 1 ? pm2.app : null)
+    const probe = readLastProbeLine(outLog.file)
+    const testOverrides = Boolean(options.testStub || options.testRpc)
+    const result = evaluate({ root, appEnv, rootAppEnvExists, pm2, probe, probeLogSource: outLog.source, testOverrides })
     write(`${result.lines.join('\n')}\n`)
     return result.exitCode
   } catch {
@@ -523,8 +644,10 @@ export function main(argv = process.argv.slice(2), { root = process.cwd(), env =
 const invokedDirectly = (() => {
   try {
     if (!process.argv[1]) return false
-    const invoked = path.resolve(process.argv[1])
-    const self = fileURLToPath(import.meta.url)
+    // Node realpaths the ESM entry, so behind a junction / symlink argv[1] and import.meta.url differ
+    // until both sides are resolved. Without this the script would print nothing and exit 0.
+    const invoked = realpathSync.native(path.resolve(process.argv[1]))
+    const self = realpathSync.native(fileURLToPath(import.meta.url))
     return process.platform === 'win32' ? invoked.toLowerCase() === self.toLowerCase() : invoked === self
   } catch {
     return false
