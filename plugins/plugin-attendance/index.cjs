@@ -46453,9 +46453,21 @@ module.exports = {
               endDate = resolved.endDate
             }
 
+            // Calendar day of a cycle date. pg returns a DATE column as a Date at LOCAL midnight (read it with local
+            // getters, as mapPayrollCycleRow does); the API and resolvePayrollWindow send 'YYYY-MM-DD', which
+            // new Date() reads as UTC midnight. Comparing those two instants depends on the server time zone.
+            // Any other form gives null.
+            const calendarDay = (value) => (value instanceof Date
+              ? (Number.isNaN(value.getTime()) ? null : normalizeDateOnly(value))
+              : normalizeDateOnlyStrict(value))
+
             const startParsed = parseDateInput(startDate)
             const endParsed = parseDateInput(endDate)
-            if (!startParsed || !endParsed || startParsed > endParsed) {
+            const startDay = calendarDay(startDate)
+            const endDay = calendarDay(endDate)
+            // Plain dates compare by calendar day; other parseable string forms keep the instant comparison.
+            const rangeInverted = startDay && endDay ? startDay > endDay : startParsed > endParsed
+            if (!startParsed || !endParsed || rangeInverted) {
               throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid date range')
             }
 
@@ -46477,10 +46489,11 @@ module.exports = {
             const cycleIsFrozen = existing.status === 'closed' || existing.status === 'archived'
               || (await trx.query('SELECT 1 FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1 AND org_id = $2 LIMIT 1', [payrollCycleId, orgId])).length > 0
             if (cycleIsFrozen) {
+              // Same calendar day on both sides. A form other than a pg Date or 'YYYY-MM-DD' cannot be shown to
+              // leave the stored day unchanged, so it counts as a change (fail closed).
               const sameDate = (a, b) => {
-                const pa = parseDateInput(a)
-                const pb = parseDateInput(b)
-                return pa && pb ? formatDateOnly(pa) === formatDateOnly(pb) : String(a) === String(b)
+                const left = calendarDay(a)
+                return left !== null && left === calendarDay(b)
               }
               const periodChanged = !sameDate(payload.startDate, existing.start_date)
                 || !sameDate(payload.endDate, existing.end_date)
