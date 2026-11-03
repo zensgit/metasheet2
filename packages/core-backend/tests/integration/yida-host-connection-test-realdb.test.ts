@@ -19,7 +19,7 @@ import {
 const SLOT_KEY = [0x59494441, 1] as const
 const path = '/api/integration/yida-owner-send/initialization/connection-test'
 const body = () => ({ commandId: randomUUID(), mode: 'candidate',
-  material: { appKey: ' synthetic-host-probe-key ', appSecret: ' synthetic-host-probe-secret ' } })
+  material: { appKey: 'synthetic-host-probe-key', appSecret: 'synthetic-host-probe-secret' } })
 
 it('sentinel: YiDa host connection-test proof requires EXPECT_DB=1 and a dedicated DATABASE_URL', () => {
   expect(process.env.EXPECT_DB).toBe('1')

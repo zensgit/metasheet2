@@ -80,10 +80,24 @@ jobs:
           tests/integration/task-m4-list-items.db.test.ts
           tests/integration/task-m4-groups.db.test.ts
           tests/integration/task-m4-org-members.db.test.ts
+          tests/integration/task-member-access.db.test.ts
           tests/integration/task-m4-outbox.db.test.ts
           tests/integration/task-m4-delivery.db.test.ts
           tests/integration/task-m4-scheduler.db.test.ts
           tests/integration/task-m4-dingtalk.db.test.ts
           tests/integration/task-m4-realtime.db.test.ts
           tests/integration/task-g2-status-filter.db.test.ts
+          --reporter=verbose
+
+      # The enablement walk: real server, real sign-in, the page's own HTTP calls. Its own config,
+      # because tests/setup.integration.ts turns token-claim trust on before any import.
+      - name: Run tasks enablement walk (token-claim trust off)
+        env:
+          RBAC_BYPASS: 'false'
+          RBAC_TOKEN_TRUST: 'false'
+          RBAC_OPTIONAL: ''
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.tasks-enablement.config.ts run
+          tests/integration/task-enablement-http.db.test.ts
           --reporter=verbose
