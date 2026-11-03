@@ -14,7 +14,7 @@
 import { isValidPrintableAsciiId } from './task-ids'
 
 /** The only `task_source_links.source_type` today. */
-export const TASK_SOURCE_TYPE_MULTITABLE_RECORD = 'multitable_record' as const
+export const TASK_SOURCE_TYPE_RECORD = 'multitable_record' as const
 
 /** Upper bound on a source id, the member-id bound (`MEMBER_ID_MAX_LENGTH`, services/task-create.ts). */
 export const TASK_SOURCE_ID_MAX_LENGTH = 255

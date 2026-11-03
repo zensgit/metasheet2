@@ -42,7 +42,7 @@ import { pendingScopeForBadge } from '../tasks/task-settings'
 import {
   isDispatchKey,
   isTaskSourceRef,
-  TASK_SOURCE_TYPE_MULTITABLE_RECORD,
+  TASK_SOURCE_TYPE_RECORD,
   type TaskSourceRef,
 } from '../tasks/task-source-links'
 import { isPrintableId, isStorableText, resolveCreateAssigneeIds } from './task-create'
@@ -233,7 +233,7 @@ export async function createTask(input: {
         `INSERT INTO task_source_links (task_id, org_id, source_type, sheet_id, record_id, view_id, base_id, created_by, dispatch_key)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
         [
-          id, input.orgId, TASK_SOURCE_TYPE_MULTITABLE_RECORD, source.sheetId, source.recordId,
+          id, input.orgId, TASK_SOURCE_TYPE_RECORD, source.sheetId, source.recordId,
           source.viewId, source.baseId, input.creatorId, dispatchKey,
         ],
       )
@@ -523,7 +523,7 @@ export async function getTask(input: { orgId: string; actorId: string; taskId: s
     ...(sourceRow
       ? {
           source: {
-            kind: TASK_SOURCE_TYPE_MULTITABLE_RECORD,
+            kind: TASK_SOURCE_TYPE_RECORD,
             sheetId: String(sourceRow.sheet_id),
             recordId: String(sourceRow.record_id),
             viewId: typeof sourceRow.view_id === 'string' ? sourceRow.view_id : null,
