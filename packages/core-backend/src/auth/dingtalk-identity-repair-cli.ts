@@ -46,6 +46,62 @@ export function classifyRepairFailure(e: unknown): { code: string; exit: number 
   return { code: 'DINGTALK_LOGIN_REPAIR_REFUSED', exit: 1 }
 }
 
+/** The part of a Node process the output guard takes over (a fake in unit tests). */
+export type RepairProcess = {
+  stdout: { write(chunk: unknown, ...rest: unknown[]): boolean }
+  stderr: { write(chunk: unknown, ...rest: unknown[]): boolean }
+  on(event: 'uncaughtException' | 'unhandledRejection', listener: (e: unknown) => void): unknown
+  exit(code: number): void
+}
+
+export type RepairProcessOutput = {
+  stdout(s: string): void
+  stderr(s: string): void
+  /** Writes the one recorded line, then exits with the status. Later calls are ignored. */
+  exit(code: number): void
+  /** A failure nobody awaited (e.g. a pg client 'error' event): classified like any run failure. */
+  crash(e: unknown): void
+}
+
+/**
+ * Takes over the process streams for the CLI. Every other writer (the winston Console transport,
+ * console.*, library warnings) is discarded from here on, so stdout carries only the final JSON and
+ * stderr only one fixed code. An uncaught exception or unhandled rejection prints a fixed code instead
+ * of Node's stack trace. Call before loading anything that can log.
+ */
+export function guardRepairProcess(proc: RepairProcess): RepairProcessOutput {
+  const write = { out: proc.stdout.write.bind(proc.stdout), err: proc.stderr.write.bind(proc.stderr) }
+  const discard = (...args: unknown[]): boolean => {
+    const callback = args.find((a): a is () => void => typeof a === 'function')
+    if (callback) queueMicrotask(callback)
+    return true
+  }
+  proc.stdout.write = discard
+  proc.stderr.write = discard
+  let line: { to: 'out' | 'err'; text: string } | null = null
+  let exiting = false
+  const record = (to: 'out' | 'err', text: string) => {
+    if (!line) line = { to, text }
+  }
+  const exit = (code: number) => {
+    if (exiting) return
+    exiting = true
+    if (!line) return proc.exit(code)
+    const writer = line.to === 'out' ? write.out : write.err
+    writer(line.text + '\n', () => proc.exit(code))
+  }
+  const crash = (e: unknown) => {
+    // A line already recorded means runRepairCli has decided; its own exit follows in the same tick.
+    if (exiting || line) return
+    const { code, exit: status } = classifyRepairFailure(e)
+    record('err', code)
+    exit(status)
+  }
+  proc.on('uncaughtException', crash)
+  proc.on('unhandledRejection', crash)
+  return { stdout: (s) => record('out', s), stderr: (s) => record('err', s), exit, crash }
+}
+
 export type RepairMain = {
   effectiveClientQueryTimeoutMs(): number | null
   run(argv: string[]): Promise<unknown>

@@ -1,8 +1,9 @@
 /** Real PG transactions, synthetic provider only. No online binding or provider requests. */
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
+import { connect, createServer, type AddressInfo, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -3404,8 +3405,12 @@ suite('DingTalk controlled login repair', () => {
     const backendRoot = fileURLToPath(new URL('../..', import.meta.url))
     const entry = path.join(backendRoot, 'scripts/dingtalk-login-repair.ts')
     const tsxLoader = createRequire(import.meta.url).resolve('tsx')
-    /** Explicit env only (no DB_QUERY_TIMEOUT from the runner): the CLI must preset its own floor. */
-    const spawnCli = (f: Fixture, args: string[]) =>
+    /**
+     * Explicit env only (no DB_QUERY_TIMEOUT from the runner): the CLI must preset its own floor.
+     * DB_SLOW_MS=0 by default: every pool query then crosses the slow-query log threshold, so any
+     * logger output that reached the process streams would break the exact stdout/stderr assertions.
+     */
+    const spawnCli = (f: Fixture, args: string[], extra: Record<string, string> = {}) =>
       new Promise<{ code: number | null; stdout: string; stderr: string; ms: number }>((resolve, reject) => {
         const started = Date.now()
         const child = spawn(process.execPath, ['--import', tsxLoader, entry, ...args], {
@@ -3414,6 +3419,7 @@ suite('DingTalk controlled login repair', () => {
             PATH: process.env.PATH ?? '',
             NODE_ENV: 'test',
             TSX_DISABLE_CACHE: '1',
+            DB_SLOW_MS: '0',
             DATABASE_URL: String(process.env.DATABASE_URL),
             ENCRYPTION_KEY: String(process.env.ENCRYPTION_KEY),
             ENCRYPTION_SALT: String(process.env.ENCRYPTION_SALT),
@@ -3421,6 +3427,7 @@ suite('DingTalk controlled login repair', () => {
             DINGTALK_CLIENT_ID: 'synthetic-current-app',
             DINGTALK_CLIENT_SECRET: 'unused',
             DINGTALK_REDIRECT_URI: 'https://example.test/callback',
+            ...extra,
           },
           stdio: ['ignore', 'pipe', 'pipe'],
         })
@@ -3431,6 +3438,63 @@ suite('DingTalk controlled login repair', () => {
         child.on('error', reject)
         child.on('close', (code) => resolve({ code, stdout, stderr, ms: Date.now() - started }))
       })
+    /** The CLI's backend once it waits on the maintenance LOCK TABLE behind the holder. */
+    const waitingCliBackend = async (holderPid: number) => {
+      const deadline = Date.now() + 20000
+      while (Date.now() < deadline) {
+        const row = (
+          await query(
+            `SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND pid<>$1 AND wait_event_type='Lock' AND query LIKE 'LOCK TABLE %' LIMIT 1`,
+            [holderPid],
+          )
+        ).rows[0]
+        if (row) return Number(row.pid)
+        await new Promise((r) => setTimeout(r, 25))
+      }
+      throw new Error('the CLI backend never waited on the lock')
+    }
+    /** A TCP relay to the test database that can stop forwarding in both directions without closing. */
+    const stallableRelay = async () => {
+      const target = new URL(String(process.env.DATABASE_URL))
+      const sockets: Socket[] = []
+      let stalled = false
+      const server = createServer((client) => {
+        const upstream = connect(Number(target.port || 5432), target.hostname)
+        sockets.push(client, upstream)
+        client.on('data', (d) => {
+          if (!stalled) upstream.write(d)
+        })
+        upstream.on('data', (d) => {
+          if (!stalled) client.write(d)
+        })
+        // Once stalled, neither side learns anything about the other, not even a close.
+        for (const [a, b] of [
+          [client, upstream],
+          [upstream, client],
+        ] as const) {
+          a.on('error', () => {
+            if (!stalled) b.destroy()
+          })
+          a.on('close', () => {
+            if (!stalled) b.destroy()
+          })
+        }
+      })
+      await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()))
+      const relayed = new URL(target.toString())
+      relayed.hostname = '127.0.0.1'
+      relayed.port = String((server.address() as AddressInfo).port)
+      return {
+        url: relayed.toString(),
+        stall: () => {
+          stalled = true
+        },
+        close: async () => {
+          for (const s of sockets) s.destroy()
+          await new Promise<void>((r) => server.close(() => r()))
+        },
+      }
+    }
     let dir = ''
     const privateInput = async (name: string, body: Record<string, string>) => {
       if (!dir) dir = await mkdtemp(path.join(tmpdir(), 'login-repair-cli-db-'))
@@ -3529,5 +3593,84 @@ suite('DingTalk controlled login repair', () => {
       ])
       expect(again).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_NOT_ACTIVE\n' })
     }, 90000)
+
+    it('a verify refusal prints only its code although every query of the run is logged as slow', async () => {
+      const f = await fixture()
+      const input = await privateInput('verify', {
+        userId: f.user,
+        password: f.password,
+        code: 'synthetic-code',
+        actorId: randomUUID(),
+        actorPassword: f.password,
+      })
+      const out = path.join(dir, 'proof-' + randomUUID() + '.json')
+      const r = await spawnCli(f, ['verify', input, out])
+      expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_OPERATOR_REQUIRED\n' })
+      await expect(readFile(out)).rejects.toMatchObject({ code: 'ENOENT' })
+    }, 60000)
+
+    it('a connection terminated while the CLI waits for the lock prints only the generic code and writes nothing', async () => {
+      const f = await fixture(),
+        proof = await f.verify(),
+        p = await previewDingTalkRepair(proof)
+      const input = await privateInput('apply-terminated', { proof, digest: p.digest, confirm: 'apply' })
+      const before = await capture(f, randomUUID())
+      const holder = await pool!.connect()
+      let r: Awaited<ReturnType<typeof spawnCli>>
+      try {
+        await holder.query('BEGIN')
+        await holder.query('LOCK TABLE roles IN SHARE UPDATE EXCLUSIVE MODE')
+        const holderPid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+        const running = spawnCli(f, ['apply', input])
+        const cliPid = await waitingCliBackend(holderPid)
+        expect((await query('SELECT pg_terminate_backend($1) AS ok', [cliPid])).rows[0].ok).toBe(true)
+        r = await running
+      } finally {
+        await holder.query('ROLLBACK').catch(() => undefined)
+        holder.release()
+      }
+      expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'DINGTALK_LOGIN_REPAIR_REFUSED\n' })
+      expect(await capture(f, randomUUID())).toEqual(before)
+      expect((await query('SELECT id FROM dingtalk_login_repairs WHERE user_id=$1', [f.user])).rows).toEqual([])
+      // Operator check after the non-zero exit: the same proof still previews, so apply did not commit.
+      await expect(previewDingTalkRepair(proof)).resolves.toMatchObject({ digest: p.digest })
+    }, 60000)
+
+    it('a connection that stops answering ends at the client read timeout: only REPAIR_CLIENT_TIMEOUT (exit 69), the failed ROLLBACK is not printed', async () => {
+      const f = await fixture(),
+        proof = await f.verify(),
+        p = await previewDingTalkRepair(proof)
+      const input = await privateInput('apply-stalled', { proof, digest: p.digest, confirm: 'apply' })
+      const before = await capture(f, randomUUID())
+      const relay = await stallableRelay()
+      const holder = await pool!.connect()
+      let r: Awaited<ReturnType<typeof spawnCli>>
+      try {
+        let running: ReturnType<typeof spawnCli>
+        try {
+          await holder.query('BEGIN')
+          await holder.query('LOCK TABLE roles IN SHARE UPDATE EXCLUSIVE MODE')
+          const holderPid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+          running = spawnCli(f, ['apply', input], { DATABASE_URL: relay.url })
+          const cliPid = await waitingCliBackend(holderPid)
+          // Partition: the CLI keeps an open socket that never answers; the server side ends now, so
+          // nothing stays locked while the client waits out its read timeout twice (LOCK TABLE, ROLLBACK).
+          relay.stall()
+          expect((await query('SELECT pg_terminate_backend($1) AS ok', [cliPid])).rows[0].ok).toBe(true)
+        } finally {
+          await holder.query('ROLLBACK').catch(() => undefined)
+          holder.release()
+        }
+        r = await running
+      } finally {
+        await relay.close()
+      }
+      expect(r).toMatchObject({ code: 69, stdout: '', stderr: 'REPAIR_CLIENT_TIMEOUT\n' })
+      // Two consecutive 45 s read timeouts: the wrapper's ROLLBACK ran (and failed) before the exit.
+      expect(r.ms).toBeGreaterThan(89000)
+      expect(await capture(f, randomUUID())).toEqual(before)
+      expect((await query('SELECT id FROM dingtalk_login_repairs WHERE user_id=$1', [f.user])).rows).toEqual([])
+      await expect(previewDingTalkRepair(proof)).resolves.toMatchObject({ digest: p.digest })
+    }, 150000)
   })
 })

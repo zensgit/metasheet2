@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   REPAIR_CLI_QUERY_TIMEOUT_FLOOR_MS,
   classifyRepairFailure,
+  guardRepairProcess,
   resolveRepairClientTimeout,
   runRepairCli,
   type RepairMain,
@@ -164,6 +165,96 @@ describe('runRepairCli', () => {
   })
 })
 
+describe('guardRepairProcess', () => {
+  const fakeProcess = () => {
+    const written: Array<[string, string]> = []
+    const exits: number[] = []
+    const listeners = new Map<string, (e: unknown) => void>()
+    const stream = (name: string) => ({
+      write: (chunk: unknown, ...rest: unknown[]) => {
+        written.push([name, String(chunk)])
+        const cb = rest.find((a) => typeof a === 'function') as (() => void) | undefined
+        if (cb) queueMicrotask(cb)
+        return true
+      },
+    })
+    const proc = {
+      stdout: stream('stdout'),
+      stderr: stream('stderr'),
+      on: (event: 'uncaughtException' | 'unhandledRejection', l: (e: unknown) => void) => listeners.set(event, l),
+      exit: (code: number) => {
+        exits.push(code)
+      },
+    }
+    return { proc, written, exits, listeners }
+  }
+  const settle = () => new Promise((r) => setTimeout(r, 0))
+
+  it('discards every other writer and prints only the recorded line, then exits once', async () => {
+    const f = fakeProcess()
+    const io = guardRepairProcess(f.proc)
+    const callback = vi.fn()
+    expect(f.proc.stdout.write('warn: Slow query: 9ms - SELECT * FROM users WHERE id=$1\n', callback)).toBe(true)
+    f.proc.stderr.write('Error: Connection terminated unexpectedly\n    at /abs/path/client.js:136:73\n')
+    await settle()
+    expect(callback).toHaveBeenCalledTimes(1)
+    io.stdout('{"digest":"d"}')
+    io.stdout('{"second":true}')
+    io.exit(0)
+    io.exit(1)
+    await settle()
+    expect(f.written).toEqual([['stdout', '{"digest":"d"}\n']])
+    expect(f.exits).toEqual([0])
+  })
+
+  it('an uncaught exception or unhandled rejection prints one fixed code instead of the trace', async () => {
+    for (const [event, e, code, status] of [
+      ['uncaughtException', new Error('Connection terminated unexpectedly'), 'DINGTALK_LOGIN_REPAIR_REFUSED', 1],
+      ['unhandledRejection', new Error('Query read timeout'), 'REPAIR_CLIENT_TIMEOUT', 69],
+      ['uncaughtException', 'not an error', 'DINGTALK_LOGIN_REPAIR_REFUSED', 1],
+    ] as const) {
+      const f = fakeProcess()
+      const io = guardRepairProcess(f.proc)
+      f.listeners.get(event)!(e)
+      // The awaited run fails afterwards with the same root cause: nothing more is printed.
+      io.stderr('DINGTALK_LOGIN_REPAIR_REFUSED')
+      io.exit(1)
+      f.listeners.get(event)!(e)
+      await settle()
+      expect(f.written).toEqual([['stderr', code + '\n']])
+      expect(f.exits).toEqual([status])
+    }
+  })
+
+  it('a decision already recorded by the run is not replaced by a later crash', async () => {
+    const f = fakeProcess()
+    const io = guardRepairProcess(f.proc)
+    io.stderr('REPAIR_LOCK_BUSY')
+    f.listeners.get('uncaughtException')!(new Error('Connection terminated unexpectedly'))
+    io.exit(75)
+    await settle()
+    expect(f.written).toEqual([['stderr', 'REPAIR_LOCK_BUSY\n']])
+    expect(f.exits).toEqual([75])
+  })
+
+  it('exits without writing when nothing was recorded', async () => {
+    const f = fakeProcess()
+    guardRepairProcess(f.proc).exit(0)
+    await settle()
+    expect(f.written).toEqual([])
+    expect(f.exits).toEqual([0])
+  })
+
+  it('the entry installs the guard before anything is loaded and routes every outcome through it', async () => {
+    const text = await source('scripts/dingtalk-login-repair.ts')
+    const guard = text.indexOf('guardRepairProcess(process)')
+    expect(guard).toBeGreaterThan(-1)
+    expect(guard).toBeLessThan(text.indexOf('runRepairCli(process.argv'))
+    expect(text).toMatch(/\.then\(io\.exit,\s*io\.crash\)/)
+    expect(text).not.toMatch(/console\.|process\.exit\(|process\.(stdout|stderr)\.write/)
+  })
+})
+
 describe('code lists and import boundaries', () => {
   const literals = (text: string) =>
     new Set([...text.matchAll(/'((?:DINGTALK_[A-Z_]+_REFUSED)|(?:REPAIR_[A-Z_]+))'/g)].map((m) => m[1]))
@@ -218,19 +309,22 @@ describe('entry process (child, no database)', () => {
     if (dir) await rm(dir, { recursive: true, force: true })
   })
   /** Explicit env only: nothing from the test runner (e.g. DB_QUERY_TIMEOUT) leaks into the child. */
-  const spawnEntry = (args: string[], extra: Record<string, string> = {}) =>
+  /** An `undefined` in `extra` removes that variable from the child's environment. */
+  const spawnEntry = (args: string[], extra: Record<string, string | undefined> = {}) =>
     new Promise<{ code: number | null; stdout: string; stderr: string; ms: number }>((resolve, reject) => {
       const started = Date.now()
+      const env: Record<string, string | undefined> = {
+        PATH: process.env.PATH ?? '',
+        NODE_ENV: 'test',
+        TSX_DISABLE_CACHE: '1',
+        // Nothing listens here: any connection attempt would fail and print the generic code.
+        DATABASE_URL: 'postgresql://synthetic@127.0.0.1:9/synthetic',
+        ...extra,
+      }
+      for (const k of Object.keys(env)) if (env[k] === undefined) delete env[k]
       const child = spawn(process.execPath, ['--import', tsxLoader, entry, ...args], {
         cwd: backendRoot,
-        env: {
-          PATH: process.env.PATH ?? '',
-          NODE_ENV: 'test',
-          TSX_DISABLE_CACHE: '1',
-          // Nothing listens here: any connection attempt would fail and print the generic code.
-          DATABASE_URL: 'postgresql://synthetic@127.0.0.1:9/synthetic',
-          ...extra,
-        },
+        env,
         stdio: ['ignore', 'pipe', 'pipe'],
       })
       let stdout = '',
@@ -261,6 +355,11 @@ describe('entry process (child, no database)', () => {
 
   it('with DB_QUERY_TIMEOUT unset the dynamically loaded pool holds the preset (the assertion runs before argv validation)', async () => {
     const r = await spawnEntry(['nonsense'])
+    expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_INPUT_INVALID\n' })
+  }, 30000)
+
+  it('the pool warning for an unset DATABASE_URL (non-production) does not reach stdout or stderr', async () => {
+    const r = await spawnEntry(['nonsense'], { DATABASE_URL: undefined })
     expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_INPUT_INVALID\n' })
   }, 30000)
 
