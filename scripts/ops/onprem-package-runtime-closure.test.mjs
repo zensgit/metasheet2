@@ -95,9 +95,11 @@ test('compiled YiDa bootstrap CLI smoke runs after a core-backend build in the r
 
 // 人工补充行 content markers: files that existed before the feature must carry it. Listed here independently of
 // verify.sh, so deleting a check there turns its case below red. The decoys are what real output also holds: the same
-// strings in comments, in the gate module's own definitions, in a sibling plugin file, and in non-JS files under the
-// web dist. None of them proves the feature, so a check that is loosened (quotes dropped) or widened (a directory
-// instead of the one file, any file under dist instead of the JS chunks) matches a decoy and its case turns red too.
+// strings in comments, in the gate module (its own definitions and a quoted route), in a sibling plugin file, in
+// non-JS files under the web dist, and in the packaged verify.sh itself, which quotes every needle. None of them
+// proves the feature, so a check that is loosened (quotes dropped) or widened (the plugin lib dir, the core-backend
+// dist dir or the package root instead of the one file, any file under dist instead of the JS chunks) matches a decoy
+// and its case turns red too.
 const manualRowsMarkers = [
   ['plugins/plugin-integration-core/lib/http-routes.cjs', "'/api/integration/stock-preparation/projects/:projectNo/target/manual-rows'", 'http-routes.cjs must register the stock-prep manual-rows switch route'],
   ['packages/core-backend/dist/src/routes/univer-meta.js', "'/sheets/:sheetId/manual-rows'", 'manual-row create route (manual rows B2)'],
@@ -110,6 +112,10 @@ const manualRowsDecoys = [
   ['plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs', "    path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',"],
   ['packages/core-backend/dist/src/routes/univer-meta.js', '// Three session-only routes: POST /sheets/:sheetId/manual-rows (新增), POST /records/:recordId/manual-copy'],
   ['packages/core-backend/dist/src/multitable/stock-preparation-manual-rows-gate.js', 'async function resolveGenericCreateRefusal(query, sheetId, fields) {'],
+  ['packages/core-backend/dist/src/multitable/stock-preparation-manual-rows-gate.js', "// the create route '/sheets/:sheetId/manual-rows' (univer-meta) calls assertManualRowsAllowed"],
+  ['scripts/ops/multitable-onprem-package-verify.sh', "search_fixed_string \"'/sheets/:sheetId/manual-rows'\" \"$host_routes\""],
+  ['scripts/ops/multitable-onprem-package-verify.sh', "search_fixed_string \"'/api/integration/stock-preparation/projects/:projectNo/target/manual-rows'\" \"$plugin_routes\""],
+  ['scripts/ops/multitable-onprem-package-verify.sh', "search_fixed_string 'resolveGenericCreateRefusal' \"$host_routes\""],
   ['apps/web/dist/stray.txt', 'PATCH /manual-fields and GET /target/manual-rows'],
   ['apps/web/dist/assets/index.js.map', '{"sourcesContent":["// GET /target/manual-rows, PATCH /manual-fields"]}'],
 ]
@@ -142,8 +148,9 @@ function runManualRowsCheck(omitted) {
 }
 
 test('multitable verifier defines the manual-rows marker check once and runs it before the report', () => {
-  // Any definition form counts (with or without `function`, one-line bodies too), so a later shadowing one is caught.
-  const definitions = multitableVerifier.match(/^[ \t]*(?:function[ \t]+)?verify_stock_preparation_manual_rows_contract[ \t]*\(\)/gm) || []
+  // Counted forms: `function name` (with or without `()`) and `name()`, at line start, one-line bodies included, so a
+  // later shadowing definition in any of those forms is caught.
+  const definitions = multitableVerifier.match(/^[ \t]*(?:function[ \t]+verify_stock_preparation_manual_rows_contract\b|verify_stock_preparation_manual_rows_contract[ \t]*\(\))/gm) || []
   assert.equal(definitions.length, 1, 'exactly one definition')
   const calls = multitableVerifier.split('\nverify_stock_preparation_manual_rows_contract "$pkg_root"\n')
   assert.equal(calls.length, 2, 'exactly one main-flow call')
