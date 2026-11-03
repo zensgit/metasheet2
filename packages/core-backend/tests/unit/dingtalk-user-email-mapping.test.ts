@@ -113,6 +113,7 @@ describe('DingTalk directory member mapping — email fallback wiring', () => {
         errcode: 0,
         errmsg: 'ok',
         result: {
+          has_more: false,
           list: [
             {
               userid: 'u1',

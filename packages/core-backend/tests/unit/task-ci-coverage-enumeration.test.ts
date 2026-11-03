@@ -50,6 +50,27 @@ describe('task CI coverage enumeration', () => {
     }
   })
 
+  it('the enablement walk runs once, in its own step, under the trust-off config', () => {
+    const file = 'tests/integration/task-enablement-http.db.test.ts'
+    const lane = readFileSync(join(repoRoot, '.github/workflows/tasks-realdb.yml'), 'utf8')
+    expect(lane.split(file).length - 1).toBe(1)
+    const at = lane.indexOf(file)
+    const stepStart = lane.lastIndexOf('- name:', at)
+    const next = lane.indexOf('- name:', at)
+    const step = lane.slice(stepStart, next === -1 ? undefined : next)
+    expect(step).toContain('--config vitest.tasks-enablement.config.ts run')
+    expect(step).toContain("RBAC_TOKEN_TRUST: 'false'")
+    expect(step.includes('vitest.integration.config.ts')).toBe(false)
+
+    const cfg = readFileSync(join(repoRoot, 'packages/core-backend/vitest.tasks-enablement.config.ts'), 'utf8')
+    expect(cfg).toContain(`include: ['${file}']`)
+    expect(cfg).toContain("setupFiles: ['./tests/tasks-enablement/setup.ts']")
+    expect(cfg).toContain("RBAC_TOKEN_TRUST: 'false'")
+    expect(cfg.includes("'./tests/setup.integration.ts'")).toBe(false)
+    const setup = readFileSync(join(repoRoot, 'packages/core-backend/tests/tasks-enablement/setup.ts'), 'utf8')
+    expect(setup).toContain("process.env.RBAC_TOKEN_TRUST = 'false'")
+  })
+
   it('this enumeration file is not excluded and is not a lane file', () => {
     const unitCfg = readFileSync(join(repoRoot, 'packages/core-backend/vitest.config.ts'), 'utf8')
     const lane = readFileSync(join(repoRoot, '.github/workflows/tasks-realdb.yml'), 'utf8')
