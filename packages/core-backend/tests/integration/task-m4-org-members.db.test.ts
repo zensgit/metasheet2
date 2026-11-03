@@ -18,8 +18,9 @@ import { rawRequest, startTasksListener, type TasksListener } from '../helpers/t
  * another user, POST /api/tasks (every assignee other than the creator), POST
  * /api/tasks/:id/assignees and POST /api/tasks/:id/followers, require that user to be an active
  * member of the caller's org by the login test (user_orgs.is_active and users.is_active, by
- * org_id, and the account gate: activated, a role other than disabled, an RBAC admin checked as
- * admin). Every failure is the same 422 INACTIVE_ORG_MEMBER and nothing is written.
+ * org_id, and the account gate: not in the recycle bin, activated, a role other than disabled, an
+ * RBAC admin checked as admin). Every failure is the same 422 INACTIVE_ORG_MEMBER and nothing is
+ * written.
  * ASSUMPTION(task-m4): [own-16] the operator is never looked up. RULED(2026-10-07): [own-53] a
  * caller without a direct role gets the 404 before any lookup. A re-add (no event) never looks up;
  * LIMIT and the member-id check come first.
@@ -354,12 +355,15 @@ describe('S9: the three write points (R17, N2)', () => {
 })
 
 // ---------------------------------------------------------------------------------------------
-// The account half of the login test: a disabled role or a pending activation is refused like the
-// four reasons above; a disabled role together with the RBAC admin role passes, as it does at
-// login (login checks the role it resolves, and the admin role resolves to admin).
+// The account half of the login test: a disabled role, a pending activation or an account in the
+// recycle bin is refused like the four reasons above; a disabled role together with the RBAC admin
+// role passes, as it does at login (login checks the role it resolves, and the admin role resolves
+// to admin). The two recycle-bin shapes keep users.is_active true while deleted_at or purged_at is
+// set, so only that column refuses them; each sets one of the two columns, so each column's
+// condition is pinned on its own.
 // ---------------------------------------------------------------------------------------------
 
-const ACCOUNT_KEYS = ['role-disabled', 'pending-activation', 'role-disabled-admin'] as const
+const ACCOUNT_KEYS = ['role-disabled', 'pending-activation', 'recycled-active', 'purged-active', 'role-disabled-admin'] as const
 type AccountKey = typeof ACCOUNT_KEYS[number]
 
 /** Seeds `userId` as an active member of `orgId` (both `is_active` columns true) whose account is
@@ -369,6 +373,16 @@ async function seedAccount(key: AccountKey, orgId: string, userId: string): Prom
   const db = poolManager.get()
   if (key === 'pending-activation') {
     await db.query(`UPDATE users SET activation_status = 'pending_activation' WHERE id = $1`, [userId])
+    return
+  }
+  if (key === 'recycled-active') {
+    // In the recycle bin (deleted_at set) with is_active still true; purged_at stays empty.
+    await db.query(`UPDATE users SET deleted_at = now() WHERE id = $1`, [userId])
+    return
+  }
+  if (key === 'purged-active') {
+    // purged_at set with is_active still true; deleted_at stays empty, so only purged_at refuses it.
+    await db.query(`UPDATE users SET purged_at = now() WHERE id = $1`, [userId])
     return
   }
   await db.query(`UPDATE users SET role = 'disabled' WHERE id = $1`, [userId])

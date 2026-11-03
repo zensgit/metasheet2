@@ -3,6 +3,7 @@ import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import UserManagementView from '../src/views/UserManagementView.vue'
+import { useLocale } from '../src/composables/useLocale'
 import { describeCreateUserError } from '../src/utils/createUserValidationCopy'
 
 const apiFetchMock = vi.fn()
@@ -713,6 +714,32 @@ function createApiImplementation(
       })
     }
 
+    if (pathname === '/api/admin/users/recycle' && (init?.method || 'GET').toUpperCase() !== 'POST') {
+      return createJsonResponse({
+        ok: true,
+        data: {
+          total: 1,
+          retentionDays: 30,
+          items: [{
+            id: 'user-gone',
+            email: 'gone@example.com',
+            name: '已删除同事',
+            department: '装配',
+            deletedAt: '2026-10-01T00:00:00.000Z',
+            deletedBy: 'admin-1',
+            purgeAfter: '2026-10-31T00:00:00.000Z',
+          }],
+        },
+      })
+    }
+
+    if (pathname === '/api/admin/users/recycle/restore') {
+      return createJsonResponse({
+        ok: true,
+        data: { successCount: 1, failureCount: 0, results: [{ ok: true, userId: 'user-gone', message: '已恢复' }] },
+      })
+    }
+
     throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
   }
 }
@@ -755,6 +782,7 @@ describe('UserManagementView', () => {
   })
 
   afterEach(() => {
+    useLocale().setLocale('en')
     if (app) app.unmount()
     if (container) container.remove()
     window.history.replaceState({}, '', '/')
@@ -3171,10 +3199,10 @@ describe('UserManagementView', () => {
     })
   })
 
-  // Customer field report 2026-10-21 (#4): at ~1270px the left card's export buttons were clipped and
-  // the bulk-action buttons were drawn over the right panel. jsdom cannot lay out, so this pins the
-  // DOM structure the fix relies on plus the CSS contract in the SFC's style block; the real-browser
-  // measurement was done against a lab harness (see the PR body).
+  // Customer field report 2026-10-21 (#4), kept after the member-table redesign: long unbreakable
+  // identifiers must not widen the page. The list is one minmax(0, 1fr) track and the editor is a
+  // fixed drawer, so it cannot be drawn over the table. jsdom cannot lay out; this pins the DOM
+  // structure and the CSS contract in the SFC.
   it('keeps the left-card buttons in wrapping containers and caps the card track at the card width', async () => {
     const originalInnerWidth = window.innerWidth
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1270 })
@@ -3221,7 +3249,9 @@ describe('UserManagementView', () => {
       expect(start, selector).toBeGreaterThan(-1)
       return style.slice(start, style.indexOf('}', start)).replace(/\/\*[\s\S]*?\*\//g, '')
     }
-    expect(rule('.user-admin__layout')).toContain('grid-template-columns: minmax(0, 320px) minmax(0, 1fr);')
+    expect(rule('.user-admin__layout')).toContain('grid-template-columns: minmax(0, 1fr);')
+    expect(rule('.user-admin__panel--detail')).toContain('position: fixed;')
+    expect(rule('.user-admin__panel--detail')).toContain('width: min(640px, 100%);')
     expect(rule('.user-admin__layout > *')).toContain('min-width: 0;')
     expect(rule('.user-admin__panel')).toContain('grid-template-columns: minmax(0, 1fr);')
     expect(rule('.user-admin__panel')).toContain('min-width: 0;')
@@ -3236,5 +3266,88 @@ describe('UserManagementView', () => {
     expect(style).toMatch(/\.user-admin__user-body > span,\n\.user-admin__detail-head h2,\n\.user-admin__detail-head p \{\n  overflow-wrap: anywhere;/)
     // The shared flex-wrap rule for every action row is still in place.
     expect(style).toMatch(/\.user-admin__role-actions,\n\.user-admin__role-list \{\n  display: flex;\n  flex-wrap: wrap;/)
+  })
+
+  it('keeps invite and editing off the member table until the admin opens them', async () => {
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    const modal = container!.querySelector('.user-admin__modal')
+    const detail = container!.querySelector('.user-admin__panel--detail')
+    expect(modal?.classList.contains('user-admin__modal--open')).toBe(false)
+    expect(detail?.classList.contains('user-admin__panel--detail-open')).toBe(false)
+    expect(container!.querySelector('.user-admin__panel--create input[aria-label="登录名（可选）"]')).toBeTruthy()
+    expect(container!.querySelectorAll('.user-admin__user').length).toBeGreaterThan(0)
+
+    findButtonByText(container!, '邀请用户').click()
+    await flushUi()
+    expect(container!.querySelector('.user-admin__modal')?.classList.contains('user-admin__modal--open')).toBe(true)
+    expect(container!.querySelector('.user-admin__panel--create')?.textContent).toContain('一次邀请一名成员')
+
+    findButtonByText(container!, '待处理邀请').click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="pending-invites-tab"]')?.getAttribute('aria-selected')).toBe('true')
+    expect(container!.textContent).toContain('邀请记录')
+
+    const alphaRow = findUserRow(container!, 'Alpha')
+    const alphaButton = Array.from(alphaRow.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Alpha'))
+    if (!(alphaButton instanceof HTMLButtonElement)) throw new Error('Alpha row button not found')
+    alphaButton.click()
+    await flushUi()
+    expect(container!.querySelector('.user-admin__panel--detail')?.classList.contains('user-admin__panel--detail-open')).toBe(true)
+    expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
+  })
+
+  it('filters the member table by role and status and sorts by name without dropping rows', async () => {
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    const roleSelect = container!.querySelector<HTMLSelectElement>('select[aria-label="角色筛选"]')
+    const statusSelect = container!.querySelector<HTMLSelectElement>('select[aria-label="账号状态"]')
+    if (!roleSelect || !statusSelect) throw new Error('Role or status filter not found')
+
+    await setSelectValue(roleSelect, 'admin')
+    const adminRows = Array.from(container!.querySelectorAll('.user-admin__user')).map((row) => row.textContent || '')
+    expect(adminRows).toHaveLength(1)
+    expect(adminRows[0]).toContain('Delta')
+
+    await setSelectValue(roleSelect, '')
+    await setSelectValue(statusSelect, 'inactive')
+    const inactiveRows = Array.from(container!.querySelectorAll('.user-admin__user')).map((row) => row.textContent || '')
+    expect(inactiveRows).toHaveLength(1)
+    expect(inactiveRows[0]).toContain('Charlie')
+
+    await setSelectValue(statusSelect, '')
+    const nameSort = container!.querySelector<HTMLButtonElement>('.user-admin__table-head button')
+    if (!nameSort) throw new Error('Name sort button not found')
+    nameSort.click()
+    nameSort.click()
+    await flushUi()
+    const names = Array.from(container!.querySelectorAll('.user-admin__user strong')).map((node) => node.textContent?.trim())
+    expect(names).toEqual(['Delta', 'Charlie', 'Bravo', 'Alpha'])
+  })
+
+  it('shows the recycle bin and restores a deleted account', async () => {
+    useLocale().setLocale('zh-CN')
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(12)
+
+    findButtonByText(container!, '回收站').click()
+    await waitForCondition(() => container!.textContent?.includes('已删除同事') === true)
+    expect(container!.textContent).toContain('不能登录')
+    expect(container!.textContent).toContain('30')
+
+    const row = findUserRow(container!, '已删除同事')
+    findButtonByText(row, '恢复').click()
+    await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/recycle/restore'))
+    const restoreCall = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users/recycle/restore')
+    expect(JSON.parse(String((restoreCall?.[1] as RequestInit | undefined)?.body))).toEqual({ userIds: ['user-gone'] })
+    useLocale().setLocale('en')
   })
 })
