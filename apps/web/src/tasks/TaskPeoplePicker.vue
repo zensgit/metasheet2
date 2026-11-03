@@ -13,6 +13,14 @@
   300ms after the last keystroke; an answer to an older term is dropped. `beforeRequest`, when given,
   is asked right before every search and nothing is sent when it says no.
 
+  Account switches: the picker holds the identity it was opened under (`readDispatchIdentity`, the
+  user and org a request would carry, as the record dispatch dialog reads it). When another identity
+  is seen — on a storage change from another tab, a session switch in this tab, the start of a search,
+  the answer to one, or confirm — the rows, the term, the ticks and any pending search are cleared and
+  nothing from before is shown or handed back. A token refresh for the same user and org is not a
+  change. This is not the parent's gate: `beforeRequest` is still asked first, and the parent decides
+  whether anything may be sent at all.
+
   Inline overlay (no Teleport), so it can open inside another dialog. Esc closes this picker only.
 -->
 <template>
@@ -90,8 +98,10 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, useId, watch } from 'vue'
+import { onAuthSessionSwitch } from '../composables/authPrincipal'
 import { useLocale } from '../composables/useLocale'
 import { TASKS_EN, TASKS_ZH, type TasksText } from './labels'
+import { readDispatchIdentity } from './recordTaskDispatchIdentity'
 import { isPathSafeSegment, searchPeople, type PersonOption, type SearchPeopleResult } from './tasksApi'
 
 export type TaskPeoplePickerMode = 'assignee' | 'follower'
@@ -135,6 +145,8 @@ const state = shallowRef<PickerState>({ kind: 'idle' })
 const picked = shallowRef(new Map<string, PersonOption>())
 let timer: ReturnType<typeof setTimeout> | null = null
 let generation = 0
+// The identity the rows, the term and the ticks on screen belong to (see the header).
+let identity = readDispatchIdentity()
 
 function clearTimer(): void {
   if (timer !== null) {
@@ -149,6 +161,15 @@ function reset(): void {
   term.value = ''
   state.value = { kind: 'idle' }
   picked.value = new Map()
+  identity = readDispatchIdentity()
+}
+
+/** Whether another identity than the one on screen is seen now; if so, everything on screen is
+ *  cleared (and the pending search stopped) before this returns `true`. */
+function identityChanged(): boolean {
+  if (readDispatchIdentity() === identity) return false
+  reset()
+  return true
 }
 
 watch(() => props.visible, (open) => {
@@ -156,9 +177,15 @@ watch(() => props.visible, (open) => {
   if (open) void nextTick(() => inputRef.value?.focus())
 }, { immediate: true })
 
+const stopSessionSwitch = onAuthSessionSwitch(() => { identityChanged() })
+const onStorage = () => { identityChanged() }
+if (typeof window !== 'undefined') window.addEventListener('storage', onStorage)
+
 onBeforeUnmount(() => {
   clearTimer()
   generation += 1
+  stopSessionSwitch()
+  if (typeof window !== 'undefined') window.removeEventListener('storage', onStorage)
 })
 
 const okState = computed(() => (state.value.kind === 'ok' ? state.value : null))
@@ -192,6 +219,7 @@ const failureText = computed(() => {
 
 async function runSearch(query: string): Promise<void> {
   if (props.beforeRequest && !props.beforeRequest()) return
+  if (identityChanged()) return
   const mine = ++generation
   state.value = { kind: 'loading' }
   let result: SearchPeopleResult
@@ -201,6 +229,8 @@ async function runSearch(query: string): Promise<void> {
     result = { kind: 'error', status: 0 }
   }
   if (mine !== generation) return
+  // An answer that lands under another identity than the one it was asked under is not shown.
+  if (identityChanged()) return
   if (result.kind === 'ok') {
     state.value = result.requiresQuery ? { kind: 'idle' } : { kind: 'ok', items: result.items, hasMore: result.hasMore }
     return
@@ -234,6 +264,7 @@ function toggle(row: PersonOption): void {
 const confirmable = computed(() => Array.from(picked.value.values()).filter((row) => isPathSafeSegment(row.id) && !isBlocked(row)))
 
 function onConfirm(): void {
+  if (identityChanged()) return
   const rows = confirmable.value
   if (rows.length === 0) return
   emit('confirm', {

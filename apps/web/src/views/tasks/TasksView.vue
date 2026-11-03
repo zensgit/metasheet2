@@ -338,6 +338,7 @@
               v-if="canManageTaskMembers"
               :visible="pickerMode !== null"
               :mode="pickerMode ?? 'assignee'"
+              :before-request="peopleIdentityHolds"
               @confirm="onPickerConfirm"
               @close="pickerMode = null"
             />
@@ -717,6 +718,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { onAuthSessionSwitch } from '../../composables/authPrincipal'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
 import { TASKS_EN, TASKS_FMT_EN, TASKS_FMT_ZH, TASKS_ZH, codeMessage, type TasksText } from '../../tasks/labels'
@@ -756,6 +758,7 @@ import {
   type TaskView,
   type WriteFailure,
 } from '../../tasks/tasksApi'
+import { readDispatchIdentity } from '../../tasks/recordTaskDispatchIdentity'
 import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
 import { formatDueDisplay, formatStartDisplay, formatViewerInstant } from '../../tasks/tasksDateDisplay'
 import { focusAfterSwap } from '../../tasks/tasksFocus'
@@ -930,6 +933,26 @@ const addAssigneeByIdOpen = ref(false)
 const addFollowerByIdOpen = ref(false)
 const taskPeople = shallowRef<Map<string, TaskPerson> | null>(null)
 let taskPeopleGeneration = 0
+// The identity (`readDispatchIdentity`: the user and org a request would carry, read the way the
+// record dispatch dialog reads it) the names and the picker's rows on screen belong to. When another
+// one is seen — a storage change from another tab, a session switch in this tab, right before a
+// picker search, or when a names answer lands — the names are dropped, a names read still out is
+// dropped with them, the picker closes, and the page holds the new identity from then on (the next
+// detail read loads that account's names). A token refresh for the same user and org is not a
+// change. Client-side and compared for equality only; the server checks every request.
+let peopleIdentity = readDispatchIdentity()
+
+/** `true` while the identity a request would carry is the one the names belong to; otherwise drops
+ *  the names and closes the picker (see above), takes the new identity and answers `false`. */
+function peopleIdentityHolds(): boolean {
+  const current = readDispatchIdentity()
+  if (current === peopleIdentity) return true
+  peopleIdentity = current
+  taskPeople.value = null
+  taskPeopleGeneration += 1
+  pickerMode.value = null
+  return false
+}
 
 // Row-level abilities from the detail body (contract §3.2). `false` hides the controls the server
 // would answer with its uniform 404; an absent flag (an older body) leaves them visible, and the
@@ -1140,6 +1163,8 @@ async function loadDetail(id: string): Promise<void> {
 /** Package 1b: the names on the task. Read after every detail read; only an `ok` answer for the
  *  task still on screen is kept. A failure, a thrown call or any other answer changes nothing. */
 async function loadTaskPeople(id: string): Promise<void> {
+  // Asked under the identity held from here on: one seen to differ now is taken first.
+  peopleIdentityHolds()
   taskPeopleGeneration += 1
   const mine = taskPeopleGeneration
   let result: Awaited<ReturnType<typeof getTaskPeople>> | undefined
@@ -1149,6 +1174,8 @@ async function loadTaskPeople(id: string): Promise<void> {
     return
   }
   if (mine !== taskPeopleGeneration || taskId.value !== id) return
+  // An answer that lands under another identity than the one it was asked under is dropped.
+  if (!peopleIdentityHolds()) return
   if (result && result.kind === 'ok') taskPeople.value = result.people
 }
 
@@ -2090,8 +2117,16 @@ const unsubscribeLists = onListsChanged(() => {
   if (contextState.value?.state === 'ready' && taskId.value) void loadMyLists()
 })
 
+// The names' identity (see `peopleIdentityHolds`): checked on a session switch in this tab and on a
+// storage change from another tab, which this tab is not otherwise told about.
+const stopPeopleSessionSwitch = onAuthSessionSwitch(() => { peopleIdentityHolds() })
+const onPeopleStorage = () => { peopleIdentityHolds() }
+if (typeof window !== 'undefined') window.addEventListener('storage', onPeopleStorage)
+
 onBeforeUnmount(() => {
   unsubscribeLists()
+  stopPeopleSessionSwitch()
+  if (typeof window !== 'undefined') window.removeEventListener('storage', onPeopleStorage)
 })
 
 /** The lists sidebar's read or create, or a grouping-board write, reported no org selected: the

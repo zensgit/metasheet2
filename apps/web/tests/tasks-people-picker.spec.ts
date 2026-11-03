@@ -12,6 +12,12 @@ import { createApp, h, nextTick, type App as VueApp } from 'vue'
  *     a distinguishing detail and, for someone who cannot use tasks yet, a mark (not tickable as an
  *     assignee, tickable as a follower); each failure has its own copy; confirm hands back only the
  *     ticked ids.
+ *  3. Account switches (the component): an answer that lands after the signed-in account changed is
+ *     not shown, whether the switch was seen or not; a switch seen while the picker is open (another
+ *     tab's storage change, or a session switch in this tab) clears the rows, the ticks and a pending
+ *     search, and so does another org for the same person; a search due or a confirm after an unseen
+ *     switch sends and hands back nothing; a token refresh for the same person keeps the rows and
+ *     the ticks, and a search under one account shows its rows as usual.
  *
  * Only the transport (`apiFetch`) and the locale are replaced.
  */
@@ -31,6 +37,7 @@ vi.mock('../src/composables/useLocale', () => ({
   useLocale: () => ({ locale: { value: mocks.isZh.value ? 'zh-CN' : 'en' }, isZh: mocks.isZh, setLocale: vi.fn() }),
 }))
 
+import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 import { getTaskPeople, resolvePeople, searchPeople } from '../src/tasks/tasksApi'
 import TaskPeoplePicker, { type TaskPeoplePicked, type TaskPeoplePickerMode } from '../src/tasks/TaskPeoplePicker.vue'
 import { TASKS_EN, TASKS_ZH } from '../src/tasks/labels'
@@ -412,5 +419,191 @@ describe('TaskPeoplePicker', () => {
     await pause()
     expect(el.querySelector('[data-testid="task-people-picker-no-access"]')!.textContent).toBe(TASKS_EN.peopleCannotUseTasks)
     expect(cjk.test(el.textContent ?? '')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// 3. Account switches
+// ---------------------------------------------------------------------------------------------
+
+/** A JWT-shaped token the app's own payload reader understands (header and signature are not read). */
+function fakeToken(payload: Record<string, unknown>): string {
+  return `h.${btoa(JSON.stringify(payload)).replace(/=+$/, '')}.s`
+}
+const TOKEN_A = fakeToken({ sub: 'usr_a', exp: 4102444800 })
+const TOKEN_A_REFRESHED = fakeToken({ sub: 'usr_a', exp: 4102448400 })
+const TOKEN_B = fakeToken({ sub: 'usr_b', exp: 4102444800 })
+
+function signIn(token: string): void {
+  localStorage.setItem('auth_token', token)
+}
+
+/** Another tab signs in: the shared storage changes and this tab is told nothing. */
+function signInSilently(token: string): void {
+  signIn(token)
+}
+
+/** The same, plus the `storage` event a browser delivers to the other tabs. */
+function signInElsewhereWithEvent(token: string): void {
+  signIn(token)
+  window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token', newValue: token }))
+}
+
+describe('TaskPeoplePicker — account switches', () => {
+  beforeEach(() => {
+    localStorage.removeItem('auth_token')
+    signIn(TOKEN_A)
+  })
+
+  afterEach(() => {
+    localStorage.removeItem('auth_token')
+  })
+
+  it('a search started under one account whose answer lands after a silent switch to another is not shown', async () => {
+    const late = deferred<Response>()
+    mocks.apiFetch.mockImplementationOnce(() => late.promise)
+    const { el } = mountPicker('assignee')
+    await flush()
+    type(el, '张')
+    await pause()
+    expect(q(el, 'loading')).not.toBeNull()
+    signInSilently(TOKEN_B)
+    late.resolve(jsonResponse(200, searchBody([row('u1', '张三', 'zh***@example.test')])))
+    await flush()
+    expect(rows(el)).toEqual([])
+    expect(el.textContent).not.toContain('张三')
+    expect(el.textContent).not.toContain('zh***@example.test')
+    expect(q(el, 'type-hint')).not.toBeNull()
+    expect((q(el, 'search') as HTMLInputElement).value).toBe('')
+  })
+
+  for (const [how, switchTo] of [
+    ['another tab (a storage change)', (token: string) => signInElsewhereWithEvent(token)],
+    ['this tab (a session switch)', (token: string) => { signIn(token); notifyAuthPrincipalChange() }],
+  ] as Array<[string, (token: string) => void]>) {
+    it(`a switch seen while open, from ${how}: rows, ticks and the pending search are cleared`, async () => {
+      mocks.apiFetch.mockResolvedValue(jsonResponse(200, searchBody([row('u1', '张三', 'zh***@example.test')])))
+      const { el, confirmed } = mountPicker('assignee')
+      await flush()
+      type(el, '张')
+      await pause()
+      tick(el, 'u1')
+      await flush()
+      expect(q(el, 'count')!.textContent).toBe(`${TASKS_ZH.peopleSelectedLabel}1`)
+      type(el, '张三')
+      switchTo(TOKEN_B)
+      await flush()
+      expect(rows(el)).toEqual([])
+      expect(el.textContent).not.toContain('zh***@example.test')
+      expect(q(el, 'count')!.textContent).toBe(`${TASKS_ZH.peopleSelectedLabel}0`)
+      expect((q(el, 'confirm') as HTMLButtonElement).disabled).toBe(true)
+      await pause()
+      expect(urls()).toEqual([`/api/tasks/people?q=${encodeURIComponent('张')}`])
+      ;(q(el, 'confirm') as HTMLButtonElement).click()
+      await flush()
+      expect(confirmed).toEqual([])
+    })
+
+    it(`a search started before a switch seen from ${how} whose answer lands after it is not shown`, async () => {
+      const late = deferred<Response>()
+      mocks.apiFetch.mockImplementationOnce(() => late.promise)
+      const { el } = mountPicker('assignee')
+      await flush()
+      type(el, '张')
+      await pause()
+      expect(q(el, 'loading')).not.toBeNull()
+      switchTo(TOKEN_B)
+      await flush()
+      late.resolve(jsonResponse(200, searchBody([row('u1', '张三', 'zh***@example.test')])))
+      await flush()
+      expect(rows(el)).toEqual([])
+      expect(el.textContent).not.toContain('张三')
+      expect(el.textContent).not.toContain('zh***@example.test')
+      expect(q(el, 'type-hint')).not.toBeNull()
+    })
+  }
+
+  it('a search whose pause ends after a silent switch to another account is not sent', async () => {
+    mocks.apiFetch.mockResolvedValue(jsonResponse(200, searchBody([row('u1', '张三', 'zh***@example.test')])))
+    const { el } = mountPicker('assignee')
+    await flush()
+    type(el, '张')
+    await flush()
+    signInSilently(TOKEN_B)
+    await pause()
+    expect(mocks.apiFetch).not.toHaveBeenCalled()
+    expect(rows(el)).toEqual([])
+    expect((q(el, 'search') as HTMLInputElement).value).toBe('')
+  })
+
+  it('ticks made under one account are not handed back by a confirm after a silent switch to another', async () => {
+    mocks.apiFetch.mockResolvedValue(jsonResponse(200, searchBody([row('u1', '张三', 'zh***@example.test')])))
+    const { el, confirmed } = mountPicker('assignee')
+    await flush()
+    type(el, '张')
+    await pause()
+    tick(el, 'u1')
+    await flush()
+    expect((q(el, 'confirm') as HTMLButtonElement).disabled).toBe(false)
+    signInSilently(TOKEN_B)
+    ;(q(el, 'confirm') as HTMLButtonElement).click()
+    await flush()
+    expect(confirmed).toEqual([])
+    expect(rows(el)).toEqual([])
+    expect(q(el, 'count')!.textContent).toBe(`${TASKS_ZH.peopleSelectedLabel}0`)
+  })
+
+  it('a switch to another org for the same person, seen from another tab, clears the rows and the ticks', async () => {
+    signIn(fakeToken({ sub: 'usr_a', tenantId: 'org_1', exp: 4102444800 }))
+    mocks.apiFetch.mockResolvedValue(jsonResponse(200, searchBody([row('u1', '张三', 'zh***@example.test')])))
+    const { el, confirmed } = mountPicker('assignee')
+    await flush()
+    type(el, '张')
+    await pause()
+    tick(el, 'u1')
+    await flush()
+    expect(q(el, 'count')!.textContent).toBe(`${TASKS_ZH.peopleSelectedLabel}1`)
+    signInElsewhereWithEvent(fakeToken({ sub: 'usr_a', tenantId: 'org_2', exp: 4102444800 }))
+    await flush()
+    expect(rows(el)).toEqual([])
+    expect(el.textContent).not.toContain('zh***@example.test')
+    expect(q(el, 'count')!.textContent).toBe(`${TASKS_ZH.peopleSelectedLabel}0`)
+    ;(q(el, 'confirm') as HTMLButtonElement).click()
+    await flush()
+    expect(confirmed).toEqual([])
+  })
+
+  it('negative control: a token refresh for the same person keeps the rows and the ticks, and the next search is sent', async () => {
+    mocks.apiFetch.mockResolvedValue(jsonResponse(200, searchBody([row('u1', '张三', 'zh***@example.test')])))
+    const { el, confirmed } = mountPicker('assignee')
+    await flush()
+    type(el, '张')
+    await pause()
+    tick(el, 'u1')
+    await flush()
+    signInElsewhereWithEvent(TOKEN_A_REFRESHED)
+    notifyAuthPrincipalChange()
+    await flush()
+    expect(rows(el).map((entry) => entry.dataset.personId)).toEqual(['u1'])
+    expect(q(el, 'count')!.textContent).toBe(`${TASKS_ZH.peopleSelectedLabel}1`)
+    ;(q(el, 'confirm') as HTMLButtonElement).click()
+    await flush()
+    expect(confirmed).toEqual([{ ids: ['u1'], names: { u1: '张三' } }])
+    type(el, '张三')
+    await pause()
+    expect(urls()).toEqual([`/api/tasks/people?q=${encodeURIComponent('张')}`, `/api/tasks/people?q=${encodeURIComponent('张三')}`])
+    expect(rows(el).map((entry) => entry.dataset.personId)).toEqual(['u1'])
+  })
+
+  it('negative control: signed in and not switching, a search shows its rows and beforeRequest is asked once', async () => {
+    mocks.apiFetch.mockResolvedValue(jsonResponse(200, searchBody([row('u1', '张三', 'zh***@example.test'), row('u2', '张伟', '')])))
+    const asked = { count: 0 }
+    const { el } = mountPicker('follower', { beforeRequest: () => { asked.count += 1; return true } })
+    await flush()
+    type(el, '张')
+    await pause()
+    expect(asked.count).toBe(1)
+    expect(rows(el).map((entry) => entry.dataset.personId)).toEqual(['u1', 'u2'])
+    expect(q(el, 'detail')!.textContent).toBe('zh***@example.test')
   })
 })
