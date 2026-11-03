@@ -1110,7 +1110,13 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
       ...authenticated.user,
       must_change_password: false,
     }
-    const token = await issueAuthSessionToken(refreshedUser, req)
+    // Fenced like /session-org: the new session is registered only while the access generation read
+    // when this request authenticated is still current. The password change above stays committed.
+    const token = await issueAuthSessionToken(
+      refreshedUser,
+      req,
+      Number(authenticated.user.access_generation ?? 0),
+    )
 
     return res.json({
       success: true,
@@ -1122,6 +1128,13 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
       },
     })
   } catch (error) {
+    if (error instanceof DingTalkLoginPolicyError && error.code === 'authentication_changed') {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: 'Authentication changed; please sign in again with the new password',
+        code: error.code,
+      })
+    }
     logger.error('Password change error', error instanceof Error ? error : undefined)
     return res.status(500).json({
       success: false,

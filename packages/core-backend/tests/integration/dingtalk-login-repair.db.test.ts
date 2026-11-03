@@ -1535,6 +1535,161 @@ suite('DingTalk controlled login repair', () => {
     )
   })
 
+  describe('POST /api/auth/password/change across a repair rollback', () => {
+    const app = express()
+    app.use(express.json())
+    app.use('/api/auth', authRouter)
+    const newPassword = 'SyntheticRotated-Only!58'
+    const changePassword = (token: string) =>
+      request(app)
+        .post('/api/auth/password/change')
+        .set('authorization', `Bearer ${token}`)
+        .send({ password: newPassword })
+    const activeSessions = async (user: string) =>
+      (
+        await query(
+          'SELECT id FROM user_sessions WHERE user_id=$1 AND revoked_at IS NULL',
+          [user],
+        )
+      ).rows
+    const generation = async (user: string) =>
+      Number(
+        (
+          await query('SELECT access_generation FROM users WHERE id=$1', [
+            user,
+          ])
+        ).rows[0].access_generation,
+      )
+    const requirePasswordChange = (user: string) =>
+      query('UPDATE users SET must_change_password=true WHERE id=$1', [user])
+    const withDbTokenVerification = async (run: () => Promise<void>) => {
+      const trust = process.env.RBAC_TOKEN_TRUST
+      process.env.RBAC_TOKEN_TRUST = 'false'
+      try {
+        await run()
+      } finally {
+        if (trust === undefined) delete process.env.RBAC_TOKEN_TRUST
+        else process.env.RBAC_TOKEN_TRUST = trust
+      }
+    }
+    // Parks the request after authentication (generation already read) and after the password write,
+    // before the session write. The first tenant lookup is token verification's; the second is the
+    // session re-issuance's, reached only once the new password and the revocation watermark are committed.
+    const parkBeforeSession = (user: string) => {
+      let entered!: () => void, resume!: () => void
+      const reached = new Promise<void>((resolve) => {
+          entered = resolve
+        }),
+        released = new Promise<void>((resolve) => {
+          resume = resolve
+        })
+      const real = authService.resolveSessionTenantId.bind(authService)
+      let calls = 0
+      const spy = vi
+        .spyOn(authService, 'resolveSessionTenantId')
+        .mockImplementation(async (...args) => {
+          const result = await real(...args)
+          if (++calls === 2) {
+            entered()
+            await released
+          }
+          return result
+        })
+      const parkedAfterPasswordWrite = async () =>
+        (
+          await query('SELECT must_change_password FROM users WHERE id=$1', [
+            user,
+          ])
+        ).rows[0].must_change_password === false
+      return { reached, resume, spy, parkedAfterPasswordWrite }
+    }
+
+    it('a credential authenticated before the generation moves cannot obtain a session; a later normal change still can', async () => {
+      await withDbTokenVerification(async () => {
+        const f = await fixture(),
+          proof = await f.verify(),
+          p = await previewDingTalkRepair(proof)
+        const r = await applyDingTalkRepair(proof, p.digest, 'apply')
+        await requirePasswordChange(f.user)
+        // JWT iat has second precision: a login in the same second as apply's revocation would be dead.
+        await new Promise((resolve) => setTimeout(resolve, 1100))
+        const login = await authService.login(f.user, f.password)
+        expect(login?.user.must_change_password).toBe(true)
+        const before = await generation(f.user)
+        const park = parkBeforeSession(f.user)
+        const pending = changePassword(login!.token).then((res) => res)
+        try {
+          await park.reached
+          expect(await park.parkedAfterPasswordWrite()).toBe(true)
+          const recovery = await previewDingTalkRepairRecovery(
+            r.id,
+            f.admin,
+            f.password,
+            'rollback',
+          )
+          await rollbackDingTalkRepair(
+            r.id,
+            f.admin,
+            recovery.digest,
+            'rollback',
+            f.password,
+          )
+          expect(await generation(f.user)).toBeGreaterThan(before)
+          park.resume()
+          const res = await pending
+          expect(res.status).toBe(409)
+          expect(res.body).toEqual({
+            success: false,
+            error:
+              'Authentication changed; please sign in again with the new password',
+            code: 'authentication_changed',
+          })
+          expect(await activeSessions(f.user)).toHaveLength(0)
+          expect(await authService.verifyToken(login!.token)).toBeNull()
+        } finally {
+          park.resume()
+          await pending.catch(() => undefined)
+          park.spy.mockRestore()
+        }
+        // The password change itself stayed committed: the old password is refused, the new one works.
+        expect(await authService.login(f.user, f.password)).toBeNull()
+        const next = await authService.login(f.user, newPassword)
+        expect(next?.user.id).toBe(f.user)
+        expect(next?.user.must_change_password).toBe(false)
+
+        // A normal forced change on the moved generation still returns a usable token.
+        await requirePasswordChange(f.user)
+        await new Promise((resolve) => setTimeout(resolve, 1100))
+        const again = await authService.login(f.user, newPassword)
+        expect(again?.user.must_change_password).toBe(true)
+        expect(await generation(f.user)).toBeGreaterThan(before)
+        const slow = parkBeforeSession(f.user)
+        const normal = changePassword(again!.token).then((res) => res)
+        try {
+          await slow.reached
+          expect(await slow.parkedAfterPasswordWrite()).toBe(true)
+          // JWT iat has second precision: a token minted now would postdate the revocation watermark.
+          await new Promise((resolve) => setTimeout(resolve, 1100))
+          slow.resume()
+          const ok = await normal
+          expect(ok.status).toBe(200)
+          expect(ok.body.data.passwordChangeRequired).toBe(false)
+          const sid = authService.readTokenPayload(ok.body.data.token)?.sid
+          expect((await activeSessions(f.user)).map((row) => row.id)).toContain(
+            sid,
+          )
+          expect((await authService.verifyToken(ok.body.data.token))?.id).toBe(
+            f.user,
+          )
+        } finally {
+          slow.resume()
+          await normal.catch(() => undefined)
+          slow.spy.mockRestore()
+        }
+      })
+    })
+  })
+
   describe('core-table lock acquisition waits a bounded time instead of failing immediately', () => {
     // SHARE UPDATE EXCLUSIVE is the lock (auto)VACUUM and ANALYZE hold; a plain session holding it
     // stands in for them but never cancels itself, so it exercises both the wait and the timeout.
@@ -1675,8 +1830,11 @@ suite('DingTalk controlled login repair', () => {
         pending.catch(() => undefined)
         // Apply now holds the tables listed before roles (users first) and is queued on roles.
         expect(await waitUntilBlockedBy(pid)).toBe(true)
-        // Close the cycle well before apply's deadlock_timeout (1s) check, so apply is the victim.
-        await new Promise((resolve) => setTimeout(resolve, 200))
+        // Each waiter runs its own deadlock check deadlock_timeout (1s) after it starts waiting, and the
+        // first to run it is the victim. Apply is the victim only if the holder enqueues after apply's wait
+        // starts (so apply's check fires first) and before that check runs. Closing the cycle at the
+        // midpoint leaves about half a second on each side; closing it at once lets timer jitter pick the holder.
+        await new Promise((resolve) => setTimeout(resolve, 500))
         holderNext = holder.query('LOCK TABLE users IN ROW EXCLUSIVE MODE')
         holderNext.catch(() => undefined)
         await expect(pending).rejects.toThrow('REPAIR_LOCK_BUSY')
