@@ -104,6 +104,7 @@
     "verify:integration-k3wise:poc": "node --test scripts/ops/integration-read-selfservice-postdeploy-smoke.test.mjs && node --test scripts/ops/integration-k3wise-live-poc-preflight.test.mjs && node --test scripts/ops/integration-k3wise-live-poc-evidence.test.mjs && node --test scripts/ops/fixtures/integration-k3wise/fixture-contract.test.mjs && node --test scripts/ops/fixtures/integration-k3wise/mock-k3-webapi-server.test.mjs && node --test scripts/ops/fixtures/integration-k3wise/mock-sqlserver-executor.test.mjs && node scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs",
     "verify:integration-k3wise:delivery": "node --test scripts/ops/integration-k3wise-delivery-readiness.test.mjs",
     "verify:integration-k3wise:onprem-preflight": "node --test scripts/ops/integration-k3wise-onprem-preflight.test.mjs",
+    "verify:integration-yida:l4-preflight": "node --test scripts/ops/integration-yida-l4-preflight.test.mjs",
     "verify:integration-k3wise:postdeploy-env-check": "node --test scripts/ops/integration-k3wise-postdeploy-env-check.test.mjs",
     "verify:integration-k3wise:gate-contract": "node --test scripts/ops/integration-k3wise-gate-contract-check.test.mjs",
     "verify:integration-issue1542:seed-workbench": "node --test scripts/ops/integration-issue1542-seed-workbench-systems.test.mjs",
