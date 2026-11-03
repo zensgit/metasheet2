@@ -21,6 +21,12 @@ const FIXTURE = path.join(__dirname, '..', 'fixtures', 'yida-rule-templates', 'm
 const TARGET = { appType: 'synthetic_parity_app', formUuid: 'synthetic_parity_form' }
 const PROJECTS = ['SYN-PROJECT-01', 'SYN-PROJECT-02']
 
+// The exporter writes LF. A core.autocrlf=true checkout hands the fixture back with CRLF, so the
+// comparison is on LF-normalized text; any other byte difference still fails the exact equality.
+function readFixture() {
+  return fs.readFileSync(FIXTURE, 'utf8').replace(/\r\n/g, '\n')
+}
+
 function withoutTarget(config) {
   const { target: _target, ...rules } = config
   return rules
@@ -45,7 +51,7 @@ test('the checked-in synthetic v3 material template is exactly what the exporter
   const { exportYidaRuleTemplate, parseYidaRuleTemplate } = await templatePromise
   const example = createYidaTransformExample()
   const text = exportYidaRuleTemplate({ rules: withoutTarget(example.config), allocation: example.allocation })
-  assert.equal(fs.readFileSync(FIXTURE, 'utf8'), `${text}\n`)
+  assert.equal(readFixture(), `${text}\n`)
   const imported = parseYidaRuleTemplate(text)
   assert.equal(imported.formatVersion, 2)
   assert.deepEqual(imported.rules, withoutTarget(validateYidaStaticConfig(example.config).normalized))
@@ -60,7 +66,7 @@ test('template import -> browser preview -> host recompute: identical rules and 
   const { exportYidaRuleTemplate, parseYidaRuleTemplate } = await templatePromise
   const { compileYidaLocalDraft } = await draftPromise
   const example = createYidaTransformExample()
-  const imported = parseYidaRuleTemplate(fs.readFileSync(FIXTURE, 'utf8'))
+  const imported = parseYidaRuleTemplate(readFixture())
   for (const allocation of [{ mode: 'original' }, { ...imported.allocation, projects: PROJECTS }]) {
     const browser = await browserPlan(imported.rules, example.text, allocation)
     const host = compileYidaLocalDraft({ config: { ...imported.rules, target: TARGET }, rowsText: example.text, allocation })
@@ -69,7 +75,7 @@ test('template import -> browser preview -> host recompute: identical rules and 
     assert.equal(browser.evidence.invalid, 0)
     // The host's own rule identity matches a fresh export of what it compiled.
     assert.equal(exportYidaRuleTemplate({ rules: withoutTarget(host.source.config), allocation: imported.allocation }),
-      fs.readFileSync(FIXTURE, 'utf8').replace(/\n$/, ''))
+      readFixture().replace(/\n$/, ''))
   }
 })
 
@@ -77,7 +83,7 @@ test('independent oracle for the first allocated row: values, constants, copy, c
   const { createYidaTransformExample } = await plannerPromise
   const { parseYidaRuleTemplate } = await templatePromise
   const { compileYidaLocalDraft } = await draftPromise
-  const imported = parseYidaRuleTemplate(fs.readFileSync(FIXTURE, 'utf8'))
+  const imported = parseYidaRuleTemplate(readFixture())
   const example = createYidaTransformExample()
   const host = compileYidaLocalDraft({ config: { ...imported.rules, target: TARGET }, rowsText: example.text,
     allocation: { ...imported.allocation, projects: PROJECTS } })
@@ -105,7 +111,7 @@ test('issues: the browser plan reports them; the host refuses to compile a draft
   const { createYidaTransformExample } = await plannerPromise
   const { parseYidaRuleTemplate } = await templatePromise
   const { compileYidaLocalDraft } = await draftPromise
-  const imported = parseYidaRuleTemplate(fs.readFileSync(FIXTURE, 'utf8'))
+  const imported = parseYidaRuleTemplate(readFixture())
   const rows = createYidaTransformExample().rows.map((item) => ({ ...item }))
   rows[0].ext_blankWidth = null
   rows[1].material = ''
@@ -125,7 +131,7 @@ test('template envelope: v1/v2 rules stay formatVersion 1; v3 rules need formatV
   const v2 = exportYidaRuleTemplate({ rules: withoutTarget(createYidaProtocolExample().config), allocation: { mode: 'original' } })
   assert.match(v2, /"formatVersion": 1,/)
   assert.equal(parseYidaRuleTemplate(v2).formatVersion, 1)
-  const text = fs.readFileSync(FIXTURE, 'utf8')
+  const text = readFixture()
   const code = (kind) => (error) => error.code === `YIDA_RULE_TEMPLATE_${kind}`
   assert.throws(() => parseYidaRuleTemplate(text.replace('"formatVersion": 2', '"formatVersion": 1')), code('TEXT'))
   assert.throws(() => parseYidaRuleTemplate(v2.replace('"formatVersion": 1', '"formatVersion": 2')), code('INPUT'))

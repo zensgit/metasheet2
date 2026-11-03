@@ -159,6 +159,21 @@ test('concat semantics are explicit: listed order, one separator, String(number)
   assert.deepEqual(run(config(), [row({ length: 'x'.repeat(4096) })])[0].issues.map((issue) => issue.code), ['FIELD_VALUE_TOO_LONG'])
 })
 
+test('v3 row-token number domain: safe integers up to 2^53-1, finite decimals that keep their text', async () => {
+  const { parseYidaStaticRows } = await plannerPromise
+  // Builds the row text by hand so the numeric token reaches the scanner exactly as written.
+  const rowsText = (token) => `[{"projectNo":"DEMO-P1","lineId":"LINE-1","parentCode":"PARENT-1","quantity":${token},"length":1200,"width":600,"thickness":20}]`
+  const accepted = { '9007199254740991': Number.MAX_SAFE_INTEGER, '-9007199254740991': -Number.MAX_SAFE_INTEGER, '0': 0, '1.5': 1.5 }
+  for (const [token, value] of Object.entries(accepted)) {
+    assert.equal(parseYidaStaticRows(rowsText(token), config())[0].quantity, value, token)
+  }
+  // 2^53 and beyond leave the safe-integer domain; 1e400 parses to Infinity; -0 is refused;
+  // a decimal that loses digits when parsed no longer keeps its text identity.
+  for (const token of ['9007199254740992', '9007199254740993', '-9007199254740992', '1e400', '-1e400', '-0', '9007199254740991.5']) {
+    assert.throws(() => parseYidaStaticRows(rowsText(token), config()), (error) => error.code === 'YIDA_STATIC_ROWS_INVALID', token)
+  }
+})
+
 test('constants and copies land in the payload and are validated against their own control', async () => {
   const { buildYidaStaticPlan } = await plannerPromise
   const [planned] = buildYidaStaticPlan({ config: config(), rows: [row()] }).rows
