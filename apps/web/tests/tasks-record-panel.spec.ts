@@ -525,9 +525,28 @@ describe('MultitableApiClient.listRecordTasks', () => {
     })
   })
 
+  it('with a retry key, reads the same route with the key as a query parameter (the dispatch dialog\'s open-time read)', async () => {
+    const fetchFn = respond(200, { ok: true, data: { items: [], hasMore: false } })
+    const client = new MultitableApiClient({ fetchFn })
+    const key = '0f8fad5b-d9cb-469f-a165-70867728950e'
+    expect(await client.listRecordTasks('sheet 1', 'rec/1', { dispatchKey: key })).toEqual({ items: [], hasMore: false, degraded: false })
+    expect(fetchFn.mock.calls[0][0]).toBe(`/api/multitable/sheets/sheet%201/records/rec%2F1/tasks?dispatchKey=${key}`)
+    // An empty key is not sent.
+    await client.listRecordTasks('s', 'r', { dispatchKey: '' })
+    expect(String(fetchFn.mock.calls[1][0])).not.toContain('dispatchKey')
+  })
+
   it('hasMore and degraded are strictly true', async () => {
     const client = new MultitableApiClient({ fetchFn: respond(200, { ok: true, data: { items: [], hasMore: 'true', degraded: true, reason: 'org_missing' } }) })
     expect(await client.listRecordTasks('s', 'r')).toEqual({ items: [], hasMore: false, degraded: true })
+  })
+
+  it('a 2xx whose body holds no items list throws instead of reading as an empty list', async () => {
+    for (const body of ['<html>sign in</html>', { ok: true, data: { rows: [] } }, { ok: true, data: { items: 'none' } }, []]) {
+      const fetchFn = vi.fn().mockResolvedValue(new Response(typeof body === 'string' ? body : JSON.stringify(body), { status: 200 }))
+      const client = new MultitableApiClient({ fetchFn })
+      await expect(client.listRecordTasks('s', 'r')).rejects.toMatchObject({ status: 200 })
+    }
   })
 
   it('a refusal throws with its status', async () => {

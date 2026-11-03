@@ -2584,29 +2584,40 @@ export class MultitableApiClient implements CommentsApiClient {
   /**
    * The tasks dispatched from this record that the viewer can open (package 2, the 关联任务 panel).
    * The server answers only those, and never a count of the others. `limit` is the page size the
-   * panel asks for (the server clamps it to 1..100).
+   * panel asks for (the server clamps it to 1..100). With `dispatchKey` (the 派发任务 dialog resolving
+   * an attempt that got no readable answer) the server answers only the caller's own live task made
+   * from this record under that key: zero or one row. A 2xx whose body is not an object with an
+   * `items` list (a proxy's page, say) throws, like a refusal: it says nothing about the record's tasks,
+   * so it is not read as an empty list.
    */
   async listRecordTasks(
     sheetId: string,
     recordId: string,
-    options: { limit?: number } = {},
+    options: { limit?: number; dispatchKey?: string } = {},
   ): Promise<MetaRecordTaskListPage> {
     const limit = typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0
       ? Math.trunc(options.limit)
       : undefined
+    const dispatchKey = typeof options.dispatchKey === 'string' && options.dispatchKey !== '' ? options.dispatchKey : undefined
     const res = await this.fetch(
-      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/tasks${qs({ limit })}`,
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/tasks${qs({ limit, dispatchKey })}`,
     )
-    const body = await this.parseJson<unknown>(res)
-    const rows = isPlainObject(body) && Array.isArray(body.items) ? body.items : []
-    const items = rows
+    const raw = await this.parseJson<unknown>(res)
+    const body = isPlainObject(raw) && Array.isArray(raw.items) ? raw : null
+    if (body === null) {
+      const error = new Error('The record\'s tasks could not be read.') as Error & { status?: number }
+      error.name = 'MultitableApiError'
+      error.status = res.status
+      throw error
+    }
+    const items = (body.items as unknown[])
       .map((row: unknown) => normalizeRecordTaskItem(row))
       .filter((row): row is MetaRecordTaskItem => row !== null)
     return {
       items,
       // Strictly boolean-true, as for the approvals list: anything else claims no more rows.
-      hasMore: isPlainObject(body) && body.hasMore === true,
-      degraded: isPlainObject(body) && body.degraded === true,
+      hasMore: body.hasMore === true,
+      degraded: body.degraded === true,
     }
   }
 

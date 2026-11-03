@@ -47,6 +47,21 @@
                 {{ t.detailRemindLabel }}{{ detailResult.task.remindAt ? formatViewerInstant(detailResult.task.remindAt, undefined, viewerLocale) : t.noReminder }}
               </p>
             </template>
+            <!-- Package 2 (S-G2): the record this task was dispatched from, for a task that has one. The
+                 link is built from the ids alone (tasks/taskSourceLink.ts) and resolved by the router;
+                 nothing is read from the record here, and the record page decides whether the viewer
+                 may open it. Without a usable link the row shows without one. A task dispatched before
+                 the structured source keeps the line its description already holds. -->
+            <p v-if="detailResult.task.source" class="tasks-view__detail-source" data-testid="tasks-detail-source">
+              {{ t.detailSourceLabel }}<router-link
+                v-if="detailSourceLink"
+                :to="detailSourceLink"
+                data-testid="tasks-detail-source-link"
+              >{{ t.detailSourceRecord }}</router-link><span
+                v-else
+                data-testid="tasks-detail-source-plain"
+              >{{ t.detailSourceRecord }}</span>
+            </p>
 
             <ul class="tasks-view__detail-assignees" data-testid="tasks-detail-assignees">
               <li
@@ -705,6 +720,7 @@ import {
   type WriteFailure,
 } from '../../tasks/tasksApi'
 import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
+import { taskSourceRecordPath } from '../../tasks/taskSourceLink'
 import { formatDueDisplay, formatStartDisplay, formatViewerInstant } from '../../tasks/tasksDateDisplay'
 import { focusAfterSwap } from '../../tasks/tasksFocus'
 import { onListsChanged } from '../../tasks/tasksListsBus'
@@ -797,6 +813,11 @@ type DetailRenderState =
   | { kind: 'error' }
 
 const detailResult = ref<DetailRenderState>({ kind: 'loading' })
+// Package 2 (S-G2): the app path of the source record, or `null` (no source, or no link can be built).
+const detailSourceLink = computed<string | null>(() => {
+  const state = detailResult.value
+  return state.kind === 'ok' && state.task.source ? taskSourceRecordPath(state.task.source) : null
+})
 
 const orgMissingFromAction = ref(false)
 
