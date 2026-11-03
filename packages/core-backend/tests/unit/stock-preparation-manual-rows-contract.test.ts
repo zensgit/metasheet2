@@ -14,7 +14,11 @@
  *   K-06 the plugin registry read is a FIXED statement over columns migration 087 created (parsed from the migration);
  *   K-07 the failure direction is decided by SQLSTATE alone (42P01 = not registered; anything else = unreadable);
  *   K-08 the deployment switch reads with the plugin's exact-literal rule;
- *   K-09 the physical ids the gate derives are provisioning's.
+ *   K-09 the physical ids the gate derives are provisioning's;
+ *   K-10 (B4) the per-sheet switch: the plugin's reader (the switch route's) answers exactly as the host's, value for
+ *        value, and what the plugin writes survives the host sanitizer with the lock and the key stanza kept; the switch
+ *        route's 「manual rows offered on this sheet」 rule (manualRowsSupportedOnObject) answers exactly as the host's
+ *        predicate (a), id for id.
  */
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
@@ -30,12 +34,14 @@ import {
   MANUAL_ROWS_PROJECT_TARGET_TABLE,
   deriveManualRowsFieldIds,
   evaluateManualRowsGate,
+  isManualRowsProjectSheetHost,
   readManualRowsHostRegistry,
   readManualRowsProjectTarget,
   stockPrepProjectSheetsEnabledForManualRows,
 } from '../../src/multitable/stock-preparation-manual-rows-gate'
 import { STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PATTERN } from '../../src/multitable/stock-preparation-project-sheet-grant-contract'
 import { getObjectFieldId } from '../../src/multitable/provisioning'
+import { sanitizeFieldProperty } from '../../src/multitable/field-codecs'
 
 const requireCjs = createRequire(import.meta.url)
 const PLUGIN = '../../../../plugins/plugin-integration-core'
@@ -253,6 +259,85 @@ describe('K-08 the deployment switch: the plugin\'s exact-literal rule, read per
     const env = value === undefined ? {} : { MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED: value }
     expect(stockPrepProjectSheetsEnabledForManualRows(env as NodeJS.ProcessEnv)).toBe(expected)
     expect(stockPrepProjectSheetsEnabledForManualRows(env as NodeJS.ProcessEnv)).toBe(pluginTargets.stockPreparationProjectSheetsEnabled(env))
+  })
+})
+
+/**
+ * K-10 (B4) THE PER-SHEET SWITCH, read on both sides. The plugin's switch route (B4,
+ * lib/stock-preparation-manual-rows.cjs `manualRowsPolicyValueOf`) reads the key column's `stockPreparationManualRows`
+ * and answers the admin panel; the host (B2) reads the same property to allow or refuse a manual-row create. If the
+ * two readers ever disagreed on a junk value, the panel could say "allowed" while the host refuses (or the reverse).
+ * The expected column is stated EXPLICITLY, not derived from either reader.
+ */
+describe('K-10 (B4) the per-sheet switch: the plugin reader answers exactly as the host reader, value for value', () => {
+  const SWITCH_CASES: Array<[string, unknown, 'allowed' | 'disabled' | null, 'allowed' | 'disabled']> = [
+    ['an empty property', {}, null, 'allowed'],
+    ['a null property', null, null, 'allowed'],
+    ['a property that is not an object', 'plain text', null, 'allowed'],
+    ['an array property', ['allowed'], null, 'allowed'],
+    ['an undefined value (JSON cannot store it)', { stockPreparationManualRows: undefined }, null, 'allowed'],
+    ['exactly allowed', { stockPreparationManualRows: 'allowed' }, 'allowed', 'allowed'],
+    ['exactly disabled', { stockPreparationManualRows: 'disabled' }, 'disabled', 'disabled'],
+    ['upper case', { stockPreparationManualRows: 'ALLOWED' }, 'disabled', 'disabled'],
+    ['a leading space', { stockPreparationManualRows: ' allowed' }, 'disabled', 'disabled'],
+    ['a trailing space', { stockPreparationManualRows: 'allowed ' }, 'disabled', 'disabled'],
+    ['an empty string', { stockPreparationManualRows: '' }, 'disabled', 'disabled'],
+    ['null', { stockPreparationManualRows: null }, 'disabled', 'disabled'],
+    ['true', { stockPreparationManualRows: true }, 'disabled', 'disabled'],
+    ['false', { stockPreparationManualRows: false }, 'disabled', 'disabled'],
+    ['a number', { stockPreparationManualRows: 1 }, 'disabled', 'disabled'],
+    ['an object', { stockPreparationManualRows: { value: 'allowed' } }, 'disabled', 'disabled'],
+    ['an array', { stockPreparationManualRows: ['allowed'] }, 'disabled', 'disabled'],
+    ['JSON text, allowed', JSON.stringify({ stockPreparationManualRows: 'allowed' }), 'allowed', 'allowed'],
+    ['JSON text, junk', JSON.stringify({ stockPreparationManualRows: 'yes' }), 'disabled', 'disabled'],
+    ['JSON text, absent', JSON.stringify({ humanWriteLock: 'plm_system' }), null, 'allowed'],
+    ['malformed JSON text', '{"stockPreparationManualRows":', null, 'allowed'],
+  ]
+  it('the property key and the two closed values are byte-equal', () => {
+    expect(pluginRows.MANUAL_ROWS_POLICY_PROPERTY_KEY).toBe(host.MANUAL_ROWS_POLICY_PROPERTY_KEY)
+    expect(pluginRows.MANUAL_ROWS_POLICY_ALLOWED).toBe(host.MANUAL_ROWS_POLICY_ALLOWED)
+    expect(pluginRows.MANUAL_ROWS_POLICY_DISABLED).toBe(host.MANUAL_ROWS_POLICY_DISABLED)
+    expect([...pluginRows.MANUAL_ROWS_POLICIES]).toEqual([host.MANUAL_ROWS_POLICY_ALLOWED, host.MANUAL_ROWS_POLICY_DISABLED])
+  })
+  it.each(SWITCH_CASES)('%s', (_label, property, value, effect) => {
+    expect(host.manualRowsPolicyValueOf(property)).toBe(value)
+    expect(pluginRows.manualRowsPolicyValueOf(property)).toBe(value)
+    expect(host.manualRowsPolicyOfProperty(property)).toBe(effect)
+    expect(pluginRows.manualRowsPolicyOfProperty(property)).toBe(effect)
+  })
+  it('what the plugin WRITES survives the host sanitizer: each closed value is kept, and the lock and the key stanza ride along', () => {
+    for (const policy of pluginRows.MANUAL_ROWS_POLICIES as string[]) {
+      const merged = { stockPreparation: { ownership: 'plm_system', key: true }, humanWriteLock: 'plm_system', stockPreparationManualRows: policy }
+      const sanitized = sanitizeFieldProperty('string', merged)
+      expect(sanitized.stockPreparationManualRows).toBe(policy)
+      expect(sanitized.humanWriteLock).toBe('plm_system')
+      expect(pluginRows.manualRowsKeyColumnState({ property: sanitized })).toEqual({
+        present: true, policy, source: 'set', stored: policy, locked: true, keyStanza: true,
+      })
+    }
+  })
+  it('manualRowsSupportedOnObject answers exactly as the host predicate (a), id for id', () => {
+    const P = truth.PROJECT_OBJECT_ID as string
+    const HEX = P.slice('plm_stock_preparation_sandbox_p_'.length)
+    const IDS: Array<[string, unknown, boolean]> = [
+      ['the registered project-sheet shape', P, true],
+      ['uppercase hex', `plm_stock_preparation_sandbox_p_${HEX.toUpperCase()}`, false],
+      ['uppercase prefix', `PLM_STOCK_PREPARATION_SANDBOX_P_${HEX}`, false],
+      ['a 23-hex digest', P.slice(0, -1), false],
+      ['a 25-hex digest', `${P}0`, false],
+      ['a trailing suffix', `${P}_x`, false],
+      ['a trailing newline', `${P}\n`, false],
+      ['a trailing space', `${P} `, false],
+      ['a leading space', ` ${P}`, false],
+      ['a leading prefix', `x_${P}`, false],
+      ['an adopted older sandbox sheet', 'plm_stock_preparation_sandbox_adopted_syn', false],
+      ['the env main sheet', 'plm_stock_preparation_main', false],
+      ['empty', '', false], ['null', null, false], ['undefined', undefined, false], ['a number', 1, false],
+    ]
+    for (const [label, objectId, expected] of IDS) {
+      expect(isManualRowsProjectSheetHost({ kind: 'present', row: { projectId: 'p', objectId, pluginName: 'plugin-integration-core' } }), `host: ${label}`).toBe(expected)
+      expect(pluginRows.manualRowsSupportedOnObject(objectId), `plugin: ${label}`).toBe(expected)
+    }
   })
 })
 

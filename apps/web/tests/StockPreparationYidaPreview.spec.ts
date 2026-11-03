@@ -864,8 +864,70 @@ describe('StockPreparationYidaPreviewPanel', () => {
     }
     await importRules('{')
     expect(q('sp-yida-error').textContent).toBe('YIDA_RULE_TEMPLATE_TEXT')
+    // The L4 entry reason names the failed import, not a preview that never ran.
+    expect(root?.querySelector('[data-testid="sp-yida-initialization-blocked"]')?.textContent).toContain('规则草稿 JSON 的生成或导入没有通过')
+    expect(root?.querySelector('[data-testid="sp-yida-initialization-blocked"]')?.textContent).not.toContain('本地预演没有通过')
     edit('sp-yida-rule-import-text', '{}'); await flush()
     expect(root?.querySelector('[data-testid="sp-yida-error"]')).toBeNull()
     expectNoIo()
+  })
+
+  // Issue #6687 items 1, 3 and 4: step guide, an always-rendered L4 entry naming the missing condition, v1 note.
+  function stepStates(): Array<string | null | undefined> { return Array.from({ length: 8 }, (_, index) => root?.querySelector(`[data-testid="sp-yida-step-${index + 1}"]`)?.getAttribute('data-state')) }
+  function openEntry(): HTMLButtonElement { return q<HTMLButtonElement>('sp-yida-initialization-open') }
+  function blockedReason(): string { return root?.querySelector('[data-testid="sp-yida-initialization-blocked"]')?.textContent ?? '' }
+
+  it('step guide lists the eight steps and marks current and completed steps from local state only', async () => {
+    expect(Array.from(q('sp-yida-steps').querySelectorAll('li')).map((node) => node.textContent)).toEqual([
+      '1 选合同（v2）（当前）', '2 填样例或规则', '3 只在本地预演', '4 生成并存档规则草稿 JSON', '5 打开本地初始化', '6 手动 GET 本地初始化状态', '7 测试连接', '8 本地初始化'])
+    expect(q('sp-yida-step-1').getAttribute('aria-current')).toBe('step')
+    edit('sp-yida-preview-mode', 'protocol'); await flush()
+    expect(stepStates()).toEqual(['done', 'current', 'todo', 'todo', 'todo', 'todo', 'todo', 'todo'])
+    q<HTMLButtonElement>('sp-yida-protocol-example-primary').click(); await flush()
+    expect(stepStates()).toEqual(['done', 'done', 'current', 'todo', 'todo', 'todo', 'todo', 'todo'])
+    await preview()
+    expect(stepStates()).toEqual(['done', 'done', 'done', 'current', 'todo', 'todo', 'todo', 'todo'])
+    expect(q('sp-yida-step-3').textContent).toBe('3 只在本地预演（已完成）')
+    // Generating the rule draft clears the preview: step 3 is current again, step 4 stays done.
+    await exportRules()
+    expect(stepStates()).toEqual(['done', 'done', 'current', 'done', 'todo', 'todo', 'todo', 'todo'])
+    expect(q('sp-yida-steps-note').textContent).toContain('请在第 5 步之前存档')
+    await preview()
+    expect(stepStates()).toEqual(['done', 'done', 'done', 'done', 'current', 'todo', 'todo', 'todo'])
+    // A v1 preview never completes step 3, whatever else is filled in.
+    await example('primary'); await preview()
+    expect(stepStates()).toEqual(['current', 'done', 'todo', 'todo', 'todo', 'todo', 'todo', 'todo'])
+    expectNoIo()
+  })
+
+  it('keeps 打开本地初始化 rendered but disabled with the exact missing condition, and enables it when all hold', async () => {
+    expect(openEntry().disabled).toBe(true); expect(blockedReason()).toContain('「表单字段目录与协议 v2（仅本地）」')
+    await example('primary'); await preview()
+    expect(q('sp-yida-summary').textContent).toContain('无效 0'); expect(openEntry().disabled).toBe(true)
+    expect(blockedReason()).toContain('字段映射 v1 不支持本地初始化')
+    await protocolExample(); edit('sp-yida-intent', 'update'); await flush()
+    expect(openEntry().disabled).toBe(true); expect(blockedReason()).toContain('意图须为「计划创建」')
+    edit('sp-yida-intent', 'create'); await flush()
+    expect(openEntry().disabled).toBe(true); expect(blockedReason()).toContain('尚未运行本地预演')
+    const first = rows()[0]
+    edit('sp-yida-rows', '['); await preview()
+    expect(q('sp-yida-error').textContent).not.toBe(''); expect(blockedReason()).toContain('本地预演没有通过')
+    edit('sp-yida-rows', JSON.stringify([first, { ...first, projectNo: undefined }])); await preview()
+    expect(q('sp-yida-summary').textContent).toContain('无效 1'); expect(openEntry().disabled).toBe(true)
+    expect(blockedReason()).toContain('有 1 行无效')
+    edit('sp-yida-rows', JSON.stringify([first, first])); await preview()
+    expect(q('sp-yida-summary').textContent).toContain('本地重复键 2'); expect(openEntry().disabled).toBe(true)
+    expect(blockedReason()).toContain('有 2 行本地业务键重复'); expect(blockedReason()).not.toContain('其它原因')
+    edit('sp-yida-rows', JSON.stringify([{ ...first, quantity: 5 }])); await setAllocation('equal_integer'); await preview()
+    expect(q('sp-yida-allocation-issues').textContent).toContain('QUANTITY_NOT_DIVISIBLE'); expect(openEntry().disabled).toBe(true)
+    expect(blockedReason()).toContain('项目数量分配有拒因')
+    await protocolExample(); await preview()
+    expect(openEntry().disabled).toBe(false); expect(root?.querySelector('[data-testid="sp-yida-initialization-blocked"]')).toBeNull()
+    expectNoIo()
+  })
+
+  it('labels the v1 samples as not supporting local initialization', () => {
+    expect(q('sp-yida-example-v1-note').textContent).toContain('v1 不支持本地初始化')
+    expect(q('sp-yida-example-v1-note').parentElement).toBe(q('sp-yida-example-primary').parentElement)
   })
 })
