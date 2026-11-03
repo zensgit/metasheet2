@@ -39,6 +39,12 @@ import { normalizeUserText } from '../tasks/task-ids'
 import { toTaskListMemberships, visibleTaskListIds, type TaskListMemberRole } from '../tasks/task-lists'
 import { parsePageParams, TASK_PAGE_SORT_KEY, type TaskPageParams } from '../tasks/task-pagination'
 import { pendingScopeForBadge } from '../tasks/task-settings'
+import {
+  isDispatchKey,
+  isTaskSourceRef,
+  TASK_SOURCE_TYPE_MULTITABLE_RECORD,
+  type TaskSourceRef,
+} from '../tasks/task-source-links'
 import { isPrintableId, isStorableText, resolveCreateAssigneeIds } from './task-create'
 import { taskCountsSignal } from './task-counts-realtime'
 import { newTaskEventId, newTaskId } from './task-ids-runtime'
@@ -102,6 +108,41 @@ export async function withOrgStructure<T>(orgId: string, run: (db: Db) => Promis
   })
 }
 
+/**
+ * The answer to a create. A create with a `source` stored its link (`sourceLinked`); a resend of a
+ * dispatch key already used by the same dispatcher in the same org is answered with that earlier
+ * task (`reused`) and writes nothing. A create without a source is exactly `{ id, version }`.
+ */
+export interface CreatedTask {
+  id: string
+  version: number
+  reused?: true
+  sourceLinked?: true
+}
+
+/**
+ * The earlier dispatch made with `dispatchKey` by this dispatcher in this org, if any. Matched on the
+ * columns of `uq_tsrc_dispatch_key`. A soft-deleted task is still found: a resend of the same attempt
+ * answers with the task that attempt made.
+ */
+async function findDispatchedTask(db: Db, input: { orgId: string; creatorId: string; dispatchKey: string }): Promise<{
+  taskId: string
+  version: number
+  sheetId: string
+  recordId: string
+} | null> {
+  const result = await db.query(
+    `SELECT l.task_id, l.sheet_id, l.record_id, t.version
+     FROM task_source_links l
+     JOIN tasks t ON t.id = l.task_id AND t.org_id = l.org_id
+     WHERE l.org_id = $1 AND l.created_by = $2 AND l.dispatch_key = $3`,
+    [input.orgId, input.creatorId, input.dispatchKey],
+  )
+  const row = result.rows[0]
+  if (!row) return null
+  return { taskId: String(row.task_id), version: Number(row.version), sheetId: String(row.sheet_id), recordId: String(row.record_id) }
+}
+
 export async function createTask(input: {
   orgId: string
   creatorId: string
@@ -114,7 +155,11 @@ export async function createTask(input: {
   startTime?: unknown
   timeZone?: unknown
   remindAt?: unknown
-}): Promise<{ id: string; version: number }> {
+  /** The record a dispatch comes from, parsed and gated by the route (task-source-links.ts). */
+  source?: TaskSourceRef | null
+  /** The client's retry key for one dispatch; only with `source`. */
+  dispatchKey?: string | null
+}): Promise<CreatedTask> {
   const title = normalizeUserText(input.title)
   // A title Postgres cannot store exactly as sent (U+0000, lone surrogate)
   // is the same 422 as a blank one (M3R3-IN-3, M3R3-IN-4).
@@ -126,13 +171,28 @@ export async function createTask(input: {
   if (dates.ok === false) fail(422, dates.reason.toUpperCase())
   const remind = parseRemindAtInput(input.remindAt)
   if (remind.ok === false) fail(422, 'INVALID_REMIND_AT')
+  const source = input.source ?? null
+  const dispatchKey = input.dispatchKey ?? null
+  if (source !== null && !isTaskSourceRef(source)) fail(422, 'INVALID_SOURCE')
+  if (dispatchKey !== null && (source === null || !isDispatchKey(dispatchKey))) fail(422, 'INVALID_DISPATCH_KEY')
   const id = newTaskId()
   const counts = taskCountsSignal()
-  await transaction(async (client) => {
+  const created = await transaction(async (client): Promise<CreatedTask> => {
     const q = asQuery(client)
     const db: Db = { query: async (sql, params) => ({ rows: (await client.query(sql, params)).rows as Row[] }) }
     await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     await acquireTaskStructureLock(q, input.orgId)
+    // A resend of a dispatch key is looked up after the lock, so two resends of one key queue here
+    // and the second finds the first one's task, and before the member and task access tests below,
+    // so a resend whose assignee has lost either since is answered with the task already made. The
+    // same key for another sheet or record is 422 INVALID_DISPATCH_KEY. Either way nothing is written.
+    if (source !== null && dispatchKey !== null) {
+      const earlier = await findDispatchedTask(db, { orgId: input.orgId, creatorId: input.creatorId, dispatchKey })
+      if (earlier) {
+        if (earlier.sheetId !== source.sheetId || earlier.recordId !== source.recordId) fail(422, 'INVALID_DISPATCH_KEY')
+        return { id: earlier.taskId, version: earlier.version, reused: true, sourceLinked: true }
+      }
+    }
     // RULED(2026-10-07): [R17] [N2] every assignee other than
     // the creator must be an active member of the org, the login test (task-org-members.ts); any
     // other id is 422 INACTIVE_ORG_MEMBER and nothing is written. Inside the transaction, after the
@@ -167,18 +227,38 @@ export async function createTask(input: {
         [id, assignees, input.creatorId],
       )
     }
+    if (source !== null) {
+      // The record the task was dispatched from, ids only, in the same transaction as the task.
+      await q(
+        `INSERT INTO task_source_links (task_id, org_id, source_type, sheet_id, record_id, view_id, base_id, created_by, dispatch_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          id, input.orgId, TASK_SOURCE_TYPE_MULTITABLE_RECORD, source.sheetId, source.recordId,
+          source.viewId, source.baseId, input.creatorId, dispatchKey,
+        ],
+      )
+    }
+    const createdEventId = newTaskEventId()
     await q(
       `INSERT INTO task_events (id, task_id, actor_id, event_type) VALUES ($1, $2, $3, 'created')`,
-      [newTaskEventId(), id, input.creatorId],
+      [createdEventId, id, input.creatorId],
     )
+    // Outbox rows for the `created` event, in this transaction; none while the event does not notify.
+    await enqueueTaskEventNotifications(db, {
+      orgId: input.orgId,
+      taskId: id,
+      createdBy: input.creatorId,
+      events: [{ id: createdEventId, type: 'created', actorId: input.creatorId, occurredAt: null }],
+    })
     // RULED(2026-10-07): [R16] a new task's assignees (none before the write); an empty list sends
     // nothing. ASSUMPTION(task-m4): [own-3c-08] a creator who is the only assignee is a recipient.
     counts.note({ before: [], after: assignees })
+    // A new row starts at the column default, version 1.
+    return source !== null ? { id, version: 1, sourceLinked: true } : { id, version: 1 }
   })
   // RULED(2026-10-07): [R16] sent only once the transaction above committed.
   counts.publish()
-  // A new row starts at the column default, version 1.
-  return { id, version: 1 }
+  return created
 }
 
 /** Instants are bound as ISO-8601 UTC text so the driver never re-renders them in a local zone. */
@@ -392,6 +472,13 @@ export async function getTask(input: { orgId: string; actorId: string; taskId: s
     : row.remind_at
       ? new Date(String(row.remind_at))
       : null
+  // The record the task was dispatched from, read after the view check: ids only, the same for every
+  // viewer. A task without one has no `source` key.
+  const sourceResult = await query<Row>(
+    `SELECT sheet_id, record_id, view_id, base_id FROM task_source_links WHERE task_id = $1 AND org_id = $2`,
+    [input.taskId, input.orgId],
+  )
+  const sourceRow = sourceResult.rows[0]
   return {
     id: String(row.id),
     title: String(row.title),
@@ -433,6 +520,17 @@ export async function getTask(input: { orgId: string; actorId: string; taskId: s
       taskListIds: await loadTaskListIds(plainDb, input.taskId),
       memberListIds: (memberships.get(input.taskId) ?? []).map((membership) => membership.listId),
     }),
+    ...(sourceRow
+      ? {
+          source: {
+            kind: TASK_SOURCE_TYPE_MULTITABLE_RECORD,
+            sheetId: String(sourceRow.sheet_id),
+            recordId: String(sourceRow.record_id),
+            viewId: typeof sourceRow.view_id === 'string' ? sourceRow.view_id : null,
+            baseId: typeof sourceRow.base_id === 'string' ? sourceRow.base_id : null,
+          },
+        }
+      : {}),
   }
 }
 

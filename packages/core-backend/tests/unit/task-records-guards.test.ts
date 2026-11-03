@@ -1723,3 +1723,118 @@ describe('notification producer wiring (M4 PR-3b S2)', () => {
     }
   })
 })
+
+describe('createTask with a source and a dispatch key', () => {
+  const base = { orgId: 'org-1', creatorId: 'usr-1', title: '备料复核' }
+  const SOURCE = { sheetId: 'sht_1', recordId: 'rec_1', viewId: 'viw_1', baseId: 'bas_1' }
+  const KEY = '3b2f5d1e-8c7a-4f60-9e1b-2a4c6d8e0f13'
+
+  /** The link row the key lookup finds (none when `link` is unset); the org lookup and the task
+   * access reads answer from `seed`; writes get no rows. */
+  function respondWith(seed: AccessSeed & { active?: string[]; link?: { sheet_id: string; record_id: string } }): void {
+    state.respond = (sql, params) => {
+      if (/^\s*(INSERT|UPDATE|DELETE)/.test(sql)) return undefined
+      if (sql.includes('FROM task_source_links')) {
+        return { rows: seed.link ? [{ task_id: 'tsk_prev', version: 3, ...seed.link }] : [] }
+      }
+      if (sql.includes('FROM user_orgs')) {
+        const asked = (params?.[1] ?? []) as string[]
+        return { rows: (seed.active ?? []).filter((user_id) => asked.includes(user_id)).map((user_id) => ({ user_id })) }
+      }
+      return answerTaskAccess(sql, params, seed)
+    }
+  }
+
+  function sqls(): string[] {
+    return state.calls.map((call) => call.sql.replace(/\s+/g, ' ').trim())
+  }
+
+  function indexOf(fragment: string): number {
+    return state.calls.findIndex((call) => call.sql.includes(fragment))
+  }
+
+  function written(): string[] {
+    return sqls().filter((sql) => /^(INSERT|UPDATE|DELETE)/.test(sql)).map((sql) => sql.split(' ').slice(0, 3).join(' '))
+  }
+
+  const linkReads = () => state.calls.filter((call) => call.sql.includes('FROM task_source_links'))
+
+  beforeEach(() => {
+    state.calls.length = 0
+    state.transactions = 0
+    state.respond = undefined
+  })
+
+  afterEach(() => {
+    state.respond = undefined
+  })
+
+  it('without either key nothing reads or writes the link table, and the answer is exactly { id, version }', async () => {
+    respondWith({ active: ['usr-2'], usable: ['usr-2'] })
+    const created = await createTask({ ...base, assignees: ['usr-1', 'usr-2'] })
+    expect(Object.keys(created).sort()).toEqual(['id', 'version'])
+    expect(created.version).toBe(1)
+    expect(sqls().some((sql) => sql.includes('task_source_links'))).toBe(false)
+    expect(written()).toEqual(['INSERT INTO tasks', 'INSERT INTO task_assignees', 'INSERT INTO task_events'])
+  })
+
+  it('with a source the link is written after the assignees and before the event, with the task org and the creator, and the answer says so', async () => {
+    respondWith({})
+    const created = await createTask({ ...base, assignees: ['usr-1'], source: SOURCE })
+    expect(created).toEqual({ id: created.id, version: 1, sourceLinked: true })
+    expect(linkReads()).toEqual([])
+    expect(written()).toEqual(['INSERT INTO tasks', 'INSERT INTO task_assignees', 'INSERT INTO task_source_links', 'INSERT INTO task_events'])
+    const insert = state.calls.find((call) => call.sql.includes('INSERT INTO task_source_links'))
+    expect(insert?.params).toEqual([created.id, 'org-1', 'multitable_record', 'sht_1', 'rec_1', 'viw_1', 'bas_1', 'usr-1', null])
+  })
+
+  it('with a key, one lookup by org, dispatcher and key runs after the lock and before the org and task access tests; a miss writes the key with the link', async () => {
+    respondWith({ active: ['usr-2'], usable: ['usr-2'] })
+    const created = await createTask({ ...base, assignees: ['usr-1', 'usr-2'], source: SOURCE, dispatchKey: KEY })
+    expect(created).toEqual({ id: created.id, version: 1, sourceLinked: true })
+    expect(linkReads()).toHaveLength(1)
+    expect(linkReads()[0]?.params).toEqual(['org-1', 'usr-1', KEY])
+    const lookup = sqls()[indexOf('FROM task_source_links')] ?? ''
+    for (const fragment of ['l.org_id = $1', 'l.created_by = $2', 'l.dispatch_key = $3', 'JOIN tasks t ON t.id = l.task_id AND t.org_id = l.org_id']) {
+      expect(lookup).toContain(fragment)
+    }
+    expect(lookup).not.toContain('deleted_at')
+    const lookupAt = indexOf('FROM task_source_links')
+    expect(lookupAt).toBeGreaterThan(indexOf('pg_advisory_xact_lock'))
+    expect(indexOf('FROM user_orgs')).toBeGreaterThan(lookupAt)
+    expect(indexOf('FROM users u')).toBeGreaterThan(lookupAt)
+    const insert = state.calls.find((call) => call.sql.includes('INSERT INTO task_source_links'))
+    expect(insert?.params?.[8]).toBe(KEY)
+  })
+
+  it('a hit on the same sheet and record answers the earlier task, writes nothing and runs neither the org nor the task access test', async () => {
+    // usr-2 is no longer an active member: a first send would be 422, a resend is the earlier task.
+    respondWith({ active: [], link: { sheet_id: 'sht_1', record_id: 'rec_1' } })
+    const created = await createTask({ ...base, assignees: ['usr-1', 'usr-2'], source: SOURCE, dispatchKey: KEY })
+    expect(created).toEqual({ id: 'tsk_prev', version: 3, reused: true, sourceLinked: true })
+    expect(written()).toEqual([])
+    expect(indexOf('FROM user_orgs')).toBe(-1)
+    expect(accessCalls()).toEqual([])
+  })
+
+  it('a hit on another record or another sheet is 422 INVALID_DISPATCH_KEY with nothing written', async () => {
+    for (const link of [{ sheet_id: 'sht_1', record_id: 'rec_2' }, { sheet_id: 'sht_2', record_id: 'rec_1' }]) {
+      state.calls.length = 0
+      respondWith({ active: [], link })
+      await expect(createTask({ ...base, assignees: ['usr-1'], source: SOURCE, dispatchKey: KEY }))
+        .rejects.toMatchObject({ status: 422, code: 'INVALID_DISPATCH_KEY' })
+      expect(written(), JSON.stringify(link)).toEqual([])
+      expect(indexOf('FROM user_orgs')).toBe(-1)
+    }
+  })
+
+  it('a key without a source, a malformed key or a malformed source is refused before the transaction opens', async () => {
+    await expect(createTask({ ...base, assignees: undefined, dispatchKey: KEY }))
+      .rejects.toMatchObject({ status: 422, code: 'INVALID_DISPATCH_KEY' })
+    await expect(createTask({ ...base, assignees: undefined, source: SOURCE, dispatchKey: 'short' }))
+      .rejects.toMatchObject({ status: 422, code: 'INVALID_DISPATCH_KEY' })
+    await expect(createTask({ ...base, assignees: undefined, source: { ...SOURCE, sheetId: 'sht/1' } }))
+      .rejects.toMatchObject({ status: 422, code: 'INVALID_SOURCE' })
+    expect(state.transactions).toBe(0)
+  })
+})

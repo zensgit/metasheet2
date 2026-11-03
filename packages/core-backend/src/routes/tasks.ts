@@ -6,15 +6,18 @@
  * does not matter for correctness (contract §2 / lock §12 门 13).
  */
 import { Router } from 'express'
+import { query } from '../db/pg'
 import { authenticate } from '../middleware/auth'
 import { rbacGuard } from '../rbac/rbac'
 import { validateViewerTimeZoneHeader } from '../tasks/task-dates'
+import { parseTaskSourceInput } from '../tasks/task-source-links'
 import {
   completeTask,
   countPending,
   countPendingList,
   countTasks,
   createTask,
+  fail,
   getTask,
   listPending,
   listTasks,
@@ -40,6 +43,20 @@ import { isVersionConflict, patchTask } from '../services/task-patch'
 import { actorId, orgId, sendError } from './tasks-http'
 import { registerTaskListRoutes } from './tasks-lists'
 import { registerTaskSettingsRoutes } from './tasks-settings'
+import { requireRecordReadable } from './univer-meta'
+
+/** The record read gate's query function for a dispatch from a record: the task module's own
+ * database access, as a plain function. */
+const sourceQuery: Parameters<typeof requireRecordReadable>[1] = (sql, params) => query(sql, params)
+
+/**
+ * The one refusal for a dispatch source the caller may not use: a missing or unreadable record, a
+ * gated reader who is not the creator, or a view or base that is not the sheet's. Sent as
+ * `{ error: { code } }`; a 401 from the gate stays a 401.
+ */
+function sourceNotReadable(status = 422): Error {
+  return Object.assign(new Error('SOURCE_NOT_READABLE'), { status, code: 'SOURCE_NOT_READABLE' })
+}
 
 export function tasksRouter(): Router | null {
   if (process.env.TASKS_ENABLED !== 'true') return null
@@ -140,6 +157,30 @@ export function tasksRouter(): Router | null {
         return
       }
       const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {}
+      // A dispatch from a multitable record adds `source` and, only with it, `dispatchKey`. Both are
+      // parsed before anything is read; a body without them is created exactly as before.
+      const dispatch = parseTaskSourceInput({ source: body.source, dispatchKey: body.dispatchKey })
+      if (dispatch.ok === false) fail(422, dispatch.reason.toUpperCase())
+      const source = dispatch.source
+      if (source) {
+        // The record routes' own read gate, for this caller, before anything is written. A missing
+        // record and an unreadable one are the same 422.
+        const gate = await requireRecordReadable(req, sourceQuery, source.sheetId, source.recordId)
+        if ('status' in gate) {
+          throw sourceNotReadable(gate.status === 401 ? 401 : 422)
+        }
+        // The gated reader is the task's creator.
+        if (gate.access.userId !== actorId(req)) throw sourceNotReadable()
+        // A view or base sent with the source must be the sheet's; read only once the gate passed.
+        if (source.viewId !== null) {
+          const view = await query('SELECT sheet_id FROM meta_views WHERE id = $1', [source.viewId])
+          if (view.rows[0]?.sheet_id !== source.sheetId) throw sourceNotReadable()
+        }
+        if (source.baseId !== null) {
+          const sheet = await query('SELECT base_id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [source.sheetId])
+          if (!sheet.rows[0] || sheet.rows[0].base_id !== source.baseId) throw sourceNotReadable()
+        }
+      }
       // RULED(2026-10-07): [R03] the date keys, `timeZone` and `remindAt` are accepted on create;
       // `description` is not (it is a PATCH field).
       const created = await createTask({
@@ -154,6 +195,7 @@ export function tasksRouter(): Router | null {
         startTime: body.startTime,
         timeZone: body.timeZone,
         remindAt: body.remindAt,
+        ...(source ? { source, dispatchKey: dispatch.dispatchKey } : {}),
       })
       res.status(200).json(created)
     } catch (err) {

@@ -1217,6 +1217,9 @@ const COVERED: Record<string, CoveredFile> = {
   // #5828 closed: all three `:sheetId` handlers now gate on loadLiveSpreadsheetSheet — see
   // "LEGACY SPREADSHEET SHEETS" for the parent-liveness AND the :sheetId → :id binding half.
   'routes/spreadsheets.ts': { minHandlers: 9, minInScope: 3, exempt: {} },
+  // POST /api/tasks with a `source` (a dispatch from a record) runs requireRecordReadable inline and
+  // throws on its refusal before any other read; the other handlers of the file address no sheet.
+  'routes/tasks.ts': { minHandlers: 22, minInScope: 1, exempt: {} },
 }
 
 /** Files whose closed world lives in a sibling guard. */
