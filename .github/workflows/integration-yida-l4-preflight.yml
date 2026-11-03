@@ -121,3 +121,5 @@ jobs:
           if (-not ($lines -contains 'pm2Source=global pm2Status=daemon_not_found')) { Write-Error 'pm2 must not be run without a live daemon'; exit 1 }
           if (@(Get-ChildItem -Force $root).Count -ne 0 -or @(Get-ChildItem -Force $pm2Home).Count -ne 0) { Write-Error 'the preflight must not write any file'; exit 1 }
           Remove-Item -Recurse -Force $root, $pm2Home
+          # The runner wrapper exits with $LASTEXITCODE, which is the expected STOP (1) from above.
+          exit 0
