@@ -533,14 +533,96 @@ describe('Yida owner connection test behind the server display bit', () => {
   const client = () => { const value = createYidaInitializationClient(); clients.push(value); return value }
   const request = () => ({ commandId: ids.command, mode: 'candidate' as const, material: { appKey: material.appKey, appSecret: material.appSecret } })
 
-  it('is not rendered while the server bit is false; rendered (with the anchor prerequisite) when true', async () => {
-    mountPanel(); await observe(false); await fill()
-    expect(absent('connection')).toBe(true); expect(absent('connection-test')).toBe(true)
+  // Issue #6687 item 2: the button is always rendered once the panel is open; greyed, it names the missing step.
+  const blocked = () => q('connection-blocked').textContent ?? ''
+  it('stays rendered but greyed with its reason before the GET and while the server bit is false; enabled when true', async () => {
+    mountPanel()
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true)
+    expect(blocked()).toContain('尚未读取状态'); expect(blocked()).toContain('第 6 步「手动 GET 本地初始化状态」')
+    await observe(false); await fill()
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true); expect(blocked()).toContain('服务器未开启测试连接（上机清单 L2）')
+    // Actionable, and never a skip: the on-site checklist requires an ok test before 本地初始化.
+    expect(blocked()).toContain('请服务器管理员在 docker\\app.env 打开测试开关并用包内脚本重启后端'); expect(blocked()).toContain('本地初始化前须测试通过')
+    expect(blocked()).not.toContain('跳过')
     await observe(true)
     expect(q('connection').textContent).toContain('bootstrap-yida-initialization-owner')
     expect(q('connection').textContent).toContain('只证明 appKey/appSecret')
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true); expect(blocked()).toContain('请先填写 appKey 和 appSecret')
+    await fill(); expect(q<HTMLButtonElement>('connection-test').disabled).toBe(false); expect(absent('connection-blocked')).toBe(true)
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('stays greyed with its reason while the status is unconfirmed or a request is pending, after a refusal, and after initialization', async () => {
+    mountPanel(); await observe(true); await fill()
+    fetchSpy.mockRejectedValueOnce(new Error('SYN-LOST')); await click('submit')
+    expect(q('uncertain')).toBeDefined(); expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true)
+    expect(blocked()).toContain('状态未确认')
+    const pending = deferred<Response>(); fetchSpy.mockReturnValueOnce(pending.promise); await click('refresh')
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true); expect(blocked()).toContain('请求进行中')
+    pending.resolve(json(initialized(false, true))); await flush()
+    // Initialized: the material fieldset is gone, the greyed button stays and says why (the server answers 409).
+    expect(absent('appKey')).toBe(true); expect(q('initialized').textContent).toContain('canSend=false')
     expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true)
-    await fill(); expect(q<HTMLButtonElement>('connection-test').disabled).toBe(false)
+    expect(blocked()).toContain('本地槽已初始化'); expect(blocked()).toContain('409')
+    await click('connection-test'); expect(fetchSpy).toHaveBeenCalledTimes(3)
+    app?.unmount(); root?.remove(); app = null; root = null
+    // A server DENIED (not the anchored owner / no permission): reloading does not change it.
+    mountPanel(); fetchSpy.mockResolvedValueOnce(error('YIDA_INITIALIZATION_DENIED', 403)); await click('refresh')
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true); expect(blocked()).toContain('不是宜搭锚点 owner 或没有权限')
+    expect(blocked()).toContain('重新加载不会改变结果'); expect(blocked()).not.toContain('请刷新页面')
+    app?.unmount(); root?.remove(); app = null; root = null
+    // A session change: the reload advice stays.
+    mountPanel(); window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token' })); await flush()
+    expect(q('error').textContent).toBe('YIDA_INITIALIZATION_SESSION_CHANGED'); expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true)
+    expect(blocked()).toContain('登录会话已变化；请刷新页面'); expect(blocked()).not.toContain('锚点 owner')
+  })
+
+  it('reports step-guide progress to the parent: status read, an ok test for the current pair, initialized', async () => {
+    const progress = vi.fn()
+    root = document.createElement('div'); document.body.appendChild(root)
+    app = createApp(StockPreparationYidaInitializationPanel, { draftInput: draftInput(), 'onProgress-change': progress }); app.mount(root)
+    expect(progress).toHaveBeenLastCalledWith({ statusRead: false, tested: false, initialized: false, connectionTestEnabled: false })
+    await observe(false); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: false, initialized: false, connectionTestEnabled: false })
+    await observe(true); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: false, initialized: false, connectionTestEnabled: true })
+    await fill(); await probe(json(probeView('upstream_rejected')))
+    expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: false, initialized: false, connectionTestEnabled: true })
+    await vi.waitFor(() => expect(q<HTMLButtonElement>('connection-test').disabled).toBe(false))
+    await probe(json(probeView('ok'))); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: true, initialized: false, connectionTestEnabled: true })
+    // The tested pair edited: no longer counted as tested (the re-test rule itself is unchanged).
+    await type('appSecret', 'SYN-SECRET-EDITED'); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: false, initialized: false, connectionTestEnabled: true })
+    await pasteInto('appSecret', material.appSecret); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: true, initialized: false, connectionTestEnabled: true })
+    fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await click('submit')
+    expect(progress).toHaveBeenLastCalledWith(expect.objectContaining({ statusRead: true, initialized: true }))
+  })
+
+  it('the parent step guide marks steps 5–8 from the opened panel: open, GET, ok test, initialization', async () => {
+    root = document.createElement('div'); document.body.appendChild(root); app = createApp(StockPreparationYidaPreviewPanel); app.mount(root)
+    const parentClick = async (id: string) => { const button = root?.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`); if (!button) throw new Error('MISSING_PARENT_NODE'); button.click(); await flush() }
+    const states = () => Array.from({ length: 8 }, (_, index) => root?.querySelector(`[data-testid="sp-yida-step-${index + 1}"]`)?.getAttribute('data-state'))
+    const mode = root.querySelector<HTMLSelectElement>('[data-testid="sp-yida-preview-mode"]')!; mode.value = 'protocol'; mode.dispatchEvent(new Event('change')); await flush()
+    await parentClick('sp-yida-protocol-example-primary'); await parentClick('sp-yida-rule-export'); await parentClick('sp-yida-run')
+    expect(states()).toEqual(['done', 'done', 'done', 'done', 'current', 'todo', 'todo', 'todo'])
+    await parentClick('sp-yida-initialization-open'); expect(fetchSpy).not.toHaveBeenCalled()
+    expect(states()).toEqual(['done', 'done', 'done', 'done', 'done', 'current', 'todo', 'todo'])
+    await observe(true); expect(states().slice(4)).toEqual(['done', 'done', 'current', 'todo'])
+    await fill(); await probe(json(probeView('ok'))); expect(states().slice(4)).toEqual(['done', 'done', 'done', 'current'])
+    fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await click('submit')
+    expect(states()).toEqual(Array(8).fill('done')); expect(root.querySelector('[aria-current="step"]')).toBeNull()
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('the parent step guide shows step 7 as 待开启 (not current) while the server test switch is off', async () => {
+    root = document.createElement('div'); document.body.appendChild(root); app = createApp(StockPreparationYidaPreviewPanel); app.mount(root)
+    const parentClick = async (id: string) => { const button = root?.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`); if (!button) throw new Error('MISSING_PARENT_NODE'); button.click(); await flush() }
+    const step = (n: number) => root?.querySelector(`[data-testid="sp-yida-step-${n}"]`)
+    const mode = root.querySelector<HTMLSelectElement>('[data-testid="sp-yida-preview-mode"]')!; mode.value = 'protocol'; mode.dispatchEvent(new Event('change')); await flush()
+    await parentClick('sp-yida-protocol-example-primary'); await parentClick('sp-yida-rule-export'); await parentClick('sp-yida-run'); await parentClick('sp-yida-initialization-open')
+    await observe(false)
+    expect(Array.from({ length: 4 }, (_, index) => step(index + 5)?.getAttribute('data-state'))).toEqual(['done', 'done', 'blocked', 'todo'])
+    expect(step(7)?.textContent).toBe('7 测试连接（待开启）'); expect(step(7)?.getAttribute('aria-current')).toBe('step')
+    expect(root.querySelector('[data-state="current"]')).toBeNull(); expect(blocked()).toContain('上机清单 L2')
+    // The switch turned on and a fresh GET: step 7 becomes an ordinary current step.
+    await observe(true); expect(step(7)?.getAttribute('data-state')).toBe('current'); expect(step(7)?.textContent).toBe('7 测试连接（当前）')
     expect(fetchSpy).toHaveBeenCalledTimes(2)
   })
 
@@ -571,7 +653,8 @@ describe('Yida owner connection test behind the server display bit', () => {
     fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await click('submit')
     expect(fetchSpy.mock.calls[2][0]).toBe(endpoint)
     expect(JSON.stringify(JSON.parse(fetchSpy.mock.calls[2][1].body as string)) === JSON.stringify(payload())).toBe(true)
-    expect(q('initialized').textContent).toContain('canSend=false'); expect(absent('connection')).toBe(true)
+    expect(q('initialized').textContent).toContain('canSend=false')
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true); expect(absent('connection-result')).toBe(true)
   })
 
   // Each substring is unique to its own copy, so swapping two copies turns a row red.
