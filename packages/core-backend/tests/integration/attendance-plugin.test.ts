@@ -8588,6 +8588,241 @@ attendanceIntegrationDescribe(
         expect(await readCycle(openId)).toEqual(openBefore)
       })
     })
+
+    // T16a-T16e: the edit page sends only the fields that changed (AttendanceView.vue payrollCycleChangedFields), and
+    // its date box passes typed text through as it is. One date can then come from the request while the other comes
+    // from the locked row as a pg Date at local midnight. A string other than 'YYYY-MM-DD' was compared as an instant,
+    // but PG stores only its written day, so a range that looked ordered could be stored inverted and closed. The
+    // instant each case gives is written next to it. Cycles are created before the zone switch, as in T15a-T15d.
+    const invalidRange = { code: 'VALIDATION_ERROR', message: 'Invalid date range' } as const
+    const zoneProbe = {
+      UTC: { offsetMinutes: 0, isoOfDate20150201: '2015-02-01T00:00:00.000Z' },
+      'Asia/Taipei': { offsetMinutes: -480, isoOfDate20150201: '2015-01-31T16:00:00.000Z' },
+      'America/New_York': { offsetMinutes: 300, isoOfDate20150201: '2015-02-01T05:00:00.000Z' },
+    } as const
+
+    async function expectRefusedWithoutWrites(
+      ctx: OrgFixture,
+      cycleId: string,
+      body: Record<string, unknown>,
+      entry: 'put' | 'post-update',
+      events: { forCycle: (cycleId: string) => CycleEventPayload[] },
+      expected: { status: number; code: string; message?: string },
+      label: string,
+    ): Promise<void> {
+      const rowBefore = await readCycle(cycleId)
+      const settlementsBefore = await readSettlements(cycleId)
+      const res = await updateCycle(ctx, cycleId, body, entry)
+      const what = `${label} ${entry} ${JSON.stringify(body)}`
+      expect(res.status, `${what} ${res.raw}`).toBe(expected.status)
+      const error = (res.body as { error?: { code?: string; message?: string } } | undefined)?.error
+      if (expected.message === undefined) expect(error?.code, what).toBe(expected.code)
+      else expect(error, what).toEqual({ code: expected.code, message: expected.message })
+      expect(await readCycle(cycleId), what).toEqual(rowBefore)
+      expect(await readSettlements(cycleId), what).toEqual(settlementsBefore)
+      expect(events.forCycle(cycleId), what).toEqual([])
+    }
+
+    it('T16a [defect] under TZ=Asia/Taipei a page edit that sends only an endDate written as a UTC instant is refused with 400 on both update entries, also when it closes the cycle in the same request: row, settlement rows and success events unchanged', async () => {
+      await seedCompTimeLot(org, `r7-t16a-user-${randomUUID()}`)
+      // The stored start 2017-04-05 comes back as 2017-04-04T16:00:00.000Z; the end string is 2017-04-04T23:00:00.000Z,
+      // seven hours later, so the instant comparison let it through, and PG would store the written day 2017-04-04.
+      const cases = [
+        { entry: 'put', period: ['2017-04-05', '2017-04-10'], endDate: '2017-04-04T23:00:00.000Z' },
+        { entry: 'post-update', period: ['2017-04-12', '2017-04-17'], endDate: '2017-04-11T23:00:00.000Z' },
+      ] as const
+      const ids: string[] = []
+      for (const testCase of cases) ids.push(await createCycle(org, { startDate: testCase.period[0], endDate: testCase.period[1] }))
+      const events = captureCycleEvents('attendance.payrollCycle.updated')
+      try {
+        await underTimeZone('Asia/Taipei', async () => {
+          await expectDateParsedAtLocalMidnight(zoneProbe['Asia/Taipei'].offsetMinutes, zoneProbe['Asia/Taipei'].isoOfDate20150201)
+          for (const [index, testCase] of cases.entries()) {
+            for (const body of [{ endDate: testCase.endDate, status: 'closed' }, { endDate: testCase.endDate }]) {
+              await expectRefusedWithoutWrites(org, ids[index], body, testCase.entry, events, { status: 400, ...invalidRange }, 'Asia/Taipei')
+            }
+            expect(await readCycle(ids[index])).toMatchObject({ status: 'open', start_date: testCase.period[0], end_date: testCase.period[1] })
+            expect(await readSettlements(ids[index])).toEqual([])
+          }
+        })
+      } finally {
+        events.stop()
+      }
+    })
+
+    it('T16b [defect] under TZ=UTC, America/New_York and Asia/Taipei an endDate written with a -05:00 offset, alone or with a start in another offset, is refused with 400 on both update entries, also when it closes the cycle: row, settlement rows and success events unchanged', async () => {
+      await seedCompTimeLot(org, `r7-t16b-user-${randomUUID()}`)
+      // '<day before start>T23:30:00-05:00' is <start>T04:30:00Z. The stored start comes back as <start>T00:00Z (UTC),
+      // <start>T04:00Z (New York, EDT) or <day before start>T16:00Z (Taipei): never later, so the instant comparison let
+      // it through in all three zones, and PG would store the written day, one day before the start.
+      // Both ends given as strings: '2017-..-05T00:00:00+08:00' is <day before>T16:00Z, '..-04T23:00:00.000Z' is seven
+      // hours later; written days 05 and 04.
+      const cases = [
+        { tz: 'UTC', put: ['2017-05-05', '2017-05-10'], post: ['2017-05-12', '2017-05-17'], putEnd: '2017-05-04T23:30:00-05:00', postEnd: '2017-05-11T23:30:00-05:00', both: { startDate: '2017-05-05T00:00:00+08:00', endDate: '2017-05-04T23:00:00.000Z' } },
+        { tz: 'America/New_York', put: ['2017-06-05', '2017-06-10'], post: ['2017-06-12', '2017-06-17'], putEnd: '2017-06-04T23:30:00-05:00', postEnd: '2017-06-11T23:30:00-05:00', both: { startDate: '2017-06-05T00:00:00+08:00', endDate: '2017-06-04T23:00:00.000Z' } },
+        { tz: 'Asia/Taipei', put: ['2017-07-05', '2017-07-10'], post: ['2017-07-12', '2017-07-17'], putEnd: '2017-07-04T23:30:00-05:00', postEnd: '2017-07-11T23:30:00-05:00', both: { startDate: '2017-07-05T00:00:00+08:00', endDate: '2017-07-04T23:00:00.000Z' } },
+      ] as const
+      const ids: Array<{ put: string; post: string }> = []
+      for (const testCase of cases) {
+        ids.push({
+          put: await createCycle(org, { startDate: testCase.put[0], endDate: testCase.put[1] }),
+          post: await createCycle(org, { startDate: testCase.post[0], endDate: testCase.post[1] }),
+        })
+      }
+      const events = captureCycleEvents('attendance.payrollCycle.updated')
+      try {
+        for (const [index, testCase] of cases.entries()) {
+          const zone = zoneProbe[testCase.tz]
+          await underTimeZone(testCase.tz, async () => {
+            await expectDateParsedAtLocalMidnight(zone.offsetMinutes, zone.isoOfDate20150201)
+            const attempts: Array<{ id: string; entry: 'put' | 'post-update'; body: Record<string, unknown> }> = [
+              { id: ids[index].put, entry: 'put', body: { endDate: testCase.putEnd, status: 'closed' } },
+              { id: ids[index].put, entry: 'put', body: { endDate: testCase.putEnd } },
+              { id: ids[index].put, entry: 'put', body: { ...testCase.both, status: 'closed' } },
+              { id: ids[index].post, entry: 'post-update', body: { endDate: testCase.postEnd, status: 'closed' } },
+              { id: ids[index].post, entry: 'post-update', body: { endDate: testCase.postEnd } },
+              { id: ids[index].post, entry: 'post-update', body: { ...testCase.both, status: 'closed' } },
+            ]
+            for (const attempt of attempts) {
+              await expectRefusedWithoutWrites(org, attempt.id, attempt.body, attempt.entry, events, { status: 400, ...invalidRange }, testCase.tz)
+            }
+            expect(await readCycle(ids[index].put)).toMatchObject({ status: 'open', start_date: testCase.put[0], end_date: testCase.put[1] })
+            expect(await readCycle(ids[index].post)).toMatchObject({ status: 'open', start_date: testCase.post[0], end_date: testCase.post[1] })
+            expect(await readSettlements(ids[index].put)).toEqual([])
+            expect(await readSettlements(ids[index].post)).toEqual([])
+          })
+        }
+      } finally {
+        events.stop()
+      }
+    })
+
+    it('T16c [defect] under TZ=Asia/Taipei and America/New_York an open cycle refuses a single start or end date that is not YYYY-MM-DD even when its range is in order, on both update entries and also when closing: 400 with row, settlement rows and success events unchanged', async () => {
+      await seedCompTimeLot(org, `r7-t16c-user-${randomUUID()}`)
+      // In order by instant and by written day (end '..-12T00:00:00.000Z' after the start; start '..-06T00:00:00.000Z'
+      // before the stored end), so only the format is wrong: the old code stored them.
+      const cases = [
+        { tz: 'Asia/Taipei', put: ['2017-08-05', '2017-08-10'], post: ['2017-08-15', '2017-08-20'], bodies: { put: [{ endDate: '2017-08-12T00:00:00.000Z', status: 'closed' }, { startDate: '2017-08-06T00:00:00.000Z' }], post: [{ endDate: '2017-08-22T00:00:00.000Z', status: 'closed' }, { startDate: '2017-08-16T00:00:00.000Z' }] } },
+        { tz: 'America/New_York', put: ['2017-09-05', '2017-09-10'], post: ['2017-09-15', '2017-09-20'], bodies: { put: [{ endDate: '2017-09-12T00:00:00.000Z', status: 'closed' }, { startDate: '2017-09-06T00:00:00.000Z' }], post: [{ endDate: '2017-09-22T00:00:00.000Z', status: 'closed' }, { startDate: '2017-09-16T00:00:00.000Z' }] } },
+      ] as const
+      const ids: Array<{ put: string; post: string }> = []
+      for (const testCase of cases) {
+        ids.push({
+          put: await createCycle(org, { startDate: testCase.put[0], endDate: testCase.put[1] }),
+          post: await createCycle(org, { startDate: testCase.post[0], endDate: testCase.post[1] }),
+        })
+      }
+      const events = captureCycleEvents('attendance.payrollCycle.updated')
+      try {
+        for (const [index, testCase] of cases.entries()) {
+          const zone = zoneProbe[testCase.tz]
+          await underTimeZone(testCase.tz, async () => {
+            await expectDateParsedAtLocalMidnight(zone.offsetMinutes, zone.isoOfDate20150201)
+            for (const body of testCase.bodies.put) {
+              await expectRefusedWithoutWrites(org, ids[index].put, body, 'put', events, { status: 400, ...invalidRange }, testCase.tz)
+            }
+            for (const body of testCase.bodies.post) {
+              await expectRefusedWithoutWrites(org, ids[index].post, body, 'post-update', events, { status: 400, ...invalidRange }, testCase.tz)
+            }
+            expect(await readCycle(ids[index].put)).toMatchObject({ status: 'open', start_date: testCase.put[0], end_date: testCase.put[1] })
+            expect(await readCycle(ids[index].post)).toMatchObject({ status: 'open', start_date: testCase.post[0], end_date: testCase.post[1] })
+            expect(await readSettlements(ids[index].put)).toEqual([])
+            expect(await readSettlements(ids[index].post)).toEqual([])
+          })
+        }
+      } finally {
+        events.stop()
+      }
+    })
+
+    it('T16d [control] under TZ=Asia/Taipei and America/New_York a page edit that moves one end onto the other and closes in the same request makes a closed single-day cycle on both update entries, with a snapshot of that day and one success event; a YYYY-MM-DD inversion with close is 400 with nothing changed', async () => {
+      await seedCompTimeLot(org, `r7-t16d-user-${randomUUID()}`)
+      const cases = [
+        { tz: 'Asia/Taipei', put: { period: ['2017-10-05', '2017-10-10'], body: { endDate: '2017-10-05', status: 'closed' }, day: '2017-10-05' }, post: { period: ['2017-10-12', '2017-10-17'], body: { startDate: '2017-10-17', status: 'closed' }, day: '2017-10-17' }, inverted: { period: ['2017-10-20', '2017-10-25'], body: { endDate: '2017-10-19', status: 'closed' } } },
+        { tz: 'America/New_York', put: { period: ['2017-12-05', '2017-12-10'], body: { endDate: '2017-12-05', status: 'closed' }, day: '2017-12-05' }, post: { period: ['2017-12-12', '2017-12-17'], body: { startDate: '2017-12-17', status: 'closed' }, day: '2017-12-17' }, inverted: { period: ['2017-12-20', '2017-12-25'], body: { endDate: '2017-12-19', status: 'closed' } } },
+      ] as const
+      const ids: Array<{ put: string; post: string; inverted: string }> = []
+      for (const testCase of cases) {
+        ids.push({
+          put: await createCycle(org, { startDate: testCase.put.period[0], endDate: testCase.put.period[1] }),
+          post: await createCycle(org, { startDate: testCase.post.period[0], endDate: testCase.post.period[1] }),
+          inverted: await createCycle(org, { startDate: testCase.inverted.period[0], endDate: testCase.inverted.period[1] }),
+        })
+      }
+      const events = captureCycleEvents('attendance.payrollCycle.updated')
+      try {
+        for (const [index, testCase] of cases.entries()) {
+          const zone = zoneProbe[testCase.tz]
+          await underTimeZone(testCase.tz, async () => {
+            await expectDateParsedAtLocalMidnight(zone.offsetMinutes, zone.isoOfDate20150201)
+            for (const { id, entry, edit } of [
+              { id: ids[index].put, entry: 'put', edit: testCase.put },
+              { id: ids[index].post, entry: 'post-update', edit: testCase.post },
+            ] as const) {
+              const res = await updateCycle(org, id, edit.body, entry)
+              expect(res.status, `${testCase.tz} ${entry} ${JSON.stringify(edit.body)} ${res.raw}`).toBe(200)
+              expect(await readCycle(id)).toMatchObject({ status: 'closed', start_date: edit.day, end_date: edit.day })
+              const settlements = await readSettlements(id)
+              expect(settlements.length).toBeGreaterThan(0)
+              for (const row of settlements) expect(row).toMatchObject({ period_start_date: edit.day, period_end_date: edit.day })
+              expect(events.forCycle(id)).toEqual([{ orgId: org.orgId, payrollCycleId: id }])
+            }
+            for (const entry of ['put', 'post-update'] as const) {
+              await expectRefusedWithoutWrites(org, ids[index].inverted, testCase.inverted.body, entry, events, { status: 400, ...invalidRange }, testCase.tz)
+            }
+            expect(await readCycle(ids[index].inverted)).toMatchObject({ status: 'open', start_date: testCase.inverted.period[0], end_date: testCase.inverted.period[1] })
+            expect(await readSettlements(ids[index].inverted)).toEqual([])
+          })
+        }
+      } finally {
+        events.stop()
+      }
+    })
+
+    it('T16e [control] under TZ=Asia/Taipei a closed cycle and an open cycle with settlement rows keep 409 CYCLE_CLOSED_PERIOD_FROZEN for the T16a/T16b date strings on both update entries, also with close, and keep 400 for a YYYY-MM-DD inversion or an unparseable date, which are checked before the freeze: nothing changes', async () => {
+      const templateId = await createTemplate(org, 'r7 t16e template')
+      await seedCompTimeLot(org, `r7-t16e-user-${randomUUID()}`)
+      const closedId = await createCycle(org, { startDate: '2017-03-05', endDate: '2017-03-10', templateId, status: 'closed' })
+      expect((await readSettlements(closedId)).length).toBeGreaterThan(0)
+      const settledOpenId = await createCycle(org, { startDate: '2017-02-05', endDate: '2017-02-10' })
+      await requirePool().query(
+        `INSERT INTO attendance_payroll_cycle_settlements
+           (org_id, cycle_id, period_start_date, period_end_date, closed_at, user_id, source, convertible_minutes, must_pay_minutes, snapshot)
+         VALUES ($1, $2, '2017-02-05', '2017-02-10', now(), $3, 'restday', 90, 0, '{}'::jsonb)`,
+        [org.orgId, settledOpenId, `r7-t16e-settled-${randomUUID()}`],
+      )
+      const cycles = [
+        { id: closedId, dayBeforeStart: '2017-03-04' },
+        { id: settledOpenId, dayBeforeStart: '2017-02-04' },
+      ]
+      const events = captureCycleEvents('attendance.payrollCycle.updated')
+      try {
+        await underTimeZone('Asia/Taipei', async () => {
+          await expectDateParsedAtLocalMidnight(zoneProbe['Asia/Taipei'].offsetMinutes, zoneProbe['Asia/Taipei'].isoOfDate20150201)
+          for (const cycle of cycles) {
+            const rowBefore = await readCycle(cycle.id)
+            const settlementsBefore = await readSettlements(cycle.id)
+            expect(settlementsBefore.length).toBeGreaterThan(0)
+            const attempts: Array<{ body: Record<string, unknown>; expected: { status: number; code: string; message?: string } }> = [
+              { body: { endDate: `${cycle.dayBeforeStart}T23:00:00.000Z` }, expected: { status: 409, code: 'CYCLE_CLOSED_PERIOD_FROZEN' } },
+              { body: { endDate: `${cycle.dayBeforeStart}T23:00:00.000Z`, status: 'closed' }, expected: { status: 409, code: 'CYCLE_CLOSED_PERIOD_FROZEN' } },
+              { body: { endDate: `${cycle.dayBeforeStart}T23:30:00-05:00`, status: 'closed' }, expected: { status: 409, code: 'CYCLE_CLOSED_PERIOD_FROZEN' } },
+              { body: { endDate: cycle.dayBeforeStart, status: 'closed' }, expected: { status: 400, ...invalidRange } },
+              { body: { startDate: 'not-a-date' }, expected: { status: 400, ...invalidRange } },
+            ]
+            for (const entry of ['put', 'post-update'] as const) {
+              for (const attempt of attempts) {
+                await expectRefusedWithoutWrites(org, cycle.id, attempt.body, entry, events, attempt.expected, 'Asia/Taipei')
+              }
+            }
+            expect(await readCycle(cycle.id)).toEqual(rowBefore)
+            expect(await readSettlements(cycle.id)).toEqual(settlementsBefore)
+          }
+        })
+      } finally {
+        events.stop()
+      }
+    })
   })
 
   it('④ 加班银行 v1-3b — 满勤 flag surfaces on GET /summary when policy ON; ABSENT when OFF (dormant-clean)', async () => {
