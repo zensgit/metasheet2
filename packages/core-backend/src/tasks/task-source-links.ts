@@ -88,3 +88,19 @@ export function parseTaskSourceInput(input: { source?: unknown; dispatchKey?: un
   if (source === null || !isDispatchKey(key)) return { ok: false, reason: 'invalid_dispatch_key' }
   return { ok: true, source, dispatchKey: key }
 }
+
+/** Rows a record's list of tasks answers when the caller names no page size. */
+export const RECORD_TASK_LIST_DEFAULT_LIMIT = 20
+
+/** The most rows a record's list of tasks answers. */
+export const RECORD_TASK_LIST_MAX_LIMIT = 100
+
+/**
+ * The page size of a record's list of tasks: an integer in `1..RECORD_TASK_LIST_MAX_LIMIT`. A value
+ * above the bound is the bound; an absent, non-integer or non-positive value is the default.
+ */
+export function clampRecordTaskListLimit(value: unknown): number {
+  const raw = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1) return RECORD_TASK_LIST_DEFAULT_LIMIT
+  return Math.min(raw, RECORD_TASK_LIST_MAX_LIMIT)
+}

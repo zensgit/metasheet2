@@ -1205,6 +1205,9 @@ const COVERED: Record<string, CoveredFile> = {
   // canRead 403 → sendSheetNotLive pair inline, before any gate or read, so the scan proves them GUARDED.
   'routes/multitable-copy-sheet.ts': { minHandlers: 2, minInScope: 2, exempt: {} },
   'routes/multitable-record-approvals.ts': { minHandlers: 2, minInScope: 2, exempt: {} },
+  // The record's list of tasks: its one handler runs requireRecordReadable first and answers its
+  // refusal before anything else is read.
+  'routes/multitable-record-tasks.ts': { minHandlers: 1, minInScope: 1, exempt: {} },
   'routes/recovery-archive-restore-owner.ts': { minHandlers: 11, minInScope: 11, exempt: {} },
   // #5829 CLOSED: all three legacy grant-table routes now run the same capability/liveness PAIR as
   // the forward routes — resolveSheetCapabilities → 403 on !canManageSheetAccess →

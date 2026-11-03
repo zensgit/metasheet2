@@ -354,6 +354,84 @@ export async function countTasks(input: { orgId: string; actorId: string; view: 
   return Number(result.rows[0]?.n ?? 0)
 }
 
+/**
+ * One task dispatched from a multitable record, as the record's list of tasks answers it: ids, the
+ * title, the status and the dates. `isMine` is whether the viewer created it. No retry key and no
+ * value from the record.
+ */
+export interface RecordTaskItem {
+  id: string
+  title: string
+  status: string
+  completionMode: string
+  dueAt: string | null
+  dueDate: string | null
+  createdBy: string
+  createdAt: string | null
+  isMine: boolean
+}
+
+function instantText(value: unknown): string | null {
+  if (value === null || value === undefined) return null
+  const at = value instanceof Date ? value : new Date(String(value))
+  return Number.isNaN(at.getTime()) ? null : at.toISOString()
+}
+
+/**
+ * The tasks linked to one record (`task_source_links`) that the viewer could open from the task
+ * centre: live tasks of the viewer's org on which the viewer is an assignee, a follower or the
+ * creator (the `any_role` scope, whose org clause is the single emission; list identity does not
+ * enter a list). Newest first, at most `limit`, `hasMore` from a `limit + 1` probe. Nothing is
+ * counted, so a reader learns nothing about tasks they cannot open.
+ *
+ * With `dispatchKey`, only the viewer's own dispatch made with that key from this record: the link's
+ * creator is the viewer and its key is the one given, so 0 or 1 rows, and `hasMore` is false.
+ */
+export async function listRecordTasks(input: {
+  orgId: string
+  actorId: string
+  sheetId: string
+  recordId: string
+  limit: number
+  dispatchKey?: string | null
+}): Promise<{ items: RecordTaskItem[]; hasMore: boolean }> {
+  const dispatchKey = input.dispatchKey ?? null
+  if (dispatchKey !== null && !isDispatchKey(dispatchKey)) fail(422, 'INVALID_DISPATCH_KEY')
+  // $1 actor and $2 org come from the scope builder; this query's own binds start at $3.
+  const scope = buildTaskScopeCondition({ view: 'any_role', actorParam: input.actorId, orgParam: input.orgId })
+  const params: unknown[] = [...scope.params, input.sheetId, input.recordId, TASK_SOURCE_TYPE_RECORD]
+  let keyed = ''
+  if (dispatchKey !== null) {
+    params.push(dispatchKey)
+    keyed = ` AND l.created_by = $1 AND l.dispatch_key = $${params.length}`
+  }
+  params.push(dispatchKey !== null ? 1 : input.limit + 1)
+  const result = await query<Row>(
+    `SELECT tasks.id, tasks.title, tasks.status, tasks.completion_mode, tasks.due_at,
+            tasks.due_date::text AS due_date, tasks.created_by, tasks.created_at
+     FROM tasks
+     JOIN task_source_links l ON l.task_id = tasks.id AND l.org_id = tasks.org_id
+     WHERE l.sheet_id = $3 AND l.record_id = $4 AND l.source_type = $5${keyed}
+       AND ${scope.sql}
+     ORDER BY tasks.created_at DESC, tasks.id DESC
+     LIMIT $${params.length}`,
+    params,
+  )
+  const rows = dispatchKey !== null ? result.rows : result.rows.slice(0, input.limit)
+  const items = rows.map((row): RecordTaskItem => ({
+    id: String(row.id),
+    title: String(row.title),
+    status: String(row.status),
+    completionMode: String(row.completion_mode),
+    dueAt: instantText(row.due_at),
+    dueDate: calendarDate(row.due_date),
+    createdBy: String(row.created_by),
+    createdAt: instantText(row.created_at),
+    isMine: String(row.created_by) === input.actorId,
+  }))
+  return { items, hasMore: dispatchKey === null && result.rows.length > input.limit }
+}
+
 function calendarDate(value: unknown): string | null {
   if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10)
   return null
