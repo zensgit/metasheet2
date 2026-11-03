@@ -6,7 +6,7 @@
 
 仅提供运维私有文件 CLI，修复现有账号的钉钉登录身份，不建立公开绑定接口。保留本地账号、角色、准入、组织成员权限、目录关联及审批记录；不切换企业、不代审批、不启用同步。
 
-verify 同时要求有效管理员及其密码、目标账号的非临时本地密码、新鲜的当前应用钉钉资料，以及当前应用下已经关联到目标账号的活动目录证据。企业、UnionID、OpenID 证据必须相容；另一用户占用、隐藏的第二个人、企业不符、仅 OpenID 相同而 UnionID 冲突均拒绝。不按昵称、邮箱相同或管理员知道密码推定同一人。证据不足的旧 E4 关联仍阻断，不能用本工具绕过完整 E4→Canary 交接。
+verify 同时要求有效管理员及其密码、目标账号的非临时本地密码、新鲜的当前应用钉钉资料，以及当前应用下已经关联到目标账号的活动目录证据。企业、UnionID、OpenID 证据必须相容；另一用户占用、隐藏的第二个人、企业不符、仅 OpenID 相同而 UnionID 冲突均拒绝。不按昵称、邮箱相同或管理员知道密码推定同一人。证据不足的旧 E4 关联仍阻断，不能用本工具绕过完整 E4→Canary 交接。目录证据必须已存储 UnionID：目标账号在当前应用下任一活动的钉钉目录关联缺少 UnionID 时，verify 在调用钉钉之前即以 `REPAIR_DIRECTORY_UNION_ID_REQUIRED` 拒绝（apply 同样复核）；仅 OpenID 相同（同应用亦然）不构成同人证据；UnionID 存在而目录 OpenID 为空的来源仍可作为证据。当前应用、同企业、同 UnionID 且仍关联到目标账号的活动钉钉来源必须恰好一个，多于一个以 `REPAIR_CANONICAL_SOURCE_REQUIRED` 拒绝。身份来源检查、journal 来源、release 允许列表与目录守卫只覆盖 `provider='dingtalk'` 的目录账号；本地目录账号保留在审批快照与摘要中，不受围栏约束。
 
 证明使用平台 AES-GCM 材料加密，绑定管理员凭据摘要、目标权限／准入快照、登录应用范围与一次性 nonce，五分钟过期。只输出证明文件，不签发本地会话。预览仅输出打码线索和摘要，不构成本人确认的替代。
 
@@ -26,7 +26,7 @@ apply 需精确证明摘要及 `confirm=apply`。身份旧值加密保存；写�
 
 rollback-preview 显示当前摘要及变动分段。后续登录、角色补齐、资料或合法权限变更不再让恢复永久无出口，但必须重新审阅和批准当前恢复摘要。rollback 只恢复本次身份旧值，保留之后的角色、准入、密码、启用标记等合法变更；拒绝未解决撤权、其他人占用或 applied handover。执行后再次撤销目标当前会话和 API token。恢复不能复活已撤销授权。
 
-release 不恢复旧身份，也不恢复权限。有效用户必须有唯一当前应用、同企业同人的 canonical 目录来源；撤权用户可结束活动身份 pin，但撤权状态及证据保留。**release 仅解除身份 pin，目录来源约束继续生效。** released_account_ids 只保留恰好一个 canonical 账户 ID，否则为空数组；空数组会持续拒绝包括原账号在内的目录重绑。历史来源 IDs 保持不变。新来源接入、跨企业或解除此持久约束不在本轮范围，须另行设计和批准。正常受控交接移动原稳定账户 ID，不创建第二个账户。
+release 不恢复旧身份，也不恢复权限。release 分两种模式，两者都从 journal 记录的来源 ID 重新读取并核实真实目录账号与集成（历史 ID 本身不是证据）：被核实的是 apply 时记录为 `canonical_account_id` 的那一行（apply 预览中显示为 canonicalAccountId），其余 journal 来源 ID 只重新读取，用于发现被其他用户占用的情形。可登录用户（授权开启、钉钉身份存在、账号可登录）走 canonical 模式：必须恰好有一个当前应用、同企业、同 UnionID、活动且仍关联到该用户的钉钉来源，否则 `REPAIR_CANONICAL_SOURCE_REQUIRED`（可 rollback、重绑原账号或撤权后终结）。已撤权用户（授权关闭、身份已删、账号停用／回收站／未激活）走终结模式：只接受恰好一个同企业、同应用、同 UnionID 的原来源（来源 inactive 允许，不恢复其活跃状态），否则 `REPAIR_HISTORICAL_SOURCE_UNVERIFIED`；终结不重新启用授权、不恢复身份、不恢复关联、用户状态、权限、组织成员或旧会话，撤权状态与证据保留。两种模式都拒绝：登录应用或企业已变（`REPAIR_LOGIN_SCOPE_CHANGED`）、同企业同 UnionID 的目录行被其他用户占用（`REPAIR_DIRECTORY_OWNER_CONFLICT`）、其他用户持有该人的钉钉身份（`REPAIR_IDENTITY_CONFLICT`）、用户名下仍有名单外的钉钉关联（`REPAIR_SOURCE_OUTSIDE_ALLOWLIST`，含 inactive 旧关联，须先安全解绑；解绑会删除同 UnionID 身份并使 release 走终结模式）。拒绝时不写任何行。**release 仅解除身份 pin，目录来源约束继续生效。** released_account_ids 恒为恰好一个账户 ID，数据库 CHECK 拒绝空数组、NULL 与含 NULL 元素的数组；历史来源 IDs 保持不变。release-preview 输出 mode、releasedAccountIds、linkedDingTalkAccountIds、localLinkCount，并把当前登录 scope、最终名单与重新读取的来源行绑定进摘要，执行时在锁内重算，任何变化拒绝为 `REPAIR_RECOVERY_SNAPSHOT_CHANGED`。来源删失、换应用、企业／人员归属改变或被他人占用属于本版明确不支持的恢复范围（journal 停在 applied；已撤权用户的 rollback 也被拒绝），须另批受控重锚。新来源接入、跨企业或解除此持久约束不在本轮范围，须另行设计和批准。正常受控交接移动原稳定账户 ID，不创建第二个账户。
 
 此约束不依赖没有实际消费者的 connectionDisabled 字段，也不把 status=inactive 或 sync_enabled=false 当作手动同步／在途同步已停止的证明。具有完整有效配置、能够成功同步的旧来源，在 release 后尝试第二关联仍由真实数据库守卫拒绝；其同步批次可能失败，禁止自动解除守卫。
 
@@ -46,7 +46,15 @@ pnpm ops:dingtalk-login-repair release /restricted/release.json
 
 verify 输入：userId/password/code/actorId/actorPassword。preview：proof。apply：proof/digest/confirm。两种 recovery preview：id/actorId/actorPassword；执行 rollback／release 再增加 digest/confirm。输入必须为私有常规文件，无组／其他用户权限，最多 64 KiB，严格字段集；证明输出 0600 且不覆盖。凭据、授权码和证明不得进入命令参数、聊天或 PR。失败仅打印固定拒绝码。
 
-真实窗口前必须另批：完整迁移台账、专用加密材料及可恢复配置／数据库备份、当前身份与目录证据、审批在途依赖、session/API token 影响、来源约束后续处理和维护窗口。新加密字段 `dingtalk_login_repairs.before_identity` 已登记普查和启动探测，单字段最多抽取二十行，不代表全库普查。换材料而不迁移密文会使恢复拒绝；必须保留原材料与密文备份。非空修复历史不允许 migration down，不能通过删除历史或直接拆守卫回滚。
+真实窗口前必须另批：完整迁移台账、专用加密材料及可恢复配置／数据库备份、当前身份与目录证据、审批在途依赖、session/API token 影响、来源约束后续处理和维护窗口。新加密字段 `dingtalk_login_repairs.before_identity` 已登记普查和启动探测，单字段最多抽取二十行，不代表全库普查。换材料而不迁移密文会使恢复拒绝；必须保留原材料与密文备份。非空修复历史不允许 migration down，不能通过删除历史或直接拆守卫回滚。迁移在合并前再次原地改写（CHECK 与目录守卫函数）：跑过 `cbd01a7101` 版本的开发库须重建。
+
+## 本版限制
+
+- 不支持目录缺少 UnionID 的修复：verify 在调用钉钉之前拒绝，须先补齐目录 UnionID。
+- 不提供重锚：登录应用或企业变更、canonical 来源被删除、换应用、人员或企业归属改变、被其他用户占用时，journal 停在 applied，须另批受控重锚。
+- 同一用户在当前应用下有两个活动的同人来源时，verify 拒绝（`REPAIR_CANONICAL_SOURCE_REQUIRED`），须先解绑其中一个。
+- release 前必须解绑名单外的钉钉关联（任何应用，活动或 inactive）；解绑会删除该用户同 UnionID 的钉钉身份，即撤销其钉钉登录，release 随之走终结模式。
+- 锁阶段内单条语句三十秒累计等待触发的真实 57014 未在真实 PostgreSQL 上复现。
 
 ## 本地验证与交付门槛
 
