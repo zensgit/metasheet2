@@ -8425,13 +8425,16 @@ attendanceIntegrationDescribe(
     // Cycles are created and closed before the switch; only the maintenance requests run inside it.
     async function underTimeZone<T>(tz: string, run: () => Promise<T>): Promise<T> {
       const previousTz = process.env.TZ
+      const offsetBefore = new Date(2015, 1, 1).getTimezoneOffset()
       process.env.TZ = tz
-      try {
-        return await run()
-      } finally {
+      const result = await run().finally(() => {
         if (previousTz === undefined) delete process.env.TZ
         else process.env.TZ = previousTz
-      }
+      })
+      // Reached only when run() succeeded, so a failing run() keeps its own error. Covers the delete path that CI
+      // takes (TZ unset there): later tests in this file must not run in the zone that was switched to.
+      expect(new Date(2015, 1, 1).getTimezoneOffset(), `time zone restored after ${tz}`).toBe(offsetBefore)
+      return result
     }
 
     // Positive control for the switch: in this process a DATE now comes back from pg at local midnight of the zone.
@@ -8549,6 +8552,41 @@ attendanceIntegrationDescribe(
           expect(await readCycle(cycleId)).toEqual(rowAfter)
         })
       }
+    })
+
+    it('T15d [control] under TZ=UTC a closed cycle refuses a date string other than YYYY-MM-DD even when its UTC day equals the stored day, and an open cycle refuses an inverted range given as such a string: 409 / 400 with zero writes', async () => {
+      const templateId = await createTemplate(org, 'r7 t15d template')
+      await seedCompTimeLot(org, `r7-t15d-user-${randomUUID()}`)
+      const frozenCases = [
+        // Its UTC day is 2018-07-02, the stored start; PG keeps only the written date, 2018-07-01.
+        { id: await createCycle(org, { startDate: '2018-07-02', endDate: '2018-07-28', templateId, status: 'closed' }), change: { startDate: '2018-07-01T20:00:00-05:00' } },
+        // Names the stored start day, but only 'YYYY-MM-DD' is accepted as proof that the stored day stays the same.
+        { id: await createCycle(org, { startDate: '2018-06-01', endDate: '2018-06-28', templateId, status: 'closed' }), change: { startDate: '2018-06-01T00:00:00.000Z' } },
+      ] as const
+      for (const { id } of frozenCases) expect((await readSettlements(id)).length).toBeGreaterThan(0)
+      const openId = await createCycle(org, { startDate: '2019-04-01', endDate: '2019-04-28' })
+
+      await underTimeZone('UTC', async () => {
+        await expectDateParsedAtLocalMidnight(0, '2015-02-01T00:00:00.000Z')
+        for (const { id, change } of frozenCases) {
+          const rowBefore = await readCycle(id)
+          const settlementsBefore = await readSettlements(id)
+          for (const entry of ['put', 'post-update'] as const) {
+            const res = await updateCycle(org, id, change, entry)
+            expect(res.status, `UTC ${entry} ${JSON.stringify(change)} ${res.raw}`).toBe(409)
+            expect(errorCode(res)).toBe('CYCLE_CLOSED_PERIOD_FROZEN')
+            expect(await readCycle(id)).toEqual(rowBefore)
+            expect(await readSettlements(id)).toEqual(settlementsBefore)
+          }
+        }
+
+        const openBefore = await readCycle(openId)
+        const inverted = { startDate: '2019-04-20T00:00:00.000Z', endDate: '2019-04-10' }
+        const invertedRes = await updateCycle(org, openId, inverted)
+        expect(invertedRes.status, `UTC ${JSON.stringify(inverted)} ${invertedRes.raw}`).toBe(400)
+        expect((invertedRes.body as { error?: { code?: string; message?: string } } | undefined)?.error).toEqual({ code: 'VALIDATION_ERROR', message: 'Invalid date range' })
+        expect(await readCycle(openId)).toEqual(openBefore)
+      })
     })
   })
 
