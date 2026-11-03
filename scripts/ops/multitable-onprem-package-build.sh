@@ -96,6 +96,9 @@ REQUIRED_PATHS=(
   # /api/integration/* routes and the offline mock chain can resolve its
   # adapter imports from the package root.
   "scripts/ops/integration-k3wise-onprem-preflight.mjs"
+  # YiDa L4 preflight: the read-only, values-free pre-start server checks an operator
+  # runs from the deploy root before the one-time YiDa local initialization (L4).
+  "scripts/ops/integration-yida-l4-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-evidence.mjs"
   "scripts/ops/integration-k3wise-delivery-readiness.mjs"
