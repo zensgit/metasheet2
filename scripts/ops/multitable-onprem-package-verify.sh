@@ -1073,6 +1073,7 @@ required=(
   "plugins/plugin-elearning/index.cjs"
   "plugins/plugin-elearning/lib/feature-flags.cjs"
   "scripts/ops/integration-k3wise-onprem-preflight.mjs"
+  "scripts/ops/integration-yida-l4-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-evidence.mjs"
   "scripts/ops/integration-k3wise-delivery-readiness.mjs"
@@ -1171,6 +1172,7 @@ required=(
   "docs/deployment/multitable-platform-rc-notes-20260404.md"
   "docs/deployment/multitable-windows-onprem-easy-start-20260319.md"
   "docs/deployment/multitable-onprem-package-layout-20260319.md"
+  "docs/deployment/tasks-enablement.md"
 )
 
 for rel in "${required[@]}"; do

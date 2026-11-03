@@ -365,12 +365,13 @@ describe('C — 新增: POST /sheets/:sheetId/manual-rows', () => {
     expect(recordsOf(S.PREG)).toEqual([])
   })
 
-  it('C-16 generic POST /records on the same P_reg sheet is unchanged in B2 (its refusal by state is B3): a locked column is still 403 FIELD_READONLY_PLM_SYSTEM, a human-only row still 422', async () => {
+  it('C-16 generic POST /records on the same P_reg sheet is refused BY STATE since B3 (ADR §3.1): 409 STOCK_PREP_PROJECT_SHEET_CREATE_USE_MANUAL_ROW, whatever the body — the full table lives in stock-preparation-manual-rows-generic-create.test.ts', async () => {
     const locked = await http().post('/api/multitable/records').send({ sheetId: S.PREG.sheetId, data: { [ph(S.PREG, 'componentName')]: 'SYN' } })
-    expect(locked.status).toBe(403)
-    expect(locked.body.error.code).toBe('FIELD_READONLY_PLM_SYSTEM')
+    expect(locked.status).toBe(409)
+    expect(locked.body.error.code).toBe('STOCK_PREP_PROJECT_SHEET_CREATE_USE_MANUAL_ROW')
     const human = await http().post('/api/multitable/records').send({ sheetId: S.PREG.sheetId, data: { [ph(S.PREG, 'notes')]: 'SYN' } })
-    expect(human.status).toBe(422)
+    expect(human.status).toBe(409)
+    expect(human.body.error.details).toEqual({ state: 'allowed' })
     expect(recordsOf(S.PREG)).toEqual([])
   })
 
@@ -750,11 +751,13 @@ describe('X — GET /context: capabilities.stockPreparationManualRows', () => {
     return res.body.data.capabilities.stockPreparationManualRows
   }
 
-  it('X-01 allowed on a P_reg sheet: the six fillable ids (template order) and the create\'s required ids (名称, 总用量)', async () => {
+  it('X-01 allowed on a P_reg sheet: the six fillable ids (template order), the create\'s required ids (名称, 总用量) and (B3) the dialog\'s columns', async () => {
     expect(await block(S.PREG)).toEqual({
       state: 'allowed',
       editableFieldIds: ['componentCode', 'componentName', 'componentSpec', 'material', 'rawQuantity', 'totalQuantity'].map((l) => ph(S.PREG, l)),
       requiredFieldIds: [ph(S.PREG, 'componentName'), ph(S.PREG, 'totalQuantity')],
+      // ADR §8 B3.3: 名称*、总用量*、图号、规格、材质、用量、备注.
+      dialogFieldIds: ['componentName', 'totalQuantity', 'componentCode', 'componentSpec', 'material', 'rawQuantity', 'notes'].map((l) => ph(S.PREG, l)),
     })
   })
 
@@ -780,7 +783,7 @@ describe('X — GET /context: capabilities.stockPreparationManualRows', () => {
 
   it('X-04 a registry that cannot be read: unavailable / registry_unreadable (fail closed — the load itself still answers 200)', async () => {
     fake.failures.target = { code: '42501', message: 'synthetic: permission denied' }
-    expect(await block(S.PREG)).toEqual({ state: 'unavailable', reason: 'registry_unreadable', editableFieldIds: [], requiredFieldIds: [] })
+    expect(await block(S.PREG)).toEqual({ state: 'unavailable', reason: 'registry_unreadable', editableFieldIds: [], requiredFieldIds: [], dialogFieldIds: [] })
     fake.failures.target = null
     fake.failures.hostRegistry = { code: '08006', message: 'synthetic: connection failure' }
     const res = await context(S.PREG)

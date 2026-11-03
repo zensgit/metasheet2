@@ -1,6 +1,11 @@
 <template>
   <section class="sp-yida-preview" data-testid="stock-prep-yida-preview-panel">
     <h3>宜搭静态预演（不发送）</h3>
+    <!-- Display only: every marker is derived from state this panel (and the opened initialization panel) already holds; no read. -->
+    <ol class="sp-yida-preview__steps" data-testid="sp-yida-steps" aria-label="本地初始化操作步骤">
+      <li v-for="step in stepGuide" :key="step.number" :data-testid="`sp-yida-step-${step.number}`" :data-state="step.state" :aria-current="step.state === 'current' || step.state === 'blocked' ? 'step' : undefined">{{ step.number }} {{ step.label }}<span v-if="step.state === 'done'">（已完成）</span><span v-else-if="step.state === 'current'">（当前）</span><span v-else-if="step.state === 'blocked'">（待开启）</span></li>
+    </ol>
+    <p data-testid="sp-yida-steps-note">第 4 步「生成规则草稿 JSON」会清空预演结果，并关掉已打开的本地初始化：请在第 5 步之前存档，存档后再点一次「只在本地预演」。</p>
     <p>仅在本页处理粘贴的本地 JSON；请勿填写凭据。目标标识和远端状态均未核验。</p>
     <p>预演不会查询或推送。项目分配是用户选择的本地候选，尚非获批准的生产数量政策。</p>
     <fieldset class="sp-yida-preview__editor" :disabled="ownerSendLocked || initializationLocked">
@@ -8,6 +13,7 @@
     <div class="sp-yida-preview__examples">
       <button type="button" data-testid="sp-yida-example-primary" @click="loadExample('primary')">填入合成样例 A（创建）</button>
       <button type="button" data-testid="sp-yida-example-renamed" @click="loadExample('renamed')">填入合成样例 B（另一布局）</button>
+      <span data-testid="sp-yida-example-v1-note">以上是字段映射 v1 样例：v1 不支持本地初始化；本地初始化请选 v2 合同并用「填入七项身份合成样例 A」。</span>
     </div>
     <div v-if="previewMode === 'protocol'" class="sp-yida-preview__examples">
       <button type="button" data-testid="sp-yida-protocol-example-primary" @click="loadProtocolExample('primary')">填入七项身份合成样例 A</button>
@@ -88,15 +94,19 @@
       <p v-if="previewMode === 'protocol'" data-testid="sp-yida-protocol-warning">以下仅为 SDK 数据字段 DTO，不含认证、令牌或执行用户，不能作为完整请求发送。远端表单和实例均未核验；本地重复检查不证明远端幂等。</p>
       <ol><li v-for="row in plan.rows" :key="row.index" :data-testid="`sp-yida-result-row-${row.index}`"><strong>{{ row.index + 1 }}. {{ rowStatus(row.status) }}</strong> · 远端未核验<span v-if="candidateOrigins.has(row.index)"> · {{ candidateOrigins.get(row.index) }}</span><span v-if="row.status !== 'invalid' && row.localBusinessKey"> · 本地业务键：{{ row.localBusinessKey }}</span><span v-if="row.instanceId"> · 本地 instanceId：{{ row.instanceId }}</span><ul v-if="row.issues.length"><li v-for="(issue, issueIndex) in row.issues" :key="issueIndex" :data-testid="`sp-yida-row-issue-${row.index}-${issueIndex}`">{{ rowIssueReason(issue) }}</li></ul><pre v-if="row.payload" :data-testid="`sp-yida-payload-${row.index}`">{{ JSON.stringify(row.payload, null, 2) }}</pre><div v-if="row.status !== 'invalid' && row.protocolPreview" :data-testid="`sp-yida-protocol-${row.index}`"><p>协议 {{ row.protocolPreview.contract }}；完整性 {{ row.protocolPreview.completeness }}（仅数据字段）</p><pre :data-testid="`sp-yida-protocol-data-${row.index}`">{{ JSON.stringify(row.protocolPreview.data, null, 2) }}</pre></div></li></ol>
     </section>
-    <section v-if="persistentInput" class="sp-yida-preview__owner-entry">
+    <section class="sp-yida-preview__owner-entry" data-testid="sp-yida-owner-entry">
       <p>独立本地初始化可在发送开关 OFF 下使用；只由服务器预指定 owner 管理永久单槽，不交换令牌或授权发送。</p>
-      <button v-if="!initializationOpen" type="button" data-testid="sp-yida-initialization-open" :disabled="ownerSendLocked" @click="initializationOpen = true">打开本地初始化（不发送）</button>
-      <StockPreparationYidaInitializationPanel v-if="initializationOpen" :draft-input="persistentInput" @locked-change="initializationLocked = $event" @send-enabled-change="ownerSendEnabled = $event" />
+      <!-- Always rendered; greyed with the one missing condition until a clean v2 create preview exists. -->
+      <button v-if="!initializationOpen" type="button" data-testid="sp-yida-initialization-open" :disabled="ownerSendLocked || !persistentInput" @click="initializationOpen = true">打开本地初始化（不发送）</button>
+      <p v-if="!initializationOpen && initializationBlockedReason" data-testid="sp-yida-initialization-blocked">暂不能打开：{{ initializationBlockedReason }}</p>
+      <template v-if="persistentInput">
+      <StockPreparationYidaInitializationPanel v-if="initializationOpen" :draft-input="persistentInput" @locked-change="initializationLocked = $event" @send-enabled-change="ownerSendEnabled = $event" @progress-change="initializationProgress = $event" />
       <!-- Switch off means not visible: the entry appears only after the owner-authorized initialization GET
            reported the server send switch ON. An already open panel stays mounted (never abort its request). -->
       <p v-if="ownerSendEnabled || ownerSendOpen">以下是独立服务器确认流程；仅当前人工登记目标的 owner 且具备集成管理员权限可用。它不会把上面的本地预演当发送许可。</p>
       <button v-if="ownerSendEnabled && !ownerSendOpen" type="button" data-testid="sp-yida-owner-open" :disabled="initializationLocked" @click="ownerSendOpen = true">打开单行 CREATE 确认（服务器已开通）</button>
       <StockPreparationYidaOwnerSendPanel v-if="ownerSendOpen" :draft-input="persistentInput" @locked-change="ownerSendLocked = $event" />
+      </template>
     </section>
   </section>
 </template>
@@ -283,6 +293,47 @@ function runPreview(): void {
 }
 function rowStatus(status: YidaStaticPlan['rows'][number]['status']): string { return status === 'planned_create' ? '计划创建' : status === 'planned_update' ? '计划更新' : '无效' }
 function displayNumber(value: number | null | undefined): string { return value === null || value === undefined ? '—' : String(value) }
+// Step guide and the L4 entry reason (issue #6687 items 1–3). Display only: they read state this panel
+// already holds plus what the opened initialization panel reports; capturePersistentInput stays the gate.
+type InitializationProgress = { statusRead: boolean; tested: boolean; initialized: boolean; connectionTestEnabled: boolean }
+const initializationProgress = ref<InitializationProgress>({ statusRead: false, tested: false, initialized: false, connectionTestEnabled: false })
+const stepLabels = ['选合同（v2）', '填样例或规则', '只在本地预演', '生成并存档规则草稿 JSON', '打开本地初始化', '手动 GET 本地初始化状态', '测试连接', '本地初始化'] as const
+const stepGuide = computed(() => {
+  const open = initializationOpen.value && persistentInput.value !== null
+  const progress = open ? initializationProgress.value : { statusRead: false, tested: false, initialized: false, connectionTestEnabled: false }
+  const done = [
+    previewMode.value === 'protocol',
+    rowsText.value.trim().length > 0 && fieldMap.some((entry) => entry.source.length > 0 && entry.target.length > 0),
+    persistentInput.value !== null,
+    ruleExportText.value.length > 0,
+    open,
+    progress.statusRead,
+    progress.tested || progress.initialized,
+    progress.initialized,
+  ]
+  // Before opening: the first missing of steps 1–4 (archive before step 5). Once open: the first missing of 6–8.
+  const current = progress.initialized ? -1 : open ? done.indexOf(false, 5) : done.slice(0, 5).indexOf(false)
+  // Step 7 waiting on the server test switch is shown as blocked (待开启), not as a step the operator can do now.
+  const blocked = current === 6 && progress.statusRead && !progress.connectionTestEnabled
+  return stepLabels.map((label, index) => ({ number: index + 1, label, state: done[index] ? 'done' : index === current ? (blocked ? 'blocked' : 'current') : 'todo' }))
+})
+const initializationBlockedReason = computed(() => {
+  if (persistentInput.value) return ownerSendLocked.value ? '单行确认请求进行中，完成后才能打开。' : ''
+  if (previewMode.value !== 'protocol') return '预演合同须选「表单字段目录与协议 v2（仅本地）」；字段映射 v1 不支持本地初始化。'
+  if (intent.value !== 'create') return '意图须为「计划创建」；计划更新不能本地初始化。'
+  // An allocation rejection leaves no plan at all, so it is checked before the not-run case.
+  if ((allocationPreview.value?.issues.length ?? 0) !== 0) return '项目数量分配有拒因（见分配分析）；须先消除。'
+  const current = plan.value
+  // A failed rule-draft export/import also leaves an error code with no plan: name that action, not the preview.
+  if (!current && errorCode.value.startsWith('YIDA_RULE_TEMPLATE_')) return '规则草稿 JSON 的生成或导入没有通过（见上方错误代码），本地预演尚未运行；修正后再点「只在本地预演」。'
+  if (!current) return errorCode.value ? '本地预演没有通过（见上方错误代码）；修正后再点「只在本地预演」。' : '尚未运行本地预演：请先点「只在本地预演」。'
+  // The planner also marks every duplicate-key row invalid, so duplicates are named first.
+  const { invalid, duplicateKeyCount } = current.evidence
+  if (duplicateKeyCount !== 0) return `有 ${duplicateKeyCount} 行本地业务键重复${invalid > duplicateKeyCount ? `，另有 ${invalid - duplicateKeyCount} 行因其它原因无效` : ''}；须 0 行重复、0 行无效。`
+  if (invalid !== 0) return `有 ${invalid} 行无效；须 0 行无效、每行都是「计划创建」。`
+  if (current.rows.length === 0) return '预演结果没有任何行。'
+  return '每一行都须是「计划创建」。'
+})
 </script>
 
 <style scoped>
@@ -290,6 +341,11 @@ function displayNumber(value: number | null | undefined): string { return value 
 .sp-yida-preview h3, .sp-yida-preview h4, .sp-yida-preview p { margin: 0; }
 .sp-yida-preview__editor { display: grid; gap: var(--ms-space-3); margin: 0; padding: 0; border: 0; min-width: 0; }
 .sp-yida-preview__owner-entry { display: grid; gap: var(--ms-space-3); }
+.sp-yida-preview__steps { display: flex; flex-wrap: wrap; gap: var(--ms-space-2); margin: 0; padding: 0; list-style: none; }
+.sp-yida-preview__steps li { padding: 2px 8px; border: 1px solid var(--ms-border-light); border-radius: 6px; color: var(--ms-text-3); }
+.sp-yida-preview__steps li[data-state="done"] { color: var(--ms-text-2); }
+.sp-yida-preview__steps li[data-state="current"] { color: var(--ms-text-1); border-color: var(--ms-color-primary); font-weight: 600; }
+.sp-yida-preview__steps li[data-state="blocked"] { color: var(--ms-text-1); border-color: var(--ms-color-warning); border-style: dashed; font-weight: 600; }
 .sp-yida-preview__examples, .sp-yida-preview__fields, .sp-yida-preview__map-row, .sp-yida-preview__allocation-fields { display: flex; flex-wrap: wrap; gap: var(--ms-space-3); }
 .sp-yida-preview label, .sp-yida-preview__mapping, .sp-yida-preview__catalog, .sp-yida-preview__allocation, .sp-yida-preview__rule-template { display: grid; gap: var(--ms-space-2); }
 .sp-yida-preview input, .sp-yida-preview select, .sp-yida-preview textarea, .sp-yida-preview button { font: inherit; }
