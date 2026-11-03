@@ -3920,9 +3920,11 @@ export class AutomationExecutor {
   }
 
   /**
-   * #4196 Class-B Tx B for the call sites whose result shaping predates the attempt token: the terminal write
-   * is fenced by the claim's token; an unconfirmed write (lease expired and flipped by a replay, or the row
-   * terminalized elsewhere) is logged values-free. Returns whether THIS attempt's write landed.
+   * #4196 Class-B Tx B for the DingTalk sites (card / person / group): the terminal write is fenced by the
+   * claim's token; an unconfirmed write (lease expired and flipped by a replay, or the row terminalized
+   * elsewhere) is logged values-free. Returns whether THIS attempt's write landed — a site may report success
+   * only when it did (same rule as send_webhook / send_email: otherwise a failed-shaped step with
+   * output.reason 'terminal_write_unconfirmed', so dependent steps are skipped).
    */
   private async recordOutboundTerminal(
     outboundId: OutboundIntentIdentity,
@@ -5397,20 +5399,37 @@ export class AutomationExecutor {
       // the catch with the intent ALREADY `sent` and cannot be mis-recorded as a retryable `failed`. Guarded
       // WHERE status='pending' (single-writer); reason is a bounded, values-free class.
       sendReturned = true
-      if (outboundId) await this.recordOutboundTerminal(outboundId, outboundAttemptToken, 'sent', 'dingtalk_card_sent')
+      // Flag OFF / no identity ⇒ no intent row ⇒ nothing to confirm (legacy success shape, byte-identical).
+      const outboundConfirmed = outboundId
+        ? await this.recordOutboundTerminal(outboundId, outboundAttemptToken, 'sent', 'dingtalk_card_sent')
+        : true
+      // The card WAS delivered, so the card-delivery ledger is marked sent either way (it is the card's own
+      // truth, used by the action wrapper); only the step result below depends on the intent write.
       await markDingTalkApprovalCardDeliverySent(this.deps.queryFn, delivery.id, result.taskId ?? null)
+      const cardOutput = {
+        deliveryId: delivery.id,
+        instanceId,
+        nodeKey,
+        entryEpoch: typeof entryEpochRaw === 'number' ? entryEpochRaw : null,
+        recipientUserId: assigneeUserId,
+        deliveryKind: useInteractiveCard ? 'interactive_card' : 'work_notice_action_card',
+        taskId: result.taskId ?? null,
+      }
+      if (!outboundConfirmed) {
+        // Same rule as send_webhook / send_email: the intent row is no longer this attempt's `pending` (its
+        // lease expired and a replay flipped it, or it was terminalized elsewhere), so the ledger later steps
+        // consult does not say `sent` — this step must not say success either (dependents are skipped).
+        return {
+          actionType,
+          status: 'failed',
+          error: `${actionType} outcome_unknown (sent, terminal write not confirmed by this attempt); reconcile the intent ledger, not auto-resent`,
+          output: { ...cardOutput, outcome: 'outcome_unknown', reason: 'terminal_write_unconfirmed' },
+        }
+      }
       return {
         actionType,
         status: 'success',
-        output: {
-          deliveryId: delivery.id,
-          instanceId,
-          nodeKey,
-          entryEpoch: typeof entryEpochRaw === 'number' ? entryEpochRaw : null,
-          recipientUserId: assigneeUserId,
-          deliveryKind: useInteractiveCard ? 'interactive_card' : 'work_notice_action_card',
-          taskId: result.taskId ?? null,
-        },
+        output: cardOutput,
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
@@ -5805,32 +5824,47 @@ export class AutomationExecutor {
         for (const recipient of batch) sentRecipients.add(recipient)
       }
 
-      if (outboundId) {
-        await this.recordOutboundTerminal(outboundId, outboundAttemptToken, 'sent', 'dingtalk_person_sent')
+      // Flag OFF / no identity ⇒ no intent row ⇒ nothing to confirm (legacy success shape, byte-identical).
+      const outboundConfirmed = outboundId
+        ? await this.recordOutboundTerminal(outboundId, outboundAttemptToken, 'sent', 'dingtalk_person_sent')
+        : true
+
+      const personOutput = {
+        notifiedUsers: resolvedRecipients.length,
+        staticRecipientCount: staticUserIds.length,
+        memberGroupRecipientCount: memberGroupUserIds.length,
+        dynamicRecipientCount: recordUserIds.length,
+        dynamicMemberGroupRecipientCount: recordMemberGroupIds.length,
+        skippedRecipientCount: missingUserIds.length,
+        skippedUserIds: missingUserIds,
+        skippedReasonCounts,
+        memberGroupIds,
+        recipientFieldPath: recipientFieldPaths[0] ?? null,
+        recipientFieldPaths,
+        memberGroupRecipientFieldPath: memberGroupRecipientFieldPaths[0] ?? null,
+        memberGroupRecipientFieldPaths,
+        batchCount: batches.length,
+        integrationCount: recipientsByIntegration.size,
+        linkCount: linkLines.length,
+        responseCount,
+      }
+
+      if (!outboundConfirmed) {
+        // Same rule as send_webhook / send_email: every batch was accepted, but the intent row is no longer
+        // this attempt's `pending` (its lease expired and a replay flipped it, or it was terminalized
+        // elsewhere), so the ledger later steps consult does not say `sent` — neither may this step.
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: 'send_dingtalk_person_message outcome_unknown (sent, terminal write not confirmed by this attempt); reconcile the intent ledger, not auto-resent',
+          output: { ...personOutput, outcome: 'outcome_unknown', reason: 'terminal_write_unconfirmed' },
+        }
       }
 
       return {
         actionType: 'send_dingtalk_person_message',
         status: 'success',
-        output: {
-          notifiedUsers: resolvedRecipients.length,
-          staticRecipientCount: staticUserIds.length,
-          memberGroupRecipientCount: memberGroupUserIds.length,
-          dynamicRecipientCount: recordUserIds.length,
-          dynamicMemberGroupRecipientCount: recordMemberGroupIds.length,
-          skippedRecipientCount: missingUserIds.length,
-          skippedUserIds: missingUserIds,
-          skippedReasonCounts,
-          memberGroupIds,
-          recipientFieldPath: recipientFieldPaths[0] ?? null,
-          recipientFieldPaths,
-          memberGroupRecipientFieldPath: memberGroupRecipientFieldPaths[0] ?? null,
-          memberGroupRecipientFieldPaths,
-          batchCount: batches.length,
-          integrationCount: recipientsByIntegration.size,
-          linkCount: linkLines.length,
-          responseCount,
-        },
+        output: personOutput,
       }
     } catch (error) {
       const httpStatus = error instanceof DingTalkRequestError ? error.statusCode : error instanceof DingTalkBusinessError ? 200 : null
@@ -6426,6 +6460,8 @@ export class AutomationExecutor {
       }
     }
 
+    // Flag OFF / no identity ⇒ no intent row ⇒ nothing to confirm (legacy result shapes, byte-identical).
+    let outboundConfirmed = true
     if (outboundId) {
       // Multi-destination aggregate: any confirmed success makes the action terminal `sent`, even
       // when a later destination fails. Replaying the action would duplicate that confirmed send.
@@ -6436,7 +6472,7 @@ export class AutomationExecutor {
         : outcomeUnknownObserved
           ? 'outcome_unknown'
           : 'failed'
-      await this.recordOutboundTerminal(
+      outboundConfirmed = await this.recordOutboundTerminal(
         outboundId,
         outboundAttemptToken,
         outcome,
@@ -6467,21 +6503,35 @@ export class AutomationExecutor {
       }
     }
 
+    const groupOutput = {
+      destinationId: successfulDestinations[0]?.id,
+      destinationName: successfulDestinations[0]?.name,
+      staticDestinationCount: staticDestinationIds.length,
+      dynamicDestinationCount: recordDestinationIds.length,
+      destinationIds: successfulDestinations.map((destination) => destination.id),
+      destinationNames: successfulDestinations.map((destination) => destination.name),
+      destinationFieldPath: destinationFieldPaths[0] ?? null,
+      destinationFieldPaths,
+      sentCount: successfulDestinations.length,
+      linkCount: linkLines.length,
+    }
+
+    if (!outboundConfirmed) {
+      // Same rule as send_webhook / send_email: every destination accepted the message, but the intent row
+      // is no longer this attempt's `pending` (its lease expired and a replay flipped it, or it was
+      // terminalized elsewhere), so the ledger later steps consult does not say `sent` — neither may this step.
+      return {
+        actionType: 'send_dingtalk_group_message',
+        status: 'failed',
+        error: 'send_dingtalk_group_message outcome_unknown (sent, terminal write not confirmed by this attempt); reconcile the intent ledger, not auto-resent',
+        output: { ...groupOutput, outcome: 'outcome_unknown', reason: 'terminal_write_unconfirmed' },
+      }
+    }
+
     return {
       actionType: 'send_dingtalk_group_message',
       status: 'success',
-      output: {
-        destinationId: successfulDestinations[0]?.id,
-        destinationName: successfulDestinations[0]?.name,
-        staticDestinationCount: staticDestinationIds.length,
-        dynamicDestinationCount: recordDestinationIds.length,
-        destinationIds: successfulDestinations.map((destination) => destination.id),
-        destinationNames: successfulDestinations.map((destination) => destination.name),
-        destinationFieldPath: destinationFieldPaths[0] ?? null,
-        destinationFieldPaths,
-        sentCount: successfulDestinations.length,
-        linkCount: linkLines.length,
-      },
+      output: groupOutput,
     }
   }
 }

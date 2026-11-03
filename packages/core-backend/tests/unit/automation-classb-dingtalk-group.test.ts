@@ -226,6 +226,49 @@ describe('flag ON - Class-B DingTalk group intent/outcome', () => {
     expect(h.fetch).toHaveBeenCalledTimes(2)
   })
 
+  // #6715 verify P2: the group send reports success to later steps ONLY after its own token-fenced `sent`
+  // write is confirmed — the same rule send_webhook / send_email follow.
+  const twoStepRule = (): AutomationRule => ({
+    ...ruleWith(groupAction(['dest_1'])),
+    actions: [groupAction(['dest_1']) as never, { ...groupAction(['dest_1']), config: { destinationIds: ['dest_1'], titleTemplate: 'Second', bodyTemplate: 'Body' } } as never],
+  })
+  // What a replay does after this attempt's lease expired: flip the live `pending` row to outcome_unknown.
+  const replayFlipsPending = (intent: Map<string, IntentRow>) => {
+    for (const row of intent.values()) {
+      if (row.status === 'pending') Object.assign(row, { status: 'outcome_unknown', last_error: 'lease_expired' })
+    }
+  }
+
+  it('confirmed terminal write → success and the dependent step runs', async () => {
+    const h = makeHarness(['dest_1'], okResponse)
+    const execution = await new AutomationExecutor(h.deps).execute(twoStepRule(), TRIGGER, undefined, ROOT)
+    expect(execution.steps[0]?.status).toBe('success')
+    expect(execution.steps[0]?.output).not.toHaveProperty('reason')
+    expect(execution.steps[1]?.status).toBe('success')
+    expect([...h.intent.values()].map((row) => row.status)).toEqual(['sent', 'sent'])
+  })
+
+  it('terminal write unconfirmed (a replay flipped the row before the 2xx) → NOT success; dependent skipped; ledger stays outcome_unknown', async () => {
+    const h: Harness = makeHarness(['dest_1'], (call) => {
+      if (call === 0) replayFlipsPending(h.intent) // the slow send outlived its lease; a replay flipped the row
+      return okResponse()
+    })
+    const execution = await new AutomationExecutor(h.deps).execute(twoStepRule(), TRIGGER, undefined, ROOT)
+    expect(execution.steps[0]?.status).toBe('failed')
+    expect(execution.steps[0]?.alreadyApplied).toBeUndefined()
+    expect(execution.steps[0]?.error).toMatch(/terminal write not confirmed/)
+    expect(execution.steps[0]?.output).toMatchObject({
+      outcome: 'outcome_unknown',
+      reason: 'terminal_write_unconfirmed',
+      sentCount: 1,
+      destinationIds: ['dest_1'],
+    })
+    expect(execution.steps[1]?.status).toBe('skipped')
+    expect(onlyIntent(h.intent)).toMatchObject({ status: 'outcome_unknown', last_error: 'lease_expired' })
+    expect(h.intent.size).toBe(1) // the dependent never claimed
+    expect(h.fetch).toHaveBeenCalledTimes(1) // nothing resent
+  })
+
   it('keeps ad-hoc runSingleAction outside the two-phase substrate', async () => {
     const h = makeHarness(['dest_1'], okResponse)
 

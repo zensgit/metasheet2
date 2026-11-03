@@ -289,6 +289,11 @@ async function resolveExistingRow(
  * Per-target identities (#4450) first consult the whole-action sentinel row of the same action: history
  * written under the pre-#4450 key format (`sent` / `outcome_unknown` / a crashed `pending`) is recognized and
  * blocks the per-target send; a sentinel `failed` (definite non-delivery) blocks nothing.
+ *
+ * The consult is ONE-directional (whole-action → per-target upgrade only): a whole-action claim does NOT
+ * consult per-target rows. An action type's key shape is therefore fixed once it is wired — never mix
+ * whole-action and per-target claims for the same action, or a whole-action claim would proceed over a
+ * per-target `sent` row (a resend). A reverse consult is a follow-up for when fan-out actions are wired.
  */
 export async function claimOutboundIntent(
   query: OutboundQueryFn,
