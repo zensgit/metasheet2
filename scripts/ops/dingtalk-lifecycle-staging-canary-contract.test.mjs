@@ -6451,11 +6451,155 @@ test('human-bootstrap enforces the backend password policy before any account mu
   assert.match(policy, /password != password\.strip\(\)/)
   assert.match(policy, /len\(password\) < 8/)
   assert.match(policy, /len\(password\) > 128/)
-  assert.match(policy, /char\.islower\(\)/)
-  assert.match(policy, /char\.isupper\(\)/)
-  assert.match(policy, /char\.isdigit\(\)/)
+  // ASCII classes, same ranges as validatePassword's /[a-z]/, /[A-Z]/, /[0-9]/.
+  // Unicode islower/isupper/isdigit would accept letters and digits the API rejects.
+  assert.match(policy, /"a" <= char <= "z"/)
+  assert.match(policy, /"A" <= char <= "Z"/)
+  assert.match(policy, /"0" <= char <= "9"/)
+  assert.doesNotMatch(policy, /char\.islower\(\)|char\.isupper\(\)|char\.isdigit\(\)/)
   for (const weak of ['password', '123456', 'qwerty', 'abc123', 'letmein', 'admin']) {
     assert.match(policy, new RegExp(`"${weak}"`))
+  }
+})
+
+test('FUNCTIONAL: non-ASCII upper, lower, and digit are rejected before any create or reset', async () => {
+  // These pass Python's Unicode islower/isupper/isdigit and fail validatePassword:
+  // É (U+00C9) is upper but not [A-Z]; é (U+00E9) is lower but not [a-z];
+  // ١ (U+0661) is a digit but not [0-9].
+  const cases = [
+    { password: '\u00c9bcdefg1', note: 'password_missing_uppercase' },
+    { password: '\u00e9BCDEFG1', note: 'password_missing_lowercase' },
+    { password: 'Abcdefg\u0661', note: 'password_missing_digit' },
+  ]
+  for (const { password, note } of cases) {
+    const dir = mkdtempSync(join(tmpdir(), 'lifecycle-human-bootstrap-ascii-'))
+    const jwtFile = join(dir, 'admin.jwt')
+    const passFile = join(dir, 'staging-owner-admin.password')
+    const callsFile = join(dir, 'calls.txt')
+    writeFileSync(jwtFile, 'canary-jwt-token', { mode: 0o600 })
+    writeFileSync(passFile, password, { mode: 0o600 })
+    writeFileSync(callsFile, '', { mode: 0o600 })
+    const serverPy = `
+import json, http.server, socketserver, pathlib
+calls = pathlib.Path(${JSON.stringify(callsFile)})
+class H(http.server.BaseHTTPRequestHandler):
+    def _read(self):
+        n = int(self.headers.get('Content-Length', '0'))
+        return self.rfile.read(n) if n else b''
+    def _write(self, code, obj):
+        body = json.dumps(obj).encode('utf-8')
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def _record(self, method):
+        calls.write_text(calls.read_text(encoding='utf-8') + f'{method} {self.path}\\n', encoding='utf-8')
+    def do_GET(self):
+        self._record('GET')
+        if self.path.startswith('/api/admin/users?'):
+            return self._write(200, {'ok': True, 'data': {'items': [], 'total': 0}})
+        self._write(500, {'ok': False})
+    def do_POST(self):
+        self._record('POST')
+        raw = self._read()
+        if self.path == '/api/admin/users':
+            return self._write(200, {
+                'ok': True,
+                'data': {
+                    'user': {
+                        'id': 'user-new',
+                        'username': 'staging-owner-admin',
+                        'name': 'Staging Owner Admin',
+                        'email': None,
+                        'mobile': None,
+                        'role': 'admin',
+                        'is_admin': True,
+                    },
+                },
+            })
+        if self.path.endswith('/reset-password'):
+            return self._write(400, {'ok': False, 'error': {'code': 'PASSWORD_POLICY_FAILED'}})
+        self._write(500, {'ok': False})
+    def log_message(self, *args):
+        return
+with socketserver.TCPServer(('127.0.0.1', 0), H) as httpd:
+    print(httpd.server_address[1], flush=True)
+    for _ in range(6):
+        httpd.handle_request()
+`
+    const serverProc = await spawnPythonOrThrow(['-c', serverPy], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
+    })
+    const serverDone = collectChild(serverProc, 10000)
+    serverDone.catch(() => {})
+    try {
+      const port = await new Promise((resolve, reject) => {
+        let buf = ''
+        const timer = setTimeout(() => reject(new Error('port timeout')), 3000)
+        const onData = (chunk) => {
+          buf += chunk.toString('utf8')
+          const line = buf.trim().split(/\r?\n/).filter(Boolean).pop() || ''
+          if (/^\d+$/.test(line)) {
+            clearTimeout(timer)
+            serverProc.stdout.off('data', onData)
+            resolve(line)
+          }
+        }
+        serverProc.stdout.on('data', onData)
+      })
+      const result = spawnSync(
+        'bash',
+        [
+          '-o',
+          'pipefail',
+          '-c',
+          `source "$1"
+           CANARY_ADMIN_JWT_FILE="$2"
+           STAGING_OWNER_ADMIN_PASSWORD_FILE="$3"
+           STAGING_API_BASE_URL="http://127.0.0.1:$4"
+           if bootstrap_human_platform_admin; then
+             printf 'ok|%s' "$HUMAN_BOOTSTRAP_OUTCOME"
+           else
+             printf 'fail|%s' "$HUMAN_BOOTSTRAP_OUTCOME"
+           fi`,
+          'bash',
+          REMOTE_SH,
+          jwtFile,
+          passFile,
+          port,
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            ACTION: 'human-bootstrap',
+            OUTPUT_DIR: dir,
+            RUN_STAMP: 'contract-human-ascii-class',
+            LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+          },
+          timeout: 10000,
+        },
+      )
+      assert.equal(result.status, 0, result.stderr + result.stdout)
+      assert.match(result.stdout, new RegExp(`(?:^|\\n)fail\\|${note}(?:\\n|$)`))
+      const calls = readFileSync(callsFile, 'utf8')
+      const lines = calls.split('\n').filter(Boolean)
+      const createRequests = lines.filter((line) => line === 'POST /api/admin/users')
+      const resetRequests = lines.filter((line) => line.startsWith('POST ') && line.includes('/reset-password'))
+      assert.deepEqual(createRequests, [], `create ran before ${note}: ${calls}`)
+      assert.deepEqual(resetRequests, [], `reset ran before ${note}: ${calls}`)
+    } finally {
+      if (!serverProc.killed && serverProc.exitCode === null) {
+        try {
+          serverProc.kill('SIGKILL')
+        } catch {
+          // ignore
+        }
+      }
+      rmSync(dir, { recursive: true, force: true })
+    }
   }
 })
 

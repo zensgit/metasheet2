@@ -1259,11 +1259,15 @@ if len(password) < 8:
     emit(False, "password_too_short")
 if len(password) > 128:
     emit(False, "password_too_long")
-if not any(char.islower() for char in password):
+# Match validatePassword's ASCII classes [a-z], [A-Z], and [0-9]. Unicode
+# islower/isupper/isdigit accept letters and digits the API rejects (É, é, ١).
+# Reject those before lookup or create: a reset-password 400 after first-create
+# would leave an active admin whose generated temp password was never returned.
+if not any("a" <= char <= "z" for char in password):
     emit(False, "password_missing_lowercase")
-if not any(char.isupper() for char in password):
+if not any("A" <= char <= "Z" for char in password):
     emit(False, "password_missing_uppercase")
-if not any(char.isdigit() for char in password):
+if not any("0" <= char <= "9" for char in password):
     emit(False, "password_missing_digit")
 if any(pattern in password.lower() for pattern in ("password", "123456", "qwerty", "abc123", "letmein", "admin")):
     emit(False, "password_weak_pattern")
