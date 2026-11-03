@@ -18,6 +18,8 @@ import {
 } from '../../src/services/task-list-records'
 import { completeTask, countPending, createTask, parseTaskPage, reopenTask, toTaskPendingItem } from '../../src/services/task-records'
 import { addAssignee, addComment, addFollower, deleteTaskById, leaveTask, removeAssignee, removeFollower, switchCompletionMode } from '../../src/services/task-structure'
+import { resetTaskCountsBroadcasterForTests, setTaskCountsBroadcaster } from '../../src/services/task-counts-realtime'
+import { sendError } from '../../src/routes/tasks-http'
 import {
   createTaskListGroup,
   createUserTaskGroup,
@@ -63,6 +65,39 @@ function insertedTitle(): unknown {
 function insertedMode(): unknown {
   const insert = state.calls.find((call) => call.sql.includes('INSERT INTO tasks'))
   return insert?.params?.[3]
+}
+
+/** Task access answers for the assignee writes (task-member-access.ts): `admins` are answered by the
+ * administrator read; `usable` hold both task codes through a role and have task access enabled;
+ * anyone else gets no rows. */
+interface AccessSeed { admins?: string[]; usable?: string[] }
+
+/** The five statements of the task access test, in the order they first run for one person. */
+const ACCESS_FRAGMENTS = ['FROM users u', 'UNION ALL', 'permissions FROM users', 'LEFT JOIN role_permissions', 'FROM user_namespace_admissions'] as const
+
+function answerTaskAccess(sql: string, params: unknown[] | undefined, seed: AccessSeed): MockRows | undefined {
+  if (sql.includes('FROM users u')) {
+    const asked = (params?.[0] ?? []) as string[]
+    return { rows: (seed.admins ?? []).filter((userId) => asked.includes(userId)).map((user_id) => ({ user_id })) }
+  }
+  const usable = (seed.usable ?? []).includes(String(params?.[0] ?? ''))
+  if (sql.includes('UNION ALL')) return { rows: usable ? [{ code: 'tasks:read' }, { code: 'tasks:write' }] : [] }
+  if (sql.includes('permissions FROM users')) return { rows: [{ permissions: [] }] }
+  if (sql.includes('LEFT JOIN role_permissions')) {
+    return { rows: usable ? [{ role_id: 'tasks_member', permission_code: 'tasks:read' }, { role_id: 'tasks_member', permission_code: 'tasks:write' }] : [] }
+  }
+  if (sql.includes('FROM user_namespace_admissions')) return { rows: usable ? [{ namespace: 'tasks', enabled: true }] : [] }
+  return undefined
+}
+
+/** The task access statements sent so far, as [fragment, params]. */
+function accessCalls(): Array<[string, unknown[] | undefined]> {
+  const out: Array<[string, unknown[] | undefined]> = []
+  for (const call of state.calls) {
+    const fragment = ACCESS_FRAGMENTS.find((candidate) => call.sql.includes(candidate))
+    if (fragment && !call.sql.includes('FROM user_orgs')) out.push([fragment, call.params])
+  }
+  return out
 }
 
 describe('createTask guards', () => {
@@ -1121,10 +1156,13 @@ describe('task member writes (M4 PR-3a, [own-53])', () => {
     memberships?: Array<[string, string]>
     /** Users the org lookup ([R17] [N2], S9) answers as active members. */
     active?: string[]
+    /** Task access for a new assignee (task-member-access.ts). */
+    admins?: string[]
+    usable?: string[]
   }
 
-  /** Answers the task read, its assignee and follower rows, the caller's list identity and the org
-   * lookup; writes get no rows. */
+  /** Answers the task read, its assignee and follower rows, the caller's list identity, the org
+   * lookup and the task access reads; writes get no rows. */
   function respondWith(seed: MemberSeed): void {
     state.respond = (sql, params) => {
       if (/^\s*(INSERT|UPDATE|DELETE)/.test(sql)) return undefined
@@ -1140,7 +1178,7 @@ describe('task member writes (M4 PR-3a, [own-53])', () => {
         const asked = (params?.[1] ?? []) as string[]
         return { rows: (seed.active ?? []).filter((user_id) => asked.includes(user_id)).map((user_id) => ({ user_id })) }
       }
-      return undefined
+      return answerTaskAccess(sql, params, seed)
     }
   }
 
@@ -1195,7 +1233,7 @@ describe('task member writes (M4 PR-3a, [own-53])', () => {
     expect(written().map((sql) => sql.split(' ').slice(0, 3).join(' '))).toEqual(['DELETE FROM task_followers', 'INSERT INTO task_events'])
 
     // The creator: a malformed id is 422 once the role allows the write; a new assignee is one row and one event.
-    respondWith({ createdBy: 'usr-1', active: ['usr-2'] })
+    respondWith({ createdBy: 'usr-1', active: ['usr-2'], admins: ['usr-2'] })
     state.calls.length = 0
     await expect(addAssignee({ ...base, body: { userId: '..' } })).rejects.toMatchObject({ status: 422, code: 'INVALID_ASSIGNEES' })
     expect(written()).toEqual([])
@@ -1224,10 +1262,10 @@ describe('task org membership (M4 PR-3a S9)', () => {
   const createBase = { orgId: 'org-1', creatorId: 'usr-1', title: '备料复核' }
   const memberBase = { orgId: 'org-1', actorId: 'usr-1', taskId: 'tsk_1' }
 
-  interface Seed { createdBy?: string; assignees?: string[]; followers?: string[]; active?: string[] }
+  interface Seed extends AccessSeed { createdBy?: string; assignees?: string[]; followers?: string[]; active?: string[] }
 
-  /** Answers the task read, its assignee and follower rows and the org lookup (only the ids asked
-   * for that are in `active`); writes get no rows. */
+  /** Answers the task read, its assignee and follower rows, the org lookup (only the ids asked
+   * for that are in `active`) and the task access reads (`admins`, `usable`); writes get no rows. */
   function respondWith(seed: Seed): void {
     state.respond = (sql, params) => {
       if (/^\s*(INSERT|UPDATE|DELETE)/.test(sql)) return undefined
@@ -1240,7 +1278,7 @@ describe('task org membership (M4 PR-3a S9)', () => {
         const asked = (params?.[1] ?? []) as string[]
         return { rows: (seed.active ?? []).filter((user_id) => asked.includes(user_id)).map((user_id) => ({ user_id })) }
       }
-      return undefined
+      return answerTaskAccess(sql, params, seed)
     }
   }
 
@@ -1264,6 +1302,7 @@ describe('task org membership (M4 PR-3a S9)', () => {
     state.calls.length = 0
     state.transactions = 0
     state.respond = undefined
+    vi.mocked(query).mockClear()
   })
 
   afterEach(() => {
@@ -1281,7 +1320,7 @@ describe('task org membership (M4 PR-3a S9)', () => {
     expect(written()).toEqual([])
 
     state.calls.length = 0
-    respondWith({ active: ['usr-2', 'usr-3'] })
+    respondWith({ active: ['usr-2', 'usr-3'], usable: ['usr-2', 'usr-3'] })
     await expect(createTask({ ...createBase, assignees: ['usr-1', 'usr-2', 'usr-3'] })).resolves.toMatchObject({ version: 1 })
     const lockAt = indexOf('pg_advisory_xact_lock')
     const lookupAt = indexOf('FROM user_orgs')
@@ -1296,6 +1335,7 @@ describe('task org membership (M4 PR-3a S9)', () => {
     for (const fragment of [
       'uo.org_id = $1', 'uo.user_id = ANY($2::text[])', 'uo.is_active = true', 'u.is_active = true', 'JOIN users u ON u.id = uo.user_id',
       "u.activation_status = 'activated'", "(u.role <> 'disabled' OR EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = u.id AND ur.role_id = 'admin'))",
+      "(to_jsonb(u) ->> 'deleted_at') IS NULL", "(to_jsonb(u) ->> 'purged_at') IS NULL",
     ]) {
       expect(lookup).toContain(fragment)
     }
@@ -1307,6 +1347,136 @@ describe('task org membership (M4 PR-3a S9)', () => {
       state.calls.length = 0
       await expect(createTask({ ...createBase, assignees })).resolves.toMatchObject({ version: 1 })
       expect(lookups(), JSON.stringify(assignees)).toEqual([])
+      expect(accessCalls(), JSON.stringify(assignees)).toEqual([])
+    }
+  })
+
+  it('createTask: the task access reads run after the org lookup and before the first INSERT, on the transaction client; one person without access is 422 ASSIGNEE_TASK_ACCESS_REQUIRED with nothing written', async () => {
+    respondWith({ active: ['usr-2', 'usr-3'], usable: ['usr-2', 'usr-3'] })
+    await expect(createTask({ ...createBase, assignees: ['usr-1', 'usr-2', 'usr-3'] })).resolves.toMatchObject({ version: 1 })
+    const lockAt = indexOf('pg_advisory_xact_lock')
+    const lookupAt = indexOf('FROM user_orgs')
+    const adminAt = indexOf('FROM users u')
+    const insertAt = state.calls.findIndex((call) => /^\s*INSERT/.test(call.sql))
+    expect(lookupAt).toBeGreaterThan(lockAt)
+    expect(adminAt).toBeGreaterThan(lookupAt)
+    for (const fragment of ACCESS_FRAGMENTS.slice(1)) {
+      const at = indexOf(fragment)
+      expect(at, fragment).toBeGreaterThan(adminAt)
+      expect(at, fragment).toBeLessThan(insertAt)
+    }
+    // One administrator read for every id but the creator, then the person-by-person reads.
+    expect(accessCalls().filter(([fragment]) => fragment === 'FROM users u').map(([, params]) => params)).toEqual([[['usr-2', 'usr-3']]])
+    expect(accessCalls().filter(([fragment]) => fragment === 'UNION ALL').map(([, params]) => params)).toEqual([['usr-2'], ['usr-3']])
+    expect(accessCalls().some(([, params]) => JSON.stringify(params).includes('usr-1'))).toBe(false)
+    expect(vi.mocked(query)).not.toHaveBeenCalled()
+
+    state.calls.length = 0
+    respondWith({ active: ['usr-2', 'usr-3'], usable: ['usr-2'] })
+    await expect(createTask({ ...createBase, assignees: ['usr-1', 'usr-2', 'usr-3'] }))
+      .rejects.toMatchObject({ status: 422, code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' })
+    expect(written()).toEqual([])
+
+    // An administrator needs the one read and nothing more.
+    state.calls.length = 0
+    respondWith({ active: ['usr-2'], admins: ['usr-2'] })
+    await expect(createTask({ ...createBase, assignees: ['usr-2'] })).resolves.toMatchObject({ version: 1 })
+    expect(accessCalls().map(([fragment]) => fragment)).toEqual(['FROM users u'])
+    expect(vi.mocked(query)).not.toHaveBeenCalled()
+  })
+
+  it('createTask: an org refusal sends no task access read', async () => {
+    respondWith({ active: ['usr-2'], usable: ['usr-2', 'usr-3'] })
+    await expect(createTask({ ...createBase, assignees: ['usr-2', 'usr-3'] }))
+      .rejects.toMatchObject({ status: 422, code: 'INACTIVE_ORG_MEMBER' })
+    expect(accessCalls()).toEqual([])
+  })
+
+  it('addAssignee: the task access reads run after the org lookup and before the INSERT; a refusal is 422 ASSIGNEE_TASK_ACCESS_REQUIRED with nothing written; an org refusal sends none', async () => {
+    respondWith({ createdBy: 'usr-1', active: ['usr-2'], usable: [] })
+    await expect(addAssignee({ ...memberBase, body: { userId: 'usr-2' } }))
+      .rejects.toMatchObject({ status: 422, code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' })
+    expect(accessCalls().map(([, params]) => params?.[0])).toEqual([['usr-2'], 'usr-2', 'usr-2'])
+    expect(written()).toEqual([])
+
+    state.calls.length = 0
+    respondWith({ createdBy: 'usr-1', active: ['usr-2'], usable: ['usr-2'] })
+    await expect(addAssignee({ ...memberBase, body: { userId: 'usr-2' } })).resolves.toBeDefined()
+    const lookupAt = indexOf('FROM user_orgs')
+    const insertAt = indexOf('INSERT INTO task_assignees')
+    expect(indexOf('FROM users u')).toBeGreaterThan(lookupAt)
+    for (const fragment of ACCESS_FRAGMENTS) expect(indexOf(fragment), fragment).toBeLessThan(insertAt)
+    expect(indexOf('FROM user_namespace_admissions')).toBeGreaterThan(indexOf('FROM users u'))
+    expect(written()).toEqual(['INSERT INTO task_assignees', 'INSERT INTO task_events'])
+    expect(vi.mocked(query)).not.toHaveBeenCalled()
+
+    state.calls.length = 0
+    respondWith({ createdBy: 'usr-1', active: [], usable: ['usr-2'] })
+    await expect(addAssignee({ ...memberBase, body: { userId: 'usr-2' } }))
+      .rejects.toMatchObject({ status: 422, code: 'INACTIVE_ORG_MEMBER' })
+    expect(accessCalls()).toEqual([])
+  })
+
+  it('addAssignee: the task creator added by another assignee is checked like anyone else (the creator is exempt on the create call only)', async () => {
+    const byAssignee = { ...memberBase, actorId: 'usr-2' }
+    respondWith({ createdBy: 'usr-1', assignees: ['usr-2'], active: ['usr-1'], usable: ['usr-1'] })
+    await expect(addAssignee({ ...byAssignee, body: { userId: 'usr-1' } })).resolves.toBeDefined()
+    expect(accessCalls().length).toBeGreaterThan(0)
+    expect(accessCalls().every(([, params]) => JSON.stringify(params).includes('usr-1'))).toBe(true)
+
+    state.calls.length = 0
+    respondWith({ createdBy: 'usr-1', assignees: ['usr-2'], active: ['usr-1'], usable: [] })
+    await expect(addAssignee({ ...byAssignee, body: { userId: 'usr-1' } }))
+      .rejects.toMatchObject({ status: 422, code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' })
+    expect(written()).toEqual([])
+  })
+
+  it('createTask and addAssignee: a failed task access read rejects with its own error, not 422; nothing is written, no counts signal is sent, and the route answers 500 INTERNAL', async () => {
+    const rooms: string[] = []
+    setTaskCountsBroadcaster((room) => { rooms.push(room) })
+    const seed = { createdBy: 'usr-1', active: ['usr-2'], usable: ['usr-2'] }
+    const writes = {
+      create: () => createTask({ ...createBase, assignees: ['usr-1', 'usr-2'] }),
+      add: () => addAssignee({ ...memberBase, body: { userId: 'usr-2' } }),
+    }
+    try {
+      // The control: with every read answering, both writes send the counts signal.
+      for (const run of Object.values(writes)) {
+        rooms.length = 0
+        respondWith(seed)
+        await expect(run()).resolves.toBeDefined()
+        expect(rooms.length).toBeGreaterThan(0)
+      }
+
+      for (const fragment of ACCESS_FRAGMENTS) {
+        for (const [key, run] of Object.entries(writes)) {
+          const label = `${key} ${fragment}`
+          rooms.length = 0
+          state.calls.length = 0
+          respondWith(seed)
+          const answer = state.respond!
+          const failure = new Error(`read failed: ${fragment}`)
+          state.respond = (sql, params) => {
+            if (sql.includes(fragment) && !sql.includes('FROM user_orgs')) throw failure
+            return answer(sql, params)
+          }
+          const error = await run().then(() => null, (caught: unknown) => caught)
+          expect(error, label).toBe(failure)
+          expect(accessCalls().map(([seen]) => seen), label).toContain(fragment)
+          expect(written(), label).toEqual([])
+          expect(rooms, label).toEqual([])
+
+          const res = { statusCode: 0, body: undefined as unknown }
+          const reply = {
+            status(code: number) { res.statusCode = code; return reply },
+            json(body: unknown) { res.body = body; return reply },
+          }
+          sendError(reply as unknown as Parameters<typeof sendError>[0], error)
+          expect(res, label).toEqual({ statusCode: 500, body: { error: { code: 'INTERNAL' } } })
+        }
+      }
+    } finally {
+      resetTaskCountsBroadcasterForTests()
     }
   })
 
@@ -1339,7 +1509,7 @@ describe('task org membership (M4 PR-3a S9)', () => {
     expect(written()).toEqual([])
 
     state.calls.length = 0
-    respondWith({ createdBy: 'usr-1', active: ['usr-2'] })
+    respondWith({ createdBy: 'usr-1', active: ['usr-2'], usable: ['usr-2'] })
     await expect(call()).resolves.toBeDefined()
     const lookupAt = indexOf('FROM user_orgs')
     expect(lookupAt).toBeGreaterThan(indexOf('FROM task_assignees'))
@@ -1357,6 +1527,7 @@ describe('task org membership (M4 PR-3a S9)', () => {
     respondWith({ createdBy: 'usr-1', ...existing, active: [] })
     await expect(add({ ...memberBase, body: { userId: 'usr-2' } })).resolves.toBeDefined()
     expect(lookups()).toEqual([])
+    expect(accessCalls()).toEqual([])
     expect(written()).toEqual([])
 
     // The caller naming themselves ([own-16]): written without a lookup.
@@ -1364,6 +1535,7 @@ describe('task org membership (M4 PR-3a S9)', () => {
     respondWith({ createdBy: 'usr-1', active: [] })
     await expect(add({ ...memberBase, body: { userId: 'usr-1' } })).resolves.toBeDefined()
     expect(lookups()).toEqual([])
+    expect(accessCalls()).toEqual([])
     expect(written()).toHaveLength(2)
 
     // LIMIT and a malformed id are answered before the lookup.
@@ -1372,12 +1544,14 @@ describe('task org membership (M4 PR-3a S9)', () => {
     await expect(add({ ...memberBase, body: { userId: 'usr-2' } })).rejects.toMatchObject({ status: 422, code: 'LIMIT' })
     await expect(add({ ...memberBase, body: { userId: '..' } })).rejects.toMatchObject({ status: 422, code: 'INVALID_ASSIGNEES' })
     expect(lookups()).toEqual([])
+    expect(accessCalls()).toEqual([])
 
     // [own-53]: no direct role is the 404 before the lookup, even for an active target.
     state.calls.length = 0
-    respondWith({ createdBy: 'usr-0', assignees: ['usr-3'], active: ['usr-2'] })
+    respondWith({ createdBy: 'usr-0', assignees: ['usr-3'], active: ['usr-2'], usable: ['usr-2'] })
     await expect(add({ ...memberBase, body: { userId: 'usr-2' } })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
     expect(lookups()).toEqual([])
+    expect(accessCalls()).toEqual([])
     expect(written()).toEqual([])
   })
 })

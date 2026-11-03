@@ -33,7 +33,10 @@ const DINGTALK_OAUTH_ENDPOINT = 'https://api.dingtalk.com/v1.0/oauth2/accessToke
 const owner = Object.freeze({ actorId: 'synthetic-probe-owner', tenantId: 'synthetic-probe-tenant', workspaceId: null })
 const secondAdmin = Object.freeze({ ...owner, actorId: 'synthetic-probe-second-admin' })
 const otherCommand = '99999999-9999-4999-8999-999999999999'
-const pair = () => ({ appKey: ' synthetic-probe-app-key ', appSecret: ' synthetic-probe-app-secret ' })
+// Invisible test characters are built from code units at run time, so the source holds neither a raw
+// invisible character nor an escape that an editor could rewrite into one.
+const codeUnit = (code: number) => String.fromCharCode(code)
+const pair = () => ({ appKey: 'synthetic-probe-app-key', appSecret: 'synthetic-probe-app-secret' })
 const ident = (value: string) => { if (!/^[a-z][a-z0-9_]*$/u.test(value)) throw new Error('OWNED_SCHEMA_REQUIRED'); return `"${value}"` }
 type Row = Record<string, unknown>
 type Result = { status: number; headers: Record<string, string | string[] | undefined>; body: Row }
@@ -53,6 +56,10 @@ realdb('YiDa connection test — anchor owner, live ACL, one synthetic token exc
   const stops: Array<() => Promise<void>> = [], sql: string[] = [], tokenBodies: Row[] = [], foreignFetch: string[] = []
   const logs: Array<Record<PropertyKey, unknown>> = []
   let logSpy: ReturnType<typeof vi.spyOn>
+  // L4 refuses unless ENCRYPTION_KEY / ENCRYPTION_SALT pass the production checks in every NODE_ENV,
+  // and this suite's setup configures neither: beforeAll sets explicit synthetic material for the whole file
+  // (only the POST /initialization case needs it; L3 without keys is covered by yida-host-connection-test-realdb).
+  let savedEncryption: Array<[string, string | undefined]> = []
   const security = Object.freeze({ async encrypt(value: string) { return 'enc:' + Buffer.from(value).toString('base64') },
     async decrypt(value: string) { return Buffer.from(value.slice(4), 'base64').toString() } })
   const syntheticFetch = (async (url: unknown, init?: RequestInit) => {
@@ -129,6 +136,9 @@ realdb('YiDa connection test — anchor owner, live ACL, one synthetic token exc
     expect(result.body).toEqual({ ok: false, error: { code } })
   }
   beforeAll(async () => {
+    savedEncryption = ['ENCRYPTION_KEY', 'ENCRYPTION_SALT'].map(key => [key, process.env[key]])
+    process.env.ENCRYPTION_KEY = 'synthetic-probe-encryption-key-0123456789abcdef'
+    process.env.ENCRYPTION_SALT = 'synthetic-probe-encryption-salt-0123456789abcdef'
     const lib = path.join(root, 'plugins/plugin-integration-core/lib')
     createProbeBinding = requireCjs(path.join(lib, 'yida-connection-probe.cjs')).createYidaConnectionProbeBinding
     createInitBinding = (await importNative(pathToFileURL(path.join(lib, 'yida-initialization-producer.mjs')).href)).createYidaInitializationBinding as typeof createInitBinding
@@ -167,7 +177,10 @@ realdb('YiDa connection test — anchor owner, live ACL, one synthetic token exc
     expect(foreignFetch).toEqual([])
     if (schema) { await admin.query(`DROP SCHEMA ${ident(schema)} CASCADE`); schema = '' }
   }, 30000)
-  afterAll(async () => { try { logSpy?.mockRestore(); admin?.release(); await pool?.end() } catch { /* best effort */ } }, 30000)
+  afterAll(async () => {
+    try { logSpy?.mockRestore(); admin?.release(); await pool?.end() } catch { /* best effort */ }
+    finally { for (const [key, value] of savedEncryption) { if (value === undefined) delete process.env[key]; else process.env[key] = value } }
+  }, 30000)
 
   it('switch OFF: the GET carries no connectionTestEnabled key and the probe is 403 DISABLED before any transaction', async () => {
     const anchor = await provisionYidaInitializationAnchor({ database }, { ownerId: owner.actorId, tenantId: owner.tenantId })
@@ -226,7 +239,7 @@ realdb('YiDa connection test — anchor owner, live ACL, one synthetic token exc
     await start(); enablement = 'true'
     const source = example()
     const made = data(await http('POST', '/initialization', { commandId: anchor.commandId,
-      material: { ...pair(), systemToken: ' synthetic-probe-system-token ', userId: 'synthetic-probe-user' },
+      material: { ...pair(), systemToken: 'synthetic-probe-system-token', userId: 'synthetic-probe-user' },
       draft: { config: source.config, rowsText: source.text, allocation: { mode: 'original' } },
       attestation: { kind: 'owner-reviewed-target', reviewRef: 'synthetic-probe-review', organizationId: 'synthetic-probe-org', executionIdentity: 'synthetic-probe-user' } }), 201)
     expect(made).toMatchObject({ status: 'initialized', connectionTestEnabled: true, sendEnabled: false })
@@ -249,5 +262,35 @@ realdb('YiDa connection test — anchor owner, live ACL, one synthetic token exc
     const output = inspect(logs, { depth: null, colors: false, getters: false })
     for (const value of [...Object.values(pair()), 'synthetic-probe-access-token', 'PRIVATE_PROBE_CORRELATION_CANARY', 'connection-test', anchor])
       expect(output.includes(value)).toBe(false)
+  })
+
+  it('a pasted line break, padding, control or invisible format character in appKey/appSecret/systemToken is 400 before any transaction, exchange or row', async () => {
+    const anchor = await provisionYidaInitializationAnchor({ database }, { ownerId: owner.actorId, tenantId: owner.tenantId })
+    await start(); enablement = 'true'
+    const source = example(), full = { ...pair(), systemToken: 'synthetic-probe-system-token', userId: 'synthetic-probe-user' }
+    const seal = (material: Row) => http('POST', '/initialization', { commandId: anchor.commandId, material,
+      draft: { config: source.config, rowsText: source.text, allocation: { mode: 'original' } },
+      attestation: { kind: 'owner-reviewed-target', reviewRef: 'synthetic-probe-review', organizationId: 'synthetic-probe-org', executionIdentity: full.userId } })
+    const before = await counts(); sql.length = 0
+    expect(before.integration_yida_initializations).toBe(0); expect(before.integration_yida_credential_materials).toBe(0)
+    for (const [key, value] of [['appKey', full.appKey + '\r\n'], ['appSecret', ' ' + full.appSecret], ['appSecret', full.appSecret + '\u00a0'],
+      ['appKey', 'synthetic-probe\tapp-key']] as const) {
+      denied(await http('POST', '/initialization/connection-test', { commandId: anchor.commandId, mode: 'candidate', material: { ...pair(), [key]: value } }), 400, 'YIDA_OWNER_HTTP_INPUT')
+    }
+    for (const [key, value] of [['appKey', full.appKey + '\n'], ['appSecret', '\t' + full.appSecret], ['systemToken', full.systemToken + '\r\n'],
+      ['systemToken', '\u3000' + full.systemToken], ['systemToken', 'synthetic-probe\u0000system-token']] as const) {
+      denied(await seal({ ...full, [key]: value }), 400, 'YIDA_OWNER_HTTP_INPUT')
+    }
+    // Invisible format characters survive trim() (judge J-F1): without this rule a zero-width space after
+    // systemToken was sealed for good and a bidi embedding before appKey was exchanged as sent.
+    denied(await seal({ ...full, systemToken: `${full.systemToken}${codeUnit(0x200b)}` }), 400, 'YIDA_OWNER_HTTP_INPUT')
+    denied(await http('POST', '/initialization/connection-test', { commandId: anchor.commandId, mode: 'candidate',
+      material: { ...pair(), appKey: `${codeUnit(0x202a)}${full.appKey}` } }), 400, 'YIDA_OWNER_HTTP_INPUT')
+    // Refused before any transaction, exchange, crypto or write; the slot is still empty and ready.
+    expect(sql).toEqual([]); expect(tokenBodies).toEqual([]); expect(await counts()).toEqual(before)
+    expect(data(await http('GET', '/initialization'), 200)).toMatchObject({ commandId: anchor.commandId, status: 'ready', draft: null })
+    // Nothing was stamped: the same pair without padding is tested at once with exactly one exchange.
+    expect(data(await probe(anchor.commandId), 200).outcome).toBe('ok')
+    expect(tokenBodies).toEqual([pair()]); expect(await counts()).toEqual(before)
   })
 })

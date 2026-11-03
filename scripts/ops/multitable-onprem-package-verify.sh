@@ -1171,6 +1171,7 @@ required=(
   "docs/deployment/multitable-platform-rc-notes-20260404.md"
   "docs/deployment/multitable-windows-onprem-easy-start-20260319.md"
   "docs/deployment/multitable-onprem-package-layout-20260319.md"
+  "docs/deployment/tasks-enablement.md"
 )
 
 for rel in "${required[@]}"; do

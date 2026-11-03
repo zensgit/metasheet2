@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { assertNoEnvironmentFiles } from './run-stock-preparation-yida-browser-ci.mjs'
 
 // Caller contracts only. The executable adapter records argv/environment; it never
-// runs the launcher, Vitest, PG or Chromium and does not produce a whole-70 receipt.
+// runs the launcher, Vitest, PG or Chromium and does not produce a whole-72 receipt.
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const workflow = readFileSync(new URL('../../.github/workflows/plugin-tests.yml', import.meta.url), 'utf8').replaceAll('\r\n', '\n')
 const stepId = 'stock-preparation-yida-owner-real-db'

@@ -29,6 +29,8 @@ export default defineConfig({
     // Most integration tests require database/external services and custom PluginLoader API.
     // Mock-DB integration tests (comment-flow, collab-ux-flow) can run without a live DB.
     exclude: [
+      'tests/integration/admin-user-batch-review.db.test.ts',
+      'tests/integration/admin-user-recycle-review.db.test.ts',
       '**/node_modules/**',
       '**/dist/**',
       // Integration tests requiring a live DB or pluginDirs PluginLoader API:
@@ -356,6 +358,7 @@ export default defineConfig({
       // job cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
       // plugin-tests.yml (both points asserted by t2-source-freeze-ci-wiring.test.mjs).
       'tests/integration/directory-org-transfer-source-freeze.db.test.ts',
+      'tests/integration/directory-controlled-handover.db.test.ts',
       // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
       // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
       // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
@@ -1966,6 +1969,9 @@ export default defineConfig({
       'tests/integration/task-m4-list-items.db.test.ts',
       'tests/integration/task-m4-groups.db.test.ts',
       'tests/integration/task-m4-org-members.db.test.ts',
+      'tests/integration/task-member-access.db.test.ts',
+      // The enablement walk: its own trust-off step in tasks-realdb.yml (vitest.tasks-enablement.config.ts).
+      'tests/integration/task-enablement-http.db.test.ts',
       'tests/integration/task-m4-outbox.db.test.ts',
       'tests/integration/task-m4-delivery.db.test.ts',
       'tests/integration/task-m4-scheduler.db.test.ts',
