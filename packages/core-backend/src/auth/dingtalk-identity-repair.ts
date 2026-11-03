@@ -376,6 +376,8 @@ async function lock(c: Client, userId: string, actorId: string) {
   // makes a conflicting autovacuum/autoanalyze cancel itself. Any other holder past the limit
   // (55P03), including the advisory mutex, or a lock cycle in which this transaction is the
   // deadlock victim (40P01) ends in a refusal; the transaction rolls back with no row written.
+  // Every statement below is a lock wait, so statement_timeout (57014) here means the same thing:
+  // still busy after the per-statement budget. A 57014 on any later statement is not mapped here.
   try {
     await c.query(
       "SELECT pg_advisory_xact_lock(hashtext('directory:identity-maintenance'))",
@@ -386,7 +388,7 @@ async function lock(c: Client, userId: string, actorId: string) {
     await lockUsersForAccessGraphWrite(c, [userId, actorId].sort())
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code
-    if (code === '55P03' || code === '40P01')
+    if (code === '55P03' || code === '40P01' || code === '57014')
       throw new Error('REPAIR_LOCK_BUSY')
     throw error
   }

@@ -1,9 +1,15 @@
 /** Real PG transactions, synthetic provider only. No online binding or provider requests. */
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
+import * as path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import * as bcrypt from 'bcryptjs'
 import express from 'express'
 import request from 'supertest'
-import { describe, it, expect, vi } from 'vitest'
+import { afterAll, describe, it, expect, vi } from 'vitest'
 const provider = vi.hoisted(() => ({
   config: vi.fn(),
   exchange: vi.fn(),
@@ -3392,5 +3398,136 @@ suite('DingTalk controlled login repair', () => {
         'REPAIR_SOURCE_OUTSIDE_ALLOWLIST',
       )
     })
+  })
+
+  describe('maintenance CLI process against the real database', () => {
+    const backendRoot = fileURLToPath(new URL('../..', import.meta.url))
+    const entry = path.join(backendRoot, 'scripts/dingtalk-login-repair.ts')
+    const tsxLoader = createRequire(import.meta.url).resolve('tsx')
+    /** Explicit env only (no DB_QUERY_TIMEOUT from the runner): the CLI must preset its own floor. */
+    const spawnCli = (f: Fixture, args: string[]) =>
+      new Promise<{ code: number | null; stdout: string; stderr: string; ms: number }>((resolve, reject) => {
+        const started = Date.now()
+        const child = spawn(process.execPath, ['--import', tsxLoader, entry, ...args], {
+          cwd: backendRoot,
+          env: {
+            PATH: process.env.PATH ?? '',
+            NODE_ENV: 'test',
+            TSX_DISABLE_CACHE: '1',
+            DATABASE_URL: String(process.env.DATABASE_URL),
+            ENCRYPTION_KEY: String(process.env.ENCRYPTION_KEY),
+            ENCRYPTION_SALT: String(process.env.ENCRYPTION_SALT),
+            DINGTALK_CORP_ID: f.corp,
+            DINGTALK_CLIENT_ID: 'synthetic-current-app',
+            DINGTALK_CLIENT_SECRET: 'unused',
+            DINGTALK_REDIRECT_URI: 'https://example.test/callback',
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+        let stdout = '',
+          stderr = ''
+        child.stdout.on('data', (d) => (stdout += d))
+        child.stderr.on('data', (d) => (stderr += d))
+        child.on('error', reject)
+        child.on('close', (code) => resolve({ code, stdout, stderr, ms: Date.now() - started }))
+      })
+    let dir = ''
+    const privateInput = async (name: string, body: Record<string, string>) => {
+      if (!dir) dir = await mkdtemp(path.join(tmpdir(), 'login-repair-cli-db-'))
+      const file = path.join(dir, name + '-' + randomUUID() + '.json')
+      await writeFile(file, JSON.stringify(body))
+      await chmod(file, 0o600)
+      return file
+    }
+    afterAll(async () => {
+      if (dir) await rm(dir, { recursive: true, force: true })
+    })
+
+    it('apply behind a conflicting lock exits 75 with only REPAIR_LOCK_BUSY and writes nothing', async () => {
+      const f = await fixture(),
+        proof = await f.verify(),
+        p = await previewDingTalkRepair(proof)
+      const input = await privateInput('apply', { proof, digest: p.digest, confirm: 'apply' })
+      const identityBefore = (
+        await query('SELECT to_jsonb(t) AS row FROM user_external_identities t WHERE local_user_id=$1', [f.user])
+      ).rows
+      // Same maintenance-shaped holder as the in-process lock tests.
+      const holder = await pool!.connect()
+      let r: Awaited<ReturnType<typeof spawnCli>>
+      try {
+        await holder.query('BEGIN')
+        await holder.query('LOCK TABLE roles IN SHARE UPDATE EXCLUSIVE MODE')
+        r = await spawnCli(f, ['apply', input])
+      } finally {
+        await holder.query('ROLLBACK').catch(() => undefined)
+        holder.release()
+      }
+      expect(r).toMatchObject({ code: 75, stdout: '', stderr: 'REPAIR_LOCK_BUSY\n' })
+      expect(r.ms).toBeLessThan(20000)
+      expect(
+        (await query('SELECT id FROM dingtalk_login_repairs WHERE user_id=$1', [f.user])).rows,
+      ).toEqual([])
+      expect(
+        (await query('SELECT to_jsonb(t) AS row FROM user_external_identities t WHERE local_user_id=$1', [f.user])).rows,
+      ).toEqual(identityBefore)
+      // Operator check after a non-zero exit: the same proof still previews, so apply did not commit.
+      await expect(previewDingTalkRepair(proof)).resolves.toMatchObject({ digest: p.digest })
+      // One manual retry once the holder is gone; afterwards the same proof's preview reports the commit.
+      const retry = await spawnCli(f, ['apply', input])
+      expect(retry).toMatchObject({ code: 0, stderr: '' })
+      expect(JSON.parse(retry.stdout)).toMatchObject({ id: expect.any(String), clientQueryTimeoutMs: 45000 })
+      await expect(previewDingTalkRepair(proof)).rejects.toThrow(exact('REPAIR_SNAPSHOT_CHANGED'))
+    }, 60000)
+
+    it('release-preview prints the plan and the effective client timeout; a wrong digest exits 1 with the exact code; the approved digest releases', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      const before = await capture(f, r.id)
+      const preview = await spawnCli(f, [
+        'release-preview',
+        await privateInput('recovery', { id: r.id, actorId: f.admin, actorPassword: f.password }),
+      ])
+      expect(preview).toMatchObject({ code: 0, stderr: '' })
+      const out = JSON.parse(preview.stdout)
+      expect(out).toMatchObject({
+        clientQueryTimeoutMs: 45000,
+        digest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        release: { mode: 'canonical', releasedAccountIds: [f.account], linkedDingTalkAccountIds: [f.account], localLinkCount: 0 },
+      })
+      // The CLI preview is the same pure preview: no journal, audit or session write.
+      expect(await capture(f, r.id)).toEqual(before)
+      const wrong = await spawnCli(f, [
+        'release',
+        await privateInput('release-wrong', {
+          id: r.id,
+          actorId: f.admin,
+          actorPassword: f.password,
+          digest: '0'.repeat(64),
+          confirm: 'release',
+        }),
+      ])
+      expect(wrong).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_RECOVERY_SNAPSHOT_CHANGED\n' })
+      expect(await capture(f, r.id)).toEqual(before)
+      expect(await journalRow(r.id)).toMatchObject({ state: 'applied', released_account_ids: null })
+      const done = await spawnCli(f, [
+        'release',
+        await privateInput('release', {
+          id: r.id,
+          actorId: f.admin,
+          actorPassword: f.password,
+          digest: out.digest,
+          confirm: 'release',
+        }),
+      ])
+      expect(done).toMatchObject({ code: 0, stderr: '' })
+      expect(JSON.parse(done.stdout)).toMatchObject({ clientQueryTimeoutMs: 45000 })
+      expect(await journalRow(r.id)).toMatchObject({ state: 'released', released_account_ids: [f.account] })
+      // Operator check after the fact: the same preview now reports that the action committed.
+      const again = await spawnCli(f, [
+        'release-preview',
+        await privateInput('recovery-again', { id: r.id, actorId: f.admin, actorPassword: f.password }),
+      ])
+      expect(again).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_NOT_ACTIVE\n' })
+    }, 90000)
   })
 })

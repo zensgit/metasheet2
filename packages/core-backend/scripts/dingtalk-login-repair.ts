@@ -1,90 +1,12 @@
-/** Operator-only private-file workflow. No proof or credential is printed. */
-import { lstat, readFile, writeFile } from 'node:fs/promises'
-import {
-  verifyDingTalkRepair,
-  previewDingTalkRepair,
-  applyDingTalkRepair,
-  rollbackDingTalkRepair,
-  releaseDingTalkRepair,
-  previewDingTalkRepairRecovery,
-} from '../src/auth/dingtalk-identity-repair'
-async function main() {
-  const [action, file, out, ...rest] = process.argv.slice(2)
-  if (
-    rest.length ||
-    !file ||
-    ![
-      'verify',
-      'preview',
-      'apply',
-      'rollback-preview',
-      'release-preview',
-      'rollback',
-      'release',
-    ].includes(action) ||
-    (action === 'verify' ? !out : !!out)
-  )
-    throw Error('Invalid command')
-  const stat = await lstat(file)
-  if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.size > 65536)
-    throw Error('Private input required')
-  const input = JSON.parse(await readFile(file, 'utf8'))
-  const fields =
-    action === 'verify'
-      ? ['userId', 'password', 'code', 'actorId', 'actorPassword']
-      : action === 'preview'
-        ? ['proof']
-        : action === 'apply'
-          ? ['proof', 'digest', 'confirm']
-          : action.endsWith('-preview')
-            ? ['id', 'actorId', 'actorPassword']
-            : ['id', 'actorId', 'actorPassword', 'digest', 'confirm']
-  if (
-    !input ||
-    Array.isArray(input) ||
-    Object.keys(input).length !== fields.length ||
-    fields.some((k) => typeof input[k] !== 'string' || !input[k])
-  )
-    throw Error('Invalid fields')
-  if (action === 'verify') {
-    const proof = await verifyDingTalkRepair(
-      input.userId,
-      input.password,
-      input.code,
-      input.actorId,
-      input.actorPassword,
-    )
-    await writeFile(out, JSON.stringify({ proof }), {
-      mode: 0o600,
-      flag: 'wx',
-    })
-    return {
-      verified: true,
-      expiresInSeconds: 300,
-      localSessionIssued: false,
-      businessRowsChanged: false,
-    }
-  }
-  if (action === 'preview') return previewDingTalkRepair(input.proof)
-  if (action === 'apply')
-    return applyDingTalkRepair(input.proof, input.digest, input.confirm)
-  if (action.endsWith('-preview'))
-    return previewDingTalkRepairRecovery(
-      input.id,
-      input.actorId,
-      input.actorPassword,
-      action === 'rollback-preview' ? 'rollback' : 'release',
-    )
-  return (
-    action === 'rollback' ? rollbackDingTalkRepair : releaseDingTalkRepair
-  )(input.id, input.actorId, input.digest, input.confirm, input.actorPassword)
-}
-main()
-  .then((r) => {
-    console.log(JSON.stringify(r))
-    process.exit(0)
-  })
-  .catch(() => {
-    console.error('DINGTALK_LOGIN_REPAIR_REFUSED')
-    process.exit(1)
-  })
+/**
+ * Operator-only private-file workflow. No proof or credential is printed; only a fixed refusal code
+ * leaves the process. This entry imports nothing that reaches the connection pool: the pool reads
+ * DB_QUERY_TIMEOUT once when it is constructed, so the body is loaded only after the timeout gate.
+ */
+import { runRepairCli } from '../src/auth/dingtalk-identity-repair-cli'
+
+runRepairCli(process.argv.slice(2), process.env, {
+  load: () => import('./dingtalk-login-repair-main'),
+  stdout: (s) => console.log(s),
+  stderr: (s) => console.error(s),
+}).then((code) => process.exit(code))

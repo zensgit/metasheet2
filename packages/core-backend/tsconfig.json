@@ -29,6 +29,7 @@
     "scripts/attendance-timezone-legacy-repair.ts",
     "scripts/directory-controlled-handover.ts",
     "scripts/dingtalk-login-repair.ts",
+    "scripts/dingtalk-login-repair-main.ts",
     "scripts/bootstrap-yida-initialization-owner.ts"
   ],
   "exclude": ["node_modules", "dist", "**/*.test.ts", "**/__tests__/**"]
