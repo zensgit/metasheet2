@@ -62,15 +62,26 @@ function get(path: string, bearer: string) {
   return request(app).get(path).set('Authorization', `Bearer ${bearer}`)
 }
 
+// A write that names an assignee now requires that person to be able to use tasks (both task codes
+// and task access enabled). Most viewers here hold `tasks:read` only, so their assignee rows are
+// written the way an earlier assignment left them, as task-rbac-trust.db.test.ts does; the seeded
+// org members (`creatorId`, `otherId`) are still named through createTask.
 async function assignedTask(assignees: string[], extra: Record<string, unknown> = {}, orgId = ORG_A): Promise<string> {
+  const named = assignees.filter((userId) => userId === creatorId || userId === otherId)
   const created = await createTask({
     orgId,
     creatorId,
     title: `todo source ${randomUUID()}`,
-    assignees,
+    assignees: named,
     completionMode: 'all',
     ...extra,
   })
+  for (const userId of assignees.filter((id) => !named.includes(id))) {
+    await db().query(
+      'INSERT INTO task_assignees (task_id, user_id, assigned_by) VALUES ($1, $2, $3)',
+      [created.id, userId, creatorId],
+    )
+  }
   return created.id
 }
 
