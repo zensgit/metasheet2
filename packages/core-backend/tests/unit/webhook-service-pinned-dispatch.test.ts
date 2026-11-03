@@ -26,7 +26,7 @@ import type { Kysely } from 'kysely'
 import type { Database } from '../../src/db/types'
 import type { WebhookDelivery } from '../../src/multitable/webhooks'
 import type { SsrfLookupFn } from '../../src/multitable/webhook-ssrf-guard'
-import { pinnedHttpsFetch, type PinnedSendFn } from '../../src/multitable/webhook-pinned-fetch'
+import { PINNED_WEBHOOK_USER_AGENT, pinnedHttpsFetch, type PinnedSendFn } from '../../src/multitable/webhook-pinned-fetch'
 import { generateRuntimeSelfSignedCert } from '../helpers/runtime-self-signed-cert'
 
 const decision = vi.hoisted(() => ({ next: null as unknown }))
@@ -192,7 +192,15 @@ describe('subscription delivery — real https.request against a loopback TLS se
   let server: https.Server
   let port = 0
   let ca = ''
-  const hits: Array<{ path: string; body: string; signature: string | undefined; deliveryId: string | undefined }> = []
+  const hits: Array<{
+    path: string
+    body: string
+    signature: string | undefined
+    deliveryId: string | undefined
+    contentLength: string | undefined
+    transferEncoding: string | undefined
+    userAgent: string | undefined
+  }> = []
 
   beforeAll(async () => {
     const { cert, key } = generateRuntimeSelfSignedCert(HOST)
@@ -207,6 +215,9 @@ describe('subscription delivery — real https.request against a loopback TLS se
           body,
           signature: req.headers['x-webhook-signature'] as string | undefined,
           deliveryId: req.headers['x-webhook-delivery'] as string | undefined,
+          contentLength: req.headers['content-length'],
+          transferEncoding: req.headers['transfer-encoding'],
+          userAgent: req.headers['user-agent'],
         })
         if (req.url === '/no-content') { res.writeHead(204); res.end(); return }
         if (req.url === '/text-ok') { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('accepted, not json'); return }
@@ -245,6 +256,10 @@ describe('subscription delivery — real https.request against a loopback TLS se
     expect(JSON.parse(hits[0].body)).toEqual(MASKED_PAYLOAD) // re-masked, not the stored body
     expect(hits[0].signature).toBe(WebhookService.signPayload(hits[0].body, SECRET))
     expect(hits[0].deliveryId).toBe('del1')
+    // S0-a review F1: framed like the platform fetch framed it — Content-Length = body bytes, never chunked.
+    expect(hits[0].contentLength).toBe(String(Buffer.byteLength(hits[0].body, 'utf8')))
+    expect(hits[0].transferEncoding).toBeUndefined()
+    expect(hits[0].userAgent).toBe(PINNED_WEBHOOK_USER_AGENT)
     expect(deliveryWrites().some((w) => w.status === 'success')).toBe(true)
   })
 
