@@ -12,6 +12,7 @@ import {
   seedOrgMembers,
   seedTaskActor,
   signTaskToken,
+  TASK_FIXTURE_MEMBER_ROLE,
   type SeededTaskActor,
 } from '../helpers/task-m4-fixtures'
 
@@ -35,6 +36,7 @@ const ORG_B = `${ORG_PREFIX}b_${stamp}`
 const ITEMS = '/api/todo/items'
 const COUNT = '/api/todo/count'
 const BADGE = '/api/tasks/pending-count'
+const PENDING = '/api/tasks/pending'
 const FORBIDDEN_BODY = '{"error":"Insufficient permissions"}'
 const APPROVAL_NODE = 'approval_a'
 
@@ -307,5 +309,33 @@ describe('todo center task source under the production wiring', () => {
     const assigned = await get('/api/tasks?view=assigned', reader.bearer)
     expect(assigned.status).toBe(200)
     expect(ids(assigned.body)).toContain(task)
+  })
+
+  it('todo-source|a task dispatched through createTask to a person with task access is in their center', async () => {
+    // `otherId` holds task access from seedOrgMembers (the shared fixture role), so createTask names
+    // them directly; earlier cells left other open tasks on them, hence no exact count here.
+    const created = await createTask({
+      orgId: ORG_A,
+      creatorId,
+      title: `todo source dispatched ${randomUUID()}`,
+      assignees: [otherId],
+      completionMode: 'all',
+    })
+    const otherBearer = signTaskToken(otherId, TASK_FIXTURE_MEMBER_ROLE, ORG_A)
+
+    const items = await get(ITEMS, otherBearer)
+    expect(items.status).toBe(200)
+    expect(items.body.sources).toEqual({ task: 'ok' })
+    expect(ids(items.body)).toContain(created.id)
+
+    const pending = await get(PENDING, otherBearer)
+    expect(pending.status).toBe(200)
+    expect(ids(items.body)).toEqual(ids(pending.body))
+
+    const count = await get(COUNT, otherBearer)
+    expect(count.status).toBe(200)
+    expect(count.body.sources).toEqual({ task: 'ok' })
+    expect(count.body.count).toBe(pending.body.total)
+    expect(count.body.count).toBe(items.body.items.length)
   })
 })

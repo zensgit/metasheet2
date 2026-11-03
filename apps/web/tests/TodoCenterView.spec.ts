@@ -458,6 +458,66 @@ describe('todo center view', () => {
     expect(groupOf(root, 'task')?.querySelector('h2')?.textContent).toBe('Tasks')
   })
 
+  // The task source lists at most one task page (100 rows) while its count is not capped, so a task
+  // group showing exactly that many rows says so and links to the task page. The line must not promise
+  // that every task is there: the task page reads one default page as well.
+  function rows(source: string, n: number): Array<Record<string, string>> {
+    return Array.from({ length: n }, (_, i) => ({
+      source,
+      id: `${source}-${i}`,
+      title: `${source} ${i}`,
+      href: source === 'task' ? `/tasks/${source}-${i}` : `/approvals/${source}-${i}`,
+      updatedAt: '2026-09-18T00:00:00.000Z',
+    }))
+  }
+
+  it('a task group showing 100 rows says at most the 100 most recent are shown and links to the task page', async () => {
+    getTodoItemsSpy.mockResolvedValue({ items: rows('task', 100), sources: { task: 'ok' } })
+    const root = await mountView()
+
+    const group = groupOf(root, 'task')
+    expect(group?.querySelectorAll('[data-testid="todo-center-item"]').length).toBe(100)
+    const capped = group?.querySelector('[data-testid="todo-center-group-capped"]')
+    expect(capped?.textContent).toContain('最多显示最近更新的 100 条任务。打开任务页')
+    expect(capped?.textContent).not.toContain('全部')
+    const link = capped?.querySelector('[data-testid="todo-center-group-capped-link"]')
+    expect(link?.getAttribute('data-router-link-to')).toBe('/tasks')
+    expect(link?.textContent).toBe('打开任务页')
+  })
+
+  it('the same line in English', async () => {
+    mocks.isZh = false
+    getTodoItemsSpy.mockResolvedValue({ items: rows('task', 100), sources: { task: 'ok' } })
+    const root = await mountView()
+
+    const capped = groupOf(root, 'task')?.querySelector('[data-testid="todo-center-group-capped"]')
+    expect(capped?.textContent).toContain('Showing at most the 100 most recently updated tasks.')
+    expect(capped?.textContent).not.toMatch(/\ball\b/i)
+    expect(capped?.querySelector('[data-router-link-to="/tasks"]')?.textContent).toBe('Open the Tasks page')
+  })
+
+  it('a task group showing 99 rows has no such line', async () => {
+    getTodoItemsSpy.mockResolvedValue({ items: rows('task', 99), sources: { task: 'ok' } })
+    const root = await mountView()
+
+    const group = groupOf(root, 'task')
+    expect(group?.querySelectorAll('[data-testid="todo-center-item"]').length).toBe(99)
+    expect(group?.querySelector('[data-testid="todo-center-group-capped"]')).toBeNull()
+  })
+
+  it('the approval group never shows the line, even with 100 rows', async () => {
+    getTodoItemsSpy.mockResolvedValue({
+      items: [...rows('approval', 100), ...rows('task', 1)],
+      sources: { approval: 'ok', task: 'ok' },
+    })
+    const root = await mountView()
+
+    const approvals = groupOf(root, 'approval')
+    expect(approvals?.querySelectorAll('[data-testid="todo-center-item"]').length).toBe(100)
+    expect(approvals?.querySelector('[data-testid="todo-center-group-capped"]')).toBeNull()
+    expect(root.querySelector('[data-testid="todo-center-group-capped"]')).toBeNull()
+  })
+
   it('folds the task signals inside one window into one read, none before it closes', async () => {
     await mountView()
     expect(getTodoItemsSpy).toHaveBeenCalledTimes(1)

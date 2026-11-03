@@ -55,6 +55,8 @@ describe('task pending source', () => {
     expect(sql).toContain('NOT EXISTS (SELECT 1 FROM task_assignees ta_done')
     expect(sql).toContain('ta_done.completed_at IS NOT NULL')
     expect(sql).toContain('ORDER BY tasks.updated_at DESC, tasks.id DESC LIMIT $3 OFFSET $4')
+    // 100 = TASK_PAGE_LIMIT_DEFAULT. The todo center's TODO_TASK_ROW_CAP
+    // (apps/web/src/todo/views/TodoCenterView.vue) mirrors it; change both together.
     expect(params).toEqual(['u1', 'org-1', 100, 0])
   })
 
