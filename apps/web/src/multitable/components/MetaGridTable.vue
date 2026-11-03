@@ -67,6 +67,12 @@
               </td>
               <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
                 <span>{{ startIndex + item.navIndex + 1 }}</span>
+                <span
+                  v-if="isManualSupplementRow(item.row.id)"
+                  class="meta-grid__manual-row-tag"
+                  data-test="row-manual-supplement-tag"
+                  :title="manualRowLabel('tag.manualTitle', isZh)"
+                >{{ manualRowLabel('tag.manual', isZh) }}</span>
                 <button
                   type="button"
                   class="meta-grid__open-record-btn"
@@ -185,6 +191,13 @@
               </button>
             </td>
           </tr>
+          <tr v-if="showManualRowAdd && !loading" class="meta-grid__add-row" data-test="grid-add-manual-row">
+            <td :colspan="colSpan">
+              <button type="button" class="meta-grid__add-row-btn" data-testid="grid-inline-add-manual-row" @click="emit('create-manual-row')">
+                <span class="meta-grid__add-row-plus" aria-hidden="true">+</span> {{ manualRowLabel('entry.create', isZh) }}
+              </button>
+            </td>
+          </tr>
         </tbody>
         <tbody v-else>
           <!-- #5863c: frozen rows (always mounted) + the A1 virtualization top spacer are both items in
@@ -222,6 +235,12 @@
                   @click.stop="emit('expand-record', row.id)"
                 >&#x2197;</button>
                 <span>{{ startIndex + ri + 1 }}</span>
+                <span
+                  v-if="isManualSupplementRow(row.id)"
+                  class="meta-grid__manual-row-tag"
+                  data-test="row-manual-supplement-tag"
+                  :title="manualRowLabel('tag.manualTitle', isZh)"
+                >{{ manualRowLabel('tag.manual', isZh) }}</span>
                 <span
                   v-if="isRowLocked(row.id)"
                   class="meta-grid__lock-indicator"
@@ -291,7 +310,7 @@
                   v-if="isEditing(row.id, field.id)"
                   :field="field"
                   :model-value="editCell!.value"
-                  :record-id="row.id"
+                  :record-id="isManualFillableCell(row.id, field.id) ? null : row.id"
                   :upload-fn="props.uploadFn"
                   :delete-attachment-fn="props.deleteAttachmentFn"
                   :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
@@ -382,6 +401,13 @@
               </button>
             </td>
           </tr>
+          <tr v-if="showManualRowAdd && !loading" class="meta-grid__add-row" data-test="grid-add-manual-row">
+            <td :colspan="colSpan">
+              <button type="button" class="meta-grid__add-row-btn" data-testid="grid-inline-add-manual-row" @click="emit('create-manual-row')">
+                <span class="meta-grid__add-row-plus" aria-hidden="true">+</span> {{ manualRowLabel('entry.create', isZh) }}
+              </button>
+            </td>
+          </tr>
         </tbody>
         <tfoot v-if="hasAnyAggregation" class="meta-grid__foot">
           <tr>
@@ -417,8 +443,9 @@
          so it keeps the pager rather than strand the viewer on that page (客户反馈 2026-10-21). The rows-per-page
          select sits in the same footer whenever there is more than one page or a non-default size to undo.
          客户反馈 2026-10-27 (R74): the footer also carries 「跳转到第 [ ] 行」 (whenever there is more than one row, NOT
-         tied to showPager, which is off on the flat page 1) and a 「+ 新建记录」 that needs no scrolling. -->
-    <div v-if="showPager || showPageSizeSelect || showRowJump || showFooterAdd" class="meta-grid__pagination">
+         tied to showPager, which is off on the flat page 1) and a 「+ 新建记录」 that needs no scrolling.
+         人工补充行 B3: on a registered project sheet in state `allowed` that place holds 「+ 新增人工补充行」 instead. -->
+    <div v-if="showPager || showPageSizeSelect || showRowJump || showFooterAdd || showManualRowAdd" class="meta-grid__pagination">
       <button
         v-if="showFooterAdd"
         type="button"
@@ -427,6 +454,15 @@
         @click="emit('create-record')"
       >
         <span class="meta-grid__add-row-plus" aria-hidden="true">+</span> {{ l('grid.addRecordInline') }}
+      </button>
+      <button
+        v-if="showManualRowAdd"
+        type="button"
+        class="meta-grid__page-btn meta-grid__footer-add-btn"
+        data-testid="grid-footer-add-manual-row"
+        @click="emit('create-manual-row')"
+      >
+        <span class="meta-grid__add-row-plus" aria-hidden="true">+</span> {{ manualRowLabel('entry.create', isZh) }}
       </button>
       <template v-if="showPager">
         <button class="meta-grid__page-btn" :disabled="currentPage <= 1" @click="emit('go-to-page', currentPage - 1)">&lsaquo; {{ l('grid.prev') }}</button>
@@ -518,6 +554,8 @@ import {
 } from '../utils/comment-affordance'
 import { isSystemField } from '../utils/system-fields'
 import { workbenchLabel } from '../utils/workbench-labels'
+import { manualRowLabel } from '../utils/manual-row-labels'
+import { isManualSupplementMarked } from '../utils/manual-rows'
 import { isFieldAlwaysReadOnly, isFieldHumanWriteLocked } from '../utils/field-permissions'
 import { isDateLikeStringField, isYjsTextEligible } from '../utils/yjs-text-eligibility'
 import { isYjsCollabEnabled } from '../composables/useYjsCellBinding'
@@ -567,6 +605,17 @@ const props = defineProps<{
   frozenTopRowCount?: number
   rowActionOverrides?: Record<string, MetaRowActions>
   fieldReadOnlyIds?: string[]
+  /** 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.4): the manual rows (record ids) whose fillable
+   *  columns (`manualRowFieldIds`) open as SINGLE-cell editors although the columns are PLM-locked for every other row —
+   *  the workbench routes their patch to PATCH /records/:recordId/manual-fields. Both lists come from the workbench,
+   *  gated on /context's `stockPreparationManualRows` block (never on the row mark alone; empty ⇒ no override). Range
+   *  fill, paste and Yjs keep treating these cells as read-only. */
+  manualRowRecordIds?: string[]
+  manualRowFieldIds?: string[]
+  /** 人工补充行 B3 (ADR §8 B3.3): true ⇒ the inline add row and the footer entry (R74) keep their places and read
+   *  「新增人工补充行」, emitting `create-manual-row` — never `create-record`. The workbench passes it only in state
+   *  `allowed` of a registered project sheet, where `canCreate` is off; absent / false ⇒ unchanged. */
+  manualRowCreate?: boolean
   rangeContextKey?: string
   commitRange?: (changes: RangeChange[]) => Promise<unknown>
   columnWidths?: Record<string, number>
@@ -670,6 +719,8 @@ const emit = defineEmits<{
   (e: 'duplicate-record', recordId: string): void
   (e: 'reorder-field', fromFieldId: string, toFieldId: string): void
   (e: 'create-record'): void
+  // 人工补充行 B3: the inline add row / footer entry in their 「新增人工补充行」 form (see `manualRowCreate`).
+  (e: 'create-manual-row'): void
   (e: 'set-frozen', frozenLeftColumnIds: string[]): void
   (e: 'set-frozen-rows', frozenTopRowCount: number): void
   (e: 'set-aggregation', payload: { fieldId: string; fn: string | null }): void
@@ -897,6 +948,9 @@ function onPageSizeChange(event: Event) {
 // canCreate gate as the inline row (the workbench turns it off for a PLM-locked sheet, R68). An empty sheet keeps
 // its empty state, as the inline row does.
 const showFooterAdd = computed(() => props.canCreate === true && filteredRows.value.length > 0)
+// 人工补充行 B3: on a registered project sheet in state `allowed` the same two places (inline row, footer) carry
+// 「新增人工补充行」 — `manualRowCreate`, never together with the generic entry, under the same "rows exist" rule.
+const showManualRowAdd = computed(() => props.manualRowCreate === true && props.canCreate !== true && filteredRows.value.length > 0)
 
 // Row N is the number in the row-number column: startIndex + index + 1, where the index is into displayRows (the
 // server order on the flat path; the visible order on the grouped path, where row numbers are nav indices).
@@ -1449,10 +1503,27 @@ function canShowLockAction(recordId: string): boolean {
 // per-field permission map is stale, not yet loaded, or a future call site forgets to thread it.
 // `!isFieldHumanWriteLocked(f)` is the same defense for a PLM-system column on a 备料 project sheet
 // (`property.humanWriteLock`): no editor ever opens on it; copying it is unaffected.
-const isEditable = (recordId: string, f: MetaField) =>
+const isPlainEditable = (recordId: string, f: MetaField) =>
   !isRowLocked(recordId) &&
   resolveRowActions(recordId).canEdit && EDITABLE.has(f.type) && !isSystemField(f) &&
   !isFieldAlwaysReadOnly(f) && !isFieldHumanWriteLocked(f) && !props.fieldReadOnlyIds?.includes(f.id)
+// 人工补充行 B3 (ADR §3.4): a fillable column of a manual row — named by the workbench from /context's block — opens a
+// single-cell editor although the PLM lock (and with it `fieldReadOnlyIds`) keeps the column read-only for every other
+// row. Every other condition stays: the row's own lock, the row's canEdit, an editable type, never a system or
+// always-read-only field. Only single-cell editing reads this (dblclick / Enter / type-to-edit); paste of the focused
+// cell, range fill / paste and Yjs keep the plain rule — the editor of such a cell gets NO record id, so it never binds
+// a Yjs document and its commit is the REST patch the workbench routes to PATCH …/manual-fields.
+const manualRowRecordIdSet = computed(() => new Set(props.manualRowRecordIds ?? []))
+const manualRowFieldIdSet = computed(() => new Set(props.manualRowFieldIds ?? []))
+const isManualFillableCell = (recordId: string, fieldId: string) =>
+  manualRowRecordIdSet.value.has(recordId) && manualRowFieldIdSet.value.has(fieldId)
+const isEditable = (recordId: string, f: MetaField) =>
+  isPlainEditable(recordId, f) || (
+    isManualFillableCell(recordId, f.id) && !isRowLocked(recordId) &&
+    resolveRowActions(recordId).canEdit && EDITABLE.has(f.type) && !isSystemField(f) && !isFieldAlwaysReadOnly(f)
+  )
+// 人工补充行 (OQ3): the row-head label — a display mark from the server's per-row actions, shown to every reader.
+const isManualSupplementRow = (recordId: string) => isManualSupplementMarked(props.rowActionOverrides?.[recordId])
 const isEditing = (rid: string, fid: string) => editCell.value?.recordId === rid && editCell.value?.fieldId === fid
 
 function cellStyle(rid: string, fid: string, ci?: number, ri?: number) {
@@ -1941,7 +2012,8 @@ function pasteFocusedCell(text: string) {
   if (focusRow.value < 0 || focusCol.value < 0) return
   const row = displayRows.value[focusRow.value]
   const field = props.visibleFields[focusCol.value]
-  if (!row || !field || !isEditable(row.id, field)) return
+  // 人工补充行 B3: the PLAIN rule — a paste keeps treating a manual row's fillable cells as read-only (ADR §3.4).
+  if (!row || !field || !isPlainEditable(row.id, field)) return
   // person/multiSelect store array values server-side; pasting raw clipboard
   // text would be rejected by record-write-service's field validation (400).
   if (field.type === 'person' || field.type === 'multiSelect') return
@@ -2282,6 +2354,9 @@ thead .meta-grid__check-col {
 .meta-grid__table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: #999; font-size: 12px; background: #f9fafb; border-bottom: 1px solid #eee; border-right: 1px solid #eee; padding: 6px 4px; position: sticky; left: 0; z-index: 1; }
 .meta-grid__row-num > span { display: inline-flex; align-items: center; justify-content: center; }
+/* 人工补充行 (OQ3): the row-head label — a block under the row number, so the fixed 56px column (ROW_NUM_W, the
+   frozen-column offsets) keeps its width. */
+.meta-grid__row-num > span.meta-grid__manual-row-tag { display: block; width: fit-content; margin: 2px auto 0; padding: 0 3px; font-size: 10px; line-height: 14px; color: #8a5a00; background: #fdf6ec; border: 1px solid #f5dab1; border-radius: 3px; white-space: nowrap; }
 .meta-grid__check-col { position: sticky; z-index: 1; }
 .meta-grid__row { transition: background 0.1s; content-visibility: auto; contain-intrinsic-size: auto 36px; }
 /* #5863c: a frozen-top row is always rendered (never virtualized away, see windowRows/isFrozenRow)

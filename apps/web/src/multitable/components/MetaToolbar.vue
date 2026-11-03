@@ -229,6 +229,9 @@
       </MtButton>
       <!-- UI-P2-1c: primary CTA migrated to shared MtButton variant="primary". -->
       <MtButton v-if="canCreateRecord" variant="primary" @click="emit('add-record')">{{ l('toolbar.newRecord') }}</MtButton>
+      <!-- 人工补充行 B3 (ADR §8 B3.3): on a registered project sheet in state `allowed` the same place holds
+           「+ 新增人工补充行」 (`canCreateRecord` is off there, so never both). -->
+      <MtButton v-if="manualRowCreate && !canCreateRecord" variant="primary" data-testid="toolbar-add-manual-row" @click="emit('add-manual-row')">+ {{ manualRowLabel('entry.create', isZh) }}</MtButton>
     </div>
   </div>
 </template>
@@ -259,6 +262,7 @@ import {
   rowCount,
   type MetaCoreLabelKey,
 } from '../utils/meta-core-labels'
+import { manualRowLabel } from '../utils/manual-row-labels'
 import { ElIcon } from 'element-plus'
 import {
   Menu as IconFields,
@@ -302,6 +306,9 @@ const props = withDefaults(defineProps<{
   filterGroups?: FilterGroup[]
   filterConjunction: FilterConjunction
   canCreateRecord: boolean
+  // 人工补充行 B3: true ⇒ the 「+ 新建记录」 place reads 「+ 新增人工补充行」 and emits `add-manual-row` (the workbench
+  // passes it only in state `allowed` of a registered project sheet). Absent / false ⇒ unchanged.
+  manualRowCreate?: boolean
   canExport?: boolean
   canUndo: boolean
   canRedo: boolean
@@ -331,6 +338,7 @@ const emit = defineEmits<{
   (e: 'set-conjunction', conj: FilterConjunction): void
   (e: 'apply-sort-filter'): void
   (e: 'add-record'): void
+  (e: 'add-manual-row'): void
   (e: 'undo'): void
   (e: 'redo'): void
   (e: 'set-group-fields', fieldIds: string[]): void
