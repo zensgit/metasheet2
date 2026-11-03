@@ -19,11 +19,13 @@ import {
   classifyOutboundResult,
   claimOutboundIntent,
   isClassBOutboundEnabled,
+  outboundLeaseForTimeout,
   outboundReasonClass,
   recordOutboundOutcome,
   type OutboundAttemptResult,
   type OutboundIntentIdentity,
   type OutboundOutcome,
+  type OutboundSkipDecision,
 } from './automation-outbound-intent'
 import type { TransactionalQueryable } from './pg-transaction-guard'
 import { Logger } from '../core/logger'
@@ -3891,6 +3893,51 @@ export class AutomationExecutor {
     return { actionType, status: 'success', alreadyApplied: true, output: { alreadyApplied: true } }
   }
 
+  /**
+   * #4196 Class-B: the step result for a claim that said "do not send". Only `skip_sent` is honestly a
+   * success (the delivery happened; alreadyApplied). `skip_unknown` is the §3 TERMINAL ambiguity: the step
+   * reports FAILED naming outcome_unknown so the executor stops the dependent steps until reconciliation —
+   * never an alreadyApplied success that lets them run as if the send were known. `skip_inflight` means
+   * another attempt holds a live lease: nothing is known yet, so the step fails closed without sending and
+   * without declaring that attempt dead.
+   */
+  private outboundSkipResult(actionType: AutomationActionType, decision: OutboundSkipDecision): AutomationStepResult {
+    if (decision === 'skip_sent') return this.alreadyAppliedResult(actionType)
+    if (decision === 'skip_inflight') {
+      return {
+        actionType,
+        status: 'failed',
+        error: `${actionType} outbound attempt in flight (another attempt holds a live lease); not resent`,
+        output: { outcome: 'pending', reason: 'inflight_lease' },
+      }
+    }
+    return {
+      actionType,
+      status: 'failed',
+      error: `${actionType} outcome_unknown (prior attempt); recorded, not auto-resent; reconcile before dependent steps run`,
+      output: { outcome: 'outcome_unknown', reason: 'prior_outcome_unknown' },
+    }
+  }
+
+  /**
+   * #4196 Class-B Tx B for the call sites whose result shaping predates the attempt token: the terminal write
+   * is fenced by the claim's token; an unconfirmed write (lease expired and flipped by a replay, or the row
+   * terminalized elsewhere) is logged values-free. Returns whether THIS attempt's write landed.
+   */
+  private async recordOutboundTerminal(
+    outboundId: OutboundIntentIdentity,
+    attemptToken: string | null,
+    outcome: OutboundOutcome,
+    reason: string,
+  ): Promise<boolean> {
+    if (!attemptToken) return false
+    const { confirmed } = await recordOutboundOutcome(this.deps.queryFn, outboundId, outcome, reason, attemptToken)
+    if (!confirmed) {
+      logger.warn(`class-B terminal write (${outcome}, ${reason}) not confirmed by its own attempt; ledger row owned elsewhere`)
+    }
+    return confirmed
+  }
+
   private async executeCreateRecord(
     config: Record<string, unknown>,
     context: ExecutionContext,
@@ -4707,11 +4754,12 @@ export class AutomationExecutor {
       timeoutMs: number
     },
   ): Promise<AutomationStepResult> {
-    // Tx A — intent committed BEFORE the network call. A prior sent/unknown short-circuits with no send.
-    const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
-    if (decision === 'skip_sent' || decision === 'skip_unknown') {
-      // Success-shaped, alreadyApplied — no second delivery for an already-sent or ambiguous prior attempt.
-      return this.alreadyAppliedResult('send_webhook')
+    // Tx A — intent committed BEFORE the network call; the claim mints THIS attempt's token and a lease that
+    // outlives the transport timeout. Every skip decision means no send (sent → alreadyApplied; unknown /
+    // in-flight → a failed-shaped step that stops dependents).
+    const claim = await claimOutboundIntent(this.deps.queryFn, outboundId, { leaseMs: outboundLeaseForTimeout(req.timeoutMs) })
+    if (claim.decision !== 'proceed' && claim.decision !== 'retry_failed') {
+      return this.outboundSkipResult('send_webhook', claim.decision)
     }
 
     // decision is 'proceed' | 'retry_failed' → attempt ONCE.
@@ -4734,23 +4782,38 @@ export class AutomationExecutor {
 
     const outcome = classifyOutboundResult(attempt)
     const reason = outboundReasonClass(attempt) // bounded, redacted class — never a body/URL/token
-    // Tx B — record the terminal outcome (guarded `status='pending'`, single-writer).
-    await recordOutboundOutcome(this.deps.queryFn, outboundId, outcome, reason)
+    // Tx B — the SAME attempt records the terminal outcome, fenced `status='pending' AND attempt_token=mine`.
+    // `confirmed` is whether THIS write landed on exactly one row; success may only be reported when it did.
+    const record = await recordOutboundOutcome(this.deps.queryFn, outboundId, outcome, reason, claim.attemptToken)
+    const httpStatus = attempt.kind === 'response' ? attempt.status : null
 
     if (outcome === 'sent') {
+      if (!record.confirmed) {
+        // 2xx came back, but the ledger row is no longer this attempt's `pending` (its lease expired and a
+        // replay flipped it to outcome_unknown, or it was terminalized elsewhere). The ledger — what later
+        // steps and retries consult — does not say `sent`, so this step must not say success either.
+        logger.warn(`send_webhook to ${redactString(req.url)} → sent_2xx but the terminal write was not confirmed by this attempt; reported as outcome_unknown`)
+        return {
+          actionType: 'send_webhook',
+          status: 'failed',
+          error: 'send_webhook outcome_unknown (sent_2xx, terminal write not confirmed by this attempt); reconcile the intent ledger, not auto-resent',
+          output: { outcome: 'outcome_unknown', reason: 'terminal_write_unconfirmed', httpStatus },
+        }
+      }
       return {
         actionType: 'send_webhook',
         status: 'success',
-        output: { outcome: 'sent', httpStatus: attempt.kind === 'response' ? attempt.status : null },
+        output: { outcome: 'sent', httpStatus },
       }
     }
     if (outcome === 'failed') {
-      // Definite non-delivery (nothing left the client) — retryable; the run is marked failed.
+      // Definite non-delivery (nothing left the client) — retryable; the run is marked failed. An unconfirmed
+      // write here means the row was already terminalized elsewhere; the step stays failed either way.
       return {
         actionType: 'send_webhook',
         status: 'failed',
         error: `send_webhook definite non-delivery (${reason}); eligible for retry`,
-        output: { outcome: 'failed', reason },
+        output: { outcome: 'failed', reason, terminalWriteConfirmed: record.confirmed },
       }
     }
     // outcome_unknown — the send MAY have happened; surfaced as failed so the run does NOT silently succeed,
@@ -5023,10 +5086,11 @@ export class AutomationExecutor {
     notification: Notification,
     recipientCount: number,
   ): Promise<AutomationStepResult> {
-    // Tx A — intent committed BEFORE the send. A prior sent/unknown short-circuits with no send.
-    const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
-    if (decision === 'skip_sent' || decision === 'skip_unknown') {
-      return this.alreadyAppliedResult('send_email')
+    // Tx A — intent committed BEFORE the send; the claim mints THIS attempt's token. Every skip decision
+    // means no send (sent → alreadyApplied; unknown / in-flight → a failed-shaped step that stops dependents).
+    const claim = await claimOutboundIntent(this.deps.queryFn, outboundId)
+    if (claim.decision !== 'proceed' && claim.decision !== 'retry_failed') {
+      return this.outboundSkipResult('send_email', claim.decision)
     }
 
     // decision is 'proceed' | 'retry_failed' → attempt ONCE.
@@ -5047,10 +5111,26 @@ export class AutomationExecutor {
       reason = 'email_send_threw'
     }
 
-    // Tx B — record the terminal outcome (guarded `status='pending'`, single-writer).
-    await recordOutboundOutcome(this.deps.queryFn, outboundId, outcome, reason)
+    // Tx B — the SAME attempt records the terminal outcome (fenced `status='pending' AND attempt_token=mine`).
+    const record = await recordOutboundOutcome(this.deps.queryFn, outboundId, outcome, reason, claim.attemptToken)
 
     if (outcome === 'sent') {
+      if (!record.confirmed) {
+        // The ledger row is no longer this attempt's `pending` (lease expired and flipped, or terminalized
+        // elsewhere): the ledger does not say `sent`, so this step must not report success.
+        return {
+          actionType: 'send_email',
+          status: 'failed',
+          error: 'send_email outcome_unknown (sent, terminal write not confirmed by this attempt); reconcile the intent ledger, not auto-resent',
+          output: {
+            outcome: 'outcome_unknown',
+            reason: 'terminal_write_unconfirmed',
+            notificationId: sendResult?.id,
+            notificationStatus: sendResult?.status,
+            recipientCount,
+          },
+        }
+      }
       return {
         actionType: 'send_email',
         status: 'success',
@@ -5220,11 +5300,13 @@ export class AutomationExecutor {
     // fail-close to unknown). Flag OFF (or the ad-hoc no-identity path) ⇒ outboundId null ⇒ everything below,
     // including the existing card-delivery ledger, is BYTE-IDENTICAL to pre-slice.
     const outboundId = this.classBOutboundIdentity(identity, 'send_dingtalk_approval_card', config)
+    let outboundAttemptToken: string | null = null
     if (outboundId) {
-      const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
-      if (decision === 'skip_sent' || decision === 'skip_unknown') {
-        return this.alreadyAppliedResult('send_dingtalk_approval_card')
+      const claim = await claimOutboundIntent(this.deps.queryFn, outboundId)
+      if (claim.decision !== 'proceed' && claim.decision !== 'retry_failed') {
+        return this.outboundSkipResult('send_dingtalk_approval_card', claim.decision)
       }
+      outboundAttemptToken = claim.attemptToken
     }
 
     let delivery: Awaited<ReturnType<typeof insertDingTalkApprovalCardDelivery>>
@@ -5248,7 +5330,7 @@ export class AutomationExecutor {
       // retain the existing fail-closed intent handling; never retry an unknown send.
       const guard = error as { code?: string; constraint?: string }
       if (outboundId && guard?.code === '55000' && guard.constraint === 'directory_handover_card_insert') {
-        await recordOutboundOutcome(this.deps.queryFn, outboundId, 'failed', 'directory_handover_blocked')
+        await this.recordOutboundTerminal(outboundId, outboundAttemptToken, 'failed', 'directory_handover_blocked')
       }
       throw error
     }
@@ -5315,7 +5397,7 @@ export class AutomationExecutor {
       // the catch with the intent ALREADY `sent` and cannot be mis-recorded as a retryable `failed`. Guarded
       // WHERE status='pending' (single-writer); reason is a bounded, values-free class.
       sendReturned = true
-      if (outboundId) await recordOutboundOutcome(this.deps.queryFn, outboundId, 'sent', 'dingtalk_card_sent')
+      if (outboundId) await this.recordOutboundTerminal(outboundId, outboundAttemptToken, 'sent', 'dingtalk_card_sent')
       await markDingTalkApprovalCardDeliverySent(this.deps.queryFn, delivery.id, result.taskId ?? null)
       return {
         actionType,
@@ -5366,9 +5448,9 @@ export class AutomationExecutor {
       //     ambiguous ⇒ outcome_unknown (the card may have reached the recipient; never auto-resent);
       //     definite (HTTP 429 / non-5xx / business error — nothing delivered) ⇒ failed (re-attemptable).
       if (outboundId) {
-        await recordOutboundOutcome(
-          this.deps.queryFn,
+        await this.recordOutboundTerminal(
           outboundId,
+          outboundAttemptToken,
           sendReturned ? 'sent' : outcomeUnknown ? 'outcome_unknown' : 'failed',
           sendReturned ? 'dingtalk_card_sent' : outcomeUnknown ? 'dingtalk_send_outcome_unknown' : 'dingtalk_send_failed',
         )
@@ -5653,11 +5735,13 @@ export class AutomationExecutor {
     // call. A prior sent or ambiguous attempt short-circuits the whole multi-batch action: retrying
     // it could duplicate any recipient batch that DingTalk already accepted.
     const outboundId = this.classBOutboundIdentity(identity, 'send_dingtalk_person_message', config)
+    let outboundAttemptToken: string | null = null
     if (outboundId) {
-      const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
-      if (decision === 'skip_sent' || decision === 'skip_unknown') {
-        return this.alreadyAppliedResult('send_dingtalk_person_message')
+      const claim = await claimOutboundIntent(this.deps.queryFn, outboundId)
+      if (claim.decision !== 'proceed' && claim.decision !== 'retry_failed') {
+        return this.outboundSkipResult('send_dingtalk_person_message', claim.decision)
       }
+      outboundAttemptToken = claim.attemptToken
     }
 
     // DT-HARDEN-06: recipients whose batch already reached DingTalk. A later batch
@@ -5722,12 +5806,7 @@ export class AutomationExecutor {
       }
 
       if (outboundId) {
-        await recordOutboundOutcome(
-          this.deps.queryFn,
-          outboundId,
-          'sent',
-          'dingtalk_person_sent',
-        )
+        await this.recordOutboundTerminal(outboundId, outboundAttemptToken, 'sent', 'dingtalk_person_sent')
       }
 
       return {
@@ -5787,9 +5866,9 @@ export class AutomationExecutor {
           : inFlightSendBatch
             ? classifyOutboundResult(classifyFetchError(error))
             : 'failed'
-        await recordOutboundOutcome(
-          this.deps.queryFn,
+        await this.recordOutboundTerminal(
           outboundId,
+          outboundAttemptToken,
           outcome,
           outcome === 'sent'
             ? 'dingtalk_person_sent'
@@ -6213,11 +6292,13 @@ export class AutomationExecutor {
     // ambiguous attempt must short-circuit the WHOLE action because retrying it would duplicate any
     // destination that already received the message.
     const outboundId = this.classBOutboundIdentity(identity, 'send_dingtalk_group_message', config)
+    let outboundAttemptToken: string | null = null
     if (outboundId) {
-      const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
-      if (decision === 'skip_sent' || decision === 'skip_unknown') {
-        return this.alreadyAppliedResult('send_dingtalk_group_message')
+      const claim = await claimOutboundIntent(this.deps.queryFn, outboundId)
+      if (claim.decision !== 'proceed' && claim.decision !== 'retry_failed') {
+        return this.outboundSkipResult('send_dingtalk_group_message', claim.decision)
       }
+      outboundAttemptToken = claim.attemptToken
     }
 
     let sendSucceeded = false
@@ -6355,9 +6436,9 @@ export class AutomationExecutor {
         : outcomeUnknownObserved
           ? 'outcome_unknown'
           : 'failed'
-      await recordOutboundOutcome(
-        this.deps.queryFn,
+      await this.recordOutboundTerminal(
         outboundId,
+        outboundAttemptToken,
         outcome,
         outcome === 'sent'
           ? 'dingtalk_group_sent'

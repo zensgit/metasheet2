@@ -202,7 +202,10 @@ describe('flag ON - Class-B DingTalk person intent/outcome', () => {
       status: 'outcome_unknown',
       last_error: 'dingtalk_person_outcome_unknown',
     })
-    expect(retry.steps[0]?.alreadyApplied).toBe(true)
+    // skip_unknown → a FAILED step naming outcome_unknown (never an alreadyApplied success).
+    expect(retry.steps[0]?.status).toBe('failed')
+    expect(retry.steps[0]?.alreadyApplied).toBeUndefined()
+    expect(retry.steps[0]?.error).toMatch(/outcome_unknown/)
     expect(h.fetch).toHaveBeenCalledTimes(2)
   })
 

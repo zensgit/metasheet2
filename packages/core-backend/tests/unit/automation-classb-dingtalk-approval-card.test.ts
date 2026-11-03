@@ -268,7 +268,11 @@ describe('flag ON — two-phase intent/outcome', () => {
 
     const asyncBefore = h.fetch.mock.calls.filter((c) => String(c[0] ?? '').includes('asyncsend')).length
     const retry = await new AutomationExecutor(h.deps).execute(ruleWith(CARD), TRIGGER, undefined, ROOT)
-    expect(retry.steps[0]?.alreadyApplied).toBe(true) // skip_unknown → alreadyApplied
+    // skip_unknown → a FAILED step naming outcome_unknown (never an alreadyApplied success): the ambiguity is
+    // unresolved until reconciliation, so dependent steps must not run as if the card were known delivered.
+    expect(retry.steps[0]?.status).toBe('failed')
+    expect(retry.steps[0]?.alreadyApplied).toBeUndefined()
+    expect(retry.steps[0]?.error).toMatch(/outcome_unknown/)
     const asyncAfter = h.fetch.mock.calls.filter((c) => String(c[0] ?? '').includes('asyncsend')).length
     expect(asyncAfter).toBe(asyncBefore) // TERMINAL: never a second send
   })
