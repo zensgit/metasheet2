@@ -1297,8 +1297,13 @@ async function theFloorOperatorNoLongerPullsAndThePullerDoes() {
     pullTier.map((entry) => entry.capability).sort(),
     // S3 fix round 1 (R6): + the overview ENSURE — creating the read-only overview is provisioning, the
     // PULL tier's (R-35), so the OPERATE refresh no longer creates it.
-    ['projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore'],
-    'P-14: exactly four PULL-tier manifest capabilities — create, archive, restore, overview ensure',
+    [
+      'projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore',
+      // 人工补充行 B4 fix round 1 (OQ4; R-68): the puller READS the per-sheet switch and the last pull's reminder (the
+      // SET stays ADMIN, OQ6).
+      'projectTarget.manualRowsRead',
+    ].sort(),
+    'P-14: exactly five PULL-tier manifest capabilities — create, archive, restore, the manual-rows switch read, overview ensure',
   )
   for (const entry of pullTier) {
     for (const [user, expected, who] of [

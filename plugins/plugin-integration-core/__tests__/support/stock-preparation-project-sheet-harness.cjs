@@ -135,7 +135,7 @@ function makeMemoryDb() {
  * merges, and the DB-backed reads answer from exactly what landed. `state.failFieldWrite` makes the
  * additive write throw (a genuine mid-install host failure).
  */
-function makeProvisioning({ stampsSystemKind = false } = {}) {
+function makeProvisioning({ stampsSystemKind = false, fieldReads = false } = {}) {
   const calls = []
   const objects = new Map()
   const state = { failFieldWrite: false }
@@ -147,6 +147,16 @@ function makeProvisioning({ stampsSystemKind = false } = {}) {
     objects,
     state,
     sheetIdOf,
+    // R-line port of main #6510 (OPT-IN, `fieldReads`): the per-field READ the manual-rows switch (B4) uses. Opt-in
+    // because the suites that predate it pin the host calls of a host WITHOUT it.
+    ...(fieldReads ? {
+      async getObjectField({ projectId, objectId, fieldId }) {
+        calls.push(['getObjectField', objectId, fieldId])
+        const object = objects.get(keyOf(projectId, objectId))
+        const field = object && object.fields.get(fieldId)
+        return field ? { id: fieldIdOf(objectId, fieldId), name: field.name, type: field.type, property: clone(field.property || {}) } : null
+      },
+    } : {}),
     // S3 fix round 1 (R8c): the host's declaration that it stamps `systemKind` at INSERT. OPT-IN here — a
     // mount without it is an OLDER host, on which the overview legs refuse before any IO, so every suite
     // that predates the overview sees exactly the host calls and audit rows it always saw.
@@ -418,6 +428,8 @@ function mountProjectSheetRoutes({
   switchOn = true,
   // S3 fix round 1: a host that declares the overview stamp (see makeProvisioning). Off = an older host.
   stampsSystemKind = false,
+  // R-line port (main #6510): a host with per-field reads (see makeProvisioning).
+  fieldReads = false,
   // S3 fix round 1: the route logger (default: silent) — a suite that pins a values-free warn passes its own.
   logger = { info() {}, warn() {}, error() {} },
   grantRoleIds = null,
@@ -434,7 +446,7 @@ function mountProjectSheetRoutes({
   const staging = `${tenantId}:integration-core`
   const routes = new Map()
   const auditAppends = []
-  const provisioning = makeProvisioning({ stampsSystemKind })
+  const provisioning = makeProvisioning({ stampsSystemKind, fieldReads })
   if (envObjectId) seedObject(provisioning, staging, envObjectId, envExtFieldIds)
   const records = makeRecordsApi({ provisioning })
   const source = makeSourceAdapter(projectNo)
@@ -500,6 +512,9 @@ function mountProjectSheetRoutes({
   httpRoutes.registerIntegrationRoutes({ context, services, logger })
   return {
     routes, auditAppends, provisioning, records, source, db, context, staging, tenantDirectoryCalls,
+    // R-line port (main #6510): the service objects the routes captured at mount, so a suite can patch one in place
+    // (an audit store whose vocabulary probe refuses).
+    services,
     // S3 fix round 1: the REAL registry store the routes use, for suites that drive the overview module directly.
     projectTargetStore: services.stockPreparationProjectTargetStore,
     projectObjectId: (no = projectNo) => deriveProjectSheetObjectId(tenantId, no),

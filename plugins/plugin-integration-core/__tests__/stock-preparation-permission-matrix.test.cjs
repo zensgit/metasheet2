@@ -369,6 +369,12 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   // switch-off 404 for the same reason the three above do — not on a 400 about the body.
   'projectTarget.archive': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO } }),
   'projectTarget.restore': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO } }),
+  // 人工补充行 B4 (R-68): the switch read (PULL) and the typed-confirmation set (ADMIN); past the gate they land on the
+  // same switch-off 404 (gate first, switch second), and the set carries a well-formed body so a 'pass' cell never
+  // meets a 400 that could mask the gate. Switch on, tier by tier, in stock-preparation-manual-rows-switch-routes.test.cjs;
+  // the read also joins M-12 below.
+  'projectTarget.manualRowsRead': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'projectTarget.manualRowsSet': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, policy: 'disabled' } }),
   // S3 (R-37): the project-fields pair and the overview refresh — OPERATE, and past the gate they land
   // on the same switch-off 404 (gate first, switch second, body third). The PUT carries one whitelisted
   // key so a switch-ON mount (M-12) is a real 200 rather than a 422 about an empty patch.
@@ -427,6 +433,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectTarget.manualRowsRead': 'gate',
+    'projectTarget.manualRowsSet': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -453,6 +461,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectTarget.manualRowsRead': 'gate',
+    'projectTarget.manualRowsSet': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -479,6 +489,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectTarget.manualRowsRead': 'gate',
+    'projectTarget.manualRowsSet': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -505,6 +517,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectTarget.manualRowsRead': 'gate',
+    'projectTarget.manualRowsSet': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -531,6 +545,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectTarget.manualRowsRead': 'gate',
+    'projectTarget.manualRowsSet': 'gate',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -557,6 +573,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectTarget.manualRowsRead': 'gate',
+    'projectTarget.manualRowsSet': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -583,6 +601,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'pass',
     'projectTarget.restore': 'pass',
+    'projectTarget.manualRowsRead': 'pass',
+    'projectTarget.manualRowsSet': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -609,6 +629,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'pass',
     'projectTarget.restore': 'pass',
+    'projectTarget.manualRowsRead': 'pass',
+    'projectTarget.manualRowsSet': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -638,6 +660,9 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'pass',
     'projectTarget.restore': 'pass',
+    // 人工补充行 B4 fix round 1 (OQ4): the 拉取人员 READS the switch and the last pull's reminder; only the SET is ADMIN.
+    'projectTarget.manualRowsRead': 'pass',
+    'projectTarget.manualRowsSet': 'gate',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -664,6 +689,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectTarget.manualRowsRead': 'gate',
+    'projectTarget.manualRowsSet': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -1120,11 +1147,14 @@ async function orphanOperateGrantConfersNothing() {
       'projectTarget.archive',
       'projectTarget.create',
       'projectTarget.restore',
+      // 人工补充行 B4 fix round 1 (OQ4): the puller reads the switch and the last pull's reminder (the SET stays ADMIN).
+      'projectTarget.manualRowsRead',
     ].sort(),
-    'M-05: on this manifest the pull code adds exactly projectTarget.create / .archive / .restore and projectOverview.ensure to the operator tier',
+    'M-05: on this manifest the pull code adds exactly projectTarget.create / .archive / .restore / .manualRowsRead and projectOverview.ensure to the operator tier',
   )
-  // …and the floor operator holds none of the four (archive / restore are the 拉取人员's, Q2).
-  for (const pullOnly of ['projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore']) {
+  // …and the floor operator holds none of the five (archive / restore are the 拉取人员's, Q2; the reminder is for the
+  // people who pull, OQ4).
+  for (const pullOnly of ['projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore', 'projectTarget.manualRowsRead']) {
     assert.ok(
       !grantedStockPrepCapabilities([STOCK_PREP_OPERATE, STOCK_PREP_READ]).includes(pullOnly),
       `M-05: the floor operator (read + operate) is not granted ${pullOnly}`,
@@ -1252,8 +1282,12 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
       'stockPreparationMembersCustomRoleProjectTargets',
       'stockPreparationMembersCustomRoleUpdate',
       'stockPreparationMembersRead',
+      // 人工补充行 B4 (OQ6 / R-68): SETTING the per-sheet switch 「允许人工补充行」 (typed confirmation, one key-column
+      // property through the host's provisioning port, read back) — manifest member projectTarget.manualRowsSet, its
+      // control on the project sync panel. Its READ is the PULL tier (below).
+      'stockPreparationProjectManualRowsSet',
     ],
-    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler and the four members handlers',
+    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler, the four members handlers and the manual-rows switch SET',
   )
   // STOCK_PREP_PULL joined the set with the S1 project-sheet CREATE, the named R-11 exception (R-35),
   // and S4 (R-38) added exactly two more — ARCHIVE and RESTORE, which the owner gave to the 拉取人员
@@ -1266,8 +1300,17 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
     stockPrepGatedHandlersInSource(HTTP_ROUTES_SOURCE).filter((handler) => (
       /requireAccess\(req,\s*STOCK_PREP_PULL\)/.test(handlerBodyInSource(HTTP_ROUTES_SOURCE, handler))
     )).sort(),
-    ['stockPreparationProjectOverviewEnsure', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetCreate', 'stockPreparationProjectTargetRestore'],
-    'M-08: STOCK_PREP_PULL gates exactly the project-sheet create, archive and restore handlers and the overview ensure',
+    [
+      // 人工补充行 B4 fix round 1 (OQ4; R-68): READING the per-sheet switch and the last pull's reminder — the reminder is
+      // on the project sync panel for the people who pull (manifest member projectTarget.manualRowsRead); its `may.set`
+      // still needs the ADMIN tier the SET's gate admits.
+      'stockPreparationProjectManualRowsGet',
+      'stockPreparationProjectOverviewEnsure',
+      'stockPreparationProjectTargetArchive',
+      'stockPreparationProjectTargetCreate',
+      'stockPreparationProjectTargetRestore',
+    ],
+    'M-08: STOCK_PREP_PULL gates exactly the project-sheet create, archive and restore handlers, the manual-rows switch READ and the overview ensure',
   )
   // ...and those identifiers really carry the frozen codes (the names alone prove nothing).
   for (const code of [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN]) {
@@ -1641,6 +1684,10 @@ const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
   'projectFields.update',
   'projectOverview.refresh',
   'projectOverview.ensure',
+  // 人工补充行 B4 (R-68): both switch routes resolve the host-vouched operator scope (never a header-fillable tenant),
+  // so the door adds nothing to them.
+  'projectTarget.manualRowsRead',
+  'projectTarget.manualRowsSet',
   // S5b (R-39): three of the four touch no tenant at all (roles and memberships are platform-global and the
   // host port scopes visibility by the delegation scope); the project-sheet add resolves the host-vouched
   // operator scope like the project-target routes above. None runs a shared tenant helper.
@@ -1999,6 +2046,10 @@ async function projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn() {
     // declares the stamp) — 200 over an empty registry; the ensure creates it (PULL), 200.
     'projectOverview.refresh': { method: 'POST', path: '/api/integration/stock-preparation/project-overview/refresh', params: {}, body: {}, stampingHost: true, overviewFirst: true, okStatuses: [200] },
     'projectOverview.ensure': { method: 'POST', path: '/api/integration/stock-preparation/project-overview/ensure', params: {}, body: {}, stampingHost: true, okStatuses: [200] },
+    // 人工补充行 B4 (R-68): the switch READ over an empty registry — 200 `status: 'absent'` (PULL tier: the puller and
+    // both admins). The SET (ADMIN) is deliberately not a shape here: it needs a registered sheet whose key column the
+    // host can read and write, so its "served" leg is proven in stock-preparation-manual-rows-switch-routes.test.cjs.
+    'projectTarget.manualRowsRead': { method: 'GET', path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows', params: { projectNo: PROJECT_NO }, okStatuses: [200] },
   }
   let served = 0
   for (const [actorName, expectations] of Object.entries(MATRIX)) {
@@ -2039,9 +2090,9 @@ async function projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn() {
       }
     }
   }
-  // Anti-vacuity: puller, workbench admin and platform admin are served all nine; the confirming
-  // operator the two reads plus the three S3 OPERATE routes. 9 + 9 + 9 + 5.
-  assert.equal(served, 32, 'M-12: the served cells are exactly the matrix\'s pass cells for the nine routes')
+  // Anti-vacuity: puller, workbench admin and platform admin are served the nine S1–S4 routes plus the B4 switch read
+  // (PULL); the confirming operator the two reads plus the three S3 OPERATE routes. 10 + 10 + 10 + 5.
+  assert.equal(served, 35, 'M-12: the served cells are exactly the matrix\'s pass cells for the ten routes')
 }
 
 async function main() {

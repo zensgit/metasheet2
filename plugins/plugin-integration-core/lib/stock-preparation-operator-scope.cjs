@@ -178,6 +178,13 @@
 //           projectId. A header-fillable tenant here would patch another tenant's project sheet. The
 //           route's projectNo-less leg is unchanged and is NOT on this list: it keeps its
 //           `resolveAuthUserTenantId` normalizer (the GHSA step-1 write face).
+//       21. GET  …/projects/:projectNo/target/manual-rows  `stockPreparationProjectManualRowsGet`
+//       22. POST …/projects/:projectNo/target/manual-rows  `stockPreparationProjectManualRowsSet`
+//           人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; register R-68), ADMIN. The GET answers the
+//           proven tenant's project sheet switch 「允许人工补充行」 and its last pull's persisted reminder (counts and
+//           record handles); the POST is a WRITE — one field property of that sheet's key column, through the host's
+//           provisioning port in the staging project derived from this scope with no request projectId. A
+//           header-fillable tenant here would read or flip another tenant's project switch.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins
