@@ -649,7 +649,7 @@ function validateFactBase(item: Record<string, unknown>): boolean {
   return true
 }
 
-function parseCoverage(value: unknown): { bounded: IntervalMs | null; unbounded: boolean } | null {
+function parseCoverage(value: unknown, allowSnapshotUnattributed = false): { bounded: IntervalMs | null; unbounded: boolean } | null {
   if (!isPlainObject(value)) return null
   if (value.kind === 'bounded_interval') {
     if (!hasExactKeys(value, ['kind', 'startAt', 'endAt', 'minutes'])) return null
@@ -662,7 +662,8 @@ function parseCoverage(value: unknown): { bounded: IntervalMs | null; unbounded:
   if (value.kind === 'minutes_only_unbounded') {
     if (!hasExactKeys(value, ['kind', 'minutes', 'source'])) return null
     if (!isNonNegativeInteger(value.minutes)) return null
-    if (value.source !== 'explicit_minutes' && value.source !== 'policy_default') return null
+    if (value.source !== 'explicit_minutes' && value.source !== 'policy_default'
+      && !(allowSnapshotUnattributed && value.source === 'request_snapshot_unattributed')) return null
     return { bounded: null, unbounded: true }
   }
   return null
@@ -692,7 +693,7 @@ function validateApprovedFacts(facts: unknown): FactsCheck {
       else if (coverage.bounded) boundedLeaveIntervals.push(coverage.bounded)
     } else if (kind === 'overtime') {
       if (!hasExactKeys(item, [...FACT_BASE_KEYS, 'coverage'])) return { kind: 'invalid' }
-      const coverage = parseCoverage(item.coverage)
+      const coverage = parseCoverage(item.coverage, true)
       if (!coverage) return { kind: 'invalid' }
       if (coverage.unbounded) hasUnboundedMinutesFact = true
       else if (coverage.bounded) boundedOvertimeIntervals.push(coverage.bounded)

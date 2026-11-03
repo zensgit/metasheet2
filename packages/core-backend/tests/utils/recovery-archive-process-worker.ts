@@ -1,4 +1,5 @@
 import { Pool } from 'pg'
+import { archiveDerivedFailureCode, type ArchiveDerivedNonCompletion } from './recovery-archive-derived-diagnostic'
 import { createRecoveryArchiveDerivedProcessor, createRecoveryArchiveWorkerAuthorization } from '../../src/routes/univer-meta'
 import type { RecoveryArchiveRestoreWorkerRunResult } from '../../src/multitable/recovery-archive-restore-worker'
 import { createRecoveryArchiveApplication } from '../../src/multitable/recovery-archive-application'
@@ -50,7 +51,7 @@ export interface ArchiveProcessWorkerInput {
 
 export type ArchiveProcessWorkerMessage =
   | { kind: 'read-object'; requestId: number; request: RecoveryArchiveObjectReadRequest }
-  | { kind: 'drained'; pid: number; attempts: number; completed: number; batches: number[]; ticks: RecoveryArchiveRestoreWorkerRunResult[]; lifecycle: RecoveryArchiveWorkerLifecycle[] }
+  | { kind: 'drained'; pid: number; attempts: number; completed: number; batches: number[]; ticks: RecoveryArchiveRestoreWorkerRunResult[]; lifecycle: RecoveryArchiveWorkerLifecycle[]; firstNonCompletion: ArchiveDerivedNonCompletion | null }
   | { kind: 'boundary'; phase: 'before_commit' | 'after_commit'; pid: number; claim: ArchiveProcessClaimSnapshot }
   | {
       kind: 'done'
@@ -212,18 +213,40 @@ async function run(input: ArchiveProcessWorkerInput): Promise<void> {
       const ticks: RecoveryArchiveRestoreWorkerRunResult[] = []
       const batches: number[] = []
       let previousCompleted = 0
+      const effectOrdinals = new Map<string, number>()
+      const diagnostic: { first: ArchiveDerivedNonCompletion | null } = { first: null }
       const lifecycle = await runApplication(tickCount, async work => {
         attempts += 1
-        if (work.identity.jobId !== input.jobId) throw new Error('archive_process_derived_job_mismatch')
-        const result = await processDerived(work)
-        if (result) completed += 1
-        return result
+        const effectOrdinal = effectOrdinals.get(work.revisionId) ?? effectOrdinals.size + 1
+        effectOrdinals.set(work.revisionId, effectOrdinal)
+        const jobMatch = work.identity.jobId === input.jobId
+        const record = (outcome: ArchiveDerivedNonCompletion['outcome'], code: ArchiveDerivedNonCompletion['code']) => {
+          diagnostic.first ??= { attempt: attempts, tick: ticks.length + 1, effectOrdinal, jobMatch,
+            outcome, code, laterCompleted: false }
+        }
+        if (!jobMatch) {
+          record('job_mismatch', 'none')
+          throw new Error('archive_process_derived_job_mismatch')
+        }
+        try {
+          const result = await processDerived(work)
+          if (result) {
+            completed += 1
+            if (diagnostic.first?.effectOrdinal === effectOrdinal) diagnostic.first.laterCompleted = true
+          } else {
+            record('false', 'none')
+          }
+          return result
+        } catch (error) {
+          record('throw', archiveDerivedFailureCode(error))
+          throw error
+        }
       }, result => {
         ticks.push(result)
         batches.push(completed - previousCompleted)
         previousCompleted = completed
       })
-      await send({ kind: 'drained', pid: process.pid, attempts, completed, batches, ticks, lifecycle })
+      await send({ kind: 'drained', pid: process.pid, attempts, completed, batches, ticks, lifecycle, firstNonCompletion: diagnostic.first })
       return
     }
     if (input.priorClaim) {

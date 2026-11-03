@@ -187,7 +187,11 @@ interface ApprovedFactBaseV1 {
 
 export type ApprovedAttendanceFactV1 =
   | (ApprovedFactBaseV1 & { kind: 'leave'; coverage: ApprovedFactCoverageV1; leaveType: string })
-  | (ApprovedFactBaseV1 & { kind: 'overtime'; coverage: ApprovedFactCoverageV1 })
+  | (ApprovedFactBaseV1 & {
+      kind: 'overtime'
+      coverage: ApprovedFactCoverageV1
+        | { kind: 'minutes_only_unbounded'; minutes: number; source: 'request_snapshot_unattributed' }
+    })
   | (ApprovedFactBaseV1 & {
       kind: 'correction'
       direction: 'check_in' | 'check_out'
