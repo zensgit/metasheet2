@@ -262,3 +262,64 @@ describe('send_webhook — real https.request against a loopback TLS server', ()
     })
   }
 })
+
+describe('send_webhook — a transport failure on the pinned path persists a closed class, never the address (S0-a review F2)', () => {
+  let server: https.Server
+  let livePort = 0
+  let closedPort = 0
+  let ca = ''
+
+  beforeAll(async () => {
+    const { cert, key } = generateRuntimeSelfSignedCert(HOST)
+    ca = cert
+    server = https.createServer({ cert, key }, (_req: IncomingMessage, res: ServerResponse) => { res.writeHead(204); res.end() })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    livePort = (server.address() as AddressInfo).port
+    // A port that was just bound and released: nothing listens there, so the connect is refused.
+    const probe = https.createServer()
+    await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', () => resolve()))
+    closedPort = (probe.address() as AddressInfo).port
+    await new Promise<void>((resolve) => probe.close(() => resolve()))
+  })
+  afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  })
+
+  const publicLookup: SsrfLookupFn = async () => [{ address: CHECKED_PUBLIC, family: 4 }]
+  /** The REAL helper over a REAL socket, pinned to loopback (the executor's chosen pin is the checked one). */
+  const realSend: PinnedSendFn = (url, _pin, _family, opts) => pinnedHttpsFetch(url, '127.0.0.1', 4, { ...opts, ca })
+
+  function expectNoAddress(text: string, port: number, host: string) {
+    expect(text).not.toContain('127.0.0.1')
+    expect(text).not.toContain(CHECKED_PUBLIC)
+    expect(text).not.toContain(String(port))
+    expect(text).not.toContain(host)
+    expect(text).not.toMatch(/\d{1,3}(\.\d{1,3}){3}/)
+  }
+
+  for (const branch of BRANCHES) {
+    it(`${branch}: connection refused -> step.error names the class only (no IP, no port)`, async () => {
+      const h = makeHarness({ ssrfLookupFn: publicLookup, pinnedWebhookSendFn: realSend })
+      const step = await run(h, branch, { url: `https://${HOST}:${closedPort}/hook` })
+      expect(step?.status).toBe('failed')
+      const text = String(step?.error)
+      if (branch === 'legacy') {
+        expect(text).toBe('Webhook failed after 1 attempts: conn-refused')
+        expect(step?.output).toMatchObject({ failureClass: 'conn-refused' })
+      }
+      expectNoAddress(text, closedPort, HOST)
+      expectNoAddress(JSON.stringify(step?.output ?? {}), closedPort, HOST)
+    })
+
+    it(`${branch}: TLS name mismatch -> step.error names the class only (no host, no IP, no port)`, async () => {
+      const other = 'other.s0a-test.invalid'
+      const h = makeHarness({ ssrfLookupFn: publicLookup, pinnedWebhookSendFn: realSend })
+      const step = await run(h, branch, { url: `https://${other}:${livePort}/hook` })
+      expect(step?.status).toBe('failed')
+      const text = String(step?.error)
+      if (branch === 'legacy') expect(text).toBe('Webhook failed after 1 attempts: tls-failure')
+      expectNoAddress(text, livePort, other)
+      expect(text).not.toContain(HOST)
+    })
+  }
+})
