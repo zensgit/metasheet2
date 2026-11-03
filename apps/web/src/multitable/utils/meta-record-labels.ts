@@ -197,6 +197,13 @@ export type MetaRecordLabelKey =
   | 'approval.progressForbidden' | 'approval.progressNotParticipant' | 'approval.progressFailed'
   | 'approval.progressMismatch'
   | 'approval.progressRetry' | 'approval.completedAt'
+  // --- 关联任务 / the record's linked tasks (package 2). Every `recordTasks.*` key belongs to
+  //     MetaRecordTasksPanel.vue. The panel lists only tasks the viewer can open: no sentence here
+  //     names a person, echoes a record value or counts tasks the viewer cannot open. ---
+  | 'recordTasks.panelTitle' | 'recordTasks.panelExpand' | 'recordTasks.panelCollapse'
+  | 'recordTasks.panelLoading' | 'recordTasks.panelEmpty' | 'recordTasks.panelError' | 'recordTasks.panelRetry'
+  | 'recordTasks.panelForbidden' | 'recordTasks.panelUnavailable'
+  | 'recordTasks.statusOpen' | 'recordTasks.statusDone' | 'recordTasks.due' | 'recordTasks.untitled'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
   'notification.bell': { en: 'Notifications', zh: '通知' },
@@ -593,6 +600,21 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'approval.progressMismatch': { en: 'Progress data does not match this approval — not shown.', zh: '返回的进度与该审批不一致，已隐藏' },
   'approval.progressRetry': { en: 'Retry', zh: '重试' },
   'approval.completedAt': { en: 'Completed at', zh: '完成时间' },
+  // 关联任务 / the record's linked tasks (package 2). "you can open" on purpose: the list holds only the
+  // tasks the viewer can open, so an empty list says nothing about anyone else's tasks.
+  'recordTasks.panelTitle': { en: 'Linked tasks', zh: '关联任务' },
+  'recordTasks.panelExpand': { en: 'Show linked tasks', zh: '展开关联任务' },
+  'recordTasks.panelCollapse': { en: 'Hide linked tasks', zh: '收起关联任务' },
+  'recordTasks.panelLoading': { en: 'Loading linked tasks…', zh: '正在加载关联任务…' },
+  'recordTasks.panelEmpty': { en: 'No linked tasks that you can open.', zh: '没有你可以打开的关联任务。' },
+  'recordTasks.panelError': { en: 'Failed to load linked tasks.', zh: '加载关联任务失败。' },
+  'recordTasks.panelRetry': { en: 'Retry', zh: '重试' },
+  'recordTasks.panelForbidden': { en: 'You do not have permission to view the linked tasks of this record.', zh: '你没有查看此记录关联任务的权限。' },
+  'recordTasks.panelUnavailable': { en: 'Linked tasks are not available right now.', zh: '关联任务暂不可用。' },
+  'recordTasks.statusOpen': { en: 'Open', zh: '进行中' },
+  'recordTasks.statusDone': { en: 'Done', zh: '已完成' },
+  'recordTasks.due': { en: 'Due', zh: '截止' },
+  'recordTasks.untitled': { en: 'Untitled task', zh: '未命名任务' },
 }
 
 export function recordLabel(key: MetaRecordLabelKey, isZh: boolean): string {
@@ -1057,4 +1079,17 @@ export function recordApprovalHistoryActionLabel(action: string, isZh: boolean):
     : undefined
   if (!entry) return action
   return isZh ? entry.zh : entry.en
+}
+
+// 关联任务 / the record's linked tasks (package 2): the server answered `hasMore` for the page the panel
+// asked for. Counts the rows ON SCREEN, never a total: the server counts nothing, and a reader learns
+// nothing about tasks they cannot open.
+export function recordTasksHasMoreNotice(shown: number, isZh: boolean): string {
+  const count = Number.isFinite(shown) && shown > 0 ? Math.trunc(shown) : 0
+  if (count <= 0) {
+    return isZh ? '还有更多（仅显示最近一页）' : 'More exist (showing the most recent page only)'
+  }
+  return isZh
+    ? `还有更多（仅显示最近 ${count} 条）`
+    : `More exist (showing the latest ${count} only)`
 }

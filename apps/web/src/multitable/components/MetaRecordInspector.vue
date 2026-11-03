@@ -423,6 +423,15 @@
           :api-client="apiClient"
           :refresh-token="approvalRefreshToken"
         />
+        <!-- 关联任务 / Linked tasks (package 2): same self-gating lazy discipline as 审批 above, plus the top
+             bar's 任务 rule (tasks feature on, tasks:read). It lists only the tasks dispatched from this
+             record that the viewer can open, and re-reads after a dispatch from this drawer (the dialog's
+             task-change signal). See the component's file header. -->
+        <MetaRecordTasksPanel
+          :record="record"
+          :sheet-id="sheetId"
+          :api-client="apiClient"
+        />
       </div>
       <div
         v-else-if="activeTab === 'history'"
@@ -605,6 +614,7 @@ import MetaRecordFieldsPanel from './MetaRecordFieldsPanel.vue'
 import MetaRecordProvenancePanel from './MetaRecordProvenancePanel.vue'
 import MetaRecordApprovalPanel from './MetaRecordApprovalPanel.vue'
 import MetaRecordApprovalSubmitDialog from './MetaRecordApprovalSubmitDialog.vue'
+import MetaRecordTasksPanel from './MetaRecordTasksPanel.vue'
 import MetaRecordTaskDispatchDialog, { type DispatchPersonField } from './MetaRecordTaskDispatchDialog.vue'
 import MetaRecordHistoryPanel from './MetaRecordHistoryPanel.vue'
 // S3a: MetaCommentsPanel's real implementation now lives in shared/comments/components/ —
