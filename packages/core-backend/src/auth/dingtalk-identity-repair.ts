@@ -15,8 +15,11 @@ import {
   getEncryptionMaterialIssues,
   isEncryptedSecretValue,
 } from '../security/encrypted-secrets'
+import type { REPAIR_REFUSAL_CODES } from './dingtalk-identity-repair-codes'
 
 type Row = Record<string, unknown>
+/** Compile-time only: every refusal literal passed to requireRepair must be a registered module code. */
+type RepairRefusalCode = (typeof REPAIR_REFUSAL_CODES)[number]
 type Client = {
   query: (sql: string, args?: unknown[]) => Promise<{ rows: Row[] }>
 }
@@ -45,7 +48,7 @@ const digest = (v: unknown) =>
   createHash('sha256').update(canonical(v)).digest('hex')
 function requireRepair(
   v: unknown,
-  code = 'DINGTALK_IDENTITY_REPAIR_REFUSED',
+  code: RepairRefusalCode = 'DINGTALK_IDENTITY_REPAIR_REFUSED',
 ): asserts v {
   if (!v) throw new Error(code)
 }
@@ -62,6 +65,36 @@ const normalize = (r: Row) =>
   )
 const mask = (s: unknown) =>
   typeof s === 'string' && s.length ? s.slice(0, 1) + '***' : 'not-provided'
+const DINGTALK = 'dingtalk'
+const hasText = (v: unknown): v is string => typeof v === 'string' && v.length > 0
+/** Same person: same corp and a present, equal directory UnionID. OpenID is never person evidence. */
+const samePerson = (r: Row, expected: Row) =>
+  r.corp_id === expected.corp_id &&
+  hasText(r.union_id) &&
+  r.union_id === expected.provider_union_id
+/** Canonical source: same person, from a DingTalk directory account, in the login application. */
+const canonicalSource = (r: Row, expected: Row, clientId: string) =>
+  r.provider === DINGTALK && samePerson(r, expected) && r.app_key === clientId
+/** Explicit digest-stable column list (no raw/last_seen_at/timestamps: they change every sync). */
+const SOURCE_COLUMNS =
+  "a.id,a.provider,a.integration_id,a.corp_id,a.union_id,a.open_id,a.is_active,i.status,i.config->>'appKey' AS app_key"
+const SOURCE_JOIN =
+  'FROM directory_accounts a JOIN directory_integrations i ON i.id=a.integration_id LEFT JOIN directory_account_links l ON l.directory_account_id=a.id'
+const dingtalkOnly = (links: Row[]) =>
+  links.filter((l) => l.provider === DINGTALK)
+function userEnabled(u: Row): boolean {
+  // Extracted from active() unchanged; the complement is "revoked" for release.
+  return (
+    u.is_active === true &&
+    !u.deleted_at &&
+    !u.purged_at &&
+    !evaluateUserAuthenticationGate({
+      is_active: u.is_active as boolean,
+      role: String(u.role),
+      activation_status: String(u.activation_status),
+    })
+  )
+}
 async function operator(c: Client, id: string, password?: string) {
   const r = (
     await c.query(
@@ -143,10 +176,11 @@ async function snapshot(c: Client, userId: string) {
     : null
   const links = (
     await c.query(
-      `SELECT a.id,a.integration_id,a.corp_id,a.union_id,a.open_id,a.is_active,i.status,i.config->>'appKey' AS app_key FROM directory_account_links l JOIN directory_accounts a ON a.id=l.directory_account_id JOIN directory_integrations i ON i.id=a.integration_id WHERE l.local_user_id=$1 AND l.link_status='linked' ORDER BY a.id`,
+      `SELECT ${SOURCE_COLUMNS} ${SOURCE_JOIN} WHERE l.local_user_id=$1 AND l.link_status='linked' ORDER BY a.id`,
       [userId],
     )
   ).rows
+  // Every provider stays in the approval snapshot; only the DingTalk subset is identity evidence.
   sections.sources = links.map(normalize)
   const grant =
     (
@@ -160,6 +194,7 @@ async function snapshot(c: Client, userId: string) {
     sections,
     identity,
     links,
+    dingtalkLinks: dingtalkOnly(links),
     grant,
     hash: digest(sections),
     segments: Object.fromEntries(
@@ -167,18 +202,10 @@ async function snapshot(c: Client, userId: string) {
     ),
   }
 }
-function active(s: Awaited<ReturnType<typeof snapshot>>) {
+type Snapshot = Awaited<ReturnType<typeof snapshot>>
+function active(s: Snapshot) {
   requireRepair(
-    s.user.is_active === true &&
-      !s.user.deleted_at &&
-      !s.user.purged_at &&
-      !evaluateUserAuthenticationGate({
-        is_active: s.user.is_active as boolean,
-        role: String(s.user.role),
-        activation_status: String(s.user.activation_status),
-      }) &&
-      s.grant &&
-      s.identity,
+    userEnabled(s.user) && s.grant && s.identity,
     'REPAIR_TARGET_NOT_ENABLED',
   )
 }
@@ -189,10 +216,12 @@ async function noHandover(c: Client, userId: string, extra: unknown[] = []) {
   )
   requireRepair(!r.rows.length, 'REPAIR_HANDOVER_ACTIVE')
 }
+/** `links` is the target's DingTalk subset of linked directory rows; local directory rows are never identity evidence. */
 async function ownership(c: Client, p: Proof, links: Row[]) {
+  const clientId = scope().cfg.clientId
   const rows = (
     await c.query(
-      `SELECT a.id,a.union_id,a.open_id,l.local_user_id,l.link_status,a.name,a.is_active,i.status,i.config->>'appKey' AS app_key FROM directory_accounts a JOIN directory_integrations i ON i.id=a.integration_id LEFT JOIN directory_account_links l ON l.directory_account_id=a.id WHERE a.provider='dingtalk' AND a.corp_id=$1 AND (a.union_id=$2 OR (a.open_id IS NOT NULL AND a.open_id=$3))`,
+      `SELECT ${SOURCE_COLUMNS},l.local_user_id,l.link_status ${SOURCE_JOIN} WHERE a.provider='dingtalk' AND a.corp_id=$1 AND (a.union_id=$2 OR (a.open_id IS NOT NULL AND a.open_id=$3))`,
       [
         p.identity.corp_id,
         p.identity.provider_union_id,
@@ -200,36 +229,37 @@ async function ownership(c: Client, p: Proof, links: Row[]) {
       ],
     )
   ).rows
+  // Any non-null other owner, whatever the link status (pending hints included), refuses.
   requireRepair(
     rows.length > 0 &&
       !rows.some((r) => r.local_user_id && r.local_user_id !== p.userId),
     'REPAIR_DIRECTORY_OWNER_CONFLICT',
   )
+  const live = links.filter(
+    (l) => l.is_active === true && l.status === 'active',
+  )
+  // A directory row without a UnionID is not evidence in v1 and blocks the repair before it starts.
   requireRepair(
-    links
-      .filter((link) => link.is_active === true && link.status === 'active')
-      .every(
-        (link) =>
-          link.corp_id === p.identity.corp_id &&
-          (link.union_id
-            ? link.union_id === p.identity.provider_union_id
-            : link.app_key === scope().cfg.clientId &&
-              link.open_id === p.identity.provider_open_id),
-      ),
+    live.every((l) => hasText(l.union_id)),
+    'REPAIR_DIRECTORY_UNION_ID_REQUIRED',
+  )
+  // No app/OpenID arm: OpenID can refuse (owner conflict above) but never prove.
+  requireRepair(
+    live.every((l) => samePerson(l, p.identity)),
     'REPAIR_DIRECTORY_PERSON_AMBIGUOUS',
   )
-  requireRepair(
-    rows.some(
-      (r) =>
-        r.local_user_id === p.userId &&
-        r.link_status === 'linked' &&
-        r.is_active === true &&
-        r.status === 'active' &&
-        r.app_key === scope().cfg.clientId &&
-        (!r.union_id || r.union_id === p.identity.provider_union_id),
-    ),
-    'REPAIR_PERSON_NOT_PROVEN',
+  // The witness is a current-app, active, linked, same-UnionID DingTalk row of this user, and there is exactly one.
+  const witnesses = rows.filter(
+    (r) =>
+      r.local_user_id === p.userId &&
+      r.link_status === 'linked' &&
+      r.is_active === true &&
+      r.status === 'active' &&
+      canonicalSource(r, p.identity, clientId),
   )
+  requireRepair(witnesses.length > 0, 'REPAIR_PERSON_NOT_PROVEN')
+  requireRepair(witnesses.length === 1, 'REPAIR_CANONICAL_SOURCE_REQUIRED')
+  return { canonicalAccountId: String(witnesses[0].id) }
 }
 function open(proof: string): Proof {
   requireRepair(isEncryptedSecretValue(proof))
@@ -264,6 +294,13 @@ export async function verifyDingTalkRepair(
       (await bcrypt.compare(password, before.user.password_hash)),
     'REPAIR_TARGET_CREDENTIAL_REQUIRED',
   )
+  // Before any provider call: an active DingTalk source without a stored UnionID can never prove the person.
+  requireRepair(
+    before.dingtalkLinks
+      .filter((l) => l.is_active === true && l.status === 'active')
+      .every((l) => hasText(l.union_id)),
+    'REPAIR_DIRECTORY_UNION_ID_REQUIRED',
+  )
   const dt = await exchangeCodeForDingTalkProfile(code)
   requireRepair(dt.openId && dt.unionId, 'REPAIR_PROFILE_INCOMPLETE')
   const p: Proof = {
@@ -283,7 +320,7 @@ export async function verifyDingTalkRepair(
       external_key: `${cfg.corpId}:${dt.openId}`,
     },
   }
-  await ownership({ query }, p, before.links)
+  await ownership({ query }, p, before.dingtalkLinks)
   return encryptStoredSecretValue(JSON.stringify(p))
 }
 async function checks(c: Client, p: Proof) {
@@ -295,7 +332,7 @@ async function checks(c: Client, p: Proof) {
   const s = await snapshot(c, p.userId)
   active(s)
   requireRepair(s.hash === p.before, 'REPAIR_SNAPSHOT_CHANGED')
-  await ownership(c, p, s.links)
+  const { canonicalAccountId } = await ownership(c, p, s.dingtalkLinks)
   requireRepair(
     !(
       await c.query(
@@ -329,7 +366,7 @@ async function checks(c: Client, p: Proof) {
     ).rows.length,
     'REPAIR_ALREADY_ACTIVE',
   )
-  return s
+  return { s, canonicalAccountId }
 }
 async function lock(c: Client, userId: string, actorId: string) {
   await c.query("SET LOCAL lock_timeout='5s'")
@@ -373,17 +410,23 @@ async function revoke(
     [userId],
   )
 }
-async function audit(c: Client, id: string, actorId: string, action: string) {
+async function audit(
+  c: Client,
+  id: string,
+  actorId: string,
+  action: string,
+  details?: Row,
+) {
   await c.query(
     `INSERT INTO audit_logs(event_type,event_category,resource_type,resource_id,action,action_details,user_name) VALUES('DINGTALK_LOGIN_REPAIR','SECURITY','dingtalk_login_repairs',$1,$2,$3::jsonb,$4)`,
-    [id, action, JSON.stringify({ actorId }), actorId],
+    [id, action, JSON.stringify({ actorId, ...details }), actorId],
   )
 }
 export async function previewDingTalkRepair(proof: string) {
   const p = open(proof)
   return transaction(async (c) => {
     await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
-    const s = await checks(c, p)
+    const { s, canonicalAccountId } = await checks(c, p)
     return {
       digest: digest(p),
       expires: p.expires,
@@ -391,6 +434,7 @@ export async function previewDingTalkRepair(proof: string) {
       target: mask(s.user.name),
       scanner: mask(p.scannerName),
       identitySuffix: String(p.identity.provider_open_id).slice(-4),
+      canonicalAccountId,
       permissionsChanged: false,
     }
   })
@@ -408,10 +452,11 @@ export async function applyDingTalkRepair(
   return transaction(async (c) => {
     await c.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     await lock(c, p.userId, p.actorId)
-    const s = await checks(c, p)
+    const { s, canonicalAccountId } = await checks(c, p)
     const id = randomUUID()
+    // The journal records only DingTalk sources; the single apply-time witness is recorded as the canonical row.
     await c.query(
-      `INSERT INTO dingtalk_login_repairs(id,user_id,proof_nonce,state,before_identity,expected_identity,after_digest,actor_id,source_account_ids,source_integration_ids,login_client_id) VALUES($1,$2,$3,'applied',$4,$5,'pending',$6,$7,$8,$9)`,
+      `INSERT INTO dingtalk_login_repairs(id,user_id,proof_nonce,state,before_identity,expected_identity,after_digest,actor_id,source_account_ids,source_integration_ids,canonical_account_id,login_client_id) VALUES($1,$2,$3,'applied',$4,$5,'pending',$6,$7,$8,$9,$10)`,
       [
         id,
         p.userId,
@@ -419,8 +464,9 @@ export async function applyDingTalkRepair(
         encryptStoredSecretValue(JSON.stringify(s.identity)),
         p.identity,
         p.actorId,
-        s.links.map((r) => r.id),
-        s.links.map((r) => r.integration_id),
+        s.dingtalkLinks.map((r) => r.id),
+        s.dingtalkLinks.map((r) => r.integration_id),
+        canonicalAccountId,
         scope().cfg.clientId,
       ],
     )
@@ -455,6 +501,125 @@ export async function applyDingTalkRepair(
     }
   })
 }
+type ReleasePlan = {
+  mode: 'canonical' | 'termination'
+  /** Exactly one element, always: the row apply recorded as canonical_account_id. */
+  releasedAccountIds: string[]
+  /** Sorted; every element equals releasedAccountIds[0]. */
+  linkedDingTalkAccountIds: string[]
+  /** Non-DingTalk linked rows, kept outside the fence. */
+  localLinkCount: number
+  /** Normalized re-read journal rows (bound into the digest). */
+  candidates: Row[]
+}
+const normalizeCandidate = (h: Row): Row => ({
+  id: h.id,
+  provider: h.provider,
+  integration_id: h.integration_id,
+  corp_id: h.corp_id,
+  union_id: h.union_id,
+  open_id: h.open_id,
+  is_active: h.is_active,
+  status: h.status,
+  app_key: h.app_key,
+  local_user_id: h.local_user_id ?? null,
+  link_status: h.link_status ?? null,
+})
+/**
+ * Release allowlist plan. Canonical mode (login-capable user) and termination mode (revoked user) are exact
+ * complements of active(). Both re-read the journal's source rows (historical ids are not evidence; the rows
+ * are) and re-verify the row apply recorded as canonical. Every refusal happens before finish() writes.
+ */
+async function releasePlan(
+  c: Client,
+  row: Row,
+  s: Snapshot,
+): Promise<ReleasePlan> {
+  const userId = String(row.user_id)
+  const expected = row.expected_identity as Row
+  const { cfg } = scope()
+  // 1. Login scope drift (app or enterprise) since apply: same test the login pin uses.
+  //    A per-row app_key match cannot replace it: an integration whose appKey was edited to the new app would match.
+  requireRepair(
+    row.login_client_id === cfg.clientId && expected.corp_id === cfg.corpId,
+    'REPAIR_LOGIN_SCOPE_CHANGED',
+  )
+  // 2. The pinned identity, when present, still names the same person (held by the identity trigger while applied).
+  if (s.identity)
+    requireRepair(
+      s.identity.corp_id === expected.corp_id &&
+        s.identity.provider_union_id === expected.provider_union_id,
+      'REPAIR_CURRENT_PERSON_CHANGED',
+    )
+  const mode: ReleasePlan['mode'] =
+    s.grant && s.identity && userEnabled(s.user) ? 'canonical' : 'termination'
+  // 3. Occupation by another local user, corp-wide, same shape as ownership(): any non-null other owner, any link_status.
+  requireRepair(
+    !(
+      await c.query(
+        `SELECT 1 ${SOURCE_JOIN} WHERE a.provider='dingtalk' AND a.corp_id=$1 AND (a.union_id=$2 OR (a.open_id IS NOT NULL AND a.open_id=$3)) AND l.local_user_id IS NOT NULL AND l.local_user_id<>$4 LIMIT 1`,
+        [
+          expected.corp_id,
+          expected.provider_union_id,
+          expected.provider_open_id,
+          userId,
+        ],
+      )
+    ).rows.length,
+    'REPAIR_DIRECTORY_OWNER_CONFLICT',
+  )
+  // 4. Identity-table conflict: another local user holds this person's DingTalk identity.
+  requireRepair(
+    !(
+      await c.query(
+        `SELECT 1 FROM user_external_identities WHERE provider='dingtalk' AND local_user_id<>$1 AND corp_id=$2 AND provider_union_id=$3 LIMIT 1`,
+        [userId, expected.corp_id, expected.provider_union_id],
+      )
+    ).rows.length,
+    'REPAIR_IDENTITY_CONFLICT',
+  )
+  // 5. Candidate universe: the journal's own source ids, re-read now.
+  const candidates = (
+    await c.query(
+      `SELECT ${SOURCE_COLUMNS},l.local_user_id,l.link_status ${SOURCE_JOIN} WHERE a.id=ANY($1::uuid[]) ORDER BY a.id`,
+      [row.source_account_ids],
+    )
+  ).rows.map(normalizeCandidate)
+  requireRepair(
+    !candidates.some((h) => h.local_user_id && h.local_user_id !== userId),
+    'REPAIR_DIRECTORY_OWNER_CONFLICT',
+  )
+  // The original stable source is the row apply recorded; it must re-verify now. Canonical mode also needs it live and linked.
+  const chosen = String(row.canonical_account_id)
+  const trusted = candidates.filter(
+    (h) =>
+      String(h.id) === chosen &&
+      canonicalSource(h, expected, cfg.clientId) &&
+      (mode === 'termination' ||
+        (h.local_user_id === userId &&
+          h.link_status === 'linked' &&
+          h.is_active === true &&
+          h.status === 'active')),
+  )
+  requireRepair(
+    trusted.length === 1,
+    mode === 'canonical'
+      ? 'REPAIR_CANONICAL_SOURCE_REQUIRED'
+      : 'REPAIR_HISTORICAL_SOURCE_UNVERIFIED',
+  )
+  // 6. Any other currently linked DingTalk row (active or not, any app) would hit the fence on the next sync.
+  requireRepair(
+    s.dingtalkLinks.every((l) => String(l.id) === chosen),
+    'REPAIR_SOURCE_OUTSIDE_ALLOWLIST',
+  )
+  return {
+    mode,
+    releasedAccountIds: [chosen],
+    linkedDingTalkAccountIds: s.dingtalkLinks.map((l) => String(l.id)).sort(),
+    localLinkCount: s.links.length - s.dingtalkLinks.length,
+    candidates,
+  }
+}
 async function recovery(
   c: Client,
   id: string,
@@ -474,6 +639,7 @@ async function recovery(
   )
   const s = await snapshot(c, String(row.user_id))
   const expected = row.expected_identity as Row
+  let plan: ReleasePlan | null = null
   if (action === 'rollback') {
     active(s)
     requireRepair(
@@ -491,20 +657,7 @@ async function recovery(
       'REPAIR_REVOCATION_UNRESOLVED',
     )
   } else {
-    const revoked = !s.grant || s.user.is_active !== true || !s.identity
-    if (!revoked) {
-      const cfg = scope().cfg
-      requireRepair(
-        row.login_client_id === cfg.clientId &&
-          s.links.length === 1 &&
-          s.links[0].app_key === cfg.clientId &&
-          s.links[0].corp_id === expected.corp_id &&
-          s.links[0].union_id === expected.provider_union_id &&
-          s.links[0].is_active === true &&
-          s.links[0].status === 'active',
-        'REPAIR_CANONICAL_SOURCE_REQUIRED',
-      )
-    }
+    plan = await releasePlan(c, row, s)
   }
 
   const changed = Object.keys(s.segments).filter(
@@ -514,7 +667,17 @@ async function recovery(
     row,
     s,
     changed,
-    digest: digest([id, action, s.hash, row.expected_identity, row.state]),
+    plan,
+    // The login scope and the release plan (mode, allowlist, linked ids, re-read candidates) are bound too.
+    digest: digest([
+      id,
+      action,
+      s.hash,
+      row.expected_identity,
+      row.state,
+      scope().hash,
+      plan,
+    ]),
   }
 }
 export async function previewDingTalkRepairRecovery(
@@ -535,6 +698,15 @@ export async function previewDingTalkRepairRecovery(
       changedSections: r.changed,
       permissionsRestored: false,
       allTargetSessionsWillBeRevoked: true,
+      release: r.plan
+        ? {
+            mode: r.plan.mode,
+            releasedAccountIds: r.plan.releasedAccountIds,
+            linkedDingTalkAccountIds: r.plan.linkedDingTalkAccountIds,
+            localLinkCount: r.plan.localLinkCount,
+            revocationRetained: r.plan.mode === 'termination',
+          }
+        : null,
     }
   })
 }
@@ -578,25 +750,14 @@ async function finish(
       )
       requireRepair(!conflict.rows.length, 'REPAIR_OLD_IDENTITY_CONFLICT')
     }
-    const allowedReleasedAccounts = r.s.links
-      .filter(
-        (link) =>
-          link.app_key === scope().cfg.clientId &&
-          link.corp_id === (r.row.expected_identity as Row).corp_id &&
-          link.union_id === (r.row.expected_identity as Row).provider_union_id,
-      )
-      .map((link) => link.id)
+    // Never recompute the allowlist here: write the plan the approved digest bound.
     await c.query(
       'UPDATE dingtalk_login_repairs SET state=$2,rollback_actor_id=$3,rolled_back_at=now(),released_account_ids=$4 WHERE id=$1',
       [
         id,
         action === 'rollback' ? 'rolled_back' : 'released',
         actorId,
-        action === 'release'
-          ? allowedReleasedAccounts.length === 1
-            ? allowedReleasedAccounts
-            : []
-          : null,
+        action === 'release' ? r.plan!.releasedAccountIds : null,
       ],
     )
     if (action === 'rollback')
@@ -623,7 +784,13 @@ async function finish(
       actorId,
       'dingtalk_identity_repair_' + action,
     )
-    await audit(c, id, actorId, action)
+    await audit(
+      c,
+      id,
+      actorId,
+      action,
+      action === 'release' ? { releaseMode: r.plan!.mode } : undefined,
+    )
     return {
       id,
       rolledBack: action === 'rollback',

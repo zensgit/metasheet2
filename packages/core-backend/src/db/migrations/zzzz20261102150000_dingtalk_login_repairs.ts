@@ -5,7 +5,12 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     id uuid PRIMARY KEY, user_id text NOT NULL REFERENCES users(id), proof_nonce uuid NOT NULL UNIQUE,
     state text NOT NULL CHECK(state IN ('applied','rolled_back','released')), before_identity text NOT NULL,
     expected_identity jsonb NOT NULL, after_digest text NOT NULL, actor_id text NOT NULL,
-    source_account_ids uuid[] NOT NULL, source_integration_ids uuid[] NOT NULL, login_client_id text NOT NULL, after_segments jsonb, released_account_ids uuid[], CHECK(state <> 'released' OR released_account_ids IS NOT NULL),
+    source_account_ids uuid[] NOT NULL, source_integration_ids uuid[] NOT NULL,
+    canonical_account_id uuid NOT NULL, CHECK (canonical_account_id = ANY(source_account_ids)),
+    login_client_id text NOT NULL, after_segments jsonb,
+    released_account_ids uuid[],
+    CHECK (state <> 'released' OR (released_account_ids IS NOT NULL AND released_account_ids = ARRAY[canonical_account_id])),
+    CHECK (state = 'released' OR released_account_ids IS NULL),
     created_at timestamptz NOT NULL DEFAULT now(), rollback_actor_id text, rolled_back_at timestamptz
   )`.execute(db)
   await sql`CREATE UNIQUE INDEX dingtalk_login_repairs_active ON dingtalk_login_repairs(user_id) WHERE state='applied'`.execute(
@@ -43,15 +48,21 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     db,
   )
   await sql`CREATE FUNCTION guard_repaired_directory_link() RETURNS trigger LANGUAGE plpgsql AS $$
-  DECLARE allowed uuid[];
+  DECLARE allowed uuid[]; account_provider text;
   BEGIN
     IF NEW.link_status='linked' AND NEW.local_user_id IS NOT NULL THEN
-      PERFORM id FROM users WHERE id=NEW.local_user_id FOR SHARE;
-      SELECT CASE WHEN state='released' THEN released_account_ids ELSE source_account_ids END INTO allowed
-      FROM dingtalk_login_repairs WHERE user_id=NEW.local_user_id AND state IN ('applied','released')
-      ORDER BY CASE WHEN state='applied' THEN 0 ELSE 1 END,created_at DESC,id DESC LIMIT 1;
-      IF allowed IS NOT NULL AND NOT (NEW.directory_account_id=ANY(allowed)) THEN
-        RAISE EXCEPTION 'repair blocks a second directory source' USING ERRCODE='55000';
+      -- The real account row decides, never a request field (the link row carries no provider). A missing row
+      -- (NULL) is constrained: fail closed; the FK on directory_account_id refuses the insert afterwards anyway.
+      -- Plain read: directory_accounts.provider is never updated, and the RI check already holds KEY SHARE on the row.
+      SELECT provider INTO account_provider FROM directory_accounts WHERE id=NEW.directory_account_id;
+      IF account_provider IS NULL OR account_provider='dingtalk' THEN
+        PERFORM id FROM users WHERE id=NEW.local_user_id FOR SHARE;
+        SELECT CASE WHEN state='released' THEN released_account_ids ELSE source_account_ids END INTO allowed
+        FROM dingtalk_login_repairs WHERE user_id=NEW.local_user_id AND state IN ('applied','released')
+        ORDER BY CASE WHEN state='applied' THEN 0 ELSE 1 END,created_at DESC,id DESC LIMIT 1;
+        IF allowed IS NOT NULL AND NOT (NEW.directory_account_id=ANY(allowed)) THEN
+          RAISE EXCEPTION 'repair blocks a second directory source' USING ERRCODE='55000';
+        END IF;
       END IF;
     END IF;
     RETURN NEW;

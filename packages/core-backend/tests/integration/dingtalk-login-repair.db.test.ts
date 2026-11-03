@@ -202,6 +202,193 @@ async function fixture() {
       verifyDingTalkRepair(user, password, 'synthetic-code', admin, password),
   }
 }
+type Fixture = Awaited<ReturnType<typeof fixture>>
+/** Exact refusal code (toThrow(string) is a substring match: REPAIR_IDENTITY_CONFLICT ⊂ REPAIR_OLD_IDENTITY_CONFLICT). */
+const exact = (code: string) => new RegExp(`^${code}$`)
+const journalRow = async (id: string) =>
+  (
+    await query(
+      'SELECT state,released_account_ids,canonical_account_id,source_account_ids,source_integration_ids FROM dingtalk_login_repairs WHERE id=$1',
+      [id],
+    )
+  ).rows[0]
+/** A local user with no DingTalk identity, grant, link or repair journal. */
+async function bareUser() {
+  const id = randomUUID()
+  await query(
+    `INSERT INTO users(id,username,name,password_hash,is_active,is_admin,activation_status,local_password_set) VALUES($1,$1,$1,'synthetic-unused',true,false,'activated',false)`,
+    [id],
+  )
+  return id
+}
+async function addIntegration(f: Fixture, appKey: string) {
+  const id = randomUUID()
+  await query(
+    `INSERT INTO directory_integrations(id,name,provider,corp_id,org_id,config,status,sync_enabled) VALUES($1::uuid,$1::text,'dingtalk',$2,$3,$4,'active',false)`,
+    [id, f.corp, f.org, { appKey }],
+  )
+  return id
+}
+async function addAccount(
+  integration: string,
+  corp: string,
+  externalUserId: string,
+  o: { union?: string | null; open?: string | null; active?: boolean } = {},
+) {
+  const id = randomUUID()
+  await query(
+    `INSERT INTO directory_accounts(id,integration_id,corp_id,external_user_id,external_key,union_id,open_id,is_active,name) VALUES($1,$2,$3,$4,$4,$5,$6,$7,'Synthetic extra member')`,
+    [id, integration, corp, externalUserId, o.union ?? null, o.open ?? null, o.active ?? true],
+  )
+  return id
+}
+const link = (
+  account: string,
+  user: string,
+  status = 'linked',
+  strategy = 'manual_admin',
+) =>
+  query(
+    `INSERT INTO directory_account_links(directory_account_id,local_user_id,link_status,match_strategy) VALUES($1,$2,$3,$4) ON CONFLICT (directory_account_id) DO UPDATE SET local_user_id=EXCLUDED.local_user_id,link_status=EXCLUDED.link_status,match_strategy=EXCLUDED.match_strategy`,
+    [account, user, status, strategy],
+  )
+/** The product shape of a local directory member (local-directory-org.ts createLocalAccount + local anchor). */
+async function localSource(f: Fixture, org = f.org) {
+  const integration = randomUUID(),
+    account = randomUUID()
+  await query(
+    `INSERT INTO directory_integrations(id,name,provider,corp_id,org_id,config,status,sync_enabled) VALUES($1,'Local organization','local',$2,$3,'{"mode":"editable","source":"local"}','active',false)`,
+    [integration, 'local:' + org, org],
+  )
+  await query(
+    `INSERT INTO directory_accounts(id,integration_id,provider,corp_id,external_user_id,external_key,name,is_active) VALUES($1,$2,'local',NULL,$3,$4,'Synthetic local member',true)`,
+    [account, integration, f.user, org + ':' + f.user],
+  )
+  await link(account, f.user, 'linked', 'local_explicit')
+  return { integration, account }
+}
+async function applyRepair(f: Fixture) {
+  const proof = await f.verify(),
+    p = await previewDingTalkRepair(proof)
+  return applyDingTalkRepair(proof, p.digest, 'apply')
+}
+const releasePreview = (f: Fixture, id: string) =>
+  previewDingTalkRepairRecovery(id, f.admin, f.password, 'release')
+const releaseWith = (f: Fixture, id: string, digest: string) =>
+  releaseDingTalkRepair(id, f.admin, digest, 'release', f.password)
+/** Every row a refused recovery must leave untouched. */
+async function capture(f: Fixture, id: string) {
+  const out: Record<string, unknown> = {}
+  for (const [table, key] of [
+    ['users', 'id'],
+    ['dingtalk_login_repairs', 'user_id'],
+    ['user_external_auth_grants', 'local_user_id'],
+    ['user_external_identities', 'local_user_id'],
+    ['directory_account_links', 'local_user_id'],
+    ['user_orgs', 'user_id'],
+    ['user_roles', 'user_id'],
+    ['user_permissions', 'user_id'],
+    ['user_session_revocations', 'user_id'],
+    ['user_sessions', 'user_id'],
+  ])
+    out[table] = (
+      await query(
+        `SELECT to_jsonb(t) AS row FROM ${table} t WHERE ${key}=$1 ORDER BY to_jsonb(t)::text`,
+        [f.user],
+      )
+    ).rows
+  out.sourceLinks = (
+    await query(
+      'SELECT to_jsonb(l) AS row FROM directory_account_links l WHERE directory_account_id IN (SELECT unnest(source_account_ids) FROM dingtalk_login_repairs WHERE id=$1) ORDER BY to_jsonb(l)::text',
+      [id],
+    )
+  ).rows
+  out.audit = (
+    await query(
+      "SELECT action,action_details FROM audit_logs WHERE resource_type='dingtalk_login_repairs' AND resource_id=$1 ORDER BY action",
+      [id],
+    )
+  ).rows
+  return out
+}
+/** A refused recovery writes nothing, and the journal only carries its apply audit row. */
+async function expectRefusedWithoutWrite(
+  f: Fixture,
+  id: string,
+  run: () => Promise<unknown>,
+  code: string,
+) {
+  const before = await capture(f, id)
+  await expect(run()).rejects.toThrow(exact(code))
+  const after = await capture(f, id)
+  expect(after).toEqual(before)
+  expect(after.audit).toEqual([
+    { action: 'apply', action_details: { actorId: f.admin } },
+  ])
+  expect(await journalRow(id)).toMatchObject({
+    state: 'applied',
+    released_account_ids: null,
+  })
+}
+/** Allowed release: one-id allowlist, nothing restored, every session revoked and none created. */
+async function expectAllowedRelease(
+  f: Fixture,
+  id: string,
+  digest: string,
+  mode: 'canonical' | 'termination',
+) {
+  const authority = async () => {
+    const out: unknown[] = []
+    for (const [table, key] of [
+      ['user_external_auth_grants', 'local_user_id'],
+      ['user_external_identities', 'local_user_id'],
+      ['directory_account_links', 'local_user_id'],
+      ['user_orgs', 'user_id'],
+      ['user_roles', 'user_id'],
+      ['user_permissions', 'user_id'],
+    ])
+      out.push(
+        (
+          await query(
+            `SELECT to_jsonb(t) AS row FROM ${table} t WHERE ${key}=$1 ORDER BY to_jsonb(t)::text`,
+            [f.user],
+          )
+        ).rows,
+      )
+    out.push((await listUserPermissions(f.user, query)).sort())
+    return out
+  }
+  const sessions = async () =>
+    (
+      await query('SELECT id,revoked_at FROM user_sessions WHERE user_id=$1', [
+        f.user,
+      ])
+    ).rows
+  const before = await authority(),
+    sessionsBefore = await sessions()
+  await releaseWith(f, id, digest)
+  expect(await journalRow(id)).toMatchObject({
+    state: 'released',
+    released_account_ids: [f.account],
+    canonical_account_id: f.account,
+  })
+  expect(await authority()).toEqual(before)
+  const sessionsAfter = await sessions()
+  expect(sessionsAfter.map((s) => s.id).sort()).toEqual(
+    sessionsBefore.map((s) => s.id).sort(),
+  )
+  expect(sessionsAfter.every((s) => s.revoked_at)).toBe(true)
+  expect(
+    (
+      await query(
+        "SELECT action,action_details FROM audit_logs WHERE resource_type='dingtalk_login_repairs' AND resource_id=$1 AND action='release'",
+        [id],
+      )
+    ).rows,
+  ).toEqual([
+    { action: 'release', action_details: { actorId: f.admin, releaseMode: mode } },
+  ])
+}
 suite('DingTalk controlled login repair', () => {
   it('verification and preview do not write rows, issue sessions, or return raw identifiers', async () => {
     const f = await fixture(),
@@ -798,6 +985,13 @@ suite('DingTalk controlled login repair', () => {
       f.password,
       'release',
     )
+    expect(recovery.release).toEqual({
+      mode: 'termination',
+      releasedAccountIds: [f.account],
+      linkedDingTalkAccountIds: [f.account],
+      localLinkCount: 0,
+      revocationRetained: true,
+    })
     await releaseDingTalkRepair(
       r.id,
       f.admin,
@@ -828,6 +1022,17 @@ suite('DingTalk controlled login repair', () => {
         ])
       ).rows[0].state,
     ).toBe('released')
+    expect(await journalRow(r.id)).toMatchObject({
+      released_account_ids: [f.account],
+    })
+    expect(
+      (
+        await query(
+          'SELECT link_status,local_user_id FROM directory_account_links WHERE directory_account_id=$1',
+          [f.account],
+        )
+      ).rows,
+    ).toEqual([{ link_status: 'linked', local_user_id: f.user }])
     await expect(
       previewDingTalkRepairRecovery(r.id, f.admin, f.password, 'rollback'),
     ).rejects.toThrow('REPAIR_NOT_ACTIVE')
@@ -844,6 +1049,18 @@ suite('DingTalk controlled login repair', () => {
     await expect(
       previewDingTalkRepairRecovery(r.id, f.admin, f.password, 'release'),
     ).rejects.toThrow('REPAIR_CANONICAL_SOURCE_REQUIRED')
+    // Grant-off twin: termination re-verifies the recorded row too, and the integration app no longer matches.
+    await query(
+      'UPDATE user_external_auth_grants SET enabled=false WHERE local_user_id=$1',
+      [f.user],
+    )
+    await expect(
+      previewDingTalkRepairRecovery(r.id, f.admin, f.password, 'release'),
+    ).rejects.toThrow(exact('REPAIR_HISTORICAL_SOURCE_UNVERIFIED'))
+    await query(
+      'UPDATE user_external_auth_grants SET enabled=true WHERE local_user_id=$1',
+      [f.user],
+    )
     await query(
       `UPDATE directory_integrations SET config='{"appKey":"synthetic-current-app"}' WHERE id=$1`,
       [f.source],
@@ -854,6 +1071,10 @@ suite('DingTalk controlled login repair', () => {
       f.password,
       'release',
     )
+    expect(recovery.release).toMatchObject({
+      mode: 'canonical',
+      releasedAccountIds: [f.account],
+    })
     await releaseDingTalkRepair(
       r.id,
       f.admin,
@@ -861,6 +1082,10 @@ suite('DingTalk controlled login repair', () => {
       'release',
       f.password,
     )
+    expect(await journalRow(r.id)).toMatchObject({
+      state: 'released',
+      released_account_ids: [f.account],
+    })
     expect(
       (
         await query(
@@ -1025,6 +1250,23 @@ suite('DingTalk controlled login repair', () => {
       f.password,
       'release',
     )
+    // Termination: the unbound original source is re-read and re-verified; it is the one allowed id.
+    expect(recovery.release).toEqual({
+      mode: 'termination',
+      releasedAccountIds: [f.account],
+      linkedDingTalkAccountIds: [],
+      localLinkCount: 0,
+      revocationRetained: true,
+    })
+    const membership = async () =>
+      (
+        await query(
+          'SELECT org_id,is_active FROM user_orgs WHERE user_id=$1 ORDER BY org_id',
+          [f.user],
+        )
+      ).rows
+    const membershipBefore = await membership()
+    expect(membershipBefore).toEqual([{ org_id: f.org, is_active: false }])
     await releaseDingTalkRepair(
       r.id,
       f.admin,
@@ -1032,6 +1274,51 @@ suite('DingTalk controlled login repair', () => {
       'release',
       f.password,
     )
+    expect(await journalRow(r.id)).toMatchObject({
+      state: 'released',
+      released_account_ids: [f.account],
+    })
+    // Nothing the revocation removed comes back.
+    expect(
+      (
+        await query(
+          'SELECT enabled FROM user_external_auth_grants WHERE local_user_id=$1',
+          [f.user],
+        )
+      ).rows[0].enabled,
+    ).toBe(false)
+    expect(
+      (
+        await query(
+          'SELECT * FROM user_external_identities WHERE local_user_id=$1',
+          [f.user],
+        )
+      ).rows,
+    ).toHaveLength(0)
+    expect(
+      (
+        await query(
+          'SELECT link_status,local_user_id FROM directory_account_links WHERE directory_account_id=$1',
+          [f.account],
+        )
+      ).rows,
+    ).toEqual([{ link_status: 'unmatched', local_user_id: null }])
+    expect(await membership()).toEqual(membershipBefore)
+    // The original stable id stays bindable (no OpenID anywhere, so the grant stays off); any other DingTalk source does not.
+    expect(
+      await bindDirectoryAccount(f.account, {
+        localUserRef: f.user,
+        adminUserId: f.admin,
+        enableDingTalkGrant: false,
+      }),
+    ).toBeTruthy()
+    const second = await addAccount(f.source, f.corp, 'second-' + f.user, {
+      union: 'new-union-' + f.user,
+    })
+    await expect(link(second, f.user)).rejects.toMatchObject({
+      code: '55000',
+      message: 'repair blocks a second directory source',
+    })
   })
   it('pure previews do not advance a generation or modify identity, journal, session or audit rows', async () => {
     const f = await fixture()
@@ -1356,6 +1643,11 @@ suite('DingTalk controlled login repair', () => {
         f.password,
         'release',
       )
+      expect(preview.release).toMatchObject({
+        mode: disabled ? 'termination' : 'canonical',
+        releasedAccountIds: [f.account],
+        linkedDingTalkAccountIds: [f.account],
+      })
       await releaseDingTalkRepair(
         r.id,
         f.admin,
@@ -1363,6 +1655,10 @@ suite('DingTalk controlled login repair', () => {
         'release',
         f.password,
       )
+      expect(await journalRow(r.id)).toMatchObject({
+        state: 'released',
+        released_account_ids: [f.account],
+      })
       await expect(
         syncDirectoryIntegration(old, 'synthetic-test'),
       ).rejects.toThrow('repair blocks a second directory source')
@@ -2122,7 +2418,7 @@ suite('DingTalk controlled login repair', () => {
       r = await applyDingTalkRepair(proof, p.digest, 'apply')
     const copy = (nonce: string | null, state: string) =>
       query(
-        `INSERT INTO dingtalk_login_repairs(id,user_id,proof_nonce,state,before_identity,expected_identity,after_digest,actor_id,source_account_ids,source_integration_ids,login_client_id) SELECT $2::uuid,user_id,COALESCE($3::uuid,proof_nonce),$4,before_identity,expected_identity,after_digest,actor_id,source_account_ids,source_integration_ids,login_client_id FROM dingtalk_login_repairs WHERE id=$1`,
+        `INSERT INTO dingtalk_login_repairs(id,user_id,proof_nonce,state,before_identity,expected_identity,after_digest,actor_id,source_account_ids,source_integration_ids,canonical_account_id,login_client_id) SELECT $2::uuid,user_id,COALESCE($3::uuid,proof_nonce),$4,before_identity,expected_identity,after_digest,actor_id,source_account_ids,source_integration_ids,canonical_account_id,login_client_id FROM dingtalk_login_repairs WHERE id=$1`,
         [r.id, randomUUID(), nonce, state],
       )
     await expect(copy(null, 'rolled_back')).rejects.toMatchObject({
@@ -2174,5 +2470,927 @@ suite('DingTalk controlled login repair', () => {
     } finally {
       spy.mockRestore()
     }
+  })
+
+  describe('release writes exactly one re-verified DingTalk source', () => {
+    it('normal release: canonical mode, the recorded source is the one allowed id and nothing is restored', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      expect(await journalRow(r.id)).toMatchObject({
+        source_account_ids: [f.account],
+        source_integration_ids: [f.source],
+        canonical_account_id: f.account,
+      })
+      expect(
+        await sessionRegistry.createUserSession(f.user, {
+          sessionId: randomUUID(),
+          expiresAt: new Date(Date.now() + 60000).toISOString(),
+        }),
+      ).not.toBeNull()
+      const preview = await releasePreview(f, r.id)
+      expect(preview.release).toEqual({
+        mode: 'canonical',
+        releasedAccountIds: [f.account],
+        linkedDingTalkAccountIds: [f.account],
+        localLinkCount: 0,
+        revocationRetained: false,
+      })
+      await expectAllowedRelease(f, r.id, preview.digest, 'canonical')
+      expect(
+        (
+          await query(
+            'SELECT provider_union_id FROM user_external_identities WHERE local_user_id=$1',
+            [f.user],
+          )
+        ).rows[0].provider_union_id,
+      ).toBe('new-union-' + f.user)
+    })
+
+    it('termination then full login recovery when the directory row stores an OpenID', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      await unbindDirectoryAccount(f.account, {
+        adminUserId: f.admin,
+        disableDingTalkGrant: true,
+      })
+      const preview = await releasePreview(f, r.id)
+      expect(preview.release).toMatchObject({
+        mode: 'termination',
+        releasedAccountIds: [f.account],
+      })
+      await expectAllowedRelease(f, r.id, preview.digest, 'termination')
+      expect(
+        await bindDirectoryAccount(f.account, {
+          localUserRef: f.user,
+          adminUserId: f.admin,
+          enableDingTalkGrant: true,
+        }),
+      ).toBeTruthy()
+      expect((await exchangeCodeForUser('same-person')).localUserId).toBe(
+        f.user,
+      )
+      const second = await addAccount(f.source, f.corp, 'second-' + f.user, {
+        union: 'new-union-' + f.user,
+      })
+      await expect(link(second, f.user)).rejects.toMatchObject({
+        code: '55000',
+      })
+    })
+
+    it('an inactive original source terminates without being reactivated', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      await query('UPDATE directory_accounts SET is_active=false WHERE id=$1', [
+        f.account,
+      ])
+      await query(
+        'UPDATE user_external_auth_grants SET enabled=false WHERE local_user_id=$1',
+        [f.user],
+      )
+      const preview = await releasePreview(f, r.id)
+      expect(preview.release).toMatchObject({
+        mode: 'termination',
+        releasedAccountIds: [f.account],
+      })
+      await expectAllowedRelease(f, r.id, preview.digest, 'termination')
+      expect(
+        (
+          await query('SELECT is_active FROM directory_accounts WHERE id=$1', [
+            f.account,
+          ])
+        ).rows[0].is_active,
+      ).toBe(false)
+      expect(
+        (
+          await query(
+            'SELECT enabled FROM user_external_auth_grants WHERE local_user_id=$1',
+            [f.user],
+          )
+        ).rows[0].enabled,
+      ).toBe(false)
+    })
+
+    it.each([
+      ['deactivated', 'UPDATE users SET is_active=false WHERE id=$1'],
+      ['recycled', 'UPDATE users SET deleted_at=now() WHERE id=$1'],
+    ])(
+      'a %s user takes termination and keeps the user flags',
+      async (_name, sql) => {
+        const f = await fixture(),
+          r = await applyRepair(f)
+        await query(sql, [f.user])
+        const flags = async () =>
+          (
+            await query(
+              'SELECT is_active,deleted_at,purged_at,activation_status FROM users WHERE id=$1',
+              [f.user],
+            )
+          ).rows[0]
+        const flagsBefore = await flags()
+        const preview = await releasePreview(f, r.id)
+        expect(preview.release).toMatchObject({
+          mode: 'termination',
+          releasedAccountIds: [f.account],
+        })
+        await expectAllowedRelease(f, r.id, preview.digest, 'termination')
+        expect(await flags()).toEqual(flagsBefore)
+      },
+    )
+
+    it('a deleted original source refuses REPAIR_HISTORICAL_SOURCE_UNVERIFIED at preview and execute (v1 dead end)', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      await unbindDirectoryAccount(f.account, {
+        adminUserId: f.admin,
+        disableDingTalkGrant: true,
+      })
+      const preview = await releasePreview(f, r.id)
+      await query('DELETE FROM directory_accounts WHERE id=$1', [f.account])
+      await expect(releasePreview(f, r.id)).rejects.toThrow(
+        exact('REPAIR_HISTORICAL_SOURCE_UNVERIFIED'),
+      )
+      await expectRefusedWithoutWrite(
+        f,
+        r.id,
+        () => releaseWith(f, r.id, preview.digest),
+        'REPAIR_HISTORICAL_SOURCE_UNVERIFIED',
+      )
+      await expect(
+        previewDingTalkRepairRecovery(r.id, f.admin, f.password, 'rollback'),
+      ).rejects.toThrow(exact('REPAIR_TARGET_NOT_ENABLED'))
+    })
+
+    it.each([false, true])(
+      'a changed login application refuses REPAIR_LOGIN_SCOPE_CHANGED at preview and execute (revoked=%s)',
+      async (revoked) => {
+        const f = await fixture(),
+          r = await applyRepair(f)
+        if (revoked)
+          await query(
+            'UPDATE user_external_auth_grants SET enabled=false WHERE local_user_id=$1',
+            [f.user],
+          )
+        const preview = await releasePreview(f, r.id)
+        expect(preview.release?.mode).toBe(revoked ? 'termination' : 'canonical')
+        provider.config.mockReturnValue({
+          corpId: f.corp,
+          clientId: 'other-app',
+        })
+        await expect(releasePreview(f, r.id)).rejects.toThrow(
+          exact('REPAIR_LOGIN_SCOPE_CHANGED'),
+        )
+        await expectRefusedWithoutWrite(
+          f,
+          r.id,
+          () => releaseWith(f, r.id, preview.digest),
+          'REPAIR_LOGIN_SCOPE_CHANGED',
+        )
+      },
+    )
+
+    it('a changed login enterprise refuses REPAIR_LOGIN_SCOPE_CHANGED', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      provider.config.mockReturnValue({
+        corpId: 'other-corp',
+        clientId: 'synthetic-current-app',
+      })
+      await expect(releasePreview(f, r.id)).rejects.toThrow(
+        exact('REPAIR_LOGIN_SCOPE_CHANGED'),
+      )
+    })
+
+    it.each([
+      ['another person', 'UPDATE directory_accounts SET union_id=$2 WHERE id=$1', 'different-person'],
+      ['another enterprise', 'UPDATE directory_accounts SET corp_id=$2 WHERE id=$1', 'other-corp'],
+      ['no UnionID', 'UPDATE directory_accounts SET union_id=NULL WHERE id=$1', null],
+    ])(
+      'a historical source now naming %s refuses REPAIR_HISTORICAL_SOURCE_UNVERIFIED without writing',
+      async (_name, sql, value) => {
+        const f = await fixture(),
+          r = await applyRepair(f)
+        await query(
+          'UPDATE user_external_auth_grants SET enabled=false WHERE local_user_id=$1',
+          [f.user],
+        )
+        await query(sql, value === null ? [f.account] : [f.account, value])
+        await expectRefusedWithoutWrite(
+          f,
+          r.id,
+          () => releasePreview(f, r.id),
+          'REPAIR_HISTORICAL_SOURCE_UNVERIFIED',
+        )
+      },
+    )
+
+    it('a journal source re-linked to another user refuses REPAIR_DIRECTORY_OWNER_CONFLICT at preview and execute', async () => {
+      const f = await fixture(),
+        other = await bareUser(),
+        r = await applyRepair(f)
+      await unbindDirectoryAccount(f.account, {
+        adminUserId: f.admin,
+        disableDingTalkGrant: true,
+      })
+      const preview = await releasePreview(f, r.id)
+      await query(
+        "UPDATE directory_account_links SET link_status='linked',local_user_id=$2 WHERE directory_account_id=$1",
+        [f.account, other],
+      )
+      await expect(releasePreview(f, r.id)).rejects.toThrow(
+        exact('REPAIR_DIRECTORY_OWNER_CONFLICT'),
+      )
+      await expectRefusedWithoutWrite(
+        f,
+        r.id,
+        () => releaseWith(f, r.id, preview.digest),
+        'REPAIR_DIRECTORY_OWNER_CONFLICT',
+      )
+    })
+
+    it('a journal source of a different person later linked to another user refuses REPAIR_DIRECTORY_OWNER_CONFLICT', async () => {
+      // Not visible to the corp-wide person query (different UnionID); only the journal re-read sees it.
+      const f = await fixture(),
+        other = await bareUser(),
+        stale = await addAccount(f.source, f.corp, 'stale-' + f.user, {
+          union: 'different-person',
+          active: false,
+        })
+      await link(stale, f.user)
+      const r = await applyRepair(f)
+      expect((await journalRow(r.id)).source_account_ids.sort()).toEqual(
+        [f.account, stale].sort(),
+      )
+      await query(
+        'UPDATE directory_account_links SET local_user_id=$2 WHERE directory_account_id=$1',
+        [stale, other],
+      )
+      await expectRefusedWithoutWrite(
+        f,
+        r.id,
+        () => releasePreview(f, r.id),
+        'REPAIR_DIRECTORY_OWNER_CONFLICT',
+      )
+    })
+
+    it.each([
+      ['linked', 'manual_admin'],
+      ['pending', 'email'],
+    ])(
+      'a same-person row outside the journal %s to another user refuses REPAIR_DIRECTORY_OWNER_CONFLICT',
+      async (status, strategy) => {
+        const f = await fixture(),
+          other = await bareUser(),
+          r = await applyRepair(f)
+        await query(
+          'UPDATE user_external_auth_grants SET enabled=false WHERE local_user_id=$1',
+          [f.user],
+        )
+        const twin = await addAccount(f.source, f.corp, 'twin-' + f.user, {
+          union: 'new-union-' + f.user,
+        })
+        await link(twin, other, status, strategy)
+        await expectRefusedWithoutWrite(
+          f,
+          r.id,
+          () => releasePreview(f, r.id),
+          'REPAIR_DIRECTORY_OWNER_CONFLICT',
+        )
+      },
+    )
+
+    it('another user holding this person\'s DingTalk identity refuses REPAIR_IDENTITY_CONFLICT at preview and execute', async () => {
+      const f = await fixture(),
+        other = await bareUser(),
+        r = await applyRepair(f)
+      await unbindDirectoryAccount(f.account, {
+        adminUserId: f.admin,
+        disableDingTalkGrant: true,
+      })
+      const preview = await releasePreview(f, r.id)
+      await query(
+        `INSERT INTO user_external_identities(provider,external_key,local_user_id,corp_id,provider_open_id,provider_union_id) VALUES('dingtalk',$1,$2,$3,'x',$4)`,
+        [f.corp + ':x', other, f.corp, 'new-union-' + f.user],
+      )
+      await expect(releasePreview(f, r.id)).rejects.toThrow(
+        exact('REPAIR_IDENTITY_CONFLICT'),
+      )
+      await expectRefusedWithoutWrite(
+        f,
+        r.id,
+        () => releaseWith(f, r.id, preview.digest),
+        'REPAIR_IDENTITY_CONFLICT',
+      )
+    })
+
+    it.each([false, true])(
+      'a duplicate same-person journal row must be unbound first and is never chosen (grant disabled=%s)',
+      async (disabled) => {
+        const f = await fixture(),
+          dup = await addAccount(f.source, f.corp, 'dup-' + f.user, {
+            union: 'new-union-' + f.user,
+            active: false,
+          })
+        await link(dup, f.user)
+        const r = await applyRepair(f)
+        expect(await journalRow(r.id)).toMatchObject({
+          canonical_account_id: f.account,
+        })
+        expect((await journalRow(r.id)).source_account_ids.sort()).toEqual(
+          [f.account, dup].sort(),
+        )
+        if (disabled)
+          await query(
+            'UPDATE user_external_auth_grants SET enabled=false WHERE local_user_id=$1',
+            [f.user],
+          )
+        await expectRefusedWithoutWrite(
+          f,
+          r.id,
+          () => releasePreview(f, r.id),
+          'REPAIR_SOURCE_OUTSIDE_ALLOWLIST',
+        )
+        await unbindDirectoryAccount(dup, { adminUserId: f.admin })
+        // Unbinding a same-UnionID row deletes the identity: release now terminates.
+        const preview = await releasePreview(f, r.id)
+        expect(preview.release).toMatchObject({
+          mode: 'termination',
+          releasedAccountIds: [f.account],
+          linkedDingTalkAccountIds: [f.account],
+        })
+        await expectAllowedRelease(f, r.id, preview.digest, 'termination')
+        await expect(link(dup, f.user)).rejects.toMatchObject({ code: '55000' })
+      },
+    )
+
+    it('with the recorded source unbound and the duplicate still linked, release never moves the allowlist to the duplicate', async () => {
+      const f = await fixture(),
+        dup = await addAccount(f.source, f.corp, 'dup-' + f.user, {
+          union: 'new-union-' + f.user,
+          active: false,
+        })
+      await link(dup, f.user)
+      const r = await applyRepair(f)
+      await unbindDirectoryAccount(f.account, {
+        adminUserId: f.admin,
+        disableDingTalkGrant: true,
+      })
+      await expectRefusedWithoutWrite(
+        f,
+        r.id,
+        () => releasePreview(f, r.id),
+        'REPAIR_SOURCE_OUTSIDE_ALLOWLIST',
+      )
+    })
+
+    it.each([false, true])(
+      'an inactive old-application linked row outside the allowlist refuses until it is unbound (grant disabled=%s)',
+      async (disabled) => {
+        const f = await fixture(),
+          old = randomUUID(),
+          oldAccount = randomUUID()
+        await query(
+          `INSERT INTO directory_integrations(id,name,provider,corp_id,org_id,config,status) VALUES($1::uuid,$1::text,'dingtalk',$2,$3,'{"appKey":"old-app","appSecret":"synthetic-no-network","rootDeptId":1}','active')`,
+          [old, f.corp, f.org],
+        )
+        await query(
+          `INSERT INTO directory_accounts(id,integration_id,corp_id,external_user_id,external_key,union_id,is_active,name) VALUES($1,$2,$3,$4,$4,$5,false,'Synthetic old linked source')`,
+          [oldAccount, old, f.corp, 'old-' + f.user, 'new-union-' + f.user],
+        )
+        await link(oldAccount, f.user)
+        const r = await applyRepair(f)
+        if (disabled)
+          await query(
+            'UPDATE user_external_auth_grants SET enabled=false WHERE local_user_id=$1',
+            [f.user],
+          )
+        await expectRefusedWithoutWrite(
+          f,
+          r.id,
+          () => releasePreview(f, r.id),
+          'REPAIR_SOURCE_OUTSIDE_ALLOWLIST',
+        )
+        await unbindDirectoryAccount(oldAccount, { adminUserId: f.admin })
+        const preview = await releasePreview(f, r.id)
+        expect(preview.release).toMatchObject({
+          mode: 'termination',
+          releasedAccountIds: [f.account],
+          linkedDingTalkAccountIds: [f.account],
+        })
+        await expectAllowedRelease(f, r.id, preview.digest, 'termination')
+        const member = {
+          userId: 'old-' + f.user,
+          unionId: 'new-union-' + f.user,
+          name: 'Synthetic old linked source',
+          departmentIds: ['1'],
+          source: {},
+        }
+        provider.token.mockResolvedValue('synthetic-no-network-token')
+        provider.departments.mockResolvedValue([])
+        provider.department.mockResolvedValue({ deptManagerUserIdList: [] })
+        provider.members.mockResolvedValue({
+          users: [member],
+          nextCursor: null,
+          hasMore: false,
+        })
+        provider.member.mockResolvedValue(member)
+        // The unbind deleted the identity, so a real sync of the old source finds nobody to match and
+        // leaves the admin-unbound row alone; an explicit link of it is what the fence must still refuse.
+        await syncDirectoryIntegration(old, 'synthetic-test')
+        expect(
+          (
+            await query(
+              'SELECT link_status,local_user_id FROM directory_account_links WHERE directory_account_id=$1',
+              [oldAccount],
+            )
+          ).rows,
+        ).toEqual([{ link_status: 'unmatched', local_user_id: null }])
+        await expect(link(oldAccount, f.user)).rejects.toMatchObject({
+          code: '55000',
+        })
+        expect(
+          (
+            await query(
+              "SELECT directory_account_id FROM directory_account_links WHERE local_user_id=$1 AND link_status='linked'",
+              [f.user],
+            )
+          ).rows,
+        ).toEqual([{ directory_account_id: f.account }])
+      },
+    )
+
+    it('database CHECKs reject an empty, NULL, NULL-element or wrong-id allowlist and a canonical id outside the sources', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      const copy = (o: { canonical?: string; released?: unknown }) =>
+        query(
+          `INSERT INTO dingtalk_login_repairs(id,user_id,proof_nonce,state,before_identity,expected_identity,after_digest,actor_id,source_account_ids,source_integration_ids,canonical_account_id,login_client_id,released_account_ids) SELECT $2::uuid,user_id,$3::uuid,$4,before_identity,expected_identity,after_digest,actor_id,source_account_ids,source_integration_ids,COALESCE($5::uuid,canonical_account_id),login_client_id,$6::uuid[] FROM dingtalk_login_repairs WHERE id=$1`,
+          [
+            r.id,
+            randomUUID(),
+            randomUUID(),
+            'canonical' in o ? 'rolled_back' : 'released',
+            o.canonical ?? null,
+            o.released ?? null,
+          ],
+        )
+      for (const released of ['{}', '{NULL}', null, [randomUUID()]])
+        await expect(copy({ released })).rejects.toMatchObject({
+          code: '23514',
+        })
+      await expect(copy({ canonical: randomUUID() })).rejects.toMatchObject({
+        code: '23514',
+      })
+      await expect(
+        query(
+          "UPDATE dingtalk_login_repairs SET state='released',released_account_ids='{}' WHERE id=$1",
+          [r.id],
+        ),
+      ).rejects.toMatchObject({ code: '23514' })
+      await expect(
+        query(
+          'UPDATE dingtalk_login_repairs SET released_account_ids=ARRAY[$2::uuid] WHERE id=$1',
+          [r.id, f.account],
+        ),
+      ).rejects.toMatchObject({ code: '23514' })
+      expect(await journalRow(r.id)).toMatchObject({
+        state: 'applied',
+        released_account_ids: null,
+      })
+      // Positive control: the same copy with the one canonical id is accepted.
+      await expect(copy({ released: [f.account] })).resolves.toBeDefined()
+    })
+  })
+
+  describe('directory evidence needs a stored UnionID and one current-application witness', () => {
+    it('a NULL directory UnionID refuses before the provider exchange', async () => {
+      const f = await fixture()
+      await query('UPDATE directory_accounts SET union_id=NULL WHERE id=$1', [
+        f.account,
+      ])
+      const graph = await f.graph()
+      await expect(f.verify()).rejects.toThrow(
+        exact('REPAIR_DIRECTORY_UNION_ID_REQUIRED'),
+      )
+      expect(provider.exchange).not.toHaveBeenCalled()
+      expect(await f.graph()).toEqual(graph)
+      expect(
+        (
+          await query('SELECT id FROM dingtalk_login_repairs WHERE user_id=$1', [
+            f.user,
+          ])
+        ).rows,
+      ).toHaveLength(0)
+    })
+
+    it('a same-application same-OpenID directory row without a UnionID is not person evidence', async () => {
+      const f = await fixture()
+      await query('UPDATE directory_accounts SET union_id=NULL WHERE id=$1', [
+        f.account,
+      ])
+      // The fixture's directory OpenID equals the scanned profile's OpenID, in the login application.
+      expect(
+        (
+          await query('SELECT open_id FROM directory_accounts WHERE id=$1', [
+            f.account,
+          ])
+        ).rows[0].open_id,
+      ).toBe('new-open-' + f.user)
+      await expect(f.verify()).rejects.toThrow(
+        exact('REPAIR_DIRECTORY_UNION_ID_REQUIRED'),
+      )
+    })
+
+    it('a UnionID removed between verify and apply refuses REPAIR_SNAPSHOT_CHANGED', async () => {
+      const f = await fixture(),
+        proof = await f.verify(),
+        p = await previewDingTalkRepair(proof)
+      await query('UPDATE directory_accounts SET union_id=NULL WHERE id=$1', [
+        f.account,
+      ])
+      await expect(applyDingTalkRepair(proof, p.digest, 'apply')).rejects.toThrow(
+        exact('REPAIR_SNAPSHOT_CHANGED'),
+      )
+      expect(
+        (
+          await query('SELECT id FROM dingtalk_login_repairs WHERE user_id=$1', [
+            f.user,
+          ])
+        ).rows,
+      ).toHaveLength(0)
+    })
+
+    it('a stored UnionID with no directory OpenID verifies, applies and releases', async () => {
+      const f = await fixture()
+      await query('UPDATE directory_accounts SET open_id=NULL WHERE id=$1', [
+        f.account,
+      ])
+      const proof = await f.verify(),
+        p = await previewDingTalkRepair(proof)
+      expect(p.canonicalAccountId).toBe(f.account)
+      const r = await applyDingTalkRepair(proof, p.digest, 'apply')
+      const preview = await releasePreview(f, r.id)
+      expect(preview.release).toMatchObject({
+        mode: 'canonical',
+        releasedAccountIds: [f.account],
+      })
+      await expectAllowedRelease(f, r.id, preview.digest, 'canonical')
+    })
+
+    it.each([
+      ['linked to the target with another UnionID', 'different-person', 'target', 'REPAIR_DIRECTORY_PERSON_AMBIGUOUS'],
+      ['linked to another user', 'different-person', 'other', 'REPAIR_DIRECTORY_OWNER_CONFLICT'],
+      ['unlinked', 'different-person', null, null],
+      ['the same person linked to the target', 'same', 'target', null],
+    ] as const)(
+      'a cross-application directory row with the scanned OpenID, %s',
+      async (_name, union, owner, code) => {
+        const f = await fixture(),
+          other = await bareUser(),
+          xapp = await addIntegration(f, 'other-app'),
+          account = await addAccount(xapp, f.corp, 'xapp-' + f.user, {
+            union: union === 'same' ? 'new-union-' + f.user : union,
+            open: 'new-open-' + f.user,
+          })
+        if (owner) await link(account, owner === 'target' ? f.user : other)
+        if (code) {
+          await expect(f.verify()).rejects.toThrow(exact(code))
+          return
+        }
+        const p = await previewDingTalkRepair(await f.verify())
+        expect(p.canonicalAccountId).toBe(f.account)
+        const r = await applyRepair(f)
+        expect(await journalRow(r.id)).toMatchObject({
+          canonical_account_id: f.account,
+        })
+        if (owner === null) {
+          expect(await journalRow(r.id)).toMatchObject({
+            source_account_ids: [f.account],
+          })
+          return
+        }
+        // Same person in another application: not a second witness, but still a linked row outside the allowlist.
+        await expectRefusedWithoutWrite(
+          f,
+          r.id,
+          () => releasePreview(f, r.id),
+          'REPAIR_SOURCE_OUTSIDE_ALLOWLIST',
+        )
+      },
+    )
+
+    it('two active current-application witnesses refuse REPAIR_CANONICAL_SOURCE_REQUIRED after the exchange', async () => {
+      const f = await fixture(),
+        twin = await addAccount(f.source, f.corp, 'twin-' + f.user, {
+          union: 'new-union-' + f.user,
+        })
+      await link(twin, f.user)
+      await expect(f.verify()).rejects.toThrow(
+        exact('REPAIR_CANONICAL_SOURCE_REQUIRED'),
+      )
+      expect(provider.exchange).toHaveBeenCalled()
+      expect(
+        (
+          await query('SELECT id FROM dingtalk_login_repairs WHERE user_id=$1', [
+            f.user,
+          ])
+        ).rows,
+      ).toHaveLength(0)
+    })
+
+    it('a verified OAuth OpenID rotation does not block a canonical release over the stale directory OpenID', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      provider.profile.mockResolvedValue({
+        openId: 'rotated-' + f.user,
+        unionId: 'new-union-' + f.user,
+      })
+      expect((await exchangeCodeForUser('fresh-rotation')).localUserId).toBe(
+        f.user,
+      )
+      expect(
+        (
+          await query('SELECT open_id FROM directory_accounts WHERE id=$1', [
+            f.account,
+          ])
+        ).rows[0].open_id,
+      ).toBe('new-open-' + f.user)
+      const preview = await releasePreview(f, r.id)
+      expect(preview.release).toMatchObject({
+        mode: 'canonical',
+        releasedAccountIds: [f.account],
+      })
+      await expectAllowedRelease(f, r.id, preview.digest, 'canonical')
+    })
+  })
+
+  describe('local directory links stay outside the DingTalk source chain', () => {
+    it('a local link present before verify is not identity evidence but stays in the approval snapshot', async () => {
+      const f = await fixture(),
+        local = await localSource(f)
+      const r = await applyRepair(f)
+      expect(await journalRow(r.id)).toMatchObject({
+        source_account_ids: [f.account],
+        source_integration_ids: [f.source],
+        canonical_account_id: f.account,
+      })
+      await query('UPDATE directory_accounts SET is_active=false WHERE id=$1', [
+        local.account,
+      ])
+      const rollback = await previewDingTalkRepairRecovery(
+        r.id,
+        f.admin,
+        f.password,
+        'rollback',
+      )
+      expect(rollback.changedSections).toContain('sources')
+    })
+
+    it('a local link added after apply passes the fence; a second DingTalk link does not', async () => {
+      const f = await fixture()
+      await applyRepair(f)
+      await expect(localSource(f)).resolves.toBeDefined()
+      const second = await addAccount(f.source, f.corp, 'second-' + f.user, {
+        union: 'new-union-' + f.user,
+      })
+      await expect(link(second, f.user)).rejects.toMatchObject({
+        code: '55000',
+        message: 'repair blocks a second directory source',
+      })
+    })
+
+    it('release with a local link present, then later local changes, while DingTalk stays fenced', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f),
+        local = await localSource(f)
+      const preview = await releasePreview(f, r.id)
+      expect(preview.release).toEqual({
+        mode: 'canonical',
+        releasedAccountIds: [f.account],
+        linkedDingTalkAccountIds: [f.account],
+        localLinkCount: 1,
+        revocationRetained: false,
+      })
+      await expectAllowedRelease(f, r.id, preview.digest, 'canonical')
+      await expect(
+        query(
+          "UPDATE directory_account_links SET review_note='Synthetic local change' WHERE directory_account_id=$1",
+          [local.account],
+        ),
+      ).resolves.toBeDefined()
+      const otherOrg = 'login-repair-org-local-' + randomUUID()
+      await expect(localSource(f, otherOrg)).resolves.toBeDefined()
+      const second = await addAccount(f.source, f.corp, 'second-' + f.user, {
+        union: 'new-union-' + f.user,
+      })
+      await expect(link(second, f.user)).rejects.toMatchObject({
+        code: '55000',
+      })
+    })
+
+    it('the directory guard decides by the real account row; a missing row fails closed', async () => {
+      const f = await fixture()
+      await applyRepair(f)
+      await expect(link(randomUUID(), f.user)).rejects.toMatchObject({
+        code: '55000',
+      })
+      const outside = await addAccount(f.source, f.corp, 'outside-' + f.user, {
+        union: 'new-union-' + f.user,
+      })
+      await expect(link(outside, f.user)).rejects.toMatchObject({
+        code: '55000',
+      })
+      await expect(localSource(f)).resolves.toBeDefined()
+    })
+
+    it('termination with a local link present keeps the local link untouched', async () => {
+      const f = await fixture(),
+        local = await localSource(f),
+        r = await applyRepair(f)
+      await unbindDirectoryAccount(f.account, {
+        adminUserId: f.admin,
+        disableDingTalkGrant: true,
+      })
+      const localLink = async () =>
+        (
+          await query(
+            'SELECT to_jsonb(l) AS row FROM directory_account_links l WHERE directory_account_id=$1',
+            [local.account],
+          )
+        ).rows
+      const localBefore = await localLink()
+      const preview = await releasePreview(f, r.id)
+      expect(preview.release).toEqual({
+        mode: 'termination',
+        releasedAccountIds: [f.account],
+        linkedDingTalkAccountIds: [],
+        localLinkCount: 1,
+        revocationRetained: true,
+      })
+      await expectAllowedRelease(f, r.id, preview.digest, 'termination')
+      expect(await localLink()).toEqual(localBefore)
+    })
+
+    it('handover exclusion still holds with a local link present', async () => {
+      const f = await fixture()
+      await localSource(f)
+      const target = await addIntegration(f, 'handover-target')
+      await query(
+        `INSERT INTO directory_handovers(source_integration_id,target_integration_id,state,before_state,after_digest,created_by,updated_by) VALUES($1,$2,'applied','{}','synthetic',$3,$3)`,
+        [f.source, target, f.admin],
+      )
+      await expect(f.verify()).rejects.toThrow(exact('REPAIR_HANDOVER_ACTIVE'))
+      await query(
+        'DELETE FROM directory_handovers WHERE source_integration_id=$1',
+        [f.source],
+      )
+      await applyRepair(f)
+      await expect(
+        applyDirectoryHandover(
+          { sourceIntegrationId: f.source, targetIntegrationId: target },
+          'unused-before-preflight',
+          f.admin,
+        ),
+      ).rejects.toThrow('Active login repair blocks handover')
+      await unbindDirectoryAccount(f.account, {
+        adminUserId: f.admin,
+        disableDingTalkGrant: true,
+      })
+      await expect(
+        applyDirectoryHandover(
+          { sourceIntegrationId: f.source, targetIntegrationId: target },
+          'not-reached',
+          f.admin,
+        ),
+      ).rejects.toThrow('Active login repair blocks handover')
+    })
+  })
+
+  describe('release approval binds the login scope and the source plan', () => {
+    it('a login scope change between preview and execute refuses; rollback binds the scope too', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f),
+        preview = await releasePreview(f, r.id)
+      provider.config.mockReturnValue({ corpId: f.corp, clientId: 'other-app' })
+      await expectRefusedWithoutWrite(
+        f,
+        r.id,
+        () => releaseWith(f, r.id, preview.digest),
+        'REPAIR_LOGIN_SCOPE_CHANGED',
+      )
+      provider.config.mockReturnValue({
+        corpId: f.corp,
+        clientId: 'synthetic-current-app',
+      })
+      const rollback = await previewDingTalkRepairRecovery(
+        r.id,
+        f.admin,
+        f.password,
+        'rollback',
+      )
+      provider.config.mockReturnValue({
+        corpId: 'other-corp',
+        clientId: 'synthetic-current-app',
+      })
+      await expectRefusedWithoutWrite(
+        f,
+        r.id,
+        () =>
+          rollbackDingTalkRepair(
+            r.id,
+            f.admin,
+            rollback.digest,
+            'rollback',
+            f.password,
+          ),
+        'REPAIR_RECOVERY_SNAPSHOT_CHANGED',
+      )
+    })
+
+    it('a change to an unbound historical source invalidates the approval although the user snapshot is unchanged', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      await unbindDirectoryAccount(f.account, {
+        adminUserId: f.admin,
+        disableDingTalkGrant: true,
+      })
+      const preview = await releasePreview(f, r.id)
+      await query('UPDATE directory_accounts SET is_active=false WHERE id=$1', [
+        f.account,
+      ])
+      await expectRefusedWithoutWrite(
+        f,
+        r.id,
+        () => releaseWith(f, r.id, preview.digest),
+        'REPAIR_RECOVERY_SNAPSHOT_CHANGED',
+      )
+      const fresh = await releasePreview(f, r.id)
+      expect(fresh.release).toMatchObject({
+        mode: 'termination',
+        releasedAccountIds: [f.account],
+      })
+      await expectAllowedRelease(f, r.id, fresh.digest, 'termination')
+    })
+
+    it('an ownership change between preview and execute refuses REPAIR_DIRECTORY_OWNER_CONFLICT', async () => {
+      const f = await fixture(),
+        other = await bareUser(),
+        r = await applyRepair(f)
+      await unbindDirectoryAccount(f.account, {
+        adminUserId: f.admin,
+        disableDingTalkGrant: true,
+      })
+      const preview = await releasePreview(f, r.id)
+      await link(f.account, other)
+      await expectRefusedWithoutWrite(
+        f,
+        r.id,
+        () => releaseWith(f, r.id, preview.digest),
+        'REPAIR_DIRECTORY_OWNER_CONFLICT',
+      )
+    })
+
+    it('a mode flip between preview and execute refuses REPAIR_RECOVERY_SNAPSHOT_CHANGED', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      await unbindDirectoryAccount(f.account, {
+        adminUserId: f.admin,
+        disableDingTalkGrant: true,
+      })
+      const preview = await releasePreview(f, r.id)
+      expect(preview.release?.mode).toBe('termination')
+      await bindDirectoryAccount(f.account, {
+        localUserRef: f.user,
+        adminUserId: f.admin,
+        enableDingTalkGrant: true,
+      })
+      expect((await releasePreview(f, r.id)).release?.mode).toBe('canonical')
+      await expectRefusedWithoutWrite(
+        f,
+        r.id,
+        () => releaseWith(f, r.id, preview.digest),
+        'REPAIR_RECOVERY_SNAPSHOT_CHANGED',
+      )
+    })
+
+    it('an allowlist change between preview and execute refuses REPAIR_SOURCE_OUTSIDE_ALLOWLIST', async () => {
+      const f = await fixture(),
+        old = await addIntegration(f, 'old-app'),
+        oldAccount = await addAccount(old, f.corp, 'old-' + f.user, {
+          union: 'new-union-' + f.user,
+          active: false,
+        })
+      await link(oldAccount, f.user)
+      const r = await applyRepair(f)
+      await unbindDirectoryAccount(oldAccount, { adminUserId: f.admin })
+      const preview = await releasePreview(f, r.id)
+      // Allowed while applied: the old row is one of the journal's source ids.
+      await link(oldAccount, f.user)
+      await expectRefusedWithoutWrite(
+        f,
+        r.id,
+        () => releaseWith(f, r.id, preview.digest),
+        'REPAIR_SOURCE_OUTSIDE_ALLOWLIST',
+      )
+    })
   })
 })
