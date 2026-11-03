@@ -472,6 +472,24 @@ function verify_stock_preparation_mvp_contract() {
   search_fixed_string 'metasheet-backend' "$pm2_sample" || die "stock-preparation PM2 safe projection helper must be packaged"
 }
 
+# 人工补充行 (stock-prep manual supplementary rows, ADR adr-stock-prep-manual-rows-20261030; #6663 B1, #6664 B2,
+# #6671 B3, #6672 B4). The new runtime modules are in the required list; these markers prove that files which
+# existed before the feature carry it. Route paths and identifiers only, no UI copy. The host markers matter
+# because tsc never cleans dist: a dist rebuilt from an older tree can keep a stale manual-rows .js beside an
+# older univer-meta.js, which the required list alone would accept.
+function verify_stock_preparation_manual_rows_contract() {
+  local root="$1"
+  local plugin_routes="${root}/plugins/plugin-integration-core/lib/http-routes.cjs"
+  local host_routes="${root}/packages/core-backend/dist/src/routes/univer-meta.js"
+  local web_dist="${root}/apps/web/dist"
+
+  search_fixed_string "'/api/integration/stock-preparation/projects/:projectNo/target/manual-rows'" "$plugin_routes" || die "plugin http-routes.cjs must register the stock-prep manual-rows switch route (manual rows B4)"
+  search_fixed_string "'/sheets/:sheetId/manual-rows'" "$host_routes" || die "core-backend dist/src/routes/univer-meta.js must register the manual-row create route (manual rows B2)"
+  search_fixed_string 'resolveGenericCreateRefusal' "$host_routes" || die "core-backend dist/src/routes/univer-meta.js must refuse generic create on stock-prep project sheets (manual rows B3)"
+  search_fixed_string '/manual-fields' "$web_dist" || die "web dist must call the manual-row edit route (manual rows B3)"
+  search_fixed_string '/target/manual-rows' "$web_dist" || die "web dist must call the stock-prep manual-rows switch route (manual rows B4)"
+}
+
 function verify_sealed_export_package_provenance() {
   local root="$1"
 
@@ -1036,6 +1054,8 @@ required=(
   "packages/core-backend/dist/src/db/migrate.js"
   "packages/core-backend/dist/scripts/bootstrap-yida-initialization-owner.js"
   "packages/core-backend/dist/src/integration/yida-initialization-bootstrap.js"
+  "packages/core-backend/dist/src/multitable/stock-preparation-manual-rows.js"
+  "packages/core-backend/dist/src/multitable/stock-preparation-manual-rows-gate.js"
   "packages/core-backend/dist/scripts/attendance-timezone-legacy-repair.js"
   "packages/core-backend/dist/src/attendance/attendance-timezone-legacy-repair.js"
   "packages/core-backend/dist/src/db/migration-provider.js"
@@ -1062,6 +1082,7 @@ required=(
   "plugins/plugin-integration-core/index.cjs"
   "plugins/plugin-integration-core/lib/http-routes.cjs"
   "plugins/plugin-integration-core/lib/yida-connection-probe.cjs"
+  "plugins/plugin-integration-core/lib/stock-preparation-manual-rows.cjs"
   "plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json"
   "plugins/plugin-integration-core/lib/adapters/k3-wise-document-templates.cjs"
   "plugins/plugin-integration-core/lib/adapters/k3-wise-webapi-adapter.cjs"
@@ -1191,6 +1212,7 @@ verify_build_provenance "$pkg_root"
 verify_integration_fix_markers "$pkg_root"
 verify_migration_bridge_contract "$pkg_root"
 verify_stock_preparation_mvp_contract "$pkg_root"
+verify_stock_preparation_manual_rows_contract "$pkg_root"
 verify_sealed_export_package_provenance "$pkg_root"
 verify_generic_integration_workbench_contract "$pkg_root"
 verify_bridge_agent_tooling_contract "$pkg_root"

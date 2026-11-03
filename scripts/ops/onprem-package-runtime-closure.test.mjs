@@ -13,6 +13,9 @@ const closures = {
     'packages/core-backend/dist/scripts/bootstrap-yida-initialization-owner.js',
     'packages/core-backend/dist/src/integration/yida-initialization-bootstrap.js',
     'plugins/plugin-integration-core/lib/yida-connection-probe.cjs',
+    'packages/core-backend/dist/src/multitable/stock-preparation-manual-rows.js',
+    'packages/core-backend/dist/src/multitable/stock-preparation-manual-rows-gate.js',
+    'plugins/plugin-integration-core/lib/stock-preparation-manual-rows.cjs',
     'packages/core-backend/src/db/migrations/20250925_create_view_tables.sql',
     'packages/core-backend/src/db/migrations/20250926_create_audit_tables.sql',
     'scripts/ops/attendance-onprem-publish-web-dist.sh',
@@ -89,3 +92,55 @@ test('compiled YiDa bootstrap CLI smoke runs after a core-backend build in the r
   assert.ok(steps[0].indexOf("grep -Fxq 'ok 1 - compiled YiDa bootstrap CLI refuses an empty invocation as a program'") > smoke, 'the smoke step must require the named test, not just a passing file')
   assert.doesNotMatch(steps[0], /continue-on-error/)
 })
+
+// 人工补充行 content markers: files that existed before the feature must carry it. Listed here independently of
+// verify.sh, so deleting or loosening a check there turns its case below red.
+const manualRowsMarkers = [
+  ['plugins/plugin-integration-core/lib/http-routes.cjs', "'/api/integration/stock-preparation/projects/:projectNo/target/manual-rows'", 'http-routes.cjs must register the stock-prep manual-rows switch route'],
+  ['packages/core-backend/dist/src/routes/univer-meta.js', "'/sheets/:sheetId/manual-rows'", 'manual-row create route (manual rows B2)'],
+  ['packages/core-backend/dist/src/routes/univer-meta.js', 'resolveGenericCreateRefusal', 'generic create on stock-prep project sheets (manual rows B3)'],
+  ['apps/web/dist/assets/manual-fields.js', '/manual-fields', 'manual-row edit route (manual rows B3)'],
+  ['apps/web/dist/assets/target-manual-rows.js', '/target/manual-rows', 'manual-rows switch route (manual rows B4)'],
+]
+const multitableVerifier = fs.readFileSync(path.join(repo, 'scripts/ops/multitable-onprem-package-verify.sh'), 'utf8')
+const manualRowsCheck = [
+  multitableVerifier.match(/\nfunction search_fixed_string\(\) \{\n[\s\S]*?\n\}\n/)[0],
+  multitableVerifier.match(/\nfunction verify_stock_preparation_manual_rows_contract\(\) \{\n[\s\S]*?\n\}\n/)[0],
+].join('')
+
+function runManualRowsCheck(omitted) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'onprem-manual-rows-markers-'))
+  try {
+    const contents = new Map()
+    for (const [file, needle] of manualRowsMarkers) {
+      if (!contents.has(file)) contents.set(file, ['fixture'])
+      if (needle !== omitted) contents.get(file).push(needle)
+    }
+    for (const [file, lines] of contents) {
+      fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true })
+      fs.writeFileSync(path.join(root, file), lines.join('\n') + '\n')
+    }
+    return spawnSync('bash', ['-c', 'set -eu\ndie() { echo "$*" >&2; exit 1; }\n' + manualRowsCheck + 'verify_stock_preparation_manual_rows_contract "$pkg_root"\n'], {
+      env: { ...process.env, pkg_root: root }, encoding: 'utf8',
+    })
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
+test('multitable verifier runs the manual-rows marker check in its main flow', () => {
+  assert.match(multitableVerifier, /\nverify_stock_preparation_manual_rows_contract "\$pkg_root"\n/)
+})
+
+test('multitable verifier manual-rows markers accept complete contents', () => {
+  const result = runManualRowsCheck()
+  assert.equal(result.status, 0, result.stderr)
+})
+
+for (const [file, needle, what] of manualRowsMarkers) {
+  test(`multitable verifier rejects ${file} without ${needle}`, () => {
+    const result = runManualRowsCheck(needle)
+    assert.notEqual(result.status, 0, `verifier accepted ${file} without ${needle}`)
+    assert.ok(result.stderr.includes(what), result.stderr)
+  })
+}
