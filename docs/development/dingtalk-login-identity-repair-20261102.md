@@ -14,7 +14,7 @@ verify 同时要求有效管理员及其密码、目标账号的非临时本地�
 
 preview、rollback-preview、release-preview 为只读 REPEATABLE READ 事务，不加核心表写锁、不递增 generation、不创建会话，也不写审计记录（零写入测试固定）；审计行只由 apply、rollback、release 写入。权限快照包含 users、角色、角色权限、直接权限、组织、namespace admissions、外部授权、目录关联、身份键和来源。仅忽略 created_at、updated_at、last_login_at 这三类元数据。
 
-写事务首句固定 READ COMMITTED，再取得身份维护互斥、核心表 SHARE ROW EXCLUSIVE 锁及 canonical 用户锁。这三步不使用 NOWAIT，每次加锁都在 lock_timeout（五秒）内有界等待；lock_timeout 按单次加锁计时，核心表一步要取 13 把锁，有多个持有者时等待会累加（实测两个持有者时约 9 秒才拒绝），整条语句最多到 statement_timeout（三十秒）为止。等待超过 deadlock_timeout 时，冲突的 autovacuum／autoanalyze 会自行取消。其他持有者（含防回卷 vacuum）使某次加锁超过五秒、出现锁环，或身份维护互斥等待超过五秒，都拒绝为 `REPAIR_LOCK_BUSY`，不写任何行，可在确认无长事务后重试；累计等待达到三十秒时同样被拒绝，不写任何行；默认 DB_QUERY_TIMEOUT（pg 客户端读超时）也是三十秒，与 statement_timeout 几乎同时到期，多半先由客户端读超时报错，而不是 SQLSTATE 57014，两种情况都不写任何行。DB_QUERY_TIMEOUT 须保持三十秒或以上。按另一顺序取这些表的并发写入（目录同步、角色或权限管理写入，以及登录写入，含钉钉 OAuth 登录：它锁用户行并写身份行，缺少 corpId 时还锁整张身份表）可能反过来被选为死锁牺牲者而中止，因此维护窗口内须暂停目录同步和角色、权限管理；期间个别登录也可能因此失败，需要重试。apply 排队期间，需要写这些表的请求会跟着等待，例如其他用户的登录：只有一个持有者时约五秒，多个持有者时更久，最长到 apply 被拒绝为止。令牌校验本身只读，不排队；只有在需要为该用户首次补齐考勤自助角色、写入 user_roles 时，才会像登录一样等待。CLI 仍只打印单一拒绝码 `DINGTALK_LOGIN_REPAIR_REFUSED`，不区分锁忙。与 applied handover 双向排斥；安全解绑也不能抹掉日志中原来源的互斥依据。不修改 handover 的产品摘要规则。
+写事务首句固定 READ COMMITTED，再取得身份维护互斥、核心表 SHARE ROW EXCLUSIVE 锁及 canonical 用户锁。这三步不使用 NOWAIT，每次加锁都在 lock_timeout（五秒）内有界等待；lock_timeout 按单次加锁计时，核心表一步要取 13 把锁，有多个持有者时等待会累加（实测两个持有者时约 9 秒才拒绝），整条语句最多到 statement_timeout（三十秒）为止。等待超过 deadlock_timeout 时，冲突的 autovacuum／autoanalyze 会自行取消。其他持有者（含防回卷 vacuum）使某次加锁超过五秒、出现锁环，或身份维护互斥等待超过五秒，都拒绝为 `REPAIR_LOCK_BUSY`，不写任何行，可在确认无长事务后重试；lock_timeout 按单次加锁计时，statement_timeout 按单条语句计时，事务没有总时限：锁阶段的互斥、核心表锁和用户行锁（每个用户一条）语句各自受这两个限制，之后每条语句各自不超过三十秒。锁阶段内单条语句（如 13 张表的 LOCK TABLE）累计等待达到三十秒时，服务端以 57014 取消，同样映射为 `REPAIR_LOCK_BUSY`，不写任何行；锁阶段之后的语句被服务端以 57014 取消时，CLI 打印 `REPAIR_STATEMENT_TIMEOUT`，事务已回滚。维护 CLI 进程自行要求客户端读超时不低于 max(45000, DB_STATEMENT_TIMEOUT+15000) 毫秒：未设置时自动采用该值；显式低于该值或无法解析（DB_STATEMENT_TIMEOUT 无法解析时同样）以 `REPAIR_CLIENT_TIMEOUT_TOO_LOW` 拒绝，且在建立连接池之前拒绝，不连接数据库；连接池建立后再核对其实际持有的值，不足同样拒绝。应用进程参数不变。因此服务端超时先于客户端超时到达；客户端读超时（`REPAIR_CLIENT_TIMEOUT`，退出码 69）表示结果未知，须先读 journal。按另一顺序取这些表的并发写入（目录同步、角色或权限管理写入，以及登录写入，含钉钉 OAuth 登录：它锁用户行并写身份行，缺少 corpId 时还锁整张身份表）可能反过来被选为死锁牺牲者而中止，因此维护窗口内须暂停目录同步和角色、权限管理；期间个别登录也可能因此失败，需要重试。apply 排队期间，需要写这些表的请求会跟着等待，例如其他用户的登录：只有一个持有者时约五秒，多个持有者时更久，最长到 apply 被拒绝为止。令牌校验本身只读，不排队；只有在需要为该用户首次补齐考勤自助角色、写入 user_roles 时，才会像登录一样等待。与 applied handover 双向排斥；安全解绑也不能抹掉日志中原来源的互斥依据。不修改 handover 的产品摘要规则。
 
 apply 需精确证明摘要及 `confirm=apply`。身份旧值加密保存；写产品审计，记录的管理员为 verify 时校验密码的管理员（apply 本身不另行认证执行者）。撤销目标已存在的 JWT 会话、session registry 记录与多维表 API token，递增 generation，不倒退。OAuth／免登认证结果携带在用户锁内取得的 generation，登记 session 时重新锁定并核对；API token 创建／轮换也复核请求认证时的 generation。旧 refresh 不得重新激活已撤销 sid，无 sid 的 refresh 同样复核 generation。切换组织（POST /api/auth/session-org）重新签发会话时同样携带请求认证时的 generation，版本已变则返回 409 `authentication_changed`，不登记会话。强制改密（POST /api/auth/password/change）重新签发会话时也携带请求认证时的 generation；版本已变则返回 409 `authentication_changed`，提示用新密码重新登录，不登记会话，已写入的新密码和会话撤销保留。
 
@@ -44,7 +44,11 @@ pnpm ops:dingtalk-login-repair release-preview /restricted/recovery.json
 pnpm ops:dingtalk-login-repair release /restricted/release.json
 ```
 
-verify 输入：userId/password/code/actorId/actorPassword。preview：proof。apply：proof/digest/confirm。两种 recovery preview：id/actorId/actorPassword；执行 rollback／release 再增加 digest/confirm。输入必须为私有常规文件，无组／其他用户权限，最多 64 KiB，严格字段集；证明输出 0600 且不覆盖。凭据、授权码和证明不得进入命令参数、聊天或 PR。失败仅打印固定拒绝码。
+verify 输入：userId/password/code/actorId/actorPassword。preview：proof。apply：proof/digest/confirm。两种 recovery preview：id/actorId/actorPassword；执行 rollback／release 再增加 digest/confirm。输入必须为私有常规文件，无组／其他用户权限，最多 64 KiB，严格字段集；证明输出 0600 且不覆盖。凭据、授权码和证明不得进入命令参数、聊天或 PR。失败只打印固定拒绝码集合中的一个（模块码与 CLI 码清单见 `dingtalk-identity-repair-codes.ts`），不打印错误文本、堆栈、SQL 或标识；`REPAIR_LOCK_BUSY` 退出码 75，`REPAIR_CLIENT_TIMEOUT` 退出码 69，其余 1；输入文件、字段或权限问题为 `REPAIR_INPUT_INVALID`；成功输出 JSON 含 clientQueryTimeoutMs。
+
+执行 apply、rollback、release 之前：（一）定时同步关闭不等于没有同步在跑：确认该企业所有钉钉集成在 `directory_sync_runs` 中没有 `status='running'` 的行，且 `pg_stat_activity` 中没有处于事务中的同步会话；（二）窗口内暂停手动同步、管理员绑定／解绑以及角色、权限和组织成员管理；（三）执行前立即重新运行对应的 preview；（四）CLI 进程不设置 DB_QUERY_TIMEOUT（由 CLI 预设下限），或显式设置为不低于该下限的值，显式更低的值以 `REPAIR_CLIENT_TIMEOUT_TOO_LOW` 拒绝且不连接数据库；（五）锁阶段内登录会排队（每个持有者约五秒），并发写入可能被选为死锁牺牲者（见上文执行与互斥）。
+
+非零退出之后：（一）先确认是否已提交。rollback／release 重新运行同一 preview：返回 `REPAIR_NOT_ACTIVE` 表示已提交，得到新摘要表示已回滚。apply 用同一证明重新运行 preview：仍然成功表示 apply 已回滚，返回 `REPAIR_SNAPSHOT_CHANGED` 表示已提交（apply 改变了身份，此检查先于 `REPAIR_ALREADY_ACTIVE`）；这只在证明的五分钟有效期内可行，证明过期（`REPAIR_PROOF_INVALID`）后由 DBA 读取 journal（`SELECT id,state,released_account_ids FROM dingtalk_login_repairs WHERE user_id=$1 ORDER BY created_at DESC`）及该 id 最新的 audit_logs 行。（二）退出码 75 时由 DBA 在 `pg_stat_activity`、`pg_locks` 中查找 `hashtext('directory:identity-maintenance')` 互斥或 13 张核心表的持有者。（三）重新运行对应 preview 并批准新摘要。（四）只手动重试一次，不循环重试；CLI 不自动重试。（五）退出码 69 时，在确认 journal 状态之前不做任何操作。暂停真实同步、修改在线参数和执行修复仍是三项独立审批。
 
 真实窗口前必须另批：完整迁移台账、专用加密材料及可恢复配置／数据库备份、当前身份与目录证据、审批在途依赖、session/API token 影响、来源约束后续处理和维护窗口。新加密字段 `dingtalk_login_repairs.before_identity` 已登记普查和启动探测，单字段最多抽取二十行，不代表全库普查。换材料而不迁移密文会使恢复拒绝；必须保留原材料与密文备份。非空修复历史不允许 migration down，不能通过删除历史或直接拆守卫回滚。迁移在合并前再次原地改写（CHECK 与目录守卫函数）：跑过 `cbd01a7101` 版本的开发库须重建。
 
@@ -54,7 +58,7 @@ verify 输入：userId/password/code/actorId/actorPassword。preview：proof。a
 - 不提供重锚：登录应用或企业变更、canonical 来源被删除、换应用、人员或企业归属改变、被其他用户占用时，journal 停在 applied，须另批受控重锚。
 - 同一用户在当前应用下有两个活动的同人来源时，verify 拒绝（`REPAIR_CANONICAL_SOURCE_REQUIRED`），须先解绑其中一个。
 - release 前必须解绑名单外的钉钉关联（任何应用，活动或 inactive）；解绑会删除该用户同 UnionID 的钉钉身份，即撤销其钉钉登录，release 随之走终结模式。
-- 锁阶段内单条语句三十秒累计等待触发的真实 57014 未在真实 PostgreSQL 上复现。
+- 锁阶段内单条语句三十秒累计等待触发的真实 57014 未在真实 PostgreSQL 上复现，只由分类单测（桩事务客户端）覆盖。
 
 ## 本地验证与交付门槛
 
@@ -69,5 +73,7 @@ CI 修正（承接 34bcb2c8）：两处私有 schema 的合成 users 表补齐 `
 锁修正（承接 94576920）：身份维护互斥移入同一错误映射，锁超时与死锁牺牲均拒绝为 `REPAIR_LOCK_BUSY`。新增两项真实 DB 用例（锁环、互斥等待超时），在旧实现上分别得到原始 `deadlock detected` 与 `canceling statement due to lock timeout`。本地同一 PostgreSQL 15.17：修复文件 65 项；十一文件组合 260 项；认证单测 8 文件 312 项。
 
 改密栅栏修正（承接 7057f9d5）：强制改密重新签发会话时携带请求认证时的 generation，版本已变返回 409 `authentication_changed`，不登记会话。新增两项单测和一项真实 DB 用例：改密请求写入新密码后停住，期间 rollback 推进 generation，结果为 409、无有效会话、新密码仍然生效；之后在已推进的 generation 上正常改密，返回可用令牌。该用例在撤销之后等待一秒以上才签发令牌：撤销水位精确到毫秒，令牌签发时间只精确到秒，与撤销同一秒签发的令牌会立即被判为已撤销。这是 main 上已有的行为，本修订没有改变。去掉栅栏时该真实 DB 用例得到 200。锁环用例中，持有者在观察到 apply 排队约 500 毫秒后再加锁，即两侧 deadlock_timeout 检查的中点；立即加锁时 10 次中有 3 次由持有者先检查而成为牺牲者，500 毫秒时 20 次全部由 apply 拒绝。本地同一 PostgreSQL 15.17：修复文件 66 项；十一文件组合 261 项；认证单测 8 文件 314 项。
+
+来源与超时修正（承接 cbd01a71）：release 只允许一个重新核实的钉钉来源（canonical 与终结两种模式），目录证据要求已存储的 UnionID，本地目录关联不进围栏；锁阶段内的 57014 映射为 `REPAIR_LOCK_BUSY`；维护 CLI 自行设定客户端读超时下限，只打印固定拒绝码。修复文件新增 46 项真实 DB 用例（来源、模式与围栏 44 项，CLI 子进程 2 项：持锁时退出码 75 且不写行；release-preview 输出计划与 clientQueryTimeoutMs 45000，错误摘要退出码 1，批准摘要完成 release），另有 CLI 单测 2 文件 90 项（含不连接数据库的子进程用例和桩事务客户端的 57014 分类）。变异检查：来源部分 31 项中 30 项转红，未转红的一项（从计划中去掉 mode）与预期一致；CLI 与超时部分 15 项全部转红。其中把正文改为静态导入时，子进程中的连接池实际持有三十秒并以 `REPAIR_CLIENT_TIMEOUT_TOO_LOW` 拒绝，说明脚本顶部赋值来不及，必须先过门再动态加载。本地同一 PostgreSQL 15.17（全新库按 CI 排除清单执行 456 项迁移）：修复文件 112 项；十一文件组合 307 项；认证单测 8 文件 314 项；CLI 单测 2 文件 90 项。后端单测全量（CI=true，无数据库）1414 个文件中 1238 通过、172 跳过、4 个失败，失败的是 multitable 恢复归档相关的 4 个文件共 43 项，在 cbd01a71 上同样失败，与本修订无关。TypeScript noEmit 两套配置、CI 合约 6 项、W4C-0 收集器 67 项通过。
 
 执行命令和当前 head／CI 结论保存在本地 FINAL-VERIFICATION.md。以上为本地验证，未宣告当前 head 的十三项必需 CI 通过。合并、部署、真实绑定、E4 交接、审批处置、停用和启用同步仍需单独批准。
