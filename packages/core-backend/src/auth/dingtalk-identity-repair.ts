@@ -334,19 +334,22 @@ async function checks(c: Client, p: Proof) {
 async function lock(c: Client, userId: string, actorId: string) {
   await c.query("SET LOCAL lock_timeout='5s'")
   await c.query("SET LOCAL statement_timeout='30s'")
-  await c.query(
-    "SELECT pg_advisory_xact_lock(hashtext('directory:identity-maintenance'))",
-  )
   // Mutation only. Pure previews never acquire write locks or advance generations.
   // Bounded wait (lock_timeout above), not NOWAIT: a queued request lasting past deadlock_timeout
-  // makes a conflicting autovacuum/autoanalyze cancel itself; any other holder ends in a refusal.
+  // makes a conflicting autovacuum/autoanalyze cancel itself. Any other holder past the limit
+  // (55P03), including the advisory mutex, or a lock cycle in which this transaction is the
+  // deadlock victim (40P01) ends in a refusal; the transaction rolls back with no row written.
   try {
+    await c.query(
+      "SELECT pg_advisory_xact_lock(hashtext('directory:identity-maintenance'))",
+    )
     await c.query(
       'LOCK TABLE users,user_roles,user_permissions,user_namespace_admissions,user_orgs,user_external_auth_grants,directory_account_links,user_external_identities,directory_accounts,directory_integrations,roles,role_permissions,permissions IN SHARE ROW EXCLUSIVE MODE',
     )
     await lockUsersForAccessGraphWrite(c, [userId, actorId].sort())
   } catch (error) {
-    if ((error as { code?: unknown } | null)?.code === '55P03')
+    const code = (error as { code?: unknown } | null)?.code
+    if (code === '55P03' || code === '40P01')
       throw new Error('REPAIR_LOCK_BUSY')
     throw error
   }

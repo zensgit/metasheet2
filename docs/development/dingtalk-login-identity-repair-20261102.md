@@ -14,7 +14,7 @@ verify 同时要求有效管理员及其密码、目标账号的非临时本地�
 
 preview、rollback-preview、release-preview 为只读 REPEATABLE READ 事务，不加核心表写锁、不递增 generation、不创建会话，也不写审计记录（零写入测试固定）；审计行只由 apply、rollback、release 写入。权限快照包含 users、角色、角色权限、直接权限、组织、namespace admissions、外部授权、目录关联、身份键和来源。仅忽略 created_at、updated_at、last_login_at 这三类元数据。
 
-写事务首句固定 READ COMMITTED，再取得身份维护互斥、核心表 SHARE ROW EXCLUSIVE 锁及 canonical 用户锁。核心表锁与用户锁在 lock_timeout（五秒）内有界等待，不使用 NOWAIT：等待超过 deadlock_timeout 时，冲突的 autovacuum／autoanalyze 会自行取消；其他持有者（含防回卷 vacuum）超过五秒则拒绝为 `REPAIR_LOCK_BUSY`，不写任何行，可在确认无长事务后重试。排队期间已取得的表锁（users 在前）会阻塞相关写入至多五秒。现有部分写入未共享用户 mutex，因此此维护操作仍可能拒绝并发写入，必须安排维护窗口。statement_timeout 为三十秒。与 applied handover 双向排斥；安全解绑也不能抹掉日志中原来源的互斥依据。不修改 handover 的产品摘要规则。
+写事务首句固定 READ COMMITTED，再取得身份维护互斥、核心表 SHARE ROW EXCLUSIVE 锁及 canonical 用户锁。这三步都在 lock_timeout 内有界等待，最多五秒，不使用 NOWAIT。等待超过 deadlock_timeout 时，冲突的 autovacuum／autoanalyze 会自行取消。其他持有者（含防回卷 vacuum）超过五秒、出现锁环，或身份维护互斥等待超过五秒，都拒绝为 `REPAIR_LOCK_BUSY`，不写任何行，可在确认无长事务后重试。按另一顺序取这些表的并发写入（目录同步、角色或权限管理写入）可能反过来被选为死锁牺牲者而中止，因此维护窗口内须暂停目录同步和角色、权限管理。apply 排队期间，其他用户的登录和令牌校验可能等待至多约五秒。CLI 仍只打印单一拒绝码 `DINGTALK_LOGIN_REPAIR_REFUSED`，不区分锁忙。statement_timeout 为三十秒。与 applied handover 双向排斥；安全解绑也不能抹掉日志中原来源的互斥依据。不修改 handover 的产品摘要规则。
 
 apply 需精确证明摘要及 `confirm=apply`。身份旧值加密保存；写产品审计，记录的管理员为 verify 时校验密码的管理员（apply 本身不另行认证执行者）。撤销目标已存在的 JWT 会话、session registry 记录与多维表 API token，递增 generation，不倒退。OAuth／免登认证结果携带在用户锁内取得的 generation，登记 session 时重新锁定并核对；API token 创建／轮换也复核请求认证时的 generation。旧 refresh 不得重新激活已撤销 sid，无 sid 的 refresh 同样复核 generation。切换组织（POST /api/auth/session-org）重新签发会话时同样携带请求认证时的 generation，版本已变则返回 409 `authentication_changed`，不登记会话。
 
@@ -57,5 +57,7 @@ Node 20.20.2、本机 PostgreSQL 15.17、全新合成库；提供方仅测试桩
 包含真实 refresh 屏障红转绿、旧 OAuth 认证版本拒绝、API 创建／轮换版本拒绝、RR 默认事务在用户锁等待期间新提交 token 的撤销、首次登录补角色后的恢复、无变化同步后的恢复、缺 OpenID 绑定／解绑、OpenID 轮换后旧目录拒绝、release 前同步成功正对照及其后精确拒绝、隐藏第二人／UnionID 冲突拒绝、加密字段探测及密钥变化后恢复拒绝／原密文恢复。真实行为优于仅检查 generation 值。
 
 CI 修正（承接 34bcb2c8）：两处私有 schema 的合成 users 表补齐 `access_generation`（与 zzzz20260724170000 一致）；修复套件改用每个夹具独立的组织，不再向 'default' 留下关联用户；真实 DB 加密存储探测固定清单加入 `dingtalk_login_repairs.before_identity`（含当前／旧材料两行）。本地同一 PostgreSQL 15.17：修复文件 63 项；十一文件组合 258 项（原 252 加组织切换 3 项、锁等待 3 项）；approval-db 全部 102 文件按 CI 顺序 1424 通过，余 5 项为本机 worktree 无法运行 `pnpm` 子进程及一次瞬时连接重置，单独复跑通过；multitable 加密探测 11 项；YiDa owner／初始化 HTTP 与运行时 60 项（两份浏览器文件需固定 Chromium，未在本机运行）。
+
+锁修正（承接 94576920）：身份维护互斥移入同一错误映射，锁超时与死锁牺牲均拒绝为 `REPAIR_LOCK_BUSY`。新增两项真实 DB 用例（锁环、互斥等待超时），在旧实现上分别得到原始 `deadlock detected` 与 `canceling statement due to lock timeout`。本地同一 PostgreSQL 15.17：修复文件 65 项；十一文件组合 260 项；认证单测 8 文件 312 项。
 
 执行命令和当前 head／CI 结论保存在本地 FINAL-VERIFICATION.md。以上为本地验证，未宣告当前 head 的十三项必需 CI 通过。合并、部署、真实绑定、E4 交接、审批处置、停用和启用同步仍需单独批准。

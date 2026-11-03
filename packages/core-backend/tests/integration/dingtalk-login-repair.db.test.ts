@@ -1646,6 +1646,81 @@ suite('DingTalk controlled login repair', () => {
         ).toEqual(identityBefore)
       },
     )
+
+    const identityRows = async (user: string) =>
+      (
+        await query(
+          'SELECT to_jsonb(t) AS row FROM user_external_identities t WHERE local_user_id=$1',
+          [user],
+        )
+      ).rows
+
+    it('a lock cycle during the bounded wait refuses with REPAIR_LOCK_BUSY, writes nothing, and lets the other transaction proceed', async () => {
+      const f = await fixture(),
+        proof = await f.verify(),
+        p = await previewDingTalkRepair(proof)
+      const identityBefore = await identityRows(f.user)
+      const journalBefore = await journal(f.user)
+      // A writer that already holds roles and then wants users: the reverse of apply's table order.
+      const holder = await pool!.connect()
+      let pending: Promise<unknown> | undefined
+      let holderNext: Promise<unknown> | undefined
+      try {
+        await holder.query('BEGIN')
+        await holder.query('LOCK TABLE roles IN ROW EXCLUSIVE MODE')
+        const pid = (await holder.query('SELECT pg_backend_pid() AS pid'))
+          .rows[0].pid
+        const started = Date.now()
+        pending = applyDingTalkRepair(proof, p.digest, 'apply')
+        pending.catch(() => undefined)
+        // Apply now holds the tables listed before roles (users first) and is queued on roles.
+        expect(await waitUntilBlockedBy(pid)).toBe(true)
+        // Close the cycle well before apply's deadlock_timeout (1s) check, so apply is the victim.
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        holderNext = holder.query('LOCK TABLE users IN ROW EXCLUSIVE MODE')
+        holderNext.catch(() => undefined)
+        await expect(pending).rejects.toThrow('REPAIR_LOCK_BUSY')
+        // Deadlock detection, not lock_timeout, ended the wait.
+        expect(Date.now() - started).toBeLessThan(4500)
+        await expect(holderNext).resolves.toBeDefined()
+        await holder.query('COMMIT')
+      } finally {
+        await holder.query('ROLLBACK').catch(() => undefined)
+        holder.release()
+        await pending?.catch(() => undefined)
+        await holderNext?.catch(() => undefined)
+      }
+      expect(await journal(f.user)).toEqual(journalBefore)
+      expect(await identityRows(f.user)).toEqual(identityBefore)
+    })
+
+    it('an identity-maintenance advisory-lock wait past lock_timeout refuses with REPAIR_LOCK_BUSY and writes nothing', async () => {
+      const f = await fixture(),
+        proof = await f.verify(),
+        p = await previewDingTalkRepair(proof)
+      const identityBefore = await identityRows(f.user)
+      const journalBefore = await journal(f.user)
+      // Stands in for a handover (or another repair) holding the shared maintenance mutex.
+      const holder = await pool!.connect()
+      try {
+        await holder.query('BEGIN')
+        await holder.query(
+          "SELECT pg_advisory_xact_lock(hashtext('directory:identity-maintenance'))",
+        )
+        const started = Date.now()
+        await expect(
+          applyDingTalkRepair(proof, p.digest, 'apply'),
+        ).rejects.toThrow('REPAIR_LOCK_BUSY')
+        const elapsed = Date.now() - started
+        expect(elapsed).toBeGreaterThanOrEqual(4500)
+        expect(elapsed).toBeLessThan(15000)
+      } finally {
+        await holder.query('ROLLBACK').catch(() => undefined)
+        holder.release()
+      }
+      expect(await journal(f.user)).toEqual(journalBefore)
+      expect(await identityRows(f.user)).toEqual(identityBefore)
+    })
   })
 
   it('rejects a scan whose OpenID matches but whose stored directory UnionID names another person', async () => {
