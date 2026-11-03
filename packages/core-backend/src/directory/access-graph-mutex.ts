@@ -24,6 +24,8 @@ export type LockedAccessGraphUser = {
   activationStatus: string | null
   isActive: boolean
   accessGeneration: number
+  deletedAt: string | null
+  purgedAt: string | null
 }
 
 function normalizeUserIds(userIds: string[]): string[] {
@@ -48,7 +50,9 @@ export async function lockUsersForAccessGraphWrite(
               mobile,
               activation_status,
               COALESCE(is_active, TRUE) AS is_active,
-              COALESCE(access_generation, 0)::bigint AS access_generation
+              COALESCE(access_generation, 0)::bigint AS access_generation,
+              (to_jsonb(users) ->> 'deleted_at') AS deleted_at,
+              (to_jsonb(users) ->> 'purged_at') AS purged_at
          FROM users
         WHERE id = $1::text
         FOR UPDATE`,
@@ -72,6 +76,12 @@ export async function lockUsersForAccessGraphWrite(
           : String(row.activation_status),
       isActive: row.is_active === true,
       accessGeneration: Number(row.access_generation ?? 0),
+      deletedAt: row.deleted_at === null || row.deleted_at === undefined || String(row.deleted_at).length === 0
+        ? null
+        : String(row.deleted_at),
+      purgedAt: row.purged_at === null || row.purged_at === undefined || String(row.purged_at).length === 0
+        ? null
+        : String(row.purged_at),
     })
   }
 

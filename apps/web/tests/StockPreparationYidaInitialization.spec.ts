@@ -30,7 +30,13 @@ function metadata() { return { targetRef: ids.target, operationId: ids.operation
 function ready(sendEnabled = false, connectionTestEnabled = false) { return { commandId: ids.command, status: 'ready', draft: null, canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled,
   ...(connectionTestEnabled ? { connectionTestEnabled: true } : {}) } }
 function initialized(sendEnabled = false, connectionTestEnabled = false) { return { ...ready(sendEnabled, connectionTestEnabled), status: 'initialized', draft: metadata() } }
-const material: YidaInitializationMaterial = { appKey: ' SYN-KEY\r\n原字节 ', appSecret: ' SYN-SECRET\n原字节 ', systemToken: ' SYN-TOKEN\r\n原字节 ', userId: 'SYN-EXECUTION' }
+// What the operator pastes (surrounding blanks and a trailing line break the password box hides) and what is
+// sent: the same text with its edges trimmed, inner bytes unchanged. The server refuses the padded form.
+const pasted: YidaInitializationMaterial = { appKey: ' SYN-KEY原字节\r\n', appSecret: '\tSYN-SECRET原字节\n', systemToken: '\u00a0SYN-TOKEN原字节\r\n', userId: 'SYN-EXECUTION' }
+const material: YidaInitializationMaterial = { appKey: 'SYN-KEY原字节', appSecret: 'SYN-SECRET原字节', systemToken: 'SYN-TOKEN原字节', userId: 'SYN-EXECUTION' }
+// Invisible test characters are built from code units at run time, so the source holds neither a raw
+// invisible character nor an escape that an editor could rewrite into one.
+const codeUnit = (code: number) => String.fromCharCode(code)
 function payload(): YidaInitializationInput { return { commandId: ids.command, material: { ...material }, draft: draftInput(),
   attestation: { kind: 'owner-reviewed-target', reviewRef: 'SYN-REVIEW', organizationId: 'SYN-ORG', executionIdentity: material.userId } } }
 function json(data: unknown, status = 200) { return new Response(JSON.stringify({ ok: true, data }), { status, headers: { 'Content-Type': 'application/json' } }) }
@@ -52,7 +58,7 @@ async function type(id: string, value: string) { const node = q<HTMLInputElement
 async function fill() {
   for (const key of ['appKey', 'appSecret', 'systemToken', 'userId'] as const) {
     const paste = new Event('paste', { cancelable: true })
-    Object.defineProperty(paste, 'clipboardData', { value: { getData: (format: string) => format === 'text' ? material[key] : '' } })
+    Object.defineProperty(paste, 'clipboardData', { value: { getData: (format: string) => format === 'text' ? pasted[key] : '' } })
     q(key).dispatchEvent(paste); expect(paste.defaultPrevented).toBe(true)
   }
   await type('review', 'SYN-REVIEW'); await type('organization', 'SYN-ORG')
@@ -231,6 +237,24 @@ describe('Yida initialization explicit local management UI', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(3)
   })
 
+  it('503 ENCRYPTION_NOT_READY shows its code and the plain Chinese hint, clears material and needs a manual GET before a retry', async () => {
+    mountPanel(); await observeReady(); await fill()
+    fetchSpy.mockResolvedValueOnce(error('YIDA_INITIALIZATION_ENCRYPTION_NOT_READY', 503)); await click('submit'); noSecrets()
+    expect(q('error').textContent).toBe('YIDA_INITIALIZATION_ENCRYPTION_NOT_READY')
+    const hint = q('error-hint').textContent ?? ''
+    for (const part of ['本机加密密钥未配置或仍是默认值', '初始化未执行，未写入任何内容', 'docker\\app.env', 'ENCRYPTION_KEY / ENCRYPTION_SALT', '重启后端', '手动 GET'])
+      expect(hint.includes(part)).toBe(true)
+    // Values-free: neither the pasted material nor the review identifiers appear in the hint.
+    for (const value of [...Object.values(material), 'SYN-REVIEW', 'SYN-ORG']) expect(hint.includes(value)).toBe(false)
+    expect(absent('initialized')).toBe(true); expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+    expect(q<HTMLButtonElement>('refresh').disabled).toBe(false)
+    await click('submit'); expect(fetchSpy).toHaveBeenCalledTimes(2)
+    fetchSpy.mockResolvedValueOnce(json(ready())); await click('refresh')
+    expect(absent('error-hint')).toBe(true)
+    await fill(); fetchSpy.mockResolvedValueOnce(json(initialized(), 201)); await click('submit')
+    expect(q('initialized').textContent).toContain('canSend=false'); expect(fetchSpy).toHaveBeenCalledTimes(4)
+  })
+
   it.each(['YIDA_INITIALIZATION_DENIED', 'YIDA_OWNER_HTTP_DENIED'])('a server %s shows its own code and keeps the panel closed', async code => {
     mountPanel(); await fill()
     fetchSpy.mockResolvedValueOnce(error(code, 403)); await click('refresh')
@@ -270,6 +294,14 @@ describe('Yida initialization actual service boundaries', () => {
   ])('does not read or accept foreign error detail/status (%#)', async envelope => {
     fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(envelope), { status: 503, headers: { 'Content-Type': 'application/json' } }))
     await expect(client().observe()).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_RESPONSE_INVALID' })
+  })
+  it('decodes ENCRYPTION_NOT_READY only with its own status 503', async () => {
+    const value = client(); fetchSpy.mockResolvedValueOnce(json(ready())); await value.observe()
+    fetchSpy.mockResolvedValueOnce(error('YIDA_INITIALIZATION_ENCRYPTION_NOT_READY', 503))
+    await expect(value.initialize(payload())).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_ENCRYPTION_NOT_READY' })
+    const other = client(); fetchSpy.mockResolvedValueOnce(json(ready())); await other.observe()
+    fetchSpy.mockResolvedValueOnce(error('YIDA_INITIALIZATION_ENCRYPTION_NOT_READY', 409))
+    await expect(other.initialize(payload())).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_RESPONSE_INVALID' })
   })
   it('uses original reader and rejects a response at EOF after cancellation, even if transport ignores signal', async () => {
     const end = deferred<ReadableStreamReadResult<Uint8Array>>(), release = vi.fn(), caller = new AbortController()
@@ -501,14 +533,96 @@ describe('Yida owner connection test behind the server display bit', () => {
   const client = () => { const value = createYidaInitializationClient(); clients.push(value); return value }
   const request = () => ({ commandId: ids.command, mode: 'candidate' as const, material: { appKey: material.appKey, appSecret: material.appSecret } })
 
-  it('is not rendered while the server bit is false; rendered (with the anchor prerequisite) when true', async () => {
-    mountPanel(); await observe(false); await fill()
-    expect(absent('connection')).toBe(true); expect(absent('connection-test')).toBe(true)
+  // Issue #6687 item 2: the button is always rendered once the panel is open; greyed, it names the missing step.
+  const blocked = () => q('connection-blocked').textContent ?? ''
+  it('stays rendered but greyed with its reason before the GET and while the server bit is false; enabled when true', async () => {
+    mountPanel()
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true)
+    expect(blocked()).toContain('尚未读取状态'); expect(blocked()).toContain('第 6 步「手动 GET 本地初始化状态」')
+    await observe(false); await fill()
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true); expect(blocked()).toContain('服务器未开启测试连接（上机清单 L2）')
+    // Actionable, and never a skip: the on-site checklist requires an ok test before 本地初始化.
+    expect(blocked()).toContain('请服务器管理员在 docker\\app.env 打开测试开关并用包内脚本重启后端'); expect(blocked()).toContain('本地初始化前须测试通过')
+    expect(blocked()).not.toContain('跳过')
     await observe(true)
     expect(q('connection').textContent).toContain('bootstrap-yida-initialization-owner')
     expect(q('connection').textContent).toContain('只证明 appKey/appSecret')
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true); expect(blocked()).toContain('请先填写 appKey 和 appSecret')
+    await fill(); expect(q<HTMLButtonElement>('connection-test').disabled).toBe(false); expect(absent('connection-blocked')).toBe(true)
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('stays greyed with its reason while the status is unconfirmed or a request is pending, after a refusal, and after initialization', async () => {
+    mountPanel(); await observe(true); await fill()
+    fetchSpy.mockRejectedValueOnce(new Error('SYN-LOST')); await click('submit')
+    expect(q('uncertain')).toBeDefined(); expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true)
+    expect(blocked()).toContain('状态未确认')
+    const pending = deferred<Response>(); fetchSpy.mockReturnValueOnce(pending.promise); await click('refresh')
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true); expect(blocked()).toContain('请求进行中')
+    pending.resolve(json(initialized(false, true))); await flush()
+    // Initialized: the material fieldset is gone, the greyed button stays and says why (the server answers 409).
+    expect(absent('appKey')).toBe(true); expect(q('initialized').textContent).toContain('canSend=false')
     expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true)
-    await fill(); expect(q<HTMLButtonElement>('connection-test').disabled).toBe(false)
+    expect(blocked()).toContain('本地槽已初始化'); expect(blocked()).toContain('409')
+    await click('connection-test'); expect(fetchSpy).toHaveBeenCalledTimes(3)
+    app?.unmount(); root?.remove(); app = null; root = null
+    // A server DENIED (not the anchored owner / no permission): reloading does not change it.
+    mountPanel(); fetchSpy.mockResolvedValueOnce(error('YIDA_INITIALIZATION_DENIED', 403)); await click('refresh')
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true); expect(blocked()).toContain('不是宜搭锚点 owner 或没有权限')
+    expect(blocked()).toContain('重新加载不会改变结果'); expect(blocked()).not.toContain('请刷新页面')
+    app?.unmount(); root?.remove(); app = null; root = null
+    // A session change: the reload advice stays.
+    mountPanel(); window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token' })); await flush()
+    expect(q('error').textContent).toBe('YIDA_INITIALIZATION_SESSION_CHANGED'); expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true)
+    expect(blocked()).toContain('登录会话已变化；请刷新页面'); expect(blocked()).not.toContain('锚点 owner')
+  })
+
+  it('reports step-guide progress to the parent: status read, an ok test for the current pair, initialized', async () => {
+    const progress = vi.fn()
+    root = document.createElement('div'); document.body.appendChild(root)
+    app = createApp(StockPreparationYidaInitializationPanel, { draftInput: draftInput(), 'onProgress-change': progress }); app.mount(root)
+    expect(progress).toHaveBeenLastCalledWith({ statusRead: false, tested: false, initialized: false, connectionTestEnabled: false })
+    await observe(false); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: false, initialized: false, connectionTestEnabled: false })
+    await observe(true); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: false, initialized: false, connectionTestEnabled: true })
+    await fill(); await probe(json(probeView('upstream_rejected')))
+    expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: false, initialized: false, connectionTestEnabled: true })
+    await vi.waitFor(() => expect(q<HTMLButtonElement>('connection-test').disabled).toBe(false))
+    await probe(json(probeView('ok'))); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: true, initialized: false, connectionTestEnabled: true })
+    // The tested pair edited: no longer counted as tested (the re-test rule itself is unchanged).
+    await type('appSecret', 'SYN-SECRET-EDITED'); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: false, initialized: false, connectionTestEnabled: true })
+    await pasteInto('appSecret', material.appSecret); expect(progress).toHaveBeenLastCalledWith({ statusRead: true, tested: true, initialized: false, connectionTestEnabled: true })
+    fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await click('submit')
+    expect(progress).toHaveBeenLastCalledWith(expect.objectContaining({ statusRead: true, initialized: true }))
+  })
+
+  it('the parent step guide marks steps 5–8 from the opened panel: open, GET, ok test, initialization', async () => {
+    root = document.createElement('div'); document.body.appendChild(root); app = createApp(StockPreparationYidaPreviewPanel); app.mount(root)
+    const parentClick = async (id: string) => { const button = root?.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`); if (!button) throw new Error('MISSING_PARENT_NODE'); button.click(); await flush() }
+    const states = () => Array.from({ length: 8 }, (_, index) => root?.querySelector(`[data-testid="sp-yida-step-${index + 1}"]`)?.getAttribute('data-state'))
+    const mode = root.querySelector<HTMLSelectElement>('[data-testid="sp-yida-preview-mode"]')!; mode.value = 'protocol'; mode.dispatchEvent(new Event('change')); await flush()
+    await parentClick('sp-yida-protocol-example-primary'); await parentClick('sp-yida-rule-export'); await parentClick('sp-yida-run')
+    expect(states()).toEqual(['done', 'done', 'done', 'done', 'current', 'todo', 'todo', 'todo'])
+    await parentClick('sp-yida-initialization-open'); expect(fetchSpy).not.toHaveBeenCalled()
+    expect(states()).toEqual(['done', 'done', 'done', 'done', 'done', 'current', 'todo', 'todo'])
+    await observe(true); expect(states().slice(4)).toEqual(['done', 'done', 'current', 'todo'])
+    await fill(); await probe(json(probeView('ok'))); expect(states().slice(4)).toEqual(['done', 'done', 'done', 'current'])
+    fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await click('submit')
+    expect(states()).toEqual(Array(8).fill('done')); expect(root.querySelector('[aria-current="step"]')).toBeNull()
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('the parent step guide shows step 7 as 待开启 (not current) while the server test switch is off', async () => {
+    root = document.createElement('div'); document.body.appendChild(root); app = createApp(StockPreparationYidaPreviewPanel); app.mount(root)
+    const parentClick = async (id: string) => { const button = root?.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`); if (!button) throw new Error('MISSING_PARENT_NODE'); button.click(); await flush() }
+    const step = (n: number) => root?.querySelector(`[data-testid="sp-yida-step-${n}"]`)
+    const mode = root.querySelector<HTMLSelectElement>('[data-testid="sp-yida-preview-mode"]')!; mode.value = 'protocol'; mode.dispatchEvent(new Event('change')); await flush()
+    await parentClick('sp-yida-protocol-example-primary'); await parentClick('sp-yida-rule-export'); await parentClick('sp-yida-run'); await parentClick('sp-yida-initialization-open')
+    await observe(false)
+    expect(Array.from({ length: 4 }, (_, index) => step(index + 5)?.getAttribute('data-state'))).toEqual(['done', 'done', 'blocked', 'todo'])
+    expect(step(7)?.textContent).toBe('7 测试连接（待开启）'); expect(step(7)?.getAttribute('aria-current')).toBe('step')
+    expect(root.querySelector('[data-state="current"]')).toBeNull(); expect(blocked()).toContain('上机清单 L2')
+    // The switch turned on and a fresh GET: step 7 becomes an ordinary current step.
+    await observe(true); expect(step(7)?.getAttribute('data-state')).toBe('current'); expect(step(7)?.textContent).toBe('7 测试连接（当前）')
     expect(fetchSpy).toHaveBeenCalledTimes(2)
   })
 
@@ -539,7 +653,8 @@ describe('Yida owner connection test behind the server display bit', () => {
     fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await click('submit')
     expect(fetchSpy.mock.calls[2][0]).toBe(endpoint)
     expect(JSON.stringify(JSON.parse(fetchSpy.mock.calls[2][1].body as string)) === JSON.stringify(payload())).toBe(true)
-    expect(q('initialized').textContent).toContain('canSend=false'); expect(absent('connection')).toBe(true)
+    expect(q('initialized').textContent).toContain('canSend=false')
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true); expect(absent('connection-result')).toBe(true)
   })
 
   // Each substring is unique to its own copy, so swapping two copies turns a row red.
@@ -785,5 +900,104 @@ describe('Yida owner connection test behind the server display bit', () => {
     }
     await check(createYidaInitializationClient, false)
     await check(memoryService('  if (row.tokenRetained !== false || row.externalWriteAttempted !== false || row.canSend !== false) invalid()', ''), true)
+  })
+})
+
+// Pasted credentials (finding F9 on onprem-r78): a paste often carries a trailing line break or blanks the
+// password box hides. appKey/appSecret/systemToken go out with their edges trimmed, so the pair tested is the
+// pair L4 seals; text with whitespace or a control character inside is not sent at all.
+describe('Yida pasted credentials: edges trimmed before the test and L4, inner blanks refused locally', () => {
+  const okView = () => ({ commandId: ids.command, mode: 'candidate', outcome: 'ok', tokenIssued: true, tokenRetained: false, externalWriteAttempted: false, canSend: false })
+  async function pasteInto(field: string, value: string) {
+    const event = new Event('paste', { cancelable: true })
+    Object.defineProperty(event, 'clipboardData', { value: { getData: (format: string) => format === 'text' ? value : '' } })
+    q(field).dispatchEvent(event); await flush()
+  }
+  async function openWithProbe() { mountPanel(); fetchSpy.mockResolvedValueOnce(json(ready(false, true))); await click('refresh'); await fill() }
+  const sent = (call: number) => JSON.parse(fetchSpy.mock.calls[call][1].body as string) as { material: Record<string, string> }
+  const clients: ReturnType<typeof createYidaInitializationClient>[] = []
+  afterEach(() => { for (const value of clients.splice(0)) value.dispose() })
+
+  it('a paste with a trailing CR/LF reaches the connection test and L4 trimmed: the tested pair is the sealed pair', async () => {
+    await openWithProbe()
+    expect(absent('material-hint')).toBe(true)
+    fetchSpy.mockResolvedValueOnce(json(okView())); await click('connection-test')
+    const probed = sent(1).material
+    expect(probed.appKey === 'SYN-KEY原字节' && probed.appSecret === 'SYN-SECRET原字节').toBe(true)
+    expect(absent('connection-mismatch')).toBe(true); expect(q('connection-result').textContent).toContain('令牌已在服务器丢弃')
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await click('submit')
+    const sealed = sent(2).material
+    expect(sealed.appKey === probed.appKey && sealed.appSecret === probed.appSecret).toBe(true)
+    expect(sealed.systemToken === 'SYN-TOKEN原字节' && sealed.userId === 'SYN-EXECUTION').toBe(true)
+    expect(q('initialized').textContent).toContain('canSend=false'); expect(fetchSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('after an ok test, the same text with or without the line break is the same pair; a changed inner byte is a mismatch', async () => {
+    await openWithProbe()
+    fetchSpy.mockResolvedValueOnce(json(okView())); await click('connection-test')
+    // Typed (an input event strips the line break) and re-pasted with other padding: still the tested pair.
+    await type('appSecret', 'SYN-SECRET原字节'); await pasteInto('appKey', '  SYN-KEY原字节 \n')
+    expect(absent('connection-mismatch')).toBe(true); expect(q('connection-result').textContent).toContain('令牌已在服务器丢弃')
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    await type('appSecret', 'SYN-SECRET原字节X')
+    expect(q('connection-mismatch').textContent).toBe('已测试的凭据与当前输入不一致，请重新测试')
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(true); expect(absent('connection-result')).toBe(true)
+  })
+
+  it.each([
+    ['appKey', 'an inner space', 'SYN-KEY 原字节'], ['appSecret', 'an inner line break', 'SYN-SECRET\n原字节'],
+    ['systemToken', 'an inner TAB', 'SYN-TOKEN\t原字节'], ['appSecret', 'a C1 control', 'SYN-SECRET原字节\u0085'],
+    // Invisible format characters (Cf) and lone surrogates (Cs) survive trim(): blocked with the same hint (J-F1).
+    ['systemToken', 'a trailing zero-width space', `SYN-TOKEN原字节${codeUnit(0x200b)}`], ['appKey', 'an inner zero-width space', `SYN-KEY${codeUnit(0x200b)}原字节`],
+    ['appKey', 'a leading bidi embedding', `${codeUnit(0x202a)}SYN-KEY原字节`], ['appSecret', 'a trailing word joiner', `SYN-SECRET原字节${codeUnit(0x2060)}`],
+    ['appSecret', 'a lone surrogate', `SYN-SECRET${codeUnit(0xd800)}原字节`],
+  ] as const)('%s with %s: a hint naming only the field, and nothing is sent', async (key, _label, value) => {
+    await openWithProbe(); await pasteInto(key, value)
+    const hint = q('material-hint').textContent ?? ''
+    expect(hint.includes(key) && hint.includes('本页不会发送')).toBe(true)
+    for (const secret of [value, value.trim(), ...Object.values(material)]) expect(hint.includes(secret)).toBe(false)
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+    // The connection test sends appKey/appSecret only, so a blocked systemToken leaves it available.
+    expect(q<HTMLButtonElement>('connection-test').disabled).toBe(key !== 'systemToken')
+    await click('submit'); if (key !== 'systemToken') await click('connection-test')
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    await pasteInto(key, pasted[key])
+    expect(absent('material-hint')).toBe(true)
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false); expect(q<HTMLButtonElement>('connection-test').disabled).toBe(false)
+  })
+
+  it('the client refuses a padded or control-character credential before any request and keeps the ready command', async () => {
+    const value = createYidaInitializationClient(); clients.push(value)
+    fetchSpy.mockResolvedValueOnce(json(ready(false, true))); await value.observe()
+    const probeRequest = (appKey: string, appSecret: string) => ({ commandId: ids.command, mode: 'candidate' as const, material: { appKey, appSecret } })
+    for (const [appKey, appSecret] of [[pasted.appKey, material.appSecret], [material.appKey, pasted.appSecret],
+      [material.appKey, 'SYN\u0000SECRET'], [`${material.appKey} `, material.appSecret]]) {
+      await expect(value.testConnection(probeRequest(appKey, appSecret))).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_INPUT_INVALID' })
+    }
+    for (const patch of [{ systemToken: pasted.systemToken }, { appKey: pasted.appKey }, { appSecret: `\u3000${material.appSecret}` }, { systemToken: 'SYN\u007fTOKEN' }]) {
+      const sample = payload()
+      await expect(value.initialize({ ...sample, material: { ...sample.material, ...patch } })).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_INPUT_INVALID' })
+    }
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    // Refused locally, so the observed ready command is not consumed: the unpadded payload initializes.
+    fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await expect(value.initialize(payload())).resolves.toMatchObject({ status: 'initialized' })
+  })
+  it('the client refuses a zero-width, bidi, BOM or lone-surrogate credential before any request (J-F1)', async () => {
+    const value = createYidaInitializationClient(); clients.push(value)
+    fetchSpy.mockResolvedValueOnce(json(ready(false, true))); await value.observe()
+    const probeRequest = (appKey: string, appSecret: string) => ({ commandId: ids.command, mode: 'candidate' as const, material: { appKey, appSecret } })
+    for (const [appKey, appSecret] of [[`${material.appKey}${codeUnit(0x200b)}`, material.appSecret], [material.appKey, `${codeUnit(0x202a)}${material.appSecret}`],
+      [`SYN${codeUnit(0xfeff)}KEY`, material.appSecret], [material.appKey, `SYN${codeUnit(0xd800)}SECRET`]]) {
+      await expect(value.testConnection(probeRequest(appKey, appSecret))).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_INPUT_INVALID' })
+    }
+    for (const patch of [{ systemToken: `${material.systemToken}${codeUnit(0x200b)}` }, { appKey: `${codeUnit(0x200e)}${material.appKey}` },
+      { appSecret: `SYN${codeUnit(0x2060)}SECRET` }, { systemToken: `SYN${codeUnit(0xdc00)}TOKEN` }]) {
+      const sample = payload()
+      await expect(value.initialize({ ...sample, material: { ...sample.material, ...patch } })).rejects.toMatchObject({ code: 'YIDA_INITIALIZATION_INPUT_INVALID' })
+    }
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    // Refused locally, so the observed ready command is not consumed: the unpadded payload initializes.
+    fetchSpy.mockResolvedValueOnce(json(initialized(false, true), 201)); await expect(value.initialize(payload())).resolves.toMatchObject({ status: 'initialized' })
   })
 })

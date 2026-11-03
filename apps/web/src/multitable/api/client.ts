@@ -39,6 +39,7 @@ import type {
   PersonalViewConfigResponse,
   DeletePersonalViewConfigResponse,
   CreateRecordInput,
+  PatchManualRowFieldsInput,
   PatchRecordsInput,
   FormSubmitInput,
   MultitableComment,
@@ -3698,6 +3699,37 @@ export class MultitableApiClient implements CommentsApiClient {
   async patchRecords(input: PatchRecordsInput): Promise<PatchResult> {
     const res = await this.fetch('/api/multitable/patch', {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return this.parseJson(res)
+  }
+
+  // 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.2–§3.4; host routes of #6664, session requests only).
+  // 新增: `data` is { <physical field id>: value }; the server stamps 项目号, the row's own `manual:v1:` key and 有效.
+  async createManualRow(sheetId: string, data: Record<string, unknown>): Promise<{ record: MetaRecord }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/manual-rows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data }),
+    })
+    return this.parseJson(res)
+  }
+
+  // 复制为新行: a NEW manual row from the whitelisted columns of `recordId` (the server picks the columns).
+  async copyAsManualRow(recordId: string, params?: { sheetId?: string }): Promise<{ record: MetaRecord }> {
+    const res = await this.fetch(`/api/multitable/records/${encodeURIComponent(recordId)}/manual-copy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params?.sheetId ? { sheetId: params.sheetId } : {}),
+    })
+    return this.parseJson(res)
+  }
+
+  // 修改: the six fillable columns of one manual row; every other column keeps going through `patchRecords`.
+  async patchManualRowFields(recordId: string, input: PatchManualRowFieldsInput): Promise<PatchResult> {
+    const res = await this.fetch(`/api/multitable/records/${encodeURIComponent(recordId)}/manual-fields`, {
+      method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
