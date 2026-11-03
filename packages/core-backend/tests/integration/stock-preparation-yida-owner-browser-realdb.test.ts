@@ -209,7 +209,7 @@ databaseSuite('SA05 owner browser — isolated real panel and actual HTTP/PG aut
     await page.getByTestId('sp-yida-allocation-project-field').selectOption('projectNo')
     await page.getByTestId('sp-yida-allocation-quantity-field').selectOption('quantity')
     await page.getByTestId('sp-yida-run').click()
-    await page.getByTestId('sp-yida-initialization-open').waitFor()
+    await page.locator('[data-testid="sp-yida-initialization-open"]:enabled').waitFor()
     expect(await page.getByTestId('sp-yida-summary').innerText()).toBe('共 3 行；计划创建 3；计划更新 0；无效 0；本地重复键 0。')
     expect(JSON.parse(await page.getByTestId('sp-yida-payload-2').innerText())).toEqual(host.compiledPayload(expected, 2))
     await ui.settled()

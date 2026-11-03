@@ -26,6 +26,7 @@ import { usePinnedServer } from '../utils/pinned-server'
 // R-66 ① exemption and the switch, on a sheet the real plugin provisioned — a cases module registered at the end of this
 // file, so it runs in this file's existing real-DB lane.
 import { defineStockPreparationManualRowsHostRealDbCases } from './stock-preparation-manual-rows-host-realdb.cases'
+import { defineStockPreparationManualRowsSwitchRealDbCases } from './stock-preparation-manual-rows-switch-realdb.cases'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -579,3 +580,6 @@ describePlmDeleteIfDatabase('R-66: PLM rows on stock-preparation template sheets
 })
 
 defineStockPreparationManualRowsHostRealDbCases()
+// 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §8 「B4」 5): the plugin's switch routes write the switch, the
+// host refuses the create — on the same real database, through this file's already-registered real-DB lane.
+defineStockPreparationManualRowsSwitchRealDbCases()
