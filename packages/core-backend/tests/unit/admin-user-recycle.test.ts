@@ -35,10 +35,15 @@ function clientFor(users: UserRow[], extras: { aliases?: string[]; identities?: 
       const id = String(params[0] ?? '')
       const user = users.find((row) => row.id === id)
       if (statement.includes('SET access_generation')) return { rows: [{ access_generation: 1 }] }
+      if (statement.includes('is_sign_in_admin')) {
+        const signIn = Boolean(user && user.is_active && !user.deleted_at && !user.purged_at && (user.is_admin || user.role === 'admin'))
+        return { rows: [{ is_sign_in_admin: signIn }] }
+      }
       if (statement.includes('COUNT(*)')) {
-        const liveAdmins = users.filter((row) => row.id !== id && !row.deleted_at && !row.purged_at && (row.is_admin || row.role === 'admin'))
+        const liveAdmins = users.filter((row) => row.id !== id && row.is_active && !row.deleted_at && !row.purged_at && (row.is_admin || row.role === 'admin'))
         return { rows: [{ c: liveAdmins.length }] }
       }
+      if (statement.includes('to_regclass')) return { rows: [{ rel: String(params[0] ?? '') }] }
       if (statement.includes('FOR UPDATE') && statement.includes('FROM users')) {
         if (!user) return { rows: [] }
         return {
@@ -162,6 +167,13 @@ describe('user recycle bin', () => {
     expect(identities).toEqual([])
     expect(db.sql.some((statement) => /DELETE\s+FROM\s+users\b/i.test(statement))).toBe(false)
     expect(db.sql.some((statement) => statement.includes('DELETE FROM user_login_aliases'))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes('hire_date = NULL'))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes('cumulative_service_start_date = NULL'))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes('last_login_at = NULL'))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes('UPDATE directory_accounts'))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes("link_status = 'unlinked'"))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes('user_login_alias_collision_report'))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes('UPDATE audit_logs'))).toBe(true)
   })
 
   it('declares recycle columns in the migration', () => {
@@ -170,5 +182,19 @@ describe('user recycle bin', () => {
       expect(migration).toContain(column)
     }
     expect(migration).not.toContain('DROP TABLE users')
+    expect(migration).toContain('active_before_delete')
+    expect(migration).toContain('purged_at IS NULL')
+  })
+
+  it('does not treat an inactive administrator as the last sign-in admin', async () => {
+    const users: UserRow[] = [
+      { id: 'admin-inactive', email: 'old@example.com', name: '旧管理员', is_active: false, is_admin: true, role: 'admin', deleted_at: null, deleted_by: null, purge_after: null, purged_at: null, active_before_delete: null, department: null },
+      { id: 'admin-live', email: 'live@example.com', name: '在任', is_active: true, is_admin: true, role: 'admin', deleted_at: null, deleted_by: null, purge_after: null, purged_at: null, active_before_delete: null, department: null },
+    ]
+    const db = clientFor(users)
+    const moved = await applyRecycleMove(db, { userId: 'admin-inactive', actorId: 'admin-live', retentionDays: 30, index: 0 })
+    expect(moved.ok).toBe(true)
+    const blocked = await applyRecycleMove(db, { userId: 'admin-live', actorId: 'admin-inactive', retentionDays: 30, index: 1 })
+    expect(blocked.code).toBe('LAST_PLATFORM_ADMIN')
   })
 })

@@ -99,8 +99,29 @@ describe('recycle review against a fresh migrated synthetic PostgreSQL database'
     expect((await query('SELECT access_generation::int, is_active FROM users WHERE id = $1', [userId])).rows).toEqual([{ access_generation: 2, is_active: true }])
     expect((await move(userId)).ok).toBe(true)
     expect((await transaction(client => applyRecyclePurge(client, { userId, actorId: 'synthetic-operator', index: 0, passwordHash: 'synthetic-unusable' }))).ok).toBe(true)
-    expect((await query('SELECT access_generation::int, is_active, email FROM users WHERE id = $1', [userId])).rows).toEqual([{ access_generation: 4, is_active: false, email: null }])
+    expect((await query('SELECT access_generation::int, is_active, email, hire_date, last_login_at, cumulative_service_start_date FROM users WHERE id = $1', [userId])).rows).toEqual([{
+      access_generation: 4,
+      is_active: false,
+      email: null,
+      hire_date: null,
+      last_login_at: null,
+      cumulative_service_start_date: null,
+    }])
     expect((await query('SELECT role_id FROM user_roles WHERE user_id = $1', [userId])).rows).toEqual([])
+    const scrubbed = await query(
+      `SELECT a.name, a.email, a.mobile, a.is_active, l.link_status, l.local_user_id
+       FROM directory_accounts a
+       JOIN directory_account_links l ON l.directory_account_id = a.id
+       WHERE a.external_user_id LIKE 'purged:' || a.id::text`,
+    )
+    expect(scrubbed.rows).toEqual([{
+      name: '已清除用户',
+      email: null,
+      mobile: null,
+      is_active: false,
+      link_status: 'unlinked',
+      local_user_id: null,
+    }])
   })
 
   it('revokes tokens on recycling and fails closed on a recycled or purged creator even if active', async () => {

@@ -14,13 +14,22 @@ import { lockUsersForAccessGraphWrite, supersedeDeprovisionEvidenceForAccessGrap
 import { lockNamespaceAdmissionWrites, disableNamespaceAdmissionsWithoutRoles, listRoleNamespaces } from '../rbac/namespace-admission'
 import { unassignUserRoles } from '../rbac/role-assignment'
 import { invalidateUserPerms } from '../rbac/service'
+import { escapeLikePattern } from './user-visibility'
 
 export const USER_RECYCLE_RETENTION_DEFAULT_DAYS = 30
 export const USER_RECYCLE_RETENTION_MIN_DAYS = 1
 export const USER_RECYCLE_RETENTION_MAX_DAYS = 3650
 export const USER_RECYCLE_PURGE_CONFIRM_TEXT = '立即清除'
+export const USER_RECYCLE_PURGE_CONFIRM_TEXT_EN = 'Purge now'
+export const USER_RECYCLE_PURGE_CONFIRM_TEXTS = [USER_RECYCLE_PURGE_CONFIRM_TEXT, USER_RECYCLE_PURGE_CONFIRM_TEXT_EN] as const
 export const USER_TOMBSTONE_NAME = '已清除用户'
 export const USER_RECYCLE_SWEEP_BATCH = 100
+export const PLATFORM_ADMIN_ADVISORY_LOCK_SQL =
+  "SELECT pg_advisory_xact_lock(hashtextextended('user-recycle:platform-admin', 0))"
+
+export function acceptsRecyclePurgeConfirm(value: unknown): boolean {
+  return typeof value === 'string' && (USER_RECYCLE_PURGE_CONFIRM_TEXTS as readonly string[]).includes(value)
+}
 
 const PLATFORM_ADMIN_PREDICATE = `(
   COALESCE(u.is_admin, FALSE) IS TRUE
@@ -28,13 +37,47 @@ const PLATFORM_ADMIN_PREDICATE = `(
   OR EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = u.id AND ur.role_id = 'admin')
 )`
 
+const SIGN_IN_PLATFORM_ADMIN_PREDICATE = `
+  COALESCE(u.is_active, FALSE) IS TRUE
+  AND u.deleted_at IS NULL
+  AND u.purged_at IS NULL
+  AND ${PLATFORM_ADMIN_PREDICATE}
+`
+
 export const LIVE_PLATFORM_ADMIN_COUNT_SQL = `
   SELECT COUNT(*)::int AS c
   FROM users u
-  WHERE u.deleted_at IS NULL
-    AND u.purged_at IS NULL
-    AND ${PLATFORM_ADMIN_PREDICATE}
+  WHERE ${SIGN_IN_PLATFORM_ADMIN_PREDICATE}
 `
+
+/**
+ * Take this before any users-row lock in the same transaction.
+ * pg_advisory_xact_lock is reentrant, so a second call in the same transaction is safe.
+ * Sharing this lock with recycle, disable, and admin demotion keeps the last
+ * sign-in-capable platform admin from being removed by two concurrent paths.
+ */
+export async function lockPlatformAdminInvariant(client: RecycleClient): Promise<void> {
+  await client.query(PLATFORM_ADMIN_ADVISORY_LOCK_SQL)
+}
+
+/** True when this user can currently sign in as a platform admin and nobody else can. */
+export async function isLastSignInPlatformAdmin(client: RecycleClient, userId: string): Promise<boolean> {
+  const self = await client.query(
+    `SELECT (${SIGN_IN_PLATFORM_ADMIN_PREDICATE}) AS is_sign_in_admin
+     FROM users u
+     WHERE u.id = $1`,
+    [userId],
+  )
+  if (self.rows[0]?.is_sign_in_admin !== true) return false
+  const remaining = await client.query(
+    `SELECT COUNT(*)::int AS c
+     FROM users u
+     WHERE u.id <> $1
+       AND ${SIGN_IN_PLATFORM_ADMIN_PREDICATE}`,
+    [userId],
+  )
+  return readCount(remaining.rows) < 1
+}
 
 export type RecycleClient = {
   query: (
@@ -126,15 +169,11 @@ export async function applyRecycleMove(
   input: { userId: string; actorId: string; retentionDays: number; index: number; now?: Date },
 ): Promise<BatchItemResult> {
   const now = input.now ?? new Date()
-  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('user-recycle:platform-admin', 0))")
+  await lockPlatformAdminInvariant(client)
   await lockNamespaceAdmissionWrites(client, input.userId)
   await lockUsersForAccessGraphWrite(client, [input.userId])
   const locked = await client.query(
-    `SELECT id, email,
-            deleted_at, purged_at,
-            (COALESCE(is_admin, FALSE) IS TRUE OR role = 'admin' OR EXISTS (
-              SELECT 1 FROM user_roles ur WHERE ur.user_id = users.id AND ur.role_id = 'admin'
-            )) AS is_platform_admin
+    `SELECT id, email, deleted_at, purged_at
      FROM users
      WHERE id = $1
      FOR UPDATE`,
@@ -152,19 +191,8 @@ export async function applyRecycleMove(
   if (textOrNull(row.deleted_at)) {
     return item(input.index, input.userId, email, true, 'ALREADY_IN_RECYCLE', '已在回收站')
   }
-  if (row.is_platform_admin === true) {
-    const remaining = await client.query(
-      `SELECT COUNT(*)::int AS c
-       FROM users u
-       WHERE u.deleted_at IS NULL
-         AND u.purged_at IS NULL
-         AND u.id <> $1
-         AND ${PLATFORM_ADMIN_PREDICATE}`,
-      [input.userId],
-    )
-    if (readCount(remaining.rows) < 1) {
-      return item(input.index, input.userId, email, false, 'LAST_PLATFORM_ADMIN', '至少保留一名平台管理员')
-    }
+  if (await isLastSignInPlatformAdmin(client, input.userId)) {
+    return item(input.index, input.userId, email, false, 'LAST_PLATFORM_ADMIN', '至少保留一名可登录的平台管理员')
   }
   const days = Math.min(
     USER_RECYCLE_RETENTION_MAX_DAYS,
@@ -242,7 +270,7 @@ export async function applyRecyclePurge(
   await lockNamespaceAdmissionWrites(client, input.userId)
   await lockUsersForAccessGraphWrite(client, [input.userId])
   const locked = await client.query(
-    `SELECT id, email, deleted_at, purged_at, deleted_at::text AS deletion_version, purge_after
+    `SELECT id, email, username, mobile, deleted_at, purged_at, deleted_at::text AS deletion_version, purge_after
      FROM users
      WHERE id = $1
      FOR UPDATE`,
@@ -296,6 +324,9 @@ export async function applyRecyclePurge(
          role = 'user',
          local_password_set = FALSE,
          must_change_password = TRUE,
+         hire_date = NULL,
+         cumulative_service_start_date = NULL,
+         last_login_at = NULL,
          purged_at = $4,
          purged_by = $5,
          updated_at = $4
@@ -307,8 +338,105 @@ export async function applyRecyclePurge(
   )
   if (!updated.rows[0]) return item(input.index, input.userId, null, false, 'NOT_IN_RECYCLE_BIN', '只能清除回收站中的账号')
   await client.query('UPDATE multitable_api_tokens SET revoked = TRUE, revoked_at = COALESCE(revoked_at, NOW()) WHERE created_by = $1', [input.userId])
+  await scrubPurgedUserIdentity(client, {
+    userId: input.userId,
+    email: textOrNull(row.email),
+    username: textOrNull(row.username),
+    mobile: textOrNull(row.mobile),
+    at: now.toISOString(),
+  })
   await supersedeDeprovisionEvidenceForAccessGraphWrite(client, { userIds: [input.userId], actorId: input.actorId, reason: 'user-purged' })
   return item(input.index, input.userId, null, true, null, '已清除个人身份，历史记录仍保留')
+}
+
+async function relationExists(client: RecycleClient, name: string): Promise<boolean> {
+  const found = await client.query('SELECT to_regclass($1) AS rel', [name])
+  const rel = found.rows[0]?.rel
+  return rel !== null && rel !== undefined && String(rel).length > 0
+}
+
+function distinctiveIdentifier(value: string | null, minLength: number): string {
+  if (!value || value.trim().length < minLength) return ''
+  return value.trim()
+}
+
+/**
+ * Remove identity copies that would survive the users-row tombstone.
+ * Directory keys are rewritten so the next sync cannot upsert the old PII back
+ * onto the same row. Missing relations are skipped so a partial schema still purges.
+ */
+export async function scrubPurgedUserIdentity(
+  client: RecycleClient,
+  input: { userId: string; email: string | null; username: string | null; mobile: string | null; at: string },
+): Promise<void> {
+  const aliases = [input.email, input.username, input.mobile]
+    .map((value) => (value ? value.trim().toLowerCase() : ''))
+    .filter((value) => value.length > 0)
+  if (await relationExists(client, 'directory_account_links')) {
+    if (await relationExists(client, 'directory_accounts')) {
+      await client.query(
+        `UPDATE directory_accounts AS account
+         SET name = $2,
+             nick = NULL,
+             email = NULL,
+             mobile = NULL,
+             job_number = NULL,
+             title = NULL,
+             avatar_url = NULL,
+             org_email = NULL,
+             open_id = NULL,
+             union_id = NULL,
+             raw = '{}'::jsonb,
+             is_active = FALSE,
+             external_user_id = 'purged:' || account.id::text,
+             external_key = 'purged:' || account.id::text,
+             updated_at = $3::timestamptz
+         WHERE account.id IN (
+           SELECT directory_account_id
+           FROM directory_account_links
+           WHERE local_user_id = $1
+         )`,
+        [input.userId, USER_TOMBSTONE_NAME, input.at],
+      )
+    }
+    await client.query(
+      `UPDATE directory_account_links
+       SET link_status = 'unlinked',
+           local_user_id = NULL,
+           updated_at = $2::timestamptz
+       WHERE local_user_id = $1`,
+      [input.userId, input.at],
+    )
+  }
+  if (await relationExists(client, 'user_login_alias_collision_report')) {
+    await client.query(
+      `UPDATE user_login_alias_collision_report
+       SET normalized_value = 'redacted:' || id::text
+       WHERE $1::text = ANY(candidate_user_ids)
+          OR normalized_value = ANY($2::text[])`,
+      [input.userId, aliases],
+    )
+  }
+  const email = distinctiveIdentifier(input.email, 3)
+  const mobile = distinctiveIdentifier(input.mobile, 6)
+  const username = distinctiveIdentifier(input.username, 3)
+  for (const table of ['audit_logs', 'audit_logs_archive']) {
+    if (!(await relationExists(client, table))) continue
+    await client.query(
+      `UPDATE ${table}
+       SET action_details = jsonb_build_object('redacted', true, 'reason', 'user-purged'),
+           user_email = NULL,
+           user_name = NULL,
+           request_body = NULL,
+           resource_name = CASE WHEN resource_id = $1 THEN $5 ELSE resource_name END
+       WHERE resource_id = $1
+          OR ($2 <> '' AND user_email = $2)
+          OR ($2 <> '' AND position($2 in COALESCE(action_details::text, '')) > 0)
+          OR ($3 <> '' AND position($3 in COALESCE(action_details::text, '')) > 0)
+          OR ($4 <> '' AND position($4 in COALESCE(action_details::text, '')) > 0)`,
+      [input.userId, email, mobile, username, USER_TOMBSTONE_NAME],
+    )
+  }
 }
 
 export async function listDueRecycleUsers(client: RecycleClient, now: Date, limit = USER_RECYCLE_SWEEP_BATCH): Promise<Array<{ id: string; deletedAt: string }>> {
@@ -442,10 +570,10 @@ export async function purgeRecycleUsers(input: {
 }
 
 export async function listRecycleBin(input: { q?: string; limit: number; offset: number }): Promise<{ total: number; items: RecycleBinUser[] }> {
-  const term = input.q?.trim() ? `%${input.q.trim()}%` : ''
+  const term = input.q?.trim() ? `%${escapeLikePattern(input.q.trim())}%` : ''
   const where = term
     ? `WHERE deleted_at IS NOT NULL AND purged_at IS NULL AND (
-        COALESCE(email, '') ILIKE $1 OR COALESCE(name, '') ILIKE $1 OR COALESCE(department, '') ILIKE $1 OR id ILIKE $1
+        COALESCE(email, '') ILIKE $1 ESCAPE E'\\\\' OR COALESCE(name, '') ILIKE $1 ESCAPE E'\\\\' OR COALESCE(department, '') ILIKE $1 ESCAPE E'\\\\' OR id ILIKE $1 ESCAPE E'\\\\'
       )`
     : 'WHERE deleted_at IS NOT NULL AND purged_at IS NULL'
   const count = await query<{ c: number }>(

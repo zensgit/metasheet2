@@ -4814,15 +4814,17 @@ export class MetaSheetServer {
       this.logger.error('DingTalk approval-card/person delivery retention scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 
-    // User recycle bin: anonymize accounts whose retention window has elapsed.
-    // Enabled by default (USER_RECYCLE_RETENTION_DAYS, default 30). Opt out with
-    // USER_RECYCLE_SWEEPER_DISABLED=1. Does not delete the users row.
+    // User recycle bin. Automatic purge stays OFF unless USER_RECYCLE_SWEEPER_ENABLED
+    // is the exact string true. Anonymizing identity is irreversible, and this sweeper
+    // does not elect a leader, so the default matches the flag manifest: do not start.
+    // USER_RECYCLE_SWEEPER_DISABLED=1 is an extra kill switch. The admin UI must say
+    // that expiry does not clear identity while the sweeper is off. The users row is kept.
     try {
       const userRecycleSweeper = startUserRecycleSweeper()
       this.logger.info(
         userRecycleSweeper
           ? 'User recycle sweeper initialized'
-          : 'User recycle sweeper disabled (USER_RECYCLE_SWEEPER_DISABLED=1 or test runtime)',
+          : 'User recycle sweeper disabled (set USER_RECYCLE_SWEEPER_ENABLED=true to enable; USER_RECYCLE_SWEEPER_DISABLED=1 forces off)',
       )
     } catch (e) {
       this.logger.error('User recycle sweeper initialization failed; continuing in degraded mode', e as Error)
