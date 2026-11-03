@@ -15,6 +15,9 @@ export default defineConfig({
     exclude: [
       '**/node_modules/**',
       '**/dist/**',
+      // The enablement walk: its own trust-off step in tasks-realdb.yml (vitest.tasks-enablement.config.ts).
+      // Its module guard throws under any other config, so a bare run here would only report it as failed.
+      'tests/integration/task-enablement-http.db.test.ts',
     ],
     testTimeout: 30000,
     hookTimeout: 15000,
