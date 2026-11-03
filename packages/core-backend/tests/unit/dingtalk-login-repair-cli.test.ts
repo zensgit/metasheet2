@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   REPAIR_CLI_QUERY_TIMEOUT_FLOOR_MS,
+  REPAIR_CLI_QUERY_TIMEOUT_MAX_MS,
   classifyRepairFailure,
   guardRepairProcess,
   resolveRepairClientTimeout,
@@ -43,12 +44,25 @@ describe('resolveRepairClientTimeout', () => {
     [{ DB_QUERY_TIMEOUT: '1e9' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' }],
     [{ DB_STATEMENT_TIMEOUT: 'x' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' }],
     [{ DB_STATEMENT_TIMEOUT: '-5' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' }],
+    // Upper bound: Node arms a larger setTimeout delay as 1 ms, so pg's read timer would fire at once.
+    [{ DB_QUERY_TIMEOUT: '2147483647' }, { ok: true, value: 2147483647, floor: 45000, explicit: true }],
+    [{ DB_QUERY_TIMEOUT: '2147483648' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH' }],
+    [{ DB_QUERY_TIMEOUT: '9999999999' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH' }],
+    // PostgreSQL's own maximum statement_timeout: the floor (budget + 15 s) cannot be armed.
+    [{ DB_STATEMENT_TIMEOUT: '2147483647' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH' }],
+    [{ DB_STATEMENT_TIMEOUT: '2147468648' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH' }],
+    [{ DB_STATEMENT_TIMEOUT: '2147468647' }, { ok: true, value: 2147483647, floor: 2147483647, explicit: false }],
+    [
+      { DB_STATEMENT_TIMEOUT: '2147483647', DB_QUERY_TIMEOUT: '2147483647' },
+      { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH' },
+    ],
   ] as const)('%j', (env, expected) => {
     expect(resolveRepairClientTimeout({ ...env })).toEqual(expected)
   })
 
-  it('the floor is never below 45 seconds', () => {
+  it('the floor is never below 45 seconds, and no accepted value exceeds the largest delay Node can arm', () => {
     expect(REPAIR_CLI_QUERY_TIMEOUT_FLOOR_MS).toBe(45000)
+    expect(REPAIR_CLI_QUERY_TIMEOUT_MAX_MS).toBe(2 ** 31 - 1)
     expect(resolveRepairClientTimeout({ DB_STATEMENT_TIMEOUT: '1000' })).toMatchObject({ floor: 45000 })
   })
 })
@@ -135,6 +149,16 @@ describe('runRepairCli', () => {
       expect(await h.go()).toBe(1)
       expect(run).not.toHaveBeenCalled()
       expect(h.err).toEqual(['REPAIR_CLIENT_TIMEOUT_TOO_LOW'])
+    }
+  })
+
+  it('refuses when the pool holds a value above the largest delay Node can arm, before running anything', async () => {
+    for (const effective of [2147483648, 9999999999, Number.POSITIVE_INFINITY]) {
+      const run = vi.fn(async () => ({}))
+      const h = harness({ effectiveClientQueryTimeoutMs: () => effective, run })
+      expect(await h.go()).toBe(1)
+      expect(run).not.toHaveBeenCalled()
+      expect(h.err).toEqual(['REPAIR_CLIENT_TIMEOUT_TOO_HIGH'])
     }
   })
 
@@ -353,10 +377,34 @@ describe('entry process (child, no database)', () => {
     expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW\n' })
   }, 30000)
 
+  it.each([
+    [{ DB_STATEMENT_TIMEOUT: '2147483647' }],
+    [{ DB_QUERY_TIMEOUT: '2147483648' }],
+    [{ DB_QUERY_TIMEOUT: '9999999999' }],
+  ])('a client timeout above 2^31-1 ms (%j) refuses without loading or connecting', async (extra) => {
+    const r = await spawnEntry(['preview', path.join(dir, 'nonexistent.json')], extra)
+    expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH\n' })
+    expect(r.ms).toBeLessThan(10000)
+  }, 30000)
+
+  it('the largest client timeout Node can arm is accepted by the post-load assertion', async () => {
+    const r = await spawnEntry(['nonsense'], { DB_QUERY_TIMEOUT: '2147483647' })
+    expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_INPUT_INVALID\n' })
+  }, 30000)
+
   it('with DB_QUERY_TIMEOUT unset the dynamically loaded pool holds the preset (the assertion runs before argv validation)', async () => {
     const r = await spawnEntry(['nonsense'])
     expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_INPUT_INVALID\n' })
   }, 30000)
+
+  // The documented invocation itself is run through pnpm in the real-database CLI cases.
+  it('every operator command in the doc runs through `pnpm --silent`, the flag before the script name', async () => {
+    const doc = await readFile(path.join(backendRoot, '../../docs/development/dingtalk-login-identity-repair-20261102.md'), 'utf8')
+    const blocks = [...doc.matchAll(/^```sh\n([\s\S]*?)^```$/gm)].map((m) => m[1])
+    const commands = blocks.flatMap((b) => b.split('\n')).filter((l) => l.includes('ops:dingtalk-login-repair'))
+    expect(commands.length).toBeGreaterThanOrEqual(7)
+    for (const line of commands) expect(line).toMatch(/^pnpm --silent ops:dingtalk-login-repair [a-z-]+ /)
+  })
 
   it('the pool warning for an unset DATABASE_URL (non-production) does not reach stdout or stderr', async () => {
     const r = await spawnEntry(['nonsense'], { DATABASE_URL: undefined })

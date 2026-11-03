@@ -6,6 +6,11 @@ import { REPAIR_CLI_CODES, REPAIR_REFUSAL_CODES } from './dingtalk-identity-repa
 
 /** The CLI's client read timeout must exceed the server budget so the server's 57014 ends a stuck statement first. */
 export const REPAIR_CLI_QUERY_TIMEOUT_FLOOR_MS = 45000
+/**
+ * pg arms the client read timeout with setTimeout(); Node turns any delay above 2^31-1 ms into 1 ms,
+ * so a larger value would end every query at once. Neither the explicit value nor the floor may exceed it.
+ */
+export const REPAIR_CLI_QUERY_TIMEOUT_MAX_MS = 2147483647
 const PRINTABLE: ReadonlySet<string> = new Set<string>([...REPAIR_REFUSAL_CODES, ...REPAIR_CLI_CODES])
 
 /** Same parse as connection-pool.ts (parseInt base 10), so the gate evaluates what the pool will actually hold. */
@@ -19,16 +24,19 @@ export function resolveRepairClientTimeout(
   env: NodeJS.ProcessEnv,
 ):
   | { ok: true; value: number; floor: number; explicit: boolean }
-  | { ok: false; code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' } {
+  | { ok: false; code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' | 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH' } {
   const statement = parsePositiveInt(env.DB_STATEMENT_TIMEOUT, 30000)
   // Unparsable server budget: no floor can be established.
   if (statement === null) return { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' }
   const floor = Math.max(REPAIR_CLI_QUERY_TIMEOUT_FLOOR_MS, statement + 15000)
+  // A server budget this large leaves no client timeout that both exceeds it and can be armed.
+  if (floor > REPAIR_CLI_QUERY_TIMEOUT_MAX_MS) return { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH' }
   const raw = env.DB_QUERY_TIMEOUT
   if (raw === undefined || raw.trim() === '') return { ok: true, value: floor, floor, explicit: false }
   const value = parsePositiveInt(raw, 0)
   // An explicit lower or unparsable value refuses; it is never overridden.
   if (value === null || value < floor) return { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' }
+  if (value > REPAIR_CLI_QUERY_TIMEOUT_MAX_MS) return { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH' }
   return { ok: true, value, floor, explicit: true }
 }
 
@@ -131,6 +139,7 @@ export async function runRepairCli(
     // What the pool actually holds, asserted before any argument, file or database work.
     const effective = main.effectiveClientQueryTimeoutMs()
     if (typeof effective !== 'number' || !(effective >= t.floor)) throw new Error('REPAIR_CLIENT_TIMEOUT_TOO_LOW')
+    if (effective > REPAIR_CLI_QUERY_TIMEOUT_MAX_MS) throw new Error('REPAIR_CLIENT_TIMEOUT_TOO_HIGH')
     const result = await main.run(argv)
     io.stdout(JSON.stringify({ ...(result as Record<string, unknown>), clientQueryTimeoutMs: effective }))
     return 0

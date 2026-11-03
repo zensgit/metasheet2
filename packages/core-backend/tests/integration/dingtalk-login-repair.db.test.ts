@@ -3410,13 +3410,18 @@ suite('DingTalk controlled login repair', () => {
      * DB_SLOW_MS=0 by default: every pool query then crosses the slow-query log threshold, so any
      * logger output that reached the process streams would break the exact stdout/stderr assertions.
      */
-    const spawnCli = (f: Fixture, args: string[], extra: Record<string, string> = {}) =>
+    const spawnCli = (f: Fixture, args: string[], extra: Record<string, string> = {}, viaPnpm = false) =>
       new Promise<{ code: number | null; stdout: string; stderr: string; ms: number }>((resolve, reject) => {
         const started = Date.now()
-        const child = spawn(process.execPath, ['--import', tsxLoader, entry, ...args], {
+        // viaPnpm: the operator invocation the doc gives, `pnpm --silent ops:dingtalk-login-repair ...`.
+        const [command, commandArgs] = viaPnpm
+          ? ['pnpm', ['--silent', 'ops:dingtalk-login-repair', ...args]]
+          : [process.execPath, ['--import', tsxLoader, entry, ...args]]
+        const child = spawn(command, commandArgs, {
           cwd: backendRoot,
           env: {
             PATH: process.env.PATH ?? '',
+            ...(viaPnpm && process.env.HOME ? { HOME: process.env.HOME } : {}),
             NODE_ENV: 'test',
             TSX_DISABLE_CACHE: '1',
             DB_SLOW_MS: '0',
@@ -3592,6 +3597,62 @@ suite('DingTalk controlled login repair', () => {
         await privateInput('recovery-again', { id: r.id, actorId: f.admin, actorPassword: f.password }),
       ])
       expect(again).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_NOT_ACTIVE\n' })
+    }, 90000)
+
+    it('through the documented `pnpm --silent` invocation: stdout is exactly the JSON on success, and a lock refusal keeps exit 75 and one code', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      const preview = await spawnCli(
+        f,
+        ['release-preview', await privateInput('recovery-pnpm', { id: r.id, actorId: f.admin, actorPassword: f.password })],
+        {},
+        true,
+      )
+      expect(preview).toMatchObject({ code: 0, stderr: '' })
+      expect(preview.stdout.split('\n')).toHaveLength(2)
+      expect(JSON.parse(preview.stdout)).toMatchObject({ clientQueryTimeoutMs: 45000, release: { mode: 'canonical' } })
+      const holder = await pool!.connect()
+      let busy: Awaited<ReturnType<typeof spawnCli>>
+      try {
+        await holder.query('BEGIN')
+        await holder.query('LOCK TABLE roles IN SHARE UPDATE EXCLUSIVE MODE')
+        busy = await spawnCli(
+          f,
+          [
+            'release',
+            await privateInput('release-pnpm', {
+              id: r.id,
+              actorId: f.admin,
+              actorPassword: f.password,
+              digest: JSON.parse(preview.stdout).digest,
+              confirm: 'release',
+            }),
+          ],
+          {},
+          true,
+        )
+      } finally {
+        await holder.query('ROLLBACK').catch(() => undefined)
+        holder.release()
+      }
+      expect(busy).toMatchObject({ code: 75, stdout: '', stderr: 'REPAIR_LOCK_BUSY\n' })
+      expect(await journalRow(r.id)).toMatchObject({ state: 'applied', released_account_ids: null })
+    }, 90000)
+
+    it('a client timeout above 2^31-1 ms refuses before connecting instead of ending every query at once (exit 69)', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      const before = await capture(f, r.id)
+      const input = await privateInput('recovery-max', { id: r.id, actorId: f.admin, actorPassword: f.password })
+      for (const extra of [{ DB_STATEMENT_TIMEOUT: '2147483647' }, { DB_QUERY_TIMEOUT: '2147483648' }, { DB_QUERY_TIMEOUT: '9999999999' }]) {
+        const refused = await spawnCli(f, ['release-preview', input], extra)
+        expect({ extra, ...refused, ms: 0 }).toEqual({ extra, code: 1, stdout: '', stderr: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH\n', ms: 0 })
+      }
+      // The largest delay Node arms as given is accepted, and pg's read timer then does not fire early.
+      const max = await spawnCli(f, ['release-preview', input], { DB_QUERY_TIMEOUT: '2147483647' })
+      expect(max).toMatchObject({ code: 0, stderr: '' })
+      expect(JSON.parse(max.stdout)).toMatchObject({ clientQueryTimeoutMs: 2147483647, release: { mode: 'canonical' } })
+      expect(await capture(f, r.id)).toEqual(before)
     }, 90000)
 
     it('a verify refusal prints only its code although every query of the run is logged as slow', async () => {
