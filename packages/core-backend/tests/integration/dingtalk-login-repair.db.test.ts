@@ -1,6 +1,8 @@
 /** Real PG transactions, synthetic provider only. No online binding or provider requests. */
 import { randomUUID } from 'node:crypto'
 import * as bcrypt from 'bcryptjs'
+import express from 'express'
+import request from 'supertest'
 import { describe, it, expect, vi } from 'vitest'
 const provider = vi.hoisted(() => ({
   config: vi.fn(),
@@ -26,7 +28,8 @@ vi.mock('../../src/integrations/dingtalk/client', async (original) => ({
 import { exchangeCodeForUser } from '../../src/auth/dingtalk-oauth'
 import * as revocations from '../../src/auth/session-revocation'
 import * as sessionRegistry from '../../src/auth/session-registry'
-import { AuthService } from '../../src/auth/AuthService'
+import { AuthService, authService } from '../../src/auth/AuthService'
+import { authRouter } from '../../src/routes/auth'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
 import { probeEncryptedStores } from '../../src/security/encrypted-store-probe'
 import { poolManager } from '../../src/integration/db/connection-pool'
@@ -65,7 +68,9 @@ async function fixture() {
     source = randomUUID(),
     account = randomUUID(),
     approval = randomUUID(),
-    corp = 'corp-' + randomUUID()
+    corp = 'corp-' + randomUUID(),
+    // Own org per fixture: rows linked in 'default' would leak into other suites' org-scoped samples.
+    org = 'login-repair-org-' + randomUUID()
   const password = 'SyntheticPassword-Only!42'
   await query(
     `INSERT INTO users(id,username,name,password_hash,is_active,is_admin,activation_status,local_password_set) VALUES($1,$1,$1,$2,true,false,'activated',true),($3,$3,$3,$2,true,true,'activated',true)`,
@@ -92,12 +97,12 @@ async function fixture() {
     )
   }
   await query(
-    "INSERT INTO user_orgs(user_id,org_id,is_active) VALUES($1,'default',true)",
-    [user],
+    "INSERT INTO user_orgs(user_id,org_id,is_active) VALUES($1,$2,true)",
+    [user, org],
   )
   await query(
-    `INSERT INTO directory_integrations(id,name,provider,corp_id,org_id,config,status,sync_enabled) VALUES($1,$2,'dingtalk',$3,'default','{"appKey":"synthetic-current-app"}','active',false)`,
-    [source, 'synthetic-' + user, corp],
+    `INSERT INTO directory_integrations(id,name,provider,corp_id,org_id,config,status,sync_enabled) VALUES($1,$2,'dingtalk',$3,$4,'{"appKey":"synthetic-current-app"}','active',false)`,
+    [source, 'synthetic-' + user, corp, org],
   )
   await query(
     `INSERT INTO directory_accounts(id,integration_id,corp_id,external_user_id,union_id,open_id,external_key,name) VALUES($1,$2,$3,$4,$5,$6,$4,'Synthetic old member')`,
@@ -122,8 +127,8 @@ async function fixture() {
     [user],
   )
   await query(
-    "INSERT INTO approval_instances(id,status,current_node_key,title,org_id) VALUES($1,'pending','approve','Synthetic retained todo','default')",
-    [approval],
+    "INSERT INTO approval_instances(id,status,current_node_key,title,org_id) VALUES($1,'pending','approve','Synthetic retained todo',$2)",
+    [approval, org],
   )
   await query(
     "INSERT INTO approval_assignments(instance_id,assignment_type,assignee_id,node_key,entry_epoch,is_active) VALUES($1,'user',$2,'approve',1,true)",
@@ -188,6 +193,7 @@ async function fixture() {
     user,
     admin,
     corp,
+    org,
     account,
     source,
     password,
@@ -259,6 +265,16 @@ suite('DingTalk controlled login repair', () => {
       f.password,
       'rollback',
     )
+    // A real credential minted before rollback: its iat cannot postdate the rollback watermark.
+    const issuer = new AuthService()
+    const preRollbackIat = issuer.readTokenPayload(
+      issuer.createToken({
+        id: f.user,
+        email: '',
+        role: 'user',
+      } as unknown as Parameters<AuthService['createToken']>[0]),
+    )?.iat
+    expect(typeof preRollbackIat).toBe('number')
     const undo = await rollbackDingTalkRepair(
       r.id,
       f.admin,
@@ -269,7 +285,7 @@ suite('DingTalk controlled login repair', () => {
     expect(undo.targetSessionsRevoked).toBe(true)
     expect(await identity(f.user)).toEqual(originalIdentity)
     expect(
-      await isUserSessionRevoked(f.user, Math.floor(Date.now() / 1000)),
+      await isUserSessionRevoked(f.user, preRollbackIat),
     ).toBe(true)
     expect(await f.graph()).toEqual(before)
     expect(
@@ -540,9 +556,9 @@ suite('DingTalk controlled login repair', () => {
   })
   it('revokes actual JWT verification, refresh, registry sessions and API tokens on apply and rollback', async () => {
     const f = await fixture()
-    const trust = process.env.TOKEN_TRUST,
+    const trust = process.env.RBAC_TOKEN_TRUST,
       bypass = process.env.RBAC_BYPASS
-    process.env.TOKEN_TRUST = 'false'
+    process.env.RBAC_TOKEN_TRUST = 'false'
     process.env.RBAC_BYPASS = 'false'
     try {
       const auth = new AuthService(),
@@ -597,8 +613,8 @@ suite('DingTalk controlled login repair', () => {
         ).rows,
       ).toHaveLength(0)
     } finally {
-      if (trust === undefined) delete process.env.TOKEN_TRUST
-      else process.env.TOKEN_TRUST = trust
+      if (trust === undefined) delete process.env.RBAC_TOKEN_TRUST
+      else process.env.RBAC_TOKEN_TRUST = trust
       if (bypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = bypass
     }
@@ -861,8 +877,8 @@ suite('DingTalk controlled login repair', () => {
     await applyDingTalkRepair(proof, p.digest, 'apply')
     const target = randomUUID()
     await query(
-      `INSERT INTO directory_integrations(id,name,provider,corp_id,org_id,config,status,sync_enabled) VALUES($1::uuid,$1::text,'dingtalk',$2,'default','{}','active',false)`,
-      [target, f.corp],
+      `INSERT INTO directory_integrations(id,name,provider,corp_id,org_id,config,status,sync_enabled) VALUES($1::uuid,$1::text,'dingtalk',$2,$3,'{}','active',false)`,
+      [target, f.corp, f.org],
     )
     await expect(
       applyDirectoryHandover(
@@ -876,8 +892,8 @@ suite('DingTalk controlled login repair', () => {
     const f = await fixture(),
       target = randomUUID()
     await query(
-      `INSERT INTO directory_integrations(id,name,provider,corp_id,org_id,config,status,sync_enabled) VALUES($1::uuid,$1::text,'dingtalk',$2,'default','{}','active',false)`,
-      [target, f.corp],
+      `INSERT INTO directory_integrations(id,name,provider,corp_id,org_id,config,status,sync_enabled) VALUES($1::uuid,$1::text,'dingtalk',$2,$3,'{}','active',false)`,
+      [target, f.corp, f.org],
     )
     await query(
       `INSERT INTO directory_handovers(source_integration_id,target_integration_id,state,before_state,after_digest,created_by,updated_by) VALUES($1,$2,'applied','{}','synthetic',$3,$3)`,
@@ -1293,8 +1309,8 @@ suite('DingTalk controlled login repair', () => {
         old = randomUUID(),
         account = randomUUID()
       await query(
-        `INSERT INTO directory_integrations(id,name,provider,corp_id,config,status) VALUES($1::uuid,$1::text,'dingtalk',$2,'{"appKey":"old-app","appSecret":"synthetic-no-network","rootDeptId":1}','active')`,
-        [old, f.corp],
+        `INSERT INTO directory_integrations(id,name,provider,corp_id,org_id,config,status) VALUES($1::uuid,$1::text,'dingtalk',$2,$3,'{"appKey":"old-app","appSecret":"synthetic-no-network","rootDeptId":1}','active')`,
+        [old, f.corp, f.org],
       )
       await query(
         `INSERT INTO directory_accounts(id,integration_id,corp_id,external_user_id,external_key,union_id,name) VALUES($1,$2,$3,$4,$4,$5,'Synthetic old unlinked source')`,
@@ -1405,6 +1421,233 @@ suite('DingTalk controlled login repair', () => {
     }
   })
 
+  describe('POST /api/auth/session-org across a repair apply', () => {
+    const app = express()
+    app.use(express.json())
+    app.use('/api/auth', authRouter)
+    const switchOrg = (token: string, orgId: string) =>
+      request(app)
+        .post('/api/auth/session-org')
+        .set('authorization', `Bearer ${token}`)
+        .send({ orgId })
+    const activeSessions = async (user: string) =>
+      (
+        await query(
+          'SELECT id FROM user_sessions WHERE user_id=$1 AND revoked_at IS NULL',
+          [user],
+        )
+      ).rows
+    const withDbTokenVerification = async (run: () => Promise<void>) => {
+      const trust = process.env.RBAC_TOKEN_TRUST
+      process.env.RBAC_TOKEN_TRUST = 'false'
+      try {
+        await run()
+      } finally {
+        if (trust === undefined) delete process.env.RBAC_TOKEN_TRUST
+        else process.env.RBAC_TOKEN_TRUST = trust
+      }
+    }
+    const secondOrg = async (user: string) => {
+      const org = 'login-repair-org-b-' + randomUUID()
+      await query(
+        'INSERT INTO user_orgs(user_id,org_id,is_active) VALUES($1,$2,true)',
+        [user, org],
+      )
+      return org
+    }
+
+    it('a normal organization switch still mints a usable session', async () => {
+      await withDbTokenVerification(async () => {
+        const f = await fixture(),
+          orgB = await secondOrg(f.user)
+        const login = await authService.login(f.user, f.password)
+        expect(login?.user.id).toBe(f.user)
+        const res = await switchOrg(login!.token, orgB)
+        expect(res.status).toBe(200)
+        expect(res.body.data.currentOrgId).toBe(orgB)
+        const switched = await authService.verifyToken(res.body.data.token)
+        expect(switched?.id).toBe(f.user)
+        expect(authService.readTokenPayload(res.body.data.token)?.tenantId).toBe(orgB)
+        expect(await activeSessions(f.user)).toHaveLength(1)
+      })
+    })
+
+    it.each(['with a sid', 'without a sid'] as const)(
+      'a credential %s authenticated before apply cannot obtain a new session after apply',
+      async (shape) => {
+        await withDbTokenVerification(async () => {
+          const f = await fixture(),
+            orgB = await secondOrg(f.user)
+          const login = await authService.login(f.user, f.password)
+          const credential =
+            shape === 'with a sid'
+              ? login!.token
+              : authService.createToken(login!.user)
+          if (shape === 'without a sid')
+            expect(authService.readTokenPayload(credential)?.sid).toBeUndefined()
+          const proof = await f.verify(),
+            p = await previewDingTalkRepair(proof)
+          let entered!: () => void, resume!: () => void
+          const reached = new Promise<void>((resolve) => {
+              entered = resolve
+            }),
+            released = new Promise<void>((resolve) => {
+              resume = resolve
+            })
+          const real = authService.resolveSessionTenantId.bind(authService)
+          // Parks the request after authentication (generation already read) and before the session write.
+          const spy = vi
+            .spyOn(authService, 'resolveSessionTenantId')
+            .mockImplementation(async (...args) => {
+              const result = await real(...args)
+              entered()
+              await released
+              return result
+            })
+          const pending = switchOrg(credential, orgB).then((res) => res)
+          try {
+            await reached
+            await applyDingTalkRepair(proof, p.digest, 'apply')
+            // JWT iat has second precision: a token minted now would postdate the revocation watermark.
+            await new Promise((resolve) => setTimeout(resolve, 1100))
+            resume()
+            const res = await pending
+            expect(res.status).toBe(409)
+            expect(res.body).toEqual({
+              success: false,
+              error: 'Authentication changed; please sign in again',
+              code: 'authentication_changed',
+            })
+            expect(await activeSessions(f.user)).toHaveLength(0)
+            expect(await authService.verifyToken(credential)).toBeNull()
+          } finally {
+            resume()
+            await pending.catch(() => undefined)
+            spy.mockRestore()
+          }
+          // A fresh post-apply sign-in can still switch organizations.
+          const next = await authService.login(f.user, f.password)
+          const after = await switchOrg(next!.token, orgB)
+          expect(after.status).toBe(200)
+          expect((await authService.verifyToken(after.body.data.token))?.id).toBe(f.user)
+        })
+      },
+    )
+  })
+
+  describe('core-table lock acquisition waits a bounded time instead of failing immediately', () => {
+    // SHARE UPDATE EXCLUSIVE is the lock (auto)VACUUM and ANALYZE hold; a plain session holding it
+    // stands in for them but never cancels itself, so it exercises both the wait and the timeout.
+    const holdConflictingLock = async () => {
+      const holder = await pool!.connect()
+      await holder.query('BEGIN')
+      await holder.query('LOCK TABLE roles IN SHARE UPDATE EXCLUSIVE MODE')
+      const pid = (await holder.query('SELECT pg_backend_pid() AS pid')).rows[0]
+        .pid
+      return { holder, pid }
+    }
+    const waitUntilBlockedBy = async (pid: number) => {
+      for (let i = 0; i < 300; i++) {
+        const n = Number(
+          (
+            await query(
+              'SELECT count(*) AS n FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',
+              [pid],
+            )
+          ).rows[0].n,
+        )
+        if (n > 0) return true
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      return false
+    }
+    const journal = async (user: string) =>
+      (
+        await query(
+          'SELECT state FROM dingtalk_login_repairs WHERE user_id=$1',
+          [user],
+        )
+      ).rows
+
+    it('apply queues behind a conflicting maintenance-shaped lock and proceeds once it is released', async () => {
+      const f = await fixture(),
+        proof = await f.verify(),
+        p = await previewDingTalkRepair(proof)
+      const { holder, pid } = await holdConflictingLock()
+      let pending: Promise<unknown> | undefined
+      try {
+        pending = applyDingTalkRepair(proof, p.digest, 'apply')
+        pending.catch(() => undefined)
+        expect(await waitUntilBlockedBy(pid)).toBe(true)
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        await holder.query('COMMIT')
+        await expect(pending).resolves.toMatchObject({ id: expect.any(String) })
+        expect(await journal(f.user)).toEqual([{ state: 'applied' }])
+      } finally {
+        await holder.query('ROLLBACK').catch(() => undefined)
+        holder.release()
+        await pending?.catch(() => undefined)
+      }
+    })
+
+    it.each(['apply', 'rollback'] as const)(
+      '%s refuses with REPAIR_LOCK_BUSY within lock_timeout while the conflicting lock is held',
+      async (action) => {
+        const f = await fixture(),
+          proof = await f.verify(),
+          p = await previewDingTalkRepair(proof)
+        let operation: () => Promise<unknown>
+        if (action === 'apply')
+          operation = () => applyDingTalkRepair(proof, p.digest, 'apply')
+        else {
+          const r = await applyDingTalkRepair(proof, p.digest, 'apply'),
+            recovery = await previewDingTalkRepairRecovery(
+              r.id,
+              f.admin,
+              f.password,
+              'rollback',
+            )
+          operation = () =>
+            rollbackDingTalkRepair(
+              r.id,
+              f.admin,
+              recovery.digest,
+              'rollback',
+              f.password,
+            )
+        }
+        const identityBefore = (
+          await query(
+            'SELECT to_jsonb(t) AS row FROM user_external_identities t WHERE local_user_id=$1',
+            [f.user],
+          )
+        ).rows
+        const journalBefore = await journal(f.user)
+        const { holder } = await holdConflictingLock()
+        try {
+          const started = Date.now()
+          await expect(operation()).rejects.toThrow('REPAIR_LOCK_BUSY')
+          const elapsed = Date.now() - started
+          // lock_timeout is 5s: it waited (not NOWAIT) and it did not hang.
+          expect(elapsed).toBeGreaterThanOrEqual(4500)
+          expect(elapsed).toBeLessThan(15000)
+        } finally {
+          await holder.query('ROLLBACK').catch(() => undefined)
+          holder.release()
+        }
+        expect(await journal(f.user)).toEqual(journalBefore)
+        expect(
+          (
+            await query(
+              'SELECT to_jsonb(t) AS row FROM user_external_identities t WHERE local_user_id=$1',
+              [f.user],
+            )
+          ).rows,
+        ).toEqual(identityBefore)
+      },
+    )
+  })
+
   it('rejects a scan whose OpenID matches but whose stored directory UnionID names another person', async () => {
     const f = await fixture()
     await query('UPDATE directory_accounts SET union_id=$2 WHERE id=$1', [
@@ -1441,8 +1684,8 @@ suite('DingTalk controlled login repair', () => {
       disableDingTalkGrant: true,
     })
     await query(
-      `INSERT INTO directory_integrations(id,name,provider,corp_id,config,status) VALUES($1::uuid,$1::text,'dingtalk',$2,'{}','active')`,
-      [target, f.corp],
+      `INSERT INTO directory_integrations(id,name,provider,corp_id,org_id,config,status) VALUES($1::uuid,$1::text,'dingtalk',$2,$3,'{}','active')`,
+      [target, f.corp, f.org],
     )
     await expect(
       applyDirectoryHandover(

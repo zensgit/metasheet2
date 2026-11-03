@@ -1264,10 +1264,16 @@ authRouter.post('/session-org', async (req: Request, res: Response) => {
     if (!nextPayload?.exp) {
       return res.status(503).json({ success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE' })
     }
-    await createUserSession(user.id, {
+    // Fenced like refresh: the session is registered only while the access generation read when this
+    // request authenticated is still current, so a credential verified before a revocation cannot mint one.
+    const session = await createUserSession(user.id, {
       sessionId, expiresAt: new Date(nextPayload.exp * 1000).toISOString(),
+      expectedAccessGeneration: Number(user.access_generation ?? 0),
       ipAddress: getClientIP(req), userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
     })
+    if (!session) {
+      return res.status(409).json({ success: false, error: 'Authentication changed; please sign in again', code: 'authentication_changed' })
+    }
     return res.json({ success: true, data: { token: nextToken, user: tokenUser, currentOrgId: chosen } })
   } catch {
     return res.status(503).json({ success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE' })

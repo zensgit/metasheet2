@@ -555,7 +555,7 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
       'data_sources', 'directory_integrations', 'dingtalk_group_destinations', 'integration_external_systems',
       'attendance_integrations', 'system_configs', 'integration_yida_credential_materials',
       'integration_yida_draft_targets', 'integration_yida_draft_operations', 'integration_yida_approved_target',
-      'integration_yida_send_approvals',
+      'integration_yida_send_approvals', 'dingtalk_login_repairs',
     ]
     try {
       // data_sources: the same real migrations beforeAll runs (tenant_id / scope_kind come from the
@@ -595,6 +595,10 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
         slot INTEGER PRIMARY KEY CHECK (slot = 1), evidence_encrypted TEXT NOT NULL)`)
       await setupPool.query(`CREATE TABLE integration_yida_send_approvals (
         grant_id TEXT PRIMARY KEY, snapshot_encrypted TEXT NOT NULL)`)
+      //   dingtalk_login_repairs       src/db/migrations/zzzz20261102150000_dingtalk_login_repairs.ts
+      //   (probe-only column subset; before_identity keeps its real name, TEXT type and NOT NULL)
+      await setupPool.query(`CREATE TABLE dingtalk_login_repairs (
+        id uuid PRIMARY KEY, before_identity text NOT NULL)`)
 
       const seedDataSource = async (id: string, credentials: Record<string, string>, active = true, deleted = false) => {
         await setupPool.query(
@@ -672,6 +676,11 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
            ('probe-yida-approval-a', $1), ('probe-yida-approval-b', $2)`,
         [cur('yida-approval'), prev('yida-approval')],
       )
+      await setupPool.query(
+        `INSERT INTO dingtalk_login_repairs (id, before_identity) VALUES
+           ('00000000-0000-4000-8000-000000000118', $1), ('00000000-0000-4000-8000-000000000129', $2)`,
+        [cur('login-repair-before'), prev('login-repair-before')],
+      )
 
       const fingerprint = async () => {
         const parts: string[] = []
@@ -716,9 +725,10 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
         ['integration_yida_draft_operations.snapshot_encrypted', 'ok', 2, 2, 1, 0, null],
         ['integration_yida_approved_target.evidence_encrypted', 'ok', 1, 1, approvedTargetUndecryptable, 0, null],
         ['integration_yida_send_approvals.snapshot_encrypted', 'ok', 2, 2, 1, 0, null],
+        ['dingtalk_login_repairs.before_identity', 'ok', 2, 2, 1, 0, null],
       ])
       expect(report.material.status).toBe('ok')
-      expect(report.totals).toMatchObject({ encrypted: 31, undecryptable: 15 + approvedTargetUndecryptable, plaintext: 1, legacyNotChecked: 1, unreadable: 0, missing: 0 })
+      expect(report.totals).toMatchObject({ encrypted: 33, undecryptable: 16 + approvedTargetUndecryptable, plaintext: 1, legacyNotChecked: 1, unreadable: 0, missing: 0 })
       // one existence precheck per table + one SELECT per field, every one a SELECT, none rejected
       expect(statements).toHaveLength(TABLES.length + report.stores.length)
       expect(statements.every((sql) => /^SELECT\s/.test(sql))).toBe(true)
@@ -738,7 +748,7 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
       expect(rejected).toEqual([])
       expect(statements).toHaveLength(TABLES.length + report.stores.length - 2)
       expect(by['dingtalk_group_destinations.webhook_url']).toMatchObject({ status: 'ok', encrypted: 2, undecryptable: 1 })
-      expect(degraded.totals).toMatchObject({ encrypted: 27, undecryptable: 13 + approvedTargetUndecryptable, missing: 2, unreadable: 0 })
+      expect(degraded.totals).toMatchObject({ encrypted: 29, undecryptable: 14 + approvedTargetUndecryptable, missing: 2, unreadable: 0 })
 
       const serialized = JSON.stringify([report, degraded])
       for (const secret of [...sealed, SECRET.secondPassword, SECRET.username, 'MARKER', CURRENT.key, PREVIOUS.key]) {

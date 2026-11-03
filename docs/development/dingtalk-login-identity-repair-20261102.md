@@ -12,11 +12,11 @@ verify 同时要求有效管理员及其密码、目标账号的非临时本地�
 
 ## 执行与互斥
 
-preview、rollback-preview、release-preview 为只读 REPEATABLE READ 事务，不加核心表写锁、不递增 generation、不创建会话。权限快照包含 users、角色、角色权限、直接权限、组织、namespace admissions、外部授权、目录关联、身份键和来源。仅忽略 created_at、updated_at、last_login_at 这三类元数据。
+preview、rollback-preview、release-preview 为只读 REPEATABLE READ 事务，不加核心表写锁、不递增 generation、不创建会话，也不写审计记录（零写入测试固定）；审计行只由 apply、rollback、release 写入。权限快照包含 users、角色、角色权限、直接权限、组织、namespace admissions、外部授权、目录关联、身份键和来源。仅忽略 created_at、updated_at、last_login_at 这三类元数据。
 
-写事务首句固定 READ COMMITTED，再取得身份维护互斥、核心表 NOWAIT 锁及 canonical 用户锁。现有部分写入未共享用户 mutex，因此此维护操作仍可能拒绝并发写入，必须安排维护窗口。lock_timeout 为五秒，statement_timeout 为三十秒。与 applied handover 双向排斥；安全解绑也不能抹掉日志中原来源的互斥依据。不修改 handover 的产品摘要规则。
+写事务首句固定 READ COMMITTED，再取得身份维护互斥、核心表 SHARE ROW EXCLUSIVE 锁及 canonical 用户锁。核心表锁与用户锁在 lock_timeout（五秒）内有界等待，不使用 NOWAIT：等待超过 deadlock_timeout 时，冲突的 autovacuum／autoanalyze 会自行取消；其他持有者（含防回卷 vacuum）超过五秒则拒绝为 `REPAIR_LOCK_BUSY`，不写任何行，可在确认无长事务后重试。排队期间已取得的表锁（users 在前）会阻塞相关写入至多五秒。现有部分写入未共享用户 mutex，因此此维护操作仍可能拒绝并发写入，必须安排维护窗口。statement_timeout 为三十秒。与 applied handover 双向排斥；安全解绑也不能抹掉日志中原来源的互斥依据。不修改 handover 的产品摘要规则。
 
-apply 需精确证明摘要及 `confirm=apply`。身份旧值加密保存；写产品审计并记录真实管理员。撤销目标已存在的 JWT 会话、session registry 记录与多维表 API token，递增 generation，不倒退。OAuth／免登认证结果携带在用户锁内取得的 generation，登记 session 时重新锁定并核对；API token 创建／轮换也复核请求认证时的 generation。旧 refresh 不得重新激活已撤销 sid，无 sid 的 refresh 同样复核 generation。
+apply 需精确证明摘要及 `confirm=apply`。身份旧值加密保存；写产品审计，记录的管理员为 verify 时校验密码的管理员（apply 本身不另行认证执行者）。撤销目标已存在的 JWT 会话、session registry 记录与多维表 API token，递增 generation，不倒退。OAuth／免登认证结果携带在用户锁内取得的 generation，登记 session 时重新锁定并核对；API token 创建／轮换也复核请求认证时的 generation。旧 refresh 不得重新激活已撤销 sid，无 sid 的 refresh 同样复核 generation。切换组织（POST /api/auth/session-org）重新签发会话时同样携带请求认证时的 generation，版本已变则返回 409 `authentication_changed`，不登记会话。
 
 这不禁止修复完成后的有效新登录，也不承诺取消所有已经执行的业务请求。现有无 sid JWT 在应用节点时钟超前于数据库时，仍受既有时间水位机制限制；本轮没有修改全局 JWT 合约。生产必须完成迁移并验证时钟与会话机制，不能把本地结果称为全部凭据系统的安全证明。开发模式 RBAC_TOKEN_TRUST 不提供数据库 generation 时，API token 签发会拒绝。未提供 generation、非 production 且用户确实不存在时保留原虚拟用户会话兼容；携带 generation 的 OAuth／refresh 不可走此分支，遇 schema 错误也拒绝。原无版本调用的缺表 synthetic 兼容未改，因此仍要求完整迁移。
 
@@ -55,5 +55,7 @@ Node 20.20.2、本机 PostgreSQL 15.17、全新合成库；提供方仅测试桩
 修订验证：十一文件真实 DB 组合 252 项（含原八文件 185、修复文件 57、API 路由／组织准入十项）；认证／钉钉联合单测 55 文件 1040 项；独立 todo-center 待办门槛 27 项（EXPECT_DB=1，0 跳过）。CI 合约六项、TypeScript noEmit 通过。十个其他改动运行文件定向 ESLint 通过；AuthService 的 137 行原有 no-extra-semi 在旧 head 上同样失败，本轮未改无关代码。
 
 包含真实 refresh 屏障红转绿、旧 OAuth 认证版本拒绝、API 创建／轮换版本拒绝、RR 默认事务在用户锁等待期间新提交 token 的撤销、首次登录补角色后的恢复、无变化同步后的恢复、缺 OpenID 绑定／解绑、OpenID 轮换后旧目录拒绝、release 前同步成功正对照及其后精确拒绝、隐藏第二人／UnionID 冲突拒绝、加密字段探测及密钥变化后恢复拒绝／原密文恢复。真实行为优于仅检查 generation 值。
+
+CI 修正（承接 34bcb2c8）：两处私有 schema 的合成 users 表补齐 `access_generation`（与 zzzz20260724170000 一致）；修复套件改用每个夹具独立的组织，不再向 'default' 留下关联用户；真实 DB 加密存储探测固定清单加入 `dingtalk_login_repairs.before_identity`（含当前／旧材料两行）。本地同一 PostgreSQL 15.17：修复文件 63 项；十一文件组合 258 项（原 252 加组织切换 3 项、锁等待 3 项）；approval-db 全部 102 文件按 CI 顺序 1424 通过，余 5 项为本机 worktree 无法运行 `pnpm` 子进程及一次瞬时连接重置，单独复跑通过；multitable 加密探测 11 项；YiDa owner／初始化 HTTP 与运行时 60 项（两份浏览器文件需固定 Chromium，未在本机运行）。
 
 执行命令和当前 head／CI 结论保存在本地 FINAL-VERIFICATION.md。以上为本地验证，未宣告当前 head 的十三项必需 CI 通过。合并、部署、真实绑定、E4 交接、审批处置、停用和启用同步仍需单独批准。

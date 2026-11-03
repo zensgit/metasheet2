@@ -244,6 +244,22 @@ describe('explicit session organization routes', () => {
     expect(authServiceMocks.resolveSessionTenantId).toHaveBeenCalledWith('actor', 'org-b')
     expect(authServiceMocks.createToken).toHaveBeenCalledWith({ id: 'actor', tenantId: 'org-b' }, { sid: 'session' })
     expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledTimes(1)
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith('actor', expect.objectContaining({
+      sessionId: 'session', expectedAccessGeneration: 0,
+    }))
+  })
+
+  it('fences the reminted session on the authenticated access generation and returns 409 when it moved', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({ id: 'actor', tenantId: 'org-a', access_generation: 3 })
+    sessionRegistryMocks.createUserSession.mockResolvedValue(null)
+    const res = await invokeRoute('post', '/session-org', {
+      headers: { authorization: 'Bearer current' }, body: { orgId: 'org-b' },
+    })
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith('actor', expect.objectContaining({
+      sessionId: 'session', expectedAccessGeneration: 3,
+    }))
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({ success: false, error: 'Authentication changed; please sign in again', code: 'authentication_changed' })
   })
 
   it.each(['non-member', 'revoked-member'])('refuses %s without token or session writes', async () => {

@@ -305,7 +305,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       // Exact consumed auth/RBAC/session shapes: no absent-table fallback.
       await admin!.query(`
         CREATE TABLE users(id text PRIMARY KEY,email text,username text,mobile text,name text,role text,permissions jsonb,
-          password_hash text,is_active boolean,must_change_password boolean,activation_status text,local_password_set boolean,
+          password_hash text,access_generation bigint NOT NULL DEFAULT 0,is_active boolean,must_change_password boolean,activation_status text,local_password_set boolean,
           is_admin boolean,created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());
         CREATE TABLE user_roles(user_id text,role_id text,PRIMARY KEY(user_id,role_id));
         CREATE TABLE role_permissions(role_id text,permission_code text,PRIMARY KEY(role_id,permission_code));
