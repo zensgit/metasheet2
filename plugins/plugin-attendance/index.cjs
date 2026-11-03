@@ -46465,7 +46465,8 @@ module.exports = {
             const endParsed = parseDateInput(endDate)
             const startDay = calendarDay(startDate)
             const endDay = calendarDay(endDate)
-            // Plain dates compare by calendar day; other parseable string forms keep the instant comparison.
+            // Plain dates compare by calendar day; other parseable string forms keep the instant comparison here, which
+            // only decides 400 before the freeze below. Such a form never reaches the write (see after the freeze).
             const rangeInverted = startDay && endDay ? startDay > endDay : startParsed > endParsed
             if (!startParsed || !endParsed || rangeInverted) {
               throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid date range')
@@ -46503,6 +46504,14 @@ module.exports = {
               }
             }
 
+            // The write takes the calendar days the range check compared, never the raw values. A string other than
+            // 'YYYY-MM-DD' was compared above as an instant, while PG stores only its written day, so an open cycle
+            // could be stored inverted (and closed in the same request). It is refused here; a frozen cycle has
+            // already answered 409 above for such a string (sameDate fails closed), so its order is unchanged.
+            if (!startDay || !endDay) {
+              throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid date range')
+            }
+
             const updated = await trx.query(
               `UPDATE attendance_payroll_cycles
                SET template_id = $3,
@@ -46519,8 +46528,8 @@ module.exports = {
                 orgId,
                 payload.templateId,
                 payload.name,
-                payload.startDate,
-                payload.endDate,
+                startDay,
+                endDay,
                 payload.status,
                 JSON.stringify(payload.metadata),
               ],
