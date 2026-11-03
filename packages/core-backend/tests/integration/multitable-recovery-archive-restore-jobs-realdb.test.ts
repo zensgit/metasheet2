@@ -1,6 +1,6 @@
 import { fork } from 'node:child_process'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, statfs } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -109,7 +109,7 @@ import {
 } from '../utils/recovery-archive-verified-fixture'
 import type { ArchiveProcessClaimSnapshot, ArchiveProcessWorkerInput, ArchiveProcessWorkerMessage } from '../utils/recovery-archive-process-worker'
 import { createLocalCustodyBackup, createLocalCustodySession, type LocalArchiveCustodyAdmission } from '../../src/multitable/recovery-local-custody'
-import { createLocalCustodyStore } from '../../src/multitable/recovery-local-custody-store'
+import { assertLocalCustodyMountIsolation, createLocalCustodyStore } from '../../src/multitable/recovery-local-custody-store'
 import { createRecoveryArchiveFileStoreProvider, provisionRecoveryArchiveFileRoot } from '../../src/multitable/recovery-archive-file-store'
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from '../../src/multitable/recovery-archive-contract'
 
@@ -129,6 +129,192 @@ const localFixtureKeyIds = new Set<string>()
 const localFixtureNonceGenerations = new Set<string>()
 const sha = (value: string): string => createHash('sha256').update(value).digest('hex')
 const future = (milliseconds: number): string => new Date(Date.now() + milliseconds).toISOString()
+
+// One worker tick drains at most 32 derived effects and ends at the first attempt that does not complete;
+// that effect stays pending and is retried after the never-attempted ones (recovery-archive-restore-worker.ts).
+const DERIVED_TICK_BATCH = 32
+// The only refusals a drain may see carry a lock-not-available code: SQLSTATE 55P03 raised by one of the
+// derived processor's NOWAIT locks (the authority lease, which the product reports as AUTHORITY_UNAVAILABLE,
+// or the scope row prelock), observed by the fixture underneath the attempt. A concurrent lock holder on the
+// shared database, e.g. autovacuum truncating an authority table, causes them; they are retried by design.
+// AUTHORITY_UNAVAILABLE without 55P03 underneath (non-canonical authority substrate, a busy advisory
+// try-lock, a permission-taint refusal) is a real failure.
+const DERIVED_CONTENTION_REFUSALS = ['RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE<-pg:55P03', 'pg:55P03']
+// Inside the sixth tick, where both observed CI attempts-5002 runs cut their batch.
+const DERIVED_CONTENDED_ATTEMPT = 170
+// Natural (not injected) contention refusals tolerated in one drain. A refusal ends its tick, so k of them
+// need the conflicting lock held across k consecutive ticks; a held lock refused one tick per 5-11 ms in
+// local runs (100 ms -> 10 and 20, 400 ms -> 36 and 79). CI showed exactly 1 per affected run. 16 is 16x
+// that, tolerates roughly 80-170 ms of continuous holding, and stays inside the 42 spare ticks of the
+// 200-tick budget. More is a red that names the codes and the tick shape.
+const DERIVED_NATURAL_REFUSAL_LIMIT = 16
+
+function runLength(values: readonly number[]): string {
+  const runs: string[] = []
+  for (let index = 0; index < values.length;) {
+    let end = index
+    while (end + 1 < values.length && values[end + 1] === values[index]) end += 1
+    runs.push(end > index ? `${values[index]}x${end - index + 1}` : String(values[index]))
+    index = end + 1
+  }
+  return runs.join(',')
+}
+
+/** Values-free summary of a drain for assertion messages: counts, codes and the run-length tick shape. */
+function describeDerivedDrain(drained: ArchiveProcessDrained): string {
+  const codes: Record<string, number> = {}
+  for (const code of drained.refusals) codes[code] = (codes[code] ?? 0) + 1
+  return JSON.stringify({
+    ticks: drained.batches.length, idle: drained.idle, pending: drained.pending,
+    attempts: drained.attempts, completed: drained.completed, refusals: codes,
+    batches: runLength(drained.batches), tickAttempts: runLength(drained.tickAttempts),
+  })
+}
+
+type ArchiveProcessDrained = Extract<ArchiveProcessWorkerMessage, { kind: 'drained' }>
+
+/** The product's drain loop, replayed for `total` effects whose `refused` attempt ordinals (1-based) did not complete. */
+function replayDerivedDrain(total: number, refused: ReadonlySet<number>): { batches: number[]; tickAttempts: number[] } {
+  const batches: number[] = []
+  const tickAttempts: number[] = []
+  let pending = total
+  let ordinal = 0
+  while (batches.length < 1_000) {
+    let batch = 0
+    let attempted = 0
+    while (attempted < DERIVED_TICK_BATCH && pending > 0) {
+      ordinal += 1
+      attempted += 1
+      if (refused.has(ordinal)) break
+      batch += 1
+      pending -= 1
+    }
+    batches.push(batch)
+    tickAttempts.push(attempted)
+    if (attempted === 0) return { batches, tickAttempts }
+  }
+  throw new Error('derived_drain_replay_unbounded')
+}
+
+/**
+ * A drain-until-idle run is exact once its refusals are known: every effect completes exactly once, every
+ * refused attempt carries a lock-contention code and ends its tick, natural refusals stay within the
+ * limit, and the per-tick shape is the product loop's replay. With no contention this is the uncontended
+ * shape (156 x 32, 9, 0 for 5001 effects, 5001 attempts). Every failure message carries the drain summary.
+ */
+function expectExactDerivedDrain(drained: ArchiveProcessDrained, total: number, contendedAttempt?: number): void {
+  const { attempts, completed, batches, tickAttempts, refusals, ticks } = drained
+  const summary = describeDerivedDrain(drained)
+  expect({ idle: drained.idle, pending: drained.pending }, `derived drain did not reach idle: ${summary}`)
+    .toEqual({ idle: true, pending: 0 })
+  expect(completed, summary).toBe(total)
+  expect(attempts, summary).toBe(completed + refusals.length)
+  expect(refusals.filter((code) => !DERIVED_CONTENTION_REFUSALS.includes(code)),
+    `derived refusals without a lock-contention code: ${summary}`).toEqual([])
+  expect(tickAttempts).toHaveLength(batches.length)
+  expect(ticks).toEqual(batches.map(() => ({ kind: 'idle', swept: 0, chunks: 0 })))
+  const refusedOrdinals: number[] = []
+  let ordinal = 0
+  tickAttempts.forEach((attempted, index) => {
+    ordinal += attempted
+    for (let refused = attempted - batches[index]; refused > 0; refused -= 1) refusedOrdinals.push(ordinal)
+  })
+  expect(ordinal).toBe(attempts)
+  expect(refusedOrdinals).toHaveLength(refusals.length)
+  const natural = refusedOrdinals.filter((refused) => refused !== contendedAttempt)
+  expect(natural.length, `natural contention refusals exceed ${DERIVED_NATURAL_REFUSAL_LIMIT}: ${summary}`)
+    .toBeLessThanOrEqual(DERIVED_NATURAL_REFUSAL_LIMIT)
+  expect({ batches, tickAttempts }, summary).toEqual(replayDerivedDrain(total, new Set(refusedOrdinals)))
+  if (refusals.length === 0) {
+    expect(attempts).toBe(total)
+    expect(batches).toEqual([
+      ...Array.from({ length: Math.floor(total / DERIVED_TICK_BATCH) }, () => DERIVED_TICK_BATCH),
+      ...(total % DERIVED_TICK_BATCH ? [total % DERIVED_TICK_BATCH] : []),
+      0,
+    ])
+  }
+  if (contendedAttempt !== undefined) {
+    expect(refusedOrdinals, summary).toContain(contendedAttempt)
+    expect(refusals[refusedOrdinals.indexOf(contendedAttempt)]).toBe('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE<-pg:55P03')
+  }
+}
+
+const LOCAL_CUSTODY_STORE_REFUSED = 'RECOVERY_LOCAL_CUSTODY_STORE_REFUSED'
+type LocalCustodyRoot = { name: 'custody' | 'archive'; path: string; dev: bigint; ino: bigint }
+
+async function pinLocalCustodyRoot(name: LocalCustodyRoot['name'], path: string): Promise<LocalCustodyRoot> {
+  const pinned = await lstat(path, { bigint: true })
+  return { name, path, dev: pinned.dev, ino: pinned.ino }
+}
+
+async function countMounts(): Promise<number> {
+  if (process.platform !== 'linux') return 0
+  return (await readFile('/proc/self/mountinfo', 'utf8')).trim().split('\n').length
+}
+
+/**
+ * The custody store fails closed with one cause-free code: its guarded wrapper maps every admission check
+ * and filesystem error to it. Re-read each admission input it checks (transaction depth, both roots' type,
+ * owner, mode, identity and filesystem, mount isolation) so a red run names what moved. Values-free.
+ */
+async function readLocalCustodyAdmissionInputs(
+  roots: readonly LocalCustodyRoot[],
+  mountsAtSetup: number,
+): Promise<Record<string, string | number>> {
+  const diagnosis: Record<string, string | number> = { transactionDepth }
+  const realRoots: string[] = []
+  for (const root of roots) {
+    try {
+      const current = await lstat(root.path, { bigint: true })
+      const real = await realpath(root.path)
+      const filesystem = await statfs(real)
+      realRoots.push(real)
+      diagnosis[root.name] = !current.isDirectory() || current.isSymbolicLink() ? 'not_directory'
+        : current.uid !== BigInt(process.getuid?.() ?? -1) ? 'owner_changed'
+        : (current.mode & 0o077n) !== 0n ? 'mode_widened'
+        : current.dev !== root.dev || current.ino !== root.ino ? 'replaced'
+        : ![0xef53, 0x58465342, 0x9123683e].includes(filesystem.type) ? 'filesystem_unsupported'
+        : 'ok'
+      diagnosis[`${root.name}PendingTemporaries`] = (await readdir(real)).filter((name) => name.startsWith('.pending-')).length
+    } catch (error) {
+      const code = (error as { code?: unknown }).code
+      diagnosis[root.name] = `unreadable_${typeof code === 'string' && /^E[A-Z]+$/.test(code) ? code : 'unknown'}`
+    }
+  }
+  if (process.platform === 'linux') {
+    const mountInfo = await readFile('/proc/self/mountinfo', 'utf8')
+    try {
+      assertLocalCustodyMountIsolation(mountInfo, realRoots)
+      diagnosis.mountIsolation = realRoots.length === roots.length ? 'ok' : 'unchecked'
+    } catch {
+      diagnosis.mountIsolation = 'refused'
+    }
+    diagnosis.mountsAtSetup = mountsAtSetup
+    diagnosis.mountsNow = mountInfo.trim().split('\n').length
+  }
+  return diagnosis
+}
+
+/**
+ * Runs one custody store call; a refusal is still a failure, now carrying the admission inputs read just
+ * before the call and again after the refusal. All "ok" in both means a product refusal or a transient cause
+ * that appeared and cleared during the call itself; a difference names the input that moved.
+ */
+async function withLocalCustodyDiagnosis<T>(
+  stage: string,
+  roots: readonly LocalCustodyRoot[],
+  mountsAtSetup: number,
+  work: () => Promise<T>,
+): Promise<T> {
+  const before = await readLocalCustodyAdmissionInputs(roots, mountsAtSetup)
+  try {
+    return await work()
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== LOCAL_CUSTODY_STORE_REFUSED) throw error
+    const after = await readLocalCustodyAdmissionInputs(roots, mountsAtSetup)
+    throw new Error(`${LOCAL_CUSTODY_STORE_REFUSED} at ${stage} ${JSON.stringify({ before, after })}`)
+  }
+}
 
 type QueryResult = Awaited<ReturnType<Pool['query']>>
 let pool: Pool
@@ -2006,6 +2192,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       recoveryMode: 'revert' as const,
       resumeAfterCrash: true,
       processBoundary: 'after_commit' as const,
+      contendDerivedAuthority: true,
     },
     {
       label: 'local custody and persistent objects after SIGKILL and independent-process reopening',
@@ -2019,6 +2206,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     resumeAfterCrash,
     processBoundary,
     localStorage,
+    contendDerivedAuthority,
   }) => {
     const expiresAt = '2099-12-31T00:00:00.000Z'
     const root = await mkdtemp(join(tmpdir(), `tm-composed-async-${recoveryMode}-`))
@@ -2045,13 +2233,25 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         await mkdir(custodyPath, { mode: 0o700 })
         await provisionRecoveryArchiveFileRoot({ basePath: archivePath, storeId, transactionDepth: depthProbe })
         provider = await createRecoveryArchiveFileStoreProvider({ basePath: archivePath, storeId, maxObjectBytes: 16 * 1024 * 1024, transactionDepth: depthProbe })
-        const store = await createLocalCustodyStore({ archivePath, custodyPath, custodyId, transactionDepth: depthProbe })
+        const custodyRoots = [await pinLocalCustodyRoot('custody', custodyPath), await pinLocalCustodyRoot('archive', archivePath)]
+        const mountsAtSetup = await countMounts()
+        const custodyStep = <T>(stage: string, work: () => Promise<T>) =>
+          withLocalCustodyDiagnosis(stage, custodyRoots, mountsAtSetup, work)
+        const store = await custodyStep('open', () =>
+          createLocalCustodyStore({ archivePath, custodyPath, custodyId, transactionDepth: depthProbe }))
         const backup = createLocalCustodyBackup({ custodyId, recoverySecret: localSecret, transactionDepth: depthProbe })
-        await store.putBackup(randomUUID(), backup)
+        const initial = await custodyStep('put_initial', () => store.putBackup(randomUUID(), backup))
         localWriter.unlock({ custodyId, recoverySecret: localSecret, backup })
         admission = localWriter.admitForArchive(custodyId)
         localFixtureKeyIds.add(admission.keyId)
-        const receipt = await store.putBackup(randomUUID(), localWriter.exportRotatedBackup(localSecret))
+        const rotated = localWriter.exportRotatedBackup(localSecret)
+        const receipt = await custodyStep('put_rotated', () => store.putBackup(randomUUID(), rotated))
+        // Custody outcome: exactly the two immutable 0600 packages, no publication temporaries left behind.
+        const packages = (await readdir(custodyPath)).sort()
+        expect(packages).toEqual([initial, receipt].map((entry) => `${custodyId}-${entry.backupId}.custody`).sort())
+        for (const name of packages) expect((await stat(join(custodyPath, name))).mode & 0o777).toBe(0o600)
+        expect(receipt.size).toBe(rotated.byteLength)
+        expect(receipt.sha256).toBe(createHash('sha256').update(rotated).digest('hex'))
         local = { archivePath, custodyPath, custodyId, storeId, receipt, recoverySecret: localSecret }
       } else {
         provider = createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: root })
@@ -2489,8 +2689,12 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         const denied = await runArchiveProcessWorker({
           phase: 'drain', drainTicks: 1, keyId: fixture.keyId, keyMaterial, jobId: accepted.id, local,
         }, provider)
-        expect(denied).toMatchObject({ kind: 'drained', attempts: 1, completed: 0, batches: [0], lifecycle: ['started', 'drained'],
-          ticks: [{ kind: 'idle', swept: 0, chunks: 0 }] })
+        expect(denied).toMatchObject({ kind: 'drained', attempts: 1, completed: 0, batches: [0], tickAttempts: [1],
+          lifecycle: ['started', 'drained'], ticks: [{ kind: 'idle', swept: 0, chunks: 0 }] })
+        if (denied.kind !== 'drained') throw new Error('archive_process_denied_drain_missing')
+        // The inactive actor is declined; a lock-contention refusal can only pre-empt that check, never complete.
+        expect(denied.refusals).toHaveLength(1)
+        expect(['declined', ...DERIVED_CONTENTION_REFUSALS]).toContain(denied.refusals[0])
         expect((await q('SELECT data FROM meta_records WHERE id=$1', [recordIds[0]])).rows[0].data[formulaId])
           .toBe('stale-derived-value')
         expect((await q(`SELECT count(*)::int AS pending FROM meta_recovery_archive_derived_effects
@@ -2499,12 +2703,14 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         await q('UPDATE users SET is_active=TRUE WHERE id=$1', [fixture.actorId])
       }
       if (processBoundary) {
+        const contendAt = contendDerivedAuthority ? DERIVED_CONTENDED_ATTEMPT : undefined
         const drained = await runArchiveProcessWorker({
-          phase: 'drain', drainTicks: 158, keyId: fixture.keyId, keyMaterial, jobId: accepted.id, local,
+          phase: 'drain', drainTicks: 200, drainUntilIdle: true, contendAuthorityAtAttempt: contendAt,
+          keyId: fixture.keyId, keyMaterial, jobId: accepted.id, local,
         }, provider)
-        expect(drained).toMatchObject({ kind: 'drained', attempts: 5001, completed: 5001, lifecycle: ['started', 'drained'],
-          batches: [...Array.from({ length: 156 }, () => 32), 9, 0],
-          ticks: Array.from({ length: 158 }, () => ({ kind: 'idle', swept: 0, chunks: 0 })) })
+        expect(drained).toMatchObject({ kind: 'drained', lifecycle: ['started', 'drained'] })
+        if (drained.kind !== 'drained') throw new Error('archive_process_drain_missing')
+        expectExactDerivedDrain(drained, 5001, contendAt)
         await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('idle')
         expect(processDerived).not.toHaveBeenCalled()
         expect((await q('SELECT data FROM meta_records WHERE id=$1', [recordIds[0]])).rows[0].data[formulaId])
@@ -2513,6 +2719,11 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
           count(*) FILTER (WHERE completed_at IS NOT NULL)::int AS completed
           FROM meta_recovery_archive_derived_effects WHERE job_id=$1`, [accepted.id])).rows)
           .toEqual([{ total: 5001, completed: 5001 }])
+        // Every restored record carries its recomputed derived value: a refused attempt was retried, not lost.
+        expect((await q(`SELECT count(*)::int AS records,
+          count(*) FILTER (WHERE data->>$2::text = data->>$3::text AND data->>$3::text LIKE 'archived-%')::int AS materialized
+          FROM meta_records WHERE sheet_id=$1`, [fixture.sheetId, formulaId, fieldId])).rows)
+          .toEqual([{ records: 5001, materialized: 5001 }])
       } else {
         await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('completed')
         expect(processDerived).toHaveBeenCalledTimes(1)

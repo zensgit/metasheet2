@@ -13,6 +13,8 @@ import * as authority from '../../src/integration/automation-live-authority'
 import * as bootstrap from '../../src/integration/yida-initialization-bootstrap'
 import { createYidaInitializationRuntime, type YidaInitializationRuntimeBinding, type YidaInitializationInput } from '../../src/integration/yida-initialization-runtime'
 import * as encryptedSecrets from '../../src/security/encrypted-secrets'
+import * as requestContext from '../../src/context/request-context'
+import * as coreLogger from '../../src/core/logger'
 import { PluginRuntimeSecurityService } from '../../src/security/plugin-runtime-security-service'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
 
@@ -30,7 +32,7 @@ const tables = ['integration_yida_credential_materials', 'integration_yida_crede
 const sendTables = ['integration_yida_send_approvals', 'integration_yida_send_admissions', 'integration_yida_send_revocations',
   'integration_yida_send_approval_audit', 'integration_yida_delivery_ledger', 'integration_yida_delivery_audit'] as const
 const ident = (value: string) => { if (!/^[a-z][a-z0-9_]*$/u.test(value)) throw new Error('OWNED_SCHEMA_REQUIRED'); return `"${value}"` }
-const material = () => ({ appKey: ' synthetic-local-app ', appSecret: ' synthetic-local-secret ', systemToken: ' synthetic-local-token ', userId: 'synthetic-local-user' })
+const material = () => ({ appKey: 'synthetic-local-app', appSecret: 'synthetic-local-secret', systemToken: 'synthetic-local-token', userId: 'synthetic-local-user' })
 const attestation = () => ({ kind: 'owner-reviewed-target', reviewRef: 'synthetic-local-review', organizationId: 'synthetic-local-org', executionIdentity: material().userId })
 function deferred() {
   let resolve!: () => void
@@ -190,6 +192,8 @@ realdb('Approved A initialization — actual PG/live ACL/native producer/transac
       if (specifier === './automation-live-authority') return authority
       if (specifier === './yida-initialization-bootstrap') return bootstrap
       if (specifier === '../security/encrypted-secrets') return encryptedSecrets
+      if (specifier === '../context/request-context') return requestContext
+      if (specifier === '../core/logger') return coreLogger
       throw new Error('Unexpected mutated module dependency')
     }, exports)
     const original = await active(); await rejected(original.runtime.status(secondAdmin), 'DENIED')

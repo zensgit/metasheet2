@@ -209,6 +209,13 @@
 //           table-action wall) and its private record set; the confirm and the review decide over its step-4 /
 //           step-5 rows (the confirm bumps its sheet's plan generation). A header-fillable tenant here would read
 //           or approve another tenant's content change.
+//       32. GET  …/projects/:projectNo/target/manual-rows  `stockPreparationProjectManualRowsGet`
+//       33. POST …/projects/:projectNo/target/manual-rows  `stockPreparationProjectManualRowsSet`
+//           人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; register R-68), ADMIN. The GET answers the
+//           proven tenant's project sheet switch 「允许人工补充行」 and its last pull's persisted reminder (counts and
+//           record handles); the POST is a WRITE — one field property of that sheet's key column, through the host's
+//           provisioning port in the staging project derived from this scope with no request projectId. A
+//           header-fillable tenant here would read or flip another tenant's project switch.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins
