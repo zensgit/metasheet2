@@ -24,6 +24,12 @@ export type PinnedFetchResult = {
   body?: string
 }
 
+/**
+ * Fixed `User-Agent` for every pinned webhook send, named like the other outbound senders
+ * (`MetaSheet-Automation-DingTalk/1.0`, `MetaSheet-Notification-Service/1.0`). A caller-supplied one wins.
+ */
+export const PINNED_WEBHOOK_USER_AGENT = 'MetaSheet-Automation-Webhook/1.0'
+
 export type HttpsRequestFn = typeof https.request
 
 export interface PinnedFetchOptions {
@@ -98,12 +104,26 @@ export async function pinnedHttpsFetch(
     // Force the Host header to the URL's host. A caller-supplied Host would split the HTTP identity from
     // the pinned connection + TLS SNI (virtual-host confusion), so strip any caller host/Host and set it
     // from the URL — Host stays aligned with what was validated and connected to.
+    //
+    // WIRE FRAMING (S0-a review F1). Without an explicit length `https.request` frames a written body as
+    // `Transfer-Encoding: chunked`, which some receivers (API gateways, WAF profiles) reject — the platform
+    // `fetch` sent a `Content-Length` for the same string body. So the length is computed HERE from the bytes
+    // actually written (UTF-8), and any caller-supplied `Content-Length` / `Transfer-Encoding` is dropped so a
+    // stale or conflicting value can never frame the request. Every other caller header is kept as given.
+    // A fixed `User-Agent` is set unless the caller supplied one (the platform `fetch` sent `node`).
+    // `Connection: close` is intentional (see `agent: false` below): one request per connection.
+    const bodyBuffer = typeof opts.body === 'string' && opts.body.length > 0 ? Buffer.from(opts.body, 'utf8') : null
     const safeHeaders: Record<string, string> = {}
+    let callerUserAgent = false
     for (const [k, v] of Object.entries(opts.headers ?? {})) {
-      if (k.toLowerCase() === 'host') continue
+      const lower = k.toLowerCase()
+      if (lower === 'host' || lower === 'content-length' || lower === 'transfer-encoding') continue
+      if (lower === 'user-agent') callerUserAgent = true
       safeHeaders[k] = v
     }
     safeHeaders.host = parsed.host
+    safeHeaders['content-length'] = String(bodyBuffer ? bodyBuffer.length : 0)
+    if (!callerUserAgent) safeHeaders['user-agent'] = PINNED_WEBHOOK_USER_AGENT
     const req = requestImpl(
       url,
       {
@@ -186,7 +206,8 @@ export async function pinnedHttpsFetch(
       req.destroy(timeoutError())
       finish(() => reject(timeoutError()))
     })
-    if (typeof opts.body === 'string' && opts.body.length > 0) req.write(opts.body)
+    // Exactly the bytes `content-length` announced.
+    if (bodyBuffer) req.write(bodyBuffer)
     req.end()
   })
 }

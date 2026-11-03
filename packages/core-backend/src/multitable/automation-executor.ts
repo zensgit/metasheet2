@@ -4743,9 +4743,16 @@ export class AutomationExecutor {
         lastError = `HTTP ${response.status}`
         lastFailure = { kind: 'response', status: response.status }
       } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err)
         // The RAW error, not its message: `classifyWebhookFailure` reads only `name`/`code`/`cause.*`.
         lastFailure = { kind: 'error', error: err }
+        // S0-a review F2: on the PINNED transport the raw `https.request` error text names the connected
+        // address and port (`connect ECONNREFUSED <ip>:<port>`, TLS alt-name messages quote the host) —
+        // the platform `fetch` only ever said `fetch failed`. So the persisted step error gets the closed
+        // failure class (same set the log line and `output.failureClass` use), never the transport's text.
+        // The fetch-shaped TEST seam keeps its message so existing assertions on it stay meaningful.
+        lastError = this.usesPinnedWebhookTransport()
+          ? classifyWebhookFailure(lastFailure)
+          : err instanceof Error ? err.message : String(err)
       }
 
       // Wait before retry (simple exponential backoff)
@@ -4769,9 +4776,10 @@ export class AutomationExecutor {
     // test). So NO free text goes in this line at all: host SHAPE + a closed-set failure class +
     // identifiers — the same discipline as the refusal line, which never had this hole.
     //
-    // SCOPE, stated exactly so the claim is not wider than the code: `lastError` STILL reaches the
-    // operator-facing step `error` below (pre-existing behaviour — it is what tells an operator their URL
-    // is unusable). That string is persisted by `automation-log-service.record()` through `redactValue`,
+    // SCOPE, stated exactly so the claim is not wider than the code: `lastError` reaches the
+    // operator-facing step `error` below. On the production (pinned) transport it is `HTTP <status>` or the
+    // closed failure class (S0-a review F2) — no transport text. Only the fetch-shaped test seam still puts
+    // an error message there. That string is persisted by `automation-log-service.record()` through `redactValue`,
     // which has the same blind spot, as does the `rule_snapshot` channel, which stores `config.url`
     // verbatim on EVERY run, refused or not. Closing that PERSISTENCE face means changing the shared
     // redactor (four channels + a web mirror) and is deliberately not done here. What this change
@@ -4848,7 +4856,7 @@ export class AutomationExecutor {
     approvedAddresses: string[],
     init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal; timeoutMs: number },
   ): Promise<{ status: number; ok: boolean; type?: string }> {
-    if (this.deps.fetchFn && !this.deps.pinnedWebhookSendFn) {
+    if (!this.usesPinnedWebhookTransport()) {
       // Fetch-shaped TEST seam (see `AutomationDeps.pinnedWebhookSendFn`).
       return this.deps.fetchFn(url, {
         method: init.method,
@@ -4870,6 +4878,11 @@ export class AutomationExecutor {
       body: init.body,
       timeoutMs: init.timeoutMs,
     })
+  }
+
+  /** `false` only for the fetch-shaped TEST seam (`fetchFn` without `pinnedWebhookSendFn`); production is pinned. */
+  private usesPinnedWebhookTransport(): boolean {
+    return !(this.deps.fetchFn && !this.deps.pinnedWebhookSendFn)
   }
 
   private refusedRedirectResult(

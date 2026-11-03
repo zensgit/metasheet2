@@ -18,7 +18,7 @@ import https from 'node:https'
 import { EventEmitter } from 'node:events'
 import type { AddressInfo } from 'node:net'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { pinnedHttpsFetch } from '../../src/multitable/webhook-pinned-fetch'
+import { PINNED_WEBHOOK_USER_AGENT, pinnedHttpsFetch } from '../../src/multitable/webhook-pinned-fetch'
 import { generateRuntimeSelfSignedCert } from '../helpers/runtime-self-signed-cert'
 
 const HOST = 'hooks.pinned-test.invalid'
@@ -28,6 +28,7 @@ interface Hit {
   method: string
   host: string | undefined
   body: string
+  headers: IncomingMessage['headers']
 }
 
 let server: https.Server
@@ -40,7 +41,7 @@ function handler(req: IncomingMessage, res: ServerResponse): void {
   req.setEncoding('utf8')
   req.on('data', (c: string) => { body += c })
   req.on('end', () => {
-    hits.push({ path: req.url ?? '', method: req.method ?? '', host: req.headers.host, body })
+    hits.push({ path: req.url ?? '', method: req.method ?? '', host: req.headers.host, body, headers: req.headers })
     if (req.url === '/no-content') {
       res.writeHead(204)
       res.end()
@@ -176,5 +177,57 @@ describe('pinnedHttpsFetch — lookup answers both shapes with the pin', () => {
     const seen = await captureLookup()
     expect(seen.all).toEqual([{ address: '203.0.113.10', family: 4 }])
     expect(seen.single).toEqual(['203.0.113.10', 4])
+  })
+})
+
+describe('pinnedHttpsFetch — wire framing matches the platform fetch (S0-a review F1)', () => {
+  // Non-ASCII on purpose: the UTF-8 byte length differs from the string length, so a length computed from
+  // `body.length` instead of the bytes would be caught here.
+  const BODY = JSON.stringify({ name: '备料-ü', n: 1 })
+
+  it('the body is sent with Content-Length = its UTF-8 byte length, never chunked; fixed User-Agent', async () => {
+    hits.length = 0
+    expect(Buffer.byteLength(BODY, 'utf8')).not.toBe(BODY.length)
+    const r = await pinnedHttpsFetch(url('/no-content'), '127.0.0.1', 4, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Custom': 'keep' },
+      body: BODY,
+      timeoutMs: 5000,
+      ca,
+    })
+    expect(r).toMatchObject({ status: 204, ok: true })
+    expect(hits).toHaveLength(1)
+    const h = hits[0].headers
+    expect(h['content-length']).toBe(String(Buffer.byteLength(BODY, 'utf8')))
+    expect(h['transfer-encoding']).toBeUndefined()
+    expect(h['user-agent']).toBe(PINNED_WEBHOOK_USER_AGENT)
+    expect(PINNED_WEBHOOK_USER_AGENT).toBe('MetaSheet-Automation-Webhook/1.0')
+    expect(h['content-type']).toBe('application/json')
+    expect(h['x-custom']).toBe('keep')
+    expect(hits[0].body).toBe(BODY)
+  })
+
+  it('a caller Content-Length / Transfer-Encoding cannot frame the request; a caller User-Agent is kept', async () => {
+    hits.length = 0
+    const r = await pinnedHttpsFetch(url('/no-content'), '127.0.0.1', 4, {
+      headers: { 'Content-Length': '3', 'Transfer-Encoding': 'chunked', 'User-Agent': 'caller-agent/2' },
+      body: BODY,
+      timeoutMs: 5000,
+      ca,
+    })
+    expect(r).toMatchObject({ status: 204, ok: true })
+    const h = hits[0].headers
+    expect(h['content-length']).toBe(String(Buffer.byteLength(BODY, 'utf8')))
+    expect(h['transfer-encoding']).toBeUndefined()
+    expect(h['user-agent']).toBe('caller-agent/2')
+    expect(hits[0].body).toBe(BODY)
+  })
+
+  it('no body: Content-Length 0, not chunked', async () => {
+    hits.length = 0
+    const r = await pinnedHttpsFetch(url('/no-content'), '127.0.0.1', 4, { timeoutMs: 5000, ca })
+    expect(r).toMatchObject({ status: 204, ok: true })
+    expect(hits[0].headers['content-length']).toBe('0')
+    expect(hits[0].headers['transfer-encoding']).toBeUndefined()
   })
 })
