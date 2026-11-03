@@ -66,7 +66,15 @@ export function draftInput(mode = 'original', quantity = 6): Input {
     : { mode, projects: ['SYN-P1', 'SYN-P2', 'SYN-P3'], projectField: 'projectNo', quantityField: 'quantity' } }
 }
 
-export async function createYidaOwnerHttpRealdbFixture(options: { initialization?: boolean; bootstrap?: boolean } = {}) {
+// Y2 synthetic sheet (in memory, never a customer record): the HTTP proofs drive the sheet-source route
+// branch with these; the permission logic itself is proved in tests/unit/yida-sheet-source.test.ts.
+export const sheetColumns = Object.freeze([{ fieldId: 'fld_project', source: 'projectNo' }, { fieldId: 'fld_line', source: 'lineId' },
+  { fieldId: 'fld_parent', source: 'parentCode' }, { fieldId: 'fld_qty', source: 'quantity' }, { fieldId: 'fld_desc', source: 'description' }])
+type SheetState = { access: Data; records: Array<{ id: string; data: Data }> }
+const defaultSheet = (): SheetState => ({ access: {}, records: [{ id: 'rec_synthetic_1',
+  data: { fld_project: 'SYN-P1', fld_line: 'SYN-L1', fld_qty: 6, fld_desc: 'synthetic HTTP part' } }] })
+
+export async function createYidaOwnerHttpRealdbFixture(options: { initialization?: boolean; bootstrap?: boolean; multiTarget?: boolean } = {}) {
   const databaseUrl = process.env.DATABASE_URL
   if (process.env.EXPECT_DB !== '1' || !databaseUrl) throw new Error('SYNTHETIC_DATABASE_REQUIRED')
   const schema = 'yida_owner_http_' + randomUUID().replaceAll('-', '')
@@ -96,6 +104,22 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   const sql: string[] = [], tokenPayloads: Data[] = [], formPayloads: Data[] = []
   const sessions: Record<string, string> = {}, tokens: Record<string, string> = {}
   let enablement: unknown = 'false', tokenCommitted = false, validRequests = true, formOutcome = 'ack'
+  let multiTargetEnablement: unknown = 'false', multiTargetUp = '', sheet = defaultSheet()
+  const sheetFields = [{ id: 'fld_project', type: 'string' }, { id: 'fld_line', type: 'string' }, { id: 'fld_parent', type: 'string' },
+    { id: 'fld_qty', type: 'number' }, { id: 'fld_desc', type: 'string' }]
+  const sheetSource = {
+    async resolveAccess() {
+      return { userId: principals.owner, isAdminRole: false, canRead: true, canExport: true, live: true, bounded: false,
+        capabilities: {}, ...sheet.access }
+    },
+    async loadFields() { return sheetFields },
+    async readableFieldIds(_sheet: string, _user: string, fields: Array<{ id: string }>) { return new Set(fields.map(field => field.id)) },
+    async loadView() { return null },
+    async loadRecords(_sheet: string, limit: number) { return sheet.records.slice(0, limit) },
+    async readableRecordIds(_sheet: string, _user: string, _admin: boolean, ids: readonly string[]) { return new Set(ids) },
+    filter: { parse: () => null, prune: () => null, leaves: () => [], evaluate: () => true, leafMatches: () => true,
+      effectiveType: (field: { type: string }) => field.type },
+  }
   let credentialRef = '', credentialGeneration = 0, seedDraft: Draft
   const load = (relative: string) => importNative(pathToFileURL(path.join(root, relative)).href)
   const query: Queryable['query'] = async (text, params) => {
@@ -157,13 +181,15 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   async function startRuntime(useDefault = false) {
     await closeRuntime()
     runtime = createRuntime({ database, security, fetch: syntheticFetch,
-      ...(useDefault ? {} : { readEnablement: () => enablement }), timeoutMs: 5000 })
+      ...(useDefault ? {} : { readEnablement: () => enablement }), timeoutMs: 5000,
+      ...(options.multiTarget ? { readMultiTargetEnablement: () => multiTargetEnablement } : {}) })
     // Match the production plugin injector: class methods are captured as
     // narrow own data members, never supplied as an inherited capability.
     const pluginSecurity = Object.freeze({ encrypt: security.encrypt.bind(security), decrypt: security.decrypt.bind(security) })
     registration = await runtime.createPluginCapability().activate(createBinding({ db: ownerDb, security: pluginSecurity }))
     if (options.initialization) {
-      initializationRuntime = createInitialization({ database, security })
+      initializationRuntime = createInitialization({ database, security,
+        ...(options.multiTarget ? { readMultiTargetEnablement: () => multiTargetEnablement } : {}) })
       initializationRegistration = await initializationRuntime.createPluginCapability().activate(createInitializationBinding({ security: pluginSecurity }))
     }
     const app = express()
@@ -176,7 +202,9 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     app.use(prefix, noStore, jsonOnly, express.json({ limit: '192kb', strict: true }), parseError)
     // Mount actual JWT at the prefix preserving the original path for auth policy.
     app.use(jwtMiddleware)
-    app.use(prefix, createRouter(runtime, initializationRuntime))
+    app.use(prefix, options.multiTarget
+      ? createRouter(runtime, initializationRuntime, undefined, sheetSource as Parameters<typeof createRouter>[3])
+      : createRouter(runtime, initializationRuntime))
     server = createServer(app)
     await new Promise<void>((resolve, reject) => {
       server!.once('error', reject)
@@ -263,6 +291,10 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       createInitializationBinding = (await load('plugins/plugin-integration-core/lib/yida-initialization-producer.mjs')).createYidaInitializationBinding as typeof createInitializationBinding
       correlation = (await load('packages/core-backend/src/middleware/correlation.ts')).correlationIdMiddleware as RequestHandler
     }
+    if (options.multiTarget) {
+      multiTargetUp = (await load('packages/core-backend/src/db/migrations/zzzz20261103120000_add_integration_yida_multi_target_slots.ts'))
+        .YIDA_MULTI_TARGET_UP_SQL as string
+    }
     const route = await load('packages/core-backend/src/routes/integration-yida-owner.ts')
     createRouter = route.createIntegrationYidaOwnerRouter as typeof createRouter
     noStore = route.yidaOwnerNoStoreMiddleware as RequestHandler; jsonOnly = route.yidaOwnerJsonOnlyMiddleware as RequestHandler
@@ -275,9 +307,12 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     '094_create_integration_yida_approved_target.sql', '095_create_integration_yida_send_approvals.sql',
     ...(options.initialization ? ['096_create_integration_yida_initialization.sql'] : [])]
     .map(name => readFileSync(path.join(root, 'packages/core-backend/migrations', name), 'utf8')).join('\n')
+    + (options.multiTarget ? '\n' + multiTargetUp : '')
   return {
     sql, tokens, sessions, tokenPayloads, formPayloads, rows, proof, http, tokenFor, startRuntime, closeRuntime, cleanup,
     setEnablement(value: unknown) { enablement = value }, setFormOutcome(value: 'ack' | 'unknown') { formOutcome = value },
+    setMultiTarget(value: unknown) { multiTargetEnablement = value },
+    setSheet(patch: Partial<SheetState>) { sheet = { ...defaultSheet(), ...patch } },
     get tokenCommitted() { return tokenCommitted }, get validRequests() { return validRequests },
     get seedDraft() { return seedDraft }, get runtime() { return runtime! },
     get initializationRuntime() { return initializationRuntime! },
@@ -359,6 +394,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       if (current.rows[0]?.schema !== schema) throw new Error('SYNTHETIC_NATIVE_AUTH_POOL_SCHEMA_REQUIRED')
       tokenPayloads.length = 0; formPayloads.length = 0; sql.length = 0
       enablement = 'false'; tokenCommitted = false; validRequests = true; formOutcome = 'ack'
+      multiTargetEnablement = 'false'; sheet = defaultSheet()
       await startRuntime()
     },
   }

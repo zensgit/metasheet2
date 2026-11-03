@@ -59,7 +59,9 @@ test('private binding and producer are closed, actor-bound and inert at construc
   const [{ createYidaInitializationBinding }] = await modules, f = fixture(), context = actor()
   const binding = createYidaInitializationBinding({ security: f.security }), producer = binding.createInitializationProducer(context)
   assert.deepEqual(Object.keys(binding), ['createInitializationProducer'])
-  assert.deepEqual(Object.keys(producer), ['initializeInTransaction', 'inspectDraftInTransaction'])
+  // Y2 adds the two multi-target methods; the host gates them behind INTEGRATION_YIDA_MULTI_TARGET_ENABLED.
+  assert.deepEqual(Object.keys(producer), ['initializeInTransaction', 'registerTargetInTransaction',
+    'listTargetsInTransaction', 'inspectDraftInTransaction'])
   assert(Object.isFrozen(binding) && Object.isFrozen(producer))
   assert.equal(f.statements.length, 0)
   assert.throws(() => createYidaInitializationBinding({ security: f.security, db: {} }), fixed('INPUT'))
@@ -185,4 +187,53 @@ test('actual plugin initialization activation refusal remains fixed and owner ca
     assert.equal(stopped, 0)
     await plugin.deactivate(); assert.equal(stopped, 1)
   } finally { await plugin.deactivate(); if (previous === undefined) delete process.env[flag]; else process.env[flag] = previous }
+})
+test('Y2 additional target: own slot, material and sealed locator; lister names app/form per slot; one target per form', async () => {
+  const [{ createYidaInitializationBinding }] = await modules, f = fixture(), request = await input()
+  const producer = createYidaInitializationBinding({ security: f.security }).createInitializationProducer(actor())
+  // No slot 1 yet: an additional target cannot exist before the initialized first target.
+  const early = structuredClone(request); early.draft.config.target.formUuid = 'FORM-SYNTHETIC-Y2-EARLY'
+  await assert.rejects(producer.registerTargetInTransaction(f.raw, early), fixed('UNAVAILABLE'))
+  assert.equal((f.rows.get('integration_yida_approved_target') ?? []).length, 0)
+  const first = await producer.initializeInTransaction(f.raw, request)
+  const second = structuredClone(request)
+  second.commandId = '22222222-2222-4222-8222-222222222222'
+  second.draft.config.target.formUuid = 'FORM-SYNTHETIC-Y2-SECOND'
+  second.attestation.reviewRef = 'synthetic-review-second'
+  const made = await producer.registerTargetInTransaction(f.raw, second)
+  assert.deepEqual(Object.keys(made).sort(), ['credentialGeneration', 'credentialRef', 'draft', 'slot', 'targetRef'])
+  assert.equal(made.slot, 2); assert.equal(made.credentialGeneration, 1)
+  assert.notEqual(made.targetRef, first.targetRef); assert.notEqual(made.credentialRef, first.credentialRef)
+  assert.notEqual(made.draft.targetRef, first.draft.targetRef)
+  const targets = f.rows.get('integration_yida_approved_target'), audits = f.rows.get('integration_yida_approved_target_audit')
+  assert.deepEqual(targets.map(row => row.slot), [1, 2]); assert.deepEqual(audits.map(row => row.slot), [1, 2])
+  // Its own attestation and locator are sealed in its own envelope; nothing plain in the row.
+  const envelope = JSON.parse(await f.security.decrypt(targets[1].evidence_encrypted))
+  assert.equal(envelope.slot, 2); assert.equal(envelope.targetRef, made.targetRef)
+  assert.equal(envelope.attestation.reviewRef, 'synthetic-review-second')
+  assert.equal(envelope.locator.formUuid, 'FORM-SYNTHETIC-Y2-SECOND')
+  assert.equal(JSON.stringify(targets).includes('FORM-SYNTHETIC-Y2-SECOND'), false)
+  const listed = await producer.listTargetsInTransaction(f.raw)
+  assert.deepEqual(listed.map(row => [row.slot, row.targetRef, row.formUuid]),
+    [[1, first.targetRef, request.draft.config.target.formUuid], [2, made.targetRef, 'FORM-SYNTHETIC-Y2-SECOND']])
+  assert.equal(JSON.stringify(listed).includes(request.material.appSecret), false)
+  // The same form again (another command, another material) is refused: one approved target per locator.
+  const again = structuredClone(second); again.commandId = '33333333-3333-4333-8333-333333333333'
+  await assert.rejects(producer.registerTargetInTransaction(f.raw, again), fixed('UNAVAILABLE'))
+  // The first target's form cannot become a second slot either.
+  const firstForm = structuredClone(request); firstForm.commandId = '44444444-4444-4444-8444-444444444444'
+  await assert.rejects(producer.registerTargetInTransaction(f.raw, firstForm), fixed('UNAVAILABLE'))
+  assert.deepEqual(f.rows.get('integration_yida_approved_target').map(row => row.slot), [1, 2])
+  assert.equal(f.statements.some(sql => /integration_yida_(send_|delivery_|create_fence)/u.test(sql)), false)
+})
+test('Y2 another owner context cannot add a slot to, or list, the first owner targets', async () => {
+  const [{ createYidaInitializationBinding }] = await modules, f = fixture(), request = await input()
+  const binding = createYidaInitializationBinding({ security: f.security })
+  await binding.createInitializationProducer(actor()).initializeInTransaction(f.raw, request)
+  const other = binding.createInitializationProducer({ ...actor(), actorId: 'synthetic-other-owner' })
+  const second = structuredClone(request); second.draft.config.target.formUuid = 'FORM-SYNTHETIC-Y2-OTHER'
+  await assert.rejects(other.registerTargetInTransaction(f.raw, second), fixed('UNAVAILABLE'))
+  const listed = await other.listTargetsInTransaction(f.raw)
+  assert.deepEqual(listed, [])
+  assert.equal(f.rows.get('integration_yida_approved_target').length, 1)
 })

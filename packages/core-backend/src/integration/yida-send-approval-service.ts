@@ -15,6 +15,9 @@ const MAX_TTL = 900000
 const MAX_PLAIN = 16 * 1024 * 1024
 const MAX_CIPHER = 24 * 1024 * 1024
 const DIGEST = /^[0-9a-f]{64}$/
+// Y2 multi-target: additional owner-attested targets live in slots 2..16 (migration zzzz20261103120000).
+const MAX_SLOT = 16
+const TARGET_REF = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const SELECTION_KEYS = ['tenantId', 'workspaceId', 'ownerId', 'operationId', 'rowKey', 'targetRef',
   'targetRevision', 'planRevision', 'credentialRef', 'credentialGeneration', 'businessKeyDigest',
   'rowPayloadDigest', 'planDigest', 'config', 'selectedRow', 'source', 'plan'] as const
@@ -169,7 +172,14 @@ type Dependencies = {
   // The actual private plugin factory supplies this port, never a request body.
   // It is data/execution infrastructure, not a substitute for live host authority.
   primitives: YidaSendAuthorityPrimitives
+  // Y2: true only while the host multi-target switch reads exact 'true' for this run. False/absent =
+  // the original permanent slot-1 authority, byte for byte (no targetRef accepted or forwarded).
+  multiTarget?: boolean
 }
+// A multi-target transaction names its target: explicitly (draft/preview/approve) or through the
+// immutable grant row (inspect/revoke/admit/observe/execution). Never chosen from a request scope.
+type TargetSelector = Readonly<{ targetRef: string }> | Readonly<{ grantId: string }>
+type TargetBinding = Readonly<{ draftTargetRef: string }> | null
 
 export type YidaExecutionCredentialBinding = Readonly<{
   tenantId: string; workspaceId: null; ownerId: string; credentialRef: string; credentialGeneration: number
@@ -194,8 +204,9 @@ export type YidaSendExecutionHandle = Readonly<{
   close(): void
 }>
 
-function createApprovalInternals({ database, security, context, primitives }: Dependencies,
+function createApprovalInternals({ database, security, context, primitives, multiTarget }: Dependencies,
   executionPrimitives?: YidaSendExecutionPrimitives) {
+  const multi = multiTarget === true
   const rawContext = record(context, ['actorId', 'tenantId', 'workspaceId'])
   const fixed: Context = Object.freeze({ actorId: id(rawContext.actorId), tenantId: id(rawContext.tenantId), workspaceId: null })
   if (rawContext.workspaceId !== null) fail('INPUT')
@@ -204,21 +215,54 @@ function createApprovalInternals({ database, security, context, primitives }: De
     || ['resolveSelectionInTransaction', 'executionPayloadDigest', 'prepareInTransaction']
       .some(key => typeof primitives[key as keyof YidaSendAuthorityPrimitives] !== 'function')) fail('UNAVAILABLE')
 
-  async function transaction<T>(callback: (trx: Queryable, targetRef: string) => Promise<T>, checkpoint = noCheckpoint): Promise<T> {
+  async function transaction<T>(callback: (trx: Queryable, targetRef: string, bound: TargetBinding) => Promise<T>,
+    checkpoint = noCheckpoint, selector?: TargetSelector): Promise<T> {
     try {
+      if (selector !== undefined && !multi) fail('INPUT')
       return await checked(checkpoint, () => database.transaction(async trx => {
         // The provider has BEGIN already. This must precede even the xid probe.
         await checked(checkpoint, () => trx.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED'))
         await checked(checkpoint, () => assertAutomationIntegrationActor(trx, fixed))
-        const result = await checked(checkpoint, () => trx.query('SELECT slot, target_ref, tenant_id, workspace_id, owner_id, evidence_version, status FROM integration_yida_approved_target WHERE slot = 1 FOR UPDATE'))
+        if (selector === undefined) {
+          const result = await checked(checkpoint, () => trx.query('SELECT slot, target_ref, tenant_id, workspace_id, owner_id, evidence_version, status FROM integration_yida_approved_target WHERE slot = 1 FOR UPDATE'))
+          const slot = result.rows[0]
+          if (result.rows.length !== 1 || slot.tenant_id !== fixed.tenantId || slot.workspace_id !== null
+            || slot.owner_id !== fixed.actorId) fail('NOT_FOUND')
+          if (slot.slot !== 1 || slot.status !== 'manually_confirmed' || slot.evidence_version !== 1) fail('UNAVAILABLE')
+          return checked(checkpoint, () => callback(trx, id(slot.target_ref), null))
+        }
+        // Y2: a grant names its target for good (append-only row); read that binding, then lock the
+        // target row exactly as the slot-1 path does. A grant of another owner/tenant is NOT_FOUND.
+        let wanted: string
+        if ('grantId' in selector) {
+          const bound = await checked(checkpoint, () => trx.query('SELECT target_ref FROM integration_yida_send_approvals WHERE grant_id = $1 AND tenant_id = $2 AND workspace_id IS NULL AND owner_id = $3',
+            [id(selector.grantId), fixed.tenantId, fixed.actorId]))
+          if (bound.rows.length !== 1) fail('NOT_FOUND')
+          wanted = id(bound.rows[0].target_ref)
+        } else wanted = id(selector.targetRef)
+        if (!TARGET_REF.test(wanted)) fail('NOT_FOUND')
+        const result = await checked(checkpoint, () => trx.query('SELECT slot, target_ref, tenant_id, workspace_id, owner_id, evidence_version, status, draft_target_ref FROM integration_yida_approved_target WHERE target_ref = $1 FOR UPDATE', [wanted]))
         const slot = result.rows[0]
-        if (result.rows.length !== 1 || slot.tenant_id !== fixed.tenantId || slot.workspace_id !== null
-          || slot.owner_id !== fixed.actorId) fail('NOT_FOUND')
-        if (slot.slot !== 1 || slot.status !== 'manually_confirmed' || slot.evidence_version !== 1) fail('UNAVAILABLE')
-        return checked(checkpoint, () => callback(trx, id(slot.target_ref)))
+        if (result.rows.length !== 1 || slot.target_ref !== wanted || slot.tenant_id !== fixed.tenantId
+          || slot.workspace_id !== null || slot.owner_id !== fixed.actorId) fail('NOT_FOUND')
+        if (!Number.isInteger(slot.slot) || Number(slot.slot) < 1 || Number(slot.slot) > MAX_SLOT || slot.status !== 'manually_confirmed'
+          || slot.evidence_version !== 1) fail('UNAVAILABLE')
+        const binding: TargetBinding = Object.freeze({ draftTargetRef: id(slot.draft_target_ref) })
+        return checked(checkpoint, () => callback(trx, id(slot.target_ref), binding))
       }))
     } catch (error) { closeError(error) }
   }
+  // Y2: an operation (draft) is compiled for exactly one target's app/form. Under a named target it
+  // must belong to that target's draft locator, or the request is a cross-target attempt: CONFLICT.
+  async function assertOperationTarget(trx: Queryable, bound: TargetBinding, operationId: string) {
+    if (bound === null) return
+    const result = await trx.query('SELECT target_ref FROM integration_yida_draft_operations WHERE operation_id = $1', [operationId])
+    if (result.rows.length !== 1) fail('NOT_FOUND')
+    if (result.rows[0].target_ref !== bound.draftTargetRef) fail('CONFLICT')
+  }
+  const targeted = <T extends Row>(input: T, targetRef: string, bound: TargetBinding): T | (T & { targetRef: string }) =>
+    bound === null ? input : { ...input, targetRef }
+  const grantSelector = (grantId: string): TargetSelector | undefined => multi ? Object.freeze({ grantId }) : undefined
   async function now(trx: Queryable): Promise<number> {
     const result = await trx.query('SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint::text AS now_ms')
     if (result.rows.length !== 1) fail('UNAVAILABLE')
@@ -266,8 +310,9 @@ function createApprovalInternals({ database, security, context, primitives }: De
       admissionId: admission ? id(admission.id) : null, ledgerId: admission ? id(admission.ledger_id) : null,
       canSend: false, externalWriteAttempted: false })
   }
-  async function selection(trx: Queryable, targetRef: string, operationId: string, rowKey: string) {
-    const selected = await primitives.resolveSelectionInTransaction(trx, { operationId, rowKey })
+  async function selection(trx: Queryable, targetRef: string, operationId: string, rowKey: string, bound: TargetBinding = null) {
+    await assertOperationTarget(trx, bound, operationId)
+    const selected = await primitives.resolveSelectionInTransaction(trx, targeted({ operationId, rowKey }, targetRef, bound))
     const checked = record(selected, SELECTION_KEYS)
     if (!Object.isFrozen(selected) || checked.tenantId !== fixed.tenantId || checked.workspaceId !== null
       || checked.ownerId !== fixed.actorId || checked.targetRef !== targetRef || checked.operationId !== operationId
@@ -286,8 +331,8 @@ function createApprovalInternals({ database, security, context, primitives }: De
       approvedAt: millis(row.approved_at_ms), expiresAt: millis(row.expires_at_ms), ttlMs: row.ttl_ms, maxAttempts: 1,
       executionPayloadDigest: row.execution_payload_digest, selection: selected }
   }
-  async function authenticatedSelection(trx: Queryable, targetRef: string, row: Row, checkpoint = noCheckpoint) {
-    const selected = await checked(checkpoint, () => selection(trx, targetRef, id(row.operation_id), id(row.row_key)))
+  async function authenticatedSelection(trx: Queryable, targetRef: string, row: Row, checkpoint = noCheckpoint, bound: TargetBinding = null) {
+    const selected = await checked(checkpoint, () => selection(trx, targetRef, id(row.operation_id), id(row.row_key), bound))
     const executionDigest = digest(await checked(checkpoint, async () => primitives.executionPayloadDigest(selected,
       { grantRef: id(row.grant_id), expiresAt: millis(row.expires_at_ms), actorId: fixed.actorId })))
     if (executionDigest !== row.execution_payload_digest || selected.credentialRef !== row.credential_ref
@@ -306,11 +351,13 @@ function createApprovalInternals({ database, security, context, primitives }: De
       || result.rows[0].actor_id !== fixed.actorId) fail('UNAVAILABLE')
   }
   async function approve(input: unknown) {
-    const parsed = record(input, ['operationId', 'rowKey', 'confirmationId', 'ttlMs'], ['operationId', 'rowKey', 'confirmationId'])
+    const parsed = record(input, multi ? ['operationId', 'rowKey', 'confirmationId', 'ttlMs', 'targetRef']
+      : ['operationId', 'rowKey', 'confirmationId', 'ttlMs'], ['operationId', 'rowKey', 'confirmationId'])
     const operationId = id(parsed.operationId), rowKey = id(parsed.rowKey), confirmationId = id(parsed.confirmationId)
     const ttlMs = Object.hasOwn(parsed, 'ttlMs') ? parsed.ttlMs : MAX_TTL
     if (!Number.isInteger(ttlMs) || Number(ttlMs) < 1 || Number(ttlMs) > MAX_TTL) fail('INPUT')
-    return transaction(async (trx, targetRef) => {
+    const selector = Object.hasOwn(parsed, 'targetRef') ? Object.freeze({ targetRef: id(parsed.targetRef) }) : undefined
+    return transaction(async (trx, targetRef, bound) => {
       const previous = await trx.query('SELECT * FROM integration_yida_send_approvals WHERE tenant_id = $1 AND owner_id = $2 AND confirmation_id = $3 FOR UPDATE',
         [fixed.tenantId, fixed.actorId, confirmationId])
       if (previous.rows.length > 1) fail('UNAVAILABLE')
@@ -322,7 +369,7 @@ function createApprovalInternals({ database, security, context, primitives }: De
       // Recover an already committed confirmation even when its material has
       // since expired or been revoked. This returns history, not a new permit;
       // a fresh approval and first admission still authenticate current state.
-      const selected = await selection(trx, targetRef, operationId, rowKey)
+      const selected = await selection(trx, targetRef, operationId, rowKey, bound)
       const window = await trx.query(`WITH instant AS MATERIALIZED
         (SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS at_ms)
         SELECT at_ms::text AS approved_at_ms, (at_ms + $1::bigint)::text AS expires_at_ms FROM instant`, [ttlMs])
@@ -348,11 +395,11 @@ function createApprovalInternals({ database, security, context, primitives }: De
         ? millis(inserted[key]) !== value : inserted[key] !== value)) fail('UNAVAILABLE')
       await audit(trx, grantId, 'approve')
       return Object.freeze({ ...await metadata(trx, inserted), reused: false })
-    })
+    }, noCheckpoint, selector)
   }
   async function inspect(input: unknown) {
     const grantId = id(record(input, ['grantId']).grantId)
-    return transaction(async (trx, targetRef) => metadata(trx, await grant(trx, targetRef, grantId)))
+    return transaction(async (trx, targetRef) => metadata(trx, await grant(trx, targetRef, grantId)), noCheckpoint, grantSelector(grantId))
   }
   async function revoke(input: unknown) {
     const grantId = id(record(input, ['grantId']).grantId)
@@ -365,7 +412,7 @@ function createApprovalInternals({ database, security, context, primitives }: De
         await audit(trx, grantId, 'revoke')
       }
       return Object.freeze({ ...await metadata(trx, row), reused: Boolean(revocation) })
-    })
+    }, noCheckpoint, grantSelector(grantId))
   }
   function grantAnchor(row: Row): Readonly<Row> {
     return Object.freeze(Object.fromEntries(GRANT_ANCHOR_KEYS.map(key => [key,
@@ -373,7 +420,7 @@ function createApprovalInternals({ database, security, context, primitives }: De
   }
   async function persistAdmission(input: unknown): Promise<{ approval: ApprovalResult; anchor: ExecutionAnchor | null }> {
     const parsed = record(input, ['grantId', 'submissionId']), grantId = id(parsed.grantId), submissionId = id(parsed.submissionId)
-    return transaction(async (trx, targetRef) => {
+    return transaction(async (trx, targetRef, bound) => {
       const row = await grant(trx, targetRef, grantId), state = await facts(trx, row)
       if (state.admission) {
         if (state.admission.submission_id !== submissionId) fail('CONFLICT')
@@ -382,7 +429,7 @@ function createApprovalInternals({ database, security, context, primitives }: De
       }
       if (state.revocation) fail('REVOKED')
       if (await now(trx) >= millis(row.expires_at_ms)) fail('EXPIRED')
-      const { selected, executionDigest } = await authenticatedSelection(trx, targetRef, row)
+      const { selected, executionDigest } = await authenticatedSelection(trx, targetRef, row, noCheckpoint, bound)
       const prepared = await primitives.prepareInTransaction(trx, { tenantId: fixed.tenantId, workspaceId: null,
         ownerId: fixed.actorId, operationId: selected.operationId, rowKey: selected.rowKey, targetRef,
         targetRevision: selected.targetRevision, planRevision: selected.planRevision, credentialRef: selected.credentialRef,
@@ -407,7 +454,7 @@ function createApprovalInternals({ database, security, context, primitives }: De
       const admissionId = id(result.rows[0].id), ledgerId = id(ledger.id)
       if (approval.status !== 'admitted' || approval.admissionId !== admissionId || approval.ledgerId !== ledgerId) fail('UNAVAILABLE')
       return { approval, anchor: Object.freeze({ grantId, admissionId, submissionId, ledgerId, grant: grantAnchor(row) }) }
-    })
+    }, noCheckpoint, grantSelector(grantId))
   }
   async function admit(input: unknown): Promise<ApprovalResult> {
     // A public admission never inserts anything into the execution-permit map.
@@ -439,16 +486,20 @@ function createApprovalInternals({ database, security, context, primitives }: De
       const ledger = admission ? await delivery(trx, row, admission) : null
       return Object.freeze({ approval: await metadata(trx, row),
         delivery: ledger ? Object.freeze({ id: id(ledger.id), status: ledger.status as string, durable: true as const }) : null })
-    })
+    }, noCheckpoint, grantSelector(grantId))
   }
   async function prepareDraft(input: unknown): Promise<Readonly<Row>> {
-    const parsed = record(input, ['config', 'rowsText', 'allocation'])
+    const supplied = record(input, multi ? ['config', 'rowsText', 'allocation', 'targetRef'] : ['config', 'rowsText', 'allocation'],
+      ['config', 'rowsText', 'allocation'])
+    const selector = Object.hasOwn(supplied, 'targetRef') ? Object.freeze({ targetRef: id(supplied.targetRef) }) : undefined
+    const parsed = record({ config: supplied.config, rowsText: supplied.rowsText, allocation: supplied.allocation },
+      ['config', 'rowsText', 'allocation'])
     // Literal data only, never a source/Connection reference or a query port.
     // The actual plugin compiler applies its tighter input/row budgets too.
     canonical(parsed)
     if (!executionPrimitives?.prepareDraftInTransaction) fail('UNAVAILABLE')
-    return transaction(async trx => {
-      const result = await executionPrimitives.prepareDraftInTransaction!(trx, parsed)
+    return transaction(async (trx, targetRef, bound) => {
+      const result = await executionPrimitives.prepareDraftInTransaction!(trx, targeted(parsed, targetRef, bound))
       const view = record(result, ['targetRef', 'operationId', 'status', 'identityKind', 'canSend', 'canApply',
         'tokenIssued', 'externalWriteAttempted', 'rowCount', 'rows', 'reused'])
       if (!Object.isFrozen(result) || view.status !== 'unverified' || view.identityKind !== 'local-unverified'
@@ -464,14 +515,16 @@ function createApprovalInternals({ database, security, context, primitives }: De
       })
       canonical(result)
       return result
-    })
+    }, noCheckpoint, selector)
   }
   async function preview(input: unknown): Promise<Readonly<Row>> {
-    const parsed = record(input, ['operationId', 'rowKey'])
+    const parsed = record(input, multi ? ['operationId', 'rowKey', 'targetRef'] : ['operationId', 'rowKey'], ['operationId', 'rowKey'])
     const operationId = id(parsed.operationId), rowKey = id(parsed.rowKey)
+    const selector = Object.hasOwn(parsed, 'targetRef') ? Object.freeze({ targetRef: id(parsed.targetRef) }) : undefined
     if (!executionPrimitives?.previewInTransaction) fail('UNAVAILABLE')
-    return transaction(async (trx, targetRef) => {
-      const result = await executionPrimitives.previewInTransaction!(trx, { operationId, rowKey })
+    return transaction(async (trx, targetRef, bound) => {
+      await assertOperationTarget(trx, bound, operationId)
+      const result = await executionPrimitives.previewInTransaction!(trx, targeted({ operationId, rowKey }, targetRef, bound))
       const view = record(result, ['operationId', 'rowKey', 'planDigest', 'rowPayloadDigest', 'target', 'payload',
         'policy', 'canSend', 'externalWriteAttempted'])
       const target = record(view.target, ['targetRef', 'identityKind', 'evidenceVersion', 'reviewRef', 'organizationId', 'appType', 'formUuid'])
@@ -487,7 +540,7 @@ function createApprovalInternals({ database, security, context, primitives }: De
         || types.isProxy(view.payload) || !Object.isFrozen(view.payload)) fail('UNAVAILABLE')
       canonical(result)
       return result
-    })
+    }, noCheckpoint, selector)
   }
   const permits = new WeakMap<object, ExecutionAnchor>()
   async function admitForExecution(input: unknown) {
@@ -502,7 +555,7 @@ function createApprovalInternals({ database, security, context, primitives }: De
   }
   async function authenticatedExecution(anchor: ExecutionAnchor, expectedStatus: 'prepared' | 'dispatching', checkpoint: Checkpoint) {
     if (!executionPrimitives) fail('UNAVAILABLE')
-    return transaction(async (trx, targetRef) => {
+    return transaction(async (trx, targetRef, bound) => {
       const row = await checked(checkpoint, () => grant(trx, targetRef, anchor.grantId))
       const currentAnchor = grantAnchor(row)
       if (GRANT_ANCHOR_KEYS.some(key => currentAnchor[key] !== anchor.grant[key])) fail('CONFLICT')
@@ -511,9 +564,9 @@ function createApprovalInternals({ database, security, context, primitives }: De
         || state.admission.submission_id !== anchor.submissionId) fail('CONFLICT')
       if (state.revocation) fail('REVOKED')
       if (await checked(checkpoint, () => now(trx)) >= millis(row.expires_at_ms)) fail('EXPIRED')
-      const { selected } = await authenticatedSelection(trx, targetRef, row, checkpoint)
+      const { selected } = await authenticatedSelection(trx, targetRef, row, checkpoint, bound)
       const raw = await checked(checkpoint, () => executionPrimitives.loadExecutionMaterialInTransaction(trx,
-        { credentialRef: selected.credentialRef, credentialGeneration: selected.credentialGeneration }))
+        targeted({ credentialRef: selected.credentialRef, credentialGeneration: selected.credentialGeneration }, targetRef, bound)))
       const material = record(raw, [...BINDING_KEYS, 'appKey', 'appSecret', 'systemToken', 'userId'])
       const expectedBinding = { tenantId: fixed.tenantId, workspaceId: null, ownerId: fixed.actorId,
         credentialRef: selected.credentialRef, credentialGeneration: selected.credentialGeneration }
@@ -526,7 +579,7 @@ function createApprovalInternals({ database, security, context, primitives }: De
       if (await checked(checkpoint, () => now(trx)) >= millis(row.expires_at_ms)) fail('EXPIRED')
       checkpoint()
       return { row, selected, material }
-    }, checkpoint)
+    }, checkpoint, grantSelector(anchor.grantId))
   }
   function takeExecution(permit: unknown): YidaSendExecutionHandle {
     const found = permits.get(permit as object)
