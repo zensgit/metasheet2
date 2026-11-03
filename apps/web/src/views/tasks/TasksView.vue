@@ -55,7 +55,12 @@
                 class="tasks-view__detail-assignee"
                 data-testid="tasks-detail-assignee"
               >
-                <span class="tasks-view__detail-assignee-id">{{ assignee.userId }}</span>
+                <span class="tasks-view__detail-assignee-id">{{ personName(assignee.userId) }}</span>
+                <span
+                  v-if="isDeactivatedPerson(assignee.userId)"
+                  class="tasks-view__person-inactive"
+                  data-testid="tasks-detail-person-inactive"
+                >{{ t.memberInactiveMark }}</span>
                 <span class="tasks-view__detail-assignee-status" data-testid="tasks-detail-assignee-status">
                   {{ assignee.completedAt ? fmt.completedAt(formatViewerInstant(assignee.completedAt, undefined, viewerLocale)) : t.assigneeNotDone }}
                 </span>
@@ -69,7 +74,24 @@
               </li>
             </ul>
 
-            <form v-if="canManageTaskMembers" class="tasks-view__add-assignee" data-testid="tasks-detail-add-assignee-form" @submit.prevent="onAddAssignee">
+            <!-- Package 1b: people are picked by name; the user-id form stays as the secondary entry,
+                 folded until it is asked for. -->
+            <div v-if="canManageTaskMembers" class="tasks-view__member-pick">
+              <button
+                type="button"
+                data-testid="tasks-detail-pick-assignee"
+                :disabled="detailActionPending"
+                @click="pickerMode = 'assignee'"
+              >{{ t.pickAssignee }}</button>
+              <button
+                type="button"
+                class="tasks-view__link-button"
+                data-testid="tasks-detail-add-assignee-by-id-toggle"
+                :aria-expanded="addAssigneeByIdOpen ? 'true' : 'false'"
+                @click="addAssigneeByIdOpen = !addAssigneeByIdOpen"
+              >{{ t.addByIdToggle }}</button>
+            </div>
+            <form v-if="canManageTaskMembers" v-show="addAssigneeByIdOpen" class="tasks-view__add-assignee" data-testid="tasks-detail-add-assignee-form" @submit.prevent="onAddAssignee">
               <input
                 v-model="newAssigneeId"
                 type="text"
@@ -254,7 +276,12 @@
               <h3>{{ t.followersHeading }}</h3>
               <ul v-if="followersState !== null" data-testid="tasks-detail-followers">
                 <li v-for="followerId in followersState" :key="followerId" data-testid="tasks-detail-follower">
-                  <span>{{ followerId }}</span>
+                  <span>{{ personName(followerId) }}</span>
+                  <span
+                    v-if="isDeactivatedPerson(followerId)"
+                    class="tasks-view__person-inactive"
+                    data-testid="tasks-detail-person-inactive"
+                  >{{ t.memberInactiveMark }}</span>
                   <button
                     v-if="canManageTaskMembers"
                     type="button"
@@ -267,7 +294,22 @@
               <p v-else class="tasks-view__message" data-testid="tasks-detail-followers-unknown">
                 {{ t.followersUnknown }}
               </p>
-              <form v-if="canManageTaskMembers" class="tasks-view__add-follower" data-testid="tasks-detail-add-follower-form" @submit.prevent="onAddFollower">
+              <div v-if="canManageTaskMembers" class="tasks-view__member-pick">
+                <button
+                  type="button"
+                  data-testid="tasks-detail-pick-follower"
+                  :disabled="detailActionPending"
+                  @click="pickerMode = 'follower'"
+                >{{ t.pickFollower }}</button>
+                <button
+                  type="button"
+                  class="tasks-view__link-button"
+                  data-testid="tasks-detail-add-follower-by-id-toggle"
+                  :aria-expanded="addFollowerByIdOpen ? 'true' : 'false'"
+                  @click="addFollowerByIdOpen = !addFollowerByIdOpen"
+                >{{ t.addByIdToggle }}</button>
+              </div>
+              <form v-if="canManageTaskMembers" v-show="addFollowerByIdOpen" class="tasks-view__add-follower" data-testid="tasks-detail-add-follower-form" @submit.prevent="onAddFollower">
                 <input
                   v-model="newFollowerId"
                   type="text"
@@ -291,6 +333,14 @@
                 {{ codeMessage(followerError, t) }}
               </p>
             </section>
+
+            <TaskPeoplePicker
+              v-if="canManageTaskMembers"
+              :visible="pickerMode !== null"
+              :mode="pickerMode ?? 'assignee'"
+              @confirm="onPickerConfirm"
+              @close="pickerMode = null"
+            />
 
             <!-- M3 §3.6: comments. Tombstones render as 已删除; edit/delete gated by
                  `canEditOwnComment` (own-comment only — see the script for the "id unavailable"
@@ -665,7 +715,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
@@ -683,6 +733,7 @@ import {
   deleteTask,
   editComment,
   getTask,
+  getTaskPeople,
   leaveTask,
   listAllTaskLists,
   listComments,
@@ -700,6 +751,7 @@ import {
   type TaskDetail,
   type TaskListItem,
   type TaskPatch,
+  type TaskPerson,
   type TaskStatusFilter,
   type TaskView,
   type WriteFailure,
@@ -731,6 +783,7 @@ import {
   type EditorState,
   type TaskDraft,
 } from '../../tasks/tasksDraft'
+import TaskPeoplePicker, { type TaskPeoplePicked, type TaskPeoplePickerMode } from '../../tasks/TaskPeoplePicker.vue'
 import TaskDetailEditor from './TaskDetailEditor.vue'
 import TaskDetailLists, { type DetailListsError, type MyListsState } from './TaskDetailLists.vue'
 import TaskListsSidebar from './TaskListsSidebar.vue'
@@ -869,6 +922,14 @@ const canLeaveCurrentTask = computed(() => {
 })
 const newFollowerId = ref('')
 const followerError = ref<string | null>(null)
+// Package 1b: the people picker, the folded user-id forms, and the names on the task
+// (`GET /api/tasks/:id/people`). The names are kept only from an `ok` answer; anything else leaves
+// the ids as they are.
+const pickerMode = ref<TaskPeoplePickerMode | null>(null)
+const addAssigneeByIdOpen = ref(false)
+const addFollowerByIdOpen = ref(false)
+const taskPeople = shallowRef<Map<string, TaskPerson> | null>(null)
+let taskPeopleGeneration = 0
 
 // Row-level abilities from the detail body (contract §3.2). `false` hides the controls the server
 // would answer with its uniform 404; an absent flag (an older body) leaves them visible, and the
@@ -1073,6 +1134,30 @@ async function loadDetail(id: string): Promise<void> {
   if (mine !== detailGeneration) return
   detailResult.value = result.kind === 'ok' ? { kind: 'ok', task: result.task } : { kind: result.kind }
   if (result.kind === 'ok' && result.task.followers !== undefined) followersState.value = result.task.followers
+  if (result.kind === 'ok') void loadTaskPeople(id)
+}
+
+/** Package 1b: the names on the task. Read after every detail read; only an `ok` answer for the
+ *  task still on screen is kept. A failure, a thrown call or any other answer changes nothing. */
+async function loadTaskPeople(id: string): Promise<void> {
+  taskPeopleGeneration += 1
+  const mine = taskPeopleGeneration
+  let result: Awaited<ReturnType<typeof getTaskPeople>> | undefined
+  try {
+    result = await getTaskPeople(id)
+  } catch {
+    return
+  }
+  if (mine !== taskPeopleGeneration || taskId.value !== id) return
+  if (result && result.kind === 'ok') taskPeople.value = result.people
+}
+
+function personName(userId: string): string {
+  return taskPeople.value?.get(userId)?.name || userId
+}
+
+function isDeactivatedPerson(userId: string): boolean {
+  return taskPeople.value?.get(userId)?.status === 'inactive'
 }
 
 /** M3: a SECOND read the detail page needs — `GET /api/tasks/:id` (`loadDetail` above) does not
@@ -1424,6 +1509,51 @@ async function onAddAssignee(): Promise<void> {
   } finally {
     if (token === detailActionToken) detailActionPending.value = false
   }
+}
+
+/** Package 1b: the picker's people, added one at a time through the same write as the user-id form,
+ *  in the order they were ticked; the first failure stops the rest and shows next to the form. */
+async function addPickedMembers(kind: TaskPeoplePickerMode, userIds: string[]): Promise<void> {
+  const id = taskId.value
+  if (!id || userIds.length === 0 || detailActionPending.value) return
+  const setError = (code: string | null) => {
+    if (kind === 'assignee') membershipError.value = code
+    else followerError.value = code
+  }
+  setError(null)
+  actionErrorKind.value = null
+  const token = ++detailActionToken
+  detailActionPending.value = true
+  let added = false
+  let failed = false
+  try {
+    for (const userId of userIds) {
+      const result = kind === 'assignee' ? await addAssignee(id, userId) : await addFollower(id, userId)
+      if (token !== detailActionToken) {
+        if (added || result.kind === 'ok') notifyTasksChanged()
+        return
+      }
+      if (result.kind !== 'ok') {
+        applyDetailFailure(result, (code) => setError(code))
+        failed = true
+        break
+      }
+      added = true
+      if (kind === 'follower' && 'followers' in result.task) followersState.value = result.task.followers
+    }
+    if (!added) return
+    if (!failed) orgMissingFromAction.value = false
+    notifyTasksChanged()
+    await loadDetail(id)
+  } finally {
+    if (token === detailActionToken) detailActionPending.value = false
+  }
+}
+
+function onPickerConfirm(picked: TaskPeoplePicked): void {
+  const kind = pickerMode.value
+  pickerMode.value = null
+  if (kind) void addPickedMembers(kind, picked.ids)
 }
 
 async function onRemoveAssignee(userId: string): Promise<void> {
@@ -2068,6 +2198,11 @@ watch(taskId, (id) => {
   followersState.value = null
   newFollowerId.value = ''
   followerError.value = null
+  pickerMode.value = null
+  addAssigneeByIdOpen.value = false
+  addFollowerByIdOpen.value = false
+  taskPeople.value = null
+  taskPeopleGeneration += 1
   newCommentBody.value = ''
   commentError.value = null
   editingCommentId.value = null
@@ -2103,6 +2238,28 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+.tasks-view__member-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.tasks-view__link-button {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--ms-color-primary, #409eff);
+  cursor: pointer;
+}
+
+.tasks-view__person-inactive {
+  margin-left: 4px;
+  font-size: 12px;
+  color: #909399;
+}
+
 .tasks-view {
   padding: 24px;
 }
