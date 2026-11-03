@@ -148,6 +148,8 @@ async function fakeFetch(path: string, init?: FetchInit): Promise<Response> {
   if (method === 'POST' && pathname === '/api/task-lists') return h_.createReply(init?.body)
   if (method === 'GET' && (match = /^\/api\/tasks\/([^/]+)$/.exec(pathname))) return jsonResponse(200, detailBody(decodeURIComponent(match[1])))
   if (method === 'GET' && /^\/api\/tasks\/[^/]+\/comments$/.test(pathname)) return jsonResponse(200, { items: [], total: 0 })
+  // Package 1b: the detail page reads the names on the task; none known here.
+  if (method === 'GET' && /^\/api\/tasks\/[^/]+\/people$/.test(pathname)) return jsonResponse(200, { people: {} })
   // M4 FE-7: the assigned view's rows render through the personal grouping board, which reads the
   // viewer's groups and placements — here a viewer without groups (tasks-groups.spec.ts covers it).
   if (method === 'GET' && pathname === '/api/task-groups') {
