@@ -54,6 +54,8 @@ interface Seed {
   followers?: string[]
   /** Users the org lookup answers as active members. */
   active?: string[]
+  /** Users the task access read answers as administrators (one statement, no further reads). */
+  admins?: string[]
   /** The task row is gone (every task read returns no row). */
   missing?: boolean
   /** Live children of the task (the delete answers 409 HAS_CHILDREN). */
@@ -93,6 +95,10 @@ function respondWith(seed: Seed): void {
     if (sql.includes('FROM user_orgs')) {
       const asked = params?.[1] as string[] | undefined
       return { rows: (seed.active ?? []).filter((id) => (asked ?? []).includes(id)).map((user_id) => ({ user_id })) }
+    }
+    if (sql.includes('FROM users u')) {
+      const asked = params?.[0] as string[] | undefined
+      return { rows: (seed.admins ?? []).filter((id) => (asked ?? []).includes(id)).map((user_id) => ({ user_id })) }
     }
     return undefined
   }
@@ -150,7 +156,7 @@ const F = 'usr-f'
 const TOUCHPOINTS: Touchpoint[] = [
   {
     name: 'createTask',
-    seed: { createdBy: C, active: [A, B] },
+    seed: { createdBy: C, active: [A, B], admins: [A, B] },
     run: () => createTask({ orgId: ORG, creatorId: C, title: 'title', assignees: [A, B] }),
     recipients: [A, B],
     failing: {
@@ -185,7 +191,7 @@ const TOUCHPOINTS: Touchpoint[] = [
   },
   {
     name: 'addAssignee',
-    seed: { createdBy: C, assignees: [{ userId: A }], followers: [F], active: [B] },
+    seed: { createdBy: C, assignees: [{ userId: A }], followers: [F], active: [B], admins: [B] },
     run: () => addAssignee({ orgId: ORG, actorId: C, taskId: TASK, body: { userId: B } }),
     recipients: [A, B],
     failing: {
@@ -317,7 +323,7 @@ describe('tasks:counts-updated touchpoints (M4 PR-3c)', () => {
   })
 
   it('addAssignee: the first assignee of a task with none is the only recipient', async () => {
-    respondWith({ createdBy: C, followers: [F], active: [B] })
+    respondWith({ createdBy: C, followers: [F], active: [B], admins: [B] })
     await addAssignee({ orgId: ORG, actorId: C, taskId: TASK, body: { userId: B } })
     expectEmitsAfterCommit(roomsOf(B))
   })

@@ -103,6 +103,8 @@ function stubPoolForAuthReads(options: {
   userRow: Record<string, unknown>
   admissionRows?: unknown[]
   admissionError?: Error
+  /** The default role row already exists, so the backfill's ON CONFLICT DO NOTHING insert inserts nothing. */
+  roleAlreadyHeld?: boolean
 }) {
   const roleInsertParams: unknown[][] = []
   const admissionParams: unknown[][] = []
@@ -115,7 +117,10 @@ function stubPoolForAuthReads(options: {
     }
     if (text.includes('INSERT INTO user_roles')) {
       roleInsertParams.push(params ?? [])
-      return { rows: [] }
+      // `INSERT ... ON CONFLICT DO NOTHING RETURNING user_id`: a fresh insert returns its row, a held role none.
+      const userIds = Array.isArray(params?.[0]) ? (params[0] as unknown[]) : []
+      const rows = options.roleAlreadyHeld ? [] : userIds.map((userId) => ({ user_id: userId }))
+      return { rows, rowCount: rows.length }
     }
     if (text.includes('FROM users')) {
       return { rows: [options.userRow] }
@@ -123,6 +128,30 @@ function stubPoolForAuthReads(options: {
     return { rows: [] }
   })
   return { roleInsertParams, admissionParams }
+}
+
+/**
+ * Records the backfill's commit boundary. The NEXT `pool.transaction` call logs `transaction:start`, runs
+ * the handler on the same query mock, and logs `transaction:committed` only after the handler's promise
+ * resolved, which is where the real pool issues COMMIT (integration/db/connection-pool.ts `transaction`).
+ * Every `invalidateUserPerms` call logs `invalidate:<userId>`, so the order shows whether the permission
+ * cache was invalidated after the commit or while the transaction was still open.
+ */
+function recordBackfillCommitOrder(): { order: string[]; transactionsStarted: () => number } {
+  const order: string[] = []
+  const callsBefore = poolMocks.transaction.mock.calls.length
+  poolMocks.transaction.mockImplementationOnce(
+    async (handler: (client: { query: typeof poolMocks.query }) => Promise<unknown>) => {
+      order.push('transaction:start')
+      const result = await handler({ query: poolMocks.query })
+      order.push('transaction:committed')
+      return result
+    },
+  )
+  rbacMocks.invalidateUserPerms.mockImplementation((userId: string) => {
+    order.push(`invalidate:${userId}`)
+  })
+  return { order, transactionsStarted: () => poolMocks.transaction.mock.calls.length - callsBefore }
 }
 
 describe('AuthService.verifyToken', () => {
@@ -394,8 +423,12 @@ describe('AuthService.verifyToken', () => {
         }]
       })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      // The user held no attendance role: ON CONFLICT DO NOTHING ... RETURNING returns the inserted row.
+      .mockResolvedValueOnce({ rows: [{ user_id: 'u5' }], rowCount: 1 })
     rbacMocks.isAdmin.mockResolvedValue(false)
     rbacMocks.listUserPermissions.mockResolvedValue([])
+    const commit = recordBackfillCommitOrder()
 
     const auth = new AuthService()
     const user = await auth.verifyToken('platform-user-token')
@@ -421,6 +454,12 @@ describe('AuthService.verifyToken', () => {
       [['u5'], 'attendance_employee'],
     )
     expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('u5')
+    expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledTimes(1)
+    // One transaction (the backfill), and the cache is invalidated only after it committed: never while
+    // its handler was still running, where a concurrent read could refill the cache from a state the
+    // commit then supersedes.
+    expect(commit.transactionsStarted()).toBe(1)
+    expect(commit.order).toEqual(['transaction:start', 'transaction:committed', 'invalidate:u5'])
   })
 
   it('does not merge attendance permissions when a non-recovery INSERT fails', async () => {
@@ -509,6 +548,61 @@ describe('AuthService.verifyToken', () => {
 
       expect(user).toBeTruthy()
       expect(user?.permissions).not.toContain('attendance:read')
+      expect(tracked.roleInsertParams).toEqual([])
+      expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    } finally {
+      if (previousMode === undefined) delete process.env.PRODUCT_MODE
+      else process.env.PRODUCT_MODE = previousMode
+    }
+  })
+
+  // Steady state of a user with no attendance admission row: the admission filter drops the held
+  // default role's attendance codes, so every authenticated request re-runs the backfill and its
+  // insert is an ON CONFLICT no-op. The codes must still be merged (they are reachable only this way),
+  // but the permission cache must not be invalidated: nothing changed, and invalidating on every
+  // request made concurrent permission reads of the same user fail closed to [].
+  it('a no-op re-insert (default role already held) still merges attendance permissions but does not invalidate the permission cache', async () => {
+    const previousMode = process.env.PRODUCT_MODE
+    process.env.PRODUCT_MODE = 'platform'
+    try {
+      jwtMocks.verify.mockReturnValue({ userId: 'u-steady', email: 'steady@x', role: 'user', iat: 0, exp: 0 })
+      const tracked = stubPoolForAuthReads({
+        userRow: platformAuthUserRow({ id: 'u-steady', email: 'steady@x', name: 'Steady' }),
+        admissionRows: [],
+        roleAlreadyHeld: true,
+      })
+      rbacMocks.isAdmin.mockResolvedValue(false)
+      rbacMocks.listUserPermissions.mockResolvedValue(['stock-prep:admin'])
+
+      const user = await new AuthService().verifyToken('steady-state-token')
+
+      expect(user?.permissions).toEqual(['stock-prep:admin', 'attendance:read', 'attendance:write'])
+      expect(tracked.admissionParams).toEqual([['u-steady', 'attendance']])
+      expect(tracked.roleInsertParams).toEqual([[['u-steady'], 'attendance_employee']])
+      expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    } finally {
+      if (previousMode === undefined) delete process.env.PRODUCT_MODE
+      else process.env.PRODUCT_MODE = previousMode
+    }
+  })
+
+  it('skips the backfill transaction entirely when RBAC already yields attendance codes (enabled admission)', async () => {
+    const previousMode = process.env.PRODUCT_MODE
+    process.env.PRODUCT_MODE = 'platform'
+    try {
+      jwtMocks.verify.mockReturnValue({ userId: 'u-enabled', email: 'enabled@x', role: 'user', iat: 0, exp: 0 })
+      const tracked = stubPoolForAuthReads({
+        userRow: platformAuthUserRow({ id: 'u-enabled', email: 'enabled@x', name: 'Enabled' }),
+        admissionRows: [{ enabled: true, source: 'platform_admin' }],
+      })
+      rbacMocks.isAdmin.mockResolvedValue(false)
+      rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read', 'attendance:write', 'stock-prep:admin'])
+
+      const user = await new AuthService().verifyToken('enabled-admission-token')
+
+      expect(user?.permissions).toEqual(['attendance:read', 'attendance:write', 'stock-prep:admin'])
+      expect(poolMocks.query.mock.calls.some(([sql]) => String(sql).includes('pg_advisory_xact_lock'))).toBe(false)
+      expect(tracked.admissionParams).toEqual([])
       expect(tracked.roleInsertParams).toEqual([])
       expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
     } finally {
@@ -956,6 +1050,7 @@ describe('AuthService.login', () => {
         iat: Math.floor(new Date('2026-04-18T00:00:00.000Z').getTime() / 1000),
         sid: 'session-eligible',
       })
+      const commit = recordBackfillCommitOrder()
 
       const auth = new AuthService()
       const result = await auth.login('logineligible', 'WelcomePass9A')
@@ -964,6 +1059,49 @@ describe('AuthService.login', () => {
       expect(tracked.admissionParams).toEqual([['user-login-eligible', 'attendance']])
       expect(tracked.roleInsertParams).toEqual([[['user-login-eligible'], 'attendance_employee']])
       expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-login-eligible')
+      expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledTimes(1)
+      // Same commit-boundary witness on the fresh-login path.
+      expect(commit.transactionsStarted()).toBe(1)
+      expect(commit.order).toEqual(['transaction:start', 'transaction:committed', 'invalidate:user-login-eligible'])
+    } finally {
+      if (previousMode === undefined) delete process.env.PRODUCT_MODE
+      else process.env.PRODUCT_MODE = previousMode
+    }
+  })
+
+  it('a fresh login of a steady-state user (default role already held) merges attendance permissions without invalidating', async () => {
+    const previousMode = process.env.PRODUCT_MODE
+    process.env.PRODUCT_MODE = 'platform'
+    try {
+      const passwordHash = await bcrypt.hash('WelcomePass9A', 10)
+      rbacMocks.listUserPermissions.mockResolvedValue([])
+      const tracked = stubPoolForAuthReads({
+        userRow: platformAuthUserRow({
+          id: 'user-login-steady',
+          email: 'login-steady@x',
+          username: 'loginsteady',
+          name: 'Login Steady',
+          password_hash: passwordHash,
+        }),
+        admissionRows: [],
+        roleAlreadyHeld: true,
+      })
+      jwtMocks.verify.mockReturnValue({
+        userId: 'user-login-steady',
+        email: 'login-steady@x',
+        role: 'user',
+        exp: Math.floor(new Date('2026-04-19T00:00:00.000Z').getTime() / 1000),
+        iat: Math.floor(new Date('2026-04-18T00:00:00.000Z').getTime() / 1000),
+        sid: 'session-steady',
+      })
+
+      const auth = new AuthService()
+      const result = await auth.login('loginsteady', 'WelcomePass9A')
+
+      expect(result?.user.permissions).toEqual(expect.arrayContaining(['attendance:read', 'attendance:write']))
+      expect(tracked.admissionParams).toEqual([['user-login-steady', 'attendance']])
+      expect(tracked.roleInsertParams).toEqual([[['user-login-steady'], 'attendance_employee']])
+      expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
     } finally {
       if (previousMode === undefined) delete process.env.PRODUCT_MODE
       else process.env.PRODUCT_MODE = previousMode
