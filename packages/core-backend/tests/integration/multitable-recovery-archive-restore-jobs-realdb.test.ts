@@ -2502,7 +2502,8 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         const drained = await runArchiveProcessWorker({
           phase: 'drain', drainTicks: 158, keyId: fixture.keyId, keyMaterial, jobId: accepted.id, local,
         }, provider)
-        expect(drained).toMatchObject({ kind: 'drained', attempts: 5001, completed: 5001, lifecycle: ['started', 'drained'],
+        expect(drained, drained.kind === 'drained' ? JSON.stringify(drained.firstNonCompletion) : undefined)
+          .toMatchObject({ kind: 'drained', attempts: 5001, completed: 5001, lifecycle: ['started', 'drained'],
           batches: [...Array.from({ length: 156 }, () => 32), 9, 0],
           ticks: Array.from({ length: 158 }, () => ({ kind: 'idle', swept: 0, chunks: 0 })) })
         await expect(consumeRecoveryArchiveDerivedEffect(transaction, processDerived)).resolves.toBe('idle')
