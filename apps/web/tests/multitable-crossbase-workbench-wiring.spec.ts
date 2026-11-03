@@ -106,6 +106,8 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+import { getLookupTargetField, resetLookupTargetFields } from '../src/multitable/utils/lookup-target-fields'
+import { formatFieldDisplay } from '../src/multitable/utils/field-display'
 
 async function flushUi(cycles = 5): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
@@ -133,6 +135,9 @@ function createWorkbenchMock() {
       loadFormContext: vi.fn(), getRecord: vi.fn(), createSheet: vi.fn(), createBase: vi.fn(),
       createField: vi.fn(), preparePersonField: vi.fn(), updateField: vi.fn(), deleteField: vi.fn(),
       createView: vi.fn(), deleteView: vi.fn(), patchRecords: vi.fn(), submitForm: vi.fn(), updateView: vi.fn(),
+      // Read-gated field listing — the lookup target picker's source, and (客户反馈 #4c follow-up) where the
+      // workbench learns a lookup's TARGET field type.
+      listFields: vi.fn().mockResolvedValue({ fields: [] }),
     },
     sheets: ref([{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]),
     fields: ref([{ id: 'fld_title', name: 'Title', type: 'string' }]),
@@ -248,5 +253,35 @@ describe('MultitableWorkbench cross-base field-picker wiring', () => {
     const bases = await listBasesFn()
     expect(workbenchMock.client.listBases).toHaveBeenCalled()
     expect(bases).toEqual([{ id: 'base_ops', name: 'Ops Base' }, { id: 'base_far', name: 'Far Base' }])
+  })
+
+  // 客户反馈 2026-09-24 #4c follow-up (deferred by PR #6083): a lookup of a dateTime field shows the target
+  // column's wall clock. The target's TYPE is not on the lookup field, so the workbench resolves it through the
+  // same read-gated bare client.listFields the lookup target picker uses — once per lookup wiring, not per render.
+  it('resolves lookup target fields through the bare client.listFields, once per lookup wiring', async () => {
+    resetLookupTargetFields()
+    gridMock.fields.value = [
+      { id: 'fld_title', name: 'Title', type: 'string' },
+      { id: 'fld_link', name: 'Order', type: 'link', property: { foreignSheetId: 'sheet_far' } },
+      { id: 'fld_lk', name: 'Due', type: 'lookup', property: { linkFieldId: 'fld_link', targetFieldId: 'fld_due' } },
+    ]
+    workbenchMock.client.listFields.mockResolvedValue({
+      fields: [{ id: 'fld_due', name: 'Due', type: 'dateTime', property: { timezone: 'UTC' } }],
+    })
+    const Host = defineComponent({ setup() { return () => h(MultitableWorkbench as Component) } })
+    app = createApp(Host)
+    app.mount(container!)
+    await flushUi(8)
+
+    expect(workbenchMock.client.listFields).toHaveBeenCalledWith('sheet_far')
+    expect(getLookupTargetField('fld_lk')).toEqual({ type: 'dateTime', property: { timezone: 'UTC' } })
+    expect(formatFieldDisplay({ field: gridMock.fields.value[2], value: ['2026-09-23T17:00:00.000Z'] })).toBe('2026-09-24 01:00')
+
+    // Same wiring re-emitted (a new array, same lookups) → no refetch.
+    const calls = workbenchMock.client.listFields.mock.calls.length
+    gridMock.fields.value = [...gridMock.fields.value]
+    await flushUi(8)
+    expect(workbenchMock.client.listFields.mock.calls.length).toBe(calls)
+    resetLookupTargetFields()
   })
 })

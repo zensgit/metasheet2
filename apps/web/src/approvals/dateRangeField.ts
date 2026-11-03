@@ -44,12 +44,14 @@ export function isDateRangeEndpointValid(dateType: unknown, value: unknown): boo
  * either endpoint is missing/invalid/out of order (B-1 rejects `start > end` at submit; this
  * display simply renders nothing while the author is mid-edit rather than a negative duration).
  * Never stored, never submitted, never editable — a pure projection of `{ start, end }` recomputed
- * on every render.
+ * on every render. O-8 / F8-1: `isZh` (required; the only caller is ApprovalNewView.vue) picks
+ * the unit words.
  */
 export function computeDateRangeDurationText(
   dateType: unknown,
   start: unknown,
   end: unknown,
+  isZh: boolean,
 ): string | null {
   if (!isDateRangeEndpointValid(dateType, start) || !isDateRangeEndpointValid(dateType, end)) {
     return null
@@ -59,7 +61,7 @@ export function computeDateRangeDurationText(
   if (dateType === 'date') {
     if (startStr > endStr) return null
     const days = Math.round((Date.parse(endStr) - Date.parse(startStr)) / 86400000)
-    return `${days} 天`
+    return isZh ? `${days} 天` : `${days} ${days === 1 ? 'day' : 'days'}`
   }
   const startMs = Date.parse(startStr)
   const endMs = Date.parse(endStr)
@@ -67,9 +69,9 @@ export function computeDateRangeDurationText(
   const totalMinutes = Math.round((endMs - startMs) / 60000)
   const hours = Math.floor(totalMinutes / 60)
   const minutes = totalMinutes % 60
-  if (hours === 0) return `${minutes} 分钟`
-  if (minutes === 0) return `${hours} 小时`
-  return `${hours} 小时 ${minutes} 分钟`
+  if (hours === 0) return isZh ? `${minutes} 分钟` : `${minutes} min`
+  if (minutes === 0) return isZh ? `${hours} 小时` : `${hours} h`
+  return isZh ? `${hours} 小时 ${minutes} 分钟` : `${hours} h ${minutes} min`
 }
 
 /** The el-date-picker `type` prop for a given dateType — the civil-date arm gets `'date'`, both

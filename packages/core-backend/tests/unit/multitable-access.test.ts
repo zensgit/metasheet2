@@ -112,6 +112,9 @@ describe('multitable access helper', () => {
       canManageAutomation: false,
       canExport: true,
       canSendNotification: true,
+      // Submitting a record for approval is NOT implied by multitable:write (its own code,
+      // `multitable:submit-approval`; the approval product also demands `approvals:write`).
+      canSubmitApproval: false,
     })
   })
 
@@ -135,6 +138,7 @@ describe('multitable access helper', () => {
       canManageAutomation: false,
       canExport: false,
       canSendNotification: false,
+      canSubmitApproval: false,
     })
   })
 
@@ -157,7 +161,15 @@ describe('multitable access helper', () => {
       canManageAutomation: true,
       canExport: true,
       canSendNotification: true,
+      canSubmitApproval: true,
     })
+  })
+
+  it('grants canSubmitApproval ONLY via its own code (or a wildcard), never via multitable:write', () => {
+    expect(deriveCapabilities(['multitable:submit-approval'], false).canSubmitApproval).toBe(true)
+    expect(deriveCapabilities(['multitable:*'], false).canSubmitApproval).toBe(true)
+    expect(deriveCapabilities(['multitable:write', 'multitable:manage-schema'], false).canSubmitApproval).toBe(false)
+    expect(deriveCapabilities(['multitable:read'], false).canSubmitApproval).toBe(false)
   })
 
   it('derives field and view permissions from capabilities', () => {

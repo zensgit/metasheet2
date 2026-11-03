@@ -16,17 +16,48 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 // admission set in ApprovalProductService.ts) or the type is unpublishable.
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
+/**
+ * Lock-1 §K1 / OD-L1-7(a) (RATIFIED) — the cc node's OWN target vocabulary: the two legacy kinds
+ * plus `'group'` (用户组). Deliberately a SEPARATE alias from `ApprovalAssigneeType` above: that
+ * alias also types the legacy approver `assigneeType`, and OD-L1-7 widens the cc half ONLY ("cc is
+ * a second contract, not a rider"). The widening is enumerated, not permissive (G-4): the authoring
+ * choke (`normalizeApprovalGraph` case 'cc') and both executor cc arms accept EXACTLY this set and
+ * still throw for anything else.
+ */
+export const APPROVAL_CC_TARGET_TYPES = ['user', 'role', 'group'] as const
+export type ApprovalCcTargetType = typeof APPROVAL_CC_TARGET_TYPES[number]
+const APPROVAL_CC_TARGET_TYPE_SET: ReadonlySet<string> = new Set<string>(APPROVAL_CC_TARGET_TYPES)
+export function isApprovalCcTargetType(value: unknown): value is ApprovalCcTargetType {
+  return typeof value === 'string' && APPROVAL_CC_TARGET_TYPE_SET.has(value)
+}
 export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver' | 'user_group' | 'form_field_user_manager' | 'form_field_user_dept_head'
 export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold' | 'sequential'
 
 /**
- * Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED handler assignee-source registry: exactly SEVEN of the
- * shipped kinds. `continuous_managers` is excluded (corpus C-2 lists 连续多级上级 for approvers, not
- * handlers), and `requester_choice` — though now shipped (Lock-1 K2) and §1.5 says it ADMITS once
- * Lock-1 lands — is NOT added here: §1.5 says "each row lands in the SAME slice as its kind", and
- * gate G-13 freezes the seven-member set by exact-set equality (adding a kind must FAIL). Widening
- * to requester_choice is a separate follow-up decision, not P4-A. This is the per-node-type M4
- * fail-closed registry: a handler config carrying any kind outside this set is rejected at authoring.
+ * Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED handler assignee-source registry (the per-node-type M4
+ * fail-closed registry: a handler config carrying any kind outside this set is rejected at
+ * authoring, `APPROVAL_HANDLER_SOURCE_KIND_UNSUPPORTED`). Three layers, each ratified text:
+ *
+ *  1. The base roster — SEVEN of the originally shipped eight kinds. `continuous_managers` is
+ *     excluded (corpus C-2 lists 连续多级上级 for approvers, not handlers; OD-L3-6(a)).
+ *  2. Lock-2 §2.4 — the two contact-derived rows (`approval` AND `handler`), 7→9.
+ *  3. Lock-3 §1.5's FORWARD rows, quoted verbatim: "Forward rows, conditional on Lock-1 landing:
+ *     `user_group` (K1), `requester_choice` (K2) and `dept_head_at_level` (K5-b) ADMIT (corpus C-2
+ *     lists 用户组 / 提交人自选); `prior_node_approver` (K3) and `continuous_dept_heads` (K4) do NOT;
+ *     Lock-2's 表单内部门 admits when it exists. Each row lands in the same slice as its kind, per
+ *     Lock-1 §2.3." Lock-1 is RATIFIED and on main, so the condition is met; the K1/K2/K5-b slices
+ *     landed approval-only and deferred this widening, which W1-1d now lands as its own slice:
+ *     9→12. ONLY the three named rows widen — K3 and K4 stay rejected, and the handler
+ *     empty-assignee/fallback key stays rejected (§1.2 / OD-L3-2(a); the F4-B handler arm is a
+ *     separate, unratified decision).
+ *
+ * Gate G-13 pins this set by EXACT-set equality (not count, not subset, not the full
+ * `ApprovalAssigneeSourceKind` union): growth is a reviewed decision made in the same commit as
+ * the test update, never a silent widening. The three forward kinds also need every create/publish
+ * collector that bakes their snapshot input to read HANDLER nodes (`collectApprovalGraphMemberGroupIds`,
+ * `assertUserGroupSourcesBoundToOrg`, `collectRuntimeGraphRequesterChoiceSources`,
+ * `runtimeGraphUsesDeptHeadChain` in ApprovalProductService.ts) — admitting a kind here without its
+ * collector arm is the R-13 "silent skip" class (the node resolves EMPTY and fails at dispatch).
  */
 export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
   'static_user',
@@ -40,11 +71,19 @@ export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
   // `approval` AND `handler` ("The handler rows are corpus-evidenced, not an M11 widening (C-6);
   // Lock-3 §1.5's forward-row sentence names only 表单内部门 although its own roster lists
   // 表单内联系人, so the two contact-derived rows supply what fell between the locks"). Each row
-  // lands in the SAME slice as its kind, so the exact-set roster grows 7→9 here — deliberately,
+  // lands in the SAME slice as its kind, so the exact-set roster grew 7→9 here — deliberately,
   // with the G-13 exact-set tests updated in the same commit (they exist to make this growth a
   // reviewed decision, not to forbid ratified rows).
   'form_field_user_manager',
   'form_field_user_dept_head',
+  // Lock-3 §1.5 forward rows (RATIFIED; W1-1d, 2026-10-10) — "`user_group` (K1), `requester_choice`
+  // (K2) and `dept_head_at_level` (K5-b) ADMIT". 9→12, strictly these three; the G-13 exact-set
+  // tests (FE approval-handler-node-authoring.spec.ts, BE approval-handler-node-registry.test.ts)
+  // are updated in the same commit. Each kind's create/publish collector gained its handler arm in
+  // the same slice (see the doc comment above) — never admit a kind here without that arm.
+  'user_group',
+  'requester_choice',
+  'dept_head_at_level',
 ] as const
 export type HandlerAssigneeSourceKind = typeof HANDLER_ASSIGNEE_SOURCE_KINDS[number]
 
@@ -105,6 +144,31 @@ export const APPROVAL_ACTION_TYPES = [
   'handle',
 ] as const
 export type ApprovalActionType = typeof APPROVAL_ACTION_TYPES[number]
+/**
+ * Lock-5 L5-B (gate B-1) — the three EXPLICIT add-sign modes. `parallel` (并加签, the default when
+ * the key is absent) and `before` seat co-signers into the current node's CURRENT round (outside a
+ * parallel region the two are byte-identical — gate B-2's pin; `before` is refused inside one).
+ * `after` (后加签) is OD-L5-4(b)'s deferred same-node round: the actor's seat is consumed as an
+ * approval and, when that approval completes the node's current round, the addees activate as a
+ * FRESH `nodeEntryEpoch` round at the SAME node. No node is inserted and the current node is not
+ * skipped. Any other value is a values-free 400 `APPROVAL_ADD_SIGN_MODE_INVALID` at BOTH doors
+ * (route and service) — never silently flattened to the default.
+ */
+export const APPROVAL_ADD_SIGN_MODES = ['before', 'parallel', 'after'] as const
+export type ApprovalAddSignMode = typeof APPROVAL_ADD_SIGN_MODES[number]
+export function isApprovalAddSignMode(value: unknown): value is ApprovalAddSignMode {
+  return typeof value === 'string' && (APPROVAL_ADD_SIGN_MODES as readonly string[]).includes(value)
+}
+/**
+ * Lock-5 OD-L5-5(a) — the appended round's aggregation for `after` with two or more addees:
+ * `all` (会签) needs every addee, `any` (或签) the first. Supplied at action time, REQUIRED there,
+ * and ignored for `before`/`parallel` (which inherit the node's own mode — today's behaviour).
+ */
+export const APPROVAL_ADD_SIGN_AGGREGATIONS = ['all', 'any'] as const
+export type ApprovalAddSignAggregation = typeof APPROVAL_ADD_SIGN_AGGREGATIONS[number]
+export function isApprovalAddSignAggregation(value: unknown): value is ApprovalAddSignAggregation {
+  return typeof value === 'string' && (APPROVAL_ADD_SIGN_AGGREGATIONS as readonly string[]).includes(value)
+}
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
 export const APPROVAL_TERMINAL_STATUSES = ['approved', 'rejected', 'revoked', 'cancelled'] as const
 export type ApprovalTerminalStatus = typeof APPROVAL_TERMINAL_STATUSES[number]
@@ -521,8 +585,9 @@ export type ApprovalAssigneeSource =
    * (RATIFIED OD-L1-2(a) curated per-org binding table, `approval_usable_member_groups`), is a
    * DIFFERENT case — rejected at PUBLISH (`assertUserGroupSourcesBoundToOrg`), never at dispatch.
    * Fingerprint: `user_group:<sorted groupIds joined by ','>` (§2.4). Cc-as-recipient (OD-L1-7,
-   * widening `CcNodeConfig.targetType`) is a SEPARATE contract/registry row and is NOT part of
-   * this shape — deferred to its own slice (§K1 "cc is a second contract, not a rider").
+   * widening `CcNodeConfig.targetType` to `'group'`) is a SEPARATE contract/registry row and is
+   * NOT part of this shape (§K1 "cc is a second contract, not a rider") — it landed as its own
+   * slice and shares only the `groupMemberIds` snapshot map and the publish-time binding gate.
    */
   | { kind: 'user_group'; groupIds: string[] }
   /**
@@ -651,7 +716,16 @@ export interface ConditionRule {
 }
 
 export interface CcNodeConfig {
-  targetType: ApprovalAssigneeType
+  /**
+   * Lock-1 OD-L1-7(a): `'group'` names `platform_member_groups` ids in `targetIds`. The TEMPLATE
+   * keeps the group reference (authoring round-trips byte-for-byte); the EXECUTOR expands it at
+   * dispatch into one `targetType:'user'` cc event per FROZEN member (`requesterSnapshot
+   * .groupMemberIds` — the same create-time freeze the approver `user_group` source reads), so the
+   * persisted `approval_records` cc row shape stays `user` / `role` and every cc reader is
+   * unchanged. Publish applies the K1 org-binding gate (`assertUserGroupSourcesBoundToOrg`) to cc
+   * group targets exactly as to approver `user_group` sources.
+   */
+  targetType: ApprovalCcTargetType
   targetIds: string[]
 }
 
@@ -852,7 +926,8 @@ export interface ApprovalRequesterSnapshot {
    * Lock-1 §K1 (user_group, RATIFIED OD-L1-1(a) EAGER_EXPANSION) — the FROZEN member list of every
    * `user_group` group id the published runtime graph references, keyed by group id (ordered local
    * user ids, as read from `platform_member_group_members` at create). OPT-IN: populated only when
-   * the graph actually uses a `user_group` source (`collectApprovalGraphMemberGroupIds`, mirroring
+   * the graph actually uses a `user_group` source or a `'group'` cc target
+   * (`collectApprovalGraphMemberGroupIds`, mirroring
    * `includeManagerChain`'s posture — unrelated approvals pay nothing). The resolver reads ONLY
    * this map — no live `platform_member_group_members` read at dispatch/return/admin-jump/timeout —
    * so a membership change after create never reaches an in-flight instance; a group deleted after
@@ -937,6 +1012,21 @@ export interface UnifiedApprovalDTO {
    * parallelism can keep using `currentNodeKey` unchanged.
    */
   currentNodeKeys?: string[] | null
+  /**
+   * 退回 (return) targets the server's return gate would accept RIGHT NOW, in trail order
+   * (start → cursor) — `computeReturnableNodeKeys` (services/approval-return-targets.ts): the
+   * FROZEN runtime graph walked exactly as `dispatchAction`'s `return` arm walks it, after every
+   * VIEWER-INDEPENDENT refusal that arm applies (cancel-round instance kind, handler cursor, the
+   * cursor node's `nodeOperationPolicy.allowReturn === false`, parallel region); the per-actor seat
+   * checks are NOT folded in (`nodeOperations` / `canDecideCurrentNode` answer those for THIS
+   * viewer). `[]` = nothing is legal (a client hides 退回).
+   * ABSENT = not computed: an older server, a non-pending instance, a bridged / legacy instance
+   * with no frozen graph, or a graph the walker could not evaluate — a client keeps its own
+   * fallback. Carried by the detail read and by every action response; never by list rows.
+   * Presentation only: the gate's own 409s remain the authority. Mirrors
+   * `services/approval-bridge-types.ts`, the detail read's declaration of the same DTO.
+   */
+  returnableNodeKeys?: string[]
   assignments: ApprovalAssignmentDTO[]
   createdAt: string
   updatedAt: string
@@ -988,8 +1078,21 @@ export interface ApprovalActionRequest {
    * P1-B add_sign — `parallel` (并加签, default) adds co-signers at the current
    * node; `before` (前加签) is rejected inside a parallel region in v1
    * (no node-internal ordered queue yet — see design §7).
+   *
+   * Lock-5 L5-B (gates B-1/B-3/B-4): `after` (后加签) consumes the actor's seat as an approval
+   * and opens a fresh same-node round for the addees once that approval completes the current
+   * round; it is refused inside a parallel region (same 409 as `before`) and refused when the
+   * approval cannot complete the current round (409 `APPROVAL_ADD_SIGN_AFTER_ROUND_INCOMPLETE`,
+   * nothing persisted). An unknown value is a 400 `APPROVAL_ADD_SIGN_MODE_INVALID` (see
+   * `APPROVAL_ADD_SIGN_MODES`).
    */
-  addSignMode?: 'before' | 'parallel'
+  addSignMode?: ApprovalAddSignMode
+  /**
+   * Lock-5 OD-L5-5(a) / gate B-5 — REQUIRED with `addSignMode: 'after'` and two or more
+   * `targetUserIds`; governs the appended round (`all` = every addee, `any` = the first). Optional
+   * with one addee (a single seat completes either way). Ignored for `before`/`parallel`.
+   */
+  addSignAggregation?: ApprovalAddSignAggregation
   /**
    * P1-B reduce_sign — assignee_id of the previously add-signed row to remove.
    * Only rows stamped `metadata.addSign === true` are removable.
@@ -1016,6 +1119,38 @@ export interface ApprovalActionRequest {
    * `undefined`) stays a 200 no-op.
    */
   attachmentIds?: string[]
+  /**
+   * H-5 (settlement parity) — the legacy `POST /api/approvals/:id/reject` door's OWN column.
+   *
+   * `approval_records.reason` is a persisted audit column that ONLY that door has ever written
+   * (`/actions` has no `reason` field and never has), and that door enforces its presence with a
+   * 400 `APPROVAL_REJECTION_REASON_REQUIRED`. Routing that door through `dispatchAction` without
+   * this rider would collect the text and then drop it on the floor — "mandatory then discarded".
+   *
+   * INTERNAL-ONLY, exactly like `channelOrigin`: the `/actions` route builds its request from an
+   * explicit field whitelist that does not include this key, so an HTTP body can never reach it
+   * through that door. Absent ⇒ the column is written NULL, which is what every caller other than
+   * the legacy reject door produces today — a pure widening, byte-identical for them.
+   *
+   * Read by the `reject` arm only. Present on any other action it is simply not read (the other
+   * arms build their own `insertApprovalRecord` payloads and none of them names `reason`).
+   */
+  reason?: string | null
+  /**
+   * H-5 (settlement parity) — an OPTIONAL optimistic-lock PRECONDITION, checked under the
+   * settlement transaction's OWN `FOR UPDATE` lock on the instance row.
+   *
+   * The legacy decision doors publish a `version` precondition (409 `APPROVAL_VERSION_CONFLICT`).
+   * They must release their row lock before calling this method — `dispatchAction` re-locks the
+   * same row on a SECOND pool connection, so holding it across the call is a deterministic
+   * self-deadlock — which means the version they validated under their own lock is no longer the
+   * version the write lands on. Passing it here makes it a real precondition again: the check and
+   * the write happen in ONE transaction under ONE lock, the way the doors' inline DML used to.
+   *
+   * Absent ⇒ no version check at all (`/actions`, the DingTalk card wrapper and the after-sales
+   * bridge have no version concept and never set it) — byte-identical to today for them.
+   */
+  expectedVersion?: number
 }
 
 export interface ApprovalTemplateListItemDTO {

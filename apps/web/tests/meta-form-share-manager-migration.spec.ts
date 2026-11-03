@@ -115,8 +115,18 @@ describe('MetaFormShareManager — Copy-link MtButton (variant=primary) migratio
     const { container } = await mountLoaded(client)
     const btn = container.querySelector('[data-form-share-copy]') as HTMLButtonElement
     btn.click()
-    await nextTick()
-    expect(btn.textContent?.trim()).toBe('Copied!')
+    // "Copied!" now waits for the clipboard write to actually resolve (it used to flip before the
+    // write even ran), so let the copy promise chain settle before asserting.
+    await vi.waitFor(() => expect(btn.textContent?.trim()).toBe('Copied!'))
+  })
+
+  it('a copy that fails on every path (no Clipboard API, no execCommand) says so instead of "Copied!" and never throws', async () => {
+    const { client } = shareClient()
+    Object.assign(navigator, { clipboard: undefined })
+    const { container } = await mountLoaded(client)
+    const btn = container.querySelector('[data-form-share-copy]') as HTMLButtonElement
+    btn.click()
+    await vi.waitFor(() => expect(btn.textContent?.trim()).toBe('Copy failed: select it manually'))
   })
 })
 

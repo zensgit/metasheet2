@@ -11,7 +11,7 @@ import { pool } from '../db/pg'
 import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { auditLog } from '../audit/audit'
 import { getPermissionTemplate, listPermissionTemplates } from '../auth/permission-templates'
-import { userHasPermission, listUserPermissions, isAdmin, invalidateUserPerms } from '../rbac/service'
+import { userHasPermission, listUserPermissions, inspectUserPermissionGrants, isAdmin, invalidateUserPerms } from '../rbac/service'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 
 const logger = new Logger('PermissionsRouter')
@@ -299,13 +299,35 @@ export function permissionsRouter(): Router {
         }
       }
 
-      const permissions = await listUserPermissions(userId)
-      const admin = await isAdmin(userId)
+      const [grants, admin] = await Promise.all([
+        inspectUserPermissionGrants(userId),
+        isAdmin(userId),
+      ])
+
+      if (grants.unavailable) {
+        return res.json({
+          userId,
+          permissions: [],
+          isAdmin: admin,
+          degraded: true,
+          unavailable: true,
+          direct: [],
+          inherited: [],
+          legacy: [],
+          effective: [],
+          blockedByNamespaceAdmission: [],
+        })
+      }
 
       res.json({
         userId,
-        permissions,
-        isAdmin: admin
+        permissions: grants.effective,
+        isAdmin: admin,
+        direct: grants.direct,
+        inherited: grants.inherited,
+        legacy: grants.legacy,
+        effective: grants.effective,
+        blockedByNamespaceAdmission: grants.blockedByNamespaceAdmission,
       })
     } catch (error) {
       if (isDatabaseSchemaError(error) && allowDegradation) {
@@ -313,7 +335,18 @@ export function permissionsRouter(): Router {
           logger.warn('Permissions service degraded - tables not found')
           permsDegraded = true
         }
-        return res.json({ permissions: [], isAdmin: false, degraded: true })
+        return res.json({
+          userId: req.params.userId,
+          permissions: [],
+          isAdmin: false,
+          degraded: true,
+          unavailable: true,
+          direct: [],
+          inherited: [],
+          legacy: [],
+          effective: [],
+          blockedByNamespaceAdmission: [],
+        })
       }
       logger.error('Failed to get user permissions', error instanceof Error ? error : undefined)
       res.status(500).json({ error: 'Failed to get user permissions' })

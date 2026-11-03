@@ -1003,7 +1003,15 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
   // presence). ADDITIVE ONLY: existing snake_case fields, the arm (i) exclusion, and total/page/
   // pageSize are all pinned unchanged here; the new field is read-scoped to exactly the same
   // S1-admitted viewers this route already gates, and carries ONLY the `attachmentIds` key — never
-  // the whole `metadata` object (which can carry `nodeKey` and future policy/internal keys).
+  // the whole `metadata` object (which can carry future policy/internal keys).
+  //
+  // Test report 2026-10-08 T4cd (owner approval pending under the 2026-09-20 whitelist ruling):
+  // `nodeKey` became a whitelisted single-key projection too, so a rider row's `metadata` is now
+  // `{ nodeKey, attachmentIds }` and a row whose only whitelisted value is its node key carries
+  // `{ nodeKey }`. Every assertion below that used to read `{ attachmentIds }` or "no metadata key"
+  // on a row seeded with `nodeKey: 'node-1'` now reads the node key beside it; what each case
+  // discriminates (the flag, the pointer-row exclusion, the hostile keys, the parser branches) is
+  // unchanged.
   // -----------------------------------------------------------------------------------------------
   describe('C-18: Lock-9 rider row attachmentIds — additive field, scoped read, metadata redaction', () => {
     // C-18's original six cases assume the feature is live (a Lock-9 rider row only exists once
@@ -1047,7 +1055,7 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       }
       const item = json.data.items.find((it) => it.comment === marker)
       expect(item).toBeTruthy()
-      expect(item!.metadata).toEqual({ attachmentIds: [idA, idB] })
+      expect(item!.metadata).toEqual({ nodeKey: 'node-1', attachmentIds: [idA, idB] })
       // Positive control on the field PATH itself: a top-level `attachmentIds` is never emitted —
       // only under `metadata`, matching `collectHistoryAttachmentRefIds`'s `item.metadata.attachmentIds` read.
       expect(item!.attachmentIds).toBeUndefined()
@@ -1109,7 +1117,9 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       expect(bodyText).not.toContain(secretInternalToken)
       expect(bodyText).not.toContain('policySnapshot')
       expect(bodyText).not.toContain('internalToken')
-      expect(bodyText).not.toContain('nodeKey')
+      // T4cd: `nodeKey` is whitelisted now — it crosses as its own value, and nothing else does.
+      const json = JSON.parse(bodyText) as { data: { items: Array<{ metadata?: Record<string, unknown> }> } }
+      expect(json.data.items[0].metadata).toEqual({ nodeKey: 'node-1', attachmentIds: [idA] })
     })
 
     it('count/pagination are unchanged by the new field: total increments by exactly one for a rider row, page/pageSize echo the request', async () => {
@@ -1140,7 +1150,8 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       const res = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history`, token)
       const json = (await res.json()) as { data: { items: Array<Record<string, unknown>> } }
       expect(json.data.items.length).toBe(1)
-      expect(Object.prototype.hasOwnProperty.call(json.data.items[0], 'metadata')).toBe(false)
+      // T4cd: the node key crosses; the empty attachmentIds array still adds no key of its own.
+      expect(json.data.items[0].metadata).toEqual({ nodeKey: 'node-1' })
     })
 
     // ---------------------------------------------------------------------------------------------
@@ -1166,7 +1177,8 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       expect(offText).not.toContain(idSecret)
       const offJson = JSON.parse(offText) as { data: { items: Array<Record<string, unknown>> } }
       expect(offJson.data.items.length).toBe(1)
-      expect(Object.prototype.hasOwnProperty.call(offJson.data.items[0], 'metadata')).toBe(false)
+      // T4cd: flag OFF leaves only the (flag-independent) node key — no attachmentIds key at all.
+      expect(offJson.data.items[0].metadata).toEqual({ nodeKey: 'node-1' })
 
       // Positive control: the SAME row, flag ON, on the SAME already-booted server —
       // `isApprovalAttachmentsEnabled()` is read fresh per request (never cached at boot/router
@@ -1174,7 +1186,7 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       process.env.APPROVAL_ATTACHMENTS_ENABLED = 'true'
       const onRes = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history`, token)
       const onJson = (await onRes.json()) as { data: { items: Array<{ metadata?: { attachmentIds?: string[] } }> } }
-      expect(onJson.data.items[0].metadata).toEqual({ attachmentIds: [idSecret] })
+      expect(onJson.data.items[0].metadata).toEqual({ nodeKey: 'node-1', attachmentIds: [idSecret] })
     })
 
     // ---------------------------------------------------------------------------------------------
@@ -1203,7 +1215,7 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       expect(bodyText).not.toContain(nestedSecret)
       expect(bodyText).not.toContain('"nested"')
       const json = (await res.json()) as { data: { items: Array<{ metadata?: { attachmentIds?: unknown[] } }> } }
-      expect(json.data.items[0].metadata).toEqual({ attachmentIds: [idOk1, idOk2] })
+      expect(json.data.items[0].metadata).toEqual({ nodeKey: 'node-1', attachmentIds: [idOk1, idOk2] })
     })
 
     // ---------------------------------------------------------------------------------------------
@@ -1226,7 +1238,7 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       const res = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history`, token)
       expect(res.status).toBe(200)
       const json = (await res.json()) as { data: { items: Array<{ metadata?: { attachmentIds?: string[] } }> } }
-      expect(json.data.items[0].metadata).toEqual({ attachmentIds: [idStr] })
+      expect(json.data.items[0].metadata).toEqual({ nodeKey: 'node-1', attachmentIds: [idStr] })
     })
 
     it('fix-round P3-1: a malformed jsonb-string attachmentIds value fails closed to no metadata key (never a 500, never a partial parse)', async () => {
@@ -1239,7 +1251,8 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       expect(res.status).toBe(200)
       const json = (await res.json()) as { data: { items: Array<Record<string, unknown>> } }
       expect(json.data.items.length).toBe(1)
-      expect(Object.prototype.hasOwnProperty.call(json.data.items[0], 'metadata')).toBe(false)
+      // T4cd: only the node key survives; the malformed attachmentIds value adds nothing.
+      expect(json.data.items[0].metadata).toEqual({ nodeKey: 'node-1' })
     })
   })
 })

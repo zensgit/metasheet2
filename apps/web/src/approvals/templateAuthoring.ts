@@ -6,6 +6,7 @@ import type {
   ApprovalNodeConfig,
   ApprovalTemplateDetailDTO,
   ApprovalTemplateVisibilityScope,
+  ApprovalType,
   AutoApprovalPolicy,
   EmptyAssigneeFallback,
   EmptyAssigneePolicy,
@@ -24,8 +25,9 @@ import type {
   CreateApprovalTemplateRequest,
   UpdateApprovalTemplateRequest,
   RuntimePolicy,
+  SamePersonPolicy,
 } from '../types/approval'
-import { NODE_FIELD_ACCESS_VALUES, NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
+import { APPROVAL_TYPE_VALUES, NODE_FIELD_ACCESS_VALUES, NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
 export { NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
 export type { NodeTimeoutConfig, NodeTimeoutEffect, SupportedNodeTimeoutEffect } from '../types/approval'
 import {
@@ -34,7 +36,20 @@ import {
   validateDetailColumnsDraft,
   type DetailColumnDraft,
 } from './detailField'
-import { validateRecordLinkPinAgainstLoadedCatalog } from './recordLinkField'
+import { validateRecordLinkPinAgainstLoadedCatalog, visibilityReferenceBaseFieldId } from './recordLinkField'
+import {
+  conditionStoredValuePreview,
+  conditionStoredValueNoteShown,
+  conditionValueKind,
+  formatConditionListText,
+  isOptionKind,
+  parseConditionListText,
+  sameConditionList,
+  visibilityOperatorsForField,
+  visibilityRuleValueIssues,
+  type ConditionValueField,
+  type ConditionValueKind,
+} from './conditionValueTyping'
 import {
   applyConditionEditsToGraph,
   conditionEditsFromGraph,
@@ -60,10 +75,21 @@ import {
 import { collectParallelRegionNodeKeys } from './graphTopologyEdit'
 export { collectParallelRegionNodeKeys } from './graphTopologyEdit'
 import {
+  APPROVAL_NODE_EDIT_HIDDEN_BLOCK_NEUTRALIZERS,
   applyApprovalNodeEditsToGraph,
+  approvalNodeEditOmitsAssigneeSources,
   approvalNodeEditsFromGraph,
+  emptyAssigneeFallbackHasTarget,
+  hiddenBlockLiveErrors,
+  isKnownSamePersonPolicy,
+  samePersonControlState,
   validateApprovalNodeEdits,
+  withEmptyAssigneeFallbackIds,
   type ApprovalNodeEdits,
+  type HiddenBlockLiveErrors,
+  type HiddenBlockNeutralizers,
+  type SamePersonChoice,
+  type SamePersonControlState,
 } from './approvalNodeEdit'
 
 export type { DetailColumnDraft } from './detailField'
@@ -81,8 +107,25 @@ export type { ParallelEdits, ParallelNodeEdit } from './parallelEdit'
 export { PARALLEL_JOIN_MODES, parallelDynamicAssigneeConflicts } from './parallelEdit'
 export type { CcEdits, CcNodeEdit } from './ccEdit'
 export { CC_TARGET_TYPES } from './ccEdit'
-export type { ApprovalNodeEdits, ApprovalNodeSourceEdit } from './approvalNodeEdit'
-export { placeholderRoleNodeKeys, isPlaceholderRoleSource, addAssigneeSourceCard, removeAssigneeSourceCard, legalPriorApproverNodeKeys } from './approvalNodeEdit'
+export type { ApprovalNodeEdits, ApprovalNodeSourceEdit, AutoApproveHiddenBlockId, HiddenBlockLiveErrors } from './approvalNodeEdit'
+export { AUTO_APPROVE_HIDDEN_BLOCK_IDS } from './approvalNodeEdit'
+export { placeholderRoleNodeKeys, isPlaceholderRoleSource, addAssigneeSourceCard, removeAssigneeSourceCard, legalPriorApproverNodeKeys, approvalNodeEditOmitsAssigneeSources, applyApprovalTypeChoice } from './approvalNodeEdit'
+// W1-1a (Lock-4 F4-B / F4-C) — the shared same-person / designated-fallback vocabulary, re-exported
+// so the view and the canvas config editor read ONE set of helpers and labels.
+export type { SamePersonChoice, SamePersonControlState } from './approvalNodeEdit'
+export {
+  EMPTY_ASSIGNEE_DESIGNATED_HINT,
+  EMPTY_ASSIGNEE_DESIGNATED_LABEL,
+  SAME_PERSON_TRANSFER_HINT,
+  applySamePersonChoice,
+  emptyAssigneeFallbackHasTarget,
+  samePersonChoiceFromSelectValue,
+  samePersonChoiceOptions,
+  samePersonControlState,
+  samePersonOverrideHint,
+  samePersonSelectValue,
+  withEmptyAssigneeFallbackIds,
+} from './approvalNodeEdit'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
@@ -117,11 +160,22 @@ export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
  * Editable representation of a `FormFieldVisibilityRule`. `dependsOnFieldId === ''`
  * means "no rule". `valueText` holds the eq/neq single value, or — for `in` —
  * newline-separated values; it is unused for isEmpty/notEmpty.
+ *
+ * R-43 (B): two OPTIONAL typed carriers. Anything a plain trimmed string can express losslessly
+ * stays in `valueText` only (the three-key shape every existing caller/spec writes); a number,
+ * boolean, null, a string with edge whitespace or a newline, or a list entry containing a newline
+ * rides the carrier, so a number-field rule is saved as a number and an API-authored typed rule
+ * survives an edit-and-save round trip instead of silently degrading to a string.
  */
 export interface FieldVisibilityDraft {
   dependsOnFieldId: string
   operator: FormFieldVisibilityOperator
+  /** Text-mode buffer: the eq/neq single value, or the `in` one-value-per-line text. */
   valueText: string
+  /** R-43 (B): typed eq/neq value. When present (`!== undefined`) it wins over `valueText`. */
+  value?: unknown
+  /** R-43 (B): typed `in` values. When present (an array) it wins over splitting `valueText`. */
+  values?: unknown[]
 }
 
 export interface FieldAuthoringDraft {
@@ -238,22 +292,43 @@ export interface ApprovalStepDraft {
   // dispatch (`APPROVAL_THRESHOLD_UNREACHABLE`), never at save/publish. See
   // `validateTemplateApprovalFlow` for the (integer-only) client-side preview.
   approvalThreshold: number
+  /**
+   * Lock-4 §1 F4-A — 审批类型. Absent ≡ `'manual'` (today's behavior, byte-stable). Hydrated
+   * VERBATIM (an explicit persisted `'manual'` stays explicit) and re-emitted by `buildStepConfig`
+   * only when defined. Authored through `setStepApprovalType`, never assigned ad hoc.
+   */
+  approvalType?: ApprovalType
+  /**
+   * Lock-4 §1 F4-A — true ⇒ this step emits NO `assigneeSources` ("an empty source list is legal
+   * here and only here"). Meaningful ONLY while `approvalType === 'auto_approve'` (see
+   * `stepOmitsAssigneeSources`). Set by hydrate for a persisted auto_approve node that carries no
+   * sources, and by `setStepApprovalType(step, 'auto_approve')` (an AUTHOR action — save never
+   * clears sources on its own). The step's source fields (`sourceKind`/`idsText`/…) are kept as
+   * hidden scratch while it is set, so switching back to 人工审批 restores the previous source
+   * instead of silently discarding it (the P1-1 radio-traversal loss class).
+   */
+  omitAssigneeSources?: boolean
   emptyAssigneePolicy: EmptyAssigneePolicy
   /**
-   * Fix-round P1-1 (gate P3A-F4B-20260819) — PRESERVE-VERBATIM carrier for `'designated'`'s target
-   * set. The linear editor has no typed userIds/roleIds picker yet (deferred follower work), so
-   * this field is never authored here; it exists so hydrate → `buildStepConfig` re-emits the
-   * persisted object unchanged instead of silently dropping it on save. Same role as
-   * `nodeOperationPolicy` / `originalAutoApprovalPolicy`. Absent unless `emptyAssigneePolicy` is
-   * `'designated'`, and omitted from the built config when absent (byte-stability).
+   * Lock-4 §3 F4-B — `'designated'`'s target set. Hydrated VERBATIM (so an untouched step re-emits
+   * the persisted object unchanged) and, since W1-1a, AUTHORED by the typed user/role pickers via
+   * `setStepEmptyAssigneeFallbackIds` (which prunes blanks/empty sides and drops the object when
+   * both sides are empty). Kept on the draft when the author switches the policy away so switching
+   * back restores the last-entered targets (the `approvalThreshold` posture); `buildStepConfig`
+   * emits it ONLY under `'designated'` (byte-stability, no orphaned key).
    */
   emptyAssigneeFallback?: EmptyAssigneeFallback
-  // Self-approver authoring: the editable toggle (merge the requester in as an
-  // auto-approval). `originalAutoApprovalPolicy` preserves the three non-merge
-  // sub-fields (mergeAdjacentApprover / dedupeHistoricalApprover / actorMode),
-  // which are out of UI scope but must survive hydrate→rebuild (no silent flatten),
-  // mirroring `FieldAuthoringDraft.original`.
+  // Same-person (审批人与发起人为同一人时) authoring, W1-1a / Lock-4 §2 F4-C. The two RAW persisted
+  // fields are stored as-is — `mergeWithRequester` (the shipped 自动跳过 carrier) and
+  // `samePersonPolicy` (absent unless persisted/picked) — and the four-value control's displayed
+  // choice is DERIVED from them (`stepSamePersonControlState`), never stored as a separate
+  // "choice" that would be re-serialized: a bare legacy `{ mergeWithRequester: true }` step must
+  // re-save byte-identical (lock: "no existing graph changes shape"). `setStepSamePersonChoice`
+  // keeps both in sync. `originalAutoApprovalPolicy` preserves the sub-fields this editor does not
+  // own (mergeAdjacentApprover / dedupeHistoricalApprover / actorMode) across hydrate→rebuild (no
+  // silent flatten), mirroring `FieldAuthoringDraft.original`.
   mergeWithRequester: boolean
+  samePersonPolicy?: SamePersonPolicy
   originalAutoApprovalPolicy?: AutoApprovalPolicy
   // T1-4 node-level field permissions (linear editor). One entry per NON-editable form field
   // (`editable` is the absent default, so a field left editable carries no entry). Hydrated from
@@ -421,10 +496,17 @@ export function emptyVisibilityDraft(): FieldVisibilityDraft {
 /** Hydrate an editable visibility draft from a stored rule (or blank for none). */
 function visibilityDraftFromRule(rule: FormFieldVisibilityRule | undefined): FieldVisibilityDraft {
   if (!rule) return emptyVisibilityDraft()
-  const valueText = rule.operator === 'in'
-    ? (rule.values ?? []).map((value) => String(value)).join('\n')
-    : (rule.value === undefined || rule.value === null ? '' : String(rule.value))
-  return { dependsOnFieldId: rule.fieldId, operator: rule.operator, valueText }
+  const base: FieldVisibilityDraft = { dependsOnFieldId: rule.fieldId, operator: rule.operator, valueText: '' }
+  if (rule.operator === 'in') {
+    return visibilityDraftWithList(base, Array.isArray(rule.values) ? rule.values : [])
+  }
+  if (rule.operator === 'eq' || rule.operator === 'neq') {
+    return visibilityDraftWithScalar(base, rule.value === undefined ? '' : rule.value)
+  }
+  return {
+    ...base,
+    valueText: rule.value === undefined || rule.value === null ? '' : String(rule.value),
+  }
 }
 
 /**
@@ -432,17 +514,229 @@ function visibilityDraftFromRule(rule: FormFieldVisibilityRule | undefined): Fie
  * The editor is authoritative: callers MUST delete a missing rule rather than let
  * a stale one survive via the `original` spread (see buildFormSchema).
  */
-function buildVisibilityRule(visibility: FieldVisibilityDraft): FormFieldVisibilityRule | undefined {
+export function buildVisibilityRule(visibility: FieldVisibilityDraft): FormFieldVisibilityRule | undefined {
   const fieldId = visibility.dependsOnFieldId.trim()
   if (!fieldId) return undefined
   if (visibility.operator === 'in') {
-    const values = visibility.valueText.split('\n').map((line) => line.trim()).filter(Boolean)
-    return { fieldId, operator: 'in', values }
+    return { fieldId, operator: 'in', values: visibilityDraftList(visibility) }
   }
   if (visibility.operator === 'isEmpty' || visibility.operator === 'notEmpty') {
     return { fieldId, operator: visibility.operator }
   }
-  return { fieldId, operator: visibility.operator, value: visibility.valueText.trim() }
+  return {
+    fieldId,
+    operator: visibility.operator,
+    value: visibility.value !== undefined ? visibility.value : visibility.valueText.trim(),
+  }
+}
+
+// --- R-43 (B): typed visibility values ------------------------------------------------------------
+// Readers/writers over the optional `value`/`values` carriers. Every writer returns a NEW draft and
+// copies arrays (the form command layer only shallow-copies `visibility`). Normalisation keeps any
+// value a plain trimmed string expresses losslessly in `valueText` alone (three-key shape).
+
+/**
+ * Draft field → condition-value description (options parsed for select / multi-select). A
+ * multi-person picker submits a LIST value (`listValued`, set only when true). An attachment field
+ * (also list-valued) never reaches here: it is not an authorable type.
+ */
+export function conditionValueFieldFromDraft(
+  field: Pick<FieldAuthoringDraft, 'type' | 'optionsText'> & Partial<Pick<FieldAuthoringDraft, 'userSelection'>>,
+): ConditionValueField {
+  const description: ConditionValueField = {
+    type: field.type,
+    options: field.type === 'select' || field.type === 'multi-select' ? parseOptionsText(field.optionsText) : [],
+  }
+  if (field.type === 'user' && field.userSelection === 'multi') {
+    description.listValued = true
+  }
+  return description
+}
+
+/**
+ * Read-only preview of a stored visibility value that its free-entry box shows EMPTY because the
+ * rule is marked (`conditionStoredValueNoteShown`: a blanked text box, or a number box left empty by
+ * a non-number), so the author still sees what was saved; null when
+ * the box shows the value itself (or the dependency is an option field, whose pickers carry their
+ * own invalid-value placeholders). For `in` this is decided by the textarea's actual text
+ * (`visibilityDraftListText`): a number list holding a non-number line can still show its lines
+ * (e.g. while the author is typing), and then there is nothing hidden to explain.
+ */
+export function visibilityStoredValuePreview(
+  visibility: FieldVisibilityDraft,
+  dependency: ConditionValueField | null,
+): string | null {
+  if (!dependency || isOptionKind(conditionValueKind(dependency))) return null
+  const rule = buildVisibilityRule(visibility)
+  if (!rule || rule.operator === 'isEmpty' || rule.operator === 'notEmpty') return null
+  if (!conditionStoredValueNoteShown(visibilityRuleValueIssues(rule, dependency))) return null
+  if (rule.operator === 'in' && visibilityDraftListText(visibility, conditionValueKind(dependency)) !== '') return null
+  return conditionStoredValuePreview(rule.operator === 'in' ? rule.values : rule.value)
+}
+
+/**
+ * Visibility dependency id → description. A date_range dotted endpoint (`${id}.start|end`) compares
+ * a date string (text kind); an unknown id → null.
+ */
+export function visibilityDependencyValueField(
+  dependsOnFieldId: string,
+  fields: readonly FieldAuthoringDraft[],
+): ConditionValueField | null {
+  const raw = dependsOnFieldId.trim()
+  if (!raw) return null
+  const direct = fields.find((field) => field.id.trim() === raw)
+  if (direct) return conditionValueFieldFromDraft(direct)
+  const baseId = visibilityReferenceBaseFieldId(raw)
+  if (baseId !== raw && fields.some((field) => field.id.trim() === baseId && field.type === 'date_range')) {
+    return { type: 'date', options: [] }
+  }
+  return null
+}
+
+/** Read: the eq/neq value (carrier first, else the raw `valueText`). */
+export function visibilityDraftScalar(visibility: FieldVisibilityDraft): unknown {
+  return visibility.value !== undefined ? visibility.value : visibility.valueText
+}
+
+/** Read: the `in` list (carrier first, else `valueText` split per line, trimmed, blanks dropped). */
+export function visibilityDraftList(visibility: FieldVisibilityDraft): unknown[] {
+  if (Array.isArray(visibility.values)) return [...visibility.values]
+  return visibility.valueText.split('\n').map((line) => line.trim()).filter(Boolean)
+}
+
+/**
+ * Read (display): the eq/neq text-box text. Number kind shows only a finite number (a stored
+ * non-number shows '' and is explained by the issue note, so re-typing the same digits is a real
+ * edit that commits a number). Text kind shows only a string, by the same rule: a stored non-string
+ * (e.g. a number left behind when the field was retyped from number to text, which `===` never
+ * matches) shows '' and is explained by the issue note, so re-typing it commits a string.
+ */
+export function visibilityDraftScalarText(visibility: FieldVisibilityDraft, kind: ConditionValueKind): string {
+  const scalar = visibilityDraftScalar(visibility)
+  if (kind === 'number') {
+    return typeof scalar === 'number' && Number.isFinite(scalar) ? String(scalar) : ''
+  }
+  return typeof scalar === 'string' ? scalar : ''
+}
+
+/**
+ * Read (display): the `in` textarea text. Keeps the author's in-progress text (newlines, a trailing
+ * blank line) whenever it still parses to the stored list; otherwise renders the stored list.
+ */
+export function visibilityDraftListText(visibility: FieldVisibilityDraft, kind: ConditionValueKind): string {
+  const list = visibilityDraftList(visibility)
+  if (sameConditionList(parseConditionListText(visibility.valueText, kind), list)) return visibility.valueText
+  if (kind === 'number' && !list.every((value) => typeof value === 'number' && Number.isFinite(value))) return ''
+  // Text kind: a stored non-string entry never matches (`includes` is strict) — show '' like above.
+  if (kind === 'text' && !list.every((value) => typeof value === 'string')) return ''
+  return formatConditionListText(list)
+}
+
+/**
+ * Write (typed eq/neq value). A string containing a newline rides the carrier too, so a carrier-less
+ * `valueText` with a newline can only be an `in` list (what `visibilityDraftWithOperator` relies on).
+ */
+export function visibilityDraftWithScalar(visibility: FieldVisibilityDraft, value: unknown): FieldVisibilityDraft {
+  const base = { dependsOnFieldId: visibility.dependsOnFieldId, operator: visibility.operator }
+  if (typeof value === 'string' && value === value.trim() && !value.includes('\n')) return { ...base, valueText: value }
+  return { ...base, valueText: '', value }
+}
+
+/** Write (text-mode eq/neq value): drops any carrier so the typed text is what gets saved. */
+export function visibilityDraftWithScalarText(visibility: FieldVisibilityDraft, text: string): FieldVisibilityDraft {
+  return { dependsOnFieldId: visibility.dependsOnFieldId, operator: visibility.operator, valueText: text }
+}
+
+/** Write (typed `in` list). */
+export function visibilityDraftWithList(visibility: FieldVisibilityDraft, list: readonly unknown[]): FieldVisibilityDraft {
+  const base = { dependsOnFieldId: visibility.dependsOnFieldId, operator: visibility.operator }
+  const plain = list.every((value) => (
+    typeof value === 'string' && value !== '' && value === value.trim() && !value.includes('\n')
+  ))
+  if (plain) return { ...base, valueText: list.join('\n') }
+  return { ...base, valueText: formatConditionListText(list), values: [...list] }
+}
+
+/** Write (`in` textarea text). Number kind parses each line so the saved list holds numbers. */
+export function visibilityDraftWithListText(
+  visibility: FieldVisibilityDraft,
+  text: string,
+  kind: ConditionValueKind,
+): FieldVisibilityDraft {
+  const base = { dependsOnFieldId: visibility.dependsOnFieldId, operator: visibility.operator }
+  if (kind === 'number') return { ...base, valueText: text, values: parseConditionListText(text, 'number') }
+  return { ...base, valueText: text }
+}
+
+/**
+ * Operator change. eq/neq ↔ eq/neq keeps the value; scalar → `in` wraps a non-empty value in a
+ * one-entry list; `in` → scalar keeps the first entry; → isEmpty/notEmpty keeps the value (ignored
+ * by build). Coming back from isEmpty/notEmpty the kept value is shaped for the NEW operator by
+ * what the draft actually holds, so `in → isEmpty → eq` keeps the first entry instead of saving the
+ * whole list as one newline-joined value (which `===` never matches).
+ */
+export function visibilityDraftWithOperator(
+  visibility: FieldVisibilityDraft,
+  next: FormFieldVisibilityOperator,
+): FieldVisibilityDraft {
+  const current = visibility.operator
+  const renamed: FieldVisibilityDraft = { ...visibility, operator: next }
+  if (Array.isArray(visibility.values)) renamed.values = [...visibility.values]
+  const isScalar = (op: FormFieldVisibilityOperator) => op === 'eq' || op === 'neq'
+  const isEmptiness = (op: FormFieldVisibilityOperator) => op === 'isEmpty' || op === 'notEmpty'
+  if (isEmptiness(current) && isScalar(next)) {
+    const holdsList = Array.isArray(visibility.values) ||
+      Array.isArray(visibility.value) ||
+      (visibility.value === undefined && visibility.valueText.includes('\n'))
+    if (!holdsList) return renamed
+    const list = Array.isArray(visibility.value) ? [...visibility.value] : visibilityDraftList(visibility)
+    return visibilityDraftWithScalar(renamed, list.length > 0 ? list[0] : '')
+  }
+  if (isEmptiness(current) && next === 'in') {
+    // A kept scalar carrier (e.g. a number) would otherwise be dropped by the list reader.
+    if (visibility.value === undefined || Array.isArray(visibility.values)) return renamed
+    const scalar = visibility.value
+    const empty = scalar === null || (typeof scalar === 'string' && scalar.trim() === '')
+    if (empty) return visibilityDraftWithList(renamed, [])
+    return visibilityDraftWithList(renamed, Array.isArray(scalar) ? scalar : [typeof scalar === 'string' ? scalar.trim() : scalar])
+  }
+  if (isScalar(current) && next === 'in') {
+    const scalar = visibilityDraftScalar(visibility)
+    const empty = scalar === undefined || scalar === null || (typeof scalar === 'string' && scalar.trim() === '')
+    return visibilityDraftWithList(renamed, empty ? [] : [typeof scalar === 'string' ? scalar.trim() : scalar])
+  }
+  if (current === 'in' && isScalar(next)) {
+    const list = visibilityDraftList(visibility)
+    return visibilityDraftWithScalar(renamed, list.length > 0 ? list[0] : '')
+  }
+  return renamed
+}
+
+/**
+ * Dependency change. '' resets the rule. Otherwise the operator is kept when it can take effect on
+ * the new dependency, else the first one that can (multi-select / multi-person picker ⇒ `in`). The
+ * value survives only a text → text move that keeps the operator (the pre-R-43 behaviour); any typed
+ * kind on either side, or a forced operator change, clears it, because an option value / number of
+ * one field means nothing for another (and an eq scalar is not an `in` list).
+ */
+export function visibilityDraftForDependencyChange(
+  visibility: FieldVisibilityDraft,
+  nextDependsOnFieldId: string,
+  prev: ConditionValueField | null,
+  next: ConditionValueField | null,
+): FieldVisibilityDraft {
+  if (!nextDependsOnFieldId) return emptyVisibilityDraft()
+  const nextKind = conditionValueKind(next)
+  const allowed = visibilityOperatorsForField(next)
+  const operator = allowed.includes(visibility.operator) ? visibility.operator : allowed[0]!
+  // A forced operator change (e.g. single person → multi-person picker: eq ⇒ in) clears the value
+  // too: an eq scalar is not an `in` list.
+  if (conditionValueKind(prev) === 'text' && nextKind === 'text' && operator === visibility.operator) {
+    const kept: FieldVisibilityDraft = { ...visibility, dependsOnFieldId: nextDependsOnFieldId, operator }
+    if (Array.isArray(visibility.values)) kept.values = [...visibility.values]
+    return kept
+  }
+  return { dependsOnFieldId: nextDependsOnFieldId, operator, valueText: '' }
 }
 
 export function createEmptyStepDraft(index = 1): ApprovalStepDraft {
@@ -599,6 +893,65 @@ export function setStepFieldPermission(
     return permissions.map((permission) => (permission.fieldId === fieldId ? { fieldId, access } : permission))
   }
   return [...permissions, { fieldId, access }]
+}
+
+// ── W1-1a (Lock-4 §2 F4-C / §3 F4-B) — linear-step adapters over the shared helpers in
+// approvalNodeEdit.ts, so BOTH editors project and write the same-person / designated-fallback
+// controls through ONE implementation. ────────────────────────────────────────────────────────────
+
+type StepAutoApprovalCarriers = Pick<ApprovalStepDraft, 'mergeWithRequester' | 'samePersonPolicy' | 'originalAutoApprovalPolicy'>
+
+/**
+ * The node-level `autoApprovalPolicy` a linear step EMITS (also what its controls read, so the
+ * displayed state and the saved shape cannot diverge). The same-person control owns
+ * `mergeWithRequester` + `samePersonPolicy`: both are stripped from the preserved original (every
+ * other sibling kept — no silent flatten) and re-added from the two raw draft fields. 'auto_skip'
+ * ALWAYS carries `mergeWithRequester: true`, the exact shape the backend `normalizeAutoApprovalPolicy`
+ * persists ("auto_skip WINS over an explicit mergeWithRequester"), so the FE never sends a shape the
+ * server would rewrite. Spread-only would resurrect a stale carrier (the shipped self-revert class).
+ */
+export function stepAutoApprovalPolicy(step: StepAutoApprovalCarriers): AutoApprovalPolicy {
+  const policy: AutoApprovalPolicy = { ...step.originalAutoApprovalPolicy }
+  delete policy.mergeWithRequester
+  delete policy.samePersonPolicy
+  if (step.mergeWithRequester || step.samePersonPolicy === 'auto_skip') policy.mergeWithRequester = true
+  if (step.samePersonPolicy !== undefined) policy.samePersonPolicy = step.samePersonPolicy
+  return policy
+}
+
+/** The four-value control's state for a linear step, derived from its two RAW carriers. */
+export function stepSamePersonControlState(step: StepAutoApprovalCarriers): SamePersonControlState {
+  return samePersonControlState(stepAutoApprovalPolicy(step))
+}
+
+/**
+ * Writes a pick onto the step's two raw carriers, keeping them in sync (implementer default (a):
+ * 'auto_skip' ⇒ `samePersonPolicy:'auto_skip'` + `mergeWithRequester:true`; every other pick clears
+ * `mergeWithRequester`; 'default' clears both). No-op for an `unknown` persisted value (X-3) and
+ * when the pick equals the current projection (an untouched legacy `{ mergeWithRequester: true }`
+ * keeps its shape).
+ */
+export function setStepSamePersonChoice(
+  step: StepAutoApprovalCarriers,
+  choice: SamePersonChoice,
+): void {
+  const current = stepSamePersonControlState(step)
+  if (current.kind !== 'editable' || current.choice === choice) return
+  if (choice !== 'default' && !isKnownSamePersonPolicy(choice)) return
+  step.mergeWithRequester = choice === 'auto_skip'
+  if (choice === 'default') delete step.samePersonPolicy
+  else step.samePersonPolicy = choice
+}
+
+/** Replaces one side (users / roles) of a linear step's `'designated'` targets from a typed picker. */
+export function setStepEmptyAssigneeFallbackIds(
+  step: Pick<ApprovalStepDraft, 'emptyAssigneeFallback'>,
+  side: 'user' | 'role',
+  ids: string[],
+): void {
+  const next = withEmptyAssigneeFallbackIds(step.emptyAssigneeFallback, side, ids)
+  if (next) step.emptyAssigneeFallback = next
+  else delete step.emptyAssigneeFallback
 }
 
 function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
@@ -762,10 +1115,13 @@ function stepDraftFromApprovalNode(
     idsText = formatIds(legacyIds)
   }
 
-  // Hydrate the self-approver policy: surface `mergeWithRequester` as the editable
-  // toggle, and stash the full policy so non-merge sub-fields survive a rebuild.
+  // Hydrate the same-person policy's two RAW carriers (see `ApprovalStepDraft.samePersonPolicy`),
+  // and stash the full policy so the sub-fields this editor does not own survive a rebuild. An
+  // off-enum `samePersonPolicy` is carried verbatim too — `unsupportedTemplateAuthoringReason` is
+  // the single door that makes such a template read-only (gate X-3), never this line.
   const autoApprovalPolicy = config.autoApprovalPolicy as AutoApprovalPolicy | undefined
   const mergeWithRequester = autoApprovalPolicy?.mergeWithRequester === true
+  const samePersonPolicy = autoApprovalPolicy?.samePersonPolicy
 
   // T1-4: hydrate node-level field permissions. Only well-formed { fieldId, access-in-enum } entries
   // are carried; a malformed entry is separately caught by `unsupportedTemplateAuthoringReason`
@@ -789,6 +1145,15 @@ function stepDraftFromApprovalNode(
     Number.isInteger(config.approvalThreshold) && (config.approvalThreshold as number) >= 1
       ? (config.approvalThreshold as number)
       : 1
+  // Lock-4 §1 F4-A: an `auto_approve` node persisted with NO assignee carrier at all (the one shape
+  // only it may take) hydrates with the omit flag, so `buildStepConfig` re-emits it sourceless instead
+  // of inventing the `requester` default above as a phantom source. An auto_approve node that DOES
+  // carry a source (only an API save can produce one) keeps it: it is re-emitted verbatim, validated,
+  // and stays VISIBLE in the step card with a notice — the UI hides exactly what the save omits.
+  const omitAssigneeSources = config.approvalType === 'auto_approve'
+    && config.assigneeSources === undefined
+    && config.assigneeType === undefined
+    && config.assigneeIds === undefined
 
   // P1-C: hydrate node-level timeout. Shape is already gated by `unsupportedTemplateAuthoringReason`
   // (`timeoutConfigHasBackendDrop`), so every field read here is well-typed.
@@ -822,6 +1187,11 @@ function stepDraftFromApprovalNode(
     groupIds,
     approvalMode,
     approvalThreshold,
+    // Lock-4 §1 F4-A: verbatim (absent stays absent). An out-of-union value never reaches an
+    // editable draft — `unsupportedTemplateAuthoringReason`'s approvalType value door forces the
+    // whole template read-only first, so this line never re-decides that question.
+    ...(config.approvalType !== undefined ? { approvalType: config.approvalType as ApprovalType } : {}),
+    ...(omitAssigneeSources ? { omitAssigneeSources: true } : {}),
     // Fix-round P1-1 / P3-2 (gate P3A-F4B-20260819, master M4): the out-of-union coercion to
     // `'error'` is DELETED — this used to map `'designated'` (and any future value) to `'error'`,
     // exactly the silent downgrade M4's no-flatten clause exists to make impossible (the same
@@ -832,6 +1202,7 @@ function stepDraftFromApprovalNode(
     // a genuinely ABSENT `emptyAssigneePolicy` takes the documented `'error'` default.
     emptyAssigneePolicy: config.emptyAssigneePolicy === undefined ? 'error' : (config.emptyAssigneePolicy as EmptyAssigneePolicy),
     mergeWithRequester,
+    ...(samePersonPolicy !== undefined ? { samePersonPolicy } : {}),
     ...(autoApprovalPolicy ? { originalAutoApprovalPolicy: autoApprovalPolicy } : {}),
     fieldPermissions,
     timeoutEnabled,
@@ -955,6 +1326,13 @@ const BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS = [
   'assigneeSources',
   'approvalMode',
   'approvalThreshold',
+  // Lock-4 §1 F4-A / §2.3 — allowlist 2 of 4 for 审批类型. The backend approval-node rebuild already
+  // re-emits `approvalType` ("allowlist 1", ApprovalProductService.ts `case 'approval'` spread), so a
+  // template carrying it must stay EDITABLE rather than being forced read-only by the drop-check
+  // below. It is a SCALAR, so its "nested" counterpart is the value door in
+  // `approvalTypeConfigHasBackendDrop` (an off-union value — `'auto_reject'` included — still fails
+  // closed). Gate A-3's `signaturePolicy` positive control still goes read-only here.
+  'approvalType',
   'emptyAssigneePolicy',
   // Fix-round P1-1 (gate P3A-F4B-20260819, Lock-4 §3 F4-B / §2.3) — allowlist 2 of 4. The backend
   // approval-node rebuild re-emits `emptyAssigneeFallback` (ApprovalProductService.ts, the
@@ -1045,7 +1423,22 @@ function emptyAssigneeFallbackHasBackendDrop(value: unknown): boolean {
   if (value.roleIds !== undefined && !Array.isArray(value.roleIds)) return true
   return false
 }
-const BACKEND_AUTO_APPROVAL_POLICY_KEYS = ['mergeWithRequester', 'mergeAdjacentApprover', 'dedupeHistoricalApprover', 'actorMode']
+// W1-1a (Lock-4 §2 F4-C / §2.3) — `samePersonPolicy` joins the nested allowlist: the backend
+// `normalizeAutoApprovalPolicy` re-emits it, and BOTH editors now own it through the four-value
+// control (which owns `mergeWithRequester` with it, so the shipped self-revert class — a toggle that
+// clears only `mergeWithRequester` while a persisted 'auto_skip' re-synthesizes it — cannot recur).
+// A widened ENUM is a different hazard than a new key (§2.3): `samePersonPolicyIsOffEnum` below is
+// the VALUE-level door (gate X-3) that the key-only check here cannot provide.
+const BACKEND_AUTO_APPROVAL_POLICY_KEYS = ['mergeWithRequester', 'mergeAdjacentApprover', 'dedupeHistoricalApprover', 'actorMode', 'samePersonPolicy']
+
+/**
+ * Gate X-3 (Lock-4 §3): "a persisted `emptyAssigneePolicy` / `samePersonPolicy` outside the frontend
+ * enum renders read-only and saves unchanged on BOTH the linear and canvas paths". True for a
+ * policy object carrying an off-enum `samePersonPolicy` — both paths fail closed to read-only on it.
+ */
+function samePersonPolicyIsOffEnum(policy: unknown): boolean {
+  return isPlainRecord(policy) && policy.samePersonPolicy !== undefined && !isKnownSamePersonPolicy(policy.samePersonPolicy)
+}
 const BACKEND_FIELD_PERMISSION_KEYS = ['fieldId', 'access']
 // Lock-5 §1.1 / §2.2 — allowlist 4 of 4 (the NESTED one, beside BACKEND_AUTO_APPROVAL_POLICY_KEYS).
 // `nodeOperationPolicy` is an OBJECT, so a top-level allowlist entry alone is incomplete: the
@@ -1149,6 +1542,22 @@ function thresholdConfigHasBackendDrop(config: Record<string, unknown>): boolean
   return config.approvalThreshold !== undefined && config.approvalMode !== 'threshold'
 }
 
+/** Lock-4 §1 F4-A — true for a value outside the FE `ApprovalType` union. */
+export function isKnownApprovalType(value: unknown): value is ApprovalType {
+  return typeof value === 'string' && (APPROVAL_TYPE_VALUES as readonly string[]).includes(value)
+}
+
+/**
+ * Lock-4 §1 F4-A — the value door for the `approvalType` SCALAR on BOTH paths (allowlist "4 of 4"
+ * for a key with no nested shape). A persisted value outside `APPROVAL_TYPE_VALUES` — `'auto_reject'`
+ * included (OD-L4-2(a): no inert third option) — can never come from a real save (backend
+ * `normalizeApprovalType` rejects it on every read), and no 审批类型 radio can represent it, so it
+ * fails closed to read-only instead of rendering as a silently-unchecked control.
+ */
+function approvalTypeConfigHasBackendDrop(config: Record<string, unknown>): boolean {
+  return config.approvalType !== undefined && !isKnownApprovalType(config.approvalType)
+}
+
 /**
  * True when a COMPLEX approval node's config carries a key — TOP-LEVEL or NESTED in assigneeSources[]
  * / autoApprovalPolicy / fieldPermissions[] / timeout — that the backend `normalizeApprovalGraph` does
@@ -1158,6 +1567,7 @@ function thresholdConfigHasBackendDrop(config: Record<string, unknown>): boolean
 function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): boolean {
   if (hasKeyOutside(config, BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS)) return true
   if (thresholdConfigHasBackendDrop(config)) return true
+  if (approvalTypeConfigHasBackendDrop(config)) return true
   if (config.timeout !== undefined && timeoutConfigHasBackendDrop(config.timeout)) return true
   // Fix-round P1-1 (gate P3A-F4B-20260819) — allowlist 4 of 4, the nested shape check for the key
   // added to allowlist 2 above.
@@ -1173,6 +1583,8 @@ function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): b
     }
   }
   if (hasKeyOutside(config.autoApprovalPolicy, BACKEND_AUTO_APPROVAL_POLICY_KEYS)) return true
+  // W1-1a gate X-3 (canvas path): an off-enum samePersonPolicy is read-only, never re-projected.
+  if (samePersonPolicyIsOffEnum(config.autoApprovalPolicy)) return true
   const perms = config.fieldPermissions
   if (Array.isArray(perms)) {
     for (const perm of perms) {
@@ -1308,6 +1720,11 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
       // (buildStepConfig / stepDraftFromApprovalNode), so they are no longer unknown config keys
       // that would force the whole template read-only (master §P1-C I12/I13 no-flatten).
       'approvalThreshold',
+      // Lock-4 §1 F4-A / §2.3 — allowlist 3 of 4 for 审批类型. AUTHORED here (the 审批类型 radio on
+      // each step) and carried end to end: `stepDraftFromApprovalNode` hydrates it verbatim and
+      // `buildStepConfig` re-emits it — before this slice it was absent from this list, so any
+      // template carrying it opened read-only with save disabled (never silently stripped).
+      'approvalType',
       'emptyAssigneePolicy',
       // Fix-round P1-1 (gate P3A-F4B-20260819, Lock-4 §3 F4-B / §2.3) — allowlist 3 of 4. The
       // linear editor does NOT author `emptyAssigneeFallback` (no typed userIds/roleIds picker
@@ -1343,6 +1760,8 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     ) return true
     if (thresholdConfigHasBackendDrop(config)) return true
     if (config.approvalMode === 'threshold' && !(Number.isInteger(config.approvalThreshold) && (config.approvalThreshold as number) >= 1)) return true
+    // Lock-4 §1 F4-A — the same value door as the complex path (`approvalTypeConfigHasBackendDrop`).
+    if (approvalTypeConfigHasBackendDrop(config)) return true
     // Fix-round P1-1 / P3-2 (gate P3A-F4B-20260819, master M4 "no silent flatten of an unknown
     // persisted value") — mirrors the `approvalMode` check immediately above. `'designated'` is now
     // a KNOWN value (`stepDraftFromApprovalNode` preserves it verbatim, never coercing it to
@@ -1355,17 +1774,17 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     // (same predicate, reused rather than duplicated).
     if (config.emptyAssigneeFallback !== undefined && emptyAssigneeFallbackHasBackendDrop(config.emptyAssigneeFallback)) return true
     if (config.timeout !== undefined && timeoutConfigHasBackendDrop(config.timeout)) return true
-    // P2-1 fix: `buildStepConfig` only AUTHORS `mergeWithRequester` — the three sibling
-    // `autoApprovalPolicy` fields (incl. `samePersonPolicy`) are preserved verbatim from
-    // `originalAutoApprovalPolicy` (:1673-1680) and re-spread on every save regardless of the
-    // 自动跳过 toggle's state. A node carrying a key `buildStepConfig`/backend's
-    // `normalizeAutoApprovalPolicy` don't jointly own (i.e. anything besides the four
-    // `BACKEND_AUTO_APPROVAL_POLICY_KEYS`) must fail closed to read-only here too — mirrors the
-    // complex path's identical check at `complexApprovalConfigHasBackendDrop` (:1067) — otherwise
-    // the shipped toggle silently self-reverts (turning it OFF never clears a persisted
-    // `samePersonPolicy` carrier such as `auto_skip`/`transfer_*`, which resynthesizes
-    // `mergeWithRequester:true` server-side on every save).
+    // P2-1 fix (amended by W1-1a): a node carrying an `autoApprovalPolicy` key that
+    // `buildStepConfig` + the backend's `normalizeAutoApprovalPolicy` don't jointly own (anything
+    // besides `BACKEND_AUTO_APPROVAL_POLICY_KEYS`) must fail closed to read-only here — mirrors the
+    // complex path's identical check in `complexApprovalConfigHasBackendDrop`. `samePersonPolicy`
+    // was the motivating case (the shipped toggle could not clear a persisted `auto_skip`/
+    // `transfer_*`, so it silently self-reverted); W1-1a makes it OWNED — the four-value control
+    // writes `samePersonPolicy` and `mergeWithRequester` together, and `buildStepConfig` strips both
+    // from the preserved original before re-adding them — so the key is now allowlisted, and only an
+    // OFF-ENUM value (gate X-3) still forces read-only, via the value check below.
     if (hasKeyOutside(config.autoApprovalPolicy, BACKEND_AUTO_APPROVAL_POLICY_KEYS)) return true
+    if (samePersonPolicyIsOffEnum(config.autoApprovalPolicy)) return true
     // The linear path preserves the object verbatim, so a shape the backend would reject or
     // re-emit differently must still fail closed to read-only (same predicate as the complex path).
     if (
@@ -1424,7 +1843,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
 export function graphReadOnlyReason(template: ApprovalTemplateDetailDTO): string | null {
   if (unsupportedTemplateAuthoringReason(template)) return null
   if (!isComplexApprovalGraph(template.approvalGraph)) return null
-  return '该模板已启用分支流程编辑：可在画布调整流程结构，并在结构列表编辑各节点配置。'
+  return '该表单已启用分支流程编辑：可在画布调整流程结构，并在结构列表编辑各节点配置。'
 }
 
 export function draftFromTemplate(template: ApprovalTemplateDetailDTO): TemplateAuthoringDraft {
@@ -1771,8 +2190,40 @@ export function sourceFromStep(step: ApprovalStepDraft, allSteps?: ApprovalStepD
 }
 
 /**
- * Build the approval-node config for a step. The `mergeWithRequester` toggle is the
- * only authored sub-field of `autoApprovalPolicy`; the three non-merge sub-fields are
+ * Lock-4 §1 F4-A — the ONE predicate for "this linear step saves with NO assignee sources": an
+ * `auto_approve` step whose sources were omitted (hydrated sourceless, or switched to 自动通过 by the
+ * author). Every consumer of the step's hidden source scratch — `buildStepConfig`, the save/publish
+ * preview in `validateTemplateApprovalFlow`, the spine (`linearStepSpine.ts`) and the view's
+ * routing-driver hint — asks THIS, so they cannot disagree about whether a source is real.
+ */
+export function stepOmitsAssigneeSources(step: Pick<ApprovalStepDraft, 'approvalType' | 'omitAssigneeSources'>): boolean {
+  return step.approvalType === 'auto_approve' && step.omitAssigneeSources === true
+}
+
+/**
+ * Lock-4 §1 F4-A — the linear 审批类型 radio's mutator (implementer defaults, owner-visible):
+ *  - `'auto_approve'`: the step carries NO assignee sources from now on (L4: "an empty source list
+ *    is legal here and only here"). The source fields stay on the draft as hidden scratch, so an
+ *    accidental arrow-key traversal 自动通过 → 人工审批 restores them (never a silent discard).
+ *  - `'manual'`: the KEY is removed (absent ≡ manual — byte-identical to every pre-F4-A step) and
+ *    the step's source becomes live again (for a step hydrated sourceless that is the `requester`
+ *    default — the same zero-config default a brand-new step starts from).
+ * No other field is touched: mode / empty-assignee / self-approval / timeout values are preserved
+ * verbatim while hidden (no flatten) and reappear on switching back.
+ */
+export function setStepApprovalType(step: ApprovalStepDraft, type: ApprovalType): void {
+  if (type === 'auto_approve') {
+    step.approvalType = 'auto_approve'
+    step.omitAssigneeSources = true
+    return
+  }
+  delete step.approvalType
+  delete step.omitAssigneeSources
+}
+
+/**
+ * Build the approval-node config for a step. The same-person control (W1-1a) owns
+ * `mergeWithRequester` + `samePersonPolicy` of `autoApprovalPolicy`; every other sub-field is
  * preserved verbatim from `originalAutoApprovalPolicy` (no silent flatten). The
  * `autoApprovalPolicy` key is OMITTED entirely when the effective policy is empty —
  * mirroring `buildFormSchema`'s `delete next.visibilityRule` omit-empty discipline so a
@@ -1839,15 +2290,8 @@ function buildStepConfig(
   allSteps: ApprovalStepDraft[],
   stepLocalIdToNodeKey: Map<string, string>,
 ): ApprovalNodeConfig {
-  const autoApprovalPolicy: AutoApprovalPolicy = {
-    ...step.originalAutoApprovalPolicy,
-    ...(step.mergeWithRequester ? { mergeWithRequester: true } : {}),
-  }
-  // The toggle owns `mergeWithRequester`: when OFF, drop the flag but keep preserved
-  // siblings. (Spread-only would resurrect a `mergeWithRequester:true` carrier.)
-  if (!step.mergeWithRequester) {
-    delete autoApprovalPolicy.mergeWithRequester
-  }
+  // W1-1a: see `stepAutoApprovalPolicy` — the same-person control owns BOTH carriers.
+  const autoApprovalPolicy = stepAutoApprovalPolicy(step)
   // T1-4: emit only NON-editable entries (editable === absent default) whose field still exists —
   // pruning an entry for a deleted field keeps the backend cross-reference
   // (`validateNodeFieldPermissionsAgainstFormSchema`) satisfied. Omit the key entirely when empty
@@ -1863,26 +2307,31 @@ function buildStepConfig(
   const nodeOperationPolicy = step.nodeOperationPolicy
     ? (JSON.parse(JSON.stringify(step.nodeOperationPolicy)) as NodeOperationPolicy)
     : undefined
-  // Fix-round P1-1 — re-emit the preserved `'designated'` target set VERBATIM (fresh deep copy,
-  // same discipline as `nodeOperationPolicy` immediately above).
+  // Lock-4 F4-B — re-emit the `'designated'` target set (hydrated verbatim, or authored through the
+  // W1-1a pickers) as a fresh deep copy, same discipline as `nodeOperationPolicy` immediately above.
   const emptyAssigneeFallback = step.emptyAssigneeFallback
     ? (JSON.parse(JSON.stringify(step.emptyAssigneeFallback)) as EmptyAssigneeFallback)
     : undefined
   return {
-    assigneeSources: [sourceFromStep(step, allSteps)],
+    // Lock-4 §1 F4-A: a sourceless auto_approve step OMITS the key entirely — never `[]` (the backend
+    // 400s an empty array) and never the hidden `requester` scratch default (a phantom source).
+    ...(stepOmitsAssigneeSources(step) ? {} : { assigneeSources: [sourceFromStep(step, allSteps)] }),
     approvalMode: step.approvalMode,
     // P1-C: `approvalThreshold` is emitted ONLY under `approvalMode === 'threshold'` — mirrors the
     // backend's own conditional emission (`thresholdConfigHasBackendDrop`'s invariant) so switching
     // mode away never leaves an orphaned threshold key behind.
     ...(step.approvalMode === 'threshold' ? { approvalThreshold: step.approvalThreshold } : {}),
+    // Lock-4 §1 F4-A / §2.3 — allowlist 3's emitter (without it the linear save DROPS the key). Placed
+    // where the backend rebuild places it (after `approvalThreshold`, before `emptyAssigneePolicy`),
+    // so a backend-normalized node round-trips byte-for-byte, key order included. Absent stays absent.
+    ...(step.approvalType !== undefined ? { approvalType: step.approvalType } : {}),
     emptyAssigneePolicy: step.emptyAssigneePolicy,
     // Fix-round advisor catch (post-P1-1): emitted ONLY under `emptyAssigneePolicy === 'designated'`
-    // — mirrors `approvalThreshold`'s own conditional emission immediately above. The 空审批人策略
-    // `<el-select>` (TemplateAuthoringView.vue) offers only 报错/自动通过 as options but is bound
-    // directly to `step.emptyAssigneePolicy`, which P1-1 now preserves as `'designated'` verbatim;
-    // an author switching a designated node's select to either option must not leave an orphaned
-    // `emptyAssigneeFallback` behind — P2-3's own validator would then 400 the save on a key no
-    // linear UI can see or clear.
+    // — mirrors `approvalThreshold`'s own conditional emission immediately above. An author
+    // switching a designated step's 空审批人策略 select to 报错/自动通过 must not leave an orphaned
+    // `emptyAssigneeFallback` behind — the backend B-s10 validator would 400 the save
+    // (APPROVAL_EMPTY_ASSIGNEE_FALLBACK_NOT_ALLOWED). The draft keeps the targets so switching back
+    // restores them.
     ...(step.emptyAssigneePolicy === 'designated' && emptyAssigneeFallback ? { emptyAssigneeFallback } : {}),
     ...(Object.keys(autoApprovalPolicy).length > 0 ? { autoApprovalPolicy } : {}),
     ...(fieldPermissions.length > 0 ? { fieldPermissions } : {}),
@@ -2254,7 +2703,7 @@ export function validateTemplateFormFields(
       return
     }
     if (field.visibility.operator === 'in'
-      && field.visibility.valueText.split('\n').map((line) => line.trim()).filter(Boolean).length === 0) {
+      && visibilityDraftList(field.visibility).length === 0) {
       errors.push(`字段 ${label} 的显隐"包含"规则需要至少一个值`)
     }
     if (fieldId) visibilityDeps.set(fieldId, dependencyBaseId)
@@ -2346,13 +2795,21 @@ export function validateTemplateApprovalFlow(
   )
   draft.steps.forEach((step, index) => {
     const label = step.name.trim() || `审批步骤 ${index + 1}`
-    if ((step.sourceKind === 'static_user' || step.sourceKind === 'static_role') && parseIdsText(step.idsText).length === 0) {
+    // Lock-4 §1 F4-A: a sourceless auto_approve step saves NO assignee source (`buildStepConfig`
+    // omits it), so its hidden source scratch is not validated — a preview error about a source the
+    // save will not send would block save on nothing. An auto_approve step that still CARRIES sources
+    // keeps every check below (those sources are sent, and the backend validates them).
+    const sourceIsLive = !stepOmitsAssigneeSources(step)
+    if (sourceIsLive && (step.sourceKind === 'static_user' || step.sourceKind === 'static_role') && parseIdsText(step.idsText).length === 0) {
       errors.push(`${label} 需要填写用户/角色 id`)
     }
     if (
-      step.sourceKind === 'form_field_user'
-      || step.sourceKind === 'form_field_user_manager'
-      || step.sourceKind === 'form_field_user_dept_head'
+      sourceIsLive
+      && (
+        step.sourceKind === 'form_field_user'
+        || step.sourceKind === 'form_field_user_manager'
+        || step.sourceKind === 'form_field_user_dept_head'
+      )
     ) {
       const userField = userFieldsById.get(step.fieldId.trim())
       if (!userField) {
@@ -2375,7 +2832,8 @@ export function validateTemplateApprovalFlow(
     // Lock-1 §K2 PREVIEW (backend normalize is the final arbiter): a members/role scope needs
     // at least one configured id — the backend rejects an empty scope list the same way.
     if (
-      step.sourceKind === 'requester_choice'
+      sourceIsLive
+      && step.sourceKind === 'requester_choice'
       && (step.requesterChoiceScopeType === 'members' || step.requesterChoiceScopeType === 'role')
       && parseIdsText(step.idsText).length === 0
     ) {
@@ -2385,7 +2843,7 @@ export function validateTemplateApprovalFlow(
     // referenced step must exist and be STRICTLY EARLIER than this one — a missing choice, a
     // deleted referenced step, a self-reference, or a reference that ended up at/after this step
     // via reorder all fail here (matching what `sourceFromStep` would emit as an empty nodeKey).
-    if (step.sourceKind === 'prior_node_approver') {
+    if (sourceIsLive && step.sourceKind === 'prior_node_approver') {
       const referencedIndex = draft.steps.findIndex((candidate) => candidate.localId === step.priorStepLocalId)
       if (referencedIndex < 0 || referencedIndex >= index) {
         errors.push(`${label} 需要引用一个位于其之前的审批步骤作为节点审批人`)
@@ -2394,8 +2852,14 @@ export function validateTemplateApprovalFlow(
     // Lock-1 §K1 PREVIEW (backend normalize's non-empty-array check is the final arbiter): a
     // user_group source needs at least one bound group selected — mirrors the static_user/
     // static_role empty check above.
-    if (step.sourceKind === 'user_group' && step.groupIds.length === 0) {
+    if (sourceIsLive && step.sourceKind === 'user_group' && step.groupIds.length === 0) {
       errors.push(`${label} 需要选择至少一个用户组`)
+    }
+    // W1-1a — FE mirror of the backend B-s10 authoring gate (`validateEmptyAssigneeFallbackConfigs`,
+    // APPROVAL_EMPTY_ASSIGNEE_FALLBACK_REQUIRED). That gate runs on create/update as well as publish,
+    // so this check is deliberately NOT minimal-gated: it blocks 保存草稿 exactly like the server.
+    if (step.emptyAssigneePolicy === 'designated' && !emptyAssigneeFallbackHasTarget(step.emptyAssigneeFallback)) {
+      errors.push(`${label} 的空审批人策略为「转交指定人员」，需要至少指定一位用户或一个角色`)
     }
     // P1-C (T2-4) threshold PREVIEW: integer-only shape check, matching the ONE bound the backend
     // enforces UNCONDITIONALLY at publish for the `assigneeSources` shape this editor emits
@@ -2433,6 +2897,57 @@ export function validateTemplateApprovalFlow(
     }
   })
   return errors
+}
+
+/**
+ * Lock-4 §1 F4-A — the linear step cards' hidden blocks for the HIDDEN-BLOCK GUARD
+ * (`hiddenBlockLiveErrors`, approvalNodeEdit.ts — the one mechanism both editors use). `policy` =
+ * the 审批模式 / 门槛 / 空审批人策略 / 自审策略 rows, `timeout` = the 节点超时 section. The source rows
+ * are NOT a block: a sourceless step really saves no source, so `validateTemplateApprovalFlow`
+ * already exempts them (`sourceIsLive`). Neutralized copies are for attribution only. A step-draft
+ * field added to the policy rows later (e.g. a same-person policy) must be reset in `policy` too, or a
+ * rule on it is attributed to no block.
+ */
+export const APPROVAL_STEP_HIDDEN_BLOCK_NEUTRALIZERS: HiddenBlockNeutralizers<ApprovalStepDraft> = {
+  policy: (step) => ({
+    ...step,
+    approvalMode: 'single',
+    approvalThreshold: 1,
+    emptyAssigneePolicy: 'error',
+    mergeWithRequester: false,
+    samePersonPolicy: undefined,
+  }),
+  timeout: (step) => ({ ...step, timeoutEnabled: false }),
+}
+
+/**
+ * The live errors of `step`'s hidden blocks, judged by the SAME validator the save/publish runs
+ * (`validateTemplateApprovalFlow`, full mode) on the draft with only this step substituted. Empty for
+ * every step whose blocks are not hidden (`stepOmitsAssigneeSources` false): those render anyway.
+ */
+export function stepHiddenBlockLiveErrors(draft: TemplateAuthoringDraft, step: ApprovalStepDraft): HiddenBlockLiveErrors {
+  if (!stepOmitsAssigneeSources(step)) return {}
+  return hiddenBlockLiveErrors(step, APPROVAL_STEP_HIDDEN_BLOCK_NEUTRALIZERS, (candidate) =>
+    validateTemplateApprovalFlow({
+      ...draft,
+      steps: draft.steps.map((existing) => (existing.localId === step.localId ? candidate : existing)),
+    }))
+}
+
+/**
+ * Canvas twin of `stepHiddenBlockLiveErrors`: the live errors of the hidden blocks on approval node
+ * `nodeKey`, judged by `validateTemplateApprovalFlow` (which derives the parallel-region / approval-
+ * node context exactly as the save does) on the draft with only this edit substituted. Empty unless
+ * the edit omits its sources.
+ */
+export function approvalNodeEditHiddenBlockLiveErrors(draft: TemplateAuthoringDraft, nodeKey: string): HiddenBlockLiveErrors {
+  const edit = draft.approvalNodeEdits?.[nodeKey]
+  if (!edit || !approvalNodeEditOmitsAssigneeSources(edit)) return {}
+  return hiddenBlockLiveErrors(edit, APPROVAL_NODE_EDIT_HIDDEN_BLOCK_NEUTRALIZERS, (candidate) =>
+    validateTemplateApprovalFlow({
+      ...draft,
+      approvalNodeEdits: { ...draft.approvalNodeEdits, [nodeKey]: candidate },
+    }))
 }
 
 export function validateTemplateDraft(
@@ -2507,8 +3022,16 @@ let templateKeySeq = 0
  * either — a real collision falls through to a raw Postgres unique-violation, which the backend
  * does not currently map to a clean 400; see the PR body for this residual risk), but the
  * collision probability is astronomically small for a single-author authoring session.
+ *
+ * Exported (approval-form-ux-slice1, 20260916 design §1.2) so the View can seed `draft.key` alone
+ * at DRAFT-CREATION time (before the key input is ever rendered, since it is now read-only and
+ * would otherwise show a permanently-blank, permanently-uneditable field) — `name` is deliberately
+ * NOT seeded there; it stays a normal blank required input the author fills in, exactly as before
+ * this slice. `seedDraftIdentityForSave` (below) still seeds BOTH at save time as a safety net —
+ * unchanged — but by then `key` is already non-blank for every draft created through the View, so
+ * that call is a no-op on `key` and only ever fills `name` if the author left it blank.
  */
-function generateTemplateKey(): string {
+export function generateTemplateKey(): string {
   templateKeySeq += 1
   return `draft_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}_${templateKeySeq}`
 }
@@ -2552,8 +3075,19 @@ export function buildCreateTemplatePayload(draft: TemplateAuthoringDraft): Creat
   }
 }
 
+/**
+ * approval-form-ux-slice1 (20260916 design §1.2): PATCH never sends `key` — the key input is now
+ * read-only, so the author cannot have changed it, and the backend guard `if (request.key !==
+ * undefined)` (`ApprovalProductService.ts:5948`) means an omitted `key` never enters the SET
+ * clause: an existing row's `key` column is left byte-for-byte unchanged (design §1 acceptance A1).
+ * `UpdateApprovalTemplateRequest.key` is optional (no `required` array on that schema — verified
+ * directly against `packages/openapi/src/base.yml`), so omitting it is contract-legal. POST is
+ * UNCHANGED: `buildCreateTemplatePayload` still includes `key` (`CreateApprovalTemplateRequest.key`
+ * stays required), so a NEW template's front-end-generated key is still sent exactly as before.
+ */
 export function buildUpdateTemplatePayload(draft: TemplateAuthoringDraft): UpdateApprovalTemplateRequest {
-  return buildCreateTemplatePayload(draft)
+  const { key: _omittedKey, ...update } = buildCreateTemplatePayload(draft)
+  return update
 }
 
 /**
@@ -2561,9 +3095,9 @@ export function buildUpdateTemplatePayload(draft: TemplateAuthoringDraft): Updat
  * the template-level 审批人去重 tier. A 3-way projection over the SAME two booleans the backend
  * already server-enforces on `runtimeGraph.policy.autoApproval` (Lock-4 §2.6 /
  * `evaluateAutoApprovalAssignment`): `dedupeHistoricalApprover` (仅一次全自动同意) and
- * `mergeAdjacentApprover` (仅连续节点自动同意). `mergeWithRequester` is deliberately NOT part of this
- * tier — it stays a NODE-level-only field authored via the existing per-step
- * `mergeWithRequester` / `originalAutoApprovalPolicy` pair, never through this template control.
+ * `mergeAdjacentApprover` (仅连续节点自动同意). `mergeWithRequester` / `samePersonPolicy` are
+ * deliberately NOT part of this tier — they stay NODE-level-only fields authored via the per-step
+ * same-person control (W1-1a), never through this template control.
  */
 export type TemplateDedupTier = 'none' | 'dedupe_historical' | 'merge_adjacent'
 

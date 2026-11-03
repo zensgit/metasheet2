@@ -965,6 +965,30 @@ describe('elearning client fail-closed validation', () => {
     })
   })
 
+  it('passes the org-context gate code through the learner/admin client and nothing else uppercase', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(403, { error: 'ORG_CONTEXT_REQUIRED' }))
+    await expect(getElearningCapabilities()).rejects.toMatchObject({
+      name: 'ElearningApiError',
+      code: 'ORG_CONTEXT_REQUIRED',
+      status: 403,
+    })
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(403, { error: ' ORG_CONTEXT_REQUIRED ' }))
+    await expect(listMyElearningCourses()).rejects.toMatchObject({
+      code: 'ORG_CONTEXT_REQUIRED',
+      status: 403,
+    })
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(403, { error: 'SOME_OTHER_CODE' }))
+    await expect(listMyElearningCourses()).rejects.toMatchObject({
+      code: 'request_failed',
+      status: 403,
+    })
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(403, { error: 'forbidden' }))
+    await expect(listMyElearningCourses()).rejects.toMatchObject({
+      code: 'forbidden',
+      status: 403,
+    })
+  })
+
   it('rejects extra keys, missing keys, and secret fields on the learner DTO', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse(200, {
       courses: [learnerCourse()],

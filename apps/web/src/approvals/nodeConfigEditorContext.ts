@@ -1,10 +1,13 @@
 import type { ComputedRef, InjectionKey, Ref } from 'vue'
 import type {
   ApprovalAssigneeSourceKind,
-  ApprovalAssigneeType,
+  ApprovalCcTargetType,
   ApprovalMode,
   ApprovalNode,
+  ApprovalType,
   EmptyAssigneePolicy,
+  FormFieldType,
+  FormOption,
   HandlerMode,
   NodeFieldAccess,
   NodeTimeoutConfig,
@@ -19,8 +22,23 @@ import type {
   CcNodeEdit,
   ParallelNodeEdit,
   ApprovalNodeSourceEdit,
+  AutoApproveHiddenBlockId,
+  HiddenBlockLiveErrors,
 } from './templateAuthoring'
 import type { FormulaInsertOption } from './conditionEdit'
+
+/**
+ * A branch-rule field choice. R-43 (B): the optional `type` / `options` let the condition editor
+ * pick values by field type (option names for select / multi-select, numbers for number).
+ */
+export interface ConditionFieldOption {
+  id: string
+  label: string
+  type?: FormFieldType
+  options?: readonly FormOption[]
+  /** R-43 (B): the submitted form value is a list (a multi-person picker). */
+  listValued?: boolean
+}
 
 /**
  * Shared context for G-2..G-5 node config editors. Canvas inspector and structured-list mode both
@@ -33,7 +51,7 @@ export interface ApprovalNodeConfigEditorApi {
   parallelEditFor: (nodeKey: string) => ParallelNodeEdit | undefined
   ccEditFor: (nodeKey: string) => CcNodeEdit | undefined
   approvalNodeEditFor: (nodeKey: string) => ApprovalNodeSourceEdit | undefined
-  conditionFieldOptions: ComputedRef<Array<{ id: string; label: string }>> | Array<{ id: string; label: string }>
+  conditionFieldOptions: ComputedRef<ConditionFieldOption[]> | ConditionFieldOption[]
   userFields: ComputedRef<Array<{ id: string; label: string }>> | Array<{ id: string; label: string }>
   conditionFormulaInsertOptions: ComputedRef<FormulaInsertOption[]> | FormulaInsertOption[]
   fieldPermissionFields: ComputedRef<Array<{ id: string; label: string }>> | Array<{ id: string; label: string }>
@@ -51,11 +69,25 @@ export interface ApprovalNodeConfigEditorApi {
   conditionFormulaDryRunLoading: (nodeKey: string, edgeKey: string) => boolean
   dryRunConditionFormula: (nodeKey: string, branch: ConditionBranchEdit) => void | Promise<void>
   conditionOutgoingEdgeKeys: (nodeKey: string) => string[]
+  /**
+   * T5a/T5b (test report 2026-10-08) — true when this editor is hosted by the Canvas V2 inspector,
+   * i.e. where topology actions join the unified Canvas undo history and the inspector toolbar shows
+   * 「+添加分支」. The flag-off structured rollback renderer has no Canvas undo control, so it never
+   * offers branch delete. OPTIONAL (absent ⇒ false ⇒ no delete control, fail-closed) so
+   * component-level tests that never exercise it can omit it; present on the shipped app's api.
+   */
+  canvasAuthoringActive?: ComputedRef<boolean> | Ref<boolean> | boolean
+  /** T5a — `null` when the non-default branch can be deleted, else the business-language reason
+   *  the disabled control shows (a dry run of the SAME topology command — never a re-implementation). */
+  conditionBranchRemovalBlocker?: (nodeKey: string, edgeKey: string) => string | null
+  /** Delete a non-default branch through the unified topology-op path (one undo entry). Deleting the
+   *  last non-default branch removes the condition node and keeps the default path. */
+  removeConditionBranch?: (nodeKey: string, edgeKey: string) => void
   conditionEdgeLabel: (nodeKey: string, edgeKey: string) => string
   graphEdgeTargetLabel: (nodeKey: string, edgeKey: string) => string
   graphNodeLabel: (nodeKey: string) => string
   parallelJoinModeLabel: (mode: ParallelJoinMode) => string
-  ccTargetTypeLabel: (targetType: ApprovalAssigneeType) => string
+  ccTargetTypeLabel: (targetType: ApprovalCcTargetType) => string
   setCcTargetIds: (nodeKey: string, ids: string[]) => void
   syncCcOptions: (nodeKey: string) => void
   // P1-B: every per-source accessor takes an explicit `sourceIndex` — one card in the multi-source
@@ -91,10 +123,48 @@ export interface ApprovalNodeConfigEditorApi {
   // `APPROVAL_THRESHOLD_IN_PARALLEL` / `APPROVAL_NODE_TIMEOUT_PARALLEL_UNSUPPORTED` region). The mode
   // picker must not OFFER 'threshold', and the timeout section must not be enterable, when true.
   approvalNodeInParallelRegion: (nodeKey: string) => boolean
+  /**
+   * Lock-4 §1 F4-A — the node-level 审批类型 (人工审批 / 自动通过) mutator for an `approval` node; L0-1
+   * places the control in the 审批人设置 tab. The current value is read straight off
+   * `approvalNodeEditFor(nodeKey).approvalType`. OPTIONAL (absent ⇒ the control does not render at
+   * all, fail-closed — the same posture as `removeConditionBranch` above), so component harnesses
+   * that do not exercise F4-A can omit it; always present on the shipped app's api.
+   */
+  setApprovalNodeApprovalType?: (nodeKey: string, type: ApprovalType) => void
+  /**
+   * Lock-4 §1 F4-A HIDDEN-BLOCK GUARD — per hidden block (policy grid / timeout section) of a
+   * sourceless auto_approve node, the save validator's messages that block's own values cause
+   * (`approvalNodeEditHiddenBlockLiveErrors`). A block with a live error is rendered again with a
+   * notice instead of staying hidden. OPTIONAL like the mutator above; absent ⇒ no block is ever
+   * revealed (the pre-guard rendering), which only a component harness that also cannot judge the
+   * save can hit — the shipped app's api always provides it.
+   */
+  approvalNodeHiddenBlockErrors?: (nodeKey: string) => HiddenBlockLiveErrors
+  /**
+   * W1-1a (merge-train r3 F9) — canvas STICKY REVEAL: true while hidden block `blockId` of `nodeKey`
+   * must stay rendered, because it has a live error now OR had one since the node's 审批类型 last
+   * changed and the draft was last re-baselined (load / save). The shipped view keeps this per node
+   * key and scopes it to the policy grid; the notice stays keyed on `approvalNodeHiddenBlockErrors`
+   * alone. OPTIONAL: absent ⇒ a block is rendered exactly while it has a live error (no sticky), so
+   * harnesses that do not wire it are unaffected; the shipped app's api always provides it.
+   */
+  approvalNodeHiddenBlockRevealed?: (nodeKey: string, blockId: AutoApproveHiddenBlockId) => boolean
   approvalNodeEmptyPolicy: (nodeKey: string) => EmptyAssigneePolicy
   setApprovalNodeEmptyPolicy: (nodeKey: string, policy: EmptyAssigneePolicy) => void
-  approvalNodeMergeWithRequester: (nodeKey: string) => boolean
-  setApprovalNodeMergeWithRequester: (nodeKey: string, enabled: boolean) => void
+  /**
+   * W1-1a (Lock-4 §2 F4-C) — the four-value 审批人与发起人为同一人时 control's writer. Takes the RAW
+   * select value ('default' | one of the four ratified values; anything else — incl. the X-3 unknown
+   * sentinel — is ignored). Owns `mergeWithRequester` + `samePersonPolicy` together; replaces the
+   * shipped approvalNodeMergeWithRequester / setApprovalNodeMergeWithRequester checkbox pair. The
+   * editor DERIVES the displayed value from `approvalNodeEditFor(nodeKey).autoApprovalPolicy` through
+   * the shared pure helpers (approvalNodeEdit.ts), so no separate getter is needed.
+   */
+  setApprovalNodeSamePersonPolicy: (nodeKey: string, value: string) => void
+  /**
+   * W1-1a (Lock-4 §3 F4-B) — replaces ONE side (users / roles) of the node's `'designated'` targets
+   * from a typed directory picker (D0 §10.2). Read side: `approvalNodeEditFor(nodeKey).emptyAssigneeFallback`.
+   */
+  setApprovalNodeEmptyAssigneeFallbackIds: (nodeKey: string, side: 'user' | 'role', ids: string[]) => void
   // P1-C (T1-1) node-level SLA timeout — approval-node-only (a handler config forbids `timeout`,
   // §1.2). `undefined` when the node has none configured (the section renders collapsed/disabled).
   approvalNodeTimeout: (nodeKey: string) => NodeTimeoutConfig | undefined

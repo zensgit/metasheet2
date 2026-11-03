@@ -26,6 +26,9 @@ export function useHistoryCenter(client: HistoryClient = multitableClient) {
   // Remembered for loadMore so the next page reuses the SAME filter set (a cursor is only valid for its filters).
   let lastBaseId = ''
   let lastFilters: HistoryFilters = {}
+  let listGeneration = 0
+  let detailGeneration = 0
+  let pinnedGeneration = 0
 
   const clientParams = (filters: HistoryFilters, cursor?: string) => ({
     sheetId: filters.sheetId || undefined,
@@ -42,26 +45,29 @@ export function useHistoryCenter(client: HistoryClient = multitableClient) {
 
   async function load(baseId: string, filters: HistoryFilters = {}): Promise<void> {
     if (!baseId) return
+    const generation = ++listGeneration
     lastBaseId = baseId
-    lastFilters = filters
+    lastFilters = { ...filters }
     loading.value = true
+    loadingMore.value = false
     error.value = null
-    expandedId.value = null
-    detail.value = null
+    invalidateDetail()
     nextCursor.value = null
     searchTruncated.value = false
     try {
       const res = await client.listHistoryEvents(baseId, clientParams(filters))
+      if (generation !== listGeneration) return
       batches.value = res.batches
       nextCursor.value = res.nextCursor
       searchTruncated.value = res.searchTruncated
     } catch (err) {
+      if (generation !== listGeneration) return
       error.value = err instanceof Error ? err.message : 'Failed to load history'
       batches.value = []
       nextCursor.value = null
       searchTruncated.value = false
     } finally {
-      loading.value = false
+      if (generation === listGeneration) loading.value = false
     }
   }
 
@@ -69,33 +75,60 @@ export function useHistoryCenter(client: HistoryClient = multitableClient) {
   // (clears the cursor) and keeps the batches already shown, so a click can't leak an unhandled rejection.
   async function loadMore(): Promise<void> {
     if (!nextCursor.value || !lastBaseId || loadingMore.value) return
+    const generation = listGeneration
+    const baseId = lastBaseId
+    const filters = lastFilters
+    const cursor = nextCursor.value
     loadingMore.value = true
     try {
-      const res = await client.listHistoryEvents(lastBaseId, clientParams(lastFilters, nextCursor.value))
+      const res = await client.listHistoryEvents(baseId, clientParams(filters, cursor))
+      if (generation !== listGeneration) return
       batches.value = [...batches.value, ...res.batches]
       nextCursor.value = res.nextCursor
       searchTruncated.value = res.searchTruncated
     } catch {
-      nextCursor.value = null
+      if (generation === listGeneration) nextCursor.value = null
     } finally {
-      loadingMore.value = false
+      if (generation === listGeneration) loadingMore.value = false
     }
+  }
+
+  function invalidateList(): void {
+    listGeneration += 1
+    lastBaseId = ''
+    lastFilters = {}
+    batches.value = []
+    loading.value = false
+    loadingMore.value = false
+    error.value = null
+    nextCursor.value = null
+    searchTruncated.value = false
+  }
+
+  function invalidateDetail(): void {
+    detailGeneration += 1
+    expandedId.value = null
+    detail.value = null
+    detailLoading.value = false
   }
 
   async function toggle(baseId: string, batchId: string): Promise<void> {
     if (expandedId.value === batchId) {
-      expandedId.value = null
+      invalidateDetail()
       return
     }
+    const generation = ++detailGeneration
     expandedId.value = batchId
     detail.value = null
     detailLoading.value = true
     try {
-      detail.value = await client.getHistoryBatch(baseId, batchId)
+      const loadedDetail = await client.getHistoryBatch(baseId, batchId)
+      if (generation !== detailGeneration) return
+      detail.value = loadedDetail
     } catch {
-      detail.value = null
+      if (generation === detailGeneration) detail.value = null
     } finally {
-      detailLoading.value = false
+      if (generation === detailGeneration) detailLoading.value = false
     }
   }
 
@@ -109,23 +142,27 @@ export function useHistoryCenter(client: HistoryClient = multitableClient) {
   const pinnedLoading = ref(false)
 
   async function loadPinned(baseId: string, batchId: string): Promise<void> {
+    const generation = ++pinnedGeneration
     pinnedLoading.value = true
     pinnedDetail.value = null
     try {
-      pinnedDetail.value = await client.getHistoryBatch(baseId, batchId)
+      const loadedDetail = await client.getHistoryBatch(baseId, batchId)
+      if (generation !== pinnedGeneration) return
+      pinnedDetail.value = loadedDetail
     } catch {
-      pinnedDetail.value = null
+      if (generation === pinnedGeneration) pinnedDetail.value = null
     } finally {
-      pinnedLoading.value = false
+      if (generation === pinnedGeneration) pinnedLoading.value = false
     }
   }
   function clearPinned(): void {
+    pinnedGeneration += 1
     pinnedDetail.value = null
     pinnedLoading.value = false
   }
 
   return {
-    batches, loading, loadingMore, error, nextCursor, searchTruncated, expandedId, detail, detailLoading, load, loadMore, toggle,
+    batches, loading, loadingMore, error, nextCursor, searchTruncated, expandedId, detail, detailLoading, load, loadMore, invalidateList, invalidateDetail, toggle,
     // W3-5b pinned-batch banner (deep-link display, independent of the paged list / row-expansion state)
     pinnedDetail, pinnedLoading, loadPinned, clearPinned,
   }

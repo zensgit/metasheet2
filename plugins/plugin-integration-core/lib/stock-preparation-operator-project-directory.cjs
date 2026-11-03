@@ -12,7 +12,7 @@
 // NOT confer (R-11's mapping is zero-automatic) — and it is values-free by construction, so even an
 // admin sees option labels built from a status, some counts and a runId, with no number and no name.
 // The confirmation queue then demands a hand-typed `projectNo`. Net effect: the operator had to
-// memorise, out of band, that 230920006 is the RY2 注射水缓冲罐部件.
+// memorise, out of band, that 200000006 is the 示例乙型容器.
 //
 // ---------------------------------------------------------------------------
 // WHY THIS IS A NEW MODULE AND NOT A WIDER PROJECTION ON THE OLD ONE
@@ -133,6 +133,9 @@ const OPERATOR_PROJECT_SOURCE_PULL_TARGET = 'pull_target'
 
 /** The action the materials export stamps its own audit row with. */
 const PREP_LINE_EXPORT_AUDIT_ACTION = 'prep_line_export'
+// PR-5: the audit mode of a formal export the gate REFUSED (nothing delivered) — skipped by the
+// 「最近导出」 window and never a timestamp a reader could mistake for a delivery.
+const PREP_LINE_EXPORT_REFUSED_MODE = 'export_refused'
 
 /**
  * The audit window `lastExportAtByProjectNo` reads. The store clamps `limit` to its own
@@ -216,6 +219,9 @@ async function lastExportAtByProjectNo(audit, { tenantId, limit = EXPORT_AUDIT_W
     const entries = result && Array.isArray(result.entries) ? result.entries : []
     const byProjectNo = new Map()
     for (const entry of entries) {
+      // PR-5: a REFUSED formal export (mode `export_refused`, the gate's audit row) delivered nothing —
+      // it is not a 「最近导出」 and must not shadow the real one behind it in the window.
+      if (entry && entry.mode === PREP_LINE_EXPORT_REFUSED_MODE) continue
       // `project_id` is where the export route stamps the customer's projectNo. A row without one
       // cannot be attributed to a project, so it is skipped — never guessed at.
       const projectNo = optionalString(entry && entry.projectId)
@@ -424,6 +430,22 @@ async function listOperatorProjectDirectory({
   boundTarget = null,
   audit = null,
   pullTargetScanCache = null,
+  // S3 (ADR §5 「首页与项目查询」, register R-37): the tenant's project-sheet REGISTRY rows, read by the
+  // route from the registry store while the project-sheets switch is on (and only under the union
+  // opt-in). With the switch on the union scan reads NO bound sheet (Q3: the old mixed sheet is never
+  // read), so the registry is what enumerates the projects the floor pulled: one directory row per
+  // registry row, merged by project number with the 「平台登记」 (mvp) rows, carrying the registry's
+  // own bounded counts and its archived flag. `null` (the default, and the switch-off value) leaves
+  // every response below byte-identical to S2.
+  projectTargets = null,
+  // PR-5 (design §11): the tenant's OPEN refresh holds counted by project number — the second
+  // pending-work ledger (batch-refresh step 4's hold table), read by the route through the continuation
+  // store. `{ ready, byProjectNo }`: `pendingDecisionCount` becomes the UNION of the confirmation
+  // ledger's pending rows and the open holds, and `ledgerReady` is true only when BOTH ledgers answered
+  // (a hold table that could not be read never degrades to "no holds" — plan §8 / design §9.5; the
+  // directory then says the pending counts cannot be trusted, which the FE already renders). Absent
+  // (`null`, a direct module caller that did not ask): the confirmation ledger alone, as before PR-5.
+  refreshHoldCounts = null,
 } = {}) {
   if (!scope || !optionalString(scope.tenantId)) {
     throw new StockPreparationOperatorDirectoryError(500, 'OPERATOR_DIRECTORY_SCOPE_REQUIRED', 'operator project directory requires a resolved operator value scope')
@@ -452,6 +474,19 @@ async function listOperatorProjectDirectory({
   const exceptionSheet = await findMvpSheet(recordsApi, provisioning, stagingProjectId, EXCEPTION_OBJECT_ID)
   const prepLineSheet = await findMvpSheet(recordsApi, provisioning, stagingProjectId, PREP_LINE_OBJECT_ID)
   const pending = await pendingDecisionCountsByProjectNo(recordsApi, provisioning, stagingProjectId, narrowTo)
+  // PR-5: the UNION of the two pending-work ledgers — the confirmation ledger's pending rows and the
+  // open refresh holds the route counted — keyed by project number. The rows AND the index below are
+  // projected from this one map, so a row and the board (which consumes the index) cannot disagree.
+  const holdCounts = refreshHoldCounts === null || refreshHoldCounts === undefined
+    ? null
+    : { ready: refreshHoldCounts.ready === true, byProjectNo: refreshHoldCounts.byProjectNo instanceof Map ? refreshHoldCounts.byProjectNo : new Map() }
+  const pendingUnion = new Map(pending.byProjectNo)
+  if (holdCounts) {
+    for (const [no, n] of holdCounts.byProjectNo) {
+      if (Number.isInteger(n) && n > 0) pendingUnion.set(no, (pendingUnion.get(no) || 0) + n)
+    }
+  }
+  const pendingUnionOf = (no) => pendingUnion.get(no) || 0
 
   // THE SECOND STORE — AND THE ONE SWITCH THAT DECIDES WHETHER IT IS READ AT ALL.
   //
@@ -497,16 +532,32 @@ async function listOperatorProjectDirectory({
   // large-BOM panel) had no sheet id to route with and fell back to the plain multitable workbench —
   // i.e. the operator landed on a table chooser instead of their own 备料主表.
   //
-  // IT COSTS NO EXTRA IO AND OPENS NO NEW DOOR. `ownSheet` is the ALREADY-RESOLVED result of
-  // `resolveOwnBoundSheet` above — the same tenant gate, the same proof, the same object — and
-  // `resolveFillTarget` on top of it is a pure host-side id derivation. So this is the board's handle,
-  // from the board's gate, not a second answer to "which sheet may this caller be pointed at".
+  // IT OPENS NO NEW DOOR, AND IT COSTS ONE READ-ONLY SELECT. `ownSheet` is the ALREADY-RESOLVED
+  // result of `resolveOwnBoundSheet` above — the same tenant gate, the same proof, the same object —
+  // so this is the board's handle, from the board's gate, not a second answer to "which sheet may
+  // this caller be pointed at". What `resolveFillTarget` adds on top is no longer free: since the
+  // deep link started preferring the 备料填写视图 it PROBES for that view (`findObjectView`), i.e. one
+  // read-only, values-free view lookup per directory response — AFTER the tenant gate, once per
+  // response and not once per project (this line is outside the project loop below).
   //
   // AND IT IS TIED TO THE UNION OPT-IN because `ownSheet` is: a caller that did not ask for the
   // pull-target union never resolved a bound sheet, and a `fillTarget: null` on that response would
   // claim 「这台系统没有备料主表」 when the truth is 「没人问过」 — the same "absent, not false" rule the
   // four union flags below are built on. VALUES-FREE: two ids, no customer row content.
   const fillTarget = unioned ? await resolveFillTarget(provisioning, ownSheet, stagingProjectId) : null
+
+  // S3: the registry rows by project number — only under the union opt-in and only when the route
+  // handed them over (switch on). A registry row is a project that HAS a sheet, whether or not it
+  // was pulled yet; its counts are the ones the overview refresh stamped (null until the first
+  // refresh), and `status` is the archive state (ADR §6).
+  const registryByProjectNo = new Map()
+  if (unioned && Array.isArray(projectTargets)) {
+    for (const row of projectTargets) {
+      const no = row && optionalString(row.projectNo)
+      if (no && !registryByProjectNo.has(no)) registryByProjectNo.set(no, row)
+    }
+  }
+  const registryEnumerated = unioned && Array.isArray(projectTargets)
 
   /**
    * ONE ROW, BUILT KEY BY KEY. Never a spread of a stored record — that is what S-02b pins, and it
@@ -546,7 +597,7 @@ async function listOperatorProjectDirectory({
       openExceptionCount: counts.openExceptionCount,
       heldLineCount: counts.heldLineCount,
       readyLineCount: counts.readyLineCount,
-      pendingDecisionCount: rowProjectNo ? (pending.byProjectNo.get(rowProjectNo) || 0) : 0,
+      pendingDecisionCount: rowProjectNo ? pendingUnionOf(rowProjectNo) : 0,
     }
     if (!unioned) return row
     const pullFacts = rowProjectNo ? pullScan.byProjectNo.get(rowProjectNo) : undefined
@@ -559,6 +610,17 @@ async function listOperatorProjectDirectory({
     // Same three-state shape, one level up: the window this came from is bounded, so a null here
     // means 「从未导出」 only when `lastExportAtMayBeIncomplete` is false.
     row.lastExportAt = rowProjectNo ? (exportTimes.byProjectNo.get(rowProjectNo) || null) : null
+    // S3 (R-37): THREE MORE KEYS, PRESENT ONLY WHEN THE REGISTRY WAS ENUMERATED (switch on) — the
+    // switch-off union response is byte-identical to S2. `archived` is null for a row the registry
+    // does not know (a 「平台登记」-only project), true/false for a registered one; the two counts are
+    // the registry's own bounded numbers (null until the overview refresh first stamped them), so a
+    // card can show a real posture instead of 「看不到进度」 (ADR §5: no more `progressUnknown`).
+    if (registryEnumerated) {
+      const registry = rowProjectNo ? registryByProjectNo.get(rowProjectNo) : undefined
+      row.archived = registry ? registry.status === 'archived' : null
+      row.pulledRowCount = registry && Number.isInteger(registry.rowCount) ? registry.rowCount : null
+      row.missingComponentsCount = registry && Number.isInteger(registry.missingComponentsCount) ? registry.missingComponentsCount : null
+    }
     return row
   }
 
@@ -587,7 +649,9 @@ async function listOperatorProjectDirectory({
       projectNo: rowProjectNo,
       // BOTH tokens when the same number is also in the pull target — that is the dedupe: one row,
       // two sources, never two rows for one project number.
-      sources: rowProjectNo && pullScan.byProjectNo.has(rowProjectNo)
+      // S3: a registry row (the project HAS its own sheet) is the pull target of that project, so it
+      // contributes the same second token — the source vocabulary does not grow.
+      sources: rowProjectNo && (pullScan.byProjectNo.has(rowProjectNo) || registryByProjectNo.has(rowProjectNo))
         ? [OPERATOR_PROJECT_SOURCE_MVP, OPERATOR_PROJECT_SOURCE_PULL_TARGET]
         : [OPERATOR_PROJECT_SOURCE_MVP],
       counts: {
@@ -606,7 +670,9 @@ async function listOperatorProjectDirectory({
   // reader that those zeros mean 「还没归档」 rather than 「归档里是零」.
   //
   // SORTED, so the response is stable across calls: page order out of the records API is not.
-  const pullOnlyProjectNos = [...pullScan.byProjectNo.keys()].filter((no) => !seenProjectNos.has(no)).sort()
+  // S3: the registry's project numbers join the pull-target-only set (de-duplicated, sorted) — with
+  // the switch on the scan read nothing, so these ARE the floor's own projects.
+  const pullOnlyProjectNos = [...new Set([...pullScan.byProjectNo.keys(), ...registryByProjectNo.keys()])].filter((no) => !seenProjectNos.has(no)).sort()
   let mergeTruncated = false
   for (const rowProjectNo of pullOnlyProjectNos) {
     if (projects.length >= MAX_LIST_ROWS) {
@@ -642,7 +708,9 @@ async function listOperatorProjectDirectory({
     // gate that did was deleted when the owner ruled against project ownership (2026-09-06), and it
     // took its `archiveEmpty` opt-in with it.
     directoryReady: projectSheet !== null,
-    ledgerReady: pending.ready,
+    // PR-5: both pending-work ledgers answered (the confirmation ledger, and — when the route consulted
+    // it — the refresh hold table); an unreadable hold table is `false`, never "zero holds".
+    ledgerReady: pending.ready && (holdCounts === null || holdCounts.ready === true),
     // ─────────────────────────────────────────────────────────────────────────
     // THE UNION'S OWN KEYS — PRESENT ONLY UNDER `includePullTargets` (核验裁决 r3).
     //
@@ -671,11 +739,13 @@ async function listOperatorProjectDirectory({
       // is true in all four; 「外接源还没绑好」 is a confident falsehood in the fourth. Splitting it
       // into a closed enum is a new top-level key and therefore a new S-02a contract review; it is
       // named in the PR body as the follow-up rather than smuggled in here.
-      pullTargetReady: pullScan.ready,
+      // S3: with the registry enumerated (switch on) the floor's own store IS readable — the registry
+      // answered — even though no bound sheet was scanned (Q3: none may be).
+      pullTargetReady: pullScan.ready || registryEnumerated,
       // THE DEEP-LINK HANDLE, `{ sheetId, viewId }` or null — see its own note above the computation.
       // It is NOT a permission decision and this module cannot make one: multitable enforces access
       // when the operator lands. Null means "no bound sheet this caller is proved to own", which the
-      // front end renders as 「打开多维表工作台」 rather than as a dead button.
+      // front end renders as 「打开多维表首页」 (it opens the multitable home) rather than as a dead button.
       fillTarget,
       // THE ANTI-SILENT-TRUNCATION FLAG (设计稿 N1). True when the union may be missing project
       // numbers, in all THREE ways that can happen: the pull-target scan hit `PULL_TARGET_MAX_PAGES`,
@@ -732,8 +802,8 @@ async function listOperatorProjectDirectory({
     // set is frozen and asserted (S-02a). Making either default would be an unreviewed widening of a
     // value-bearing response projection — the index's KEYS are customer project numbers — so only a
     // caller that asks gets it, and the route's default shape is unchanged by construction.
-    ...(includePendingIndex ? { pendingByProjectNo: pending.byProjectNo } : {}),
-    ...(includePendingCounts ? { pendingCountsByProjectNo: pendingCountsObject(pending.byProjectNo) } : {}),
+    ...(includePendingIndex ? { pendingByProjectNo: pendingUnion } : {}),
+    ...(includePendingCounts ? { pendingCountsByProjectNo: pendingCountsObject(pendingUnion) } : {}),
     projects,
   }
 }
@@ -750,6 +820,7 @@ module.exports = {
   OPERATOR_PROJECT_SOURCE_MVP,
   OPERATOR_PROJECT_SOURCE_PULL_TARGET,
   PREP_LINE_EXPORT_AUDIT_ACTION,
+  PREP_LINE_EXPORT_REFUSED_MODE,
   PROJECT_OBJECT_ID,
   StockPreparationOperatorDirectoryError,
   StockPreparationProjectReadsError,

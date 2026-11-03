@@ -750,6 +750,36 @@ describe('AutomationExecutionsView — whole-execution re-run (P3-4)', () => {
     useLocale().setLocale('en')
   })
 
+  // #5803: retryExecution() refuses a rule whose sheet is soft-deleted with 409 SHEET_DELETED. The client
+  // throws it with `.code`. That refusal is not predictable from the row (sheet state is not on the run view),
+  // so the request is sent, and the answer must render as its own localized copy. It must not show the raw
+  // English server sentence, and it must not look like a success.
+  const SHEET_DELETED_SERVER_TEXT = "SHEET_DELETED: the rule's sheet has been deleted; execution not retried."
+  for (const locale of [
+    { name: 'zh', set: 'zh-CN', expected: '规则所在的表已被删除，未重新执行。请先恢复该表后重试。' },
+    { name: 'en', set: 'en', expected: "The rule's sheet has been deleted, so nothing was re-run. Restore the sheet and try again." },
+  ] as const) {
+    it(`#5803 (${locale.name}): a 409 SHEET_DELETED refusal renders the sheet-deleted copy inline, not the server sentence`, async () => {
+      useLocale().setLocale(locale.set)
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+      const err = Object.assign(new Error(SHEET_DELETED_SERVER_TEXT), { code: 'SHEET_DELETED' })
+      const client = makeClient({ retryAutomationExecution: vi.fn().mockRejectedValue(err) })
+      mounted = mount(client)
+      await settle()
+      await expandRow(mounted.container, 'axe_f')
+      ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+      await settle()
+      expect(client.retryAutomationExecution).toHaveBeenCalledTimes(1)
+      const inline = mounted.container.querySelector('[data-field="rerun-error"]')
+      expect(inline?.textContent ?? '').toBe(locale.expected)
+      expect(mounted.container.textContent).not.toContain(SHEET_DELETED_SERVER_TEXT)
+      expect(mounted.container.querySelector('[data-field="rerun-success"]')).toBeNull()
+      expect(mounted.container.querySelector('[data-run-id="axe_f"]')).not.toBeNull()
+      confirmSpy.mockRestore()
+      useLocale().setLocale('en')
+    })
+  }
+
   it('zh: the button label and confirm dialog switch to the zh copy', async () => {
     useLocale().setLocale('zh-CN')
     const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(new Error('cancel'))
@@ -790,5 +820,113 @@ describe('AutomationExecutionsView — whole-execution re-run (P3-4)', () => {
     const rerunBtn = mounted.container.querySelector('[data-action="rerun"]') as HTMLElement
     expect(rerunBtn.textContent).not.toBe(retryBtn.textContent)
     expect(rerunBtn.textContent).toBe('Re-run execution')
+  })
+})
+
+// 客户反馈 2026-09-24 #3 final review F2 — a run skipped because its trigger record is gone. The backend refuses
+// the retry (409 TARGET_RECORD_MISSING_NOT_RETRYABLE, `isTargetRecordMissingSkippedExecution`); the detail
+// already carries every step's result, so this row is item 4 of the view's COMPLETE enumeration: shown
+// DISABLED with the reason (the B1 shape), never sent.
+const GONE_RESULT = { recordId: 'rec_gone', sheetId: 'sheet-a', reason: 'target_record_missing' }
+const GONE_LIST: AutomationRunView = {
+  ...FAILED_LIST, id: 'axe_gone', status: 'skipped', statusLegacy: 'skipped', error: null,
+  steps: [{ id: 'axe_gone:step:0', executionId: 'axe_gone', stepKey: '0', status: 'skipped', upstreamJobId: null, result: GONE_RESULT }],
+}
+const GONE_DETAIL: AutomationRunView = {
+  ...GONE_LIST,
+  triggerEvent: { recordId: 'rec_gone', sheetId: 'sheet-a' },
+  ruleSnapshot: { id: 'rule-1', name: 'Notify Customers', actions: [{ type: 'delete_record', config: {} }] },
+}
+
+describe('AutomationExecutionsView — re-run of a run skipped because its trigger record is gone (F2)', () => {
+  it('renders the button DISABLED with the reason, and a click sends nothing', async () => {
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const client = makeClient({
+      listAutomationRuns: vi.fn().mockResolvedValue([GONE_LIST]),
+      getAutomationRun: vi.fn().mockResolvedValue(GONE_DETAIL),
+    })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_gone')
+    const btn = mounted.container.querySelector('[data-action="rerun"]') as HTMLButtonElement
+    expect(btn).not.toBeNull()
+    expect(btn.disabled).toBe(true)
+    const reason = mounted.container.querySelector('[data-field="rerun-blocked-reason"]')
+    expect(reason?.textContent ?? '').toBe('Every step was skipped because the trigger record no longer exists; re-running cannot change that.')
+    expect(btn.getAttribute('aria-describedby')).toBe(reason?.id)
+    btn.click()
+    await settle()
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(client.retryAutomationExecution).not.toHaveBeenCalled()
+    confirmSpy.mockRestore()
+  })
+
+  it('zh: the disabled reason is the zh copy', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = makeClient({
+      listAutomationRuns: vi.fn().mockResolvedValue([GONE_LIST]),
+      getAutomationRun: vi.fn().mockResolvedValue(GONE_DETAIL),
+    })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_gone')
+    expect(mounted.container.querySelector('[data-field="rerun-blocked-reason"]')?.textContent)
+      .toBe('触发记录已不存在，该执行的所有步骤均已跳过，重新执行也不会有任何变化。')
+    useLocale().setLocale('en')
+  })
+
+  // Positive controls: the mirror is never wider than the backend predicate.
+  const OTHER_SKIP = { id: 'axe_gone:step:1', executionId: 'axe_gone', stepKey: '1', status: 'skipped' as const, upstreamJobId: 'axe_gone:step:0', result: { reason: 'APPROVAL_FWB_WRITEBACK_ENABLED is OFF' } }
+  const ENABLED_CASES: { name: string; list: AutomationRunView; detail: AutomationRunView }[] = [
+    {
+      name: 'a skipped run with one step skipped for ANOTHER reason',
+      list: GONE_LIST,
+      detail: { ...GONE_DETAIL, steps: [...GONE_DETAIL.steps, OTHER_SKIP] },
+    },
+    {
+      name: 'a FAILED run that merely contains such a step',
+      list: { ...GONE_LIST, status: 'failed', statusLegacy: 'failed' },
+      detail: {
+        ...GONE_DETAIL, status: 'failed', statusLegacy: 'failed',
+        steps: [...GONE_DETAIL.steps, { id: 'axe_gone:step:1', executionId: 'axe_gone', stepKey: '1', status: 'failed', upstreamJobId: 'axe_gone:step:0', error: 'HTTP 502' }],
+      },
+    },
+    {
+      name: 'a skipped run with no steps (conditions not met)',
+      list: { ...GONE_LIST, steps: [] },
+      detail: { ...GONE_DETAIL, steps: [] },
+    },
+  ]
+  for (const testCase of ENABLED_CASES) {
+    it(`control: ${testCase.name} stays ENABLED`, async () => {
+      const client = makeClient({
+        listAutomationRuns: vi.fn().mockResolvedValue([testCase.list]),
+        getAutomationRun: vi.fn().mockResolvedValue(testCase.detail),
+      })
+      mounted = mount(client)
+      await settle()
+      await expandRow(mounted.container, 'axe_gone')
+      const btn = mounted.container.querySelector('[data-action="rerun"]') as HTMLButtonElement
+      expect(btn).not.toBeNull()
+      expect(btn.disabled).toBe(false)
+      expect(mounted.container.querySelector('[data-field="rerun-blocked-reason"]')).toBeNull()
+    })
+  }
+
+  it('a 409 TARGET_RECORD_MISSING_NOT_RETRYABLE the view did not predict still renders its own copy inline', async () => {
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const serverText = 'Every step of this execution was skipped because its trigger record no longer exists; a retry cannot change that'
+    const err = Object.assign(new Error(serverText), { code: 'TARGET_RECORD_MISSING_NOT_RETRYABLE' })
+    const client = makeClient({ retryAutomationExecution: vi.fn().mockRejectedValue(err) })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+    await settle()
+    expect(client.retryAutomationExecution).toHaveBeenCalledTimes(1)
+    expect(mounted.container.querySelector('[data-field="rerun-error"]')?.textContent)
+      .toBe('Every step was skipped because the trigger record no longer exists; re-running cannot change that.')
+    expect(mounted.container.textContent).not.toContain(serverText)
+    confirmSpy.mockRestore()
   })
 })

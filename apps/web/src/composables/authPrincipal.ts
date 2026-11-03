@@ -120,6 +120,86 @@ export function onAuthPrincipalChange(listener: AuthPrincipalChangeListener): ()
   }
 }
 
+/**
+ * The identity of the session this process is holding, for the purpose of "is this still the same
+ * session?" — the principal key AND the token text it came from.
+ *
+ * Both halves are needed and neither subsumes the other. The key alone is deliberately STABLE
+ * across a token refresh for the same subject (see `getAuthPrincipalKey`), so it cannot see the
+ * same person's rights being re-issued; the token alone cannot see the explicit-session marker
+ * being installed or cleared around an unchanged token. Unreadable explicit metadata (a partial
+ * switch, which `getAuthPrincipalKey` throws on) collapses to one constant: it is not a session,
+ * so it compares equal to itself and differs from every real one.
+ *
+ * EXPORTED so that a cache which answers a REQUEST can stamp that request with the session it was
+ * issued for and re-check it when the answer lands — `approvals/templateStore`'s list read does
+ * exactly that. A subscriber (`onAuthSessionSwitch` below) is told about transitions this process
+ * performs; a request already in flight needs the VALUE, because nobody notifies a pending promise.
+ * The two are the same comparison applied at different moments, and they must read the same source
+ * or they can disagree about whether the session changed.
+ */
+export function readAuthSessionSignature(): string {
+  let key: string | null
+  try {
+    key = getAuthPrincipalKey()
+  } catch {
+    return 'invalid'
+  }
+  // JSON, not a delimiter: the two halves are joined unambiguously without introducing a
+  // separator character into the source at all. An earlier revision used a NUL byte here,
+  // which is a legal string literal that nothing in the type-check, build or test run can
+  // see — but it makes git classify this file as BINARY, so every diff and every
+  // secret-scan silently skips it (finding_raw_nul_in_domain_constants).
+  return JSON.stringify([key, readStoredToken()])
+}
+
+/**
+ * Subscribe to "the session actually CHANGED", as opposed to `onAuthPrincipalChange`'s "the reset
+ * funnel ran". Returns an unsubscribe, same as its base.
+ *
+ * The funnel announces every reset, including ones that change nothing about WHOSE session this
+ * is — most commonly `bootstrapSession`'s no-token branch, which fires on any page with no
+ * session at all, repeatedly. A subscriber that DROPS state (rather than merely marking a cache
+ * dirty) cannot use the raw signal: it would throw away the current session's own data every time
+ * something bootstrapped. Callers that clear rendered state want this; callers that only
+ * invalidate a cached answer can keep using `onAuthPrincipalChange` directly.
+ */
+export function onAuthSessionSwitch(listener: AuthPrincipalChangeListener): () => void {
+  let last = readAuthSessionSignature()
+  let scheduled = false
+  // Deferring the read (below) means a microtask can already be queued when the caller
+  // unsubscribes — unsubscribing from the base signal cannot cancel it. Without this flag that
+  // queued callback still fires, into a subscriber that has just been torn down; for a component
+  // that re-fetches on a session switch, that is a request issued for a page that no longer
+  // exists. The unsubscribe has to close the deferred window too, not just the subscription.
+  let disposed = false
+  const unsubscribe = onAuthPrincipalChange(() => {
+    // Read the signature one microtask LATER, never at notification time. `useAuth`'s funnel is
+    // called FIRST and the storage write follows it in the same synchronous run (`setToken`:
+    // `resetSessionBootstrap(...)` then `localStorage.setItem('auth_token', …)`; `clearToken`:
+    // the same order around `removeItem`), so at notification time storage still holds the
+    // OUTGOING session and comparing then would report "nothing changed" for every sign-in and
+    // sign-out. A microtask cannot interleave with that synchronous run, so by the time this
+    // callback executes the new session is fully written — and no frame can be painted in
+    // between, so subscribers that clear rendered state are still clearing it before it is seen.
+    // `scheduled` coalesces the several notifications one transition can produce into one read.
+    if (scheduled || disposed) return
+    scheduled = true
+    void Promise.resolve().then(() => {
+      scheduled = false
+      if (disposed) return
+      const next = readAuthSessionSignature()
+      if (next === last) return
+      last = next
+      listener()
+    })
+  })
+  return () => {
+    disposed = true
+    unsubscribe()
+  }
+}
+
 /** Called by `useAuth`'s session-reset funnel — the one place that knows a transition happened. */
 export function notifyAuthPrincipalChange(): void {
   // Iterate a copy: a listener that unsubscribes itself must not perturb this iteration.

@@ -60,11 +60,92 @@
       </button>
       <span class="sp-home__fill-hint">
         {{ bi(
-          '表里是这台系统上所有项目的行,请按项目号找您那一个。',
-          'That table holds the rows for every project on this system — find yours by project number.',
+          '请按项目号在备料表里找到您的项目。',
+          'Find your project in the stock-preparation table by its project number.',
         ) }}
       </span>
     </p>
+
+    <!-- 一个项目一张备料表 (S2, R-36) — the projectTarget.list control of the workbench manifest
+         (OPERATE). Rendered only when GET …/project-targets answered, i.e. the server's switch is on;
+         with it off the page says exactly what it said before. -->
+    <div
+      v-if="projectTargets"
+      class="sp-home__project-sheets"
+      data-testid="stock-prep-project-target-list"
+      :data-registered-count="projectTargets.count"
+    >
+      <p class="sp-home__project-sheets-line">
+        {{ bi(oneSheetPerProject.zh, oneSheetPerProject.en) }}
+        {{ bi(`已经有 ${projectTargets.count} 个项目建了表。`, `${projectTargets.count} project(s) have a sheet so far.`) }}
+      </p>
+      <!-- 项目总览表 (S3, ADR §5, register R-37), only inside this block — i.e. once the list answered
+           (switch on). Fix round 1:
+             「建立项目总览」 — the projectOverview.ensure control (PULL): only while the server says the
+               overview is ABSENT and only for a holder of that capability (R6);
+             「刷新项目总览」 — the projectOverview.refresh control (OPERATE): only once a STAMPED overview
+               exists (the server never creates one on a refresh);
+             「打开项目总览」 — a deep link to the 「进行中」 view, rendered only when the HOST answered that this
+               caller can read the sheet (R1: probed, never assumed — the sheet is host-level read-only, so
+               opening it grants nothing, but a link the caller cannot open is not offered). -->
+      <p
+        v-if="showEnsureOverview || showRefreshOverview || overviewOpenTarget"
+        class="sp-home__overview"
+        data-testid="stock-prep-project-overview"
+      >
+        <button
+          v-if="showEnsureOverview"
+          type="button"
+          class="sp-home__link"
+          data-testid="stock-prep-project-overview-ensure"
+          :disabled="overviewBusy"
+          @click="onEnsureOverview"
+        >
+          {{ overviewBusy
+            ? bi(overviewPlain('overview_ensuring').zh, overviewPlain('overview_ensuring').en)
+            : bi(overviewPlain('overview_ensure_action').zh, overviewPlain('overview_ensure_action').en) }}
+        </button>
+        <button
+          v-if="showRefreshOverview"
+          type="button"
+          class="sp-home__link"
+          data-testid="stock-prep-project-overview-refresh"
+          :disabled="overviewBusy"
+          @click="onRefreshOverview"
+        >
+          {{ overviewBusy
+            ? bi(overviewPlain('overview_refreshing').zh, overviewPlain('overview_refreshing').en)
+            : bi(overviewPlain('overview_refresh_action').zh, overviewPlain('overview_refresh_action').en) }}
+        </button>
+        <button
+          v-if="overviewOpenTarget"
+          type="button"
+          class="sp-home__link"
+          data-testid="stock-prep-project-overview-open"
+          @click="emit('open-multitable', overviewOpenTarget)"
+        >
+          {{ bi(overviewPlain('overview_open_action').zh, overviewPlain('overview_open_action').en) }}
+        </button>
+      </p>
+      <p
+        v-if="showOverviewAbsentHint"
+        class="sp-home__overview-result"
+        data-testid="stock-prep-project-overview-absent"
+      >
+        {{ bi(overviewPlain('overview_absent_hint').zh, overviewPlain('overview_absent_hint').en) }}
+      </p>
+      <p
+        v-if="overviewNotice"
+        class="sp-home__overview-result"
+        data-testid="stock-prep-project-overview-result"
+        :data-result="overviewNotice.kind"
+        role="status"
+      >
+        {{ bi(overviewNoticeText.zh, overviewNoticeText.en) }}
+        <span v-if="overviewNoticeText.zhNext">{{ bi(overviewNoticeText.zhNext, overviewNoticeText.enNext ?? '') }}</span>
+        <code v-if="overviewNotice.kind === 'refused' && overviewNotice.code" class="sp-home__token">{{ overviewNotice.code }}</code>
+      </p>
+    </div>
 
     <EmptyState
       v-if="emptyState"
@@ -76,10 +157,56 @@
     >
       <template v-if="emptyState !== 'nothing_today'" #action>
         <button type="button" class="sp-home__link" @click="emit('focus-quick-open')">
-          {{ bi('拉一个新项目', 'Pull a new project in') }}
+          {{ canPull ? bi('拉一个新项目', 'Pull a new project in') : bi('打开一个项目', 'Open a project') }}
         </button>
       </template>
     </EmptyState>
+
+    <!-- 从列表移除 (客户反馈 2026-09-24 #1a / A8): the cards below were previously permanent and
+         unlabelled — no way to remove one, and nothing explaining that a card is only a shortcut. One
+         static line covers both, and the dynamic confirmation below it is rendered HERE, at the page
+         level, so it survives even when the removed card's own DOM node does not (see `onRemoveCard`'s
+         own comment for why it may not disappear on this click at all). -->
+    <p
+      v-if="cards.length > 0"
+      class="sp-home__cards-explainer"
+      data-testid="stock-prep-operator-home-cards-explainer"
+    >
+      {{ bi(
+        '这些卡片只是快捷入口，移除不会删除任何数据；重新登录后这台电脑记住的列表会清空、隐藏也会失效。',
+        'These cards are only shortcuts. Removing one does not delete any data; signing in again clears what this computer remembers, including anything hidden.',
+      ) }}
+    </p>
+
+    <!-- 全部恢复 (S2, adversarial review 2026-09-26): shown WHENEVER something is hidden, regardless of
+         `cards.length` — when every visible card happens to be hidden this is the ONLY thing left on
+         screen saying so, which is exactly why `resolveOperatorHomeEmptyState` steps aside for
+         `no_projects` in that case (see its own doc) rather than the two contradicting each other. -->
+    <p
+      v-if="hiddenCount > 0"
+      class="sp-home__hidden-banner"
+      data-testid="stock-prep-operator-home-hidden-banner"
+    >
+      {{ bi(`已从列表移除 ${hiddenCount} 个项目 · `, `Removed ${hiddenCount} project(s) from this list · `) }}
+      <button
+        type="button"
+        class="sp-home__link"
+        data-testid="stock-prep-operator-home-restore-all"
+        @click="onRestoreAll"
+      >
+        {{ bi('全部恢复', 'Restore all') }}
+      </button>
+    </p>
+
+    <p
+      v-if="removalNoticeText"
+      class="sp-home__removed-notice"
+      data-testid="stock-prep-operator-home-removed-notice"
+      :data-notice-kind="removalNotice?.kind"
+      role="status"
+    >
+      {{ bi(removalNoticeText[0], removalNoticeText[1]) }}
+    </p>
 
     <!-- 一级常驻筛选 — a row of five count buttons (§3 wireframe A ④), never a dropdown. -->
     <div v-if="cards.length > 0" class="sp-home__filters" data-testid="stock-prep-operator-home-filters">
@@ -126,8 +253,11 @@
             data-testid="stock-prep-operator-home-card-badge"
           >{{ bi(card.posture.zh, card.posture.en) }}</span>
         </header>
+        <p v-if="cardRowsText(card)" class="sp-home__card-note" data-testid="stock-prep-operator-home-card-rows">
+          {{ cardRowsText(card) }}
+        </p>
         <p v-if="card.postureFromMemory" class="sp-home__card-note">
-          {{ bi('这台电脑上最近开过的', 'Recently opened on this computer') }}
+          {{ bi('这台电脑上次打开时的状态', 'As last known on this computer') }}
         </p>
         <p v-else-if="card.posture.key === 'unknown'" class="sp-home__card-note">
           {{ bi(
@@ -157,6 +287,20 @@
           >
             {{ bi('打开', 'Open') }}
           </button>
+          <!-- 从列表移除 (客户反馈 2026-09-24 #1a / A8): a low-emphasis text button, deliberately not
+               styled like either action above it — removing a shortcut is not this card's purpose.
+               [S3] Disabled (never merely omitted) while this card has a LIVE pending decision, with
+               a tooltip saying why — see `canRemoveCard`'s own comment. -->
+          <button
+            type="button"
+            class="sp-home__card-remove"
+            data-testid="stock-prep-operator-home-card-remove"
+            :disabled="!canRemoveCard(card)"
+            :title="!canRemoveCard(card) ? bi('有等您处理的事，不能移除', 'This card has something waiting on you — it cannot be removed') : undefined"
+            @click="onRemoveCard(card)"
+          >
+            {{ bi('从列表移除', 'Remove from list') }}
+          </button>
         </div>
         <p
           v-if="exportNotice && exportNotice.projectNo === card.projectNo"
@@ -172,6 +316,44 @@
       </article>
     </div>
 
+    <!-- 「已归档（N）」 (S3, ADR §5 「首页」): archived projects leave the main list above and wait here,
+         collapsed, each with the 「已归档」 tag. Archiving changes no grant, so 「打开」 stays — the
+         project's page says what an archived sheet can and cannot do. Absent when N = 0. -->
+    <details
+      v-if="archivedCards.length > 0"
+      class="sp-home__archived"
+      data-testid="stock-prep-operator-home-archived"
+      :data-archived-count="archivedCards.length"
+    >
+      <summary class="sp-home__archived-summary" data-testid="stock-prep-operator-home-archived-summary">
+        {{ bi(archivedHeading.zh, archivedHeading.en) }}
+      </summary>
+      <ul class="sp-home__archived-list">
+        <li
+          v-for="card in archivedCards"
+          :key="card.projectNo"
+          class="sp-home__archived-item"
+          data-testid="stock-prep-operator-home-archived-card"
+          :data-project-no="card.projectNo"
+        >
+          <span class="sp-home__card-no">{{ card.projectNo }}</span>
+          <span v-if="card.projectName" class="sp-home__card-name">{{ card.projectName }}</span>
+          <span
+            class="sp-home__badge sp-home__badge--neutral"
+            data-testid="stock-prep-operator-home-archived-tag"
+          >{{ bi(overviewPlain('archived_tag').zh, overviewPlain('archived_tag').en) }}</span>
+          <button
+            type="button"
+            class="sp-home__card-open"
+            data-testid="stock-prep-operator-home-archived-open"
+            @click="emit('open-project', card.projectNo)"
+          >
+            {{ bi('打开', 'Open') }}
+          </button>
+        </li>
+      </ul>
+    </details>
+
     <!-- 兜底入口 (§3 wireframe A ⑦) — the HEADING AND THE HONEST SENTENCE only. The input itself is
          the workspace's own existing search box, which the parent renders immediately below this
          block instead of this component owning a second one: two boxes with byte-identical labels,
@@ -179,12 +361,17 @@
          "不知道该点哪个" this redesign exists to remove. Its testids are therefore unchanged and the
          three existing specs that open a project through them keep working untouched. -->
     <div class="sp-home__quick-open" data-testid="stock-prep-operator-home-quick-open">
-      <h3 class="sp-home__quick-open-title">{{ bi('拉一个新项目', 'Pull a new project in') }}</h3>
-      <p class="sp-home__quick-open-hint">
-        {{ bi(
-          '找不到号码?列表里只有这台电脑最近开过的、和管理员归档过的项目。直接把号码打进去也一样能打开。',
-          'Cannot find the number? The list only holds projects this computer recently opened, or that an administrator has archived — typing the number in directly always works too.',
-        ) }}
+      <h3 class="sp-home__quick-open-title">{{ canPull ? bi('拉一个新项目', 'Pull a new project in') : bi('打开一个项目', 'Open a project') }}</h3>
+      <!-- With the switch on (`projectTargets` answered) the old third clause — 「备料表里已经有数据的项目」,
+           read off the ONE env table — is no longer true, so the hint says what is: one sheet per
+           project. Q8: the `mvp` source is 「平台登记」, never 「归档过」 (「已归档」 is the project-sheet
+           lifecycle now). -->
+      <p class="sp-home__quick-open-hint" data-testid="stock-prep-operator-home-quick-open-hint">
+        <template v-if="projectTargets">{{ bi(oneSheetPerProject.zhNext ?? '', oneSheetPerProject.enNext ?? '') }}</template>
+        <template v-else>{{ bi(
+          '找不到号码?列表里有这台电脑最近开过的项目、平台登记的项目,以及备料表里已经有数据的项目(不论是谁拉进去的)。直接把号码打进去也一样能打开。',
+          'Cannot find the number? The list includes projects this computer recently opened, platform-registered projects, and projects that already have data in the stock-preparation table, whoever pulled them in — typing the number in directly always works too.',
+        ) }}</template>
       </p>
     </div>
   </div>
@@ -197,8 +384,12 @@
 //
 // DATA SOURCE (D1=A). "目录 + 本机记忆两路并集" — both halves are HANDED to this component by the
 // parent (which already loads the directory once and already owns the memory read, so a predread
-// failure is absorbed exactly once, not doubled, and nothing here touches `localStorage` directly).
-// See `operatorHomeCards.ts` for the per-field merge and why a directory row does NOT simply win.
+// failure is absorbed exactly once, not doubled). See `operatorHomeCards.ts` for the per-field merge
+// and why a directory row does NOT simply win.
+//
+// ONE DELIBERATE EXCEPTION (客户反馈 2026-09-24 #1a / A8): 从列表移除's hidden-project list. See the
+// `remove-recent-project` emit's own comment for why this component reads/writes that ONE piece of
+// storage itself instead of asking the parent.
 //
 // NO NEW READ ON THIS SCREEN, except the one action that IS a real write-shaped user click: exporting
 // a 「可以导出」 card's materials directly from its card (H14 discipline — a button that says
@@ -210,18 +401,25 @@
 // main action, and not a `--ms-color-primary` fill. The criterion then holds literally on this screen
 // too (zero filled primaries), and the one filled primary in the whole tab stays where §3 wireframe C
 // ③ puts it: the workspace's 「下一步」 bar.
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import EmptyState from '../../status/EmptyState.vue'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import type { StockPreparationOperatorDirectory } from '../../../services/integration/stockPreparation/confirmationQueue'
 import { exportStockPreparationPrepLines } from '../../../services/integration/stockPreparation/confirmationQueue'
-import type { StockPrepRecentProjectEntry } from '../../../services/integration/stockPreparation/operatorHomeMemory'
+import {
+  clearStockPrepHiddenProjects,
+  HIDDEN_MAX_ENTRIES,
+  readStockPrepHiddenProjects,
+  removeStockPrepRecentProject,
+  type StockPrepRecentProjectEntry,
+} from '../../../services/integration/stockPreparation/operatorHomeMemory'
 import {
   buildOperatorHomeCards,
   countActionableOperatorHomeCards,
   countOperatorHomeCardsByFilter,
   filterOperatorHomeCards,
+  partitionOperatorHomeCards,
   resolveOperatorHomeEmptyState,
   sortOperatorHomeCards,
   stockPrepHomeStatusLabel,
@@ -231,8 +429,30 @@ import {
 } from '../../../services/integration/stockPreparation/operatorHomeCards'
 import {
   resolveStockPrepPullBanner,
+  stockPrepErrorPlain,
+  stockPrepExportRefreshGatePlain,
+  stockPrepExportTenantWallPlain,
+  stockPrepHomeArchivedHeading,
+  stockPrepProjectOverviewPlain,
+  stockPrepProjectOverviewRefreshText,
+  stockPrepProjectTargetPlain,
+  stockPrepProjectTargetRowCountText,
   STOCK_PREP_TOOLTIP_READY_TO_EXPORT,
+  type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
+import {
+  createStockPreparationProjectTargetApi,
+  ensureStockPreparationProjectOverview,
+  probeStockPreparationProjectOverviewReadable,
+  refreshStockPreparationProjectOverview,
+  stockPrepProjectOverviewOpenTarget,
+  type StockPrepProjectOverviewEnsureOutcome,
+  type StockPrepProjectOverviewEnsureResult,
+  type StockPrepProjectOverviewRefreshOutcome,
+  type StockPrepProjectOverviewRefreshResult,
+  type StockPrepProjectTargetList,
+  type StockPreparationProjectTargetApi,
+} from '../../../services/integration/stockPreparation/projectTarget'
 
 const props = withDefaults(
   defineProps<{
@@ -244,8 +464,45 @@ const props = withDefaults(
     directoryLoaded?: boolean
     /** This browser's memory of projects it opened before, read ONCE by the parent (D1=A's local half). */
     memory?: readonly StockPrepRecentProjectEntry[]
+    /**
+     * R-33 (2026-10-08): whether THIS viewer may pull from PLM — the parent passes the same predicate
+     * its pull button renders on (`canRunStockPrepProjectSync`). `false` rewrites the three
+     * pull-inviting lines on this page (empty-state action, fallback heading, no_projects hint) to
+     * 「打开一个项目」 / 「由拉取人员拉取」, so a floor operator is never invited to do a step they
+     * cannot. Defaults to `true` so a parent without a principal keeps today's words.
+     */
+    canPull?: boolean
+    /**
+     * S2 (R-36): the tenant's project-sheet registry list, loaded by the parent with the directory.
+     * `null` = the server's switch is off (404 DISABLED) or the list was unreadable — the page then
+     * says exactly what it said before S2.
+     */
+    projectTargets?: StockPrepProjectTargetList | null
+    /**
+     * S3 (R-37): whether THIS viewer holds `projectOverview.refresh` — the parent resolves it from the
+     * workbench manifest mirror (`grantedStockPrepCapabilities`), the same way it resolves the
+     * archive / restore controls. Defaults to `false`: no principal, no button.
+     */
+    canRefreshOverview?: boolean
+    /**
+     * S3 fix round 1 (R6): whether THIS viewer holds `projectOverview.ensure` (PULL) — resolved by the
+     * parent from the same manifest mirror. Defaults to `false`.
+     */
+    canEnsureOverview?: boolean
+    /** Test seam ONLY (S3) — the project-target client for the refresh. Null in production: built from `scope`. */
+    targetApi?: StockPreparationProjectTargetApi | null
   }>(),
-  { scope: () => ({}), directory: null, directoryLoaded: false, memory: () => [] },
+  {
+    scope: () => ({}),
+    directory: null,
+    directoryLoaded: false,
+    memory: () => [],
+    canPull: true,
+    projectTargets: null,
+    canRefreshOverview: false,
+    canEnsureOverview: false,
+    targetApi: null,
+  },
 )
 
 const emit = defineEmits<{
@@ -259,8 +516,28 @@ const emit = defineEmits<{
    * 打开备料多维表. NO PAYLOAD, deliberately: the parent already holds the directory this page is
    * rendered from and resolves the handle in ONE place (`openFillTarget`), shared with the board's
    * own button. Sending the target back up would be a second copy of that decision.
+   *
+   * S3: 「打开项目总览」 is the one caller that DOES send a target — the overview sheet is not the
+   * fill sheet, and only this page holds its handles (from the registry list or the refresh it just
+   * ran). The parent routes a target as-is and falls back to `openFillTarget` without one.
    */
-  (e: 'open-multitable'): void
+  (e: 'open-multitable', target?: { sheetId: string; viewId: string }): void
+  /** S3: the overview was refreshed — the parent re-reads the registry list (counts, handles). */
+  (e: 'overview-refreshed', result: StockPrepProjectOverviewRefreshResult): void
+  /** S3 fix round 1 (R6): the overview was created (or found) by a puller — the parent re-reads the list. */
+  (e: 'overview-ensured', result: StockPrepProjectOverviewEnsureResult): void
+  /**
+   * 从列表移除 (客户反馈 2026-09-24 #1a / A8) — informational only. Every OTHER mutation on this page
+   * follows the contract at the top of `props`: this component reads nothing from storage and asks the
+   * parent to write. This one is the deliberate exception: `StockPreparationProjectBoardView.vue` is a
+   * pinned file another concurrent PR (A6) is editing at the time of this change, so this component
+   * calls `removeStockPrepRecentProject` / `readStockPrepHiddenProjects` itself (below) rather than
+   * adding a parent-side listener, and keeps its own `hiddenProjectNos` state to react immediately.
+   * This event still fires so a LATER pass can move the write up to the parent (restoring the usual
+   * contract) without this component needing another change — the parent choosing not to listen today
+   * changes nothing about what already happened.
+   */
+  (e: 'remove-recent-project', projectNo: string): void
 }>()
 
 const { locale } = useLocale()
@@ -285,9 +562,34 @@ const directoryProjects = computed(() => {
   return Array.isArray(list) ? list : []
 })
 
-const cards = computed<StockPrepHomeCard[]>(() => sortOperatorHomeCards(
-  buildOperatorHomeCards(directoryProjects.value, props.memory ?? []),
-))
+/**
+ * 从列表移除 (客户反馈 2026-09-24 #1a / A8). Read once at setup — the same "no prop watch" posture
+ * `recentProjects` takes in the parent — and mutated in place by `onRemoveCard` below rather than
+ * re-read from storage on every render, so a removal is reflected the instant it happens with no extra
+ * round trip through `props.scope`. See the `remove-recent-project` emit's own doc for why this
+ * component owns this one read/write pair instead of the parent. Unhiding on a REOPEN happens inside
+ * `recordStockPrepProjectVisit` itself (operatorHomeMemory.ts) — the parent already calls that on every
+ * live posture change, so a project this browser hides and then reopens unhides on its own, with no
+ * change needed here or in the parent for that half of the contract.
+ */
+const hiddenProjectNos = ref<Set<string>>(new Set(readStockPrepHiddenProjects(props.scope)))
+
+/** [S2] How many projects this browser is currently choosing not to show — see `resolveOperatorHomeEmptyState`'s own doc for why the empty-state logic needs this, and the persistent banner below for why the UI does too. */
+const hiddenCount = computed(() => hiddenProjectNos.value.size)
+
+/**
+ * S3 (ADR §5 「首页」): the MAIN list excludes archived projects; they go to the collapsed
+ * 「已归档（N）」 section below it. Every count on this page — the five chips, the guidance line, the
+ * explainer — is over the main list; only the empty-state decision also counts the archived half, so
+ * a tenant whose every project is archived is never told 「这里还没有您的项目」.
+ */
+const partitionedCards = computed(() => partitionOperatorHomeCards(sortOperatorHomeCards(
+  buildOperatorHomeCards(directoryProjects.value, props.memory ?? [], hiddenProjectNos.value),
+)))
+
+const cards = computed<StockPrepHomeCard[]>(() => partitionedCards.value.active)
+const archivedCards = computed<StockPrepHomeCard[]>(() => partitionedCards.value.archived)
+const archivedHeading = computed(() => stockPrepHomeArchivedHeading(archivedCards.value.length))
 
 const actionable = computed(() => countActionableOperatorHomeCards(cards.value))
 
@@ -297,8 +599,9 @@ const directoryAvailable = computed(() => props.directory !== null)
 const emptyState = computed(() => resolveOperatorHomeEmptyState({
   directorySettled: directorySettled.value,
   directoryAvailable: directoryAvailable.value,
-  cardCount: cards.value.length,
+  cardCount: cards.value.length + archivedCards.value.length,
   actionableCount: actionable.value.any,
+  hiddenCount: hiddenCount.value,
 }))
 
 const EMPTY_STATE_TEXT: Record<string, { title: [string, string]; hint: [string, string] }> = {
@@ -312,8 +615,10 @@ const EMPTY_STATE_TEXT: Record<string, { title: [string, string]; hint: [string,
   nothing_today: {
     title: ['今天没有等您的事', 'Nothing is waiting on you today'],
     hint: [
-      '下面是您最近开过的项目,随时可以打开看看。',
-      'Below are the projects you have opened recently — open any of them whenever you like.',
+      // N1 (adversarial review 2026-09-26): this used to say 「最近开过的」, which is only true of a
+      // MEMORY card — a directory-only card below may be one this browser has never opened at all.
+      '下面是您能看到的项目,随时可以打开看看。',
+      'Below are the projects you can see — open any of them whenever you like.',
     ],
   },
   directory_unavailable: {
@@ -326,6 +631,16 @@ const emptyStateText = computed(() => {
   const state = emptyState.value
   const entry = state ? EMPTY_STATE_TEXT[state] : null
   if (!entry) return { title: '', hint: '' }
+  // R-33: a viewer who cannot pull is told who does, not 「可以自己拉」.
+  if (state === 'no_projects' && !props.canPull) {
+    return {
+      title: bi(...entry.title),
+      hint: bi(
+        '备料从"把项目从 PLM 拉进来"开始,由拉取人员拉取。知道项目号可以直接打开查看。',
+        'Stock preparation starts by pulling a project in from PLM — a pull operator (拉取人员) does that. If you know the number you can open it directly.',
+      ),
+    }
+  }
   return { title: bi(...entry.title), hint: bi(...entry.hint) }
 })
 
@@ -356,6 +671,127 @@ const guidance = computed<string | null>(() => {
 
 /** I-20: the 可以导出 filter chip's tooltip. */
 const readyTooltip = STOCK_PREP_TOOLTIP_READY_TO_EXPORT
+
+// ── 一个项目一张备料表 (S2, R-36) ────────────────────────────────────────────────────────────────
+
+const oneSheetPerProject: StockPrepPlainEntry = stockPrepProjectTargetPlain('home_one_sheet_per_project')
+  ?? { zh: '', en: '' }
+
+/**
+ * ADR §7 「首页卡片:共 N 行(有效 M 行)」 — from the registry row of THIS card's project, and only
+ * when the server counted (the registry's count columns are filled by the overview refresh, S3; until
+ * then they are null and the card says nothing rather than 「0 行」).
+ */
+function cardRowsText(card: StockPrepHomeCard): string {
+  const list = props.projectTargets
+  if (!list) return ''
+  const row = list.items.find((item) => item.projectNo === card.projectNo)
+  if (!row || row.status === 'absent') return ''
+  const text = stockPrepProjectTargetRowCountText({
+    rowCount: row.rowCount,
+    activeRowCount: row.activeRowCount,
+    rowCountBounded: row.countsBounded,
+  })
+  return text ? bi(text.zh, text.en) : ''
+}
+
+// ── 项目总览表 (S3, ADR §5, register R-37) ──────────────────────────────────────────────────────────
+
+function overviewPlain(id: string): StockPrepPlainEntry {
+  return stockPrepProjectOverviewPlain(id) ?? { zh: id, en: id }
+}
+
+/** The last refresh / ensure answer on THIS page — it carries the handles before the parent's list re-read lands. */
+const refreshedOverview = ref<{ sheetId: string; activeViewId: string | null } | null>(null)
+
+function targetApiOf() {
+  return props.targetApi ?? createStockPreparationProjectTargetApi(props.scope)
+}
+
+/** The overview's handles as known now: this page's last answer, else the server's list (only a STAMPED one). */
+const overviewHandles = computed(() => stockPrepProjectOverviewOpenTarget(refreshedOverview.value)
+  ?? (props.projectTargets?.overview?.status === 'ready' ? stockPrepProjectOverviewOpenTarget(props.projectTargets.overview) : null))
+
+/**
+ * S3 fix round 1 (R1): may THIS caller open the overview? The HOST answers (the multitable context's
+ * `canRead` for the overview sheet) — a floor operator without the G1 READ grant is not offered a link
+ * the host would refuse. Re-asked whenever the handles change; a stale answer is dropped.
+ */
+const overviewReadable = ref(false)
+let overviewProbeGeneration = 0
+watch(overviewHandles, async (handles) => {
+  overviewProbeGeneration += 1
+  const generation = overviewProbeGeneration
+  overviewReadable.value = false
+  if (!handles) return
+  const readable = await probeStockPreparationProjectOverviewReadable(targetApiOf(), handles)
+  if (generation === overviewProbeGeneration) overviewReadable.value = readable
+}, { immediate: true })
+
+/** 「打开项目总览」's target: handles the host said this caller can read — never a half link, never a guess. */
+const overviewOpenTarget = computed(() => (overviewReadable.value ? overviewHandles.value : null))
+
+/** The overview exists (the server reported it stamped, or this page just ensured / refreshed it). */
+const overviewExists = computed(() => overviewHandles.value !== null)
+const overviewAbsent = computed(() => !overviewExists.value && props.projectTargets?.overview?.status === 'absent')
+const showRefreshOverview = computed(() => props.canRefreshOverview && overviewExists.value)
+const showEnsureOverview = computed(() => props.canEnsureOverview && overviewAbsent.value)
+const showOverviewAbsentHint = computed(() => overviewAbsent.value && !props.canEnsureOverview && props.canRefreshOverview)
+
+const overviewBusy = ref(false)
+const overviewNotice = ref<StockPrepProjectOverviewRefreshOutcome | StockPrepProjectOverviewEnsureOutcome | null>(null)
+
+/**
+ * 刷新项目总览 — a write-shaped click, so its answer is VISIBLE either way (G3): the one result line,
+ * or the refusal's plain sentence and code. The server re-checks the gate (OPERATE) and answers 404
+ * DISABLED while the switch is off; this page only renders the button for a holder of the capability.
+ */
+async function onRefreshOverview(): Promise<void> {
+  if (overviewBusy.value || !props.canRefreshOverview) return
+  overviewBusy.value = true
+  overviewNotice.value = null
+  try {
+    const outcome = await refreshStockPreparationProjectOverview(targetApiOf())
+    overviewNotice.value = outcome
+    if (outcome.kind === 'done') {
+      refreshedOverview.value = { sheetId: outcome.result.sheetId, activeViewId: outcome.result.activeViewId }
+      emit('overview-refreshed', outcome.result)
+    }
+  } finally {
+    overviewBusy.value = false
+  }
+}
+
+/**
+ * 建立项目总览 (S3 fix round 1, R6) — a puller's write-shaped click: the answer is visible either way. The
+ * server re-checks the PULL gate and the switch; on success the parent re-reads the list (handles + status).
+ */
+async function onEnsureOverview(): Promise<void> {
+  if (overviewBusy.value || !props.canEnsureOverview) return
+  overviewBusy.value = true
+  overviewNotice.value = null
+  try {
+    const outcome = await ensureStockPreparationProjectOverview(targetApiOf())
+    overviewNotice.value = outcome
+    if (outcome.kind === 'done') {
+      refreshedOverview.value = { sheetId: outcome.result.sheetId, activeViewId: outcome.result.activeViewId }
+      emit('overview-ensured', outcome.result)
+    }
+  } finally {
+    overviewBusy.value = false
+  }
+}
+
+const overviewNoticeText = computed<StockPrepPlainEntry>(() => {
+  const notice = overviewNotice.value
+  if (!notice) return { zh: '', en: '' }
+  if (notice.kind === 'done') {
+    return 'fresh' in notice.result ? stockPrepProjectOverviewRefreshText(notice.result) : overviewPlain('overview_ensured')
+  }
+  // Follow-ups 2 (item 1): a cooldown after an INCOMPLETE refresh never says the numbers are current.
+  if (notice.kind === 'cooled') return overviewPlain(notice.incomplete ? 'overview_cooled_incomplete' : 'overview_cooled')
+  return stockPrepErrorPlain(notice.code ?? '')
+})
 
 /**
  * U2 契约 (P0 补项 5)'s three-sentence priority chain — shared with 项目查询 (hardening wave, see
@@ -394,6 +830,94 @@ function cardActionLabel(card: StockPrepHomeCard): string {
 function showsOpenButton(card: StockPrepHomeCard): boolean {
   return card.posture.key === 'pending_decision' || card.posture.key === 'ready'
 }
+
+/**
+ * [S3, adversarial review 2026-09-26] A card the ledger says is waiting on this operator RIGHT NOW must
+ * not even offer 从列表移除 — `buildOperatorHomeCards`'s own guard would keep it visible anyway (belt),
+ * but disabling the button here (braces) means the notice below can never claim 已移除 for a card that
+ * plainly did not go anywhere, and the operator gets told WHY before clicking rather than after.
+ * `pendingDecisionCount` is only ever non-null on a `directory` card carrying a LIVE ledger count (see
+ * its own field doc in operatorHomeCards.ts) — a memory-only card's `null` here always allows removal.
+ */
+function canRemoveCard(card: StockPrepHomeCard): boolean {
+  return !(card.pendingDecisionCount !== null && card.pendingDecisionCount > 0)
+}
+
+/**
+ * 从列表移除 (客户反馈 2026-09-24 #1a / A8). The card may not actually leave the grid on this click —
+ * `buildOperatorHomeCards` still shows a directory row with a LIVE `pendingDecisionCount > 0` — so the
+ * confirmation line below is rendered at the page level, never inside the card's own DOM node, and
+ * survives whether or not that node is still there after this render.
+ *
+ * [N4] Names the project and auto-clears after a short delay, rather than sitting on screen forever or
+ * silently getting replaced by the next unrelated render.
+ */
+const REMOVAL_NOTICE_DISMISS_MS = 6000
+
+const removalNotice = ref<{ projectNo: string; kind: 'removed' | 'limit_reached' } | null>(null)
+let removalNoticeTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearRemovalNoticeTimer(): void {
+  if (removalNoticeTimer !== null) {
+    clearTimeout(removalNoticeTimer)
+    removalNoticeTimer = null
+  }
+}
+
+function showRemovalNotice(notice: { projectNo: string; kind: 'removed' | 'limit_reached' }): void {
+  clearRemovalNoticeTimer()
+  removalNotice.value = notice
+  removalNoticeTimer = setTimeout(() => {
+    removalNotice.value = null
+    removalNoticeTimer = null
+  }, REMOVAL_NOTICE_DISMISS_MS)
+}
+
+onBeforeUnmount(clearRemovalNoticeTimer)
+
+/**
+ * [S1] `removeStockPrepRecentProject` REFUSES rather than evicts once the hidden list is full — this
+ * only updates `hiddenProjectNos` (so the grid actually changes) and emits `remove-recent-project` on
+ * an ACTUAL hide (`'hidden'`), never on `'limit_reached'`: a card that stayed exactly where it was must
+ * never be reported upstream as removed.
+ */
+function onRemoveCard(card: StockPrepHomeCard): void {
+  if (!canRemoveCard(card)) return
+  const result = removeStockPrepRecentProject(card.projectNo, props.scope)
+  if (result === 'limit_reached') {
+    showRemovalNotice({ projectNo: card.projectNo, kind: 'limit_reached' })
+    return
+  }
+  hiddenProjectNos.value = new Set(hiddenProjectNos.value).add(card.projectNo)
+  showRemovalNotice({ projectNo: card.projectNo, kind: 'removed' })
+  emit('remove-recent-project', card.projectNo)
+}
+
+/** 全部恢复 (S2) — clears every project this scope hid, on this one browser, right now. */
+function onRestoreAll(): void {
+  clearStockPrepHiddenProjects(props.scope)
+  hiddenProjectNos.value = new Set()
+}
+
+/**
+ * [N4] Names the removed (or refused) project every time, rather than a generic sentence — the two
+ * kinds are worded differently on purpose (S3/S1's own point): one claims a removal happened, the
+ * other explicitly says it did not.
+ */
+const removalNoticeText = computed<readonly [string, string] | null>(() => {
+  const notice = removalNotice.value
+  if (!notice) return null
+  if (notice.kind === 'limit_reached') {
+    return [
+      `隐藏列表已满(最多 ${HIDDEN_MAX_ENTRIES} 个),项目 ${notice.projectNo} 这次没有被移除。`,
+      `The hidden list is full (limit ${HIDDEN_MAX_ENTRIES}) — project ${notice.projectNo} was not removed this time.`,
+    ]
+  }
+  return [
+    `已从这台电脑的列表里移除项目 ${notice.projectNo}。数据没有删除，还在备料表里；要再看它，去「项目查询」或在下面输入项目号打开。`,
+    `Removed project ${notice.projectNo} from this computer's list. No data was deleted — it is still in the stock-preparation table; to see it again, go to Project Query or open it by number below.`,
+  ]
+})
 
 function onCardAction(card: StockPrepHomeCard): void {
   if (card.posture.key === 'pending_decision') {
@@ -436,7 +960,32 @@ async function exportCard(projectNo: string): Promise<void> {
         en: 'This project number has no active material rows — an empty, headers-only template was downloaded.',
       }
     }
-  } catch {
+  } catch (error) {
+    // THE TENANT WALL gets its own words: the bound 备料主表 is not provably this factory's, and
+    // 「稍后再点一次」 would send the operator round in circles on a refusal no retry can change.
+    const wall = stockPrepExportTenantWallPlain((error as { code?: unknown } | null)?.code)
+    if (wall) {
+      exportNotice.value = {
+        projectNo,
+        tone: 'error',
+        zh: wall.zhNext ? `${wall.zh}${wall.zhNext}` : wall.zh,
+        en: wall.enNext ? `${wall.en} ${wall.enNext}` : wall.en,
+      }
+      return
+    }
+    // 备料分批拉取第一期 step 4 PR-7: the formal-export gate's refusals (and the retarget wall) say which state it is —
+    // for `not_settled` / `state` 「稍后再点一次」 is the one instruction that never works. Reason-aware, values-free.
+    const failure = error as { code?: unknown; reason?: unknown } | null
+    const gate = stockPrepExportRefreshGatePlain(failure?.code, typeof failure?.reason === 'string' ? failure.reason : null)
+    if (gate) {
+      exportNotice.value = {
+        projectNo,
+        tone: 'error',
+        zh: gate.zhNext ? `${gate.zh}${gate.zhNext}` : gate.zh,
+        en: gate.enNext ? `${gate.en} ${gate.enNext}` : gate.en,
+      }
+      return
+    }
     // A generic, values-free failure line — this button is a genuine write-shaped click (G3), so it
     // gets a visible answer, unlike the silent predreads elsewhere on this page.
     exportNotice.value = {
@@ -494,6 +1043,41 @@ async function exportCard(projectNo: string): Promise<void> {
   line-height: 1.6;
 }
 
+/* 从列表移除 (客户反馈 2026-09-24 #1a / A8): a muted, always-on line — not a warning, not a tip that
+   only appears once — explaining what the cards below actually are before anyone has to guess. */
+.sp-home__cards-explainer {
+  margin: 0;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 全部恢复 (S2): visually similar to the pull-banner — a diagnostic line, not an alarm — but its own
+   class because its content (count + a live button) differs from every other muted line here. */
+.sp-home__hidden-banner {
+  margin: 0;
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 8px;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* The dynamic counterpart above: rendered at the page level (never inside a card's own node) so it
+   survives whether or not the card that triggered it is still in `visibleCards` after this render. */
+.sp-home__removed-notice {
+  margin: 0;
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 8px;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 /* 打开备料多维表 — one line, subordinate to the banner above it: it is a way OUT of this page, not
    a thing waiting on the operator, so it never competes with 指引位 for attention. */
 .sp-home__fill {
@@ -507,6 +1091,63 @@ async function exportCard(projectNo: string): Promise<void> {
 .sp-home__fill-hint {
   color: var(--ms-color-text-secondary, #6b7280);
   font-size: 12px;
+}
+
+/* S3: the overview line sits inside the project-sheets block — links, not buttons, like 打开备料多维表. */
+.sp-home__project-sheets-line,
+.sp-home__overview,
+.sp-home__overview-result {
+  margin: 0;
+}
+
+.sp-home__overview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ms-space-3);
+  margin-top: var(--ms-space-2);
+}
+
+.sp-home__overview-result {
+  margin-top: var(--ms-space-2);
+  color: var(--ms-text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.sp-home__token {
+  margin: 0 4px;
+  font-size: 11px;
+  color: var(--ms-text-3);
+}
+
+/* S3: 「已归档（N）」 — collapsed, muted, below the main list. */
+.sp-home__archived {
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 8px;
+  background: var(--ms-bg-page);
+}
+
+.sp-home__archived-summary {
+  cursor: pointer;
+  color: var(--ms-text-2);
+  font-size: 13px;
+}
+
+.sp-home__archived-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-2);
+  margin: var(--ms-space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sp-home__archived-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--ms-space-2);
 }
 .sp-home__link {
   border: none;
@@ -633,6 +1274,29 @@ async function exportCard(projectNo: string): Promise<void> {
   color: var(--ms-text-1);
   font: inherit;
   cursor: pointer;
+}
+
+/* 从列表移除 — the low-emphasis text button §3's card asks for: no border, no fill, muted colour, so
+   it reads as the least important control on the card rather than a third peer of the two above it. */
+.sp-home__card-remove {
+  align-self: flex-start;
+  margin-left: auto;
+  border: none;
+  background: none;
+  padding: 7px 4px;
+  color: var(--ms-text-3);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* [S3] disabled, not merely omitted, while the card has a live pending decision — see the button's
+   own `:title` in the template for the tooltip this pairs with. */
+.sp-home__card-remove:disabled {
+  color: var(--ms-text-4, #b3b8c2);
+  cursor: not-allowed;
+  text-decoration: none;
 }
 
 .sp-home__card-notice {

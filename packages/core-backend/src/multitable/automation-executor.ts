@@ -54,8 +54,11 @@ import type { FwbGateChecks } from './approval-fwb-permission-gates'
 import {
   ensureRecordWriteAllowed,
   loadRecordPermissionScopeMap,
+  loadSheetMemberUserIdSet,
   loadSheetPermissionScopeMap,
 } from './permission-service'
+// F9b: the ONE durable notification-write seam (shared with routes/multitable-button.ts).
+import { insertRecordSubscriptionNotifications } from './record-subscription-service'
 import {
   lockRecordLinkMultiTargetAuthorityPhasedOnQuery,
   resolveSheetCapabilitiesForUserOnQuery,
@@ -63,6 +66,7 @@ import {
 import { acquireRecordLinkRowAuthLockOnQuery } from '../services/approval-record-link-row-auth-lock'
 import { redactString, redactValue } from './automation-log-redact'
 import { checkWebhookTargetUrl, type SsrfLookupFn } from './webhook-ssrf-guard'
+import { pinnedAddressFamily, pinnedHttpsFetch, type PinnedSendFn } from './webhook-pinned-fetch'
 import {
   classifyWebhookFailure,
   classifyWebhookRefusal,
@@ -72,11 +76,17 @@ import {
   webhookHostFamily,
   type WebhookFailureInput,
 } from './webhook-refusal-class'
+import { DINGTALK_PERSON_RECIPIENT_STATUS_SQL, resolveDingTalkPersonRecipientRows } from './dingtalk-person-recipient-status'
 import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
 import { ensureRecordNotLocked } from './record-lock'
 import { fenceWriterEntriesInOrder, isWriterFenceEnabled } from './canonical-sheet-fence'
+import {
+  assertFieldSchemaUnchangedAfterFence,
+  loadFieldSchemaSnapshot,
+  validateAutomationOptionValues,
+} from './field-schema-fence-recheck'
 import {
   assertRecordLinkDeleteFencePlanCurrent,
   prepareRecordLinkDeleteFencePlan,
@@ -89,6 +99,17 @@ import {
   resolveSheetBaseIdForTrash,
 } from './side-door-delete-trash'
 import { resolveCrossBaseWriteAuthority } from './cross-base-write-authority'
+import {
+  STOCK_PREP_OVERVIEW_AUTOMATION_REFUSAL,
+  loadStockPreparationOverviewSheetIds,
+} from './stock-preparation-overview-contract'
+import { HUMAN_WRITE_LOCK_AUTOMATION_REFUSAL, findHumanWriteLockedFieldIds } from './human-write-lock'
+import {
+  assertPlmRowDeletable,
+  loadPlmGuardFields,
+  PLM_ROW_DELETE_AUTOMATION_REFUSAL,
+  PlmRowDeleteRefusedError,
+} from './plm-row-delete-guard'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { MemoryRateLimitStore, type RateLimitStore } from '../middleware/rate-limiter'
 import {
@@ -133,13 +154,40 @@ import type {
   SendDingTalkGroupMessageConfig,
   SendDingTalkPersonMessageConfig,
 } from './automation-actions'
-import type { ConditionGroup } from './automation-conditions'
-import { evaluateConditions } from './automation-conditions'
+import type {
+  AutomationConditionField,
+  ConditionEvaluationOptions,
+  ConditionGroup,
+  ConditionUnreadableValueInfo,
+} from './automation-conditions'
+import { evaluateConditions, normalizeConditionFields } from './automation-conditions'
 import type { AutomationTrigger } from './automation-triggers'
 import type { Notification, NotificationResult, NotificationService } from '../types/plugin'
 import { WebhookService } from './webhook-service'
 
 const logger = new Logger('AutomationExecutor')
+
+// 客户反馈 2026-09-24 #4b — ONE values-free warning per rule when a stored cell or a condition value cannot be
+// read as its field's type (a legacy free-text string in a date field, …). The condition then evaluates as
+// unmatched instead of throwing. Bounded so a long-lived process never grows the registry without limit.
+const UNREADABLE_CONDITION_VALUE_WARNED_RULES = new Set<string>()
+const UNREADABLE_CONDITION_VALUE_WARN_CAP = 5_000
+
+function warnUnreadableConditionValueOnce(ruleId: string, sheetId: string, info: ConditionUnreadableValueInfo): void {
+  if (UNREADABLE_CONDITION_VALUE_WARNED_RULES.has(ruleId)) return
+  if (UNREADABLE_CONDITION_VALUE_WARNED_RULES.size >= UNREADABLE_CONDITION_VALUE_WARN_CAP) {
+    UNREADABLE_CONDITION_VALUE_WARNED_RULES.clear()
+  }
+  UNREADABLE_CONDITION_VALUE_WARNED_RULES.add(ruleId)
+  logger.warn('Automation condition value could not be read as the field type; the condition evaluated as unmatched', {
+    ruleId,
+    sheetId,
+    fieldId: info.fieldId,
+    fieldType: info.fieldType,
+    operator: info.operator,
+    side: info.side,
+  })
+}
 
 const DEFAULT_WEBHOOK_TIMEOUT_MS = 5_000
 const DEFAULT_MAX_WEBHOOK_RETRIES = 2
@@ -189,6 +237,19 @@ type RuntimeParallelBranch = {
   label?: string
   actions: AutomationAction[]
 }
+
+/**
+ * S3 fix round 1 (R4): the automation actions that WRITE a record (or its lock / form-write-back columns).
+ * Every one of them is refused on the stock-preparation project overview before any write — see
+ * `AutomationExecutor.refuseRecordActionOnStockPrepOverview`.
+ */
+const STOCK_PREP_OVERVIEW_GUARDED_ACTIONS: ReadonlySet<AutomationActionType> = new Set<AutomationActionType>([
+  'update_record',
+  'create_record',
+  'delete_record',
+  'lock_record',
+  'write_approval_form_values',
+])
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -820,6 +881,85 @@ export interface AutomationStepResult {
 
 export type AutomationDispatchMode = 'live' | 'simulate'
 
+/**
+ * F9: a send_notification with no recipients FAILS EXPLICITLY — it is never defaulted to the rule
+ * creator (that would be a delivery decision made on the author's behalf, and it would fork from the
+ * button route's NO_RECIPIENTS hard line in routes/multitable-button.ts). The text is the operator's
+ * next action, not an engine term, because the manager renders step.error verbatim in the test-run
+ * banner. The NO_RECIPIENTS token keeps it greppable/machine-matchable across both surfaces.
+ */
+export const AUTOMATION_NO_RECIPIENTS_ERROR = '该规则未配置通知接收人，请在编辑器中补充（NO_RECIPIENTS）'
+
+/**
+ * F9b: a rule-side send_notification whose recipients are not ALL inside the selectable-people roster
+ * fails the WHOLE step — the same hard line the button route draws with RECIPIENT_NOT_AUTHORIZED, so one
+ * recipient policy governs both surfaces. Never a partial delivery, never a durable row, never an emit.
+ * Values-free on purpose (a count, never the ids) because the manager renders step.error verbatim.
+ *
+ * WHAT THAT ROSTER ACTUALLY IS (stated exactly, no wider claim): `loadSheetMemberUserIdSet`
+ * (multitable/permission-service.ts:611) delegates to `listSheetPermissionCandidates` (:416), whose USER
+ * branch LEFT JOINs `spreadsheet_permissions` (:440) for the access-level LABEL only — the filter that
+ * survives (:594) keeps every ACTIVE user holding a GLOBAL `multitable:read`/`multitable:write` grant.
+ * So this control means “a selectable person on this platform”; it is NOT “granted on THIS sheet” and NOT
+ * a tenant boundary. That width is inherited ON PURPOSE from the button route (one resolver, zero drift);
+ * narrowing it to per-sheet grants is a both-surfaces change and is deliberately out of this slice.
+ */
+export const AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR =
+  '通知接收人不在可选人员范围内，请在编辑器中改选（RECIPIENT_NOT_AUTHORIZED）'
+
+/**
+ * F9b fail-closed sink: every PRODUCTION AutomationExecutor construction injects `deps.queryFn`
+ * (multitable/automation-service.ts:1067 and both routes/multitable-button.ts constructions), so a
+ * missing sink is a wiring bug — the step fails instead of silently degrading back to the
+ * eventBus-only phantom notification this slice exists to close.
+ */
+export const AUTOMATION_NOTIFICATION_SINK_UNAVAILABLE_ERROR =
+  '通知无法落库：notification sink unavailable（NOTIFICATION_SINK_UNAVAILABLE）'
+
+/**
+ * F9b r2 (refutation A, minor «错误文案错标»): reading the roster and writing the rows are two stages.
+ * In r1 the roster read sat INSIDE the write try/catch, so an unreadable roster was reported as
+ * “send_notification durable write failed: <driver text>” — the wrong stage, and the only path that
+ * pushed a driver string into `step.error` for a READ. Both stages stay fail-closed (no roster ⇒ no
+ * delivery, ever); r2 only makes the reported stage true and keeps this one values-free.
+ */
+export const AUTOMATION_NOTIFICATION_ROSTER_UNAVAILABLE_ERROR =
+  '通知接收人名册暂时读不到，未发送通知，请稍后重试（ROSTER_UNAVAILABLE）'
+
+/**
+ * F9b r2: the ONE recipient shaping for this action — trim + dedupe, byte-for-byte the button route's
+ * shaping (routes/multitable-button.ts:224-228). Applied ONCE and reused by the membership gate, the
+ * durable write, the emitted payload AND the dry-run preflight, so all four speak about the SAME list
+ * (a duplicate id must never become two notification rows for one person).
+ *
+ * F9c: EXPORTED (was module-private) so the rule SAVE gate (automation-service.ts
+ * `assertNotificationRecipientsAtSave`) shapes recipients with THIS function instead of a second
+ * copy — save-time and run-time must never disagree about what ' u1 ' or a repeated id means.
+ * Nothing on the execution path changed.
+ */
+export function normalizeNotificationRecipients(userIds: unknown): string[] {
+  return Array.from(new Set(
+    (Array.isArray(userIds) ? userIds : [])
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  ))
+}
+
+/**
+ * F9b r2: outcome of the recipient membership gate — shared by the live path and the dry-run preflight.
+ * A single shape (not a discriminated union) because this package compiles with `strict:false`, where a
+ * boolean discriminant does not narrow.
+ */
+interface NotificationRecipientGate {
+  /** TRUE only when EVERY recipient is inside the roster; both failure modes report false. */
+  ok: boolean
+  /** Values-free operator text; set only when `ok` is false. */
+  error?: string
+  /** Count of refused recipients (all of them when the roster itself was unreadable). */
+  rejected?: number
+}
+
 function simulationDisposition(actionType: AutomationActionType): 'execute' | 'simulate' {
   switch (actionType) {
     case 'condition_branch':
@@ -966,9 +1106,12 @@ function simulatedGenericClassBPlan(
       const userIds = Array.isArray(config.userIds)
         ? config.userIds.filter((entry): entry is string => typeof entry === 'string' && Boolean(entry))
         : []
-      const message = typeof config.message === 'string' ? config.message : ''
+      // F9b r3: simulate judges the SAME shaped message as the live path (executeSendNotification
+      // trims too) - a whitespace-only message must not test-run green and then fail on its first
+      // live fire.
+      const message = typeof config.message === 'string' ? config.message.trim() : ''
       if (!userIds.length) {
-        return { actionType: action.type, status: 'failed', error: 'No user IDs specified', durationMs: 0 }
+        return { actionType: action.type, status: 'failed', error: AUTOMATION_NO_RECIPIENTS_ERROR, durationMs: 0 }
       }
       if (!message) {
         return { actionType: action.type, status: 'failed', error: 'Notification message is required', durationMs: 0 }
@@ -1437,6 +1580,12 @@ export interface ExecutionContext {
   ledgerKind?: ExecutionLedgerKind
   /** #4196 Q2/Q6: simulate derives control flow but dispatches no business action. */
   dispatchMode?: AutomationDispatchMode
+  /**
+   * 客户反馈 2026-09-24 #4b — the sheet's fields for TYPED condition evaluation, loaded lazily once per
+   * execution through `AutomationDeps.loadConditionFields` and cached here. `undefined` = not loaded yet;
+   * `null` = no loader / load failed ⇒ legacy untyped evaluation.
+   */
+  conditionFields?: ReadonlyMap<string, AutomationConditionField> | null
 }
 
 // ── Dependencies interface for action executors ───────────────────────────
@@ -1543,6 +1692,15 @@ export interface AutomationDeps {
    * every returned address, and a seam that returns an internal address is refused like any other.
    */
   ssrfLookupFn?: SsrfLookupFn
+  /**
+   * S0-a transport seam for `send_webhook`. OMITTED (production) ⇒ `pinnedHttpsFetch`: the request goes
+   * to the address the SSRF check approved for THIS attempt, never to a fresh resolution of the name, and
+   * a 3xx is returned as a status (no second request). A test passes a wrapper to observe the chosen pin
+   * or to point the real helper at a loopback server. When neither this nor `fetchFn` is injected the
+   * pinned helper is used; `fetchFn`, when injected, is the older fetch-shaped TEST seam (it still gets
+   * `redirect: 'manual'`, but a fetch-shaped call cannot be pinned — production wiring passes neither).
+   */
+  pinnedWebhookSendFn?: PinnedSendFn
   notificationService?: Pick<NotificationService, 'send'>
   /** Optional cross-base write quota override (limit/window/store). Omit → process-global default. */
   crossBaseWriteQuota?: CrossBaseWriteQuotaConfig
@@ -1554,6 +1712,13 @@ export interface AutomationDeps {
    * authorization read shares the write transaction; a fixed `fwbGateChecks` remains a test seam.
    */
   fwbGateChecksFactory?: (queryFn: AutomationDeps['queryFn']) => FwbGateChecks
+  /**
+   * 客户反馈 2026-09-24 #4b — the sheet's fields (`id`, `type`, `property`) so rule and condition_branch
+   * conditions compare by FIELD TYPE (dates by calendar day in the business timezone, person/link/multiSelect
+   * as id sets, numbers numerically, …). OMITTED ⇒ the legacy untyped evaluation and NO field query — the
+   * zero-DB executor test seams stay zero-DB. Production (`AutomationService`) binds it to `meta_fields`.
+   */
+  loadConditionFields?: (sheetId: string) => Promise<ReadonlyArray<AutomationConditionField>>
 }
 
 /** FWB fail-closed default: every gate denies. Production binds real checks at AutomationService
@@ -1574,6 +1739,71 @@ export type CrossBaseWriteGate =
   | { crossBase: true; ok: true }
   | { crossBase: true; ok: false; error: string }
 
+/**
+ * The addressing verdict `AutomationExecutor.resolveCrossBaseWriteTarget` returns — the first half of
+ * {@link CrossBaseWriteGate}, before any authority / quota check. `crossBase: false` ⇒ update / delete / lock
+ * address the TRIGGER record (`context.sheetId` / `context.recordId`), whatever the config's target ids say.
+ */
+export type CrossBaseWriteTarget =
+  | { crossBase: false }
+  | { crossBase: true; resolved: false; error: string }
+  | { crossBase: true; resolved: true; targetBaseId: string | null; declaredBaseClaim: string | null }
+
+/**
+ * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — a SAME-BASE record-mutating action whose target is the TRIGGER
+ * record, and that record is already gone (the canonical case: a `record.deleted` rule whose action is
+ * `delete_record` on the same table — the trigger record cannot exist any more by definition).
+ *
+ * Before this fix the 0-row DELETE was reported as `success` AND still emitted a fresh
+ * `multitable.record.deleted` (new `_eventId`, depth+1) — which re-triggered the same rule until the depth
+ * guard (MAX_AUTOMATION_DEPTH = 3) dropped it: ONE user delete ⇒ THREE execution logs, and up to four
+ * webhook deliveries (the webhook bridge has no depth guard). Deleting nothing must publish nothing.
+ *
+ * Thrown INSIDE the write transaction so everything taken so far rolls back — including the #4196 Class-A
+ * claim (a committed claim for a no-op would turn a legitimate retry into a false duplicate) — and caught
+ * by the action method, which converts it into a values-free `skipped` step. Control flow, never a failure.
+ */
+export class SameBaseTargetRecordMissingSignal extends Error {
+  constructor(readonly actionType: AutomationActionType) {
+    super(`${actionType}: same-base target (trigger) record no longer exists`)
+    this.name = 'SameBaseTargetRecordMissingSignal'
+  }
+}
+
+/** Values-free reason carried by a step skipped through {@link SameBaseTargetRecordMissingSignal}. */
+export const TARGET_RECORD_MISSING_SKIP_REASON = 'target_record_missing'
+
+/**
+ * 客户反馈 2026-10-21 (a) — values-free reason on a `send_dingtalk_person_message` step that reached NOBODY
+ * because every resolved recipient was skipped (no linked DingTalk account, inactive, or no such user).
+ *
+ * The step stays `skipped`, NOT `failed`, on purpose: a failed step fail-stops every action after it in
+ * `executeActions` (the same reason DT-OPS-04 refuses to fail a valid-but-split audience), and an
+ * unreachable audience is a configuration gap, not a transport fault — nothing about re-running it helps
+ * until somebody links DingTalk. What changes is that it is no longer silent: the reason code plus the
+ * per-cause counts let the manager/test-run/log surfaces say "0 人收到：N 人未绑定钉钉" instead of a bare
+ * "skipped", and the step error no longer carries user ids (the UI renders step.error verbatim). The ids
+ * stay in `output.skippedUserIds` and in the per-recipient delivery rows exactly as before.
+ */
+export const DINGTALK_RECIPIENTS_UNREACHABLE_REASON = 'dingtalk_recipients_unreachable'
+
+export interface DingTalkSkippedRecipientCounts {
+  /** Active local user with no linked, active DingTalk directory account. */
+  notLinked: number
+  /** Local user exists but is deactivated. */
+  inactive: number
+  /** No local user with that id. */
+  notFound: number
+}
+
+/** Values-free step error for an all-skipped person message: counts only, never ids. */
+export function describeDingTalkUnreachableRecipients(counts: DingTalkSkippedRecipientCounts): string {
+  const total = counts.notLinked + counts.inactive + counts.notFound
+  return `No DingTalk recipient was reached: ${total} skipped `
+    + `(not linked: ${counts.notLinked}, inactive: ${counts.inactive}, not found: ${counts.notFound}) `
+    + '(DINGTALK_RECIPIENTS_UNREACHABLE)'
+}
+
 // ── Executor class ────────────────────────────────────────────────────────
 
 export class AutomationExecutor {
@@ -1591,6 +1821,38 @@ export class AutomationExecutor {
     this.crossBaseQuotaWindowMs = override?.windowMs ?? def.windowMs
     // Injected store wins (test isolation); else the module-level singleton default.
     this.crossBaseQuotaStore = override?.store ?? defaultCrossBaseWriteQuotaStore
+  }
+
+  /**
+   * 客户反馈 2026-09-24 #4b — the typed-evaluation options for `evaluateConditions`: the sheet's field types
+   * (loaded once per execution via `deps.loadConditionFields`, cached on the context so the top-level
+   * conditions and every condition_branch share ONE read) plus the once-per-rule values-free warning for
+   * values that cannot be read as their field's type. Never throws: no loader or a failing loader ⇒ `null`
+   * fields ⇒ the legacy untyped evaluation, so a field-table hiccup can never fail a run.
+   */
+  private async conditionEvaluationOptions(context: ExecutionContext): Promise<ConditionEvaluationOptions> {
+    if (context.conditionFields === undefined) {
+      context.conditionFields = await this.loadConditionFieldMap(context.sheetId, context.ruleId)
+    }
+    return {
+      fields: context.conditionFields,
+      onUnreadableValue: (info) => warnUnreadableConditionValueOnce(context.ruleId, context.sheetId, info),
+    }
+  }
+
+  private async loadConditionFieldMap(
+    sheetId: string,
+    ruleId: string,
+  ): Promise<ReadonlyMap<string, AutomationConditionField> | null> {
+    const loader = this.deps.loadConditionFields
+    if (!loader) return null
+    try {
+      return normalizeConditionFields(await loader(sheetId))
+    } catch {
+      // Values-free: the failure reason is not logged (it may echo connection details); ids only.
+      logger.warn('Automation condition field types unavailable; evaluating conditions untyped', { ruleId, sheetId })
+      return null
+    }
   }
 
   /**
@@ -1650,9 +1912,10 @@ export class AutomationExecutor {
       dispatchMode,
     }
 
-    // Evaluate conditions
+    // Evaluate conditions — typed by the sheet's field types when the wiring provides them (#4b).
     if (rule.conditions) {
-      const conditionsPassed = evaluateConditions(rule.conditions, context.recordData)
+      const conditionOptions = await this.conditionEvaluationOptions(context)
+      const conditionsPassed = evaluateConditions(rule.conditions, context.recordData, conditionOptions)
       if (!conditionsPassed) {
         execution.status = 'skipped'
         execution.duration = Date.now() - startTime
@@ -2282,8 +2545,10 @@ export class AutomationExecutor {
     let matched = false
 
     try {
+      // #4b: branch conditions compare by field type exactly like the rule's top-level conditions.
+      const conditionOptions = await this.conditionEvaluationOptions(context)
       for (const branch of branches) {
-        if (branch.conditions && evaluateConditions(branch.conditions, context.recordData)) {
+        if (branch.conditions && evaluateConditions(branch.conditions, context.recordData, conditionOptions)) {
           selected = branch
           matched = true
           break
@@ -2506,7 +2771,17 @@ export class AutomationExecutor {
     let result: AutomationStepResult
 
     try {
-      switch (action.type) {
+      // S3 fix round 1 (R4; ADR adr-stock-prep-project-sheets-20261008 §5 「对所有人生效，含管理员」): the
+      // stock-preparation project overview is written ONLY by its plugin. The record actions below write
+      // through bare SQL with no person capability in front of them (same-base create has no gate at all;
+      // the cross-base gate checks base write only), so the clamp the capability resolvers apply never sees
+      // them. Refused here, for every sheet the action could address — the trigger sheet, `targetSheetId`
+      // and create's `sheetId` — before any write, read-only lookup excepted. An action whose candidate ids
+      // cannot be an overview (the derived-id prefilter) issues no statement and runs exactly as before.
+      const overviewRefusal = await this.refuseRecordActionOnStockPrepOverview(action, context)
+      if (overviewRefusal) {
+        result = overviewRefusal
+      } else switch (action.type) {
         case 'update_record':
           result = await this.executeUpdateRecord(action.config, context, identity)
           break
@@ -2606,6 +2881,53 @@ export class AutomationExecutor {
     }
 
     return result
+  }
+
+  /**
+   * S3 fix round 1 (R4) — the automation half of the stock-preparation overview's read-only guarantee.
+   * Returns a failed step (values-free: a fixed code + sentence, no id) when a RECORD action could write an
+   * overview sheet, else null. Candidate sheets are every id the action may address: the trigger sheet
+   * (the same-base default target of update / delete / lock / form write-back), `config.targetSheetId`
+   * (cross-base update / delete / lock) and `config.sheetId` (create's target, same- or cross-base). Over-
+   * refusing a rule whose TRIGGER is the overview is deliberate: nobody may author automations there
+   * (`canManageAutomation` is clamped), so such a rule can only predate the stamp.
+   * Not a record action → null with no IO; no candidate in the derived-id namespace → null with no IO.
+   */
+  private async refuseRecordActionOnStockPrepOverview(
+    action: AutomationAction,
+    context: ExecutionContext,
+  ): Promise<AutomationStepResult | null> {
+    if (!STOCK_PREP_OVERVIEW_GUARDED_ACTIONS.has(action.type)) return null
+    const config = isPlainRecord(action.config) ? action.config : {}
+    const candidates = [context.sheetId, config.targetSheetId, config.sheetId]
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    const overviews = await loadStockPreparationOverviewSheetIds(this.deps.queryFn, candidates)
+    if (overviews.size === 0) return null
+    return { actionType: action.type, status: 'failed', error: STOCK_PREP_OVERVIEW_AUTOMATION_REFUSAL }
+  }
+
+  /**
+   * 备料 option B (human-write-lock.ts): `update_record` / `create_record` write `meta_records` with bare SQL on
+   * behalf of a rule a PERSON authored, so they must not write a column only the PLM pull may write. Checked at
+   * EXECUTION (not only at rule save), so a rule saved before the column was marked is refused too, and only the
+   * steps that actually name a locked column are affected. A failed step with the closed code; values-free log
+   * (counts and the fixed code only). Runs before any claim / write, read-only lookup only.
+   */
+  private async refuseHumanWriteLockedTargets(
+    actionType: 'update_record' | 'create_record',
+    sheetId: string,
+    fieldIds: string[],
+    context: ExecutionContext,
+  ): Promise<AutomationStepResult | null> {
+    const locked = await findHumanWriteLockedFieldIds(this.deps.queryFn, sheetId, fieldIds)
+    if (locked.length === 0) return null
+    logger.warn('Automation step refused: it writes a human-write-locked column', {
+      code: 'FIELD_READONLY_PLM_SYSTEM',
+      actionType,
+      ruleId: context.ruleId,
+      lockedFieldCount: locked.length,
+    })
+    return { actionType, status: 'failed', error: HUMAN_WRITE_LOCK_AUTOMATION_REFUSAL }
   }
 
   private async notifyRuleCreatorOfDingTalkGroupFailure(
@@ -2780,19 +3102,21 @@ export class AutomationExecutor {
   }
 
   /**
-   * ②b write-gate, CONTEXT-AGNOSTIC "new shape" (queryFn, actorId, triggerSheetId, targetSheetId,
-   * declaredTargetBaseId). The record-mutating executors delegate here via `evaluateCrossBaseWrite`, and the
-   * T3-5 approval cross-base resultWriteback backwrite calls it directly on the SAME executor instance so it
-   * shares the per-target-base write QUOTA (Q5) with update/create/delete/lock. Behaviour is unchanged from
-   * the pre-T3-5 method; only the trigger sheet/actor + queryFn are now explicit params instead of `context`.
+   * The ADDRESSING half of the ②b write gate, and the ONLY place that decides it: is a write addressed at
+   * `targetSheetId` (with the raw `declaredTargetBaseId` claim) a same-base write relative to
+   * `triggerSheetId`, a cross-base write, or unresolvable? Read-only (at most two `meta_sheets` lookups), no
+   * authority check, no quota slot. `evaluateCrossBaseWriteGate` consumes it first; the rule-save check
+   * for 客户反馈 2026-09-24 #3 (`validateDeletedTriggerSelfMutationTargets` in automation-service.ts) consumes
+   * it too, because a same-base verdict means update/delete/lock address `context.recordId` — the TRIGGER
+   * record — whatever `targetSheetId` / `targetRecordId` say (executeUpdateRecord / executeDeleteRecord /
+   * executeLockRecord only retarget when `gate.crossBase`).
    */
-  async evaluateCrossBaseWriteGate(
+  async resolveCrossBaseWriteTarget(
     queryFn: AutomationDeps['queryFn'],
-    actorId: string | null,
     triggerSheetId: string,
     targetSheetId: string,
     declaredTargetBaseId: string | undefined,
-  ): Promise<CrossBaseWriteGate> {
+  ): Promise<CrossBaseWriteTarget> {
     // Fast-path: a write to the SAME sheet as the trigger, with no explicit cross-base `targetBaseId`,
     // is DEFINITIONALLY same-base — a sheet cannot exist in two bases — so skip the base lookups
     // entirely. This keeps a legitimate same-sheet write from fail-closing when the sheet row is
@@ -2816,7 +3140,7 @@ export class AutomationExecutor {
     if (rawTargetBaseId === undefined) {
       return {
         crossBase: true,
-        ok: false,
+        resolved: false,
         error: `Cross-base write target sheet ${targetSheetId} is missing or soft-deleted (no resolvable base)`,
       }
     }
@@ -2828,11 +3152,45 @@ export class AutomationExecutor {
     // same-set are same-base; a null/legacy base vs a set base is cross-base.
     if (triggerBaseId === targetBaseId) return { crossBase: false }
 
+    return { crossBase: true, resolved: true, targetBaseId, declaredBaseClaim }
+  }
+
+  /**
+   * ②b write-gate, CONTEXT-AGNOSTIC "new shape" (queryFn, actorId, triggerSheetId, targetSheetId,
+   * declaredTargetBaseId). The record-mutating executors delegate here via `evaluateCrossBaseWrite`, and the
+   * T3-5 approval cross-base resultWriteback backwrite calls it directly on the SAME executor instance so it
+   * shares the per-target-base write QUOTA (Q5) with update/create/delete/lock. Behaviour is unchanged from
+   * the pre-T3-5 method; only the trigger sheet/actor + queryFn are now explicit params instead of `context`.
+   */
+  async evaluateCrossBaseWriteGate(
+    queryFn: AutomationDeps['queryFn'],
+    actorId: string | null,
+    triggerSheetId: string,
+    targetSheetId: string,
+    declaredTargetBaseId: string | undefined,
+  ): Promise<CrossBaseWriteGate> {
+    // S3 fix round 2 (F2; register R-37): the stock-preparation project overview is written ONLY by its plugin.
+    // Every consumer of this gate — update / create / delete / lock, the approval-form write-back and the
+    // approval RESULT write-back to another base (automation-service.ts `writeApprovalResultBackCrossBase`,
+    // whose only authority check is this gate) — is refused here when the target sheet carries the overview
+    // stamp, same-base or cross-base, BEFORE the addressing reads, the authority check and the quota slot.
+    // Values-free step error. An id outside the derived-id shape cannot be an overview: no statement.
+    if ((await loadStockPreparationOverviewSheetIds(queryFn, [targetSheetId])).size > 0) {
+      return { crossBase: true, ok: false, error: STOCK_PREP_OVERVIEW_AUTOMATION_REFUSAL }
+    }
+    // Addressing half (same-base vs cross-base vs unresolvable) — shared, byte-for-byte, with the rule-save
+    // check `validateDeletedTriggerSelfMutationTargets` (see resolveCrossBaseWriteTarget). Same queries in the
+    // same order as before the extraction.
+    const target = await this.resolveCrossBaseWriteTarget(queryFn, triggerSheetId, targetSheetId, declaredTargetBaseId)
+    if (!target.crossBase) return { crossBase: false }
+    if (target.resolved === false) return { crossBase: true, ok: false, error: target.error }
+    const { targetBaseId, declaredBaseClaim } = target
+
     // Cross-base AUTHORITY decision — claim==truth then base-write — via the shared, context-agnostic primitive
     // (C1: `resolveCrossBaseWriteAuthority`, the SAME primitive the cross-base mirror write-through consumes; see
     // the design-lock §3/§10). The primitive returns a structured reason; this adapter maps it back to the EXACT,
     // unchanged `CrossBaseWriteGate` error strings (order preserved: claim before writable). (`declaredBaseClaim`
-    // computed at the top, reused here.)
+    // is the trimmed claim computed by resolveCrossBaseWriteTarget, reused here.)
     const claimed = declaredBaseClaim
     const authority = await resolveCrossBaseWriteAuthority({
       actorId,
@@ -3011,12 +3369,20 @@ export class AutomationExecutor {
         effectiveRecordId = targetRecordId
       }
 
+      // 备料 option B: a human-write-locked (PLM-system) column is never written by an automation.
+      const lockRefusal = await this.refuseHumanWriteLockedTargets('update_record', effectiveSheetId, Object.keys(patch), context)
+      if (lockRefusal) return lockRefusal
+
       // rich-longText write-path defense: this bare UPDATE bypasses the 5 record-write
       // validators, so sanitize any rich-longText value in the patch against the TARGET
       // sheet's field config before it reaches the DB (inert-by-construction at every writer). A
       // read-only field-config lookup — never touches `meta_records` — so it stays OUTSIDE the
       // transaction below (same placement as before this slice).
       await this.sanitizeRichLongTextInWritePayload(effectiveSheetId, patch)
+      // Field retype slice 3a (ADR §3.11 row 6): this writer keeps no field-type snapshot of its own, so take one
+      // here, BEFORE the fence (gated: conversion flag or writer fence off ⇒ null, no query). The handler below re-reads the
+      // same fields after the fence and refuses if a conversion retyped one while this write was queued.
+      const schemaSnapshot = await loadFieldSchemaSnapshot(this.deps.queryFn, effectiveSheetId, Object.keys(patch))
 
       // P1#2c REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable
       // enqueue (flag ON, inside the txn below) and the legacy post-commit emit (flag OFF) share one identity.
@@ -3035,6 +3401,9 @@ export class AutomationExecutor {
       // `poolManager.get().transaction(...)` — is re-verified for THIS slice by the atomicity golden,
       // not assumed from D-1). A failed revision INSERT rolls the UPDATE back too — no half-write (an
       // updated `meta_records` row with no matching `meta_record_revisions` row) is possible.
+      // 客户反馈 2026-09-24 #3: did the UPDATE touch a row? Decided INSIDE the transaction (RETURNING), read
+      // after it: a 0-row update publishes NO chain event and NO real-time invalidation (see below).
+      let recordUpdated = false
       const txResult = await this.withTransaction(effectiveSheetId, async (query) => {
         // #4196 Class-A claim — FIRST statement, SAME transaction as the mutation+revision below. A
         // duplicate (retry/replay) short-circuits: return the already-applied success and skip the UPDATE
@@ -3042,6 +3411,14 @@ export class AutomationExecutor {
         if (await this.claimClassAOrSkip(query, identity, 'update_record', config) === 'duplicate') {
           return this.alreadyAppliedResult('update_record')
         }
+        // Field retype slice 3a (ADR §3.11 row 6): post-fence re-read of the patched fields; a type / option
+        // change since `schemaSnapshot` throws (rolls back the claim too) ⇒ the step fails, zero writes.
+        const currentFields = await assertFieldSchemaUnchangedAfterFence(query, effectiveSheetId, schemaSnapshot, Object.keys(patch))
+        // ADR §3.12, gated (Decision Register R-22): select / multiSelect values are validated against the same
+        // read with the record write paths' rules; a value outside the options fails the step (values-free), zero
+        // writes. multiSelect values are written normalised, as the record write paths write them. Gate off ⇒
+        // `currentFields` is null ⇒ `{}` ⇒ the patch is untouched (today's behaviour).
+        Object.assign(patch, validateAutomationOptionValues(currentFields, patch))
         // Record-lock guard (rank-8 review B1; decisions d/e/f). An automation acting on behalf of its
         // actor is NOT implicitly the locker/owner — overwriting a locked record is blocked. To write
         // through a lock the rule must first run a `lock_record{locked:false}` action (decision f). The
@@ -3122,18 +3499,37 @@ export class AutomationExecutor {
             snapshot: normalizeJson(updatedRow.data),
           })
         }
+        recordUpdated = updatedRow !== undefined
         // P1#2c REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
         // UPDATE + revision (any throw above rolls it back; the duplicate-claim early-return above skips it,
-        // exactly as it skips the legacy emit). Unconditional on `updatedRow` to mirror the legacy emit
-        // 1:1 (the 0-row same-base leniency still emitted). Flag OFF ⇒ no-op (legacy emit below fires).
-        await enqueueRecordEventIfDurable(
-          { query, isTransaction: true } as unknown as TransactionalQueryable,
-          'multitable.record.updated',
-          chainEventPayload,
-        )
+        // exactly as it skips the legacy emit). Flag OFF ⇒ no-op (legacy emit below fires).
+        // 客户反馈 2026-09-24 #3: GATED on `updatedRow` (was "unconditional … to mirror the legacy emit").
+        // A 0-row same-base UPDATE (trigger record already gone — e.g. a `record.deleted` rule) changed
+        // nothing, so it must not manufacture a `multitable.record.updated` for downstream rules/webhooks:
+        // that ghost event re-fires record.updated rules on a record that does not exist, depth by depth.
+        // The step's reported status is unchanged (same-base 0-row leniency, see the comment above) — the
+        // defect was the emit, and `output.noop` now says so in the execution log.
+        if (updatedRow) {
+          await enqueueRecordEventIfDurable(
+            { query, isTransaction: true } as unknown as TransactionalQueryable,
+            'multitable.record.updated',
+            chainEventPayload,
+          )
+        }
         return null
       })
       if (txResult) return txResult
+
+      if (!recordUpdated) {
+        // 客户反馈 2026-09-24 #3: nothing changed ⇒ no legacy emit, no real-time invalidation. Same
+        // leniency on the reported status as before (pinned by the executor unit suites); the log carries a
+        // values-free marker instead of a bare success.
+        return {
+          actionType: 'update_record',
+          status: 'success',
+          output: { updatedFields: Object.keys(fields), noop: true, reason: TARGET_RECORD_MISSING_SKIP_REASON },
+        }
+      }
 
       // P1#2c REPLACE: flag OFF ⇒ legacy post-commit emit (byte-identical); flag ON ⇒ SUPPRESSED (the
       // same-txn enqueue above is the delivery path — keep-both would double-deliver the webhook sink).
@@ -3165,11 +3561,12 @@ export class AutomationExecutor {
     // shared per-target-base quota bucket).
     const targetSheetId = (config.targetSheetId as string) || context.sheetId
     const declaredTargetBaseId = typeof config.targetBaseId === 'string' ? config.targetBaseId : undefined
+    // Hoisted out of the try so the catch below can name the addressed record in the `skipped` result.
+    let effectiveSheetId = context.sheetId
+    let effectiveRecordId = context.recordId
 
     try {
       const gate = await this.evaluateCrossBaseWrite(targetSheetId, declaredTargetBaseId, context)
-      let effectiveSheetId = context.sheetId
-      let effectiveRecordId = context.recordId
       if (gate.crossBase) {
         if (gate.ok === false) {
           return { actionType: 'delete_record', status: 'failed', error: gate.error }
@@ -3243,21 +3640,39 @@ export class AutomationExecutor {
           | undefined
         // ②b claim==truth for the record: a cross-base delete must address a record that ACTUALLY lives in
         // `targetSheetId`. No row → the targetRecordId does not exist there → fail-closed (never a silent
-        // no-op success). Same-base keeps its leniency (a missing trigger record yields a 0-row DELETE
-        // reported as success) to avoid any behavior regression vs the other same-base sinks.
-        if (gate.crossBase && !lockRow) {
-          // #4196 atomicity: THROW (not return) so this transaction — and the Class-A claim taken above —
-          // ROLLS BACK. A non-throwing `return {failed}` would COMMIT the claim for an action that never
-          // deleted anything, so a legitimate retry would skip as a FALSE duplicate (the exact hazard this
-          // ledger exists to prevent). The method's outer catch reports the identical failed result.
-          // Consistent with the lock-conflict check just below, which already throws to roll back.
-          throw new Error(
-            `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
-          )
+        // no-op success).
+        // 客户反馈 2026-09-24 #3 (裁定 PR #6074): a SAME-BASE delete of a missing trigger record used to keep a
+        // "0-row DELETE reported as success" leniency — and still emitted a fresh `multitable.record.deleted`
+        // (new `_eventId`, depth+1), so a `record.deleted → delete_record` rule re-triggered itself until the
+        // depth guard cut it: ONE user delete ⇒ THREE execution logs. Now: no row ⇒ nothing to delete ⇒ the
+        // step is `skipped` (values-free reason) and NOTHING is published — no outbox row, no legacy emit, no
+        // real-time invalidation, no revision. The signal THROWS for the same reason the cross-base branch
+        // does: the transaction, and the Class-A claim taken above, roll back (no claim for a no-op).
+        if (!lockRow) {
+          if (gate.crossBase) {
+            // #4196 atomicity: THROW (not return) so this transaction — and the Class-A claim taken above —
+            // ROLLS BACK. A non-throwing `return {failed}` would COMMIT the claim for an action that never
+            // deleted anything, so a legitimate retry would skip as a FALSE duplicate (the exact hazard this
+            // ledger exists to prevent). The method's outer catch reports the identical failed result.
+            // Consistent with the lock-conflict check just below, which already throws to roll back.
+            throw new Error(
+              `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+            )
+          }
+          throw new SameBaseTargetRecordMissingSignal('delete_record')
         }
-        if (lockRow) {
-          ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
-        }
+        ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
+
+        // R-66 ① (owner 2026-10-28, plm-row-delete-guard.ts): a rule cannot delete a PLM row on a stock-preparation
+        // template sheet, whoever authored it. Checked on the row locked FOR UPDATE above, before any write. THROWS
+        // (like the cross-base missing-record branch) so this transaction — and the #4196 Class-A claim taken above —
+        // ROLLS BACK; the catch below reports the fixed failed step.
+        await assertPlmRowDeletable(
+          query,
+          effectiveSheetId,
+          await loadPlmGuardFields(query, effectiveSheetId),
+          normalizeJson(lockRow.data),
+        )
 
         // D-2 (side-door delete recoverability, #4004; default OFF ⇒ every `sideDoorTrash` branch below is
         // dead and this method behaves byte-identically to D-1, §1.9). §1.2 anchor: ONE pre-generated uuid
@@ -3276,9 +3691,9 @@ export class AutomationExecutor {
         // §1.3: capture the INBOUND edges BEFORE the links DELETE below destroys both directions. No-op
         // unless BOTH the D-2 flag and the capture flag are on (§1.5 nesting). Over-cap ⇒
         // TombstoneCaptureCapExceededError propagates out of withTransaction to this method's catch ⇒ step
-        // `failed`, whole txn rolled back, record NOT deleted (fail-closed, §1.4 / golden G7). Skipped when
-        // there is no row: a same-base delete of a missing record must not anchor tombstones to a delete
-        // revision that will never be written.
+        // `failed`, whole txn rolled back, record NOT deleted (fail-closed, §1.4 / golden G7). (`lockRow` is
+        // always present from here on — the no-row case threw above; the guard is kept so the D-2 block
+        // reads as written and audited.)
         if (lockRow) {
           await captureSideDoorInboundTombstones(query, {
             sheetId: effectiveSheetId,
@@ -3346,15 +3761,24 @@ export class AutomationExecutor {
         // delete is rejected before this DELETE unless claim==truth + trigger-actor base-write.
         // lock-guarded: automation delete_record (C2a) — ensureRecordNotLocked enforced just above.
         // revision-emitted: automation delete_record, D-1 — recordRecordRevision(action:'delete') @2365.
-        await query(
+        const deleteRes = await query(
           'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2',
           [effectiveRecordId, effectiveSheetId],
         )
+        // 客户反馈 2026-09-24 #3 belt-and-braces: the row was locked FOR UPDATE above, so inside a real
+        // transaction this DELETE always removes it. On the autocommit fallback (no `deps.transaction`) a
+        // concurrent delete can land between the SELECT and this statement — a driver-reported 0 rows then
+        // means nothing was deleted, and nothing may be published (the throw also drops the revision written
+        // above when a real transaction is present). A driver that reports no rowCount is trusted.
+        if (typeof deleteRes.rowCount === 'number' && deleteRes.rowCount === 0) {
+          throw new SameBaseTargetRecordMissingSignal('delete_record')
+        }
 
         // P1#2c REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
         // link cleanup + revision + DELETE (any throw above rolls it back; the duplicate-claim early-return
-        // above skips it, exactly as it skips the legacy emit). Unconditional on `lockRow` to mirror the
-        // legacy emit 1:1 (the 0-row same-base leniency still emitted). Flag OFF ⇒ no-op.
+        // above skips it, exactly as it skips the legacy emit). Reached ONLY when a row was actually deleted
+        // (客户反馈 2026-09-24 #3 — the former "unconditional on lockRow" 0-row emit was the self-chain).
+        // Flag OFF ⇒ no-op.
         await enqueueRecordEventIfDurable(
           { query, isTransaction: true } as unknown as TransactionalQueryable,
           'multitable.record.deleted',
@@ -3375,7 +3799,40 @@ export class AutomationExecutor {
 
       return { actionType: 'delete_record', status: 'success', output: { recordId: effectiveRecordId, sheetId: effectiveSheetId } }
     } catch (err) {
+      // 客户反馈 2026-09-24 #3: the transaction rolled back with nothing deleted and nothing published —
+      // report `skipped`, not `failed` (a missing trigger record is the expected state under `record.deleted`).
+      if (err instanceof SameBaseTargetRecordMissingSignal) {
+        return this.targetRecordMissingSkippedResult('delete_record', effectiveSheetId, effectiveRecordId)
+      }
+      // R-66: the PLM-row refusal — rolled back above; a failed step with the fixed code, values-free log line.
+      if (err instanceof PlmRowDeleteRefusedError) {
+        logger.warn('Automation step refused: it deletes a row the PLM pull maintains', {
+          code: err.code,
+          actionType: 'delete_record',
+          ruleId: context.ruleId,
+          reason: err.reason,
+        })
+        return { actionType: 'delete_record', status: 'failed', error: PLM_ROW_DELETE_AUTOMATION_REFUSAL }
+      }
       return { actionType: 'delete_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  /**
+   * 客户反馈 2026-09-24 #3: the step result for a same-base record action whose target — the trigger record —
+   * no longer exists. `skipped` (so the execution log says what happened and a whole-rule run of only such
+   * steps reads `skipped`, not `success`), with a values-free reason and the ids the success path already
+   * reports. NO mutation, NO revision, NO event/outbox row, NO real-time fan-out ran.
+   */
+  private targetRecordMissingSkippedResult(
+    actionType: AutomationActionType,
+    sheetId: string,
+    recordId: string,
+  ): AutomationStepResult {
+    return {
+      actionType,
+      status: 'skipped',
+      output: { recordId, sheetId, reason: TARGET_RECORD_MISSING_SKIP_REASON },
     }
   }
 
@@ -3482,10 +3939,16 @@ export class AutomationExecutor {
         return { actionType: 'create_record', status: 'failed', error: gate.error }
       }
 
+      // 备料 option B: an automation never seeds a human-write-locked (PLM-system) column on a new row.
+      const lockRefusal = await this.refuseHumanWriteLockedTargets('create_record', targetSheetId, Object.keys(data), context)
+      if (lockRefusal) return lockRefusal
+
       // rich-longText write-path defense: this bare INSERT bypasses the 5 record-write
       // validators, so sanitize any rich-longText value in `data` against the target sheet's
       // field config before it reaches the DB (inert-by-construction at every writer).
       await this.sanitizeRichLongTextInWritePayload(targetSheetId, data)
+      // Field retype slice 3a (ADR §3.11 row 6): pre-fence snapshot, same as executeUpdateRecord.
+      const schemaSnapshot = await loadFieldSchemaSnapshot(this.deps.queryFn, targetSheetId, Object.keys(data))
 
       // P1#2c REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable
       // enqueue (flag ON, inside the txn below) and the legacy post-commit emit (flag OFF) share one identity.
@@ -3518,6 +3981,11 @@ export class AutomationExecutor {
         if (await this.claimClassAOrSkip(query, identity, 'create_record', config) === 'duplicate') {
           return 'duplicate' as const
         }
+        // Field retype slice 3a (ADR §3.11 row 6): post-fence re-read before the INSERT.
+        const currentFields = await assertFieldSchemaUnchangedAfterFence(query, targetSheetId, schemaSnapshot, Object.keys(data))
+        // ADR §3.12, gated (R-22): same validation as update_record, on the same read. `data` is normalised in place,
+        // as sanitizeRichLongTextInWritePayload above already does; gate off ⇒ `{}` ⇒ untouched.
+        Object.assign(data, validateAutomationOptionValues(currentFields, data))
         // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
         // create is rejected before this INSERT unless claim==truth + trigger-actor base-write (§1.3 vector).
         // revision-emitted: D-1c slice ③ (A4) — recordRecordRevision(action:'create') below, same txn.
@@ -3937,6 +4405,14 @@ export class AutomationExecutor {
       ) {
         throw new Error('fwb_rejected:target_schema')
       }
+      // S3 fix round 2 (F7a; register R-37): the record this update writes lives on the sheet the pinned FORM
+      // SCHEMA names — not the trigger sheet, `targetSheetId` or `sheetId` the pre-dispatch guard
+      // (`refuseRecordActionOnStockPrepOverview`) can see. Refuse the read-only stock-preparation overview
+      // here, inside the transaction, before the gates, the bound-record checks and any write (the cross-base
+      // gate below refuses it too; this holds for a same-base target the gate would wave through).
+      if ((await loadStockPreparationOverviewSheetIds(query as AutomationDeps['queryFn'], [derived.sheetId])).size > 0) {
+        throw new Error('fwb_rejected:stock_prep_overview_read_only')
+      }
 
       if (this.deps.fwbGateChecksFactory) {
         const ruleMembership = await query(
@@ -4167,34 +4643,11 @@ export class AutomationExecutor {
     if (!ssrf.ok) {
       // `strict: false` in this package disables discriminated-union narrowing (same reason as the
       // button route); read `reason` off the rejection variant explicitly.
-      const guardReason = (ssrf as { reason?: string }).reason
-      // VALUES-FREE: the guard's `reason` is NOT logged — it is only mapped to a closed-set label. The
-      // URL (which may carry userinfo/query credentials) and every header value stay out of the log and
-      // out of the persisted step result; only the code + host SHAPE are recorded.
-      const refusal = classifyWebhookRefusal(url, guardReason)
-      logger.warn('[automation.send_webhook.refused]', {
-        code: refusal.code,
-        refusalClass: refusal.refusalClass,
-        hostFamily: refusal.hostFamily,
-        // IDENTIFIERS, not values — `sheetId` alone does not locate the rule when a sheet carries many
-        // (it only narrows to the sheet), so carry the two the context already holds. Same identifier
-        // discipline as the sibling button route (`routes/multitable-button.ts:311-314`).
-        sheetId: context.sheetId,
-        ruleId: context.ruleId,
-        executionId: context.executionId,
-      })
-      return {
-        actionType: 'send_webhook',
-        status: 'failed',
-        error: `${WEBHOOK_TARGET_REJECTED}:${refusal.refusalClass}`,
-        output: {
-          code: refusal.code,
-          refusalClass: refusal.refusalClass,
-          hostFamily: refusal.hostFamily,
-          dispatched: false,
-        },
-      }
+      return this.refusedWebhookTargetResult(url, (ssrf as { reason?: string }).reason, context, false)
     }
+    // S0-a: the addresses THIS check approved. Every dispatch below connects to one of them (pinned), so a
+    // name that re-resolves somewhere else between the check and the connect cannot move the request.
+    const approvedAddresses = (ssrf as { addresses: string[] }).addresses
 
     const method = (config.method as string) ?? 'POST'
     const headers = { ...((config.headers as Record<string, string>) ?? {}) }
@@ -4222,7 +4675,6 @@ export class AutomationExecutor {
       }
     }
 
-    const fetchFn = this.deps.fetchFn ?? globalThis.fetch
     const timeoutMs = webhookTimeoutMs()
 
     // #4196 Class-B two-phase (flag ON + identity present). Intent (Tx A) commits BEFORE the send; a prior
@@ -4231,7 +4683,7 @@ export class AutomationExecutor {
     // runs BYTE-IDENTICAL to pre-slice.
     const outboundId = this.classBOutboundIdentity(identity, 'send_webhook', config)
     if (outboundId) {
-      return this.executeSendWebhookTwoPhase(outboundId, { url, method, headers, bodyStr, fetchFn, timeoutMs })
+      return this.executeSendWebhookTwoPhase(outboundId, { url, method, headers, bodyStr, approvedAddresses, timeoutMs })
     }
 
     const retries = maxWebhookRetries()
@@ -4240,20 +4692,31 @@ export class AutomationExecutor {
     // #5619 review: the LOG below gets this structured view of the last attempt, never `lastError`. Two
     // separate variables on purpose — the log line physically cannot be handed the free text.
     let lastFailure: WebhookFailureInput = { kind: 'none' }
+    let attemptAddresses = approvedAddresses
     for (let attempt = 0; attempt <= retries; attempt++) {
+      if (attempt > 0) {
+        // S0-a: a retry is a NEW send, so it is checked again — the first check covered the first attempt
+        // only. A target that now resolves internally is refused here, before anything is dispatched, with
+        // the same closed-set shape as the pre-dispatch refusal (`dispatched: true`: earlier attempts went out).
+        const recheck = await checkWebhookTargetUrl(url, this.deps.ssrfLookupFn)
+        if (!recheck.ok) {
+          return this.refusedWebhookTargetResult(url, (recheck as { reason?: string }).reason, context, true)
+        }
+        attemptAddresses = (recheck as { addresses: string[] }).addresses
+      }
       try {
         const controller = new AbortController()
         const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
-        const response = await fetchFn(url, {
+        // G05: never follow — following would replay this exact method/body/headers (incl. the signature
+        // headers) at a target the gate never judged. The pinned transport does not follow; the fetch-shaped
+        // test seam gets `redirect: 'manual'`. Either way a 3xx resolves as itself, with no second request.
+        const response = await this.dispatchWebhookAttempt(url, attemptAddresses, {
           method,
           headers,
           body: bodyStr,
           signal: controller.signal,
-          // G05: do NOT let the platform follow. See the gate comment above — following would replay
-          // this exact method/body/headers (incl. the signature headers) at a target the gate never
-          // judged. `manual` resolves with the 3xx itself and issues no second request.
-          redirect: 'manual',
+          timeoutMs,
         })
         clearTimeout(timeout)
 
@@ -4340,6 +4803,75 @@ export class AutomationExecutor {
    * the FIRST hop did go out — the gate allowed that url. The `Location` is never read, logged or
    * followed: it is a value chosen by whoever answered, and it is the one input the gate never judged.
    */
+  private refusedWebhookTargetResult(
+    url: string,
+    guardReason: string | undefined,
+    context: ExecutionContext,
+    dispatched: boolean,
+  ): AutomationStepResult {
+    // VALUES-FREE: the guard's `reason` is NOT logged — it is only mapped to a closed-set label. The URL
+    // (which may carry userinfo/query credentials) and every header value stay out of the log and out of
+    // the persisted step result; only the code + host SHAPE are recorded.
+    const refusal = classifyWebhookRefusal(url, guardReason)
+    logger.warn('[automation.send_webhook.refused]', {
+      code: refusal.code,
+      refusalClass: refusal.refusalClass,
+      hostFamily: refusal.hostFamily,
+      // IDENTIFIERS, not values — `sheetId` alone does not locate the rule when a sheet carries many
+      // (it only narrows to the sheet), so carry the two the context already holds. Same identifier
+      // discipline as the sibling button route (`routes/multitable-button.ts:311-314`).
+      sheetId: context.sheetId,
+      ruleId: context.ruleId,
+      executionId: context.executionId,
+    })
+    return {
+      actionType: 'send_webhook',
+      status: 'failed',
+      error: `${WEBHOOK_TARGET_REJECTED}:${refusal.refusalClass}`,
+      output: {
+        code: refusal.code,
+        refusalClass: refusal.refusalClass,
+        hostFamily: refusal.hostFamily,
+        dispatched,
+      },
+    }
+  }
+
+  /**
+   * S0-a: ONE webhook send to an address the SSRF check approved. Production (no seam) uses
+   * `pinnedHttpsFetch`: it connects to `approvedAddresses[0]` — TLS SNI and `Host` stay the URL's host —
+   * and returns a 3xx as a plain status without a second request. The returned object carries only what
+   * the callers read (`status`, `ok`, and `type` from a fetch-shaped seam).
+   */
+  private async dispatchWebhookAttempt(
+    url: string,
+    approvedAddresses: string[],
+    init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal; timeoutMs: number },
+  ): Promise<{ status: number; ok: boolean; type?: string }> {
+    if (this.deps.fetchFn && !this.deps.pinnedWebhookSendFn) {
+      // Fetch-shaped TEST seam (see `AutomationDeps.pinnedWebhookSendFn`).
+      return this.deps.fetchFn(url, {
+        method: init.method,
+        headers: init.headers,
+        body: init.body,
+        signal: init.signal,
+        redirect: 'manual',
+      })
+    }
+    const pinned = approvedAddresses[0]
+    if (typeof pinned !== 'string' || pinned.length === 0) {
+      // Unreachable for an `ok` check (the guard always returns at least one address); fail closed anyway.
+      throw new TypeError('webhook target has no approved address')
+    }
+    const send: PinnedSendFn = this.deps.pinnedWebhookSendFn ?? pinnedHttpsFetch
+    return send(url, pinned, pinnedAddressFamily(pinned), {
+      method: init.method,
+      headers: init.headers,
+      body: init.body,
+      timeoutMs: init.timeoutMs,
+    })
+  }
+
   private refusedRedirectResult(
     url: string,
     ids: Record<string, string | undefined>,
@@ -4400,7 +4932,7 @@ export class AutomationExecutor {
       method: string
       headers: Record<string, string>
       bodyStr: string
-      fetchFn: typeof fetch
+      approvedAddresses: string[]
       timeoutMs: number
     },
   ): Promise<AutomationStepResult> {
@@ -4417,13 +4949,14 @@ export class AutomationExecutor {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), req.timeoutMs)
     try {
-      const response = await req.fetchFn(req.url, {
+      // G05 / S0-a: same posture as the legacy loop — connect to the approved (pinned) address and never
+      // follow a `Location` the gate did not judge.
+      const response = await this.dispatchWebhookAttempt(req.url, req.approvedAddresses, {
         method: req.method,
         headers: req.headers,
         body: req.bodyStr,
         signal: controller.signal,
-        // G05: same posture as the legacy loop — never follow a `Location` the gate did not judge.
-        redirect: 'manual',
+        timeoutMs: req.timeoutMs,
       })
       attempt = { kind: 'response', status: response.status }
       redirected = isRefusedRedirectStatus(response)
@@ -4489,42 +5022,152 @@ export class AutomationExecutor {
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
     const userIds = config.userIds as string[] | undefined
-    const message = config.message as string | undefined
+    // F9b r3: message shaping is now the button route's, byte-for-byte
+    // (routes/multitable-button.ts:229 `typeof ... === 'string' ? ....trim() : ''`). Before this, a
+    // whitespace-only or non-string message passed `if (!message)` and persisted a BLANK durable
+    // notification row - the bell renders `message` verbatim (MetaNotificationBell.vue:41-45), so a
+    // blank row is an undismissable no-op for the recipient. Both cases now take the same explicit
+    // step failure the button answers with MESSAGE_REQUIRED. The trimmed value is also what gets
+    // written and emitted, so padding never reaches the notification centre.
+    const message = typeof config.message === 'string' ? config.message.trim() : ''
 
     if (!userIds || userIds.length === 0) {
-      return { actionType: 'send_notification', status: 'failed', error: 'No user IDs specified' }
+      return { actionType: 'send_notification', status: 'failed', error: AUTOMATION_NO_RECIPIENTS_ERROR }
     }
     if (!message) {
       return { actionType: 'send_notification', status: 'failed', error: 'Notification message is required' }
     }
 
+    // F9b: normalize ONCE (trim + dedupe, the button route's exact recipient shaping) so the
+    // membership check, the durable rows and the emitted payload all speak about the SAME list.
+    const recipients = normalizeNotificationRecipients(userIds)
+    if (recipients.length === 0) {
+      return { actionType: 'send_notification', status: 'failed', error: AUTOMATION_NO_RECIPIENTS_ERROR }
+    }
+
+    // F9b §4 FAIL-CLOSED SINK — no queryFn ⇒ no durable notification is possible. Do NOT fall back to
+    // an eventBus-only "delivery": that is exactly the phantom (test ran green, notification centre
+    // empty) this slice closes.
+    const queryFn = this.deps.queryFn
+    if (typeof queryFn !== 'function') {
+      return { actionType: 'send_notification', status: 'failed', error: AUTOMATION_NOTIFICATION_SINK_UNAVAILABLE_ERROR }
+    }
+
+    // F9b §1 RECIPIENT HARD-REJECT (no write) — see checkNotificationRecipients. Fail-closed on BOTH
+    // its branches (outside-roster and roster-unreadable); r2 split it out of the write try/catch so the
+    // reported stage is the stage that broke, and so the DRY RUN can run the identical check read-only.
+    const gate = await this.checkNotificationRecipients(queryFn, recipients, context)
+    if (!gate.ok) {
+      return { actionType: 'send_notification', status: 'failed', error: gate.error }
+    }
+
+    let persisted: number
     try {
-      // Emit notification event — CollabService or other handler picks this up.
-      //
-      // B1-S1 D0-A SCOPE NOTE: the DURABLE notification write does NOT live here. A
-      // button's durable Notification-Center delivery is a route-level dedicated
-      // side-effect transaction (see routes/multitable-button.ts) so it composes
-      // with the run's dedup + audit as one all-or-nothing unit. The automation-RULE
-      // path stays eventBus-only here — adding durable writes / member-filter / dedup
-      // to the shared executor would expand automation's behavior surface, which is
-      // out of scope for a button slice.
+      // F9b §2 DURABLE WRITE FIRST — one `notification.sent` row per recipient through the SAME seam
+      // the button route uses (no parallel INSERT, no new table, no dedup ledger borrowed from the
+      // button). A missing table or a failing INSERT is NEVER swallowed (no isUndefinedTableError
+      // "0 rows = success" here): it throws into the catch below and the step fails, so a
+      // `status:'success'` always implies durable rows.
+      // r2: `inserted` is the seam's OWN count (record-subscription-service.ts re-trims/re-filters before
+      // it builds rows), so output.persisted is a MEASUREMENT of what was written, not a restatement of
+      // what we asked for.
+      const result = await insertRecordSubscriptionNotifications(queryFn, {
+        userIds: recipients,
+        sheetId: context.sheetId,
+        recordId: context.recordId,
+        eventType: 'notification.sent',
+        message,
+        actorId: context.actorId ?? null,
+      })
+      persisted = result.inserted
+    } catch (err) {
+      return {
+        actionType: 'send_notification',
+        status: 'failed',
+        error: `send_notification durable write failed: ${err instanceof Error ? err.message : String(err)}`,
+      }
+    }
+
+    try {
+      // F9b §2 EMIT AFTER THE WRITE — the legacy realtime event still fires for any in-memory
+      // subscriber, but it can no longer announce a notification that was never persisted.
       this.deps.eventBus.emit('automation.notification', {
-        userIds,
+        userIds: recipients,
         message,
         sheetId: context.sheetId,
         recordId: context.recordId,
         actorId: context.actorId,
       })
-
-      return {
-        actionType: 'send_notification',
-        status: 'success',
-        output: { notifiedUsers: userIds.length },
-      }
     } catch (err) {
+      // Pre-F9b behaviour for a throwing subscriber is kept (step fails). The durable rows are
+      // already committed at this point — stated plainly rather than papered over.
       return { actionType: 'send_notification', status: 'failed', error: err instanceof Error ? err.message : String(err) }
     }
+
+    return {
+      actionType: 'send_notification',
+      status: 'success',
+      output: { notifiedUsers: recipients.length, persisted },
+    }
   }
+
+  /**
+   * F9b §1 RECIPIENT GATE — the ONE membership check for this action. LIVE PATH ONLY.
+   *
+   * r2 NOTE (refutation A, blocker 2 — why the dry run does NOT call this): the simulate path is a
+   * pinned ZERO-DATABASE path (tests/unit/automation-v1.test.ts asserts `expect(deps.queryFn)
+   * .not.toHaveBeenCalled()` for every simulated step — 14 places, e.g. :679/:805/:1164), so a
+   * read-only roster preflight in simulate cannot be added without relaxing that invariant. The
+   * consequence is stated plainly instead of papered over: a TEST RUN never validates recipients, so a
+   * pre-existing rule aimed at someone outside the roster still test-runs green and only fails on its
+   * first LIVE trigger (and then skips the actions after it). Closing that needs its own slice
+   * (preflight + the zero-DB simulate invariant re-decided together); it is NOT done here.
+   *
+   * Same resolver, same set, SAME ARGUMENT as the button route (`loadSheetMemberUserIdSet(query,
+   * sheetId)`, routes/multitable-button.ts:243) — one recipient口径 for both surfaces, no drift. ANY
+   * recipient outside the roster fails the WHOLE step: no partial delivery, no durable row, no emit.
+   * WIDTH: the roster is the platform selectable-people set, NOT a per-sheet grant — see
+   * AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR above for the exact derivation.
+   * The `context.sheetId` argument is pinned by tests/unit/automation-rule-notification-persist.test.ts
+   * (“roster is resolved for the TRIGGERING sheet” asserts $1 of the roster query), because a roster
+   * read keyed by the wrong id would still answer a plausible list and stay green otherwise.
+   *
+   * FAIL-CLOSED ON BOTH BRANCHES, by two DIFFERENT mechanisms (r2 states them separately because r1's
+   * comment described only the first): a roster that resolves to ZERO ROWS is the EMPTY set, so every
+   * recipient is outside it ⇒ rejected; a roster read that THROWS never produces a set at all ⇒ the
+   * catch below rejects with ROSTER_UNAVAILABLE. Neither branch can fall through to a write.
+   */
+  private async checkNotificationRecipients(
+    queryFn: AutomationDeps['queryFn'],
+    recipients: string[],
+    context: ExecutionContext,
+  ): Promise<NotificationRecipientGate> {
+    let memberSet: Set<string>
+    try {
+      memberSet = await loadSheetMemberUserIdSet(queryFn, context.sheetId)
+    } catch (err) {
+      logger.warn('[automation.send_notification] recipient roster unreadable; delivery refused', {
+        sheetId: context.sheetId,
+        ruleId: context.ruleId,
+        requested: recipients.length, // counts only — never the ids, never the message
+        error: err instanceof Error ? err.name : 'unknown',
+      })
+      return { ok: false, error: AUTOMATION_NOTIFICATION_ROSTER_UNAVAILABLE_ERROR, rejected: recipients.length }
+    }
+
+    const rejected = recipients.filter((userId) => !memberSet.has(userId)).length
+    if (rejected > 0) {
+      logger.warn('[automation.send_notification] recipients rejected: outside selectable-people roster', {
+        sheetId: context.sheetId,
+        ruleId: context.ruleId,
+        requested: recipients.length,
+        rejected, // counts only — never the ids, never the message
+      })
+      return { ok: false, error: AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR, rejected }
+    }
+    return { ok: true }
+  }
+
 
   private async executeSendEmail(
     config: SendEmailConfig,
@@ -4837,20 +5480,31 @@ export class AutomationExecutor {
       }
     }
 
-    const delivery = await insertDingTalkApprovalCardDelivery(this.deps.queryFn, {
-      instanceId,
-      nodeKey,
-      recipientUserId: assigneeUserId,
-      recipientDingTalkUserId: dingtalkUserId,
-      deliveryKind: useInteractiveCard ? 'interactive_card' : 'work_notice_action_card',
-      integrationId: assigneeIntegrationId || null,
-      // P1-1: persist the node-entry epoch this card is sent for so the action wrapper + the engine's
-      // in-txn binding can bind the card to the SAME round's active assignment (closes same-node
-      // re-entry). Review P3-1: under the STRICT binding a NULL epoch is NOT actionable (fail-closed
-      // dead-on-arrival), so a null here means this card will never be clickable — warn (values-free)
-      // rather than silently ship a dead card. Expected only for pre-epoch/legacy task events.
-      entryEpoch: typeof entryEpochRaw === 'number' ? entryEpochRaw : null,
-    })
+    let delivery: Awaited<ReturnType<typeof insertDingTalkApprovalCardDelivery>>
+    try {
+      delivery = await insertDingTalkApprovalCardDelivery(this.deps.queryFn, {
+        instanceId,
+        nodeKey,
+        recipientUserId: assigneeUserId,
+        recipientDingTalkUserId: dingtalkUserId,
+        deliveryKind: useInteractiveCard ? 'interactive_card' : 'work_notice_action_card',
+        integrationId: assigneeIntegrationId || null,
+        // P1-1: persist the node-entry epoch this card is sent for so the action wrapper + the engine's
+        // in-txn binding can bind the card to the SAME round's active assignment (closes same-node
+        // re-entry). Review P3-1: under the STRICT binding a NULL epoch is NOT actionable (fail-closed
+        // dead-on-arrival), so a null here means this card will never be clickable — warn (values-free)
+        // rather than silently ship a dead card. Expected only for pre-epoch/legacy task events.
+        entryEpoch: typeof entryEpochRaw === 'number' ? entryEpochRaw : null,
+      })
+    } catch (error) {
+      // This exact database guard proves no provider call occurred. Other insert failures
+      // retain the existing fail-closed intent handling; never retry an unknown send.
+      const guard = error as { code?: string; constraint?: string }
+      if (outboundId && guard?.code === '55000' && guard.constraint === 'directory_handover_card_insert') {
+        await recordOutboundOutcome(this.deps.queryFn, outboundId, 'failed', 'directory_handover_blocked')
+      }
+      throw error
+    }
 
     const token = createHmac('sha256', linkSecret).update(delivery.id).digest('hex').slice(0, 32)
     const decisionUrl = buildAppLink(baseUrl, '/m/approval-decision', { d: delivery.id, t: token })
@@ -5176,38 +5830,27 @@ export class AutomationExecutor {
       // DT-OPS-04: carry the integration the recipient is actually bound under. A
       // DingTalk userid is only meaningful inside its own corp, so the credentials used
       // to notify them must come from that integration — not from whichever integration
-      // happens to sort first as "latest active".
-      `SELECT u.id AS local_user_id,
-              u.is_active AS local_user_active,
-              linked.external_user_id AS dingtalk_user_id,
-              linked.integration_id AS integration_id
-         FROM users u
-         LEFT JOIN LATERAL (
-           SELECT a.external_user_id, a.integration_id::text AS integration_id
-             FROM directory_account_links l
-             JOIN directory_accounts a ON a.id = l.directory_account_id
-            WHERE l.local_user_id = u.id
-              AND l.link_status = 'linked'
-              AND a.provider = 'dingtalk'
-              AND a.is_active = TRUE
-            ORDER BY a.updated_at DESC
-            LIMIT 1
-         ) linked ON TRUE
-        WHERE u.id = ANY($1::text[])`,
+      // happens to sort first as "latest active". The query is shared with the rule editor's
+      // recipient-status preflight (客户反馈 2026-10-21 item 1), so both read the same conditions.
+      DINGTALK_PERSON_RECIPIENT_STATUS_SQL,
       [userIds],
     )
 
-    const recipientMap = new Map<string, { localUserId: string; dingtalkUserId: string; integrationId: string }>()
-    for (const row of recipientsResult.rows as Array<Record<string, unknown>>) {
-      const localUserId = typeof row.local_user_id === 'string' ? row.local_user_id.trim() : ''
-      const dingtalkUserId = typeof row.dingtalk_user_id === 'string' ? row.dingtalk_user_id.trim() : ''
-      const integrationId = typeof row.integration_id === 'string' ? row.integration_id.trim() : ''
-      const isActive = row.local_user_active === true
-      if (!localUserId || !isActive || !dingtalkUserId || recipientMap.has(localUserId)) continue
-      recipientMap.set(localUserId, { localUserId, dingtalkUserId, integrationId })
-    }
+    // Review round 2: the row decision is shared with the rule editor's preflight
+    // (resolveDingTalkPersonRecipientRows), so what the editor reports is what this step does.
+    // (a) localUserActive: which local users exist and are active — only to COUNT why one was skipped.
+    const recipientResolution = resolveDingTalkPersonRecipientRows(recipientsResult.rows)
+    const recipientMap = recipientResolution.reachable
+    const localUserActive = recipientResolution.activeByUserId
 
     const missingUserIds = userIds.filter((userId) => !recipientMap.has(userId))
+    const skippedReasonCounts: DingTalkSkippedRecipientCounts = { notLinked: 0, inactive: 0, notFound: 0 }
+    for (const userId of missingUserIds) {
+      const active = localUserActive.get(userId)
+      if (active === undefined) skippedReasonCounts.notFound += 1
+      else if (active) skippedReasonCounts.notLinked += 1
+      else skippedReasonCounts.inactive += 1
+    }
     if (missingUserIds.length > 0) {
       await Promise.all(missingUserIds.map((userId) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
         localUserId: userId,
@@ -5230,11 +5873,13 @@ export class AutomationExecutor {
       return {
         actionType: 'send_dingtalk_person_message',
         status: 'skipped',
-        error: `DingTalk account not linked for users: ${missingUserIds.join(', ')}`,
+        error: describeDingTalkUnreachableRecipients(skippedReasonCounts),
         output: {
+          reason: DINGTALK_RECIPIENTS_UNREACHABLE_REASON,
           notifiedUsers: 0,
           skippedRecipientCount: missingUserIds.length,
           skippedUserIds: missingUserIds,
+          skippedReasonCounts,
         },
       }
     }
@@ -5349,6 +5994,7 @@ export class AutomationExecutor {
           dynamicMemberGroupRecipientCount: recordMemberGroupIds.length,
           skippedRecipientCount: missingUserIds.length,
           skippedUserIds: missingUserIds,
+          skippedReasonCounts,
           memberGroupIds,
           recipientFieldPath: recipientFieldPaths[0] ?? null,
           recipientFieldPaths,

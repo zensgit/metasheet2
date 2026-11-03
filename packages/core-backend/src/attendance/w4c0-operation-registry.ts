@@ -30,6 +30,7 @@
  *
  * Values-free discipline: closed codes only; no caller value is echoed.
  */
+import { requireOnlinePunchRequestV1, readOnlinePunchCompanionV1, OnlinePunchConnectionUncertainError, ONLINE_PUNCH_SOURCE_REF, OLD_OUTDOOR_PUNCH_SOURCE_REF, OnlinePunchClaimCollisionError, isOnlinePunchClaimPrimaryKeyCollision, type OnlinePunchRequestV1 } from './online-punch-request'
 import type {
   AttendanceSourceEntrypointV1,
   AttendanceW4TransactionClientV1,
@@ -37,6 +38,10 @@ import type {
   VerifiedAttendanceOrgIdentityV1,
 } from './w4c0-identity'
 import { canonicalSheetFenceKey } from '../multitable/canonical-sheet-fence'
+import {
+  SettlementCoordinationRestartSignalV1,
+  currentSettlementCoordinationContextV1,
+} from './coordination/settlement-coordination-context'
 import {
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceResultOperationLocks,
@@ -82,6 +87,66 @@ export class AttendanceW4RegistryError extends Error {
 /** The caller must destroy, not return, this pooled connection. */
 export class AttendanceCleaningConnectionUncertainError extends AttendanceW4RegistryError {
   constructor() { super('W4C0_ATTENDANCE_CLEANING_CONNECTION_UNCERTAIN') }
+}
+
+/**
+ * Settlement coordination (r6.1 §1.1 P1-1 「连接销毁语义」): when the runner can no longer say what state
+ * the connection is in — ROLLBACK failed, or COMMIT failed with anything other than 40001 / 40P01 — it
+ * marks the original error and sends it out unchanged otherwise: same object, same `code`, same message.
+ * The mark is a non-enumerable own property keyed by this symbol, invisible to JSON, `Object.keys` and
+ * equality. Releasers read it with `isAttendanceW4ConnectionUncertainV1` and destroy the connection
+ * instead of returning it; a same-connection wrapper checks it before any retry.
+ */
+export const ATTENDANCE_W4_CONNECTION_UNCERTAIN = Symbol.for('ms2.attendance.w4.connectionUncertain')
+
+/** Error objects that cannot take the own property (frozen or sealed) are remembered by identity. */
+const uncertainByIdentity = new WeakSet<object>()
+
+/** A thrown primitive cannot carry the mark; it travels as `cause` of this registry error instead. */
+export class AttendanceW4ConnectionUncertainPrimitiveError extends AttendanceW4RegistryError {
+  readonly cause: unknown
+
+  constructor(cause: unknown) {
+    super('W4C0_CONNECTION_UNCERTAIN')
+    this.name = 'AttendanceW4ConnectionUncertainPrimitiveError'
+    this.cause = cause
+  }
+}
+
+/** Marks `error` as having left its connection in an unknown state; returns the same object. */
+export function markAttendanceW4ConnectionUncertainV1(error: unknown): unknown {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
+    return new AttendanceW4ConnectionUncertainPrimitiveError(error)
+  }
+  const target = error as Record<symbol, unknown>
+  if (target[ATTENDANCE_W4_CONNECTION_UNCERTAIN] === true || uncertainByIdentity.has(error as object)) return error
+  try {
+    Object.defineProperty(target, ATTENDANCE_W4_CONNECTION_UNCERTAIN, { value: true, enumerable: false, configurable: false, writable: false })
+  } catch {
+    uncertainByIdentity.add(error as object)
+  }
+  return error
+}
+
+/**
+ * What a releaser passes to `release(error?)` for an error that left its body: the error itself
+ * (wrapped when it is not an `Error`) when the connection's state is unknown, so the pool destroys the
+ * connection; `undefined` otherwise, so it goes back. The error that propagates is never changed.
+ */
+export function attendanceW4ConnectionDiscardV1(error: unknown): Error | undefined {
+  if (!isAttendanceW4ConnectionUncertainV1(error)) return undefined
+  return error instanceof Error ? error : new AttendanceW4ConnectionUncertainPrimitiveError(error)
+}
+
+/** The mark, or one of the uncertain error classes that predate it. */
+export function isAttendanceW4ConnectionUncertainV1(error: unknown): boolean {
+  if (
+    error instanceof AttendanceCleaningConnectionUncertainError
+    || error instanceof OnlinePunchConnectionUncertainError
+    || error instanceof AttendanceW4ConnectionUncertainPrimitiveError
+  ) return true
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) return false
+  return (error as Record<symbol, unknown>)[ATTENDANCE_W4_CONNECTION_UNCERTAIN] === true || uncertainByIdentity.has(error as object)
 }
 
 function fail(code: string): never {
@@ -599,7 +664,7 @@ export async function attendanceResultOperationPreflightV1(
   trx: AttendanceW4TransactionClientV1,
   authorization: unknown,
   envelope: AttendanceResultOperationEnvelopeInputV1,
-  options?: { readonly attendanceCleaningReplay: 'allow-new' | 'require-completed' },
+  options?: { readonly attendanceCleaningReplay: 'allow-new' | 'require-completed' } | { readonly onlinePunch: OnlinePunchRequestV1 },
 ): Promise<AttendanceResultOperationPreflightResultV1> {
   const plan = planEnvelope(envelope)
   // Step 1: branded authorization covers every envelope item; org binding; SQL recheck.
@@ -609,8 +674,21 @@ export async function attendanceResultOperationPreflightV1(
   }
   await recheckAttendanceActorLivenessInTransactionV1(trx, auth)
   // Internal adapter decision, never inferred from a sourceRef or HTTP body.
-  const cleaningReplay = options?.attendanceCleaningReplay
-  if (options !== undefined && (
+  if (options !== undefined && (Object.keys(options).length !== 1
+    || (!('onlinePunch' in options) && !('attendanceCleaningReplay' in options)))) fail('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
+  const onlinePunch = options && 'onlinePunch' in options ? requireOnlinePunchRequestV1(options.onlinePunch) : null
+  if (onlinePunch && (plan.entrypoint !== 'live_punch' || plan.batch !== null || plan.sourced.length !== 1
+    || plan.legacyNullIdCount !== 0 || auth.sourceRef !== ONLINE_PUNCH_SOURCE_REF
+    || auth.actorId !== onlinePunch.userId || plan.orgKey !== onlinePunch.orgId
+    || plan.sourced[0]!.candidateOperationId !== onlinePunch.operationId
+    || plan.sourced[0]!.input.commandFingerprint !== onlinePunch.fingerprint)) fail('W4C0_ENVELOPE_INVALID')
+  const onlineCompanion = readOnlinePunchCompanionV1(trx)
+  if (onlineCompanion && (plan.entrypoint !== 'request_create' || plan.batch !== null || plan.sourced.length !== 1
+    || plan.legacyNullIdCount !== 0 || auth.sourceRef !== OLD_OUTDOOR_PUNCH_SOURCE_REF
+    || auth.orgId !== onlineCompanion.orgId || auth.actorId !== onlineCompanion.userId
+    || plan.sourced[0]!.candidateOperationId !== onlineCompanion.operationId)) fail('W4C0_ENVELOPE_INVALID')
+  const cleaningReplay = options && 'attendanceCleaningReplay' in options ? options.attendanceCleaningReplay : undefined
+  if (options !== undefined && !onlinePunch && (
     (cleaningReplay !== 'allow-new' && cleaningReplay !== 'require-completed')
     || plan.entrypoint !== 'manual_edit' || plan.batch !== null
     || plan.sourced.length !== 1 || plan.legacyNullIdCount !== 0
@@ -672,7 +750,10 @@ export async function attendanceResultOperationPreflightV1(
 
   // Canonical exclusive identity advisory locks for ALL supplied identities.
   const allIdentities = batchIdentity ? [batchIdentity, ...itemIdentities] : [...itemIdentities]
+  if (onlinePunch) allIdentities.push(createVerifiedAttendanceOperationIdentityV1({ org, kind: 'item',
+    entrypoint: 'request_create', source: { sourceKind: 'direct_request_create', clientOperationId: onlinePunch.operationId } }))
   await acquireAttendanceResultOperationLocks(trx, allIdentities)
+  if (onlinePunch) await refuseOldOutdoorPunchV1(trx, onlinePunch)
 
   // Re-read under locks; now strict: mixed/incomplete/non-congruent conflicts.
   const lockedBatchRow = plan.batch
@@ -719,16 +800,15 @@ export async function attendanceResultOperationPreflightV1(
     .map((item, index) => ({ item, identity: itemIdentities[index] }))
     .sort((a, b) => (a.identity.id < b.identity.id ? -1 : a.identity.id > b.identity.id ? 1 : 0))
   for (const { item, identity } of orderedForInsert) {
-    await insertClaimedItemRow(
-      trx,
-      org,
-      identity,
-      auth,
-      item.input.commandFingerprint,
-      plan.batch ? plan.batch.batchCommandId : null,
-      item.ordinal,
-      item.input.normalizedBusinessInputSnapshot,
-    )
+    try {
+      await insertClaimedItemRow(
+        trx, org, identity, auth, item.input.commandFingerprint,
+        plan.batch ? plan.batch.batchCommandId : null, item.ordinal, item.input.normalizedBusinessInputSnapshot,
+      )
+    } catch (error) {
+      if ((onlinePunch || onlineCompanion) && isOnlinePunchClaimPrimaryKeyCollision(error)) throw new OnlinePunchClaimCollisionError()
+      throw error
+    }
   }
   return {
     kind: 'claimed',
@@ -738,6 +818,27 @@ export async function attendanceResultOperationPreflightV1(
     legacyNullIdCount: plan.legacyNullIdCount,
     referenceSegments: posture.referenceSegments,
   }
+}
+
+/** Online read probe never claims; immutable completed rows preserve replay before suspension. */
+export async function readOnlinePunchReplayV1(
+  trx: AttendanceW4TransactionClientV1, authorization: unknown, input: OnlinePunchRequestV1,
+): Promise<unknown | null> {
+  const request = requireOnlinePunchRequestV1(input)
+  const auth = requireAuthorizedCapabilityForEntrypointV1(authorization, 'live_punch')
+  if (auth.orgId !== request.orgId || auth.actorId !== request.userId || auth.sourceRef !== ONLINE_PUNCH_SOURCE_REF) {
+    throw new AttendanceW4OperationError('ATTENDANCE_WRITE_NOT_AUTHORIZED')
+  }
+  await recheckAttendanceActorLivenessInTransactionV1(trx, auth)
+  const rows = await readOperationRows(trx, request.orgId, 'live_punch', [request.operationId])
+  if (!rows.size) { await refuseOldOutdoorPunchV1(trx, request); return null }
+  const result = classify(planEnvelope(request.registryInput), auth, null, rows, true)
+  if (result.kind !== 'all_completed_congruent') conflict('ATTENDANCE_OPERATION_CONFLICT')
+  return result.responses.itemResponses[request.operationId] ?? null
+}
+async function refuseOldOutdoorPunchV1(trx: AttendanceW4TransactionClientV1, request: OnlinePunchRequestV1): Promise<void> {
+  const rows = await readOperationRows(trx, request.orgId, 'request_create', [request.operationId])
+  if (rows.get(request.operationId)?.source_ref === OLD_OUTDOOR_PUNCH_SOURCE_REF) conflict('ATTENDANCE_OPERATION_CONFLICT')
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,12 +1173,19 @@ export async function runAttendanceResultOperationTransactionV1<T>(
         // Retry only an explicit serialization/deadlock rollback; an ambiguous
         // commit must recover via the durable operation, never blindly reapply.
         if (sessionFenced && !isRetryableSqlState(error)) throw new AttendanceCleaningConnectionUncertainError()
+        // Settlement coordination: a COMMIT that failed with anything else left the connection's state
+        // unknown. The error keeps its object and code and goes out carrying the uncertainty mark.
+        if (!isRetryableSqlState(error)) throw markAttendanceW4ConnectionUncertainV1(error)
         throw error
       }
       return result
     } catch (error) {
       try { await connection.query('ROLLBACK', []) } catch {
         if (sessionFenced) throw new AttendanceCleaningConnectionUncertainError()
+        if (error instanceof OnlinePunchClaimCollisionError) throw new OnlinePunchConnectionUncertainError()
+        // Settlement coordination: a failed ROLLBACK leaves the connection's state unknown — no further
+        // attempt on this connection, retryable or not; the original error goes out marked.
+        throw markAttendanceW4ConnectionUncertainV1(error)
       }
       if (isRetryableSqlState(error) && attempt < W4_TRANSACTION_MAX_RETRIES) {
         attempt += 1
@@ -1089,5 +1197,28 @@ export async function runAttendanceResultOperationTransactionV1<T>(
       // Never unlock-all or silently return an uncertain connection to its pool.
       if (sessionFenced) await releaseCleaningSessionFences(connection, held)
     }
+  }
+}
+
+/**
+ * Handed-over mode (settlement coordination, r6.1 §8 W-7). The coordinated-transaction port has
+ * already borrowed `connection`, proven it idle (S1, which takes the place of Gate E), begun the
+ * transaction and set its timeouts (S2). This runs `body` on it and nothing else: no Gate E, no
+ * BEGIN / COMMIT / ROLLBACK, no settings, no retry. A 40001 / 40P01 becomes the coordination restart
+ * signal, which only the port handles; every other error is rethrown unchanged. Refused unless
+ * `connection` is the active coordination context's own connection, so a body never runs outside
+ * the transaction the port opened. The default mode above is unchanged.
+ */
+export async function runAttendanceResultOperationHandedOverV1<T>(
+  connection: AttendanceW4TransactionClientV1,
+  body: (trx: AttendanceW4TransactionClientV1) => Promise<T>,
+): Promise<T> {
+  const context = currentSettlementCoordinationContextV1()
+  if (!context || context.connection !== connection) fail('W4C0_CONNECTION_NOT_HANDED_OVER')
+  try {
+    return await body(connection)
+  } catch (error) {
+    if (isRetryableSqlState(error)) throw new SettlementCoordinationRestartSignalV1(error)
+    throw error
   }
 }

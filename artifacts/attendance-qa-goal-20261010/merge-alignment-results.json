@@ -1,0 +1,51 @@
+{
+  "node": "v20.20.2",
+  "pnpm": "10.33.0",
+  "results": [
+    {
+      "name": "github-hosted runner routing + attendance W4C2 CI wiring",
+      "log": "ci-wiring-node20.log",
+      "exitCode": 0,
+      "passed": 267,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "name": "required-web token manifest",
+      "log": "required-web-token-manifest-node20.log",
+      "exitCode": 0,
+      "invocations": 20,
+      "tokens": 559
+    },
+    {
+      "name": "required-web registration shape + token manifest guards",
+      "log": "required-web-shape-manifest-vitest-node20.log",
+      "exitCode": 0,
+      "files": 2,
+      "passed": 63,
+      "failed": 0
+    },
+    {
+      "name": "sealed-export package provenance",
+      "log": "provenance-node20.log",
+      "exitCode": 0
+    },
+    {
+      "name": "merge union audit",
+      "log": "merge-test-chain-union.json",
+      "exitCode": 0,
+      "missingFromEitherSide": 0
+    },
+    {
+      "name": "plugin workflow all path token audit",
+      "log": "plugin-workflow-path-union.json",
+      "exitCode": 0,
+      "missingFromEitherSide": 0
+    },
+    {
+      "name": "owned CI + manifest paths staged diff whitespace check",
+      "exitCode": 0
+    }
+  ],
+  "note": "Whole staged diff --check flags inherited CRLF whitespace in main decision-register.md; not modified by this alignment task."
+}

@@ -1,0 +1,182 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createRequire } from 'node:module'
+import { acquireBusinessTripRequestPrefixV1, registerAttendanceRequestTimezoneSourceGuardV1 } from '../../src/attendance/attendance-business-trip-locks'
+import {
+  acquireAttendanceTimezoneRuntimeLocksV1,
+  buildAttendanceTimezoneRuntimeOrgLockKeyV1,
+} from '../../src/attendance/attendance-timezone-runtime-locks'
+import {
+  buildAttendanceW7MembershipTimelineLockKeyV1,
+  buildAttendanceW7ScheduleFactsLockKeyV1,
+} from '../../src/attendance/w7-resolver/w7-composite-lock-order'
+
+const { attendanceTimezoneOrgLockKey } = createRequire(import.meta.url)(
+  '../../../../plugins/plugin-attendance/lib/attendance-timezone-policy-store.cjs',
+) as { attendanceTimezoneOrgLockKey(orgId: string): string }
+const orgId = '1971d75c-65d0-40c0-b058-bc7d5f278d37'
+const userId = 'fc987fb5-c6b5-4efd-a3df-a4bac5da250a'
+
+describe('attendance timezone canonical runtime lock prefix', () => {
+  it.each([orgId, 'default'])('matches the actual D1 exclusive writer key for %s', org => {
+    expect(buildAttendanceTimezoneRuntimeOrgLockKeyV1(org)).toBe(attendanceTimezoneOrgLockKey(org))
+  })
+
+  it('takes policy before the unchanged shared timeline and schedule families', async () => {
+    const calls: { sql: string; values: readonly unknown[] }[] = []
+    const trx = { query: async (sql: string, values: readonly unknown[] = []) => {
+      calls.push({ sql, values })
+      return { rows: [] }
+    } }
+    await acquireAttendanceTimezoneRuntimeLocksV1(trx, { orgId, userId })
+    expect(calls).toEqual([
+      { sql: 'SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))',
+        values: [attendanceTimezoneOrgLockKey(orgId)] },
+      { sql: 'SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))',
+        values: [buildAttendanceW7MembershipTimelineLockKeyV1(orgId, userId)] },
+      { sql: 'SELECT pg_advisory_xact_lock_shared(hashtext($1::text), hashtext($2::text))',
+        values: [buildAttendanceW7ScheduleFactsLockKeyV1(orgId), userId] },
+    ])
+  })
+
+  it('uses exclusive policy mode without changing the following composite order', async () => {
+    const calls: string[] = []
+    const trx = { query: async (sql: string) => { calls.push(sql); return { rows: [] } } }
+    await acquireAttendanceTimezoneRuntimeLocksV1(trx, { orgId, userId, mode: 'exclusive' })
+    expect(calls).toEqual([
+      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+      'SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))',
+      'SELECT pg_advisory_xact_lock_shared(hashtext($1::text), hashtext($2::text))',
+    ])
+  })
+
+  it('rejects an illegal lock mode before acquiring any family', async () => {
+    const calls: string[] = []
+    const trx = { query: async (sql: string) => { calls.push(sql); return { rows: [] } } }
+    await expect(acquireAttendanceTimezoneRuntimeLocksV1(trx, {
+      orgId, userId, mode: 'true' as 'shared',
+    })).rejects.toThrow('ATTENDANCE_TIMEZONE_INVALID_LOCK_MODE')
+    expect(calls).toEqual([])
+  })
+
+  it('does not reach either facts family after a policy lock error', async () => {
+    const error = new Error('SYNTHETIC_POLICY_LOCK_FAILURE')
+    const calls: string[] = []
+    const trx = { query: async (sql: string) => { calls.push(sql); throw error } }
+    await expect(acquireAttendanceTimezoneRuntimeLocksV1(trx, { orgId, userId })).rejects.toBe(error)
+    expect(calls).toEqual(['SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))'])
+  })
+})
+
+describe('related request prefix before external approval parents',()=>{
+  const requestId='f380de63-7caf-4a81-b84d-e6b3f845663d'
+  const types=['leave','overtime','missed_check_in','missed_check_out','time_correction']
+  function fixture(requestType:string) {
+    const calls:{sql:string;values:readonly unknown[]}[]=[]
+    let transactionId='own-transaction'
+    const trx={query:async(sql:string,values:readonly unknown[]=[])=>{
+      calls.push({sql,values})
+      if (sql.includes('SELECT user_id,request_type')) return {rows:[{user_id:userId,request_type:requestType}]}
+      if (sql.includes('FROM pg_locks')) return {rows:[{held:1}]}
+      if (sql.includes('txid_current()')) return {rows:[{transaction_id:transactionId}]}
+      if (sql.includes('FROM users u JOIN user_orgs')) return {rows:[{id:userId}]}
+      return {rows:[]}
+    }}
+    return {trx,calls,setTransaction:(value:string)=>{transactionId=value}}
+  }
+  it.each(types)('%s takes the shared org/facts prefix without changing actor authorization',async requestType=>{
+    const f=fixture(requestType)
+    await acquireBusinessTripRequestPrefixV1(f.trx,{orgId,requestId,actorId:userId})
+    const acquisitions=f.calls.filter(call=>call.sql.includes('pg_advisory_xact_lock'))
+    expect(acquisitions).toEqual([
+      {sql:'SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))',values:[buildAttendanceTimezoneRuntimeOrgLockKeyV1(orgId)]},
+      {sql:'SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))',values:[buildAttendanceW7MembershipTimelineLockKeyV1(orgId,userId)]},
+      {sql:'SELECT pg_advisory_xact_lock_shared(hashtext($1::text), hashtext($2::text))',values:[buildAttendanceW7ScheduleFactsLockKeyV1(orgId),userId]},
+    ])
+    expect(f.calls.filter(call=>call.sql.includes('FROM users u JOIN user_orgs'))).toEqual([])
+  })
+  it.each(types)('%s external redemption refuses an org lock without the same transaction preparation and takes no late lock',async requestType=>{
+    const f=fixture(requestType)
+    await expect(acquireBusinessTripRequestPrefixV1(f.trx,{orgId,requestId,external:true}))
+      .rejects.toThrow('ATTENDANCE_TIMEZONE_EXTERNAL_PREFIX_REQUIRED')
+    expect(f.calls.filter(call=>call.sql.includes('pg_advisory_xact_lock'))).toEqual([])
+  })
+  it('accepts actual preparation for the same client and transaction with no late acquisition',async()=>{
+    const f=fixture('leave')
+    await acquireBusinessTripRequestPrefixV1(f.trx,{orgId,requestId})
+    f.calls.length=0
+    await acquireBusinessTripRequestPrefixV1(f.trx,{orgId,requestId,external:true})
+    expect(f.calls.filter(call=>call.sql.includes('pg_advisory_xact_lock'))).toEqual([])
+  })
+  it('rejects stale preparation on a pooled client reused for another transaction',async()=>{
+    const f=fixture('leave')
+    await acquireBusinessTripRequestPrefixV1(f.trx,{orgId,requestId})
+    f.setTransaction('next-own-transaction');f.calls.length=0
+    await expect(acquireBusinessTripRequestPrefixV1(f.trx,{orgId,requestId,external:true}))
+      .rejects.toThrow('ATTENDANCE_TIMEZONE_EXTERNAL_PREFIX_REQUIRED')
+    expect(f.calls.filter(call=>call.sql.includes('pg_advisory_xact_lock'))).toEqual([])
+  })
+})
+
+
+describe('schedule request source schema is mandatory before approval parents', () => {
+  afterEach(() => registerAttendanceRequestTimezoneSourceGuardV1(null))
+  const requestId = 'f380de63-7caf-4a81-b84d-e6b3f845663d'
+
+  function fixture(requestType: string, present: unknown) {
+    const calls: string[] = []
+    const trx = { query: async (sql: string) => {
+      calls.push(sql)
+      if (sql.includes('SELECT user_id,request_type')) return { rows: [{ user_id: userId, request_type: requestType }] }
+      if (sql.includes('to_regclass')) return { rows: [{ present }] }
+      if (sql.includes('txid_current()')) return { rows: [{ transaction_id: 'schedule-source-transaction' }] }
+      if (sql.includes('FROM users u JOIN user_orgs')) return { rows: [{ id: userId }] }
+      return { rows: [] }
+    } }
+    return { trx, calls }
+  }
+
+  it.each([
+    ['shift_swap', false], ['schedule_dispatch', false],
+    ['shift_swap', null], ['schedule_dispatch', null],
+    ['shift_swap', undefined], ['schedule_dispatch', undefined],
+  ])('%s refuses missing or unproven schema (%s) without invoking the source guard or locking actor rows', async (type, present) => {
+    const f = fixture(String(type), present)
+    const guard = vi.fn(async () => async () => undefined)
+    registerAttendanceRequestTimezoneSourceGuardV1(guard)
+    await expect(acquireBusinessTripRequestPrefixV1(f.trx, { orgId, requestId, actorId: userId }))
+      .rejects.toMatchObject({
+        name: 'AttendanceBusinessTripError',
+        code: 'ATTENDANCE_TIMEZONE_SCHEMA_UNAVAILABLE',
+        message: 'ATTENDANCE_TIMEZONE_SCHEMA_UNAVAILABLE',
+        httpStatus: 503,
+      })
+    expect(guard).not.toHaveBeenCalled()
+    expect(f.calls.filter(sql => sql.includes('pg_advisory_xact_lock'))).toHaveLength(3)
+    expect(f.calls.some(sql => /FOR\s+(?:UPDATE|SHARE)/i.test(sql))).toBe(false)
+    expect(f.calls.some(sql => /^\s*(?:INSERT|UPDATE|DELETE)\b/i.test(sql))).toBe(false)
+  })
+
+  it.each(['shift_swap', 'schedule_dispatch'])('%s requires and returns its same-transaction source verifier when schema exists', async type => {
+    const f = fixture(type, true)
+    const verify = vi.fn(async () => undefined)
+    const guard = vi.fn(async () => { f.calls.push('trusted-source-guard'); return verify })
+    registerAttendanceRequestTimezoneSourceGuardV1(guard)
+    const result = await acquireBusinessTripRequestPrefixV1(f.trx, { orgId, requestId, actorId: userId })
+    expect(guard).toHaveBeenCalledTimes(1)
+    expect(guard).toHaveBeenCalledWith(f.trx, { orgId, userIds: null })
+    expect(result).toBe(verify)
+    expect(f.calls.indexOf('trusted-source-guard')).toBeGreaterThan(f.calls.findIndex(sql => sql.includes('to_regclass')))
+    expect(f.calls.indexOf('trusted-source-guard')).toBeLessThan(f.calls.findIndex(sql => sql.includes('FOR SHARE')))
+    if (typeof result !== 'function') throw new Error('SOURCE_VERIFIER_REQUIRED')
+    await result()
+    expect(verify).toHaveBeenCalledOnce()
+  })
+
+  it.each(['shift_swap', 'schedule_dispatch'])('%s never substitutes schema presence for a missing trusted guard', async type => {
+    const f = fixture(type, true)
+    registerAttendanceRequestTimezoneSourceGuardV1(null)
+    await expect(acquireBusinessTripRequestPrefixV1(f.trx, { orgId, requestId, actorId: userId }))
+      .rejects.toThrow('ATTENDANCE_TIMEZONE_WRITE_GUARD_UNAVAILABLE')
+    expect(f.calls.some(sql => /FOR\s+(?:UPDATE|SHARE)/i.test(sql))).toBe(false)
+  })
+})

@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
 import http from 'http'
+import { Pool } from 'pg'
+import { buildAttendanceTimezoneRuntimeOrgLockKeyV1 } from '../../src/attendance/attendance-timezone-runtime-locks'
 import type { MetaSheetServer } from '../../src/index'
 import { query } from '../../src/db/pg'
 
@@ -195,6 +197,56 @@ describeIfDatabase('W4-PRE-1b item D (F6) — POST /api/admin/users explicit att
     // No attendanceGroupId/defaultShiftId AND no attendanceOrgId submitted → attendanceOrgId
     // resolution never triggers (matches pre-W4-PRE-1b-item-D behavior byte-for-byte).
     expect(res.body?.data && (res.body.data as { attendanceOnboarding?: unknown }).attendanceOnboarding).toBeNull()
+  })
+
+  it('onboarding waits for the timezone org prefix before creating any user rows', async () => {
+    const group = await query<{ id: string }>(
+      "INSERT INTO attendance_groups (org_id,name,timezone) VALUES ($1,$2,'UTC') RETURNING id",
+      [freshOrg, NS + '-prefix-group'],
+    )
+    const groupId = group.rows[0].id
+    const email = NS + '-prefix@example.test'
+    const lockKey = buildAttendanceTimezoneRuntimeOrgLockKeyV1(freshOrg)
+    const blockerPool = new Pool({ connectionString: dbUrl, max: 1 })
+    const blocker = await blockerPool.connect()
+    let pending: Promise<HttpResponse> | undefined
+    try {
+      await blocker.query('BEGIN')
+      await blocker.query('SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))', [lockKey])
+      let settled = false
+      pending = createUser({ name: 'Prefix onboarding', email, orgId: freshOrg, attendanceOrgId: freshOrg, attendanceGroupId: groupId })
+      void pending.then(() => { settled = true })
+      let waiting = false
+      for (let attempt = 0; attempt < 250 && !settled; attempt += 1) {
+        const locks = await query<{ waiting: boolean }>(
+          `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory'
+            AND mode='ExclusiveLock' AND NOT granted
+            AND classid=((hashtextextended($1,0) >> 32) & 4294967295)::oid
+            AND objid=(hashtextextended($1,0) & 4294967295)::oid AND objsubid=1) AS waiting`,
+          [lockKey],
+        )
+        waiting = locks.rows[0].waiting
+        if (waiting) break
+        await new Promise(resolve => setTimeout(resolve, 20))
+      }
+      // A red control must reach a valid successful endpoint, not a 4xx fixture refusal.
+      if (!waiting && settled) expect((await pending).status).toBe(200)
+      expect(waiting).toBe(true)
+      expect((await query<{ count: number }>('SELECT COUNT(*)::int AS count FROM users WHERE email=$1', [email])).rows).toEqual([{ count: 0 }])
+      await blocker.query('COMMIT')
+      const result = await pending
+      expect(result.status).toBe(200)
+      const userId = (result.body.data as { user: { id: string } }).user.id
+      expect(await membershipRow(userId, freshOrg)).toEqual({ is_active: true })
+      expect((await query<{ user_id: string }>('SELECT user_id FROM attendance_group_members WHERE group_id=$1', [groupId])).rows).toEqual([{ user_id: userId }])
+    } finally {
+      await blocker.query('ROLLBACK')
+      blocker.release()
+      await blockerPool.end()
+      if (pending) await pending
+      await query('DELETE FROM attendance_group_members WHERE group_id=$1', [groupId])
+      await query('DELETE FROM attendance_groups WHERE id=$1', [groupId])
+    }
   })
 
   it('explicit attendanceOrgId conflicting with the group/shift-derived org → 400 ATTENDANCE_ORG_CONFLICT', async () => {

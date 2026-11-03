@@ -51,7 +51,8 @@
             <button class="meta-toolbar__remove" @click="emit('remove-sort', rule.fieldId)">&times;</button>
           </div>
           <button v-if="fields.length" class="meta-toolbar__add" @click="emit('add-sort', { fieldId: fields[0].id, direction: 'asc' })">{{ l('toolbar.addSort') }}</button>
-          <button v-if="sortRules.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ l('toolbar.apply') }}</button>
+          <!-- `|| sortFilterDirty`: after removing the LAST sort rule the button must stay, or the removal can never be applied/saved (客户反馈 2026-09-24 #5). -->
+          <button v-if="sortRules.length || sortFilterDirty" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ l('toolbar.apply') }}</button>
         </div>
       </MtPopover>
 
@@ -110,7 +111,8 @@
             <button v-if="fields.length" class="meta-toolbar__add" data-add-filter-group="true" @click="onAddFilterGroup">{{ l('toolbar.addGroup') }}</button>
             <button v-if="filterRules.length || filterGroups.length" class="meta-toolbar__add meta-toolbar__add--danger" @click="emit('clear-filters')">{{ l('toolbar.clearAll') }}</button>
           </div>
-          <button v-if="filterRules.length || filterGroups.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ applyButtonLabel }}</button>
+          <!-- `|| sortFilterDirty`: same as the sort panel — removing the LAST condition (×) must still be appliable. -->
+          <button v-if="filterRules.length || filterGroups.length || sortFilterDirty" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ applyButtonLabel }}</button>
           <p v-if="filterRules.length && sortFilterDirty" class="meta-toolbar__apply-hint">{{ l('toolbar.stagedHint') }}</p>
         </div>
       </MtPopover>
@@ -217,16 +219,40 @@
         <template #icon><el-icon><component :is="ICON.import" /></el-icon></template>
         {{ l('toolbar.import') }}
       </MtButton>
-      <MtButton v-if="canExport" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')">
+      <!-- Review round 2: in the sheet-switch stale window (`exportPending`) the pair stays MOUNTED but disabled, so an
+           ordinary-to-ordinary switch does not unmount and remount it; it is enabled again once the new sheet's own
+           capabilities arrive. -->
+      <MtButton v-if="canExport && !exportClosedReason" :disabled="exportPending" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')">
         <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
         {{ l('toolbar.exportCsv') }}
       </MtButton>
-      <MtButton v-if="canExport" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')">
+      <MtButton v-if="canExport && !exportClosedReason" :disabled="exportPending" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')">
         <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
         {{ l('toolbar.exportXlsx') }}
       </MtButton>
+      <!-- 备料分批拉取第一期 step 3: on a sheet the host closed for generic grid export the two export buttons stay
+           visible but DISABLED, and the wrapper carries the reason (a disabled <button> shows no tooltip in every
+           browser, so the title sits on the span). Native `disabled` means a click emits nothing. -->
+      <span
+        v-if="exportClosedReason"
+        class="meta-toolbar__export-closed"
+        data-testid="meta-toolbar-export-closed"
+        :title="exportClosedReason"
+      >
+        <MtButton disabled :title="exportClosedReason" :aria-label="l('toolbar.exportCsv')" data-export-closed="csv" @click="emit('export-csv')">
+          <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
+          {{ l('toolbar.exportCsv') }}
+        </MtButton>
+        <MtButton disabled :title="exportClosedReason" :aria-label="l('toolbar.exportExcel')" data-export-closed="xlsx" @click="emit('export-xlsx')">
+          <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
+          {{ l('toolbar.exportXlsx') }}
+        </MtButton>
+      </span>
       <!-- UI-P2-1c: primary CTA migrated to shared MtButton variant="primary". -->
       <MtButton v-if="canCreateRecord" variant="primary" @click="emit('add-record')">{{ l('toolbar.newRecord') }}</MtButton>
+      <!-- 人工补充行 B3 (ADR §8 B3.3): on a registered project sheet in state `allowed` the same place holds
+           「+ 新增人工补充行」 (`canCreateRecord` is off there, so never both). -->
+      <MtButton v-if="manualRowCreate && !canCreateRecord" variant="primary" data-testid="toolbar-add-manual-row" @click="emit('add-manual-row')">+ {{ manualRowLabel('entry.create', isZh) }}</MtButton>
     </div>
   </div>
 </template>
@@ -257,6 +283,7 @@ import {
   rowCount,
   type MetaCoreLabelKey,
 } from '../utils/meta-core-labels'
+import { manualRowLabel } from '../utils/manual-row-labels'
 import { ElIcon } from 'element-plus'
 import {
   Menu as IconFields,
@@ -300,7 +327,16 @@ const props = withDefaults(defineProps<{
   filterGroups?: FilterGroup[]
   filterConjunction: FilterConjunction
   canCreateRecord: boolean
+  // 人工补充行 B3: true ⇒ the 「+ 新建记录」 place reads 「+ 新增人工补充行」 and emits `add-manual-row` (the workbench
+  // passes it only in state `allowed` of a registered project sheet). Absent / false ⇒ unchanged.
+  manualRowCreate?: boolean
   canExport?: boolean
+  // 备料分批拉取第一期 step 3: non-empty ⇒ the sheet's generic grid export is closed; the export buttons render
+  // disabled with this reason. Absent / empty ⇒ unchanged (`canExport` alone decides, as before).
+  exportClosedReason?: string | null
+  // Review round 2: true while the capabilities shown belong to ANOTHER sheet (the workbench's sheet-switch window):
+  // the export pair renders disabled, without any reason, until the active sheet's capabilities land.
+  exportPending?: boolean
   canUndo: boolean
   canRedo: boolean
   // Nested / multi-level grouping: ordered group field ids (level 0 = outermost), 1..MAX_GROUP_LEVELS.
@@ -329,6 +365,7 @@ const emit = defineEmits<{
   (e: 'set-conjunction', conj: FilterConjunction): void
   (e: 'apply-sort-filter'): void
   (e: 'add-record'): void
+  (e: 'add-manual-row'): void
   (e: 'undo'): void
   (e: 'redo'): void
   (e: 'set-group-fields', fieldIds: string[]): void
@@ -434,9 +471,10 @@ function onAddFilterGroup() {
 </script>
 
 <style scoped>
-.meta-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--ms-border-light, #e7e8ec); background: var(--ms-bg-card, #fff); }
-.meta-toolbar__left { display: flex; gap: 2px; align-items: center; }
-.meta-toolbar__right { display: flex; gap: 4px; align-items: center; }
+.meta-toolbar { display: flex; flex-wrap: wrap; gap: 6px; justify-content: space-between; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--ms-border-light, #e7e8ec); background: var(--ms-bg-card, #fff); }
+.meta-toolbar__left { display: flex; flex-wrap: wrap; min-width: 0; max-width: 100%; gap: 2px; align-items: center; }
+.meta-toolbar__right { display: flex; flex-wrap: wrap; min-width: 0; max-width: 100%; gap: 4px; align-items: center; }
+.meta-toolbar__export-closed { display: inline-flex; gap: 4px; align-items: center; cursor: not-allowed; }
 .meta-toolbar__divider { display: inline-block; width: 1px; align-self: stretch; margin: 4px 6px; background: var(--ms-border-light, #e7e8ec); flex-shrink: 0; }
 .meta-toolbar__btn {
   display: inline-flex; align-items: center; gap: 4px; height: var(--ms-control-height, 32px); box-sizing: border-box;
@@ -456,9 +494,12 @@ function onAddFilterGroup() {
 .meta-toolbar__panel--filter { min-width: 420px; }
 /* Hide-fields panel (UI-P2-1c slice-3): hosted inside MtPopover's own `.mt-popover` surface (which
    only pads top/bottom), so this class supplies the horizontal breathing room the old
-   `.meta-toolbar__panel { padding: 8px }` gave the toggle rows — same 8px, all sides. */
-.meta-toolbar__field-panel { padding: var(--ms-space-2); min-width: 200px; box-sizing: border-box; }
-.meta-toolbar__field-toggle { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; cursor: pointer; }
+   `.meta-toolbar__panel { padding: 8px }` gave the toggle rows — same 8px, all sides.
+   Viewport cap: computePosition clamps the teleported border box with an 8px inset. Popover chrome
+   is padding 4+4 and border 1+1 vertical, border 1+1 horizontal, so this inner box stays within
+   100vh-18px / 100vw-10px. Both axes scroll; each name stays one line (no wrap, no ellipsis). */
+.meta-toolbar__field-panel { padding: var(--ms-space-2); min-width: 200px; max-width: calc(100vw - 10px); max-height: calc(100vh - 18px); box-sizing: border-box; overflow: auto; }
+.meta-toolbar__field-toggle { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; cursor: pointer; width: max-content; min-width: 100%; white-space: nowrap; }
 /* Sort builder panel (UI-P2-1c slice-4): same rationale as the hide-fields panel above — hosted
    inside MtPopover's own `.mt-popover` surface (which only pads top/bottom), so this class supplies
    the horizontal breathing room the old `.meta-toolbar__panel { padding: 8px }` gave the rows. */

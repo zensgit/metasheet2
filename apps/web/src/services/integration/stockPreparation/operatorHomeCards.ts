@@ -21,6 +21,40 @@ export interface StockPrepHomeCard {
   postureFromMemory: boolean
   /** Only ever real for a `directory` card — F1 means no per-card live read backs a `memory` one. */
   pendingDecisionCount: number | null
+  /**
+   * S3 (ADR §5, register R-37): TRUE only for a directory row the server's project-sheet registry
+   * reports as archived. The home page lists such a card in its 「已归档（N）」 section, never in the
+   * main list; 项目查询 tags it 「已归档」.
+   */
+  archived: boolean
+}
+
+/** A count off a directory row, or null when the row did not carry one (absent, null, or not a count). */
+function registryCountOf(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null
+}
+
+/**
+ * S3 — a REGISTRY row's posture from its own counts, or null when they cannot decide it.
+ *
+ * A directory row carries `archived` (boolean) only when the server enumerated its project-sheet
+ * registry (switch on). Such a row's counts are real, so it no longer needs `progressUnknown` (ADR §5)
+ * — EXCEPT where the registry has not stamped them yet (`pulledRowCount: null` until the overview
+ * refresh): then nothing here can tell 「还没拉过」 from 「可以导出」, and the caller falls back to the
+ * pre-S3 merge (this browser's memory, else 「看不到进度」) rather than guess. `archived` and a live
+ * pending count decide on their own; a known missing-parts count > 0 does too.
+ */
+function registryPosture(project: StockPreparationOperatorProject, pending: number): StockPrepPosture | null {
+  if (typeof project.archived !== 'boolean') return null
+  const missing = registryCountOf(project.missingComponentsCount)
+  const pulled = registryCountOf(project.pulledRowCount)
+  if (project.archived !== true && pending <= 0 && !(missing !== null && missing > 0) && pulled === null) return null
+  return stockPrepPosture({
+    archived: project.archived === true,
+    pendingDecisionCount: pending,
+    missingComponentsCount: missing ?? 0,
+    pulledRowCount: pulled ?? 0,
+  })
 }
 
 /**
@@ -75,6 +109,12 @@ function memoryPosture(key: StockPrepPostureKey): StockPrepPosture {
   if (key === 'not_yours') return stockPrepPosture({ notYours: true })
   if (key === 'ready') return stockPrepPosture({ pulledRowCount: 1 })
   if (key === 'unknown') return stockPrepPosture({ progressUnknown: true })
+  // Never stored (operatorHomeMemory.ts admits no `archived` — it is a live registry fact), handled
+  // so a hand-written value cannot reach an undefined branch.
+  if (key === 'archived') return stockPrepPosture({ archived: true })
+  // PR-5: a remembered blocked refresh state keeps its key; the state token itself is not stored, so the
+  // generic wording (「刷新未完成」) renders until the live board says which state it is.
+  if (key === 'blocked_pull_state') return stockPrepPosture({ refreshStatus: 'unknown' })
   return stockPrepPosture({})
 }
 
@@ -93,11 +133,26 @@ function memoryPosture(key: StockPrepPostureKey): StockPrepPosture {
  *   pendingDecisionCount  → always the directory's (live ledger beats a remembered enum)
  *   everything else       → this browser's remembered conclusion when it has one, otherwise
  *                           `unknown` (§4.4's `? 看不到`), NEVER an archive-derived ready/not_pulled.
+ *   S3: a REGISTRY row   → its own counts (`archived`, `pulledRowCount`, `missingComponentsCount`)
+ *                           when they can decide the posture (`registryPosture`); 「已归档」 first.
+ *
+ * `hidden` (客户反馈 2026-09-24 #1a / A8, optional — every existing caller keeps passing two
+ * arguments). A project number this principal asked 从列表移除 for, via `operatorHomeMemory.ts`'s
+ * sibling hidden list. Skips that project's card ON THE HOME PAGE ONLY:
+ *   - `StockPreparationProjectQueryView.vue`'s 项目查询 goes through `projectQuery.ts`'s
+ *     `buildStockPrepProjectQueryRows`, which calls this function WITHOUT a third argument — it stays
+ *     the complete list, by construction, not by a flag this function has to check on its behalf.
+ *   - NEVER hides a directory row whose LIVE `pendingDecisionCount > 0`: a card the ledger says is
+ *     waiting on this operator right now must not vanish because of a click made before that became
+ *     true. Once the count drops back to 0 the hide takes effect on the next render.
  */
 export function buildOperatorHomeCards(
   directoryProjects: readonly StockPreparationOperatorProject[],
   memory: readonly StockPrepRecentProjectEntry[],
+  hidden?: ReadonlySet<string> | readonly string[],
 ): StockPrepHomeCard[] {
+  const hiddenSet = hidden ? (hidden instanceof Set ? hidden : new Set(hidden)) : null
+
   const remembered = new Map<string, StockPrepPostureKey>()
   for (const entry of memory) {
     if (!remembered.has(entry.projectNo)) remembered.set(entry.projectNo, entry.postureKey)
@@ -111,23 +166,39 @@ export function buildOperatorHomeCards(
     if (!no || seen.has(no)) continue
     seen.add(no)
     const pending = project.pendingDecisionCount
-    const memoryKey = remembered.get(no) ?? null
     const live = pending > 0
+    const archived = project.archived === true
+    if (hiddenSet && hiddenSet.has(no) && !live) continue
+    const memoryKey = remembered.get(no) ?? null
+    // S3: a registry row speaks for itself when its counts can (see `registryPosture`).
+    const registry = registryPosture(project, pending)
+    // PR-7 (R-62 ⑥) — FAIL-CLOSED FOLD: a registry row derives 「可以导出」 from `pulledRowCount` alone, but the
+    // directory row carries no refresh state; when THIS browser last saw the live board say the refresh is
+    // unfinished (`blocked_pull_state`), that outranks a registry-derived 「可以导出」. Dormant for every
+    // not-governed project (memory never holds the key for one). Never the other way: a remembered 「可以导出」 does
+    // not override a registry 「刷新未完成」 (the registry never produces it).
+    const foldBlocked = registry !== null && registry.key === 'ready' && memoryKey === 'blocked_pull_state'
+    const fromRegistry = foldBlocked ? null : registry
     cards.push({
       projectNo: no,
       projectName: project.projectName,
       source: 'directory',
-      posture: live
-        ? stockPrepPosture({ pendingDecisionCount: pending })
-        : (memoryKey ? memoryPosture(memoryKey) : stockPrepPosture({ progressUnknown: true })),
-      postureFromMemory: !live && memoryKey !== null,
+      posture: fromRegistry
+        ?? (foldBlocked
+          ? memoryPosture('blocked_pull_state')
+          : (live
+            ? stockPrepPosture({ pendingDecisionCount: pending })
+            : (memoryKey ? memoryPosture(memoryKey) : stockPrepPosture({ progressUnknown: true })))),
+      postureFromMemory: foldBlocked || (!fromRegistry && !live && memoryKey !== null),
       pendingDecisionCount: pending,
+      archived,
     })
   }
 
   for (const entry of memory) {
     if (seen.has(entry.projectNo)) continue
     seen.add(entry.projectNo)
+    if (hiddenSet && hiddenSet.has(entry.projectNo)) continue
     cards.push({
       projectNo: entry.projectNo,
       projectName: null,
@@ -135,21 +206,39 @@ export function buildOperatorHomeCards(
       posture: memoryPosture(entry.postureKey),
       postureFromMemory: true,
       pendingDecisionCount: null,
+      archived: false,
     })
   }
 
   return cards
 }
 
+/**
+ * S3 (ADR §5 「首页：卡片主列表排除已归档，下方一个折叠区「已归档（N）」」) — split the cards into the main
+ * list and the archived section. Order within each half is preserved.
+ */
+export function partitionOperatorHomeCards(cards: readonly StockPrepHomeCard[]): {
+  active: StockPrepHomeCard[]
+  archived: StockPrepHomeCard[]
+} {
+  const active: StockPrepHomeCard[] = []
+  const archived: StockPrepHomeCard[] = []
+  for (const card of cards) (card.archived ? archived : active).push(card)
+  return { active, archived }
+}
+
 /** Highest-priority-first: pending_decision, then blocked, then ready, then everything else. */
 const CARD_RANK: Record<StockPrepPostureKey, number> = {
   pending_decision: 0,
   blocked: 1,
-  running: 2,
-  ready: 3,
-  unknown: 4,
-  not_pulled: 5,
-  not_yours: 6,
+  // PR-5: an unfinished refresh state sits with the two action-needing badges, above 正在跑 / 可以导出.
+  blocked_pull_state: 2,
+  running: 3,
+  ready: 4,
+  unknown: 5,
+  not_pulled: 6,
+  not_yours: 7,
+  archived: 8,
 }
 
 export function sortOperatorHomeCards(cards: readonly StockPrepHomeCard[]): StockPrepHomeCard[] {
@@ -209,20 +298,33 @@ export type StockPrepHomeEmptyState = 'no_projects' | 'nothing_today' | 'directo
  *   1. directory_unavailable — the directory read genuinely failed (G3: silently, no red banner —
  *      this IS the silent degradation). Checked first among the settled cases: with no directory in
  *      hand nothing below can be claimed either way, memory-only cards notwithstanding.
- *   2. no_projects — nothing known at all, from either source.
+ *   2. no_projects — nothing known at all, from either source, AND nothing is merely hidden either
+ *      (see `hiddenCount` below — [S2] this is the one case this function refuses to claim on its
+ *      own).
  *   3. nothing_today — there are cards, but none of them are waiting on the operator.
  *
  * Returns null when the card grid should render with no banner above it.
+ *
+ * `hiddenCount` [S2, adversarial review 2026-09-26]: the number of projects THIS BROWSER chose to hide
+ * via 从列表移除 (`operatorHomeMemory.ts`'s hidden list), whether or not any of them still has a card
+ * (`buildOperatorHomeCards`'s own `pendingDecisionCount` guard can keep one visible regardless). When
+ * every visible card happens to be hidden, `cardCount` reaches 0 the same way it would if there were
+ * genuinely nothing — but 「这里还没有您的项目」 would be FALSE in that case: there are projects, this
+ * browser just asked not to see them. So `cardCount === 0 && hiddenCount > 0` returns `null` here
+ * instead of `'no_projects'`, and `StockPreparationOperatorHome.vue`'s own persistent hidden-count line
+ * (shown whenever `hiddenCount > 0`, regardless of `cardCount`) is what actually explains the empty
+ * grid and offers 全部恢复 — ONE honest message in that spot, not a second one contradicting it.
  */
 export function resolveOperatorHomeEmptyState(input: {
   directorySettled: boolean
   directoryAvailable: boolean
   cardCount: number
   actionableCount: number
+  hiddenCount: number
 }): StockPrepHomeEmptyState | null {
   if (!input.directorySettled) return null
   if (!input.directoryAvailable) return 'directory_unavailable'
-  if (input.cardCount === 0) return 'no_projects'
+  if (input.cardCount === 0) return input.hiddenCount > 0 ? null : 'no_projects'
   if (input.actionableCount === 0) return 'nothing_today'
   return null
 }

@@ -136,6 +136,13 @@ function mountGrid(
 function gridEl(root: HTMLElement): HTMLElement {
   return root.querySelector('.meta-grid') as HTMLElement
 }
+// jsdom has no ClipboardEvent constructor; a plain cancelable `paste` Event carrying a clipboardData stub
+// is what the grid's paste listener reads.
+function pasteEventWithText(text: string): Event {
+  const event = new Event('paste', { bubbles: true, cancelable: true })
+  Object.defineProperty(event, 'clipboardData', { value: { getData: (type: string) => (type === 'text/plain' ? text : '') } })
+  return event
+}
 function cellAt(root: HTMLElement, rowIndex: number, colIndex: number): HTMLElement {
   const rows = root.querySelectorAll('tbody tr.meta-grid__row')
   return rows[rowIndex]!.querySelectorAll('.meta-grid__cell')[colIndex] as HTMLElement
@@ -905,11 +912,16 @@ describe('MetaGridTable cell-edit commit reliability round 2 (P1, P3-A..D)', () 
       checkbox.dispatchEvent(pasteEvt)
       const copyEvt = new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true })
       checkbox.dispatchEvent(copyEvt)
+      // Keyboard paste is read from the native paste event (onGridPaste), which bubbles from the
+      // checkbox to the grid root: the same target gate must leave it alone.
+      const nativePaste = pasteEventWithText('pasted text')
+      checkbox.dispatchEvent(nativePaste)
       await flushUi()
 
       expect(pasteEvt.defaultPrevented).toBe(false)
       expect(copyEvt.defaultPrevented).toBe(false)
-      expect(patchSpy).not.toHaveBeenCalled() // pasteFocusedCell never ran (would patch-cell on a resolved clipboard read)
+      expect(nativePaste.defaultPrevented).toBe(false)
+      expect(patchSpy).not.toHaveBeenCalled() // pasteFocusedCell never ran (it would patch-cell with the event's text)
     })
 
     it('P3-3 positive control: the identical Ctrl+V on the grid root itself (correct target) IS intercepted', async () => {
@@ -918,13 +930,20 @@ describe('MetaGridTable cell-edit commit reliability round 2 (P1, P3-A..D)', () 
       await flushUi()
 
       cellAt(root, 0, 0).click()
+      gridEl(root).focus() // a real click on a cell focuses the grid root
       await flushUi()
 
+      // The Ctrl+V keydown itself is NOT preventDefault-ed (the browser must still fire its paste
+      // event); the paste event on the grid root is the one intercepted and written.
       const evt = new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true, cancelable: true })
       gridEl(root).dispatchEvent(evt)
+      const nativePaste = pasteEventWithText('pasted text')
+      gridEl(root).dispatchEvent(nativePaste)
       await flushUi()
 
-      expect(evt.defaultPrevented).toBe(true) // pasteFocusedCell's own preventDefault, unconditional on the target gate passing
+      expect(evt.defaultPrevented).toBe(false)
+      expect(nativePaste.defaultPrevented).toBe(true) // onGridPaste's preventDefault, once the target gate passes
+      expect(patchSpy).toHaveBeenCalledWith('r0', 'title', 'pasted text', 1)
     })
 
     it('P3-4 guard 2: ArrowDown on the row-select checkbox does not move the grid\'s own focus row', async () => {

@@ -1,0 +1,736 @@
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import net from 'net'
+import { Pool } from 'pg'
+import { Kysely, PostgresDialect } from 'kysely'
+import { MetaSheetServer } from '../../src/index'
+import { poolManager } from '../../src/integration/db/connection-pool'
+import * as writeActManageMigration from '../../src/db/migrations/zzzz20261010120000_add_approval_write_act_template_manage_permissions'
+
+/**
+ * Approval-product permission codes — real-DB acceptance for the two migrations that register them in
+ * the `permissions` catalogue (see `verify-approvals-read-catalogue-gap-20260920.md` for the CONFIRMED
+ * finding this closes):
+ *   - `zzzz20260920130000_add_approval_product_permissions` registers `approvals:read`;
+ *   - `zzzz20261010120000_add_approval_write_act_template_manage_permissions` registers `approvals:write`,
+ *     `approvals:act` and `approval-templates:manage` — the codes the first migration's header deferred.
+ * Both are catalogue rows only: ZERO default grants. Test 1 below asserts all four codes are registered;
+ * it used to assert that write/act stayed unregistered, which was the scope boundary of the first
+ * migration alone and was lifted, as that assertion's own comment said it would be, by the second.
+ *
+ * `approval-templates:manage` is the odd one out: `approval-templates` is a namespace-admission-controlled
+ * resource (`approvals` is not), so registering the code makes it grantable and bindable, but whether a
+ * holder passes `approvalTemplateAdminGuard` is decided by the admission check, not by the migration.
+ * This suite therefore ASSERTS its registration and both grant round trips and RECORDS (does not assert)
+ * the guard outcome, the way the write-surface case below records its evidence.
+ *
+ * This suite deliberately goes through the PRODUCT paths, not a trusted-claims dev-token and not a
+ * direct `user_permissions` INSERT:
+ *   1. `POST /api/auth/register` creates both principals (real path; register() also returns a
+ *      usable token — no separate login call needed).
+ *   2. The actor is elevated to admin via a direct `user_roles` INSERT, exactly as the real-browser
+ *      acceptance run recorded it (`todo-center-real-browser-acceptance-20260920.md` §0.2 note 1):
+ *      there is no product path to self-elevate to admin, so this one seed step is out-of-band by
+ *      necessity, not a shortcut around the thing under test.
+ *   3. `POST /api/permissions/grant` (routes/permissions.ts:133) is the actual product grant
+ *      endpoint — the one that 400s on an unregistered code (routes/permissions.ts:156-164). Before
+ *      this migration, granting `approvals:read` here would fail with exactly that 400; this suite
+ *      proves it now succeeds and the target's PRE-EXISTING token (not a freshly minted one) is
+ *      immediately treated as authorized on its very next request, because `AuthService.verifyToken`
+ *      re-resolves permissions from `user_permissions`/`role_permissions` on every call
+ *      (`resolveRbacProfile` → `listUserPermissions`) rather than baking them into the JWT.
+ *   4. `GET /api/approvals/pending-count` (routes/approvals.ts:1990) is the discriminating endpoint:
+ *      gated by the exact `rbacGuard('approvals', 'read')` this migration's code feeds, and it
+ *      already exists on `origin/main` today (routes/todo.ts does not — the todo center is an
+ *      unmerged draft PR — so this is the closest main-side analogue named in the review, and the
+ *      SAME predicate the todo center will inherit once it lands).
+ *
+ * The discriminating pair is the SAME target user, SAME token, SAME endpoint, before vs. after the
+ * grant: 403 → grant → 200. That isolates the catalogue-registration fix from every other variable.
+ *
+ * RUNNING THIS FILE OUTSIDE ITS CI LANE: this file calls `POST /api/auth/register` 19 times
+ * (mechanically counted, 20261010, with block-comment lines stripped first so the count excludes
+ * this note's own text: `grep -v '^\s*\*' <this file> | grep -c 'await registerUser('` — re-count
+ * rather than assume this stays 19 as cases are added).
+ * The lane (`.github/workflows/approval-realdb-permission-catalogue.yml`) sets
+ * `AUTH_REGISTER_MAX_PER_IP=50` in its job `env:` for exactly that reason. The route's own default
+ * (`routes/auth.ts`'s `maxRegisterPerIp`) is 3 per IP per window — running this file locally without
+ * that override 429s starting at the 4th registration, and the failure surfaces as an unrelated
+ * `expect(response.status).toBe(201)` mismatch with no hint that rate limiting is the real cause. Set
+ * `AUTH_REGISTER_MAX_PER_IP` to something well above the registration count in this file before
+ * running it directly.
+ */
+const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
+
+async function canListenOnEphemeralPort(): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const server = net.createServer()
+    server.once('error', () => resolve(false))
+    server.listen(0, '127.0.0.1', () => server.close(() => resolve(true)))
+  })
+}
+
+const TS = Date.now()
+
+interface RegisterResult {
+  userId: string
+  token: string
+}
+
+async function registerUser(baseUrl: string, email: string, name: string): Promise<RegisterResult> {
+  const response = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, password: 'Perm-Cat-Test-P@ss1', name }),
+  })
+  expect(response.status).toBe(201)
+  const body = (await response.json()) as { data: { user: { id: string }; token: string } }
+  return { userId: body.data.user.id, token: body.data.token }
+}
+
+/** The actual product grant endpoint, routes/permissions.ts:133 — same call the existing
+ *  DISCRIMINATING test below uses inline; factored out so the additional acceptance cases further
+ *  down (participant fence / revoke / write-shaped surface) share one call site. */
+async function grantPermission(baseUrl: string, adminToken: string, userId: string, permission: string): Promise<Response> {
+  return fetch(`${baseUrl}/api/permissions/grant`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ userId, permission }),
+  })
+}
+
+/** The actual product revoke endpoint, routes/permissions.ts:214 — admin-only, DELETEs the
+ *  `user_permissions` row through the product path (not a direct DB DELETE). */
+async function revokePermission(baseUrl: string, adminToken: string, userId: string, permission: string): Promise<Response> {
+  return fetch(`${baseUrl}/api/permissions/revoke`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ userId, permission }),
+  })
+}
+
+/** The four approval-product codes the two registering migrations make grantable. */
+const APPROVAL_PRODUCT_CODES = ['approvals:read', 'approvals:write', 'approvals:act', 'approval-templates:manage'] as const
+
+/**
+ * One gate per code, each fronted by ONLY that code's guard, so a flip on one cannot be explained by
+ * another: `approvals:write` -> `rbacGuard('approvals','write')` on the form-draft list;
+ * `approvals:act` -> `rbacGuard('approvals','act')` on the card-delivery summary (an unknown delivery id is
+ * a 404 from the handler once the guard has admitted the caller); `approval-templates:manage` ->
+ * `approvalTemplateAdminGuard` on the author role directory.
+ */
+const GATE_PATHS = {
+  write: '/api/approvals/form-drafts',
+  act: '/api/approval-card-deliveries/permcat-no-such-delivery',
+  manage: '/api/approval-templates/directory/roles',
+} as const
+
+async function getStatus(baseUrl: string, token: string, path: string): Promise<{ status: number; body: unknown }> {
+  const response = await fetch(`${baseUrl}${path}`, { headers: { Authorization: `Bearer ${token}` } })
+  const text = await response.text()
+  let body: unknown = null
+  try {
+    body = text ? JSON.parse(text) : null
+  } catch {
+    body = text
+  }
+  return { status: response.status, body }
+}
+
+describeIfDatabase('approval-product permission catalogue registration — grant-and-gate real-DB acceptance', () => {
+  let server: MetaSheetServer | undefined
+  let baseUrl = ''
+  const pool = () => poolManager.get()
+  const createdUserIds: string[] = []
+  const createdInstanceIds: string[] = []
+
+  beforeAll(async () => {
+    expect(await canListenOnEphemeralPort()).toBe(true)
+    server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    await server.start()
+    const address = server.getAddress()
+    const port = address && typeof address === 'object' ? address.port : undefined
+    expect(port).toBeTruthy()
+    baseUrl = `http://127.0.0.1:${port}`
+  })
+
+  afterAll(async () => {
+    try {
+      if (createdInstanceIds.length > 0) {
+        await pool().query(`DELETE FROM approval_records WHERE instance_id = ANY($1::text[])`, [createdInstanceIds])
+        await pool().query(`DELETE FROM approval_instances WHERE id = ANY($1::text[])`, [createdInstanceIds])
+      }
+      if (createdUserIds.length > 0) {
+        await pool().query(`DELETE FROM approval_delegations WHERE delegator_user_id = ANY($1::text[])`, [createdUserIds])
+        await pool().query(`DELETE FROM approval_reads WHERE user_id = ANY($1::text[])`, [createdUserIds])
+        await pool().query(`DELETE FROM user_permissions WHERE user_id = ANY($1::text[])`, [createdUserIds])
+        await pool().query(`DELETE FROM user_roles WHERE user_id = ANY($1::text[])`, [createdUserIds])
+        await pool().query(`DELETE FROM users WHERE id = ANY($1::text[])`, [createdUserIds])
+      }
+    } finally {
+      await server?.stop()
+    }
+  })
+
+  /** Seeds a minimal platform approval instance directly (no template/workflow scaffolding needed
+   *  for a permission-catalogue authz probe) with the given user as its REQUESTER — arm 1 of
+   *  `canReadApprovalInstance` (services/approval-instance-readability.ts): `requester_snapshot->>
+   *  'id' = viewerId`, unconditional. Mirrors approval-history-authz-guard.db.test.ts's own
+   *  `seedInstanceWithComment`, minus the marker/comment row this suite's status-only assertions
+   *  don't need. */
+  async function seedRequesterInstance(requesterId: string): Promise<string> {
+    const id = `permcat-instance-${TS}-${Math.random().toString(36).slice(2, 8)}`
+    await pool().query(
+      `INSERT INTO approval_instances (id, status, requester_snapshot) VALUES ($1, 'pending', $2::jsonb)`,
+      [id, JSON.stringify({ id: requesterId })],
+    )
+    createdInstanceIds.push(id)
+    return id
+  }
+
+  /**
+   * REQUIRES AN EXCLUSIVE DATABASE (this file's lane provisions one; do not add this file to a
+   * shared-DB run-list without changing this test first). Both migrations insert with
+   * `ON CONFLICT DO NOTHING`, and sibling suites seed some of these codes the same way, so the SET of
+   * codes is stable under sharing; the exact-set assertion below is still only safe where nothing
+   * DELETEs from the global `permissions` table, and the zero-grant test after it additionally needs a
+   * database no sibling suite has granted these codes in.
+   */
+  it('the migrations registered ALL FOUR approval-product codes in the permissions catalogue, each with a name and a description', async () => {
+    const result = await pool().query<{ code: string; name: string | null; description: string | null }>(
+      `SELECT code, name, description FROM permissions WHERE code = ANY($1::text[])`,
+      [[...APPROVAL_PRODUCT_CODES]],
+    )
+    // Sorted in JS: ORDER BY code would depend on the database collation ('-' vs ':' vs letters).
+    expect(result.rows.map((row) => row.code).sort()).toEqual([...APPROVAL_PRODUCT_CODES].sort())
+    for (const row of result.rows) {
+      expect(typeof row.name).toBe('string')
+      expect((row.name ?? '').length).toBeGreaterThan(0)
+      expect(typeof row.description).toBe('string')
+      expect((row.description ?? '').length).toBeGreaterThan(0)
+    }
+  })
+
+  it('the migrations grant NOTHING by default — no role_permissions and no user_permissions row exists for any of the four codes', async () => {
+    const roleRows = await pool().query<{ role_id: string; permission_code: string }>(
+      `SELECT role_id, permission_code FROM role_permissions WHERE permission_code = ANY($1::text[])`,
+      [[...APPROVAL_PRODUCT_CODES]],
+    )
+    expect(roleRows.rows).toEqual([])
+    const userRows = await pool().query<{ user_id: string; permission_code: string }>(
+      `SELECT user_id, permission_code FROM user_permissions WHERE permission_code = ANY($1::text[])`,
+      [[...APPROVAL_PRODUCT_CODES]],
+    )
+    expect(userRows.rows).toEqual([])
+  })
+
+  /**
+   * Placed right after the zero-grant test ON PURPOSE: the cases below grant approvals:write / act /
+   * manage to throwaway users and those rows live until afterAll, so this is the last point in the file
+   * where all three codes are known to be unbound. Same EXCLUSIVE-DATABASE requirement as the two tests
+   * above (it deletes and re-inserts global catalogue rows); the finally block re-runs up() so every later
+   * case sees all three codes registered again. It registers NO user (the lane's AUTH_REGISTER_MAX_PER_IP
+   * count is unchanged): the user binding uses a synthetic user id, which `user_permissions` accepts
+   * because its only foreign key is `permission_code -> permissions(code)`. down() runs inside a
+   * transaction, as the migrator runs it, so its FOR UPDATE row lock is held until the DELETE is done.
+   */
+  it('ROLLBACK SAFETY: down() keeps a code a role holds and a code a user holds (catalogue rows AND bindings survive), removes only the unbound code, and up() re-registers it', async () => {
+    const roleId = `permcat-down-role-${TS}`
+    const userId = `permcat-down-user-${TS}`
+    const migrationPool = new Pool({ connectionString: process.env.DATABASE_URL })
+    const migrationDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: migrationPool }) })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const catalogueRows = async () =>
+      (
+        await pool().query<{ code: string; name: string | null; description: string | null }>(
+          `SELECT code, name, description FROM permissions WHERE code = ANY($1::text[])`,
+          [['approvals:write', 'approvals:act', 'approval-templates:manage']],
+        )
+      ).rows.sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0))
+    let bodyCompleted = false
+    try {
+      const unbound = await pool().query<{ n: number }>(
+        `SELECT (SELECT count(*) FROM role_permissions WHERE permission_code = ANY($1::text[]))::int
+              + (SELECT count(*) FROM user_permissions WHERE permission_code = ANY($1::text[]))::int AS n`,
+        [['approvals:write', 'approvals:act', 'approval-templates:manage']],
+      )
+      expect(unbound.rows[0]?.n).toBe(0)
+
+      // The deployed shape that motivated narrowing down(): approvals:write bound to a live role, plus a
+      // direct per-user grant of approvals:act.
+      await pool().query(`INSERT INTO roles (id, name) VALUES ($1, 'Permcat Down Probe Role')`, [roleId])
+      await pool().query(`INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'approvals:write')`, [roleId])
+      await pool().query(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:act')`, [userId])
+      const keptBefore = (await catalogueRows()).filter((row) => row.code !== 'approval-templates:manage')
+      expect(keptBefore.map((row) => row.code)).toEqual(['approvals:act', 'approvals:write'])
+
+      await migrationDb.transaction().execute((trx) => writeActManageMigration.down(trx))
+
+      const roleBinding = await pool().query(`SELECT role_id, permission_code FROM role_permissions WHERE role_id = $1`, [roleId])
+      expect(roleBinding.rows).toEqual([{ role_id: roleId, permission_code: 'approvals:write' }])
+      const userBinding = await pool().query(`SELECT user_id, permission_code FROM user_permissions WHERE user_id = $1`, [userId])
+      expect(userBinding.rows).toEqual([{ user_id: userId, permission_code: 'approvals:act' }])
+      // Both bound rows survive byte-for-byte; the unbound code is gone.
+      expect(await catalogueRows()).toEqual(keptBefore)
+      expect(warn).toHaveBeenCalledTimes(2)
+      const warned = warn.mock.calls.map((call) => String(call[0]))
+      expect(warned.some((line) => line.includes('approvals:write'))).toBe(true)
+      expect(warned.some((line) => line.includes('approvals:act'))).toBe(true)
+
+      await writeActManageMigration.up(migrationDb)
+
+      expect((await catalogueRows()).map((row) => row.code)).toEqual(['approval-templates:manage', 'approvals:act', 'approvals:write'])
+      const roleBindingAfterUp = await pool().query(`SELECT permission_code FROM role_permissions WHERE role_id = $1`, [roleId])
+      expect(roleBindingAfterUp.rows).toEqual([{ permission_code: 'approvals:write' }])
+      const userBindingAfterUp = await pool().query(`SELECT permission_code FROM user_permissions WHERE user_id = $1`, [userId])
+      expect(userBindingAfterUp.rows).toEqual([{ permission_code: 'approvals:act' }])
+      bodyCompleted = true
+    } finally {
+      warn.mockRestore()
+      // Every step runs even if an earlier one throws: later cases need all three codes registered and
+      // none of this case's bindings left behind, and the pool must always be closed.
+      const cleanupErrors: unknown[] = []
+      const attempt = async (step: () => Promise<unknown>) => {
+        try {
+          await step()
+        } catch (error) {
+          cleanupErrors.push(error)
+        }
+      }
+      await attempt(() => writeActManageMigration.up(migrationDb))
+      await attempt(() => pool().query(`DELETE FROM user_permissions WHERE user_id = $1`, [userId]))
+      await attempt(() => pool().query(`DELETE FROM role_permissions WHERE role_id = $1`, [roleId]))
+      await attempt(() => pool().query(`DELETE FROM roles WHERE id = $1`, [roleId]))
+      await attempt(() => migrationDb.destroy())
+      if (cleanupErrors.length > 0) {
+        // Surface cleanup failures without masking an assertion failure from the body above.
+        if (bodyCompleted) throw new AggregateError(cleanupErrors, 'ROLLBACK SAFETY cleanup failed')
+        // eslint-disable-next-line no-console
+        console.error('[permcat rollback-safety] cleanup errors after a failed body:', cleanupErrors)
+      }
+    }
+  })
+
+  it(
+    'DISCRIMINATING: same non-admin user, same token, same endpoint — 403 before the product grant, 200 after it',
+    async () => {
+      const adminEmail = `permcat-admin-${TS}@example.com`
+      const targetEmail = `permcat-target-${TS}@example.com`
+
+      const admin = await registerUser(baseUrl, adminEmail, 'Permcat Admin')
+      const target = await registerUser(baseUrl, targetEmail, 'Permcat Target')
+      createdUserIds.push(admin.userId, target.userId)
+
+      // No product path elevates a fresh registrant to admin (registration never assigns the
+      // `admin` role_id) — this one direct seed is the same out-of-band step the real-browser
+      // acceptance run took and documented for the identical reason.
+      await pool().query(
+        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+        [admin.userId],
+      )
+
+      // BEFORE: target has never been granted approvals:read.
+      const before = await fetch(`${baseUrl}/api/approvals/pending-count`, {
+        headers: { Authorization: `Bearer ${target.token}` },
+      })
+      expect(before.status).toBe(403)
+
+      // Grant, through the actual product endpoint routes/permissions.ts:133 — the same one that
+      // 400s on an unregistered code at :156-164. Pre-migration this call would have 400ed.
+      const grant = await fetch(`${baseUrl}/api/permissions/grant`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: `Bearer ${admin.token}` },
+        body: JSON.stringify({ userId: target.userId, permission: 'approvals:read' }),
+      })
+      expect(grant.status).toBe(200)
+      const grantBody = (await grant.json()) as { success: boolean; permission: string }
+      expect(grantBody).toMatchObject({ success: true, permission: 'approvals:read' })
+
+      // AFTER: SAME token, SAME endpoint — verifyToken re-resolves permissions from
+      // user_permissions/role_permissions on every call, so no re-login is needed.
+      const after = await fetch(`${baseUrl}/api/approvals/pending-count`, {
+        headers: { Authorization: `Bearer ${target.token}` },
+      })
+      expect(after.status).toBe(200)
+    },
+  )
+
+  it(
+    'DISCRIMINATING (approvals:write): same non-admin user, same token, same endpoint — 403 before the product grant, 200 after it; the OTHER two new codes stay denied',
+    async () => {
+      const admin = await registerUser(baseUrl, `permcat-admin7-${TS}@example.com`, 'Permcat Admin Seven')
+      const target = await registerUser(baseUrl, `permcat-target7-${TS}@example.com`, 'Permcat Target Seven')
+      createdUserIds.push(admin.userId, target.userId)
+      await pool().query(
+        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+        [admin.userId],
+      )
+
+      expect((await getStatus(baseUrl, target.token, GATE_PATHS.write)).status).toBe(403)
+
+      // Pre-migration this 400ed with "Permission code 'approvals:write' does not exist".
+      const grant = await grantPermission(baseUrl, admin.token, target.userId, 'approvals:write')
+      expect(grant.status).toBe(200)
+      expect(await grant.json()).toMatchObject({ success: true, permission: 'approvals:write' })
+
+      const after = await getStatus(baseUrl, target.token, GATE_PATHS.write)
+      expect(after.status).toBe(200)
+      expect(after.body).toMatchObject({ ok: true, data: { drafts: [] } })
+
+      // Independence: holding write confers neither act nor template management.
+      expect((await getStatus(baseUrl, target.token, GATE_PATHS.act)).status).toBe(403)
+      expect((await getStatus(baseUrl, target.token, GATE_PATHS.manage)).status).toBe(403)
+    },
+  )
+
+  it(
+    'DISCRIMINATING (approvals:act): same non-admin user, same token, same endpoint — 403 before the product grant, the handler\'s own 404 after it; the OTHER two new codes stay denied',
+    async () => {
+      const admin = await registerUser(baseUrl, `permcat-admin8-${TS}@example.com`, 'Permcat Admin Eight')
+      const target = await registerUser(baseUrl, `permcat-target8-${TS}@example.com`, 'Permcat Target Eight')
+      createdUserIds.push(admin.userId, target.userId)
+      await pool().query(
+        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+        [admin.userId],
+      )
+
+      expect((await getStatus(baseUrl, target.token, GATE_PATHS.act)).status).toBe(403)
+
+      // Pre-migration this 400ed with "Permission code 'approvals:act' does not exist".
+      const grant = await grantPermission(baseUrl, admin.token, target.userId, 'approvals:act')
+      expect(grant.status).toBe(200)
+      expect(await grant.json()).toMatchObject({ success: true, permission: 'approvals:act' })
+
+      // The guard now admits the caller; the card-delivery handler then answers for an unknown id with its
+      // own coded 404 (no existence oracle), which is what tells "admitted" apart from a bare route miss.
+      const after = await getStatus(baseUrl, target.token, GATE_PATHS.act)
+      expect(after.status).toBe(404)
+      expect(after.body).toMatchObject({ ok: false, error: { code: 'APPROVAL_CARD_DELIVERY_NOT_FOUND' } })
+
+      // Independence: holding act confers neither write nor template management.
+      expect((await getStatus(baseUrl, target.token, GATE_PATHS.write)).status).toBe(403)
+      expect((await getStatus(baseUrl, target.token, GATE_PATHS.manage)).status).toBe(403)
+    },
+  )
+
+  it(
+    'approval-templates:manage is registered and accepted by the per-user grant endpoint (400 before the migration); the guard outcome for that direct-grant holder is RECORDED, not asserted — approval-templates is namespace-admission-controlled, so whether the holder passes approvalTemplateAdminGuard is the admission check\'s decision, not this migration\'s',
+    async () => {
+      const admin = await registerUser(baseUrl, `permcat-admin9-${TS}@example.com`, 'Permcat Admin Nine')
+      const target = await registerUser(baseUrl, `permcat-target9-${TS}@example.com`, 'Permcat Target Nine')
+      createdUserIds.push(admin.userId, target.userId)
+      await pool().query(
+        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+        [admin.userId],
+      )
+
+      const before = await getStatus(baseUrl, target.token, GATE_PATHS.manage)
+      expect(before.status).toBe(403)
+
+      const grant = await grantPermission(baseUrl, admin.token, target.userId, 'approval-templates:manage')
+      expect(grant.status).toBe(200)
+      expect(await grant.json()).toMatchObject({ success: true, permission: 'approval-templates:manage' })
+
+      const after = await getStatus(baseUrl, target.token, GATE_PATHS.manage)
+      // eslint-disable-next-line no-console
+      console.log(`[permcat manage-surface evidence] GET ${GATE_PATHS.manage} for a direct approval-templates:manage holder: ${before.status} before the grant -> ${after.status} after it`)
+      // Pinned to the admission check's CURRENT decision for a direct grant of this code (not a promise
+      // of the migration): a holder is still refused until the resource's admission policy changes.
+      // Edit this line together with any admission-policy change.
+      expect(after.status).toBe(403)
+
+      // The row was written through the product endpoint, and only for this user.
+      const rows = await pool().query<{ user_id: string }>(
+        `SELECT user_id FROM user_permissions WHERE permission_code = 'approval-templates:manage' AND user_id = ANY($1::text[])`,
+        [createdUserIds],
+      )
+      expect(rows.rows).toEqual([{ user_id: target.userId }])
+    },
+  )
+
+  it('granting an UNREGISTERED code still 400s (negative control — the fix is not a blanket bypass; uses a synthetic code, not approvals:write/act, so this stays correct even after a future PR registers those)', async () => {
+    const adminEmail = `permcat-admin2-${TS}@example.com`
+    const targetEmail = `permcat-target2-${TS}@example.com`
+    const admin = await registerUser(baseUrl, adminEmail, 'Permcat Admin Two')
+    const target = await registerUser(baseUrl, targetEmail, 'Permcat Target Two')
+    createdUserIds.push(admin.userId, target.userId)
+    await pool().query(
+      `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+      [admin.userId],
+    )
+
+    const grant = await fetch(`${baseUrl}/api/permissions/grant`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${admin.token}` },
+      body: JSON.stringify({ userId: target.userId, permission: `nonexistent:code-${TS}` }),
+    })
+    expect(grant.status).toBe(400)
+  })
+
+  it(
+    'UNRELATED-INSTANCE FENCE: a user holding approvals:read via the product grant is NOT thereby admitted to an instance they are not a participant of — GET /:id and /:id/history both deny (canReadApprovalInstance runs AFTER rbacGuard as a SEPARATE per-instance leg; approvals:read only satisfies the leg-1 resource-shape guard). This is a P1 finding-in-waiting if it ever comes back 200: the test records the ACTUAL status observed rather than assuming 403/404, and fails loudly (with the unexpected status printed) if the participant fence turns out not to hold. POSITIVE CONTROL, same instanceId: the instance\'s own requester (also granted approvals:read) asserts 200 on the identical two endpoints, so a 404 above can only mean "not a participant", never "the instance was never actually created" (gate r3 P2-1).',
+    async () => {
+      const adminEmail = `permcat-admin3-${TS}@example.com`
+      const readerEmail = `permcat-reader3-${TS}@example.com`
+      const strangerRequesterEmail = `permcat-stranger3-${TS}@example.com`
+
+      const admin = await registerUser(baseUrl, adminEmail, 'Permcat Admin Three')
+      const reader = await registerUser(baseUrl, readerEmail, 'Permcat Reader Three')
+      const strangerRequester = await registerUser(baseUrl, strangerRequesterEmail, 'Permcat Stranger Three')
+      createdUserIds.push(admin.userId, reader.userId, strangerRequester.userId)
+      await pool().query(
+        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+        [admin.userId],
+      )
+
+      // reader is granted approvals:read through the actual product endpoint — not a dev-token,
+      // not a direct user_permissions INSERT.
+      const grant = await grantPermission(baseUrl, admin.token, reader.userId, 'approvals:read')
+      expect(grant.status).toBe(200)
+
+      // strangerRequester is ALSO granted approvals:read — the positive control below needs them to
+      // clear the SAME leg-1 rbacGuard('approvals','read') reader just cleared, so that a 200 on
+      // their own instance is attributable to canReadApprovalInstance's arm 1 (participant), not to
+      // some other bypass.
+      const requesterGrant = await grantPermission(baseUrl, admin.token, strangerRequester.userId, 'approvals:read')
+      expect(requesterGrant.status).toBe(200)
+
+      // An instance reader is NOT a participant of: requester is strangerRequester, not reader; no
+      // assignment/cc/past-actor row names reader at all.
+      const instanceId = await seedRequesterInstance(strangerRequester.userId)
+
+      // LEG-1 PROOF, same token used below: pending-count is gated by ONLY
+      // rbacGuard('approvals','read') (no per-instance leg-2), so 200 here mechanically confirms
+      // reader's grant clears leg-1 before the /:id calls run. Without this, a 403 on /:id below
+      // would be indistinguishable between "leg-1 (the thing this migration fixes) never cleared"
+      // and "leg-2's participant fence denied" — this pins it to the latter.
+      const readerLeg1Check = await fetch(`${baseUrl}/api/approvals/pending-count`, {
+        headers: { Authorization: `Bearer ${reader.token}` },
+      })
+      expect(readerLeg1Check.status).toBe(200)
+
+      const detailResponse = await fetch(`${baseUrl}/api/approvals/${encodeURIComponent(instanceId)}`, {
+        headers: { Authorization: `Bearer ${reader.token}` },
+      })
+      const historyResponse = await fetch(`${baseUrl}/api/approvals/${encodeURIComponent(instanceId)}/history`, {
+        headers: { Authorization: `Bearer ${reader.token}` },
+      })
+
+      // POSITIVE CONTROL — SAME instanceId, the instance's own requester, own token: arm 1 of
+      // canReadApprovalInstance (`requester_snapshot->>'id' = viewerId`) admits them unconditionally,
+      // so this must be 200/200. Without this pair, the 404/404 above would read identically whether
+      // the fence is holding OR seedRequesterInstance's INSERT silently failed/wrote a different id —
+      // this closes that gap by proving the SAME id is hydratable by SOMEONE.
+      const requesterDetailResponse = await fetch(`${baseUrl}/api/approvals/${encodeURIComponent(instanceId)}`, {
+        headers: { Authorization: `Bearer ${strangerRequester.token}` },
+      })
+      const requesterHistoryResponse = await fetch(`${baseUrl}/api/approvals/${encodeURIComponent(instanceId)}/history`, {
+        headers: { Authorization: `Bearer ${strangerRequester.token}` },
+      })
+
+      // Record what actually happened rather than assuming — if either comes back 200 that is the
+      // participant fence failing to hold for a grant issued via THIS migration's code, which is a
+      // P1 worth flagging to owner, not silently accepting/hiding. Narrowed to 404 (not
+      // [403, 404]): readerLeg1Check above already proves leg-1 (rbacGuard('approvals','read'))
+      // passed with this SAME token, so a 403 here could now only mean leg-1 stopped passing
+      // mid-test — a different, more alarming failure than the participant fence this test targets
+      // — and is deliberately excluded rather than accepted as an equivalent outcome.
+      expect(detailResponse.status).toBe(404)
+      expect(historyResponse.status).toBe(404)
+      expect(requesterDetailResponse.status).toBe(200)
+      expect(requesterHistoryResponse.status).toBe(200)
+    },
+  )
+
+  it(
+    'REVOKE THEN DENY: same non-admin user, same token, same endpoint that just proved 403→grant→200 above — after the product revoke endpoint removes the grant, the identical request is denied again (403), proving the gate re-resolves permissions on every call rather than caching the earlier grant for the life of the token',
+    async () => {
+      const adminEmail = `permcat-admin4-${TS}@example.com`
+      const targetEmail = `permcat-target4-${TS}@example.com`
+
+      const admin = await registerUser(baseUrl, adminEmail, 'Permcat Admin Four')
+      const target = await registerUser(baseUrl, targetEmail, 'Permcat Target Four')
+      createdUserIds.push(admin.userId, target.userId)
+      await pool().query(
+        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+        [admin.userId],
+      )
+
+      const grant = await grantPermission(baseUrl, admin.token, target.userId, 'approvals:read')
+      expect(grant.status).toBe(200)
+
+      const afterGrant = await fetch(`${baseUrl}/api/approvals/pending-count`, {
+        headers: { Authorization: `Bearer ${target.token}` },
+      })
+      expect(afterGrant.status).toBe(200)
+
+      const revoke = await revokePermission(baseUrl, admin.token, target.userId, 'approvals:read')
+      expect(revoke.status).toBe(200)
+      const revokeBody = (await revoke.json()) as { success: boolean; permission: string }
+      expect(revokeBody).toMatchObject({ success: true, permission: 'approvals:read' })
+
+      // SAME token, SAME endpoint — post-revoke this must deny again.
+      const afterRevoke = await fetch(`${baseUrl}/api/approvals/pending-count`, {
+        headers: { Authorization: `Bearer ${target.token}` },
+      })
+      expect(afterRevoke.status).toBe(403)
+    },
+  )
+
+  it(
+    'WRITE-SHAPED SURFACE BEHIND approvals:read: enumerates what an approvals:read holder can reach on write-shaped routes gated by the SAME rbacGuard(\'approvals\',\'read\') predicate this migration\'s code feeds — POST /api/approval-delegations/mine (creates a delegation row) and POST /api/approvals/mark-all-read (mutates read-state). Without the grant both 403 (negative control, unchanged by this migration). WITH the grant, this records the ACTUAL status/effect rather than assuming a particular outcome either way — a 2xx here is evidence for the private write-up (approvals:read gates more than reads), not something this test tries to prevent or launder.',
+    async () => {
+      const adminEmail = `permcat-admin5-${TS}@example.com`
+      const targetEmail = `permcat-target5-${TS}@example.com`
+      const delegateeEmail = `permcat-delegatee5-${TS}@example.com`
+
+      const admin = await registerUser(baseUrl, adminEmail, 'Permcat Admin Five')
+      const target = await registerUser(baseUrl, targetEmail, 'Permcat Target Five')
+      const delegatee = await registerUser(baseUrl, delegateeEmail, 'Permcat Delegatee Five')
+      createdUserIds.push(admin.userId, target.userId, delegatee.userId)
+      await pool().query(
+        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+        [admin.userId],
+      )
+
+      // BEFORE grant: negative control — target has approvals:read on neither route yet.
+      const delegationsBefore = await fetch(`${baseUrl}/api/approval-delegations/mine`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: `Bearer ${target.token}` },
+        body: JSON.stringify({
+          delegateeUserId: delegatee.userId,
+          scope: 'all',
+          startAt: new Date(TS).toISOString(),
+          endAt: new Date(TS + 24 * 60 * 60 * 1000).toISOString(),
+        }),
+      })
+      expect(delegationsBefore.status).toBe(403)
+
+      const markAllReadBefore = await fetch(`${baseUrl}/api/approvals/mark-all-read`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: `Bearer ${target.token}` },
+        body: JSON.stringify({}),
+      })
+      expect(markAllReadBefore.status).toBe(403)
+
+      const grant = await grantPermission(baseUrl, admin.token, target.userId, 'approvals:read')
+      expect(grant.status).toBe(200)
+
+      // AFTER grant — record the real outcome as evidence, whatever it is.
+      const delegationsAfter = await fetch(`${baseUrl}/api/approval-delegations/mine`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: `Bearer ${target.token}` },
+        body: JSON.stringify({
+          delegateeUserId: delegatee.userId,
+          scope: 'all',
+          startAt: new Date(TS).toISOString(),
+          endAt: new Date(TS + 24 * 60 * 60 * 1000).toISOString(),
+        }),
+      })
+      // eslint-disable-next-line no-console
+      console.log(`[permcat write-surface evidence] POST /api/approval-delegations/mine after approvals:read grant -> ${delegationsAfter.status}`)
+
+      const markAllReadAfter = await fetch(`${baseUrl}/api/approvals/mark-all-read`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: `Bearer ${target.token}` },
+        body: JSON.stringify({}),
+      })
+      // eslint-disable-next-line no-console
+      console.log(`[permcat write-surface evidence] POST /api/approvals/mark-all-read after approvals:read grant -> ${markAllReadAfter.status}`)
+
+      // This suite does not assert a particular post-grant status for either route — the finding
+      // (round-2 gate P3-B) is that approvals:read is ALSO the leg-1 door for these write-shaped
+      // routes, and the actual numbers are the evidence, not a thing to be papered over with a
+      // loose assertion. If a future PR adds a leg-2 fence to either route, this evidence changes
+      // and the console lines above will show it; until then the numbers are what they are.
+      expect(typeof delegationsAfter.status).toBe('number')
+      expect(typeof markAllReadAfter.status).toBe('number')
+
+      // Clean up any delegation row this test actually created (delegator = target).
+      if (delegationsAfter.status === 201) {
+        const body = (await delegationsAfter.json()) as { data: { id: string } }
+        await pool().query(`DELETE FROM approval_delegations WHERE id = $1`, [body.data.id])
+      }
+    },
+  )
+
+  it(
+    'ROLE-LEVEL PRODUCT PATH (gate r4 P2-1): the SAME catalogue rows the migrations insert also ' +
+      'unblock a SECOND, independent product endpoint — POST /api/roles, which binds permission ' +
+      'codes to an entire role in one call via assertCodesInCatalog (routes/roles.ts), never ' +
+      'reached through POST /api/permissions/grant. Unregistered code (a synthetic one — no longer ' +
+      'approvals:write, which the second migration registers): binding it 400s UNKNOWN_PERMISSION_CODE, ' +
+      'so the role and its grant are never persisted (assertCodesInCatalog runs inside the same DB ' +
+      'transaction as the role/grant INSERT and rolls both back on throw). Registered codes (all four ' +
+      'approval-product codes): the IDENTICAL endpoint 200s and writes one role_permissions row per ' +
+      'code — with ZERO calls anywhere in this test to POST /api/permissions/grant — demonstrating the ' +
+      'role-level bulk-bind path is separate from, and does not go through, the per-user grant ' +
+      'endpoint the rest of this suite exercises. This test creates the only role_permissions/roles ' +
+      'rows it creates and deletes both in a finally block, so the "zero role_permissions rows for the ' +
+      'four codes" invariant the migrations promise (asserted by the earlier test in this file, and by ' +
+      'their zero-default-grant claim) still holds for every run after this one.',
+    async () => {
+      const adminEmail = `permcat-admin6-${TS}@example.com`
+      const admin = await registerUser(baseUrl, adminEmail, 'Permcat Admin Six')
+      createdUserIds.push(admin.userId)
+      await pool().query(
+        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+        [admin.userId],
+      )
+
+      const roleId = `permcat-role-${TS}`
+
+      try {
+        // UNREGISTERED code, product endpoint POST /api/roles (not /api/permissions/grant): must
+        // 400 with the same UNKNOWN_PERMISSION_CODE the per-user grant endpoint returns, not
+        // silently create the role with an empty permission set.
+        const unregistered = await fetch(`${baseUrl}/api/roles`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', Authorization: `Bearer ${admin.token}` },
+          body: JSON.stringify({ id: roleId, name: 'Permcat Probe Role', permissions: [`nonexistent:role-code-${TS}`] }),
+        })
+        expect(unregistered.status).toBe(400)
+        const unregisteredBody = (await unregistered.json()) as { ok: boolean; error?: { code?: string } }
+        expect(unregisteredBody).toMatchObject({ ok: false, error: { code: 'UNKNOWN_PERMISSION_CODE' } })
+
+        // Confirm the rolled-back transaction left no trace — the role row itself must not exist
+        // after the 400 (assertCodesInCatalog throws inside the same transaction as the role INSERT).
+        const roleAfterRefusal = await pool().query(`SELECT id FROM roles WHERE id = $1`, [roleId])
+        expect(roleAfterRefusal.rows).toEqual([])
+
+        // REGISTERED codes (all four approval-product codes the two migrations add), SAME endpoint,
+        // SAME role id — no POST /api/permissions/grant call anywhere in this test.
+        const registered = await fetch(`${baseUrl}/api/roles`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', Authorization: `Bearer ${admin.token}` },
+          body: JSON.stringify({ id: roleId, name: 'Permcat Probe Role', permissions: [...APPROVAL_PRODUCT_CODES] }),
+        })
+        expect(registered.status).toBe(200)
+
+        const roleGrantRows = await pool().query<{ permission_code: string }>(
+          `SELECT permission_code FROM role_permissions WHERE role_id = $1 ORDER BY permission_code`,
+          [roleId],
+        )
+        expect(roleGrantRows.rows.map((row) => row.permission_code).sort()).toEqual([...APPROVAL_PRODUCT_CODES].sort())
+      } finally {
+        // The migrations add zero default grants; this test's own admin-operated POST is what
+        // created these role_permissions rows, and they must not survive this test.
+        await pool().query(`DELETE FROM role_permissions WHERE role_id = $1`, [roleId])
+        await pool().query(`DELETE FROM roles WHERE id = $1`, [roleId])
+      }
+
+      // Mechanical re-check, not just this test's own rows: zero role_permissions rows for any of the
+      // four codes anywhere in the database after cleanup, the same invariant the earlier
+      // "grants NOTHING by default" test in this file asserts.
+      const residual = await pool().query<{ permission_code: string }>(
+        `SELECT permission_code FROM role_permissions WHERE permission_code = ANY($1::text[])`,
+        [[...APPROVAL_PRODUCT_CODES]],
+      )
+      expect(residual.rows).toEqual([])
+    },
+  )
+})

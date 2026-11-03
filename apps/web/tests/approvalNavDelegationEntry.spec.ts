@@ -30,6 +30,7 @@ vi.mock('../src/composables/usePlugins', () => ({
 
 vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({
+    resolveHomePath: () => '/home', // App.vue brand link (#5700) reads it; the brand target itself is pinned in App.spec.ts
     loadProductFeatures: vi.fn().mockResolvedValue(undefined),
     isAttendanceFocused: () => false,
     isPlmWorkbenchFocused: () => false,
@@ -248,3 +249,6 @@ describe('my-delegation self-service entry', () => {
     expect(enclosingOpeningTag(source, 'no-such-attribute-anywhere')).toBe('')
   })
 })
+
+// Preload the shell during collection; mountApp keeps its dynamic import for module resets.
+await import('../src/App.vue')

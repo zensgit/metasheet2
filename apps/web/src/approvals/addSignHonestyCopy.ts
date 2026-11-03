@@ -27,11 +27,21 @@
  *
  * ### What is deliberately NOT changed
  *
- * The wire contract is untouched and widen-only: the client keeps sending `addSignMode:'parallel'`,
- * and the SERVER still accepts `'before'` exactly as before, so no existing client breaks. Making
- * `'after'` reach the service (gate B-1) and giving it a runtime shape (B-3/B-4/B-5) are NOT in this
- * slice — see the PR body's deferral, which carries the reproduced `APPROVAL_NODE_ENTRY_EPOCH_MIXED`
- * blocker for OD-L5-4(b) at a multi-seat node.
+ * The wire contract is widen-only: `'parallel'` stays the default this client sends, and the SERVER
+ * still accepts `'before'` exactly as before, so no existing client breaks.
+ *
+ * ### F4-S1 — 后加签 (`'after'`) lands, and its copy must be as honest as the retired radio was not
+ *
+ * OD-L5-4(b) (RATIFIED, `approval-lock5-node-operation-policy-20260817.md:311-322`, recorded
+ * `:348-349`) ships after-sign as **a deferred same-node round**: the actor's seat is consumed as an
+ * approval, the addees activate as a fresh round AT THE SAME NODE, and the node advances when that
+ * round completes. The lock's own constraint: *"Under (b) … no copy may claim corpus 后加签 semantics
+ * (当前节点自动通过并流转至新增节点): the node is not skipped."* Owner disposition (1) on the
+ * ledger's four-completions row (2026-10-01) adds the refusal arm: when the actor's approval does not
+ * complete the current round (undecided 会签 siblings / threshold still short), the server refuses
+ * with `APPROVAL_ADD_SIGN_AFTER_ROUND_INCOMPLETE` and nothing is written. Every string below states
+ * exactly that, in both languages, so a locale switch cannot reintroduce the claim: the corpus
+ * phrase appears only NEGATED (「也不是…」 / "this is not …"), and 前加签 does not appear at all.
  */
 
 /**
@@ -46,5 +56,73 @@
 export const ADD_SIGN_MODE_HINT =
   '加签人将加入当前审批节点，由该节点原有的会签/或签规则决定何时通过；不会插入新的审批节点，也不会跳过当前节点。'
 
-/** The ONLY mode this client sends. The server's accepted set is unchanged (widen-only). */
+/** O-8 / F8-1: the same honest statement in English — no 前加签/后加签 claim in either locale. */
+export const ADD_SIGN_MODE_HINT_EN =
+  'Added approvers join the current approval node, and that node\'s existing all-approve / any-approve rule decides when it passes. No new approval node is inserted and the current node is not skipped.'
+
+/** The add-sign hint for the current shell locale. */
+export function addSignModeHint(isZh: boolean): string {
+  return isZh ? ADD_SIGN_MODE_HINT : ADD_SIGN_MODE_HINT_EN
+}
+
+/** The DEFAULT mode this client sends; the dialog may switch it to `'after'` (F4-S1). */
 export const CLIENT_ADD_SIGN_MODE = 'parallel' as const
+
+/** The two placements the dialog offers. `'before'` is not offered: it is `'parallel'` mislabelled (B-2). */
+export type ClientAddSignPlacement = 'parallel' | 'after'
+
+/** The appended round's aggregation, asked only for 后加签 with two or more addees (OD-L5-5(a)). */
+export type ClientAddSignAggregation = 'all' | 'any'
+
+/**
+ * F4-S1 — the honest copy for the 加签方式 choice, in both languages. Each string is a statement of
+ * what the server DOES (OD-L5-4(b) + owner disposition (1)), never of what the corpus feature is
+ * called.
+ *
+ * O-8 / F8-1: one table per locale, `ADD_SIGN_PLACEMENT_COPY_ZH` / `ADD_SIGN_PLACEMENT_COPY_EN`
+ * (`EN: Record<keyof typeof ZH, string>`, so vue-tsc enforces key parity — the `*_ZH` / `*_EN` shape
+ * the member-surface source guard recognises), and `addSignPlacementCopy(isZh)` picks one from the
+ * shell locale. The form-item label above the choice is the detail view's own `addSignMode` label
+ * key (`approvalDetailLabels.ts`), and the 并加签 hint is `addSignModeHint(isZh)` above, so neither
+ * is repeated here.
+ */
+export const ADD_SIGN_PLACEMENT_COPY_ZH = {
+  parallelLabel: '并加签',
+  afterLabel: '后加签',
+  afterHint:
+    '你的这一票按同意处理；加签人将在同一节点上开始新一轮审批，该轮通过后流程才继续。不会插入新的审批节点，也不是「当前节点自动通过并流转到新增节点」。若你的同意还不能完成本轮（多人会签还有人未表态、门槛未达），后加签不可用；可在其他审批人表态后再用，或改用并加签。',
+  aggregationLabel: '加签人审批方式',
+  aggregationAll: '会签（全部同意）',
+  aggregationAny: '或签（任一同意）',
+  aggregationHint: '两人及以上后加签时必选；只约束加签人这一轮。',
+} as const
+
+export const ADD_SIGN_PLACEMENT_COPY_EN: Readonly<Record<keyof typeof ADD_SIGN_PLACEMENT_COPY_ZH, string>> = {
+  parallelLabel: 'Alongside me',
+  afterLabel: 'After me',
+  afterHint:
+    'Your seat is counted as an approval; the added approvers then start a new round at this SAME node, and the flow continues only when that round passes. No new approval node is inserted, and this is not "auto-pass the current node and move to an inserted one". If your approval would not complete the current round (others still to decide in an all-approve round, a threshold not yet met), after-sign is unavailable — use it once the others have decided, or add alongside instead.',
+  aggregationLabel: 'How the added approvers decide',
+  aggregationAll: 'All must approve',
+  aggregationAny: 'Any one approves',
+  aggregationHint: 'Required when adding two or more approvers after you; it governs only their round.',
+}
+
+/** The 加签方式 choice's copy for the current shell locale (`useLocale().isZh`). */
+export function addSignPlacementCopy(isZh: boolean): Readonly<Record<keyof typeof ADD_SIGN_PLACEMENT_COPY_ZH, string>> {
+  return isZh ? ADD_SIGN_PLACEMENT_COPY_ZH : ADD_SIGN_PLACEMENT_COPY_EN
+}
+
+/**
+ * The server's refusal when the actor's approval would not complete the current round (owner
+ * disposition (1)). Deliberately contains no 请重试: it is not transient — the other seats of the
+ * round have to decide first — and the dialog stays open so the member can switch to 并加签.
+ *
+ * O-8 / F8-1: a zh-CN / `_EN` constant pair, the same shape as `NODE_OPERATION_DISABLED_MESSAGE` /
+ * `NODE_OPERATION_DISABLED_MESSAGE_EN`; `memberActionFailure` picks one from the shell locale.
+ */
+export const ADD_SIGN_AFTER_ROUND_INCOMPLETE_CODE = 'APPROVAL_ADD_SIGN_AFTER_ROUND_INCOMPLETE'
+export const ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE =
+  '本节点还有其他审批人尚未表态，你的同意还不能完成本轮，暂不能后加签；可在其他审批人表态后再后加签，或改用并加签。'
+export const ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE_EN =
+  'Other approvers at this node have not decided yet, so your approval would not complete the current round and after-sign is unavailable. You can after-sign once they have decided, or add the approver alongside you instead.'

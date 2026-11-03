@@ -1,3 +1,4 @@
+import { requiredSuiteJob } from './plugin-tests-workflow-contract.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -5,6 +6,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { fileURLToPath } from 'node:url'
 import { dirname, join, posix } from 'node:path'
 import { tmpdir } from 'node:os'
+import { PYTHON_CANDIDATE_LABEL, spawnPythonSync } from './python-interpreter.mjs'
 import {
   REAL_DB_STEP_IDS,
   extractStepById,
@@ -1156,7 +1158,8 @@ test('P1-2: every allowed command word is accepted, and the allowlist is what re
 // stop-line residual for the OTHER two step ids, and the header above already records why this
 // step must not join the shared frozen allowlist.
 // ---------------------------------------------------------------------------------------------
-const REQUIRED_JOB = 'test' // the job whose matrix leg produces the required `test (20.x)` context
+const REQUIRED_JOB = 'attendance-db' // unconditional dependency of required test (20.x)
+const CONTRACTS_JOB = 'contracts'
 
 /**
  * Names of ALL jobs whose `steps` contain a step with the given `id:`, read off the PARSED
@@ -1173,7 +1176,7 @@ function jobsContainingStepId(stepId) {
     "    sys.stderr.write('PYYAML_MISSING: %r' % (exc,))",
     '    sys.exit(3)',
     'try:',
-    '    doc = yaml.safe_load(sys.stdin.read())',
+    '    doc = yaml.safe_load(sys.stdin.buffer.read().decode("utf-8"))',
     'except Exception as exc:',
     "    sys.stderr.write('YAML_PARSE_ERROR: %r' % (exc,))",
     '    sys.exit(4)',
@@ -1189,14 +1192,14 @@ function jobsContainingStepId(stepId) {
     '                hits.append(str(job_name))',
     'json.dump(hits, sys.stdout)',
   ].join('\n')
-  const res = spawnSync('python3', ['-c', py, stepId], {
+  const res = spawnPythonSync(['-c', py, stepId], {
     input: wf,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     timeout: 120_000,
   })
   if (res.error) {
-    throw new Error(`job-scope guard: failing CLOSED — python3 could not be spawned (${res.error.message})`)
+    throw new Error(`job-scope guard: failing CLOSED — no Python interpreter could be spawned (tried ${PYTHON_CANDIDATE_LABEL}; last error: ${res.error.message})`)
   }
   if (res.status !== 0) {
     throw new Error(
@@ -1222,7 +1225,7 @@ function stepRunScriptsOfJob(jobName) {
     "    sys.stderr.write('PYYAML_MISSING: %r' % (exc,))",
     '    sys.exit(3)',
     'try:',
-    '    doc = yaml.safe_load(sys.stdin.read())',
+    '    doc = yaml.safe_load(sys.stdin.buffer.read().decode("utf-8"))',
     'except Exception as exc:',
     "    sys.stderr.write('YAML_PARSE_ERROR: %r' % (exc,))",
     '    sys.exit(4)',
@@ -1236,14 +1239,14 @@ function stepRunScriptsOfJob(jobName) {
     '        out.append(run if isinstance(run, str) else "")',
     'json.dump(out, sys.stdout)',
   ].join('\n')
-  const res = spawnSync('python3', ['-c', py, jobName], {
+  const res = spawnPythonSync(['-c', py, jobName], {
     input: wf,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     timeout: 120_000,
   })
   if (res.error) {
-    throw new Error(`step-order guard: failing CLOSED — python3 could not be spawned (${res.error.message})`)
+    throw new Error(`step-order guard: failing CLOSED — no Python interpreter could be spawned (tried ${PYTHON_CANDIDATE_LABEL}; last error: ${res.error.message})`)
   }
   if (res.status !== 0) {
     throw new Error(
@@ -1331,21 +1334,19 @@ test('P1-2 config-resolution positive control: same-basename decoys, escapes and
 // true. If the guard is ever moved after the install, this leg reds and the stronger, EXECUTED
 // derivation becomes available to the corpus — that is a deliberate decision point, not a silent
 // one.
-test(`this guard's step runs BEFORE the workspace install in job "${REQUIRED_JOB}" (why its corpus is static)`, () => {
-  const runs = stepRunScriptsOfJob(REQUIRED_JOB)
+test('this guard runs without installed dependencies, before the heavy suite jobs', () => {
+  const workflow = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
+  requiredSuiteJob(workflow, CONTRACTS_JOB)
+  requiredSuiteJob(workflow, REQUIRED_JOB)
+  const runs = stepRunScriptsOfJob(CONTRACTS_JOB)
   const guardAt = runs.findIndex((r) => r.includes('scripts/ops/attendance-w4c2-ci-wiring.test.mjs'))
-  const installAt = runs.findIndex((r) => /\bpnpm install\b/.test(r))
-  assert.ok(guardAt >= 0, `this guard's own step was not found in job "${REQUIRED_JOB}" — it must run there`)
-  assert.ok(installAt >= 0, `no \`pnpm install\` step found in job "${REQUIRED_JOB}" — the ordering claim cannot be evaluated`)
-  assert.ok(
-    guardAt < installAt,
-    `this guard's step (index ${guardAt}) must precede \`pnpm install\` (index ${installAt}): it is `
-      + `placed pre-install so a wiring break reds the required check in seconds, and the corpus `
-      + `derivation documents that placement as the reason it cannot use vitest's own collection`,
-  )
+  assert.ok(guardAt >= 0, 'the pre-install guard must execute in contracts')
+  assert.equal(runs.some((r) => /\bpnpm install\b/.test(r)), false,
+    'contracts must remain dependency-free; heavy suites wait for it through needs')
 })
 
-test(`attendance real-DB step (id: ${STEP_ID}) lives in job "${REQUIRED_JOB}" — the job that produces the required test (20.x) context — and in no other job`, () => {
+test(`attendance real-DB step (id: ${STEP_ID}) lives in job "${REQUIRED_JOB}" — a dependency of required test (20.x) — and in no other job`, () => {
+  requiredSuiteJob(readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8'), REQUIRED_JOB)
   assert.deepEqual(
     jobsContainingStepId(STEP_ID),
     [REQUIRED_JOB],
@@ -1357,8 +1358,9 @@ test(`attendance real-DB step (id: ${STEP_ID}) lives in job "${REQUIRED_JOB}" �
 })
 
 test(`W4C-3c tooling step (id: ${W4C3C_TOOLING_STEP_ID}) lives in required job and invokes both node:test files`, () => {
-  assert.deepEqual(jobsContainingStepId(W4C3C_TOOLING_STEP_ID), [REQUIRED_JOB])
+  assert.deepEqual(jobsContainingStepId(W4C3C_TOOLING_STEP_ID), [CONTRACTS_JOB])
   const workflow = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
+  requiredSuiteJob(workflow, CONTRACTS_JOB)
   const step = extractStepById(workflow, W4C3C_TOOLING_STEP_ID)
   assert.ok(step && typeof step.run === 'string', 'W4C-3c tooling step must carry a real run script')
   assert.match(step.run, /\bnode\s+--test\b/)
@@ -2181,9 +2183,17 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-approval-direct-manager-s7-2.db.test.ts',
   'tests/integration/attendance-approval-flow-dynamic-kind-s7-1.db.test.ts',
   'tests/integration/attendance-approval-manager-at-level-s7-4.db.test.ts',
+  'tests/integration/attendance-business-trip.db.test.ts',
   'tests/integration/attendance-calculation-group-membership-w1.db.test.ts',
   'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
+  'tests/integration/attendance-coordination-acquire.db.test.ts',
+  'tests/integration/attendance-coordination-approval-handover.db.test.ts',
+  'tests/integration/attendance-coordination-cleanup.db.test.ts',
+  'tests/integration/attendance-coordination-key-credential.db.test.ts',
+  'tests/integration/attendance-coordination-port.db.test.ts',
+  'tests/integration/attendance-coordination-s1s2-snapshot.db.test.ts',
   'tests/integration/attendance-csv-export-bom.test.ts',
+  'tests/integration/attendance-daily-calendar.db.test.ts',
   'tests/integration/attendance-decision-trace-w5-0.db.test.ts',
   'tests/integration/attendance-expiry-service.test.ts',
   'tests/integration/attendance-files-acl.test.ts',
@@ -2193,18 +2203,27 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts',
   'tests/integration/attendance-group-fixed-schedule-self-effectiveness.db.test.ts',
   'tests/integration/attendance-import-template-prefs.test.ts',
+  'tests/integration/attendance-import-user-identity.db.test.ts',
   'tests/integration/attendance-legacy-membership-overlap-audit.db.test.ts',
+  'tests/integration/attendance-live-punch-order.db.test.ts',
   'tests/integration/attendance-makeup-punch-policy.test.ts',
+  'tests/integration/attendance-multitimezone-browser.db.test.ts',
   'tests/integration/attendance-notification-deliveries.test.ts',
   'tests/integration/attendance-notification-redelivery-route.db.test.ts',
   'tests/integration/attendance-notification-redelivery.db.test.ts',
+  'tests/integration/attendance-online-punch-replay.db.test.ts',
+  'tests/integration/attendance-online-punch-server-time.db.test.ts',
   'tests/integration/attendance-org-resolution-shadow.db.test.ts',
   'tests/integration/attendance-outdoor-punch.test.ts',
+  'tests/integration/attendance-p11-hotpath-compare.db.test.ts',
+  'tests/integration/attendance-p11-inertness-baseline.db.test.ts',
+  'tests/integration/attendance-p11-inertness-head.db.test.ts',
   'tests/integration/attendance-plugin.test.ts',
   'tests/integration/attendance-punch-org-resolution.db.test.ts',
   'tests/integration/attendance-report-cleaning-proposal.db.test.ts',
   'tests/integration/attendance-result-edit.test.ts',
   'tests/integration/attendance-schedule-dispatch.test.ts',
+  'tests/integration/attendance-self-service-revocation-atomicity.db.test.ts',
   'tests/integration/attendance-settlement-table-v1-5a.db.test.ts',
   'tests/integration/attendance-setup-readiness-w4-0.db.test.ts',
   'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',
@@ -2212,7 +2231,20 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-shift-segments-writer-matrix.db.test.ts',
   'tests/integration/attendance-shift-swap.test.ts',
   'tests/integration/attendance-soak-diff-families.db.test.ts',
+  'tests/integration/attendance-timezone-default-recovery.db.test.ts',
+  'tests/integration/attendance-timezone-legacy-repair.db.test.ts',
+  'tests/integration/attendance-timezone-policy-preview.db.test.ts',
+  'tests/integration/attendance-timezone-policy-routes.db.test.ts',
+  'tests/integration/attendance-timezone-policy-store.db.test.ts',
+  'tests/integration/attendance-timezone-policy-write-routes.db.test.ts',
+  'tests/integration/attendance-timezone-read-context.db.test.ts',
+  'tests/integration/attendance-timezone-runtime-locks.db.test.ts',
+  'tests/integration/attendance-timezone-runtime.db.test.ts',
+  'tests/integration/attendance-timezone-scheduled.db.test.ts',
+  'tests/integration/attendance-timezone-target-routes.db.test.ts',
+  'tests/integration/attendance-trip-context-transition-dates.db.test.ts',
   'tests/integration/attendance-unscheduled-reminder.test.ts',
+  'tests/integration/attendance-w4-release-destroy.db.test.ts',
   'tests/integration/attendance-w4c0-concurrency-gates-e3.db.test.ts',
   'tests/integration/attendance-w4c0-db-gates-e1.db.test.ts',
   'tests/integration/attendance-w4c0-durable-storage-smoke.db.test.ts',
@@ -3149,7 +3181,7 @@ function workflowStepsWithRun(files) {
     'except Exception as exc:',
     "    sys.stderr.write('PYYAML_MISSING: %r' % (exc,))",
     '    sys.exit(3)',
-    'entries = json.loads(sys.stdin.read())',
+    'entries = json.loads(sys.stdin.buffer.read().decode("utf-8"))',
     'out = []',
     'for entry in entries:',
     '    try:',
@@ -3180,14 +3212,14 @@ function workflowStepsWithRun(files) {
     '            })',
     'json.dump(out, sys.stdout)',
   ].join('\n')
-  const res = spawnSync('python3', ['-c', py], {
+  const res = spawnPythonSync(['-c', py], {
     input: JSON.stringify(files),
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
     timeout: 120_000,
   })
   if (res.error) {
-    throw new Error(`workflow step walk: failing CLOSED — python3 could not be spawned (${res.error.message})`)
+    throw new Error(`workflow step walk: failing CLOSED — no Python interpreter could be spawned (tried ${PYTHON_CANDIDATE_LABEL}; last error: ${res.error.message})`)
   }
   if (res.status !== 0) {
     throw new Error(

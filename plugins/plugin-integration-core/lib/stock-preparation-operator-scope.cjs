@@ -57,6 +57,11 @@
 //      values, so the H0 三重门 applies: RBAC + a server-side field whitelist + audit.
 //        1. GET …/confirmation-decisions/value-entry  the per-decision readback  (O1')
 //        2. GET …/prep-lines/export                   the materials workbook     (按项目导出物料 Excel)
+//           Its sheet is the DEPLOY-GLOBAL table-action target, so the scope resolved here is then
+//           checked against that sheet's registry ownership (`isSheetOwnedByProject`, derived-id
+//           fallback) before any records IO — the same wall as (8), in its own
+//           PREP_LINE_EXPORT_TARGET_* vocabulary. See http-routes.cjs
+//           `assertStockPreparationTargetBelongsToTenant`.
 //        3. GET …/operator/projects                   the project directory      (一线看得见自己工厂的项目)
 //        4. GET …/projects/:projectNo/board           `stockPreparationOperatorProjectBoard`
 //           the project board (项目备料页). ONE project's number and name plus counts and booleans — the fourth value-bearing read on
@@ -73,6 +78,12 @@
 //           its tenant from `scope.tenantId` rather than from `resolveTenantId`, because the tenant
 //           chosen there is the tenant whose PLM binding is opened and whose part numbers therefore
 //           come back. Without the flag the handler is byte-for-byte the values-free route it was.
+//        5b. GET …/table-actions/:actionId/dry-run-jobs  `tableActionDryRunJobGet`
+//           R67 ④: the read-back of (5) run in the background — the stored result IS (5)'s response,
+//           missing-component list included when the job was enqueued with the opt-in. A value-bearing
+//           job is a separate record that only a poll carrying `includeMissingComponents=true` can
+//           address, and that poll resolves the scope here and takes its tenant from it, exactly as
+//           (5) does; without the flag it is the values-free job, on `resolveTenantId`, as (5) is.
 //      (1) and (2) predate this module and were left on `resolveTenantId` when it landed, which was a
 //      live cross-tenant leak on a claimless deployment rather than a stylistic gap — see the routes.
 //
@@ -83,7 +94,10 @@
 //           the broad READ tier (`requiredTier: STOCK_PREP_READ`) because a supervisor is meant to
 //           see whose turn it is — but WHOSE turn is still a tenant fact.
 //        7. POST …/stock-preparation/handoff/advance  `stockPreparationHandoffAdvance`
-//           the advance itself: a WRITE (see below).
+//           the advance itself: a WRITE (see below). Before it writes it probes the DEPLOY-GLOBAL
+//           table-action target for "does this project have rows", so the scope resolved here is
+//           first checked against that sheet's registry ownership — the same wall as (2) and (8), in
+//           its own STOCK_PREPARATION_HANDOFF_TARGET_* vocabulary (#6121).
 //        8. POST …/stock-preparation/carry/confirm    `stockPreparationCarryConfirm`
 //           the K2 结转 confirm: a WRITE, values-free in its response (modes, counts, field NAMES).
 //           It joins this list for a reason specific to it — the tenant string does not merely scope
@@ -93,7 +107,8 @@
 //           would be a steering vector straight into someone else's table. The scope resolved here
 //           is then checked against the bound sheet's own registry ownership
 //           (`isSheetOwnedByProject`) before any records IO — see http-routes.cjs
-//           `assertCarryTargetBelongsToTenant`.
+//           `assertCarryTargetBelongsToTenant` (the carry vocabulary of
+//           `assertStockPreparationTargetBelongsToTenant`, which the export (2) shares).
 //        9. POST …/confirmation-decisions/confirm     `stockPreparationConfirmationDecisionsConfirm`
 //           THE WRITE HALF OF (1), and the last member of that family to be enrolled. It is listed
 //           under B rather than A because its RESPONSE is values-free (the patched row's ids, status
@@ -104,6 +119,103 @@
 //           arrangement where reading an entered value was proven and writing one was not — on a
 //           claimless deployment the `x-tenant-id` header decided both the row and the trail. The
 //           scope is resolved BEFORE the audit append, so a refused caller leaves no audit row.
+//
+//   C. THE PROOF WITHOUT THE TIER — a route outside the stock-prep namespace that still returns
+//      values, so its tenant must be proven exactly as above, but whose callers hold an
+//      `integration:*` tier rather than a stock-prep one. It calls `resolveProvenOwnTenant` (the
+//      tenant half of this module, exported on its own) after its own `requireAccess` gate, and so
+//      gets every refusal below except OPERATOR_SCOPE_TIER_REQUIRED.
+//       10. GET  …/stock-preparation/source-preflight  `stockPreparationSourcePreflight`
+//           源就绪预检 (「检查这个源」): up to two observed project numbers as liveness evidence. The
+//           proven tenant is the one value its table-action lookup, binding peek and load run under.
+//
+//   E. 备料「成员与权限」(S5b, register R-39; behind the default-OFF STOCK_PREP_MEMBERS_PAGE_ENABLED and
+//      MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED, 404 before any IO without them). Listed apart from D
+//      so the two slices' numbering cannot collide; it is the same rule.
+//      E1. POST …/members/custom-roles/:roleId/project-targets  `stockPreparationMembersCustomRoleProjectTargets`
+//           A WRITE (one G1 grant per named project sheet, WORKBENCH_ADMIN + the host members port). The
+//           proven tenant keys the registry rows the request may name and the staging project the grant
+//           is addressed to; a header-fillable tenant here would grant a role on another tenant's sheet.
+//           The scope is resolved only after the host port admitted the caller.
+//
+//   D. 一个项目一张备料表 (S1, ADR adr-stock-prep-project-sheets-20261008; all three behind the
+//      default-OFF switch MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED, 404 before any IO without it).
+//      The registry they read (migration 087) is keyed by the tenant this scope proves, so what a
+//      caller learns — ABSENT / ACTIVE / ARCHIVED, handles, counts — is only ever about their own.
+//       11. GET  …/projects/:projectNo/target          `stockPreparationProjectTargetGet`
+//           The project's registry state plus its deep-link handles and bounded row counts (OPERATE,
+//           the board's tier). `may.*` is computed on the PULL tier.
+//       12. POST …/projects/:projectNo/target          `stockPreparationProjectTargetCreate`
+//           A WRITE: provisions the project's sheet INTO the staging project of the proven tenant and
+//           registers it under that tenant (PULL; the R-35 exception to R-11). A header-fillable
+//           tenant here would plant a sheet in another tenant's staging project.
+//       13. GET  …/stock-preparation/project-targets   `stockPreparationProjectTargetList`
+//           The tenant's registry rows (handles and enums only; OPERATE).
+//       14. POST …/projects/:projectNo/target/archive  `stockPreparationProjectTargetArchive`
+//       15. POST …/projects/:projectNo/target/restore  `stockPreparationProjectTargetRestore`
+//           S4 (R-38): WRITES to the registry row of the proven tenant — 归档 / 恢复, PULL tier. The
+//           tenant keys the row they flip; a header-fillable tenant here would archive another
+//           tenant's project. Neither touches a sheet, so neither derives a staging project.
+//       16. GET  …/projects/:projectNo/target/project-fields  `stockPreparationProjectFieldsGet`
+//       17. PATCH …/projects/:projectNo/target/project-fields `stockPreparationProjectFieldsUpdate`
+//           S3 (R-37, ADR §5 O2(a)): the ONLY surfaces that carry the three free-text project-level
+//           columns (负责人 / 备注 / 计划完成), OPERATE. The proven tenant keys the registry row they
+//           read or write; a header-fillable tenant here would read or overwrite another tenant's
+//           texts. Neither touches a sheet, so neither derives a staging project.
+//       18. POST …/stock-preparation/project-overview/refresh  `stockPreparationProjectOverviewRefresh`
+//           S3 (R-37, ADR §5 Q5): rebuilds the read-only overview sheet of the proven tenant's staging
+//           project from its registry rows and project sheets (OPERATE). The staging project whose
+//           overview it projects into, and every project sheet it counts through, is derived from this
+//           scope with no request projectId. Fix round 1: it never creates the overview.
+//       19. POST …/stock-preparation/project-overview/ensure  `stockPreparationProjectOverviewEnsure`
+//           S3 fix round 1 (R-37, R6): the PULL tier creates the proven tenant's read-only overview in
+//           the staging project derived from this scope with no request projectId, and grants the
+//           configured roles READ on it (the host's overview read port).
+//       20. POST …/stock-preparation/options/sync WITH `projectNo`  `stockPreparationOptionsSync`
+//           (its repair leg, `repairProjectSheetContractOptions`) — G1 field defect (R67): a WRITE of
+//           field metadata (the server-held contract option sets) onto the sheet the proven tenant's
+//           registry row names, in the staging project derived from this scope with no request
+//           projectId. A header-fillable tenant here would patch another tenant's project sheet. The
+//           route's projectNo-less leg is unchanged and is NOT on this list: it keeps its
+//           `resolveAuthUserTenantId` normalizer (the GHSA step-1 write face).
+//       21. GET  …/projects/:projectNo/target/pilot    `stockPreparationProjectPilotGet`
+//       22. POST …/projects/:projectNo/target/pilot    `stockPreparationProjectPilotEnable`
+//           备料分批拉取第一期 step 3 PR B (register R-53 / R-54), ADMIN. The GET answers the pilot
+//           marker and a values-free readiness list about the proven tenant's registry row and sheet
+//           (the staging project the probes read is derived from this scope with no request
+//           projectId, in the shared readiness helper). The POST is a WRITE: it bumps the sheet's plan
+//           generation, asks the host to stamp the sheet closed for grid export and marks the registry
+//           row — keyed by the proven tenant; a header-fillable tenant here would mark another
+//           tenant's project pilot. Set-once; there is no unset surface.
+//       23. GET  …/projects/:projectNo/refresh/holds                       `stockPreparationRefreshHolds`
+//       24. GET  …/projects/:projectNo/refresh/holds/:holdId/evidence      `stockPreparationRefreshHoldEvidence`
+//       25. POST …/projects/:projectNo/refresh/holds/:holdId/keep          `stockPreparationRefreshHoldKeep`
+//       26. POST …/projects/:projectNo/refresh/continuations/confirm       `stockPreparationRefreshContinuationConfirm`
+//       27. GET  …/projects/:projectNo/refresh/continuations/:id           `stockPreparationRefreshContinuationGet`
+//       28. POST …/projects/:projectNo/refresh/continuations/:id/end       `stockPreparationRefreshContinuationEnd`
+//           备料分批拉取第一期 step 4 PR-4 (register R-59), PULL. ONE resolution for the six, in the shared
+//           context builder `stockPreparationRefreshDecisionContext` (http-routes.cjs), at the PULL tier:
+//           the hold page, the evidence and the relationship detail carry the proven tenant's PRIVATE
+//           business values (keys, quantities, before / after cells), and the confirm / keep / end
+//           decide over its step-4 rows and bump its sheet's plan generation. A header-fillable tenant
+//           here would read another tenant's values or confirm a relationship on its sheet; a
+//           TENANTLESS platform admin is refused (403 OPERATOR_SCOPE_TENANT_REQUIRED) — counts are the
+//           board's, values never theirs.
+//       29. GET  …/projects/:projectNo/refresh/change-plans/current        `stockPreparationRefreshChangePlanCurrent`
+//       30. POST …/projects/:projectNo/refresh/change-plans/confirm        `stockPreparationRefreshChangePlanConfirm`
+//       31. POST …/projects/:projectNo/refresh/change-reviews/complete     `stockPreparationRefreshChangeReviewComplete`
+//           备料分批拉取第一期 step 5 PR-8 (register R-63), PULL. The SAME shared context builder as 23–28 (no new
+//           call site): the change-plan page and the review READ the proven tenant's main sheet (behind the
+//           table-action wall) and its private record set; the confirm and the review decide over its step-4 /
+//           step-5 rows (the confirm bumps its sheet's plan generation). A header-fillable tenant here would read
+//           or approve another tenant's content change.
+//       32. GET  …/projects/:projectNo/target/manual-rows  `stockPreparationProjectManualRowsGet`
+//       33. POST …/projects/:projectNo/target/manual-rows  `stockPreparationProjectManualRowsSet`
+//           人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; register R-68), ADMIN. The GET answers the
+//           proven tenant's project sheet switch 「允许人工补充行」 and its last pull's persisted reminder (counts and
+//           record handles); the POST is a WRITE — one field property of that sheet's key column, through the host's
+//           provisioning port in the staging project derived from this scope with no request projectId. A
+//           header-fillable tenant here would read or flip another tenant's project switch.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins
@@ -255,6 +367,88 @@ function principalActorId(user) {
 }
 
 /**
+ * THE TENANT PROOF, ON ITS OWN — "which tenant is THIS principal's, proven without trusting a
+ * header", with no permission tier attached.
+ *
+ * `resolveOperatorValueScope` below asks two questions: may this principal hold the stock-prep tier
+ * the surface requires, and whose tenant is it. The second one is this function, split out so a
+ * route that is NOT in the stock-prep namespace can ask it too. The first caller outside the scope
+ * is the source preflight (`stockPreparationSourcePreflight`, the 「检查这个源」 button), which is
+ * gated on the INTEGRATION read tier and returns up to two observed project numbers: it needs the
+ * same proof and must not be handed a stock-prep tier check that its callers never hold.
+ *
+ * It grants nothing. The route's own permission gate runs first; this only decides WHICH tenant,
+ * or refuses. Refusal order (every one decided before the host is asked, and the host before any
+ * route IO):
+ *   401 OPERATOR_SCOPE_UNAUTHENTICATED       no principal at all
+ *   403 OPERATOR_SCOPE_TENANT_CONTRADICTED   a header tenant contradicted the verified token claim
+ *   403 OPERATOR_SCOPE_TENANT_REQUIRED       principal has no tenant of its own
+ *   403 OPERATOR_SCOPE_TENANT_MISMATCH       the request tried to steer to another tenant
+ *   403 OPERATOR_SCOPE_PRINCIPAL_UNKNOWN     principal has no stable id/email to travel under
+ *   501 OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE the host cannot vouch for principals here
+ *   403 OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED  the host says this principal is not in that tenant
+ *
+ * The host is asked whether or not a verified claim exists. That is the behaviour the scope has
+ * shipped with since #5445 and it is kept byte-for-byte: `resolveOperatorValueScope` now calls this
+ * function after its tier check, so the two cannot drift apart.
+ *
+ * @returns {Promise<{ tenantId: string, actorId: string, tenantClaimVerified: boolean }>}
+ */
+async function resolveProvenOwnTenant({
+  user,
+  authenticatedTenantId,
+  explicitTenantIds = [],
+  tenantPrincipalDirectory,
+} = {}) {
+  if (!user) {
+    throw new StockPreparationOperatorScopeError(401, 'OPERATOR_SCOPE_UNAUTHENTICATED', 'authentication is required for a value-bearing operator read')
+  }
+
+  const verifiedClaim = optionalString(authenticatedTenantId) || ''
+  const { tenantId, contradicted } = ownTenantId(user, verifiedClaim)
+  if (contradicted) {
+    // A header tenant that disagrees with the verified token claim. There is no reading of that which
+    // is a legitimate caller, so it is refused rather than resolved toward either side.
+    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_CONTRADICTED', 'the carried tenant contradicts the verified tenant claim')
+  }
+  if (!tenantId) {
+    // THE PLATFORM-SIDE REFUSAL. A tenantless platform admin lands here, deliberately: under "whose
+    // data is it" they have no own tenant, so there is no tenant whose values they may be shown on
+    // this surface. Their values-free routes are untouched and still answer for every tenant.
+    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_REQUIRED', 'a value-bearing operator read requires a principal with its own tenant')
+  }
+
+  for (const explicit of explicitTenantIds) {
+    const candidate = optionalString(explicit)
+    if (candidate && candidate !== tenantId) {
+      throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_MISMATCH', 'tenant scope mismatch')
+    }
+  }
+
+  const actorId = principalActorId(user)
+  if (!actorId) {
+    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_PRINCIPAL_UNKNOWN', 'the principal carries no stable identifier')
+  }
+
+  if (!tenantPrincipalDirectory || typeof tenantPrincipalDirectory.verifyTenantMembership !== 'function') {
+    throw new StockPreparationOperatorScopeError(501, 'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE', 'the host tenant principal directory is not available', {
+      requiredMethods: ['verifyTenantMembership'],
+    })
+  }
+
+  const verdict = await tenantPrincipalDirectory.verifyTenantMembership({ userId: actorId, tenantId })
+  if (!verdict || verdict.member !== true) {
+    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED', 'the principal is not a member of its own claimed tenant')
+  }
+
+  // `tenantClaimVerified` is reported, not enforced: a deployment whose tokens carry no tenant claim
+  // is still served, because the host membership check above — not the claim — is what makes the
+  // pairing safe there. It is surfaced so an audit row can record WHICH of the two proofs was
+  // available without the route having to re-derive it.
+  return { tenantId, actorId, tenantClaimVerified: verifiedClaim === tenantId }
+}
+
+/**
  * RESOLVE THE VERIFIED OWN-TENANT VALUE SCOPE, or refuse.
  *
  * @param {object}   params
@@ -316,54 +510,23 @@ async function resolveOperatorValueScope({
     })
   }
 
-  const verifiedClaim = optionalString(authenticatedTenantId) || ''
-  const { tenantId, contradicted } = ownTenantId(user, verifiedClaim)
-  if (contradicted) {
-    // A header tenant that disagrees with the verified token claim. There is no reading of that which
-    // is a legitimate caller, so it is refused rather than resolved toward either side.
-    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_CONTRADICTED', 'the carried tenant contradicts the verified tenant claim')
-  }
-  if (!tenantId) {
-    // THE PLATFORM-SIDE REFUSAL. A tenantless platform admin lands here, deliberately: under "whose
-    // data is it" they have no own tenant, so there is no tenant whose values they may be shown on
-    // this surface. Their values-free routes are untouched and still answer for every tenant.
-    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_REQUIRED', 'a value-bearing operator read requires a principal with its own tenant')
-  }
-
-  for (const explicit of explicitTenantIds) {
-    const candidate = optionalString(explicit)
-    if (candidate && candidate !== tenantId) {
-      throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_MISMATCH', 'tenant scope mismatch')
-    }
-  }
-
-  const actorId = principalActorId(user)
-  if (!actorId) {
-    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_PRINCIPAL_UNKNOWN', 'the principal carries no stable identifier')
-  }
-
-  if (!tenantPrincipalDirectory || typeof tenantPrincipalDirectory.verifyTenantMembership !== 'function') {
-    throw new StockPreparationOperatorScopeError(501, 'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE', 'the host tenant principal directory is not available', {
-      requiredMethods: ['verifyTenantMembership'],
-    })
-  }
-
-  const verdict = await tenantPrincipalDirectory.verifyTenantMembership({ userId: actorId, tenantId })
-  if (!verdict || verdict.member !== true) {
-    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED', 'the principal is not a member of its own claimed tenant')
-  }
-
-  // `tenantClaimVerified` is reported, not enforced: a deployment whose tokens carry no tenant claim
-  // is still served, because the host membership check above — not the claim — is what makes the
-  // pairing safe there. It is surfaced so an audit row can record WHICH of the two proofs was
-  // available without the route having to re-derive it.
-  return { tenantId, actorId, tier: requiredTier, tenantClaimVerified: verifiedClaim === tenantId }
+  // Everything after the tier is the tenant proof, and it lives in ONE place (`resolveProvenOwnTenant`
+  // above) so that the scope and the one route that asks the proof without a stock-prep tier cannot
+  // come to disagree about what "proven" means.
+  const proof = await resolveProvenOwnTenant({
+    user,
+    authenticatedTenantId,
+    explicitTenantIds,
+    tenantPrincipalDirectory,
+  })
+  return { tenantId: proof.tenantId, actorId: proof.actorId, tier: requiredTier, tenantClaimVerified: proof.tenantClaimVerified }
 }
 
 module.exports = {
   OPERATOR_VALUE_TIER,
   StockPreparationOperatorScopeError,
   resolveOperatorValueScope,
+  resolveProvenOwnTenant,
   __internals: {
     holdsOperatorValueTier,
     listPrincipalPermissions,

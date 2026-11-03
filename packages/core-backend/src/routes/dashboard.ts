@@ -47,6 +47,11 @@ import {
   type QueryFn,
 } from '../multitable/permission-service'
 import type { ResolvedRequestAccess } from '../multitable/access'
+// #5807 — the People-sheet read-side quantity bound. Imported for the RESOLVER only: this file's
+// refusal keeps ITS OWN 403 body (see requireSheetRead), so the shared `refuseBoundedSheetBulkRead`
+// (which sends univer-meta's body) is deliberately not used here.
+import { resolvePeopleSheetReadBound } from '../multitable/people-sheet-read-bound'
+import { sendSheetNotLive } from '../multitable/sheet-refusals'
 
 const dashboardService = new DashboardService()
 const CHART_TYPES = new Set<ChartType>(['bar', 'line', 'pie', 'number', 'table', 'area', 'funnel', 'gauge', 'scatter'])
@@ -121,18 +126,58 @@ async function loadChartRecords(
   })
 }
 
+/**
+ * The two sheet gates every chart/dashboard route passes through. Order: 401 → 403 → liveness 404.
+ *
+ * LIVENESS: charts and dashboards are keyed by `sheet_id`, and `loadChartRecords` reads `meta_records`
+ * without joining `meta_sheets`, so a soft-deleted sheet used to stay fully addressable here — chart
+ * data was still aggregated over its records and charts/dashboards could still be created, edited and
+ * deleted. The refusal comes AFTER the capability check so an unauthorized caller gets the same 403
+ * for a live and a deleted sheet (no liveness oracle). (Sheet-liveness closed world:
+ * tests/unit/multitable-sheet-liveness-closure-all-routes.guard.test.ts.)
+ *
+ * #5807 PEOPLE-SHEET BOUND (third gate). Every read route in this file passes through here, and two of
+ * them publish the whole sheet in ONE response with no window at all: `POST …/charts/preview-data`
+ * takes a CALLER-SUPPLIED chart config (no saved chart, no extra authority) and
+ * `GET …/charts/:id/data` runs a saved one — both feed `loadChartRecords` (an unlimited
+ * `SELECT … FROM meta_records WHERE sheet_id = $1`) into `groupRecords`, which emits ONE
+ * `{label,value}` per distinct group-by value. Point that at the People sheet's `Name` column and the
+ * labels ARE the roster; point it at the user-id column and they are the ids. That is `view-aggregate`'s
+ * and `POST /dashboard/query`'s twin on the SAME `/api/multitable` mount behind the SAME bare
+ * `canRead` — refusing those two and leaving these open would have closed the front door onto a side
+ * door. A clamped bucket list is a wrong aggregate, so these REFUSE rather than truncate, like the
+ * other two.
+ *
+ * Refusing in this chokepoint (rather than per route) also covers the chart/dashboard CONFIG readers
+ * here: the People sheet is a hidden system sheet no chart UI targets, so there is nothing to keep
+ * working, and a read route added to this file tomorrow is bound by construction.
+ *
+ * SHAPE: it sends THIS file's `sendForbidden` — byte-identical to the authority refusal three lines
+ * above — not the shared values-free one, so the bound answer cannot be told apart from the gate's
+ * answer on this route (the two bodies differ between files). ORDER: after 401/403/404, so it adds no
+ * oracle; a caller who may not read the sheet already got that same 403 without this query running.
+ */
 async function requireSheetRead(
   req: Request,
   res: Response,
   sheetId: string,
 ): Promise<SheetAuthContext | null> {
   const query = getQuery()
-  const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
+  const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, sheetId)
   if (!access.userId) {
     sendUnauthorized(res)
     return null
   }
   if (!capabilities.canRead) {
+    sendForbidden(res)
+    return null
+  }
+  if (sheetLiveness !== 'live') {
+    sendSheetNotLive(res, sheetLiveness)
+    return null
+  }
+  const peopleSheetReadBound = await resolvePeopleSheetReadBound(query, sheetId)
+  if (peopleSheetReadBound.bounded) {
     sendForbidden(res)
     return null
   }
@@ -145,13 +190,17 @@ async function requireSheetManageViews(
   sheetId: string,
 ): Promise<SheetAuthContext | null> {
   const query = getQuery()
-  const { access, capabilities } = await resolveSheetCapabilities(req, query, sheetId)
+  const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, query, sheetId)
   if (!access.userId) {
     sendUnauthorized(res)
     return null
   }
   if (!capabilities.canManageViews) {
     sendForbidden(res)
+    return null
+  }
+  if (sheetLiveness !== 'live') {
+    sendSheetNotLive(res, sheetLiveness)
     return null
   }
   return { query, userId: access.userId, capabilities, access }

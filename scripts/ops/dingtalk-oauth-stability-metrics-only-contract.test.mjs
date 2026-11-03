@@ -1,9 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { spawnPythonSync, PYTHON_CANDIDATE_LABEL } from './python-interpreter.mjs'
 
 // DT-CLOSE-01B contract guard — the OAuth-stability recording is METRICS-ONLY.
 //
@@ -41,10 +41,16 @@ function runVerdict(env) {
     JSON_OUTPUT_INPUT: 'true',
     ALERT_TOPOLOGY_DEFERRED_INPUT: 'false',
   }
-  const r = spawnSync('python3', ['-c', extractVerdictPython()], {
+  const r = spawnPythonSync(['-c', extractVerdictPython()], {
     env: { ...base, ...env },
     encoding: 'utf8',
   })
+  if (r.error) {
+    throw new Error(
+      `no Python interpreter could be spawned for the verdict script (tried ` +
+        `${PYTHON_CANDIDATE_LABEL}; last error: ${r.error.message})`,
+    )
+  }
   assert.equal(r.status, 0, `verdict python aborted: ${r.stderr}`)
   return JSON.parse(r.stdout)
 }

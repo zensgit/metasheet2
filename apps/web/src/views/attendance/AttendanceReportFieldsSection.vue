@@ -16,6 +16,7 @@
         </div>
       </div>
       <div class="attendance__admin-actions">
+        <AttendanceReportFieldsHelp :tr="tr" />
         <a
           v-if="multitableHref"
           class="attendance__btn"
@@ -158,12 +159,12 @@
       </div>
     </div>
 
-    <div
+    <details
       v-if="reportFields.length > 0"
       class="attendance-report-fields__basis attendance-report-fields__formula-reference"
       data-report-field-formula-reference
     >
-      <div class="attendance-report-fields__basis-header">
+      <summary class="attendance-report-fields__basis-header">
         <div>
           <div class="attendance-report-fields__basis-title">
             {{ tr('Formula reference', '公式参考') }}
@@ -175,7 +176,7 @@
         <span class="attendance-report-fields__status-pill attendance-report-fields__status-pill--ok">
           {{ tr('Record + summary', '单记录 + 汇总') }}
         </span>
-      </div>
+      </summary>
       <div class="attendance-report-fields__formula-reference-layout">
         <div class="attendance-report-fields__formula-reference-block">
           <div class="attendance-report-fields__formula-reference-label">
@@ -278,7 +279,13 @@
           </ul>
         </div>
       </div>
-      <div class="attendance-report-fields__formula-create" data-report-field-formula-create>
+    </details>
+
+    <div
+      v-if="reportFields.length > 0"
+      class="attendance-report-fields__basis attendance-report-fields__formula-create"
+      data-report-field-formula-create
+    >
         <div class="attendance-report-fields__formula-reference-label">
           {{ tr('Create formula field', '创建公式字段') }}
         </div>
@@ -364,11 +371,11 @@
           <button
             class="attendance__btn"
             type="button"
-            :disabled="savingFormulaCode === newFormulaDraft.code.trim()"
+            :disabled="creatingFormulaField"
             data-report-field-formula-create-save
             @click="saveNewFormulaField"
           >
-            {{ savingFormulaCode === newFormulaDraft.code.trim() ? tr('Saving...', '保存中...') : tr('Create formula', '创建公式') }}
+            {{ creatingFormulaField ? tr('Saving...', '保存中...') : tr('Create formula', '创建公式') }}
           </button>
         </div>
         <div
@@ -384,7 +391,6 @@
           {{ formulaDraftStatusMessage }}
         </div>
       </div>
-    </div>
 
     <div
       v-if="formulaDependencyGraph && reportFields.length > 0 && !hasActiveFieldFilters"
@@ -521,21 +527,17 @@
       <div class="attendance-report-fields__record-sync-form">
         <label class="attendance-report-fields__filter" for="attendance-report-record-sync-from">
           <span>{{ tr('From date', '开始日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-record-sync-from"
             v-model="recordSyncFrom"
-            type="date"
-            data-report-record-sync-from
-          >
+            data-report-record-sync-from />
         </label>
         <label class="attendance-report-fields__filter" for="attendance-report-record-sync-to">
           <span>{{ tr('To date', '结束日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-record-sync-to"
             v-model="recordSyncTo"
-            type="date"
-            data-report-record-sync-to
-          >
+            data-report-record-sync-to />
         </label>
         <label class="attendance-report-fields__filter" for="attendance-report-record-sync-user">
           <span>{{ tr('User ID', '员工 ID') }}</span>
@@ -664,12 +666,10 @@
           for="attendance-report-period-summary-sync-from"
         >
           <span>{{ tr('From date', '开始日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-period-summary-sync-from"
             v-model="periodSummarySyncFrom"
-            type="date"
-            data-report-period-summary-sync-from
-          >
+            data-report-period-summary-sync-from />
         </label>
         <label
           v-if="periodSummarySyncMode === 'date_range'"
@@ -677,12 +677,10 @@
           for="attendance-report-period-summary-sync-to"
         >
           <span>{{ tr('To date', '结束日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-period-summary-sync-to"
             v-model="periodSummarySyncTo"
-            type="date"
-            data-report-period-summary-sync-to
-          >
+            data-report-period-summary-sync-to />
         </label>
         <label
           v-if="periodSummarySyncMode === 'payroll_cycle'"
@@ -855,12 +853,10 @@
           for="attendance-report-sync-job-from"
         >
           <span>{{ tr('From date', '开始日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-sync-job-from"
             v-model="reportSyncJobFrom"
-            type="date"
-            data-report-sync-job-from
-          >
+            data-report-sync-job-from />
         </label>
         <label
           v-if="reportSyncJobPeriodMode === 'date_range'"
@@ -868,12 +864,10 @@
           for="attendance-report-sync-job-to"
         >
           <span>{{ tr('To date', '结束日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-sync-job-to"
             v-model="reportSyncJobTo"
-            type="date"
-            data-report-sync-job-to
-          >
+            data-report-sync-job-to />
         </label>
         <label
           v-if="reportSyncJobPeriodMode === 'payroll_cycle'"
@@ -1153,7 +1147,7 @@
                       class="attendance__field-hint attendance-report-fields__formula-editor-help"
                       :data-report-field-formula-editor-help="field.code"
                     >
-                      {{ tr('See the function reference panel above for syntax, allowed functions, and disabled functions. Preview before saving.', '上方公式参考面板列出可用函数与禁用函数,保存前请先预览。') }}
+                      {{ tr('Open the function reference panel above for allowed and disabled functions. Preview before saving.', '展开上方公式参考面板，查看可用函数与禁用函数。保存前请先预览。') }}
                     </div>
                     <label class="attendance-report-fields__formula-editor-field">
                       <span>{{ tr('Expression', '表达式') }}</span>
@@ -1252,6 +1246,8 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
+import AttendanceReportFieldsHelp from './AttendanceReportFieldsHelp.vue'
 import { computed, ref, watch } from 'vue'
 import { apiFetch as sendApiFetch } from '../../utils/api'
 import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
@@ -1616,6 +1612,7 @@ const fieldCategoryFilter = ref('all')
 const editingFormulaCode = ref('')
 const previewingFormulaCode = ref('')
 const savingFormulaCode = ref('')
+const creatingFormulaField = ref(false)
 const formulaDraft = ref<FormulaDraft>(createBlankFormulaDraft())
 const newFormulaDraft = ref<FormulaDraft>(createBlankFormulaDraft())
 const formulaPreviewResult = ref<FormulaPreviewResult | null>(null)
@@ -2247,9 +2244,20 @@ async function saveEditingFormulaField(): Promise<void> {
 }
 
 async function saveNewFormulaField(): Promise<void> {
-  await saveFormulaDraft(newFormulaDraft.value)
-  if (formulaDraftStatusKind.value !== 'error') {
-    newFormulaDraft.value = createBlankFormulaDraft()
+  if (creatingFormulaField.value) return
+  // Idle `savingFormulaCode` is ''. A blank draft code must not look like an in-flight save.
+  if (!newFormulaDraft.value.code.trim()) {
+    await saveFormulaDraft(newFormulaDraft.value)
+    return
+  }
+  creatingFormulaField.value = true
+  try {
+    await saveFormulaDraft(newFormulaDraft.value)
+    if (formulaDraftStatusKind.value !== 'error') {
+      newFormulaDraft.value = createBlankFormulaDraft()
+    }
+  } finally {
+    creatingFormulaField.value = false
   }
 }
 
@@ -3055,6 +3063,11 @@ watch(
   gap: 6px;
 }
 
+.attendance-report-fields__formula-reference-chips {
+  max-height: 96px;
+  overflow: auto;
+}
+
 .attendance-report-fields__formula-reference-group {
   display: flex;
   align-items: center;
@@ -3140,13 +3153,18 @@ watch(
 
 .attendance-report-fields__formula-create-grid {
   display: grid;
-  grid-template-columns: minmax(150px, 0.8fr) minmax(150px, 1fr) minmax(140px, 0.8fr) minmax(150px, 0.8fr) minmax(260px, 1.6fr) auto;
-  gap: 10px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
   align-items: end;
 }
 
 .attendance-report-fields__formula-create-expression {
-  min-width: 260px;
+  grid-column: 1 / 5;
+  min-width: 0;
+}
+
+.attendance-report-fields__formula-create-grid > button {
+  grid-column: 5;
 }
 
 .attendance-report-fields__formula-dependency-edges {
@@ -3383,6 +3401,11 @@ watch(
 
   .attendance-report-fields__formula-create-grid {
     grid-template-columns: 1fr;
+  }
+
+  .attendance-report-fields__formula-create-expression,
+  .attendance-report-fields__formula-create-grid > button {
+    grid-column: auto;
   }
 }
 </style>

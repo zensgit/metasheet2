@@ -17,6 +17,9 @@ import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import type { LoadedPlugin } from '../../src/core/plugin-loader'
 import type { PluginContext } from '../../src/types/plugin'
+import { defineStockPreparationProjectWriteLockRealDbCases } from './stock-preparation-project-write-lock-realdb.cases'
+import { defineStockPreparationGenericWriterGovernanceRealDbCases } from './stock-preparation-generic-writer-governance-realdb.cases'
+import { defineStockPreparationManualRowsRealDbCases } from './stock-preparation-manual-rows-realdb.cases'
 
 const require = createRequire(import.meta.url)
 const {
@@ -494,3 +497,12 @@ describeIfDatabase('stock-preparation P4 one-shot repair (real DB)', () => {
     for (const objectId of objectIds) expect(available.has(objectId)).toBe(true)
   })
 })
+
+// Batch-refresh phase 0 step 1: the stock-prep project write lock (migration 100) real-DB cases ride this
+// already-wired stock-prep real-DB host (see the cases module header for why there is no lane file of their own).
+defineStockPreparationProjectWriteLockRealDbCases()
+// Batch-refresh step 4 PR-6: the generic configured writers refuse governed stock-prep sheets (real PG, S6-*).
+defineStockPreparationGenericWriterGovernanceRealDbCases()
+// 人工补充行 B1 (ADR adr-stock-prep-manual-rows-20261030 §8 「B1 插件」 1 / 10): the pull never touches a `manual:` row, the
+// export carries 来源, and the R-60 boundary holds (real PG, MR-RD-*).
+defineStockPreparationManualRowsRealDbCases()

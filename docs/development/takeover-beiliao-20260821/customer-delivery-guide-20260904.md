@@ -1,7 +1,7 @@
 # 备料(stock-preparation)客户交付说明(2026-09-04)
 
 > 读者:客户 IT + 我方现场实施。
-> 值面纪律:本文**不含任何账号 / 密码 / token / 内部 IP**。测试 PLM 地址仅保留 `10.10.52.16`(客户已知悉的测试库),其余主机一律用占位符 `<部署主机>` / `<PLM主机>`。账号、密码全部由客户/实施在界面当场输入,本文不记录。
+> 值面纪律:本文**不含任何账号 / 密码 / token / 内部 IP**。测试 PLM 地址仅保留 `<测试实例地址>`(客户已知悉的测试库),其余主机一律用占位符 `<部署主机>` / `<PLM主机>`。账号、密码全部由客户/实施在界面当场输入,本文不记录。
 > 来源纪律:本文每一步均核对自 `222-deploy-window-runbook-20260901.md`(含文末"2026-09-03 r7 实际执行记录与订正"一节,**订正优先于正文**)、`222-rehearsal-full-run-20260904.md`、`222-rehearsal-day-checklist-20260903.md`、`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1`、`scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs`,以及 `plugins/plugin-integration-core/lib/http-routes.cjs`、`packages/core-backend/src/routes/{admin-users,permissions}.ts` 的路由定义。不确定处标"待核对",不猜测、不编造。
 
 ---
@@ -83,6 +83,8 @@ New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
 | `pm2 list` | `metasheet-backend` 为 `online` |
 | `Invoke-RestMethod http://127.0.0.1/api/health` | 正常返回 |
 | 版本号 | `node -e "console.log(require('<部署根目录>/packages/core-backend/dist/src/version.js'))"` 对应这次打包的提交,不是升级前旧值(没变说明升级没真正生效) |
+
+**`/api/health` 里的 `build` 字段(addresses #6463)**:本地 Windows 起法不设 `METASHEET_BUILD_*` 环境变量时,`build.commit` / `build.imageTag` / `build.created` 现在取自部署根目录的 `BUILD_PROVENANCE.json`(`gitCommit` / `gitRef` / `builtAt`),此时 `build.source` 显示 `provenance-file`、`build.imageDigest` 仍为 null。只要设了任何一个 `METASHEET_BUILD_*` 变量,就只用环境变量、不读文件。文件从工作目录与后端模块目录向上最多找 6 层;要钉死路径就设 `METASHEET_BUILD_PROVENANCE_PATH`(绝对路径;设了就只认这一个路径,不再向上找,也就不会读到部署根目录上层意外放置的文件)。文件缺失、损坏或超过 1 MB(按文件大小判断,不读内容)时各字段保持 null,不影响健康检查。后端按文件的大小与修改时间判断是否变化,所以升级后按 ① 把新的 `BUILD_PROVENANCE.json` 拷到部署根目录,下一次健康检查(一个轮询周期内)就会显示新值,不需要再重启后端。
 
 **失败处理**:脚本第 4-7 步之间任何异常,会**自动**停 pm2、打印"RESTORE REQUIRED"框(备份路径 + 每个被替换路径的精确恢复命令),照抄执行即可,不用自己回忆回退步骤。若尚未开始执行就失败(如 SHA-256 校验不过),说明包传输损坏,重新传一次,不要跳过校验。
 
@@ -188,7 +190,7 @@ PathExAttrInfo.FileCode(NodeType=2 项目节点) → PathInfo → OrderHeadInfo 
 
 | # | 步骤 | 动作 |
 |---|---|---|
-| 1 | 新建外接数据源(SQL Server 只读) | 顶部导航「**外接数据源**」页新建一个只读 SQL Server 连接,地址、账号、密码**由客户/实施在界面当场输入**,本文不记录、不留存。测试库地址为 `10.10.52.16`(生产库地址由客户提供,现场输入,不写入任何文档)。**具体菜单入口待核对**(本次复核的源文档未截图此界面,只核实了其后端约束,见下一步)。 |
+| 1 | 新建外接数据源(SQL Server 只读) | 顶部导航「**外接数据源**」页新建一个只读 SQL Server 连接,地址、账号、密码**由客户/实施在界面当场输入**,本文不记录、不留存。测试库地址为 `<测试实例地址>`(生产库地址由客户提供,现场输入,不写入任何文档)。**具体菜单入口待核对**(本次复核的源文档未截图此界面,只核实了其后端约束,见下一步)。 |
 | 2 | 外部系统绑定该连接 | 该连接对应的"外部系统"记录,`kind` 必须是 `data-source:sql-readonly`,且其 `connectionId` 必须非空并指向第 1 步新建的连接(#5452 起的约束)。若沿用一条历史遗留的外部系统记录(未打 `dataSourceOwnerId` 标记),source-preflight 会报 `CONNECTION_LEGACY_FALLBACK_DENIED`;修法:`GET /api/integration/external-systems/:id` 取出原样公开字段(`id`/`tenantId`/`name`/`kind`/`role`/`status`/`config`/`capabilities`),补上 `connectionId = config.dataSourceId` 后 `POST /api/integration/external-systems` 回写(需 admin token + `x-tenant-id` 请求头)。 |
 | 3 | 源绑定切换 | `POST /api/integration/stock-preparation/source-binding`,body 只能带一个字段:<br>`{ "externalSystemId": "<第 2 步的外部系统 id>" }`<br>需要 `integration:admin` 权限。响应 `takesEffectWithoutRestart: true`,**不需要 `pm2 restart`**,立即生效。 |
 | 4 | 验证绑定生效 | `GET /api/integration/stock-preparation/source-binding` 应读到新值;`GET /api/integration/stock-preparation/audit` 应能看到一条 `action: 'source_binding_set'` 的记录。 读审计时**不要带 `workspaceId`**:审计行的 workspace 一律为空,带了就按等值过滤成 0 行(界面本来就不带,只有手写探针会踩)。 |
@@ -226,7 +228,7 @@ PathExAttrInfo.FileCode(NodeType=2 项目节点) → PathInfo → OrderHeadInfo 
 
 - `maxReadCount` 在启用该块时必填,否则后端拒绝整份动作配置;三个 `maxSubtree*` 有代码硬顶(深度 4、节点 2000、根 500)。
 - 改完按 §7.1 的写法重载 env 再重启;试算证据里出现 `expansion.summary.subtree`(nodesVisited / rootsDiscovered / rootsExpanded)即生效。
-- 222 实测(2026-09-06,项目 2-20231625):开启前 0 行,开启后 6 张表头全部发现、135 行展开、225 项因缺件挂起。详见 `222-w2-subtree-evidence-20260906.md`。
+- 222 实测(2026-09-06,项目 <项目号B>):开启前 0 行,开启后 6 张表头全部发现、135 行展开、225 项因缺件挂起。详见 `222-w2-subtree-evidence-20260906.md`。
 - 关闭方法:删掉该块并重启,行为与 r9 逐字节相同。
 
 ### 3.2 每日定时拉取(只试算,不写入)
@@ -264,21 +266,21 @@ Start-ScheduledTask -TaskName 'metasheet-stock-prep-scheduled-dry-run'
 
 ## 4. 数据前置(客户侧必做)
 
-**测试库现状**(2026-09-03 现场核实):`10.10.52.16` 上的测试库只有 1 张订单,其明细指向的零件全部不在物料表(`PartLibraryInfo`)——这不是映射或配置问题,是测试库数据本身残缺:该库里另有几个零件挂着完整 BOM 树(例如某零件有 2 张 BOM 表头、118 行明细),但没有任何订单引用它们。因此**任何项目号在测试库上现状都走不完整链**,第 2 步(从 PLM 拉取)演不出效果。
+**测试库现状**(2026-09-03 现场核实):`<测试实例地址>` 上的测试库只有 1 张订单,其明细指向的零件全部不在物料表(`PartLibraryInfo`)——这不是映射或配置问题,是测试库数据本身残缺:该库里另有几个零件挂着完整 BOM 树(例如某零件有 2 张 BOM 表头、118 行明细),但没有任何订单引用它们。因此**任何项目号在测试库上现状都走不完整链**,第 2 步(从 PLM 拉取)演不出效果。
 
 客户在测试环境验证前,需二选一:
 
 **(a)在测试库插入一张订单,指向已有 BOM 的零件**(推荐,风险最低,不涉及生产数据):
 
 ```sql
--- 项目 230920006 的节点 15014156;零件 600028853 有 2 个 BOM 表头、118 行明细
-INSERT INTO DN_PDM_OrderHeadInfo (OBJ_ID, path_id) VALUES (<新订单ID>, 15014156);
-INSERT INTO DN_PDM_OrderDetailInfo (order_id, part_id, quantity, sort_id) VALUES (<新订单ID>, 600028853, 1, 1);
+-- 项目 <项目号A> 的节点 <节点ID-1>;零件 <零件ID-1> 有 2 个 BOM 表头、118 行明细
+INSERT INTO DN_PDM_OrderHeadInfo (OBJ_ID, path_id) VALUES (<新订单ID>, <节点ID-1>);
+INSERT INTO DN_PDM_OrderDetailInfo (order_id, part_id, quantity, sort_id) VALUES (<新订单ID>, <零件ID-1>, 1, 1);
 ```
 
 **表头可能还有其它非空列,以客户实际表结构为准,上面两条 INSERT 只给出本方案必须的最小字段集。**
 
-插入后对项目号 `230920006` 跑一次拉取(§6),预计能展开出该 BOM 下的行。**预告**:2026-09-03 对测试库的只读枚举显示,该零件的一张 BOM(bom_id 15013572)59 行明细里有 33 行的子件不在测试库物料表(其它有 BOM 的根零件也普遍缺 40–60%),拉取后这些行会被系统**挂起待人工确认**(`manual_confirm_required`),这是**设计行为,不是故障**——系统对拿不准的行选择停下来问人,不自己猜。具体挂起的子件笔数(任务书口径为"59 个子件里 33 个不在测试库物料表")**待核对**:本次复核的源文档中未找到这一具体计数的逐字出处,已核实的是同一零件"2 张 BOM 表头 / 118 行明细"这组数字(见 `222-deploy-window-runbook-20260901.md` 第 116 条)。
+插入后对项目号 `<项目号A>` 跑一次拉取(§6),预计能展开出该 BOM 下的行。**预告**:2026-09-03 对测试库的只读枚举显示,该零件的一张 BOM(bom_id <BOM-ID-1>)59 行明细里有 33 行的子件不在测试库物料表(其它有 BOM 的根零件也普遍缺 40–60%),拉取后这些行会被系统**挂起待人工确认**(`manual_confirm_required`),这是**设计行为,不是故障**——系统对拿不准的行选择停下来问人,不自己猜。具体挂起的子件笔数(任务书口径为"59 个子件里 33 个不在测试库物料表")**待核对**:本次复核的源文档中未找到这一具体计数的逐字出处,已核实的是同一零件"2 张 BOM 表头 / 118 行明细"这组数字(见 `222-deploy-window-runbook-20260901.md` 第 116 条)。
 
 **(b)提供生产 PLM 只读账号**:凭据由客户/实施在界面当场输入,用后按客户内部安全策略轮换;本文及其他任何交付文档都不记录凭据。选这条需要客户明确同意接入生产库。
 
@@ -524,6 +526,8 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 
 > 上表以合并到 main 的权限矩阵回归结果为准(逐主体、逐导航项、逐落地姿态的全称对拍全绿)。222 上验证过前五行:`stock-prep-operator` 角色与平台管理员两档一个 tab 都没变;最后两行(裸 `integration:admin`、通配持有者)r18 之前与服务端相反,现已对齐。
 
+> **2026-10-13 订正（演示机现状）**：旧一线角色 `stock-prep-operator` 已于 2026-10-13 在演示机上删除；一线角色现为「操作人员」（`stock-prep_frontline`）+「审批与提交」（`approvals_operator`），见 `runbook-operator-merge-20261012.md`「执行记录」。上文「222 上的 `stock-prep-operator` 角色」两处今后读作「操作人员」。
+
 **就地确认**
 
 打开一个项目的工作区之后,「等您拿主意」这一块(面板 2)不用再跳到确认队列 tab——有待确认的行时,面板 2 直接就地展开,带一条进度条(已确认 / 待确认)。逐条确认之后,项目看板会自动重新读取一遍,不用手动刷新;确认到 0 之后,「回到上面再同步一次」按钮**直接在原地完成同步**,不切页、不跳转。确认队列作为独立页打开时,行为和以前完全一样,没有变化。
@@ -647,9 +651,18 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 | 单次拉取翻页上限 | 100 页 | **每次读表内部**的分页数,每次调用归零,不是总量;222 已显式写入配置 `maxPages:100` |
 | 单次拉取总读次数上限 | **30000 次**(222 于 2026-09-05 写入) | 配置项 `maxReadCount`;**不设即无上限**——代码默认 undefined,预算检查直接跳过 |
 | 单次拉取总耗时上限 | **600000 毫秒**(222 于 2026-09-05 写入) | 配置项 `maxElapsedMs`;同上,不设即无上限 |
+| 单次拉取同时在途的 PLM 读 | **4 条**(R67 起的代码默认) | 动作配置 `readConcurrency`(与 `maxReadCount` 同一份 JSON);取值 1–8,**越界按边界执行而不是拒绝**(0→1、99→8),非数字按默认 4;**写 1 = R67 之前的逐条串行**。只改"同时发几条读",不改读什么、不改计划与 revision;见下方「读并发」 |
 | Excel 导出上限 | 20000 行 | 代码常量 |
 | 单次试算的**行级错误条目**上限 | **5000 条**(2026-09-06 起) | 代码常量 `ROW_ERROR_LIMIT`;可由动作配置 `rowErrorLimit` 覆盖,硬顶 20000(`ROW_ERROR_LIMIT_CEILING`),**写超过硬顶的值会被拒绝(422)而不是按硬顶执行**。此旋钮**仅对前台交互式试算通道生效**,大 BOM 后台展开通道恒用默认 5000 |
 | 超过 `maxRows` 时 | **不报错、不截断**,转入"大 BOM 分批"路径 | 界面有专门面板;后端按每批 100–1000 行写入 |
+
+**读并发(R67 起)**:试算 / 应用 / 内部持久化在展开 BOM 时,会按展开顺序提前读取后面要读的节点(子件、BOM 头、明细),最多 `readConcurrency` 条同时在途(默认 4)。展开结果、证据(evidence)、试算 revision 与逐条串行时**逐字节相同**——提前读到的结果仍按原顺序被消费。大 BOM **后台**展开作业不受影响,仍逐条串行。
+
+- **读次数的两个口径**:证据 / 审计里的 `readCount`(`evidence.expansion.readCount`)是**展开实际消费**的查询条数(与逐条串行时相同);试算响应里 `plmReadPhase.queriesIssued` 才是 **PLM 实际收到**的查询条数。正常完成时两者相等;提前中止时后者可能更大(见下)。
+- **客户 PLM 侧的变化**:同一次试算会同时占用最多 `readConcurrency` 条查询 / 连接(原来恒为 1 条)。数据源连接池上限是数据源自身的 `poolConfig.max`(未设为 20),它须 ≥ `readConcurrency` + 同时在用这条数据源的其它请求数;不够时多出的读在连接池里排队,排队超过取连接超时(30 秒:mssql 10 不设、连接池库 tarn 的默认值)的那条读失败,整次试算判为 `read_failed`,causeClass 为驱动给出的超时类名(tarn 的取连接超时没有设置类名,实际显示为通用的 `Error`)。
+- **提前中止的代价**:遇到循环、超上限、读失败而提前结束时,可能已经多发了一些最终没用上的读——单页读最多 16 × N 条(N = `readConcurrency`,默认 64 条);多页读会读完已开始那条读的剩余页,上限 16 × N + N × (`maxPages` − 1)。失败 / 中止的试算**不等待**仍在途的提前读:错误一确定就返回;那几条读在后台跑完后被丢弃(最长占用连接到单次读超时为止),返回之后不会再向 PLM 发任何新的查询(包括多页读的下一页)。
+- **行自检(所有宽度,包括 1)**:每次读回来的行必须满足这次读自己的等值条件(列名取自读计划的配置)。比较规则:按大小写不敏感、去尾空格比较,数值形态按数值比较('0010' = 10);不做全半角 / Unicode 折叠。有一行不满足,即视为传输串线(一次读拿到了另一次读的结果),整次试算判失败,错误码 `read_row_mismatch`(`canApply: false`,不发令牌,应用拒绝,不写任何行)。数据源**声明**未过滤(`filtersApplied: false`,桥接只读源可以合法地返回整表)的读,改为按同一规则在本地过滤后再使用:整表返回仍然合法,串线拿到的别的件的行会被滤掉,不会被悄悄展开成这个件的子件。
+- **怎么核对**:试算响应在 `evidence` 旁边新增 `plmReadPhase`(五个整数,不含任何业务值):`readConcurrency`(本次宽度)、`maxReadsInFlight`(实际最多同时在途)、`queriesIssued`(PLM 实际收到的查询数)、`queriesNotConsumed`(其中没用上的,正常完成时为 0)、`wallMs`(读阶段耗时,毫秒)——下次现场报告可直接对比。
 
 **行级错误条目封顶(2026-09-06 起)**:一个源数据很差的项目(零件库整块缺、数量列写成文字)以前会按 BOM 位置数一条一条累计行级错误,数万条撑爆响应、revision 哈希与确认账本。现在数组封到 5000 条,**但计数不封顶**:试算结果的 `summary` / evidence 会给出 `rowErrorsTotal`(真实总数)、`rowErrorsTruncated: true` 与按类型的真实计数,`errorTypes` 也照样列出"每一条都被丢掉"的那种类型;`missing_child_bom` 这类硬阻断类型即便条目全被丢掉,也照样挡住写入(fail-closed)。**5000 条以内的项目一切照旧**——条目内容与顺序、试算 revision、evidence、待确认项身份全部字节级不变,没有任何在飞的试算令牌或待确认项受影响。**只有真的超过 5000 条的项目**,其试算 revision 会变:在飞的 `dryRunToken` 会 409 MISMATCH、已发起的人工确认会 SUPERSEDED 重开,重跑一次试算即可。这可以接受——这类项目在封顶之前本来就跑不出可用结果。
 

@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "verification_date": "2026-10-10",
+  "verdict": "CONFIRMED_CODE_DEFECTS_FIXED_LOCAL_VALIDATION_PASSED_EXTERNAL_ACCEPTANCE_PENDING",
+  "all_twenty_items_fixed": false,
+  "branch": "codex/attendance-qa-completion-20261009",
+  "code_commit": "0841cf65ab740b9191ecfcc5cd8f12f87871ebb0",
+  "code_tree": "e37e1d079ffb790460930051f50ed2d8ee6f2f98",
+  "first_fix_commit": "62d6801c5f126178ce197c81e8ef7f7e71913bf1",
+  "main_snapshot": "548c1d5834ecead8502f6c63437e32b7b0cb8a7a",
+  "normal_merge_commit": "c9674c0ab3",
+  "rebased": false,
+  "force_pushed": false,
+  "source_sha256": {
+    "apps/web/src/views/AttendanceView.vue": "269f85e06215bf2a7579f823bf3301f3377a3f5265b257da279ebec75f81e503",
+    "apps/web/tests/attendance-selfservice-dashboard.spec.ts": "ba3245306fd942910ca26bc7bbf95f7877a3b731339ed8219762e4dd95e9e4f1"
+  },
+  "runtime": {
+    "node": "20.20.2",
+    "pnpm": "10.33.0",
+    "database": "isolated synthetic PostgreSQL 15"
+  },
+  "final_runs": {
+    "frontend_utc": {
+      "files": 14,
+      "passed": 292,
+      "failed": 0,
+      "skipped": 0,
+      "log": "frontend-final-utc.log"
+    },
+    "frontend_los_angeles": {
+      "files": 4,
+      "passed": 149,
+      "failed": 0,
+      "skipped": 0,
+      "log": "frontend-final-la.log"
+    },
+    "browser": {
+      "passed": 8,
+      "failed": 0,
+      "viewports": [
+        1440,
+        390
+      ],
+      "scope": "local mock harness only",
+      "log": "browser-final.log"
+    },
+    "backend_database": {
+      "files": 2,
+      "passed": 19,
+      "failed": 0,
+      "log": "backend-db-final.log"
+    },
+    "strict_rbac_fixture": {
+      "seed_passes": 2,
+      "rbac_bypass": false,
+      "token_claims_trusted": false,
+      "admin_read_denied": true,
+      "submitted_verified_cancelled": {
+        "leave": 1,
+        "overtime": 1,
+        "swap": 1
+      },
+      "log": "selfservice-fixture-final.log"
+    },
+    "web_typecheck": {
+      "command": "vue-tsc -b --force",
+      "exit_code": 0,
+      "log": "web-typecheck-final.log"
+    },
+    "backend_typecheck": {
+      "command": "tsc --noEmit",
+      "exit_code": 0,
+      "log": "backend-typecheck-final.log"
+    },
+    "web_build": {
+      "exit_code": 0,
+      "warning": "existing large-chunk advisory",
+      "log": "web-build-final.log"
+    },
+    "validate_all": {
+      "exit_code": 0,
+      "plugin_manifests_valid": 13,
+      "plugin_manifest_warnings": 9,
+      "scope": "repository configured validate:all chain",
+      "log": "validate-all-final.log"
+    },
+    "migration_replay": {
+      "applied": 435,
+      "pending": 0,
+      "new_migrations": 0
+    }
+  },
+  "midnight_regression": {
+    "refresh_entry_red": true,
+    "focused_approval_entry_red_with_refresh_only_fix": true,
+    "both_entry_guards_passed": 4,
+    "dashboard_and_helper_passed": 111,
+    "skipped_in_full_two_file_run": 0,
+    "receipt": "midnight-history-race/results.json",
+    "independent_final_review": "PASS_NO_ACTIONABLE_FINDING"
+  },
+  "merge_ci_guards": {
+    "ci_contracts_passed": 267,
+    "required_web_guards_passed": 63,
+    "required_web_tokens": 559,
+    "gating_invocations": 20,
+    "union_dropped_paths": 0,
+    "provenance": "PASS",
+    "receipt": "merge-alignment-results.json"
+  },
+  "models": [
+    {
+      "model": "gpt-6.1-sol",
+      "complexity": "medium",
+      "scope": "implementation, merge and CI alignment, regression",
+      "completed": true
+    },
+    {
+      "model": "gpt-6-astra",
+      "complexity": "high",
+      "scope": "adversarial timezone and transaction review, final delta review",
+      "completed": true
+    },
+    {
+      "model": "gpt-6-luna",
+      "complexity": "low",
+      "scope": "Chinese design and verification draft",
+      "completed": true,
+      "finalized_by": "root"
+    },
+    {
+      "model": "kimi-code/k3",
+      "scope": "readonly history advisory",
+      "completed": false,
+      "reason": "180-second timeout",
+      "counted_as_passing_review": false
+    },
+    {
+      "model": "grok-4.7",
+      "scope": "preflight only",
+      "completed": false,
+      "reason": "CLI unauthenticated",
+      "counted_as_passing_review": false
+    }
+  ],
+  "delivery": {
+    "pr_published": false,
+    "remote_ci": "not_run",
+    "hold": true,
+    "merged": false,
+    "deployed": false,
+    "production_changed": false,
+    "real_history_repaired": false,
+    "archive_credentials_used": false
+  },
+  "remaining": [
+    "public Draft PR authorization and fresh required CI",
+    "original QA build and organization/user/date scope",
+    "real history observation and acceptance",
+    "target-environment latency and business acceptance"
+  ],
+  "prior_twenty_item_receipt": "artifacts/attendance-qa-fix-20261009/verification.json",
+  "note": "Overlapping suites are not summed. This receipt describes code commit; subsequent documentation-only commits do not replace source identity."
+}

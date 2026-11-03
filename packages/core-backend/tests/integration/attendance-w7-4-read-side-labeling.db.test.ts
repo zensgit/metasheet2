@@ -1,3 +1,4 @@
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 /**
  * W7-4 (#4556) — READ-SIDE TRACE LABELING: the design-lock §4.4 slice that makes
  * group-derived evidence distinguishable from legacy-derived evidence on the
@@ -104,7 +105,10 @@ const { buildAttendanceGroupFixedScheduleProducerKey } = requireCjs(
 const TRACE_CATEGORIES = ['today_status', 'late_early', 'missing_punch'] as const
 
 type HttpResponse = { status: number; body?: any; raw: string }
-function requestJson(
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(
   url: string,
   options: { method?: string; headers?: Record<string, string>; body?: string } = {},
 ): Promise<HttpResponse> {
@@ -219,6 +223,7 @@ function convertNullable(schema: unknown): unknown {
 describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)', () => {
   let server: MetaSheetServer | undefined
   let pool: Pool
+  const seededDefaultRuleIds: string[] = []
   let baseUrl = ''
   let priorW4: string | undefined
   let priorW7: string | undefined
@@ -394,6 +399,15 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
     // W7-3 transition-writer schema: seeded via the shared legal-ladder helper
     // (bootstrap at 'off', walk to the target), never a bare INSERT.
     await seedAttendanceW7ContextSourcePostureV1(pool, orgId, postureState)
+    const defaultRule = await pool.query<{ id: string }>(
+      `INSERT INTO attendance_rules
+       (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, $2, 'owned timezone fixture', $3, 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
+       RETURNING id`,
+      [randomUUID(), orgId, 'UTC'],
+    )
+    seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id))
   }
 
   async function seedPlainAssignment(
@@ -759,6 +773,7 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
         [groupUser, legacyUser, preGroupUser, shadowUser, legacyShadowUser, reviewUser, corruptUser],
       ])
       .catch(() => undefined)
+    await pool?.query('DELETE FROM attendance_rules WHERE id = ANY($1::uuid[])', [seededDefaultRuleIds]).catch(() => undefined)
     await pool?.end()
     await server?.stop?.()
     if (priorW4 === undefined) delete process.env[W4_ENV]

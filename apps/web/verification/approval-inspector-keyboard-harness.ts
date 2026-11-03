@@ -231,8 +231,12 @@ const api: ApprovalNodeConfigEditorApi = {
   timeoutJumpTargetOptions: () => [],
   approvalNodeEmptyPolicy: () => 'error',
   setApprovalNodeEmptyPolicy: () => {},
-  approvalNodeMergeWithRequester: () => false,
-  setApprovalNodeMergeWithRequester: () => {},
+  // W1-1a (Lock-4 F4-C / F4-B): the four-value same-person writer + the 'designated' fallback
+  // pickers' writer replace the shipped merge-with-requester checkbox pair. Inert here: the
+  // editor DERIVES the displayed state from approvalNodeEditFor(); writes are pinned by the
+  // full TemplateAuthoringView mounts.
+  setApprovalNodeSamePersonPolicy: () => {},
+  setApprovalNodeEmptyAssigneeFallbackIds: () => {},
   // Lock-3 §1.1 — handler-node mode (会签/或签) + 办理意见 required.
   handlerNodeMode: () => handlerMode.value,
   setHandlerNodeMode: (_key, mode) => { handlerMode.value = mode },

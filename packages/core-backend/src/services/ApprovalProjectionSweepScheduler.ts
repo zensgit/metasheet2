@@ -73,6 +73,9 @@ export class ApprovalProjectionSweepScheduler {
   private running = false
   private started = false
   private isLeader = false
+  private stopping = false
+  private inFlightTick: Promise<number> | null = null
+  private stopPromise: Promise<void> | null = null
   public readonly ready: Promise<void>
 
   constructor(options: ApprovalProjectionSweepSchedulerOptions = {}) {
@@ -101,7 +104,7 @@ export class ApprovalProjectionSweepScheduler {
   }
 
   start(): void {
-    if (this.started) return
+    if (this.started || this.stopping) return
     this.started = true
     this.ready.then(() => {
       if (!this.started) return
@@ -115,7 +118,13 @@ export class ApprovalProjectionSweepScheduler {
     })
   }
 
-  stop(): void {
+  stop(): Promise<void> {
+    this.stopPromise ??= this.stopOnce()
+    return this.stopPromise
+  }
+
+  private async stopOnce(): Promise<void> {
+    this.stopping = true
     this.started = false
     if (this.timer) {
       clearInterval(this.timer)
@@ -129,9 +138,11 @@ export class ApprovalProjectionSweepScheduler {
       clearInterval(this.acquisitionTimer)
       this.acquisitionTimer = null
     }
+    await this.ready
+    if (this.inFlightTick) await this.inFlightTick
     if (this.leaderOptions && this.isLeader) {
       const { leaderLock, ownerId } = this.leaderOptions
-      leaderLock.release(this.lockKey, ownerId).catch(() => {})
+      await leaderLock.release(this.lockKey, ownerId).catch(() => false)
       this.isLeader = false
     }
     this.setLeaderGauge('relinquished')
@@ -167,6 +178,11 @@ export class ApprovalProjectionSweepScheduler {
     const won = await leaderLock.acquire(this.lockKey, ownerId, this.ttlMs)
     this.isLeader = won
     if (won) {
+      if (this.stopping) {
+        await leaderLock.release(this.lockKey, ownerId).catch(() => false)
+        this.isLeader = false
+        return
+      }
       this.logger.info(`Acquired approval projection sweep leader lock ${this.lockKey} (owner=${ownerId}, ttl=${this.ttlMs}ms)`)
       this.setLeaderGauge('leader')
       this.stopAcquisitionRetryLoop()
@@ -190,9 +206,17 @@ export class ApprovalProjectionSweepScheduler {
   }
 
   private startTickLoop(): void {
-    if (!this.started || !this.isLeader || this.timer) return
+    if (!this.started || this.stopping || !this.isLeader || this.timer) return
     this.logger.info(`Approval projection sweep scheduler starting with interval ${this.intervalMs}ms`)
-    this.timer = setInterval(() => { void this.tick() }, this.intervalMs)
+    this.timer = setInterval(() => {
+      if (this.inFlightTick) return
+      const task = this.tick()
+      this.inFlightTick = task
+      void task.then(
+        () => { if (this.inFlightTick === task) this.inFlightTick = null },
+        () => { if (this.inFlightTick === task) this.inFlightTick = null },
+      )
+    }, this.intervalMs)
     if (typeof this.timer.unref === 'function') this.timer.unref()
   }
 
@@ -266,11 +290,11 @@ export function getSharedApprovalProjectionSweepScheduler(): ApprovalProjectionS
   return sharedScheduler
 }
 
-export function stopApprovalProjectionSweepScheduler(): void {
-  if (sharedScheduler) {
-    sharedScheduler.stop()
-    sharedScheduler = null
-  }
+export async function stopApprovalProjectionSweepScheduler(): Promise<void> {
+  const scheduler = sharedScheduler
+  if (!scheduler) return
+  await scheduler.stop()
+  if (sharedScheduler === scheduler) sharedScheduler = null
 }
 
 export function resolveApprovalProjectionSweepIntervalMs(): number | undefined {

@@ -17,10 +17,17 @@
       :directory="directory"
       :directory-loaded="directoryLoaded"
       :memory="recentProjects"
+      :can-pull="canRunPull"
+      :project-targets="projectTargetList"
+      :can-refresh-overview="canRefreshOverview"
+      :can-ensure-overview="canEnsureOverview"
+      :target-api="projectTargetApi"
       @open-project="onHomeOpenProject"
       @open-project-in-queue="onHomeOpenProjectInQueue"
       @focus-quick-open="focusProjectNoInput"
-      @open-multitable="openFillTarget"
+      @open-multitable="onHomeOpenMultitable"
+      @overview-refreshed="loadProjectTargetList"
+      @overview-ensured="loadProjectTargetList"
     />
 
     <!-- 线框 C ①: the way BACK. Without it `?projectNo=` is a one-way door — once an operator opens
@@ -98,7 +105,7 @@
     <!-- ── 1. 搜项目 ────────────────────────────────────────────────────────────────────────────
          The SAME native datalist #5445 built for the confirmation queue: option VALUE is the number
          and option LABEL is the name, so the browser's own type-ahead filters on either. An operator
-         who only remembers 「注射水缓冲罐」 finds 230920006 without being told it, and the trained
+         who only remembers 「示例乙型」 finds 200000006 without being told it, and the trained
          operator who types the number keeps the path they already use. -->
     <div class="sp-board__search" :class="{ 'sp-board__search--home': showHome }">
       <label class="sp-board__field">
@@ -112,8 +119,11 @@
           :placeholder="bi('项目号或名称', 'Project number or name')"
           @keyup.enter="openProject"
         >
-        <!-- D1=A: the union, not the directory alone. The home page's own caption says the list
-             holds "这台电脑最近开过的、和管理员归档过的项目" — so it has to. -->
+        <!-- D1=A: the union, not the directory alone. The home page's quick-open hint (#6088) says the
+             list holds 「这台电脑最近开过的项目、平台登记的项目,以及备料表里已经有数据的项目」 — so it
+             has to. A directory row is labelled by its own name; a row only this computer's memory
+             knows is labelled with the home page's words for that half of the list, verbatim. The
+             memory is written only when this page opens a project, so "opened" is literally true. -->
         <datalist id="stock-prep-board-directory-options" data-testid="stock-prep-project-board-datalist">
           <option
             v-for="project in directoryProjects"
@@ -124,7 +134,7 @@
             v-for="entry in memoryOnlyProjectNos"
             :key="`memory:${entry}`"
             :value="entry"
-          >{{ bi('这台电脑最近开过的', 'Recently opened on this computer') }}</option>
+          >{{ bi('这台电脑最近开过的项目', 'A project this computer recently opened') }}</option>
         </datalist>
       </label>
       <button
@@ -149,6 +159,276 @@
          the board still answers a foreign tenant's project number with a 404 byte-identical to the
          one an unknown number gets (the server decides that, and its suite asserts it) — what
          changed is only what this tab renders around that refusal. -->
+    <!-- 一个项目一张备料表 (S2, R-36) — THIS PROJECT'S SHEET, said in one line. The projectTarget.read
+         control of the workbench manifest (OPERATE, the board's own tier): rendered only once GET
+         …/projects/:projectNo/target answered, i.e. the server's switch is on. 「直接打开」 deep-links
+         the fill view of the project's OWN sheet; archived reads 「打开(已归档)」 and says who restores
+         it. A caller without the pull right is told to contact a pull operator — never pointed at a
+         button they do not have. -->
+    <section
+      v-if="openedProjectNo && projectTarget"
+      class="sp-board__target"
+      data-testid="stock-prep-project-target-status"
+      :data-target-status="projectTarget.status"
+    >
+      <p class="sp-board__target-line">
+        {{ bi(targetStatusText.zh, targetStatusText.en) }}
+        <span v-if="targetRowsText" class="sp-board__target-rows" data-testid="stock-prep-project-target-rows">{{ targetRowsText }}</span>
+      </p>
+      <p v-if="targetNextText" class="sp-board__hint" data-testid="stock-prep-project-target-next">
+        {{ bi(targetNextText.zh, targetNextText.en) }}
+      </p>
+      <button
+        v-if="projectTargetFillTarget"
+        type="button"
+        class="sp-board__link"
+        data-testid="stock-prep-project-target-open"
+        @click="openProjectTargetSheet"
+      >
+        {{ projectTarget.status === 'archived'
+          ? bi(targetPlain('open_archived_action').zh, targetPlain('open_archived_action').en)
+          : bi(targetPlain('open_action').zh, targetPlain('open_action').en) }}
+      </button>
+      <!-- S4 (ADR §6, register R-38) — 归档代替删除 (Q2). The projectTarget.archive / .restore controls
+           of the workbench manifest (PULL tier): rendered only when the caller holds that capability
+           AND the server says the action fits this sheet's state (`may.archive` / `may.restore`). A
+           caller without the pull right gets no button — the line above already says to contact a
+           pull operator. Pressing asks for the project number to be TYPED before anything is sent. -->
+      <button
+        v-if="canArchiveTarget"
+        type="button"
+        class="sp-board__link"
+        data-testid="stock-prep-project-target-archive"
+        :disabled="lifecycleBusy"
+        @click="openLifecyclePrompt('archive')"
+      >{{ bi(targetPlain('archive_action').zh, targetPlain('archive_action').en) }}</button>
+      <button
+        v-if="canRestoreTarget"
+        type="button"
+        class="sp-board__link"
+        data-testid="stock-prep-project-target-restore"
+        :disabled="lifecycleBusy"
+        @click="openLifecyclePrompt('restore')"
+      >{{ bi(targetPlain('restore_action').zh, targetPlain('restore_action').en) }}</button>
+      <div
+        v-if="lifecyclePrompt"
+        class="sp-board__lifecycle"
+        role="group"
+        data-testid="stock-prep-project-target-lifecycle-prompt"
+        :data-action="lifecyclePrompt"
+      >
+        <p class="sp-board__hint">
+          {{ lifecyclePrompt === 'archive'
+            ? bi(targetPlain('confirm_archive').zh, targetPlain('confirm_archive').en)
+            : bi(targetPlain('confirm_restore').zh, targetPlain('confirm_restore').en) }}
+        </p>
+        <p v-if="lifecyclePrompt === 'archive'" class="sp-board__hint" data-testid="stock-prep-project-target-lifecycle-remove-vs-archive">
+          {{ bi(targetPlain('remove_vs_archive').zh, targetPlain('remove_vs_archive').en) }}
+        </p>
+        <label class="sp-board__lifecycle-field">
+          <span>
+            {{ bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en) }}
+            <strong data-testid="stock-prep-project-target-lifecycle-project-no">{{ openedProjectNo }}</strong>
+          </span>
+          <input
+            v-model="lifecycleTyped"
+            type="text"
+            class="sp-board__lifecycle-input"
+            data-testid="stock-prep-project-target-lifecycle-input"
+            :disabled="lifecycleBusy"
+            :aria-label="bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en)"
+          />
+        </label>
+        <button
+          type="button"
+          class="sp-board__link"
+          data-testid="stock-prep-project-target-lifecycle-confirm"
+          :disabled="lifecycleBusy || !lifecycleTypedMatches"
+          @click="confirmLifecycle"
+        >
+          {{ lifecyclePrompt === 'archive'
+            ? bi(targetPlain('confirm_archive_action').zh, targetPlain('confirm_archive_action').en)
+            : bi(targetPlain('confirm_restore_action').zh, targetPlain('confirm_restore_action').en) }}
+        </button>
+        <button
+          type="button"
+          class="sp-board__link"
+          data-testid="stock-prep-project-target-lifecycle-cancel"
+          :disabled="lifecycleBusy"
+          @click="closeLifecyclePrompt"
+        >{{ bi(targetPlain('confirm_lifecycle_cancel').zh, targetPlain('confirm_lifecycle_cancel').en) }}</button>
+      </div>
+      <p
+        v-if="lifecycleNotice"
+        class="sp-board__hint"
+        role="status"
+        data-testid="stock-prep-project-target-lifecycle-result"
+        :data-result="lifecycleNotice.kind"
+      >
+        {{ bi(lifecycleNoticeText.zh, lifecycleNoticeText.en) }}
+        <span v-if="lifecycleNoticeText.zhNext">{{ bi(lifecycleNoticeText.zhNext, lifecycleNoticeText.enNext ?? '') }}</span>
+        <code v-if="lifecycleNotice.kind === 'refused' && lifecycleNotice.code" class="sp-board__token">{{ lifecycleNotice.code }}</code>
+      </p>
+      <!-- 备料分批拉取第一期 step 3 PR B (register R-53 / R-54) — THE PILOT MARKER. The projectTarget.pilotRead
+           control (ADMIN): read LAZILY, only once this line knows the sheet exists (active or archived — never on
+           absent) and only for a holder of the capability; it says whether the pilot is on and, while it is off,
+           WHICH readiness checks still fail (closed ids, never values). 「启用分批拉取试点」 is the
+           projectTarget.pilotEnable control (ADMIN): rendered only for its holder AND when the server says the
+           sheet is ready and not yet enabled (`may.enable`). Enabling is SET-ONCE (no disable anywhere — R-53 ②),
+           so the project number must be typed before anything is sent. -->
+      <p
+        v-if="projectPilot"
+        class="sp-board__hint"
+        data-testid="stock-prep-project-pilot-status"
+        :data-pilot-enabled="projectPilot.pilot && projectPilot.pilot.enabled ? 'true' : 'false'"
+        :data-pilot-ready="projectPilot.readiness ? (projectPilot.readiness.ready ? 'true' : 'false') : 'none'"
+      >
+        {{ bi(pilotStatusText.zh, pilotStatusText.en) }}
+        <template v-if="pilotFailingIds.length > 0">
+          <span>{{ bi(targetPlain('pilot_not_ready').zh, targetPlain('pilot_not_ready').en) }}</span>
+          <code v-for="id in pilotFailingIds" :key="id" class="sp-board__token" data-testid="stock-prep-project-pilot-failing">{{ id }}</code>
+        </template>
+      </p>
+      <button
+        v-if="canEnablePilot"
+        type="button"
+        class="sp-board__link"
+        data-testid="stock-prep-project-pilot-enable"
+        :disabled="pilotBusy"
+        @click="openPilotPrompt"
+      >{{ bi(targetPlain('pilot_enable_action').zh, targetPlain('pilot_enable_action').en) }}</button>
+      <div
+        v-if="pilotPrompt"
+        class="sp-board__lifecycle"
+        role="group"
+        data-testid="stock-prep-project-pilot-prompt"
+      >
+        <p class="sp-board__hint">{{ bi(targetPlain('pilot_confirm_enable').zh, targetPlain('pilot_confirm_enable').en) }}</p>
+        <label class="sp-board__lifecycle-field">
+          <span>
+            {{ bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en) }}
+            <strong data-testid="stock-prep-project-pilot-project-no">{{ openedProjectNo }}</strong>
+          </span>
+          <input
+            v-model="pilotTyped"
+            type="text"
+            class="sp-board__lifecycle-input"
+            data-testid="stock-prep-project-pilot-input"
+            :disabled="pilotBusy"
+            :aria-label="bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en)"
+          />
+        </label>
+        <button
+          type="button"
+          class="sp-board__link"
+          data-testid="stock-prep-project-pilot-confirm"
+          :disabled="pilotBusy || !pilotTypedMatches"
+          @click="confirmPilotEnable"
+        >{{ bi(targetPlain('pilot_confirm_enable_action').zh, targetPlain('pilot_confirm_enable_action').en) }}</button>
+        <button
+          type="button"
+          class="sp-board__link"
+          data-testid="stock-prep-project-pilot-cancel"
+          :disabled="pilotBusy"
+          @click="closePilotPrompt"
+        >{{ bi(targetPlain('pilot_confirm_enable_cancel').zh, targetPlain('pilot_confirm_enable_cancel').en) }}</button>
+      </div>
+      <p
+        v-if="pilotNotice"
+        class="sp-board__hint"
+        role="status"
+        data-testid="stock-prep-project-pilot-result"
+        :data-result="pilotNotice.kind"
+      >
+        {{ bi(pilotNoticeText.zh, pilotNoticeText.en) }}
+        <span v-if="pilotNoticeText.zhNext">{{ bi(pilotNoticeText.zhNext, pilotNoticeText.enNext ?? '') }}</span>
+        <code v-if="pilotNotice.kind === 'refused' && pilotNotice.code" class="sp-board__token">{{ pilotNotice.code }}</code>
+        <template v-if="pilotNotice.kind === 'refused' && pilotNotice.failing.length > 0">
+          <code v-for="id in pilotNotice.failing" :key="id" class="sp-board__token" data-testid="stock-prep-project-pilot-refused-failing">{{ id }}</code>
+        </template>
+      </p>
+      <!-- S3 (ADR §5 O2(a), register R-37) — 负责人 / 备注 / 计划完成. The projectFields.read control of the
+           workbench manifest (OPERATE): read LAZILY, only once this line knows the sheet exists (active or
+           archived — never on absent), and only for a holder of the capability. 「保存」 is the
+           projectFields.update control: rendered only for its holder AND when the server says the sheet
+           takes the write (`may.update`, i.e. active). Saving sends ONLY the fields the operator changed.
+           Archived: the three show read-only with 「已归档，不能改」 — the grid itself stays fillable. -->
+      <div
+        v-if="projectFields"
+        class="sp-board__fields"
+        role="group"
+        data-testid="stock-prep-project-fields"
+        :data-fields-status="projectFields.status"
+        :aria-label="bi(fieldsPlain('fields_title').zh, fieldsPlain('fields_title').en)"
+      >
+        <p class="sp-board__fields-title">{{ bi(fieldsPlain('fields_title').zh, fieldsPlain('fields_title').en) }}</p>
+        <label class="sp-board__fields-field">
+          <span>{{ bi(fieldsPlain('field_responsibleLabel').zh, fieldsPlain('field_responsibleLabel').en) }}</span>
+          <input
+            v-model="fieldsDraft.responsibleLabel"
+            type="text"
+            class="sp-board__fields-input"
+            data-testid="stock-prep-project-fields-responsible"
+            :maxlength="STOCK_PREP_PROJECT_FIELD_TEXT_LIMITS.responsibleLabel"
+            :disabled="!fieldsEditable || fieldsBusy"
+          />
+        </label>
+        <label class="sp-board__fields-field sp-board__fields-field--grow">
+          <span>{{ bi(fieldsPlain('field_note').zh, fieldsPlain('field_note').en) }}</span>
+          <input
+            v-model="fieldsDraft.note"
+            type="text"
+            class="sp-board__fields-input"
+            data-testid="stock-prep-project-fields-note"
+            :maxlength="STOCK_PREP_PROJECT_FIELD_TEXT_LIMITS.note"
+            :disabled="!fieldsEditable || fieldsBusy"
+          />
+        </label>
+        <label class="sp-board__fields-field">
+          <span>{{ bi(fieldsPlain('field_plannedFinishOn').zh, fieldsPlain('field_plannedFinishOn').en) }}</span>
+          <input
+            v-model="fieldsDraft.plannedFinishOn"
+            type="date"
+            class="sp-board__fields-input"
+            data-testid="stock-prep-project-fields-planned-finish"
+            :disabled="!fieldsEditable || fieldsBusy"
+          />
+        </label>
+        <button
+          v-if="canSaveProjectFields"
+          type="button"
+          class="sp-board__link"
+          data-testid="stock-prep-project-fields-save"
+          :disabled="fieldsBusy || !fieldsChanged"
+          @click="saveProjectFields"
+        >
+          {{ fieldsBusy
+            ? bi(fieldsPlain('fields_saving').zh, fieldsPlain('fields_saving').en)
+            : bi(fieldsPlain('fields_save_action').zh, fieldsPlain('fields_save_action').en) }}
+        </button>
+        <p
+          v-if="projectFields.status === 'archived'"
+          class="sp-board__hint"
+          data-testid="stock-prep-project-fields-archived"
+        >
+          {{ bi(fieldsPlain('fields_archived_readonly').zh, fieldsPlain('fields_archived_readonly').en) }}
+        </p>
+        <p v-else class="sp-board__hint">{{ bi(fieldsPlain('fields_hint').zh, fieldsPlain('fields_hint').en) }}</p>
+        <p
+          v-if="fieldsNotice"
+          class="sp-board__hint"
+          role="status"
+          data-testid="stock-prep-project-fields-result"
+          :data-result="fieldsNotice.kind"
+          :data-field="fieldsNotice.kind === 'refused' ? (fieldsNotice.field ?? '') : ''"
+        >
+          {{ bi(fieldsNoticeText.zh, fieldsNoticeText.en) }}
+          <span v-if="fieldsNoticeText.zhNext">{{ bi(fieldsNoticeText.zhNext, fieldsNoticeText.enNext ?? '') }}</span>
+          <code v-if="fieldsNotice.kind === 'refused' && fieldsNotice.code" class="sp-board__token">{{ fieldsNotice.code }}</code>
+        </p>
+      </div>
+    </section>
+
     <section v-if="openedProjectNo" class="sp-board__pull" data-testid="stock-prep-project-board-pull">
       <!-- H14: this page's step 1 is 从PLM拉取数据, and its empty state already sends people to a
            button by that name. `run-variant` makes the button actually carry it. See the panel. -->
@@ -162,10 +442,16 @@
         :large-bom-api="largeBomApi"
         :large-bom-poll-wait="largeBomPollWait"
         :fill-target="composedFillTarget"
+        :target-api="projectTargetApi"
+        no-link-hint-context="board"
+        :refresh-status="refreshStanza ? refreshStanza.status : null"
+        :refresh-settled="refreshStanza ? refreshStanza.settled : false"
+        :can-open-refresh-queue="canOpenRefreshQueue"
         @navigate-stage="(key: string) => emit('navigate-stage', key)"
         @open-multitable="openFillTarget"
         @synced="onSyncReportChanged"
         @busy-changed="onSyncBusyChanged"
+        @project-target-changed="onProjectTargetChanged"
       />
     </section>
 
@@ -185,6 +471,27 @@
             data-testid="stock-prep-project-board-posture"
           >{{ bi(posture.zh, posture.en) }}</span>
         </h3>
+        <!-- 备料分批拉取第一期 step 4 PR-7 (design §13): THE REFRESH BANNER, for everyone who can open this board —
+             counts and words only, never a hold payload. ABSENT (no element at all) for a project the batch refresh
+             does not govern, for a complete-and-checked one, and for an older backend that sends no stanza, so every
+             such page is the DOM it was. The link to 「拉取待确认」 renders only for the PULL tier (R-11). -->
+        <p
+          v-if="refreshBanner"
+          class="sp-board__refresh-banner"
+          data-testid="stock-prep-project-board-refresh-banner"
+          :data-refresh-status="refreshBanner.key"
+          role="status"
+        >
+          {{ bi(refreshBanner.zh, refreshBanner.en) }}
+          <span class="sp-board__hint">{{ bi(refreshBanner.zhNext, refreshBanner.enNext) }}</span>
+          <button
+            v-if="refreshBanner.link"
+            type="button"
+            class="sp-board__link"
+            data-testid="stock-prep-project-board-refresh-open-queue"
+            @click="openRefreshQueue"
+          >{{ bi('去「拉取待确认」', 'Open “Pull holds”') }}</button>
+        </p>
         <dl class="sp-board__facts">
           <div class="sp-board__fact" data-testid="stock-prep-project-board-rows">
             <dt :title="bi(rowsTooltip.zh, rowsTooltip.en)">{{ bi('表里有多少行', 'Rows in the table') }}</dt>
@@ -224,10 +531,10 @@
              them. The link stays — it goes to the CROSS-PROJECT queue, which this page does not
              replace — but it is a text link, not the primary action; the 「下一步」 bar above owns
              that (G1) and now opens 面板 2 in place. -->
-        <p v-if="board.pendingDecisionCount > 0" class="sp-board__pending" data-testid="stock-prep-project-board-pending">
+        <p v-if="ledgerPending > 0" class="sp-board__pending" data-testid="stock-prep-project-board-pending">
           {{ bi(
-            `这个项目有 ${board.pendingDecisionCount} 件事等您拿主意 —— 在下面的「等您拿主意」里就能处理。`,
-            `${board.pendingDecisionCount} thing(s) on this project are waiting for your decision — you can handle them in 「等您拿主意」 below.`,
+            `这个项目有 ${ledgerPending} 件事等您拿主意 —— 在下面的「等您拿主意」里就能处理。`,
+            `${ledgerPending} thing(s) on this project are waiting for your decision — you can handle them in 「等您拿主意」 below.`,
           ) }}
           <button
             type="button"
@@ -255,7 +562,7 @@
            for. Once they collapse it (or open another project, which resets the flag) the entry
            condition is the only thing left holding it open. -->
       <section
-        v-if="board.pendingDecisionCount > 0 || confirmPanelExpanded"
+        v-if="ledgerPending > 0 || confirmPanelExpanded"
         ref="confirmPanelEl"
         class="sp-board__confirm-panel"
         data-testid="stock-prep-project-board-confirm-panel"
@@ -263,7 +570,7 @@
         <div class="sp-board__confirm-panel-header">
           <h3 class="sp-board__confirm-panel-title">
             {{ bi('等您拿主意', 'Waiting on your decision') }}
-            <span v-if="board.pendingDecisionCount > 0">({{ board.pendingDecisionCount }})</span>
+            <span v-if="ledgerPending > 0">({{ ledgerPending }})</span>
           </h3>
           <button
             type="button"
@@ -332,7 +639,9 @@
 
       <!-- ── 3. 四个动作 ────────────────────────────────────────────────────────────────────────
            从PLM拉取 / 通知下一步 / 导出Excel / 推送宜搭. Every control that renders is one the
-           server answers for this caller (R-11); the ones that do not render say why in words. -->
+           server answers for this caller (R-11); the ones that do not render say why in words.
+           The 宜搭 entries follow the browser's platform-admin view; the server still checks the
+           anchored owner, namespace admission and tenant membership on every action. -->
       <section class="sp-board__actions" data-testid="stock-prep-project-board-actions">
         <!-- 从PLM拉取 lives ABOVE, outside `v-if="board"` — see the section that renders it. It is
              ONE instance either way: mounting a second copy here would give the operator two panels
@@ -345,11 +654,11 @@
             type="button"
             class="sp-board__button"
             data-testid="stock-prep-project-board-notify-next"
-            :disabled="busy || !handoff.isCurrentHandler || handoff.terminal"
+            :disabled="busy || !notifyPressable"
             :title="notifyTitle"
             @click="notifyNext"
           >
-            {{ bi('通知下一步', 'Tell the next person') }}
+            {{ notifyLabel }}
           </button>
 
           <!-- 导出Excel — the #5437 client, reused. Same route, same gate, same download trigger. -->
@@ -363,11 +672,30 @@
             {{ bi('导出物料清单(Excel)', 'Export materials (Excel)') }}
           </button>
 
-          <!-- 推送宜搭 — a PLACEHOLDER, and it says so in the words a factory uses. It is deliberately
-               present-and-disabled rather than absent: 宜搭 is on the customer's own roadmap, and an
-               operator who is looking for it deserves「还没接入」rather than silence that reads as
-               「这个系统不支持」. It is not a permission gate, so it is not an R-11 decoy. -->
+          <!-- 宜搭 — the two preparation entries render only for the literal platform admin the server's
+               live gate admits (`canOpenStockPrepYidaEntries`). Opening either screen approves and sends
+               nothing; the 单行 CREATE entry inside the preview appears only once the server reported its
+               send switch ON. Everyone else keeps main's PLACEHOLDER below, unchanged: it says「还没接入」
+               in a factory's words, and it is not a permission gate, so it is not an R-11 decoy. -->
+          <template v-if="yidaEntriesVisible">
+            <button
+              type="button"
+              class="sp-board__button"
+              data-testid="stock-prep-project-board-yida"
+              :title="bi('仅打开本地预演和准备界面；本入口不发送', 'Open local preview and preparation only; this entry does not send')"
+              @click="openYidaPreparation"
+            >
+              {{ bi('打开宜搭准备（不发送）', 'Open Yida preparation (no sending)') }}
+            </button>
+            <button
+              type="button"
+              class="sp-board__button"
+              data-testid="stock-prep-project-board-yida-preview-toggle"
+              @click="toggleYidaPreview"
+            >宜搭静态预演（不发送）</button>
+          </template>
           <button
+            v-else
             type="button"
             class="sp-board__button sp-board__button--placeholder"
             data-testid="stock-prep-project-board-yida"
@@ -377,6 +705,8 @@
             {{ bi('推送宜搭(暂未接入)', 'Push to Yida (not connected yet)') }}
           </button>
         </div>
+
+        <StockPreparationYidaPreviewPanel v-if="yidaPreviewOpen && yidaEntriesVisible" />
 
         <p v-if="handoffNotice" class="sp-board__notice" data-testid="stock-prep-project-board-handoff-notice" role="status">
           {{ handoffNotice }}
@@ -404,8 +734,8 @@
           </button>
           <p class="sp-board__fill-hint">
             {{ bi(
-              '打开的是备料主表。表里是这台系统上所有项目的行,请按项目号找您这一个 —— 目前还不能只显示一个项目。',
-              'This opens the stock-preparation table. It holds the rows for every project on this system, so find yours by project number — filtering it down to a single project is not available yet.',
+              '这是这套部署的备料表,请按项目号确认是您要处理的项目。',
+              'This is this deployment’s stock-preparation table — confirm the project number before you work on it.',
             ) }}
           </p>
         </template>
@@ -422,7 +752,7 @@
             data-testid="stock-prep-project-board-open-multitable-fallback"
             @click="openFillTarget"
           >
-            {{ bi('打开多维表', 'Open the multitable') }}
+            {{ bi('打开多维表首页', 'Open the multitable home') }}
           </button>
           <p class="sp-board__fill-hint" data-testid="stock-prep-project-board-no-fill-target">
             {{ bi(
@@ -450,7 +780,9 @@
 //
 // IT HAS NO EDITABLE CELL, on purpose. Filling stays in the multitable grid, where the column-level
 // write permissions and the human-field wall already live. A cell here would be a second write path
-// into the same rows with none of that behind it.
+// into the same rows with none of that behind it. (S3's three project-level fields — 负责人 / 备注 /
+// 计划完成 — are not cells of any sheet: they live on the server's registry row and have their own
+// OPERATE route, ADR §5 O2(a); the overview only projects them, read-only.)
 //
 // THE DEEP LINK IS A LINK, NOT A PERMISSION CHECK. The board returns a handle only when the sheet
 // exists; whether this operator may open it is multitable's answer, given when they land. The page
@@ -459,41 +791,91 @@
 // multitable view model and ACL layers, and promising a filter we did not build would be worse than
 // the honest sentence.
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { onAuthSessionSwitch, readAuthSessionSignature } from '../../../composables/authPrincipal'
 import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel.vue'
 import StockPreparationOperatorHome from './StockPreparationOperatorHome.vue'
 import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
+import StockPreparationYidaPreviewPanel from './StockPreparationYidaPreviewPanel.vue'
 import {
+  advanceStockPreparationHandoff,
   exportStockPreparationPrepLines,
   readStockPreparationOperatorDirectory,
+  stockPreparationHandoffAdvanceWasReplay,
+  stockPreparationHandoffFromStepKey,
+  stockPreparationHandoffMayPress,
+  stockPreparationHandoffResendableStepKey,
   type StockPreparationDecisionQueue,
+  type StockPreparationHandoffAdvanceResult,
   type StockPreparationOperatorDirectory,
   type StockPreparationOperatorProject,
 } from '../../../services/integration/stockPreparation/confirmationQueue'
 import { readStockPreparationOperatorHomeDirectory } from '../../../services/integration/stockPreparation/operatorHomeDirectory'
 import {
-  advanceStockPreparationHandoff,
   readStockPreparationHandoff,
   readStockPreparationProjectBoard,
   type StockPreparationHandoffCursor,
   type StockPreparationProjectBoard,
 } from '../../../services/integration/stockPreparation/projectBoard'
 import type { StockPreparationProjectSyncApi, StockPreparationProjectSyncReport } from '../../../services/integration/stockPreparation/projectSync'
+import {
+  changeStockPreparationProjectTargetLifecycle,
+  createStockPreparationProjectTargetApi,
+  enableStockPreparationProjectPilot,
+  saveStockPreparationProjectFields,
+  stockPrepProjectFieldsChangedPatch,
+  stockPrepProjectFieldsDraft,
+  stockPrepProjectNumbersMatch,
+  stockPrepProjectTargetFillTarget,
+  STOCK_PREP_PROJECT_FIELD_TEXT_LIMITS,
+  type StockPrepProjectFieldsDraft,
+  type StockPrepProjectFieldsSaveOutcome,
+  type StockPrepProjectFieldsState,
+  type StockPrepProjectLifecycleAction,
+  type StockPrepProjectLifecycleOutcome,
+  type StockPrepProjectPilotEnableOutcome,
+  type StockPrepProjectPilotState,
+  type StockPrepProjectTargetList,
+  type StockPrepProjectTargetState,
+  type StockPreparationProjectTargetApi,
+} from '../../../services/integration/stockPreparation/projectTarget'
 import type { StockPreparationLargeBomJobApi } from '../../../services/integration/stockPreparation/largeBomPull'
 import {
   STOCK_PREP_CONFIRM_PANEL_NOTE,
   STOCK_PREP_TOOLTIP_ROWS_IN_TABLE,
+  STOCK_PREP_TOOLTIP_TOOLBAR_ROWS_ARE_VIEW_ROWS,
   stockPrepBoardErrorPlain,
+  stockPrepProjectOverviewPlain,
+  stockPrepProjectTargetPlain,
+  stockPrepProjectTargetRowCountText,
   stockPrepErrorCopyText,
   stockPrepErrorPlain,
+  stockPrepHandoffOutcomePlain,
+  stockPrepHandoffStepPlain,
   type StockPrepPlainEntry,
   type StockPrepPlainText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
-import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
+import {
+  canOpenStockPrepRefreshQueue,
+  canOpenStockPrepYidaEntries,
+  canRunStockPrepProjectSync,
+  grantedStockPrepCapabilities,
+} from '../../../services/integration/stockPreparation/workbenchAccess'
+import {
+  parseStockPrepRefreshStanza,
+  stockPrepPendingSplit,
+  stockPrepRefreshBanner,
+  type StockPrepRefreshBanner,
+  type StockPrepRefreshStanza,
+} from '../../../services/integration/stockPreparation/refreshState'
 import { useAuth } from '../../../composables/useAuth'
-import { operatorNextStep, type OperatorNextStepResult } from '../../../services/integration/stockPreparation/operatorNextStep'
+import {
+  operatorNextStep,
+  STOCK_PREP_NOTIFY_LAST_STEP_LABEL,
+  type OperatorNextStepResult,
+} from '../../../services/integration/stockPreparation/operatorNextStep'
 import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
 import {
   readStockPrepRecentProjects,
@@ -513,8 +895,13 @@ const props = withDefaults(
     largeBomApi?: StockPreparationLargeBomJobApi | null
     /** Test seam ONLY — forwarded so specs never wait on a real timer. */
     largeBomPollWait?: ((ms: number) => Promise<void>) | null
+    /**
+     * Test seam ONLY (S2) — the project-target client, shared with the composed pull panel. Null in
+     * production: built from `scope`.
+     */
+    projectTargetApi?: StockPreparationProjectTargetApi | null
   }>(),
-  { scope: () => ({}), projectNo: '', syncApi: null, largeBomApi: null, largeBomPollWait: null },
+  { scope: () => ({}), projectNo: '', syncApi: null, largeBomApi: null, largeBomPollWait: null, projectTargetApi: null },
 )
 
 const emit = defineEmits<{
@@ -527,6 +914,12 @@ const emit = defineEmits<{
   (e: 'open-multitable', target: { sheetId: string; viewId: string } | null): void
   /** Mirrors the opened project into the shell's `?projectNo=` query. */
   (e: 'select-project-no', projectNo: string): void
+  /**
+   * 备料分批拉取第一期 step 4 PR-7: the open project's refresh stanza (values-free tokens / counts / booleans — the
+   * parsed board `refresh` key), or null when none is open / the backend sends none. The shell's 拉取待确认 rail
+   * count reads it (R-62 ④); nothing values-bearing rides this emit.
+   */
+  (e: 'refresh-changed', stanza: StockPrepRefreshStanza | null): void
 }>()
 
 const { locale } = useLocale()
@@ -545,6 +938,11 @@ const busy = ref(false)
  */
 const refreshing = ref(false)
 const errorCode = ref<string | null>(null)
+/**
+ * PR-7 (PR-5 pg review N1): the last failure's clamped `details.reason` token (confirmApi.ts) — so the export's
+ * `lease_in_flight` / `state` / `not_settled` refusals read as three different sentences. Never a message.
+ */
+const errorReason = ref<string | null>(null)
 /**
  * WHICH VOCABULARY THE LAST FAILURE BELONGS TO. This page mixes a read (the board) with two actions
  * that genuinely write or download (通知下一步, 导出), and 「这一步没有保存成功」 is right for one of
@@ -579,6 +977,56 @@ const directoryLoaded = ref(false)
  * and every tab switch back to 项目备料.
  */
 const openedProjectNo = ref<string>((props.projectNo ?? '').trim())
+const yidaPreviewOpen = ref(false)
+
+watch([openedProjectNo, () => props.projectNo, () => props.scope.tenantId, () => props.scope.workspaceId], () => {
+  yidaPreviewOpen.value = false
+}, { flush: 'sync' })
+
+function yidaPreviewSessionSignature(): string {
+  try {
+    return JSON.stringify([
+      readAuthSessionSignature(),
+      localStorage.getItem('user_permissions'),
+      localStorage.getItem('user_roles'),
+    ])
+  } catch {
+    return 'invalid'
+  }
+}
+
+let yidaPreviewSession = yidaPreviewSessionSignature()
+/** R-11: the 宜搭 entries follow the same session snapshot, re-read whenever that snapshot changes. */
+const yidaEntriesVisible = ref<boolean>(canOpenStockPrepYidaEntries(auth.getAccessSnapshot()))
+function checkYidaPreviewSession(): boolean {
+  const current = yidaPreviewSessionSignature()
+  if (current === yidaPreviewSession) return false
+  yidaPreviewSession = current
+  yidaPreviewOpen.value = false
+  yidaEntriesVisible.value = canOpenStockPrepYidaEntries(auth.getAccessSnapshot())
+  return true
+}
+
+function toggleYidaPreview(): void {
+  // A missed cross-tab event must first unmount the old editor. Reopening in this same
+  // tick could let Vue batch false -> true and retain the previous account's inputs.
+  if (checkYidaPreviewSession() || !yidaEntriesVisible.value) return
+  yidaPreviewOpen.value = !yidaPreviewOpen.value
+}
+
+function openYidaPreparation(): void {
+  if (checkYidaPreviewSession() || !yidaEntriesVisible.value) return
+  yidaPreviewOpen.value = true
+}
+
+const stopYidaPreviewSessionSwitch = onAuthSessionSwitch(checkYidaPreviewSession)
+window.addEventListener('storage', checkYidaPreviewSession)
+window.addEventListener('focus', checkYidaPreviewSession)
+onBeforeUnmount(() => {
+  stopYidaPreviewSessionSwitch()
+  window.removeEventListener('storage', checkYidaPreviewSession)
+  window.removeEventListener('focus', checkYidaPreviewSession)
+})
 
 // ---------------------------------------------------------------------------
 // P0-2/P0-3/P0-6 — the task-oriented home page, the "下一步" bar, and the shared posture badge.
@@ -662,13 +1110,15 @@ function onEmbeddedQueueChanged(next: StockPreparationDecisionQueue | null): voi
   if (!byStatus) return
   const pending = typeof byStatus.pending === 'number' ? byStatus.pending : 0
   const current = board.value
-  if (current === null || current.pendingDecisionCount === pending) return
+  // PR-7: the queue counts LEDGER rows; compare against the board's ledger part, never the union with holds
+  // (which would re-read the board on every queue response of a governed project).
+  if (current === null || ledgerPending.value === pending) return
   // §4.2 rule 4 ON THE IN-PLACE PATH. Its wording is 「本次会话内 pending 归零」, and until now the ONLY
   // way that could be observed was `watch(board.pendingDecisionCount)` after a tab round-trip, which
   // this path never makes — so 「都确认完了。再同步一次」, the step the design calls 「每天漏得最多的
   // 一步」, would never have fired for the operator who confirmed without leaving the page. Set from
   // the transition itself (was > 0, is now 0), so it cannot latch on a project that was already clear.
-  if (pending === 0 && current.pendingDecisionCount > 0) justConfirmedFlag.value = true
+  if (pending === 0 && ledgerPending.value > 0) justConfirmedFlag.value = true
   void reloadBoard()
 }
 
@@ -719,9 +1169,11 @@ async function scrollToConfirmPanel(): Promise<void> {
  * on the panel that reports it.
  *
  * NEVER AN UNEXERCISABLE PRESS. The composed queue renders this button only for a caller who passes
- * `canOpenStockPrepProjectBoard` (operate ∧ read), and `canRunStockPrepProjectSync` is that same tier
- * plus platform admin — so every caller who can see it can run it. The panel's own `run` re-checks
- * permission and busy state anyway; this adds no second implementation of what 同步 means.
+ * `canOpenStockPrepProjectBoard` (operate ∧ read); `canRunStockPrepProjectSync` is one rung ABOVE
+ * that since R-33 (pull ∧ operate ∧ read, or platform admin), and `nextStep` below strips the
+ * pull/resync action for a caller who fails it — so every caller who can see this button can run
+ * it. The panel's own `run` re-checks permission and busy state anyway; this adds no second
+ * implementation of what 同步 means.
  */
 async function onEmbeddedResync(): Promise<void> {
   await nextTick()
@@ -794,8 +1246,11 @@ const emptyPlain = computed<StockPrepPlainEntry | null>(() => {
   // same class of wrong answer as 「都清了」 for a project nobody has ever heard of.
   //
   // So the board says the honest thing FIRST — this number has no data here yet — and names the
-  // control. The administrator sentence is kept for the one case where it is true: the pull panel is
-  // absent because this caller may not press it.
+  // control. The 「请联系拉取人员」 sentence is kept for the one case where it is true: the pull panel
+  // is absent because this caller may not press it. Since R-33 (2026-10-08) that is every floor
+  // operator — pulling belongs to a holder of `stock-prep:pull` (the 拉取人员), a `stock-prep:admin`
+  // or a platform administrator — so the sentence names the 拉取人员 first, never 「备料操作权限」,
+  // which the reader already holds.
   if (canRunPull.value) {
     return {
       zh: `这个项目号在您这里还没有数据。`,
@@ -807,8 +1262,8 @@ const emptyPlain = computed<StockPrepPlainEntry | null>(() => {
   return {
     zh: '这个项目号在您这里还没有数据,而拉取数据不是您能做的一步。',
     en: 'There is no data for this project number here yet, and pulling it in is not a step you can run.',
-    zhNext: '请找有备料操作权限的同事或平台管理员把它拉进来;也请顺便核对一下号码有没有打错。',
-    enNext: 'Ask a colleague with the stock-preparation operator permission, or a platform administrator, to pull it in — and check the number for a typo while you are at it.',
+    zhNext: '请联系拉取人员(或平台管理员)把它拉进来;也请顺便核对一下号码有没有打错。',
+    enNext: 'Please contact a pull operator (拉取人员) — or a platform administrator — to pull it in, and check the number for a typo while you are at it.',
   }
 })
 
@@ -819,7 +1274,7 @@ const emptyPlain = computed<StockPrepPlainEntry | null>(() => {
 const errorText = computed<StockPrepPlainEntry>(() => {
   const code = errorCode.value
   if (!code) return stockPrepBoardErrorPlain('')
-  return errorShape.value === 'write' ? stockPrepErrorPlain(code) : stockPrepBoardErrorPlain(code)
+  return errorShape.value === 'write' ? stockPrepErrorPlain(code, errorReason.value) : stockPrepBoardErrorPlain(code)
 })
 
 /**
@@ -930,18 +1385,26 @@ const archiveText = computed<StockPrepPlainEntry>(() => {
 /**
  * 轮到谁. Three honest answers, and the first one is the important one: a deployment with no handoff
  * chain must not be told a turn it does not have.
+ *
+ * ONLY `completed` MEANS DONE. `terminal` is the LAST step being the CURRENT one, not yet handed on —
+ * reading it as "finished" told the last handler 「已经走完最后一步」 about the step still in front of them.
  */
 const turnText = computed<string>(() => {
   const cursor = handoff.value
   if (!cursor) return bi('这台系统没有设置流转顺序', 'No handoff order is set up on this system')
-  if (cursor.completed || cursor.terminal) return bi('已经走完最后一步', 'The last step is done')
+  if (cursor.completed) return bi('已经走完最后一步', 'The last step is done')
   const step = cursor.currentStepKey ?? ''
   const position = cursor.stepIndex !== null && cursor.stepCount > 0
     ? bi(`(第 ${cursor.stepIndex + 1}/${cursor.stepCount} 步)`, ` (step ${cursor.stepIndex + 1} of ${cursor.stepCount})`)
     : ''
   if (!step) return bi('还没开始', 'Not started yet')
-  return cursor.isCurrentHandler
-    ? bi(`轮到您了${position}`, `It is your turn${position}`)
+  if (cursor.isCurrentHandler) return bi(`轮到您了${position}`, `It is your turn${position}`)
+  // SOMEBODY ELSE'S STEP, by the desk's name — a bare key like `final_review` tells the floor nothing.
+  // The closed step vocabulary (plainLanguage.ts, the same one the queue labels its status line with);
+  // a key it does not know keeps today's raw text rather than a guess.
+  const plain = stockPrepHandoffStepPlain(step)
+  return plain
+    ? bi(`${plain.zh}${position}`, `${plain.en}${position}`)
     : bi(`${step}${position}`, `${step}${position}`)
 })
 
@@ -992,14 +1455,59 @@ const lastChangedFromPlmText = computed<string>(() => {
 })
 
 /** I-20: 表里有多少行's tooltip, the design's own worked example. */
-const rowsTooltip = STOCK_PREP_TOOLTIP_ROWS_IN_TABLE
+const rowsTooltip: StockPrepPlainText = {
+  zh: `${STOCK_PREP_TOOLTIP_ROWS_IN_TABLE.zh}${STOCK_PREP_TOOLTIP_TOOLBAR_ROWS_ARE_VIEW_ROWS.zh}`,
+  en: `${STOCK_PREP_TOOLTIP_ROWS_IN_TABLE.en} ${STOCK_PREP_TOOLTIP_TOOLBAR_ROWS_ARE_VIEW_ROWS.en}`,
+}
 
 const notifyTitle = computed<string>(() => {
   const cursor = handoff.value
   if (!cursor) return ''
-  if (cursor.terminal) return bi('已经是最后一步了', 'This is already the last step')
+  // An owed notice is this caller's to send even when the turn is somebody else's — the queue's own
+  // invitation sentence, so the two surfaces say the same thing about the same state.
+  if (stockPreparationHandoffResendableStepKey(cursor)) {
+    return bi(
+      '上一跳的群通知还没发出去,再点一次「通知下一步」就会补发。',
+      'The group notice for the previous step has not gone out yet — press 通知下一步 again and it will be sent.',
+    )
+  }
   if (!cursor.isCurrentHandler) return bi('现在不是轮到您,所以不用您来通知', 'It is not your turn, so this is not yours to send')
   return ''
+})
+
+/**
+ * MAY THIS CALLER PRESS 通知下一步 — the confirmation queue's own rule (confirmationQueue.ts
+ * `stockPreparationHandoffMayPress`), so the two buttons cannot disagree about who may press.
+ *
+ * `terminal` is NOT "the chain is done": the server sets it when the LAST step is the current one and
+ * has not been handed on (http-routes.cjs, the GET /handoff answer: `terminal: !completed && stepIndex
+ * === steps.length - 1`), and pressing it there is what tells 仓库/采购. Only `completed` means nothing
+ * is left — except an OWED notice (`resendableStepKey`), which the server offers only to a handler of
+ * that hop and which stays theirs to send after the turn, or the whole chain, has moved on.
+ * The server re-checks the handler on the POST whatever this says; the page only stops hiding it.
+ */
+const notifyPressable = computed<boolean>(() => stockPreparationHandoffMayPress(handoff.value))
+
+/**
+ * WHAT A PRESS WOULD SEND, once, for everything that names it: an owed resend (the press sends THAT
+ * hop's notice, not the current step's), the LAST step (the press tells 仓库/采购, the queue's H-09),
+ * or an ordinary hand-over. The button label and the 「下一步」 bar both read this, so the two
+ * controls for one press cannot describe it in two ways.
+ */
+const notifyTarget = computed<'resend' | 'last-step' | 'next'>(() => {
+  const cursor = handoff.value
+  if (stockPreparationHandoffResendableStepKey(cursor)) return 'resend'
+  if (cursor && cursor.terminal) return 'last-step'
+  return 'next'
+})
+
+/** The button's words, the queue's own labels. */
+const notifyLabel = computed<string>(() => {
+  if (notifyTarget.value === 'resend') {
+    return bi('通知下一步(补发上一步的群消息)', 'Tell the next person (resend the previous step’s message)')
+  }
+  if (notifyTarget.value === 'last-step') return bi(STOCK_PREP_NOTIFY_LAST_STEP_LABEL.zh, STOCK_PREP_NOTIFY_LAST_STEP_LABEL.en)
+  return bi('通知下一步', 'Tell the next person')
 })
 
 /**
@@ -1007,12 +1515,47 @@ const notifyTitle = computed<string>(() => {
  * from THIS page's own live `board` + the composed sync panel's `busy`/report state (via `syncBusy`/
  * `missingComponentsCount` above).
  */
-const posture = computed<StockPrepPosture>(() => stockPrepPosture({
-  busy: syncBusy.value,
-  pendingDecisionCount: board.value?.pendingDecisionCount ?? 0,
-  missingComponentsCount: missingComponentsCount.value,
-  pulledRowCount: board.value?.pulledRowCount ?? 0,
-}))
+const posture = computed<StockPrepPosture>(() => {
+  const stanza = refreshStanza.value
+  return stockPrepPosture({
+    busy: syncBusy.value,
+    // PR-7: the LEDGER part only — holds are a puller's work, said by the banner and the refresh posture below.
+    pendingDecisionCount: ledgerPending.value,
+    missingComponentsCount: missingComponentsCount.value,
+    pulledRowCount: board.value?.pulledRowCount ?? 0,
+    // PR-7 (#6566 review N5): `settled`, NEVER `exportAllowed` — a complete-but-unsettled project is 「待核对」.
+    // Absent stanza (older backend): no refresh input at all, so the posture is exactly the pre-PR-5 one.
+    ...(stanza
+      ? {
+        refreshStatus: stanza.status,
+        refreshSettled: stanza.settled,
+        refreshPendingConfirmCount: stanza.counts?.pendingConfirm ?? 0,
+      }
+      : {}),
+  })
+})
+
+/**
+ * 备料分批拉取第一期 step 4 PR-7 — THE BOARD'S REFRESH STANZA (design §13; plan §8). Parsed once; `null` when the
+ * backend sends none (pre-PR-5: the page is exactly what it was), the `unreadable` stanza for anything malformed.
+ */
+const refreshStanza = computed<StockPrepRefreshStanza | null>(() => parseStockPrepRefreshStanza(board.value?.refresh))
+/** 「拉取待确认」 is the PULL tier exactly — the six routes' own gate (R-62 ①). */
+const canOpenRefreshQueue = computed<boolean>(() => canOpenStockPrepRefreshQueue(auth.getAccessSnapshot()))
+/**
+ * The board's 「等您拿主意」 is LEDGER work only (R-62 ⑥): since PR-5 `board.pendingDecisionCount` is the union of
+ * the ledger's pending rows and the open holds; the holds are a puller's, shown by the banner. For an absent /
+ * unreadable stanza `ledger === board.pendingDecisionCount`, so every pre-PR-7 fixture renders unchanged.
+ */
+const pendingSplit = computed(() => stockPrepPendingSplit(board.value, refreshStanza.value))
+const ledgerPending = computed<number>(() => pendingSplit.value.ledger)
+/** The banner, for EVERYONE who can open the board; `null` (no element) for absent / not_governed / complete ∧ settled. */
+const refreshBanner = computed<StockPrepRefreshBanner | null>(() => stockPrepRefreshBanner(refreshStanza.value, { canOpenQueue: canOpenRefreshQueue.value }))
+
+function openRefreshQueue(): void {
+  if (!canOpenRefreshQueue.value) return
+  emit('navigate-stage', 'refresh-queue')
+}
 
 /**
  * P0-3: the "下一步" bar's input — every field already lives on this page or the composed panel; see
@@ -1023,22 +1566,39 @@ const posture = computed<StockPrepPosture>(() => stockPrepPosture({
  */
 const nextStep = computed<OperatorNextStepResult | null>(() => {
   if (!openedProjectNo.value || visibleErrorCode.value) return null
-  const cursor = handoff.value
+  const stanza = refreshStanza.value
   const step = operatorNextStep({
     boardFound: board.value !== null,
     pulledRowCount: board.value?.pulledRowCount ?? 0,
     missingComponentsCount: missingComponentsCount.value,
-    pendingDecisionCount: board.value?.pendingDecisionCount ?? 0,
+    // PR-7: rule 3 reads the LEDGER part only; the holds go to rule 3b below.
+    pendingDecisionCount: ledgerPending.value,
     justConfirmed: justConfirmed.value,
+    // PR-7: rule 3b — the stanza's values-free inputs (absent: the rule never fires).
+    refreshStatus: stanza ? stanza.status : null,
+    refreshSettled: stanza ? stanza.settled : false,
+    refreshPendingConfirmCount: stanza?.counts?.pendingConfirm ?? null,
+    canOpenRefreshQueue: canOpenRefreshQueue.value,
     hasExported: Boolean(board.value?.lastExportAt),
-    isCurrentHandler: Boolean(cursor?.isCurrentHandler && !cursor.terminal),
+    // The SAME rule as the button, so the bar never offers a press the button refuses — or says
+    // 「没有等您的事」 above a last step that is still waiting on this operator.
+    isCurrentHandler: notifyPressable.value,
+    // …and the SAME words as the button: on the last step both say 「通知仓库和采购」.
+    handoffLastStep: notifyTarget.value === 'last-step',
+    // R-33: the SAME predicate as the pull button, so the two pull-driving sentences name the
+    // 拉取人员 for a floor operator instead of telling them to press a button they do not have.
+    canPull: canRunPull.value,
   })
   // R-11 again: a control the caller cannot exercise is ABSENT, not disabled and not silently inert.
   // Both sync-driving actions are gated by the same predicate the composed panel gates its own run
   // button with, so the bar can never offer a button whose click would be swallowed. The SENTENCE
   // still renders — knowing what the next step is remains useful to someone who has to ask a
   // colleague to press it, and the panel below says in words who that is.
-  if ((step.action === 'pull' || step.action === 'resync') && !canRunPull.value) {
+  if ((step.action === 'pull' || step.action === 'resync' || step.action === 'check') && !canRunPull.value) {
+    return { ...step, action: null, actionZh: '', actionEn: '' }
+  }
+  // PR-7: 「拉取待确认」 is the PULL tier exactly — absent, not disabled, for anyone else (R-11).
+  if (step.action === 'go-refresh-queue' && !canOpenRefreshQueue.value) {
     return { ...step, action: null, actionZh: '', actionEn: '' }
   }
   return step
@@ -1056,7 +1616,7 @@ const justConfirmed = computed<boolean>(() => {
   if (!rememberedHeld.value) return false
   if (syncReport.value) return false // a run landed in THIS mount; its verdict is the newer fact
   const current = board.value
-  return current !== null && current.pendingDecisionCount === 0 && current.pulledRowCount > 0
+  return current !== null && ledgerPending.value === 0 && current.pulledRowCount > 0
 })
 
 // justConfirmed tracking (§4.2 rule 4), SESSION-LOCAL and reset whenever a different project opens.
@@ -1080,7 +1640,7 @@ watch(syncReport, (report) => {
   rememberedHeld.value = false
 })
 
-watch(() => board.value?.pendingDecisionCount ?? 0, (count) => {
+watch(() => ledgerPending.value, (count) => {
   if (wasHeldPending.value && count === 0) {
     justConfirmedFlag.value = true
     wasHeldPending.value = false
@@ -1093,6 +1653,11 @@ watch(() => board.value?.pendingDecisionCount ?? 0, (count) => {
 // ONLY FOR A PROJECT THAT REALLY RESOLVED. Without the `board` guard a mistyped number would 404,
 // leave `board` null, settle on 「还没拉过」 and be remembered forever: the home page would grow a
 // permanent junk card per typo, and 30 of them would evict every real entry.
+// PR-7 (R-62 ④): the shell's 拉取待确认 rail count follows the OPEN project's stanza — values-free, null when none.
+watch(refreshStanza, (stanza) => {
+  emit('refresh-changed', stanza)
+}, { immediate: true })
+
 watch(posture, (value) => {
   if (!openedProjectNo.value || board.value === null) return
   recordStockPrepProjectVisit(openedProjectNo.value, value.key, props.scope)
@@ -1102,11 +1667,15 @@ watch(posture, (value) => {
 async function run(work: () => Promise<void>, shape: 'read' | 'write' = 'read'): Promise<void> {
   busy.value = true
   errorCode.value = null
+  errorReason.value = null
   errorShape.value = shape
   try {
     await work()
   } catch (error) {
     const code = (error as { code?: unknown })?.code
+    // PR-7: the clamped reason token (StockPreparationConfirmApiError.reason) — already lower_snake or null.
+    const reason = (error as { reason?: unknown })?.reason
+    errorReason.value = typeof reason === 'string' && /^[a-z][a-z0-9_]{0,47}$/.test(reason) ? reason : null
     // The fallback code differs by shape for the same reason the copy does: an unlabelled read
     // failure must not borrow the confirm surface's "nothing was saved" identity.
     errorCode.value = typeof code === 'string'
@@ -1151,6 +1720,7 @@ async function loadDirectory(): Promise<void> {
   try {
     // See operatorHomeDirectory.ts for why the home call (and only it) opts in and throttles: the
     // confirmation queue's own directory read stays the plain, un-opted-in, un-throttled call too.
+    if (home) void loadProjectTargetList()
     directory.value = home
       ? await readStockPreparationOperatorHomeDirectory(props.scope)
       : await readStockPreparationOperatorDirectory(props.scope)
@@ -1216,8 +1786,15 @@ async function loadBoard(projectNo: string, mode: 'open' | 'refresh' = 'open'): 
     handoff.value = null
     handoffNotice.value = ''
     exportEmptyNotice.value = false
+    projectTarget.value = null
+    // S4: a question about one project's lifecycle never survives a switch to another project.
+    closeLifecyclePrompt()
+    lifecycleNotice.value = null
   }
   if (!target) return
+  // S2: this project's sheet state — independent of the board read, silent on failure (switch off is
+  // a 404 DISABLED and means "no line", not an error the operator should see).
+  void loadProjectTarget(target)
   if (refresh) {
     refreshing.value = true
     errorCode.value = null
@@ -1347,32 +1924,82 @@ function onNextStepAction(): void {
     openFillTarget()
     return
   }
+  if (step.action === 'check') {
+    // PR-7 「核对」: the composed panel's own dry-run-only check (one preview, nothing written), like `resync`
+    // reaching the panel's own run — one implementation.
+    void syncPanelEl.value?.runSettlementCheck?.()
+    return
+  }
+  if (step.action === 'go-refresh-queue') {
+    openRefreshQueue()
+    return
+  }
   if (step.action === 'notify-next') {
     void notifyNext()
   }
 }
 
+/** Somebody else moved this step first; the server's compare-and-set refused the press (409). */
+const HANDOFF_STEP_MISMATCH_CODE = 'STOCK_PREPARATION_HANDOFF_STEP_MISMATCH'
+
 async function notifyNext(): Promise<void> {
   const current = board.value
   const cursor = handoff.value
-  if (!current || !current.projectNo || !cursor || !cursor.isCurrentHandler || cursor.terminal) return
+  if (!current || !current.projectNo || !cursor || !notifyPressable.value) return
+  // THE STEP THIS PRESS COMPLETES, derived exactly as the confirmation queue derives it: the owed
+  // resend first, then the current step. The route refuses a press without it (400
+  // STOCK_PREPARATION_HANDOFF_REQUEST_INVALID) — which is what every press on this page got while it
+  // posted through a client that never sent one. No step to name means there is nothing to press for.
+  const fromStepKey = stockPreparationHandoffFromStepKey(cursor)
+  if (!fromStepKey) return
+  const projectNo = current.projectNo
   handoffNotice.value = ''
   // A WRITE: 「这一步没有保存成功」 is the right sentence when this one fails.
   await run(async () => {
-    const result = await advanceStockPreparationHandoff({ ...props.scope, projectNo: current.projectNo as string })
-    handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo: current.projectNo as string })
-    // The three outcomes are said as three different sentences because they are three different
-    // facts. "已经通知" on a deployment whose notifier is not configured would be a claim we cannot
-    // back — the turn moved, and nobody was told.
-    if (result.notifyOutcome === 'sent') {
+    let result: StockPreparationHandoffAdvanceResult
+    try {
+      result = await advanceStockPreparationHandoff({ ...props.scope, projectNo, fromStepKey })
+    } catch (error) {
+      // 409 STEP_MISMATCH: the cursor on screen is stale — somebody else already handed this step on.
+      // Re-read it so 轮到谁 and the button show where the chain really is, then let the refusal reach
+      // the error line with its own sentence (the same entry the queue shows), never the generic
+      // 「过一会儿再点一次」: pressing again against a stale step can only be refused again.
+      if ((error as { code?: unknown })?.code === HANDOFF_STEP_MISMATCH_CODE) {
+        try {
+          handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo })
+        } catch {
+          // The refusal is what the operator needs to read; a failed re-read must not replace it.
+        }
+      }
+      throw error
+    }
+    handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo })
+    // WHAT HAPPENED TO THE MESSAGE decides the sentence — not whether the turn moved. This used to key
+    // off `changed`, which told an operator whose message had just FAILED either 「这台系统没有配通知
+    // 渠道」 (a fresh advance) or 「没有重复交」 (an owed resend). The at-most-once claim is spent by
+    // then, so no later click can resend: the only fix is a word in person, and they were not told so.
+    // "Was it a plain replay" is the confirmation queue's own predicate (confirmationQueue.ts), and a
+    // message that went out wrong or not at all is said in the queue's own words (plainLanguage.ts).
+    // The three sentences that were already right — sent, no destination, replay — are unchanged.
+    const outcomePlain = result.notifyOutcome === 'sent' || result.notifyOutcome === 'no_destination'
+      ? null
+      : stockPrepHandoffOutcomePlain(result.notifyOutcome)
+    if (stockPreparationHandoffAdvanceWasReplay(result)) {
+      handoffNotice.value = bi('这一步已经交出去了,没有重复交。', 'This step had already been handed on; it was not handed on twice.')
+    } else if (result.notifyOutcome === 'sent') {
       handoffNotice.value = bi('已经交给下一步,并且通知到了。', 'Handed to the next step, and they were notified.')
-    } else if (result.changed) {
+    } else if (outcomePlain) {
+      // failed / partial / skipped: the turn moved and the message did not reach everyone it should.
+      const lead = bi(outcomePlain.zh, outcomePlain.en)
+      const next = bi(outcomePlain.zhNext ?? '', outcomePlain.enNext ?? '')
+      handoffNotice.value = next ? `${lead} ${next}` : lead
+    } else {
+      // no_destination (or an older backend's not_configured): the turn moved, and there was nowhere
+      // to send. "已经通知" here would be a claim we cannot back.
       handoffNotice.value = bi(
         '已经交给下一步。这台系统没有配通知渠道,所以没有发出提醒 —— 记得口头知会一声。',
         'Handed to the next step. This system has no notification channel configured, so no alert was sent — tell them yourself.',
       )
-    } else {
-      handoffNotice.value = bi('这一步已经交出去了,没有重复交。', 'This step had already been handed on; it was not handed on twice.')
     }
   }, 'write')
 }
@@ -1416,6 +2043,9 @@ function triggerExportDownload(blob: Blob, filename: string): void {
  * so that read never happens) and a project the board 404s on — where nothing has claimed anything.
  */
 const composedFillTarget = computed(() => {
+  // S2: once the project has its OWN sheet (switch on, registry row), that sheet's fill view is the
+  // destination — the registry is the one authority for "which sheet is this project's" (ADR §3).
+  if (projectTargetFillTarget.value) return projectTargetFillTarget.value
   if (board.value) return board.value.fillTarget ?? null
   return directory.value?.fillTarget ?? null
 })
@@ -1441,6 +2071,20 @@ function openFillTarget(): void {
 }
 
 /**
+ * The home page's two multitable entries. 「打开备料多维表」 sends no target and resolves through
+ * `openFillTarget` exactly as before; S3's 「打开项目总览」 sends the overview's own handles (the
+ * overview is not the fill sheet, so `composedFillTarget` must not answer for it), which go to the
+ * shell unchanged — the shell's `handleOpenFillTarget` pushes `/multitable/<sheetId>/<viewId>`.
+ */
+function onHomeOpenMultitable(target?: { sheetId: string; viewId: string }): void {
+  if (target && typeof target.sheetId === 'string' && target.sheetId && typeof target.viewId === 'string' && target.viewId) {
+    emit('open-multitable', { sheetId: target.sheetId, viewId: target.viewId })
+    return
+  }
+  openFillTarget()
+}
+
+/**
  * The shell's `?projectNo=` is the state bit for 首页 ⇄ 工作区 (§2.3), so it has to be followed in
  * BOTH directions. The empty case used to early-return, which meant browser Back — and the shell's
  * own 「返回今天要处理」 — left the workspace on screen with no way out.
@@ -1450,6 +2094,372 @@ watch(() => props.projectNo, (next) => {
   if (target === openedProjectNo.value) return
   projectNoInput.value = target
   void loadBoard(target)
+})
+
+// ── 一个项目一张备料表 (S2, R-36) — the project's own sheet, as the server's registry states it ──────
+
+/** This project's sheet; null = no line (switch off, unreadable, or not loaded yet). */
+const projectTarget = ref<StockPrepProjectTargetState | null>(null)
+/** The tenant's registry rows, for 今天要处理; null = the switch is off or the list was unreadable. */
+const projectTargetList = ref<StockPrepProjectTargetList | null>(null)
+let projectTargetGeneration = 0
+
+function projectTargetClient(): StockPreparationProjectTargetApi {
+  return props.projectTargetApi ?? createStockPreparationProjectTargetApi(props.scope)
+}
+
+async function loadProjectTarget(projectNo: string): Promise<void> {
+  const mine = ++projectTargetGeneration
+  try {
+    const state = await projectTargetClient().get(projectNo)
+    if (mine === projectTargetGeneration && openedProjectNo.value === projectNo) projectTarget.value = state
+  } catch {
+    if (mine === projectTargetGeneration) projectTarget.value = null
+  }
+}
+
+async function loadProjectTargetList(): Promise<void> {
+  try {
+    projectTargetList.value = await projectTargetClient().list()
+  } catch {
+    projectTargetList.value = null
+  }
+}
+
+/** The pull panel re-read the sheet after a create or a re-pull — no second request needed. */
+function onProjectTargetChanged(state: StockPrepProjectTargetState | null): void {
+  if (state) {
+    projectTargetGeneration += 1
+    projectTarget.value = state
+  } else if (openedProjectNo.value) {
+    void loadProjectTarget(openedProjectNo.value)
+  }
+}
+
+const projectTargetFillTarget = computed(() => stockPrepProjectTargetFillTarget(projectTarget.value))
+
+function targetPlain(id: string): StockPrepPlainEntry {
+  return stockPrepProjectTargetPlain(id) ?? { zh: id, en: id }
+}
+
+const targetStatusText = computed<StockPrepPlainText>(() => {
+  const status = projectTarget.value?.status ?? 'absent'
+  return targetPlain(`status_${status}`)
+})
+
+/** Who acts next — never a button this caller does not have. */
+const targetNextText = computed<StockPrepPlainText | null>(() => {
+  const state = projectTarget.value
+  if (!state) return null
+  if (state.status === 'absent') return targetPlain(canRunPull.value && state.may.create ? 'absent_can_create' : 'contact_puller_create')
+  if (state.status === 'archived') return targetPlain(canRunPull.value && state.may.restore ? 'restore_pending' : 'contact_puller_restore')
+  return null
+})
+
+const targetRowsText = computed<string>(() => {
+  const state = projectTarget.value
+  if (!state || state.status === 'absent') return ''
+  const text = stockPrepProjectTargetRowCountText(state)
+  return text ? bi(text.zh, text.en) : ''
+})
+
+function openProjectTargetSheet(): void {
+  emit('open-multitable', projectTargetFillTarget.value)
+}
+
+// ── S4 (ADR §6, register R-38) — archive / restore this project's sheet ─────────────────────────────
+//
+// The two controls render iff the caller holds the manifest capability (the PULL tier — the same
+// mirror the server's gate is checked against in StockPreparationProjectArchive.spec.ts) AND the
+// server's `may.*` says the action fits the sheet's current state. The project number must be typed
+// before anything is sent; `changeStockPreparationProjectTargetLifecycle` stops a mismatch locally and
+// the server compares it again.
+
+function holdsLifecycleCapability(capability: 'projectTarget.archive' | 'projectTarget.restore'): boolean {
+  return holdsWorkbenchCapability(capability)
+}
+
+/**
+ * ONE resolver for every manifest-gated control on this page: the caller's capabilities as the
+ * workbench manifest mirror computes them (F-01 keeps the mirror byte-equal to the plugin's rows).
+ * S4's archive / restore and S3's project-fields / overview-refresh all go through it.
+ */
+function holdsWorkbenchCapability(
+  capability: 'projectTarget.archive' | 'projectTarget.restore' | 'projectTarget.pilotRead' | 'projectTarget.pilotEnable' | 'projectFields.read' | 'projectFields.update' | 'projectOverview.refresh' | 'projectOverview.ensure',
+): boolean {
+  return grantedStockPrepCapabilities(auth.getAccessSnapshot()).includes(capability)
+}
+
+const canArchiveTarget = computed<boolean>(() => {
+  const state = projectTarget.value
+  return Boolean(state && state.status === 'active' && state.may.archive && holdsLifecycleCapability('projectTarget.archive'))
+})
+
+const canRestoreTarget = computed<boolean>(() => {
+  const state = projectTarget.value
+  return Boolean(state && state.status === 'archived' && state.may.restore && holdsLifecycleCapability('projectTarget.restore'))
+})
+
+const lifecyclePrompt = ref<StockPrepProjectLifecycleAction | null>(null)
+const lifecycleTyped = ref('')
+const lifecycleBusy = ref(false)
+const lifecycleNotice = ref<StockPrepProjectLifecycleOutcome | null>(null)
+const lifecycleTypedMatches = computed<boolean>(() => stockPrepProjectNumbersMatch(openedProjectNo.value, lifecycleTyped.value))
+
+function openLifecyclePrompt(action: StockPrepProjectLifecycleAction): void {
+  lifecyclePrompt.value = action
+  lifecycleTyped.value = ''
+  lifecycleNotice.value = null
+}
+
+function closeLifecyclePrompt(): void {
+  lifecyclePrompt.value = null
+  lifecycleTyped.value = ''
+}
+
+async function confirmLifecycle(): Promise<void> {
+  const action = lifecyclePrompt.value
+  const projectNo = openedProjectNo.value
+  if (!action || !projectNo || lifecycleBusy.value) return
+  lifecycleBusy.value = true
+  try {
+    const outcome = await changeStockPreparationProjectTargetLifecycle({
+      targetApi: projectTargetClient(),
+      canPull: holdsLifecycleCapability(action === 'archive' ? 'projectTarget.archive' : 'projectTarget.restore'),
+    }, action, projectNo, lifecycleTyped.value)
+    lifecycleNotice.value = outcome
+    if (outcome.kind === 'done') {
+      closeLifecyclePrompt()
+      if (outcome.state && openedProjectNo.value === projectNo) {
+        projectTargetGeneration += 1
+        projectTarget.value = outcome.state
+      } else if (openedProjectNo.value === projectNo) {
+        void loadProjectTarget(projectNo)
+      }
+    }
+  } finally {
+    lifecycleBusy.value = false
+  }
+}
+
+const lifecycleNoticeText = computed<StockPrepPlainEntry>(() => {
+  const notice = lifecycleNotice.value
+  if (!notice) return { zh: '', en: '' }
+  if (notice.kind === 'done') return targetPlain(notice.action === 'archive' ? 'archived_done' : 'restored_done')
+  if (notice.kind === 'mismatch') return stockPrepErrorPlain('STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH')
+  if (notice.kind === 'contact_puller') return targetPlain('contact_puller_restore')
+  return stockPrepErrorPlain(notice.code ?? '')
+})
+
+// ── 备料分批拉取第一期 step 3 PR B (register R-53 / R-54) — the pilot marker of this project's sheet ──
+//
+// The pilot line renders iff the caller holds projectTarget.pilotRead (ADMIN) and the sheet exists; the
+// enable button iff the caller holds projectTarget.pilotEnable (ADMIN) AND the server's `may.enable` says the
+// sheet is ready and not yet a pilot. Set-once: there is no disable control, by design (R-53 ②).
+
+/** This project's pilot state; null = no line (absent, not loaded, no right, no port, unreadable). */
+const projectPilot = ref<StockPrepProjectPilotState | null>(null)
+let projectPilotGeneration = 0
+
+const canReadPilot = computed<boolean>(() => holdsWorkbenchCapability('projectTarget.pilotRead'))
+
+const canEnablePilot = computed<boolean>(() => {
+  const state = projectPilot.value
+  return Boolean(state && state.status === 'active' && state.may.enable && !(state.pilot && state.pilot.enabled) && holdsWorkbenchCapability('projectTarget.pilotEnable'))
+})
+
+async function loadProjectPilot(projectNo: string): Promise<void> {
+  const mine = ++projectPilotGeneration
+  const api = projectTargetClient()
+  if (!canReadPilot.value || typeof api.getPilot !== 'function') {
+    if (mine === projectPilotGeneration) projectPilot.value = null
+    return
+  }
+  try {
+    const state = await api.getPilot(projectNo)
+    if (mine === projectPilotGeneration && openedProjectNo.value === projectNo) projectPilot.value = state.status === 'absent' ? null : state
+  } catch {
+    if (mine === projectPilotGeneration) projectPilot.value = null
+  }
+}
+
+// Lazy, after the sheet state: the pilot read is asked only of a sheet that exists.
+watch(projectTarget, (state) => {
+  const projectNo = openedProjectNo.value
+  if (state && state.status !== 'absent' && projectNo) void loadProjectPilot(projectNo)
+  else { projectPilotGeneration += 1; projectPilot.value = null }
+})
+
+const pilotStatusText = computed<StockPrepPlainEntry>(() => {
+  const state = projectPilot.value
+  if (!state) return { zh: '', en: '' }
+  if (state.pilot && state.pilot.enabled) return targetPlain('pilot_status_enabled')
+  if (state.readiness && state.readiness.ready) return targetPlain('pilot_status_ready')
+  return targetPlain('pilot_status_not_enabled')
+})
+
+/** The readiness check ids still failing (closed tokens from the server), shown only while the pilot is off. */
+const pilotFailingIds = computed<string[]>(() => {
+  const state = projectPilot.value
+  if (!state || (state.pilot && state.pilot.enabled) || !state.readiness) return []
+  return state.readiness.failing
+})
+
+const pilotPrompt = ref(false)
+const pilotTyped = ref('')
+const pilotBusy = ref(false)
+const pilotNotice = ref<StockPrepProjectPilotEnableOutcome | null>(null)
+const pilotTypedMatches = computed<boolean>(() => stockPrepProjectNumbersMatch(openedProjectNo.value, pilotTyped.value))
+
+function openPilotPrompt(): void {
+  pilotPrompt.value = true
+  pilotTyped.value = ''
+  pilotNotice.value = null
+}
+
+function closePilotPrompt(): void {
+  pilotPrompt.value = false
+  pilotTyped.value = ''
+}
+
+async function confirmPilotEnable(): Promise<void> {
+  const projectNo = openedProjectNo.value
+  if (!projectNo || pilotBusy.value) return
+  pilotBusy.value = true
+  try {
+    const outcome = await enableStockPreparationProjectPilot({
+      targetApi: projectTargetClient(),
+      canEnable: holdsWorkbenchCapability('projectTarget.pilotEnable'),
+    }, projectNo, pilotTyped.value)
+    pilotNotice.value = outcome
+    if (outcome.kind === 'done') {
+      closePilotPrompt()
+      if (openedProjectNo.value === projectNo) {
+        projectPilotGeneration += 1
+        if (outcome.state) projectPilot.value = outcome.state
+        else void loadProjectPilot(projectNo)
+      }
+    }
+  } finally {
+    pilotBusy.value = false
+  }
+}
+
+const pilotNoticeText = computed<StockPrepPlainEntry>(() => {
+  const notice = pilotNotice.value
+  if (!notice) return { zh: '', en: '' }
+  if (notice.kind === 'done') return targetPlain(notice.result.alreadyEnabled ? 'pilot_already_enabled' : 'pilot_enabled_done')
+  if (notice.kind === 'mismatch') return stockPrepErrorPlain('STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH')
+  if (notice.kind === 'not_permitted') return targetPlain('pilot_not_permitted')
+  return stockPrepErrorPlain(notice.code ?? '')
+})
+
+// ── S3 (ADR §5 O2(a) / Q5, register R-37) — the project-level columns and the overview refresh ─────
+//
+// 「刷新项目总览」 lives on the home page; this page only resolves whether the caller holds it.
+const canRefreshOverview = computed<boolean>(() => holdsWorkbenchCapability('projectOverview.refresh'))
+// S3 fix round 1 (R6): 「建立项目总览」 is the PULL tier's (the manifest's projectOverview.ensure row).
+const canEnsureOverview = computed<boolean>(() => holdsWorkbenchCapability('projectOverview.ensure'))
+
+/** This project's three project-level texts; null = no form (not loaded, absent, switch off, no right, unreadable). */
+const projectFields = ref<StockPrepProjectFieldsState | null>(null)
+const fieldsDraft = ref<StockPrepProjectFieldsDraft>(stockPrepProjectFieldsDraft(null))
+const fieldsBusy = ref(false)
+const fieldsNotice = ref<StockPrepProjectFieldsSaveOutcome | null>(null)
+let projectFieldsGeneration = 0
+
+function fieldsPlain(id: string): StockPrepPlainEntry {
+  return stockPrepProjectOverviewPlain(id) ?? { zh: id, en: id }
+}
+
+function setProjectFields(state: StockPrepProjectFieldsState | null): void {
+  projectFields.value = state
+  fieldsDraft.value = stockPrepProjectFieldsDraft(state?.fields ?? null)
+}
+
+/**
+ * LAZY: read only once the sheet-state line knows the sheet EXISTS (active / archived — never on
+ * absent, never with the switch off), and only for a holder of `projectFields.read`. Silent on
+ * failure — a predread nobody asked for; the line simply shows no form.
+ */
+async function loadProjectFields(projectNo: string): Promise<void> {
+  const mine = ++projectFieldsGeneration
+  const api = projectTargetClient()
+  if (typeof api.getProjectFields !== 'function') return
+  try {
+    const state = await api.getProjectFields(projectNo)
+    if (mine !== projectFieldsGeneration || openedProjectNo.value !== projectNo) return
+    setProjectFields(state.status === 'absent' ? null : state)
+  } catch {
+    if (mine === projectFieldsGeneration) setProjectFields(null)
+  }
+}
+
+/** Re-read on a change of PROJECT or of the sheet's STATUS (archive / restore) — not on every re-read of the same state. */
+watch(
+  // Multi-source on purpose: Vue compares each source on its own, so replacing `projectTarget` with
+  // an equal-status state (every board re-read does) does not re-read the fields.
+  [openedProjectNo, () => projectTarget.value?.status ?? null],
+  ([projectNo, status], previous) => {
+    if (!previous || previous[0] !== projectNo) fieldsNotice.value = null
+    if (!projectNo || (status !== 'active' && status !== 'archived') || !holdsWorkbenchCapability('projectFields.read')) {
+      projectFieldsGeneration += 1
+      setProjectFields(null)
+      return
+    }
+    void loadProjectFields(projectNo)
+  },
+)
+
+/** Editable iff the caller holds `projectFields.update` AND the server says the sheet takes it (`may.update`, active). */
+const canSaveProjectFields = computed<boolean>(() => {
+  const state = projectFields.value
+  return Boolean(state && state.status === 'active' && state.may.update && holdsWorkbenchCapability('projectFields.update'))
+})
+
+const fieldsEditable = computed<boolean>(() => canSaveProjectFields.value)
+
+const fieldsChanged = computed<boolean>(() =>
+  Object.keys(stockPrepProjectFieldsChangedPatch(projectFields.value?.fields ?? null, fieldsDraft.value)).length > 0)
+
+async function saveProjectFields(): Promise<void> {
+  const projectNo = openedProjectNo.value
+  const state = projectFields.value
+  if (!projectNo || !state || fieldsBusy.value || !canSaveProjectFields.value) return
+  fieldsBusy.value = true
+  fieldsNotice.value = null
+  try {
+    const outcome = await saveStockPreparationProjectFields(projectTargetClient(), projectNo, state.fields, fieldsDraft.value)
+    if (openedProjectNo.value !== projectNo) return
+    fieldsNotice.value = outcome
+    if (outcome.kind === 'saved') {
+      projectFieldsGeneration += 1
+      setProjectFields({ status: outcome.saved.status, fields: outcome.saved.fields, updatedAt: outcome.saved.updatedAt, may: state.may })
+    } else if (outcome.kind === 'refused' && outcome.code === 'STOCK_PREPARATION_PROJECT_ARCHIVED') {
+      // A colleague archived it meanwhile: re-read the sheet's state; the form follows it.
+      void loadProjectTarget(projectNo)
+    }
+  } finally {
+    fieldsBusy.value = false
+  }
+}
+
+/** The one result line: 已保存, or the refusal's plain sentence — naming the FIELD for a 422, never its value. */
+const fieldsNoticeText = computed<StockPrepPlainEntry>(() => {
+  const notice = fieldsNotice.value
+  if (!notice) return { zh: '', en: '' }
+  if (notice.kind === 'saved') return fieldsPlain('fields_saved')
+  if (notice.kind === 'unchanged') return { zh: '', en: '' }
+  if (notice.code === 'STOCK_PREPARATION_PROJECT_ARCHIVED') return fieldsPlain('fields_archived_refused')
+  if (notice.code === 'STOCK_PREPARATION_PROJECT_FIELDS_INVALID') {
+    // S3 fix round 1 (R13): a 400 under this code is the control-character refusal, whichever field it names.
+    const specific = notice.status === 400
+      ? stockPrepProjectOverviewPlain('fields_invalid_control')
+      : (notice.field && notice.field !== 'body' ? stockPrepProjectOverviewPlain(`fields_invalid_${notice.field}`) : null)
+    const general = stockPrepErrorPlain('STOCK_PREPARATION_PROJECT_FIELDS_INVALID')
+    return specific ? { zh: specific.zh, en: specific.en, zhNext: general.zhNext, enNext: general.enNext } : general
+  }
+  return stockPrepErrorPlain(notice.code ?? '')
 })
 
 onMounted(async () => {
@@ -1658,6 +2668,17 @@ onMounted(async () => {
   line-height: 1.7;
 }
 
+/* PR-7: the refresh banner — the warning tone of the posture badge, one line of copy plus its next step. */
+.sp-board__refresh-banner {
+  margin: var(--ms-space-2) 0 0;
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border-left: 3px solid var(--ms-color-warning);
+  background: color-mix(in srgb, var(--ms-color-warning) 10%, transparent);
+  color: var(--ms-text-1);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
 .sp-board__link {
   border: none;
   background: none;
@@ -1666,6 +2687,60 @@ onMounted(async () => {
   font: inherit;
   cursor: pointer;
   text-decoration: underline;
+}
+
+/* S4: the typed confirmation for archive / restore, inside the sheet-state line. */
+.sp-board__lifecycle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ms-space-2) var(--ms-space-3);
+  flex-basis: 100%;
+}
+
+.sp-board__lifecycle-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ms-space-2);
+}
+
+.sp-board__lifecycle-input {
+  min-width: 10em;
+}
+
+/* S3: 负责人 / 备注 / 计划完成, inside the sheet-state line — a small inline form, never a grid. */
+.sp-board__fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--ms-space-2) var(--ms-space-3);
+  flex-basis: 100%;
+}
+
+.sp-board__fields-title {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--ms-text-2);
+}
+
+.sp-board__fields-field {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ms-text-2);
+}
+
+.sp-board__fields-field--grow {
+  flex: 1 1 16em;
+}
+
+.sp-board__fields-input {
+  padding: 4px 6px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  font: inherit;
 }
 
 /* P1-2: Panel 2 — 就地展开 embedded 队列 + 进度条. */
@@ -1776,5 +2851,29 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: var(--ms-space-3);
+}
+
+/* S2: this project's own sheet, one line. Outlined, never a filled primary (G1). */
+.sp-board__target {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ms-space-2) var(--ms-space-3);
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: var(--ms-bg-page);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.sp-board__target-line {
+  margin: 0;
+  color: var(--ms-text-1);
+}
+
+.sp-board__target-rows {
+  margin-left: var(--ms-space-2);
+  color: var(--ms-text-2);
 }
 </style>

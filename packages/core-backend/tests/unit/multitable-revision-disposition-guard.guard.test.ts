@@ -141,7 +141,14 @@ describe('OD-6 revision-disposition guard — durable structural guard (D-1c fin
     }
     for (const f of emittedFiles) {
       const src = readFileSync(join(SRC, f), 'utf8')
-      expect(src.includes('recordRecordRevision('), `${f} is labelled revision-emitted but never calls recordRecordRevision(`).toBe(true)
+      // `recordRecordRevisionsBatch` is the same module's bulk path (one multi-row INSERT, identical column
+      // semantics). A file that emits ONLY through it — field retype convert / undo, up to a whole column per
+      // call — contains no `recordRecordRevision(` and would fail this cross-check for using the sanctioned bulk
+      // helper. Either call counts; a label with neither still reds.
+      expect(
+        /\brecordRecordRevision(?:sBatch)?\(/.test(src),
+        `${f} is labelled revision-emitted but never calls recordRecordRevision( / recordRecordRevisionsBatch(`,
+      ).toBe(true)
     }
   })
 

@@ -1,0 +1,151 @@
+paths:
+  # Q4c. Contract source: plugins/plugin-integration-core/lib/http-routes.cjs, handler
+  # `pipelinesList` (~L5429) calling pipelineRegistry.listPipelines
+  # (plugins/plugin-integration-core/lib/pipelines.cjs ~L605). Read the handler/registry
+  # function themselves before touching this block — they are the sole source of truth.
+  /api/integration/pipelines:
+    get:
+      summary: List integration pipelines
+      description: >-
+        Read-only pipeline listing, scoped by (tenantId, workspaceId) and optionally narrowed
+        by status/sourceSystemId/targetSystemId. `data` is a plain array of IntegrationPipeline,
+        newest first (ORDER BY created_at DESC); there is no cursor or total count. The list
+        projection never embeds `fieldMappings` (only the single-pipeline read can).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the authenticated tenant
+            (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.
+          schema: { type: string }
+        - in: query
+          name: workspaceId
+          required: false
+          description: Workspace scope. Omitted means the null workspace.
+          schema: { type: string }
+        - in: query
+          name: status
+          required: false
+          description: >-
+            Restrict to pipelines in one status. An unrecognized value is a 400
+            (PipelineValidationError), not an empty result.
+          schema:
+            type: string
+            enum: [draft, active, paused, disabled]
+        - in: query
+          name: sourceSystemId
+          required: false
+          description: Restrict to pipelines whose sourceSystemId matches.
+          schema: { type: string }
+        - in: query
+          name: targetSystemId
+          required: false
+          description: Restrict to pipelines whose targetSystemId matches.
+          schema: { type: string }
+        - in: query
+          name: limit
+          required: false
+          description: >-
+            Max rows to return. Must be a positive integer; a non-numeric or non-positive
+            value is silently ignored (registry default applies). Capped at 500 server-side.
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - in: query
+          name: offset
+          required: false
+          description: >-
+            Rows to skip. Must be a positive integer; a non-numeric or non-positive value is
+            silently ignored (registry default applies), not rejected.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/IntegrationPipeline' }
+        '400':
+          description: An unrecognized `status` value.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                status_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: PipelineValidationError
+                      message: status must be one of draft, active, paused, disabled
+                      details: { field: status }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  # Q4c. Contract source: plugins/plugin-integration-core/lib/http-routes.cjs, handler
+  # `pipelinesGet` (~L5451) calling pipelineRegistry.getPipeline
+  # (plugins/plugin-integration-core/lib/pipelines.cjs ~L588).
+  /api/integration/pipelines/{id}:
+    get:
+      summary: Get one integration pipeline
+      description: >-
+        Read-only single-pipeline read, scoped by (tenantId, workspaceId, id). By default the
+        response embeds `fieldMappings` (a second read of the pipeline's field-mapping rows);
+        pass `includeFieldMappings=false` to skip that second read and omit the key entirely
+        (not an empty array). Another tenant's pipeline id and a non-existent id both raise
+        PipelineNotFoundError → 404 with the identical message and no distinguishing detail.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          description: Pipeline id.
+          schema: { type: string }
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the authenticated tenant
+            (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.
+          schema: { type: string }
+        - in: query
+          name: workspaceId
+          required: false
+          description: Workspace scope. Omitted means the null workspace.
+          schema: { type: string }
+        - in: query
+          name: includeFieldMappings
+          required: false
+          description: >-
+            Any value other than the exact string `false` is treated as true (the handler's
+            check is `!== 'false'`). Default true.
+          schema: { type: string, enum: ['true', 'false'], default: 'true' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data: { $ref: '#/components/schemas/IntegrationPipeline' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: >-
+            Pipeline not visible in the caller's (tenant, workspace) scope. Identical body for
+            a non-existent id and another tenant's id.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                pipeline_not_found:
+                  value:
+                    ok: false
+                    error:
+                      code: PipelineNotFoundError
+                      message: pipeline not found

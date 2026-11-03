@@ -9,6 +9,7 @@ import {
   createElearningAnalyticsExport,
   downloadElearningAnalyticsExport,
   getElearningAnalyticsExport,
+  getElearningAnalyticsExportAvailability,
   getElearningDepartmentStatsDaily,
   getElearningDepartmentStatsPeriod,
 } from '../src/services/elearningAnalytics'
@@ -287,5 +288,43 @@ describe('e-learning analytics client', () => {
       code: 'invalid_response',
       status: 200,
     })
+  })
+
+  it('reads closed export availability and surfaces the storage-unavailable refusal code', async () => {
+    apiFetchMock.mockResolvedValueOnce(response({ available: true }))
+    await expect(getElearningAnalyticsExportAvailability()).resolves.toEqual({ available: true })
+    expect(apiFetchMock).toHaveBeenLastCalledWith(
+      '/api/elearning/admin/analytics/export-availability',
+      { method: 'GET' },
+    )
+
+    apiFetchMock.mockResolvedValueOnce(response({ available: false, reason: 'storage_unavailable' }))
+    await expect(getElearningAnalyticsExportAvailability())
+      .resolves.toEqual({ available: false, reason: 'storage_unavailable' })
+
+    for (const body of [
+      { available: false },
+      { available: true, reason: 'storage_unavailable' },
+      { available: false, reason: 'other' },
+      { available: 'false' },
+    ]) {
+      apiFetchMock.mockResolvedValueOnce(response(body))
+      await expect(getElearningAnalyticsExportAvailability())
+        .rejects.toMatchObject({ code: 'invalid_response', status: 200 })
+    }
+
+    apiFetchMock.mockResolvedValueOnce(response({ error: 'Insufficient permissions' }, 403))
+    await expect(getElearningAnalyticsExportAvailability())
+      .rejects.toMatchObject({ code: 'request_failed', status: 403 })
+
+    apiFetchMock.mockResolvedValueOnce(
+      response({ error: 'ANALYTICS_EXPORT_STORAGE_UNAVAILABLE' }, 409),
+    )
+    await expect(createElearningAnalyticsExport({
+      requestId: REQUEST,
+      departmentId: DEPARTMENT,
+      periodStart: START,
+      periodEnd: END,
+    })).rejects.toMatchObject({ code: 'ANALYTICS_EXPORT_STORAGE_UNAVAILABLE', status: 409 })
   })
 })

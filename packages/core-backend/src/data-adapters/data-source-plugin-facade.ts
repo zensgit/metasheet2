@@ -268,15 +268,118 @@ export class DataSourceUnavailableError extends DataSourceBridgeConfigError {
   }
 }
 
-function requirePrincipal(principal: string | undefined): string {
+// ── Refusal reasons: WHY a connection was refused, for the SERVER LOG only (#6067 §5 R1) ────────
+// `resolveConnectionRegistration` and the sealed snapshot facade answer about twelve different
+// states with one uniform not-found, on purpose: a caller who is not the owner must not learn
+// whether an id exists. The cost was that an operator could not tell the states apart either. Every
+// refusal of those two entry points now carries exactly ONE word from the closed list below.
+//
+// What the word may and may not do:
+//  - It rides on the thrown error as a NON-ENUMERABLE property under a `Symbol.for` key. It is not a
+//    string-keyed `reason` (the integration routes copy `error.reason` into response details), and
+//    JSON.stringify, object spread, Object.keys and the routes' `sendError` cannot pick it up. The
+//    class, name, code, message and status of every refusal are exactly what they were.
+//  - The plugin's connection resolver reads it, checks it against its own copy of this list by exact
+//    string, and writes it to the server log. It never reaches an HTTP response.
+//
+// Equal cost: a refusal decided from caller input alone (principal, tenant, runAs) is thrown before
+// the manager is resolved and looks nothing up, exactly as before. Every path that does resolve the
+// manager reads the load state of the id ONCE, from memory, before it branches — so which refusal an
+// id ends in does not change what ran, and no refusal gains a promise, a database read or a file read.
+export const DATA_SOURCE_REFUSAL_REASONS = [
+  // decided from caller input, before the manager is resolved
+  'principal_missing',
+  'tenant_missing',
+  'run_as_invalid',
+  // the access step (assertAccess / getScope / getDataSource) refused
+  'owner_mismatch',
+  'not_loaded_credentials_unreadable',
+  'not_loaded_unsupported_type',
+  'not_loaded_load_failed',
+  'not_loaded_absent',
+  'load_state_unknown',
+  // access passed, the stored scope refused
+  'scope_missing',
+  'tenant_mismatch',
+  'tenantless_scope',
+  'tenantless_service',
+  // sealed snapshot facade only
+  'sealed_run_as_not_user',
+  'sealed_type_unsupported',
+  'sealed_adapter_unavailable',
+  'sealed_not_read_only',
+  'sealed_config_unreadable',
+  'sealed_connection_not_representable',
+] as const
+export type DataSourceRefusalReason = typeof DATA_SOURCE_REFUSAL_REASONS[number]
+
+/** Where the reason rides on a refusal. Registered symbol, so the plugin reads the same key. */
+export const DATA_SOURCE_REFUSAL_REASON_KEY: unique symbol = Symbol.for('metasheet.dataSource.refusalReason')
+
+// Marks the error and hands the SAME object back. Marking must never change what is thrown: an
+// error that cannot take the property (frozen, already marked) goes on exactly as it was.
+function withRefusalReason<E>(error: E, reason: DataSourceRefusalReason): E {
+  try {
+    if (typeof error === 'object' && error !== null) {
+      Object.defineProperty(error, DATA_SOURCE_REFUSAL_REASON_KEY, {
+        value: reason,
+        enumerable: false,
+        writable: false,
+        configurable: false,
+      })
+    }
+  } catch {
+    // unmarked: the resolver logs its fixed word for a refusal without a reason
+  }
+  return error
+}
+
+function unavailable(message: string, reason: DataSourceRefusalReason): DataSourceUnavailableError {
+  return withRefusalReason(new DataSourceUnavailableError(message), reason)
+}
+
+// The ONE load-state lookup of a resolution: a Map read inside the manager, no database, no promise.
+// Guarded, because it is diagnostics: a manager without the accessor, or an accessor that throws,
+// costs the word and never the refusal.
+function readLoadState(manager: DataSourceManager, dataSourceId: string): unknown {
+  try {
+    const accessor = (manager as { getLoadState?: unknown }).getLoadState
+    if (typeof accessor !== 'function') return undefined
+    return accessor.call(manager, dataSourceId)
+  } catch {
+    return undefined
+  }
+}
+
+// The word for a refusal of the access step. `accessGranted` tells a refused owner check from a
+// registry read that failed after the owner check had passed.
+function accessRefusalReason(loadState: unknown, accessGranted: boolean): DataSourceRefusalReason {
+  switch (loadState) {
+    case 'loaded':
+      return accessGranted ? 'load_state_unknown' : 'owner_mismatch'
+    case 'credentials_unreadable':
+      return 'not_loaded_credentials_unreadable'
+    case 'unsupported_type':
+      return 'not_loaded_unsupported_type'
+    case 'load_failed':
+      return 'not_loaded_load_failed'
+    case 'absent':
+      return 'not_loaded_absent'
+    default:
+      return 'load_state_unknown'
+  }
+}
+
+function requirePrincipal(principal: string | undefined, reason?: DataSourceRefusalReason): string {
   // Fail-closed: a read MUST carry an owner principal. We deliberately do NOT fall back to a
   // default / system / tenant / admin identity — that would bypass per-source ownership.
   if (typeof principal !== 'string' || principal.trim() === '') {
-    throw new DataSourceBridgeConfigError(
+    const refusal = new DataSourceBridgeConfigError(
       DATA_SOURCE_PRINCIPAL_REQUIRED_CODE,
       MISSING_PRINCIPAL_MESSAGE,
       'DataSourcePrincipalRequiredError'
     )
+    throw reason === undefined ? refusal : withRefusalReason(refusal, reason)
   }
   return principal
 }
@@ -492,36 +595,46 @@ export function createDataSourcePluginFacade(
     dataSourceId: string,
     options: ResolveConnectionRegistrationOptions | undefined
   ) {
-    const principal = requirePrincipal(options?.principal)
+    // The three refusals below are decided from caller input alone. They carry a reason, look
+    // nothing up and do not resolve the manager — their cost cannot depend on the id.
+    const principal = requirePrincipal(options?.principal, 'principal_missing')
     const requestedTenant = typeof options?.tenantId === 'string' ? options.tenantId.trim() : ''
     if (!requestedTenant) {
-      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+      throw unavailable(`Data source with id '${dataSourceId}' not found`, 'tenant_missing')
     }
     const runAs = options?.runAs ?? 'service'
     if (runAs !== 'user' && runAs !== 'owner' && runAs !== 'service') {
-      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+      throw unavailable(`Data source with id '${dataSourceId}' not found`, 'run_as_invalid')
     }
     const manager = getManager()
+    // ONE lookup, here, for every path that reaches the manager — before any branch on the id, so
+    // no refusal below does more or less than another. Only the access step reads its result.
+    const loadState = readLoadState(manager, dataSourceId)
     let scope
     let adapter
+    let accessGranted = false
     try {
       manager.assertAccess(dataSourceId, principal)
+      accessGranted = true
       scope = manager.getScope(dataSourceId)
       adapter = manager.getDataSource(dataSourceId)
     } catch (err) {
-      throw new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
+      throw unavailable(
+        err instanceof Error ? err.message : String(err),
+        accessRefusalReason(loadState, accessGranted)
+      )
     }
     if (!scope) {
-      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+      throw unavailable(`Data source with id '${dataSourceId}' not found`, 'scope_missing')
     }
     if (scope.tenantId !== null && scope.tenantId !== requestedTenant) {
-      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+      throw unavailable(`Data source with id '${dataSourceId}' not found`, 'tenant_mismatch')
     }
     if (scope.tenantId === null && scope.scopeKind !== 'legacy_private') {
-      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+      throw unavailable(`Data source with id '${dataSourceId}' not found`, 'tenantless_scope')
     }
     if (scope.tenantId === null && runAs === 'service') {
-      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+      throw unavailable(`Data source with id '${dataSourceId}' not found`, 'tenantless_service')
     }
     return { adapter, manager, scope }
   }
@@ -689,12 +802,13 @@ const SEALED_SQL_CONNECTION_FIELDS = new Set([
 ])
 const SEALED_SQL_CREDENTIAL_FIELDS = new Set(['password', 'username'])
 
-function sealedSnapshotConnectionInvalid(field: string): never {
-  throw new DataSourceBridgeConfigError(
+function sealedSnapshotConnectionInvalid(field: string, reason?: DataSourceRefusalReason): never {
+  const refusal = new DataSourceBridgeConfigError(
     DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID_CODE,
     `data source sealed snapshot SQL Server connection field '${field}' is not representable`,
     'DataSourceSealedSnapshotConnectionError'
   )
+  throw reason === undefined ? refusal : withRefusalReason(refusal, reason)
 }
 
 function requiredSealedString(value: unknown, field: string): string {
@@ -796,29 +910,40 @@ export function createDataSourceSealedSnapshotConnectionFacade(
   const registrationFacade = createDataSourcePluginFacade(getManager)
   return {
     async resolveSqlServerConnection(dataSourceId, options) {
-      if (options?.runAs !== 'user') sealedSnapshotConnectionInvalid('runAs')
+      // Decided from caller input alone: a reason, no lookup, the manager is not resolved.
+      if (options?.runAs !== 'user') sealedSnapshotConnectionInvalid('runAs', 'sealed_run_as_not_user')
+      // A refusal of the registration arrives here already carrying its reason, and the registration
+      // did the ONE load-state lookup of this resolution — on the path that passes as well. So the
+      // sealed-only refusals below add no lookup of their own: every refusal decided after the
+      // manager was consulted has done exactly one.
       const registration = await registrationFacade.resolveConnectionRegistration(dataSourceId, options)
       if (typeof registration.type !== 'string' || registration.type.toLowerCase() !== 'sqlserver') {
-        sealedSnapshotConnectionInvalid('type')
+        sealedSnapshotConnectionInvalid('type', 'sealed_type_unsupported')
       }
       let adapter
       try {
         adapter = getManager().getDataSource(dataSourceId)
       } catch (err) {
-        throw new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
+        throw unavailable(err instanceof Error ? err.message : String(err), 'sealed_adapter_unavailable')
       }
       const adapterType = adapter.getType()
       if (typeof adapterType !== 'string' || adapterType.toLowerCase() !== 'sqlserver') {
-        sealedSnapshotConnectionInvalid('type')
+        sealedSnapshotConnectionInvalid('type', 'sealed_type_unsupported')
       }
-      if (!adapter.isReadOnly()) sealedSnapshotConnectionInvalid('readOnly')
+      if (!adapter.isReadOnly()) sealedSnapshotConnectionInvalid('readOnly', 'sealed_not_read_only')
       let config: DataSourceConfig
       try {
         config = adapter.getConfig()
       } catch {
-        sealedSnapshotConnectionInvalid('connection')
+        sealedSnapshotConnectionInvalid('connection', 'sealed_config_unreadable')
       }
-      return projectSealedSnapshotConnection(config)
+      try {
+        return projectSealedSnapshotConnection(config)
+      } catch (err) {
+        // The projection names the offending FIELD in its message, and a field can be a key of the
+        // stored configuration. The reason is one fixed word; the error itself goes on unchanged.
+        throw withRefusalReason(err, 'sealed_connection_not_representable')
+      }
     },
   }
 }

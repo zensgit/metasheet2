@@ -19,6 +19,13 @@ export interface MultitableCapabilities {
   // No role fallback and no fallbackKey on purpose: an old backend that does not send it, or a
   // legacy role-string source, yields false (delete entry hidden), never a guess from canManageFields.
   canDeleteSheet: Ref<boolean>
+  /**
+   * Record-level approval submit (multitable x approval phase 2). Server-derived from the
+   * multitable-namespaced `multitable:submit-approval` permission, exactly like canDeleteSheet:
+   * NO role fallback and NO fallbackKey on purpose, so a legacy role-string source or an older
+   * backend that never sends the key yields false and the drawer entry stays hidden.
+   */
+  canSubmitApproval: Ref<boolean>
 }
 
 const ROLE_CAPS: Record<MultitableRole, Record<string, boolean>> = {
@@ -40,6 +47,14 @@ const ROLE_CAPS: Record<MultitableRole, Record<string, boolean>> = {
   },
 }
 
+/**
+ * The boolean-valued capability keys. `MetaCapabilities` also carries non-boolean markers (e.g. the 备料
+ * `gridExportClosure` object), which are read where they are needed, never through `caps()`.
+ */
+type BooleanCapabilityKey = {
+  [K in keyof MetaCapabilities]-?: NonNullable<MetaCapabilities[K]> extends boolean ? K : never
+}[keyof MetaCapabilities]
+
 function isMetaCapabilities(value: unknown): value is MetaCapabilities {
   return !!value && typeof value === 'object' && 'canRead' in value
 }
@@ -47,7 +62,7 @@ function isMetaCapabilities(value: unknown): value is MetaCapabilities {
 export function useMultitableCapabilities(
   source: Ref<MultitableRole | MetaCapabilities | null | undefined>,
 ): MultitableCapabilities {
-  const caps = (key: keyof MetaCapabilities, fallbackKey?: keyof MetaCapabilities) =>
+  const caps = (key: BooleanCapabilityKey, fallbackKey?: BooleanCapabilityKey) =>
     computed(() => {
       const current = source.value
       if (isMetaCapabilities(current)) {
@@ -73,5 +88,6 @@ export function useMultitableCapabilities(
     // canSendNotification; current backends send it explicitly.
     canSendNotification: caps('canSendNotification', 'canEditRecord'),
     canDeleteSheet: caps('canDeleteSheet'),
+    canSubmitApproval: caps('canSubmitApproval'),
   }
 }

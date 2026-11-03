@@ -80,6 +80,8 @@ vi.mock('../../src/db/pg', () => ({
 }))
 
 import { adminDirectoryRouter } from '../../src/routes/admin-directory'
+// The REAL class (the directory-sync mock above spreads the actual module), so the route's instanceof sees it.
+import { DirectoryNotFoundError } from '../../src/directory/directory-sync'
 import {
   RECOVERY_CONFLICT_HTTP_CODE,
   RECOVERY_CONFLICT_HTTP_MESSAGE,
@@ -260,7 +262,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
   it('[recovery-census:admin-directory:sync] synchronous sync: named conflict from the local apply → exact uniform retryable 409', async () => {
     directorySyncMocks.syncDirectoryIntegration.mockRejectedValue(namedConflict())
     const res = await invokeRoute('post', '/integrations/:integrationId/sync', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       body: {},
     })
     expect(res.statusCode).toBe(409)
@@ -268,10 +270,13 @@ describe('recovery conflict boundary — remaining admin-directory write surface
     census.record('admin-directory:sync')
   })
 
-  it('synchronous sync: non-conflict failure keeps the ORIGINAL DIRECTORY_SYNC_FAILED 500, exactly', async () => {
+  // #6163 S6 changed the non-conflict path on purpose (these two legs used to pin that the recovery-conflict
+  // branch left it untouched): an untyped failure answers the route's FIXED sentence, and a typed
+  // directory-sync failure answers by its type — never by a regex over the text.
+  it('synchronous sync: an untyped non-conflict failure answers 500 DIRECTORY_SYNC_FAILED with the fixed sentence, not its text', async () => {
     directorySyncMocks.syncDirectoryIntegration.mockRejectedValue(new Error('provider exploded'))
     const res = await invokeRoute('post', '/integrations/:integrationId/sync', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       body: {},
     })
     expect(res.statusCode).toBe(500)
@@ -279,10 +284,11 @@ describe('recovery conflict boundary — remaining admin-directory write surface
       ok: false,
       error: {
         code: 'DIRECTORY_SYNC_FAILED',
-        message: 'provider exploded',
+        message: 'Failed to sync directory integration',
         details: undefined,
       },
     })
+    expect(JSON.stringify(res.body)).not.toContain('provider exploded')
   })
 
   it('[recovery-census:admin-directory:sync-async] async sync: named conflict BEFORE the run row exists → exact uniform retryable 409', async () => {
@@ -291,7 +297,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
       throw namedConflict()
     })
     const res = await invokeRoute('post', '/integrations/:integrationId/sync', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       body: { async: true },
     })
     expect(res.statusCode).toBe(409)
@@ -302,7 +308,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
   it('[recovery-census:admin-directory:bind] bind: named conflict from the bind write → exact uniform retryable 409', async () => {
     directorySyncMocks.bindDirectoryAccount.mockRejectedValue(namedConflict())
     const res = await invokeRoute('post', '/accounts/:accountId/bind', {
-      params: { accountId: 'account-1' },
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
       body: { localUserRef: 'user-1' },
     })
     expect(res.statusCode).toBe(409)
@@ -310,18 +316,33 @@ describe('recovery conflict boundary — remaining admin-directory write surface
     census.record('admin-directory:bind')
   })
 
-  it('bind: non-conflict failure keeps the ORIGINAL DIRECTORY_BIND_FAILED mapping, exactly', async () => {
-    directorySyncMocks.bindDirectoryAccount.mockRejectedValue(new Error('Local user not found'))
-    const res = await invokeRoute('post', '/accounts/:accountId/bind', {
-      params: { accountId: 'account-1' },
+  it('bind: a non-conflict failure maps by TYPE: typed not-found → 404 with its sentence; the same text untyped → the fixed 500', async () => {
+    directorySyncMocks.bindDirectoryAccount.mockRejectedValue(new DirectoryNotFoundError('Local user not found'))
+    const typed = await invokeRoute('post', '/accounts/:accountId/bind', {
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
       body: { localUserRef: 'user-1' },
     })
-    expect(res.statusCode).toBe(404)
-    expect(res.body).toEqual({
+    expect(typed.statusCode).toBe(404)
+    expect(typed.body).toEqual({
       ok: false,
       error: {
         code: 'DIRECTORY_BIND_FAILED',
         message: 'Local user not found',
+        details: undefined,
+      },
+    })
+
+    directorySyncMocks.bindDirectoryAccount.mockRejectedValue(new Error('Local user not found'))
+    const untyped = await invokeRoute('post', '/accounts/:accountId/bind', {
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
+      body: { localUserRef: 'user-1' },
+    })
+    expect(untyped.statusCode).toBe(500)
+    expect(untyped.body).toEqual({
+      ok: false,
+      error: {
+        code: 'DIRECTORY_BIND_FAILED',
+        message: 'Failed to bind directory account',
         details: undefined,
       },
     })
@@ -330,7 +351,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
   it('[recovery-census:admin-directory:admit-user] admit-user: named conflict from the admission write → exact uniform retryable 409', async () => {
     directorySyncMocks.admitDirectoryAccountUser.mockRejectedValue(namedConflict())
     const res = await invokeRoute('post', '/accounts/:accountId/admit-user', {
-      params: { accountId: 'account-1' },
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
       body: { name: 'New User', email: 'new@example.com' },
     })
     expect(res.statusCode).toBe(409)
@@ -341,7 +362,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
   it('[recovery-census:admin-directory:batch-bind] batch-bind: named conflict from a bind write → exact uniform retryable 409', async () => {
     directorySyncMocks.batchBindDirectoryAccounts.mockRejectedValue(namedConflict())
     const res = await invokeRoute('post', '/accounts/batch-bind', {
-      body: { items: [{ accountId: 'account-1', localUserRef: 'user-1' }] },
+      body: { items: [{ accountId: 'ac000000-0000-4000-8000-000000000001', localUserRef: 'user-1' }] },
     })
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
@@ -351,7 +372,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
   it('[recovery-census:admin-directory:batch-admit] batch-admit-users: named conflict from an admission write → exact uniform retryable 409', async () => {
     directorySyncMocks.batchAdmitDirectoryAccountUsers.mockRejectedValue(namedConflict())
     const res = await invokeRoute('post', '/accounts/batch-admit-users', {
-      body: { items: [{ accountId: 'account-1', name: 'New User', email: 'new@example.com' }] },
+      body: { items: [{ accountId: 'ac000000-0000-4000-8000-000000000001', name: 'New User', email: 'new@example.com' }] },
     })
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
@@ -361,7 +382,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
   it('[recovery-census:admin-directory:unbind] unbind: named conflict from the unbind write → exact uniform retryable 409', async () => {
     directorySyncMocks.unbindDirectoryAccount.mockRejectedValue(namedConflict())
     const res = await invokeRoute('post', '/accounts/:accountId/unbind', {
-      params: { accountId: 'account-1' },
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
       body: {},
     })
     expect(res.statusCode).toBe(409)
@@ -372,7 +393,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
   it('[recovery-census:admin-directory:batch-unbind] batch-unbind: named conflict from an unbind write → exact uniform retryable 409', async () => {
     directorySyncMocks.batchUnbindDirectoryAccounts.mockRejectedValue(namedConflict())
     const res = await invokeRoute('post', '/accounts/batch-unbind', {
-      body: { accountIds: ['account-1'] },
+      body: { accountIds: ['ac000000-0000-4000-8000-000000000001'] },
     })
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)

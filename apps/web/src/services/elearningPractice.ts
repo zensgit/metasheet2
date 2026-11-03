@@ -1,4 +1,5 @@
 import { apiFetch } from '../utils/api'
+import { randomUuid } from '../utils/uuid'
 import {
   ElearningApiError,
   type ElearningCapabilities,
@@ -240,10 +241,7 @@ async function requestJson(
 }
 
 function newRequestId(): string {
-  if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') {
-    fail('request_failed', 0)
-  }
-  return crypto.randomUUID()
+  return randomUuid()
 }
 
 function requestIdentity(parts: readonly unknown[]): string {

@@ -45,7 +45,7 @@
 2. **两套凭据加密**：core `encrypted-secrets.ts`（`ENCRYPTION_KEY` + PBKDF2 + 16B IV，`enc:` 前缀）vs 插件 `credential-store.cjs`（`INTEGRATION_ENCRYPTION_KEY` + 12B IV，`v1:` 格式，兼容 `enc:`）。
 3. **3-4 处 SQL Server 连接池**：`MSSQLAdapter.ts:219`、`k3-wise-sqlserver-executor.cjs:197`、`gip-sqlserver-snapshot-page-sequence-executor.cjs:372`、Bridge Agent 进程内 `SqlConnectionStringBuilder`（ps1 L330）。
 4. **4 套字段映射模型**：`integration_field_mappings`（057 L83）、读取源 `fieldMap`、前端 `EditableMapping`、备料 `ext_` 映射；transform 函数集前端与 SQL 注释各硬编码一次。
-5. **3 套同步调度表，本次扫描均无消费者**：040 `data_sync_jobs`、044 `external_tables`（`DataMaterializationService.ts` 1324 行全仓零 import）、057 `integration_schedules`（pipeline `VALID_TRIGGERS` 含 `'cron'` 但无写入方）。三个功能今天全是纯手动触发。
+5. **3 套同步调度表，本次扫描均无消费者**：040 `data_sync_jobs`、044 `external_tables`（`DataMaterializationService.ts` 1324 行全仓零 import，源码已移除——GOV-02，迁移与表保留）、057 `integration_schedules`（pipeline `VALID_TRIGGERS` 含 `'cron'` 但无写入方）。三个功能今天全是纯手动触发。
 6. **两套 HTTP 出站适配器**：`HTTPAdapter.ts`（753 行，axios）vs `http-adapter.cjs`（525 行，fetch + 出站写闸门），错误分类/脱敏/写闸门互不共享。
 7. **三套 schema/objects 发现**：`/api/data-sources/:id/schema`、`/api/integration/external-systems/:id/schema`、Agent 自身 `GET /schema/<object>`。
 8. **四套同构治理存储**：062/063/064/065 四个迁移同为"内容寻址 + draft/approved/retired + values-free 审计"；`bridge-agent-change-checklist-store.cjs:6` 自述 "Mirrors read-source-config-store.cjs's pattern"。
@@ -115,7 +115,7 @@
    ——照 multitable `automation-scheduler` 模式接一条；UI 在 pipeline 区加"定时运行"。
 2. **入站 webhook**：参照飞书 Webhook 连接配置形态（自动生成 token、IP 白名单、HMAC 签名），
    外部系统 POST 触发指定 pipeline，打通"K3 出单 → 自动同步进多维表"闭环。
-3. **清死代码**：删 040/044 僵尸表 + `DataMaterializationService.ts`；057 `integration_schedules`
+3. **清死代码**：`DataMaterializationService.ts` 源码已移除（GOV-02，迁移与表保留）；040/044 僵尸表；057 `integration_schedules`
    接活（或删）。避免下一个人在死表上接调度。
 
 ## 5. iPaaS 能力对照（n8n / 飞书 / 数环通）
@@ -147,7 +147,7 @@
 ```
 P1  权限模型对齐（data_sources 补 workspace 共享）
  →  直连 SQL 类连接迁移（facade 通道）
- →  死代码清理（040/044/DataMaterializationService）
+ →  死代码清理（040/044 僵尸表；DataMaterializationService 源码已移除——GOV-02）
 P2  定时触发接活（scheduler → pipeline triggeredBy:'cron'）
  →  HTTP 类连接迁移（凭据统一加密）
 P3  入站 webhook 触发

@@ -1,3 +1,4 @@
+import { requiredSuiteJobBody } from './plugin-tests-workflow-contract.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -53,10 +54,7 @@ test('host identity contract is load-bearing for both production workflows', () 
 
 test('host identity contract runs in the required Node 20 test context', () => {
   const raw = readFileSync(pluginTestsWorkflowPath, 'utf8')
-  const requiredJobStart = raw.indexOf('\n  test:\n')
-  const requiredJobEnd = raw.indexOf('\n  after-sales-integration:\n')
-  assert.ok(requiredJobStart >= 0 && requiredJobEnd > requiredJobStart)
-  const requiredJob = raw.slice(requiredJobStart, requiredJobEnd)
+  const requiredJob = requiredSuiteJobBody(raw, 'contracts')
   const requiredStepStart = requiredJob.indexOf(
     '      - name: Production maintenance SSH host-identity contract (required lane)',
   )

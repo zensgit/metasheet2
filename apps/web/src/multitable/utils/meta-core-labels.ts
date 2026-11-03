@@ -63,6 +63,7 @@ export type MetaCoreLabelKey =
   | 'grid.noRecordsHintPrefix' | 'grid.noRecordsHintAction' | 'grid.noRecordsHintSuffix'
   | 'grid.addRecordInline'
   | 'grid.freezeUpToColumn' | 'grid.unfreezeColumns'
+  | 'grid.freezeUpToRow' | 'grid.unfreezeRows'
   | 'grid.aggregateTooLarge'
   | 'grid.noMatchingTitle' | 'grid.noMatchingHint'
   | 'grid.collapseRow' | 'grid.expandRow'
@@ -74,6 +75,8 @@ export type MetaCoreLabelKey =
   | 'grid.lockRow' | 'grid.unlockRow' | 'grid.lockedIndicator'
   | 'grid.errorLockRow' | 'grid.errorUnlockRow'
   | 'grid.prev' | 'grid.next' | 'grid.loading'
+  | 'grid.pageSize' | 'grid.pageSizeAria'
+  | 'grid.jumpToRow' | 'grid.jumpToRowAria' | 'grid.jumpToRowGo'
   | 'grid.errorLoadViewData'
   | 'grid.errorEditRowBlocked' | 'grid.errorDeleteRowBlocked'
   | 'grid.errorContextRequired'
@@ -83,6 +86,8 @@ export type MetaCoreLabelKey =
   // --- MetaCellEditor static (T3A2) ---
   | 'cell.editing'
   | 'cell.barcodePlaceholder' | 'cell.qrcodePlaceholder' | 'cell.locationPlaceholder'
+  // --- dateTime editor (客户反馈 2026-09-24 #4c): text-box placeholder + the values-free invalid-draft error ---
+  | 'cell.dateTimePlaceholder' | 'cell.dateTimeInvalid' | 'cell.dateTimePick'
   | 'cell.yes' | 'cell.no' | 'cell.clear'
   | 'cell.noAttachments' | 'cell.clearAll'
   | 'cell.uploadFailed' | 'cell.removeFailed' | 'cell.clearFailed'
@@ -96,6 +101,8 @@ export type MetaCoreLabelKey =
   | 'linkedRecord.empty'
   // --- Rich-longText in-cell @mention (B5) ---
   | 'mention.suggestionsAria'
+  // #5795: server-side, term-required mention search prompt.
+  | 'mention.typeToSearch'
   // --- Rich-longText editor chrome aria (B5 i18n fix — was unconditional zh) ---
   | 'richText.toolbarAria' | 'richText.contentAria'
   // --- Auth chrome (file-location closure tightening per #1803) ---
@@ -170,7 +177,17 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'export.selectAll': { en: 'Select all', zh: '全选' },
   'export.clearAll': { en: 'Clear all', zh: '清空' },
   'export.rowScope': { en: 'Rows', zh: '行' },
-  'export.allRows': { en: 'All loaded rows', zh: '全部已加载行' },
+  // A10 phase 1(客户反馈 2026-09-24 #8):这个选项走服务端路由(client.exportSheet),导出的
+  // 是这个视图按当前视图筛选/排序过滤后的全量记录,不是「已加载到本地网格的那一页」——旧文案
+  // 「全部已加载行」正好说反了(MultitableWorkbench.vue 的 openExportDialog 注释)。
+  // S2(2026-09-26 对抗评审):不能写成「按当前筛选」——工具栏的搜索框(searchText)不会跟着
+  // 发给导出路由(client.ts exportSheet 的参数只有 sheetId/viewId/fieldIds/format,没有 search;
+  // export-xlsx 路由本身也不接收 search),所以文案必须明说「不含搜索」,否则用户会以为搜索词
+  // 也筛过了。
+  'export.allRows': {
+    en: 'All rows in this view (view filter, search not applied)',
+    zh: '当前视图的全部行（按视图筛选，不含搜索）',
+  },
   'export.selectedRows': { en: 'Selected rows only', zh: '仅选中行' },
   'export.format': { en: 'Format', zh: '格式' },
   'export.formatCsv': { en: 'CSV', zh: 'CSV' },
@@ -208,6 +225,8 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'grid.freezeUpToColumn': { en: 'Freeze up to this column', zh: '冻结到此列' },
   'grid.aggregateTooLarge': { en: 'Too many rows to aggregate', zh: '数据量过大，无法聚合' },
   'grid.unfreezeColumns': { en: 'Unfreeze columns', zh: '取消冻结' },
+  'grid.freezeUpToRow': { en: 'Freeze up to this row', zh: '冻结到此行' },
+  'grid.unfreezeRows': { en: 'Unfreeze rows', zh: '取消冻结行' },
   'grid.noMatchingTitle': { en: 'No matching records', zh: '没有匹配的记录' },
   'grid.noMatchingHint': { en: 'Try a different search term', zh: '试试其他搜索词' },
   'grid.collapseRow': { en: 'Collapse row', zh: '收起行' },
@@ -220,6 +239,12 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'grid.errorUnlockRow': { en: 'Failed to unlock row', zh: '解锁行失败' },
   'grid.prev': { en: 'Prev', zh: '上一页' },
   'grid.next': { en: 'Next', zh: '下一页' },
+  'grid.pageSize': { en: 'Rows per page', zh: '每页行数' },
+  'grid.pageSizeAria': { en: 'Rows per page', zh: '每页显示的行数' },
+  // 客户反馈 2026-10-27 (R74): footer 「跳转到第 [ ] 行」. The zh unit after the box comes from jumpToRowSuffix (en has none).
+  'grid.jumpToRow': { en: 'Go to row', zh: '跳转到第' },
+  'grid.jumpToRowAria': { en: 'Row number to go to', zh: '要跳转到的行号' },
+  'grid.jumpToRowGo': { en: 'Go', zh: '前往' },
   'grid.loading': { en: 'Loading data', zh: '正在加载数据' },
   // Frontend-owned composable fallbacks. Backend/user messages still win via `e.message ?? fallback`.
   'grid.errorLoadViewData': { en: 'Failed to load view data', zh: '加载视图数据失败' },
@@ -259,6 +284,11 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'cell.barcodePlaceholder': { en: 'Scan or enter barcode', zh: '扫描或输入条码' },
   'cell.qrcodePlaceholder': { en: 'Enter text or URL for QR code', zh: '输入二维码文本或网址' },
   'cell.locationPlaceholder': { en: 'Enter address', zh: '输入地址' },
+  // dateTime (客户反馈 2026-09-24 #4c): every remaining text box shows the format by example; the invalid-draft
+  // error names the format, never the typed value (values-free).
+  'cell.dateTimePlaceholder': { en: 'e.g. 2026-09-24 09:00', zh: '如 2026-09-24 09:00' },
+  'cell.dateTimeInvalid': { en: 'Invalid date-time — use the form 2026-09-24 09:00', zh: '时间格式不正确，请按 2026-09-24 09:00 填写' },
+  'cell.dateTimePick': { en: 'Pick a date and time', zh: '选择日期时间' },
   'cell.yes': { en: 'Yes', zh: '是' },
   'cell.no': { en: 'No', zh: '否' },
   'cell.clear': { en: 'Clear', zh: '清除' },
@@ -284,6 +314,7 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'linkedRecord.close': { en: 'Close', zh: '关闭' },
   'linkedRecord.empty': { en: 'No fields to show', zh: '没有可显示的字段' },
   'mention.suggestionsAria': { en: 'Mention people', zh: '提及成员' },
+  'mention.typeToSearch': { en: 'Type a name or email to mention someone', zh: '输入姓名或邮箱以提及成员' },
   // MetaRichLongTextEditor toolbar/content-surface aria labels. zh keeps the
   // exact pre-fix strings; en was previously missing (the consts were
   // unconditional Chinese — a screen reader in an English UI read Chinese).
@@ -303,6 +334,16 @@ export function metaCoreLabel(key: MetaCoreLabelKey, isZh: boolean): string {
 export function rowCount(n: number, isZh: boolean): string {
   if (isZh) return `${n} 行`
   return `${n} row${n === 1 ? '' : 's'}`
+}
+
+// jumpToRowSuffix / jumpToRowTotal: the footer row jump (客户反馈 2026-10-27). zh reads 「跳转到第 [ ] 行」, so the
+// unit sits after the box; en reads "Go to row [ ]" and has none. The total shows when the typed row was clamped.
+export function jumpToRowSuffix(isZh: boolean): string {
+  return isZh ? '行' : ''
+}
+export function jumpToRowTotal(n: number, isZh: boolean): string {
+  if (isZh) return `共 ${n} 行`
+  return `${n} row${n === 1 ? '' : 's'} in total`
 }
 
 // selectedCount: bulk-bar count. en "selected" does not inflect; zh uses 条.
@@ -388,6 +429,8 @@ export function fieldTypeLabel(type: string, isZh: boolean): string {
 export function filterValuePlaceholder(type: string, isZh: boolean): string {
   if (type === 'number') return isZh ? '输入数字' : 'Enter a number'
   if (type === 'date') return isZh ? '选择日期' : 'Pick a date'
+  // dateTime filter values are typed as the business wall clock the grid shows (客户反馈 2026-09-24 #4c).
+  if (type === 'dateTime') return isZh ? '如 2026-09-24 09:00' : 'e.g. 2026-09-24 09:00'
   return isZh ? '输入筛选文本' : 'Enter filter text'
 }
 

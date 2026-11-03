@@ -41,11 +41,24 @@
 
 const crypto = require('node:crypto')
 
+const { lockExternalSystemForPointerWrite, pinLockProtocolIsolation } = require('./external-system-pointer-lock.cjs')
+
 const BINDING_TABLE = 'integration_stock_prep_source_binding'
+// The error code a bind gets when the system it names is not there ONCE THE ROW LOCK IS HELD —
+// i.e. it never existed in this tenant, or its delete committed while this write waited on it.
+// 409, not 404: the route already 404s a system it cannot see BEFORE calling `set`
+// (`assertBindableSource` → SOURCE_BINDING_SOURCE_NOT_FOUND), so a refusal from inside the write
+// transaction is by construction a CONFLICT with a concurrent delete, the same class as
+// SOURCE_BINDING_WRITE_CONFLICT and as external-systems.cjs's EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE.
+// Values-free: the details carry the action id, never the system id that was not found.
+const SOURCE_NOT_LIVE_CODE = 'SOURCE_BINDING_SOURCE_NOT_LIVE'
 
 // The unique index from migration 079 — (tenant_id, COALESCE(workspace_id,''), action_id).
 const SCOPE_CONSTRAINT = 'uniq_integration_stock_prep_source_binding_scope'
 const MAX_SET_ATTEMPTS = 3
+// `listForAction`'s page: one row per workspace that ever bound this action. A tenant with more
+// workspaces bound than this is not one `listForAction` can vouch for, and says so (`complete: false`).
+const LIST_FOR_ACTION_LIMIT = 64
 
 // Postgres unique-violation routing, same idiom as read-source-config-store.cjs.
 function isUniqueViolation(error, constraint) {
@@ -113,15 +126,20 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
     typeof db.select !== 'function' ||
     typeof db.insertOne !== 'function' ||
     typeof db.updateRow !== 'function' ||
-    typeof db.transaction !== 'function'
+    typeof db.transaction !== 'function' ||
+    typeof db.selectOneForKeyShare !== 'function'
   ) {
     // `transaction` is REQUIRED, not nice-to-have: read-then-write on a single row races, and the
     // caller needs the PREVIOUS value back to audit the change. Reading it in one statement and
     // writing in another would let a concurrent rebind make the audit trail name a source that was
     // never actually replaced. `select` (plural) is required too: `get()`'s null-workspace scope
     // fallback below has to enumerate this (tenant, action)'s OTHER rows, which a single-row
-    // `selectOne` cannot do.
-    throw new Error('createStockPreparationSourceBindingStore: scoped db helper (incl. transaction) is required')
+    // `selectOne` cannot do. `selectOneForKeyShare` is required for the same reason `transaction`
+    // is: `set` is a POINTER WRITE at an external system, and the external-system delete lock
+    // protocol (`external-system-pointer-lock.cjs`) needs the writer to pin that row inside its
+    // transaction — a helper that cannot lock would write the unprotected pointer this protocol
+    // exists to refuse.
+    throw new Error('createStockPreparationSourceBindingStore: scoped db helper (incl. transaction, selectOneForKeyShare) is required')
   }
 
   function normalizeScope(input = {}) {
@@ -257,6 +275,35 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
   }
 
   /**
+   * EVERY binding row of one (tenant, action), across ALL of its workspaces — the null row included.
+   *
+   * #6475 fix round 1. `get()` answers "what does THIS hint resolve to"; mvp-persist (step ④ of the
+   * project-sync panel) needs the other question — "could a DIFFERENT hint have resolved something
+   * else" — because it resolves its source with no hint while the panel's dry-run and apply carry the
+   * page's workspace hint. When the caller cannot say which source its write read, that route
+   * proceeds only if every row here names the source it is about to read (see
+   * `assertMvpPersistReadsTheWrittenSource` in http-routes.cjs).
+   *
+   * READ-ONLY and SCOPED: `tenant_id` and `action_id` are the caller's own, and nothing here is ever
+   * handed back as a resolution — it is evidence for a refusal, never a wider answer. BOUNDED: asks
+   * for `LIST_FOR_ACTION_LIMIT + 1` rows so the caller can tell "this is all of them" (`complete`)
+   * from "there were more than we read" — and a caller that cannot see all of them must refuse, not
+   * decide on a prefix.
+   */
+  async function listForAction(input = {}) {
+    const tenantId = requiredString(input.tenantId, 'tenantId')
+    const actionId = requiredString(input.actionId, 'actionId')
+    const raw = allRows(await db.select(BINDING_TABLE, {
+      where: { tenant_id: tenantId, action_id: actionId },
+      limit: LIST_FOR_ACTION_LIMIT + 1,
+    })).filter(Boolean)
+    return {
+      bindings: raw.slice(0, LIST_FOR_ACTION_LIMIT).map(rowToPublicBinding),
+      complete: raw.length <= LIST_FOR_ACTION_LIMIT,
+    }
+  }
+
+  /**
    * Bind (or rebind) this scope's source.
    *
    * Returns `{ binding, previousExternalSystemId, changed }` — the caller needs all three to write
@@ -276,6 +323,23 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
    * transaction, where it now sees the winner's row and takes the UPDATE path — reporting the
    * winner's id as the previous one, which is the truth. Bounded, because an unbounded retry on a
    * violation we may have misdiagnosed is a spin.
+   *
+   * THE EXTERNAL-SYSTEM ROW IS PINNED FIRST. Before this transaction reads or writes the binding
+   * row it takes `FOR KEY SHARE` on the external system the pointer is about to name
+   * (`lockExternalSystemForPointerWrite`). That is the writer's half of the delete lock protocol:
+   * a concurrent `deleteExternalSystem` holds `FOR UPDATE` on that row for the whole of its
+   * count-then-delete, so this write WAITS until the delete commits, re-reads, finds no row, and
+   * refuses SOURCE_BINDING_SOURCE_NOT_LIVE with nothing written; conversely a delete that arrives
+   * while this KEY SHARE is held waits for THIS commit and then counts the row. The route's own
+   * eligibility check (`assertBindableSource`) still runs before `set` — this lock judges
+   * existence-under-lock only, never kind/role/status. LOCK ORDER: system row first, binding row
+   * second; the delete side never locks a binding row, so the two cannot form a cycle.
+   *
+   * AND THE TRANSACTION IS PINNED TO READ COMMITTED FIRST (`pinLockProtocolIsolation`, before the
+   * KEY SHARE): under an inherited REPEATABLE READ the KEY SHARE's snapshot predates the delete it
+   * waits on, and the resumed read fails as a bare SQLSTATE 40001 instead of this path's
+   * SOURCE_BINDING_SOURCE_NOT_LIVE. Every attempt of the retry loop is a fresh transaction and pins
+   * again.
    */
   async function set(input = {}) {
     const scope = normalizeScope(input)
@@ -286,6 +350,16 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
     for (let attempt = 1; attempt <= MAX_SET_ATTEMPTS; attempt += 1) {
       try {
         return await db.transaction(async (trx) => {
+          await pinLockProtocolIsolation(trx)
+          const system = await lockExternalSystemForPointerWrite(trx, {
+            tenantId: scope.tenantId,
+            id: externalSystemId,
+          })
+          if (!system) {
+            throw new StockPreparationSourceBindingStoreError(409, SOURCE_NOT_LIVE_CODE, 'source external system is not live: it does not exist in this tenant (or its delete committed while this bind waited); pick a live source', {
+              actionId: scope.actionId,
+            })
+          }
           const existing = await trx.selectOne(BINDING_TABLE, where)
           const previousExternalSystemId = existing ? existing.external_system_id : null
           const row = existing
@@ -329,11 +403,13 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
     })
   }
 
-  return { get, set }
+  return { get, set, listForAction }
 }
 
 module.exports = {
   BINDING_TABLE,
+  LIST_FOR_ACTION_LIMIT,
+  SOURCE_NOT_LIVE_CODE,
   StockPreparationSourceBindingStoreError,
   createStockPreparationSourceBindingStore,
   __internals: {

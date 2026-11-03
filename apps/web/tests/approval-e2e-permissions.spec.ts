@@ -15,6 +15,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
+// Collect SFC modules before timed tests; keep cold imports out of mount helpers.
+import ApprovalCenterView from '../src/views/approval/ApprovalCenterView.vue'
+import ApprovalDetailView from '../src/views/approval/ApprovalDetailView.vue'
+import ApprovalNewView from '../src/views/approval/ApprovalNewView.vue'
+import TemplateCenterView from '../src/views/approval/TemplateCenterView.vue'
+import TemplateDetailView from '../src/views/approval/TemplateDetailView.vue'
 import {
   mockPendingApproval,
   mockApprovedApproval,
@@ -51,6 +57,26 @@ vi.mock('vue-router', async () => {
       query: routeQuery,
       path: routePath,
       meta: {},
+    }),
+  }
+})
+
+// ElMessage stub (same flake and fix as approval-e2e-lifecycle.spec.ts). A real toast is mounted
+// into document.body, outside the test app, and closes itself after ~3 s. When that timer fires
+// after this file's jsdom environment is torn down, the toast's leave transition calls the missing
+// requestAnimationFrame and vitest fails the lane with an unhandled ReferenceError although every
+// test passed. No test here asserts on toast DOM, so only ElMessage is replaced; every other
+// element-plus export stays real.
+vi.mock('element-plus', async () => {
+  const actual = await vi.importActual<typeof import('element-plus')>('element-plus')
+  return {
+    ...actual,
+    ElMessage: Object.assign(vi.fn(), {
+      success: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      closeAll: vi.fn(),
     }),
   }
 })
@@ -146,7 +172,11 @@ const mockTemplateLoading = ref(false)
 const mockTemplateError = ref<string | null>(null)
 const mockTemplateTotal = ref(0)
 
-const loadTemplatesSpy = vi.fn().mockResolvedValue(undefined)
+// Resolves 'applied' because that is what the real `templateStore.loadTemplates` resolves when
+// the read it issued is still the current one and succeeded (`ApprovalTemplateListOutcome`).
+// TemplateCenterView lowers its flat-list stale bit only for that value, so a mock that
+// resolved `undefined` would be a mock of a contract this store does not have.
+const loadTemplatesSpy = vi.fn().mockResolvedValue('applied')
 const loadTemplateSpy = vi.fn().mockResolvedValue(undefined)
 const loadVersionSpy = vi.fn().mockResolvedValue(undefined)
 
@@ -535,7 +565,6 @@ describe('Approval E2E Permissions', () => {
   // Mount helpers
   // -------------------------------------------------------------------------
   async function mountCenterView() {
-    const { default: ApprovalCenterView } = await import('../src/views/approval/ApprovalCenterView.vue')
     const Host = defineComponent({ setup: () => () => h(ApprovalCenterView as any) })
     app = createApp(Host)
     registerAllStubs(app)
@@ -544,7 +573,6 @@ describe('Approval E2E Permissions', () => {
   }
 
   async function mountDetailView() {
-    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
     const Host = defineComponent({ setup: () => () => h(ApprovalDetailView as any) })
     app = createApp(Host)
     registerAllStubs(app)
@@ -553,7 +581,6 @@ describe('Approval E2E Permissions', () => {
   }
 
   async function mountNewView() {
-    const { default: ApprovalNewView } = await import('../src/views/approval/ApprovalNewView.vue')
     const Host = defineComponent({ setup: () => () => h(ApprovalNewView as any) })
     app = createApp(Host)
     registerAllStubs(app)
@@ -562,7 +589,6 @@ describe('Approval E2E Permissions', () => {
   }
 
   async function mountTemplateCenterView() {
-    const { default: TemplateCenterView } = await import('../src/views/approval/TemplateCenterView.vue')
     const Host = defineComponent({ setup: () => () => h(TemplateCenterView as any) })
     app = createApp(Host)
     registerAllStubs(app)
@@ -571,7 +597,6 @@ describe('Approval E2E Permissions', () => {
   }
 
   async function mountTemplateDetailView() {
-    const { default: TemplateDetailView } = await import('../src/views/approval/TemplateDetailView.vue')
     const Host = defineComponent({ setup: () => () => h(TemplateDetailView as any) })
     app = createApp(Host)
     registerAllStubs(app)
@@ -910,7 +935,7 @@ describe('Approval E2E Permissions', () => {
 
       expect(loadTemplatesSpy).toHaveBeenCalled()
       const header = container!.querySelector('.template-center__header h1')
-      expect(header?.textContent).toBe('审批模板')
+      expect(header?.textContent).toBe('审批表单')
     })
 
     it('template center has search input', async () => {
@@ -1104,7 +1129,7 @@ describe('Approval E2E Permissions', () => {
       await mountTemplateDetailView()
 
       const backBtn = Array.from(container!.querySelectorAll('button'))
-        .find((b) => b.textContent?.includes('返回模板列表'))
+        .find((b) => b.textContent?.includes('返回表单列表'))
       backBtn!.click()
       await flushUi()
 
@@ -1183,7 +1208,7 @@ describe('Approval E2E Permissions', () => {
       await mountNewView()
 
       const empty = container!.querySelector('[data-el-empty]')
-      expect(empty?.textContent).toContain('未找到审批模板')
+      expect(empty?.textContent).toContain('未找到审批表单')
     })
 
     it('template detail shows empty state when template not found', async () => {
@@ -1193,7 +1218,7 @@ describe('Approval E2E Permissions', () => {
       await mountTemplateDetailView()
 
       const empty = container!.querySelector('[data-el-empty]')
-      expect(empty?.textContent).toContain('未找到模板')
+      expect(empty?.textContent).toContain('未找到表单')
     })
   })
 
@@ -1236,7 +1261,9 @@ describe('Approval E2E Permissions', () => {
     it('clicking return opens dialog and submits with targetNodeKey', async () => {
       setMockPermissions(['approvals:read', 'approvals:act'])
       routeParams = { id: 'apv_pending_1' }
-      mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_2' })
+      // The instance belongs to the template loaded below: since test report 2026-10-08 T4cd only an
+      // instance's OWN template may name its nodes (a different one left in the store would not).
+      mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_2', templateId: 'tpl_modes' })
       mockHistoryRef.value = mockReturnHistory()
       mockActiveTemplate.value = mockTemplateWithModes()
       executeActionSpy.mockResolvedValue(mockPendingApproval())
@@ -1322,7 +1349,8 @@ describe('Approval E2E Permissions', () => {
     it('renders return event in timeline with metadata', async () => {
       setMockPermissions(['approvals:read'])
       routeParams = { id: 'apv_pending_1' }
-      mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_1' })
+      // Own template (see the note in 'clicking return opens dialog…' above).
+      mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_1', templateId: 'tpl_modes' })
       mockHistoryRef.value = mockReturnHistory()
       mockActiveTemplate.value = mockTemplateWithModes()
       await mountDetailView()

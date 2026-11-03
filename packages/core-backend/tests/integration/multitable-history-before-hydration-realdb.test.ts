@@ -224,6 +224,53 @@ describeIfDatabase('T1b before-image hydration goldens (real DB)', () => {
     const change = changeOf(res, REC_DELETE)
     expect(change?.action).toBe('delete')
     expect(change?.before?.[STATUS]).toBe('updated') // the LAST state before deletion, not the first ('alive')
+    expect(change?.changedFieldIds).toEqual([STATUS])
+  })
+
+  test('delete snapshot keys drive detail and both summary modes only after field masking', async () => {
+    const batchId = `batch_t1b_delete_keys_${TS}`
+    await insertRevision({ recordId: REC_DELETE, version: 4, action: 'delete', changedFieldIds: [], snapshot: { [STATUS]: 'deleted status', [SALARY]: 4567 }, batchId })
+    const events = (query: Record<string, string>) => request(app).get(`/api/multitable/bases/${BASE_ID}/history/events`).query({ action: 'delete', limit: '100', ...query })
+
+    const visible = await detail(batchId)
+    expect(visible.status).toBe(200)
+    expect(changeOf(visible, REC_DELETE)?.changedFieldIds).toEqual([SALARY, STATUS])
+    expect(visible.body.data.visibleAffectedFieldCount).toBe(2)
+    expect(visible.body.data.fieldNames[SHEET_ID]).toHaveProperty(SALARY)
+    for (const countMode of ['exact', 'estimate']) {
+      const listed = await events({ countMode })
+      expect(listed.status).toBe(200)
+      expect(listed.body.data.batches.find((b: { batchId: string }) => b.batchId === batchId)?.visibleAffectedFieldCount).toBe(2)
+    }
+    const searchable = await events({ fieldId: SALARY })
+    expect(searchable.body.data.batches.map((b: { batchId: string }) => b.batchId)).toContain(batchId)
+
+    await denyFieldForUser(SALARY)
+    const masked = await detail(batchId)
+    expect(masked.status).toBe(200)
+    expect(changeOf(masked, REC_DELETE)?.changedFieldIds).toEqual([STATUS])
+    expect(changeOf(masked, REC_DELETE)?.before).toEqual({ [STATUS]: 'deleted status' })
+    expect(changeOf(masked, REC_DELETE)?.after).toEqual({ [STATUS]: 'deleted status' })
+    expect(masked.body.data.visibleAffectedFieldCount).toBe(1)
+    expect(JSON.stringify(masked.body.data)).not.toContain(SALARY)
+    expect(JSON.stringify(masked.body.data)).not.toContain('4567')
+    for (const countMode of ['exact', 'estimate']) {
+      const listed = await events({ countMode })
+      expect(listed.status).toBe(200)
+      expect(listed.body.data.batches.find((b: { batchId: string }) => b.batchId === batchId)?.visibleAffectedFieldCount).toBe(1)
+    }
+    const hiddenFilter = await events({ fieldId: SALARY })
+    expect(hiddenFilter.status).toBe(200)
+    expect(hiddenFilter.body.data.batches).toEqual([])
+  })
+
+  test.each([null, { [STATUS]: 'surviving snapshot value' }])('delete retains explicitly stamped ids when snapshot is %j', async (snapshot) => {
+    const batchId = `batch_t1b_delete_partial_${TS}`
+    await insertRevision({ recordId: REC_DELETE, version: 4, action: 'delete', changedFieldIds: [SALARY, STATUS], snapshot, batchId })
+    const res = await detail(batchId)
+    expect(res.status).toBe(200)
+    expect(changeOf(res, REC_DELETE)?.changedFieldIds).toEqual([SALARY, STATUS])
+    expect(changeOf(res, REC_DELETE)?.before).toEqual(snapshot)
   })
 
   test('(b) control (non-vacuous): with NO field denial, before+after both carry SALARY (genuine values)', async () => {

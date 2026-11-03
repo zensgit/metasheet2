@@ -302,12 +302,16 @@ describe('Multitable record and form context API', () => {
       },
     })
 
+    vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', '')
     const response = await request(app)
       .get('/api/multitable/form-context')
       .query({ viewId: 'view_form_ops', recordId: 'rec_existing' })
       .expect(200)
+    vi.unstubAllEnvs()
 
     expect(response.body.ok).toBe(true)
+    // 客户反馈 2026-09-24 #4c: the form never loads /context, so form-context carries the business timezone.
+    expect(response.body.data.businessTimezone).toBe('Asia/Shanghai')
     expect(response.body.data.mode).toBe('form')
     expect(response.body.data.readOnly).toBe(true)
     expect(response.body.data.sheet).toMatchObject({ id: 'sheet_ops', baseId: 'base_ops' })
@@ -410,12 +414,17 @@ describe('Multitable record and form context API', () => {
       },
     })
 
+    vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Asia/Tokyo')
     const formResponse = await request(app)
       .get('/api/multitable/form-context')
       .query({ viewId: 'view_public_form', publicToken: 'pub_token_123' })
       .expect(200)
+    vi.unstubAllEnvs()
 
     expect(formResponse.body.ok).toBe(true)
+    // 客户反馈 2026-09-24 #4c: the ANONYMOUS public form learns the instance business timezone here too —
+    // the env value verbatim (a zone id, nothing actor- or tenant-derived).
+    expect(formResponse.body.data.businessTimezone).toBe('Asia/Tokyo')
     expect(formResponse.body.data.readOnly).toBe(false)
     expect(formResponse.body.data.submitPath).toBe('/api/multitable/views/view_public_form/submit?publicToken=pub_token_123')
     expect(formResponse.body.data.capabilities).toMatchObject({

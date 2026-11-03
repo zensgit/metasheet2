@@ -1,0 +1,163 @@
+name: Approval real-DB acceptance (CSV export read-parity)
+
+# EVIDENCE LANE for the P3-1 approval CSV export:
+#   - tests/integration/approval-export-csv.db.test.ts — `GET /api/approvals?format=csv` is an
+#     OUTPUT BRANCH on the existing read route, never a second query and never a second guard.
+#     What this lane establishes against real PostgreSQL:
+#       * export ⊆ read(detail): the list scope is documented to be strictly WIDER than
+#         `canReadApprovalInstance` (it admits `source_queue` seats and every `plm:` mirror row),
+#         so every candidate row is filtered through the canonical per-instance predicate. A row
+#         the list shows and the detail route 404s MUST NOT reach the CSV — with the positive
+#         control on the same instance, so the assertion cannot pass by exporting nothing.
+#       * per-viewer record-link masking survives serialization: a linked record the viewer may
+#         not read arrives as the RECORD_LINK_INACCESSIBLE_VALUE sentinel, not a real recordId.
+#       * hidden-field redaction survives serialization.
+#       * org-pin PARITY: the export inherits the read path's org conjunct and adds none of its
+#         own — dormant when APPROVAL_S1_ORG_PIN_ENABLED is off (its shipped default), narrowing
+#         identically when forced ON in-process.
+#       * a zero-row export and every refusal path stay mechanically distinguishable.
+# This lane changes no flag and ships no default: the org pin stays DEFAULT OFF and any in-process
+# override is cleared by the suite itself.
+# Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag change.
+
+on:
+  workflow_dispatch:
+  # NO `merge_group:` — deliberately, matching the sibling approval-realdb-* evidence lanes (see
+  # approval-realdb-history-guard.yml's comment for the full rationale: a `merge_group` event does
+  # not honour the `paths` filter the way `pull_request` does, so declaring it would spin up this
+  # PostgreSQL job for every merge group regardless of relevance).
+  pull_request:
+    # No `branches:` filter (mirrors the sibling approval-realdb-* precedents): a brand-new workflow
+    # cannot be workflow_dispatch-ed until it has run once via a trigger it responds to. The `paths`
+    # filter keeps it off unrelated PRs.
+    paths:
+      - 'packages/core-backend/tests/integration/approval-export-csv.db.test.ts'
+      - 'packages/core-backend/tests/unit/csv-cell.test.ts'
+      - 'packages/core-backend/src/services/csv-cell.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/services/ApprovalBridgeService.ts'
+      - 'packages/core-backend/src/services/approval-bridge-types.ts'
+      - 'packages/core-backend/src/services/approval-instance-readability.ts'
+      - 'packages/core-backend/src/services/approval-form-redaction.ts'
+      - 'packages/core-backend/src/services/approval-record-link-read-projection.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/src/multitable/permission-service.ts'
+      - 'packages/core-backend/src/services/approval-record-link-txn-auth.ts'
+      - 'packages/core-backend/src/integration/db/connection-pool.ts'
+      - 'packages/core-backend/src/index.ts'
+      - 'packages/core-backend/src/db/migrations/**'
+      - 'packages/core-backend/tests/setup.integration.ts'
+      # The config this job actually runs under. Its absence was a real wiring hole: the lane listed
+      # vitest.config.ts (which this job does NOT use) and omitted this one (which it does).
+      - 'packages/core-backend/vitest.integration.config.ts'
+      # Not a runtime input for this job — it is the SIBLING half of the two-point wiring. This
+      # suite must stay excluded there so the no-DB job cannot skip-green it; if that entry is
+      # removed this lane should run and say so.
+      - 'packages/core-backend/vitest.config.ts'
+      - '.github/workflows/approval-realdb-export-csv.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/tests/integration/approval-export-csv.db.test.ts'
+      - 'packages/core-backend/tests/unit/csv-cell.test.ts'
+      - 'packages/core-backend/src/services/csv-cell.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/services/ApprovalBridgeService.ts'
+      - 'packages/core-backend/src/services/approval-bridge-types.ts'
+      - 'packages/core-backend/src/services/approval-instance-readability.ts'
+      - 'packages/core-backend/src/services/approval-form-redaction.ts'
+      - 'packages/core-backend/src/services/approval-record-link-read-projection.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/src/multitable/permission-service.ts'
+      - 'packages/core-backend/src/services/approval-record-link-txn-auth.ts'
+      - 'packages/core-backend/src/integration/db/connection-pool.ts'
+      - 'packages/core-backend/src/index.ts'
+      - 'packages/core-backend/src/db/migrations/**'
+      - 'packages/core-backend/tests/setup.integration.ts'
+      # The config this job actually runs under. Its absence was a real wiring hole: the lane listed
+      # vitest.config.ts (which this job does NOT use) and omitted this one (which it does).
+      - 'packages/core-backend/vitest.integration.config.ts'
+      # Not a runtime input for this job — it is the SIBLING half of the two-point wiring. This
+      # suite must stay excluded there so the no-DB job cannot skip-green it; if that entry is
+      # removed this lane should run and say so.
+      - 'packages/core-backend/vitest.config.ts'
+      - '.github/workflows/approval-realdb-export-csv.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  approval-realdb-export-csv:
+    name: approval-realdb-export-csv
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_export_csv
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_export_csv"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_export_csv
+      # Arms the suite's top-level sentinel: in THIS lane a missing DATABASE_URL is a red run, never
+      # a silent skipped-green.
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
+          # (see packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md).
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run CSV-export real-DB acceptance (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and
+        # hide regressions; verbose prints every collected test so an empty collection shows in the
+        # log.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-export-csv.db.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suites=approval-export-csv.db.test.ts"
+            echo "scope=GET /api/approvals?format=csv export-parity: export subset of canonical per-instance read, record-link mask survival, hidden-field redaction survival, org-pin parity (default OFF; forced ON in-process), empty-vs-refused distinguishability"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

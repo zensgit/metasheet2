@@ -36,6 +36,11 @@
 //         leaf, a closed-vocabulary violation and a planted secret
 //   S-13  driver error text NEVER reaches the report — a message carrying a password classifies to a
 //         code and the password is gone
+//   S-20  a SQL Server error NUMBER (208/2812/229/18456/4060) is judged BEFORE the English prose regexes,
+//         so a Chinese-locale server's 对象名…无效 / 拒绝了…权限 / 登录失败 still classifies correctly —
+//         locked by fixtures whose number and prose CONTRADICT each other
+//   S-21  the host's own post-#5586 connect refusal (`code: 'SOURCE_UNAVAILABLE'`, no number, fixed
+//         sentence) classifies as UNREACHABLE, so "cannot connect" is not reported as OBJECT_MISSING
 //   R-01  the route is registered at the module's own path and gated on the integration READ tier;
 //         a stock-prep-namespace principal is refused (source reads are not a queue-operator act)
 //   R-02  the source defaults to the CONFIGURED table action, and an explicit id overrides it
@@ -70,6 +75,7 @@ const {
   runStockPreparationSourcePreflight,
   assertSourcePreflightValuesFree,
   describeValuesFreeRefusal,
+  __internals: { classifyReadError },
 } = require(path.join(LIB, 'stock-preparation-source-preflight.cjs'))
 const {
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
@@ -1167,6 +1173,152 @@ async function vocabulariesAreClosedAndOrdered() {
 }
 
 // ---------------------------------------------------------------------------
+// S-20 — a Chinese-locale SQL Server names no host and no login, but its driver still hands back a
+// server-assigned error NUMBER (tedious's `.code` is always the useless 'EREQUEST' for these). The
+// English prose regexes above never match 对象名…无效 / 拒绝了…权限 / 登录失败, so the number must be
+// judged FIRST, with prose kept only for drivers (or fixtures) that carry no number at all.
+// ---------------------------------------------------------------------------
+
+async function mssqlErrorNumberIsJudgedBeforeProse() {
+  const cases = [
+    {
+      name: '208 invalid object name (Chinese prose)',
+      error: { code: 'EREQUEST', number: 208, message: "对象名 'dbo.零件清单' 无效。" },
+      expected: 'object_missing',
+    },
+    {
+      name: '2812 stored procedure not found (Chinese prose)',
+      error: { code: 'EREQUEST', number: 2812, message: "找不到存储过程 'dbo.usp_x'。" },
+      expected: 'object_missing',
+    },
+    {
+      name: '229 permission denied (Chinese prose)',
+      error: { code: 'EREQUEST', number: 229, message: "拒绝了对对象 'dbo.物料' 的 SELECT 权限。" },
+      expected: 'permission_denied',
+    },
+    {
+      name: '18456 login failed (Chinese prose)',
+      error: { code: 'ELOGIN', number: 18456, message: "用户 'sa' 登录失败。" },
+      expected: 'auth_refused',
+    },
+    {
+      name: '4060 cannot open database (Chinese prose)',
+      error: { number: 4060, message: '无法打开登录所请求的数据库 "存货备料"。登录失败。' },
+      expected: 'auth_refused',
+    },
+    // THE ORDER-LOCKING HALF. The five fixtures above only prove the number is USED — their prose is
+    // Chinese and matches nothing, so a build that judged prose first would pass them all unchanged.
+    // Each fixture below carries a number and English prose that point at DIFFERENT codes, so the
+    // assertion can only hold if the number is judged FIRST. Move the number block after the prose
+    // regexes and these five turn red; that is the whole claim of this section, made falsifiable.
+    {
+      name: '229 whose prose says "invalid object name" — the number wins',
+      error: { code: 'EREQUEST', number: 229, message: "Invalid object name 'dbo.Part'." },
+      expected: 'permission_denied', // prose-first would say object_missing
+    },
+    {
+      name: '208 whose prose says "permission denied" — the number wins',
+      error: { code: 'EREQUEST', number: 208, message: 'permission denied for table part' },
+      expected: 'object_missing', // prose-first would say permission_denied
+    },
+    {
+      name: '2812 whose prose says "permission denied" — the number wins',
+      error: { code: 'EREQUEST', number: 2812, message: 'permission denied for function dbo.usp_x' },
+      expected: 'object_missing', // prose-first would say permission_denied
+    },
+    {
+      name: '18456 whose prose says "invalid object name" — the number wins',
+      error: { code: 'EREQUEST', number: 18456, message: "Invalid object name 'dbo.Part'." },
+      expected: 'auth_refused', // prose-first would say object_missing
+    },
+    {
+      name: '4060 whose prose says "invalid object name" — the number wins',
+      error: { code: 'EREQUEST', number: 4060, message: "Invalid object name 'dbo.Part'." },
+      expected: 'auth_refused', // prose-first would say object_missing
+    },
+  ]
+  for (const testCase of cases) {
+    assert.equal(
+      classifyReadError(testCase.error),
+      testCase.expected,
+      `${testCase.name} -> expected ${testCase.expected}`,
+    )
+  }
+}
+
+async function proseStillClassifiesWhenThereIsNoErrorNumber() {
+  // No `.number` at all (a PG driver, or any source that never assigns one) — the pre-existing
+  // English-prose path must still carry these, unchanged.
+  assert.equal(
+    classifyReadError({ code: 'EREQUEST', message: "Invalid object name 'dbo.Part'." }),
+    'object_missing',
+  )
+  assert.equal(
+    classifyReadError({ code: '42501', message: 'permission denied for table part' }),
+    'permission_denied',
+  )
+  assert.equal(
+    classifyReadError({ code: 'ELOGIN', message: "Login failed for user 'sa'." }),
+    'auth_refused',
+  )
+}
+
+async function anUnrecognizedNumberFallsBackToProseThenUnknown() {
+  // A number the module does not recognize must not shortcut past prose, and an error with neither
+  // a known number nor matching prose stays UNKNOWN — conservative, not guessed.
+  assert.equal(
+    classifyReadError({ code: 'EREQUEST', number: 999999, message: "Invalid object name 'dbo.Part'." }),
+    'object_missing',
+    'an unrecognized number must not block the prose fallback from still catching a plain English message',
+  )
+  assert.equal(
+    classifyReadError({ code: 'EREQUEST', number: 999999, message: '某种未知的驱动错误' }),
+    'unknown_error',
+  )
+}
+
+// ---------------------------------------------------------------------------
+// S-21 — THE REAL CONNECT-FAILURE SHAPE. Since #5586 the host never lets a driver connect error out:
+// DataSourceManager.connectDataSource replaces it with a fixed values-free error whose ONLY
+// identifying mark is `code: 'SOURCE_UNAVAILABLE'` (no `.number`, no driver prose). That is the
+// object this module actually receives when a customer's SQL Server is down, credentials are wrong,
+// or the database cannot be opened — the 18456/4060 rows of the number table are NOT reachable on
+// this stack. Classified as UNREACHABLE, because the alternative (unknown_error) is not in
+// CONNECTIVITY_ERROR_CODES and made the reachability check report "cannot connect" as
+// OBJECT_MISSING, sending an implementer to the schema when the problem is the network.
+// ---------------------------------------------------------------------------
+
+// Byte-for-byte the host's own refusal: packages/core-backend/src/data-adapters/DataSourceManager.ts
+// DATA_SOURCE_UNAVAILABLE_MESSAGE + `{ status: 503, code: DATA_SOURCE_UNAVAILABLE_CODE }`. Copied
+// rather than imported because this plugin must not depend on core-backend's TS source.
+function hostSourceUnavailableError() {
+  return Object.assign(
+    new Error('数据源当前无法连接，请先「测试连接」查看原因 / Data source is currently unreachable; run "Test connection" for details'),
+    { status: 503, code: 'SOURCE_UNAVAILABLE' },
+  )
+}
+
+async function hostConnectRefusalIsAConnectivityFailure() {
+  assert.equal(
+    classifyReadError(hostSourceUnavailableError()),
+    'unreachable',
+    'the host connect refusal carries no number and no matchable prose; only its code identifies it',
+  )
+  // The consequence, end to end through the real report builder: the verdict must be "cannot
+  // connect", NOT "the entry table is missing".
+  const { report } = await preflight(orderModuleSource(), {
+    failEveryRead: () => hostSourceUnavailableError(),
+  })
+  const reachability = checkOf(report, 'reachability')
+  assert.equal(reachability.reachable, false)
+  assert.equal(reachability.failureCode, 'unreachable',
+    'unknown_error here would fall through to OBJECT_MISSING and blame the schema for a dead network')
+  assert.deepEqual(codesOf(report.blockers), [B.SOURCE_UNREACHABLE])
+  // Still values-free: the refusal sentence never travels, same as any driver text.
+  assert.equal(JSON.stringify(report).includes('Test connection'), false)
+}
+
+// ---------------------------------------------------------------------------
 // R-01 .. R-05 — the route
 // ---------------------------------------------------------------------------
 
@@ -1176,6 +1328,22 @@ const INTEGRATION_READER = Object.freeze({ id: 'u_read', tenantId: TENANT_ID, pe
 const INTEGRATION_WRITER = Object.freeze({ id: 'u_write', tenantId: TENANT_ID, permissions: ['integration:write'] })
 const PLATFORM_ADMIN = Object.freeze({ id: 'u_admin', tenantId: TENANT_ID, roles: ['admin'], permissions: ['integration:admin'] })
 const STOCK_PREP_OPERATOR = Object.freeze({ id: 'u_sp', tenantId: TENANT_ID, permissions: [STOCK_PREP_READ, STOCK_PREP_ADMIN] })
+
+// THE VERIFIED TENANT CLAIM EACH PRINCIPAL'S TOKEN CARRIES — what the host sets as
+// `req.authenticatedTenantId`, and only when the token really has one. The route proves its tenant
+// from this claim (or, for a claimless token, from a carried tenant the host directory vouches for),
+// so a principal that is meant to be tenant-bound names its claim HERE, per principal. It is
+// deliberately not derived from `user.tenantId`: that field is what the host fills from the
+// `x-tenant-id` header for a claimless token, and a harness that promoted it to a claim would pass
+// the very gate it is supposed to exercise. The claimless and cross-tenant principals live in
+// stock-preparation-source-preflight-tenant-scope.test.cjs.
+const TOKEN_TENANT_CLAIMS = new Map([
+  [LOGGED_IN, TENANT_ID],
+  [INTEGRATION_READER, TENANT_ID],
+  [INTEGRATION_WRITER, TENANT_ID],
+  [PLATFORM_ADMIN, TENANT_ID],
+  [STOCK_PREP_OPERATOR, TENANT_ID],
+])
 
 function inertService(methods) {
   const service = {}
@@ -1202,7 +1370,9 @@ function boundSystem(id, overrides = {}) {
     id,
     kind: 'data-source:sql-readonly',
     connectionId: `conn_${id}`,
-    config: { schema: 'dbo', dataSourceOwnerId: 'u_binding_owner' },
+    // `lookupProjection` is the PRIVATE subtree for this kind: present on the adapter-ready row,
+    // deleted from the public projection. It is what makes the two accessors distinguishable.
+    config: { schema: 'dbo', dataSourceOwnerId: 'u_binding_owner', lookupProjection: { table: 'dbo.parts' } },
     ...overrides,
   }
 }
@@ -1211,20 +1381,33 @@ function mountRoute({ catalog, action = tableActionConfig(), systems, adapterOve
   const routes = new Map()
   const reader = catalog ? createReader(catalog) : null
   const loaded = []
+  const storedSystem = (input) => {
+    const system = (systems || { [SYSTEM_ID]: boundSystem(SYSTEM_ID) })[input.id]
+    if (!system) {
+      const error = new Error('external system not found')
+      error.name = 'ExternalSystemNotFoundError'
+      throw error
+    }
+    return system
+  }
+  // G4/M2 (#5553 §3). These used to be ONE function under two names, which is the shape the design
+  // rules out: with an alias, a call site that degraded from the decrypting accessor back to the
+  // public projection returns the identical object and every assertion here still passes. They are
+  // now distinct — `getExternalSystem` deletes the private config subtree that `publicRow()` deletes
+  // for this kind (external-systems.cjs PRIVATE_CONFIG_KEYS_BY_KIND: `lookupProjection`) — and
+  // `loaded` counts the DECRYPTING loads only.
   const registry = {
     ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
     async getExternalSystem(input) {
+      const system = storedSystem(input)
+      const { lookupProjection, ...publicConfig } = system.config || {}
+      return { ...system, config: publicConfig }
+    },
+    async getExternalSystemForAdapter(input) {
       loaded.push(input)
-      const system = (systems || { [SYSTEM_ID]: boundSystem(SYSTEM_ID) })[input.id]
-      if (!system) {
-        const error = new Error('external system not found')
-        error.name = 'ExternalSystemNotFoundError'
-        throw error
-      }
-      return system
+      return storedSystem(input)
     },
   }
-  registry.getExternalSystemForAdapter = registry.getExternalSystem
   const adapterRegistry = {
     listAdapterKinds() { return ['data-source:sql-readonly'] },
     createAdapter() {
@@ -1255,6 +1438,13 @@ function mountRoute({ catalog, action = tableActionConfig(), systems, adapterOve
       readSourceConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
       readSourceCompositionConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
       bridgeAgentChecklistStore: inertService(['saveVersion', 'approve', 'retire', 'getForApply']),
+      // The host membership directory the route's tenant proof asks (resolveProvenOwnTenant). Every
+      // principal this suite names is a member of TENANT_ID and of nothing else; the claimless,
+      // cross-tenant and directory-absent principals live in
+      // stock-preparation-source-preflight-tenant-scope.test.cjs.
+      tenantPrincipalDirectory: {
+        async verifyTenantMembership({ tenantId }) { return { member: tenantId === TENANT_ID } },
+      },
     },
     // A caller may inject a recording logger (see `createRecordingLogger` below, R-08) to observe
     // what `routeLogger` is wired with, or explicitly pass `logger: null` to mean NO logger at all
@@ -1289,7 +1479,14 @@ async function callRoute(routes, { user, query = {} } = {}) {
   const handler = routes.get(`GET ${SOURCE_PREFLIGHT_ROUTE_PATH}`)
   assert.ok(handler, `route GET ${SOURCE_PREFLIGHT_ROUTE_PATH} is registered`)
   const res = createResponse()
-  await handler({ user, body: {}, query, params: {} }, res)
+  const authenticatedTenantId = TOKEN_TENANT_CLAIMS.get(user)
+  await handler({
+    user,
+    body: {},
+    query,
+    params: {},
+    ...(authenticatedTenantId ? { authenticatedTenantId } : {}),
+  }, res)
   assert.notEqual(res.body, undefined)
   return res
 }
@@ -2116,6 +2313,14 @@ async function main() {
   await vocabulariesAreClosedAndOrdered()
   console.log('  ✓ S-13 driver text never travels; the vocabularies are closed and ordered')
 
+  await mssqlErrorNumberIsJudgedBeforeProse()
+  await proseStillClassifiesWhenThereIsNoErrorNumber()
+  await anUnrecognizedNumberFallsBackToProseThenUnknown()
+  console.log('  ✓ S-20 a Chinese-locale SQL Server`s error NUMBER is judged before its (unmatchable) prose')
+
+  await hostConnectRefusalIsAConnectivityFailure()
+  console.log('  ✓ S-21 the host`s SOURCE_UNAVAILABLE connect refusal is a connectivity failure, not unknown')
+
   await routeIsRegisteredAtTheModulesOwnPath()
   await routeIsGatedOnTheIntegrationReadTier()
   console.log('  ✓ R-01 the route is registered at the module`s path and gated on the integration read tier')
@@ -2147,4 +2352,6 @@ async function main() {
   console.log('stock-preparation-source-preflight: OK')
 }
 
-main()
+// S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — `main` runs as one test
+// under the exit sentinel and the whole-suite timeout, so a check that hangs can never end this suite with exit 0.
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-source-preflight.test.cjs', main)

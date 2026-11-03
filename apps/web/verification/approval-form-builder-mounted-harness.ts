@@ -21,6 +21,7 @@ import { createApp, defineComponent, h } from 'vue'
 import { createMemoryHistory, createRouter, RouterView } from 'vue-router'
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
+import { useLocale } from '../src/composables/useLocale'
 import { useFeatureFlags } from '../src/stores/featureFlags'
 
 declare global {
@@ -30,6 +31,10 @@ declare global {
 }
 
 async function main(): Promise<void> {
+  // O-8 / F8-1: the shared approval pickers (department / user) now follow the shell locale, while
+  // TemplateAuthoringView itself stays zh-CN until slice F8-3. The matrix asserts zh-CN names, so
+  // pin zh-CN instead of inheriting the browser's language.
+  useLocale().setLocale('zh-CN')
   // Dev-override path (§ module doc above) — set BEFORE loadProductFeatures reads it.
   const params = new URLSearchParams(window.location.search)
   if (params.get('networkTemplate') === 'on') {

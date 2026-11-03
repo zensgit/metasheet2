@@ -23,6 +23,11 @@ import {
   MultitableRecordVersionConflictError,
 } from './record-errors'
 import { ensureRecordNotLocked, mapRecordLockState } from './record-lock'
+import {
+  assertPlmRowDeletable,
+  fieldsCarryExactStockPreparationStanza,
+  normalizePlmRowData,
+} from './plm-row-delete-guard'
 import { isFieldAlwaysReadOnly } from './permission-derivation'
 import {
   assertTransactionalQuery,
@@ -33,6 +38,10 @@ import {
 } from './side-door-delete-trash'
 import { TombstoneCaptureCapExceededError } from './tombstone-capture'
 import { isRetryableLiveLinkDatabaseConflict } from './live-link-projection-integrity'
+import {
+  assertFieldSchemaUnchangedAfterFence,
+  fieldSchemaSnapshotFromFields,
+} from './field-schema-fence-recheck'
 import {
   assertLinkWriterFencePlanMatchesFieldGuards,
   enterLinkWriterFencePlan,
@@ -61,6 +70,8 @@ export {
   MultitableRecordVersionConflictError,
 } from './record-errors'
 export { MultitableSideDoorDeleteNonTransactionalError } from './side-door-delete-trash'
+// R-66: the typed refusal a plugin-SDK delete of a PLM row throws (code RECORD_DELETE_REFUSED_PLM_ROW, status 409).
+export { PlmRowDeleteRefusedError as MultitablePlmRowDeleteRefusedError } from './plm-row-delete-guard'
 export {
   buildRecordsCacheKey,
   decodeRecordCursor,
@@ -462,7 +473,30 @@ async function loadSheetAndFields(
   return { sheet, fields }
 }
 
+/**
+ * Plugin-SDK record read (#5833). Same sheet-liveness contract as patch/create/delete in this file:
+ * a soft-deleted (`deleted_at IS NOT NULL`) or absent sheet throws the same
+ * `MultitableRecordNotFoundError('Sheet not found: …')` BEFORE the record SELECT runs, so a plugin that
+ * resolves a stale sheet id (e.g. after-sales' derived-id fallback) cannot read records back out of a
+ * deleted sheet. Only the liveness half of `loadSheetAndFields` is applied: the zero-fields refusal is a
+ * write precondition and a live field-less sheet keeps its prior read behaviour.
+ */
 export async function getRecord(
+  input: GetMultitableRecordInput,
+): Promise<LoadedMultitableRecord> {
+  const sheet = await loadSheetRow(input.query, input.sheetId, getMultitableRequestMetadataCache()?.sheets)
+  if (!sheet) {
+    throw new MultitableRecordNotFoundError(`Sheet not found: ${input.sheetId}`)
+  }
+  return loadRecordRowForLiveSheet(input)
+}
+
+/**
+ * Raw record read with NO sheet-liveness check. Only for callers that have already proven liveness in
+ * the same flow (`patchRecord` runs `loadSheetAndFields` first); keeps that path's statement sequence
+ * unchanged. Not exported — plugins must go through `getRecord`.
+ */
+async function loadRecordRowForLiveSheet(
   input: GetMultitableRecordInput,
 ): Promise<LoadedMultitableRecord> {
   const recordRes = await input.query(
@@ -554,8 +588,18 @@ export async function patchRecord(
       }])),
     )
   }
+  // Field retype slice 3a (ADR §3.11 row 2): `fields` may come from the request-scoped metadata cache, i.e. a
+  // snapshot older than the fence. Re-read the touched fields FOR SHARE and refuse 409 FIELD_SCHEMA_CHANGED on
+  // any type / option drift. No query unless the conversion flag AND the writer fence are both on.
+  await assertFieldSchemaUnchangedAfterFence(
+    query,
+    input.sheetId,
+    fieldSchemaSnapshotFromFields(fields),
+    Object.keys(input.changes),
+  )
 
-  const existing = await getRecord({
+  // Liveness already proven by loadSheetAndFields above in this same flow.
+  const existing = await loadRecordRowForLiveSheet({
     query,
     sheetId: input.sheetId,
     recordId: input.recordId,
@@ -591,7 +635,7 @@ export async function patchRecord(
   )
 
   // W0 slice ② required fix (concurrent-delete fail-closed — recycled from Draft #4216's P1 review):
-  // `existing` above was read via `getRecord` (a plain SELECT, no `FOR UPDATE`) and
+  // `existing` above was read via `loadRecordRowForLiveSheet` (a plain SELECT, no `FOR UPDATE`) and
   // `guardRecordNotLockedForPlugin` likewise takes no row lock — so this UPDATE is the FIRST point in
   // this function that actually locks the row, and a concurrent DELETE of this exact record IS reachable
   // in the window between those reads and this statement (unlike the form-submit EDIT branch fixed in
@@ -694,6 +738,13 @@ export async function createRecord(
       }])),
     )
   }
+  // Field retype slice 3a (ADR §3.11 row 3): same cached-snapshot hazard as patchRecord above.
+  await assertFieldSchemaUnchangedAfterFence(
+    query,
+    input.sheetId,
+    fieldSchemaSnapshotFromFields(fields),
+    Object.keys(input.data),
+  )
 
   const { patch, linkUpdates } = await buildNormalizedPatch(
     query,
@@ -937,11 +988,22 @@ export async function deleteRecord(
   input: DeleteMultitableRecordInput,
 ): Promise<DeletedMultitableRecord> {
   const query = input.query
-  await loadSheetAndFields(query, input.sheetId)
+  const { fields } = await loadSheetAndFields(query, input.sheetId)
 
   // Record-lock guard (rank-8 review M1; decision d). Actor-less plugin path → a locked record cannot
   // be deleted via the SDK (it must be unlocked first through the explicit unlock action).
   await guardRecordNotLockedForPlugin(query, input.sheetId, input.recordId)
+
+  // R-66 ① (owner 2026-10-28, plm-row-delete-guard.ts): a PLM row on a stock-preparation template sheet is
+  // refused here too — the plugin-scoped generic wrapper, the unscoped host SDK and every other SDK caller land in
+  // this function, before EITHER the D-1 or the D-2 branch. The stock-preparation pull never deletes (ADD / UPDATE
+  // / INACTIVE only), so no plugin flow is affected. The overview port's sheet carries only its own namespace
+  // (no exact `stockPreparation` stanza): the in-memory sheet half says no and NO statement is issued for it.
+  if (fieldsCarryExactStockPreparationStanza(fields)) {
+    const rowRes = await query('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [input.recordId, input.sheetId])
+    const row = (rowRes.rows as Array<{ data?: unknown }>)[0]
+    if (row) await assertPlmRowDeletable(query, input.sheetId, fields, normalizePlmRowData(row.data))
+  }
 
   const linkDeleteFencePlan = await prepareRecordLinkDeleteFencePlan(
     query,

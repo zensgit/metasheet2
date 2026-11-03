@@ -20,6 +20,18 @@ function expectDirectAsyncImportRoute(path: string) {
   expect(pluginSource).toMatch(pattern)
 }
 
+/** Both the direct registrar and the PUT-plus-POST-/update helper. */
+const ROUTE_REGISTRARS = ['context.api.http.addRoute', 'addAttendanceIdUpdateRoute'] as const
+
+function nextRouteRegistration(from: number): number {
+  let next = -1
+  for (const marker of ROUTE_REGISTRARS) {
+    const at = pluginSource.indexOf(marker, from)
+    if (at !== -1 && (next === -1 || at < next)) next = at
+  }
+  return next
+}
+
 describe('attendance import permission wiring', () => {
   it('exposes a dedicated importer preset and keeps admins import-capable', () => {
     const presets = listAccessPresets()
@@ -70,7 +82,11 @@ describe('attendance import permission wiring', () => {
     const end = pluginSource.indexOf('\n}\n', start) + 2
     const helper = pluginSource.slice(start, end)
     expect(start).toBeGreaterThanOrEqual(0)
-    expect(helper).toContain('user?.orgId ?? user?.workspaceId ?? req.authenticatedTenantId')
+    expect(helper).toContain('user?.orgId')
+    expect(helper).toContain('user?.workspaceId')
+    expect(helper).toContain('req.authenticatedTenantId')
+    expect(helper).toContain('raw.trim().length > 0')
+    expect(helper).not.toContain('user?.orgId ?? user?.workspaceId ?? req.authenticatedTenantId')
     expect(helper).not.toContain('user?.tenantId')
     expect(helper).not.toContain("req.headers['x-org-id']")
     expect(helper).not.toContain('DEFAULT_ORG_ID')
@@ -93,5 +109,94 @@ describe('attendance import permission wiring', () => {
     expect(subjectHelper).not.toContain("req.headers['x-user-id']")
     expect(pluginSource).toContain('tokenSubjectUserId,')
     expect(pluginSource).not.toContain('tokenSubjectUserId: actorId')
+  })
+
+  it('binds the import permission wrapper to the authenticated org', () => {
+    const start = pluginSource.indexOf('const withAttendanceImportPermission =')
+    const end = pluginSource.indexOf('const emitEvent', start)
+    const wrapper = pluginSource.slice(start, end)
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(wrapper).toContain('resolveAttendanceImportActor(req, res)')
+    expect(wrapper).toContain('req.attendanceImportAccess = access')
+
+    const boundReads = [
+      '/api/attendance/import/jobs/:id',
+      '/api/attendance/import/batches',
+      '/api/attendance/import/batches/:id',
+      '/api/attendance/import/batches/:id/items',
+      '/api/attendance/import/batches/:id/export.csv',
+      '/api/attendance/import/template-prefs',
+      '/api/attendance/import/upload',
+      '/api/attendance/import/upload-artifact',
+      '/api/attendance/integrations',
+      '/api/attendance/integrations/:id/runs',
+    ]
+    for (const path of boundReads) {
+      const marker = pluginSource.indexOf(`'${path}'`)
+      expect(marker, path).toBeGreaterThanOrEqual(0)
+      const next = nextRouteRegistration(marker + path.length)
+      const body = pluginSource.slice(marker, next === -1 ? marker + 1200 : next)
+      expect(body, path).not.toContain('getOrgId(req)')
+      expect(body, path).toContain('readBoundAttendanceImportOrg')
+    }
+  })
+
+  it('keeps every import and integration handler off getOrgId', () => {
+    const expected = [
+      'POST /api/attendance/import/upload-artifact',
+      'GET /api/attendance/import/template',
+      'GET /api/attendance/import/template.csv',
+      'GET /api/attendance/import/template-prefs',
+      'PUT /api/attendance/import/template-prefs',
+      'POST /api/attendance/import/upload',
+      'POST /api/attendance/import/prepare',
+      'POST /api/attendance/import/preview',
+      'POST /api/attendance/import/commit',
+      'POST /api/attendance/import/preview-async',
+      'POST /api/attendance/import/commit-async',
+      'GET /api/attendance/import/jobs/:id',
+      'POST /api/attendance/import',
+      'GET /api/attendance/integrations',
+      'POST /api/attendance/integrations',
+      'PUT /api/attendance/integrations/:id',
+      'POST /api/attendance/integrations/:id/update',
+      'DELETE /api/attendance/integrations/:id',
+      'GET /api/attendance/integrations/:id/runs',
+      'POST /api/attendance/integrations/:id/sync',
+      'GET /api/attendance/import/batches',
+      'GET /api/attendance/import/batches/:id',
+      'GET /api/attendance/import/batches/:id/items',
+      'GET /api/attendance/import/batches/:id/export.csv',
+      'POST /api/attendance/import/rollback/:id',
+    ]
+    const helperStart = pluginSource.indexOf('function addAttendanceIdUpdateRoute')
+    const helperEnd = pluginSource.indexOf('\n}\n', helperStart)
+    const helper = pluginSource.slice(helperStart, helperEnd)
+    expect(helperStart).toBeGreaterThanOrEqual(0)
+    // Both mounts receive the same handler argument. A POST /update that grew its own
+    // handler would no longer be covered by the body checks below.
+    expect(helper).toContain('context.api.http.addRoute(method, path, handler)')
+    expect(helper).toContain("context.api.http.addRoute('POST', path + '/update', handler)")
+
+    const found: string[] = []
+    const re = /(?:context\.api\.http\.addRoute|addAttendanceIdUpdateRoute)\(\s*(?:context\s*,\s*)?'([^']+)'\s*,\s*'([^']+)'/g
+    const orgBound = /withAttendanceImportPermission\(|resolveAuthenticatedAttendanceOrg\(|\baccess\.orgId\b|importAccess\.orgId/
+    for (const match of pluginSource.matchAll(re)) {
+      const method = match[1]
+      const path = match[2]
+      if (!path.startsWith('/api/attendance/import') && !path.startsWith('/api/attendance/integrations')) continue
+      const next = nextRouteRegistration((match.index ?? 0) + 10)
+      const body = pluginSource.slice(match.index ?? 0, next === -1 ? pluginSource.length : next)
+      const labels = [`${method} ${path}`]
+      if (match[0].startsWith('addAttendanceIdUpdateRoute') && method === 'PUT' && path.endsWith('/:id')) {
+        labels.push(`POST ${path}/update`)
+      }
+      for (const label of labels) {
+        expect(body, label).not.toContain('getOrgId(req)')
+        expect(orgBound.test(body), label).toBe(true)
+        found.push(label)
+      }
+    }
+    expect(found).toEqual(expected)
   })
 })

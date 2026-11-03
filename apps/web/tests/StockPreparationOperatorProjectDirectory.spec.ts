@@ -6,7 +6,7 @@ import { createApp, defineComponent, h as createElement, nextTick, ref, type App
 // The problem this closes: a floor operator could not find their own project. The only directory was
 // admin-only and values-free (status + counts + runId, no number and no name), and the confirmation
 // queue demanded a hand-typed `projectNo` — so an operator had to memorise, out of band, that
-// 230920006 is the RY2 注射水缓冲罐部件. Worse, when nothing came back they got ONE sentence,
+// 200000006 is the 示例乙型容器. Worse, when nothing came back they got ONE sentence,
 // 「都清了」, whether the project had never been synced, the number was mistyped, or the project
 // really was clear. Only the last is good news.
 //
@@ -85,8 +85,8 @@ const DIRECTORY_URL = '/api/integration/stock-preparation/operator/projects'
 const QUEUE_URL = '/api/integration/stock-preparation/confirmation-decisions'
 
 // The real shape of the problem: a number nobody remembers, and the name everybody uses.
-const P1 = { no: '230920006', name: 'RY2注射水缓冲罐部件' }
-const P2 = { no: '230920007', name: 'RY2纯化水储罐部件' }
+const P1 = { no: '200000006', name: '示例乙型容器' }
+const P2 = { no: '200000007', name: '示例甲型支架' }
 
 function project(entry: { no: string; name: string }, pendingDecisionCount: number) {
   return {
@@ -251,7 +251,7 @@ describe('一线看得见自己工厂的项目 — the operator project director
     const options = Array.from(datalist!.querySelectorAll('option'))
     expect(options.map((option) => option.getAttribute('value'))).toEqual([P1.no, P2.no])
     // The LABEL is the name, which is what lets the browser's native type-ahead match on either —
-    // an operator who only remembers 「注射水缓冲罐」 can still reach 230920006.
+    // an operator who only remembers 「示例乙型」 can still reach 200000006.
     expect(options.map((option) => option.textContent)).toEqual([P1.name, P2.name])
     // The input is wired to it.
     expect(q(root, 'stock-prep-confirmation-project-input')!.getAttribute('list'))

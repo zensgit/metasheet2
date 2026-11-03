@@ -11,6 +11,7 @@ import crypto from 'crypto'
 import type { NextFunction, Request, Response } from 'express'
 
 import { enrichRequestContext, getCorrelationId, runWithRequestContext } from '../context/request-context'
+import { isYidaOwnerHttpObservationPath } from '../integration/yida-owner-http-observation'
 
 const CORRELATION_HEADER = 'x-correlation-id'
 const CORRELATION_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
@@ -31,7 +32,8 @@ export function resolveCorrelationId(headerValue: unknown): string {
 
 export function correlationIdMiddleware(req: Request, res: Response, next: NextFunction): void {
   const incoming = req.headers[CORRELATION_HEADER]
-  const correlationId = resolveCorrelationId(incoming)
+  const privateOwnerObservation = isYidaOwnerHttpObservationPath(req.path)
+  const correlationId = privateOwnerObservation ? crypto.randomUUID() : resolveCorrelationId(incoming)
 
   req.correlationId = correlationId
   res.setHeader('X-Correlation-ID', correlationId)
@@ -40,7 +42,10 @@ export function correlationIdMiddleware(req: Request, res: Response, next: NextF
   // and whitelisted routes still get a correlation id. `userId` / `tenantId`
   // are populated later by `correlationContextEnrichmentMiddleware`, after
   // authentication has attached `req.user`.
-  runWithRequestContext({ correlationId }, () => next())
+  runWithRequestContext({
+    correlationId,
+    ...(privateOwnerObservation ? { privateObservationSurface: 'yida-owner-http' as const } : {}),
+  }, () => next())
 }
 
 export const CORRELATION_ID_HEADER = 'X-Correlation-ID'

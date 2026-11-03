@@ -71,7 +71,7 @@ async function createApp(args: {
   return { app, mockPool }
 }
 
-function defaultQueryHandler(records: any[] = []): QueryHandler {
+function defaultQueryHandler(records: any[] = [], fieldRows: any[] = FIELD_ROWS): QueryHandler {
   return async (sql, params) => {
     if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
       expect(params).toEqual([SHEET_ID])
@@ -83,11 +83,11 @@ function defaultQueryHandler(records: any[] = []): QueryHandler {
     }
     if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
       expect(params).toEqual([SHEET_ID])
-      return { rows: FIELD_ROWS }
+      return { rows: fieldRows }
     }
     if (sql.includes('SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1')) {
       expect(params).toEqual([SHEET_ID])
-      return { rows: FIELD_ROWS }
+      return { rows: fieldRows }
     }
     if (
       sql.includes('FROM meta_records') &&
@@ -190,5 +190,332 @@ describe('multitable xlsx routes', () => {
       ['Name', 'Amount'],
       ['Alpha', '12'],
     ])
+  })
+
+  // 客户反馈 2026-09-24 #4c (PR #6083 review B1/S1): a dateTime column exports as the business-zone wall clock
+  // the grid shows (`YYYY-MM-DD HH:mm`, Asia/Shanghai by default) — not the raw stored `…T01:00:00.000Z` — and
+  // that exact text imports back to the same instant. createdTime/modifiedTime use the same format.
+  test('dateTime exports as YYYY-MM-DD HH:mm in the business zone (xlsx AND csv) and re-imports to the same instant', async () => {
+    const fieldRows = [
+      { id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 },
+      { id: 'fld_when', name: 'When', type: 'dateTime', property: { timezone: 'UTC' }, order: 2 },
+      { id: 'fld_tokyo', name: 'Tokyo', type: 'dateTime', property: { timezone: 'Asia/Tokyo' }, order: 3 },
+      { id: 'fld_created', name: 'Created', type: 'createdTime', property: {}, order: 4 },
+    ]
+    const stored = '2026-09-24T01:00:00.000Z' // 09:00 Beijing, 10:00 Tokyo
+    // createdTime is record METADATA: query-service `mapRecordRow` → `injectSystemFieldValues` fills it from
+    // the row's `created_at`, never from `data` (a `data.fld_created` key would be overwritten).
+    const records = [
+      { id: 'rec_1', sheet_id: SHEET_ID, version: 1, created_at: new Date('2026-09-24T13:05:00.000Z'), data: { fld_name: 'Alpha', fld_when: stored, fld_tokyo: stored } },
+      { id: 'rec_2', sheet_id: SHEET_ID, version: 1, created_at: null, data: { fld_name: 'Junk', fld_when: 'not a date', fld_tokyo: null } },
+    ]
+    const parseBody = (res: any, callback: any) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: any) => chunks.push(Buffer.from(chunk)))
+      res.on('end', () => callback(null, Buffer.concat(chunks)))
+    }
+
+    const exporter = await createApp({ tokenPerms: ['multitable:read'], queryHandler: defaultQueryHandler(records, fieldRows) })
+    const xlsxResponse = await request(exporter.app)
+      .get(`/api/multitable/sheets/${SHEET_ID}/export-xlsx`)
+      .buffer(true)
+      .parse(parseBody)
+      .expect(200)
+    const parsed = xlsx.read(xlsxResponse.body, { type: 'buffer' })
+    const rows = xlsx.utils.sheet_to_json(parsed.Sheets[parsed.SheetNames[0]], { header: 1, raw: false, defval: '' })
+    expect(rows).toEqual([
+      ['Name', 'When', 'Tokyo', 'Created'],
+      ['Alpha', '2026-09-24 09:00', '2026-09-24 10:00', '2026-09-24 21:05'], // createdTime: business zone too
+      ['Junk', 'not a date', '', ''], // a non-date-time value keeps the raw projection, never dropped
+    ])
+
+    const csvResponse = await request(exporter.app)
+      .get(`/api/multitable/sheets/${SHEET_ID}/export-xlsx?format=csv`)
+      .buffer(true)
+      .parse(parseBody)
+      .expect(200)
+    const csvText = Buffer.from(csvResponse.body).toString('utf8').replace(/^﻿/, '')
+    expect(csvText.split(/\r?\n/)[1]).toBe('Alpha,2026-09-24 09:00,2026-09-24 10:00,2026-09-24 21:05')
+    expect(csvText).not.toContain('T01:00:00.000Z')
+    expect(csvText).not.toContain('T13:05:00.000Z')
+
+    // Round trip: the exported wall clock is what the import receives, and the write path reads it in the
+    // SAME zone rule (field zone, else business zone) → the identical instant is stored.
+    const importer = await createApp({ tokenPerms: ['multitable:read', 'multitable:write'], queryHandler: defaultQueryHandler([], fieldRows) })
+    const buffer = buildXlsxBuffer(xlsx, {
+      sheetName: 'Rows',
+      headers: ['Name', 'When', 'Tokyo'],
+      rows: [['Alpha', '2026-09-24 09:00', '2026-09-24 10:00']],
+    })
+    const importResponse = await request(importer.app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/import-xlsx`)
+      .attach('file', buffer, 'rows.xlsx')
+      .expect(200)
+    expect(importResponse.body.ok).toBe(true)
+    expect(importResponse.body.data.imported).toBe(1)
+    const insertCall = importer.mockPool.query.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO meta_records'))
+    expect(JSON.parse(String(insertCall?.[1]?.[2]))).toEqual({ fld_name: 'Alpha', fld_when: stored, fld_tokyo: stored })
+  })
+
+  // #6181 (the rule #6178 applies to `date` cells on the web): a `date` (date-only) column exports as the
+  // `YYYY-MM-DD` day the grid shows — a day as written keeps that day; a stored INSTANT (the PLM refresh writes
+  // ISO instants into date columns) is its day in the business timezone (Asia/Shanghai default), not the raw ISO
+  // and never the UTC day. A value that names no day keeps the raw projection.
+  test('date exports as the YYYY-MM-DD day the grid shows (xlsx AND csv): days as written kept, instants on their business day', async () => {
+    const fieldRows = [
+      { id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 },
+      { id: 'fld_day', name: 'Day', type: 'date', property: {}, order: 2 },
+    ]
+    const records = [
+      { id: 'rec_1', sheet_id: SHEET_ID, version: 1, data: { fld_name: 'Instant', fld_day: '2026-09-17T16:00:00.000Z' } }, // 09-18 00:00 北京时间, UTC day 09-17
+      { id: 'rec_2', sheet_id: SHEET_ID, version: 1, data: { fld_name: 'Written', fld_day: '2026-09-18' } },
+      { id: 'rec_3', sheet_id: SHEET_ID, version: 1, data: { fld_name: 'Slashes', fld_day: '2026/9/18' } },
+      { id: 'rec_4', sheet_id: SHEET_ID, version: 1, data: { fld_name: 'Junk', fld_day: 'not a date' } },
+      { id: 'rec_5', sheet_id: SHEET_ID, version: 1, data: { fld_name: 'Empty', fld_day: null } },
+    ]
+    const parseBody = (res: any, callback: any) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: any) => chunks.push(Buffer.from(chunk)))
+      res.on('end', () => callback(null, Buffer.concat(chunks)))
+    }
+
+    const exporter = await createApp({ tokenPerms: ['multitable:read'], queryHandler: defaultQueryHandler(records, fieldRows) })
+    const xlsxResponse = await request(exporter.app)
+      .get(`/api/multitable/sheets/${SHEET_ID}/export-xlsx`)
+      .buffer(true)
+      .parse(parseBody)
+      .expect(200)
+    const parsed = xlsx.read(xlsxResponse.body, { type: 'buffer' })
+    const rows = xlsx.utils.sheet_to_json(parsed.Sheets[parsed.SheetNames[0]], { header: 1, raw: false, defval: '' })
+    expect(rows).toEqual([
+      ['Name', 'Day'],
+      ['Instant', '2026-09-18'], // raw ISO before; its UTC day would be 2026-09-17
+      ['Written', '2026-09-18'],
+      ['Slashes', '2026-09-18'],
+      ['Junk', 'not a date'], // names no day → raw projection, never dropped
+      ['Empty', ''],
+    ])
+
+    const csvResponse = await request(exporter.app)
+      .get(`/api/multitable/sheets/${SHEET_ID}/export-xlsx?format=csv`)
+      .buffer(true)
+      .parse(parseBody)
+      .expect(200)
+    const csvLines = Buffer.from(csvResponse.body).toString('utf8').replace(/^\uFEFF/, '').split(/\r?\n/)
+    expect(csvLines.slice(1, 3)).toEqual(['Instant,2026-09-18', 'Written,2026-09-18'])
+    expect(csvLines.join('\n')).not.toContain('T16:00:00.000Z')
+  })
+
+  // PR #6083 review must-fix item 1: a workbook whose dateTime / date columns are Excel NATIVE date cells
+  // (numFmt 22 `m/d/yy h:mm`, numFmt 14 `m/d/yy`) — what a person gets by typing a date into Excel — must
+  // import: the dateTime cell as the Excel wall clock in the business zone, the date cell as that calendar day.
+  test('imports Excel native date cells (numFmt 22 dateTime, numFmt 14 date-only) through the record create path', async () => {
+    const fieldRows = [
+      { id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 },
+      { id: 'fld_when', name: 'When', type: 'dateTime', property: {}, order: 2 },
+      { id: 'fld_day', name: 'Day', type: 'date', property: {}, order: 3 },
+    ]
+    const ws = xlsx.utils.aoa_to_sheet([
+      ['Name', 'When', 'Day'],
+      ['Alpha', 46289.375, 46289], // 2026-09-24 09:00 / 2026-09-24 as Excel serials
+    ]) as Record<string, any>
+    ws.B2.z = 'm/d/yy h:mm'
+    ws.C2.z = 'm/d/yy'
+    const wb = xlsx.utils.book_new()
+    xlsx.utils.book_append_sheet(wb, ws, 'Rows')
+    const buffer = Buffer.from(xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer)
+    // The fixture really is a native date cell: SheetJS's own formatted read shows the US-locale text.
+    const control = xlsx.read(buffer, { type: 'buffer' })
+    expect((xlsx.utils.sheet_to_json(control.Sheets.Rows, { header: 1, raw: false, defval: '' }) as string[][])[1]).toEqual(['Alpha', '9/24/26 9:00', '9/24/26'])
+
+    const { app, mockPool } = await createApp({ tokenPerms: ['multitable:read', 'multitable:write'], queryHandler: defaultQueryHandler([], fieldRows) })
+    const response = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/import-xlsx`)
+      .attach('file', buffer, 'rows.xlsx')
+      .expect(200)
+    expect(response.body.ok).toBe(true)
+    expect(response.body.data.imported).toBe(1)
+    expect(response.body.data.failures).toEqual([])
+    const insertCall = mockPool.query.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO meta_records'))
+    expect(JSON.parse(String(insertCall?.[1]?.[2]))).toEqual({
+      fld_name: 'Alpha',
+      fld_when: '2026-09-24T01:00:00.000Z', // 09:00 北京时间 — the Excel wall clock, not the process zone
+      fld_day: '2026-09-24', // the calendar day as written
+    })
+  })
+
+  // 客户反馈 2026-09-24 #4c follow-up (deferred by PR #6083): a LOOKUP of a dateTime field exports the target
+  // column's wall clock (`YYYY-MM-DD HH:mm`, the target field's zone rule), not the raw `…Z` ISO. Lookups are
+  // computed on read, so they reach the export only where rows are hydrated through applyLookupRollup — the
+  // filtered / sorted branch when the view's filter or sort references a computed field (this test's sort).
+  // A lookup of a TEXT field that happens to hold ISO-looking text stays raw: the format follows the target's
+  // TYPE, never the value's shape.
+  test('lookup of a dateTime field exports the target wall clock; a lookup of a text field stays raw', async () => {
+    const fieldRows = [
+      { id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 },
+      { id: 'fld_link', name: 'Orders', type: 'link', property: { foreignSheetId: 'sheet_orders' }, order: 2 },
+      { id: 'fld_due_lookup', name: 'Due', type: 'lookup', property: { linkFieldId: 'fld_link', targetFieldId: 'fld_due', foreignSheetId: 'sheet_orders' }, order: 3 },
+      { id: 'fld_note_lookup', name: 'Note', type: 'lookup', property: { linkFieldId: 'fld_link', targetFieldId: 'fld_note', foreignSheetId: 'sheet_orders' }, order: 4 },
+    ]
+    const foreignFieldRows = [
+      { id: 'fld_due', name: 'Due', type: 'dateTime', property: { timezone: 'UTC' }, order: 1 },
+      { id: 'fld_note', name: 'Note', type: 'string', property: {}, order: 2 },
+    ]
+    const early = '2026-09-23T17:00:00.000Z' // 2026-09-24 01:00 北京时间 (UTC day 09-23)
+    const evening = '2026-09-24T13:05:00.000Z' // 2026-09-24 21:05 北京时间
+    const queryHandler: QueryHandler = async (sql, params) => {
+      if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+        const id = String(params?.[0])
+        return { rows: [{ id, base_id: 'base_xlsx', name: id === SHEET_ID ? 'XLSX Sheet' : 'Orders', description: null }] }
+      }
+      if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
+        return { rows: [{ id: String(params?.[0]) }] }
+      }
+      if (sql.includes('FROM meta_fields WHERE sheet_id = $1')) {
+        return { rows: params?.[0] === SHEET_ID ? fieldRows : params?.[0] === 'sheet_orders' ? foreignFieldRows : [] }
+      }
+      if (sql.includes('FROM meta_views WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'view_sorted', sheet_id: SHEET_ID, name: 'Sorted', type: 'grid', filter_info: {},
+            sort_info: { rules: [{ fieldId: 'fld_due_lookup', desc: false }] }, group_info: {}, hidden_field_ids: [], config: {},
+          }],
+        }
+      }
+      if (sql.includes('SELECT id, version, data, created_at FROM meta_records WHERE sheet_id = $1')) {
+        return { rows: [{ id: 'rec_1', version: 1, data: { fld_name: 'Alpha', fld_link: ['ord_1', 'ord_2'] }, created_at: null }] }
+      }
+      if (sql.includes('FROM meta_links')) {
+        return {
+          rows: [
+            { field_id: 'fld_link', record_id: 'rec_1', foreign_record_id: 'ord_1' },
+            { field_id: 'fld_link', record_id: 'rec_1', foreign_record_id: 'ord_2' },
+          ],
+        }
+      }
+      if (sql.includes('SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])')) {
+        expect(params?.[0]).toBe('sheet_orders')
+        return {
+          rows: [
+            { id: 'ord_1', data: { fld_due: early, fld_note: early } },
+            { id: 'ord_2', data: { fld_due: evening, fld_note: 'plain' } },
+          ],
+        }
+      }
+      return { rows: [], rowCount: 0 }
+    }
+    const parseBody = (res: any, callback: any) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: any) => chunks.push(Buffer.from(chunk)))
+      res.on('end', () => callback(null, Buffer.concat(chunks)))
+    }
+
+    vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', '')
+    try {
+      const { app } = await createApp({ tokenPerms: ['multitable:read'], queryHandler })
+      const csvResponse = await request(app)
+        .get(`/api/multitable/sheets/${SHEET_ID}/export-xlsx?format=csv&viewId=view_sorted`)
+        .buffer(true)
+        .parse(parseBody)
+        .expect(200)
+      const lines = Buffer.from(csvResponse.body).toString('utf8').replace(/^\uFEFF/, '').split(/\r?\n/)
+      expect(lines[0]).toBe('Name,Orders,Due,Note')
+      expect(lines[1]).toBe(`Alpha,"ord_1, ord_2","2026-09-24 01:00, 2026-09-24 21:05","${early}, plain"`)
+      expect(lines[1]).not.toContain(evening)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  // #6204 item 2 (#6181 edge 1): a LOOKUP of a `date` (date-only) column exports each looked-up value as the
+  // `YYYY-MM-DD` day that column shows — the same rule as a direct `date` column (#6182): a day as written keeps its
+  // day, a stored instant is its business-timezone day (Asia/Shanghai default), a value that names no day keeps its
+  // raw text. Before this, only date-TIME lookup targets were formatted and a date lookup exported the raw ISO.
+  test('lookup of a date column exports the YYYY-MM-DD day the column shows (instant on its business day)', async () => {
+    const fieldRows = [
+      { id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 },
+      { id: 'fld_link', name: 'Orders', type: 'link', property: { foreignSheetId: 'sheet_orders' }, order: 2 },
+      { id: 'fld_day_lookup', name: 'Ship day', type: 'lookup', property: { linkFieldId: 'fld_link', targetFieldId: 'fld_ship_day', foreignSheetId: 'sheet_orders' }, order: 3 },
+      { id: 'fld_note_lookup', name: 'Note', type: 'lookup', property: { linkFieldId: 'fld_link', targetFieldId: 'fld_note', foreignSheetId: 'sheet_orders' }, order: 4 },
+    ]
+    const foreignFieldRows = [
+      { id: 'fld_ship_day', name: 'Ship day', type: 'date', property: {}, order: 1 },
+      { id: 'fld_note', name: 'Note', type: 'string', property: {}, order: 2 },
+    ]
+    const instant = '2026-09-17T16:00:00.000Z' // 2026-09-18 00:00 北京时间; its UTC day is 09-17
+    const queryHandler: QueryHandler = async (sql, params) => {
+      if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+        const id = String(params?.[0])
+        return { rows: [{ id, base_id: 'base_xlsx', name: id === SHEET_ID ? 'XLSX Sheet' : 'Orders', description: null }] }
+      }
+      if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
+        return { rows: [{ id: String(params?.[0]) }] }
+      }
+      if (sql.includes('FROM meta_fields WHERE sheet_id = $1')) {
+        return { rows: params?.[0] === SHEET_ID ? fieldRows : params?.[0] === 'sheet_orders' ? foreignFieldRows : [] }
+      }
+      if (sql.includes('FROM meta_views WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'view_sorted', sheet_id: SHEET_ID, name: 'Sorted', type: 'grid', filter_info: {},
+            sort_info: { rules: [{ fieldId: 'fld_day_lookup', desc: false }] }, group_info: {}, hidden_field_ids: [], config: {},
+          }],
+        }
+      }
+      if (sql.includes('SELECT id, version, data, created_at FROM meta_records WHERE sheet_id = $1')) {
+        return { rows: [{ id: 'rec_1', version: 1, data: { fld_name: 'Alpha', fld_link: ['ord_1', 'ord_2', 'ord_3'] }, created_at: null }] }
+      }
+      if (sql.includes('FROM meta_links')) {
+        return {
+          rows: [
+            { field_id: 'fld_link', record_id: 'rec_1', foreign_record_id: 'ord_1' },
+            { field_id: 'fld_link', record_id: 'rec_1', foreign_record_id: 'ord_2' },
+            { field_id: 'fld_link', record_id: 'rec_1', foreign_record_id: 'ord_3' },
+          ],
+        }
+      }
+      if (sql.includes('SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])')) {
+        expect(params?.[0]).toBe('sheet_orders')
+        return {
+          rows: [
+            { id: 'ord_1', data: { fld_ship_day: instant, fld_note: instant } },
+            { id: 'ord_2', data: { fld_ship_day: '2026-09-20', fld_note: 'plain' } },
+            { id: 'ord_3', data: { fld_ship_day: 'not a day', fld_note: 'x' } },
+          ],
+        }
+      }
+      return { rows: [], rowCount: 0 }
+    }
+    const parseBody = (res: any, callback: any) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: any) => chunks.push(Buffer.from(chunk)))
+      res.on('end', () => callback(null, Buffer.concat(chunks)))
+    }
+
+    vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', '')
+    try {
+      const { app } = await createApp({ tokenPerms: ['multitable:read'], queryHandler })
+      const csvResponse = await request(app)
+        .get(`/api/multitable/sheets/${SHEET_ID}/export-xlsx?format=csv&viewId=view_sorted`)
+        .buffer(true)
+        .parse(parseBody)
+        .expect(200)
+      const lines = Buffer.from(csvResponse.body).toString('utf8').replace(/^﻿/, '').split(/\r?\n/)
+      expect(lines[0]).toBe('Name,Orders,Ship day,Note')
+      // Ship day: instant → its business day (raw ISO before; its UTC day would be 09-17), day as written kept,
+      // junk kept raw. Note (a text target holding the same ISO text) stays raw: the format follows the TYPE.
+      expect(lines[1]).toBe(`Alpha,"ord_1, ord_2, ord_3","2026-09-18, 2026-09-20, not a day","${instant}, plain, x"`)
+
+      const xlsxResponse = await request(app)
+        .get(`/api/multitable/sheets/${SHEET_ID}/export-xlsx?viewId=view_sorted`)
+        .buffer(true)
+        .parse(parseBody)
+        .expect(200)
+      const parsed = xlsx.read(xlsxResponse.body, { type: 'buffer' })
+      const rows = xlsx.utils.sheet_to_json(parsed.Sheets[parsed.SheetNames[0]], { header: 1, raw: false, defval: '' }) as unknown[][]
+      expect(rows[1]?.[2]).toBe('2026-09-18, 2026-09-20, not a day')
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 })

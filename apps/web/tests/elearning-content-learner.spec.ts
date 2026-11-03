@@ -166,4 +166,14 @@ describe('ElearningContentLearnerCourse', () => {
     expect(h.completed).toHaveBeenCalledTimes(1)
     expect(root.querySelector('[data-testid="elearning-content-learner-status"]')?.textContent).toContain('invalid_response')
   })
+
+  it('explains a 403 ORG_CONTEXT_REQUIRED on open instead of printing the raw code', async () => {
+    h.open.mockRejectedValueOnce(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+    const root = mountView()
+    ;(root.querySelector('[data-testid="elearning-content-open-0"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-content-learner-status"]')?.textContent?.trim())
+      .toBe('当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。')
+    expect(h.completed).not.toHaveBeenCalled()
+  })
 })

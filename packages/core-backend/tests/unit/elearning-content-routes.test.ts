@@ -20,6 +20,10 @@ import {
   ElearningOpenCompletionStoreError,
   type RecordElearningOpenCompletionInput,
 } from '../../src/services/elearning-open-completion-postgres'
+import {
+  searchElearningAssignees,
+  type SearchElearningAssigneesInput,
+} from '../../src/services/elearning-assignee-directory'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const ORG = 'org-content-route'
@@ -96,8 +100,10 @@ function makeApp(over: {
   revisionError?: ElearningContentRevisionStoreError
   publishError?: ElearningContentCoursePublishError
   openError?: ElearningOpenCompletionStoreError
+  assigneeRows?: Array<Record<string, unknown>>
 } = {}) {
   const revisionCalls: CreateElearningContentRevisionInput[] = []
+  const searchCalls: SearchElearningAssigneesInput[] = []
   const publishCalls: PublishElearningContentCourseInput[] = []
   const openCalls: RecordElearningOpenCompletionInput[] = []
   const order: string[] = []
@@ -141,6 +147,12 @@ function makeApp(over: {
       if (over.openError) throw over.openError
       return OPEN_RESULT
     },
+    searchElearningAssignees: async (_db, input) => {
+      order.push('search')
+      searchCalls.push(input)
+      // Deliberately over-wide rows: the route must still answer id + name + email only.
+      return { items: (over.assigneeRows ?? []) as never }
+    },
   })
   if (router) app.use(router)
   pinned.setApp(app)
@@ -150,8 +162,175 @@ function makeApp(over: {
     revisionCalls,
     publishCalls,
     openCalls,
+    searchCalls,
   }
 }
+
+interface CapturedQuery {
+  sql: string
+  params: unknown[]
+}
+
+function captureDb(rows: Array<Record<string, unknown>>): {
+  db: ElearningContentRouteDeps['db']
+  queries: CapturedQuery[]
+} {
+  const queries: CapturedQuery[] = []
+  return {
+    queries,
+    db: {
+      transaction: async (handler) => handler({
+        query: async (sql: string, params: unknown[] = []) => {
+          queries.push({ sql, params })
+          return { rows, rowCount: rows.length }
+        },
+      }),
+    },
+  }
+}
+
+describe('elearning assignee search (F13 picker)', () => {
+  it('runs flags -> identity -> org -> adminGuard before the lookup', async () => {
+    for (const env of [{}, { ELEARNING_ENABLED: 'true' }]) {
+      const off = makeApp({ env: env as NodeJS.ProcessEnv })
+      expect((await off.api.get('/api/elearning/admin/assignees?q=a')).status).toBe(404)
+      expect(off.searchCalls).toEqual([])
+    }
+
+    const anonymous = makeApp({ viewer: null })
+    expect((await anonymous.api.get('/api/elearning/admin/assignees?q=a')).status).toBe(401)
+    expect(anonymous.order).toEqual([])
+    expect(anonymous.searchCalls).toEqual([])
+
+    const noOrg = makeApp({ org: null })
+    const noOrgResponse = await noOrg.api.get('/api/elearning/admin/assignees?q=a')
+    expect(noOrgResponse.status).toBe(403)
+    expect(noOrgResponse.body).toEqual({ error: 'ORG_CONTEXT_REQUIRED' })
+    expect(noOrg.order).toEqual([])
+    expect(noOrg.searchCalls).toEqual([])
+
+    const denied = makeApp({ adminAllowed: false })
+    expect((await denied.api.get('/api/elearning/admin/assignees?q=a')).status).toBe(403)
+    expect(denied.order).toEqual(['admin'])
+    expect(denied.searchCalls).toEqual([])
+
+    // The learner read guard is not enough: a reader is never asked.
+    const readerOnly = makeApp({ adminAllowed: false, readAllowed: true })
+    expect((await readerOnly.api.get('/api/elearning/admin/assignees')).status).toBe(403)
+    expect(readerOnly.order).not.toContain('read')
+  })
+
+  it('passes the JWT-bound org, the trimmed term and the limit, and answers id + name + email only', async () => {
+    const state = makeApp({
+      assigneeRows: [
+        { id: 'user-1', name: 'Alice', email: 'alice@example.test', role: 'admin', is_admin: true, mobile: '1' },
+        { id: 'user-2', name: null, email: null },
+      ],
+    })
+    const response = await state.api.get('/api/elearning/admin/assignees?q=%20ali%20&limit=5')
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      items: [
+        { id: 'user-1', name: 'Alice', email: 'alice@example.test' },
+        { id: 'user-2', name: null, email: null },
+      ],
+    })
+    expect(state.searchCalls).toEqual([{ orgId: ORG, query: 'ali', limit: 5 }])
+    expect(state.order).toEqual(['admin', 'search'])
+
+    const empty = makeApp()
+    expect((await empty.api.get('/api/elearning/admin/assignees')).status).toBe(200)
+    expect(empty.searchCalls).toEqual([{ orgId: ORG, query: '', limit: 20 }])
+  })
+
+  it('rejects a client-supplied org or any other unknown / malformed query without calling the lookup', async () => {
+    const state = makeApp()
+    for (const path of [
+      '/api/elearning/admin/assignees?q=a&orgId=evil',
+      '/api/elearning/admin/assignees?q=a&tenantId=evil',
+      '/api/elearning/admin/assignees?q=a&q=b',
+      '/api/elearning/admin/assignees?q[]=a',
+      '/api/elearning/admin/assignees?limit=0',
+      '/api/elearning/admin/assignees?limit=51',
+      '/api/elearning/admin/assignees?limit=5.5',
+      '/api/elearning/admin/assignees?limit=abc',
+      `/api/elearning/admin/assignees?q=${'x'.repeat(101)}`,
+      '/api/elearning/admin/assignees?q=a%00b',
+    ]) {
+      const response = await state.api.get(path)
+      expect(response.status, path).toBe(400)
+      expect(response.body).toEqual({ error: 'invalid_input' })
+    }
+    expect(state.searchCalls).toEqual([])
+    expect((await state.api.get(`/api/elearning/admin/assignees?q=${'x'.repeat(100)}&limit=50`)).status)
+      .toBe(200)
+  })
+
+  it('reads only active members of the given org, by name or email, with LIKE metacharacters escaped', async () => {
+    const { db, queries } = captureDb([
+      { id: 'user-1', name: 'Alice', email: 'alice@example.test' },
+      { id: 'user-2', name: '  ', email: '' },
+      { id: '', name: 'No id', email: 'x@example.test' },
+      { id: null, name: 'Null id', email: null },
+    ])
+    const result = await searchElearningAssignees(db, {
+      orgId: ORG,
+      query: ' 50%_off\\ ',
+      limit: 7,
+    })
+    expect(result).toEqual({
+      items: [
+        { id: 'user-1', name: 'Alice', email: 'alice@example.test' },
+        { id: 'user-2', name: null, email: null },
+      ],
+    })
+    expect(queries).toHaveLength(1)
+    const [{ sql, params }] = queries
+    expect(params).toEqual([
+      ORG,
+      '50%_off\\',
+      '%50\\%\\_off\\\\%',
+      7,
+      ['%@placeholder.local', '%@migration-revert.local', '%@trusted-token.local'],
+    ])
+    const compact = sql.replace(/\s+/g, ' ')
+    expect(compact).toContain('JOIN user_orgs membership ON membership.user_id = platform_user.id AND membership.org_id = $1 AND membership.is_active = TRUE')
+    expect(compact).toContain('WHERE platform_user.is_active = TRUE')
+    expect(compact).toContain("COALESCE(platform_user.name, '') ILIKE $3 ESCAPE '\\'")
+    // Placeholder mailboxes are neither matched nor projected.
+    expect(compact).toContain("( COALESCE(platform_user.email, '') ILIKE $3 ESCAPE '\\' AND NOT lower(COALESCE(platform_user.email, '')) LIKE ANY($5::text[]) )")
+    expect(compact).toContain("CASE WHEN lower(COALESCE(platform_user.email, '')) LIKE ANY($5::text[]) THEN NULL ELSE platform_user.email END AS email")
+    expect(compact).toContain('LIMIT $4')
+    expect(compact).toMatch(/^\/\* elearning-assignee-directory:search \*\/ SELECT platform_user\.id, platform_user\.name, CASE WHEN /)
+    expect(compact).toContain(' END AS email FROM users platform_user ')
+    expect(compact).not.toMatch(/is_admin|mobile|department|last_login|password|role/i)
+  })
+
+  it('never returns a placeholder mailbox and clamps the limit even when called directly', async () => {
+    const { db, queries } = captureDb([
+      { id: 'dt-1', name: '钉钉用户', email: 'dingtalk_union123@placeholder.local' },
+      { id: 'dt-2', name: null, email: 'DingTalk_Open9@PLACEHOLDER.LOCAL ' },
+      { id: 'mig-1', name: 'Migrated', email: 'mig-1@migration-revert.local' },
+      { id: 'tok-1', name: 'Token', email: 'tok-1@trusted-token.local' },
+      { id: 'real-1', name: 'Real', email: 'real@placeholder.local.example.test' },
+    ])
+    const result = await searchElearningAssignees(db, { orgId: ORG, query: 'a', limit: 500 })
+    expect(result.items).toEqual([
+      { id: 'dt-1', name: '钉钉用户', email: null },
+      { id: 'dt-2', name: null, email: null },
+      { id: 'mig-1', name: 'Migrated', email: null },
+      { id: 'tok-1', name: 'Token', email: null },
+      { id: 'real-1', name: 'Real', email: 'real@placeholder.local.example.test' },
+    ])
+    expect(JSON.stringify(result)).not.toMatch(/placeholder\.local"|migration-revert|trusted-token|union123|Open9/i)
+    expect(queries[0]?.params[3]).toBe(50)
+    for (const [limit, expected] of [[0, 1], [-3, 1], [7.9, 7], [Number.NaN, 20]] as const) {
+      const run = captureDb([])
+      await searchElearningAssignees(run.db, { orgId: ORG, query: '', limit })
+      expect(run.queries[0]?.params[3]).toBe(expected)
+    }
+  })
+})
 
 describe('elearning content routes', () => {
   it('mounts only for exact master plus CONTENT true', async () => {

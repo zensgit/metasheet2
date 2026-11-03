@@ -186,6 +186,35 @@ describe('MetaDashboardView', () => {
     expect(container.querySelector('[data-empty]')).toBeTruthy()
   })
 
+  // S1 (2026-09-25 review, A2 #6080): MultitableWorkbench's dashboard-exit spec stubs out this whole
+  // component, so it would never notice if the real back-to-table button were deleted — that spec
+  // only pins that emitting `close` (from whatever fires it) resets `showDashboardView`. This test
+  // pins the OTHER half: the real component actually renders that button, localizes it, and emits
+  // `close` on click.
+  it('A2: renders a back-to-table button, localizes it, and emits close on click', async () => {
+    const { client } = mockClient([fakeDashboard()], [fakeChart()])
+    const onClose = vi.fn()
+    const { container, app } = mount({ sheetId: 'sheet_1', client, onClose })
+    await flushPromises()
+
+    const backButton = () => container.querySelector('[data-action="back-to-table"]') as HTMLButtonElement | null
+    expect(backButton()).toBeTruthy()
+    expect(backButton()!.textContent).toBe('Back to table')
+
+    useLocale().setLocale('zh-CN')
+    await nextTick()
+    expect(backButton()!.textContent).toBe('返回表格')
+    useLocale().setLocale('en')
+    await nextTick()
+
+    expect(onClose).not.toHaveBeenCalled()
+    backButton()!.click()
+    await flushPromises()
+    expect(onClose).toHaveBeenCalledTimes(1)
+
+    app.unmount()
+  })
+
   it('renders dashboard with panels', async () => {
     const { client } = mockClient([fakeDashboard()], [fakeChart()])
     const { container } = mount({ sheetId: 'sheet_1', client })

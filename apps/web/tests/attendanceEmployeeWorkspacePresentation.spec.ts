@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { createApp, nextTick } from 'vue'
 import { describe, expect, it } from 'vitest'
 import AttendanceEmployeeWorkspace from '../src/views/attendance/AttendanceEmployeeWorkspace.vue'
@@ -9,10 +11,19 @@ import {
   greetingHeadline,
   isClockedIn,
   parseClockHour,
+  resolveHeroPunchEmphasis,
+  resolveTodoMark,
   suggestOffDutyTime,
   workWindowShortLabel,
 } from '../src/views/attendance/attendanceEmployeeWorkspacePresentation'
 import { buildEmployeeWorkspaceProps } from '../verification/attendance-employee-overview-first-viewport-fixtures'
+import {
+  formatAttendanceClockTime,
+  formatAttendanceDateKey,
+  formatAttendanceDateTime,
+  formatAttendanceWeekday,
+  normalizeAttendanceTimeZone,
+} from '../src/views/attendance/attendanceDateTimePresentation'
 
 const en = (english: string, _zh: string) => english
 const zh = (_english: string, chinese: string) => chinese
@@ -75,10 +86,188 @@ describe('attendanceEmployeeWorkspacePresentation', () => {
     expect(suggestOffDutyTime('—')).toBeNull()
   })
 
-  it('treats a check-in time as clocked in', () => {
-    expect(isClockedIn({ checkIn: '09:18', checkOut: null }, '--:--')).toBe(true)
-    expect(isClockedIn({ checkIn: null, checkOut: null }, '09:18')).toBe(true)
-    expect(isClockedIn(null, '--:--')).toBe(false)
+  it('treats only an open check-in as clocked in', () => {
+    expect(isClockedIn({ checkIn: '09:18', checkOut: null })).toBe(true)
+    expect(isClockedIn({ checkIn: '09:18', checkOut: '18:02' })).toBe(false)
+    expect(isClockedIn({ checkIn: null, checkOut: '18:02' })).toBe(false)
+    expect(isClockedIn(null)).toBe(false)
+  })
+
+  it('emphasizes the next punch CTA without inventing a third action', () => {
+    expect(resolveHeroPunchEmphasis(null)).toBe('check_in')
+    expect(resolveHeroPunchEmphasis({ checkIn: null, checkOut: null })).toBe('check_in')
+    expect(resolveHeroPunchEmphasis({ checkIn: '09:18', checkOut: null })).toBe('check_out')
+    expect(resolveHeroPunchEmphasis({ checkIn: '09:18', checkOut: '18:02' })).toBe('complete')
+  })
+
+  it('shows not-clocked-in and emphasizes check-in when today has no timeline', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp(AttendanceEmployeeWorkspace, {
+      ...buildEmployeeWorkspaceProps('empty'),
+      tr: en,
+      heroTimeline: null,
+      workbenchRecordStatus: null,
+      workbenchStatusDescription: 'No attendance record for today yet.',
+      selfServiceNeedsSetupHint: false,
+    })
+    app.mount(container)
+    await nextTick()
+
+    expect(container.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Not clocked in yet')
+    expect(container.querySelector('[data-attendance-clock-state]')?.getAttribute('data-attendance-clock-state')).toBe('check_in')
+    expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.getAttribute('data-attendance-hero-next')).toBe('true')
+    expect(container.querySelector('[data-attendance-hero-cta="check_out"]')?.getAttribute('data-attendance-hero-next')).toBeNull()
+    expect(container.querySelector('[data-testid="attendance-hero-timeline"]')).toBeNull()
+    expect(container.textContent).toContain('No attendance record for today yet.')
+    expect(container.textContent).not.toContain('Clocked out')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('shows unknown today status without suggesting a punch or fabricating zero hours', async () => {
+    const container = document.createElement('div')
+    const app = createApp(AttendanceEmployeeWorkspace, {
+      ...buildEmployeeWorkspaceProps('empty'), tr: en, heroTimeline: null,
+      todayStateHint: 'Loading today’s status…',
+    })
+    app.mount(container)
+    await nextTick()
+    expect(container.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Loading today’s status…')
+    expect(container.querySelector('[data-attendance-clock-state]')?.getAttribute('data-attendance-clock-state')).toBe('unknown')
+    expect(container.querySelector('[data-attendance-hero-next="true"]')).toBeNull()
+    expect(container.querySelector('[data-selfservice-card="status"]')?.textContent).not.toContain('0m')
+    expect(container.querySelector<HTMLButtonElement>('[data-attendance-hero-cta="check_in"]')?.disabled).toBe(false)
+    app.unmount()
+  })
+
+  it('keeps the makeup 面性 icon on 缺卡 / anomaly rows and varies other todo marks', () => {
+    expect(resolveTodoMark('anomaly')).toEqual({ icon: 'clock-plus', tone: 'makeup' })
+    expect(resolveTodoMark('punch_failure')).toEqual({ icon: 'clock-plus', tone: 'makeup' })
+    expect(resolveTodoMark('request_pending')).toEqual({ icon: 'calendar', tone: 'leave' })
+    expect(resolveTodoMark('request_rejected')).toEqual({ icon: 'calendar', tone: 'leave' })
+    expect(resolveTodoMark('record_review')).toEqual({ icon: 'pin', tone: 'review' })
+    expect(resolveTodoMark('setup_needed')).toEqual({ icon: 'user', tone: 'setup' })
+    expect(resolveTodoMark('all_clear')).toEqual({ icon: 'check', tone: 'clear' })
+    expect(resolveTodoMark('unknown_status')).toEqual({ icon: 'pin', tone: 'review' })
+  })
+
+  it('renders work dates and punch clocks in the resolved attendance rule timezone', () => {
+    const instant = new Date('2026-09-10T19:15:49.000Z')
+    expect(formatAttendanceDateKey(instant, 'Asia/Shanghai')).toBe('2026-09-11')
+    expect(formatAttendanceDateKey(instant, 'America/Los_Angeles')).toBe('2026-09-10')
+    expect(formatAttendanceClockTime(instant, 'Asia/Shanghai')).toBe('03:15')
+    expect(formatAttendanceClockTime(instant, 'America/Los_Angeles')).toBe('12:15')
+  })
+
+  it('refuses to guess browser-local dates or times when the rule timezone is unavailable', () => {
+    const instant = new Date('2026-09-10T19:15:49.000Z')
+    expect(normalizeAttendanceTimeZone(' Mars/Olympus ')).toBeNull()
+    expect(normalizeAttendanceTimeZone('')).toBeNull()
+    expect(formatAttendanceDateKey(instant, 'Mars/Olympus')).toBeNull()
+    expect(formatAttendanceClockTime(instant, null)).toBeNull()
+    expect(formatAttendanceWeekday(instant, 'en-US', 'Mars/Olympus')).toBeNull()
+    expect(formatAttendanceDateTime(instant.toISOString(), 'en-US', 'Mars/Olympus')).toBe('--')
+  })
+
+  it('renders a completed pair as clocked out with both timestamps', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp(AttendanceEmployeeWorkspace, {
+      ...buildEmployeeWorkspaceProps('normal'),
+      tr: en,
+      heroTimeline: { checkIn: '09:18', checkOut: '18:02' },
+    })
+    app.mount(container)
+    await nextTick()
+
+    expect(container.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked out')
+    expect(container.querySelector('[data-attendance-clock-state]')?.getAttribute('data-attendance-clock-state')).toBe('complete')
+    expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.getAttribute('data-attendance-hero-next')).toBeNull()
+    expect(container.querySelector('[data-attendance-hero-cta="check_out"]')?.getAttribute('data-attendance-hero-next')).toBeNull()
+    expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.classList.contains('attendance__btn--hero')).toBe(true)
+    expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.classList.contains('attendance__btn--primary')).toBe(true)
+    expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.classList.contains('attendance-ew__punch-btn--complete')).toBe(true)
+    expect(container.querySelector('[data-attendance-hero-cta="check_out"]')?.classList.contains('attendance-ew__punch-btn--complete')).toBe(true)
+    const metricText = container.querySelector('[data-selfservice-card="status"]')?.textContent ?? ''
+    expect(metricText).toContain('In09:18')
+    expect(metricText).toContain('Out18:02')
+    expect(metricText).toContain('Hours')
+    expect(metricText).not.toContain("Today's hours")
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('promotes Check Out as the next CTA after an open check-in', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp(AttendanceEmployeeWorkspace, {
+      ...buildEmployeeWorkspaceProps('empty'),
+      tr: en,
+      heroTimeline: { checkIn: '09:18', checkOut: null },
+    })
+    app.mount(container)
+    await nextTick()
+
+    expect(container.querySelector('[data-attendance-hero-cta="check_out"]')?.getAttribute('data-attendance-hero-next')).toBe('true')
+    expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.getAttribute('data-attendance-hero-next')).toBeNull()
+    expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.classList.contains('attendance-ew__punch-btn--rest')).toBe(true)
+    expect(container.querySelector('[data-attendance-hero-cta="check_out"]')?.classList.contains('attendance-ew__punch-btn--next')).toBe(true)
+    expect(container.querySelector('[data-attendance-clock-state]')?.getAttribute('data-attendance-clock-state')).toBe('check_out')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('keeps first-viewport IA: punch next-action, anomaly makeup mark, empty request footer, 常用 after primary', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp(AttendanceEmployeeWorkspace, {
+      ...buildEmployeeWorkspaceProps('missing'),
+      tr: zh,
+    })
+    app.mount(container)
+    await nextTick()
+
+    const primary = container.querySelector('[data-attendance-overview-primary]')
+    const common = container.querySelector('[data-selfservice-card="actions"]')
+    expect(primary?.contains(container.querySelector('[data-testid="attendance-hero-punch"]')!)).toBe(true)
+    expect(primary?.contains(container.querySelector('[data-attendance-overview-attention]')!)).toBe(true)
+    expect(primary?.contains(container.querySelector('[data-selfservice-card="requests"]')!)).toBe(true)
+    expect(primary?.contains(common)).toBe(false)
+    expect(common?.previousElementSibling).toBe(primary)
+
+    const todoMark = container.querySelector('[data-attendance-todo-mark]')
+    expect(todoMark?.getAttribute('data-attendance-todo-tone')).toBe('makeup')
+    expect(todoMark?.textContent?.trim()).toBe('')
+    expect(todoMark?.querySelector('svg')).toBeTruthy()
+    expect(container.querySelector('[data-attendance-todo-empty]')).toBeNull()
+    expect(container.querySelector('[data-attendance-request-empty]')?.textContent).toContain('暂无待审批')
+    expect(container.querySelector('[data-selfservice-action="missing-punch"]')?.querySelector('.attendance-ew__tile-label')?.textContent).toContain('补卡')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('renders a calm empty 今日待办 with a check mark, not the makeup icon', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp(AttendanceEmployeeWorkspace, {
+      ...buildEmployeeWorkspaceProps('normal'),
+      tr: zh,
+    })
+    app.mount(container)
+    await nextTick()
+
+    expect(container.querySelector('[data-attendance-todo-empty]')).toBeTruthy()
+    expect(container.querySelector('[data-attendance-todo-mark]')?.getAttribute('data-attendance-todo-tone')).toBe('clear')
+    expect(container.querySelector('[data-attendance-overview-attention]')?.textContent).toContain('当前已处理完毕')
+    expect(container.querySelector('[data-attendance-overview-attention-action]')).toBeNull()
+
+    app.unmount()
+    container.remove()
   })
 })
 
@@ -159,6 +348,17 @@ describe('employee self-balance card copy', () => {
     expect(text).toContain('已过期 0天')
     expect(text).not.toContain('分钟剩余')
     unmount()
+  })
+
+  it('uses the shared calm surface tokens without a decorative page wash', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/views/attendance/AttendanceEmployeeWorkspace.vue'), 'utf8')
+    expect(css).toMatch(/\.attendance__hero-punch\s*\{[^}]*border:\s*1px solid var\(--ms-border-light\)/)
+    expect(css).toMatch(/\.attendance__hero-punch\s*\{[^}]*box-shadow:\s*var\(--ms-shadow-card\)/)
+    expect(css).toMatch(/\.attendance__btn--primary\s*\{[^}]*background:\s*var\(--ms-color-primary\)/)
+    expect(css).toMatch(/\.attendance-ew__primary\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1\.6fr\) minmax\(0,\s*1fr\)/)
+    expect(css).not.toMatch(/radial-gradient/)
+    expect(css).not.toMatch(/#3370ff/)
+    expect(css).toMatch(/\.attendance-ew__history-filters-panel\s*\{[^}]*minmax\(140px,\s*1fr\)/)
   })
 
   it('keeps the empty-copy path when no summary is loaded', async () => {

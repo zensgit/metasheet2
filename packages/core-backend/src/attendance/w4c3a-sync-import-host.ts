@@ -1,3 +1,4 @@
+import { acquireAttendanceImportTimezonePrefixV1, prepareAttendanceImportTimezoneSourceV1 } from './attendance-business-trip-locks'
 /**
  * W4C-3a P06 — core-owned modern synchronous import commit host.
  *
@@ -35,7 +36,7 @@ import {
   type AttendanceW4TransactionClientV1,
   type VerifiedAttendanceOperationIdentityV1,
 } from './w4c0-identity'
-import { runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
+import { runAttendanceResultOperationTransactionV1, attendanceW4ConnectionDiscardV1 } from './w4c0-operation-registry'
 import {
   claimAttendanceCanonicalImportRegistryV1,
   executeAttendanceCanonicalImportPlanV1,
@@ -89,7 +90,8 @@ export type AttendanceSyncImportHostConnectionV1 = AttendanceW4TransactionClient
 export type AttendanceSyncImportHostDepsV1 = Readonly<{
   acquireConnection(): Promise<{
     client: AttendanceSyncImportHostConnectionV1
-    release(): void
+    /** pg's `release(err?)`: a truthy error destroys the connection instead of returning it. */
+    release(error?: Error): void
   }>
 }>
 
@@ -376,11 +378,13 @@ export function createAttendanceSyncImportHostV1(
     async commitSyncImportPlanV1(input) {
       validateHostInput(input)
       const acquired = await deps.acquireConnection()
+      let discard: Error | undefined
       try {
         const startedAt = Date.now()
         return await runAttendanceResultOperationTransactionV1(
           acquired.client,
           async (trx) => {
+            await acquireAttendanceImportTimezonePrefixV1(trx, input.orgId)
             const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(input.orgId)
             await acquireAttendanceCalculationRolloutLock(trx, orgKey, 'shared')
             const posture = await resolveSegmentCalculationPosture(
@@ -585,6 +589,8 @@ export function createAttendanceSyncImportHostV1(
               }
             }
 
+            if (input.groupEffects.length > 0) await prepareAttendanceImportTimezoneSourceV1(trx, input.orgId)
+
             // Freeze preconditions (class-11 inside strict/bulk freeze helpers).
             const frozenRecords =
               await lockAndFreezeAttendanceRecordPreconditionsV1(
@@ -786,8 +792,13 @@ export function createAttendanceSyncImportHostV1(
             })
           },
         )
+      } catch (error) {
+        // Settlement coordination (r6.1 §1.1 P1-1): a connection whose state the runner could not vouch for is
+        // destroyed, not returned; every other error returns it as before. The error itself goes up unchanged.
+        discard = attendanceW4ConnectionDiscardV1(error)
+        throw error
       } finally {
-        acquired.release()
+        acquired.release(discard)
       }
     },
   })

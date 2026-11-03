@@ -174,7 +174,9 @@ import { useLocale } from '../../../composables/useLocale'
 import { useAuth } from '../../../composables/useAuth'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import { canRunStockPrepInstall } from '../../../services/integration/stockPreparation/workbenchAccess'
+import type { StockPrepGettingStartedBinding } from '../../../services/integration/stockPreparation/gettingStarted'
 import {
+  countDataSourceBackedCandidates,
   readStockPreparationSourceBinding,
   setStockPreparationSourceBinding,
   stockPrepSourceRefusalText,
@@ -189,16 +191,17 @@ import {
 const props = defineProps<{ scope: IntegrationScope }>()
 
 /**
- * WHAT THE SERVER SAID ABOUT THE BINDING, handed upward so the getting-started wizard's steps ①③ can
- * PROJECT this answer instead of re-deriving 「备料用哪条源」 out of the source preflight's topology
- * check (R7). `null` means "no answer exists" — the read failed, or was never attempted because this
+ * WHAT THE SERVER SAID ABOUT THE BINDING, handed upward so the getting-started wizard's steps
+ * (1b) and (3) can PROJECT this answer instead of re-deriving 「备料用哪条源」 out of the source
+ * preflight's topology check (R7). NOT step (1a): `eligibleSources` enumerates external SYSTEMS, so
+ * it is silent about whether a DATA SOURCE is registered, and the wizard reads that separately. `null` means "no answer exists" — the read failed, or was never attempted because this
  * caller may not run it — which the wizard renders as 「? 看不到」, never as 「没做」.
  *
  * This is a report, not a control: nothing here becomes a button, so the workbench capability mirror
  * (`workbenchAccess.ts` ↔ the plugin's `.cjs`) is untouched by it.
  */
 const emit = defineEmits<{
-  (event: 'binding-read', binding: { effectiveExternalSystemId: string | null; eligibleSourceCount: number } | null): void
+  (event: 'binding-read', binding: StockPrepGettingStartedBinding | null): void
 }>()
 
 const { locale } = useLocale()
@@ -269,6 +272,14 @@ function publishBinding(): void {
     ? {
         effectiveExternalSystemId: view.value.effectiveExternalSystemId,
         eligibleSourceCount: Array.isArray(view.value.eligibleSources) ? view.value.eligibleSources.length : 0,
+        // WHICH ROAD, for the wizard's (1b) evidence line. A subset of the count above, over the
+        // `kind` token the server already decided — the page adds no eligibility rule of its own.
+        dataSourceBackedSourceCount: countDataSourceBackedCandidates(view.value.eligibleSources),
+        // THE ACTION'S OWN FROZEN KIND, as the server resolved it. The wizard needs it to know
+        // whether ①a/①b APPLY AT ALL: a `bridge:legacy-sql-readonly` deployment can never be
+        // offered a `data-source:sql-readonly` system, so telling it to go register a data source
+        // is telling it to do work that cannot help. Projected, never re-derived (R7).
+        requiredKind: view.value.effectiveSourceKind,
       }
     : null)
 }

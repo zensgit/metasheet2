@@ -118,6 +118,8 @@ function storeOver(rows) {
       async select() { return [] },
       async insertOne() { return null },
       async updateRow() { return null },
+      // Required by the store since the external-system delete lock protocol; answers "live".
+      async selectOneForKeyShare(_t, where) { return { id: where.id, tenant_id: where.tenant_id } },
       async transaction(fn) { return fn(this) },
     },
   })
@@ -516,6 +518,7 @@ async function refusalsAreValuesFreeAndClosed() {
       async select() { return [] },
       async insertOne() { return null },
       async updateRow() { return null },
+      async selectOneForKeyShare() { throw new Error(ATTACKER) },
       async transaction(fn) { return fn(this) },
     },
   })

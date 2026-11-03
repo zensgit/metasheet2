@@ -8,6 +8,8 @@ const {
   transformValue,
 } = require(path.join(__dirname, '..', 'lib', 'transform-engine.cjs'))
 const {
+  USER_REGEX_MAX_PATTERN_LEN,
+  USER_REGEX_MAX_SUBJECT_LEN,
   validateRecord,
   validateValue,
 } = require(path.join(__dirname, '..', 'lib', 'validator.cjs'))
@@ -140,6 +142,36 @@ async function main() {
   assert.equal(unsupported.length, 1)
   assert.equal(unsupported[0].code, 'UNSUPPORTED_RULE')
   assertStructuredError(unsupported[0])
+
+  // --- 6. Length limits on the pattern rule: a refusal is its own code, not PATTERN
+  const patternRule = [{ type: 'pattern', params: { regex: '^a+$' } }]
+  assert.deepEqual(validateValue('a'.repeat(USER_REGEX_MAX_SUBJECT_LEN), patternRule, 'atCap'), [], 'a value AT the limit is evaluated')
+  const overCap = validateValue('a'.repeat(USER_REGEX_MAX_SUBJECT_LEN + 1), patternRule, 'overCap')
+  assert.equal(overCap.length, 1)
+  assert.equal(overCap[0].code, 'PATTERN_NOT_EVALUATED')
+  assert.equal(overCap[0].details.reason, 'subject-too-long')
+  assert.equal(overCap[0].details.limit, USER_REGEX_MAX_SUBJECT_LEN)
+  assertStructuredError(overCap[0])
+
+  const longPattern = validateValue('abc', [{ type: 'pattern', params: { regex: 'a'.repeat(USER_REGEX_MAX_PATTERN_LEN + 1) } }], 'longPattern')
+  assert.equal(longPattern.length, 1)
+  assert.equal(longPattern[0].code, 'PATTERN_NOT_EVALUATED')
+  assert.equal(longPattern[0].details.reason, 'pattern-too-long')
+  assertStructuredError(longPattern[0])
+
+  // INVALID_RULE keeps precedence over a length refusal (the gate runs after compilePattern).
+  const invalidAndLong = validateValue('a'.repeat(USER_REGEX_MAX_SUBJECT_LEN + 1), [{ type: 'pattern', params: { regex: '[' } }], 'invalidAndLong')
+  assert.deepEqual(invalidAndLong.map((error) => error.code), ['INVALID_RULE'])
+
+  // Timing: an over-limit subject under a quadratic idiom is refused after a length
+  // comparison. Unguarded, this input was measured at ~4 s on the census machine;
+  // the threshold is loose on purpose and only the guarded path is expected under it.
+  const quadraticSubject = 'Z' + ' '.repeat(100000) + 'Z'
+  const t0 = process.hrtime.bigint()
+  const slow = validateValue(quadraticSubject, [{ type: 'pattern', params: { regex: '^\\s+|\\s+$' } }], 'slow')
+  const elapsedMs = Number(process.hrtime.bigint() - t0) / 1e6
+  assert.deepEqual(slow.map((error) => error.code), ['PATTERN_NOT_EVALUATED'])
+  assert.ok(elapsedMs < 500, `over-limit subject must be refused promptly, took ${elapsedMs.toFixed(1)}ms`)
 
   console.log('[pass] transform-validator: transform engine + validator tests passed')
 }

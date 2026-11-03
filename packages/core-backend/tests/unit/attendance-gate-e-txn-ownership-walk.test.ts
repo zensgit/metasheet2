@@ -26,6 +26,7 @@ import { describe, expect, it } from 'vitest'
 import {
   discoverBeginSitesV1,
   independentDiscoverBeginCallSitesV1,
+  discoverPoolOwnedBeginSitesV1,
   TXN_OWNERSHIP_ALLOWLIST_V1,
   type BeginSiteV1,
 } from '../helpers/attendance-txn-ownership-walk'
@@ -121,17 +122,22 @@ describe('Gate E (#4844) transaction-ownership guard — walk the exported table
 
     it("P2-c backstop: the classifier's site COUNT agrees with an INDEPENDENT, type-agnostic collector — a BEGIN call the classifier's AttendanceW4TransactionClientV1 type-name gate cannot see would otherwise be INVISIBLE (not even UNKNOWN), the exact defect class the F1 guard's independentThisStarts exists to catch", () => {
       let independentTotal = 0
+      const poolOwned: string[] = []
       for (const file of fileNames) {
         const path = join(ATTENDANCE_SRC_DIR, file)
         const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.ES2022, true)
         independentTotal += independentDiscoverBeginCallSitesV1(source).length
+        poolOwned.push(...discoverPoolOwnedBeginSitesV1(source).map(site => `${file}::${site.enclosingFunction}`))
       }
       // Reference-independent completeness (P2-c): if this ever drops below `sites.length`, the
       // classifier is reporting MORE sites than even the broad, type-agnostic walk can find —
       // impossible unless the classifier double-counts. If it ever RISES above `sites.length`,
       // some BEGIN call the classifier's type gate did not recognize as a caller-connection
       // parameter is invisible to the whole rest of this file's UNKNOWN-empty discipline.
-      expect(independentTotal).toBe(sites.length)
+      expect(poolOwned).toEqual([
+        'attendance-timezone-legacy-repair.ts::inspectAttendanceTimezoneLegacyRepairV1',
+      ])
+      expect(independentTotal).toBe(sites.length + poolOwned.length)
     })
   })
 
@@ -308,5 +314,54 @@ describe('Gate E (#4844) transaction-ownership guard — walk the exported table
       )
       expect(after[0].key).toBe(before[0].key)
     })
+  })
+})
+
+
+describe('pool-owned transaction acquisition positive and negative controls',()=>{
+  const parse=(text:string)=>ts.createSourceFile('pool.ts',text,ts.ScriptTarget.ES2022,true)
+  const positive='export async function read(pool: Pool) { const client = await pool.connect(); try { await client.query("BEGIN READ ONLY") } finally { client.release() } }'
+  it('recognizes only the newly acquired const client and keeps the broad count intact',()=>{
+    const source=parse(positive)
+    expect(independentDiscoverBeginCallSitesV1(source)).toHaveLength(1)
+    expect(discoverPoolOwnedBeginSitesV1(source)).toEqual([{enclosingFunction:'read',receiverName:'client',statementText:'BEGIN READ ONLY'}])
+    expect(discoverBeginSitesV1(source,'pool.ts')).toEqual([])
+  })
+  it.each([
+    positive.replace('const client','let client'),
+    positive.replace('await pool.connect()','pool.client'),
+    positive.replace('await pool.connect()','await pool.connect().catch(() => borrowedClient)'),
+    positive.replace('try {','try { const client = borrowedClient;'),
+    positive.replace('try {','try { const {client} = borrowed;'),
+    'function fail():never { throw Error() } export async function read(pool:Pool,fail:()=>Other) { const client=await pool.connect().catch(()=>fail()); await client.query("BEGIN") }',
+    positive.replace('const client = await pool.connect();','if (true) { const client = await pool.connect(); }'),
+    'export async function read(client: Other) { await client.query("BEGIN") }',
+  ])('does not hide mutable, borrowed or conditionally acquired clients',text=>{
+    const source=parse(text)
+    expect(independentDiscoverBeginCallSitesV1(source)).toHaveLength(1)
+    expect(discoverPoolOwnedBeginSitesV1(source)).toEqual([])
+  })
+})
+
+
+describe('pool acquisition with fixed synchronous and asynchronous connect failure handling',()=>{
+  const parse=(text:string)=>ts.createSourceFile('pool.ts',text,ts.ScriptTarget.ES2022,true)
+  const acquired='function fail():never { throw Error() } export async function read(pool:Pool) { let client:Client; try { client=await pool.connect() } catch { fail() } try { await client.query("BEGIN READ ONLY") } finally {client.release()} }'
+  it('recognizes the unconditional pool acquisition after a never-returning failure catch',()=>{
+    expect(discoverPoolOwnedBeginSitesV1(parse(acquired))).toHaveLength(1)
+  })
+  it.each([
+    acquired.replace('catch { fail() }','catch { return borrowedClient }'),
+    acquired.replace('pool:Pool','pool:Pool, {fail}:Options'),
+    acquired.replace('try { await client.query','client=borrowedClient; try { await client.query'),
+    acquired.replace('try { await client.query','[client]=[borrowedClient]; try { await client.query'),
+    acquired.replace('try { await client.query','client &&= borrowedClient; try { await client.query'),
+    acquired.replace('try { await client.query','for(client of borrowedClients){} try { await client.query'),
+    acquired.replace('try { await client.query','const replace=()=>{client=borrowedClient};replace(); try { await client.query'),
+    acquired.replace('catch { fail() }','catch (fail) { fail() }'),
+  ])('keeps unproven acquisition or reassignment visible to the independent backstop',text=>{
+    const source=parse(text)
+    expect(independentDiscoverBeginCallSitesV1(source)).toHaveLength(1)
+    expect(discoverPoolOwnedBeginSitesV1(source)).toEqual([])
   })
 })

@@ -12,6 +12,7 @@ vi.mock('../src/services/elearningProfile', async () => {
 })
 
 import ElearningLearningProfileSection from '../src/views/ElearningLearningProfileSection.vue'
+import { formatElearningDate } from '../src/views/elearningLabels'
 
 const COURSE_1 = '11111111-1111-4111-8111-111111111111'
 const VERSION_1 = '22222222-2222-4222-8222-222222222222'
@@ -84,6 +85,9 @@ describe('ElearningLearningProfileSection', () => {
     expect(view.querySelector('[data-testid="elearning-profile-summary"]')?.textContent)
       .toContain('2')
     expect(view.textContent).toContain('9 / 10')
+    // F13: completion times go through the shared formatter, never the raw ISO string.
+    expect(view.querySelector('time')?.textContent).toBe(formatElearningDate('2026-08-30T01:30:00.000Z', false))
+    expect(view.textContent).not.toContain('2026-08-30T01:30:00.000Z')
     ;(view.querySelector('[data-testid="elearning-profile-more"]') as HTMLButtonElement).click()
     await flushUi()
     expect(h.getProfile).toHaveBeenLastCalledWith('cursor_2')

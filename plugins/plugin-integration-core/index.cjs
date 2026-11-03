@@ -24,7 +24,12 @@ const { createReadSourceConfigStore } = require('./lib/read-source-config-store.
 const { createStockPreparationAuditStore } = require('./lib/stock-preparation-audit-store.cjs')
 const { createStockPreparationSourceBindingStore } = require('./lib/stock-preparation-source-binding-store.cjs')
 const { createStockPreparationHandoffStore } = require('./lib/stock-preparation-handoff-store.cjs')
+const { createStockPreparationProjectTargetStore } = require('./lib/stock-preparation-project-target-store.cjs')
 const { createConfirmationDecisionReconcileLease } = require('./lib/stock-preparation-confirmation-decisions.cjs')
+const { createStockPreparationProjectWriteLock } = require('./lib/stock-preparation-project-write-lock.cjs')
+const { createStockPreparationContinuationStore } = require('./lib/stock-preparation-continuation-store.cjs')
+const { createStockPreparationRefreshGovernance } = require('./lib/stock-preparation-refresh-governance.cjs')
+const { createStockPreparationGovernedSheetProbe } = require('./lib/stock-preparation-governed-sheet-probe.cjs')
 const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
   createStockPreparationPackInstallStore,
@@ -86,8 +91,13 @@ let readSourceConfigStore = null
 let stockPreparationAuditStore = null
 let stockPreparationSourceBindingStore = null
 let stockPreparationHandoffStore = null
+let stockPreparationProjectTargetStore = null
 let stockPreparationPackInstallStore = null
 let stockPreparationConfirmationDecisionLease = null
+let stockPreparationProjectWriteLock = null
+let stockPreparationContinuationStore = null
+let stockPreparationRefreshGovernance = null
+let stockPreparationGovernedSheetProbe = null
 let b2aOperationClaim = null
 let readSourceCompositionConfigStore = null
 let bridgeAgentChecklistStore = null
@@ -102,6 +112,9 @@ let pipelineRunner = null
 let stagingInstaller = null
 let stockPreparationSqlServerRuntime = null
 let stockPreparationRuntimeDatabase = null
+let stopYidaOwnerRuntime = null
+let stopYidaInitializationRuntime = null
+let stopYidaConnectionTestRuntime = null
 
 function buildCapabilityStatus() {
   return {
@@ -113,6 +126,7 @@ function buildCapabilityStatus() {
     deadLetters: Boolean(deadLetterStore),
     deadLetterReplay: Boolean(pipelineRunner && typeof pipelineRunner.replayDeadLetter === 'function'),
     staging: Boolean(stagingInstaller),
+    governedSheetProbe: Boolean(stockPreparationGovernedSheetProbe),
     stockPreparationSqlServerSealedSnapshot:
       Boolean(stockPreparationSqlServerRuntime),
   }
@@ -311,6 +325,9 @@ module.exports = {
       // The host injects it only for this plugin; ordinary Connection resolution
       // remains values-free and never receives this capability's projection.
       sealedSnapshotFacade,
+      // Where the resolver writes WHY a connection was refused: one values-free line per refusal
+      // (phase, connection error code, closed-list reason). The response does not change.
+      logger,
     })
     externalSystemRegistry = createExternalSystemRegistry({
       db,
@@ -337,6 +354,12 @@ module.exports = {
     // which is what makes a double click a detectable replay instead of a second advance. Absent (no
     // SQL db) → the routes fail closed with a named 501, never with a plausible-but-volatile turn.
     stockPreparationHandoffStore = createStockPreparationHandoffStore({ db })
+    // 一个项目一张备料表 (migration 087): the project-sheet REGISTRY — which managed sheet is each
+    // business project's 备料表. Built here so the route layer can hand the table-action registry a
+    // per-REQUEST overlay resolver (the switch is read per call, so flipping it needs no restart) and
+    // so the three S1 routes can read / register rows. Absent (no SQL db) → no overlay is wired → the
+    // action resolves the env target exactly as before S1, and the S1 routes fail closed (501).
+    stockPreparationProjectTargetStore = createStockPreparationProjectTargetStore({ db })
     // Customer-pack install LEDGER (migration 076). Terminal-state rows only; it is what makes a
     // pack's `ext_` columns enumerable, which is what lets a PLM refresh honour their ownership
     // bands instead of falling back to the frozen-template ones.
@@ -344,6 +367,29 @@ module.exports = {
     // HG v1.2 PR-A: DB-backed single-active-reconciler lease (migration 077) for the
     // confirmation-decision ledger. The reconcile route fails closed without it.
     stockPreparationConfirmationDecisionLease = createConfirmationDecisionReconcileLease({ db })
+    // Batch-refresh phase 0 step 1 (migration 100): the cross-process project write lease + plan
+    // generation, one row per target sheet (R-52). Every small apply and large chunk takes it and
+    // fails closed (501) without it; a lock table that cannot be read or written refuses 503.
+    stockPreparationProjectWriteLock = createStockPreparationProjectWriteLock({ db, logger })
+    // Batch-refresh step 4 PR-2 (migrations 102 / 103): the persisted 沿用关系 (continuations + members), the
+    // per-project refresh state, the hold ledger and the execution ledger, and the ONE governance consult every
+    // lane will make (PR-3 wires it; nothing consults it yet). Both fail closed: a read that fails is 503, never
+    // "no continuation"; a reader whose registry lacks PR B's pilot reads answers 501 by name at consult time.
+    stockPreparationContinuationStore = createStockPreparationContinuationStore({ db })
+    stockPreparationRefreshGovernance = createStockPreparationRefreshGovernance({
+      continuationStore: stockPreparationContinuationStore,
+      projectTargetStore: stockPreparationProjectTargetStore,
+      projectWriteLock: stockPreparationProjectWriteLock,
+    })
+    // Batch-refresh step 4 PR-6 (design §7.1 rows 17-18, D-21): the GOVERNED-SHEET PROBE for the generic configured
+    // writers — the pipelines target adapter and the ERP feedback writer below, and the C6 write-source the routes
+    // build (services). Built from the SAME continuation store and registry store the governance reads, so
+    // "governed" means one thing in the codebase; it answers by SHEET (a generic writer holds nothing else). A read
+    // that fails refuses the write (503), never "not governed".
+    stockPreparationGovernedSheetProbe = createStockPreparationGovernedSheetProbe({
+      continuationStore: stockPreparationContinuationStore,
+      projectTargetStore: stockPreparationProjectTargetStore,
+    })
     // HG v1.2 PR-C: DB-enforced one-shot source-read operation claim (migration 078). Built here so
     // the B2a guard's `sourceReadOperationLimit: 1` is a PRIMARY KEY, not a read-then-write over the
     // plugin kv store — whose `set` is an unconditional upsert and cannot decide a race between two
@@ -362,7 +408,7 @@ module.exports = {
       .registerAdapter('erp:k3-wise-sqlserver', createK3WiseSqlServerChannelFactory({ queryExecutor: sqlServerQueryExecutor }), { metadata: K3_WISE_SQLSERVER_ADAPTER_METADATA })
       .registerAdapter('bridge:legacy-sql-readonly', createBridgeAgentReadonlyAdapterFactory(), { metadata: BRIDGE_READONLY_ADAPTER_METADATA })
       .registerAdapter('metasheet:staging', createMetaSheetStagingSourceAdapterFactory({ context }), { metadata: METASHEET_STAGING_ADAPTER_METADATA })
-      .registerAdapter('metasheet:multitable', createMetaSheetMultitableTargetAdapterFactory({ context }), { metadata: METASHEET_MULTITABLE_ADAPTER_METADATA })
+      .registerAdapter('metasheet:multitable', createMetaSheetMultitableTargetAdapterFactory({ context, governedSheetProbe: stockPreparationGovernedSheetProbe }), { metadata: METASHEET_MULTITABLE_ADAPTER_METADATA })
       .registerAdapter('data-source:sql-readonly', createDataSourceSqlReadonlySourceAdapterFactory({ context }), { metadata: DATA_SOURCE_SQL_READONLY_ADAPTER_METADATA })
       .registerAdapter('data-source:sql-write-gated', createDataSourceSqlWriteGatedTargetAdapterFactory({ context }), { metadata: DATA_SOURCE_SQL_WRITE_GATED_ADAPTER_METADATA })
     pipelineRegistry = createPipelineRegistry({ db })
@@ -375,6 +421,8 @@ module.exports = {
     erpFeedbackWriter = createErpFeedbackWriter({
       context,
       logger,
+      // PR-6: a governed stock-prep sheet is refused before any feedback write.
+      governedSheetProbe: stockPreparationGovernedSheetProbe,
     })
     stagingInstaller = {
       listStagingDescriptors,
@@ -506,6 +554,12 @@ module.exports = {
         // adopted.
         stockPreparationFieldPermissions:
           (context.services && context.services.stockPreparationFieldPermissions) || null,
+        // 备料「成员与权限」(S5b, register R-39): the host's NARROW members port (packages/core-backend
+        // services/stock-preparation-members.ts), injected for this plugin only — same INJECTED-per-plugin
+        // shape as the ports above. It creates / updates server-generated `stock-prep_c_…` roles with
+        // `stock-prep:*` codes only and audits every change; the four members routes are 501 without it.
+        // Duck-typed to { describe, createCustomRole, updateCustomRole, grantCustomRoleProjectSheets }.
+        stockPreparationMembers: (context.services && context.services.stockPreparationMembers) || null,
         // 通知下一步: the DingTalk seam, injected by the host for this plugin only — the same
         // INJECTED-per-plugin shape as governedAi and stockPreparationXlsxExport above, and for the
         // same reason: the plugin has no DingTalk client of its own and must not grow one. The host
@@ -522,8 +576,13 @@ module.exports = {
         stockPreparationAuditStore,
         stockPreparationSourceBindingStore,
         stockPreparationHandoffStore,
+        stockPreparationProjectTargetStore,
         stockPreparationPackInstallStore,
         stockPreparationConfirmationDecisionLease,
+        stockPreparationProjectWriteLock,
+        stockPreparationContinuationStore,
+        stockPreparationRefreshGovernance,
+        stockPreparationGovernedSheetProbe,
         b2aOperationClaim,
         readSourceCompositionConfigStore,
         bridgeAgentChecklistStore,
@@ -543,11 +602,103 @@ module.exports = {
     context.communication.register(COMMUNICATION_NAMESPACE, buildCommunicationApi())
 
     logger.info(`[${PLUGIN_ID}] activated (${PLUGIN_PHASE}). routes=${registeredRoutes.length}`)
+    // Only the host receives these actual factories. Never publish them, their
+    // authority/permit, or complete material on buildCommunicationApi().
+    const yidaOwnerRuntime = context.services && context.services.yidaOwnerRuntime
+    if (yidaOwnerRuntime !== undefined) {
+      const security = context.services && context.services.security
+      if (!yidaOwnerRuntime || typeof yidaOwnerRuntime.activate !== 'function'
+        || !security || typeof security.encrypt !== 'function' || typeof security.decrypt !== 'function') {
+        throw new Error('YIDA_OWNER_RUNTIME_UNAVAILABLE')
+      }
+      const { createYidaOwnerRuntimeBinding } = await import('./lib/yida-owner-runtime-factory.mjs')
+      const binding = createYidaOwnerRuntimeBinding({ db, security: Object.freeze({
+        encrypt: security.encrypt.bind(security), decrypt: security.decrypt.bind(security),
+      }) })
+      const handle = await yidaOwnerRuntime.activate(binding)
+      if (!handle || typeof handle.stop !== 'function') throw new Error('YIDA_OWNER_RUNTIME_UNAVAILABLE')
+      stopYidaOwnerRuntime = handle.stop.bind(handle)
+    }
+    const yidaInitializationRuntime = context.services && context.services.yidaInitializationRuntime
+    if (yidaInitializationRuntime !== undefined) {
+      try {
+        const security = context.services && context.services.security
+        if (!yidaInitializationRuntime || typeof yidaInitializationRuntime.activate !== 'function'
+          || !security || typeof security.encrypt !== 'function' || typeof security.decrypt !== 'function') {
+          throw new Error('YIDA_INITIALIZATION_RUNTIME_UNAVAILABLE')
+        }
+        const { createYidaInitializationBinding } = await import('./lib/yida-initialization-producer.mjs')
+        const binding = createYidaInitializationBinding({ security: Object.freeze({
+          encrypt: security.encrypt.bind(security), decrypt: security.decrypt.bind(security),
+        }) })
+        const handle = await yidaInitializationRuntime.activate(binding)
+        if (!handle || typeof handle.stop !== 'function') throw new Error('YIDA_INITIALIZATION_RUNTIME_UNAVAILABLE')
+        stopYidaInitializationRuntime = handle.stop.bind(handle)
+      } catch { throw new Error('YIDA_INITIALIZATION_RUNTIME_UNAVAILABLE') }
+    }
+    // Owner-run token-only 测试连接 (ADR adr-yida-connection-test-20261028). Fails SOFT: a missing or
+    // refused probe binding leaves only this capability inactive (the host route then answers 503
+    // YIDA_CONNECTION_TEST_INACTIVE) and never takes the integration plugin down.
+    const yidaConnectionTestRuntime = context.services && context.services.yidaConnectionTestRuntime
+    if (yidaConnectionTestRuntime !== undefined) {
+      try {
+        if (!yidaConnectionTestRuntime || typeof yidaConnectionTestRuntime.activate !== 'function') {
+          throw new Error('YIDA_CONNECTION_TEST_RUNTIME_UNAVAILABLE')
+        }
+        const { createYidaConnectionProbeBinding } = require('./lib/yida-connection-probe.cjs')
+        const handle = await yidaConnectionTestRuntime.activate(createYidaConnectionProbeBinding())
+        if (!handle || typeof handle.stop !== 'function') throw new Error('YIDA_CONNECTION_TEST_RUNTIME_UNAVAILABLE')
+        stopYidaConnectionTestRuntime = handle.stop.bind(handle)
+      } catch {
+        if (typeof logger.warn === 'function') logger.warn(`[${PLUGIN_ID}] YIDA_CONNECTION_TEST_RUNTIME_INACTIVE`)
+      }
+    }
   },
 
   async deactivate() {
     if (!activeContext) return
     const logger = activeContext.logger || console
+    // Latch the private runtimes before the legacy read drain's first await. A stopped
+    // owner request retains actual pending work, so observe its rejection now
+    // but await the original drain before any plugin DB is closed below.
+    let yidaConnectionTestDrain, connectionTestStopFailed = false
+    if (stopYidaConnectionTestRuntime) {
+      const stop = stopYidaConnectionTestRuntime
+      stopYidaConnectionTestRuntime = null
+      try {
+        yidaConnectionTestDrain = stop()
+        void yidaConnectionTestDrain.catch(() => {})
+      } catch { connectionTestStopFailed = true }
+    }
+    let yidaInitializationDrain, initializationStopFailed = false
+    if (stopYidaInitializationRuntime) {
+      const stop = stopYidaInitializationRuntime
+      stopYidaInitializationRuntime = null
+      try {
+        yidaInitializationDrain = stop()
+        void yidaInitializationDrain.catch(() => {})
+      } catch { initializationStopFailed = true }
+    }
+    let yidaOwnerDrain
+    if (stopYidaOwnerRuntime) {
+      const stop = stopYidaOwnerRuntime
+      stopYidaOwnerRuntime = null
+      try {
+        yidaOwnerDrain = stop()
+        void yidaOwnerDrain.catch(() => {})
+      } catch {
+        throw new Error('YIDA_OWNER_RUNTIME_STOP_UNAVAILABLE')
+      }
+    }
+    if (yidaOwnerDrain) await yidaOwnerDrain
+    if (initializationStopFailed) throw new Error('YIDA_INITIALIZATION_RUNTIME_STOP_UNAVAILABLE')
+    if (yidaInitializationDrain) {
+      try { await yidaInitializationDrain } catch { throw new Error('YIDA_INITIALIZATION_RUNTIME_STOP_UNAVAILABLE') }
+    }
+    if (connectionTestStopFailed) throw new Error('YIDA_CONNECTION_TEST_RUNTIME_STOP_UNAVAILABLE')
+    if (yidaConnectionTestDrain) {
+      try { await yidaConnectionTestDrain } catch { throw new Error('YIDA_CONNECTION_TEST_RUNTIME_STOP_UNAVAILABLE') }
+    }
     if (stockPreparationRuntimeDatabase) {
       try {
         await stockPreparationRuntimeDatabase.close()
@@ -577,6 +728,7 @@ module.exports = {
     erpFeedbackWriter = null
     pipelineRunner = null
     stagingInstaller = null
+    stockPreparationGovernedSheetProbe = null
     stockPreparationSqlServerRuntime = null
     stockPreparationRuntimeDatabase = null
     activeContext = null

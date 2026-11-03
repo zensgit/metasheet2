@@ -343,6 +343,7 @@ import {
   elearningAssessmentPage,
   elearningAssessmentPaperPublished,
   elearningAssessmentRevision,
+  elearningErrorMessage,
   elearningFailure,
   elearningLabel,
   elearningQuestionPoints,
@@ -389,7 +390,7 @@ const selectedQuestionRevisionIds = computed(() => (
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
-    return elearningFailure(error.code, error.status, isZh.value)
+    return elearningErrorMessage(error.code, error.status, isZh.value)
   }
   return elearningFailure('request_failed', 0, isZh.value)
 }

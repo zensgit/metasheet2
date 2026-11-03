@@ -17,7 +17,7 @@ import {
   W4_MAX_BATCH_ITEMS,
   W4_MAX_DISTINCT_TARGETS,
 } from './w4c0-operation-contract'
-import { runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
+import { runAttendanceResultOperationTransactionV1, attendanceW4ConnectionDiscardV1 } from './w4c0-operation-registry'
 import {
   ATTENDANCE_W4_EMPTY_ITEM_SEQUENCE_FINGERPRINT_V1,
   ATTENDANCE_W4_EMPTY_ITEM_SET_FINGERPRINT_V1,
@@ -41,7 +41,8 @@ export type AttendanceLegacyPlanReservationHostConnectionV1 =
 export type AttendanceLegacyPlanReservationHostDepsV1 = Readonly<{
   acquireConnection(): Promise<{
     client: AttendanceLegacyPlanReservationHostConnectionV1
-    release(): void
+    /** pg's `release(err?)`: a truthy error destroys the connection instead of returning it. */
+    release(error?: Error): void
   }>
 }>
 
@@ -130,6 +131,7 @@ export function createAttendanceLegacyPlanReservationHostV1(
       // Freshly-acquired, idle-on-entry connection — NOT a transaction handle yet (the wrapper
       // below opens the transaction on it after `assertConnectionIsIdleV1` certifies idle).
       const connection = acquired.client
+      let discard: Error | undefined
       try {
         return await runAttendanceResultOperationTransactionV1(connection, async () => {
         const posture = await resolveSegmentCalculationPosture(connection, input.orgId)
@@ -297,8 +299,13 @@ export function createAttendanceLegacyPlanReservationHostV1(
           },
         )
         })
+      } catch (error) {
+        // Settlement coordination (r6.1 §1.1 P1-1): a connection whose state the runner could not vouch for is
+        // destroyed, not returned; every other error returns it as before. The error itself goes up unchanged.
+        discard = attendanceW4ConnectionDiscardV1(error)
+        throw error
       } finally {
-        acquired.release()
+        acquired.release(discard)
       }
     },
   })

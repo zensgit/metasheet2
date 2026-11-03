@@ -1,4 +1,5 @@
 import { isSystemFieldType } from './field-codecs'
+import { isFieldHumanWriteLocked } from './human-write-lock'
 
 /**
  * Extracted permission derivation functions for testability.
@@ -67,6 +68,17 @@ export function isFieldAlwaysReadOnly(field: Pick<FieldLike, 'type' | 'property'
   return property.readonly === true || property.readOnly === true
 }
 
+/**
+ * The PERSON-facing read-only floor: `isFieldAlwaysReadOnly` plus the human write lock
+ * (`property.humanWriteLock`, human-write-lock.ts). Every person write spine's property-level guard and
+ * `deriveFieldPermissions` use THIS; the plugin records SDK (`records.ts`) keeps using
+ * `isFieldAlwaysReadOnly` alone, which is exactly what lets the PLM apply keep writing a locked column.
+ * Never fold the lock into `isFieldAlwaysReadOnly` — that would stop the system writer too.
+ */
+export function isFieldReadOnlyForPeople(field: Pick<FieldLike, 'type' | 'property'>): boolean {
+  return isFieldAlwaysReadOnly(field) || isFieldHumanWriteLocked(field)
+}
+
 export function isFieldPermissionHidden(field: Pick<FieldLike, 'property'>): boolean {
   const property = field.property ?? {}
   if (property.hidden === true) return true
@@ -85,7 +97,9 @@ export function deriveFieldPermissions(
   return Object.fromEntries(
     fields.map((field) => {
       const baseVisible = !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field)
-      const baseReadOnly = readOnly || isFieldAlwaysReadOnly(field)
+      // The person-facing floor (always-read-only + the human write lock). A per-subject scope can only
+      // ADD read-only below; nothing here or there can lift the lock — there is no administrator override.
+      const baseReadOnly = readOnly || isFieldReadOnlyForPeople(field)
       const scope = fieldScopeMap?.get(field.id)
       return [
         field.id,

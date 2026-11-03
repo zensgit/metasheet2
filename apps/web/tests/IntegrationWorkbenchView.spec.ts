@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, type App as VueApp, type Component } from 'vue'
+import { createPinia, setActivePinia } from 'pinia'
 // integration-guard flake fix (#4614 prerequisite): IntegrationWorkbenchView.vue is a ~5100-line SFC
 // with ~20 imported subcomponents. A dynamic `await import(...)` INSIDE a test body pays that whole
 // module graph's first-time resolve/transform cost against THAT test's own `testTimeout` (5000ms) —
@@ -109,6 +110,18 @@ describe('IntegrationWorkbenchView', () => {
   let confirmMock: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
+    // 整合切片 (2026-09-09): 连接管理 now embeds the folded-in 外接数据源 panel
+    // (components/data-sources/DataSourcesPanel.vue), which owns a pinia store and lists sources
+    // on mount. These mounts use bare createApp(View) with no plugins, so the store is given an
+    // active pinia here instead of at all ~40 call sites; the list call gets a default empty
+    // answer so every case that does not care about it renders a clean empty panel (cases that
+    // DO care reset and re-implement apiGetMock themselves, exactly as before).
+    setActivePinia(createPinia())
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url === '/api/data-sources') return { ok: true, data: { items: [] } }
+      throw new Error(`unexpected apiGet ${url}`)
+    })
     apiFetchMock.mockReset()
     if (typeof localStorage?.clear === 'function') localStorage.clear()
     originalCreateObjectURL = URL.createObjectURL
@@ -531,7 +544,11 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('连接系统')
     expect(container.textContent).toContain('选择数据集')
     expect(container.textContent).toContain('多维表清洗')
-    expect(container.textContent).toContain('Dry-run / 推送')
+    // G10: step 4 is 交付 (export / write into a Metasheet table), not 推送 — the K3 write-back it used
+    // to promise has been permanently fenced in the runtime since 20260829.
+    expect(container.textContent).toContain('Dry-run / 交付')
+    expect(container.textContent).toContain('K3 目标只读不写回')
+    expect(container.textContent).not.toContain('导出或 Save-only 写回')
     expect(container.querySelector('[data-testid="data-factory-quick-flow"]')?.textContent)
       .toContain('选来源系统 -> 2. 选来源数据集')
     expect(container.textContent).toContain('选择系统与数据集')
@@ -861,25 +878,23 @@ describe('IntegrationWorkbenchView', () => {
     await new Promise((resolve) => window.setTimeout(resolve, 0))
     expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:data-factory-cleansed-export')
 
-    ;(container.querySelector('[data-testid="allow-save-only-run"]') as HTMLInputElement).click()
-    await flushUi()
-    ;(container.querySelector('[data-testid="run-save-only"]') as HTMLButtonElement).click()
-    await flushUi(16)
-    expect(runBodies[1]).toEqual({
-      url: '/api/integration/pipelines/pipe_1/run',
-      body: {
-        tenantId: 'default',
-        workspaceId: null,
-        mode: 'manual',
-        sampleLimit: 20,
-      },
-    })
-    expect(container.textContent).toContain('Save-only 推送已提交')
+    // G10: the selected target is `erp:k3-wise-webapi`, and K3 external write-back is permanently fenced
+    // in the runtime (E4 / HG v1.2 §10.1, four refusal layers per kind). Before G10 this block ticked the
+    // allow-toggle and POSTed /run — an action the server answers with 403
+    // K3_WISE_PIPELINE_RUN_DISABLED / K3_WISE_EXTERNAL_WRITE_DISABLED. The affordance is now absent, not
+    // disabled: "disabled" reads as "not yet", and this is "never".
+    expect((container.querySelector('[data-testid="target-system"]') as HTMLSelectElement).value).toBe('k3_1')
+    expect(container.querySelector('[data-testid="allow-save-only-run"]')).toBeNull()
+    expect(container.querySelector('[data-testid="run-save-only"]')).toBeNull()
+    expect(container.querySelector('[data-testid="save-only-fenced-notice"]')?.textContent).toContain('K3 目标永久只读')
+    // Dry-run is a READ and must stay offered — a fence that killed preview would be the E4-05 failure.
+    expect((container.querySelector('[data-testid="run-dry-run"]') as HTMLButtonElement).disabled).toBe(false)
+    expect(runBodies.every((entry) => !entry.url.endsWith('/run'))).toBe(true)
 
     dryRunPreviewMode = 'empty'
     ;(container.querySelector('[data-testid="run-dry-run"]') as HTMLButtonElement).click()
     await flushUi(16)
-    expect(runBodies[2]).toMatchObject({
+    expect(runBodies[1]).toMatchObject({
       url: '/api/integration/pipelines/pipe_1/dry-run',
     })
     expect(container.textContent).toContain('Dry-run 成功，但本次没有可处理记录')
@@ -1082,9 +1097,13 @@ describe('IntegrationWorkbenchView', () => {
     expect(sourceOptions).toContain('PLM Source · http')
     expect(sourceOptions).not.toContain('K3 Target · erp:k3-wise-webapi')
     expect(targetOptions).toContain('K3 Target · erp:k3-wise-webapi')
-    expect(container.querySelector('[data-testid="source-selector-explanation"]')?.textContent).toContain('当前 K3 WISE WebAPI 仅作为目标写入连接')
+    // G10: the explanation used to sell K3 as the write target ("仅作为目标写入连接"). It now states the
+    // fence instead — same screen as the hub-overview 只读·永不写入 badge, same words.
+    expect(container.querySelector('[data-testid="source-selector-explanation"]')?.textContent).toContain('K3 目标永久只读、不写回')
+    expect(container.querySelector('[data-testid="source-selector-explanation"]')?.textContent).not.toContain('仅作为目标写入连接')
     expect(container.querySelector('[data-testid="k3-webapi-read-gate-notice"]')?.textContent).toContain('来源侧请使用 staging 多维表、SQL 只读通道或其他可读连接')
-    expect(container.querySelector('[data-testid="target-selector-explanation"]')?.textContent).toContain('Save-only')
+    expect(container.querySelector('[data-testid="target-selector-explanation"]')?.textContent).toContain('K3 目标永久只读')
+    expect(container.querySelector('[data-testid="target-selector-explanation"]')?.textContent).not.toContain('可写入')
 
     ;(container.querySelector('[data-testid="toggle-inventory-overview"]') as HTMLButtonElement).click()
     await flushUi()
@@ -1160,6 +1179,397 @@ describe('IntegrationWorkbenchView', () => {
     expect(deleteUrls).toEqual(['/api/integration/external-systems/k3_target?tenantId=default'])
     expect(container.textContent).toContain('连接已删除：K3 Target Edited')
     expect(container.textContent).not.toContain('K3 Target · erp:k3-wise-webapi')
+  })
+
+  // 列表回退 x 带写按钮的清单 —— 工作台这一侧的接线。
+  //
+  // useAuth 把 localStorage.workspaceId 写成 tenantId,于是每个请求都带非 null 的 workspace hint;
+  // 外接源按既有约定建在 workspace_id IS NULL 上。列表读为此回退一步(本 PR),upsert/delete 没有也不该
+  // 跟着放宽:仍按 (tenant, workspace, id) 精确匹配。所以回退来的行在这块屏幕上编辑/停用/启用/删除
+  // 全置灰:服务端会以 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH / 404 拒掉它们(插件侧 L-10 钉着)。
+  //
+  // 而口径只到这四个为止:同一屏的「测试连接」**不**拦,因为服务端 persistExternalSystemTestResult
+  // (#5534)按行自身的作用域落库,它是真的写得进去的。下面第二个 it 钉住这一半 ——
+  // 两条合起来才是「置灰的量 = 实际写不动的量」。
+  const mountWithTenantWideSource = async (
+    onWrite?: (url: string, method: string) => Response | undefined,
+  ) => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    localStorage.setItem('workspaceId', 'default')
+    const writeRequests: Array<{ url: string; method: string }> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (method !== 'GET') {
+        writeRequests.push({ url, method })
+        return onWrite?.(url, method) ?? jsonResponse({})
+      }
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source', 'target'], supports: ['read', 'upsert'], advanced: false },
+        ])
+      }
+      if (url.startsWith('/api/integration/external-systems')) {
+        // 服务端(lib/external-systems.cjs 的 listExternalSystems)对非 null hint 的回退结果:行仍报自己的
+        // 作用域(workspaceId: null)。没有任何额外字段 —— 屏幕侧的判据就靠这个 workspaceId 与当前 hint 比。
+        return jsonResponse([
+          {
+            id: 'sys_tenant_wide',
+            tenantId: 'default',
+            workspaceId: null,
+            name: '客户 PLM 只读库',
+            kind: 'http',
+            role: 'source',
+            status: 'active',
+          },
+        ])
+      }
+      return jsonResponse([])
+    })
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async () => EMPTY_HUB_OVERVIEW)
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(8)
+    return writeRequests
+  }
+
+  it('回退来的租户级连接:编辑/停用/删除置灰,且绕过按钮也发不出写请求', async () => {
+    const writeRequests = await mountWithTenantWideSource()
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async () => EMPTY_HUB_OVERVIEW)
+
+    // 列表本身确实带了 hint —— 这正是回退发生的条件,也是 upsert/delete 够不着这行的原因。
+    expect(apiFetchMock.mock.calls.some(([url]) => String(url) === '/api/integration/external-systems?tenantId=default&workspaceId=default')).toBe(true)
+
+    ;(container.querySelector('[data-testid="toggle-inventory-overview"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const deactivate = container.querySelector('[data-testid="deactivate-connection-sys_tenant_wide"]') as HTMLButtonElement
+    const remove = container.querySelector('[data-testid="delete-connection-sys_tenant_wide"]') as HTMLButtonElement
+    const notice = container.querySelector('[data-testid="connection-scope-write-block-sys_tenant_wide"]')?.textContent || ''
+    expect(notice).toContain('租户级')
+    // 文案列出的就是被拦的那四个,而且必须说清测试连接不在内 —— 否则就是在屏幕上撒谎。
+    for (const action of ['编辑', '停用', '启用', '删除']) {
+      expect(notice).toContain(action)
+    }
+    expect(notice).toContain('测试连接')
+    expect(notice).not.toContain('只读')
+    expect(deactivate.disabled).toBe(true)
+    expect(remove.disabled).toBe(true)
+
+    // 置灰只是外观。把 disabled 摘掉再点 —— 处理函数自己也得拒绝,并且一个写请求都不许发出去。
+    // (服务端也会拒 —— 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH,见插件侧 L-10;这里钉的是屏幕不再浪费一轮往返。)
+    deactivate.disabled = false
+    deactivate.click()
+    await flushUi(8)
+    expect(writeRequests).toEqual([])
+    expect(container.textContent).toContain('无法停用')
+    expect(container.textContent).not.toContain('连接已停用')
+
+    remove.disabled = false
+    remove.click()
+    await flushUi(8)
+    expect(writeRequests).toEqual([])
+    expect(container.textContent).toContain('无法删除')
+    expect(container.textContent).not.toContain('连接已删除')
+    // 删除甚至没走到确认框:守卫在 confirm 之前。
+    expect(confirmMock).not.toHaveBeenCalled()
+    // 清单里仍然只有那一行。
+    expect(container.querySelectorAll('[data-testid^="deactivate-connection-"]').length).toBe(1)
+  })
+
+  // 口径的另一半,也是第二轮评审的那条 blocker:同一屏的「测试连接」会真的改掉这行的
+  // status / last_tested_at / last_error(服务端 persistExternalSystemTestResult 按行自身的作用域落库,
+  // #5534,插件侧 L-11)。所以它**不**能跟着那四个一起被拦:拦了就是把本 PR 要治的
+  // 「源不可用」换个按钮重现。拦不拦是一回事,说不说实话是另一回事 —— 测完要说出写到了哪一行。
+  it('同一行的「测试连接」不被拦:请求照发,且状态条告知写入的是租户级那一行', async () => {
+    const writeRequests = await mountWithTenantWideSource((url) => (
+      url.startsWith('/api/integration/external-systems/sys_tenant_wide/test')
+        ? jsonResponse({ ok: true, status: 200 })
+        : undefined
+    ))
+
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    sourceSystemSelect.value = 'sys_tenant_wide'
+    sourceSystemSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="test-source-system"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    // 1) 它真的发出去了 —— 与上一条里 writeRequests 永远为空的停用/删除形成对照。
+    expect(writeRequests).toEqual([
+      { url: '/api/integration/external-systems/sys_tenant_wide/test?tenantId=default&workspaceId=default', method: 'POST' },
+    ])
+    // 2) 并且屏幕说出了它写到哪里。
+    expect(container.textContent).toContain('连接测试通过')
+    expect(container.textContent).toContain('测试结果已写入租户级的那一行')
+  })
+
+  // 同一道不对称的第五、第六个入口,不在「四动作」名单里:清洗表卡片的「作为 Dry-run 来源」/「作为目标多维表」。
+  // 它们发的是带**确定性 id** 的 upsert(id 由 projectId 算出,不是新建的随机 id),所以这个项目的连接行
+  // 若在租户级(workspace_id IS NULL)而当前工作区框非空,服务端会以 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH 拒
+  // (插件侧 L-10);那时 parseIntegrationResponse 只保留 message、丢掉 code,直出的是一句英文原文
+  // (code 已透传之后,兜底见本文件下方「列表没带出这一行时」那条)。
+  // 这里钉:① 撞上租户级行时不发那一枪、给中文人话;② 判据是「行自己的作用域 vs 当前 hint」,
+  // 换一个没有租户级行的项目照发,而且请求仍带调用方自己的 hint —— 绝不为了写得进去而回退到 null 作用域。
+  it('确定性 id 的 ensure 按钮撞上租户级行:不发请求并给中文人话;换个项目照发且不放宽作用域', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    localStorage.setItem('workspaceId', 'default')
+    const writeRequests: Array<{ url: string; method: string }> = []
+    const externalSystemBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (method !== 'GET') {
+        writeRequests.push({ url, method })
+        if (url === '/api/integration/staging/install') {
+          return jsonResponse({
+            projectId: 'project_1',
+            sheetIds: { standard_materials: 'sheet_materials' },
+            viewIds: { standard_materials: 'view_materials' },
+            openLinks: { standard_materials: '/multitable/sheet_materials/view_materials' },
+            targets: [{
+              id: 'standard_materials',
+              name: '物料清洗',
+              sheetId: 'sheet_materials',
+              viewId: 'view_materials',
+              openLink: '/multitable/sheet_materials/view_materials',
+            }],
+            warnings: [],
+          })
+        }
+        if (url === '/api/integration/external-systems') {
+          const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+          externalSystemBodies.push(body)
+          return jsonResponse(body)
+        }
+        return jsonResponse({})
+      }
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'metasheet:staging', label: 'MetaSheet staging multitable', roles: ['source'], supports: ['read'], advanced: false },
+          { kind: 'metasheet:multitable', label: 'MetaSheet multitable', roles: ['target'], supports: ['upsert'], advanced: false },
+        ])
+      }
+      if (url.startsWith('/api/integration/external-systems')) {
+        // project_1 的两条连接都建在租户级,列表那一步的回退把它们带了出来(行仍报自己的作用域)。
+        return jsonResponse([
+          {
+            id: 'metasheet_staging_project_1',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'MetaSheet staging 多维表',
+            kind: 'metasheet:staging',
+            role: 'source',
+            status: 'active',
+          },
+          {
+            id: 'metasheet_target_project_1',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'MetaSheet 目标多维表',
+            kind: 'metasheet:multitable',
+            role: 'target',
+            status: 'active',
+          },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([
+          { id: 'standard_materials', name: 'Standard Materials', fields: ['code', 'name'] },
+        ])
+      }
+      return jsonResponse([])
+    })
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async () => EMPTY_HUB_OVERVIEW)
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    const projectIdInput = container.querySelector('[data-testid="staging-project-id"]') as HTMLInputElement
+    projectIdInput.value = 'project_1'
+    projectIdInput.dispatchEvent(new Event('input'))
+    ;(container.querySelector('[data-testid="install-staging"]') as HTMLButtonElement).click()
+    await flushUi(20)
+
+    // 安装本身照做;它结尾自动「设为 Dry-run 来源」那一步撞上租户级行,被拦在发请求之前。
+    expect(writeRequests.map((entry) => entry.url)).toEqual(['/api/integration/staging/install'])
+    expect(externalSystemBodies).toEqual([])
+    expect(container.textContent).toContain('无法把 staging 多维表设为 Dry-run 来源')
+    expect(container.textContent).toContain('固定 id「metasheet_staging_project_1」')
+    expect(container.textContent).toContain('租户级')
+    expect(container.textContent).toContain('请清空上方的工作区')
+    // 服务端那句英文原文不许落到屏幕上(这里根本没发请求;发了也会被下面那条兜底翻成中文)。
+    expect(container.textContent).not.toContain('belongs to the tenant-wide scope')
+
+    ;(container.querySelector('[data-testid="use-multitable-target-standard_materials"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(writeRequests.map((entry) => entry.url)).toEqual(['/api/integration/staging/install'])
+    expect(externalSystemBodies).toEqual([])
+    expect(container.textContent).toContain('无法把多维表设为写回目标')
+    expect(container.textContent).toContain('固定 id「metasheet_target_project_1」')
+
+    // 判据只有「行自己的作用域 vs 这次写要带的 hint」:换一个列表里没有租户级行的项目,照发不误拦。
+    projectIdInput.value = 'project_2'
+    projectIdInput.dispatchEvent(new Event('input'))
+    ;(container.querySelector('[data-testid="use-staging-source-standard_materials"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(writeRequests.map((entry) => entry.url)).toEqual([
+      '/api/integration/staging/install',
+      '/api/integration/external-systems',
+    ])
+    expect(externalSystemBodies).toHaveLength(1)
+    expect(externalSystemBodies[0]).toMatchObject({
+      id: 'metasheet_staging_project_2',
+      tenantId: 'default',
+      // 仍然是调用方自己的 hint。屏幕侧这道拦截只少发注定失败的请求,不会改写入作用域去够那行租户级的连接。
+      workspaceId: 'default',
+      projectId: 'project_2',
+      kind: 'metasheet:staging',
+    })
+  })
+
+  // 上一条钉的是「列表带出了那一行时，屏幕侧预检省掉一次注定失败的请求」。这一条钉它的**兜底**：
+  // 列表里没有这一行（没加载 / 分页外 / 别处刚把它建到租户级），预检按约定不猜、照发，请求就真的
+  // 撞上服务端那道 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH。此前 parseIntegrationResponse 丢掉 code，
+  // catch 只能直出英文原文；现在 code 透传到 Error 上，判据是稳定的 wire code 而不是英文散文。
+  // 第二段是正控：换一个 code，照旧直出服务端 message —— 这次改动只认一个码，没有把别的错误吞成
+  // 「作用域不匹配」。
+  const mountWithEmptyInventory = async (
+    onExternalSystemPost: (body: Record<string, unknown>) => Response,
+  ) => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    localStorage.setItem('workspaceId', 'default')
+    const externalSystemBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (method !== 'GET') {
+        if (url === '/api/integration/staging/install') {
+          return jsonResponse({
+            projectId: 'project_1',
+            sheetIds: { standard_materials: 'sheet_materials' },
+            viewIds: { standard_materials: 'view_materials' },
+            openLinks: { standard_materials: '/multitable/sheet_materials/view_materials' },
+            targets: [{
+              id: 'standard_materials',
+              name: '物料清洗',
+              sheetId: 'sheet_materials',
+              viewId: 'view_materials',
+              openLink: '/multitable/sheet_materials/view_materials',
+            }],
+            warnings: [],
+          })
+        }
+        if (url === '/api/integration/external-systems') {
+          const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+          externalSystemBodies.push(body)
+          return onExternalSystemPost(body)
+        }
+        return jsonResponse({})
+      }
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'metasheet:staging', label: 'MetaSheet staging multitable', roles: ['source'], supports: ['read'], advanced: false },
+          { kind: 'metasheet:multitable', label: 'MetaSheet multitable', roles: ['target'], supports: ['upsert'], advanced: false },
+        ])
+      }
+      // 清单是空的 —— 屏幕侧预检查无可查，只能照发；兜底只剩服务端那道 409。
+      if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([{ id: 'standard_materials', name: 'Standard Materials', fields: ['code', 'name'] }])
+      }
+      return jsonResponse([])
+    })
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async () => EMPTY_HUB_OVERVIEW)
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    const projectIdInput = container.querySelector('[data-testid="staging-project-id"]') as HTMLInputElement
+    projectIdInput.value = 'project_1'
+    projectIdInput.dispatchEvent(new Event('input'))
+    ;(container.querySelector('[data-testid="install-staging"]') as HTMLButtonElement).click()
+    await flushUi(20)
+    return externalSystemBodies
+  }
+
+  it('列表没带出这一行时：ensure 请求照发，服务端 409 SCOPE_MISMATCH 被翻成中文人话，英文原文不上屏', async () => {
+    const externalSystemBodies = await mountWithEmptyInventory(() => new Response(
+      JSON.stringify({
+        ok: false,
+        error: {
+          code: 'EXTERNAL_SYSTEM_SCOPE_MISMATCH',
+          message: 'external system belongs to the tenant-wide scope',
+          details: { id: 'metasheet_staging_project_1', requestedWorkspaceId: 'default', rowWorkspaceId: null },
+        },
+      }),
+      { status: 409, headers: { 'Content-Type': 'application/json' } },
+    ))
+
+    // 请求确实发了（与上一条的 externalSystemBodies === [] 正相反），而且带的仍是调用方自己的 hint。
+    expect(externalSystemBodies).toHaveLength(1)
+    expect(externalSystemBodies[0]).toMatchObject({
+      id: 'metasheet_staging_project_1',
+      workspaceId: 'default',
+    })
+    expect(container.textContent).toContain('无法把 staging 多维表设为 Dry-run 来源')
+    // 文案与预检那条同源（externalSystemScopeWriteBlock），不另起第二套口径。
+    expect(container.textContent).toContain('租户级')
+    expect(container.textContent).toContain('请清空上方的工作区')
+    expect(container.textContent).toContain('测试连接')
+    expect(container.textContent).not.toContain('belongs to the tenant-wide scope')
+
+    // 目标那一侧同理。
+    ;(container.querySelector('[data-testid="use-multitable-target-standard_materials"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(externalSystemBodies).toHaveLength(2)
+    expect(container.textContent).toContain('无法把多维表设为写回目标')
+    expect(container.textContent).not.toContain('belongs to the tenant-wide scope')
+  })
+
+  it('正控：其它 error code 照旧直出服务端 message，不被当成作用域不匹配', async () => {
+    await mountWithEmptyInventory(() => new Response(
+      JSON.stringify({
+        ok: false,
+        error: { code: 'EXTERNAL_SYSTEM_KIND_UNSUPPORTED', message: 'adapter kind metasheet:staging is not registered' },
+      }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } },
+    ))
+
+    expect(container.textContent).toContain('adapter kind metasheet:staging is not registered')
+    expect(container.textContent).not.toContain('请清空上方的工作区')
   })
 
   it('does not mark error-state source or target systems as dry-run ready', async () => {
@@ -1292,6 +1702,95 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi()
     expect(runDryRunButton.disabled).toBe(true)
     expect(runSaveOnlyButton.disabled).toBe(true)
+  })
+
+  // G10: an integration API refusal carrying a REGISTERED code renders that code's humanized label + hint
+  // in the status bar instead of the backend's English prose.
+  //
+  // This is the case the hidden Save-only button does NOT cover, which is why both exist: a pipeline can
+  // be run from a PASTED id, and then the UI never saw the target kind — the refusal is the first time it
+  // learns. Before G10 the operator got the server's accurate English sentence, which reads like an outage.
+  it('G10: a run refused by the K3 fence renders the humanized label, never the English refusal prose', async () => {
+    const englishRefusal = 'K3 WISE live writes are C6-only: use external-write dry-run + apply'
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source', 'target'], supports: ['read', 'upsert'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          { id: 'plm_1', tenantId: 'default', workspaceId: null, name: 'PLM Source', kind: 'http', role: 'source', status: 'active' },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([])
+      }
+      if (url.endsWith('/run')) {
+        // The shape the SERVER actually emits, not a convenient one. `PipelineRunnerError` has no own
+        // `.code`, so http-routes `inferErrorCode` reports its CLASS NAME at the top of the envelope and
+        // the product code rides in `details.code`; `inferHttpStatus` maps /PipelineRunner/ to 422.
+        // Pinned server-side by
+        // plugins/plugin-integration-core/__tests__/http-routes-plm-k3wise-poc.test.cjs, which asserts
+        // exactly statusCode 422 + error.code 'PipelineRunnerError' + error.details.code
+        // 'K3_WISE_PIPELINE_RUN_DISABLED'.
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: { code: 'PipelineRunnerError', message: englishRefusal, details: { code: 'K3_WISE_PIPELINE_RUN_DISABLED', pipelineId: 'pipe_pasted_k3' } },
+          }),
+          { status: 422, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    sourceSystemSelect.value = 'plm_1'
+    sourceSystemSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // No target picked in the UI, so nothing is client-side fenced and the Save-only control renders —
+    // exactly the pasted-id situation this test is about.
+    const pipelineIdInput = container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement
+    pipelineIdInput.value = 'pipe_pasted_k3'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="allow-save-only-run"]') as HTMLInputElement).click()
+    await flushUi()
+
+    const saveOnlyButton = container.querySelector('[data-testid="run-save-only"]') as HTMLButtonElement
+    expect(saveOnlyButton.disabled).toBe(false)
+    saveOnlyButton.click()
+    await flushUi(16)
+
+    const status = container.querySelector('.integration-workbench__status') as HTMLElement
+    expect(status).toBeTruthy()
+    expect(status.getAttribute('data-kind')).toBe('error')
+    // This harness runs at locale 'en' (useLocale seeds from navigator.language at import time and this
+    // spec never overrides it), so the assertion is on the REGISTERED en label + hint. The zh side of the
+    // same three entries — including that every hint says 只读 — is asserted in
+    // tests/integrationErrorCodeLabels.spec.ts.
+    expect(status.textContent).toContain('This pipeline cannot push to its K3 target.')
+    expect(status.textContent).toContain('permanently read-only')
+    expect(status.textContent).toContain('export the cleansed result')
+    // The server's own refusal prose never reaches the operator, anywhere on the page. Drop the label
+    // entry (or the code-carrying throw) and the fallback puts this exact sentence back on screen.
+    expect(status.textContent).not.toContain('C6-only')
+    expect(container.textContent).not.toContain(englishRefusal)
   })
 
   it('C6-4: runs external-write dry-run then apply without exposing token or client-owned write scope', async () => {
@@ -2594,6 +3093,244 @@ describe('IntegrationWorkbenchView', () => {
     expect(previewBodies.at(-1)!).not.toHaveProperty('referenceMappingSources')
   })
 
+  // 整合切片 (2026-09-09): 连接管理 now hosts BOTH halves — the 外接数据源 panel that registers a
+  // physical connection, and the connection-draft editor that references one by connectionId. The
+  // whole point of folding them together is that the second sees the first's result WITHOUT a
+  // reload. That only holds if the panel's `changed` emit reaches the view's refresh callback AND
+  // that callback defeats the picker's `bridgeDataSourcesLoaded` first-open short-circuit — this
+  // pins the end-to-end chain, not either half.
+  it('a source registered in the embedded 外接数据源 panel shows up in the bridge picker without a reload', async () => {
+    const registered: Array<{ id: string; name: string; type: string; connected: boolean }> = []
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url === '/api/data-sources') return { ok: true, data: { items: [...registered] } }
+      throw new Error(`unexpected apiGet ${url}`)
+    })
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: false, guardrails: { write: { supported: false } } },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/hub/overview?tenantId=default') return jsonResponse(EMPTY_HUB_OVERVIEW)
+      if (url === '/api/data-sources' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}')) as { id?: string; name?: string; type?: string }
+        registered.push({ id: String(body.id), name: String(body.name), type: String(body.type), connected: false })
+        return jsonResponse({ id: body.id })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('router-link', {
+      props: { to: { type: [String, Object], required: false, default: '' } },
+      setup(_props, { slots }) { return () => h('a', slots.default?.()) },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    // Open the picker first, so its list is already loaded (and therefore already STALE) before
+    // the new source is registered. Without the refresh wiring the short-circuit keeps it stale.
+    const kindSelect = container.querySelector('[data-testid="connection-draft-kind"]') as HTMLSelectElement
+    kindSelect.value = 'data-source:sql-readonly'
+    kindSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(6)
+    const optionsBefore = Array.from(
+      (container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement).options,
+    ).map((option) => option.value)
+    expect(optionsBefore).not.toContain('folded-pg')
+
+    // Register a source in the embedded panel, in this same section.
+    const panel = container.querySelector('[data-testid="connection-data-sources-panel"]') as HTMLElement
+    expect(panel).not.toBeNull()
+    ;(panel.querySelector('[data-testid="ds-new-button"]') as HTMLButtonElement).click()
+    await flushUi(2)
+    for (const [testid, value] of [['ds-field-id', 'folded-pg'], ['ds-field-name', 'Folded PG'], ['ds-field-host', 'db.internal'], ['ds-field-database', 'app']] as const) {
+      const input = panel.querySelector(`[data-testid="${testid}"]`) as HTMLInputElement
+      expect(input, testid).not.toBeNull()
+      input.value = value
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    await flushUi(2)
+    ;(panel.querySelector('[data-testid="ds-create-form"]') as HTMLFormElement)
+      .dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }))
+    await flushUi(10)
+
+    // The connection-draft editor's own picker now offers it — no remount, no reload.
+    const optionsAfter = Array.from(
+      (container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement).options,
+    ).map((option) => option.value)
+    expect(optionsAfter).toContain('folded-pg')
+  })
+
+  // 终审 (2026-09-09) 第 5 节: the mirror image of the case above — the panel can DELETE the source
+  // the draft below is referencing. Refreshing the list alone left a DANGLING draft: the <select>
+  // keeps a value that no longer has an <option>, the object list underneath it still shows the
+  // dead source's tables, and 「保存」 would post a connectionId the server cannot resolve. This
+  // pins all three consequences of the delete at once (picker cleared, objects cleared, save
+  // refused), because clearing only one of them still leaves a saveable dangling draft.
+  it('deleting the referenced source in the embedded panel clears the draft picker, its object list and the save button', async () => {
+    let registered = [{ id: 'doomed-pg', name: 'Doomed PG', type: 'postgres', connected: true }]
+    const upsertBodies: Array<Record<string, unknown>> = []
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url === '/api/data-sources') return { ok: true, data: { items: [...registered] } }
+      throw new Error(`unexpected apiGet ${url}`)
+    })
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: false, guardrails: { write: { supported: false } } },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default' && init?.method === 'POST') {
+        upsertBodies.push(JSON.parse(String(init.body || '{}')) as Record<string, unknown>)
+        return jsonResponse({ id: 'sys_1', name: 'x', kind: 'data-source:sql-readonly', role: 'source', status: 'active' })
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/hub/overview?tenantId=default') return jsonResponse(EMPTY_HUB_OVERVIEW)
+      if (url === '/api/data-sources/doomed-pg/schema') {
+        return jsonResponse({ tables: [{ name: 'orders', schema: 'dbo', columns: [{ name: 'id' }] }], views: [] })
+      }
+      if (url === '/api/data-sources/doomed-pg' && init?.method === 'DELETE') {
+        registered = registered.filter((item) => item.id !== 'doomed-pg')
+        return jsonResponse({ deleted: true })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('router-link', {
+      props: { to: { type: [String, Object], required: false, default: '' } },
+      setup(_props, { slots }) { return () => h('a', slots.default?.()) },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    // Author a draft that REFERENCES the source: name + bridge kind + connectionId + object.
+    const nameInput = container.querySelector('[data-testid="connection-draft-name"]') as HTMLInputElement
+    nameInput.value = 'Bridge draft'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    const kindSelect = container.querySelector('[data-testid="connection-draft-kind"]') as HTMLSelectElement
+    kindSelect.value = 'data-source:sql-readonly'
+    kindSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(6)
+    const picker = container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement
+    picker.value = 'doomed-pg'
+    picker.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(8)
+    const objectSelect = container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLSelectElement
+    expect(Array.from(objectSelect.options).map((option) => option.value)).toContain('dbo.orders')
+    objectSelect.value = 'dbo.orders'
+    objectSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(4)
+    const saveButton = container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement
+    expect(saveButton.disabled, 'a complete bridge draft must be saveable before the delete').toBe(false)
+
+    // Delete THAT source from the embedded panel (window.confirm is stubbed true in beforeEach).
+    const panel = container.querySelector('[data-testid="connection-data-sources-panel"]') as HTMLElement
+    ;(panel.querySelector('[data-testid="ds-delete"]') as HTMLButtonElement).click()
+    await flushUi(10)
+
+    // 1. the reference is gone from the picker (not merely un-listed while still selected)
+    expect((container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement).value).toBe('')
+    expect(Array.from((container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement).options)
+      .map((option) => option.value)).not.toContain('doomed-pg')
+    // 2. the dead source's object list went with it (only the placeholder <option> is left)
+    const objectsAfter = container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLSelectElement
+    expect(objectsAfter.value).toBe('')
+    expect(Array.from(objectsAfter.options).map((option) => option.value)).toEqual([''])
+    // 3. and the draft cannot be saved into a dangling reference
+    expect(saveButton.disabled).toBe(true)
+    saveButton.click()
+    await flushUi(4)
+    expect(upsertBodies).toHaveLength(0)
+    // The operator is told why their picker just emptied, without naming the deleted source.
+    expect(container.textContent || '').toContain('草稿引用的外接数据源已不在列表里')
+  })
+
+  // F04: two data-source list reads can be in flight at once (the picker's first-open load and a
+  // refresh fired by the embedded panel, or two kind switches). Whoever lands LAST used to win,
+  // so a slow FIRST read would paint its already-superseded list over the newer one — and set the
+  // `bridgeDataSourcesLoaded` short-circuit, freezing it there until the next panel change.
+  it('F04: a superseded data-source list read cannot overwrite a newer one', async () => {
+    type ListItem = { id: string; name: string; type: string; connected: boolean }
+    let queueing = false
+    const pendingListReads: Array<(items: ListItem[]) => void> = []
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url !== '/api/data-sources') throw new Error(`unexpected apiGet ${url}`)
+      if (!queueing) return { ok: true, data: { items: [] as ListItem[] } }
+      return new Promise((resolve) => {
+        pendingListReads.push((items) => resolve({ ok: true, data: { items } }))
+      })
+    })
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http:generic', label: 'HTTP', roles: ['source'], supports: ['read'], advanced: false, guardrails: { write: { supported: false } } },
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: false, guardrails: { write: { supported: false } } },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/hub/overview?tenantId=default') return jsonResponse(EMPTY_HUB_OVERVIEW)
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('router-link', {
+      props: { to: { type: [String, Object], required: false, default: '' } },
+      setup(_props, { slots }) { return () => h('a', slots.default?.()) },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    // From here on the list read hangs until this test releases it, one read at a time.
+    queueing = true
+    const kindSelect = container.querySelector('[data-testid="connection-draft-kind"]') as HTMLSelectElement
+    const selectKind = async (kind: string) => {
+      kindSelect.value = kind
+      kindSelect.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi(2)
+    }
+    await selectKind('data-source:sql-readonly')   // read #1 — hangs
+    await selectKind('http:generic')
+    await selectKind('data-source:sql-readonly')   // read #2 — hangs alongside it
+    expect(pendingListReads).toHaveLength(2)
+
+    // The NEWER read lands first, then the older one — the exact interleaving that used to leave
+    // the picker showing a list the page had already moved past.
+    pendingListReads[1]([{ id: 'fresh-pg', name: 'Fresh PG', type: 'postgres', connected: true }])
+    await flushUi(4)
+    pendingListReads[0]([{ id: 'stale-pg', name: 'Stale PG', type: 'postgres', connected: true }])
+    await flushUi(4)
+
+    const options = Array.from(
+      (container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement).options,
+    ).map((option) => option.value)
+    expect(options).toContain('fresh-pg')
+    expect(options).not.toContain('stale-pg')
+  })
+
   it('C2b: data-source:sql-readonly connection uses the structured picker and references a data source by id (no credentials)', async () => {
     const upsertBodies: Array<Record<string, unknown>> = []
     apiGetMock.mockReset()
@@ -2647,9 +3384,17 @@ describe('IntegrationWorkbenchView', () => {
     app.mount(container)
     await flushUi()
 
-    // Picker is hidden until the operator picks the bridge kind, and the data-source list is NOT fetched yet (lazy).
+    // Picker is hidden until the operator picks the bridge kind.
+    //
+    // 整合切片 (2026-09-09): the embedded 外接数据源 panel in this same section lists sources on
+    // mount, so "GET /api/data-sources was never issued" is no longer the right shape for the
+    // picker's laziness. What still has to hold — and is what this pinned — is that the PICKER
+    // issues no load of its own until the bridge kind is chosen: exactly one call at mount (the
+    // panel's), and the count goes up only after the kind select changes (asserted below).
     expect(container.querySelector('[data-testid="data-source-bridge-picker"]')).toBeNull()
-    expect(apiGetMock.mock.calls.some(([url]) => url === '/api/data-sources')).toBe(false)
+    const dataSourceListCalls = (): number =>
+      apiGetMock.mock.calls.filter(([url]) => url === '/api/data-sources').length
+    expect(dataSourceListCalls()).toBe(1)
 
     // data-source:sql-readonly is an advanced connector — reveal it via the advanced toggle first.
     const advancedToggle = container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement
@@ -2663,13 +3408,17 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi()
 
     // Picker appears + lists the data sources; the raw-JSON config is hidden for this kind.
+    // The picker's OWN load happens here, not at mount — one additional call, triggered by the
+    // kind selection.
+    expect(dataSourceListCalls()).toBe(2)
     expect(container.querySelector('[data-testid="data-source-bridge-picker"]')).not.toBeNull()
     expect(container.querySelector('[data-testid="connection-draft-config"]')).toBeNull()
     const dsSelect = container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement
     const dsOptions = Array.from(dsSelect.options).map((option) => option.textContent?.trim())
     expect(dsOptions).toContain('Warehouse PG · postgres')
     expect(dsOptions).toContain('ERP MSSQL · sqlserver')
-    expect(container.querySelector('[data-testid="data-source-bridge-hint"]')?.textContent).toContain('凭据由 /data-sources 管理')
+    // 整合切片 (2026-09-09): the hint names the in-section panel now, not the retired bare path.
+    expect(container.querySelector('[data-testid="data-source-bridge-hint"]')?.textContent).toContain('凭据由上方「外接数据源」面板管理')
 
     const nameInput = container.querySelector('[data-testid="connection-draft-name"]') as HTMLInputElement
     nameInput.value = 'Warehouse bridge'
@@ -3147,7 +3896,9 @@ describe('IntegrationWorkbenchView', () => {
 
     const statusText = container.textContent || ''
     expect(statusText).toContain('引用的连接或数据源不存在、已删除')
-    expect(statusText).toContain('重新选择 /data-sources')
+    // F09/F14: the guidance names the in-page panel now that /data-sources is a redirect.
+    expect(statusText).toContain('上方「外接数据源」面板里确认后重新选择连接')
+    expect(statusText).not.toContain('重新选择 /data-sources')
     expect(apiFetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/integration/external-systems/ds_bridge_1/objects'))).toBe(true)
     expect(statusText).not.toContain('当前账号无权')
     expect(statusText).not.toContain('ds-403-gone')
@@ -3267,7 +4018,9 @@ describe('IntegrationWorkbenchView', () => {
 
     const statusText = container.textContent || ''
     expect(statusText).toContain('当前账号无权读取该连接或 schema')
-    expect(statusText).toContain('/data-sources 权限')
+    // F09/F14: the copy names the in-page panel now that /data-sources is a redirect, not a page.
+    expect(statusText).toContain('上方「外接数据源」面板的权限')
+    expect(statusText).not.toContain('以及 /data-sources 权限')
     expect(statusText).not.toContain('owner principal')
     expect(statusText).not.toContain('none provided')
   })

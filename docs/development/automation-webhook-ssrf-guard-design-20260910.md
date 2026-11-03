@@ -2,6 +2,14 @@
 
 **Date**: 2026-09-10 · **Branch**: `fix/automation-webhook-ssrf-guard` · **Scope**: `@metasheet/core-backend`
 
+> **2026-11-03 update (S0-a).** F-1 below is now done, and §5's "No resolve-then-pin on this path" no longer
+> holds. Production sends (no `fetchFn` injected) go through `pinnedHttpsFetch`, connecting to the address the
+> check approved for that attempt; the legacy loop re-checks before every retry; the two-phase path changes only
+> at its fetch call site. `pinnedHttpsFetch` itself answered Node 20's `lookup({ all: true })` with a single
+> string and could not connect; that is fixed. Save-time checks (rule create / patch, no DNS) give early errors
+> only. Tests: `automation-send-webhook-pinned-dispatch.test.ts`, `webhook-pinned-fetch-real-socket.test.ts`,
+> `automation-webhook-target-save-route.test.ts`. The injected `fetchFn` stays a test seam and is not pinned.
+
 ## 1. Why now
 
 The repository already owns a complete egress guard —

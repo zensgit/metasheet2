@@ -191,6 +191,61 @@ export async function fetchAiUsageSummaryWithProbeCache(
   }
 }
 
+/**
+ * A11 (customer feedback 2026-09-24 #7c): the three answers the AI availability read can settle on.
+ *  - 'available'   — the server said `{ available: true }`: the AI surfaces render;
+ *  - 'unavailable' — the server EXPLICITLY said `{ available: false }`: hidden, and the UI may say
+ *                    「未开通」 (not enabled);
+ *  - 'unknown'     — no usable answer (network / 5xx after one retry, 4xx such as an old backend's
+ *                    404 or an expired session's 401, a malformed body, no fn): hidden too, but the
+ *                    UI must NOT claim "not enabled" — it cannot know.
+ */
+export type AiAvailabilityState = 'available' | 'unavailable' | 'unknown'
+
+/** Delay before the single retry of a transient (network / 5xx) availability failure. */
+export const AI_AVAILABILITY_RETRY_DELAY_MS = 1000
+
+function aiAvailabilityStateOf(body: unknown): AiAvailabilityState {
+  if (typeof body !== 'object' || body === null) return 'unknown'
+  const available = (body as { available?: unknown }).available
+  if (available === true) return 'available'
+  if (available === false) return 'unavailable'
+  return 'unknown'
+}
+
+/** Transient = worth one retry: no HTTP status (network failure) or a 5xx. A 4xx is an answer. */
+function isTransientAvailabilityError(err: unknown): boolean {
+  const status = (err as { status?: unknown } | null | undefined)?.status
+  return typeof status !== 'number' || status >= 500
+}
+
+/**
+ * A11: resolve whether the AI surfaces may be shown. FAIL-CLOSED — only 'available' shows them.
+ * A transient failure (network / 5xx) is retried ONCE after a short delay; anything still failing
+ * settles on 'unknown'. The server still gates every AI request; this only decides what the UI
+ * offers and which words it uses.
+ */
+export async function resolveAiAvailability(
+  fetchFn: (() => Promise<unknown>) | null | undefined,
+  options: { retryDelayMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<AiAvailabilityState> {
+  if (typeof fetchFn !== 'function') return 'unknown'
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms) }))
+  const attempt = async (): Promise<{ state: AiAvailabilityState } | { error: unknown }> => {
+    try {
+      return { state: aiAvailabilityStateOf(await fetchFn()) }
+    } catch (error) {
+      return { error }
+    }
+  }
+  const first = await attempt()
+  if ('state' in first) return first.state
+  if (!isTransientAvailabilityError(first.error)) return 'unknown'
+  await sleep(options.retryDelayMs ?? AI_AVAILABILITY_RETRY_DELAY_MS)
+  const second = await attempt()
+  return 'state' in second ? second.state : 'unknown'
+}
+
 export function useAiShortcut(opts: UseAiShortcutOptions) {
   const state = reactive<AiShortcutState>({
     pending: null,

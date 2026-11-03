@@ -11,6 +11,8 @@
  *
  * The claim is head-scoped: it is a fact about the tree this suite runs on,
  * not a promise about later ones. That is exactly why it is a test.
+ * The default-config leg cannot attest private runtime configuration omitted
+ * by the declared sparse checkout: see the exact skip-worktree exception below.
  *
  * "PRODUCTION" IS DEFINED MECHANICALLY BELOW, not by eyeball. A sweep whose
  * exclusions are applied by judgement is a sweep that can be talked into any
@@ -98,12 +100,64 @@ function isProductionSource(relPath: string): boolean {
   return SOURCE_EXTENSIONS.has(path.extname(base))
 }
 
-function trackedFiles(): string[] {
+function trackedFiles(root: string = REPO_ROOT): string[] {
   const raw = execFileSync('git', ['ls-files', '-z', '--cached'], {
-    cwd: REPO_ROOT,
+    cwd: root,
     maxBuffer: 64 * 1024 * 1024,
   })
   return raw.toString('utf8').split('\0').filter((entry) => entry.length > 0)
+}
+
+// This is the ONE legacy private runtime file intentionally left unmaterialized
+// by the fresh CI checkout. It is not a blanket .env or missing-file exemption.
+const LEGACY_RUNTIME_ENV_REL = 'packages/core-backend/.env'
+
+function isDefaultConfigurationPath(rel: string): boolean {
+  return /\.(ya?ml|env|sh|json|ts|cjs|mjs|js)$/.test(rel)
+    && !rel.includes('/tests/')
+    && !rel.includes('__tests__')
+    && !rel.startsWith(`${W7_RESOLVER_DIR}/`)
+}
+
+function isUnmaterializedLegacyRuntimeEnv(rel: string, root: string): boolean {
+  if (rel !== LEGACY_RUNTIME_ENV_REL) return false
+  try {
+    fs.lstatSync(path.join(root, rel))
+    // Present files retain the original scan semantics, even with skip-worktree.
+    return false
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  const indexed = execFileSync('git', ['ls-files', '-t', '-z', '--cached', '--', rel], {
+    cwd: root,
+    maxBuffer: 64 * 1024 * 1024,
+  }).toString('utf8')
+  // Require the exact tracked entry AND the skip-worktree flag; absence alone
+  // is not sufficient. No private contents are read to establish this state.
+  return indexed === `S ${LEGACY_RUNTIME_ENV_REL}\0`
+}
+
+function defaultConfigurationSetters(
+  files: readonly string[],
+  root: string = REPO_ROOT,
+): string[] {
+  return files.filter(isDefaultConfigurationPath)
+    .filter((rel) => !isUnmaterializedLegacyRuntimeEnv(rel, root))
+    .filter((rel) => {
+      const text = fs.readFileSync(path.join(root, rel), 'utf8')
+      return /ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED\s*[:=]/.test(text)
+    })
+    .sort()
+}
+
+/** Index operations here affect ONLY the isolated, synthetic mirror. No commit,
+ *  credentials, hooks or real runtime configuration are involved. */
+function withIndexedDecoyTree(files: Record<string, string>, run: (decoyRoot: string) => void): void {
+  withDecoyTree(files, (decoyRoot) => {
+    execFileSync('git', ['init', '--quiet', '--template='], { cwd: decoyRoot })
+    execFileSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.fsmonitor=false', 'add', '--force', '--', ...Object.keys(files)], { cwd: decoyRoot })
+    run(decoyRoot)
+  })
 }
 
 /** The production files the real sweep inspects. */
@@ -265,6 +319,8 @@ describe('W7-1a structural inertness: the sweep itself is non-vacuous', () => {
  * test edit.
  */
 const W7_1B_PRODUCTION_IMPORTERS_V1 = Object.freeze([
+  // Timezone runtime reuses the canonical timeline/schedule composite locks.
+  'packages/core-backend/src/attendance/attendance-timezone-runtime-locks.ts',
   // W7-3 (train merge): the transition writer — REQUIRED by the resolver's own
   // doc contract to import `isAttendanceW7ContextSourceOrgAllowlistedV1` rather
   // than copy the allowlist mechanism. See the W7-3 amendment note below.
@@ -294,6 +350,7 @@ const W7_1B_PRODUCTION_IMPORTERS_V1 = Object.freeze([
  * selection, and that is precisely the drift ruling 3 forbids. It reds here.
  */
 const W7_1B_PRODUCTION_CALL_SITES_V1 = Object.freeze([
+  { file: 'packages/core-backend/src/attendance/attendance-timezone-runtime-locks.ts', symbol: 'acquireAttendanceW7CompositeFactsLocksV1' },
   // W7-3 (train merge): the writer names the ONE allowlist predicate — the exact
   // wiring the resolver's contract demands, and the only production call site.
   { file: 'packages/core-backend/src/attendance/w7-context-source-transition.ts', symbol: 'isAttendanceW7ContextSourceOrgAllowlistedV1' },
@@ -560,6 +617,8 @@ describe('W7-1a structural inertness: the posture table has no production reader
     //    the matcher.
     expect(postureTableCodeReferences()).toEqual([
       W7_TRANSITION_WRITER,
+      // Preview's read-only cache recognizes posture SELECTs; it never writes posture.
+      'plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs',
       'scripts/attendance/w4c0-dml-inventory/table-classification.cjs',
     ])
   })
@@ -664,16 +723,58 @@ describe('W7-1a structural inertness: the W7 env var is new, unset by default, a
     )
   })
 
-  it('nothing in the repo sets the W7 var by default (no CI/env/compose default entry)', () => {
-    const setters = trackedFiles()
-      .filter((rel) => /\.(ya?ml|env|sh|json|ts|cjs|mjs|js)$/.test(rel))
-      .filter((rel) => !rel.includes('/tests/') && !rel.includes('__tests__'))
-      .filter((rel) => !rel.startsWith(`${W7_RESOLVER_DIR}/`))
-      .filter((rel) => {
-        const text = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8')
-        return /ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED\s*[:=]/.test(text)
-      })
-      .sort()
-    expect(setters).toEqual([])
+  it('tracked default configuration has no W7 setter (except the declared unmaterialized runtime file)', () => {
+    // Head-scoped CI/env/compose defaults, NOT a claim about omitted private
+    // operational values. Every other admitted tracked file must be readable.
+    expect(defaultConfigurationSetters(trackedFiles())).toEqual([])
+  })
+
+  it('NEGATIVE CONTROL: an admitted default configuration setter reds the actual assertion', () => {
+    const rel = 'config/w7-default.env'
+    expect(isDefaultConfigurationPath(rel)).toBe(true)
+    withIndexedDecoyTree({ [rel]: 'ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED=true\n' }, (decoyRoot) => {
+      const setters = defaultConfigurationSetters(trackedFiles(decoyRoot), decoyRoot)
+      expect(setters).toEqual([rel])
+      expect(() => expect(setters).toEqual([])).toThrow()
+    })
+  })
+
+  it('NEGATIVE CONTROL: missing ordinary tracked configuration fails rather than being skipped', () => {
+    const rel = 'config/w7-default.env'
+    expect(isDefaultConfigurationPath(rel)).toBe(true)
+    withIndexedDecoyTree({ [rel]: '# synthetic tracked default fixture\n' }, (decoyRoot) => {
+      fs.unlinkSync(path.join(decoyRoot, rel))
+      expect(() => defaultConfigurationSetters(trackedFiles(decoyRoot), decoyRoot)).toThrow(/ENOENT/)
+    })
+  })
+
+  it('only the absent exact runtime path with skip-worktree may be unread; removing the flag reds', () => {
+    expect(isDefaultConfigurationPath(LEGACY_RUNTIME_ENV_REL)).toBe(true)
+    withIndexedDecoyTree({ [LEGACY_RUNTIME_ENV_REL]: '# synthetic runtime fixture\n' }, (decoyRoot) => {
+      execFileSync('git', ['update-index', '--skip-worktree', '--', LEGACY_RUNTIME_ENV_REL], { cwd: decoyRoot })
+      fs.unlinkSync(path.join(decoyRoot, LEGACY_RUNTIME_ENV_REL))
+      expect(defaultConfigurationSetters(trackedFiles(decoyRoot), decoyRoot)).toEqual([])
+      execFileSync('git', ['update-index', '--no-skip-worktree', '--', LEGACY_RUNTIME_ENV_REL], { cwd: decoyRoot })
+      expect(() => defaultConfigurationSetters(trackedFiles(decoyRoot), decoyRoot)).toThrow(/ENOENT/)
+    })
+  })
+
+  it('NEGATIVE CONTROL: skip-worktree cannot exempt a different absent runtime filename', () => {
+    const rel = 'packages/other-backend/.env'
+    expect(isDefaultConfigurationPath(rel)).toBe(true)
+    withIndexedDecoyTree({ [rel]: '# synthetic neighboring fixture\n' }, (decoyRoot) => {
+      execFileSync('git', ['update-index', '--skip-worktree', '--', rel], { cwd: decoyRoot })
+      fs.unlinkSync(path.join(decoyRoot, rel))
+      expect(() => defaultConfigurationSetters(trackedFiles(decoyRoot), decoyRoot)).toThrow(/ENOENT/)
+    })
+  })
+
+  it('NEGATIVE CONTROL: a present runtime setter is still checked even with skip-worktree', () => {
+    withIndexedDecoyTree({ [LEGACY_RUNTIME_ENV_REL]: 'ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED=true\n' }, (decoyRoot) => {
+      execFileSync('git', ['update-index', '--skip-worktree', '--', LEGACY_RUNTIME_ENV_REL], { cwd: decoyRoot })
+      const setters = defaultConfigurationSetters(trackedFiles(decoyRoot), decoyRoot)
+      expect(setters).toEqual([LEGACY_RUNTIME_ENV_REL])
+      expect(() => expect(setters).toEqual([])).toThrow()
+    })
   })
 })

@@ -14,7 +14,9 @@
 //      parameterized SQL with whitelisted identifiers and never concatenate
 //      user values into the statement.
 //   6. updateRow / deleteRows refuse empty where clauses (no unbounded ops).
-//   7. transaction() exposes the same scoped surface, no rawQuery.
+//   7. transaction() exposes the same scoped surface, no rawQuery — plus ONE handle-only method,
+//      setTransactionIsolationLevel, whose level is a whitelist key rendering a fixed literal
+//      (never on the root helper: outside a transaction block PostgreSQL only warns and ignores).
 //   8. No rawQuery export at all.
 //
 // Run: node __tests__/db.test.cjs
@@ -84,7 +86,12 @@ async function main() {
   const publicKeys = Object.keys(db).sort()
   const expected = [
     'ALLOWED_PREFIX', 'countRows', 'deleteRows', 'insertMany', 'insertOne',
-    'select', 'selectOne', 'selectOneForUpdate', 'transaction', 'updateRow',
+    'select', 'selectOne',
+    // selectOneForKeyShare: the writer's half of the external-system delete lock protocol
+    // (external-system-pointer-lock.cjs). Same whitelist, same parameterization as
+    // selectOneForUpdate; only the locking clause differs.
+    'selectOneForKeyShare',
+    'selectOneForUpdate', 'transaction', 'updateRow',
     // upsertOne is the module header's sanctioned extension form ("added here as a new validated
     // method"), NOT a raw-SQL hook: table, row columns and conflict columns all pass the same
     // identifier whitelist, and every value stays parameterized.
@@ -291,6 +298,33 @@ async function main() {
   )
   assert.deepEqual(mockDb6b_lock.calls[0].params, ['p1', 'approved'])
 
+  // selectOneForKeyShare renders the KEY SHARE clause — not FOR SHARE, not FOR UPDATE — and is
+  // otherwise byte-identical in shape to selectOneForUpdate (whitelist, quoting, parameters).
+  const mockDb6b_keyShare = mockDatabase({ nextRows: [
+    [{ id: 'sys_1', tenant_id: 't1' }],
+  ] })
+  const db6b_keyShare = createDb({ database: mockDb6b_keyShare })
+  const pinned = await db6b_keyShare.selectOneForKeyShare(
+    'integration_external_systems',
+    { tenant_id: 't1', id: 'sys_1' },
+  )
+  assert.equal(pinned.id, 'sys_1')
+  assert.match(
+    mockDb6b_keyShare.calls[0].sql,
+    /^SELECT \* FROM "integration_external_systems" WHERE "tenant_id" = \$1 AND "id" = \$2 LIMIT 1 FOR KEY SHARE$/,
+  )
+  assert.deepEqual(mockDb6b_keyShare.calls[0].params, ['t1', 'sys_1'])
+  await assert.rejects(
+    () => db6b_keyShare.selectOneForKeyShare('users', { id: 'x' }),
+    /outside the "integration_" scope/,
+    'selectOneForKeyShare enforces the same table whitelist',
+  )
+  await assert.rejects(
+    () => db6b_keyShare.selectOneForKeyShare('integration_external_systems'),
+    /where clause is required/,
+    'selectOneForKeyShare refuses an unbounded lock',
+  )
+
   const mockDb6b_count = mockDatabase({ nextRows: [
     [{ count: 42 }],
   ] })
@@ -320,12 +354,184 @@ async function main() {
     const trxKeys = Object.keys(trx).sort()
     assert.deepEqual(
       trxKeys,
-      ['commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'selectOneForUpdate', 'updateRow', 'upsertOne'],
+      [
+        // advisoryXactLock: HANDLE-ONLY (asserted absent from the root surface in 7c.), the
+        // per-tenant "count then insert under a cap" mutex (stock-preparation-project-target-store.cjs).
+        'advisoryXactLock',
+        'commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'selectOneForKeyShare', 'selectOneForUpdate',
+        // setLocalLockTimeout: HANDLE-ONLY (asserted absent from the root surface in 7e.), the stock-prep
+        // sheet write lock's bound on how long its takeover / abandoned-lease clear / release may wait for
+        // a row a stalled fenced write holds FOR SHARE (stock-preparation-project-write-lock.cjs, PR #6501 S1).
+        'setLocalLockTimeout',
+        // setTransactionIsolationLevel: HANDLE-ONLY (asserted absent from the root surface in 4.),
+        // the external-system delete lock protocol's isolation pin (external-system-pointer-lock.cjs).
+        'setTransactionIsolationLevel',
+        // tryAdvisoryXactLock: HANDLE-ONLY (asserted absent from the root surface in 7d.), the NON-blocking
+        // per-tenant overview-writer lock (S3 fix round 2, F4; stock-preparation-project-target-store.cjs).
+        'tryAdvisoryXactLock',
+        'updateRow', 'upsertOne'],
       'transaction exposes scoped surface only, no rawQuery',
     )
     await trx.insertOne('integration_runs', { id: 'rtx', status: 'running' })
   })
   assert.ok(mockDb9.calls.some((c) => c.tx && /INSERT INTO "integration_runs"/.test(c.sql)))
+
+  // --- 7c. advisoryXactLock (E1): ONE fixed literal, the key as its ONE parameter, on the tx connection
+  assert.equal(typeof db9.advisoryXactLock, 'undefined',
+    'advisoryXactLock is NOT on the root helper (pg_advisory_xact_lock in autocommit guards nothing)')
+  const mockDb9lock = mockDatabase()
+  const db9lock = createDb({ database: mockDb9lock })
+  await db9lock.transaction(async (trx) => {
+    await trx.advisoryXactLock('stock-prep-project-target:tenant-a')
+    await trx.advisoryXactLock("x'); DROP TABLE users; --")
+  })
+  assert.deepEqual(
+    mockDb9lock.calls.map((c) => ({ sql: c.sql, params: c.params, tx: c.tx })),
+    [
+      { sql: 'SELECT pg_advisory_xact_lock(hashtext($1))', params: ['stock-prep-project-target:tenant-a'], tx: true },
+      // Caller text NEVER reaches the SQL: a hostile key is just a parameter value.
+      { sql: 'SELECT pg_advisory_xact_lock(hashtext($1))', params: ["x'); DROP TABLE users; --"], tx: true },
+    ],
+    'the lock statement is a fixed literal; the key is its only parameter; it runs on the transaction connection',
+  )
+  const mockDb9lockBad = mockDatabase()
+  const db9lockBad = createDb({ database: mockDb9lockBad })
+  for (const badKey of ['', '   ', null, undefined, 42, {}, ['k'], { toString: () => 'k' }]) {
+    await assert.rejects(
+      db9lockBad.transaction((trx) => trx.advisoryXactLock(badKey)),
+      (error) => error instanceof ScopeViolationError,
+      `advisoryXactLock refuses a non-string / blank key: ${JSON.stringify(badKey)}`,
+    )
+  }
+  assert.ok(!mockDb9lockBad.calls.some((c) => c.sql), 'a refused key issues no statement')
+
+  // --- 7d. tryAdvisoryXactLock (S3 fix round 2, F4): the NON-blocking sibling — ONE fixed literal, the key as
+  // its ONE parameter, on the tx connection; ONLY an explicit boolean true from PostgreSQL counts as acquired.
+  assert.equal(typeof db9.tryAdvisoryXactLock, 'undefined',
+    'tryAdvisoryXactLock is NOT on the root helper (a transaction-scoped lock in autocommit guards nothing)')
+  const mockDb9try = mockDatabase({ nextRows: [[{ locked: true }], [{ locked: false }], [], [{ locked: 't' }], [{ locked: 1 }]] })
+  const db9try = createDb({ database: mockDb9try })
+  const tryAnswers = await db9try.transaction(async (trx) => [
+    await trx.tryAdvisoryXactLock('stock-prep-project-overview:tenant-a'),
+    await trx.tryAdvisoryXactLock('stock-prep-project-overview:tenant-a'),
+    await trx.tryAdvisoryXactLock("x'); DROP TABLE users; --"),
+    await trx.tryAdvisoryXactLock('k'),
+    await trx.tryAdvisoryXactLock('k'),
+  ])
+  assert.deepEqual(tryAnswers, [true, false, false, false, false], 'acquired only on an explicit boolean true; busy / empty / truthy-but-not-true is NOT acquired')
+  assert.deepEqual(
+    mockDb9try.calls.map((c) => ({ sql: c.sql, params: c.params, tx: c.tx })),
+    [
+      { sql: 'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', params: ['stock-prep-project-overview:tenant-a'], tx: true },
+      { sql: 'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', params: ['stock-prep-project-overview:tenant-a'], tx: true },
+      // Caller text NEVER reaches the SQL.
+      { sql: 'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', params: ["x'); DROP TABLE users; --"], tx: true },
+      { sql: 'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', params: ['k'], tx: true },
+      { sql: 'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', params: ['k'], tx: true },
+    ],
+    'the try-lock statement is a fixed literal; the key is its only parameter; it runs on the transaction connection',
+  )
+  const mockDb9tryBad = mockDatabase()
+  const db9tryBad = createDb({ database: mockDb9tryBad })
+  for (const badKey of ['', '   ', null, undefined, 42, {}, ['k'], { toString: () => 'k' }]) {
+    await assert.rejects(
+      db9tryBad.transaction((trx) => trx.tryAdvisoryXactLock(badKey)),
+      (error) => error instanceof ScopeViolationError,
+      `tryAdvisoryXactLock refuses a non-string / blank key: ${JSON.stringify(badKey)}`,
+    )
+  }
+  assert.ok(!mockDb9tryBad.calls.some((c) => c.sql), 'a refused key issues no statement')
+
+  // --- 7e. setLocalLockTimeout (PR #6501 S1): ONE fixed literal (set_config, is_local = true), the timeout as
+  // its ONE parameter (decimal milliseconds text), on the tx connection; refused outside 1..30000 ms, before
+  // any statement; NOT on the root helper (a local setting in autocommit ends with its own statement).
+  assert.equal(typeof db9.setLocalLockTimeout, 'undefined',
+    'setLocalLockTimeout is NOT on the root helper (in autocommit a local setting bounds nothing)')
+  assert.equal(__internals.LOCAL_LOCK_TIMEOUT_STATEMENT, "SELECT set_config('lock_timeout', $1, true)",
+    'the lock-timeout statement is set_config with is_local = true (SET LOCAL takes no bind parameter)')
+  assert.equal(__internals.LOCAL_LOCK_TIMEOUT_MAX_MS, 30000, 'the bound never exceeds the pool statement_timeout (30 s)')
+  const mockDb9lt = mockDatabase()
+  const db9lt = createDb({ database: mockDb9lt })
+  await db9lt.transaction(async (trx) => {
+    await trx.setLocalLockTimeout(5000)
+    await trx.setLocalLockTimeout(1)
+    await trx.setLocalLockTimeout(30000)
+    await trx.updateRow('integration_runs', { status: 'done' }, { id: 'r1' })
+  })
+  assert.deepEqual(
+    mockDb9lt.calls.filter((c) => c.sql).map((c) => ({ sql: c.sql, params: c.params, tx: c.tx })).slice(0, 3),
+    [
+      { sql: "SELECT set_config('lock_timeout', $1, true)", params: ['5000'], tx: true },
+      { sql: "SELECT set_config('lock_timeout', $1, true)", params: ['1'], tx: true },
+      { sql: "SELECT set_config('lock_timeout', $1, true)", params: ['30000'], tx: true },
+    ],
+    'the lock-timeout statement is a fixed literal; the timeout is its only parameter, as decimal text; it runs on the transaction connection',
+  )
+  assert.ok(/UPDATE "integration_runs"/.test(mockDb9lt.calls[3].sql) && mockDb9lt.calls[3].tx === true,
+    'the statements that follow run in the same transaction')
+  const mockDb9ltBad = mockDatabase()
+  const db9ltBad = createDb({ database: mockDb9ltBad })
+  for (const badMs of [0, -1, 30001, 1.5, NaN, Infinity, '5000', null, undefined, {}, [5000], { valueOf: () => 5000 }]) {
+    await assert.rejects(
+      db9ltBad.transaction((trx) => trx.setLocalLockTimeout(badMs)),
+      (error) => error instanceof ScopeViolationError,
+      `setLocalLockTimeout refuses a non-integer / out-of-range timeout: ${JSON.stringify(badMs)}`,
+    )
+  }
+  assert.ok(!mockDb9ltBad.calls.some((c) => c.sql), 'a refused timeout issues no statement')
+
+  // --- 7b. setTransactionIsolationLevel: whitelist key -> fixed literal, on the tx connection ----
+  assert.equal(typeof db9.setTransactionIsolationLevel, 'undefined',
+    'setTransactionIsolationLevel is NOT on the root helper (autocommit would make it a silent no-op)')
+  const mockDb9b = mockDatabase()
+  const db9b = createDb({ database: mockDb9b })
+  await db9b.transaction(async (trx) => {
+    await trx.setTransactionIsolationLevel('read committed')
+    await trx.setTransactionIsolationLevel('repeatable read')
+    await trx.setTransactionIsolationLevel('serializable')
+  })
+  assert.deepEqual(
+    mockDb9b.calls.map((c) => ({ sql: c.sql, params: c.params, tx: c.tx })),
+    [
+      { sql: 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED', params: [], tx: true },
+      { sql: 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ', params: [], tx: true },
+      { sql: 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE', params: [], tx: true },
+    ],
+    'each whitelisted level renders its ONE fixed statement, on the transaction connection, with no parameters',
+  )
+  const hostile = [
+    'READ COMMITTED', // case is part of the key: only the exact whitelist spellings pass
+    'read uncommitted', // deliberately absent (PostgreSQL runs it as read committed)
+    "read committed; DROP TABLE users; --",
+    'read committed ',
+    '',
+    null,
+    undefined,
+    42,
+    { toString: () => 'read committed' },
+    ['read committed'],
+    'constructor',
+    '__proto__',
+    'hasOwnProperty',
+  ]
+  const mockDb9c = mockDatabase()
+  const db9c = createDb({ database: mockDb9c })
+  await db9c.transaction(async (trx) => {
+    for (const level of hostile) {
+      await assert.rejects(
+        () => trx.setTransactionIsolationLevel(level),
+        (error) => error instanceof ScopeViolationError
+          && /not one of the whitelisted levels/.test(error.message)
+          // values-free: the refusal never echoes what it was handed
+          && !error.message.includes('DROP') && !error.message.includes('READ COMMITTED'),
+        `setTransactionIsolationLevel refuses ${JSON.stringify(String(level))}`,
+      )
+    }
+  })
+  assert.equal(mockDb9c.calls.length, 0, 'a refused level issues NO statement at all')
+  assert.deepEqual(Object.keys(__internals.TRANSACTION_ISOLATION_STATEMENTS).sort(),
+    ['read committed', 'repeatable read', 'serializable'], 'the isolation whitelist is exactly three levels')
+  assert.ok(Object.isFrozen(__internals.TRANSACTION_ISOLATION_STATEMENTS), 'the isolation whitelist is frozen')
 
   // --- 8. No rawQuery export ------------------------------------------
   assert.equal(typeof db.rawQuery, 'undefined', 'db has no rawQuery')

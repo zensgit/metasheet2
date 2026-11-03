@@ -178,11 +178,14 @@ describe('nodeAssigneeSourceSummary (node-level)', () => {
     expect(nodeAssigneeSourceSummary(node)).toBe('发起人')
   })
 
-  it('cc node: names the target type (成员 vs 角色)', () => {
+  it('cc node: names the target type (成员 vs 角色 vs 用户组)', () => {
     const userCc: ApprovalNode = { key: 'cc1', type: 'cc', config: { targetType: 'user', targetIds: ['user_1'] } }
     const roleCc: ApprovalNode = { key: 'cc2', type: 'cc', config: { targetType: 'role', targetIds: ['role_1'] } }
+    // Lock-1 OD-L1-7(a): 'group' is the third cc target kind (registry row "user_group (cc) | 用户组").
+    const groupCc: ApprovalNode = { key: 'cc3', type: 'cc', config: { targetType: 'group', targetIds: ['grp_1'] } }
     expect(nodeAssigneeSourceSummary(userCc)).toBe('抄送成员')
     expect(nodeAssigneeSourceSummary(roleCc)).toBe('抄送角色')
+    expect(nodeAssigneeSourceSummary(groupCc)).toBe('抄送用户组')
   })
 
   it('condition node: the honest "按条件进入后续分支" label (no fabricated branch)', () => {

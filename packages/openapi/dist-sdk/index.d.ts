@@ -1018,6 +1018,469 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance/groups/{groupId}/fixed-schedule/editor": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read fixed schedule editor configuration and candidate reference eligibility
+         * @description Uses the existing fixed schedule preview actor, organization and group-manager authorization. The authenticated organization is authoritative. Eligibility is advisory and does not grant write permission; apply and rebuild recheck their existing authorization and canonical posture. An absent shiftId selects the saved desired shift, or returns null eligibility when unconfigured. No coverage counts or raw member identifiers are returned. Unreadable segment or posture state fails closed.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    shiftId?: string;
+                };
+                header?: never;
+                path: {
+                    groupId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Desired configuration, old managed sets and candidate reference eligibility */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: components["schemas"]["AttendanceFixedScheduleEditor"];
+                        };
+                    };
+                };
+                /** @description Invalid group or candidate shift identifier */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authentication required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Actor */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Group or selected shift not found in authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Fixed schedule */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups/{groupId}/fixed-schedule/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save fixed schedule desired configuration
+         * @description Requires existing fixed schedule dispatch authorization. This saves configuration only and does not create assignments. expectedConfigRevision=0 requires absence; a positive value requires that exact saved revision. A stale expectation returns ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED with no configuration or assignment change. Omission retains legacy unconditional save behavior. A no-op save retains revision and timestamps.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    groupId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceFixedScheduleConfigSave"];
+                };
+            };
+            responses: {
+                /** @description Saved desired configuration and authoritative revision */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: components["schemas"]["AttendanceFixedScheduleSavedConfig"];
+                        };
+                    };
+                };
+                /** @description Invalid date window */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authentication required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Actor */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Group or shift not found in authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED; reload before retry */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Attendance tables unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups/{groupId}/fixed-schedule/config/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Save fixed schedule desired configuration through the POST update alias
+         * @description Uses the identical handler, authorization, validation, revision checks and response as PUT config.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    groupId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceFixedScheduleConfigSave"];
+                };
+            };
+            responses: {
+                /** @description Saved desired configuration and authoritative revision */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: components["schemas"]["AttendanceFixedScheduleSavedConfig"];
+                        };
+                    };
+                };
+                /** @description Invalid date window */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authentication required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Actor */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Group or shift not found in authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED; reload before retry */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Attendance tables unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/effective-calendar": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read effective attendance calendar dates
+         * @description Provide from and to and exactly one selector: userId, groupId, or orgOnly=true. The inclusive range is limited to 366 days. Cross-user and group selectors require the existing attendance administration permissions. User dates carry individual timezone contexts; a mixed-zone result has timezone=null and timezoneMode=per_day. Stored historical dates are not reinterpreted through current policy or trips.
+         */
+        get: {
+            parameters: {
+                query: {
+                    from: string;
+                    to: string;
+                    userId?: string;
+                    groupId?: string;
+                    orgOnly?: boolean;
+                    includePending?: boolean;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Calendar with individual timezone identity in user mode */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                /** @enum {string} */
+                                mode: "userId" | "groupId" | "orgOnly";
+                                /** Format: date */
+                                from: string;
+                                /** Format: date */
+                                to: string;
+                                timezone: string | null;
+                                /**
+                                 * @description Present in userId mode.
+                                 * @enum {string}
+                                 */
+                                timezoneMode?: "single" | "per_day";
+                                items: components["schemas"]["AttendanceEffectiveCalendarDay"][];
+                            };
+                        };
+                    };
+                };
+                /** @description Invalid selectors or date range */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authentication required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Attendance permission or active organization membership required */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Conflicting target or stored timezone context */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Missing or invalid timezone configuration */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authoritative calendar context unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/rules/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the authenticated employee's attendance rules and current timezone
+         * @description The employee and organization come from the authenticated session. asOf selects schedule rules; attendanceTimeContext is resolved independently for one captured server instant, which also supplies resolvedAt. A missing or conflicting timezone source fails explicitly.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    asOf?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Schedule rules plus current server-instant timezone */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                userId: string;
+                                orgId: string;
+                                /** Format: date-time */
+                                resolvedAt: string;
+                                /** Format: date */
+                                resolvedForDate: string;
+                                attendanceTimeContext: components["schemas"]["AttendanceCurrentTimeContext"];
+                                assignment?: Record<string, never>;
+                                runtimeRule?: Record<string, never>;
+                                configuredGroupRule?: Record<string, never> | null;
+                                punchPolicy?: Record<string, never> | null;
+                                warnings?: Record<string, never>[];
+                            };
+                        };
+                    };
+                };
+                /** @description Authentication required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Active organization membership and attendance read permission required */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Current timezone context is ambiguous */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Invalid date or missing timezone configuration */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Timezone authority unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/attendance/punch": {
         parameters: {
             query?: never;
@@ -1027,7 +1490,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Punch attendance (check in/out) */
+        /**
+         * Punch attendance (check in/out)
+         * @description Ordinary online punches use one server-generated instant. Supplying occurredAt or occurred_at, including null, returns 400 PUNCH_CLIENT_TIMESTAMP_FORBIDDEN with message "The server determines online punch time". Historical timestamps require the separately governed import or correction workflow.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -1040,16 +1506,6 @@ export interface paths {
                     "application/json": {
                         /** @enum {string} */
                         eventType: "check_in" | "check_out";
-                        /**
-                         * Format: date-time
-                         * @description Preferred punch timestamp in ISO 8601 format.
-                         */
-                        occurredAt?: string;
-                        /**
-                         * Format: date-time
-                         * @description Compatibility alias for occurredAt.
-                         */
-                        occurred_at?: string;
                         timezone?: string;
                         source?: string;
                         location?: Record<string, never>;
@@ -1414,7 +1870,14 @@ export interface paths {
             };
         };
         put?: never;
-        /** Create attendance adjustment request */
+        /**
+         * Create attendance adjustment request
+         * @description Supplied timestamps on a fresh request must identify an absolute instant with Z or an explicit UTC offset.
+         *     Local times without an offset, DST gaps, and unresolved DST folds are rejected.
+         *     The server resolves and freezes the target shift context; a client fingerprint is an optional
+         *     optimistic concurrency check, never an authority to select a timezone.
+         *     Existing sealed idempotent requests replay before fresh-input validation.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -1485,6 +1948,8 @@ export interface paths {
                          * @description Compatibility alias for requestedOutAt.
                          */
                         clockOut?: string;
+                        /** @description Optional target-context fingerprint from the target-timezone-context endpoint. A changed context returns 409. */
+                        expectedTimezoneContextFingerprint?: string;
                         reason?: string;
                         /** @description Required for leave requests unless leaveTypeCode is provided. */
                         leaveTypeId?: string;
@@ -3229,6 +3694,607 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance/timezone-context/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Preview the authenticated employee target shift timezone
+         * @description Requires attendance:read and active organization membership. Accepts only workDate; user, organization, group, and timezone query overrides are rejected. Reads frozen context first, otherwise resolves the actual target context in the same transaction. Does not create attendance or configuration records. Submission must recheck context identity.
+         */
+        get: {
+            parameters: {
+                query: {
+                    workDate: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Actual target context preview */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceTimezoneTargetResponse"];
+                    };
+                };
+                /** @description Invalid date or extra query fields */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector mismatch */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Conflicting contexts or incomplete historical freeze */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Invalid timezone */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Trusted runtime unavailable or unbound result */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/timezone-context/employees/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Preview an administrator selected employee target shift timezone
+         * @description Requires attendance:admin plus actual transaction-bound management authorization and active actor and target memberships in the authenticated organization. Accepts only workDate query and the path subject. Uses the same trusted target resolution as the employee self preview.
+         */
+        get: {
+            parameters: {
+                query: {
+                    workDate: string;
+                };
+                header?: never;
+                path: {
+                    userId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Actual target context preview */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceTimezoneTargetResponse"];
+                    };
+                };
+                /** @description Invalid date or extra query fields */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector mismatch */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Conflicting contexts or incomplete historical freeze */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Invalid timezone */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Trusted runtime unavailable or unbound result */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/timezone-policy/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview attendance timezone policy impact without saving
+         * @description Requires attendance:admin and actual transaction-bound management authority. Runs in a read-only transaction and compares the supplied policy revision with the current row. Counts active organization members, changes to their prospective current context, and conflicts with started or frozen shifts and remaining approved trips. Does not reserve a change or guarantee all future calendar dates; saving revalidates authority and source contexts. Invalid default sources and stale revisions return errors without partial counts.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceTimezonePolicyWrite"];
+                };
+            };
+            responses: {
+                /** @description Actual version-bound save-admission impact counts */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceTimezonePolicyImpactResponse"];
+                    };
+                };
+                /** @description Unknown fields */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector mismatch */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Stale policy revision */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Required default source or timezone is invalid */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Trusted preview unavailable or counts do not bind to the proposal */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/timezone-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read organization attendance timezone policy
+         * @description Requires attendance:admin and active membership in the authenticated organization. An absent policy is OFF with version 0. The organization must have one valid default attendance rule; no global fallback is used. This read does not enable the feature or select a target shift.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: components["schemas"]["AttendanceTimezonePolicyRead"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector differs from the authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Ambiguous persisted timezone configuration */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Required timezone configuration is missing or invalid */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Timezone configuration store unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        /**
+         * Set the organization attendance timezone policy
+         * @description Requires attendance:admin and transaction-bound management authorization. Organization and actor come from the authenticated session; client selectors are rejected. Enabling validates the unique organization default in the same transaction. Disabling does not require a valid default, but still preserves already started shifts and approved trip boundaries. All source writes and audit share the guarded transaction.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceTimezonePolicyWrite"];
+                };
+            };
+            responses: {
+                /** @description Saved at the returned revision */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceTimezonePolicyWriteResponse"];
+                    };
+                };
+                /** @description Unknown fields or malformed strict input */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector mismatch or unavailable override */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Stale revision */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Required default */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Trusted management authorizer */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/timezone-policy/employees/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read current effective employee attendance timezone override
+         * @description Requires attendance:admin and active administrator and target employee memberships in the authenticated organization. Uses the server instant and a half-open effective interval. Null means inheritance, not a selected shift timezone.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    userId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                override: components["schemas"]["AttendanceEmployeeTimezoneOverrideRead"];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector differs from the authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Ambiguous persisted timezone configuration */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Required timezone configuration is missing or invalid */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Timezone configuration store unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Create an employee attendance timezone interval
+         * @description Requires attendance:admin and active same-organization administrator and target employee membership. The half-open UTC interval cannot overlap another override. Source guards preserve started and frozen shift contexts and remaining approved trip boundaries. An override does not enable multiple timezones.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    userId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceEmployeeTimezoneOverrideCreate"];
+                };
+            };
+            responses: {
+                /** @description Saved at the returned revision */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceEmployeeTimezoneOverrideWriteResponse"];
+                    };
+                };
+                /** @description Unknown fields or malformed strict input */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector mismatch or unavailable override */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Stale revision */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Required default */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Trusted management authorizer */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/timezone-policy/employees/{userId}/{referenceId}/close": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Shorten an employee attendance timezone interval
+         * @description Requires attendance:admin and transaction-bound management authorization. Only the named employee override in the authenticated organization may be shortened at its expected revision; history is retained. Started shifts and approved trips remain guarded.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    userId: string;
+                    referenceId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceEmployeeTimezoneOverrideClose"];
+                };
+            };
+            responses: {
+                /** @description Saved at the returned revision */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceEmployeeTimezoneOverrideWriteResponse"];
+                    };
+                };
+                /** @description Unknown fields or malformed strict input */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector mismatch or unavailable override */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Stale revision */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Required default */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Trusted management authorizer */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/attendance/settings": {
         parameters: {
             query?: never;
@@ -3255,6 +4321,7 @@ export interface paths {
                         "application/json": {
                             ok?: boolean;
                             data?: components["schemas"]["AttendanceSettings"];
+                            runtimeGates?: components["schemas"]["AttendanceRuntimeGates"];
                         };
                     };
                 };
@@ -3906,6 +4973,29 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description The batch is not an active member of the authenticated organization. details are values-free: error code, rejected count, and request indexes. They do not echo userId. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: false;
+                            error: {
+                                /** @enum {string} */
+                                code: "USER_NOT_IN_ORG";
+                                message: string;
+                                details: {
+                                    /** @enum {string} */
+                                    code: "USER_NOT_IN_ORG";
+                                    rejectedCount: number;
+                                    indexes: number[];
+                                }[];
+                            };
+                        };
+                    };
+                };
             };
         };
         delete?: never;
@@ -5638,7 +6728,14 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody?: never;
+            /** @description Send the same organization identifier used by the subsequent preview or commit request. */
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        orgId?: string;
+                    };
+                };
+            };
             responses: {
                 /** @description OK */
                 200: {
@@ -7036,6 +8133,143 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance/business-trip-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a business trip approval request
+         * @description Requires attendance:write. Only this dedicated route creates a business_trip request. Pending requests do not change attendance timezone or create attendance entitlements. Only final approval may publish a destination arrangement, subject to whole-shift boundaries and one context per work date. Multiple timezones remain disabled unless separately configured.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceBusinessTripCreate"];
+                };
+            };
+            responses: {
+                /** @description Created or replayed with the original operation identity */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceBusinessTripResponse"];
+                    };
+                };
+                /** @description Invalid strict input */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector differs from the authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Operation identity or approval configuration conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Canonical write boundary unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/business-trip-requests/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read a business trip request and its effective arrangement
+         * @description Requires attendance:read and same-organization ownership or attendance access to other employees. A cancelled request may retain an arrangement through an already started shift boundary; effectiveEndAt determines eligibility.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceBusinessTripResponse"];
+                    };
+                };
+                /** @description Invalid request reference */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Unknown or cross-organization business trip request */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Business trip store unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/audit-logs": {
         parameters: {
             query?: never;
@@ -7599,13 +8833,15 @@ export interface paths {
         };
         /**
          * List comment mention candidates
-         * @description Returns active user suggestions for multitable comment authoring. The frontend may locally filter the returned candidates while the backend supports optional query narrowing.
+         * @description Returns active user suggestions for multitable comment authoring. Search-required (#5795) - a call without a non-blank `q` returns no items and `requiresQuery` true instead of a user list. By default the term is a literal case-insensitive substring of name, email or id. When `match=exact-email` (#5819) is set, the term is instead matched against the stored email by trimmed, case-insensitive equality - still requires a non-blank `q`, and the returned rows are a subset of what the substring search would return for the same term. `limit` is capped at 50 and `hasMore` reports truncation. `total` is the size of the returned page, not a population count.
          */
         get: {
             parameters: {
                 query: {
                     spreadsheetId: string;
                     q?: string;
+                    /** @description Optional. When set to `exact-email`, switches from substring search to trimmed, case-insensitive email equality (#5819). */
+                    match?: "exact-email";
                     limit?: number;
                 };
                 header?: never;
@@ -8097,12 +9333,15 @@ export interface paths {
         post?: never;
         /**
          * Delete data source
-         * @description Refuses with 409 (DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS, naming the reference count) while any integration external system's config.dataSourceId references this source. force=true (platform-admin only) breaks the reference deliberately and is audited.
+         * @description Refuses with 409 (DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS, details.referenceCount) while any integration external system references this source (canonical connection_id, or an owner-attributed legacy config.dataSourceId). There is no bypass: unbind the external systems first. The check runs inside the delete transaction under a row lock, and the database's foreign key onto data_sources.live_id refuses the soft delete itself while a canonical binding exists (reported as the same 409, with details.referenceCount null).
          */
         delete: {
             parameters: {
                 query?: {
-                    /** @description Platform-admin only — delete even while referenced by external systems. */
+                    /**
+                     * @deprecated
+                     * @description Retired 2026-09-20 (owner ruling: a referenced source cannot be deleted). The server ignores this parameter for every tier, platform admins included, and answers the same 409. Kept only so old clients still validate; do not send it.
+                     */
                     force?: boolean;
                 };
                 header?: never;
@@ -8122,7 +9361,7 @@ export interface paths {
                 };
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
-                /** @description Referenced by external systems (reference count in the error body) */
+                /** @description Referenced by external systems (details.referenceCount in the error body; unbind first) */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -8456,7 +9695,11 @@ export interface paths {
          * @description Organization and actor come only from the authenticated session. Missing
          *     instance means not-installed. canManage is server-derived from hydrated
          *     global elearning administrator authority and active organization membership.
-         *     Administrative setup is available independently of the deployment master flag.
+         *     Follows the deployment master flag: while it is not exact 'true', GET, POST
+         *     and PUT all answer 404 `{ error: feature_disabled }` right after
+         *     authentication, read and write nothing, and do not reveal whether an
+         *     installation exists. Existing installations are kept and apply again once
+         *     the flag is exact 'true'.
          */
         get: operations["getElearningAppInstallation"];
         /**
@@ -9839,6 +11082,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/admin/analytics/export-availability": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Report whether this deployment can store analytics exports
+         * @description Same authentication, organization, RBAC, and exact feature gates as the export routes.
+         *     Lets the admin UI disable export creation up front instead of offering a button whose
+         *     task can only fail. Values-free: no storage provider, location, or configuration is
+         *     returned, only availability and a closed reason.
+         */
+        get: operations["getElearningAnalyticsExportAvailability"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/admin/analytics/exports": {
         parameters: {
             query?: never;
@@ -9856,7 +11122,9 @@ export interface paths {
          *     command contains requestId, departmentId, periodStart, and periodEnd. An exact replay
          *     returns the original closed nine-field result; a different payload for the same
          *     requestId returns a values-free conflict. The export never contains individual answers,
-         *     traces, grades, or unsuppressed small-group values.
+         *     traces, grades, or unsuppressed small-group values. When this deployment has no export
+         *     storage the request is rejected with 409 `ANALYTICS_EXPORT_STORAGE_UNAVAILABLE` before
+         *     any export task is created.
          */
         post: operations["createElearningAnalyticsExport"];
         delete?: never;
@@ -9903,6 +11171,936 @@ export interface paths {
          *     configured.
          */
         get: operations["downloadElearningAnalyticsExport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/external-systems": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List external systems
+         * @description Read-only external-system listing, scoped by (tenantId, workspaceId) and optionally narrowed by kind/status. `data` is a plain array of IntegrationExternalSystem (the credential-redacted public projection); there is no cursor or total count. A workspace-scoped caller's page additionally merges in tenant-wide (null-workspace) rows so a system shared across the tenant is still visible from a workspace — see listExternalSystems' merge branch for the exact windowing.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null (tenant-wide) workspace, which is never widened further. */
+                    workspaceId?: string;
+                    /** @description Restrict to one adapter kind (e.g. k3, data-source:sql-readonly). Not validated against an enum server-side — an unknown kind simply matches zero rows. */
+                    kind?: string;
+                    /** @description Restrict to one status. An unrecognized value is a 400 (ExternalSystemValidationError), not an empty result. */
+                    status?: "active" | "inactive" | "error";
+                    /** @description Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies). Capped at 500 server-side. */
+                    limit?: number;
+                    /** @description Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. */
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationExternalSystem"][];
+                        };
+                    };
+                };
+                /** @description An unrecognized `status` value. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/external-systems/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get one external system
+         * @description Read-only single-system read, scoped by (tenantId, workspaceId, id). Returns the same credential-redacted IntegrationExternalSystem projection as the list route. Another tenant's system id and a non-existent id both raise ExternalSystemNotFoundError → 404 with the identical message.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description External system id. */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationExternalSystem"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description System not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/pipelines": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List integration pipelines
+         * @description Read-only pipeline listing, scoped by (tenantId, workspaceId) and optionally narrowed by status/sourceSystemId/targetSystemId. `data` is a plain array of IntegrationPipeline, newest first (ORDER BY created_at DESC); there is no cursor or total count. The list projection never embeds `fieldMappings` (only the single-pipeline read can).
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                    /** @description Restrict to pipelines in one status. An unrecognized value is a 400 (PipelineValidationError), not an empty result. */
+                    status?: "draft" | "active" | "paused" | "disabled";
+                    /** @description Restrict to pipelines whose sourceSystemId matches. */
+                    sourceSystemId?: string;
+                    /** @description Restrict to pipelines whose targetSystemId matches. */
+                    targetSystemId?: string;
+                    /** @description Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies). Capped at 500 server-side. */
+                    limit?: number;
+                    /** @description Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. */
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationPipeline"][];
+                        };
+                    };
+                };
+                /** @description An unrecognized `status` value. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/pipelines/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get one integration pipeline
+         * @description Read-only single-pipeline read, scoped by (tenantId, workspaceId, id). By default the response embeds `fieldMappings` (a second read of the pipeline's field-mapping rows); pass `includeFieldMappings=false` to skip that second read and omit the key entirely (not an empty array). Another tenant's pipeline id and a non-existent id both raise PipelineNotFoundError → 404 with the identical message and no distinguishing detail.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                    /** @description Any value other than the exact string `false` is treated as true (the handler's check is `!== 'false'`). Default true. */
+                    includeFieldMappings?: "true" | "false";
+                };
+                header?: never;
+                path: {
+                    /** @description Pipeline id. */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationPipeline"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Pipeline not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/provenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List one row's cross-run provenance timeline
+         * @description Read-only cross-run provenance timeline for one rowId, scoped by (tenantId, workspaceId, rowId) and optionally narrowed by pipelineId and a [from, to] window on the run's `created_at`. Reads the migration-060 integration_provenance_by_row view; ordered oldest-first (by run_created_at, then a stable secondary compare). `attrs` were redacted at write (DF-N2-2b scrub gate); this read path does NOT re-redact and never returns raw payloads. No write, replay or retry.
+         */
+        get: {
+            parameters: {
+                query: {
+                    /** @description Row id to fetch the timeline for. Missing/empty is a 400 (ROW_ID_REQUIRED). */
+                    rowId: string;
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                    /** @description Restrict the timeline to events from one pipeline. */
+                    pipelineId?: string;
+                    /** @description Inclusive lower bound on the owning run's created_at. Must be an ISO date-time; an unparsable value is a 400 (PipelineValidationError). */
+                    from?: string;
+                    /** @description Inclusive upper bound on the owning run's created_at. Must be an ISO date-time; an unparsable value is a 400 (PipelineValidationError). */
+                    to?: string;
+                    /** @description Max events to return. Capped at 500 at the route (the registry's own ceiling is higher; the tighter of the two always wins). */
+                    limit?: number;
+                    /** @description Events to skip. */
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["ProvenanceTimelineEntry"][];
+                        };
+                    };
+                };
+                /** @description rowId missing, or an unparsable from/to. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description The host's pipeline registry does not implement the by-row provenance read. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/dead-letters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List dead letters
+         * @description Read-only dead-letter listing, scoped by (tenantId, workspaceId) and optionally narrowed by pipelineId/runId/status. `data` is a plain array of IntegrationDeadLetter, newest first (ORDER BY created_at DESC); there is no cursor or total count. `sourcePayload`/`transformedPayload` are stripped by default; only a caller whose session resolves as admin AND passes `includePayload=true` gets them back (sanitized). A non-admin caller passing `includePayload=true` is silently ignored (redacted view), not rejected.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                    /** @description Restrict to dead letters from one pipeline. */
+                    pipelineId?: string;
+                    /** @description Restrict to dead letters from one run. */
+                    runId?: string;
+                    /** @description Restrict to one status. An unrecognized value is a 400 (DeadLetterError), not an empty result. */
+                    status?: "open" | "replayed" | "discarded";
+                    /** @description Admin-only. Must be the exact string `true`; any other value (including for a non-admin caller) keeps the redacted (payload-stripped) projection. */
+                    includePayload?: "true" | "false";
+                    /** @description Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies). Capped at 500 server-side. */
+                    limit?: number;
+                    /** @description Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. */
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationDeadLetter"][];
+                        };
+                    };
+                };
+                /** @description An unrecognized `status` value. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List integration pipeline runs
+         * @description Read-only run listing, scoped by (tenantId, workspaceId) and optionally narrowed by pipelineId/status. `data` is a plain array of IntegrationPipelineRun, newest first (ORDER BY created_at DESC); there is no cursor or total count.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                    /** @description Restrict to runs of one pipeline. */
+                    pipelineId?: string;
+                    /** @description Restrict to runs in one status. An unrecognized value is a 400 (PipelineValidationError), not an empty result. */
+                    status?: "pending" | "running" | "succeeded" | "partial" | "failed" | "cancelled";
+                    /** @description Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. Capped at 500 server-side. */
+                    limit?: number;
+                    /** @description Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. */
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationPipelineRun"][];
+                        };
+                    };
+                };
+                /** @description An unrecognized `status` value. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/runs/{runId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get one integration pipeline run
+         * @description Read-only single-run read, scoped by (tenantId, workspaceId, runId). The tenant is resolved from the verified session claim; `tenantId` may be echoed as a query parameter but must MATCH the caller's own tenant (a mismatch is 403), so this parameter cannot widen scope. Another tenant's run id and a run id that does not exist return the SAME details-free 404 — the route is not a cross-tenant existence oracle. No write, replay or retry is performed.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace — the same normalization the list route applies, so a run written under the null workspace is read back there. */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description Pipeline run id. */
+                    runId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationPipelineRun"];
+                        };
+                    };
+                };
+                /** @description runId missing from the path */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Run not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id; carries no `details`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's pipeline registry does not implement the single-run read (optional-method wiring older than this route). */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/runs/{runId}/provenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List one run's provenance timeline
+         * @description Read-only per-run provenance timeline, scoped by (tenantId, workspaceId, runId) and ordered by `eventIndex` (the migration-060 view's WITH ORDINALITY over the run's persisted `provenance_events`, i.e. write order). The run is resolved first through the same three-key lookup the single-run read uses, so another tenant's run id and a run id that does not exist return the SAME details-free 404 — an unknown run is never answered with an empty timeline. `attrs` were redacted at write (DF-N2-2b scrub gate); this read path does not re-redact and never returns raw payloads. No write, replay or retry. One call answers ONE PAGE (default 200 events) together with `total`, `truncated` and `nextCursor`, so a client can always tell the first page from the whole timeline; pass the previous page's `nextCursor` as `cursor` to read the next page.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace — the same normalization the run reads apply. */
+                    workspaceId?: string;
+                    /** @description Max events per page. Capped at 500 at the route and at 1000 in the registry (the tighter wins); a non-numeric or non-positive value is silently ignored and the server-held default page size (200) applies. */
+                    limit?: number;
+                    /** @description The previous page's `nextCursor` (the `eventIndex` of the last event it returned). Answers the events strictly after it, in `eventIndex` order, under the same (tenantId, workspaceId, runId) scope. Omitted or empty means the first page. Anything else that is not 1-15 ASCII decimal digits is refused with 400 INVALID_CURSOR (never silently treated as the first page); the tenant scope is checked before the cursor. */
+                    cursor?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description Pipeline run id. */
+                    runId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of the run's timeline plus its completeness disclosure. `truncated` is true iff at least one more event exists after the last returned item; `nextCursor` is then that item's `eventIndex` as a string (null otherwise). `total` counts every event the run has in the caller's scope, independent of `cursor` and `limit`. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: {
+                                items: components["schemas"]["ProvenanceTimelineEntry"][];
+                                /** @description Every event this run has in the caller's scope (not just this page). */
+                                total: number;
+                                /** @description True iff more events exist after the last returned item. */
+                                truncated: boolean;
+                                /** @description Cursor for the next page when `truncated`; null on the last page. */
+                                nextCursor: string | null;
+                            };
+                        };
+                    };
+                };
+                /** @description runId missing from the path, or a malformed `cursor` */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Run not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id; carries no `details`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's pipeline registry implements neither the per-run provenance read (PROVENANCE_READ_NOT_IMPLEMENTED) nor the single-run read the scope probe needs (RUN_READ_NOT_IMPLEMENTED) — optional-method wiring older than this route. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/stock-preparation/snapshot-batches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List a project's immutable BOM snapshot batches (stock-prep view 2)
+         * @description Read-only, values-free LIST of the immutable BOM snapshot batches for one business project — queryRecords-only against the internal MetaSheet-provisioned MVP tables, never PLM/K3/any external system. Uses the two-project split: the STAGING project (derived from the auth tenant) locates the provisioned sheets, `projectId` (the PLM business project) filters the batch rows and is echoed back. An unprovisioned batch sheet degrades gracefully to `{ projectId, batchCount: 0, batches: [] }` rather than an error. `workspaceId` is accepted by the query allowlist but is never read by the handler or the read function — it has no effect on the result (confirmed by reading both; not a documented no-op elsewhere in this module family).
+         */
+        get: {
+            parameters: {
+                query: {
+                    /** @description The (business) PLM project id. Missing/empty is a 400 (STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID, field: projectId). */
+                    projectId: string;
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Accepted by the query allowlist but NOT forwarded to the read function — has no effect on the response (dead parameter; documented here so a caller does not assume it scopes anything). */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["StockPreparationSnapshotBatchListResult"];
+                        };
+                    };
+                };
+                /** @description Missing `projectId`, or an unsupported query field. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description The bounded readonly scan exceeded its page bound (READ_MAX_PAGES=50 pages of READ_PAGE_LIMIT=500 rows each) reading the batch/line/run sheets — fails closed rather than scanning forever. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's multitable provisioning API (findObjectSheet/resolveFieldIds) or the records API (queryRecords) is not available. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Values-free counts diff of one snapshot batch vs its base (stock-prep view 2)
+         * @description Read-only, values-free diff of the named snapshot batch against its immutable predecessor (auto-picked: same business project, highest snapshotVersion strictly below the current one) or an explicit caller-chosen `baseSnapshotBatchId`. The business project used for the predecessor search is read from the CURRENT batch row itself (the FE diff call sends no `projectId`); the `projectId` query param is only a fallback used when that batch row cannot be read. `workspaceId` is accepted by the query allowlist but has no effect on the result (same dead-parameter note as the LIST route). H-1 gate: BOTH the current and the resolved base batch must be structurally complete (at least one line AND a matching run row) — an incomplete side fails loud with 409 SNAPSHOT_DIFF_BATCH_INCOMPLETE rather than serving a partial/fabricated diff. An unprovisioned substrate (no batch/line/exception sheet exists at all) degrades gracefully to zero counts and `baseSnapshotBatchId: null`, unless an explicit base was requested (then 404).
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Caller-chosen base pair, overriding the predecessor auto-pick. Must differ from `snapshotBatchId` (400 SNAPSHOT_DIFF_BASE_INVALID), must exist (404 SNAPSHOT_DIFF_BASE_NOT_FOUND) and must belong to the same business project as the diffed batch (409 SNAPSHOT_DIFF_BASE_PROJECT_MISMATCH). Only verifiable when the diffed batch's own row exists — a caller-chosen pair against a ghost current id is also 404 SNAPSHOT_DIFF_BASE_NOT_FOUND. */
+                    baseSnapshotBatchId?: string;
+                    /** @description Fallback business-project id, used only when the current batch row cannot be read (the normal path reads the project from that row). Does not filter or narrow the diffed batch itself (the batch id already rode the path). */
+                    projectId?: string;
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Accepted by the query allowlist but has no effect on the response. */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description The snapshot batch being diffed (the "current" side). */
+                    snapshotBatchId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["StockPreparationSnapshotDiffResult"];
+                        };
+                    };
+                };
+                /** @description An unsupported query field, or `baseSnapshotBatchId` equal to `snapshotBatchId`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description An explicit `baseSnapshotBatchId` that does not exist, or that cannot be verified because the diffed batch's own row does not exist. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The resolved base belongs to a different business project than the diffed batch, OR (H-1) the current/base batch is structurally incomplete, OR the current/base batch identity is ambiguous (duplicate snapshotBatchId or duplicate run identity, no substrate unique index). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's multitable provisioning API or records API is not available (same two codes as the LIST route). */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff/rows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Per-row diff browse of one snapshot batch vs its base (stock-prep view 2 rows)
+         * @description Read-only, values-free PER-ROW diff browse: diffType/changeTypes/reviewStatus per diff row, for the FE's row-level drill-down under view 2. Same base resolution (auto-pick or explicit `baseSnapshotBatchId`) and H-1 completeness gate as the counts diff (GET .../diff); the enum filters `reviewStatus`/`diffType` are validated against the route's own closed vocabulary FIRST (400 with the field name), so the read function's own belt-and-braces re-check of the same vocabulary is unreachable via HTTP. `heldRowCount` is computed over the WHOLE pair BEFORE these filters are applied, so a filtered read still carries that context; `rowCount` is the post-filter row count.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Same semantics as the counts diff route's `baseSnapshotBatchId`. */
+                    baseSnapshotBatchId?: string;
+                    /** @description Restrict rows to one reviewStatus. A value outside the vocabulary is a 400 (STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID), not an empty result. */
+                    reviewStatus?: "ready" | "held";
+                    /** @description Restrict rows to one diffType. A value outside the vocabulary is a 400 (STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID), not an empty result. */
+                    diffType?: "added" | "removed" | "changed" | "unchanged" | "held";
+                    /** @description Same fallback semantics as the counts diff route's `projectId`. */
+                    projectId?: string;
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Accepted by the query allowlist but has no effect on the response. */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description The snapshot batch being diffed (the "current" side). */
+                    snapshotBatchId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["StockPreparationSnapshotDiffRowsResult"];
+                        };
+                    };
+                };
+                /** @description An unsupported query field, an out-of-vocabulary `reviewStatus`/`diffType`, or `baseSnapshotBatchId` equal to `snapshotBatchId`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Same semantics as the counts diff route's 404. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description Same semantics as the counts diff route's 409 (project mismatch / H-1 incomplete / ambiguous). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The filtered/unfiltered row set exceeded MAX_DIFF_ROWS=2000, or the underlying bounded sheet scan exceeded its page bound (same as the LIST route's 422). */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's multitable provisioning API or records API is not available (same two codes as the LIST route). */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
         put?: never;
         post?: never;
         delete?: never;
@@ -9993,6 +12191,68 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/multitable/bases/{baseId}/trash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List restorable deleted tables in a base
+         * @description Requires sheet lifecycle authority and read access. Returns only eligible soft-deleted user tables; managed and system projections are excluded. Authorization is applied before pagination. No total count is exposed. Missing, deleted, and inaccessible bases return 403. The opaque cursor is bound to the base and uses a stable table-id keyset.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                    /** @description Opaque nextCursor from the preceding page of this base. */
+                    cursor?: string;
+                };
+                header?: never;
+                path: {
+                    baseId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Authorized deleted tables, possibly empty. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                sheets: {
+                                    id: string;
+                                    baseId: string;
+                                    name: string;
+                                    description: string | null;
+                                    /** Format: date-time */
+                                    deletedAt: string;
+                                }[];
+                                nextCursor: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/templates": {
         parameters: {
             query?: never;
@@ -10064,9 +12324,11 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Created */
+                /** @description Created. Repeated identical installs inside the server-side dedupe window (same authenticated tenant, user, templateId, workspaceId and baseName) return the FIRST base again instead of creating another one; the body is then byte-identical to the original 201 and only the Idempotent-Replayed header distinguishes the two. */
                 201: {
                     headers: {
+                        /** @description Present with the value `true` only when this 201 replayed an earlier install instead of creating a new base; absent on a fresh install. Ops/gateway signal only — the web client does not read it, and it is not CORS-exposed, so browser JS cannot see it without Access-Control-Expose-Headers. */
+                        "Idempotent-Replayed"?: "true";
                         [name: string]: unknown;
                     };
                     content: {
@@ -10336,7 +12598,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete a multitable sheet */
+        /**
+         * Soft-delete a multitable sheet
+         * @description Marks the table deleted while retaining its fields, records, and views. It is no longer accessible through live table reads or writes. Authorized users can restore it from the table recycle bin; this is not a record deletion or field deletion.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -10368,6 +12633,63 @@ export interface paths {
                 404: components["responses"]["NotFound"];
             };
         };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/sheets/{sheetId}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restore a soft-deleted multitable sheet
+         * @description Clears the table deletion marker under the same lifecycle authority as table deletion. Retained fields, records, views, and inbound links become available again. Does not restore an earlier data version or recreate a table that was permanently deleted. Live or missing tables return 404; a concurrent recovery fence returns 409. No feature flag is changed.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sheetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Table restored. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                restored: string;
+                                sheet: {
+                                    id: string;
+                                    baseId: string | null;
+                                    name: string;
+                                    description: string | null;
+                                };
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -11844,7 +14166,7 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
-                /** @description Version conflict */
+                /** @description Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the record changed since `expectedVersion` (carries `serverVersion`). `RECOVERY_IN_PROGRESS`: a recovery holds the sheet. `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this write touches changed type or options while the write was waiting (a field type conversion committed first). Nothing was written; reload the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED` is only returned by a server running with field type conversion and the writer fence both enabled. */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -11930,7 +14252,7 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
-                /** @description Version conflict */
+                /** @description Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the record changed since `expectedVersion` (carries `serverVersion`). `RECOVERY_IN_PROGRESS`: a recovery holds the sheet. `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this write touches changed type or options while the write was waiting (a field type conversion committed first). Nothing was written; reload the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED` is only returned by a server running with field type conversion and the writer fence both enabled. */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -12167,7 +14489,7 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
-                /** @description Conflict */
+                /** @description Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the record changed since `expectedVersion` (carries `serverVersion`). `RECOVERY_IN_PROGRESS`: a recovery holds the sheet. `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this write touches changed type or options while the write was waiting (a field type conversion committed first). Nothing was written; reload the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED` is only returned by a server running with field type conversion and the writer fence both enabled. */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -14456,6 +16778,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/roles/{roleId}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List role member display names
+         * @description Platform-admin read of persisted role members. Page defaults are 1 and 20, and pageSize is capped at 100. Items contain only id and displayName.
+         */
+        get: operations["listAdminRoleMembers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/spreadsheets/{id}/permissions": {
         parameters: {
             query?: never;
@@ -16410,6 +18752,191 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AttendanceTimezoneTarget: {
+            orgId: string;
+            userId: string;
+            /** Format: date */
+            workDate: string;
+            /** @description Actual IANA timezone of the selected target shift. */
+            timezone: string;
+            /** @description Target context identity to compare again on fresh submission. Preview does not reserve the target. */
+            contextFingerprint: string;
+            frozen: boolean;
+            referenceId: string | null;
+            /** @description Existing source identity. Null only for a complete historical freeze that predates timezone provenance; no source revision is invented. */
+            provenance: {
+                timezone: string;
+                /** @enum {string} */
+                source: "system_default" | "trip" | "employee_override" | "calculation_group";
+                /** @enum {string} */
+                mode: "default_only" | "multi_timezone";
+                referenceId: string;
+                version: number;
+                policyVersion: number;
+                /** @description Actual effective membership identity retained by the selected context. */
+                calculationGroupMembership: Record<string, never> | null;
+            } | null;
+            window: {
+                /** Format: date-time */
+                startAt: string;
+                /** Format: date-time */
+                endAt: string;
+            };
+            /** @description Target calculation rule snapshot returned by the trusted runtime, not client-selected rule input. */
+            rule: Record<string, never>;
+            isWorkingDay: boolean;
+        };
+        AttendanceTimezoneTargetResponse: {
+            /** @enum {boolean} */
+            ok: true;
+            data: components["schemas"]["AttendanceTimezoneTarget"];
+        };
+        AttendanceTimezonePolicyImpact: {
+            currentVersion: number;
+            proposedEnabled: boolean;
+            evaluatedUsers: number;
+            affectedUsers: number;
+            conflictingUsers: number;
+            conflictCounts: {
+                startedContext: number;
+                tripContext: number;
+                invalidTargetContext: number;
+            };
+        };
+        AttendanceTimezonePolicyImpactResponse: {
+            /** @enum {boolean} */
+            ok: true;
+            data: components["schemas"]["AttendanceTimezonePolicyImpact"];
+        };
+        AttendanceTimezonePolicyWrite: {
+            enabled: boolean;
+            /** @description Current policy revision. Zero only for an absent disabled policy. */
+            expectedVersion: number;
+        };
+        AttendanceEmployeeTimezoneOverrideCreate: {
+            /** @description Valid IANA attendance timezone; no device fallback. */
+            timezone: string;
+            /**
+             * Format: date-time
+             * @description Explicit RFC3339 instant with seconds, optional millisecond precision, and Z or UTC offset.
+             */
+            effectiveFrom: string;
+            /**
+             * Format: date-time
+             * @description Exclusive end instant after effectiveFrom, or null for an open interval.
+             */
+            effectiveTo: string | null;
+            expectedPolicyVersion: number;
+        };
+        AttendanceEmployeeTimezoneOverrideClose: {
+            /**
+             * Format: date-time
+             * @description Explicit RFC3339 exclusive end with seconds and Z or UTC offset. May shorten, never extend, an existing interval.
+             */
+            endAt: string;
+            expectedVersion: number;
+        };
+        AttendanceTimezonePolicyWriteResponse: {
+            /** @enum {boolean} */
+            ok: true;
+            data: {
+                enabled: boolean;
+                version: number;
+            };
+        };
+        AttendanceEmployeeTimezoneOverrideWriteResponse: {
+            /** @enum {boolean} */
+            ok: true;
+            data: {
+                orgId: string;
+                userId: string;
+                referenceId: string;
+                timezone: string;
+                version: number;
+                /** Format: date-time */
+                effectiveFrom: string;
+                /** Format: date-time */
+                effectiveTo: string | null;
+            };
+        };
+        AttendanceBusinessTripCreate: {
+            /** @description Defaults to the authenticated employee. Another employee requires attendance administrator access and active same-organization membership. */
+            userId?: string;
+            /** @description Valid IANA destination timezone. No browser timezone fallback. */
+            destinationTimezone: string;
+            /**
+             * Format: date-time
+             * @description Explicit RFC3339 instant with seconds and Z or UTC offset. Zone-free local values are rejected.
+             */
+            startAt: string;
+            /**
+             * Format: date-time
+             * @description Explicit RFC3339 instant after startAt.
+             */
+            endAt: string;
+            reason?: string;
+            /** Format: uuid */
+            approvalFlowId?: string;
+            /**
+             * Format: uuid
+             * @description Reuse the same identity and payload after an uncertain submission.
+             */
+            operationId?: string;
+        };
+        AttendanceBusinessTripDetail: {
+            /** Format: uuid */
+            requestId: string;
+            orgId: string;
+            userId: string;
+            destinationTimezone: string;
+            /** Format: date-time */
+            startAt: string;
+            /** Format: date-time */
+            endAt: string;
+            arrangement: {
+                /** Format: date-time */
+                effectiveEndAt: string;
+                version: number;
+                /** Format: date-time */
+                publishedAt: string;
+                /** Format: date-time */
+                cancelledAt: string | null;
+            } | null;
+        };
+        AttendanceBusinessTripResponse: {
+            /** @enum {boolean} */
+            ok: true;
+            data: {
+                request: components["schemas"]["AttendanceRequest"];
+                businessTrip: components["schemas"]["AttendanceBusinessTripDetail"];
+                /** @description Existing versioned attendance request snapshot, when issued by the canonical boundary. */
+                requestSnapshot?: Record<string, never>;
+            };
+        };
+        AttendanceTimezonePolicyRead: {
+            enabled: boolean;
+            /** @description Zero only for an absent disabled policy; persisted revisions start at one. */
+            version: number;
+            systemDefault: {
+                orgId: string;
+                referenceId: string;
+                /** @description Valid IANA timezone identifier */
+                timezone: string;
+                version: number;
+            };
+        };
+        AttendanceEmployeeTimezoneOverrideRead: {
+            orgId: string;
+            userId: string;
+            referenceId: string;
+            /** @description Valid IANA timezone identifier */
+            timezone: string;
+            version: number;
+            /** Format: date-time */
+            effectiveFrom: string;
+            /** Format: date-time */
+            effectiveTo: string | null;
+        } | null;
         StandardResponse: {
             ok?: boolean;
             data?: unknown;
@@ -16473,6 +19000,10 @@ export interface components {
             updatedAt?: string;
             /** @description Mentioned user identifiers parsed from comment content. */
             mentions?: string[];
+            /** @description Display labels for this comment's own mentions, keyed by user id. A label is the user's name, or their email when they have no name (the label the mention search returns, without its email subtitle). Only in GET /api/comments responses to an interactive session caller, only on that caller's own comments, only for active users, and for at most 50 distinct ids per response. Never sent to API-token callers. An id without an entry has no label in this response (inactive or deleted user, no name or email, or beyond the 50-distinct-id ceiling). */
+            mentionLabels?: {
+                [key: string]: string;
+            };
         };
         CommentsListResponse: {
             /** @example true */
@@ -16522,10 +19053,36 @@ export interface components {
             ok?: boolean;
             data?: {
                 items?: components["schemas"]["CommentMentionCandidate"][];
-                /** @example 1 */
+                /**
+                 * @description Number of items in this (clamped) page - never a deployment-wide count.
+                 * @example 1
+                 */
                 total?: number;
-                /** @example 50 */
+                /**
+                 * @description Effective page size after the server ceiling (50).
+                 * @example 50
+                 */
                 limit?: number;
+                /**
+                 * @description The trimmed search term that was applied (empty when `requiresQuery` is true).
+                 * @example jam
+                 */
+                query?: string;
+                /**
+                 * @description True when more candidates matched than this page holds.
+                 * @example false
+                 */
+                hasMore?: boolean;
+                /**
+                 * @description True when the call carried no usable search term; `items` is then empty.
+                 * @example false
+                 */
+                requiresQuery?: boolean;
+                /**
+                 * @description Minimum trimmed search-term length the server accepts.
+                 * @example 1
+                 */
+                minQueryLength?: number;
             };
         };
         CommentUnreadCountResponse: {
@@ -16624,7 +19181,67 @@ export interface components {
             created_at?: string;
         };
         AttendancePunchEvent: components["schemas"]["AttendanceEvent"];
+        /** @description Current server-instant attendance timezone, independent of the requested asOf schedule date. */
+        AttendanceCurrentTimeContext: {
+            /** Format: date-time */
+            resolvedForInstant: string;
+            effectiveTimezone: string;
+            /** @enum {string} */
+            timezoneSource: "system_default" | "trip" | "employee_override" | "calculation_group";
+            /** @enum {string} */
+            mode: "default_only" | "multi_timezone";
+            policyVersion: number;
+            referenceId: string;
+            version: number;
+            /** Format: date */
+            currentLocalDate: string;
+            /**
+             * Format: date-time
+             * @description Earliest future governed source boundary. Refresh the current context at this instant; default-only mode has no optional-source boundary.
+             */
+            nextEffectiveBoundary: string | null;
+        };
+        AttendanceEffectiveCalendarDay: {
+            /** Format: date */
+            date: string;
+            base: {
+                isWorkingDay: boolean;
+                /** @enum {string} */
+                source: "rule" | "shift" | "rotation" | "national" | "manual" | "org" | "group" | "role" | "user" | "stored_record";
+                holidayId?: string;
+                dayIndex?: number;
+                name?: string | null;
+            };
+            effective: {
+                isWorkingDay: boolean;
+                /** @enum {string} */
+                source: "rule" | "shift" | "rotation" | "national" | "manual" | "org" | "group" | "role" | "user" | "stored_record";
+                label?: string;
+                policyId?: string;
+                plannedMinutes?: number;
+                slots?: Record<string, never>[];
+            };
+            layers: Record<string, never>[];
+            overlays: Record<string, never>[];
+            /** @description Present in userId mode. Future dates use their target context; persisted dates use stored identity, including legacy null provenance. */
+            attendanceTimeContext?: components["schemas"]["AttendanceStoredTimeContext"];
+        };
+        AttendanceStoredTimeContext: {
+            /** Format: date */
+            targetWorkDate: string;
+            effectiveTimezone: string;
+            /** @enum {string} */
+            timezoneSource: "system_default" | "trip" | "employee_override" | "calculation_group" | "legacy_record";
+            /** @enum {string|null} */
+            mode: "default_only" | "multi_timezone" | null;
+            policyVersion: number | null;
+            contextFingerprint: string | null;
+            frozen: boolean;
+        };
         AttendanceRecord: {
+            attendanceTimeContext?: components["schemas"]["AttendanceStoredTimeContext"];
+            /** @enum {string} */
+            timezone_source?: "system_default" | "trip" | "employee_override" | "calculation_group" | "legacy_record";
             id?: string;
             user_id?: string;
             org_id?: string;
@@ -16733,7 +19350,7 @@ export interface components {
             /** Format: date */
             work_date?: string;
             /** @enum {string} */
-            request_type?: "missed_check_in" | "missed_check_out" | "time_correction" | "leave" | "overtime" | "outdoor_punch" | "shift_swap" | "schedule_dispatch";
+            request_type?: "missed_check_in" | "missed_check_out" | "time_correction" | "leave" | "overtime" | "outdoor_punch" | "shift_swap" | "schedule_dispatch" | "business_trip";
             /** Format: date-time */
             requested_in_at?: string | null;
             /** Format: date-time */
@@ -17316,6 +19933,220 @@ export interface components {
              */
             runCreatedAt: string;
         };
+        /** @description SC-04 pipeline run projection. This is the EXACT shape produced by the plugin's rowToPipelineRun (plugins/plugin-integration-core/lib/pipelines.cjs) and is shared verbatim by the list route (GET /api/integration/runs) and the single-run read (GET /api/integration/runs/{runId}) — the single read does no extra join, so the two projections cannot drift. */
+        IntegrationPipelineRun: {
+            id: string;
+            tenantId: string;
+            workspaceId?: string | null;
+            pipelineId: string;
+            /** @description Run mode recorded by the runner (e.g. dry-run vs. a real write run). */
+            mode: string;
+            triggeredBy?: string | null;
+            status: string;
+            rowsRead: number;
+            rowsCleaned: number;
+            rowsWritten: number;
+            rowsFailed: number;
+            /** Format: date-time */
+            startedAt?: string | null;
+            /** Format: date-time */
+            finishedAt?: string | null;
+            durationMs?: number | null;
+            errorSummary?: string | null;
+            /** @description Run detail JSONB as persisted by the runner (e.g. targetWriteSummaries, watermarkAdvanced). Forward-compatible: unknown keys are passed through unchanged. Already sanitized at write time; this read path does NOT re-redact, so nothing secret may be written into it. */
+            details?: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            createdAt?: string | null;
+        };
+        /** @description Q4c: one row of the readonly BOM snapshot-batch LIST (view 2). Exact shape produced by plugin-integration-core's batchSummary (plugins/plugin-integration-core/lib/stock-preparation-snapshot-reads.cjs:201), one per immutable snapshot batch of the business project. Values-free: no drawing number, quantity, unit, path key or timestamp value, only counts/status enums/booleans and the presence of createdAt (never its value). */
+        StockPreparationSnapshotBatchSummary: {
+            snapshotBatchId: string | null;
+            /** @description Defaults to 0 when the stored cell is missing or non-numeric. */
+            snapshotVersion: number;
+            snapshotStatus: string | null;
+            syncRunId: string | null;
+            /** @description Count of bom_snapshot_line rows linked to this batch. */
+            lineCount: number;
+            /** @description Whether the batch row's createdAt cell is set — never the timestamp itself. */
+            createdAtPresent: boolean;
+            /** @description True when the multi-step persist path (batch row -> lines -> run row) did not finish: zero lines OR no matching run row (isBatchIncomplete, stock-preparation-snapshot-reads.cjs:197). An orphaned batch is never presented as normal. */
+            incomplete: boolean;
+        };
+        /** @description Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches (listSnapshotBatches, stock-preparation-snapshot-reads.cjs:228). Batches are ordered newest-first (highest snapshotVersion first; snapshotBatchId breaks ties, orderBatches, same file:215). An unprovisioned batch sheet degrades gracefully to `{ projectId, batchCount: 0, batches: [] }` rather than an error. */
+        StockPreparationSnapshotBatchListResult: {
+            /** @description The (business) projectId the request named, echoed back. */
+            projectId: string;
+            batchCount: number;
+            batches: components["schemas"]["StockPreparationSnapshotBatchSummary"][];
+        };
+        /** @description Q4c: values-free per-changeType tally over one snapshot-batch diff's evidence (changeCountsFromEvidence, stock-preparation-snapshot-reads.cjs:263). Exactly these 10 keys; each defaults to 0 when the engine's evidence carries no rows of that changeType. `componentCodeChanged`/`materialChanged` (added Q3c) are independent of `fingerprintChanged` — a row can carry more than one changeType, so these two do not subtract from it. */
+        StockPreparationSnapshotChangeCounts: {
+            added: number;
+            removed: number;
+            quantityChanged: number;
+            unitChanged: number;
+            versionChanged: number;
+            pathChanged: number;
+            missingChildBom: number;
+            /** @description Tally of the engine's source_fingerprint_changed changeType. */
+            fingerprintChanged: number;
+            /** @description In-place component-code swap at an otherwise unchanged path (Q3c fingerprint decomposition); previously only visible folded into fingerprintChanged. */
+            componentCodeChanged: number;
+            /** @description In-place material substitution at an otherwise unchanged path (Q3c fingerprint decomposition); previously only visible folded into fingerprintChanged. */
+            materialChanged: number;
+        };
+        /** @description Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff (getSnapshotDiff, stock-preparation-snapshot-reads.cjs:404). Values-free counts-only diff of the named batch against its resolved base (predecessor or caller-chosen). An unprovisioned substrate (no batch/line/exception sheet at all) degrades gracefully to zero counts and a null baseSnapshotBatchId rather than an error. */
+        StockPreparationSnapshotDiffResult: {
+            snapshotBatchId: string;
+            /** @description null when no predecessor exists and the caller named none. Otherwise the resolved (auto-picked or caller-chosen and validated) base batch id. */
+            baseSnapshotBatchId: string | null;
+            changeCounts: components["schemas"]["StockPreparationSnapshotChangeCounts"];
+            /** @description exception_confirmation rows linked to this batch whose stored severity is 'blocking'; not filtered by resolution status. */
+            blockingExceptionCount: number;
+        };
+        /** @description Q4c: one row of the per-row diff browse (view 2 rows). Exact projection produced by projectDiffRow over the engine's makeDiff output, through the closed DIFF_ROW_KEYS allowlist (plugins/plugin-integration-core/lib/stock-preparation-snapshot-reads.cjs:526, :543) — a future engine key can never leak through this route unreviewed. Values-free: handles, enums and sha16-prefixed fingerprints only, never a drawing number, quantity, unit or path key value. */
+        StockPreparationSnapshotDiffRow: {
+            /** @description Deterministic id (stableDiffId) hashing (base, current, row key). */
+            diffId: string;
+            /** @enum {string} */
+            diffType: "added" | "removed" | "changed" | "unchanged" | "held";
+            /**
+             * @description 'held' iff changeTypes includes at least one BLOCKING_CHANGE_TYPES entry (reviewStatusForChangeTypes, stock-preparation-snapshot-diff.cjs:240).
+             * @enum {string}
+             */
+            reviewStatus: "ready" | "held";
+            changeTypes: ("added" | "removed" | "quantity_changed" | "unit_changed" | "version_changed" | "path_changed" | "parent_changed" | "material_changed" | "component_code_changed" | "source_fingerprint_changed" | "invalid_qty" | "missing_child_bom" | "duplicate_path_key" | "missing_path_key")[];
+            /** @description Fixed diagnostic token naming which diff rule produced this row (e.g. matched_path_changed, missing_from_current_snapshot, new_in_current_snapshot, previous_missing_path_key). Closed set today but not asserted stable across engine versions, so left as a free string rather than an enum. */
+            reason: string;
+            /** @description Usually 1 (one source line); >1 only for a duplicate_path_key collision row, where it is the number of raw rows collapsed into this one diagnostic entry. */
+            rowCount: number;
+            previousSnapshotLineId: string | null;
+            currentSnapshotLineId: string | null;
+            /** @description sha16:-prefixed non-reversible hash of the row's match key. */
+            keyFingerprint: string;
+            /** @description sha16:-prefixed hash of the previous row's path key. OMITTED entirely (not null) when there is no previous row or it carries no path key. */
+            previousPathKeyFingerprint?: string;
+            /** @description sha16:-prefixed hash of the current row's path key. OMITTED entirely (not null) when there is no current row or it carries no path key. */
+            currentPathKeyFingerprint?: string;
+        };
+        /** @description Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff/rows (listSnapshotDiffRows, stock-preparation-snapshot-reads.cjs:558). Same base-resolution and H-1 completeness-gate semantics as the counts diff; `heldRowCount` is computed over the WHOLE pair BEFORE the optional reviewStatus/diffType filters, so a filtered read keeps that context; `rowCount` is the length of `rows` AFTER filtering. */
+        StockPreparationSnapshotDiffRowsResult: {
+            snapshotBatchId: string;
+            baseSnapshotBatchId: string | null;
+            /** @description rows.length after any reviewStatus/diffType filter is applied. */
+            rowCount: number;
+            /** @description Count of held-reviewStatus rows over the whole pair, before filtering. */
+            heldRowCount: number;
+            rows: components["schemas"]["StockPreparationSnapshotDiffRow"][];
+        };
+        /** @description Q4c: one field mapping row of a pipeline. This is the exact shape produced by plugin-integration-core's rowToFieldMapping (plugins/plugin-integration-core/lib/pipelines.cjs) and is embedded in IntegrationPipeline.fieldMappings when the read requests it (GET /api/integration/pipelines/{id}?includeFieldMappings=true, the default). */
+        IntegrationPipelineFieldMapping: {
+            id: string;
+            pipelineId: string;
+            sourceField: string;
+            targetField: string;
+            transform?: {
+                [key: string]: unknown;
+            } | null;
+            validation?: {
+                [key: string]: unknown;
+            } | null;
+            /** @description Any JSON value persisted as the field's default; shape is caller-defined. */
+            defaultValue?: unknown;
+            sortOrder: number;
+            /** Format: date-time */
+            createdAt?: string | null;
+        };
+        /** @description Q4c: read-only pipeline projection. This is the exact shape produced by plugin-integration-core's rowToPipeline (plugins/plugin-integration-core/lib/pipelines.cjs) and is shared verbatim by the list route (GET /api/integration/pipelines) and the single-pipeline read (GET /api/integration/pipelines/{id}); the list read never embeds `fieldMappings` (the registry call omits it), only the single read does, and only when `includeFieldMappings` is not explicitly `false`. */
+        IntegrationPipeline: {
+            id: string;
+            tenantId: string;
+            workspaceId?: string | null;
+            projectId?: string | null;
+            name: string;
+            description?: string | null;
+            sourceSystemId: string;
+            sourceObject: string;
+            targetSystemId: string;
+            targetObject: string;
+            stagingSheetId?: string | null;
+            mode: string;
+            idempotencyKeyFields: string[];
+            options: {
+                [key: string]: unknown;
+            };
+            /** @enum {string} */
+            status: "draft" | "active" | "paused" | "disabled";
+            createdBy?: string | null;
+            /** Format: date-time */
+            createdAt?: string | null;
+            /** Format: date-time */
+            updatedAt?: string | null;
+            /** @description Present only on the single-pipeline read with includeFieldMappings !== 'false'; absent (not null, not []) on the list route and on a read with includeFieldMappings=false. */
+            fieldMappings?: components["schemas"]["IntegrationPipelineFieldMapping"][];
+        };
+        /** @description Q4c: public (credential-redacted) external-system projection. This is the exact shape produced by plugin-integration-core's rowToPublicExternalSystem (plugins/plugin-integration-core/lib/external-systems.cjs) and is shared verbatim by the list route (GET /api/integration/external-systems) and the single-system read (GET /api/integration/external-systems/{id}). `config` has every key in that system's `kind`-specific private-config set already deleted (never redacted-in-place); raw credentials are never in this projection — only derived presence/format/fingerprint fields are. */
+        IntegrationExternalSystem: {
+            id: string;
+            connectionId?: string | null;
+            tenantId: string;
+            workspaceId?: string | null;
+            projectId?: string | null;
+            name: string;
+            kind: string;
+            /** @enum {string} */
+            role: "source" | "target" | "bidirectional";
+            /** @description Sanitized config with every private (kind-specific) key already removed. */
+            config: {
+                [key: string]: unknown;
+            };
+            capabilities: {
+                [key: string]: unknown;
+            };
+            /** @enum {string} */
+            status: "active" | "inactive" | "error";
+            /** Format: date-time */
+            lastTestedAt?: string | null;
+            lastError?: string | null;
+            /** @description True iff a non-empty encrypted credential blob is stored; never the credential itself. */
+            hasCredentials: boolean;
+            /** @description Detected format token of the stored ciphertext (e.g. its envelope version), never its content. */
+            credentialFormat?: string | null;
+            /** @description Non-reversible fingerprint of the stored credential, present only where the route computes one; null when it does not. */
+            credentialFingerprint?: string | null;
+            /** Format: date-time */
+            createdAt?: string | null;
+            /** Format: date-time */
+            updatedAt?: string | null;
+        };
+        /** @description Q4c: redacted dead-letter projection returned by GET /api/integration/dead-letters. This is plugin-integration-core's rowToDeadLetter (plugins/plugin-integration-core/lib/dead-letter.cjs) with redactDeadLetter (plugins/plugin-integration-core/lib/http-routes.cjs) applied: by default `sourcePayload`/`transformedPayload` are stripped entirely (`payloadRedacted: true`); an admin caller passing `includePayload=true` gets both fields back, sanitized (secret-shaped values scrubbed), not verbatim. `errorMessage` is always scrubbed for secret-shaped substrings, including on rows written before write-time scrubbing existed. */
+        IntegrationDeadLetter: {
+            id: string;
+            tenantId: string;
+            workspaceId?: string | null;
+            runId: string;
+            pipelineId: string;
+            idempotencyKey?: string | null;
+            /** @description Present only when an admin requested includePayload=true; sanitized, not verbatim. */
+            sourcePayload?: unknown;
+            /** @description Present only when an admin requested includePayload=true; sanitized, not verbatim. */
+            transformedPayload?: unknown;
+            errorCode: string;
+            /** @description Free-text error, scrubbed of secret-shaped substrings at read time. */
+            errorMessage: string;
+            retryCount: number;
+            /** @enum {string} */
+            status: "open" | "replayed" | "discarded";
+            lastReplayRunId?: string | null;
+            /** @description Always true; marks that this projection is the redacted view, whichever branch produced it. */
+            payloadRedacted: boolean;
+            /** Format: date-time */
+            createdAt?: string | null;
+            /** Format: date-time */
+            updatedAt?: string | null;
+        };
         /**
          * @description DF-T1A connector action operation kind. read/preview/export are non-mutating; upsert is a write (always gated). Submit/Audit/BOM are intentionally NOT modeled here.
          * @enum {string}
@@ -17571,6 +20402,17 @@ export interface components {
                 /** @enum {string} */
                 swap?: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
             };
+        };
+        /** @description Read-only report of the server-side run switches that the two scheduled attendance features need in addition to their saved org-side settings. Present only as a sibling of `data` on GET /api/attendance/settings (omitted by older servers); never part of the persisted settings document and never on the PUT response. It carries symbolic gate ids and booleans only, no environment variable names or values. An open gate means "not blocked by these switches", not that the feature is running. The report is the switch snapshot of the one process that answered this request; another instance may be configured differently, so it is never a cluster-wide state. */
+        AttendanceRuntimeGates: {
+            reportDigest: components["schemas"]["AttendanceRuntimeGateEntry"];
+            annualLeaveAccrualScheduled: components["schemas"]["AttendanceRuntimeGateEntry"];
+        };
+        AttendanceRuntimeGateEntry: {
+            /** @description True when none of the feature's server run switches is closed. Not "running". */
+            gatesOpen: boolean;
+            /** @description Symbolic ids of the closed switches, in the server's order. Currently digestProducer, accrualTrigger, scheduler and deliveryWorker; open-ended, so a newer server may add ids. */
+            closedGates: string[];
         };
         Spreadsheet: {
             id?: string;
@@ -18111,9 +20953,14 @@ export interface components {
             branches: components["schemas"]["ApprovalConditionBranch"][];
             defaultEdgeKey?: string;
         };
+        /**
+         * @description Lock-1 OD-L1-7(a): `targetType: group` names member-group ids in `targetIds`; the template
+         *     keeps the group reference and the executor expands it into one user cc record per frozen
+         *     member at dispatch, so persisted cc records stay user/role.
+         */
         ApprovalCcNodeConfig: {
             /** @enum {string} */
-            targetType: "user" | "role";
+            targetType: "user" | "role" | "group";
             targetIds: string[];
         };
         /**
@@ -18365,6 +21212,29 @@ export interface components {
              *     unchanged for the linear / non-parallel flow.
              */
             currentNodeKeys?: string[] | null;
+            /**
+             * @description 退回 (return) targets the server's return gate would accept RIGHT NOW, in trail
+             *     order (start → cursor). Computed server-side from the instance's FROZEN runtime
+             *     graph with every VIEWER-INDEPENDENT check the action endpoint applies to a
+             *     `return`, in the endpoint's order: the instance is not a cancel round
+             *     (CANCEL_ROUND_OUTLET_FORBIDDEN), the current node is not a handler
+             *     (APPROVAL_HANDLER_ACTION_NOT_ALLOWED), the current node's node-operation policy
+             *     does not carry an explicit `allowReturn: false` (APPROVAL_NODE_OPERATION_DISABLED),
+             *     the instance is not inside a parallel region
+             *     (APPROVAL_RETURN_IN_PARALLEL_UNSUPPORTED), and the target is an approval node the
+             *     walker visits before the cursor (APPROVAL_RETURN_TARGET_INVALID). The per-viewer
+             *     seat checks (APPROVAL_ASSIGNMENT_REQUIRED) are NOT folded in: `nodeOperations` and
+             *     `canDecideCurrentNode` answer those for the calling viewer, and a client offers the
+             *     return action only when all three agree. An EMPTY array means nothing is legal —
+             *     clients hide the return action. ABSENT means the server did not compute it: an
+             *     older server, a non-pending instance, a bridged / legacy instance with no frozen
+             *     graph, or a graph the walker could not evaluate — clients fall back to their prior
+             *     behaviour, never read absence as empty. Present on the detail read
+             *     (GET /api/approvals/{id}) and on action responses
+             *     (POST /api/approvals/{id}/actions); never on list responses. Presentation only:
+             *     the return gate's own 409s remain the authority.
+             */
+            returnableNodeKeys?: string[];
             assignments: components["schemas"]["ApprovalAssignmentDTO"][];
             /** Format: date-time */
             createdAt: string;
@@ -19938,6 +22808,17 @@ export interface components {
         };
         /** @enum {string} */
         ElearningAnalyticsExportStatus: "pending" | "running" | "succeeded" | "failed" | "expired";
+        ElearningAnalyticsExportAvailable: {
+            /** @enum {boolean} */
+            available: true;
+        };
+        ElearningAnalyticsExportUnavailable: {
+            /** @enum {boolean} */
+            available: false;
+            /** @enum {string} */
+            reason: "storage_unavailable";
+        };
+        ElearningAnalyticsExportAvailability: components["schemas"]["ElearningAnalyticsExportAvailable"] | components["schemas"]["ElearningAnalyticsExportUnavailable"];
         ElearningAnalyticsExportResult: {
             exportId: components["schemas"]["ElearningUuid"];
             departmentId: components["schemas"]["ElearningUuid"];
@@ -19951,6 +22832,73 @@ export interface components {
             completedAt: string | null;
             errorCode: string | null;
             duplicate: boolean;
+        };
+        AttendanceFixedScheduleConfigSave: {
+            /** Format: uuid */
+            shiftId: string;
+            /** Format: date */
+            startDate: string;
+            /** Format: date */
+            endDate: string;
+            /** @description Must equal the authenticated organization when supplied. */
+            orgId?: string;
+            /** @description Zero expects absence; positive values require an exact saved revision. Omitted retains legacy unconditional save. */
+            expectedConfigRevision?: number;
+        };
+        AttendanceFixedScheduleDesired: {
+            /** Format: uuid */
+            shiftId: string;
+            /** Format: date */
+            startDate: string;
+            /** Format: date */
+            endDate: string;
+            revision: number;
+        } | null;
+        AttendanceFixedScheduleSavedConfig: {
+            /** Format: uuid */
+            id: string;
+            orgId: string;
+            /** Format: uuid */
+            groupId: string;
+            /** Format: uuid */
+            shiftId: string;
+            /** Format: date */
+            startDate: string;
+            /** Format: date */
+            endDate: string;
+            revision: number;
+            updatedBy: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        AttendanceFixedScheduleEditor: {
+            /** Format: uuid */
+            groupId: string;
+            /** @enum {string} */
+            state: "not_configured" | "configuration_changed" | "pending_apply" | "effective";
+            reasonCodes: ("NO_DESIRED_CONFIG" | "NO_TARGET_MEMBERS" | "DIFFERENT_MANAGED_KEY_ACTIVE" | "TARGET_MEMBER_MISSING" | "NON_MEMBER_TARGET_ACTIVE" | "DUPLICATE_MATCHING_ASSIGNMENT" | "ASSIGNMENT_VALUE_MISMATCH" | "UNPUBLISHED_MANAGED_ROW" | "EFFECTIVE")[];
+            desired: components["schemas"]["AttendanceFixedScheduleDesired"];
+            drift: {
+                managedSets: {
+                    /** Format: uuid */
+                    shiftId: string;
+                    /** Format: date */
+                    startDate: string;
+                    /** Format: date */
+                    endDate: string | null;
+                    producerKey: string;
+                    rowCount: number;
+                }[];
+            };
+            referenceEligibility: {
+                /** Format: uuid */
+                shiftId: string;
+                allowed: boolean;
+                /** @enum {string|null} */
+                reasonCode: "ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED" | null;
+            } | null;
         };
     };
     responses: {
@@ -21178,6 +24126,8 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Master flag is not exact 'true' (`feature_disabled`); nothing read. */
+            404: components["responses"]["ElearningError"];
             /** @description Installation authority unavailable; no fallback enablement. */
             503: {
                 headers: {
@@ -21233,6 +24183,8 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Master flag is not exact 'true' (`feature_disabled`); nothing written. */
+            404: components["responses"]["ElearningError"];
             /** @description Application not installed. */
             409: {
                 headers: {
@@ -21292,6 +24244,8 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Master flag is not exact 'true' (`feature_disabled`); nothing written. */
+            404: components["responses"]["ElearningError"];
             /** @description Installation authority unavailable. */
             503: {
                 headers: {
@@ -23559,6 +26513,29 @@ export interface operations {
             503: components["responses"]["ElearningError"];
         };
     };
+    getElearningAnalyticsExportAvailability: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current export storage availability. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAnalyticsExportAvailability"];
+                };
+            };
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            403: components["responses"]["ElearningError"];
+        };
+    };
     createElearningAnalyticsExport: {
         parameters: {
             query?: never;
@@ -23654,6 +26631,70 @@ export interface operations {
             409: components["responses"]["ElearningError"];
             410: components["responses"]["ElearningError"];
             503: components["responses"]["ElearningError"];
+        };
+    };
+    listAdminRoleMembers: {
+        parameters: {
+            query?: {
+                page?: number;
+                pageSize?: number;
+            };
+            header?: never;
+            path: {
+                roleId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @enum {boolean} */
+                        ok: true;
+                        data: {
+                            items: {
+                                id: string;
+                                displayName: string;
+                            }[];
+                            page: number;
+                            pageSize: number;
+                            total: number;
+                        };
+                    };
+                };
+            };
+            /** @description Role id is required */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Role members are temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @enum {boolean} */
+                        ok: false;
+                        error: {
+                            /** @enum {string} */
+                            code: "ROLE_MEMBERS_UNAVAILABLE";
+                            message: string;
+                        };
+                    };
+                };
+            };
         };
     };
 }

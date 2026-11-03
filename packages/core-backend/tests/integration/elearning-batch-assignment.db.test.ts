@@ -261,6 +261,28 @@ async function seedUsers(
   return Array.from({ length: count }, (_, index) => `${prefix}-${index + 1}`)
 }
 
+// The 10,000-member case bulk-loads users and user_orgs inside a transaction
+// that is rolled back, so autovacuum never analyzes those rows and the resolver
+// is planned with the statistics that earlier tests left behind. If an
+// autovacuum pass saw either table empty with a page still allocated
+// (reltuples = 0, relpages >= 1), the planner applies a density of 0 and plans
+// the 10,000-row membership joins as ~1 row. The result is nested loops with a
+// join filter that compares 10,000 x 10,000 rows, which takes seconds per
+// statement instead of milliseconds. ANALYZE inside the transaction counts the
+// transaction's own rows. This is the same approach, with the same caveats, as
+// analyzeBulkFixture in elearning-scope-access.db.test.ts: the pg_statistic
+// rows roll back with the transaction and the pg_class counts are written in
+// place. ANALYZE holds SHARE UPDATE EXCLUSIVE on each table until the
+// transaction ends. That mode conflicts only with another ANALYZE, a VACUUM or
+// DDL on the same table, not with reads or row writes, and the integration
+// files run one at a time.
+async function analyzeBulkFixture(
+  client: PoolClient,
+  tables: readonly string[],
+): Promise<void> {
+  await client.query(`ANALYZE ${tables.join(', ')}`)
+}
+
 function expectCode(error: unknown, code: string): void {
   expect(error).toBeInstanceOf(ElearningBatchAssignmentError)
   expect((error as ElearningBatchAssignmentError).code).toBe(code)
@@ -570,6 +592,9 @@ describe('e-learning L2 batch-assignment service (real PostgreSQL)', () => {
         org,
         ELEARNING_BATCH_ASSIGNMENT_MEMBER_LIMIT + 1,
       )
+      // Both bulk-written tables are analyzed before the next statement plans
+      // against them. See analyzeBulkFixture.
+      await analyzeBulkFixture(client, ['users', 'user_orgs'])
       await client.query(
         `UPDATE user_orgs SET is_active = FALSE WHERE org_id = $1 AND user_id = $2`,
         [org, users.at(-1)],

@@ -116,6 +116,43 @@ Expected failed event fields:
 
 The event must not include `baseName`, request body, template content, email, token, workspace name, or arbitrary user-provided text.
 
+### 5.1 Replayed installs (#5861 dedupe)
+
+Since #5861 the install route deduplicates repeated clicks: within the dedupe window, the same
+(tenant, user, template, workspace, baseName) intent returns the **first** base instead of creating
+another one. A replay writes nothing, so it is **not** an install and deliberately carries a
+**different** event name:
+
+```text
+[multitable.template.install.replayed]
+```
+
+```json
+{
+  "templateId": "contract-management",
+  "ok": true,
+  "userId": "<user-id>",
+  "baseId": "<replayed-base-id>"
+}
+```
+
+Consequences for the counting commands in §6 (no change needed to them):
+
+- `grep -F '[multitable.template.install]'` does **not** match `[multitable.template.install.replayed]`
+  (the fixed string includes the closing bracket), so the "installed templates" count stays one per
+  base actually created. That count is the metric for "did the duplicate-base burst stop?" — it
+  should drop even while click volume stays the same.
+- A replay has **no** `sheetId` field (nothing was created in that request); do not treat its absence
+  on a `[multitable.template.install]` line as normal — there it is still always present.
+- To count how often the dedupe fired:
+  `grep -F '[multitable.template.install.replayed]' backend.log | wc -l`.
+
+Two non-event `warn` lines exist for the degraded paths and intentionally carry **no** stable token
+(so no grep in this SOP picks them up): "ledger unavailable" (the ledger table is not migrated —
+installs proceed without dedupe) and "lock not acquired within the bounded wait" (the advisory lock
+was contended past the bounded wait — the install proceeded with the ledger primary key as the only
+backstop).
+
 ## 6. Log Collection
 
 Use the command that matches the deployment.

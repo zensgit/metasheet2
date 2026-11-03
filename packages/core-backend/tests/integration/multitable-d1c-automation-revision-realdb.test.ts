@@ -81,12 +81,16 @@ const SHEET_MAIN = `sheet_d1c3_main_${TS}`
 const SHEET_FAIL_CREATE = `sheet_d1c3_failcreate_${TS}`
 const SHEET_FAIL_UPDATE = `sheet_d1c3_failupdate_${TS}`
 const SHEET_RACE = `sheet_d1c3_race_${TS}`
+// 客户反馈 2026-09-24 #4b — typed condition evaluation (date by business-timezone day) on the real wiring.
+const SHEET_COND = `sheet_d1c3_cond_${TS}`
 
 const FLD_TITLE = `fld_d1c3_title_${TS}`
 const FLD_NOTES = `fld_d1c3_notes_${TS}`
 const FLD_FAIL_CREATE_TITLE = `fld_d1c3_ftitle_${TS}`
 const FLD_FAIL_UPDATE_TITLE = `fld_d1c3_utitle_${TS}`
 const FLD_RACE_TITLE = `fld_d1c3_rtitle_${TS}`
+const FLD_COND_OPENED = `fld_d1c3_copened_${TS}`
+const FLD_COND_TITLE = `fld_d1c3_ctitle_${TS}`
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
@@ -102,11 +106,12 @@ function realService(): AutomationService {
 async function makeSheet(id: string, name: string): Promise<void> {
   await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [id, BASE, name])
 }
-async function makeField(id: string, sheetId: string, name: string, order = 0): Promise<void> {
-  await q(`INSERT INTO meta_fields (id, sheet_id, name, type, "order") VALUES ($1,$2,$3,'string',$4)`, [
+async function makeField(id: string, sheetId: string, name: string, order = 0, type = 'string'): Promise<void> {
+  await q(`INSERT INTO meta_fields (id, sheet_id, name, type, "order") VALUES ($1,$2,$3,$4,$5)`, [
     id,
     sheetId,
     name,
+    type,
     order,
   ])
 }
@@ -235,7 +240,7 @@ describeIfDatabase('D-1c slice ③ — automation create_record/update_record wr
   })
 
   afterAll(async () => {
-    for (const sheet of [SHEET_MAIN, SHEET_FAIL_CREATE, SHEET_FAIL_UPDATE, SHEET_RACE]) {
+    for (const sheet of [SHEET_MAIN, SHEET_FAIL_CREATE, SHEET_FAIL_UPDATE, SHEET_RACE, SHEET_COND]) {
       await q(
         'DELETE FROM meta_record_revisions WHERE record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)',
         [sheet],
@@ -550,5 +555,63 @@ describeIfDatabase('D-1c slice ③ — automation create_record/update_record wr
       // proxy), so there is no live row left to compare a "did it change" assertion against.
       expect(await recordRow(recordId)).toBeUndefined()
     }, 15000)
+  })
+  // ── 客户反馈 2026-09-24 #4b（裁定 PR #6074）— typed condition evaluation, end to end on the real wiring ──
+  // The REAL AutomationService wiring loads the sheet's field types for the executor (deps.loadConditionFields →
+  // meta_fields), so a `date` condition compares by CALENDAR DAY in the business timezone: a record whose
+  // `openedAt` was stored as the instant 2026-09-24T18:00:00.000Z IS 2026-09-25 in Asia/Shanghai and fires the
+  // rule "openedAt equals 2026-09-25"; "equals 2026-09-24" does not. Before #4b `===` compared the ISO text
+  // against the typed day and this rule could never fire.
+  describe('客户反馈 #4b — date condition buckets a stored instant into the business-timezone day (real DB)', () => {
+    let previousBusinessTimezone: string | undefined
+
+    beforeAll(async () => {
+      previousBusinessTimezone = process.env.MULTITABLE_BUSINESS_TIMEZONE
+      process.env.MULTITABLE_BUSINESS_TIMEZONE = 'Asia/Shanghai'
+      await makeSheet(SHEET_COND, 'D1C3 Cond Typing')
+      await makeField(FLD_COND_OPENED, SHEET_COND, 'Opened At', 1, 'date')
+      await makeField(FLD_COND_TITLE, SHEET_COND, 'Title', 2)
+    })
+
+    afterAll(() => {
+      if (previousBusinessTimezone === undefined) delete process.env.MULTITABLE_BUSINESS_TIMEZONE
+      else process.env.MULTITABLE_BUSINESS_TIMEZONE = previousBusinessTimezone
+    })
+
+    // Seeded EXACTLY as the customer's rows are stored: a `date` cell holding a full ISO instant (an `openedAt`
+    // written by an integration), bypassing any write-side coercion so the evaluator sees the raw shape.
+    async function seedOpenedRecord(): Promise<string> {
+      const recordId = `rec_d1c3_cond_${TS}_${Math.random().toString(36).slice(2, 8)}`
+      await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [
+        recordId,
+        SHEET_COND,
+        JSON.stringify({ [FLD_COND_OPENED]: '2026-09-24T18:00:00.000Z', [FLD_COND_TITLE]: 'before' }),
+      ])
+      return recordId
+    }
+
+    function dateRule(day: string): AutomationRule {
+      const rule = ruleFor(SHEET_COND, { type: 'update_record', config: { fields: { [FLD_COND_TITLE]: `matched ${day}` } } })
+      rule.conditions = { conjunction: 'AND', conditions: [{ fieldId: FLD_COND_OPENED, operator: 'equals', value: day }] }
+      return rule
+    }
+
+    test('"openedAt equals 2026-09-25" fires for a record stored 2026-09-24T18:00Z; "equals 2026-09-24" is skipped', async () => {
+      const recordId = await seedOpenedRecord()
+      const row = await recordRow(recordId)
+      expect(row?.data[FLD_COND_OPENED]).toBe('2026-09-24T18:00:00.000Z')
+      const triggerEvent = { recordId, actorId: OWNER, data: row!.data }
+
+      const skipped = await svc.executeRule(dateRule('2026-09-24'), triggerEvent)
+      expect(skipped.status).toBe('skipped')
+      expect(skipped.steps).toHaveLength(0)
+      expect((await recordRow(recordId))?.data[FLD_COND_TITLE]).toBe('before')
+
+      const fired = await svc.executeRule(dateRule('2026-09-25'), triggerEvent)
+      expect(fired.status).toBe('success')
+      expect(fired.steps[0]?.actionType).toBe('update_record')
+      expect(fired.steps[0]?.status).toBe('success')
+      expect((await recordRow(recordId))?.data[FLD_COND_TITLE]).toBe('matched 2026-09-25')
+    })
   })
 })

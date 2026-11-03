@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "review_date": "2026-10-10",
+  "reviewer": "astra-independent-read-only",
+  "verdict": "NO_ACTIONABLE_COMPATIBILITY_FINDINGS_IN_FIXED_MAIN_INCREMENT",
+  "reviewed_main_range": {
+    "base": "20c705add7c86fdabb486e834735f9a1913e6de2",
+    "target": "e0205875d7e523466f68f2ecb0ecd19c25b9cbbf"
+  },
+  "premerge_head": "f6a99a1f839c147b628c82fc7b8c33c695fdc8cf",
+  "merge_head": "e0205875d7e523466f68f2ecb0ecd19c25b9cbbf",
+  "frozen_index_tree": "177793708e5b8fbdf724b767db97f36cb4f46da0",
+  "index_tree_derivation": "Read-only recursive Git tree object hashing from stage-zero index entries; algorithm verified against the current HEAD tree. No git objects or index writes needed.",
+  "reviewed_code_and_regression_blobs": {
+    "apps/web/src/views/AttendanceView.vue": "28cda8b424ed5191b2f110e27f04cf45acc6d421",
+    "apps/web/src/views/attendance/AttendanceEmployeeLeaveRequestCard.vue": "5895a3da331bf2d25071680ec369d6230fba7d75",
+    "apps/web/src/views/attendance/AttendanceEmployeeMakeupRequestCard.vue": "01f6b5f6b01f35e4d6c45e9cce2025cd985d598c",
+    "apps/web/src/views/attendance/AttendanceEmployeeOvertimeRequestCard.vue": "b52b61cf22cc8a112ccdb4218dc32a15e7ee52ec",
+    "apps/web/src/views/attendance/AttendanceEmployeeShiftSwapRequestCard.vue": "0fb0627fe6fc21e051c7a06c2a33a1c99d5f30bc",
+    "apps/web/src/views/attendance/AttendanceEmployeeWorkspace.vue": "34a7ed886e49e6406e5802a351cb43a6e98cfba1",
+    "apps/web/src/views/attendance/attendanceRecordRequestPrefill.ts": "a982d72c98d343cbff3eaa9700af6399e32c8d1e",
+    "apps/web/src/views/attendance/attendanceTodayWorkbench.ts": "2ae91e79d1b6c7c17506f735642fcd994c313d37",
+    "apps/web/tests/attendance-selfservice-dashboard.spec.ts": "ed496b46a5bf6303d19f5b2ae968d12178ff14bb"
+  },
+  "findings": [],
+  "evidence": [
+    "Fixed main range EmployeeWorkspace runtime script and template differ only in a comment; all four request card non-style content is byte-identical.",
+    "Actual staged AttendanceView script differs from the premerge head only by openHolidayCalendarPolicyFromSettings, an admin navigation helper.",
+    "Actual staged AttendanceView employee template prefix before the admin settings section is byte-identical to premerge head, retaining todayStateHint and historical request controls.",
+    "Actual staged EmployeeWorkspace non-style content differs only in a comment; unknown today-state rendering and punch emphasis logic are retained.",
+    "Actual staged leave, makeup, overtime and shift-swap request cards retain all non-style content exactly.",
+    "Actual staged attendanceTodayWorkbench.ts, attendanceRecordRequestPrefill.ts and attendance-selfservice-dashboard.spec.ts are byte-identical to premerge head.",
+    "Both start-instant midnight guards and their two DOM regression tests remain unchanged from the previously independently reproduced and reviewed fix.",
+    "Index blob identifiers were captured for immutable review and rechecked unchanged before writing this receipt."
+  ],
+  "review_bounds": {
+    "focus": "Compatibility of fixed incoming main increment with this task today/history/session/org/rule-date/timeline-prefill behavior and the two midnight guard paths.",
+    "new_test_execution": false,
+    "reason_no_new_tests": "No new algorithmic changes in the reviewed employee/request behaviors and no additional reachable defect identified; prior independent red-green evidence reused.",
+    "not_claimed": [
+      "Independent rerun of implementer type checks or focused tests",
+      "Browser acceptance",
+      "Original customer QA acceptance",
+      "Remote CI",
+      "Deployment"
+    ]
+  },
+  "side_effects": {
+    "source_changed": false,
+    "index_changed": false,
+    "git_objects_created": false,
+    "commit_created": false,
+    "push": false,
+    "real_data_accessed": false,
+    "flags_changed": false,
+    "external_messages": false
+  }
+}

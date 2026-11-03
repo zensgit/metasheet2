@@ -44,7 +44,7 @@ on:
       - 'docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md'
       - 'plugins/plugin-integration-core/package.json'
       - 'pnpm-lock.yaml'
-      - '.github/workflows/plugin-tests.yml'
+      - '.github/workflows/stock-prep-powershell51.yml'
       - '.github/workflows/sealed-export-s5-sqlserver.yml'
 
 permissions:

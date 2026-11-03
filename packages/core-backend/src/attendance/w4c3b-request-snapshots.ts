@@ -125,6 +125,7 @@ const REQUEST_TYPES = Object.freeze([
   'outdoor_punch',
   'shift_swap',
   'schedule_dispatch',
+  'business_trip',
 ] as const)
 
 /**

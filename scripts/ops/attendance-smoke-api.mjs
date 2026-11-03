@@ -5,6 +5,7 @@ import {
 } from './attendance-smoke-workdate.mjs'
 import { pathToFileURL } from 'node:url'
 import { AcceptanceTenantError, verifyAcceptanceTokenTenant } from './attendance-acceptance-preflight.mjs'
+import { scopeAttendanceImportUrl } from './attendance-import-scope.mjs'
 
 const apiBase = (process.env.API_BASE || '').replace(/\/+$/, '')
 let token = process.env.AUTH_TOKEN || ''
@@ -105,7 +106,7 @@ async function refreshAuthToken() {
 }
 
 async function apiFetch(path, init = {}) {
-  const url = `${apiBase}${path}`
+  const url = scopeAttendanceImportUrl(`${apiBase}${path}`, orgId)
   const res = await fetchWithRetry(url, {
     ...init,
     headers: {
@@ -125,7 +126,7 @@ async function apiFetch(path, init = {}) {
 }
 
 async function apiFetchRaw(path, init = {}) {
-  const url = `${apiBase}${path}`
+  const url = scopeAttendanceImportUrl(`${apiBase}${path}`, orgId)
   const res = await fetchWithRetry(url, {
     ...init,
     headers: {
@@ -512,7 +513,7 @@ async function run() {
   log(`plugins ok: active=${active.length}`)
 
   // 3) prepare token (preview)
-  const prepare1 = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+  const prepare1 = await apiFetch('/attendance/import/prepare', { method: 'POST', body: JSON.stringify({ orgId }) })
   assertOk(prepare1, 'POST /attendance/import/prepare (preview)')
   const token1 = prepare1.body?.data?.commitToken
   if (!token1) die('prepare did not return commitToken')
@@ -581,7 +582,7 @@ async function run() {
 
   // 5.1) async preview gate (optional): validates preview enqueue + poll + idempotency retry.
   if (requirePreviewAsync) {
-    const preparePreviewAsync = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+    const preparePreviewAsync = await apiFetch('/attendance/import/prepare', { method: 'POST', body: JSON.stringify({ orgId }) })
     assertOk(preparePreviewAsync, 'POST /attendance/import/prepare (preview-async)')
     const previewAsyncToken = preparePreviewAsync.body?.data?.commitToken
     if (!previewAsyncToken) die('prepare (preview-async) did not return commitToken')
@@ -637,7 +638,7 @@ async function run() {
   }
 
   // 6) prepare token (commit) - preview consumes tokens by design
-  const prepare2 = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+  const prepare2 = await apiFetch('/attendance/import/prepare', { method: 'POST', body: JSON.stringify({ orgId }) })
   assertOk(prepare2, 'POST /attendance/import/prepare (commit)')
   const token2 = prepare2.body?.data?.commitToken
   if (!token2) die('prepare (commit) did not return commitToken')
@@ -655,7 +656,7 @@ async function run() {
     const attemptPayload = { ...commitPayload }
     if (attempt > 1) {
       // Prepare a fresh token in case the previous attempt consumed/invalidated it before failing.
-      const prepareRetry = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+      const prepareRetry = await apiFetch('/attendance/import/prepare', { method: 'POST', body: JSON.stringify({ orgId }) })
       assertOk(prepareRetry, 'POST /attendance/import/prepare (commit retry)')
       const retryToken = prepareRetry.body?.data?.commitToken
       if (!retryToken) die('prepare (commit retry) did not return commitToken')
@@ -725,7 +726,7 @@ async function run() {
   }
 
   // 6.2) export endpoint should return CSV (items or anomalies).
-  const exportUrl = `${apiBase}/attendance/import/batches/${batchId}/export.csv?type=anomalies`
+  const exportUrl = scopeAttendanceImportUrl(`${apiBase}/attendance/import/batches/${batchId}/export.csv?type=anomalies`, orgId)
   const exportRes = await fetchWithRetry(exportUrl, {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}`, Accept: 'text/csv' },
@@ -744,7 +745,7 @@ async function run() {
 
   // 6.3) async commit gate (optional): validates job enqueue + poll + rollback + idempotency.
   if (requireImportAsync) {
-    const prepareAsync = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+    const prepareAsync = await apiFetch('/attendance/import/prepare', { method: 'POST', body: JSON.stringify({ orgId }) })
     assertOk(prepareAsync, 'POST /attendance/import/prepare (commit-async)')
     const asyncToken = prepareAsync.body?.data?.commitToken
     if (!asyncToken) die('prepare (commit-async) did not return commitToken')

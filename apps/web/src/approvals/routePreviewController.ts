@@ -31,9 +31,13 @@ export interface RoutePreviewController<Req = CreateApprovalRequest> {
  * defaults to `CreateApprovalRequest` so RP-2's existing call sites (and this file's own tests)
  * are unaffected; RP-3's caller supplies its own fetcher and Req is inferred from it.
  */
+// O-8 / F8-1: `isZh` is a getter (this module stays Vue-free) read when the fallback error copy is
+// built; ApprovalNewView passes `() => isZh.value`. The default keeps the shipped zh-CN copy for the
+// not-yet-converted authoring try-run caller (TemplateAuthoringView.vue, slice F8-3).
 export function createRoutePreviewController<Req = CreateApprovalRequest>(
   fetcher: (req: Req) => Promise<ApprovalRoutePreview>,
   onState: (patch: Partial<RoutePreviewState>) => void,
+  isZh: () => boolean = () => true,
 ): RoutePreviewController<Req> {
   let gen = 0
   return {
@@ -50,7 +54,7 @@ export function createRoutePreviewController<Req = CreateApprovalRequest>(
         onState({ preview: result, loading: false })
       } catch (error) {
         if (g !== gen) return
-        onState({ preview: null, error: error instanceof Error ? error.message : '路径预览失败', loading: false })
+        onState({ preview: null, error: error instanceof Error ? error.message : (isZh() ? '路径预览失败' : 'Route preview failed'), loading: false })
       }
     },
   }

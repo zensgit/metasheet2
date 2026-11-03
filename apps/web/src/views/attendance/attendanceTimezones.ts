@@ -1,3 +1,7 @@
+import { timezoneCityLabel } from '../../utils/timezoneCityLabels'
+
+export type TimezoneDisplayLocale = 'en' | 'zh'
+
 const FALLBACK_TIMEZONES = [
   'UTC',
   'Asia/Shanghai',
@@ -141,22 +145,38 @@ export function formatTimezoneOffsetLabel(timezone?: string | null, date = new D
   }
 }
 
-export function formatTimezoneOptionLabel(timezone?: string | null, date = new Date()): string {
+function timezonePlaceName(timezone: string, locale: TimezoneDisplayLocale): string {
+  if (locale !== 'zh') return timezone
+  return timezoneCityLabel(timezone) || timezone
+}
+
+export function formatTimezoneOptionLabel(
+  timezone?: string | null,
+  date = new Date(),
+  locale: TimezoneDisplayLocale = 'en',
+): string {
   const normalized = normalizeTimezoneValue(timezone)
   if (!normalized) return ''
 
   const offsetLabel = formatTimezoneOffsetLabel(normalized, date)
-  return offsetLabel ? `${normalized} (${offsetLabel})` : normalized
+  const place = timezonePlaceName(normalized, locale)
+  return offsetLabel ? `${place} (${offsetLabel})` : place
 }
 
-export function buildTimezoneOptionEntries(currentValue?: string | null): TimezoneOptionEntry[] {
+export function buildTimezoneOptionEntries(
+  currentValue?: string | null,
+  locale: TimezoneDisplayLocale = 'en',
+): TimezoneOptionEntry[] {
   return buildTimezoneOptions(currentValue).map((value) => ({
     value,
-    label: formatTimezoneOptionLabel(value),
+    label: formatTimezoneOptionLabel(value, new Date(), locale),
   }))
 }
 
-export function buildTimezoneOptionGroups(currentValue?: string | null): TimezoneOptionGroupEntry[] {
+export function buildTimezoneOptionGroups(
+  currentValue?: string | null,
+  locale: TimezoneDisplayLocale = 'en',
+): TimezoneOptionGroupEntry[] {
   const options = buildTimezoneOptions(currentValue)
   const normalizedCurrent = normalizeTimezoneValue(currentValue)
   const localTimezone = normalizeTimezoneValue(resolveLocalTimezone())
@@ -196,9 +216,62 @@ export function buildTimezoneOptionGroups(currentValue?: string | null): Timezon
         labelZh: group.labelZh,
         options: entries.map((value) => ({
           value,
-          label: formatTimezoneOptionLabel(value),
+          label: formatTimezoneOptionLabel(value, new Date(), locale),
         })),
       }
     })
     .filter((group): group is TimezoneOptionGroupEntry => Boolean(group))
+}
+
+export interface TimezoneChoice {
+  value: string
+  label: string
+  offsetMinutes?: number
+}
+
+const OFFSET_IN_LABEL = /(?:UTC|GMT)\s*([+-])\s*(\d{1,2})(?::(\d{2}))?/i
+
+/** Minutes east of UTC. Null when the text is a city or IANA search, not an offset. */
+export function parseTimezoneOffsetQuery(raw: string): number | null {
+  const text = raw.trim().replace(/\s+/g, '').toLowerCase()
+  if (!text) return null
+  const signed = /^(?:utc|gmt)?([+-])(\d{1,2})(?::?(\d{2}))?$/.exec(text)
+  if (signed) {
+    const sign = signed[1] === '-' ? -1 : 1
+    const hours = Number(signed[2])
+    const minutes = signed[3] ? Number(signed[3]) : 0
+    if (hours > 14 || minutes > 59) return null
+    return sign * (hours * 60 + minutes)
+  }
+  const unsigned = /^(?:utc|gmt)?(\d{1,2})(?::(\d{2}))?$/.exec(text)
+  if (!unsigned) return null
+  const hours = Number(unsigned[1])
+  const minutes = unsigned[2] ? Number(unsigned[2]) : 0
+  if (hours > 14 || minutes > 59) return null
+  return hours * 60 + minutes
+}
+
+export function timezoneChoiceOffsetMinutes(choice: TimezoneChoice, at = new Date()): number | null {
+  if (typeof choice.offsetMinutes === 'number' && Number.isFinite(choice.offsetMinutes)) {
+    return choice.offsetMinutes
+  }
+  const fromLabel = choice.label.match(OFFSET_IN_LABEL)
+  if (fromLabel) {
+    const sign = fromLabel[1] === '-' ? -1 : 1
+    return sign * (Number(fromLabel[2]) * 60 + Number(fromLabel[3] || '0'))
+  }
+  const formatted = formatTimezoneOffsetLabel(choice.value, at)
+  const fromFormatted = formatted.match(OFFSET_IN_LABEL)
+  if (!fromFormatted) return null
+  const sign = fromFormatted[1] === '-' ? -1 : 1
+  return sign * (Number(fromFormatted[2]) * 60 + Number(fromFormatted[3] || '0'))
+}
+
+export function timezoneChoiceMatchesQuery(choice: TimezoneChoice, query: string, at = new Date()): boolean {
+  const trimmed = query.trim()
+  if (!trimmed) return true
+  const offset = parseTimezoneOffsetQuery(trimmed)
+  if (offset !== null) return timezoneChoiceOffsetMinutes(choice, at) === offset
+  const needle = trimmed.toLowerCase()
+  return choice.label.toLowerCase().includes(needle) || choice.value.toLowerCase().includes(needle)
 }

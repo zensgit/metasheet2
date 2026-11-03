@@ -15,6 +15,7 @@ import {
   getElearningAnalyticsExport,
   type ElearningAnalyticsExportDb,
 } from '../services/elearning-analytics-export'
+import { isElearningAnalyticsExportStorageAvailable } from '../services/elearning-analytics-export-storage'
 import {
   ElearningDepartmentStatsError,
   getElearningDepartmentStats,
@@ -32,6 +33,11 @@ const EXPORT_BODY_KEYS = new Set(['requestId', 'departmentId', 'periodStart', 'p
 const jsonParser = json({ limit: 16 * 1024 })
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+/**
+ * Answered before an export task is created when this deployment has no export
+ * storage, so the request never turns into a task that can only fail.
+ */
+export const ANALYTICS_EXPORT_STORAGE_UNAVAILABLE = 'ANALYTICS_EXPORT_STORAGE_UNAVAILABLE' as const
 
 export interface ElearningAnalyticsRouteDeps {
   db: ElearningDepartmentStatsDb & ElearningStatsDailyReadDb & ElearningAnalyticsExportDb
@@ -45,6 +51,8 @@ export interface ElearningAnalyticsRouteDeps {
   createElearningAnalyticsExport?: typeof createElearningAnalyticsExport
   getElearningAnalyticsExport?: typeof getElearningAnalyticsExport
   downloadElearningAnalyticsExport?: typeof downloadElearningAnalyticsExport
+  /** Test seam; defaults to the same predicate the export storage factory uses. */
+  isAnalyticsExportStorageAvailable?: () => boolean
 }
 
 function queryText(value: unknown): string | null {
@@ -141,6 +149,10 @@ export function createElearningAnalyticsRouter(
   const readExport = deps.getElearningAnalyticsExport ?? getElearningAnalyticsExport
   const downloadExport = deps.downloadElearningAnalyticsExport
     ?? downloadElearningAnalyticsExport
+  // The worker materializes through getElearningAnalyticsExportStorage() with
+  // the process environment, so the default reads the process environment too.
+  const exportStorageAvailable = deps.isAnalyticsExportStorageAvailable
+    ?? (() => isElearningAnalyticsExportStorageAvailable())
 
   const requireContext: RequestHandler = (req, res, next) => {
     if (!deps.viewerId(req)) {
@@ -154,6 +166,23 @@ export function createElearningAnalyticsRouter(
     next()
   }
 
+  router.get(
+    '/api/elearning/admin/analytics/export-availability',
+    requireContext,
+    deps.statsGuard,
+    (req, res): void => {
+      if (Object.keys(req.query as Record<string, unknown>).length !== 0) {
+        res.status(400).json({ error: 'invalid_input' })
+        return
+      }
+      res.status(200).json(
+        exportStorageAvailable()
+          ? { available: true }
+          : { available: false, reason: 'storage_unavailable' },
+      )
+    },
+  )
+
   router.post(
     '/api/elearning/admin/analytics/exports',
     requireContext,
@@ -166,6 +195,12 @@ export function createElearningAnalyticsRouter(
         const orgId = deps.orgId(req)
         if (!body || !actorId || !orgId) {
           res.status(400).json({ error: 'invalid_input' })
+          return
+        }
+        // Pre-check only: the worker still marks a task STORAGE_UNAVAILABLE if
+        // storage disappears after this point.
+        if (!exportStorageAvailable()) {
+          res.status(409).json({ error: ANALYTICS_EXPORT_STORAGE_UNAVAILABLE })
           return
         }
         try {

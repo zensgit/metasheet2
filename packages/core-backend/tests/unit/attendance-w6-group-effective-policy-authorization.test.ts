@@ -624,7 +624,7 @@ describe('the real app assembly (index.ts) registers this route behind the globa
 
   it('A2 — the set of methods holding ANY this.app.<verb> registration site is exactly this frozen set', () => {
     const byMethod = new Set(model.sites.map((s) => s.enclosingMethod))
-    expect([...byMethod].sort()).toEqual(['installGlobalErrorHandler', 'setupMiddleware', 'start'])
+    expect([...byMethod].sort()).toEqual(['installGlobalErrorHandler', 'setupMiddleware', 'startOnce'])
   })
 
   it('A3 — ordering: the gate, audit, and security sites all precede the route site, in setupMiddleware\'s own sequential order', () => {
@@ -660,11 +660,11 @@ describe('the real app assembly (index.ts) registers this route behind the globa
       { kind: 'COMPUTED_REGISTRATION', enclosingMethod: 'createCoreAPI', signature: '[methodLower](...)' },
       { kind: 'COMPUTED_REGISTRATION', enclosingMethod: 'registerPluginRoute', signature: "[methodLower as 'get' | 'post' | 'put' | 'delete' | 'patch'](...)" },
       { kind: 'ESCAPE', enclosingMethod: 'setupMiddleware', signature: 'installMetrics(...) arg0' },
-      { kind: 'ESCAPE', enclosingMethod: 'start', signature: 'new APIGateway(...) arg0' },
+      { kind: 'ESCAPE', enclosingMethod: 'startOnce', signature: 'new APIGateway(...) arg0' },
     ])
   })
 
-  it('A5 — pre-gate prefix: the 16 sites that run before the gate, inside setupMiddleware, are exactly this frozen list (the pre-authentication surface)', () => {
+  it('A5 — pre-gate prefix: the 17 sites that run before the gate, inside setupMiddleware, are exactly this frozen list (the pre-authentication surface)', () => {
     const gateOrdinal = inSetup.findIndex((s) => s.start === subjectState(model, 'jwtAuthMiddleware').sites[0].start)
     const prefix = inSetup.slice(0, gateOrdinal).map((s) => ({ verb: s.verb, unconditional: s.unconditional, args: s.argProjection }))
     expect(prefix).toEqual([
@@ -680,11 +680,25 @@ describe('the real app assembly (index.ts) registers this route behind the globa
       { verb: 'use', unconditional: true, args: ['createElearningAppInstallationRouter()'] },
       { verb: 'use', unconditional: false, args: ['"/api/elearning"', 'authenticateElearningApp', 'requireElearningAppInstallation()'] },
       { verb: 'use', unconditional: false, args: ['elearningPilotRuntime.router'] },
+      { verb: 'use', unconditional: true, args: ['YIDA_OWNER_HTTP_PREFIX', 'yidaOwnerNoStoreMiddleware', 'yidaOwnerJsonOnlyMiddleware', 'express.json()'] },
       { verb: 'use', unconditional: true, args: ['express.json()'] },
       { verb: 'use', unconditional: true, args: ['express.urlencoded()'] },
       { verb: 'use', unconditional: true, args: ['requestMetricsMiddleware'] },
       { verb: 'use', unconditional: true, args: ['<inline>'] },
     ])
+  })
+
+  it('A6 — the YiDa pre-gate site only supplies response/parser middleware; the owner runtime router stays behind the global JWT gate', () => {
+    const owner = subjectState(model, 'createIntegrationYidaOwnerRouter')
+    expect(owner.state).toBe('UNCONDITIONAL_SITE')
+    expect(owner.sites).toHaveLength(1)
+    expect(owner.sites[0].enclosingMethod).toBe('setupMiddleware')
+    const ownerOrdinal = inSetup.findIndex((site) => site.start === owner.sites[0].start)
+    const gateOrdinal = inSetup.findIndex((site) => site.start === subjectState(model, 'jwtAuthMiddleware').sites[0].start)
+    const parserOrdinal = inSetup.findIndex((site) => site.argProjection.includes('yidaOwnerJsonOnlyMiddleware'))
+    expect(parserOrdinal).toBeGreaterThanOrEqual(0)
+    expect(parserOrdinal).toBeLessThan(gateOrdinal)
+    expect(ownerOrdinal).toBeGreaterThan(gateOrdinal)
   })
 
   it('positive control (real code, no mutation): the approval-attachments pre-gate parser is the live CONDITIONAL witness — its own IfStatement guard is isApprovalAttachmentsEnabled(), proving the CONDITIONAL_SITE branch of the classifier actually discriminates on production source, not merely on a synthetic fixture', () => {
@@ -1098,8 +1112,8 @@ describe('the real app assembly (index.ts) registers this route behind the globa
  */
 describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', () => {
   const SCOPE = new Set(['setupMiddleware', 'constructor'])
-  const FROZEN_SAFE_COUNT = 48
-  const FROZEN_SAFE_HASH = '491a38feac62706d5568953e8a424e60411b88f9ff547cc788d381152ef984a6'
+  const FROZEN_SAFE_COUNT = 53
+  const FROZEN_SAFE_HASH = '423675b2e6f10b140eb4d128b587800a742a25e1fc88656ada4e54a23a36c58c'
   // Frozen census as a LITERAL (owner + gate P2): deriving it live from the
   // same source it partitions makes UNKNOWN-empty vacuous (a novel this-use is
   // auto-added to SAFE). With the literal, a novel this-use lands in UNKNOWN.
@@ -1112,10 +1126,12 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.httpServer//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.injector//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.logger//#0",
+      "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.manageProcessSignals//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.port//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.portLocked//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.recoveryArchiveApplication//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.snapshotService//#0",
+      "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.startupSignal//#0",
       "constructor//Block>ExpressionStatement>CallExpression>PropertyAccessExpression//.initializeCache//#0",
       "constructor//Block>ExpressionStatement>CallExpression>PropertyAccessExpression//.registerInternalPluginApis//#0",
       "constructor//Block>ExpressionStatement>CallExpression>PropertyAccessExpression//.setupMiddleware//#0",
@@ -1147,6 +1163,9 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.injector//#0",
       "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.injector//#1",
       "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.injector//#2",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.yidaConnectionTestRuntime//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.yidaInitializationRuntime//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.yidaOwnerRuntime//#0",
       "setupMiddleware//Block>FirstStatement>VariableDeclarationList>VariableDeclaration>ArrowFunction>Block>TryStatement>Block>ExpressionStatement>CallExpression>ObjectLiteralExpression>PropertyAssignment>PropertyAccessExpression>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.pluginLoader//#0",
       "setupMiddleware//Block>FirstStatement>VariableDeclarationList>VariableDeclaration>ArrowFunction>Block>TryStatement>Block>TryStatement>Block>ExpressionStatement>BinaryExpression>CallExpression>PropertyAccessExpression>ParenthesizedExpression>AsExpression>AsExpression>PropertyAccessExpression//.pluginLoader//#0",
       "setupMiddleware//Block>FirstStatement>VariableDeclarationList>VariableDeclaration>PropertyAccessExpression>PropertyAccessExpression//.recoveryArchiveApplication//#0",
@@ -1196,7 +1215,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       assertValidPartition(part, independentThisStarts(source, SCOPE))
     })
 
-    it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level, count 48, sha256 pin) — a novel this-use is NOT auto-admitted', () => {
+    it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level, count 53, sha256 pin) — a novel this-use is NOT auto-admitted', () => {
       expect(part.safe.length).toBe(FROZEN_SAFE_COUNT)
       for (const o of part.safe) expect(FROZEN_SAFE_KEYS.has(o.key)).toBe(true)
       const hash = createHash('sha256').update(part.safe.map((o) => o.key).sort().join('\n')).digest('hex')
@@ -1218,6 +1237,19 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       expect(mpart.unknown.length).toBeGreaterThan(0)
       expect(mpart.unknown.some((o) => o.shape === 'bare')).toBe(true)
     })
+
+    it.each(['yidaOwnerRuntime', 'yidaInitializationRuntime', 'yidaConnectionTestRuntime'])(
+      'a new use of the registered %s still lands in UNKNOWN rather than inheriting a property-name exemption',
+      (property) => {
+        const marker = 'private setupMiddleware(): void {'
+        expect(indexText).toContain(marker)
+        const mutated = indexText.replace(marker, marker + `\n    void this.${property};`)
+        const msrc = ts.createSourceFile('mut.ts', mutated, ts.ScriptTarget.ES2022, true)
+        const mpart = buildThisPartition(msrc, FROZEN_SAFE_KEYS, SCOPE)
+        expect(mpart.total).toBe(independentThisStarts(source, SCOPE).length + 1)
+        expect(mpart.unknown.some((occurrence) => occurrence.shape === `.${property}`)).toBe(true)
+      },
+    )
 
     it('P2-a LOAD-BEARING: a `this` inside an ordinary nested function ENTERS T (not pruned) and reds UNKNOWN — the reference set is not narrowed', () => {
       // Owner counterexample: pre-fix `inScope` EXCLUDED this `this` from T, so
@@ -1249,7 +1281,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       expect(indexText).toContain(marker)
       const mutated = indexText.replace(marker, marker + '\n    const __p2bUnrelated = 1; void __p2bUnrelated;')
       const msrc = ts.createSourceFile('mut.ts', mutated, ts.ScriptTarget.ES2022, true)
-      // the safe-eligible census is unchanged (same 48 keys)
+      // the safe-eligible census is unchanged (same 52 keys)
       expect(new Set(deriveSafeCensus(msrc, SCOPE))).toEqual(FROZEN_SAFE_KEYS)
       const mpart = buildThisPartition(msrc, FROZEN_SAFE_KEYS, SCOPE)
       expect(mpart.safe.length).toBe(FROZEN_SAFE_COUNT)

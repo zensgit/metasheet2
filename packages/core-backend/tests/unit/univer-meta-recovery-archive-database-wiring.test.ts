@@ -59,6 +59,9 @@ vi.mock('../../src/multitable/recovery-authorization-stability', async (importOr
       permissions: [],
     },
     capabilities: {
+      // The real resolver never yields canManageSheetAccess without canRead (applySheetPermissionScope pairs
+      // them; an admin has both), and hasFullTableReadAccess now refuses when canRead is false (Refs #6139).
+      canRead: true,
       canManageSheetAccess: true,
     },
   })),

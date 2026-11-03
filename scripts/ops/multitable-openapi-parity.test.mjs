@@ -24,6 +24,7 @@ const expectedFieldTypes = [
   'currency',
   'percent',
   'rating',
+  'duration',
   'url',
   'email',
   'phone',
@@ -55,8 +56,30 @@ test('multitable openapi stays aligned with runtime contracts', () => {
 
   assert.ok(paths['/api/multitable/person-fields/prepare']?.post, 'missing person-field prepare endpoint')
   assert.ok(paths['/api/multitable/templates']?.get, 'missing template catalog endpoint')
-  assert.ok(paths['/api/multitable/templates/{templateId}/install']?.post, 'missing template install endpoint')
+  const templateInstall = paths['/api/multitable/templates/{templateId}/install']?.post
+  assert.ok(templateInstall, 'missing template install endpoint')
+  // #5861: the install route is idempotent inside a server-side window, and a replayed 201 is
+  // distinguishable ONLY by this response header (the body is byte-identical to the first 201).
+  // The route sets it at packages/core-backend/src/routes/univer-meta.ts (`res.set('Idempotent-Replayed', 'true')`),
+  // so it is part of the contract and must be declared — otherwise nothing detects its removal.
+  const replayHeader = templateInstall.responses?.['201']?.headers?.['Idempotent-Replayed']
+  assert.ok(replayHeader, 'template install 201 must declare the Idempotent-Replayed header (#5861 dedupe replay signal)')
+  assert.deepEqual(replayHeader.schema, { type: 'string', enum: ['true'] })
+  assert.equal(replayHeader.required, false, 'Idempotent-Replayed is absent on a fresh install')
   assert.ok(paths['/api/multitable/sheets/{sheetId}']?.delete, 'missing sheet delete endpoint')
+  const deletedSheets = paths['/api/multitable/bases/{baseId}/trash']?.get
+  assert.ok(deletedSheets, 'missing table recycle-bin list endpoint')
+  assert.deepEqual(deletedSheets.security, [{ bearerAuth: [] }])
+  assert.deepEqual(deletedSheets.parameters.map((p) => p.name), ['baseId', 'limit', 'cursor'])
+  assert.deepEqual(deletedSheets.parameters[1].schema, { type: 'integer', minimum: 1, maximum: 100, default: 20 })
+  const deletedPage = deletedSheets.responses['200'].content['application/json'].schema.properties.data
+  assert.equal(deletedPage.additionalProperties, false)
+  assert.deepEqual(deletedPage.required, ['sheets', 'nextCursor'])
+  assert.deepEqual(Object.keys(deletedPage.properties).sort(), ['nextCursor', 'sheets'])
+  assert.equal(deletedPage.properties.nextCursor.nullable, true)
+  assert.equal(deletedPage.properties.sheets.items.additionalProperties, false)
+  assert.deepEqual(deletedPage.properties.sheets.items.required, ['id', 'baseId', 'name', 'description', 'deletedAt'])
+  assert.ok(paths['/api/multitable/sheets/{sheetId}/restore']?.post, 'missing soft-deleted sheet restore endpoint')
   assert.ok(paths['/api/multitable/records/{recordId}']?.patch, 'missing single-record patch endpoint')
   assert.ok(paths['/api/multitable/sheets/{sheetId}/import-xlsx']?.post, 'missing xlsx import endpoint')
   assert.ok(paths['/api/multitable/sheets/{sheetId}/export-xlsx']?.get, 'missing xlsx export endpoint')

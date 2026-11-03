@@ -11,6 +11,7 @@ import {
   createElearningContentRevision,
   openElearningContentItem,
   publishElearningContentCourse,
+  searchElearningAssignees,
 } from '../src/services/elearningContent'
 
 const COURSE = '11111111-1111-4111-8111-111111111111'
@@ -341,6 +342,66 @@ describe('e-learning content client', () => {
       code: 'invalid_response',
       status: 200,
     })
+  })
+
+  it('passes the org-context gate code through and keeps other uppercase codes closed', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(403, { error: 'ORG_CONTEXT_REQUIRED' }))
+    await expect(openElearningContentItem(ARTICLE_ITEM, REQUEST)).rejects.toMatchObject({
+      name: 'ElearningApiError',
+      code: 'ORG_CONTEXT_REQUIRED',
+      status: 403,
+    })
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(403, { error: 'SOME_OTHER_CODE' }))
+    await expect(openElearningContentItem(ARTICLE_ITEM, REQUEST)).rejects.toMatchObject({
+      code: 'request_failed',
+      status: 403,
+    })
+  })
+
+  it('F13: searches assignees with a GET carrying only q + limit and parses the closed rows', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      items: [
+        { id: 'user-1', name: '张三', email: 'zhangsan@example.test' },
+        { id: 'user-2', name: '  ', email: null },
+      ],
+    }))
+    await expect(searchElearningAssignees(' 张 三 ')).resolves.toEqual([
+      { id: 'user-1', name: '张三', email: 'zhangsan@example.test' },
+      { id: 'user-2', name: null, email: null },
+    ])
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+    const [path, init] = apiFetchMock.mock.calls[0] as [string, RequestInit]
+    const url = new URL(path, 'http://localhost')
+    expect(url.pathname).toBe('/api/elearning/admin/assignees')
+    expect([...url.searchParams.keys()].sort()).toEqual(['limit', 'q'])
+    expect(url.searchParams.get('q')).toBe('张 三')
+    expect(url.searchParams.get('limit')).toBe('20')
+    expect(init).toEqual({ method: 'GET' })
+
+    // Blank input never reaches the network; an over-long one fails locally.
+    await expect(searchElearningAssignees('   ')).resolves.toEqual([])
+    await expect(searchElearningAssignees('x'.repeat(101))).rejects.toMatchObject({ code: 'invalid_input' })
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('F13: rejects leaky or malformed assignee rows and passes values-free error codes through', async () => {
+    for (const body of [
+      { items: [{ id: 'user-1', name: 'A', email: null, role: 'admin' }] },
+      { items: [{ id: 'user-1', name: 'A' }] },
+      { items: [{ id: '', name: 'A', email: null }] },
+      { items: [{ id: 'user-1', name: 7, email: null }] },
+      { items: [], total: 1 },
+      { items: 'nope' },
+    ]) {
+      apiFetchMock.mockResolvedValueOnce(jsonResponse(200, body))
+      await expect(searchElearningAssignees('a')).rejects.toMatchObject({ code: 'invalid_response' })
+    }
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(403, { error: 'Insufficient permissions' }))
+    await expect(searchElearningAssignees('a')).rejects.toMatchObject({ code: 'request_failed', status: 403 })
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(403, { error: 'ORG_CONTEXT_REQUIRED' }))
+    await expect(searchElearningAssignees('a')).rejects.toMatchObject({ code: 'ORG_CONTEXT_REQUIRED', status: 403 })
+    apiFetchMock.mockRejectedValueOnce(new TypeError('offline'))
+    await expect(searchElearningAssignees('a')).rejects.toMatchObject({ code: 'network_error', status: 0 })
   })
 
   it('reuses ids for same logical retries and rotates on content, URL, or order changes', () => {

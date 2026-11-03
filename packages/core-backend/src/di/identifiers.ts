@@ -196,6 +196,13 @@ export interface CommentQueryOptions {
      * paging. This is not a public API query parameter.
      */
     excludeRowIds?: string[];
+    /**
+     * #5808 — internal, route-set only (never a query parameter). When present, comments on the page
+     * AUTHORED BY this user get `mentionLabels` for their own `mentions` (the only comments the UI lets
+     * that user edit). One batched lookup per page, active users only, at most MENTION_LABELS_MAX_IDS
+     * distinct ids. The route sets it only for an authenticated session user (never for API tokens).
+     */
+    mentionLabelsAuthorId?: string;
 }
 
 /** Aggregated emoji-reaction summary attached to a comment (B6). */
@@ -298,6 +305,13 @@ export interface CommentRecord {
      * the viewer reacted. Undefined when reactions were not hydrated.
      */
     reactions?: CommentReactionSummary[];
+    /**
+     * #5808 — display labels for this comment's OWN `mentions`, keyed by user id. Only on list
+     * responses (`getComments` with `mentionLabelsAuthorId`) and only on the caller's own comments;
+     * an id with no active user (deactivated / deleted) or past the per-response ceiling is simply
+     * absent. Undefined when labels were not requested.
+     */
+    mentionLabels?: Record<string, string>;
 }
 
 /** An inbox entry extends CommentRecord with read/mention state and navigation context. */
@@ -402,6 +416,40 @@ export interface CommentUnreadSummary {
     mentionUnreadCount: number;
 }
 
+/**
+ * #5831 — where a comment lives: the only columns a comment-id-addressed route needs to decide WHICH
+ * sheet gate applies. Immutable after create; no content.
+ */
+export interface CommentAddressRecord {
+    spreadsheetId: string;
+    rowId: string;
+}
+
+/**
+ * #5831 part B — a sheet with row-level read deny ON for the caller, with the rows a cross-sheet comment
+ * aggregate may include on it: the candidate rows the route CHECKED against the deny and found allowed.
+ * An ALLOW list, not a deny list, so a row nobody checked when the scope was built (a comment that
+ * arrived between the candidate lookup and the count/page queries) is left out, never let in.
+ */
+export interface CommentInboxRowDenySheet {
+    spreadsheetId: string;
+    /** Trimmed row ids; a comment on any other row of this sheet is excluded. */
+    allowedRowIds: readonly string[];
+}
+
+/**
+ * #5831 part B — which comments a user-scoped cross-sheet aggregate (inbox, unread counts) may include,
+ * computed by the route from the caller's authority (routes/comments.ts resolveCommentInboxScope).
+ * The service applies it in SQL before counting and before LIMIT/OFFSET. REQUIRED: an empty or missing
+ * `sheetIds` means "nothing" — the service returns an empty result without querying.
+ */
+export interface CommentInboxScope {
+    /** Sheets the caller may read AND that are live. */
+    sheetIds: readonly string[];
+    /** Those of `sheetIds` with row-level read deny on, each with its allowed rows (fail-closed). */
+    rowDenySheets: readonly CommentInboxRowDenySheet[];
+}
+
 export interface ICommentService {
     setCommentTargetReadChecker(checker: (input: { spreadsheetId: string; rowId: string; userId: string }) => Promise<boolean>): void;
     /**
@@ -421,18 +469,48 @@ export interface ICommentService {
     updateComment(commentId: string, userId: string, data: CommentUpdateInput): Promise<CommentRecord>;
     deleteComment(commentId: string, userId: string): Promise<void>;
     getComments(spreadsheetId: string, options?: CommentQueryOptions): Promise<{ items: CommentRecord[]; total: number }>;
+    /**
+     * #5795: bounded — a term is required (term-less ⇒ empty, no query), the term is a literal
+     * substring, at most MENTION_CANDIDATES_MAX_ITEMS + 1 rows come back, and there is deliberately
+     * NO `total` (it used to be a deployment-wide active-user count).
+     * #5809: `match: 'exact-email'` narrows the substring search to trimmed, case-insensitive EMAIL
+     * EQUALITY (same term requirement, ceiling and ordering).
+     */
     listMentionCandidates(
       spreadsheetId: string,
-      options?: { q?: string; limit?: number },
-    ): Promise<{ items: CommentMentionCandidate[]; total: number }>;
-    getInbox(userId: string, options?: Pick<CommentQueryOptions, 'limit' | 'offset'>): Promise<{ items: CommentInboxItem[]; total: number }>;
-    /** @deprecated Use `getUnreadSummary()` for richer unread data. */
-    getUnreadCount(userId: string): Promise<number>;
+      options?: { q?: string; limit?: number; match?: 'exact-email' },
+    ): Promise<{ items: CommentMentionCandidate[] }>;
+    /**
+     * #5831 part B — the distinct sheets holding a comment the caller's inbox would list (by someone
+     * else; unread by the caller or mentioning them), BEFORE any authority filter. Ids only; the route
+     * turns them into a CommentInboxScope and never returns them.
+     */
+    listInboxCandidateSheetIds(userId: string): Promise<string[]>;
+    /**
+     * #5831 part B — the same candidates' distinct rows on `sheetIds` (sheet id → row ids), for the
+     * row-bounded row-level read deny. Ids only.
+     */
+    listInboxCandidateRowIds(userId: string, sheetIds: readonly string[]): Promise<Map<string, string[]>>;
+    /** #5831 part B: `scope` is required and applied before COUNT and LIMIT/OFFSET. */
+    getInbox(
+      userId: string,
+      options: Pick<CommentQueryOptions, 'limit' | 'offset'> | undefined,
+      scope: CommentInboxScope,
+    ): Promise<{ items: CommentInboxItem[]; total: number }>;
+    /** @deprecated Use `getUnreadSummary()` for richer unread data. #5831 part B: `scope` is required. */
+    getUnreadCount(userId: string, scope: CommentInboxScope): Promise<number>;
     /**
      * Return combined unread summary with both general unread count
      * and mention-specific unread count in a single call.
+     * #5831 part B: counts only comments inside `scope` (required).
      */
-    getUnreadSummary(userId: string): Promise<CommentUnreadSummary>;
+    getUnreadSummary(userId: string, scope: CommentInboxScope): Promise<CommentUnreadSummary>;
+    /**
+     * #5831 — the sheet and row of one comment, or null when no comment has this id. Reads nothing
+     * else (no content, no sheet data); the comment-id routes call it BEFORE their sheet gate to learn
+     * which sheet to gate on.
+     */
+    getCommentAddress(commentId: string): Promise<CommentAddressRecord | null>;
     markCommentRead(commentId: string, userId: string): Promise<void>;
     /**
      * Add an emoji reaction by `userId` to a comment (B6). Idempotent: re-adding

@@ -108,6 +108,17 @@ export function conditionEditsFromGraph(graph: ApprovalGraph | undefined): Condi
 }
 
 /**
+ * T5a / verify X1: the trimmed default-branch edge key, or '' for "no default". Accepts anything
+ * because the edit model is bound to a CLEARABLE picker — Element Plus 2.11 clears an el-select to
+ * `undefined` (its `valueOnClear` default), which previously reached `.trim()` and threw a TypeError
+ * on every canvas render and on save. The editor also normalizes at the source; this keeps every
+ * downstream consumer safe regardless of how the value was written.
+ */
+export function conditionDefaultEdgeKeyText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+/**
  * Build one persisted `ConditionRule` from a rule edit, mirroring the backend
  * `normalizeApprovalGraph` rule shape: `fieldId` trimmed, `operator` verbatim, and `value` emitted
  * only when defined (omitted for `isEmpty` / no-value rules) so an untouched rule is byte-identical.
@@ -245,9 +256,13 @@ export function applyConditionEditsToGraph(
         rules: branchEdit.rules.map(buildConditionRule),
       }
     })
+    // T5a / verify X1: the default-branch picker is clearable, and Element Plus clears to
+    // `undefined` (not ''). Never `.trim()` a value that may not be a string — a cleared picker
+    // means "no default", exactly like ''.
+    const defaultEdgeKey = conditionDefaultEdgeKeyText(edit.defaultEdgeKey)
     const config: ConditionNodeConfig = {
       branches,
-      ...(edit.defaultEdgeKey.trim() ? { defaultEdgeKey: edit.defaultEdgeKey.trim() } : {}),
+      ...(defaultEdgeKey ? { defaultEdgeKey } : {}),
     }
     return {
       ...cloneJson(node),
@@ -375,7 +390,7 @@ export function validateConditionEdits(
         }
       })
     })
-    const defaultEdgeKey = edit.defaultEdgeKey.trim()
+    const defaultEdgeKey = conditionDefaultEdgeKeyText(edit.defaultEdgeKey)
     if (defaultEdgeKey && graph) {
       const outgoing = outgoingByNode.get(edit.nodeKey) ?? new Set<string>()
       if (!outgoing.has(defaultEdgeKey)) {

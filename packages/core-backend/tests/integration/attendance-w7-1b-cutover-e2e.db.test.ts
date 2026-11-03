@@ -44,6 +44,7 @@ import { randomUUID } from 'crypto'
 import { Pool } from 'pg'
 import type { MetaSheetServer } from '../../src/index'
 import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
+import { createLegacyLivePunchBoundaryDriver } from '../utils/attendance-legacy-live-punch-boundary-driver'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeDb = dbUrl ? describe : describe.skip
@@ -99,6 +100,7 @@ function requestJson(
 describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)', () => {
   let server: MetaSheetServer | undefined
   let pool: Pool
+  const seededDefaultRuleIds: string[] = []
   let baseUrl = ''
   let priorW4: string | undefined
   let priorW7: string | undefined
@@ -117,19 +119,22 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
   const w4OnlyOrg = randomUUID()
   const w4OnlyUser = randomUUID()
   const w4OnlyShift = randomUUID()
-  // SUSPENDED org, W4-AUTHORITATIVE so the punch actually reaches the boundary —
-  // that is what makes the BOUNDARY refusal reachable rather than theoretical.
+  // Suspended HTTP org and independent prepare/execute boundary fixture.
   const suspendedOrg = randomUUID()
   const suspendedUser = randomUUID()
   const suspendedShift = randomUUID()
   const suspendedGroup = randomUUID()
+  const boundaryOrg = randomUUID()
+  const boundaryUser = randomUUID()
+  const boundaryShift = randomUUID()
+  const boundaryGroup = randomUUID()
   // W4-legacy + W7-group org — the §2.4 incoherence fixture (T-R9).
   const incoherentOrg = randomUUID()
   const incoherentUser = randomUUID()
   const incoherentShift = randomUUID()
   const incoherentGroup = randomUUID()
 
-  const allOrgs = () => [bothOrg, incoherentOrg, w4OnlyOrg, suspendedOrg]
+  const allOrgs = () => [bothOrg, incoherentOrg, w4OnlyOrg, suspendedOrg, boundaryOrg]
 
   const mintToken = async (userId: string): Promise<string> => {
     const res = await requestJson(
@@ -149,6 +154,16 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
       `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true) ON CONFLICT DO NOTHING`,
       [userId, orgId],
     )
+    if (orgId === 'default') return
+    const defaultRule = await pool.query<{ id: string }>(
+      `INSERT INTO attendance_rules
+       (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, $2, 'owned timezone fixture', $3, 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
+       RETURNING id`,
+      [randomUUID(), orgId, 'UTC'],
+    )
+    seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id))
   }
 
   /** Walks the rollout state machine's LEGAL edges to `authoritative`. Inserting
@@ -274,8 +289,8 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     //
     // Doing only (2) breaks registration; doing only (1) leaves the premise at a
     // neighbour's mercy. The earlier round mistook one for the other.
-    process.env[W4_ENV] = `${bothOrg.toLowerCase()},${w4OnlyOrg.toLowerCase()},${suspendedOrg.toLowerCase()}`
-    process.env[W7_ENV] = `${bothOrg.toLowerCase()},${suspendedOrg.toLowerCase()}`
+    process.env[W4_ENV] = `${bothOrg.toLowerCase()},${w4OnlyOrg.toLowerCase()},${suspendedOrg.toLowerCase()},${boundaryOrg.toLowerCase()}`
+    process.env[W7_ENV] = `${bothOrg.toLowerCase()},${suspendedOrg.toLowerCase()},${boundaryOrg.toLowerCase()}`
 
     const repoRoot = path.join(HERE, '../../../../')
     const { MetaSheetServer: Server } = await import('../../src/index')
@@ -334,6 +349,11 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     // the production writer would have produced for a suspended org.
     await seedAttendanceW7ContextSourcePostureV1(pool, suspendedOrg, 'suspended')
 
+    await insertActiveUser(boundaryUser, boundaryOrg)
+    await seedAuthoritativeRollout(boundaryOrg)
+    await seedShiftAndEffectiveGroup(boundaryOrg, boundaryUser, boundaryShift, boundaryGroup)
+    await seedAttendanceW7ContextSourcePostureV1(pool, boundaryOrg, 'off')
+
     await insertActiveUser(incoherentUser, incoherentOrg)
     await seedLegacyRollout(incoherentOrg)
     await seedShiftAndEffectiveGroup(incoherentOrg, incoherentUser, incoherentShift, incoherentGroup)
@@ -363,8 +383,9 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
       ])
       .catch(() => undefined)
     await pool
-      ?.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[bothUser, incoherentUser, w4OnlyUser, suspendedUser]])
+      ?.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[bothUser, incoherentUser, w4OnlyUser, suspendedUser, boundaryUser]])
       .catch(() => undefined)
+    await pool?.query('DELETE FROM attendance_rules WHERE id = ANY($1::uuid[])', [seededDefaultRuleIds]).catch(() => undefined)
     await pool?.end()
     await server?.stop?.()
     if (priorW4 === undefined) delete process.env[W4_ENV]
@@ -411,8 +432,8 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
 
   /** The allowlist state every punching leg needs, installed per test. */
   const BOTH_MACHINES_ENV = () => ({
-    [W4_ENV]: `${bothOrg.toLowerCase()},${w4OnlyOrg.toLowerCase()},${suspendedOrg.toLowerCase()}`,
-    [W7_ENV]: `${bothOrg.toLowerCase()},${suspendedOrg.toLowerCase()}`,
+    [W4_ENV]: `${bothOrg.toLowerCase()},${w4OnlyOrg.toLowerCase()},${suspendedOrg.toLowerCase()},${boundaryOrg.toLowerCase()}`,
+    [W7_ENV]: `${bothOrg.toLowerCase()},${suspendedOrg.toLowerCase()},${boundaryOrg.toLowerCase()}`,
   })
 
   const punch = async (userId: string, orgId: string, eventType: 'check_in' | 'check_out') =>
@@ -427,6 +448,17 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
       // the fixture rather than optional decoration.
       body: JSON.stringify({ orgId, eventType, timezone: 'UTC', operationId: randomUUID() }),
     })
+
+  const zeroBusinessCounts = { events: 0, records: 0, operations: 0, calculations: 0, segments: 0, outbox: 0, companions: 0 }
+  const businessCounts = async (orgId: string) => (await pool.query(`
+    SELECT
+      (SELECT count(*)::int FROM attendance_events WHERE org_id=$1) AS events,
+      (SELECT count(*)::int FROM attendance_records WHERE org_id=$1) AS records,
+      (SELECT count(*)::int FROM attendance_result_operations WHERE org_id=$1) AS operations,
+      (SELECT count(*)::int FROM attendance_record_calculations WHERE org_id=$1) AS calculations,
+      (SELECT count(*)::int FROM attendance_record_segments s JOIN attendance_record_calculations c ON c.id=s.calculation_id WHERE c.org_id=$1) AS segments,
+      (SELECT count(*)::int FROM attendance_result_event_outbox WHERE org_id=$1) AS outbox,
+      (SELECT count(*)::int FROM attendance_timezone_context_companions WHERE org_id=$1) AS companions`, [orgId])).rows[0]
 
   const calculationsFor = async (userId: string) =>
     (
@@ -635,36 +667,54 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     })
   }, 60_000)
 
-  it('OD-W7-4(a) BOUNDARY refusal: a suspended org punch is REFUSED and writes ZERO calculation rows', async () => {
-    // THE RATIONALE FOR `blocked` BEING A DISTINCT ARM. If the seam returned a
-    // null context instead, the calculator would turn it into a durable
-    // `review('missing_frozen_context')` ROW — a PRODUCED CALCULATION, which is
-    // precisely what suspension must prevent. So the assertion that matters is
-    // not just "the punch failed" but "nothing was written".
+  it('OD-W7-4(a) HTTP refusal: a suspended org punch returns 409 with zero business writes', async () => {
+    // HTTP preflight now encounters suspension before the live boundary.
+    // The separate direct-boundary case below proves the inner guard.
     await withEnv(BOTH_MACHINES_ENV(), async () => {
-      const before = (await pool.query(
-        `SELECT count(*)::int AS n FROM attendance_record_calculations c
-           JOIN attendance_records r ON r.id = c.attendance_record_id
-          WHERE r.user_id = $1`,
-        [suspendedUser],
-      )).rows[0].n
-      expect(Number(before)).toBe(0)
-
+      expect(await businessCounts(suspendedOrg)).toEqual(zeroBusinessCounts)
       const res = await punch(suspendedUser, suspendedOrg, 'check_in')
-      // The EXACT closed code, never "a 4xx". The boundary maps its own error
-      // class, so this proves the BOUNDARY site refused — not the plugin one.
-      const code = String((res.body as { error?: { code?: string } } | undefined)?.error?.code ?? `<none:${res.status}>`)
-      expect(code, `body: ${res.raw}`).toBe('W4C2_W7_CONTEXT_SOURCE_SUSPENDED')
-
-      const after = (await pool.query(
-        `SELECT count(*)::int AS n FROM attendance_record_calculations c
-           JOIN attendance_records r ON r.id = c.attendance_record_id
-          WHERE r.user_id = $1`,
-        [suspendedUser],
-      )).rows[0].n
-      expect(Number(after), 'a suspended org must produce NO calculation row — not even a review row').toBe(0)
+      expect(res.status, res.raw).toBe(409)
+      expect(res.body).toEqual({
+        ok: false,
+        error: { code: 'W4C2_W7_CONTEXT_SOURCE_SUSPENDED', message: 'W4C2_W7_CONTEXT_SOURCE_SUSPENDED' },
+      })
+      expect(await businessCounts(suspendedOrg)).toEqual(zeroBusinessCounts)
     })
   }, 60_000)
+
+  it('legacy boundary refuses suspension after prepare; disarmed control completes', async () => {
+    await withEnv(BOTH_MACHINES_ENV(), async () => {
+      const driver = createLegacyLivePunchBoundaryDriver(pool)
+      const command = {
+        orgId: boundaryOrg, userId: boundaryUser, eventType: 'check_in' as const,
+        occurredAt: '2026-08-20T12:00:00.000Z', timezone: 'UTC', operationId: randomUUID(),
+      }
+      await seedAttendanceW7ContextSourcePostureV1(pool, boundaryOrg, 'off')
+      try {
+        const prepared = await driver.prepare(command)
+        expect(prepared.outerIssued?.arm).toBe('legacy')
+        await seedAttendanceW7ContextSourcePostureV1(pool, boundaryOrg, 'suspended')
+        expect(await businessCounts(boundaryOrg)).toEqual(zeroBusinessCounts)
+        await expect(driver.execute(prepared)).rejects.toMatchObject({
+          code: 'W4C2_W7_CONTEXT_SOURCE_SUSPENDED', httpStatus: 409,
+        })
+        expect(await businessCounts(boundaryOrg)).toEqual(zeroBusinessCounts)
+
+        await seedAttendanceW7ContextSourcePostureV1(pool, boundaryOrg, 'off')
+        const control = await driver.execute(await driver.prepare({ ...command, operationId: randomUUID() }))
+        expect(control.kind).toBe('w4')
+        const calcs = await calculationsFor(boundaryUser)
+        expect(calcs).toHaveLength(1)
+        expect(calcs[0].outcome).toBe('completed')
+        const counts = await businessCounts(boundaryOrg)
+        expect(counts.calculations).toBe(1)
+        expect(counts.segments).toBeGreaterThan(0)
+      } finally {
+        await seedAttendanceW7ContextSourcePostureV1(pool, boundaryOrg, 'off')
+      }
+    })
+  })
+
 
   it('OD-W7-4(a) PLUGIN-PRODUCER refusal: the same suspension is refused at the plugin producer with its own code', async () => {
     // The SECOND refusal site. Deleting either one alone previously left the

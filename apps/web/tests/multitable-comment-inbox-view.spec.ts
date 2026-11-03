@@ -171,6 +171,8 @@ describe('MultitableCommentInboxView', () => {
     expect(container?.textContent).toContain('Need review')
     expect(container?.textContent).toContain('1')
     expect(container?.textContent).toContain('Mention')
+    // 客户反馈 2026-09-24 #4c follow-up: comment time in the business timezone (Asia/Shanghai default), 24-hour.
+    expect(container?.querySelector('.mt-comment-inbox__footer > span')?.textContent?.trim()).toBe('2026-04-04 16:00')
 
     // G-10 (docket #68): cards render entity display names, name-first (id ?? name fallback pattern
     // mirrored from the existing authorName ?? authorId). The raw ids are demoted to a `title`

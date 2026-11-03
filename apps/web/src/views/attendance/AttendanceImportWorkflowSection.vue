@@ -245,21 +245,13 @@
       </label>
       <label class="attendance__field" for="attendance-import-group-timezone">
         <span>{{ tr('Group timezone (optional)', '分组时区（可选）') }}</span>
-        <select
+        <AttendanceTimezoneSelect
           id="attendance-import-group-timezone"
           v-model="importGroupTimezone"
-        >
-          <option value="">{{ tr('(Optional) Use import timezone', '（可选）沿用导入时区') }}</option>
-          <optgroup
-            v-for="group in importGroupTimezoneOptionGroups"
-            :key="group.id"
-            :label="tr(group.labelEn, group.labelZh)"
-          >
-            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
-              {{ timezone.label }}
-            </option>
-          </optgroup>
-        </select>
+          :tr="tr"
+          :empty-label="tr('(Optional) Use import timezone', '（可选）沿用导入时区')"
+          :groups="importGroupTimezoneOptionGroups"
+        />
       </label>
       <label class="attendance__field" for="attendance-import-user">
         <span>{{ tr('User ID', '用户 ID') }}</span>
@@ -273,21 +265,13 @@
       </label>
       <label class="attendance__field" for="attendance-import-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
-        <select
+        <AttendanceTimezoneSelect
           id="attendance-import-timezone"
           name="importTimezone"
           v-model="importForm.timezone"
-        >
-          <optgroup
-            v-for="group in importTimezoneOptionGroups"
-            :key="group.id"
-            :label="tr(group.labelEn, group.labelZh)"
-          >
-            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
-              {{ timezone.label }}
-            </option>
-          </optgroup>
-        </select>
+          :tr="tr"
+          :groups="importTimezoneOptionGroups"
+        />
       </label>
       <label class="attendance__field attendance__field--full" for="attendance-import-payload">
         <span>{{ tr('Payload (JSON)', '负载（JSON）') }}</span>
@@ -482,6 +466,8 @@
 
 <script setup lang="ts">
 import { computed, type ComputedRef, type Ref } from 'vue'
+import { useLocale } from '../../composables/useLocale'
+import AttendanceTimezoneSelect from './AttendanceTimezoneSelect.vue'
 import {
   buildTimezoneOptionGroups,
   formatTimezoneOptionLabel,
@@ -600,8 +586,10 @@ const importGroupAutoCreate = props.workflow.importGroupAutoCreate
 const importGroupAutoAssign = props.workflow.importGroupAutoAssign
 const importGroupRuleSetId = props.workflow.importGroupRuleSetId
 const importGroupTimezone = props.workflow.importGroupTimezone
-const importTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importForm.timezone))
-const importGroupTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importGroupTimezone.value))
+const { isZh } = useLocale()
+const timezoneLocale = computed(() => (isZh.value ? 'zh' : 'en') as 'zh' | 'en')
+const importTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importForm.timezone, timezoneLocale.value))
+const importGroupTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importGroupTimezone.value, timezoneLocale.value))
 const importScalabilityHint = props.workflow.importScalabilityHint
 const importPreviewTask = props.workflow.importPreviewTask
 const importAsyncJob = props.workflow.importAsyncJob
@@ -689,7 +677,7 @@ const importGroupSyncSummary = computed(() => {
   }
   const timezone = importGroupTimezone.value.trim()
   if (timezone) {
-    const timezoneLabel = formatTimezoneOptionLabel(timezone)
+    const timezoneLabel = formatTimezoneOptionLabel(timezone, new Date(), timezoneLocale.value)
     segments.push(tr(`timezone ${timezoneLabel}`, `时区 ${timezoneLabel}`))
   }
 
@@ -730,6 +718,10 @@ function formatImportLane(value: AttendanceImportPreviewLane | AttendanceImportC
 .attendance__field--checkbox {
   flex-direction: row;
   align-items: center;
+  justify-content: flex-start;
+  justify-self: start;
+  width: fit-content;
+  max-width: 100%;
   gap: 8px;
 }
 

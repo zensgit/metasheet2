@@ -1,8 +1,12 @@
+import { timezoneCityLabel } from './timezoneCityLabels'
+
 export interface TimezoneOption {
   value: string
   label: string
   offsetMinutes: number
 }
+
+export type TimezoneDisplayLocale = 'en' | 'zh'
 
 const FALLBACK_TIMEZONES = [
   'UTC',
@@ -80,17 +84,26 @@ export function formatUtcOffset(offsetMinutes: number): string {
   return `UTC${sign}${hours}:${minutes}`
 }
 
-export function formatTimezoneLabel(timeZone: string | null | undefined, at = new Date()): string {
+function timezonePlaceName(timeZone: string, locale: TimezoneDisplayLocale): string {
+  if (locale !== 'zh') return timeZone
+  return timezoneCityLabel(timeZone) || timeZone
+}
+
+export function formatTimezoneLabel(
+  timeZone: string | null | undefined,
+  at = new Date(),
+  locale: TimezoneDisplayLocale = 'en',
+): string {
   const normalized = String(timeZone || '').trim()
   if (!normalized) return '--'
 
-  const cacheKey = `${normalized}|${at.toISOString().slice(0, 10)}`
+  const cacheKey = `${locale}|${normalized}|${at.toISOString().slice(0, 10)}`
   const cached = labelCache.get(cacheKey)
   if (cached) return cached
 
   try {
     const offsetMinutes = getTimezoneOffsetMinutes(normalized, at)
-    const label = `${formatUtcOffset(offsetMinutes)} · ${normalized}`
+    const label = `${formatUtcOffset(offsetMinutes)} · ${timezonePlaceName(normalized, locale)}`
     labelCache.set(cacheKey, label)
     return label
   } catch {
@@ -101,6 +114,7 @@ export function formatTimezoneLabel(timeZone: string | null | undefined, at = ne
 export function buildTimezoneOptions(
   preferredTimezones: Array<string | null | undefined> = [],
   at = new Date(),
+  locale: TimezoneDisplayLocale = 'en',
 ): TimezoneOption[] {
   const supportedTimezones = getSupportedTimezones()
   const deduped = new Set<string>()
@@ -131,7 +145,7 @@ export function buildTimezoneOptions(
     const offsetMinutes = getTimezoneOffsetMinutes(value, at)
     return {
       value,
-      label: `${formatUtcOffset(offsetMinutes)} · ${value}`,
+      label: `${formatUtcOffset(offsetMinutes)} · ${timezonePlaceName(value, locale)}`,
       offsetMinutes,
     }
   })

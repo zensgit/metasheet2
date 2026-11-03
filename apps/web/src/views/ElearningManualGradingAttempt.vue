@@ -43,7 +43,7 @@
         <p data-testid="elearning-grading-attempt-learner">
           {{ elearningLabel('grading.learnerIdLabel', isZh) }}: {{ detail.userId }}
         </p>
-        <p>{{ detail.submittedAt }}</p>
+        <p>{{ formatElearningDate(detail.submittedAt, isZh) }}</p>
       </header>
 
       <p
@@ -152,6 +152,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import { randomUuid } from '../utils/uuid'
 import { ElearningApiError } from '../services/elearning'
 import {
   ELEARNING_MANUAL_GRADE_COMMENT_MAX,
@@ -165,6 +166,7 @@ import {
   elearningManualGradingErrorMessage,
   elearningManualGradingGradedLabel,
   elearningManualGradingScoreRangeError,
+  formatElearningDate,
 } from './elearningLabels'
 
 const props = defineProps<{ attemptId: string }>()
@@ -266,10 +268,7 @@ function validateDraft(question: ElearningManualGradingQuestionDetail, draft: Dr
 }
 
 function freshRequestId(): string {
-  if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') {
-    throw new Error('crypto.randomUUID unavailable')
-  }
-  return crypto.randomUUID()
+  return randomUuid()
 }
 
 function resolveSubmissionIntent(

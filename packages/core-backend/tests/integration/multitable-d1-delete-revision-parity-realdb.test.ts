@@ -36,9 +36,9 @@ const SHEET = `sheet_d1_${TS}`
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
-function makeExecutor(): AutomationExecutor {
+function makeExecutor(bus: EventBus = new EventBus()): AutomationExecutor {
   const deps: AutomationDeps = {
-    eventBus: new EventBus(),
+    eventBus: bus,
     queryFn: (sql: string, params?: unknown[]) => q(sql, params),
     crossBaseWriteQuota: { limit: 1000, windowMs: 60_000, store: new MemoryRateLimitStore() },
   }
@@ -184,19 +184,27 @@ describeIfDatabase('D-1 — delete-revision parity for plugin-SDK + automation h
     expect(await deleteRevisionsOf(ghost)).toHaveLength(0)
   })
 
-  test('BEHAVIOR PRESERVED: same-base automation delete of a missing record keeps its 0-row success — and fabricates NO revision', async () => {
+  test('客户反馈 2026-09-24 #3: same-base automation delete of a MISSING record is `skipped` (was a 0-row success) — NO revision, NO chain event', async () => {
     const ghost = `rec_d1_ghost2_${TS}`
-    const exec = await makeExecutor().execute(deleteRuleFor(ghost), {
+    const bus = new EventBus()
+    const seen: unknown[] = []
+    bus.subscribe('multitable.record.deleted', (payload: unknown) => { seen.push(payload) })
+    const exec = await makeExecutor(bus).execute(deleteRuleFor(ghost), {
       recordId: ghost,
       sheetId: SHEET,
       actorId: OWNER,
       data: {},
     })
-    // Pre-existing same-base leniency: a missing trigger record yields a 0-row DELETE reported as
-    // success. D-1 must not change that — and must NOT invent a delete revision for a record that
-    // never existed.
-    expect(exec.steps[0]?.status).toBe('success')
+    // This golden used to pin the pre-existing same-base leniency ("a missing trigger record yields a 0-row
+    // DELETE reported as success"). That leniency also re-emitted a fresh multitable.record.deleted for the
+    // ghost, which is exactly how a「记录删除时 → 删除记录」rule re-fired itself to the depth cap (裁定 PR #6074,
+    // customer item 3). The step now says what happened — `skipped`, values-free reason — and publishes
+    // NOTHING. D-1's own half is unchanged: NO delete revision is invented for a record that never existed.
+    expect(exec.steps[0]?.status).toBe('skipped')
+    expect(exec.steps[0]?.output).toMatchObject({ recordId: ghost, sheetId: SHEET, reason: 'target_record_missing' })
+    expect(exec.status).toBe('skipped')
     expect(await deleteRevisionsOf(ghost)).toHaveLength(0)
+    expect(seen).toHaveLength(0)
   })
 
   /**

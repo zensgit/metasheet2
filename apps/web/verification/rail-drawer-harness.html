@@ -37,6 +37,31 @@
         box-shadow: var(--ms-shadow-pop);
         border-radius: 0 var(--ms-radius-lg) var(--ms-radius-lg) 0;
       }
+      /*
+        `?grid=1&inspector=overlay|push` only: the record inspector's panel rules, copied from
+        apps/web/src/multitable/components/MetaRecordInspector.vue's <style scoped> (.meta-record-drawer
+        push column / .meta-record-drawer--overlay narrow-width overlay). Same purpose as the rail rules
+        above: a positioned sibling that comes AFTER the grid in the DOM, which the grid's linked-record
+        popover (a full-screen fixed overlay opened from a grid cell) must still paint over.
+      */
+      .meta-record-drawer {
+        width: var(--meta-record-drawer-width, 360px);
+        min-width: 360px;
+        max-width: min(720px, 60vw);
+        border-left: 1px solid #e5e7eb; background: #fff; display: flex; flex-direction: column;
+        position: relative;
+      }
+      .meta-record-drawer--overlay {
+        position: absolute;
+        inset: 0 0 0 auto;
+        z-index: 5;
+        width: min(360px, calc(100vw - 32px));
+        min-width: min(320px, calc(100vw - 32px));
+        max-width: none;
+        background: var(--ms-bg-card);
+        box-shadow: var(--ms-shadow-pop);
+        border-radius: var(--ms-radius-lg) 0 0 var(--ms-radius-lg);
+      }
     </style>
   </head>
   <body style="margin:16px;font-family:system-ui">

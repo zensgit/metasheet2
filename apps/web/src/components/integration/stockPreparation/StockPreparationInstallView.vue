@@ -24,6 +24,7 @@
       :can-run-install="canRun"
       :busy="busy"
       :source-check-control="wizardSourceCheckControl"
+      :can-open-data-factory="canOpenDataFactory"
       @run-preflight-check="loadPreflight"
       @run-source-preflight="loadSourcePreflight()"
       @run-install="startInstall"
@@ -203,7 +204,7 @@
             {{ postureLabel(defaults.permissions.posture) }}
           </em>
           <small class="stock-prep-install__hint">
-            {{ bi('这三项的名字与含义由应用固定,安装过程不会改动。', 'The three are fixed by the application; installing does not change them.') }}
+            {{ bi('这些权限的名字与含义由应用固定,安装过程不会改动。', 'These are fixed by the application; installing does not change them.') }}
           </small>
         </li>
       </ul>
@@ -544,10 +545,10 @@
         class="stock-prep-install__hint"
         data-testid="stock-prep-source-preflight-error"
       >
-        {{ bi(readFailed.zh, readFailed.en) }}
+        {{ bi(sourcePreflightErrorText.zh, sourcePreflightErrorText.en) }}
         <code class="stock-prep-install__token">{{ sourcePreflightErrorStatus }}</code>
-        <span v-if="readFailed.zhNext" class="stock-prep-install__hint" data-testid="stock-prep-source-preflight-error-next">
-          {{ bi(readFailed.zhNext, readFailed.enNext ?? '') }}
+        <span v-if="sourcePreflightErrorText.zhNext" class="stock-prep-install__hint" data-testid="stock-prep-source-preflight-error-next">
+          {{ bi(sourcePreflightErrorText.zhNext, sourcePreflightErrorText.enNext ?? '') }}
         </span>
         <button type="button" data-testid="stock-prep-source-preflight-error-copy" @click="copyReadError(sourcePreflightErrorStatus)">
           {{ readErrorCopyLabel === 'copy' ? bi('复制这条报错', 'Copy this error') : bi('已复制', 'Copied') }}
@@ -904,6 +905,13 @@
       </StockPrepTechnicalDetails>
     </section>
 
+    <!-- 「把系统表的英文表头改成中文」(客户反馈 2026-09-24 #4a): tables installed before the Chinese
+         labels existed keep their English headers, because names are only chosen at creation. This
+         card previews, then (on confirm) renames the still-English columns — compare-and-set, audited
+         in each table's config history. Self-gated on the route's own tier (stock-prep:admin+); the
+         card class falls through onto the panel's own root, so a gated-off panel leaves no empty card. -->
+    <StockPreparationManagedTableRelabelPanel class="stock-prep-install__card" />
+
     <!-- 列映射副驾: the first AI feature on the governed AI boundary. It PROPOSES what each opaque
          source column means; a human confirms; the confirmed result becomes a deterministic preset.
          Advisory-only, fail-open, admin-gated server-side. Signals come from a source discovery. -->
@@ -970,9 +978,11 @@ import { useAuth } from '../../../composables/useAuth'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import StockPreparationSourceBindingPanel from './StockPreparationSourceBindingPanel.vue'
+import type { StockPrepGettingStartedBinding } from '../../../services/integration/stockPreparation/gettingStarted'
 import StockPreparationGettingStarted from './StockPreparationGettingStarted.vue'
 import SchemaMappingCopilotPanel from './SchemaMappingCopilotPanel.vue'
 import StockPreparationCodeHelpPanel from './StockPreparationCodeHelpPanel.vue'
+import StockPreparationManagedTableRelabelPanel from './StockPreparationManagedTableRelabelPanel.vue'
 import type { SchemaMappingColumnInput, SchemaMappingSignalsInput } from '../../../services/integration/stockPreparation/schemaMappingCopilot'
 import {
   buildStockPreparationInstallDefaults,
@@ -1029,9 +1039,11 @@ import {
   stockPrepSourceBlockerPlain,
   stockPrepSourceBridgePlain,
   stockPrepSourceCheckPlain,
+  stockPrepSourcePreflightRefusalPlain,
   stockPrepSourceVerdictPlain,
   stockPrepSourceWarningPlain,
   stockPrepStepOutcomeText,
+  type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
 
@@ -1099,11 +1111,11 @@ const twoPreflightRelation = STOCK_PREP_TWO_PREFLIGHT_RELATION
 const sourcePreflightButtonNote = STOCK_PREP_SOURCE_PREFLIGHT_BUTTON_NOTE
 
 /**
- * WHAT THE SOURCE-BINDING PANEL BELOW ANSWERED, for the wizard's steps ①③ (see that panel's
- * `binding-read` note). `null` = no answer on this page — never 「没绑」.
+ * WHAT THE SOURCE-BINDING PANEL BELOW ANSWERED, for the wizard's steps (1b) and (3) (see that
+ * panel's `binding-read` note). `null` = no answer on this page — never 「没绑」.
  */
-const sourceBinding = ref<{ effectiveExternalSystemId: string | null; eligibleSourceCount: number } | null>(null)
-function onBindingRead(binding: { effectiveExternalSystemId: string | null; eligibleSourceCount: number } | null): void {
+const sourceBinding = ref<StockPrepGettingStartedBinding | null>(null)
+function onBindingRead(binding: StockPrepGettingStartedBinding | null): void {
   sourceBinding.value = binding
 }
 
@@ -1142,8 +1154,28 @@ onBeforeUnmount(() => {
 // ---------------------------------------------------------------------------
 const sourcePreflight = ref<StockPrepSourcePreflight | null>(null)
 const sourcePreflightErrorStatus = ref<number | null>(null)
+// WHICH OF 「检查这个源」's OWN REFUSALS this was, as a constant entry from plainLanguage.ts — never the
+// server's code or text. `null` keeps the generic read-failure sentence (an outage, a proxy error).
+const sourcePreflightRefusal = ref<StockPrepPlainEntry | null>(null)
+const sourcePreflightErrorText = computed<StockPrepPlainEntry>(() => sourcePreflightRefusal.value ?? readFailed)
 const sourcePreflightRoute = STOCK_PREPARATION_SOURCE_PREFLIGHT_ROUTE
 const canCheckSource = computed(() => canRunStockPrepSourcePreflight((permission) => auth.hasPermission(permission)))
+
+/**
+ * 整合切片 (2026-09-09) — whether 向导①'s 「去数据工厂 · 连接管理」 LINKS may render at all.
+ * ①拆分 (2026-09-10): there are now TWO of them — ①a「登记外接数据源」 and ①b「新增 SQL 绑定」
+ * — pointing at the top and the bottom of the SAME 连接管理 section, so one computed gates both.
+ *
+ * 外接数据源 is now a section of the 数据工厂 workbench, whose route declares
+ * `permissions: ['integration:write']` (router/appRoutes.ts). This is the SAME probe the router
+ * guard runs (`auth.hasPermission`, via routeAccess.isRoutePermitted), so a reader who gets the
+ * link is a reader the guard lets through. A `stock-prep:admin` holder does not hold
+ * integration:write — for them the wizard prints who to ask instead of a link that redirects.
+ *
+ * NOT a permission of its own: it decides only what step ① says. Nothing on the other side of
+ * the link is gated by this computed.
+ */
+const canOpenDataFactory = computed(() => auth.hasPermission('integration:write'))
 
 /**
  * WHETHER THE WIZARD CARRIES STEP ②'s OWN RUN CONTROL — and it does so in `mode="wizard"` alone.
@@ -1230,9 +1262,13 @@ async function loadSourcePreflight(declaredBridge?: StockPrepDeclarableBridge): 
     // later check of a different source.
     sourcePreflight.value = await readStockPreparationSourcePreflight(props.scope, undefined, declaredBridge)
   } catch (error) {
-    // Only a status reaches state. A server message could carry a value, and this page's whole
-    // contract with the customer's data is that none of it lands here.
+    // Only a status reaches state, plus — when the status and code name one of the route's own
+    // refusals — a constant sentence chosen from plainLanguage.ts. A server message could carry a
+    // value, and this page's whole contract with the customer's data is that none of it lands here.
     sourcePreflightErrorStatus.value = error instanceof StockPrepSourcePreflightError ? error.status : 0
+    sourcePreflightRefusal.value = error instanceof StockPrepSourcePreflightError
+      ? stockPrepSourcePreflightRefusalPlain(error.status, error.code)
+      : null
   } finally {
     busy.value = false
   }

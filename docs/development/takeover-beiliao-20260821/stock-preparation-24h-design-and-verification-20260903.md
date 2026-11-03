@@ -1,6 +1,6 @@
 # 备料(Stock Preparation)24 小时自主开发计划:设计及验证(2026-09-03)
 
-> owner 离席期间授权按代码难度分派模型(sonnet5/opus5/fable5)自主推进备料线,收工出本设计+验证文档。values-free:本文不含主机名、IP、口令、凭据、客户业务值(项目号 `230920006` 等项目级事实沿用姊妹文档既有纪律,视为已向客户披露的非敏感信息)。
+> owner 离席期间授权按代码难度分派模型(sonnet5/opus5/fable5)自主推进备料线,收工出本设计+验证文档。values-free:本文不含主机名、IP、口令、凭据、客户业务值(项目号 `<项目号A>` 等项目级事实沿用姊妹文档既有纪律,视为已向客户披露的非敏感信息)。
 > 基线:`origin/main`(2026-09-03,含 #5442/#5445/#5446/#5447/#5456/#5457/#5458/#5459/#5462 等);#5455/#5460 两支保证型 PR 仍 OPEN,内容以其 PR 分支为准,随时可能因下一轮对抗而变。
 
 ---
@@ -107,6 +107,7 @@ owner 裁决"项目备料页 = 备料工作台新 tab,不另起炉灶":真正新
 **tenantId 必填、fail-closed(不是文档声明单租户就够)**:钉钉目的地 id 是部署级配置,宿主发送时只能证明"这个目的地是管理员管的",证明不了"它属于正在被播报的那个租户"——而一个在两个组织里都活跃的账号 token 不带租户声明,`x-tenant-id` 请求头就能选择用哪个租户身份推进。裁决:handoff 配置文件里 `tenantId` 是**必填**字段;不属于该租户的推进一律返回 **501**,故意与"这个部署根本没配接力"逐字节相同,不让外租户从报错里学到"这里有一条链,只是不是你的"。多租户部署目前**只能服务一条链**(按租户分链是后续工作,见 §6)。
 
 **钉钉群工作通知代打待办**:owner 裁决三方案(A 工作通知冒充待办 / B 单向待办镜像 / C 双向回流)评审一致——A 先上、B 是下一波、C 永不做。本轮交付的正是 A 的底座(`sendDingTalkWorkNotificationActionCard` 群 webhook),终点并行仓库+采购(R5),正文带"(本条由系统发送)"+ 批准人签名(R6)。**没有完成态、没有红点**,这一点必须在 UI 与文档里明说,不能读成"已经是待办"([[beiliao-dingtalk-todo-decision]])。
+  > 纠正（2026-09-16，三读者只读地图）：上面这句与代码不符——已上的 handoff 通知走的是**群机器人 webhook**（`DingTalkGroupDestinationService` / `dingtalk_group_deliveries`，正文带「(本条由系统发送)」），`sendDingTalkWorkNotificationActionCard`（按人工作通知）没有被任何备料路径调用；按人工作通知（A 方案本体）与钉钉待办镜像（B 方案，PR #5772，默认关闭）见 `dingtalk-todo-mirror-b-design-20260916.md`。
 
 ### 2.7 裁决清单
 
@@ -252,6 +253,16 @@ owner 裁决"项目备料页 = 备料工作台新 tab,不另起炉灶":真正新
 ### 5.4 LEGACY_UNATTRIBUTED:对来历不明的旧行 fail-closed
 
 #5455 之前,`created_by` 里根本没有 pack id——现场每一行都是"裸标记"。裸标记行只有在**装机账本**(`stock-preparation-pack-install-store`,含 `failed` 状态)证明"这块 sheet 上有且只有这一个 pack 装过"时才会被认领(标记或退役);没有这份证明,矩形内的裸标记行是 `UNATTRIBUTED`,安装带码 **422** 拒绝、**一行不动**,留给人跑回填脚本或手工清空——不存在"无主行默认归我"这条静默推断。
+
+**这句话当时只对"带矩形(reconcile)的安装"成立,对追加式调用曾经是假的(#5455 后续 C0/P2,已修)。**宿主端口的 `INSERT ... ON CONFLICT DO UPDATE` 里那道归属守卫,曾把**裸标记无条件**绑进 `IN ($4, $5)`——与 `legacyAdoptable` 无关。于是一次**不带矩形**的 `applyRoleWriteScopes`(entries-only,即不带矩形的追加式路径)会把裸标记行的 `visible`/`read_only` 一并改回 `true` 并重盖成调用方的 pack 标记:如果操作员在"盖章路由"上线前**藏过列**(`visible=false`)或**放宽过禁写**(`read_only=false`),那次人工决定会被静默改回,且计入 `applied`、不出现在 `removed`、`operatorHeld` 或任何报告里(追加式调用根本没有这三样)。现在改写与退役共用**同一个条件数组**(本包标记恒在;裸标记仅在 `legacyAdoptable` 为真时加入),未声明收养的裸标记行在 DO UPDATE 的三列上一律走 ELSE,原样返回。注意三点:①**带矩形的安装路径一直是安全的**——矩形内未证明的裸标记行先 422,压根到不了 upsert;②**不传 packId 的调用者**写的就是裸标记本身,它的"自己的行"与"裸标记行"字面同形,这个条件对它天然无效(见端口文件头);③**这条追加式路径今天没有生产调用者**——宿主只把该能力注入 `plugin-integration-core`(`packages/core-backend/src/index.ts` 的 `manifest.name === "plugin-integration-core" ? new StockPreparationFieldPermissionsService() : undefined`,同处注释自陈 "Absent for every other plugin"),而该插件唯一的生产调用点(`stock-preparation-customer-pack-installer.cjs:1093-1099`)恒传 `reconcile: resolved.region`,pack 没声明 `fieldWritePolicies` 时 region 为 null、`:1073` 直接返回**根本不调端口**。所以 **C0 在当前代码上的可达性为零**,这次修的是**纵深防御**(下一个追加式调用者),不是在飞事故。对已在 222 上按 Step 3-3a 跑过回填、且只经安装器(始终带矩形)装包的部署,行为无变化。
+
+**这一改的代价不是零,别按"零"写进报告。**保守口径唯一失去的保护是这一种形状:裸标记行被操作员**放宽过**(`read_only=false`、未藏列)时,旧的无条件绑定会把它强制改回 `read_only=true`——禁写当场生效;现在它走 ELSE,**本次声明的禁写不生效,该列对该角色仍可写**(真库用例 `stock-preparation-fieldperm-write-gate-realdb.test.ts` 里就是断言 `200`)。被操作员**藏过列**的行(`visible=false`)则无此问题:藏列在宿主写门 `isFieldWriteForbidden` 里本身就等于禁写,那里保住的是操作员的两个维度与行的出身,不是可写性。
+
+为此端口返回体新增 `skippedUnattributed`(契约见 `src/types/plugin.ts` 的宿主能力声明):凡是因归属守卫走了 ELSE、声明没落地的 (列, 角色) 对都在里面逐对列出,并且**不计入 `applied`**——`applied` 从"发了几条语句"改口径为"几条声明当下生效"。调用方因此有通道知道"我声明了但没拿到",而不是只看到 `applied=N`、`removed=[]`。带矩形的安装路径结构上不会产生这个数组(未证明的裸标记行先 422、兄弟包声明冲突先 409、操作员持有的声明对先被摘出并进 `operatorHeld`)。
+
+另一种口径(**全量收养**:裸标记行一律当自己的行改写)会把上面那种放宽行的禁写重新拿回来,代价是每次独包安装都会无声撤销操作员在盖章路由上线前的一切人工决定,并把行重盖成本包标记——这正是 C0 被判为缺陷的原因,故不取。
+
+**后续(本 PR 没做、下一个动安装器的人必须先做):插件侧的共享假件还实现着修前的归属规则。**`plugins/plugin-integration-core/__tests__/support/stock-preparation-write-scope-port.cjs` 是三个插件套件(`stock-preparation-customer-pack-routes`、`...-write-scope-reconcile-bounds`、`...-department-fields-and-write-scoping`)与安装器共用的 stand-in:它的 `:188` 仍写着 `existing.createdBy === createdBy || existing.createdBy === BASE_MARKER`(裸标记**无条件**可改写 = 原 C0),`:197`/`:205` 的 `applied: writeEntries.length` 也没减去 skipped、没有 `skippedUnattributed`。该文件头自陈"是宿主的替身、绝不是关于宿主的证据",把"替身↔宿主一致"的担保外包给 core-backend 的单测与真库用例——而本 PR 只改了宿主那一侧。后果不是当下变红,而是**永远不会红**:任何后续安装器改动都会被这个替身背书成"裸标记行照样被改写"。下一步要做三件事:`:188` 的 `|| existing.createdBy === BASE_MARKER` 改成只在 `legacyAdoptable === true` 时成立;`:197`/`:205` 的 `applied` 减去被守卫拦下的对;返回体补 `skippedUnattributed` 并由安装器透传进安装报告。本 PR 不动 `plugins/` 是因为规格与溯源 pin 的边界,不是因为这条不成立。
 
 ### 5.5 projectName 在 mvp-persist 之前是空的
 

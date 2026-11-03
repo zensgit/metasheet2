@@ -19,6 +19,11 @@ export const COMMON_ICON_IDS = [
 
 export type CommonIconId = typeof COMMON_ICON_IDS[number]
 
+/** Display-only icons for first-viewport chrome. Not offered in the admin picker. */
+export const WORKSPACE_DISPLAY_ICON_IDS = [...COMMON_ICON_IDS, 'check'] as const
+
+export type WorkspaceDisplayIconId = typeof WORKSPACE_DISPLAY_ICON_IDS[number]
+
 export const EMPLOYEE_QUICK_ACTION_KEYS = ['makeup', 'leave', 'overtime', 'swap'] as const
 
 export type EmployeeQuickActionKey = typeof EMPLOYEE_QUICK_ACTION_KEYS[number]

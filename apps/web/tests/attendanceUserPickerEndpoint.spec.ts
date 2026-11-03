@@ -3,7 +3,9 @@ import { createApp, nextTick, ref, type App } from 'vue'
 import fs from 'node:fs'
 import path from 'node:path'
 import AttendanceView from '../src/views/AttendanceView.vue'
+import AttendanceUserPickerField from '../src/views/attendance/AttendanceUserPickerField.vue'
 import { useAuth } from '../src/composables/useAuth'
+import { attendanceSessionGuardKey, createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 import { apiFetch } from '../src/utils/api'
 
 /**
@@ -32,6 +34,7 @@ const EXPECTED_MOUNTED_PICKER_IDS = [
   'attendance-group-manager-user-picker',
   'attendance-annual-balance-user',
   'attendance-annual-bulk-adjust-user-picker',
+  'attendance-comprehensive-hours-user-id',
   'attendance-rotation-user',
   'attendance-assignment-user-id',
   'attendance-bulk-apply-user-picker',
@@ -393,6 +396,90 @@ describe('attendance user pickers — every picker searches through the attendan
   })
 })
 
+describe('attendance user picker typeahead empty hint', () => {
+  let app: App | null = null
+  let container: HTMLElement | null = null
+
+  afterEach(() => {
+    vi.useRealTimers()
+    app?.unmount()
+    app = null
+    container?.remove()
+    container = null
+  })
+
+  it('shows 搜索不到 only after a non-empty name query settles empty', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (!url.includes(ATTENDANCE_USER_SEARCH)) return emptyAttendanceResponse()
+      const query = new URL(url, 'http://localhost').searchParams.get('q')
+      if (query === '张三') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{
+              id: 'user-1',
+              email: 'zhang@example.com',
+              name: '张三',
+              role: 'user',
+              is_active: true,
+              is_admin: false,
+              last_login_at: null,
+              created_at: '2026-01-01T00:00:00.000Z',
+            }],
+          },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [] } })
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(AttendanceUserPickerField, {
+      modelValue: '',
+      label: '员工姓名',
+      tr: (_en: string, zh: string) => zh,
+      typeahead: true,
+      inputId: 'attendance-comprehensive-hours-user-id',
+      endpoint: ATTENDANCE_USER_SEARCH,
+      orgId: 'default',
+    })
+    app.provide(attendanceSessionGuardKey, createAttendanceSessionGuard('default', () => 'epoch'))
+    app.mount(container)
+    await flushUi()
+
+    const input = container.querySelector<HTMLInputElement>('#attendance-comprehensive-hours-user-id')!
+    input.dispatchEvent(new Event('focus'))
+    await nextTick()
+    expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+    vi.useFakeTimers()
+    input.value = '没有此人'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+    await vi.advanceTimersByTimeAsync(250)
+    await flushUi()
+    expect(container.querySelector('[data-attendance-search-empty]')?.textContent).toContain('搜索不到')
+
+    input.value = '张三'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+    await vi.advanceTimersByTimeAsync(250)
+    await flushUi()
+    expect(container.querySelector('[data-attendance-user-picker-menu]')?.textContent).toContain('张三')
+    expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+    input.value = ''
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+    expect(container.querySelector('[data-attendance-user-picker-menu]')).toBeNull()
+  })
+})
+
 /* ─────────────────────────────── B. mechanical ─────────────────────────────── */
 
 const WEB_SRC = path.resolve(__dirname, '../src')
@@ -425,7 +512,7 @@ describe('attendance user pickers — the endpoint is stated at every usage', ()
   it('finds every picker usage in the source tree', () => {
     // Domain floor pinned to the current count: adding a picker is a deliberate act, and this
     // number changing is the signal that the leg below has a new case to cover.
-    expect(usages.length).toBe(13)
+    expect(usages.length).toBe(14)
   })
 
   it('every usage passes the attendance-scoped user-search endpoint', () => {

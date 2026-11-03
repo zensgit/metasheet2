@@ -41,7 +41,7 @@
               <MetaCellEditor
                 :field="selectedField"
                 :model-value="value"
-                @update:modelValue="value = $event"
+                @update:model-value="value = $event"
                 @cancel="onCancel"
               />
             </div>

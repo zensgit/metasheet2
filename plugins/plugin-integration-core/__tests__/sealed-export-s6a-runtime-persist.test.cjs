@@ -159,8 +159,50 @@ async function main() {
       return true
     },
   )
-  console.log('sealed-export-s6a-runtime-persist.test.cjs OK')
   await nonFirstPartyThrowKeepsIdentity()
+  await snapshotTableDriftIsRemintedUnprocessableBeforeAnyWrite()
+  console.log('sealed-export-s6a-runtime-persist.test.cjs OK')
+}
+
+// The sealed runtime rides the SAME persist module as the mvp-persist route, so it inherits the MVP
+// snapshot-table field existence probe (stock-preparation-sync-run-persist.cjs
+// `assertMvpTargetFieldsExist`): a host whose DB-backed read says a snapshot table is missing
+// template columns refuses 422 TARGET_SCHEMA_INCOMPLETE before the unit-of-work opens. On this
+// boundary that is reminted — NO new vocabulary — as the existing 422
+// STOCK_PREPARATION_PERSIST_UNPROCESSABLE, values-free (no column name crosses), and with zero
+// records I/O behind it.
+async function snapshotTableDriftIsRemintedUnprocessableBeforeAnyWrite() {
+  const calls = []
+  const context = contextFixture(calls)
+  const MISSING = ['pathKey', 'designQty', 'designUnit', 'totalQuantity', 'sourceFingerprint']
+  context.api.multitable.provisioning.resolveExistingObjectFieldIds = async ({ objectId, fieldIds }) => {
+    calls.push(['resolveExistingObjectFieldIds', { objectId }])
+    const gone = objectId === 'plm_stock_preparation_bom_snapshot_line' ? MISSING : []
+    return Object.fromEntries(fieldIds.filter((id) => !gone.includes(id)).map((id) => [id, `${objectId}-${id}`]))
+  }
+  const persist = createStockPreparationRuntimePersist({ context })
+  await assert.rejects(
+    () => persist({
+      decoded: decodedFixture(),
+      scope: { tenantId: 'tenant-1', workspaceId: null },
+    }),
+    (error) => {
+      assert.equal(isStockPreparationRuntimePersistFailure(error), true)
+      assert.equal(error.status, 422)
+      assert.equal(error.code, 'STOCK_PREPARATION_PERSIST_UNPROCESSABLE')
+      assert.deepEqual(error.details, {})
+      for (const column of MISSING) {
+        assert.equal(JSON.stringify(error).includes(column), false, `values-free: ${column} must not cross the boundary`)
+      }
+      return true
+    },
+  )
+  assert.equal(calls.some(([name]) => name === 'resolveExistingObjectFieldIds'), true, 'the DB-backed read was consulted')
+  assert.equal(calls.some(([name]) => name === 'unitOfWork'), false, 'the unit-of-work never opened')
+  assert.equal(calls.some(([name]) => name === 'createRecord' || name === 'patchRecord' || name === 'queryRecords'), false, 'zero records I/O')
+  for (const [, input] of calls.filter(([name]) => name === 'resolveExistingObjectFieldIds')) {
+    assert.ok(['plm_stock_preparation_bom_snapshot_batch', 'plm_stock_preparation_bom_snapshot_line'].includes(input.objectId), 'judged in write order up to the refused table')
+  }
 }
 
 // R14: a NON-first-party throw out of the persist unit-of-work must keep its identity.

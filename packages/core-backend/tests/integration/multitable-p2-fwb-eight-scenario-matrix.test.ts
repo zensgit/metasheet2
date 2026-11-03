@@ -297,14 +297,24 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
 
   test('S5 version mismatch: unknown consumer_key stays pending + alerted, never terminated', async () => {
     const evt = track(`evt_${RUN}_s5`)
-    const res = await enqueueCommitted({ eventType: 'approval.task_created', eventId: evt, payload: {} }) // routes to approval-task-trigger
+    // manifest v3 routes this family to TWO keys (approval-task-trigger + dingtalk-todo-mirror); this
+    // N-1 worker knows neither, so BOTH rows must survive the tick untouched.
+    const res = await enqueueCommitted({ eventType: 'approval.task_created', eventId: evt, payload: {} })
     const reg = new ConsumerAdapterRegistry()
     reg.register({ key: `ck_${RUN}_other`, handle: async () => ({ outcome: 'success' }) }) // N-1 worker: doesn't know the key
     const alerted: string[] = []
     await runDispatchTick(db(), reg, { onUnknownConsumerKeys: (k) => alerted.push(...k), batchSize: 500 })
     expect(alerted).toContain('approval-task-trigger')
-    const st = await db().query('SELECT status, attempts FROM meta_automation_outbox_consumer WHERE outbox_id=$1', [res.outboxId])
-    expect(st.rows[0]).toMatchObject({ status: 'pending', attempts: 0 })
+    expect(alerted).toContain('dingtalk-todo-mirror')
+    const st = await db().query(
+      'SELECT consumer_key, status, attempts FROM meta_automation_outbox_consumer WHERE outbox_id=$1 ORDER BY consumer_key',
+      [res.outboxId],
+    )
+    const states = st.rows as Array<{ consumer_key: string; status: string; attempts: number }>
+    expect(states.map((r) => [r.consumer_key, r.status, Number(r.attempts)])).toEqual([
+      ['approval-task-trigger', 'pending', 0],
+      ['dingtalk-todo-mirror', 'pending', 0],
+    ])
   })
 
   // ── S6-S8: the production FWB chain (real template + real rule + real instances; NO seams, NO fake gates) ──
@@ -466,7 +476,9 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
     setFlags(true, true)
     try {
       // 1) the approval completion event enters the REAL durable outbox in a COMMITTED transaction —
-      //    manifest v1 fans approval.approved out to approval-bridge/-trigger/-projection.
+      //    manifest v3 fans approval.approved out to approval-bridge/-trigger/-projection PLUS
+      //    multitable-record-approval (the record-level submit-for-approval sink) PLUS
+      //    dingtalk-todo-mirror (the approval-todo one-way mirror).
       const evtS8 = track(`evt_${RUN}_s8`)
       const parent = await enqueueCommitted({ eventType: 'approval.approved', eventId: evtS8, payload: completionEvent(instanceC, evtS8), automationDepth: 0 })
 
@@ -477,6 +489,12 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
         automationService: svc,
         projectionService: getApprovalRecordProjectionService(),
         webhookService: new WebhookService(kyselyDb),
+        // manifest v2 consumer. This scenario enqueues a synthetic completion for an instance that has no
+        // record submission row, so the real sink would no-op; a spy keeps the scenario hermetic.
+        recordApprovalService: { handleApprovalCompletion: async () => undefined },
+        // manifest v3 consumer (DingTalk todo mirror). Same reasoning: spied, so the scenario stays
+        // hermetic and the mirror's own flag/ledger behaviour is proven by its own suites.
+        todoMirrorService: { handleApprovalTaskCreated: async () => undefined, handleApprovalCompletion: async () => undefined },
       })
       const fullRegistry = buildConsumerAdapterRegistry(handlers) // the boot-identical six-adapter worker
       // Tick 1 runs a worker scoped to the approval-completion keys (the dispatcher's own worker-key
@@ -492,13 +510,19 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
       }
       await runDispatchTick(db(), approvalWorker, { batchSize: 500 })
 
-      // 3) tick 1 delivered the completion fan-out: all three REAL consumers resolved 'done', and the
+      // 3) tick 1 delivered the completion fan-out: the three REAL consumers this worker registered
+      //    resolved 'done' (the v2 record-approval and v3 todo-mirror rows stay 'pending' — this worker
+      //    does not claim those keys, which is exactly the dispatcher's worker-key contract), and the
       //    approval-trigger adapter drove handleApprovalCompletionTrigger → executeRule → the production
       //    write_approval_form_values action.
       expect(await consumerStates(parent.outboxId)).toEqual([
         ['approval-bridge', 'done'],
         ['approval-projection', 'done'],
         ['approval-trigger', 'done'],
+        // manifest v3 row, not registered by this scoped worker → untouched, still pending.
+        ['dingtalk-todo-mirror', 'pending'],
+        // manifest v2 row, not registered by this scoped worker → untouched, still pending.
+        ['multitable-record-approval', 'pending'],
       ])
       await waitForExecutionCount(5)
       const exec = await lastExecution()

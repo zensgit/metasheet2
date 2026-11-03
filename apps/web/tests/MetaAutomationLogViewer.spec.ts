@@ -347,3 +347,224 @@ describe('MetaAutomationLogViewer — load failure surfaces error', () => {
     expect(empty).toBeNull()
   })
 })
+
+// 客户反馈 2026-09-24 #3 final review F1 — after the executor fix one delete of a record.deleted rule's trigger
+// record logs ONE skipped run. This panel counted it in 总计 only, badged it 跳过, and printed the step output as
+// raw JSON — a zh customer read `"reason":"target_record_missing"`.
+const GONE_EXECUTION: AutomationExecution = {
+  id: 'exec-gone',
+  ruleId: 'rule-1',
+  status: 'skipped',
+  triggeredBy: 'event',
+  triggeredAt: '2026-09-24T10:00:00Z',
+  duration: 7,
+  steps: [
+    {
+      actionType: 'delete_record',
+      status: 'skipped',
+      durationMs: 5,
+      output: { recordId: 'rec_gone', sheetId: 'sheet_1', reason: 'target_record_missing' },
+    },
+  ],
+}
+const NOOP_EXECUTION: AutomationExecution = {
+  id: 'exec-noop',
+  ruleId: 'rule-1',
+  status: 'success',
+  triggeredBy: 'event',
+  triggeredAt: '2026-09-24T10:01:00Z',
+  duration: 6,
+  steps: [
+    {
+      actionType: 'update_record',
+      status: 'success',
+      durationMs: 4,
+      output: { updatedFields: ['fld_status'], noop: true, reason: 'target_record_missing' },
+    },
+    {
+      actionType: 'start_approval',
+      status: 'success',
+      durationMs: 1,
+      output: { approvalInstanceId: 'ai_1', backwriteSkipped: 'target_record_missing' },
+    },
+    {
+      actionType: 'write_approval_form_values',
+      status: 'skipped',
+      durationMs: 0,
+      output: { reason: 'APPROVAL_FWB_WRITEBACK_ENABLED is OFF' },
+    },
+  ],
+}
+const GONE_STATS: AutomationStats = { total: 3, success: 1, failed: 0, skipped: 2, avgDuration: 7 }
+
+async function expandLog(container: HTMLElement, id: string): Promise<HTMLElement> {
+  const item = container.querySelector(`[data-log-id="${id}"]`) as HTMLElement
+  item.click()
+  await nextTick()
+  return item
+}
+
+describe('MetaAutomationLogViewer — a run skipped because its trigger record is gone (F1)', () => {
+  it('zh: the stats bar counts 已跳过, the run is badged 已跳过, and the step reads as a sentence, not the code', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = makeMockClient({ logs: [GONE_EXECUTION], stats: GONE_STATS })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+
+    const skippedStat = mounted.container.querySelector('[data-stat="skipped"]')
+    expect(skippedStat?.querySelector('.meta-log-viewer__stat-label')?.textContent).toBe('已跳过')
+    expect(skippedStat?.querySelector('[data-field="stat-skipped"]')?.textContent?.trim()).toBe('2')
+    expect(mounted.container.querySelector('[data-log-id="exec-gone"] [data-status="skipped"]')?.textContent?.trim()).toBe('已跳过')
+    expect(mounted.container.querySelector('[data-field="statusFilter"] option[value="skipped"]')?.textContent).toBe('已跳过')
+
+    const item = await expandLog(mounted.container, 'exec-gone')
+    expect(item.querySelector('[data-field="step-reason"]')?.textContent).toBe('触发记录已不存在，已跳过（未做任何修改）')
+    const output = item.querySelector('[data-field="step-output"]')?.textContent ?? ''
+    expect(output).toContain('rec_gone') // ids stay raw
+    expect(item.textContent ?? '').not.toContain('target_record_missing')
+    expect(item.querySelector('.meta-log-viewer__step .meta-log-viewer__badge--skipped')?.textContent).toBe('已跳过')
+  })
+
+  it('en: the same run reads in English', async () => {
+    const client = makeMockClient({ logs: [GONE_EXECUTION], stats: GONE_STATS })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+    expect(mounted.container.querySelector('[data-stat="skipped"] .meta-log-viewer__stat-label')?.textContent).toBe('Skipped')
+    const item = await expandLog(mounted.container, 'exec-gone')
+    expect(item.querySelector('[data-field="step-reason"]')?.textContent).toBe('The trigger record no longer exists; skipped (nothing was changed).')
+    expect(item.textContent ?? '').not.toContain('target_record_missing')
+  })
+
+  it('zh: the update no-op and the approval writeback marker get their own sentences; an unknown reason stays raw', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = makeMockClient({ logs: [NOOP_EXECUTION], stats: GONE_STATS })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+    const item = await expandLog(mounted.container, 'exec-noop')
+
+    const reasons = [...item.querySelectorAll('[data-field="step-reason"]')].map((el) => el.textContent)
+    expect(reasons).toEqual(['触发记录已不存在，未做任何修改', '审批结果未写回：触发记录已不存在（未做任何修改）'])
+    const outputs = [...item.querySelectorAll('[data-field="step-output"]')].map((el) => el.textContent ?? '')
+    expect(outputs).toHaveLength(3)
+    expect(outputs[0]).toContain('fld_status')
+    expect(outputs[0]).not.toContain('noop')
+    expect(outputs[1]).toContain('ai_1')
+    for (const text of outputs.slice(0, 2)) expect(text).not.toContain('target_record_missing')
+    // Positive control: a reason this change does not recognise is rendered exactly as before.
+    expect(outputs[2]).toContain('APPROVAL_FWB_WRITEBACK_ENABLED is OFF')
+  })
+})
+
+// 客户反馈 2026-10-21 (a): a DingTalk person message that reached nobody was read as "success" in the field.
+// The run log now says how many received it and why the rest did not — counts only, no user ids in the copy.
+const NOBODY_REACHED_EXECUTION: AutomationExecution = {
+  id: 'exec-nobody',
+  ruleId: 'rule-1',
+  status: 'skipped',
+  triggeredBy: 'event',
+  triggeredAt: '2026-10-21T10:00:00Z',
+  duration: 9,
+  steps: [
+    {
+      actionType: 'send_dingtalk_person_message',
+      status: 'skipped',
+      durationMs: 8,
+      error: 'No DingTalk recipient was reached: 1 skipped (not linked: 1, inactive: 0, not found: 0) (DINGTALK_RECIPIENTS_UNREACHABLE)',
+      output: {
+        reason: 'dingtalk_recipients_unreachable',
+        notifiedUsers: 0,
+        skippedRecipientCount: 1,
+        skippedUserIds: ['user_fake_nobody'],
+        skippedReasonCounts: { notLinked: 1, inactive: 0, notFound: 0 },
+      },
+    },
+  ],
+}
+
+describe('MetaAutomationLogViewer — DingTalk person message that reached nobody (customer feedback 2026-10-21)', () => {
+  it('zh: the step reads 「0 人收到：1 人未绑定钉钉」 with the link hint; the error line carries no user id', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = makeMockClient({ logs: [NOBODY_REACHED_EXECUTION], stats: GONE_STATS })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+    const item = await expandLog(mounted.container, 'exec-nobody')
+
+    expect(item.querySelector('[data-field="step-reason"]')?.textContent)
+      .toBe('0 人收到：1 人未绑定钉钉。成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。')
+    expect(item.querySelector('[data-field="step-error"]')?.textContent ?? '').not.toContain('user_fake_nobody')
+    expect(item.textContent ?? '').not.toContain('dingtalk_recipients_unreachable')
+    expect(item.querySelector('.meta-log-viewer__step .meta-log-viewer__badge--skipped')?.textContent).toBe('已跳过')
+  })
+
+  // 客户反馈 2026-10-21 item 1 follow-up: the zh log showed the raw English error line above the Chinese sentence.
+  it('zh: only the Chinese sentence — no English error line, and no skipped user id anywhere in the step', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = makeMockClient({ logs: [NOBODY_REACHED_EXECUTION], stats: GONE_STATS })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+    const item = await expandLog(mounted.container, 'exec-nobody')
+
+    expect(item.querySelector('[data-field="step-reason"]')?.textContent).toContain('0 人收到：1 人未绑定钉钉')
+    expect(item.querySelector('[data-field="step-error"]')).toBeNull()
+    expect(item.textContent ?? '').not.toContain('No DingTalk recipient was reached')
+    expect(item.textContent ?? '').not.toContain('user_fake_nobody')
+  })
+
+  it('en: the English error line stays (it is the en wording), still without any user id', async () => {
+    useLocale().setLocale('en')
+    const client = makeMockClient({ logs: [NOBODY_REACHED_EXECUTION], stats: GONE_STATS })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+    const item = await expandLog(mounted.container, 'exec-nobody')
+
+    expect(item.querySelector('[data-field="step-error"]')?.textContent).toContain('No DingTalk recipient was reached')
+    expect(item.querySelector('[data-field="step-reason"]')?.textContent).toContain('0 received: 1 not linked to DingTalk')
+    expect(item.textContent ?? '').not.toContain('user_fake_nobody')
+  })
+})
+
+// 客户反馈 2026-10-21 item 1 follow-up: executions written by earlier releases carry
+// `DingTalk account not linked for users: <ids>` — the log never renders those ids.
+const LEGACY_NOT_LINKED_EXECUTION: AutomationExecution = {
+  id: 'exec-legacy',
+  ruleId: 'rule-1',
+  status: 'skipped',
+  triggeredBy: 'event',
+  triggeredAt: '2026-10-20T10:00:00Z',
+  duration: 7,
+  steps: [
+    {
+      actionType: 'send_dingtalk_person_message',
+      status: 'skipped',
+      durationMs: 6,
+      error: 'DingTalk account not linked for users: user_fake_old_a, user_fake_old_b',
+      output: {
+        notifiedUsers: 0,
+        skippedRecipientCount: 2,
+        skippedUserIds: ['user_fake_old_a', 'user_fake_old_b'],
+      },
+    },
+  ],
+}
+
+describe('MetaAutomationLogViewer — legacy DingTalk "not linked for users" error (customer feedback 2026-10-21 item 1)', () => {
+  for (const [locale, sentence, countSentence] of [
+    ['zh-CN', '有收件人未绑定钉钉（旧记录，未列出具体用户）。', '0 人收到：2 人未绑定钉钉或已停用'],
+    ['en', 'Some recipients were not linked to DingTalk (older record; the users are not listed).', '0 received: 2 not linked to DingTalk or inactive'],
+  ] as const) {
+    it(`${locale}: renders a values-free sentence instead of the raw ids`, async () => {
+      useLocale().setLocale(locale)
+      const client = makeMockClient({ logs: [LEGACY_NOT_LINKED_EXECUTION], stats: GONE_STATS })
+      mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+      await flushPromises()
+      const item = await expandLog(mounted.container, 'exec-legacy')
+
+      expect(item.querySelector('[data-field="step-error"]')?.textContent).toBe(sentence)
+      expect(item.querySelector('[data-field="step-reason"]')?.textContent).toContain(countSentence)
+      const text = item.textContent ?? ''
+      expect(text).not.toContain('user_fake_old_a')
+      expect(text).not.toContain('user_fake_old_b')
+      expect(text).not.toContain('not linked for users')
+    })
+  }
+})

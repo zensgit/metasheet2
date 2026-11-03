@@ -96,6 +96,15 @@
           @click="selectTab(item.key)"
         >
           {{ bi(item.zh, item.en) }}
+          <!-- 备料分批拉取第一期 step 4 PR-7 (R-62 ④): an item's count badge — today only 拉取待确认's, the open
+               project's open holds, passed ONLY for a PULL-tier viewer. aria-hidden keeps the tab's accessible
+               name its label alone (the P1-08 lane reads it). -->
+          <span
+            v-if="(counts?.[item.key] ?? 0) > 0"
+            class="sp-rail__count"
+            aria-hidden="true"
+            :data-testid="`stock-prep-rail-count-${item.key}`"
+          >{{ counts?.[item.key] }}</span>
         </button>
       </div>
     </div>
@@ -240,6 +249,8 @@ const props = defineProps<{
   groups: StockPreparationRailGroupView[]
   /** The key currently rendered by the panel — never the raw click state. */
   activeKey: string | null
+  /** PR-7: per-item count badges (positive integers only render). Optional — every existing mount passes none. */
+  counts?: Record<string, number | null | undefined>
 }>()
 
 const emit = defineEmits<{ (e: 'select', key: string): void }>()
@@ -439,6 +450,20 @@ const orientation = computed<'vertical' | 'horizontal'>(() => (railIsNarrow.valu
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+/* PR-7: the 拉取待确认 count badge. */
+.sp-rail__count {
+  display: inline-block;
+  min-width: 18px;
+  margin-left: var(--ms-space-1);
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--ms-color-warning);
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
 }
 
 .sp-rail__tab:hover {

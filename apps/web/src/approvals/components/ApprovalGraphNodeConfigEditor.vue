@@ -6,8 +6,10 @@
     :data-node-type="node.type"
   >
     <!-- G-2: editable condition node (rules / conjunction / default fall-through edge).
-         Topology (which branches exist, their edgeKeys/targets) is NOT editable here — only
-         the matching LOGIC. Branch add/remove is a later slice. -->
+         Topology (which branches exist, their edgeKeys/targets) is NOT edited by these controls —
+         only the matching LOGIC. T5a (test report 2026-10-08): the one topology control mounted
+         here is 「删除分支」 on a NON-default branch card; it only calls the parent's typed topology
+         op (unified undo), never mutates the graph itself. -->
     <div
       v-if="node.type === 'condition' && conditionEditFor(node.key)"
       class="template-authoring__condition"
@@ -66,7 +68,28 @@
             <el-option label="全部满足 (AND)" value="and" />
             <el-option label="任一满足 (OR)" value="or" />
           </el-select>
+          <!-- T5a (test report 2026-10-08): delete a NON-default branch. The default card below never
+               renders this control (D0 §4.1). Mounted only where the delete joins the Canvas undo
+               history; a shape the command refuses keeps the button disabled and states why. -->
+          <el-button
+            v-if="branchDeleteAvailable && branch.edgeKey !== conditionEditFor(node.key)!.defaultEdgeKey"
+            size="small"
+            type="danger"
+            text
+            class="template-authoring__condition-branch-remove"
+            :disabled="readOnly || Boolean(branchRemovalBlocker(node.key, branch.edgeKey))"
+            :aria-label="branchRemoveAriaLabel(node.key, branchIndex)"
+            :title="branchRemoveTitle(node.key, branch.edgeKey)"
+            data-testid="approval-condition-branch-remove"
+            @click="removeConditionBranchAt(node.key, branch.edgeKey)"
+          >删除分支</el-button>
         </div>
+        <p
+          v-if="branchDeleteAvailable && !readOnly && branchRemovalBlocker(node.key, branch.edgeKey)"
+          class="template-authoring__hint"
+          role="note"
+          data-testid="approval-condition-branch-remove-blocked"
+        >{{ branchRemovalBlocker(node.key, branch.edgeKey) }}</p>
         <template v-if="branch.predicateMode === 'rules'">
           <div
             v-for="(rule, ruleIndex) in branch.rules"
@@ -75,13 +98,14 @@
             data-testid="approval-condition-rule"
           >
             <el-select
-              v-model="rule.fieldId"
+              :model-value="rule.fieldId"
               size="small"
               filterable
               placeholder="字段"
               :disabled="readOnly"
               class="ms-w-160"
               data-testid="approval-condition-rule-field"
+              @update:model-value="(fieldId: string | null | undefined) => onRuleFieldChange(rule, fieldId)"
             >
               <el-option
                 v-for="field in conditionFieldOptions"
@@ -91,29 +115,113 @@
               />
             </el-select>
             <el-select
-              v-model="rule.operator"
+              :model-value="rule.operator"
               size="small"
               :disabled="readOnly"
               class="ms-w-120"
               data-testid="approval-condition-rule-operator"
+              @update:model-value="(operator: ConditionRuleOperator) => onRuleOperatorChange(rule, operator)"
             >
               <el-option
-                v-for="operator in CONDITION_RULE_OPERATORS"
-                :key="operator"
-                :label="conditionOperatorLabel(operator)"
-                :value="operator"
+                v-for="choice in ruleOperatorChoices(rule)"
+                :key="choice.value"
+                :label="choice.label"
+                :value="choice.value"
+                :disabled="choice.disabled"
               />
             </el-select>
-            <el-input
-              v-if="rule.operator !== 'isEmpty'"
-              :model-value="conditionRuleValueText(rule)"
-              size="small"
-              placeholder="比较值"
-              :disabled="readOnly"
-              class="ms-w-160"
-              data-testid="approval-condition-rule-value"
-              @update:model-value="(text: string) => setConditionRuleValue(rule, text)"
-            />
+            <!-- R-43 (B): the value control follows the rule field's type (option name shown,
+                 option value saved; numbers saved as numbers; `in` saved as a list). -->
+            <template v-if="rule.operator !== 'isEmpty'">
+              <template v-if="ruleIsOption(rule)">
+                <span
+                  v-if="ruleFieldOptions(rule).length === 0"
+                  class="template-authoring__hint"
+                  data-testid="approval-condition-rule-no-options"
+                >{{ conditionCopy.noOptions }}</span>
+                <el-select
+                  v-else-if="rule.operator !== 'in'"
+                  :model-value="ruleOptionScalar(rule)"
+                  size="small"
+                  clearable
+                  :placeholder="conditionCopy.chooseOption"
+                  :disabled="readOnly"
+                  class="ms-w-160"
+                  data-testid="approval-condition-rule-option-value"
+                  @update:model-value="(value: string | null | undefined) => setRuleOptionScalar(rule, value)"
+                >
+                  <el-option
+                    v-for="option in ruleFieldOptions(rule)"
+                    :key="option.value"
+                    :label="option.label"
+                    :value="option.value"
+                  />
+                  <el-option
+                    v-if="ruleOptionScalarStale(rule)"
+                    :label="conditionCopy.invalidValue"
+                    :value="ruleOptionScalar(rule)"
+                    disabled
+                  />
+                </el-select>
+                <el-select
+                  v-else
+                  :model-value="ruleOptionList(rule)"
+                  size="small"
+                  multiple
+                  collapse-tags
+                  :placeholder="conditionCopy.chooseOptions"
+                  :disabled="readOnly"
+                  class="ms-w-200"
+                  data-testid="approval-condition-rule-option-values"
+                  @update:model-value="(values: string[]) => setRuleOptionList(rule, values)"
+                >
+                  <el-option
+                    v-for="option in ruleFieldOptions(rule)"
+                    :key="option.value"
+                    :label="option.label"
+                    :value="option.value"
+                  />
+                </el-select>
+                <span
+                  v-if="rule.operator === 'in' && ruleOptionListStaleCount(rule) > 0"
+                  class="template-authoring__hint"
+                  data-testid="approval-condition-rule-stale-count"
+                >{{ conditionCopy.staleListHint(ruleOptionListStaleCount(rule)) }}</span>
+              </template>
+              <el-input
+                v-else-if="rule.operator === 'in'"
+                :model-value="ruleListText(rule)"
+                type="textarea"
+                :rows="2"
+                size="small"
+                :placeholder="ruleKind(rule) === 'number' ? conditionCopy.oneNumberPerLine : conditionCopy.oneValuePerLine"
+                :disabled="readOnly"
+                class="ms-w-160"
+                data-testid="approval-condition-rule-values"
+                @update:model-value="(text: string) => setRuleListText(rule, text)"
+              />
+              <el-input-number
+                v-else-if="ruleKind(rule) === 'number'"
+                :model-value="ruleNumberValue(rule)"
+                size="small"
+                :controls="false"
+                :placeholder="conditionCopy.enterNumber"
+                :disabled="readOnly"
+                class="ms-w-160"
+                data-testid="approval-condition-rule-number-value"
+                @update:model-value="(value: number | null | undefined) => setRuleNumberValue(rule, value)"
+              />
+              <el-input
+                v-else
+                :model-value="ruleScalarText(rule)"
+                size="small"
+                placeholder="比较值"
+                :disabled="readOnly"
+                class="ms-w-160"
+                data-testid="approval-condition-rule-value"
+                @update:model-value="(text: string) => setConditionRuleValue(rule, text)"
+              />
+            </template>
             <el-button
               size="small"
               type="danger"
@@ -121,6 +229,19 @@
               data-testid="approval-condition-rule-remove"
               @click="removeConditionRule(branch, ruleIndex)"
             >删除</el-button>
+            <p
+              v-if="ruleIssueText(rule)"
+              class="template-authoring__hint template-authoring__hint--issue template-authoring__condition-rule-issue"
+              role="note"
+              data-testid="approval-condition-rule-issue"
+            >{{ ruleIssueText(rule) }}</p>
+            <!-- R-43 (B): a marked value the box shows EMPTY (so re-entering it is a real edit) is
+                 shown here read-only; plain-text interpolation, cut short. -->
+            <p
+              v-if="ruleStoredValueShown(rule)"
+              class="template-authoring__hint template-authoring__condition-rule-issue template-authoring__condition-rule-stored"
+              data-testid="approval-condition-rule-stored-value"
+            >{{ conditionCopy.storedValuePrefix }}<span data-testid="approval-condition-rule-stored-value-text">{{ conditionStoredValuePreview(rule.value) }}</span></p>
           </div>
         </template>
         <el-button
@@ -224,8 +345,8 @@
       </div>
       <!-- D0 §4.1 / P1-D: the default (fall-through) branch is presented as an explanatory card,
            visually de-emphasized from the ordered branch cards above, and excluded from rule
-           editing. It is not a mutable topology affordance in this slice — no delete/duplicate is
-           mounted here (a future slice may add branch delete with its own authorization).
+           editing. It is never a delete target — no delete/duplicate is mounted here (D0 §4.1:
+           the default cannot be deleted; T5a's 「删除分支」 lives on non-default cards only).
            M8 honesty: the explanatory copy is gated on a real `defaultEdgeKey` — when none is
            designated, the runtime falls through to the FIRST outgoing edge
            (ApprovalGraphExecutor.resolveConditionTarget), never an undefined "default flow", so
@@ -254,14 +375,17 @@
           未指定默认分支：所有条件都不满足时，流程走向不确定，请指定默认分支。
         </p>
         <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
+          <!-- T5a / verify X1: bound one-way + normalized — Element Plus clears a clearable select to
+               `undefined`, which used to land in the edit model and throw on the next `.trim()`. -->
           <el-select
-            v-model="conditionEditFor(node.key)!.defaultEdgeKey"
+            :model-value="conditionEditFor(node.key)!.defaultEdgeKey"
             size="small"
             clearable
             :disabled="readOnly"
             class="ms-w-220"
             placeholder="（无默认分支）"
             data-testid="approval-condition-default-edge"
+            @update:model-value="(value: unknown) => setConditionDefaultEdgeKey(node.key, value)"
           >
             <el-option
               v-for="edgeKey in conditionOutgoingEdgeKeys(node.key)"
@@ -304,16 +428,30 @@
         <li>并行分支：{{ (node.config as ParallelNodeConfig).branches.map((edgeKey) => graphEdgeTargetLabel(node.key, edgeKey)).join('、') || '（无）' }}</li>
         <li>汇聚节点：{{ (node.config as ParallelNodeConfig).joinNodeKey ? graphNodeLabel((node.config as ParallelNodeConfig).joinNodeKey) : '（无）' }}</li>
       </ul>
+      <!-- T5b (test report 2026-10-08): say where more lanes come from — the lane count is not fixed
+           at two, and 「+添加分支」 in the inspector toolbar above adds one per click. -->
+      <p
+        v-if="canvasAuthoringActive && !readOnly"
+        class="template-authoring__hint"
+        data-testid="approval-parallel-add-branch-hint"
+      >共 {{ (node.config as ParallelNodeConfig).branches.length }} 个并行分支，点击上方「+添加分支」可再增加一路</p>
     </div>
 
-    <!-- G-4: editable cc node — targetType (用户/角色) + targetIds. The cc node's edges /
-         position are TOPOLOGY: preserved byte-for-byte on save. -->
+    <!-- G-4: editable cc node — targetType (用户/角色/用户组) + targetIds. The cc node's edges /
+         position are TOPOLOGY: preserved byte-for-byte on save. Lock-1 OD-L1-7(a): 用户组 is offered
+         only while the "`user_group` (cc)" capability-registry row is present (`ccTargetTypeOptions`);
+         `data-cc-target-types` exposes the offered set so a test can pin it without opening the popper. -->
     <div
       v-else-if="node.type === 'cc' && ccEditFor(node.key)"
       class="template-authoring__cc"
       data-testid="approval-cc-editor"
       :data-cc-node="node.key"
+      :data-cc-target-types="ccTargetTypeOptions.join(',')"
     >
+      <!-- targetIds are typed per target type (user ids / role ids / bound-group ids), so switching
+           the type CLEARS them (`setCcTargetIds(key, [])`, which also re-syncs the picker options):
+           ids of the previous type must never land under the new one — a user id under 'group'
+           would render as a placeholder chip and fail publish as an unbound group. -->
       <el-form-item label="抄送类型">
         <el-select
           v-model="ccEditFor(node.key)!.targetType"
@@ -321,10 +459,10 @@
           :disabled="readOnly"
           class="ms-w-240"
           data-testid="approval-cc-target-type"
-          @change="syncCcOptions(node.key)"
+          @change="setCcTargetIds(node.key, [])"
         >
           <el-option
-            v-for="targetType in CC_TARGET_TYPES"
+            v-for="targetType in ccTargetTypeOptions"
             :key="targetType"
             :label="ccTargetTypeLabel(targetType)"
             :value="targetType"
@@ -356,7 +494,7 @@
           />
         </el-select>
         <el-select
-          v-else
+          v-else-if="ccEditFor(node.key)!.targetType === 'role'"
           :model-value="ccEditFor(node.key)!.targetIds"
           multiple
           filterable
@@ -375,6 +513,46 @@
             :value="role.id"
           />
         </el-select>
+        <!-- Lock-1 OD-L1-7(a) (用户组 cc target): the SAME typed, org-scoped bound-group multi-select
+             the approver user_group sub-form uses (D0 §10.2 — never a free-text/raw-id input). An
+             unbound group fails PUBLISH (values-free 400, `assertUserGroupSourcesBoundToOrg`), never
+             at dispatch; the picker only OFFERS bound candidates. The branch is gated on the SAME
+             registry row that offers 用户组 (`ccGroupTargetOffered`): without the row a persisted
+             'group' value is outside this editor's registry and falls to the read-only unknown line
+             below (Lock-1 §2.3 / G-16 — read-only, ids preserved, round-trips unchanged). -->
+        <el-select
+          v-else-if="ccEditFor(node.key)!.targetType === 'group' && ccGroupTargetOffered"
+          :model-value="ccEditFor(node.key)!.targetIds"
+          multiple
+          filterable
+          size="small"
+          :disabled="readOnly"
+          :loading="memberGroupOptionsLoading"
+          class="ms-w-360"
+          placeholder="选择已绑定的用户组"
+          data-testid="approval-cc-target-ids"
+          @update:model-value="(ids: string[]) => setCcTargetIds(node.key, ids)"
+          @visible-change="(visible: boolean) => visible && syncCcOptions(node.key)"
+        >
+          <el-option
+            v-for="group in memberGroupOptions"
+            :key="group.id"
+            :label="formatMemberGroupLabel(group)"
+            :value="group.id"
+          />
+        </el-select>
+        <!-- G-16 unknown-value safety: a persisted targetType this editor does not know renders
+             read-only (ids preserved, never re-typed); `validateCcEdits` flags it before save. -->
+        <p
+          v-else
+          class="template-authoring__hint template-authoring__hint--warn"
+          data-testid="approval-cc-target-unknown"
+        >未知的抄送类型「{{ ccEditFor(node.key)!.targetType }}」，已保留原值（{{ ccEditFor(node.key)!.targetIds.length }} 个对象）；请选择已知类型后再保存</p>
+        <p
+          v-if="ccEditFor(node.key)!.targetType === 'group' && ccGroupTargetOffered && !readOnly && memberGroupOptions.length === 0 && !memberGroupOptionsLoading"
+          class="template-authoring__hint template-authoring__hint--warn"
+          data-testid="approval-cc-target-group-empty"
+        >当前组织尚无已绑定的可用用户组（需管理员先绑定用户组才能选择）</p>
       </el-form-item>
     </div>
 
@@ -402,6 +580,104 @@
       class="template-authoring__approval-node-section"
       data-testid="approval-node-section-assignee"
     >
+      <!-- Lock-4 §1 F4-A — node-level 审批类型, placed in this 审批人设置 tab by L0-1. OD-L4-2(a): exactly
+           TWO options (人工审批 / 自动通过) — auto_reject is deferred and no inert third option renders.
+           A native radiogroup like the roster below (arrow keys move AND commit), which is why 自动通过
+           keeps the cards as hidden scratch instead of discarding them (`applyApprovalTypeChoice`).
+           Rendered only when the api provides the mutator (fail-closed for harnesses that omit it). -->
+      <el-form-item v-if="node.type === 'approval' && approvalTypeControlAvailable" label="审批类型">
+        <div
+          class="approval-node-source-roster"
+          role="radiogroup"
+          aria-label="审批类型"
+          data-testid="approval-node-approval-type"
+        >
+          <label class="approval-node-source-roster-option">
+            <input
+              type="radio"
+              :name="`approval-node-approval-type-${node.key}`"
+              value="manual"
+              :checked="!approvalNodeIsAutoApprove(node.key)"
+              :disabled="readOnly"
+              data-testid="approval-node-approval-type-manual"
+              @change="() => chooseApprovalNodeApprovalType(node.key, 'manual')"
+            />
+            <span>人工审批</span>
+          </label>
+          <label class="approval-node-source-roster-option">
+            <input
+              type="radio"
+              :name="`approval-node-approval-type-${node.key}`"
+              value="auto_approve"
+              :checked="approvalNodeIsAutoApprove(node.key)"
+              :disabled="readOnly || approvalNodeInParallelRegion(node.key)"
+              data-testid="approval-node-approval-type-auto-approve"
+              @change="() => chooseApprovalNodeApprovalType(node.key, 'auto_approve')"
+            />
+            <span>自动通过</span>
+          </label>
+        </div>
+        <!-- Backend APPROVAL_NODE_AUTO_TYPE_PARALLEL_UNSUPPORTED ("a non-manual node inside a parallel
+             region is rejected in v1"): disabled + this hint, same posture as the threshold hint below. -->
+        <p
+          v-if="approvalNodeInParallelRegion(node.key)"
+          class="template-authoring__hint"
+          data-testid="approval-node-approval-type-parallel-hint"
+        >位于并行分支内，暂不支持自动通过（v1 仅支持线性路径）</p>
+        <p
+          v-else-if="approvalNodeIsAutoApprove(node.key)"
+          class="template-authoring__hint"
+          data-testid="approval-node-approval-type-auto-hint"
+        >流程到达此节点时由系统自动通过，不分配审批人</p>
+        <!-- An auto_approve node that still CARRIES sources (only reachable from a template saved
+             through the API) keeps them visible: they are saved and validated, so hiding them would
+             let an error block save with no visible cause. The action drops them (sets the omit flag). -->
+        <p
+          v-if="approvalNodeIsAutoApprove(node.key) && !approvalNodeOmitsSources(node.key)"
+          class="template-authoring__hint template-authoring__hint--warn"
+          data-testid="approval-node-approval-type-live-sources-hint"
+        >
+          该节点仍保存有下方的审批人来源：自动通过时不会生效，保存时原样保留。
+          <el-button
+            size="small"
+            link
+            :disabled="readOnly"
+            data-testid="approval-node-approval-type-drop-sources"
+            @click="chooseApprovalNodeApprovalType(node.key, 'auto_approve')"
+          >移除审批人来源</el-button>
+        </p>
+        <!-- Lock-4 §1 F4-A HIDDEN-BLOCK GUARD: a hidden block (policy grid / timeout section below) is
+             still saved and validated, so while its own values fail validation it is rendered again
+             and this notice names the failure — never an error about an invisible control. Clearing
+             the timeout is an explicit author action; nothing is rewritten at save time. -->
+        <div
+          v-if="approvalNodeOmitsSources(node.key) && hiddenBlockLiveErrorList.length > 0"
+          class="template-authoring__hint template-authoring__hint--warn"
+          data-testid="approval-node-approval-type-hidden-errors-hint"
+        >
+          <p>该节点有已隐藏的设置未通过校验（自动通过时这些设置不会生效，但保存时原样保留并校验），已在下方显示，请修正或关闭：</p>
+          <ul>
+            <li
+              v-for="(message, messageIndex) in hiddenBlockLiveErrorList"
+              :key="messageIndex"
+              data-testid="approval-node-approval-type-hidden-error"
+            >{{ message }}</li>
+          </ul>
+          <el-button
+            v-if="hiddenBlockHasLiveErrors('timeout')"
+            size="small"
+            link
+            :disabled="readOnly"
+            data-testid="approval-node-approval-type-clear-timeout"
+            @click="clearApprovalNodeTimeout(node.key)"
+          >关闭超时</el-button>
+        </div>
+      </el-form-item>
+      <!-- Lock-4 §1 F4-A: an auto_approve node whose sources are omitted saves NONE, so the cards (hidden
+           scratch, restored on 人工审批) and every control below that only matters when a person
+           approves are not rendered; their values are preserved verbatim. Same predicate as the save
+           and the validator (`approvalNodeEditOmitsAssigneeSources`), so nothing hidden is ever sent. -->
+      <template v-if="!approvalNodeOmitsSources(node.key)">
       <!-- P1-B: one card per assigneeSources[] entry, keyed by its (stable, positional) index — the
            array IS the identity model here (no separate id field), and add/remove/edit only ever
            append/splice/replace by index, so index-as-key is safe. Each card is byte-identical to
@@ -752,7 +1028,7 @@
           class="template-authoring__placeholder-hint"
           data-testid="approval-node-placeholder-hint"
           title="此为占位审批角色，发布前请替换为真实角色 ID"
-          description="占位角色无人可认领，未替换将无法发布该模板。"
+          description="占位角色无人可认领，未替换将无法发布该审批表单。"
         />
         <!-- P1-B remove affordance: fail-closed — a node must always keep ≥1 source. `disabled` here
              is the UX signal; the actual guard lives in `removeApprovalSourceCard` itself (refuses
@@ -784,10 +1060,11 @@
           data-testid="approval-node-source-union-hint"
         >已配置 {{ approvalSourceCount(node.key) }} 个来源，取其并集；同一人出现在多个来源时，系统运行时自动去重（此编辑器本身不做去重或排序）</p>
       </div>
+      </template>
       <!-- Approval-node policy grid: 审批模式 / 空审批人策略 / 自审策略. Handler nodes render NONE of
            these (M7 no inert controls) — a handler has NO empty-assignee/fallback key (§1.2) and no
            self-approval merge; its own controls are the 办理模式 + 办理意见 below. -->
-      <div v-if="node.type === 'approval'" class="template-authoring__grid template-authoring__approval-node-policy">
+      <div v-if="node.type === 'approval' && (!approvalNodeOmitsSources(node.key) || hiddenBlockRevealed('policy'))" class="template-authoring__grid template-authoring__approval-node-policy">
         <el-form-item label="审批模式">
           <el-select
             :model-value="approvalNodeMode(node.key)"
@@ -842,6 +1119,10 @@
             需要 N 位不同审批人同意才通过；实际可用人数（M）由上方审批人来源在实例运行时解析，若解析结果不足 N 人，该节点会在运行时失败（而非发布时被拒绝）。
           </p>
         </el-form-item>
+        <!-- W1-1a (Lock-4 §3 F4-B, OD-L4-3(a)): 'designated' joins 报错/自动通过; its targets ride the ONE
+             key `emptyAssigneeFallback`, filled through the SAME typed directory pickers as the
+             static_user/static_role sub-form above (D0 §10.2 — never a raw-id input). Approval-only:
+             this whole grid never renders for a handler node (§1.2). -->
         <el-form-item label="空审批人策略">
           <el-select
             :model-value="approvalNodeEmptyPolicy(node.key)"
@@ -852,21 +1133,90 @@
           >
             <el-option label="报错" value="error" />
             <el-option label="自动通过" value="auto-approve" />
+            <el-option :label="EMPTY_ASSIGNEE_DESIGNATED_LABEL" value="designated" />
           </el-select>
         </el-form-item>
-        <el-form-item label="自审策略">
-          <el-checkbox
-            :model-value="approvalNodeMergeWithRequester(node.key)"
-            :disabled="readOnly"
-            data-testid="approval-node-merge-with-requester"
-            @update:model-value="(enabled: boolean) => setApprovalNodeMergeWithRequester(node.key, enabled)"
-          >发起人自动通过（自审合并）</el-checkbox>
+        <!-- Full-width, label-on-top rows: outside an <el-form>, an item's label auto-sizes to its text, so
+             in the narrow inspector a long label (or the hint copy) left the control 0px wide —
+             found by the browser lane (approval-canvas-sole-surface.spec.ts, W1-1a test). -->
+        <template v-if="approvalNodeEmptyPolicy(node.key) === 'designated'">
+          <el-form-item label="转交给（用户）" label-position="top" class="template-authoring__approval-node-policy-wide">
+            <el-select
+              :model-value="approvalNodeEmptyFallbackIds(node.key, 'user')"
+              multiple
+              filterable
+              remote
+              :remote-method="onUserSearch"
+              :loading="directoryUsersLoading"
+              size="small"
+              :disabled="readOnly"
+              class="ms-w-360"
+              placeholder="搜索用户名 / 邮箱"
+              data-testid="approval-node-empty-fallback-user-picker"
+              @update:model-value="(ids: string[]) => setApprovalNodeEmptyAssigneeFallbackIds(node.key, 'user', ids)"
+              @visible-change="(visible: boolean) => visible && onUserSearch('')"
+            >
+              <el-option
+                v-for="user in directoryUsers"
+                :key="user.id"
+                :label="formatUserLabel(user)"
+                :value="user.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="转交给（角色）" label-position="top" class="template-authoring__approval-node-policy-wide">
+            <el-select
+              :model-value="approvalNodeEmptyFallbackIds(node.key, 'role')"
+              multiple
+              filterable
+              size="small"
+              :disabled="readOnly"
+              class="ms-w-360"
+              placeholder="选择角色"
+              data-testid="approval-node-empty-fallback-role-picker"
+              @update:model-value="(ids: string[]) => setApprovalNodeEmptyAssigneeFallbackIds(node.key, 'role', ids)"
+            >
+              <el-option
+                v-for="role in directoryRoles"
+                :key="role.id"
+                :label="formatRoleLabel(role)"
+                :value="role.id"
+              />
+            </el-select>
+            <p class="template-authoring__hint" data-testid="approval-node-empty-fallback-hint">{{ EMPTY_ASSIGNEE_DESIGNATED_HINT }}</p>
+          </el-form-item>
+        </template>
+        <!-- W1-1a (Lock-4 §2 F4-C): the four-value same-person control REPLACES the shipped 自审合并
+             checkbox (implementer default (a)) and owns `mergeWithRequester` + `samePersonPolicy`
+             together; 默认 omits both keys (default (b)). Value/options are DERIVED from the live edit's
+             `autoApprovalPolicy` via the shared helpers, so the canvas and linear editors agree. -->
+        <el-form-item label="审批人与发起人为同一人时" label-position="top" class="template-authoring__approval-node-policy-wide">
+          <el-select
+            :model-value="approvalNodeSamePersonValue(node.key)"
+            :disabled="readOnly || !approvalNodeSamePersonEditable(node.key)"
+            class="ms-w-100pct"
+            data-testid="approval-node-same-person-policy"
+            @update:model-value="(value: string) => setApprovalNodeSamePersonPolicy(node.key, value)"
+          >
+            <el-option
+              v-for="option in approvalNodeSamePersonOptions(node.key)"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+          <p class="template-authoring__hint" data-testid="approval-node-same-person-hint">{{ approvalNodeSamePersonOverrideHint }}</p>
+          <p
+            v-if="isSamePersonTransferValue(approvalNodeSamePersonValue(node.key))"
+            class="template-authoring__hint"
+            data-testid="approval-node-same-person-transfer-hint"
+          >{{ SAME_PERSON_TRANSFER_HINT }}</p>
         </el-form-item>
       </div>
       <!-- P1-C (T1-1) node-level SLA timeout — approval-node-only (a handler config forbids the
            `timeout` key, §1.2), so this section renders only in the SAME `node.type === 'approval'`
            scope as the policy grid above, never for a handler. -->
-      <div v-if="node.type === 'approval'" class="template-authoring__approval-node-timeout" data-testid="approval-node-timeout-section">
+      <div v-if="node.type === 'approval' && (!approvalNodeOmitsSources(node.key) || hiddenBlockRevealed('timeout'))" class="template-authoring__approval-node-timeout" data-testid="approval-node-timeout-section">
         <el-form-item label="节点超时">
           <el-checkbox
             :model-value="Boolean(approvalNodeTimeout(node.key))"
@@ -1012,8 +1362,9 @@
       </div>
     </section>
 
-    <!-- Lock-0 L0-1/L0-6: 表单权限 tab content. Renders alone when tabbed (activeTabId ===
-         'fieldPermissions'); alongside the assignee section, unchanged, in flat/list mode. -->
+    <!-- Lock-0 L0-1/L0-6: 字段权限 tab content (renamed from 表单权限, approval-form-ux-slice1
+         20260916 design §2.1). Renders alone when tabbed (activeTabId === 'fieldPermissions');
+         alongside the assignee section, unchanged, in flat/list mode. -->
     <section
       v-show="showFieldPermissionsSection"
       class="template-authoring__approval-node-section"
@@ -1125,6 +1476,7 @@ import type {
   ApprovalAssigneeSourceKind,
   ApprovalMode,
   ApprovalNode,
+  ApprovalType,
   EmptyAssigneePolicy,
   HandlerMode,
   NodeFieldAccess,
@@ -1137,12 +1489,44 @@ import { NODE_FIELD_ACCESS_VALUES } from '../../types/approval'
 import {
   APPROVAL_NODE_CONFIG_EDITOR_KEY,
 } from '../nodeConfigEditorContext'
+import type { ConditionRuleEdit, ConditionRuleOperator } from '../conditionEdit'
 import {
-  CONDITION_RULE_OPERATORS,
+  conditionOperatorsForField,
+  conditionRuleValueIssues,
+  conditionStoredValueNoteShown,
+  conditionStoredValuePreview,
+  conditionValueCopy,
+  conditionValueIssueText,
+  conditionValueKind,
+  conditionValueShowsBlank,
+  formatConditionListText,
+  isCurrentOptionValue,
+  isOptionKind,
+  parseConditionListText,
+  parseConditionNumber,
+  sameConditionList,
+  STALE_OPTION_KEY,
+  type ConditionValueField,
+  type ConditionValueKind,
+} from '../conditionValueTyping'
+import { useLocale } from '../../composables/useLocale'
+import {
   PARALLEL_JOIN_MODES,
   CC_TARGET_TYPES,
   NODE_TIMEOUT_MAX_AFTER_MINUTES,
   NODE_TIMEOUT_SUPPORTED_EFFECTS,
+  approvalNodeEditOmitsAssigneeSources,
+  AUTO_APPROVE_HIDDEN_BLOCK_IDS,
+  type AutoApproveHiddenBlockId,
+  type HiddenBlockLiveErrors,
+  // W1-1a (Lock-4 F4-B / F4-C) — the SAME helpers + copy the linear editor uses.
+  EMPTY_ASSIGNEE_DESIGNATED_HINT,
+  EMPTY_ASSIGNEE_DESIGNATED_LABEL,
+  SAME_PERSON_TRANSFER_HINT,
+  samePersonChoiceOptions,
+  samePersonControlState,
+  samePersonOverrideHint,
+  samePersonSelectValue,
 } from '../templateAuthoring'
 import {
   APPROVAL_ASSIGNEE_SOURCE_LABELS,
@@ -1184,6 +1568,15 @@ const showFieldPermissionsSection = computed(
 
 // ── Lock-0 L0-2 capability registry ──────────────────────────────────────────────────────────
 const registry = computed(() => props.registry ?? DEFAULT_APPROVAL_CAPABILITY_REGISTRY)
+// Lock-1 OD-L1-7(a): the cc target-type select offers the backend-accepted set (CC_TARGET_TYPES),
+// with 用户组 gated on the "`user_group` (cc)" registry row — the cc half's M4 admission, read
+// mechanically from the same registry the approver/handler rosters read, never a hand flag.
+const ccTargetTypeOptions = computed(() =>
+  CC_TARGET_TYPES.filter((targetType) => targetType !== 'group' || isRegisteredAssigneeSourceKind(registry.value, 'cc', 'user_group')),
+)
+// The same admission gates RENDERING a persisted 'group' target (picker + empty hint), not only
+// offering it: outside the registry the value is read-only (unknown line), never re-typed.
+const ccGroupTargetOffered = computed(() => ccTargetTypeOptions.value.includes('group'))
 const assigneeSourceRosterForNode = computed(() => {
   const roster = assigneeSourceRoster(registry.value, props.node.type)
   // Lock-2 §2.4 C-7 form-schema precondition (gate D-6): the two contact-derived kinds are
@@ -1255,6 +1648,170 @@ const formulaRoles = computed(() => unwrap(api.formulaRoles))
 const memberGroupOptions = computed(() => unwrap(api.memberGroupOptions))
 const memberGroupOptionsLoading = computed(() => Boolean(unwrap(api.memberGroupOptionsLoading)))
 
+// ── R-43 (B) typed branch condition values ────────────────────────────────────────────────────
+// The rule edit (`ConditionRuleEdit.value: unknown`) already carries any JSON value verbatim; this
+// editor now WRITES the type the backend executor compares against. Rules that can never take
+// effect are only MARKED (display) — never rewritten on load, never a save/publish blocker.
+const { isZh } = useLocale()
+const conditionCopy = computed(() => conditionValueCopy(isZh.value))
+// `in` textarea text per rule, so a half-typed line (trailing newline) survives the re-render.
+const ruleListTextBuffers = new WeakMap<ConditionRuleEdit, string>()
+
+function ruleField(rule: ConditionRuleEdit): ConditionValueField | null {
+  const id = typeof rule.fieldId === 'string' ? rule.fieldId.trim() : ''
+  const option = conditionFieldOptions.value.find((candidate) => candidate.id === id)
+  if (!option?.type) return null
+  return option.listValued
+    ? { type: option.type, options: option.options ?? [], listValued: true }
+    : { type: option.type, options: option.options ?? [] }
+}
+function ruleKind(rule: ConditionRuleEdit): ConditionValueKind {
+  return conditionValueKind(ruleField(rule))
+}
+function ruleIsOption(rule: ConditionRuleEdit): boolean {
+  return isOptionKind(ruleKind(rule))
+}
+function ruleFieldOptions(rule: ConditionRuleEdit) {
+  return [...(ruleField(rule)?.options ?? [])]
+}
+function ruleOperatorChoices(rule: ConditionRuleEdit) {
+  const choices = conditionOperatorsForField(ruleField(rule)).map((operator) => ({
+    value: operator,
+    label: conditionOperatorLabel(operator),
+    disabled: false,
+  }))
+  if (!choices.some((choice) => choice.value === rule.operator)) {
+    choices.push({
+      value: rule.operator,
+      label: `${conditionOperatorLabel(rule.operator)}${conditionCopy.value.notApplicableSuffix}`,
+      disabled: true,
+    })
+  }
+  return choices
+}
+function ruleIssues(rule: ConditionRuleEdit) {
+  return conditionRuleValueIssues(rule, ruleField(rule))
+}
+function ruleIssueText(rule: ConditionRuleEdit): string {
+  return conditionValueIssueText(ruleIssues(rule), isZh.value)
+}
+/**
+ * A free-entry value box (text / number / one-per-line list) shows a marked stored value EMPTY:
+ * `el-input` emits nothing when the typed text equals what it shows, so re-entering the value as
+ * displayed would change nothing. The stored value is never rewritten on load; it is shown
+ * read-only next to the box instead. Option pickers have their own invalid-value placeholders.
+ */
+function ruleValueShownBlank(rule: ConditionRuleEdit): boolean {
+  return !ruleIsOption(rule) && rule.operator !== 'isEmpty' && conditionValueShowsBlank(ruleIssues(rule))
+}
+/**
+ * The read-only note: every blanked text box, plus a number box left empty by a non-number. Decided
+ * by what the box actually SHOWS: an `in` textarea that shows text (the author's in-progress lines,
+ * a non-number one included) has nothing hidden to explain, so it gets no note — only the issue mark.
+ */
+function ruleStoredValueShown(rule: ConditionRuleEdit): boolean {
+  if (ruleIsOption(rule) || rule.operator === 'isEmpty' || isBlankRuleValue(rule.value)) return false
+  if (rule.operator === 'in' && ruleListText(rule) !== '') return false
+  return conditionStoredValueNoteShown(ruleIssues(rule))
+}
+function ruleScalarText(rule: ConditionRuleEdit): string {
+  return ruleValueShownBlank(rule) ? '' : conditionRuleValueText(rule)
+}
+function isBlankRuleValue(value: unknown): boolean {
+  return value === undefined || value === null || value === ''
+}
+/**
+ * A value meaningful for the NEXT field: only a text→text or number→number move keeps it. When the
+ * next field does not offer the current operator, the switch goes through `onRuleOperatorChange` so
+ * the kept value is reshaped too (e.g. single person eq `u1` → multi-person picker ⇒ in `[u1]`).
+ */
+function onRuleFieldChange(rule: ConditionRuleEdit, fieldId: string | null | undefined): void {
+  const previousKind = ruleKind(rule)
+  rule.fieldId = fieldId ?? ''
+  const nextKind = ruleKind(rule)
+  if (!(previousKind === nextKind && (nextKind === 'text' || nextKind === 'number'))) {
+    rule.value = undefined
+  }
+  const allowed = conditionOperatorsForField(ruleField(rule))
+  if (!allowed.includes(rule.operator)) onRuleOperatorChange(rule, allowed[0]!)
+  ruleListTextBuffers.delete(rule)
+}
+/**
+ * Shape the value for the NEW operator (never by the previous one: `in → isEmpty → eq` must not
+ * leave a list under a single-value operator, which the executor never / always matches).
+ * `in` wraps a scalar in a one-entry list; eq/neq/gt/gte/lt/lte keep a list's first entry;
+ * `isEmpty` keeps the value untouched (ignored there, restored by the next operator).
+ */
+function onRuleOperatorChange(rule: ConditionRuleEdit, operator: ConditionRuleOperator): void {
+  if (operator === 'in') {
+    if (!isBlankRuleValue(rule.value) && !Array.isArray(rule.value)) rule.value = [rule.value]
+  } else if (operator !== 'isEmpty' && Array.isArray(rule.value)) {
+    rule.value = rule.value.length > 0 ? rule.value[0] : undefined
+  }
+  rule.operator = operator
+  ruleListTextBuffers.delete(rule)
+}
+/** A stored value no current option carries (a non-string one included) shows as the invalid placeholder. */
+function ruleOptionScalarStale(rule: ConditionRuleEdit): boolean {
+  if (isBlankRuleValue(rule.value) || (Array.isArray(rule.value) && rule.value.length === 0)) return false
+  return !isCurrentOptionValue(ruleField(rule), rule.value)
+}
+function ruleOptionScalar(rule: ConditionRuleEdit): string {
+  if (ruleOptionScalarStale(rule)) return typeof rule.value === 'string' ? rule.value : STALE_OPTION_KEY
+  return typeof rule.value === 'string' ? rule.value : ''
+}
+function setRuleOptionScalar(rule: ConditionRuleEdit, value: string | null | undefined): void {
+  rule.value = value ? value : undefined
+}
+function ruleValueList(rule: ConditionRuleEdit): unknown[] {
+  if (Array.isArray(rule.value)) return rule.value
+  return isBlankRuleValue(rule.value) ? [] : [rule.value]
+}
+/** Only current option values enter the multi-select model (a stale one would render raw). */
+function ruleOptionList(rule: ConditionRuleEdit): string[] {
+  const list = ruleValueList(rule)
+  return ruleFieldOptions(rule)
+    .map((option) => option.value)
+    .filter((value) => list.includes(value))
+}
+function ruleOptionListStaleCount(rule: ConditionRuleEdit): number {
+  const field = ruleField(rule)
+  return ruleValueList(rule).filter((value) => !isCurrentOptionValue(field, value)).length
+}
+/** Re-picking drops stale values; the list is saved in option order. */
+function setRuleOptionList(rule: ConditionRuleEdit, values: string[] | null | undefined): void {
+  const picked = new Set(values ?? [])
+  const ordered = ruleFieldOptions(rule)
+    .map((option) => option.value)
+    .filter((value) => picked.has(value))
+  rule.value = ordered.length > 0 ? ordered : undefined
+}
+function ruleNumberValue(rule: ConditionRuleEdit): number | undefined {
+  // Never hand a non-number to el-input-number: it coerces on mount and would rewrite an untouched rule.
+  if (typeof rule.value === 'number' && Number.isFinite(rule.value)) return rule.value
+  // gt/gte/lt/lte normalise a numeric string in the executor (it works today): show its number
+  // without rewriting the stored value. eq/neq compare strictly, so a string shows empty + the mark.
+  const comparesNormalised = rule.operator === 'gt' || rule.operator === 'gte' || rule.operator === 'lt' || rule.operator === 'lte'
+  return comparesNormalised ? parseConditionNumber(rule.value) ?? undefined : undefined
+}
+function setRuleNumberValue(rule: ConditionRuleEdit, value: number | null | undefined): void {
+  rule.value = typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+function ruleListText(rule: ConditionRuleEdit): string {
+  const kind = ruleKind(rule)
+  const list = ruleValueList(rule)
+  const buffered = ruleListTextBuffers.get(rule)
+  if (buffered !== undefined && sameConditionList(parseConditionListText(buffered, kind), list)) return buffered
+  if (ruleValueShownBlank(rule)) return ''
+  if (kind === 'number' && !list.every((value) => typeof value === 'number' && Number.isFinite(value))) return ''
+  return formatConditionListText(list)
+}
+function setRuleListText(rule: ConditionRuleEdit, text: string): void {
+  ruleListTextBuffers.set(rule, text)
+  const list = parseConditionListText(text, ruleKind(rule))
+  rule.value = list.length > 0 ? list : undefined
+}
+
 const conditionEditFor = api.conditionEditFor
 const parallelEditFor = api.parallelEditFor
 const ccEditFor = api.ccEditFor
@@ -1273,6 +1830,45 @@ const conditionFormulaDryRunResult = api.conditionFormulaDryRunResult
 const conditionFormulaDryRunLoading = api.conditionFormulaDryRunLoading
 const dryRunConditionFormula = api.dryRunConditionFormula
 const conditionOutgoingEdgeKeys = api.conditionOutgoingEdgeKeys
+// T5a (test report 2026-10-08): condition-branch delete — every member is OPTIONAL on the api, and
+// an absent member renders no control at all (fail-closed), so component harnesses that do not wire
+// branch delete are unaffected.
+const canvasAuthoringActive = computed(() => Boolean(unwrap(api.canvasAuthoringActive ?? false)))
+const conditionBranchRemovalBlockerApi = api.conditionBranchRemovalBlocker
+const removeConditionBranchApi = api.removeConditionBranch
+const branchDeleteAvailable = computed(() => Boolean(
+  canvasAuthoringActive.value
+    && removeConditionBranchApi
+    && conditionBranchRemovalBlockerApi,
+))
+function branchRemovalBlocker(nodeKey: string, edgeKey: string): string | null {
+  return conditionBranchRemovalBlockerApi?.(nodeKey, edgeKey) ?? null
+}
+function isLastConditionBranch(nodeKey: string): boolean {
+  return (conditionEditFor(nodeKey)?.branches.length ?? 0) <= 1
+}
+/** D0 §13.6: a destructive action names its object — by priority, never by an edge key. */
+function branchRemoveAriaLabel(nodeKey: string, branchIndex: number): string {
+  const base = `删除优先级 ${branchIndex + 1} 分支`
+  return isLastConditionBranch(nodeKey) ? `${base}，并移除此条件节点（保留默认分支流程）` : base
+}
+function branchRemoveTitle(nodeKey: string, edgeKey: string): string {
+  const blocker = branchRemovalBlocker(nodeKey, edgeKey)
+  if (blocker) return blocker
+  return isLastConditionBranch(nodeKey)
+    ? '这是最后一个条件分支：删除后移除此条件节点，保留默认分支流程，可撤销'
+    : '删除此分支及其中的节点，可撤销'
+}
+function removeConditionBranchAt(nodeKey: string, edgeKey: string): void {
+  if (readOnly.value || branchRemovalBlocker(nodeKey, edgeKey)) return
+  removeConditionBranchApi?.(nodeKey, edgeKey)
+}
+/** T5a / verify X1: a cleared picker means "no default" — store '', never `undefined`/`null`. */
+function setConditionDefaultEdgeKey(nodeKey: string, value: unknown): void {
+  const edit = conditionEditFor(nodeKey)
+  if (!edit || readOnly.value) return
+  edit.defaultEdgeKey = typeof value === 'string' ? value : ''
+}
 const conditionEdgeLabel = api.conditionEdgeLabel
 const graphEdgeTargetLabel = api.graphEdgeTargetLabel
 const graphNodeLabel = api.graphNodeLabel
@@ -1305,6 +1901,49 @@ const setApprovalNodeMode = api.setApprovalNodeMode
 const approvalNodeThreshold = api.approvalNodeThreshold
 const setApprovalNodeThreshold = api.setApprovalNodeThreshold
 const approvalNodeInParallelRegion = api.approvalNodeInParallelRegion
+// ── Lock-4 §1 F4-A — node-level 审批类型. The mutator is OPTIONAL on the api: absent ⇒ no control
+// renders (fail-closed), so harnesses that do not wire F4-A are unaffected. Reads go straight to the
+// edit model (`approvalType` / the omit flag), never to a second copy of the state.
+const setApprovalNodeApprovalTypeApi = api.setApprovalNodeApprovalType
+const approvalTypeControlAvailable = computed(() => Boolean(setApprovalNodeApprovalTypeApi))
+function approvalNodeIsAutoApprove(nodeKey: string): boolean {
+  return approvalNodeEditFor(nodeKey)?.approvalType === 'auto_approve'
+}
+function approvalNodeOmitsSources(nodeKey: string): boolean {
+  const edit = approvalNodeEditFor(nodeKey)
+  return edit ? approvalNodeEditOmitsAssigneeSources(edit) : false
+}
+function chooseApprovalNodeApprovalType(nodeKey: string, type: ApprovalType): void {
+  if (readOnly.value) return
+  setApprovalNodeApprovalTypeApi?.(nodeKey, type)
+}
+// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD — the live validation errors of this node's hidden blocks
+// (computed by the view against the real save validator; see `approvalNodeEditHiddenBlockLiveErrors`).
+// Absent api method ⇒ {} (nothing revealed; documented on the api).
+const approvalNodeHiddenBlockErrorsApi = api.approvalNodeHiddenBlockErrors
+const hiddenBlockLiveErrors = computed<HiddenBlockLiveErrors>(() =>
+  props.node.type === 'approval' && approvalNodeHiddenBlockErrorsApi
+    ? approvalNodeHiddenBlockErrorsApi(props.node.key)
+    : {},
+)
+const hiddenBlockLiveErrorList = computed(() =>
+  AUTO_APPROVE_HIDDEN_BLOCK_IDS.flatMap((blockId) => hiddenBlockLiveErrors.value[blockId] ?? []),
+)
+function hiddenBlockHasLiveErrors(blockId: AutoApproveHiddenBlockId): boolean {
+  return (hiddenBlockLiveErrors.value[blockId]?.length ?? 0) > 0
+}
+// W1-1a (merge-train r3 F9) — STICKY REVEAL: whether a hidden block is rendered. The view owns the
+// sticky state, keyed by node key (this instance is reused across selections in the Canvas-first
+// inspector, so it must keep none). Absent api method ⇒ rendered exactly while it has a live error.
+const approvalNodeHiddenBlockRevealedApi = api.approvalNodeHiddenBlockRevealed
+function hiddenBlockRevealed(blockId: AutoApproveHiddenBlockId): boolean {
+  if (hiddenBlockHasLiveErrors(blockId)) return true
+  return props.node.type === 'approval' && Boolean(approvalNodeHiddenBlockRevealedApi?.(props.node.key, blockId))
+}
+function clearApprovalNodeTimeout(nodeKey: string): void {
+  if (readOnly.value) return
+  setApprovalNodeTimeoutEnabled(nodeKey, false)
+}
 const approvalNodeTimeout = api.approvalNodeTimeout
 const setApprovalNodeTimeoutEnabled = api.setApprovalNodeTimeoutEnabled
 const setApprovalNodeTimeoutAfterMinutes = api.setApprovalNodeTimeoutAfterMinutes
@@ -1323,8 +1962,42 @@ function nodeTimeoutEffectOptionLabel(effect: SupportedNodeTimeoutEffect): strin
 }
 const approvalNodeEmptyPolicy = api.approvalNodeEmptyPolicy
 const setApprovalNodeEmptyPolicy = api.setApprovalNodeEmptyPolicy
-const approvalNodeMergeWithRequester = api.approvalNodeMergeWithRequester
-const setApprovalNodeMergeWithRequester = api.setApprovalNodeMergeWithRequester
+// W1-1a (Lock-4 §2 F4-C / §3 F4-B) — writers live on the api (the view owns every mutation); the
+// displayed state is DERIVED here from the live edit through the shared pure helpers.
+const setApprovalNodeSamePersonPolicy = api.setApprovalNodeSamePersonPolicy
+const setApprovalNodeEmptyAssigneeFallbackIds = api.setApprovalNodeEmptyAssigneeFallbackIds
+function approvalNodeSamePersonValue(nodeKey: string): string {
+  return samePersonSelectValue(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy)
+}
+function approvalNodeSamePersonOptions(nodeKey: string): Array<{ value: string; label: string }> {
+  return samePersonChoiceOptions(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy)
+}
+/**
+ * Precedence hint — never implies the template tier applies at a node that already overrides it. A
+ * computed over `props.node`, not a template interpolation that passes the node's key to a helper:
+ * the raw-id census (approval-member-identity-coverage-enumeration.spec.ts, `mustache-id`) flags any
+ * key token inside an interpolation, even one that only feeds a lookup.
+ */
+const approvalNodeSamePersonOverrideHint = computed(() =>
+  samePersonOverrideHint(approvalNodeEditFor(props.node.key)?.autoApprovalPolicy),
+)
+/**
+ * False for an X-3 unknown persisted value — the control renders read-only (never re-projected).
+ * Component-level contract, independent of the host's `readOnly`: inside TemplateAuthoringView an
+ * off-enum value already makes the whole template read-only, so this clause is a belt for any other
+ * host of this reusable editor; it is pinned by a direct mount with `readOnly: false`
+ * (approval-template-authoring-canvas-inspector.spec.ts, gate r1 P3-1).
+ */
+function approvalNodeSamePersonEditable(nodeKey: string): boolean {
+  return samePersonControlState(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy).kind === 'editable'
+}
+function isSamePersonTransferValue(value: string): boolean {
+  return value === 'transfer_direct_manager' || value === 'transfer_dept_head'
+}
+function approvalNodeEmptyFallbackIds(nodeKey: string, side: 'user' | 'role'): string[] {
+  const fallback = approvalNodeEditFor(nodeKey)?.emptyAssigneeFallback
+  return [...((side === 'user' ? fallback?.userIds : fallback?.roleIds) ?? [])]
+}
 // Lock-3 §1.1 — handler-only controls (办理模式 / 办理意见).
 const handlerNodeMode = api.handlerNodeMode
 const setHandlerNodeMode = api.setHandlerNodeMode
@@ -1589,6 +2262,19 @@ const { node } = toRefs(props)
   min-width: 0;
 }
 
+.template-authoring__hint--issue {
+  color: var(--el-color-danger);
+}
+
+.template-authoring__condition-rule-issue {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.template-authoring__condition-rule-stored {
+  overflow-wrap: anywhere;
+}
+
 .template-authoring__condition-rule {
   display: flex;
   flex-wrap: wrap;
@@ -1643,6 +2329,11 @@ const { node } = toRefs(props)
 /* P1-D — priority chip (condition branches) / de-emphasized default-branch label. Text-only
    information carrier (branch order + "default" are both spelled out in words); the token colors
    below are a supplementary accent, never the sole carrier (V-6/V-8). */
+/* T5a: the branch delete sits at the end of the wrapping head row (flat text button, token colors
+   only — no new literal colors in this file). */
+.template-authoring__condition-branch-remove {
+  margin-left: auto;
+}
 .template-authoring__condition-branch-priority {
   display: inline-flex;
   align-items: center;
@@ -1684,6 +2375,12 @@ const { node } = toRefs(props)
 
 .template-authoring__approval-node-policy {
   margin-top: 8px;
+}
+
+/* W1-1a: the designated-fallback pickers and the four-value same-person select span the whole policy
+   grid (their labels and honesty hints are long; a half-width column squeezed the control to 0px). */
+.template-authoring__approval-node-policy-wide {
+  grid-column: 1 / -1;
 }
 
 /* Lock-0 L0-1: transparent section wrappers — no border/shadow of their own (parent §3.2). */

@@ -188,6 +188,10 @@ const {
 // ZERO capability toward the canonical sheet.
 const { CARRY_CONFLICT_TYPES } = require('./stock-preparation-carry-policy.cjs')
 const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
+// B3: the SAME base resolver the main table uses, so the ledger can never land in a different
+// base than the main table. The resolver owns the pair's identities (this module must not name
+// the main table — see G1): the ledger passes only its OWN objectId and gets a base id back.
+const { resolveStockPreparationOwnBase } = require('./stock-preparation-own-base.cjs')
 const {
   StockPreparationTargetProvisioningError,
   ensureManagedTableDefaultView,
@@ -457,7 +461,16 @@ async function inspectConfirmationDecisionTarget({ context, projectId, permissio
   }
 }
 
-async function ensureConfirmationDecisionTarget({ context, projectId, permission, baseId, locale } = {}) {
+async function ensureConfirmationDecisionTarget({
+  context,
+  projectId,
+  permission,
+  baseId,
+  locale,
+  tenantId,
+  resolveOwnBase,
+  env,
+} = {}) {
   assertAdminPermission(permission)
   const provisioning = getProvisioningApi(context || {})
   const scopedProjectId = requiredString(projectId, 'projectId')
@@ -478,9 +491,26 @@ async function ensureConfirmationDecisionTarget({ context, projectId, permission
       { objectId: OBJECT_ID, missingFields: inspected.missingFields, requiredFields: templateFieldIds(TEMPLATE) },
     )
   }
+  // B3: the ledger's base. Own base resolution is a ROUTE opt-in (`resolveOwnBase: true`); every
+  // other caller keeps today's `optionalString(baseId)`. With the opt-in, the resolver anchors
+  // this ledger (identified by its OWN objectId — the resolver knows the pair partner, this
+  // module must not) to the main table when it exists (zero ensureSystemBase calls, the 222
+  // shape) and derives the same id the main table would otherwise. The already-ready return
+  // above precedes this, so an existing ledger is never moved.
+  const ownBase = resolveOwnBase === true
+    ? await resolveStockPreparationOwnBase({
+        provisioning,
+        projectId: scopedProjectId,
+        objectId: OBJECT_ID,
+        tenantId,
+        explicitBaseId: optionalString(baseId),
+        locale,
+        env,
+      })
+    : { baseId: optionalString(baseId), source: 'unchanged' }
   await provisioning.ensureObject({
     projectId: scopedProjectId,
-    baseId: optionalString(baseId),
+    baseId: ownBase.baseId,
     descriptor: buildTargetDescriptor({ locale }),
   })
   const verified = await inspectConfirmationDecisionTarget({ context, projectId: scopedProjectId, permission })
@@ -508,7 +538,15 @@ async function ensureConfirmationDecisionTarget({ context, projectId, permission
     created: true,
     mode: 'confirmation_decision_created',
     defaultView,
-    evidence: { objectId: OBJECT_ID, created: true, rowsSeeded: 0, fieldCounts: templateFieldCounts(TEMPLATE) },
+    evidence: {
+      objectId: OBJECT_ID,
+      created: true,
+      rowsSeeded: 0,
+      fieldCounts: templateFieldCounts(TEMPLATE),
+      // B3, values-free: the rule that picked the base and whether this call created it.
+      ownBaseSource: ownBase.source,
+      ownBaseCreated: ownBase.created === true,
+    },
   }
 }
 
@@ -1281,7 +1319,11 @@ async function readConfirmationDecisionProjectNo({ recordsApi, provisioning, tar
   return { decisionId: id, projectNo: auditableProjectNo(readCell(matches[0], 'projectNo')) }
 }
 
-async function confirmConfirmationDecision({ recordsApi, provisioning, targetProjectId, permission, decisionId, inputFingerprint, resolutionAction, resolvedValue, resolvedAuxValue, notes, confirmedBy, now } = {}) {
+// `assertProjectWritable` (S4, ADR §6, register R-38) is an OPTIONAL hook the route passes only while
+// the project-sheets switch is on: called with the located row's own project cell (trimmed, or null)
+// after the row is found and BEFORE any check of its state or any patch, so a refusal from it leaves
+// the ledger untouched. Absent → this function is byte-identical to before S4.
+async function confirmConfirmationDecision({ recordsApi, provisioning, targetProjectId, permission, decisionId, inputFingerprint, resolutionAction, resolvedValue, resolvedAuxValue, notes, confirmedBy, now, assertProjectWritable } = {}) {
   assertAdminPermission(permission)
   const id = requiredString(decisionId, 'decisionId')
   const fingerprint = requiredString(inputFingerprint, 'inputFingerprint')
@@ -1324,6 +1366,9 @@ async function confirmConfirmationDecision({ recordsApi, provisioning, targetPro
     )
   }
   const record = matches[0]
+  if (typeof assertProjectWritable === 'function') {
+    await assertProjectWritable(optionalString(readCell(record, 'projectNo')))
+  }
   if (optionalString(readCell(record, 'status')) !== STATUSES.PENDING) {
     throw new StockPreparationConfirmationDecisionError(
       409,

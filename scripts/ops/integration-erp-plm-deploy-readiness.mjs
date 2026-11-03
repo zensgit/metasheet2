@@ -13,7 +13,7 @@ export const REQUIRED_MAIN_WORKFLOWS = [
   {
     id: 'plugin-system-tests',
     workflowName: 'Plugin System Tests',
-    purpose: 'plugin, K3 offline PoC, Node 18/20, and coverage checks pass on the selected main commit',
+    purpose: 'plugin, K3 offline PoC, Node 20, and coverage checks pass on the selected main commit',
   },
   {
     id: 'production-flags',

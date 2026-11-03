@@ -8,14 +8,16 @@ import {
 } from '../src/approvals/templateAuthoring'
 import { applyCcEditsToGraph, ccEditsFromGraph, validateCcEdits, CC_TARGET_TYPES } from '../src/approvals/ccEdit'
 import { applyConditionEditsToGraph, conditionEditsFromGraph } from '../src/approvals/conditionEdit'
+import { DEFAULT_APPROVAL_CAPABILITY_REGISTRY, assigneeSourceRoster } from '../src/approvals/approvalCapabilityRegistry'
 
 // G-4 — cc node editing (targetType + targetIds). PURE-LOGIC tests (no .vue / no Element Plus) so
 // they run under the approval-web-guard CI gate. The GATE is topology + cross-phase preservation:
 // editing a cc node's targets must leave every OTHER node (start/approval/condition/parallel/end) and
 // the FULL edge list byte-identical, cc edits must COMPOSE with condition/parallel edits, and an
 // untouched complex graph must still round-trip byte-identical (G-1 floor). PRE-CHECK: the backend
-// `normalizeApprovalGraph` cc rule (ApprovalProductService.ts:914-922) = targetType ∈ {'user','role'}
-// + a non-empty targetIds string[] (trimmed). The editor + validateCcEdits mirror exactly.
+// `normalizeApprovalGraph` cc rule (ApprovalProductService.ts, case 'cc') = targetType ∈
+// APPROVAL_CC_TARGET_TYPES {'user','role','group'} (Lock-1 OD-L1-7(a), RATIFIED) + a non-empty
+// targetIds string[] (trimmed). The editor + validateCcEdits mirror exactly.
 
 function buildTemplate(approvalGraph: ApprovalGraph): ApprovalTemplateDetailDTO {
   return {
@@ -130,8 +132,8 @@ describe('G-4 cross-phase — cc + condition edits compose; nothing else drifts'
 })
 
 describe('validateCcEdits (preview mirrors the backend cc rule)', () => {
-  it('offers exactly [user, role]', () => {
-    expect([...CC_TARGET_TYPES]).toEqual(['user', 'role'])
+  it('offers exactly [user, role, group] — Lock-1 OD-L1-7(a) widened the cc half by exactly one kind', () => {
+    expect([...CC_TARGET_TYPES]).toEqual(['user', 'role', 'group'])
   })
   it('passes a valid cc edit', () => {
     expect(validateCcEdits({ cc_1: { nodeKey: 'cc_1', targetType: 'user', targetIds: ['u1'] } })).toEqual([])
@@ -146,5 +148,67 @@ describe('validateCcEdits (preview mirrors the backend cc rule)', () => {
     const draft = draftFromTemplate(buildTemplate(CC_GRAPH))
     draft.ccEdits!.cc_1.targetIds = []
     expect(validateTemplateDraft(draft).some((e) => /抄送/.test(e))).toBe(true)
+  })
+})
+
+// Lock-1 §K1 / OD-L1-7(a) (RATIFIED) — "widen CcNodeConfig.targetType to include 'group'". FE half:
+// the edit model seeds/applies 'group' like any other kind (the template KEEPS the group reference;
+// the backend expands it per member at dispatch), the registry carries the SEPARATE
+// "`user_group` (cc) | 用户组 | cc" row the lock requires, and — G-16 FE unknown-value safety — a
+// persisted targetType outside the FE's set round-trips VERBATIM and is flagged, never silently
+// rewritten to 'user' (the former `ccEditsFromGraph` seed did exactly that rewrite).
+const GROUP_CC_GRAPH: ApprovalGraph = {
+  nodes: [
+    { key: 'start', type: 'start', name: '发起', config: {} },
+    { key: 'approval_1', type: 'approval', name: '主管', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['mgr'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+    { key: 'cc_1', type: 'cc', name: '抄送用户组', config: { targetType: 'group', targetIds: ['grp-1'] } },
+    { key: 'end', type: 'end', name: '结束', config: {} },
+  ],
+  edges: [
+    { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+    { key: 'edge-approval_1-cc_1', source: 'approval_1', target: 'cc_1' },
+    { key: 'edge-cc_1-end', source: 'cc_1', target: 'end' },
+  ],
+}
+
+describe('OD-L1-7(a) — group cc target (FE half)', () => {
+  it('seeds a persisted group target verbatim and round-trips it byte-identical (the template keeps the group reference)', () => {
+    expect(ccEditsFromGraph(GROUP_CC_GRAPH)).toEqual({ cc_1: { nodeKey: 'cc_1', targetType: 'group', targetIds: ['grp-1'] } })
+    const original = clone(GROUP_CC_GRAPH)
+    expect(buildApprovalGraph(draftFromTemplate(buildTemplate(GROUP_CC_GRAPH)))).toEqual(original)
+  })
+
+  it('switching a cc node to group lands ONLY on that node config; topology + every other node byte-identical', () => {
+    const original = clone(CC_GRAPH)
+    const edits = ccEditsFromGraph(CC_GRAPH)
+    edits.cc_1.targetType = 'group'
+    edits.cc_1.targetIds = ['grp-1', ' grp-2 ']
+    const rebuilt = applyCcEditsToGraph(CC_GRAPH, edits)
+    expect(rebuilt.nodes.find((n) => n.key === 'cc_1')!.config).toEqual({ targetType: 'group', targetIds: ['grp-1', 'grp-2'] })
+    expect(nonCc(rebuilt)).toEqual(nonCc(original))
+    expect(rebuilt.edges).toEqual(original.edges)
+    expect(validateCcEdits(edits)).toEqual([])
+  })
+
+  it('G-16: an off-enum persisted targetType is seeded VERBATIM (never coerced to user), rebuilt verbatim, and flagged by validateCcEdits', () => {
+    const offEnum: ApprovalGraph = {
+      ...clone(GROUP_CC_GRAPH),
+      nodes: clone(GROUP_CC_GRAPH).nodes.map((n) => (n.key === 'cc_1' ? { ...n, config: { targetType: 'dept' as never, targetIds: ['d-1'] } } : n)),
+    }
+    const edits = ccEditsFromGraph(offEnum)
+    expect(edits.cc_1.targetType).toBe('dept')
+    expect(edits.cc_1.targetIds).toEqual(['d-1'])
+    // Untouched round-trip reproduces the stored value — the ids are NOT re-typed under 'user'.
+    expect(applyCcEditsToGraph(offEnum, edits).nodes.find((n) => n.key === 'cc_1')!.config).toEqual({ targetType: 'dept', targetIds: ['d-1'] })
+    expect(buildApprovalGraph(draftFromTemplate(buildTemplate(offEnum)))).toEqual(offEnum)
+    expect(validateCcEdits(edits)[0]).toMatch(/类型无效/)
+    // Positive control: the ratified kind is NOT flagged — the flag is value-selected.
+    expect(validateCcEdits(ccEditsFromGraph(GROUP_CC_GRAPH))).toEqual([])
+  })
+
+  it('registry treatment: the cc roster is exactly the single "user_group (cc) | 用户组" row (exact set, not subset)', () => {
+    expect(assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'cc')).toEqual([{ kind: 'user_group', label: '用户组' }])
+    // The approver row does not admit it and vice versa: the approval roster is unchanged by the cc row.
+    expect(assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval').filter((c) => c.kind === 'user_group')).toHaveLength(1)
   })
 })

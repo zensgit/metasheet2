@@ -21,6 +21,13 @@
         >{{ recordDisplay(c) }}</button>
         <span v-else class="meta-hist__change-rec" :title="c.recordId" data-test="hist-rec-label">{{ recordDisplay(c) }}</span>
         <span class="meta-hist__change-fields">{{ fieldsLabel(c.changedFieldIds.length) }}</span>
+        <button
+          v-if="canRestoreRecord(c)"
+          class="meta-hist__change-restore"
+          type="button"
+          data-test="hist-restore-deleted-record"
+          @click="emit('restore-record', { sheetId: c.sheetId, recordId: c.recordId })"
+        >{{ isZh ? '恢复' : 'Restore' }}</button>
         <span
           v-if="c.restoredFromVersion != null"
           class="meta-hist__change-restored"
@@ -72,6 +79,9 @@ const props = defineProps<{
    *  own count/id fallbacks — never a fetch, never un-masking. */
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
   personSummaries?: Record<string, Record<string, PersonSummary[]>>
+  /** Recovery is only offered for a deleted row on the caller's active sheet. All-tables rows remain read-only. */
+  activeSheetId?: string
+  canRestoreRecords?: boolean
   /** all-tables-B (R11): server-masked field-id → display-name map, keyed by sheetId, from the batch-detail
    *  payload (`HistoryBatchDetail.fieldNames`). Lets a change row on a NON-active sheet (all-tables mode)
    *  show its field name instead of a raw id. Already two-layer-masked server-side (layer-2 property-hidden ∩
@@ -98,7 +108,10 @@ const props = defineProps<{
 // PR-C click-through: a non-delete change's record label is a button that asks the host to open the
 // record drawer (delete rows stay plain text — the record is gone). The list only EMITS; sheet
 // switching / drawer opening / not-found feedback are the workbench's concern.
-const emit = defineEmits<{ (e: 'open-record', payload: { sheetId: string; recordId: string }): void }>()
+const emit = defineEmits<{
+  (e: 'open-record', payload: { sheetId: string; recordId: string }): void
+  (e: 'restore-record', payload: { sheetId: string; recordId: string }): void
+}>()
 
 const { isZh } = useLocale()
 
@@ -129,6 +142,10 @@ function recordDisplay(c: HistoryChange): string {
     if (title) return title
   }
   return shortRecordId(c.recordId)
+}
+
+function canRestoreRecord(c: HistoryChange): boolean {
+  return c.action === 'delete' && props.canRestoreRecords === true && c.sheetId === props.activeSheetId
 }
 
 // --- Inline per-field diff (read-only detail expansion) ---
@@ -239,7 +256,8 @@ function formatDiffValueFor(c: HistoryChange, fieldId: string, v: unknown): stri
 function changeFieldDiffs(c: HistoryChange): FieldDiffRow[] {
   return c.changedFieldIds.map((fieldId) => {
     const beforeHas = hasFieldValue(c.before, fieldId)
-    const afterHas = hasFieldValue(c.after, fieldId)
+    // Delete wire snapshots retain the pre-delete data on both sides; no value survives the deletion.
+    const afterHas = c.action !== 'delete' && hasFieldValue(c.after, fieldId)
     const shape: FieldDiffShape = beforeHas && afterHas ? 'changed' : afterHas ? 'set' : beforeHas ? 'cleared' : 'masked'
     return {
       fieldId,
@@ -273,6 +291,7 @@ function diffMaskedLabel(): string {
 .meta-hist__change-rec--link { background: none; border: none; padding: 0; font: inherit; cursor: pointer; text-decoration: underline dotted; }
 .meta-hist__change-rec--link:hover { color: var(--meta-text, #0f172a); }
 .meta-hist__change-fields { color: var(--meta-text-secondary, #888); }
+.meta-hist__change-restore { cursor: pointer; }
 .meta-hist__diff { list-style: none; margin: 4px 0 0; padding: 0; }
 .meta-hist__diff-row { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
 .meta-hist__diff-row + .meta-hist__diff-row { border-top: 1px dashed var(--meta-border, #eee); }

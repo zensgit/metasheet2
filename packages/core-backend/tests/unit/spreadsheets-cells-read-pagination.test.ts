@@ -43,6 +43,7 @@ function makeSelectQuery(result: { takeFirst?: unknown; execute?: unknown[] }) {
   }
   const chain: any = {
     selectAll: vi.fn(() => chain),
+    select: vi.fn(() => chain),
     where: vi.fn((field: unknown, op: unknown, value: unknown) => {
       state.where.push([field, op, value])
       return chain
@@ -66,18 +67,21 @@ function makeSelectQuery(result: { takeFirst?: unknown; execute?: unknown[] }) {
 }
 
 function makeDb(cells: unknown[] = []) {
+  // #5828 — the route now gates on the PARENT spreadsheet being live before it reads the sheet row.
+  const spreadsheetQuery = makeSelectQuery({ takeFirst: { id: spreadsheetId } })
   const sheetQuery = makeSelectQuery({
     takeFirst: { id: sheetId, spreadsheet_id: spreadsheetId, name: 'Sheet1' },
   })
   const cellsQuery = makeSelectQuery({ execute: cells })
   const db = {
     selectFrom: vi.fn((table: string) => {
+      if (table === 'spreadsheets') return spreadsheetQuery.chain
       if (table === 'sheets') return sheetQuery.chain
       if (table === 'cells') return cellsQuery.chain
       throw new Error(`unexpected table ${table}`)
     }),
   }
-  return { db, sheetQuery, cellsQuery }
+  return { db, spreadsheetQuery, sheetQuery, cellsQuery }
 }
 
 async function loadRouter(db: unknown) {

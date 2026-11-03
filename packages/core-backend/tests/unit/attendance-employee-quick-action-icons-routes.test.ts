@@ -66,6 +66,13 @@ async function createHarness() {
   const db = {
     query: vi.fn(async (sql: string, params: unknown[] = []) => {
       const text = String(sql)
+      if (text.includes('AS allowed') && text.includes('FROM users u JOIN user_orgs')) {
+        return [{ allowed: grants.get(String(params[0]))?.includes('attendance:admin') === true }]
+      }
+      if (text.includes('SELECT u.id FROM users u JOIN user_orgs')) {
+        return params[1] === ADMIN.orgId && grants.has(String(params[0])) ? [{ id: params[0] }] : []
+      }
+      if (text.includes('pg_advisory_xact_lock')) return []
       const rbac = rbacRows(text, params, grants)
       if (rbac !== null) return rbac
       if (text.includes('SELECT value FROM system_configs')) {

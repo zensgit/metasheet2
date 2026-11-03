@@ -308,6 +308,72 @@ describe('stock-prep posture plain language', () => {
   })
 
   // -------------------------------------------------------------------------
+  // 通知下一步's TENANT WALL (#6121 follow-up). The advance now refuses, before it checks the project
+  // exists, when the bound 备料主表 is not the caller's factory's — in three codes of its own. With no
+  // row here each one fell through to STOCK_PREP_ERROR_GENERIC and its 「过一会儿再点一次」, which
+  // invites a retry that can never succeed: the binding is deployment configuration.
+  //
+  // The code family is read FROM THE SERVER MODULES, the same discipline as the manifest and source
+  // preflight reads above: the two refusal codes from the handoff's ownership register, the 501 from
+  // the handoff wall's `portUnavailableCode`. A code the server adds to that family later without a
+  // row here turns this red instead of silently rendering the generic retry sentence.
+  // -------------------------------------------------------------------------
+  const PLUGIN_LIB = path.resolve(HERE, '..', '..', '..', 'plugins', 'plugin-integration-core', 'lib')
+
+  function serverHandoffWallCodes(): string[] {
+    const provisioning = fs.readFileSync(path.join(PLUGIN_LIB, 'stock-preparation-target-provisioning.cjs'), 'utf8')
+    const registerStart = provisioning.indexOf('const STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES = Object.freeze({')
+    expect(registerStart, 'the handoff ownership register is where this spec expects it').toBeGreaterThan(0)
+    const register = provisioning.slice(registerStart, provisioning.indexOf('})', registerStart))
+    const routes = fs.readFileSync(path.join(PLUGIN_LIB, 'http-routes.cjs'), 'utf8')
+    const wallStart = routes.indexOf('  handoffAdvance: Object.freeze({')
+    expect(wallStart, 'the handoff wall vocabulary is where this spec expects it').toBeGreaterThan(0)
+    const wall = routes.slice(wallStart, routes.indexOf('}),', wallStart))
+    const codes = [...`${register}\n${wall}`.matchAll(/'(STOCK_PREPARATION_HANDOFF_[A-Z_]+)'/g)].map((m) => m[1])
+    return [...new Set(codes)].sort()
+  }
+
+  it('the handoff tenant-wall codes each have their own sentence, send the reader to an admin, and never invite a retry', () => {
+    const codes = serverHandoffWallCodes()
+    // Anti-vacuity: the text read found exactly the family the server raises today.
+    expect(codes).toEqual([
+      'STOCK_PREPARATION_HANDOFF_PROVISIONING_UNAVAILABLE',
+      'STOCK_PREPARATION_HANDOFF_TARGET_OWNER_UNKNOWN',
+      'STOCK_PREPARATION_HANDOFF_TARGET_TENANT_MISMATCH',
+    ])
+    for (const code of codes) {
+      expect(Object.prototype.hasOwnProperty.call(STOCK_PREP_ERROR_PLAIN, code), `${code} has a row of its own`).toBe(true)
+      const plain = stockPrepErrorPlain(code)
+      expect(plain, code).not.toBe(STOCK_PREP_ERROR_GENERIC)
+      expect(plain.zh, code).not.toBe(STOCK_PREP_ERROR_GENERIC.zh)
+      // What happened to the CHAIN, the way the other handoff rows say it — and that no prep row moved.
+      expect(plain.zh, `${code} says the next person was not told`).toContain('没有通知下一步')
+      expect(plain.zh, `${code} says nothing changed`).toContain('备料数据也没有变化')
+      // Never a retry invitation, in either half.
+      const both = `${plain.zh}${plain.zhNext ?? ''}`
+      expect(both, `${code} is not a retry invitation`).not.toContain('过一会儿再')
+      expect(both, `${code} is not a retry invitation`).not.toContain('稍后再')
+      expect(String(plain.enNext ?? ''), `${code} is not a retry invitation (en)`).not.toMatch(/try again/i)
+      expect(plain.zhNext, `${code} sends the reader to an administrator`).toContain('管理员')
+      expect(String(plain.en ?? '').trim().length, `${code}.en`).toBeGreaterThan(0)
+      expect(String(plain.enNext ?? '').trim().length, `${code}.enNext`).toBeGreaterThan(0)
+      // Values-free.
+      expect(`${plain.zh}${plain.zhNext}${plain.en}${plain.enNext}`).not.toMatch(/\d{6,}/)
+      // The board resolves the same row (no board-only override shadows it) — one definition, two surfaces.
+      expect(stockPrepBoardErrorPlain(code), `${code} on the board`).toBe(plain)
+      // Its own words, not the export's: a handoff click is never described as an export.
+      expect(plain.zh, `${code} is not the export sentence`).not.toContain('导出')
+    }
+    // The binding refusals name the admin's first check — the preflight step, by its on-screen name.
+    for (const code of ['STOCK_PREPARATION_HANDOFF_TARGET_TENANT_MISMATCH', 'STOCK_PREPARATION_HANDOFF_TARGET_OWNER_UNKNOWN']) {
+      expect(stockPrepErrorPlain(code).zhNext, `${code} names the preflight step`).toContain('看看还缺什么')
+      expect(stockPrepErrorPlain(code).enNext, `${code} names the preflight step (en)`).toContain('See what is missing')
+    }
+    // The 501 is a server upgrade, which the preflight cannot fix; it says so instead.
+    expect(stockPrepErrorPlain('STOCK_PREPARATION_HANDOFF_PROVISIONING_UNAVAILABLE').zhNext).toContain('升级服务端')
+  })
+
+  // -------------------------------------------------------------------------
   // 2026-09-10 field report (b): the confirmation queue's 「什么情况」 column used to render
   // `row.conflictType` verbatim — a materials admin saw six `SOURCE_VALUE_NOT_A_STRING` rows with no
   // words for what that meant or why 「我来定…」 was greyed out. `stockPrepConflictTypePlain` covers

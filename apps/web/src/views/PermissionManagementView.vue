@@ -51,22 +51,78 @@
             </div>
             <div class="permission-admin__chips">
               <span class="permission-admin__chip">{{ selectedUser.role }}</span>
-              <span class="permission-admin__chip" :class="{ 'permission-admin__chip--admin': selectedUserAccess?.isAdmin }">
-                {{ selectedUserAccess?.isAdmin ? '管理员' : '普通用户' }}
+              <span class="permission-admin__chip" :class="{ 'permission-admin__chip--admin': grantView.adminLabel === '管理员' }">
+                {{ grantView.adminLabel }}
               </span>
             </div>
           </div>
 
-          <section class="permission-admin__section">
+          <p
+            v-if="grantView.unread"
+            class="permission-admin__status permission-admin__status--error"
+            data-testid="permission-inspection-unavailable"
+          >
+            权限来源暂时不可用，不能把空列表当作已回收或未授予。
+          </p>
+
+          <section class="permission-admin__section" data-testid="permission-direct-section">
             <div class="permission-admin__section-head">
-              <h3>已授予权限</h3>
-              <span>{{ assignedPermissions.length }} 项</span>
+              <h3>直接授予</h3>
+              <span>{{ grantView.directLabel }}</span>
             </div>
             <div class="permission-admin__chips">
-              <span v-for="permission in assignedPermissions" :key="permission" class="permission-admin__chip permission-admin__chip--permission">
+              <span v-for="permission in grantView.showDirectChips ? (selectedUserAccess?.direct || []) : []" :key="`direct-${permission}`" class="permission-admin__chip permission-admin__chip--permission">
                 {{ permission }}
               </span>
-              <span v-if="assignedPermissions.length === 0" class="permission-admin__empty">暂无直接权限</span>
+              <span v-if="grantView.showDirectEmpty" class="permission-admin__empty">暂无直接授予</span>
+            </div>
+          </section>
+
+          <section class="permission-admin__section" data-testid="permission-inherited-section">
+            <div class="permission-admin__section-head">
+              <h3>角色继承</h3>
+              <span>{{ grantView.inheritedLabel }}</span>
+            </div>
+            <div class="permission-admin__chips">
+              <span v-for="permission in grantView.showInheritedChips ? (selectedUserAccess?.inherited || []) : []" :key="`inherited-${permission}`" class="permission-admin__chip">
+                {{ permission }}
+              </span>
+              <span v-if="grantView.showInheritedEmpty" class="permission-admin__empty">暂无角色继承权限</span>
+            </div>
+          </section>
+
+          <section class="permission-admin__section" data-testid="permission-effective-section">
+            <div class="permission-admin__section-head">
+              <h3>生效权限</h3>
+              <span>{{ grantView.effectiveLabel }}</span>
+            </div>
+            <p class="permission-admin__hint">生效权限 = 直接授予 ∪ 角色继承 ∪ 历史字段，再经过命名空间准入过滤。未开通准入的权限不会出现在这里，也不会被自动开通。</p>
+            <div class="permission-admin__chips">
+              <span v-for="permission in grantView.showEffectiveChips ? assignedPermissions : []" :key="`effective-${permission}`" class="permission-admin__chip permission-admin__chip--permission">
+                {{ permission }}
+              </span>
+              <span v-if="grantView.showEffectiveEmpty" class="permission-admin__empty">暂无生效权限</span>
+            </div>
+          </section>
+
+          <section
+            v-if="(selectedUserAccess?.blockedByNamespaceAdmission.length || 0) > 0"
+            class="permission-admin__section"
+            data-testid="permission-blocked-section"
+          >
+            <div class="permission-admin__section-head">
+              <h3>未生效（命名空间准入）</h3>
+              <span>{{ selectedUserAccess?.blockedByNamespaceAdmission.length }} 项</span>
+            </div>
+            <p class="permission-admin__hint">这些权限已写入直接授予、角色或历史字段，但因命名空间准入未满足而未进入生效权限。本页不会自动开通准入。</p>
+            <div class="permission-admin__chips">
+              <span
+                v-for="permission in selectedUserAccess?.blockedByNamespaceAdmission || []"
+                :key="`blocked-${permission}`"
+                class="permission-admin__chip permission-admin__chip--blocked"
+              >
+                {{ permission }}
+              </span>
             </div>
           </section>
 
@@ -86,7 +142,7 @@
                     {{ template.name }} · {{ template.productMode }}
                   </option>
                 </select>
-                <button class="permission-admin__button" type="button" :disabled="busy || !selectedTemplateId" @click="void applyPermissionTemplate()">
+                <button class="permission-admin__button" type="button" data-testid="apply-permission-template-button" :disabled="busy || !selectedTemplateId || !grantView.actionsEnabled" @click="void applyPermissionTemplate()">
                   按模板补齐
                 </button>
               </div>
@@ -105,20 +161,30 @@
             <div class="permission-admin__section-head">
               <h3>权限目录</h3>
               <div class="permission-admin__role-actions">
-                <select v-model="selectedPermissionCode" class="permission-admin__select">
+                <select v-model="selectedPermissionCode" class="permission-admin__select" data-testid="permission-select" aria-label="选择要授予或回收的权限">
                   <option value="">请选择权限</option>
                   <option v-for="permission in permissions" :key="permission.code" :value="permission.code">
                     {{ permission.code }}
                   </option>
                 </select>
-                <button class="permission-admin__button" type="button" :disabled="busy || !selectedPermissionCode" @click="void grantPermission()">
+                <button class="permission-admin__button" type="button" data-testid="grant-permission-button" :disabled="busy || !selectedPermissionCode || !grantView.actionsEnabled" @click="void grantPermission()">
                   授予
                 </button>
-                <button class="permission-admin__button permission-admin__button--secondary" type="button" :disabled="busy || !selectedPermissionCode" @click="void revokePermission()">
+                <button class="permission-admin__button permission-admin__button--secondary" type="button" data-testid="revoke-permission-button" :disabled="busy || !selectedPermissionCode || !grantView.actionsEnabled" @click="void revokePermission()">
                   回收
                 </button>
               </div>
             </div>
+            <p v-if="selectedPermissionHint" data-testid="selected-permission-hint" class="permission-admin__hint">{{ selectedPermissionHint }}</p>
+            <p
+              v-if="permissionActionFeedback"
+              data-testid="permission-action-feedback"
+              class="permission-admin__status"
+              :class="{ 'permission-admin__status--error': permissionActionFeedback.tone === 'error' }"
+              aria-live="polite"
+            >
+              {{ permissionActionFeedback.message }}
+            </p>
 
             <div class="permission-admin__catalog">
               <article v-for="permission in permissions" :key="permission.code" class="permission-admin__permission">
@@ -148,6 +214,19 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { apiFetch } from '../utils/api'
+import {
+  accessReadStillCurrent,
+  describePermissionInspectionView,
+  describePermissionTemplateApply,
+  describePermissionWrite,
+  describeSelectedPermissionHint,
+  nextAccessReadGeneration,
+  readPermissionTemplateApplyAcknowledgement,
+  readPermissionWriteAcknowledgement,
+  readUserPermissionInspection,
+  unreadUserPermissionInspection,
+  type UserPermissionInspection,
+} from './adminPermissionGrantDisplay'
 
 type ManagedUser = {
   id: string
@@ -166,11 +245,7 @@ type PermissionCatalogItem = {
   description: string | null
 }
 
-type UserPermissionState = {
-  userId: string
-  permissions: string[]
-  isAdmin: boolean
-}
+type UserPermissionState = UserPermissionInspection
 
 type PermissionTemplate = {
   id: string
@@ -191,13 +266,20 @@ const users = ref<ManagedUser[]>([])
 const permissions = ref<PermissionCatalogItem[]>([])
 const permissionTemplates = ref<PermissionTemplate[]>([])
 const selectedUserId = ref('')
+const userAccessReadGeneration = ref(0)
 const selectedPermissionCode = ref('')
 const selectedTemplateId = ref('')
 const templateModeFilter = ref<'' | 'platform' | 'attendance' | 'plm-workbench'>('')
 const selectedUserAccess = ref<UserPermissionState | null>(null)
+const permissionActionFeedback = ref<{ tone: 'info' | 'error'; message: string } | null>(null)
 
 const selectedUser = computed(() => users.value.find((user) => user.id === selectedUserId.value) || null)
-const assignedPermissions = computed(() => selectedUserAccess.value?.permissions || [])
+const grantView = computed(() => describePermissionInspectionView(selectedUserAccess.value, selectedUserId.value))
+const assignedPermissions = computed(() => {
+  if (!grantView.value.showEffectiveChips) return []
+  return selectedUserAccess.value?.effective || []
+})
+const selectedPermissionHint = computed(() => describeSelectedPermissionHint(selectedPermissionCode.value, selectedUserAccess.value))
 const selectedTemplate = computed(() => permissionTemplates.value.find((template) => template.id === selectedTemplateId.value) || null)
 
 function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
@@ -258,30 +340,52 @@ async function loadPermissions(): Promise<void> {
   }
 }
 
-async function loadUserAccess(userId: string): Promise<void> {
+async function loadUserAccess(userId: string): Promise<UserPermissionState> {
   const response = await apiFetch(`/api/permissions/user/${encodeURIComponent(userId)}`)
   const payload = await readJson(response)
   if (!response.ok) {
     throw new Error(String(payload.error || '加载用户权限失败'))
   }
 
-  selectedUserAccess.value = {
-    userId: String(payload.userId || userId),
-    permissions: Array.isArray(payload.permissions) ? payload.permissions as string[] : [],
-    isAdmin: Boolean(payload.isAdmin),
+  return readUserPermissionInspection(payload, userId)
+}
+
+async function reloadSelectedUserAccess(): Promise<void> {
+  const userId = selectedUserId.value
+  if (!userId) return
+  const generation = nextAccessReadGeneration(userAccessReadGeneration.value)
+  userAccessReadGeneration.value = generation
+  selectedUserAccess.value = null
+  try {
+    const inspection = await loadUserAccess(userId)
+    if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
+    selectedUserAccess.value = inspection
+  } catch (error) {
+    if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
+    selectedUserAccess.value = unreadUserPermissionInspection(userId)
+    setStatus(error instanceof Error ? error.message : '加载用户权限失败', 'error')
   }
 }
 
 async function loadAll(): Promise<void> {
   loading.value = true
+  const requestedUserId = selectedUserId.value
+  const generation = requestedUserId ? nextAccessReadGeneration(userAccessReadGeneration.value) : userAccessReadGeneration.value
+  if (requestedUserId) {
+    userAccessReadGeneration.value = generation
+    selectedUserAccess.value = unreadUserPermissionInspection(requestedUserId)
+  }
   try {
     await Promise.all([loadUsers(), loadPermissions()])
     if (!selectedUserId.value && users.value.length > 0) {
       await selectUser(users.value[0].id)
     } else if (selectedUserId.value) {
-      await loadUserAccess(selectedUserId.value)
+      await reloadSelectedUserAccess()
     }
   } catch (error) {
+    if (requestedUserId && accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) {
+      selectedUserAccess.value = unreadUserPermissionInspection(requestedUserId)
+    }
     setStatus(error instanceof Error ? error.message : '加载权限管理数据失败', 'error')
   } finally {
     loading.value = false
@@ -291,49 +395,123 @@ async function loadAll(): Promise<void> {
 async function selectUser(userId: string): Promise<void> {
   selectedUserId.value = userId
   selectedPermissionCode.value = ''
-  try {
-    await loadUserAccess(userId)
-  } catch (error) {
-    setStatus(error instanceof Error ? error.message : '加载用户权限失败', 'error')
+  permissionActionFeedback.value = null
+  await reloadSelectedUserAccess()
+}
+
+function applyPermissionReadback(
+  generation: number,
+  requestedUserId: string,
+  inspection: UserPermissionInspection,
+  outcomeApply: boolean,
+): void {
+  if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) return
+  if (outcomeApply || inspection.degraded || !inspection.subjectMatched || !inspection.sourceKnown) {
+    selectedUserAccess.value = inspection.subjectMatched ? inspection : unreadUserPermissionInspection(requestedUserId)
   }
 }
 
 async function mutatePermission(action: 'grant' | 'revoke'): Promise<void> {
-  if (!selectedUserId.value || !selectedPermissionCode.value) return
+  if (!selectedUserId.value || !selectedPermissionCode.value || !grantView.value.actionsEnabled) return
+  const requestedUserId = selectedUserId.value
+  const requestedPermission = selectedPermissionCode.value
+  const generation = userAccessReadGeneration.value
 
   busy.value = true
+  let acknowledged = false
   try {
     const response = await apiFetch(`/api/permissions/${action}`, {
       method: 'POST',
       body: JSON.stringify({
-        userId: selectedUserId.value,
-        permission: selectedPermissionCode.value,
+        userId: requestedUserId,
+        permission: requestedPermission,
       }),
     })
     const payload = await readJson(response)
     if (!response.ok) {
-      throw new Error(String(payload.error || `${action} permission failed`))
+      const outcome = describePermissionWrite({
+        action,
+        requestedUserId,
+        selectedUserId: selectedUserId.value,
+        permission: requestedPermission,
+        ok: false,
+        httpStatus: response.status,
+        errorMessage: String(payload.error || `${action} permission failed`),
+        inspection: selectedUserAccess.value,
+      })
+      permissionActionFeedback.value = { tone: outcome.tone, message: outcome.message }
+      setStatus(outcome.message, 'error')
+      return
     }
 
-    await loadUserAccess(selectedUserId.value)
-    setStatus(action === 'grant' ? '权限已授予' : '权限已回收')
+    const acknowledgement = readPermissionWriteAcknowledgement(payload, requestedUserId, requestedPermission)
+    if (!acknowledgement.accepted) {
+      if (accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) {
+        selectedUserAccess.value = unreadUserPermissionInspection(requestedUserId)
+      }
+      const outcome = describePermissionWrite({
+        action,
+        requestedUserId,
+        selectedUserId: selectedUserId.value,
+        permission: requestedPermission,
+        ok: true,
+        writeAcknowledged: false,
+        errorMessage: acknowledgement.message,
+      })
+      permissionActionFeedback.value = { tone: outcome.tone, message: outcome.message }
+      setStatus(outcome.message, 'error')
+      return
+    }
+
+    acknowledged = true
+    const inspection = await loadUserAccess(requestedUserId)
+    const outcome = describePermissionWrite({
+      action,
+      requestedUserId,
+      selectedUserId: selectedUserId.value,
+      permission: requestedPermission,
+      ok: true,
+      writeAcknowledged: true,
+      inspection,
+    })
+    permissionActionFeedback.value = { tone: outcome.tone, message: outcome.message }
+    setStatus(outcome.message, outcome.tone)
+    applyPermissionReadback(generation, requestedUserId, inspection, outcome.applyInspection)
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '权限操作失败', 'error')
+    if (acknowledged && selectedUserId.value === requestedUserId && userAccessReadGeneration.value === generation) {
+      selectedUserAccess.value = unreadUserPermissionInspection(requestedUserId)
+    }
+    const outcome = describePermissionWrite({
+      action,
+      requestedUserId,
+      selectedUserId: selectedUserId.value,
+      permission: requestedPermission,
+      ok: false,
+      errorMessage: error instanceof Error ? error.message : '权限操作失败',
+      inspection: selectedUserAccess.value,
+    })
+    permissionActionFeedback.value = { tone: outcome.tone, message: outcome.message }
+    setStatus(outcome.message, 'error')
   } finally {
     busy.value = false
   }
 }
 
 async function applyPermissionTemplate(): Promise<void> {
-  if (!selectedUserId.value || !selectedTemplateId.value) return
+  if (!selectedUserId.value || !selectedTemplateId.value || !grantView.value.actionsEnabled) return
+  const requestedUserId = selectedUserId.value
+  const requestedTemplateId = selectedTemplateId.value
+  const templateName = selectedTemplate.value?.name || requestedTemplateId
+  const generation = userAccessReadGeneration.value
 
   busy.value = true
+  let submitted = false
   try {
     const response = await apiFetch('/api/admin/permission-templates/apply', {
       method: 'POST',
       body: JSON.stringify({
-        userId: selectedUserId.value,
-        templateId: selectedTemplateId.value,
+        userId: requestedUserId,
+        templateId: requestedTemplateId,
       }),
     })
     const payload = await readJson(response)
@@ -341,14 +519,28 @@ async function applyPermissionTemplate(): Promise<void> {
       throw new Error(String(payload.error || '应用权限模板失败'))
     }
 
-    selectedUserAccess.value = {
-      userId: selectedUserId.value,
-      permissions: Array.isArray(payload.permissions) ? payload.permissions as string[] : [],
-      isAdmin: Boolean(payload.isAdmin),
+    const acknowledgement = readPermissionTemplateApplyAcknowledgement(payload, requestedUserId, requestedTemplateId)
+    if (!acknowledgement.accepted) {
+      if (accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) {
+        selectedUserAccess.value = unreadUserPermissionInspection(requestedUserId)
+        setStatus(acknowledgement.message, 'error')
+      }
+      return
     }
-    setStatus(`已按模板 ${selectedTemplate.value?.name || selectedTemplateId.value} 补齐权限`)
+
+    submitted = true
+    const inspection = await loadUserAccess(requestedUserId)
+    if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) return
+    selectedUserAccess.value = inspection
+    const outcome = describePermissionTemplateApply({ templateName, inspection })
+    setStatus(outcome.message, outcome.tone)
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '应用权限模板失败', 'error')
+    if (submitted && accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) {
+      selectedUserAccess.value = unreadUserPermissionInspection(requestedUserId)
+    }
+    if (accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) {
+      setStatus(error instanceof Error ? error.message : '应用权限模板失败', 'error')
+    }
   } finally {
     busy.value = false
   }
@@ -466,6 +658,11 @@ watch(templateModeFilter, () => {
 .permission-admin__chip--admin {
   background: #eff6ff;
   color: #1d4ed8;
+}
+
+.permission-admin__chip--blocked {
+  background: #fef3c7;
+  color: #92400e;
 }
 
 .permission-admin__search,

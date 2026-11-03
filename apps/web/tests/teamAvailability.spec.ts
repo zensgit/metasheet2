@@ -130,11 +130,11 @@ describe('useTeamAvailability — clear-on-failure invariant (403/404/failure cl
 describe('AttendanceTeamAvailabilitySection — RENDER (the owner-enumerated §3c vitest criterion)', () => {
   beforeEach(() => apiFetchMock.mockReset())
 
-  function mountSection() {
+  function mountSection(extra: Record<string, unknown> = {}) {
     const container = document.createElement('div')
     document.body.appendChild(container)
     // ZH locale so the rendered tooltip is the §3c "待审批，未生效".
-    const app = createApp(AttendanceTeamAvailabilitySection, { tr: (_en: string, zh: string) => zh })
+    const app = createApp(AttendanceTeamAvailabilitySection, { tr: (_en: string, zh: string) => zh, ...extra })
     app.provide(attendanceSessionGuardKey, createAttendanceSessionGuard('synthetic-org', () => 'synthetic-epoch'))
     app.mount(container)
     const fillForm = () => {
@@ -204,6 +204,122 @@ describe('AttendanceTeamAvailabilitySection — RENDER (the owner-enumerated §3
     clickLoad()
     await flushUi()
     expect(container.querySelector('[data-attendance-team-availability-matrix]')).toBeNull()
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('keeps group, from, and to on one filter row', async () => {
+    const { container, app } = mountSection()
+    await flushUi()
+    const row = container.querySelector('[data-attendance-team-availability-filters]')
+    expect(row).toBeTruthy()
+    expect(row!.classList.contains('attendance-ta__filters')).toBe(true)
+    expect(row!.querySelector('#attendance-ta-group')).toBeTruthy()
+    expect(row!.querySelector('#attendance-ta-from')).toBeTruthy()
+    expect(row!.querySelector('#attendance-ta-to')).toBeTruthy()
+    expect(container.querySelector('.attendance__admin-grid')).toBeNull()
+    app.unmount()
+    container.remove()
+  })
+
+  it('lists group names in the typeahead and rewrites a pasted group id to the name', async () => {
+    const groupUuid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (String(url).includes('/api/attendance/groups')) {
+        return jsonResponse(200, { ok: true, data: { items: [{ id: groupUuid, name: '白班组' }] } })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [] } })
+    })
+    const { container, app } = mountSection()
+    await flushUi()
+    const input = container.querySelector('#attendance-ta-group') as HTMLInputElement
+    input.dispatchEvent(new Event('focus'))
+    await flushUi()
+    const menu = container.querySelector('[data-attendance-team-availability-group-menu]')
+    expect(menu?.textContent).toContain('白班组')
+    expect(menu?.textContent).not.toContain(groupUuid)
+    input.value = groupUuid
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(input.value).toBe('白班组')
+    expect(menu?.textContent ?? container.textContent).not.toContain(groupUuid)
+    app.unmount()
+    container.remove()
+  })
+
+  it('shows 搜索不到 only after a group query matches nothing', async () => {
+    let resolveGroups: (response: Response) => void = () => {}
+    apiFetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/api/attendance/groups')) {
+        return new Promise<Response>((resolve) => { resolveGroups = resolve })
+      }
+      return Promise.resolve(jsonResponse(200, { ok: true, data: { items: [] } }))
+    })
+    const { container, app } = mountSection()
+    const input = container.querySelector('#attendance-ta-group') as HTMLInputElement
+    input.value = '没有这个组'
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+    resolveGroups(jsonResponse(200, { ok: true, data: { items: [{ id: 'g1', name: '白班组' }] } }))
+    await flushUi()
+    expect(container.querySelector('[data-attendance-search-empty]')?.textContent).toContain('搜索不到')
+
+    input.value = ''
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+    expect(container.querySelector('[data-attendance-team-availability-group-menu]')?.textContent).toContain('白班组')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('shows the resolved 姓名 and clips the raw user id', async () => {
+    const userId = '11111111-1111-4111-8111-111111111111'
+    const { container, app, fillForm, clickLoad } = mountSection({ userScope: { orgId: 'org-1' } })
+    await flushUi()
+    fillForm()
+    await flushUi()
+    apiFetchMock.mockImplementation(async (url: string, options?: { body?: string }) => {
+      const path = String(url)
+      if (path.includes('/api/attendance/team-availability')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            groupId: 'grp_1',
+            range: { from: '2026-09-21', to: '2026-09-21' },
+            members: 1,
+            items: [{ date: '2026-09-21', userId, state: 'scheduled' }],
+            summary: [
+              { date: '2026-09-21', scheduled: 1, rest: 0, approvedLeave: 0, pendingLeaveTentative: 0, unscheduled: 0, availableFormal: 1 },
+            ],
+          },
+        })
+      }
+      if (path.includes('/api/attendance-admin/users/batch/resolve')) {
+        const body = JSON.parse(String(options?.body || '{}')) as { orgId?: string; userIds?: string[] }
+        expect(body.orgId).toBe('org-1')
+        expect(body.userIds).toEqual([userId])
+        return jsonResponse(200, {
+          ok: true,
+          data: { items: [{ id: userId, name: '张三', email: 'zhang@example.com' }] },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [] } })
+    })
+    clickLoad()
+    await flushUi(16)
+
+    const label = container.querySelector('[data-attendance-team-availability-member-label]')
+    expect(label?.textContent).toBe('张三')
+    const idNode = container.querySelector('[data-attendance-team-availability-member-id]')
+    expect(idNode?.textContent).toBe(userId)
+    expect(idNode?.classList.contains('attendance-ta__id-clip')).toBe(true)
+    expect(container.querySelector('.attendance-ta__member')?.textContent).not.toContain('zhang@example.com')
+    expect(container.querySelector('[data-attendance-team-availability-matrix]')).toBeTruthy()
 
     app.unmount()
     container.remove()

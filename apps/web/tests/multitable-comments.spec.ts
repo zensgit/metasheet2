@@ -298,6 +298,54 @@ describe('useMultitableComments', () => {
     expect(state.comments.value[0].reactions).toEqual([{ emoji: '👍', count: 2, reactedByMe: true }])
   })
 
+  // ── #5808 edit-time mention labels ───────────────────────────────────────
+
+  it('carries mentionLabels through the client normalizer, only for the comment\'s own mentions (wire-drift guard)', async () => {
+    const comments = [
+      {
+        id: 'c1', spreadsheetId: 's1', rowId: 'r1', fieldId: null, authorId: 'u1', content: 'hi', resolved: false, createdAt: '2026-01-01',
+        mentions: ['u_fake_a', 'u_fake_b', 'u_fake_c'],
+        mentionLabels: { u_fake_a: ' Fake A ', u_fake_b: 42, u_fake_c: '   ', u_fake_stray: 'Stray Person' },
+      },
+      { id: 'c2', spreadsheetId: 's1', rowId: 'r1', fieldId: null, authorId: 'u2', content: 'yo', resolved: false, createdAt: '2026-01-02', mentions: ['u_fake_a'] },
+    ]
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: { comments } }), { status: 200 }))
+    ;(client as any).fetch = fetch
+    const state = useMultitableComments(client)
+    await state.loadComments({ containerId: 's1', targetId: 'r1' })
+    expect(state.comments.value[0].mentionLabels).toEqual({ u_fake_a: 'Fake A' })
+    expect(state.comments.value[1]).not.toHaveProperty('mentionLabels')
+  })
+
+  it('normalizes mentionLabels by own key into a prototype-less map (mention ids may be Object.prototype keys)', async () => {
+    const { normalizeMultitableComment } = await import('../src/shared/comments/normalize')
+    // JSON.parse gives `__proto__` as an OWN key, as a wire payload would
+    const rawLabels = JSON.parse('{"__proto__":"Fake Proto","u_fake_x":"Fake X"}') as Record<string, unknown>
+    Object.setPrototypeOf(rawLabels, { u_fake_inherited: 'Fake Inherited' })
+    const comment = normalizeMultitableComment({
+      id: 'c1', containerId: 's1', targetId: 'r1', authorId: 'u1', content: 'hi', resolved: false, createdAt: '2026-01-01',
+      mentions: ['constructor', 'toString', '__proto__', 'u_fake_x', 'u_fake_inherited'],
+      mentionLabels: rawLabels,
+    } as any)
+    const labels = comment.mentionLabels!
+    expect(Object.getPrototypeOf(labels)).toBeNull()
+    expect(Object.keys(labels).sort()).toEqual(['__proto__', 'u_fake_x'])
+    expect(labels['__proto__']).toBe('Fake Proto')
+    expect(labels.constructor).toBeUndefined()
+    expect(labels.toString).toBeUndefined()
+    expect(Object.hasOwn(labels, 'u_fake_inherited')).toBe(false)
+    expect(labels.u_fake_inherited).toBeUndefined()
+  })
+
+  it('upsertComment keeps existing mentionLabels when an edit/realtime payload lacks them', () => {
+    const state = useMultitableComments(client)
+    state.comments.value = [{ id: 'c1', containerId: 's1', targetId: 'r1', fieldId: null, mentions: ['u_fake_a'], mentionLabels: { u_fake_a: 'Fake A' }, authorId: 'u1', content: 'old', resolved: false, createdAt: '2026-01-01' }]
+    // an edit/realtime payload whose labels were not hydrated (an explicit undefined, like `reactions`)
+    state.upsertComment({ id: 'c1', containerId: 's1', targetId: 'r1', fieldId: null, mentions: ['u_fake_a'], mentionLabels: undefined, authorId: 'u1', content: 'edited', resolved: false, createdAt: '2026-01-01' } as any)
+    expect(state.comments.value[0].content).toBe('edited')
+    expect(state.comments.value[0].mentionLabels).toEqual({ u_fake_a: 'Fake A' })
+  })
+
   it('surfaces a localized fallback when addReaction fails', async () => {
     useLocale().setLocale('en')
     const state = useMultitableComments({

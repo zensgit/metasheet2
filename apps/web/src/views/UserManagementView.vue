@@ -3,7 +3,7 @@
     <header class="user-admin__header">
       <div>
         <h1>用户管理</h1>
-        <p>平台管理员可在此查看用户访问状态并分配角色。</p>
+        <p>查看成员、邀请新用户，并在侧栏里维护资料与权限。</p>
       </div>
 
       <div class="user-admin__actions">
@@ -11,15 +11,8 @@
         <router-link class="user-admin__link" to="/admin/permissions">权限管理</router-link>
         <router-link class="user-admin__link" to="/admin/directory">目录同步</router-link>
         <router-link class="user-admin__link" to="/admin/audit">管理审计</router-link>
-        <input
-          v-model.trim="search"
-          class="user-admin__search"
-          type="search"
-          placeholder="搜索邮箱、用户名、手机号、姓名、员工号、部门或用户 ID"
-          @keyup.enter="void loadUsers()"
-        />
-        <button class="user-admin__button" type="button" :disabled="loading" @click="void loadUsers()">
-          {{ loading ? '加载中...' : '查询' }}
+        <button class="user-admin__button" type="button" data-testid="open-invite-user" @click="openInvite()">
+          邀请用户
         </button>
       </div>
     </header>
@@ -47,17 +40,193 @@
         </button>
       </div>
     </section>
-    <section class="user-admin__panel user-admin__panel--create">
+    <div class="user-admin__tabs" role="tablist" aria-label="用户管理视图">
+      <button
+        class="user-admin__tab"
+        :class="{ 'user-admin__tab--active': surface === 'members' }"
+        type="button"
+        role="tab"
+        :aria-selected="surface === 'members'"
+        @click="surface = 'members'"
+      >
+        成员
+      </button>
+      <button
+        class="user-admin__tab"
+        :class="{ 'user-admin__tab--active': surface === 'invites' }"
+        type="button"
+        role="tab"
+        :aria-selected="surface === 'invites'"
+        data-testid="pending-invites-tab"
+        @click="surface = 'invites'"
+      >
+        待处理邀请
+        <span v-if="pendingInviteCount > 0" class="user-admin__tab-count">{{ pendingInviteCount }}</span>
+      </button>
+      <button
+        class="user-admin__tab"
+        :class="{ 'user-admin__tab--active': surface === 'recycle' }"
+        type="button"
+        role="tab"
+        :aria-selected="surface === 'recycle'"
+        data-testid="recycle-bin-tab"
+        @click="surface = 'recycle'"
+      >
+        {{ recycleText('tab') }}
+        <span v-if="recycleTotal > 0" class="user-admin__tab-count">{{ recycleTotal }}</span>
+      </button>
+    </div>
+
+    <div v-show="surface === 'invites'" class="user-admin__panel">
       <div class="user-admin__section-head">
         <div>
-          <h2>创建用户</h2>
-          <p class="user-admin__hint">可选择自动生成临时密码，后续再在权限页补充直接权限。密码需至少 8 位，包含大小写字母和数字。</p>
+          <h2>邀请记录</h2>
+          <p class="user-admin__hint">待接受的邀请在这里重发或撤销。已接受、已撤销的记录可切换查看。</p>
+        </div>
+        <div class="user-admin__role-actions">
+          <button
+            class="user-admin__filter"
+            :class="{ 'user-admin__filter--active': inviteStatusFilter === 'pending' }"
+            type="button"
+            @click="inviteStatusFilter = 'pending'"
+          >
+            待处理
+          </button>
+          <button
+            class="user-admin__filter"
+            :class="{ 'user-admin__filter--active': inviteStatusFilter === 'all' }"
+            type="button"
+            @click="inviteStatusFilter = 'all'"
+          >
+            全部记录
+          </button>
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loadingInvites" @click="void loadInviteRecords(selectedUserId || undefined)">
+            {{ loadingInvites ? '刷新中...' : '刷新邀请记录' }}
+          </button>
         </div>
       </div>
+      <div v-if="inviteRecords.length === 0" class="user-admin__empty">暂无邀请记录</div>
+      <div v-else-if="visibleInviteRecords.length === 0" class="user-admin__empty">没有待处理的邀请</div>
+      <div v-else class="user-admin__role-list user-admin__invite-list">
+        <article v-for="record in visibleInviteRecords" :key="record.id" class="user-admin__role-card">
+          <strong>{{ record.userName || record.email }}</strong>
+          <span>{{ record.email }}</span>
+          <small>{{ record.productMode }} · {{ record.status }} · 创建于 {{ formatDate(record.createdAt) }}</small>
+          <p>最近发送：{{ formatDate(record.lastSentAt) }}</p>
+          <p v-if="record.acceptedAt">接受时间：{{ formatDate(record.acceptedAt) }}</p>
+          <a :href="buildInviteUrl(record.inviteToken)" target="_blank" rel="noreferrer">打开邀请链接</a>
+          <button
+            v-if="record.status !== 'accepted'"
+            class="user-admin__button user-admin__button--secondary"
+            type="button"
+            :disabled="busy || loadingInvites"
+            @click="void resendInvite(record)"
+          >
+            重发邀请
+          </button>
+          <button
+            v-if="record.status === 'pending'"
+            class="user-admin__button user-admin__button--secondary"
+            type="button"
+            :disabled="busy || loadingInvites"
+            @click="void revokeInvite(record)"
+          >
+            撤销邀请
+          </button>
+        </article>
+      </div>
+    </div>
+
+    <div v-show="surface === 'recycle'" class="user-admin__panel" data-testid="recycle-bin-panel">
+      <div class="user-admin__section-head">
+        <div>
+          <h2>{{ recycleText('title') }}</h2>
+          <p class="user-admin__hint">{{ recycleText('hint', { days: recycleRetentionDays }) }}</p>
+        </div>
+        <div class="user-admin__role-actions">
+          <input v-model.trim="recycleSearch" class="user-admin__search" type="text" :aria-label="recycleText('search')" :placeholder="recycleText('search')" data-testid="recycle-search" @keyup.enter="void loadRecycleBin()" />
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loadingRecycle" @click="void loadRecycleBin()">
+            {{ loadingRecycle ? recycleText('loading') : recycleText('refresh') }}
+          </button>
+        </div>
+      </div>
+      <div class="user-admin__role-actions">
+        <button class="user-admin__button" type="button" :disabled="recycleBusy || recycleSelectedIds.length === 0" data-testid="recycle-restore-selected" @click="void restoreRecycleUsers()">
+          {{ recycleText('restoreSelected') }}
+        </button>
+        <input v-model.trim="purgePhrase" class="user-admin__search" type="text" :aria-label="recycleText('purgePlaceholder')" :placeholder="recycleText('purgePlaceholder')" data-testid="recycle-purge-phrase" />
+        <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="recycleBusy || recycleSelectedIds.length === 0 || purgePhrase !== '立即清除'" data-testid="recycle-purge-selected" @click="void purgeRecycleUsers()">
+          {{ recycleText('purgeSelected') }}
+        </button>
+      </div>
+      <p class="user-admin__hint">{{ recycleText('purgedHint') }}</p>
+      <div v-if="loadingRecycle && recycleUsers.length === 0" class="user-admin__empty">{{ recycleText('loading') }}</div>
+      <div v-else-if="recycleUsers.length === 0" class="user-admin__empty">{{ recycleText('empty') }}</div>
+      <div v-else class="user-admin__table" role="table" aria-label="回收站">
+        <article v-for="user in recycleUsers" :key="user.id" class="user-admin__user" role="row" data-testid="recycle-row">
+          <label class="user-admin__user-select">
+            <input
+              :checked="recycleSelectedIds.includes(user.id)"
+              type="checkbox"
+              :aria-label="`${recycleText('restore')} ${user.name || user.email || user.id}`"
+              @change="toggleRecycleSelection(user.id, $event)"
+            />
+          </label>
+          <div class="user-admin__user-body">
+            <span class="user-admin__identity">
+              <span class="user-admin__avatar" aria-hidden="true">{{ userInitials(user) }}</span>
+              <span class="user-admin__identity-text">
+                <strong>{{ user.name || user.email || user.id }}</strong>
+                <span>{{ user.email || user.id }}</span>
+              </span>
+            </span>
+            <span class="user-admin__meta">{{ formatDate(user.deletedAt) }}</span>
+            <span class="user-admin__meta">{{ user.deletedBy || recycleText('unknownActor') }}</span>
+            <span class="user-admin__meta">{{ formatDate(user.purgeAfter) }}</span>
+          </div>
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="recycleBusy" @click="void restoreRecycleUsers([user.id])">
+            {{ recycleText('restore') }}
+          </button>
+        </article>
+      </div>
+    </div>
+
+    <div
+      class="user-admin__modal"
+      :class="{ 'user-admin__modal--open': inviteOpen }"
+      role="dialog"
+      aria-modal="true"
+      aria-label="邀请用户"
+      :aria-hidden="inviteOpen ? 'false' : 'true'"
+    >
+      <button class="user-admin__modal-backdrop" type="button" aria-label="关闭邀请" @click="closeInvite()" />
+      <section class="user-admin__panel user-admin__panel--create">
+        <div class="user-admin__section-head">
+          <div>
+            <h2>邀请用户</h2>
+            <p v-show="inviteTab === 'single'" class="user-admin__hint">一次邀请一名成员：填写邮箱和角色后创建账号。邀请文案可复制，并在「待处理邀请」里重发或撤销。</p>
+            <p v-show="inviteTab === 'single'" class="user-admin__hint">可选择自动生成临时密码，后续再在权限页补充直接权限。</p>
+            <p v-show="inviteTab === 'single'" class="user-admin__hint" data-create-user-rule="login-name">{{ createUserRuleHints.loginName }}</p>
+            <p v-show="inviteTab === 'single'" class="user-admin__hint" data-create-user-rule="password">{{ createUserRuleHints.password }}</p>
+          </div>
+          <button class="user-admin__button user-admin__button--secondary" type="button" @click="closeInvite()">关闭</button>
+        </div>
+        <div class="user-admin__tabs" role="tablist" aria-label="邀请方式">
+          <button class="user-admin__tab" :class="{ 'user-admin__tab--active': inviteTab === 'single' }" type="button" @click="inviteTab = 'single'">单个邀请</button>
+          <button class="user-admin__tab" :class="{ 'user-admin__tab--active': inviteTab === 'import' }" type="button" data-testid="batch-import-tab" @click="inviteTab = 'import'">批量导入</button>
+          <button class="user-admin__tab" :class="{ 'user-admin__tab--active': inviteTab === 'paste' }" type="button" data-testid="paste-emails-tab" @click="inviteTab = 'paste'">粘贴邮箱</button>
+        </div>
+      <div v-show="inviteTab === 'single'">
       <div class="user-admin__create-grid">
         <input v-model.trim="createForm.name" class="user-admin__search" type="text" placeholder="姓名" />
         <input v-model.trim="createForm.email" class="user-admin__search" type="email" placeholder="邮箱（可选）" />
-        <input v-model.trim="createForm.username" class="user-admin__search" type="text" placeholder="用户名（可选）" />
+        <input
+          v-model.trim="createForm.username"
+          class="user-admin__search"
+          type="text"
+          placeholder="登录名（可选，小写字母/数字）"
+          aria-label="登录名（可选）"
+        />
         <input v-model.trim="createForm.mobile" class="user-admin__search" type="text" placeholder="手机号（可选）" />
         <input v-model.trim="createForm.employeeNo" class="user-admin__search" type="text" placeholder="员工号（可选）" />
         <input v-model.trim="createForm.department" class="user-admin__search" type="text" placeholder="部门（可选）" />
@@ -92,6 +261,29 @@
           aria-label="默认班次生效日期（可选）"
           :disabled="!createForm.defaultShiftId"
         />
+        <div class="user-admin__org-field" data-create-user-org-field>
+          <select
+            v-model="createForm.attendanceOrgId"
+            class="user-admin__select"
+            :disabled="attendanceOrgOptionsLoading"
+            aria-label="所属组织（可选）"
+            data-create-user-org-select
+          >
+            <option value="">不指定组织（不写入组织归属）</option>
+            <option v-for="orgId in attendanceOrgOptions" :key="orgId" :value="orgId">
+              {{ orgId }}
+            </option>
+          </select>
+          <button
+            v-if="createForm.attendanceOrgId"
+            class="user-admin__button user-admin__button--secondary"
+            type="button"
+            data-create-user-org-clear
+            @click="createForm.attendanceOrgId = ''"
+          >
+            清除组织
+          </button>
+        </div>
         <input v-model.trim="createForm.password" class="user-admin__search" type="text" placeholder="可选：初始密码" />
         <select v-model="presetModeFilter" class="user-admin__select">
           <option value="">预设模式（全部）</option>
@@ -119,6 +311,10 @@
       </div>
       <p v-if="attendanceSetupLoadError" class="user-admin__hint">
         {{ attendanceSetupLoadError }}
+      </p>
+      <p class="user-admin__hint" data-create-user-org-hint>{{ attendanceOrgHint }}</p>
+      <p v-if="attendanceOnboardingOrgNote" class="user-admin__hint" data-create-user-attendance-org-note>
+        {{ attendanceOnboardingOrgNote }}
       </p>
       <div class="user-admin__role-actions">
         <button class="user-admin__button" type="button" :disabled="busy" @click="void createUser()">
@@ -165,56 +361,95 @@
         <a :href="createdOnboarding.acceptInviteUrl" target="_blank" rel="noreferrer">{{ createdOnboarding.acceptInviteUrl }}</a>
       </p>
       <pre v-if="createdInviteMessage" class="user-admin__invite">{{ createdInviteMessage }}</pre>
-    </section>
-
-    <section class="user-admin__panel">
-      <div class="user-admin__section-head">
-        <div>
-          <h2>邀请记录</h2>
-          <p class="user-admin__hint">展示最近发出的邀请及其当前状态。</p>
+        <label class="user-admin__note-label">
+          <span>附言（可选）</span>
+          <textarea
+            v-model="inviteNote"
+            class="user-admin__search user-admin__note"
+            rows="3"
+            placeholder="只附在复制的邀请文案末尾，不会提交到服务器"
+            aria-label="邀请附言（可选）"
+          />
+        </label>
+      </div>
+      <div v-show="inviteTab === 'import'" data-testid="batch-import-panel">
+        <p class="user-admin__hint">下载模板，填好姓名、邮箱、角色 ID 和部门后上传。先预览校验，再确认创建。一次最多 100 行。</p>
+        <div class="user-admin__role-actions">
+          <button class="user-admin__button user-admin__button--secondary" type="button" @click="downloadImportTemplate('csv')">下载 CSV 模板</button>
+          <button class="user-admin__button user-admin__button--secondary" type="button" @click="void downloadImportTemplate('xlsx')">下载 Excel 模板</button>
+          <label class="user-admin__button user-admin__button--secondary user-admin__file">
+            上传文件
+            <input type="file" accept=".csv,.xlsx,text/csv" data-testid="batch-import-file" @change="void onImportFile($event)" />
+          </label>
+          <button class="user-admin__button" type="button" :disabled="bulkBusy || importPreview.every((row) => !row.ok)" @click="void submitImport()">确认导入</button>
         </div>
-        <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loadingInvites" @click="void loadInviteRecords(selectedUserId || undefined)">
-          {{ loadingInvites ? '刷新中...' : '刷新邀请记录' }}
-        </button>
+        <p v-if="importPreview.length" class="user-admin__hint">可导入 {{ importPreview.filter((row) => row.ok).length }} 行，有问题 {{ importPreview.filter((row) => !row.ok).length }} 行。</p>
+        <div v-if="importPreview.length" class="user-admin__table">
+          <div class="user-admin__preview-row user-admin__preview-row--head"><span>邮箱</span><span>姓名</span><span>角色</span><span>结果</span></div>
+          <div v-for="row in importPreview" :key="row.index" class="user-admin__preview-row">
+            <span>{{ row.email || '—' }}</span>
+            <span>{{ row.name || '—' }}</span>
+            <span>{{ row.roleId || 'user' }}</span>
+            <span>{{ row.message }}</span>
+          </div>
+        </div>
+        <div v-if="batchReport" class="user-admin__preset" data-testid="batch-import-report">
+          <strong>导入结果：成功 {{ batchReport.successCount }}，失败 {{ batchReport.failureCount }}</strong>
+          <p v-for="item in batchReport.results" :key="`${item.index}-${item.email}`">{{ item.email || '—' }}：{{ item.message }}<template v-if="item.temporaryPassword">，临时密码 {{ item.temporaryPassword }}</template></p>
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="batchReport.failureCount === 0" @click="downloadFailedRows()">下载失败行</button>
+        </div>
       </div>
-      <div v-if="inviteRecords.length === 0" class="user-admin__empty">暂无邀请记录</div>
-      <div v-else class="user-admin__role-list">
-        <article v-for="record in inviteRecords" :key="record.id" class="user-admin__role-card">
-          <strong>{{ record.userName || record.email }}</strong>
-          <span>{{ record.email }}</span>
-          <small>{{ record.productMode }} · {{ record.status }} · 创建于 {{ formatDate(record.createdAt) }}</small>
-          <p>最近发送：{{ formatDate(record.lastSentAt) }}</p>
-          <p v-if="record.acceptedAt">接受时间：{{ formatDate(record.acceptedAt) }}</p>
-          <a :href="buildInviteUrl(record.inviteToken)" target="_blank" rel="noreferrer">打开邀请链接</a>
-          <button
-            v-if="record.status !== 'accepted'"
-            class="user-admin__button user-admin__button--secondary"
-            type="button"
-            :disabled="busy || loadingInvites"
-            @click="void resendInvite(record)"
-          >
-            重发邀请
-          </button>
-          <button
-            v-if="record.status === 'pending'"
-            class="user-admin__button user-admin__button--secondary"
-            type="button"
-            :disabled="busy || loadingInvites"
-            @click="void revokeInvite(record)"
-          >
-            撤销邀请
-          </button>
-        </article>
+      <div v-show="inviteTab === 'paste'" data-testid="paste-emails-panel">
+        <p class="user-admin__hint">把多个邮箱粘贴在这里，用逗号、分号或换行分开。他们会使用同一个角色。</p>
+        <textarea v-model="pasteEmails" class="user-admin__search user-admin__note" rows="5" aria-label="粘贴多个邮箱" placeholder="a@example.com, b@example.com" />
+        <select v-model="pasteRoleId" class="user-admin__select" aria-label="粘贴邀请角色">
+          <option value="">不指定角色（普通成员）</option>
+          <option v-for="role in roleCatalog" :key="role.id" :value="role.id">{{ role.name }} ({{ role.id }})</option>
+        </select>
+        <div class="user-admin__role-actions">
+          <button class="user-admin__button" type="button" :disabled="bulkBusy || pastedEmailList.length === 0" @click="void submitPastedEmails()">邀请这些邮箱</button>
+        </div>
+        <p v-if="pastedEmailList.length" class="user-admin__hint">将邀请 {{ pastedEmailList.length }} 个邮箱。</p>
       </div>
-    </section>
+      </section>
+    </div>
 
+    <div v-show="surface === 'members'">
     <div class="user-admin__layout">
       <aside class="user-admin__panel">
-        <div class="user-admin__section-head">
-          <div>
-            <h2>用户列表</h2>
-            <p class="user-admin__hint">按账号、钉钉和目录状态快速筛选，再执行批量治理动作。</p>
-          </div>
+        <div class="user-admin__toolbar">
+          <input
+            v-model.trim="search"
+            class="user-admin__search"
+            type="search"
+            placeholder="搜索邮箱、用户名、手机号、姓名、员工号、部门或用户 ID"
+            aria-label="搜索成员"
+            @keyup.enter="void loadUsers()"
+          />
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loading" @click="void loadUsers()">
+            {{ loading ? '加载中...' : '查询' }}
+          </button>
+          <select v-model="roleFilter" class="user-admin__select" aria-label="角色筛选">
+            <option value="">全部角色</option>
+            <option v-for="role in roleFilterOptions" :key="role" :value="role">{{ role }}</option>
+          </select>
+          <select v-model="accountStatusFilter" class="user-admin__select" aria-label="账号状态">
+            <option value="">全部状态</option>
+            <option value="active">启用</option>
+            <option value="inactive">停用</option>
+          </select>
+        </div>
+        <div class="user-admin__filters" role="group" aria-label="成员治理筛选">
+          <button
+            v-for="option in userFilterOptions"
+            :key="option.value"
+            class="user-admin__filter"
+            :class="{ 'user-admin__filter--active': userListFilter === option.value }"
+            type="button"
+            @click="userListFilter = option.value"
+          >
+            {{ option.label }}
+          </button>
         </div>
         <div class="user-admin__summary">
           <span class="user-admin__metric">
@@ -246,6 +481,8 @@
             <small>待收口</small>
           </router-link>
         </div>
+        <details class="user-admin__governance">
+        <summary>治理工具</summary>
         <div class="user-admin__section-head user-admin__section-head--workbench">
           <div>
             <h3>治理工作台</h3>
@@ -282,23 +519,12 @@
             <span class="user-admin__workbench-note">{{ card.note }}</span>
           </router-link>
         </div>
-        <div class="user-admin__filters" role="group" aria-label="成员治理筛选">
-          <button
-            v-for="option in userFilterOptions"
-            :key="option.value"
-            class="user-admin__filter"
-            :class="{ 'user-admin__filter--active': userListFilter === option.value }"
-            type="button"
-            @click="userListFilter = option.value"
-          >
-            {{ option.label }}
-          </button>
-        </div>
-        <div v-if="visibleUsers.length > 0" class="user-admin__bulkbar">
+        </details>
+        <div v-if="visibleUsers.length > 0" class="user-admin__bulkbar" :class="{ 'user-admin__bulkbar--idle': selectedUserIds.length === 0 }">
           <div>
             <strong>批量操作</strong>
             <p class="user-admin__hint">
-              已选择 {{ selectedUserIds.length }} / {{ visibleUsers.length }} 个当前筛选结果。
+              已选择 {{ selectedUserIds.length }} / {{ displayedUsers.length }} 个当前筛选结果。
             </p>
             <p v-if="screeningUsersMissingOpenId.length > 0" class="user-admin__hint">
               当前筛选结果中有 {{ screeningUsersMissingOpenId.length }} 个缺 OpenID 用户，可直接导出治理清单。
@@ -350,28 +576,93 @@
             <router-link class="user-admin__button user-admin__button--secondary" :to="buildDingTalkGovernanceAuditLocation()">
               查看钉钉治理审计
             </router-link>
+            <select v-model="bulkRoleId" class="user-admin__select" aria-label="批量角色" :disabled="selectedUserIds.length === 0">
+              <option value="">修改角色</option>
+              <option v-for="role in roleCatalog" :key="role.id" :value="role.id">{{ role.name }}</option>
+            </select>
+            <button class="user-admin__button" type="button" :disabled="bulkBusy || selectedUserIds.length === 0 || !bulkRoleId" @click="openBulkConfirm('role')">应用角色</button>
+            <input v-model.trim="bulkDepartment" class="user-admin__search" type="text" placeholder="修改部门" aria-label="批量部门" :disabled="selectedUserIds.length === 0" />
+            <button class="user-admin__button" type="button" :disabled="bulkBusy || selectedUserIds.length === 0 || !bulkDepartment" @click="openBulkConfirm('department')">应用部门</button>
+            <button class="user-admin__button" type="button" :disabled="bulkBusy || selectedUserIds.length === 0" @click="openBulkConfirm('enable')">批量启用</button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="bulkBusy || selectedUserIds.length === 0" @click="openBulkConfirm('disable')">批量停用</button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="displayedUsers.length === 0" @click="exportUsersForUpdate()">导出以便修改</button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="reimportOpen = true">导入更新</button>
           </div>
+          <div v-if="bulkConfirm" class="user-admin__confirm" role="dialog" aria-label="确认批量操作" data-testid="bulk-confirm">
+            <strong>{{ bulkConfirmTitle }}</strong>
+            <p>将影响 {{ selectedUserIds.length }} 人：{{ selectedUserLabels }}</p>
+            <div class="user-admin__role-actions">
+              <button class="user-admin__button" type="button" data-testid="bulk-confirm-submit" @click="void submitBulkConfirm()">确认</button>
+              <button class="user-admin__button user-admin__button--secondary" type="button" @click="bulkConfirm = null">取消</button>
+            </div>
+          </div>
+          <details class="user-admin__danger">
+            <summary>{{ recycleText('dangerSummary') }}</summary>
+            <p class="user-admin__hint">{{ recycleText('dangerHint') }}</p>
+            <p v-if="selectedUserIds.length">将列出：{{ selectedUserLabels }}</p>
+            <input v-model.trim="hardDeletePhrase" class="user-admin__search" type="text" :aria-label="recycleText('dangerPhrase')" :placeholder="recycleText('dangerPhrase')" data-testid="recycle-move-phrase" />
+            <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="recycle-move-submit" :disabled="bulkBusy || selectedUserIds.length === 0 || hardDeletePhrase !== '永久删除'" @click="void submitHardDelete()">{{ recycleText('dangerButton') }}</button>
+          </details>
         </div>
-        <div v-if="visibleUsers.length === 0" class="user-admin__empty">暂无用户数据</div>
+        <div v-if="reimportOpen" class="user-admin__confirm" role="dialog" aria-label="导入更新" data-testid="reimport-dialog">
+          <strong>导入更新</strong>
+          <p class="user-admin__hint">按用户 ID 或邮箱匹配。先看差异，再写入。部门是文本字段；考勤组不在这里改。</p>
+          <input type="file" accept=".csv,.xlsx,text/csv" data-testid="reimport-file" @change="void onReimportFile($event)" />
+          <div v-for="row in reimportPreview" :key="row.index" class="user-admin__hint">
+            {{ row.email || row.userId }}：{{ row.message }}<template v-if="row.changes.length">（{{ row.changes.map((change) => `${change.field} ${change.before || '空'} → ${change.after || '空'}`).join('；') }}）</template>
+          </div>
+          <div class="user-admin__role-actions">
+            <button class="user-admin__button" type="button" :disabled="bulkBusy || reimportPreview.length === 0" @click="void submitReimport(true)">预览差异</button>
+            <button class="user-admin__button" type="button" :disabled="bulkBusy || !reimportReady" @click="void submitReimport(false)">确认更新</button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="reimportOpen = false">取消</button>
+          </div>
+          <p v-if="batchReport" class="user-admin__hint">成功 {{ batchReport.successCount }}，失败 {{ batchReport.failureCount }}</p>
+        </div>
+        <div v-if="loading && users.length === 0" class="user-admin__empty">正在加载成员…</div>
+        <div v-else-if="displayedUsers.length === 0" class="user-admin__empty">暂无用户数据</div>
+        <div v-else class="user-admin__table" role="table" aria-label="成员列表">
+          <div class="user-admin__table-head" role="row">
+            <span role="columnheader" />
+            <button type="button" role="columnheader" @click="toggleSort('name')">
+              成员{{ sortMark('name') }}
+            </button>
+            <button type="button" role="columnheader" @click="toggleSort('role')">
+              角色{{ sortMark('role') }}
+            </button>
+            <button type="button" role="columnheader" @click="toggleSort('status')">
+              状态{{ sortMark('status') }}
+            </button>
+            <button type="button" role="columnheader" @click="toggleSort('lastLogin')">
+              最近登录{{ sortMark('lastLogin') }}
+            </button>
+            <span role="columnheader" />
+          </div>
         <article
-          v-for="user in visibleUsers"
+          v-for="user in pagedUsers"
           :key="user.id"
           class="user-admin__user"
           :class="{ 'user-admin__user--active': selectedUserId === user.id }"
+          role="row"
         >
           <label class="user-admin__user-select">
             <input
               :checked="selectedUserIdSet.has(user.id)"
               type="checkbox"
+              :aria-label="`选择 ${user.name || formatManagedUserLabel(user)}`"
               @change="void handleUserSelectionChange(user.id, $event)"
             />
             <span>选择</span>
           </label>
-          <button class="user-admin__user-body" type="button" @click="void selectUser(user.id)">
-            <strong>{{ user.name || formatManagedUserLabel(user) }}</strong>
-            <span>{{ formatManagedUserIdentifier(user) }}</span>
-            <span class="user-admin__meta">{{ user.role }} · {{ user.is_active ? '启用' : '停用' }}</span>
-            <div class="user-admin__row-badges">
+          <button class="user-admin__user-body" type="button" @click="void openUserDetail(user.id)">
+            <span class="user-admin__identity">
+              <span class="user-admin__avatar" aria-hidden="true">{{ userInitials(user) }}</span>
+              <span class="user-admin__identity-text">
+                <strong>{{ user.name || formatManagedUserLabel(user) }}</strong>
+                <span>{{ formatManagedUserIdentifier(user) }}</span>
+              </span>
+            </span>
+            <span class="user-admin__meta">{{ user.role }}</span>
+            <span class="user-admin__row-badges">
               <span class="user-admin__row-badge" :class="{ 'user-admin__row-badge--success': user.is_active, 'user-admin__row-badge--danger': !user.is_active }">
                 {{ user.is_active ? '账号启用' : '账号停用' }}
               </span>
@@ -393,19 +684,46 @@
               <span v-if="(user.businessRoleCount || 0) > 0" class="user-admin__row-badge user-admin__row-badge--muted">
                 业务角色 {{ user.businessRoleCount }}
               </span>
-            </div>
+            </span>
+            <span class="user-admin__meta">{{ formatLastLogin(user.last_login_at) }}</span>
           </button>
+          <div class="user-admin__row-menu">
+            <button
+              type="button"
+              :aria-expanded="rowMenuUserId === user.id"
+              aria-haspopup="menu"
+              @click="toggleRowMenu(user.id)"
+            >
+              操作
+            </button>
+            <div v-show="rowMenuUserId === user.id" class="user-admin__row-menu-panel" role="menu">
+              <button type="button" role="menuitem" @click="void openUserDetail(user.id)">编辑</button>
+            </div>
+          </div>
           <p v-if="user.dingtalkOpenIdMissing" class="user-admin__hint">
             {{ readMissingOpenIdGovernanceHint(user) }}
           </p>
         </article>
+        </div>
+        <div v-if="displayedUsers.length > pageSize" class="user-admin__pager">
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="page <= 1" @click="page -= 1">上一页</button>
+          <span>第 {{ page }} / {{ pageCount }} 页 · 共 {{ displayedUsers.length }} 人</span>
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="page >= pageCount" @click="page += 1">下一页</button>
+        </div>
       </aside>
 
-      <section class="user-admin__panel user-admin__panel--detail">
+      <button
+        v-show="detailOpen"
+        class="user-admin__drawer-backdrop"
+        type="button"
+        aria-label="关闭用户详情"
+        @click="closeUserDetail()"
+      />
+      <section class="user-admin__panel user-admin__panel--detail" :class="{ 'user-admin__panel--detail-open': detailOpen }">
         <template v-if="access">
           <div class="user-admin__detail-head">
             <div>
-              <h2>{{ access.user.name || formatManagedUserLabel(access.user) }}</h2>
+              <h2 data-testid="selected-user-heading">{{ access.user.name || formatManagedUserLabel(access.user) }}</h2>
               <p>{{ formatManagedUserIdentifier(access.user) }}</p>
               <p v-if="access.user.mobile" class="user-admin__hint">手机号：{{ access.user.mobile }}</p>
               <p v-if="profileSummaryLine" class="user-admin__hint">{{ profileSummaryLine }}</p>
@@ -419,6 +737,7 @@
                 {{ access.isAdmin ? '管理员' : '普通用户' }}
               </span>
             </div>
+            <button class="user-admin__button user-admin__button--secondary user-admin__detail-close" type="button" @click="closeUserDetail()">关闭</button>
           </div>
 
           <div class="user-admin__section">
@@ -503,6 +822,10 @@
                 {{ loadingAdmission ? '刷新中...' : '刷新准入状态' }}
               </button>
             </div>
+            <div v-if="memberAdmissionLoadFailure" class="user-admin__block-error" data-testid="member-admission-load-failure">
+              <p>成员准入信息暂时无法加载，请刷新页面后重试。</p>
+              <small v-if="memberAdmissionLoadFailure.correlationId">排查编号：{{ memberAdmissionLoadFailure.correlationId }}</small>
+            </div>
             <div v-if="memberAdmission" class="user-admin__chips">
               <span class="user-admin__chip" :class="{ 'user-admin__chip--success': memberAdmission.accountEnabled, 'user-admin__chip--danger': !memberAdmission.accountEnabled }">
                 {{ memberAdmission.accountEnabled ? '平台账号已启用' : '平台账号未启用' }}
@@ -516,6 +839,70 @@
               <span class="user-admin__chip" :class="{ 'user-admin__chip--success': memberAdmission.businessRoleIds.length > 0 }">
                 {{ memberAdmission.businessRoleIds.length > 0 ? `业务系统角色 ${memberAdmission.businessRoleIds.length}` : '未分配业务系统角色' }}
               </span>
+            </div>
+            <!-- Slice B (owner ruling on #6079): read-only view of the user's active organizations, the same
+                 rows the login tenant claim reads. Nothing here writes; an older backend without the field
+                 renders nothing, and a disabled account is already explained by its chip above. -->
+            <div v-if="memberAdmissionOrganizations" class="user-admin__org-context" data-testid="member-admission-organizations">
+              <div class="user-admin__chips">
+                <strong class="user-admin__org-label">所属组织</strong>
+                <span
+                  v-for="org in memberAdmissionOrganizations.active"
+                  :key="org.orgId"
+                  class="user-admin__chip"
+                  :class="{ 'user-admin__chip--success': memberAdmissionOrganizations.hasTenantContext }"
+                  data-testid="member-admission-org-chip"
+                >
+                  {{ org.orgId }}
+                </span>
+              </div>
+              <template v-if="memberAdmissionOrganizations.active.length === 0">
+                <p class="user-admin__warning" data-testid="member-admission-org-none">
+                  未归属任何组织：该账号无法使用云课堂等按组织隔离的应用；请用目录管理或新建账号时的「所属组织」补齐
+                </p>
+                <!-- Slice C: one-click 加入默认组织 via the local-directory-account route. Shown only when the
+                     backend positively says the user has no membership row at all and no applied deprovision
+                     (an older backend without those two booleans keeps it hidden) and the admission on screen
+                     belongs to the selected user; a disabled account never reaches this block (see
+                     memberAdmissionOrganizations). -->
+                <div v-if="canJoinDefaultOrg" class="user-admin__chips">
+                  <button
+                    class="user-admin__button"
+                    type="button"
+                    data-testid="join-default-org-button"
+                    :disabled="joiningDefaultOrg"
+                    @click="openJoinDefaultOrgConfirm"
+                  >
+                    {{ joiningDefaultOrg ? '加入中...' : '加入默认组织' }}
+                  </button>
+                </div>
+                <div
+                  v-if="canJoinDefaultOrg && joinDefaultOrgConfirmUserId !== null && joinDefaultOrgConfirmUserId === memberAdmission?.userId"
+                  class="user-admin__confirm"
+                  role="dialog"
+                  aria-label="确认加入默认组织"
+                  data-testid="join-default-org-confirm"
+                >
+                  <strong>确认将该账号加入默认组织？</strong>
+                  <ol>
+                    <li>会为该账号创建一条本地目录账号与链接（目录管理里可见）；</li>
+                    <li>加入组织后该用户进入考勤全员名册（自动缺勤 / 年假累计 / 考勤报表 / 汇总会计入）；</li>
+                    <li>用户需重新登录或刷新后，云课堂等按组织隔离的应用才可用。</li>
+                  </ol>
+                  <p data-testid="join-default-org-confirm-undo">此操作不能在本页撤销；撤销需运维调用目录接口归档该本地目录账号（界面暂无），归档后也不能再经本按钮加入。</p>
+                  <div class="user-admin__chips">
+                    <button class="user-admin__button" type="button" data-testid="join-default-org-confirm-submit" @click="void confirmJoinDefaultOrg()">
+                      确认加入
+                    </button>
+                    <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="join-default-org-confirm-cancel" @click="closeJoinDefaultOrgConfirm">
+                      取消
+                    </button>
+                  </div>
+                </div>
+              </template>
+              <p v-else-if="memberAdmissionOrganizations.active.length >= 2" class="user-admin__warning" data-testid="member-admission-org-multiple">
+                属于多个组织：登录后需在页面顶部选择组织
+              </p>
             </div>
             <div v-if="memberAdmission?.directoryMemberships.length" class="user-admin__role-list">
               <article v-for="membership in memberAdmission.directoryMemberships" :key="membership.directoryAccountId" class="user-admin__role-card">
@@ -569,6 +956,9 @@
                 </div>
               </article>
             </div>
+            <div v-else-if="memberAdmissionLoadFailure" class="user-admin__block-error" data-testid="namespace-admission-load-failure">
+              <p>插件使用准入信息暂时无法加载，请刷新页面后重试。</p>
+            </div>
             <div v-else class="user-admin__empty">
               暂无插件使用准入信息
             </div>
@@ -582,24 +972,56 @@
               </div>
             </div>
             <div class="user-admin__chips">
-              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': hasPlatformAdminAccess, 'user-admin__chip--danger': !hasPlatformAdminAccess }">
+              <span
+                class="user-admin__chip"
+                data-testid="platform-admin-chip"
+                :class="{ 'user-admin__chip--success': hasPlatformAdminAccess, 'user-admin__chip--danger': !hasPlatformAdminAccess }"
+              >
                 {{ hasPlatformAdminAccess ? '已开通平台管理员' : '未开通平台管理员' }}
               </span>
-              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': hasAttendanceAdminAccess, 'user-admin__chip--danger': !hasAttendanceAdminAccess }">
+              <span
+                class="user-admin__chip"
+                data-testid="attendance-admin-chip"
+                :class="{ 'user-admin__chip--success': hasAttendanceAdminAccess, 'user-admin__chip--danger': !hasAttendanceAdminAccess }"
+              >
                 {{ hasAttendanceAdminAccess ? '已开通考勤管理员' : '未开通考勤管理员' }}
               </span>
             </div>
             <div class="user-admin__role-actions">
-              <button class="user-admin__button" type="button" :disabled="busy || hasPlatformAdminAccess" @click="void updateNamedRole('admin', true)">
+              <button
+                class="user-admin__button"
+                type="button"
+                data-testid="promote-platform-admin-button"
+                :disabled="busy || !roleSnapshotReady || hasPlatformAdminAccess"
+                @click="void updateNamedRole('admin', true)"
+              >
                 提升为平台管理员
               </button>
-              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || !hasPlatformAdminAccess" @click="void updateNamedRole('admin', false)">
+              <button
+                class="user-admin__button user-admin__button--secondary"
+                type="button"
+                data-testid="revoke-platform-admin-button"
+                :disabled="busy || !roleSnapshotReady || !hasPlatformAdminAccess"
+                @click="void updateNamedRole('admin', false)"
+              >
                 取消平台管理员
               </button>
-              <button class="user-admin__button" type="button" :disabled="busy || hasAttendanceAdminAccess" @click="void updateNamedRole('attendance_admin', true)">
+              <button
+                class="user-admin__button"
+                type="button"
+                data-testid="enable-attendance-admin-button"
+                :disabled="busy || !roleSnapshotReady || hasAttendanceAdminAccess"
+                @click="void updateNamedRole('attendance_admin', true)"
+              >
                 开通考勤管理员
               </button>
-              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || !hasAttendanceAdminAccess" @click="void updateNamedRole('attendance_admin', false)">
+              <button
+                class="user-admin__button user-admin__button--secondary"
+                type="button"
+                data-testid="disable-attendance-admin-button"
+                :disabled="busy || !roleSnapshotReady || !hasAttendanceAdminAccess"
+                @click="void updateNamedRole('attendance_admin', false)"
+              >
                 关闭考勤管理员
               </button>
             </div>
@@ -614,6 +1036,10 @@
               <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loadingDingTalk || !access" @click="void loadDingTalkAccess(access.user.id)">
                 {{ loadingDingTalk ? '刷新中...' : '刷新钉钉状态' }}
               </button>
+            </div>
+            <div v-if="dingtalkAccessLoadFailure" class="user-admin__block-error" data-testid="dingtalk-access-load-failure">
+              <p>钉钉扫码登录信息暂时无法加载，请刷新页面后重试。</p>
+              <small v-if="dingtalkAccessLoadFailure.correlationId">排查编号：{{ dingtalkAccessLoadFailure.correlationId }}</small>
             </div>
             <div v-if="dingtalkAccess" class="user-admin__chips">
               <span class="user-admin__chip" :class="{ 'user-admin__chip--permission': dingtalkAccess.requireGrant }">
@@ -674,10 +1100,10 @@
               最近钉钉登录：{{ formatDate(dingtalkAccess.identity.lastLoginAt) }}
             </p>
             <p v-if="shouldWarnMissingDingTalkOpenId(dingtalkAccess)" class="user-admin__warning">
-              当前钉钉身份缺少 openId，暂不能开通钉钉扫码；请重新同步目录或让用户完成一次钉钉 OAuth 绑定。
+              当前钉钉身份缺少 openId：暂时拿不到该成员的 openId，暂不能开通钉钉扫码。
             </p>
             <p v-if="shouldWarnMissingDingTalkOpenId(dingtalkAccess)" class="user-admin__hint">
-              修复建议：先回到目录同步查看该成员是否已补齐 openId；如果目录仍未返回，请让用户先完成一次钉钉 OAuth 绑定；确认 openId 已补齐后刷新本页，再开通钉钉扫码。
+              修复建议：确认账号已激活并已绑定钉钉身份 → 让成员用钉钉扫码登录一次（登录会补齐 openId）→ 刷新本页后再开通钉钉扫码。
             </p>
             <p v-if="dingtalkAccess?.grant.updatedAt" class="user-admin__hint">
               开通状态更新时间：{{ formatDate(dingtalkAccess.grant.updatedAt) }}
@@ -699,8 +1125,9 @@
             </div>
           </div>
 
-          <div class="user-admin__section">
+          <div class="user-admin__section user-admin__section--danger">
             <h3>账号操作</h3>
+            <p class="user-admin__hint">停用、重置密码和全部下线会影响该用户的现有会话，与上方的资料、角色分开操作。</p>
             <div class="user-admin__role-actions">
               <button class="user-admin__button" type="button" :disabled="busy" @click="void toggleUserStatus()">
                 {{ access.user.is_active ? '停用账号' : '启用账号' }}
@@ -710,6 +1137,10 @@
                 class="user-admin__search"
                 type="text"
                 placeholder="可选：设置临时密码"
+                data-testid="admin-temporary-password"
+                aria-label="临时密码"
+                :aria-invalid="passwordResetInlineError ? 'true' : 'false'"
+                :aria-describedby="passwordResetInlineError ? 'admin-temporary-password-rule admin-temporary-password-error' : 'admin-temporary-password-rule'"
               />
               <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy" @click="void resetPassword()">
                 重置密码
@@ -718,8 +1149,20 @@
                 全部下线
               </button>
             </div>
+            <p id="admin-temporary-password-rule" data-testid="admin-temporary-password-rule" class="user-admin__hint">
+              {{ adminTemporaryPasswordRuleHint }}
+            </p>
+            <p
+              v-if="passwordResetInlineError"
+              id="admin-temporary-password-error"
+              data-testid="admin-temporary-password-error"
+              class="user-admin__status user-admin__status--error"
+              role="alert"
+            >
+              {{ passwordResetInlineError }}
+            </p>
             <p class="user-admin__hint">重置密码或停用账号会让该用户的现有会话失效。</p>
-            <p v-if="temporaryPassword" class="user-admin__status">
+            <p v-if="temporaryPassword" class="user-admin__status" data-testid="admin-reset-temporary-password">
               临时密码：{{ temporaryPassword }}
             </p>
           </div>
@@ -760,19 +1203,29 @@
           <div class="user-admin__section">
             <h3>角色操作</h3>
             <div class="user-admin__role-actions">
-              <select v-model="selectedRoleId" class="user-admin__select">
+              <select v-model="selectedRoleId" class="user-admin__select" data-testid="user-role-select" aria-label="选择要分配或撤销的角色">
                 <option value="">请选择角色</option>
                 <option v-for="role in roleCatalog" :key="role.id" :value="role.id">
                   {{ role.name }} ({{ role.id }})
                 </option>
               </select>
-              <button class="user-admin__button" type="button" :disabled="busy || !selectedRoleId" @click="void assignRole()">
+              <button class="user-admin__button" type="button" data-testid="assign-role-button" :disabled="busy || !roleSnapshotReady || !selectedRoleId" @click="void assignRole()">
                 分配角色
               </button>
-              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || !selectedRoleId" @click="void unassignRole()">
+              <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="unassign-role-button" :disabled="busy || !roleSnapshotReady || !selectedRoleId" @click="void unassignRole()">
                 撤销角色
               </button>
             </div>
+            <p data-testid="selected-role-membership" class="user-admin__hint">{{ selectedRoleMembership.text }}</p>
+            <p
+              v-if="roleActionFeedback"
+              data-testid="role-action-feedback"
+              class="user-admin__status"
+              :class="{ 'user-admin__status--error': roleActionFeedback.tone === 'error' }"
+              aria-live="polite"
+            >
+              {{ roleActionFeedback.message }}
+            </p>
           </div>
 
           <div class="user-admin__section">
@@ -788,19 +1241,54 @@
           </div>
         </template>
 
+        <div v-else-if="selectedUserId" class="user-admin__empty" data-testid="user-access-unread">
+          该用户的访问快照未读，不能把上一名用户的角色或空列表当作当前状态。
+        </div>
         <div v-else class="user-admin__empty">
           请选择一个用户查看访问详情
         </div>
       </section>
     </div>
+    </div>
   </section>
 </template>
 
 <script setup lang="ts">
+import {
+  ADMIN_USER_BATCH_LIMIT,
+  buildImportTemplateCsv,
+  buildUpdateExportCsv,
+  parseCsv,
+  parsePastedEmails,
+  previewUpdateRows,
+  validateImportRows,
+  type ImportPreviewRow,
+  type UpdatePreviewRow,
+} from './adminUserBatch'
+import { copyText } from '../utils/clipboard'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
+import { useLocale } from '../composables/useLocale'
+import { userRecycleLabel, type UserRecycleLabelKey } from './userRecycleLabels'
 import { apiFetch } from '../utils/api'
 import { subscribeToLocationChanges } from '../utils/browserLocation'
+import { describeCreateUserError, getCreateUserRuleHints } from '../utils/createUserValidationCopy'
+import {
+  accessReadStillCurrent,
+  describeRoleMembershipWrite,
+  nextAccessReadGeneration,
+  roleWriteOutcomeFromPayload,
+  selectedRoleMembershipHint,
+  userAccessSnapshotMatches,
+  type RoleMembershipSnapshot,
+  type RoleMembershipWriteOutcome,
+} from './adminUserRoleAction'
+import {
+  ADMIN_TEMPORARY_PASSWORD_RULE_HINT,
+  ADMIN_TEMPORARY_PASSWORD_TOO_SHORT,
+  classifyManualTemporaryPassword,
+  describeAdminResetPasswordInlineError,
+} from './adminTemporaryPasswordFeedback'
 
 type ManagedUser = {
   id: string
@@ -937,6 +1425,25 @@ type MemberAdmission = {
   directoryMemberships: MemberDirectoryMembership[]
   dingtalk: DingTalkAccess
   namespaceAdmissions: NamespaceAdmission[]
+  /**
+   * null = render nothing: the field is absent (older backend), the server sent null (its
+   * user_orgs read failed, "unknown"), or the payload is malformed.
+   */
+  organizations: MemberOrganizations | null
+}
+
+type MemberOrganizations = {
+  active: Array<{ orgId: string }>
+  /** Mirrors the no-hint login rule (exactly one active row); a login carrying a stored tenant hint takes another branch. */
+  hasTenantContext: boolean
+  /**
+   * Slice C: whether the user has ANY user_orgs row (active or not) / any applied deprovision event.
+   * null = unknown (an older backend without the field, the server sent null because that read failed
+   * (#6389), or a non-boolean value); unknown never shows
+   * the 加入默认组织 button.
+   */
+  hasAnyRow: boolean | null
+  deprovisionApplied: boolean | null
 }
 
 type NamespaceAdmission = {
@@ -945,6 +1452,10 @@ type NamespaceAdmission = {
   effective: boolean
   hasRole: boolean
   updatedAt: string | null
+}
+
+type SidePanelLoadFailure = {
+  correlationId: string | null
 }
 
 type CreateUserForm = {
@@ -959,6 +1470,7 @@ type CreateUserForm = {
   attendanceGroupId: string
   defaultShiftId: string
   defaultShiftStartDate: string
+  attendanceOrgId: string
   password: string
   presetId: string
   role: string
@@ -970,6 +1482,8 @@ type AttendanceGroupOption = {
   id: string
   name: string
   code: string
+  /** The org the group belongs to, as the group list reports it; '' when the payload has none. */
+  orgId: string
 }
 
 type AttendanceShiftOption = {
@@ -977,6 +1491,8 @@ type AttendanceShiftOption = {
   name: string
   workStartTime: string
   workEndTime: string
+  /** The org the shift belongs to, as the shift list reports it; '' when the payload has none. */
+  orgId: string
 }
 
 type AccessPreset = {
@@ -1072,6 +1588,51 @@ const busy = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 const search = ref('')
+const surface = ref<'members' | 'invites' | 'recycle'>('members')
+const { isZh } = useLocale()
+function recycleText(key: UserRecycleLabelKey, vars: Record<string, string | number> = {}): string {
+  return userRecycleLabel(isZh.value, key, vars)
+}
+const inviteOpen = ref(false)
+const inviteTab = ref<'single' | 'import' | 'paste'>('single')
+const inviteNote = ref('')
+const pasteEmails = ref('')
+const pasteRoleId = ref('')
+const importPreview = ref<ImportPreviewRow[]>([])
+const reimportOpen = ref(false)
+const reimportPreview = ref<UpdatePreviewRow[]>([])
+const reimportReady = ref(false)
+const bulkRoleId = ref('')
+const bulkDepartment = ref('')
+const bulkConfirm = ref<null | 'role' | 'department' | 'enable' | 'disable'>(null)
+const hardDeletePhrase = ref('')
+const loadingRecycle = ref(false)
+const recycleBusy = ref(false)
+const recycleSearch = ref('')
+const purgePhrase = ref('')
+const recycleRetentionDays = ref(30)
+const recycleTotal = ref(0)
+const recycleSelectedIds = ref<string[]>([])
+type RecycleBinUser = {
+  id: string
+  email: string | null
+  name: string | null
+  department: string | null
+  deletedAt: string
+  deletedBy: string | null
+  purgeAfter: string | null
+}
+const recycleUsers = ref<RecycleBinUser[]>([])
+const batchReport = ref<{ successCount: number; failureCount: number; results: Array<Record<string, unknown>> } | null>(null)
+const inviteStatusFilter = ref<'pending' | 'all'>('pending')
+const detailOpen = ref(false)
+const rowMenuUserId = ref('')
+const roleFilter = ref('')
+const accountStatusFilter = ref<'' | 'active' | 'inactive'>('')
+const sortKey = ref<'' | 'name' | 'role' | 'status' | 'lastLogin'>('')
+const sortDir = ref<'asc' | 'desc'>('asc')
+const page = ref(1)
+const pageSize = 20
 const users = ref<ManagedUser[]>([])
 const selectedUserIds = ref<string[]>([])
 const userListFilter = ref<UserListFilter>(readInitialUserNavigation().filter)
@@ -1080,11 +1641,23 @@ const accessPresets = ref<AccessPreset[]>([])
 const attendanceGroups = ref<AttendanceGroupOption[]>([])
 const attendanceShifts = ref<AttendanceShiftOption[]>([])
 const attendanceSetupLoadError = ref('')
+// W1-6 (owner ruling 2026-10-10): the create form's org selector. Options come from the EXISTING
+// read endpoint GET /api/auth/session-orgs (the signed-in admin's own active memberships). The
+// selector is never pre-filled -- not even with a single option -- and an empty choice sends no
+// `attendanceOrgId`, so no org membership is written. The server still validates the chosen org
+// against an existing org anchor (404 ATTENDANCE_ORG_NOT_FOUND otherwise).
+const attendanceOrgOptions = ref<string[]>([])
+const attendanceOrgOptionsLoading = ref(false)
+const attendanceOrgOptionsFailed = ref(false)
 const presetModeFilter = ref<'' | 'platform' | 'attendance' | 'plm-workbench'>('')
 const selectedNamespace = ref('')
 const selectedUserId = ref('')
+const userAccessReadGeneration = ref(0)
 const selectedRoleId = ref('')
+const roleActionFeedback = ref<{ tone: 'info' | 'error'; message: string } | null>(null)
 const manualPassword = ref('')
+const passwordResetInlineError = ref('')
+const adminTemporaryPasswordRuleHint = ADMIN_TEMPORARY_PASSWORD_RULE_HINT
 const temporaryPassword = ref('')
 const createdTemporaryPassword = ref('')
 const createdInviteMessage = ref('')
@@ -1093,8 +1666,40 @@ const createdAttendanceOnboardingTarget = ref<AttendanceOnboardingTarget | null>
 const inviteRecords = ref<InviteLedgerRecord[]>([])
 const userSessions = ref<UserSessionRecord[]>([])
 const access = ref<UserAccess | null>(null)
+const selectedRoleMembership = computed(() => selectedRoleMembershipHint(selectedRoleId.value, access.value?.roles || []))
 const dingtalkAccess = ref<DingTalkAccess | null>(null)
 const memberAdmission = ref<MemberAdmission | null>(null)
+// Hidden for a disabled account: the server reads memberships with the login predicate
+// (u.is_active = true), so a disabled account always reads as "no organization", which would
+// send the admin to add memberships it may already have.
+const memberAdmissionOrganizations = computed<MemberOrganizations | null>(() => {
+  const admission = memberAdmission.value
+  if (!admission || !admission.accountEnabled) return null
+  return admission.organizations ?? null
+})
+// Slice C: every condition must be positively known; the server re-checks them (409) anyway. "No active
+// organization" is enforced by the template: the button lives only inside the active.length === 0 branch.
+const canJoinDefaultOrg = computed<boolean>(() => {
+  const organizations = memberAdmissionOrganizations.value
+  if (!organizations) return false
+  // The admission on screen must be the selected user's (the header and the POST both follow the selection).
+  if (memberAdmission.value?.userId !== selectedUserId.value) return false
+  return organizations.hasAnyRow === false
+    && organizations.deprovisionApplied === false
+})
+// Users whose join request is in flight; only the one on screen shows 加入中....
+const joiningDefaultOrgUserIds = ref<string[]>([])
+const joiningDefaultOrg = computed<boolean>(() => {
+  const userId = memberAdmission.value?.userId
+  return typeof userId === 'string' && joiningDefaultOrgUserIds.value.includes(userId)
+})
+// The user the confirm panel was opened for; the panel only renders while that user's admission is shown.
+const joinDefaultOrgConfirmUserId = ref<string | null>(null)
+// #6163: a failed load of these two side-panel reads is shown inside its own block, with this page's
+// sentence and (when the server sent one) the request's correlation id — never in the top banner and
+// never with the server's error text.
+const dingtalkAccessLoadFailure = ref<SidePanelLoadFailure | null>(null)
+const memberAdmissionLoadFailure = ref<SidePanelLoadFailure | null>(null)
 const profileDraftName = ref('')
 const profileDraftMobile = ref('')
 const profileDraftEmployeeNo = ref('')
@@ -1102,6 +1707,7 @@ const profileDraftDepartment = ref('')
 const profileDraftPosition = ref('')
 const profileDraftHireDate = ref('')
 const appliedUserNavigationKey = ref('')
+const createUserRuleHints = getCreateUserRuleHints('zh')
 const createForm = ref<CreateUserForm>({
   name: '',
   email: '',
@@ -1114,6 +1720,7 @@ const createForm = ref<CreateUserForm>({
   attendanceGroupId: '',
   defaultShiftId: '',
   defaultShiftStartDate: '',
+  attendanceOrgId: '',
   password: '',
   presetId: '',
   role: 'user',
@@ -1121,6 +1728,41 @@ const createForm = ref<CreateUserForm>({
   isActive: true,
 })
 const selectedPreset = computed(() => accessPresets.value.find((preset) => preset.id === createForm.value.presetId) || null)
+const attendanceOrgHint = computed(() => {
+  if (attendanceOrgOptionsFailed.value) return '组织列表暂不可用；不指定组织时不会写入组织归属。'
+  if (!attendanceOrgOptionsLoading.value && attendanceOrgOptions.value.length === 0) {
+    return '当前账号没有可选的组织；不指定组织时不会写入组织归属。'
+  }
+  return '所属组织：选择后新用户会加入该组织；不指定则不写入组织归属。'
+})
+// W1-6 (owner ruling 2026-10-10, "顺带显示考勤组所属组织"): when an attendance group or default shift is
+// picked, the create route's existing group/shift branch (unchanged) writes the new user's org
+// membership into the org that group / shift belongs to -- it looks the group / shift up inside that
+// org and refuses the create otherwise. Say which org that is, from the group / shift list's own
+// `orgId`. Display only: the value is never copied into `createForm.attendanceOrgId`, so nothing is
+// sent that the admin did not pick. If a picked item's org is unknown, say nothing rather than guess.
+const attendanceOnboardingOrgNote = computed(() => {
+  const { attendanceGroupId, defaultShiftId, attendanceOrgId } = createForm.value
+  if (!attendanceGroupId && !defaultShiftId) return ''
+  const groupOrgId = attendanceGroupId
+    ? attendanceGroups.value.find((group) => group.id === attendanceGroupId)?.orgId ?? ''
+    : ''
+  const shiftOrgId = defaultShiftId
+    ? attendanceShifts.value.find((shift) => shift.id === defaultShiftId)?.orgId ?? ''
+    : ''
+  if ((attendanceGroupId && !groupOrgId) || (defaultShiftId && !shiftOrgId)) return ''
+  if (groupOrgId && shiftOrgId && groupOrgId !== shiftOrgId) {
+    return '所选考勤组和默认班次属于不同的组织，创建会被拒绝；请改选其中之一。'
+  }
+  const onboardingOrgId = groupOrgId || shiftOrgId
+  const source = attendanceGroupId && defaultShiftId
+    ? '所选考勤组和默认班次'
+    : attendanceGroupId ? '所选考勤组' : '所选默认班次'
+  if (attendanceOrgId && attendanceOrgId !== onboardingOrgId) {
+    return `${source}属于组织 ${onboardingOrgId}，与上面选择的组织不一致，创建会被拒绝；请改选组织或清除组织。`
+  }
+  return `新用户将加入组织 ${onboardingOrgId}（${source}所属的组织）。`
+})
 const createdAttendanceOnboardingSummary = computed(() => {
   const target = createdAttendanceOnboardingTarget.value
   if (!target) return ''
@@ -1192,6 +1834,50 @@ const visibleUsers = computed(() => {
     return true
   })
 })
+const roleFilterOptions = computed(() => {
+  const roles = new Set<string>()
+  for (const user of users.value) {
+    if (user.role) roles.add(user.role)
+  }
+  return [...roles].sort((left, right) => left.localeCompare(right, 'zh'))
+})
+const displayedUsers = computed(() => {
+  let rows = visibleUsers.value
+  if (roleFilter.value) rows = rows.filter((user) => user.role === roleFilter.value)
+  if (accountStatusFilter.value === 'active') rows = rows.filter((user) => user.is_active)
+  if (accountStatusFilter.value === 'inactive') rows = rows.filter((user) => !user.is_active)
+  if (!sortKey.value) return rows
+  const direction = sortDir.value === 'asc' ? 1 : -1
+  const valueOf = (user: ManagedUser): string => {
+    if (sortKey.value === 'name') return user.name || formatManagedUserLabel(user)
+    if (sortKey.value === 'role') return user.role || ''
+    if (sortKey.value === 'status') return user.is_active ? '0' : '1'
+    return user.last_login_at || ''
+  }
+  return [...rows].sort((left, right) => valueOf(left).localeCompare(valueOf(right), 'zh') * direction)
+})
+const pageCount = computed(() => Math.max(1, Math.ceil(displayedUsers.value.length / pageSize)))
+const pagedUsers = computed(() => {
+  const current = Math.min(page.value, pageCount.value)
+  const start = (current - 1) * pageSize
+  return displayedUsers.value.slice(start, start + pageSize)
+})
+const pendingInviteCount = computed(() => inviteRecords.value.filter((record) => record.status === 'pending').length)
+const knownRoleIds = computed(() => new Set(roleCatalog.value.map((role) => role.id)))
+const pastedEmailList = computed(() => parsePastedEmails(pasteEmails.value))
+const selectedUsers = computed(() => users.value.filter((user) => selectedUserIdSet.value.has(user.id)))
+const selectedUserLabels = computed(() => selectedUsers.value.map((user) => user.name || user.email || user.id).join('、'))
+const bulkConfirmTitle = computed(() => {
+  if (bulkConfirm.value === 'role') return `确认把所选用户的角色改为 ${bulkRoleId.value}？`
+  if (bulkConfirm.value === 'department') return `确认把所选用户的部门改为 ${bulkDepartment.value}？`
+  if (bulkConfirm.value === 'enable') return '确认启用所选用户？'
+  if (bulkConfirm.value === 'disable') return '确认停用所选用户？停用可恢复，历史会保留。'
+  return ''
+})
+const visibleInviteRecords = computed(() => {
+  if (inviteStatusFilter.value === 'all') return inviteRecords.value
+  return inviteRecords.value.filter((record) => record.status === 'pending' || record.status === 'expired')
+})
 const screeningUsersMissingOpenId = computed(() => visibleUsers.value.filter((user) => user.dingtalkOpenIdMissing === true))
 const screeningUsersMissingOpenIdWithGrant = computed(() => (
   screeningUsersMissingOpenId.value.filter((user) => user.dingtalkLoginEnabled === true)
@@ -1205,6 +1891,7 @@ const userFilterOptions = [
   { value: 'dingtalk-openid-missing', label: '缺 OpenID' },
   { value: 'platform-admin', label: '平台管理员' },
 ] as const
+const roleSnapshotReady = computed(() => userAccessSnapshotMatches(access.value, selectedUserId.value))
 const hasPlatformAdminAccess = computed(() => {
   if (!access.value) return false
   return access.value.roles.includes('admin') || access.value.user.role === 'admin' || access.value.user.is_admin
@@ -1399,7 +2086,7 @@ function exportGovernanceValidationResultTemplate(): void {
     '- [ ] 缺 OpenID 成员清单与预期一致',
     '  - 实际结果：',
     `  - 入口：${buildMissingOpenIdUserManagementLocation()}`,
-    '- [ ] 目录同步可补齐 openId / 或确认仍缺失原因',
+    '- [ ] 成员用钉钉扫码登录一次后已补齐 openId（目录同步本身不返回 openId）/ 或确认仍缺失原因',
     '  - 实际结果：',
     `  - 入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
     '- [ ] 批量关闭缺 OpenID 钉钉扫码后，待收口数量正确变化',
@@ -1515,7 +2202,7 @@ function exportGovernanceFullValidationPackage(): void {
     '## 联调检查单',
     '- [ ] 缺 OpenID 成员清单与预期一致',
     `  - 入口：${buildMissingOpenIdUserManagementLocation()}`,
-    '- [ ] 目录同步页可用于补齐 openId 或确认仍缺失原因',
+    '- [ ] 成员用钉钉扫码登录一次后，目录同步页刷新可见 openId 已补齐 / 或确认仍缺失原因',
     `  - 入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
     '- [ ] 批量关闭缺 OpenID 钉钉扫码后，待收口和已收口统计变化正确',
     '- [ ] 最近 7 天收口审计可看到动作、处理时间和处理人',
@@ -1763,7 +2450,7 @@ function clearSelectedUsers(): void {
 }
 
 function selectVisibleUsers(): void {
-  selectedUserIds.value = visibleUsers.value.map((user) => user.id)
+  selectedUserIds.value = displayedUsers.value.map((user) => user.id)
 }
 
 function toggleUserSelection(userId: string, checked: boolean): void {
@@ -1781,6 +2468,60 @@ function handleUserSelectionChange(userId: string, event: Event): void {
   const target = event.target
   if (!(target instanceof HTMLInputElement)) return
   toggleUserSelection(userId, target.checked)
+}
+
+function userInitials(user: { name?: string | null; email?: string | null; username?: string | null }): string {
+  const source = (user.name || user.email || user.username || '?').trim()
+  if (!source) return '?'
+  const parts = source.split(/\s+/).filter(Boolean)
+  if (parts.length >= 2) return `${parts[0]?.charAt(0) || ''}${parts[1]?.charAt(0) || ''}`.toUpperCase()
+  return source.slice(0, 1).toUpperCase()
+}
+
+function formatLastLogin(value: string | null | undefined): string {
+  if (!value) return '从未登录'
+  return formatDate(value)
+}
+
+function sortMark(key: 'name' | 'role' | 'status' | 'lastLogin'): string {
+  if (sortKey.value !== key) return ''
+  return sortDir.value === 'asc' ? ' ↑' : ' ↓'
+}
+
+function toggleSort(key: 'name' | 'role' | 'status' | 'lastLogin'): void {
+  page.value = 1
+  if (sortKey.value !== key) {
+    sortKey.value = key
+    sortDir.value = 'asc'
+    return
+  }
+  sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
+}
+
+function toggleRowMenu(userId: string): void {
+  rowMenuUserId.value = rowMenuUserId.value === userId ? '' : userId
+}
+
+function openInvite(): void {
+  inviteOpen.value = true
+  surface.value = 'members'
+}
+
+function closeInvite(): void {
+  inviteOpen.value = false
+}
+
+function closeUserDetail(): void {
+  detailOpen.value = false
+  rowMenuUserId.value = ''
+}
+
+async function openUserDetail(userId: string): Promise<void> {
+  detailOpen.value = true
+  rowMenuUserId.value = ''
+  surface.value = 'members'
+  if (selectedUserId.value === userId && access.value?.user.id === userId) return
+  await selectUser(userId)
 }
 
 function formatDate(value: string | null | undefined): string {
@@ -1850,6 +2591,27 @@ function buildDirectoryManagementLocation(userId: string, membership: Pick<Membe
   return `/admin/directory?${params.toString()}`
 }
 
+// Any shape problem makes the whole field "unknown" (null, render nothing) rather than dropping the
+// bad items: dropping them could turn a list of unreadable ids into an empty list, and the empty
+// list tells the admin 「未归属任何组织」, which would be a claim the payload does not support.
+function normalizeMemberOrganizations(value: unknown): MemberOrganizations | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  if (!Array.isArray(record.active) || typeof record.hasTenantContext !== 'boolean') return null
+  const active: Array<{ orgId: string }> = []
+  for (const item of record.active) {
+    const orgId = item && typeof item === 'object' ? (item as Record<string, unknown>).orgId : null
+    if (typeof orgId !== 'string' || !orgId.trim()) return null
+    active.push({ orgId: orgId.trim() })
+  }
+  return {
+    active,
+    hasTenantContext: record.hasTenantContext,
+    hasAnyRow: typeof record.hasAnyRow === 'boolean' ? record.hasAnyRow : null,
+    deprovisionApplied: typeof record.deprovisionApplied === 'boolean' ? record.deprovisionApplied : null,
+  }
+}
+
 function normalizeNamespaceAdmissions(value: unknown): NamespaceAdmission[] {
   if (!Array.isArray(value)) return []
   return value
@@ -1894,6 +2656,21 @@ function buildInviteUrl(token: string): string {
   return `/accept-invite?token=${encodeURIComponent(token)}`
 }
 
+const CORRELATION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
+
+/**
+ * The only thing this page takes from a failed side-panel read's body: `error.correlationId`, and
+ * only when it has the shape the backend's correlation middleware gives it. The error text is never
+ * read (#6163).
+ */
+function readSidePanelLoadFailure(payload: Record<string, unknown>): SidePanelLoadFailure {
+  const error = payload.error
+  const candidate = error && typeof error === 'object' ? (error as Record<string, unknown>).correlationId : undefined
+  return {
+    correlationId: typeof candidate === 'string' && CORRELATION_ID_PATTERN.test(candidate) ? candidate : null,
+  }
+}
+
 async function readJson(response: Response): Promise<Record<string, unknown>> {
   try {
     return await response.json() as Record<string, unknown>
@@ -1922,6 +2699,7 @@ function normalizeAttendanceGroupOptions(payload: Record<string, unknown>): Atte
       id: readOptionalString(item.id),
       name: firstOptionalString(item.name, item.code, item.id),
       code: readOptionalString(item.code),
+      orgId: firstOptionalString(item.orgId, item.org_id),
     }))
     .filter((item) => item.id.length > 0 && item.name.length > 0)
 }
@@ -1935,6 +2713,7 @@ function normalizeAttendanceShiftOptions(payload: Record<string, unknown>): Atte
       name: firstOptionalString(item.name, item.id),
       workStartTime: firstOptionalString(item.workStartTime, item.work_start_time),
       workEndTime: firstOptionalString(item.workEndTime, item.work_end_time),
+      orgId: firstOptionalString(item.orgId, item.org_id),
     }))
     .filter((item) => item.id.length > 0 && item.name.length > 0)
 }
@@ -1971,6 +2750,33 @@ async function loadAttendanceOnboardingOptions(): Promise<void> {
     attendanceSetupLoadError.value = '考勤配置选项暂不可用，可创建后从下一步进入考勤管理配置。'
   } finally {
     attendanceSetupLoading.value = false
+  }
+}
+
+function normalizeAttendanceOrgOptions(payload: Record<string, unknown>): string[] | null {
+  if (payload.success !== true) return null
+  const data = payload.data as Record<string, unknown> | undefined
+  const orgs = data?.orgs
+  if (!Array.isArray(orgs)) return null
+  const normalized = orgs.filter((orgId): orgId is string => typeof orgId === 'string' && orgId.trim().length > 0)
+  return Array.from(new Set(normalized))
+}
+
+async function loadAttendanceOrgOptions(): Promise<void> {
+  attendanceOrgOptionsLoading.value = true
+  attendanceOrgOptionsFailed.value = false
+  try {
+    const response = await apiFetch('/api/auth/session-orgs')
+    const payload = await readJson(response)
+    const options = response.ok ? normalizeAttendanceOrgOptions(payload) : null
+    if (!options) throw new Error('SESSION_ORGS_UNAVAILABLE')
+    attendanceOrgOptions.value = options
+  } catch {
+    attendanceOrgOptions.value = []
+    attendanceOrgOptionsFailed.value = true
+  } finally {
+    // Loaded once at mount; the response's currentOrgId is deliberately ignored (never a default).
+    attendanceOrgOptionsLoading.value = false
   }
 }
 
@@ -2012,6 +2818,7 @@ async function loadUsers(): Promise<void> {
       const requestedUser = userNavigation.value.userId
         ? users.value.find((item) => item.id === userNavigation.value.userId)
         : null
+      if (requestedUser) detailOpen.value = true
       await selectUser((requestedUser || users.value[0]).id)
     } else if (userNavigation.value.userId) {
       const navigationKey = buildUserNavigationKey(userNavigation.value)
@@ -2020,6 +2827,7 @@ async function loadUsers(): Promise<void> {
         requestedUser
         && (selectedUserId.value !== requestedUser.id || appliedUserNavigationKey.value !== navigationKey)
       ) {
+        detailOpen.value = true
         await selectUser(requestedUser.id)
       }
     }
@@ -2074,6 +2882,7 @@ async function loadInviteRecords(userId?: string): Promise<void> {
     }
 
     const data = payload.data as { items?: Array<Record<string, unknown>> } | undefined
+    if (userId && userId !== selectedUserId.value) return
     inviteRecords.value = Array.isArray(data?.items)
       ? data.items.map((item) => ({
           id: String(item.id || ''),
@@ -2093,6 +2902,7 @@ async function loadInviteRecords(userId?: string): Promise<void> {
         }))
       : []
   } catch (error) {
+    if (userId && userId !== selectedUserId.value) return
     setStatus(error instanceof Error ? error.message : '加载邀请记录失败', 'error')
   } finally {
     loadingInvites.value = false
@@ -2114,6 +2924,7 @@ async function loadUserSessions(userId?: string): Promise<void> {
     }
 
     const data = payload.data as { items?: Array<Record<string, unknown>> } | undefined
+    if (userId !== selectedUserId.value) return
     userSessions.value = Array.isArray(data?.items)
       ? data.items.map((item) => ({
           id: String(item.id || ''),
@@ -2129,6 +2940,7 @@ async function loadUserSessions(userId?: string): Promise<void> {
         }))
       : []
   } catch (error) {
+    if (userId !== selectedUserId.value) return
     setStatus(error instanceof Error ? error.message : '加载用户会话失败', 'error')
   } finally {
     loadingSessions.value = false
@@ -2145,15 +2957,28 @@ async function fetchUserAccessOrThrow(userId: string): Promise<UserAccess> {
 }
 
 async function selectUser(userId: string): Promise<void> {
+  const generation = nextAccessReadGeneration(userAccessReadGeneration.value)
+  userAccessReadGeneration.value = generation
   selectedUserId.value = userId
   selectedRoleId.value = ''
+  roleActionFeedback.value = null
   manualPassword.value = ''
+  passwordResetInlineError.value = ''
   temporaryPassword.value = ''
   createdTemporaryPassword.value = ''
   dingtalkAccess.value = null
   memberAdmission.value = null
+  dingtalkAccessLoadFailure.value = null
+  memberAdmissionLoadFailure.value = null
+  access.value = null
   try {
-    access.value = await fetchUserAccessOrThrow(userId)
+    const snapshot = await fetchUserAccessOrThrow(userId)
+    if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
+    if (!userAccessSnapshotMatches(snapshot, userId)) {
+      setStatus('用户访问快照与当前选择不一致，未覆盖角色状态', 'error')
+      return
+    }
+    access.value = snapshot
     syncProfileDraftFromAccess()
     const navigationKey = buildUserNavigationKey(userNavigation.value)
     if (userNavigation.value.userId === userId && appliedUserNavigationKey.value !== navigationKey) {
@@ -2162,8 +2987,11 @@ async function selectUser(userId: string): Promise<void> {
       }
       appliedUserNavigationKey.value = navigationKey
     }
+    if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
     await Promise.all([loadInviteRecords(userId), loadUserSessions(userId), loadDingTalkAccess(userId), loadMemberAdmission(userId)])
   } catch (error) {
+    if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
+    access.value = null
     setStatus(error instanceof Error ? error.message : '加载用户权限失败', 'error')
   }
 }
@@ -2189,12 +3017,14 @@ async function handleUserNavigationChange(): Promise<void> {
     return
   }
 
+  detailOpen.value = true
   await selectUser(requestedUser.id)
 }
 
 async function loadDingTalkAccess(userId?: string): Promise<void> {
   if (!userId) {
     dingtalkAccess.value = null
+    dingtalkAccessLoadFailure.value = null
     return
   }
 
@@ -2202,14 +3032,19 @@ async function loadDingTalkAccess(userId?: string): Promise<void> {
   try {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/dingtalk-access`)
     const payload = await readJson(response)
+    if (userId !== selectedUserId.value) return
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载钉钉登录状态失败'))
+      dingtalkAccess.value = null
+      dingtalkAccessLoadFailure.value = readSidePanelLoadFailure(payload)
+      return
     }
 
     dingtalkAccess.value = payload.data as DingTalkAccess
-  } catch (error) {
+    dingtalkAccessLoadFailure.value = null
+  } catch {
+    if (userId !== selectedUserId.value) return
     dingtalkAccess.value = null
-    setStatus(error instanceof Error ? error.message : '加载钉钉登录状态失败', 'error')
+    dingtalkAccessLoadFailure.value = { correlationId: null }
   } finally {
     loadingDingTalk.value = false
   }
@@ -2218,6 +3053,7 @@ async function loadDingTalkAccess(userId?: string): Promise<void> {
 async function loadMemberAdmission(userId?: string): Promise<void> {
   if (!userId) {
     memberAdmission.value = null
+    memberAdmissionLoadFailure.value = null
     return
   }
 
@@ -2225,20 +3061,106 @@ async function loadMemberAdmission(userId?: string): Promise<void> {
   try {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/member-admission`)
     const payload = await readJson(response)
+    // A late answer for a user who is no longer selected must not overwrite the selected user's panel.
+    if (userId !== selectedUserId.value) return
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载成员准入失败'))
+      memberAdmission.value = null
+      memberAdmissionLoadFailure.value = readSidePanelLoadFailure(payload)
+      return
     }
 
     const data = payload.data as Record<string, unknown> | undefined
     memberAdmission.value = {
       ...(data as MemberAdmission),
       namespaceAdmissions: normalizeNamespaceAdmissions(data?.namespaceAdmissions),
+      organizations: normalizeMemberOrganizations(data?.organizations),
     }
-  } catch (error) {
+    memberAdmissionLoadFailure.value = null
+  } catch {
+    if (userId !== selectedUserId.value) return
     memberAdmission.value = null
-    setStatus(error instanceof Error ? error.message : '加载成员准入失败', 'error')
+    memberAdmissionLoadFailure.value = { correlationId: null }
   } finally {
     loadingAdmission.value = false
+  }
+}
+
+// Slice C: the 409 codes POST /api/admin/directory/local/accounts can answer with, in this page's words.
+// The server's message text is never shown (values-free UI); any other failure gets the generic sentence.
+const JOIN_DEFAULT_ORG_FAILURE = '加入默认组织失败，请稍后重试'
+const JOIN_DEFAULT_ORG_CONFLICT_MESSAGES: Readonly<Record<string, string>> = {
+  // createLocalAccount: an account already exists for this user in this org, or the user is inactive.
+  DIRECTORY_LOCAL_CONFLICT: '该账号已有本地目录账号或已停用，不能再加入默认组织；请到目录管理查看',
+  // Guard added by #6389: any user_orgs row (active or not, any org) or an applied deprovision event.
+  DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY: '该账号在默认组织已有归属记录或离职记录，不能从本页加入；活跃归属无需处理，停用归属或离职记录请按目录管理 / 离职证据流程处理。',
+}
+
+// The route answers 404 DIRECTORY_LOCAL_NOT_FOUND when the platform user no longer exists.
+const JOIN_DEFAULT_ORG_USER_GONE = '该账号已不存在，请刷新列表'
+
+type JoinDefaultOrgResult = { ok: true } | { ok: false; status: number; code: string | null }
+
+async function postJoinDefaultOrg(userId: string): Promise<JoinDefaultOrgResult> {
+  const response = await apiFetch('/api/admin/directory/local/accounts', {
+    method: 'POST',
+    body: JSON.stringify({ localUserId: userId }),
+  })
+  const payload = await readJson(response)
+  if (response.ok && payload.ok === true) {
+    const data = payload.data
+    const account = data && typeof data === 'object' ? (data as Record<string, unknown>).account : null
+    if (account && typeof account === 'object' && typeof (account as Record<string, unknown>).id === 'string') {
+      return { ok: true }
+    }
+    return { ok: false, status: response.status, code: null }
+  }
+  const error = payload.error
+  const code = error && typeof error === 'object' ? (error as Record<string, unknown>).code : undefined
+  return { ok: false, status: response.status, code: typeof code === 'string' ? code : null }
+}
+
+function describeJoinDefaultOrgFailure(result: { status: number; code: string | null }): string {
+  if (result.status === 409 && result.code && Object.prototype.hasOwnProperty.call(JOIN_DEFAULT_ORG_CONFLICT_MESSAGES, result.code)) {
+    return JOIN_DEFAULT_ORG_CONFLICT_MESSAGES[result.code]
+  }
+  if (result.status === 404 && result.code === 'DIRECTORY_LOCAL_NOT_FOUND') return JOIN_DEFAULT_ORG_USER_GONE
+  return JOIN_DEFAULT_ORG_FAILURE
+}
+
+function openJoinDefaultOrgConfirm(): void {
+  const userId = memberAdmission.value?.userId
+  if (!userId) return
+  joinDefaultOrgConfirmUserId.value = userId
+}
+
+function closeJoinDefaultOrgConfirm(): void {
+  joinDefaultOrgConfirmUserId.value = null
+}
+
+async function confirmJoinDefaultOrg(): Promise<void> {
+  const confirmedUserId = joinDefaultOrgConfirmUserId.value
+  closeJoinDefaultOrgConfirm()
+  const userId = selectedUserId.value
+  // Only the selected user, and only when the confirmed panel and the admission on screen are that user's.
+  if (!userId || userId !== confirmedUserId || userId !== memberAdmission.value?.userId) {
+    setStatus(JOIN_DEFAULT_ORG_FAILURE, 'error')
+    return
+  }
+  joiningDefaultOrgUserIds.value = [...joiningDefaultOrgUserIds.value, userId]
+  try {
+    const result = await postJoinDefaultOrg(userId)
+    if (!result.ok) {
+      setStatus(describeJoinDefaultOrgFailure(result), 'error')
+      return
+    }
+    // The admin moved on to another user: that user's panel is not reloaded or told 已加入.
+    if (selectedUserId.value !== userId) return
+    await refreshCurrentDetailMemberAdmissionIfNeeded([userId])
+    setStatus('已加入默认组织')
+  } catch {
+    setStatus(JOIN_DEFAULT_ORG_FAILURE, 'error')
+  } finally {
+    joiningDefaultOrgUserIds.value = joiningDefaultOrgUserIds.value.filter((id) => id !== userId)
   }
 }
 
@@ -2281,7 +3203,7 @@ async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: 
 async function updateDingTalkGrant(enabled: boolean): Promise<void> {
   if (!access.value) return
   if (enabled && !canEnableDingTalkGrant(dingtalkAccess.value)) {
-    setStatus('当前钉钉身份缺少 openId，暂不能开通钉钉扫码；请重新同步目录或让用户完成一次钉钉 OAuth 绑定。', 'error')
+    setStatus('当前钉钉身份缺少 openId：暂时拿不到该成员的 openId，暂不能开通钉钉扫码。', 'error')
     return
   }
   busy.value = true
@@ -2453,6 +3375,7 @@ async function createUser(): Promise<void> {
         attendanceGroupId: createForm.value.attendanceGroupId || undefined,
         defaultShiftId: createForm.value.defaultShiftId || undefined,
         defaultShiftStartDate: createForm.value.defaultShiftStartDate || undefined,
+        attendanceOrgId: createForm.value.attendanceOrgId || undefined,
         password: createForm.value.password || undefined,
         presetId: createForm.value.presetId || undefined,
         role: createForm.value.role || undefined,
@@ -2463,6 +3386,9 @@ async function createUser(): Promise<void> {
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
       const errorPayload = payload.error as Record<string, unknown> | undefined
+      // Known validation codes render Chinese copy; anything else keeps the server message.
+      const localizedError = describeCreateUserError(errorPayload, 'zh')
+      if (localizedError) throw new Error(localizedError)
       const detailText = Array.isArray(errorPayload?.details) ? `：${(errorPayload?.details as string[]).join('；')}` : ''
       throw new Error(String(errorPayload?.message || '创建用户失败') + detailText)
     }
@@ -2486,6 +3412,7 @@ async function createUser(): Promise<void> {
       attendanceGroupId: '',
       defaultShiftId: '',
       defaultShiftStartDate: '',
+      attendanceOrgId: '',
       password: '',
       presetId: '',
       role: 'user',
@@ -2547,11 +3474,12 @@ async function resendInvite(record: InviteLedgerRecord): Promise<void> {
 
 async function copyInviteMessage(): Promise<void> {
   if (!createdInviteMessage.value) return
-  try {
-    await navigator.clipboard.writeText(createdInviteMessage.value)
+  const note = inviteNote.value.trim()
+  const text = note ? `${createdInviteMessage.value}\n\n${note}` : createdInviteMessage.value
+  if (await copyText(text)) {
     setStatus('邀请文案已复制')
-  } catch (error) {
-    setStatus(error instanceof Error ? error.message : '复制邀请文案失败', 'error')
+  } else {
+    setStatus('复制邀请文案失败', 'error')
   }
 }
 
@@ -2615,23 +3543,39 @@ async function toggleUserStatus(): Promise<void> {
 
 async function resetPassword(): Promise<void> {
   if (!access.value) return
+  const requestedUserId = access.value.user.id
+  const intent = classifyManualTemporaryPassword(manualPassword.value)
+  if (intent.kind === 'too-short') {
+    passwordResetInlineError.value = ADMIN_TEMPORARY_PASSWORD_TOO_SHORT
+    return
+  }
+  passwordResetInlineError.value = ''
   busy.value = true
   try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(access.value.user.id)}/reset-password`, {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(requestedUserId)}/reset-password`, {
       method: 'POST',
       body: JSON.stringify({
-        password: manualPassword.value || undefined,
+        password: intent.kind === 'submit' ? intent.password : undefined,
       }),
     })
     const payload = await readJson(response)
+    if (selectedUserId.value !== requestedUserId) return
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '重置密码失败'))
+      const errorPayload = payload.error as { code?: unknown; message?: unknown } | undefined
+      const inlineError = describeAdminResetPasswordInlineError(errorPayload)
+      if (inlineError) {
+        passwordResetInlineError.value = inlineError
+        return
+      }
+      throw new Error(String(errorPayload?.message || '重置密码失败'))
     }
 
     temporaryPassword.value = String((payload.data as Record<string, unknown> | undefined)?.temporaryPassword || '')
     manualPassword.value = ''
+    passwordResetInlineError.value = ''
     setStatus('密码已重置')
   } catch (error) {
+    if (selectedUserId.value !== requestedUserId) return
     setStatus(error instanceof Error ? error.message : '重置密码失败', 'error')
   } finally {
     busy.value = false
@@ -2681,52 +3625,129 @@ async function revokeSingleSession(sessionId: string): Promise<void> {
   }
 }
 
+function finishRoleWrite(
+  generation: number,
+  requestedUserId: string,
+  outcome: RoleMembershipWriteOutcome,
+  snapshot: RoleMembershipSnapshot | null,
+): boolean {
+  const stillCurrent = accessReadStillCurrent(
+    generation,
+    userAccessReadGeneration.value,
+    requestedUserId,
+    selectedUserId.value,
+  )
+  if (!stillCurrent) {
+    if (selectedUserId.value !== requestedUserId) {
+      roleActionFeedback.value = { tone: outcome.tone, message: outcome.message }
+      setStatus(outcome.message, outcome.tone)
+    }
+    return false
+  }
+
+  roleActionFeedback.value = { tone: outcome.tone, message: outcome.message }
+  setStatus(outcome.message, outcome.tone)
+  if (!outcome.applySnapshot || !snapshot || snapshot.user.id !== requestedUserId) {
+    access.value = null
+    return false
+  }
+
+  access.value = {
+    user: snapshot.user as UserAccess['user'],
+    roles: snapshot.roles,
+    permissions: snapshot.permissions,
+    isAdmin: snapshot.isAdmin,
+  }
+  syncProfileDraftFromAccess()
+  return true
+}
+
 async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
-  if (!selectedUserId.value || !selectedRoleId.value) return
+  if (!selectedUserId.value || !selectedRoleId.value || !roleSnapshotReady.value) return
+  const requestedUserId = selectedUserId.value
+  const requestedRoleId = selectedRoleId.value
+  const generation = userAccessReadGeneration.value
   busy.value = true
   try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(selectedUserId.value)}/roles/${action}`, {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(requestedUserId)}/roles/${action}`, {
       method: 'POST',
-      body: JSON.stringify({ roleId: selectedRoleId.value }),
+      body: JSON.stringify({ roleId: requestedRoleId }),
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存角色失败'))
     }
 
-    access.value = payload.data as UserAccess
-    syncProfileDraftFromAccess()
+    const result = roleWriteOutcomeFromPayload(payload.data, {
+      action,
+      requestedUserId,
+      selectedUserId: selectedUserId.value,
+      roleId: requestedRoleId,
+    })
+    if (!finishRoleWrite(generation, requestedUserId, result.outcome, result.snapshot)) return
+    await loadRoles()
     await loadUsers()
-    await loadMemberAdmission(selectedUserId.value)
-    setStatus(action === 'assign' ? '角色已分配' : '角色已撤销')
+    if (accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) {
+      await loadMemberAdmission(requestedUserId)
+    }
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '保存角色失败', 'error')
+    const message = error instanceof Error ? error.message : '保存角色失败'
+    const outcome = describeRoleMembershipWrite({
+      action,
+      requestedUserId,
+      selectedUserId: selectedUserId.value,
+      roleId: requestedRoleId,
+      persistedRoleIds: [],
+      ok: false,
+      errorMessage: message,
+    })
+    finishRoleWrite(generation, requestedUserId, outcome, null)
   } finally {
     busy.value = false
   }
 }
 
 async function updateNamedRole(roleId: string, enabled: boolean): Promise<void> {
-  if (!selectedUserId.value) return
+  if (!selectedUserId.value || !roleSnapshotReady.value) return
+  const requestedUserId = selectedUserId.value
+  const requestedRoleId = roleId
+  const action: 'assign' | 'unassign' = enabled ? 'assign' : 'unassign'
+  const generation = userAccessReadGeneration.value
   busy.value = true
   try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(selectedUserId.value)}/roles/${enabled ? 'assign' : 'unassign'}`, {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(requestedUserId)}/roles/${action}`, {
       method: 'POST',
-      body: JSON.stringify({ roleId }),
+      body: JSON.stringify({ roleId: requestedRoleId }),
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存管理员角色失败'))
     }
 
-    access.value = payload.data as UserAccess
-    syncProfileDraftFromAccess()
+    const result = roleWriteOutcomeFromPayload(payload.data, {
+      action,
+      requestedUserId,
+      selectedUserId: selectedUserId.value,
+      roleId: requestedRoleId,
+    })
+    if (!finishRoleWrite(generation, requestedUserId, result.outcome, result.snapshot)) return
+    await loadRoles()
     await loadUsers()
-    await loadMemberAdmission(selectedUserId.value)
-    const label = roleId === 'admin' ? '平台管理员' : roleId === 'attendance_admin' ? '考勤管理员' : roleId
-    setStatus(enabled ? `已开通${label}` : `已关闭${label}`)
+    if (accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) {
+      await loadMemberAdmission(requestedUserId)
+    }
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '保存管理员角色失败', 'error')
+    const message = error instanceof Error ? error.message : '保存管理员角色失败'
+    const outcome = describeRoleMembershipWrite({
+      action,
+      requestedUserId,
+      selectedUserId: selectedUserId.value,
+      roleId: requestedRoleId,
+      persistedRoleIds: [],
+      ok: false,
+      errorMessage: message,
+    })
+    finishRoleWrite(generation, requestedUserId, outcome, null)
   } finally {
     busy.value = false
   }
@@ -2796,21 +3817,336 @@ async function saveUserProfile(): Promise<void> {
   }
 }
 
+function openBulkConfirm(kind: 'role' | 'department' | 'enable' | 'disable'): void {
+  bulkConfirm.value = kind
+}
+
+async function readBatchPayload(response: Response): Promise<{ successCount: number; failureCount: number; results: Array<Record<string, unknown>>; dryRun?: boolean }> {
+  const payload = await readJson(response)
+  const data = (payload.data || {}) as { successCount?: number; failureCount?: number; results?: Array<Record<string, unknown>>; dryRun?: boolean }
+  if (!response.ok || payload.ok !== true) {
+    const error = payload.error as { message?: string; details?: { results?: Array<Record<string, unknown>>; successCount?: number; failureCount?: number } } | undefined
+    if (error?.details?.results) {
+      return {
+        successCount: error.details.successCount || 0,
+        failureCount: error.details.failureCount || error.details.results.length,
+        results: error.details.results,
+      }
+    }
+    throw new Error(error?.message || '批量操作失败')
+  }
+  return {
+    successCount: data.successCount || 0,
+    failureCount: data.failureCount || 0,
+    results: data.results || [],
+    dryRun: data.dryRun,
+  }
+}
+
+async function rowsFromUpload(file: File): Promise<Array<Record<string, string>>> {
+  if (file.name.toLowerCase().endsWith('.xlsx')) {
+    const xlsx = await import('xlsx')
+    const book = xlsx.read(await file.arrayBuffer(), { type: 'array' })
+    const sheet = book.Sheets[book.SheetNames[0] || '']
+    const matrix = xlsx.utils.sheet_to_json<(string | number | null)[]>(sheet, { header: 1, raw: false })
+    if (!matrix.length) return []
+    const headers = (matrix[0] || []).map((cell) => String(cell || '').trim())
+    return matrix.slice(1).filter((line) => line.some((cell) => String(cell || '').trim())).map((line) => {
+      const record: Record<string, string> = {}
+      headers.forEach((header, index) => {
+        record[header] = String(line[index] ?? '').trim()
+      })
+      return record
+    })
+  }
+  return parseCsv(await file.text())
+}
+
+function downloadImportTemplate(kind: 'csv' | 'xlsx'): void {
+  if (kind === 'csv') {
+    downloadText('user-import-template.csv', buildImportTemplateCsv(), 'text/csv;charset=utf-8')
+    return
+  }
+  void import('xlsx').then((xlsx) => {
+    const sheet = xlsx.utils.aoa_to_sheet([
+      ['name', 'email', 'roleId', 'department'],
+      ['林岚', 'linlan@example.com', 'user', '装配车间'],
+    ])
+    const book = xlsx.utils.book_new()
+    xlsx.utils.book_append_sheet(book, sheet, 'users')
+    xlsx.writeFile(book, 'user-import-template.xlsx')
+  }).catch(() => {
+    downloadText('user-import-template.csv', buildImportTemplateCsv(), 'text/csv;charset=utf-8')
+    setStatus('Excel 模板暂不可用，已改为下载 CSV', 'error')
+  })
+}
+
+async function onImportFile(event: Event): Promise<void> {
+  const input = event.target
+  if (!(input instanceof HTMLInputElement) || !input.files?.[0]) return
+  const rows = await rowsFromUpload(input.files[0])
+  importPreview.value = validateImportRows(rows, knownRoleIds.value).slice(0, ADMIN_USER_BATCH_LIMIT)
+  batchReport.value = null
+  input.value = ''
+}
+
+async function submitBatchCreate(items: Array<Record<string, unknown>>): Promise<void> {
+  bulkBusy.value = true
+  try {
+    const response = await apiFetch('/api/admin/users/batch/create', {
+      method: 'POST',
+      body: JSON.stringify({ items: items.slice(0, ADMIN_USER_BATCH_LIMIT) }),
+    })
+    batchReport.value = await readBatchPayload(response)
+    await loadUsers()
+    setStatus(`批量邀请完成：成功 ${batchReport.value.successCount}，失败 ${batchReport.value.failureCount}`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '批量邀请失败', 'error')
+  } finally {
+    bulkBusy.value = false
+  }
+}
+
+async function submitImport(): Promise<void> {
+  const items = importPreview.value.filter((row) => row.ok).map((row) => ({
+    name: row.name || undefined,
+    email: row.email,
+    roleId: row.roleId || undefined,
+    department: row.department || undefined,
+  }))
+  await submitBatchCreate(items)
+}
+
+async function submitPastedEmails(): Promise<void> {
+  const items = pastedEmailList.value.slice(0, ADMIN_USER_BATCH_LIMIT).map((email) => ({
+    email,
+    roleId: pasteRoleId.value || undefined,
+  }))
+  await submitBatchCreate(items)
+}
+
+function downloadFailedRows(): void {
+  const failed = (batchReport.value?.results || []).filter((item) => item.ok !== true)
+  const lines = ['email,code,message', ...failed.map((item) => [item.email, item.code, item.message].map((value) => `"${String(value || '').replaceAll('"', '""')}"`).join(','))]
+  downloadText('user-import-failed.csv', `\ufeff${lines.join('\n')}\n`, 'text/csv;charset=utf-8')
+}
+
+async function submitBulkConfirm(): Promise<void> {
+  const kind = bulkConfirm.value
+  bulkConfirm.value = null
+  if (!kind || selectedUserIds.value.length === 0) return
+  bulkBusy.value = true
+  try {
+    if (kind === 'enable' || kind === 'disable') {
+      const response = await apiFetch('/api/admin/users/batch/disable', {
+        method: 'POST',
+        body: JSON.stringify({ userIds: selectedUserIds.value, isActive: kind === 'enable' }),
+      })
+      batchReport.value = await readBatchPayload(response)
+    } else {
+      const items = selectedUsers.value.map((user) => ({
+        userId: user.id,
+        email: user.email,
+        roleId: kind === 'role' ? bulkRoleId.value : undefined,
+        department: kind === 'department' ? bulkDepartment.value : undefined,
+      }))
+      const response = await apiFetch('/api/admin/users/batch/update', {
+        method: 'POST',
+        body: JSON.stringify({ items }),
+      })
+      batchReport.value = await readBatchPayload(response)
+    }
+    await loadUsers()
+    setStatus(`批量操作完成：成功 ${batchReport.value?.successCount || 0}，失败 ${batchReport.value?.failureCount || 0}`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '批量操作失败', 'error')
+  } finally {
+    bulkBusy.value = false
+  }
+}
+
+function exportUsersForUpdate(): void {
+  const source = selectedUsers.value.length > 0 ? selectedUsers.value : displayedUsers.value
+  downloadText('user-update.csv', buildUpdateExportCsv(source), 'text/csv;charset=utf-8')
+  setStatus(`已导出 ${source.length} 名用户，可修改后重新导入`)
+}
+
+async function onReimportFile(event: Event): Promise<void> {
+  const input = event.target
+  if (!(input instanceof HTMLInputElement) || !input.files?.[0]) return
+  const rows = await rowsFromUpload(input.files[0])
+  reimportPreview.value = previewUpdateRows(rows, users.value, knownRoleIds.value).slice(0, ADMIN_USER_BATCH_LIMIT)
+  reimportReady.value = false
+  batchReport.value = null
+  input.value = ''
+}
+
+async function submitReimport(dryRun: boolean): Promise<void> {
+  const items = reimportPreview.value.filter((row) => row.ok && (row.userId || row.email)).map((row) => ({
+    userId: row.userId || undefined,
+    email: row.email || undefined,
+    name: row.name || undefined,
+    roleId: row.roleId || undefined,
+    department: row.department,
+    isActive: row.isActive === 'true' ? true : row.isActive === 'false' ? false : undefined,
+  }))
+  bulkBusy.value = true
+  try {
+    const response = await apiFetch('/api/admin/users/batch/update', {
+      method: 'POST',
+      body: JSON.stringify({ items, dryRun }),
+    })
+    batchReport.value = await readBatchPayload(response)
+    reimportReady.value = dryRun && (batchReport.value.failureCount === 0 || batchReport.value.successCount > 0)
+    if (!dryRun) {
+      await loadUsers()
+      reimportOpen.value = false
+    }
+    setStatus(dryRun ? '已生成差异预览，确认后才会写入' : `更新完成：成功 ${batchReport.value.successCount}，失败 ${batchReport.value.failureCount}`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '导入更新失败', 'error')
+  } finally {
+    bulkBusy.value = false
+  }
+}
+
+async function submitHardDelete(): Promise<void> {
+  bulkBusy.value = true
+  try {
+    const response = await apiFetch('/api/admin/users/batch/delete', {
+      method: 'POST',
+      body: JSON.stringify({
+        userIds: selectedUserIds.value,
+        mode: 'hard',
+        confirmText: hardDeletePhrase.value,
+      }),
+    })
+    batchReport.value = await readBatchPayload(response)
+    selectedUserIds.value = []
+    await loadUsers()
+    recycleTotal.value = 0
+    setStatus(recycleText('moved', { ok: batchReport.value.successCount, fail: batchReport.value.failureCount }), batchReport.value.failureCount > 0 ? 'error' : 'info')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : recycleText('moved', { ok: 0, fail: selectedUserIds.value.length }), 'error')
+  } finally {
+    bulkBusy.value = false
+    hardDeletePhrase.value = ''
+  }
+}
+
+function toggleRecycleSelection(userId: string, event: Event): void {
+  const checked = event.target instanceof HTMLInputElement && event.target.checked
+  recycleSelectedIds.value = checked
+    ? Array.from(new Set([...recycleSelectedIds.value, userId]))
+    : recycleSelectedIds.value.filter((id) => id !== userId)
+}
+
+async function loadRecycleBin(): Promise<void> {
+  loadingRecycle.value = true
+  try {
+    const params = new URLSearchParams()
+    if (recycleSearch.value) params.set('q', recycleSearch.value)
+    const response = await apiFetch(`/api/admin/users/recycle?${params.toString()}`)
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || recycleText('loading')))
+    }
+    const data = payload.data as { items?: RecycleBinUser[]; total?: number; retentionDays?: number } | undefined
+    recycleUsers.value = Array.isArray(data?.items) ? data.items : []
+    recycleTotal.value = Number(data?.total || recycleUsers.value.length)
+    if (typeof data?.retentionDays === 'number' && data.retentionDays > 0) recycleRetentionDays.value = data.retentionDays
+    const visible = new Set(recycleUsers.value.map((user) => user.id))
+    recycleSelectedIds.value = recycleSelectedIds.value.filter((id) => visible.has(id))
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : recycleText('loading'), 'error')
+  } finally {
+    loadingRecycle.value = false
+  }
+}
+
+async function restoreRecycleUsers(userIds = recycleSelectedIds.value): Promise<void> {
+  if (userIds.length === 0) return
+  recycleBusy.value = true
+  try {
+    const response = await apiFetch('/api/admin/users/recycle/restore', {
+      method: 'POST',
+      body: JSON.stringify({ userIds }),
+    })
+    const report = await readBatchPayload(response)
+    await loadRecycleBin()
+    await loadUsers()
+    setStatus(recycleText('restored', { ok: report.successCount, fail: report.failureCount }), report.failureCount > 0 ? 'error' : 'info')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : recycleText('restored', { ok: 0, fail: userIds.length }), 'error')
+  } finally {
+    recycleBusy.value = false
+  }
+}
+
+async function purgeRecycleUsers(): Promise<void> {
+  if (recycleSelectedIds.value.length === 0 || purgePhrase.value !== '立即清除') return
+  recycleBusy.value = true
+  try {
+    const response = await apiFetch('/api/admin/users/recycle/purge', {
+      method: 'POST',
+      body: JSON.stringify({ userIds: recycleSelectedIds.value, confirmText: purgePhrase.value }),
+    })
+    const report = await readBatchPayload(response)
+    purgePhrase.value = ''
+    await loadRecycleBin()
+    setStatus(recycleText('purged', { ok: report.successCount, fail: report.failureCount }), report.failureCount > 0 ? 'error' : 'info')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : recycleText('purged', { ok: 0, fail: recycleSelectedIds.value.length }), 'error')
+  } finally {
+    recycleBusy.value = false
+  }
+}
+
+watch([userListFilter, roleFilter, accountStatusFilter, search], () => {
+  page.value = 1
+})
+
+watch(surface, (value) => {
+  if (value === 'recycle') void loadRecycleBin()
+})
+
+function onUserAdminKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Escape') return
+  if (inviteOpen.value) {
+    closeInvite()
+    return
+  }
+  if (detailOpen.value) closeUserDetail()
+}
+
 const stopUserLocationSync = subscribeToLocationChanges(() => {
   if (!syncUserNavigationFromLocation()) return
   void handleUserNavigationChange()
 })
 
 onMounted(async () => {
-  await Promise.all([loadRoles(), loadUsers(), loadAccessPresets(), loadInviteRecords(), loadAttendanceOnboardingOptions()])
+  window.addEventListener('keydown', onUserAdminKeydown)
+  await Promise.all([loadRoles(), loadUsers(), loadAccessPresets(), loadInviteRecords(), loadAttendanceOnboardingOptions(), loadAttendanceOrgOptions()])
 })
 
 onUnmounted(() => {
+  window.removeEventListener('keydown', onUserAdminKeydown)
   stopUserLocationSync()
 })
 </script>
 
 <style scoped>
+.user-admin__org-field {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.user-admin__org-field .user-admin__select {
+  flex: 1;
+  min-width: 0;
+}
+
 .user-admin {
   display: grid;
   gap: 16px;
@@ -2899,6 +4235,51 @@ onUnmounted(() => {
   color: #dc2626;
 }
 
+.user-admin__org-context {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.user-admin__org-label {
+  align-self: center;
+  font-size: 13px;
+}
+
+.user-admin__confirm {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.user-admin__confirm ol {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.user-admin__block-error {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.user-admin__block-error p {
+  margin: 0;
+}
+
+.user-admin__block-error small {
+  display: block;
+  margin-top: 4px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
 .user-admin__source-banner {
   display: grid;
   gap: 4px;
@@ -2927,9 +4308,17 @@ onUnmounted(() => {
 
 .user-admin__layout {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  /* Single full-width track (customer field report 2026-10-21, updated with the member-table
+     redesign): a plain `1fr` is minmax(auto, 1fr) and grows to min-content, so one long
+     unbreakable identifier could widen the page. The detail editor is an overlay drawer, not a
+     second column, so it cannot be pushed off or drawn over the table. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
-  min-height: 520px;
+  min-height: 0;
+}
+
+.user-admin__layout > * {
+  min-width: 0;
 }
 
 .user-admin__panel--create {
@@ -2964,6 +4353,13 @@ onUnmounted(() => {
   border-radius: 12px;
   padding: 16px;
   display: grid;
+  /* Explicit single track capped at the card width (customer field report 2026-10-21). The implicit
+     track was `auto`, which grows to the widest child's min-content (e.g. a long unbreakable account
+     identifier in a user row): every block in the left card was then laid out wider than the card,
+     the export buttons were clipped at its edge and the bulk-action buttons were drawn over the
+     right panel. */
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 12px;
   align-content: start;
 }
@@ -2982,15 +4378,62 @@ onUnmounted(() => {
 
 .user-admin__section-head--workbench {
   margin-top: 4px;
+  /* In the 320px left card the export buttons do not fit beside the heading: wrap them onto their
+     own line instead of squeezing the heading into a one-word-per-line column. */
+  flex-wrap: wrap;
+}
+
+.user-admin__section-head--workbench > * {
+  min-width: 0;
+}
+
+/* Long button labels wrap inside the card instead of overflowing it. */
+.user-admin__role-actions > .user-admin__button {
+  max-width: 100%;
+  height: auto;
+  min-height: 38px;
+  white-space: normal;
+}
+
+/* Account identifiers (e.g. directory-synced ids) are one unbreakable token; let them break. */
+.user-admin__user-body > strong,
+.user-admin__user-body > span,
+.user-admin__detail-head h2,
+.user-admin__detail-head p {
+  overflow-wrap: anywhere;
+}
+
+/* The missing-OpenID hint carries the whole corpId (one unbreakable token): full row, may break. */
+.user-admin__user > .user-admin__hint {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  flex-basis: 100%;
+  min-width: 0;
+  margin: 2px 0 0;
+  padding-top: 6px;
+  border-top: 1px dashed var(--ms-border-light);
+  overflow-wrap: anywhere;
 }
 
 .user-admin__panel--detail {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 30;
+  width: min(640px, 100%);
+  height: 100%;
+  max-height: 100vh;
+  margin: 0;
+  overflow: auto;
+  border-radius: 0;
+  transform: translateX(105%);
+  visibility: hidden;
   gap: 16px;
 }
 
 .user-admin__summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
   gap: 8px;
 }
 
@@ -3090,15 +4533,21 @@ onUnmounted(() => {
 }
 
 .user-admin__user {
-  display: flex;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 2.4fr) minmax(0, 0.7fr) minmax(0, 1.5fr) minmax(88px, 0.8fr) 64px;
+  /* The missing-OpenID governance hint (a <p> after the user-body button) takes its own line instead
+     of squeezing the button and running past the card. */
+  flex-wrap: wrap;
+  align-items: center;
   gap: 10px;
   text-align: left;
   width: 100%;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: #fff;
-  padding: 12px;
+  /* width: 100% plus padding/border must still fit the card. */
+  box-sizing: border-box;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  padding: 10px 12px;
 }
 
 .user-admin__user--active {
@@ -3117,15 +4566,17 @@ onUnmounted(() => {
 }
 
 .user-admin__user-body {
-  flex: 1;
+  grid-column: 2 / 6;
   display: grid;
-  gap: 4px;
+  grid-template-columns: subgrid;
+  align-items: center;
   text-align: left;
   border: 0;
   padding: 0;
   background: transparent;
   color: inherit;
   cursor: pointer;
+  min-width: 0;
 }
 
 .user-admin__meta {
@@ -3275,6 +4726,307 @@ onUnmounted(() => {
 
 .user-admin__role-card p {
   margin: 0;
+}
+
+.user-admin__panel--detail-open {
+  transform: translateX(0);
+  visibility: visible;
+}
+
+.user-admin__detail-close,
+.user-admin__panel--detail .user-admin__section-head > .user-admin__button,
+.user-admin__panel--detail .user-admin__role-actions > .user-admin__button {
+  flex: none;
+  width: auto;
+  white-space: nowrap;
+}
+
+.user-admin__invite-list {
+  display: grid;
+  gap: var(--ms-space-3);
+}
+
+.user-admin__invite-list .user-admin__role-card {
+  width: min(520px, 100%);
+}
+
+.user-admin__drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  border: 0;
+  background: color-mix(in srgb, var(--ms-text-1) 28%, transparent);
+}
+
+.user-admin__modal {
+  display: none;
+}
+
+.user-admin__modal--open {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: var(--ms-space-5);
+}
+
+.user-admin__modal-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: color-mix(in srgb, var(--ms-text-1) 35%, transparent);
+}
+
+.user-admin__modal--open .user-admin__panel--create {
+  position: relative;
+  z-index: 1;
+  width: min(960px, 100%);
+  max-height: min(860px, calc(100vh - 48px));
+  overflow: auto;
+}
+
+.user-admin__note-label {
+  display: grid;
+  gap: 6px;
+  color: var(--ms-text-2);
+  font-size: 13px;
+}
+
+.user-admin__file {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+}
+
+.user-admin__file input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.user-admin__preview-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--ms-border-light);
+  color: var(--ms-text-2);
+  font-size: 13px;
+}
+
+.user-admin__preview-row--head {
+  color: var(--ms-text-3);
+  font-weight: 600;
+}
+
+.user-admin__danger {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ms-border-light);
+}
+
+.user-admin__danger summary {
+  color: var(--ms-color-danger);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.user-admin__note {
+  width: 100%;
+  min-height: 72px;
+  height: auto;
+  padding: 8px 12px;
+}
+
+.user-admin__tabs {
+  display: flex;
+  gap: var(--ms-space-1);
+  border-bottom: 1px solid var(--ms-border-light);
+}
+
+.user-admin__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--ms-text-2);
+  font-weight: 600;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.user-admin__tab--active {
+  color: var(--ms-text-1);
+  border-bottom-color: var(--ms-color-primary);
+}
+
+.user-admin__tab-count {
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.user-admin__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ms-space-2);
+}
+
+.user-admin__toolbar .user-admin__search {
+  flex: 1 1 280px;
+}
+
+.user-admin__toolbar .user-admin__select {
+  min-width: 140px;
+}
+
+.user-admin__governance {
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  padding: 8px 12px;
+  background: var(--ms-bg-card);
+}
+
+.user-admin__governance summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--ms-text-1);
+}
+
+.user-admin__bulkbar--idle {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.user-admin__table-head {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 2.4fr) minmax(0, 0.7fr) minmax(0, 1.5fr) minmax(88px, 0.8fr) 64px;
+  gap: 10px;
+  padding: 0 12px 8px;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.user-admin__table-head button {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.user-admin__identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.user-admin__avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.user-admin__identity-text {
+  display: grid;
+  min-width: 0;
+}
+
+.user-admin__identity-text span {
+  color: var(--ms-text-3);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.user-admin__user-select span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+
+.user-admin__row-menu {
+  position: relative;
+  justify-self: end;
+}
+
+.user-admin__row-menu > button,
+.user-admin__row-menu-panel button {
+  border: 1px solid var(--ms-border);
+  background: var(--ms-bg-card);
+  border-radius: var(--ms-radius-sm);
+  height: 32px;
+  padding: 0 8px;
+  cursor: pointer;
+  color: var(--ms-text-1);
+}
+
+.user-admin__row-menu-panel {
+  position: absolute;
+  right: 0;
+  top: 36px;
+  z-index: 5;
+  min-width: 96px;
+  padding: 4px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+}
+
+.user-admin__row-menu-panel button {
+  width: 100%;
+  border: 0;
+  text-align: left;
+}
+
+.user-admin__pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--ms-space-2);
+  color: var(--ms-text-2);
+  font-size: 13px;
+}
+
+.user-admin__section--danger {
+  margin-top: var(--ms-space-2);
+  padding-top: var(--ms-space-3);
+  border-top: 1px solid var(--ms-border-light);
+}
+
+.user-admin {
+  background: var(--ms-bg-page);
 }
 
 @media (max-width: 960px) {

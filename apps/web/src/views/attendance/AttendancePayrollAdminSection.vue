@@ -20,21 +20,13 @@
       </label>
       <label class="attendance__field" for="attendance-payroll-template-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
-        <select
+        <AttendanceTimezoneSelect
           id="attendance-payroll-template-timezone"
-          v-model="payrollTemplateForm.timezone"
           name="payrollTemplateTimezone"
-        >
-          <optgroup
-            v-for="group in payrollTemplateTimezoneOptionGroups"
-            :key="group.id"
-            :label="tr(group.labelEn, group.labelZh)"
-          >
-            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
-              {{ timezone.label }}
-            </option>
-          </optgroup>
-        </select>
+          v-model="payrollTemplateForm.timezone"
+          :tr="tr"
+          :groups="payrollTemplateTimezoneOptionGroups"
+        />
       </label>
       <label class="attendance__field" for="attendance-payroll-template-start">
         <span>{{ tr('Start day', '起始日') }}</span>
@@ -198,7 +190,7 @@
         <tbody>
           <tr v-for="item in payrollTemplates" :key="item.id">
             <td>{{ item.name }}</td>
-            <td>{{ formatTimezoneOptionLabel(item.timezone) }}</td>
+            <td>{{ timezoneLabel(item.timezone) }}</td>
             <td>{{ item.startDay }}</td>
             <td>{{ item.endDay }}</td>
             <td>{{ item.endMonthOffset }}</td>
@@ -249,31 +241,28 @@
       </label>
       <label class="attendance__field" for="attendance-payroll-cycle-anchor">
         <span>{{ tr('Anchor date', '锚点日期') }}</span>
-        <input
+        <AttendanceLocaleDateInput
           id="attendance-payroll-cycle-anchor"
           v-model="payrollCycleForm.anchorDate"
           name="payrollCycleAnchor"
-          type="date"
         />
       </label>
       <label class="attendance__field" for="attendance-payroll-cycle-start">
         <span>{{ tr('Start date', '开始日期') }}</span>
-        <input
+        <AttendanceLocaleDateInput
           id="attendance-payroll-cycle-start"
           v-model="payrollCycleForm.startDate"
           name="payrollCycleStartDate"
-          type="date"
           :class="{ 'attendance__input--invalid': payrollCycleManualPeriodRequired && !payrollCycleForm.startDate }"
           :aria-invalid="payrollCycleManualPeriodRequired && !payrollCycleForm.startDate ? 'true' : 'false'"
         />
       </label>
       <label class="attendance__field" for="attendance-payroll-cycle-end">
         <span>{{ tr('End date', '结束日期') }}</span>
-        <input
+        <AttendanceLocaleDateInput
           id="attendance-payroll-cycle-end"
           v-model="payrollCycleForm.endDate"
           name="payrollCycleEndDate"
-          type="date"
           :class="{ 'attendance__input--invalid': payrollCycleManualPeriodRequired && !payrollCycleForm.endDate }"
           :aria-invalid="payrollCycleManualPeriodRequired && !payrollCycleForm.endDate ? 'true' : 'false'"
         />
@@ -337,11 +326,10 @@
         </label>
         <label class="attendance__field" for="attendance-payroll-cycle-gen-anchor">
           <span>{{ tr('Anchor date', '锚点日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-payroll-cycle-gen-anchor"
             v-model="payrollCycleGenerateForm.anchorDate"
             name="payrollCycleGenAnchor"
-            type="date"
           />
         </label>
         <label class="attendance__field" for="attendance-payroll-cycle-gen-count">
@@ -461,7 +449,10 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
+import AttendanceTimezoneSelect from './AttendanceTimezoneSelect.vue'
 import { computed, type Ref } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type {
   AttendancePayrollCycle,
   AttendancePayrollSummaryFieldOption,
@@ -576,7 +567,12 @@ const payrollCycleGenerateForm = props.payroll.payrollCycleGenerateForm
 const payrollCycleCanSave = props.payroll.payrollCycleCanSave
 const payrollCycleManualPeriodRequired = props.payroll.payrollCycleManualPeriodRequired
 const payrollCycleValidationHint = props.payroll.payrollCycleValidationHint
-const payrollTemplateTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(payrollTemplateForm.timezone))
+const { isZh } = useLocale()
+const timezoneLocale = computed(() => (isZh.value ? 'zh' : 'en') as 'zh' | 'en')
+function timezoneLabel(value?: string | null): string {
+  return formatTimezoneOptionLabel(value, new Date(), timezoneLocale.value)
+}
+const payrollTemplateTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(payrollTemplateForm.timezone, timezoneLocale.value))
 const payrollTemplateName = props.payroll.payrollTemplateName
 const resetPayrollTemplateForm = () => props.payroll.resetPayrollTemplateForm()
 const editPayrollTemplate = (item: AttendancePayrollTemplate) => props.payroll.editPayrollTemplate(item)
@@ -640,7 +636,13 @@ const exportPayrollCycleSummary = () => props.payroll.exportPayrollCycleSummary(
 }
 
 .attendance__field--checkbox {
-  justify-content: flex-end;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  justify-self: start;
+  width: fit-content;
+  max-width: 100%;
+  gap: 8px;
 }
 
 .attendance__input--invalid {

@@ -161,6 +161,46 @@ describe('flag OFF — byte-identical legacy send_dingtalk_approval_card (no int
 describe('flag ON — two-phase intent/outcome', () => {
   beforeEach(() => { process.env[FLAG] = 'true' })
 
+  it('handover guard leaves a definitely unsent intent retryable; release sends once', async () => {
+    const h = makeHarness(call => call === 0 ? tokenResponse() : asyncSendOk())
+    const orig = h.deps.queryFn
+    let frozen = true
+    h.deps.queryFn = (async (sql: string, params: unknown[] = []) => {
+      if (frozen && /INSERT INTO dingtalk_approval_card_deliveries/i.test(sql)) {
+        throw Object.assign(new Error('handover guard'), { code: '55000', constraint: 'directory_handover_card_insert' })
+      }
+      return orig(sql, params)
+    }) as AutomationDeps['queryFn']
+    const first = await new AutomationExecutor(h.deps).execute(ruleWith(CARD), TRIGGER, undefined, ROOT)
+    expect(first.steps[0]?.status).toBe('failed')
+    expect(h.fetch).not.toHaveBeenCalled()
+    expect(only(h.intent)).toMatchObject({ status: 'failed', last_error: 'directory_handover_blocked' })
+    frozen = false
+    const retry = await new AutomationExecutor(h.deps).execute(ruleWith(CARD), TRIGGER, undefined, ROOT)
+    expect(retry.steps[0]?.status).toBe('success')
+    expect(only(h.intent).status).toBe('sent')
+    expect(h.fetch).toHaveBeenCalledTimes(2)
+    await new AutomationExecutor(h.deps).execute(ruleWith(CARD), TRIGGER, undefined, ROOT)
+    expect(h.fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    { code: '40001', constraint: undefined },
+    { code: '55000', constraint: 'unrelated_guard' },
+  ])('unrelated insert refusal remains fail-closed ($code/$constraint)', async databaseError => {
+    const h = makeHarness(() => { throw new Error('must not call provider') })
+    const orig = h.deps.queryFn
+    h.deps.queryFn = (async (sql: string, params: unknown[] = []) => {
+      if (/INSERT INTO dingtalk_approval_card_deliveries/i.test(sql)) throw Object.assign(new Error('unrelated refusal'), databaseError)
+      return orig(sql, params)
+    }) as AutomationDeps['queryFn']
+    await new AutomationExecutor(h.deps).execute(ruleWith(CARD), TRIGGER, undefined, ROOT)
+    expect(only(h.intent).status).toBe('pending')
+    await new AutomationExecutor(h.deps).execute(ruleWith(CARD), TRIGGER, undefined, ROOT)
+    expect(only(h.intent).status).toBe('outcome_unknown')
+    expect(h.fetch).not.toHaveBeenCalled()
+  })
+
   it('proceed → sent: card delivered once, success step, intent row = sent', async () => {
     const h = makeHarness((call) => (call === 0 ? tokenResponse() : asyncSendOk()))
     const exec = await new AutomationExecutor(h.deps).execute(ruleWith(CARD), TRIGGER, undefined, ROOT)

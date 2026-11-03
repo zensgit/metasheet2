@@ -1,4 +1,5 @@
 import { apiFetch } from '../utils/api'
+import { randomUuid } from '../utils/uuid'
 import { ElearningApiError } from './elearning'
 
 const UUID_RE =
@@ -288,10 +289,7 @@ export async function publishElearningPortalSettings(
 }
 
 function defaultRequestId(): string {
-  if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') {
-    fail('request_failed', 0)
-  }
-  return crypto.randomUUID()
+  return randomUuid()
 }
 
 export function createElearningPortalRequestIdTracker(

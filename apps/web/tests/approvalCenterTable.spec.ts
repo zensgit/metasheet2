@@ -14,6 +14,7 @@
  * own local import regardless of what is globally registered.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import {
   createApp,
   defineComponent,
@@ -163,6 +164,12 @@ function buildRow(overrides: Partial<UnifiedApprovalDTO> = {}): UnifiedApprovalD
     ...overrides,
   } as UnifiedApprovalDTO
 }
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalCenterTable', () => {
   let app: VueApp<Element> | null = null
@@ -359,6 +366,52 @@ describe('ApprovalCenterTable', () => {
       emptyText: 'empty',
       summaryLineFor: () => '',
       showUnreadDot: true,
+    })
+    const cell = container!.querySelector('[data-el-cell="标题"]')
+    expect(cell?.querySelector('[data-testid="approval-row-unread-dot"]')).toBeNull()
+  })
+
+  // ---------------------------------------------------------------------------
+  // Test report 2026-10-08: `unreadDotFor` — the same dot for a tab whose unread rule is not
+  // `isRead` (抄送我的 `ccUnread`). The predicate decides alone; absent predicate ⇒ no extra dot.
+  // ---------------------------------------------------------------------------
+  it('unreadDotFor: a row the predicate marks unread gets the dot; others do not', async () => {
+    const rows = [
+      buildRow({ id: 'apv_1', ccUnread: true } as Partial<UnifiedApprovalDTO>),
+      buildRow({ id: 'apv_2', ccUnread: false } as Partial<UnifiedApprovalDTO>),
+    ]
+    await mountTable({
+      rows,
+      loading: false,
+      emptyText: 'empty',
+      summaryLineFor: () => '',
+      unreadDotFor: (row: UnifiedApprovalDTO) => row.ccUnread === true,
+    })
+    const dotIn = (id: string) => container!.querySelector(`[data-el-row="${id}"] [data-testid="approval-row-unread-dot"]`)
+    expect(dotIn('apv_1')).toBeTruthy()
+    expect(dotIn('apv_2')).toBeNull()
+  })
+
+  it('unreadDotFor absent: a row carrying ccUnread===true renders NO dot (the caller has not opted in)', async () => {
+    const rows = [buildRow({ ccUnread: true } as Partial<UnifiedApprovalDTO>)]
+    await mountTable({
+      rows,
+      loading: false,
+      emptyText: 'empty',
+      summaryLineFor: () => '',
+    })
+    const cell = container!.querySelector('[data-el-cell="标题"]')
+    expect(cell?.querySelector('[data-testid="approval-row-unread-dot"]')).toBeNull()
+  })
+
+  it('unreadDotFor does not widen the pending rule: isRead===false without showUnreadDot stays dot-less when the predicate says no', async () => {
+    const rows = [buildRow({ isRead: false } as Partial<UnifiedApprovalDTO>)]
+    await mountTable({
+      rows,
+      loading: false,
+      emptyText: 'empty',
+      summaryLineFor: () => '',
+      unreadDotFor: () => false,
     })
     const cell = container!.querySelector('[data-el-cell="标题"]')
     expect(cell?.querySelector('[data-testid="approval-row-unread-dot"]')).toBeNull()

@@ -1,3 +1,4 @@
+import { acquireAttendanceImportTimezonePrefixV1, prepareAttendanceImportTimezoneSourceV1 } from './attendance-business-trip-locks'
 /**
  * W4C-3a core-owned canonical legacy-plan processor (P07/P08 recovery).
  *
@@ -24,7 +25,7 @@ import {
   type VerifiedAttendanceCalculationTargetIdentityV1,
   type VerifiedAttendanceOperationIdentityV1,
 } from './w4c0-identity'
-import { runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
+import { runAttendanceResultOperationTransactionV1, attendanceW4ConnectionDiscardV1 } from './w4c0-operation-registry'
 import {
   AttendanceLegacyPlanEnqueueError,
   authorizeAttendanceLegacyPlanFullImportFromJobV1,
@@ -59,7 +60,8 @@ export type AttendanceLegacyPlanProcessorDepsV1 = Readonly<{
    */
   acquireConnection(): Promise<{
     client: AttendanceLegacyPlanProcessorConnectionV1
-    release(): void
+    /** pg's `release(err?)`: a truthy error destroys the connection instead of returning it. */
+    release(error?: Error): void
   }>
 }>
 
@@ -190,6 +192,7 @@ function assembleCallbacks(
       return runAttendanceResultOperationTransactionV1(connection, work)
     },
     async acquireClass00(trx, orgId) {
+      await acquireAttendanceImportTimezonePrefixV1(trx, orgId)
       const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(orgId)
       await acquireAttendanceCalculationRolloutLock(trx, orgKey, 'shared')
     },
@@ -264,6 +267,7 @@ function assembleCallbacks(
       return deriveAttendanceLegacyPlanTargetIdentitiesV1(plan)
     },
     async acquireClass11(trx, plan, identities) {
+      if (plan.groupEffects.length > 0) await prepareAttendanceImportTimezoneSourceV1(trx, plan.manifest.orgId)
       await acquireAttendanceLegacyPlanClass11V1(trx, plan, identities)
     },
     async recheckPreconditions(trx, plan) {
@@ -317,11 +321,12 @@ function assembleCallbacks(
         trx,
       ).clearResumedSuspendedReason(jobId, orgId)
     },
-    async markPlanFailed(trx, jobId, orgId, reason) {
+    async markPlanFailed(trx, jobId, orgId, reason, errorDetail) {
       await createAttendanceLegacyPlanWorkerRepositoryV1(trx).markPlanFailed(
         jobId,
         orgId,
         reason,
+        errorDetail,
       )
     },
   })
@@ -347,12 +352,18 @@ export function createAttendanceLegacyPlanProcessorV1(
         return { kind: 'not_found' as const }
       }
       const acquired = await deps.acquireConnection()
+      let discard: Error | undefined
       try {
         const callbacks = assembleCallbacks(acquired.client)
         const worker = createAttendanceLegacyPlanWorkerV1(callbacks)
         return await worker.process(jobId)
+      } catch (error) {
+        // Settlement coordination (r6.1 §1.1 P1-1): a connection whose state the runner could not vouch for is
+        // destroyed, not returned; every other error returns it as before. The error itself goes up unchanged.
+        discard = attendanceW4ConnectionDiscardV1(error)
+        throw error
       } finally {
-        acquired.release()
+        acquired.release(discard)
       }
     },
   })

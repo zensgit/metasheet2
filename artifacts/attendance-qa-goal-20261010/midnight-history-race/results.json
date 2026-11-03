@@ -1,0 +1,34 @@
+{
+  "sourceFiles": {
+    "apps/web/src/views/AttendanceView.vue": "269f85e06215bf2a7579f823bf3301f3377a3f5265b257da279ebec75f81e503",
+    "apps/web/tests/attendance-selfservice-dashboard.spec.ts": "ba3245306fd942910ca26bc7bbf95f7877a3b731339ed8219762e4dd95e9e4f1"
+  },
+  "results": [
+    {
+      "name": "refreshAll-only red baseline: direct history regression and three neighbors",
+      "log": "red-refresh-only.log",
+      "exitCode": 1,
+      "failed": 1,
+      "passed": 3,
+      "selected": 4
+    },
+    {
+      "name": "both fetch-entry guards: midnight regressions and neighbors",
+      "log": "green-midnight-four.log",
+      "exitCode": 0,
+      "passed": 4,
+      "selected": 4
+    },
+    {
+      "name": "dashboard whole file + today helper",
+      "log": "green-dashboard-today-helper.log",
+      "exitCode": 0,
+      "files": 2,
+      "dashboardTests": 102,
+      "helperTests": 9,
+      "passed": 111,
+      "skipped": 0
+    }
+  ],
+  "scope": "Only loadRecords added to prior refreshAll fix and one direct history dashboard regression; source changes not staged or committed."
+}

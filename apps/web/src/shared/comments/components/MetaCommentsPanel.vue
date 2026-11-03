@@ -179,13 +179,16 @@
       <MetaCommentComposer
         v-model="draftModel"
         :suggestions="mentionSuggestions"
+        :mention-search="mentionSearch"
         :initial-mentions="composerInitialMentions"
+        :mention-selection="composerMentionSelection"
         :disabled="!canComment"
         :submitting="submitting"
         :placeholder="composerPlaceholder"
         :submit-label="composerSubmitLabel"
         :submit-kind="composerSubmitKind"
         @submit="submitComment"
+        @update:mention-selection="(value: MetaCommentMentionSelection) => emit('update:composerMentionSelection', value)"
       />
     </div>
   </div>
@@ -194,7 +197,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
-import type { MetaCommentMentionSuggestion, MultitableComment } from '../types'
+import type { MetaCommentMentionSearch, MetaCommentMentionSelection, MetaCommentMentionSuggestion, MultitableComment } from '../types'
 import { normalizeMultitableComment } from '../normalize'
 import {
   commentLabel,
@@ -233,7 +236,14 @@ const props = withDefaults(defineProps<{
   currentUserId?: string | null
   mentionSuggestions?: MetaCommentMentionSuggestion[]
   composerInitialMentions?: MetaCommentMentionSuggestion[]
+  /**
+   * #5813: opt-in pass-through of the composer's `mentionSelection` (see MetaCommentComposer). Left out
+   * (undefined) the composer keeps its picks to itself, as before.
+   */
+  composerMentionSelection?: MetaCommentMentionSelection | null
   mentionCandidates?: MentionCandidateInput[]
+  /** #5795: host-supplied server-side mention search, forwarded to the composer untouched. */
+  mentionSearch?: MetaCommentMentionSearch | null
   /**
    * S3b: gates the reactions block (picker + existing chips) independent of `canComment`.
    * Defaults `true` so every existing multitable mount (which never passes this prop) is
@@ -241,6 +251,12 @@ const props = withDefaults(defineProps<{
    * endpoints — passes `false` explicitly.
    */
   enableReactions?: boolean
+  /**
+   * 客户反馈 2026-09-24 #4c follow-up: host-supplied timestamp text. The multitable hosts pass the business-
+   * timezone formatter (the zone every multitable date-time is shown in); left out — the approval host — the
+   * browser-local `toLocaleString()` stays, byte-identical.
+   */
+  timestampFormatter?: ((iso: string) => string) | null
 }>(), {
   highlightedCommentId: null,
   targetFieldId: null,
@@ -257,7 +273,9 @@ const props = withDefaults(defineProps<{
   mentionSuggestions: () => [],
   composerInitialMentions: () => [],
   mentionCandidates: () => [],
+  mentionSearch: null,
   enableReactions: true,
+  timestampFormatter: null,
 })
 
 const emit = defineEmits<{
@@ -269,6 +287,7 @@ const emit = defineEmits<{
   (e: 'cancel-reply'): void
   (e: 'cancel-edit'): void
   (e: 'update:draft', value: string): void
+  (e: 'update:composerMentionSelection', value: MetaCommentMentionSelection): void
   (e: 'retry'): void
   (e: 'react', commentId: string, emoji: string): void
   (e: 'unreact', commentId: string, emoji: string): void
@@ -445,6 +464,7 @@ function formatReplyCount(count: number): string {
 }
 
 function formatTime(iso: string): string {
+  if (props.timestampFormatter) return props.timestampFormatter(iso)
   try { return new Date(iso).toLocaleString() } catch { return iso }
 }
 

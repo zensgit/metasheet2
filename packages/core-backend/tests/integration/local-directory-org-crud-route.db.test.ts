@@ -2,7 +2,10 @@ import { randomUUID } from 'crypto'
 import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, it } from 'vitest'
-import { query } from '../../src/db/pg'
+import { query, transaction } from '../../src/db/pg'
+import { applyDirectoryDeprovisionCandidate } from '../../src/directory/deprovision-ledger'
+import { restoreDeprovisionEvent } from '../../src/directory/deprovision-evidence-api'
+import { readOrgMembershipHistory } from '../../src/directory/org-membership-history'
 import {
   ADD_LOCAL_MEMBERSHIP_FIELD_TYPES,
   ADD_LOCAL_MEMBERSHIP_FIELDS,
@@ -858,5 +861,246 @@ describeIfDatabase('PB4-2 — provider-mislabeled switch TARGET is 404 at the ro
     const primaryMap = new Map(primaries.rows.map((r) => [r.directory_department_id, r.is_primary]))
     expect(primaryMap.get(localDeptId)).toBe(true)
     expect(primaryMap.get(dtDeptId)).toBe(false)
+  })
+})
+
+// Slice C (#6079, plan "切片 C 开工", owner 2026-10-13): POST /accounts sets
+// `refuseMembershipHistory`, so a user who already has a `user_orgs` row in `default` (active or
+// deactivated) or applied deprovision evidence is refused with 409
+// DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY and NOTHING is written (no account, no link, the row stays
+// as it was, the evidence stays applied, access_generation unchanged, no audit row); a zero-row user
+// without evidence gets the full write set. The shared history read
+// (directory/org-membership-history.ts) is checked against the same rows, since the member-admission
+// `organizations.hasAnyRow` / `deprovisionApplied` fields run that statement.
+describeIfDatabase('Slice C — local-account create refuses org-membership history (real DB, HTTP)', () => {
+  const PREFIX = `b2-slicec-${STAMP}`
+  const userIds: string[] = []
+  const accountIds: string[] = []
+
+  afterEach(async () => {
+    const users = userIds.splice(0)
+    for (const id of accountIds.splice(0)) await query(`DELETE FROM directory_accounts WHERE id = $1`, [id])
+    if (users.length === 0) return
+    await query(`DELETE FROM directory_deprovision_effects WHERE local_user_id = ANY($1::text[])`, [users])
+    await query(`DELETE FROM directory_deprovision_events WHERE local_user_id = ANY($1::text[])`, [users])
+    await query(`DELETE FROM user_external_auth_grants WHERE local_user_id = ANY($1::text[])`, [users])
+    await query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [users])
+    await query(`DELETE FROM directory_integrations WHERE org_id LIKE $1`, [`${PREFIX}-%`])
+    await query(`DELETE FROM users WHERE id = ANY($1::text[])`, [users])
+  })
+
+  async function seedSliceCUser(tag: string): Promise<string> {
+    const id = `${PREFIX}-${tag}-${randomUUID().slice(0, 8)}`
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, is_active, activation_status)
+       VALUES ($1, $2, 'Slice C User', 'x', TRUE, 'activated')`,
+      [id, `${id}@example.test`],
+    )
+    userIds.push(id)
+    return id
+  }
+
+  async function snapshot(userId: string) {
+    const accounts = await query<{ id: string }>(`SELECT id FROM directory_accounts WHERE external_user_id = $1`, [userId])
+    const links = await query<{ n: string }>(`SELECT count(*)::text AS n FROM directory_account_links WHERE local_user_id = $1`, [userId])
+    const memberships = await query<{ org_id: string; is_active: boolean }>(
+      `SELECT org_id, is_active FROM user_orgs WHERE user_id = $1 ORDER BY org_id`,
+      [userId],
+    )
+    const generation = await query<{ g: string }>(`SELECT COALESCE(access_generation, 0)::text AS g FROM users WHERE id = $1`, [userId])
+    const events = await query<{ status: string }>(
+      `SELECT status FROM directory_deprovision_events WHERE local_user_id = $1 ORDER BY status`,
+      [userId],
+    )
+    const effects = await query<{ status: string }>(
+      `SELECT status FROM directory_deprovision_effects WHERE local_user_id = $1 ORDER BY status`,
+      [userId],
+    )
+    return {
+      accounts: accounts.rows.map((row) => row.id),
+      links: Number(links.rows[0]?.n ?? '0'),
+      memberships: memberships.rows,
+      generation: Number(generation.rows[0]?.g ?? '0'),
+      eventStatuses: events.rows.map((row) => row.status),
+      effectStatuses: effects.rows.map((row) => row.status),
+    }
+  }
+
+  async function auditCount(userId: string): Promise<number> {
+    const rows = await query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM audit_logs WHERE action = 'directory.local_account.create' AND action_details->>'localUserId' = $1`,
+      [userId],
+    )
+    return Number(rows.rows[0]?.n ?? '0')
+  }
+
+  const history = (userId: string, orgId: string | null) =>
+    readOrgMembershipHistory({ query: (statement, params) => query(statement, params) }, { userId, orgId })
+
+  /**
+   * Applied deprovision evidence written by the PRODUCTION writer (same seed shape as
+   * directory-access-graph-mutex.db.test.ts): a DingTalk-bound user in a fixture org is deprovisioned
+   * with `disable_grant_only` — the fixture-org membership is deactivated and the DingTalk grant
+   * disabled, while the user itself stays ACTIVE. That is the state in which a local account would
+   * otherwise pass the inactive-user check and silently supersede the evidence.
+   */
+  async function seedAppliedEvidence(userId: string): Promise<{ orgId: string; eventId: string }> {
+    const orgId = `${PREFIX}-org-${randomUUID()}`
+    const integration = await query<{ id: string }>(
+      `INSERT INTO directory_integrations (name, corp_id, org_id, provider, status, default_deprovision_policy)
+       VALUES ($1, $2, $3, 'dingtalk', 'active', 'disable_grant_only')
+       RETURNING id::text AS id`,
+      [`${PREFIX}-integration-${randomUUID()}`, `${PREFIX}-corp-${randomUUID()}`, orgId],
+    )
+    const integrationId = integration.rows[0].id
+    const run = await query<{ id: string }>(
+      `INSERT INTO directory_sync_runs (integration_id, status, triggered_by, trigger_source)
+       VALUES ($1::uuid, 'success', 'test:slice-c', 'manual')
+       RETURNING id::text AS id`,
+      [integrationId],
+    )
+    await query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)`, [userId, orgId])
+    await query(
+      `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+       VALUES ('dingtalk', $1, TRUE, 'test:slice-c', NOW(), NOW())`,
+      [userId],
+    )
+    const externalUserId = `${PREFIX}-external-${randomUUID()}`
+    const account = await query<{ id: string }>(
+      `INSERT INTO directory_accounts (integration_id, provider, corp_id, external_user_id, union_id, open_id, external_key, name, is_active)
+       SELECT integration.id, 'dingtalk', integration.corp_id, $2, $3, $4, $2, 'Slice C DingTalk', FALSE
+         FROM directory_integrations integration
+        WHERE integration.id = $1::uuid
+       RETURNING id::text AS id`,
+      [integrationId, externalUserId, `${PREFIX}-union-${randomUUID()}`, `${PREFIX}-open-${randomUUID()}`],
+    )
+    await query(
+      `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status) VALUES ($1::uuid, $2, 'linked')`,
+      [account.rows[0].id, userId],
+    )
+    const applied = await transaction((client) =>
+      applyDirectoryDeprovisionCandidate(client, {
+        localUserId: userId,
+        orgId,
+        integrationId,
+        directoryAccountId: account.rows[0].id,
+        runId: run.rows[0].id,
+        triggeredBy: 'test:slice-c',
+        policy: 'disable_grant_only',
+        write: true,
+      }),
+    )
+    if (!applied.eventId) throw new Error('failed to seed deprovision evidence')
+    return { orgId, eventId: applied.eventId }
+  }
+
+  it.each([
+    { label: 'DEACTIVATED', isActive: false },
+    { label: 'ACTIVE', isActive: true },
+  ])('a $label default-org row: 409 DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY and nothing is written', async ({ isActive }) => {
+    const uid = await seedSliceCUser(isActive ? 'active-row' : 'inactive-row')
+    await query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, 'default', $2)`, [uid, isActive])
+    expect(await history(uid, 'default')).toEqual({ hasAnyRow: true, hasOrgRow: true, deprovisionApplied: false })
+    const before = await snapshot(uid)
+
+    const res = await request(adminApp).post('/api/admin/directory/local/accounts').send({ localUserId: uid })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY')
+    expect(JSON.stringify(res.body)).not.toContain(uid)
+    const after = await snapshot(uid)
+    expect(after).toEqual(before)
+    expect(after.accounts).toEqual([])
+    expect(after.memberships).toEqual([{ org_id: 'default', is_active: isActive }])
+    expect(await auditCount(uid)).toBe(0)
+  })
+
+  it('applied deprovision evidence (no default-org row): 409 DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY, evidence stays applied, nothing is written', async () => {
+    const uid = await seedSliceCUser('applied-evidence')
+    const { orgId: fixtureOrg } = await seedAppliedEvidence(uid)
+    // The fixture-org row the deprovision deactivated is history in ANY org, but not in `default`.
+    expect(await history(uid, 'default')).toEqual({ hasAnyRow: true, hasOrgRow: false, deprovisionApplied: true })
+    const before = await snapshot(uid)
+    expect(before.eventStatuses).toEqual(['applied'])
+    expect(before.effectStatuses.length).toBeGreaterThan(0)
+    expect(new Set(before.effectStatuses)).toEqual(new Set(['applied']))
+    expect(before.memberships).toEqual([{ org_id: fixtureOrg, is_active: false }])
+
+    const res = await request(adminApp).post('/api/admin/directory/local/accounts').send({ localUserId: uid })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY')
+    const after = await snapshot(uid)
+    expect(after).toEqual(before)
+    expect(after.accounts).toEqual([])
+    expect(await auditCount(uid)).toBe(0)
+  })
+
+  it('the documented remedy works: after the deprovision-evidence restore the same request succeeds', async () => {
+    const uid = await seedSliceCUser('remedy')
+    const { orgId: fixtureOrg, eventId } = await seedAppliedEvidence(uid)
+
+    const refused = await request(adminApp).post('/api/admin/directory/local/accounts').send({ localUserId: uid })
+    expect(refused.status).toBe(409)
+    expect(refused.body.error.code).toBe('DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY')
+
+    // The refusal left access_generation where the event recorded it, so the restore path still
+    // accepts the event (a silent supersede would have closed it and bumped the generation).
+    await restoreDeprovisionEvent({
+      eventId,
+      mode: 'admin_force',
+      adminUserId: `b2-route-admin-${STAMP}`,
+      confirm: true,
+      note: 'slice C remedy rehearsal (real DB)',
+    })
+    expect(await history(uid, 'default')).toEqual({ hasAnyRow: true, hasOrgRow: false, deprovisionApplied: false })
+    const restored = await snapshot(uid)
+    expect(restored.eventStatuses).toEqual(['fully_resolved'])
+    expect(new Set(restored.effectStatuses)).toEqual(new Set(['reversed']))
+    expect(restored.memberships).toEqual([{ org_id: fixtureOrg, is_active: true }])
+
+    const joined = await request(adminApp).post('/api/admin/directory/local/accounts').send({ localUserId: uid })
+    expect(joined.status).toBe(200)
+    accountIds.push(joined.body.data.account.id as string)
+    const after = await snapshot(uid)
+    expect(after.memberships).toEqual(
+      [{ org_id: 'default', is_active: true }, { org_id: fixtureOrg, is_active: true }]
+        .sort((a, b) => (a.org_id < b.org_id ? -1 : 1)),
+    )
+    expect(after.eventStatuses).toEqual(['fully_resolved'])
+    expect(after.generation).toBe(restored.generation + 1)
+  })
+
+  it('a zero-row user without evidence: 200 with the full side-effect set (account, link, active default-org row, generation +1, one audit row)', async () => {
+    const uid = await seedSliceCUser('zero-row')
+    expect(await history(uid, 'default')).toEqual({ hasAnyRow: false, hasOrgRow: false, deprovisionApplied: false })
+    const before = await snapshot(uid)
+    expect(before.memberships).toEqual([])
+
+    const res = await request(adminApp).post('/api/admin/directory/local/accounts').send({ localUserId: uid })
+
+    expect(res.status).toBe(200)
+    const accountId = res.body.data.account.id as string
+    accountIds.push(accountId)
+    expect(res.body.data.account).toMatchObject({ localUserId: uid, isActive: true, externalKey: `default:${uid}` })
+
+    const account = await query<{ provider: string; external_user_id: string; external_key: string; is_active: boolean; org_id: string }>(
+      `SELECT a.provider, a.external_user_id, a.external_key, a.is_active, i.org_id
+         FROM directory_accounts a JOIN directory_integrations i ON i.id = a.integration_id
+        WHERE a.id = $1`,
+      [accountId],
+    )
+    expect(account.rows).toEqual([{ provider: 'local', external_user_id: uid, external_key: `default:${uid}`, is_active: true, org_id: 'default' }])
+    const link = await query<{ local_user_id: string; link_status: string; match_strategy: string }>(
+      `SELECT local_user_id, link_status, match_strategy FROM directory_account_links WHERE directory_account_id = $1`,
+      [accountId],
+    )
+    expect(link.rows).toEqual([{ local_user_id: uid, link_status: 'linked', match_strategy: 'local_explicit' }])
+    const after = await snapshot(uid)
+    expect(after.memberships).toEqual([{ org_id: 'default', is_active: true }])
+    expect(after.generation).toBe(before.generation + 1)
+    expect(await auditCount(uid)).toBe(1)
+    // The member-admission fields now say the guard would refuse a second attempt.
+    expect(await history(uid, 'default')).toEqual({ hasAnyRow: true, hasOrgRow: true, deprovisionApplied: false })
   })
 })

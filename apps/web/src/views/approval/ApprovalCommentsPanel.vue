@@ -73,6 +73,7 @@ import {
   type ApprovalCommentMentionCandidate,
 } from '../../approvals/approvalCommentsClient'
 import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
+import { useLocale } from '../../composables/useLocale'
 
 const props = defineProps<{
   instanceId: string
@@ -97,11 +98,17 @@ const scopeTarget = computed(() => ({
   targetFieldId: null as string | null,
 }))
 
-const truncatedNotice = computed(() => (
-  client.truncated.value
+// O-8 / F8-1: this wrapper's own copy follows the shell locale (the shared comments kit it mounts
+// already does, via the same module-scope `useLocale()` singleton).
+const { isZh } = useLocale()
+
+function truncatedNoticeText(): string {
+  return isZh.value
     ? '仅显示最近的评论——历史评论过多，未全部加载。'
-    : ''
-))
+    : 'Showing the most recent comments only. There are too many earlier comments to load them all.'
+}
+
+const truncatedNotice = computed(() => (client.truncated.value ? truncatedNoticeText() : ''))
 
 // -----------------------------------------------------------------------------------------------
 // member-display-identity guard (census gate: approval-member-identity-coverage-enumeration.spec
@@ -155,7 +162,7 @@ const memberIdentity = computed<{
     if (!c.authorId || seen.has(c.authorId)) continue
     seen.add(c.authorId)
     ordinal += 1
-    const label = getResolvedUserName(c.authorId) || `成员 ${ordinal}`
+    const label = getResolvedUserName(c.authorId) || (isZh.value ? `成员 ${ordinal}` : `Member ${ordinal}`)
     authorNames[c.authorId] = label
     suggestions.push({ id: c.authorId, label, subtitle: undefined })
   }
@@ -164,7 +171,7 @@ const memberIdentity = computed<{
     if (!candidate.id || seen.has(candidate.id)) continue
     seen.add(candidate.id)
     ordinal += 1
-    const label = candidate.name.trim() || `成员 ${ordinal}`
+    const label = candidate.name.trim() || (isZh.value ? `成员 ${ordinal}` : `Member ${ordinal}`)
     // The subtitle IS a real S2 field when present (`ApprovalMentionCandidate.email`), not a
     // raw-id fallback — see P3-2 / the census triage row for this file, which now describes this
     // branch accurately instead of claiming `subtitle: undefined` for both halves.

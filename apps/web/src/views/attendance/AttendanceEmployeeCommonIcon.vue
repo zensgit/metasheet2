@@ -19,13 +19,14 @@
     <path v-else-if="name === 'user'" d="M12 3.2a4.2 4.2 0 1 1 0 8.4 4.2 4.2 0 0 1 0-8.4ZM6.1 20.8A6 6 0 0 1 12 15.6a6 6 0 0 1 5.9 5.2.9.9 0 0 1-.9 1H7a.9.9 0 0 1-.9-1Z" />
     <path v-else-if="name === 'briefcase'" fill-rule="evenodd" d="M9 4.6A2.2 2.2 0 0 1 11.2 2.4h1.6A2.2 2.2 0 0 1 15 4.6V6h3.2A2.8 2.8 0 0 1 21 8.8v3.1h-7.1v-.3a.9.9 0 1 0-1.8 0v.3H3V8.8A2.8 2.8 0 0 1 5.8 6H9V4.6Zm0 1.4h6V4.6c0-.2-.2-.4-.4-.4h-1.6c-.2 0-.4.2-.4.4V6H9Zm-6 7.3h7.1v.4a.9.9 0 1 0 1.8 0v-.4H21v4.9A2.8 2.8 0 0 1 18.2 21H5.8A2.8 2.8 0 0 1 3 18.2v-4.9Z" />
     <path v-else-if="name === 'pin'" fill-rule="evenodd" d="M12 2.3a6.4 6.4 0 0 1 6.4 6.4c0 3.7-4.3 9.4-5.8 11.3a.8.8 0 0 1-1.2 0C9.9 18.1 5.6 12.4 5.6 8.7A6.4 6.4 0 0 1 12 2.3Zm0 4.2a2.3 2.3 0 1 0 0 4.6 2.3 2.3 0 0 0 0-4.6Z" />
+    <path v-else-if="name === 'check'" fill-rule="evenodd" d="M12 2.4a9.6 9.6 0 1 1 0 19.2 9.6 9.6 0 0 1 0-19.2Zm4.1 6.2a.9.9 0 0 0-1.3 0l-3.7 3.7-1.5-1.5a.9.9 0 1 0-1.3 1.3l2.2 2.2c.3.3.9.3 1.2 0l4.4-4.4a.9.9 0 0 0 0-1.3Z" />
   </svg>
 </template>
 
 <script setup lang="ts">
-import type { CommonIconId } from './attendanceEmployeeWorkspaceCommonIcons'
+import type { WorkspaceDisplayIconId } from './attendanceEmployeeWorkspaceCommonIcons'
 
 defineProps<{
-  name: CommonIconId
+  name: WorkspaceDisplayIconId
 }>()
 </script>

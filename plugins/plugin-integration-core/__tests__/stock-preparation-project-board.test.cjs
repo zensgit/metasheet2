@@ -35,6 +35,11 @@ const path = require('node:path')
 const LIB = path.join(__dirname, '..', 'lib')
 
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
+// Batch-refresh step 4 PR-5: the board carries the project's derived refresh state (`refresh`) and unions the open
+// refresh holds into its pending count — both read through the REAL refresh governance / continuation store over the
+// kit's empty step-4 tables (=> not governed, zero holds), wired here with a lock for the reader's generation read.
+const { createInMemoryProjectWriteLock } = require('./support/stock-preparation-project-write-lock-kit.cjs')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const {
   STOCK_PREP_ADMIN,
   STOCK_PREP_OPERATE,
@@ -55,6 +60,7 @@ const {
 } = require(path.join(LIB, 'stock-preparation-project-reads.cjs'))
 const {
   STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_FILL_VIEW_FALLBACK_LOGICAL_ID,
   STOCK_PREPARATION_PROJECT_BOARD_KEYS,
   STOCK_PREPARATION_PROJECT_BOARD_MODES,
   readOperatorProjectBoard,
@@ -105,8 +111,8 @@ const MAIN_FIELD_ID_MAP = Object.freeze({
 })
 
 
-const PROJECT_A_NO = '230920006'
-const PROJECT_A_NAME = 'RY2注射水缓冲罐部件'
+const PROJECT_A_NO = '200000006'
+const PROJECT_A_NAME = '示例乙型容器'
 const PROJECT_A_ID = 'stockprep_project_a1'
 
 // Tenant B's project number is a string that appears NOWHERE in tenant A's fixture, so a single
@@ -138,7 +144,7 @@ function inertService(methods) {
 
 function baseServices() {
   return {
-    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
+    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
     adapterRegistry: inertService(['createAdapter', 'listAdapterKinds']),
     pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
     pipelineRunner: inertService(['runPipeline']),
@@ -181,6 +187,11 @@ function ownSheetIdFor(stagingProjectId, objectId) {
 
 function mount({
   mainTableProvisioned = true,
+  // PR-5: `false` mounts WITHOUT the refresh governance / continuation store (a deployment that has not wired them):
+  // the board's `refresh` stanza must then say unreadable by name and its pending counts cannot be trusted.
+  wireRefreshGovernance = true,
+  // Step-4 review follow-ups (item 5): an optional wrapper over the wired governance service (identity when absent).
+  wrapRefreshGovernance = null,
   // `undefined` = the action is bound to the caller's own canonical fill table (the normal case).
   // `null` = nothing is bound at all. An object = whatever the deployment configured, verbatim.
   boundTarget,
@@ -216,6 +227,12 @@ function mount({
   // that models a hand-bound sheet moves it, which is the only way to model a sheet whose id does
   // not hash from the caller's own project.
   mainSheetIdOverride = null,
+  // DOES THE 备料填写视图 EXIST on that table? `false` — the default, and the state of every table
+  // in the field (only the CREATE path provisions it; the repair verb that would heal an existing
+  // table has no route and no production caller today) — models a host that answers
+  // "no such view"; `true` models one where provisioning created it. `null` models a host too old
+  // to have the view-read port at all, which must degrade the same way a "no" does.
+  fillViewProvisioned = false,
 } = {}) {
   const routes = new Map()
   const MAIN_SHEET = mainSheetIdOverride || MAIN_SHEET_A
@@ -377,6 +394,16 @@ function mount({
     getObjectViewId(projectId, objectId, viewId) {
       return `view_${projectId}_${objectId}_${viewId}`
     },
+    // The host's READ-ONLY view existence probe. Absent (`null`) models a host older than the port;
+    // present, it answers only about the view id the caller composed for its OWN project + object.
+    ...(fillViewProvisioned === null ? {} : {
+      async findObjectView({ projectId, objectId, viewId } = {}) {
+        if (!fillViewProvisioned) return null
+        if (viewId !== 'prep-fill') return null
+        const id = `view_${projectId}_${objectId}_${viewId}`
+        return { id, sheetId: ownSheetIdFor(projectId, objectId), name: '备料填写视图', type: 'grid', filterInfo: {}, sortInfo: {}, groupInfo: {}, hiddenFieldIds: [], config: {} }
+      },
+    }),
     // The host's OWNERSHIP question — a BOOLEAN about the project we name, so no other tenant's
     // project id is ever returned to this plugin.
     ...(owners === null ? {} : {
@@ -466,7 +493,12 @@ function mount({
     } : {}),
   }
   if (tenantPrincipalDirectory) services.tenantPrincipalDirectory = tenantPrincipalDirectory
+  services.stockPreparationProjectWriteLock = createInMemoryProjectWriteLock({ timers: 'real' }).lock
 
+  if (wireRefreshGovernance !== false) {
+    withRefreshGovernance(services)
+    if (typeof wrapRefreshGovernance === 'function') services.stockPreparationRefreshGovernance = wrapRefreshGovernance(services.stockPreparationRefreshGovernance)
+  }
   httpRoutes.registerIntegrationRoutes({
     context,
     services,
@@ -475,6 +507,7 @@ function mount({
   return {
     routes,
     auditAppends,
+    services,
     auditListCalls,
     auditProbes,
     hostCallCount: () => hostCalls,
@@ -724,7 +757,7 @@ async function theAuditRowIsValuesFreeAndPrecedesTheValues() {
   //
   // `?workspaceId` used to be forwarded verbatim into the audit row's `workspace_id`, which made the
   // "the row never carries the projectNo" claim depend on the caller not putting it there: send
-  // `?workspaceId=230920006` and the number was on the trail, in a column no gate looked at. The
+  // `?workspaceId=200000006` and the number was on the trail, in a column no gate looked at. The
   // board route now selects nothing from it at all (the key stays in the allowlist for shape
   // compatibility with the rest of this family, exactly like `tenantId`, and steers nothing), and
   // the store gates the column besides. Asserted on BOTH branches, because a miss writes a row too.
@@ -1082,7 +1115,7 @@ async function theBoardReflectsThePullRatherThanTheAdminsArchive() {
 // this pins BOTH, because a claim that only ever gets tested on its comfortable side is not pinned.
 async function theBoundSheetsTenantModelHoldsFromBothSides() {
   const CANONICAL_SHEET = ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID)
-  const NEIGHBOUR_PROJECT_NO = '230920007'
+  const NEIGHBOUR_PROJECT_NO = '200000007'
 
   // HALF ONE — THE OWNER READS THE WHOLE SHEET, and that is what "owning" means here. Two different
   // project numbers living in tenant A's own bound sheet are BOTH tenant A's data by definition:
@@ -1401,14 +1434,22 @@ async function theModuleRefusesToProjectAValueWithoutAScope() {
 }
 
 // ---------------------------------------------------------------------------
-// B-10 — THE DEEP LINK'S VIEW ID IS THE HOST'S, NOT A HAND-COPIED LITERAL
+// B-10 — THE DEEP LINK PREFERS THE 备料填写视图, AND FALLS BACK TO THE DEFAULT VIEW
 // ---------------------------------------------------------------------------
 //
-// `STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID` must be the same token the host's own default-view
-// provisioning creates (`DEFAULT_OBJECT_VIEW_LOGICAL_ID`). Nothing enforced that: changing the
-// plugin's copy to any other string kept every suite green and shipped a link to a view that does
-// not exist. Mirrored byte-for-byte out of the host source, in the same style B-01's vocabulary
-// mirror uses.
+// Two halves, and BOTH are load-bearing:
+//
+//   * The FALLBACK id must still be the token the host's own default-view provisioning creates
+//     (`DEFAULT_OBJECT_VIEW_LOGICAL_ID`). Nothing enforced that before this mirror existed:
+//     changing the plugin's copy to any other string kept every suite green and shipped a link to
+//     a view that does not exist. Mirrored byte-for-byte out of the host source.
+//
+//   * The PREFERRED id is the plugin's OWN view (`prep-fill`, the one with the 12 system columns
+//     hidden), and it is handed out ONLY when the host says that view EXISTS. A table provisioned
+//     before the fill view existed — every table in the field, and there is no reachable verb that
+//     heals one today — must keep the link it has today. Without the existence probe the
+//     handle would name a view id that resolves to nothing, and the workbench would fold to the
+//     sheet's FIRST view, which on a pack-installed table is a role view, not the default one.
 function theFillViewIdMirrorsTheHostsDefaultViewId() {
   const provisioningSrc = fs.readFileSync(
     path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'src', 'multitable', 'provisioning.ts'),
@@ -1417,11 +1458,76 @@ function theFillViewIdMirrorsTheHostsDefaultViewId() {
   const match = provisioningSrc.match(/export const DEFAULT_OBJECT_VIEW_LOGICAL_ID = '([^']+)'/)
   assert.ok(match, 'B-10: the host still declares DEFAULT_OBJECT_VIEW_LOGICAL_ID')
   assert.equal(
+    STOCK_PREPARATION_FILL_VIEW_FALLBACK_LOGICAL_ID,
+    match[1],
+    'B-10: the deep link\'s FALLBACK must name the view id the host\'s own default-view provisioning creates',
+  )
+  assert.notEqual(
     STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
     match[1],
-    'B-10: the fill deep link must name the view id the host\'s own default-view provisioning creates',
+    'B-10: the fill view must be the plugin\'s OWN view id — upserting the default view would hole the host\'s never-touch-existing-views guarantee',
   )
+  assert.equal(STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID, 'prep-fill')
 }
+
+async function theDeepLinkPrefersTheFillViewAndFallsBackToTheDefaultOne() {
+  // (a) THE TABLE THAT HAS ONE. The handle names the 备料填写视图 — the view whose hidden columns,
+  //     父组件分组 and 有效过滤 are the whole point of 「打开项目备料」.
+  {
+    const res = await callBoard(
+      mount({ mainTableProvisioned: true, fillViewProvisioned: true }).routes,
+      { user: OPERATOR_A, projectNo: PROJECT_A_NO },
+    )
+    const target = res.body.data.fillTarget
+    assert.ok(target, 'B-10: a provisioned fill table still yields a handle')
+    assert.equal(
+      target.viewId,
+      `view_${STAGING_A}_${MAIN_OBJECT_ID}_prep-fill`,
+      'B-10: when the fill view exists, the deep link lands on it',
+    )
+    assert.equal(target.sheetId, ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID))
+  }
+  // (b) THE TABLE THAT DOES NOT — every table in the field today. The link is byte-for-byte the one
+  //     it has always been, so nothing regresses — and since no deployment can run the repair verb
+  //     yet (it has no entry), this leg, not the one above, is what 222 gets from this change.
+  {
+    const res = await callBoard(
+      mount({ mainTableProvisioned: true, fillViewProvisioned: false }).routes,
+      { user: OPERATOR_A, projectNo: PROJECT_A_NO },
+    )
+    const target = res.body.data.fillTarget
+    assert.ok(target, 'B-10: a missing fill view is not an error')
+    assert.equal(
+      target.viewId,
+      `view_${STAGING_A}_${MAIN_OBJECT_ID}_default`,
+      'B-10: with no fill view, the deep link falls back to the DEFAULT view',
+    )
+  }
+  // (c) A HOST TOO OLD to answer the question at all degrades exactly like a "no" — a plugin newer
+  //     than its host keeps working rather than erroring.
+  {
+    const res = await callBoard(
+      mount({ mainTableProvisioned: true, fillViewProvisioned: null }).routes,
+      { user: OPERATOR_A, projectNo: PROJECT_A_NO },
+    )
+    const target = res.body.data.fillTarget
+    assert.ok(target, 'B-10: an older host still yields a handle')
+    assert.equal(target.viewId, `view_${STAGING_A}_${MAIN_OBJECT_ID}_default`, 'B-10: unprovable existence means the default view')
+  }
+  // (d) THE TENANT GATE STILL COMES FIRST. A fill view that exists cannot conjure a handle for a
+  //     sheet that is not the caller's own: the probe is a display decision taken AFTER ownership,
+  //     never a second way to name a sheet.
+  {
+    const foreign = { sheetId: ownSheetIdFor(STAGING_B, MAIN_OBJECT_ID), objectId: MAIN_OBJECT_ID }
+    const res = await callBoard(
+      mount({ boundTarget: foreign, fillViewProvisioned: true }).routes,
+      { user: OPERATOR_A, projectNo: PROJECT_A_NO },
+    )
+    assert.equal(res.body.data.fillTarget, null, 'B-10: a bound target outside the caller\'s own tenant yields NO handle, fill view or not')
+    assert.ok(!JSON.stringify(res.body).includes(STAGING_B), 'B-10: and nothing about the foreign project is echoed')
+  }
+}
+
 
 // ---------------------------------------------------------------------------
 // B-13 (H13) — THE AUDIT VOCABULARY GATE
@@ -1504,7 +1610,7 @@ async function theBoardRefusesBeforeItsAuditActionCanBeStored() {
 // ever breaks — every project's rows counted under whichever project the operator happens to open,
 // and a 「上次从 PLM 拉过」 stamp that belongs to somebody else's pull.
 async function oneProjectsNumbersAreReadOutOfASheetThatHoldsMany() {
-  const OTHER_PROJECT_NO = '230920099'
+  const OTHER_PROJECT_NO = '200000099'
   const OURS = '2026-09-01T00:00:00.000Z'
   const THEIRS = '2026-09-05T00:00:00.000Z'
   const boundTarget = {
@@ -1540,10 +1646,115 @@ async function oneProjectsNumbersAreReadOutOfASheetThatHoldsMany() {
     'B-14: and the other project number never appears in a board that is not about it')
 }
 
+// ---------------------------------------------------------------------------
+// B-PR5 — THE REFRESH STANZA AND THE HOLD UNION (batch-refresh step 4 PR-5, design §11 / §13, O-18)
+// ---------------------------------------------------------------------------
+
+async function theBoardCarriesTheRefreshStateAndUnionsTheOpenHolds() {
+  const refreshKit = require('./support/stock-preparation-refresh-store-kit.cjs')
+  const { hold } = await refreshKit.candidateHoldFixture()
+  // No step-4 row anywhere: the stanza is the derived `not_governed` state — three distinct answers, never zero.
+  {
+    const h = mount()
+    const res = await callBoard(h.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    const stanza = JSON.parse(JSON.stringify(res.body.data.refresh))
+    assert.deepEqual(stanza, {
+      readable: true, status: 'not_governed', statusLabel: '未启用', governed: 'none', exportAllowed: true, settled: false,
+      counts: { pendingConfirm: 0, confirmable: 0, openExecutions: 0, pendingReviews: 0, continuations: 0 },
+    }, 'B-PR5: the stanza is readProjectRefreshState\'s own values-free object')
+    assert.equal(res.body.data.ledgerReady, true)
+  }
+  // An open hold on the project's bound sheet (seeded through the REAL store): the stanza says 待确认, the pending
+  // count is the UNION of the confirmation ledger and the hold, and the audit row counts the union too.
+  {
+    const h = mount()
+    const before = await callBoard(h.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    const ledgerPending = before.body.data.pendingDecisionCount
+    await h.services.refreshGovernanceEnv.seedHolds({ tenantId: TENANT_A, sheetId: MAIN_SHEET_A, projectNo: PROJECT_A_NO }, [hold])
+    h.auditAppends.length = 0
+    const res = await callBoard(h.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    const stanza = res.body.data.refresh
+    assert.equal(stanza.status, 'pending_confirmation')
+    assert.equal(stanza.statusLabel, '待确认')
+    assert.equal(stanza.governed, 'protected')
+    assert.equal(stanza.exportAllowed, false)
+    assert.equal(stanza.counts.pendingConfirm, 1)
+    assert.equal(res.body.data.pendingDecisionCount, ledgerPending + 1, 'B-PR5: the union of the ledger and the open hold')
+    assert.equal(res.body.data.ledgerReady, true)
+    assert.equal(h.auditAppends.find((entry) => entry.detail && entry.detail.operation === 'operator_project_board').detail.pendingDecisionCount, ledgerPending + 1)
+    assert.equal(JSON.stringify(res.body).includes('D100-01'), false, 'B-PR5: no hold value crosses the board')
+    assert.deepEqual(Object.keys(res.body.data).sort(), [...STOCK_PREPARATION_PROJECT_BOARD_KEYS].sort())
+  }
+  // The hold table cannot be read: the stanza is `unreadable` BY NAME (store + operation tokens), and the pending
+  // counts cannot be trusted — `ledgerReady` false, never "zero holds".
+  {
+    const h = mount()
+    h.services.refreshGovernanceEnv.db.faults.select = (args) => (args && /integration_stock_prep_refresh_hold/.test(args.table) ? refreshKit.sqlError('42P01', 'relation does not exist') : null)
+    const res = await callBoard(h.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    const stanza = JSON.parse(JSON.stringify(res.body.data.refresh))
+    assert.deepEqual(stanza, { readable: false, status: 'unreadable', statusLabel: '状态读取失败', governed: 'unknown', exportAllowed: false, settled: false, counts: null, unreadable: { reason: 'store_read_failed', store: 'continuation', operation: 'read_holds' } })
+    assert.equal(res.body.data.ledgerReady, false, 'B-PR5: an unreadable hold table is never "no holds"')
+    h.services.refreshGovernanceEnv.db.faults.select = null
+  }
+  // No bound sheet to consult: unreadable with its own reason — never a fabricated state.
+  {
+    const res = await callBoard(mount({ actionConfigured: false }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.deepEqual(JSON.parse(JSON.stringify(res.body.data.refresh.unreadable)), { reason: 'store_read_failed', store: 'registry', operation: 'bound_target_absent' })
+  }
+  // No refresh governance wired at all (an older deployment): the stanza is unreadable BY NAME (never not_governed,
+  // never complete) and the pending counts cannot be trusted — the board still opens.
+  {
+    const res = await callBoard(mount({ wireRefreshGovernance: false }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    const stanza = JSON.parse(JSON.stringify(res.body.data.refresh))
+    assert.equal(stanza.status, 'unreadable', 'B-PR5: an unwired reader is never "not governed"')
+    assert.equal(stanza.readable, false)
+    assert.equal(stanza.exportAllowed, false)
+    assert.deepEqual(stanza.unreadable, { reason: 'store_read_failed', store: 'governance', operation: 'reader_absent' })
+    assert.equal(res.body.data.ledgerReady, false, 'B-PR5: an unwired hold store is never "no holds"')
+  }
+  // Step-4 review follow-ups (item 5, #6566 N4): a READER REFUSAL (here 409 RETARGETED — a stale hold for this
+  // project number on ANOTHER sheet) is the board's `unreadable` stanza with the overview's token
+  // `consult_refused`, not a 409 for the whole board (R-60 ⑤: a read surface that cannot read says 状态读取失败).
+  // Values-free: nothing of the refusal (no sheet id, no hold value) reaches the body.
+  {
+    const OTHER_SHEET = 'sheet_board_pr5_other_sheet'
+    const h = mount()
+    await h.services.refreshGovernanceEnv.seedHolds({ tenantId: TENANT_A, sheetId: OTHER_SHEET, projectNo: PROJECT_A_NO }, [hold])
+    h.auditAppends.length = 0
+    const res = await callBoard(h.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, `B-PR5: a reader refusal does not fail the board — ${JSON.stringify(res.body)}`)
+    const stanza = JSON.parse(JSON.stringify(res.body.data.refresh))
+    assert.deepEqual(stanza, { readable: false, status: 'unreadable', statusLabel: '状态读取失败', governed: 'unknown', exportAllowed: false, settled: false, counts: null, unreadable: { reason: 'store_read_failed', store: 'governance', operation: 'consult_refused' } })
+    assert.ok(h.auditAppends.some((entry) => entry.mode === 'operator_project_board'), 'B-PR5: the board read is audited')
+    const body = JSON.stringify(res.body)
+    assert.equal(body.includes(OTHER_SHEET), false, 'B-PR5: the other sheet id never crosses the board')
+    assert.equal(body.includes('D100-01'), false, 'B-PR5: no hold value crosses the board')
+    assert.equal(body.includes('RETARGETED'), false, 'B-PR5: the refusal itself is not echoed')
+    // D-3 is untouched: the reader itself still refuses (the export and every lane keep their 409).
+    await assert.rejects(
+      h.services.stockPreparationRefreshGovernance.readRefreshState({ tenantId: TENANT_A, projectNo: PROJECT_A_NO, sheetId: MAIN_SHEET_A }),
+      (error) => error.status === 409 && /RETARGETED/.test(error.code),
+    )
+  }
+  // ...while any OTHER reader throw still fails the board (the fixed values-free 500), never a quiet stanza.
+  {
+    const h = mount({ wrapRefreshGovernance: (governance) => Object.freeze({ ...governance, readRefreshState: async () => { throw new Error('reader defect ZZBOARDSENTINELZZ') } }) })
+    const res = await callBoard(h.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 500, JSON.stringify(res.body))
+    assert.equal(JSON.stringify(res.body).includes('ZZBOARDSENTINELZZ'), false)
+  }
+}
+
 async function main() {
   await onlyTheOperatorTierReachesTheBoard()
   await anotherTenantsProjectIsIndistinguishableFromNoProject()
   await theBoardAnswersWithHandlesCountsAndTheProjectsOwnNameOnly()
+  await theBoardCarriesTheRefreshStateAndUnionsTheOpenHolds()
   await theAuditRowIsValuesFreeAndPrecedesTheValues()
   await theDeepLinkHandleAppearsOnlyWhenTheFillTableExists()
   await theBoardReflectsThePullRatherThanTheAdminsArchive()
@@ -1552,6 +1763,7 @@ async function main() {
   await oneProjectsBoardCostsOneProjectsQueries()
   await theModuleRefusesToProjectAValueWithoutAScope()
   theFillViewIdMirrorsTheHostsDefaultViewId()
+  await theDeepLinkPrefersTheFillViewAndFallsBackToTheDefaultOne()
   await anAuditStoreWithoutListStillAnswersTheBoard()
   await theBoardReportsLastChangedFromPlmFromTheBoundLastPlmRefreshColumn()
   await lastChangedFromPlmIsNeverReportedFromATruncatedScan()
@@ -1560,7 +1772,6 @@ async function main() {
   console.log('✓ stock-preparation-project-board')
 }
 
-main().catch((error) => {
-  console.error(error)
-  process.exit(1)
-})
+// S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — `main` runs as one test
+// under the exit sentinel and the whole-suite timeout, so a check that hangs can never end this suite with exit 0.
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-project-board.test.cjs', main)

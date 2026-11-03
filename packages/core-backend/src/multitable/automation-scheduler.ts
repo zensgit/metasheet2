@@ -338,6 +338,9 @@ export class AutomationScheduler {
   private readonly renewIntervalMs: number
   private renewalTimer: NodeJS.Timeout | null = null
   private isLeader: boolean = false
+  private destroyed = false
+  private readonly inFlight = new Set<Promise<void>>()
+  private destroyPromise: Promise<void> | null = null
   private readonly leaderStateGauge: AutomationSchedulerLeaderGauge | null
   /**
    * Resolves once the initial leader-election attempt has completed. When
@@ -416,6 +419,11 @@ export class AutomationScheduler {
     const won = await leaderLock.acquire(this.lockKey, ownerId, this.ttlMs)
     this.isLeader = won
     if (won) {
+      if (this.destroyed) {
+        await leaderLock.release(this.lockKey, ownerId).catch(() => false)
+        this.isLeader = false
+        return
+      }
       logger.info(
         `Acquired scheduler leader lock ${this.lockKey} (owner=${ownerId}, ttl=${this.ttlMs}ms)`,
       )
@@ -480,13 +488,16 @@ export class AutomationScheduler {
   }
 
   private runScheduledRule(rule: AutomationRule): void {
+    if (this.destroyed) return
     try {
-      const result = this.callback(rule)
-      if (result && typeof (result as Promise<void>).catch === 'function') {
-        (result as Promise<void>).catch((err) => {
-          logger.error(`Scheduled rule ${rule.id} execution failed`, err instanceof Error ? err : undefined)
-        })
-      }
+      const task = Promise.resolve(this.callback(rule)).catch((err) => {
+        logger.error(`Scheduled rule ${rule.id} execution failed`, err instanceof Error ? err : undefined)
+      })
+      this.inFlight.add(task)
+      void task.then(
+        () => this.inFlight.delete(task),
+        () => this.inFlight.delete(task),
+      )
     } catch (err) {
       logger.error(`Scheduled rule ${rule.id} execution failed`, err instanceof Error ? err : undefined)
     }
@@ -506,6 +517,7 @@ export class AutomationScheduler {
   }
 
   private registerCron(rule: AutomationRule, expression: string, timeZone?: string): void {
+    if (this.destroyed) return
     const nextMs = nextCronOccurrenceMs(expression, Date.now(), timeZone)
     if (!nextMs) {
       logger.warn(`Rule ${rule.id}: unsupported cron expression: ${expression}`)
@@ -518,7 +530,7 @@ export class AutomationScheduler {
       this.timers.delete(rule.id)
       // Re-arm from NOW (no catch-up — Q3 at-most-once). On a DST fall-back day the next-occurrence scan
       // suppresses the repeated wall-clock minute, so the timer advances past the overlap (fire-once).
-      if (this.isLeader) this.registerCron(rule, expression, timeZone)
+      if (this.isLeader && !this.destroyed) this.registerCron(rule, expression, timeZone)
     }, delayMs)
     if (typeof timer.unref === 'function') {
       timer.unref()
@@ -539,6 +551,7 @@ export class AutomationScheduler {
    * only via its in-memory state and relies on the leader to execute them.
    */
   register(rule: AutomationRule): void {
+    if (this.destroyed) return
     // Unregister first if already exists
     this.unregister(rule.id)
 
@@ -616,10 +629,11 @@ export class AutomationScheduler {
    * lives in `this.timers`, so `unregister`'s clear cancels a pending fire.
    */
   private armDateFieldTimer(rule: AutomationRule, config: Partial<ScheduleDateFieldConfig>): void {
+    if (this.destroyed) return
     const delay = nextDateReminderTimerDelayMs(config.timeOfDay, Date.now(), config.timezone)
     const timer = setTimeout(() => {
       this.runScheduledRule(rule)
-      if (this.timers.get(rule.id) === timer) {
+      if (!this.destroyed && this.timers.get(rule.id) === timer) {
         this.armDateFieldTimer(rule, config)
       }
     }, delay)
@@ -660,7 +674,13 @@ export class AutomationScheduler {
   /**
    * Cleanup all timers.
    */
-  destroy(): void {
+  destroy(): Promise<void> {
+    this.destroyPromise ??= this.destroyOnce()
+    return this.destroyPromise
+  }
+
+  private async destroyOnce(): Promise<void> {
+    this.destroyed = true
     for (const [ruleId, timer] of this.timers.entries()) {
       this.clearTimer(timer)
       logger.info(`Destroyed schedule for rule ${ruleId}`)
@@ -670,12 +690,20 @@ export class AutomationScheduler {
       clearInterval(this.renewalTimer)
       this.renewalTimer = null
     }
+    await this.ready
+    if (this.renewalTimer) {
+      clearInterval(this.renewalTimer)
+      this.renewalTimer = null
+    }
+    while (this.inFlight.size > 0) {
+      await Promise.allSettled([...this.inFlight])
+    }
     if (this.leaderOptions && this.isLeader) {
       // Best-effort lock release so a replacement replica can take over
       // without waiting for the full TTL. Failures are intentionally
       // swallowed — Redis will eventually expire the key regardless.
       const { leaderLock, ownerId } = this.leaderOptions
-      leaderLock.release(this.lockKey, ownerId).catch(() => {})
+      await leaderLock.release(this.lockKey, ownerId).catch(() => false)
       this.isLeader = false
     }
   }

@@ -32,15 +32,89 @@ const ROUTE_PREVIEW_WEDGE_MESSAGES: Record<string, string> = {
     '未能读取此样例发起人的角色信息，请稍后重试。',
 }
 
+// R-43 follow-up (a) — the server validates a 试运行 sample against the WHOLE form, the same way a
+// real submit does (`assembleCreationContext` → `validateApprovalFormData`). A visible required field
+// the author left empty therefore fails with 400 `VALIDATION_ERROR` and the English message
+// "Approval form data is invalid", which the panel used to show verbatim. That same code also covers
+// type / length / option / linked-record failures and the route's own missing-body 400, so the code
+// alone cannot tell them apart: only `details.errors` entries of the server's exact
+// `<fieldId> is required` / `<detailId>[i].<columnId> is required` shape select the localized hint.
+// Every other failure keeps its current text. Field NAMES only — never a value, never a raw id.
+
+/** `<fieldId> is required`, or a detail cell `<detailId>[<row>].<columnId> is required` (group 1 = base id). */
+const REQUIRED_ENTRY = /^([^\s[]+)(?:\[\d+\]\.\S+)? is required$/
+
+export interface RoutePreviewErrorOptions {
+  /** Field id → display name. A null / empty result is left out (the raw id is never shown). */
+  fieldLabel?: (fieldId: string) => string | null | undefined
+  /** Defaults to true, like `routePreviewController`. */
+  isZh?: boolean
+}
+
+export const ROUTE_PREVIEW_REQUIRED_COPY_ZH = {
+  withNames: (names: string) => `样例里有必填字段未填写：${names}。试运行和真实提交一样按完整表单校验，请先在上方补全后再试运行。`,
+  withoutNames: '样例里有必填字段未填写。试运行和真实提交一样按完整表单校验，请先在上方补全后再试运行。',
+  cannotFillHint: '明细、附件、部门、关联记录、日期区间、多选人员等字段无法在试运行里填写（试运行的人员选择只能选一人，填不了要求一组人员的多选人员字段）；这类字段为必填时，可在模板发布后到发起页用「按当前表单预览路径」按完整表单预览（发起页按已发布的版本计算）。',
+  nameSeparator: '、',
+  quote: (label: string) => `「${label}」`,
+  joiner: '',
+}
+
+export const ROUTE_PREVIEW_REQUIRED_COPY_EN: typeof ROUTE_PREVIEW_REQUIRED_COPY_ZH = {
+  withNames: (names: string) => `Some required fields in the sample are empty: ${names}. Try-run validates the whole form, the same as a real submission. Fill them in above and run it again.`,
+  withoutNames: 'Some required fields in the sample are empty. Try-run validates the whole form, the same as a real submission. Fill them in above and run it again.',
+  cannotFillHint: 'Detail, attachment, department, linked-record, date-range and multi-person fields cannot be filled in here (the try-run person picker takes a single person, so it cannot fill a multi-person field, which needs a list of people). If one of them is required, publish the template and use "Preview the route for this form" on the submit page to preview with the whole form (the submit page uses the published version).',
+  nameSeparator: ', ',
+  quote: (label: string) => `"${label}"`,
+  joiner: ' ',
+}
+
+/**
+ * The BASE ids of the required fields the server reported empty (deduplicated, first occurrence
+ * first), or null when `error` is not that kind of failure: it must be an `ApprovalApiError` with
+ * code `VALIDATION_ERROR` whose `details.errors` holds at least one string entry of the exact
+ * required-field shape. Non-string entries are ignored.
+ */
+export function routePreviewMissingRequiredFieldIds(error: unknown): string[] | null {
+  if (!(error instanceof ApprovalApiError) || error.code !== 'VALIDATION_ERROR') return null
+  const entries = error.details?.errors
+  if (!Array.isArray(entries)) return null
+  const ids: string[] = []
+  for (const entry of entries) {
+    if (typeof entry !== 'string') continue
+    const match = REQUIRED_ENTRY.exec(entry)
+    if (match && !ids.includes(match[1]!)) ids.push(match[1]!)
+  }
+  return ids.length > 0 ? ids : null
+}
+
+function describeMissingRequired(ids: readonly string[], options: RoutePreviewErrorOptions): string {
+  const copy = options.isZh === false ? ROUTE_PREVIEW_REQUIRED_COPY_EN : ROUTE_PREVIEW_REQUIRED_COPY_ZH
+  const names: string[] = []
+  for (const id of ids) {
+    const name = options.fieldLabel?.(id)?.trim()
+    if (name) names.push(copy.quote(name))
+  }
+  const lead = names.length > 0 ? copy.withNames(names.join(copy.nameSeparator)) : copy.withoutNames
+  return `${lead}${copy.joiner}${copy.cannotFillHint}`
+}
+
 /**
  * Maps a failed `previewTemplateRoute` call to a display string. Narrows `error` to
  * `ApprovalApiError` internally (rather than taking a bare `code` param) so the
  * instanceof-and-extract glue itself sits under this function's unit tests instead of being
- * untested view wiring.
+ * untested view wiring. Order: the wedge codes above (unchanged) → a missing-required-field
+ * validation failure (localized hint) → the error's own message → `fallback`.
  */
-export function describeRoutePreviewError(error: unknown, fallback = '试运行失败'): string {
+export function describeRoutePreviewError(
+  error: unknown,
+  fallback = '试运行失败',
+  options: RoutePreviewErrorOptions = {},
+): string {
   const code = error instanceof ApprovalApiError ? error.code : undefined
   if (code && ROUTE_PREVIEW_WEDGE_MESSAGES[code]) return ROUTE_PREVIEW_WEDGE_MESSAGES[code]
+  const missingRequired = routePreviewMissingRequiredFieldIds(error)
+  if (missingRequired) return describeMissingRequired(missingRequired, options)
   if (error instanceof Error && error.message.trim()) return error.message
   return fallback
 }

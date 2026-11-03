@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { evaluateCondition, evaluateConditions, type AutomationCondition, type ConditionGroup } from '../../src/multitable/automation-conditions'
-import { AutomationExecutor, truncateDingTalkMessageText, type AutomationRule, type AutomationDeps, type AutomationExecution } from '../../src/multitable/automation-executor'
+import { AutomationExecutor, truncateDingTalkMessageText, AUTOMATION_NO_RECIPIENTS_ERROR, DINGTALK_RECIPIENTS_UNREACHABLE_REASON, type AutomationRule, type AutomationDeps, type AutomationExecution } from '../../src/multitable/automation-executor'
 import { AutomationScheduler, cronHasNoMatchingDay, nextCronOccurrenceMs, parseCronToIntervalMs } from '../../src/multitable/automation-scheduler'
 import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, ALL_TRIGGER_TYPES } from '../../src/multitable/automation-triggers'
 import type { AutomationTrigger, AutomationTriggerType } from '../../src/multitable/automation-triggers'
@@ -87,6 +87,38 @@ function createMockRule(overrides: Partial<AutomationRule> = {}): AutomationRule
   }
 }
 
+// F9b: the rule-side send_notification HARD-REJECTS non-members before its durable write, using the
+// SAME resolver as the button route (loadSheetMemberUserIdSet → listSheetPermissionCandidates). Mock
+// deps must therefore model the member-roster SQL; an unmodelled roster resolves to the EMPTY set,
+// i.e. fail-closed — which is the intended behaviour, not a fixture accident.
+export const MOCK_SHEET_MEMBER_IDS = ['u1', 'u2', 'u3']
+
+export function sheetMemberRosterRows(
+  memberIds: string[],
+  sqlText: string,
+): { rows: unknown[]; rowCount: number } | null {
+  if (/WITH user_candidates AS/i.test(sqlText)) {
+    return {
+      rows: memberIds.map((id) => ({
+        subject_type: 'user',
+        subject_id: id,
+        user_name: id,
+        user_email: `${id}@members.test`,
+        user_is_active: true,
+        permission_codes: ['multitable:read'],
+      })),
+      rowCount: memberIds.length,
+    }
+  }
+  if (/FROM user_permissions up/i.test(sqlText)) {
+    return {
+      rows: memberIds.map((id) => ({ user_id: id, permission_code: 'multitable:read' })),
+      rowCount: memberIds.length,
+    }
+  }
+  return null
+}
+
 function createMockDeps(overrides: Partial<AutomationDeps> = {}): AutomationDeps {
   return {
     eventBus: new EventBus(),
@@ -98,6 +130,11 @@ function createMockDeps(overrides: Partial<AutomationDeps> = {}): AutomationDeps
     queryFn: vi.fn(async (sql: unknown) => {
       if (typeof sql === 'string' && /FROM meta_sheets/i.test(sql)) {
         return { rows: [{ base_id: 'base_mock' }], rowCount: 1 }
+      }
+      // F9b member roster (see sheetMemberRosterRows): send_notification recipients must be members.
+      if (typeof sql === 'string') {
+        const roster = sheetMemberRosterRows(MOCK_SHEET_MEMBER_IDS, sql)
+        if (roster) return roster
       }
       return { rows: [], rowCount: 0 }
     }),
@@ -1353,7 +1390,7 @@ describe('AutomationExecutor', () => {
     {
       name: 'notification recipients',
       action: { type: 'send_notification', config: { userIds: [], message: 'Ready' } },
-      error: 'No user IDs specified',
+      error: AUTOMATION_NO_RECIPIENTS_ERROR,
     },
     {
       name: 'notification message',
@@ -3076,7 +3113,10 @@ describe('AutomationExecutor', () => {
       notifiedUsers: 1,
       skippedRecipientCount: 1,
       skippedUserIds: ['user_2'],
+      // 客户反馈 2026-10-21 (a): the partial case stays success but carries the per-cause count.
+      skippedReasonCounts: { notLinked: 0, inactive: 0, notFound: 1 },
     })
+    expect((result.steps[0].output as Record<string, unknown>).reason).toBeUndefined()
     const [, sendInit] = findDingTalkPersonSend(fetchFn)
     expect(JSON.parse(sendInit.body as string).userid_list).toBe('dt-user-1')
     const insertCalls = queryFn.mock.calls.filter((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
@@ -3111,8 +3151,9 @@ describe('AutomationExecutor', () => {
     expect(result.steps[0]).toMatchObject({
       actionType: 'send_dingtalk_person_message',
       status: 'skipped',
-      error: 'DingTalk account not linked for users: user_1',
+      error: 'No DingTalk recipient was reached: 1 skipped (not linked: 0, inactive: 0, not found: 1) (DINGTALK_RECIPIENTS_UNREACHABLE)',
       output: {
+        reason: DINGTALK_RECIPIENTS_UNREACHABLE_REASON,
         notifiedUsers: 0,
         skippedRecipientCount: 1,
         skippedUserIds: ['user_1'],
@@ -3123,6 +3164,106 @@ describe('AutomationExecutor', () => {
     expect(insertCall?.[1]?.[1]).toBe('user_1')
     expect(insertCall?.[1]?.[6]).toBe(false)
     expect(insertCall?.[1]?.[7]).toBe('skipped')
+  })
+
+  // 客户反馈 2026-10-21 (a): a person message that reaches NOBODY is a distinct, values-free outcome — never a
+  // plain success, and never a failure that fail-stops the rest of the rule.
+  describe('zero-notified DingTalk person message outcome', () => {
+    const RECIPIENT_ROWS: Record<string, { local_user_active: boolean; dingtalk_user_id: string | null }> = {
+      u_linked: { local_user_active: true, dingtalk_user_id: 'dt-linked' },
+      u_unlinked: { local_user_active: true, dingtalk_user_id: null },
+      u_inactive: { local_user_active: false, dingtalk_user_id: 'dt-inactive' },
+    }
+    function recipientAwareQuery() {
+      return vi.fn(async (sql: unknown, params?: unknown[]) => {
+        const text = typeof sql === 'string' ? sql : ''
+        if (/FROM meta_sheets/i.test(text)) return { rows: [{ base_id: 'base_mock' }], rowCount: 1 }
+        if (/FROM users u/i.test(text) && /directory_account_links/i.test(text)) {
+          const ids = (params?.[0] as string[]) ?? []
+          const rows = ids
+            .filter((id) => RECIPIENT_ROWS[id])
+            .map((id) => ({ local_user_id: id, ...RECIPIENT_ROWS[id], integration_id: null }))
+          return { rows, rowCount: rows.length }
+        }
+        return { rows: [], rowCount: 0 }
+      })
+    }
+    function okFetch() {
+      return vi.fn(async (url: unknown) => {
+        const body = String(url).includes('gettoken')
+          ? { errcode: 0, errmsg: 'ok', access_token: 'app-access-token' }
+          : { errcode: 0, errmsg: 'ok', task_id: 4242 }
+        return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }) as unknown as typeof fetch
+    }
+    const personAction = (userIds: string[]) => ({
+      type: 'send_dingtalk_person_message' as const,
+      config: { userIds, titleTemplate: 'Title', bodyTemplate: 'Body' },
+    })
+
+    beforeEach(() => {
+      process.env.DINGTALK_APP_KEY = 'dt-app-key'
+      process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+      process.env.DINGTALK_AGENT_ID = '123456789'
+    })
+
+    it('all recipients skipped -> skipped step with the reason code, per-cause counts and an id-free error', async () => {
+      const queryFn = recipientAwareQuery()
+      const fetchFn = okFetch()
+      executor = new AutomationExecutor(createMockDeps({ queryFn, fetchFn }))
+      const result = await executor.execute(
+        createMockRule({ actions: [personAction(['u_unlinked', 'u_inactive', 'u_missing'])] }),
+        { recordId: 'r1', sheetId: 'sheet_1', actorId: 'user_1' },
+      )
+
+      expect(result.status).toBe('skipped')
+      expect(result.steps[0].status).toBe('skipped')
+      expect(result.steps[0].output).toMatchObject({
+        reason: DINGTALK_RECIPIENTS_UNREACHABLE_REASON,
+        notifiedUsers: 0,
+        skippedRecipientCount: 3,
+        skippedReasonCounts: { notLinked: 1, inactive: 1, notFound: 1 },
+        // ids stay in the stored output, as before
+        skippedUserIds: ['u_unlinked', 'u_inactive', 'u_missing'],
+      })
+      const error = result.steps[0].error ?? ''
+      expect(error).toContain('DINGTALK_RECIPIENTS_UNREACHABLE')
+      for (const id of ['u_unlinked', 'u_inactive', 'u_missing']) expect(error).not.toContain(id)
+      expect(fetchFn).not.toHaveBeenCalled()
+    })
+
+    it('some recipients notified -> success with the skipped count and no unreachable reason', async () => {
+      const queryFn = recipientAwareQuery()
+      const fetchFn = okFetch()
+      executor = new AutomationExecutor(createMockDeps({ queryFn, fetchFn }))
+      const result = await executor.execute(
+        createMockRule({ actions: [personAction(['u_linked', 'u_unlinked'])] }),
+        { recordId: 'r1', sheetId: 'sheet_1', actorId: 'user_1' },
+      )
+
+      expect(result.status).toBe('success')
+      expect(result.steps[0].status).toBe('success')
+      expect(result.steps[0].output).toMatchObject({
+        notifiedUsers: 1,
+        skippedRecipientCount: 1,
+        skippedReasonCounts: { notLinked: 1, inactive: 0, notFound: 0 },
+      })
+      expect((result.steps[0].output as Record<string, unknown>).reason).toBeUndefined()
+    })
+
+    it('a zero-notified step does not fail-stop the actions after it', async () => {
+      const queryFn = recipientAwareQuery()
+      const fetchFn = okFetch()
+      executor = new AutomationExecutor(createMockDeps({ queryFn, fetchFn }))
+      const result = await executor.execute(
+        createMockRule({ actions: [personAction(['u_unlinked']), personAction(['u_linked'])] }),
+        { recordId: 'r1', sheetId: 'sheet_1', actorId: 'user_1' },
+      )
+
+      expect(result.steps.map((step) => step.status)).toEqual(['skipped', 'success'])
+      expect(result.steps[1].output).toMatchObject({ notifiedUsers: 1 })
+      expect(result.status).toBe('success')
+    })
   })
 
   it('executes send_dingtalk_person_message with dynamic record recipients', async () => {
@@ -3299,7 +3440,9 @@ describe('AutomationExecutor', () => {
     })
     const result = await executor.execute(rule, { recordId: 'r1', sheetId: 'sheet_1' })
     expect(result.status).toBe('failed')
-    expect(result.steps[0].error).toContain('No user IDs')
+    // F9: the reason is now the author's next action, not the engine's phrasing (the manager renders
+    // step.error verbatim). Still an explicit failure — no fallback delivery to the rule creator.
+    expect(result.steps[0].error).toBe(AUTOMATION_NO_RECIPIENTS_ERROR)
   })
 
   it('fails send_notification with no message', async () => {
@@ -3934,10 +4077,14 @@ describe('AutomationService — Rule CRUD', () => {
   // Build a Kysely mock that returns controllable results
   let dbExecuteResults: unknown[]
   let dbExecuteTakeFirstResults: unknown[]
+  // F9: captures updateTable().set(...) payloads so a write-path assertion can read the COLUMNS that
+  // were actually written (the returned row comes from the mocked SELECT and would prove nothing).
+  let dbSetCalls: Record<string, unknown>[]
 
   function makeMockDb() {
     dbExecuteResults = []
     dbExecuteTakeFirstResults = []
+    dbSetCalls = []
 
     const chain: Record<string, unknown> = {}
     const chainFn = (..._args: unknown[]) => chain
@@ -3951,6 +4098,7 @@ describe('AutomationService — Rule CRUD', () => {
     for (const m of methods) {
       chain[m] = vi.fn(chainFn)
     }
+    chain.set = vi.fn((value: unknown) => { dbSetCalls.push(value as Record<string, unknown>); return chain })
     chain.execute = vi.fn(async () => {
       return dbExecuteResults.shift() ?? []
     })
@@ -3995,7 +4143,15 @@ describe('AutomationService — Rule CRUD', () => {
 
   beforeEach(() => {
     eventBus = new EventBus()
-    queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+    // F9c: createRule/updateRule now resolve the selectable-people roster (the SAME
+    // loadSheetMemberUserIdSet the executor and the button route use) before persisting any rule that
+    // contains a send_notification. An unmodelled roster is the EMPTY set = fail-closed, so the legacy
+    // alias / branch specs below would be refused for a FIXTURE reason rather than a product one.
+    // Modelling it with the file's own helper keeps every recipient in these specs (`u1`) a member.
+    queryFn = vi.fn(async (sql: unknown) => (
+      (typeof sql === 'string' ? sheetMemberRosterRows(MOCK_SHEET_MEMBER_IDS, sql) : null)
+      ?? { rows: [], rowCount: 0 }
+    ))
     _valuesCalls.length = 0
     const db = makeMockDb()
     service = new AutomationService(eventBus, db as never, queryFn)
@@ -4017,6 +4173,67 @@ describe('AutomationService — Rule CRUD', () => {
     expect(rule.name).toBe('My Rule')
     expect(rule.trigger_type).toBe('record.created')
     expect(rule.enabled).toBe(true)
+  })
+
+  // F9 write path — LEGACY_ACTION_TYPES stays accepted as INPUT (old clients keep working) but nothing
+  // legacy is persisted any more, so the stored row is directly executable.
+  it('F9: createRule stores a legacy notify as send_notification with the recipients it was given', async () => {
+    dbExecuteResults.push([])
+    const rule = await service.createRule('sheet_1', {
+      name: 'legacy client create',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'notify',
+      actionConfig: { message: 'Ping', userIds: ['u1'] },
+    })
+    expect(rule.action_type).toBe('send_notification')
+    expect(rule.action_config).toMatchObject({ message: 'Ping', userIds: ['u1'] })
+  })
+
+  it('F9: createRule stores a legacy update_field as update_record { fields }', async () => {
+    dbExecuteResults.push([])
+    const rule = await service.createRule('sheet_1', {
+      name: 'legacy client create 2',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'update_field',
+      actionConfig: { fieldId: 'f1', value: 'v' },
+    })
+    expect(rule.action_type).toBe('update_record')
+    expect(rule.action_config).toMatchObject({ fields: { f1: 'v' } })
+  })
+
+  it('F9: createRule does NOT convert an update_field without a fieldId (no guessed target)', async () => {
+    dbExecuteResults.push([])
+    const rule = await service.createRule('sheet_1', {
+      name: 'legacy client create 3',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'update_field',
+      actionConfig: { value: 'v' },
+    })
+    expect(rule.action_type).toBe('update_field')
+    expect(rule.action_config).toEqual({ value: 'v' })
+  })
+
+  it('F9: updateRule rewrites BOTH columns when only the config of a stored legacy rule is edited', async () => {
+    dbExecuteTakeFirstResults.push(makeRuleRow({ action_type: 'notify', action_config: { message: 'Old' } }))
+    dbExecuteResults.push([makeRuleRow()])
+    await service.updateRule('atr_1', 'sheet_1', { actionConfig: { message: 'Ping', userIds: ['u1'] } })
+    const written = dbSetCalls.at(-1) as Record<string, unknown>
+    expect(written.action_type).toBe('send_notification')
+    expect(JSON.parse(written.action_config as string)).toMatchObject({ message: 'Ping', userIds: ['u1'] })
+  })
+
+  it('F9: updateRule rewrites the CONFIG too when only the legacy action type is sent', async () => {
+    dbExecuteTakeFirstResults.push(makeRuleRow({ action_type: 'update_field', action_config: { fieldId: 'f1', value: 'v' } }))
+    dbExecuteResults.push([makeRuleRow()])
+    await service.updateRule('atr_1', 'sheet_1', { actionType: 'update_field' })
+    const written = dbSetCalls.at(-1) as Record<string, unknown>
+    // type-only rewrite would leave {fieldId,value} under update_record — a shape toExecutorRule can
+    // no longer repair, because a canonical type is not normalized on read.
+    expect(written.action_type).toBe('update_record')
+    expect(JSON.parse(written.action_config as string)).toMatchObject({ fields: { f1: 'v' } })
   })
 
   it('T2-5: createRule REJECTS an invalid IANA timezone on a cron trigger (400 at save)', async () => {
@@ -6439,5 +6656,150 @@ describe('runSingleAction — B1-a1 executor-owned record_click inert action', (
     const result = await executor.runSingleAction({ type: 'definitely_not_a_type' as AutomationAction['type'], config: {} }, ctx())
     expect(result.status).toBe('failed')
     expect(result.error).toContain('Unknown action type')
+  })
+})
+
+// F9 — the v0 aliases `notify` / `update_field` have NO dispatch case in the executor: every stored
+// rule using one failed with `Unknown action type: notify` on every trigger (and the simulate short-
+// circuit did not catch it either, because simulationDisposition only knows canonical types).
+// toExecutorRule is the ONE transform every execution path shares (handleEvent / testRun / retry /
+// resume / scheduler), so normalizing there repairs the stored rows without a data migration.
+describe('F9 legacy action alias normalization (toExecutorRule)', () => {
+  const legacyRow = (overrides: Record<string, unknown> = {}) => ({
+    id: 'rule_legacy',
+    sheet_id: 'sheet_1',
+    name: 'Legacy notify',
+    trigger_type: 'record.updated',
+    trigger_config: {},
+    action_type: 'notify',
+    action_config: { message: 'Ping' },
+    enabled: true,
+    created_by: 'user_1',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    conditions: null,
+    actions: null,
+    execution_mode: null,
+    ...overrides,
+  })
+
+  const ctx = (recordId = 'r1') => ({ recordId, data: { status: 'done' }, sheetId: 'sheet_1' })
+
+  it('notify -> send_notification, message preserved, recipients default to an EMPTY list (never the creator)', () => {
+    const exec = toExecutorRule(legacyRow() as never)
+    expect(exec.actions).toHaveLength(1)
+    expect(exec.actions[0].type).toBe('send_notification')
+    expect(exec.actions[0].config.message).toBe('Ping')
+    expect(exec.actions[0].config.userIds).toEqual([])
+  })
+
+  it('notify keeps recipients that were already stored (and drops blank entries)', () => {
+    const exec = toExecutorRule(legacyRow({ action_config: { message: 'Ping', userIds: ['u1', '  ', 'u2'] } }) as never)
+    expect(exec.actions[0].config.userIds).toEqual(['u1', 'u2'])
+  })
+
+  it('update_field -> update_record { fields: { [fieldId]: value } }', () => {
+    const exec = toExecutorRule(legacyRow({ action_type: 'update_field', action_config: { fieldId: 'f1', value: 'v' } }) as never)
+    expect(exec.actions[0].type).toBe('update_record')
+    expect(exec.actions[0].config.fields).toEqual({ f1: 'v' })
+  })
+
+  it('update_field WITHOUT a fieldId is NOT converted - it keeps failing explicitly instead of guessing a target', () => {
+    const exec = toExecutorRule(legacyRow({ action_type: 'update_field', action_config: { value: 'v' } }) as never)
+    expect(exec.actions[0].type).toBe('update_field')
+    expect(exec.actions[0].config.fields).toBeUndefined()
+  })
+
+  it('a legacy alias inside the v1 actions[] column is normalized too', () => {
+    const exec = toExecutorRule(legacyRow({ actions: [{ type: 'notify', config: { message: 'Ping', userIds: ['u1'] } }] }) as never)
+    expect(exec.actions[0].type).toBe('send_notification')
+    expect(exec.actions[0].config.userIds).toEqual(['u1'])
+  })
+
+  it('canonical actions pass through untouched', () => {
+    const exec = toExecutorRule(legacyRow({ action_type: 'update_record', action_config: { fields: { f1: 'v' } } }) as never)
+    expect(exec.actions[0].type).toBe('update_record')
+    expect(exec.actions[0].config).toEqual({ fields: { f1: 'v' } })
+  })
+
+  // Risk pin: normalization moves a legacy rule's action fingerprint onto the CANONICAL rule's
+  // fingerprint (retry's RULE_CHANGED guard hashes toExecutorRule(rule).actions).
+  it('a normalized legacy rule fingerprints identically to the equivalent canonical rule', () => {
+    const legacy = toExecutorRule(legacyRow({ action_config: { message: 'Ping', userIds: ['u1'] } }) as never)
+    const canonical = toExecutorRule(legacyRow({
+      action_type: 'send_notification',
+      action_config: { message: 'Ping', userIds: ['u1'] },
+    }) as never)
+    expect(deriveRuleActionSetFingerprint(legacy.actions).hash)
+      .toBe(deriveRuleActionSetFingerprint(canonical.actions).hash)
+  })
+
+  it('REAL record.updated trigger: the legacy rule matches its trigger AND its step succeeds (not a simulated step)', async () => {
+    const deps = createMockDeps()
+    const emit = vi.spyOn(deps.eventBus, 'emit')
+    const executor = new AutomationExecutor(deps)
+    const exec = toExecutorRule(legacyRow({ action_config: { message: 'Ping', userIds: ['u1'] } }) as never)
+    // the trigger half of the path: this rule really does fire on record.updated
+    expect(matchesTrigger(exec.trigger, 'record.updated', { recordId: 'r1' })).toBe(true)
+    const result = await executor.execute(exec as never, ctx())
+    expect(result.status).toBe('success')
+    expect(result.steps[0].actionType).toBe('send_notification')
+    expect(result.steps[0].status).toBe('success')
+    expect(result.steps[0].simulated).toBeUndefined() // live delivery, NOT the dry-run step
+    expect(result.steps[0].error ?? '').not.toContain('Unknown action type')
+    expect(emit).toHaveBeenCalledWith('automation.notification', expect.objectContaining({ userIds: ['u1'], message: 'Ping' }))
+
+    // F9b: "the step succeeded" now MEANS a durable notification-centre row exists. The legacy emit
+    // alone has no listener anywhere in the repo, so without this assertion the end-to-end claim is
+    // "an event nobody consumes was raised".
+    const insertCall = (deps.queryFn as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .find(([sql]) => typeof sql === 'string' && /INSERT INTO meta_record_subscription_notifications/i.test(sql))
+    expect(insertCall, 'the rule path must write the durable notification row').toBeTruthy()
+    const insertedRows = JSON.parse(String((insertCall?.[1] as unknown[])?.[0] ?? '[]')) as Array<Record<string, unknown>>
+    expect(insertedRows).toHaveLength(1)
+    expect(insertedRows[0]).toMatchObject({
+      user_id: 'u1',
+      event_type: 'notification.sent',
+      message: 'Ping',
+      sheet_id: 'sheet_1',
+      record_id: 'r1',
+    })
+  })
+
+  it('test run (simulate) of a legacy rule dry-runs instead of delivering', async () => {
+    const deps = createMockDeps()
+    const emit = vi.spyOn(deps.eventBus, 'emit')
+    const executor = new AutomationExecutor(deps)
+    const exec = toExecutorRule(legacyRow({ action_config: { message: 'Ping', userIds: ['u1'] } }) as never)
+    const result = await executor.execute(exec as never, ctx(), undefined, undefined, 'simulate')
+    expect(result.status).toBe('success')
+    expect(result.steps[0].actionType).toBe('send_notification')
+    expect(result.steps[0].simulated).toBe(true)
+    expect(emit).not.toHaveBeenCalledWith('automation.notification', expect.anything())
+  })
+
+  it('no recipients -> explicit failure with an ACTIONABLE Chinese reason (never a silent default delivery)', async () => {
+    const deps = createMockDeps()
+    const emit = vi.spyOn(deps.eventBus, 'emit')
+    const executor = new AutomationExecutor(deps)
+    const exec = toExecutorRule(legacyRow() as never) // stored legacy config has no userIds at all
+    const result = await executor.execute(exec as never, ctx())
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].status).toBe('failed')
+    expect(result.steps[0].error).not.toContain('Unknown action type')
+    expect(result.steps[0].error).toContain('未配置通知接收人')
+    expect(result.steps[0].error).toContain('NO_RECIPIENTS')
+    expect(emit).not.toHaveBeenCalledWith('automation.notification', expect.anything())
+  })
+
+  it('a legacy update_field rule really writes the record (live update_record dispatch)', async () => {
+    const deps = createMockDeps()
+    const executor = new AutomationExecutor(deps)
+    const exec = toExecutorRule(legacyRow({ action_type: 'update_field', action_config: { fieldId: 'f1', value: 'v' } }) as never)
+    const result = await executor.execute(exec as never, ctx())
+    expect(result.status).toBe('success')
+    expect(result.steps[0].actionType).toBe('update_record')
+    expect(result.steps[0].status).toBe('success')
+    expect(deps.queryFn).toHaveBeenCalled()
   })
 })

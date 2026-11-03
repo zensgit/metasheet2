@@ -115,6 +115,11 @@ const ALLOWLIST: Record<
     disposition: 'SAFE',
     reason: 'W7-1 approval-result backwrite writes ONLY system outcome values (status enum / approver id / ISO timestamp) — never user-supplied longText',
   },
+  'multitable/field-retype-convert-execute.ts': {
+    disposition: 'SAFE',
+    reason:
+      'Field retype convert / whole-column undo (ADR multitable-field-retype-first-batch-adr-20260926 §3). It writes ONE column, and only between `string` and `select` / `multiSelect`: the pair is re-checked under the field row lock (a `longText` source or target, rich or not, is refused 422 pair_not_in_first_batch), and the undo restores the source type recorded on the job row, which is that same `string`. No request-supplied value is written — the convert moves the text ALREADY stored in the cell into its option shape, the undo writes back the pre-image of that same cell — so no rich-longText carrier can arrive through this file.',
+  },
   'services/elearning-stats-multitable-projection.ts': {
     disposition: 'SAFE',
     reason:

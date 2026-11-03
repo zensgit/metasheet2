@@ -78,6 +78,8 @@
         @keydown.meta.enter.prevent="onConfirm"
         @keydown.ctrl.enter.prevent="onConfirm"
         @keydown.escape="onEscape($event)"
+        @keyup="onEditableKeyup($event)"
+        @mouseup="onCaretMoved"
       />
       <!-- B5 people-mention popover. Renders ONLY when the host fed candidates
            (authenticated hosts: cell editor + drawer). MetaFormView passes no
@@ -90,6 +92,13 @@
         :aria-label="l('mention.suggestionsAria')"
         data-test="rich-longtext-mention-popover"
       >
+        <!-- #5795: server-side, term-required mention search: a bare `@` gets a prompt, not a roster. -->
+        <div
+          v-if="showMentionSearchHint"
+          class="meta-rich-editor__suggestion-hint"
+          data-test="rich-longtext-mention-search-required"
+          aria-live="polite"
+        >{{ l('mention.typeToSearch') }}</div>
         <button
           v-for="suggestion in mentionSuggestionsFiltered"
           :key="suggestion.id"
@@ -109,14 +118,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { sanitizeRichLongTextHtml } from '../../utils/rich-longtext'
 import {
   detectMentionQuery,
   filterMentionSuggestions,
   insertMentionChipAtRange,
 } from '../../utils/rich-longtext-mention'
-import type { MetaCommentMentionSuggestion } from '../../types'
+import type { MetaCommentMentionSearch, MetaCommentMentionSuggestion } from '../../types'
 import { metaCoreLabel, type MetaCoreLabelKey } from '../../utils/meta-core-labels'
 
 const props = defineProps<{
@@ -132,6 +141,14 @@ const props = defineProps<{
    * persisted chip token reconstructs the EXACT comment token `@[label](id)`.
    */
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  /**
+   * #5795: server-side mention search, fed by the SAME authenticated hosts as `mentionSuggestions`
+   * (the workbench binds it to the sheet). The candidate endpoint no longer hands out a term-less
+   * roster, so a host that wants the @-popover passes this and the editor queries as the user types.
+   * Like `mentionSuggestions` it is a HOST GATE: MetaFormView passes neither, so the anonymous public
+   * form still never reaches the member directory.
+   */
+  mentionSearch?: MetaCommentMentionSearch | null
 }>()
 
 const emit = defineEmits<{
@@ -163,21 +180,102 @@ const l = (key: MetaCoreLabelKey) => metaCoreLabel(key, zh())
 // True only when a host actually fed candidates → the popover is structurally
 // gated to authenticated hosts (the form view passes none). This is the host
 // gate: no FE permission mirror, just "render the affordance when candidates exist".
-const mentionEnabled = computed(() => (props.mentionSuggestions?.length ?? 0) > 0)
+const mentionEnabled = computed(() => (props.mentionSuggestions?.length ?? 0) > 0 || typeof props.mentionSearch === 'function')
 /** The active "@query" the caret is typing (null when not in a mention). */
 const mentionQuery = ref<string | null>(null)
 /** Length of the typed `@query` run (chars to replace on select), e.g. `@ja` → 3. */
 const mentionQueryLength = ref(0)
 const activeMentionIndex = ref(0)
 
+// #5795 server-side search state: `remoteQuery` is the (trimmed) term `remoteSuggestions` answer.
+const MENTION_SEARCH_DEBOUNCE_MS = 150
+const remoteSuggestions = ref<MetaCommentMentionSuggestion[]>([])
+const remoteQuery = ref<string | null>(null)
+const remoteRequiresQuery = ref(false)
+let mentionSearchSeq = 0
+let mentionSearchTimer: ReturnType<typeof setTimeout> | null = null
+
 const mentionSuggestionsFiltered = computed<MetaCommentMentionSuggestion[]>(() => {
   if (!mentionEnabled.value || mentionQuery.value === null) return []
-  return filterMentionSuggestions(props.mentionSuggestions ?? [], mentionQuery.value)
+  const query = mentionQuery.value.trim()
+  // An answer for the CURRENT term is already server-filtered (name / email / id) and is kept as-is;
+  // a stale one is narrowed like the static list while the newer request is in flight (and dropped
+  // under a bare `@`, where narrowing would keep all of it).
+  const remoteIsCurrent = remoteQuery.value !== null && remoteQuery.value.toLowerCase() === query.toLowerCase()
+  const remote = remoteIsCurrent
+    ? remoteSuggestions.value
+    : query ? filterMentionSuggestions(remoteSuggestions.value, query, 50) : []
+  const local = filterMentionSuggestions(props.mentionSuggestions ?? [], query, 50)
+  const seen = new Set<string>()
+  return [...remote, ...local]
+    .filter((suggestion) => {
+      if (seen.has(suggestion.id)) return false
+      seen.add(suggestion.id)
+      return true
+    })
+    .slice(0, 6)
 })
 
+const showMentionSearchHint = computed(() => (
+  mentionEnabled.value
+  && typeof props.mentionSearch === 'function'
+  && mentionQuery.value !== null
+  && remoteRequiresQuery.value
+  && remoteQuery.value === mentionQuery.value.trim()
+))
+
 const showMentionSuggestions = computed(
-  () => mentionEnabled.value && mentionQuery.value !== null && mentionSuggestionsFiltered.value.length > 0,
+  () => mentionEnabled.value && mentionQuery.value !== null
+    && (mentionSuggestionsFiltered.value.length > 0 || showMentionSearchHint.value),
 )
+
+function resetMentionSearch(): void {
+  mentionSearchSeq += 1
+  remoteSuggestions.value = []
+  remoteQuery.value = null
+  remoteRequiresQuery.value = false
+}
+
+async function runMentionSearch(search: MetaCommentMentionSearch, query: string): Promise<void> {
+  const seq = ++mentionSearchSeq
+  try {
+    const result = await search(query)
+    if (seq !== mentionSearchSeq) return
+    remoteSuggestions.value = Array.isArray(result?.items) ? result.items : []
+    remoteRequiresQuery.value = result?.requiresQuery === true
+    remoteQuery.value = query
+  } catch {
+    if (seq !== mentionSearchSeq) return
+    remoteSuggestions.value = []
+    remoteRequiresQuery.value = false
+    remoteQuery.value = query
+  }
+}
+
+watch(
+  () => (typeof props.mentionSearch === 'function' && mentionQuery.value !== null ? mentionQuery.value.trim() : null),
+  (query) => {
+    if (mentionSearchTimer !== null) {
+      clearTimeout(mentionSearchTimer)
+      mentionSearchTimer = null
+    }
+    const search = props.mentionSearch
+    if (query === null || typeof search !== 'function') {
+      resetMentionSearch()
+      return
+    }
+    mentionSearchTimer = setTimeout(() => {
+      mentionSearchTimer = null
+      void runMentionSearch(search, query)
+    }, MENTION_SEARCH_DEBOUNCE_MS)
+  },
+)
+
+onBeforeUnmount(() => {
+  if (mentionSearchTimer !== null) clearTimeout(mentionSearchTimer)
+  mentionSearchTimer = null
+  mentionSearchSeq += 1
+})
 
 const activeMention = computed<MetaCommentMentionSuggestion | null>(() => {
   const list = mentionSuggestionsFiltered.value
@@ -300,11 +398,38 @@ function selectMention(suggestion: MetaCommentMentionSuggestion): void {
   emitLive()
 }
 
+// Keys whose default action moves the caret WITHOUT an `input` event (so `onInput` never re-detects).
+const CARET_MOVE_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'])
+/** Set when ArrowUp/ArrowDown was left to its default (caret move) rather than consumed by the list. */
+let verticalKeyMovedCaret = false
+
 function onMentionNavigate(direction: 1 | -1, event: KeyboardEvent): void {
-  if (!showMentionSuggestions.value) return
-  event.preventDefault()
   const len = mentionSuggestionsFiltered.value.length
+  // #5795: the "type to search" prompt is not a list. With no option to move to, the arrow keeps its
+  // normal caret-moving job (checked BEFORE preventDefault), exactly as when no popover is showing.
+  if (!showMentionSuggestions.value || len === 0) {
+    verticalKeyMovedCaret = true
+    return
+  }
+  event.preventDefault()
   activeMentionIndex.value = (activeMentionIndex.value + direction + len) % len
+}
+
+/**
+ * #5795: a caret move (click, arrow, Home/End) fires no `input`, so an open `@query` would otherwise
+ * outlive the caret leaving it — with the bare-`@` prompt that is now the common case. Re-check an
+ * OPEN mention only: a caret move can close it (or re-scope its term), never open a new one, so
+ * walking the caret through existing text never pops a suggester that typing did not.
+ */
+function onCaretMoved(): void {
+  if (mentionQuery.value === null) return
+  refreshMentionQuery()
+}
+
+function onEditableKeyup(event: KeyboardEvent): void {
+  const vertical = verticalKeyMovedCaret && (event.key === 'ArrowUp' || event.key === 'ArrowDown')
+  verticalKeyMovedCaret = false
+  if (vertical || CARET_MOVE_KEYS.has(event.key)) onCaretMoved()
 }
 
 function onMentionEnter(event: KeyboardEvent): void {
@@ -326,6 +451,9 @@ function onMentionTab(event: KeyboardEvent): void {
 function onEscape(event: KeyboardEvent): void {
   // Esc dismisses the popover first (one Esc closes the suggester); a second Esc (or
   // Esc with no popover) cancels the edit, matching the textarea's Esc contract.
+  // #5795: this deliberately includes the prompt-only popover — a visible popover is closed first so
+  // an Esc aimed at it never throws away the edit; the prompt also closes by itself once the caret
+  // leaves the `@` run (onCaretMoved), after which the first Esc cancels as before.
   if (showMentionSuggestions.value) {
     event.preventDefault()
     dismissMention()
@@ -528,6 +656,7 @@ watch(
 .meta-rich-editor__suggestion:hover { background: #f8fafc; }
 .meta-rich-editor__suggestion--active { background: #eff6ff; }
 .meta-rich-editor__suggestion small { color: #64748b; }
+.meta-rich-editor__suggestion-hint { padding: 8px 10px; color: #64748b; font-size: 12px; }
 .meta-rich-editor__content :deep(.meta-rich-editor__mention),
 .meta-rich-editor__content :deep(span[data-mention-id]) {
   display: inline;

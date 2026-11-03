@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h as createElement, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import { createApp, defineComponent, h as createElement, nextTick, reactive, ref, type App as VueApp, type Component } from 'vue'
+import { getAuthPrincipalKey, notifyAuthPrincipalChange, readAuthSessionSignature } from '../src/composables/authPrincipal'
 
 // 项目备料页 — THE PAGE, and the four claims it must not get wrong.
 //
@@ -14,7 +15,8 @@ import { createApp, defineComponent, h as createElement, nextTick, ref, type App
 //        filter was not built, and a query param the workbench ignores would be a link that lies.
 //   B-04 NO ROW VALUES, NO RAW CODES. The board's own fields are the only business strings on the
 //        page; a 404 renders #5445's three-way empty state rather than an error code; and 推送宜搭
-//        is a disabled placeholder whose copy says so in words.
+//        stays main's disabled placeholder for everyone the server's live YiDa gate would refuse —
+//        only a literal platform admin gets the two local preparation entries (R-11).
 
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
@@ -71,6 +73,7 @@ import StockPreparationProjectBoardView from '../src/components/integration/stoc
 import StockPreparationWorkspace from '../src/components/integration/stockPreparation/StockPreparationWorkspace.vue'
 import {
   canOpenStockPrepProjectBoard,
+  canOpenStockPrepYidaEntries,
   canRunStockPrepProjectSync,
   landsOnStockPrepProjectBoard,
   STOCK_PREP_OPERATOR_PULL_ACTION_ID,
@@ -78,12 +81,23 @@ import {
   STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS,
 } from '../src/services/integration/stockPreparation/workbenchAccess'
 import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
+import { recordStockPrepProjectVisit } from '../src/services/integration/stockPreparation/operatorHomeMemory'
+import {
+  stockPreparationHandoffFromStepKey,
+  stockPreparationHandoffMayPress,
+  stockPreparationHandoffResendableStepKey,
+} from '../src/services/integration/stockPreparation/confirmationQueue'
+import {
+  STOCK_PREP_ERROR_GENERIC,
+  STOCK_PREP_ERROR_PLAIN,
+  STOCK_PREP_HANDOFF_OUTCOME_PLAIN,
+} from '../src/services/integration/stockPreparation/plainLanguage'
 
 const backendAccess = require('../../../plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs')
 
 const SCOPE = { tenantId: 'tenant-a', workspaceId: 'workspace-default' }
-const PROJECT_NO = '230920006'
-const PROJECT_NAME = 'RY2注射水缓冲罐部件'
+const PROJECT_NO = '200000006'
+const PROJECT_NAME = '示例乙型容器'
 const SHEET_ID = 'sheet_abcdef0123456789'
 const VIEW_ID = 'view_abcdef0123456789'
 
@@ -257,13 +271,525 @@ async function flush(): Promise<void> {
   }
 }
 
+// ---- BNP: 通知下一步 on 项目备料页 says and allows what the confirmation queue does ---------------
+//
+// #6142 made the board's press reach the server for the first time, and with it three older board
+// defects became reachable. The confirmation queue already handled all three
+// (StockPreparationHandoff.spec.ts). Each case below names the defect it pins, and every fix has a
+// control: the neighbouring case keeps the words or the state it already had.
+//
+//   BNP-1 A message that did not go out is said as that — never as 「这台系统没有配通知渠道」 (a
+//         fresh advance) or as 「没有重复交」 (an owed resend that failed again).
+//   BNP-2 `terminal` means the LAST step is the current one, not that the chain is done: its handler
+//         can press (the press tells 仓库/采购), and only `completed` reads as finished.
+//   BNP-3 A hop whose notice is still OWED to this caller (`resendableStepKey`) can be sent from here
+//         even when the turn — or the whole chain — has moved on, as it can from the queue.
+//   BNP-4 (copy only) The project picker labels a project only this computer remembers in the home
+//         page's own words for that half of the list (#6088).
+//
+// The fixtures are the server's GET /handoff and POST /handoff/advance shapes
+// (plugins/plugin-integration-core/lib/http-routes.cjs, stockPreparationHandoff /
+// stockPreparationHandoffAdvance), including the keys the board does not read.
+
+describe('项目备料页 — 通知下一步 matches the confirmation queue (BNP)', () => {
+  let app: VueApp | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    h.locale = 'zh-CN'
+    // R-33 (2026-10-08): the default actor is the 拉取人员 (read+operate+PULL) — the person who runs
+    // the board's pull. The floor operator (no pull) is exercised by name where the pull is the point.
+    h.permissions = ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull']
+    h.roles = []
+    routeApi()
+    resetStockPreparationOperatorHomeDirectoryThrottle()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  /** GET /handoff for a four-step chain, sitting at `process` with the caller holding it. */
+  function cursor(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      configured: true,
+      projectNo: PROJECT_NO,
+      steps: [
+        { key: 'prep_entry', order: 0, handlerCount: 1 },
+        { key: 'process', order: 1, handlerCount: 1 },
+        { key: 'planning', order: 2, handlerCount: 1 },
+        { key: 'final_review', order: 3, handlerCount: 1 },
+      ],
+      stepCount: 4,
+      stepIndex: 1,
+      currentStepKey: 'process',
+      terminal: false,
+      completed: false,
+      isCurrentHandler: true,
+      notifiedStepIndex: 0,
+      notificationsConfigured: true,
+      resendableStepKey: null,
+      lostStepKeys: [],
+      ...overrides,
+    }
+  }
+
+  /** POST /handoff/advance for a fresh `process` → `planning` hop whose message went out. */
+  function advanced(overrides: Record<string, unknown> = {}): Response {
+    return ok({
+      projectNo: PROJECT_NO,
+      fromStepKey: 'process',
+      currentStepKey: 'planning',
+      stepIndex: 2,
+      stepCount: 4,
+      changed: true,
+      terminal: false,
+      notified: true,
+      notifyOutcome: 'sent',
+      resumed: false,
+      ...overrides,
+    })
+  }
+
+  /** GET /handoff answers in order (the last one serves every later read); POST /advance separately. */
+  function route(config: { handoff: Array<() => Response>; advance?: () => Response }): void {
+    routeApi()
+    const base = h.apiFetch.getMockImplementation()!
+    let reads = 0
+    h.apiFetch.mockImplementation(async (path: string, ...rest: unknown[]) => {
+      const target = String(path)
+      if (target.includes('/handoff/advance')) {
+        if (!config.advance) throw new Error('unexpected advance call')
+        return config.advance()
+      }
+      if (target.includes('/handoff')) {
+        const answer = config.handoff[Math.min(reads, config.handoff.length - 1)]
+        reads += 1
+        return answer()
+      }
+      return base(path, ...rest)
+    })
+  }
+
+  async function mountBoard(): Promise<HTMLElement> {
+    // Props by variable: an inline object here reads to vue/one-component-per-file as a component.
+    const props = { scope: SCOPE, projectNo: PROJECT_NO }
+    app = createApp(StockPreparationProjectBoardView, props)
+    app.mount(container!)
+    await flush()
+    return container!
+  }
+
+  function remount(): void {
+    if (app) app.unmount()
+    app = null
+    container!.innerHTML = ''
+  }
+
+  function notifyButton(root: HTMLElement): HTMLButtonElement | null {
+    return root.querySelector('[data-testid="stock-prep-project-board-notify-next"]') as HTMLButtonElement | null
+  }
+
+  function text(root: HTMLElement, testid: string): string {
+    return (root.querySelector(`[data-testid="${testid}"]`) as HTMLElement | null)?.textContent ?? ''
+  }
+
+  /** Every body POSTed to the advance route, parsed. */
+  function advanceBodies(): Record<string, unknown>[] {
+    return h.apiFetch.mock.calls
+      .filter(([path]) => String(path).includes('/handoff/advance'))
+      .map(([, options]) => JSON.parse(String((options as { body?: string }).body)) as Record<string, unknown>)
+  }
+
+  async function press(root: HTMLElement): Promise<void> {
+    const button = notifyButton(root)
+    expect(button, 'the control must render').not.toBeNull()
+    expect(button!.disabled, 'the control must be pressable, or the case proves nothing').toBe(false)
+    button!.click()
+    await flush()
+  }
+
+  // ---- BNP-1 the outcome sentence -------------------------------------------------------------
+
+  // plainLanguage.ts STOCK_PREP_HANDOFF_OUTCOME_PLAIN.failed — the queue's own words (its H-08).
+  const FAILED_LEAD = '已经交给下一步了,但群里的消息没有发出去 —— 请您自己跟下一位说一声。'
+  const FAILED_NEXT = '交接本身是成功的,不用再点一次。'
+
+  it('BNP-1: a fresh advance whose message FAILED says it did not go out, not that no channel is configured', async () => {
+    route({
+      handoff: [
+        () => ok(cursor()),
+        // The hop moved and its claim was spent on the failed send.
+        () => ok(cursor({ stepIndex: 2, currentStepKey: 'planning', isCurrentHandler: false, notifiedStepIndex: 1 })),
+      ],
+      advance: () => advanced({ notified: false, notifyOutcome: 'failed' }),
+    })
+    const root = await mountBoard()
+    await press(root)
+
+    expect(advanceBodies().map((body) => body.fromStepKey)).toEqual(['process'])
+    const notice = text(root, 'stock-prep-project-board-handoff-notice')
+    expect(notice).toContain(FAILED_LEAD)
+    expect(notice).toContain(FAILED_NEXT)
+    expect(notice, 'a channel IS configured; the send failed').not.toContain('没有配通知渠道')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-error"]'), 'the turn moved; this is a notice, not an error').toBeNull()
+  })
+
+  it('BNP-1: an owed resend that FAILED again says it did not go out, not that the step was already handed on', async () => {
+    // The caller handles both `process` and `planning`: the chain sits at `planning` (theirs), and the
+    // `process` hop's notice is still owed to them. The press replays `process` and takes the claim.
+    route({
+      handoff: [
+        () => ok(cursor({ stepIndex: 2, currentStepKey: 'planning', notifiedStepIndex: 0, resendableStepKey: 'process' })),
+        () => ok(cursor({ stepIndex: 2, currentStepKey: 'planning', notifiedStepIndex: 1, resendableStepKey: null })),
+      ],
+      advance: () => advanced({
+        currentStepKey: 'planning',
+        changed: false,
+        notified: false,
+        notifyOutcome: 'failed',
+        resumed: true,
+      }),
+    })
+    const root = await mountBoard()
+    await press(root)
+
+    expect(advanceBodies().map((body) => body.fromStepKey)).toEqual(['process'])
+    const notice = text(root, 'stock-prep-project-board-handoff-notice')
+    expect(notice).toContain(FAILED_LEAD)
+    expect(notice).toContain(FAILED_NEXT)
+    expect(notice, 'this click spent the owed claim; "nothing to do" would be false').not.toContain('没有重复交')
+    expect(notice, 'and it must not claim the resend succeeded').not.toContain('补发了')
+  })
+
+  it('BNP-1: the LAST step whose 仓库/采购 fan-out half-failed says one group was missed, never the success sentence', async () => {
+    // `partial` only happens on the terminal hop (two groups), i.e. on the press BNP-2 unlocks. The
+    // claim is spent, so pressing again cannot resend: the only fix is telling that group in person.
+    route({
+      handoff: [
+        () => ok(cursor({ stepIndex: 3, currentStepKey: 'final_review', terminal: true, notifiedStepIndex: 2 })),
+        () => ok(cursor({ stepIndex: 4, currentStepKey: null, terminal: false, completed: true, isCurrentHandler: false, notifiedStepIndex: 3 })),
+      ],
+      advance: () => advanced({
+        fromStepKey: 'final_review',
+        currentStepKey: null,
+        stepIndex: null,
+        terminal: true,
+        notified: false,
+        notifyOutcome: 'partial',
+      }),
+    })
+    const root = await mountBoard()
+    await press(root)
+
+    expect(advanceBodies().map((body) => body.fromStepKey)).toEqual(['final_review'])
+    const notice = text(root, 'stock-prep-project-board-handoff-notice')
+    // plainLanguage.ts STOCK_PREP_HANDOFF_OUTCOME_PLAIN.partial — the queue's own words (its H-15).
+    expect(notice).toContain(STOCK_PREP_HANDOFF_OUTCOME_PLAIN.partial.zh)
+    expect(notice).toContain(STOCK_PREP_HANDOFF_OUTCOME_PLAIN.partial.zhNext as string)
+    expect(notice).toContain('有一个群没发出去')
+    expect(notice).toContain('再点也不会补发')
+    expect(notice, 'one group was NOT told; the success sentence would stop anyone chasing it').not.toContain('已经交给下一步,并且通知到了。')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-error"]'), 'the turn moved; this is a notice, not an error').toBeNull()
+  })
+
+  it('BNP-1 control: the sentences that were already right are unchanged', async () => {
+    const cases: Array<{ label: string; handoff: Record<string, unknown>; answer: Record<string, unknown>; says: string }> = [
+      {
+        label: 'fresh advance, sent',
+        handoff: cursor(),
+        answer: {},
+        says: '已经交给下一步,并且通知到了。',
+      },
+      {
+        label: 'fresh advance, no destination for this hop',
+        handoff: cursor(),
+        answer: { notified: false, notifyOutcome: 'no_destination' },
+        says: '已经交给下一步。这台系统没有配通知渠道,所以没有发出提醒 —— 记得口头知会一声。',
+      },
+      {
+        label: 'plain replay: nothing moved, nothing owed',
+        handoff: cursor(),
+        answer: { changed: false, notified: false, notifyOutcome: 'skipped', resumed: false },
+        says: '这一步已经交出去了,没有重复交。',
+      },
+      {
+        label: 'owed resend that went out',
+        handoff: cursor({ stepIndex: 2, currentStepKey: 'planning', notifiedStepIndex: 0, resendableStepKey: 'process' }),
+        answer: { currentStepKey: 'planning', changed: false, notified: true, notifyOutcome: 'sent', resumed: true },
+        says: '已经交给下一步,并且通知到了。',
+      },
+    ]
+    for (const entry of cases) {
+      route({ handoff: [() => ok(entry.handoff)], advance: () => advanced(entry.answer) })
+      const root = await mountBoard()
+      await press(root)
+      const notice = text(root, 'stock-prep-project-board-handoff-notice')
+      expect(notice, entry.label).toContain(entry.says)
+      expect(notice, entry.label).not.toContain(FAILED_LEAD)
+      remount()
+    }
+  })
+
+  // ---- BNP-2 the last step --------------------------------------------------------------------
+
+  function nextStepKey(root: HTMLElement): string | null {
+    return root.querySelector('[data-testid="stock-prep-project-board-next-step"]')?.getAttribute('data-next-step') ?? null
+  }
+
+  /** The 「下一步」 bar's sentence and its button's words. */
+  function bar(root: HTMLElement): { sentence: string; button: string } {
+    return {
+      sentence: (root.querySelector('.sp-board__next-step-text') as HTMLElement | null)?.textContent?.trim() ?? '',
+      button: text(root, 'stock-prep-project-board-next-step-action').trim(),
+    }
+  }
+
+  /** The chain after its last step was handed on: GET /handoff's `completed` answer. */
+  const FINISHED = { stepIndex: 4, currentStepKey: null, terminal: false, completed: true, isCurrentHandler: false, notifiedStepIndex: 3 }
+
+  it('BNP-2: the handler of the LAST step can press, is told it goes to 仓库/采购, and sends that step', async () => {
+    route({
+      handoff: [
+        () => ok(cursor({ stepIndex: 3, currentStepKey: 'final_review', terminal: true, notifiedStepIndex: 2 })),
+        () => ok(cursor(FINISHED)),
+      ],
+      advance: () => advanced({ fromStepKey: 'final_review', currentStepKey: null, stepIndex: null, terminal: true }),
+    })
+    const root = await mountBoard()
+
+    // Before: the step is theirs and still open — not "finished".
+    const turn = text(root, 'stock-prep-project-board-turn')
+    expect(turn).toContain('轮到您了')
+    expect(turn, 'the last step is in front of them, not behind them').not.toContain('已经走完最后一步')
+    const button = notifyButton(root)!
+    expect(button.textContent).toContain('仓库')
+    expect(button.textContent).toContain('采购')
+    expect(button.getAttribute('title') ?? '', 'no "already the last step" refusal').not.toContain('最后一步')
+    // The 「下一步」 bar agrees with the button instead of saying nothing is waiting on them — and in
+    // the same words: one press, one name for it.
+    expect(nextStepKey(root)).toBe('notify')
+    expect(bar(root).button).toBe('通知仓库和采购')
+    expect(bar(root).button).toBe(button.textContent?.trim())
+    expect(bar(root).sentence).toBe('这是最后一步。填完了就通知仓库和采购,他们才知道可以按项目导出物料清单了。')
+
+    await press(root)
+    expect(advanceBodies().map((body) => body.fromStepKey)).toEqual(['final_review'])
+    expect(root.querySelector('[data-testid="stock-prep-project-board-error"]')).toBeNull()
+    // After: the re-read says finished, and now the button is done.
+    expect(text(root, 'stock-prep-project-board-turn')).toContain('已经走完最后一步')
+    expect(notifyButton(root)!.disabled).toBe(true)
+  })
+
+  it('BNP-2 control: on a MIDDLE step the 「下一步」 bar keeps its words and matches the button', async () => {
+    route({ handoff: [() => ok(cursor())] })
+    const root = await mountBoard()
+    expect(nextStepKey(root)).toBe('notify')
+    expect(bar(root)).toEqual({ sentence: '填完了就通知下一步,后面的人才知道该他了。', button: '通知下一步' })
+    expect(notifyButton(root)!.textContent?.trim()).toBe('通知下一步')
+  })
+
+  it('BNP-2 control: a FINISHED chain still reads as finished and posts nothing', async () => {
+    // The server's own shape, and the queue's H-13 shape: `isCurrentHandler` left true, so the ONLY
+    // thing withholding the press is `completed`.
+    for (const finished of [FINISHED, { ...FINISHED, isCurrentHandler: true }]) {
+      route({ handoff: [() => ok(cursor(finished))] })
+      const root = await mountBoard()
+      const label = `isCurrentHandler: ${String(finished.isCurrentHandler)}`
+      expect(text(root, 'stock-prep-project-board-turn'), label).toContain('已经走完最后一步')
+      const button = notifyButton(root)!
+      expect(button.disabled, label).toBe(true)
+      button.click()
+      await flush()
+      expect(advanceBodies(), label).toHaveLength(0)
+      expect(nextStepKey(root), label).not.toBe('notify')
+      remount()
+    }
+  })
+
+  it('BNP-2 control: the last step held by SOMEONE ELSE stays unpressable, and names that step', async () => {
+    route({
+      handoff: [() => ok(cursor({ stepIndex: 3, currentStepKey: 'final_review', terminal: true, isCurrentHandler: false, notifiedStepIndex: 2 }))],
+    })
+    const root = await mountBoard()
+    const button = notifyButton(root)!
+    expect(button.disabled).toBe(true)
+    button.click()
+    await flush()
+    expect(advanceBodies()).toHaveLength(0)
+    const turn = text(root, 'stock-prep-project-board-turn')
+    // By the desk's name, not the bare key (a key the vocabulary does not know stays raw — see the
+    // B-19 409 case, which still reads its unknown key back).
+    const turnValue = (root.querySelector('[data-testid="stock-prep-project-board-turn"] dd') as HTMLElement).textContent?.trim() ?? ''
+    expect(turnValue.startsWith('终审'), turnValue).toBe(true)
+    expect(turnValue).toContain('第 4/4 步')
+    expect(turn).not.toContain('final_review')
+    expect(turn).not.toContain('已经走完最后一步')
+    expect(nextStepKey(root)).not.toBe('notify')
+  })
+
+  // ---- BNP-3 the owed resend ------------------------------------------------------------------
+
+  /** The turn moved on to `planning` (not the caller's); the `process` hop's notice is owed to them. */
+  const OWED = { stepIndex: 2, currentStepKey: 'planning', isCurrentHandler: false, notifiedStepIndex: 0, resendableStepKey: 'process' }
+  const RESEND_INVITE = '上一跳的群通知还没发出去,再点一次「通知下一步」就会补发。'
+
+  it('BNP-3: the handler who still owes a hop’s notice can send it after the turn moved on', async () => {
+    route({
+      handoff: [
+        () => ok(cursor(OWED)),
+        () => ok(cursor({ ...OWED, notifiedStepIndex: 1, resendableStepKey: null })),
+      ],
+      advance: () => advanced({ currentStepKey: 'planning', changed: false, notified: true, notifyOutcome: 'sent', resumed: true }),
+    })
+    const root = await mountBoard()
+
+    // It is still not their turn, and the page does not pretend otherwise…
+    expect(text(root, 'stock-prep-project-board-turn')).not.toContain('轮到您了')
+    // …but the notice is theirs to send, and the button says which one it sends.
+    const button = notifyButton(root)!
+    expect(button.textContent).toContain('补发上一步的群消息')
+    expect(button.getAttribute('title')).toBe(RESEND_INVITE)
+    expect(nextStepKey(root)).toBe('notify')
+
+    await press(root)
+    // The OWED hop, not the current one — advancing `planning` would lose `process` for good.
+    expect(advanceBodies().map((body) => body.fromStepKey)).toEqual(['process'])
+    expect(root.querySelector('[data-testid="stock-prep-project-board-error"]')).toBeNull()
+    // Once sent, nothing is owed and it is still somebody else's turn: back to unpressable.
+    expect(notifyButton(root)!.disabled).toBe(true)
+  })
+
+  it('BNP-3: an owed notice for the LAST hop can still be sent after the chain finished', async () => {
+    // The terminal fan-out to 仓库/采购 is the notice this feature exists for; the chain is done, but
+    // its claim was never taken.
+    const owedAtEnd = { stepIndex: 4, currentStepKey: null, terminal: false, completed: true, isCurrentHandler: false, notifiedStepIndex: 2, resendableStepKey: 'final_review' }
+    route({
+      handoff: [() => ok(cursor(owedAtEnd)), () => ok(cursor({ ...owedAtEnd, notifiedStepIndex: 3, resendableStepKey: null }))],
+      advance: () => advanced({
+        fromStepKey: 'final_review',
+        currentStepKey: null,
+        stepIndex: null,
+        terminal: true,
+        changed: false,
+        notified: true,
+        notifyOutcome: 'sent',
+        resumed: true,
+      }),
+    })
+    const root = await mountBoard()
+    expect(text(root, 'stock-prep-project-board-turn')).toContain('已经走完最后一步')
+    await press(root)
+    expect(advanceBodies().map((body) => body.fromStepKey)).toEqual(['final_review'])
+    expect(notifyButton(root)!.disabled).toBe(true)
+  })
+
+  it('BNP-3 control: with NOTHING owed, somebody else’s turn stays unpressable and says why', async () => {
+    // `null` from a current backend, and the key ABSENT from one older than it: both mean "nothing owed".
+    const withoutKey = cursor({ ...OWED, resendableStepKey: null })
+    delete withoutKey.resendableStepKey
+    for (const answer of [cursor({ ...OWED, resendableStepKey: null }), withoutKey]) {
+      route({ handoff: [() => ok(answer)] })
+      const root = await mountBoard()
+      const label = `resendableStepKey ${'resendableStepKey' in answer ? 'null' : 'absent'}`
+      const button = notifyButton(root)!
+      expect(button.disabled, label).toBe(true)
+      expect(button.textContent, label).not.toContain('补发')
+      expect(button.getAttribute('title'), label).toBe('现在不是轮到您,所以不用您来通知')
+      button.click()
+      await flush()
+      expect(advanceBodies(), label).toHaveLength(0)
+      expect(nextStepKey(root), label).not.toBe('notify')
+      remount()
+    }
+  })
+
+  it('BNP-3: if the server refuses the resend, its refusal is what the operator reads', async () => {
+    // The roster changed between the read and the press: the planner answers 403 for a caller who is
+    // no longer a handler of the replayed hop. The page shows that answer; it does not decide it.
+    route({
+      handoff: [() => ok(cursor(OWED))],
+      advance: () => new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER', message: 'refused' },
+      }), { status: 403 }),
+    })
+    const root = await mountBoard()
+    await press(root)
+    expect(advanceBodies().map((body) => body.fromStepKey)).toEqual(['process'])
+    const error = root.querySelector('[data-testid="stock-prep-project-board-error"]') as HTMLElement
+    expect(error).not.toBeNull()
+    expect(error.textContent).toContain('现在不是您这一步,所以不能通知下一步。')
+    expect(error.querySelector('code')?.textContent).toBe('STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-handoff-notice"]')).toBeNull()
+  })
+
+  it('BNP-3: the shared rule both buttons render by, as a table', () => {
+    const at = (overrides: Record<string, unknown>) => ({
+      configured: true,
+      currentStepKey: 'planning',
+      isCurrentHandler: false,
+      completed: false,
+      resendableStepKey: null as string | null,
+      ...overrides,
+    })
+    // Holds an open step — the last one included (`terminal` is not an input at all).
+    expect(stockPreparationHandoffMayPress(at({ isCurrentHandler: true }))).toBe(true)
+    // Owes a notice: after the turn moved on, and after the chain finished.
+    expect(stockPreparationHandoffMayPress(at({ resendableStepKey: 'process' }))).toBe(true)
+    expect(stockPreparationHandoffMayPress(at({ currentStepKey: null, completed: true, resendableStepKey: 'final_review' }))).toBe(true)
+    // Nothing to press: somebody else's turn, a finished chain, no chain at all, no state.
+    expect(stockPreparationHandoffMayPress(at({}))).toBe(false)
+    expect(stockPreparationHandoffMayPress(at({ currentStepKey: null, completed: true, isCurrentHandler: true }))).toBe(false)
+    expect(stockPreparationHandoffMayPress(at({ configured: false, isCurrentHandler: true }))).toBe(false)
+    expect(stockPreparationHandoffMayPress(at({ configured: false, resendableStepKey: 'process' }))).toBe(false)
+    expect(stockPreparationHandoffMayPress(at({ resendableStepKey: '' }))).toBe(false)
+    expect(stockPreparationHandoffMayPress(null)).toBe(false)
+  })
+
+  // ---- BNP-4 the picker's words for this computer's memory ------------------------------------
+
+  it('BNP-4: a project only this computer remembers is labelled in the home page’s own words', async () => {
+    // Derived from the fixture constant, so no new project number is written here; not in the directory.
+    const memoryOnly = `${PROJECT_NO}-M`
+    recordStockPrepProjectVisit(memoryOnly, 'ready', SCOPE)
+    // No project open: the home page and the picker are on ONE screen, so the two can be compared.
+    const props = { scope: SCOPE, projectNo: '' }
+    app = createApp(StockPreparationProjectBoardView, props)
+    app.mount(container!)
+    await flush()
+    const root = container!
+
+    const options = Array.from(
+      root.querySelectorAll('[data-testid="stock-prep-project-board-datalist"] option'),
+    ) as HTMLOptionElement[]
+    const remembered = options.find((option) => option.value === memoryOnly)
+    expect(remembered, 'the memory-only project is offered').toBeDefined()
+    expect(remembered!.textContent).toBe('这台电脑最近开过的项目')
+    expect(
+      text(root, 'stock-prep-operator-home-quick-open'),
+      'the home page describes that half of the list in the same words',
+    ).toContain(remembered!.textContent!)
+    // Control: a directory row is still labelled by its own name.
+    expect(options.find((option) => option.value === PROJECT_NO)?.textContent).toBe(PROJECT_NAME)
+  })
+})
+
 describe('项目备料页 — the operator project board', () => {
   let app: VueApp | null = null
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
     h.locale = 'zh-CN'
-    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    // R-33 (2026-10-08): the default actor is the 拉取人员 (read+operate+PULL) — the person who runs
+    // the board's pull. The floor operator (no pull) is exercised by name where the pull is the point.
+    h.permissions = ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull']
     h.roles = []
     routeApi()
     routerPush.mockReset()
@@ -365,14 +891,22 @@ describe('项目备料页 — the operator project board', () => {
       .toEqual(backendAccess.STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS.map((step: Record<string, unknown>) => ({ ...step })))
 
     // The web predicate and the server rule must admit the same principals for the pull action.
+    // R-33 (2026-10-08): the tier is PULL — the puller is admitted, the floor operator is not.
+    const admitted: Record<string, boolean> = {}
     for (const actor of [
+      { permissions: ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'], roles: [] as string[] },
       { permissions: ['stock-prep:read', 'stock-prep:operate'], roles: [] as string[] },
+      { permissions: ['stock-prep:read', 'stock-prep:pull'], roles: [] as string[] },
+      { permissions: ['stock-prep:operate', 'stock-prep:pull'], roles: [] as string[] },
+      { permissions: ['stock-prep:pull'], roles: [] as string[] },
+      { permissions: ['stock-prep:admin'], roles: [] as string[] },
       { permissions: ['stock-prep:operate'], roles: [] as string[] },
       { permissions: ['stock-prep:read'], roles: [] as string[] },
       { permissions: ['integration:write'], roles: [] as string[] },
       { permissions: ['integration:admin'], roles: ['admin'] },
       { permissions: [] as string[], roles: [] as string[] },
     ]) {
+      admitted[actor.permissions.join('+') || '(none)'] = canRunStockPrepProjectSync({ roles: actor.roles, permissions: actor.permissions })
       h.permissions = [...actor.permissions]
       h.roles = [...actor.roles]
       const flattened = [...actor.permissions, ...actor.roles.map((role) => `role:${role}`)]
@@ -381,6 +915,16 @@ describe('项目备料页 — the operator project board', () => {
       const legacyAdmin = flattened.includes('integration:admin') || flattened.includes('role:admin')
       expect(canRunStockPrepProjectSync({ roles: h.roles, permissions: h.permissions })).toBe(serverAdmitsOperator || legacyAdmin)
     }
+    // LITERAL expectations as well as parity, so the parity cannot be satisfied by both sides being
+    // wrong together: the puller and the two admins are in, the floor operator and every degenerate
+    // grant are out.
+    expect(admitted['stock-prep:read+stock-prep:operate+stock-prep:pull'], 'the 拉取人员 pulls').toBe(true)
+    expect(admitted['stock-prep:admin'], 'stock-prep:admin pulls through the ladder').toBe(true)
+    expect(admitted['integration:admin'], 'the platform admin pulls').toBe(true)
+    expect(admitted['stock-prep:read+stock-prep:operate'], 'the floor operator no longer pulls (R-33)').toBe(false)
+    expect(admitted['stock-prep:read+stock-prep:pull'], 'pull without operate confers nothing').toBe(false)
+    expect(admitted['stock-prep:operate+stock-prep:pull'], 'pull without read confers nothing').toBe(false)
+    expect(admitted['stock-prep:pull'], 'pull alone confers nothing').toBe(false)
   })
 
   // ---- B-02 the handoff button is optional ---------------------------------------------------
@@ -441,6 +985,241 @@ describe('项目备料页 — the operator project board', () => {
     const button = root.querySelector('[data-testid="stock-prep-project-board-notify-next"]') as HTMLButtonElement
     expect(button).not.toBeNull()
     expect(button.disabled).toBe(true)
+  })
+
+  // ---- B-19 pressing 通知下一步 names the step it completes -------------------------------------
+  //
+  // The advance route REFUSES a body without `fromStepKey` (400 STOCK_PREPARATION_HANDOFF_REQUEST_INVALID).
+  // This page used to post through its own client that never sent one, so every press since it
+  // shipped was refused. These cases read `fromStepKey` off the wire, because a press that names the
+  // wrong step looks identical on screen until the server says no — or, worse, says yes.
+
+  const ADVANCE_PATH = '/api/integration/stock-preparation/handoff/advance'
+
+  function handoffCursor(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      configured: true,
+      projectNo: PROJECT_NO,
+      currentStepKey: 'purchasing',
+      stepIndex: 1,
+      stepCount: 4,
+      terminal: false,
+      completed: false,
+      isCurrentHandler: true,
+      ...overrides,
+    }
+  }
+
+  function advanceOk(overrides: Record<string, unknown> = {}): Response {
+    return ok({
+      projectNo: PROJECT_NO,
+      fromStepKey: 'purchasing',
+      currentStepKey: 'warehouse',
+      stepIndex: 2,
+      stepCount: 4,
+      changed: true,
+      terminal: false,
+      notified: true,
+      notifyOutcome: 'sent',
+      resumed: false,
+      ...overrides,
+    })
+  }
+
+  /** GET /handoff answers in order (the last entry serves every further read); POST /advance separately. */
+  function routeHandoffPress(config: { handoff: Array<() => Response>; advance?: () => Response }): void {
+    routeApi()
+    const base = h.apiFetch.getMockImplementation()!
+    let handoffReads = 0
+    h.apiFetch.mockImplementation(async (path: string, ...rest: unknown[]) => {
+      const target = String(path)
+      if (target.includes('/handoff/advance')) {
+        if (!config.advance) throw new Error('unexpected advance call')
+        return config.advance()
+      }
+      if (target.includes('/handoff')) {
+        const step = config.handoff[Math.min(handoffReads, config.handoff.length - 1)]
+        handoffReads += 1
+        return step()
+      }
+      return base(path, ...rest)
+    })
+  }
+
+  function advanceCalls(): unknown[][] {
+    return h.apiFetch.mock.calls.filter(([path]) => String(path).includes('/handoff/advance'))
+  }
+
+  function handoffReadCount(): number {
+    return h.apiFetch.mock.calls.filter(([path]) => {
+      const target = String(path)
+      return target.includes('/handoff') && !target.includes('/handoff/advance')
+    }).length
+  }
+
+  function advanceBody(): Record<string, unknown> {
+    const calls = advanceCalls()
+    expect(calls.length, 'exactly one advance was POSTed').toBe(1)
+    const options = calls[0][1] as { method?: string; body?: string }
+    expect(options.method).toBe('POST')
+    return JSON.parse(String(options.body)) as Record<string, unknown>
+  }
+
+  async function pressNotifyNext(root: HTMLElement): Promise<void> {
+    const button = root.querySelector('[data-testid="stock-prep-project-board-notify-next"]') as HTMLButtonElement
+    expect(button, 'the control must render').not.toBeNull()
+    expect(button.disabled, 'the control must be pressable, or the case proves nothing').toBe(false)
+    button.click()
+    await flush()
+  }
+
+  it('B-19: the press sends fromStepKey = currentStepKey, through the one client the queue uses', async () => {
+    // No `resendableStepKey` key at all: the shape an older backend answers, and the shape every
+    // other fixture in this file uses. Absent must read as "nothing owed".
+    routeHandoffPress({
+      handoff: [
+        () => ok(handoffCursor()),
+        () => ok(handoffCursor({ currentStepKey: 'warehouse', stepIndex: 2, isCurrentHandler: false })),
+      ],
+      advance: () => advanceOk(),
+    })
+    const root = await mountBoard()
+    await pressNotifyNext(root)
+
+    const call = advanceCalls()[0]
+    expect(String(call[0])).toBe(ADVANCE_PATH)
+    const body = advanceBody()
+    expect(body.fromStepKey).toBe('purchasing')
+    expect(body.projectNo).toBe(PROJECT_NO)
+    // The server's allowlist is CLOSED — an extra key is a 400 too.
+    expect(Object.keys(body).sort()).toEqual(['fromStepKey', 'projectNo', 'tenantId', 'workspaceId'])
+    // The page's own sentence for 'sent' is unchanged, and the cursor was re-read after the press.
+    expect((root.querySelector('[data-testid="stock-prep-project-board-handoff-notice"]') as HTMLElement).textContent)
+      .toContain('已经交给下一步,并且通知到了。')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-error"]')).toBeNull()
+    expect(handoffReadCount()).toBe(2)
+  })
+
+  it('B-19: when a resend is OWED, the press names the owed step, not the current one', async () => {
+    // Advancing `warehouse` here would claim the next hop and push the monotonic max past the owed
+    // `purchasing` notice, losing it for good — so the owed step must win.
+    routeHandoffPress({
+      handoff: [() => ok(handoffCursor({ currentStepKey: 'warehouse', stepIndex: 2, resendableStepKey: 'purchasing' }))],
+      advance: () => advanceOk({ changed: false, resumed: true }),
+    })
+    const root = await mountBoard()
+    await pressNotifyNext(root)
+    expect(advanceBody().fromStepKey).toBe('purchasing')
+  })
+
+  it('B-19: with no step to name, nothing is sent at all', async () => {
+    routeHandoffPress({
+      handoff: [() => ok(handoffCursor({ currentStepKey: null, resendableStepKey: null }))],
+    })
+    const root = await mountBoard()
+    await pressNotifyNext(root)
+    expect(advanceCalls()).toHaveLength(0)
+    expect(root.querySelector('[data-testid="stock-prep-project-board-error"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-handoff-notice"]')).toBeNull()
+  })
+
+  it('B-19: a 409 STEP_MISMATCH re-reads the cursor and says so in its own words', async () => {
+    routeHandoffPress({
+      handoff: [
+        () => ok(handoffCursor()),
+        // Somebody else handed `purchasing` on first; the chain now sits at a step that is not ours.
+        () => ok(handoffCursor({ currentStepKey: 'warehouse', stepIndex: 2, isCurrentHandler: false })),
+      ],
+      advance: () => new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'STOCK_PREPARATION_HANDOFF_STEP_MISMATCH', message: 'step mismatch' },
+      }), { status: 409 }),
+    })
+    const root = await mountBoard()
+    expect((root.querySelector('[data-testid="stock-prep-project-board-turn"]') as HTMLElement).textContent).toContain('轮到您了')
+    await pressNotifyNext(root)
+
+    expect(advanceBody().fromStepKey).toBe('purchasing')
+    // The cursor was re-read after the refusal…
+    expect(handoffReadCount()).toBe(2)
+    const turn = (root.querySelector('[data-testid="stock-prep-project-board-turn"]') as HTMLElement).textContent ?? ''
+    expect(turn).not.toContain('轮到您了')
+    expect(turn).toContain('warehouse')
+    const button = root.querySelector('[data-testid="stock-prep-project-board-notify-next"]') as HTMLButtonElement
+    expect(button.disabled, 'the stale step must not stay pressable').toBe(true)
+    // …and the refusal kept its own sentence, not the generic 「过一会儿再点一次」.
+    const error = root.querySelector('[data-testid="stock-prep-project-board-error"]') as HTMLElement
+    expect(error).not.toBeNull()
+    const text = error.textContent ?? ''
+    expect(text).toContain(STOCK_PREP_ERROR_PLAIN.STOCK_PREPARATION_HANDOFF_STEP_MISMATCH.zh)
+    expect(text).not.toContain(STOCK_PREP_ERROR_GENERIC.zh)
+    expect(text).not.toContain(STOCK_PREP_ERROR_GENERIC.zhNext as string)
+    expect(error.querySelector('code')?.textContent).toBe('STOCK_PREPARATION_HANDOFF_STEP_MISMATCH')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-handoff-notice"]')).toBeNull()
+  })
+
+  it('B-19: the shared derivation — owed first, then current, and nothing from an unconfigured or empty cursor', () => {
+    expect(stockPreparationHandoffFromStepKey({ configured: true, currentStepKey: 'warehouse', resendableStepKey: 'purchasing' })).toBe('purchasing')
+    expect(stockPreparationHandoffFromStepKey({ configured: true, currentStepKey: 'warehouse', resendableStepKey: null })).toBe('warehouse')
+    expect(stockPreparationHandoffFromStepKey({ configured: true, currentStepKey: 'warehouse' })).toBe('warehouse')
+    expect(stockPreparationHandoffFromStepKey({ configured: true, currentStepKey: 'warehouse', resendableStepKey: '' })).toBe('warehouse')
+    expect(stockPreparationHandoffFromStepKey({ configured: true, currentStepKey: '', resendableStepKey: null })).toBeNull()
+    expect(stockPreparationHandoffFromStepKey({ configured: true, currentStepKey: null })).toBeNull()
+    expect(stockPreparationHandoffFromStepKey(null)).toBeNull()
+    // An unconfigured chain owes nothing, whatever the key says.
+    expect(stockPreparationHandoffResendableStepKey({ configured: false, resendableStepKey: 'purchasing' })).toBeNull()
+    expect(stockPreparationHandoffResendableStepKey({ configured: true, resendableStepKey: 7 as unknown as string })).toBeNull()
+    expect(stockPreparationHandoffResendableStepKey({ configured: true, resendableStepKey: 'purchasing' })).toBe('purchasing')
+  })
+
+  // Two guards inside notifyNext's 409 branch, neither of which has its own case above: the outer
+  // "only re-read on STEP_MISMATCH" test (line 590) always gives the re-read itself a 200, and the
+  // outer refusal-keeps-cursor shape is never crossed with "the refusal was something else".
+
+  it('B-19: a 409 STEP_MISMATCH whose own re-read ALSO fails still shows the STEP_MISMATCH refusal', async () => {
+    // The re-read after a 409 is allowed to fail on its own (a flaky GET, a brief outage) — the inner
+    // try/catch around it exists so THAT failure never displaces the refusal the operator pressed for.
+    routeHandoffPress({
+      handoff: [
+        () => ok(handoffCursor()),
+        () => new Response(JSON.stringify({ ok: false, error: { code: 'INTERNAL', message: 'x' } }), { status: 500 }),
+      ],
+      advance: () => new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'STOCK_PREPARATION_HANDOFF_STEP_MISMATCH', message: 'step mismatch' },
+      }), { status: 409 }),
+    })
+    const root = await mountBoard()
+    await pressNotifyNext(root)
+
+    expect(advanceBody().fromStepKey).toBe('purchasing')
+    // The re-read WAS attempted (the mount's GET, then the post-409 retry)…
+    expect(handoffReadCount()).toBe(2)
+    // …but the re-read's own failure never reaches the screen: the STEP_MISMATCH refusal does.
+    const error = root.querySelector('[data-testid="stock-prep-project-board-error"]') as HTMLElement
+    expect(error).not.toBeNull()
+    expect(error.querySelector('code')?.textContent).toBe('STOCK_PREPARATION_HANDOFF_STEP_MISMATCH')
+    expect((error.textContent ?? '')).toContain(STOCK_PREP_ERROR_PLAIN.STOCK_PREPARATION_HANDOFF_STEP_MISMATCH.zh)
+  })
+
+  it('B-19: a non-409 refusal (403 NOT_CURRENT_HANDLER) does not re-read the cursor', async () => {
+    // Only a 409 STEP_MISMATCH means the on-screen cursor is stale. Any other refusal leaves the
+    // chain exactly where the operator already saw it, so the re-read is skipped — a read the code
+    // would otherwise spend for nothing.
+    routeHandoffPress({
+      handoff: [() => ok(handoffCursor())],
+      advance: () => new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER', message: 'not your turn' },
+      }), { status: 403 }),
+    })
+    const root = await mountBoard()
+    const readsBeforePress = handoffReadCount()
+    await pressNotifyNext(root)
+
+    expect(advanceBody().fromStepKey).toBe('purchasing')
+    expect(handoffReadCount()).toBe(readsBeforePress)
+    expect(root.querySelector('[data-testid="stock-prep-project-board-error"]')).not.toBeNull()
   })
 
   // ---- B-03 the deep link ---------------------------------------------------------------------
@@ -649,6 +1428,38 @@ describe('项目备料页 — the operator project board', () => {
     expect(banner.textContent).not.toContain('没有保存成功')
   })
 
+  // ---- B-18: THE EXPORT'S TENANT WALL HAS WORDS OF ITS OWN ON THIS PAGE TOO -------------------
+  //
+  // 导出物料清单 now refuses (409) before reading a row when the deployment's bound 备料主表 is not
+  // provably this factory's. This page is the operator's landing tab, so the refusal must name the
+  // reason and send the person to an administrator here as well — not a retry, not "nothing saved".
+
+  it('B-18: a 409 PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH on 导出 says the table is not this factory\'s', async () => {
+    routeApi()
+    const routed = h.apiFetch.getMockImplementation()!
+    h.apiFetch.mockImplementation(async (path: string, ...rest: unknown[]) => {
+      if (String(path).includes('/prep-lines/export')) {
+        return new Response(
+          JSON.stringify({ ok: false, error: { code: 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH', message: 'not owned', details: { objectId: 'plm_stock_preparation_main' } } }),
+          { status: 409 },
+        )
+      }
+      return routed(path, ...rest)
+    })
+    const root = await mountBoard()
+    ;(root.querySelector('[data-testid="stock-prep-project-board-export"]') as HTMLButtonElement).click()
+    await flush()
+    const banner = root.querySelector('[data-testid="stock-prep-project-board-error"]') as HTMLElement
+    expect(banner, 'the refusal is visible on the board').not.toBeNull()
+    expect(banner.textContent).toContain('不属于您的工厂')
+    expect(banner.textContent).toContain('PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH')
+    const next = banner.querySelector('[data-testid="stock-prep-project-board-error-next"]') as HTMLElement
+    expect(next, 'and says what to do next').not.toBeNull()
+    expect(next.textContent).toContain('管理员')
+    expect(banner.textContent, 'retrying cannot change a tenant-wall refusal').not.toContain('稍后再点一次')
+    expect(banner.textContent, 'and nothing was being saved').not.toContain('没有保存成功')
+  })
+
   it('B-14: …and only says "find an administrator" when the caller truly cannot pull', async () => {
     // A stock-prep:admin holder opens the tab (canOpenStockPrepProjectBoard) but does NOT satisfy
     // canRunStockPrepProjectSync's conjunction, so for them the pull control is genuinely absent and
@@ -663,12 +1474,47 @@ describe('项目备料页 — the operator project board', () => {
     expect(empty.textContent).toContain('平台管理员')
   })
 
+  it('B-14 / R-33: the floor operator (read+operate, no pull) is sent to the 拉取人员, never at a button they do not have', async () => {
+    // The actor the 2026-10-08 ruling is about: the floor operator opens the board
+    // (canOpenStockPrepProjectBoard) but no longer satisfies canRunStockPrepProjectSync.
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.roles = []
+    routeApi({ board: notFound('STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND') })
+    const root = await mountBoard({ projectNo: 'NO-SUCH-PROJECT' })
+    const empty = root.querySelector('[data-testid="stock-prep-project-board-empty"]') as HTMLElement
+    expect(empty).not.toBeNull()
+    expect(empty.textContent).toContain('还没有数据')
+    expect(empty.textContent).toContain('请联系拉取人员')
+    // Not pointed at the control: the empty state does not name 从PLM拉取数据 as something to press…
+    expect(empty.textContent).not.toContain('下面的「从PLM拉取数据」')
+    // …and not told to get a permission they already hold.
+    expect(empty.textContent).not.toContain('备料操作权限')
+    // The pull control itself is absent and the panel says why, in the same words.
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).toBeNull()
+    const denied = root.querySelector('[data-testid="stock-prep-project-sync-denied"]') as HTMLElement
+    expect(denied).not.toBeNull()
+    expect(denied.textContent).toContain('请联系拉取人员')
+  })
+
+  it('B-14 / R-33: the 拉取人员 keeps the self-serve empty state and the pull control', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull']
+    h.roles = []
+    routeApi({ board: notFound('STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND') })
+    const root = await mountBoard({ projectNo: 'NO-SUCH-PROJECT' })
+    const empty = root.querySelector('[data-testid="stock-prep-project-board-empty"]') as HTMLElement
+    expect(empty).not.toBeNull()
+    expect(empty.textContent).toContain('下面的「从PLM拉取数据」')
+    expect(empty.textContent).not.toContain('请联系拉取人员')
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).toBeNull()
+  })
+
   // ---- B-15: A STALE RESPONSE NEVER OVERWRITES THE PROJECT THE OPERATOR JUST OPENED -----------
 
   it('B-15: an in-flight refresh cannot land on a newly opened project', async () => {
     // The refresh's board read is held open; while it is in flight the operator opens ANOTHER
     // project, which resolves first. When the stale answer finally arrives it must be dropped.
-    const OTHER_NO = '230920099'
+    const OTHER_NO = '200000099'
     let releaseStale: (() => void) | null = null
     const stale = new Promise<void>((resolve) => { releaseStale = resolve })
     let boardReads = 0
@@ -782,12 +1628,298 @@ describe('项目备料页 — the operator project board', () => {
     expect(syncedText.trim().length).toBeGreaterThan(0)
   })
 
-  it('B-04: 推送宜搭 is a disabled placeholder that says so in words', async () => {
+  /** The browser's platform-admin view (holdsPlatformAdmin). The server's live gate is stricter: it also
+   *  checks namespace admission, active tenant membership and the anchored owner (automation-live-authority.ts). */
+  function asYidaAdmin(): void {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull', 'integration:admin']
+    h.roles = []
+  }
+
+  it('B-04: an operate-tier user keeps main\'s disabled 推送宜搭 placeholder and gets no YiDa entry', async () => {
     const root = await mountBoard()
     const yida = root.querySelector('[data-testid="stock-prep-project-board-yida"]') as HTMLButtonElement
     expect(yida).not.toBeNull()
     expect(yida.disabled).toBe(true)
-    expect(`${yida.textContent} ${yida.getAttribute('title')}`).toContain('暂未接入')
+    expect(yida.classList.contains('sp-board__button--placeholder')).toBe(true)
+    expect(yida.textContent?.trim()).toBe('推送宜搭(暂未接入)')
+    expect(yida.getAttribute('title')).toBe('宜搭推送暂未接入')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]')).toBeNull()
+    expect(root.textContent).not.toContain('宜搭准备')
+    expect(root.textContent).not.toContain('单行确认')
+    const callsBefore = h.apiFetch.mock.calls.length
+    yida.click(); await flush()
+    expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBeNull()
+    expect(h.apiFetch.mock.calls).toHaveLength(callsBefore)
+  })
+
+  it('B-04: YiDa entries render exactly for the literal platform admin, never for an expanding grant', async () => {
+    const cases: Array<[string, string[], string[], boolean]> = [
+      ['floor operator', ['stock-prep:read', 'stock-prep:operate'], [], false],
+      ['puller', ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'], [], false],
+      ['workbench admin', ['stock-prep:admin'], [], false],
+      ['*:* without the admin role', ['stock-prep:read', 'stock-prep:operate', '*:*'], [], false],
+      ['integration:* wildcard', ['stock-prep:read', 'stock-prep:operate', 'integration:*'], [], false],
+      ['users:write holder', ['stock-prep:read', 'stock-prep:operate', 'users:write'], [], false],
+      ['integration:admin code', ['stock-prep:read', 'stock-prep:operate', 'integration:admin'], [], true],
+      ['role:admin code', ['stock-prep:read', 'stock-prep:operate', 'role:admin'], [], true],
+      ['admin role', [], ['admin'], true],
+    ]
+    for (const [name, permissions, roles, expected] of cases) {
+      h.permissions = permissions
+      h.roles = roles
+      const root = await mountBoard()
+      const yida = root.querySelector('[data-testid="stock-prep-project-board-yida"]') as HTMLButtonElement
+      const toggle = root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]')
+      expect(canOpenStockPrepYidaEntries({ permissions, roles }), `${name} predicate`).toBe(expected)
+      expect(toggle !== null, `${name} toggle`).toBe(expected)
+      expect(yida.disabled, `${name} entry disabled`).toBe(!expected)
+      expect(yida.textContent?.includes('推送宜搭(暂未接入)'), `${name} placeholder`).toBe(!expected)
+      remount()
+    }
+  })
+
+  it('B-04: the admin YiDa preparation entry opens only local preview and promises no single-row send', async () => {
+    asYidaAdmin()
+    const root = await mountBoard()
+    const yida = root.querySelector('[data-testid="stock-prep-project-board-yida"]') as HTMLButtonElement
+    expect(yida).not.toBeNull()
+    expect(yida.disabled).toBe(false)
+    expect(yida.textContent).toContain('打开宜搭准备（不发送）')
+    expect(yida.getAttribute('title')).toContain('仅打开本地预演和准备界面')
+    expect(root.textContent).not.toContain('单行确认')
+    const callsBefore = h.apiFetch.mock.calls.length
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const setSpy = vi.spyOn(Storage.prototype, 'setItem')
+    const removeSpy = vi.spyOn(Storage.prototype, 'removeItem')
+    try {
+      yida.click(); await flush()
+      const panel = root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')
+      expect(panel).not.toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-yida-owner-send-panel"]')).toBeNull()
+      yida.click(); await flush()
+      expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBe(panel)
+      // A clean protocol preview makes the L4 entry openable (it is always rendered, so enabled + no blocked line is the proof);
+      // with no owner-authorized ON reply the CREATE entry stays absent.
+      const mode = panel!.querySelector('[data-testid="sp-yida-preview-mode"]') as HTMLSelectElement
+      mode.value = 'protocol'
+      mode.dispatchEvent(new Event('change')); await flush()
+      ;(panel!.querySelector('[data-testid="sp-yida-protocol-example-primary"]') as HTMLButtonElement).click(); await flush()
+      ;(panel!.querySelector('[data-testid="sp-yida-run"]') as HTMLButtonElement).click(); await flush()
+      expect((panel!.querySelector('[data-testid="sp-yida-initialization-open"]') as HTMLButtonElement).disabled).toBe(false)
+      expect(panel!.querySelector('[data-testid="sp-yida-initialization-blocked"]')).toBeNull()
+      expect(panel!.querySelector('[data-testid="sp-yida-owner-open"]')).toBeNull()
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(h.apiFetch.mock.calls).toHaveLength(callsBefore)
+      expect(setSpy).not.toHaveBeenCalled()
+      expect(removeSpy).not.toHaveBeenCalled()
+    } finally { fetchSpy.mockRestore(); setSpy.mockRestore(); removeSpy.mockRestore() }
+  })
+
+  it('SA04: static Yida preview remains a separate local-only toggle beside the preparation entry', async () => {
+    asYidaAdmin()
+    const root = await mountBoard()
+    const entry = root.querySelector('[data-testid="stock-prep-project-board-yida"]') as HTMLButtonElement
+    const toggle = root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]') as HTMLButtonElement
+    expect(entry.disabled).toBe(false)
+    expect(toggle.disabled).toBe(false)
+    const callsBefore = h.apiFetch.mock.calls.length
+
+    toggle.click()
+    await flush()
+    const panel = root.querySelector('[data-testid="stock-prep-yida-preview-panel"]') as HTMLElement
+    expect(panel).not.toBeNull()
+    ;(panel.querySelector('[data-testid="sp-yida-example-primary"]') as HTMLButtonElement).click()
+    await flush()
+    ;(panel.querySelector('[data-testid="sp-yida-run"]') as HTMLButtonElement).click()
+    await flush()
+    expect(panel.querySelector('[data-testid="sp-yida-result"]')).not.toBeNull()
+    expect(h.apiFetch.mock.calls).toHaveLength(callsBefore)
+    expect(entry.disabled).toBe(false)
+    expect(root.querySelector('[data-testid="stock-prep-yida-owner-send-panel"]')).toBeNull()
+  })
+
+  it('SA04: changing tenant, workspace, or project closes local preview state', async () => {
+    asYidaAdmin()
+    const liveScope = reactive({ ...SCOPE })
+    const liveProjectNo = ref(PROJECT_NO)
+    app = createApp(() => createElement(StockPreparationProjectBoardView, {
+      scope: { ...liveScope },
+      projectNo: liveProjectNo.value,
+    }))
+    app.mount(container!)
+    await flush()
+    const root = container!
+    const toggle = () => root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]') as HTMLButtonElement
+    toggle().click()
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).not.toBeNull()
+    ;(root.querySelector('[data-testid="sp-yida-example-primary"]') as HTMLButtonElement).click()
+    await flush()
+    ;(root.querySelector('[data-testid="sp-yida-run"]') as HTMLButtonElement).click()
+    await flush()
+    expect(root.querySelector('[data-testid="sp-yida-result"]')).not.toBeNull()
+
+    liveScope.tenantId = 'tenant-b'
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBeNull()
+    toggle().click()
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).not.toBeNull()
+    expect((root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).toBe('')
+    expect(root.querySelector('[data-testid="sp-yida-result"]')).toBeNull()
+
+    liveScope.workspaceId = 'workspace-other'
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBeNull()
+    toggle().click()
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).not.toBeNull()
+
+    liveProjectNo.value = 'OTHER-PROJECT'
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBeNull()
+  })
+
+  describe('SA04: local Yida preview follows the auth session', () => {
+    const keys = ['auth_token', 'user_permissions', 'user_roles'] as const
+    let previous: Array<string | null>
+
+    beforeEach(() => {
+      previous = keys.map((key) => localStorage.getItem(key))
+      localStorage.setItem('auth_token', 'sa04-actor-a')
+      localStorage.setItem('user_permissions', JSON.stringify(['stock-prep:read', 'stock-prep:operate']))
+      localStorage.setItem('user_roles', '[]')
+      asYidaAdmin()
+    })
+
+    afterEach(() => {
+      keys.forEach((key, index) => {
+        const value = previous[index]
+        if (value === null) localStorage.removeItem(key)
+        else localStorage.setItem(key, value)
+      })
+    })
+
+    async function populate(root: HTMLElement): Promise<string> {
+      ;(root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]') as HTMLButtonElement).click()
+      await flush()
+      ;(root.querySelector('[data-testid="sp-yida-example-primary"]') as HTMLButtonElement).click()
+      await flush()
+      ;(root.querySelector('[data-testid="sp-yida-run"]') as HTMLButtonElement).click()
+      await flush()
+      const rows = (root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value
+      expect(rows).not.toBe('')
+      expect(root.querySelector('[data-testid="sp-yida-result"]')).not.toBeNull()
+      return rows
+    }
+
+    async function expectBlankOnReopen(root: HTMLElement): Promise<void> {
+      expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBeNull()
+      ;(root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]') as HTMLButtonElement).click()
+      await flush()
+      expect((root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).toBe('')
+      expect((root.querySelector('[data-testid="sp-yida-app-type"]') as HTMLInputElement).value).toBe('')
+      expect(root.querySelector('[data-testid="sp-yida-result"]')).toBeNull()
+    }
+
+    it('unmounts the populated panel when account B takes the same project and scope', async () => {
+      const root = await mountBoard()
+      await populate(root)
+      notifyAuthPrincipalChange()
+      localStorage.setItem('auth_token', 'sa04-actor-b')
+      await flush()
+      await expectBlankOnReopen(root)
+    })
+
+    it('unmounts on a same-subject token rotation', async () => {
+      const token = (issued: number) => `header.${btoa(JSON.stringify({ sub: 'sa04-actor-a', iat: issued }))}.signature`
+      localStorage.setItem('auth_token', token(1))
+      const root = await mountBoard()
+      await populate(root)
+      const principal = getAuthPrincipalKey()
+      const session = readAuthSessionSignature()
+      notifyAuthPrincipalChange()
+      localStorage.setItem('auth_token', token(2))
+      expect(getAuthPrincipalKey()).toBe(principal)
+      expect(readAuthSessionSignature()).not.toBe(session)
+      await flush()
+      await expectBlankOnReopen(root)
+    })
+
+    it('closes before reopening when a token changed without a storage or auth event', async () => {
+      const root = await mountBoard()
+      await populate(root)
+      localStorage.setItem('auth_token', 'sa04-actor-b')
+      ;(root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]') as HTMLButtonElement).click()
+      await flush()
+      await expectBlankOnReopen(root)
+    })
+
+    it('unmounts on a permission snapshot revocation signalled by storage', async () => {
+      const root = await mountBoard()
+      await populate(root)
+      localStorage.setItem('user_permissions', '[]')
+      window.dispatchEvent(new StorageEvent('storage', { key: 'user_permissions' }))
+      await flush()
+      await expectBlankOnReopen(root)
+    })
+
+    it('re-reads YiDa entry visibility when the session snapshot drops to operate tier', async () => {
+      localStorage.setItem('user_permissions', JSON.stringify(h.permissions))
+      const root = await mountBoard()
+      await populate(root)
+      h.permissions = ['stock-prep:read', 'stock-prep:operate']
+      localStorage.setItem('user_permissions', JSON.stringify(h.permissions))
+      window.dispatchEvent(new StorageEvent('storage', { key: 'user_permissions' }))
+      await flush()
+      expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]')).toBeNull()
+      const yida = root.querySelector('[data-testid="stock-prep-project-board-yida"]') as HTMLButtonElement
+      expect(yida.disabled).toBe(true)
+      expect(yida.classList.contains('sp-board__button--placeholder')).toBe(true)
+      expect(yida.textContent?.trim()).toBe('推送宜搭(暂未接入)')
+    })
+
+    it('unmounts when focus discovers a changed permission snapshot', async () => {
+      const root = await mountBoard()
+      await populate(root)
+      localStorage.setItem('user_permissions', '[]')
+      window.dispatchEvent(new Event('focus'))
+      await flush()
+      await expectBlankOnReopen(root)
+    })
+
+    it('keeps populated local work on unchanged focus, storage and auth notification', async () => {
+      const root = await mountBoard()
+      const rows = await populate(root)
+      window.dispatchEvent(new Event('focus'))
+      window.dispatchEvent(new Event('storage'))
+      notifyAuthPrincipalChange()
+      await flush()
+      expect((root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).toBe(rows)
+      expect(root.querySelector('[data-testid="sp-yida-result"]')).not.toBeNull()
+    })
+
+    it('removes its storage and focus listeners on board unmount', async () => {
+      const added = vi.spyOn(window, 'addEventListener')
+      const removed = vi.spyOn(window, 'removeEventListener')
+      try {
+        await mountBoard()
+        const listeners = added.mock.calls.filter(([type, listener]) =>
+          (type === 'storage' || type === 'focus')
+          && typeof listener === 'function'
+          && listener.name === 'checkYidaPreviewSession')
+        expect(listeners.map(([type]) => type).sort()).toEqual(['focus', 'storage'])
+        remount()
+        for (const [type, listener] of listeners) {
+          expect(removed.mock.calls.some(([removedType, removedListener]) =>
+            removedType === type && removedListener === listener)).toBe(true)
+        }
+      } finally {
+        added.mockRestore()
+        removed.mockRestore()
+      }
+    })
   })
 
   it('B-04: opening a project mirrors the NUMBER into the query, never the internal handle', async () => {
@@ -872,6 +2004,34 @@ describe('项目备料页 — the operator project board', () => {
     expect(banner).not.toBeNull()
     expect(banner.textContent).toContain('没能读到')
     expect(banner.textContent).not.toContain('没有保存成功')
+  })
+
+  // ---- R67 ④: 项目备料页 picks a background trial back up -----------------------------------------
+  //
+  // The board's pull panel is seeded with the board's project. Coming back to the page while this
+  // caller's trial of that project is still reading PLM shows it — and starts nothing on its own.
+
+  it('R67-B1: a trial of the board\'s project still running in the background is shown on mount; nothing is re-run', async () => {
+    const syncApi = syncApiDouble({
+      dryRunJobStatus: vi.fn().mockResolvedValue({ status: 'running', elapsedMs: 125_000 }),
+    })
+    const root = await mountBoard({ syncApi })
+    await flush()
+    const line = root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]') as HTMLElement | null
+    expect(line).not.toBeNull()
+    expect(line!.getAttribute('data-dry-run-progress')).toBe('resumed')
+    expect(line!.textContent).toContain('2:05')
+    expect(syncApi.dryRunJobStatus).toHaveBeenCalledTimes(1)
+    expect(syncApi.dryRun).not.toHaveBeenCalled()
+    expect(syncApi.apply).not.toHaveBeenCalled()
+  })
+
+  it('R67-B2: no trial running for the board\'s project — no progress line, and the board reads as before', async () => {
+    const syncApi = syncApiDouble({ dryRunJobStatus: vi.fn().mockResolvedValue(null) })
+    const root = await mountBoard({ syncApi })
+    await flush()
+    expect(syncApi.dryRunJobStatus).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]')).toBeNull()
   })
 
   // ---- B-09: A REFRESH DOES NOT UNMOUNT WHAT THE OPERATOR IS READING ---------------------------
@@ -1001,6 +2161,39 @@ describe('项目备料页 — the operator project board', () => {
     const fallback = root.querySelector('[data-testid="stock-prep-project-board-open-multitable-fallback"]') as HTMLButtonElement
     expect(fallback, 'a board with no handle must still offer the plain workbench').not.toBeNull()
     expect(fallback.disabled).toBe(false)
+    // Review round 1 (F2): one destination, one label — the same words the pull panel's button uses.
+    expect(fallback.textContent).toContain('打开多维表首页')
+  })
+
+  it('round 1 (F1): on 项目备料 the pull panel\'s no-link sentence points down to the board\'s own explanation', async () => {
+    routeApi({ board: () => ok(boardPayload({ fillTarget: null })) })
+    const root = await mountBoard({ syncApi: syncApiDouble() })
+    await runPullPanel(root)
+    const panelButton = root.querySelector('[data-testid="stock-prep-project-sync-open-multitable"]') as HTMLButtonElement
+    expect(panelButton).not.toBeNull()
+    expect(panelButton.getAttribute('data-fill-target')).toBe('none')
+    expect(panelButton.textContent).toContain('打开多维表首页')
+    const hint = root.querySelector('[data-testid="stock-prep-project-sync-no-sheet-link-hint"]') as HTMLElement
+    expect(hint).not.toBeNull()
+    // It names the page's OTHER button by its label, and that button really is on the page with the explanation.
+    expect(hint.textContent).toContain('见本页下方另一个「打开多维表首页」按钮旁的说明')
+    expect(hint.textContent).not.toContain('请在「项目备料」页')
+    expect(hint.textContent).not.toContain('再拉取一次')
+    const fallback = root.querySelector('[data-testid="stock-prep-project-board-open-multitable-fallback"]') as HTMLButtonElement
+    expect(fallback.textContent).toContain('打开多维表首页')
+    const explanation = root.querySelector('[data-testid="stock-prep-project-board-no-fill-target"]') as HTMLElement
+    expect(explanation.textContent).toContain('数据来源与体检')
+    // DOM order: the explanation it points at is further DOWN the page than the sentence pointing at it.
+    expect(hint.compareDocumentPosition(explanation) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // And the two sentences do not disagree about who builds the sheet.
+    expect(hint.textContent).toContain('由系统或管理员按固定模板建立')
+  })
+
+  it('round 1 (F1): with a handle on 项目备料 neither the panel sentence nor the board fallback renders', async () => {
+    const root = await mountBoard({ syncApi: syncApiDouble() })
+    await runPullPanel(root)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-no-sheet-link-hint"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-open-multitable-fallback"]')).toBeNull()
   })
 
   /** The shell has no '?projectNo=' in these specs, so a board only appears once one is opened. */
@@ -1090,6 +2283,14 @@ describe('项目备料页 — the operator project board', () => {
     // the 「拉一个新项目」 heading and the honest sentence, never a second box with the same label.
     expect(root.querySelectorAll('[data-testid="stock-prep-project-board-input"]').length).toBe(1)
     expect(root.querySelectorAll('input[list="stock-prep-board-directory-options"]').length).toBe(1)
+    // R-33: the board WIRES its own pull predicate into the home (`:can-pull="canRunPull"`), so the
+    // puller (this file's default actor) sees 「拉一个新项目」 and an operate-only mount sees the
+    // 「打开一个项目」 variant instead of an invitation to pull.
+    expect(root.querySelector('.sp-home__quick-open-title')?.textContent).toContain('拉一个新项目')
+    remount()
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    const floor = await mountBoard({ projectNo: '' })
+    expect(floor.querySelector('.sp-home__quick-open-title')?.textContent).toContain('打开一个项目')
   })
 
   it('P0-2: every OTHER spec in this file seeds a projectNo and therefore never sees the home page', async () => {

@@ -33,6 +33,13 @@ export interface YjsRecordBridgeConfig {
 /** Resolves a socket.id (Yjs transaction origin) to a verified userId. */
 export type ActorResolver = (socketId: string) => string | undefined
 
+/**
+ * Called after a flush was REFUSED (the write threw), with the record and the error as thrown. The bridge has no
+ * HTTP response to answer on, so this is the one place a refusal can be turned into something the editors are
+ * told. Optional: with no handler the bridge counts and logs the failure, exactly as before.
+ */
+export type YjsBridgeRefusalHandler = (recordId: string, error: unknown) => void | Promise<void>
+
 interface PendingWrite {
   fields: Record<string, unknown>
   actorIds: Set<string>
@@ -68,6 +75,7 @@ export class YjsRecordBridge {
   private maxDelayMs: number
 
   private actorResolver: ActorResolver
+  private refusalHandler: YjsBridgeRefusalHandler | null = null
 
   constructor(
     private syncService: YjsSyncService,
@@ -79,6 +87,11 @@ export class YjsRecordBridge {
     this.actorResolver = actorResolver ?? (() => undefined)
     this.mergeWindowMs = config?.mergeWindowMs ?? 200
     this.maxDelayMs = config?.maxDelayMs ?? 500
+  }
+
+  /** Attach (or detach, with null) the handler told about refused flushes. */
+  setRefusalHandler(handler: YjsBridgeRefusalHandler | null): void {
+    this.refusalHandler = handler
   }
 
   /**
@@ -216,6 +229,18 @@ export class YjsRecordBridge {
       .catch((err) => {
         this._flushFailureCount++
         console.error(`[yjs-bridge] Failed to flush patch for record ${recordId}:`, err)
+        this.tellRefusal(recordId, err)
+      })
+  }
+
+  /** Never throws and never rejects: a handler that fails is logged, the flush outcome stands. */
+  private tellRefusal(recordId: string, error: unknown): void {
+    const handler = this.refusalHandler
+    if (!handler) return
+    Promise.resolve()
+      .then(() => handler(recordId, error))
+      .catch((handlerError) => {
+        console.error(`[yjs-bridge] Refusal handler failed for record ${recordId}:`, handlerError)
       })
   }
 

@@ -86,7 +86,12 @@ describe('approval admin jump migration and bootstrap sync', () => {
     // Fix-round (S2 gate P2-1) bumped it again to add `approval_cmt_tombstone_mentions_cleared`.
     // S3b (P3-6 carried-hardening item) bumped it again to NAME the `approval_comments.instance_id`
     // FK as `approval_cmt_instance_fk` (was unnamed) — see the P3-6 parity test below.
-    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260822-s3b-p36-named-instance-fk'")
+    // P3-3 fix round (gate2 P1-1) bumped it again to add the `approval_form_drafts.signature`
+    // bounds CHECKs (`approval_fd_signature_bounds` / `approval_fd_signature_nonblank`) — this pin
+    // was left behind pointing at the PRIOR version when that bump landed, reddening this test on
+    // its own; keep it synchronized going forward.
+    // F3-D1 (owner ruling Q9 ④) relabelled it to the renamed migration's date; no DDL change.
+    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20261001-f3d1-approval-form-drafts'")
     // ANCHORED on the FULL member list, not the old floating fragment. The previous substring
     // (`'remind', 'jump', 'add_sign', 'reduce_sign', 'reassign'`) still passed with BOTH `handle`
     // and `policy_denied` missing from the bootstrap — an unanchored pin over load-bearing DDL, the

@@ -39,12 +39,44 @@ function createAttendanceGroupFixedScheduleConfigService({ HttpError }) {
       throw new HttpError(404, 'NOT_FOUND', 'Group not found')
     }
 
+    const hasExpectedRevision = input.expectedConfigRevision !== undefined
+    let lockedConfig = null
+    if (hasExpectedRevision) {
+      if (!Number.isSafeInteger(input.expectedConfigRevision) || input.expectedConfigRevision < 0) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'expectedConfigRevision must be a non-negative integer')
+      }
+      const lockedRows = await trx.query(
+        `SELECT * FROM attendance_group_fixed_schedule_configs
+          WHERE org_id = $1 AND group_id = $2 FOR UPDATE`,
+        [input.orgId, input.groupId],
+      )
+      lockedConfig = lockedRows[0] ?? null
+      if ((lockedConfig && Number(lockedConfig.revision) !== input.expectedConfigRevision)
+        || (!lockedConfig && input.expectedConfigRevision !== 0)) {
+        throwConfigChanged()
+      }
+    }
+
     const shiftRows = await trx.query(
       'SELECT id FROM attendance_shifts WHERE id = $1 AND org_id = $2 FOR SHARE',
       [input.shiftId, input.orgId],
     )
+
     if (!shiftRows.length) {
       throw new HttpError(404, 'NOT_FOUND', 'Shift not found')
+    }
+
+    if (hasExpectedRevision && !lockedConfig) {
+      const inserted = await trx.query(
+        `INSERT INTO attendance_group_fixed_schedule_configs
+           (org_id, group_id, shift_id, start_date, end_date, revision, updated_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 1, $6, now(), now())
+         ON CONFLICT (org_id, group_id) DO NOTHING
+         RETURNING *`,
+        [input.orgId, input.groupId, input.shiftId, input.startDate, input.endDate, input.updatedBy],
+      )
+      if (!inserted.length) throwConfigChanged()
+      return mapConfigRow(inserted[0])
     }
 
     const rows = await trx.query(

@@ -5,6 +5,21 @@
 
 import { describe, test, expect, beforeEach, vi } from 'vitest'
 import { createHash, createHmac } from 'crypto'
+
+// The delivery rules read the database in their own transaction, which this mock DB cannot host; these
+// service tests stand the rules in as "owner can read everything on the bound sheet" (body unchanged).
+// The rules themselves are covered by webhook-delivery-authority.test.ts and the real-DB suites.
+vi.mock('../../src/multitable/webhook-delivery-authority', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/multitable/webhook-delivery-authority')>()
+  return {
+    ...actual,
+    authorizeWebhookDelivery: vi.fn(async (_db: unknown, _webhook: unknown, _event: unknown, payload: unknown) => ({
+      deliver: true,
+      payload: { ...(payload as Record<string, unknown>) },
+    })),
+  }
+})
+
 import { ApiTokenService } from '../../src/multitable/api-token-service'
 import { WebhookService } from '../../src/multitable/webhook-service'
 import type { SsrfLookupFn } from '../../src/multitable/webhook-ssrf-guard'
@@ -30,6 +45,7 @@ const publicLookup: SsrfLookupFn = async () => [{ address: '203.0.113.10', famil
 /** Result queues: push values to control what execute / executeTakeFirst return. */
 let executeQueue: unknown[]
 let executeTakeFirstQueue: unknown[]
+let selectArgCalls: unknown[][]
 
 function makeChain(): Record<string, unknown> {
   const self: Record<string, unknown> = {}
@@ -44,6 +60,10 @@ function makeChain(): Record<string, unknown> {
   for (const m of methods) {
     self[m] = vi.fn(chainFn)
   }
+  self.select = vi.fn((...args: unknown[]) => {
+    selectArgCalls.push(args)
+    return self
+  })
   self.execute = vi.fn(async () => executeQueue.shift() ?? [])
   self.executeTakeFirst = vi.fn(async () => executeTakeFirstQueue.shift())
   self.executeTakeFirstOrThrow = vi.fn(async () => {
@@ -93,6 +113,15 @@ const ACTIVE_CREATOR = {
   local_password_set: true,
 }
 
+function renderSelectArg(value: unknown): string {
+  if (Array.isArray(value)) return value.map(renderSelectArg).join('\n')
+  if (value && typeof value === 'object' && 'toOperationNode' in value) {
+    const node = value as { toOperationNode?: () => unknown }
+    if (typeof node.toOperationNode === 'function') return JSON.stringify(node.toOperationNode())
+  }
+  return JSON.stringify(value)
+}
+
 function tokenRow(
   created: { token: { id: string; name: string; tokenHash: string; tokenPrefix: string; scopes: ApiTokenScope[]; createdAt: string } },
   overrides: Record<string, unknown> = {},
@@ -117,6 +146,7 @@ describe('ApiTokenService', () => {
   beforeEach(() => {
     executeQueue = []
     executeTakeFirstQueue = []
+    selectArgCalls = []
     db = createMockDb()
     svc = new ApiTokenService(db)
   })
@@ -271,7 +301,45 @@ describe('ApiTokenService', () => {
     if (!result.valid) expect(result.reason).toMatch(/invalid/i)
   })
 
-  test('mutation: omitting creator gate would green the four negative creator cases', async () => {
+  test('validateToken creator query reads deleted_at and purged_at via to_jsonb(users)', async () => {
+    const created = await svc.createToken('user1', { name: 'JsonbCreator', scopes: ['records:read'] })
+    selectArgCalls = []
+    executeTakeFirstQueue.push(tokenRow(created), { ...ACTIVE_CREATOR, deleted_at: null, purged_at: null })
+    const result = await svc.validateToken(created.plainTextToken)
+    expect(result.valid).toBe(true)
+    const rendered = selectArgCalls.map((args) => args.map(renderSelectArg).join('\n')).join('\n')
+    expect(rendered).toContain('to_jsonb(users)')
+    expect(rendered).toContain("->> 'deleted_at'")
+    expect(rendered).toContain("->> 'purged_at'")
+  })
+
+  test('validateToken fails when creator is recycled despite is_active', async () => {
+    const created = await svc.createToken('user1', { name: 'RecycledCreator', scopes: ['records:read'] })
+    executeTakeFirstQueue.push(tokenRow(created), {
+      ...ACTIVE_CREATOR,
+      is_active: true,
+      deleted_at: '2026-10-01T00:00:00.000Z',
+      purged_at: null,
+    })
+    const result = await svc.validateToken(created.plainTextToken)
+    expect(result.valid).toBe(false)
+    if (!result.valid) expect(result.reason).toMatch(/recycle bin/i)
+  })
+
+  test('validateToken fails when creator is purged despite is_active', async () => {
+    const created = await svc.createToken('user1', { name: 'PurgedCreator', scopes: ['records:read'] })
+    executeTakeFirstQueue.push(tokenRow(created), {
+      ...ACTIVE_CREATOR,
+      is_active: true,
+      deleted_at: null,
+      purged_at: '2026-10-02T00:00:00.000Z',
+    })
+    const result = await svc.validateToken(created.plainTextToken)
+    expect(result.valid).toBe(false)
+    if (!result.valid) expect(result.reason).toMatch(/recycle bin/i)
+  })
+
+  test('mutation: omitting creator gate would green the negative creator cases', async () => {
     // Load-bearing: each negative creator state must fail with the current gate.
     // If the creator query/gate is deleted, these would incorrectly become valid.
     const cases = [
@@ -279,6 +347,8 @@ describe('ApiTokenService', () => {
       { label: 'pending', creator: { ...ACTIVE_CREATOR, activation_status: 'pending_activation' }, reason: /pending activation/i },
       { label: 'inactive', creator: { ...ACTIVE_CREATOR, is_active: false }, reason: /inactive|disabled/i },
       { label: 'invalid', creator: { ...ACTIVE_CREATOR, activation_status: 'corrupted' }, reason: /invalid/i },
+      { label: 'recycled', creator: { ...ACTIVE_CREATOR, is_active: true, deleted_at: '2026-10-01T00:00:00.000Z', purged_at: null }, reason: /recycle bin/i },
+      { label: 'purged', creator: { ...ACTIVE_CREATOR, is_active: true, deleted_at: null, purged_at: '2026-10-02T00:00:00.000Z' }, reason: /recycle bin/i },
     ] as const
     for (const c of cases) {
       const created = await svc.createToken('user1', { name: c.label, scopes: ['records:read'] })
@@ -451,7 +521,7 @@ describe('ApiTokenService', () => {
       name: 'Limited',
       scopes: ['records:read'],
     })
-    expect(ApiTokenService.hasScope(token, 'webhooks:manage')).toBe(false)
+    expect(ApiTokenService.hasScope(token, 'comments:write')).toBe(false)
   })
 
   // ── Rotation ──────────────────────────────────────────────────────
@@ -572,31 +642,57 @@ describe('WebhookService', () => {
 
   test('createWebhook validates URL', async () => {
     await expect(
-      svc.createWebhook('u1', { name: 'Bad', url: 'not-a-url', events: ['record.created'] }),
+      svc.createWebhook('u1', { sheetId: 'sheet1', name: 'Bad', url: 'not-a-url', events: ['record.created'] }),
     ).rejects.toThrow('not a valid URL')
+  })
+
+  test('createWebhook requires the sheet the webhook is bound to', async () => {
+    await expect(
+      svc.createWebhook('u1', { name: 'No sheet', url: 'https://example.com/hook', events: ['record.created'] } as never),
+    ).rejects.toThrow('sheetId is required')
+    await expect(
+      svc.createWebhook('u1', { sheetId: '   ', name: 'Blank sheet', url: 'https://example.com/hook', events: ['record.created'] }),
+    ).rejects.toThrow('sheetId is required')
+  })
+
+  test('createWebhook stores the bound sheet', async () => {
+    const wh = await svc.createWebhook('u1', { sheetId: 'sheet1', name: 'Bound', url: 'https://example.com/hook', events: ['record.created'] })
+    expect(wh.sheetId).toBe('sheet1')
+  })
+
+  test('deliverEvent has no candidates for an event without a string sheetId', async () => {
+    executeQueue.push([{
+      id: 'wh-x', name: 'x', url: 'https://example.com/x', secret: null,
+      events: JSON.stringify(['record.created']), active: true, created_by: 'u1', sheet_id: 'sheet1',
+      created_at: new Date().toISOString(), failure_count: 0, max_retries: 3,
+    }])
+    expect(await svc.deliverEvent('record.created', { recordId: 'r1' })).toEqual([])
+    expect(await svc.deliverEvent('record.created', { sheetId: 42, recordId: 'r1' })).toEqual([])
+    await new Promise((r) => setTimeout(r, 20))
+    expect(okFetch).not.toHaveBeenCalled()
   })
 
   test('createWebhook rejects empty name', async () => {
     await expect(
-      svc.createWebhook('u1', { name: '', url: 'https://example.com/hook', events: ['record.created'] }),
+      svc.createWebhook('u1', { sheetId: 'sheet1', name: '', url: 'https://example.com/hook', events: ['record.created'] }),
     ).rejects.toThrow('name is required')
   })
 
   test('createWebhook rejects empty events', async () => {
     await expect(
-      svc.createWebhook('u1', { name: 'No events', url: 'https://example.com/hook', events: [] }),
+      svc.createWebhook('u1', { sheetId: 'sheet1', name: 'No events', url: 'https://example.com/hook', events: [] }),
     ).rejects.toThrow('At least one event')
   })
 
   test('createWebhook rejects unknown event type', async () => {
     await expect(
-      svc.createWebhook('u1', { name: 'Bad event', url: 'https://example.com/hook', events: ['unknown.event' as WebhookEventType] }),
+      svc.createWebhook('u1', { sheetId: 'sheet1', name: 'Bad event', url: 'https://example.com/hook', events: ['unknown.event' as WebhookEventType] }),
     ).rejects.toThrow('Unknown event type')
   })
 
   test('createWebhook stores webhook and listWebhooks returns it', async () => {
     const wh = await svc.createWebhook('u1', {
-      name: 'My Hook', url: 'https://example.com/hook', events: ['record.created'],
+      sheetId: 'sheet1', name: 'My Hook', url: 'https://example.com/hook', events: ['record.created'],
     })
     expect(wh.id).toBeDefined()
     expect(wh.active).toBe(true)
@@ -604,7 +700,7 @@ describe('WebhookService', () => {
 
     executeQueue.push([{
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 0, max_retries: 3,
     }])
     const list = await svc.listWebhooks('u1')
@@ -614,7 +710,7 @@ describe('WebhookService', () => {
 
   test('deleteWebhook removes webhook', async () => {
     const wh = await svc.createWebhook('u1', {
-      name: 'Del', url: 'https://example.com/hook', events: ['record.created'],
+      sheetId: 'sheet1', name: 'Del', url: 'https://example.com/hook', events: ['record.created'],
     })
     executeTakeFirstQueue.push({ id: wh.id, created_by: 'u1' })
     await svc.deleteWebhook(wh.id, 'u1')
@@ -624,7 +720,7 @@ describe('WebhookService', () => {
 
   test('deleteWebhook throws for wrong user', async () => {
     const wh = await svc.createWebhook('u1', {
-      name: 'Owned', url: 'https://example.com/hook', events: ['record.created'],
+      sheetId: 'sheet1', name: 'Owned', url: 'https://example.com/hook', events: ['record.created'],
     })
     executeTakeFirstQueue.push({ id: wh.id, created_by: 'u1' })
     await expect(svc.deleteWebhook(wh.id, 'u2')).rejects.toThrow('Not authorized')
@@ -632,17 +728,17 @@ describe('WebhookService', () => {
 
   test('updateWebhook modifies fields', async () => {
     const wh = await svc.createWebhook('u1', {
-      name: 'Update me', url: 'https://example.com/hook', events: ['record.created'],
+      sheetId: 'sheet1', name: 'Update me', url: 'https://example.com/hook', events: ['record.created'],
     })
     executeTakeFirstQueue.push({
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 0, max_retries: 3,
     })
     const updatedAt = new Date().toISOString()
     executeTakeFirstQueue.push({
       id: wh.id, name: 'Updated', url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: false, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: false, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, updated_at: updatedAt, failure_count: 0, max_retries: 3,
     })
     const updated = await svc.updateWebhook(wh.id, 'u1', { name: 'Updated', active: false })
@@ -662,21 +758,21 @@ describe('WebhookService', () => {
 
   test('delivery includes signature header when secret is set', async () => {
     const wh = await svc.createWebhook('u1', {
-      name: 'Signed', url: 'https://example.com/hook', secret: 'my-secret', events: ['record.created'],
+      sheetId: 'sheet1', name: 'Signed', url: 'https://example.com/hook', secret: 'my-secret', events: ['record.created'],
     })
 
     executeQueue.push([{
       id: wh.id, name: wh.name, url: wh.url, secret: 'my-secret',
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 0, max_retries: 3,
     }])
     executeTakeFirstQueue.push({
       id: wh.id, name: wh.name, url: wh.url, secret: 'my-secret',
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 0, max_retries: 3,
     })
 
-    await svc.deliverEvent('record.created', { test: true })
+    await svc.deliverEvent('record.created', { sheetId: 'sheet1', test: true })
     await new Promise((r) => setTimeout(r, 50))
 
     expect(okFetch).toHaveBeenCalledTimes(1)
@@ -690,21 +786,21 @@ describe('WebhookService', () => {
 
   test('delivery does not include signature when no secret', async () => {
     const wh = await svc.createWebhook('u1', {
-      name: 'Unsigned', url: 'https://example.com/hook', events: ['record.created'],
+      sheetId: 'sheet1', name: 'Unsigned', url: 'https://example.com/hook', events: ['record.created'],
     })
 
     executeQueue.push([{
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 0, max_retries: 3,
     }])
     executeTakeFirstQueue.push({
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 0, max_retries: 3,
     })
 
-    await svc.deliverEvent('record.created', { test: true })
+    await svc.deliverEvent('record.created', { sheetId: 'sheet1', test: true })
     await new Promise((r) => setTimeout(r, 50))
 
     const callArgs = okFetch.mock.calls[0]
@@ -716,31 +812,31 @@ describe('WebhookService', () => {
 
   test('deliverEvent only triggers webhooks subscribed to the event', async () => {
     const whA = await svc.createWebhook('u1', {
-      name: 'Records only', url: 'https://example.com/a', events: ['record.created'],
+      sheetId: 'sheet1', name: 'Records only', url: 'https://example.com/a', events: ['record.created'],
     })
     await svc.createWebhook('u1', {
-      name: 'Comments only', url: 'https://example.com/b', events: ['comment.created'],
+      sheetId: 'sheet1', name: 'Comments only', url: 'https://example.com/b', events: ['comment.created'],
     })
 
     executeQueue.push([
       {
         id: whA.id, name: 'Records only', url: 'https://example.com/a', secret: null,
-        events: JSON.stringify(['record.created']), active: true, created_by: 'u1',
+        events: JSON.stringify(['record.created']), active: true, created_by: 'u1', sheet_id: 'sheet1',
         created_at: whA.createdAt, failure_count: 0, max_retries: 3,
       },
       {
         id: 'other-id', name: 'Comments only', url: 'https://example.com/b', secret: null,
-        events: JSON.stringify(['comment.created']), active: true, created_by: 'u1',
+        events: JSON.stringify(['comment.created']), active: true, created_by: 'u1', sheet_id: 'sheet1',
         created_at: whA.createdAt, failure_count: 0, max_retries: 3,
       },
     ])
     executeTakeFirstQueue.push({
       id: whA.id, name: 'Records only', url: 'https://example.com/a', secret: null,
-      events: JSON.stringify(['record.created']), active: true, created_by: 'u1',
+      events: JSON.stringify(['record.created']), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: whA.createdAt, failure_count: 0, max_retries: 3,
     })
 
-    await svc.deliverEvent('record.created', {})
+    await svc.deliverEvent('record.created', { sheetId: 'sheet1' })
     await new Promise((r) => setTimeout(r, 50))
 
     expect(okFetch).toHaveBeenCalledTimes(1)
@@ -749,13 +845,13 @@ describe('WebhookService', () => {
 
   test('inactive webhook is not triggered', async () => {
     await svc.createWebhook('u1', {
-      name: 'Inactive', url: 'https://example.com/hook', events: ['record.created'],
+      sheetId: 'sheet1', name: 'Inactive', url: 'https://example.com/hook', events: ['record.created'],
     })
 
     // Mock returns empty for active webhooks (simulating that the webhook is inactive)
     executeQueue.push([])
 
-    await svc.deliverEvent('record.created', {})
+    await svc.deliverEvent('record.created', { sheetId: 'sheet1' })
     await new Promise((r) => setTimeout(r, 50))
 
     expect(okFetch).not.toHaveBeenCalled()
@@ -770,26 +866,26 @@ describe('WebhookService', () => {
     const failSvc = new WebhookService(db, failFetch as unknown as typeof fetch, publicLookup)
 
     const wh = await failSvc.createWebhook('u1', {
-      name: 'Fail', url: 'https://example.com/hook', events: ['record.created'],
+      sheetId: 'sheet1', name: 'Fail', url: 'https://example.com/hook', events: ['record.created'],
     })
 
     executeQueue.push([{
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 0, max_retries: 3,
     }])
     executeTakeFirstQueue.push({
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 0, max_retries: 3,
     })
 
-    await failSvc.deliverEvent('record.created', {})
+    await failSvc.deliverEvent('record.created', { sheetId: 'sheet1' })
     await new Promise((r) => setTimeout(r, 50))
 
     executeTakeFirstQueue.push({
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 1, max_retries: 3,
     })
     const stored = await failSvc.getWebhookById(wh.id)
@@ -803,27 +899,27 @@ describe('WebhookService', () => {
     const failSvc = new WebhookService(db, failFetch as unknown as typeof fetch, publicLookup)
 
     const wh = await failSvc.createWebhook('u1', {
-      name: 'Will disable', url: 'https://example.com/hook', events: ['record.created'],
+      sheetId: 'sheet1', name: 'Will disable', url: 'https://example.com/hook', events: ['record.created'],
     })
 
     for (let i = 0; i < 10; i++) {
       executeQueue.push([{
         id: wh.id, name: wh.name, url: wh.url, secret: null,
-        events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+        events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
         created_at: wh.createdAt, failure_count: i, max_retries: 3,
       }])
       executeTakeFirstQueue.push({
         id: wh.id, name: wh.name, url: wh.url, secret: null,
-        events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+        events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
         created_at: wh.createdAt, failure_count: i, max_retries: 3,
       })
-      await failSvc.deliverEvent('record.created', { attempt: i })
+      await failSvc.deliverEvent('record.created', { sheetId: 'sheet1', attempt: i })
       await new Promise((r) => setTimeout(r, 20))
     }
 
     executeTakeFirstQueue.push({
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: false, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: false, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 10, max_retries: 3,
     })
     const stored = await failSvc.getWebhookById(wh.id)
@@ -843,26 +939,26 @@ describe('WebhookService', () => {
     const mixSvc = new WebhookService(db, mixFetch as unknown as typeof fetch, publicLookup)
 
     const wh = await mixSvc.createWebhook('u1', {
-      name: 'Mix', url: 'https://example.com/hook', events: ['record.created'],
+      sheetId: 'sheet1', name: 'Mix', url: 'https://example.com/hook', events: ['record.created'],
     })
 
     // First delivery fails
     executeQueue.push([{
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 0, max_retries: 3,
     }])
     executeTakeFirstQueue.push({
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 0, max_retries: 3,
     })
-    await mixSvc.deliverEvent('record.created', {})
+    await mixSvc.deliverEvent('record.created', { sheetId: 'sheet1' })
     await new Promise((r) => setTimeout(r, 50))
 
     executeTakeFirstQueue.push({
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 1, max_retries: 3,
     })
     expect((await mixSvc.getWebhookById(wh.id))?.failureCount).toBeGreaterThan(0)
@@ -870,20 +966,20 @@ describe('WebhookService', () => {
     // Second delivery succeeds
     executeQueue.push([{
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 1, max_retries: 3,
     }])
     executeTakeFirstQueue.push({
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 1, max_retries: 3,
     })
-    await mixSvc.deliverEvent('record.created', {})
+    await mixSvc.deliverEvent('record.created', { sheetId: 'sheet1' })
     await new Promise((r) => setTimeout(r, 50))
 
     executeTakeFirstQueue.push({
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 0, max_retries: 3,
     })
     expect((await mixSvc.getWebhookById(wh.id))?.failureCount).toBe(0)
@@ -893,7 +989,7 @@ describe('WebhookService', () => {
 
   test('listDeliveries returns deliveries for the given webhook', async () => {
     const wh = await svc.createWebhook('u1', {
-      name: 'Deliveries', url: 'https://example.com/hook', events: ['record.created'],
+      sheetId: 'sheet1', name: 'Deliveries', url: 'https://example.com/hook', events: ['record.created'],
     })
 
     executeQueue.push([
@@ -914,21 +1010,21 @@ describe('WebhookService', () => {
 
     const retrySvc = new WebhookService(db, failOnceFetch as unknown as typeof fetch, publicLookup)
     const wh = await retrySvc.createWebhook('u1', {
-      name: 'Retry', url: 'https://example.com/hook', events: ['record.created'],
+      sheetId: 'sheet1', name: 'Retry', url: 'https://example.com/hook', events: ['record.created'],
     })
 
     executeQueue.push([{
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 0, max_retries: 3,
     }])
     executeTakeFirstQueue.push({
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 0, max_retries: 3,
     })
 
-    const deliveries = await retrySvc.deliverEvent('record.created', { x: 1 })
+    const deliveries = await retrySvc.deliverEvent('record.created', { sheetId: 'sheet1', x: 1 })
     await new Promise((r) => setTimeout(r, 100))
 
     expect(deliveries[0].status).toBe('pending')
@@ -941,12 +1037,12 @@ describe('WebhookService', () => {
     }])
     executeTakeFirstQueue.push({
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 1, max_retries: 3,
     })
     executeTakeFirstQueue.push({
       id: wh.id, name: wh.name, url: wh.url, secret: null,
-      events: JSON.stringify(wh.events), active: true, created_by: 'u1',
+      events: JSON.stringify(wh.events), active: true, created_by: 'u1', sheet_id: 'sheet1',
       created_at: wh.createdAt, failure_count: 1, max_retries: 3,
     })
 

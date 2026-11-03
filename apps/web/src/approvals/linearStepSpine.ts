@@ -1,5 +1,5 @@
 import { assigneeSourceSummary } from './assigneeSource'
-import { parseIdsText, sourceFromStep, type ApprovalStepDraft } from './templateAuthoring'
+import { parseIdsText, sourceFromStep, stepOmitsAssigneeSources, type ApprovalStepDraft } from './templateAuthoring'
 
 /**
  * G-B2-06 — read-only "flow spine" for a LINEAR template's steps: 发起人 → 步骤1 → 步骤2 → … one
@@ -90,12 +90,17 @@ export function buildLinearStepSpine(steps: ApprovalStepDraft[]): LinearStepSpin
   }
   const stepChips = steps.map((step, index) => {
     const position = index + 1
-    const resolvable = isStepSourceResolvable(step)
+    // Lock-4 §1 F4-A: a step whose sources are omitted saves NO source — its hidden scratch source
+    // (`requester` by default, or whatever the author configured before choosing 自动通过) must
+    // neither be described nor flagged unresolvable. A step that still carries a source keeps the
+    // source's own completeness check (that source is saved and validated).
+    const omitsSource = stepOmitsAssigneeSources(step)
+    const resolvable = omitsSource || isStepSourceResolvable(step)
     return {
       key: step.localId,
       role: 'step' as const,
       label: step.name.trim() || `审批人 ${position}`,
-      sourceSummary: stepSourceSummary(step, resolvable, steps),
+      sourceSummary: step.approvalType === 'auto_approve' ? '自动通过' : stepSourceSummary(step, resolvable, steps),
       resolvable,
       stepIndex: position,
     }
