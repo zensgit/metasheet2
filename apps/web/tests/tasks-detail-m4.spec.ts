@@ -192,14 +192,15 @@ async function fakeFetch(path: string, init?: FetchInit): Promise<Response> {
   const [pathname, query = ''] = path.split('?')
   let match: RegExpExecArray | null
   if (method === 'GET' && pathname === '/api/tasks') return jsonResponse(200, { items: [], total: 0 })
+  // Package 1b: the people picker's search (`h_.peopleSearchReply`; the "type a name" marker by default).
+  // Answered before the task-id pattern below, which `/api/tasks/people` would otherwise match.
+  if (method === 'GET' && pathname === '/api/tasks/people') return h_.peopleSearchReply(query)
   if ((match = /^\/api\/tasks\/([^/]+)$/.exec(pathname))) {
     const id = decodeURIComponent(match[1])
     if (method === 'GET') return h_.detailReply(id)
     if (method === 'PATCH') return h_.patchReply(id, init?.body)
   }
   if (method === 'GET' && /^\/api\/tasks\/[^/]+\/comments$/.test(pathname)) return jsonResponse(200, { items: [], total: 0 })
-  // Package 1b: the people picker's search (`h_.peopleSearchReply`; the "type a name" marker by default).
-  if (method === 'GET' && pathname === '/api/tasks/people') return h_.peopleSearchReply(query)
   // Package 1b: the names on the task (`h_.peopleReply`; none by default).
   if (method === 'GET' && (match = /^\/api\/tasks\/([^/]+)\/people$/.exec(pathname))) return h_.peopleReply(decodeURIComponent(match[1]))
   if (method === 'GET' && pathname === '/api/task-lists') return h_.myListsReply(query)
