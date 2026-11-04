@@ -4,12 +4,36 @@
     <p>先保存服务端草稿，再核对所选行、明确授权，最后单独提交一次。当前只支持手动 CREATE；有效期最长 15 分钟。</p>
     <p data-testid="sp-yida-owner-default-off">发送默认关闭；只有服务端明确启用且核验当前 Owner 与集成管理员权限后才接受操作。本页不配置凭据或登记目标。</p>
     <p v-if="!draftInput" data-testid="sp-yida-owner-input-required">请先完成有效的协议 v2 创建预演。</p>
+    <section v-if="multiTarget" data-testid="sp-yida-owner-multi">
+      <p>服务端已开启多目标：先选择要写入的宜搭目标（应用 + 表单），再选择数据来源。每个草稿、授权与发送记录只绑定这一个目标。</p>
+      <button type="button" data-testid="sp-yida-owner-targets-load" :disabled="busy || !!draft || locked" @click="loadTargets">读取目标列表</button>
+      <label>宜搭目标
+        <select v-model="selectedTargetRef" data-testid="sp-yida-owner-target-select" :disabled="busy || !!draft || locked || !targets.length">
+          <option value="">请选择</option>
+          <option v-for="target in targets" :key="target.targetRef" :value="target.targetRef">目标 {{ target.slot }} · {{ target.appType }} / {{ target.formUuid }}</option>
+        </select>
+      </label>
+      <fieldset data-testid="sp-yida-owner-source" :disabled="busy || !!draft || locked">
+        <legend>数据来源</legend>
+        <label><input v-model="sourceMode" type="radio" value="paste" data-testid="sp-yida-owner-source-paste">粘贴</label>
+        <label><input v-model="sourceMode" type="radio" value="sheet" data-testid="sp-yida-owner-source-sheet">从表格</label>
+      </fieldset>
+      <div v-if="sourceMode === 'sheet'" data-testid="sp-yida-owner-sheet">
+        <p>服务端按你本人在多维表中的读取与导出权限读取（最多扫描 2000 条、生成 100 行），不会提升权限。</p>
+        <label>表格 ID <input v-model.trim="sheetId" data-testid="sp-yida-owner-sheet-id"></label>
+        <label>视图 ID（可选，按视图筛选） <input v-model.trim="viewId" data-testid="sp-yida-owner-view-id"></label>
+        <label v-for="source in mappingSources" :key="source">{{ source }} ← 列 ID
+          <input v-model.trim="columnMap[source]" :data-testid="'sp-yida-owner-column-' + source">
+        </label>
+      </div>
+    </section>
     <button type="button" data-testid="sp-yida-owner-save" :disabled="!draftInput || busy || !!draft || locked || disabled" @click="saveDraft">保存服务端草稿（不发送）</button>
     <p v-if="errorCode" role="alert" data-testid="sp-yida-owner-error">{{ errorCode }}</p>
     <p v-if="disabled" data-testid="sp-yida-owner-disabled">服务端发送开关关闭；未取得新的发送授权。已有授权仅可手动查看或撤销。</p>
 
     <section v-if="draft" data-testid="sp-yida-owner-draft">
       <p>草稿：{{ draft.operationId }}；{{ draft.rowCount }} 个服务端行成员{{ draft.reused ? '（复用既有草稿）' : '' }}。目标仍未核验，未签发发送授权。</p>
+      <p v-if="draftTargetRef" data-testid="sp-yida-owner-draft-target">草稿绑定目标：{{ draftTargetRef }}</p>
       <label>选择服务端行
         <select v-model="selectedRowKey" data-testid="sp-yida-owner-row" :disabled="busy || locked || disabled">
           <option value="">请选择</option>
@@ -56,7 +80,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue'
 import { randomUuid } from '../../../utils/uuid'
 import {
   createYidaOwnerClient,
@@ -68,11 +92,15 @@ import {
   type YidaOwnerDraftInput,
   type YidaOwnerObservation,
   type YidaOwnerPreview,
+  type YidaOwnerSheetSource,
   type YidaOwnerSubmission,
   type YidaOwnerSubmissionInput,
+  type YidaOwnerTarget,
 } from '../../../services/integration/yidaOwner'
 
-const props = defineProps<{ draftInput: YidaOwnerDraftInput | null }>()
+// multiTarget: the server multi-target switch as an owner-authorized reply reported it (display only;
+// the server re-checks its exact switch on every call). Absent/false = the original single-target panel.
+const props = defineProps<{ draftInput: YidaOwnerDraftInput | null; multiTarget?: boolean }>()
 const emit = defineEmits<{ 'locked-change': [locked: boolean] }>()
 const draft = shallowRef<YidaOwnerDraft | null>(null)
 const selectedRowKey = ref('')
@@ -88,6 +116,18 @@ const expiredLocally = ref(false)
 const errorCode = ref('')
 let client: YidaOwnerClient | null = null
 let generation = 0
+// Y2 state: only read while props.multiTarget is true.
+const targets = shallowRef<readonly YidaOwnerTarget[]>([])
+const selectedTargetRef = ref('')
+const draftTargetRef = ref('')
+const sourceMode = ref<'paste' | 'sheet'>('paste')
+const sheetId = ref('')
+const viewId = ref('')
+const columnMap = reactive<Record<string, string>>({})
+const mappingSources = computed(() => {
+  const fieldMap = (props.draftInput?.config as { fieldMap?: unknown } | undefined)?.fieldMap
+  return Array.isArray(fieldMap) ? fieldMap.map(entry => (entry as { source?: unknown }).source).filter((source): source is string => typeof source === 'string') : []
+})
 
 const locked = computed(() => !!approvalCommand.value || !!grant.value || !!submissionCommand.value)
 const maySubmit = computed(() => !!grant.value && grant.value.status === 'approved' && !grant.value.revoked
@@ -112,6 +152,7 @@ function reset(): void {
   disabled.value = false
   expiredLocally.value = false
   busy.value = false
+  draftTargetRef.value = ''
 }
 // Synchronous invalidation closes input A -> B -> A before a late response can
 // reappear; deep edits count, even when the object reference stays unchanged.
@@ -137,6 +178,19 @@ async function perform<T>(action: (current: YidaOwnerClient) => Promise<T>, appl
     if (errorCode.value === 'YIDA_OWNER_RUNTIME_DISABLED') disabled.value = true
   } finally { if (started === generation) busy.value = false }
 }
+function loadTargets(): void {
+  if (!props.multiTarget || draft.value || locked.value) return
+  void perform(current => current.targets(), result => {
+    targets.value = result
+    if (!result.some(target => target.targetRef === selectedTargetRef.value)) selectedTargetRef.value = ''
+  })
+}
+function sheetSource(): YidaOwnerSheetSource | null {
+  const columns = mappingSources.value.filter(source => (columnMap[source] ?? '').length > 0)
+    .map(source => ({ fieldId: columnMap[source], source }))
+  if (!sheetId.value || columns.length === 0) return null
+  return { kind: 'sheet', sheetId: sheetId.value, ...(viewId.value ? { viewId: viewId.value } : {}), columns }
+}
 function saveDraft(): void {
   if (!props.draftInput || draft.value || locked.value || disabled.value) return
   // A detached snapshot is captured at the explicit save. No local row payload
@@ -144,12 +198,24 @@ function saveDraft(): void {
   let snapshot: YidaOwnerDraftInput
   try { snapshot = JSON.parse(JSON.stringify(props.draftInput)) as YidaOwnerDraftInput }
   catch { errorCode.value = 'YIDA_OWNER_INPUT_INVALID'; return }
-  void perform(current => current.prepareDraft(snapshot), result => { draft.value = result })
+  if (!props.multiTarget) {
+    void perform(current => current.prepareDraft(snapshot), result => { draft.value = result })
+    return
+  }
+  // Y2: a named target; the pasted rows of the local preview, or the server reads the sheet/view.
+  const targetRef = selectedTargetRef.value
+  if (!targetRef) { errorCode.value = 'YIDA_OWNER_TARGET_REQUIRED'; return }
+  const source = sourceMode.value === 'sheet' ? sheetSource() : null
+  if (sourceMode.value === 'sheet' && !source) { errorCode.value = 'YIDA_OWNER_SHEET_SOURCE_REQUIRED'; return }
+  const input = source ? { targetRef, config: snapshot.config, allocation: snapshot.allocation, source }
+    : { targetRef, config: snapshot.config, allocation: snapshot.allocation, rowsText: snapshot.rowsText }
+  void perform(current => current.prepareTargetedDraft(input), result => { draft.value = result; draftTargetRef.value = targetRef })
 }
 function fetchPreview(): void {
   if (!draft.value || !selectedRowKey.value || locked.value || disabled.value
     || !draft.value.rows.some(row => row.rowKey === selectedRowKey.value)) return
-  const selection = { operationId: draft.value.operationId, rowKey: selectedRowKey.value }
+  const selection = { operationId: draft.value.operationId, rowKey: selectedRowKey.value,
+    ...(draftTargetRef.value ? { targetRef: draftTargetRef.value } : {}) }
   preview.value = null
   acknowledged.value = false
   void perform(current => current.preview(selection), result => { preview.value = result })
@@ -159,7 +225,8 @@ function approve(): void {
   if (!approvalCommand.value) {
     try {
       approvalCommand.value = Object.freeze({ operationId: preview.value.operationId, rowKey: preview.value.rowKey,
-        confirmationId: randomUuid(), acknowledgeOnce: true, ttlMs: 900000 })
+        confirmationId: randomUuid(), acknowledgeOnce: true, ttlMs: 900000,
+        ...(draftTargetRef.value ? { targetRef: draftTargetRef.value } : {}) })
     } catch { errorCode.value = 'YIDA_OWNER_UNAVAILABLE'; return }
   }
   const command = approvalCommand.value

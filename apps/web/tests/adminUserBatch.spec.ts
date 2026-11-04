@@ -32,6 +32,20 @@ describe('adminUserBatch', () => {
     ])
   })
 
+  it('neutralizes formula-leading cells in the update export', () => {
+    const csv = buildUpdateExportCsv([{
+      id: 'user-1',
+      email: '=cmd@example.com',
+      name: '=HYPERLINK("http://evil.example","x")',
+      role: 'user',
+      department: '+1+1',
+      is_active: true,
+    }])
+    expect(csv).toContain("'=cmd@example.com")
+    expect(csv).toContain("'+1+1")
+    expect(csv).not.toMatch(/(^|\n)user-1,=cmd@/)
+  })
+
   it('builds an update export and previews a department diff', () => {
     const csv = buildUpdateExportCsv([{
       id: 'user-lin',

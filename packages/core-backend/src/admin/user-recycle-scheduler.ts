@@ -1,9 +1,12 @@
 /**
  * Automatic purge of recycle-bin users whose purge_after has passed.
  * Starts only when USER_RECYCLE_SWEEPER_ENABLED is the exact string true.
- * USER_RECYCLE_SWEEPER_DISABLED=1 and the test-runtime helper stay kill switches.
- * Retention window: USER_RECYCLE_RETENTION_DAYS (default 30), applied when
- * the account is moved into the bin.
+ * Default is OFF. Turning this on anonymizes identity with no leader election,
+ * so the product copy must not promise a 30-day automatic purge while the flag
+ * is unset. USER_RECYCLE_SWEEPER_DISABLED=1 and the test-runtime helper stay
+ * kill switches. Retention window: USER_RECYCLE_RETENTION_DAYS (default 30),
+ * applied when the account is moved into the bin. That date is the earliest
+ * time a manual or enabled automatic purge may run.
  */
 import { Logger } from '../core/logger'
 import {
