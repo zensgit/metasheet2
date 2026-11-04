@@ -484,14 +484,19 @@ describe('business trip real request approval and destination arrangement',() =>
     try{expect((await decide(id,'approve',seatToken)).status).toBe(200)}finally{setBusinessTripInstantForTests(null)}
     const originalRule=(await f.pool.query('SELECT * FROM attendance_rules WHERE org_id=$1 AND is_default=true',[orgId])).rows
     const originalArrangement=await arrangements(id)
-    const rejected=await update('02:30')
-    expect(rejected.status,rejected.body.error?.code).toBe(422)
-    expect(rejected.body.error).toEqual({code:'ATTENDANCE_TIMEZONE_WALL_INVALID'})
-    expect((await f.pool.query('SELECT * FROM attendance_rules WHERE org_id=$1 AND is_default=true',[orgId])).rows).toEqual(originalRule)
-    expect(await arrangements(id)).toEqual(originalArrangement)
-    const accepted=await update('08:30')
-    expect(accepted.status,accepted.body.error?.code).toBe(200)
-    expect(await arrangements(id)).toEqual(originalArrangement)
+    // Pin the trusted server clock before the trip so the rule writer still
+    // scans this approved trip whatever the run day; JWT/network clocks stay real.
+    punchClock.setOnlinePunchInstantForTests('2027-02-20T00:00:00Z')
+    try{
+      const rejected=await update('02:30')
+      expect(rejected.status,rejected.body.error?.code).toBe(422)
+      expect(rejected.body.error).toEqual({code:'ATTENDANCE_TIMEZONE_WALL_INVALID'})
+      expect((await f.pool.query('SELECT * FROM attendance_rules WHERE org_id=$1 AND is_default=true',[orgId])).rows).toEqual(originalRule)
+      expect(await arrangements(id)).toEqual(originalArrangement)
+      const accepted=await update('08:30')
+      expect(accepted.status,accepted.body.error?.code).toBe(200)
+      expect(await arrangements(id)).toEqual(originalArrangement)
+    }finally{punchClock.setOnlinePunchInstantForTests(null)}
     expect(await f.counts(owner.userId)).toMatchObject({events:0,records:0})
   },60000)
   it('an unused interior base-zone gap does not invalidate unique destination shift instants',async()=>{
