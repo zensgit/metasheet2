@@ -607,8 +607,8 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
           [id, `name-${id}`, JSON.stringify({ connection: CONNECTION, credentials: { username: SECRET.username, ...credentials } }), OWNER_ID, active, deleted ? '2026-01-02T00:00:00Z' : null],
         )
       }
-      await seedDataSource('probe-current', { password: cur('ds-password'), apiKey: cur('ds-apikey'), token: cur('ds-token') })
-      await seedDataSource('probe-previous', { password: prev('ds-password'), apiKey: prev('ds-apikey'), token: prev('ds-token') })
+      await seedDataSource('probe-current', { password: cur('ds-password'), apiKey: cur('ds-apikey'), token: cur('ds-token'), bearerToken: cur('ds-bearer') })
+      await seedDataSource('probe-previous', { password: prev('ds-password'), apiKey: prev('ds-apikey'), token: prev('ds-token'), bearerToken: prev('ds-bearer') })
       await seedDataSource('probe-plaintext', { password: SECRET.secondPassword })
       // Rows the data-source loader never reads are not counted either.
       await seedDataSource('probe-inactive', { password: prev('ds-inactive') }, false)
@@ -712,6 +712,7 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
         ['data_sources.config.credentials.password', 'ok', 3, 2, 1, 1, null],
         ['data_sources.config.credentials.apiKey', 'ok', 2, 2, 1, 0, null],
         ['data_sources.config.credentials.token', 'ok', 2, 2, 1, 0, null],
+        ['data_sources.config.credentials.bearerToken', 'ok', 2, 2, 1, 0, null],
         ['directory_integrations.config.appSecret', 'ok', 2, 2, 1, 0, null],
         ['directory_integrations.config.workNotificationAgentId|agentId', 'ok', 2, 2, 1, 0, null],
         ['directory_integrations.config.approvalCardLinkSecret', 'ok', 2, 2, 1, 0, null],

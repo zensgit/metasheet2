@@ -103,10 +103,13 @@ function captureInput(value: unknown): YidaConnectionTestInput {
   const row = record(value, ['commandId', 'mode', 'material'])
   if (row.mode !== 'candidate') fail('INPUT')
   const material = record(row.material, ['appKey', 'appSecret'])
-  // Exact pasted bytes, never trimmed: the same rule as the initialization material and the exchange.
+  // Never trimmed, and refused (INPUT) with surrounding whitespace or a control (Cc), invisible format (Cf)
+  // or lone surrogate (Cs) character anywhere: the same rule as the initialization material, so a tested
+  // pair can only be one that L4 would seal unchanged.
   for (const key of ['appKey', 'appSecret']) {
     const field = material[key]
-    if (typeof field !== 'string' || !field.trim() || field.length > 4096) fail('INPUT')
+    if (typeof field !== 'string' || !field || field.length > 4096 || field.trim() !== field
+      || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(field)) fail('INPUT')
   }
   const appKey = material.appKey as string, appSecret = material.appSecret as string
   if (Buffer.byteLength(JSON.stringify({ appKey, appSecret }), 'utf8') > 16 * 1024) fail('INPUT')

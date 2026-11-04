@@ -150,7 +150,7 @@ export type MetaRecordLabelKey =
   | 'dispatch.dueDateLabel' | 'dispatch.dueTimeLabel' | 'dispatch.requiredMark' | 'dispatch.accessNote'
   | 'dispatch.titleRequired' | 'dispatch.invalidTitle' | 'dispatch.dueDateRequired' | 'dispatch.zoneUnavailable'
   | 'dispatch.invalidDate' | 'dispatch.assigneeInvalid' | 'dispatch.assigneeLimit'
-  | 'dispatch.errorInactiveMember' | 'dispatch.errorOrgMissing' | 'dispatch.errorForbidden'
+  | 'dispatch.errorInactiveMember' | 'dispatch.errorAssigneeTaskAccess' | 'dispatch.errorOrgMissing' | 'dispatch.errorForbidden'
   | 'dispatch.errorTasksUnavailable' | 'dispatch.errorFailed'
   | 'dispatch.success' | 'dispatch.openTask' | 'dispatch.sourceNoteFailed' | 'dispatch.sourceLinePrefix'
   | 'dispatch.pendingElsewhere' | 'dispatch.inactiveSkipped'
@@ -466,7 +466,7 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'dispatch.dueDateLabel': { en: 'Due date', zh: '截止日期' },
   'dispatch.dueTimeLabel': { en: 'Due time (optional)', zh: '截止时间（可选）' },
   'dispatch.requiredMark': { en: 'required', zh: '必填' },
-  'dispatch.accessNote': { en: 'Assignees are not notified when the task is dispatched, and need task access to see the task.', zh: '派发时不会通知负责人；负责人需要有任务权限才能看到该任务。' },
+  'dispatch.accessNote': { en: 'Assignees are not notified when the task is dispatched. Every assignee needs task access; the task cannot be dispatched to someone without it.', zh: '派发时不会通知负责人；负责人需要已开通任务功能，未开通的负责人无法被派发。' },
   'dispatch.titleRequired': { en: 'Enter a title', zh: '请填写标题' },
   'dispatch.invalidTitle': { en: 'The title contains characters that cannot be saved', zh: '标题包含无法保存的字符' },
   'dispatch.dueDateRequired': { en: 'Choose a due date', zh: '请选择截止日期' },
@@ -475,6 +475,7 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'dispatch.assigneeInvalid': { en: 'The user ID is not valid', zh: '用户 ID 格式不正确' },
   'dispatch.assigneeLimit': { en: 'At most 50 assignees', zh: '负责人最多 50 人' },
   'dispatch.errorInactiveMember': { en: 'At least one assignee is not an active member of the current organization. Check the assignees and try again.', zh: '有负责人不是当前组织的有效成员，请检查负责人后重试。' },
+  'dispatch.errorAssigneeTaskAccess': { en: "At least one assignee can't use tasks yet. Ask an administrator to give them task access.", zh: '有负责人还不能使用任务功能，请管理员先为其开通任务权限。' },
   'dispatch.errorOrgMissing': { en: 'Choose an organization first, then dispatch the task.', zh: '请先选择组织，再派发任务。' },
   'dispatch.errorForbidden': { en: 'You do not have permission to create tasks.', zh: '你没有创建任务的权限。' },
   'dispatch.errorTasksUnavailable': { en: 'Tasks are not enabled.', zh: '任务功能未开启。' },

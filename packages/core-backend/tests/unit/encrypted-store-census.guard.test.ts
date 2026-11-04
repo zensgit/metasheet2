@@ -65,7 +65,7 @@ const SCRIPTS = 'packages/core-backend/scripts'
 
 /** Every sealing site in the scanned roots today: `<file> :: <writer>` -> count + owner. */
 const CENSUS: Readonly<Record<string, CensusEntry>> = {
-  // data_sources.config.credentials.{password,apiKey,token} — DataSourceManager.encryptCredentials
+  // data_sources.config.credentials.{password,apiKey,token,bearerToken} — DataSourceManager.encryptCredentials
   [`${CS}/data-adapters/DataSourceManager.ts :: encryptStoredSecretValue`]: { count: 1, stores: ['data_sources'] },
   // One encrypted short-lived proof file and one durable rollback snapshot. Neither contains a reusable provider token.
   [`${CS}/auth/dingtalk-identity-repair.ts :: encryptStoredSecretValue`]: { count: 2, stores: ['dingtalk_login_repairs'] },

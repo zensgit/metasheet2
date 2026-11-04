@@ -1,0 +1,145 @@
+name: YiDa L4 Preflight
+
+# Hermetic PR-time lane for scripts/ops/integration-yida-l4-preflight.mjs, the read-only, values-free
+# pre-start server check an operator runs from the Windows deploy root before the one-time YiDa local
+# initialization (L4). No existing workflow runs scripts/ops/integration-k3wise-onprem-preflight.test.mjs
+# (its sibling), so this lane is its own file rather than a step in plugin-tests.yml, whose jobs are
+# digest-pinned by scripts/ops/plugin-tests-parallel-contract.test.mjs.
+#
+# The suite also holds the source-text contracts that keep the script's sentinel copies equal to the
+# backend (encryption defaults, JWT fallback/placeholders, probe log wording, switch names, pm2 app
+# name and log path, documented sample values, and the #6691 sample list once it lands), so the paths
+# below include every file those contracts read.
+#
+# Values-free: every fixture is synthetic and built by the test under the runner temp dir; pm2 is a
+# node stub or a fake shim; nothing reaches the network, a database or a real pm2 daemon.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/integration-yida-l4-preflight.yml'
+      - 'scripts/ops/integration-yida-l4-preflight.mjs'
+      - 'scripts/ops/integration-yida-l4-preflight.test.mjs'
+      - 'packages/core-backend/src/security/encrypted-secrets.ts'
+      - 'packages/core-backend/src/security/auth-runtime-config.ts'
+      - 'packages/core-backend/src/security/encrypted-store-probe.ts'
+      - 'packages/core-backend/src/integration/yida-initialization-runtime.ts'
+      - 'packages/core-backend/src/index.ts'
+      - 'ecosystem.config.cjs'
+      - 'docs/deployment/multitable-windows-onprem-easy-start-20260319.md'
+      - 'docs/CONFIG_SECRET_MANAGEMENT_REPORT.md'
+      - 'docs/development/ops-encryption-material-preflight-design-20260914.md'
+      - 'docs/development/ops-encryption-material-preflight-verification-20260914.md'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/integration-yida-l4-preflight.yml'
+      - 'scripts/ops/integration-yida-l4-preflight.mjs'
+      - 'scripts/ops/integration-yida-l4-preflight.test.mjs'
+      - 'packages/core-backend/src/security/encrypted-secrets.ts'
+      - 'packages/core-backend/src/security/auth-runtime-config.ts'
+      - 'packages/core-backend/src/security/encrypted-store-probe.ts'
+      - 'packages/core-backend/src/integration/yida-initialization-runtime.ts'
+      - 'packages/core-backend/src/index.ts'
+      - 'ecosystem.config.cjs'
+      - 'docs/deployment/multitable-windows-onprem-easy-start-20260319.md'
+      - 'docs/CONFIG_SECRET_MANAGEMENT_REPORT.md'
+      - 'docs/development/ops-encryption-material-preflight-design-20260914.md'
+      - 'docs/development/ops-encryption-material-preflight-verification-20260914.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  yida-l4-preflight-linux:
+    name: YiDa L4 preflight tests (Linux, values-free, no network)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # `node --test` reports a file that aborts before declaring tests as a passing file, so the
+      # step also requires a non-trivial `# tests N` and `# fail 0` from the TAP summary.
+      - name: Run YiDa L4 preflight tests and contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$(node --test --test-reporter=tap scripts/ops/integration-yida-l4-preflight.test.mjs 2>&1)" || { printf '%s\n' "$out"; echo 'YiDa L4 preflight tests failed (output above)' >&2; exit 1; }
+          printf '%s\n' "$out"
+          tests="$(printf '%s\n' "$out" | grep -Eo '^# tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)"
+          fails="$(printf '%s\n' "$out" | grep -Eo '^# fail [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)"
+          [ -n "$tests" ] && [ "$tests" -ge 50 ] || { echo "YiDa L4 preflight: expected at least 50 tests, got '${tests:-none}'" >&2; exit 1; }
+          [ "$fails" = '0' ] || { echo "YiDa L4 preflight: expected '# fail 0', got '${fails:-none}'" >&2; exit 1; }
+
+  yida-l4-preflight-windows:
+    name: YiDa L4 preflight tests (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # The deploy target is Windows: this is where pm2.cmd goes through the fixed cmd.exe line
+      # (Node 20 refuses to spawn a .cmd without a shell) and where the operator runs the command.
+      - name: Run YiDa L4 preflight tests and contracts
+        shell: powershell
+        run: |
+          # No 2>&1: under the runner's $ErrorActionPreference = 'stop', Windows PowerShell 5.1 turns
+          # redirected native stderr into a terminating error. TAP goes to stdout.
+          $out = & node --test --test-reporter=tap scripts/ops/integration-yida-l4-preflight.test.mjs | Out-String
+          $code = $LASTEXITCODE
+          Write-Output $out
+          if ($code -ne 0) { Write-Error 'YiDa L4 preflight tests failed (output above)'; exit 1 }
+          $tests = [regex]::Matches($out, '(?m)^# tests (\d+)\r?$') | Select-Object -Last 1
+          $fails = [regex]::Matches($out, '(?m)^# fail (\d+)\r?$') | Select-Object -Last 1
+          if ($null -eq $tests -or [int]$tests.Groups[1].Value -lt 50) { Write-Error 'YiDa L4 preflight: expected at least 50 tests'; exit 1 }
+          if ($null -eq $fails -or $fails.Groups[1].Value -ne '0') { Write-Error "YiDa L4 preflight: expected '# fail 0'"; exit 1 }
+      # The operator's own invocation, in Windows PowerShell 5.1, from an empty deploy root with an
+      # empty PM2_HOME: pm2 must not be run (no live daemon), the verdict must be STOP with exit 1.
+      - name: Operator invocation smoke (empty deploy root, no pm2 daemon)
+        shell: powershell
+        run: |
+          $script = Join-Path $env:GITHUB_WORKSPACE 'scripts\ops\integration-yida-l4-preflight.mjs'
+          $root = Join-Path $env:RUNNER_TEMP ('yida-l4-smoke-' + [guid]::NewGuid().ToString('N'))
+          $pm2Home = Join-Path $env:RUNNER_TEMP ('yida-l4-pm2home-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $root, $pm2Home | Out-Null
+          $env:PM2_HOME = $pm2Home
+          Push-Location $root
+          try {
+            $lines = @(& node $script)
+            $code = $LASTEXITCODE
+          } finally {
+            Pop-Location
+          }
+          $lines | ForEach-Object { Write-Output $_ }
+          if ($code -ne 1) { Write-Error "expected exit 1, got $code"; exit 1 }
+          if ($lines[-1] -notmatch '^L4_PREFLIGHT=STOP .*\bbackendInPm2\b') { Write-Error 'expected a STOP verdict naming backendInPm2'; exit 1 }
+          if (-not ($lines -contains 'pm2Source=global pm2Status=daemon_not_found')) { Write-Error 'pm2 must not be run without a live daemon'; exit 1 }
+          if (-not ($lines -contains 'HINT no pm2 daemon is listening on this machine, so pm2 was not run (it would start a new one). Start nothing; report to the owner.')) { Write-Error 'expected the fixed daemon_not_found hint'; exit 1 }
+          if (@(Get-ChildItem -Force $root).Count -ne 0 -or @(Get-ChildItem -Force $pm2Home).Count -ne 0) { Write-Error 'the preflight must not write any file'; exit 1 }
+          # Same invocation through a directory junction (a deploy root reached by a junction must still
+          # print a verdict, not exit 0 silently). The junction points at a temp COPY of the script, and
+          # is removed with rmdir, which deletes the link only.
+          $copyDir = Join-Path $env:RUNNER_TEMP ('yida-l4-copy-' + [guid]::NewGuid().ToString('N'))
+          $junction = Join-Path $env:RUNNER_TEMP ('yida-l4-junction-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $copyDir | Out-Null
+          Copy-Item $script $copyDir
+          & cmd.exe /d /c mklink /J "$junction" "$copyDir" | Out-Null
+          if ($LASTEXITCODE -ne 0) { Write-Error 'mklink /J failed'; exit 1 }
+          Push-Location $root
+          try {
+            $viaJunction = @(& node (Join-Path $junction 'integration-yida-l4-preflight.mjs'))
+            $junctionCode = $LASTEXITCODE
+          } finally {
+            Pop-Location
+          }
+          & cmd.exe /d /c rmdir "$junction"
+          Remove-Item -Recurse -Force $copyDir
+          if ($junctionCode -ne 1 -or $viaJunction.Count -eq 0 -or $viaJunction[-1] -notmatch '^L4_PREFLIGHT=STOP .*\bbackendInPm2\b') { Write-Error "through a junction: expected exit 1 and a STOP verdict, got exit $junctionCode"; exit 1 }
+          Remove-Item -Recurse -Force $root, $pm2Home
+          # The runner wrapper exits with $LASTEXITCODE, which is the expected STOP (1) from above.
+          exit 0
