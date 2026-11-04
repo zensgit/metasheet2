@@ -115,7 +115,10 @@ function executorOn(client: Client, fetchImpl: () => Promise<Response> | Respons
     if (/meta_automation_outbound_intent/i.test(String(sqlText))) return client.query(String(sqlText), params)
     return { rows: [], rowCount: 1 }
   }
-  return { exec: new AutomationExecutor({ eventBus: new EventBus(), queryFn, fetchFn: fetchSpy as unknown as typeof fetch }), fetch: fetchSpy }
+  // #5619 checks the target before every send; resolve the synthetic host to a public documentation
+  // address so the check passes and the flow reaches the injected fetch (the ledger is what is under test).
+  const ssrfLookupFn: AutomationDeps['ssrfLookupFn'] = async () => [{ address: '203.0.113.10', family: 4 }]
+  return { exec: new AutomationExecutor({ eventBus: new EventBus(), queryFn, fetchFn: fetchSpy as unknown as typeof fetch, ssrfLookupFn }), fetch: fetchSpy }
 }
 async function untilCalled(spy: ReturnType<typeof vi.fn>, n: number): Promise<void> {
   for (let i = 0; i < 400 && spy.mock.calls.length < n; i++) await tick()
