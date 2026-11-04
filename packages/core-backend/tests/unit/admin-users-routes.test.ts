@@ -3148,6 +3148,8 @@ describe('admin-users routes', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ is_sign_in_admin: false }] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
@@ -3398,6 +3400,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce(false)
     rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
     pgMocks.query
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
           id: 'user-1',
@@ -3413,6 +3416,7 @@ describe('admin-users routes', () => {
           updated_at: '2026-03-12T00:00:00.000Z',
         }],
       })
+      .mockResolvedValueOnce({ rows: [{ is_sign_in_admin: false }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -3454,6 +3458,39 @@ describe('admin-users routes', () => {
       String(call[0]).includes('UPDATE directory_deprovision_effects'))).toBe(true)
     expect(pgMocks.query.mock.calls.some((call) =>
       String(call[0]).includes('access_generation = COALESCE'))).toBe(true)
+  })
+
+  it('refuses to disable the last sign-in platform admin', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const text = String(sql)
+      if (text.includes('is_sign_in_admin')) return { rows: [{ is_sign_in_admin: true }] }
+      if (text.includes('COUNT(*)')) return { rows: [{ c: 0 }] }
+      if (text.includes('FOR UPDATE')) {
+        return {
+          rows: [{
+            id: 'admin-2',
+            email: 'other@example.com',
+            name: '另一位',
+            role: 'admin',
+            is_active: true,
+            activation_status: 'activated',
+            access_generation: 0,
+            is_admin: true,
+          }],
+        }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/status', {
+      params: { userId: 'admin-2' },
+      body: { isActive: false },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('LAST_PLATFORM_ADMIN')
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('SET is_active'))).toBe(false)
   })
 
   it('creates a user with preset-driven onboarding metadata', async () => {
@@ -4227,9 +4264,26 @@ describe('admin-users routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
+    expect(String(pgMocks.query.mock.calls[0]?.[0])).toContain('deleted_at IS NULL')
+    expect(String(pgMocks.query.mock.calls[0]?.[0])).toContain('purged_at IS NULL')
     expect((response.body as Record<string, any>).data.temporaryPassword).toBe('TempPass9A')
     expect(bcryptMocks.hash).toHaveBeenCalledWith('TempPass9A', 10)
     expect(auditMocks.auditLog).toHaveBeenCalled()
+  })
+
+  it('does not reset a password for a recycled profile', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/reset-password', {
+      params: { userId: 'user-gone' },
+      body: {},
+    })
+
+    expect(response.statusCode).toBe(404)
+    expect(String(pgMocks.query.mock.calls[0]?.[0])).toContain('deleted_at IS NULL')
+    expect(String(pgMocks.query.mock.calls[0]?.[0])).toContain('purged_at IS NULL')
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('password_hash'))).toBe(false)
   })
 
   it('revokes all sessions for a user', async () => {

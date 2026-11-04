@@ -382,8 +382,11 @@ describe('readonly current, target-date calendar and stored export actual HTTP/P
   })
 
   it('fresh published calendar metadata follows same-TX holiday and policy inputs while stored history stays unchanged', async () => {
+    // Keep the history, policy change and future shift on a fixed timeline away from DST transitions.
+    const historyDate = '2026-08-18'
+    punchClock.setOnlinePunchInstantForTests('2026-08-20T00:30:00Z')
     const subject = await live.user()
-    const workDate = day(20)
+    const workDate = '2026-09-09'
     const shiftId = randomUUID()
     const assignmentId = randomUUID()
     await live.pool.query(`INSERT INTO attendance_shifts(id,org_id,name,timezone,work_start_time,work_end_time,working_days)
@@ -398,8 +401,8 @@ describe('readonly current, target-date calendar and stored export actual HTTP/P
     await assertCalendarTargetParity(original, subject.token)
     await live.pool.query(`INSERT INTO attendance_records(id,org_id,user_id,work_date,timezone,first_in_at,last_out_at,status,is_workday,work_minutes)
       VALUES($1,$2,$3,$4,'America/New_York',$5,$6,'normal',true,480)`,
-    [randomUUID(),live.orgId,subject.userId,day(-2),instant(-2,14),instant(-2,22)])
-    const historical = await get(calendar(day(-2), day(-2), subject.userId), subject.token)
+    [randomUUID(),live.orgId,subject.userId,historyDate,historyDate+'T14:00:00Z',historyDate+'T22:00:00Z'])
+    const historical = await get(calendar(historyDate, historyDate, subject.userId), subject.token)
     expect(historical.status, historical.body.error?.code).toBe(200)
     expect(historical.body.data.items[0].attendanceTimeContext).toMatchObject({
       effectiveTimezone:'America/New_York',timezoneSource:'legacy_record',frozen:true,
@@ -456,7 +459,7 @@ describe('readonly current, target-date calendar and stored export actual HTTP/P
         isWorkingDay:false,source:'user',label:'Synthetic external rest',policyId:override.id,
       })
       await assertCalendarTargetParity(refreshed, subject.token)
-      const old = await get(calendar(day(-2), day(-2), subject.userId), subject.token)
+      const old = await get(calendar(historyDate, historyDate, subject.userId), subject.token)
       expect(old.status, old.body.error?.code).toBe(200)
       expect(old.body.data).toEqual(historical.body.data)
     } finally {

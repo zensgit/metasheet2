@@ -25,6 +25,8 @@ export interface YidaInitializationState {
   readonly sendEnabled: boolean
   /** Server's exact 测试连接 switch, same rule: display only; the server re-authorizes every probe. */
   readonly connectionTestEnabled: boolean
+  /** Y2: server's exact multi-target switch, same rule: shows the target picker / sheet source only. */
+  readonly multiTargetEnabled: boolean
 }
 /** Owner-run token-only connection test before initialization (ADR adr-yida-connection-test-20261028). */
 export interface YidaConnectionTestRequest {
@@ -74,6 +76,18 @@ function canonical(value: unknown): string {
   return value
 }
 function uuid(value: unknown): string { const result = canonical(value); if (!uuidPattern.test(result)) invalid(); return result }
+// The server refuses appKey/appSecret/systemToken with surrounding whitespace or with a control (Cc),
+// invisible format (Cf: zero-width, bidi, BOM) or lone surrogate (Cs) character anywhere, before any
+// exchange or write (L4 seals them for good). This client sends only what it would accept and never trims
+// or normalizes here; the panel trims a paste before calling it.
+function credential(field: unknown, maximum: number): void {
+  if (typeof field !== 'string' || !field || field.length > maximum || field.trim() !== field
+    || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(field)) invalid()
+}
+/** True when a pasted appKey/appSecret/systemToken still holds whitespace, a control character, an invisible
+ * format character (zero-width, bidi, BOM) or a lone surrogate once its edges are trimmed: that text is not
+ * the credential, so the panel does not send it and shows a hint. */
+export function yidaCredentialHasInnerBlank(value: string): boolean { return /[\s\p{Cc}\p{Cf}\p{Cs}]/u.test(value.trim()) }
 function draft(value: unknown): YidaOwnerDraft {
   const row = object(value, ['targetRef', 'operationId', 'status', 'identityKind', 'canSend', 'canApply', 'tokenIssued', 'externalWriteAttempted', 'rowCount', 'rows', 'reused'])
   if (row.status !== 'unverified' || row.identityKind !== 'local-unverified' || row.canSend !== false || row.canApply !== false
@@ -93,15 +107,19 @@ function state(value: unknown, expectedCommand: string | null): YidaInitializati
   // The server sends connectionTestEnabled only while its switch is on (absent = off), so this
   // bundle also reads an older backend; the key set stays closed either way.
   const probeBit = !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'connectionTestEnabled')
-  const row = object(value, probeBit ? [...stateKeys, 'connectionTestEnabled'] : stateKeys)
+  // Y2: multiTargetEnabled follows the same absent-while-off rule.
+  const multiBit = !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'multiTargetEnabled')
+  const baseKeys = probeBit ? [...stateKeys, 'connectionTestEnabled'] : stateKeys
+  const row = object(value, multiBit ? [...baseKeys, 'multiTargetEnabled'] : baseKeys)
   const commandId = uuid(row.commandId)
   if (expectedCommand !== null && commandId !== expectedCommand) invalid()
   if (row.canSend !== false || row.tokenIssued !== false || row.externalWriteAttempted !== false || typeof row.sendEnabled !== 'boolean'
     || (row.status !== 'ready' && row.status !== 'initialized') || (row.status === 'ready') !== (row.draft === null)) invalid()
   if (probeBit && typeof row.connectionTestEnabled !== 'boolean') invalid()
+  if (multiBit && typeof row.multiTargetEnabled !== 'boolean') invalid()
   return Object.freeze({ commandId, status: row.status, draft: row.draft === null ? null : draft(row.draft),
     canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled: row.sendEnabled,
-    connectionTestEnabled: row.connectionTestEnabled === true })
+    connectionTestEnabled: row.connectionTestEnabled === true, multiTargetEnabled: row.multiTargetEnabled === true })
 }
 function connectionTestResult(value: unknown, expectedCommand: string | null): YidaConnectionTestResult {
   const row = object(value, ['commandId', 'mode', 'outcome', 'tokenIssued', 'tokenRetained', 'externalWriteAttempted', 'canSend'])
@@ -118,10 +136,7 @@ function connectionTestInput(value: unknown): YidaConnectionTestRequest {
     const row = object(value, ['commandId', 'mode', 'material'])
     const material = object(row.material, ['appKey', 'appSecret'])
     if (row.mode !== 'candidate') invalid()
-    for (const key of ['appKey', 'appSecret']) {
-      const field = material[key]
-      if (typeof field !== 'string' || !field.trim() || field.length > 4096) invalid()
-    }
+    for (const key of ['appKey', 'appSecret']) credential(material[key], 4096)
     // Detach, never trim or normalize: the server tests exactly these bytes.
     return JSON.parse(JSON.stringify({ commandId: uuid(row.commandId), mode: 'candidate',
       material: { appKey: material.appKey, appSecret: material.appSecret } })) as YidaConnectionTestRequest
@@ -131,10 +146,9 @@ function input(value: unknown): YidaInitializationInput {
   try {
     const row = object(value, ['commandId', 'material', 'draft', 'attestation'])
     const material = object(row.material, ['appKey', 'appSecret', 'systemToken', 'userId'])
-    for (const key of ['appKey', 'appSecret', 'systemToken', 'userId']) {
-      const field = material[key]
-      if (typeof field !== 'string' || !field.trim() || field.length > (key === 'userId' ? 128 : 4096)) invalid()
-    }
+    for (const key of ['appKey', 'appSecret', 'systemToken']) credential(material[key], 4096)
+    // userId keeps its own rule: it must equal executionIdentity, whose canonical() check refuses padding.
+    if (typeof material.userId !== 'string' || !material.userId.trim() || material.userId.length > 128) invalid()
     const reviewed = object(row.attestation, ['kind', 'reviewRef', 'organizationId', 'executionIdentity'])
     if (reviewed.kind !== 'owner-reviewed-target' || reviewed.executionIdentity !== material.userId) invalid()
     const fixedDraft = object(row.draft, ['config', 'rowsText', 'allocation'])

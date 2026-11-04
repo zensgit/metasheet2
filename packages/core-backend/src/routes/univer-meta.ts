@@ -188,6 +188,7 @@ import {
   loadManualRowsVerdict,
   manualRowCopyRule,
   mintManualRowCreateExtension,
+  resolveGenericCreateRefusal,
   resolveManualRowsContextBlock,
   STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE_CODE,
   StockPrepManualRowsRefusedError,
@@ -440,6 +441,7 @@ import {
   parseUpdateRuleInput,
   preflightAutomationConditionFields,
   preflightAutomationRuleUpdate,
+  preflightAutomationWebhookTargets,
   preflightDingTalkAutomationCreate,
   serializeAutomationRule,
 } from '../multitable/automation-service'
@@ -9756,7 +9758,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             '[univer-meta] load context: manual-rows probe failed; failing closed to unavailable',
             { reason: 'manual_rows_probe_failed', ...describeLivenessLookupError(err) },
           )
-          manualRowsBlock = { state: 'unavailable', reason: 'registry_unreadable', editableFieldIds: [], requiredFieldIds: [] }
+          manualRowsBlock = { state: 'unavailable', reason: 'registry_unreadable', editableFieldIds: [], requiredFieldIds: [], dialogFieldIds: [] }
         }
       }
       // Customer feedback 2026-10-27: the duplicate route refuses a sheet whose rows the stock-preparation
@@ -16992,6 +16994,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         }
 
         const fields = await loadFieldsForSheetShared(pool.query.bind(pool), sheetId)
+        // 人工补充行 B3 (ADR §3.1): the xlsx import is a generic create too — on a registered project sheet it is refused
+        // here, by state, before any row reaches createRecord (the same verdict POST /records and /context use).
+        const genericCreateRefusal = await resolveGenericCreateRefusal(pool.query.bind(pool), sheetId, fields)
+        if (genericCreateRefusal) return res.status(genericCreateRefusal.status).json(genericCreateRefusal.body())
         const rawMapping = parseJsonFormField(req.body.mapping, 'mapping')
         const columnMapping = normalizeXlsxColumnMapping(rawMapping, parsed.headers, fields)
         if (Object.keys(columnMapping.mapping).length === 0) {
@@ -20599,6 +20605,19 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.1): on a registered project sheet (P_reg) a generic
+      // create is refused HERE, before createRecord, by the sheet's manual-rows state — 409 (503 when a registry cannot
+      // be read) with the §3.1 code and text; only `allowed` points at 「新增人工补充行」. Session and mst_ tokens both
+      // land here. Asked only for an actor who can create (anyone else keeps createRecord's own 403). Every other sheet
+      // keeps its old answer; a sheet id outside the plugin-derived shape issues no statement for it.
+      if (capabilities.canCreateRecord === true) {
+        const genericCreateRefusal = await resolveGenericCreateRefusal(
+          pool.query.bind(pool),
+          sheetId,
+          () => loadFieldsForSheet(pool.query.bind(pool), sheetId),
+        )
+        if (genericCreateRefusal) return res.status(genericCreateRefusal.status).json(genericCreateRefusal.body())
+      }
       const recordService = new RecordService(pool, eventBus)
       // A-min-create (#2255): compute the new record's same-record formula-over-lookup on create.
       recordService.setFormulaRecalcHook((q, sid, ids) => recalcNewRecordFormulas(req, q, sid, ids))
@@ -22005,6 +22024,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const parsed = parseCreateRuleInput(req.body as Record<string, unknown> | undefined, access.userId)
+      // S0-a: early error for a send_webhook target the send-time check would always refuse (no DNS here;
+      // the boundary is the per-send check in the executor).
+      preflightAutomationWebhookTargets(parsed)
       const input = await preflightDingTalkAutomationCreate(pool.query.bind(pool), sheetId, parsed)
       // #4b: `input` also carries the action tree, so condition_branch conditions are field-checked too.
       await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, input)
@@ -22060,6 +22082,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
       const input = preflight.input
+      // S0-a: early error for a send_webhook target, on the EFFECTIVE action pair (request ?? stored) — a
+      // PATCH that only re-types a rule to send_webhook would otherwise make a stored target live unchecked.
+      // A PATCH that does not touch the action tree (rename / enable / disable) is not blocked.
+      preflightAutomationWebhookTargets({
+        ...input,
+        actionType: preflight.effectiveActionType ?? input.actionType,
+        actionConfig: preflight.effectiveActionConfig ?? input.actionConfig,
+      })
       // #4b: an update that touches the action tree gets its condition_branch conditions field-checked too.
       // The action type AND config are the EFFECTIVE ones (request ?? stored), exactly what updateRule persists:
       // a PATCH that sends only `actionConfig` for a rule stored as condition_branch, or only `actionType` to
