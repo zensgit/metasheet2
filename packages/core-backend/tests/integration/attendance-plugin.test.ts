@@ -8914,6 +8914,218 @@ attendanceIntegrationDescribe(
         { user_id: settledUserId, source: 'restday', convertible_minutes: 90, must_pay_minutes: 0, period_start_date: '2024-03-01', period_end_date: '2024-03-28' },
       ])
     })
+
+    // T18a-T18c: the create route (POST /api/attendance/payroll-cycles) compared the two request date strings as
+    // instants and wrote them as they were, while PG keeps only the written day of a date string: the same hole the
+    // update route had (T16a-T16c), but with no stored row, so only the two strings meet and the process zone does not
+    // change the answer. Each case still runs under several zones. A created cycle is snapshotted in the same request
+    // when it is created closed, so a comp-time lot is seeded and the settlement rows of the whole org are compared.
+    type OrgCycleDbRow = { id: string; name: string | null; start_date: string; end_date: string; status: string }
+    type OrgSettlementDbRow = { cycle_id: string; user_id: string; source: string; period_start_date: string; period_end_date: string }
+
+    function createCycleRequest(ctx: OrgFixture, body: Record<string, unknown>): Promise<HttpResponse> {
+      return requestJson(`${requireBaseUrl()}/api/attendance/payroll-cycles`, {
+        method: 'POST',
+        headers: ctx.headers,
+        body: JSON.stringify({ orgId: ctx.orgId, ...body }),
+      })
+    }
+
+    async function readOrgCycles(orgId: string): Promise<OrgCycleDbRow[]> {
+      const result = await requirePool().query<OrgCycleDbRow>(
+        `SELECT id::text AS id, name, start_date::text AS start_date, end_date::text AS end_date, status
+           FROM attendance_payroll_cycles WHERE org_id = $1 ORDER BY start_date, end_date, id`,
+        [orgId],
+      )
+      return result.rows
+    }
+
+    async function readOrgSettlements(orgId: string): Promise<OrgSettlementDbRow[]> {
+      const result = await requirePool().query<OrgSettlementDbRow>(
+        `SELECT cycle_id::text AS cycle_id, user_id, source,
+                period_start_date::text AS period_start_date, period_end_date::text AS period_end_date
+           FROM attendance_payroll_cycle_settlements WHERE org_id = $1 ORDER BY cycle_id, user_id, source`,
+        [orgId],
+      )
+      return result.rows
+    }
+
+    function captureCreatedEventsOfOrg(orgId: string): { list: () => CycleEventPayload[]; stop: () => void } {
+      const seen: CycleEventPayload[] = []
+      const id = requireBus().subscribe('attendance.payrollCycle.created', (payload: unknown) => {
+        const event = (payload ?? {}) as CycleEventPayload
+        if (event.orgId === orgId) seen.push(event)
+      })
+      return {
+        list: () => [...seen],
+        stop: () => {
+          requireBus().unsubscribe(id)
+        },
+      }
+    }
+
+    async function expectCreateRefusedWithoutWrites(
+      ctx: OrgFixture,
+      body: Record<string, unknown>,
+      events: { list: () => CycleEventPayload[] },
+      expected: { status: number; code: string; message?: string },
+      label: string,
+    ): Promise<void> {
+      const cyclesBefore = await readOrgCycles(ctx.orgId)
+      const settlementsBefore = await readOrgSettlements(ctx.orgId)
+      const eventsBefore = events.list()
+      const res = await createCycleRequest(ctx, body)
+      const what = `${label} create ${JSON.stringify(body)}`
+      expect(res.status, `${what} ${res.raw}`).toBe(expected.status)
+      const error = (res.body as { error?: { code?: string; message?: string } } | undefined)?.error
+      if (expected.message === undefined) expect(error?.code, what).toBe(expected.code)
+      else expect(error, what).toEqual({ code: expected.code, message: expected.message })
+      expect(await readOrgCycles(ctx.orgId), what).toEqual(cyclesBefore)
+      expect(await readOrgSettlements(ctx.orgId), what).toEqual(settlementsBefore)
+      expect(events.list(), what).toEqual(eventsBefore)
+    }
+
+    it('T18a [defect] under TZ=UTC, Asia/Taipei and America/New_York a create whose endDate is an ISO timestamp with a -05:00 offset on the day before the start is refused with 400, also when it creates the cycle closed: no cycle row, no settlement rows, no created event', async () => {
+      await seedCompTimeLot(org, `r7-t18a-user-${randomUUID()}`)
+      // '<day before start>T23:30:00-05:00' is <start>T04:30:00Z, later than the start '<start>' (read as <start>T00:00Z),
+      // so the instant comparison let it through in every zone, and PG would store the written day, one day before the
+      // start (and snapshot that inverted period when created closed). Every attempt has its own dates.
+      const cases = [
+        { tz: 'UTC', closed: ['2018-05-05', '2018-05-04T23:30:00-05:00'], open: ['2018-05-12', '2018-05-11T23:30:00-05:00'] },
+        { tz: 'Asia/Taipei', closed: ['2018-06-05', '2018-06-04T23:30:00-05:00'], open: ['2018-06-12', '2018-06-11T23:30:00-05:00'] },
+        { tz: 'America/New_York', closed: ['2018-07-05', '2018-07-04T23:30:00-05:00'], open: ['2018-07-12', '2018-07-11T23:30:00-05:00'] },
+      ] as const
+      const events = captureCreatedEventsOfOrg(org.orgId)
+      try {
+        for (const testCase of cases) {
+          const zone = zoneProbe[testCase.tz]
+          await underTimeZone(testCase.tz, async () => {
+            await expectDateParsedAtLocalMidnight(zone.offsetMinutes, zone.isoOfDate20150201)
+            const bodies: Array<Record<string, unknown>> = [
+              { name: `r7 t18a ${testCase.tz} closed`, startDate: testCase.closed[0], endDate: testCase.closed[1], status: 'closed' },
+              { name: `r7 t18a ${testCase.tz} open`, startDate: testCase.open[0], endDate: testCase.open[1] },
+            ]
+            for (const body of bodies) {
+              await expectCreateRefusedWithoutWrites(org, body, events, { status: 400, ...invalidDateForm }, testCase.tz)
+            }
+          })
+        }
+        expect(await readOrgCycles(org.orgId)).toEqual([])
+        expect(await readOrgSettlements(org.orgId)).toEqual([])
+        expect(events.list()).toEqual([])
+      } finally {
+        events.stop()
+      }
+    })
+
+    it('T18b [contract] under TZ=UTC and Asia/Taipei a create with a start or end date that is not YYYY-MM-DD (2017/04/05) or not a real day (2017-09-31) is refused with 400, never stored and never 500, also when it creates the cycle closed: no cycle row, no settlement rows, no created event', async () => {
+      await seedCompTimeLot(org, `r7-t18b-user-${randomUUID()}`)
+      // '2017/04/05' is in order with the other end as an instant and as a written day, and PG accepts it, so the old
+      // route stored it; it is refused for its form, as on the update route (T16c). '2017-09-31' does not exist: the old
+      // route answered 500 if new Date() read it as 2017-10-01 (PG then refuses the day) and 400 if it read it as
+      // invalid, so only status and code are checked for it, as in T16c. The '2017/04/05' attempts run first.
+      const cases = [
+        {
+          tz: 'UTC',
+          slash: [
+            { startDate: '2017/04/05', endDate: '2017-04-10', status: 'closed' },
+            { startDate: '2017/04/05', endDate: '2017-04-11' },
+            { startDate: '2017-04-01', endDate: '2017/04/05', status: 'closed' },
+            { startDate: '2017-04-02', endDate: '2017/04/05' },
+          ],
+          missingDay: [
+            { startDate: '2017-09-05', endDate: '2017-09-31', status: 'closed' },
+            { startDate: '2017-09-06', endDate: '2017-09-31' },
+            { startDate: '2017-09-31', endDate: '2017-10-10', status: 'closed' },
+          ],
+        },
+        {
+          tz: 'Asia/Taipei',
+          slash: [
+            { startDate: '2017/04/05', endDate: '2017-04-12', status: 'closed' },
+            { startDate: '2017/04/05', endDate: '2017-04-13' },
+            { startDate: '2017-04-03', endDate: '2017/04/05', status: 'closed' },
+            { startDate: '2017-03-31', endDate: '2017/04/05' },
+          ],
+          missingDay: [
+            { startDate: '2017-09-07', endDate: '2017-09-31', status: 'closed' },
+            { startDate: '2017-09-08', endDate: '2017-09-31' },
+            { startDate: '2017-09-31', endDate: '2017-10-11', status: 'closed' },
+          ],
+        },
+      ] as const
+      const events = captureCreatedEventsOfOrg(org.orgId)
+      try {
+        for (const testCase of cases) {
+          const zone = zoneProbe[testCase.tz]
+          await underTimeZone(testCase.tz, async () => {
+            await expectDateParsedAtLocalMidnight(zone.offsetMinutes, zone.isoOfDate20150201)
+            for (const body of testCase.slash) {
+              await expectCreateRefusedWithoutWrites(org, { name: `r7 t18b ${testCase.tz}`, ...body }, events, { status: 400, ...invalidDateForm }, testCase.tz)
+            }
+            for (const body of testCase.missingDay) {
+              await expectCreateRefusedWithoutWrites(org, { name: `r7 t18b ${testCase.tz}`, ...body }, events, { status: 400, code: 'VALIDATION_ERROR' }, testCase.tz)
+            }
+          })
+        }
+        expect(await readOrgCycles(org.orgId)).toEqual([])
+        expect(await readOrgSettlements(org.orgId)).toEqual([])
+        expect(events.list()).toEqual([])
+      } finally {
+        events.stop()
+      }
+    })
+
+    it('T18c [control] under TZ=UTC, Asia/Taipei and America/New_York a single-day create, open and closed, and a normal create answer 201 and store the days that were sent, the closed one with a snapshot of that day, each with one created event; a YYYY-MM-DD inversion is 400 Invalid date range with nothing written', async () => {
+      await seedCompTimeLot(org, `r7-t18c-user-${randomUUID()}`)
+      const cases = [
+        { tz: 'UTC', singleOpen: '2019-05-05', singleClosed: '2019-05-12', normal: ['2019-05-15', '2019-05-28'], inverted: ['2019-05-20', '2019-05-19'] },
+        { tz: 'Asia/Taipei', singleOpen: '2019-06-05', singleClosed: '2019-06-12', normal: ['2019-06-15', '2019-06-28'], inverted: ['2019-06-20', '2019-06-19'] },
+        { tz: 'America/New_York', singleOpen: '2019-07-05', singleClosed: '2019-07-12', normal: ['2019-07-15', '2019-07-28'], inverted: ['2019-07-20', '2019-07-19'] },
+      ] as const
+      const events = captureCreatedEventsOfOrg(org.orgId)
+      try {
+        for (const testCase of cases) {
+          const zone = zoneProbe[testCase.tz]
+          await underTimeZone(testCase.tz, async () => {
+            await expectDateParsedAtLocalMidnight(zone.offsetMinutes, zone.isoOfDate20150201)
+            const creates = [
+              { body: { name: `r7 t18c ${testCase.tz} single open`, startDate: testCase.singleOpen, endDate: testCase.singleOpen }, status: 'open', period: [testCase.singleOpen, testCase.singleOpen] },
+              { body: { name: `r7 t18c ${testCase.tz} single closed`, startDate: testCase.singleClosed, endDate: testCase.singleClosed, status: 'closed' }, status: 'closed', period: [testCase.singleClosed, testCase.singleClosed] },
+              { body: { name: `r7 t18c ${testCase.tz} normal`, startDate: testCase.normal[0], endDate: testCase.normal[1] }, status: 'open', period: [testCase.normal[0], testCase.normal[1]] },
+            ] as const
+            for (const create of creates) {
+              const res = await createCycleRequest(org, create.body)
+              const what = `${testCase.tz} create ${JSON.stringify(create.body)}`
+              expect(res.status, `${what} ${res.raw}`).toBe(201)
+              const data = (res.body as { data?: { id?: string; startDate?: string; endDate?: string; status?: string } } | undefined)?.data
+              const id = String(data?.id)
+              expect(data, what).toMatchObject({ startDate: create.period[0], endDate: create.period[1], status: create.status })
+              expect(await readCycle(id), what).toMatchObject({ status: create.status, start_date: create.period[0], end_date: create.period[1] })
+              const settlements = await readSettlements(id)
+              if (create.status === 'closed') {
+                expect(settlements.length, what).toBeGreaterThan(0)
+                for (const row of settlements) expect(row, what).toMatchObject({ period_start_date: create.period[0], period_end_date: create.period[1] })
+              } else {
+                expect(settlements, what).toEqual([])
+              }
+              expect(events.list().filter((event) => event.payrollCycleId === id), what).toEqual([{ orgId: org.orgId, payrollCycleId: id }])
+            }
+            await expectCreateRefusedWithoutWrites(
+              org,
+              { name: `r7 t18c ${testCase.tz} inverted`, startDate: testCase.inverted[0], endDate: testCase.inverted[1], status: 'closed' },
+              events,
+              { status: 400, ...invalidRange },
+              testCase.tz,
+            )
+          })
+        }
+        expect(await readOrgCycles(org.orgId)).toHaveLength(9)
+        expect(events.list()).toHaveLength(9)
+      } finally {
+        events.stop()
+      }
+    })
   })
 
   it('④ 加班银行 v1-3b — 满勤 flag surfaces on GET /summary when policy ON; ABSENT when OFF (dormant-clean)', async () => {
