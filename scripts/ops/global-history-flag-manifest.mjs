@@ -854,7 +854,7 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'high',
     purpose:
-      "User recycle sweeper (packages/core-backend/src/admin/user-recycle-scheduler.ts). Default OFF; exact literal 'true' only (no trim, no case folding; unset, false, 1, TRUE, and trailing space stay OFF). Off: startUserRecycleSweeper returns false before any tick, interval, or database call. On: USER_RECYCLE_SWEEPER_DISABLED=1 and the test-runtime helper remain additional kill switches. A tick anonymizes recycle-bin accounts whose purge_after has passed. Tick failure logs are values-free and do not include Error.message.",
+      "User recycle sweeper (packages/core-backend/src/admin/user-recycle-scheduler.ts). Default OFF on purpose: a tick anonymizes identity and the sweeper has no leader election, so it must not start just because the retention window defaults to 30 days. Exact literal 'true' only (no trim, no case folding; unset, false, 1, TRUE, and trailing space stay OFF). Off: startUserRecycleSweeper returns false before any tick, interval, or database call, and the admin UI must not promise automatic purge. On: USER_RECYCLE_SWEEPER_DISABLED=1 and the test-runtime helper remain additional kill switches. A tick anonymizes recycle-bin accounts whose purge_after has passed. Tick failure logs are values-free and do not include Error.message.",
     source: 'packages/core-backend/src/admin/user-recycle-scheduler.ts#startUserRecycleSweeper',
   },
   // ── Automation runtime (AGENTS.md: every env flag is registered here; iPaaS follow-up 2026-11-03) ──
