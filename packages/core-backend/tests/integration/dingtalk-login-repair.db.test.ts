@@ -6,7 +6,7 @@ import { createRequire } from 'node:module'
 import { connect, createServer, type AddressInfo, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import * as bcrypt from 'bcryptjs'
 import express from 'express'
 import request from 'supertest'
@@ -4850,6 +4850,40 @@ suite('DingTalk controlled login repair', () => {
           expect(await successorOf(r.id)).toEqual([])
         }
       })
+
+      it.each([
+        ['another UnionID', 'other-dev-union'],
+        ['no UnionID', null],
+      ] as const)('N26 (DBA): the pinned OpenID alone never selects an anchor: an unowned current-app row with %s refuses REPAIR_PERSON_NOT_PROVEN', async (_name, union) => {
+        // recordedRowReplaced() shape, except that the only current-app replacement carries the pinned OpenID
+        // without the pinned person's UnionID (the row an attacker under a switched app could plant).
+        const f = await fixture(),
+          r = await applyRepair(f),
+          b = await secondAdmin(f)
+        await unbindDirectoryAccount(f.account, {
+          adminUserId: f.admin,
+          disableDingTalkGrant: true,
+        })
+        await productionKey(f.account)
+        const i2 = await addIntegration(f, 'synthetic-current-app')
+        await query('DELETE FROM directory_accounts WHERE id=$1', [f.account])
+        const x = await addAccount(i2, f.corp, 'n26-' + f.user, {
+          union,
+          open: (await repairRow(r.id)).expected_identity.provider_open_id,
+        })
+        expect((await repairRow(r.id)).expected_identity.provider_open_id).toBe('new-open-' + f.user)
+        provider.exchange.mockClear()
+        // Without a code and with one: the refusal comes from the read-only plan, before any provider exchange.
+        for (const code of [undefined, 'synthetic-scan'])
+          await expectReanchorRefused(
+            f,
+            r.id,
+            () => requestReanchor(f, r.id, b, f.admin, code),
+            'REPAIR_PERSON_NOT_PROVEN',
+          )
+        expect(provider.exchange).not.toHaveBeenCalled()
+        expect(await linkOf(x)).toEqual([])
+      })
     })
 
     describe('database chain guard (direct SQL and the transaction() wrapper)', () => {
@@ -4869,10 +4903,12 @@ suite('DingTalk controlled login repair', () => {
         actor?: string
         approver?: string | null
         supersedes?: string | null
+        user?: string
+        released?: string[]
       }
       /** A copy of `from` as a successor; every override replaces one column. */
       const successor = (from: string, f: Fixture, admin2: string, o: Over = {}): [string, unknown[]] => [
-        `INSERT INTO dingtalk_login_repairs(id,user_id,proof_nonce,state,before_identity,expected_identity,after_digest,actor_id,approver_id,supersedes_id,source_account_ids,source_integration_ids,canonical_account_id,login_client_id) SELECT $1::uuid,user_id,$2::uuid,$3::text,COALESCE($4::text,before_identity),COALESCE($5::jsonb,expected_identity),'pending',$6::text,$7::text,$8::uuid,COALESCE($9::uuid[],source_account_ids),COALESCE($10::uuid[],source_integration_ids),COALESCE($11::uuid,canonical_account_id),login_client_id FROM dingtalk_login_repairs WHERE id=$12::uuid`,
+        `INSERT INTO dingtalk_login_repairs(id,user_id,proof_nonce,state,before_identity,expected_identity,after_digest,actor_id,approver_id,supersedes_id,source_account_ids,source_integration_ids,canonical_account_id,login_client_id,released_account_ids) SELECT $1::uuid,COALESCE($13::text,user_id),$2::uuid,$3::text,COALESCE($4::text,before_identity),COALESCE($5::jsonb,expected_identity),'pending',$6::text,$7::text,$8::uuid,COALESCE($9::uuid[],source_account_ids),COALESCE($10::uuid[],source_integration_ids),COALESCE($11::uuid,canonical_account_id),login_client_id,$14::uuid[] FROM dingtalk_login_repairs WHERE id=$12::uuid`,
         [
           o.id ?? randomUUID(),
           o.nonce ?? randomUUID(),
@@ -4886,6 +4922,8 @@ suite('DingTalk controlled login repair', () => {
           o.integrations ?? null,
           o.canonical ?? null,
           from,
+          o.user ?? null,
+          o.released ?? null,
         ],
       ]
       /** Runs the statements in one pool-client transaction; a failure carries the stage it happened at. */
@@ -5128,6 +5166,63 @@ suite('DingTalk controlled login repair', () => {
           viaWrapper([['UPDATE dingtalk_login_repairs SET before_identity=before_identity WHERE id=ANY($1::uuid[])', [[r.id, id]]]]),
         ).resolves.toBeUndefined()
       })
+
+      /** Every journal row of `user` (expectNothingPersisted only reads the fixture user's rows). */
+      const journalOf = async (user: string) =>
+        (await query('SELECT to_jsonb(t) AS row FROM dingtalk_login_repairs t WHERE user_id=$1 ORDER BY 1', [user])).rows
+
+      it('G13: a successor continuing the row for another local user fails at COMMIT', async () => {
+        const { f, r, admin2 } = await setup()
+        // A bare user: no applied row (the one-applied index stays quiet) and neither administrator (CHECKs hold),
+        // so only the guard's same-user clause can refuse.
+        const other = await bareUser()
+        await expectNothingPersisted(
+          f,
+          r.id,
+          () => [supersede(r.id, admin2), successor(r.id, f, admin2, { user: other })],
+          chainRefused,
+        )
+        expect(await successorOf(r.id)).toEqual([])
+        expect(await journalOf(other)).toEqual([])
+      })
+
+      it('G14: a successor inserted as released or rolled back (not applied) fails at COMMIT', async () => {
+        const { f, r, admin2 } = await setup()
+        // 'released' with released_account_ids = [canonical] satisfies both released CHECKs: without the guard's
+        // applied clause it would plant a release allowlist through the newest-released branch of the link fence.
+        for (const o of [{ state: 'released', released: [f.account] }, { state: 'rolled_back' }] as Over[]) {
+          await expectNothingPersisted(
+            f,
+            r.id,
+            () => [supersede(r.id, admin2), successor(r.id, f, admin2, o)],
+            chainRefused,
+          )
+          expect(await successorOf(r.id)).toEqual([])
+        }
+        expect(await repairRow(r.id)).toMatchObject({ state: 'applied', rollback_actor_id: null })
+      })
+
+      it('G15: the guard reads the successor at COMMIT: released or rolled back later in the same transaction fails', async () => {
+        const { f, r, admin2 } = await setup()
+        for (const state of ['released', 'rolled_back']) {
+          const id = randomUUID()
+          await expectNothingPersisted(
+            f,
+            r.id,
+            () => [
+              supersede(r.id, admin2),
+              successor(r.id, f, admin2, { id }),
+              [
+                "UPDATE dingtalk_login_repairs SET state=$2::text,released_account_ids=CASE WHEN $2::text='released' THEN ARRAY[canonical_account_id] END WHERE id=$1",
+                [id, state],
+              ],
+            ],
+            chainRefused,
+          )
+          expect(await repairRow(id)).toBeUndefined()
+        }
+        expect(await successorOf(r.id)).toEqual([])
+      })
     })
 
     describe('after a re-anchor', () => {
@@ -5261,13 +5356,23 @@ suite('DingTalk controlled login repair', () => {
      * DB_SLOW_MS=0 by default: every pool query then crosses the slow-query log threshold, so any
      * logger output that reached the process streams would break the exact stdout/stderr assertions.
      */
-    const spawnCli = (f: Fixture, args: string[], extra: Record<string, string> = {}, viaPnpm = false) =>
+    const spawnCli = (
+      f: Fixture,
+      args: string[],
+      extra: Record<string, string> = {},
+      viaPnpm = false,
+      preload?: string,
+    ) =>
       new Promise<{ code: number | null; stdout: string; stderr: string; ms: number }>((resolve, reject) => {
         const started = Date.now()
         // viaPnpm: the operator invocation the doc gives, `pnpm --silent ops:dingtalk-login-repair ...`.
+        // preload: an extra ESM module loaded before the entry (direct tsx invocation only).
         const [command, commandArgs] = viaPnpm
           ? ['pnpm', ['--silent', 'ops:dingtalk-login-repair', ...args]]
-          : [process.execPath, ['--import', tsxLoader, entry, ...args]]
+          : [
+              process.execPath,
+              ['--import', tsxLoader, ...(preload ? ['--import', pathToFileURL(preload).href] : []), entry, ...args],
+            ]
         const child = spawn(command, commandArgs, {
           cwd: backendRoot,
           env: {
@@ -5656,6 +5761,160 @@ suite('DingTalk controlled login repair', () => {
       expect((await exchangeCodeForUser('synthetic-fresh')).localUserId).toBe(f.user)
       expect((await repairRow(result.id)).expected_identity).toMatchObject({ provider_open_id: 'next-open-' + f.user })
     }, 120000)
+
+    /**
+     * The child's provider calls: the OAuth endpoints are fixed URLs, and the transport resolves the global fetch per
+     * request, so a module loaded before the entry answers them offline. It writes only to the log file named in env,
+     * never to the process streams the entry takes over.
+     */
+    const fakeDingTalk = async () => {
+      if (!dir) dir = await mkdtemp(path.join(tmpdir(), 'login-repair-cli-db-'))
+      const preload = path.join(dir, 'fake-dingtalk-' + randomUUID() + '.mjs')
+      await writeFile(
+        preload,
+        `import { appendFileSync } from 'node:fs'
+const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+globalThis.fetch = async (input, init = {}) => {
+  const url = String(typeof input === 'string' ? input : input.url ?? input)
+  appendFileSync(process.env.L4_FETCH_LOG, JSON.stringify({ method: init.method ?? 'GET', url, body: init.body ?? null }) + '\\n')
+  if (url === 'https://api.dingtalk.com/v1.0/oauth2/userAccessToken') return json({ accessToken: 'synthetic-child-token', expireIn: 7200 })
+  if (url === 'https://api.dingtalk.com/v1.0/contact/users/me') return json({ openId: process.env.L4_OPEN_ID, unionId: process.env.L4_UNION_ID })
+  throw new TypeError('synthetic fetch: unexpected request')
+}
+`,
+      )
+      const calls = async (log: string) =>
+        (await readFile(log, 'utf8').catch(() => ''))
+          .split('\n')
+          .filter(Boolean)
+          .map((l) => JSON.parse(l) as { method: string; url: string; body: string | null })
+      return { preload, calls, log: () => path.join(dir, 'fake-dingtalk-' + randomUUID() + '.log') }
+    }
+    const missing = (file: string) => stat(file).then(() => false, (e) => (e as NodeJS.ErrnoException).code === 'ENOENT')
+
+    it('L4: reanchor-request forwards the scan code: canonical mode after an app change scans under the new app in the child, and the first login then advances the pin', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      await switchLoginApp(f)
+      const approver = await secondAdmin(f)
+      const fake = await fakeDingTalk()
+      const before = await capture(f, r.id)
+      const request = (code?: string) =>
+        privateInput('reanchor-l4', {
+          id: r.id,
+          actorId: f.admin,
+          actorPassword: f.password,
+          approverId: approver,
+          ...(code === undefined ? {} : { code }),
+        })
+      const run = async (input: string, unionId: string) => {
+        const log = fake.log(),
+          out = path.join(dir, 'reanchor-l4-' + randomUUID() + '.json')
+        const result = await spawnCli(
+          f,
+          ['reanchor-request', input, out],
+          { ...nextApp, L4_FETCH_LOG: log, L4_OPEN_ID: 'next-open-' + f.user, L4_UNION_ID: unionId },
+          false,
+          fake.preload,
+        )
+        return { result, out, calls: await fake.calls(log) }
+      }
+      // (a) Canonical mode after an app change needs a scan: no code refuses before any provider call.
+      const a = await run(await request(), 'new-union-' + f.user)
+      expect(a.result).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_REANCHOR_SCAN_REQUIRED\n' })
+      expect(a.calls).toEqual([])
+      expect(await missing(a.out)).toBe(true)
+      expect(await capture(f, r.id)).toEqual(before)
+      // (b) The code reaches the module: it is exchanged under the new app and the scanned person is checked.
+      const b = await run(await request('synthetic-child-scan'), 'different-person')
+      expect(b.result).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_REANCHOR_PERSON_MISMATCH\n' })
+      expect(b.calls.map((c) => [c.method, c.url])).toEqual([
+        ['POST', 'https://api.dingtalk.com/v1.0/oauth2/userAccessToken'],
+        ['GET', 'https://api.dingtalk.com/v1.0/contact/users/me'],
+      ])
+      expect(JSON.parse(String(b.calls[0].body))).toMatchObject({ code: 'synthetic-child-scan', clientId: 'next-app' })
+      expect(await missing(b.out)).toBe(true)
+      expect(await capture(f, r.id)).toEqual(before)
+      expect(await successorOf(r.id)).toEqual([])
+      // (c) The same person: the request is sealed with the scanned OpenID.
+      const c = await run(await request('synthetic-child-scan-2'), 'new-union-' + f.user)
+      expect(c.result).toMatchObject({ code: 0, stderr: '' })
+      expect(c.calls).toHaveLength(2)
+      expect(JSON.parse(String(c.calls[0].body))).toMatchObject({ code: 'synthetic-child-scan-2', clientId: 'next-app' })
+      const summary = JSON.parse(c.result.stdout)
+      expect(summary).toMatchObject({
+        id: r.id,
+        preparerId: f.admin,
+        approverId: approver,
+        reanchor: { releaseMode: 'canonical', reasons: ['login_scope'], scanRequired: true, scanned: true },
+      })
+      expect((await stat(c.out)).mode & 0o777).toBe(0o600)
+      const { request: sealedRequest } = JSON.parse(await readFile(c.out, 'utf8')) as { request: string }
+      expect(JSON.parse(decryptStoredSecretValue(sealedRequest))).toMatchObject({
+        scanOpenId: 'next-open-' + f.user,
+        preparerId: f.admin,
+        approverId: approver,
+      })
+      expect(await capture(f, r.id)).toEqual(before)
+      // The named approver previews and executes the sealed request through the child; neither calls the provider.
+      const after = fake.log()
+      const previewed = await spawnCli(
+        f,
+        ['reanchor-preview', await privateInput('reanchor-l4-preview', { request: sealedRequest, actorId: approver, actorPassword: f.password })],
+        { ...nextApp, L4_FETCH_LOG: after },
+        false,
+        fake.preload,
+      )
+      expect(previewed).toMatchObject({ code: 0, stderr: '' })
+      expect(JSON.parse(previewed.stdout)).toEqual(summary)
+      const credentials = await liveCredentials(f)
+      const done = await spawnCli(
+        f,
+        [
+          'reanchor',
+          await privateInput('reanchor-l4-execute', {
+            request: sealedRequest,
+            actorId: approver,
+            actorPassword: f.password,
+            digest: summary.digest,
+            confirm: 'reanchor',
+          }),
+        ],
+        { ...nextApp, L4_FETCH_LOG: after },
+        false,
+        fake.preload,
+      )
+      expect(done).toMatchObject({ code: 0, stderr: '' })
+      expect(await fake.calls(after)).toEqual([])
+      const result = JSON.parse(done.stdout)
+      expect(result).toMatchObject({ predecessorId: r.id, releaseMode: 'canonical', loginClientChanged: true })
+      await credentials.expectRevoked()
+      expect(await repairRow(r.id)).toMatchObject({ state: 'superseded', rollback_actor_id: approver })
+      expect(await successorOf(r.id)).toEqual([
+        expect.objectContaining({ id: result.id, state: 'applied', approver_id: approver, login_client_id: 'next-app' }),
+      ])
+      expect(await auditOf(result.id)).toEqual([
+        {
+          action: 'reanchor',
+          action_details: {
+            actorId: approver,
+            preparerId: f.admin,
+            approverId: approver,
+            predecessorId: r.id,
+            successorId: result.id,
+            releaseMode: 'canonical',
+            reasons: ['login_scope'],
+            scanned: true,
+          },
+        },
+      ])
+      // The real OAuth login under the new app (in process, provider mocked to the same person) advances the pin.
+      expect((await exchangeCodeForUser('synthetic-fresh')).localUserId).toBe(f.user)
+      expect((await repairRow(result.id)).expected_identity).toMatchObject({ provider_open_id: 'next-open-' + f.user })
+      expect(await identityOf(f.user)).toEqual([
+        { row: expect.objectContaining({ provider_open_id: 'next-open-' + f.user, provider_union_id: 'new-union-' + f.user }) },
+      ])
+    }, 150000)
 
     it('through the documented `pnpm --silent` invocation: stdout is exactly the JSON on success, and a lock refusal keeps exit 75 and one code', async () => {
       const f = await fixture(),
