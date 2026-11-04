@@ -5603,6 +5603,15 @@ suite('DingTalk controlled login repair', () => {
       expect(await capture(f, r.id)).toEqual(before)
       expect(await successorOf(r.id)).toEqual([])
       expect(await journalRow(r.id)).toMatchObject({ state: 'applied', released_account_ids: null })
+      // Operator check after a non-zero exit (doc): the approver's preview of the same request still gives the same digest.
+      const recheck = await spawnCli(
+        f,
+        ['reanchor-preview', await privateInput('reanchor-l2-recheck', { request, actorId: approver, actorPassword: f.password })],
+        nextApp,
+      )
+      expect(recheck).toMatchObject({ code: 0, stderr: '' })
+      expect(JSON.parse(recheck.stdout)).toEqual({ ...summary, clientQueryTimeoutMs: 45000 })
+      expect(await capture(f, r.id)).toEqual(before)
     }, 120000)
 
     it('L3: a request sealed in process after a scan is previewed and executed by the child only under the same login scope; the first login then advances the pin', async () => {
