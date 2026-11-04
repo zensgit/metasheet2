@@ -435,6 +435,51 @@ describeIfDatabase('native local department-head backend', () => {
     expect((await resolve(f)).deptHeadChainIds).toEqual([f.next.localUserId])
   })
 
+  it('a padded account provider is not local and does not adopt the native head', async () => {
+    const f = await fixture()
+    await seedHead(f.head, f.department)
+    await query("UPDATE directory_accounts SET provider = ' local ' WHERE id = $1", [f.requester.id])
+    const watched = watchNativeHeadQueries()
+    const rel = await resolveApprovalRequesterOrgRelations(f.requester.localUserId!, watched.wrapped, {
+      orgId: f.org, includeDeptHeadChain: true,
+    })
+    expectNoNativeHead(rel, f.head.localUserId)
+    expect(watched.sql).toEqual([])
+  })
+
+  it('dingtalk account and department tags under a local integration do not adopt a local parent head', async () => {
+    const f = await fixture()
+    const parent = await department(f.org)
+    await member(f.next, parent, f.org)
+    await seedHead(f.next, parent)
+    await query('UPDATE directory_departments SET external_parent_department_id = $2 WHERE id = $1',
+      [f.department.id, parent.externalDepartmentId])
+    await query("UPDATE directory_accounts SET provider = 'dingtalk' WHERE id = $1", [f.requester.id])
+    await query("UPDATE directory_departments SET provider = 'dingtalk' WHERE id = $1", [f.department.id])
+    const watched = watchNativeHeadQueries()
+    const rel = await resolveApprovalRequesterOrgRelations(f.requester.localUserId!, watched.wrapped, {
+      orgId: f.org, includeDeptHeadChain: true,
+    })
+    expectNoNativeHead(rel, f.next.localUserId, f.head.localUserId)
+    expect(watched.sql).toEqual([])
+  })
+
+  it('a matching external provider keeps raw-list order and never reads the native head flag', async () => {
+    const f = await fixture()
+    await seedHead(f.head, f.department)
+    await query("UPDATE directory_integrations SET provider = 'dingtalk', corp_id = $2 WHERE id = $1", [f.integration, `synthetic-${randomUUID()}`])
+    await query("UPDATE directory_accounts SET provider = 'dingtalk' WHERE id = ANY($1::uuid[])", [[f.requester.id, f.manager.id, f.head.id, f.next.id]])
+    await query("UPDATE directory_departments SET provider = 'dingtalk', raw = $2::jsonb WHERE id = $1",
+      [f.department.id, JSON.stringify({ dept_manager_userid_list: [f.next.externalUserId, f.head.externalUserId] })])
+    const watched = watchNativeHeadQueries()
+    const rel = await resolveApprovalRequesterOrgRelations(f.requester.localUserId!, watched.wrapped, {
+      orgId: f.org, includeDeptHeadChain: true,
+    })
+    expect(rel.deptHeadId).toBe(f.next.localUserId)
+    expect(rel.deptHeadChainIds).toEqual([f.next.localUserId])
+    expect(watched.sql).toEqual([])
+  })
+
   async function pointPrimaryAt(accountId: string, fromDepartmentId: string, toDepartmentId: string): Promise<void> {
     await query(
       'UPDATE directory_account_departments SET is_primary = FALSE WHERE directory_account_id = $1 AND directory_department_id = $2',

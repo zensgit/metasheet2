@@ -42,7 +42,6 @@
 import {
   readNativeDepartmentHead,
   readNativeParentDepartmentHead,
-  resolveLocalDepartmentHead,
   type NativeDepartmentHeadRead,
 } from '../directory/local-directory-department-head'
 
@@ -266,6 +265,7 @@ interface RequesterDirectoryRow {
   title: string | null
   /** Present on the production requester SELECT. Absent only for legacy in-memory fixtures. */
   account_provider?: string | null
+  integration_provider?: string | null
   primary_department_id: string | null
   primary_department_active: boolean | null
   department_provider?: string | null
@@ -286,31 +286,40 @@ function blankIdentity(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null
 }
 
+/** Providers compare raw. A padded value such as ' local ' is not the local provider. */
+function rawProvider(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
 /**
- * Native head resolution is allowed only for the requester's exact department row.
- * A cross-integration edge, a cross-provider edge, or a blank identity rejects that
- * source instead of looking the department up again by external key. External
- * providers that actually match keep the legacy raw-list path. Fixture rows that
- * predate the identity columns stay on that legacy path.
+ * Native head resolution is allowed only when the account, the primary department, and the
+ * integration are the same non-empty provider and that provider is exactly `local`. Anything
+ * else that is not one matching external provider is rejected. External providers keep the
+ * raw-list order and never enter the native UUID lookup. Fixture rows that predate the
+ * identity columns stay on that raw-list path.
  */
 function classifyPrimaryDepartment(row: RequesterDirectoryRow): PrimaryDepartmentEdge {
   const externalDepartmentId = normalizeExternalId(row.primary_external_department_id)
   const identityColumnsPresent = 'account_provider' in row
     || 'department_provider' in row
+    || 'integration_provider' in row
     || 'department_integration_id' in row
   if (!identityColumnsPresent) return { kind: 'external', externalDepartmentId }
   const departmentId = blankIdentity(row.primary_department_id)
-  const accountProvider = blankIdentity(row.account_provider)
-  const departmentProvider = blankIdentity(row.department_provider)
+  const accountProvider = rawProvider(row.account_provider)
+  const departmentProvider = rawProvider(row.department_provider)
+  const integrationProvider = rawProvider(row.integration_provider)
   const accountIntegration = blankIdentity(row.integration_id)
   const departmentIntegration = blankIdentity(row.department_integration_id)
-  if (!departmentId || !accountProvider || !departmentProvider || !accountIntegration || !departmentIntegration) {
+  if (!departmentId || !accountProvider || !departmentProvider || !integrationProvider
+    || !accountIntegration || !departmentIntegration) {
     return { kind: 'rejected' }
   }
-  if (accountProvider !== departmentProvider || accountIntegration !== departmentIntegration) {
+  if (accountProvider !== departmentProvider || accountProvider !== integrationProvider
+    || accountIntegration !== departmentIntegration) {
     return { kind: 'rejected' }
   }
-  if (accountProvider === 'local') return { kind: 'native', departmentId, integrationId: accountIntegration }
+  if (integrationProvider === 'local') return { kind: 'native', departmentId, integrationId: accountIntegration }
   return { kind: 'external', externalDepartmentId }
 }
 
@@ -501,6 +510,7 @@ export async function resolveApprovalRequesterOrgRelations(
             a.raw                        AS raw,
             a.title                      AS title,
             a.provider                   AS account_provider,
+            i.provider                   AS integration_provider,
             d.id::text                   AS primary_department_id,
             d.is_active                  AS primary_department_active,
             d.provider                   AS department_provider,
@@ -513,6 +523,8 @@ export async function resolveApprovalRequesterOrgRelations(
          ON a.id = l.directory_account_id
         AND a.is_active = true
         AND a.integration_id = $2::uuid
+       JOIN directory_integrations i
+         ON i.id = a.integration_id
        LEFT JOIN directory_account_departments ad
          ON ad.directory_account_id = a.id
         AND ad.is_primary = true
@@ -532,6 +544,7 @@ export async function resolveApprovalRequesterOrgRelations(
                 a.raw                        AS raw,
                 a.title                      AS title,
                 a.provider                   AS account_provider,
+                di.provider                  AS integration_provider,
                 d.id::text                   AS primary_department_id,
                 d.is_active                  AS primary_department_active,
                 d.provider                   AS department_provider,
@@ -564,6 +577,7 @@ export async function resolveApprovalRequesterOrgRelations(
             a.raw                        AS raw,
             a.title                      AS title,
             a.provider                   AS account_provider,
+            i.provider                   AS integration_provider,
             d.id::text                   AS primary_department_id,
             d.is_active                  AS primary_department_active,
             d.provider                   AS department_provider,
@@ -575,6 +589,8 @@ export async function resolveApprovalRequesterOrgRelations(
        JOIN directory_accounts a
          ON a.id = l.directory_account_id
         AND a.is_active = true
+       JOIN directory_integrations i
+         ON i.id = a.integration_id
        LEFT JOIN directory_account_departments ad
          ON ad.directory_account_id = a.id
         AND ad.is_primary = true
@@ -612,30 +628,23 @@ export async function resolveApprovalRequesterOrgRelations(
     ? await resolveDirectManager(integrationId, requesterDeptId, requester.external_user_id, query)
     : undefined
 
-  // 3) Native heads are read once, by the primary department's exact UUID. A mismatched
-  //    provider or integration rejects that source for the single head and the chain; it does
-  //    not look the department up again by external key. Matching external providers keep the
-  //    raw dept_manager_userid_list order below.
+  // 3) Native heads are read once, by the primary department's exact UUID, and only after the
+  //    account, department, and integration providers are exactly `local`. A mismatch rejects
+  //    that source. A confirmed external provider keeps the raw dept_manager_userid_list order
+  //    and does not call the native resolver.
   let deptHeadId: string | undefined
   let nativePrimary: NativeDepartmentHeadRead | undefined
   if (primaryEdge.kind === 'native') {
     nativePrimary = await readNativeDepartmentHead(primaryEdge.integrationId, primaryEdge.departmentId, userId, query)
     if (nativePrimary.localDepartment) deptHeadId = nativePrimary.headId
   } else if (primaryEdge.kind === 'external') {
-    const localHead = requesterDeptId
-      ? await resolveLocalDepartmentHead(integrationId, requesterDeptId, userId, query)
-      : { localDepartment: false }
-    if (localHead.localDepartment) {
-      deptHeadId = localHead.headId
-    } else {
-      const deptManagerExternalIds = parseDeptManagerExternalIds(asRecord(requester.primary_department_raw))
-        .filter((external) => external !== requester.external_user_id)
-      for (const external of deptManagerExternalIds) {
-        const localId = await resolveLinkedLocalUserIdByExternal(integrationId, external, query)
-        if (localId) {
-          deptHeadId = localId
-          break
-        }
+    const deptManagerExternalIds = parseDeptManagerExternalIds(asRecord(requester.primary_department_raw))
+      .filter((external) => external !== requester.external_user_id)
+    for (const external of deptManagerExternalIds) {
+      const localId = await resolveLinkedLocalUserIdByExternal(integrationId, external, query)
+      if (localId) {
+        deptHeadId = localId
+        break
       }
     }
   }
@@ -920,20 +929,14 @@ async function resolveDeptHeadChain(
     const hop = await fetchDeptHop(integrationId, currentDeptExternalId, query)
     if (!hop) break
 
-    // Continue-past-empty-level: resolve THIS level's head without letting the outcome gate the
-    // next hop (set below, from `hop.parentExternalId`).
-    const localHead = await resolveLocalDepartmentHead(integrationId, currentDeptExternalId, requesterLocalId, query)
-    if (localHead.localDepartment) {
-      if (localHead.headId && !chain.includes(localHead.headId)) chain.push(localHead.headId)
-    } else {
-      const managerExternalIds = parseDeptManagerExternalIds(asRecord(hop.raw))
-        .filter((external) => external !== requesterExternalId)
-      for (const external of managerExternalIds) {
-        const localId = await resolveLinkedLocalUserIdByExternal(integrationId, external, query)
-        if (localId) {
-          if (localId !== requesterLocalId && !chain.includes(localId)) chain.push(localId)
-          break
-        }
+    // External providers keep the raw list order. This walk never consults the native head flag.
+    const managerExternalIds = parseDeptManagerExternalIds(asRecord(hop.raw))
+      .filter((external) => external !== requesterExternalId)
+    for (const external of managerExternalIds) {
+      const localId = await resolveLinkedLocalUserIdByExternal(integrationId, external, query)
+      if (localId) {
+        if (localId !== requesterLocalId && !chain.includes(localId)) chain.push(localId)
+        break
       }
     }
 

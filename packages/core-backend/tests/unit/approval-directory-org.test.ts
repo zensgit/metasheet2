@@ -336,7 +336,7 @@ describe('resolveApprovalRequesterOrgRelations', () => {
   })
 
   // ── S7 §3.3 org anchor (optional / backward compatible) ──
-  it('S7 §3.3: omitting orgId keeps the unscoped requester SELECT (no directory_integrations join)', async () => {
+  it('S7 §3.3: omitting orgId keeps the unscoped requester SELECT (reads integration.provider, no org anchor)', async () => {
     const db: FakeDb & { lastOrgIdParam?: string | null; lastRequesterSql?: string } = {
       requester: {
         integration_id: 'int-unscoped',
@@ -353,7 +353,8 @@ describe('resolveApprovalRequesterOrgRelations', () => {
     expect(result.managerId).toBe('local-mgr')
     expect(db.lastOrgIdParam).toBeNull()
     expect(db.lastRequesterSql).toBeTruthy()
-    expect(db.lastRequesterSql).not.toContain('directory_integrations')
+    expect(db.lastRequesterSql).toContain('i.provider')
+    expect(db.lastRequesterSql).not.toContain('di.org_id')
   })
 
   it('S7 §3.3: orgId anchors the requester-account pick BEFORE ORDER BY/LIMIT (join + $2)', async () => {
@@ -420,7 +421,8 @@ describe('resolveApprovalRequesterOrgRelations', () => {
     const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db), { orgId: '   ' })
     expect(result.managerId).toBe('local-mgr')
     expect(db.lastOrgIdParam).toBeNull()
-    expect(db.lastRequesterSql).not.toContain('directory_integrations')
+    expect(db.lastRequesterSql).toContain('i.provider')
+    expect(db.lastRequesterSql).not.toContain('di.org_id')
   })
 
   // ── S7 tenant boundary × B5-b policy probe (orgId scopes policy visibility) ──
@@ -701,8 +703,9 @@ describe('native department-head identity', () => {
     return {
       integration_id: 'int-home',
       account_id: 'acc-req',
-      account_provider: 'local',
-      external_user_id: 'ext-req',
+    account_provider: 'local',
+    integration_provider: 'local',
+    external_user_id: 'ext-req',
       raw: {},
       title: null,
       primary_department_id: 'dept-edge',
@@ -742,6 +745,8 @@ describe('native department-head identity', () => {
     ['blank department id', { primary_department_id: '   ' }],
     ['blank provider', { account_provider: ' ' }],
     ['blank integration', { department_integration_id: '' }],
+    ['padded account provider', { account_provider: ' local ' }],
+    ['dingtalk account and department under a local integration', { account_provider: 'dingtalk', department_provider: 'dingtalk' }],
   ])('rejects a %s primary edge instead of re-selecting by external key', async (_label, overrides) => {
     const watched = queryFor(requester(overrides))
     const rel = await resolveApprovalRequesterOrgRelations('local-req', watched.query, { includeDeptHeadChain: true })
