@@ -52,6 +52,9 @@ import {
   rollbackDingTalkRepair,
   previewDingTalkRepairRecovery,
   releaseDingTalkRepair,
+  requestDingTalkRepairReanchor,
+  previewDingTalkRepairReanchor,
+  reanchorDingTalkRepair,
 } from '../../src/auth/dingtalk-identity-repair'
 import { listUserPermissions } from '../../src/rbac/service'
 import { approvalPendingSource } from '../../src/services/approval-pending-source'
@@ -420,6 +423,7 @@ async function expectAllowedRelease(
   id: string,
   digest: string,
   mode: 'canonical' | 'termination',
+  account = f.account,
 ) {
   const authority = async () => {
     const out: unknown[] = []
@@ -456,8 +460,8 @@ async function expectAllowedRelease(
   await releaseWith(f, id, digest)
   expect(await journalRow(id)).toMatchObject({
     state: 'released',
-    released_account_ids: [f.account],
-    canonical_account_id: f.account,
+    released_account_ids: [account],
+    canonical_account_id: account,
   })
   expect(await authority()).toEqual(before)
   const sessionsAfter = await sessions()
@@ -477,6 +481,231 @@ async function expectAllowedRelease(
     { action: 'release', action_details: { actorId: f.admin, releaseMode: mode } },
   ])
 }
+/** A second active, activated administrator with a local password (the re-anchor approver). */
+async function secondAdmin(f: Fixture) {
+  const id = randomUUID()
+  await query(
+    `INSERT INTO users(id,username,name,password_hash,is_active,is_admin,activation_status,local_password_set) VALUES($1,$1,$1,$2,true,true,'activated',true)`,
+    [id, await bcrypt.hash(f.password, 4)],
+  )
+  return id
+}
+/** Production procedure: the login app switched in place on the integration that holds the canonical row. */
+async function switchLoginApp(
+  f: Fixture,
+  app = 'next-app',
+  profile = { openId: 'next-open-' + f.user, unionId: 'new-union-' + f.user },
+) {
+  provider.config.mockReturnValue({
+    corpId: f.corp,
+    clientId: app,
+    clientSecret: 'unused',
+    redirectUri: 'https://example.test/callback',
+  })
+  await query(
+    `UPDATE directory_integrations SET config = config || jsonb_build_object('appKey', $2::text) WHERE id=$1`,
+    [f.source, app],
+  )
+  provider.profile.mockResolvedValue(profile)
+  // f.verify() already called the provider once; "not called" assertions count from here.
+  provider.exchange.mockClear()
+}
+/** Production key shape: sync writes external_key = unionId, unique per corp. */
+const productionKey = (account: string) =>
+  query('UPDATE directory_accounts SET external_key=union_id WHERE id=$1', [
+    account,
+  ])
+const requestReanchor = (
+  f: Fixture,
+  id: string,
+  approver: string,
+  actor = f.admin,
+  code?: string,
+) => requestDingTalkRepairReanchor(id, actor, f.password, approver, code)
+const previewReanchor = (f: Fixture, request: string, actor: string) =>
+  previewDingTalkRepairReanchor(request, actor, f.password)
+const reanchorWith = (
+  f: Fixture,
+  request: string,
+  actor: string,
+  digest: string,
+) => reanchorDingTalkRepair(request, actor, f.password, digest, 'reanchor')
+const repairRow = async (id: string) =>
+  (await query('SELECT * FROM dingtalk_login_repairs WHERE id=$1', [id]))
+    .rows[0]
+const successorOf = async (id: string) =>
+  (
+    await query('SELECT * FROM dingtalk_login_repairs WHERE supersedes_id=$1', [
+      id,
+    ])
+  ).rows
+const auditOf = async (id: string) =>
+  (
+    await query(
+      "SELECT action,action_details FROM audit_logs WHERE resource_type='dingtalk_login_repairs' AND resource_id=$1 ORDER BY action",
+      [id],
+    )
+  ).rows
+const identityOf = async (user: string) =>
+  (
+    await query(
+      "SELECT to_jsonb(t) AS row FROM user_external_identities t WHERE provider='dingtalk' AND local_user_id=$1",
+      [user],
+    )
+  ).rows
+/**
+ * Everything a re-anchor must not write: identity, grant, links, directory rows of the corp, membership, roles,
+ * permissions, admissions, deprovision evidence, handovers and every user column except access_generation/updated_at.
+ */
+async function untouchedByReanchor(f: Fixture) {
+  const out: Record<string, unknown> = {}
+  const user = (
+    await query('SELECT to_jsonb(u) AS row FROM users u WHERE id=$1', [f.user])
+  ).rows[0].row as Record<string, unknown>
+  delete user.access_generation
+  delete user.updated_at
+  out.user = user
+  for (const [name, sql] of [
+    ['identities', "SELECT to_jsonb(t) AS row FROM user_external_identities t WHERE local_user_id=$1 ORDER BY to_jsonb(t)::text"],
+    ['grants', 'SELECT to_jsonb(t) AS row FROM user_external_auth_grants t WHERE local_user_id=$1 ORDER BY to_jsonb(t)::text'],
+    ['userLinks', 'SELECT to_jsonb(t) AS row FROM directory_account_links t WHERE local_user_id=$1 ORDER BY to_jsonb(t)::text'],
+    ['orgs', 'SELECT to_jsonb(t) AS row FROM user_orgs t WHERE user_id=$1 ORDER BY to_jsonb(t)::text'],
+    ['roles', 'SELECT to_jsonb(t) AS row FROM user_roles t WHERE user_id=$1 ORDER BY to_jsonb(t)::text'],
+    ['permissions', 'SELECT to_jsonb(t) AS row FROM user_permissions t WHERE user_id=$1 ORDER BY to_jsonb(t)::text'],
+    ['admissions', 'SELECT to_jsonb(t) AS row FROM user_namespace_admissions t WHERE user_id=$1 ORDER BY to_jsonb(t)::text'],
+    ['effects', 'SELECT to_jsonb(t) AS row FROM directory_deprovision_effects t WHERE local_user_id=$1 ORDER BY to_jsonb(t)::text'],
+    ['events', 'SELECT to_jsonb(t) AS row FROM directory_deprovision_events t WHERE local_user_id=$1 ORDER BY to_jsonb(t)::text'],
+  ])
+    out[name] = (await query(sql, [f.user])).rows
+  for (const [name, sql] of [
+    ['accounts', 'SELECT to_jsonb(t) AS row FROM directory_accounts t WHERE corp_id=$1 ORDER BY to_jsonb(t)::text'],
+    ['corpLinks', 'SELECT to_jsonb(l) AS row FROM directory_account_links l JOIN directory_accounts a ON a.id=l.directory_account_id WHERE a.corp_id=$1 ORDER BY to_jsonb(l)::text'],
+    ['integrations', 'SELECT to_jsonb(t) AS row FROM directory_integrations t WHERE corp_id=$1 ORDER BY to_jsonb(t)::text'],
+    ['handovers', 'SELECT to_jsonb(h) AS row FROM directory_handovers h JOIN directory_integrations i ON i.id=h.source_integration_id WHERE i.corp_id=$1 ORDER BY to_jsonb(h)::text'],
+  ])
+    out[name] = (await query(sql, [f.corp])).rows
+  out.effective = (await listUserPermissions(f.user, query)).sort()
+  return out
+}
+/**
+ * The full dual-controlled procedure: A requests naming a fresh admin B, B previews and executes. Besides the
+ * journal shape it checks what every journal transition must do: a live session and an unrevoked API token
+ * created before execute are revoked, access_generation rises by exactly 1 and the watermark advances; and
+ * nothing outside the journal, the generation, sessions, tokens and audit rows changes.
+ */
+async function reanchorFlow(f: Fixture, id: string, code?: string) {
+  const approver = await secondAdmin(f),
+    req = await requestReanchor(f, id, approver, f.admin, code)
+  const preview = await previewReanchor(f, req.request, approver)
+  expect(preview.digest).toBe(req.summary.digest)
+  expect(preview).toEqual(req.summary)
+  const predecessor = await repairRow(id)
+  const auditBefore = await auditOf(id)
+  const credentials = await liveCredentials(f)
+  const untouched = await untouchedByReanchor(f)
+  const done = await reanchorWith(f, req.request, approver, preview.digest)
+  await credentials.expectRevoked()
+  expect(await untouchedByReanchor(f)).toEqual(untouched)
+  expect(done).toMatchObject({
+    predecessorId: id,
+    releaseMode: req.summary.reanchor.releaseMode,
+    canonicalAccountId: req.summary.reanchor.canonicalAccountId,
+    loginClientChanged: req.summary.reanchor.loginClientChanged,
+    identityChanged: false,
+    permissionsChanged: false,
+    targetSessionsRevoked: true,
+  })
+  const ended = await repairRow(id)
+  expect(ended).toMatchObject({
+    state: 'superseded',
+    rollback_actor_id: approver,
+    supersedes_id: predecessor.supersedes_id,
+    approver_id: predecessor.approver_id,
+    actor_id: predecessor.actor_id,
+    expected_identity: predecessor.expected_identity,
+    before_identity: predecessor.before_identity,
+    source_account_ids: predecessor.source_account_ids,
+    canonical_account_id: predecessor.canonical_account_id,
+    released_account_ids: null,
+  })
+  expect(ended.rolled_back_at).toBeInstanceOf(Date)
+  const successors = await successorOf(id)
+  expect(successors).toHaveLength(1)
+  const successor = successors[0]
+  const sealed = JSON.parse(decryptStoredSecretValue(req.request))
+  expect(successor).toMatchObject({
+    id: done.id,
+    user_id: f.user,
+    state: 'applied',
+    supersedes_id: id,
+    actor_id: f.admin,
+    approver_id: approver,
+    proof_nonce: sealed.nonce,
+    login_client_id: provider.config().clientId,
+    canonical_account_id: req.summary.reanchor.canonicalAccountId,
+    source_account_ids: req.summary.reanchor.sourceAccountIds,
+    expected_identity: predecessor.expected_identity,
+    before_identity: predecessor.before_identity,
+    released_account_ids: null,
+    rollback_actor_id: null,
+  })
+  expect(successor.after_digest).not.toBe('pending')
+  const details = {
+    actorId: approver,
+    preparerId: f.admin,
+    approverId: approver,
+    predecessorId: id,
+    successorId: done.id,
+    releaseMode: req.summary.reanchor.releaseMode,
+    reasons: req.summary.reanchor.reasons,
+    scanned: req.summary.reanchor.scanned,
+  }
+  expect(await auditOf(id)).toEqual(
+    [...auditBefore, { action: 'superseded', action_details: details }].sort(
+      (a, b) => String(a.action).localeCompare(String(b.action)),
+    ),
+  )
+  expect(await auditOf(done.id)).toEqual([
+    { action: 'reanchor', action_details: details },
+  ])
+  return { approver, req, preview, done, successor }
+}
+/** A refusal against an applied successor writes nothing; its audit is only the reanchor row. */
+async function expectRefusedWithoutWriteOn(
+  f: Fixture,
+  id: string,
+  run: () => Promise<unknown>,
+  code: string,
+) {
+  const before = await capture(f, id)
+  await expect(run()).rejects.toThrow(exact(code))
+  const after = await capture(f, id)
+  expect(after).toEqual(before)
+  expect((after.audit as { action: string }[]).map((a) => a.action)).toEqual([
+    'reanchor',
+  ])
+  expect(await journalRow(id)).toMatchObject({
+    state: 'applied',
+    released_account_ids: null,
+  })
+}
+/** A refused re-anchor of the root writes nothing and leaves no successor. */
+async function expectReanchorRefused(
+  f: Fixture,
+  id: string,
+  run: () => Promise<unknown>,
+  code: string,
+) {
+  await expectRefusedWithoutWrite(f, id, run, code)
+  expect(await successorOf(id)).toEqual([])
+}
+/** The pre-apply identity of the fixture (old-open/old-union) as stored. */
+const originalIdentityShape = (f: Fixture) => ({
+  external_key: f.corp + ':old-open-' + f.user,
+  corp_id: f.corp,
+  provider_open_id: 'old-open-' + f.user,
+  provider_union_id: 'old-union-' + f.user,
+})
 suite('DingTalk controlled login repair', () => {
   it('verification and preview do not write rows, issue sessions, or return raw identifiers', async () => {
     const f = await fixture(),
@@ -2691,6 +2920,7 @@ suite('DingTalk controlled login repair', () => {
       },
     )
 
+    // Release still refuses these v1 dead ends; the separate re-anchor verb exits them ('controlled re-anchoring', R1-R5).
     it('a deleted original source refuses REPAIR_HISTORICAL_SOURCE_UNVERIFIED at preview and execute (v1 dead end)', async () => {
       const f = await fixture(),
         r = await applyRepair(f)
@@ -3569,6 +3799,1456 @@ suite('DingTalk controlled login repair', () => {
         () => releaseWith(f, r.id, preview.digest),
         'REPAIR_SOURCE_OUTSIDE_ALLOWLIST',
       )
+    })
+  })
+
+  describe('controlled re-anchoring', () => {
+    // Shape labels: PROD = product actions only; DBA = needs a directory row deletion no product path performs;
+    // LEGACY = two rows of one person in one corp, impossible for sync-written rows (unique corp + UnionID key).
+    /** Applied repair, then the login app switched in place (canonical mode: a scan is required). */
+    const loginAppSwitched = async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      await switchLoginApp(f)
+      return { f, r }
+    }
+    /** Applied repair, grant disabled, then the login app switched in place (termination: no scan). */
+    const revokedAndSwitched = async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      await query(
+        'UPDATE user_external_auth_grants SET enabled=false WHERE local_user_id=$1',
+        [f.user],
+      )
+      await switchLoginApp(f)
+      return { f, r }
+    }
+    /** Applied repair, recorded row unbound with the grant off (identity deleted), then the login app switched. */
+    const unboundAndSwitched = async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      await unbindDirectoryAccount(f.account, {
+        adminUserId: f.admin,
+        disableDingTalkGrant: true,
+      })
+      await switchLoginApp(f)
+      return { f, r }
+    }
+    /** A different-person inactive row linked before apply, later relinked to its rightful owner. */
+    const journalSourceOccupied = async () => {
+      const f = await fixture(),
+        other = await bareUser(),
+        stale = await addAccount(f.source, f.corp, 'stale-' + f.user, {
+          union: 'different-person',
+          active: false,
+        })
+      await link(stale, f.user)
+      const r = await applyRepair(f)
+      await query(
+        'UPDATE directory_account_links SET local_user_id=$2 WHERE directory_account_id=$1',
+        [stale, other],
+      )
+      provider.exchange.mockClear()
+      return { f, r, other, stale }
+    }
+    /** DBA shape: the recorded row deleted (grant off, identity unbound) and an unowned current-app replacement. */
+    const recordedRowReplaced = async (extra?: (f: Fixture, i2: string) => Promise<void>) => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      await unbindDirectoryAccount(f.account, {
+        adminUserId: f.admin,
+        disableDingTalkGrant: true,
+      })
+      await productionKey(f.account)
+      const i2 = await addIntegration(f, 'synthetic-current-app')
+      await query('DELETE FROM directory_accounts WHERE id=$1', [f.account])
+      const x = await addAccount(i2, f.corp, 'new-union-' + f.user, {
+        union: 'new-union-' + f.user,
+        open: 'new-open-' + f.user,
+      })
+      if (extra) await extra(f, i2)
+      provider.exchange.mockClear()
+      return { f, r, i2, x }
+    }
+    const linkOf = async (account: string) =>
+      (
+        await query(
+          'SELECT link_status,local_user_id FROM directory_account_links WHERE directory_account_id=$1',
+          [account],
+        )
+      ).rows
+
+    describe('stuck states are re-anchored and then released', () => {
+      it('R1 (PROD): login app switched in place, scan under the new app, first login advances the pin, release', async () => {
+        const { f, r } = await loginAppSwitched()
+        await expect(exchangeCodeForUser('synthetic-old-pin')).rejects.toMatchObject({
+          statusCode: 409,
+          code: 'repair_identity_mismatch',
+        })
+        await expect(releasePreview(f, r.id)).rejects.toThrow(
+          exact('REPAIR_LOGIN_SCOPE_CHANGED'),
+        )
+        const identityBefore = await identityOf(f.user)
+        provider.exchange.mockClear()
+        const flow = await reanchorFlow(f, r.id, 'synthetic-scan')
+        expect(provider.exchange).toHaveBeenCalledTimes(1)
+        expect(flow.req.summary.reanchor).toEqual({
+          releaseMode: 'canonical',
+          reasons: ['login_scope'],
+          loginClientChanged: true,
+          previousCanonicalAccountId: f.account,
+          canonicalAccountId: f.account,
+          canonicalLinked: true,
+          sourceAccountIds: [f.account],
+          droppedSourceAccountIds: [],
+          linkedDingTalkAccountIds: [f.account],
+          scanRequired: true,
+          scanned: true,
+        })
+        expect(flow.successor).toMatchObject({
+          login_client_id: 'next-app',
+          canonical_account_id: f.account,
+          source_account_ids: [f.account],
+          source_integration_ids: [f.source],
+        })
+        // C writes no identity: the scanned OpenID is checked, never stored.
+        expect(await identityOf(f.user)).toEqual(identityBefore)
+        expect((identityBefore[0].row as Record<string, unknown>).provider_open_id).toBe('new-open-' + f.user)
+        // The first real login under the new app advances the successor's pin and merges the new OpenID.
+        expect((await exchangeCodeForUser('synthetic-fresh')).localUserId).toBe(f.user)
+        expect((await identityOf(f.user))[0].row).toMatchObject({
+          provider_open_id: 'next-open-' + f.user,
+          provider_union_id: 'new-union-' + f.user,
+          external_key: f.corp + ':next-open-' + f.user,
+        })
+        expect((await repairRow(flow.done.id)).expected_identity).toMatchObject({
+          provider_open_id: 'next-open-' + f.user,
+          provider_union_id: 'new-union-' + f.user,
+          external_key: f.corp + ':next-open-' + f.user,
+        })
+        // The superseded predecessor keeps the pin it had.
+        expect((await repairRow(r.id)).expected_identity).toMatchObject({
+          provider_open_id: 'new-open-' + f.user,
+        })
+        const preview = await releasePreview(f, flow.done.id)
+        expect(preview.release).toMatchObject({
+          mode: 'canonical',
+          releasedAccountIds: [f.account],
+        })
+        await expectAllowedRelease(f, flow.done.id, preview.digest, 'canonical')
+      })
+
+      it('R2 (PROD): revoked user, login app switched: termination re-anchor without a scan, then release', async () => {
+        const { f, r } = await revokedAndSwitched()
+        const flow = await reanchorFlow(f, r.id)
+        expect(provider.exchange).not.toHaveBeenCalled()
+        expect(flow.req.summary.reanchor).toMatchObject({
+          releaseMode: 'termination',
+          reasons: ['login_scope'],
+          scanRequired: false,
+          scanned: false,
+          canonicalAccountId: f.account,
+          canonicalLinked: true,
+        })
+        const preview = await releasePreview(f, flow.done.id)
+        expect(preview.release).toMatchObject({
+          mode: 'termination',
+          releasedAccountIds: [f.account],
+        })
+        await expectAllowedRelease(f, flow.done.id, preview.digest, 'termination')
+        expect(
+          (await query('SELECT enabled FROM user_external_auth_grants WHERE local_user_id=$1', [f.user]))
+            .rows[0].enabled,
+        ).toBe(false)
+        await expect(exchangeCodeForUser('synthetic-after-release')).rejects.toMatchObject({
+          statusCode: 403,
+          code: 'grant_disabled',
+        })
+      })
+
+      it('R3 (PROD): unbound and revoked, login app switched: unlinked anchor, release, product bind restores login', async () => {
+        const { f, r } = await unboundAndSwitched()
+        const orgsBefore = (
+          await query('SELECT to_jsonb(t) AS row FROM user_orgs t WHERE user_id=$1 ORDER BY 1', [f.user])
+        ).rows
+        const flow = await reanchorFlow(f, r.id)
+        expect(flow.req.summary.reanchor).toMatchObject({
+          releaseMode: 'termination',
+          canonicalAccountId: f.account,
+          canonicalLinked: false,
+          sourceAccountIds: [f.account],
+          linkedDingTalkAccountIds: [],
+        })
+        expect(await identityOf(f.user)).toEqual([])
+        expect(await linkOf(f.account)).toEqual([{ link_status: 'unmatched', local_user_id: null }])
+        expect(
+          (await query('SELECT to_jsonb(t) AS row FROM user_orgs t WHERE user_id=$1 ORDER BY 1', [f.user])).rows,
+        ).toEqual(orgsBefore)
+        const preview = await releasePreview(f, flow.done.id)
+        await expectAllowedRelease(f, flow.done.id, preview.digest, 'termination')
+        expect(
+          await bindDirectoryAccount(f.account, {
+            localUserRef: f.user,
+            adminUserId: f.admin,
+            enableDingTalkGrant: true,
+          }),
+        ).toBeTruthy()
+        expect((await exchangeCodeForUser('synthetic-after-bind')).localUserId).toBe(f.user)
+        expect((await identityOf(f.user))[0].row).toMatchObject({
+          provider_open_id: 'next-open-' + f.user,
+        })
+      })
+
+      it('R4 (PROD): a journal row of another person now held by its owner is dropped; release follows', async () => {
+        const { f, r, other, stale } = await journalSourceOccupied()
+        await expect(releasePreview(f, r.id)).rejects.toThrow(
+          exact('REPAIR_DIRECTORY_OWNER_CONFLICT'),
+        )
+        const flow = await reanchorFlow(f, r.id)
+        expect(provider.exchange).not.toHaveBeenCalled()
+        expect(flow.req.summary.reanchor).toMatchObject({
+          releaseMode: 'canonical',
+          reasons: ['journal_source_occupied'],
+          canonicalAccountId: f.account,
+          sourceAccountIds: [f.account],
+          droppedSourceAccountIds: [stale],
+          scanRequired: false,
+        })
+        const preview = await releasePreview(f, flow.done.id)
+        await expectAllowedRelease(f, flow.done.id, preview.digest, 'canonical')
+        expect(await linkOf(stale)).toEqual([{ link_status: 'linked', local_user_id: other }])
+      })
+
+      it('R5 (DBA): recorded row deleted, unowned replacement in a second integration, termination, release, bind', async () => {
+        const f = await fixture(),
+          r = await applyRepair(f)
+        await unbindDirectoryAccount(f.account, {
+          adminUserId: f.admin,
+          disableDingTalkGrant: true,
+        })
+        await productionKey(f.account)
+        const i2 = await addIntegration(f, 'synthetic-current-app')
+        // One DingTalk row per corp + person while the original exists (unique provider, corp, external_key).
+        await expect(
+          addAccount(i2, f.corp, 'new-union-' + f.user, { union: 'new-union-' + f.user }),
+        ).rejects.toMatchObject({
+          code: '23505',
+          constraint: 'idx_directory_accounts_provider_corp_external_key',
+        })
+        await query('DELETE FROM directory_accounts WHERE id=$1', [f.account])
+        const x = await addAccount(i2, f.corp, 'new-union-' + f.user, {
+          union: 'new-union-' + f.user,
+          open: 'new-open-' + f.user,
+        })
+        await expect(releasePreview(f, r.id)).rejects.toThrow(
+          exact('REPAIR_HISTORICAL_SOURCE_UNVERIFIED'),
+        )
+        const flow = await reanchorFlow(f, r.id)
+        expect(flow.req.summary.reanchor).toMatchObject({
+          releaseMode: 'termination',
+          reasons: ['canonical_source'],
+          canonicalAccountId: x,
+          canonicalLinked: false,
+          sourceAccountIds: [x],
+          droppedSourceAccountIds: [f.account],
+        })
+        expect(flow.successor.source_integration_ids).toEqual([i2])
+        const preview = await releasePreview(f, flow.done.id)
+        expect(preview.release).toMatchObject({ mode: 'termination', releasedAccountIds: [x] })
+        await expectAllowedRelease(f, flow.done.id, preview.digest, 'termination', x)
+        expect(
+          await bindDirectoryAccount(x, {
+            localUserRef: f.user,
+            adminUserId: f.admin,
+            enableDingTalkGrant: true,
+          }),
+        ).toBeTruthy()
+        expect((await exchangeCodeForUser('synthetic-after-bind')).localUserId).toBe(f.user)
+        const second = await addAccount(f.source, f.corp, 'second-' + f.user, {
+          union: 'new-union-' + f.user + '-second',
+        })
+        await expect(link(second, f.user)).rejects.toMatchObject({ code: '55000' })
+      })
+
+      it('R6 (LEGACY): recorded row deleted, a same-person journal row linked and live: canonical re-anchor onto it', async () => {
+        const f = await fixture(),
+          dup = await addAccount(f.source, f.corp, 'dup-' + f.user, {
+            union: 'new-union-' + f.user,
+            active: false,
+          })
+        await link(dup, f.user)
+        const r = await applyRepair(f)
+        expect((await journalRow(r.id)).source_account_ids.sort()).toEqual([f.account, dup].sort())
+        await query('UPDATE directory_accounts SET is_active=true WHERE id=$1', [dup])
+        await query('DELETE FROM directory_accounts WHERE id=$1', [f.account])
+        await expect(releasePreview(f, r.id)).rejects.toThrow(
+          exact('REPAIR_CANONICAL_SOURCE_REQUIRED'),
+        )
+        provider.exchange.mockClear()
+        const flow = await reanchorFlow(f, r.id)
+        expect(provider.exchange).not.toHaveBeenCalled()
+        expect(flow.req.summary.reanchor).toMatchObject({
+          releaseMode: 'canonical',
+          reasons: ['canonical_source'],
+          scanRequired: false,
+          canonicalAccountId: dup,
+          canonicalLinked: true,
+          sourceAccountIds: [dup],
+          droppedSourceAccountIds: [f.account],
+        })
+        const preview = await releasePreview(f, flow.done.id)
+        await expectAllowedRelease(f, flow.done.id, preview.digest, 'canonical', dup)
+      })
+
+      it('R7 (PROD): a second app switch re-anchors the successor; the chain keeps one undo target', async () => {
+        const { f, r } = await loginAppSwitched()
+        const first = await reanchorFlow(f, r.id, 'synthetic-scan')
+        expect((await exchangeCodeForUser('synthetic-fresh')).localUserId).toBe(f.user)
+        await switchLoginApp(f, 'third-app', {
+          openId: 'third-open-' + f.user,
+          unionId: 'new-union-' + f.user,
+        })
+        await expect(exchangeCodeForUser('synthetic-old-app')).rejects.toMatchObject({
+          code: 'repair_identity_mismatch',
+        })
+        const second = await reanchorFlow(f, first.done.id, 'synthetic-scan-2')
+        expect(second.successor.supersedes_id).toBe(first.done.id)
+        const rows = [await repairRow(r.id), await repairRow(first.done.id), await repairRow(second.done.id)]
+        expect(rows.map((x) => x.state)).toEqual(['superseded', 'superseded', 'applied'])
+        expect(rows[1].supersedes_id).toBe(r.id)
+        expect(new Set(rows.map((x) => x.before_identity)).size).toBe(1)
+        expect((await exchangeCodeForUser('synthetic-third')).localUserId).toBe(f.user)
+        expect((await identityOf(f.user))[0].row).toMatchObject({
+          provider_open_id: 'third-open-' + f.user,
+        })
+      })
+
+      it('R8 (PROD): recorded row moved to another app with the login app unchanged: refused before any scan; restore and release', async () => {
+        const f = await fixture(),
+          r = await applyRepair(f),
+          approver = await secondAdmin(f)
+        await query(
+          `UPDATE directory_integrations SET config = config || '{"appKey":"wrong-app"}' WHERE id=$1`,
+          [f.source],
+        )
+        await expect(releasePreview(f, r.id)).rejects.toThrow(
+          exact('REPAIR_CANONICAL_SOURCE_REQUIRED'),
+        )
+        provider.exchange.mockClear()
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => requestReanchor(f, r.id, approver, f.admin, 'synthetic-scan'),
+          'REPAIR_PERSON_NOT_PROVEN',
+        )
+        expect(provider.exchange).not.toHaveBeenCalled()
+        await query(
+          `UPDATE directory_integrations SET config = config || '{"appKey":"synthetic-current-app"}' WHERE id=$1`,
+          [f.source],
+        )
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => requestReanchor(f, r.id, approver),
+          'REPAIR_REANCHOR_NOT_NEEDED',
+        )
+        const preview = await releasePreview(f, r.id)
+        await expectAllowedRelease(f, r.id, preview.digest, 'canonical')
+      })
+
+      it('R9 (PROD): login app switched but the integration not yet: refused before any scan; after the switch it succeeds', async () => {
+        const f = await fixture(),
+          r = await applyRepair(f),
+          approver = await secondAdmin(f)
+        provider.config.mockReturnValue({
+          corpId: f.corp,
+          clientId: 'next-app',
+          clientSecret: 'unused',
+          redirectUri: 'https://example.test/callback',
+        })
+        provider.profile.mockResolvedValue({ openId: 'next-open-' + f.user, unionId: 'new-union-' + f.user })
+        provider.exchange.mockClear()
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => requestReanchor(f, r.id, approver, f.admin, 'synthetic-scan'),
+          'REPAIR_PERSON_NOT_PROVEN',
+        )
+        expect(provider.exchange).not.toHaveBeenCalled()
+        await switchLoginApp(f)
+        const flow = await reanchorFlow(f, r.id, 'synthetic-scan')
+        expect(flow.req.summary.reanchor).toMatchObject({ reasons: ['login_scope'], scanned: true })
+        const preview = await releasePreview(f, flow.done.id)
+        await expectAllowedRelease(f, flow.done.id, preview.digest, 'canonical')
+      })
+    })
+
+    describe('refusals write nothing and leave no successor', () => {
+      it('N1: a healthy applied repair refuses REPAIR_REANCHOR_NOT_NEEDED (two admins cannot re-pin it)', async () => {
+        const f = await fixture(),
+          r = await applyRepair(f),
+          approver = await secondAdmin(f)
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => requestReanchor(f, r.id, approver),
+          'REPAIR_REANCHOR_NOT_NEEDED',
+        )
+        // Not even with a scan of the same person under the same app.
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => requestReanchor(f, r.id, approver, f.admin, 'synthetic-scan'),
+          'REPAIR_REANCHOR_NOT_NEEDED',
+        )
+      })
+
+      it('N2: an enterprise change refuses REPAIR_REANCHOR_CORP_CHANGED', async () => {
+        const f = await fixture(),
+          r = await applyRepair(f),
+          approver = await secondAdmin(f)
+        provider.config.mockReturnValue({
+          corpId: 'other-corp',
+          clientId: 'synthetic-current-app',
+          clientSecret: 'unused',
+          redirectUri: 'https://example.test/callback',
+        })
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => requestReanchor(f, r.id, approver),
+          'REPAIR_REANCHOR_CORP_CHANGED',
+        )
+      })
+
+      it('N3: the same administrator twice refuses REPAIR_DUAL_CONTROL_REQUIRED at request, preview and execute', async () => {
+        const { f, r } = await loginAppSwitched(),
+          b = await secondAdmin(f)
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => requestReanchor(f, r.id, f.admin, f.admin, 'synthetic-scan'),
+          'REPAIR_DUAL_CONTROL_REQUIRED',
+        )
+        const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => previewReanchor(f, req.request, f.admin),
+          'REPAIR_DUAL_CONTROL_REQUIRED',
+        )
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => reanchorWith(f, req.request, f.admin, req.summary.digest),
+          'REPAIR_DUAL_CONTROL_REQUIRED',
+        )
+      })
+
+      it('N4: the target as an administrator refuses REPAIR_DUAL_CONTROL_REQUIRED as preparer, approver and executor', async () => {
+        const { f, r } = await loginAppSwitched(),
+          b = await secondAdmin(f)
+        await query('UPDATE users SET is_admin=true WHERE id=$1', [f.user])
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => requestReanchor(f, r.id, b, f.user, 'synthetic-scan'),
+          'REPAIR_DUAL_CONTROL_REQUIRED',
+        )
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => requestReanchor(f, r.id, f.user, f.admin, 'synthetic-scan'),
+          'REPAIR_DUAL_CONTROL_REQUIRED',
+        )
+        expect(provider.exchange).not.toHaveBeenCalled()
+        const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => previewReanchor(f, req.request, f.user),
+          'REPAIR_DUAL_CONTROL_REQUIRED',
+        )
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => reanchorWith(f, req.request, f.user, req.summary.digest),
+          'REPAIR_DUAL_CONTROL_REQUIRED',
+        )
+      })
+
+      it('N5: only the named approver may preview and execute', async () => {
+        const { f, r } = await loginAppSwitched(),
+          b = await secondAdmin(f),
+          c = await secondAdmin(f)
+        const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => previewReanchor(f, req.request, c),
+          'REPAIR_DUAL_CONTROL_REQUIRED',
+        )
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => reanchorWith(f, req.request, c, req.summary.digest),
+          'REPAIR_DUAL_CONTROL_REQUIRED',
+        )
+      })
+
+      it('N6: any change between request and execute refuses REPAIR_RECOVERY_SNAPSHOT_CHANGED', async () => {
+        // (a) the target's users row (s.hash) changes before preview.
+        {
+          const { f, r } = await loginAppSwitched(),
+            b = await secondAdmin(f)
+          const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+          await query("UPDATE users SET role='admin' WHERE id=$1", [f.user])
+          await expectReanchorRefused(
+            f,
+            r.id,
+            () => previewReanchor(f, req.request, b),
+            'REPAIR_RECOVERY_SNAPSHOT_CHANGED',
+          )
+        }
+        // (b) a new person row (pinned OpenID, another app, unowned) between preview and execute.
+        {
+          const { f, r } = await loginAppSwitched(),
+            b = await secondAdmin(f)
+          const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+          await previewReanchor(f, req.request, b)
+          const o = await addIntegration(f, 'other-app')
+          await addAccount(o, f.corp, 'n6b-' + f.user, { open: 'new-open-' + f.user })
+          await expectReanchorRefused(
+            f,
+            r.id,
+            () => reanchorWith(f, req.request, b, req.summary.digest),
+            'REPAIR_RECOVERY_SNAPSHOT_CHANGED',
+          )
+        }
+        // (c) only the journal's pinned identity changes (identity row untouched, s.hash unchanged).
+        {
+          const { f, r } = await loginAppSwitched(),
+            b = await secondAdmin(f)
+          const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+          await previewReanchor(f, req.request, b)
+          await query(
+            `UPDATE dingtalk_login_repairs SET expected_identity = expected_identity || '{"external_key":"x"}' WHERE id=$1`,
+            [r.id],
+          )
+          await expectReanchorRefused(
+            f,
+            r.id,
+            () => reanchorWith(f, req.request, b, req.summary.digest),
+            'REPAIR_RECOVERY_SNAPSHOT_CHANGED',
+          )
+        }
+        // (d) a verified OAuth OpenID rotation advances the pin between preview and execute.
+        {
+          const { f, r } = await journalSourceOccupied(),
+            b = await secondAdmin(f)
+          const req = await requestReanchor(f, r.id, b)
+          await previewReanchor(f, req.request, b)
+          provider.profile.mockResolvedValue({ openId: 'rotated-' + f.user, unionId: 'new-union-' + f.user })
+          expect((await exchangeCodeForUser('synthetic-rotation')).localUserId).toBe(f.user)
+          expect((await repairRow(r.id)).expected_identity).toMatchObject({ provider_open_id: 'rotated-' + f.user })
+          await expectReanchorRefused(
+            f,
+            r.id,
+            () => reanchorWith(f, req.request, b, req.summary.digest),
+            'REPAIR_RECOVERY_SNAPSHOT_CHANGED',
+          )
+        }
+      })
+
+      it('N7: a wrong confirm or a digest other than the request\'s refuses REPAIR_APPROVAL_REQUIRED', async () => {
+        const { f, r } = await loginAppSwitched(),
+          b = await secondAdmin(f)
+        const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => reanchorDingTalkRepair(req.request, b, f.password, req.summary.digest, 'yes'),
+          'REPAIR_APPROVAL_REQUIRED',
+        )
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => reanchorWith(f, req.request, b, 'f'.repeat(64)),
+          'REPAIR_APPROVAL_REQUIRED',
+        )
+      })
+
+      it('N8: a login scope change after the request refuses REPAIR_PROOF_INVALID', async () => {
+        const { f, r } = await loginAppSwitched(),
+          b = await secondAdmin(f)
+        const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+        await previewReanchor(f, req.request, b)
+        provider.config.mockReturnValue({
+          corpId: f.corp,
+          clientId: 'third-app',
+          clientSecret: 'unused',
+          redirectUri: 'https://example.test/callback',
+        })
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => reanchorWith(f, req.request, b, req.summary.digest),
+          'REPAIR_PROOF_INVALID',
+        )
+      })
+
+      it('N9: this person\'s row held or hinted by another user refuses REPAIR_DIRECTORY_OWNER_CONFLICT, before the not-needed gate', async () => {
+        // (a) PROD: the person's only row now linked to another local account (moved person).
+        {
+          const { f, r } = await unboundAndSwitched(),
+            other = await bareUser(),
+            b = await secondAdmin(f)
+          await link(f.account, other)
+          await expectReanchorRefused(f, r.id, () => requestReanchor(f, r.id, b), 'REPAIR_DIRECTORY_OWNER_CONFLICT')
+        }
+        // (b) LEGACY: a same-UnionID twin pending/email to another user.
+        {
+          const { f, r } = await revokedAndSwitched(),
+            other = await bareUser(),
+            b = await secondAdmin(f)
+          const twin = await addAccount(f.source, f.corp, 'twin-' + f.user, { union: 'new-union-' + f.user })
+          await link(twin, other, 'pending', 'email')
+          await expectReanchorRefused(f, r.id, () => requestReanchor(f, r.id, b), 'REPAIR_DIRECTORY_OWNER_CONFLICT')
+        }
+        // (c) LEGACY: nothing stuck, a same-UnionID twin linked to another user: the conflict, not NOT_NEEDED.
+        {
+          const f = await fixture(),
+            r = await applyRepair(f),
+            other = await bareUser(),
+            b = await secondAdmin(f)
+          const twin = await addAccount(f.source, f.corp, 'twin-' + f.user, { union: 'new-union-' + f.user })
+          await link(twin, other)
+          await expectReanchorRefused(f, r.id, () => requestReanchor(f, r.id, b), 'REPAIR_DIRECTORY_OWNER_CONFLICT')
+        }
+        // (d) PROD: the row is linked to another user between preview and execute.
+        {
+          const { f, r } = await unboundAndSwitched(),
+            other = await bareUser(),
+            b = await secondAdmin(f)
+          const req = await requestReanchor(f, r.id, b)
+          await previewReanchor(f, req.request, b)
+          await link(f.account, other)
+          await expectReanchorRefused(
+            f,
+            r.id,
+            () => reanchorWith(f, req.request, b, req.summary.digest),
+            'REPAIR_DIRECTORY_OWNER_CONFLICT',
+          )
+        }
+      })
+
+      it('N10: another user holding this person\'s identity refuses REPAIR_IDENTITY_CONFLICT at request and execute', async () => {
+        const { f, r } = await unboundAndSwitched(),
+          other = await bareUser(),
+          b = await secondAdmin(f)
+        const plant = () =>
+          query(
+            `INSERT INTO user_external_identities(provider,external_key,local_user_id,corp_id,provider_open_id,provider_union_id) VALUES('dingtalk',$1,$2,$3,'x',$4)`,
+            [f.corp + ':x', other, f.corp, 'new-union-' + f.user],
+          )
+        await plant()
+        await expectReanchorRefused(f, r.id, () => requestReanchor(f, r.id, b), 'REPAIR_IDENTITY_CONFLICT')
+        await query('DELETE FROM user_external_identities WHERE local_user_id=$1', [other])
+        const req = await requestReanchor(f, r.id, b)
+        await previewReanchor(f, req.request, b)
+        await plant()
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => reanchorWith(f, req.request, b, req.summary.digest),
+          'REPAIR_IDENTITY_CONFLICT',
+        )
+      })
+
+      it('N11: a live link without a UnionID refuses REPAIR_DIRECTORY_UNION_ID_REQUIRED before the scan', async () => {
+        const { f, r } = await loginAppSwitched(),
+          b = await secondAdmin(f)
+        await query('UPDATE directory_accounts SET union_id=NULL WHERE id=$1', [f.account])
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => requestReanchor(f, r.id, b, f.admin, 'synthetic-scan'),
+          'REPAIR_DIRECTORY_UNION_ID_REQUIRED',
+        )
+        expect(provider.exchange).not.toHaveBeenCalled()
+      })
+
+      it.each([
+        ['a', 'a cross-app row with the pinned OpenID linked to another user', 'REPAIR_DIRECTORY_OWNER_CONFLICT', false],
+        ['b', 'a scan of another person', 'REPAIR_REANCHOR_PERSON_MISMATCH', true],
+        ['c', 'another user\'s identity with the scanned OpenID', 'REPAIR_IDENTITY_CONFLICT', true],
+        ['d', 'another user\'s directory row with the scanned OpenID', 'REPAIR_DIRECTORY_OWNER_CONFLICT', true],
+      ] as const)('N12(%s): %s refuses %s', async (variant, _name, code, exchanged) => {
+        const { f, r } = await loginAppSwitched(),
+          other = await bareUser(),
+          b = await secondAdmin(f)
+        if (variant === 'a') {
+          const o = await addIntegration(f, 'other-app')
+          const row = await addAccount(o, f.corp, 'n12a-' + f.user, {
+            open: 'new-open-' + f.user,
+            union: 'different-person',
+          })
+          await link(row, other)
+        }
+        if (variant === 'b')
+          provider.profile.mockResolvedValue({ openId: 'next-open-' + f.user, unionId: 'different-person' })
+        if (variant === 'c')
+          await query(
+            `INSERT INTO user_external_identities(provider,external_key,local_user_id,corp_id,provider_open_id,provider_union_id) VALUES('dingtalk',$1,$2,$3,$4,'other-union')`,
+            [f.corp + ':next-open-' + f.user, other, f.corp, 'next-open-' + f.user],
+          )
+        if (variant === 'd') {
+          const row = await addAccount(f.source, f.corp, 'n12d-' + f.user, {
+            open: 'next-open-' + f.user,
+            union: 'n12d-union',
+          })
+          await link(row, other)
+        }
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => requestReanchor(f, r.id, b, f.admin, 'synthetic-scan'),
+          code,
+        )
+        expect(provider.exchange).toHaveBeenCalledTimes(exchanged ? 1 : 0)
+      })
+
+      it('N13 (LEGACY): two fitting anchor rows refuse REPAIR_CANONICAL_SOURCE_REQUIRED; a live row beats an inactive one', async () => {
+        // (a) canonical mode: two same-UnionID journal rows linked and live, the recorded row deleted.
+        {
+          const f = await fixture(),
+            dup1 = await addAccount(f.source, f.corp, 'dup1-' + f.user, { union: 'new-union-' + f.user, active: false }),
+            dup2 = await addAccount(f.source, f.corp, 'dup2-' + f.user, { union: 'new-union-' + f.user, active: false })
+          await link(dup1, f.user)
+          await link(dup2, f.user)
+          const r = await applyRepair(f),
+            b = await secondAdmin(f)
+          await query('UPDATE directory_accounts SET is_active=true WHERE id=ANY($1::uuid[])', [[dup1, dup2]])
+          await query('DELETE FROM directory_accounts WHERE id=$1', [f.account])
+          await expectReanchorRefused(f, r.id, () => requestReanchor(f, r.id, b), 'REPAIR_CANONICAL_SOURCE_REQUIRED')
+        }
+        // (b) termination: two live unowned current-app replacements.
+        {
+          const { f, r } = await recordedRowReplaced(async (f2, i2) => {
+            await addAccount(i2, f2.corp, 'x2-' + f2.user, { union: 'new-union-' + f2.user })
+          })
+          const b = await secondAdmin(f)
+          await expectReanchorRefused(f, r.id, () => requestReanchor(f, r.id, b), 'REPAIR_CANONICAL_SOURCE_REQUIRED')
+        }
+        // (c) control: one live and one inactive replacement: the live row is the anchor.
+        {
+          const { f, r, x } = await recordedRowReplaced(async (f2, i2) => {
+            await addAccount(i2, f2.corp, 'x2-' + f2.user, { union: 'new-union-' + f2.user, active: false })
+          })
+          const b = await secondAdmin(f)
+          const req = await requestReanchor(f, r.id, b)
+          expect(req.summary.reanchor).toMatchObject({ canonicalAccountId: x, sourceAccountIds: [x] })
+        }
+      })
+
+      it('N14: an applied handover on the old or the new integration refuses REPAIR_HANDOVER_ACTIVE before the scan', async () => {
+        const handover = async (f: Fixture, source: string) => {
+          const target = await addIntegration(f, 'handover-target')
+          await query(
+            `INSERT INTO directory_handovers(source_integration_id,target_integration_id,state,before_state,after_digest,created_by,updated_by) VALUES($1,$2,'applied','{}','synthetic',$3,$3)`,
+            [source, target, f.admin],
+          )
+        }
+        {
+          const { f, r } = await loginAppSwitched(),
+            b = await secondAdmin(f)
+          await handover(f, f.source)
+          await expectReanchorRefused(
+            f,
+            r.id,
+            () => requestReanchor(f, r.id, b, f.admin, 'synthetic-scan'),
+            'REPAIR_HANDOVER_ACTIVE',
+          )
+          expect(provider.exchange).not.toHaveBeenCalled()
+        }
+        {
+          const { f, r, i2 } = await recordedRowReplaced()
+          const b = await secondAdmin(f)
+          await handover(f, i2)
+          await expectReanchorRefused(f, r.id, () => requestReanchor(f, r.id, b), 'REPAIR_HANDOVER_ACTIVE')
+        }
+      })
+
+      it('N15: an expired, far-future, wrong-purpose or v1 token refuses REPAIR_PROOF_INVALID; v1 preview refuses a request', async () => {
+        const f = await fixture(),
+          proof = await f.verify(),
+          p = await previewDingTalkRepair(proof),
+          r = await applyDingTalkRepair(proof, p.digest, 'apply')
+        await switchLoginApp(f)
+        const b = await secondAdmin(f)
+        const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+        const raw = JSON.parse(decryptStoredSecretValue(req.request))
+        const reseal = (o: Record<string, unknown>) => encryptStoredSecretValue(JSON.stringify({ ...raw, ...o }))
+        for (const token of [
+          reseal({ expires: Date.now() - 1 }),
+          reseal({ expires: Date.now() + 2 * 600000 }),
+          reseal({ purpose: 'dingtalk-login-repair-v2' }),
+          reseal({ nonce: 'not-a-uuid' }),
+          proof,
+          '{}',
+        ]) {
+          await expectReanchorRefused(f, r.id, () => previewReanchor(f, token, b), 'REPAIR_PROOF_INVALID')
+          await expectReanchorRefused(
+            f,
+            r.id,
+            () => reanchorWith(f, token, b, req.summary.digest),
+            'REPAIR_PROOF_INVALID',
+          )
+        }
+        await expectReanchorRefused(f, r.id, () => previewDingTalkRepair(req.request), 'REPAIR_PROOF_INVALID')
+      })
+
+      it('N16: a replayed or concurrent execution commits one successor; a nonce copy is refused by the database', async () => {
+        const { f, r } = await loginAppSwitched()
+        const flow = await reanchorFlow(f, r.id, 'synthetic-scan')
+        const before = await capture(f, flow.done.id)
+        await expect(
+          reanchorWith(f, flow.req.request, flow.approver, flow.req.summary.digest),
+        ).rejects.toThrow(exact('REPAIR_NOT_ACTIVE'))
+        expect(await capture(f, flow.done.id)).toEqual(before)
+        await expect(
+          query(
+            `INSERT INTO dingtalk_login_repairs(id,user_id,proof_nonce,state,before_identity,expected_identity,after_digest,actor_id,source_account_ids,source_integration_ids,canonical_account_id,login_client_id) SELECT $2::uuid,user_id,proof_nonce,'rolled_back',before_identity,expected_identity,after_digest,actor_id,source_account_ids,source_integration_ids,canonical_account_id,login_client_id FROM dingtalk_login_repairs WHERE id=$1`,
+            [flow.done.id, randomUUID()],
+          ),
+        ).rejects.toMatchObject({ code: '23505', constraint: 'dingtalk_login_repairs_proof_nonce_key' })
+        // Two executions of one approved request at once.
+        const g = await loginAppSwitched(),
+          b = await secondAdmin(g.f)
+        const req = await requestReanchor(g.f, g.r.id, b, g.f.admin, 'synthetic-scan')
+        const settled = await Promise.allSettled([
+          reanchorWith(g.f, req.request, b, req.summary.digest),
+          reanchorWith(g.f, req.request, b, req.summary.digest),
+        ])
+        expect(settled.filter((s) => s.status === 'fulfilled')).toHaveLength(1)
+        const rejected = settled.find((s) => s.status === 'rejected') as PromiseRejectedResult
+        expect(String(rejected.reason.message)).toMatch(/^(REPAIR_NOT_ACTIVE|REPAIR_LOCK_BUSY)$/)
+        expect(await successorOf(g.r.id)).toHaveLength(1)
+      })
+
+      it('N17: the preparer\'s credential changing after the request refuses at preview and execute', async () => {
+        {
+          const { f, r } = await loginAppSwitched(),
+            b = await secondAdmin(f)
+          const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+          await query('UPDATE users SET password_hash=$2 WHERE id=$1', [f.admin, await bcrypt.hash(f.password, 4)])
+          await expectReanchorRefused(f, r.id, () => previewReanchor(f, req.request, b), 'REPAIR_OPERATOR_CHANGED')
+          await expectReanchorRefused(
+            f,
+            r.id,
+            () => reanchorWith(f, req.request, b, req.summary.digest),
+            'REPAIR_OPERATOR_CHANGED',
+          )
+        }
+        {
+          const { f, r } = await loginAppSwitched(),
+            b = await secondAdmin(f)
+          const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+          await query('UPDATE users SET is_active=false WHERE id=$1', [f.admin])
+          await expectReanchorRefused(f, r.id, () => previewReanchor(f, req.request, b), 'REPAIR_OPERATOR_REQUIRED')
+          await expectReanchorRefused(
+            f,
+            r.id,
+            () => reanchorWith(f, req.request, b, req.summary.digest),
+            'REPAIR_OPERATOR_REQUIRED',
+          )
+        }
+      })
+
+      it('N18: the approver must be an eligible administrator and authenticate with their own password', async () => {
+        const { f, r } = await loginAppSwitched(),
+          b = await secondAdmin(f)
+        const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => previewDingTalkRepairReanchor(req.request, b, 'wrong-password'),
+          'REPAIR_OPERATOR_CREDENTIAL_REQUIRED',
+        )
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => reanchorDingTalkRepair(req.request, b, 'wrong-password', req.summary.digest, 'reanchor'),
+          'REPAIR_OPERATOR_CREDENTIAL_REQUIRED',
+        )
+        provider.exchange.mockClear()
+        const notAdmin = await bareUser()
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => requestReanchor(f, r.id, notAdmin, f.admin, 'synthetic-scan'),
+          'REPAIR_OPERATOR_REQUIRED',
+        )
+        expect(provider.exchange).not.toHaveBeenCalled()
+        await query('UPDATE users SET is_admin=false WHERE id=$1', [b])
+        await expectReanchorRefused(f, r.id, () => previewReanchor(f, req.request, b), 'REPAIR_OPERATOR_REQUIRED')
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => reanchorWith(f, req.request, b, req.summary.digest),
+          'REPAIR_OPERATOR_REQUIRED',
+        )
+      })
+
+      it('N19: canonical mode after an app change needs a scan at request, preview and execute', async () => {
+        const { f, r } = await loginAppSwitched(),
+          b = await secondAdmin(f)
+        await expectReanchorRefused(f, r.id, () => requestReanchor(f, r.id, b), 'REPAIR_REANCHOR_SCAN_REQUIRED')
+        expect(provider.exchange).not.toHaveBeenCalled()
+        const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+        const unscanned = encryptStoredSecretValue(
+          JSON.stringify({ ...JSON.parse(decryptStoredSecretValue(req.request)), scanOpenId: null }),
+        )
+        await expectReanchorRefused(f, r.id, () => previewReanchor(f, unscanned, b), 'REPAIR_REANCHOR_SCAN_REQUIRED')
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => reanchorWith(f, unscanned, b, req.summary.digest),
+          'REPAIR_REANCHOR_SCAN_REQUIRED',
+        )
+      })
+
+      it('N20: an incomplete scan profile refuses REPAIR_PROFILE_INCOMPLETE', async () => {
+        const { f, r } = await loginAppSwitched(),
+          b = await secondAdmin(f)
+        provider.profile.mockResolvedValue({ openId: 'x' })
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => requestReanchor(f, r.id, b, f.admin, 'synthetic-scan'),
+          'REPAIR_PROFILE_INCOMPLETE',
+        )
+      })
+
+      it('N21: a mode flip (grant re-enabled) after a termination request refuses REPAIR_RECOVERY_SNAPSHOT_CHANGED', async () => {
+        const { f, r } = await revokedAndSwitched(),
+          b = await secondAdmin(f)
+        const req = await requestReanchor(f, r.id, b)
+        expect(req.summary.reanchor.releaseMode).toBe('termination')
+        await query('UPDATE user_external_auth_grants SET enabled=true WHERE local_user_id=$1', [f.user])
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => reanchorWith(f, req.request, b, req.summary.digest),
+          'REPAIR_RECOVERY_SNAPSHOT_CHANGED',
+        )
+      })
+
+      it('N22: a conflicting core-table lock past lock_timeout refuses REPAIR_LOCK_BUSY and writes nothing', async () => {
+        const { f, r } = await loginAppSwitched(),
+          b = await secondAdmin(f)
+        const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+        await previewReanchor(f, req.request, b)
+        const holder = await pool!.connect()
+        try {
+          await holder.query('BEGIN')
+          await holder.query('LOCK TABLE roles IN SHARE UPDATE EXCLUSIVE MODE')
+          await expectReanchorRefused(
+            f,
+            r.id,
+            () => reanchorWith(f, req.request, b, req.summary.digest),
+            'REPAIR_LOCK_BUSY',
+          )
+        } finally {
+          await holder.query('ROLLBACK').catch(() => undefined)
+          holder.release()
+        }
+      })
+
+      it('N23: released and rolled-back repairs refuse REPAIR_NOT_ACTIVE', async () => {
+        for (const action of ['release', 'rollback'] as const) {
+          const f = await fixture(),
+            r = await applyRepair(f),
+            b = await secondAdmin(f)
+          const preview = await previewDingTalkRepairRecovery(r.id, f.admin, f.password, action)
+          await (action === 'release' ? releaseDingTalkRepair : rollbackDingTalkRepair)(
+            r.id,
+            f.admin,
+            preview.digest,
+            action,
+            f.password,
+          )
+          await switchLoginApp(f)
+          const before = await capture(f, r.id)
+          await expect(requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')).rejects.toThrow(
+            exact('REPAIR_NOT_ACTIVE'),
+          )
+          expect(await capture(f, r.id)).toEqual(before)
+          expect(await successorOf(r.id)).toEqual([])
+          expect(provider.exchange).not.toHaveBeenCalled()
+        }
+      })
+
+      it('N24 (PROD, rare): canonical mode with the recorded row unlinked refuses REPAIR_PERSON_NOT_PROVEN until rebound', async () => {
+        const f = await fixture(),
+          r = await applyRepair(f),
+          b = await secondAdmin(f)
+        await unbindDirectoryAccount(f.account, { adminUserId: f.admin })
+        expect(await identityOf(f.user)).toEqual([])
+        // An email first association re-creates the identity (the insert guard admits exactly the pin).
+        await query(
+          `INSERT INTO user_external_identities(provider,external_key,local_user_id,corp_id,provider_open_id,provider_union_id) VALUES('dingtalk',$1,$2,$3,$4,$5)`,
+          [f.corp + ':new-open-' + f.user, f.user, f.corp, 'new-open-' + f.user, 'new-union-' + f.user],
+        )
+        await switchLoginApp(f)
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => requestReanchor(f, r.id, b, f.admin, 'synthetic-scan'),
+          'REPAIR_PERSON_NOT_PROVEN',
+        )
+        expect(provider.exchange).not.toHaveBeenCalled()
+        expect(
+          await bindDirectoryAccount(f.account, {
+            localUserRef: f.user,
+            adminUserId: f.admin,
+            enableDingTalkGrant: true,
+          }),
+        ).toBeTruthy()
+        const flow = await reanchorFlow(f, r.id, 'synthetic-scan')
+        expect(flow.req.summary.reanchor).toMatchObject({ releaseMode: 'canonical', canonicalLinked: true })
+      })
+
+      it('N25: request and preview write nothing (with and without a scan)', async () => {
+        for (const setup of [loginAppSwitched, revokedAndSwitched]) {
+          const { f, r } = await setup(),
+            b = await secondAdmin(f)
+          const sessionsAndTokens = async () => [
+            (await query('SELECT to_jsonb(t) AS row FROM user_sessions t WHERE user_id=$1 ORDER BY 1', [f.user])).rows,
+            (await query('SELECT to_jsonb(t) AS row FROM multitable_api_tokens t WHERE created_by=$1 ORDER BY 1', [f.user]))
+              .rows,
+            (
+              await query(
+                "SELECT count(*)::int AS n FROM audit_logs WHERE resource_type='dingtalk_login_repairs' AND user_name=ANY($1::text[])",
+                [[f.admin, b]],
+              )
+            ).rows,
+          ]
+          const before = await capture(f, r.id),
+            other = await sessionsAndTokens(),
+            untouched = await untouchedByReanchor(f),
+            generation = await accessGeneration(f.user)
+          const code = setup === loginAppSwitched ? 'synthetic-scan' : undefined
+          const req = await requestReanchor(f, r.id, b, f.admin, code)
+          await previewReanchor(f, req.request, b)
+          // A scan offered where none is required is still exchanged and checked, and still writes nothing.
+          if (!code) await requestReanchor(f, r.id, b, f.admin, 'synthetic-optional-scan')
+          expect(await capture(f, r.id)).toEqual(before)
+          expect(await sessionsAndTokens()).toEqual(other)
+          expect(await untouchedByReanchor(f)).toEqual(untouched)
+          expect(await accessGeneration(f.user)).toBe(generation)
+          expect(await successorOf(r.id)).toEqual([])
+        }
+      })
+    })
+
+    describe('database chain guard (direct SQL and the transaction() wrapper)', () => {
+      const supersede = (id: string, by: string): [string, unknown[]] => [
+        "UPDATE dingtalk_login_repairs SET state='superseded',rollback_actor_id=$2,rolled_back_at=now() WHERE id=$1",
+        [id, by],
+      ]
+      type Over = {
+        id?: string
+        nonce?: string
+        state?: string
+        before?: string
+        expected?: unknown
+        sources?: string[]
+        integrations?: string[]
+        canonical?: string
+        actor?: string
+        approver?: string | null
+        supersedes?: string | null
+      }
+      /** A copy of `from` as a successor; every override replaces one column. */
+      const successor = (from: string, f: Fixture, admin2: string, o: Over = {}): [string, unknown[]] => [
+        `INSERT INTO dingtalk_login_repairs(id,user_id,proof_nonce,state,before_identity,expected_identity,after_digest,actor_id,approver_id,supersedes_id,source_account_ids,source_integration_ids,canonical_account_id,login_client_id) SELECT $1::uuid,user_id,$2::uuid,$3::text,COALESCE($4::text,before_identity),COALESCE($5::jsonb,expected_identity),'pending',$6::text,$7::text,$8::uuid,COALESCE($9::uuid[],source_account_ids),COALESCE($10::uuid[],source_integration_ids),COALESCE($11::uuid,canonical_account_id),login_client_id FROM dingtalk_login_repairs WHERE id=$12::uuid`,
+        [
+          o.id ?? randomUUID(),
+          o.nonce ?? randomUUID(),
+          o.state ?? 'applied',
+          o.before ?? null,
+          o.expected === undefined ? null : JSON.stringify(o.expected),
+          o.actor ?? f.admin,
+          o.approver === undefined ? admin2 : o.approver,
+          o.supersedes === undefined ? from : o.supersedes,
+          o.sources ?? null,
+          o.integrations ?? null,
+          o.canonical ?? null,
+          from,
+        ],
+      ]
+      /** Runs the statements in one pool-client transaction; a failure carries the stage it happened at. */
+      async function viaClient(statements: [string, unknown[]][]) {
+        const c = await pool!.connect()
+        let stage = 'BEGIN'
+        try {
+          await c.query('BEGIN')
+          for (const [i, [sql, args]] of statements.entries()) {
+            stage = `statement ${i}`
+            await c.query(sql, args)
+          }
+          stage = 'COMMIT'
+          await c.query('COMMIT')
+        } catch (error) {
+          await c.query('ROLLBACK').catch(() => undefined)
+          throw Object.assign(error as object, { stage })
+        } finally {
+          c.release()
+        }
+      }
+      /** The same statements through the repo's transaction() wrapper (COMMIT inside its try, ROLLBACK on error). */
+      const viaWrapper = (statements: [string, unknown[]][]) =>
+        pg.transaction(async (c) => {
+          for (const [sql, args] of statements) await c.query(sql, args)
+        })
+      const setup = async () => {
+        const f = await fixture(),
+          r = await applyRepair(f),
+          admin2 = await secondAdmin(f)
+        return { f, r, admin2 }
+      }
+      /** Both paths fail with `code` (at COMMIT for the deferred guard) and persist nothing. */
+      async function expectNothingPersisted(
+        f: Fixture,
+        id: string,
+        statements: () => [string, unknown[]][],
+        expected: { code: string; message?: string; constraint?: string; stage: string },
+      ) {
+        const { stage, ...shape } = expected
+        const rowBefore = await repairRow(id)
+        const journalBefore = (
+          await query('SELECT to_jsonb(t) AS row FROM dingtalk_login_repairs t WHERE user_id=$1 ORDER BY 1', [f.user])
+        ).rows
+        await expect(viaClient(statements())).rejects.toMatchObject({ ...shape, stage })
+        await expect(viaWrapper(statements())).rejects.toMatchObject(shape)
+        expect(await repairRow(id)).toEqual(rowBefore)
+        expect(
+          (
+            await query('SELECT to_jsonb(t) AS row FROM dingtalk_login_repairs t WHERE user_id=$1 ORDER BY 1', [f.user])
+          ).rows,
+        ).toEqual(journalBefore)
+      }
+      const chainRefused = { code: '55000', message: 'a superseded login repair needs its same-person successor', stage: 'COMMIT' }
+
+      it('G1: a correct successor commits through both paths, and the fence then reads the successor', async () => {
+        const { f, r, admin2 } = await setup()
+        const x = await addAccount(f.source, f.corp, 'g1-' + f.user, { union: 'new-union-' + f.user })
+        await expect(link(x, f.user)).rejects.toMatchObject({ code: '55000' })
+        const id = randomUUID()
+        await viaClient([
+          supersede(r.id, admin2),
+          successor(r.id, f, admin2, { id, sources: [f.account, x], integrations: [f.source, f.source], canonical: x }),
+        ])
+        expect(await repairRow(r.id)).toMatchObject({ state: 'superseded' })
+        expect(await repairRow(id)).toMatchObject({ state: 'applied', supersedes_id: r.id, canonical_account_id: x })
+        await expect(link(x, f.user)).resolves.toBeDefined()
+        // The wrapper path commits a correct chain link too.
+        const g = await setup()
+        await viaWrapper([supersede(g.r.id, g.admin2), successor(g.r.id, g.f, g.admin2)])
+        expect((await successorOf(g.r.id)).map((s) => s.state)).toEqual(['applied'])
+      })
+
+      it('G2: a supersede with no successor fails at the implicit commit of an autocommit statement', async () => {
+        const { r, admin2 } = await setup()
+        const [sql, args] = supersede(r.id, admin2)
+        await expect(query(sql, args)).rejects.toMatchObject({
+          code: '55000',
+          message: 'a superseded login repair needs its same-person successor',
+        })
+        expect(await repairRow(r.id)).toMatchObject({ state: 'applied', rollback_actor_id: null })
+      })
+
+      it('G3: a successor pinning another person fails at COMMIT', async () => {
+        const { f, r, admin2 } = await setup()
+        const expected = { ...(await repairRow(r.id)).expected_identity, provider_union_id: 'different-person' }
+        await expectNothingPersisted(
+          f,
+          r.id,
+          () => [supersede(r.id, admin2), successor(r.id, f, admin2, { expected })],
+          chainRefused,
+        )
+      })
+
+      it('G4: a successor with a different undo ciphertext (same value, resealed) fails at COMMIT', async () => {
+        const { f, r, admin2 } = await setup()
+        const sealed = String((await repairRow(r.id)).before_identity)
+        const resealed = encryptStoredSecretValue(decryptStoredSecretValue(sealed))
+        expect(resealed).not.toBe(sealed)
+        await expectNothingPersisted(
+          f,
+          r.id,
+          () => [supersede(r.id, admin2), successor(r.id, f, admin2, { before: resealed })],
+          chainRefused,
+        )
+      })
+
+      it('G5: a successor adding a source besides its own canonical row fails at COMMIT', async () => {
+        const { f, r, admin2 } = await setup()
+        const extra = await addAccount(f.source, f.corp, 'g5-' + f.user, { union: 'new-union-' + f.user })
+        await expectNothingPersisted(
+          f,
+          r.id,
+          () => [
+            supersede(r.id, admin2),
+            successor(r.id, f, admin2, { sources: [f.account, extra], integrations: [f.source, f.source] }),
+          ],
+          chainRefused,
+        )
+      })
+
+      it('G6: superseding a rolled-back or released row fails at COMMIT', async () => {
+        for (const action of ['rollback', 'release'] as const) {
+          const { f, r, admin2 } = await setup()
+          const preview = await previewDingTalkRepairRecovery(r.id, f.admin, f.password, action)
+          await (action === 'release' ? releaseDingTalkRepair : rollbackDingTalkRepair)(
+            r.id,
+            f.admin,
+            preview.digest,
+            action,
+            f.password,
+          )
+          await expectNothingPersisted(
+            f,
+            r.id,
+            () => [
+              [
+                "UPDATE dingtalk_login_repairs SET state='superseded',released_account_ids=NULL WHERE id=$1",
+                [r.id],
+              ],
+              successor(r.id, f, admin2),
+            ],
+            chainRefused,
+          )
+        }
+      })
+
+      it('G7: a successor of a released row (no supersede) fails at COMMIT', async () => {
+        const { f, r, admin2 } = await setup()
+        const preview = await releasePreview(f, r.id)
+        await releaseWith(f, r.id, preview.digest)
+        await expectNothingPersisted(f, r.id, () => [successor(r.id, f, admin2)], {
+          code: '55000',
+          message: 'a login repair successor must continue a superseded repair',
+          stage: 'COMMIT',
+        })
+        // A rolled-back predecessor is refused the same way.
+        const g = await setup()
+        const back = await previewDingTalkRepairRecovery(g.r.id, g.f.admin, g.f.password, 'rollback')
+        await rollbackDingTalkRepair(g.r.id, g.f.admin, back.digest, 'rollback', g.f.password)
+        await expectNothingPersisted(g.f, g.r.id, () => [successor(g.r.id, g.f, g.admin2)], {
+          code: '55000',
+          message: 'a login repair successor must continue a superseded repair',
+          stage: 'COMMIT',
+        })
+      })
+
+      it('G8: a successor inserted while its predecessor is still applied hits the one-applied index', async () => {
+        const { f, r, admin2 } = await setup()
+        await expectNothingPersisted(f, r.id, () => [successor(r.id, f, admin2)], {
+          code: '23505',
+          constraint: 'dingtalk_login_repairs_active',
+          stage: 'statement 0',
+        })
+      })
+
+      it('G9: a predecessor is continued by at most one successor', async () => {
+        const { f, r, admin2 } = await setup()
+        const first = randomUUID()
+        await viaClient([supersede(r.id, admin2), successor(r.id, f, admin2, { id: first })])
+        await query(
+          "UPDATE dingtalk_login_repairs SET state='rolled_back',rollback_actor_id=$2,rolled_back_at=now() WHERE id=$1",
+          [first, admin2],
+        )
+        await expectNothingPersisted(f, r.id, () => [successor(r.id, f, admin2)], {
+          code: '23505',
+          constraint: 'dingtalk_login_repairs_supersedes_id_key',
+          stage: 'statement 0',
+        })
+      })
+
+      it('G10: CHECKs refuse an approver equal to the actor or the target, an actor equal to the target, and unpaired columns', async () => {
+        const { f, r, admin2 } = await setup()
+        for (const o of [
+          { approver: f.admin },
+          { approver: f.user },
+          { actor: f.user },
+          { approver: null },
+        ] as Over[])
+          await expectNothingPersisted(f, r.id, () => [supersede(r.id, admin2), successor(r.id, f, admin2, o)], {
+            code: '23514',
+            stage: 'statement 1',
+          })
+        // An approver without supersedes_id (a non-applied copy, so the applied index stays out of the way).
+        await expectNothingPersisted(
+          f,
+          r.id,
+          () => [successor(r.id, f, admin2, { supersedes: null, state: 'rolled_back' })],
+          { code: '23514', stage: 'statement 0' },
+        )
+        // A superseded row without who ended it.
+        await expectNothingPersisted(
+          f,
+          r.id,
+          () => [["UPDATE dingtalk_login_repairs SET state='superseded' WHERE id=$1", [r.id]]],
+          { code: '23514', stage: 'statement 0' },
+        )
+      })
+
+      it('G11: a predecessor that has a successor cannot be deleted', async () => {
+        const { f, r, admin2 } = await setup()
+        await viaClient([supersede(r.id, admin2), successor(r.id, f, admin2)])
+        await expect(query('DELETE FROM dingtalk_login_repairs WHERE id=$1', [r.id])).rejects.toMatchObject({
+          code: '23503',
+          constraint: 'dingtalk_login_repairs_supersedes_id_fkey',
+        })
+      })
+
+      it('G12: a later reseal-shaped update of the superseded row or the successor does not fire the guard', async () => {
+        const { f, r, admin2 } = await setup()
+        const id = randomUUID()
+        await viaClient([supersede(r.id, admin2), successor(r.id, f, admin2, { id })])
+        await expect(
+          query('UPDATE dingtalk_login_repairs SET before_identity=before_identity WHERE id=$1', [r.id]),
+        ).resolves.toBeDefined()
+        await expect(
+          query('UPDATE dingtalk_login_repairs SET before_identity=before_identity WHERE id=$1', [id]),
+        ).resolves.toBeDefined()
+        await expect(
+          viaWrapper([['UPDATE dingtalk_login_repairs SET before_identity=before_identity WHERE id=ANY($1::uuid[])', [[r.id, id]]]]),
+        ).resolves.toBeUndefined()
+      })
+    })
+
+    describe('after a re-anchor', () => {
+      it('A1: rollback of the successor restores the chain root\'s pre-repair identity and ends the fence', async () => {
+        const { f, r } = await loginAppSwitched()
+        const flow = await reanchorFlow(f, r.id, 'synthetic-scan')
+        expect((await exchangeCodeForUser('synthetic-fresh')).localUserId).toBe(f.user)
+        const preview = await previewDingTalkRepairRecovery(flow.done.id, f.admin, f.password, 'rollback')
+        const credentials = await liveCredentials(f)
+        await rollbackDingTalkRepair(flow.done.id, f.admin, preview.digest, 'rollback', f.password)
+        await credentials.expectRevoked()
+        expect((await identityOf(f.user))[0].row).toMatchObject(originalIdentityShape(f))
+        expect(await repairRow(flow.done.id)).toMatchObject({ state: 'rolled_back' })
+        expect(await repairRow(r.id)).toMatchObject({ state: 'superseded' })
+        const second = await addAccount(f.source, f.corp, 'a1-' + f.user, { union: 'new-union-' + f.user })
+        await expect(link(second, f.user)).resolves.toBeDefined()
+      })
+
+      it('A2: the superseded predecessor id refuses REPAIR_NOT_ACTIVE for release, rollback and re-anchor', async () => {
+        const { f, r } = await loginAppSwitched()
+        const flow = await reanchorFlow(f, r.id, 'synthetic-scan')
+        const before = await capture(f, r.id)
+        await expect(releasePreview(f, r.id)).rejects.toThrow(exact('REPAIR_NOT_ACTIVE'))
+        await expect(
+          previewDingTalkRepairRecovery(r.id, f.admin, f.password, 'rollback'),
+        ).rejects.toThrow(exact('REPAIR_NOT_ACTIVE'))
+        await expect(requestReanchor(f, r.id, flow.approver, f.admin, 'synthetic-scan')).rejects.toThrow(
+          exact('REPAIR_NOT_ACTIVE'),
+        )
+        expect(await capture(f, r.id)).toEqual(before)
+        // The successor itself is a healthy repair now: no second re-anchor of it.
+        await expectRefusedWithoutWriteOn(
+          f,
+          flow.done.id,
+          () => requestReanchor(f, flow.done.id, flow.approver, f.admin, 'synthetic-scan'),
+          'REPAIR_REANCHOR_NOT_NEEDED',
+        )
+      })
+
+      it('A3: the fence follows the successor\'s sources before its release', async () => {
+        {
+          const { f, r, stale } = await journalSourceOccupied()
+          await reanchorFlow(f, r.id)
+          await query(
+            "UPDATE directory_account_links SET local_user_id=NULL,link_status='unmatched' WHERE directory_account_id=$1",
+            [stale],
+          )
+          await expect(link(stale, f.user)).rejects.toMatchObject({
+            code: '55000',
+            message: 'repair blocks a second directory source',
+          })
+        }
+        {
+          const { f, r, x } = await recordedRowReplaced()
+          await reanchorFlow(f, r.id)
+          await expect(link(x, f.user)).resolves.toBeDefined()
+        }
+      })
+
+      it('A4: the successor blocks a handover of the anchor\'s integration', async () => {
+        const { f, r, i2 } = await recordedRowReplaced()
+        await reanchorFlow(f, r.id)
+        const target = await addIntegration(f, 'handover-target')
+        await expect(
+          applyDirectoryHandover(
+            { sourceIntegrationId: i2, targetIntegrationId: target },
+            'unused-before-preflight',
+            f.admin,
+          ),
+        ).rejects.toThrow('Active login repair blocks handover')
+      })
+
+      it('A5: the generation bump fences a stale repeatable-read writer through the link fence', async () => {
+        const { f, r, stale } = await journalSourceOccupied(),
+          b = await secondAdmin(f)
+        const req = await requestReanchor(f, r.id, b)
+        const c = await pool!.connect()
+        try {
+          await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
+          await c.query('SELECT id FROM users WHERE id=$1', [f.user])
+          await reanchorWith(f, req.request, b, req.summary.digest)
+          await expect(
+            c.query(
+              "UPDATE directory_account_links SET local_user_id=$2,link_status='linked' WHERE directory_account_id=$1",
+              [stale, f.user],
+            ),
+          ).rejects.toMatchObject({ code: '40001' })
+        } finally {
+          await c.query('ROLLBACK').catch(() => undefined)
+          c.release()
+        }
+      })
+
+      it('A6: the old login app is refused again after a re-anchor to the new one', async () => {
+        const { f, r } = await loginAppSwitched()
+        await reanchorFlow(f, r.id, 'synthetic-scan')
+        provider.config.mockReturnValue({
+          corpId: f.corp,
+          clientId: 'synthetic-current-app',
+          clientSecret: 'unused',
+          redirectUri: 'https://example.test/callback',
+        })
+        await expect(exchangeCodeForUser('synthetic-old-app')).rejects.toMatchObject({
+          statusCode: 409,
+          code: 'repair_identity_mismatch',
+        })
+      })
+
+      it('A7: a re-anchor writes no identity, grant, link, directory, membership, permission or evidence row', async () => {
+        const { f, r } = await loginAppSwitched()
+        // Unresolved revocation evidence does not refuse a re-anchor, and the re-anchor never supersedes it.
+        await query(
+          `INSERT INTO directory_deprovision_events(org_id,integration_id,directory_account_id,local_user_id,triggered_by,event_origin,link_witness_account_id,link_witness_local_user_id,policy,globally_clear,access_generation_at_apply,status) VALUES($1,$2,$3,$4,$5,'admin_manual',$3,$4,'mark_inactive',true,0,'applied')`,
+          [f.org, f.source, f.account, f.user, f.admin],
+        )
+        const before = await untouchedByReanchor(f)
+        expect(before.events).toHaveLength(1)
+        const flow = await reanchorFlow(f, r.id, 'synthetic-scan')
+        expect(await untouchedByReanchor(f)).toEqual(before)
+        expect(flow.done.identityChanged).toBe(false)
+      })
     })
   })
 

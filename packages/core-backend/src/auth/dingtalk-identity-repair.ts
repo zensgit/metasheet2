@@ -368,7 +368,8 @@ async function checks(c: Client, p: Proof) {
   )
   return { s, canonicalAccountId }
 }
-async function lock(c: Client, userId: string, actorId: string) {
+/** Locks the target and every acting administrator (apply, rollback and release pass one; a re-anchor passes two). */
+async function lock(c: Client, userId: string, actorIds: string[]) {
   await c.query("SET LOCAL lock_timeout='5s'")
   await c.query("SET LOCAL statement_timeout='30s'")
   // Mutation only. Pure previews never acquire write locks or advance generations.
@@ -385,7 +386,7 @@ async function lock(c: Client, userId: string, actorId: string) {
     await c.query(
       'LOCK TABLE users,user_roles,user_permissions,user_namespace_admissions,user_orgs,user_external_auth_grants,directory_account_links,user_external_identities,directory_accounts,directory_integrations,roles,role_permissions,permissions IN SHARE ROW EXCLUSIVE MODE',
     )
-    await lockUsersForAccessGraphWrite(c, [userId, actorId].sort())
+    await lockUsersForAccessGraphWrite(c, [userId, ...actorIds].sort())
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code
     if (code === '55P03' || code === '40P01' || code === '57014')
@@ -453,7 +454,7 @@ export async function applyDingTalkRepair(
   )
   return transaction(async (c) => {
     await c.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-    await lock(c, p.userId, p.actorId)
+    await lock(c, p.userId, [p.actorId])
     const { s, canonicalAccountId } = await checks(c, p)
     const id = randomUUID()
     // The journal records only DingTalk sources; the single apply-time witness is recorded as the canonical row.
@@ -622,6 +623,509 @@ async function releasePlan(
     candidates,
   }
 }
+const REANCHOR_PURPOSE = 'dingtalk-login-reanchor-v1'
+const REANCHOR_REQUEST_TTL_MS = 600000
+/** Row active and integration active. (Named so it does not shadow ownership()'s local `live`.) */
+const isLive = (h: Row) => h.is_active === true && h.status === 'active'
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+type ReanchorReason = 'canonical_source' | 'journal_source_occupied' | 'login_scope'
+type ReanchorPlan = {
+  releaseMode: ReleasePlan['mode']
+  /** Fixed order; empty refuses REPAIR_REANCHOR_NOT_NEEDED. */
+  reasons: ReanchorReason[]
+  scanRequired: boolean
+  /** Anchor fields of the applied row (never before_identity: a reseal must not invalidate an approval). */
+  predecessor: Row
+  previousCanonical: Row | null
+  journalRows: Row[]
+  personRows: Row[]
+  loginClientId: string
+  canonicalAccountId: string
+  canonicalLinked: boolean
+  /** Sorted; a subset of the predecessor sources plus canonicalAccountId (checked by the chain guard). */
+  sourceAccountIds: string[]
+  /** Parallel to sourceAccountIds. */
+  sourceIntegrationIds: string[]
+  droppedSourceAccountIds: string[]
+  linkedDingTalkAccountIds: string[]
+}
+/** Sealed hand-over file from the preparer to the named approver. */
+type ReanchorRequest = {
+  purpose: typeof REANCHOR_PURPOSE
+  nonce: string
+  expires: number
+  repairId: string
+  userId: string
+  preparerId: string
+  preparerCredential: string
+  approverId: string
+  scope: string
+  digest: string
+  /** Current-app OpenID of the scan, or null. It can refuse (another owner) but never proves. */
+  scanOpenId: string | null
+}
+
+function openReanchorRequest(request: string): ReanchorRequest {
+  requireRepair(isEncryptedSecretValue(request), 'REPAIR_PROOF_INVALID')
+  const q = JSON.parse(decryptStoredSecretValue(request)) as ReanchorRequest
+  const now = Date.now()
+  requireRepair(
+    q.purpose === REANCHOR_PURPOSE &&
+      UUID_PATTERN.test(String(q.nonce)) &&
+      q.expires > now &&
+      q.expires <= now + REANCHOR_REQUEST_TTL_MS &&
+      q.scope === scope().hash,
+    'REPAIR_PROOF_INVALID',
+  )
+  return q
+}
+
+/**
+ * Re-anchor plan: the same person (the pin's corp + UnionID), a new login scope and/or a new canonical row.
+ * Occupation refuses before the not-needed gate, so a moved person never reads as "not needed".
+ */
+async function reanchorPlan(
+  c: Client,
+  row: Row,
+  s: Snapshot,
+): Promise<ReanchorPlan> {
+  const userId = String(row.user_id)
+  const expected = row.expected_identity as Row
+  const { cfg } = scope()
+  // 1. Never across enterprises (doc: 不切换企业); the person key is corp + UnionID.
+  requireRepair(
+    expected.corp_id === cfg.corpId,
+    'REPAIR_REANCHOR_CORP_CHANGED',
+  )
+  // 2. A present identity still names the pinned person (held by the identity guard while applied).
+  if (s.identity)
+    requireRepair(
+      s.identity.corp_id === expected.corp_id &&
+        s.identity.provider_union_id === expected.provider_union_id,
+      'REPAIR_CURRENT_PERSON_CHANGED',
+    )
+  const releaseMode: ReleasePlan['mode'] =
+    s.grant && s.identity && userEnabled(s.user) ? 'canonical' : 'termination'
+  // 3. This person's DingTalk rows corp-wide (ownership() shape): any other owner or hint refuses; OpenID only refuses.
+  const personRows = (
+    await c.query(
+      `SELECT ${SOURCE_COLUMNS},l.local_user_id,l.link_status ${SOURCE_JOIN} WHERE a.provider='dingtalk' AND a.corp_id=$1 AND (a.union_id=$2 OR (a.open_id IS NOT NULL AND a.open_id=$3)) ORDER BY a.id`,
+      [
+        expected.corp_id,
+        expected.provider_union_id,
+        expected.provider_open_id,
+      ],
+    )
+  ).rows.map(normalizeCandidate)
+  requireRepair(
+    !personRows.some((h) => h.local_user_id && h.local_user_id !== userId),
+    'REPAIR_DIRECTORY_OWNER_CONFLICT',
+  )
+  // 4. Another local user holds this person's identity (checks() shape, pinned values).
+  requireRepair(
+    !(
+      await c.query(
+        `SELECT 1 FROM user_external_identities WHERE provider='dingtalk' AND local_user_id<>$1 AND (external_key=$2 OR (corp_id=$3 AND (provider_open_id=$4 OR provider_union_id=$5))) LIMIT 1`,
+        [
+          userId,
+          expected.external_key,
+          expected.corp_id,
+          expected.provider_open_id,
+          expected.provider_union_id,
+        ],
+      )
+    ).rows.length,
+    'REPAIR_IDENTITY_CONFLICT',
+  )
+  // 5. The target's live DingTalk links (any app) carry a UnionID and name the pinned person (ownership() rules).
+  const liveLinks = s.dingtalkLinks.filter(isLive)
+  requireRepair(
+    liveLinks.every((l) => hasText(l.union_id)),
+    'REPAIR_DIRECTORY_UNION_ID_REQUIRED',
+  )
+  requireRepair(
+    liveLinks.every((l) => samePerson(l, expected)),
+    'REPAIR_DIRECTORY_PERSON_AMBIGUOUS',
+  )
+  // 6. Only what release cannot clear. Same-person rows held by others already refused at 3,
+  //    so an occupied journal row here is another person's row in its rightful owner's hands.
+  const journalRows = (
+    await c.query(
+      `SELECT ${SOURCE_COLUMNS},l.local_user_id,l.link_status ${SOURCE_JOIN} WHERE a.id=ANY($1::uuid[]) ORDER BY a.id`,
+      [row.source_account_ids],
+    )
+  ).rows.map(normalizeCandidate)
+  const previousCanonical =
+    journalRows.find(
+      (h) => String(h.id) === String(row.canonical_account_id),
+    ) ?? null
+  const reasons: ReanchorReason[] = []
+  if (
+    !previousCanonical ||
+    !canonicalSource(previousCanonical, expected, cfg.clientId)
+  )
+    reasons.push('canonical_source')
+  if (journalRows.some((h) => h.local_user_id && h.local_user_id !== userId))
+    reasons.push('journal_source_occupied')
+  if (row.login_client_id !== cfg.clientId) reasons.push('login_scope')
+  requireRepair(reasons.length > 0, 'REPAIR_REANCHOR_NOT_NEEDED')
+  // 7. The anchor satisfies the predicate of the release mode that follows; the recorded row is kept when it fits.
+  const fits = (h: Row) =>
+    canonicalSource(h, expected, cfg.clientId) &&
+    (releaseMode === 'termination' ||
+      (h.local_user_id === userId && h.link_status === 'linked' && isLive(h)))
+  let anchor: Row
+  if (previousCanonical && fits(previousCanonical)) anchor = previousCanonical
+  else {
+    const fitting = personRows.filter(fits)
+    const pool =
+      releaseMode === 'termination' && fitting.some(isLive)
+        ? fitting.filter(isLive)
+        : fitting
+    requireRepair(pool.length > 0, 'REPAIR_PERSON_NOT_PROVEN')
+    requireRepair(pool.length === 1, 'REPAIR_CANONICAL_SOURCE_REQUIRED')
+    anchor = pool[0]
+  }
+  // 8. Successor sources: rows linked now (the fence admitted them; sync re-fires the fence on each), the anchor,
+  //    and predecessor rows still this person and unowned or the target's (dropping one would fail its next sync).
+  const sources = new Map<string, string>()
+  for (const l of s.dingtalkLinks)
+    sources.set(String(l.id), String(l.integration_id))
+  for (const h of journalRows)
+    if (
+      samePerson(h, expected) &&
+      (!h.local_user_id || h.local_user_id === userId)
+    )
+      sources.set(String(h.id), String(h.integration_id))
+  sources.set(String(anchor.id), String(anchor.integration_id))
+  const sourceAccountIds = [...sources.keys()].sort()
+  return {
+    releaseMode,
+    reasons,
+    scanRequired: releaseMode === 'canonical' && reasons.includes('login_scope'),
+    predecessor: {
+      id: row.id,
+      user_id: row.user_id,
+      state: row.state,
+      supersedes_id: row.supersedes_id ?? null,
+      login_client_id: row.login_client_id,
+      canonical_account_id: row.canonical_account_id,
+      source_account_ids: row.source_account_ids,
+      source_integration_ids: row.source_integration_ids,
+      expected_identity: row.expected_identity,
+    },
+    previousCanonical,
+    journalRows,
+    personRows,
+    loginClientId: cfg.clientId,
+    canonicalAccountId: String(anchor.id),
+    canonicalLinked:
+      anchor.local_user_id === userId && anchor.link_status === 'linked',
+    sourceAccountIds,
+    sourceIntegrationIds: sourceAccountIds.map((id) => String(sources.get(id))),
+    droppedSourceAccountIds: (row.source_account_ids as unknown[])
+      .map(String)
+      .filter((id) => !sources.has(id))
+      .sort(),
+    linkedDingTalkAccountIds: s.dingtalkLinks.map((l) => String(l.id)).sort(),
+  }
+}
+
+/** The scanned OpenID may refuse (another user's directory row or identity) but never proves anything. */
+async function scannedOpenIdConflicts(
+  c: Client,
+  userId: string,
+  openId: string,
+) {
+  const { cfg } = scope()
+  requireRepair(
+    !(
+      await c.query(
+        `SELECT 1 ${SOURCE_JOIN} WHERE a.provider='dingtalk' AND a.corp_id=$1 AND a.open_id=$2 AND l.local_user_id IS NOT NULL AND l.local_user_id<>$3 LIMIT 1`,
+        [cfg.corpId, openId, userId],
+      )
+    ).rows.length,
+    'REPAIR_DIRECTORY_OWNER_CONFLICT',
+  )
+  requireRepair(
+    !(
+      await c.query(
+        `SELECT 1 FROM user_external_identities WHERE provider='dingtalk' AND local_user_id<>$1 AND (external_key=$2 OR (corp_id=$3 AND provider_open_id=$4)) LIMIT 1`,
+        [userId, `${cfg.corpId}:${openId}`, cfg.corpId, openId],
+      )
+    ).rows.length,
+    'REPAIR_IDENTITY_CONFLICT',
+  )
+}
+
+async function reanchorState(
+  c: Client,
+  repairId: string,
+  preparerId: string,
+  approverId: string,
+  scanOpenId: string | null,
+) {
+  const row = (
+    await c.query('SELECT * FROM dingtalk_login_repairs WHERE id=$1', [
+      repairId,
+    ])
+  ).rows[0]
+  requireRepair(row && row.state === 'applied', 'REPAIR_NOT_ACTIVE')
+  const userId = String(row.user_id)
+  // Two different administrators, neither the target (the successor CHECK repeats this).
+  requireRepair(
+    preparerId !== approverId &&
+      preparerId !== userId &&
+      approverId !== userId,
+    'REPAIR_DUAL_CONTROL_REQUIRED',
+  )
+  const s = await snapshot(c, userId)
+  const plan = await reanchorPlan(c, row, s)
+  if (scanOpenId) await scannedOpenIdConflicts(c, userId, scanOpenId)
+  await noHandover(c, userId, [
+    ...new Set([
+      ...(row.source_integration_ids as unknown[]).map(String),
+      ...plan.sourceIntegrationIds,
+    ]),
+  ])
+  return {
+    row,
+    s,
+    plan,
+    digest: digest([
+      'reanchor',
+      repairId,
+      s.hash,
+      scope().hash,
+      preparerId,
+      approverId,
+      plan,
+    ]),
+  }
+}
+type ReanchorState = Awaited<ReturnType<typeof reanchorState>>
+
+const reanchorSummary = (
+  r: ReanchorState,
+  q: Pick<
+    ReanchorRequest,
+    'repairId' | 'expires' | 'preparerId' | 'approverId' | 'scanOpenId'
+  >,
+) => ({
+  id: q.repairId,
+  digest: r.digest,
+  expires: q.expires,
+  preparerId: q.preparerId,
+  approverId: q.approverId,
+  target: mask(r.s.user.name),
+  reanchor: {
+    releaseMode: r.plan.releaseMode,
+    reasons: r.plan.reasons,
+    loginClientChanged: r.plan.reasons.includes('login_scope'),
+    previousCanonicalAccountId: String(r.row.canonical_account_id),
+    canonicalAccountId: r.plan.canonicalAccountId,
+    canonicalLinked: r.plan.canonicalLinked,
+    sourceAccountIds: r.plan.sourceAccountIds,
+    droppedSourceAccountIds: r.plan.droppedSourceAccountIds,
+    linkedDingTalkAccountIds: r.plan.linkedDingTalkAccountIds,
+    scanRequired: r.plan.scanRequired,
+    scanned: q.scanOpenId !== null,
+  },
+  identityChanged: false,
+  permissionsChanged: false,
+  allTargetSessionsWillBeRevoked: true,
+})
+
+/** Preparer. Two read-only plans around the optional provider exchange; nothing is written to the database. */
+export async function requestDingTalkRepairReanchor(
+  repairId: string,
+  actorId: string,
+  actorPassword: string,
+  approverId: string,
+  code?: string,
+) {
+  const { hash } = scope()
+  requireRepair(actorId !== approverId, 'REPAIR_DUAL_CONTROL_REQUIRED')
+  const preparerCredential = await operator({ query }, actorId, actorPassword)
+  // The named approver must be an eligible administrator now; their password is checked at their own steps.
+  await operator({ query }, approverId)
+  const readOnly = (scanOpenId: string | null) =>
+    transaction(async (c) => {
+      await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      return reanchorState(c, repairId, actorId, approverId, scanOpenId)
+    })
+  // Every refusal that needs no provider call happens first, so a doomed request never consumes the code.
+  let r = await readOnly(null)
+  let scanOpenId: string | null = null
+  if (r.plan.scanRequired || code !== undefined) {
+    requireRepair(code, 'REPAIR_REANCHOR_SCAN_REQUIRED')
+    const dt = await exchangeCodeForDingTalkProfile(code)
+    requireRepair(dt.openId && dt.unionId, 'REPAIR_PROFILE_INCOMPLETE')
+    requireRepair(
+      dt.unionId === (r.row.expected_identity as Row).provider_union_id,
+      'REPAIR_REANCHOR_PERSON_MISMATCH',
+    )
+    scanOpenId = String(dt.openId)
+    r = await readOnly(scanOpenId)
+  }
+  const q: ReanchorRequest = {
+    purpose: REANCHOR_PURPOSE,
+    nonce: randomUUID(),
+    expires: Date.now() + REANCHOR_REQUEST_TTL_MS,
+    repairId,
+    userId: String(r.row.user_id),
+    preparerId: actorId,
+    preparerCredential,
+    approverId,
+    scope: hash,
+    digest: r.digest,
+    scanOpenId,
+  }
+  return {
+    request: encryptStoredSecretValue(JSON.stringify(q)),
+    summary: reanchorSummary(r, q),
+  }
+}
+
+/** Named approver: the same plan, recomputed; read-only. */
+export async function previewDingTalkRepairReanchor(
+  request: string,
+  actorId: string,
+  actorPassword: string,
+) {
+  const q = openReanchorRequest(request)
+  requireRepair(
+    actorId === q.approverId &&
+      actorId !== q.preparerId &&
+      actorId !== q.userId,
+    'REPAIR_DUAL_CONTROL_REQUIRED',
+  )
+  return transaction(async (c) => {
+    await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    await operator(c, actorId, actorPassword)
+    requireRepair(
+      (await operator(c, q.preparerId)) === q.preparerCredential,
+      'REPAIR_OPERATOR_CHANGED',
+    )
+    const r = await reanchorState(
+      c,
+      q.repairId,
+      q.preparerId,
+      q.approverId,
+      q.scanOpenId,
+    )
+    requireRepair(String(r.row.user_id) === q.userId, 'REPAIR_PROOF_INVALID')
+    requireRepair(r.digest === q.digest, 'REPAIR_RECOVERY_SNAPSHOT_CHANGED')
+    requireRepair(
+      !r.plan.scanRequired || q.scanOpenId !== null,
+      'REPAIR_REANCHOR_SCAN_REQUIRED',
+    )
+    return reanchorSummary(r, q)
+  })
+}
+
+/** Named approver executes. Everything is recomputed under the maintenance lock; a refusal writes nothing. */
+export async function reanchorDingTalkRepair(
+  request: string,
+  actorId: string,
+  actorPassword: string,
+  approvedDigest: string,
+  confirm: string,
+) {
+  const q = openReanchorRequest(request)
+  requireRepair(
+    confirm === 'reanchor' && approvedDigest === q.digest,
+    'REPAIR_APPROVAL_REQUIRED',
+  )
+  requireRepair(
+    actorId === q.approverId &&
+      actorId !== q.preparerId &&
+      actorId !== q.userId,
+    'REPAIR_DUAL_CONTROL_REQUIRED',
+  )
+  return transaction(async (c) => {
+    await c.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+    await lock(c, q.userId, [q.preparerId, actorId])
+    await operator(c, actorId, actorPassword)
+    requireRepair(
+      (await operator(c, q.preparerId)) === q.preparerCredential,
+      'REPAIR_OPERATOR_CHANGED',
+    )
+    const r = await reanchorState(
+      c,
+      q.repairId,
+      q.preparerId,
+      actorId,
+      q.scanOpenId,
+    )
+    requireRepair(String(r.row.user_id) === q.userId, 'REPAIR_PROOF_INVALID')
+    requireRepair(
+      r.digest === approvedDigest,
+      'REPAIR_RECOVERY_SNAPSHOT_CHANGED',
+    )
+    requireRepair(
+      !r.plan.scanRequired || q.scanOpenId !== null,
+      'REPAIR_REANCHOR_SCAN_REQUIRED',
+    )
+    // First write. The predecessor leaves 'applied' before the successor exists (the applied index is not deferrable).
+    const ended = await c.query(
+      "UPDATE dingtalk_login_repairs SET state='superseded',rollback_actor_id=$2,rolled_back_at=now() WHERE id=$1 AND state='applied' RETURNING id",
+      [q.repairId, actorId],
+    )
+    requireRepair(ended.rows.length === 1, 'REPAIR_NOT_ACTIVE')
+    const id = randomUUID()
+    // Same person and same undo target, copied by the server from the row just superseded: lock() does not lock this
+    // table, so a two-statement copy could race a before_identity reseal; no jsonb or ciphertext round trip.
+    const inserted = await c.query(
+      `INSERT INTO dingtalk_login_repairs(id,user_id,proof_nonce,state,before_identity,expected_identity,after_digest,actor_id,approver_id,supersedes_id,source_account_ids,source_integration_ids,canonical_account_id,login_client_id) SELECT $1::uuid,user_id,$2::uuid,'applied',before_identity,expected_identity,'pending',$3::text,$4::text,id,$5::uuid[],$6::uuid[],$7::uuid,$8::text FROM dingtalk_login_repairs WHERE id=$9::uuid AND state='superseded' RETURNING id`,
+      [
+        id,
+        q.nonce,
+        q.preparerId,
+        actorId,
+        r.plan.sourceAccountIds,
+        r.plan.sourceIntegrationIds,
+        r.plan.canonicalAccountId,
+        r.plan.loginClientId,
+        q.repairId,
+      ],
+    )
+    requireRepair(inserted.rows.length === 1, 'REPAIR_NOT_ACTIVE')
+    // Users-tuple fence: a stale REPEATABLE READ writer fails 40001 instead of reading the superseded row as applied.
+    await c.query(
+      'UPDATE users SET access_generation=COALESCE(access_generation,0)+1,updated_at=now() WHERE id=$1',
+      [q.userId],
+    )
+    await revoke(c, q.userId, actorId, 'dingtalk_identity_repair_reanchor')
+    const after = await snapshot(c, q.userId)
+    await c.query(
+      'UPDATE dingtalk_login_repairs SET after_digest=$2,after_segments=$3 WHERE id=$1',
+      [id, after.hash, after.segments],
+    )
+    const details = {
+      preparerId: q.preparerId,
+      approverId: actorId,
+      predecessorId: q.repairId,
+      successorId: id,
+      releaseMode: r.plan.releaseMode,
+      reasons: r.plan.reasons,
+      scanned: q.scanOpenId !== null,
+    }
+    await audit(c, q.repairId, actorId, 'superseded', details)
+    await audit(c, id, actorId, 'reanchor', details)
+    return {
+      id,
+      predecessorId: q.repairId,
+      releaseMode: r.plan.releaseMode,
+      canonicalAccountId: r.plan.canonicalAccountId,
+      loginClientChanged: r.plan.reasons.includes('login_scope'),
+      identityChanged: false,
+      permissionsChanged: false,
+      targetSessionsRevoked: true,
+    }
+  })
+}
 async function recovery(
   c: Client,
   id: string,
@@ -730,7 +1234,7 @@ async function finish(
       ])
     ).rows[0]
     requireRepair(seed, 'REPAIR_NOT_ACTIVE')
-    await lock(c, String(seed.user_id), actorId)
+    await lock(c, String(seed.user_id), [actorId])
     const r = await recovery(c, id, actorId, actorPassword, action)
     requireRepair(
       r.digest === approvedDigest,

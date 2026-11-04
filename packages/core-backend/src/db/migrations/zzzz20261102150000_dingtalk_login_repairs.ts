@@ -3,7 +3,7 @@ import { sql, type Kysely } from 'kysely'
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`CREATE TABLE dingtalk_login_repairs (
     id uuid PRIMARY KEY, user_id text NOT NULL REFERENCES users(id), proof_nonce uuid NOT NULL UNIQUE,
-    state text NOT NULL CHECK(state IN ('applied','rolled_back','released')), before_identity text NOT NULL,
+    state text NOT NULL CHECK(state IN ('applied','rolled_back','released','superseded')), before_identity text NOT NULL,
     expected_identity jsonb NOT NULL, after_digest text NOT NULL, actor_id text NOT NULL,
     source_account_ids uuid[] NOT NULL, source_integration_ids uuid[] NOT NULL,
     canonical_account_id uuid NOT NULL, CHECK (canonical_account_id = ANY(source_account_ids)),
@@ -11,6 +11,12 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     released_account_ids uuid[],
     CHECK (state <> 'released' OR (released_account_ids IS NOT NULL AND released_account_ids = ARRAY[canonical_account_id])),
     CHECK (state = 'released' OR released_account_ids IS NULL),
+    -- Controlled re-anchoring: a successor names the row it supersedes and a second administrator, and no
+    -- administrator is the target. A superseded row records who ended it and when (as rollback and release do).
+    supersedes_id uuid UNIQUE REFERENCES dingtalk_login_repairs(id), approver_id text,
+    CHECK ((supersedes_id IS NULL) = (approver_id IS NULL)),
+    CHECK (supersedes_id IS NULL OR (approver_id <> actor_id AND approver_id <> user_id AND actor_id <> user_id)),
+    CHECK (state <> 'superseded' OR (rollback_actor_id IS NOT NULL AND rolled_back_at IS NOT NULL)),
     created_at timestamptz NOT NULL DEFAULT now(), rollback_actor_id text, rolled_back_at timestamptz
   )`.execute(db)
   await sql`CREATE UNIQUE INDEX dingtalk_login_repairs_active ON dingtalk_login_repairs(user_id) WHERE state='applied'`.execute(
@@ -74,12 +80,45 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`CREATE TRIGGER repaired_directory_link BEFORE INSERT OR UPDATE ON directory_account_links FOR EACH ROW EXECUTE FUNCTION guard_repaired_directory_link()`.execute(
     db,
   )
+  await sql`CREATE FUNCTION guard_dingtalk_login_repair_chain() RETURNS trigger LANGUAGE plpgsql AS $$
+  BEGIN
+    IF TG_OP = 'INSERT' THEN
+      -- A successor continues a row superseded in its own transaction; it never overrides a released or rolled-back row.
+      IF NOT EXISTS (SELECT 1 FROM dingtalk_login_repairs p WHERE p.id = NEW.supersedes_id AND p.state = 'superseded') THEN
+        RAISE EXCEPTION 'a login repair successor must continue a superseded repair' USING ERRCODE = '55000';
+      END IF;
+      RETURN NULL;
+    END IF;
+    -- Only an applied row is superseded. At commit exactly one applied successor continues it: same user, same pinned
+    -- identity, same undo target, and sources that add at most the successor's own canonical row.
+    IF OLD.state <> 'applied' OR NOT EXISTS (
+      SELECT 1 FROM dingtalk_login_repairs s
+      WHERE s.supersedes_id = NEW.id AND s.state = 'applied' AND s.user_id = NEW.user_id
+        AND s.expected_identity = NEW.expected_identity
+        AND s.before_identity = NEW.before_identity
+        AND s.source_account_ids <@ (NEW.source_account_ids || s.canonical_account_id)
+    ) THEN
+      RAISE EXCEPTION 'a superseded login repair needs its same-person successor' USING ERRCODE = '55000';
+    END IF;
+    RETURN NULL;
+  END $$`.execute(db)
+  await sql`CREATE CONSTRAINT TRIGGER dingtalk_login_repair_superseded AFTER UPDATE ON dingtalk_login_repairs
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+    WHEN (NEW.state = 'superseded' AND OLD.state IS DISTINCT FROM 'superseded')
+    EXECUTE FUNCTION guard_dingtalk_login_repair_chain()`.execute(db)
+  await sql`CREATE CONSTRAINT TRIGGER dingtalk_login_repair_successor AFTER INSERT ON dingtalk_login_repairs
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+    WHEN (NEW.supersedes_id IS NOT NULL)
+    EXECUTE FUNCTION guard_dingtalk_login_repair_chain()`.execute(db)
 }
 export async function down(db: Kysely<unknown>): Promise<void> {
   await sql`DO $$ BEGIN IF EXISTS(SELECT 1 FROM dingtalk_login_repairs) THEN
     RAISE EXCEPTION 'login repair history must be retained'; END IF; END $$`.execute(
     db,
   )
+  await sql`DROP TRIGGER dingtalk_login_repair_successor ON dingtalk_login_repairs`.execute(db)
+  await sql`DROP TRIGGER dingtalk_login_repair_superseded ON dingtalk_login_repairs`.execute(db)
+  await sql`DROP FUNCTION guard_dingtalk_login_repair_chain()`.execute(db)
   await sql`DROP TRIGGER repaired_directory_link ON directory_account_links`.execute(
     db,
   )
