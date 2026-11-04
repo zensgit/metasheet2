@@ -847,6 +847,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'plugins/plugin-attendance/index.cjs#isAttendanceCancelRoundEntryEnabled',
   },
   {
+    key: 'AUTOMATION_CLASSB_OUTBOUND_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "#4196 Class-B outbound two-phase intent/outcome ledger (packages/core-backend/src/multitable/automation-outbound-intent.ts, read by the automation executor's send_webhook / send_email / send_dingtalk_* and by automation-retry-eligibility). Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). Off: every send path is byte-identical to pre-slice (no intent row, no classification, no outcome write). On: a rule-driven send first commits a `pending` intent row in meta_automation_outbound_intent with an attempt token and a lease, attempts the send ONCE, then the same attempt records sent / failed / outcome_unknown (token-fenced); a replay of the same identity never resends a sent or ambiguous attempt, never declares a live in-flight attempt dead, re-arms only a definite pre-dispatch failure with exactly one winner, and reports outcome_unknown as a failed step that stops dependents until reconciliation. Requires the zzzz20260716110000 table plus the zzzz20261103120000 attempt-token/lease/target_key migration. danger=high: ON changes which automation sends happen on retry (fail-closed, never a duplicate external effect); it does not by itself enable any external write — the DingTalk/webhook/email transports keep their own gates.",
+    source: 'packages/core-backend/src/multitable/automation-outbound-intent.ts#isClassBOutboundEnabled',
+  },
+  {
     key: 'USER_RECYCLE_SWEEPER_ENABLED',
     type: 'boolean',
     activationValue: 'true',
