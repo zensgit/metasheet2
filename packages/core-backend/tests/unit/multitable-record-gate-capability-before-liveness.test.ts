@@ -3,13 +3,19 @@
  *
  * The shared record read gate used to answer 404 (record missing, SHEET_DELETED, sheet not found)
  * BEFORE its 401/403, so a caller with no read access could tell a deleted or absent sheet from a
- * live one. Five routes rely on that gate alone:
+ * live one. Six routes rely on that gate alone for the sheet and the record:
  *
  *   POST /sheets/:sheetId/ai/shortcut/preview                              (routes/multitable-ai.ts)
  *   POST /sheets/:sheetId/ai/shortcut/run                                  (routes/multitable-ai.ts)
  *   POST /sheets/:sheetId/records/:recordId/fields/:fieldId/button/run     (routes/multitable-button.ts)
  *   POST /sheets/:sheetId/records/:recordId/approvals                      (routes/multitable-record-approvals.ts)
  *   GET  /sheets/:sheetId/records/:recordId/approvals                      (routes/multitable-record-approvals.ts)
+ *   GET  /sheets/:sheetId/records/:recordId/tasks                          (routes/multitable-record-tasks.ts)
+ *
+ * The record's list of tasks also carries the task door (`authenticate`, `tasks:read`) as route
+ * middleware, which the others do not. Here that door is open for every caller, so what is pinned is
+ * the record gate's answer through that route; the door itself is pinned in
+ * multitable-record-tasks-routes.test.ts and on a real database in task-p2-source-links.db.test.ts.
  *
  * Pinned here, on the helper and on every one of those routes (real routers, real permission-service,
  * a fake pool that answers by SQL shape):
@@ -31,6 +37,27 @@ import type { Request } from 'express'
 import express from 'express'
 import request from 'supertest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+// The task door of the record's list of tasks, open (see the header): the session the app sets is
+// kept and given an org, and `tasks:read` passes. Every other guard is the real one.
+vi.mock('../../src/middleware/auth', () => {
+  const authenticate = (req: unknown, _res: unknown, next: () => void) => {
+    const session = req as { user?: unknown; authenticatedTenantId?: string }
+    if (session.user) session.authenticatedTenantId = 'org_gate'
+    next()
+  }
+  return { authenticate, authMiddleware: authenticate, default: authenticate }
+})
+
+vi.mock('../../src/rbac/rbac', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/rbac/rbac')>()
+  return {
+    ...actual,
+    rbacGuard: (resource: string, action?: string) => (resource === 'tasks' && action === 'read'
+      ? (_req: unknown, _res: unknown, next: () => void) => next()
+      : actual.rbacGuard(resource, action)),
+  }
+})
 
 import { resolveSheetReadableCapabilities } from '../../src/multitable/permission-service'
 import { SHEET_DELETED_CODE, SHEET_DELETED_MESSAGE, SHEET_NOT_FOUND_MESSAGE } from '../../src/multitable/sheet-liveness'
@@ -235,7 +262,7 @@ describe('requireRecordReadable: authority first, then sheet liveness, then the 
   })
 })
 
-// ── The five routes that rely on the gate alone ─────────────────────────────
+// ── The six routes that rely on the gate alone ──────────────────────────────
 
 const pinned = usePinnedServer()
 let currentUser: GateUser | undefined
@@ -246,6 +273,7 @@ async function buildApp() {
   const { createMultitableAiRoutes } = await import('../../src/routes/multitable-ai')
   const { createMultitableButtonRoutes } = await import('../../src/routes/multitable-button')
   const { createMultitableRecordApprovalRoutes } = await import('../../src/routes/multitable-record-approvals')
+  const { createMultitableRecordTaskRoutes } = await import('../../src/routes/multitable-record-tasks')
   const query = vi.fn(fakeQuery)
   vi.spyOn(poolManager, 'get').mockReturnValue({
     query,
@@ -261,6 +289,18 @@ async function buildApp() {
   app.use('/api/multitable', createMultitableAiRoutes({ fetchFn: fetchSpy as unknown as typeof fetch }))
   app.use('/api/multitable', createMultitableButtonRoutes())
   app.use('/api/multitable', createMultitableRecordApprovalRoutes({ approvalProductService: { createApproval: vi.fn() } as any }))
+  // The record's list of tasks mounts only with the tasks switch on; the factory reads it once.
+  const savedTasksFlag = process.env.TASKS_ENABLED
+  process.env.TASKS_ENABLED = 'true'
+  let recordTasks: ReturnType<typeof createMultitableRecordTaskRoutes>
+  try {
+    recordTasks = createMultitableRecordTaskRoutes()
+  } finally {
+    if (savedTasksFlag === undefined) delete process.env.TASKS_ENABLED
+    else process.env.TASKS_ENABLED = savedTasksFlag
+  }
+  if (!recordTasks) throw new Error('the record tasks router must mount with TASKS_ENABLED=true')
+  app.use('/api/multitable', recordTasks)
   return app
 }
 
@@ -282,6 +322,9 @@ interface RouteCase {
 const APPROVAL_FORBIDDEN = { ok: false, error: { code: 'RECORD_APPROVAL_PERMISSION_DENIED', message: 'Insufficient permissions' } }
 const APPROVAL_NOT_FOUND = { ok: false, error: { code: 'RECORD_APPROVAL_RECORD_NOT_FOUND', message: 'Record not found' } }
 const readFields = (sql: string[]) => sql.some((s) => /FROM meta_fields WHERE sheet_id/.test(s))
+// The record's list of tasks answers the gate's 403 and 404 with one code each.
+const TASKS_FORBIDDEN = { ok: false, error: { code: 'PERMISSION_DENIED', message: 'Insufficient permissions' } }
+const TASKS_NOT_FOUND = { ok: false, error: { code: 'RECORD_NOT_FOUND', message: 'Record not found' } }
 
 const ROUTES: RouteCase[] = [
   {
@@ -347,9 +390,23 @@ const ROUTES: RouteCase[] = [
       expect(res.body).toEqual({ ok: true, data: { submissions: [], hasMore: false } })
     },
   },
+  {
+    name: 'GET /sheets/:sheetId/records/:recordId/tasks',
+    send: (a, s, r) => a.get(`/api/multitable/sheets/${s}/records/${r}/tasks`),
+    forbidden: TASKS_FORBIDDEN,
+    deleted: TASKS_NOT_FOUND,
+    absent: TASKS_NOT_FOUND,
+    missingRecord: () => TASKS_NOT_FOUND,
+    pastGate: (res, sql) => {
+      // The list itself ran: the tasks linked to the record, in the session's org.
+      expect(sql.some((s) => /FROM tasks JOIN task_source_links l\b/.test(s))).toBe(true)
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ ok: true, data: { items: [], hasMore: false } })
+    },
+  },
 ]
 
-describe('the five routes guarded by requireRecordReadable alone (#5830)', () => {
+describe('the six routes whose sheet and record read is decided by requireRecordReadable alone (#5830)', () => {
   beforeEach(async () => {
     currentUser = READER
     fetchSpy = vi.fn(async () => new Response('{}', { status: 500 }))

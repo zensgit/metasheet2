@@ -4,6 +4,13 @@ import { Router } from 'express'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { APPROVAL_PROJECTION_BASE_ID } from '../../src/multitable/approval-projection-constants'
+import {
+  deriveElearningProjectionBaseId,
+  deriveElearningProjectionSheetId,
+  ELEARNING_PROJECTION_SYSTEM_KIND,
+  ELEARNING_PROJECTION_SYSTEM_OWNER,
+} from '../../src/multitable/elearning-projection-constants'
 import { createMultitableRecordTaskRoutes } from '../../src/routes/multitable-record-tasks'
 import { tasksRouter } from '../../src/routes/tasks'
 import { createTask, listRecordTasks } from '../../src/services/task-records'
@@ -38,6 +45,11 @@ import { rawRequest, startTasksListener, type TasksListener } from '../helpers/t
  * router, mounted on the same listener): the task read door, then the record read gate, then the
  * tasks linked to the record that the viewer could open from the task centre, in the viewer's org;
  * with `dispatchKey`, only the viewer's own dispatch made with that key from that record.
+ *
+ * The record read gate beyond global read, on both routes: a record hidden by a per-record read
+ * rule, a sheet assignment that carries no read code, a sheet of the approval read model for a
+ * reader who takes part in none of its rows, and a sheet whose readability is bound to one
+ * organization. Each has its own sheet, so its rules reach no other cell.
  */
 
 if (process.env.EXPECT_DB !== '1') {
@@ -69,7 +81,26 @@ const REC_2 = `rec_p2src_2_${FILE_STAMP}`
 const REC_OTHER = `rec_p2src_o_${FILE_STAMP}`
 const REC_DELETED = `rec_p2src_d_${FILE_STAMP}`
 const REC_MISSING = `rec_p2src_missing_${FILE_STAMP}`
-const SHEETS = [SHEET, OTHER_SHEET, DELETED_SHEET]
+// A sheet with per-record read rules on; a rule given in a cell hides REC_ROW_HIDDEN from its user.
+const ROW_SHEET = `sht_p2src_r_${FILE_STAMP}`
+const REC_ROW_HIDDEN = `rec_p2src_rh_${FILE_STAMP}`
+const REC_ROW_OPEN = `rec_p2src_ro_${FILE_STAMP}`
+// A sheet on which a cell gives its users a sheet assignment whose only code is not a read code.
+const SCOPED_SHEET = `sht_p2src_s_${FILE_STAMP}`
+const REC_SCOPED = `rec_p2src_s_${FILE_STAMP}`
+// The code that assignment carries: a real code outside the sheet read set, which the legacy grant
+// route writes as it is sent.
+const NO_READ_SHEET_CODE = 'comments:read'
+// A sheet of the approval read model; its record names no requester or approver.
+const PROJ_SHEET = `sht_p2src_p_${FILE_STAMP}`
+const REC_PROJ = `rec_p2src_p_${FILE_STAMP}`
+// A sheet whose readability is bound to one organization (the e-learning read model, in the shape
+// of its mapping migration).
+const BOUND_ORG = orgOf('bound', FILE_STAMP)
+const BOUND_BASE = deriveElearningProjectionBaseId(BOUND_ORG)
+const BOUND_SHEET = deriveElearningProjectionSheetId(BOUND_ORG)
+const REC_BOUND = `rec_p2src_b_${FILE_STAMP}`
+const SHEETS = [SHEET, OTHER_SHEET, DELETED_SHEET, ROW_SHEET, SCOPED_SHEET, PROJ_SHEET, BOUND_SHEET]
 
 const TITLE = '备料复核'
 const NOT_READABLE_TEXT = JSON.stringify({ error: { code: 'SOURCE_NOT_READABLE' } })
@@ -85,7 +116,8 @@ let listener: TasksListener | undefined
 beforeAll(async () => {
   const db = pool()
   await db.query(
-    `INSERT INTO permissions (code, name, description) VALUES ('multitable:read', 'Multitable Read', 'read')
+    `INSERT INTO permissions (code, name, description) VALUES
+       ('multitable:read', 'Multitable Read', 'read'), ('elearning:admin', 'E-learning Admin', 'admin')
      ON CONFLICT (code) DO NOTHING`,
   )
   await db.query('INSERT INTO meta_bases (id, name) VALUES ($1, $2), ($3, $4)', [BASE, 'P2 source base', OTHER_BASE, 'P2 other base'])
@@ -103,6 +135,29 @@ beforeAll(async () => {
     [REC_1, SHEET, REC_2, REC_OTHER, OTHER_SHEET, REC_DELETED, DELETED_SHEET],
   )
   await db.query('UPDATE meta_sheets SET deleted_at = now() WHERE id = $1', [DELETED_SHEET])
+  // The record read gate beyond global read: per-record read rules on, the approval read model (its
+  // base is shared and left in place), and the sheet bound to BOUND_ORG with its mapping row.
+  await db.query(`INSERT INTO meta_sheets (id, base_id, name, description) VALUES ($1, $2, 'P2 row rules', '')`, [ROW_SHEET, BASE])
+  await db.query('UPDATE meta_sheets SET row_level_read_permissions_enabled = true WHERE id = $1', [ROW_SHEET])
+  await db.query(`INSERT INTO meta_sheets (id, base_id, name, description) VALUES ($1, $2, 'P2 sheet scope', '')`, [SCOPED_SHEET, BASE])
+  await db.query(
+    `INSERT INTO meta_bases (id, name, icon, color, owner_id, workspace_id)
+     VALUES ($1, 'Approval Projection', '', '', 'system:approval-projection', NULL) ON CONFLICT (id) DO NOTHING`,
+    [APPROVAL_PROJECTION_BASE_ID],
+  )
+  await db.query(`INSERT INTO meta_sheets (id, base_id, name, description) VALUES ($1, $2, 'P2 read model', '')`, [PROJ_SHEET, APPROVAL_PROJECTION_BASE_ID])
+  await db.query('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1, $2, $3)', [BOUND_BASE, 'P2 bound base', ELEARNING_PROJECTION_SYSTEM_OWNER])
+  await db.query(
+    `INSERT INTO meta_sheets (id, base_id, name, description, system_kind) VALUES ($1, $2, 'P2 bound', '', $3)`,
+    [BOUND_SHEET, BOUND_BASE, ELEARNING_PROJECTION_SYSTEM_KIND],
+  )
+  await db.query('INSERT INTO elearning_stats_multitable_sheets (org_id, base_id, sheet_id) VALUES ($1, $2, $3)', [BOUND_ORG, BOUND_BASE, BOUND_SHEET])
+  await db.query(
+    `INSERT INTO meta_records (id, sheet_id, data, version) VALUES
+       ($1, $2, '{}'::jsonb, 1), ($3, $2, '{}'::jsonb, 1), ($4, $5, '{}'::jsonb, 1), ($6, $7, '{}'::jsonb, 1),
+       ($8, $9, '{}'::jsonb, 1)`,
+    [REC_ROW_HIDDEN, ROW_SHEET, REC_ROW_OPEN, REC_PROJ, PROJ_SHEET, REC_BOUND, BOUND_SHEET, REC_SCOPED, SCOPED_SHEET],
+  )
   // The task routes and the record's list of tasks on one listener, mounted as index.ts mounts them.
   const tasks = tasksRouter()
   const recordTasks = createMultitableRecordTaskRoutes()
@@ -116,10 +171,13 @@ beforeAll(async () => {
 afterAll(async () => {
   await dropTaskM4Fixtures({ orgPrefix: ORG_PREFIX, userIds: seededUsers, roleIds: seededRoles })
   const db = pool()
+  await db.query('DELETE FROM record_permissions WHERE sheet_id = ANY($1::text[])', [SHEETS]).catch(() => undefined)
+  await db.query('DELETE FROM spreadsheet_permissions WHERE sheet_id = ANY($1::text[])', [SHEETS]).catch(() => undefined)
+  await db.query('DELETE FROM elearning_stats_multitable_sheets WHERE org_id = $1', [BOUND_ORG]).catch(() => undefined)
   await db.query('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [SHEETS]).catch(() => undefined)
   await db.query('DELETE FROM meta_views WHERE sheet_id = ANY($1::text[])', [SHEETS]).catch(() => undefined)
   await db.query('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [SHEETS]).catch(() => undefined)
-  await db.query('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[BASE, OTHER_BASE]]).catch(() => undefined)
+  await db.query('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[BASE, OTHER_BASE, BOUND_BASE]]).catch(() => undefined)
   await listener?.close()
 })
 
@@ -150,6 +208,30 @@ async function dispatcher(label: string, stamp: string, orgId: string, opts: { r
   seededUsers.push(seeded.userId)
   seededRoles.push(seeded.roleId)
   return seeded
+}
+
+/** Makes a seeded actor a platform admin (the `admin` role), before their first request. */
+async function asAdmin(actor: SeededTaskActor): Promise<SeededTaskActor> {
+  await pool().query(`INSERT INTO roles (id, name) VALUES ('admin', 'admin') ON CONFLICT (id) DO NOTHING`)
+  await pool().query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [actor.userId, 'admin'])
+  return actor
+}
+
+/** A per-record read rule that hides `recordId` of ROW_SHEET from `userId` (access level 'none'). */
+async function hideRecord(recordId: string, userId: string): Promise<void> {
+  await pool().query(
+    `INSERT INTO record_permissions (sheet_id, record_id, subject_type, subject_id, access_level) VALUES ($1, $2, 'user', $3, 'none')`,
+    [ROW_SHEET, recordId, userId],
+  )
+}
+
+/** A direct sheet assignment of SCOPED_SHEET to `userId`, in the legacy grant route's shape, whose
+ * only code is NO_READ_SHEET_CODE. */
+async function assignWithoutRead(userId: string): Promise<void> {
+  await pool().query(
+    `INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code) VALUES ($1, $2, 'user', $2, $3)`,
+    [SCOPED_SHEET, userId, NO_READ_SHEET_CODE],
+  )
 }
 
 /** An active member of `orgId` with task access, who can be named as an assignee. */
@@ -724,6 +806,8 @@ describe('the link and the record', () => {
 
 const RECORDS_FILE = new URL('../../src/services/task-records.ts', import.meta.url).pathname
 
+const LIST_DENIED_TEXT = JSON.stringify({ ok: false, error: { code: 'PERMISSION_DENIED', message: 'Insufficient permissions' } })
+
 type RecordTaskItem = Record<string, unknown> & { id: string; isMine: boolean }
 type RecordTaskPage = { items: RecordTaskItem[]; hasMore: boolean }
 
@@ -868,6 +952,24 @@ describe('the record list of tasks: refusals', () => {
     expect(deleted.status).toBe(404)
   })
 
+  it('N11 (the list): without read on the sheet the answer is the same bytes for a live, a deleted and an absent sheet and a missing record', async () => {
+    const stamp = stampOf()
+    const orgId = orgOf('n11l', stamp)
+    const cannot = await dispatcher('n11ln', stamp, orgId, { read: false })
+    const targets: Array<[string, string]> = [
+      [SHEET, REC_1],
+      [DELETED_SHEET, REC_DELETED],
+      [`sht_p2src_absent_${stamp}`, REC_1],
+      [SHEET, REC_MISSING],
+    ]
+    const answers = new Set<string>()
+    for (const [sheetId, recordId] of targets) {
+      const reply = await get(recordTasksPath(recordId, '', sheetId), cannot.bearer)
+      answers.add(`${reply.status} ${reply.text}`)
+    }
+    expect([...answers]).toEqual([`403 ${LIST_DENIED_TEXT}`])
+  })
+
   it('a malformed dispatchKey is 422 INVALID_DISPATCH_KEY and reads no link', async () => {
     const stamp = stampOf()
     const orgId = orgOf('bk', stamp)
@@ -942,5 +1044,139 @@ describe('the record list of tasks: the dispatchKey query', () => {
     const gone = await del(`/api/tasks/${taskId}`, me.bearer)
     expect(gone.status, gone.text).toBe(200)
     expect(pageOf(await get(recordTasksPath(REC_1, `?dispatchKey=${key}`), me.bearer))).toEqual({ items: [], hasMore: false })
+  })
+})
+
+describe('the record read gate beyond global read: the create and the record list', () => {
+  it('a reader of the sheet whose record a per-record read rule hides: the create is the same 422 and writes nothing, the list is 403; another record passes; with the rules off the same record passes; an admin under the same rule passes both', async () => {
+    const stamp = stampOf()
+    const orgId = orgOf('rl', stamp)
+    const me = await dispatcher('rlme', stamp, orgId)
+    const admin = await asAdmin(await dispatcher('rlad', stamp, orgId))
+    await hideRecord(REC_ROW_HIDDEN, me.userId)
+    await hideRecord(REC_ROW_HIDDEN, admin.userId)
+
+    const before = await orgState(orgId)
+    const refused = await post('/api/tasks', me.bearer, sourced({ sheetId: ROW_SHEET, recordId: REC_ROW_HIDDEN }, newKey()))
+    expect([refused.status, refused.text]).toEqual([422, NOT_READABLE_TEXT])
+    expect(await orgState(orgId)).toBe(before)
+    expect(await taskCount(orgId)).toBe(0)
+    expect(await linksOf(orgId)).toEqual([])
+    const listed = await get(recordTasksPath(REC_ROW_HIDDEN, '', ROW_SHEET), me.bearer)
+    expect([listed.status, listed.text]).toEqual([403, LIST_DENIED_TEXT])
+
+    // The same reader reads the sheet: the record no rule hides passes on both routes.
+    const open = await post('/api/tasks', me.bearer, sourced({ sheetId: ROW_SHEET, recordId: REC_ROW_OPEN }, newKey()))
+    expect(open.status, open.text).toBe(200)
+    expect(idsOfPage(pageOf(await get(recordTasksPath(REC_ROW_OPEN, '', ROW_SHEET), me.bearer)))).toEqual([idOf(open)])
+
+    // An admin under the same rule passes both.
+    const byAdmin = await post('/api/tasks', admin.bearer, sourced({ sheetId: ROW_SHEET, recordId: REC_ROW_HIDDEN }, newKey()))
+    expect(byAdmin.status, byAdmin.text).toBe(200)
+    expect(idsOfPage(pageOf(await get(recordTasksPath(REC_ROW_HIDDEN, '', ROW_SHEET), admin.bearer)))).toEqual([idOf(byAdmin)])
+
+    // With the sheet's per-record read rules off, the rule is inert and the same reader passes both.
+    await pool().query('UPDATE meta_sheets SET row_level_read_permissions_enabled = false WHERE id = $1', [ROW_SHEET])
+    try {
+      const ruleOff = await post('/api/tasks', me.bearer, sourced({ sheetId: ROW_SHEET, recordId: REC_ROW_HIDDEN }, newKey()))
+      expect(ruleOff.status, ruleOff.text).toBe(200)
+      expect(idsOfPage(pageOf(await get(recordTasksPath(REC_ROW_HIDDEN, '', ROW_SHEET), me.bearer)))).toEqual([idOf(ruleOff)])
+    } finally {
+      await pool().query('UPDATE meta_sheets SET row_level_read_permissions_enabled = true WHERE id = $1', [ROW_SHEET])
+    }
+  })
+
+  it('a reader whose own assignment on the sheet carries no read code: the create is the same 422 and writes nothing, the list is 403; an admin with the same assignment passes both; without the assignment the same reader passes both', async () => {
+    const stamp = stampOf()
+    const orgId = orgOf('ss', stamp)
+    const me = await dispatcher('ssme', stamp, orgId)
+    const admin = await asAdmin(await dispatcher('ssad', stamp, orgId))
+    await assignWithoutRead(me.userId)
+    await assignWithoutRead(admin.userId)
+    const source = { sheetId: SCOPED_SHEET, recordId: REC_SCOPED }
+
+    const before = await orgState(orgId)
+    const refused = await post('/api/tasks', me.bearer, sourced(source, newKey()))
+    expect([refused.status, refused.text]).toEqual([422, NOT_READABLE_TEXT])
+    expect(await orgState(orgId)).toBe(before)
+    expect(await taskCount(orgId)).toBe(0)
+    expect(await linksOf(orgId)).toEqual([])
+    const listed = await get(recordTasksPath(REC_SCOPED, '', SCOPED_SHEET), me.bearer)
+    expect([listed.status, listed.text]).toEqual([403, LIST_DENIED_TEXT])
+
+    // An admin with the same assignment passes both.
+    const byAdmin = await post('/api/tasks', admin.bearer, sourced(source, newKey()))
+    expect(byAdmin.status, byAdmin.text).toBe(200)
+    expect(idsOfPage(pageOf(await get(recordTasksPath(REC_SCOPED, '', SCOPED_SHEET), admin.bearer)))).toEqual([idOf(byAdmin)])
+
+    // The same reader once its assignment is gone: global read alone decides, and both pass.
+    await pool().query('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_id = $2', [SCOPED_SHEET, me.userId])
+    const unassigned = await post('/api/tasks', me.bearer, sourced(source, newKey()))
+    expect(unassigned.status, unassigned.text).toBe(200)
+    expect(idsOfPage(pageOf(await get(recordTasksPath(REC_SCOPED, '', SCOPED_SHEET), me.bearer)))).toEqual([idOf(unassigned)])
+  })
+
+  it('a sheet of the approval read model, for a reader who takes part in none of its rows: the create is the same 422 and writes nothing, the list is 403; an admin passes both', async () => {
+    const stamp = stampOf()
+    const orgId = orgOf('pj', stamp)
+    const me = await dispatcher('pjme', stamp, orgId)
+    const admin = await asAdmin(await dispatcher('pjad', stamp, orgId))
+
+    const before = await orgState(orgId)
+    const refused = await post('/api/tasks', me.bearer, sourced({ sheetId: PROJ_SHEET, recordId: REC_PROJ }, newKey()))
+    expect([refused.status, refused.text]).toEqual([422, NOT_READABLE_TEXT])
+    expect(await orgState(orgId)).toBe(before)
+    expect(await linksOf(orgId)).toEqual([])
+    const listed = await get(recordTasksPath(REC_PROJ, '', PROJ_SHEET), me.bearer)
+    expect([listed.status, listed.text]).toEqual([403, LIST_DENIED_TEXT])
+    // The sheet itself is closed to this reader, not only its rows: a record id it does not hold is
+    // the same 403, not a 404.
+    const missing = await get(recordTasksPath(REC_MISSING, '', PROJ_SHEET), me.bearer)
+    expect([missing.status, missing.text]).toEqual([403, LIST_DENIED_TEXT])
+    // The same reader on an ordinary sheet passes.
+    const ordinary = await post('/api/tasks', me.bearer, sourced({ sheetId: SHEET, recordId: REC_1 }, newKey()))
+    expect(ordinary.status, ordinary.text).toBe(200)
+
+    const byAdmin = await post('/api/tasks', admin.bearer, sourced({ sheetId: PROJ_SHEET, recordId: REC_PROJ }, newKey()))
+    expect(byAdmin.status, byAdmin.text).toBe(200)
+    expect(idsOfPage(pageOf(await get(recordTasksPath(REC_PROJ, '', PROJ_SHEET), admin.bearer)))).toEqual([idOf(byAdmin)])
+  })
+
+  it('refuses a source the caller cannot read under the task’s organization: on a sheet bound to one organization, the same caller in another organization is the same 422 with nothing written in either and a 403 list; in that organization both pass', async () => {
+    const stamp = stampOf()
+    const orgId = orgOf('ob', stamp)
+    // Global read and the read model's own admin code (through the role, with its admission), a
+    // member of both organizations.
+    const caller = await seedTaskActor({
+      label: 'obme', stamp, orgId, codes: ['tasks:read', 'tasks:write', 'elearning:admin'], admission: true,
+      direct: ['multitable:read'],
+    })
+    seededUsers.push(caller.userId)
+    seededRoles.push(caller.roleId)
+    await pool().query(
+      `INSERT INTO user_namespace_admissions (
+         user_id, namespace, enabled, source, created_at, updated_at
+       ) VALUES ($1, 'elearning', TRUE, 'test', now(), now())`,
+      [caller.userId],
+    )
+    await pool().query('INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)', [caller.userId, BOUND_ORG])
+    const inBoundOrg = signTaskToken(caller.userId, caller.roleId, BOUND_ORG)
+    const source = { sheetId: BOUND_SHEET, recordId: REC_BOUND }
+
+    const beforeHere = await orgState(orgId)
+    const beforeBound = await orgState(BOUND_ORG)
+    const refused = await post('/api/tasks', caller.bearer, sourced(source, newKey()))
+    expect([refused.status, refused.text]).toEqual([422, NOT_READABLE_TEXT])
+    expect(await orgState(orgId)).toBe(beforeHere)
+    expect(await orgState(BOUND_ORG)).toBe(beforeBound)
+    const listed = await get(recordTasksPath(REC_BOUND, '', BOUND_SHEET), caller.bearer)
+    expect([listed.status, listed.text]).toEqual([403, LIST_DENIED_TEXT])
+
+    // The same caller in the sheet's organization: the create links the record in that organization.
+    const created = await post('/api/tasks', inBoundOrg, sourced(source, newKey()))
+    expect(created.status, created.text).toBe(200)
+    expect((await linksOf(BOUND_ORG)).map((row) => [row.task_id, row.sheet_id, row.record_id])).toEqual([[idOf(created), BOUND_SHEET, REC_BOUND]])
+    expect(idsOfPage(pageOf(await get(recordTasksPath(REC_BOUND, '', BOUND_SHEET), inBoundOrg)))).toEqual([idOf(created)])
+    expect(await orgState(orgId)).toBe(beforeHere)
   })
 })

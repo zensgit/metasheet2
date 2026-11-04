@@ -1302,8 +1302,8 @@ const OPAQUE_REGISTRATIONS: Record<string, Record<string, { handler: string; rea
  * The vetted record gate is held to the SAME rule 3 as a route (#5830): the capability lookup runs
  * first, its 401/403 precede the liveness 404, nothing — no record read — runs between, and the
  * liveness it refuses is the one of the sheet it was given. Routes that rely on it alone (AI shortcut
- * preview/run, button run, record approvals POST/GET) are GUARDED on the strength of that proof; their
- * behaviour is pinned in multitable-record-gate-capability-before-liveness.test.ts.
+ * preview/run, button run, record approvals POST/GET, the record's list of tasks) are GUARDED on the
+ * strength of that proof; their behaviour is pinned in multitable-record-gate-capability-before-liveness.test.ts.
  */
 const VETTED_RECORD_GATE_OPTIONS: AnalyzeOptions = {
   vetted: new Map(),
