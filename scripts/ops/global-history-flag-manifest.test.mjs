@@ -1082,3 +1082,39 @@ test('automation scheduler leader lock: exact true switch plus a numeric TTL tha
   assert.match(ttl.activationValue, /default 30000/)
   assert.equal(isActivated(ttl, '30000'), false)
 })
+
+test('DINGTALK_TODO_MIRROR_ENABLED: the registry evaluates the same input matrix exactly like the runtime reader', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.DINGTALK_TODO_MIRROR_ENABLED
+  assert.ok(spec, 'DINGTALK_TODO_MIRROR_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, true, 'the runtime reader trims and lowercases, so the registry must too')
+  assert.equal(spec.danger, 'medium')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.doesNotMatch(spec.purpose, /exact literal/i, 'the purpose must not claim exact-literal behaviour')
+  // The runtime reader is a TypeScript module; it is read as text (Node 20 has no type stripping) and its
+  // single return expression is evaluated as-is, so this compares against what the runtime really runs.
+  const runtimePath = 'packages/core-backend/src/integrations/dingtalk/todo-mirror-flag.ts'
+  assert.ok(spec.source.startsWith(`${runtimePath}:`), 'the source cites the runtime reader first')
+  const module = readRepoSource(runtimePath)
+  const match = module.match(/export function isDingTalkTodoMirrorEnabled\([^)]*\)[^{]*\{\n\s*return ([^\n]+)\n\}/)
+  assert.ok(match, 'isDingTalkTodoMirrorEnabled is a single return expression')
+  const expression = match[1]
+  assert.equal(expression, "String(env[DINGTALK_TODO_MIRROR_ENABLED] ?? '').trim().toLowerCase() === 'true'")
+  // The env key comes from the runtime module's own constant, so a renamed key cannot pass silently.
+  const keyMatch = module.match(/export const DINGTALK_TODO_MIRROR_ENABLED = '([^']+)'/)
+  assert.ok(keyMatch, 'the runtime module declares its env key as a constant')
+  assert.equal(keyMatch[1], spec.key, 'the runtime reads the same env key the registry describes')
+  const runtimeExpression = new Function('env', 'DINGTALK_TODO_MIRROR_ENABLED', `return ${expression}`)
+  const runtimeReader = (raw) => runtimeExpression(raw === undefined ? {} : { [keyMatch[1]]: raw }, keyMatch[1])
+  const matrix = ['true', 'TRUE', ' true ', 'True', undefined, '', 'false', '1', 'yes']
+  for (const value of matrix) {
+    assert.equal(isActivated(spec, value), runtimeReader(value), `registry and runtime disagree on ${JSON.stringify(value)}`)
+  }
+  // Positive control: the matrix really has both outcomes, so agreement is not vacuous.
+  assert.deepEqual(matrix.map(runtimeReader), [true, true, true, true, false, false, false, false, false])
+  // isMisconfiguredTruthy follows isActivated: a value the runtime honours is not flagged as a footgun.
+  for (const value of ['TRUE', 'True', ' true ']) assert.equal(isMisconfiguredTruthy(spec, value), false, value)
+  for (const value of ['1', 'yes']) assert.equal(isMisconfiguredTruthy(spec, value), true, value)
+})

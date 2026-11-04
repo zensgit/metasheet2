@@ -10,6 +10,7 @@
  */
 import { Logger } from '../core/logger'
 import {
+  describeRecycleFailure,
   isUserRecycleSweeperDisabled,
   purgeDueRecycleUsers,
   resolveUserRecycleSweeperIntervalMs,
@@ -25,8 +26,8 @@ async function tick(): Promise<void> {
   try {
     const purged = await purgeDueRecycleUsers()
     if (purged > 0) logger.info(`User recycle sweeper purged ${purged} account(s)`)
-  } catch {
-    logger.error('User recycle sweeper tick failed')
+  } catch (error) {
+    logger.error(`User recycle sweeper tick failed ${describeRecycleFailure(error)}`)
   } finally {
     running = false
   }

@@ -51,6 +51,10 @@
  *     changes neither the key nor the count of the entry the record holds then, nor the read under
  *     that key on the next open; the same account's own late 4xx still counts off its request, and a
  *     late 5xx or no answer still leaves the entry unresolved.
+ * 11. A sent form keeps what was sent (packages 1b and 2 together; cells S1–S4): a dialog mounted
+ *     while the create is out shows the sent form once the outcome is unknown; neither a picker
+ *     confirm nor a people lookup that lands after the send changes the chips of the locked form,
+ *     and 重试 resends the same bytes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type App } from 'vue'
@@ -199,12 +203,23 @@ const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/
 /** The source every create from the default harness carries: ids only, never the base id. */
 const SOURCE = { sheetId: 'sht_1', viewId: 'viw_1', recordId: 'rec_1' }
 
-/** Route the transport: POST /api/tasks, PATCH /api/tasks/:id, GET /api/tasks/:id (the exact path
- *  first, then the id patterns). The default create answer is the current service's: the source link
- *  is confirmed. */
-function serveTasks(options: { create?: Route; patch?: Route; get?: Route } = {}) {
+/** The people lookup's answer when a cell names none: every id asked for is an active member who
+ *  can use tasks, so the prefill stays as it was. */
+function everyoneUsable(url: string): Response {
+  const raw = new URL(url, 'http://localhost').searchParams.get('ids') ?? ''
+  const ids = raw.split(',').filter((id) => id.length > 0)
+  return jsonResponse(200, { items: ids.map((id) => ({ id, name: '', detail: '', canUseTasks: true })), truncated: false })
+}
+
+/** Route the transport: the people lookup GET /api/tasks/people (package 1b), POST /api/tasks,
+ *  PATCH /api/tasks/:id, GET /api/tasks/:id (the exact paths first, then the id patterns). The default
+ *  create answer is the current service's: the source link is confirmed. */
+function serveTasks(options: { create?: Route; patch?: Route; get?: Route; people?: Route } = {}) {
   mocks.apiFetch.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
     const method = init?.method ?? 'GET'
+    if (url.startsWith('/api/tasks/people?') && method === 'GET') {
+      return options.people ? options.people(url, init) : everyoneUsable(url)
+    }
     if (url === '/api/tasks' && method === 'POST') {
       return options.create ? options.create(url, init) : jsonResponse(200, { id: 'tsk_9', version: 1, sourceLinked: true })
     }
@@ -216,6 +231,20 @@ function serveTasks(options: { create?: Route; patch?: Route; get?: Route } = {}
     }
     return jsonResponse(404, {})
   })
+}
+
+/** Every task request except the people lookup (package 1b), which the dialog sends on open. */
+function taskSends(): unknown[][] {
+  return mocks.apiFetch.mock.calls.filter(([url]) => String(url).startsWith('/api/tasks') && !String(url).startsWith('/api/tasks/people?'))
+}
+
+function peopleLookups(): string[] {
+  return mocks.apiFetch.mock.calls.map(([url]) => String(url)).filter((url) => url.startsWith('/api/tasks/people?'))
+}
+
+/** Every read of a task (GET /api/tasks/:id), without the people lookup (package 1b). */
+function taskReads(): Array<[string, Record<string, unknown>]> {
+  return tasksCalls('GET', '/api/tasks/').filter(([url]) => !url.startsWith('/api/tasks/people?'))
 }
 
 function tasksCalls(method: string, prefix: string): Array<[string, Record<string, unknown>]> {
@@ -752,7 +781,8 @@ describe('派发任务 dialog: due date and request bodies', () => {
     await openDialog(container)
     await submit()
     expect(q('error')!.textContent).toContain('请选择截止日期')
-    expect(mocks.apiFetch).not.toHaveBeenCalled()
+    // Only the people lookup of the prefill (package 1b) has gone out; no create.
+    expect(mocks.apiFetch.mock.calls.map(([url]) => String(url))).toEqual(peopleLookups())
   })
 
   it('sends exactly the confirmed title, assignees, mode, due keys, the source and a retry key; nothing else is written', async () => {
@@ -796,7 +826,7 @@ describe('派发任务 dialog: due date and request bodies', () => {
     expect(JSON.stringify(mocks.apiFetch.mock.calls)).not.toContain('bse_1')
     // The description is not written any more (2-D2), and nothing is read back.
     expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
-    expect(tasksCalls('GET', '/api/tasks/')).toHaveLength(0)
+    expect(taskReads()).toHaveLength(0)
   })
 
   it('omits assignees when nobody is named (the dispatcher becomes the assignee)', async () => {
@@ -835,7 +865,7 @@ describe('派发任务 dialog: due date and request bodies', () => {
     setInput('due-date', '2031-05-06')
     await submit()
     expect(q('success')).not.toBeNull()
-    expect(tasksCalls('GET', '/api/tasks/')).toHaveLength(0)
+    expect(taskReads()).toHaveLength(0)
     expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
   })
 })
@@ -1139,8 +1169,8 @@ async function openAndSubmit(container: HTMLElement) {
   await submit()
 }
 
-// The controls outside the people-picking block (whose own controls read the same lock).
-const LOCKED_CONTROLS = ['title', 'mode', 'due-date']
+// The form's controls, the people-picking block's included (package 1b reads the same lock).
+const LOCKED_CONTROLS = ['title', 'pick-people', 'person-field', 'assignee-input', 'assignee-add', 'mode', 'due-date']
 
 describe('派发任务 dialog: the retry key (K2)', () => {
   it('(a) an open and a cancel write nothing; the first submit writes the entry before the request leaves and sends its key', async () => {
@@ -1230,6 +1260,7 @@ describe('派发任务 dialog: what each answer says', () => {
     // Storage works: no line about it.
     expect(q('key-not-saved')).toBeNull()
     for (const id of LOCKED_CONTROLS) expect(q<HTMLInputElement>(id)!.disabled).toBe(true)
+    expect(document.querySelector<HTMLButtonElement>('[data-assignee-id="usr_a"] .meta-dispatch__chip-remove')!.disabled).toBe(true)
     expect(q('submit')!.textContent!.trim()).toBe('重试')
     expect(q<HTMLButtonElement>('submit')!.disabled).toBe(false)
     expect(storedEntry()!.unsettled).toBe(1)
@@ -1399,6 +1430,7 @@ describe('派发任务 dialog: what each answer says', () => {
     expect(q<HTMLSelectElement>('mode')!.value).toBe('any')
     expect(assigneeIds()).toEqual(['usr_a'])
     for (const id of LOCKED_CONTROLS) expect(q<HTMLInputElement>(id)!.disabled).toBe(true)
+    expect(document.querySelector<HTMLButtonElement>('[data-assignee-id="usr_a"] .meta-dispatch__chip-remove')!.disabled).toBe(true)
     expect(q('submit')!.textContent!.trim()).toBe('重试')
     // No read on the second open: this page holds the body (the one call is the first open's list).
     expect(client.listRecordTasks).toHaveBeenCalledTimes(1)
@@ -1946,7 +1978,7 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     await flushUi()
     signInElsewhere(TOKEN_B)
     await submit()
-    expect(mocks.apiFetch.mock.calls.filter(([url]) => String(url).startsWith('/api/tasks'))).toHaveLength(0)
+    expect(taskSends()).toHaveLength(0)
     expectRefused()
   })
 
@@ -2066,7 +2098,7 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     signInElsewhere(TOKEN_B)
     release(jsonResponse(200, { id: 'tsk_9' }))
     await flushUi(10)
-    expect(tasksCalls('GET', '/api/tasks/')).toHaveLength(0)
+    expect(tasksCalls('GET', '/api/tasks/tsk_9')).toHaveLength(0)
     expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
     expectRefused()
   })
@@ -2082,7 +2114,7 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     signInElsewhere(TOKEN_B)
     release(jsonResponse(200, { id: 'tsk_9', version: 1, reused: true, sourceLinked: true }))
     await flushUi(10)
-    expect(tasksCalls('GET', '/api/tasks/')).toHaveLength(0)
+    expect(taskReads()).toHaveLength(0)
     expectRefused()
   })
 
@@ -2298,7 +2330,7 @@ describe('派发任务 dialog: bound to the org the task service uses as well', 
     signInElsewhere(TOKEN_A_ORG2)
     expect(authHeaders()['x-tenant-id']).toBe(header)
     await submit()
-    expect(mocks.apiFetch.mock.calls.filter(([url]) => String(url).startsWith('/api/tasks'))).toHaveLength(0)
+    expect(taskSends()).toHaveLength(0)
     expectRefused()
   })
 
@@ -2440,7 +2472,7 @@ describe('派发任务 page binding: another identity seen once refuses for good
     await flushUi(6)
     await openDialog(container)
     expectRefused()
-    expect(mocks.apiFetch.mock.calls.filter(([url]) => String(url).startsWith('/api/tasks'))).toHaveLength(0)
+    expect(taskSends()).toHaveLength(0)
   })
 
   it('A, then B, then A with no event at all: a record read while B was signed in is caught by the read itself', async () => {
@@ -2778,5 +2810,425 @@ describe('multitable client: the before-send signal (api/beforeSend.ts)', () => 
     for (const { index } of transportLines) expect(lines[index - 1].trim()).toBe('notifyMultitableBeforeSend()')
     // And the stored transport is called only through the hooked `fetch`.
     expect(source.match(/this\.fetch\s*=/g)).toHaveLength(1)
+  })
+})
+
+// ---- package 1b: the people lookup after a prefill, and the people picker ---------------------
+
+/** Waits out the picker's search debounce (300ms) in real time. */
+async function afterDebounce() {
+  await new Promise<void>((resolve) => setTimeout(resolve, 350))
+  await flushUi(6)
+}
+
+const pickerQ = <T extends Element = HTMLElement>(id: string) => document.querySelector<T>(`[data-testid="task-people-picker-${id}"]`)
+
+function typeSearch(value: string) {
+  const input = pickerQ<HTMLInputElement>('search')
+  expect(input).not.toBeNull()
+  input!.value = value
+  input!.dispatchEvent(new Event('input'))
+}
+
+function chipText(id: string): string {
+  return document.querySelector(`[data-assignee-id="${id}"]`)?.textContent ?? ''
+}
+
+describe('派发任务 dialog: the people lookup after a person-field prefill (package 1b)', () => {
+  it('looks the prefilled ids up once, and keeps them when every one is an active member who can use tasks', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    await flushUi()
+    expect(peopleLookups()).toEqual(['/api/tasks/people?ids=usr_a'])
+    expect(assigneeIds()).toEqual(['usr_a'])
+    expect(q('access-skipped')).toBeNull()
+  })
+
+  it('a person the lookup leaves out (not an active member) is not filled in, and the deactivated note says so', async () => {
+    serveTasks({ people: () => jsonResponse(200, { items: [], truncated: false }) })
+    const record = { ...RECORD, data: { ...RECORD.data, fld_owner: ['usr_a'] } } as unknown as MetaRecord
+    const { container } = mountInspector({ record })
+    await flushUi()
+    await openDialog(container)
+    await flushUi()
+    expect(assigneeIds()).toEqual([])
+    expect(q('inactive-skipped')!.textContent).toContain('已停用的人员未带入')
+    // Typed back, the chip carries the deactivated mark.
+    setInput('assignee-input', 'usr_a')
+    q<HTMLButtonElement>('assignee-add')!.click()
+    await flushUi()
+    expect(chipText('usr_a')).toContain('已停用')
+  })
+
+  it('a person who cannot use tasks yet is not filled in; the note gives the count; typed back, the chip is marked', async () => {
+    serveTasks({
+      people: () => jsonResponse(200, { items: [{ id: 'usr_a', name: 'Person A', detail: 'pa***@example.test', canUseTasks: false }], truncated: false }),
+    })
+    const record = { ...RECORD, data: { ...RECORD.data, fld_owner: ['usr_a'] } } as unknown as MetaRecord
+    const { container } = mountInspector({ record })
+    await flushUi()
+    await openDialog(container)
+    await flushUi()
+    expect(assigneeIds()).toEqual([])
+    expect(q('access-skipped')!.textContent).toBe('人员字段中有 1 人还不能使用任务，未带入。')
+    expect(q('inactive-skipped')).toBeNull()
+    setInput('assignee-input', 'usr_a')
+    q<HTMLButtonElement>('assignee-add')!.click()
+    await flushUi()
+    expect(chipText('usr_a')).toContain('还不能使用任务')
+    // Picking another field starts afresh.
+    setSelect('person-field', 'fld_reviewer')
+    await flushUi()
+    expect(q('access-skipped')).toBeNull()
+  })
+
+  const unusable: Array<[string, () => Response]> = [
+    ['a 404 (an older server)', () => jsonResponse(404, {})],
+    ['a 200 of another shape', () => jsonResponse(200, taskBody({ version: 1 }))],
+    ['a 200 with a malformed row', () => jsonResponse(200, { items: [{ id: 'usr_a', name: 'Person A' }], truncated: false })],
+    ['a 429', () => jsonResponse(429, { error: { code: 'RATE_LIMITED' } })],
+    ['a 500', () => jsonResponse(500, {})],
+  ]
+  for (const [name, reply] of unusable) {
+    it(`${name} leaves the prefilled ids and their chips as they were`, async () => {
+      serveTasks({ people: reply })
+      const { container } = mountInspector()
+      await flushUi()
+      await openDialog(container)
+      await flushUi()
+      expect(peopleLookups()).toHaveLength(1)
+      expect(assigneeIds()).toEqual(['usr_a'])
+      expect(chipText('usr_a')).toContain('Person A')
+      expect(chipText('usr_a')).not.toContain('已停用')
+      expect(chipText('usr_a')).not.toContain('还不能使用任务')
+      expect(q('access-skipped')).toBeNull()
+      expect(q('inactive-skipped')).not.toBeNull() // usr_b, deactivated in the drawer's own summaries
+      setInput('due-date', '2031-05-06')
+      await submit()
+      expect(tasksCalls('POST', '/api/tasks')[0][1].assignees).toEqual(['usr_a'])
+    })
+  }
+
+  it('a refused dialog sends no people lookup', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    signInElsewhereWithEvent(TOKEN_B)
+    await flushUi()
+    await openDialog(container)
+    expectRefused()
+    expect(peopleLookups()).toEqual([])
+  })
+
+  it('the user-id entry is folded until asked for', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    const toggle = q<HTMLButtonElement>('add-by-id-toggle')!
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(q<HTMLElement>('add-by-id')!.style.display).toBe('none')
+    toggle.click()
+    await flushUi()
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(q<HTMLElement>('add-by-id')!.style.display).toBe('')
+  })
+})
+
+describe('派发任务 dialog: the people picker (package 1b)', () => {
+  function peopleWithSearch(): Route {
+    return (url) => {
+      if (url.includes('?ids=')) return everyoneUsable(url)
+      return jsonResponse(200, {
+        items: [
+          { id: 'usr_x', name: 'Person X', detail: 'px***@example.test', canUseTasks: true },
+          { id: 'usr_y', name: 'Person Y', detail: 'py***@example.test', canUseTasks: false },
+        ],
+        hasMore: false,
+        requiresQuery: false,
+        limit: 20,
+      })
+    }
+  }
+
+  it('picked people join the chips with their names; someone who cannot use tasks yet cannot be ticked', async () => {
+    serveTasks({ people: peopleWithSearch() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    q<HTMLButtonElement>('pick-people')!.click()
+    await flushUi()
+    expect(pickerQ('type-hint')).not.toBeNull()
+    typeSearch('P')
+    await afterDebounce()
+    expect(peopleLookups().filter((url) => url.includes('?q='))).toEqual(['/api/tasks/people?q=P'])
+    const rows = Array.from(document.querySelectorAll<HTMLElement>('[data-testid="task-people-picker-row"]'))
+    expect(rows.map((row) => row.dataset.personId)).toEqual(['usr_x', 'usr_y'])
+    const blocked = rows[1].querySelector<HTMLInputElement>('input[type="checkbox"]')!
+    expect(blocked.disabled).toBe(true)
+    expect(rows[1].textContent).toContain('还不能使用任务')
+    rows[0].querySelector<HTMLInputElement>('input[type="checkbox"]')!.click()
+    await flushUi()
+    pickerQ<HTMLButtonElement>('confirm')!.click()
+    await flushUi()
+    expect(pickerQ('search')).toBeNull()
+    expect(assigneeIds()).toEqual(['usr_a', 'usr_x'])
+    expect(chipText('usr_x')).toContain('Person X')
+    setInput('due-date', '2031-05-06')
+    await submit()
+    expect(tasksCalls('POST', '/api/tasks')[0][1].assignees).toEqual(['usr_a', 'usr_x'])
+  })
+
+  it('a pick that would pass 50 assignees is refused with the limit message, and the chips stay', async () => {
+    serveTasks({ people: peopleWithSearch() })
+    const many = Array.from({ length: 50 }, (_, i) => `usr_m${i}`)
+    const record = { ...RECORD, data: { ...RECORD.data, fld_owner: many } } as unknown as MetaRecord
+    const { container } = mountInspector({ record })
+    await flushUi()
+    await openDialog(container)
+    await flushUi()
+    expect(assigneeIds()).toHaveLength(50)
+    q<HTMLButtonElement>('pick-people')!.click()
+    await flushUi()
+    typeSearch('P')
+    await afterDebounce()
+    document.querySelector<HTMLInputElement>('[data-person-id="usr_x"] input[type="checkbox"]')!.click()
+    await flushUi()
+    pickerQ<HTMLButtonElement>('confirm')!.click()
+    await flushUi()
+    expect(q('assignee-error')!.textContent).toContain('负责人最多 50 人')
+    expect(assigneeIds()).toEqual(many)
+  })
+
+  it('Esc closes the picker only, not the dialog', async () => {
+    serveTasks({ people: peopleWithSearch() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    q<HTMLButtonElement>('pick-people')!.click()
+    await flushUi()
+    pickerQ<HTMLInputElement>('search')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushUi()
+    expect(pickerQ('search')).toBeNull()
+    expect(dialog()).not.toBeNull()
+  })
+
+  it('after another sign-in, a search is not sent and the dialog refuses', async () => {
+    serveTasks({ people: peopleWithSearch() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    q<HTMLButtonElement>('pick-people')!.click()
+    await flushUi()
+    signInElsewhere(TOKEN_B)
+    typeSearch('P')
+    await afterDebounce()
+    expect(peopleLookups().filter((url) => url.includes('?q='))).toEqual([])
+    expectRefused()
+  })
+})
+
+describe('派发任务 dialog: a sent form keeps what was sent (packages 1b and 2 together)', () => {
+  /** The people route: the prefill lookup answered by `lookup` (at once by default), a search by
+   *  one person who can use tasks. */
+  function peopleRoute(lookup: Route = everyoneUsable): Route {
+    return (url, init) => {
+      if (url.includes('?ids=')) return lookup(url, init)
+      return jsonResponse(200, {
+        items: [{ id: 'usr_x', name: 'Person X', detail: 'px***@example.test', canUseTasks: true }],
+        hasMore: false,
+        requiresQuery: false,
+        limit: 20,
+      })
+    }
+  }
+
+  const NO_TASKS_FOR_A = () => jsonResponse(200, {
+    items: [{ id: 'usr_a', name: 'Person A', detail: '', canUseTasks: false }],
+    truncated: false,
+  })
+
+  async function pickPersonX() {
+    q<HTMLButtonElement>('pick-people')!.click()
+    await flushUi()
+    typeSearch('P')
+    await afterDebounce()
+    document.querySelector<HTMLInputElement>('[data-person-id="usr_x"] input[type="checkbox"]')!.click()
+    await flushUi()
+  }
+
+  it('S1: a dialog mounted while the create is out shows the sent form once the outcome is unknown; 重试 resends it', async () => {
+    let release: (value: Response) => void = () => {}
+    let creates = 0
+    serveTasks({
+      people: peopleRoute(),
+      create: () => (creates++ === 0
+        ? new Promise<Response>((resolve) => { release = resolve })
+        : jsonResponse(200, { id: 'tsk_9', version: 1, sourceLinked: true })),
+    })
+    const { container, vm } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('title', 'Changed')
+    setSelect('mode', 'any')
+    setInput('due-date', '2031-05-06')
+    await pickPersonX()
+    pickerQ<HTMLButtonElement>('confirm')!.click()
+    await flushUi()
+    expect(assigneeIds()).toEqual(['usr_a', 'usr_x'])
+    await submit()
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    vm.record = { ...RECORD, id: 'rec_2' } as unknown as MetaRecord
+    await flushUi(6)
+    vm.record = RECORD
+    await flushUi(6)
+    await openDialog(container)
+    expect(q('pending')).not.toBeNull()
+    release(jsonResponse(502, {}))
+    await flushUi(10)
+    expect(q('pending')).toBeNull()
+    expect(q('error')!.textContent!.trim()).toBe(OUTCOME_UNKNOWN_ZH)
+    expect(q<HTMLInputElement>('title')!.value).toBe('Changed')
+    expect(q<HTMLSelectElement>('mode')!.value).toBe('any')
+    expect(q<HTMLInputElement>('due-date')!.value).toBe('2031-05-06')
+    // Ids: the names the picker gave stayed with the dialog that sent the create.
+    expect(assigneeIds()).toEqual(['usr_a', 'usr_x'])
+    expect(q('inactive-skipped')).toBeNull()
+    for (const id of LOCKED_CONTROLS) expect(q<HTMLInputElement>(id)!.disabled).toBe(true)
+    expect(q('submit')!.textContent!.trim()).toBe('重试')
+    await submit()
+    const bodies = rawCreateBodies()
+    expect(bodies).toHaveLength(2)
+    expect(bodies[1]).toBe(bodies[0])
+    expect(JSON.parse(bodies[0])).toMatchObject({ title: 'Changed', assignees: ['usr_a', 'usr_x'], dueDate: '2031-05-06' })
+    expect(q('success')).not.toBeNull()
+  })
+
+  it('S2: a picker confirm on the locked form adds no chip, and 重试 resends the same bytes', async () => {
+    let answer: () => Response = () => jsonResponse(502, {})
+    serveTasks({ people: peopleRoute(), create: () => answer() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    // The picker is open with usr_x ticked, not confirmed, when the create is sent.
+    await pickPersonX()
+    await submit()
+    expect(q('submit')!.textContent!.trim()).toBe('重试')
+    expect(q<HTMLButtonElement>('pick-people')!.disabled).toBe(true)
+    pickerQ<HTMLButtonElement>('confirm')!.click()
+    await flushUi()
+    expect(pickerQ('search')).toBeNull()
+    expect(assigneeIds()).toEqual(['usr_a'])
+    expect(document.querySelector('[data-assignee-id="usr_x"]')).toBeNull()
+    answer = () => jsonResponse(200, { id: 'tsk_9', version: 1, sourceLinked: true })
+    await submit()
+    const bodies = rawCreateBodies()
+    expect(bodies).toHaveLength(2)
+    expect(bodies[1]).toBe(bodies[0])
+    expect(JSON.parse(bodies[0]).assignees).toEqual(['usr_a'])
+  })
+
+  // The unlocked form acts on the same answer (the "cannot use tasks yet" prefill cell above).
+  for (const when of ['after the 502', 'while the create is out'] as const) {
+    it(`S3: a people lookup answered ${when} leaves the locked chips as sent, and 重试 resends the same bytes`, async () => {
+      let releasePeople: (value: Response) => void = () => {}
+      let releaseCreate: (value: Response) => void = () => {}
+      let creates = 0
+      serveTasks({
+        people: peopleRoute(() => new Promise<Response>((resolve) => { releasePeople = resolve })),
+        create: () => (creates++ === 0
+          ? new Promise<Response>((resolve) => { releaseCreate = resolve })
+          : jsonResponse(200, { id: 'tsk_9', version: 1, sourceLinked: true })),
+      })
+      const { container } = mountInspector()
+      await flushUi()
+      await openDialog(container)
+      expect(peopleLookups()).toEqual(['/api/tasks/people?ids=usr_a'])
+      setInput('due-date', '2031-05-06')
+      await submit()
+      if (when === 'while the create is out') {
+        releasePeople(NO_TASKS_FOR_A())
+        await flushUi(10)
+        releaseCreate(jsonResponse(502, {}))
+      } else {
+        releaseCreate(jsonResponse(502, {}))
+        await flushUi(10)
+        releasePeople(NO_TASKS_FOR_A())
+      }
+      await flushUi(10)
+      expect(q('submit')!.textContent!.trim()).toBe('重试')
+      expect(assigneeIds()).toEqual(['usr_a'])
+      expect(chipText('usr_a')).not.toContain('还不能使用任务')
+      expect(q('access-skipped')).toBeNull()
+      await submit()
+      const bodies = rawCreateBodies()
+      expect(bodies).toHaveLength(2)
+      expect(bodies[1]).toBe(bodies[0])
+      expect(JSON.parse(bodies[0]).assignees).toEqual(['usr_a'])
+    })
+  }
+
+  it('S4: a people lookup answered while the create is out, then a 200: only the created panel', async () => {
+    let releasePeople: (value: Response) => void = () => {}
+    let releaseCreate: (value: Response) => void = () => {}
+    serveTasks({
+      people: peopleRoute(() => new Promise<Response>((resolve) => { releasePeople = resolve })),
+      create: () => new Promise<Response>((resolve) => { releaseCreate = resolve }),
+    })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    releasePeople(NO_TASKS_FOR_A())
+    await flushUi(10)
+    releaseCreate(jsonResponse(200, { id: 'tsk_9', version: 1, sourceLinked: true }))
+    await flushUi(10)
+    expect(q('success')).not.toBeNull()
+    expect(q('access-skipped')).toBeNull()
+    expect(q('assignees')).toBeNull()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+    expect(tasksCalls('POST', '/api/tasks')[0][1].assignees).toEqual(['usr_a'])
+  })
+
+  it('S5: a resend with a person from the picker answered as a matched resend writes nothing: no PATCH, one read of the task, no nudge', async () => {
+    let answer: () => Response = () => jsonResponse(502, {})
+    serveTasks({ people: peopleRoute(), create: () => answer() })
+    let nudges = 0
+    const stop = onTasksChanged(() => { nudges += 1 })
+    try {
+      const { container } = mountInspector()
+      await flushUi()
+      await openDialog(container)
+      setInput('due-date', '2031-05-06')
+      await pickPersonX()
+      pickerQ<HTMLButtonElement>('confirm')!.click()
+      await flushUi()
+      expect(assigneeIds()).toEqual(['usr_a', 'usr_x'])
+      await submit()
+      expect(q('submit')!.textContent!.trim()).toBe('重试')
+      answer = () => jsonResponse(200, { id: 'tsk_9', version: 1, reused: true, sourceLinked: true })
+      await submit()
+      await flushUi(10)
+      const bodies = rawCreateBodies()
+      expect(bodies).toHaveLength(2)
+      expect(bodies[1]).toBe(bodies[0])
+      expect(JSON.parse(bodies[0]).assignees).toEqual(['usr_a', 'usr_x'])
+      expect(q('reused')!.querySelector('[role="status"]')!.textContent).toContain(REUSED_HEADING_ZH)
+      expect(q('reused-note')!.textContent!.trim()).toBe(REUSED_NOTE_ZH)
+      expect(q<HTMLAnchorElement>('open-task')!.getAttribute('href')).toBe('/tasks/tsk_9')
+      // The two creates are the only writes; the one read is the check that the task can be opened.
+      const writes = mocks.apiFetch.mock.calls.filter(([, init]) => (init?.method ?? 'GET') !== 'GET')
+      expect(writes.map(([url, init]) => `${init.method} ${String(url)}`)).toEqual(['POST /api/tasks', 'POST /api/tasks'])
+      expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
+      expect(taskReads().map(([url]) => url)).toEqual(['/api/tasks/tsk_9'])
+      expect(nudges).toBe(0)
+    } finally {
+      stop()
+    }
   })
 })

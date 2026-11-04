@@ -2021,6 +2021,7 @@ exec npx vitest run \
   tasks-nav-badge.spec.ts \
   tasks-nav-feature-gate.spec.ts \
   tasks-nav-relogin.spec.ts \
+  tasks-people-picker.spec.ts \
   tasks-record-dispatch.spec.ts \
   tasks-record-panel.spec.ts \
   tasks-routes.spec.ts \

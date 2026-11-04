@@ -26,6 +26,8 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
   getDingTalkDepartmentDetail: dingtalkMocks.getDingTalkDepartmentDetail,
 }))
 
+import { Logger } from '../../src/core/logger'
+import { requestDingTalkTransportJson } from '../../src/integrations/dingtalk/transport'
 import {
   DIRECTORY_SYNC_HEARTBEAT_INTERVAL_MS,
   DIRECTORY_SYNC_LEASE_STALE_MINUTES,
@@ -449,6 +451,100 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
       expect(failureWrite).toBeDefined()
       expect(failureWrite?.params?.[0]).toBe(RUN_ID)
       expect(String(failureWrite?.params?.[1])).toContain('lost its lease while still alive')
+    })
+  })
+
+  /**
+   * Roadmap §7.7 per-phase timing + retry stats on the run record. Only the DingTalk client (and
+   * db/pg) is mocked here; the transport is real. So this is the one offline case that drives the
+   * REAL transport retry loop through BOTH of syncDirectoryIntegration's observer wrappers
+   * (department pull and user pull) all the way to the completion write: it turns red if either
+   * pull's retry counters or timing stop reaching `directory_sync_runs.stats`, which the DB tests
+   * (mocked client, zero retries) cannot tell from a clean run.
+   */
+  describe('per-phase timing and retry stats on the completion write (roadmap §7.7)', () => {
+    const PULL_DELAY_MS = 50
+    const jsonResponse = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+
+    it('writes one retry per pull (flow-control, then HTTP 429) and a measured pull duration into the run stats', async () => {
+      // Full-jitter backoff × 0 ⇒ each retry waits 0 ms, so the pull time below is the two holds alone.
+      const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
+      const warnSpy = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+      try {
+        const { txCalls } = installFullRunMocks()
+        const departmentFetchFn = vi.fn()
+          .mockResolvedValueOnce(jsonResponse({ errcode: 90018, errmsg: 'flow control' }))
+          .mockResolvedValueOnce(jsonResponse({ errcode: 0, errmsg: 'ok', result: [] }))
+        const userFetchFn = vi.fn()
+          .mockResolvedValueOnce(jsonResponse({ message: 'too many requests' }, 429))
+          .mockResolvedValueOnce(jsonResponse({ errcode: 0, errmsg: 'ok', result: { list: [], has_more: false } }))
+        // Each mocked pull makes one real transport call (rejected once — the flow-control errcode
+        // for departments, HTTP 429 for users — then served) and then holds for a measurable interval.
+        // The root department is always seeded, so the user pull runs once even with no children.
+        dingtalkMocks.listDingTalkDepartments.mockImplementation(async () => {
+          await requestDingTalkTransportJson({
+            input: 'https://example.test/topapi/v2/department/listsub',
+            init: { method: 'POST', body: '{}' },
+            fallbackError: 'department listing failed',
+            kind: 'read',
+            envelope: 'oapi',
+            fetchFn: departmentFetchFn as unknown as typeof fetch,
+          })
+          await new Promise((resolve) => setTimeout(resolve, PULL_DELAY_MS))
+          return []
+        })
+        dingtalkMocks.listDingTalkDepartmentUsers.mockImplementation(async () => {
+          await requestDingTalkTransportJson({
+            input: 'https://example.test/topapi/user/listsimple',
+            init: { method: 'POST', body: '{}' },
+            fallbackError: 'department user listing failed',
+            kind: 'read',
+            envelope: 'oapi',
+            fetchFn: userFetchFn as unknown as typeof fetch,
+          })
+          await new Promise((resolve) => setTimeout(resolve, PULL_DELAY_MS))
+          return { users: [], hasMore: false, nextCursor: null }
+        })
+
+        await syncDirectoryIntegration('dir-1', 'admin-1', 'scheduler')
+
+        expect(dingtalkMocks.listDingTalkDepartmentUsers).toHaveBeenCalledTimes(1)
+        expect(departmentFetchFn).toHaveBeenCalledTimes(2)
+        expect(userFetchFn).toHaveBeenCalledTimes(2)
+        const completion = txCalls.find((call) => call.text.includes("SET status = 'completed'"))
+        const stats = JSON.parse(String(completion?.params?.[1])) as Record<string, unknown>
+        for (const key of [
+          'fetchDurationMs',
+          'applyTransactionMs',
+          'bcryptMsInTransaction',
+          'externalPullRetryCount',
+          'externalPullRetryFlowControlCount',
+          'externalPullRetryHttp429Count',
+          'externalPullRetryNetworkCount',
+          'externalPullRetryOtherCount',
+        ]) {
+          expect(typeof stats[key], key).toBe('number')
+        }
+        // One retry per pull reached the run record, each in its own bucket — so dropping either
+        // pull's observer wrapper cannot pass.
+        expect(stats.externalPullRetryCount).toBe(2)
+        expect(stats.externalPullRetryFlowControlCount).toBe(1)
+        expect(stats.externalPullRetryHttp429Count).toBe(1)
+        expect(stats.externalPullRetryNetworkCount).toBe(0)
+        expect(stats.externalPullRetryOtherCount).toBe(0)
+        // No admission ran (zero users) ⇒ nothing was hashed inside the transaction.
+        expect(stats.bcryptMsInTransaction).toBe(0)
+        // Both pulls were held for PULL_DELAY_MS, so neither a constant 0 nor a single pull's time
+        // can pass (small slack for timer rounding); the per-phase values stay inside the whole-run
+        // window.
+        expect(stats.fetchDurationMs).toBeGreaterThanOrEqual(2 * PULL_DELAY_MS - 10)
+        expect((stats.fetchDurationMs as number) + (stats.applyTransactionMs as number))
+          .toBeLessThanOrEqual(stats.durationMs as number)
+      } finally {
+        randomSpy.mockRestore()
+        warnSpy.mockRestore()
+      }
     })
   })
 

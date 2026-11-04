@@ -160,6 +160,7 @@ export type MetaRecordLabelKey =
   | 'dispatch.errorNotSent' | 'dispatch.earlierUnresolved' | 'dispatch.earlierNoTask' | 'dispatch.earlierCreated'
   | 'dispatch.reusedHeading' | 'dispatch.reusedNote' | 'dispatch.reusedNotOpenable' | 'dispatch.existingReadFailed'
   | 'dispatch.sourceNotLinked' | 'dispatch.retry' | 'dispatch.another' | 'dispatch.existingHeading'
+  | 'dispatch.pickPeople' | 'dispatch.assigneeNoAccess'
   | 'dispatch.identityChanged' | 'dispatch.identityUnavailable'
   // --- 记录级送审 / record-level approval submit (多维表 × 审批 阶段二, design
   //     multitable-approval-phase2-record-submit-design-20260915.md §5). `record.submitApproval` is the
@@ -516,6 +517,8 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'dispatch.retry': { en: 'Retry', zh: '重试' },
   'dispatch.another': { en: 'Dispatch another', zh: '再派一项' },
   'dispatch.existingHeading': { en: 'Dispatched from this record', zh: '已从此记录派发' },
+  'dispatch.pickPeople': { en: 'Choose people', zh: '选择人员' },
+  'dispatch.assigneeNoAccess': { en: "can't use tasks yet", zh: '还不能使用任务' },
   // True in every case that latches the refusal (another account, the same account after a sign-out
   // or an expired session, an org switch, a change while a create is out or after it landed): it
   // says only that dispatching is off on this page and the form was cleared, claims neither that the
@@ -733,6 +736,16 @@ export function recordPosition(current: number, total: number, isZh: boolean): s
 // Same interpolated-helper shape as `recordPosition` above; the count is data, rendered raw.
 export function recordHiddenFieldsHeading(count: number, isZh: boolean): string {
   return isZh ? `本视图中隐藏的字段 (${count})` : `Hidden in this view (${count})`
+}
+
+// dispatchAccessSkipped: the 派发任务 dialog's note under the assignee chips after a person-field
+// prefill (task usability package 1b): how many people of the field were not filled in because they
+// cannot use tasks yet. Names nobody; the count is rendered raw.
+export function dispatchAccessSkipped(count: number, isZh: boolean): string {
+  if (isZh) return `人员字段中有 ${count} 人还不能使用任务，未带入。`
+  return count === 1
+    ? "1 person in the person field can't use tasks yet and was not filled in."
+    : `${count} people in the person field can't use tasks yet and were not filled in.`
 }
 
 // configRestoreTypedConfirm: the T9-W destructive-tier typed-confirm input prompt

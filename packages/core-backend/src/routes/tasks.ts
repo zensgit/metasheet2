@@ -22,6 +22,7 @@ import {
   listPending,
   listTasks,
   parseTaskPage,
+  plainDb,
   reopenTask,
 } from '../services/task-records'
 import {
@@ -40,6 +41,9 @@ import {
   updateComment,
 } from '../services/task-structure'
 import { isVersionConflict, patchTask } from '../services/task-patch'
+import { loadTaskPeople, resolveOrgPeople, searchOrgPeople } from '../services/task-people'
+import { createRateLimiter } from '../middleware/rate-limiter'
+import { PEOPLE_QUERY_MIN_LENGTH, parsePeopleRequest } from '../tasks/task-people-search'
 import { actorId, orgId, sendError } from './tasks-http'
 import { registerTaskListRoutes } from './tasks-lists'
 import { registerTaskSettingsRoutes } from './tasks-settings'
@@ -58,9 +62,31 @@ function sourceNotReadable(status = 422): Error {
   return Object.assign(new Error('SOURCE_NOT_READABLE'), { status, code: 'SOURCE_NOT_READABLE' })
 }
 
+/** The per-router cleanup of `tasksRouter()`: the people search limiter's sweep timer. */
+const routerDisposers = new WeakMap<Router, () => void>()
+
+/** Stops the timer a `tasksRouter()` instance owns. The timer never keeps a process alive; tests
+ *  that build routers call this when they are done with one. */
+export function disposeTasksRouter(router: Router | null): void {
+  if (!router) return
+  routerDisposers.get(router)?.()
+  routerDisposers.delete(router)
+}
+
 export function tasksRouter(): Router | null {
   if (process.env.TASKS_ENABLED !== 'true') return null
   const router = Router()
+  // Package 1b: 120 people searches a minute per signed-in user, in memory, one counter per router.
+  const peopleRateLimit = createRateLimiter({
+    windowMs: 60_000,
+    maxRequests: 120,
+    keyPrefix: 'tasks-people',
+    keyFn: (req) => actorId(req),
+    onLimited: (_req, res) => {
+      res.status(429).json({ error: { code: 'RATE_LIMITED' } })
+    },
+  })
+  routerDisposers.set(router, peopleRateLimit._cleanup)
 
   router.get('/api/tasks/context', authenticate, rbacGuard('tasks', 'read'), (req, res) => {
     const id = orgId(req)
@@ -96,6 +122,36 @@ export function tasksRouter(): Router | null {
       const count = await countPending({ orgId: org, actorId: actorId(req), viewerTz })
       // ASSUMPTION(task-m4): [D5] [own-11] `null` means badge_scope 'off'; only then the extra key.
       res.json(count === null ? { count: 0, badgeScope: 'off' } : { count })
+    } catch (err) {
+      sendError(res, err)
+    }
+  })
+
+  // Package 1b: the people directory of the assignee and follower pickers (task-people.ts). It
+  // takes tasks:write, the code of the writes it feeds, and answers a missing org like them.
+  router.get('/api/tasks/people', authenticate, rbacGuard('tasks', 'write'), peopleRateLimit, async (req, res) => {
+    try {
+      const org = orgId(req)
+      if (!org) {
+        res.status(422).json({ error: { code: 'ORG_MISSING' } })
+        return
+      }
+      const request = parsePeopleRequest({ q: req.query.q, ids: req.query.ids, limit: req.query.limit })
+      if (!request) {
+        res.status(422).json({ error: { code: 'PEOPLE_QUERY_INVALID' } })
+        return
+      }
+      if (request.kind === 'blank') {
+        res.json({ items: [], hasMore: false, requiresQuery: true, limit: request.limit, minQueryLength: PEOPLE_QUERY_MIN_LENGTH })
+        return
+      }
+      if (request.kind === 'resolve') {
+        const items = await resolveOrgPeople(plainDb, { orgId: org, ids: request.ids })
+        res.json({ items, truncated: request.truncated })
+        return
+      }
+      const found = await searchOrgPeople(plainDb, { orgId: org, term: request.term, limit: request.limit })
+      res.json({ items: found.items, hasMore: found.hasMore, requiresQuery: false, limit: request.limit })
     } catch (err) {
       sendError(res, err)
     }
@@ -288,6 +344,21 @@ export function tasksRouter(): Router | null {
       }
       const result = await getParentCandidates({ orgId: org, actorId: actorId(req), taskId: req.params.id })
       res.json(result)
+    } catch (err) {
+      sendError(res, err)
+    }
+  })
+
+  // Package 1b: the names on a task, and whether each person is still an active member.
+  router.get('/api/tasks/:id/people', authenticate, rbacGuard('tasks', 'read'), async (req, res) => {
+    try {
+      const org = orgId(req)
+      if (!org) {
+        res.status(404).json({ error: { code: 'NOT_FOUND' } })
+        return
+      }
+      const people = await loadTaskPeople({ orgId: org, actorId: actorId(req), taskId: req.params.id })
+      res.json({ people })
     } catch (err) {
       sendError(res, err)
     }

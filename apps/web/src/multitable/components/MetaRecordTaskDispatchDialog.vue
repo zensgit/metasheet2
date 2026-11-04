@@ -170,6 +170,17 @@
                 <option v-for="field in personFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </div>
+            <!-- Package 1b: people are picked by name; the user-id entry below is folded until asked for. -->
+            <div class="meta-dispatch__inline">
+              <MtButton size="sm" data-testid="record-task-dispatch-pick-people" :disabled="submitting" @click="pickerOpen = true">{{ l('dispatch.pickPeople') }}</MtButton>
+              <button
+                type="button"
+                class="meta-dispatch__link-button"
+                data-testid="record-task-dispatch-add-by-id-toggle"
+                :aria-expanded="typedOpen ? 'true' : 'false'"
+                @click="typedOpen = !typedOpen"
+              >{{ l('dispatch.assigneeInputLabel') }}</button>
+            </div>
             <ul v-if="assignees.length > 0" class="meta-dispatch__chips" data-testid="record-task-dispatch-assignees">
               <li
                 v-for="id in assignees"
@@ -179,6 +190,7 @@
               >
                 <span>{{ assigneeDisplay(id) }}</span>
                 <span v-if="isInactive(id)" class="meta-dispatch__chip-note">（{{ l('dispatch.assigneeInactive') }}）</span>
+                <span v-else-if="noAccessIds.has(id)" class="meta-dispatch__chip-note">（{{ l('dispatch.assigneeNoAccess') }}）</span>
                 <button
                   type="button"
                   class="meta-dispatch__chip-remove"
@@ -194,7 +206,12 @@
               class="meta-dispatch__hint"
               data-testid="record-task-dispatch-inactive-skipped"
             >{{ l('dispatch.inactiveSkipped') }}</p>
-            <div class="meta-dispatch__inline">
+            <p
+              v-if="accessSkipped > 0"
+              class="meta-dispatch__hint"
+              data-testid="record-task-dispatch-access-skipped"
+            >{{ dispatchAccessSkipped(accessSkipped, isZh) }}</p>
+            <div v-show="typedOpen" class="meta-dispatch__inline" data-testid="record-task-dispatch-add-by-id">
               <label class="meta-dispatch__sublabel" :for="controlId('assignee-input')">{{ l('dispatch.assigneeInputLabel') }}</label>
               <input
                 :id="controlId('assignee-input')"
@@ -214,6 +231,13 @@
               role="alert"
               data-testid="record-task-dispatch-assignee-error"
             >{{ l(assigneeError) }}</p>
+            <TaskPeoplePicker
+              :visible="pickerOpen"
+              mode="assignee"
+              :before-request="verifyIdentity"
+              @confirm="onPickerConfirm"
+              @close="pickerOpen = false"
+            />
           </div>
 
           <div class="meta-dispatch__row">
@@ -304,9 +328,19 @@ import { RouterLink, routerKey } from 'vue-router'
 import type { PersonSummary } from '../types'
 import { MtButton, MtIconButton } from '../ui'
 import { useLocale } from '../../composables/useLocale'
-import { recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
+import { dispatchAccessSkipped, recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 import { TASKS_EN, TASKS_ZH } from '../../tasks/labels'
-import { createTask, getTask, type CompletionMode, type CreateTaskInput, type CreateTaskResult } from '../../tasks/tasksApi'
+import TaskPeoplePicker, { type TaskPeoplePicked } from '../../tasks/TaskPeoplePicker.vue'
+import {
+  createTask,
+  getTask,
+  resolvePeople,
+  type CompletionMode,
+  type CreateTaskInput,
+  type CreateTaskResult,
+  type PersonOption,
+  type SearchPeopleResult,
+} from '../../tasks/tasksApi'
 import { usableViewerTimeZone } from '../../tasks/tasksDraft'
 import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
 import { NO_DISPATCH_IDENTITY, type DispatchBinding } from '../../tasks/recordTaskDispatchIdentity'
@@ -388,6 +422,15 @@ const dueTime = ref('')
 const assigneeError = ref<MetaRecordLabelKey | null>(null)
 const formError = ref<MetaRecordLabelKey | null>(null)
 const inactiveSkipped = ref(false)
+// Package 1b: the picker, the folded user-id entry, the names the picker gave, and what the people
+// lookup after a person-field prefill said (not an active member: 已停用; cannot use tasks yet).
+const pickerOpen = ref(false)
+const typedOpen = ref(false)
+const pickedNames = ref<Record<string, string>>({})
+const absentIds = ref<Set<string>>(new Set())
+const noAccessIds = ref<Set<string>>(new Set())
+const accessSkipped = ref(0)
+let resolveGeneration = 0
 // This record's dispatch state lives outside the component (see the header comment).
 const run = computed(() => readDispatchRun(props.runKey))
 const inFlight = computed(() => run.value?.inFlight === true)
@@ -437,6 +480,13 @@ function clearDraft(): void {
   formError.value = null
   inactiveSkipped.value = false
   sentHere.value = false
+  pickerOpen.value = false
+  typedOpen.value = false
+  pickedNames.value = {}
+  absentIds.value = new Set()
+  noAccessIds.value = new Set()
+  accessSkipped.value = 0
+  resolveGeneration += 1
   clearOpenState()
 }
 
@@ -477,11 +527,11 @@ const summaryById = computed(() => {
 })
 
 function assigneeDisplay(id: string): string {
-  return summaryById.value.get(id)?.display || id
+  return summaryById.value.get(id)?.display || pickedNames.value[id] || id
 }
 
 function isInactive(id: string): boolean {
-  return summaryById.value.get(id)?.inactive === true
+  return summaryById.value.get(id)?.inactive === true || absentIds.value.has(id)
 }
 
 function taskPath(id: string): string {
@@ -570,15 +620,61 @@ function activeIds(field: DispatchPersonField | undefined): string[] {
 function applyPersonField(fieldId: string): void {
   personFieldId.value = fieldId
   assigneeError.value = null
+  absentIds.value = new Set()
+  noAccessIds.value = new Set()
+  accessSkipped.value = 0
   const field = props.personFields.find((entry) => entry.id === fieldId)
   const ids = activeIds(field)
   inactiveSkipped.value = field !== undefined && ids.length < field.ids.length
   if (ids.length > DISPATCH_ASSIGNEE_LIMIT) {
     assignees.value = ids.slice(0, DISPATCH_ASSIGNEE_LIMIT)
     assigneeError.value = 'dispatch.assigneeLimit'
+  } else {
+    assignees.value = [...ids]
+  }
+  void checkPrefill(fieldId, [...assignees.value])
+}
+
+/** Package 1b: person-field ids skip the picker, so they are looked up once (`resolvePeople`). Only
+ *  an `ok` answer for the same prefill is acted on: an id it leaves out (not an active member of
+ *  the org) is dropped and said, like a deactivated person; a person who cannot use tasks yet is
+ *  dropped too, and counted. Any other answer changes nothing; the create's own check remains.
+ *  An answer that lands once the form is sent (a create out, or its outcome unknown) is not acted on
+ *  either: the locked form shows what was sent, and a retry resends that. */
+async function checkPrefill(fieldId: string, ids: string[]): Promise<void> {
+  const mine = ++resolveGeneration
+  if (ids.length === 0 || !verifyIdentity()) return
+  let result: SearchPeopleResult
+  try {
+    result = await resolvePeople(ids)
+  } catch {
     return
   }
-  assignees.value = [...ids]
+  if (mine !== resolveGeneration || personFieldId.value !== fieldId || props.binding.changed.value || submitting.value) return
+  if (result.kind !== 'ok') return
+  const found = new Map<string, PersonOption>(result.items.map((item): [string, PersonOption] => [item.id, item]))
+  const absent = ids.filter((id) => !found.has(id))
+  const blocked = ids.filter((id) => found.get(id)?.canUseTasks === false)
+  if (absent.length === 0 && blocked.length === 0) return
+  absentIds.value = new Set(absent)
+  noAccessIds.value = new Set(blocked)
+  if (absent.length > 0) inactiveSkipped.value = true
+  accessSkipped.value = blocked.length
+  const dropped = new Set([...absent, ...blocked])
+  assignees.value = assignees.value.filter((id) => !dropped.has(id))
+}
+
+function onPickerConfirm(picked: TaskPeoplePicked): void {
+  pickerOpen.value = false
+  if (submitting.value) return
+  const result = addAssignees(assignees.value, picked.ids)
+  if (!result.ok) {
+    assigneeError.value = result.code === 'LIMIT' ? 'dispatch.assigneeLimit' : 'dispatch.assigneeInvalid'
+    return
+  }
+  assignees.value = result.ids
+  pickedNames.value = { ...pickedNames.value, ...picked.names }
+  assigneeError.value = null
 }
 
 function onSelectPersonField(fieldId: string): void {
@@ -629,6 +725,12 @@ function restoreSentForm(input: CreateTaskInput | null): void {
   assigneeError.value = null
   inactiveSkipped.value = false
   typedAssignee.value = ''
+  // Package 1b: no picker over the locked form, and no lookup note or late lookup from another form.
+  pickerOpen.value = false
+  absentIds.value = new Set()
+  noAccessIds.value = new Set()
+  accessSkipped.value = 0
+  resolveGeneration += 1
   clearOpenState()
   if (!input) return
   title.value = input.title
@@ -774,7 +876,13 @@ watch(
       if (!(current.created.reused && !current.created.openable)) dispatchKeys.release(currentScope())
       return
     }
-    if (current.failure && !current.failure.unknown) {
+    // A dialog mounted while the create was out showed the pending note over a fresh form; once the
+    // outcome is unknown it shows the form as that create sent it, which is what 重试 resends.
+    if (current.failure?.unknown) {
+      if (!sentHere.value) restoreSentForm(current.input)
+      return
+    }
+    if (current.failure) {
       showFailure(current.failure)
       forgetDispatchRun(props.runKey)
     }
@@ -1024,6 +1132,7 @@ function onKeydown(event: KeyboardEvent): void {
 .meta-dispatch__chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
 .meta-dispatch__chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; background: #f4f4f5; font-size: 13px; }
 .meta-dispatch__chip-note { color: #909399; font-size: 12px; }
+.meta-dispatch__link-button { border: none; background: none; padding: 0; font-size: 12px; color: var(--ms-color-primary, #409eff); cursor: pointer; }
 .meta-dispatch__chip-remove { border: none; background: transparent; cursor: pointer; padding: 0 2px; font-size: 14px; line-height: 1; }
 .meta-dispatch__hint { font-size: 13px; margin: 0; color: #909399; }
 .meta-dispatch__hint--warn { color: #e6a23c; }
