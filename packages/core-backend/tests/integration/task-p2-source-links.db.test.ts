@@ -293,13 +293,20 @@ function idOf(reply: Reply): string {
 
 /** The org's task, assignee, event, link and outbox rows, for "nothing was written". */
 async function orgState(orgId: string): Promise<string> {
+  // Every column of every task, so a resend that rewrote a title, a description, a date or a
+  // reminder shows here, not only one that bumped the version.
   const tasks = await pool().query(
-    `SELECT id, status, version, deleted_at, updated_at FROM tasks WHERE org_id = $1 ORDER BY id`,
+    `SELECT to_jsonb(t) AS task FROM tasks t WHERE t.org_id = $1 ORDER BY t.id`,
     [orgId],
   )
   const assignees = await pool().query(
     `SELECT a.task_id, a.user_id, a.completed_at FROM task_assignees a JOIN tasks t ON t.id = a.task_id
      WHERE t.org_id = $1 ORDER BY a.task_id, a.user_id`,
+    [orgId],
+  )
+  const followers = await pool().query(
+    `SELECT f.task_id, f.user_id FROM task_followers f JOIN tasks t ON t.id = f.task_id
+     WHERE t.org_id = $1 ORDER BY f.task_id, f.user_id`,
     [orgId],
   )
   const events = await pool().query(
@@ -312,7 +319,7 @@ async function orgState(orgId: string): Promise<string> {
     `SELECT id FROM task_notification_deliveries WHERE org_id = $1 ORDER BY id`,
     [orgId],
   )
-  return JSON.stringify({ tasks: tasks.rows, assignees: assignees.rows, events: events.rows, links, outbox: outbox.rows })
+  return JSON.stringify({ tasks: tasks.rows, assignees: assignees.rows, followers: followers.rows, events: events.rows, links, outbox: outbox.rows })
 }
 
 async function linksOf(orgId: string): Promise<Record<string, unknown>[]> {
