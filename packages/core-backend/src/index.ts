@@ -262,6 +262,7 @@ import { tasksRouter } from './routes/tasks'
 import { setTaskCountsBroadcaster } from './services/task-counts-realtime'
 import { pendingSourceRegistry } from './services/pending-source-registry'
 import { approvalPendingSource } from './services/approval-pending-source'
+import { taskPendingSource } from './services/task-pending-source'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
@@ -467,6 +468,7 @@ import { createYidaOwnerRuntime, type YidaOwnerRuntimeDependencies } from './int
 import type { TransactionalQueryable } from './multitable/pg-transaction-guard'
 import { createYidaInitializationRuntime } from './integration/yida-initialization-runtime'
 import { createYidaConnectionTestRuntime } from './integration/yida-connection-test-runtime'
+import { createYidaSheetSourceHostDependencies } from './integration/yida-sheet-source-host'
 import { isYidaOwnerHttpObservationPath } from './integration/yida-owner-http-observation'
 import { createIntegrationYidaOwnerRouter, YIDA_OWNER_HTTP_PREFIX, yidaOwnerNoStoreMiddleware,
   yidaOwnerJsonOnlyMiddleware, yidaOwnerParseErrorHandler } from './routes/integration-yida-owner'
@@ -650,6 +652,8 @@ export class MetaSheetServer {
     // Host-owned switch, not a request claim. The actual owner/admin, immutable
     // grant and one-use admission still gate every external request.
     readEnablement: () => process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED,
+    // Y2 multi-target + sheet source: its own default-OFF switch (exact 'true'), never the send switch.
+    readMultiTargetEnablement: () => process.env.INTEGRATION_YIDA_MULTI_TARGET_ENABLED,
   })
   // Local initialization is an independent authority, not the send switch or
   // an existing target owner check. The immutable server anchor and live ACL
@@ -657,6 +661,7 @@ export class MetaSheetServer {
   private yidaInitializationRuntime = createYidaInitializationRuntime({
     database: { transaction: yidaOwnerTransaction },
     security: this.pluginRuntimeSecurityService,
+    readMultiTargetEnablement: () => process.env.INTEGRATION_YIDA_MULTI_TARGET_ENABLED,
   })
   // Owner-run token-only 测试连接 before initialization: its own default-OFF switch, never the send
   // switch. Anchor owner + live integration admin are re-proved per call; nothing is persisted.
@@ -2050,11 +2055,14 @@ export class MetaSheetServer {
       injector: this.injector,
       afterSalesApprovalBridgeService: this.afterSalesApprovalBridgeService,
     }))
-    // 路由：待办中心（v1 首切片,todo-center-design-lock §3/§4 —— 只注册审批源）
+    // 路由：待办中心（todo-center-design-lock §3/§4）。任务来源随任务路由一起注册。
     pendingSourceRegistry.register(approvalPendingSource)
     this.app.use(todoRouter())
     const taskRoutes = tasksRouter()
-    if (taskRoutes) this.app.use(taskRoutes)
+    if (taskRoutes) {
+      this.app.use(taskRoutes)
+      pendingSourceRegistry.register(taskPendingSource)
+    }
     // 路由：审计日志（管理员）
     this.app.use(auditLogsRouter())
     // 路由：审批历史（从审计表衍生）
@@ -2137,7 +2145,7 @@ export class MetaSheetServer {
     // in the startup sequence than route mounting happens.
     this.app.use('/api/multitable', createAutomationRoutes(() => this.automationService))
     this.app.use(YIDA_OWNER_HTTP_PREFIX, createIntegrationYidaOwnerRouter(this.yidaOwnerRuntime, this.yidaInitializationRuntime,
-      this.yidaConnectionTestRuntime))
+      this.yidaConnectionTestRuntime, createYidaSheetSourceHostDependencies()))
     this.app.use(YIDA_OWNER_HTTP_PREFIX, yidaOwnerParseErrorHandler)
     // AI routes — internal/not-in-OpenAPI, per-route guards; platform JWT
     // comes from the global /api/** middleware above:

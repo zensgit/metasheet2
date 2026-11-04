@@ -70,6 +70,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/index.ts#yidaConnectionTestRuntime; packages/core-backend/src/integration/yida-connection-test-runtime.ts; plugins/plugin-integration-core/lib/yida-connection-probe.cjs',
   },
   {
+    key: 'INTEGRATION_YIDA_MULTI_TARGET_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'Default OFF; byte-exact true lets the anchor owner register MORE THAN ONE owner-attested YiDa target (slots 2..16, each with its own attestation, sealed app/form identifiers and generation-1 credential material) and prepare drafts from a multitable sheet or view (with the read and export permissions of the owner, bounded to 2000 scanned records, 100 rows, 128 KiB) instead of pasted rowsText. Every draft, preview, approval and delivery stays bound to exactly one target_ref; the CREATE fence is per target. Not a grant and never the send switch: sending still requires INTEGRATION_YIDA_OWNER_SEND_ENABLED plus the unchanged owner/live-admin/one-attempt rules. While OFF every route body, SQL statement and reply is the original single-target slot-1 behaviour and /targets answers the generic 404. Amends R-50 decision 1 (one permanent target slot per deployment) only when ON: enabling it on any deployed machine is a separate owner decision (R-50, AGENTS.md owner-only steps).',
+    source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime+yidaInitializationRuntime; packages/core-backend/src/integration/yida-send-approval-service.ts; packages/core-backend/src/integration/yida-sheet-source.ts; packages/core-backend/src/routes/integration-yida-owner.ts',
+  },
+  {
     key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
     type: 'boolean',
     activationValue: 'true',
@@ -652,11 +663,12 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     key: 'DINGTALK_TODO_MIRROR_ENABLED',
     type: 'boolean',
     activationValue: 'true',
+    caseInsensitive: true, // isDingTalkTodoMirrorEnabled(): `String(env[...] ?? '').trim().toLowerCase() === 'true'`
     dependsOn: [],
     conflictsWith: [],
     danger: 'medium',
     purpose:
-      'Master gate for the DingTalk approval-todo ONE-WAY mirror (plan B, #5772/#5768). Default OFF; exact literal \'true\' only (isDingTalkTodoMirrorEnabled: String(env).trim().toLowerCase() === \'true\'). The sink (both the live eventBus leg and the durable consumer leg) checks this flag FIRST and writes nothing to dingtalk_todo_mirrors when it is off — both legs stay inert. The delivery WORKER (the only code that talks to the DingTalk API) is additionally gated: it is only ever constructed/started in index.ts when this flag is on AND NODE_ENV!==\'test\' AND !VITEST. Danger=medium, not high: an outbound convenience with its own idempotent ledger (ON CONFLICT DO NOTHING on org_id+source_key) — a missing/misconfigured mirror loses no platform state (the durable consumer keeps ACKing regardless).',
+      'Master gate for the DingTalk approval-todo ONE-WAY mirror (plan B, #5772/#5768). Default OFF; \'true\' after trimming, case-insensitive (isDingTalkTodoMirrorEnabled: String(env).trim().toLowerCase() === \'true\'), so \'TRUE\', \'True\' and \' true \' are ON too, while unset, blank, \'false\', \'1\' and \'yes\' stay OFF. The sink (both the live eventBus leg and the durable consumer leg) checks this flag FIRST and writes nothing to dingtalk_todo_mirrors when it is off — both legs stay inert. The delivery WORKER (the only code that talks to the DingTalk API) is additionally gated: it is only ever constructed/started in index.ts when this flag is on AND NODE_ENV!==\'test\' AND !VITEST. Danger=medium, not high: an outbound convenience with its own idempotent ledger (ON CONFLICT DO NOTHING on org_id+source_key) — a missing/misconfigured mirror loses no platform state (the durable consumer keeps ACKing regardless).',
     source: 'packages/core-backend/src/integrations/dingtalk/todo-mirror-flag.ts:20,23; packages/core-backend/src/services/dingtalk-todo-mirror-service.ts:15; packages/core-backend/src/services/dingtalk-todo-mirror-worker.ts:25; packages/core-backend/src/index.ts:3924,3943,3959',
   },
   {

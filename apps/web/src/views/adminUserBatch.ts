@@ -1,8 +1,22 @@
 import { sanitizeCsvCell, sanitizeCsvRow } from '../utils/csvFormulaCell'
 
 export const USER_IMPORT_HEADERS = ['name', 'email', 'roleId', 'department'] as const
-export const USER_UPDATE_HEADERS = ['userId', 'email', 'name', 'roleId', 'department', 'isActive'] as const
+export const USER_UPDATE_HEADERS = ['userId', 'email', 'name', 'roleId', 'department', 'isActive', 'roleIds'] as const
 export const ADMIN_USER_BATCH_LIMIT = 100
+
+/** Blank roleId on update means keep the current RBAC roles. Over-limit files are rejected whole. */
+export function describeImportLimitExceeded(rowCount: number, limit = ADMIN_USER_BATCH_LIMIT): string | null {
+  if (!Number.isFinite(rowCount) || rowCount <= limit) return null
+  const total = Math.floor(rowCount)
+  const over = total - limit
+  return `共 ${total} 行，超出 ${over} 行，一次最多 ${limit} 行。未写入任何数据。`
+}
+
+function exportedRoleIds(roleIds: readonly string[] | null | undefined): string {
+  return [...new Set((roleIds ?? []).map((roleId) => roleId.trim()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right))
+    .join(';')
+}
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -42,6 +56,7 @@ export function buildUpdateExportCsv(users: Array<{
   email: string | null
   name: string | null
   role: string
+  roleIds?: readonly string[] | null
   department?: string | null
   is_active: boolean
 }>): string {
@@ -51,9 +66,12 @@ export function buildUpdateExportCsv(users: Array<{
       user.id,
       user.email || '',
       user.name || '',
-      user.role || '',
+      // The profile field `role` (often "user") is not an RBAC role id. Leave roleId blank
+      // so re-import keeps every assigned role. Real role ids are listed in roleIds.
+      '',
       user.department || '',
       user.is_active ? 'true' : 'false',
+      exportedRoleIds(user.roleIds),
     ]))
   }
   return `\ufeff${lines.join('\n')}\n`
@@ -106,9 +124,14 @@ export function validateImportRows(rows: Array<Record<string, string>>, knownRol
   })
 }
 
+function listedRoleIds(user: { roleIds?: readonly string[] | null }): string[] {
+  return [...new Set((user.roleIds ?? []).map((roleId) => roleId.trim()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right))
+}
+
 export function previewUpdateRows(
   rows: Array<Record<string, string>>,
-  users: Array<{ id: string; email: string | null; name: string | null; role: string; department?: string | null; is_active: boolean }>,
+  users: Array<{ id: string; email: string | null; name: string | null; role: string; roleIds?: readonly string[] | null; department?: string | null; is_active: boolean }>,
   knownRoleIds: ReadonlySet<string>,
 ): UpdatePreviewRow[] {
   const byId = new Map(users.map((user) => [user.id, user]))
@@ -158,8 +181,16 @@ export function previewUpdateRows(
     if (department !== '' && department !== (user.department || '')) {
       changes.push({ field: '部门', before: user.department || '', after: department })
     }
-    if (roleId && roleId !== user.role) {
-      changes.push({ field: '角色', before: user.role, after: roleId })
+    if (roleId) {
+      const currentIds = listedRoleIds(user)
+      const sameMembership = currentIds.length === 1 && currentIds[0] === roleId
+      if (!sameMembership && (currentIds.length > 0 || roleId !== user.role)) {
+        changes.push({
+          field: '角色',
+          before: currentIds.length > 0 ? currentIds.join(';') : user.role,
+          after: roleId,
+        })
+      }
     }
     if (isActive === 'true' || isActive === 'false') {
       const next = isActive === 'true'
