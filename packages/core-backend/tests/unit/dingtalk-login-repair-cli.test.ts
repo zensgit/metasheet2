@@ -455,4 +455,98 @@ describe('entry process (child, no database)', () => {
       })
     }
   }, 120000)
+
+  // Platform configuration the module's scope() needs; nothing listens at DATABASE_URL (port 9).
+  const reanchorEnv = {
+    DINGTALK_CORP_ID: 'synthetic-corp',
+    DINGTALK_CLIENT_ID: 'synthetic-app',
+    DINGTALK_CLIENT_SECRET: 'unused',
+    DINGTALK_REDIRECT_URI: 'https://example.test/callback',
+    ENCRYPTION_KEY: 'synthetic-cli-key-'.repeat(4),
+    ENCRYPTION_SALT: 'synthetic-cli-salt-'.repeat(2),
+  }
+  const exists = (file: string) =>
+    readFile(file).then(
+      () => true,
+      () => false,
+    )
+
+  it('the re-anchor verbs take exact field sets: other sets, an empty code, a missing or extra output path print only REPAIR_INPUT_INVALID and create no file', async () => {
+    const request = { id: 'r', actorId: 'a', actorPassword: 'p', approverId: 'b' }
+    const out = () => path.join(dir, 'reanchor-out-' + Math.random().toString(16).slice(2) + '.json')
+    const outputs: string[] = []
+    const withOut = (verb: string, file: string) => {
+      const o = out()
+      outputs.push(o)
+      return [verb, file, o]
+    }
+    const cases: string[][] = [
+      withOut('reanchor-request', await privateFile('rq-3.json', JSON.stringify({ id: 'r', actorId: 'a', actorPassword: 'p' }))),
+      withOut('reanchor-request', await privateFile('rq-6.json', JSON.stringify({ ...request, code: 'c', extra: 'x' }))),
+      withOut('reanchor-request', await privateFile('rq-empty-code.json', JSON.stringify({ ...request, code: '' }))),
+      withOut('reanchor-request', await privateFile('rq-other-5th.json', JSON.stringify({ ...request, digest: 'd' }))),
+      withOut('reanchor-request', await privateFile('rq-number.json', JSON.stringify({ ...request, approverId: 7 }))),
+      withOut('reanchor-request', await privateFile('rq-open.json', JSON.stringify(request), 0o644)),
+      ['reanchor-request', await privateFile('rq-no-out.json', JSON.stringify(request))],
+      // The recovery-preview field set is not a re-anchor preview, and a re-anchor preview takes no output path.
+      ['reanchor-preview', await privateFile('rp-recovery-set.json', JSON.stringify({ id: 'r', actorId: 'a', actorPassword: 'p' }))],
+      withOut('reanchor-preview', await privateFile('rp-ok.json', JSON.stringify({ request: 'q', actorId: 'a', actorPassword: 'p' }))),
+      ['reanchor', await privateFile('ra-no-confirm.json', JSON.stringify({ request: 'q', actorId: 'a', actorPassword: 'p', digest: 'd' }))],
+      ['reanchor', await privateFile('ra-recovery-set.json', JSON.stringify({ id: 'r', actorId: 'a', actorPassword: 'p', digest: 'd', confirm: 'reanchor' }))],
+      withOut('reanchor', await privateFile('ra-ok.json', JSON.stringify({ request: 'q', actorId: 'a', actorPassword: 'p', digest: 'd', confirm: 'reanchor' }))),
+    ]
+    for (const args of cases) {
+      const r = await spawnEntry(args, reanchorEnv)
+      expect({ args: args.map((a) => path.basename(a)), ...r, ms: 0 }).toEqual({
+        args: args.map((a) => path.basename(a)),
+        code: 1,
+        stdout: '',
+        stderr: 'REPAIR_INPUT_INVALID\n',
+        ms: 0,
+      })
+    }
+    for (const o of outputs) expect({ o: path.basename(o), exists: await exists(o) }).toEqual({ o: path.basename(o), exists: false })
+  }, 180000)
+
+  it('reanchor-request with four or five fields reaches the module: one administrator in both roles refuses before any database work and writes no file', async () => {
+    const base = { id: 'r', actorId: 'same-admin', actorPassword: 'p', approverId: 'same-admin' }
+    for (const [name, body] of [
+      ['rq-4.json', base],
+      ['rq-5.json', { ...base, code: 'synthetic-code' }],
+    ] as const) {
+      const o = path.join(dir, 'reanchor-request-' + name)
+      const r = await spawnEntry(['reanchor-request', await privateFile(name, JSON.stringify(body)), o], reanchorEnv)
+      expect({ name, ...r, ms: 0 }).toEqual({ name, code: 1, stdout: '', stderr: 'REPAIR_DUAL_CONTROL_REQUIRED\n', ms: 0 })
+      expect(await exists(o)).toBe(false)
+    }
+  }, 60000)
+
+  it('reanchor-preview and reanchor with a request that is not a sealed envelope print REPAIR_PROOF_INVALID (not routed to the recovery preview)', async () => {
+    for (const [verb, body] of [
+      ['reanchor-preview', { request: 'synthetic-plain-request', actorId: 'b', actorPassword: 'p' }],
+      ['reanchor', { request: 'synthetic-plain-request', actorId: 'b', actorPassword: 'p', digest: 'd', confirm: 'reanchor' }],
+    ] as const) {
+      const r = await spawnEntry([verb, await privateFile(verb + '-plain.json', JSON.stringify(body))])
+      expect({ verb, ...r, ms: 0 }).toEqual({ verb, code: 1, stdout: '', stderr: 'REPAIR_PROOF_INVALID\n', ms: 0 })
+    }
+  }, 60000)
+
+  it('the doc lists exactly one command for each of the ten verbs', async () => {
+    const doc = await readFile(path.join(backendRoot, '../../docs/development/dingtalk-login-identity-repair-20261102.md'), 'utf8')
+    const verbs = [...doc.matchAll(/^pnpm --silent ops:dingtalk-login-repair ([a-z-]+) /gm)].map((m) => m[1])
+    expect(verbs.sort()).toEqual(
+      [
+        'verify',
+        'preview',
+        'apply',
+        'rollback-preview',
+        'rollback',
+        'release-preview',
+        'release',
+        'reanchor-request',
+        'reanchor-preview',
+        'reanchor',
+      ].sort(),
+    )
+  })
 })

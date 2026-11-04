@@ -1,7 +1,7 @@
 /** Real PG transactions, synthetic provider only. No online binding or provider requests. */
 import { spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { connect, createServer, type AddressInfo, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -5449,6 +5449,204 @@ suite('DingTalk controlled login repair', () => {
       ])
       expect(again).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_NOT_ACTIVE\n' })
     }, 90000)
+
+    /** The deployment switched to the new login app (the in-process mock already reads 'next-app'). */
+    const nextApp = { DINGTALK_CLIENT_ID: 'next-app' }
+    /** R2 shape: applied repair, grant disabled, login app switched in place (termination, no scan). */
+    const revokedSwitched = async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      await query('UPDATE user_external_auth_grants SET enabled=false WHERE local_user_id=$1', [f.user])
+      await switchLoginApp(f)
+      return { f, r, approver: await secondAdmin(f) }
+    }
+
+    it('L1: reanchor-request writes a 0600 request file it never overwrites; the named approver previews (via `pnpm --silent`) and re-anchors', async () => {
+      const { f, r, approver } = await revokedSwitched()
+      const before = await capture(f, r.id)
+      const input = await privateInput('reanchor-request', {
+        id: r.id,
+        actorId: f.admin,
+        actorPassword: f.password,
+        approverId: approver,
+      })
+      const out = path.join(dir, 'reanchor-request-' + randomUUID() + '.json')
+      const requested = await spawnCli(f, ['reanchor-request', input, out], nextApp)
+      expect(requested).toMatchObject({ code: 0, stderr: '' })
+      const summary = JSON.parse(requested.stdout)
+      expect(summary).toMatchObject({
+        id: r.id,
+        digest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        preparerId: f.admin,
+        approverId: approver,
+        clientQueryTimeoutMs: 45000,
+        identityChanged: false,
+        permissionsChanged: false,
+        reanchor: {
+          releaseMode: 'termination',
+          reasons: ['login_scope'],
+          loginClientChanged: true,
+          canonicalAccountId: f.account,
+          sourceAccountIds: [f.account],
+          scanRequired: false,
+          scanned: false,
+        },
+      })
+      expect((await stat(out)).mode & 0o777).toBe(0o600)
+      const file = await readFile(out, 'utf8')
+      expect(Object.keys(JSON.parse(file))).toEqual(['request'])
+      const { request } = JSON.parse(file) as { request: string }
+      expect(request).not.toContain(f.password)
+      // The request writes no row: no journal, audit, session or generation change.
+      expect(await capture(f, r.id)).toEqual(before)
+      // An existing output file is never overwritten.
+      const again = await spawnCli(f, ['reanchor-request', input, out], nextApp)
+      expect(again).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_INPUT_INVALID\n' })
+      expect(await readFile(out, 'utf8')).toBe(file)
+      expect(await capture(f, r.id)).toEqual(before)
+      const previewInput = await privateInput('reanchor-preview', {
+        request,
+        actorId: approver,
+        actorPassword: f.password,
+      })
+      const preview = await spawnCli(f, ['reanchor-preview', previewInput], nextApp, true)
+      expect(preview).toMatchObject({ code: 0, stderr: '' })
+      expect(preview.stdout.split('\n')).toHaveLength(2)
+      expect(JSON.parse(preview.stdout)).toEqual(summary)
+      expect(await capture(f, r.id)).toEqual(before)
+      const credentials = await liveCredentials(f)
+      const done = await spawnCli(
+        f,
+        [
+          'reanchor',
+          await privateInput('reanchor', {
+            request,
+            actorId: approver,
+            actorPassword: f.password,
+            digest: summary.digest,
+            confirm: 'reanchor',
+          }),
+        ],
+        nextApp,
+      )
+      expect(done).toMatchObject({ code: 0, stderr: '' })
+      const result = JSON.parse(done.stdout)
+      expect(result).toEqual({
+        id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        predecessorId: r.id,
+        releaseMode: 'termination',
+        canonicalAccountId: f.account,
+        loginClientChanged: true,
+        identityChanged: false,
+        permissionsChanged: false,
+        targetSessionsRevoked: true,
+        clientQueryTimeoutMs: 45000,
+      })
+      await credentials.expectRevoked()
+      expect(await repairRow(r.id)).toMatchObject({ state: 'superseded', rollback_actor_id: approver })
+      expect(await successorOf(r.id)).toEqual([
+        expect.objectContaining({
+          id: result.id,
+          state: 'applied',
+          supersedes_id: r.id,
+          actor_id: f.admin,
+          approver_id: approver,
+          login_client_id: 'next-app',
+          canonical_account_id: f.account,
+          source_account_ids: [f.account],
+        }),
+      ])
+      const details = {
+        actorId: approver,
+        preparerId: f.admin,
+        approverId: approver,
+        predecessorId: r.id,
+        successorId: result.id,
+        releaseMode: 'termination',
+        reasons: ['login_scope'],
+        scanned: false,
+      }
+      expect(await auditOf(result.id)).toEqual([{ action: 'reanchor', action_details: details }])
+      expect(await auditOf(r.id)).toEqual([
+        { action: 'apply', action_details: { actorId: f.admin } },
+        { action: 'superseded', action_details: details },
+      ])
+      // Operator check after the fact (doc): the same request now reports that the re-anchor committed.
+      const after = await spawnCli(f, ['reanchor-preview', previewInput], nextApp)
+      expect(after).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_NOT_ACTIVE\n' })
+      const releasePlan = await releasePreview(f, result.id)
+      expect(releasePlan.release).toMatchObject({ mode: 'termination', releasedAccountIds: [f.account] })
+      await expectAllowedRelease(f, result.id, releasePlan.digest, 'termination')
+    }, 120000)
+
+    it('L2: reanchor or reanchor-preview by anyone but the named approver, or with another digest, exits 1 with exactly one code and writes nothing', async () => {
+      const { f, r, approver } = await revokedSwitched()
+      const third = await secondAdmin(f)
+      const { request, summary } = await requestReanchor(f, r.id, approver)
+      const before = await capture(f, r.id)
+      const execute = (actorId: string, digest: string) =>
+        privateInput('reanchor-l2', { request, actorId, actorPassword: f.password, digest, confirm: 'reanchor' })
+      const cases: [string, string[], string][] = [
+        ['preparer executes', ['reanchor', await execute(f.admin, summary.digest)], 'REPAIR_DUAL_CONTROL_REQUIRED'],
+        ['third admin executes', ['reanchor', await execute(third, summary.digest)], 'REPAIR_DUAL_CONTROL_REQUIRED'],
+        [
+          'preparer previews',
+          ['reanchor-preview', await privateInput('reanchor-l2-preview', { request, actorId: f.admin, actorPassword: f.password })],
+          'REPAIR_DUAL_CONTROL_REQUIRED',
+        ],
+        ['another digest', ['reanchor', await execute(approver, '0'.repeat(64))], 'REPAIR_APPROVAL_REQUIRED'],
+      ]
+      for (const [name, args, code] of cases) {
+        const run = await spawnCli(f, args, nextApp)
+        expect({ name, ...run, ms: 0 }).toEqual({ name, code: 1, stdout: '', stderr: code + '\n', ms: 0 })
+      }
+      expect(await capture(f, r.id)).toEqual(before)
+      expect(await successorOf(r.id)).toEqual([])
+      expect(await journalRow(r.id)).toMatchObject({ state: 'applied', released_account_ids: null })
+    }, 120000)
+
+    it('L3: a request sealed in process after a scan is previewed and executed by the child only under the same login scope; the first login then advances the pin', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      await switchLoginApp(f)
+      const approver = await secondAdmin(f)
+      const { request, summary } = await requestReanchor(f, r.id, approver, f.admin, 'synthetic-scan')
+      expect(summary.reanchor).toMatchObject({ releaseMode: 'canonical', scanRequired: true, scanned: true })
+      // The in-process scope hash is the one the child computes from its own env (corp + DINGTALK_CLIENT_ID).
+      const sealed = JSON.parse(decryptStoredSecretValue(request))
+      expect(sealed.scope).toBe(createHash('sha256').update(JSON.stringify([f.corp, 'next-app'])).digest('hex'))
+      const previewInput = await privateInput('reanchor-l3-preview', { request, actorId: approver, actorPassword: f.password })
+      const before = await capture(f, r.id)
+      // Under the old app the child's scope differs and the request is refused.
+      const oldApp = await spawnCli(f, ['reanchor-preview', previewInput])
+      expect(oldApp).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_PROOF_INVALID\n' })
+      const preview = await spawnCli(f, ['reanchor-preview', previewInput], nextApp)
+      expect(preview).toMatchObject({ code: 0, stderr: '' })
+      expect(JSON.parse(preview.stdout)).toEqual({ ...summary, clientQueryTimeoutMs: 45000 })
+      expect(await capture(f, r.id)).toEqual(before)
+      const credentials = await liveCredentials(f)
+      const done = await spawnCli(
+        f,
+        [
+          'reanchor',
+          await privateInput('reanchor-l3', {
+            request,
+            actorId: approver,
+            actorPassword: f.password,
+            digest: summary.digest,
+            confirm: 'reanchor',
+          }),
+        ],
+        nextApp,
+      )
+      expect(done).toMatchObject({ code: 0, stderr: '' })
+      const result = JSON.parse(done.stdout)
+      expect(result).toMatchObject({ predecessorId: r.id, releaseMode: 'canonical', loginClientChanged: true, clientQueryTimeoutMs: 45000 })
+      await credentials.expectRevoked()
+      expect((await repairRow(result.id)).login_client_id).toBe('next-app')
+      expect((await exchangeCodeForUser('synthetic-fresh')).localUserId).toBe(f.user)
+      expect((await repairRow(result.id)).expected_identity).toMatchObject({ provider_open_id: 'next-open-' + f.user })
+    }, 120000)
 
     it('through the documented `pnpm --silent` invocation: stdout is exactly the JSON on success, and a lock refusal keeps exit 75 and one code', async () => {
       const f = await fixture(),

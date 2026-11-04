@@ -298,6 +298,23 @@ describe('scanner self-check (synthetic sources, memory only)', () => {
     ])
   })
 
+  it('in-memory mutation: a fourth sealing call in the login repair module, or one fewer, turns the pinned count of 3 red', () => {
+    const victim = 'packages/core-backend/src/auth/dingtalk-identity-repair.ts'
+    const key = `${victim} :: encryptStoredSecretValue`
+    const original = readRepoFile(victim)
+    expect(PINNED_COUNTS[key]).toBe(3)
+    const fourth = `${original}\nexport const eadmRepairProbe = () => encryptStoredSecretValue('fixture')\n`
+    expect(censusDrift(countSealingSites(scanTree((rel) => (rel === victim ? fourth : readRepoFile(rel)))))).toEqual([
+      `${key}: pinned 3, found 4 — ${NEW_SITE_HELP}`,
+    ])
+    const at = original.indexOf('request: encryptStoredSecretValue(')
+    expect(at).toBeGreaterThan(0)
+    const fewer = original.slice(0, at) + 'request: String(' + original.slice(at + 'request: encryptStoredSecretValue('.length)
+    expect(censusDrift(countSealingSites(scanTree((rel) => (rel === victim ? fewer : readRepoFile(rel)))))).toEqual([
+      `${key}: pinned 3, found 2 — ${GONE_SITE_HELP}`,
+    ])
+  })
+
   it('in-memory mutation: a new plugin module that seals through the host security service turns it red', () => {
     const newFile = 'plugins/plugin-after-sales/lib/eadm-webhook-secret-store.cjs'
     const source = `'use strict'\nasync function saveWebhookSecret(context, value) {\n  return context.services.security.encrypt(value)\n}\nmodule.exports = { saveWebhookSecret }\n`

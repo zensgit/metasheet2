@@ -11,18 +11,33 @@ import {
   rollbackDingTalkRepair,
   releaseDingTalkRepair,
   previewDingTalkRepairRecovery,
+  requestDingTalkRepairReanchor,
+  previewDingTalkRepairReanchor,
+  reanchorDingTalkRepair,
 } from '../src/auth/dingtalk-identity-repair'
 import { poolManager } from '../src/integration/db/connection-pool'
 
-const ACTIONS = [
-  'verify',
-  'preview',
-  'apply',
-  'rollback-preview',
-  'release-preview',
-  'rollback',
-  'release',
-]
+/**
+ * The exact input field sets of every verb (one table, so a new verb never falls into another verb's
+ * branch). A verb with two sets accepts exactly one of them.
+ */
+const FIELDS: Readonly<Record<string, readonly (readonly string[])[]>> = {
+  verify: [['userId', 'password', 'code', 'actorId', 'actorPassword']],
+  preview: [['proof']],
+  apply: [['proof', 'digest', 'confirm']],
+  'rollback-preview': [['id', 'actorId', 'actorPassword']],
+  'release-preview': [['id', 'actorId', 'actorPassword']],
+  rollback: [['id', 'actorId', 'actorPassword', 'digest', 'confirm']],
+  release: [['id', 'actorId', 'actorPassword', 'digest', 'confirm']],
+  'reanchor-request': [
+    ['id', 'actorId', 'actorPassword', 'approverId'],
+    ['id', 'actorId', 'actorPassword', 'approverId', 'code'],
+  ],
+  'reanchor-preview': [['request', 'actorId', 'actorPassword']],
+  reanchor: [['request', 'actorId', 'actorPassword', 'digest', 'confirm']],
+}
+/** Verbs that take a second path: a new private output file (0600, never overwritten). */
+const WRITES_FILE: ReadonlySet<string> = new Set(['verify', 'reanchor-request'])
 
 /** Any local input, file-system or JSON failure is an operator input problem with one fixed code. */
 async function local<T>(work: () => Promise<T>): Promise<T> {
@@ -50,8 +65,8 @@ export async function run(argv: string[]): Promise<unknown> {
   if (
     rest.length ||
     !file ||
-    !ACTIONS.includes(action) ||
-    (action === 'verify' ? !out : !!out)
+    !Object.prototype.hasOwnProperty.call(FIELDS, action) ||
+    (WRITES_FILE.has(action) ? !out : !!out)
   )
     throw new Error('REPAIR_INPUT_INVALID')
   const input = await local(async () => {
@@ -60,22 +75,15 @@ export async function run(argv: string[]): Promise<unknown> {
       throw new Error('private input required')
     return JSON.parse(await readFile(file, 'utf8'))
   })
-  const fields =
-    action === 'verify'
-      ? ['userId', 'password', 'code', 'actorId', 'actorPassword']
-      : action === 'preview'
-        ? ['proof']
-        : action === 'apply'
-          ? ['proof', 'digest', 'confirm']
-          : action.endsWith('-preview')
-            ? ['id', 'actorId', 'actorPassword']
-            : ['id', 'actorId', 'actorPassword', 'digest', 'confirm']
   if (
     !input ||
     typeof input !== 'object' ||
     Array.isArray(input) ||
-    Object.keys(input).length !== fields.length ||
-    fields.some((k) => typeof input[k] !== 'string' || !input[k])
+    !FIELDS[action].some(
+      (set) =>
+        set.length === Object.keys(input).length &&
+        set.every((k) => typeof input[k] === 'string' && input[k]),
+    )
   )
     throw new Error('REPAIR_INPUT_INVALID')
   if (action === 'verify') {
@@ -99,6 +107,36 @@ export async function run(argv: string[]): Promise<unknown> {
       businessRowsChanged: false,
     }
   }
+  if (action === 'reanchor-request') {
+    const { request, summary } = await requestDingTalkRepairReanchor(
+      input.id,
+      input.actorId,
+      input.actorPassword,
+      input.approverId,
+      input.code,
+    )
+    await local(() =>
+      writeFile(out, JSON.stringify({ request }), {
+        mode: 0o600,
+        flag: 'wx',
+      }),
+    )
+    return summary
+  }
+  if (action === 'reanchor-preview')
+    return previewDingTalkRepairReanchor(
+      input.request,
+      input.actorId,
+      input.actorPassword,
+    )
+  if (action === 'reanchor')
+    return reanchorDingTalkRepair(
+      input.request,
+      input.actorId,
+      input.actorPassword,
+      input.digest,
+      input.confirm,
+    )
   if (action === 'preview') return previewDingTalkRepair(input.proof)
   if (action === 'apply')
     return applyDingTalkRepair(input.proof, input.digest, input.confirm)
