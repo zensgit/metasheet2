@@ -201,9 +201,9 @@ databaseSuite('SA05 permanent human-attested target — actual PG and no online 
     createTarget = targets.createYidaApprovedTargetStore
     createTargetWriter = targets.createInternalYidaApprovedTargetTransactionWriter
     createAdditionalWriter = targets.createInternalYidaAdditionalTargetTransactionWriter
-    // Y2 migration SQL, exactly what zzzz20261103120000 up()/down() execute.
+    // Y2 migration SQL, exactly what zzzz20261103130000 up()/down() execute.
     const migration = await import(pathToFileURL(path.join(root,
-      'packages/core-backend/src/db/migrations/zzzz20261103120000_add_integration_yida_multi_target_slots.ts')).href) as
+      'packages/core-backend/src/db/migrations/zzzz20261103130000_add_integration_yida_multi_target_slots.ts')).href) as
       { YIDA_MULTI_TARGET_UP_SQL: string; YIDA_MULTI_TARGET_DOWN_SQL: string }
     multiTargetUp = migration.YIDA_MULTI_TARGET_UP_SQL; multiTargetDown = migration.YIDA_MULTI_TARGET_DOWN_SQL
     const drafts = await importNative(pathToFileURL(path.join(lib, 'yida-draft-plan-store.mjs')).href)
@@ -507,7 +507,7 @@ databaseSuite('SA05 permanent human-attested target — actual PG and no online 
     expect((await onboardingEvidence()).counts).toEqual([1, 1, 1, 1, committed?.createdDraft.rows.length, 1, 1, 1])
   })
 
-  // ---- Y2 multi-target (migration zzzz20261103120000). Synthetic data only. ----
+  // ---- Y2 multi-target (migration zzzz20261103130000). Synthetic data only. ----
   async function catalog() {
     const constraints = await owner.query(`SELECT c.conrelid::regclass::text AS rel, c.conname, pg_get_constraintdef(c.oid) AS def
       FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace WHERE n.nspname = $1 ORDER BY 1, 2`, [schema])

@@ -15,7 +15,7 @@ const MAX_TTL = 900000
 const MAX_PLAIN = 16 * 1024 * 1024
 const MAX_CIPHER = 24 * 1024 * 1024
 const DIGEST = /^[0-9a-f]{64}$/
-// Y2 multi-target: additional owner-attested targets live in slots 2..16 (migration zzzz20261103120000).
+// Y2 multi-target: additional owner-attested targets live in slots 2..16 (migration zzzz20261103130000).
 const MAX_SLOT = 16
 const TARGET_REF = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const SELECTION_KEYS = ['tenantId', 'workspaceId', 'ownerId', 'operationId', 'rowKey', 'targetRef',

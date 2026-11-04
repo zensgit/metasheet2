@@ -295,7 +295,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       correlation = (await load('packages/core-backend/src/middleware/correlation.ts')).correlationIdMiddleware as RequestHandler
     }
     if (options.multiTarget) {
-      multiTargetUp = (await load('packages/core-backend/src/db/migrations/zzzz20261103120000_add_integration_yida_multi_target_slots.ts'))
+      multiTargetUp = (await load('packages/core-backend/src/db/migrations/zzzz20261103130000_add_integration_yida_multi_target_slots.ts'))
         .YIDA_MULTI_TARGET_UP_SQL as string
     }
     const route = await load('packages/core-backend/src/routes/integration-yida-owner.ts')

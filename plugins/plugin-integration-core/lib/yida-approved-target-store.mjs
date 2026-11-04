@@ -15,7 +15,7 @@ const MATERIALS = 'integration_yida_credential_materials'
 const CONTEXT = ['tenantId', 'workspaceId', 'ownerId']
 const MAX_BYTES = 262144
 // Y2 multi-target: slots 2..MAX_SLOT are additional targets of the slot-1 owner (migration
-// zzzz20261103120000). Only an explicit targetRef read or the additional writer accepts them;
+// zzzz20261103130000). Only an explicit targetRef read or the additional writer accepts them;
 // every legacy (no targetRef) path still selects and requires slot 1 exactly.
 const MAX_SLOT = 16
 const TARGET_REF = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
