@@ -2,7 +2,7 @@
 
 > 范围：只读旧系统源码，把它对宜搭的写法整理成我们自己的规则模板格式。本 PR 只有文档和三份合成模板，不改代码、不开开关。
 >
-> 代码引用都固定在 `47655efec`（origin/main，2026-11-03）。旧系统引用按压缩包根目录写相对路径，Java 包路径一段统一写成 `<pkg>`。
+> 代码引用都固定在 `b36f53c2f`（origin/main，已含 #6714 与 #6718；初版写于 `47655efec`，2026-11-03）。旧系统引用按压缩包根目录写相对路径，Java 包路径一段统一写成 `<pkg>`。
 
 ## 1. 来源与边界
 
@@ -18,7 +18,7 @@
   - 按 AI 协作章程「安全红线」，这些凭据默认视为已泄露，接管时要轮换。
   - 这份压缩包本身也应按含凭据的文件保管。
 - **模板的定位**：三份模板都是 `stock-preparation-yida-rule-template` 本地模板，状态是 `local-unverified`。
-  - 模板不带 target：`plugins/plugin-integration-core/lib/yida-rule-template.mjs:97` 拒收 target，`:100-101` 只在校验时临时放一个 schema 占位 target。
+  - 模板不带 target：`plugins/plugin-integration-core/lib/yida-rule-template.mjs:98` 拒收 target，`:101-102` 只在校验时临时放一个 schema 占位 target。
   - 模板也不代表宜搭远端的真实结构：`plugins/plugin-integration-core/lib/yida-static-plan.mjs:1-2`。
 
 ## 2. 三张表单字段目录
@@ -45,13 +45,13 @@
 | 版本号 | 文本 | `sourceVersion`（templates.cjs:756） | 直接映射 | 是 | 是 | 是 |
 | 父组件图号 | 文本 | `parentComponentCode`（templates.cjs:736） | 直接映射，顶层为空 | 否 | 是，可空键 | 是 |
 | 父组件名称 | 文本 | `parentComponentName`（templates.cjs:737） | 直接映射 | 否 | 否 | 是 |
-| 部件类别 | 文本 | 与父组件名称同值（`StockInfoController.java:1803`） | 复制派生 | 否 | 否 | 否，见 G3 |
+| 部件类别 | 文本 | 与父组件名称同值（`StockInfoController.java:1803`） | 复制派生 | 否 | 否 | v2 否；v3 是（copy），见 G3 |
 | 总数量 | 数字 | `totalQuantity`（templates.cjs:758） | 拆分均分 | 是 | 否 | 是，见 G7 |
-| 毛胚尺寸 | 文本 | 长、宽、厚三列拼一段文字（`StockInfoController.java:1838-1850`）。这三列只存在于客户包（`plugins/plugin-integration-core/lib/customer-packs/factory-a.rehearsal.cjs:118-120`） | 拼接 | 否 | 否 | 否，见 G2 |
+| 毛胚尺寸 | 文本 | 长、宽、厚三列拼一段文字（`StockInfoController.java:1838-1850`）。这三列只存在于客户包（`plugins/plugin-integration-core/lib/customer-packs/factory-a.rehearsal.cjs:118-120`） | 拼接 | 否 | 否 | v2 否；v3 是（concat），见 G2 |
 | 材料类型 | 文本 | `blankType`（templates.cjs:771-774）。旧代码注释写明这一列「实际上是毛胚类型」（`StockInfoController.java:1851-1853`） | 直接映射 | 否 | 否 | 是 |
-| 工艺执行规则 | 下拉 | 无 | 常量，固定值见旧代码 `StockInfoController.java:1854` | — | 否 | 否，见 G1 |
-| 是否允许负库存 | 单选 | 无 | 常量（`StockInfoController.java:1855`） | — | 否 | 否，见 G1 |
-| 一个只注释为「默认值」的文本字段 | 文本 | 无 | 常量（`StockInfoController.java:1857`） | — | 否 | 否，见 G1；用途待现场核对 |
+| 工艺执行规则 | 下拉 | 无 | 常量，固定值见旧代码 `StockInfoController.java:1854` | — | 否 | v2 否；v3 是（constant），见 G1 |
+| 是否允许负库存 | 单选 | 无 | 常量（`StockInfoController.java:1855`） | — | 否 | v2 否；v3 是（constant），见 G1 |
+| 一个只注释为「默认值」的文本字段 | 文本 | 无 | 常量（`StockInfoController.java:1857`） | — | 否 | v2 否；v3 是（constant），见 G1；用途待现场核对 |
 | 备料行标识 | 文本 | `idempotencyKey`（templates.cjs:701）。旧系统用的是备料表自增 id（`StockInfoController.java:1856`） | 直接映射 | 是 | 否。旧代码按它查询的那一行已注释掉 | 是 |
 | 物料编码 | 文本 | 无。旧代码用前缀加随机 UUID（`StockInfoController.java:1896`） | 生成编号 | — | 否 | 否，见 G6 |
 | 图纸图片 ×4 | 图片 | 无。旧代码注释写明 2025-10 起停用 | — | — | — | 否，见 G8 |
@@ -103,14 +103,14 @@
 
 - 三份模板都是 `intent: create`，按业务键去重。
   - 物料表的业务键跟旧系统的查重条件一致：项目号、图号、名称、规格、材质、版本、父组件图号。
-  - 规格和父组件图号是可空键（`yida-static-plan.mjs:214-220`）。
-- **批内重复**：本地预览会把同一批里业务键相同的行归成一组（`yida-static-plan.mjs:444-449`）。
+  - 规格和父组件图号是可空键（`yida-static-plan.mjs:225-231`）。
+- **批内重复**：本地预览会把同一批里业务键相同的行归成一组（`yida-static-plan.mjs:695-700`）。
 - **跨批次重复**：交付台账对「租户、工作区、目标、业务键摘要」做 create 预留，靠唯一约束兜住（`packages/core-backend/migrations/091_create_integration_yida_create_fence.sql:1-5`，`plugins/plugin-integration-core/lib/yida-delivery-store.cjs:11`、`:193-195`）。
   - 所以不再需要「先查宜搭再写」。
   - 但这个约束只认得经我们系统写过的行。旧系统已经写进宜搭的行，它不知道。见 §7 Q3。
-- **多项目号均分**：用 `equal_integer`（`stock-preparation-yida-allocation.mjs:268-272`），除不尽就报 `QUANTITY_NOT_DIVISIBLE`（`:271`）。
+- **多项目号均分**：用 `equal_integer`（`stock-preparation-yida-allocation.mjs:284-288`），除不尽就报 `QUANTITY_NOT_DIVISIBLE`（`:287`）。
   - 旧系统遇到除不尽是把数量留空，只记一行日志。
-  - 有小数时只能改用 `equal_decimal_exact`（`stock-preparation-yida-allocation.mjs:274-288`）：最多 6 位小数，不舍入，除不尽同样报错。
+  - 有小数时只能改用 `equal_decimal_exact`（`stock-preparation-yida-allocation.mjs:290-304`）：最多 6 位小数，不舍入，除不尽同样报错。
   - 旧系统是保留 1 位小数、四舍五入。选哪种见 §7 Q4。
 - **发料确认的本地回写**：模板只管出站，不表达回写。
   - 备料主表里没有「发料确认日期」这一列。相近的列有 `warehouseDone`（templates.cjs:842）、`warehouseConfirmation`（templates.cjs:783）和 `actualArrivalDate`（templates.cjs:845）。
@@ -151,37 +151,60 @@
 
 ## 6. 与现有模板的对照与缺口
 
-**已覆盖**：
+**已覆盖（v2，今天的持久化 / 发送路径）**：
 
-- 直接映射：`yida-static-plan.mjs:12`、`:177-203`。
-- 业务键，最多 8 个（`yida-static-plan.mjs:209-213`）。
-- 可空键（`yida-static-plan.mjs:214-220`）。
-- 必填一致性（`yida-static-plan.mjs:204-207`）。
-- 多项目号均分：`stock-preparation-yida-allocation.mjs:72-76`、`:79-95`。
+- 直接映射：`yida-static-plan.mjs:12`、`:188-214`。
+- 业务键，最多 8 个（`yida-static-plan.mjs:220-224`）。
+- 可空键（`yida-static-plan.mjs:225-231`）。
+- 必填一致性（`yida-static-plan.mjs:215-218`）。
+- 多项目号均分：`stock-preparation-yida-allocation.mjs:72-76`、`:94-110`。
 
-**缺口**（每一条都用合成数据在今天的校验器上实测过，见 PR 说明）：
+**v3 映射（#6714 已合）**：
 
-- **G1 常量**：映射项只能有 `source`、`target`、`type`、`required` 四个键（`yida-static-plan.mjs:12`、`:191`），没有固定值。今天只能由源表补一列常量列。
-- **G2 拼接**：没有多列合成一列的表达方式。今天只能在源表预先算好。
-- **G3 复制派生**：同一来源列不能映射到两个目标（`yida-static-plan.mjs:183`、`:194`、`:200`），所以「部件类别 = 父组件名称」写不进模板。
-- **G4 查表**：模板只读本行的列，不能跨表取值，例如项目规格型号。今天只能在源表预先补列。
-- **G5 动态下拉**：
-  - 下拉和单选必须带静态选项，1 到 64 个（`yida-static-plan.mjs:158-163`）。值不在选项里就报 `FIELD_OPTION_INVALID`（`:467-470`）。
+- 一组封闭的显式变换：`direct`、`copy`、`constant`、`concat`（`yida-static-plan.mjs:242-257`）。不含查表（`:242-243`）。
+- 业务键和可空键按 direct 目标字段名绑定，派生字段进不了业务键（`yida-static-plan.mjs:248-250`、`:353-358`）。
+- 用途只有两处：浏览器本地预览，和主机侧的本地重算（`plugins/plugin-integration-core/lib/yida-draft-compiler.mjs:187-192`）。
+  - 持久化的草稿路径（草稿库、初始化、owner 发送口）仍只编译 v2（`yida-draft-compiler.mjs:181-185`，`plugins/plugin-integration-core/lib/yida-draft-plan.mjs:1-5`）。
+  - owner 裁决：先完成第一次单目标发送，v3 才进入发送路径。
+- v3 模板用 `formatVersion: 2` 信封，v1/v2 规则仍是 `formatVersion: 1`、字节不变（`yida-rule-template.mjs:116-120`）。
+- 合成示例：`plugins/plugin-integration-core/fixtures/yida-rule-templates/material-v3.json`，它就是 §2.1 物料表的 v3 写法。本 PR 不再复制一份。
+
+**缺口状态**（每一条都用合成数据在 `b36f53c2f` 的校验器上实测过，见 PR 说明）：
+
+- **G1 常量：v3 可表达**。`constant` 写死一个值；下拉和单选的常量必须在静态选项里（`yida-static-plan.mjs:306-311`）。v2 映射项仍只有四个键（`:12`、`:202`），v2 模板不变。
+- **G2 拼接：v3 可表达**。`concat` 最多 8 段，段可以是列或字面量，只能写到文本控件；某段为空时按 `skip` 跳过或按 `refuse` 拒收（`yida-static-plan.mjs:258-261`、`:312-317`，取值见 `:554-575`）。
+- **G3 复制派生：v3 可表达**。`copy` 只能复制一个同类型的 direct 字段，不能链式复制（`yida-static-plan.mjs:302-305`、`:342-346`）。v2 仍不能把同一来源列映射到两个目标（`:194`、`:205`、`:211`）。
+- **G1–G3 的边界**：只在本地预览和本地重算里可表达。真正持久化和发送的草稿仍是 v2，这三类字段在上线发送前还得由源表补成列。
+- **G4 查表：仍是缺口**。v3 明确不含查表，需要别表的值由上游经批准的读取补成列（`yida-static-plan.mjs:242-243`）。
+  - 表格来源的草稿只收普通存储的标量列，公式、lookup、rollup 列一律拒收（`packages/core-backend/src/integration/yida-sheet-source.ts:18-19`）。
+  - 所以「项目规格型号」要在源表里存成普通列，不能用 lookup 列代替。
+- **G5 动态下拉：仍是缺口**。
+  - 下拉和单选必须带静态选项，1 到 64 个（`yida-static-plan.mjs:162-167`）。值不在选项里就报 `FIELD_OPTION_INVALID`（v2 `:719-722`，v3 `:609-612`）。
   - 宜搭里的「项目号」是下拉，选项会随项目增长。模板里只能先按文本控件表达。
   - 宜搭的接口是否接受选项以外的值，待现场核对，本文不下结论。
-- **G6 生成编号**：模板不生成值。物料编码应改成由业务键确定性派生，或者交给宜搭自己的流水号字段。选哪种见 Q2。
+- **G6 生成编号：仍是缺口**。v2 和 v3 都不生成值。物料编码应改成由业务键确定性派生，或者交给宜搭自己的流水号字段。选哪种见 Q2。
 - **G7 带单位的数量**：
-  - 数字控件只收 number（`yida-static-plan.mjs:195`、`:457-459`），带单位的字符串会被拒收（`FIELD_TYPE`）。
-  - 单位如果要显示在宜搭里，需要单独一个文本字段，待现场核对。
-- **G8 图片控件**：控件只有 text、number、select、radio 四种（`yida-static-plan.mjs:15`）。旧系统已停用图纸图片，不补。
+  - 数字控件只收 number（`yida-static-plan.mjs:206`、`:709-711`），带单位的字符串会被拒收（`FIELD_TYPE`）。
+  - 单位如果要显示在宜搭里，可以单独一个文本字段，在 v3 里用 `concat` 或 `constant` 写。是否需要，待现场核对。
+- **G8 图片控件：仍是缺口**。控件只有 text、number、select、radio 四种（`yida-static-plan.mjs:15`），v3 沿用同一份控件目录。旧系统已停用图纸图片，不补。
+
+**多目标和表格来源（#6718 已合，默认关闭）**：
+
+- 开关 `INTEGRATION_YIDA_MULTI_TARGET_ENABLED`，只认字面 `'true'`（`scripts/ops/global-history-flag-manifest.mjs:73`，`packages/core-backend/src/integration/yida-initialization-runtime.ts:230-232`）。
+- 打开后：可以登记第 2 到第 16 个经 owner 认证的宜搭目标，也可以从多维表或视图准备草稿，不必粘贴行文本（`yida-sheet-source.ts:3-16`）。
+- 每份草稿、预览、审批和交付仍只绑定一个目标，create 预留按目标分开。这个开关不是发送开关。
+- R-50 第 ① 条（每个部署一个永久目标槽）不变。开关只在打开时改写这一条，任何部署机上打开都要 owner 另批（`global-history-flag-manifest.mjs:80`）。
+- 对本文的意义：物料表、项目号表、发料确认表三张表单将来可以是三个目标，不必共用一个；但今天的默认行为仍是单目标。
 
 ## 7. 建议与待定问题
 
 **建议**：
 
-- 先做一组封闭的声明式变换：常量、拼接、复制派生、查表、确定性编号。这五种加上已有的直接映射和拆分均分，正好覆盖旧系统对宜搭的全部写法，不需要任意代码。
-- 这组变换落地之前，缺口字段由源表预先算成列，再按普通映射进模板。
-- 这一步要改代码，需要 owner 另批。
+- 常量、拼接、复制派生已由 v3 表达。剩下的查表和确定性编号不进映射变换：
+  - 查表由上游经批准的读取补成普通列；
+  - 物料编码先等 Q2 裁决，再决定是派生还是交给宜搭流水号。
+- 在 v3 进入发送路径之前（先完成第一次单目标发送），上线用的仍是本 PR 的三份 v2 模板。G1–G3 字段由源表预先算成普通列，再按直接映射进模板。
+- v3 进入发送路径、打开多目标开关，都是 owner 另批的事项，本文不改变任何开关。
 
 **待定问题**：
 
@@ -203,6 +226,7 @@
 | `project-registry.json` | 项目号表 | 1 | `original` |
 | `issue-confirm.json` | 发料确认表 | 2 | `original` |
 
-- 三份文件都由我们自己的 `exportYidaRuleTemplate` 生成，再用 `parseYidaRuleTemplate` 读回比对，字节一致。
+- 三份文件都是 v2 规则（`formatVersion: 1`），由我们自己的 `exportYidaRuleTemplate` 生成，再用 `parseYidaRuleTemplate` 读回比对，字节一致。在 `b36f53c2f` 上重跑过，结果相同。
+- 物料表的 v3 写法（加上常量、拼接、复制派生共 16 个字段）不在这里，见 `plugins/plugin-integration-core/fixtures/yida-rule-templates/material-v3.json`。
 - 目标字段 id 都是中性占位名，不是宜搭的真实字段 id。
 - 现场接入时，在界面里把占位名对到真实字段，同时填入 target。
