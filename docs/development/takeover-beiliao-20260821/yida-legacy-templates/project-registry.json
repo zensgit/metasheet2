@@ -1,0 +1,32 @@
+{
+  "formatVersion": 1,
+  "kind": "stock-preparation-yida-rule-template",
+  "status": "local-unverified",
+  "rules": {
+    "version": 2,
+    "kind": "yida-form-protocol-static",
+    "intent": "create",
+    "businessKey": [
+      "projectNo"
+    ],
+    "emptyKeyFields": [],
+    "fieldMap": [
+      {
+        "source": "projectNo",
+        "target": "project",
+        "type": "string",
+        "required": true
+      }
+    ],
+    "fieldCatalog": [
+      {
+        "id": "project",
+        "control": "text",
+        "required": true
+      }
+    ]
+  },
+  "allocation": {
+    "mode": "original"
+  }
+}
