@@ -318,18 +318,23 @@ describe('recycle review against a fresh migrated synthetic PostgreSQL database'
     name: string
     at: string
     resourceId?: string
+    action?: string
+    details?: Record<string, unknown>
+    table?: 'audit_logs' | 'audit_logs_archive'
   }) {
-    await ensureAuditPartition(input.at)
+    const table = input.table ?? 'audit_logs'
+    if (table === 'audit_logs') await ensureAuditPartition(input.at)
+    const details = input.details ?? { email: input.email, name: input.name }
     const inserted = await query<{ id: string; created_at: string }>(
-      `INSERT INTO audit_logs (
+      `INSERT INTO ${table} (
          event_type, event_category, action, resource_type, resource_id, resource_name,
          user_email, user_name, action_details, request_body, created_at
        ) VALUES (
-         'UPDATE', 'USER', 'update', 'user', $1, $2,
-         $3, $2, jsonb_build_object('email', $4::text, 'name', $5::text), jsonb_build_object('email', $4::text), $6::timestamptz
+         'UPDATE', 'USER', $6, 'user', $1, $2,
+         $3, $2, $4::jsonb, $4::jsonb, $5::timestamptz
        )
        RETURNING id::text AS id, created_at::text AS created_at`,
-      [input.resourceId ?? input.userId, input.name, input.email, input.email, input.name, input.at],
+      [input.resourceId ?? input.userId, input.name, input.email, JSON.stringify(details), input.at, input.action ?? 'update'],
     )
     return inserted.rows[0]
   }
@@ -378,6 +383,80 @@ describe('recycle review against a fresh migrated synthetic PostgreSQL database'
     expect(kept.rows[0].user_name).toBe('Other person')
     expect(kept.rows[0].resource_name).toBe('Other person')
     expect(kept.rows[0].action_details).toMatchObject({ email: 'keep@example.test', name: 'Other person' })
+  })
+
+  it('scrubs accountLabel on a create audit in both the live and archive logs', async () => {
+    const userId = await seedUser()
+    const at = '2026-11-04 05:31:00.123456+00'
+    const email = `${userId}@example.test`
+    const details = {
+      email,
+      username: userId,
+      mobile: '13800001111',
+      accountLabel: email,
+      displayName: 'Synthetic user',
+      phone: '13800001111',
+      position: '装配',
+      roleId: 'user',
+      adminUserId: 'synthetic-operator',
+    }
+    const created = await insertAuditRow({
+      userId,
+      email,
+      name: 'Synthetic user',
+      at,
+      action: 'create',
+      details,
+    })
+    const archived = await insertAuditRow({
+      userId,
+      email,
+      name: 'Synthetic user',
+      at,
+      action: 'create',
+      details,
+      table: 'audit_logs_archive',
+    })
+    const unrelated = await insertAuditRow({
+      userId,
+      email: 'keep@example.test',
+      name: 'Other person',
+      at,
+      action: 'create',
+      resourceId: `other-${userId}`,
+      details: { accountLabel: 'keep@example.test', roleId: 'user' },
+    })
+    expect((await move(userId)).ok).toBe(true)
+    expect((await transaction(client => applyRecyclePurge(client, {
+      userId,
+      actorId: 'synthetic-operator',
+      index: 0,
+      passwordHash: 'synthetic-unusable',
+    }))).ok).toBe(true)
+    for (const row of [
+      { table: 'audit_logs', id: created.id },
+      { table: 'audit_logs_archive', id: archived.id },
+    ]) {
+      const scrubbed = await query(
+        `SELECT action_details FROM ${row.table} WHERE id = $1`,
+        [row.id],
+      )
+      expect(scrubbed.rows[0].action_details).toMatchObject({
+        email: null,
+        username: null,
+        mobile: null,
+        accountLabel: null,
+        displayName: '已清除用户',
+        phone: null,
+        position: null,
+        roleId: 'user',
+        adminUserId: 'synthetic-operator',
+      })
+    }
+    expect((await query('SELECT action_details FROM audit_logs WHERE id = $1', [unrelated.id])).rows[0].action_details).toMatchObject({
+      accountLabel: 'keep@example.test',
+      roleId: 'user',
+    })
   })
 
   it('rolls back the whole purge when audit scrub fails', async () => {
