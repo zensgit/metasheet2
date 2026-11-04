@@ -429,13 +429,41 @@ function globalHistoryFlagsInSource() {
   // Derive the reviewed owner-send switch from actual core reads, including phantom detection.
   const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
   const userRecycle = grepFlagTokens('USER_RECYCLE_[A-Z_0-9]+_ENABLED')
+  // #4196 Class-B outbound two-phase ledger switch (S0-c, AGENTS.md: every new env flag is registered
+  // here). One family by name shape, scanned where the executor and retry-eligibility read it.
+  const automationClassB = grepFlagTokens('AUTOMATION_CLASSB_[A-Z_0-9]+_ENABLED')
   // The leave cancel-round launch flag (AGENTS.md: every new env flag; reviewer finding F3, 2026-10-08) is
   // read by the attendance PLUGIN, not under packages/core-backend/src. Only this one family is scanned
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner, ...attendanceCancelRound, ...userRecycle])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner, ...attendanceCancelRound, ...userRecycle, ...automationClassB])].sort()
 }
+
+// #4196 Class-B outbound ledger switch (S0-c): default OFF, exact literal only, danger high, sourced from its
+// exported predicate; the purpose names both migrations the ON path depends on, as they are on disk.
+test('AUTOMATION_CLASSB_OUTBOUND_ENABLED manifest entry: exact true, danger high, predicate source, migrations on disk', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.AUTOMATION_CLASSB_OUTBOUND_ENABLED
+  assert.ok(spec, 'AUTOMATION_CLASSB_OUTBOUND_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/multitable/automation-outbound-intent.ts#isClassBOutboundEnabled')
+  const module = readFileSync(path.join(REPO_ROOT, spec.source.split('#')[0]), 'utf8')
+  assert.match(module, /export function isClassBOutboundEnabled\(/)
+  assert.ok(module.includes("env.AUTOMATION_CLASSB_OUTBOUND_ENABLED === 'true'"), 'the reader compares the exact literal')
+  const migrationsDir = path.join(REPO_ROOT, 'packages/core-backend/src/db/migrations')
+  for (const pattern of [/^zzzz\d{14}_create_automation_outbound_intent\.ts$/, /^zzzz\d{14}_outbound_intent_attempt_lease_target_key\.ts$/]) {
+    const onDisk = readdirSync(migrationsDir).filter((name) => pattern.test(name))
+    assert.equal(onDisk.length, 1, `${pattern} on disk exactly once`)
+    assert.ok(spec.purpose.includes(onDisk[0].slice(0, 'zzzz00000000000000'.length)), `purpose names ${onDisk[0]}`)
+  }
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false)
+})
 
 test('recycle sweeper manifest requires exact true and matches the runtime source', () => {
   const spec = GLOBAL_HISTORY_FLAG_BY_KEY.USER_RECYCLE_SWEEPER_ENABLED
