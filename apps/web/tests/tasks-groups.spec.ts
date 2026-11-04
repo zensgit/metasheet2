@@ -289,6 +289,8 @@ async function fakeFetch(path: string, init?: FetchInit): Promise<Response> {
   }
   if (method === 'GET' && (match = /^\/api\/tasks\/([^/]+)$/.exec(pathname))) return jsonResponse(200, detailBody(decodeURIComponent(match[1])))
   if (method === 'GET' && /^\/api\/tasks\/[^/]+\/comments$/.test(pathname)) return jsonResponse(200, { items: [], total: 0 })
+  // Package 1b: the detail page reads the names on the task; none known here.
+  if (method === 'GET' && /^\/api\/tasks\/[^/]+\/people$/.test(pathname)) return jsonResponse(200, { people: {} })
   if (method === 'POST' && (match = /^\/api\/tasks\/([^/]+)\/complete$/.exec(pathname))) return h_.completeReply(decodeURIComponent(match[1]))
   // The lists sidebar on /tasks and the detail page's "my lists".
   if (method === 'GET' && pathname === '/api/task-lists') return page([], query)
