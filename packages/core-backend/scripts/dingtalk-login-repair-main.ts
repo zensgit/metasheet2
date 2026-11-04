@@ -16,6 +16,10 @@ import {
   reanchorDingTalkRepair,
 } from '../src/auth/dingtalk-identity-repair'
 import { poolManager } from '../src/integration/db/connection-pool'
+import {
+  readPoolConnection,
+  type RepairEffectiveConnection,
+} from '../src/auth/dingtalk-identity-repair-cli'
 
 /**
  * The exact input field sets of every verb (one table, so a new verb never falls into another verb's
@@ -48,16 +52,16 @@ async function local<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
-/** The client read timeout the pool really holds (pg-pool keeps a copy of its options). */
-export function effectiveClientQueryTimeoutMs(): number | null {
-  const options = (
-    poolManager.get().getInternalPool() as unknown as {
-      options?: { query_timeout?: unknown }
-    }
-  ).options
-  return typeof options?.query_timeout === 'number'
-    ? options.query_timeout
-    : null
+/**
+ * The parameters every connection of the pool will use: a client built the way pg-pool builds one, so
+ * DATABASE_URL parameters are merged over the pool options exactly as on a real connection. Not connected.
+ */
+export function effectiveConnection(): RepairEffectiveConnection {
+  return readPoolConnection(
+    poolManager.get().getInternalPool() as unknown as Parameters<
+      typeof readPoolConnection
+    >[0],
+  )
 }
 
 export async function run(argv: string[]): Promise<unknown> {

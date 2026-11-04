@@ -2809,6 +2809,28 @@ suite('DingTalk controlled login repair', () => {
   })
 
   describe('release writes exactly one re-verified DingTalk source', () => {
+    /** The read-only query the operator doc gives for rows a REPAIR_SOURCE_OUTSIDE_ALLOWLIST refusal does not print. */
+    const documentedLinkedRows = async (journalId: string) => {
+      const doc = await readFile(
+        fileURLToPath(new URL('../../../../docs/development/dingtalk-login-identity-repair-20261102.md', import.meta.url)),
+        'utf8',
+      )
+      const blocks = [...doc.matchAll(/^```sql\n([\s\S]*?)^```$/gm)].map((m) => m[1])
+      expect(blocks).toHaveLength(1)
+      const lines = blocks[0].trim().split('\n')
+      expect([lines[0], lines[lines.length - 1]]).toEqual(['BEGIN READ ONLY;', 'ROLLBACK;'])
+      const select = lines.slice(1, -1).join('\n').replace(/;\s*$/, '')
+      const c = await pool!.connect()
+      try {
+        await c.query('BEGIN READ ONLY')
+        const rows = (await c.query(select, [journalId])).rows
+        return rows.map((row) => ({ directory_account_id: String(row.directory_account_id), is_release_target: row.is_release_target }))
+      } finally {
+        await c.query('ROLLBACK').catch(() => undefined)
+        c.release()
+      }
+    }
+
     it('normal release: canonical mode, the recorded source is the one allowed id and nothing is restored', async () => {
       const f = await fixture(),
         r = await applyRepair(f)
@@ -3206,7 +3228,15 @@ suite('DingTalk controlled login repair', () => {
           () => releasePreview(f, r.id),
           'REPAIR_SOURCE_OUTSIDE_ALLOWLIST',
         )
+        // The refusal returns no account ids; the operator doc's read-only query names the row to unbind.
+        expect(await documentedLinkedRows(r.id)).toEqual(
+          [
+            { directory_account_id: f.account, is_release_target: true },
+            { directory_account_id: oldAccount, is_release_target: false },
+          ].sort((x, y) => x.directory_account_id.localeCompare(y.directory_account_id)),
+        )
         await unbindDirectoryAccount(oldAccount, { adminUserId: f.admin })
+        expect(await documentedLinkedRows(r.id)).toEqual([{ directory_account_id: f.account, is_release_target: true }])
         const preview = await releasePreview(f, r.id)
         expect(preview.release).toMatchObject({
           mode: 'termination',
@@ -6473,6 +6503,40 @@ globalThis.fetch = async (input, init = {}) => {
       expect(JSON.parse(max.stdout)).toMatchObject({ clientQueryTimeoutMs: 2147483647, release: { mode: 'canonical' } })
       expect(await capture(f, r.id)).toEqual(before)
     }, 90000)
+
+    it('DATABASE_URL timeout parameters decide: success reports the value every connection uses, and a URL value outside the range refuses', async () => {
+      const f = await fixture(),
+        r = await applyRepair(f)
+      const before = await capture(f, r.id)
+      const input = await privateInput('recovery-url', { id: r.id, actorId: f.admin, actorPassword: f.password })
+      const withParams = (params: Record<string, string>) => {
+        const u = new URL(String(process.env.DATABASE_URL))
+        for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v)
+        return u.toString()
+      }
+      // DB_QUERY_TIMEOUT unset: the pool option is the preset 45000, the URL's 60000 is what pg arms.
+      const raised = await spawnCli(f, ['release-preview', input], { DATABASE_URL: withParams({ query_timeout: '60000' }) })
+      expect(raised).toMatchObject({ code: 0, stderr: '' })
+      expect(JSON.parse(raised.stdout)).toMatchObject({ clientQueryTimeoutMs: 60000, release: { mode: 'canonical' } })
+      // A 40 s server budget from the URL needs 55 s on the client; exactly that passes and is reported.
+      const budget = await spawnCli(f, ['release-preview', input], {
+        DATABASE_URL: withParams({ statement_timeout: '40000' }),
+        DB_QUERY_TIMEOUT: '55000',
+      })
+      expect(budget).toMatchObject({ code: 0, stderr: '' })
+      expect(JSON.parse(budget.stdout)).toMatchObject({ clientQueryTimeoutMs: 55000, digest: JSON.parse(raised.stdout).digest })
+      for (const [params, extra, code] of [
+        [{ query_timeout: '1000' }, {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+        [{ query_timeout: '2147483648' }, {}, 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH'],
+        [{ statement_timeout: '40000' }, {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+        [{ statement_timeout: '40000' }, { DB_QUERY_TIMEOUT: '54999' }, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+        [{ statement_timeout: '', options: '-c statement_timeout=40000' }, {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+      ] as const) {
+        const refused = await spawnCli(f, ['release-preview', input], { ...extra, DATABASE_URL: withParams(params) })
+        expect({ params, ...refused, ms: 0 }).toEqual({ params, code: 1, stdout: '', stderr: code + '\n', ms: 0 })
+      }
+      expect(await capture(f, r.id)).toEqual(before)
+    }, 120000)
 
     it('a verify refusal prints only its code although every query of the run is logged as slow', async () => {
       const f = await fixture()
