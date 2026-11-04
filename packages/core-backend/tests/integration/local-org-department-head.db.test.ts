@@ -1065,6 +1065,182 @@ describeIfDatabase('native local department-head backend', () => {
     }
   }, 30_000)
 
+  function managerRoute(a: { id: string }, d: { id: string }) {
+    return `/api/admin/directory/local/memberships/${a.id}:${d.id}`
+  }
+
+  it('manager writer holds the integration share before the account and the department', async () => {
+    const f = await fixture('default')
+    const admin = await user(true)
+    await token(admin)
+    for (const target of ['account', 'department'] as const) {
+      const holder = new Client({ connectionString: process.env.DATABASE_URL })
+      const probe = new Client({ connectionString: process.env.DATABASE_URL })
+      await holder.connect()
+      await probe.connect()
+      let pending: Promise<{ response?: Response; failure?: unknown }> | undefined
+      try {
+        await holder.query('BEGIN')
+        const held = target === 'account' ? 'directory_accounts' : 'directory_departments'
+        const heldId = target === 'account' ? f.head.id : f.department.id
+        await holder.query(`SELECT id FROM ${held} WHERE id = $1 FOR UPDATE`, [heldId])
+        const pid = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]!.pid
+        pending = request(managerRoute(f.head, f.department), admin, 'PATCH', { isManager: true })
+          .then((response) => ({ response }), (failure: unknown) => ({ failure }))
+        let blocked = false
+        const deadline = Date.now() + 3000
+        while (Date.now() < deadline) {
+          const waiters = await query(
+            "SELECT pid FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid)) AND wait_event_type = 'Lock' AND query ILIKE '%directory_%'",
+            [pid],
+          )
+          if (waiters.rows.length === 1) { blocked = true; break }
+          await new Promise((done) => setTimeout(done, 20))
+        }
+        expect(blocked).toBe(true)
+        await probe.query('BEGIN')
+        await probe.query("SET LOCAL lock_timeout = '100ms'")
+        await expect(probe.query("UPDATE directory_integrations SET status = 'disabled' WHERE id = $1", [f.integration]))
+          .rejects.toMatchObject({ code: '55P03' })
+        await probe.query('ROLLBACK')
+        await probe.query('BEGIN')
+        if (target === 'department') {
+          await expect(probe.query('SELECT id FROM directory_accounts WHERE id = $1 FOR UPDATE NOWAIT', [f.head.id]))
+            .rejects.toMatchObject({ code: '55P03' })
+        } else {
+          expect((await probe.query('SELECT id FROM directory_departments WHERE id = $1 FOR UPDATE NOWAIT', [f.department.id])).rows)
+            .toEqual([{ id: f.department.id }])
+        }
+        await probe.query('ROLLBACK')
+        expect((await query(
+          'SELECT is_manager FROM directory_account_departments WHERE directory_account_id = $1 AND directory_department_id = $2',
+          [f.head.id, f.department.id],
+        )).rows).toEqual([{ is_manager: false }])
+        await holder.query('COMMIT')
+        const result = await pending
+        expect(result.failure).toBeUndefined()
+        expect(result.response!.status).toBe(200)
+        expect((await query(
+          `SELECT ad.is_manager, i.status
+             FROM directory_account_departments ad
+             JOIN directory_accounts a ON a.id = ad.directory_account_id
+             JOIN directory_integrations i ON i.id = a.integration_id
+            WHERE ad.directory_account_id = $1 AND ad.directory_department_id = $2`,
+          [f.head.id, f.department.id],
+        )).rows).toEqual([{ is_manager: true, status: 'active' }])
+        await query(
+          'UPDATE directory_account_departments SET is_manager = FALSE WHERE directory_account_id = $1 AND directory_department_id = $2',
+          [f.head.id, f.department.id],
+        )
+      } finally {
+        await probe.query('ROLLBACK').catch(() => undefined)
+        await holder.query('ROLLBACK').catch(() => undefined)
+        await pending
+        await probe.end()
+        await holder.end()
+      }
+    }
+  }, 30_000)
+
+  it('manager writer wins the integration lock, blocks disable, then sets is_manager', async () => {
+    const f = await fixture('default')
+    const admin = await user(true)
+    await token(admin)
+    const departmentHolder = new Client({ connectionString: process.env.DATABASE_URL })
+    const disabler = new Client({ connectionString: process.env.DATABASE_URL })
+    let pending: Promise<{ response?: Response; failure?: unknown }> | undefined
+    try {
+      await departmentHolder.connect()
+      await disabler.connect()
+      await departmentHolder.query('BEGIN')
+      await departmentHolder.query('SELECT id FROM directory_departments WHERE id = $1 FOR UPDATE', [f.department.id])
+      const pid = (await departmentHolder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]!.pid
+      pending = request(managerRoute(f.head, f.department), admin, 'PATCH', { isManager: true })
+        .then((response) => ({ response }), (failure: unknown) => ({ failure }))
+      let blocked = false
+      const deadline = Date.now() + 3000
+      while (Date.now() < deadline) {
+        const waiters = await query(
+          "SELECT pid FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid)) AND wait_event_type = 'Lock' AND query ILIKE '%directory_departments%'",
+          [pid],
+        )
+        if (waiters.rows.length === 1) { blocked = true; break }
+        await new Promise((done) => setTimeout(done, 20))
+      }
+      expect(blocked).toBe(true)
+      await disabler.query('BEGIN')
+      await disabler.query("SET LOCAL lock_timeout = '100ms'")
+      await expect(disabler.query("UPDATE directory_integrations SET status = 'disabled' WHERE id = $1", [f.integration]))
+        .rejects.toMatchObject({ code: '55P03' })
+      await disabler.query('ROLLBACK')
+      await departmentHolder.query('COMMIT')
+      const result = await pending
+      expect(result.failure).toBeUndefined()
+      expect(result.response!.status).toBe(200)
+      expect((await query(
+        `SELECT ad.is_manager, i.status
+           FROM directory_account_departments ad
+           JOIN directory_accounts a ON a.id = ad.directory_account_id
+           JOIN directory_integrations i ON i.id = a.integration_id
+          WHERE ad.directory_account_id = $1 AND ad.directory_department_id = $2`,
+        [f.head.id, f.department.id],
+      )).rows).toEqual([{ is_manager: true, status: 'active' }])
+    } finally {
+      await departmentHolder.query('ROLLBACK').catch(() => undefined)
+      await disabler.query('ROLLBACK').catch(() => undefined)
+      await pending
+      await departmentHolder.end()
+      await disabler.end()
+    }
+  }, 30_000)
+
+  it('committed integration disable wins over a parked manager write and leaves is_manager false', async () => {
+    const f = await fixture('default')
+    const admin = await user(true)
+    await token(admin)
+    const disabler = new Client({ connectionString: process.env.DATABASE_URL })
+    let pending: Promise<{ response?: Response; failure?: unknown }> | undefined
+    try {
+      await disabler.connect()
+      await disabler.query('BEGIN')
+      expect((await disabler.query(
+        "UPDATE directory_integrations SET status = 'disabled' WHERE id = $1 RETURNING status",
+        [f.integration],
+      )).rows).toEqual([{ status: 'disabled' }])
+      const pid = (await disabler.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]!.pid
+      pending = request(managerRoute(f.head, f.department), admin, 'PATCH', { isManager: true })
+        .then((response) => ({ response }), (failure: unknown) => ({ failure }))
+      let blocked = false
+      const deadline = Date.now() + 3000
+      while (Date.now() < deadline) {
+        const waiters = await query(
+          "SELECT pid FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid)) AND wait_event_type = 'Lock' AND query ILIKE '%FOR SHARE OF i%'",
+          [pid],
+        )
+        if (waiters.rows.length === 1) { blocked = true; break }
+        await new Promise((done) => setTimeout(done, 20))
+      }
+      expect(blocked).toBe(true)
+      await disabler.query('COMMIT')
+      const result = await pending
+      expect(result.failure).toBeUndefined()
+      await error(result.response!, 404, 'DIRECTORY_LOCAL_NOT_FOUND')
+      expect((await query(
+        `SELECT ad.is_manager, i.status
+           FROM directory_account_departments ad
+           JOIN directory_accounts a ON a.id = ad.directory_account_id
+           JOIN directory_integrations i ON i.id = a.integration_id
+          WHERE ad.directory_account_id = $1 AND ad.directory_department_id = $2`,
+        [f.head.id, f.department.id],
+      )).rows).toEqual([{ is_manager: false, status: 'disabled' }])
+    } finally {
+      await disabler.query('ROLLBACK').catch(() => undefined)
+      await pending
+      await query("UPDATE directory_integrations SET status = 'active' WHERE id = $1 AND status = 'disabled'", [f.integration])
+      await disabler.end()
+    }
+  }, 30_000)
+
   it('default fixture guard refuses a disabled-only anchor before provisioning any identities', async () => {
     // Establish the normal active fixture first. On a fresh owned clone this permits
     // the existing bootstrap; a pre-existing disabled-only anchor must already refuse
