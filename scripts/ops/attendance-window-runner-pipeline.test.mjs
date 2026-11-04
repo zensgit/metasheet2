@@ -525,6 +525,7 @@ function assertExactTargetMigrationContract({ remote, workflow }) {
   assert.match(migrate, /rollout_shadow_flags=OFF/)
   assert.match(migrate, /application_deployed=no/)
   assert.match(remote, /zzzz20260823040000_recovery09_prepare_legacy_default_org/)
+  assert.match(remote, /zzzz20260823050000_provision_zero_membership_active_users/)
   assert.match(remote, /zzzz20260823149900_recovery09_close_approval_org_gap/)
   assert.match(remote, /recovery09_unsupported_class6_count/)
   assert.match(remote, /directory_integration_non_default_count/)
@@ -533,6 +534,16 @@ function assertExactTargetMigrationContract({ remote, workflow }) {
     remote,
     /if \[\[ "\$repairable_users" -gt 0 \|\| "\$class6" -gt 0 \]\]/,
     'a safe retry must gate on users that can gain a new default row, not actionless default conflicts',
+  )
+  assert.match(
+    remote,
+    /SELECT name FROM kysely_migration WHERE name IN \('zzzz20260823040000_recovery09_prepare_legacy_default_org','zzzz20260823050000_provision_zero_membership_active_users','zzzz20260823149900_recovery09_close_approval_org_gap'\)/,
+    'post-Recovery09 classification must read the three chain names from kysely_migration',
+  )
+  assert.match(
+    remote,
+    /recovery09_repairable_users_informational=\$\{repairable_users\}/,
+    'an already-recorded Recovery09 chain must record the measured repairable count as informational',
   )
 }
 
@@ -562,6 +573,374 @@ test('MUTATION (pinned-assertion change): reverting the allowlist marker to the 
     () => assertExactTargetMigrationContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
     /allowlist/,
   )
+})
+
+// Recovery09 precheck (run 40476171039). After the chain is recorded in kysely_migration, a
+// later zero-membership active user is a legitimate product state and must not demand that
+// the chain still be pending. A chain that is unapplied and absent from the target image's
+// pending list still fails closed, and a chain that is about to execute still has to meet
+// the anchor / bucket / class-6 premises.
+const RECOVERY09_CHAIN = [
+  'zzzz20260823040000_recovery09_prepare_legacy_default_org',
+  'zzzz20260823050000_provision_zero_membership_active_users',
+  'zzzz20260823149900_recovery09_close_approval_org_gap',
+]
+const RECOVERY09_MIGRATIONS_DIR = join(HERE, '..', '..', 'packages', 'core-backend', 'src', 'db', 'migrations')
+
+function recovery09PrecheckRows(overrides = {}) {
+  const rows = {
+    approval_action_histogram: '{}',
+    invalid_approval_action_count: '0',
+    attachment_org_conflict_count: '0',
+    zero_membership_active_user_count: '7',
+    zero_membership_no_row_count: '7',
+    zero_membership_only_deactivated_count: '0',
+    recovery09_repairable_user_count: '7',
+    distinct_active_org_count: '4',
+    directory_integration_distinct_org_count: '1',
+    directory_integration_non_default_count: '0',
+    legacy_anchor_active_membership_witness_count: '0',
+    class6_candidate_count: '0',
+    recovery09_unsupported_class6_count: '0',
+    ...overrides,
+  }
+  return Object.entries(rows).map(([key, value]) => `${key}=${value}`).join('\n') + '\n'
+}
+
+function bashSingleQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`
+}
+
+function runRecovery09Precheck({
+  ledgerNames = [],
+  pendingNames = [],
+  rows = {},
+  ledgerRc = 0,
+  fnBody = null,
+} = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'wr-r09-precheck-'))
+  const fn = fnBody ?? extractRunnerFunctions(['action_migrate_read_only_prechecks'])
+  const failLine = extractRunnerLine('fail')
+  const logLine = extractRunnerLine('log')
+  writeFileSync(join(dir, 'rows.txt'), recovery09PrecheckRows(rows))
+  writeFileSync(join(dir, 'ledger.txt'), ledgerNames.length ? `${ledgerNames.join('\n')}\n` : '')
+  writeFileSync(
+    join(dir, 'target-migrate-list-before.txt'),
+    [
+      'Applied: 10',
+      `Pending: ${pendingNames.length}`,
+      '',
+      'Pending migrations (in load order):',
+      ...pendingNames.map((name) => `  - ${name}`),
+      '',
+    ].join('\n'),
+  )
+  const script = `#!/bin/bash
+set -euo pipefail
+${failLine}
+${logLine}
+OUTPUT_DIR=${bashSingleQuote(dir)}
+POSTGRES_CONTAINER=fake-postgres
+MIGRATE_BACKUP_PG_USER=fakeuser
+MIGRATE_BACKUP_PG_DB=stagingdb
+ROWS_FILE=${bashSingleQuote(join(dir, 'rows.txt'))}
+LEDGER_FILE=${bashSingleQuote(join(dir, 'ledger.txt'))}
+DOCKER_LOG=${bashSingleQuote(join(dir, 'docker.log'))}
+LEDGER_RC=${Number(ledgerRc)}
+docker() {
+  printf '%s\\n' "\$*" >> "\$DOCKER_LOG"
+  local sql="" arg prev=""
+  prev=""
+  for arg in "\$@"; do
+    if [[ "\$prev" == "-c" ]]; then
+      sql="\$arg"
+    fi
+    prev="\$arg"
+  done
+  if [[ "\$sql" == *"information_schema.columns"* ]]; then
+    printf '%s\\n' t
+    return 0
+  fi
+  if [[ "\$sql" == *"kysely_migration"* ]]; then
+    printf '%s\\n' "\$sql" >> "\$DOCKER_LOG"
+    if [[ "\$LEDGER_RC" != "0" ]]; then
+      echo "ledger read failed" >&2
+      return "\$LEDGER_RC"
+    fi
+    local name quoted
+    while IFS= read -r name || [[ -n "\$name" ]]; do
+      [[ -n "\$name" ]] || continue
+      quoted="'\$name'"
+      if [[ "\$sql" == *"\$quoted"* ]]; then
+        printf '%s\\n' "\$name"
+      fi
+    done < "\$LEDGER_FILE"
+    return 0
+  fi
+  cat >> "\$DOCKER_LOG"
+  cat "\$ROWS_FILE"
+}
+${fn}
+action_migrate_read_only_prechecks
+`
+  const result = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  const artifactPath = join(dir, 'target-read-only-prechecks.txt')
+  const artifact = existsSync(artifactPath) ? readFileSync(artifactPath, 'utf8') : ''
+  const dockerLog = existsSync(join(dir, 'docker.log')) ? readFileSync(join(dir, 'docker.log'), 'utf8') : ''
+  rmSync(dir, { recursive: true, force: true })
+  return { ...result, artifact, dockerLog }
+}
+
+test('EXECUTABLE (Recovery09 precheck): applied chain + repairable users passes and records the count as informational', () => {
+  for (const name of RECOVERY09_CHAIN) {
+    assert.ok(existsSync(join(RECOVERY09_MIGRATIONS_DIR, `${name}.ts`)), `${name}.ts must be a real migration`)
+  }
+  const applied = runRecovery09Precheck({
+    ledgerNames: RECOVERY09_CHAIN,
+    pendingNames: ['090_create_integration_yida_delivery_ledger'],
+    rows: { legacy_anchor_active_membership_witness_count: '0', distinct_active_org_count: '4' },
+  })
+  assert.equal(applied.status, 0, `stdout=${applied.stdout}\nstderr=${applied.stderr}`)
+  assert.match(applied.artifact, /^recovery09_ledger=applied$/m)
+  assert.match(applied.artifact, /^recovery09_repairable_users_informational=7$/m)
+  assert.match(applied.stdout, /recovery09_repairable_users_informational=7/)
+  assert.match(applied.dockerLog, /SELECT name FROM kysely_migration WHERE name IN/)
+  for (const name of RECOVERY09_CHAIN) {
+    assert.match(applied.dockerLog, new RegExp(`'${name}'`), 'the ledger read must name every Recovery09 migration')
+  }
+  assert.match(applied.dockerLog, /-d stagingdb/)
+  assert.doesNotMatch(applied.dockerLog, /\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE)\b/, 'the precheck must stay read-only')
+
+  const class6Only = runRecovery09Precheck({
+    ledgerNames: RECOVERY09_CHAIN,
+    pendingNames: ['090_create_integration_yida_delivery_ledger'],
+    rows: {
+      recovery09_repairable_user_count: '0',
+      zero_membership_active_user_count: '0',
+      zero_membership_no_row_count: '0',
+      class6_candidate_count: '3',
+      legacy_anchor_active_membership_witness_count: '0',
+    },
+  })
+  assert.equal(class6Only.status, 0, `class6-only post-apply must not demand a pending chain; stderr=${class6Only.stderr}`)
+  assert.match(class6Only.artifact, /^recovery09_repairable_users_informational=0$/m)
+})
+
+test('EXECUTABLE (Recovery09 precheck): unapplied and not pending still fails closed', () => {
+  const missing = runRecovery09Precheck({
+    ledgerNames: ['zzzz20260821120000_recovery_authority_functions_fix_search_path'],
+    pendingNames: [
+      '090_create_integration_yida_delivery_ledger',
+      'zzzz20261022150000_add_meta_sheets_grid_export_closure',
+    ],
+    rows: {
+      legacy_anchor_active_membership_witness_count: '15',
+      directory_integration_distinct_org_count: '1',
+      directory_integration_non_default_count: '0',
+      recovery09_unsupported_class6_count: '0',
+    },
+  })
+  assert.equal(missing.status, 1)
+  assert.match(
+    missing.stderr,
+    /target precheck: multi-org repair is required but the Recovery09 pre-alignment migration is not pending in the exact target image/,
+  )
+  assert.doesNotMatch(missing.artifact, /recovery09_repairable_users_informational=/)
+  assert.doesNotMatch(missing.stdout, /Recovery09 chain already applied/)
+
+  const provisioningOnly = runRecovery09Precheck({
+    ledgerNames: [
+      'zzzz20260823040000_recovery09_prepare_legacy_default_org',
+      'zzzz20260823149900_recovery09_close_approval_org_gap',
+    ],
+    pendingNames: ['090_create_integration_yida_delivery_ledger'],
+    rows: { legacy_anchor_active_membership_witness_count: '15' },
+  })
+  assert.equal(provisioningOnly.status, 1)
+  assert.match(
+    provisioningOnly.stderr,
+    /Recovery09 provisioning migration is not pending in the exact target image/,
+  )
+  assert.doesNotMatch(provisioningOnly.artifact, /recovery09_ledger=applied/)
+
+  const singleOrg = runRecovery09Precheck({
+    ledgerNames: [],
+    pendingNames: ['090_create_integration_yida_delivery_ledger'],
+    rows: {
+      distinct_active_org_count: '1',
+      recovery09_repairable_user_count: '7',
+      legacy_anchor_active_membership_witness_count: '0',
+    },
+  })
+  assert.equal(singleOrg.status, 0, `a single active org must not demand Recovery09; stderr=${singleOrg.stderr}`)
+  assert.doesNotMatch(singleOrg.artifact, /recovery09_ledger=applied/)
+  assert.doesNotMatch(singleOrg.dockerLog, /kysely_migration/, 'the ledger read stays inside the multi-org gate')
+})
+
+test('EXECUTABLE (Recovery09 precheck): a pending chain still fails when the legacy anchor premise does not hold', () => {
+  const pending = runRecovery09Precheck({
+    ledgerNames: [],
+    pendingNames: RECOVERY09_CHAIN,
+    rows: { legacy_anchor_active_membership_witness_count: '0' },
+  })
+  assert.equal(pending.status, 1)
+  assert.match(pending.stderr, /Recovery09 legacy default anchor is not uniquely and actively witnessed/)
+  assert.doesNotMatch(pending.stderr, /not pending in the exact target image/)
+  assert.doesNotMatch(pending.artifact, /recovery09_ledger=applied/)
+
+  const partial = runRecovery09Precheck({
+    ledgerNames: [
+      'zzzz20260823040000_recovery09_prepare_legacy_default_org',
+      'zzzz20260823149900_recovery09_close_approval_org_gap',
+    ],
+    pendingNames: ['zzzz20260823050000_provision_zero_membership_active_users'],
+    rows: { legacy_anchor_active_membership_witness_count: '0' },
+  })
+  assert.equal(partial.status, 1, 'a still-pending sibling must keep the execution premises')
+  assert.match(partial.stderr, /Recovery09 legacy default anchor is not uniquely and actively witnessed/)
+  assert.doesNotMatch(partial.artifact, /recovery09_ledger=applied/)
+})
+
+test('EXECUTABLE (Recovery09 precheck): an unreadable kysely_migration ledger fails closed', () => {
+  const unread = runRecovery09Precheck({
+    ledgerNames: RECOVERY09_CHAIN,
+    pendingNames: [],
+    ledgerRc: 1,
+  })
+  assert.equal(unread.status, 1)
+  assert.match(unread.stderr, /could not read kysely_migration to classify the Recovery09 chain/)
+  assert.doesNotMatch(unread.artifact, /recovery09_ledger=applied/)
+})
+
+test('MUTATION (Recovery09 precheck): deleting the applied-ledger branch turns the post-Recovery09 pass red', () => {
+  const original = extractRunnerFunctions(['action_migrate_read_only_prechecks'])
+  const mutated = original.replace(
+    'if [[ "$recovery09_ready" == "1" ]]; then',
+    'if [[ "$recovery09_ready" == "applied-branch-disabled" ]]; then',
+  )
+  assert.notEqual(mutated, original, 'the mutation must hit the applied-ledger branch')
+  const r = runRecovery09Precheck({
+    ledgerNames: RECOVERY09_CHAIN,
+    pendingNames: ['090_create_integration_yida_delivery_ledger'],
+    fnBody: mutated,
+  })
+  assert.notEqual(r.status, 0, 'without the applied branch the same ledger must fail closed')
+  assert.match(r.stderr, /Recovery09 chain is neither applied nor pending/)
+  assert.doesNotMatch(r.artifact, /recovery09_repairable_users_informational=/)
+})
+
+// Pending-path premises are ordered bucket, then anchor, then unsupported class-6. A fixture
+// that fails the anchor never reaches the later two, so each later gate needs its own case
+// where every earlier premise holds.
+const RECOVERY09_PREMISES_HOLD = {
+  legacy_anchor_active_membership_witness_count: '15',
+  directory_integration_distinct_org_count: '1',
+  directory_integration_non_default_count: '0',
+  zero_membership_active_user_count: '7',
+  zero_membership_no_row_count: '7',
+  zero_membership_only_deactivated_count: '0',
+  class6_candidate_count: '0',
+  recovery09_unsupported_class6_count: '0',
+}
+
+test('EXECUTABLE (Recovery09 precheck): a pending chain passes when anchor, bucket, and class-6 premises all hold', () => {
+  const pending = runRecovery09Precheck({
+    ledgerNames: [],
+    pendingNames: RECOVERY09_CHAIN,
+    rows: RECOVERY09_PREMISES_HOLD,
+  })
+  assert.equal(pending.status, 0, `stdout=${pending.stdout}\nstderr=${pending.stderr}`)
+  assert.match(pending.stdout, /target read-only prechecks OK/)
+  assert.doesNotMatch(pending.artifact, /recovery09_ledger=applied/)
+  assert.doesNotMatch(pending.artifact, /recovery09_repairable_users_informational=/)
+  assert.doesNotMatch(pending.stderr, /not pending in the exact target image|buckets do not close|not uniquely and actively witnessed|outside the bounded Recovery09 fallback/)
+})
+
+test('EXECUTABLE (Recovery09 precheck): a pending chain fails on an unclosed zero-membership bucket even when the anchor holds', () => {
+  const args = {
+    ledgerNames: [],
+    pendingNames: RECOVERY09_CHAIN,
+    rows: { ...RECOVERY09_PREMISES_HOLD, zero_membership_active_user_count: '8' },
+  }
+  const bucket = runRecovery09Precheck(args)
+  assert.equal(bucket.status, 1)
+  assert.match(bucket.stderr, /Recovery09 zero-membership buckets do not close over the measured population/)
+  assert.doesNotMatch(bucket.stderr, /not uniquely and actively witnessed|outside the bounded Recovery09 fallback|not pending in the exact target image/)
+  const original = extractRunnerFunctions(['action_migrate_read_only_prechecks'])
+  const mutated = original.replace('[[ "$((zero_no_row + zero_deactivated))" == "$zero_membership" ]]', 'true')
+  assert.notEqual(mutated, original, 'the mutation must hit the bucket comparison')
+  const neutralized = runRecovery09Precheck({ ...args, fnBody: mutated })
+  assert.equal(neutralized.status, 0, `neutralizing only the bucket check must let this fixture pass; stderr=${neutralized.stderr}`)
+})
+
+test('EXECUTABLE (Recovery09 precheck): a pending chain fails on unsupported class-6 even when anchor and bucket hold', () => {
+  const args = {
+    ledgerNames: [],
+    pendingNames: RECOVERY09_CHAIN,
+    rows: {
+      ...RECOVERY09_PREMISES_HOLD,
+      class6_candidate_count: '1',
+      recovery09_unsupported_class6_count: '1',
+    },
+  }
+  const class6 = runRecovery09Precheck(args)
+  assert.equal(class6.status, 1)
+  assert.match(class6.stderr, /1 class-6 candidate\(s\) are outside the bounded Recovery09 fallback/)
+  assert.doesNotMatch(class6.stderr, /buckets do not close|not uniquely and actively witnessed|not pending in the exact target image/)
+  const original = extractRunnerFunctions(['action_migrate_read_only_prechecks'])
+  const mutated = original.replace('[[ "$unsupported_class6" == "0" ]]', 'true')
+  assert.notEqual(mutated, original, 'the mutation must hit the unsupported class-6 comparison')
+  const neutralized = runRecovery09Precheck({ ...args, fnBody: mutated })
+  assert.equal(neutralized.status, 0, `neutralizing only the class-6 check must let this fixture pass; stderr=${neutralized.stderr}`)
+})
+
+test('EXECUTABLE (Recovery09 precheck): every applied/pending partition of the chain passes when execution premises hold', () => {
+  for (let mask = 0; mask < 8; mask++) {
+    const ledgerNames = RECOVERY09_CHAIN.filter((_, index) => mask & (1 << index))
+    const pendingNames = RECOVERY09_CHAIN.filter((_, index) => !(mask & (1 << index)))
+    const partition = runRecovery09Precheck({
+      ledgerNames,
+      pendingNames,
+      rows: RECOVERY09_PREMISES_HOLD,
+    })
+    assert.equal(partition.status, 0, `partition=${mask} applied=${ledgerNames.length} pending=${pendingNames.length}: ${partition.stderr}`)
+    if (mask === 7) {
+      assert.match(partition.artifact, /^recovery09_ledger=applied$/m)
+      assert.match(partition.artifact, /^recovery09_repairable_users_informational=7$/m)
+    } else {
+      assert.doesNotMatch(partition.artifact, /recovery09_ledger=applied/)
+    }
+  }
+})
+
+test('EXECUTABLE (Recovery09 precheck): each unapplied chain member fails when it is not pending', () => {
+  const reasons = {
+    zzzz20260823040000_recovery09_prepare_legacy_default_org: /Recovery09 pre-alignment migration is not pending in the exact target image/,
+    zzzz20260823149900_recovery09_close_approval_org_gap: /Recovery09 gap migration is not pending in the exact target image/,
+    zzzz20260823050000_provision_zero_membership_active_users: /Recovery09 provisioning migration is not pending in the exact target image/,
+  }
+  for (const missing of RECOVERY09_CHAIN) {
+    const absent = runRecovery09Precheck({
+      ledgerNames: RECOVERY09_CHAIN.filter((name) => name !== missing),
+      pendingNames: [],
+      rows: RECOVERY09_PREMISES_HOLD,
+    })
+    assert.equal(absent.status, 1, missing)
+    assert.match(absent.stderr, reasons[missing], missing)
+    assert.doesNotMatch(absent.artifact, /recovery09_ledger=applied/)
+  }
+})
+
+test('EXECUTABLE (Recovery09 precheck): an applied chain still rejects invalid approval actions and attachment conflicts', () => {
+  for (const [rows, reason] of [
+    [{ invalid_approval_action_count: '1' }, /approval_records rows carry an action outside the target constraint/],
+    [{ attachment_org_conflict_count: '1' }, /attachment-bearing approval instances have cross-org conflicts/],
+  ]) {
+    const rejected = runRecovery09Precheck({ ledgerNames: RECOVERY09_CHAIN, rows })
+    assert.equal(rejected.status, 1)
+    assert.match(rejected.stderr, reason)
+    assert.doesNotMatch(rejected.artifact, /recovery09_ledger=applied/)
+  }
 })
 
 // --- P1-1/P1-2/P2-4 hardening (2026-08-24, staging-review-adjudication-20260824.md) -----

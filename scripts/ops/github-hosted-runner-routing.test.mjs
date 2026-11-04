@@ -25,6 +25,10 @@ const temporaryRunnerComments = [
   '    # Temporary compatibility probe for observed UID_MAP_WRITE_DENIED on the ubuntu-24.04 image.',
   '    # This does not establish a host fix; runner-images #14254 retires ubuntu-22.04 on 2027-04-17.',
 ]
+const parallelPluginJobs = [
+  'contracts', 'permissions', 'unit', 'checkpoint',
+  'runtime-db', 'multitable-db', 'approval-db', 'attendance-db',
+]
 const otherPluginJobs = [
   'dingtalk-p4-ops-regression-gate',
   'k3wise-offline-poc',
@@ -42,13 +46,14 @@ function assertPluginWorkflowRunners(source) {
       assert.ok(header, 'plugin workflow jobs must use literal unquoted job keys')
       return header[1]
     })
-  assert.deepEqual(jobIds.slice().sort(), ['test', ...otherPluginJobs].sort(),
+  assert.deepEqual(jobIds.slice().sort(), ['test', ...parallelPluginJobs, ...otherPluginJobs].sort(),
     'plugin workflow runner allowlist must cover every job exactly once')
-  assertHostedJob(source, 'test', 'ubuntu-22.04', temporaryRunnerComments)
+  assertHostedJob(source, 'test', 'ubuntu-latest')
+  for (const jobId of parallelPluginJobs) assertHostedJob(source, jobId, 'ubuntu-22.04', temporaryRunnerComments)
   for (const jobId of otherPluginJobs) assertHostedJob(source, jobId, 'ubuntu-latest')
 }
 
-test('plugin jobs use GitHub-hosted Ubuntu with one temporary, dated test-job exception', () => {
+test('plugin jobs use GitHub-hosted Ubuntu with the original temporary, dated test-runner exception', () => {
   assertPluginWorkflowRunners(pluginWorkflow)
 })
 

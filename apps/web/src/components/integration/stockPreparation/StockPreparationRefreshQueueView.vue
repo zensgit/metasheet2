@@ -7,8 +7,12 @@
     <!-- 备料分批拉取第一期 step 4 PR-7 (design §13; plan §8 / §9.5 U03-U04) — 「拉取待确认」: the puller's holds of a
          governed project, one by one, with the comparison and the demand evidence, and the three decisions (确认沿用 /
          暂不处理 / 结束沿用关系). Every control below carries its manifest control id (workbenchAccess.ts); each is
-         PRESENT whenever a hold of its kind is shown (this tab exists only for the PULL tier) and DISABLED — never
-         absent — while a precondition is missing, so presence = grant (RQ-ALIGN). -->
+         PRESENT whenever a hold that OFFERS it is shown (this tab exists only for the PULL tier) and DISABLED — never
+         absent — while a precondition is missing, so presence = grant (RQ-ALIGN). PR-7b (review N1): only a
+         `relationship_reconfirm` hold offers 「结束沿用关系」 — the store refuses to end a relationship that is not
+         `needs_reconfirmation`, so a `relationship_content_change` hold (an ACTIVE relationship) shows no end control.
+         PR-7b (review N2 / N8): every server token on this page is shown in words (plainLanguage.ts
+         STOCK_PREP_REFRESH_*_PLAIN); an unrecognised token reads 「未识别」 with the token apart from the sentence. -->
     <p v-if="rendering === 'no_project'" class="sp-refresh__state" data-testid="stock-prep-refresh-state">
       {{ bi(plainFor('no_project').zh, plainFor('no_project').en) }}
       <span class="sp-refresh__hint">{{ bi(plainFor('no_project').zhNext ?? '', plainFor('no_project').enNext ?? '') }}</span>
@@ -64,12 +68,18 @@
             :data-hold-kind="hold.kind"
             :data-confirmable="hold.confirmable ? 'true' : 'false'"
           >
-            <h4 class="sp-refresh__hold-title">
-              {{ kindText(hold.kind) }}
-              <span v-if="hold.shapeToken" class="sp-refresh__token">{{ hold.shapeToken }}</span>
+            <h4 class="sp-refresh__hold-title" data-testid="stock-prep-refresh-hold-title">
+              {{ wordsOr(holdKindWords(hold.kind), bi('其他待确认项', 'Other hold')) }}
+              <code v-if="!holdKindWords(hold.kind)" class="sp-refresh__token" data-testid="stock-prep-refresh-unknown-token">{{ hold.kind }}</code>
             </h4>
-            <p v-if="!hold.confirmable && stockPrepRefreshHoldConfirmMode(hold)" class="sp-refresh__hint" data-testid="stock-prep-refresh-not-confirmable">
-              {{ bi('这一项现在不能确认', 'This item cannot be confirmed right now') }}<template v-if="hold.notConfirmableReason">:<code class="sp-refresh__token">{{ hold.notConfirmableReason }}</code></template>
+            <p v-if="hold.shapeToken" class="sp-refresh__hint" data-testid="stock-prep-refresh-shape" :data-shape-token="hold.shapeToken">
+              {{ bi('BOM 形态', 'BOM shape') }}:{{ wordsOr(shapeWords(hold.shapeToken), bi('未识别的形态', 'an unrecognised shape')) }}
+              <code v-if="!shapeWords(hold.shapeToken)" class="sp-refresh__token" data-testid="stock-prep-refresh-unknown-token">{{ hold.shapeToken }}</code>
+            </p>
+            <!-- PR-7b (review N2, plan W7): EVERY hold that cannot be confirmed says why, in words. -->
+            <p v-if="!hold.confirmable" class="sp-refresh__hint" data-testid="stock-prep-refresh-not-confirmable" :data-not-confirmable-reason="hold.notConfirmableReason ?? ''">
+              {{ notConfirmableText(hold) }}
+              <code v-if="hold.notConfirmableReason && !reasonWords(hold.notConfirmableReason)" class="sp-refresh__token" data-testid="stock-prep-refresh-unknown-token">{{ hold.notConfirmableReason }}</code>
             </p>
             <p v-if="hold.runbookOnly" class="sp-refresh__hint" data-testid="stock-prep-refresh-runbook-only">
               {{ bi('这条沿用关系已升级为专项修复,等运行手册关闭。', 'This relationship is under specialist repair until the runbook closes it.') }}
@@ -105,7 +115,7 @@
                   <td>{{ row.field }}</td>
                   <td>{{ row.before }}</td>
                   <td>{{ row.after }}</td>
-                  <td><code class="sp-refresh__token">{{ row.status }}</code></td>
+                  <td :data-comparison-status="row.status">{{ row.statusText }}</td>
                 </tr>
               </tbody>
             </table>
@@ -155,8 +165,10 @@
               {{ bi('我知道这份需求的历史无法查证', 'I understand this demand’s history cannot be verified') }}
             </label>
 
-            <!-- Typed project number: confirm, re-confirm and every end need it (R-62 ⑧); 「暂不处理」 does not. -->
-            <label v-if="stockPrepRefreshHoldConfirmMode(hold) || hold.continuationId" class="sp-refresh__typed">
+            <!-- Typed project number: confirm, re-confirm and every end need it (R-62 ⑧); 「暂不处理」 does not. PR-7b
+                 (review N3): the TYPED value (trimmed) is what is sent as `confirmProjectNo`, as the archive and
+                 pilot-enable flows do, so the server's own typed check is a real second check. -->
+            <label v-if="stockPrepRefreshHoldConfirmMode(hold) || endOffered(hold)" class="sp-refresh__typed">
               {{ bi('输入项目号以确认操作', 'Type the project number to confirm') }}
               <input
                 v-model="typedNo[hold.id]"
@@ -189,7 +201,7 @@
 
             <!-- END (relationship holds only): release only when the page shows the facts for it; escalate with a
                  typed number and the S25 warning. `superseded_by_new_confirmation` is confirm-only, never offered. -->
-            <fieldset v-if="hold.kind.startsWith('relationship_') && hold.continuationId" class="sp-refresh__end">
+            <fieldset v-if="endOffered(hold)" class="sp-refresh__end" data-testid="stock-prep-refresh-end-fieldset">
               <legend>{{ bi('结束沿用关系', 'End the relationship') }}</legend>
               <label v-if="releaseAdmissibleOnPage(hold)" data-testid="stock-prep-refresh-end-release">
                 <input v-model="endOutcome[hold.id]" type="radio" value="release_to_normal_refresh" />
@@ -256,8 +268,16 @@ import {
   STOCK_PREP_REFRESH_PREVIEW_AGAIN,
   STOCK_PREP_REFRESH_RECEIPT_NOTE,
   STOCK_PREP_REFRESH_RENDERING_PLAIN,
+  STOCK_PREP_REFRESH_COMPARISON_STATUS_PLAIN,
+  STOCK_PREP_REFRESH_CONTINUATION_STATUS_PLAIN,
+  STOCK_PREP_REFRESH_HISTORY_PLAIN,
+  STOCK_PREP_REFRESH_HOLD_KIND_PLAIN,
+  STOCK_PREP_REFRESH_NOT_CONFIRMABLE_PLAIN,
+  STOCK_PREP_REFRESH_SHAPE_PLAIN,
+  STOCK_PREP_REFRESH_TOKEN_UNKNOWN,
   stockPrepErrorCopyText,
   stockPrepErrorPlain,
+  stockPrepRefreshTokenPlain,
   type StockPrepPlainEntry,
   type StockPrepPlainText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
@@ -504,10 +524,25 @@ function typedMatches(hold: StockPrepRefreshHold): boolean {
   return stockPrepProjectNumbersMatch(openedProjectNo.value, typedNo[hold.id] ?? '')
 }
 
+/**
+ * PR-7b (review N3): the number the puller TYPED, trimmed — sent as `confirmProjectNo` (as the archive and
+ * pilot-enable flows send theirs, projectTarget.ts). The client check above still stops a mismatch before any
+ * request; sending the typed value makes the server's own typed check (http-routes.cjs, 400
+ * STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID) a real second check instead of one that always passes.
+ */
+function typedConfirmNo(hold: StockPrepRefreshHold): string {
+  return (typedNo[hold.id] ?? '').trim()
+}
+
+/** PR-7b (review N1): 「结束沿用关系」 only where the store can end it — a relationship awaiting re-confirmation. */
+function endOffered(hold: StockPrepRefreshHold): boolean {
+  return hold.kind === 'relationship_reconfirm' && typeof hold.continuationId === 'string' && hold.continuationId.length > 0
+}
+
 function confirmBodyFor(hold: StockPrepRefreshHold): StockPrepRefreshConfirmBody | null {
   if (!typedMatches(hold)) return null
   const mode = stockPrepRefreshHoldConfirmMode(hold)
-  const options = { confirmProjectNo: openedProjectNo.value, historyAcknowledged: historyAck[hold.id] === true }
+  const options = { confirmProjectNo: typedConfirmNo(hold), historyAcknowledged: historyAck[hold.id] === true }
   if (mode === 'confirm') return buildCandidateConfirmBody(hold, receipt.value, options)
   if (mode === 'reconfirm') {
     const detail = hold.continuationId ? detailById[hold.continuationId] : undefined
@@ -517,7 +552,8 @@ function confirmBodyFor(hold: StockPrepRefreshHold): StockPrepRefreshConfirmBody
 }
 
 function confirmWhy(hold: StockPrepRefreshHold): string {
-  if (!hold.confirmable) return bi('这一项现在不能确认。', 'This item cannot be confirmed right now.')
+  // PR-7b: the reason itself is the worded line under the title (stock-prep-refresh-not-confirmable); point to it.
+  if (!hold.confirmable) return bi('原因见上。', 'See the reason above.')
   if (!holdFingerprintsPresent(hold)) return bi('这一项还缺对照或需求依据的记录,不能确认。', 'This item lacks a comparison or evidence record, so it cannot be confirmed.')
   if (!receiptCompleteFor(receipt.value, hold.id)) return bi('先把这一项的每一页对照都打开看过。', 'Open every comparison page of this item first.')
   if (hold.history === 'history_unknown' && historyAck[hold.id] !== true) return bi('先勾选「我知道这份需求的历史无法查证」。', 'Tick “I understand this demand’s history cannot be verified” first.')
@@ -534,7 +570,7 @@ function endBodyFor(hold: StockPrepRefreshHold): StockPrepRefreshEndBody | null 
   if (outcome === 'release_to_normal_refresh' && !releaseAdmissibleOnPage(hold)) return null
   if (!typedMatches(hold)) return null
   const detail = hold.continuationId ? detailById[hold.continuationId] : undefined
-  return buildEndBody(hold, detail ? detail.continuation : null, outcome, { confirmProjectNo: openedProjectNo.value })
+  return buildEndBody(hold, detail ? detail.continuation : null, outcome, { confirmProjectNo: typedConfirmNo(hold) })
 }
 
 function endWhy(hold: StockPrepRefreshHold): string {
@@ -599,15 +635,38 @@ function copyError(): void {
 
 // ── rendering helpers (values from the PULL-tier payload, displayed only) ───────────────────────────
 
-const KIND_TEXT: Record<string, [string, string]> = {
-  continuation_candidate: ['疑似同一份需求换了位置(待确认沿用)', 'Possibly the same demand at a new position (confirm the relationship)'],
-  relationship_reconfirm: ['已有沿用关系需要重新确认', 'An existing relationship needs re-confirmation'],
-  content_change: ['机器列内容有变化(待复核)', 'A machine column changed (awaiting review)'],
+// PR-7b (review N2 / N8): server tokens → words (plainLanguage.ts). `null` = not in the map; the template then
+// says 「未识别…」 and shows the token in its own <code>, outside the sentence.
+function words(entry: StockPrepPlainText | null): string | null {
+  return entry ? bi(entry.zh, entry.en) : null
 }
 
-function kindText(kind: string): string {
-  const entry = KIND_TEXT[kind]
-  return entry ? bi(entry[0], entry[1]) : bi(`其他待确认项(${kind})`, `Other hold (${kind})`)
+function wordsOr(text: string | null, fallback: string): string {
+  return text ?? fallback
+}
+
+function holdKindWords(kind: string): string | null {
+  return words(stockPrepRefreshTokenPlain(STOCK_PREP_REFRESH_HOLD_KIND_PLAIN, kind))
+}
+
+function shapeWords(token: string | null): string | null {
+  return words(stockPrepRefreshTokenPlain(STOCK_PREP_REFRESH_SHAPE_PLAIN, token))
+}
+
+function reasonWords(token: string | null): string | null {
+  return words(stockPrepRefreshTokenPlain(STOCK_PREP_REFRESH_NOT_CONFIRMABLE_PLAIN, token))
+}
+
+function notConfirmableText(hold: StockPrepRefreshHold): string {
+  const head = bi('这一项现在不能确认', 'This item cannot be confirmed right now')
+  if (!hold.notConfirmableReason) return `${head}${bi('(没有记录原因)。', ' (no reason was recorded).')}`
+  const why = reasonWords(hold.notConfirmableReason)
+  return why ? `${head}:${why}。` : `${head}:${bi('原因未识别', 'the reason is not recognised')}`
+}
+
+/** Values-free status words for a sentence: the token's words, or 「未识别」 followed by nothing of the token. */
+function statusWords(map: Record<string, StockPrepPlainText>, token: unknown): string {
+  return words(stockPrepRefreshTokenPlain(map, typeof token === 'string' ? token : null)) ?? bi(STOCK_PREP_REFRESH_TOKEN_UNKNOWN.zh, STOCK_PREP_REFRESH_TOKEN_UNKNOWN.en)
 }
 
 function pagesText(hold: StockPrepRefreshHold): string {
@@ -623,14 +682,25 @@ function comparisonOf(hold: StockPrepRefreshHold) {
   return hold.candidates[0]?.comparison ?? hold.verification?.comparison ?? null
 }
 
-function comparisonRows(hold: StockPrepRefreshHold): Array<{ path: string; field: string; before: string; after: string; status: string }> {
+interface ComparisonRow { path: string; field: string; before: string; after: string; status: string; statusText: string }
+
+function comparisonRows(hold: StockPrepRefreshHold): ComparisonRow[] {
   const items = comparisonOf(hold)?.items
   if (!Array.isArray(items)) return []
-  const rows: Array<{ path: string; field: string; before: string; after: string; status: string }> = []
+  const rows: ComparisonRow[] = []
   for (const item of items) {
     const path = Array.isArray(item?.relativePath) && item.relativePath.length > 0 ? stockPrepRefreshCellText(item.relativePath) : bi('根', 'root')
     for (const [field, entry] of Object.entries(item?.fields ?? {})) {
-      rows.push({ path, field, before: stockPrepRefreshCellText(entry?.old), after: stockPrepRefreshCellText(entry?.new), status: typeof entry?.status === 'string' ? entry.status : '—' })
+      const status = typeof entry?.status === 'string' ? entry.status : ''
+      rows.push({
+        path,
+        field,
+        before: stockPrepRefreshCellText(entry?.old),
+        after: stockPrepRefreshCellText(entry?.new),
+        status,
+        // PR-7b (review N8): the column reads words; the token rides on the cell's data attribute only.
+        statusText: status ? statusWords(STOCK_PREP_REFRESH_COMPARISON_STATUS_PLAIN, status) : '—',
+      })
     }
   }
   return rows
@@ -653,14 +723,16 @@ function evidenceText(holdId: string): string {
   const observations = Array.isArray(evidence.current?.observations) ? evidence.current?.observations ?? [] : []
   const history = typeof evidence.history?.status === 'string' ? evidence.history.status : 'history_unknown'
   const lines = observations.map((entry) => stockPrepRefreshCellText(entry))
-  return `${bi('需求依据', 'Demand evidence')}: ${lines.length > 0 ? lines.join(';') : '—'} · ${bi('历史', 'History')}: ${history}`
+  // PR-7b (review N8): the history status in words, never the raw token inside the sentence.
+  return `${bi('需求依据', 'Demand evidence')}: ${lines.length > 0 ? lines.join(';') : '—'} · ${bi('历史', 'History')}: ${statusWords(STOCK_PREP_REFRESH_HISTORY_PLAIN, history)}`
 }
 
 function detailText(continuationId: string): string {
   const detail = detailById[continuationId]
   if (!detail) return ''
   const header = detail.continuation
-  return `${bi('沿用关系', 'Relationship')}: ${header.status} · ${bi('版本', 'revision')} ${header.revision} · ${bi('成员', 'members')} ${Array.isArray(detail.members) ? detail.members.length : 0}`
+  // PR-7b (review N8): the relationship status in words.
+  return `${bi('沿用关系', 'Relationship')}: ${statusWords(STOCK_PREP_REFRESH_CONTINUATION_STATUS_PLAIN, header.status)} · ${bi('版本', 'revision')} ${header.revision} · ${bi('成员', 'members')} ${Array.isArray(detail.members) ? detail.members.length : 0}`
 }
 
 // A different project: drop every value of the previous one BEFORE reading the new one.

@@ -1,3 +1,4 @@
+import { requiredSuiteJobBody } from './plugin-tests-workflow-contract.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, copyFileSync, existsSync, chmodSync } from 'node:fs'
@@ -1210,12 +1211,11 @@ test('F3 the embedded template key list matches docker/app.env.multitable-onprem
 // CI wiring
 // ---------------------------------------------------------------------------------------------
 
-test('CI wiring: this file is invoked by a `node --test` step of the required `test` job', () => {
+test('CI wiring: this file is invoked by a `node --test` step of the required contracts dependency', () => {
   const workflow = readLf(WORKFLOW)
-  const testJob = workflow.match(/\n {2}test:\n[\s\S]*?(?=\n {2}\S)/)
-  assert.ok(testJob, 'the required `test` job must exist in plugin-tests.yml')
+  const testJob = requiredSuiteJobBody(workflow, 'contracts')
   assert.match(
-    testJob[0],
+    testJob,
     /node --test[^\n]*scripts\/ops\/multitable-onprem-preflight\.test\.mjs/,
     'a preflight contract that no required job runs is a dead tripwire',
   )

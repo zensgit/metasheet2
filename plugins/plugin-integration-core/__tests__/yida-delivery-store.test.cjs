@@ -16,7 +16,7 @@ const AUDIT = 'integration_yida_delivery_audit'
 const UNIQUE_SCOPE_ROW = 'uniq_integration_yida_delivery_scope_row'
 const UNIQUE_CREATE_BUSINESS = 'uniq_integration_yida_delivery_create_business'
 
-test('the YiDa real-PG suites are registered in their real execution lane without filtered DB cases', () => {
+test('the YiDa real-PG suites are registered in their real execution lane without filtered DB cases', async () => {
   const root = path.resolve(__dirname, '..', '..', '..')
   const specs = ['tests/integration/stock-preparation-yida-write-ledger-realdb.test.ts',
     'tests/integration/stock-preparation-yida-create-fence-realdb.test.ts',
@@ -30,9 +30,12 @@ test('the YiDa real-PG suites are registered in their real execution lane withou
     'tests/integration/stock-preparation-yida-draft-plans-realdb.test.ts',
     'tests/integration/automation-live-authority-realdb.test.ts',
     'tests/integration/yida-host-boundaries-realdb.test.ts',
-    'tests/integration/yida-host-initialization-barrier-realdb.test.ts']
+    'tests/integration/yida-host-initialization-barrier-realdb.test.ts',
+    'tests/integration/yida-host-connection-test-realdb.test.ts',
+    'tests/integration/yida-connection-test-http-realdb.test.ts']
   const workflow = yaml.load(fs.readFileSync(path.join(root, '.github/workflows/plugin-tests.yml'), 'utf8'))
-  const step = workflow.jobs.test.steps.find((entry) => entry.id === 'external-system-delete-bind-lock-protocol-real-db')
+  const { requiredSuiteJob } = await import('../../../scripts/ops/plugin-tests-workflow-contract.mjs')
+  const step = requiredSuiteJob(workflow, 'runtime-db').steps.find((entry) => entry.id === 'external-system-delete-bind-lock-protocol-real-db')
   assert.deepEqual(Object.keys(step).sort(), ['env', 'id', 'if', 'name', 'run'])
   assert.deepEqual(Object.keys(step.env).sort(), ['DATABASE_URL', 'EXPECT_DB'])
   assert.equal(step.env.EXPECT_DB, '1')

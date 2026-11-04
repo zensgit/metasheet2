@@ -341,6 +341,28 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
     control: 'stock-prep-project-pilot-enable',
   }),
+  // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4 / §8 「B4」; OQ4, OQ6; register R-68) — THE PER-SHEET
+  // SWITCH 「允许人工补充行」 and the last pull's reminder. The READ is the PULL tier (OQ4: the reminder is on the project
+  // sync panel for the people who pull, ADR §8 「B4」 6), the SET is ADMIN (OQ6: the 备料主管理员 flips it). Their
+  // controls live on the project sync panel (StockPreparationProjectTargetManualRows.vue, mounted in
+  // StockPreparationProjectSyncPanel.vue): the switch-state line (with the reminder), read only for a holder and rendered
+  // once the server answered for a registered sheet, and the typed-confirmation switch button, rendered only for an
+  // ADMIN while the server says `may.set`. Both 404 DISABLED while the project-sheets switch is off, after the gate. The
+  // web suite StockPreparationProjectTargetManualRows.spec.ts (MR-ALIGN) asserts their alignment where they live.
+  Object.freeze({
+    capability: 'projectTarget.manualRowsRead',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
+    control: 'stock-prep-project-manual-rows-status',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.manualRowsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
+    control: 'stock-prep-project-manual-rows-set',
+  }),
   // 备料分批拉取第一期 step 4 PR-4 (design §13; register R-59) — THE PULLER'S CONFIRMATION SURFACE over a
   // governed project: the private hold page, the evidence behind a hold, a relationship's detail, and the
   // three decisions (confirm / 「暂不处理」 / end). All six are the PULL tier (D-14: the puller confirms;
@@ -392,6 +414,31 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     method: 'POST',
     path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id/end',
     control: 'stock-prep-refresh-end',
+  }),
+  // 备料分批拉取第一期 step 5 PR-8 (design §10.3, §13; register R-63) — THE CHANGE PLAN: the private page (the proposal
+  // the open content holds make + the pending plan, a written plan's current diff), the confirm and the review. PULL
+  // tier like the six above (D-14: the puller confirms AND reviews — two separate operations, C11). `control: null`
+  // until PR-9 lands the page (the PR-4 precedent).
+  Object.freeze({
+    capability: 'refresh.changePlan',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/current',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'refresh.changePlanConfirm',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/confirm',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'refresh.reviewComplete',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-reviews/complete',
+    control: null,
   }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
@@ -814,13 +861,10 @@ const STOCK_PREP_RAIL_GROUPS = Object.freeze([
     ]),
     advancedGate: STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
     advanced: Object.freeze([
-      'dashboard',
       'project-workspace',
       'bom-snapshot-diff',
       'material-mapping',
       'unit-conversion',
-      'prep-line',
-      'exception-queue',
     ]),
   }),
   Object.freeze({

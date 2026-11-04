@@ -497,4 +497,17 @@ watch(
   align-items: center;
   gap: 12px;
 }
+
+/* Up to 960px: a fieldset's minimum width defaults to its min-content width; let it and its inputs
+   narrow with the page. */
+@media (max-width: 960px) {
+  fieldset.tasks-detail-editor__field {
+    min-width: 0;
+  }
+
+  .tasks-detail-editor__field input {
+    max-width: 100%;
+    min-width: 0;
+  }
+}
 </style>

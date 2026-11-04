@@ -19,11 +19,13 @@ import {
   classifyOutboundResult,
   claimOutboundIntent,
   isClassBOutboundEnabled,
+  outboundLeaseForTimeout,
   outboundReasonClass,
   recordOutboundOutcome,
   type OutboundAttemptResult,
   type OutboundIntentIdentity,
   type OutboundOutcome,
+  type OutboundSkipDecision,
 } from './automation-outbound-intent'
 import type { TransactionalQueryable } from './pg-transaction-guard'
 import { Logger } from '../core/logger'
@@ -65,6 +67,17 @@ import {
 } from '../services/approval-record-link-txn-auth'
 import { acquireRecordLinkRowAuthLockOnQuery } from '../services/approval-record-link-row-auth-lock'
 import { redactString, redactValue } from './automation-log-redact'
+import { checkWebhookTargetUrl, type SsrfLookupFn } from './webhook-ssrf-guard'
+import { pinnedAddressFamily, pinnedHttpsFetch, type PinnedSendFn } from './webhook-pinned-fetch'
+import {
+  classifyWebhookFailure,
+  classifyWebhookRefusal,
+  isRefusedRedirectStatus,
+  REDIRECT_NOT_ALLOWED,
+  WEBHOOK_TARGET_REJECTED,
+  webhookHostFamily,
+  type WebhookFailureInput,
+} from './webhook-refusal-class'
 import { DINGTALK_PERSON_RECIPIENT_STATUS_SQL, resolveDingTalkPersonRecipientRows } from './dingtalk-person-recipient-status'
 import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
@@ -93,6 +106,12 @@ import {
   loadStockPreparationOverviewSheetIds,
 } from './stock-preparation-overview-contract'
 import { HUMAN_WRITE_LOCK_AUTOMATION_REFUSAL, findHumanWriteLockedFieldIds } from './human-write-lock'
+import {
+  assertPlmRowDeletable,
+  loadPlmGuardFields,
+  PLM_ROW_DELETE_AUTOMATION_REFUSAL,
+  PlmRowDeleteRefusedError,
+} from './plm-row-delete-guard'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { MemoryRateLimitStore, type RateLimitStore } from '../middleware/rate-limiter'
 import {
@@ -1668,6 +1687,22 @@ export interface AutomationDeps {
     handler: (client: { query: AutomationDeps['queryFn'] }) => Promise<T>,
   ) => Promise<T>
   fetchFn?: typeof fetch
+  /**
+   * DNS seam for the `send_webhook` SSRF gate (G05). OMITTED ⇒ the real resolver, so production is
+   * gated by actual DNS; a test injects a deterministic resolver instead of reaching the network.
+   * This is a RESOLVER seam only — it cannot disable the gate: `checkWebhookTargetUrl` still judges
+   * every returned address, and a seam that returns an internal address is refused like any other.
+   */
+  ssrfLookupFn?: SsrfLookupFn
+  /**
+   * S0-a transport seam for `send_webhook`. OMITTED (production) ⇒ `pinnedHttpsFetch`: the request goes
+   * to the address the SSRF check approved for THIS attempt, never to a fresh resolution of the name, and
+   * a 3xx is returned as a status (no second request). A test passes a wrapper to observe the chosen pin
+   * or to point the real helper at a loopback server. When neither this nor `fetchFn` is injected the
+   * pinned helper is used; `fetchFn`, when injected, is the older fetch-shaped TEST seam (it still gets
+   * `redirect: 'manual'`, but a fetch-shaped call cannot be pinned — production wiring passes neither).
+   */
+  pinnedWebhookSendFn?: PinnedSendFn
   notificationService?: Pick<NotificationService, 'send'>
   /** Optional cross-base write quota override (limit/window/store). Omit → process-global default. */
   crossBaseWriteQuota?: CrossBaseWriteQuotaConfig
@@ -3630,6 +3665,17 @@ export class AutomationExecutor {
         }
         ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
 
+        // R-66 ① (owner 2026-10-28, plm-row-delete-guard.ts): a rule cannot delete a PLM row on a stock-preparation
+        // template sheet, whoever authored it. Checked on the row locked FOR UPDATE above, before any write. THROWS
+        // (like the cross-base missing-record branch) so this transaction — and the #4196 Class-A claim taken above —
+        // ROLLS BACK; the catch below reports the fixed failed step.
+        await assertPlmRowDeletable(
+          query,
+          effectiveSheetId,
+          await loadPlmGuardFields(query, effectiveSheetId),
+          normalizeJson(lockRow.data),
+        )
+
         // D-2 (side-door delete recoverability, #4004; default OFF ⇒ every `sideDoorTrash` branch below is
         // dead and this method behaves byte-identically to D-1, §1.9). §1.2 anchor: ONE pre-generated uuid
         // becomes the delete revision's id, the trash row's delete_revision_id and the tombstones'
@@ -3760,6 +3806,16 @@ export class AutomationExecutor {
       if (err instanceof SameBaseTargetRecordMissingSignal) {
         return this.targetRecordMissingSkippedResult('delete_record', effectiveSheetId, effectiveRecordId)
       }
+      // R-66: the PLM-row refusal — rolled back above; a failed step with the fixed code, values-free log line.
+      if (err instanceof PlmRowDeleteRefusedError) {
+        logger.warn('Automation step refused: it deletes a row the PLM pull maintains', {
+          code: err.code,
+          actionType: 'delete_record',
+          ruleId: context.ruleId,
+          reason: err.reason,
+        })
+        return { actionType: 'delete_record', status: 'failed', error: PLM_ROW_DELETE_AUTOMATION_REFUSAL }
+      }
       return { actionType: 'delete_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
     }
   }
@@ -3862,6 +3918,53 @@ export class AutomationExecutor {
    */
   private alreadyAppliedResult(actionType: AutomationActionType): AutomationStepResult {
     return { actionType, status: 'success', alreadyApplied: true, output: { alreadyApplied: true } }
+  }
+
+  /**
+   * #4196 Class-B: the step result for a claim that said "do not send". Only `skip_sent` is honestly a
+   * success (the delivery happened; alreadyApplied). `skip_unknown` is the §3 TERMINAL ambiguity: the step
+   * reports FAILED naming outcome_unknown so the executor stops the dependent steps until reconciliation —
+   * never an alreadyApplied success that lets them run as if the send were known. `skip_inflight` means
+   * another attempt holds a live lease: nothing is known yet, so the step fails closed without sending and
+   * without declaring that attempt dead.
+   */
+  private outboundSkipResult(actionType: AutomationActionType, decision: OutboundSkipDecision): AutomationStepResult {
+    if (decision === 'skip_sent') return this.alreadyAppliedResult(actionType)
+    if (decision === 'skip_inflight') {
+      return {
+        actionType,
+        status: 'failed',
+        error: `${actionType} outbound attempt in flight (another attempt holds a live lease); not resent`,
+        output: { outcome: 'pending', reason: 'inflight_lease' },
+      }
+    }
+    return {
+      actionType,
+      status: 'failed',
+      error: `${actionType} outcome_unknown (prior attempt); recorded, not auto-resent; reconcile before dependent steps run`,
+      output: { outcome: 'outcome_unknown', reason: 'prior_outcome_unknown' },
+    }
+  }
+
+  /**
+   * #4196 Class-B Tx B for the DingTalk sites (card / person / group): the terminal write is fenced by the
+   * claim's token; an unconfirmed write (lease expired and flipped by a replay, or the row terminalized
+   * elsewhere) is logged values-free. Returns whether THIS attempt's write landed — a site may report success
+   * only when it did (same rule as send_webhook / send_email: otherwise a failed-shaped step with
+   * output.reason 'terminal_write_unconfirmed', so dependent steps are skipped).
+   */
+  private async recordOutboundTerminal(
+    outboundId: OutboundIntentIdentity,
+    attemptToken: string | null,
+    outcome: OutboundOutcome,
+    reason: string,
+  ): Promise<boolean> {
+    if (!attemptToken) return false
+    const { confirmed } = await recordOutboundOutcome(this.deps.queryFn, outboundId, outcome, reason, attemptToken)
+    if (!confirmed) {
+      logger.warn(`class-B terminal write (${outcome}, ${reason}) not confirmed by its own attempt; ledger row owned elsewhere`)
+    }
+    return confirmed
   }
 
   private async executeCreateRecord(
@@ -4555,6 +4658,46 @@ export class AutomationExecutor {
       return { actionType: 'send_webhook', status: 'failed', error: 'Webhook URL is required' }
     }
 
+    // ── G05 SSRF gate (#5615 "刀 0") ─────────────────────────────────────────
+    // `config.url` comes from an automation rule's JSON, i.e. from anyone who can EDIT A RULE — a much
+    // wider set than the deploy operator, and the rule row also stores a long-lived `Authorization`
+    // header verbatim. Ungated, that made the server a request-forgery proxy that replays stored
+    // credentials at the internal network. The identical control has guarded the button-field egress
+    // path since B1-S2 (`routes/multitable-button.ts`); this is the same guard on the rule-driven path.
+    //
+    // PLACEMENT is load-bearing, three ways:
+    //  1. BEFORE the header/HMAC assembly below — a refused target never gets a signature computed over
+    //     the body, and the caller-supplied headers (Authorization/Cookie/…) are never even materialised.
+    //  2. BEFORE `classBOutboundIdentity` / `executeSendWebhookTwoPhase` — so BOTH the legacy retry loop
+    //     and the two-phase path are gated by this ONE call, and a refusal consumes NO outbound-intent
+    //     claim (Tx A never runs), exactly as the button route refuses before its dedup transaction.
+    //  3. BEFORE any `fetchFn` call — refusal means the request is never made, so nothing can leak by
+    //     being sent. That is the whole "strip Authorization pointed at localhost" property: we do not
+    //     scrub the header, we never dispatch it.
+    //
+    // The gate judges ONE url — the one the rule stored. It is therefore only a boundary if the dispatch
+    // stops at that url: `fetch`'s default `redirect: 'follow'` would hand the method, the body, the
+    // caller-supplied headers and the signature headers below to a `Location` this gate never saw
+    // (a 307 from a public first hop is enough; the fetch standard has no scheme-downgrade guard, so
+    // https-only would not survive a redirect either — that half is read off the spec, not measured
+    // here, and it is not what the fix rests on). So BOTH dispatch
+    // sites below pass `redirect: 'manual'` and treat a 3xx as a terminal refusal
+    // (`WEBHOOK_TARGET_REJECTED:redirect-not-allowed`) — the same posture as the button route, which
+    // dispatches through `webhook-pinned-fetch.ts` (`https.request`, which does not follow), and as
+    // `guards/egress-dispatcher.ts:201`, which follows manually and re-validates every hop.
+    //
+    // Refusal is FINAL for this attempt: no retry loop, no fallback, no env override (see the design
+    // doc — neither egress path has an internal-target allowlist, by deliberate omission).
+    const ssrf = await checkWebhookTargetUrl(url, this.deps.ssrfLookupFn)
+    if (!ssrf.ok) {
+      // `strict: false` in this package disables discriminated-union narrowing (same reason as the
+      // button route); read `reason` off the rejection variant explicitly.
+      return this.refusedWebhookTargetResult(url, (ssrf as { reason?: string }).reason, context, false)
+    }
+    // S0-a: the addresses THIS check approved. Every dispatch below connects to one of them (pinned), so a
+    // name that re-resolves somewhere else between the check and the connect cannot move the request.
+    const approvedAddresses = (ssrf as { addresses: string[] }).addresses
+
     const method = (config.method as string) ?? 'POST'
     const headers = { ...((config.headers as Record<string, string>) ?? {}) }
     if (!headers['Content-Type']) {
@@ -4581,7 +4724,6 @@ export class AutomationExecutor {
       }
     }
 
-    const fetchFn = this.deps.fetchFn ?? globalThis.fetch
     const timeoutMs = webhookTimeoutMs()
 
     // #4196 Class-B two-phase (flag ON + identity present). Intent (Tx A) commits BEFORE the send; a prior
@@ -4590,24 +4732,54 @@ export class AutomationExecutor {
     // runs BYTE-IDENTICAL to pre-slice.
     const outboundId = this.classBOutboundIdentity(identity, 'send_webhook', config)
     if (outboundId) {
-      return this.executeSendWebhookTwoPhase(outboundId, { url, method, headers, bodyStr, fetchFn, timeoutMs })
+      return this.executeSendWebhookTwoPhase(outboundId, { url, method, headers, bodyStr, approvedAddresses, timeoutMs })
     }
 
     const retries = maxWebhookRetries()
 
     let lastError: string | undefined
+    // #5619 review: the LOG below gets this structured view of the last attempt, never `lastError`. Two
+    // separate variables on purpose — the log line physically cannot be handed the free text.
+    let lastFailure: WebhookFailureInput = { kind: 'none' }
+    let attemptAddresses = approvedAddresses
     for (let attempt = 0; attempt <= retries; attempt++) {
+      if (attempt > 0) {
+        // S0-a: a retry is a NEW send, so it is checked again — the first check covered the first attempt
+        // only. A target that now resolves internally is refused here, before anything is dispatched, with
+        // the same closed-set shape as the pre-dispatch refusal (`dispatched: true`: earlier attempts went out).
+        const recheck = await checkWebhookTargetUrl(url, this.deps.ssrfLookupFn)
+        if (!recheck.ok) {
+          return this.refusedWebhookTargetResult(url, (recheck as { reason?: string }).reason, context, true)
+        }
+        attemptAddresses = (recheck as { addresses: string[] }).addresses
+      }
       try {
         const controller = new AbortController()
         const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
-        const response = await fetchFn(url, {
+        // G05: never follow — following would replay this exact method/body/headers (incl. the signature
+        // headers) at a target the gate never judged. The pinned transport does not follow; the fetch-shaped
+        // test seam gets `redirect: 'manual'`. Either way a 3xx resolves as itself, with no second request.
+        const response = await this.dispatchWebhookAttempt(url, attemptAddresses, {
           method,
           headers,
           body: bodyStr,
           signal: controller.signal,
+          timeoutMs,
         })
         clearTimeout(timeout)
+
+        if (isRefusedRedirectStatus(response)) {
+          // TERMINAL, and deliberately not `lastError` + retry: retrying re-sends the same body to the
+          // same first hop, which will answer 3xx again. Report it as the refusal it is.
+          // Identifiers listed one by one — never spread `context`, which carries `recordData` /
+          // `triggerEvent` (business values) into the log meta.
+          return this.refusedRedirectResult(url, {
+            sheetId: context.sheetId,
+            ruleId: context.ruleId,
+            executionId: context.executionId,
+          })
+        }
 
         if (response.ok) {
           return {
@@ -4618,8 +4790,18 @@ export class AutomationExecutor {
         }
 
         lastError = `HTTP ${response.status}`
+        lastFailure = { kind: 'response', status: response.status }
       } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err)
+        // The RAW error, not its message: `classifyWebhookFailure` reads only `name`/`code`/`cause.*`.
+        lastFailure = { kind: 'error', error: err }
+        // S0-a review F2: on the PINNED transport the raw `https.request` error text names the connected
+        // address and port (`connect ECONNREFUSED <ip>:<port>`, TLS alt-name messages quote the host) —
+        // the platform `fetch` only ever said `fetch failed`. So the persisted step error gets the closed
+        // failure class (same set the log line and `output.failureClass` use), never the transport's text.
+        // The fetch-shaped TEST seam keeps its message so existing assertions on it stay meaningful.
+        lastError = this.usesPinnedWebhookTransport()
+          ? classifyWebhookFailure(lastFailure)
+          : err instanceof Error ? err.message : String(err)
       }
 
       // Wait before retry (simple exponential backoff)
@@ -4630,13 +4812,149 @@ export class AutomationExecutor {
 
     // Surface the failure in the step result (never silent) — the executor lifts
     // a failed step into the execution log + marks the run failed.
-    logger.warn(
-      `send_webhook to ${redactString(url)} failed after ${retries + 1} attempts: ${lastError}`,
-    )
+    //
+    // G05 VALUES-FREE, CLOSED FAILURE CLASS (#5619 review, P2). This line was
+    // `send_webhook to ${redactString(url)} failed … ${lastError}`; the first pass replaced the URL with a
+    // host shape but kept `failure: redactString(lastError ?? 'unknown')`. That still leaked, because on
+    // the ALLOWED path the TRANSPORT'S OWN free text can BE the credential: a rule whose URL carries
+    // userinfo makes the native client throw, at request CONSTRUCTION,
+    //   `TypeError: Request cannot be constructed from a URL that includes credentials: https://u:<pw>@h/x`
+    // — i.e. `lastError` IS the whole URL — and the shared redactor has no generic userinfo rule
+    // (`automation-log-redact.ts:30-61`; `url` is not a `STRUCTURED_FIELDS` member either, :121-143), so it
+    // passes through verbatim. Measured on this runtime, not inferred (see the spec's runtime-precondition
+    // test). So NO free text goes in this line at all: host SHAPE + a closed-set failure class +
+    // identifiers — the same discipline as the refusal line, which never had this hole.
+    //
+    // SCOPE, stated exactly so the claim is not wider than the code: `lastError` reaches the
+    // operator-facing step `error` below. On the production (pinned) transport it is `HTTP <status>` or the
+    // closed failure class (S0-a review F2) — no transport text. Only the fetch-shaped test seam still puts
+    // an error message there. That string is persisted by `automation-log-service.record()` through `redactValue`,
+    // which has the same blind spot, as does the `rule_snapshot` channel, which stores `config.url`
+    // verbatim on EVERY run, refused or not. Closing that PERSISTENCE face means changing the shared
+    // redactor (four channels + a web mirror) and is deliberately not done here. What this change
+    // guarantees is the LOG, and only the log.
+    const failureClass = classifyWebhookFailure(lastFailure)
+    const hostFamily = webhookHostFamily(url)
+    logger.warn('[automation.send_webhook.failed]', {
+      hostFamily,
+      attempts: retries + 1,
+      failureClass,
+      sheetId: context.sheetId,
+      ruleId: context.ruleId,
+      executionId: context.executionId,
+    })
     return {
       actionType: 'send_webhook',
       status: 'failed',
       error: `Webhook failed after ${retries + 1} attempts: ${lastError}`,
+      // The values-free CLASSIFICATION of the same failure, for anything that triages structurally
+      // instead of grepping the `error` prose.
+      output: { failureClass, hostFamily, attempts: retries + 1 },
+    }
+  }
+
+  /**
+   * G05: the first hop answered 3xx while we asked for `redirect: 'manual'`, so nothing followed it.
+   * Shaped like a pre-dispatch refusal (same code, same closed-set fields, same `WEBHOOK_TARGET_REJECTED:`
+   * error prefix) so one alert query covers both, with one honest difference: `dispatched: true`, because
+   * the FIRST hop did go out — the gate allowed that url. The `Location` is never read, logged or
+   * followed: it is a value chosen by whoever answered, and it is the one input the gate never judged.
+   */
+  private refusedWebhookTargetResult(
+    url: string,
+    guardReason: string | undefined,
+    context: ExecutionContext,
+    dispatched: boolean,
+  ): AutomationStepResult {
+    // VALUES-FREE: the guard's `reason` is NOT logged — it is only mapped to a closed-set label. The URL
+    // (which may carry userinfo/query credentials) and every header value stay out of the log and out of
+    // the persisted step result; only the code + host SHAPE are recorded.
+    const refusal = classifyWebhookRefusal(url, guardReason)
+    logger.warn('[automation.send_webhook.refused]', {
+      code: refusal.code,
+      refusalClass: refusal.refusalClass,
+      hostFamily: refusal.hostFamily,
+      // IDENTIFIERS, not values — `sheetId` alone does not locate the rule when a sheet carries many
+      // (it only narrows to the sheet), so carry the two the context already holds. Same identifier
+      // discipline as the sibling button route (`routes/multitable-button.ts:311-314`).
+      sheetId: context.sheetId,
+      ruleId: context.ruleId,
+      executionId: context.executionId,
+    })
+    return {
+      actionType: 'send_webhook',
+      status: 'failed',
+      error: `${WEBHOOK_TARGET_REJECTED}:${refusal.refusalClass}`,
+      output: {
+        code: refusal.code,
+        refusalClass: refusal.refusalClass,
+        hostFamily: refusal.hostFamily,
+        dispatched,
+      },
+    }
+  }
+
+  /**
+   * S0-a: ONE webhook send to an address the SSRF check approved. Production (no seam) uses
+   * `pinnedHttpsFetch`: it connects to `approvedAddresses[0]` — TLS SNI and `Host` stay the URL's host —
+   * and returns a 3xx as a plain status without a second request. The returned object carries only what
+   * the callers read (`status`, `ok`, and `type` from a fetch-shaped seam).
+   */
+  private async dispatchWebhookAttempt(
+    url: string,
+    approvedAddresses: string[],
+    init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal; timeoutMs: number },
+  ): Promise<{ status: number; ok: boolean; type?: string }> {
+    if (!this.usesPinnedWebhookTransport()) {
+      // Fetch-shaped TEST seam (see `AutomationDeps.pinnedWebhookSendFn`).
+      return this.deps.fetchFn(url, {
+        method: init.method,
+        headers: init.headers,
+        body: init.body,
+        signal: init.signal,
+        redirect: 'manual',
+      })
+    }
+    const pinned = approvedAddresses[0]
+    if (typeof pinned !== 'string' || pinned.length === 0) {
+      // Unreachable for an `ok` check (the guard always returns at least one address); fail closed anyway.
+      throw new TypeError('webhook target has no approved address')
+    }
+    const send: PinnedSendFn = this.deps.pinnedWebhookSendFn ?? pinnedHttpsFetch
+    return send(url, pinned, pinnedAddressFamily(pinned), {
+      method: init.method,
+      headers: init.headers,
+      body: init.body,
+      timeoutMs: init.timeoutMs,
+    })
+  }
+
+  /** `false` only for the fetch-shaped TEST seam (`fetchFn` without `pinnedWebhookSendFn`); production is pinned. */
+  private usesPinnedWebhookTransport(): boolean {
+    return !(this.deps.fetchFn && !this.deps.pinnedWebhookSendFn)
+  }
+
+  private refusedRedirectResult(
+    url: string,
+    ids: Record<string, string | undefined>,
+  ): AutomationStepResult {
+    const hostFamily = webhookHostFamily(url)
+    logger.warn('[automation.send_webhook.refused]', {
+      code: WEBHOOK_TARGET_REJECTED,
+      refusalClass: REDIRECT_NOT_ALLOWED,
+      hostFamily,
+      ...ids,
+    })
+    return {
+      actionType: 'send_webhook',
+      status: 'failed',
+      error: `${WEBHOOK_TARGET_REJECTED}:${REDIRECT_NOT_ALLOWED}`,
+      output: {
+        code: WEBHOOK_TARGET_REJECTED,
+        refusalClass: REDIRECT_NOT_ALLOWED,
+        hostFamily,
+        dispatched: true,
+      },
     }
   }
 
@@ -4676,29 +4994,35 @@ export class AutomationExecutor {
       method: string
       headers: Record<string, string>
       bodyStr: string
-      fetchFn: typeof fetch
+      approvedAddresses: string[]
       timeoutMs: number
     },
   ): Promise<AutomationStepResult> {
-    // Tx A — intent committed BEFORE the network call. A prior sent/unknown short-circuits with no send.
-    const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
-    if (decision === 'skip_sent' || decision === 'skip_unknown') {
-      // Success-shaped, alreadyApplied — no second delivery for an already-sent or ambiguous prior attempt.
-      return this.alreadyAppliedResult('send_webhook')
+    // Tx A — intent committed BEFORE the network call; the claim mints THIS attempt's token and a lease that
+    // outlives the transport timeout. Every skip decision means no send (sent → alreadyApplied; unknown /
+    // in-flight → a failed-shaped step that stops dependents).
+    const claim = await claimOutboundIntent(this.deps.queryFn, outboundId, { leaseMs: outboundLeaseForTimeout(req.timeoutMs) })
+    if (claim.decision !== 'proceed' && claim.decision !== 'retry_failed') {
+      return this.outboundSkipResult('send_webhook', claim.decision)
     }
 
     // decision is 'proceed' | 'retry_failed' → attempt ONCE.
     let attempt: OutboundAttemptResult
+    let redirected = false
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), req.timeoutMs)
     try {
-      const response = await req.fetchFn(req.url, {
+      // G05 / S0-a: same posture as the legacy loop — connect to the approved (pinned) address and never
+      // follow a `Location` the gate did not judge.
+      const response = await this.dispatchWebhookAttempt(req.url, req.approvedAddresses, {
         method: req.method,
         headers: req.headers,
         body: req.bodyStr,
         signal: controller.signal,
+        timeoutMs: req.timeoutMs,
       })
       attempt = { kind: 'response', status: response.status }
+      redirected = isRefusedRedirectStatus(response)
     } catch (err) {
       attempt = classifyFetchError(err)
     } finally {
@@ -4707,28 +5031,62 @@ export class AutomationExecutor {
 
     const outcome = classifyOutboundResult(attempt)
     const reason = outboundReasonClass(attempt) // bounded, redacted class — never a body/URL/token
-    // Tx B — record the terminal outcome (guarded `status='pending'`, single-writer).
-    await recordOutboundOutcome(this.deps.queryFn, outboundId, outcome, reason)
+    // Tx B — the SAME attempt records the terminal outcome, fenced `status='pending' AND attempt_token=mine`.
+    // `confirmed` is whether THIS write landed on exactly one row; success may only be reported when it did.
+    const record = await recordOutboundOutcome(this.deps.queryFn, outboundId, outcome, reason, claim.attemptToken)
+    const httpStatus = attempt.kind === 'response' ? attempt.status : null
+
+    if (redirected) {
+      // A 3xx is never 2xx, so `classifyOutboundResult` already classified it as the ambiguous outcome it
+      // is (the first hop DID receive the body) and Tx B above ran — the intent row is not left pending
+      // and nothing is auto-resent. Only the step label changes: say "we refused to follow" rather than
+      // "unknown outcome", so an operator is not sent hunting for a delivery a redirect ate.
+      return this.refusedRedirectResult(req.url, {
+        rootExecutionId: outboundId.rootExecutionId,
+        actionKey: outboundId.actionKey,
+      })
+    }
 
     if (outcome === 'sent') {
+      if (!record.confirmed) {
+        // 2xx came back, but the ledger row is no longer this attempt's `pending` (its lease expired and a
+        // replay flipped it to outcome_unknown, or it was terminalized elsewhere). The ledger — what later
+        // steps and retries consult — does not say `sent`, so this step must not say success either.
+        logger.warn(`send_webhook to ${redactString(req.url)} → sent_2xx but the terminal write was not confirmed by this attempt; reported as outcome_unknown`)
+        return {
+          actionType: 'send_webhook',
+          status: 'failed',
+          error: 'send_webhook outcome_unknown (sent_2xx, terminal write not confirmed by this attempt); reconcile the intent ledger, not auto-resent',
+          output: { outcome: 'outcome_unknown', reason: 'terminal_write_unconfirmed', httpStatus },
+        }
+      }
       return {
         actionType: 'send_webhook',
         status: 'success',
-        output: { outcome: 'sent', httpStatus: attempt.kind === 'response' ? attempt.status : null },
+        output: { outcome: 'sent', httpStatus },
       }
     }
     if (outcome === 'failed') {
-      // Definite non-delivery (nothing left the client) — retryable; the run is marked failed.
+      // Definite non-delivery (nothing left the client) — retryable; the run is marked failed. An unconfirmed
+      // write here means the row was already terminalized elsewhere; the step stays failed either way.
       return {
         actionType: 'send_webhook',
         status: 'failed',
         error: `send_webhook definite non-delivery (${reason}); eligible for retry`,
-        output: { outcome: 'failed', reason },
+        output: { outcome: 'failed', reason, terminalWriteConfirmed: record.confirmed },
       }
     }
     // outcome_unknown — the send MAY have happened; surfaced as failed so the run does NOT silently succeed,
     // and NEVER auto-resent (a retry consults the intent row and skips).
-    logger.warn(`send_webhook to ${redactString(req.url)} → outcome_unknown (${reason}); recorded, not auto-resent`)
+    // G05 VALUES-FREE (same reason as the legacy failure line): `redactString(req.url)` left userinfo and
+    // non-`access_token` query credentials intact, and this line fires on the ALLOWED path where the gate
+    // has already had its say. Host SHAPE + the bounded reason class + identifiers only.
+    logger.warn('[automation.send_webhook.outcome_unknown]', {
+      hostFamily: webhookHostFamily(req.url),
+      reason, // already a bounded class (`outboundReasonClass`) — never a body/URL/token
+      rootExecutionId: outboundId.rootExecutionId,
+      actionKey: outboundId.actionKey, // structural path + action type + config HASH; no config values
+    })
     return {
       actionType: 'send_webhook',
       status: 'failed',
@@ -4996,10 +5354,11 @@ export class AutomationExecutor {
     notification: Notification,
     recipientCount: number,
   ): Promise<AutomationStepResult> {
-    // Tx A — intent committed BEFORE the send. A prior sent/unknown short-circuits with no send.
-    const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
-    if (decision === 'skip_sent' || decision === 'skip_unknown') {
-      return this.alreadyAppliedResult('send_email')
+    // Tx A — intent committed BEFORE the send; the claim mints THIS attempt's token. Every skip decision
+    // means no send (sent → alreadyApplied; unknown / in-flight → a failed-shaped step that stops dependents).
+    const claim = await claimOutboundIntent(this.deps.queryFn, outboundId)
+    if (claim.decision !== 'proceed' && claim.decision !== 'retry_failed') {
+      return this.outboundSkipResult('send_email', claim.decision)
     }
 
     // decision is 'proceed' | 'retry_failed' → attempt ONCE.
@@ -5020,10 +5379,26 @@ export class AutomationExecutor {
       reason = 'email_send_threw'
     }
 
-    // Tx B — record the terminal outcome (guarded `status='pending'`, single-writer).
-    await recordOutboundOutcome(this.deps.queryFn, outboundId, outcome, reason)
+    // Tx B — the SAME attempt records the terminal outcome (fenced `status='pending' AND attempt_token=mine`).
+    const record = await recordOutboundOutcome(this.deps.queryFn, outboundId, outcome, reason, claim.attemptToken)
 
     if (outcome === 'sent') {
+      if (!record.confirmed) {
+        // The ledger row is no longer this attempt's `pending` (lease expired and flipped, or terminalized
+        // elsewhere): the ledger does not say `sent`, so this step must not report success.
+        return {
+          actionType: 'send_email',
+          status: 'failed',
+          error: 'send_email outcome_unknown (sent, terminal write not confirmed by this attempt); reconcile the intent ledger, not auto-resent',
+          output: {
+            outcome: 'outcome_unknown',
+            reason: 'terminal_write_unconfirmed',
+            notificationId: sendResult?.id,
+            notificationStatus: sendResult?.status,
+            recipientCount,
+          },
+        }
+      }
       return {
         actionType: 'send_email',
         status: 'success',
@@ -5193,27 +5568,40 @@ export class AutomationExecutor {
     // fail-close to unknown). Flag OFF (or the ad-hoc no-identity path) ⇒ outboundId null ⇒ everything below,
     // including the existing card-delivery ledger, is BYTE-IDENTICAL to pre-slice.
     const outboundId = this.classBOutboundIdentity(identity, 'send_dingtalk_approval_card', config)
+    let outboundAttemptToken: string | null = null
     if (outboundId) {
-      const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
-      if (decision === 'skip_sent' || decision === 'skip_unknown') {
-        return this.alreadyAppliedResult('send_dingtalk_approval_card')
+      const claim = await claimOutboundIntent(this.deps.queryFn, outboundId)
+      if (claim.decision !== 'proceed' && claim.decision !== 'retry_failed') {
+        return this.outboundSkipResult('send_dingtalk_approval_card', claim.decision)
       }
+      outboundAttemptToken = claim.attemptToken
     }
 
-    const delivery = await insertDingTalkApprovalCardDelivery(this.deps.queryFn, {
-      instanceId,
-      nodeKey,
-      recipientUserId: assigneeUserId,
-      recipientDingTalkUserId: dingtalkUserId,
-      deliveryKind: useInteractiveCard ? 'interactive_card' : 'work_notice_action_card',
-      integrationId: assigneeIntegrationId || null,
-      // P1-1: persist the node-entry epoch this card is sent for so the action wrapper + the engine's
-      // in-txn binding can bind the card to the SAME round's active assignment (closes same-node
-      // re-entry). Review P3-1: under the STRICT binding a NULL epoch is NOT actionable (fail-closed
-      // dead-on-arrival), so a null here means this card will never be clickable — warn (values-free)
-      // rather than silently ship a dead card. Expected only for pre-epoch/legacy task events.
-      entryEpoch: typeof entryEpochRaw === 'number' ? entryEpochRaw : null,
-    })
+    let delivery: Awaited<ReturnType<typeof insertDingTalkApprovalCardDelivery>>
+    try {
+      delivery = await insertDingTalkApprovalCardDelivery(this.deps.queryFn, {
+        instanceId,
+        nodeKey,
+        recipientUserId: assigneeUserId,
+        recipientDingTalkUserId: dingtalkUserId,
+        deliveryKind: useInteractiveCard ? 'interactive_card' : 'work_notice_action_card',
+        integrationId: assigneeIntegrationId || null,
+        // P1-1: persist the node-entry epoch this card is sent for so the action wrapper + the engine's
+        // in-txn binding can bind the card to the SAME round's active assignment (closes same-node
+        // re-entry). Review P3-1: under the STRICT binding a NULL epoch is NOT actionable (fail-closed
+        // dead-on-arrival), so a null here means this card will never be clickable — warn (values-free)
+        // rather than silently ship a dead card. Expected only for pre-epoch/legacy task events.
+        entryEpoch: typeof entryEpochRaw === 'number' ? entryEpochRaw : null,
+      })
+    } catch (error) {
+      // This exact database guard proves no provider call occurred. Other insert failures
+      // retain the existing fail-closed intent handling; never retry an unknown send.
+      const guard = error as { code?: string; constraint?: string }
+      if (outboundId && guard?.code === '55000' && guard.constraint === 'directory_handover_card_insert') {
+        await this.recordOutboundTerminal(outboundId, outboundAttemptToken, 'failed', 'directory_handover_blocked')
+      }
+      throw error
+    }
 
     const token = createHmac('sha256', linkSecret).update(delivery.id).digest('hex').slice(0, 32)
     const decisionUrl = buildAppLink(baseUrl, '/m/approval-decision', { d: delivery.id, t: token })
@@ -5277,20 +5665,37 @@ export class AutomationExecutor {
       // the catch with the intent ALREADY `sent` and cannot be mis-recorded as a retryable `failed`. Guarded
       // WHERE status='pending' (single-writer); reason is a bounded, values-free class.
       sendReturned = true
-      if (outboundId) await recordOutboundOutcome(this.deps.queryFn, outboundId, 'sent', 'dingtalk_card_sent')
+      // Flag OFF / no identity ⇒ no intent row ⇒ nothing to confirm (legacy success shape, byte-identical).
+      const outboundConfirmed = outboundId
+        ? await this.recordOutboundTerminal(outboundId, outboundAttemptToken, 'sent', 'dingtalk_card_sent')
+        : true
+      // The card WAS delivered, so the card-delivery ledger is marked sent either way (it is the card's own
+      // truth, used by the action wrapper); only the step result below depends on the intent write.
       await markDingTalkApprovalCardDeliverySent(this.deps.queryFn, delivery.id, result.taskId ?? null)
+      const cardOutput = {
+        deliveryId: delivery.id,
+        instanceId,
+        nodeKey,
+        entryEpoch: typeof entryEpochRaw === 'number' ? entryEpochRaw : null,
+        recipientUserId: assigneeUserId,
+        deliveryKind: useInteractiveCard ? 'interactive_card' : 'work_notice_action_card',
+        taskId: result.taskId ?? null,
+      }
+      if (!outboundConfirmed) {
+        // Same rule as send_webhook / send_email: the intent row is no longer this attempt's `pending` (its
+        // lease expired and a replay flipped it, or it was terminalized elsewhere), so the ledger later steps
+        // consult does not say `sent` — this step must not say success either (dependents are skipped).
+        return {
+          actionType,
+          status: 'failed',
+          error: `${actionType} outcome_unknown (sent, terminal write not confirmed by this attempt); reconcile the intent ledger, not auto-resent`,
+          output: { ...cardOutput, outcome: 'outcome_unknown', reason: 'terminal_write_unconfirmed' },
+        }
+      }
       return {
         actionType,
         status: 'success',
-        output: {
-          deliveryId: delivery.id,
-          instanceId,
-          nodeKey,
-          entryEpoch: typeof entryEpochRaw === 'number' ? entryEpochRaw : null,
-          recipientUserId: assigneeUserId,
-          deliveryKind: useInteractiveCard ? 'interactive_card' : 'work_notice_action_card',
-          taskId: result.taskId ?? null,
-        },
+        output: cardOutput,
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
@@ -5328,9 +5733,9 @@ export class AutomationExecutor {
       //     ambiguous ⇒ outcome_unknown (the card may have reached the recipient; never auto-resent);
       //     definite (HTTP 429 / non-5xx / business error — nothing delivered) ⇒ failed (re-attemptable).
       if (outboundId) {
-        await recordOutboundOutcome(
-          this.deps.queryFn,
+        await this.recordOutboundTerminal(
           outboundId,
+          outboundAttemptToken,
           sendReturned ? 'sent' : outcomeUnknown ? 'outcome_unknown' : 'failed',
           sendReturned ? 'dingtalk_card_sent' : outcomeUnknown ? 'dingtalk_send_outcome_unknown' : 'dingtalk_send_failed',
         )
@@ -5615,11 +6020,13 @@ export class AutomationExecutor {
     // call. A prior sent or ambiguous attempt short-circuits the whole multi-batch action: retrying
     // it could duplicate any recipient batch that DingTalk already accepted.
     const outboundId = this.classBOutboundIdentity(identity, 'send_dingtalk_person_message', config)
+    let outboundAttemptToken: string | null = null
     if (outboundId) {
-      const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
-      if (decision === 'skip_sent' || decision === 'skip_unknown') {
-        return this.alreadyAppliedResult('send_dingtalk_person_message')
+      const claim = await claimOutboundIntent(this.deps.queryFn, outboundId)
+      if (claim.decision !== 'proceed' && claim.decision !== 'retry_failed') {
+        return this.outboundSkipResult('send_dingtalk_person_message', claim.decision)
       }
+      outboundAttemptToken = claim.attemptToken
     }
 
     // DT-HARDEN-06: recipients whose batch already reached DingTalk. A later batch
@@ -5683,37 +6090,47 @@ export class AutomationExecutor {
         for (const recipient of batch) sentRecipients.add(recipient)
       }
 
-      if (outboundId) {
-        await recordOutboundOutcome(
-          this.deps.queryFn,
-          outboundId,
-          'sent',
-          'dingtalk_person_sent',
-        )
+      // Flag OFF / no identity ⇒ no intent row ⇒ nothing to confirm (legacy success shape, byte-identical).
+      const outboundConfirmed = outboundId
+        ? await this.recordOutboundTerminal(outboundId, outboundAttemptToken, 'sent', 'dingtalk_person_sent')
+        : true
+
+      const personOutput = {
+        notifiedUsers: resolvedRecipients.length,
+        staticRecipientCount: staticUserIds.length,
+        memberGroupRecipientCount: memberGroupUserIds.length,
+        dynamicRecipientCount: recordUserIds.length,
+        dynamicMemberGroupRecipientCount: recordMemberGroupIds.length,
+        skippedRecipientCount: missingUserIds.length,
+        skippedUserIds: missingUserIds,
+        skippedReasonCounts,
+        memberGroupIds,
+        recipientFieldPath: recipientFieldPaths[0] ?? null,
+        recipientFieldPaths,
+        memberGroupRecipientFieldPath: memberGroupRecipientFieldPaths[0] ?? null,
+        memberGroupRecipientFieldPaths,
+        batchCount: batches.length,
+        integrationCount: recipientsByIntegration.size,
+        linkCount: linkLines.length,
+        responseCount,
+      }
+
+      if (!outboundConfirmed) {
+        // Same rule as send_webhook / send_email: every batch was accepted, but the intent row is no longer
+        // this attempt's `pending` (its lease expired and a replay flipped it, or it was terminalized
+        // elsewhere), so the ledger later steps consult does not say `sent` — neither may this step.
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: 'send_dingtalk_person_message outcome_unknown (sent, terminal write not confirmed by this attempt); reconcile the intent ledger, not auto-resent',
+          output: { ...personOutput, outcome: 'outcome_unknown', reason: 'terminal_write_unconfirmed' },
+        }
       }
 
       return {
         actionType: 'send_dingtalk_person_message',
         status: 'success',
-        output: {
-          notifiedUsers: resolvedRecipients.length,
-          staticRecipientCount: staticUserIds.length,
-          memberGroupRecipientCount: memberGroupUserIds.length,
-          dynamicRecipientCount: recordUserIds.length,
-          dynamicMemberGroupRecipientCount: recordMemberGroupIds.length,
-          skippedRecipientCount: missingUserIds.length,
-          skippedUserIds: missingUserIds,
-          skippedReasonCounts,
-          memberGroupIds,
-          recipientFieldPath: recipientFieldPaths[0] ?? null,
-          recipientFieldPaths,
-          memberGroupRecipientFieldPath: memberGroupRecipientFieldPaths[0] ?? null,
-          memberGroupRecipientFieldPaths,
-          batchCount: batches.length,
-          integrationCount: recipientsByIntegration.size,
-          linkCount: linkLines.length,
-          responseCount,
-        },
+        output: personOutput,
       }
     } catch (error) {
       const httpStatus = error instanceof DingTalkRequestError ? error.statusCode : error instanceof DingTalkBusinessError ? 200 : null
@@ -5749,9 +6166,9 @@ export class AutomationExecutor {
           : inFlightSendBatch
             ? classifyOutboundResult(classifyFetchError(error))
             : 'failed'
-        await recordOutboundOutcome(
-          this.deps.queryFn,
+        await this.recordOutboundTerminal(
           outboundId,
+          outboundAttemptToken,
           outcome,
           outcome === 'sent'
             ? 'dingtalk_person_sent'
@@ -6175,11 +6592,13 @@ export class AutomationExecutor {
     // ambiguous attempt must short-circuit the WHOLE action because retrying it would duplicate any
     // destination that already received the message.
     const outboundId = this.classBOutboundIdentity(identity, 'send_dingtalk_group_message', config)
+    let outboundAttemptToken: string | null = null
     if (outboundId) {
-      const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
-      if (decision === 'skip_sent' || decision === 'skip_unknown') {
-        return this.alreadyAppliedResult('send_dingtalk_group_message')
+      const claim = await claimOutboundIntent(this.deps.queryFn, outboundId)
+      if (claim.decision !== 'proceed' && claim.decision !== 'retry_failed') {
+        return this.outboundSkipResult('send_dingtalk_group_message', claim.decision)
       }
+      outboundAttemptToken = claim.attemptToken
     }
 
     let sendSucceeded = false
@@ -6307,6 +6726,8 @@ export class AutomationExecutor {
       }
     }
 
+    // Flag OFF / no identity ⇒ no intent row ⇒ nothing to confirm (legacy result shapes, byte-identical).
+    let outboundConfirmed = true
     if (outboundId) {
       // Multi-destination aggregate: any confirmed success makes the action terminal `sent`, even
       // when a later destination fails. Replaying the action would duplicate that confirmed send.
@@ -6317,9 +6738,9 @@ export class AutomationExecutor {
         : outcomeUnknownObserved
           ? 'outcome_unknown'
           : 'failed'
-      await recordOutboundOutcome(
-        this.deps.queryFn,
+      outboundConfirmed = await this.recordOutboundTerminal(
         outboundId,
+        outboundAttemptToken,
         outcome,
         outcome === 'sent'
           ? 'dingtalk_group_sent'
@@ -6348,21 +6769,35 @@ export class AutomationExecutor {
       }
     }
 
+    const groupOutput = {
+      destinationId: successfulDestinations[0]?.id,
+      destinationName: successfulDestinations[0]?.name,
+      staticDestinationCount: staticDestinationIds.length,
+      dynamicDestinationCount: recordDestinationIds.length,
+      destinationIds: successfulDestinations.map((destination) => destination.id),
+      destinationNames: successfulDestinations.map((destination) => destination.name),
+      destinationFieldPath: destinationFieldPaths[0] ?? null,
+      destinationFieldPaths,
+      sentCount: successfulDestinations.length,
+      linkCount: linkLines.length,
+    }
+
+    if (!outboundConfirmed) {
+      // Same rule as send_webhook / send_email: every destination accepted the message, but the intent row
+      // is no longer this attempt's `pending` (its lease expired and a replay flipped it, or it was
+      // terminalized elsewhere), so the ledger later steps consult does not say `sent` — neither may this step.
+      return {
+        actionType: 'send_dingtalk_group_message',
+        status: 'failed',
+        error: 'send_dingtalk_group_message outcome_unknown (sent, terminal write not confirmed by this attempt); reconcile the intent ledger, not auto-resent',
+        output: { ...groupOutput, outcome: 'outcome_unknown', reason: 'terminal_write_unconfirmed' },
+      }
+    }
+
     return {
       actionType: 'send_dingtalk_group_message',
       status: 'success',
-      output: {
-        destinationId: successfulDestinations[0]?.id,
-        destinationName: successfulDestinations[0]?.name,
-        staticDestinationCount: staticDestinationIds.length,
-        dynamicDestinationCount: recordDestinationIds.length,
-        destinationIds: successfulDestinations.map((destination) => destination.id),
-        destinationNames: successfulDestinations.map((destination) => destination.name),
-        destinationFieldPath: destinationFieldPaths[0] ?? null,
-        destinationFieldPaths,
-        sentCount: successfulDestinations.length,
-        linkCount: linkLines.length,
-      },
+      output: groupOutput,
     }
   }
 }

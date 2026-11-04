@@ -74,6 +74,15 @@ import {
   RECOVERY_CONFLICT_HTTP_STATUS,
   sendIfRecoveryConflict,
 } from '../db/recovery-conflict'
+import {
+  handleAdminUserBatchCreate,
+  handleAdminUserBatchDelete,
+  handleAdminUserBatchDisable,
+  handleAdminUserBatchUpdate,
+} from './admin-user-batch'
+import { isLastSignInPlatformAdmin, lockPlatformAdminInvariant } from '../admin/user-recycle'
+import { visibleUserPredicate } from '../admin/user-visibility'
+import { registerAdminUserRecycleRoutes } from './admin-user-recycle'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import {
   acquireAttendanceCalculationRolloutLock,
@@ -557,7 +566,7 @@ async function fetchUserProfile(userId: string): Promise<AdminUserProfile | null
   const result = await query<AdminUserProfile>(
     `SELECT ${ADMIN_USER_PROFILE_SELECT}
      FROM users
-     WHERE id = $1`,
+     WHERE id = $1 AND ${visibleUserPredicate()}`,
     [userId],
   )
   return result.rows[0] ?? null
@@ -1357,6 +1366,7 @@ async function fetchPlatformMemberGroupMembers(groupId: string) {
      FROM platform_member_group_members gm
      JOIN users u ON u.id = gm.user_id
      WHERE gm.group_id = $1
+       AND ${visibleUserPredicate('u')}
      ORDER BY COALESCE(u.name, u.email) ASC, u.email ASC`,
     [groupId],
   )
@@ -1779,7 +1789,7 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
         ON ad.directory_account_id = a.id
       JOIN allowed_departments scoped
         ON scoped.id = ad.directory_department_id
-      WHERE 1 = 1
+      WHERE u.deleted_at IS NULL
       ${filterSql}
       UNION
       SELECT DISTINCT u.id
@@ -1788,7 +1798,7 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
         ON gm.user_id = u.id
       JOIN allowed_groups scoped_groups
         ON scoped_groups.group_id = gm.group_id
-      WHERE 1 = 1
+      WHERE u.deleted_at IS NULL
       ${filterSql}
     )
     SELECT COUNT(*)::int AS c
@@ -1849,7 +1859,7 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
         ON ad.directory_account_id = a.id
       JOIN allowed_departments scoped
         ON scoped.id = ad.directory_department_id
-      WHERE 1 = 1
+      WHERE u.deleted_at IS NULL
       ${filterSql}
       UNION
       SELECT DISTINCT
@@ -1873,7 +1883,7 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
         ON gm.user_id = u.id
       JOIN allowed_groups scoped_groups
         ON scoped_groups.group_id = gm.group_id
-      WHERE 1 = 1
+      WHERE u.deleted_at IS NULL
       ${filterSql}
     )
     SELECT id, email, username, name, mobile, "employeeNo", department, position, "hireDate", role, is_active, is_admin, last_login_at, created_at, updated_at
@@ -2504,6 +2514,28 @@ async function auditActivateSuccess(
 
 export function adminUsersRouter(): Router {
   const r = Router()
+  registerAdminUserRecycleRoutes(r)
+
+  r.post('/api/admin/users/batch/create', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchCreate(req, res, adminUserId)
+  })
+  r.post('/api/admin/users/batch/update', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchUpdate(req, res, adminUserId)
+  })
+  r.post('/api/admin/users/batch/disable', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchDisable(req, res, adminUserId)
+  })
+  r.post('/api/admin/users/batch/delete', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    await handleAdminUserBatchDelete(req, res, adminUserId)
+  })
 
   r.get('/api/admin/role-delegation/summary', authenticate, async (req: Request, res: Response) => {
     const delegation = await ensureRoleDelegationAdmin(req, res)
@@ -3247,7 +3279,9 @@ export function adminUsersRouter(): Router {
           Promise.resolve([]),
           (async () => {
             const term = q ? `%${q}%` : '%'
-            const where = q ? 'WHERE COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR COALESCE(employee_no, \'\') ILIKE $1 OR COALESCE(department, \'\') ILIKE $1 OR id ILIKE $1' : ''
+            const where = q
+              ? 'WHERE deleted_at IS NULL AND (COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR COALESCE(employee_no, \'\') ILIKE $1 OR COALESCE(department, \'\') ILIKE $1 OR id ILIKE $1)'
+              : 'WHERE deleted_at IS NULL'
             const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
             const listSql = `
               SELECT ${ADMIN_USER_PROFILE_SELECT}
@@ -3627,7 +3661,9 @@ export function adminUsersRouter(): Router {
       })
 
       const term = q ? `%${q}%` : '%'
-      const where = q ? 'WHERE COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR COALESCE(employee_no, \'\') ILIKE $1 OR COALESCE(department, \'\') ILIKE $1 OR id ILIKE $1' : ''
+      const where = q
+        ? 'WHERE deleted_at IS NULL AND (COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR COALESCE(employee_no, \'\') ILIKE $1 OR COALESCE(department, \'\') ILIKE $1 OR id ILIKE $1)'
+        : 'WHERE deleted_at IS NULL'
       const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
       const listSql = `
         SELECT ${ADMIN_USER_PROFILE_SELECT}
@@ -3649,7 +3685,7 @@ export function adminUsersRouter(): Router {
         const pinned = await query<AdminUserProfile>(
           `SELECT ${ADMIN_USER_PROFILE_SELECT}
            FROM users
-           WHERE id = $1`,
+           WHERE id = $1 AND deleted_at IS NULL`,
           [pinUserId],
         )
         if (pinned.rows[0]) {
@@ -5057,7 +5093,11 @@ export function adminUsersRouter(): Router {
 
       // The role, scoped audience and revoke witness commit together. Bootstrap uses the
       // same subject lock before reading eligibility, including when admission is absent.
-      const { membership, disabledNamespaces } = await transaction(async (client) => {
+      const unassigned = await transaction(async (client) => {
+        if (roleId === PLATFORM_ADMIN_ROLE_ID) {
+          await lockPlatformAdminInvariant(client)
+          if (await isLastSignInPlatformAdmin(client, userId)) return { blocked: true as const }
+        }
         await lockNamespaceAdmissionWrites(client, userId)
         const membership = await unassignUserRoles({
           userIds: [userId],
@@ -5072,17 +5112,32 @@ export function adminUsersRouter(): Router {
           source: 'role_unassigned',
           revokedRoleId: roleId,
         }, client.query)
-        return { membership, disabledNamespaces }
+        if (roleId === PLATFORM_ADMIN_ROLE_ID) {
+          await client.query(
+            `UPDATE users
+             SET role = CASE
+               WHEN $2::boolean THEN 'admin'
+               WHEN role = 'admin' THEN 'user'
+               ELSE role
+             END,
+             is_admin = $2,
+             updated_at = NOW()
+             WHERE id = $1`,
+            [userId, false],
+          )
+        }
+        return { blocked: false as const, membership, disabledNamespaces }
       })
+      if (unassigned.blocked) {
+        return jsonError(res, 409, 'LAST_PLATFORM_ADMIN', '至少保留一名可登录的平台管理员')
+      }
+      const { membership, disabledNamespaces } = unassigned
       await auditDelegatedAdminScopeCleanup({
         actorId: adminUserId,
         roleId,
         trigger: 'role_unassigned',
         cleanup: membership?.delegatedAdminScopeCleanup,
       })
-      if (roleId === PLATFORM_ADMIN_ROLE_ID) {
-        await syncLegacyAdminProfile(userId, false)
-      }
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -5127,6 +5182,7 @@ export function adminUsersRouter(): Router {
       }
 
       const updateResult = await transaction(async (client) => {
+        if (isActive === false) await lockPlatformAdminInvariant(client)
         const lockedUsers = await lockUsersForAccessGraphWrite(client, [userId])
         const lockedUser = lockedUsers.get(userId)
         if (!lockedUser) return null
@@ -5135,6 +5191,16 @@ export function adminUsersRouter(): Router {
           lockedUser.activationStatus ?? '',
           isActive,
         )
+        if (isActive === false && await isLastSignInPlatformAdmin(client, userId)) {
+          const lastAdmin = new Error('至少保留一名可登录的平台管理员')
+          ;(lastAdmin as Error & { code?: string }).code = 'LAST_PLATFORM_ADMIN'
+          throw lastAdmin
+        }
+        if (lockedUser.deletedAt || lockedUser.purgedAt) {
+          const recycled = new Error('账号在回收站中，请从回收站恢复后再修改状态')
+          ;(recycled as Error & { code?: string }).code = 'USER_IN_RECYCLE_BIN'
+          throw recycled
+        }
 
         if (lockedUser.isActive !== isActive) {
           await client.query(
@@ -5157,9 +5223,21 @@ export function adminUsersRouter(): Router {
             pendingActivationError: error as Error,
           }
         }
+        if (code === 'USER_IN_RECYCLE_BIN') {
+          return { recycleError: error as Error }
+        }
+        if (code === 'LAST_PLATFORM_ADMIN') {
+          return { lastAdminError: error as Error }
+        }
         throw error
       })
       if (!updateResult) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      if ('recycleError' in updateResult) {
+        return jsonError(res, 409, 'USER_IN_RECYCLE_BIN', updateResult.recycleError.message)
+      }
+      if ('lastAdminError' in updateResult) {
+        return jsonError(res, 409, 'LAST_PLATFORM_ADMIN', updateResult.lastAdminError.message)
+      }
       if ('pendingActivationError' in updateResult) {
         return jsonError(
           res,

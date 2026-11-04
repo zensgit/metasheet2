@@ -952,7 +952,10 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
 /** `/projects/<no>/board` and the table-action run steps need a pattern rather than a literal. */
 // PR B: `…/target/pilot` (GET state + readiness, POST enable) answers the same switch-off refusal; the board
 // reads it lazily (only for an ADMIN, only after the sheet state said active), so the lanes never reach it.
-const PROJECT_TARGET_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/target(?:\/(?:archive|restore|project-fields|pilot))?$/
+// 人工补充行 B4 (R-68): `…/target/manual-rows` (GET the switch + the last pull's reminder, POST set) — the project sync
+// panel reads it for an ADMIN as soon as it is about a project; with the acceptance deployment's switch off the server
+// answers the same refusal, and the panel shows nothing (the pre-B4 surface).
+const PROJECT_TARGET_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/target(?:\/(?:archive|restore|project-fields|pilot|manual-rows))?$/
 /** S3 (R-37): the project-level columns — GET and PATCH (fix round 1, R9) on `…/target/project-fields`. */
 const PROJECT_FIELDS_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/target\/project-fields$/
 const BOARD_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/board$/

@@ -16,6 +16,8 @@
  *   SW-08 resolveWritableSheetIds (S2, S3) drops the memo, then asks the grid's capability resolver
  *         per sheet and admits only a LIVE sheet on which the actor holds everything `spreadsheet:write`
  *         confers (create + edit + delete any record — not write-own only — fields, views, notify).
+ *         On a registered project sheet the resolver marks clamped (option B, owner 2026-10-29) the field /
+ *         view bits are not required — nobody but a platform admin holds or receives them there.
  *   SW-09 (lock redesign) handed the transaction's query, every decision dependency runs on THAT
  *         connection: `isAdmin` with an executor over it, `listUserPermissions` and
  *         `userHasEffectiveNamespaceAccess` with it, the capability resolver with it — the pool is not
@@ -155,6 +157,12 @@ describe('stock-prep members port — host wiring (S5b, R-39)', () => {
       // grant would hand out field / view management the grantor does not hold.
       sheet_no_schema: { capabilities: { ...FULL, canManageFields: false }, sheetLiveness: 'live' },
       sheet_no_views: { capabilities: { ...FULL, canManageViews: false }, sheetLiveness: 'live' },
+      // Option B (owner 2026-10-29, R-66 ②): a registered project sheet where the resolver took field / view
+      // management away from every non-admin. The grant confers neither bit there, so the bound does not ask
+      // for them — but every record bit and notify still are required (the next two answers stay refused).
+      sheet_project_clamped: { capabilities: { ...FULL, canManageFields: false, canManageViews: false }, sheetLiveness: 'live', stockPrepProjectSheetSchemaClamped: true },
+      sheet_project_clamped_no_delete: { capabilities: { ...FULL, canManageFields: false, canManageViews: false, canDeleteRecord: false }, sheetLiveness: 'live', stockPrepProjectSheetSchemaClamped: true },
+      sheet_project_clamped_no_notify: { capabilities: { ...FULL, canManageFields: false, canManageViews: false, canSendNotification: false }, sheetLiveness: 'live', stockPrepProjectSheetSchemaClamped: true },
       sheet_no_notify: { capabilities: { ...FULL, canSendNotification: false }, sheetLiveness: 'live' },
       sheet_unreadable: { capabilities: { ...FULL, canRead: false }, sheetLiveness: 'live' },
       sheet_deleted: { capabilities: { ...FULL }, sheetLiveness: 'deleted' },
@@ -163,7 +171,7 @@ describe('stock-prep members port — host wiring (S5b, R-39)', () => {
     mocks.resolveSheetCapabilitiesForAccess.mockImplementation(async (_query: unknown, sheetId: string) => { mocks.order.push(`capabilities:${sheetId}`); return answers[sheetId] })
     const ids = Object.keys(answers)
     const writable = await deps.resolveWritableSheetIds('u_delegated', [...ids, 'sheet_full'])
-    expect(Array.from(writable).sort()).toEqual(['sheet_full', 'sheet_global'])
+    expect(Array.from(writable).sort()).toEqual(['sheet_full', 'sheet_global', 'sheet_project_clamped'])
     // S3: the memo is dropped BEFORE the snapshot is read; one capability read per distinct sheet.
     expect(mocks.order).toEqual(['invalidate:u_delegated', 'list:u_delegated', ...ids.map((id) => `capabilities:${id}`)])
     const [query, sheetId, access] = mocks.resolveSheetCapabilitiesForAccess.mock.calls[0]

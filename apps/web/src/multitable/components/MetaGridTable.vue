@@ -6,7 +6,10 @@
       <button v-if="canBulkEdit" class="meta-grid__bulk-btn" :aria-label="l('grid.setFieldAria')" @click="onBulkEdit('set')">{{ l('grid.setField') }}</button>
       <button v-if="canBulkEdit" class="meta-grid__bulk-btn" :aria-label="l('grid.clearFieldAria')" @click="onBulkEdit('clear')">{{ l('grid.clearField') }}</button>
       <button v-if="canBulkRestore" class="meta-grid__bulk-btn" :aria-label="l('grid.batchRestoreAria')" data-test="grid-bulk-restore" @click="onBulkRestore">{{ l('grid.batchRestore') }}</button>
-      <button v-if="canDelete" class="meta-grid__bulk-btn meta-grid__bulk-btn--danger" :aria-label="l('grid.deleteSelectedAria')" @click="onBulkDelete">{{ l('grid.deleteSelected') }}</button>
+      <button v-if="canDelete && !bulkDeleteOnlyPlmRows" class="meta-grid__bulk-btn meta-grid__bulk-btn--danger" :aria-label="l('grid.deleteSelectedAria')" @click="onBulkDelete">{{ l('grid.deleteSelected') }}</button>
+      <!-- R-66: selected PLM rows (rowActions.deleteBlockedReason) are skipped by the bulk delete; say why. When the
+           selection holds ONLY such rows (no deletable row) the delete button is hidden. Other selections unchanged. -->
+      <span v-if="canDelete && selectedPlmBlockedCount > 0" class="meta-grid__bulk-reason" data-testid="grid-bulk-delete-plm-skipped" role="status">{{ plmRowDeleteBlockedReason }}</span>
       <button class="meta-grid__bulk-btn" :aria-label="l('grid.clearSelection')" @click="selectedIds = new Set(); emit('selection-change', [])">{{ l('grid.clear') }}</button>
     </div>
     <div ref="tableWrap" class="meta-grid__table-wrap">
@@ -58,13 +61,18 @@
               :class="{ 'meta-grid__row--selected': item.row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === item.navIndex }"
               :style="rowStyle(item.row.id)"
               @click="emit('select-record', item.row.id)"
-              @contextmenu="onRowContextMenu($event, item.row.id)"
             >
               <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
                 <input type="checkbox" :checked="selectedIds.has(item.row.id)" :disabled="!rowAllowsAnyBulkAction(item.row.id)" @change="toggleSelectRow(item.row.id)" />
               </td>
               <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
                 <span>{{ startIndex + item.navIndex + 1 }}</span>
+                <span
+                  v-if="isManualSupplementRow(item.row.id)"
+                  class="meta-grid__manual-row-tag"
+                  data-test="row-manual-supplement-tag"
+                  :title="manualRowLabel('tag.manualTitle', isZh)"
+                >{{ manualRowLabel('tag.manual', isZh) }}</span>
                 <button
                   type="button"
                   class="meta-grid__open-record-btn"
@@ -183,6 +191,13 @@
               </button>
             </td>
           </tr>
+          <tr v-if="showManualRowAdd && !loading" class="meta-grid__add-row" data-test="grid-add-manual-row">
+            <td :colspan="colSpan">
+              <button type="button" class="meta-grid__add-row-btn" data-testid="grid-inline-add-manual-row" @click="emit('create-manual-row')">
+                <span class="meta-grid__add-row-plus" aria-hidden="true">+</span> {{ manualRowLabel('entry.create', isZh) }}
+              </button>
+            </td>
+          </tr>
         </tbody>
         <tbody v-else>
           <!-- #5863c: frozen rows (always mounted) + the A1 virtualization top spacer are both items in
@@ -205,7 +220,6 @@
               :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === ri, 'meta-grid__row--frozen-top': isFrozenRow(ri) }"
               :style="rowStyle(row.id)"
               @click="emit('select-record', row.id)"
-              @contextmenu="onRowContextMenu($event, row.id, ri)"
             >
               <td v-if="enableMultiSelect" class="meta-grid__check-col" :style="isFrozenRow(ri) ? { position: 'sticky', top: `${frozenRowTop(ri)}px`, zIndex: '3' } : undefined" @click.stop>
                 <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!rowAllowsAnyBulkAction(row.id)" @change="toggleSelectRow(row.id)" />
@@ -221,6 +235,12 @@
                   @click.stop="emit('expand-record', row.id)"
                 >&#x2197;</button>
                 <span>{{ startIndex + ri + 1 }}</span>
+                <span
+                  v-if="isManualSupplementRow(row.id)"
+                  class="meta-grid__manual-row-tag"
+                  data-test="row-manual-supplement-tag"
+                  :title="manualRowLabel('tag.manualTitle', isZh)"
+                >{{ manualRowLabel('tag.manual', isZh) }}</span>
                 <span
                   v-if="isRowLocked(row.id)"
                   class="meta-grid__lock-indicator"
@@ -290,7 +310,7 @@
                   v-if="isEditing(row.id, field.id)"
                   :field="field"
                   :model-value="editCell!.value"
-                  :record-id="row.id"
+                  :record-id="isManualFillableCell(row.id, field.id) ? null : row.id"
                   :upload-fn="props.uploadFn"
                   :delete-attachment-fn="props.deleteAttachmentFn"
                   :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
@@ -381,6 +401,13 @@
               </button>
             </td>
           </tr>
+          <tr v-if="showManualRowAdd && !loading" class="meta-grid__add-row" data-test="grid-add-manual-row">
+            <td :colspan="colSpan">
+              <button type="button" class="meta-grid__add-row-btn" data-testid="grid-inline-add-manual-row" @click="emit('create-manual-row')">
+                <span class="meta-grid__add-row-plus" aria-hidden="true">+</span> {{ manualRowLabel('entry.create', isZh) }}
+              </button>
+            </td>
+          </tr>
         </tbody>
         <tfoot v-if="hasAnyAggregation" class="meta-grid__foot">
           <tr>
@@ -414,8 +441,29 @@
          grouped path which doesn't accumulate. The two paging models are mutually exclusive — except that a
          flat grid holding a page past the first cannot scroll-append (the composable only appends from row 0),
          so it keeps the pager rather than strand the viewer on that page (客户反馈 2026-10-21). The rows-per-page
-         select sits in the same footer whenever there is more than one page or a non-default size to undo. -->
-    <div v-if="showPager || showPageSizeSelect" class="meta-grid__pagination">
+         select sits in the same footer whenever there is more than one page or a non-default size to undo.
+         客户反馈 2026-10-27 (R74): the footer also carries 「跳转到第 [ ] 行」 (whenever there is more than one row, NOT
+         tied to showPager, which is off on the flat page 1) and a 「+ 新建记录」 that needs no scrolling.
+         人工补充行 B3: on a registered project sheet in state `allowed` that place holds 「+ 新增人工补充行」 instead. -->
+    <div v-if="showPager || showPageSizeSelect || showRowJump || showFooterAdd || showManualRowAdd" class="meta-grid__pagination">
+      <button
+        v-if="showFooterAdd"
+        type="button"
+        class="meta-grid__page-btn meta-grid__footer-add-btn"
+        data-testid="grid-footer-add-record"
+        @click="emit('create-record')"
+      >
+        <span class="meta-grid__add-row-plus" aria-hidden="true">+</span> {{ l('grid.addRecordInline') }}
+      </button>
+      <button
+        v-if="showManualRowAdd"
+        type="button"
+        class="meta-grid__page-btn meta-grid__footer-add-btn"
+        data-testid="grid-footer-add-manual-row"
+        @click="emit('create-manual-row')"
+      >
+        <span class="meta-grid__add-row-plus" aria-hidden="true">+</span> {{ manualRowLabel('entry.create', isZh) }}
+      </button>
       <template v-if="showPager">
         <button class="meta-grid__page-btn" :disabled="currentPage <= 1" @click="emit('go-to-page', currentPage - 1)">&lsaquo; {{ l('grid.prev') }}</button>
         <span class="meta-grid__page-info">{{ currentPage }} / {{ totalPages }}</span>
@@ -433,6 +481,27 @@
           <option v-for="n in pageSizeOptions" :key="n" :value="String(n)">{{ n }}</option>
         </select>
       </label>
+      <span v-if="showRowJump" class="meta-grid__row-jump">
+        <label class="meta-grid__row-jump-field">
+          <span class="meta-grid__row-jump-label">{{ l('grid.jumpToRow') }}</span>
+          <input
+            v-model="rowJumpInput"
+            type="number"
+            min="1"
+            :max="totalRows"
+            step="1"
+            inputmode="numeric"
+            class="meta-grid__row-jump-input"
+            data-testid="grid-row-jump-input"
+            :aria-label="l('grid.jumpToRowAria')"
+            @input="rowJumpHint = null"
+            @keydown.enter.prevent="onRowJumpSubmit"
+          />
+          <span v-if="jumpToRowSuffix(isZh)" class="meta-grid__row-jump-suffix">{{ jumpToRowSuffix(isZh) }}</span>
+        </label>
+        <button type="button" class="meta-grid__page-btn" data-testid="grid-row-jump-go" @click="onRowJumpSubmit">{{ l('grid.jumpToRowGo') }}</button>
+        <span v-if="rowJumpHint !== null" class="meta-grid__row-jump-hint" data-testid="grid-row-jump-hint" role="status">{{ jumpToRowTotal(rowJumpHint, isZh) }}</span>
+      </span>
     </div>
     <div v-if="loading" class="meta-grid__loading" aria-live="polite" :aria-label="l('grid.loading')">
       <div class="meta-grid__skeleton">
@@ -484,6 +553,9 @@ import {
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
 import { isSystemField } from '../utils/system-fields'
+import { workbenchLabel } from '../utils/workbench-labels'
+import { manualRowLabel } from '../utils/manual-row-labels'
+import { isManualSupplementMarked } from '../utils/manual-rows'
 import { isFieldAlwaysReadOnly, isFieldHumanWriteLocked } from '../utils/field-permissions'
 import { isDateLikeStringField, isYjsTextEligible } from '../utils/yjs-text-eligibility'
 import { isYjsCollabEnabled } from '../composables/useYjsCellBinding'
@@ -496,6 +568,8 @@ import {
   commentForRow,
   commentForField,
   groupNoValue,
+  jumpToRowSuffix,
+  jumpToRowTotal,
   type MetaCoreLabelKey,
 } from '../utils/meta-core-labels'
 
@@ -531,6 +605,17 @@ const props = defineProps<{
   frozenTopRowCount?: number
   rowActionOverrides?: Record<string, MetaRowActions>
   fieldReadOnlyIds?: string[]
+  /** 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.4): the manual rows (record ids) whose fillable
+   *  columns (`manualRowFieldIds`) open as SINGLE-cell editors although the columns are PLM-locked for every other row —
+   *  the workbench routes their patch to PATCH /records/:recordId/manual-fields. Both lists come from the workbench,
+   *  gated on /context's `stockPreparationManualRows` block (never on the row mark alone; empty ⇒ no override). Range
+   *  fill, paste and Yjs keep treating these cells as read-only. */
+  manualRowRecordIds?: string[]
+  manualRowFieldIds?: string[]
+  /** 人工补充行 B3 (ADR §8 B3.3): true ⇒ the inline add row and the footer entry (R74) keep their places and read
+   *  「新增人工补充行」, emitting `create-manual-row` — never `create-record`. The workbench passes it only in state
+   *  `allowed` of a registered project sheet, where `canCreate` is off; absent / false ⇒ unchanged. */
+  manualRowCreate?: boolean
   rangeContextKey?: string
   commitRange?: (changes: RangeChange[]) => Promise<unknown>
   columnWidths?: Record<string, number>
@@ -567,6 +652,9 @@ const props = defineProps<{
   // (mounts that do not page through the composable stay exactly as they were).
   pageSize?: number
   pageSizeOptions?: readonly number[]
+  // Footer 「跳转到第 [ ] 行」 (客户反馈 2026-10-27): the server's row count for the current filter/search. Absent →
+  // no jump box (mounts that do not page through the composable stay exactly as they were).
+  totalRows?: number
   uploadFn?: MetaAttachmentUploadFn
   deleteAttachmentFn?: MetaAttachmentDeleteFn
   canComment?: boolean
@@ -625,11 +713,14 @@ const emit = defineEmits<{
   (e: 'bulk-delete', recordIds: string[]): void
   (e: 'bulk-edit', payload: { mode: 'set' | 'clear'; recordIds: string[] }): void
   (e: 'bulk-restore', recordIds: string[]): void
-  // Duplicate / clone record (design 2026-06-16): right-click a row → request a duplicate. The native
-  // context menu is suppressed so the row affordance is the menu; the workbench owns the create + clone-open.
+  // Duplicate / clone record (design 2026-06-16). Customer feedback 2026-10-27: NO gesture emits this any
+  // more — a right-click used to emit it instantly, creating a row that people read as "copied to the
+  // clipboard". Kept declared (the workbench still listens) for an explicit, labelled row-menu entry.
   (e: 'duplicate-record', recordId: string): void
   (e: 'reorder-field', fromFieldId: string, toFieldId: string): void
   (e: 'create-record'): void
+  // 人工补充行 B3: the inline add row / footer entry in their 「新增人工补充行」 form (see `manualRowCreate`).
+  (e: 'create-manual-row'): void
   (e: 'set-frozen', frozenLeftColumnIds: string[]): void
   (e: 'set-frozen-rows', frozenTopRowCount: number): void
   (e: 'set-aggregation', payload: { fieldId: string; fn: string | null }): void
@@ -717,6 +808,7 @@ const filteredRows = computed(() => props.rows)
 const tableWrap = ref<HTMLElement | null>(null)
 const scrollTop = ref(0)
 const viewportHeight = ref(0)
+const measuredFootHeight = ref(0)
 const measuredRowHeight = ref(0)
 const measuredGroupHeaderHeight = ref(0)
 const measuredGroupSubtotalHeight = ref(0)
@@ -849,6 +941,140 @@ function onPageSizeChange(event: Event) {
   const value = Number((event.target as HTMLSelectElement | null)?.value)
   if (Number.isFinite(value) && value !== props.pageSize) emit('set-page-size', value)
 }
+
+// ── Footer 「+ 新建记录」 and 「跳转到第 [ ] 行」 (客户反馈 2026-10-27, R74) ─────────────────────────────────────────
+// 「如有1000行，我一定要拉到1000行后才可以新增」: the inline add row sits after the last row, and the flat grid only
+// appends rows as it scrolls, so on a long sheet it is out of reach. The footer is outside the scroll area. Same
+// canCreate gate as the inline row (the workbench turns it off for a PLM-locked sheet, R68). An empty sheet keeps
+// its empty state, as the inline row does.
+const showFooterAdd = computed(() => props.canCreate === true && filteredRows.value.length > 0)
+// 人工补充行 B3: on a registered project sheet in state `allowed` the same two places (inline row, footer) carry
+// 「新增人工补充行」 — `manualRowCreate`, never together with the generic entry, under the same "rows exist" rule.
+const showManualRowAdd = computed(() => props.manualRowCreate === true && props.canCreate !== true && filteredRows.value.length > 0)
+
+// Row N is the number in the row-number column: startIndex + index + 1, where the index is into displayRows (the
+// server order on the flat path; the visible order on the grouped path, where row numbers are nav indices).
+const showRowJump = computed(() => typeof props.totalRows === 'number' && props.totalRows > 1)
+const rowJumpInput = ref<string | number>('')
+// The total, shown when the typed row was out of range and got clamped; null hides the hint.
+const rowJumpHint = ref<number | null>(null)
+// A jump to a row that is not loaded: the 1-based row number, waiting for the requested page to land.
+const pendingRowJump = ref<number | null>(null)
+
+function onRowJumpSubmit() {
+  const total = props.totalRows ?? 0
+  if (total < 1) return
+  const raw = String(rowJumpInput.value).trim()
+  const typed = raw === '' ? Number.NaN : Math.trunc(Number(raw))
+  if (!Number.isFinite(typed)) {
+    rowJumpHint.value = null
+    return
+  }
+  const target = Math.min(Math.max(typed, 1), total)
+  rowJumpHint.value = target === typed ? null : total
+  // The box shows the row that is actually focused (12.7 -> 12, 2001 -> 2000 next to the 共 M 行 hint).
+  rowJumpInput.value = target
+  pendingRowJump.value = null
+  if (focusLoadedRow(target)) return
+  // Not loaded: ask for its page. The flat grid then holds that page and shows the pager until page 1 (the
+  // 2026-10-21 rule above). The same page cannot hold it either (a collapsed group): nothing to load.
+  const size = typeof props.pageSize === 'number' && props.pageSize > 0 ? props.pageSize : 0
+  if (size === 0) return
+  const page = Math.ceil(target / size)
+  if (page === props.currentPage) return
+  pendingRowJump.value = target
+  emit('go-to-page', page)
+}
+
+// Focus + select the row numbered `rowNumber` if it is loaded (as a cell click does: it selects, it does not open the
+// inspector), then bring it on screen. Returns false when it is not among the loaded rows.
+function focusLoadedRow(rowNumber: number): boolean {
+  const navIndex = rowNumber - 1 - props.startIndex
+  const row = navIndex >= 0 ? displayRows.value[navIndex] : undefined
+  if (!row) return false
+  focusRow.value = navIndex
+  focusCol.value = 0
+  emit('select-record', row.id)
+  scrollJumpedRowIntoView()
+  return true
+}
+
+// The jump has to leave row N on screen, not merely mounted. The sticky header cells (and frozen top rows) cover
+// the top of the scrollport and the sticky aggregation footer covers its bottom, so "on screen" is the band between
+// them. Windowed, a pre-scroll by row arithmetic (header and footer included) makes the row mount; with windowing
+// off, the mounted row is scrolled to the nearest edge. Then the real geometry corrects the rest: the band edges,
+// and rows that are taller than the uniform window height (a 4-digit row number wraps its cell). A correction can
+// mount other rows or let content-visibility rows take their real height, so it is re-checked for a few frames.
+let rowJumpSettleToken = 0
+const ROW_JUMP_SETTLE_FRAMES = 3
+
+function scrollJumpedRowIntoView() {
+  const windowed = flatWindowEnabled.value || groupedWindowEnabled.value
+  if (windowed) scrollFocusedRowIntoWindow({ stickyBands: true })
+  const token = ++rowJumpSettleToken
+  const target = focusRow.value
+  nextTick(() => {
+    if (token !== rowJumpSettleToken || focusRow.value !== target) return
+    if (!windowed) {
+      // Windowing off (60 rows or fewer, an expanded row, printing): every row is mounted, so scroll the row itself.
+      const el = tableWrap.value?.querySelector<HTMLElement>('tbody tr.meta-grid__row--focused')
+      if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' })
+    }
+    correctJumpedRowIntoBand()
+    settleJumpedRow(token, target, ROW_JUMP_SETTLE_FRAMES)
+  })
+}
+
+function settleJumpedRow(token: number, target: number, framesLeft: number) {
+  if (framesLeft <= 0) return
+  const nextFrame = typeof window.requestAnimationFrame === 'function'
+    ? (cb: () => void) => window.requestAnimationFrame(() => cb())
+    : (cb: () => void) => window.setTimeout(cb, 16)
+  nextFrame(() => {
+    if (token !== rowJumpSettleToken || focusRow.value !== target) return
+    correctJumpedRowIntoBand()
+    settleJumpedRow(token, target, framesLeft - 1)
+  })
+}
+
+// Viewport y-range not covered by sticky bands: below the last header row's cells and the frozen top rows, above
+// the aggregation footer.
+function visibleRowBand(wrap: HTMLElement): { top: number; bottom: number } {
+  const wr = wrap.getBoundingClientRect()
+  let top = wr.top + wrap.clientTop
+  let bottom = top + wrap.clientHeight
+  const headerRows = wrap.querySelectorAll<HTMLElement>('thead tr')
+  const headerCell = headerRows.length > 0 ? headerRows[headerRows.length - 1].querySelector<HTMLElement>('th') : null
+  if (headerCell) top = Math.max(top, headerCell.getBoundingClientRect().bottom)
+  const frozenRows = wrap.querySelectorAll<HTMLElement>('tbody tr.meta-grid__row--frozen-top')
+  const frozenCell = frozenRows.length > 0 ? frozenRows[frozenRows.length - 1].querySelector<HTMLElement>('td.meta-grid__row-num') : null
+  if (frozenCell) top = Math.max(top, frozenCell.getBoundingClientRect().bottom)
+  wrap.querySelectorAll<HTMLElement>('tfoot.meta-grid__foot tr > td:first-child').forEach((cell) => {
+    bottom = Math.min(bottom, cell.getBoundingClientRect().top)
+  })
+  return { top, bottom }
+}
+
+// Scrolls the wrap so the focused row lies inside visibleRowBand. Returns whether it scrolled. No-op without layout
+// (jsdom) and for a frozen row (it is pinned on screen by its own sticky cells).
+function correctJumpedRowIntoBand(): boolean {
+  const wrap = tableWrap.value
+  if (!wrap || focusRow.value < 0) return false
+  const el = wrap.querySelector<HTMLElement>('tbody tr.meta-grid__row--focused')
+  if (!el || el.classList.contains('meta-grid__row--frozen-top')) return false
+  const rect = el.getBoundingClientRect()
+  if (rect.height <= 0) return false
+  const band = visibleRowBand(wrap)
+  let delta = 0
+  if (rect.top < band.top - 0.5) delta = Math.floor(rect.top - band.top)
+  else if (rect.bottom > band.bottom + 0.5) delta = Math.ceil(Math.min(rect.bottom - band.bottom, rect.top - band.top))
+  if (delta === 0) return false
+  const before = wrap.scrollTop
+  wrap.scrollTop = Math.max(0, before + delta)
+  scrollTop.value = wrap.scrollTop
+  return wrap.scrollTop !== before
+}
+
 const infiniteScrollEnabled = computed(() =>
   !printing.value && !groupedRows.value && expandedRowIds.value.size === 0,
 )
@@ -887,6 +1113,8 @@ function measureViewport() {
   const headerRow = tableWrap.value.querySelector<HTMLElement>('thead tr')
   const hh = headerRow?.offsetHeight ?? 0
   if (hh > 0) measuredHeaderHeight.value = hh
+  // The sticky aggregation footer covers the bottom of the scrollport (0 without one). Used by the row jump.
+  measuredFootHeight.value = tableWrap.value.querySelector<HTMLElement>('tfoot.meta-grid__foot')?.offsetHeight ?? 0
   maybeKickWhenNotScrollable()
 }
 
@@ -904,7 +1132,10 @@ function maybeKickWhenNotScrollable() {
 }
 // Keep the focused row inside the mounted window during keyboard navigation so arrow-keys never land on
 // an un-rendered row. No-op when windowing is off or no row is focused.
-function scrollFocusedRowIntoWindow() {
+// stickyBands (the footer row jump): row offsets start below the in-flow header, and the sticky aggregation footer
+// covers the bottom, so a row below the view is scrolled until its bottom clears both. A keyboard move that changes
+// the focused row goes through scrollJumpedRowIntoView too; a move within the row keeps the plain arithmetic.
+function scrollFocusedRowIntoWindow(opts: { stickyBands?: boolean } = {}) {
   if (!tableWrap.value || focusRow.value < 0) return
   let rowTop = 0
   let rowBottom = 0
@@ -922,9 +1153,10 @@ function scrollFocusedRowIntoWindow() {
   }
   const viewTop = tableWrap.value.scrollTop
   const viewBottom = viewTop + effectiveViewportHeight.value
+  const bottomPad = opts.stickyBands ? headerHeightPx.value + measuredFootHeight.value : 0
   let next = viewTop
   if (rowTop < viewTop) next = rowTop
-  else if (rowBottom > viewBottom) next = rowBottom - effectiveViewportHeight.value
+  else if (rowBottom + bottomPad > viewBottom) next = rowBottom + bottomPad - effectiveViewportHeight.value
   if (next !== viewTop) {
     tableWrap.value.scrollTop = next
     scrollTop.value = next
@@ -1160,6 +1392,28 @@ const displayRows = computed(() => {
   return result
 })
 
+// Footer row jump watchers (see onRowJumpSubmit). Declared after displayRows / effectiveGroupFields, which they read.
+// The requested page landed (or the load ended): focus the row if it is there now, otherwise drop the jump so a
+// later, unrelated reload does not move the focus.
+watch(
+  [() => props.rows, () => props.startIndex, () => props.loading],
+  () => {
+    if (pendingRowJump.value === null || props.loading) return
+    const target = pendingRowJump.value
+    pendingRowJump.value = null
+    focusLoadedRow(target)
+  },
+  { flush: 'post' },
+)
+// Another sheet / view or another grouping: the row numbers mean something else now.
+watch(
+  [() => props.rangeContextKey, () => JSON.stringify(effectiveGroupFields.value.map((f) => f.id))],
+  () => {
+    pendingRowJump.value = null
+    rowJumpHint.value = null
+  },
+)
+
 function toggleSelectAll() {
   if (allSelected.value) selectedIds.value = new Set()
   else selectedIds.value = new Set(selectableRowIds.value)
@@ -1185,6 +1439,15 @@ function onBulkDelete() {
   const deletable = [...selectedIds.value].filter((id) => resolveRowActions(id).canDelete)
   if (deletable.length > 0) emit('bulk-delete', deletable)
 }
+
+// R-66: PLM rows in the selection (server-derived `deleteBlockedReason`) — never deletable, by anyone.
+const selectedPlmBlockedCount = computed(() =>
+  [...selectedIds.value].filter((id) => resolveRowActions(id).deleteBlockedReason === 'plm_row').length,
+)
+const bulkDeleteOnlyPlmRows = computed(() =>
+  selectedPlmBlockedCount.value > 0 && ![...selectedIds.value].some((id) => resolveRowActions(id).canDelete),
+)
+const plmRowDeleteBlockedReason = computed(() => workbenchLabel('notice.plmRowDeleteBlocked', isZh.value))
 
 // Batch restore (BS-4): emit the selected records the actor can edit (restore is a write). The server re-checks
 // per record (row-deny / write-gate / version) in the preview + execute, so this is a coarse pre-filter only.
@@ -1212,19 +1475,12 @@ function resolveRowActions(recordId: string): MetaRowActions {
   }
 }
 
-// Duplicate / clone record (design 2026-06-16): right-click a row → emit a duplicate request. Net-new grid
-// context affordance — no floating menu component, just the native contextmenu suppressed when actionable.
-// Gated on `canCreate` (a duplicate is a create; the server re-enforces it). NOT active while a cell is being
-// edited, so the native menu (copy/paste) still works inside the cell editor.
-// `ri` (row index, flat path only) is unused today — accepted so callers can pass it without a
-// signature mismatch; the row-freeze pin (#5863c) is its own dedicated button, not merged into this
-// gesture (this remains a single instant action, not an actual multi-item context menu).
-function onRowContextMenu(e: MouseEvent, recordId: string, ri?: number): void {
-  void ri
-  if (!props.canCreate || editCell.value) return
-  e.preventDefault()
-  emit('duplicate-record', recordId)
-}
+// Right-click on a row (customer feedback 2026-10-27): the grid binds NO contextmenu handler, so the
+// browser's own menu shows and nothing is created. It used to emit `duplicate-record` instantly (design
+// 2026-06-16), which POSTed a new record on every right-click — including on sheets whose rows a plugin
+// maintains, where the copy cloned the row's idempotency key and held the next pull. Duplicating is the
+// record drawer's explicit「复制」action now, behind a confirm. Tripwire:
+// tests/multitable-grid-duplicate-context.spec.ts.
 // Record-locking (design #2278 follow-up): index rows so the lock indicator + lock/unlock action +
 // read-only-while-locked visual can resolve a row's lock state by id without scanning.
 const recordById = computed(() => {
@@ -1247,10 +1503,27 @@ function canShowLockAction(recordId: string): boolean {
 // per-field permission map is stale, not yet loaded, or a future call site forgets to thread it.
 // `!isFieldHumanWriteLocked(f)` is the same defense for a PLM-system column on a 备料 project sheet
 // (`property.humanWriteLock`): no editor ever opens on it; copying it is unaffected.
-const isEditable = (recordId: string, f: MetaField) =>
+const isPlainEditable = (recordId: string, f: MetaField) =>
   !isRowLocked(recordId) &&
   resolveRowActions(recordId).canEdit && EDITABLE.has(f.type) && !isSystemField(f) &&
   !isFieldAlwaysReadOnly(f) && !isFieldHumanWriteLocked(f) && !props.fieldReadOnlyIds?.includes(f.id)
+// 人工补充行 B3 (ADR §3.4): a fillable column of a manual row — named by the workbench from /context's block — opens a
+// single-cell editor although the PLM lock (and with it `fieldReadOnlyIds`) keeps the column read-only for every other
+// row. Every other condition stays: the row's own lock, the row's canEdit, an editable type, never a system or
+// always-read-only field. Only single-cell editing reads this (dblclick / Enter / type-to-edit); paste of the focused
+// cell, range fill / paste and Yjs keep the plain rule — the editor of such a cell gets NO record id, so it never binds
+// a Yjs document and its commit is the REST patch the workbench routes to PATCH …/manual-fields.
+const manualRowRecordIdSet = computed(() => new Set(props.manualRowRecordIds ?? []))
+const manualRowFieldIdSet = computed(() => new Set(props.manualRowFieldIds ?? []))
+const isManualFillableCell = (recordId: string, fieldId: string) =>
+  manualRowRecordIdSet.value.has(recordId) && manualRowFieldIdSet.value.has(fieldId)
+const isEditable = (recordId: string, f: MetaField) =>
+  isPlainEditable(recordId, f) || (
+    isManualFillableCell(recordId, f.id) && !isRowLocked(recordId) &&
+    resolveRowActions(recordId).canEdit && EDITABLE.has(f.type) && !isSystemField(f) && !isFieldAlwaysReadOnly(f)
+  )
+// 人工补充行 (OQ3): the row-head label — a display mark from the server's per-row actions, shown to every reader.
+const isManualSupplementRow = (recordId: string) => isManualSupplementMarked(props.rowActionOverrides?.[recordId])
 const isEditing = (rid: string, fid: string) => editCell.value?.recordId === rid && editCell.value?.fieldId === fid
 
 function cellStyle(rid: string, fid: string, ci?: number, ri?: number) {
@@ -1378,7 +1651,7 @@ function onToggleFreeze(i: number) {
 // collapse) has no stable "first N rendered data rows" concept independent of collapse state, so
 // row-freezing is intentionally a no-op there (isFrozenRow always false when groupedRows is truthy).
 // The row-number context menu disables the freeze-rows action while grouping is active for the
-// same reason (see onRowContextMenu / the freeze-rows menu entry below).
+// same reason (see the freeze-rows menu entry below).
 const frozenTopRowsCountEffective = computed(() => {
   if (groupedRows.value) return 0
   return Math.max(0, Math.min(props.frozenTopRowCount ?? 0, filteredRows.value.length))
@@ -1739,7 +2012,8 @@ function pasteFocusedCell(text: string) {
   if (focusRow.value < 0 || focusCol.value < 0) return
   const row = displayRows.value[focusRow.value]
   const field = props.visibleFields[focusCol.value]
-  if (!row || !field || !isEditable(row.id, field)) return
+  // 人工补充行 B3: the PLAIN rule — a paste keeps treating a manual row's fillable cells as read-only (ADR §3.4).
+  if (!row || !field || !isPlainEditable(row.id, field)) return
   // person/multiSelect store array values server-side; pasting raw clipboard
   // text would be rejected by record-write-service's field validation (400).
   if (field.type === 'person' || field.type === 'multiSelect') return
@@ -1999,6 +2273,7 @@ function onKeydown(e: KeyboardEvent) {
   // the same check, right here; collapsed into the single top-of-handler
   // gate — see that call site's doc comment for why a second copy would
   // have made some P3-4/P3-5 mutations non-discriminating.)
+  const rowBefore = focusRow.value
   switch (e.key) {
     case 'ArrowDown': e.preventDefault(); if (focusRow.value < maxR) { focusRow.value++; if (focusCol.value < 0) focusCol.value = 0; emit('select-record', navRows[focusRow.value].id) } break
     case 'ArrowUp': e.preventDefault(); if (focusRow.value > 0) { focusRow.value--; emit('select-record', navRows[focusRow.value].id) } break
@@ -2024,9 +2299,13 @@ function onKeydown(e: KeyboardEvent) {
   }
   // A1: after a vertical move, keep the focused row inside the rendered window so arrow-keys never land
   // on an un-mounted row (no-op when windowing is off / no focus).
+  // R78 known limitation e: a move that changes the focused row (Up/Down, and Left/Right/Tab wrapping to another row)
+  // scrolls exactly like the footer row jump, so the row ends fully inside the band between the sticky header (or
+  // frozen top rows) and the aggregation footer, windowed or not. A move within the row keeps the plain arithmetic.
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key === 'Tab') {
     range.select({ row: focusRow.value, col: focusCol.value })
-    scrollFocusedRowIntoWindow()
+    if (focusRow.value !== rowBefore && focusRow.value >= 0) scrollJumpedRowIntoView()
+    else scrollFocusedRowIntoWindow()
   }
 }
 </script>
@@ -2080,6 +2359,9 @@ thead .meta-grid__check-col {
 .meta-grid__table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: #999; font-size: 12px; background: #f9fafb; border-bottom: 1px solid #eee; border-right: 1px solid #eee; padding: 6px 4px; position: sticky; left: 0; z-index: 1; }
 .meta-grid__row-num > span { display: inline-flex; align-items: center; justify-content: center; }
+/* 人工补充行 (OQ3): the row-head label — a block under the row number, so the fixed 56px column (ROW_NUM_W, the
+   frozen-column offsets) keeps its width. */
+.meta-grid__row-num > span.meta-grid__manual-row-tag { display: block; width: fit-content; margin: 2px auto 0; padding: 0 3px; font-size: 10px; line-height: 14px; color: #8a5a00; background: #fdf6ec; border: 1px solid #f5dab1; border-radius: 3px; white-space: nowrap; }
 .meta-grid__check-col { position: sticky; z-index: 1; }
 .meta-grid__row { transition: background 0.1s; content-visibility: auto; contain-intrinsic-size: auto 36px; }
 /* #5863c: a frozen-top row is always rendered (never virtualized away, see windowRows/isFrozenRow)
@@ -2157,13 +2439,19 @@ thead .meta-grid__check-col {
 .meta-grid__empty-icon { font-size: 36px; margin-bottom: 8px; opacity: 0.5; }
 .meta-grid__empty-title { font-size: 15px; font-weight: 600; color: #666; margin-bottom: 4px; }
 .meta-grid__empty-hint { font-size: 13px; color: #aaa; }
-.meta-grid__pagination { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px; border-top: 1px solid #e5e7eb; }
+.meta-grid__pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 12px; padding: 8px; border-top: 1px solid #e5e7eb; }
 .meta-grid__page-btn { padding: 4px 12px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
 .meta-grid__page-btn:hover:not(:disabled) { background: #f5f5f5; }
 .meta-grid__page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .meta-grid__page-info { font-size: 12px; color: #666; }
 .meta-grid__page-size { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #666; }
 .meta-grid__page-size-select { padding: 2px 6px; border: 1px solid #ddd; border-radius: 3px; background: #fff; font-size: 12px; }
+.meta-grid__row-jump { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #666; }
+.meta-grid__row-jump-field { display: inline-flex; align-items: center; gap: 4px; }
+.meta-grid__row-jump-input { width: 72px; padding: 2px 6px; border: 1px solid #ddd; border-radius: 3px; background: #fff; font-size: 12px; }
+.meta-grid__row-jump-hint { color: #999; }
+.meta-grid__footer-add-btn { display: inline-flex; align-items: center; gap: 4px; margin-right: auto; color: #4a5568; }
+.meta-grid__footer-add-btn:hover { color: #2563eb; }
 .meta-grid__loading { position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: stretch; background: rgba(255,255,255,.85); z-index: 10; padding-top: 40px; }
 .meta-grid__skeleton { width: 100%; padding: 0 12px; }
 .meta-grid__skeleton-row { display: flex; gap: 12px; margin-bottom: 12px; }
@@ -2200,6 +2488,7 @@ thead .meta-grid__check-col {
 .meta-grid__bulk-btn { padding: 3px 10px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 11px; }
 .meta-grid__bulk-btn--danger { color: #f56c6c; border-color: #f56c6c; }
 .meta-grid__bulk-btn--danger:hover { background: #fef0f0; }
+.meta-grid__bulk-reason { color: #909399; font-size: 11px; }
 .meta-grid__group-header { cursor: pointer; }
 .meta-grid__group-header td { padding: 6px 12px; background: #f0f4f8; font-size: 13px; font-weight: 600; color: #333; border-bottom: 1px solid #dde3ea; }
 .meta-grid__group-header:hover td { background: #e6ecf2; }

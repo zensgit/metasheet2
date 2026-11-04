@@ -13,11 +13,18 @@
 //          values-free (ids, digests, counts, timestamps)
 //   RD-R4  a receipt write that throws leaves the stored receipt unchanged over a live-reference storage (load
 //          clones; step-4 review follow-ups, item 7)
+//   RD-R5  (step 5 PR-8) a page index outside the hold's page count is never recorded, so the public flag and verify
+//          agree (the change-plan page pages on past a written plan's last page)
 //   RD-P1  the hold payload: a candidate's pairs and comparison items paged together; a relationship hold's
 //          verification incl. componentNewPositionCount; a content change; other kinds pass their detail; a page
 //          past the end is 400
 //   RD-B1  the confirm / end body normalizers: field-by-field 400s, no silent defaults
 //   RD-T1  translateByIdRead: a foreign-tenant row and another scope's row become the SAME 404; other store errors pass
+//   RD-CP1 step 5 PR-8: the change-plan legs refuse a half-wired context by name (501) before any read — the page
+//          without receipts / plan reads / the sheet reader; the confirm without the plan transaction / receipts; the
+//          review without the in-transaction audit / receipts / the live-writer check / the sheet reader
+//   RD-CP2 the change-plan body normalizers: field-by-field 400s, trimmed ids and echoes, the combined candidates, the
+//          review's optional notes — no silent defaults
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
@@ -31,7 +38,7 @@ const { StockPreparationRefreshStoreError, REFRESH_STORE_ERROR_CODES } = require
 const { LARGE_BOM_CHECKPOINT_APPLY_KEY_PREFIX } = require(path.join(LIB, 'stock-preparation-large-bom-jobs.cjs')).__internals
 
 const { createReadReceiptStore, READ_RECEIPT_KEY_PREFIX, READ_RECEIPT_TTL_MS, REFRESH_DECISION_ERROR_CODES: CODES } = decisions
-const { holdPayload, normalizeConfirmBody, normalizeEndBody, translateByIdRead } = decisions.__internals
+const { holdPayload, normalizeConfirmBody, normalizeEndBody, translateByIdRead, normalizeChangePlanConfirmBody, normalizeReviewBody } = decisions.__internals
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
@@ -134,6 +141,19 @@ test('RD-R4 a receipt write that throws leaves the stored receipt unchanged (liv
   assert.deepEqual(storage.get(`${READ_RECEIPT_KEY_PREFIX}${first.id}`).holds.hold_a.pairPagesServed, [0], 'the stored record still lists page 0 only')
 })
 
+test('RD-R5 (step 5 PR-8) a page index outside the page count of the hold is never recorded: the receipt neither shows nor verifies it as served; an in-range page then completes it', async () => {
+  const { receipts } = receiptEnv()
+  const a = hold('hold_a')
+  const current = { id: 'hold_a', fingerprint: a.fingerprint, comparisonFingerprint: a.comparisonFingerprint, evidenceFingerprint: a.evidenceFingerprint }
+  const past = await receipts.record({ scope: SCOPE, actorId: 'u_a', pages: [page(a, 1, 1), page(a, -1, 1)] })
+  assert.deepEqual(past.holds, {}, 'a page past the last one (or before the first) is not a served page')
+  assert.deepEqual(await receipts.verify({ receiptId: past.id, scope: SCOPE, actorId: 'u_a', hold: current }), { ok: false, reason: 'hold_not_in_receipt', pagesServed: 0, pageCount: null })
+  const served = await receipts.record({ receiptId: past.id, scope: SCOPE, actorId: 'u_a', pages: [page(a, 0, 1)] })
+  assert.equal(served.id, past.id)
+  assert.deepEqual(served.holds.hold_a, { pageCount: 1, pagesServed: [0], complete: true })
+  assert.deepEqual(await receipts.verify({ receiptId: past.id, scope: SCOPE, actorId: 'u_a', hold: current }), { ok: true, pagesServed: 1, pageCount: 1 })
+})
+
 test('RD-P1 the hold payload: a candidate\'s pairs and comparison items are paged together (candidateId = the pairing fingerprint); a relationship hold carries its verification and componentNewPositionCount; a content change its fields; other kinds their detail; a page past the end is 400', async () => {
   const fixture = await refreshKit.candidateHoldFixture()
   const candidate = { ...fixture.hold, id: 'hold_c', status: 'open', runbookOnly: false, openedAt: '2026-10-24T00:00:00.000Z', lastSeenAt: '2026-10-24T00:00:00.000Z' }
@@ -217,6 +237,105 @@ test('RD-T1 translateByIdRead: a foreign-tenant row (TENANT_MISMATCH) and anothe
   const notOpen = new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.CONFIRM_STALE, 'x', { reason: 'hold_not_open' })
   assert.equal(translateByIdRead(notOpen, notFound), notOpen)
   assert.equal(translateByIdRead(new Error('plain'), notFound).message, 'plain')
+})
+
+// ── Step 5 PR-8: the change-plan legs ────────────────────────────────────────────────────────────
+
+// A REAL consult (the real reader over the refresh kit) of a project with no row: ok, not governed.
+async function realConsult() {
+  const wiring = require('./support/stock-preparation-refresh-governance-wiring.cjs')
+  const env = wiring.createRefreshGovernanceEnv()
+  return env.governance.consult(SCOPE)
+}
+
+const is501 = (code, reason) => (error) => error.status === 501 && (code === undefined || error.code === code) && (reason === undefined || (error.details && error.details.reason === reason))
+
+test('RD-CP1 the change-plan legs refuse a half-wired context by name (501) before any read: the page, the confirm and the review', async () => {
+  const consult = await realConsult()
+  assert.equal(consult.ok, true)
+  const unexpected = (what) => async () => { throw new Error(`unexpected ${what}`) }
+  const base = () => ({
+    scope: SCOPE,
+    actorId: 'u_rd',
+    consult,
+    store: { readHold: unexpected('readHold'), readContinuation: unexpected('readContinuation') },
+    audit: { append: unexpected('audit append') },
+  })
+  const receipts = { record: unexpected('receipt record'), verify: unexpected('receipt verify') }
+  // The page.
+  await assert.rejects(() => decisions.readChangePlanCurrent(base()), is501(CODES.RECEIPT_STORE_UNAVAILABLE, 'receipts'))
+  await assert.rejects(() => decisions.readChangePlanCurrent({ ...base(), receipts }), is501(CODES.STORE_UNAVAILABLE, 'decision_store'))
+  const pending = {
+    ...base(),
+    receipts,
+    consult: { ...consult, changePlans: [{ id: 'chp_rd', status: 'confirmed' }] },
+    store: { ...base().store, readChangePlan: async () => ({ id: 'chp_rd', status: 'confirmed', recordSet: [], recordCount: 0 }) },
+  }
+  await assert.rejects(() => decisions.readChangePlanCurrent(pending), is501(CODES.STORE_UNAVAILABLE, 'sheet_reader'))
+  // The confirm.
+  const decisionBase = () => ({
+    ...base(),
+    store: { ...base().store, confirmContinuation: unexpected('confirm'), reconfirmContinuation: unexpected('reconfirm'), endContinuation: unexpected('end') },
+    projectWriteLock: { bumpGenerationWithin: unexpected('bump') },
+    audit: { append: unexpected('audit append'), appendWithin: unexpected('audit appendWithin') },
+  })
+  await assert.rejects(() => decisions.confirmChangePlan(decisionBase(), {}), is501(CODES.STORE_UNAVAILABLE, 'decision_store'))
+  await assert.rejects(() => decisions.confirmChangePlan({ ...decisionBase(), store: { ...decisionBase().store, confirmChangePlan: unexpected('plan confirm') } }, {}), is501(CODES.RECEIPT_STORE_UNAVAILABLE, 'receipts'))
+  // The review.
+  const reviewStore = { ...base().store, readChangePlan: unexpected('plan read'), completeChangeReview: unexpected('review') }
+  const withinAudit = { append: unexpected('audit append'), appendWithin: unexpected('audit appendWithin') }
+  await assert.rejects(() => decisions.completeChangeReview(base(), {}), is501(CODES.STORE_UNAVAILABLE, 'decision_store'))
+  await assert.rejects(() => decisions.completeChangeReview({ ...base(), store: reviewStore }, {}), is501('AUDIT_STORE_UNAVAILABLE', 'append_within'))
+  await assert.rejects(() => decisions.completeChangeReview({ ...base(), store: reviewStore, audit: withinAudit }, {}), is501(CODES.RECEIPT_STORE_UNAVAILABLE, 'receipts'))
+  await assert.rejects(() => decisions.completeChangeReview({ ...base(), store: reviewStore, audit: withinAudit, receipts }, {}), is501(undefined, 'assert_no_live_writer'))
+  await assert.rejects(() => decisions.completeChangeReview({ ...base(), store: reviewStore, audit: withinAudit, receipts, projectWriteLock: { assertNoLiveWriter: unexpected('live writer') } }, {}), is501(CODES.STORE_UNAVAILABLE, 'sheet_reader'))
+})
+
+test('RD-CP2 the change-plan body normalizers refuse field by field (400, the field named), trim ids and echoes, carry the combined candidates and the review\'s optional notes', () => {
+  const good = { holdIds: [' hold_1 ', 'hold_2'], holdSetFingerprint: ' a ', planFingerprint: 'b', sourceContentDigest: 'c', readReceipt: 'e'.repeat(32) }
+  const out = normalizeChangePlanConfirmBody(good)
+  assert.deepEqual(out.holdIds, ['hold_1', 'hold_2'])
+  assert.deepEqual(out.echo, { holdSetFingerprint: 'a', planFingerprint: 'b', sourceContentDigest: 'c' })
+  assert.equal(out.readReceipt, 'e'.repeat(32))
+  assert.deepEqual(out.candidates, [])
+  const combined = normalizeChangePlanConfirmBody({ ...good, candidates: [{ holdId: ' hold_1 ', candidateId: 'x', basis: { kind: 'puller_confirmed_same_demand', note: 'n' }, acknowledge: { historyUnknown: true } }, { holdId: 'hold_2', candidateId: 'y', basis: { kind: 'puller_confirmed_same_demand' } }] })
+  assert.deepEqual(JSON.parse(JSON.stringify(combined.candidates)), [
+    { holdId: 'hold_1', candidateId: 'x', basis: { kind: 'puller_confirmed_same_demand', note: 'n' }, historyUnknownAcknowledged: true },
+    { holdId: 'hold_2', candidateId: 'y', basis: { kind: 'puller_confirmed_same_demand' }, historyUnknownAcknowledged: false },
+  ])
+  for (const [label, mutate, field] of [
+    ['not an object', () => 'x', 'body'],
+    ['no holdIds', (b) => { delete b.holdIds }, 'holdIds'],
+    ['empty holdIds', (b) => { b.holdIds = [] }, 'holdIds'],
+    ['a blank hold id', (b) => { b.holdIds = ['hold_1', ' '] }, 'holdIds'],
+    ['a hold named twice', (b) => { b.holdIds = ['hold_1', ' hold_1'] }, 'holdIds'],
+    ['no hold-set echo', (b) => { delete b.holdSetFingerprint }, 'holdSetFingerprint'],
+    ['blank plan echo', (b) => { b.planFingerprint = ' ' }, 'planFingerprint'],
+    ['no source echo', (b) => { delete b.sourceContentDigest }, 'sourceContentDigest'],
+    ['no receipt', (b) => { delete b.readReceipt }, 'readReceipt'],
+    ['candidates not a list', (b) => { b.candidates = {} }, 'candidates'],
+    ['a candidate without its id', (b) => { b.candidates = [{ holdId: 'hold_1', basis: { kind: 'puller_confirmed_same_demand' } }] }, 'candidates[0]'],
+    ['a candidate basis token', (b) => { b.candidates = [{ holdId: 'hold_1', candidateId: 'x', basis: { kind: 'other' } }] }, 'candidates[0].basis.kind'],
+    ['a candidate basis note type', (b) => { b.candidates = [{ holdId: 'hold_1', candidateId: 'x', basis: { kind: 'puller_confirmed_same_demand', note: 3 } }] }, 'candidates[0].basis.note'],
+    ['a candidate acknowledgement type', (b) => { b.candidates = [{ holdId: 'hold_1', candidateId: 'x', basis: { kind: 'puller_confirmed_same_demand' }, acknowledge: { historyUnknown: 'yes' } }] }, 'candidates[0].acknowledge'],
+  ]) {
+    const body = label === 'not an object' ? mutate() : (() => { const b = JSON.parse(JSON.stringify(good)); mutate(b); return b })()
+    assert.throws(() => normalizeChangePlanConfirmBody(body), (error) => error.status === 400 && error.code === CODES.REQUEST_INVALID && error.details.field === field, label)
+  }
+  const goodReview = { changePlanId: ' chp_1 ', contentDigest: ' d ', conclusion: 'handled_with_notes', notes: 'n', readReceipt: 'e'.repeat(32) }
+  assert.deepEqual({ ...normalizeReviewBody(goodReview) }, { changePlanId: 'chp_1', contentDigest: 'd', conclusion: 'handled_with_notes', notes: 'n', readReceipt: 'e'.repeat(32) })
+  assert.equal(normalizeReviewBody({ ...goodReview, notes: undefined, conclusion: 'handled' }).notes, null)
+  for (const [label, mutate, field] of [
+    ['not an object', () => null, 'body'],
+    ['no plan id', (b) => { delete b.changePlanId }, 'changePlanId'],
+    ['no digest', (b) => { b.contentDigest = '' }, 'contentDigest'],
+    ['a conclusion outside the closed set', (b) => { b.conclusion = 'approved' }, 'conclusion'],
+    ['notes not a string', (b) => { b.notes = ['n'] }, 'notes'],
+    ['no receipt', (b) => { delete b.readReceipt }, 'readReceipt'],
+  ]) {
+    const body = label === 'not an object' ? mutate() : (() => { const b = JSON.parse(JSON.stringify(goodReview)); mutate(b); return b })()
+    assert.throws(() => normalizeReviewBody(body), (error) => error.status === 400 && error.code === CODES.REQUEST_INVALID && error.details.field === field, label)
+  }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-refresh-decisions.test.cjs', tests)

@@ -122,6 +122,12 @@ export const STOCK_PREP_PROJECT_TARGET_ERROR_CODES: readonly string[] = Object.f
   'STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE',
   // 2026-10-10 audit: the project-target routes' (list / get / create / archive / restore) one values-free 500.
   'STOCK_PREPARATION_ROUTE_FAILED',
+  // 备料分批拉取第一期 step 4 PR-7b (PR-7 review: codes still on the generic sentence): a malformed project number,
+  // the registry's scope refusal, an unwired registry and the PLM column-lock read on a sheet that is not one.
+  'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+  'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID',
+  'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE',
+  'STOCK_PREPARATION_PROJECT_TARGET_PLM_LOCK_OBJECT_REFUSED',
 ])
 
 /**

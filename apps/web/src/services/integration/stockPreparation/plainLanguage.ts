@@ -622,6 +622,130 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     enNext: 'Ask the platform admin.',
   }),
   /**
+   * 备料分批拉取第一期 step 4 PR-7b (PR-7 review: generic copy remained for step-4-adjacent codes). Each of these
+   * reaches a page as a typed answer (a 4xx, or a 500 / 501 with a code-shaped code passes the route's typed
+   * check), so each gets its own two lines instead of the generic sentence. The 500-class ones are defects or
+   * unwired services: nothing was written, and the code goes to the platform admin.
+   */
+  STOCK_PREP_PROJECT_WRITE_GUARD_SCOPE_MISMATCH: Object.freeze({
+    zh: '写入锁没有拿到要保护的表(系统内部问题),这一步没有继续,什么都没有写。',
+    en: 'The write lock was not given the sheet it protects (an internal problem), so this step stopped and nothing was written.',
+    zhNext: '请把下面的代码交给平台管理员。',
+    enNext: 'Give the code below to the platform admin.',
+  }),
+  STOCK_PREP_CONTINUATION_INPUT_INVALID: Object.freeze({
+    zh: '分批拉取的计算输入不完整(系统内部问题),这次没有继续,什么都没有写。',
+    en: 'The batch-refresh computation got incomplete input (an internal problem), so it stopped and nothing was written.',
+    zhNext: '请把下面的代码交给平台管理员。',
+    enNext: 'Give the code below to the platform admin.',
+  }),
+  STOCK_PREP_CONTINUATION_POSTCONDITION_VIOLATED: Object.freeze({
+    zh: '分批拉取的计划自检没有通过:计划会改动受沿用关系保护或正在挂起的行,所以整次被拒绝,什么都没有写。',
+    en: 'The batch-refresh plan failed its self-check: it would have changed rows a relationship protects or a hold suspends, so the whole run was refused and nothing was written.',
+    zhNext: '请把下面的代码交给平台管理员;不是重试能解决的。',
+    enNext: 'Give the code below to the platform admin; retrying does not help.',
+  }),
+  STOCK_PREP_SHEET_DIGEST_RECORD_REF_MISSING: Object.freeze({
+    zh: '备料表里有行缺少记录编号,没法核对整张表(系统内部问题);这一步没有继续。',
+    en: 'A row of the stock-prep sheet has no record reference, so the whole sheet cannot be checked (an internal problem); this step stopped.',
+    zhNext: '请把下面的代码交给平台管理员。',
+    enNext: 'Give the code below to the platform admin.',
+  }),
+  STOCK_PREP_PILOT_STATE_MOVED: Object.freeze({
+    zh: '启用试点的同时,这个项目的登记刚好被改动了;这次没有启用,什么都没有改动。',
+    en: 'This project’s registration changed while the pilot was being enabled; it was not enabled and nothing was changed.',
+    zhNext: '刷新页面重新读取这个项目,确认无误后再启用一次。',
+    enNext: 'Refresh the page to read the project again, then enable it once more if it is still right.',
+  }),
+  LARGE_BOM_APPLY_JOB_SCAN_INVALID: Object.freeze({
+    zh: '检查后台大 BOM 写入任务时没有拿到要检查的表(系统内部问题),这一步没有继续。',
+    en: 'The check for background large-BOM write jobs was not given the sheet to check (an internal problem), so this step stopped.',
+    zhNext: '请把下面的代码交给平台管理员。',
+    enNext: 'Give the code below to the platform admin.',
+  }),
+  LARGE_BOM_JOB_STORE_UNAVAILABLE: Object.freeze({
+    zh: '后台大 BOM 任务的存储没有接通,这一步没有继续。',
+    en: 'The storage for background large-BOM jobs is not set up, so this step stopped.',
+    zhNext: '请联系平台管理员。',
+    enNext: 'Ask the platform admin.',
+  }),
+  LARGE_BOM_PLAN_GOVERNANCE_VERDICT_INVALID: Object.freeze({
+    zh: '大 BOM 规划没有拿到有效的分批拉取检查结果(系统内部问题),什么都没有规划。',
+    en: 'The large-BOM plan was not given a valid batch-refresh check result (an internal problem), so nothing was planned.',
+    zhNext: '请把下面的代码交给平台管理员。',
+    enNext: 'Give the code below to the platform admin.',
+  }),
+  STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY: Object.freeze({
+    zh: '这批物料重新试算后还不能存档(还有冲突行,或试算结果不能应用),这次没有存档。',
+    en: 'This batch cannot be archived after its preview (conflict rows remain, or the preview cannot be applied), so nothing was archived.',
+    zhNext: '先处理确认队列里的冲突,重新同步一次后再存档;一直这样请把代码交给平台管理员。',
+    enNext: 'Work through the conflicts in the confirmation queue, sync again, then archive; if it keeps happening, give the code to the platform admin.',
+  }),
+  /**
+   * The project-sheet registry's remaining refusals (projectTarget.ts STOCK_PREP_PROJECT_TARGET_ERROR_CODES lists them,
+   * so StockPreparationProjectTarget.spec.ts PT-CODES pins each one's two lines).
+   */
+  STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID: Object.freeze({
+    zh: '项目号不是一个有效的项目号(只能是普通的项目编号),什么都没有改动。',
+    en: 'The project number is not a valid plain project number, so nothing was changed.',
+    zhNext: '检查项目号后再试一次。',
+    enNext: 'Check the project number and try again.',
+  }),
+  STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID: Object.freeze({
+    zh: '项目备料表登记缺少必要的范围信息(系统内部问题),什么都没有改动。',
+    en: 'The project-sheet registration is missing required scope information (an internal problem), so nothing was changed.',
+    zhNext: '请把下面的代码交给平台管理员。',
+    enNext: 'Give the code below to the platform admin.',
+  }),
+  STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE: Object.freeze({
+    zh: '项目备料表登记服务没有接通,这里不能创建、读取或存档项目备料表。',
+    en: 'The project-sheet registry is not set up, so project sheets cannot be created, read or archived here.',
+    zhNext: '请联系平台管理员。',
+    enNext: 'Ask the platform admin.',
+  }),
+  STOCK_PREPARATION_PROJECT_TARGET_PLM_LOCK_OBJECT_REFUSED: Object.freeze({
+    zh: '要检查的不是一张已登记的项目备料表,不能读它的 PLM 列锁定(系统内部问题);什么都没有改动。',
+    en: 'The sheet asked about is not a registered project stock-prep sheet, so its PLM column lock cannot be read (an internal problem); nothing was changed.',
+    zhNext: '请把下面的代码交给平台管理员。',
+    enNext: 'Give the code below to the platform admin.',
+  }),
+  /**
+   * 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; R-68) — the per-sheet switch's own refusals
+   * (projectManualRows.ts STOCK_PREP_MANUAL_ROWS_ERROR_CODES lists them; StockPreparationProjectTargetManualRows.spec.ts
+   * MR-COPY pins each one's two lines). The archived / absent / mismatched-confirmation refusals are the project-target
+   * codes above.
+   */
+  STOCK_PREP_MANUAL_ROWS_POLICY_INVALID: Object.freeze({
+    zh: '「允许人工补充行」只能设为允许或关闭,这次的请求两者都不是,什么都没有改动。',
+    en: 'The manual supplementary rows switch can only be set to allowed or turned off, and this request was neither; nothing was changed.',
+    zhNext: '刷新页面后再试一次。',
+    enNext: 'Refresh the page and try again.',
+  }),
+  STOCK_PREP_MANUAL_ROWS_KEY_COLUMN_MISSING: Object.freeze({
+    zh: '这张项目表缺少唯一键列,「允许人工补充行」没法设置,什么都没有改动。',
+    en: 'This project sheet has no unique-key column, so the manual supplementary rows switch cannot be set; nothing was changed.',
+    zhNext: '请联系管理员核对本表的结构。',
+    enNext: 'Ask an administrator to check this sheet’s structure.',
+  }),
+  STOCK_PREP_MANUAL_ROWS_SWITCH_UNCONFIRMED: Object.freeze({
+    zh: '「允许人工补充行」已经写入,但写完回读时没能确认结果(这次修改已记入审计)。',
+    en: 'The manual supplementary rows switch was written, but reading it back did not confirm the result (the change is in the audit trail).',
+    zhNext: '请刷新页面看现在的状态,并把下面的代码交给平台管理员检查本表。',
+    enNext: 'Refresh the page to see the current state, and give the code below to the platform admin to check this sheet.',
+  }),
+  STOCK_PREP_MANUAL_ROWS_HOST_UNSUPPORTED: Object.freeze({
+    zh: '这个部署的主机读写不了表的列设置,「允许人工补充行」在这里用不了,什么都没有改动。',
+    en: 'This deployment’s host cannot read or write a sheet’s column settings, so the manual supplementary rows switch is not available here; nothing was changed.',
+    zhNext: '请联系平台管理员。',
+    enNext: 'Ask the platform admin.',
+  }),
+  STOCK_PREP_MANUAL_ROWS_NOT_SUPPORTED: Object.freeze({
+    zh: '这张表是早先接管过来的旧备料表,系统在它上面不提供人工补充行,所以「允许人工补充行」没法设置,什么都没有改动。',
+    en: 'This is an older stock-prep sheet that was taken over, and manual supplementary rows are not offered on it, so the switch cannot be set; nothing was changed.',
+    zhNext: '如果这个项目需要人工补充行,请联系负责人决定是否改用新的项目备料表。',
+    enNext: 'If this project needs manual supplementary rows, ask the owner whether to move it to a new project sheet.',
+  }),
+  /**
    * 备料分批拉取第一期 step 3 PR B — the pilot marker's own codes (plugin stock-preparation-pilot-gate.cjs). The
    * large-lane refusal reads 「试点项目不走大 BOM 通道」 on every large route; the over-cap refusal on the dry run;
    * NOT_READY lists the failing check ids beside the sentence (the board renders them); UNREADABLE fails closed.
@@ -710,6 +834,63 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     en: 'This project has no such relationship.',
     zhNext: '请重新打开项目备料页。',
     enNext: 'Reopen the project page.',
+  }),
+  /**
+   * 备料分批拉取第一期 step 5 PR-8 (register R-63) — the change plan (变更计划确认 / 受控更新) and the review (变更复核).
+   * Minimal copy; the pages are PR-9's. A confirm / review refusal changes nothing.
+   *
+   * PR-8 review fix B1: STOCK_PREP_CHANGE_PLAN_STALE is ALSO the generic version fence's stop (register R-63 ①), live for
+   * EVERY project's apply — including a stop AFTER rows were written (`details.partial: true`). So the code-level
+   * sentence claims neither "nothing was written" nor anything about a 变更计划 (an ordinary project has none); the
+   * `<code>/<reason>` readings below carry the specifics, and only the reasons a plan-bound run produces name the plan.
+   */
+  STOCK_PREP_CHANGE_PLAN_STALE: Object.freeze({
+    zh: '试算之后,来源、待确认项或表里的内容又变了,这一步停了下来。',
+    en: 'The source, the holds or the sheet moved after the preview, so this step stopped.',
+    zhNext: '请重新试算后再试。',
+    enNext: 'Preview again, then try again.',
+  }),
+  STOCK_PREP_CHANGE_PLAN_NOT_ALLOWED: Object.freeze({
+    zh: '这次的内容变更现在不能作为变更计划确认;什么都没有改动。',
+    en: 'This content change cannot be confirmed as a change plan right now; nothing was changed.',
+    zhNext: '看页面上标出的原因;需要时联系负责人。',
+    enNext: 'See the reason shown on the page; ask the owner if needed.',
+  }),
+  STOCK_PREP_CHANGE_PLAN_STRUCTURE_CHANGE_PRESENT: Object.freeze({
+    zh: '这个项目同时有结构变化(换物料、增删子件、改挂或配对变化);内容变更计划不能借此放行,整次拉取保持挂起。',
+    en: 'This project also has a structure change (another part, a child added or removed, a move or a pairing change); a content change plan cannot release it and the whole pull stays suspended.',
+    zhNext: '先处理结构变化(第二期或专项处理);什么都没有改动。',
+    enNext: 'Handle the structure change first (phase 2 or specialist handling); nothing was changed.',
+  }),
+  STOCK_PREP_CHANGE_PLAN_NOT_FOUND: Object.freeze({
+    zh: '这个项目下没有这份变更计划。',
+    en: 'This project has no such change plan.',
+    zhNext: '请重新打开变更计划页。',
+    enNext: 'Reopen the change plan page.',
+  }),
+  STOCK_PREP_CHANGE_REVIEW_STALE: Object.freeze({
+    zh: '要复核的内容已经不是表里现在的内容(又有写入或计划已被替换),这次没有复核。',
+    en: 'The content being reviewed is no longer what the sheet holds (something was written or the plan was replaced), so nothing was reviewed.',
+    zhNext: '请重新打开复核页,看过当前差异后再复核。',
+    enNext: 'Reopen the review page, read the current difference, then review again.',
+  }),
+  STOCK_PREP_CHANGE_REVIEW_BLOCKED: Object.freeze({
+    zh: '这个项目还有别的待确认项、待执行的变更计划或未完成的写入,复核要等它们处理完;这次没有复核。',
+    en: 'This project still has another hold, a confirmed change awaiting its update or an unfinished write; the review waits for them, and nothing was reviewed now.',
+    zhNext: '先处理其他待办项,再回来复核。',
+    enNext: 'Handle the other open items first, then come back to review.',
+  }),
+  STOCK_PREP_CHANGE_REVIEW_READ_RECEIPT_INCOMPLETE: Object.freeze({
+    zh: '还没有看完当前差异的全部页,或差异在看完后又变了,不能完成复核。',
+    en: 'Not every page of the current difference has been read, or it changed after it was read, so the review cannot be completed.',
+    zhNext: '把复核页的每一页都看完后再完成复核。',
+    enNext: 'Read every page of the review, then complete it.',
+  }),
+  STOCK_PREP_REFRESH_REVIEW_PENDING: Object.freeze({
+    zh: '这个项目有一次已写入的内容变更在等待复核;复核完成之前只执行已确认的变更计划,正式导出也暂停。这次什么都没有写。',
+    en: 'A written content change of this project awaits its review; until it is reviewed only a confirmed change plan is executed and the formal export stays paused. Nothing was written now.',
+    zhNext: '请拉取人员打开变更复核页完成复核。',
+    enNext: 'Ask the puller to open the review page and complete the review.',
   }),
   /**
    * 备料分批拉取第一期 step 4 PR-3a / 3b / 5 / 6 and PR-4's remaining codes — copy added by PR-7 (the web
@@ -1298,8 +1479,11 @@ export const STOCK_PREP_ERROR_REASON_PLAIN: Record<string, StockPrepPlainEntry> 
   'STOCK_PREP_EXPORT_BLOCKED/lease_in_flight': Object.freeze({
     zh: '一次拉取正在写这张表,或一次中断的拉取还占着写入;这时不导出,免得交出半新半旧的数据。什么都没有导出。',
     en: 'A pull is writing this sheet, or an interrupted pull still holds its write turn; nothing is exported now, so no half-old, half-new data is delivered.',
-    zhNext: '稍后再导出;如果一直如此,请拉取人员重新试算一次——试算会清掉中断留下的占用(普通操作员的试算清不掉)。',
-    enNext: 'Export again shortly; if it persists, ask a puller to preview once — a puller’s preview clears what an interrupted pull left (an operator’s cannot).',
+    // PR-7b (PR-7 review N9): only an APPLICABLE preview clears it — the generation bump that clears an abandoned
+    // lease runs only when the preview is about to issue a result that can be applied (http-routes.cjs
+    // `projectWriteGenerationBinder`); a suspended or refused preview clears nothing.
+    zhNext: '稍后再导出;如果一直如此,请拉取人员重新试算一次,而且要是一次能应用的试算(结果可以应用,没有被挂起或拒绝)——只有这样的试算才会清掉中断留下的占用(普通操作员的试算清不掉)。',
+    enNext: 'Export again shortly; if it persists, ask a puller to preview once, and it must be a preview that can be applied (not suspended or refused) — only such a preview clears what an interrupted pull left (an operator’s cannot).',
   }),
   'STOCK_PREP_EXPORT_BLOCKED/state': Object.freeze({
     zh: '本项目的分批拉取还有未完成的状态(待确认、待执行、待恢复或待复核),正式导出已暂停;什么都没有导出。',
@@ -1350,6 +1534,93 @@ export const STOCK_PREP_ERROR_REASON_PLAIN: Record<string, StockPrepPlainEntry> 
     en: 'A relationship of this project is under specialist repair, so carrying human entries is paused until the runbook closes it; nothing was written.',
     zhNext: '请联系负责人。',
     enNext: 'Ask the owner.',
+  }),
+  // 备料分批拉取第一期 step 5 PR-8: the change plan's finer readings.
+  'STOCK_PREP_CHANGE_PLAN_STALE/hold_set_moved': Object.freeze({
+    zh: '确认之前又有一次试算改变了待确认项;这次没有确认。',
+    en: 'A newer preview changed the holds before this confirm; nothing was confirmed.',
+    zhNext: '请重新打开变更计划再确认。',
+    enNext: 'Reopen the change plan and confirm again.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/source_moved': Object.freeze({
+    zh: '确认之前来源又变了;这次没有确认。',
+    en: 'The source changed again before this confirm; nothing was confirmed.',
+    zhNext: '请重新试算,再打开变更计划确认。',
+    enNext: 'Preview again, then reopen the change plan and confirm.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/plan_fingerprint': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CHANGE_PLAN_STALE/hold_set_incomplete': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CHANGE_PLAN_STALE/hold_fingerprint': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CHANGE_PLAN_STALE/plan_invalidated': Object.freeze({
+    zh: '已确认的变更计划因来源或表里的内容又变了而失效,这次没有写入任何内容。',
+    en: 'The confirmed change plan was voided because the source or the sheet moved again; nothing was written.',
+    zhNext: '请重新试算,看过新的变化后重新确认。',
+    enNext: 'Preview again, read the new change and confirm it again.',
+  }),
+  // PR-8 review fix B1: plan_replaced / plan_written reach the APPLY of a run bound to a confirmed plan (never a confirm),
+  // so they say what stopped — not RELOAD_THIS_ITEM's 「这次没有确认」.
+  'STOCK_PREP_CHANGE_PLAN_STALE/plan_replaced': Object.freeze({
+    zh: '这次试算绑定的变更计划已经被替换(又有新的确认或新的计算),这一步停了下来。',
+    en: 'The change plan this preview was bound to has been replaced (a newer confirm or computation), so this step stopped.',
+    zhNext: '请重新试算;如果内容又变了,请拉取人员重新确认变更计划。',
+    enNext: 'Preview again; if the change moved, the puller confirms the change plan again.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/plan_written': Object.freeze({
+    zh: '这次试算绑定的变更计划已经写入过了,这一步停了下来。',
+    en: 'The change plan this preview was bound to has already been written, so this step stopped.',
+    zhNext: '请重新试算。',
+    enNext: 'Preview again.',
+  }),
+  // PR-8 review fix B1: the version fence's remaining stops (register R-63 ①, ANY project's apply). Neutral about what
+  // landed — rows written before the stop stay written (the result's counts say how many); no 变更计划 advice.
+  'STOCK_PREP_CHANGE_PLAN_STALE/record_missing': Object.freeze({
+    zh: '写入时发现试算时依据的一行已经不在表里了,写入已停止。',
+    en: 'While writing, a row the preview was computed against was no longer in the sheet; writing stopped.',
+    zhNext: '请重新试算后再应用;已写入的行数见结果。',
+    enNext: 'Preview again, then apply; the rows already written are in the result.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/record_replaced': Object.freeze({
+    zh: '写入时发现试算时依据的一行被删掉后又新建了一行,写入已停止。',
+    en: 'While writing, a row the preview was computed against had been deleted and re-created; writing stopped.',
+    zhNext: '请重新试算后再应用;已写入的行数见结果。',
+    enNext: 'Preview again, then apply; the rows already written are in the result.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/duplicate_target_key': Object.freeze({
+    zh: '写入时发现表里同一个键出现了两行,写入已停止。',
+    en: 'While writing, the sheet held two rows under one key; writing stopped.',
+    zhNext: '请重新试算;如果仍提示重复,请负责人处理表里的重复行。',
+    enNext: 'Preview again; if the duplicate is still reported, ask the owner to resolve the duplicate rows.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/machine_columns_moved': Object.freeze({
+    zh: '写入时发现系统维护的列在试算之后被改动了,写入已停止(不会盲目重试,也不会覆盖人工填写)。',
+    en: 'While writing, a column the system maintains was found changed since the preview; the write stopped (no blind retry, no human entry overwritten).',
+    zhNext: '请重新试算后再应用;已写入的行数见结果。',
+    enNext: 'Preview again, then apply; the rows already written are in the result.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/version_conflict_repeated': Object.freeze({
+    zh: '写入时同一行连续两次被别人改动,写入已停止,没有盲目重试。',
+    en: 'The same row was changed by someone else twice during the write; the write stopped without a blind retry.',
+    zhNext: '请稍后重新试算再应用。',
+    enNext: 'Preview again a little later, then apply.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_NOT_ALLOWED/runbook_only_hold_open': RUNBOOK_ONLY_OPEN,
+  'STOCK_PREP_CHANGE_PLAN_NOT_ALLOWED/record_unbound': Object.freeze({
+    zh: '有一行变化找不到对应的表记录,不能确认;什么都没有改动。',
+    en: 'A changed row cannot be bound to its sheet record, so it cannot be confirmed; nothing was changed.',
+    zhNext: '请联系负责人检查这张表。',
+    enNext: 'Ask the owner to check this sheet.',
+  }),
+  'STOCK_PREP_CHANGE_REVIEW_BLOCKED/hold_open': Object.freeze({
+    zh: '这个项目又出现了新的待确认项,要先处理它,复核才能完成;这次没有复核。',
+    en: 'A new hold appeared on this project; it must be handled before the review can complete, and nothing was reviewed now.',
+    zhNext: '先处理新的待确认项(需要时一起确认为新的变更计划),再回来复核。',
+    enNext: 'Handle the new hold first (confirm it into a new change plan if needed), then come back to review.',
+  }),
+  'STOCK_PREP_CHANGE_REVIEW_STALE/content_moved': Object.freeze({
+    zh: '表里的内容在写入之后又变了,复核没有完成。',
+    en: 'The sheet changed after the write, so the review did not complete.',
+    zhNext: '请重新试算;新的变化会作为待确认项出现。',
+    enNext: 'Preview again; the new change shows up as a hold.',
   }),
   'STOCK_PREP_CONTINUATION_CONFIRM_STALE/hold_not_open': RELOAD_THIS_ITEM,
   'STOCK_PREP_CONTINUATION_CONFIRM_STALE/fingerprint': RELOAD_THIS_ITEM,
@@ -1442,6 +1713,13 @@ export const STOCK_PREP_ERROR_REASON_PLAIN: Record<string, StockPrepPlainEntry> 
     en: 'This kind of hold has no confirm action; nothing was changed.',
     zhNext: '看页面上标出的原因;需要时联系负责人。',
     enNext: 'See the reason shown beside it; ask the owner if needed.',
+  }),
+  // PR-7b: the archive refused because the project's batch refresh is suspended (table-actions `refresh_suspended`).
+  'STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY/refresh_suspended': Object.freeze({
+    zh: '本项目的分批拉取正挂起着(有待拉取人员确认的项),这次没有存档。',
+    en: 'This project’s batch refresh is suspended (items await the puller’s confirmation), so nothing was archived.',
+    zhNext: '请拉取人员先处理「拉取待确认」,重新试算后再存档。',
+    enNext: 'Ask a puller to work through “Pull Holds” first, preview again, then archive.',
   }),
   'STOCK_PREP_CONTINUATION_CONFIRM_NOT_ALLOWED/not_confirmable': Object.freeze({
     zh: '这一项现在不能确认(证据不全或结构不对应);什么都没有改动。',
@@ -1654,8 +1932,10 @@ export const STOCK_PREP_REFRESH_RENDERING_PLAIN: Record<string, StockPrepPlainEn
 
 /** O-11 (design §23.3): the asymmetry of a governed project that left the pilot. */
 export const STOCK_PREP_REFRESH_NON_PILOT_ASYMMETRY: StockPrepPlainText = Object.freeze({
-  zh: '本项目已退出试点但仍受保护:图号、名称、材质、版本的变化仍会挂起整次拉取等确认;数量和规格等其他字段的变化按普通刷新直接写入,不再挂起。',
-  en: 'This project left the pilot but stays protected: a change of drawing number, name, material or version still suspends the whole pull for confirmation, while changes of quantity, spec and other fields are written by the normal refresh without suspending.',
+  // PR-7b (PR-7 review N7): a structure / parent change still suspends too — the governed planner raises a
+  // `structure_change` hold for a lineage change whether or not the project is a pilot (D-4).
+  zh: '本项目已退出试点但仍受保护:图号、名称、材质、版本的变化,以及结构或上级(父项)的变化,仍会挂起整次拉取等确认;数量和规格等其他字段的变化按普通刷新直接写入,不再挂起。',
+  en: 'This project left the pilot but stays protected: a change of drawing number, name, material or version, and a change of structure or parent, still suspends the whole pull for confirmation, while changes of quantity, spec and other fields are written by the normal refresh without suspending.',
 })
 
 /** Design §6.2's stated cost of a confirm: the legacy confirmation ledger is re-keyed. */
@@ -1683,6 +1963,87 @@ export const STOCK_PREP_REFRESH_ITEM_UPDATED: StockPrepPlainText = Object.freeze
   zh: '这一项已经更新(新的计算换了记录),请重新阅读后再处理。',
   en: 'This item has been updated (a newer computation replaced the record); read it again, then decide.',
 })
+
+// ---------------------------------------------------------------------------
+// 备料分批拉取第一期 step 4 PR-7b (PR-7 review N2 / N8; plan W7) — every server token the 「拉取待确认」 page shows,
+// in words. The page used to print the raw token (「其他待确认项(candidate_ambiguous)」, 「历史: history_unknown」,
+// 「沿用关系: needs_reconfirmation」, the comparison column's `equal`, a bare `notConfirmableReason`). Each map
+// below covers one CLOSED server vocabulary; StockPreparationRefreshState.spec.ts RS-WORDS reads the plugin's live
+// lists, so a new token without words reds CI (the RS-COPY pattern). A token outside the map (an older or newer
+// server) reads as 「未识别」 with the token shown apart from the sentence, never inside it.
+// ---------------------------------------------------------------------------
+
+/** Hold kinds (plugin stock-preparation-continuation-pairing.cjs `HOLD_KINDS`). */
+export const STOCK_PREP_REFRESH_HOLD_KIND_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  continuation_candidate: Object.freeze({ zh: '疑似同一份需求换了位置(待确认沿用)', en: 'Possibly the same demand at a new position (confirm the relationship)' }),
+  candidate_ambiguous: Object.freeze({ zh: '疑似换了位置,但能配对的位置不止一处', en: 'Possibly moved, but more than one position could pair' }),
+  candidate_target_occupied: Object.freeze({ zh: '疑似换了位置,但新位置上已经有记录', en: 'Possibly moved, but the new position already holds a record' }),
+  candidate_old_duplicate: Object.freeze({ zh: '疑似换了位置,但原位置上有重复的记录', en: 'Possibly moved, but the old position holds duplicate records' }),
+  candidate_keyless_rows: Object.freeze({ zh: '疑似换了位置,但有行缺少识别键', en: 'Possibly moved, but some rows have no identifying key' }),
+  candidate_structure_differs: Object.freeze({ zh: '疑似换了位置,但新旧两处的下级结构对不上', en: 'Possibly moved, but the structure below the old and new positions does not match' }),
+  candidate_incomplete_evidence: Object.freeze({ zh: '疑似换了位置,但需求依据不完整', en: 'Possibly moved, but the demand evidence is incomplete' }),
+  candidate_content_differs: Object.freeze({ zh: '疑似换了位置,但新旧两处的内容不一致', en: 'Possibly moved, but the old and new positions differ in content' }),
+  candidate_shape_unresolved: Object.freeze({ zh: '疑似换了位置,但这种 BOM 形态还没有客户规则', en: 'Possibly moved, but this BOM shape has no customer rule yet' }),
+  dropped_order_head_unresolved: Object.freeze({ zh: '一个下了单的上级件不在这次的 BOM 根件里了,去向待定', en: 'An ordered top-level part is no longer a root of this BOM; where it went is unresolved' }),
+  relationship_reconfirm: Object.freeze({ zh: '已有沿用关系需要重新确认', en: 'An existing relationship needs re-confirmation' }),
+  relationship_content_change: Object.freeze({ zh: '已有沿用关系的机器列内容有变化(待复核)', en: 'A machine column of an existing relationship changed (awaiting review)' }),
+  content_change: Object.freeze({ zh: '机器列内容有变化(待复核)', en: 'A machine column changed (awaiting review)' }),
+  structure_change: Object.freeze({ zh: '结构或上级(父项)有变化(待复核)', en: 'The structure or the parent changed (awaiting review)' }),
+})
+
+/** Why a hold has no confirm (plugin `NOT_CONFIRMABLE_REASONS`). Read after 「这一项现在不能确认:」. */
+export const STOCK_PREP_REFRESH_NOT_CONFIRMABLE_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  specialist_repair: Object.freeze({ zh: '需要专项修复,请联系负责人按运行手册处理', en: 'it needs specialist repair; ask the owner to follow the runbook' }),
+  ambiguous_pairing: Object.freeze({ zh: '能配对的位置不止一处,系统不能替您选', en: 'more than one position could pair, and the system cannot choose for you' }),
+  keyless_rows_present: Object.freeze({ zh: '有行缺少识别键,没法逐行对照', en: 'some rows have no identifying key, so they cannot be compared row by row' }),
+  customer_rule_pending: Object.freeze({ zh: '这种情况还没有客户确认过的处理规则', en: 'there is no customer-approved rule for this case yet' }),
+  phase_2: Object.freeze({ zh: '第一期不处理这类结构变化,留到第二期', en: 'phase 1 does not handle this kind of structural change; it waits for phase 2' }),
+  evidence_incomplete: Object.freeze({ zh: '需求依据不完整', en: 'the demand evidence is incomplete' }),
+  needs_step5: Object.freeze({ zh: '要等「变更复核」上线后才能处理', en: 'it waits for the change review, which is not available yet' }),
+  reconfirm_not_admissible: Object.freeze({ zh: '这种变化第一期不能重新确认', en: 'phase 1 cannot re-confirm this kind of change' }),
+})
+
+/** BOM shapes a candidate could not be read as (plugin `SHAPE_TOKENS`). */
+export const STOCK_PREP_REFRESH_SHAPE_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  old_root_still_ordered: Object.freeze({ zh: '原来的上级件仍在订单需求里', en: 'the old top-level part is still ordered' }),
+  sheet_metal_dual: Object.freeze({ zh: '钣金件的双重形态', en: 'a dual sheet-metal shape' }),
+  no_dash_hierarchy: Object.freeze({ zh: '图号没有横线层级', en: 'drawing numbers without a dash hierarchy' }),
+  root_selection_disabled: Object.freeze({ zh: '根件筛选没有启用', en: 'root selection is turned off' }),
+  parent_before_child: Object.freeze({ zh: '上级件排在下级件前面', en: 'a parent listed before its child' }),
+  dropped_other_rule: Object.freeze({ zh: '原来的根件被其他筛选规则去掉了', en: 'the old root was dropped by another selection rule' }),
+})
+
+/** Where a demand's history comes from (plugin store `EVIDENCE_HISTORY_STATUSES`). */
+export const STOCK_PREP_REFRESH_HISTORY_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  history_unknown: Object.freeze({ zh: '无法查证', en: 'cannot be verified' }),
+  relationship_snapshot: Object.freeze({ zh: '按沿用关系建立时的记录', en: 'as recorded when the relationship was made' }),
+  demand_evidence_store: Object.freeze({ zh: '按需求依据记录', en: 'from the demand evidence record' }),
+})
+
+/** A relationship's status (plugin store `CONTINUATION_ROW_STATUSES`). */
+export const STOCK_PREP_REFRESH_CONTINUATION_STATUS_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  active: Object.freeze({ zh: '有效', en: 'active' }),
+  needs_reconfirmation: Object.freeze({ zh: '待重新确认', en: 'needs re-confirmation' }),
+  ended: Object.freeze({ zh: '已结束', en: 'ended' }),
+})
+
+/** One compared field's result (plugin pairing `compareSevenItems`; the spec scans its literals). */
+export const STOCK_PREP_REFRESH_COMPARISON_STATUS_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  equal: Object.freeze({ zh: '一致', en: 'same' }),
+  differs: Object.freeze({ zh: '不同', en: 'differs' }),
+  incomplete: Object.freeze({ zh: '缺数据,没法比较', en: 'missing data, not compared' }),
+  not_compared_spec_undeclared: Object.freeze({ zh: '规格列没有声明,不比较', en: 'spec column not declared, not compared' }),
+  excluded_root_order_quantity: Object.freeze({ zh: '根件的订单数量,不参与比较', en: 'the root’s order quantity, not compared' }),
+})
+
+/** A token outside its map: words for "not recognised"; the caller shows the token APART from the sentence. */
+export const STOCK_PREP_REFRESH_TOKEN_UNKNOWN: StockPrepPlainText = Object.freeze({ zh: '未识别', en: 'not recognised' })
+
+/** The words for `token` in `map`, or null when the map does not know it (the caller then says 「未识别」). */
+export function stockPrepRefreshTokenPlain(map: Record<string, StockPrepPlainText>, token: string | null | undefined): StockPrepPlainText | null {
+  if (typeof token !== 'string' || token.length === 0) return null
+  return Object.prototype.hasOwnProperty.call(map, token) ? map[token] : null
+}
 
 // ---------------------------------------------------------------------------
 // Confirmation-queue conflict types — 什么情况 (2026-09-10 field report).
@@ -2963,6 +3324,28 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '请联系负责人核对项目表登记。',
     enNext: 'Ask the owner to check the project-sheet registration.',
   }),
+  // PR-8 review fix B1 — 409 STOCK_PREP_CHANGE_PLAN_STALE at the apply, by the tri-state `details.partial` (WL-6's rule).
+  /** `partial: true`: the version fence stopped the run AFTER a host write was attempted — rows may have landed. */
+  WRITE_ROW_CHANGED_MIDWAY: Object.freeze({
+    zh: '写入中途发现有行在试算之后被改动,写入已停止,可能已写进一部分',
+    en: 'A row changed after the preview; writing stopped part-way and some rows may already have landed',
+    zhNext: '请重新同步(重新试算);已写入的行不会重复写。',
+    enNext: 'Sync again (preview again); rows that landed will not be written twice.',
+  }),
+  /** `partial: false` or unreported: neutral — neither "nothing was written" nor "rows landed". */
+  WRITE_ROW_CHANGED: Object.freeze({
+    zh: '写入时发现有行在试算之后被改动,写入已停止',
+    en: 'A row changed after the preview, so writing stopped',
+    zhNext: '请重新同步(重新试算)。',
+    enNext: 'Sync again (preview again).',
+  }),
+  /** A reason only a run bound to a confirmed change plan produces (plan replaced / invalidated / already written). */
+  WRITE_CHANGE_PLAN_STALE: Object.freeze({
+    zh: '这次试算绑定的已确认变更计划已经不是当前的计划,写入已停止',
+    en: 'The confirmed change plan this preview was bound to is no longer the current one, so writing stopped',
+    zhNext: '请重新同步(重新试算);如果内容又变了,请拉取人员重新确认变更计划。',
+    enNext: 'Sync again (preview again); if the change moved, the puller confirms the change plan again.',
+  }),
 
   // 4. 批次存档
   BATCH_ARCHIVED: Object.freeze({
@@ -3210,6 +3593,17 @@ export const STOCK_PREP_SYNC_VERDICT_PLAIN: Record<string, StockPrepPlainEntry> 
     zhNext: '请联系平台管理员按手册恢复,不是数据源的问题。',
     enNext: 'Ask the platform admin to recover it per the runbook; it is not a data-source problem.',
   }),
+  /**
+   * PR-8 review fix B1: the write STOPPED after a host write was attempted (or it is not known whether one was). Rows
+   * may already be in the sheet, so this is never the `blocked` sentence (G-4: 「数据没有变化」 only when nothing was
+   * written) — and never the `partial` one either, which states rows DID land.
+   */
+  interrupted: Object.freeze({
+    zh: '写入没有完成 —— 中途停了下来,可能已经写进了一部分行,表里的数据可能已经变了。',
+    en: 'The write did not finish — it stopped part-way, some rows may already have landed, and the table may have changed.',
+    zhNext: '已写进去的行不会重复写。请重新同步(重新试算);下面每一步都写了停在哪里。',
+    enNext: 'Rows that landed will not be written twice. Sync again (preview again); each step below says where it stopped.',
+  }),
   blocked: Object.freeze({
     zh: '这次没有导入成功,数据没有变化。',
     en: 'Nothing was imported this time, and nothing was changed.',
@@ -3403,6 +3797,21 @@ export const STOCK_PREP_AUDIT_ACTION_MODE_PLAIN: Record<string, Record<string, S
       en: "Repaired a project's stock-preparation sheet (filled in option lists / locked PLM columns)",
     }),
   }),
+  // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; register R-68): the per-sheet switch writes its row
+  // under 088's `project_fields_update` — the switch is a project-level setting of the sheet, and a new action would
+  // need a new CHECK-constraint migration — with one closed mode per value it was SET to
+  // (http-routes.cjs STOCK_PREPARATION_MANUAL_ROWS_AUDIT_MODES). Read by action alone it said 「改了一个项目的项目级信息」;
+  // the S3 mode `updated` (负责人 / 备注 / 计划完成) keeps that line.
+  project_fields_update: Object.freeze({
+    manual_rows_allowed: Object.freeze({
+      zh: '为一个项目的备料表打开了「允许人工补充行」',
+      en: "Allowed manual supplementary rows on a project's stock-preparation sheet",
+    }),
+    manual_rows_disabled: Object.freeze({
+      zh: '为一个项目的备料表关闭了「允许人工补充行」',
+      en: "Turned off manual supplementary rows on a project's stock-preparation sheet",
+    }),
+  }),
 })
 
 export function stockPrepAuditActionPlain(action: string, mode?: string | null): StockPrepPlainText | null {
@@ -3586,6 +3995,168 @@ export const STOCK_PREP_PROJECT_TARGET_PLAIN: Record<string, StockPrepPlainEntry
 
 export function stockPrepProjectTargetPlain(id: string): StockPrepPlainEntry | null {
   return lookup(STOCK_PREP_PROJECT_TARGET_PLAIN, id)
+}
+
+// ---------------------------------------------------------------------------
+// 人工补充行 B4 — the project sync panel's manual-rows section (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3 /
+// §8 「B4」 3; OQ4, OQ6; register R-68)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every sentence StockPreparationProjectTargetManualRows.vue says, keyed by front-end ids (nothing server-side emits
+ * them). THREE wording rules the ADR fixes:
+ *   * the reminder NEVER promises a merge — 「永远不自动合并」 (OQ4): it says the system does not merge and leaves the
+ *     decision to the reader;
+ *   * the unbound-row guidance is the ADR §8 「B4」 3 text: rows with a creator may be deleted; rows without one need
+ *     their key changed BEFORE the lock is completed; after the lock only an approved database operation remains;
+ *   * turning the switch off stops 新增 and 复制为新行 ONLY — existing manual rows stay editable and deletable (§4
+ *     「关闭的含义」).
+ * VALUES-FREE: counts and record handles are rendered by the panel beside these sentences, never baked into them
+ * (the count-bearing builders below put only a number in).
+ */
+export const STOCK_PREP_MANUAL_ROWS_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  title: Object.freeze({ zh: '人工补充行', en: 'Manual supplementary rows' }),
+  status_allowed_default: Object.freeze({
+    zh: '「允许人工补充行」:已允许(默认)。',
+    en: '“Allow manual supplementary rows”: allowed (the default).',
+  }),
+  status_allowed: Object.freeze({ zh: '「允许人工补充行」:已允许。', en: '“Allow manual supplementary rows”: allowed.' }),
+  status_disabled: Object.freeze({ zh: '「允许人工补充行」:已关闭。', en: '“Allow manual supplementary rows”: turned off.' }),
+  meaning: Object.freeze({
+    zh: '允许时,有权限的人可以在这张项目表上「新增人工补充行」和「复制为新行」;关闭后这两个入口不再出现,已有的人工补充行照旧可以修改、删除。',
+    en: 'While allowed, people with access can “Add a manual supplementary row” and “Copy as a new row” on this project sheet; turned off, those two entries disappear, and existing manual supplementary rows can still be edited and deleted.',
+  }),
+  lock_missing: Object.freeze({
+    zh: '这张表的 PLM 列锁还没有补齐:补锁之前,即使开关是允许,也不能新增人工补充行。',
+    en: 'This sheet’s PLM column lock is not complete yet: until it is, no manual supplementary row can be added, even while the switch says allowed.',
+    zhNext: '请联系管理员修复本表(补锁)。',
+    enNext: 'Ask an administrator to repair this sheet (complete the lock).',
+  }),
+  key_column_missing: Object.freeze({
+    zh: '这张表缺少唯一键列,没法设置这个开关。',
+    en: 'This sheet has no unique-key column, so this switch cannot be set.',
+    zhNext: '请联系管理员核对本表的结构。',
+    enNext: 'Ask an administrator to check this sheet’s structure.',
+  }),
+  archived: Object.freeze({
+    zh: '这个项目的备料表已归档,不能修改这个开关。',
+    en: 'This project’s stock-preparation sheet is archived, so this switch cannot be changed.',
+    zhNext: '请拉取人员先恢复这张表。',
+    enNext: 'Ask a pull operator to restore the sheet first.',
+  }),
+  action_disable: Object.freeze({ zh: '关闭人工补充行', en: 'Turn off manual supplementary rows' }),
+  action_allow: Object.freeze({ zh: '允许人工补充行', en: 'Allow manual supplementary rows' }),
+  confirm_disable: Object.freeze({
+    zh: '关闭后,这张表不能再新增人工补充行,也不能「复制为新行」;已有的人工补充行不受影响。',
+    en: 'Once turned off, no manual supplementary row can be added to this sheet and “Copy as a new row” is gone; existing manual supplementary rows are not affected.',
+  }),
+  confirm_allow: Object.freeze({
+    zh: '打开后,有权限的人可以在这张表上新增人工补充行和「复制为新行」。',
+    en: 'Once allowed, people with access can add manual supplementary rows to this sheet and “Copy as a new row”.',
+  }),
+  confirm_action: Object.freeze({ zh: '确认修改', en: 'Confirm the change' }),
+  confirm_cancel: Object.freeze({ zh: '取消', en: 'Cancel' }),
+  result_disabled: Object.freeze({ zh: '已关闭「允许人工补充行」。', en: 'Manual supplementary rows are now turned off.' }),
+  result_allowed: Object.freeze({ zh: '已允许人工补充行。', en: 'Manual supplementary rows are now allowed.' }),
+  result_unchanged: Object.freeze({ zh: '开关本来就是这个状态,没有改动。', en: 'The switch was already in that state; nothing changed.' }),
+  result_mismatch: Object.freeze({
+    zh: '输入的项目号和这个项目对不上,没有修改。',
+    en: 'The typed project number does not match this project, so nothing was changed.',
+    zhNext: '请照页面上显示的项目号原样再输入一次(字母大小写也要一致)。',
+    enNext: 'Type the project number exactly as shown (letter case included) and try again.',
+  }),
+  result_not_permitted: Object.freeze({
+    zh: '只有备料主管理员(或平台管理员)可以修改这个开关。',
+    en: 'Only a stock-prep administrator (or a platform administrator) can change this switch.',
+  }),
+  last_pull_none: Object.freeze({
+    zh: '最近的拉取没有读到人工补充行,也没有需要处理的异常行。',
+    en: 'The latest pulls read no manual supplementary row and no anomalous row to handle.',
+  }),
+  last_pull_unavailable: Object.freeze({
+    zh: '最近一次拉取的人工补充行提醒暂时读不到。',
+    en: 'The latest pull’s manual-row reminder cannot be read right now.',
+    zhNext: '稍后再看;一直这样请联系平台管理员。',
+    enNext: 'Look again later; if it keeps happening, ask the platform admin.',
+  }),
+  reminder_explain: Object.freeze({
+    zh: '同一物料:图号相同;人工行没填图号时,名称、规格、材料都相同。系统不会自动合并,请核对后自己决定保留哪一行。',
+    en: 'The same material: the same drawing number; or, where the manual row has none, the same name, specification and material. The system never merges them — check and decide yourself which row to keep.',
+  }),
+  unbound_explain: Object.freeze({
+    zh: '这些行的唯一键以 manual: 开头,却不是这张表的人工补充行,拉取不再维护它们。',
+    en: 'These rows have a unique key starting with manual: but are not manual supplementary rows of this sheet, so pulls no longer maintain them.',
+  }),
+  unbound_guidance: Object.freeze({
+    zh: '处理办法:有建行人的,可以直接删除;没有建行人的,要在补锁之前把唯一键改掉;补锁之后,只能由负责人批准后做数据库处理。',
+    en: 'What to do: rows with a creator can simply be deleted; rows without one need their unique key changed before the lock is completed; once the lock is complete, only a database operation approved by the person in charge remains.',
+  }),
+  view_rows: Object.freeze({ zh: '查看这些行', en: 'See these rows' }),
+  /** For a reader below the PULL tier (B4 fix round 1, OQ4): who sees the reminder here, and who changes the switch. */
+  admin_only: Object.freeze({
+    zh: '人工补充行的拉取提醒和「允许人工补充行」开关的状态,拉取人员和备料主管理员在这里能看到;只有备料主管理员(或平台管理员)可以修改这个开关。',
+    en: 'Pull operators and stock-prep administrators see the manual-row pull reminder and the state of the “Allow manual supplementary rows” switch here; only a stock-prep administrator (or a platform administrator) can change the switch.',
+  }),
+  /** For a reader who sees the section but does not hold the SET (B4 fix round 1, OQ6; R-11: the reason in words). */
+  set_admin_only: Object.freeze({
+    zh: '只有备料主管理员(或平台管理员)可以修改这个开关;需要调整请联系备料主管理员。',
+    en: 'Only a stock-prep administrator (or a platform administrator) can change this switch; to change it, contact a stock-prep administrator.',
+  }),
+  /**
+   * An ADOPTED older sandbox sheet (B4 fix round 1): the host never offers manual rows on it, so the switch would change
+   * nothing and is not offered; every manual:-prefixed row a pull meets there is an unbound row.
+   */
+  not_supported: Object.freeze({
+    zh: '这张表是早先接管过来的旧备料表,系统在它上面不提供人工补充行,所以这里没有「允许人工补充行」开关。',
+    en: 'This is an older stock-prep sheet that was taken over; manual supplementary rows are not offered on it, so there is no “Allow manual supplementary rows” switch here.',
+    zhNext: '如果这个项目需要人工补充行,请联系负责人决定是否改用新的项目备料表。',
+    enNext: 'If this project needs manual supplementary rows, ask the owner whether to move it to a new project sheet.',
+  }),
+  read_failed: Object.freeze({
+    zh: '人工补充行的设置暂时读不到。',
+    en: 'The manual supplementary rows settings cannot be read right now.',
+  }),
+})
+
+export function stockPrepManualRowsPlain(id: string): StockPrepPlainEntry {
+  return lookup(STOCK_PREP_MANUAL_ROWS_PLAIN, id) ?? { zh: id, en: id }
+}
+
+/** 「月-日 时:分」 in the reader's local time; null when the stamp is not a time. */
+function manualRowsClockText(iso: string | null): string | null {
+  if (!iso) return null
+  const parsed = new Date(iso)
+  if (Number.isNaN(parsed.getTime())) return null
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
+}
+
+/** The reminder's first line: when the last pull ran and how many manual rows it read. Counts only. */
+export function stockPrepManualRowsCountText(lastPull: { at: string | null; mode: 'dry_run' | 'apply' | null; rowCount: number | null }): StockPrepPlainText {
+  const clock = manualRowsClockText(lastPull.at)
+  const count = lastPull.rowCount ?? 0
+  const kindZh = lastPull.mode === 'apply' ? '写入' : '试算'
+  const kindEn = lastPull.mode === 'apply' ? 'write' : 'preview'
+  return {
+    zh: clock ? `最近一次拉取(${kindZh},${clock})时,这张表有 ${count} 行人工补充行。` : `最近一次拉取时,这张表有 ${count} 行人工补充行。`,
+    en: clock ? `At the latest pull (${kindEn}, ${clock}) this sheet had ${count} manual supplementary row(s).` : `At the latest pull this sheet had ${count} manual supplementary row(s).`,
+  }
+}
+
+/** 「其中 N 行和 PLM 本次新增的行是同一物料」 — the OQ4 reminder's count. */
+export function stockPrepManualRowsMatchedText(count: number): StockPrepPlainText {
+  return {
+    zh: `其中 ${count} 行和 PLM 这次新增的行是同一物料。`,
+    en: `${count} of them match a row PLM newly added in that pull.`,
+  }
+}
+
+/** 「另有 N 行以 manual: 开头但不是本表的人工补充行」 — the unbound prefix rows' count (ADR §2.4). */
+export function stockPrepManualRowsUnboundText(count: number): StockPrepPlainText {
+  return {
+    zh: `另有 ${count} 行的唯一键以 manual: 开头,但不是这张表的人工补充行。`,
+    en: `${count} more row(s) have a unique key starting with manual: but are not manual supplementary rows of this sheet.`,
+  }
 }
 
 /**
