@@ -3675,6 +3675,152 @@ describe('Attendance admin regressions', () => {
       })
       expectCycleTrafficScoped()
     })
+
+    // The rows above have no template and the template list is empty (the template select is disabled), so they
+    // never compare a template. Here the list has two templates and May is bound to one of them.
+    describe('a cycle bound to a payroll template', () => {
+      const R7_TEMPLATES_URL = `/api/attendance/payroll-templates?orgId=${R7_ORG_ID}`
+      const payrollTemplate = (id: string, name: string, isDefault: boolean) => ({
+        id,
+        orgId: R7_ORG_ID,
+        name,
+        timezone: 'UTC',
+        startDay: 1,
+        endDay: 31,
+        endMonthOffset: 0,
+        autoGenerate: false,
+        isDefault,
+        config: {},
+      })
+      let templateListRequests: string[] = []
+
+      // Runs after the outer beforeEach: same cycle and fallback mocks, plus a template list.
+      beforeEach(() => {
+        cycleRows = [mayCycle({ templateId: 'tpl-a' }), juneCycle()]
+        templateListRequests = []
+        const outer = vi.mocked(apiFetch).getMockImplementation()
+        expect(outer).toBeTruthy()
+        vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+          const url = typeof input === 'string' ? input : input.url
+          const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+          if (url.startsWith('/api/attendance/payroll-templates?') && method === 'GET') {
+            templateListRequests.push(url)
+            return jsonResponse(200, {
+              ok: true,
+              data: { items: [payrollTemplate('tpl-a', 'Template A', true), payrollTemplate('tpl-b', 'Template B', false)] },
+            })
+          }
+          return outer!(input, init)
+        })
+      })
+
+      function templateOptions(section: HTMLElement): string[] {
+        const select = section.querySelector<HTMLSelectElement>('#attendance-payroll-cycle-template')
+        expect(select).toBeTruthy()
+        return Array.from(select!.options).map(option => option.value)
+      }
+
+      function setCycleTemplate(section: HTMLElement, value: string): void {
+        expect(templateOptions(section)).toContain(value)
+        const select = section.querySelector<HTMLSelectElement>('#attendance-payroll-cycle-template')!
+        select.value = value
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+      }
+
+      // Opens the section and selects May; fails unless the form really holds May's template.
+      async function editTemplatedMay(): Promise<HTMLElement> {
+        const section = await openPayrollCycles()
+        expect(templateListRequests).toContain(R7_TEMPLATES_URL)
+        const select = section.querySelector<HTMLSelectElement>('#attendance-payroll-cycle-template')
+        expect(select).toBeTruthy()
+        await vi.waitFor(() => expect(select!.disabled).toBe(false), { timeout: 1000 })
+        expect(templateOptions(section)).toEqual(['', 'tpl-a', 'tpl-b'])
+        await editCycle(section, 'May payroll')
+        expect(inputValue(section, '#attendance-payroll-cycle-template')).toBe('tpl-a')
+        return section
+      }
+
+      function expectTemplateTrafficScoped(): void {
+        expect(templateListRequests.length).toBeGreaterThan(0)
+        expect(templateListRequests.every(url => url === R7_TEMPLATES_URL)).toBe(true)
+      }
+
+      it('a rename sends only name and orgId, never the unchanged template', async () => {
+        const section = await editTemplatedMay()
+        setInput(section, '#attendance-payroll-cycle-name', 'May payroll (revised)')
+        await flushUi(2)
+        await clickUpdate(section)
+
+        expect(cycleUpdates).toEqual([
+          { url: '/api/attendance/payroll-cycles/cycle-a/update', body: { name: 'May payroll (revised)', orgId: R7_ORG_ID } },
+        ])
+        expect(cycleRows[0]!.templateId).toBe('tpl-a')
+        expectTemplateTrafficScoped()
+        expectCycleTrafficScoped()
+      })
+
+      it('changing only the template sends the new templateId and orgId, and the next save diffs against the saved template', async () => {
+        const section = await editTemplatedMay()
+        setCycleTemplate(section, 'tpl-b')
+        await flushUi(2)
+        await clickUpdate(section)
+        expect(cycleUpdates).toEqual([
+          { url: '/api/attendance/payroll-cycles/cycle-a/update', body: { templateId: 'tpl-b', orgId: R7_ORG_ID } },
+        ])
+        expect(inputValue(section, '#attendance-payroll-cycle-template')).toBe('tpl-b')
+
+        // The saved row is the new baseline: saving again without a change makes no request.
+        sectionButton(section, 'Update cycle').click()
+        await flushUi(4)
+        expect(cycleUpdates).toHaveLength(1)
+        expect(container!.textContent).toContain('Payroll cycle not modified.')
+
+        // A rename after it does not send the template again.
+        setInput(section, '#attendance-payroll-cycle-name', 'May payroll on B')
+        await flushUi(2)
+        await clickUpdate(section)
+        expect(cycleUpdates).toHaveLength(2)
+        expect(cycleUpdates[1]).toEqual({
+          url: '/api/attendance/payroll-cycles/cycle-a/update',
+          body: { name: 'May payroll on B', orgId: R7_ORG_ID },
+        })
+        expect(cycleRows[0]!.templateId).toBe('tpl-b')
+        expectTemplateTrafficScoped()
+        expectCycleTrafficScoped()
+      })
+
+      it('going back to the stored template, or to Manual, sends nothing; a cycle without a template diffs against Manual', async () => {
+        const section = await editTemplatedMay()
+        setCycleTemplate(section, 'tpl-b')
+        await flushUi(2)
+        setCycleTemplate(section, 'tpl-a')
+        await flushUi(2)
+        sectionButton(section, 'Update cycle').click()
+        await flushUi(4)
+        expect(cycleUpdates).toEqual([])
+        expect(container!.textContent).toContain('Payroll cycle not modified.')
+
+        // Manual ('') is an emptied input and stays unsent, like the other fields: an edit cannot clear a template.
+        setCycleTemplate(section, '')
+        await flushUi(2)
+        sectionButton(section, 'Update cycle').click()
+        await flushUi(4)
+        expect(cycleUpdates).toEqual([])
+
+        // June has no template, so its baseline is Manual: closing it sends no templateId.
+        await editCycle(section, 'June payroll')
+        expect(inputValue(section, '#attendance-payroll-cycle-template')).toBe('')
+        setCycleStatus(section, 'closed')
+        await flushUi(2)
+        await clickUpdate(section)
+        expect(cycleUpdates).toEqual([
+          { url: '/api/attendance/payroll-cycles/cycle-b/update', body: { status: 'closed', orgId: R7_ORG_ID } },
+        ])
+        expect(cycleRows[0]!.templateId).toBe('tpl-a')
+        expectTemplateTrafficScoped()
+        expectCycleTrafficScoped()
+      })
+    })
   })
 
   it('renders attendance groups as a list-detail manager with people inside the selected group', async () => {
