@@ -3,7 +3,10 @@ import database from './db.cjs'
 import credentialMaterials from './yida-credential-material-store.cjs'
 import { compileYidaDraft } from './yida-draft-plan.mjs'
 import { createInternalYidaDraftTransactionReader, createInternalYidaDraftTransactionWriter } from './yida-draft-plan-store.mjs'
-import { createInternalYidaApprovedTargetTransactionWriter } from './yida-approved-target-store.mjs'
+import {
+  createInternalYidaAdditionalTargetTransactionWriter, createInternalYidaApprovedTargetTransactionLister,
+  createInternalYidaApprovedTargetTransactionWriter,
+} from './yida-approved-target-store.mjs'
 
 // Private persistence composition only. The host must first establish actual
 // live ACL, its permanent deployment anchor and command inside this transaction.
@@ -100,6 +103,9 @@ export function createYidaInitializationBinding(options) {
         const writeDraft = createInternalYidaDraftTransactionWriter(options)
         const writeTarget = createInternalYidaApprovedTargetTransactionWriter(options)
         const readDraft = createInternalYidaDraftTransactionReader(options)
+        // Y2 (host multi-target switch ON only): additional targets of the anchor owner.
+        const writeAdditionalTarget = createInternalYidaAdditionalTargetTransactionWriter(options)
+        const listTargets = createInternalYidaApprovedTargetTransactionLister(options)
         return Object.freeze({
           async initializeInTransaction(rawTrx, input) {
             try {
@@ -112,6 +118,23 @@ export function createYidaInitializationBinding(options) {
               return Object.freeze({ draft, credentialRef: material.credentialRef,
                 credentialGeneration: material.credentialGeneration, targetRef: target.targetRef })
             } catch (error) { closed(error) }
+          },
+          // Same captured input as slot 1 (its own material, draft and attestation), sealed as
+          // the next free slot 2..16. Generation 1 only, like initialization.
+          async registerTargetInTransaction(rawTrx, input) {
+            try {
+              const captured = capturedInput(input), trx = crud(rawTrx)
+              const material = await writeMaterial(trx, { material: captured.material })
+              const draft = await writeDraft(trx, captured.draft)
+              const target = await writeAdditionalTarget(trx, { operationId: draft.operationId,
+                credentialRef: material.credentialRef, credentialGeneration: material.credentialGeneration,
+                attestation: captured.attestation })
+              return Object.freeze({ draft, credentialRef: material.credentialRef,
+                credentialGeneration: material.credentialGeneration, targetRef: target.targetRef, slot: target.slot })
+            } catch (error) { closed(error) }
+          },
+          async listTargetsInTransaction(rawTrx) {
+            try { return await listTargets(crud(rawTrx)) } catch (error) { closed(error) }
           },
           async inspectDraftInTransaction(rawTrx, input) {
             try {
