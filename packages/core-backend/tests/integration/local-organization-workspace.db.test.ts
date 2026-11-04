@@ -16,7 +16,7 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL', () => {
   expect(process.env.DATABASE_URL).toBeTruthy()
 })
 
-// Manual finite manifest: 21 native cases + sentinel = 22. Loops below are predicate variants,
+// Manual finite manifest: 25 native cases + sentinel = 26. Loops below are predicate variants,
 // not extra test cases. Source-fault/read-only-failure phases belong to main (see worker proof).
 const ROOT = '/api/admin/directory/local'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -775,7 +775,90 @@ describeIfDatabase('native local organization workspace', () => {
     expect((await project(a, uid)).created).toBe(true)
   })
 
-  // 21
+  // 22
+  it('deactivation after GET rejects a department rename and does not revive the anchor', async () => {
+    const a = await anchor()
+    await query("UPDATE directory_integrations SET name = 'Local organization' WHERE id = $1", [a])
+    const dept = await department(a, 'original')
+    const loaded = await ok<{ integration: { id: string; isActive: boolean } }>(await request('/workspace'))
+    expect(loaded.integration).toMatchObject({ id: a, isActive: true })
+    await query("UPDATE directory_integrations SET status = 'inactive' WHERE id = $1", [a])
+    await noChange(async () => {
+      await error(await request(`/departments/${dept.id}`, 'PATCH', { name: 'renamed', expectedIntegrationId: a }), 409, 'DIRECTORY_LOCAL_CONFLICT')
+    })
+  })
+
+  // 23
+  it('anchor replacement rejects the loaded id and writes nothing on the new anchor', async () => {
+    const previous = await anchor()
+    await query("UPDATE directory_integrations SET status = 'inactive', name = 'Local organization retired' WHERE id = $1", [previous])
+    const replacement = await anchor()
+    await query("UPDATE directory_integrations SET name = 'Local organization', status = 'active' WHERE id = $1", [replacement])
+    await noChange(async () => {
+      await error(await request('/departments', 'POST', { name: 'should-not-exist', parentDepartmentId: null, orderIndex: 0, expectedIntegrationId: previous }), 409, 'DIRECTORY_LOCAL_CONFLICT')
+    })
+    expect((await query("SELECT count(*)::int AS n FROM directory_departments WHERE integration_id = $1", [replacement])).rows[0]).toEqual({ n: 0 })
+  })
+
+  // 24
+  it('a disable committed while the department write waits is rejected with zero writes', async () => {
+    const a = await anchor()
+    await query("UPDATE directory_integrations SET name = 'Local organization' WHERE id = $1", [a])
+    const dept = await department(a, 'original')
+    const holder = new Client({ connectionString: process.env.DATABASE_URL })
+    await holder.connect()
+    let pending: Promise<Response> | undefined
+    try {
+      await holder.query('BEGIN')
+      await holder.query('SELECT id FROM directory_integrations WHERE id = $1 FOR UPDATE', [a])
+      await holder.query("UPDATE directory_integrations SET status = 'inactive' WHERE id = $1", [a])
+      pending = request(`/departments/${dept.id}`, 'PATCH', { name: 'renamed', expectedIntegrationId: a })
+      const pid = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]!.pid
+      let blocked = false
+      const deadline = Date.now() + 3000
+      while (Date.now() < deadline) {
+        const waiters = await query(
+          "SELECT pid FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid)) AND wait_event_type = 'Lock'",
+          [pid],
+        )
+        if (waiters.rows.length >= 1) { blocked = true; break }
+        await new Promise(done => setTimeout(done, 20))
+      }
+      expect(blocked).toBe(true)
+      await holder.query('COMMIT')
+      await error(await pending, 409, 'DIRECTORY_LOCAL_CONFLICT')
+      expect((await query('SELECT status FROM directory_integrations WHERE id = $1', [a])).rows).toEqual([{ status: 'inactive' }])
+      expect((await query('SELECT name FROM directory_departments WHERE id = $1', [dept.id])).rows).toEqual([{ name: 'original' }])
+    } finally {
+      await holder.query('ROLLBACK').catch(() => undefined)
+      await pending
+      await holder.end()
+    }
+  })
+
+  // 25
+  it('a name-only save keeps a missing parent, an archived parent, and a parent another admin already changed', async () => {
+    const a = await anchor()
+    const missing = await department(a, 'orphan', 'missing-parent-key')
+    const archived = await department(a, 'archived-parent')
+    const child = await department(a, 'child', archived.external)
+    await query('UPDATE directory_departments SET is_active = FALSE WHERE id = $1', [archived.id])
+    expect((await request(`/departments/${missing.id}`, 'PATCH', { name: 'orphan-renamed', expectedIntegrationId: a })).status).toBe(200)
+    expect((await query('SELECT name, external_parent_department_id FROM directory_departments WHERE id = $1', [missing.id])).rows)
+      .toEqual([{ name: 'orphan-renamed', external_parent_department_id: 'missing-parent-key' }])
+    expect((await request(`/departments/${child.id}`, 'PATCH', { name: 'child-renamed', expectedIntegrationId: a })).status).toBe(200)
+    expect((await query('SELECT name, external_parent_department_id FROM directory_departments WHERE id = $1', [child.id])).rows)
+      .toEqual([{ name: 'child-renamed', external_parent_department_id: archived.external }])
+    const parentA = await department(a, 'parent-a')
+    const parentB = await department(a, 'parent-b')
+    const moved = await department(a, 'moved', parentA.external)
+    await query('UPDATE directory_departments SET external_parent_department_id = $2 WHERE id = $1', [moved.id, parentB.external])
+    expect((await request(`/departments/${moved.id}`, 'PATCH', { name: 'moved-renamed', expectedIntegrationId: a })).status).toBe(200)
+    expect((await query('SELECT name, external_parent_department_id FROM directory_departments WHERE id = $1', [moved.id])).rows)
+      .toEqual([{ name: 'moved-renamed', external_parent_department_id: parentB.external }])
+  })
+
+  // 26
   it('same-org projection changes a prospective plan; production apply sees the fresh local sibling and writes no effects', async () => {
     const a = await anchor()
     const uid = await user('subject')

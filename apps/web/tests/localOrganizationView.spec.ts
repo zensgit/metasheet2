@@ -5,7 +5,7 @@ import { departmentRows, parentOptions } from '../src/components/localOrganizati
 import type { LocalDepartment } from '../src/services/localOrganizationClient'
 
 const mocks = vi.hoisted(() => ({
-  fetch: vi.fn(), admin: true, session: 'session-a',
+  fetch: vi.fn(), admin: true, session: 'session-a', base: '/',
   listeners: new Set<() => void>(), routeGuard: null as (() => boolean) | null,
 }))
 vi.mock('../src/utils/api', () => ({ apiFetch: (...args: unknown[]) => mocks.fetch(...args) }))
@@ -16,7 +16,15 @@ vi.mock('../src/composables/authPrincipal', () => ({
   onAuthPrincipalChange: (listener: () => void) => { mocks.listeners.add(listener); return () => mocks.listeners.delete(listener) },
 }))
 vi.mock('../src/utils/explicitSessionOrg', () => ({ EXPLICIT_SESSION_ORG_KEY: 'explicit-org' }))
-vi.mock('vue-router', () => ({ onBeforeRouteLeave: (guard: () => boolean) => { mocks.routeGuard = guard } }))
+vi.mock('vue-router', () => ({
+  onBeforeRouteLeave: (guard: () => boolean) => { mocks.routeGuard = guard },
+  useRouter: () => ({
+    resolve: (to: string) => {
+      const base = mocks.base.endsWith('/') ? mocks.base : `${mocks.base}/`
+      return { href: `${base}${to.replace(/^\//, '')}` }
+    },
+  }),
+}))
 const anchor = '11111111-1111-4111-8111-111111111111'
 const otherAnchor = '99999999-9999-4999-8999-999999999999'
 const a = '22222222-2222-4222-8222-222222222222'
@@ -122,14 +130,15 @@ async function value(label: string, v: string) {
 }
 function writes() { return mocks.fetch.mock.calls.filter(([, init]) => init.method !== 'GET') }
 function expectLastWrite(path: string, method: string, body: object) {
+  const payload = path === '/member-projections' ? body : { ...body, expectedIntegrationId: anchor }
   const commands = writes()
   expect(commands[commands.length - 1]).toEqual(['/api/admin/directory/local' + path, {
-    method, suppressUnauthorizedRedirect: true, body: JSON.stringify(body),
+    method, suppressUnauthorizedRedirect: true, body: JSON.stringify(payload),
   }])
 }
 beforeEach(() => {
   mocks.fetch.mockReset(); mocks.fetch.mockImplementation(server)
-  mocks.admin = true; mocks.session = 'session-a'; mocks.listeners.clear(); mocks.routeGuard = null
+  mocks.admin = true; mocks.session = 'session-a'; mocks.base = '/'; mocks.listeners.clear(); mocks.routeGuard = null
   app = null; container = document.createElement('div'); document.body.appendChild(container)
 })
 afterEach(() => { app?.unmount(); container.remove(); app = null })
@@ -174,6 +183,42 @@ describe('local organization workspace', () => {
     expectLastWrite('/departments/' + d1 + '/archive', 'POST', {})
     await click('旧部门（已归档）')
     expect(button('保存部门').matches(':disabled')).toBe(true)
+  })
+  it('renames a department with a missing or archived parent without clearing that parent', async () => {
+    const missing = { id: d1, name: '研发', parentDepartmentId: null, parentMissing: true, orderIndex: 1, isActive: true }
+    const archivedParent = { id: d2, name: '运营', parentDepartmentId: d4, parentMissing: false, orderIndex: 2, isActive: true }
+    mocks.fetch.mockImplementation((path: string, init: RequestInit = {}) => {
+      if ((!init.method || init.method === 'GET') && String(path).endsWith('/workspace')) {
+        return response({ integration: { id: anchor, name: '本地组织', isActive: true }, departments: [missing, archivedParent, departments[3]] })
+      }
+      return server(path, init)
+    })
+    mount(); await flush(); await click('研发')
+    expect(container.textContent).toContain('上级部门不可用')
+    await value('部门名称', '研发改名'); await click('保存部门')
+    expectLastWrite('/departments/' + d1, 'PATCH', { name: '研发改名' })
+    await click('运营'); await value('部门名称', '运营改名'); await click('保存部门')
+    expectLastWrite('/departments/' + d2, 'PATCH', { name: '运营改名' })
+    await click('运营'); await value('上级部门', ''); await click('保存部门')
+    expectLastWrite('/departments/' + d2, 'PATCH', { parentDepartmentId: null })
+  })
+  it('resolves the platform-user link for the root and /metasheet/ bases and blocks it while saving', async () => {
+    mount(); await flush()
+    expect(container.querySelector('a')?.getAttribute('href')).toBe('/admin/users')
+    app?.unmount(); container.remove()
+    mocks.base = '/metasheet/'
+    container = document.createElement('div'); document.body.appendChild(container)
+    mount(); await flush()
+    expect(container.querySelector('a')?.getAttribute('href')).toBe('/metasheet/admin/users')
+    const pending = deferred<TestResponse>()
+    mocks.fetch.mockImplementation((path: string, init: RequestInit) => String(path).includes('/departments') && init.method === 'POST' ? pending.promise : server(path, init))
+    await value('部门名称', '测试部门'); await click('保存部门')
+    expect(mocks.routeGuard?.()).toBe(false)
+    const navigation = new MouseEvent('click', { bubbles: true, cancelable: true })
+    container.querySelector('a')!.dispatchEvent(navigation)
+    expect(navigation.defaultPrevented).toBe(true)
+    pending.resolve(response({ department: {} })); await flush()
+    expect(mocks.routeGuard?.()).toBe(true)
   })
   it('saves only member names and keeps directory title read-only with an existing platform-job link', async () => {
     mount(); await flush(); await click('陈晨')

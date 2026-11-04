@@ -1179,6 +1179,7 @@ export async function setLocalMembershipManager(
   orgId: string,
   identity: { directoryAccountId: string; directoryDepartmentId: string },
   isManager: boolean,
+  expectedIntegrationId?: string,
 ): Promise<SetLocalMembershipManagerResult> {
   const normalizedOrgId = normalizeText(orgId) || DEFAULT_ORG_ID
   // PB4-2 (owner design lock, WRITE-POINT enforcement): the writer is the REAL archived guard — it
@@ -1204,8 +1205,9 @@ export async function setLocalMembershipManager(
           AND i.status = 'active'
           AND a.provider = 'local'
           AND i.org_id = $3
+          AND ($4::uuid IS NULL OR i.id = $4::uuid)
         FOR UPDATE OF a`,
-      [identity.directoryAccountId, identity.directoryDepartmentId, normalizedOrgId],
+      [identity.directoryAccountId, identity.directoryDepartmentId, normalizedOrgId, expectedIntegrationId ?? null],
     )
     const accountRow = accountRes.rows[0] as { is_active: boolean } | undefined
     if (!accountRow) return { outcome: 'not_found' }

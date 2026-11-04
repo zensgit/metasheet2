@@ -4,18 +4,22 @@ import type { DepartmentInput, LocalDepartment } from '../../services/localOrgan
 import { departmentRows, parentOptions } from './departmentTree'
 const props = defineProps<{ departments: LocalDepartment[]; disabled: boolean }>()
 const emit = defineEmits<{ save: [id: string | null, value: DepartmentInput]; archive: [id: string] }>()
+const PARENT_UNAVAILABLE = '__parent_unavailable__'
 const selectedId = ref('')
 const archiveAcknowledged = ref(false)
 const name = ref('')
 const parentId = ref('')
 const order = ref(0)
+const parentEdited = ref(false)
 const selected = computed(() => props.departments.find(d => d.id === selectedId.value))
 const rows = computed(() => departmentRows(props.departments))
 const parents = computed(() => parentOptions(props.departments, selectedId.value))
 watch([selectedId, () => props.departments], () => {
-  name.value = selected.value?.name ?? ''
-  parentId.value = selected.value?.parentDepartmentId ?? ''
-  order.value = selected.value?.orderIndex ?? 0
+  const department = selected.value
+  name.value = department?.name ?? ''
+  parentId.value = department?.parentMissing ? PARENT_UNAVAILABLE : (department?.parentDepartmentId ?? '')
+  order.value = department?.orderIndex ?? 0
+  parentEdited.value = false
 }, { immediate: true })
 watch([selectedId, () => props.departments, () => props.disabled], () => {
   archiveAcknowledged.value = false
@@ -29,7 +33,18 @@ function archive() {
 }
 function save() {
   if (props.disabled || selected.value?.isActive === false || !name.value.trim() || !Number.isSafeInteger(order.value)) return
-  emit('save', selectedId.value || null, { name: name.value.trim(), parentDepartmentId: parentId.value || null, orderIndex: order.value })
+  if (!selected.value) {
+    emit('save', null, { name: name.value.trim(), parentDepartmentId: parentId.value || null, orderIndex: order.value })
+    return
+  }
+  const patch: DepartmentInput = {}
+  if (name.value.trim() !== selected.value.name) patch.name = name.value.trim()
+  if (order.value !== selected.value.orderIndex) patch.orderIndex = order.value
+  if (parentEdited.value && parentId.value !== PARENT_UNAVAILABLE) {
+    patch.parentDepartmentId = parentId.value || null
+  }
+  if (Object.keys(patch).length === 0) return
+  emit('save', selected.value.id, patch)
 }
 </script>
 
@@ -51,9 +66,10 @@ function save() {
       <fieldset :disabled="disabled || selected?.isActive === false">
         <legend>{{ selected ? '编辑部门' : '创建部门' }}</legend>
         <label>部门名称<input v-model="name" required maxlength="200" /></label>
-        <label>上级部门<select v-model="parentId">
+        <label>上级部门<select v-model="parentId" @change="parentEdited = true">
+          <option v-if="parentId === '__parent_unavailable__'" value="__parent_unavailable__" disabled>上级部门不可用</option>
           <option value="">无上级部门</option>
-          <option v-if="parentId && !parents.some(d => d.id === parentId)" :value="parentId" disabled>当前上级不可用，请重新选择</option>
+          <option v-if="parentId && parentId !== '__parent_unavailable__' && !parents.some(d => d.id === parentId)" :value="parentId" disabled>当前上级不可用，请重新选择</option>
           <option v-for="d in parents" :key="d.id" :value="d.id">{{ d.name }}</option>
         </select></label>
         <label>部门排序<input v-model.number="order" type="number" step="1" required /></label>

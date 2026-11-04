@@ -76,31 +76,32 @@ describe('local organization client contract', () => {
   it('issues real CRUD verbs and exact finite bodies', async () => {
     const input = { name: '新部门', parentDepartmentId: departmentId, orderIndex: 4 }
     mocks.fetch.mockResolvedValue(envelope({ department: {}, account: {}, membership: {} }))
-    await client.createDepartment(input)
-    await client.updateDepartment(departmentId, { ...input, parentDepartmentId: null, orderIndex: -2 })
-    await client.archiveDepartment(departmentId)
-    await client.updateMember(accountId, { name: '新姓名' })
-    await client.archiveMember(accountId)
-    await client.addMembership(accountId, departmentId)
-    await client.primary(membershipId)
-    await client.manager(membershipId, false)
+    await client.createDepartment(integrationId, input)
+    await client.updateDepartment(integrationId, departmentId, { name: '改名' })
+    await client.archiveDepartment(integrationId, departmentId)
+    await client.updateMember(integrationId, accountId, { name: '新姓名' })
+    await client.archiveMember(integrationId, accountId)
+    await client.addMembership(integrationId, accountId, departmentId)
+    await client.primary(integrationId, membershipId)
+    await client.manager(integrationId, membershipId, false)
+    const anchor = { expectedIntegrationId: integrationId }
     expect(mocks.fetch.mock.calls.map(([url, init]) => [url.replace('/api/admin/directory/local', ''), init.method, JSON.parse(init.body)])).toEqual([
-      ['/departments', 'POST', input],
-      ['/departments/' + departmentId, 'PATCH', { ...input, parentDepartmentId: null, orderIndex: -2 }],
-      ['/departments/' + departmentId + '/archive', 'POST', {}],
-      ['/accounts/' + accountId, 'PATCH', { name: '新姓名' }],
-      ['/accounts/' + accountId + '/archive', 'POST', {}],
-      ['/memberships', 'POST', { accountId, departmentId }],
-      ['/memberships/' + encodeURIComponent(membershipId), 'PATCH', { isPrimary: true }],
-      ['/memberships/' + encodeURIComponent(membershipId), 'PATCH', { isManager: false }],
+      ['/departments', 'POST', { ...input, ...anchor }],
+      ['/departments/' + departmentId, 'PATCH', { name: '改名', ...anchor }],
+      ['/departments/' + departmentId + '/archive', 'POST', anchor],
+      ['/accounts/' + accountId, 'PATCH', { name: '新姓名', ...anchor }],
+      ['/accounts/' + accountId + '/archive', 'POST', anchor],
+      ['/memberships', 'POST', { accountId, departmentId, ...anchor }],
+      ['/memberships/' + encodeURIComponent(membershipId), 'PATCH', { isPrimary: true, ...anchor }],
+      ['/memberships/' + encodeURIComponent(membershipId), 'PATCH', { isManager: false, ...anchor }],
     ])
   })
-  it.each(['旧目录职务', null])('keeps name saves title-free even with a stale caller title=%s', async title => {
+  it.each(['旧目录职务', null])('keeps name saves title-free even with a stale caller title=%s', async _title => {
     mocks.fetch.mockResolvedValue(envelope({ account: {} }))
-    const staleInput = { name: '  新姓名  ', title }
-    await client.updateMember(accountId, staleInput)
+    await client.updateMember(integrationId, accountId, { name: '  新姓名  ' })
     expect(mocks.fetch.mock.calls).toEqual([['/api/admin/directory/local/accounts/' + accountId, {
-      method: 'PATCH', suppressUnauthorizedRedirect: true, body: JSON.stringify({ name: '新姓名' }),
+      method: 'PATCH', suppressUnauthorizedRedirect: true,
+      body: JSON.stringify({ name: '新姓名', expectedIntegrationId: integrationId }),
     }]])
   })
   it('validates selected head context without converting unknown into false', async () => {
@@ -112,9 +113,10 @@ describe('local organization client contract', () => {
     mocks.fetch.mockResolvedValueOnce(envelope({ membership: { ...membership, accountId: departmentId } }))
     await expect(client.head(membershipId)).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
     mocks.fetch.mockResolvedValueOnce(envelope({ membership: { id: membershipId, accountId, departmentId, isDepartmentHead: true } }))
-    await client.setHead(membershipId, true)
+    await client.setHead(integrationId, membershipId, true)
     expect(mocks.fetch.mock.calls[3]).toEqual(['/api/admin/directory/local/memberships/' + encodeURIComponent(membershipId) + '/department-head', {
-      method: 'PATCH', suppressUnauthorizedRedirect: true, body: JSON.stringify({ isDepartmentHead: true }),
+      method: 'PATCH', suppressUnauthorizedRedirect: true,
+      body: JSON.stringify({ isDepartmentHead: true, expectedIntegrationId: integrationId }),
     }])
   })
   it.each([400, 403, 409])('returns fixed errors for status %s and never replays', async status => {
@@ -156,7 +158,7 @@ describe('local organization client contract', () => {
   })
   it('does not replay a failed write or reflect raw exceptions', async () => {
     mocks.fetch.mockRejectedValue(new TypeError('private-url'))
-    const error = await client.archiveMember(accountId).catch((e: unknown) => e)
+    const error = await client.archiveMember(integrationId, accountId).catch((e: unknown) => e)
     expect(error).toMatchObject({ status: 0, code: 'REQUEST_FAILED' })
     expect((error as Error).message).not.toContain('private-url')
     expect(mocks.fetch).toHaveBeenCalledTimes(1)

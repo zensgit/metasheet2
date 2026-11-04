@@ -12,7 +12,7 @@ const nativeArg = 'tests/integration/local-organization-workspace.db.test.ts'
 const contractPath = 'packages/core-backend/tests/unit/local-org-workspace-ci-contract.test.ts'
 const configPath = 'packages/core-backend/vitest.config.ts'
 const integrationConfigPath = 'packages/core-backend/vitest.integration.config.ts'
-const EXPECTED_NATIVE_CASES = 22 // Explicit manual manifest: sentinel1 + business21; loops do not add cases.
+const EXPECTED_NATIVE_CASES = 26 // Explicit manual manifest: sentinel1 + business25; loops do not add cases.
 
 interface Step {
   run?: string; if?: unknown; shell?: string

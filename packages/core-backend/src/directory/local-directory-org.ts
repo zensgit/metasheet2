@@ -33,7 +33,6 @@ import {
   // `withLocalAnchorTransaction` below); its audit is emitted only after that transaction commits.
   getOrCreateLocalIntegrationInTransaction,
   emitLocalIntegrationAnchorAudit,
-  type DirectoryIntegrationSummary,
   type LocalIntegrationAnchorResult,
   // W4-PRE-1b: shared membership-write internals, imported (not reimplemented — see this
   // file's own header comment) from directory-sync.ts — same convention the anchor helpers
@@ -135,17 +134,45 @@ const NOTHING_FOUND_ROLLBACK: unique symbol = Symbol('local-directory:nothing-fo
  * departments), so two writers for the same org that both need to create the anchor queue on the
  * anchor's unique index before either holds anything else — they cannot deadlock on it.
  */
+/**
+ * Workspace writes name the anchor they loaded. Lock that row and refuse unless it still exists,
+ * belongs to this org, is the local provider, and is active. This path never bootstraps or
+ * reactivates an anchor.
+ */
+async function lockExpectedActiveLocalAnchor(
+  client: LocalDirectoryTransactionClient,
+  orgId: string,
+  expectedIntegrationId: string,
+): Promise<{ id: string }> {
+  const normalizedOrgId = normalizeText(orgId) || 'default'
+  const locked = await client.query(
+    `SELECT id::text AS id, org_id, provider, status
+       FROM directory_integrations
+      WHERE id = $1::uuid
+      FOR UPDATE`,
+    [expectedIntegrationId],
+  )
+  const row = locked.rows[0] as { id: string; org_id: string; provider: string; status: string } | undefined
+  if (!row || row.org_id !== normalizedOrgId || row.provider !== 'local' || row.status !== 'active') {
+    throw new LocalDirectoryConflictError('local organization anchor is not active for this organization')
+  }
+  return { id: row.id }
+}
+
 async function withLocalAnchorTransaction<T>(
   orgId: string,
-  work: (client: LocalDirectoryTransactionClient, integration: DirectoryIntegrationSummary) => Promise<T>,
+  work: (client: LocalDirectoryTransactionClient, integration: { id: string }) => Promise<T>,
+  expectedIntegrationId?: string,
 ): Promise<T> {
   let anchor: LocalIntegrationAnchorResult | null = null
   let value: T
   try {
     value = await transaction(async (client) => {
       await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-      anchor = await getOrCreateLocalIntegrationInTransaction(client, orgId)
-      const result = await work(client, anchor.integration)
+      const integration = expectedIntegrationId
+        ? await lockExpectedActiveLocalAnchor(client, orgId, expectedIntegrationId)
+        : (anchor = await getOrCreateLocalIntegrationInTransaction(client, orgId)).integration
+      const result = await work(client, integration)
       if (result === null) throw NOTHING_FOUND_ROLLBACK
       return result
     })
@@ -230,6 +257,8 @@ export interface CreateLocalDepartmentInput {
   name: string
   parentDepartmentId?: string | null
   orderIndex?: number
+  /** When set, lock this anchor and never bootstrap or reactivate. */
+  expectedIntegrationId?: string
 }
 
 export async function createLocalDepartment(input: CreateLocalDepartmentInput): Promise<LocalDepartmentSummary> {
@@ -287,7 +316,7 @@ export async function createLocalDepartment(input: CreateLocalDepartmentInput): 
     const created = reloaded.rows[0] as LocalDepartmentRow | undefined
     if (!created) throw new Error('local department created but reload failed')
     return summarizeLocalDepartment(created)
-  })
+  }, input.expectedIntegrationId)
 }
 
 export interface UpdateLocalDepartmentInput {
@@ -301,6 +330,7 @@ export async function updateLocalDepartment(
   orgId: string,
   departmentId: string,
   input: UpdateLocalDepartmentInput,
+  expectedIntegrationId?: string,
 ): Promise<LocalDepartmentSummary | null> {
   // Pure input validation (no DB read needed) stays before the transaction: name-required /
   // name-length when a name is supplied, and the self-parent 400 (preserved from PB4-1).
@@ -441,7 +471,7 @@ export async function updateLocalDepartment(
     const updated = reloaded.rows[0] as LocalDepartmentRow | undefined
     if (!updated) throw new Error('local department updated but reload failed')
     return summarizeLocalDepartment(updated)
-  })
+  }, expectedIntegrationId)
 }
 
 /**
@@ -450,7 +480,11 @@ export async function updateLocalDepartment(
  * already-archived department archives again as a no-op success (there is no "already deleted"
  * failure mode to guard against).
  */
-export async function archiveLocalDepartment(orgId: string, departmentId: string): Promise<LocalDepartmentSummary | null> {
+export async function archiveLocalDepartment(
+  orgId: string,
+  departmentId: string,
+  expectedIntegrationId?: string,
+): Promise<LocalDepartmentSummary | null> {
   // W1-6: read, flip and reload in the anchor's transaction; a missing department rolls back (404).
   return await withLocalAnchorTransaction(orgId, async (client, integration) => {
     const current = await loadLocalDepartment(client, integration.id, departmentId)
@@ -463,7 +497,7 @@ export async function archiveLocalDepartment(orgId: string, departmentId: string
     const updated = await loadLocalDepartment(client, integration.id, departmentId)
     if (!updated) throw new Error('local department archived but reload failed')
     return summarizeLocalDepartment(updated)
-  })
+  }, expectedIntegrationId)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -677,6 +711,7 @@ export async function updateLocalAccount(
   orgId: string,
   accountId: string,
   input: UpdateLocalAccountInput,
+  expectedIntegrationId?: string,
 ): Promise<LocalAccountSummary | null> {
   // Pure input validation (name-required / name-length when a name is supplied) stays before the
   // transaction — it needs no DB read.
@@ -720,7 +755,7 @@ export async function updateLocalAccount(
     const updated = reloaded.rows[0] as LocalAccountRow | undefined
     if (!updated) throw new Error('local account updated but reload failed')
     return summarizeLocalAccount(updated)
-  })
+  }, expectedIntegrationId)
 }
 
 /**
@@ -744,6 +779,7 @@ export async function archiveLocalAccount(
   orgId: string,
   accountId: string,
   actorIdInput?: string,
+  expectedIntegrationId?: string,
 ): Promise<LocalAccountSummary | null> {
   // W1-6: the read, the archive and the reload share the anchor's transaction; a missing account
   // (null → 404) rolls back and leaves no anchor. The first read takes no lock, so the lock order
@@ -810,7 +846,7 @@ export async function archiveLocalAccount(
     const updated = await loadLocalAccount(client, integration.id, accountId)
     if (!updated) throw new Error('local account archived but reload failed')
     return summarizeLocalAccount(updated)
-  })
+  }, expectedIntegrationId)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -844,6 +880,7 @@ export interface AddLocalMembershipInput {
   orgId: string
   accountId: string
   departmentId: string
+  expectedIntegrationId?: string
 }
 
 /**
@@ -902,7 +939,7 @@ export async function addLocalMembership(input: AddLocalMembershipInput): Promis
     const existingRow = existing.rows[0] as LocalMembershipRow | undefined
     if (!existingRow) throw new Error('membership add: row neither inserted nor found')
     return summarizeLocalMembership(existingRow)
-  })
+  }, input.expectedIntegrationId)
 }
 
 /**
@@ -918,6 +955,7 @@ export async function switchLocalPrimaryDepartment(
   orgId: string,
   accountId: string,
   departmentId: string,
+  expectedIntegrationId?: string,
 ): Promise<LocalMembershipSummary> {
   // PB4-2 (owner design lock, WRITE-POINT enforcement + FULL read-only): inside ONE transaction we
   // lock the account row, then EVERY department the account is a member of `FOR UPDATE` ordered by
@@ -1005,5 +1043,5 @@ export async function switchLocalPrimaryDepartment(
     const row = result.rows[0] as LocalMembershipRow | undefined
     if (!row) throw new Error('membership primary switch: row not found after update')
     return summarizeLocalMembership(row)
-  })
+  }, expectedIntegrationId)
 }

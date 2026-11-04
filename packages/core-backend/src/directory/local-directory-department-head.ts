@@ -50,6 +50,7 @@ export async function setLocalMembershipDepartmentHead(
   orgId: string,
   identity: MembershipIdentity,
   enabled: boolean,
+  expectedIntegrationId?: string,
 ): Promise<SetLocalMembershipDepartmentHeadResult> {
   const normalizedOrgId = orgId.trim() || 'default'
   return await transaction(async (client) => {
@@ -62,8 +63,9 @@ export async function setLocalMembershipDepartmentHead(
         WHERE ad.directory_account_id = $1::uuid AND ad.directory_department_id = $2::uuid
           AND i.org_id = $3 AND i.provider = 'local' AND i.status = 'active'
           AND a.provider = 'local'
+          AND ($4::uuid IS NULL OR i.id = $4::uuid)
         FOR SHARE OF i`,
-      [identity.directoryAccountId, identity.directoryDepartmentId, normalizedOrgId],
+      [identity.directoryAccountId, identity.directoryDepartmentId, normalizedOrgId, expectedIntegrationId ?? null],
     )
     const integrationRow = integration.rows[0] as { id: string } | undefined
     if (!integrationRow) return { outcome: 'not_found' }

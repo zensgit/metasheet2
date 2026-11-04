@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { onBeforeRouteLeave } from 'vue-router'
+import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { onAuthPrincipalChange, readAuthSessionSignature, TOKEN_KEYS } from '../composables/authPrincipal'
 import { EXPLICIT_SESSION_ORG_KEY } from '../utils/explicitSessionOrg'
@@ -11,6 +11,8 @@ import LocalMemberPanel from '../components/localOrganization/LocalMemberPanel.v
 import LocalProjectionPanel from '../components/localOrganization/LocalProjectionPanel.vue'
 
 const auth = useAuth()
+const router = useRouter()
+const usersHref = computed(() => router.resolve('/admin/users').href)
 const workspace = ref<LocalWorkspace | null>(null)
 const members = ref<LocalMember[]>([])
 const candidates = ref<LocalCandidate[]>([])
@@ -184,17 +186,35 @@ async function perform(command: () => Promise<unknown>, savedMessage = '已保�
     if (alive && epoch === refreshEpoch && session === readAuthSessionSignature() && workspace.value && !error.value) notice.value = savedMessage
   }
 }
+function loadedAnchorId(): string | null {
+  const integration = workspace.value?.integration
+  return integration?.isActive === true ? integration.id : null
+}
 function saveDepartment(id: string | null, value: DepartmentInput) {
+  const anchorId = loadedAnchorId()
+  if (!anchorId) return
   const captured = { ...value }
-  void perform(() => id ? client.updateDepartment(id, captured) : client.createDepartment(captured))
+  void perform(() => id
+    ? client.updateDepartment(anchorId, id, captured)
+    : client.createDepartment(anchorId, {
+      name: captured.name ?? '',
+      parentDepartmentId: captured.parentDepartmentId ?? null,
+      orderIndex: captured.orderIndex ?? 0,
+    }))
 }
 function saveMember(id: string, value: { name: string }) {
+  const anchorId = loadedAnchorId()
+  if (!anchorId) return
   const captured = { ...value }
-  void perform(() => client.updateMember(id, captured))
+  void perform(() => client.updateMember(anchorId, id, captured))
 }
 function setHead(id: string, value: boolean) {
-  if (!head.value || headLoading.value || head.value.readOnly || head.value.id !== id) return
-  void perform(() => client.setHead(id, value))
+  const anchorId = loadedAnchorId()
+  if (!anchorId || !head.value || headLoading.value || head.value.readOnly || head.value.id !== id) return
+  void perform(() => client.setHead(anchorId, id, value))
+}
+function guardUsersLink(event: MouseEvent) {
+  if (writing.value) event.preventDefault()
 }
 const unsubscribe = onAuthPrincipalChange(sessionChanged)
 function storageChanged(event: StorageEvent) {
@@ -221,7 +241,7 @@ onBeforeUnmount(() => {
     <header><h1 id="organization-heading">组织管理</h1>
       <p>MetaSheet 维护本组织的部门与成员；钉钉等外部通讯录通过匹配与绑定接入。</p>
       <p>此页维护本地目录关系，不会自动选择审批组织来源、启用审批策略或发布模板；审批来源与可用性仍需按现有策略另行确认。</p>
-      <a href="/admin/users" :aria-disabled="writing" @click="writing && $event.preventDefault()">维护平台岗位</a>
+      <a :href="usersHref" :aria-disabled="writing" @click="guardUsersLink">维护平台岗位</a>
       <button type="button" :disabled="writing || loading" @click="loadWorkspace">重新加载组织</button>
     </header>
     <p v-if="error" role="alert">{{ error }}</p>
@@ -235,7 +255,7 @@ onBeforeUnmount(() => {
         <div class="organization-layout">
           <LocalDepartmentPanel
         :departments="workspace.departments" :disabled="blocked"
-            @save="saveDepartment" @archive="id => perform(() => client.archiveDepartment(id))" />
+            @save="saveDepartment" @archive="id => { const anchorId = loadedAnchorId(); if (anchorId) void perform(() => client.archiveDepartment(anchorId, id)) }" />
           <section aria-labelledby="members-heading">
             <h2 id="members-heading">成员</h2>
             <form @submit.prevent="loadMembers(1)"><label>查找组织成员<input v-model="q" maxlength="200" :disabled="writing" /></label>
@@ -253,10 +273,10 @@ onBeforeUnmount(() => {
             <LocalMemberPanel
         v-if="selected" :key="selected.id" :member="selected" :departments="workspace.departments"
               :disabled="blocked" :membership-id="membershipId" :head="head" :head-loading="headLoading" :head-error="headError"
-              @save="saveMember" @archive="id => perform(() => client.archiveMember(id))"
-              @add="(account, department) => perform(() => client.addMembership(account, department))"
-              @select-membership="selectMembership" @primary="id => perform(() => client.primary(id))"
-              @manager="(id, value) => perform(() => client.manager(id, value))" @head="setHead" @retry-head="selectMembership(membershipId)" />
+              @save="saveMember" @archive="id => { const anchorId = loadedAnchorId(); if (anchorId) void perform(() => client.archiveMember(anchorId, id)) }"
+              @add="(account, department) => { const anchorId = loadedAnchorId(); if (anchorId) void perform(() => client.addMembership(anchorId, account, department)) }"
+              @select-membership="selectMembership" @primary="id => { const anchorId = loadedAnchorId(); if (anchorId) void perform(() => client.primary(anchorId, id)) }"
+              @manager="(id, value) => { const anchorId = loadedAnchorId(); if (anchorId) void perform(() => client.manager(anchorId, id, value)) }" @head="setHead" @retry-head="selectMembership(membershipId)" />
             <p v-else>请选择成员查看资料和部门关系。</p>
           </section>
           <LocalProjectionPanel

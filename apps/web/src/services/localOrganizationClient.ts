@@ -22,7 +22,11 @@ export interface LocalWorkspace {
 export interface LocalPage<T> { integrationId: string; page: number; pageSize: number; total: number; items: T[] }
 export interface LocalPageQuery { integrationId: string; page: number; pageSize: number; q: string }
 export interface LocalHead { id: string; accountId: string; departmentId: string; isDepartmentHead: boolean; readOnly: boolean }
-export interface DepartmentInput { name: string; parentDepartmentId: string | null; orderIndex: number }
+export interface DepartmentInput {
+  name?: string
+  parentDepartmentId?: string | null
+  orderIndex?: number
+}
 
 export class LocalOrganizationError extends Error {
   readonly status: number
@@ -107,9 +111,27 @@ async function write(path: string, method: string, body: object, result: string)
   const data = await request(path, method, body)
   if (!object(data[result])) fail()
 }
-function departmentBody(value: DepartmentInput): DepartmentInput {
-  input(text(value.name) && (value.parentDepartmentId === null || id(value.parentDepartmentId)) && Number.isSafeInteger(value.orderIndex))
-  return { name: value.name.trim(), parentDepartmentId: value.parentDepartmentId, orderIndex: value.orderIndex }
+function departmentBody(expectedIntegrationId: string, value: DepartmentInput): Record<string, unknown> {
+  input(id(expectedIntegrationId))
+  const body: Record<string, unknown> = {}
+  if (value.name !== undefined) {
+    input(text(value.name))
+    body.name = value.name.trim()
+  }
+  if (value.parentDepartmentId !== undefined) {
+    input(value.parentDepartmentId === null || id(value.parentDepartmentId))
+    body.parentDepartmentId = value.parentDepartmentId
+  }
+  if (value.orderIndex !== undefined) {
+    input(Number.isSafeInteger(value.orderIndex))
+    body.orderIndex = value.orderIndex
+  }
+  body.expectedIntegrationId = expectedIntegrationId
+  return body
+}
+function anchored(expectedIntegrationId: string, body: Record<string, unknown> = {}): Record<string, unknown> {
+  input(id(expectedIntegrationId))
+  return { ...body, expectedIntegrationId }
 }
 function target(value: string): string { input(id(value)); return encodeURIComponent(value) }
 function membershipTarget(value: string): string {
@@ -135,22 +157,29 @@ export const localOrganizationClient = {
     if (!keys(data, ['projection']) || !object(v) || !keys(v, ['accountId', 'created']) || !id(v.accountId) || typeof v.created !== 'boolean') fail()
     return v as unknown as { accountId: string; created: boolean }
   },
-  createDepartment: (v: DepartmentInput) => write('/departments', 'POST', departmentBody(v), 'department'),
-  updateDepartment: (departmentId: string, v: DepartmentInput) => write('/departments/' + target(departmentId), 'PATCH', departmentBody(v), 'department'),
-  archiveDepartment: (departmentId: string) => write('/departments/' + target(departmentId) + '/archive', 'POST', {}, 'department'),
-  updateMember(accountId: string, v: { name: string }) {
+  createDepartment(expectedIntegrationId: string, v: { name: string; parentDepartmentId: string | null; orderIndex: number }) {
+    input(text(v.name) && (v.parentDepartmentId === null || id(v.parentDepartmentId)) && Number.isSafeInteger(v.orderIndex))
+    return write('/departments', 'POST', departmentBody(expectedIntegrationId, v), 'department')
+  },
+  updateDepartment: (expectedIntegrationId: string, departmentId: string, v: DepartmentInput) =>
+    write('/departments/' + target(departmentId), 'PATCH', departmentBody(expectedIntegrationId, v), 'department'),
+  archiveDepartment: (expectedIntegrationId: string, departmentId: string) =>
+    write('/departments/' + target(departmentId) + '/archive', 'POST', anchored(expectedIntegrationId), 'department'),
+  updateMember(expectedIntegrationId: string, accountId: string, v: { name: string }) {
     input(text(v.name))
-    return write('/accounts/' + target(accountId), 'PATCH', { name: v.name.trim() }, 'account')
+    return write('/accounts/' + target(accountId), 'PATCH', anchored(expectedIntegrationId, { name: v.name.trim() }), 'account')
   },
-  archiveMember: (accountId: string) => write('/accounts/' + target(accountId) + '/archive', 'POST', {}, 'account'),
-  addMembership: (accountId: string, departmentId: string) => {
+  archiveMember: (expectedIntegrationId: string, accountId: string) =>
+    write('/accounts/' + target(accountId) + '/archive', 'POST', anchored(expectedIntegrationId), 'account'),
+  addMembership: (expectedIntegrationId: string, accountId: string, departmentId: string) => {
     target(accountId); target(departmentId)
-    return write('/memberships', 'POST', { accountId, departmentId }, 'membership')
+    return write('/memberships', 'POST', anchored(expectedIntegrationId, { accountId, departmentId }), 'membership')
   },
-  primary: (membershipId: string) => write('/memberships/' + membershipTarget(membershipId), 'PATCH', { isPrimary: true }, 'membership'),
-  manager: (membershipId: string, isManager: boolean) => {
+  primary: (expectedIntegrationId: string, membershipId: string) =>
+    write('/memberships/' + membershipTarget(membershipId), 'PATCH', anchored(expectedIntegrationId, { isPrimary: true }), 'membership'),
+  manager: (expectedIntegrationId: string, membershipId: string, isManager: boolean) => {
     input(typeof isManager === 'boolean')
-    return write('/memberships/' + membershipTarget(membershipId), 'PATCH', { isManager }, 'membership')
+    return write('/memberships/' + membershipTarget(membershipId), 'PATCH', anchored(expectedIntegrationId, { isManager }), 'membership')
   },
   async head(membershipId: string): Promise<LocalHead> {
     const data = await request('/memberships/' + membershipTarget(membershipId) + '/department-head')
@@ -161,9 +190,9 @@ export const localOrganizationClient = {
       || typeof v.isDepartmentHead !== 'boolean' || typeof v.readOnly !== 'boolean') fail()
     return v as unknown as LocalHead
   },
-  async setHead(membershipId: string, isDepartmentHead: boolean): Promise<void> {
+  async setHead(expectedIntegrationId: string, membershipId: string, isDepartmentHead: boolean): Promise<void> {
     input(typeof isDepartmentHead === 'boolean')
-    const data = await request('/memberships/' + membershipTarget(membershipId) + '/department-head', 'PATCH', { isDepartmentHead })
+    const data = await request('/memberships/' + membershipTarget(membershipId) + '/department-head', 'PATCH', anchored(expectedIntegrationId, { isDepartmentHead }))
     const v = data.membership
     const [accountId, departmentId] = membershipId.split(':')
     if (!keys(data, ['membership']) || !object(v) || !keys(v, ['id', 'accountId', 'departmentId', 'isDepartmentHead'])
