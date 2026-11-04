@@ -23,6 +23,26 @@ export interface YidaInitializationState {
   readonly externalWriteAttempted: false
   /** Server's exact send switch, only on an owner-authorized reply; display only, never authority. */
   readonly sendEnabled: boolean
+  /** Server's exact 测试连接 switch, same rule: display only; the server re-authorizes every probe. */
+  readonly connectionTestEnabled: boolean
+  /** Y2: server's exact multi-target switch, same rule: shows the target picker / sheet source only. */
+  readonly multiTargetEnabled: boolean
+}
+/** Owner-run token-only connection test before initialization (ADR adr-yida-connection-test-20261028). */
+export interface YidaConnectionTestRequest {
+  readonly commandId: string
+  readonly mode: 'candidate'
+  readonly material: Readonly<{ appKey: string; appSecret: string }>
+}
+export type YidaConnectionTestOutcome = 'ok' | 'upstream_rejected' | 'unreachable' | 'timeout'
+export interface YidaConnectionTestResult {
+  readonly commandId: string
+  readonly mode: 'candidate'
+  readonly outcome: YidaConnectionTestOutcome
+  readonly tokenIssued: boolean
+  readonly tokenRetained: false
+  readonly externalWriteAttempted: false
+  readonly canSend: false
 }
 
 const endpoint = '/api/integration/yida-owner-send/initialization'
@@ -33,7 +53,12 @@ const errorStatuses: Readonly<Record<string, readonly number[]>> = Object.freeze
   YIDA_OWNER_HTTP_DENIED: [403], YIDA_OWNER_HTTP_UNAVAILABLE: [503],
   YIDA_INITIALIZATION_INPUT: [400], YIDA_INITIALIZATION_DENIED: [403], YIDA_INITIALIZATION_CONFLICT: [409],
   YIDA_INITIALIZATION_INACTIVE: [503], YIDA_INITIALIZATION_CANCELLED: [409], YIDA_INITIALIZATION_UNAVAILABLE: [503],
+  YIDA_INITIALIZATION_ENCRYPTION_NOT_READY: [503],
+  YIDA_CONNECTION_TEST_INPUT: [400], YIDA_CONNECTION_TEST_DISABLED: [403], YIDA_CONNECTION_TEST_DENIED: [403],
+  YIDA_CONNECTION_TEST_CONFLICT: [409], YIDA_CONNECTION_TEST_CANCELLED: [409], YIDA_CONNECTION_TEST_THROTTLED: [429],
+  YIDA_CONNECTION_TEST_INACTIVE: [503], YIDA_CONNECTION_TEST_UNAVAILABLE: [503],
 })
+const connectionTestOutcomes: readonly string[] = ['ok', 'upstream_rejected', 'unreachable', 'timeout']
 export class YidaInitializationClientError extends Error {
   readonly code: string
   constructor(code: string) { super(code); this.name = 'YidaInitializationClientError'; this.code = code }
@@ -51,6 +76,18 @@ function canonical(value: unknown): string {
   return value
 }
 function uuid(value: unknown): string { const result = canonical(value); if (!uuidPattern.test(result)) invalid(); return result }
+// The server refuses appKey/appSecret/systemToken with surrounding whitespace or with a control (Cc),
+// invisible format (Cf: zero-width, bidi, BOM) or lone surrogate (Cs) character anywhere, before any
+// exchange or write (L4 seals them for good). This client sends only what it would accept and never trims
+// or normalizes here; the panel trims a paste before calling it.
+function credential(field: unknown, maximum: number): void {
+  if (typeof field !== 'string' || !field || field.length > maximum || field.trim() !== field
+    || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(field)) invalid()
+}
+/** True when a pasted appKey/appSecret/systemToken still holds whitespace, a control character, an invisible
+ * format character (zero-width, bidi, BOM) or a lone surrogate once its edges are trimmed: that text is not
+ * the credential, so the panel does not send it and shows a hint. */
+export function yidaCredentialHasInnerBlank(value: string): boolean { return /[\s\p{Cc}\p{Cf}\p{Cs}]/u.test(value.trim()) }
 function draft(value: unknown): YidaOwnerDraft {
   const row = object(value, ['targetRef', 'operationId', 'status', 'identityKind', 'canSend', 'canApply', 'tokenIssued', 'externalWriteAttempted', 'rowCount', 'rows', 'reused'])
   if (row.status !== 'unverified' || row.identityKind !== 'local-unverified' || row.canSend !== false || row.canApply !== false
@@ -65,23 +102,53 @@ function draft(value: unknown): YidaOwnerDraft {
   return Object.freeze({ targetRef: uuid(row.targetRef), operationId: uuid(row.operationId), status: 'unverified', identityKind: 'local-unverified',
     canSend: false, canApply: false, tokenIssued: false, externalWriteAttempted: false, rowCount: rows.length, rows: Object.freeze(rows), reused: row.reused })
 }
+const stateKeys: readonly string[] = ['commandId', 'status', 'draft', 'canSend', 'tokenIssued', 'externalWriteAttempted', 'sendEnabled']
 function state(value: unknown, expectedCommand: string | null): YidaInitializationState {
-  const row = object(value, ['commandId', 'status', 'draft', 'canSend', 'tokenIssued', 'externalWriteAttempted', 'sendEnabled'])
+  // The server sends connectionTestEnabled only while its switch is on (absent = off), so this
+  // bundle also reads an older backend; the key set stays closed either way.
+  const probeBit = !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'connectionTestEnabled')
+  // Y2: multiTargetEnabled follows the same absent-while-off rule.
+  const multiBit = !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'multiTargetEnabled')
+  const baseKeys = probeBit ? [...stateKeys, 'connectionTestEnabled'] : stateKeys
+  const row = object(value, multiBit ? [...baseKeys, 'multiTargetEnabled'] : baseKeys)
   const commandId = uuid(row.commandId)
   if (expectedCommand !== null && commandId !== expectedCommand) invalid()
   if (row.canSend !== false || row.tokenIssued !== false || row.externalWriteAttempted !== false || typeof row.sendEnabled !== 'boolean'
     || (row.status !== 'ready' && row.status !== 'initialized') || (row.status === 'ready') !== (row.draft === null)) invalid()
+  if (probeBit && typeof row.connectionTestEnabled !== 'boolean') invalid()
+  if (multiBit && typeof row.multiTargetEnabled !== 'boolean') invalid()
   return Object.freeze({ commandId, status: row.status, draft: row.draft === null ? null : draft(row.draft),
-    canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled: row.sendEnabled })
+    canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled: row.sendEnabled,
+    connectionTestEnabled: row.connectionTestEnabled === true, multiTargetEnabled: row.multiTargetEnabled === true })
+}
+function connectionTestResult(value: unknown, expectedCommand: string | null): YidaConnectionTestResult {
+  const row = object(value, ['commandId', 'mode', 'outcome', 'tokenIssued', 'tokenRetained', 'externalWriteAttempted', 'canSend'])
+  const commandId = uuid(row.commandId)
+  if (expectedCommand === null || commandId !== expectedCommand || row.mode !== 'candidate') invalid()
+  if (typeof row.outcome !== 'string' || !connectionTestOutcomes.includes(row.outcome)) invalid()
+  if (row.tokenIssued !== (row.outcome === 'ok')) invalid()
+  if (row.tokenRetained !== false || row.externalWriteAttempted !== false || row.canSend !== false) invalid()
+  return Object.freeze({ commandId, mode: 'candidate', outcome: row.outcome as YidaConnectionTestOutcome, tokenIssued: row.outcome === 'ok',
+    tokenRetained: false, externalWriteAttempted: false, canSend: false })
+}
+function connectionTestInput(value: unknown): YidaConnectionTestRequest {
+  try {
+    const row = object(value, ['commandId', 'mode', 'material'])
+    const material = object(row.material, ['appKey', 'appSecret'])
+    if (row.mode !== 'candidate') invalid()
+    for (const key of ['appKey', 'appSecret']) credential(material[key], 4096)
+    // Detach, never trim or normalize: the server tests exactly these bytes.
+    return JSON.parse(JSON.stringify({ commandId: uuid(row.commandId), mode: 'candidate',
+      material: { appKey: material.appKey, appSecret: material.appSecret } })) as YidaConnectionTestRequest
+  } catch { throw new YidaInitializationClientError('YIDA_INITIALIZATION_INPUT_INVALID') }
 }
 function input(value: unknown): YidaInitializationInput {
   try {
     const row = object(value, ['commandId', 'material', 'draft', 'attestation'])
     const material = object(row.material, ['appKey', 'appSecret', 'systemToken', 'userId'])
-    for (const key of ['appKey', 'appSecret', 'systemToken', 'userId']) {
-      const field = material[key]
-      if (typeof field !== 'string' || !field.trim() || field.length > (key === 'userId' ? 128 : 4096)) invalid()
-    }
+    for (const key of ['appKey', 'appSecret', 'systemToken']) credential(material[key], 4096)
+    // userId keeps its own rule: it must equal executionIdentity, whose canonical() check refuses padding.
+    if (typeof material.userId !== 'string' || !material.userId.trim() || material.userId.length > 128) invalid()
     const reviewed = object(row.attestation, ['kind', 'reviewRef', 'organizationId', 'executionIdentity'])
     if (reviewed.kind !== 'owner-reviewed-target' || reviewed.executionIdentity !== material.userId) invalid()
     const fixedDraft = object(row.draft, ['config', 'rowsText', 'allocation'])
@@ -127,7 +194,8 @@ export function createYidaInitializationClient(options: { onInvalidated?: (code?
   unsubscribe = onAuthPrincipalChange(() => invalidate())
   window.addEventListener('storage', onStorage); window.addEventListener('focus', checkSession)
   const assertCurrentSession = () => { checkSession(); if (disposed) throw new YidaInitializationClientError('YIDA_INITIALIZATION_SESSION_CHANGED') }
-  async function request(method: 'GET' | 'POST', expectedCommand: string | null, body?: YidaInitializationInput, signal?: AbortSignal): Promise<YidaInitializationState> {
+  async function request(method: 'GET' | 'POST', expectedCommand: string | null, body?: YidaInitializationInput | YidaConnectionTestRequest,
+    signal?: AbortSignal, probe = false): Promise<YidaInitializationState | YidaConnectionTestResult> {
     assertCurrentSession()
     if (pending) throw new YidaInitializationClientError('YIDA_INITIALIZATION_STATE_UNCONFIRMED')
     pending = true
@@ -140,7 +208,7 @@ export function createYidaInitializationClient(options: { onInvalidated?: (code?
       current()
       let response: Response
       try {
-        response = await fetch(endpoint, { method, credentials: 'omit', mode: 'same-origin', redirect: 'error', cache: 'no-store',
+        response = await fetch(probe ? `${endpoint}/connection-test` : endpoint, { method, credentials: 'omit', mode: 'same-origin', redirect: 'error', cache: 'no-store',
           referrerPolicy: 'no-referrer', signal: controller.signal,
           headers: { Accept: 'application/json', Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -172,8 +240,15 @@ export function createYidaInitializationClient(options: { onInvalidated?: (code?
       if (!response.ok) {
         const error = object(envelope.error, ['code'])
         if (typeof error.code !== 'string' || !Object.prototype.hasOwnProperty.call(errorStatuses, error.code) || !errorStatuses[error.code].includes(response.status)) invalid()
-        if (error.code === 'YIDA_OWNER_HTTP_DENIED' || error.code === 'YIDA_INITIALIZATION_DENIED') invalidate(error.code)
+        if (error.code === 'YIDA_OWNER_HTTP_DENIED' || error.code === 'YIDA_INITIALIZATION_DENIED'
+          || error.code === 'YIDA_CONNECTION_TEST_DENIED') invalidate(error.code)
         throw new YidaInitializationClientError(error.code)
+      }
+      if (probe) {
+        if (response.status !== 200) invalid()
+        const tested = connectionTestResult(envelope.data, expectedCommand)
+        current()
+        return tested
       }
       if (response.status !== (method === 'GET' ? 200 : 201)) invalid()
       const result = state(envelope.data, expectedCommand)
@@ -185,7 +260,7 @@ export function createYidaInitializationClient(options: { onInvalidated?: (code?
     dispose, assertCurrentSession,
     async observe(signal?: AbortSignal): Promise<YidaInitializationState> {
       ready = false
-      const result = await request('GET', commandId, undefined, signal)
+      const result = await request('GET', commandId, undefined, signal) as YidaInitializationState
       commandId = result.commandId; ready = result.status === 'ready'
       return result
     },
@@ -194,9 +269,18 @@ export function createYidaInitializationClient(options: { onInvalidated?: (code?
       if (!ready || commandId === null || value.commandId !== commandId) throw new YidaInitializationClientError('YIDA_INITIALIZATION_STATE_UNCONFIRMED')
       const body = input(value)
       ready = false
-      const result = await request('POST', commandId, body, signal)
+      const result = await request('POST', commandId, body, signal) as YidaInitializationState
       if (result.status !== 'initialized') invalid()
       return result
+    },
+    /** One owner click = one token-only probe. Needs the same observed ready command; does not
+     * consume it (initialization still needs that ready GET). Never retried. */
+    async testConnection(value: YidaConnectionTestRequest, signal?: AbortSignal): Promise<YidaConnectionTestResult> {
+      assertCurrentSession()
+      // Same observed-ready admission as initialize(), written separately so each guard is its own anchor.
+      if (commandId === null || !ready || value.commandId !== commandId) throw new YidaInitializationClientError('YIDA_INITIALIZATION_STATE_UNCONFIRMED')
+      const body = connectionTestInput(value)
+      return await request('POST', commandId, body, signal, true) as YidaConnectionTestResult
     },
   }
 }

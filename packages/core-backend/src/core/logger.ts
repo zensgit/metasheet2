@@ -148,6 +148,11 @@ export function runWithLogContext<T>(ctx: LogContext, fn: () => T): T {
   return contextStore.run(ctx, fn)
 }
 
+/** Drop an independently propagated OpenTelemetry span for the duration of a callback. */
+export function runWithRootTraceContext<T>(fn: () => T): T {
+  return otelApi ? otelApi.context.with(otelApi.ROOT_CONTEXT, fn) : fn()
+}
+
 export function setLogContext(ctx: LogContext): void {
   const existing = contextStore.getStore() || {}
   // enterWith overrides current store in this async context

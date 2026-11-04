@@ -1528,6 +1528,7 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 exec npx vitest run \
   adminAccess \
   adminPageContentSearch.spec.ts \
+  adminUserBatch \
   amountAutoSum \
   approval-amount-in-words \
   approval-assignee-source \
@@ -1693,6 +1694,7 @@ exec npx vitest run \
   dingtalk-recipient-field-warnings \
   directoryConfigPickers \
   DirectoryDeprovisionEvidencePanel.spec.ts \
+  DirectoryIntegrationIdentityPanel.spec.ts \
   directoryManagementView \
   featureFlagsApprovalMobile \
   formViewValidation \

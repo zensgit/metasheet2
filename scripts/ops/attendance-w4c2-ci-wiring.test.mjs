@@ -1,3 +1,4 @@
+import { requiredSuiteJob } from './plugin-tests-workflow-contract.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -1157,7 +1158,8 @@ test('P1-2: every allowed command word is accepted, and the allowlist is what re
 // stop-line residual for the OTHER two step ids, and the header above already records why this
 // step must not join the shared frozen allowlist.
 // ---------------------------------------------------------------------------------------------
-const REQUIRED_JOB = 'test' // the job whose matrix leg produces the required `test (20.x)` context
+const REQUIRED_JOB = 'attendance-db' // unconditional dependency of required test (20.x)
+const CONTRACTS_JOB = 'contracts'
 
 /**
  * Names of ALL jobs whose `steps` contain a step with the given `id:`, read off the PARSED
@@ -1332,21 +1334,19 @@ test('P1-2 config-resolution positive control: same-basename decoys, escapes and
 // true. If the guard is ever moved after the install, this leg reds and the stronger, EXECUTED
 // derivation becomes available to the corpus — that is a deliberate decision point, not a silent
 // one.
-test(`this guard's step runs BEFORE the workspace install in job "${REQUIRED_JOB}" (why its corpus is static)`, () => {
-  const runs = stepRunScriptsOfJob(REQUIRED_JOB)
+test('this guard runs without installed dependencies, before the heavy suite jobs', () => {
+  const workflow = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
+  requiredSuiteJob(workflow, CONTRACTS_JOB)
+  requiredSuiteJob(workflow, REQUIRED_JOB)
+  const runs = stepRunScriptsOfJob(CONTRACTS_JOB)
   const guardAt = runs.findIndex((r) => r.includes('scripts/ops/attendance-w4c2-ci-wiring.test.mjs'))
-  const installAt = runs.findIndex((r) => /\bpnpm install\b/.test(r))
-  assert.ok(guardAt >= 0, `this guard's own step was not found in job "${REQUIRED_JOB}" — it must run there`)
-  assert.ok(installAt >= 0, `no \`pnpm install\` step found in job "${REQUIRED_JOB}" — the ordering claim cannot be evaluated`)
-  assert.ok(
-    guardAt < installAt,
-    `this guard's step (index ${guardAt}) must precede \`pnpm install\` (index ${installAt}): it is `
-      + `placed pre-install so a wiring break reds the required check in seconds, and the corpus `
-      + `derivation documents that placement as the reason it cannot use vitest's own collection`,
-  )
+  assert.ok(guardAt >= 0, 'the pre-install guard must execute in contracts')
+  assert.equal(runs.some((r) => /\bpnpm install\b/.test(r)), false,
+    'contracts must remain dependency-free; heavy suites wait for it through needs')
 })
 
-test(`attendance real-DB step (id: ${STEP_ID}) lives in job "${REQUIRED_JOB}" — the job that produces the required test (20.x) context — and in no other job`, () => {
+test(`attendance real-DB step (id: ${STEP_ID}) lives in job "${REQUIRED_JOB}" — a dependency of required test (20.x) — and in no other job`, () => {
+  requiredSuiteJob(readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8'), REQUIRED_JOB)
   assert.deepEqual(
     jobsContainingStepId(STEP_ID),
     [REQUIRED_JOB],
@@ -1358,8 +1358,9 @@ test(`attendance real-DB step (id: ${STEP_ID}) lives in job "${REQUIRED_JOB}" �
 })
 
 test(`W4C-3c tooling step (id: ${W4C3C_TOOLING_STEP_ID}) lives in required job and invokes both node:test files`, () => {
-  assert.deepEqual(jobsContainingStepId(W4C3C_TOOLING_STEP_ID), [REQUIRED_JOB])
+  assert.deepEqual(jobsContainingStepId(W4C3C_TOOLING_STEP_ID), [CONTRACTS_JOB])
   const workflow = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
+  requiredSuiteJob(workflow, CONTRACTS_JOB)
   const step = extractStepById(workflow, W4C3C_TOOLING_STEP_ID)
   assert.ok(step && typeof step.run === 'string', 'W4C-3c tooling step must carry a real run script')
   assert.match(step.run, /\bnode\s+--test\b/)

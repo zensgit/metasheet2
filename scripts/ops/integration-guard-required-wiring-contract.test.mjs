@@ -1,3 +1,4 @@
+import { requiredSuiteJob } from './plugin-tests-workflow-contract.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, mkdtempSync, writeFileSync, rmSync, readdirSync, chmodSync, existsSync } from 'node:fs'
@@ -361,7 +362,7 @@ const RELEVANT_FALSE_IF = "steps.changes.outputs.relevant == 'false'"
 
 // The OTHER executable caller of this contract (#4614 P1 two-point wiring) — the required
 // `test` job in plugin-tests.yml, located by exact `id:`, not by `- name:` title.
-const PLUGIN_TESTS_JOB_ID = 'test'
+const PLUGIN_TESTS_JOB_ID = 'contracts'
 const PLUGIN_TESTS_CONTRACT_STEP_ID = 'integration-guard-contract'
 
 // #4801 P1 (owner review, 2026-08-07): the plugin-integration-core chain-completeness guard's
@@ -634,7 +635,7 @@ function requirePluginTestsJob() {
     `plugin-tests.yml: jobs.${PLUGIN_TESTS_JOB_ID} must exist — this is the already-required job ` +
       `this contract's other executable caller lives inside`,
   )
-  return pluginTestsDoc.jobs[PLUGIN_TESTS_JOB_ID]
+  return requiredSuiteJob(pluginTestsDoc, PLUGIN_TESTS_JOB_ID)
 }
 
 /** @param {Record<string, unknown>} job */

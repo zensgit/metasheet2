@@ -5,7 +5,7 @@
  */
 
 import { createHash, randomBytes } from 'crypto'
-import type { Kysely } from 'kysely'
+import { sql, type Kysely } from 'kysely'
 import { Logger } from '../core/logger'
 import { evaluateUserAuthenticationGate } from '../auth/user-activation'
 import type { Database } from '../db/types'
@@ -245,10 +245,17 @@ export class ApiTokenService {
       return { valid: false, reason: 'Token has expired' }
     }
 
-    // T1: fail-closed on creator account state (pending / inactive / invalid activation).
     const creator = await this.db
       .selectFrom('users')
-      .select(['id', 'is_active', 'role', 'activation_status', 'local_password_set'])
+      .select([
+        'id',
+        'is_active',
+        'role',
+        'activation_status',
+        'local_password_set',
+        sql<string | null>`(to_jsonb(users) ->> 'deleted_at')`.as('deleted_at'),
+        sql<string | null>`(to_jsonb(users) ->> 'purged_at')`.as('purged_at'),
+      ])
       .where('id', '=', row.created_by)
       .executeTakeFirst()
 
@@ -261,6 +268,8 @@ export class ApiTokenService {
       role: creator.role,
       activation_status: creator.activation_status,
       local_password_set: creator.local_password_set,
+      deleted_at: creator.deleted_at,
+      purged_at: creator.purged_at,
     })
     if (gate) {
       return { valid: false, reason: gate.message }

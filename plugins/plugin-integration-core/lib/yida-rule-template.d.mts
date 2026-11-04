@@ -1,11 +1,12 @@
-import type { YidaStaticV1Config, YidaProtocolConfig } from './yida-static-plan.mjs'
+import type { YidaStaticV1Config, YidaProtocolConfig, YidaTransformConfig } from './yida-static-plan.mjs'
 import type { YidaAllocationRules } from './stock-preparation-yida-allocation.mjs'
 
 type WithoutTarget<T> = T extends unknown ? Omit<T, 'target'> : never
-export type YidaRuleTemplateRules = WithoutTarget<YidaStaticV1Config> | WithoutTarget<YidaProtocolConfig>
+export type YidaRuleTemplateRules = WithoutTarget<YidaStaticV1Config> | WithoutTarget<YidaProtocolConfig> | WithoutTarget<YidaTransformConfig>
 export type YidaRuleTemplateAllocation = { mode: 'original' } | YidaAllocationRules
 export interface YidaRuleTemplateEnvelope {
-  readonly formatVersion: 1
+  /** 1 for v1/v2 rules (unchanged), 2 for v3 rules. */
+  readonly formatVersion: 1 | 2
   readonly kind: 'stock-preparation-yida-rule-template'
   readonly status: 'local-unverified'
   readonly rules: YidaRuleTemplateRules

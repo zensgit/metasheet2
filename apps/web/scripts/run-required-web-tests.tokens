@@ -7,6 +7,7 @@
 accountIdentityDisplay
 adminAccess
 adminPageContentSearch.spec.ts
+adminUserBatch
 amountAutoSum
 approval-amount-in-words
 approval-assignee-source
@@ -220,6 +221,7 @@ dingtalk-public-form-link-warnings
 dingtalk-recipient-field-warnings
 directoryConfigPickers
 DirectoryDeprovisionEvidencePanel.spec.ts
+DirectoryIntegrationIdentityPanel.spec.ts
 directoryManagementView
 featureFlags.plm.spec.ts
 featureFlagsApprovalAttachments

@@ -82,6 +82,8 @@ const {
 // refusals, the execution ledger). The lane module requires this module only lazily (its one call back is the
 // source-content digest), so this top-level require is cycle-free.
 const {
+  assertChangePlanCurrent,
+  assertNoReviewPending,
   assertNoUnfinishedExecution,
   assertPullNotSuspended,
   assertRefreshBindingCurrent,
@@ -94,6 +96,7 @@ const {
   mapContinuationStraddle,
   planDigestOf,
   previewRecoveryRechecked,
+  previewReviewOf,
   reconcileComputation,
   selfSettlementFor,
 } = require('./stock-preparation-refresh-lanes.cjs')
@@ -150,6 +153,15 @@ const {
   assertWriteBindingMatchesGuard,
   sheetWriteScopeKey,
 } = require('./stock-preparation-project-write-lock.cjs')
+// 人工补充行 B1 (ADR adr-stock-prep-manual-rows-20261030 §5.1 / §5.3): the `manual:` namespace, the predicate M′, the
+// reminder and its one values-free plugin_kv record. Pure (the store is handed in), and it requires nothing of this
+// module, so the edge is cycle-free.
+const {
+  classifyManualPrefixRow,
+  createManualPrefixCollector,
+  persistManualRowsLastPull,
+  summarizeManualSupplement,
+} = require('./stock-preparation-manual-rows.cjs')
 
 const PLM_STOCK_PREPARATION_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const TABLE_ACTION_KIND = 'parameterized_table_action'
@@ -1138,11 +1150,30 @@ function withExistingRowRecordRef(row, record) {
   return row
 }
 
+// 人工补充行 B1 (ADR §5.1): which `manual:` prefix row a record is — 'manual' (M′), 'unbound_prefix', or null (not a
+// prefix row). M′ reads the record ENVELOPE directly (its `id` and `createdBy`, never a `data` cell and never the
+// EXISTING_ROW_RECORD_REF Symbol) and the key from the unmapped row; (a′) is the bound target's objectId.
+function manualPrefixKindOf(target, record, row) {
+  const envelope = isPlainObject(record) && isPlainObject(record.data) ? record : null
+  return classifyManualPrefixRow({
+    objectId: target && target.objectId,
+    createdBy: envelope ? envelope.createdBy : undefined,
+    recordId: envelope ? envelope.id : undefined,
+    key: row.idempotencyKey,
+  })
+}
+
 async function readExistingStockPreparationRows(recordsApi, target, projectNo, options = {}) {
   const api = ensureRecordsApi(recordsApi)
   const limit = positiveInteger(options.limit, 'existingRows.limit', DEFAULT_EXISTING_ROWS_PAGE_LIMIT)
   const maxPages = positiveInteger(options.maxPages, 'existingRows.maxPages', DEFAULT_EXISTING_ROWS_MAX_PAGES)
   const rows = []
+  // 人工补充行 B1 (ADR §5.1): EVERY row whose key starts with `manual:` leaves planning here, page by page — the M′
+  // rows as manual rows, the rest counted as unbound prefix rows. Neither enters the array the planner, the
+  // revision, the settlement digest, the change plan, the export gate's digest or pilot readiness read; both ride on
+  // the array's non-enumerable Symbol (stock-preparation-manual-rows.cjs EXISTING_ROWS_MANUAL_PREFIX), attached only
+  // when the read found one, so a sheet without a prefix row reads byte-identically (continuation golden).
+  const prefixRows = createManualPrefixCollector()
   const filters = {
     [mapFieldName('projectNo', target.fieldIdMap)]: projectNo,
   }
@@ -1157,8 +1188,19 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
     if (!Array.isArray(pageRows)) {
       throw new StockPreparationTableActionError(500, 'TABLE_ACTION_RECORDS_API_INVALID', 'queryRecords must return an array')
     }
-    rows.push(...pageRows.map((row) => withExistingRowRecordRef(unmapRecordFields(row, target.fieldIdMap), row)))
-    if (pageRows.length < limit) return rows
+    for (const record of pageRows) {
+      const row = withExistingRowRecordRef(unmapRecordFields(record, target.fieldIdMap), record)
+      const prefixKind = manualPrefixKindOf(target, record, row)
+      if (prefixKind) {
+        prefixRows.add(prefixKind, row, isPlainObject(record) && isPlainObject(record.data) ? record.id : null)
+        continue
+      }
+      rows.push(row)
+    }
+    // THE RAW PAGE decides (ADR §5.1, the two fixed rules): the last page is the one the HOST returned short, and
+    // maxPages counts the host's pages — never the rows left after the prefix rows came out, or a page that held a
+    // manual row would read as the last one and the PLM rows behind it would never be planned.
+    if (pageRows.length < limit) return prefixRows.attachTo(rows)
   }
   throw new StockPreparationTableActionError(422, 'TABLE_ACTION_EXISTING_ROWS_TOO_LARGE', 'existing stock-preparation rows exceeded maxPages', {
     maxPages,
@@ -2036,6 +2078,34 @@ function projectWriteAbortError(applyResult) {
   return new StockPreparationProjectWriteLockError(status, code, message, details)
 }
 
+// Batch-refresh step 5 PR-8 (design §10.3 (2) last sentence, D-2; the F15 hazard): the VERSION each UPDATE /
+// INACTIVE decision of THIS in-lease recompute was planned against — `Map<idempotencyKey, { id, version, row }>` from
+// the record reference the project-scoped reader attached to the ONE existing row of that key
+// (`withExistingRowRecordRef`). Built from THIS request's read (O-10), never from the token, a preview or a stored
+// artifact. A key whose existing group is not exactly one row with an integer version gets no entry, and the writer
+// patches it exactly as before. Every small apply passes it, governed or not (register R-63 ①).
+function expectedRecordsOf(dryRun) {
+  const groups = new Map()
+  for (const row of Array.isArray(dryRun.existingRows) ? dryRun.existingRows : []) {
+    const key = isPlainObject(row) && typeof row.idempotencyKey === 'string' ? row.idempotencyKey.trim() : ''
+    if (!key) continue
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(row)
+  }
+  const out = new Map()
+  const decisions = dryRun.plan && Array.isArray(dryRun.plan.decisions) ? dryRun.plan.decisions : []
+  for (const decision of decisions) {
+    if (!decision || (decision.decision !== DECISIONS.UPDATE && decision.decision !== DECISIONS.INACTIVE)) continue
+    const key = typeof decision.idempotencyKey === 'string' ? decision.idempotencyKey.trim() : ''
+    const group = key ? groups.get(key) : null
+    if (!group || group.length !== 1) continue
+    const ref = group[0][EXISTING_ROW_RECORD_REF]
+    if (!ref || typeof ref.id !== 'string' || ref.id.trim() === '' || !Number.isSafeInteger(ref.version) || ref.version < 1) continue
+    out.set(key, Object.freeze({ id: ref.id, version: ref.version, row: group[0] }))
+  }
+  return out
+}
+
 // PR-3a (P3-X3): an execution whose apply THREW is finished `failed` with the thrown error's code (a closed
 // token, or `apply_threw`), best effort. A finish that fails here leaves the row `running` — after the
 // release it derives 失败待恢复 and blocks the next apply (RECOVERY_PENDING) until step 6 — and is logged
@@ -2427,6 +2497,10 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     runOnlyReview,
     tableScopeReview,
   })
+  // #6475 round 2: the content half of the read (see buildSourceContentRevision) — built ONCE, BEFORE planning (step 5
+  // PR-8: a confirmed change plan is bound to the source content digest of the computation that opened its holds, and
+  // the planner compares it with THIS one); the same value rides the result below.
+  const sourceContentRevision = buildSourceContentRevision({ action, parameters, expansion })
   // PR-3a: BOTH planner calls (the first plan and the re-plan after the ledger readback) carry the projection
   // for a governed project (P3-G10), and a straddling consult maps to a retryable 409 (P3-G9).
   const planConflicts = mapContinuationStraddle(planStockPreparationConflicts)
@@ -2454,8 +2528,9 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
       // W4 carry: threaded from the deploy-time action config (undefined when the
       // config never opted in — the planner is then byte-identical to pre-wiring).
       carryPolicy: action.carryPolicy,
-      // PR-3a (O-16 + AMB-1): exactly the 9-key continuation input, governed only; absent otherwise.
-      ...(refresh && refresh.governed ? { continuation: continuationInputFor(refresh, { action, expansion }) } : {}),
+      // PR-3a (O-16 + AMB-1) + PR-8 (`changePlan`, review fix N3 `expectedContent`): exactly the 11-key continuation input,
+      // governed only; absent otherwise.
+      ...(refresh && refresh.governed ? { continuation: continuationInputFor(refresh, { action, expansion, sourceContentDigest: stockPreparationSourceContentDigest(sourceContentRevision) }) } : {}),
     })
   }
   let plan = planWithReview(conflictPolicyReview)
@@ -2485,6 +2560,9 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
   const revision = buildRevision({ action, parameters, expansion, existingRows, conflictPolicyReview, plan })
   // PR-3a (AMB-2, TD-24): only a COMPLETE computation reconciles; a governed incomplete one never mints.
   const complete = isCompleteComputation(expansion, { hasGlobalErrors })
+  // 人工补充行 B1 (ADR §5.1 / §5.3): the manual rows the read took out, compared with THIS plan's ADD decisions only.
+  // Computed AFTER the revision and outside the plan, so nothing hashed moves; null for a sheet without a prefix row.
+  const manualSupplement = summarizeManualSupplement({ existingRows, addRecords: addRecordsOfPlan(plan) })
   return {
     expansion,
     existingRows,
@@ -2492,7 +2570,7 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     revision,
     // #6475 round 2: the content half only — see buildSourceContentRevision. NOT an input to
     // `revision` (which keeps hashing exactly what it always did, so no token or batch id moves).
-    sourceContentRevision: buildSourceContentRevision({ action, parameters, expansion }),
+    sourceContentRevision,
     // PR-3a (O-2): a SUSPENDED plan is never applicable — no token, no `small_preview` bump; a governed
     // computation over an incomplete read is never applicable either. `plan.suspended` is absent on every
     // not-governed plan, so that term is true and the not-governed answer is unchanged.
@@ -2507,6 +2585,9 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     extFieldMapping,
     // `null` when dormant, so a caller merging it into evidence adds no key at all.
     b2aSchemaContract,
+    // 人工补充行 B1: on the RESULT only (precedent: `governance` / `refresh` below) — never on `plan`, never hashed.
+    // Present only when the read took a prefix row out (rowCount or unboundKeyCount > 0).
+    ...(manualSupplement ? { manualSupplement } : {}),
     // PR-3a: the verdict the writer requires (design §7.2) and the PRIVATE refresh context the lanes use (the
     // handle, the consult with its private member keys, the strict band) — on the RESULT only: never on
     // `plan`, never hashed, never serialized by any caller (the egress suites pin that).
@@ -2515,6 +2596,34 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
       refresh: Object.freeze({ handle: refreshGovernance, consult: refresh.consult, governed: refresh.governed, complete, installedFieldProperties }),
     } : {}),
   }
+}
+
+// The `record` of every ADD decision of `plan` — what the manual-row reminder compares against (ADR §5.3: ADD only).
+function addRecordsOfPlan(plan) {
+  const decisions = plan && Array.isArray(plan.decisions) ? plan.decisions : []
+  return decisions.filter((decision) => isPlainObject(decision) && decision.decision === DECISIONS.ADD && isPlainObject(decision.record)).map((decision) => decision.record)
+}
+
+// 人工补充行 B1 (ADR §5.3): the last small-lane pull's reminder, persisted through the server-held store the route
+// hands in (`manualRowsStore`, the plugin's own context.storage) — best effort, never the answer (the timestamp is
+// taken inside the store helper's own try, so not even a bad clock value escapes). A direct lib caller without the
+// store persists nothing. Two computations have no authoritative ADD set and so leave the record alone:
+//   * one that never read the sheet — the source does not know the project (`not_found`);
+//   * one over a TRUNCATED or BOUNDED read (`hasGlobalErrors`: a small-lane cap, a page bound, a source read error) —
+//     its plan holds only part of the ADD rows, so its "nothing matched" would overwrite a true reminder with a
+//     false one (verification r1 MF-1).
+async function persistManualRowsReminder(input, dryRun, mode, action) {
+  if (!input || !input.manualRowsStore) return
+  if (dryRun.expansion && dryRun.expansion.status === 'not_found') return
+  if (dryRun.hasGlobalErrors === true) return
+  await persistManualRowsLastPull({
+    store: input.manualRowsStore,
+    sheetId: action.target.sheetId,
+    mode,
+    now: input.now,
+    summary: dryRun.manualSupplement || null,
+    logger: input.logger,
+  })
 }
 
 function evidenceForDryRun({ action, parameters, expansion, plan, revision, canApply, conflictPolicyReview, extFieldMapping, confirmationDecision }) {
@@ -2554,6 +2663,14 @@ function dryRunStatus(dryRun, outcome = null) {
   if (outcome && outcome.suspended === true) return 'suspended'
   if (dryRun.canApply) return dryRun.plan.valid ? 'ready' : 'manual_confirm_required'
   return 'failed'
+}
+
+// Step 5 PR-8: `review_pending` (a written change awaits its review and this preview is not its controlled update)
+// replaces only what would otherwise read as applicable — recovery_pending and suspended keep precedence; not_found /
+// large_bom_bounded / failed say something else about the read and stay.
+function withReviewStatus(status, review) {
+  if (review && review.blocksMint && (status === 'ready' || status === 'manual_confirm_required')) return 'review_pending'
+  return status
 }
 
 // D-C FAIL-CLOSED. Once `rowErrors` is a bounded SAMPLE, "no hard-blocking entry in the array" stops
@@ -2655,9 +2772,13 @@ async function dryRunStockPreparationAction(input = {}) {
   // pilot guard and BEFORE the token block, so a store failure (503) or a decision that landed since the consult
   // (409 STATE_MOVED) leaves no token and no `small_preview` bump. A settling preview settles here.
   const refreshOutcome = await reconcileComputation(dryRun, { lane: 'small_preview', ...(recovery ? {} : { settle: { template: action.template } }) })
-  // A preview mints only when it is applicable, its reconcile left the pull unsuspended (no hold open) and no
-  // earlier execution awaits recovery.
-  const mintable = dryRun.canApply && !(refreshOutcome && refreshOutcome.suspended) && !recovery
+  // Step 5 PR-8 (design §9.3, C04 / C12): a WRITTEN change awaiting review (变更待复核). The preview still reconciled and
+  // settled above (the 核对 of what the controlled update wrote); it mints no token unless THIS computation is the
+  // controlled update of a confirmed plan it matches — the apply's REVIEW_PENDING refusal, answered in advance.
+  const review = dryRun.refresh && dryRun.refresh.governed ? previewReviewOf(dryRun.refresh.consult, refreshOutcome ? refreshOutcome.changePlan : null) : null
+  // A preview mints only when it is applicable, its reconcile left the pull unsuspended (no hold open), no
+  // earlier execution awaits recovery and no written change awaits its review (unless this IS a bound update).
+  const mintable = dryRun.canApply && !(refreshOutcome && refreshOutcome.suspended) && !recovery && !(review && review.blocksMint)
   let dryRunToken = null
   if (mintable) {
     // PLAN GENERATION (batch-refresh phase 0 step 1): an applicable preview SUPERSEDES every earlier
@@ -2687,9 +2808,11 @@ async function dryRunStockPreparationAction(input = {}) {
   const missingComponents = input.includeMissingComponents === true
     ? summarizeMissingComponents(dryRun.expansion)
     : null
+  // 人工补充行 B1 (ADR §5.3): every refusal above has passed — this preview finished, so its reminder is the latest.
+  await persistManualRowsReminder(input, dryRun, 'dry_run', action)
   return {
     action: publicActionMetadata(action),
-    status: recovery ? 'recovery_pending' : dryRunStatus(dryRun, refreshOutcome),
+    status: recovery ? 'recovery_pending' : withReviewStatus(dryRunStatus(dryRun, refreshOutcome), review),
     largeBom: isLargeBomBoundedExpansion(dryRun.expansion),
     boundedPreview: largeBomBoundedPreview(dryRun.expansion),
     dryRunToken,
@@ -2734,6 +2857,12 @@ async function dryRunStockPreparationAction(input = {}) {
     // Review round 1: the values-free recovery stanza (a count) of a governed preview awaiting recovery; absent
     // otherwise (every not-governed response is byte-identical).
     ...(recovery ? { refreshRecovery: recovery } : {}),
+    // Step 5 PR-8: the values-free review stanza (a count and whether it blocks this preview's token) of a governed
+    // project whose written change awaits review; absent otherwise.
+    ...(review ? { refreshReview: { pending: true, pendingReviews: review.pendingReviews, blocksMint: review.blocksMint } } : {}),
+    // 人工补充行 B1 (ADR §5.1): counts and record handles only (never a cell), beside `evidence` and never inside it;
+    // absent for a sheet without a `manual:` prefix row, so every such response is byte-identical.
+    ...(dryRun.manualSupplement ? { manualSupplement: cloneJson(dryRun.manualSupplement) } : {}),
     // W3a — THE VALUE-BEARING KEY, and the only one. Top-level and AFTER `evidence`, never inside
     // it: `evidence` is what gets stored, compared and shipped to an audit row, and this must not
     // ride along into any of that. Conditional in the same style as the two stanzas above, on BOTH
@@ -3160,7 +3289,13 @@ async function applyStockPreparationAction(input = {}) {
     if (!dryRun.refresh.complete) {
       throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_NOT_APPLYABLE', 'current dry-run is not applyable', { reason: 'refresh_incomplete_computation', partial: false })
     }
+    // Step 5 PR-8 (design §10.3 (2), §9.3): a token minted for a confirmed change plan applies only while THIS in-lease
+    // recompute still authorizes that plan (else 409 STOCK_PREP_CHANGE_PLAN_STALE — its reconciliation above has just
+    // invalidated it); before SUSPENDED / BINDING_STALE / TOKEN_MISMATCH, so the specific code answers.
+    assertChangePlanCurrent(tokenRecord, refreshOutcome.changePlan)
     assertPullNotSuspended(dryRun, refreshOutcome)
+    // A written change awaiting review refuses every write but the controlled update of a plan this recompute matches.
+    assertNoReviewPending(dryRun.refresh.consult, refreshOutcome.changePlan)
     assertRefreshBindingCurrent(tokenRecord, refreshOutcome)
   } else {
     assertTokenCarriesNoRefreshBinding(tokenRecord)
@@ -3231,6 +3366,10 @@ async function applyStockPreparationAction(input = {}) {
       writeFenceRequired: true,
       // PR-3a (design §7.2 (b)): the verdict of THIS computation's consult; the writer refuses without it.
       governance: dryRun.governance,
+      // PR-8 (register R-63 ①): every UPDATE / INACTIVE carries the version of the row THIS in-lease recompute
+      // planned against; a conflict re-reads once (human-only move => one retry; a plugin-written column moved =>
+      // the run stops 409 STOCK_PREP_CHANGE_PLAN_STALE). Governed or not.
+      expectedRecords: expectedRecordsOf(dryRun),
     })
   } catch (error) {
     if (execution) {
@@ -3263,6 +3402,9 @@ async function applyStockPreparationAction(input = {}) {
   // The fence stopped the run (lease lost / plan superseded / lock store failed): an ERROR, carrying
   // the partial counts and the decision index it stopped at — never a plausible `partial` success.
   if (applyResult.status === 'aborted') throw projectWriteAbortError(applyResult)
+  // 人工补充行 B1 (ADR §5.3): the run finished (its execution, if governed, is closed above), so the in-lease
+  // recompute's reminder is the latest — persisted best effort, after every write and never instead of the answer.
+  await persistManualRowsReminder(input, dryRun, 'apply', action)
   return {
     action: publicActionMetadata(action),
     status: applyResult.status,
@@ -3272,6 +3414,8 @@ async function applyStockPreparationAction(input = {}) {
     // (`stockPreparationSourceContentDigest`) and strips this key from the response.
     sourceContentRevision: dryRun.sourceContentRevision,
     apply: summarizeApplyResultForEvidence(applyResult),
+    // 人工补充行 B1 (ADR §5.1): the in-lease recompute's stanza (counts + record handles), absent without a prefix row.
+    ...(dryRun.manualSupplement ? { manualSupplement: cloneJson(dryRun.manualSupplement) } : {}),
     evidence: {
       actionId: action.actionId,
       projectNoPresent: Boolean(parameters.projectNo),
@@ -3343,6 +3487,7 @@ module.exports = {
     requireConsumableTokenStore,
     WRITE_BINDING_KEYS,
     assertProjectWriteGuardScope,
+    expectedRecordsOf,
     normalizeWriteBinding,
     projectWriteAbortError,
     requireProjectWriteGuard,
@@ -3350,6 +3495,8 @@ module.exports = {
     hashJson,
     normalizeActionExtensionFieldIds,
     plmSystemFieldIds,
+    addRecordsOfPlan,
+    manualPrefixKindOf,
     readExistingStockPreparationRows,
     assertTargetSheetHoldsNoForeignActiveRows,
     stockPreparationRowIsActive,

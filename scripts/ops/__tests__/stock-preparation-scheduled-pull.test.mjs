@@ -474,7 +474,7 @@ test('an HTTP 500 on dry-run marks that project failed and exits non-zero', asyn
   assert.equal(lines[1].summary.failed, 1)
 })
 
-test('an apply failure (HTTP 500) marks that project failed even though dry-run succeeded', async () => {
+test('an apply failure (HTTP 500) marks that project failed even though dry-run succeeded; a refusal carries its partial / written facts', async () => {
   const { result } = await withMockFetch(
     (record) => {
       if (record.url.includes('/dry-run')) {
@@ -489,6 +489,54 @@ test('an apply failure (HTTP 500) marks that project failed even though dry-run 
   assert.equal(lines[0].action, 'error')
   assert.equal(lines[0].failed, true)
   assert.match(lines[0].error, /TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH/)
+  // A refusal that reports neither fact carries neither key.
+  assert.equal(Object.prototype.hasOwnProperty.call(lines[0], 'partial'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(lines[0], 'written'), false)
+
+  // Batch-refresh step 5 PR-8 review fix B1: the version fence (register R-63 ①, ANY project's apply) can stop the run
+  // AFTER rows were written — 409 STOCK_PREP_CHANGE_PLAN_STALE with details.partial true and details.written. The error
+  // record copies exactly those two values-free facts (never the reason's other details); a malformed one is dropped.
+  const stopped = await withMockFetch(
+    (record) => {
+      if (record.url.includes('/dry-run')) {
+        return { json: { ok: true, data: { status: 'ready', canApply: true, dryRunToken: 'tok_v', revision: 'r1', counts: {} } } }
+      }
+      return { status: 409, json: { ok: false, error: { code: 'STOCK_PREP_CHANGE_PLAN_STALE', message: 'stopped', details: { reason: 'machine_columns_moved', decision: 'update', partial: true, written: 2, attemptedWrites: 2, abortedAtDecisionIndex: 3 } } } }
+    },
+    () => runMain(['--apply'], BASE_ENV),
+  )
+  assert.notEqual(stopped.result.code, 0, `${stopped.result.stdout}\n${stopped.result.stderr}`)
+  const stoppedLines = jsonLines(stopped.result.stdout)
+  assert.equal(stoppedLines[0].action, 'error')
+  assert.equal(stoppedLines[0].failed, true)
+  assert.equal(stoppedLines[0].error, 'STOCK_PREP_CHANGE_PLAN_STALE')
+  assert.equal(stoppedLines[0].partial, true)
+  assert.equal(stoppedLines[0].written, 2)
+  assert.equal(Object.prototype.hasOwnProperty.call(stoppedLines[0], 'abortedAtDecisionIndex'), false)
+  const nothing = await withMockFetch(
+    (record) => {
+      if (record.url.includes('/dry-run')) {
+        return { json: { ok: true, data: { status: 'ready', canApply: true, dryRunToken: 'tok_w', revision: 'r1', counts: {} } } }
+      }
+      return { status: 409, json: { ok: false, error: { code: 'STOCK_PREP_CHANGE_PLAN_STALE', message: 'stopped', details: { reason: 'record_missing', partial: false, written: 0 } } } }
+    },
+    () => runMain(['--apply'], BASE_ENV),
+  )
+  const nothingLines = jsonLines(nothing.result.stdout)
+  assert.equal(nothingLines[0].partial, false)
+  assert.equal(nothingLines[0].written, 0)
+  const malformed = await withMockFetch(
+    (record) => {
+      if (record.url.includes('/dry-run')) {
+        return { json: { ok: true, data: { status: 'ready', canApply: true, dryRunToken: 'tok_m', revision: 'r1', counts: {} } } }
+      }
+      return { status: 409, json: { ok: false, error: { code: 'STOCK_PREP_CHANGE_PLAN_STALE', message: 'stopped', details: { partial: 'true', written: -1 } } } }
+    },
+    () => runMain(['--apply'], BASE_ENV),
+  )
+  const malformedLines = jsonLines(malformed.result.stdout)
+  assert.equal(Object.prototype.hasOwnProperty.call(malformedLines[0], 'partial'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(malformedLines[0], 'written'), false)
 })
 
 test('one failing project does not stop the others in the same run', async () => {

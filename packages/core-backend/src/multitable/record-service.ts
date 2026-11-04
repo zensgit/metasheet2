@@ -51,7 +51,15 @@ import {
   type YjsInvalidator,
 } from './post-commit-hooks'
 import { isFieldAlwaysReadOnly, isFieldPermissionHidden, isFieldReadOnlyForPeople } from './permission-derivation'
-import { fieldHumanWriteLockKind, humanWriteLockRefusalCode } from './human-write-lock'
+import { FIELD_READONLY_PLM_SYSTEM_CODE, fieldHumanWriteLockKind, humanWriteLockRefusalCode } from './human-write-lock'
+import {
+  assertManualRowCreateInTransaction,
+  isMintedManualRowCreateExtension,
+  rewriteManualRowValidation,
+  type ManualRowCreateExtension,
+  type ManualRowsSheet,
+} from './stock-preparation-manual-rows-gate'
+import { manualRowKeyFor } from './stock-preparation-manual-rows'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { mintOperation, sealOperation } from './operation-ledger'
 import { recordRecordRevision } from './record-history-service'
@@ -75,6 +83,20 @@ import {
 } from './record-subscription-service'
 import { ensureRecordWriteAllowed, requiresOwnWriteRowPolicy, type AccessInfo, type SheetPermissionScope } from './sheet-capabilities'
 import { ensureRecordNotLocked } from './record-lock'
+import {
+  assertPlmRowDeletable,
+  findPlmRowRestoreRefusal,
+  loadPlmRowSheetProfile,
+  loadPlmTrashRestoreBlocks,
+  PlmRowRestoreRefusedError,
+  type PlmTrashRestoreBlocked,
+} from './plm-row-delete-guard'
+
+// R-66 (plm-row-delete-guard.ts): the two refusals this service throws, under the service's own error names.
+export {
+  PlmRowDeleteRefusedError as RecordPlmRowDeleteRefusedError,
+  PlmRowRestoreRefusedError as RecordPlmRowRestoreRefusedError,
+} from './plm-row-delete-guard'
 import {
   isTombstoneCaptureEnabled,
   countInboundLinkCaptureRows,
@@ -294,6 +316,14 @@ export type RecordCreateInput = {
   oapiAudit?: OapiWriteAuditContext
   /** Copy-sheet write context (ADR §7.3). Present ONLY on the copy-sheet path; see {@link RecordCopyWriteContext}. */
   copy?: RecordCopyWriteContext
+  /**
+   * 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.2 「实现」): present ONLY on the two manual-row routes, and
+   * only as an extension object minted by stock-preparation-manual-rows-gate.ts (any other object is refused before
+   * any read). It turns the manual-row branch ON — the in-transaction re-check, the lock exemption for the six
+   * fillable columns, the stamps, the required rewrite — and NOTHING else: `capabilities` stays the actor's own and
+   * canCreateRecord is checked as on every create.
+   */
+  manualRow?: ManualRowCreateExtension
 }
 
 export type RecordCreateResult = {
@@ -635,6 +665,13 @@ export class RecordService {
     if (copy && (!Number.isInteger(copy.ordinal) || copy.ordinal < 0 || !(copy.startedAt instanceof Date) || !copy.batchId)) {
       throw new RecordValidationError('Copy-sheet write context is malformed', 'COPY_CONTEXT_INVALID')
     }
+    // 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.2): the extension is honoured only as an object the gate
+    // module minted, for THIS sheet, and never together with the copy-sheet context. Refused before any read. It is
+    // not a capability: `capabilities` below is still the actor's own and canCreateRecord is still checked.
+    const manualRow = input.manualRow ?? null
+    if (manualRow && (!isMintedManualRowCreateExtension(manualRow) || manualRow.sheetId !== sheetId || copy)) {
+      throw new RecordPermissionError('Manual-row writes require the server-minted manual-row extension for this sheet')
+    }
 
     const sheetRes = await this.pool.query(
       'SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
@@ -687,6 +724,14 @@ export class RecordService {
         throw new RecordNotFoundError(`Sheet not found: ${sheetId}`)
       }
 
+      // 人工补充行: conditions 3, 4 and 6 again, on the fields just re-read and the plugin registry row read on THIS
+      // transaction's query, after the fence (ADR §3.2). Refuses before any write; the stamps come from here.
+      const manualSheet: ManualRowsSheet | null = manualRow
+        ? await assertManualRowCreateInTransaction(query, manualRow, fieldRes.rows as Array<{ id?: unknown; property?: unknown }>)
+        : null
+      const manualFillableFieldIds = new Set(manualSheet?.derived.fillable ?? [])
+      const manualNeverWrittenFieldIds = manualSheet?.derived.neverWritten ?? new Set<string>()
+
       const fieldById = buildCreateFieldGuardMap(fieldRes.rows)
       const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
 
@@ -718,8 +763,14 @@ export class RecordService {
           throw new RecordValidationError(`Unknown fieldId: ${fieldId}`, 'VALIDATION_ERROR', fieldId)
         }
 
+        // 人工补充行: the stamps, the identity / RUN columns and the lineage pair are the server's on a manual row — a
+        // submitted value is refused with the closed code whether or not the column carries its lock.
+        if (manualNeverWrittenFieldIds.has(fieldId)) {
+          throw new RecordFieldForbiddenError(`Field is written by the server on a manual row: ${fieldId}`, fieldId, FIELD_READONLY_PLM_SYSTEM_CODE)
+        }
         const humanLockKind = humanLockKindByFieldId.get(fieldId)
-        if (humanLockKind) {
+        // The lock exemption: ONLY the six fillable columns derived for this sheet, and only on the manual-row branch.
+        if (humanLockKind && !manualFillableFieldIds.has(fieldId)) {
           throw new RecordFieldForbiddenError(`Field is read-only (system-written): ${fieldId}`, fieldId, humanWriteLockRefusalCode(humanLockKind))
         }
 
@@ -854,11 +905,22 @@ export class RecordService {
         patch[fieldId] = value
       }
 
+      // 人工补充行 stamps (ADR §3.2 盖章): 项目号 from the plugin registry row, the key `manual:v1:<this id>` (the id the
+      // server minted above), 有效 = true — in the SAME INSERT as created_by. Identity and RUN columns stay empty.
+      if (manualSheet) {
+        patch[manualSheet.derived.projectNo] = manualSheet.projectNo
+        patch[manualSheet.derived.key] = manualRowKeyFor(recordId)
+        patch[manualSheet.derived.active] = true
+      }
+
       // CS-21: the copy path skips `property.validation` (required / min / max / regex …) — the source rows
       // are grandfathered facts and a snapshot must not do the source table's homework.
       if (!copy) {
+        const validationFields = buildDirectValidationFields(fieldRes.rows)
         const directValidationResult = validateRecord(
-          buildDirectValidationFields(fieldRes.rows),
+          // 人工补充行: the required rewrite applies to THIS create only — componentSourceId / path lose `required`,
+          // 名称 gains it (ADR §3.2).
+          manualSheet ? rewriteManualRowValidation(validationFields, manualSheet) : validationFields,
           patch,
         )
         if (!directValidationResult.valid) {
@@ -1010,7 +1072,7 @@ export class RecordService {
     const { recordId, expectedVersion, actorId, access, resolveSheetAccess } = input
 
     const recordRes = await this.pool.query(
-      'SELECT id, sheet_id, created_by, locked, locked_by, created_at, updated_at FROM meta_records WHERE id = $1',
+      'SELECT id, sheet_id, created_by, locked, locked_by, created_at, updated_at, data FROM meta_records WHERE id = $1',
       [recordId],
     )
     if (recordRes.rows.length === 0) {
@@ -1037,6 +1099,20 @@ export class RecordService {
     // locker or owner. No silent admin bypass — an admin must explicitly unlock first. Routed through
     // the ONE shared rule (`ensureRecordNotLocked`) so every mutation path enforces it identically.
     ensureRecordNotLocked(actorId, recordRow, () => new RecordPermissionError('Record is locked'))
+
+    // R-66 ① (owner 2026-10-28「管理员也不能删 PLM 行」, plm-row-delete-guard.ts): a PLM row on a stock-preparation
+    // template sheet is refused for EVERY actor — no admin branch. After the capability / row-policy / lock checks
+    // above (an actor who may not delete anyway learns nothing new), before the fence and any write. Serves the
+    // session route, mst_ API tokens (same route) and the web's bulk delete (N single deletes). The ROW IDENTITY
+    // (this record's id and the `created_by` read above) is what lets the amended ① exempt a `manual:`-keyed row that
+    // has a creator (ADR adr-stock-prep-manual-rows-20261030 §3.5, exemption E).
+    await assertPlmRowDeletable(
+      this.pool.query.bind(this.pool),
+      sheetId,
+      await loadFieldsForSheet(this.pool.query.bind(this.pool), sheetId),
+      normalizeJson(recordRow.data),
+      { id: recordId, createdBy },
+    )
 
     const linkDeleteFencePlan = await prepareRecordLinkDeleteFencePlan(
       this.pool.query.bind(this.pool),
@@ -1191,7 +1267,7 @@ export class RecordService {
     // cardinality of hidden trashed records (deny-aware count, not just deny-filtered rows).
     excludeRecordIds?: string[]
   }): Promise<{
-    records: Array<{ recordId: string; sheetId: string; data: Record<string, unknown>; originalVersion: number; createdBy: string | null; deletedBy: string | null; deletedAt: string; inboundEdgesRecoverable?: boolean }>
+    records: Array<{ recordId: string; sheetId: string; data: Record<string, unknown>; originalVersion: number; createdBy: string | null; deletedBy: string | null; deletedAt: string; inboundEdgesRecoverable?: boolean; restoreBlocked?: PlmTrashRestoreBlocked }>
     total: number
   }> {
     const { sheetId, access, resolveSheetAccess } = input
@@ -1251,6 +1327,22 @@ export class RecordService {
           }
         }
       }
+      // R-66 (plm-row-delete-guard.ts): on a stock-preparation template sheet, mark the trash rows restoreRecord
+      // would refuse (a live row already holds the key, or the key column is unresolvable) so the recycle bin
+      // shows Restore disabled with the reason. Display only — the restore route decides. An ordinary sheet costs
+      // one field read and no other statement; omitted-when-absent keeps every other response byte-identical. A
+      // failed probe fails CLOSED to "unresolved" (display only).
+      let restoreBlocks = new Map<string, PlmTrashRestoreBlocked>()
+      if (pageRows.length > 0) {
+        const trashRows = pageRows.map((r) => ({ recordId: String(r.record_id), data: normalizeJson(r.data) }))
+        const sheetFields = await loadFieldsForSheet(this.pool.query.bind(this.pool), sheetId)
+        try {
+          const profile = await loadPlmRowSheetProfile(this.pool.query.bind(this.pool), sheetId, sheetFields)
+          restoreBlocks = await loadPlmTrashRestoreBlocks(this.pool.query.bind(this.pool), sheetId, profile, trashRows)
+        } catch {
+          restoreBlocks = new Map(trashRows.map((row) => [row.recordId, 'plm_key_unresolved' as const]))
+        }
+      }
       const records = pageRows.map((r) => ({
         recordId: String(r.record_id),
         sheetId: String(r.sheet_id),
@@ -1262,6 +1354,7 @@ export class RecordService {
         ...(typeof r.delete_revision_id === 'string' && recoverableAnchors.has(r.delete_revision_id)
           ? { inboundEdgesRecoverable: true as const }
           : {}),
+        ...(restoreBlocks.has(String(r.record_id)) ? { restoreBlocked: restoreBlocks.get(String(r.record_id))! } : {}),
       }))
       return { records, total }
     } catch (err) {
@@ -1386,6 +1479,19 @@ export class RecordService {
           throw error
         }
       }
+      // R-66 (plm-row-delete-guard.ts): on a stock-preparation template sheet a deleted PLM row comes back from the
+      // next pull as a NEW row with the same key, so restoring it while that live row exists makes two rows per key
+      // and holds every later plan (duplicate_existing_key). Refused then, and when the key column cannot be
+      // resolved (fail closed — the trash row stays, nothing is lost); a key no live row holds is restored. Inside
+      // the fenced transaction, after the trash row is locked, so the check and the INSERT see one state. No admin
+      // branch.
+      const plmRestoreRefusal = await findPlmRowRestoreRefusal(
+        query,
+        sheetId,
+        await loadPlmRowSheetProfile(query, sheetId, sheetFields),
+        snapshot,
+      )
+      if (plmRestoreRefusal) throw new PlmRowRestoreRefusedError(plmRestoreRefusal)
       const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [recordId])
       if (occupied.rows.length > 0) {
         throw new RecordRestoreConflictError(`Record id is occupied, cannot restore: ${recordId}`)

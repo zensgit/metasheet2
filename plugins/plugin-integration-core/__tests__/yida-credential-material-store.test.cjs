@@ -72,11 +72,12 @@ function fixture(fixed = context) {
   }
 }
 
-test('new suites run whole-file in real CI lanes, not in the no-DB lane', () => {
+test('new suites run whole-file in real CI lanes, not in the no-DB lane', async () => {
   const root = path.resolve(__dirname, '../../..')
   const spec = 'tests/integration/stock-preparation-yida-credential-materials-realdb.test.ts'
   const flow = yaml.load(fs.readFileSync(path.join(root, '.github/workflows/plugin-tests.yml'), 'utf8'))
-  const step = flow.jobs.test.steps.find(item => item.id === 'external-system-delete-bind-lock-protocol-real-db')
+  const { requiredSuiteJob } = await import('../../../scripts/ops/plugin-tests-workflow-contract.mjs')
+  const step = requiredSuiteJob(flow, 'runtime-db').steps.find(item => item.id === 'external-system-delete-bind-lock-protocol-real-db')
   assert.equal(step.env.EXPECT_DB, '1')
   assert.equal(step.if, "matrix.node-version == '20.x'")
   assert.ok(step.env.DATABASE_URL)

@@ -75,9 +75,13 @@ interface HarnessOptions {
   fallback?: Array<{ integration_id: string; provider_union_id: string | null }>
   orgHasActiveIntegration?: boolean
   casRowCount?: number
+  /** Row count for the `created` CAS only (the pre-send stamp still succeeds): a lease stolen DURING the send. */
+  createdCasRowCount?: number
   operatorUnionId?: string
   createTodoTask?: ReturnType<typeof vi.fn>
   completeTodoTask?: ReturnType<typeof vi.fn>
+  /** Injected `logger.warn` so a case can assert what (and only what) a warning carries. */
+  warn?: ReturnType<typeof vi.fn>
   readConfig?: () => Promise<typeof CONFIG>
   /** Injected app-access-token fetch (the READ tier before the create request). */
   fetchAccessToken?: () => Promise<string>
@@ -110,17 +114,21 @@ function harness(options: HarnessOptions = {}) {
     if (sql.includes('FROM user_external_identities')) return { rows: options.fallback ?? [], rowCount: (options.fallback ?? []).length }
     if (sql.includes('SELECT EXISTS')) return { rows: [{ has_active: options.orgHasActiveIntegration ?? true }], rowCount: 1 }
     if (sql.includes('FROM approval_templates')) return { rows: [{ name: '备料审批' }], rowCount: 1 }
+    if (sql.includes("SET status = 'created'") && options.createdCasRowCount !== undefined) {
+      return { rows: [], rowCount: options.createdCasRowCount }
+    }
     if (sql.includes('UPDATE dingtalk_todo_mirrors')) return { rows: [], rowCount: options.casRowCount ?? 1 }
     return { rows: [], rowCount: 0 }
   })
   const createTodoTask = options.createTodoTask ?? vi.fn(async () => ({ taskId: 'dt-task-1', raw: {} }))
   const completeTodoTask = options.completeTodoTask ?? vi.fn(async () => ({ taskId: 'dt-task-1', raw: {} }))
+  const warn = options.warn ?? vi.fn(() => undefined)
   const worker = new DingTalkTodoMirrorWorker({
     query: query as never,
     workerId: 'worker-test',
     now: () => new Date('2026-09-16T00:00:00.000Z'),
     env: { PUBLIC_APP_URL: 'https://app.example.com' } as NodeJS.ProcessEnv,
-    logger: { info: () => undefined, warn: () => undefined, error: () => undefined } as never,
+    logger: { info: () => undefined, warn, error: () => undefined } as never,
     readConfig: options.readConfig ?? (async () => CONFIG),
     fetchAccessToken: async () => {
       trace.push('token')
@@ -136,7 +144,7 @@ function harness(options: HarnessOptions = {}) {
   // its own - exclude both so `writes()` is the terminal/retry/created write only
   const writes = () => mirrorUpdates().filter((c) => !c.sql.includes('SET send_issued_at'))
   const sendStamps = () => mirrorUpdates().filter((c) => c.sql.includes('SET send_issued_at'))
-  return { worker, query, calls, trace, writes, sendStamps, createTodoTask, completeTodoTask }
+  return { worker, query, calls, trace, writes, sendStamps, createTodoTask, completeTodoTask, warn }
 }
 
 describe('todo mirror worker — claim', () => {
@@ -215,6 +223,43 @@ describe('todo mirror worker — create phase', () => {
     expect(write.params[2]).toBe('worker-test')
     expect(write.params[3]).toBe(1)
     expect(write.params[4]).toBe('dt-task-1')
+    // a normal create clears last_error and is nothing to warn about
+    expect(write.sql).toContain('last_error = NULL')
+    expect(h.warn).not.toHaveBeenCalled()
+  })
+
+  it('a 2xx create whose response carries no task id still lands as `created` (null id) and warns ONCE, naming only the row', async () => {
+    const h = harness({
+      claimed: [pendingRow()],
+      linked: [{ integration_id: 'integ-1', union_id: 'union-recipient' }],
+      createTodoTask: vi.fn(async () => ({ taskId: undefined, raw: {} })),
+    })
+    const result = await h.worker.runBatch()
+    expect(result).toMatchObject({ claimed: 1, created: 1, failed: 0, retrying: 0, outcomeUnknown: 0 })
+    const write = h.writes()[0]
+    expect(write.sql).toContain("SET status = 'created'")
+    expect(write.params[4]).toBeNull()
+    expect(write.sql).toContain('last_error = NULL')
+    // exactly one warning, a single string argument, pinned verbatim: the row id and NO other value
+    expect(h.warn).toHaveBeenCalledTimes(1)
+    const args = h.warn.mock.calls[0]
+    expect(args).toHaveLength(1)
+    expect(args[0]).toBe(`DingTalk todo mirror: created without a task id row=${ROW_ID}`)
+  })
+
+  it('a no-task-id create whose lease was stolen DURING the send (created CAS matches 0 rows) is lost-lease and does NOT warn', async () => {
+    const h = harness({
+      claimed: [pendingRow()],
+      linked: [{ integration_id: 'integ-1', union_id: 'union-recipient' }],
+      createTodoTask: vi.fn(async () => ({ taskId: undefined, raw: {} })),
+      createdCasRowCount: 0,
+    })
+    const result = await h.worker.runBatch()
+    // the send really went out (the pre-send stamp succeeded); only the `created` write lost the race
+    expect(h.createTodoTask).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({ claimed: 1, created: 0, lostLease: 1 })
+    // the warn sits AFTER the CAS: a row we no longer own is not ours to report on
+    expect(h.warn).not.toHaveBeenCalled()
   })
 
   it('stamps send_issued_at under the SAME CAS AFTER the token fetch and immediately BEFORE the request', async () => {

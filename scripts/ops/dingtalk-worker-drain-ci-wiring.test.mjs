@@ -1,3 +1,4 @@
+import { requiredSuiteJobBody } from './plugin-tests-workflow-contract.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -7,19 +8,8 @@ import { fileURLToPath } from 'node:url'
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const workflow = readFileSync(path.join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
 
-function jobBlock(jobId) {
-  const marker = `\n  ${jobId}:\n`
-  const start = workflow.indexOf(marker)
-  assert.notEqual(start, -1, `missing workflow job ${jobId}`)
-  const bodyStart = start + marker.length
-  const nextJob = workflow.slice(bodyStart).search(/\n  [a-z0-9_-]+:\n/)
-  return nextJob === -1
-    ? workflow.slice(bodyStart)
-    : workflow.slice(bodyStart, bodyStart + nextJob)
-}
-
 test('test matrix runs the worker-drain behavior suite on the required Node 20 leg', () => {
-  const requiredTestJob = jobBlock('test')
+  const requiredTestJob = requiredSuiteJobBody(workflow, 'contracts')
   // The 18.x leg was dropped on 2026-10-07 (Node 18 is EOL; it was never a required check).
   assert.match(requiredTestJob, /node-version:\s*\[20\.x\]/)
   assert.match(
@@ -29,7 +19,7 @@ test('test matrix runs the worker-drain behavior suite on the required Node 20 l
 })
 
 test('test matrix runs this wiring guard beside the behavior suite', () => {
-  const requiredTestJob = jobBlock('test')
+  const requiredTestJob = requiredSuiteJobBody(workflow, 'contracts')
   assert.match(
     requiredTestJob,
     /node --test scripts\/ops\/dingtalk-worker-drain-ci-wiring\.test\.mjs/,

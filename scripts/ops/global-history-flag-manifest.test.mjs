@@ -81,6 +81,28 @@ test('approval new-outcome badge switch (test report 2026-10-08): boolean, exact
   assert.equal(isActivated(spec, 'True'), false)
 })
 
+// YiDa owner-run 测试连接 (ADR adr-yida-connection-test-20261028, R-64): its own default-OFF switch,
+// danger high like the send switch, exact literal only, independent of the send switch, every cited file real.
+test('INTEGRATION_YIDA_CONNECTION_TEST_ENABLED manifest entry: exact true, danger high, independent, sources exist', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.ok(spec.purpose.includes('Does not read, imply or require INTEGRATION_YIDA_OWNER_SEND_ENABLED'))
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+  for (const cited of spec.source.split('; ').map((entry) => entry.split('#')[0])) {
+    assert.ok(readFileSync(path.join(root, cited), 'utf8').length > 0, cited)
+  }
+  const host = readFileSync(path.join(root, 'packages/core-backend/src/index.ts'), 'utf8')
+  assert.ok(host.includes('readEnablement: () => process.env.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED,'))
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false)
+})
+
 // ASSUMPTION(task-m4): [own-28] the TASKS_ENABLED entry: danger medium, both read points, and the
 // M4 migration the task routes depend on (named as it is on disk, so a rename is followed here).
 test('TASKS_ENABLED manifest entry: danger medium, both read points, and the M4 migration on disk', () => {
@@ -392,8 +414,12 @@ function globalHistoryFlagsInSource() {
   // new env flag is registered here; the ADR §8 names this manifest explicitly). One family by name
   // shape, scanned in the plugin's lib — the two keys are the switch and the G1 role list. Every
   // other MULTITABLE_STOCK_PREP_* the plugin reads predates this registry and stays out of scope.
-  const stockPrepProjectSheets = grepPluginFlagTokens('MULTITABLE_STOCK_PREP_PROJECT_SHEET[A-Z_0-9]*')
-    .filter((t) => !t.endsWith('_'))
+  // 人工补充行 B2 (ADR adr-stock-prep-manual-rows-20261030 §3.2 condition 5, §8 「B2 主机」 7): the HOST now reads the
+  // switch too (multitable/stock-preparation-manual-rows-gate.ts), so both trees are scanned — the members-page precedent.
+  const stockPrepProjectSheets = [
+    ...grepPluginFlagTokens('MULTITABLE_STOCK_PREP_PROJECT_SHEET[A-Z_0-9]*'),
+    ...grepFlagTokens('MULTITABLE_STOCK_PREP_PROJECT_SHEET[A-Z_0-9]*'),
+  ].filter((t) => !t.endsWith('_'))
   // 备料「成员与权限」(S5b, R-39): read by the plugin routes AND the host port, so both trees are scanned;
   // `_ENABLED` only, so the refusal code STOCK_PREP_MEMBERS_PAGE_DISABLED is not mistaken for a flag.
   const stockPrepMembersPage = [
@@ -402,13 +428,52 @@ function globalHistoryFlagsInSource() {
   ].filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
   // Derive the reviewed owner-send switch from actual core reads, including phantom detection.
   const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  const userRecycle = grepFlagTokens('USER_RECYCLE_[A-Z_0-9]+_ENABLED')
+  // #4196 Class-B outbound two-phase ledger switch (S0-c, AGENTS.md: every new env flag is registered
+  // here). One family by name shape, scanned where the executor and retry-eligibility read it.
+  const automationClassB = grepFlagTokens('AUTOMATION_CLASSB_[A-Z_0-9]+_ENABLED')
   // The leave cancel-round launch flag (AGENTS.md: every new env flag; reviewer finding F3, 2026-10-08) is
   // read by the attendance PLUGIN, not under packages/core-backend/src. Only this one family is scanned
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner, ...attendanceCancelRound])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner, ...attendanceCancelRound, ...userRecycle, ...automationClassB])].sort()
 }
+
+// #4196 Class-B outbound ledger switch (S0-c): default OFF, exact literal only, danger high, sourced from its
+// exported predicate; the purpose names both migrations the ON path depends on, as they are on disk.
+test('AUTOMATION_CLASSB_OUTBOUND_ENABLED manifest entry: exact true, danger high, predicate source, migrations on disk', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.AUTOMATION_CLASSB_OUTBOUND_ENABLED
+  assert.ok(spec, 'AUTOMATION_CLASSB_OUTBOUND_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/multitable/automation-outbound-intent.ts#isClassBOutboundEnabled')
+  const module = readFileSync(path.join(REPO_ROOT, spec.source.split('#')[0]), 'utf8')
+  assert.match(module, /export function isClassBOutboundEnabled\(/)
+  assert.ok(module.includes("env.AUTOMATION_CLASSB_OUTBOUND_ENABLED === 'true'"), 'the reader compares the exact literal')
+  const migrationsDir = path.join(REPO_ROOT, 'packages/core-backend/src/db/migrations')
+  for (const pattern of [/^zzzz\d{14}_create_automation_outbound_intent\.ts$/, /^zzzz\d{14}_outbound_intent_attempt_lease_target_key\.ts$/]) {
+    const onDisk = readdirSync(migrationsDir).filter((name) => pattern.test(name))
+    assert.equal(onDisk.length, 1, `${pattern} on disk exactly once`)
+    assert.ok(spec.purpose.includes(onDisk[0].slice(0, 'zzzz00000000000000'.length)), `purpose names ${onDisk[0]}`)
+  }
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false)
+})
+
+test('recycle sweeper manifest requires exact true and matches the runtime source', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.USER_RECYCLE_SWEEPER_ENABLED
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.danger, 'high')
+  assert.equal(spec.source, 'packages/core-backend/src/admin/user-recycle-scheduler.ts#startUserRecycleSweeper')
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '1', 'TRUE', ' true', 'true ']) assert.equal(isActivated(spec, value), false)
+})
 
 function grepPluginFlagTokens(pattern) {
   const libDir = path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib')
@@ -447,7 +512,7 @@ test('leave cancel-round launch flag: registered against the plugin reader, exac
 })
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src, plus plugins/plugin-attendance/index.cjs for the ATTENDANCE_CANCEL_ROUND_ family', () => {
-  const sourceGH = globalHistoryFlagsInSource()
+  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource()])].sort()
   assert.ok(
     sourceGH.length >= 20,
     `expected >=20 Global-History flags derived from source, got ${sourceGH.length} — the denylist is too broad or grep broke`,
@@ -806,6 +871,15 @@ test('stock-prep project-sheets switch (ADR adr-stock-prep-project-sheets-202610
   assert.equal(isActivated(spec, ' true'), false)
   assert.equal(isActivated(spec, '1'), false)
   assert.equal(isActivated(spec, undefined), false)
+  // 人工补充行 B2: the host reads the same switch for the manual-row create routes and /context. Both readers spell the
+  // exact-literal comparison against the same env name, and the purpose names the host reader.
+  const plugin = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/stock-preparation-project-targets.cjs'), 'utf8')
+  assert.match(plugin, /PROJECT_SHEETS_ENABLED_ENV = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'/)
+  assert.match(plugin, /env\[PROJECT_SHEETS_ENABLED_ENV\] === 'true'/)
+  const host = readFileSync(path.join(REPO_ROOT, 'packages/core-backend/src/multitable/stock-preparation-manual-rows-gate.ts'), 'utf8')
+  assert.match(host, /STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'/)
+  assert.match(host, /env\[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV\] === 'true'/)
+  assert.match(spec.purpose, /stock-preparation-manual-rows-gate\.ts#stockPrepProjectSheetsEnabledForManualRows/)
 })
 
 test('stock-prep project-sheet G1 grant role list (R-35): a list, danger high, sourced from its exported parser, not a dependsOn of the switch', () => {
@@ -877,4 +951,134 @@ test('stock-prep members page switch (ADR §11.4-11.6 S5b, R-39): boolean, exact
   assert.doesNotMatch(host, /lands \(nothing is granted after it\)/)
   assert.doesNotMatch(host, /so none of them can be revoked between the decision/)
   assert.doesNotMatch(host, /no revoke of the grantor's write can land/)
+})
+
+// ── Automation runtime flags (AGENTS.md: every env flag is registered; iPaaS follow-up 2026-11-03) ──
+// Derived from READ SITES, not from name shape: every `env.AUTOMATION_*` read under packages/core-backend/src
+// joins the population as soon as source reads it, so a new automation env read fails completeness until it
+// is registered. AUTOMATION_CLASSB_OUTBOUND_ENABLED is excluded here only because #6715 registers it with its
+// own family scan in globalHistoryFlagsInSource(); this scan therefore does not depend on merge order.
+// The scheduler leader-lock pair is read in automation-service.ts as `process.env.<KEY>`; the read-site
+// shape keeps ATTENDANCE_SCHEDULER_LEADER_LOCK_TTL_MS (attendance scheduler, not registered) out.
+const AUTOMATION_FLAGS_REGISTERED_ELSEWHERE = new Set(['AUTOMATION_CLASSB_OUTBOUND_ENABLED'])
+
+function automationFlagsInSource() {
+  const reads = [
+    ...grepFlagTokens('env[.]AUTOMATION_[A-Z_0-9]+'),
+    ...grepFlagTokens('process[.]env[.]ENABLE_SCHEDULER_LEADER_LOCK[A-Z_0-9]*'),
+    ...grepFlagTokens('process[.]env[.]SCHEDULER_LEADER_LOCK_[A-Z_0-9]+'),
+  ].map((read) => read.replace(/^.*env\./, ''))
+  return [...new Set(reads)].filter((key) => !AUTOMATION_FLAGS_REGISTERED_ELSEWHERE.has(key)).sort()
+}
+
+test('automation flags: the read-site scan finds every registered automation key (non-vacuous)', () => {
+  assert.deepEqual(automationFlagsInSource(), [
+    'AUTOMATION_CLASSA_CLAIM_ENABLED',
+    'AUTOMATION_DURABLE_DELIVERY_ENABLED',
+    'AUTOMATION_WEBHOOK_MAX_RETRIES',
+    'AUTOMATION_WEBHOOK_TIMEOUT_MS',
+    'ENABLE_SCHEDULER_LEADER_LOCK',
+    'SCHEDULER_LEADER_LOCK_TTL_MS',
+  ])
+})
+
+function readRepoSource(relative) {
+  return readFileSync(path.join(REPO_ROOT, relative), 'utf8').replace(/\r\n/g, '\n')
+}
+
+function migrationOnDisk(pattern) {
+  const onDisk = readdirSync(path.join(REPO_ROOT, 'packages/core-backend/src/db/migrations')).filter((name) => pattern.test(name))
+  assert.equal(onDisk.length, 1, `${pattern} on disk exactly once`)
+  return onDisk[0].replace(/\.ts$/, '')
+}
+
+test('AUTOMATION_DURABLE_DELIVERY_ENABLED: trim + lowercase true, danger high, predicate source, outbox migration on disk', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.AUTOMATION_DURABLE_DELIVERY_ENABLED
+  assert.ok(spec, 'AUTOMATION_DURABLE_DELIVERY_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, true)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/multitable/automation-durable-delivery.ts#isDurableDeliveryEnabled')
+  const module = readRepoSource(spec.source.split('#')[0])
+  assert.match(module, /export function isDurableDeliveryEnabled\(/)
+  assert.ok(module.includes("String(env.AUTOMATION_DURABLE_DELIVERY_ENABLED ?? '').trim().toLowerCase() === 'true'"), 'the reader trims and lowercases')
+  assert.ok(spec.purpose.includes(migrationOnDisk(/^zzzz\d{14}_create_automation_outbox\.ts$/)), 'purpose names the outbox migration on disk')
+  for (const value of ['true', 'TRUE', ' true ', 'True']) assert.equal(isActivated(spec, value), true, value)
+  for (const value of [undefined, '', 'false', '1', 'yes', 'on']) assert.equal(isActivated(spec, value), false, String(value))
+})
+
+test('AUTOMATION_CLASSA_CLAIM_ENABLED: exact true, danger high, predicate source, claim-table migration on disk', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.AUTOMATION_CLASSA_CLAIM_ENABLED
+  assert.ok(spec, 'AUTOMATION_CLASSA_CLAIM_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/multitable/automation-execution-ledger.ts#isClassAExecutionClaimEnabled')
+  const module = readRepoSource(spec.source.split('#')[0])
+  assert.match(module, /export function isClassAExecutionClaimEnabled\(/)
+  assert.ok(module.includes("env.AUTOMATION_CLASSA_CLAIM_ENABLED === 'true'"), 'the reader compares the exact literal')
+  assert.ok(spec.purpose.includes(migrationOnDisk(/^zzzz\d{14}_create_automation_action_applied\.ts$/)), 'purpose names the claim-table migration on disk')
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'TRUE', ' true', 'true ', '1', 'yes']) assert.equal(isActivated(spec, value), false, String(value))
+})
+
+test('automation webhook knobs: numeric, defaults and bounds match the executor parsers', () => {
+  const executor = readRepoSource('packages/core-backend/src/multitable/automation-executor.ts')
+  assert.match(executor, /\nconst DEFAULT_WEBHOOK_TIMEOUT_MS = 5_000\n/)
+  assert.match(executor, /\nconst DEFAULT_MAX_WEBHOOK_RETRIES = 2\n/)
+  const timeout = /\nfunction webhookTimeoutMs\(\): number \{\n([\s\S]*?)\n\}\n/.exec(executor)
+  assert.ok(timeout, 'webhookTimeoutMs reader found')
+  assert.ok(timeout[1].includes('process.env.AUTOMATION_WEBHOOK_TIMEOUT_MS'))
+  assert.ok(timeout[1].includes('Number.parseInt(raw, 10)'))
+  assert.ok(timeout[1].includes('Math.min(Math.max(parsed, 1_000), 30_000)'))
+  const retries = /\nfunction maxWebhookRetries\(\): number \{\n([\s\S]*?)\n\}\n/.exec(executor)
+  assert.ok(retries, 'maxWebhookRetries reader found')
+  assert.ok(retries[1].includes('process.env.AUTOMATION_WEBHOOK_MAX_RETRIES'))
+  assert.ok(retries[1].includes('Number.parseInt(raw, 10)'))
+  assert.ok(retries[1].includes('parsed < 0) return DEFAULT_MAX_WEBHOOK_RETRIES'))
+  assert.ok(retries[1].includes('Math.min(parsed, 5)'))
+  const timeoutSpec = GLOBAL_HISTORY_FLAG_BY_KEY.AUTOMATION_WEBHOOK_TIMEOUT_MS
+  assert.ok(timeoutSpec, 'AUTOMATION_WEBHOOK_TIMEOUT_MS must be registered in the manifest')
+  assert.equal(timeoutSpec.type, 'numeric')
+  assert.equal(timeoutSpec.source, 'packages/core-backend/src/multitable/automation-executor.ts#webhookTimeoutMs')
+  assert.match(timeoutSpec.activationValue, /default 5000; clamped to \[1000, 30000\]/)
+  const retrySpec = GLOBAL_HISTORY_FLAG_BY_KEY.AUTOMATION_WEBHOOK_MAX_RETRIES
+  assert.ok(retrySpec, 'AUTOMATION_WEBHOOK_MAX_RETRIES must be registered in the manifest')
+  assert.equal(retrySpec.type, 'numeric')
+  assert.equal(retrySpec.source, 'packages/core-backend/src/multitable/automation-executor.ts#maxWebhookRetries')
+  assert.match(retrySpec.activationValue, /default 2; capped at 5/)
+  for (const spec of [timeoutSpec, retrySpec]) {
+    assert.deepEqual(spec.dependsOn, [])
+    assert.equal(isActivated(spec, '5000'), false)
+    assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  }
+})
+
+test('automation scheduler leader lock: exact true switch plus a numeric TTL that depends on it', () => {
+  const service = readRepoSource('packages/core-backend/src/multitable/automation-service.ts')
+  assert.match(service, /export async function resolveAutomationSchedulerLeaderOptions\(/)
+  assert.ok(service.includes("if (process.env.ENABLE_SCHEDULER_LEADER_LOCK !== 'true') return null"), 'the switch compares the exact literal')
+  assert.ok(service.includes('const ttlMs = Number(process.env.SCHEDULER_LEADER_LOCK_TTL_MS) > 0'), 'the TTL uses Number(raw) > 0')
+  assert.match(service, /\n {4}: 30_000\n/)
+  const lock = GLOBAL_HISTORY_FLAG_BY_KEY.ENABLE_SCHEDULER_LEADER_LOCK
+  assert.ok(lock, 'ENABLE_SCHEDULER_LEADER_LOCK must be registered in the manifest')
+  assert.equal(lock.type, 'boolean')
+  assert.equal(lock.activationValue, 'true')
+  assert.equal(lock.caseInsensitive, undefined)
+  assert.equal(lock.source, 'packages/core-backend/src/multitable/automation-service.ts#resolveAutomationSchedulerLeaderOptions')
+  assert.equal(isActivated(lock, 'true'), true)
+  for (const value of [undefined, '', 'TRUE', ' true', '1']) assert.equal(isActivated(lock, value), false, String(value))
+  const ttl = GLOBAL_HISTORY_FLAG_BY_KEY.SCHEDULER_LEADER_LOCK_TTL_MS
+  assert.ok(ttl, 'SCHEDULER_LEADER_LOCK_TTL_MS must be registered in the manifest')
+  assert.equal(ttl.type, 'numeric')
+  assert.deepEqual(ttl.dependsOn, ['ENABLE_SCHEDULER_LEADER_LOCK'])
+  assert.equal(ttl.source, lock.source)
+  assert.match(ttl.activationValue, /default 30000/)
+  assert.equal(isActivated(ttl, '30000'), false)
 })
