@@ -92,9 +92,21 @@ function integrationRow(id: string) {
   return { id, name: `Directory ${id}`, status: fixture.status, config: fixture.config, updated_at: '2026-05-08T00:00:00.000Z' }
 }
 
-const tokenResponse = () => new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'app-access-token', expires_in: 7200 }), {
-  status: 200, headers: { 'Content-Type': 'application/json' },
-})
+// Each app gets its OWN mock access token, issued only for its own key+secret pair, so a send that used the
+// other app's credentials (or a token fetched with a mixed key/secret) is visible in the send URL.
+const TOKEN_A = 'token-for-app-a'
+const TOKEN_B = 'token-for-app-b'
+const TOKEN_BY_KEY_AND_SECRET = new Map([
+  [`${APP_A_KEY}|${APP_A_SECRET}`, TOKEN_A],
+  [`${APP_B_KEY}|${APP_B_SECRET}`, TOKEN_B],
+])
+const tokenResponse = (url: string) => {
+  const params = new URL(url).searchParams
+  const token = TOKEN_BY_KEY_AND_SECRET.get(`${params.get('appkey')}|${params.get('appsecret')}`) ?? 'token-for-unknown-pair'
+  return new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: token, expires_in: 7200 }), {
+    status: 200, headers: { 'Content-Type': 'application/json' },
+  })
+}
 const interactiveOkResponse = () => new Response(JSON.stringify({ success: true, result: { deliverResults: [{ success: true }] } }), {
   status: 200, headers: { 'Content-Type': 'application/json' },
 })
@@ -127,7 +139,7 @@ function makeHarness(options: {
   const fetchSpy = vi.fn(async (url: unknown) => {
     timeline.push('fetch')
     const target = String(url)
-    if (target.includes('gettoken')) return tokenResponse()
+    if (target.includes('gettoken')) return tokenResponse(target)
     return target.includes('createAndDeliver') ? interactiveOkResponse() : sendOkResponse()
   })
   dbMocks.query.mockImplementation(async (_sql: string, params: unknown[] = []) => {
@@ -215,6 +227,26 @@ function makeHarness(options: {
   } as Harness
 }
 
+/** Every work-notification send, as the exact (token, agent, recipients) triple DingTalk would receive. */
+function workNotificationSends(h: Harness): Array<{ token: string | null; agentId: unknown; userIds: string }> {
+  return h.fetch.mock.calls
+    .filter((call) => String(call[0]).includes('/topapi/message/corpconversation/asyncsend_v2'))
+    .map((call) => {
+      const body = JSON.parse(String((call[1] as RequestInit | undefined)?.body ?? '{}')) as { agent_id?: unknown; userid_list?: string }
+      return {
+        token: new URL(String(call[0])).searchParams.get('access_token'),
+        agentId: body.agent_id,
+        userIds: String(body.userid_list ?? ''),
+      }
+    })
+}
+
+/** App A -> token A -> recipient group of intg_a; app B -> token B -> recipient group of intg_b. */
+const EXPECTED_TWO_APP_SENDS = [
+  { token: TOKEN_A, agentId: Number(APP_A_AGENT), userIds: 'dt-user_a' },
+  { token: TOKEN_B, agentId: Number(APP_B_AGENT), userIds: 'dt-user_b' },
+]
+
 const PERSON_TRIGGER = { recordId: 'rec_1', sheetId: 'sheet_1', actorId: 'user_1', data: {} }
 const CARD_TRIGGER = {
   recordId: 'rec_1',
@@ -298,6 +330,8 @@ describe('send_dingtalk_person_message — configuration of every group before t
       const sendBodies = h.fetch.mock.calls.map((call) => String((call[1] as RequestInit | undefined)?.body ?? ''))
       expect(sendBodies.some((b) => b.includes(APP_A_AGENT))).toBe(true)
       expect(sendBodies.some((b) => b.includes(APP_B_AGENT))).toBe(true)
+      // Exact mapping per send: a swap of token, agent or recipient group between the two apps fails here.
+      expect(workNotificationSends(h)).toEqual(EXPECTED_TWO_APP_SENDS)
     })
 
     it('a configuration failure in the LAST group sends to nobody: every recipient failed with the typed sentence', async () => {
@@ -326,6 +360,7 @@ describe('send_dingtalk_person_message — configuration of every group before t
       expect(retry.steps[0]?.status).toBe('success')
       expect([...h.intent.values()][0]).toMatchObject({ status: 'sent' })
       expect(h.personDeliveries.filter((d) => d.status === 'success').map((d) => d.localUserId).sort()).toEqual(['user_a', 'user_b'])
+      expect(workNotificationSends(h)).toEqual(EXPECTED_TWO_APP_SENDS)
     })
   })
 })
@@ -444,6 +479,8 @@ describe('send_dingtalk_approval_card — OA card credentials resolved before th
     expect(exec.steps[0]?.status).toBe('success')
     expect(h.timeline.filter((e) => e.startsWith('config:'))).toEqual(['config:intg_b'])
     expect(String((h.fetch.mock.calls[1][1] as RequestInit).body)).toContain(APP_B_AGENT)
+    // Env carries app A's key/secret here: the card must still go out with app B's token and agent.
+    expect(workNotificationSends(h)).toEqual([{ token: TOKEN_B, agentId: Number(APP_B_AGENT), userIds: 'dtu_1' }])
   })
 })
 
