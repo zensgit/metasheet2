@@ -3350,4 +3350,81 @@ describe('UserManagementView', () => {
     expect(JSON.parse(String((restoreCall?.[1] as RequestInit | undefined)?.body))).toEqual({ userIds: ['user-gone'] })
     useLocale().setLocale('en')
   })
+
+  it.each(['restore', 'purge'] as const)('reloads the previous recycle page after the last %s on the last page', async (action) => {
+    useLocale().setLocale('zh-CN')
+    let finished = false
+    const kept = {
+      id: 'user-keep',
+      email: 'keep@example.com',
+      name: '仍在回收站',
+      department: '装配',
+      deletedAt: '2026-10-01T00:00:00.000Z',
+      deletedBy: 'admin-1',
+      purgeAfter: '2026-10-31T00:00:00.000Z',
+    }
+    const last = {
+      id: 'user-last',
+      email: 'last@example.com',
+      name: '最后一条',
+      department: '装配',
+      deletedAt: '2026-10-02T00:00:00.000Z',
+      deletedBy: 'admin-1',
+      purgeAfter: '2026-11-01T00:00:00.000Z',
+    }
+    const base = apiFetchMock.getMockImplementation()
+    apiFetchMock.mockImplementation(async (rawUrl: unknown, init?: RequestInit) => {
+      const url = String(rawUrl)
+      const path = url.split('?')[0]
+      if (path === '/api/admin/users/recycle') {
+        const page = new URL(url, 'http://localhost').searchParams.get('page') || '1'
+        if (!finished && page === '2') {
+          return createJsonResponse({ ok: true, data: { total: 21, retentionDays: 30, items: [last] } })
+        }
+        if (finished && page === '2') {
+          return createJsonResponse({ ok: true, data: { total: 20, retentionDays: 30, items: [] } })
+        }
+        return createJsonResponse({ ok: true, data: { total: finished ? 20 : 21, retentionDays: 30, items: [kept] } })
+      }
+      if (path === '/api/admin/users/recycle/restore' || path === '/api/admin/users/recycle/purge') {
+        finished = true
+        return createJsonResponse({ ok: true, data: { successCount: 1, failureCount: 0, results: [{ ok: true, message: 'ok' }] } })
+      }
+      if (!base) throw new Error(`Unhandled apiFetch call: ${url}`)
+      return base(rawUrl, init)
+    })
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(12)
+    findButtonByText(container!, '回收站').click()
+    await waitForCondition(() => container!.textContent?.includes('仍在回收站') === true)
+    findButtonByText(container!, '下一页').click()
+    await waitForCondition(() => container!.textContent?.includes('最后一条') === true)
+    if (action === 'restore') {
+      findButtonByText(findUserRow(container!, '最后一条'), '恢复').click()
+    } else {
+      const row = findUserRow(container!, '最后一条')
+      const checkbox = row.querySelector<HTMLInputElement>('input[type="checkbox"]')
+      if (!checkbox) throw new Error('recycle checkbox missing')
+      checkbox.click()
+      const phrase = container!.querySelector<HTMLInputElement>('[data-testid="recycle-purge-phrase"]')
+      if (!phrase) throw new Error('purge phrase missing')
+      phrase.value = '立即清除'
+      phrase.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+      const purge = findButtonByText(container!, '立即清除所选')
+      if (purge.disabled) throw new Error('purge button stayed disabled')
+      purge.click()
+    }
+    await waitForCondition(() => container!.textContent?.includes('仍在回收站') === true && container!.textContent?.includes('回收站是空的') !== true)
+    expect(container!.textContent).not.toContain('最后一条')
+    expect(container!.querySelector('[data-testid="recycle-pager"]')).toBeNull()
+    const pages = apiFetchMock.mock.calls
+      .map((args) => String(args[0]))
+      .filter((url) => url.split('?')[0] === '/api/admin/users/recycle')
+      .map((url) => new URL(url, 'http://localhost').searchParams.get('page'))
+    expect(pages).toEqual(['1', '2', '2', '1'])
+  })
 })

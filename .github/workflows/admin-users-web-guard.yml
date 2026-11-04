@@ -8,6 +8,8 @@ on:
       - 'apps/web/src/views/adminUserBatch.ts'
       - 'apps/web/src/views/userRecycleLabels.ts'
       - 'packages/core-backend/src/admin/user-recycle*.ts'
+      - 'packages/core-backend/src/admin/user-visibility.ts'
+      - 'packages/core-backend/tests/unit/user-visibility-mentions.test.ts'
       - 'packages/core-backend/src/auth/user-activation.ts'
       - 'packages/core-backend/src/auth/AuthService.ts'
       - 'packages/core-backend/src/auth/dingtalk-oauth.ts'
@@ -31,6 +33,8 @@ on:
       - 'apps/web/src/views/adminUserBatch.ts'
       - 'apps/web/src/views/userRecycleLabels.ts'
       - 'packages/core-backend/src/admin/user-recycle*.ts'
+      - 'packages/core-backend/src/admin/user-visibility.ts'
+      - 'packages/core-backend/tests/unit/user-visibility-mentions.test.ts'
       - 'packages/core-backend/src/auth/user-activation.ts'
       - 'packages/core-backend/src/auth/AuthService.ts'
       - 'packages/core-backend/src/auth/dingtalk-oauth.ts'
@@ -68,6 +72,6 @@ jobs:
       - name: Web regression tests
         run: pnpm --filter @metasheet/web exec vitest run --watch=false tests/adminUserBatch.spec.ts tests/userManagementView.spec.ts tests/userManagementRoleMembership.spec.ts
       - name: Batch and permission guard tests
-        run: pnpm --filter @metasheet/core-backend exec vitest run tests/unit/admin-user-batch-plan.test.ts tests/unit/admin-user-batch-routes.test.ts tests/unit/admin-mounts-write-gate-guard.test.ts tests/unit/admin-user-recycle.test.ts tests/unit/admin-user-recycle-routes.test.ts tests/unit/user-recycle-scheduler.test.ts tests/unit/user-activation.test.ts tests/unit/role-assignment-boundary.test.ts tests/unit/api-token-webhook.test.ts tests/unit/dingtalk-oauth-login-gates.test.ts
+        run: pnpm --filter @metasheet/core-backend exec vitest run tests/unit/admin-user-batch-plan.test.ts tests/unit/admin-user-batch-routes.test.ts tests/unit/admin-mounts-write-gate-guard.test.ts tests/unit/admin-user-recycle.test.ts tests/unit/admin-user-recycle-routes.test.ts tests/unit/user-recycle-scheduler.test.ts tests/unit/user-activation.test.ts tests/unit/role-assignment-boundary.test.ts tests/unit/api-token-webhook.test.ts tests/unit/dingtalk-oauth-login-gates.test.ts tests/unit/user-visibility-mentions.test.ts
       - name: Flag registry contracts
         run: node --test scripts/ops/global-history-flag-manifest.test.mjs

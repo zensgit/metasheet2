@@ -441,6 +441,7 @@ import {
   parseUpdateRuleInput,
   preflightAutomationConditionFields,
   preflightAutomationRuleUpdate,
+  preflightAutomationWebhookTargets,
   preflightDingTalkAutomationCreate,
   serializeAutomationRule,
 } from '../multitable/automation-service'
@@ -22023,6 +22024,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const parsed = parseCreateRuleInput(req.body as Record<string, unknown> | undefined, access.userId)
+      // S0-a: early error for a send_webhook target the send-time check would always refuse (no DNS here;
+      // the boundary is the per-send check in the executor).
+      preflightAutomationWebhookTargets(parsed)
       const input = await preflightDingTalkAutomationCreate(pool.query.bind(pool), sheetId, parsed)
       // #4b: `input` also carries the action tree, so condition_branch conditions are field-checked too.
       await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, input)
@@ -22078,6 +22082,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
       const input = preflight.input
+      // S0-a: early error for a send_webhook target, on the EFFECTIVE action pair (request ?? stored) — a
+      // PATCH that only re-types a rule to send_webhook would otherwise make a stored target live unchecked.
+      // A PATCH that does not touch the action tree (rename / enable / disable) is not blocked.
+      preflightAutomationWebhookTargets({
+        ...input,
+        actionType: preflight.effectiveActionType ?? input.actionType,
+        actionConfig: preflight.effectiveActionConfig ?? input.actionConfig,
+      })
       // #4b: an update that touches the action tree gets its condition_branch conditions field-checked too.
       // The action type AND config are the EFFECTIVE ones (request ?? stored), exactly what updateRule persists:
       // a PATCH that sends only `actionConfig` for a rule stored as condition_branch, or only `actionType` to

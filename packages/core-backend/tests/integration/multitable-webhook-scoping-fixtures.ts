@@ -6,6 +6,7 @@
 import { vi } from 'vitest'
 import { Logger } from '../../src/core/logger'
 import { poolManager } from '../../src/integration/db/connection-pool'
+import type { SsrfLookupFn } from '../../src/multitable/webhook-ssrf-guard'
 
 export const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
@@ -32,6 +33,9 @@ export function createSink(status = 200) {
   }) as unknown as typeof fetch
   return {
     fetchFn,
+    // The subscription SSRF gate resolves the target name before every attempt; `sink.test` must not depend
+    // on real DNS. A TEST-NET-3 answer (RFC 5737) is public to the gate and is never dialled (fetchFn above).
+    lookup: (async () => [{ address: '203.0.113.10', family: 4 }]) as SsrfLookupFn,
     requests,
     to: (url: string) => requests.filter((r) => r.url === url),
     setStatus: (next: number) => {

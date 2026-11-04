@@ -8,7 +8,14 @@
 
 export const ADMIN_USER_BATCH_LIMIT = 100
 export const DISABLE_CONFIRM_TEXT = '停用'
-export const HARD_DELETE_CONFIRM_TEXT = '永久删除'
+/** Chinese confirmation. English UI sends HARD_DELETE_CONFIRM_TEXT_EN. Both move to the recycle bin. */
+export const HARD_DELETE_CONFIRM_TEXT = '移入回收站'
+export const HARD_DELETE_CONFIRM_TEXT_EN = 'Move to recycle bin'
+export const HARD_DELETE_CONFIRM_TEXTS = [HARD_DELETE_CONFIRM_TEXT, HARD_DELETE_CONFIRM_TEXT_EN] as const
+
+export function acceptsRecycleMoveConfirm(value: unknown): boolean {
+  return typeof value === 'string' && (HARD_DELETE_CONFIRM_TEXTS as readonly string[]).includes(value)
+}
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -373,9 +380,12 @@ export function planDeleteBatch(input: {
   if (!mode) {
     return { ok: false, status: 400, code: 'DELETE_MODE_REQUIRED', message: 'mode 只能是 disable 或 hard' }
   }
-  const expected = mode === 'hard' ? HARD_DELETE_CONFIRM_TEXT : DISABLE_CONFIRM_TEXT
-  if (input.confirmText !== expected) {
-    return { ok: false, status: 400, code: 'CONFIRM_TEXT_MISMATCH', message: `请输入「${expected}」以确认` }
+  if (mode === 'hard') {
+    if (!acceptsRecycleMoveConfirm(input.confirmText)) {
+      return { ok: false, status: 400, code: 'CONFIRM_TEXT_MISMATCH', message: `请输入「${HARD_DELETE_CONFIRM_TEXT}」以确认` }
+    }
+  } else if (input.confirmText !== DISABLE_CONFIRM_TEXT) {
+    return { ok: false, status: 400, code: 'CONFIRM_TEXT_MISMATCH', message: `请输入「${DISABLE_CONFIRM_TEXT}」以确认` }
   }
   if (mode === 'hard') return planRecycleMove(input)
   return planStatusBatch({
@@ -444,9 +454,9 @@ function planRecycleMove(input: {
       fail('ALREADY_IN_RECYCLE', '已在回收站', true)
       return
     }
-    if (known?.isPlatformAdmin) {
+    if (known?.isPlatformAdmin && known.isActive) {
       if (adminsRemaining <= 1) {
-        fail('LAST_PLATFORM_ADMIN', '至少保留一名平台管理员')
+        fail('LAST_PLATFORM_ADMIN', '至少保留一名可登录的平台管理员')
         return
       }
       adminsRemaining -= 1

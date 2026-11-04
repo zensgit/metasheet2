@@ -28,7 +28,9 @@ const UNDEFINED_TABLE_SQLSTATE = '42P01'
 // like `username` are left as-is (matching the codebase's encrypt-secrets-only
 // convention). Exported (read-only) so the encrypted-store probe's catalog can be held to exactly
 // this list (tests/unit/encrypted-store-probe.test.ts): a new key here needs a catalog entry there.
-export const SENSITIVE_CREDENTIAL_KEYS: readonly string[] = Object.freeze(['password', 'apiKey', 'token'])
+// `bearerToken` is the HTTPAdapter's `Authorization: Bearer` credential. A row written before it was
+// listed holds it in plaintext: decryptCredentials passes that through and the next persist seals it.
+export const SENSITIVE_CREDENTIAL_KEYS: readonly string[] = Object.freeze(['password', 'apiKey', 'token', 'bearerToken'])
 export const DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED'
 export const DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED'
 // Referential delete guard (see countExternalSystemReferences): a source referenced by an

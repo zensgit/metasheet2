@@ -163,7 +163,7 @@ const idOnly = (sheetId: string, recordId = 'rec_floor') => ({ sheetId, recordId
 
 async function entry(c: FloorCase, path: EntryPath, payload: Record<string, unknown>, event = 'record.updated') {
   const sink = createSink()
-  const svc = new WebhookService(db, sink.fetchFn)
+  const svc = new WebhookService(db, sink.fetchFn, sink.lookup)
   await svc.deliverEvent(event as never, payload, eventIdFor(path, c.label))
   return { sink, svc }
 }
@@ -172,7 +172,7 @@ async function tick(c: FloorCase, shape: TickShape, payload: Record<string, unkn
   const deliveryId = id(`del_${c.label}`)
   await insertDuePending(deliveryId, c.webhookId, event, payload, pendingEventIdFor(shape, c.label))
   const sink = createSink()
-  const svc = new WebhookService(db, sink.fetchFn)
+  const svc = new WebhookService(db, sink.fetchFn, sink.lookup)
   await svc.retryFailedDeliveries()
   await settle(100)
   return { sink, deliveryId }
@@ -226,7 +226,7 @@ describeIfDatabase('subscription webhook floor rules (real DB)', () => {
     const deliveryId = id(`del_${c.label}`)
     await insertDuePending(deliveryId, c.webhookId, 'record.updated', idOnly(c.sheetId), null)
     const sink = createSink()
-    await new WebhookService(db, sink.fetchFn).executeDelivery({
+    await new WebhookService(db, sink.fetchFn, sink.lookup).executeDelivery({
       id: deliveryId,
       webhookId: c.webhookId,
       event: 'record.updated',
@@ -350,7 +350,7 @@ describeIfDatabase('subscription webhook floor rules (real DB)', () => {
       const c = await floorCase('f8e')
       liveness.failOnceFor = c.sheetId
       const sink = createSink()
-      const svc = new WebhookService(db, sink.fetchFn)
+      const svc = new WebhookService(db, sink.fetchFn, sink.lookup)
       let thrown = 0
       await svc.deliverEvent('record.updated', idOnly(c.sheetId), eventIdFor(path, c.label)).catch(() => {
         thrown += 1
@@ -452,7 +452,7 @@ describeIfDatabase('subscription webhook floor rules (real DB)', () => {
       const c = await floorCase(swallowed ? 'f9' : 'f9p', { role: 'admin' })
       swallow.forSheet = swallowed ? c.sheetId : null
       const sink = createSink()
-      await new WebhookService(db, sink.fetchFn).deliverEvent('record.deleted' as never, idOnly(c.sheetId))
+      await new WebhookService(db, sink.fetchFn, sink.lookup).deliverEvent('record.deleted' as never, idOnly(c.sheetId))
       // The injection must have actually run inside the check (it clears the flag when it fires).
       if (swallowed) expect(swallow.forSheet, 'F9.injected').toBeNull()
       expect((await deliveryRows(c.webhookId)).length, `${tid}.rows`).toBe(swallowed ? 0 : 1)
