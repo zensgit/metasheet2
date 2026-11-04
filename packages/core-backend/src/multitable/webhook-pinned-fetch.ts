@@ -9,14 +9,20 @@
  * to the URL host (a caller-supplied Host is stripped — no virtual-host confusion); only DNS resolution
  * is overridden via the `lookup` option. Certificate verification is NOT relaxed by the pin. No retry
  * (at-most-once). Redirects are never followed: `https.request` does not follow, so a 3xx comes back as a
- * plain status and no second request is made. Returns the status only — resolved on the response HEADERS,
- * then the socket is destroyed, so a slow/endless body can never stall the action and the body is never
- * read/persisted/logged.
+ * plain status and no second request is made. By default returns the status only — resolved on the response
+ * HEADERS, then the socket is destroyed, so a slow/endless body can never stall the action and the body is
+ * never read/persisted/logged. A caller that records the receiver's answer opts into a BOUNDED body read
+ * (`responseBodyLimit`), still under the same deadline.
  */
 import https from 'node:https'
 import type { IncomingMessage } from 'node:http'
 
-export type PinnedFetchResult = { status: number; ok: boolean }
+export type PinnedFetchResult = {
+  status: number
+  ok: boolean
+  /** Only when `responseBodyLimit` was set and the status is not 3xx: the first bytes of the body, as UTF-8. */
+  body?: string
+}
 
 /**
  * Fixed `User-Agent` for every pinned webhook send, named like the other outbound senders
@@ -37,6 +43,13 @@ export interface PinnedFetchOptions {
    * tests use it to trust a certificate generated at runtime without disabling verification.
    */
   ca?: string
+  /**
+   * Read at most this many bytes of a non-3xx response body (subscription delivery records the receiver's
+   * answer). OMITTED ⇒ the body is never read — the socket is destroyed on the headers. The read is bounded
+   * by the same deadline; when the deadline fires after the headers, the status and the bytes read so far
+   * are returned (the request was delivered). A 3xx body is never read.
+   */
+  responseBodyLimit?: number
 }
 
 /** The signature callers depend on, so a test can wrap the real helper without re-declaring it. */
@@ -81,7 +94,7 @@ export async function pinnedHttpsFetch(
 
   return await new Promise<PinnedFetchResult>((resolve, reject) => {
     let settled = false
-    const timers: { deadline?: ReturnType<typeof setTimeout> } = {}
+    const timers: { deadline?: ReturnType<typeof setTimeout>; onDeadline?: () => void } = {}
     const finish = (fn: () => void) => {
       if (settled) return
       settled = true
@@ -137,22 +150,59 @@ export async function pinnedHttpsFetch(
         ...(opts.ca ? { ca: opts.ca } : {}),
       } as https.RequestOptions,
       (res: IncomingMessage) => {
-        // Resolve on HEADERS — the status is known here. Do NOT await the body: a malicious target could
-        // stream an endless/slow body to keep the action open and dodge an inactivity timeout. Destroy the
-        // socket to discard the (never-read) body immediately.
         const status = res.statusCode ?? 0
-        finish(() => resolve({ status, ok: status >= 200 && status < 300 }))
-        res.destroy()
+        const ok = status >= 200 && status < 300
+        const limit = opts.responseBodyLimit
+        if (!limit || limit <= 0 || (status >= 300 && status < 400)) {
+          // Resolve on HEADERS — the status is known here. Do NOT await the body: a malicious target could
+          // stream an endless/slow body to keep the action open and dodge an inactivity timeout. Destroy the
+          // socket to discard the (never-read) body immediately.
+          finish(() => resolve({ status, ok }))
+          res.destroy()
+          return
+        }
+        // Bounded read: at most `limit` bytes, and never past the deadline (see `timers.onDeadline`).
+        const chunks: Buffer[] = []
+        let size = 0
+        const done = () => finish(() => resolve({ status, ok, body: Buffer.concat(chunks).toString('utf8') }))
+        timers.onDeadline = () => {
+          done()
+          res.destroy()
+        }
+        res.on('data', (chunk: Buffer | string) => {
+          if (size >= limit) return
+          const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk
+          const take = buf.subarray(0, limit - size)
+          chunks.push(take)
+          size += take.length
+          if (size >= limit) {
+            done()
+            res.destroy()
+          }
+        })
+        res.on('end', done)
+        res.on('close', done)
+        // A body error after the headers keeps the status: the request itself was delivered.
+        res.on('error', done)
       },
     )
     // `timeout` above is an IDLE timeout; a target trickling bytes could keep it from ever firing. The
     // deadline bounds the whole wait for headers.
     timers.deadline = setTimeout(() => {
+      if (timers.onDeadline) {
+        // Headers already arrived: keep the status and the bytes read so far.
+        timers.onDeadline()
+        return
+      }
       req.destroy(timeoutError())
       finish(() => reject(timeoutError()))
     }, opts.timeoutMs)
     req.on('error', (e: Error) => finish(() => reject(e)))
     req.on('timeout', () => {
+      if (timers.onDeadline) {
+        timers.onDeadline()
+        return
+      }
       req.destroy(timeoutError())
       finish(() => reject(timeoutError()))
     })

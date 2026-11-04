@@ -144,7 +144,7 @@
           <p class="user-admin__hint">{{ recycleText('hint', { days: recycleRetentionDays }) }}</p>
         </div>
         <div class="user-admin__role-actions">
-          <input v-model.trim="recycleSearch" class="user-admin__search" type="text" :aria-label="recycleText('search')" :placeholder="recycleText('search')" data-testid="recycle-search" @keyup.enter="void loadRecycleBin()" />
+          <input v-model.trim="recycleSearch" class="user-admin__search" type="text" :aria-label="recycleText('search')" :placeholder="recycleText('search')" data-testid="recycle-search" @keyup.enter="void searchRecycleBin()" />
           <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loadingRecycle" @click="void loadRecycleBin()">
             {{ loadingRecycle ? recycleText('loading') : recycleText('refresh') }}
           </button>
@@ -155,20 +155,27 @@
           {{ recycleText('restoreSelected') }}
         </button>
         <input v-model.trim="purgePhrase" class="user-admin__search" type="text" :aria-label="recycleText('purgePlaceholder')" :placeholder="recycleText('purgePlaceholder')" data-testid="recycle-purge-phrase" />
-        <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="recycleBusy || recycleSelectedIds.length === 0 || purgePhrase !== '立即清除'" data-testid="recycle-purge-selected" @click="void purgeRecycleUsers()">
+        <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="recycleBusy || recycleSelectedIds.length === 0 || purgePhrase !== recycleText('purgeExact')" data-testid="recycle-purge-selected" @click="void purgeRecycleUsers()">
           {{ recycleText('purgeSelected') }}
         </button>
       </div>
       <p class="user-admin__hint">{{ recycleText('purgedHint') }}</p>
       <div v-if="loadingRecycle && recycleUsers.length === 0" class="user-admin__empty">{{ recycleText('loading') }}</div>
       <div v-else-if="recycleUsers.length === 0" class="user-admin__empty">{{ recycleText('empty') }}</div>
-      <div v-else class="user-admin__table" role="table" aria-label="回收站">
+      <div v-else class="user-admin__table" role="table" :aria-label="recycleText('title')">
+        <div class="user-admin__preview-row user-admin__preview-row--head" role="row">
+          <span role="columnheader">{{ recycleText('selectMember', { name: recycleText('colMember') }) }}</span>
+          <span role="columnheader">{{ recycleText('colMember') }}</span>
+          <span role="columnheader">{{ recycleText('colDeletedAt') }}</span>
+          <span role="columnheader">{{ recycleText('colDeletedBy') }}</span>
+          <span role="columnheader">{{ recycleText('colPurgeAfter') }}</span>
+        </div>
         <article v-for="user in recycleUsers" :key="user.id" class="user-admin__user" role="row" data-testid="recycle-row">
           <label class="user-admin__user-select">
             <input
               :checked="recycleSelectedIds.includes(user.id)"
               type="checkbox"
-              :aria-label="`${recycleText('restore')} ${user.name || user.email || user.id}`"
+              :aria-label="recycleText('selectMember', { name: user.name || user.email || user.id })"
               @change="toggleRecycleSelection(user.id, $event)"
             />
           </label>
@@ -188,6 +195,11 @@
             {{ recycleText('restore') }}
           </button>
         </article>
+        <div v-if="recyclePageCount > 1" class="user-admin__role-actions" data-testid="recycle-pager">
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="recycleBusy || recyclePage <= 1" data-testid="recycle-prev" @click="void changeRecyclePage(recyclePage - 1)">{{ recycleText('previousPage') }}</button>
+          <span>{{ recycleText('pageStatus', { page: recyclePage, pages: recyclePageCount }) }}</span>
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="recycleBusy || recyclePage >= recyclePageCount" data-testid="recycle-next" @click="void changeRecyclePage(recyclePage + 1)">{{ recycleText('nextPage') }}</button>
+        </div>
       </div>
     </div>
 
@@ -372,6 +384,12 @@
           />
         </label>
       </div>
+      <div v-if="batchTemporaryPasswords.length" class="user-admin__preset" data-testid="batch-temporary-passwords">
+        <strong>临时密码只显示这一次</strong>
+        <p class="user-admin__hint">复制后会从页面上清除。请交给对应的人，不要留在聊天记录里。</p>
+        <p v-for="item in batchTemporaryPasswords" :key="`pwd-${item.index}`">{{ item.email || '—' }}：{{ item.temporaryPassword }}</p>
+        <button class="user-admin__button" type="button" data-testid="copy-batch-passwords" @click="void copyAndClearBatchPasswords()">复制并清除</button>
+      </div>
       <div v-show="inviteTab === 'import'" data-testid="batch-import-panel">
         <p class="user-admin__hint">下载模板，填好姓名、邮箱、角色 ID 和部门后上传。先预览校验，再确认创建。一次最多 100 行。</p>
         <div class="user-admin__role-actions">
@@ -395,7 +413,7 @@
         </div>
         <div v-if="batchReport" class="user-admin__preset" data-testid="batch-import-report">
           <strong>导入结果：成功 {{ batchReport.successCount }}，失败 {{ batchReport.failureCount }}</strong>
-          <p v-for="item in batchReport.results" :key="`${item.index}-${item.email}`">{{ item.email || '—' }}：{{ item.message }}<template v-if="item.temporaryPassword">，临时密码 {{ item.temporaryPassword }}</template></p>
+          <p v-for="item in batchReport.results" :key="`${item.index}-${item.email}`">{{ item.email || '—' }}：{{ item.message }}</p>
           <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="batchReport.failureCount === 0" @click="downloadFailedRows()">下载失败行</button>
         </div>
       </div>
@@ -601,7 +619,7 @@
             <p class="user-admin__hint">{{ recycleText('dangerHint') }}</p>
             <p v-if="selectedUserIds.length">将列出：{{ selectedUserLabels }}</p>
             <input v-model.trim="hardDeletePhrase" class="user-admin__search" type="text" :aria-label="recycleText('dangerPhrase')" :placeholder="recycleText('dangerPhrase')" data-testid="recycle-move-phrase" />
-            <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="recycle-move-submit" :disabled="bulkBusy || selectedUserIds.length === 0 || hardDeletePhrase !== '永久删除'" @click="void submitHardDelete()">{{ recycleText('dangerButton') }}</button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="recycle-move-submit" :disabled="bulkBusy || selectedUserIds.length === 0 || hardDeletePhrase !== recycleText('dangerPhraseExact')" @click="void submitHardDelete()">{{ recycleText('dangerButton') }}</button>
           </details>
         </div>
         <div v-if="reimportOpen" class="user-admin__confirm" role="dialog" aria-label="导入更新" data-testid="reimport-dialog">
@@ -1270,6 +1288,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
 import { useLocale } from '../composables/useLocale'
 import { userRecycleLabel, type UserRecycleLabelKey } from './userRecycleLabels'
+import { sanitizeCsvCell, sanitizeCsvRow } from '../utils/csvFormulaCell'
 import { apiFetch } from '../utils/api'
 import { subscribeToLocationChanges } from '../utils/browserLocation'
 import { describeCreateUserError, getCreateUserRuleHints } from '../utils/createUserValidationCopy'
@@ -1612,6 +1631,9 @@ const recycleSearch = ref('')
 const purgePhrase = ref('')
 const recycleRetentionDays = ref(30)
 const recycleTotal = ref(0)
+const recyclePage = ref(1)
+const recyclePageSize = 20
+const recyclePageCount = computed(() => Math.max(1, Math.ceil(recycleTotal.value / recyclePageSize)))
 const recycleSelectedIds = ref<string[]>([])
 type RecycleBinUser = {
   id: string
@@ -1624,6 +1646,15 @@ type RecycleBinUser = {
 }
 const recycleUsers = ref<RecycleBinUser[]>([])
 const batchReport = ref<{ successCount: number; failureCount: number; results: Array<Record<string, unknown>> } | null>(null)
+const batchTemporaryPasswords = computed(() => (batchReport.value?.results || []).flatMap((item) => {
+  const temporaryPassword = typeof item.temporaryPassword === 'string' ? item.temporaryPassword : ''
+  if (!temporaryPassword) return []
+  return [{
+    index: Number(item.index ?? 0),
+    email: typeof item.email === 'string' ? item.email : '',
+    temporaryPassword,
+  }]
+}))
 const inviteStatusFilter = ref<'pending' | 'all'>('pending')
 const detailOpen = ref(false)
 const rowMenuUserId = ref('')
@@ -1959,16 +1990,15 @@ function readMissingOpenIdGovernanceHint(user: ManagedUser): string {
 }
 
 function escapeCsvValue(value: unknown): string {
-  const text = String(value ?? '')
-  if (!/[",\n]/.test(text)) return text
-  return `"${text.replaceAll('"', '""')}"`
+  return sanitizeCsvCell(value)
 }
 
 function downloadText(filename: string, text: string, mimeType: string): void {
   if (typeof window === 'undefined' || typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') {
     throw new Error('当前环境不支持文件导出')
   }
-  const blob = new Blob([`\ufeff${text}`], { type: mimeType })
+  const body = text.startsWith('\ufeff') ? text : `\ufeff${text}`
+  const blob = new Blob([body], { type: mimeType })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
@@ -3927,8 +3957,32 @@ async function submitPastedEmails(): Promise<void> {
 
 function downloadFailedRows(): void {
   const failed = (batchReport.value?.results || []).filter((item) => item.ok !== true)
-  const lines = ['email,code,message', ...failed.map((item) => [item.email, item.code, item.message].map((value) => `"${String(value || '').replaceAll('"', '""')}"`).join(','))]
-  downloadText('user-import-failed.csv', `\ufeff${lines.join('\n')}\n`, 'text/csv;charset=utf-8')
+  const lines = [
+    sanitizeCsvRow(['email', 'code', 'message']),
+    ...failed.map((item) => sanitizeCsvRow([item.email, item.code, item.message])),
+  ]
+  downloadText('user-import-failed.csv', `${lines.join('\n')}\n`, 'text/csv;charset=utf-8')
+}
+
+async function copyAndClearBatchPasswords(): Promise<void> {
+  const lines = batchTemporaryPasswords.value.map((item) => `${item.email}\t${item.temporaryPassword}`)
+  if (lines.length === 0) return
+  const copied = await copyText(lines.join('\n'))
+  if (!copied) {
+    setStatus('复制失败，临时密码仍显示在页面上', 'error')
+    return
+  }
+  if (batchReport.value) {
+    batchReport.value = {
+      ...batchReport.value,
+      results: batchReport.value.results.map((item) => {
+        const next = { ...item }
+        delete next.temporaryPassword
+        return next
+      }),
+    }
+  }
+  setStatus('临时密码已复制，并从页面上清除')
 }
 
 async function submitBulkConfirm(): Promise<void> {
@@ -4024,7 +4078,7 @@ async function submitHardDelete(): Promise<void> {
     batchReport.value = await readBatchPayload(response)
     selectedUserIds.value = []
     await loadUsers()
-    recycleTotal.value = 0
+    await refreshRecycleTotal()
     setStatus(recycleText('moved', { ok: batchReport.value.successCount, fail: batchReport.value.failureCount }), batchReport.value.failureCount > 0 ? 'error' : 'info')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : recycleText('moved', { ok: 0, fail: selectedUserIds.value.length }), 'error')
@@ -4041,22 +4095,65 @@ function toggleRecycleSelection(userId: string, event: Event): void {
     : recycleSelectedIds.value.filter((id) => id !== userId)
 }
 
+async function refreshRecycleTotal(): Promise<void> {
+  try {
+    const response = await apiFetch('/api/admin/users/recycle?page=1&pageSize=1')
+    const payload = await readJson(response)
+    const data = payload.data as { total?: number } | undefined
+    if (response.ok && payload.ok === true) recycleTotal.value = Number(data?.total || 0)
+  } catch {
+    // The badge is refreshed on the next recycle-bin visit.
+  }
+}
+
+async function searchRecycleBin(): Promise<void> {
+  recyclePage.value = 1
+  await loadRecycleBin()
+}
+
+async function changeRecyclePage(pageNumber: number): Promise<void> {
+  recyclePage.value = Math.min(recyclePageCount.value, Math.max(1, pageNumber))
+  await loadRecycleBin()
+}
+
+async function fetchRecyclePage(pageNumber: number): Promise<{ items: RecycleBinUser[]; total: number; retentionDays?: number }> {
+  const params = new URLSearchParams()
+  if (recycleSearch.value) params.set('q', recycleSearch.value)
+  params.set('page', String(pageNumber))
+  params.set('pageSize', String(recyclePageSize))
+  const response = await apiFetch(`/api/admin/users/recycle?${params.toString()}`)
+  const payload = await readJson(response)
+  if (!response.ok || payload.ok !== true) {
+    throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || recycleText('loading')))
+  }
+  const data = payload.data as { items?: RecycleBinUser[]; total?: number; retentionDays?: number } | undefined
+  const items = Array.isArray(data?.items) ? data.items : []
+  return {
+    items,
+    total: Number(data?.total || items.length),
+    retentionDays: data?.retentionDays,
+  }
+}
+
+function applyRecyclePage(loaded: { items: RecycleBinUser[]; total: number; retentionDays?: number }): void {
+  recycleUsers.value = loaded.items
+  recycleTotal.value = loaded.total
+  if (typeof loaded.retentionDays === 'number' && loaded.retentionDays > 0) recycleRetentionDays.value = loaded.retentionDays
+  const visible = new Set(loaded.items.map((user) => user.id))
+  recycleSelectedIds.value = recycleSelectedIds.value.filter((id) => visible.has(id))
+}
+
 async function loadRecycleBin(): Promise<void> {
   loadingRecycle.value = true
   try {
-    const params = new URLSearchParams()
-    if (recycleSearch.value) params.set('q', recycleSearch.value)
-    const response = await apiFetch(`/api/admin/users/recycle?${params.toString()}`)
-    const payload = await readJson(response)
-    if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || recycleText('loading')))
+    const loaded = await fetchRecyclePage(recyclePage.value)
+    const pageCount = Math.max(1, Math.ceil(loaded.total / recyclePageSize))
+    if (recyclePage.value > pageCount) {
+      recyclePage.value = pageCount
+      applyRecyclePage(await fetchRecyclePage(recyclePage.value))
+      return
     }
-    const data = payload.data as { items?: RecycleBinUser[]; total?: number; retentionDays?: number } | undefined
-    recycleUsers.value = Array.isArray(data?.items) ? data.items : []
-    recycleTotal.value = Number(data?.total || recycleUsers.value.length)
-    if (typeof data?.retentionDays === 'number' && data.retentionDays > 0) recycleRetentionDays.value = data.retentionDays
-    const visible = new Set(recycleUsers.value.map((user) => user.id))
-    recycleSelectedIds.value = recycleSelectedIds.value.filter((id) => visible.has(id))
+    applyRecyclePage(loaded)
   } catch (error) {
     setStatus(error instanceof Error ? error.message : recycleText('loading'), 'error')
   } finally {
@@ -4084,7 +4181,7 @@ async function restoreRecycleUsers(userIds = recycleSelectedIds.value): Promise<
 }
 
 async function purgeRecycleUsers(): Promise<void> {
-  if (recycleSelectedIds.value.length === 0 || purgePhrase.value !== '立即清除') return
+  if (recycleSelectedIds.value.length === 0 || purgePhrase.value !== recycleText('purgeExact')) return
   recycleBusy.value = true
   try {
     const response = await apiFetch('/api/admin/users/recycle/purge', {

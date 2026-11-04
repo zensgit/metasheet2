@@ -69,9 +69,18 @@ export function scanWebhookDeliveryStructure(sources: Record<string, string>): s
     if (/multitable_webhook(s|_deliveries)\b/.test(src)) violations.push(`table-name:${file}`)
   }
   const service = sources[SERVICE] ?? ''
+  // S0-a: the request leaves through ONE call, `this.dispatchAttempt(`, made once, inside `executeDelivery`,
+  // after the delivery check. `dispatchAttempt` holds both transports — the pinned one (production) and the
+  // fetch-shaped test seam — and is the only place either is called.
+  if (count(service, 'this.dispatchAttempt(') !== 1) violations.push('fetch-count')
   if (count(service, 'this.fetchFn(') !== 1) violations.push('fetch-count')
+  const dispatch = bodyOf(service, 'dispatchAttempt') ?? ''
+  // The pinned transport is chosen inside that body and never called directly anywhere in the file.
+  if (!dispatch.includes('this.fetchFn(') || !dispatch.includes('pinnedHttpsFetch') || count(service, 'pinnedHttpsFetch(') !== 0) {
+    violations.push('fetch-count')
+  }
   const execute = bodyOf(service, 'executeDelivery') ?? ''
-  const fetchAt = execute.indexOf('this.fetchFn(')
+  const fetchAt = execute.indexOf('this.dispatchAttempt(')
   const checkAt = execute.indexOf('authorizeWebhookDelivery(')
   if (fetchAt < 0 || checkAt < 0 || checkAt > fetchAt) violations.push('fetch-before-check')
   // createDeliveryRecord calls (not the definition) must sit in deliverEvent after the check + its refusal exit.
@@ -136,6 +145,18 @@ describe('U6 subscription webhook delivery structure', () => {
     expect(plant({ [SERVICE]: `${RUNTIME[SERVICE]}\nasync function extra() { await this.fetchFn('x') }` })).toContain(
       'fetch-count',
     )
+    expect(plant({ [SERVICE]: `${RUNTIME[SERVICE]}\nasync function extra() { await this.dispatchAttempt('x') }` })).toContain(
+      'fetch-count',
+    )
+    expect(plant({ [SERVICE]: `${RUNTIME[SERVICE]}\nasync function extra() { await pinnedHttpsFetch('x') }` })).toContain(
+      'fetch-count',
+    )
+    const sendFirst = RUNTIME[SERVICE].replace(
+      'const decision = await authorizeWebhookDelivery(this.db, wh, delivery.event, delivery.payload)',
+      "await this.dispatchAttempt(wh.url, [], {}, '', new AbortController().signal)\n    const decision = await authorizeWebhookDelivery(this.db, wh, delivery.event, delivery.payload)",
+    )
+    expect(sendFirst).not.toBe(RUNTIME[SERVICE])
+    expect(plant({ [SERVICE]: sendFirst })).toContain('fetch-before-check')
     const service = RUNTIME[SERVICE]
     const createLine = service.slice(service.indexOf('const delivery = await this.createDeliveryRecord('))
     const movedCreate = service.replace(
