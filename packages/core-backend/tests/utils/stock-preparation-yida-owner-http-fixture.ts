@@ -2,7 +2,7 @@
 // Only the YiDa fetch dependency is synthetic; it never opens a socket.
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { createServer, request, type Server } from 'node:http'
+import { createServer, request, type ClientRequest, type Server } from 'node:http'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -103,8 +103,12 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   let compile: (input: Input) => { plan: { rows: Array<{ payload: Data }> } }
   const sql: string[] = [], tokenPayloads: Data[] = [], formPayloads: Data[] = []
   const sessions: Record<string, string> = {}, tokens: Record<string, string> = {}
-  let enablement: unknown = 'false', tokenCommitted = false, validRequests = true, formOutcome = 'ack'
-  let multiTargetEnablement: unknown = 'false', multiTargetUp = '', sheet = defaultSheet()
+  let enablement: unknown = 'false', tokenCommitted = false, validRequests = true, formOutcome: 'ack' | 'unknown' | 'unparsed' = 'ack'
+  let multiTargetEnablement: unknown = 'false', multiTargetUp = '', receiptUnparsedUp = '', sheet = defaultSheet()
+  // Gate 1 proof controls: destroy the in-flight client socket at the first token call (after admission has
+  // committed), observe the server-side close, and let the test wait for the host run to settle afterwards.
+  let disconnectAtToken = false, inflight: ClientRequest | undefined, closedResponses = 0
+  let lastSubmission: Promise<unknown> = Promise.resolve()
   // Every call on the sheet read path (access, fields, view, records, record permissions) counts.
   let sheetReads = 0
   const sheetFields = [{ id: 'fld_project', type: 'string' }, { id: 'fld_line', type: 'string' }, { id: 'fld_parent', type: 'string' },
@@ -155,6 +159,17 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       // Read from an independent committed PG session at the first token call.
       const admissions = await rows('integration_yida_send_admissions'), ledger = await rows('integration_yida_delivery_ledger')
       tokenCommitted = admissions.length === 1 && ledger.length === 1 && ledger[0].status === 'prepared'
+      if (disconnectAtToken) {
+        // The browser goes away AFTER admission has committed: destroy the client socket and wait until the
+        // server side has observed the close (that is where the route aborts its request signal).
+        disconnectAtToken = false
+        const before = closedResponses
+        inflight?.destroy(new Error('SYNTHETIC_CLIENT_DISCONNECT'))
+        const deadline = Date.now() + 5000
+        while (closedResponses === before && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+        if (closedResponses === before) throw new Error('SYNTHETIC_CLIENT_CLOSE_NOT_OBSERVED')
+        await new Promise(resolve => setImmediate(resolve))
+      }
       return new Response(JSON.stringify({ accessToken: 'synthetic-http-access-token', expireIn: 3600 }), { status: 200 })
     }
     if (fixed === 'https://api.dingtalk.com/v1.0/yida/forms/instances') {
@@ -162,6 +177,8 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       validRequests &&= body.systemToken === syntheticMaterial().systemToken && body.userId === syntheticMaterial().userId
         && (init?.headers as Record<string, string>)['x-acs-dingtalk-access-token'] === 'synthetic-http-access-token'
       if (formOutcome === 'unknown') throw new Error('SYNTHETIC_FORM_RESULT_UNKNOWN')
+      // A 2xx whose body the transport cannot use (gate 6, a2): the ledger must say receipt_unparsed.
+      if (formOutcome === 'unparsed') return new Response('synthetic-not-json', { status: 201 })
       return new Response(JSON.stringify({ result: 'synthetic-http-instance' }), { status: 201 })
     }
     throw new Error('SYNTHETIC_UNEXPECTED_FETCH')
@@ -196,6 +213,8 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       initializationRegistration = await initializationRuntime.createPluginCapability().activate(createInitializationBinding({ security: pluginSecurity }))
     }
     const app = express()
+    // Counts server-side response closes (a destroyed client socket included) for the gate 1 proof.
+    app.use((_req, res, next) => { res.once('close', () => { closedResponses++ }); next() })
     if (options.initialization) {
       const LoggerClass = (await load('packages/core-backend/src/core/logger.ts')).Logger as new (context: string) => NonNullable<typeof privateLogger>
       privateLogger = new LoggerClass('YidaInitializationHttpSynthetic')
@@ -205,9 +224,17 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     app.use(prefix, noStore, jsonOnly, express.json({ limit: '192kb', strict: true }), parseError)
     // Mount actual JWT at the prefix preserving the original path for auth policy.
     app.use(jwtMiddleware)
+    // The router sees the real runtime; only submit() is observed so a test can wait for a run whose
+    // HTTP client has already gone away (the route cannot answer it, the ledger records its outcome).
+    const owned = runtime
+    const observedRuntime = { ...owned, submit: (...args: Parameters<Runtime['submit']>) => {
+      const pending = owned.submit(...args)
+      lastSubmission = pending.then(() => undefined, () => undefined)
+      return pending
+    } } as Runtime
     app.use(prefix, options.multiTarget
-      ? createRouter(runtime, initializationRuntime, undefined, sheetSource as Parameters<typeof createRouter>[3])
-      : createRouter(runtime, initializationRuntime))
+      ? createRouter(observedRuntime, initializationRuntime, undefined, sheetSource as Parameters<typeof createRouter>[3])
+      : createRouter(observedRuntime, initializationRuntime))
     server = createServer(app)
     await new Promise<void>((resolve, reject) => {
       server!.once('error', reject)
@@ -242,6 +269,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       })
       req.setTimeout(10000, () => req.destroy(new Error('SYNTHETIC_OWNER_HTTP_TIMEOUT')))
       req.once('error', () => reject(new Error('SYNTHETIC_OWNER_HTTP_FAILURE')))
+      inflight = req
       req.end(raw)
     })
   }
@@ -298,6 +326,9 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       multiTargetUp = (await load('packages/core-backend/src/db/migrations/zzzz20261103130000_add_integration_yida_multi_target_slots.ts'))
         .YIDA_MULTI_TARGET_UP_SQL as string
     }
+    // Gate 6 (a2): the audit reason CHECK widened by receipt_unparsed, as production migrates it.
+    receiptUnparsedUp = (await load('packages/core-backend/src/db/migrations/zzzz20261104150000_add_integration_yida_delivery_audit_receipt_unparsed.ts'))
+      .YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL as string
     const route = await load('packages/core-backend/src/routes/integration-yida-owner.ts')
     createRouter = route.createIntegrationYidaOwnerRouter as typeof createRouter
     noStore = route.yidaOwnerNoStoreMiddleware as RequestHandler; jsonOnly = route.yidaOwnerJsonOnlyMiddleware as RequestHandler
@@ -310,11 +341,14 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     '094_create_integration_yida_approved_target.sql', '095_create_integration_yida_send_approvals.sql',
     ...(options.initialization ? ['096_create_integration_yida_initialization.sql'] : [])]
     .map(name => readFileSync(path.join(root, 'packages/core-backend/migrations', name), 'utf8')).join('\n')
+    + '\n' + receiptUnparsedUp
     + (options.multiTarget ? '\n' + multiTargetUp : '')
   return {
     sql, tokens, sessions, tokenPayloads, formPayloads, rows, proof, http, tokenFor, startRuntime, closeRuntime, cleanup,
-    setEnablement(value: unknown) { enablement = value }, setFormOutcome(value: 'ack' | 'unknown') { formOutcome = value },
+    setEnablement(value: unknown) { enablement = value }, setFormOutcome(value: 'ack' | 'unknown' | 'unparsed') { formOutcome = value },
     setMultiTarget(value: unknown) { multiTargetEnablement = value },
+    setDisconnectAtToken(value: boolean) { disconnectAtToken = value },
+    async settleSubmissions() { await lastSubmission },
     setSheet(patch: Partial<SheetState>) { sheet = { ...defaultSheet(), ...patch } },
     get sheetReads() { return sheetReads },
     get tokenCommitted() { return tokenCommitted }, get validRequests() { return validRequests },
@@ -399,6 +433,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       tokenPayloads.length = 0; formPayloads.length = 0; sql.length = 0
       enablement = 'false'; tokenCommitted = false; validRequests = true; formOutcome = 'ack'
       multiTargetEnablement = 'false'; sheet = defaultSheet(); sheetReads = 0
+      disconnectAtToken = false; inflight = undefined; closedResponses = 0; lastSubmission = Promise.resolve()
       await startRuntime()
     },
   }

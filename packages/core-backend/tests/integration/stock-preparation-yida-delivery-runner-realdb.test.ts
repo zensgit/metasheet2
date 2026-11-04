@@ -282,6 +282,11 @@ describeDatabase('SA05C1 single-row delivery composition — real PG, synthetic 
     createRunner = (await nativeImport(pathToFileURL(path.join(lib, 'yida-delivery-runner.mjs')).href)).createYidaDeliveryRunner as typeof createRunner
     migrationSql = ['090_create_integration_yida_delivery_ledger.sql', '091_create_integration_yida_create_fence.sql']
       .map(file => readFileSync(path.join(root, 'packages/core-backend/migrations', file), 'utf8')).join('\n')
+    // Gate 6 (a2): the audit reason CHECK as widened by zzzz20261104150000, exactly what its up() executes.
+    const receiptUnparsed = await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261104150000_add_integration_yida_delivery_audit_receipt_unparsed.ts')).href) as
+      { YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL: string }
+    migrationSql += '\n' + receiptUnparsed.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL
     materialMigrationSql = readFileSync(path.join(root, 'packages/core-backend/migrations/092_create_integration_yida_credential_materials.sql'), 'utf8')
     savedEnv = envKeys.map(key => [key, process.env[key]])
     process.env.NODE_ENV = 'production'
@@ -507,21 +512,24 @@ describeDatabase('SA05C1 single-row delivery composition — real PG, synthetic 
     expect(h.businessCalls.length).toBe(1)
   })
 
-  it.each(['network', 'receipt'])('%s failure stays unknown across a new runner and connection', async (mode) => {
+  it.each(['network', 'refused', 'receipt'])('%s failure stays unknown across a new runner and connection', async (mode) => {
     const h = harness()
     h.businessFetch = async () => {
       if (mode === 'network') throw new Error('synthetic-private-network-detail')
-      return new Response('{not-json')
+      // refused: a non-2xx stays receipt_invalid. receipt: a 2xx with an unusable body is receipt_unparsed (a2),
+      // which the real CHECK accepts only because the fixture applied zzzz20261104150000.
+      return new Response('{not-json', { status: mode === 'refused' ? 500 : 200 })
     }
     safe(await h.runner.run(request()), 'outcome_unknown', true)
-    expect((await rows(AUDIT)).at(-1)?.reason).toBe(mode === 'network' ? 'transport_unknown' : 'receipt_invalid')
+    expect((await rows(AUDIT)).at(-1)?.reason).toBe({ network: 'transport_unknown', refused: 'receipt_invalid', receipt: 'receipt_unparsed' }[mode])
+    expect((await rows())[0].ack_status_code).toBeNull()
     const restarted = harness(second)
     safe(await restarted.runner.run(request()), 'outcome_unknown', false)
     expect(h.businessCalls.length + restarted.businessCalls.length).toBe(1)
     expect(restarted.tokenCalls).toBe(0)
   })
 
-  it('late business response after cancellation is never acknowledged or automatically resent', async () => {
+  it('a late 2xx after cancellation is acknowledged in PostgreSQL and never automatically resent (gate 6)', async () => {
     const h = harness()
     const reached = deferred(); const release = deferred(); const controller = new AbortController()
     releases.push(release.resolve)
@@ -530,9 +538,15 @@ describeDatabase('SA05C1 single-row delivery composition — real PG, synthetic 
     await wait(reached.promise); controller.abort()
     await rejected(h.runner.run(request()), 'BUSY')
     release.resolve()
-    safe(await pending, 'outcome_unknown', true)
-    expect((await rows())[0].ack_status_code).toBeNull()
+    // The fetch ignored the abort and answered 2xx: the receipt is recorded, not folded into unknown.
+    safe(await pending, 'acknowledged', true)
+    const persisted = (await rows())[0]
+    expect(persisted.status === 'acknowledged' && persisted.ack_status_code === 200 && persisted.ack_instance_id !== null).toBe(true)
+    expect((await rows(AUDIT)).map((row) => row.event)).toEqual(['prepare', 'claim', 'acknowledgement'])
     expect(h.businessCalls.length).toBe(1)
+    const restarted = harness(second)
+    safe(await restarted.runner.run(request()), 'acknowledged', false)
+    expect(restarted.tokenCalls + restarted.businessCalls.length).toBe(0)
   })
 
   it('expired or changed-generation snapshots cannot claim the prepared row', async () => {

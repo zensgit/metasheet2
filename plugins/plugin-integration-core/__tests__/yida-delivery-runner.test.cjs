@@ -5,6 +5,7 @@
 const assert = require('node:assert/strict')
 const { test } = require('node:test')
 const { createHash } = require('node:crypto')
+const { ReadableStream } = require('node:stream/web')
 const { createYidaTokenClient } = require('../lib/yida-token-client.cjs')
 const { createDingTalkAppTokenExchange } = require('../lib/yida-token-exchange.cjs')
 const { stableCanonicalStringify } = require('../lib/gip-canonical-json.cjs')
@@ -69,7 +70,7 @@ function memoryDb() {
   return Object.assign(h, { db, rows: (table = LEDGER) => copy(state[table]) })
 }
 
-async function harness(t, options = {}) {
+async function harness(t, options = {}, transportOptions = {}) {
   const { createYidaDeliveryRunner } = await import('../lib/yida-delivery-runner.mjs')
   const { createYidaProtocolExample, buildYidaStaticPlan } = await import('../lib/yida-static-plan.mjs')
   const { createYidaFormTransport } = require('../lib/yida-form-transport.cjs')
@@ -95,7 +96,7 @@ async function harness(t, options = {}) {
     assert.ok(h.db.events.includes('commit:claim'))
     h.businessFetches.push(args)
     return h.businessFetch(...args)
-  }, readEnablement: () => h.enablement })
+  }, readEnablement: () => h.enablement, ...transportOptions })
   h.options = {
     db: h.db.db, context: context(),
     resolveExecutionSnapshot: async (input, signalOptions) => {
@@ -374,7 +375,7 @@ test('late ignored-cancellation claim retains BUSY until token arrives, then qua
   assert.deepEqual(h.db.rows(AUDIT).map((r) => r.event), ['prepare', 'claim', 'unknown'])
 })
 
-test('ignored-abort business fetch keeps BUSY until settlement and never retries', async (t) => {
+test('ignored-abort business fetch keeps BUSY until settlement; the late 2xx is acknowledged, never retried (gate 6)', async (t) => {
   const h = await harness(t)
   const reached = deferred(); const release = deferred(); const controller = new AbortController()
   h.businessFetch = async () => { reached.resolve(); await release.promise; return new Response('{"result":"synthetic-private-late"}') }
@@ -382,32 +383,75 @@ test('ignored-abort business fetch keeps BUSY until settlement and never retries
   await reached.promise; controller.abort()
   await rejects(h.runner.run(request()), 'BUSY')
   release.resolve()
-  safeResult(await pending, 'outcome_unknown', true)
+  // The abort reached the request before any status line, but the fetch ignored it and still
+  // produced a 2xx: that receipt is evidence the remote accepted the row, so it is acknowledged.
+  safeResult(await pending, 'acknowledged', true)
+  assert.equal(h.businessFetches.length, 1)
+  assert.deepEqual(h.db.rows(AUDIT).map((row) => row.event), ['prepare', 'claim', 'acknowledgement'])
+  safeResult(await h.createRunner().run(request()), 'acknowledged', false)
   assert.equal(h.businessFetches.length, 1)
 })
 
-test('business timeout retains the slot for an ignored fetch and quarantines the late reply', async (t) => {
+test('business timeout retains the slot for an ignored fetch and keeps BUSY; the late 2xx is acknowledged (gate 6)', async (t) => {
   const h = await harness(t, { timeoutMs: 20 })
   const reached = deferred(); const release = deferred(); let signal
   h.businessFetch = async (_url, options) => { signal = options.signal; reached.resolve(); await release.promise; return new Response('{"result":"synthetic-private-late"}') }
   const pending = h.runner.run(request())
   await reached.promise
+  // Before the status line the timer still tears the request down (the fetch signal aborts)...
   await new Promise((resolve) => signal.aborted ? resolve() : signal.addEventListener('abort', resolve, { once: true }))
   await rejects(h.runner.run(request()), 'BUSY')
   release.resolve()
-  safeResult(await pending, 'outcome_unknown', true)
+  // ...but a 2xx the fetch nevertheless delivered is not discarded by a post-send check.
+  safeResult(await pending, 'acknowledged', true)
   assert.equal(h.businessFetches.length, 1)
+})
+
+test('a run timeout that fires after the status line, while the body is still arriving, cannot discard the receipt', async (t) => {
+  const h = await harness(t, { timeoutMs: 20 })
+  let fetchSignal
+  h.businessFetch = async (_url, options) => {
+    fetchSignal = options.signal
+    // The status line is immediate; the body arrives only after the runner's 20 ms budget expired.
+    const body = new ReadableStream({ pull(stream) {
+      return new Promise((resolve) => setTimeout(() => { stream.enqueue(Buffer.from('{"result":"synthetic-private-late"}')); stream.close(); resolve() }, 60))
+    } }, { highWaterMark: 0 })
+    return new Response(body, { status: 201 })
+  }
+  safeResult(await h.runner.run(request()), 'acknowledged', true)
+  assert.equal(fetchSignal.aborted, false, 'after the status line the run signal is no longer forwarded to the request')
+  assert.deepEqual(h.db.rows(AUDIT).map((row) => row.event), ['prepare', 'claim', 'acknowledgement'])
+  assert.equal(h.db.rows()[0].ack_status_code, 201)
+})
+
+test('a stalled 2xx body keeps BUSY and ends as receipt_unparsed at the transport body deadline; never resent', async (t) => {
+  const h = await harness(t, {}, { bodyReadTimeoutMs: 50 })
+  const entered = deferred()
+  h.businessFetch = async () => new Response(new ReadableStream({ pull() { entered.resolve(); return new Promise(() => {}) } }, { highWaterMark: 0 }), { status: 200 })
+  const pending = h.runner.run(request())
+  await entered.promise
+  await rejects(h.runner.run(request()), 'BUSY')
+  safeResult(await pending, 'outcome_unknown', true)
+  assert.equal(h.db.rows(AUDIT).at(-1).reason, 'receipt_unparsed')
+  safeResult(await h.createRunner().run(request()), 'outcome_unknown', false)
+  assert.equal(h.businessFetches.length, 1)
+  assert.equal(h.tokenFetches.length, 1)
 })
 
 for (const [label, responseFactory, reason] of [
   ['network', () => { throw new Error('synthetic-private-wire-error') }, 'transport_unknown'],
-  ['malformed', () => new Response('{not json'), 'receipt_invalid'],
-  ['missing result', () => new Response('{}'), 'receipt_invalid'],
+  ['refused 4xx', () => new Response('{"result":"synthetic-private-instance"}', { status: 403 }), 'receipt_invalid'],
+  ['refused 5xx', () => new Response('{not json', { status: 500 }), 'receipt_invalid'],
+  // a2: a 2xx WAS received but its body is unusable; the ledger keeps that distinction.
+  ['malformed', () => new Response('{not json'), 'receipt_unparsed'],
+  ['missing result', () => new Response('{}'), 'receipt_unparsed'],
+  ['oversized', () => new Response(JSON.stringify({ result: 'x'.repeat(17000) })), 'receipt_unparsed'],
 ]) {
-  test(`${label} business outcome is terminal unknown without token refresh or resend`, async (t) => {
+  test(`${label} business outcome is terminal unknown (${reason}) without token refresh or resend`, async (t) => {
     const h = await harness(t); h.businessFetch = responseFactory
     safeResult(await h.runner.run(request()), 'outcome_unknown', true)
     assert.equal(h.db.rows(AUDIT).at(-1).reason, reason)
+    assert.equal(h.db.rows()[0].ack_status_code, null)
     safeResult(await h.createRunner().run(request()), 'outcome_unknown', false)
     assert.equal(h.businessFetches.length, 1)
     assert.equal(h.tokenFetches.length, 1)

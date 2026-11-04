@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -19,6 +20,16 @@ const LEDGER = 'integration_yida_delivery_ledger'
 const AUDIT = 'integration_yida_delivery_audit'
 const PIN = 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED'
 const migration = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '090_create_integration_yida_delivery_ledger.sql')
+// Gate 6 (a2): widens the audit reason CHECK by receipt_unparsed; its exported SQL is what up()/down() execute.
+const receiptUnparsedMigration = path.join(repoRoot, 'packages', 'core-backend', 'src', 'db', 'migrations',
+  'zzzz20261104150000_add_integration_yida_delivery_audit_receipt_unparsed.ts')
+type ReceiptUnparsedMigration = {
+  YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL: string
+  YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_DOWN_SQL: string
+  YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_DOWN_REFUSED_CODE: string
+  YIDA_DELIVERY_AUDIT_REASON_CHECK: string
+}
+const REASONS_090 = ['transport_unknown', 'commit_unknown', 'receipt_invalid', 'manual_recovery'] as const
 
 type Input = Record<string, unknown>
 type Row = Record<string, unknown>
@@ -67,6 +78,7 @@ describeIfDatabase('SA05B1 Yida delivery ledger — real PostgreSQL, no transpor
   let createDb: (args: { database: Database }) => unknown
   let createStore: (args: { db: unknown }) => Store
   let migrationSql = ''
+  let receiptUnparsed: ReceiptUnparsedMigration
   const sessions: Session[] = []
 
   function ident(value: string): string {
@@ -245,7 +257,8 @@ describeIfDatabase('SA05B1 Yida delivery ledger — real PostgreSQL, no transpor
   beforeAll(async () => {
     createDb = requireCjs(path.join(pluginLib, 'db.cjs')).createDb
     createStore = requireCjs(path.join(pluginLib, 'yida-delivery-store.cjs')).createYidaDeliveryStore
-    migrationSql = readFileSync(migration, 'utf8')
+    receiptUnparsed = await import(pathToFileURL(receiptUnparsedMigration).href) as ReceiptUnparsedMigration
+    migrationSql = readFileSync(migration, 'utf8') + '\n' + receiptUnparsed.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 7, connectionTimeoutMillis: 5000 })
     owner = await pool.connect()
     await owner.query("SET statement_timeout = '10s'")
@@ -766,6 +779,74 @@ describeIfDatabase('SA05B1 Yida delivery ledger — real PostgreSQL, no transpor
       id: randomUUID(), ledger_id: prepared.record.id, reason: null, ...overrides,
     }), '23514')
     expect(await counts()).toEqual({ ledger: 1, audit: 1 })
+  })
+
+  it('zzzz20261104150000 widens the audit reason CHECK to receipt_unparsed under the canonical name; the 090 reasons and shape CHECK stand', async () => {
+    const reasons = [...REASONS_090, 'receipt_unparsed']
+    for (const reason of reasons) {
+      const input = fixture({ rowKey: `synthetic-row-${reason}` })
+      await first.store.prepare(input)
+      const claimed = await first.store.claim(actor(input))
+      expect((await second.store.markUnknown({ ...actor(input), claimToken: claimed.claimToken, reason })).status).toBe('outcome_unknown')
+    }
+    expect((await rows(AUDIT)).filter((row) => row.event === 'unknown').map((row) => row.reason).sort()).toEqual([...reasons].sort())
+    const prepared = await first.store.prepare(fixture({ rowKey: 'synthetic-row-direct' }))
+    // Still a closed set: an unlisted reason is refused by the store before SQL and by PostgreSQL directly.
+    await rejected(second.store.markUnknown({ ...actor(), claimToken: 'f'.repeat(64), reason: 'receipt_unknown' }), 'YIDA_DELIVERY_INPUT')
+    await rejected(insertRow(AUDIT, { id: randomUUID(), ledger_id: prepared.record.id, event: 'unknown', status: 'outcome_unknown', reason: 'receipt_unknown' }), '23514')
+    // The shape CHECK is untouched: the new reason is still only legal on an unknown event.
+    await rejected(insertRow(AUDIT, { id: randomUUID(), ledger_id: prepared.record.id, event: 'claim', status: 'dispatching', reason: 'receipt_unparsed' }), '23514')
+    await rejected(insertRow(AUDIT, { id: randomUUID(), ledger_id: prepared.record.id, event: 'acknowledgement', status: 'acknowledged', reason: 'receipt_unparsed' }), '23514')
+    const checks = (await owner.query(
+      `SELECT conname, pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid = to_regclass($1) AND contype = 'c' ORDER BY conname`,
+      [AUDIT])).rows as Array<{ conname: string; definition: string }>
+    const reasonChecks = checks.filter((check) => check.definition.includes("'receipt_unparsed'"))
+    expect(reasonChecks.map((check) => check.conname)).toEqual([receiptUnparsed.YIDA_DELIVERY_AUDIT_REASON_CHECK])
+    for (const reason of REASONS_090) expect(reasonChecks[0].definition.includes(`'${reason}'`)).toBe(true)
+    expect(checks.some((check) => check.conname === 'integration_yida_delivery_audit_shape')).toBe(true)
+  })
+
+  it('zzzz20261104150000 down refuses while a receipt_unparsed audit row exists (append-only evidence)', async () => {
+    await first.store.prepare(fixture())
+    const claimed = await first.store.claim(actor())
+    await first.store.markUnknown({ ...actor(), claimToken: claimed.claimToken, reason: 'receipt_unparsed' })
+    const before = await counts()
+    let refused: { code?: string; message?: string } | undefined
+    try { await owner.query(receiptUnparsed.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_DOWN_SQL) } catch (error) { refused = error as { code?: string; message?: string } }
+    expect(refused?.code).toBe('55000')
+    expect(refused?.message).toBe(receiptUnparsed.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_DOWN_REFUSED_CODE)
+    expect(await counts()).toEqual(before)
+    // The widened CHECK is still in force after the refused down.
+    const input = fixture({ rowKey: 'synthetic-row-b' })
+    await first.store.prepare(input)
+    const next = await first.store.claim(actor(input))
+    expect((await second.store.markUnknown({ ...actor(input), claimToken: next.claimToken, reason: 'receipt_unparsed' })).status).toBe('outcome_unknown')
+  })
+
+  it('zzzz20261104150000 down without such rows restores the exact 090 reason set, and up re-widens; both replay as no-ops', async () => {
+    await owner.query(receiptUnparsed.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_DOWN_SQL)
+    await owner.query(receiptUnparsed.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_DOWN_SQL) // replay: already narrow
+    await first.store.prepare(fixture())
+    const claimed = await first.store.claim(actor())
+    const before = await counts()
+    // The store knows the reason, PostgreSQL (narrowed again) refuses it, and the transaction rolls back whole.
+    await rejected(second.store.markUnknown({ ...actor(), claimToken: claimed.claimToken, reason: 'receipt_unparsed' }), 'YIDA_DELIVERY_UNAVAILABLE')
+    expect(await counts()).toEqual(before)
+    expect((await first.store.get(scope()))?.status).toBe('dispatching')
+    expect(second.statements).toContain('ROLLBACK')
+    for (const reason of REASONS_090) {
+      const input = fixture({ rowKey: `synthetic-row-${reason}` })
+      await first.store.prepare(input)
+      const next = await first.store.claim(actor(input))
+      expect((await second.store.markUnknown({ ...actor(input), claimToken: next.claimToken, reason })).status).toBe('outcome_unknown')
+    }
+    await owner.query(receiptUnparsed.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL)
+    await owner.query(receiptUnparsed.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL) // replay: already widened
+    expect((await first.store.markUnknown({ ...actor(), claimToken: claimed.claimToken, reason: 'receipt_unparsed' })).status).toBe('outcome_unknown')
+    const checks = (await owner.query(
+      `SELECT conname FROM pg_constraint WHERE conrelid = to_regclass($1) AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%receipt_unparsed%'`,
+      [AUDIT])).rows as Array<{ conname: string }>
+    expect(checks.map((check) => check.conname)).toEqual([receiptUnparsed.YIDA_DELIVERY_AUDIT_REASON_CHECK])
   })
 
   it('audit references an existing ledger and contains only fixed event/state/reason metadata', async () => {
