@@ -2187,8 +2187,8 @@ describe('package 1b — the people picker on the detail page', () => {
 
 // ---------------------------------------------------------------------------------------------
 // Package 1b: account switches. The names on the task and the picker's rows belong to the account
-// they were read under; a switch drops them, a late answer from before it is not applied, and a
-// token refresh for the same person changes nothing.
+// they were read under; a switch drops them, a late answer from before it is not applied, a batch
+// of picked people being added ends, and a token refresh for the same person changes nothing.
 // ---------------------------------------------------------------------------------------------
 
 describe('package 1b — account switches on the detail page', () => {
@@ -2362,4 +2362,160 @@ describe('package 1b — account switches on the detail page', () => {
     expect(text(el, 'task-people-picker-name')).toBe('赵六')
     expect(text(el, 'task-people-picker-detail')).toBe('zl***@example.test')
   })
+
+  // The picker's people are added one write at a time under the account the batch started under. A
+  // switch seen before a write or while one is out ends the batch: the rest is not sent and that
+  // answer is not applied; a switch away and back does not resume it.
+  const PICK = { assignee: 'tasks-detail-pick-assignee', follower: 'tasks-detail-pick-follower' } as const
+  const ADD_PATH = { assignee: '/api/tasks/t1/assignees', follower: '/api/tasks/t1/followers' } as const
+  const ADD_ERROR = { assignee: 'tasks-detail-membership-error', follower: 'tasks-detail-follower-error' } as const
+  type MemberKind = keyof typeof PICK
+
+  function tickPerson(el: HTMLElement, id: string): void {
+    el.querySelector<HTMLElement>(`[data-testid="task-people-picker-row"][data-person-id="${id}"]`)!
+      .querySelector<HTMLInputElement>('input[type="checkbox"]')!.click()
+  }
+
+  /** Opens the picker for `kind` and ticks u7, then u8 (not yet confirmed). */
+  async function tickTwo(el: HTMLElement, kind: MemberKind): Promise<void> {
+    h_.peopleSearchReply.mockImplementation(() => jsonResponse(200, {
+      items: [
+        { id: 'u7', name: '赵六', detail: 'zl***@example.test', canUseTasks: true },
+        { id: 'u8', name: '钱七', detail: 'qq***@example.test', canUseTasks: true },
+      ],
+      hasMore: false,
+      requiresQuery: false,
+      limit: 20,
+    }))
+    await click(el, PICK[kind])
+    await searchFor(el, '六')
+    tickPerson(el, 'u7')
+    tickPerson(el, 'u8')
+    await flush()
+    expect(text(el, 'task-people-picker-count')).toBe('已选人数：2')
+  }
+
+  /** The first add of `kind` waits for the cell to answer it; later ones use the default reply. */
+  function holdFirstAdd(kind: MemberKind): { resolve: (value: Response) => void } {
+    const held = deferred<Response>()
+    ;(kind === 'assignee' ? h_.assigneeReply : h_.followerReply).mockImplementationOnce(() => held.promise)
+    return held
+  }
+
+  /** A successful answer to the add of u7. */
+  const addedU7 = (kind: MemberKind) => kind === 'assignee'
+    ? jsonResponse(200, { id: 't1', status: 'open', completionMode: 'all', assignees: [{ userId: 'u1', completedAt: null }, { userId: 'u2', completedAt: null }, { userId: 'u7', completedAt: null }] })
+    : jsonResponse(200, { id: 't1', followers: ['u5', 'u7'] })
+
+  const addBodies = (kind: MemberKind) => requests('POST', ADD_PATH[kind]).map(([, init]) => init?.body)
+  const followerTexts = (el: HTMLElement) => shownAll(el, 'tasks-detail-follower').map((row) => row.querySelector('span')?.textContent?.trim() ?? '')
+
+  for (const kind of ['assignee', 'follower'] as const) {
+    for (const [how, switchTo] of [
+      ['another tab (a storage change)', signInElsewhereWithEvent],
+      ['this tab (a session switch)', signInHere],
+      ['another tab, silently', signInSilently],
+    ] as Array<[string, (token: string) => void]>) {
+      it(`${kind} batch: a switch to another account from ${how} while the first add is out sends no second add and applies no answer`, async () => {
+        const first = holdFirstAdd(kind)
+        const el = await mountAt('/tasks/t1')
+        await tickTwo(el, kind)
+        await click(el, 'task-people-picker-confirm')
+        expect(addBodies(kind)).toEqual(['{"userId":"u7"}'])
+        switchTo(TOKEN_B)
+        await flush()
+        first.resolve(addedU7(kind))
+        await flush()
+        await flush()
+        expect(addBodies(kind)).toEqual(['{"userId":"u7"}'])
+        expect(detailReads()).toBe(1)
+        expect(followerTexts(el)).toEqual(['u5'])
+        expect(shown(el, ADD_ERROR[kind])).toBeNull()
+        expect(shown(el, 'tasks-action-error')).toBeNull()
+        expect(disabled(el, PICK[kind])).toBe(false)
+      })
+    }
+
+    it(`${kind} batch: a refusal of the first add that lands after a switch is not shown, and the second add is not sent`, async () => {
+      const first = holdFirstAdd(kind)
+      const el = await mountAt('/tasks/t1')
+      await tickTwo(el, kind)
+      await click(el, 'task-people-picker-confirm')
+      signInSilently(TOKEN_B)
+      first.resolve(jsonResponse(422, { error: { code: 'INACTIVE_ORG_MEMBER' } }))
+      await flush()
+      await flush()
+      expect(addBodies(kind)).toEqual(['{"userId":"u7"}'])
+      expect(shown(el, ADD_ERROR[kind])).toBeNull()
+      expect(shown(el, 'tasks-action-error')).toBeNull()
+      expect(detailReads()).toBe(1)
+    })
+
+    for (const [how, switchTo] of [
+      ['another tab (storage changes)', signInElsewhereWithEvent],
+      ['this tab (session switches)', signInHere],
+    ] as Array<[string, (token: string) => void]>) {
+      it(`${kind} batch: a switch to another account and back from ${how} while the first add is out does not resume the batch`, async () => {
+        const first = holdFirstAdd(kind)
+        const el = await mountAt('/tasks/t1')
+        await tickTwo(el, kind)
+        await click(el, 'task-people-picker-confirm')
+        switchTo(TOKEN_B)
+        await flush()
+        switchTo(TOKEN_A)
+        await flush()
+        first.resolve(addedU7(kind))
+        await flush()
+        await flush()
+        expect(addBodies(kind)).toEqual(['{"userId":"u7"}'])
+        expect(detailReads()).toBe(1)
+        expect(followerTexts(el)).toEqual(['u5'])
+        expect(disabled(el, PICK[kind])).toBe(false)
+      })
+    }
+
+    // The picker's own confirm check turns this one away first; the batch's check before its first
+    // add stands behind it.
+    it(`${kind} batch: after a silent switch with two people ticked, confirming sends nothing`, async () => {
+      const el = await mountAt('/tasks/t1')
+      await tickTwo(el, kind)
+      signInSilently(TOKEN_B)
+      await click(el, 'task-people-picker-confirm')
+      await flush()
+      expect(addBodies(kind)).toEqual([])
+      expect(detailReads()).toBe(1)
+      expect(h_.notifyTasksChanged).not.toHaveBeenCalled()
+    })
+
+    it(`negative control, ${kind} batch: with no switch, both adds are sent in the order ticked and the task is read again once`, async () => {
+      const first = holdFirstAdd(kind)
+      const el = await mountAt('/tasks/t1')
+      await tickTwo(el, kind)
+      await click(el, 'task-people-picker-confirm')
+      expect(addBodies(kind)).toEqual(['{"userId":"u7"}'])
+      first.resolve(addedU7(kind))
+      await flush()
+      await flush()
+      expect(addBodies(kind)).toEqual(['{"userId":"u7"}', '{"userId":"u8"}'])
+      expect(detailReads()).toBe(2)
+      expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
+      expect(shown(el, ADD_ERROR[kind])).toBeNull()
+    })
+
+    it(`negative control, ${kind} batch: a token refresh for the same person while the first add is out keeps the batch going`, async () => {
+      const first = holdFirstAdd(kind)
+      const el = await mountAt('/tasks/t1')
+      await tickTwo(el, kind)
+      await click(el, 'task-people-picker-confirm')
+      signInElsewhereWithEvent(TOKEN_A_REFRESHED)
+      notifyAuthPrincipalChange()
+      await flush()
+      first.resolve(addedU7(kind))
+      await flush()
+      await flush()
+      expect(addBodies(kind)).toEqual(['{"userId":"u7"}', '{"userId":"u8"}'])
+      expect(detailReads()).toBe(2)
+      expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
+    })
+  }
 })

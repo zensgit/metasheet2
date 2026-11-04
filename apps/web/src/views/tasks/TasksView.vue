@@ -941,6 +941,10 @@ let taskPeopleGeneration = 0
 // detail read loads that account's names). A token refresh for the same user and org is not a
 // change. Client-side and compared for equality only; the server checks every request.
 let peopleIdentity = readDispatchIdentity()
+// How many times another identity has been seen (each time `peopleIdentityHolds` takes a new one). A
+// batch of picked people is bound to the count it started under, so a switch away and back during
+// the batch still ends it: coming back to the starting identity does not resume the writes.
+let peopleIdentitySwitches = 0
 
 /** `true` while the identity a request would carry is the one the names belong to; otherwise drops
  *  the names and closes the picker (see above), takes the new identity and answers `false`. */
@@ -948,6 +952,7 @@ function peopleIdentityHolds(): boolean {
   const current = readDispatchIdentity()
   if (current === peopleIdentity) return true
   peopleIdentity = current
+  peopleIdentitySwitches += 1
   taskPeople.value = null
   taskPeopleGeneration += 1
   pickerMode.value = null
@@ -1539,10 +1544,15 @@ async function onAddAssignee(): Promise<void> {
 }
 
 /** Package 1b: the picker's people, added one at a time through the same write as the user-id form,
- *  in the order they were ticked; the first failure stops the rest and shows next to the form. */
+ *  in the order they were ticked; the first failure stops the rest and shows next to the form.
+ *  The batch belongs to the identity the picker's rows were read under (see `peopleIdentityHolds`):
+ *  one seen to differ right before a write (the first included) or when an answer lands, or a switch
+ *  away and back in between, ends it there: the rest is not sent and that answer is not applied. */
 async function addPickedMembers(kind: TaskPeoplePickerMode, userIds: string[]): Promise<void> {
   const id = taskId.value
   if (!id || userIds.length === 0 || detailActionPending.value) return
+  const switchesAtStart = peopleIdentitySwitches
+  const batchIdentityHolds = () => peopleIdentityHolds() && peopleIdentitySwitches === switchesAtStart
   const setError = (code: string | null) => {
     if (kind === 'assignee') membershipError.value = code
     else followerError.value = code
@@ -1555,8 +1565,18 @@ async function addPickedMembers(kind: TaskPeoplePickerMode, userIds: string[]): 
   let failed = false
   try {
     for (const userId of userIds) {
+      if (!batchIdentityHolds()) {
+        if (added) notifyTasksChanged()
+        return
+      }
       const result = kind === 'assignee' ? await addAssignee(id, userId) : await addFollower(id, userId)
       if (token !== detailActionToken) {
+        if (added || result.kind === 'ok') notifyTasksChanged()
+        return
+      }
+      // A write that went through is still announced (the counts are read again under whoever is
+      // signed in now); nothing from the answer reaches the page and the detail is not read again.
+      if (!batchIdentityHolds()) {
         if (added || result.kind === 'ok') notifyTasksChanged()
         return
       }
