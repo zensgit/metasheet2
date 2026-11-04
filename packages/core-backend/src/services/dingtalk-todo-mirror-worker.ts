@@ -154,6 +154,8 @@ export interface TodoMirrorRunResult {
   skipped: number
   outcomeUnknown: number
   lostLease: number
+  /** Rows whose todo was created remotely but whose `created` ledger write threw (left for the lease reclaim). */
+  unrecorded: number
 }
 
 export type TodoMirrorDeliverOutcome =
@@ -164,6 +166,7 @@ export type TodoMirrorDeliverOutcome =
   | 'skipped'
   | 'outcome_unknown'
   | 'lost-lease'
+  | 'unrecorded'
 
 export interface DingTalkTodoMirrorWorkerOptions {
   query?: TodoMirrorWorkerQuery
@@ -318,6 +321,7 @@ export class DingTalkTodoMirrorWorker {
   runBatch(): Promise<TodoMirrorRunResult> {
     const result: TodoMirrorRunResult = {
       claimed: 0, created: 0, completed: 0, retrying: 0, failed: 0, skipped: 0, outcomeUnknown: 0, lostLease: 0,
+      unrecorded: 0,
     }
     if (!this.acceptingBatches || this.running) return Promise.resolve(result)
     const task = this.runBatchOnce(result)
@@ -351,11 +355,12 @@ export class DingTalkTodoMirrorWorker {
         else if (outcome === 'failed') result.failed += 1
         else if (outcome === 'skipped') result.skipped += 1
         else if (outcome === 'outcome_unknown') result.outcomeUnknown += 1
+        else if (outcome === 'unrecorded') result.unrecorded += 1
         else result.lostLease += 1
       }
       if (result.claimed > 0) {
         this.logger.info(
-          `DingTalk todo mirror claimed=${result.claimed} created=${result.created} completed=${result.completed} retrying=${result.retrying} failed=${result.failed} skipped=${result.skipped} outcomeUnknown=${result.outcomeUnknown} lostLease=${result.lostLease}`,
+          `DingTalk todo mirror claimed=${result.claimed} created=${result.created} completed=${result.completed} retrying=${result.retrying} failed=${result.failed} skipped=${result.skipped} outcomeUnknown=${result.outcomeUnknown} lostLease=${result.lostLease} unrecorded=${result.unrecorded}`,
         )
       }
       return result
@@ -446,8 +451,11 @@ export class DingTalkTodoMirrorWorker {
     // normal create instead of being judged ambiguous. See `deliver` for the discriminator.
     if (!await this.markSendIssued(row.id, attemptCount)) return 'lost-lease'
 
+    // Only the remote call is classified here: an error from the ledger writes below must never be read
+    // as a failed create.
+    let sent: DingTalkTodoTaskResult
     try {
-      const sent = await this.createTodoTask(
+      sent = await this.createTodoTask(
         accessToken,
         operatorUnionId,
         {
@@ -459,23 +467,6 @@ export class DingTalkTodoMirrorWorker {
         },
         {},
       )
-      const ok = await this.markCreated(row.id, attemptCount, {
-        taskId: sent.taskId ?? null,
-        unionId: recipient.unionId,
-        integrationId: recipient.integrationId,
-      })
-      if (!ok) return 'lost-lease'
-      if (!(sent.taskId ?? '').trim()) {
-        // A 2xx without a parseable task id passes the transport (no envelope discriminator), so the row
-        // settles into `created` with no task id and can only fail at completion time — say so NOW.
-        this.logger.warn(`DingTalk todo mirror: created without a task id row=${row.id}`)
-      }
-      // The seat may have died WHILE we were sending. The consumer's sweeps skip `sending` rows (the
-      // lease is ours), and a terminal event that already ran will never come back — so the row would
-      // settle into `created` and keep a live todo for a finished approval forever. Close the window
-      // here, on the same liveness predicate the consumer uses.
-      await this.retireCreatedSeatIfGone(row)
-      return 'created'
     } catch (error) {
       if (isDingTalkOutcomeUnknown(error)) {
         // TERMINAL and never resent: DingTalk may have created the todo. Reconciliation is manual.
@@ -486,6 +477,35 @@ export class DingTalkTodoMirrorWorker {
       const definite = isDefiniteDingTalkRejection(error)
       return this.retryOrFail(row, attemptCount, TODO_MIRROR_ERROR_CODES.createFailed, !definite)
     }
+
+    // The todo exists remotely from here on. A ledger write that fails after the remote todo was created
+    // is not retried as a failed create: nothing else is written, and the row stays `sending` with
+    // `send_issued_at` stamped under this worker's lease, so the lease reclaim in `deliver` terminates it
+    // as `outcome_unknown` (redelivery_safe=false) and it is never sent again. The batch carries on.
+    let ok: boolean
+    try {
+      ok = await this.markCreated(row.id, attemptCount, {
+        taskId: sent.taskId ?? null,
+        unionId: recipient.unionId,
+        integrationId: recipient.integrationId,
+      })
+    } catch (error) {
+      const errorName = error instanceof Error ? error.name : 'unknown'
+      this.logger.warn(`DingTalk todo mirror: created but not recorded, left for lease reclaim row=${row.id} error=${errorName}`)
+      return 'unrecorded'
+    }
+    if (!ok) return 'lost-lease'
+    if (!(sent.taskId ?? '').trim()) {
+      // A 2xx without a parseable task id passes the transport (no envelope discriminator), so the row
+      // settles into `created` with no task id and can only fail at completion time — say so NOW.
+      this.logger.warn(`DingTalk todo mirror: created without a task id row=${row.id}`)
+    }
+    // The seat may have died WHILE we were sending. The consumer's sweeps skip `sending` rows (the
+    // lease is ours), and a terminal event that already ran will never come back — so the row would
+    // settle into `created` and keep a live todo for a finished approval forever. Close the window
+    // here, on the same liveness predicate the consumer uses.
+    await this.retireCreatedSeatIfGone(row)
+    return 'created'
   }
 
   private async deliverCompletion(row: TodoMirrorRow): Promise<TodoMirrorDeliverOutcome> {
