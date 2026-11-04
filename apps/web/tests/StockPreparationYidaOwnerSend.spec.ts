@@ -390,3 +390,123 @@ describe('Yida owner client cancellation and disposal', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 })
+
+// Y2: target picker and 粘贴 / 从表格 source, only while the server reports its multi-target switch ON.
+describe('StockPreparationYidaOwnerSendPanel multi-target controls (Y2)', () => {
+  const second = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  let app: VueApp<Element> | null = null
+  let root: HTMLDivElement | null = null
+  const fetchSpy = vi.fn()
+  const mapped = (): YidaOwnerDraftInput => ({ config: { version: 2, intent: 'create', target: { appType: 'SYN-APP', formUuid: 'SYN-FORM-2' },
+    fieldMap: [{ source: 'projectNo', target: 'project', type: 'string', required: true }, { source: 'quantity', target: 'qty', type: 'number', required: true }] },
+  rowsText: JSON.stringify([{ projectNo: 'SYN-P1', quantity: 2 }]), allocation: { mode: 'original' } })
+  function mount(multiTarget: boolean | undefined) {
+    root = document.createElement('div'); document.body.appendChild(root)
+    app = createApp({ render: () => h(StockPreparationYidaOwnerSendPanel, { draftInput: mapped(), ...(multiTarget === undefined ? {} : { multiTarget }) }) })
+    app.mount(root)
+  }
+  beforeEach(() => {
+    localStorage.setItem('auth_token', token)
+    fetchSpy.mockReset(); vi.stubGlobal('fetch', fetchSpy)
+    vi.spyOn(crypto, 'randomUUID').mockReturnValueOnce(ids.confirmation).mockReturnValueOnce(ids.submission)
+  })
+  afterEach(() => { app?.unmount(); root?.remove(); app = null; root = null; vi.unstubAllGlobals(); vi.restoreAllMocks() })
+  async function flush(): Promise<void> { for (let i = 0; i < 16; i++) await Promise.resolve(); await nextTick() }
+  function q<T extends HTMLElement = HTMLElement>(id: string): T { const node = root?.querySelector<T>(`[data-testid="sp-yida-owner-${id}"]`); if (!node) throw new Error(`missing ${id}`); return node }
+  function absent(id: string) { return root?.querySelector(`[data-testid="sp-yida-owner-${id}"]`) === null }
+  function body(index: number) { return JSON.parse(fetchSpy.mock.calls[index][1].body as string) as Record<string, unknown> }
+  async function click(id: string) { q<HTMLButtonElement>(id).click(); await flush() }
+  async function choose(id: string, value: string) { const select = q<HTMLSelectElement>(id); select.value = value; select.dispatchEvent(new Event('change')); await flush() }
+  async function type(id: string, value: string) { const field = q<HTMLInputElement>(id); field.value = value; field.dispatchEvent(new Event('input')); await flush() }
+  const targetList = () => ({ targets: [{ slot: 1, targetRef: ids.target, appType: 'SYN-APP', formUuid: 'SYN-FORM' },
+    { slot: 2, targetRef: second, appType: 'SYN-APP', formUuid: 'SYN-FORM-2' }], registered: null,
+  canSend: false, tokenIssued: false, externalWriteAttempted: false })
+  async function pickSecond() {
+    fetchSpy.mockResolvedValueOnce(json(targetList()))
+    await click('targets-load')
+    expect(fetchSpy.mock.calls[0][0]).toBe('/api/integration/yida-owner-send/targets')
+    expect(fetchSpy.mock.calls[0][1].method).toBe('GET')
+    await choose('target-select', second)
+  }
+
+  it('switch OFF (prop absent or false): no picker, no source chooser, the original closed draft body', async () => {
+    for (const value of [undefined, false]) {
+      fetchSpy.mockReset()
+      mount(value)
+      expect(absent('multi')).toBe(true); expect(absent('target-select')).toBe(true); expect(absent('source-sheet')).toBe(true)
+      expect(fetchSpy).not.toHaveBeenCalled()
+      fetchSpy.mockResolvedValueOnce(json(serverDraft(), 201))
+      await click('save')
+      expect(body(fetchSpy.mock.calls.length - 1)).toEqual(mapped())
+      app?.unmount(); root?.remove(); app = null; root = null
+    }
+  })
+
+  it('switch ON, 粘贴: the picked target rides on draft, preview and approval; nothing is fetched until an explicit click', async () => {
+    mount(true)
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(q('multi').textContent).toContain('只绑定这一个目标')
+    await pickSecond()
+    fetchSpy.mockResolvedValueOnce(json(serverDraft(), 201))
+    await click('save')
+    expect(body(1)).toEqual({ targetRef: second, config: mapped().config, allocation: mapped().allocation, rowsText: mapped().rowsText })
+    expect(q('draft-target').textContent).toContain(second)
+    expect(q<HTMLSelectElement>('target-select').disabled).toBe(true)
+    await choose('row', ids.rowA)
+    const preview = serverPreview(); preview.target.targetRef = second
+    fetchSpy.mockResolvedValueOnce(json(preview))
+    await click('preview')
+    expect(body(2)).toEqual({ operationId: ids.operation, rowKey: ids.rowA, targetRef: second })
+    const ack = q<HTMLInputElement>('ack'); ack.checked = true; ack.dispatchEvent(new Event('change')); await flush()
+    fetchSpy.mockResolvedValueOnce(json({ ...serverApproval({ targetRef: second }), reused: false }, 201))
+    await click('approve')
+    expect(body(3)).toEqual({ operationId: ids.operation, rowKey: ids.rowA, confirmationId: ids.confirmation,
+      acknowledgeOnce: true, ttlMs: 900000, targetRef: second })
+    expect(q('grant').textContent).toContain(ids.grant)
+  })
+
+  it('switch ON, 从表格: the server reads the sheet/view by mapping; no rowsText is sent; a target is required first', async () => {
+    mount(true)
+    await click('save')
+    expect(q('error').textContent).toBe('YIDA_OWNER_TARGET_REQUIRED')
+    expect(fetchSpy).not.toHaveBeenCalled()
+    await pickSecond()
+    q<HTMLInputElement>('source-sheet').click(); await flush()
+    await click('save')
+    expect(q('error').textContent).toBe('YIDA_OWNER_SHEET_SOURCE_REQUIRED')
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    await type('sheet-id', 'sheet_synthetic')
+    await type('view-id', 'view_synthetic')
+    await type('column-projectNo', 'fld_project')
+    await type('column-quantity', 'fld_qty')
+    fetchSpy.mockResolvedValueOnce(json(serverDraft(), 201))
+    await click('save')
+    expect(body(1)).toEqual({ targetRef: second, config: mapped().config, allocation: mapped().allocation,
+      source: { kind: 'sheet', sheetId: 'sheet_synthetic', viewId: 'view_synthetic',
+        columns: [{ fieldId: 'fld_project', source: 'projectNo' }, { fieldId: 'fld_qty', source: 'quantity' }] } })
+    expect(JSON.stringify(body(1)).includes('rowsText')).toBe(false)
+  })
+
+  it('a preview or approval answered for another target is refused by the client binding check', async () => {
+    mount(true)
+    await pickSecond()
+    fetchSpy.mockResolvedValueOnce(json(serverDraft(), 201))
+    await click('save')
+    await choose('row', ids.rowA)
+    fetchSpy.mockResolvedValueOnce(json(serverPreview()))
+    await click('preview')
+    expect(q('error').textContent).toBe('YIDA_OWNER_RESPONSE_INVALID')
+    expect(absent('confirmation')).toBe(true)
+  })
+
+  it('a sheet refusal from the server is shown as its fixed code', async () => {
+    mount(true)
+    await pickSecond()
+    q<HTMLInputElement>('source-sheet').click(); await flush()
+    await type('sheet-id', 'sheet_synthetic'); await type('column-projectNo', 'fld_project')
+    fetchSpy.mockResolvedValueOnce(error('YIDA_SHEET_SOURCE_DENIED', 403))
+    await click('save')
+    expect(q('error').textContent).toBe('YIDA_SHEET_SOURCE_DENIED')
+    expect(absent('draft')).toBe(true)
+  })
+})

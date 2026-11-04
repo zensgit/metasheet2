@@ -27,6 +27,15 @@ export type YidaInitializationProducer = Readonly<{
     draft: unknown; credentialRef: string; credentialGeneration: number; targetRef: string
   }>
   inspectDraftInTransaction(trx: Queryable, input: { operationId: string }): Promise<unknown>
+  // Y2 (multi-target switch ON only): additional targets of the anchor owner.
+  registerTargetInTransaction?(trx: Queryable, input: YidaInitializationInput): Promise<unknown>
+  listTargetsInTransaction?(trx: Queryable): Promise<unknown>
+}>
+export type YidaTargetSummary = Readonly<{ slot: number; targetRef: string; appType: string; formUuid: string }>
+export type YidaTargetsView = Readonly<{
+  targets: readonly YidaTargetSummary[]
+  registered: Readonly<{ commandId: string; slot: number; targetRef: string; draft: YidaInitializationDraft }> | null
+  canSend: false; tokenIssued: false; externalWriteAttempted: false
 }>
 export type YidaInitializationRuntimeBinding = Readonly<{
   createInitializationProducer(context: YidaInitializationActor): YidaInitializationProducer
@@ -34,7 +43,12 @@ export type YidaInitializationRuntimeBinding = Readonly<{
 export type YidaInitializationRuntimeDependencies = {
   database: YidaInitializationDatabase
   security: { encrypt(value: string): Promise<string>; decrypt(value: string): Promise<string> }
+  // Y2: INTEGRATION_YIDA_MULTI_TARGET_ENABLED (exact 'true'); absent = OFF. Gates only the two
+  // multi-target entries below; status/initialize never read it.
+  readMultiTargetEnablement?: () => unknown
 }
+type Mode = 'status' | 'initialize' | 'targets' | 'register'
+const MAX_TARGET_SLOT = 16
 const abortGetter = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')!.get!
 const addListener = EventTarget.prototype.addEventListener, removeListener = EventTarget.prototype.removeEventListener
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u
@@ -146,6 +160,19 @@ function view(commandId: string, draft: YidaInitializationDraft | null): YidaIni
   return Object.freeze({ commandId, status: draft === null ? 'ready' : 'initialized', draft,
     canSend: false, tokenIssued: false, externalWriteAttempted: false })
 }
+function targetList(value: unknown): readonly YidaTargetSummary[] {
+  try {
+    if (!Array.isArray(value) || types.isProxy(value) || value.length < 1 || value.length > MAX_TARGET_SLOT) fail('UNAVAILABLE')
+    let previous = 0
+    return Object.freeze(value.map(item => {
+      const row = record(item, ['slot', 'targetRef', 'appType', 'formUuid'])
+      if (!Number.isInteger(row.slot) || Number(row.slot) <= previous || Number(row.slot) > MAX_TARGET_SLOT
+        || (previous === 0 && row.slot !== 1)) fail('UNAVAILABLE')
+      previous = Number(row.slot)
+      return Object.freeze({ slot: previous, targetRef: command(row.targetRef), appType: id(row.appType), formUuid: id(row.formUuid) })
+    }))
+  } catch { fail('UNAVAILABLE') }
+}
 type Run = { controller: AbortController; pending: Promise<unknown>; dependencies: Set<Promise<unknown>> }
 type Registration = { closed: boolean; createProducer: YidaInitializationRuntimeBinding['createInitializationProducer']; runs: Set<Run>; draining?: Promise<void> }
 
@@ -200,16 +227,23 @@ export function createYidaInitializationRuntime(dependencies: YidaInitialization
   if (!dependencies?.database || typeof dependencies.database.transaction !== 'function'
     || !dependencies.security || typeof dependencies.security.encrypt !== 'function' || typeof dependencies.security.decrypt !== 'function') fail('UNAVAILABLE')
   const transaction = dependencies.database.transaction.bind(dependencies.database) as YidaInitializationDatabase['transaction']
+  const readMultiTarget = dependencies.readMultiTargetEnablement ?? (() => 'false')
+  if (typeof readMultiTarget !== 'function') fail('UNAVAILABLE')
+  const multiTargetOn = () => { try { return readMultiTarget() === 'true' } catch { return false } }
   let active: Registration | undefined, generation = 0, terminal = false, terminalDrain: Promise<void> | undefined
   function drain(state: Registration): Promise<void> {
     state.closed = true
     for (const run of state.runs) run.controller.abort()
     return state.draining ??= Promise.allSettled([...state.runs].map(run => run.pending)).then(() => { if (active === state) active = undefined })
   }
-  function execute(actorInput: unknown, supplied: unknown, options: unknown, initializing = false): Promise<YidaInitializationView> {
+  function execute(actorInput: unknown, supplied: unknown, options: unknown, mode: Mode = 'status'): Promise<YidaInitializationView | YidaTargetsView> {
     try {
       // Capture immutable caller data synchronously, before any await/dependency.
-      const actor = captureActor(actorInput), input = initializing ? captureInput(supplied) : undefined, caller = signal(options), state = active
+      const multiTargetMode = mode === 'targets' || mode === 'register'
+      const actor = captureActor(actorInput), input = mode === 'initialize' || mode === 'register' ? captureInput(supplied) : undefined
+      const caller = signal(options), state = active
+      // Y2: the switch is read before any transaction, and again inside it, for the two new entries only.
+      if (multiTargetMode && !multiTargetOn()) fail('DISABLED')
       if (terminal || !state || state.closed) fail('INACTIVE')
       if (caller && abortGetter.call(caller)) fail('CANCELLED')
       if (state.runs.size >= 32) fail('UNAVAILABLE')
@@ -249,14 +283,17 @@ export function createYidaInitializationRuntime(dependencies: YidaInitialization
             let commandId: string
             try { commandId = command(anchor.command_id) } catch { fail('UNAVAILABLE') }
             if (anchor.owner_id !== actor.actorId || anchor.tenant_id !== actor.tenantId) fail('DENIED')
-            if (input && input.commandId !== commandId) fail('CONFLICT')
+            if (input && mode === 'initialize' && input.commandId !== commandId) fail('CONFLICT')
             function producer() {
               checkpoint()
-              const captured = record(state.createProducer(actor), ['initializeInTransaction', 'inspectDraftInTransaction'])
+              const captured = record(state.createProducer(actor), ['initializeInTransaction', 'inspectDraftInTransaction',
+                'registerTargetInTransaction', 'listTargetsInTransaction'], ['initializeInTransaction', 'inspectDraftInTransaction'])
               for (const method of Object.values(captured)) if (typeof method !== 'function' || types.isProxy(method)) fail('UNAVAILABLE')
               checkpoint()
               return { initialize: captured.initializeInTransaction as YidaInitializationProducer['initializeInTransaction'],
-                inspect: captured.inspectDraftInTransaction as YidaInitializationProducer['inspectDraftInTransaction'] }
+                inspect: captured.inspectDraftInTransaction as YidaInitializationProducer['inspectDraftInTransaction'],
+                register: captured.registerTargetInTransaction as YidaInitializationProducer['registerTargetInTransaction'],
+                list: captured.listTargetsInTransaction as YidaInitializationProducer['listTargetsInTransaction'] }
             }
             async function stateRows() {
               const results = await trx.query('SELECT * FROM integration_yida_initializations WHERE slot=1')
@@ -284,6 +321,51 @@ export function createYidaInitializationRuntime(dependencies: YidaInitialization
               const members = await trx.query('SELECT row_key,ordinal FROM integration_yida_draft_rows WHERE operation_id=$1 ORDER BY ordinal', [result.operation_id])
               if (members.rows.length !== draft.rows.length || members.rows.some((member, index) => member.row_key !== draft.rows[index].rowKey
                 || member.ordinal !== draft.rows[index].index)) fail('UNAVAILABLE')
+            }
+            if (multiTargetMode) {
+              if (!multiTargetOn()) fail('DISABLED')
+              // Slot 1 must be initialized (and still authenticate) before any additional target.
+              const first = await stateRows()
+              if (!first.result || !first.target) fail('CONFLICT')
+              const sealed = producer()
+              if (!sealed.register || !sealed.list) fail('UNAVAILABLE')
+              await validate(first.result, first.target,
+                draftView(await checked(() => sealed.inspect(trx, { operationId: id(first.result.operation_id) }))))
+              let registered: YidaTargetsView['registered'] = null
+              if (mode === 'register' && input) {
+                if (input.commandId === commandId) fail('CONFLICT')
+                const prior = await trx.query('SELECT command_id FROM integration_yida_target_registrations WHERE command_id=$1', [input.commandId])
+                if (prior.rows.length !== 0) fail('CONFLICT')
+                // Same permanent-seal material refusals as slot 1 (both checks), before the producer.
+                const sealIssues = getEncryptionMaterialIssues(process.env).length + getYidaSealMaterialIssues(process.env).length
+                if (sealIssues !== 0) fail('ENCRYPTION_NOT_READY')
+                shortMaterial = isYidaSealMaterialShort(process.env)
+                const produced = record(await checked(() => sealed.register!(trx, input)),
+                  ['draft', 'credentialRef', 'credentialGeneration', 'targetRef', 'slot'])
+                const draft = draftView(produced.draft), credentialRef = id(produced.credentialRef), targetRef = command(produced.targetRef)
+                const slot = produced.slot
+                if (produced.credentialGeneration !== 1 || !Number.isInteger(slot) || Number(slot) < 2 || Number(slot) > MAX_TARGET_SLOT) fail('UNAVAILABLE')
+                // Re-read the ACTUAL row: a fabricated producer receipt cannot seed a registration.
+                const rows = await trx.query('SELECT slot,target_ref,tenant_id,workspace_id,owner_id,operation_id,draft_target_ref,credential_ref,credential_generation,evidence_version,status FROM integration_yida_approved_target WHERE target_ref=$1', [targetRef])
+                const target = rows.rows[0]
+                if (rows.rows.length !== 1 || target.slot !== slot || target.tenant_id !== actor.tenantId || target.owner_id !== actor.actorId
+                  || target.workspace_id !== null || target.status !== 'manually_confirmed' || target.evidence_version !== 1
+                  || target.operation_id !== draft.operationId || target.draft_target_ref !== draft.targetRef
+                  || target.credential_ref !== credentialRef || target.credential_generation !== 1) fail('UNAVAILABLE')
+                const inserted = await trx.query(`INSERT INTO integration_yida_target_registrations
+                  (command_id,slot,target_ref,owner_id,tenant_id,workspace_id,operation_id,credential_ref,credential_generation)
+                  VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,1) RETURNING *`, [input.commandId, slot, targetRef, actor.actorId, actor.tenantId, draft.operationId, credentialRef])
+                const expected: Row = { command_id: input.commandId, slot, target_ref: targetRef, owner_id: actor.actorId,
+                  tenant_id: actor.tenantId, workspace_id: null, operation_id: draft.operationId, credential_ref: credentialRef, credential_generation: 1 }
+                if (inserted.rows.length !== 1 || inserted.rowCount !== 1
+                  || Object.entries(expected).some(([key, value]) => inserted.rows[0][key] !== value)) fail('UNAVAILABLE')
+                registered = Object.freeze({ commandId: input.commandId, slot: Number(slot), targetRef, draft })
+              }
+              const targets = targetList(await checked(() => sealed.list!(trx)))
+              if (targets[0].targetRef !== first.target.target_ref
+                || (registered && !targets.some(target => target.targetRef === registered!.targetRef && target.slot === registered!.slot))) fail('UNAVAILABLE')
+              checkpoint()
+              return Object.freeze({ targets, registered, canSend: false, tokenIssued: false, externalWriteAttempted: false }) as YidaTargetsView
             }
             const existing = await stateRows()
             if (existing.result || existing.target) {
@@ -341,7 +423,7 @@ export function createYidaInitializationRuntime(dependencies: YidaInitialization
         }
       })
       void run.pending.catch(() => {})
-      return run.pending as Promise<YidaInitializationView>
+      return run.pending as Promise<YidaInitializationView | YidaTargetsView>
     } catch (error) {
       try { closeYidaInitializationError(error) } catch (closed) {
         const pending = Promise.reject<YidaInitializationView>(closed); void pending.catch(() => {}); return pending
@@ -364,8 +446,12 @@ export function createYidaInitializationRuntime(dependencies: YidaInitialization
         } catch (error) { try { closeYidaInitializationError(error) } catch (closed) { const pending = Promise.reject<Readonly<{ stop(): Promise<void> }>>(closed); void pending.catch(() => {}); return pending } }
       } })
     },
-    status(actor: YidaInitializationActor, options: { signal?: AbortSignal } = {}) { return execute(actor, undefined, options) },
-    initialize(actor: YidaInitializationActor, input: YidaInitializationInput, options: { signal?: AbortSignal } = {}) { return execute(actor, input, options, true) },
+    status(actor: YidaInitializationActor, options: { signal?: AbortSignal } = {}) { return execute(actor, undefined, options) as Promise<YidaInitializationView> },
+    initialize(actor: YidaInitializationActor, input: YidaInitializationInput, options: { signal?: AbortSignal } = {}) { return execute(actor, input, options, 'initialize') as Promise<YidaInitializationView> },
+    // Y2, multi-target switch ON only: list the anchor owner's targets / register one more (slot 2..16).
+    targets(actor: YidaInitializationActor, options: { signal?: AbortSignal } = {}) { return execute(actor, undefined, options, 'targets') as Promise<YidaTargetsView> },
+    registerTarget(actor: YidaInitializationActor, input: YidaInitializationInput, options: { signal?: AbortSignal } = {}) { return execute(actor, input, options, 'register') as Promise<YidaTargetsView> },
+    multiTargetEnabled(): boolean { return multiTargetOn() },
     deactivate() { ++generation; return active ? drain(active) : Promise.resolve() },
     stop() { if (terminalDrain) return terminalDrain; terminal = true; ++generation; return terminalDrain = active ? drain(active) : Promise.resolve() },
   })

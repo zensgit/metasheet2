@@ -75,7 +75,7 @@ beforeEach(() => {
 afterEach(() => { for (const [key, value] of savedEnv) setEnv(key, value) })
 function fixture(options: { missing?: boolean; badXids?: boolean; badIsolation?: boolean;
   beforeQuery?: (sql: string) => Promise<void>; beforeCommit?: () => Promise<void>; lostCommit?: boolean;
-  createRuntime?: typeof createYidaInitializationRuntime } = {}) {
+  createRuntime?: typeof createYidaInitializationRuntime; readMultiTarget?: () => unknown } = {}) {
   let state: State = { anchor: options.missing ? undefined : emptyAnchor() }, working = state, xid = 0
   let allowed = true, memberships = true, transactions = 0, commits = 0
   const sql: string[] = []
@@ -136,7 +136,8 @@ function fixture(options: { missing?: boolean; badXids?: boolean; badIsolation?:
   const inspect = vi.fn(async () => ({ ...draft, reused: true }))
   const createProducer = vi.fn(() => ({ initializeInTransaction: initialize, inspectDraftInTransaction: inspect }))
   const security = { encrypt: vi.fn(async (value: string) => `enc:${value}`), decrypt: vi.fn(async () => 'synthetic') }
-  const runtime = (options.createRuntime ?? createYidaInitializationRuntime)({ database, security })
+  const runtime = (options.createRuntime ?? createYidaInitializationRuntime)({ database, security,
+    ...(options.readMultiTarget ? { readMultiTargetEnablement: options.readMultiTarget } : {}) })
   const binding: YidaInitializationRuntimeBinding = { createInitializationProducer: createProducer }
   return { runtime, database, binding, initialize, inspect, createProducer, security, sql, query,
     get state() { return state }, set allowed(value: boolean) { allowed = value }, set memberships(value: boolean) { memberships = value },
@@ -575,6 +576,45 @@ describe('L4 also refuses public or obviously invalid material that passes the p
     expect((await f.runtime.initialize(actor, input())).status).toBe('initialized')
     expect(f.initialize).toHaveBeenCalledTimes(1); expect(f.commits).toBe(1)
     expect(f.state.result?.command_id).toBe(commandId)
+  })
+})
+
+// Y2: the runtime's OWN exact-literal read of INTEGRATION_YIDA_MULTI_TARGET_ENABLED, called directly
+// (no owner route in front of it, so the route's gate cannot mask a weakened runtime check).
+describe('Y2 multi-target switch: the initialization runtime refuses on its own', () => {
+  const otherCommand = '00000000-0000-4000-8000-000000000009'
+  const offReaders: Array<[string, (() => unknown) | undefined]> = [['absent reader', undefined], ['undefined', () => undefined],
+    ['false', () => 'false'], ['TRUE', () => 'TRUE'], [' true', () => ' true'], ['true ', () => 'true '], ['boolean true', () => true],
+    ['number 1', () => 1], ['throwing reader', () => { throw new Error('private') }], ['async true', async () => 'true']]
+  it.each(offReaders)('switch %s: targets() and registerTarget() are DISABLED before any transaction, producer or SQL', async (_name, read) => {
+    const { f } = await active({ readMultiTarget: read })
+    expect(f.runtime.multiTargetEnabled()).toBe(false)
+    await rejected(f.runtime.targets(actor), 'DISABLED')
+    await rejected(f.runtime.registerTarget(actor, { ...input(), commandId: otherCommand }), 'DISABLED')
+    expect(f.transactions).toBe(0)
+    expect(f.sql).toEqual([])
+    expect(f.createProducer).not.toHaveBeenCalled()
+    expect(f.initialize).not.toHaveBeenCalled()
+    expect(f.security.encrypt).not.toHaveBeenCalled()
+    // status/initialize never read the switch: slot 1 keeps working while it is off.
+    expect((await f.runtime.status(actor)).status).toBe('ready')
+  })
+  it('a switch that turns off after the pre-check is refused by the in-transaction re-read, before any slot state read', async () => {
+    let reads = 0
+    const { f } = await active({ readMultiTarget: () => (++reads === 1 ? 'true' : 'false') })
+    await rejected(f.runtime.targets(actor), 'DISABLED')
+    expect(reads).toBe(2)
+    expect(f.transactions).toBe(1); expect(f.commits).toBe(0)
+    expect(f.sql.some(sql => sql.includes('FROM integration_yida_initializations') || sql.includes('FROM integration_yida_approved_target'))).toBe(false)
+    expect(f.createProducer).not.toHaveBeenCalled()
+  })
+  it('control: exact true passes both reads and reaches the slot-state check (uninitialized slot 1 is CONFLICT)', async () => {
+    const { f } = await active({ readMultiTarget: () => 'true' })
+    expect(f.runtime.multiTargetEnabled()).toBe(true)
+    await rejected(f.runtime.targets(actor), 'CONFLICT')
+    expect(f.transactions).toBe(1); expect(f.commits).toBe(0)
+    expect(f.sql.some(sql => sql.includes('FROM integration_yida_initializations'))).toBe(true)
+    expect(f.createProducer).not.toHaveBeenCalled()
   })
 })
 
