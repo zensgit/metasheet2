@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { Kysely,PostgresDialect,sql } from 'kysely'
 import { up as applyTripMigration, down as rollbackTripMigration } from '../../src/db/migrations/zzzz20261013090000_create_attendance_business_trips'
 import { createOnlinePunchDbFixture,punchClock } from '../utils/attendance-online-punch-db'
+import { attendanceTestRunDateOverride,attendanceTestRunNow } from '../utils/attendance-test-run-date'
 if (!process.env.ATTENDANCE_TEST_DATABASE_URL) throw new Error('ATTENDANCE_TRIP_REAL_DATABASE_REQUIRED')
 const require=createRequire(import.meta.url)
 const {createAttendanceTimezonePolicyStore}=require('../../../../plugins/plugin-attendance/lib/attendance-timezone-policy-store.cjs')
@@ -44,7 +45,7 @@ describe('business trip real request approval and destination arrangement',() =>
   let admin:Awaited<ReturnType<typeof f.user>>, employee:Awaited<ReturnType<typeof f.user>>, approver:Awaited<ReturnType<typeof f.user>>
   let flowId:string, approvedId:string
   const priorCancelEntry=process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED
-  const startAt=new Date(Date.now()+7*86400000);startAt.setUTCHours(0,0,0,0)
+  const startAt=new Date(attendanceTestRunNow().getTime()+7*86400000);startAt.setUTCHours(0,0,0,0)
   const endAt=new Date(startAt.getTime()+2*86400000)
   const body=()=>({destinationTimezone:'Asia/Tokyo',startAt:startAt.toISOString(),endAt:endAt.toISOString(),approvalFlowId:flowId})
   const create=async(extra:Record<string,unknown>={}) => f.request('/api/attendance/business-trip-requests',employee.token,{...body(),...extra})
@@ -61,8 +62,14 @@ describe('business trip real request approval and destination arrangement',() =>
   },180000)
   // Configuration-positive cases use a legitimate quiet UTC boundary; cases
   // testing started shifts set the actual server clock explicitly below.
-  beforeEach(()=>{const safe=new Date();safe.setUTCHours(0,0,0,0);punchClock.setOnlinePunchInstantForTests(safe)})
-  afterAll(async()=>{await f.stop();if(priorCancelEntry===undefined)delete process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED;else process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED=priorCancelEntry},60000)
+  // Date-matrix legs (ATTENDANCE_TEST_RUN_DATE set) also pin the trusted trip
+  // clock to the same run-day instant: startAt above derives from the run day, so
+  // publish/cancel `now` must too, or a past leg turns RETROACTIVE_PUBLICATION once
+  // the real clock passes its startAt. Tests that set the trip clock themselves
+  // still override this. Unset (CI, today leg): trip clock stays real, unchanged.
+  const runDateOverridden=attendanceTestRunDateOverride()!==null
+  beforeEach(()=>{const safe=attendanceTestRunNow();safe.setUTCHours(0,0,0,0);punchClock.setOnlinePunchInstantForTests(safe);if(runDateOverridden)setBusinessTripInstantForTests(safe)})
+  afterAll(async()=>{if(runDateOverridden)setBusinessTripInstantForTests(null);await f.stop();if(priorCancelEntry===undefined)delete process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED;else process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED=priorCancelEntry},60000)
   it('only the dedicated route accepts business_trip; client approval metadata is rejected',async()=>{
     const generic=await f.request('/api/attendance/requests',employee.token,{requestType:'business_trip',workDate:startAt.toISOString().slice(0,10)})
     expect(generic.status).toBe(422);expect(generic.body.error.code).toBe('ATTENDANCE_TRIP_DEDICATED_ROUTE_ONLY')
@@ -157,7 +164,7 @@ describe('business trip real request approval and destination arrangement',() =>
   })
   it('default-rule reverse edits reject a new partial boundary and permit a valid future edit',async()=>{
     // Both UTC 09-18 and proposed Los Angeles 16-23 are idle at 07:00Z.
-    const safe=new Date();safe.setUTCHours(7,0,0,0);punchClock.setOnlinePunchInstantForTests(safe)
+    const safe=attendanceTestRunNow();safe.setUTCHours(7,0,0,0);punchClock.setOnlinePunchInstantForTests(safe)
     const before=(await f.pool.query('SELECT id,timezone FROM attendance_rules WHERE org_id=$1 AND is_default=true',[f.orgId])).rows
     const invalid=await f.request('/api/attendance/rules/default',admin.token,{orgId:f.orgId,timezone:'America/Los_Angeles',workStartTime:'16:00',workEndTime:'23:00',workingDays:[0,1,2,3,4,5,6]},'PUT')
     expect(invalid.status,invalid.body.error?.code).toBe(409)
@@ -315,6 +322,8 @@ describe('business trip real request approval and destination arrangement',() =>
     }finally{setBusinessTripInstantForTests(null)}
   },60000)
   it('a checked-in trip cancellation keeps the original frozen checkout and exact replay, then new work dates use base',async()=>{
+    // Not shifted by ATTENDANCE_TEST_RUN_DATE: the punches below must stay in
+    // the real past because the future-punch guard compares to the real clock.
     const startAt=new Date(Date.now()-7*86400000);startAt.setUTCHours(0,0,0,0)
     const endAt=new Date(startAt.getTime()+2*86400000)
     const orgId=randomUUID(),owner=await f.user(),seat=await f.user()
