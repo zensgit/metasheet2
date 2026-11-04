@@ -868,6 +868,275 @@ test('production function: require_migrations_pending_zero_true accepts only tru
   assert.match(run('unknown').stderr, /unknown/)
 })
 
+// --- migrate.js exec never inherits the container's migration-control env --------------
+
+const MIGRATE_FORCED_ENV_KEYS = [
+  'MIGRATION_EXCLUDE',
+  'MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL',
+  'ALLOW_DB_RESET',
+]
+
+// Stub docker: `inspect` answers the running check and the Config.Env read; `exec`
+// records argv and emulates a container whose own env carries MIGRATION_EXCLUDE
+// (STUB_CONTAINER_EXCLUDE). The list is narrowed to `Pending: 0` ONLY when that
+// inherited value reaches migrate.js, i.e. when the exec did not force it empty.
+const MIGRATE_DOCKER_STUB = `
+  docker() {
+    case "\$1" in
+      inspect)
+        if [[ "\$3" == '{{.State.Running}}' ]]; then
+          printf '%s\\n' "\${STUB_RUNNING:-true}"
+          return 0
+        fi
+        if [[ "\$3" == '{{json .Config.Env}}' ]]; then
+          [[ -z "\${STUB_INSPECT_ENV_FAIL:-}" ]] || return 1
+          printf '%s\\n' "\${STUB_ENV_JSON:-[]}"
+          return 0
+        fi
+        return 1
+        ;;
+      exec)
+        if [[ -n "\${ARGV_LOG:-}" ]]; then printf '%s\\n' "\$*" >> "\$ARGV_LOG"; fi
+        [[ -z "\${STUB_EXEC_FAIL:-}" ]] || return 125
+        local a forced=0
+        for a in "\$@"; do [[ "\$a" == 'MIGRATION_EXCLUDE=' ]] && forced=1; done
+        if [[ "\$forced" -eq 0 && -n "\${STUB_CONTAINER_EXCLUDE:-}" ]]; then
+          printf 'Applied: 1\\nPending: 0\\n'
+        else
+          printf 'Applied: 0\\nPending: %s\\n  - %s\\n' "\${STUB_WHOLE_PENDING:-1}" "\${STUB_CONTAINER_EXCLUDE:-stub_name}"
+        fi
+        return 0
+        ;;
+    esac
+    return 1
+  }
+`
+
+function runWithMigrateDockerStub(body, extraEnv = {}) {
+  return spawnSync(
+    'bash',
+    ['-o', 'pipefail', '-c', `source "$1"\n${MIGRATE_DOCKER_STUB}\n${body}`, 'bash', REMOTE_SH],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'status',
+        OUTPUT_DIR: '/tmp/lifecycle-canary-contract-source-only',
+        RUN_STAMP: 'contract',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        ...extraEnv,
+      },
+    },
+  )
+}
+
+test('migrate list exec: every migrate.js exec goes through migrate_list_exec with all three forced -e', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('migrate_list_exec()')
+  assert.ok(start >= 0, 'migrate_list_exec helper must exist')
+  const end = source.indexOf('\n}\n', start)
+  const helper = source.slice(start, end)
+  const container = helper.indexOf('"$BACKEND_CONTAINER"')
+  assert.ok(container >= 0)
+  for (const key of MIGRATE_FORCED_ENV_KEYS) {
+    const at = helper.indexOf(`-e ${key}=`)
+    assert.ok(at >= 0 && at < container, `${key} must be forced empty before the container name`)
+    assert.doesNotMatch(helper, new RegExp(`-e ${key}=[^ \\\\\\n]`), `${key} must be forced to EMPTY`)
+  }
+  assert.match(helper, /node "\$MIGRATE_JS" --list/)
+  // The helper is the only place that executes migrate.js.
+  const occurrences = source.split('"$MIGRATE_JS"').length - 1
+  assert.equal(occurrences, 1, 'only migrate_list_exec may execute "$MIGRATE_JS"')
+  assert.match(source, /list="\$\(migrate_list_exec\)"/)
+  assert.doesNotMatch(source, /docker exec "\$BACKEND_CONTAINER" node "\$MIGRATE_JS"/)
+})
+
+test('FUNCTIONAL: an inherited MIGRATION_EXCLUDE in the container env no longer narrows the pending probe', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lifecycle-migrate-env-'))
+  try {
+    const argvLog = join(dir, 'argv.log')
+    const inherited = runWithMigrateDockerStub('probe_migration_pending_zero', {
+      ARGV_LOG: argvLog,
+      STUB_CONTAINER_EXCLUDE: 'stub_excluded_migration_name',
+    })
+    assert.equal(inherited.status, 0, inherited.stderr)
+    assert.equal(inherited.stdout, 'false', 'whole ledger has one pending entry; the inherited exclude must not hide it')
+    const lines = readFileSync(argvLog, 'utf8').trim().split('\n')
+    assert.ok(lines.length >= 1, 'migrate.js must have been executed')
+    for (const line of lines) {
+      assert.match(line, /^exec /)
+      const containerAt = line.indexOf(' metasheet-staging-backend ')
+      assert.ok(containerAt > 0, line)
+      for (const key of MIGRATE_FORCED_ENV_KEYS) {
+        const at = line.indexOf(`-e ${key}=`)
+        assert.ok(at >= 0 && at < containerAt, `${key} must be forced before the container name: ${line}`)
+        assert.ok(!line.includes(`-e ${key}=stub`), `${key} must be forced empty: ${line}`)
+      }
+      assert.match(line, / node packages\/core-backend\/dist\/src\/db\/migrate\.js --list$/)
+    }
+
+    const clean = runWithMigrateDockerStub('probe_migration_pending_zero', {
+      STUB_CONTAINER_EXCLUDE: 'stub_excluded_migration_name',
+      STUB_WHOLE_PENDING: '0',
+    })
+    assert.equal(clean.status, 0, clean.stderr)
+    assert.equal(clean.stdout, 'true')
+
+    const execFailure = runWithMigrateDockerStub('probe_migration_pending_zero', { STUB_EXEC_FAIL: '1' })
+    assert.equal(execFailure.status, 0, execFailure.stderr)
+    assert.equal(execFailure.stdout, 'unknown')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('FUNCTIONAL: migrate_env_inherited_hazard is true|false|unknown and never prints an env value', () => {
+  const sentinel = 'stub_sentinel_migration_name_7f3a'
+  function probe(extraEnv) {
+    return runWithMigrateDockerStub('probe_migrate_env_inherited_hazard', extraEnv)
+  }
+  const cases = [
+    [{ STUB_ENV_JSON: `["PATH=/usr/bin","MIGRATION_EXCLUDE=${sentinel}"]` }, 'true'],
+    [{ STUB_ENV_JSON: `["MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=${sentinel}"]` }, 'true'],
+    [{ STUB_ENV_JSON: `["ALLOW_DB_RESET=${sentinel}","PATH=/usr/bin"]` }, 'true'],
+    [{ STUB_ENV_JSON: `["PATH=/usr/bin","MIGRATION_EXCLUDE=","ALLOW_DB_RESET= "]` }, 'false'],
+    [{ STUB_ENV_JSON: '["PATH=/usr/bin"]' }, 'false'],
+    [{ STUB_ENV_JSON: '[]' }, 'false'],
+    [{ STUB_INSPECT_ENV_FAIL: '1' }, 'unknown'],
+    [{ STUB_ENV_JSON: 'not json' }, 'unknown'],
+    [{ STUB_ENV_JSON: 'null' }, 'unknown'],
+    [{ STUB_ENV_JSON: `{"MIGRATION_EXCLUDE":"${sentinel}"}` }, 'unknown'],
+    [{ STUB_RUNNING: 'false', STUB_ENV_JSON: `["MIGRATION_EXCLUDE=${sentinel}"]` }, 'unknown'],
+  ]
+  for (const [env, expected] of cases) {
+    const result = probe(env)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, expected, JSON.stringify(env))
+    assert.ok(!result.stdout.includes(sentinel), 'stdout must never carry an env value')
+    assert.ok(!result.stderr.includes(sentinel), 'stderr must never carry an env value')
+  }
+})
+
+test('FUNCTIONAL: capture_live_snapshot returns 0 with migrations and hazard unknown when every new probe fails', () => {
+  const result = runWithMigrateDockerStub(
+    `read_live_flags() { printf 'false false false off'; }
+     resolve_deployed_sha() { printf 'unknown'; }
+     probe_alias_readiness() { printf 'false'; }
+     fetch_backend_health_ok() { printf 'false'; }
+     capture_live_snapshot 2>/dev/null
+     printf '%s|%s|%s' "$?" "$SNAP_MIGRATIONS_ZERO" "$SNAP_MIGRATE_ENV_HAZARD"`,
+    { STUB_EXEC_FAIL: '1', STUB_INSPECT_ENV_FAIL: '1' },
+  )
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '0|unknown|unknown')
+})
+
+test('migrate_env_inherited_hazard is report-only: emitted beside migrations_pending_zero, read with a default, never a gate', () => {
+  const source = read(REMOTE_SH)
+  const lines = source.split('\n')
+  const hazardLines = lines.filter((l) => l.includes('SNAP_MIGRATE_ENV_HAZARD'))
+  assert.ok(hazardLines.length >= 3, 'snapshot assignment + artifact + summaries')
+  const allowed = [
+    /^\s*SNAP_MIGRATE_ENV_HAZARD="\$\(probe_migrate_env_inherited_hazard\)"$/,
+    /^\s*local migrate_env_hazard="\$\{SNAP_MIGRATE_ENV_HAZARD:-unknown\}"$/,
+    /^\s*echo "migrate_env_inherited_hazard=\$\{SNAP_MIGRATE_ENV_HAZARD:-unknown\}"$/,
+  ]
+  for (const line of hazardLines) {
+    assert.ok(allowed.some((re) => re.test(line)), `hazard must only be assigned or reported: ${line}`)
+  }
+  for (const line of lines) {
+    if (!/migrate_env_hazard|MIGRATE_ENV_HAZARD/i.test(line)) continue
+    assert.doesNotMatch(line, /\bfail\b|\bexit\b|return 1/, `hazard must never gate: ${line}`)
+  }
+  // sibling emission: artifact txt + json and the status/preflight summaries
+  const artStart = source.indexOf('write_status_artifact()')
+  const artEnd = source.indexOf('\ncapture_live_snapshot()', artStart)
+  const artifact = source.slice(artStart, artEnd)
+  assert.match(artifact, /echo "migrations_pending_zero=\$\{migrations_pending_zero\}"\n\s*echo "migrate_env_inherited_hazard=\$\{migrate_env_hazard\}"/)
+  assert.match(artifact, /\\"migrate_env_inherited_hazard\\": \$\{hazard_json\}/)
+  assert.doesNotMatch(artifact, /printenv|Config\.Env/)
+  const statusBody = source.slice(source.indexOf('action_status()'), source.indexOf('\npreflight_for_target()'))
+  assert.match(statusBody, /echo "migrations_pending_zero=\$\{SNAP_MIGRATIONS_ZERO\}"\n\s*echo "migrate_env_inherited_hazard=\$\{SNAP_MIGRATE_ENV_HAZARD:-unknown\}"/)
+  const preflightBody = source.slice(source.indexOf('action_preflight()'), source.indexOf('\naction_bootstrap()'))
+  assert.match(preflightBody, /echo "migrations_pending_zero=\$\{SNAP_MIGRATIONS_ZERO\}"\n\s*echo "migrate_env_inherited_hazard=\$\{SNAP_MIGRATE_ENV_HAZARD:-unknown\}"/)
+})
+
+test('FUNCTIONAL: hazard=true never fails preflight or the migrations gate; the artifact reports it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lifecycle-hazard-report-'))
+  try {
+    const result = spawnSync(
+      'bash',
+      [
+        '-o',
+        'pipefail',
+        '-c',
+        `source "$1"
+         SNAP_MIGRATIONS_ZERO=true
+         SNAP_MODE=off
+         SNAP_BUILD_SHA="$2"
+         SNAP_HEALTH_OK=true
+         SNAP_MIGRATE_ENV_HAZARD=true
+         EXPECTED_CURRENT_MODE=''
+         DEPLOY_SHA=''
+         preflight_for_target off
+         require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" test
+         write_status_artifact "$2" false false false off false false true true off "$PREFLIGHT_OK" false ok
+         printf '%s|%s' "$PREFLIGHT_OK" "$PREFLIGHT_NOTE"`,
+        'bash',
+        REMOTE_SH,
+        'a'.repeat(40),
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          ACTION: 'status',
+          OUTPUT_DIR: dir,
+          RUN_STAMP: 'contract',
+          LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        },
+      },
+    )
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, 'true|ok')
+    const txt = readFileSync(join(dir, 'lifecycle-status.txt'), 'utf8')
+    assert.match(txt, /\nmigrations_pending_zero=true\nmigrate_env_inherited_hazard=true\n/)
+    const parsed = JSON.parse(readFileSync(join(dir, 'lifecycle-status.json'), 'utf8'))
+    assert.equal(parsed.migrations_pending_zero, true)
+    assert.equal(parsed.migrate_env_inherited_hazard, true)
+
+    // snapshots built without the new variable (set -u) still write the artifact: unknown → null
+    const legacy = spawnSync(
+      'bash',
+      [
+        '-o',
+        'pipefail',
+        '-c',
+        `source "$1"
+         write_status_artifact "$2" false false false off false false true true`,
+        'bash',
+        REMOTE_SH,
+        'a'.repeat(40),
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          ACTION: 'status',
+          OUTPUT_DIR: dir,
+          RUN_STAMP: 'contract',
+          LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        },
+      },
+    )
+    assert.equal(legacy.status, 0, legacy.stderr)
+    assert.match(readFileSync(join(dir, 'lifecycle-status.txt'), 'utf8'), /\nmigrate_env_inherited_hazard=unknown\n/)
+    assert.equal(JSON.parse(readFileSync(join(dir, 'lifecycle-status.json'), 'utf8')).migrate_env_inherited_hazard, null)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 // --- P1: pending/deprovision/alias are explicit transient operators ------------------
 
 test('P1 pending/deprovision route to action_pending/action_deprovision; alias routes to action_alias; bootstrap/human-bootstrap route', () => {

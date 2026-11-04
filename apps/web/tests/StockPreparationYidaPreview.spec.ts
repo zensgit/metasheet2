@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { createApp, nextTick, type App as VueApp } from 'vue'
 import StockPreparationYidaPreviewPanel from '../src/components/integration/stockPreparation/StockPreparationYidaPreviewPanel.vue'
-import type { YidaRuleTemplateEnvelope } from '../../../plugins/plugin-integration-core/lib/yida-rule-template.mjs'
+import { exportYidaRuleTemplate, parseYidaRuleTemplate, type YidaRuleTemplateEnvelope } from '../../../plugins/plugin-integration-core/lib/yida-rule-template.mjs'
+import { createYidaTransformExample } from '../../../plugins/plugin-integration-core/lib/yida-static-plan.mjs'
+// Host recompute (node-only module: node:crypto + the canonical JSON codec); never imported by src.
+import { compileYidaLocalDraft } from '../../../plugins/plugin-integration-core/lib/yida-draft-compiler.mjs'
 
 describe('StockPreparationYidaPreviewPanel', () => {
   let app: VueApp<Element> | null = null
@@ -864,8 +867,136 @@ describe('StockPreparationYidaPreviewPanel', () => {
     }
     await importRules('{')
     expect(q('sp-yida-error').textContent).toBe('YIDA_RULE_TEMPLATE_TEXT')
+    // The L4 entry reason names the failed import, not a preview that never ran.
+    expect(root?.querySelector('[data-testid="sp-yida-initialization-blocked"]')?.textContent).toContain('规则草稿 JSON 的生成或导入没有通过')
+    expect(root?.querySelector('[data-testid="sp-yida-initialization-blocked"]')?.textContent).not.toContain('本地预演没有通过')
     edit('sp-yida-rule-import-text', '{}'); await flush()
     expect(root?.querySelector('[data-testid="sp-yida-error"]')).toBeNull()
+    expectNoIo()
+  })
+
+  // Issue #6687 items 1, 3 and 4: step guide, an always-rendered L4 entry naming the missing condition, v1 note.
+  function stepStates(): Array<string | null | undefined> { return Array.from({ length: 8 }, (_, index) => root?.querySelector(`[data-testid="sp-yida-step-${index + 1}"]`)?.getAttribute('data-state')) }
+  function openEntry(): HTMLButtonElement { return q<HTMLButtonElement>('sp-yida-initialization-open') }
+  function blockedReason(): string { return root?.querySelector('[data-testid="sp-yida-initialization-blocked"]')?.textContent ?? '' }
+
+  it('step guide lists the eight steps and marks current and completed steps from local state only', async () => {
+    expect(Array.from(q('sp-yida-steps').querySelectorAll('li')).map((node) => node.textContent)).toEqual([
+      '1 选合同（v2）（当前）', '2 填样例或规则', '3 只在本地预演', '4 生成并存档规则草稿 JSON', '5 打开本地初始化', '6 手动 GET 本地初始化状态', '7 测试连接', '8 本地初始化'])
+    expect(q('sp-yida-step-1').getAttribute('aria-current')).toBe('step')
+    edit('sp-yida-preview-mode', 'protocol'); await flush()
+    expect(stepStates()).toEqual(['done', 'current', 'todo', 'todo', 'todo', 'todo', 'todo', 'todo'])
+    q<HTMLButtonElement>('sp-yida-protocol-example-primary').click(); await flush()
+    expect(stepStates()).toEqual(['done', 'done', 'current', 'todo', 'todo', 'todo', 'todo', 'todo'])
+    await preview()
+    expect(stepStates()).toEqual(['done', 'done', 'done', 'current', 'todo', 'todo', 'todo', 'todo'])
+    expect(q('sp-yida-step-3').textContent).toBe('3 只在本地预演（已完成）')
+    // Generating the rule draft clears the preview: step 3 is current again, step 4 stays done.
+    await exportRules()
+    expect(stepStates()).toEqual(['done', 'done', 'current', 'done', 'todo', 'todo', 'todo', 'todo'])
+    expect(q('sp-yida-steps-note').textContent).toContain('请在第 5 步之前存档')
+    await preview()
+    expect(stepStates()).toEqual(['done', 'done', 'done', 'done', 'current', 'todo', 'todo', 'todo'])
+    // A v1 preview never completes step 3, whatever else is filled in.
+    await example('primary'); await preview()
+    expect(stepStates()).toEqual(['current', 'done', 'todo', 'todo', 'todo', 'todo', 'todo', 'todo'])
+    expectNoIo()
+  })
+
+  it('keeps 打开本地初始化 rendered but disabled with the exact missing condition, and enables it when all hold', async () => {
+    expect(openEntry().disabled).toBe(true); expect(blockedReason()).toContain('「表单字段目录与协议 v2（仅本地）」')
+    await example('primary'); await preview()
+    expect(q('sp-yida-summary').textContent).toContain('无效 0'); expect(openEntry().disabled).toBe(true)
+    expect(blockedReason()).toContain('字段映射 v1 不支持本地初始化')
+    await protocolExample(); edit('sp-yida-intent', 'update'); await flush()
+    expect(openEntry().disabled).toBe(true); expect(blockedReason()).toContain('意图须为「计划创建」')
+    edit('sp-yida-intent', 'create'); await flush()
+    expect(openEntry().disabled).toBe(true); expect(blockedReason()).toContain('尚未运行本地预演')
+    const first = rows()[0]
+    edit('sp-yida-rows', '['); await preview()
+    expect(q('sp-yida-error').textContent).not.toBe(''); expect(blockedReason()).toContain('本地预演没有通过')
+    edit('sp-yida-rows', JSON.stringify([first, { ...first, projectNo: undefined }])); await preview()
+    expect(q('sp-yida-summary').textContent).toContain('无效 1'); expect(openEntry().disabled).toBe(true)
+    expect(blockedReason()).toContain('有 1 行无效')
+    edit('sp-yida-rows', JSON.stringify([first, first])); await preview()
+    expect(q('sp-yida-summary').textContent).toContain('本地重复键 2'); expect(openEntry().disabled).toBe(true)
+    expect(blockedReason()).toContain('有 2 行本地业务键重复'); expect(blockedReason()).not.toContain('其它原因')
+    edit('sp-yida-rows', JSON.stringify([{ ...first, quantity: 5 }])); await setAllocation('equal_integer'); await preview()
+    expect(q('sp-yida-allocation-issues').textContent).toContain('QUANTITY_NOT_DIVISIBLE'); expect(openEntry().disabled).toBe(true)
+    expect(blockedReason()).toContain('项目数量分配有拒因')
+    await protocolExample(); await preview()
+    expect(openEntry().disabled).toBe(false); expect(root?.querySelector('[data-testid="sp-yida-initialization-blocked"]')).toBeNull()
+    expectNoIo()
+  })
+
+  it('labels the v1 samples as not supporting local initialization', () => {
+    expect(q('sp-yida-example-v1-note').textContent).toContain('v1 不支持本地初始化')
+    expect(q('sp-yida-example-v1-note').parentElement).toBe(q('sp-yida-example-primary').parentElement)
+  })
+
+  // v3 parity: one synthetic template and one synthetic row set, three computations.
+  const V3_TARGET = { appType: 'synthetic_parity_app', formUuid: 'synthetic_parity_form' }
+  const V3_PROJECTS = ['SYN-PROJECT-01', 'SYN-PROJECT-02']
+  function v3Template(): { text: string; rowsText: string; rows: Array<Record<string, unknown>> } {
+    const example = createYidaTransformExample()
+    const { target: _target, ...rules } = example.config
+    return { text: exportYidaRuleTemplate({ rules, allocation: example.allocation }), rowsText: example.text, rows: example.rows }
+  }
+  async function previewV3(text: string, rowsText: string, projects: string[] | null): Promise<void> {
+    await importRules(text)
+    edit('sp-yida-app-type', V3_TARGET.appType); edit('sp-yida-form-uuid', V3_TARGET.formUuid); edit('sp-yida-rows', rowsText)
+    if (projects) edit('sp-yida-allocation-projects', projects.join('\n'))
+    else edit('sp-yida-allocation-mode', 'original')
+    await flush(); await preview()
+  }
+
+  it('v3 template import -> panel preview -> host recompute give identical rules, keys, payloads and DTOs without I/O', async () => {
+    const { text, rowsText } = v3Template()
+    await importRules(text)
+    expect(q<HTMLSelectElement>('sp-yida-preview-mode').value).toBe('transforms')
+    // The editor holds the imported rules exactly: exporting them again is byte-identical.
+    expect(await exportRules()).toBe(text)
+    const imported = parseYidaRuleTemplate(text)
+    for (const projects of [V3_PROJECTS, null]) {
+      await previewV3(text, rowsText, projects)
+      const allocation = projects ? { ...imported.allocation, projects } : { mode: 'original' as const }
+      const host = compileYidaLocalDraft({ config: { ...imported.rules, target: V3_TARGET }, rowsText, allocation })
+      expect(q('sp-yida-summary').textContent).toContain(`共 ${host.plan.rows.length} 行；计划创建 ${host.plan.rows.length}`)
+      expect(payloads()).toEqual(host.plan.rows.map((row) => row.payload))
+      expect(protocolData()).toEqual(host.plan.rows.map((row) => row.protocolPreview?.data))
+      host.plan.rows.forEach((row) => expect(q(`sp-yida-result-row-${row.index}`).textContent).toContain(`本地业务键：${row.localBusinessKey}`))
+    }
+    expect(q<HTMLButtonElement>('sp-yida-initialization-open').disabled).toBe(true)
+    expect(q('sp-yida-initialization-blocked').textContent).toContain('本地初始化仍只接受 v2 合同')
+    expectNoIo()
+  })
+
+  it('v3 issues render from the shared core and the host refuses to compile them, without I/O', async () => {
+    const { text, rows } = v3Template()
+    const dirty = rows.map((row) => ({ ...row }))
+    dirty[0].ext_blankWidth = null
+    dirty[1].material = ''
+    const rowsText = JSON.stringify(dirty)
+    await previewV3(text, rowsText, null)
+    expect(q('sp-yida-row-issue-0-0').textContent).toBe('FIELD_PART_MISSING（拼接有部分为空，规则为拒绝）；拼接 → blankSize（期望文本）')
+    expect(q('sp-yida-row-issue-1-0').textContent).toBe('KEY_MISSING（业务键缺失）；material → materialGrade（期望文本）')
+    const imported = parseYidaRuleTemplate(text)
+    expect(() => compileYidaLocalDraft({ config: { ...imported.rules, target: V3_TARGET }, rowsText, allocation: { mode: 'original' } })).toThrow('YIDA_DRAFT_PLAN')
+    expectNoIo()
+  })
+
+  it('v3 example loads with direct-row key checkboxes only and keeps the v1/v2 editors unchanged', async () => {
+    edit('sp-yida-preview-mode', 'transforms'); await flush()
+    q<HTMLButtonElement>('sp-yida-transform-example').click(); await flush()
+    const example = createYidaTransformExample()
+    example.config.fieldMap.forEach((entry, index) => {
+      expect(q<HTMLSelectElement>(`sp-yida-map-transform-${index}`).value).toBe(entry.transform)
+      expect(q<HTMLInputElement>(`sp-yida-map-key-${index}`).checked).toBe(entry.transform === 'direct' && example.config.businessKey.includes(entry.target))
+    })
+    await preview()
+    expect(q('sp-yida-summary').textContent).toContain('共 2 行；计划创建 2')
+    await protocolExample()
+    expect(root?.querySelector('[data-testid^="sp-yida-map-transform-"]')).toBeNull()
     expectNoIo()
   })
 })

@@ -22,10 +22,21 @@ vi.mock('../../src/multitable/webhook-delivery-authority', async (importOriginal
 
 import { ApiTokenService } from '../../src/multitable/api-token-service'
 import { WebhookService } from '../../src/multitable/webhook-service'
+import type { SsrfLookupFn } from '../../src/multitable/webhook-ssrf-guard'
 import type { ApiTokenScope } from '../../src/multitable/api-tokens'
 import type { WebhookEventType } from '../../src/multitable/webhooks'
 import type { Kysely } from 'kysely'
 import type { Database } from '../../src/db/types'
+
+/**
+ * F-3 SSRF gate (`webhook-service.ts` -> `checkWebhookTargetUrl`): delivery now resolves the target and
+ * refuses anything internal, and an UNRESOLVABLE name is refused fail-closed. The sink names below are
+ * reserved TLDs that never resolve, so the specs inject this deterministic resolver through the service's
+ * third constructor argument: a RESOLVER seam only (the guard still judges the address it returns), which
+ * keeps these specs off real DNS instead of weakening the gate. TEST-NET-3 (RFC 5737) is public as far as
+ * the guard is concerned and is not routable.
+ */
+const publicLookup: SsrfLookupFn = async () => [{ address: '203.0.113.10', family: 4 }]
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Mock DB builder
@@ -624,7 +635,7 @@ describe('WebhookService', () => {
     executeQueue = []
     executeTakeFirstQueue = []
     db = createMockDb()
-    svc = new WebhookService(db, okFetch as unknown as typeof fetch)
+    svc = new WebhookService(db, okFetch as unknown as typeof fetch, publicLookup)
   })
 
   // ── CRUD ──────────────────────────────────────────────────────────
@@ -852,7 +863,7 @@ describe('WebhookService', () => {
     const failFetch = vi.fn().mockResolvedValue({
       ok: false, status: 500, text: async () => 'Internal Server Error',
     })
-    const failSvc = new WebhookService(db, failFetch as unknown as typeof fetch)
+    const failSvc = new WebhookService(db, failFetch as unknown as typeof fetch, publicLookup)
 
     const wh = await failSvc.createWebhook('u1', {
       sheetId: 'sheet1', name: 'Fail', url: 'https://example.com/hook', events: ['record.created'],
@@ -885,7 +896,7 @@ describe('WebhookService', () => {
     const failFetch = vi.fn().mockResolvedValue({
       ok: false, status: 500, text: async () => 'error',
     })
-    const failSvc = new WebhookService(db, failFetch as unknown as typeof fetch)
+    const failSvc = new WebhookService(db, failFetch as unknown as typeof fetch, publicLookup)
 
     const wh = await failSvc.createWebhook('u1', {
       sheetId: 'sheet1', name: 'Will disable', url: 'https://example.com/hook', events: ['record.created'],
@@ -925,7 +936,7 @@ describe('WebhookService', () => {
       }
       return { ok: true, status: 200, text: async () => 'ok' }
     })
-    const mixSvc = new WebhookService(db, mixFetch as unknown as typeof fetch)
+    const mixSvc = new WebhookService(db, mixFetch as unknown as typeof fetch, publicLookup)
 
     const wh = await mixSvc.createWebhook('u1', {
       sheetId: 'sheet1', name: 'Mix', url: 'https://example.com/hook', events: ['record.created'],
@@ -997,7 +1008,7 @@ describe('WebhookService', () => {
       .mockResolvedValueOnce({ ok: false, status: 502, text: async () => 'bad' })
       .mockResolvedValue({ ok: true, status: 200, text: async () => 'ok' })
 
-    const retrySvc = new WebhookService(db, failOnceFetch as unknown as typeof fetch)
+    const retrySvc = new WebhookService(db, failOnceFetch as unknown as typeof fetch, publicLookup)
     const wh = await retrySvc.createWebhook('u1', {
       sheetId: 'sheet1', name: 'Retry', url: 'https://example.com/hook', events: ['record.created'],
     })

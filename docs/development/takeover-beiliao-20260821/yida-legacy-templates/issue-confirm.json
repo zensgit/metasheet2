@@ -1,0 +1,44 @@
+{
+  "formatVersion": 1,
+  "kind": "stock-preparation-yida-rule-template",
+  "status": "local-unverified",
+  "rules": {
+    "version": 2,
+    "kind": "yida-form-protocol-static",
+    "intent": "create",
+    "businessKey": [
+      "idempotencyKey",
+      "projectNo"
+    ],
+    "emptyKeyFields": [],
+    "fieldMap": [
+      {
+        "source": "idempotencyKey",
+        "target": "sourceLineId",
+        "type": "string",
+        "required": true
+      },
+      {
+        "source": "projectNo",
+        "target": "project",
+        "type": "string",
+        "required": true
+      }
+    ],
+    "fieldCatalog": [
+      {
+        "id": "sourceLineId",
+        "control": "text",
+        "required": true
+      },
+      {
+        "id": "project",
+        "control": "text",
+        "required": true
+      }
+    ]
+  },
+  "allocation": {
+    "mode": "original"
+  }
+}

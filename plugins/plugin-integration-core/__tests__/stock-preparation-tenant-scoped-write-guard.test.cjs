@@ -381,6 +381,13 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   // request projectId), not inline, so neither is in the inline-staging set below.
   'stockPreparationProjectPilotEnable',
   'stockPreparationProjectPilotGet',
+  // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; register R-68). The switch READ answers the caller's
+  // OWN tenant's project sheet switch and its last pull's reminder (record handles), and the SET is a WRITE — one field
+  // property of that sheet's key column, through the host's provisioning port — keyed by the tenant this scope proves:
+  // a header-fillable tenant here would read or flip another tenant's project switch. Both derive the staging project
+  // the provisioning port is addressed to INLINE, from the scope with no request projectId (the inline set below).
+  'stockPreparationProjectManualRowsGet',
+  'stockPreparationProjectManualRowsSet',
   'stockPreparationProjectOverviewRefresh',
   'stockPreparationProjectOverviewEnsure',
   // S5b (R-39) 「成员与权限」. Adding project sheets to a custom role is a WRITE (a G1 grant per sheet) and
@@ -477,6 +484,11 @@ const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
   // tenant's staging project. (The list route derives none: it reads registry rows by tenant only.)
   'stockPreparationProjectTargetCreate',
   'stockPreparationProjectTargetGet',
+  // 人工补充行 B4 (R-68): the switch read and set address the host's provisioning port (the key column's field read and
+  // its one-key patch) in the staging project derived from the scope — a request projectId here would let a caller
+  // read or flip a switch in another tenant's staging project.
+  'stockPreparationProjectManualRowsGet',
+  'stockPreparationProjectManualRowsSet',
   // S5b (R-39): the project-sheet add derives the staging project the G1 grant names (the plugin-scope
   // wrapper then requires the sheet to be the one derived for it) — from the scope, never the request.
   'stockPreparationMembersCustomRoleProjectTargets',

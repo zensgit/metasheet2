@@ -13,7 +13,7 @@
       {{ t.groupsReorderOff }}
     </p>
     <p v-if="hiddenCount > 0 && !truncated" class="tasks-group-board__message" data-testid="tasks-groups-hidden-by-filter" role="status">
-      {{ fmt.groupsHiddenByFilter(hiddenCount) }}
+      {{ rowsSearched === true ? fmt.groupsHiddenBySearch(hiddenCount) : fmt.groupsHiddenByFilter(hiddenCount) }}
     </p>
     <div class="tasks-group-board__toolbar">
       <button type="button" data-testid="tasks-groups-refresh" :disabled="pending" @click="onRefresh">{{ t.groupsRefresh }}</button>
@@ -337,6 +337,9 @@ const props = defineProps<{
   /** G2-core: the host filtered the rows by status, so a placement whose task is not a row is a
    *  hidden entry of the server's index space (design task-g2-core-design-20261011.md §4.1). */
   rowsFiltered?: boolean
+  /** The rows are also narrowed by the list page's title search, so the line about hidden entries
+   *  names the search rather than the status filter. */
+  rowsSearched?: boolean
   /** Group writes and moves are offered. */
   canManage: boolean
   /** Shared with the host through `v-model:pending`. */

@@ -24,6 +24,7 @@
  */
 import { randomUUID } from 'crypto'
 import { canReadApprovalInstance, isPlmApprovalId } from './approval-instance-readability'
+import { visibleUserPredicate } from '../admin/user-visibility'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { transaction as runInTransaction } from '../db/pg'
 
@@ -566,6 +567,7 @@ export async function listMentionCandidates(
        FROM users u
        JOIN candidate_ids c ON c.user_id = u.id
       WHERE u.is_active = TRUE
+        AND ${visibleUserPredicate('u')}
         AND ($2 = '' OR u.name ILIKE $3 OR u.email ILIKE $3)
       ORDER BY u.name ASC
       LIMIT $4`,

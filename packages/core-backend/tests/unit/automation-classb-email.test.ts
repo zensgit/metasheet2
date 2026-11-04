@@ -153,7 +153,11 @@ describe('flag ON — two-phase intent/outcome', () => {
     expect(only(h.intent).last_error).toBe('email_send_failed')
 
     const retry = await new AutomationExecutor(h.deps).execute(ruleWith(EMAIL), TRIGGER, undefined, ROOT)
-    expect(retry.steps[0]?.alreadyApplied).toBe(true) // skip_unknown → alreadyApplied
+    // skip_unknown → a FAILED step naming outcome_unknown (never an alreadyApplied success): the ambiguity is
+    // unresolved until reconciliation, so dependent steps must not run as if the email were known sent.
+    expect(retry.steps[0]?.status).toBe('failed')
+    expect(retry.steps[0]?.alreadyApplied).toBeUndefined()
+    expect(retry.steps[0]?.error).toMatch(/outcome_unknown/)
     expect(h.send).toHaveBeenCalledTimes(1) // TERMINAL: never a second send
   })
 

@@ -26,6 +26,7 @@
  */
 
 import type { Request } from 'express'
+import { visibleUserPredicate } from '../admin/user-visibility'
 
 import {
   deriveCapabilities,
@@ -484,7 +485,8 @@ async function readSheetPermissionCandidatePage(
           ON sp.sheet_id = $1
          AND sp.subject_type = 'user'
          AND sp.subject_id = u.id
-        WHERE ($2 = '' OR u.id ILIKE $3 OR u.email ILIKE $3 OR COALESCE(u.name, '') ILIKE $3 OR COALESCE(u.username, '') ILIKE $3)
+        WHERE ${visibleUserPredicate('u')}
+          AND ($2 = '' OR u.id ILIKE $3 OR u.email ILIKE $3 OR COALESCE(u.name, '') ILIKE $3 OR COALESCE(u.username, '') ILIKE $3)
         GROUP BY u.id, u.name, u.email, u.username, u.is_active
       ),
       member_group_candidates AS (
