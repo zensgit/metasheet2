@@ -4858,6 +4858,27 @@ suite('DingTalk controlled login repair', () => {
         }
       })
 
+      it('N28: an optional scan in termination mode is still exchanged and checked', async () => {
+        const { f, r } = await revokedAndSwitched(),
+          b = await secondAdmin(f)
+        provider.exchange.mockClear()
+        provider.profile.mockResolvedValue({ openId: 'next-open-' + f.user, unionId: 'different-person' })
+        await expectReanchorRefused(
+          f,
+          r.id,
+          () => requestReanchor(f, r.id, b, f.admin, 'synthetic-optional-scan'),
+          'REPAIR_REANCHOR_PERSON_MISMATCH',
+        )
+        expect(provider.exchange).toHaveBeenCalledTimes(1)
+        provider.exchange.mockClear()
+        provider.profile.mockResolvedValue({ openId: 'next-open-' + f.user, unionId: 'new-union-' + f.user })
+        const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-optional-scan')
+        expect(provider.exchange).toHaveBeenCalledTimes(1)
+        expect(req.summary.reanchor).toMatchObject({ releaseMode: 'termination', scanRequired: false, scanned: true })
+        expect(JSON.parse(decryptStoredSecretValue(req.request)).scanOpenId).toBe('next-open-' + f.user)
+        expect(await successorOf(r.id)).toEqual([])
+      })
+
       it.each([
         ['another UnionID', 'other-dev-union'],
         ['no UnionID', null],
