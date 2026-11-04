@@ -208,6 +208,20 @@ jobs:
           node --test scripts/ops/dingtalk-interactive-card-stream-staging-uat-contract.test.mjs
           node --test scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
 
+      # Same promotion: the DingTalk closeout env contract and the OAuth-stability metrics-auth,
+      # metrics-only, metrics-only full-script and summary suites had their only home in the
+      # k3wise-offline-poc job, whose check cannot block a merge. Invoked here as well in the
+      # required test lane so they actually gate; the originals stay for job self-containment.
+      # The step is pinned (presence, position, command) by plugin-tests-parallel-contract.test.mjs.
+      - name: DingTalk closeout env and OAuth-stability contracts (required lane)
+        run: |
+          node --test \
+            scripts/ops/dingtalk-closeout-env-contract.test.mjs \
+            scripts/ops/dingtalk-oauth-stability-metrics-auth-contract.test.mjs \
+            scripts/ops/dingtalk-oauth-stability-metrics-only-contract.test.mjs \
+            scripts/ops/dingtalk-oauth-stability-metrics-only-fullscript.test.mjs \
+            scripts/ops/github-dingtalk-oauth-stability-summary.test.mjs
+
       # REVIEW NIT-2 (exact-head round): these two suites already ran in `k3wise-offline-poc`, but
       # that job's check is "K3 WISE offline PoC", which is NOT one of main's required contexts --
       # so a red there did not block a merge. The suites carry the ONLY mechanical guard on the
@@ -281,6 +295,17 @@ jobs:
       # golden silently stops running. Invoked here in the required test lane so it actually gates.
       - name: Directory activation source-lock CI-wiring contract (required lane)
         run: node --test scripts/ops/directory-activation-source-lock-ci-wiring.test.mjs
+
+      # Same promotion: the grant-table, deprovision-writer and access-graph-mutex CI-wiring
+      # contracts had their only home in the k3wise-offline-poc job, whose check cannot block a
+      # merge. Invoked here as well in the required test lane so they actually gate; the originals
+      # stay. The step is pinned (presence, position, command) by plugin-tests-parallel-contract.test.mjs.
+      - name: Directory grant-table, deprovision-writer and access-graph-mutex CI-wiring contracts (required lane)
+        run: |
+          node --test \
+            scripts/ops/directory-grant-table-ci-wiring.test.mjs \
+            scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs \
+            scripts/ops/directory-access-graph-mutex-ci-wiring.test.mjs
 
       # Integration Guard required-wiring contract (governance slice, standalone from #4603/#4604/
       # #4610 by owner instruction; hardened 2026-07-25 after a P1x2/P2 review — see the workflow's own
