@@ -387,6 +387,7 @@ describe('admin-users routes', () => {
       id: 'user-1',
       email: 'alpha@example.com',
       mobile: '13800138000',
+      roleIds: [],
       dingtalkLoginEnabled: true,
       dingtalkGrantUpdatedAt: '2026-03-13T00:05:00.000Z',
       dingtalkGrantUpdatedBy: 'Admin One',
@@ -516,6 +517,42 @@ describe('admin-users routes', () => {
     expect((response.body as Record<string, any>).data.items).toEqual([])
     expect((response.body as Record<string, any>).data.pinUserId).toBe('missing-user')
     expect((response.body as Record<string, any>).data.pinUserIncluded).toBe(false)
+  })
+
+  it('filters and pages the user list on the server without an unbounded load', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [{ c: 11 }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('get', '/api/admin/users', {
+      query: {
+        page: '2',
+        pageSize: '20',
+        role: 'auditor',
+        accountStatus: 'active',
+        listFilter: 'platform-admin',
+        sort: 'name',
+        dir: 'asc',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    const countSql = String(pgMocks.query.mock.calls[0]?.[0])
+    const listSql = String(pgMocks.query.mock.calls[1]?.[0])
+    expect(countSql).toContain('role = $1')
+    expect(countSql).toContain('is_active IS TRUE')
+    expect(countSql).toContain("role = 'admin'")
+    expect(listSql).toContain('ORDER BY name ASC NULLS LAST, id ASC')
+    expect(listSql).toContain('LIMIT $2 OFFSET $3')
+    expect(listSql).not.toContain('LIMIT 10000')
+    expect(String(pgMocks.query.mock.calls[1]?.[1])).not.toContain('10000')
+    expect(pgMocks.query.mock.calls[0]?.[1]).toEqual(['auditor'])
+    expect(pgMocks.query.mock.calls[1]?.[1]).toEqual(['auditor', 20, 20])
+    expect((response.body as Record<string, any>).data).toMatchObject({ page: 2, pageSize: 20, total: 11 })
   })
 
   it('rejects non-admin requests', async () => {

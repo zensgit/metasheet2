@@ -542,7 +542,7 @@
           <div>
             <strong>批量操作</strong>
             <p class="user-admin__hint">
-              已选择 {{ selectedUserIds.length }} / {{ displayedUsers.length }} 个当前筛选结果。
+              已选择 {{ selectedUserIds.length }} / {{ userTotal }} 个当前筛选结果。
             </p>
             <p v-if="screeningUsersMissingOpenId.length > 0" class="user-admin__hint">
               当前筛选结果中有 {{ screeningUsersMissingOpenId.length }} 个缺 OpenID 用户，可直接导出治理清单。
@@ -603,7 +603,7 @@
             <button class="user-admin__button" type="button" :disabled="bulkBusy || selectedUserIds.length === 0 || !bulkDepartment" @click="openBulkConfirm('department')">应用部门</button>
             <button class="user-admin__button" type="button" :disabled="bulkBusy || selectedUserIds.length === 0" @click="openBulkConfirm('enable')">批量启用</button>
             <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="bulkBusy || selectedUserIds.length === 0" @click="openBulkConfirm('disable')">批量停用</button>
-            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="displayedUsers.length === 0" @click="exportUsersForUpdate()">导出以便修改</button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="displayedUsers.length === 0 && userTotal === 0" @click="void exportUsersForUpdate()">导出以便修改</button>
             <button class="user-admin__button user-admin__button--secondary" type="button" @click="reimportOpen = true">导入更新</button>
           </div>
           <div v-if="bulkConfirm" class="user-admin__confirm" role="dialog" aria-label="确认批量操作" data-testid="bulk-confirm">
@@ -723,10 +723,10 @@
           </p>
         </article>
         </div>
-        <div v-if="displayedUsers.length > pageSize" class="user-admin__pager">
-          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="page <= 1" @click="page -= 1">上一页</button>
-          <span>第 {{ page }} / {{ pageCount }} 页 · 共 {{ displayedUsers.length }} 人</span>
-          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="page >= pageCount" @click="page += 1">下一页</button>
+        <div v-if="userTotal > pageSize" class="user-admin__pager">
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="page <= 1 || loading" @click="page -= 1">上一页</button>
+          <span>第 {{ page }} / {{ pageCount }} 页 · 共 {{ userTotal }} 人</span>
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="page >= pageCount || loading" @click="page += 1">下一页</button>
         </div>
       </aside>
 
@@ -1273,9 +1273,9 @@
 
 <script setup lang="ts">
 import {
-  ADMIN_USER_BATCH_LIMIT,
   buildImportTemplateCsv,
   buildUpdateExportCsv,
+  describeImportLimitExceeded,
   parseCsv,
   parsePastedEmails,
   previewUpdateRows,
@@ -1320,6 +1320,7 @@ type ManagedUser = {
   position?: string | null
   hireDate?: string | null
   role: string
+  roleIds?: string[]
   is_active: boolean
   is_admin: boolean
   last_login_at: string | null
@@ -1664,8 +1665,22 @@ const sortKey = ref<'' | 'name' | 'role' | 'status' | 'lastLogin'>('')
 const sortDir = ref<'asc' | 'desc'>('asc')
 const page = ref(1)
 const pageSize = 20
+const userListFetchCap = 100
+const userTotal = ref(0)
+const serverRoleOptions = ref<string[]>([])
+const serverSummary = ref<{
+  total: number
+  accountEnabled: number
+  dingtalkEnabled: number
+  directoryLinked: number
+  dingtalkOpenIdMissing: number
+  dingtalkOpenIdGoverned: number
+  dingtalkOpenIdPending: number
+} | null>(null)
 const users = ref<ManagedUser[]>([])
 const selectedUserIds = ref<string[]>([])
+const selectedUserRecords = new Map<string, ManagedUser>()
+let userListGeneration = 0
 const userListFilter = ref<UserListFilter>(readInitialUserNavigation().filter)
 const roleCatalog = ref<RoleCatalogItem[]>([])
 const accessPresets = ref<AccessPreset[]>([])
@@ -1807,15 +1822,18 @@ const createdAttendanceOnboardingSummary = computed(() => {
     ? `${target.name || target.id} · ${details.join(' · ')}`
     : `${target.name || target.id}`
 })
-const governanceSummary = computed(() => ({
-  total: users.value.length,
-  accountEnabled: users.value.filter((user) => user.is_active).length,
-  dingtalkEnabled: users.value.filter((user) => user.dingtalkLoginEnabled !== false).length,
-  directoryLinked: users.value.filter((user) => user.directoryLinked === true).length,
-  dingtalkOpenIdMissing: users.value.filter((user) => user.dingtalkOpenIdMissing === true).length,
-  dingtalkOpenIdGoverned: users.value.filter((user) => user.dingtalkOpenIdMissing === true && user.dingtalkLoginEnabled === false).length,
-  dingtalkOpenIdPending: users.value.filter((user) => user.dingtalkOpenIdMissing === true && user.dingtalkLoginEnabled !== false).length,
-}))
+const governanceSummary = computed(() => {
+  if (serverSummary.value) return serverSummary.value
+  return {
+    total: users.value.length,
+    accountEnabled: users.value.filter((user) => user.is_active).length,
+    dingtalkEnabled: users.value.filter((user) => user.dingtalkLoginEnabled !== false).length,
+    directoryLinked: users.value.filter((user) => user.directoryLinked === true).length,
+    dingtalkOpenIdMissing: users.value.filter((user) => user.dingtalkOpenIdMissing === true).length,
+    dingtalkOpenIdGoverned: users.value.filter((user) => user.dingtalkOpenIdMissing === true && user.dingtalkLoginEnabled === false).length,
+    dingtalkOpenIdPending: users.value.filter((user) => user.dingtalkOpenIdMissing === true && user.dingtalkLoginEnabled !== false).length,
+  }
+})
 const governanceWorkbenchCards = computed(() => {
   const pendingToday = users.value.filter((user) => (
     user.dingtalkOpenIdMissing === true
@@ -1866,6 +1884,9 @@ const visibleUsers = computed(() => {
   })
 })
 const roleFilterOptions = computed(() => {
+  if (serverRoleOptions.value.length > 0) {
+    return [...serverRoleOptions.value].sort((left, right) => left.localeCompare(right, 'zh'))
+  }
   const roles = new Set<string>()
   for (const user of users.value) {
     if (user.role) roles.add(user.role)
@@ -1887,16 +1908,17 @@ const displayedUsers = computed(() => {
   }
   return [...rows].sort((left, right) => valueOf(left).localeCompare(valueOf(right), 'zh') * direction)
 })
-const pageCount = computed(() => Math.max(1, Math.ceil(displayedUsers.value.length / pageSize)))
-const pagedUsers = computed(() => {
-  const current = Math.min(page.value, pageCount.value)
-  const start = (current - 1) * pageSize
-  return displayedUsers.value.slice(start, start + pageSize)
-})
+const pageCount = computed(() => Math.max(1, Math.ceil(userTotal.value / pageSize)))
+const pagedUsers = computed(() => displayedUsers.value)
 const pendingInviteCount = computed(() => inviteRecords.value.filter((record) => record.status === 'pending').length)
 const knownRoleIds = computed(() => new Set(roleCatalog.value.map((role) => role.id)))
 const pastedEmailList = computed(() => parsePastedEmails(pasteEmails.value))
-const selectedUsers = computed(() => users.value.filter((user) => selectedUserIdSet.value.has(user.id)))
+const selectedUsers = computed(() => selectedUserIds.value.flatMap((userId) => {
+  const cached = selectedUserRecords.get(userId)
+  if (cached) return [cached]
+  const visible = users.value.find((user) => user.id === userId)
+  return visible ? [visible] : []
+}))
 const selectedUserLabels = computed(() => selectedUsers.value.map((user) => user.name || user.email || user.id).join('、'))
 const bulkConfirmTitle = computed(() => {
   if (bulkConfirm.value === 'role') return `确认把所选用户的角色改为 ${bulkRoleId.value}？`
@@ -2471,20 +2493,26 @@ function extractNamespaceFromPermission(permission: string): string | null {
 
 function reconcileSelectedUsers(): void {
   if (selectedUserIds.value.length === 0) return
-  const visibleUserIdSet = new Set(visibleUsers.value.map((user) => user.id))
-  selectedUserIds.value = selectedUserIds.value.filter((userId) => visibleUserIdSet.has(userId))
+  const loadedIds = new Set(users.value.map((user) => user.id))
+  const visibleIds = new Set(visibleUsers.value.map((user) => user.id))
+  selectedUserIds.value = selectedUserIds.value.filter((userId) => !loadedIds.has(userId) || visibleIds.has(userId))
 }
 
 function clearSelectedUsers(): void {
   selectedUserIds.value = []
 }
 
-function selectVisibleUsers(): void {
-  selectedUserIds.value = displayedUsers.value.map((user) => user.id)
+async function selectVisibleUsers(): Promise<void> {
+  const pageAlreadyComplete = userTotal.value > 0 && users.value.length >= userTotal.value
+  const collected = pageAlreadyComplete ? displayedUsers.value : await collectFilteredUsers()
+  rememberUsers(collected)
+  selectedUserIds.value = collected.map((user) => user.id)
 }
 
 function toggleUserSelection(userId: string, checked: boolean): void {
   if (checked) {
+    const user = users.value.find((item) => item.id === userId)
+    if (user) selectedUserRecords.set(user.id, user)
     if (!selectedUserIds.value.includes(userId)) {
       selectedUserIds.value = [...selectedUserIds.value, userId]
     }
@@ -2810,38 +2838,153 @@ async function loadAttendanceOrgOptions(): Promise<void> {
   }
 }
 
+function normalizeManagedUser(item: ManagedUser): ManagedUser {
+  return {
+    ...item,
+    roleIds: Array.isArray(item.roleIds) ? item.roleIds.filter((roleId) => roleId.trim().length > 0) : [],
+    platformAdminEnabled: item.platformAdminEnabled ?? (item.role === 'admin' || item.is_admin),
+    attendanceAdminEnabled: item.attendanceAdminEnabled ?? false,
+    dingtalkLoginEnabled: item.dingtalkLoginEnabled ?? false,
+    dingtalkGrantUpdatedAt: item.dingtalkGrantUpdatedAt ?? null,
+    dingtalkGrantUpdatedBy: item.dingtalkGrantUpdatedBy ?? null,
+    directoryLinked: item.directoryLinked ?? false,
+    dingtalkIdentityExists: item.dingtalkIdentityExists ?? false,
+    dingtalkHasUnionId: item.dingtalkHasUnionId ?? false,
+    dingtalkHasOpenId: item.dingtalkHasOpenId ?? false,
+    dingtalkOpenIdMissing: item.dingtalkOpenIdMissing ?? false,
+    dingtalkCorpId: item.dingtalkCorpId ?? null,
+    lastDirectorySyncAt: item.lastDirectorySyncAt ?? null,
+    businessRoleCount: item.businessRoleCount ?? 0,
+  }
+}
+
+function rememberUsers(rows: ManagedUser[]): void {
+  for (const user of rows) selectedUserRecords.set(user.id, user)
+}
+
+function buildUserListParams(pageNumber: number, size: number, withMeta: boolean): URLSearchParams {
+  const params = new URLSearchParams()
+  params.set('q', search.value)
+  params.set('page', String(pageNumber))
+  params.set('pageSize', String(size))
+  if (withMeta) params.set('meta', '1')
+  if (roleFilter.value) params.set('role', roleFilter.value)
+  if (accountStatusFilter.value) params.set('accountStatus', accountStatusFilter.value)
+  if (userListFilter.value !== 'all') params.set('listFilter', userListFilter.value)
+  if (sortKey.value) {
+    params.set('sort', sortKey.value)
+    params.set('dir', sortDir.value)
+  }
+  const pinUserId = userNavigation.value.userId.trim()
+  if (pinUserId) params.set('userId', pinUserId)
+  return params
+}
+
+function readUserListSummary(value: unknown): typeof serverSummary.value {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const read = (key: string) => (typeof record[key] === 'number' ? record[key] as number : null)
+  const total = read('total')
+  const accountEnabled = read('accountEnabled')
+  const dingtalkEnabled = read('dingtalkEnabled')
+  const directoryLinked = read('directoryLinked')
+  const dingtalkOpenIdMissing = read('dingtalkOpenIdMissing')
+  const dingtalkOpenIdGoverned = read('dingtalkOpenIdGoverned')
+  const dingtalkOpenIdPending = read('dingtalkOpenIdPending')
+  if (
+    total === null
+    || accountEnabled === null
+    || dingtalkEnabled === null
+    || directoryLinked === null
+    || dingtalkOpenIdMissing === null
+    || dingtalkOpenIdGoverned === null
+    || dingtalkOpenIdPending === null
+  ) return null
+  return {
+    total,
+    accountEnabled,
+    dingtalkEnabled,
+    directoryLinked,
+    dingtalkOpenIdMissing,
+    dingtalkOpenIdGoverned,
+    dingtalkOpenIdPending,
+  }
+}
+
+async function fetchUserListPage(pageNumber: number, size: number, withMeta: boolean): Promise<{
+  items: ManagedUser[]
+  total: number
+  roleOptions: string[] | null
+  summary: typeof serverSummary.value
+}> {
+  const params = buildUserListParams(pageNumber, size, withMeta)
+  const response = await apiFetch(`/api/admin/users?${params.toString()}`)
+  const payload = await readJson(response)
+  if (!response.ok || payload.ok !== true) {
+    throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载用户失败'))
+  }
+  const data = payload.data as {
+    items?: ManagedUser[]
+    total?: number
+    roleOptions?: unknown
+    summary?: unknown
+  } | undefined
+  const items = Array.isArray(data?.items) ? data.items.map((item) => normalizeManagedUser(item)) : []
+  return {
+    items,
+    total: typeof data?.total === 'number' ? data.total : items.length,
+    roleOptions: Array.isArray(data?.roleOptions)
+      ? data.roleOptions.filter((role): role is string => typeof role === 'string' && role.trim().length > 0)
+      : null,
+    summary: readUserListSummary(data?.summary),
+  }
+}
+
+async function collectFilteredUsers(): Promise<ManagedUser[]> {
+  const generation = userListGeneration
+  const collected: ManagedUser[] = []
+  const seen = new Set<string>()
+  let total = Number.POSITIVE_INFINITY
+  for (let pageNumber = 1; pageNumber <= 1000 && collected.length < total; pageNumber += 1) {
+    const result = await fetchUserListPage(pageNumber, userListFetchCap, false)
+    if (generation !== userListGeneration) return []
+    total = result.total
+    const before = collected.length
+    for (const item of result.items) {
+      if (seen.has(item.id)) continue
+      seen.add(item.id)
+      collected.push(item)
+    }
+    if (result.items.length === 0 || collected.length === before) break
+  }
+  return collected
+}
+
 async function loadUsers(): Promise<void> {
+  const generation = ++userListGeneration
   loading.value = true
   try {
-    const params = new URLSearchParams()
-    params.set('q', search.value)
-    const pinUserId = userNavigation.value.userId.trim()
-    if (pinUserId) params.set('userId', pinUserId)
+    const params = buildUserListParams(page.value, pageSize, true)
     const response = await apiFetch(`/api/admin/users?${params.toString()}`)
     const payload = await readJson(response)
+    if (generation !== userListGeneration) return
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载用户失败'))
     }
-
-    const data = payload.data as { items?: ManagedUser[] } | undefined
-    users.value = Array.isArray(data?.items)
-      ? data.items.map((item) => ({
-          ...item,
-          platformAdminEnabled: item.platformAdminEnabled ?? (item.role === 'admin' || item.is_admin),
-          attendanceAdminEnabled: item.attendanceAdminEnabled ?? false,
-          dingtalkLoginEnabled: item.dingtalkLoginEnabled ?? false,
-          dingtalkGrantUpdatedAt: item.dingtalkGrantUpdatedAt ?? null,
-          dingtalkGrantUpdatedBy: item.dingtalkGrantUpdatedBy ?? null,
-          directoryLinked: item.directoryLinked ?? false,
-          dingtalkIdentityExists: item.dingtalkIdentityExists ?? false,
-          dingtalkHasUnionId: item.dingtalkHasUnionId ?? false,
-          dingtalkHasOpenId: item.dingtalkHasOpenId ?? false,
-          dingtalkOpenIdMissing: item.dingtalkOpenIdMissing ?? false,
-          dingtalkCorpId: item.dingtalkCorpId ?? null,
-          lastDirectorySyncAt: item.lastDirectorySyncAt ?? null,
-          businessRoleCount: item.businessRoleCount ?? 0,
-        }))
+    const data = payload.data as {
+      items?: ManagedUser[]
+      total?: number
+      roleOptions?: unknown
+      summary?: unknown
+    } | undefined
+    const items = Array.isArray(data?.items) ? data.items.map((item) => normalizeManagedUser(item)) : []
+    users.value = items
+    userTotal.value = typeof data?.total === 'number' ? data.total : items.length
+    serverRoleOptions.value = Array.isArray(data?.roleOptions)
+      ? data.roleOptions.filter((role): role is string => typeof role === 'string' && role.trim().length > 0)
       : []
+    serverSummary.value = readUserListSummary(data?.summary)
+    rememberUsers(items)
     reconcileSelectedUsers()
 
     if (!selectedUserId.value && users.value.length > 0) {
@@ -2862,9 +3005,10 @@ async function loadUsers(): Promise<void> {
       }
     }
   } catch (error) {
+    if (generation !== userListGeneration) return
     setStatus(error instanceof Error ? error.message : '加载用户失败', 'error')
   } finally {
-    loading.value = false
+    if (generation === userListGeneration) loading.value = false
   }
 }
 
@@ -3889,7 +4033,15 @@ async function rowsFromUpload(file: File): Promise<Array<Record<string, string>>
       return record
     })
   }
-  return parseCsv(await file.text())
+  const text = typeof file.text === 'function'
+    ? await file.text()
+    : await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result ?? ''))
+      reader.onerror = () => reject(reader.error ?? new Error('读取文件失败'))
+      reader.readAsText(file)
+    })
+  return parseCsv(text)
 }
 
 function downloadImportTemplate(kind: 'csv' | 'xlsx'): void {
@@ -3915,17 +4067,28 @@ async function onImportFile(event: Event): Promise<void> {
   const input = event.target
   if (!(input instanceof HTMLInputElement) || !input.files?.[0]) return
   const rows = await rowsFromUpload(input.files[0])
-  importPreview.value = validateImportRows(rows, knownRoleIds.value).slice(0, ADMIN_USER_BATCH_LIMIT)
+  const limitMessage = describeImportLimitExceeded(rows.length)
   batchReport.value = null
   input.value = ''
+  if (limitMessage) {
+    importPreview.value = []
+    setStatus(limitMessage, 'error')
+    return
+  }
+  importPreview.value = validateImportRows(rows, knownRoleIds.value)
 }
 
 async function submitBatchCreate(items: Array<Record<string, unknown>>): Promise<void> {
+  const limitMessage = describeImportLimitExceeded(items.length)
+  if (limitMessage) {
+    setStatus(limitMessage, 'error')
+    return
+  }
   bulkBusy.value = true
   try {
     const response = await apiFetch('/api/admin/users/batch/create', {
       method: 'POST',
-      body: JSON.stringify({ items: items.slice(0, ADMIN_USER_BATCH_LIMIT) }),
+      body: JSON.stringify({ items }),
     })
     batchReport.value = await readBatchPayload(response)
     await loadUsers()
@@ -3948,7 +4111,12 @@ async function submitImport(): Promise<void> {
 }
 
 async function submitPastedEmails(): Promise<void> {
-  const items = pastedEmailList.value.slice(0, ADMIN_USER_BATCH_LIMIT).map((email) => ({
+  const limitMessage = describeImportLimitExceeded(pastedEmailList.value.length)
+  if (limitMessage) {
+    setStatus(limitMessage, 'error')
+    return
+  }
+  const items = pastedEmailList.value.map((email) => ({
     email,
     roleId: pasteRoleId.value || undefined,
   }))
@@ -4019,8 +4187,8 @@ async function submitBulkConfirm(): Promise<void> {
   }
 }
 
-function exportUsersForUpdate(): void {
-  const source = selectedUsers.value.length > 0 ? selectedUsers.value : displayedUsers.value
+async function exportUsersForUpdate(): Promise<void> {
+  const source = selectedUserIds.value.length > 0 ? selectedUsers.value : await collectFilteredUsers()
   downloadText('user-update.csv', buildUpdateExportCsv(source), 'text/csv;charset=utf-8')
   setStatus(`已导出 ${source.length} 名用户，可修改后重新导入`)
 }
@@ -4029,10 +4197,16 @@ async function onReimportFile(event: Event): Promise<void> {
   const input = event.target
   if (!(input instanceof HTMLInputElement) || !input.files?.[0]) return
   const rows = await rowsFromUpload(input.files[0])
-  reimportPreview.value = previewUpdateRows(rows, users.value, knownRoleIds.value).slice(0, ADMIN_USER_BATCH_LIMIT)
+  const limitMessage = describeImportLimitExceeded(rows.length)
   reimportReady.value = false
   batchReport.value = null
   input.value = ''
+  if (limitMessage) {
+    reimportPreview.value = []
+    setStatus(limitMessage, 'error')
+    return
+  }
+  reimportPreview.value = previewUpdateRows(rows, users.value, knownRoleIds.value)
 }
 
 async function submitReimport(dryRun: boolean): Promise<void> {
@@ -4044,6 +4218,11 @@ async function submitReimport(dryRun: boolean): Promise<void> {
     department: row.department,
     isActive: row.isActive === 'true' ? true : row.isActive === 'false' ? false : undefined,
   }))
+  const limitMessage = describeImportLimitExceeded(items.length)
+  if (limitMessage) {
+    setStatus(limitMessage, 'error')
+    return
+  }
   bulkBusy.value = true
   try {
     const response = await apiFetch('/api/admin/users/batch/update', {
@@ -4199,8 +4378,23 @@ async function purgeRecycleUsers(): Promise<void> {
   }
 }
 
-watch([userListFilter, roleFilter, accountStatusFilter, search], () => {
-  page.value = 1
+watch(search, () => {
+  if (page.value !== 1) page.value = 1
+})
+
+watch([userListFilter, roleFilter, accountStatusFilter], () => {
+  selectedUserIds.value = []
+  if (page.value !== 1) page.value = 1
+  else void loadUsers()
+})
+
+watch([sortKey, sortDir], () => {
+  if (page.value !== 1) page.value = 1
+  else void loadUsers()
+})
+
+watch(page, () => {
+  void loadUsers()
 })
 
 watch(surface, (value) => {

@@ -213,4 +213,30 @@ describe('batch review regressions against migrated synthetic PostgreSQL', () =>
       else process.env.PRODUCT_MODE = previousMode
     }
   })
+
+  it('keeps multiple real roles and direct permissions when roleId is omitted, and rejects an unknown role', async () => {
+    const actorId = await seedUser(true)
+    const targetId = await seedUser()
+    await query("INSERT INTO roles(id, name) VALUES ('planner', 'Planner'), ('keeper', 'Keeper') ON CONFLICT DO NOTHING")
+    await query('INSERT INTO user_roles(user_id, role_id) VALUES ($1, $2), ($1, $3) ON CONFLICT DO NOTHING', [targetId, 'planner', 'keeper'])
+    await query("INSERT INTO user_permissions(user_id, permission_code) VALUES ($1, 'demo:read') ON CONFLICT DO NOTHING", [targetId])
+    const beforeRoles = (await query('SELECT role_id FROM user_roles WHERE user_id = $1 ORDER BY role_id', [targetId])).rows
+    const beforePermissions = (await query('SELECT permission_code FROM user_permissions WHERE user_id = $1 ORDER BY permission_code', [targetId])).rows
+    const beforeProfile = (await query('SELECT role FROM users WHERE id = $1', [targetId])).rows
+    expect(beforeRoles.map((row) => row.role_id)).toEqual(expect.arrayContaining(['planner', 'keeper', 'user']))
+
+    const unchanged = await update(actorId, [{ userId: targetId, name: 'Synthetic user' }])
+    expect(unchanged.status).toBe(200)
+    expect(unchanged.body.data.results[0].code).toBe('UNCHANGED')
+    expect((await query('SELECT role_id FROM user_roles WHERE user_id = $1 ORDER BY role_id', [targetId])).rows).toEqual(beforeRoles)
+    expect((await query('SELECT permission_code FROM user_permissions WHERE user_id = $1 ORDER BY permission_code', [targetId])).rows).toEqual(beforePermissions)
+    expect((await query('SELECT role FROM users WHERE id = $1', [targetId])).rows).toEqual(beforeProfile)
+
+    const unknown = await update(actorId, [{ userId: targetId, roleId: 'not-a-real-role' }])
+    expect(unknown.status).toBe(200)
+    expect(unknown.body.data.results[0].code).toBe('ROLE_NOT_FOUND')
+    expect((await query('SELECT role_id FROM user_roles WHERE user_id = $1 ORDER BY role_id', [targetId])).rows).toEqual(beforeRoles)
+    expect((await query('SELECT permission_code FROM user_permissions WHERE user_id = $1 ORDER BY permission_code', [targetId])).rows).toEqual(beforePermissions)
+    expect((await query("SELECT id FROM roles WHERE id = 'not-a-real-role'")).rows).toEqual([])
+  })
 })
