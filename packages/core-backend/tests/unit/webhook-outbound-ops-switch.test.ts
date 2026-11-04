@@ -16,6 +16,10 @@ import type { Kysely } from 'kysely'
 import type { Database } from '../../src/db/types'
 import type { WebhookDelivery } from '../../src/multitable/webhooks'
 
+// The subscription SSRF gate resolves the target before every attempt; a TEST-NET-3 answer (RFC 5737) keeps
+// `hooks.example.test` off real DNS. Nothing is dialled: fetchFn is injected.
+const PUBLIC_LOOKUP = async () => [{ address: '203.0.113.10', family: 4 }]
+
 const SWITCH_ENV = 'MULTITABLE_OUTBOUND_WEBHOOKS_DISABLED'
 const SIGNAL_PREFIX = 'outbound webhook ops switch: '
 
@@ -217,7 +221,7 @@ async function runSite(
   prime(state, site)
   const queuedBefore = { execute: state.executeQueue.length, takeFirst: state.takeFirstQueue.length }
   const fetchFn = okFetch()
-  const svc = new WebhookService(db, fetchFn as unknown as typeof fetch)
+  const svc = new WebhookService(db, fetchFn as unknown as typeof fetch, PUBLIC_LOOKUP)
   const delivery = pendingDelivery()
   const deliveryBefore = { ...delivery }
   let result: unknown
@@ -268,7 +272,7 @@ describe('outbound ops switch on', () => {
     const { db, state } = createRecordingDb()
     prime(state, 'deliverEvent')
     const fetchFn = okFetch()
-    const svc = new WebhookService(db, fetchFn as unknown as typeof fetch)
+    const svc = new WebhookService(db, fetchFn as unknown as typeof fetch, PUBLIC_LOOKUP)
     const result = await svc.deliverEvent('record.created', STORED_PAYLOAD, 'evt_ops_1')
     await flush()
     expect(result).toEqual([])
