@@ -118,8 +118,14 @@ export function tasksRouter(): Router | null {
       const status = req.query.status === undefined
         ? undefined
         : typeof req.query.status === 'string' ? req.query.status : ''
-      const items = await listTasks({ orgId: org, actorId: actorId(req), view, status, page })
-      const total = await countTasks({ orgId: org, actorId: actorId(req), view, status })
+      // Basic title search, read like `status`: a repeated or nested `q` is not a string and is
+      // passed on as '', which the service refuses like an empty or blank one (422 INVALID_QUERY).
+      // The order of refusals stays page, view, status, then query.
+      const q = req.query.q === undefined
+        ? undefined
+        : typeof req.query.q === 'string' ? req.query.q : ''
+      const items = await listTasks({ orgId: org, actorId: actorId(req), view, status, q, page })
+      const total = await countTasks({ orgId: org, actorId: actorId(req), view, status, q })
       res.json({ items, total })
     } catch (err) {
       const code = typeof err === 'object' && err && 'code' in err ? String((err as { code: string }).code) : ''
