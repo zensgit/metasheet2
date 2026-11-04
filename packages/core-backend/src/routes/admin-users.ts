@@ -496,7 +496,7 @@ const ADMIN_USER_LIST_SORTS: Record<string, string> = {
 
 function adminUserListOrder(sort: string, dir: string): string {
   const column = ADMIN_USER_LIST_SORTS[sort]
-  if (!column) return 'created_at DESC'
+  if (!column) return 'created_at DESC, id ASC'
   return `${column} ${dir === 'asc' ? 'ASC' : 'DESC'} NULLS LAST, id ASC`
 }
 

@@ -3565,6 +3565,110 @@ describe('UserManagementView', () => {
     expect(disabledIds).toEqual(Array.from({ length: 11 }, (_, index) => `user-${(index + 1) * 10}`))
   })
 
+  it('drops the previous selection when the search changes so bulk deactivate cannot submit it', async () => {
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+
+    await setSearchValue(container!, 'Alpha')
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => callLog.some((url) => url.includes('q=Alpha')))
+    findButtonByText(container!, '选择当前筛选结果').click()
+    await flushUi()
+    expect(container!.textContent).toContain('已选择 1 / 1 个当前筛选结果')
+    findButtonByText(container!, '批量停用').click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="bulk-confirm"]')).toBeTruthy()
+
+    await setSearchValue(container!, 'bravo')
+    expect(container!.querySelector('[data-testid="bulk-confirm"]')).toBeNull()
+    expect(container!.textContent).toContain('已选择 0 /')
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => callLog.some((url) => url.includes('q=bravo')))
+    await waitForCondition(() => container!.textContent?.includes('已选择 0 / 1 个当前筛选结果') === true)
+    expect(findUserRow(container!, 'Bravo')).toBeTruthy()
+
+    findButtonByText(container!, '选择当前筛选结果').click()
+    await flushUi()
+    expect(container!.textContent).toContain('已选择 1 / 1 个当前筛选结果')
+    findButtonByText(container!, '批量停用').click()
+    await flushUi()
+    const confirm = container!.querySelector<HTMLButtonElement>('[data-testid="bulk-confirm-submit"]')
+    if (!confirm) throw new Error('Bulk confirm button not found')
+    confirm.click()
+    await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/batch/disable'))
+    const disableCalls = apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/users/batch/disable')
+    const submitted = disableCalls.map((args) => JSON.parse(String((args[1] as RequestInit | undefined)?.body)).userIds as string[])
+    expect(submitted.some((ids) => ids.includes('user-1'))).toBe(false)
+    expect(submitted.at(-1)).toEqual(['user-2'])
+  })
+
+  it('does not apply a stale select-all after the search changes', async () => {
+    const state: UserFixture[] = [
+      ...Array.from({ length: 25 }, (_, index) => {
+        const number = index + 1
+        return {
+          id: `alpha-${number}`,
+          email: `alpha${number}@example.com`,
+          username: `alpha${number}`,
+          name: `Alpha ${String(number).padStart(2, '0')}`,
+          mobile: null,
+          role: 'user',
+          is_active: true,
+          grantEnabled: true,
+          directoryLinked: false,
+          hasOpenId: true,
+          hasUnionId: true,
+          namespaceAdmissions: [],
+        }
+      }),
+      {
+        id: 'bravo-1',
+        email: 'bravo-only@example.com',
+        username: 'bravo-only',
+        name: 'Bravo',
+        mobile: null,
+        role: 'user',
+        is_active: true,
+        grantEnabled: true,
+        directoryLinked: false,
+        hasOpenId: true,
+        hasUnionId: true,
+        namespaceAdmissions: [],
+      },
+    ]
+    const base = createApiImplementation(callLog, state)
+    let releaseSelectAll: (() => void) | null = null
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('pageSize=100') && url.includes('q=Alpha') && !releaseSelectAll) {
+        await new Promise<void>((resolve) => {
+          releaseSelectAll = resolve
+        })
+      }
+      return base(input, init)
+    })
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+
+    await setSearchValue(container!, 'Alpha')
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => container!.textContent?.includes('共 25 人') === true)
+    findButtonByText(container!, '选择当前筛选结果').click()
+    await waitForCondition(() => releaseSelectAll !== null)
+
+    await setSearchValue(container!, 'Bravo')
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => container!.textContent?.includes('已选择 0 / 1 个当前筛选结果') === true)
+    releaseSelectAll?.()
+    await flushUi(12)
+    expect(container!.textContent).toContain('已选择 0 / 1 个当前筛选结果')
+    expect(apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/batch/disable')).toBe(false)
+  })
+
   async function uploadCsv(testId: string, csv: string, fileName: string): Promise<void> {
     const input = container!.querySelector<HTMLInputElement>(`[data-testid="${testId}"]`)
     if (!input) throw new Error(`File input not found: ${testId}`)

@@ -374,6 +374,7 @@ describe('admin-users routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
+    expect(String(pgMocks.query.mock.calls[1]?.[0])).toContain('ORDER BY created_at DESC, id ASC')
     expect(response.body).toMatchObject({
       ok: true,
       data: {

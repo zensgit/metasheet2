@@ -239,4 +239,34 @@ describe('batch review regressions against migrated synthetic PostgreSQL', () =>
     expect((await query('SELECT permission_code FROM user_permissions WHERE user_id = $1 ORDER BY permission_code', [targetId])).rows).toEqual(beforePermissions)
     expect((await query("SELECT id FROM roles WHERE id = 'not-a-real-role'")).rows).toEqual([])
   })
+
+  it('pages 110 users that share created_at without duplicating or skipping an id', async () => {
+    const actorId = await seedUser(true)
+    const stamp = '2001-01-01T00:00:00.000Z'
+    const tokenText = `tie110_${randomUUID().replace(/-/g, '').slice(0, 12)}`
+    const ids = Array.from({ length: 110 }, (_, index) => `${tokenText}_${String(index + 1).padStart(3, '0')}`)
+    for (const userId of ids) {
+      await query(
+        `INSERT INTO users(id, username, email, name, password_hash, role, is_admin, is_active, activation_status, created_at, updated_at)
+         VALUES ($1, $1, $2, $3, 'synthetic-only', 'user', FALSE, TRUE, 'activated', $4::timestamptz, $4::timestamptz)`,
+        [userId, `${userId}@example.test`, tokenText, stamp],
+      )
+    }
+    const seen: string[] = []
+    for (let page = 1; page <= 6; page += 1) {
+      const response = await request(app)
+        .get('/api/admin/users')
+        .query({ q: tokenText, page: String(page), pageSize: '20' })
+        .auth(token(actorId), { type: 'bearer' })
+      expect(response.status).toBe(200)
+      expect(response.body.data.total).toBe(110)
+      expect(response.body.data.pageSize).toBe(20)
+      const pageIds = (response.body.data.items as Array<{ id: string }>).map((item) => item.id)
+      expect(pageIds).toHaveLength(page === 6 ? 10 : 20)
+      seen.push(...pageIds)
+    }
+    expect(seen).toHaveLength(110)
+    expect(new Set(seen).size).toBe(110)
+    expect(new Set(seen)).toEqual(new Set(ids))
+  })
 })

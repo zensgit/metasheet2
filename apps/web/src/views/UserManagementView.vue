@@ -1681,6 +1681,7 @@ const users = ref<ManagedUser[]>([])
 const selectedUserIds = ref<string[]>([])
 const selectedUserRecords = new Map<string, ManagedUser>()
 let userListGeneration = 0
+let selectionFilterVersion = 0
 const userListFilter = ref<UserListFilter>(readInitialUserNavigation().filter)
 const roleCatalog = ref<RoleCatalogItem[]>([])
 const accessPresets = ref<AccessPreset[]>([])
@@ -2502,9 +2503,19 @@ function clearSelectedUsers(): void {
   selectedUserIds.value = []
 }
 
+function clearSelectionForCriteriaChange(): void {
+  selectionFilterVersion += 1
+  selectedUserIds.value = []
+  selectedUserRecords.clear()
+  bulkConfirm.value = null
+  hardDeletePhrase.value = ''
+}
+
 async function selectVisibleUsers(): Promise<void> {
+  const version = selectionFilterVersion
   const pageAlreadyComplete = userTotal.value > 0 && users.value.length >= userTotal.value
-  const collected = pageAlreadyComplete ? displayedUsers.value : await collectFilteredUsers()
+  const collected = pageAlreadyComplete ? displayedUsers.value : await collectFilteredUsers(version)
+  if (version !== selectionFilterVersion) return
   rememberUsers(collected)
   selectedUserIds.value = collected.map((user) => user.id)
 }
@@ -2940,14 +2951,14 @@ async function fetchUserListPage(pageNumber: number, size: number, withMeta: boo
   }
 }
 
-async function collectFilteredUsers(): Promise<ManagedUser[]> {
+async function collectFilteredUsers(version = selectionFilterVersion): Promise<ManagedUser[]> {
   const generation = userListGeneration
   const collected: ManagedUser[] = []
   const seen = new Set<string>()
   let total = Number.POSITIVE_INFINITY
   for (let pageNumber = 1; pageNumber <= 1000 && collected.length < total; pageNumber += 1) {
     const result = await fetchUserListPage(pageNumber, userListFetchCap, false)
-    if (generation !== userListGeneration) return []
+    if (generation !== userListGeneration || version !== selectionFilterVersion) return []
     total = result.total
     const before = collected.length
     for (const item of result.items) {
@@ -2957,6 +2968,7 @@ async function collectFilteredUsers(): Promise<ManagedUser[]> {
     }
     if (result.items.length === 0 || collected.length === before) break
   }
+  if (version !== selectionFilterVersion) return []
   return collected
 }
 
@@ -4379,11 +4391,12 @@ async function purgeRecycleUsers(): Promise<void> {
 }
 
 watch(search, () => {
+  clearSelectionForCriteriaChange()
   if (page.value !== 1) page.value = 1
 })
 
 watch([userListFilter, roleFilter, accountStatusFilter], () => {
-  selectedUserIds.value = []
+  clearSelectionForCriteriaChange()
   if (page.value !== 1) page.value = 1
   else void loadUsers()
 })
