@@ -213,4 +213,60 @@ describe('batch review regressions against migrated synthetic PostgreSQL', () =>
       else process.env.PRODUCT_MODE = previousMode
     }
   })
+
+  it('keeps multiple real roles and direct permissions when roleId is omitted, and rejects an unknown role', async () => {
+    const actorId = await seedUser(true)
+    const targetId = await seedUser()
+    await query("INSERT INTO roles(id, name) VALUES ('planner', 'Planner'), ('keeper', 'Keeper') ON CONFLICT DO NOTHING")
+    await query('INSERT INTO user_roles(user_id, role_id) VALUES ($1, $2), ($1, $3) ON CONFLICT DO NOTHING', [targetId, 'planner', 'keeper'])
+    await query("INSERT INTO user_permissions(user_id, permission_code) VALUES ($1, 'demo:read') ON CONFLICT DO NOTHING", [targetId])
+    const beforeRoles = (await query('SELECT role_id FROM user_roles WHERE user_id = $1 ORDER BY role_id', [targetId])).rows
+    const beforePermissions = (await query('SELECT permission_code FROM user_permissions WHERE user_id = $1 ORDER BY permission_code', [targetId])).rows
+    const beforeProfile = (await query('SELECT role FROM users WHERE id = $1', [targetId])).rows
+    expect(beforeRoles.map((row) => row.role_id)).toEqual(expect.arrayContaining(['planner', 'keeper', 'user']))
+
+    const unchanged = await update(actorId, [{ userId: targetId, name: 'Synthetic user' }])
+    expect(unchanged.status).toBe(200)
+    expect(unchanged.body.data.results[0].code).toBe('UNCHANGED')
+    expect((await query('SELECT role_id FROM user_roles WHERE user_id = $1 ORDER BY role_id', [targetId])).rows).toEqual(beforeRoles)
+    expect((await query('SELECT permission_code FROM user_permissions WHERE user_id = $1 ORDER BY permission_code', [targetId])).rows).toEqual(beforePermissions)
+    expect((await query('SELECT role FROM users WHERE id = $1', [targetId])).rows).toEqual(beforeProfile)
+
+    const unknown = await update(actorId, [{ userId: targetId, roleId: 'not-a-real-role' }])
+    expect(unknown.status).toBe(200)
+    expect(unknown.body.data.results[0].code).toBe('ROLE_NOT_FOUND')
+    expect((await query('SELECT role_id FROM user_roles WHERE user_id = $1 ORDER BY role_id', [targetId])).rows).toEqual(beforeRoles)
+    expect((await query('SELECT permission_code FROM user_permissions WHERE user_id = $1 ORDER BY permission_code', [targetId])).rows).toEqual(beforePermissions)
+    expect((await query("SELECT id FROM roles WHERE id = 'not-a-real-role'")).rows).toEqual([])
+  })
+
+  it('pages 110 users that share created_at without duplicating or skipping an id', async () => {
+    const actorId = await seedUser(true)
+    const stamp = '2001-01-01T00:00:00.000Z'
+    const tokenText = `tie110_${randomUUID().replace(/-/g, '').slice(0, 12)}`
+    const ids = Array.from({ length: 110 }, (_, index) => `${tokenText}_${String(index + 1).padStart(3, '0')}`)
+    for (const userId of ids) {
+      await query(
+        `INSERT INTO users(id, username, email, name, password_hash, role, is_admin, is_active, activation_status, created_at, updated_at)
+         VALUES ($1, $1, $2, $3, 'synthetic-only', 'user', FALSE, TRUE, 'activated', $4::timestamptz, $4::timestamptz)`,
+        [userId, `${userId}@example.test`, tokenText, stamp],
+      )
+    }
+    const seen: string[] = []
+    for (let page = 1; page <= 6; page += 1) {
+      const response = await request(app)
+        .get('/api/admin/users')
+        .query({ q: tokenText, page: String(page), pageSize: '20' })
+        .auth(token(actorId), { type: 'bearer' })
+      expect(response.status).toBe(200)
+      expect(response.body.data.total).toBe(110)
+      expect(response.body.data.pageSize).toBe(20)
+      const pageIds = (response.body.data.items as Array<{ id: string }>).map((item) => item.id)
+      expect(pageIds).toHaveLength(page === 6 ? 10 : 20)
+      seen.push(...pageIds)
+    }
+    expect(seen).toHaveLength(110)
+    expect(new Set(seen).size).toBe(110)
+    expect(new Set(seen)).toEqual(new Set(ids))
+  })
 })
