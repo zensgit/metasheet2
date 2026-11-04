@@ -521,6 +521,7 @@ const FMT_ARGS: Record<keyof typeof TASKS_FMT_ZH, unknown[]> = {
   groupsDeleteNamed: ['Group A'],
   groupsDeletePrompt: ['Group A'],
   groupsHiddenByFilter: [2],
+  groupsHiddenBySearch: [2],
 }
 
 describe('labels — every value is in its own language', () => {

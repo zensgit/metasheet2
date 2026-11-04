@@ -5795,7 +5795,12 @@ async function postReviewBindings(bindings: Array<{
   }
 }
 
-async function refreshAfterReviewBindings(): Promise<void> {
+// Writes the outcome status, then reloads the integration, queue and member list. The status is
+// set before the reload so a failed reload's own error status is not overwritten; a stale
+// integrations-load flag clears the status when the reload starts, so the outcome is written back
+// when the reload left the status empty.
+async function refreshAfterReviewBindings(message: string, tone: 'info' | 'error' = 'info'): Promise<void> {
+  setStatus(message, tone)
   if (!selectedIntegration.value) return
   for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
   await Promise.all([
@@ -5803,6 +5808,36 @@ async function refreshAfterReviewBindings(): Promise<void> {
     loadReviewItems(selectedIntegration.value.id),
     loadAccounts(selectedIntegration.value.id),
   ])
+  if (!status.value) setStatus(message, tone)
+}
+
+// After a partial batch failure, re-select the failed rows that are still in the reloaded queue and
+// still eligible for the same action, so they can be retried. Committed rows are never re-selected,
+// and the retry selection replaces whatever the reload pre-selected. The reload may switch to a view
+// that hides these rows; `reveal` is only called when some of them are hidden.
+function reselectFailedReviewRows(
+  batchIds: string[],
+  failedItems: unknown[],
+  isEligible: (item: DirectoryReviewItem) => boolean,
+  countSelectedVisible: () => number,
+  reveal: () => void,
+): void {
+  const failedIds = new Set(failedItems.map((entry) => (
+    entry && typeof entry === 'object' ? (entry as Record<string, unknown>).accountId : undefined
+  )))
+  const retryableIds = new Set(reviewItems.value.filter(isEligible).map((item) => item.account.id))
+  const retryIds = batchIds.filter((accountId) => failedIds.has(accountId) && retryableIds.has(accountId))
+  if (retryIds.length === 0) return
+  clearReviewSelection()
+  for (const accountId of retryIds) selectedReviewIds[accountId] = true
+  if (countSelectedVisible() < retryIds.length) reveal()
+}
+
+function showPendingBindingView(view: PendingBindingView): void {
+  if (reviewFilter.value !== 'all' && reviewFilter.value !== 'pending_binding') reviewFilter.value = 'pending_binding'
+  updatePendingBindingView(view)
+  // A manual-reason sub-filter could still hide the revealed rows, so show every manual reason.
+  if (view === 'manual') pendingBindingManualReason.value = 'all'
 }
 
 async function submitReviewBindings(bindings: Array<{
@@ -5834,12 +5869,34 @@ async function submitReviewBindings(bindings: Array<{
         message: `已提交 ${appliedCount} / ${bindings.length}，正在刷新目录成员与待处理队列...`,
       })
     }
-    await refreshAfterReviewBindings()
     const failedPreview = readFailedBindingsPreview(outcome.failed, FAILED_BINDINGS_PREVIEW_LIMIT)
     const message = outcome.failedCount > 0
       ? `已绑定 ${appliedCount} 个目录成员，另有 ${outcome.failedCount} 个失败${failedPreview ? `：${failedPreview}` : '，请重试'}`
       : successMessage
-    setStatus(message, outcome.failedCount > 0 ? 'error' : 'info')
+    await refreshAfterReviewBindings(message, outcome.failedCount > 0 ? 'error' : 'info')
+    const batchIds = bindings.map((binding) => binding.accountId)
+    if (progressKind === 'bind') {
+      reselectFailedReviewRows(
+        batchIds,
+        outcome.failed,
+        (item) => item.kind === 'pending_binding' && item.account.isActive && readBindingDraft(item.account).trim().length > 0,
+        () => selectedReviewBindEntries.value.length,
+        () => showPendingBindingView('all'),
+      )
+    } else if (progressKind === 'recommend') {
+      reselectFailedReviewRows(
+        batchIds,
+        outcome.failed,
+        (item) => (
+          item.kind === 'pending_binding'
+          && item.account.isActive
+          && item.actionable.canConfirmRecommendation
+          && item.recommendations.length > 0
+        ),
+        () => selectedRecommendedReviewBindEntries.value.length,
+        () => showPendingBindingView('recommended'),
+      )
+    }
     if (progressKind) {
       setReviewBatchProgress({
         kind: progressKind,
@@ -5983,7 +6040,7 @@ async function createAndBindDirectoryAccountUser(account: DirectoryAccount, cont
     delete mobileConflictHints[account.id]
     delete manualAdmissionExpanded[account.id]
     delete manualAdmissionDrafts[account.id]
-    await refreshAfterReviewBindings()
+    await refreshAfterReviewBindings(`${memberLabel} ${account.name} 已创建本地用户并完成绑定`)
     manualAdmissionResult.value = {
       accountId: account.id,
       accountName: account.name,
@@ -6000,7 +6057,6 @@ async function createAndBindDirectoryAccountUser(account: DirectoryAccount, cont
       mobileBackfilled: nextDraft.mobile.length === 0 || (createdUser.mobile ?? '') === nextDraft.mobile,
       mobileBackfillError: '',
     }
-    setStatus(`${memberLabel} ${account.name} 已创建本地用户并完成绑定`)
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '创建本地用户并绑定失败', 'error')
   } finally {
@@ -6057,14 +6113,25 @@ async function batchAdmitReviewItems() {
       applied: appliedCount,
       message: `已创建并绑定 ${appliedCount} / ${batchIds.length}，正在刷新目录成员与待处理队列...`,
     })
-    await refreshAfterReviewBindings()
     const failedCount = Number(data?.failedCount ?? 0)
     const failedItems = Array.isArray(data?.failed) ? data.failed : []
     const failedPreview = readFailedBindingsPreview(failedItems, FAILED_BINDINGS_PREVIEW_LIMIT)
     const message = failedCount > 0
       ? `已创建并绑定 ${appliedCount} 个目录成员，另有 ${failedCount} 个失败${failedPreview ? `：${failedPreview}` : '，请重试'}`
       : `已创建并绑定 ${appliedCount} 个目录成员`
-    setStatus(message, failedCount > 0 ? 'error' : 'info')
+    await refreshAfterReviewBindings(message, failedCount > 0 ? 'error' : 'info')
+    reselectFailedReviewRows(
+      batchIds,
+      failedItems,
+      (item) => (
+        item.kind === 'pending_binding'
+        && item.account.isActive
+        && !item.account.localUser
+        && !item.actionable.canConfirmRecommendation
+      ),
+      () => selectedReviewAdmissionIds.value.length,
+      () => showPendingBindingView('manual'),
+    )
     setReviewBatchProgress({
       kind: 'admit',
       phase: 'completed',
@@ -6161,33 +6228,19 @@ async function batchUnbindReviewItems() {
       applied: appliedCount,
       message: `已提交 ${appliedCount} / ${batchIds.length}，正在刷新目录成员与待处理队列...`,
     })
-    for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
     const failedPreview = readFailedBindingsPreview(failedItems, FAILED_BINDINGS_PREVIEW_LIMIT)
     const message = failedCount > 0
       ? `已停权处理 ${appliedCount} 个目录成员，另有 ${failedCount} 个失败${failedPreview ? `：${failedPreview}` : '，请重试'}`
       : `已完成 ${batchIds.length} 个目录成员的批量停权处理`
-    // Set before the reload so a failed reload's own error status is not overwritten.
-    setStatus(message, failedCount > 0 ? 'error' : 'info')
-    await Promise.all([
-      loadIntegrations(),
-      loadReviewItems(selectedIntegration.value.id),
-      loadAccounts(selectedIntegration.value.id),
-    ])
-    // Re-select failed rows that are still in the reloaded queue and still eligible, so they can be
-    // retried. Committed rows come back as pending_binding and are never re-selected.
-    const failedIds = new Set(failedItems.map((entry) => (
-      entry && typeof entry === 'object' ? (entry as Record<string, unknown>).accountId : undefined
-    )))
-    const retryableIds = new Set(reviewItems.value
-      .filter((item) => item.actionable.canBatchUnbind)
-      .map((item) => item.account.id))
-    const retryIds = batchIds.filter((accountId) => failedIds.has(accountId) && retryableIds.has(accountId))
-    if (retryIds.length > 0) {
-      clearReviewSelection()
-      for (const accountId of retryIds) selectedReviewIds[accountId] = true
-      // The reload may switch to a pending-binding view that hides these rows; show them instead.
-      if (selectedReviewBatchIds.value.length < retryIds.length) reviewFilter.value = 'inactive_linked'
-    }
+    await refreshAfterReviewBindings(message, failedCount > 0 ? 'error' : 'info')
+    // Deprovision acts on inactive linked accounts, so eligibility is canBatchUnbind alone.
+    reselectFailedReviewRows(
+      batchIds,
+      failedItems,
+      (item) => item.actionable.canBatchUnbind,
+      () => selectedReviewBatchIds.value.length,
+      () => { reviewFilter.value = 'inactive_linked' },
+    )
     setReviewBatchProgress({
       kind: 'unbind',
       phase: 'completed',
