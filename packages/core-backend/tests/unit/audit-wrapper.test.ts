@@ -61,6 +61,51 @@ describe('auditLog', () => {
     expect(failureCount()).toBe(before)
   })
 
+  it('keeps a UUID admin on user_name for local department-head maintenance only', async () => {
+    logEventMock.mockResolvedValue(undefined)
+    const adminId = '26979f88-e7cc-4b40-a975-a0353d19aec0'
+
+    await auditLog({
+      actorId: adminId,
+      actorType: 'user',
+      action: 'directory.local_membership.set_department_head',
+      resourceType: 'directory-membership',
+      resourceId: 'account:department',
+      meta: { isDepartmentHead: true },
+    })
+
+    expect(logEventMock).toHaveBeenCalledWith(
+      'DIRECTORY.LOCAL_MEMBERSHIP.SET_DEPARTMENT_HEAD',
+      'directory.local_membership.set_department_head',
+      {
+        userId: undefined,
+        userName: adminId,
+        resourceType: 'directory-membership',
+        resourceId: 'account:department',
+        actionDetails: { isDepartmentHead: true },
+      },
+    )
+
+    logEventMock.mockClear()
+    await auditLog({
+      actorId: adminId,
+      actorType: 'user',
+      action: 'grant',
+      resourceType: 'permission',
+      resourceId: 'user-1:attendance:read',
+    })
+    expect(logEventMock).toHaveBeenCalledWith(
+      'GRANT',
+      'grant',
+      {
+        userId: undefined,
+        resourceType: 'permission',
+        resourceId: 'user-1:attendance:read',
+        actionDetails: undefined,
+      },
+    )
+  })
+
   it('swallows audit write failures so callers do not fail closed', async () => {
     const driverError = Object.assign(
       new Error('no partition of relation "audit_logs" found for row with resource_id 26979f88'),

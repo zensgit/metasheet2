@@ -695,3 +695,140 @@ describe('F4-E departure manager context', () => {
     expect(called).toBe(false)
   })
 })
+
+describe('native department-head identity', () => {
+  function requester(overrides: Record<string, unknown>) {
+    return {
+      integration_id: 'int-home',
+      account_id: 'acc-req',
+      account_provider: 'local',
+      external_user_id: 'ext-req',
+      raw: {},
+      title: null,
+      primary_department_id: 'dept-edge',
+      primary_department_active: true,
+      department_provider: 'local',
+      department_integration_id: 'int-home',
+      primary_external_department_id: 'EXT',
+      primary_department_raw: { dept_manager_userid_list: ['ext-raw'] },
+      primary_department_name: 'Edge',
+      ...overrides,
+    }
+  }
+
+  function queryFor(row: Record<string, unknown>, onNative?: (sql: string) => { rows: Array<Record<string, unknown>> }) {
+    const nativeSql: string[] = []
+    const query = async <T>(text: string): Promise<{ rows: T[] }> => {
+      if (text.includes('org_directory_routing_policy')) return { rows: [] }
+      if (text.includes('FROM directory_account_links l') && text.includes('LEFT JOIN directory_account_departments')) {
+        return { rows: [row] as T[] }
+      }
+      if (text.includes('ad.is_manager = true') || text.includes('a.external_user_id <> $3')) return { rows: [] }
+      if (text.includes('is_department_head = true')) {
+        nativeSql.push(text)
+        return { rows: (onNative?.(text).rows ?? [{ local_user_id: 'unrelated-head' }]) as T[] }
+      }
+      if (text.includes('a.external_user_id = $2')) return { rows: [{ local_user_id: 'raw-person' }] as T[] }
+      if (text.includes('directory_account_id = $1::uuid')) return { rows: [{ local_user_id: null }] as T[] }
+      if (text.includes('external_parent_department_id')) return { rows: [] }
+      throw new Error(`unexpected query: ${text.slice(0, 140)}`)
+    }
+    return { query, nativeSql }
+  }
+
+  it.each([
+    ['cross-integration', { department_integration_id: 'int-other' }],
+    ['cross-provider', { department_provider: 'dingtalk' }],
+    ['blank department id', { primary_department_id: '   ' }],
+    ['blank provider', { account_provider: ' ' }],
+    ['blank integration', { department_integration_id: '' }],
+  ])('rejects a %s primary edge instead of re-selecting by external key', async (_label, overrides) => {
+    const watched = queryFor(requester(overrides))
+    const rel = await resolveApprovalRequesterOrgRelations('local-req', watched.query, { includeDeptHeadChain: true })
+    expect(rel.deptHeadId).toBeUndefined()
+    expect(rel.deptHeadChainIds).toBeUndefined()
+    expect(JSON.stringify(rel)).not.toContain('unrelated-head')
+    expect(JSON.stringify(rel)).not.toContain('raw-person')
+    expect(watched.nativeSql).toEqual([])
+  })
+
+  it('reuses one native primary read, including an empty head, as the chain head', async () => {
+    let primaryReads = 0
+    const watched = queryFor(requester({}), (sql) => {
+      if (sql.includes('d.id = $2::uuid')) {
+        primaryReads += 1
+        return {
+          rows: [{
+            department_id: 'dept-edge',
+            external_department_id: 'EXT',
+            external_parent_department_id: 'EXT-PARENT',
+            department_provider: 'local',
+            department_integration_id: 'int-home',
+            integration_active: true,
+            department_active: true,
+            account_provider: 'local',
+            external_user_id: 'ext-head',
+            local_user_id: primaryReads === 1 ? null : 'head-z',
+          }],
+        }
+      }
+      return {
+        rows: [{
+          department_id: 'dept-parent',
+          external_department_id: 'EXT-PARENT',
+          external_parent_department_id: null,
+          department_provider: 'local',
+          department_integration_id: 'int-home',
+          integration_active: true,
+          department_active: true,
+          account_provider: 'local',
+          external_user_id: 'ext-parent',
+          local_user_id: 'head-parent',
+        }],
+      }
+    })
+    const empty = await resolveApprovalRequesterOrgRelations('local-req', watched.query, { includeDeptHeadChain: true })
+    expect(empty.deptHeadId).toBeUndefined()
+    expect(empty.deptHeadChainIds).toEqual(['head-parent'])
+    expect(primaryReads).toBe(1)
+
+    primaryReads = 0
+    const headed = queryFor(requester({}), (sql) => {
+      if (sql.includes('d.id = $2::uuid')) {
+        primaryReads += 1
+        return {
+          rows: [{
+            department_id: 'dept-edge',
+            external_department_id: 'EXT',
+            external_parent_department_id: 'EXT-PARENT',
+            department_provider: 'local',
+            department_integration_id: 'int-home',
+            integration_active: true,
+            department_active: true,
+            account_provider: 'local',
+            external_user_id: 'ext-a',
+            local_user_id: primaryReads === 1 ? 'head-a' : 'head-z',
+          }],
+        }
+      }
+      return {
+        rows: [{
+          department_id: 'dept-parent',
+          external_department_id: 'EXT-PARENT',
+          external_parent_department_id: null,
+          department_provider: 'local',
+          department_integration_id: 'int-home',
+          integration_active: true,
+          department_active: true,
+          account_provider: 'local',
+          external_user_id: 'ext-parent',
+          local_user_id: 'head-parent',
+        }],
+      }
+    })
+    const rel = await resolveApprovalRequesterOrgRelations('local-req', headed.query, { includeDeptHeadChain: true })
+    expect(rel.deptHeadId).toBe('head-a')
+    expect(rel.deptHeadChainIds).toEqual(['head-a', 'head-parent'])
+    expect(primaryReads).toBe(1)
+  })
+})

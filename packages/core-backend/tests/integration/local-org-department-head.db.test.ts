@@ -117,8 +117,8 @@ describeIfDatabase('native local department-head backend', () => {
     }
   })
 
-  async function user(admin = false): Promise<string> {
-    const id = `local-head-${randomUUID()}`
+  async function user(admin = false, explicitId?: string): Promise<string> {
+    const id = explicitId ?? `local-head-${randomUUID()}`
     users.push(id)
     await query(
       `INSERT INTO users (id, email, username, name, password_hash, role, permissions,
@@ -435,9 +435,187 @@ describeIfDatabase('native local department-head backend', () => {
     expect((await resolve(f)).deptHeadChainIds).toEqual([f.next.localUserId])
   })
 
+  async function pointPrimaryAt(accountId: string, fromDepartmentId: string, toDepartmentId: string): Promise<void> {
+    await query(
+      'UPDATE directory_account_departments SET is_primary = FALSE WHERE directory_account_id = $1 AND directory_department_id = $2',
+      [accountId, fromDepartmentId],
+    )
+    await query(
+      'INSERT INTO directory_account_departments (directory_account_id, directory_department_id, is_primary) VALUES ($1, $2, TRUE)',
+      [accountId, toDepartmentId],
+    )
+  }
+
+  function watchNativeHeadQueries() {
+    const sql: string[] = []
+    const wrapped = async <Row>(text: string, params?: unknown[]) => {
+      if (text.includes('is_department_head = true')) sql.push(text)
+      return { rows: (await query(text, params)).rows as Row[] }
+    }
+    return { sql, wrapped }
+  }
+
+  function expectNoNativeHead(rel: { deptHeadId?: string; deptHeadChainIds?: string[] }, ...people: Array<string | null | undefined>) {
+    expect(rel.deptHeadId).toBeUndefined()
+    expect(rel.deptHeadChainIds).toBeUndefined()
+    const encoded = JSON.stringify(rel)
+    for (const person of people) {
+      if (person) expect(encoded).not.toContain(person)
+    }
+  }
+
+  it('a cross-integration primary edge does not adopt a department that only shares an external id', async () => {
+    const home = await fixture()
+    const other = await fixture()
+    await query('UPDATE directory_departments SET external_department_id = $2 WHERE id = $1',
+      [other.department.id, home.department.externalDepartmentId])
+    await seedHead(home.head, home.department)
+    await seedHead(other.head, other.department)
+    await query('UPDATE directory_departments SET raw = $2::jsonb WHERE id = $1',
+      [home.department.id, JSON.stringify({ dept_manager_userid_list: [home.next.externalUserId] })])
+    await query('UPDATE directory_departments SET raw = $2::jsonb WHERE id = $1',
+      [other.department.id, JSON.stringify({ dept_manager_userid_list: [home.next.externalUserId] })])
+    await pointPrimaryAt(home.requester.id, home.department.id, other.department.id)
+    const watched = watchNativeHeadQueries()
+    const rel = await resolveApprovalRequesterOrgRelations(home.requester.localUserId!, watched.wrapped, {
+      orgId: home.org, includeDeptHeadChain: true,
+    })
+    expectNoNativeHead(rel, home.head.localUserId, other.head.localUserId, home.next.localUserId)
+    expect(watched.sql).toEqual([])
+    await query(
+      'DELETE FROM directory_account_departments WHERE directory_account_id = $1 AND directory_department_id = $2',
+      [home.requester.id, other.department.id],
+    )
+    await query(
+      'UPDATE directory_account_departments SET is_primary = TRUE WHERE directory_account_id = $1 AND directory_department_id = $2',
+      [home.requester.id, home.department.id],
+    )
+    const restored = await resolve(home)
+    expect(restored.deptHeadId).toBe(home.head.localUserId)
+    expect(restored.deptHeadChainIds).toEqual([home.head.localUserId])
+  })
+
+  it('a cross-provider primary edge does not adopt a same-external-id local head', async () => {
+    const home = await fixture()
+    const other = await fixture()
+    await query("UPDATE directory_departments SET provider = 'dingtalk', external_department_id = $2 WHERE id = $1",
+      [other.department.id, home.department.externalDepartmentId])
+    await seedHead(home.head, home.department)
+    await seedHead(other.head, other.department)
+    await query('UPDATE directory_departments SET raw = $2::jsonb WHERE id = $1',
+      [other.department.id, JSON.stringify({ dept_manager_userid_list: [home.next.externalUserId] })])
+    await pointPrimaryAt(home.requester.id, home.department.id, other.department.id)
+    const watched = watchNativeHeadQueries()
+    const rel = await resolveApprovalRequesterOrgRelations(home.requester.localUserId!, watched.wrapped, {
+      orgId: home.org, includeDeptHeadChain: true,
+    })
+    expectNoNativeHead(rel, home.head.localUserId, other.head.localUserId, home.next.localUserId)
+    expect(watched.sql).toEqual([])
+  })
+
+  it('blank department keys never re-select a head, while an exact local UUID still resolves', async () => {
+    const home = await fixture()
+    const other = await fixture()
+    await query('UPDATE directory_departments SET external_department_id = $2 WHERE id = $1', [home.department.id, ''])
+    await query('UPDATE directory_departments SET external_department_id = $2 WHERE id = $1', [other.department.id, ''])
+    await seedHead(home.head, home.department)
+    await seedHead(other.head, other.department)
+    const exact = await resolve(home)
+    expect(exact.deptHeadId).toBe(home.head.localUserId)
+    expect(exact.deptHeadChainIds).toEqual([home.head.localUserId])
+
+    await pointPrimaryAt(home.requester.id, home.department.id, other.department.id)
+    const blankEdge = watchNativeHeadQueries()
+    const rejected = await resolveApprovalRequesterOrgRelations(home.requester.localUserId!, blankEdge.wrapped, {
+      orgId: home.org, includeDeptHeadChain: true,
+    })
+    expectNoNativeHead(rejected, home.head.localUserId, other.head.localUserId)
+    expect(blankEdge.sql).toEqual([])
+
+    const sharedKey = `blank-provider-${randomUUID()}`
+    await query("UPDATE directory_departments SET provider = ' ', external_department_id = $2 WHERE id = $1",
+      [other.department.id, sharedKey])
+    await query('UPDATE directory_departments SET external_department_id = $2 WHERE id = $1',
+      [home.department.id, sharedKey])
+    const blankProvider = watchNativeHeadQueries()
+    const providerRejected = await resolveApprovalRequesterOrgRelations(home.requester.localUserId!, blankProvider.wrapped, {
+      orgId: home.org, includeDeptHeadChain: true,
+    })
+    expectNoNativeHead(providerRejected, home.head.localUserId, other.head.localUserId)
+    expect(blankProvider.sql).toEqual([])
+  })
+
+  async function commitHeadChangeDuringResolve(f: Fixture, parentId: string, replacePrimaryHead: boolean) {
+    const writer = new Client({ connectionString: process.env.DATABASE_URL })
+    await writer.connect()
+    let primaryReads = 0
+    let committed = false
+    try {
+      const wrapped = async <Row>(sql: string, params?: unknown[]) => {
+        const result = await query<Row>(sql, params)
+        const primaryNative = sql.includes('is_department_head = true')
+          && sql.includes('d.id = $2::uuid')
+          && params?.[1] === f.department.id
+        if (!primaryNative) return result
+        primaryReads += 1
+        if (committed) return result
+        committed = true
+        await writer.query('BEGIN')
+        if (replacePrimaryHead) {
+          await writer.query(
+            'UPDATE directory_account_departments SET is_department_head = FALSE WHERE directory_account_id = $1 AND directory_department_id = $2',
+            [f.head.id, f.department.id],
+          )
+        }
+        await writer.query(
+          'UPDATE directory_account_departments SET is_department_head = TRUE WHERE directory_account_id = $1 AND directory_department_id = $2',
+          [f.next.id, f.department.id],
+        )
+        await writer.query(
+          'INSERT INTO directory_account_departments (directory_account_id, directory_department_id, is_department_head) VALUES ($1, $2, TRUE)',
+          [f.manager.id, parentId],
+        )
+        await writer.query('COMMIT')
+        return result
+      }
+      const rel = await resolveApprovalRequesterOrgRelations(f.requester.localUserId!, wrapped, {
+        orgId: f.org, includeDeptHeadChain: true,
+      })
+      expect(primaryReads).toBe(1)
+      expect(committed).toBe(true)
+      return rel
+    } finally {
+      await writer.query('ROLLBACK').catch(() => undefined)
+      await writer.end()
+    }
+  }
+
+  it('a writer that commits during resolve cannot split the native primary head from the chain', async () => {
+    const f = await fixture()
+    const parent = await department(f.org)
+    await query('UPDATE directory_departments SET external_parent_department_id = $2 WHERE id = $1',
+      [f.department.id, parent.externalDepartmentId])
+    await seedHead(f.head, f.department)
+    const rel = await commitHeadChangeDuringResolve(f, parent.id, true)
+    expect(rel.deptHeadId).toBe(f.head.localUserId)
+    expect(rel.deptHeadChainIds).toEqual([f.head.localUserId, f.manager.localUserId])
+    expect(rel.deptHeadChainIds).not.toContain(f.next.localUserId)
+  })
+
+  it('an empty native primary head stays empty when a writer commits before the parent walk', async () => {
+    const f = await fixture()
+    const parent = await department(f.org)
+    await query('UPDATE directory_departments SET external_parent_department_id = $2 WHERE id = $1',
+      [f.department.id, parent.externalDepartmentId])
+    const rel = await commitHeadChangeDuringResolve(f, parent.id, false)
+    expect(rel.deptHeadId).toBeUndefined()
+    expect(rel.deptHeadChainIds).toEqual([f.manager.localUserId])
+  })
+
   it('admin set/get/unset changes only the head bit; direct-manager, primary, raw and access graph stay exact', async () => {
     const f = await fixture('default')
-    const admin = await user(true)
+    const admin = await user(true, randomUUID())
+    expect(admin).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
     const before = await snapshot()
     expect(await (await request(route(f.head, f.department), admin)).json()).toEqual(payload(f.head, f.department, false, false))
     const set = await request(route(f.head, f.department), admin, 'PATCH', { isDepartmentHead: true })
@@ -452,11 +630,11 @@ describeIfDatabase('native local department-head backend', () => {
     expect(await (await request(route(f.head, f.department), admin)).json()).toEqual(payload(f.head, f.department, false, false))
     expect(await snapshot()).toEqual(before)
     expect((await query(
-      "SELECT action, action_details FROM audit_logs WHERE resource_type = 'directory-membership' AND resource_id = $1 AND action = 'directory.local_membership.set_department_head' ORDER BY id",
+      "SELECT action, action_details, user_id, user_name FROM audit_logs WHERE resource_type = 'directory-membership' AND resource_id = $1 AND action = 'directory.local_membership.set_department_head' ORDER BY id",
       [`${f.head.id}:${f.department.id}`],
     )).rows).toEqual([
-      { action: 'directory.local_membership.set_department_head', action_details: { isDepartmentHead: true } },
-      { action: 'directory.local_membership.set_department_head', action_details: { isDepartmentHead: false } },
+      { action: 'directory.local_membership.set_department_head', action_details: { isDepartmentHead: true }, user_id: null, user_name: admin },
+      { action: 'directory.local_membership.set_department_head', action_details: { isDepartmentHead: false }, user_id: null, user_name: admin },
     ])
     const oldDoor = await request(`/api/admin/directory/local/memberships/${f.head.id}:${f.department.id}`, admin, 'PATCH', { isDepartmentHead: true })
     await error(oldDoor, 400, 'DIRECTORY_LOCAL_UNKNOWN_FIELDS')
