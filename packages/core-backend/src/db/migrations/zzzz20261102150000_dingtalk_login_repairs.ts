@@ -53,7 +53,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     IF NEW.link_status='linked' AND NEW.local_user_id IS NOT NULL THEN
       -- The real account row decides, never a request field (the link row carries no provider). A missing row
       -- (NULL) is constrained: fail closed; the FK on directory_account_id refuses the insert afterwards anyway.
-      -- Plain read: directory_accounts.provider is never updated, and the RI check already holds KEY SHARE on the row.
+      -- Plain read, no row lock: it rests on writer discipline, not on a lock. No product writer updates
+      -- directory_accounts.provider (the sync upsert's DO UPDATE SET omits it; local-directory edits touch
+      -- name/email/mobile/title/is_active; handover moves integration_id; the OAuth backfill writes open_id), and the
+      -- bind path refuses an account whose provider differs from its integration's. The database does not enforce
+      -- this: a raw-SQL provider change on a linked row is outside the product threat model and is not caught here.
       SELECT provider INTO account_provider FROM directory_accounts WHERE id=NEW.directory_account_id;
       IF account_provider IS NULL OR account_provider='dingtalk' THEN
         PERFORM id FROM users WHERE id=NEW.local_user_id FOR SHARE;

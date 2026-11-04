@@ -404,6 +404,9 @@ describe('entry process (child, no database)', () => {
     const commands = blocks.flatMap((b) => b.split('\n')).filter((l) => l.includes('ops:dingtalk-login-repair'))
     expect(commands.length).toBeGreaterThanOrEqual(7)
     for (const line of commands) expect(line).toMatch(/^pnpm --silent ops:dingtalk-login-repair [a-z-]+ /)
+    // The script exists only in this package: from the repository root pnpm exits 254 without running anything.
+    for (const block of blocks.filter((b) => b.includes('ops:dingtalk-login-repair')))
+      expect(block.split('\n')[0]).toBe('cd packages/core-backend')
   })
 
   it('the pool warning for an unset DATABASE_URL (non-production) does not reach stdout or stderr', async () => {

@@ -337,7 +337,84 @@ async function expectRefusedWithoutWrite(
     released_account_ids: null,
   })
 }
-/** Allowed release: one-id allowlist, nothing restored, every session revoked and none created. */
+const accessGeneration = async (user: string) =>
+  Number(
+    (await query('SELECT access_generation FROM users WHERE id=$1', [user]))
+      .rows[0].access_generation,
+  )
+/**
+ * A live session and an unrevoked API token created just before a release, plus the generation and the
+ * revocation watermark at that moment. Neither table is in the bound recovery snapshot, so the approved
+ * digest still holds. expectRevoked() is what the release must have done to them.
+ */
+async function liveCredentials(f: Fixture) {
+  const session = await sessionRegistry.createUserSession(f.user, {
+    sessionId: randomUUID(),
+    expiresAt: new Date(Date.now() + 600000).toISOString(),
+  })
+  expect(session).not.toBeNull()
+  const token = randomUUID()
+  await query(
+    `INSERT INTO multitable_api_tokens(id,name,token_hash,token_prefix,scopes,created_by,revoked) VALUES($1,'synthetic release token',$1,$1,'["records:read"]',$2,false)`,
+    [token, f.user],
+  )
+  const live = async () => ({
+    sessions: (
+      await query(
+        'SELECT id FROM user_sessions WHERE user_id=$1 AND revoked_at IS NULL',
+        [f.user],
+      )
+    ).rows.map((r) => r.id),
+    tokens: (
+      await query(
+        'SELECT id FROM multitable_api_tokens WHERE created_by=$1 AND revoked=false',
+        [f.user],
+      )
+    ).rows.map((r) => r.id),
+  })
+  const liveBefore = await live()
+  expect(liveBefore.sessions).toContain(session!.id)
+  expect(liveBefore.tokens).toContain(token)
+  const generation = await accessGeneration(f.user)
+  const watermark: string | null =
+    (
+      await query(
+        'SELECT revoked_after::text AS t FROM user_session_revocations WHERE user_id=$1',
+        [f.user],
+      )
+    ).rows[0]?.t ?? null
+  return {
+    async expectRevoked() {
+      expect(await live()).toEqual({ sessions: [], tokens: [] })
+      expect(
+        (
+          await query(
+            'SELECT revoked_at IS NOT NULL AS revoked FROM user_sessions WHERE id=$1',
+            [session!.id],
+          )
+        ).rows,
+      ).toEqual([{ revoked: true }])
+      expect(
+        (
+          await query(
+            'SELECT revoked,revoked_at IS NOT NULL AS stamped FROM multitable_api_tokens WHERE id=$1',
+            [token],
+          )
+        ).rows,
+      ).toEqual([{ revoked: true, stamped: true }])
+      expect(await accessGeneration(f.user)).toBe(generation + 1)
+      expect(
+        (
+          await query(
+            'SELECT ($2::timestamptz IS NULL OR revoked_after > $2::timestamptz) AS advanced FROM user_session_revocations WHERE user_id=$1',
+            [f.user, watermark],
+          )
+        ).rows,
+      ).toEqual([{ advanced: true }])
+    },
+  }
+}
+/** Allowed release: one-id allowlist, nothing restored, every session and token revoked, none created, generation +1. */
 async function expectAllowedRelease(
   f: Fixture,
   id: string,
@@ -371,8 +448,11 @@ async function expectAllowedRelease(
         f.user,
       ])
     ).rows
+  const credentials = await liveCredentials(f)
   const before = await authority(),
     sessionsBefore = await sessions()
+  // Never vacuous: at least the session created above must be there to be revoked.
+  expect(sessionsBefore.length).toBeGreaterThan(0)
   await releaseWith(f, id, digest)
   expect(await journalRow(id)).toMatchObject({
     state: 'released',
@@ -385,6 +465,7 @@ async function expectAllowedRelease(
     sessionsBefore.map((s) => s.id).sort(),
   )
   expect(sessionsAfter.every((s) => s.revoked_at)).toBe(true)
+  await credentials.expectRevoked()
   expect(
     (
       await query(
@@ -999,6 +1080,7 @@ suite('DingTalk controlled login repair', () => {
       localLinkCount: 0,
       revocationRetained: true,
     })
+    const credentials = await liveCredentials(f)
     await releaseDingTalkRepair(
       r.id,
       f.admin,
@@ -1006,6 +1088,7 @@ suite('DingTalk controlled login repair', () => {
       'release',
       f.password,
     )
+    await credentials.expectRevoked()
     expect(
       (
         await query(
@@ -1274,6 +1357,7 @@ suite('DingTalk controlled login repair', () => {
       ).rows
     const membershipBefore = await membership()
     expect(membershipBefore).toEqual([{ org_id: f.org, is_active: false }])
+    const credentials = await liveCredentials(f)
     await releaseDingTalkRepair(
       r.id,
       f.admin,
@@ -1281,6 +1365,7 @@ suite('DingTalk controlled login repair', () => {
       'release',
       f.password,
     )
+    await credentials.expectRevoked()
     expect(await journalRow(r.id)).toMatchObject({
       state: 'released',
       released_account_ids: [f.account],
@@ -1655,6 +1740,7 @@ suite('DingTalk controlled login repair', () => {
         releasedAccountIds: [f.account],
         linkedDingTalkAccountIds: [f.account],
       })
+      const credentials = await liveCredentials(f)
       await releaseDingTalkRepair(
         r.id,
         f.admin,
@@ -1662,6 +1748,7 @@ suite('DingTalk controlled login repair', () => {
         'release',
         f.password,
       )
+      await credentials.expectRevoked()
       expect(await journalRow(r.id)).toMatchObject({
         state: 'released',
         released_account_ids: [f.account],
@@ -3196,7 +3283,7 @@ suite('DingTalk controlled login repair', () => {
 
     it('the directory guard decides by the real account row; a missing row fails closed', async () => {
       const f = await fixture()
-      await applyRepair(f)
+      const r = await applyRepair(f)
       await expect(link(randomUUID(), f.user)).rejects.toMatchObject({
         code: '55000',
       })
@@ -3207,6 +3294,90 @@ suite('DingTalk controlled login repair', () => {
         code: '55000',
       })
       await expect(localSource(f)).resolves.toBeDefined()
+      // The link row's own columns are request fields: a DingTalk account written with every link value a local
+      // writer uses (local-directory-org.ts: 'local_explicit', no reviewer, no note) is still fenced, and a local
+      // account written with DingTalk-looking values still passes. Only directory_accounts.provider decides.
+      const localWriterShape = (account: string) =>
+        query(
+          `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy, created_at, updated_at)
+           VALUES ($1, $2, 'linked', 'local_explicit', NOW(), NOW())
+           ON CONFLICT (directory_account_id) DO UPDATE SET local_user_id = EXCLUDED.local_user_id, link_status = EXCLUDED.link_status, match_strategy = EXCLUDED.match_strategy, updated_at = NOW()`,
+          [account, f.user],
+        )
+      const forged = async (tag: string) => {
+        const fresh = async (shape: string) =>
+          addAccount(f.source, f.corp, `${tag}-${shape}-${f.user}`, {
+            union: 'new-union-' + f.user,
+          })
+        const refused = { code: '55000', message: 'repair blocks a second directory source' }
+        // Plain INSERT with the local strategy and a reviewer/note.
+        const w1 = await fresh('w1')
+        await expect(
+          query(
+            `INSERT INTO directory_account_links(id,directory_account_id,local_user_id,link_status,match_strategy,reviewed_by,review_note,created_at,updated_at) VALUES(gen_random_uuid(),$1,$2,'linked','local_explicit',$3,'probe',now(),now())`,
+            [w1, f.user, f.admin],
+          ),
+        ).rejects.toMatchObject(refused)
+        // The local writer's exact statement, as an INSERT.
+        await expect(localWriterShape(await fresh('w2'))).rejects.toMatchObject(refused)
+        // pending -> linked UPDATE that also switches the strategy to the local one.
+        const w4 = await fresh('w4')
+        await link(w4, f.user, 'pending', 'email')
+        await expect(
+          query(
+            "UPDATE directory_account_links SET link_status='linked',match_strategy='local_explicit',reviewed_by=NULL,review_note=NULL WHERE directory_account_id=$1",
+            [w4],
+          ),
+        ).rejects.toMatchObject(refused)
+        // An unmatched row taken over by the ON CONFLICT upserts (the suite's and the local writer's).
+        const w7 = await fresh('w7')
+        await query(
+          "INSERT INTO directory_account_links(directory_account_id,local_user_id,link_status,match_strategy) VALUES($1,NULL,'unmatched',NULL)",
+          [w7],
+        )
+        await expect(link(w7, f.user, 'linked', 'local_explicit')).rejects.toMatchObject(refused)
+        await expect(localWriterShape(w7)).rejects.toMatchObject(refused)
+        expect(
+          (
+            await query(
+              "SELECT directory_account_id FROM directory_account_links WHERE local_user_id=$1 AND link_status='linked' AND directory_account_id=ANY($2::uuid[])",
+              [f.user, [w1, w4, w7]],
+            )
+          ).rows,
+        ).toEqual([])
+      }
+      const localWithDingTalkValues = async () => {
+        const local = await localSource(f, 'login-repair-org-forge-' + randomUUID())
+        // Re-link the existing local row with DingTalk strategies through the upsert and a plain UPDATE.
+        for (const strategy of ['manual_admin', 'auto_external_key', 'email'])
+          await expect(link(local.account, f.user, 'linked', strategy)).resolves.toBeDefined()
+        await expect(
+          query(
+            "UPDATE directory_account_links SET match_strategy='manual_admin',reviewed_by=$2,review_note='probe' WHERE directory_account_id=$1",
+            [local.account, f.admin],
+          ),
+        ).resolves.toBeDefined()
+        // A fresh local account in the same integration linked by a plain INSERT with a DingTalk strategy.
+        const second = randomUUID()
+        await query(
+          `INSERT INTO directory_accounts(id,integration_id,provider,corp_id,external_user_id,external_key,name,is_active) VALUES($1,$2,'local',NULL,$3,$3,'Synthetic local member',true)`,
+          [second, local.integration, 'forge-' + second],
+        )
+        await expect(
+          query(
+            `INSERT INTO directory_account_links(directory_account_id,local_user_id,link_status,match_strategy,reviewed_by,review_note) VALUES($1,$2,'linked','manual_admin',$3,'probe')`,
+            [second, f.user, f.admin],
+          ),
+        ).resolves.toBeDefined()
+      }
+      await forged('applied')
+      await localWithDingTalkValues()
+      const preview = await releasePreview(f, r.id)
+      expect(preview.release?.mode).toBe('canonical')
+      await releaseWith(f, r.id, preview.digest)
+      expect(await journalRow(r.id)).toMatchObject({ state: 'released' })
+      await forged('released')
+      await localWithDingTalkValues()
     })
 
     it('termination with a local link present keeps the local link untouched', async () => {
