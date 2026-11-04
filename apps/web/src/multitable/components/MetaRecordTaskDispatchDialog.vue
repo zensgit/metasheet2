@@ -10,7 +10,10 @@
   RETRY KEY (tasks/recordTaskDispatchKey.ts): a key is obtained per record when the first create is
   sent and counted as sent before the request leaves; resending under it lets the service answer with
   the task the key already made instead of making a second one. The key is released once a result is
-  on screen, on 再派一项, and when the service refuses it.
+  on screen, on 再派一项, and when the service refuses it. An answer that lands after an await changes
+  the record's entry (a 4xx counted off it, a refused or found key released) only while the page
+  binding still holds and the entry still holds the key that request carried; otherwise it is left as
+  it is.
 
   WHAT EACH ANSWER SAYS (only what the browser knows):
    - 2xx: the task (new: 任务已创建; a resend the service matched: the earlier task and a note that this
@@ -689,8 +692,11 @@ async function resolveOnOpen(): Promise<void> {
         return
       }
       if (found !== null) {
+        // The read went out under the binding and this key: the task is shown, and the entry released,
+        // only while both still hold.
+        if (!verifyIdentity()) return
         earlierCreatedId.value = found
-        dispatchKeys.release(scope)
+        if (key !== null && dispatchKeys.holds(scope, key)) dispatchKeys.release(scope)
         return
       }
       // Kept: a resend from the form is still the same attempt (a task made and since deleted answers
@@ -817,6 +823,14 @@ async function probeOpenable(taskId: string, binding: DispatchBinding): Promise<
   }
 }
 
+/** Whether a late answer may still change the record's retry-key entry: the identity the request was
+ *  sent under still holds (the page binding, which a change marks for good), and the entry still holds
+ *  the key the request carried. A session change in this tab clears every entry, so the record may
+ *  since hold a newer key, made under another account, that this answer says nothing about. */
+function holdsSentKey(scope: DispatchKeyScope, key: string | undefined, binding: DispatchBinding): boolean {
+  return binding.check() && key !== undefined && dispatchKeys.holds(scope, key)
+}
+
 /** The create. Never throws. `wasUnresolved` and `persisted` are read before the request was sent. */
 async function dispatch(
   input: CreateTaskInput,
@@ -839,10 +853,13 @@ async function dispatch(
   if (result.kind !== 'ok') {
     const failure = classifyDispatchFailure(result)
     if (!isSettledDispatchFailure(failure)) return unknown
-    // A 4xx: this request created nothing.
-    dispatchKeys.markSettled(scope)
-    // A key the service refuses has nothing left to match; the next attempt gets a fresh one.
-    if (failure === 'INVALID_DISPATCH_KEY') dispatchKeys.release(scope)
+    // A 4xx: this request created nothing. It is counted off the record's entry only while that entry
+    // is still the one it was counted into (`holdsSentKey`); otherwise the entry is left as it is.
+    if (holdsSentKey(scope, input.dispatchKey, binding)) {
+      dispatchKeys.markSettled(scope)
+      // A key the service refuses has nothing left to match; the next attempt gets a fresh one.
+      if (failure === 'INVALID_DISPATCH_KEY') dispatchKeys.release(scope)
+    }
     return {
       failure: { message: FAILURE_MESSAGES[failure], unknown: false, earlierUnresolved: wasUnresolved, keyNotSaved: false },
     }

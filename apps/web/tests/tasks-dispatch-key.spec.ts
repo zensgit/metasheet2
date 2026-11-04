@@ -12,7 +12,8 @@
  *     reads as none.
  *  2. Counter: unresolved means at least one send that no 4xx has answered, and a 4xx answer never
  *     takes the count below zero; a dormant entry keeps its key; a reload (a new store on the same
- *     storage) finds the same key and count.
+ *     storage) finds the same key and count. `holds` says whether the entry carries a given key and
+ *     makes nothing.
  *  3. Session changes: leaving a signed-in principal removes every entry, also when that principal was
  *     read at page load (a new module graph) or could not be read, and a sign-in with none before it
  *     and a refresh for the same principal keep them. Thirty-three scopes leave thirty-two entries,
@@ -351,6 +352,26 @@ describe('the counter', () => {
     const storage = makeStorage()
     const { key } = storeOn(storage).obtain(SCOPE)
     expect(JSON.parse(storage.getItem(dispatchKeyStorageKey(SCOPE))!)).toMatchObject({ key, unsettled: 0 })
+  })
+
+  it('holds answers whether the scope\'s entry carries a given key, makes nothing, and reads a released key as not held', () => {
+    const storage = makeStorage()
+    const store = storeOn(storage)
+    expect(store.holds(SCOPE, KEY_A)).toBe(false)
+    expect(entriesOf(storage)).toEqual([])
+
+    const { key } = store.obtain(SCOPE)
+    expect(store.holds(SCOPE, key)).toBe(true)
+    expect(store.holds(SCOPE, KEY_A)).toBe(false)
+    expect(store.holds(OTHER_SCOPE, key)).toBe(false)
+    // Read back after a reload as well.
+    expect(storeOn(storage).holds(SCOPE, key)).toBe(true)
+
+    store.release(SCOPE)
+    expect(store.holds(SCOPE, key)).toBe(false)
+    const newer = store.obtain(SCOPE).key
+    expect(store.holds(SCOPE, newer)).toBe(true)
+    expect(store.holds(SCOPE, key)).toBe(false)
   })
 })
 

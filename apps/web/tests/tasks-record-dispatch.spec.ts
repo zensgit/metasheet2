@@ -47,6 +47,10 @@
  *     it; after a reload the open-time read under the key tells created / none / unknown; on open the
      caller's own tasks from the record are listed before the form (再派一项 shows it), and a list
      that cannot be read is said.
+ * 10. Late answers and the retry key (cells R1–R6): an answer that lands after a session change
+ *     changes neither the key nor the count of the entry the record holds then, nor the read under
+ *     that key on the next open; the same account's own late 4xx still counts off its request, and a
+ *     late 5xx or no answer still leaves the entry unresolved.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type App } from 'vue'
@@ -66,6 +70,7 @@ import {
 import {
   DISPATCH_KEY_STORAGE_PREFIX,
   dispatchKeyStorageKey,
+  dispatchKeys,
   resetDispatchKeysForTests,
 } from '../src/tasks/recordTaskDispatchKey'
 import { UuidUnavailableError } from '../src/utils/uuid'
@@ -1658,8 +1663,9 @@ describe('派发任务 dialog: the open after a reload, with an unresolved key',
     expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
     expect(sent.entry!.unsettled).toBe(1)
     expect(q('identity-refused')!.textContent).toContain(REFUSAL_ZH)
-    // The 4xx settled that request; the entry stays (dormant) for the next visit.
-    expect(storedEntry()!.unsettled).toBe(0)
+    // The 4xx landed after the sign-out: the identity the request was sent under no longer holds, so
+    // the entry is left as it was (still counted), and a later open reads under its key first.
+    expect(storedEntry()!.unsettled).toBe(1)
   })
 })
 
@@ -2525,6 +2531,206 @@ describe('派发任务 page binding: another identity seen once refuses for good
     await flushUi()
     await openDialog(again.container)
     expect(q<HTMLAnchorElement>('open-task')!.getAttribute('href')).toBe('/tasks/tsk_9')
+  })
+})
+
+// ---- late answers and the retry key (final review, 2026-11-04) ----------------------------------
+
+describe('派发任务 dialog: a late answer changes the retry key only while it is the entry it was sent under', () => {
+  /** Creates that wait to be answered, in the order they were sent. */
+  function deferredCreates(): Array<{ resolve: (value: Response) => void; reject: (error: unknown) => void }> {
+    const pending: Array<{ resolve: (value: Response) => void; reject: (error: unknown) => void }> = []
+    serveTasks({ create: () => new Promise<Response>((resolve, reject) => { pending.push({ resolve, reject }) }) })
+    return pending
+  }
+
+  async function unresolvedThenReload(): Promise<string> {
+    serveTasks({ create: () => jsonResponse(502, {}) })
+    const first = mountInspector()
+    await flushUi()
+    await openAndSubmit(first.container)
+    const key = String(storedEntry()!.key)
+    reloadPage()
+    return key
+  }
+
+  /** A drawer client whose read under a retry key waits to be answered; the list read answers at once. */
+  function waitingKeyedClient() {
+    const answers: Array<(value: unknown) => void> = []
+    const client = fakeApiClient()
+    client.listRecordTasks.mockImplementation((_sheetId: string, _recordId: string, options?: { dispatchKey?: string }) =>
+      options?.dispatchKey ? new Promise((resolve) => { answers.push(resolve) }) : Promise.resolve(NO_ROWS))
+    return { client, answers }
+  }
+
+  const lateRefusals: Array<[string, () => Response]> = [
+    ['403', () => jsonResponse(403, {})],
+    ['422', () => jsonResponse(422, { error: { code: 'INVALID_TITLE' } })],
+    ['422 INVALID_DISPATCH_KEY', () => jsonResponse(422, { error: { code: 'INVALID_DISPATCH_KEY' } })],
+  ]
+
+  for (const [name, late] of lateRefusals) {
+    it(`R1 (${name}): the previous account's late answer changes neither the new account's key, its count nor the read on the next open`, async () => {
+      const creates = deferredCreates()
+      const first = mountInspector()
+      await flushUi()
+      await openAndSubmit(first.container)
+      const keyA = String(storedEntry()!.key)
+      expect(storedEntry()!.unsettled).toBe(1)
+      // B signs in in this tab while A's create is out: A's run and every entry go.
+      useAuth().setToken(TOKEN_B)
+      await flushUi()
+      expect(storedEntry()).toBeNull()
+      unmountAll()
+      // The page is set up again under B, and B dispatches from the same record.
+      const second = mountInspector()
+      await flushUi()
+      await openAndSubmit(second.container)
+      const keyB = String(storedEntry()!.key)
+      expect(keyB).not.toBe(keyA)
+      expect(createKeys()).toEqual([keyA, keyB])
+      expect(storedEntry()).toMatchObject({ key: keyB, unsettled: 1 })
+      // A's create is answered now, with a 4xx; B's is still out.
+      creates[0].resolve(late())
+      await flushUi(10)
+      expect(storedEntry()).toMatchObject({ key: keyB, unsettled: 1 })
+      expect(q('error')).toBeNull()
+      // B's create gets no readable answer.
+      creates[1].resolve(jsonResponse(502, {}))
+      await flushUi(10)
+      expect(q('error')!.textContent!.trim()).toBe(OUTCOME_UNKNOWN_ZH)
+      expect(storedEntry()).toMatchObject({ key: keyB, unsettled: 1 })
+      // After a reload the open reads under B's key before anything else.
+      reloadPage()
+      const third = mountInspector()
+      await flushUi()
+      await openDialog(third.container)
+      expect(third.client.listRecordTasks).toHaveBeenCalledWith('sht_1', 'rec_1', { dispatchKey: keyB })
+      expect(q('earlier-no-task')!.textContent!.trim()).toBe(EARLIER_NO_TASK_ZH)
+      expect(tasksCalls('POST', '/api/tasks')).toHaveLength(2)
+      expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
+    })
+  }
+
+  it('R2: another account signed in from another tab sends under the record\'s same key; the previous account\'s late 4xx leaves its count as it is', async () => {
+    const creates = deferredCreates()
+    const first = mountInspector()
+    await flushUi()
+    await openAndSubmit(first.container)
+    const key = String(storedEntry()!.key)
+    unmountAll()
+    // B signs in in another tab: this tab is told nothing, so no entry is cleared.
+    signInElsewhere(TOKEN_B)
+    const second = mountInspector()
+    await flushUi()
+    await openAndSubmit(second.container)
+    expect(createKeys()).toEqual([key, key])
+    expect(storedEntry()).toMatchObject({ key, unsettled: 2 })
+    creates[0].resolve(jsonResponse(422, { error: { code: 'INVALID_TITLE' } }))
+    await flushUi(10)
+    expect(storedEntry()).toMatchObject({ key, unsettled: 2 })
+    expect(q('error')).toBeNull()
+    creates[1].resolve(jsonResponse(502, {}))
+    await flushUi(10)
+    expect(storedEntry()).toMatchObject({ key, unsettled: 2 })
+    reloadPage()
+    const third = mountInspector()
+    await flushUi()
+    await openDialog(third.container)
+    expect(third.client.listRecordTasks).toHaveBeenCalledWith('sht_1', 'rec_1', { dispatchKey: key })
+  })
+
+  it('R3: a late 4xx for a key the record no longer holds leaves the newer entry alone (the store is driven directly to stand for a newer key)', async () => {
+    const creates = deferredCreates()
+    const { container } = mountInspector()
+    await flushUi()
+    await openAndSubmit(container)
+    const sentKey = String(storedEntry()!.key)
+    // While the create is out the record's entry is replaced by a newer one, counted once.
+    dispatchKeys.release(SCOPE)
+    const newer = dispatchKeys.obtain(SCOPE).key
+    dispatchKeys.markSent(SCOPE)
+    expect(newer).not.toBe(sentKey)
+    creates[0].resolve(jsonResponse(422, { error: { code: 'INVALID_TITLE' } }))
+    await flushUi(10)
+    // The answer is still shown to the account that sent it; only the entry is left alone.
+    expect(q('error')!.textContent!.trim()).toBe('标题包含无法保存的字符')
+    expect(storedEntry()).toMatchObject({ key: newer, unsettled: 1 })
+  })
+
+  for (const [name, late] of lateRefusals.slice(0, 2)) {
+    it(`R4 (${name}): the same account's own late 4xx still counts off its request; the next open has nothing to resolve`, async () => {
+      const creates = deferredCreates()
+      const first = mountInspector()
+      await flushUi()
+      await openAndSubmit(first.container)
+      const key = String(storedEntry()!.key)
+      // The dialog is closed while the create is out; the answer lands later.
+      q<HTMLButtonElement>('cancel')!.click()
+      await flushUi()
+      creates[0].resolve(late())
+      await flushUi(10)
+      expect(storedEntry()).toMatchObject({ key, unsettled: 0 })
+      reloadPage()
+      const second = mountInspector()
+      await flushUi()
+      await openDialog(second.container)
+      expect(second.client.listRecordTasks).toHaveBeenCalledTimes(1)
+      expect(second.client.listRecordTasks).toHaveBeenCalledWith('sht_1', 'rec_1', { limit: 100 })
+      expect(q('earlier-unresolved')).toBeNull()
+    })
+  }
+
+  it('R5: a late 5xx or no answer at all still leaves the entry unresolved, and the next open reads under its key', async () => {
+    for (const answer of ['503', 'no answer'] as const) {
+      const creates = deferredCreates()
+      const first = mountInspector()
+      await flushUi()
+      await openAndSubmit(first.container)
+      const key = String(storedEntry()!.key)
+      q<HTMLButtonElement>('cancel')!.click()
+      await flushUi()
+      if (answer === '503') creates[0].resolve(jsonResponse(503, {}))
+      else creates[0].reject(new TypeError('Failed to fetch'))
+      await flushUi(10)
+      expect(storedEntry()).toMatchObject({ key, unsettled: 1 })
+      reloadPage()
+      const second = mountInspector()
+      await flushUi()
+      await openDialog(second.container)
+      expect(second.client.listRecordTasks).toHaveBeenCalledWith('sht_1', 'rec_1', { dispatchKey: key })
+      reloadPage()
+      sessionStorage.clear()
+    }
+  })
+
+  it('R6: the open-time read under the key answers after another account signed in elsewhere: nothing is shown and the entry is kept', async () => {
+    const key = await unresolvedThenReload()
+    const { client, answers } = waitingKeyedClient()
+    const { container } = mountInspector({ client })
+    await flushUi()
+    await openDialog(container)
+    expect(answers).toHaveLength(1)
+    signInElsewhere(TOKEN_B)
+    answers[0]({ items: [recordTask()], hasMore: false, degraded: false })
+    await flushUi(10)
+    expectRefused()
+    expect(storedEntry()).toMatchObject({ key, unsettled: 1 })
+  })
+
+  it('R6: the open-time read under the key answers after the record took a newer key: the task is shown and the newer entry kept (the store is driven directly)', async () => {
+    await unresolvedThenReload()
+    const { client, answers } = waitingKeyedClient()
+    const { container } = mountInspector({ client })
+    await flushUi()
+    await openDialog(container)
+    expect(answers).toHaveLength(1)
+    dispatchKeys.release(SCOPE)
+    const newer = dispatchKeys.obtain(SCOPE).key
+    answers[0]({ items: [recordTask()], hasMore: false, degraded: false })
+    await flushUi(10)
+    expect(q<HTMLAnchorElement>('open-task')!.getAttribute('href')).toBe('/tasks/tsk_7')
+    expect(storedEntry()).toMatchObject({ key: newer, unsettled: 0 })
   })
 })
 

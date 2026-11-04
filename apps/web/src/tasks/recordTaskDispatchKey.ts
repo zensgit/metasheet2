@@ -36,6 +36,13 @@
  * it never stored (a dormant entry on 再派一项) is as new as any other, and a key it refused is refused
  * again.
  *
+ * An answer changes an entry only while that entry is the one its request was counted into: before a
+ * late answer settles or releases the record's entry, the caller checks that the identity the request
+ * was sent under still holds and that the entry still holds the key the request carried (`holds`).
+ * After a session change the record may hold a newer key, made under another account, that the late
+ * answer says nothing about; that entry is then left as it is. Leaving an entry alone can only keep it
+ * unresolved longer (one more read under its key on a later open), never mark a request answered.
+ *
  * Separately, every entry goes when a session change moves this tab away from the principal it
  * remembers. That sweep runs only on a page that has loaded this module, and only for transitions
  * announced through `useAuth`; everything else (a page whose chunk has not loaded, a redirect from
@@ -91,6 +98,8 @@ export interface DispatchKeyStore {
   markSettled(scope: DispatchKeyScope): void
   /** There is an entry and at least one of its requests has no 4xx answer. */
   isUnresolved(scope: DispatchKeyScope): boolean
+  /** There is an entry and its key is `key`. Makes nothing: a scope with no entry holds no key. */
+  holds(scope: DispatchKeyScope, key: string): boolean
   /** The last write of this scope's entry reached storage. */
   isPersisted(scope: DispatchKeyScope): boolean
   /** The result has been shown, 再派一项, or the server refused the key. */
@@ -274,6 +283,9 @@ function buildStore(deps: DispatchKeyStoreDeps): { store: DispatchKeyStore; clea
     isUnresolved(scope) {
       const found = find(dispatchKeyStorageKey(scope))
       return found !== null && found.entry.unsettled > 0
+    },
+    holds(scope, key) {
+      return find(dispatchKeyStorageKey(scope))?.entry.key === key
     },
     isPersisted(scope) {
       return find(dispatchKeyStorageKey(scope))?.persisted ?? false
