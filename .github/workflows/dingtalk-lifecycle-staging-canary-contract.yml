@@ -9,6 +9,8 @@ on:
       - 'docker/app.staging.env.example'
       - 'scripts/ops/dingtalk-lifecycle-staging-canary-contract.test.mjs'
       - 'scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh'
+      - 'scripts/ops/dingtalk-lifecycle-staging-canary-accepted-exclusions.txt'
+      - 'scripts/ops/attendance-window-runner-pipeline.lib.sh'
   workflow_dispatch:
 
 permissions:

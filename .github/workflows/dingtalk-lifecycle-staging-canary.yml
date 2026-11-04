@@ -11,14 +11,14 @@ run-name: "DingTalk Lifecycle Staging Canary: ${{ inputs.action }}${{ inputs.act
 #   bootstrap = staging-only create/repair of the FIXED dedicated lifecycle
 #               canary platform admin (lifecycle-canary@staging.invalid + fixed
 #               UUID). Requires full deploy SHA, expected_current_mode=off, exact
-#               mode off, health true, migrations zero. Idempotent for the owned
+#               mode off, health true, migrations gate passed. Idempotent for the owned
 #               row; collision fail-closed. Proves real password login. Never
 #               writes lifecycle env flags. Secrets: IDENTIFIER + PASSWORD only.
 #   human-bootstrap = staging-only create/repair of a SEPARATE fixed human
 #               platform admin (username staging-owner-admin, name Staging Owner
 #               Admin, no email/mobile). Requires full deploy SHA,
 #               expected_current_mode=off, confirmation CREATE_STAGING_HUMAN_ADMIN,
-#               exact mode off, health true, migrations zero. Authenticates admin
+#               exact mode off, health true, migrations gate passed. Authenticates admin
 #               API with the existing canary admin; human password only via
 #               secrets.STAGING_OWNER_ADMIN_PASSWORD → chmod-600 file path (never
 #               logged). Create or idempotent reset of the owned match only;
@@ -209,6 +209,9 @@ jobs:
             exit 2
           fi
 
+          # Only the remote script gates dispatch on syntax. The attendance lib is read at runtime in
+          # a throwaway subshell; a lib that fails to load reads as unknown there (non-off actions
+          # refuse, off judges by the whole ledger), so a broken lib never blocks off or status here.
           bash -n scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh
           echo "inputs and embedded scripts OK"
 
@@ -232,8 +235,13 @@ jobs:
           chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
           runner_dir="/tmp/dingtalk-lifecycle-canary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo "runner_dir=$runner_dir" >> "$GITHUB_OUTPUT"
+          # The remote script reads the attendance lib (owner exclusion list) and the canary
+          # accept table on demand from its own directory; --strip-components=2 lands all three
+          # side by side in the per-run runner dir.
           tar -czf - \
             scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh \
+            scripts/ops/attendance-window-runner-pipeline.lib.sh \
+            scripts/ops/dingtalk-lifecycle-staging-canary-accepted-exclusions.txt \
           | ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts -o IdentitiesOnly=yes -i ~/.ssh/deploy_key \
               "$DEPLOY_USER@$DEPLOY_HOST" \
               "bash -o pipefail -c 'set -euo pipefail; rm -rf ${runner_dir}; mkdir -p ${runner_dir}; tar -xzf - -C ${runner_dir} --strip-components=2'"

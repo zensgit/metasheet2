@@ -13,7 +13,7 @@
 #   bootstrap  — staging-only, manual create/repair of the FIXED dedicated
 #                lifecycle canary platform admin (email+UUID ownership markers).
 #                Requires full deploy SHA, expected_current_mode=off, exact mode
-#                off, health true, migrations_pending_zero true.
+#                off, health true, migrations_gate whole_ledger|owner_scoped.
 #                Idempotent for the owned row; email/id collision not matching
 #                BOTH markers fails closed. Proves real password login.
 #                NEVER writes lifecycle env flags; never touches arbitrary admins.
@@ -31,7 +31,7 @@
 #                access (admin role/isAdmin), real POST login
 #                (passwordChangeRequired + exact username), then required
 #                revoke-sessions with canary JWT. Never writes lifecycle env;
-#                never restarts. Post-check: exact SHA, health, migrations-zero,
+#                never restarts. Post-check: exact SHA, health, migrations gate,
 #                all flags OFF. Artifacts are values-free booleans/enums only.
 #   alias      — TRANSIENT secret-backed alias cutover canary.
 #                Success requires/proves OFF (post-rollback mode+login).
@@ -50,7 +50,7 @@
 #   pending    — TRANSIENT secret-backed pending-admit canary on an EXPLICIT
 #                owned directory account subject (file path only; never printed).
 #                Requires full deploy SHA, expected_current_mode=off, health true,
-#                migrations zero, canary login secrets, and
+#                migrations gate passed, canary login secrets, and
 #                CANARY_DIRECTORY_ACCOUNT_ID_FILE. Temporarily enables only
 #                DIRECTORY_PENDING_ACTIVATION_ENABLED, real admin admit, pending
 #                state assertions, optional activate path, then unconditional
@@ -91,12 +91,30 @@
 #
 # HARD SAFETY RAILS:
 #   * Staging compose + metasheet-staging-* containers only; no prod fallback.
-#   * migrations_pending_zero must be exactly "true" for preflight_ok and for
-#     action=off / action=alias / action=bootstrap / action=human-bootstrap /
-#     action=pending / action=deprovision (unknown is a fail, never success).
-#   * Every migrate.js exec forces MIGRATION_EXCLUDE / MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL /
-#     ALLOW_DB_RESET empty, so migrations_pending_zero always reads the whole ledger and
-#     is never narrowed by the container env. migrate_env_inherited_hazard (whether the
+#   * Migrations gate (migrations_gate, enum whole_ledger|owner_scoped|refused|unknown):
+#     preflight_ok for non-off targets and action=alias / bootstrap / human-bootstrap /
+#     pending / deprovision (pre-write preconditions AND post-write re-checks) pass only on
+#     whole_ledger (the whole ledger reads Pending: 0) or owner_scoped (the whole ledger's
+#     pending NAME SET equals exactly the tolerated set = owner exclusion list from the
+#     attendance window-runner lib ∩ the canary accept table beside this script, every
+#     tolerated name is proven known and pending — narrowing the ledger by exactly those
+#     names empties it — and the lib's excluded tables are proven absent through node pg
+#     in the backend container). refused and unknown always fail; unknown is never success.
+#   * action=off and preflight target=off use migrations_gate_off: whole ledger Pending: 0,
+#     or the ledger narrowed by the lib exclusion list itself reads Pending: 0. The accept
+#     table, name-set and table proofs are report-only for off. Lib unreadable → whole
+#     ledger only; whole ledger unknown → refuse.
+#   * The attendance lib is never sourced at top level: it is read on demand in a subshell,
+#     so a missing or broken lib degrades to the strict whole-ledger rule and never aborts
+#     status/off. Nothing in capture_live_snapshot's migration probes can fail or exit.
+#   * migrations_pending_zero keeps its whole-ledger meaning. A run with
+#     migrations_gate=owner_scoped must never be recorded as "zero pending migrations";
+#     record "zero pending outside the tolerated owner exclusions; exclusions proven
+#     unapplied and their tables absent".
+#   * Every migrate.js exec goes through migrate_list_exec, which forces
+#     MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL / ALLOW_DB_RESET empty and MIGRATION_EXCLUDE to
+#     either empty (whole ledger) or the lib-read exclusion csv (scoped ledger), so no list
+#     is ever narrowed by the container env. migrate_env_inherited_hazard (whether the
 #     container env sets any of those keys to a non-empty value) is report-only —
 #     booleans, never values.
 #   * action=off|alias|pending|deprovision: recreate backend only; prove
@@ -110,7 +128,10 @@
 #     only booleans / counts / reason enums / SHA.
 #   * Secrets never appear in shell argv, process listings via export of values,
 #     or logs; only chmod-600 file paths are passed.
-#   * Invoked as `bash -o pipefail -c '<script>'`.
+#   * The workflow's remote wrapper is `bash -o pipefail -c '<script>'`; inside it THIS file
+#     runs BY PATH (`bash '<runner_dir>/dingtalk-lifecycle-staging-canary-remote.sh'`), so
+#     BASH_SOURCE[0] resolves CANARY_HERE to the runner dir where the attendance lib and the
+#     canary accept table are extracted beside it.
 set -euo pipefail
 
 log() { echo "[lifecycle-canary] $*"; }
@@ -189,6 +210,19 @@ STAGING_WEB_HEALTH_URL="http://127.0.0.1:8082/api/health"
 STAGING_BACKEND_HEALTH_URL="http://127.0.0.1:18900/health"
 STAGING_API_BASE_URL="http://127.0.0.1:8082"
 MIGRATE_JS="packages/core-backend/dist/src/db/migrate.js"
+
+# Owner-ruled staging migration exclusions have ONE source: the attendance window-runner lib
+# (STAGING_OWNER_EXCLUDED_MIGRATIONS / STAGING_OWNER_EXCLUDED_TABLES). This script never
+# sources that lib at top level; read_owner_exclusion_contract loads it in a throwaway
+# subshell. The accept table beside this script lists the exclusion names this lane has
+# reviewed, each bound to the sha256 of the reviewed migration source file; the required CI
+# consistency test keeps lib list, accept table and migration sources in agreement. Both files
+# are shipped next to this script by the workflow (same directory after extraction).
+CANARY_HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || printf '.')"
+OWNER_EXCLUSION_LIB_BASENAME="attendance-window-runner-pipeline.lib.sh"
+CANARY_ACCEPT_TABLE_BASENAME="dingtalk-lifecycle-staging-canary-accepted-exclusions.txt"
+owner_exclusion_lib_path() { printf '%s/%s' "$CANARY_HERE" "$OWNER_EXCLUSION_LIB_BASENAME"; }
+canary_accept_table_path() { printf '%s/%s' "$CANARY_HERE" "$CANARY_ACCEPT_TABLE_BASENAME"; }
 
 FLAG_ALIAS="AUTH_LOGIN_USE_ALIASES"
 FLAG_PENDING="DIRECTORY_PENDING_ACTIVATION_ENABLED"
@@ -475,15 +509,299 @@ const { Client } = require("pg");
 }
 
 # The ONLY way this script executes migrate.js. docker exec -e overrides the container's
-# own env for this process, so the list is always the whole ledger: an inherited
-# MIGRATION_EXCLUDE (or the other migration-control keys) can never narrow what
-# Pending: counts.
+# own env for this process, so a list is never narrowed by an inherited MIGRATION_EXCLUDE
+# (or the other migration-control keys). With no argument MIGRATION_EXCLUDE is forced EMPTY
+# and the list is the whole ledger; the only non-empty value ever passed is an owner
+# exclusion csv read from the attendance lib (the scoped ledger). The other two keys are
+# always forced empty.
 migrate_list_exec() {
+  local exclude="${1:-}"
   docker exec \
-    -e MIGRATION_EXCLUDE= \
+    -e "MIGRATION_EXCLUDE=${exclude}" \
     -e MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL= \
     -e ALLOW_DB_RESET= \
     "$BACKEND_CONTAINER" node "$MIGRATE_JS" --list < /dev/null 2>/dev/null
+}
+
+# migrate_list_classify <list text>: true when the list reads "Pending: 0", false for any
+# other Pending count, unknown when the contract line is missing.
+migrate_list_classify() {
+  local list="$1"
+  if ! printf '%s\n' "$list" | grep -qE '^Pending:'; then
+    # list ran but did not emit the expected contract line → probe failed
+    printf 'unknown'
+    return 0
+  fi
+  if printf '%s\n' "$list" | grep -q '^Pending: 0$'; then
+    printf 'true'
+  else
+    printf 'false'
+  fi
+}
+
+# migrate_list_pending_count <list text>: the Pending count, or unknown.
+migrate_list_pending_count() {
+  local c
+  c="$(printf '%s\n' "$1" | sed -n 's/^Pending: \([0-9][0-9]*\)$/\1/p' | tail -n 1)"
+  if [[ "$c" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$c"
+  else
+    printf 'unknown'
+  fi
+}
+
+# migrate_list_pending_names <list text>: the pending migration names the list enumerates,
+# one per line, sorted and de-duplicated (empty when none are listed).
+migrate_list_pending_names() {
+  printf '%s\n' "$1" | sed -n 's/^  - \(.*\)$/\1/p' | LC_ALL=C sort -u
+}
+
+# capture_migrate_list_whole: the raw whole-ledger list on stdout; rc 1 (nothing printed)
+# when the backend is not running or the exec failed. Never exits.
+capture_migrate_list_whole() {
+  if ! docker inspect -f '{{.State.Running}}' "$BACKEND_CONTAINER" 2>/dev/null | grep -qx 'true'; then
+    return 1
+  fi
+  local list
+  if ! list="$(migrate_list_exec)"; then
+    return 1
+  fi
+  printf '%s' "$list"
+}
+
+# probe_scoped_pending_count <exclude csv>: the Pending count of the ledger narrowed by the
+# given owner exclusion csv (the only non-empty MIGRATION_EXCLUDE this script ever passes),
+# or unknown. Never exits.
+probe_scoped_pending_count() {
+  local list
+  if ! list="$(migrate_list_exec "$1")"; then
+    printf 'unknown'
+    return 0
+  fi
+  migrate_list_pending_count "$list"
+}
+
+# read_owner_exclusion_contract: stdout line 1 = the owner exclusion csv (empty for an empty
+# list), line 2 = the lib's excluded-tables-present SQL. The lib is sourced in a throwaway
+# subshell only (never in this process). rc 1 and nothing printed when the lib is unreadable,
+# fails to load, or rejects its own list.
+read_owner_exclusion_contract() {
+  local lib out
+  lib="$(owner_exclusion_lib_path)"
+  [[ -r "$lib" ]] || return 1
+  out="$(bash -c 'set -euo pipefail; source "$1"; csv="$(staging_owner_exclude_csv)"; sql="$(staging_owner_excluded_tables_present_sql)"; printf "%s\n%s\n" "$csv" "$sql"' _ "$lib" 2>/dev/null)" || return 1
+  [[ "$out" == *$'\n'* ]] || return 1
+  printf '%s' "$out"
+}
+
+# read_canary_accept_table: stdout = the accepted exclusion names, one per line. rc 1 and
+# nothing printed when the table is unreadable, a non-comment line is not
+# "<migration_name> <sha256>", or a name repeats. The sha256 binds each name to the reviewed
+# migration source file; CI verifies it, the runtime consumes names only.
+read_canary_accept_table() {
+  local table line name out="" seen=","
+  table="$(canary_accept_table_path)"
+  [[ -r "$table" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ -z "${line//[[:space:]]/}" || "$line" == \#* ]]; then
+      continue
+    fi
+    [[ "$line" =~ ^([A-Za-z0-9_]+)[[:space:]]+([0-9a-f]{64})[[:space:]]*$ ]] || return 1
+    name="${BASH_REMATCH[1]}"
+    [[ "$seen" != *",${name},"* ]] || return 1
+    seen="${seen}${name},"
+    out="${out}${name}"$'\n'
+  done < "$table"
+  printf '%s' "$out"
+}
+
+# probe_owner_excluded_tables_absent <sql>: runs the lib's excluded-tables-present SQL through
+# the backend container's own DATABASE_URL (node pg, as probe_alias_readiness does). The SQL
+# travels as argv, never interpolated. true when the count is 0, false when any excluded
+# table exists, unknown on any failure. Report-only for action=off. Never exits.
+probe_owner_excluded_tables_absent() {
+  local out
+  out="$(docker exec "$BACKEND_CONTAINER" node -e '
+const { Client } = require("pg");
+(async () => {
+  const url = process.env.DATABASE_URL;
+  const sql = process.argv[1];
+  if (!url || !sql) { process.stdout.write("unknown"); return; }
+  const c = new Client({ connectionString: url, connectionTimeoutMillis: 5000 });
+  try {
+    await c.connect();
+    const r = await c.query(sql);
+    const n = Number(Object.values(r.rows[0] ?? {})[0]);
+    process.stdout.write(Number.isInteger(n) && n >= 0 ? String(n) : "unknown");
+  } catch {
+    process.stdout.write("unknown");
+  } finally {
+    try { await c.end(); } catch { /* ignore */ }
+  }
+})().catch(() => { process.stdout.write("unknown"); });
+' "$1" < /dev/null 2>/dev/null || true)"
+  case "$out" in
+    0) printf 'true' ;;
+    ''|*[!0-9]*) printf 'unknown' ;;
+    *) printf 'false' ;;
+  esac
+}
+
+# snapshot_migrations_gate_fields <whole true|false|unknown> <whole list text>
+#   Computes the migration gate from the whole-ledger list already captured. Prints key=value
+#   lines; always invoked inside $(...) so nothing here can abort the caller — an unexpected
+#   failure leaves every field unknown.
+#   gate (non-off actions and non-off preflight targets):
+#     whole_ledger  the whole ledger reads Pending: 0
+#     owner_scoped  the whole ledger's pending name set equals exactly the tolerated set
+#                   (lib exclusion list ∩ accept table, non-empty); narrowing the ledger by
+#                   exactly the tolerated names empties it (each tolerated name is known and
+#                   pending); the lib's excluded tables are proven absent
+#     refused       the pending name set differs from the tolerated set (pending_set_mismatch:
+#                   a name outside it, an unaccepted exclusion pending, or a tolerated name
+#                   no longer pending), an excluded table present, or no tolerated set to apply
+#     unknown       a probe, the lib or the accept table could not be read — always refuses
+#   gate_off (action=off and preflight target=off):
+#     whole_ledger / owner_scoped (the ledger narrowed by the lib list itself reads Pending: 0)
+#     / refused / unknown. The accept table, name-set and table proofs are report-only here;
+#     lib unreadable → whole ledger only.
+snapshot_migrations_gate_fields() {
+  local whole="${1:-unknown}" list="${2:-}"
+  local lib_csv=unknown lib_sql="" accept_csv=unknown tolerated_csv=unknown
+  local pending_count=unknown scoped_zero='n/a' names_proven='n/a' tables_absent='n/a'
+  local gate=unknown gate_reason=probe_unknown gate_off=unknown gate_off_reason=probe_unknown
+  local contract accepted names expected name n tol_len scoped_lib=unknown scoped_tol=unknown
+  local csv_re='^([A-Za-z0-9_]+(,[A-Za-z0-9_]+)*)?$'
+
+  if contract="$(read_owner_exclusion_contract)"; then
+    lib_csv="${contract%%$'\n'*}"
+    lib_sql="${contract#*$'\n'}"
+    if [[ ! "$lib_csv" =~ $csv_re ]]; then
+      lib_csv=unknown
+      lib_sql=""
+    fi
+  fi
+  if accepted="$(read_canary_accept_table)"; then
+    accept_csv="$(printf '%s' "$accepted" | tr '\n' ',' | sed 's/,$//')"
+  fi
+  if [[ "$lib_csv" != "unknown" && "$accept_csv" != "unknown" ]]; then
+    tolerated_csv=""
+    for name in ${lib_csv//,/ }; do
+      if [[ ",${accept_csv}," == *",${name},"* ]]; then
+        tolerated_csv="${tolerated_csv}${tolerated_csv:+,}${name}"
+      fi
+    done
+  fi
+  pending_count="$(migrate_list_pending_count "$list")"
+
+  case "$whole" in
+    true)
+      gate=whole_ledger; gate_reason=whole_ledger_pending_zero
+      gate_off=whole_ledger; gate_off_reason=whole_ledger_pending_zero
+      ;;
+    false)
+      # off rule: the ledger narrowed by the lib list itself.
+      if [[ "$lib_csv" == "unknown" ]]; then
+        gate_off=refused; gate_off_reason=lib_unreadable_whole_ledger_pending
+      elif [[ -z "$lib_csv" ]]; then
+        gate_off=refused; gate_off_reason=no_owner_exclusions_whole_ledger_pending
+      else
+        scoped_lib="$(probe_scoped_pending_count "$lib_csv")"
+        case "$scoped_lib" in
+          0) scoped_zero=true; gate_off=owner_scoped; gate_off_reason=scoped_ledger_pending_zero ;;
+          unknown) scoped_zero=unknown; gate_off=unknown; gate_off_reason=scoped_probe_unknown ;;
+          *) scoped_zero=false; gate_off=refused; gate_off_reason=scoped_ledger_pending ;;
+        esac
+        tables_absent="$(probe_owner_excluded_tables_absent "$lib_sql")"
+      fi
+      # non-off rule: exact tolerated name set + per-name proof + tables absent.
+      if [[ "$tolerated_csv" == "unknown" ]]; then
+        gate=unknown
+        if [[ "$lib_csv" == "unknown" ]]; then gate_reason=lib_unreadable; else gate_reason=accept_table_unreadable; fi
+      elif [[ -z "$tolerated_csv" ]]; then
+        gate=refused; gate_reason=no_tolerated_exclusions_whole_ledger_pending
+      elif [[ "$pending_count" == "unknown" ]]; then
+        gate=unknown; gate_reason=pending_count_unknown
+      else
+        names="$(migrate_list_pending_names "$list")"
+        if [[ -z "$names" ]]; then n=0; else n="$(printf '%s\n' "$names" | wc -l | tr -d ' ')"; fi
+        # shellcheck disable=SC2086 # the csv is validated [A-Za-z0-9_,] above; splitting on commas is intended
+        expected="$(printf '%s\n' ${tolerated_csv//,/ } | LC_ALL=C sort -u)"
+        tol_len="$(printf '%s\n' "$expected" | wc -l | tr -d ' ')"
+        if [[ "$n" != "$pending_count" ]]; then
+          names_proven=unknown; gate=unknown; gate_reason=pending_names_unknown
+        elif [[ "$names" != "$expected" ]]; then
+          names_proven=false; gate=refused; gate_reason=pending_set_mismatch
+        else
+          if [[ "$tolerated_csv" == "$lib_csv" ]]; then
+            scoped_tol="$scoped_lib"
+          else
+            scoped_tol="$(probe_scoped_pending_count "$tolerated_csv")"
+          fi
+          if [[ "$scoped_tol" == "unknown" ]]; then
+            names_proven=unknown; gate=unknown; gate_reason=scoped_probe_unknown
+          elif [[ "$((pending_count - scoped_tol))" == "$tol_len" ]]; then
+            names_proven=true
+            case "$tables_absent" in
+              true) gate=owner_scoped; gate_reason=owner_scoped_proven ;;
+              false) gate=refused; gate_reason=excluded_tables_present ;;
+              *) gate=unknown; gate_reason=tables_probe_unknown ;;
+            esac
+          else
+            names_proven=false; gate=refused; gate_reason=tolerated_names_not_pending
+          fi
+        fi
+      fi
+      ;;
+    *) ;;
+  esac
+
+  printf 'owner_excluded_csv=%s\n' "$lib_csv"
+  printf 'canary_accepted_csv=%s\n' "$accept_csv"
+  printf 'tolerated_csv=%s\n' "$tolerated_csv"
+  printf 'pending_count=%s\n' "$pending_count"
+  printf 'scoped_zero=%s\n' "$scoped_zero"
+  printf 'names_proven=%s\n' "$names_proven"
+  printf 'tables_absent=%s\n' "$tables_absent"
+  printf 'gate=%s\n' "$gate"
+  printf 'gate_reason=%s\n' "$gate_reason"
+  printf 'gate_off=%s\n' "$gate_off"
+  printf 'gate_off_reason=%s\n' "$gate_off_reason"
+}
+
+# capture_migrations_gate: sets the SNAP_* migration gate globals from SNAP_MIGRATIONS_ZERO and
+# the captured whole list. Every field defaults to unknown; never fails.
+capture_migrations_gate() {
+  local fields="" key value
+  SNAP_OWNER_EXCLUDED_CSV=unknown
+  SNAP_CANARY_ACCEPTED_CSV=unknown
+  SNAP_TOLERATED_CSV=unknown
+  SNAP_MIGRATIONS_PENDING_COUNT=unknown
+  SNAP_MIGRATIONS_ZERO_SCOPED=unknown
+  SNAP_OWNER_EXCLUSION_NAMES_PROVEN=unknown
+  SNAP_OWNER_EXCLUDED_TABLES_ABSENT=unknown
+  SNAP_MIGRATIONS_GATE=unknown
+  SNAP_MIGRATIONS_GATE_REASON=probe_unknown
+  SNAP_MIGRATIONS_GATE_OFF=unknown
+  SNAP_MIGRATIONS_GATE_OFF_REASON=probe_unknown
+  fields="$(snapshot_migrations_gate_fields "${SNAP_MIGRATIONS_ZERO:-unknown}" "${SNAP_MIGRATE_LIST_WHOLE:-}" 2>/dev/null)" || fields=""
+  while IFS='=' read -r key value; do
+    case "$key" in
+      owner_excluded_csv) SNAP_OWNER_EXCLUDED_CSV="$value" ;;
+      canary_accepted_csv) SNAP_CANARY_ACCEPTED_CSV="$value" ;;
+      tolerated_csv) SNAP_TOLERATED_CSV="$value" ;;
+      pending_count) SNAP_MIGRATIONS_PENDING_COUNT="$value" ;;
+      scoped_zero) SNAP_MIGRATIONS_ZERO_SCOPED="$value" ;;
+      names_proven) SNAP_OWNER_EXCLUSION_NAMES_PROVEN="$value" ;;
+      tables_absent) SNAP_OWNER_EXCLUDED_TABLES_ABSENT="$value" ;;
+      gate) SNAP_MIGRATIONS_GATE="$value" ;;
+      gate_reason) SNAP_MIGRATIONS_GATE_REASON="$value" ;;
+      gate_off) SNAP_MIGRATIONS_GATE_OFF="$value" ;;
+      gate_off_reason) SNAP_MIGRATIONS_GATE_OFF_REASON="$value" ;;
+      *) ;;
+    esac
+  done <<< "$fields"
+  return 0
 }
 
 # Returns exactly one of: true | false | unknown. Report-only — never gates any action.
@@ -520,41 +838,40 @@ print("true" if hazard else "false")
   return 0
 }
 
-# Returns exactly one of: true | false | unknown
+# Returns exactly one of: true | false | unknown (whole ledger).
 # unknown MUST fail preflight and transitions — never treated as success.
+# Test-facing composition of capture_migrate_list_whole + migrate_list_classify; the runtime
+# path (capture_live_snapshot) calls those two directly and keeps the list for the gate.
 probe_migration_pending_zero() {
-  if ! docker inspect -f '{{.State.Running}}' "$BACKEND_CONTAINER" 2>/dev/null | grep -qx 'true'; then
-    printf 'unknown'
-    return 0
-  fi
   local list
-  if ! list="$(migrate_list_exec)"; then
+  if ! list="$(capture_migrate_list_whole)"; then
     printf 'unknown'
     return 0
   fi
-  if ! printf '%s\n' "$list" | grep -qE '^Pending:'; then
-    # list ran but did not emit the expected contract line → probe failed
-    printf 'unknown'
-    return 0
-  fi
-  if printf '%s\n' "$list" | grep -q '^Pending: 0$'; then
-    printf 'true'
-  else
-    printf 'false'
-  fi
+  migrate_list_classify "$list"
 }
 
-require_migrations_pending_zero_true() {
-  # Load-bearing for every transition (action=off|alias) and for
-  # action=bootstrap|human-bootstrap and for preflight_ok.
-  local v="$1" context="$2"
-  if [[ "$v" == "true" ]]; then
-    return 0
-  fi
-  if [[ "$v" == "false" ]]; then
-    fail "${context}: migrations_pending_zero must be exactly true (got false — pending migrations; run attendance staging migrate backup/clone-rehearsal first)"
-  fi
-  fail "${context}: migrations_pending_zero must be exactly true (got '${v}' — probe unknown/failed; refuse, do not treat unknown as success)"
+# Load-bearing for action=alias|bootstrap|human-bootstrap|pending|deprovision (pre-write
+# preconditions and post-write re-checks) and for preflight_ok of non-off targets. Reads the
+# gate enum only: whole_ledger and owner_scoped pass; refused and unknown fail.
+require_migrations_gate_ok() {
+  local gate="$1" context="$2"
+  case "$gate" in
+    whole_ledger|owner_scoped) return 0 ;;
+    refused) fail "${context}: migrations_gate must be whole_ledger or owner_scoped (got refused — pending migrations outside the tolerated owner exclusions, or an exclusion proof failed; see migrations_gate_reason in the artifact)" ;;
+    *) fail "${context}: migrations_gate must be whole_ledger or owner_scoped (got '${gate}' — probe unknown/failed; refuse, do not treat unknown as success)" ;;
+  esac
+}
+
+# action=off and preflight target=off only: whole ledger Pending: 0, or the ledger narrowed by
+# the lib exclusion list itself Pending: 0. Proof results are report-only for off.
+require_migrations_gate_off_ok() {
+  local gate="$1" context="$2"
+  case "$gate" in
+    whole_ledger|owner_scoped) return 0 ;;
+    refused) fail "${context}: migrations_gate_off must be whole_ledger or owner_scoped (got refused — pending migrations beyond the owner exclusion list; see migrations_gate_off_reason in the artifact)" ;;
+    *) fail "${context}: migrations_gate_off must be whole_ledger or owner_scoped (got '${gate}' — probe unknown/failed; refuse, do not treat unknown as success)" ;;
+  esac
 }
 
 require_canary_secret_files() {
@@ -982,7 +1299,7 @@ function readFrame() {
       // Password rotation PRIMARY guard (same shape as session-revocation.ts revokeUserSessions):
       // upsert user_session_revocations.revoked_after — JWT verify uses this watermark.
       // user_sessions row revoke is an additional belt only (not sufficient alone).
-      // Required when migrations_pending_zero=true; absence must roll back the repair.
+      // Required whenever the migrations gate passes; absence must roll back the repair.
       await c.query(
         "INSERT INTO user_session_revocations (user_id, revoked_after, updated_at, updated_by, reason) VALUES ($1, NOW(), NOW(), $2, $3) ON CONFLICT (user_id) DO UPDATE SET revoked_after = EXCLUDED.revoked_after, updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by, reason = EXCLUDED.reason",
         [ownerId, ownerId, "lifecycle_canary_bootstrap_password_repair"]
@@ -4830,6 +5147,9 @@ validate_mode_name() {
   esac
 }
 
+# json_str <value>: the value as a JSON string literal (artifact enums / csv fields).
+json_str() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
+
 write_status_artifact() {
   local build_sha="$1"
   local alias_on="$2" pending_on="$3" deprov_on="$4" mode="$5"
@@ -4841,11 +5161,25 @@ write_status_artifact() {
   local note="${13:-}"
   # Report-only snapshot field; defaulted so snapshots built without it still write.
   local migrate_env_hazard="${SNAP_MIGRATE_ENV_HAZARD:-unknown}"
+  # Migration gate fields (schema v2, additive); defaulted the same way. migrations_pending_zero
+  # keeps its whole-ledger meaning; the gate enums are what the actions read.
+  local migrations_pending_count="${SNAP_MIGRATIONS_PENDING_COUNT:-unknown}"
+  local migrations_pending_zero_scoped="${SNAP_MIGRATIONS_ZERO_SCOPED:-unknown}"
+  local owner_excluded_migrations="${SNAP_OWNER_EXCLUDED_CSV:-unknown}"
+  local canary_accepted_exclusions="${SNAP_CANARY_ACCEPTED_CSV:-unknown}"
+  local tolerated_exclusions="${SNAP_TOLERATED_CSV:-unknown}"
+  local owner_exclusion_names_proven="${SNAP_OWNER_EXCLUSION_NAMES_PROVEN:-unknown}"
+  local owner_excluded_tables_absent="${SNAP_OWNER_EXCLUDED_TABLES_ABSENT:-unknown}"
+  local migrations_gate="${SNAP_MIGRATIONS_GATE:-unknown}"
+  local migrations_gate_reason="${SNAP_MIGRATIONS_GATE_REASON:-probe_unknown}"
+  local migrations_gate_off="${SNAP_MIGRATIONS_GATE_OFF:-unknown}"
+  local migrations_gate_off_reason="${SNAP_MIGRATIONS_GATE_OFF_REASON:-probe_unknown}"
 
-  # STATUS ARTIFACT CONTRACT: only closed booleans / SHAs / health. Never dump env,
-  # credentials, canary subject ids, integration ids, or PII.
+  # STATUS ARTIFACT CONTRACT: only closed booleans / counts / reason enums / SHAs / health /
+  # repository-constant migration names. Never dump env, credentials, canary subject ids,
+  # integration ids, or PII.
   {
-    echo "schema=dingtalk-lifecycle-staging-canary-status-v1"
+    echo "schema=dingtalk-lifecycle-staging-canary-status-v2"
     echo "build_sha=${build_sha}"
     echo "mode=${mode}"
     echo "auth_login_use_aliases=${alias_on}"
@@ -4855,6 +5189,17 @@ write_status_artifact() {
     echo "alias_can_enable_cutover=${can_enable_alias}"
     echo "migrations_pending_zero=${migrations_pending_zero}"
     echo "migrate_env_inherited_hazard=${migrate_env_hazard}"
+    echo "migrations_pending_count=${migrations_pending_count}"
+    echo "migrations_pending_zero_scoped=${migrations_pending_zero_scoped}"
+    echo "owner_excluded_migrations=${owner_excluded_migrations}"
+    echo "canary_accepted_exclusions=${canary_accepted_exclusions}"
+    echo "tolerated_exclusions=${tolerated_exclusions}"
+    echo "owner_exclusion_names_proven=${owner_exclusion_names_proven}"
+    echo "owner_excluded_tables_absent=${owner_excluded_tables_absent}"
+    echo "migrations_gate=${migrations_gate}"
+    echo "migrations_gate_reason=${migrations_gate_reason}"
+    echo "migrations_gate_off=${migrations_gate_off}"
+    echo "migrations_gate_off_reason=${migrations_gate_off_reason}"
     echo "backend_health_ok=${health_ok}"
     if [[ -n "$preflight_target" ]]; then
       echo "preflight_target_mode=${preflight_target}"
@@ -4878,10 +5223,16 @@ write_status_artifact() {
     false) hazard_json=false ;;
     *) hazard_json=null ;; # unknown
   esac
+  local pending_count_json
+  if [[ "$migrations_pending_count" =~ ^[0-9]+$ ]]; then
+    pending_count_json="$migrations_pending_count"
+  else
+    pending_count_json=null
+  fi
 
   {
     echo "{"
-    echo "  \"schema\": \"dingtalk-lifecycle-staging-canary-status-v1\","
+    echo "  \"schema\": \"dingtalk-lifecycle-staging-canary-status-v2\","
     echo "  \"build_sha\": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$build_sha"),"
     echo "  \"mode\": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$mode"),"
     echo "  \"flags\": {"
@@ -4896,6 +5247,17 @@ write_status_artifact() {
     echo "  \"migrations_pending_zero\": ${mig_json},"
     echo "  \"migrations_probe\": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$migrations_pending_zero"),"
     echo "  \"migrate_env_inherited_hazard\": ${hazard_json},"
+    echo "  \"migrations_pending_count\": ${pending_count_json},"
+    echo "  \"migrations_pending_zero_scoped\": $(json_str "$migrations_pending_zero_scoped"),"
+    echo "  \"owner_excluded_migrations\": $(json_str "$owner_excluded_migrations"),"
+    echo "  \"canary_accepted_exclusions\": $(json_str "$canary_accepted_exclusions"),"
+    echo "  \"tolerated_exclusions\": $(json_str "$tolerated_exclusions"),"
+    echo "  \"owner_exclusion_names_proven\": $(json_str "$owner_exclusion_names_proven"),"
+    echo "  \"owner_excluded_tables_absent\": $(json_str "$owner_excluded_tables_absent"),"
+    echo "  \"migrations_gate\": $(json_str "$migrations_gate"),"
+    echo "  \"migrations_gate_reason\": $(json_str "$migrations_gate_reason"),"
+    echo "  \"migrations_gate_off\": $(json_str "$migrations_gate_off"),"
+    echo "  \"migrations_gate_off_reason\": $(json_str "$migrations_gate_off_reason"),"
     echo "  \"backend_health_ok\": ${health_ok},"
     if [[ -n "$preflight_target" ]]; then
       echo "  \"preflight_target_mode\": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$preflight_target"),"
@@ -4923,8 +5285,16 @@ capture_live_snapshot() {
   else
     SNAP_CAN_ENABLE_ALIAS="false"
   fi
-  SNAP_MIGRATIONS_ZERO="$(probe_migration_pending_zero)"
+  # Whole ledger: one exec; the list is kept for the gate so no second whole read is needed.
+  if ! SNAP_MIGRATE_LIST_WHOLE="$(capture_migrate_list_whole)"; then
+    SNAP_MIGRATE_LIST_WHOLE=""
+    SNAP_MIGRATIONS_ZERO="unknown"
+  else
+    SNAP_MIGRATIONS_ZERO="$(migrate_list_classify "$SNAP_MIGRATE_LIST_WHOLE")"
+  fi
   SNAP_MIGRATE_ENV_HAZARD="$(probe_migrate_env_inherited_hazard)"
+  # Owner-scoped gate: lib/accept-table read, scoped list, table proof. Never fails.
+  capture_migrations_gate
   SNAP_HEALTH_OK="$(fetch_backend_health_ok)"
 }
 
@@ -5270,6 +5640,8 @@ action_status() {
     echo "build_sha=${SNAP_BUILD_SHA:-unknown}"
     echo "migrations_pending_zero=${SNAP_MIGRATIONS_ZERO}"
     echo "migrate_env_inherited_hazard=${SNAP_MIGRATE_ENV_HAZARD:-unknown}"
+    echo "migrations_gate=${SNAP_MIGRATIONS_GATE:-unknown}"
+    echo "migrations_gate_off=${SNAP_MIGRATIONS_GATE_OFF:-unknown}"
     echo "transition_applied=false"
     echo "note=${note}"
   } > "${OUTPUT_DIR}/summary.txt"
@@ -5286,16 +5658,28 @@ preflight_for_target() {
   PREFLIGHT_NOTE="ok"
   validate_mode_name "$target" "target_mode"
 
-  # migrations: exactly true required — unknown is a fail (never acceptable success).
-  if [[ "$SNAP_MIGRATIONS_ZERO" != "true" ]]; then
-    PREFLIGHT_OK="false"
-    if [[ "$SNAP_MIGRATIONS_ZERO" == "unknown" ]]; then
-      PREFLIGHT_NOTE="migrations_probe_unknown"
-    else
-      PREFLIGHT_NOTE="migrations_pending"
-    fi
-    return 0
+  # migrations gate: non-off targets read migrations_gate (owner-scoped collection gate);
+  # target=off reads migrations_gate_off (whole ledger 0 or lib-scoped ledger 0). Only
+  # whole_ledger|owner_scoped pass; unknown is a fail (never acceptable success).
+  local gate
+  if [[ "$target" == "off" ]]; then
+    gate="${SNAP_MIGRATIONS_GATE_OFF:-unknown}"
+  else
+    gate="${SNAP_MIGRATIONS_GATE:-unknown}"
   fi
+  case "$gate" in
+    whole_ledger|owner_scoped) ;;
+    refused)
+      PREFLIGHT_OK="false"
+      PREFLIGHT_NOTE="migrations_pending"
+      return 0
+      ;;
+    *)
+      PREFLIGHT_OK="false"
+      PREFLIGHT_NOTE="migrations_probe_unknown"
+      return 0
+      ;;
+  esac
 
   if [[ "$SNAP_MODE" == "multi-on" ]]; then
     PREFLIGHT_OK="false"
@@ -5398,6 +5782,8 @@ action_preflight() {
     echo "preflight_ok=${PREFLIGHT_OK}"
     echo "migrations_pending_zero=${SNAP_MIGRATIONS_ZERO}"
     echo "migrate_env_inherited_hazard=${SNAP_MIGRATE_ENV_HAZARD:-unknown}"
+    echo "migrations_gate=${SNAP_MIGRATIONS_GATE:-unknown}"
+    echo "migrations_gate_off=${SNAP_MIGRATIONS_GATE_OFF:-unknown}"
     echo "note=${PREFLIGHT_NOTE}"
     echo "transition_applied=false"
   } > "${OUTPUT_DIR}/summary.txt"
@@ -5424,7 +5810,7 @@ action_bootstrap() {
 
   capture_live_snapshot
   assert_exact_sha
-  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=bootstrap"
+  require_migrations_gate_ok "$SNAP_MIGRATIONS_GATE" "action=bootstrap"
 
   if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
     fail "action=bootstrap refused: backend_health_ok must be true before account mutation"
@@ -5459,7 +5845,7 @@ action_bootstrap() {
   if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
     fail "action=bootstrap refused: post-bootstrap backend_health_ok must remain true"
   fi
-  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=bootstrap post-check"
+  require_migrations_gate_ok "$SNAP_MIGRATIONS_GATE" "action=bootstrap post-check"
   if [[ "${SNAP_BUILD_SHA:-}" != "$DEPLOY_SHA" ]]; then
     fail "action=bootstrap refused: post-bootstrap SHA '${SNAP_BUILD_SHA:-}' must match deploy_sha '${DEPLOY_SHA}'"
   fi
@@ -5499,7 +5885,7 @@ action_off() {
   # A failed force-recreate may leave no backend container to inspect. Keep the
   # already-proven pin for both the forward recreate and any rollback recreate.
   pin_live_backend_image_for_transition
-  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=off"
+  require_migrations_gate_off_ok "$SNAP_MIGRATIONS_GATE_OFF" "action=off"
 
   if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
     fail "action=off refused: backend_health_ok must be true before transition"
@@ -5571,7 +5957,7 @@ action_alias() {
   capture_live_snapshot
   assert_exact_sha
   pin_live_backend_image_for_transition
-  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=alias"
+  require_migrations_gate_ok "$SNAP_MIGRATIONS_GATE" "action=alias"
 
   if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
     fail "action=alias refused: backend_health_ok must be true before any env write"
@@ -5706,7 +6092,7 @@ action_human_bootstrap() {
 
   capture_live_snapshot
   assert_exact_sha
-  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=human-bootstrap"
+  require_migrations_gate_ok "$SNAP_MIGRATIONS_GATE" "action=human-bootstrap"
 
   if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
     fail "action=human-bootstrap refused: backend_health_ok must be true before account mutation"
@@ -5732,7 +6118,7 @@ action_human_bootstrap() {
   human_ok="true"
 
   # Re-prove stack posture after account mutation: mode still off, health true, SHA unchanged,
-  # migrations zero, all three lifecycle flags OFF. No restart expected.
+  # migrations gate passed, all three lifecycle flags OFF. No restart expected.
   capture_live_snapshot
   if [[ "$SNAP_MODE" != "off" ]]; then
     fail "action=human-bootstrap refused: post-human-bootstrap live mode must remain off (live='${SNAP_MODE}'); no lifecycle env write expected"
@@ -5743,7 +6129,7 @@ action_human_bootstrap() {
   if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
     fail "action=human-bootstrap refused: post-human-bootstrap backend_health_ok must remain true"
   fi
-  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=human-bootstrap post-check"
+  require_migrations_gate_ok "$SNAP_MIGRATIONS_GATE" "action=human-bootstrap post-check"
   if [[ "${SNAP_BUILD_SHA:-}" != "$DEPLOY_SHA" ]]; then
     fail "action=human-bootstrap refused: post-human-bootstrap SHA '${SNAP_BUILD_SHA:-}' must match deploy_sha '${DEPLOY_SHA}'"
   fi
@@ -5768,11 +6154,11 @@ action_human_bootstrap() {
     echo "post_human_bootstrap_mode_off=true"
     echo "post_human_bootstrap_flags_off=true"
     echo "post_human_bootstrap_health_ok=true"
-    echo "post_human_bootstrap_migrations_zero=true"
+    echo "post_human_bootstrap_migrations_gate=${SNAP_MIGRATIONS_GATE:-unknown}"
     echo "post_human_bootstrap_sha_match=true"
     echo "note=${note}"
   } > "${OUTPUT_DIR}/summary.txt"
-  log "action=human-bootstrap OK outcome=${HUMAN_BOOTSTRAP_OUTCOME} (no lifecycle env write; mode/health/SHA/migrations reasserted)"
+  log "action=human-bootstrap OK outcome=${HUMAN_BOOTSTRAP_OUTCOME} (no lifecycle env write; mode/health/SHA/migrations gate reasserted)"
 }
 
 # Transient secret-backed pending ADMIT canary (phase: admit-only by default).
@@ -5814,7 +6200,7 @@ action_pending() {
 
   capture_live_snapshot
   assert_exact_sha
-  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=pending"
+  require_migrations_gate_ok "$SNAP_MIGRATIONS_GATE" "action=pending"
 
   if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
     fail "action=pending refused: backend_health_ok must be true before mutation"
@@ -6084,7 +6470,7 @@ action_deprovision_apply() {
   capture_live_snapshot
   assert_exact_sha
   pin_live_backend_image_for_transition
-  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=deprovision"
+  require_migrations_gate_ok "$SNAP_MIGRATIONS_GATE" "action=deprovision"
 
   if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
     fail "action=deprovision apply refused: backend_health_ok must be true before any env write"
@@ -6349,7 +6735,7 @@ action_deprovision_restore() {
 
   capture_live_snapshot
   assert_exact_sha
-  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=deprovision restore"
+  require_migrations_gate_ok "$SNAP_MIGRATIONS_GATE" "action=deprovision restore"
 
   if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
     fail "action=deprovision restore refused: backend_health_ok must be true"
@@ -6429,7 +6815,7 @@ action_deprovision_restore() {
   fi
   flags_remain_off="true"
   assert_exact_sha
-  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=deprovision restore post-check"
+  require_migrations_gate_ok "$SNAP_MIGRATIONS_GATE" "action=deprovision restore post-check"
   if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
     fail "action=deprovision restore refused: backend_health_ok must remain true"
   fi
@@ -6511,7 +6897,7 @@ action_deprovision_empty_fetch_abort_recovery() {
 
   capture_live_snapshot
   assert_exact_sha
-  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=deprovision empty_fetch_abort_recovery"
+  require_migrations_gate_ok "$SNAP_MIGRATIONS_GATE" "action=deprovision empty_fetch_abort_recovery"
 
   if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
     fail "action=deprovision empty_fetch_abort_recovery refused: backend_health_ok must be true (journal left intact)"
@@ -6603,7 +6989,7 @@ action_deprovision_empty_fetch_abort_recovery() {
   fi
   flags_remain_off="true"
   assert_exact_sha
-  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=deprovision empty_fetch_abort_recovery post-check"
+  require_migrations_gate_ok "$SNAP_MIGRATIONS_GATE" "action=deprovision empty_fetch_abort_recovery post-check"
   if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
     fail "action=deprovision empty_fetch_abort_recovery refused: backend_health_ok must remain true; journal left intact"
   fi
@@ -6701,7 +7087,7 @@ action_deprovision_sync_failure_before_deprovision_recovery() {
 
   capture_live_snapshot
   assert_exact_sha
-  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=deprovision sync_failure_before_deprovision_recovery"
+  require_migrations_gate_ok "$SNAP_MIGRATIONS_GATE" "action=deprovision sync_failure_before_deprovision_recovery"
 
   if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
     fail "action=deprovision sync_failure_before_deprovision_recovery refused: backend_health_ok must be true (journal left intact)"
@@ -6797,7 +7183,7 @@ action_deprovision_sync_failure_before_deprovision_recovery() {
   fi
   flags_remain_off="true"
   assert_exact_sha
-  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=deprovision sync_failure_before_deprovision_recovery post-check"
+  require_migrations_gate_ok "$SNAP_MIGRATIONS_GATE" "action=deprovision sync_failure_before_deprovision_recovery post-check"
   if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
     fail "action=deprovision sync_failure_before_deprovision_recovery refused: backend_health_ok must remain true; journal left intact"
   fi
