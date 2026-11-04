@@ -23,6 +23,9 @@ import { join } from 'node:path'
 //             and, once the panel has seen the sheet, reads who can; the client rows are byte-equal to the plugin's
 //             (F-01 for these rows) and sit right after the pilot rows
 //   MR-COPY   every new refusal code has its own two-line zh + en sentence; the audit mode rows; the wording rules
+//   MR-STRADDLE (R80 verifier F1) a switch prompt acts only for the project, scope and session it was opened under: a
+//             scope move or a session switch closes it (cancel, typed text cleared, re-read), a confirm click after
+//             another tab replaced the session writes nothing, and a write that lands after a switch is not painted
 //   MR-MOUNT  the sync panel mounts the section ONCE with its five bindings; the section imports nothing from plugins/
 //
 // Synthetic, obviously-fake project numbers and handles only.
@@ -83,6 +86,7 @@ import {
   STOCK_PREP_WORKBENCH_CAPABILITIES,
   grantedStockPrepCapabilities,
 } from '../src/services/integration/stockPreparation/workbenchAccess'
+import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 
 // The SERVER's own manifest and decision, imported live (the F-01 posture).
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -597,6 +601,132 @@ describe('MR-PANEL — the section for an ADMIN', () => {
 })
 
 // ---------------------------------------------------------------------------
+// MR-STRADDLE (R80 verifier F1)
+// ---------------------------------------------------------------------------
+
+describe('MR-STRADDLE — a switch prompt acts only for the project, scope and session it was opened under', () => {
+  beforeEach(() => {
+    localStorage.setItem('auth_token', 'synthetic-session-mr-a')
+  })
+  afterEach(() => {
+    localStorage.removeItem('auth_token')
+  })
+
+  function mountMoving(api: StockPreparationManualRowsApi) {
+    const props = ref<{ projectNo: string; scope: { tenantId: string; workspaceId: string } }>({ projectNo: PROJECT, scope: { ...SCOPE } })
+    const host = mountReactive(() => ({ projectNo: props.value.projectNo, scope: props.value.scope, api }))
+    return { host, props }
+  }
+
+  async function openTyped(host: HTMLElement, typedText = PROJECT): Promise<void> {
+    ;(testid(host, 'stock-prep-project-manual-rows-set') as HTMLButtonElement).click()
+    await flush()
+    const input = testid(host, 'stock-prep-project-manual-rows-input') as HTMLInputElement
+    input.value = typedText
+    input.dispatchEvent(new Event('input'))
+    await flush()
+    expect((testid(host, 'stock-prep-project-manual-rows-confirm') as HTMLButtonElement).disabled).toBe(false)
+  }
+
+  const promptOf = (host: HTMLElement) => testid(host, 'stock-prep-project-manual-rows-prompt')
+
+  it('control: nothing changes — the confirm writes the project it was opened for, once', async () => {
+    const api = gatedApi(wire())
+    const { host } = mountMoving(api)
+    await flush()
+    await openTyped(host)
+    ;(testid(host, 'stock-prep-project-manual-rows-confirm') as HTMLButtonElement).click()
+    await flush()
+    expect(api.setCalls).toEqual([[PROJECT, PROJECT, 'disabled']])
+    expect(promptOf(host)).toBeNull()
+    expect(testid(host, 'stock-prep-project-manual-rows-result')!.dataset.result).toBe('disabled')
+  })
+
+  it('a scope move (tenant, then workspace) closes the prompt as cancel; the typed text is gone; nothing is written', async () => {
+    const api = gatedApi(wire())
+    const { host, props } = mountMoving(api)
+    await flush()
+    for (const scope of [{ ...SCOPE, tenantId: 'tenant-syn-other' }, { ...SCOPE, workspaceId: 'workspace-syn-other' }]) {
+      props.value = { projectNo: PROJECT, scope: { ...SCOPE } }
+      await flush()
+      await openTyped(host)
+      props.value = { ...props.value, scope }
+      await flush()
+      expect(promptOf(host), JSON.stringify(scope)).toBeNull()
+      ;(testid(host, 'stock-prep-project-manual-rows-set') as HTMLButtonElement).click()
+      await flush()
+      expect((testid(host, 'stock-prep-project-manual-rows-input') as HTMLInputElement).value).toBe('')
+      ;(testid(host, 'stock-prep-project-manual-rows-cancel') as HTMLButtonElement).click()
+      await flush()
+    }
+    expect(api.setCalls).toEqual([])
+  })
+
+  it('another principal takes the session (notified): the prompt closes as cancel, the section re-reads, nothing is written', async () => {
+    const api = gatedApi(wire())
+    const { host } = mountMoving(api)
+    await flush()
+    expect(api.getCalls).toEqual([PROJECT])
+    await openTyped(host)
+    localStorage.setItem('auth_token', 'synthetic-session-mr-b')
+    notifyAuthPrincipalChange()
+    await flush()
+    expect(promptOf(host), 'no question carried over to another principal').toBeNull()
+    expect(api.getCalls, 'read again for the session now held').toEqual([PROJECT, PROJECT])
+    ;(testid(host, 'stock-prep-project-manual-rows-set') as HTMLButtonElement).click()
+    await flush()
+    expect((testid(host, 'stock-prep-project-manual-rows-input') as HTMLInputElement).value).toBe('')
+    expect(api.setCalls).toEqual([])
+  })
+
+  it('a reset that keeps the same session (notified, nothing changed) does not close the prompt', async () => {
+    const api = gatedApi(wire())
+    const { host } = mountMoving(api)
+    await flush()
+    await openTyped(host)
+    notifyAuthPrincipalChange()
+    await flush()
+    expect(promptOf(host)).not.toBeNull()
+    expect(api.getCalls).toEqual([PROJECT])
+  })
+
+  it('another tab replaced the session (no notification): the confirm click is a cancel — nothing is written', async () => {
+    const api = gatedApi(wire())
+    const { host } = mountMoving(api)
+    await flush()
+    await openTyped(host)
+    localStorage.setItem('auth_token', 'synthetic-session-mr-other-tab')
+    ;(testid(host, 'stock-prep-project-manual-rows-confirm') as HTMLButtonElement).click()
+    await flush()
+    expect(api.setCalls).toEqual([])
+    expect(promptOf(host)).toBeNull()
+    expect(testid(host, 'stock-prep-project-manual-rows-result')).toBeNull()
+  })
+
+  it('a write that lands after the session switched is not painted: no result line, the state is the re-read one', async () => {
+    let releaseSet: () => void = () => {}
+    const readBack = clampStockPrepManualRowsSetResult({ ...wire(), policy: 'disabled', policySource: 'set', written: true, changed: true })!
+    const api: StockPreparationManualRowsApi = {
+      get: vi.fn(async () => clampStockPrepManualRowsState(wire())!),
+      set: vi.fn(() => new Promise<typeof readBack>((resolve) => { releaseSet = () => resolve(readBack) })),
+    }
+    const { host } = mountMoving(api)
+    await flush()
+    await openTyped(host)
+    ;(testid(host, 'stock-prep-project-manual-rows-confirm') as HTMLButtonElement).click()
+    await flush()
+    expect(api.set).toHaveBeenCalledTimes(1)
+    localStorage.setItem('auth_token', 'synthetic-session-mr-b')
+    notifyAuthPrincipalChange()
+    await flush()
+    releaseSet()
+    await flush()
+    expect(testid(host, 'stock-prep-project-manual-rows-result'), 'the old session\'s answer is not painted').toBeNull()
+    expect(testid(host, 'stock-prep-project-manual-rows-status')!.dataset.policy).toBe('allowed')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // MR-ALIGN
 // ---------------------------------------------------------------------------
 
@@ -752,14 +882,18 @@ describe('MR-MOUNT — one mount point in the sync panel; nothing from plugins/'
   const section = readFileSync(join(__dirname, '../src/components/integration/stockPreparation/StockPreparationProjectTargetManualRows.vue'), 'utf8')
   const service = readFileSync(join(__dirname, '../src/services/integration/stockPreparation/projectManualRows.ts'), 'utf8')
 
-  it('the sync panel mounts the section exactly once, with its five bindings', () => {
+  it('the sync panel mounts the section exactly once, with its five bindings (the project: the board\'s seed first)', () => {
     expect(panel.match(/<StockPreparationProjectTargetManualRows\b/g)).toHaveLength(1)
     const tag = panel.slice(panel.indexOf('<StockPreparationProjectTargetManualRows'), panel.indexOf('/>', panel.indexOf('<StockPreparationProjectTargetManualRows')) + 2)
-    expect(tag).toContain(':project-no="submittedProjectNo || props.projectNo"')
+    expect(tag).toContain(':project-no="manualRowsProjectNo"')
     expect(tag).toContain(':scope="scope"')
-    expect(tag).toContain(':last-run="report"')
+    expect(tag).toContain(':last-run="manualRowsRunIsBound ? report : null"')
     expect(tag).toContain(':project-sheet-known="Boolean(afterState && afterState.status !== \'absent\')"')
     expect(tag).toContain(':inert="Boolean(props.api || props.targetApi)"')
+    // R80 verifier F1: on the board the seed wins over a run's submitted number (the behaviour is pinned by BOARD-MR
+    // in StockPreparationProjectSyncPanel.spec.ts; this pins the source the five bindings read).
+    expect(panel).toContain('const manualRowsProjectNo = computed<string>(() => (props.projectNo ?? \'\').trim() || submittedProjectNo.value)')
+    expect(panel).toContain('const manualRowsRunIsBound = computed<boolean>(() => stockPrepProjectNumbersMatch(manualRowsProjectNo.value, submittedProjectNo.value))')
   })
 
   it('neither the section nor its service imports anything from plugins/ (the main image builds apps/web alone)', () => {
