@@ -6,6 +6,7 @@ import { query, transaction } from '../db/pg'
 import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { MAX_MANAGER_CHAIN_LEVELS } from '../services/ApprovalDirectoryOrg'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
+import { escapeLikePattern, visibleUserPredicate } from '../admin/user-visibility'
 import { redeliverFailedAttendanceNotification } from '../services/AttendanceNotificationRedelivery'
 import { ensurePlatformAdmin } from './admin-users'
 import { isDatabaseSchemaError } from '../utils/database-errors'
@@ -747,6 +748,7 @@ async function resolveBatchUsers(
         AND uo.is_active = true
        WHERE u.id = ANY($1::text[])
          AND u.is_active = true
+         AND ${visibleUserPredicate('u')}
        ${lockClause}`,
       [userIds, scope.orgId],
     )
@@ -754,6 +756,7 @@ async function resolveBatchUsers(
       `SELECT u.id, u.email, u.name, u.employee_no AS "employeeNo", u.department, u.is_active
        FROM users u
        WHERE u.id = ANY($1::text[])
+         AND ${visibleUserPredicate('u')}
        ${lockClause}`,
       [userIds],
     )
@@ -1145,7 +1148,7 @@ export function attendanceAdminRouter(): Router {
       const result = await transaction(async (client) => {
         const runQuery = client.query as typeof query
         const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
-        const term = q ? `%${q}%` : '%'
+        const term = q ? `%${escapeLikePattern(q)}%` : '%'
         const from = scope.kind === 'org'
           ? `FROM users u
              JOIN user_orgs uo
@@ -1154,18 +1157,19 @@ export function attendanceAdminRouter(): Router {
               AND uo.is_active = true`
           : 'FROM users u'
         const whereParams: unknown[] = scope.kind === 'org' ? [scope.orgId] : []
-        const clauses: string[] = scope.kind === 'org' ? ['u.is_active = true'] : []
+        const clauses: string[] = [visibleUserPredicate('u')]
+        if (scope.kind === 'org') clauses.push('u.is_active = true')
         if (q) {
           whereParams.push(term)
           const termIndex = whereParams.length
           clauses.push(`(
-            COALESCE(u.email, '') ILIKE $${termIndex}
-            OR COALESCE(u.username, '') ILIKE $${termIndex}
-            OR u.name ILIKE $${termIndex}
-            OR COALESCE(u.mobile, '') ILIKE $${termIndex}
-            OR COALESCE(u.employee_no, '') ILIKE $${termIndex}
-            OR COALESCE(u.department, '') ILIKE $${termIndex}
-            OR u.id ILIKE $${termIndex}
+            COALESCE(u.email, '') ILIKE $${termIndex} ESCAPE E'\\\\'
+            OR COALESCE(u.username, '') ILIKE $${termIndex} ESCAPE E'\\\\'
+            OR u.name ILIKE $${termIndex} ESCAPE E'\\\\'
+            OR COALESCE(u.mobile, '') ILIKE $${termIndex} ESCAPE E'\\\\'
+            OR COALESCE(u.employee_no, '') ILIKE $${termIndex} ESCAPE E'\\\\'
+            OR COALESCE(u.department, '') ILIKE $${termIndex} ESCAPE E'\\\\'
+            OR u.id ILIKE $${termIndex} ESCAPE E'\\\\'
           )`)
         }
         const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''

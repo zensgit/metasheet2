@@ -62,6 +62,8 @@ databaseSuite('SA05 permanent human-attested target — actual PG and no online 
   let createMaterialWriter: (input: WriterOptions) => TransactionWriter<MaterialMetadata>
   let createDraftWriter: (input: WriterOptions) => TransactionWriter<Draft>
   let createTargetWriter: (input: WriterOptions) => TransactionWriter<Metadata & { reused: boolean }>
+  let createAdditionalWriter: (input: WriterOptions) => TransactionWriter<Metadata & { reused: boolean; slot: number }>
+  let multiTargetUp = '', multiTargetDown = ''
   let example: (variant?: 'primary' | 'renamed') => { config: Config; text: string }
   const sessions: Session[] = []
   const envKeys = ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT'] as const
@@ -198,6 +200,12 @@ databaseSuite('SA05 permanent human-attested target — actual PG and no online 
     const targets = await importNative(pathToFileURL(path.join(lib, 'yida-approved-target-store.mjs')).href)
     createTarget = targets.createYidaApprovedTargetStore
     createTargetWriter = targets.createInternalYidaApprovedTargetTransactionWriter
+    createAdditionalWriter = targets.createInternalYidaAdditionalTargetTransactionWriter
+    // Y2 migration SQL, exactly what zzzz20261103130000 up()/down() execute.
+    const migration = await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261103130000_add_integration_yida_multi_target_slots.ts')).href) as
+      { YIDA_MULTI_TARGET_UP_SQL: string; YIDA_MULTI_TARGET_DOWN_SQL: string }
+    multiTargetUp = migration.YIDA_MULTI_TARGET_UP_SQL; multiTargetDown = migration.YIDA_MULTI_TARGET_DOWN_SQL
     const drafts = await importNative(pathToFileURL(path.join(lib, 'yida-draft-plan-store.mjs')).href)
     createDraft = drafts.createYidaDraftPlanStore
     createDraftWriter = drafts.createInternalYidaDraftTransactionWriter
@@ -497,5 +505,96 @@ databaseSuite('SA05 permanent human-attested target — actual PG and no online 
     expect(second.statements.some(sql => sql.startsWith(`INSERT INTO "${MATERIAL}"`))).toBe(true)
     expect(second.statements.some(sql => sql.startsWith(`INSERT INTO "${OP}"`))).toBe(true)
     expect((await onboardingEvidence()).counts).toEqual([1, 1, 1, 1, committed?.createdDraft.rows.length, 1, 1, 1])
+  })
+
+  // ---- Y2 multi-target (migration zzzz20261103130000). Synthetic data only. ----
+  async function catalog() {
+    const constraints = await owner.query(`SELECT c.conrelid::regclass::text AS rel, c.conname, pg_get_constraintdef(c.oid) AS def
+      FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace WHERE n.nspname = $1 ORDER BY 1, 2`, [schema])
+    const indexes = await owner.query('SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname = $1 ORDER BY 1, 2', [schema])
+    const triggers = await owner.query(`SELECT c.relname, t.tgname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND NOT t.tgisinternal ORDER BY 1, 2`, [schema])
+    const tables = await owner.query("SELECT tablename FROM pg_tables WHERE schemaname = $1 ORDER BY 1", [schema])
+    const functions = await owner.query(`SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = $1 ORDER BY 1`, [schema])
+    return { constraints: constraints.rows, indexes: indexes.rows, triggers: triggers.rows, tables: tables.rows, functions: functions.rows }
+  }
+  const pgCode = async (promise: Promise<unknown>) => {
+    try { await promise; return 'NO_ERROR' } catch (error) { return codeOf(error) }
+  }
+  async function additional(active: Session, value: Request) {
+    const writer = createAdditionalWriter({ security, context: active.scope })
+    return active.db.transaction(async trx => {
+      await trx.setTransactionIsolationLevel('read committed')
+      return writer(trx, value)
+    })
+  }
+  function form(name: string) { const value = input(); value.config.target.formUuid = name; return value }
+
+  it('Y2 migration round trip: up keeps the first target working, down restores the exact catalog, down refuses an additional target', async () => {
+    const requested = await request(), registered = await first.target.register(requested)
+    const before = await catalog(), evidenceBefore = await evidence()
+    await owner.query(multiTargetUp)
+    const migrated = await catalog()
+    const slotChecks = migrated.constraints.filter(row => String(row.conname).endsWith('_slot_check')).map(row => String(row.def))
+    expect(slotChecks).toEqual(['CHECK (((slot >= 1) AND (slot <= 16)))', 'CHECK (((slot >= 1) AND (slot <= 16)))',
+      'CHECK (((slot >= 2) AND (slot <= 16)))'])
+    expect(migrated.tables.map(row => row.tablename)).toContain('integration_yida_target_registrations')
+    // Additive: the existing single-target row and its evidence are byte-identical and keep working.
+    expect(await evidence()).toEqual(evidenceBefore)
+    expect((await first.target.register(requested)).reused).toBe(true)
+    expect((await first.target.inspect()).targetRef).toBe(registered.targetRef)
+    expect(await evidence()).toEqual(evidenceBefore)
+    await owner.query(multiTargetUp) // idempotent rerun
+    expect(await catalog()).toEqual(migrated)
+    await owner.query(multiTargetDown)
+    expect(await catalog()).toEqual(before)
+    expect(await evidence()).toEqual(evidenceBefore)
+    await owner.query(multiTargetUp)
+    expect(await catalog()).toEqual(migrated)
+    const made = await additional(first, await request(first, form('synthetic-y2-second-form')))
+    expect(made.slot).toBe(2)
+    const withExtra = await evidence()
+    expect(withExtra.counts).toEqual([2, 2])
+    expect(await pgCode(owner.query(multiTargetDown))).toBe('55000')
+    expect(await catalog()).toEqual(migrated)
+    expect(await evidence()).toEqual(withExtra)
+  })
+
+  it('Y2 additional slots: same owner only, after slot 1, one per form and per material; raw SQL cannot forge a slot', async () => {
+    await owner.query(multiTargetUp)
+    await rejected(additional(first, await request(first, form('synthetic-y2-early-form'))), 'YIDA_APPROVED_TARGET_CONFLICT')
+    expect((await evidence()).counts).toEqual([0, 0])
+    const registered = await first.target.register(await request())
+    // The first target's own form cannot become a second slot.
+    await rejected(additional(first, await request(first, input())), 'YIDA_APPROVED_TARGET_CONFLICT')
+    const made = await additional(first, await request(first, form('synthetic-y2-second-form')))
+    expect([made.slot, made.reused, made.identityKind, made.canSend]).toEqual([2, false, 'owner-attested-single-target', false])
+    expect(made.targetRef === registered.targetRef).toBe(false)
+    // The same second form again (fresh material) is refused.
+    await rejected(additional(first, await request(first, form('synthetic-y2-second-form'))), 'YIDA_APPROVED_TARGET_CONFLICT')
+    // Another owner or tenant has no slot 1 here: nothing to extend.
+    for (const patch of [{ ownerId: 'synthetic-other-owner' }, { tenantId: 'synthetic-other-tenant' }]) {
+      const other = await session(context(patch))
+      await rejected(additional(other, await request(other, form('synthetic-y2-other-form'))), 'YIDA_APPROVED_TARGET_CONFLICT')
+    }
+    const rows = await tableRows(TARGET)
+    expect(rows.map(row => row.slot).sort()).toEqual([1, 2])
+    const sealed = JSON.parse(await security.decrypt(String(rows.find(row => row.slot === 2)!.evidence_encrypted))) as Row
+    expect([sealed.slot, sealed.targetRef, (sealed.locator as Row).formUuid]).toEqual([2, made.targetRef, 'synthetic-y2-second-form'])
+    expect(JSON.stringify(rows).includes('synthetic-y2-second-form')).toBe(false)
+    const base = rows.find(row => row.slot === 1)!
+    const insert = (row: Row) => {
+      const keys = Object.keys(row)
+      return owner.query(`INSERT INTO ${ident(TARGET)} (${keys.map(ident).join(',')}) VALUES (${keys.map((_, index) => '$' + (index + 1)).join(',')})`,
+        keys.map(key => row[key]))
+    }
+    const before = await evidence()
+    expect(await pgCode(insert({ ...base, slot: 3, target_ref: randomUUID(), owner_id: 'synthetic-other-owner' }))).toBe('P0001')
+    expect(await pgCode(insert({ ...base, slot: 17, target_ref: randomUUID() }))).toBe('23514')
+    expect(await pgCode(insert({ ...base, slot: 3, target_ref: randomUUID() }))).toBe('23505')
+    expect(await evidence()).toEqual(before)
+    // The slot-1 reader is unchanged: it never returns slot 2.
+    expect((await first.target.inspect()).targetRef).toBe(registered.targetRef)
   })
 })
