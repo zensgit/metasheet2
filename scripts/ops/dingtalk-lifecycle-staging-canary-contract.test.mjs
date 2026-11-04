@@ -7571,7 +7571,10 @@ function ownerGateHarness({ lib = 'syn_a', accept = ['syn_a'], env = {} } = {}) 
          SYN_LIB_PATH="$2"; SYN_ACCEPT_PATH="$3"; SYN_SHA="$4"
          ${OWNER_GATE_DOCKER_STUB}
          owner_exclusion_lib_path() { printf '%s' "$SYN_LIB_PATH"; }
-         canary_accept_table_path() { printf '%s' "$SYN_ACCEPT_PATH"; }
+         canary_accept_table_path() {
+           if [[ -n "\${ACCEPT_READ_LOG:-}" ]]; then printf 'accept-table-path\\n' >> "\$ACCEPT_READ_LOG"; fi
+           printf '%s' "$SYN_ACCEPT_PATH"
+         }
          read_live_flags() { printf 'false false false off'; }
          resolve_deployed_sha() { printf '%s' "$SYN_SHA"; }
          probe_alias_readiness() { printf 'true'; }
@@ -7736,21 +7739,43 @@ test('OWNER GATE: set equality — the lib list and the accept table must be the
   assert.equal(reorderedClean.gate, 'whole_ledger')
 })
 
-test('OWNER GATE: action=off never enters the non-off proof flow — no accept-table verdict, no table probe, no tolerated scoped read, no --confirm; the off rule still decides', () => {
+test('OWNER GATE: action=off never enters the non-off proof flow — with equal lists and failing proofs, argv holds only the whole-ledger and lib-scoped --list reads; the accept table is never opened; the off rule still decides', () => {
   const dir = mkdtempSync(join(tmpdir(), 'lifecycle-owner-gate-off-'))
   try {
-    for (const [pending, wantOff, wantLists] of [
-      ['syn_a', 'owner_scoped', ['', 'syn_a']],
-      ['', 'whole_ledger', ['']],
-      ['syn_a syn_other', 'refused', ['', 'syn_a']],
-    ]) {
-      const argvLog = join(dir, `argv-${wantOff}.log`)
-      // A mismatched accept table and failing proofs would refuse or stall the non-off rule; off
-      // must not even look at them.
-      const r = ownerGateHarness({ lib: 'syn_a', accept: ['syn_other'], env: { ACTION: 'off', STUB_PENDING: pending, ARGV_LOG: argvLog, STUB_PG_FAIL: '1', STUB_CONFIRM_FAIL: '1' } })
+    // Equal lists are the fixtures that can fail: with them, entering the non-off rule from off
+    // (directly or through any helper) would issue the node pg table probe, the tolerated scoped
+    // --list, the static --confirm support read and the per-name --confirm. The mismatched table
+    // pins the field-level claims (no accept-table verdict) on top.
+    const fixtures = [
+      { tag: 'eq1-pending', lib: 'syn_a', accept: ['syn_a'], pending: 'syn_a', wantOff: 'owner_scoped', wantLists: ['', 'syn_a'] },
+      // lib csv deliberately unsorted: a tolerated scoped read would use the normalized 'syn_a,syn_b'.
+      { tag: 'eq2-pending', lib: 'syn_b,syn_a', accept: ['syn_a', 'syn_b'], pending: 'syn_a syn_b', wantOff: 'owner_scoped', wantLists: ['', 'syn_b,syn_a'] },
+      { tag: 'eq1-extra', lib: 'syn_a', accept: ['syn_a'], pending: 'syn_a syn_other', wantOff: 'refused', wantLists: ['', 'syn_a'] },
+      { tag: 'eq1-clean', lib: 'syn_a', accept: ['syn_a'], pending: '', wantOff: 'whole_ledger', wantLists: [''] },
+      { tag: 'ne-pending', lib: 'syn_a', accept: ['syn_other'], pending: 'syn_a', wantOff: 'owner_scoped', wantLists: ['', 'syn_a'] },
+      { tag: 'ne-clean', lib: 'syn_a', accept: ['syn_other'], pending: '', wantOff: 'whole_ledger', wantLists: [''] },
+      { tag: 'ne-extra', lib: 'syn_a', accept: ['syn_other'], pending: 'syn_a syn_other', wantOff: 'refused', wantLists: ['', 'syn_a'] },
+    ]
+    for (const { tag, lib, accept, pending, wantOff, wantLists } of fixtures) {
+      const argvLog = join(dir, `argv-${tag}.log`)
+      const acceptReadLog = join(dir, `accept-read-${tag}.log`)
+      const r = ownerGateHarness({
+        lib,
+        accept,
+        env: { ACTION: 'off', STUB_PENDING: pending, ARGV_LOG: argvLog, ACCEPT_READ_LOG: acceptReadLog, STUB_PG_FAIL: '1', STUB_CONFIRM_FAIL: '1' },
+      })
       const f = gateFields(r)
+      const argv = existsSync(argvLog) ? readFileSync(argvLog, 'utf8') : ''
+      assert.doesNotMatch(argv, / node -e /, `${tag}: no node pg table probe`)
+      assert.doesNotMatch(argv, /grep -qF -- --confirm/, `${tag}: no static --confirm support read`)
+      assert.doesNotMatch(argv, /--confirm/, `${tag}: no per-name --confirm`)
+      const execLines = argv.split('\n').filter((l) => l !== '')
+      const lists = execLines.filter((l) => / node packages\/core-backend\/dist\/src\/db\/migrate\.js --list$/.test(l))
+      assert.equal(lists.length, execLines.length, `${tag}: every docker exec is a --list read`)
+      assert.deepEqual(lists.map((l) => l.match(/MIGRATION_EXCLUDE=(\S*)/)[1]), wantLists, `${tag}: whole ledger plus, only when pending, the lib-scoped read`)
+      assert.equal(existsSync(acceptReadLog), false, `${tag}: the accept table path is never resolved for off`)
       assert.equal(f.rc, '0')
-      assert.equal(f.gateOff, wantOff, `off rule (pending='${pending}')`)
+      assert.equal(f.gateOff, wantOff, `${tag}: off rule (pending='${pending}')`)
       assert.equal(f.gate, 'unknown')
       assert.equal(f.gateReason, 'not_evaluated_for_off')
       assert.equal(f.acc, 'unknown', 'the accept table is not read for off')
@@ -7759,14 +7784,18 @@ test('OWNER GATE: action=off never enters the non-off proof flow — no accept-t
       assert.equal(f.confirmed, 'n/a')
       assert.equal(f.tables, 'n/a')
       assert.equal(f.count, String(pending ? pending.split(' ').length : 0), 'count parsed from the whole list already captured')
-      const argv = existsSync(argvLog) ? readFileSync(argvLog, 'utf8') : ''
-      assert.doesNotMatch(argv, /--confirm/, 'no per-name confirm and no confirm support read')
-      assert.doesNotMatch(argv, / node -e /, 'no node pg table probe')
-      const lists = argv.trim().split('\n').filter((l) => / node packages\/core-backend\/dist\/src\/db\/migrate\.js --list$/.test(l))
-      assert.deepEqual(lists.map((l) => l.match(/MIGRATION_EXCLUDE=(\S*)/)[1]), wantLists, 'whole ledger plus, only when pending, the lib-scoped read')
       assert.match(r.artifact, /\nmigrations_gate=unknown\nmigrations_gate_reason=not_evaluated_for_off\n/)
       assert.match(r.artifact, new RegExp(`\\nmigrations_gate_off=${wantOff}\\n`))
     }
+    // Positive control: the same harness does log the proof flow and the accept-table read for a
+    // non-off action, so the absences above are observable rather than structural.
+    const ctlArgv = join(dir, 'argv-control.log')
+    const ctlAccept = join(dir, 'accept-read-control.log')
+    gateFields(ownerGateHarness({ lib: 'syn_a', accept: ['syn_a'], env: { ACTION: 'status', STUB_PENDING: 'syn_a', ARGV_LOG: ctlArgv, ACCEPT_READ_LOG: ctlAccept, STUB_PG_FAIL: '1', STUB_CONFIRM_FAIL: '1' } }))
+    const ctl = readFileSync(ctlArgv, 'utf8')
+    assert.match(ctl, / node -e /, 'control: the non-off rule issues the table probe')
+    assert.match(ctl, /grep -qF -- --confirm/, 'control: the non-off rule reads --confirm support')
+    assert.ok(existsSync(ctlAccept), 'control: the non-off rule resolves the accept table path')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
