@@ -124,10 +124,10 @@ function validateV1Config(input) {
   } }
 }
 
-function validateProtocolConfig(root) {
-  const issues = []
+// Shared by v2 and v3: unknown root keys, target, intent and instance id, in this issue order.
+function protocolHead(root, issues, version) {
   if (!allowedKeys(root, PROTOCOL_CONFIG_KEYS)) issues.push(configIssue('CONFIG_UNEXPECTED_FIELD', '(root)'))
-  if (root.version?.value !== 2 || root.kind?.value !== 'yida-form-protocol-static') {
+  if (root.version?.value !== version || root.kind?.value !== 'yida-form-protocol-static') {
     issues.push(configIssue('CONFIG_KIND_INVALID', '(root)'))
   }
   const target = dataObject(root.target?.value)
@@ -142,7 +142,11 @@ function validateProtocolConfig(root) {
     || (intent === 'create' && hasInstanceField)) {
     issues.push(configIssue('CONFIG_INSTANCE_ID_INVALID', 'instanceIdField'))
   }
+  return { target, intent }
+}
 
+// Shared by v2 and v3: the explicit local field catalog.
+function protocolCatalog(root, issues) {
   const rawCatalog = dataArray(root.fieldCatalog?.value, 32)
   const catalog = []
   if (!rawCatalog || rawCatalog.length < 1) {
@@ -173,6 +177,13 @@ function validateProtocolConfig(root) {
         ...((control === 'select' || control === 'radio') ? { options: [...rawOptions] } : {}) })
     }
   }
+  return catalog
+}
+
+function validateProtocolConfig(root) {
+  const issues = []
+  const { target, intent } = protocolHead(root, issues, 2)
+  const catalog = protocolCatalog(root, issues)
 
   const rawMap = dataArray(root.fieldMap?.value, 32)
   const map = []
@@ -228,8 +239,142 @@ function validateProtocolConfig(root) {
   } }
 }
 
+// v3: an explicit, closed set of mapping transforms. Lookups are not part of it: a value
+// that needs another table is prepared upstream by an approved read and arrives as a column.
+//   direct   - the one entry that binds a row column to a target (a column has at most one);
+//   copy     - the value of a direct entry's column, written to a second target;
+//   constant - a fixed value, checked against its own control when the config is validated;
+//   concat   - parts in listed order (columns and literals) joined by one separator.
+// The business key and emptyKeyFields name direct TARGETS, so each key part is bound to its
+// primary entry by name; a derived target can never enter the key, and fieldMap order cannot
+// change which entry a key part reads. Rows are evaluated and payloads built in field-catalog
+// order, so reordering fieldMap changes neither the plan nor its data DTOs.
+const TRANSFORM_ENTRY_KEYS = new Map([
+  ['direct', ['transform', 'source', 'target', 'type', 'required']],
+  ['copy', ['transform', 'copyOf', 'target', 'type', 'required']],
+  ['constant', ['transform', 'value', 'target', 'type', 'required']],
+  ['concat', ['transform', 'parts', 'separator', 'blank', 'target', 'type', 'required']],
+])
+const CONCAT_BLANK_RULES = new Set(['skip', 'refuse'])
+const MAX_CONCAT_PARTS = 8
+const MAX_LITERAL_LENGTH = 128
+const MAX_SEPARATOR_LENGTH = 16
+
+function exactKeys(descriptors, keys) {
+  return Object.keys(descriptors).length === keys.length
+    && keys.every((key) => Object.prototype.hasOwnProperty.call(descriptors, key))
+}
+
+function plainText(value, maxLength) {
+  return typeof value === 'string' && value.length <= maxLength && value.trim().length > 0 && !CONTROL.test(value)
+}
+
+function concatParts(value) {
+  const rawParts = dataArray(value, MAX_CONCAT_PARTS)
+  if (!rawParts || rawParts.length < 2) return null
+  const parts = []
+  for (const rawPart of rawParts) {
+    const part = dataObject(rawPart)
+    if (part && exactKeys(part, ['source']) && validIdentifier(part.source.value)) parts.push({ source: part.source.value })
+    else if (part && exactKeys(part, ['literal']) && plainText(part.literal.value, MAX_LITERAL_LENGTH)) {
+      parts.push({ literal: part.literal.value })
+    } else return null
+  }
+  return parts.some((part) => Object.prototype.hasOwnProperty.call(part, 'source')) ? parts : null
+}
+
+function transformEntry(value, catalog) {
+  const fields = dataObject(value)
+  const keys = TRANSFORM_ENTRY_KEYS.get(fields?.transform?.value)
+  if (!fields || !keys || !exactKeys(fields, keys)) return null
+  const transform = fields.transform.value
+  const target = fields.target.value
+  const type = fields.type.value
+  const required = fields.required.value
+  const control = catalog.find((item) => item.id === target)
+  if (!validIdentifier(target) || !control || typeof required !== 'boolean'
+    || type !== (control.control === 'number' ? 'number' : 'string')) return null
+  const options = control.control === 'select' || control.control === 'radio' ? control.options : null
+  if (transform === 'direct') {
+    return validIdentifier(fields.source.value)
+      ? { transform, source: fields.source.value, target, type, required } : null
+  }
+  if (transform === 'copy') {
+    return validIdentifier(fields.copyOf.value)
+      ? { transform, copyOf: fields.copyOf.value, target, type, required } : null
+  }
+  if (transform === 'constant') {
+    const constant = fields.value.value
+    if (type === 'number' ? !validProtocolNumber(constant) : !plainText(constant, MAX_VALUE_LENGTH)) return null
+    if (options && options.indexOf(constant) < 0) return null
+    return { transform, value: constant, target, type, required }
+  }
+  const parts = concatParts(fields.parts.value)
+  const separator = fields.separator.value
+  if (control.control !== 'text' || !parts || typeof separator !== 'string'
+    || separator.length > MAX_SEPARATOR_LENGTH || CONTROL.test(separator)
+    || !CONCAT_BLANK_RULES.has(fields.blank.value)) return null
+  return { transform, parts, separator, blank: fields.blank.value, target, type, required }
+}
+
+function validateTransformConfig(root) {
+  const issues = []
+  const { target, intent } = protocolHead(root, issues, 3)
+  const catalog = protocolCatalog(root, issues)
+
+  const rawMap = dataArray(root.fieldMap?.value, 32)
+  const map = []
+  if (!rawMap || rawMap.length < 1) {
+    issues.push(configIssue('CONFIG_FIELD_MAP_INVALID', 'fieldMap'))
+  } else {
+    const targets = new Set()
+    const sources = new Set()
+    for (const raw of rawMap) {
+      const entry = transformEntry(raw, catalog)
+      if (!entry || targets.has(entry.target) || (entry.transform === 'direct' && sources.has(entry.source))) {
+        issues.push(configIssue('CONFIG_FIELD_MAP_INVALID', 'fieldMap'))
+        break
+      }
+      targets.add(entry.target)
+      if (entry.transform === 'direct') sources.add(entry.source)
+      map.push(entry)
+    }
+    // A copy names a direct primary of the same type: no chains, no self-reference.
+    if (map.length === rawMap.length && map.some((entry) => entry.transform === 'copy'
+      && map.find((primary) => primary.transform === 'direct' && primary.target === entry.copyOf)?.type !== entry.type)) {
+      issues.push(configIssue('CONFIG_FIELD_MAP_INVALID', 'fieldMap'))
+    }
+  }
+  if (catalog.some((item) => item.required
+    && !map.some((entry) => entry.target === item.id && entry.required))) {
+    issues.push(configIssue('CONFIG_FIELD_CATALOG_INVALID', 'fieldCatalog'))
+  }
+
+  const primaries = new Map(map.filter((entry) => entry.transform === 'direct').map((entry) => [entry.target, entry]))
+  const rawKeys = dataArray(root.businessKey?.value, 8)
+  if (!rawKeys || rawKeys.length < 1 || new Set(rawKeys).size !== rawKeys.length
+    || rawKeys.some((key) => !validIdentifier(key) || !primaries.has(key))) {
+    issues.push(configIssue('CONFIG_KEY_INVALID', 'businessKey'))
+  }
+  const rawEmptyKeys = dataArray(root.emptyKeyFields?.value, 8)
+  if (!rawEmptyKeys || new Set(rawEmptyKeys).size !== rawEmptyKeys.length
+    || rawEmptyKeys.some((key) => !rawKeys?.includes(key) || primaries.get(key)?.type !== 'string'
+      || primaries.get(key).required || catalog.find((item) => item.id === key)?.required)) {
+    issues.push(configIssue('CONFIG_EMPTY_KEY_FIELDS_INVALID', 'emptyKeyFields'))
+  }
+  if (issues.length > 0) return { valid: false, issues }
+  return { valid: true, normalized: {
+    version: 3, kind: 'yida-form-protocol-static',
+    target: { appType: target.appType.value.trim(), formUuid: target.formUuid.value.trim() },
+    intent, businessKey: [...rawKeys], emptyKeyFields: [...rawEmptyKeys],
+    ...(intent === 'update' ? { instanceIdField: root.instanceIdField.value } : {}),
+    fieldMap: map, fieldCatalog: catalog,
+  } }
+}
+
 export function validateYidaStaticConfig(input) {
   const root = dataObject(input)
+  if (root?.version?.value === 3) return validateTransformConfig(root)
   return root?.version?.value === 2 ? validateProtocolConfig(root) : validateV1Config(input)
 }
 
@@ -291,7 +436,7 @@ function validProtocolNumber(value) {
 
 // JSON.parse and sanitizeRows own syntax/shape validation. This second scan is
 // for every explicit config: decoded keys must be unique and numeric text must
-// retain its decimal identity. Only v2 adds its narrower protocol number domain.
+// retain its decimal identity. Only v2 and v3 add their narrower protocol number domain.
 function validateRowTokens(text, rows, version) {
   let offset = 0
   const whitespace = () => { while (offset < text.length && /\s/.test(text[offset])) offset += 1 }
@@ -340,7 +485,7 @@ function validateRowTokens(text, rows, version) {
         const parsed = decimalIdentity(version === 1 && Object.is(value, -0) ? '-0' : String(value))
         if (!raw || !parsed || raw.negative !== parsed.negative
           || raw.coefficient !== parsed.coefficient || raw.exponent !== parsed.exponent
-          || (version === 2 && !validProtocolNumber(value))) {
+          || (version !== 1 && !validProtocolNumber(value))) {
           throw new YidaStaticPlanError('YIDA_STATIC_ROWS_INVALID')
         }
       }
@@ -388,7 +533,104 @@ function ownValue(row, field) {
   return Object.prototype.hasOwnProperty.call(row, field) ? row[field] : undefined
 }
 
+// v3 rows. A copy reads its primary's column; constants are already validated values.
+function primaryEntry(config, target) {
+  return config.fieldMap.find((entry) => entry.transform === 'direct' && entry.target === target)
+}
+
+function catalogOrderedEntries(config) {
+  const byTarget = new Map(config.fieldMap.map((entry) => [entry.target, entry]))
+  return config.fieldCatalog.map((item) => byTarget.get(item.id)).filter((entry) => entry !== undefined)
+}
+
+function transformIssue(config, index, code, entries) {
+  return { index, code, fields: entries.map((entry) => {
+    const source = entry.transform === 'direct' ? entry.source
+      : entry.transform === 'copy' ? primaryEntry(config, entry.copyOf).source : undefined
+    return { ...(source !== undefined ? { source } : {}), target: entry.target, type: entry.type, transform: entry.transform }
+  }) }
+}
+
+// Explicit concat: parts in listed order; a column part that is absent, null or blank text
+// is a blank part; text is used verbatim, a number as String(number), a boolean is refused.
+// 'skip' drops blank parts (and so their separators); 'refuse' refuses a partly blank value.
+// When every column part is blank the value is missing: literals alone never make one.
+function concatValue(entry, row) {
+  const pieces = []
+  let columns = 0
+  let blanks = 0
+  for (const part of entry.parts) {
+    if (!Object.prototype.hasOwnProperty.call(part, 'source')) { pieces.push(part.literal); continue }
+    columns += 1
+    const raw = ownValue(row, part.source)
+    if (missing(raw)) { blanks += 1; continue }
+    if (typeof raw === 'string') pieces.push(raw)
+    else if (typeof raw === 'number') pieces.push(String(raw))
+    else return { code: 'FIELD_TYPE' }
+  }
+  if (blanks === columns) return { value: undefined }
+  if (blanks > 0 && entry.blank === 'refuse') return { code: 'FIELD_PART_MISSING' }
+  const value = pieces.join(entry.separator)
+  return value.length > MAX_VALUE_LENGTH ? { code: 'FIELD_VALUE_TOO_LONG' } : { value }
+}
+
+function transformValue(config, entry, row) {
+  if (entry.transform === 'direct') return { value: ownValue(row, entry.source) }
+  if (entry.transform === 'copy') return { value: ownValue(row, primaryEntry(config, entry.copyOf).source) }
+  if (entry.transform === 'constant') return { value: entry.value }
+  return concatValue(entry, row)
+}
+
+function planTransformFields(config, row, index, issues, payload) {
+  const keyTargets = new Set(config.businessKey)
+  for (const entry of catalogOrderedEntries(config)) {
+    const result = transformValue(config, entry, row)
+    if (result.code) {
+      issues.push(transformIssue(config, index, result.code, [entry]))
+      continue
+    }
+    const value = result.value
+    if (missing(value)) {
+      // A missing key part is already KEY_MISSING; a copy of it is its own required field.
+      if (entry.required && !(entry.transform === 'direct' && keyTargets.has(entry.target))) {
+        issues.push(transformIssue(config, index, 'FIELD_REQUIRED', [entry]))
+      }
+      continue
+    }
+    if (entry.type !== typeof value) {
+      issues.push(transformIssue(config, index, 'FIELD_TYPE', [entry]))
+      continue
+    }
+    const control = config.fieldCatalog.find((item) => item.id === entry.target)
+    if (control.control === 'number' && !validProtocolNumber(value)) {
+      issues.push(transformIssue(config, index, 'FIELD_NUMBER_INVALID', [entry]))
+      continue
+    }
+    if ((control.control === 'select' || control.control === 'radio') && control.options.indexOf(value) < 0) {
+      issues.push(transformIssue(config, index, 'FIELD_OPTION_INVALID', [entry]))
+      continue
+    }
+    payload[entry.target] = value
+  }
+}
+
+const byFirstElement = (left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0)
+
+// Same key algorithm and label as v2, so a v2 layout restated as v3 keeps every row identity
+// already reserved by the delivery fence. Only the binding differs: by primary target name.
+function transformBusinessKey(config, row) {
+  const emptyKeys = new Set(config.emptyKeyFields)
+  const pairs = config.businessKey.map((target) => {
+    const raw = ownValue(row, primaryEntry(config, target).source)
+    const value = emptyKeys.has(target) && (raw === undefined || raw === null || raw === '') ? '' : raw
+    return [target, typeof value, value]
+  })
+  pairs.sort(byFirstElement)
+  return JSON.stringify(['yida-protocol-v2', config.target.appType, config.target.formUuid, pairs])
+}
+
 function localBusinessKey(config, row) {
+  if (config.version === 3) return transformBusinessKey(config, row)
   if (config.version === 2) {
     const emptyKeys = new Set(config.emptyKeyFields)
     const pairs = config.businessKey.map((source) => {
@@ -404,6 +646,12 @@ function localBusinessKey(config, row) {
 }
 
 function keyMissing(config, row, key) {
+  if (config.version === 3) {
+    const keyValue = ownValue(row, primaryEntry(config, key).source)
+    return config.emptyKeyFields.includes(key)
+      ? typeof keyValue === 'string' && keyValue !== '' && keyValue.trim() === ''
+      : missing(keyValue)
+  }
   const value = ownValue(row, key)
   if (config.version === 2 && config.emptyKeyFields.includes(key)) {
     return typeof value === 'string' && value !== '' && value.trim() === ''
@@ -439,8 +687,11 @@ export function buildYidaStaticPlan(input) {
     const issues = []
     const missingKeys = new Set(config.businessKey.filter((key) => keyMissing(config, row, key)))
     const hasMissingKey = missingKeys.size > 0
-    if (hasMissingKey) issues.push(rowIssue(index, 'KEY_MISSING',
-      config.fieldMap.filter((entry) => missingKeys.has(entry.source))))
+    if (hasMissingKey) issues.push(config.version === 3
+      ? transformIssue(config, index, 'KEY_MISSING', catalogOrderedEntries(config)
+        .filter((entry) => entry.transform === 'direct' && missingKeys.has(entry.target)))
+      : rowIssue(index, 'KEY_MISSING',
+        config.fieldMap.filter((entry) => missingKeys.has(entry.source))))
     const key = hasMissingKey ? undefined : localBusinessKey(config, row)
     if (key !== undefined) {
       const group = keyGroups.get(key) || []
@@ -448,7 +699,8 @@ export function buildYidaStaticPlan(input) {
       keyGroups.set(key, group)
     }
     const payload = {}
-    for (const entry of config.fieldMap) {
+    if (config.version === 3) planTransformFields(config, row, index, issues, payload)
+    else for (const entry of config.fieldMap) {
       const value = ownValue(row, entry.source)
       if (missing(value)) {
         if (entry.required && !keyFields.has(entry.source)) issues.push(rowIssue(index, 'FIELD_REQUIRED', [entry]))
@@ -500,7 +752,7 @@ export function buildYidaStaticPlan(input) {
       delete planned.instanceId
     }
   }
-  if (config.version === 2) {
+  if (config.version !== 1) {
     for (const planned of plannedRows) {
       if (planned.status !== 'invalid') planned.protocolPreview = protocolPreview(config, planned)
     }
@@ -587,4 +839,59 @@ export function createYidaProtocolExample(variant = 'primary') {
   ]
   const rows = values.map((row) => Object.fromEntries(sources.map((source, index) => [source, row[index]])))
   return { config, rows, text: JSON.stringify(rows, null, 2) }
+}
+
+// Synthetic v3 layout shaped like the legacy stock-prep material form (see the 2026-11-03
+// normalization doc): neutral placeholder field IDs, placeholder constants, no real values.
+// Lookup-derived fields (the project-level spec) are left out: they come from an approved read.
+export function createYidaTransformExample() {
+  const text = (id, required = false) => ({ id, control: 'text', required })
+  const direct = (source, target, required, type = 'string') => ({ transform: 'direct', source, target, type, required })
+  const config = {
+    version: 3, kind: 'yida-form-protocol-static',
+    target: { appType: 'synthetic_stock_app', formUuid: 'synthetic_material_form' },
+    intent: 'create',
+    businessKey: ['project', 'drawingNo', 'partName', 'specification', 'materialGrade', 'versionNo', 'parentDrawingNo'],
+    emptyKeyFields: ['specification', 'parentDrawingNo'],
+    fieldCatalog: [
+      text('project', true), text('drawingNo', true), text('partName', true), text('specification'),
+      text('materialGrade', true), text('versionNo', true), text('parentDrawingNo'), text('parentPartName'),
+      text('partCategory'), { id: 'totalQty', control: 'number', required: true }, text('blankSize'),
+      text('materialTypeText'),
+      { id: 'processRule', control: 'select', required: true, options: ['SYN-RULE-A', 'SYN-RULE-B'] },
+      { id: 'allowNegativeStock', control: 'radio', required: true, options: ['SYN-YES', 'SYN-NO'] },
+      text('defaultText'), text('sourceLineId', true),
+    ],
+    fieldMap: [
+      direct('projectNo', 'project', true),
+      direct('componentCode', 'drawingNo', true),
+      direct('componentName', 'partName', true),
+      direct('componentSpec', 'specification', false),
+      direct('material', 'materialGrade', true),
+      direct('sourceVersion', 'versionNo', true),
+      direct('parentComponentCode', 'parentDrawingNo', false),
+      direct('parentComponentName', 'parentPartName', false),
+      { transform: 'copy', copyOf: 'parentPartName', target: 'partCategory', type: 'string', required: false },
+      direct('totalQuantity', 'totalQty', true, 'number'),
+      { transform: 'concat', parts: [{ source: 'ext_blankLength' }, { source: 'ext_blankWidth' }, { source: 'ext_blankThickness' }],
+        separator: '*', blank: 'refuse', target: 'blankSize', type: 'string', required: false },
+      direct('blankType', 'materialTypeText', false),
+      { transform: 'constant', value: 'SYN-RULE-A', target: 'processRule', type: 'string', required: true },
+      { transform: 'constant', value: 'SYN-NO', target: 'allowNegativeStock', type: 'string', required: true },
+      { transform: 'constant', value: 'SYN-DEFAULT', target: 'defaultText', type: 'string', required: false },
+      direct('idempotencyKey', 'sourceLineId', true),
+    ],
+  }
+  const rows = [
+    { projectNo: 'DEMO-P1', componentCode: 'DEMO-DRW-1', componentName: '示例部件', componentSpec: 'SPEC-1',
+      material: 'MAT-1', sourceVersion: 'V1', parentComponentCode: null, parentComponentName: null,
+      totalQuantity: 4, ext_blankLength: 1200, ext_blankWidth: 600, ext_blankThickness: 20,
+      blankType: 'SYN-BLANK', idempotencyKey: 'SYN-LINE-1' },
+    { projectNo: 'DEMO-P1', componentCode: 'DEMO-DRW-2', componentName: '示例子件', componentSpec: '',
+      material: 'MAT-2', sourceVersion: 'V1', parentComponentCode: 'DEMO-DRW-1', parentComponentName: '示例部件',
+      totalQuantity: 6, ext_blankLength: null, ext_blankWidth: null, ext_blankThickness: null,
+      blankType: null, idempotencyKey: 'SYN-LINE-2' },
+  ]
+  const allocation = { mode: 'equal_integer', projectField: 'projectNo', quantityField: 'totalQuantity' }
+  return { config, rows, text: JSON.stringify(rows, null, 2), allocation }
 }

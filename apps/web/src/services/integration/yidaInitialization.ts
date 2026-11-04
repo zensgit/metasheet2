@@ -25,6 +25,8 @@ export interface YidaInitializationState {
   readonly sendEnabled: boolean
   /** Server's exact 测试连接 switch, same rule: display only; the server re-authorizes every probe. */
   readonly connectionTestEnabled: boolean
+  /** Y2: server's exact multi-target switch, same rule: shows the target picker / sheet source only. */
+  readonly multiTargetEnabled: boolean
 }
 /** Owner-run token-only connection test before initialization (ADR adr-yida-connection-test-20261028). */
 export interface YidaConnectionTestRequest {
@@ -105,15 +107,19 @@ function state(value: unknown, expectedCommand: string | null): YidaInitializati
   // The server sends connectionTestEnabled only while its switch is on (absent = off), so this
   // bundle also reads an older backend; the key set stays closed either way.
   const probeBit = !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'connectionTestEnabled')
-  const row = object(value, probeBit ? [...stateKeys, 'connectionTestEnabled'] : stateKeys)
+  // Y2: multiTargetEnabled follows the same absent-while-off rule.
+  const multiBit = !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'multiTargetEnabled')
+  const baseKeys = probeBit ? [...stateKeys, 'connectionTestEnabled'] : stateKeys
+  const row = object(value, multiBit ? [...baseKeys, 'multiTargetEnabled'] : baseKeys)
   const commandId = uuid(row.commandId)
   if (expectedCommand !== null && commandId !== expectedCommand) invalid()
   if (row.canSend !== false || row.tokenIssued !== false || row.externalWriteAttempted !== false || typeof row.sendEnabled !== 'boolean'
     || (row.status !== 'ready' && row.status !== 'initialized') || (row.status === 'ready') !== (row.draft === null)) invalid()
   if (probeBit && typeof row.connectionTestEnabled !== 'boolean') invalid()
+  if (multiBit && typeof row.multiTargetEnabled !== 'boolean') invalid()
   return Object.freeze({ commandId, status: row.status, draft: row.draft === null ? null : draft(row.draft),
     canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled: row.sendEnabled,
-    connectionTestEnabled: row.connectionTestEnabled === true })
+    connectionTestEnabled: row.connectionTestEnabled === true, multiTargetEnabled: row.multiTargetEnabled === true })
 }
 function connectionTestResult(value: unknown, expectedCommand: string | null): YidaConnectionTestResult {
   const row = object(value, ['commandId', 'mode', 'outcome', 'tokenIssued', 'tokenRetained', 'externalWriteAttempted', 'canSend'])

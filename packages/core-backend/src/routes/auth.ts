@@ -32,6 +32,8 @@ import {
 import { verifyInviteToken } from '../auth/invite-tokens'
 import { validatePassword } from '../auth/password-policy'
 import { classifyRecoveryConflict, sendIfRecoveryConflict } from '../db/recovery-conflict'
+import { query } from '../db/pg'
+import { escapeLikePattern, visibleUserPredicate } from '../admin/user-visibility'
 import { activatePendingUser } from '../auth/user-activate'
 import { createUserSession, getUserSession, listUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
 import { revokeUserSessions } from '../auth/session-revocation'
@@ -45,7 +47,6 @@ import { isApprovalCcUnreadBadgeEnabled, isApprovalMineOutcomeBadgeEnabled } fro
 import { isFwbWritebackEnabled } from '../multitable/approval-fwb-activation'
 import { isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1 } from '../attendance/w6-group-effective-policy-panel-flag'
 import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
-import { query } from '../db/pg'
 import { parseUserActivationStatus } from '../auth/user-activation'
 import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { auditLog } from '../audit/audit'
@@ -1995,18 +1996,14 @@ authRouter.get('/users', async (req: Request, res: Response) => {
       })
     }
 
-    const payload = jwt.verify(token, resolveRuntimeJwtSecret(process.env.JWT_SECRET))
-    if (!payload || typeof payload !== 'object') {
+    const user = await authService.verifyToken(token)
+    if (!user) {
       return res.status(401).json({
         success: false,
         error: 'Invalid token'
       })
     }
-
-    const tokenUser = payload as { role?: unknown; roles?: unknown }
-    const roles = Array.isArray(tokenUser.roles) ? tokenUser.roles.map((value) => String(value)) : []
-    const isAdmin = tokenUser.role === 'admin' || roles.includes('admin')
-    if (!isAdmin) {
+    if (user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         error: 'Forbidden'
@@ -2019,8 +2016,11 @@ authRouter.get('/users', async (req: Request, res: Response) => {
     const pageSize = Math.min(100, Math.max(1, requestedPageSize))
     const offset = (page - 1) * pageSize
 
-    const term = q ? `%${q}%` : '%'
-    const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR id ILIKE $1' : ''
+    const visible = visibleUserPredicate()
+    const term = q ? `%${escapeLikePattern(q)}%` : ''
+    const where = q
+      ? `WHERE ${visible} AND (COALESCE(email, '') ILIKE $1 ESCAPE E'\\\\' OR COALESCE(name, '') ILIKE $1 ESCAPE E'\\\\' OR id ILIKE $1 ESCAPE E'\\\\')`
+      : `WHERE ${visible}`
     const countSql = `SELECT COUNT(*)::int AS total FROM users ${where}`
     const listSql = `
       SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at

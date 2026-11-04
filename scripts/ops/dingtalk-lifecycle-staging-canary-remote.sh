@@ -94,6 +94,11 @@
 #   * migrations_pending_zero must be exactly "true" for preflight_ok and for
 #     action=off / action=alias / action=bootstrap / action=human-bootstrap /
 #     action=pending / action=deprovision (unknown is a fail, never success).
+#   * Every migrate.js exec forces MIGRATION_EXCLUDE / MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL /
+#     ALLOW_DB_RESET empty, so migrations_pending_zero always reads the whole ledger and
+#     is never narrowed by the container env. migrate_env_inherited_hazard (whether the
+#     container env sets any of those keys to a non-empty value) is report-only —
+#     booleans, never values.
 #   * action=off|alias|pending|deprovision: recreate backend only; prove
 #     postgres/redis IDs unchanged; require backend health true after restart;
 #     prove exact mode; restore previous/OFF override and re-recreate on any
@@ -469,6 +474,52 @@ const { Client } = require("pg");
   fi
 }
 
+# The ONLY way this script executes migrate.js. docker exec -e overrides the container's
+# own env for this process, so the list is always the whole ledger: an inherited
+# MIGRATION_EXCLUDE (or the other migration-control keys) can never narrow what
+# Pending: counts.
+migrate_list_exec() {
+  docker exec \
+    -e MIGRATION_EXCLUDE= \
+    -e MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL= \
+    -e ALLOW_DB_RESET= \
+    "$BACKEND_CONTAINER" node "$MIGRATE_JS" --list < /dev/null 2>/dev/null
+}
+
+# Returns exactly one of: true | false | unknown. Report-only — never gates any action.
+# true: the container env sets one of the migration-control keys to a non-empty value.
+# Names and values never leave the filter; only the boolean does. Any probe failure → unknown.
+probe_migrate_env_inherited_hazard() {
+  if ! docker inspect -f '{{.State.Running}}' "$BACKEND_CONTAINER" 2>/dev/null | grep -qx 'true'; then
+    printf 'unknown'
+    return 0
+  fi
+  local out
+  if ! out="$(docker inspect -f '{{json .Config.Env}}' "$BACKEND_CONTAINER" 2>/dev/null | python3 -c '
+import json, sys
+values = json.load(sys.stdin)
+if not isinstance(values, list):
+    raise SystemExit(1)
+keys = ("MIGRATION_EXCLUDE", "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL", "ALLOW_DB_RESET")
+hazard = False
+for value in values:
+    if not isinstance(value, str) or "=" not in value:
+        continue
+    name, _, val = value.partition("=")
+    if name in keys and val.strip() != "":
+        hazard = True
+print("true" if hazard else "false")
+' 2>/dev/null)"; then
+    printf 'unknown'
+    return 0
+  fi
+  case "$out" in
+    true|false) printf '%s' "$out" ;;
+    *) printf 'unknown' ;;
+  esac
+  return 0
+}
+
 # Returns exactly one of: true | false | unknown
 # unknown MUST fail preflight and transitions — never treated as success.
 probe_migration_pending_zero() {
@@ -477,7 +528,7 @@ probe_migration_pending_zero() {
     return 0
   fi
   local list
-  if ! list="$(docker exec "$BACKEND_CONTAINER" node "$MIGRATE_JS" --list < /dev/null 2>/dev/null)"; then
+  if ! list="$(migrate_list_exec)"; then
     printf 'unknown'
     return 0
   fi
@@ -4788,6 +4839,8 @@ write_status_artifact() {
   local preflight_ok="${11:-}"
   local transition_applied="${12:-false}"
   local note="${13:-}"
+  # Report-only snapshot field; defaulted so snapshots built without it still write.
+  local migrate_env_hazard="${SNAP_MIGRATE_ENV_HAZARD:-unknown}"
 
   # STATUS ARTIFACT CONTRACT: only closed booleans / SHAs / health. Never dump env,
   # credentials, canary subject ids, integration ids, or PII.
@@ -4801,6 +4854,7 @@ write_status_artifact() {
     echo "alias_admin_password_ready=${alias_ready}"
     echo "alias_can_enable_cutover=${can_enable_alias}"
     echo "migrations_pending_zero=${migrations_pending_zero}"
+    echo "migrate_env_inherited_hazard=${migrate_env_hazard}"
     echo "backend_health_ok=${health_ok}"
     if [[ -n "$preflight_target" ]]; then
       echo "preflight_target_mode=${preflight_target}"
@@ -4817,6 +4871,12 @@ write_status_artifact() {
     true) mig_json=true ;;
     false) mig_json=false ;;
     *) mig_json=null ;; # unknown
+  esac
+  local hazard_json
+  case "$migrate_env_hazard" in
+    true) hazard_json=true ;;
+    false) hazard_json=false ;;
+    *) hazard_json=null ;; # unknown
   esac
 
   {
@@ -4835,6 +4895,7 @@ write_status_artifact() {
     echo "  },"
     echo "  \"migrations_pending_zero\": ${mig_json},"
     echo "  \"migrations_probe\": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$migrations_pending_zero"),"
+    echo "  \"migrate_env_inherited_hazard\": ${hazard_json},"
     echo "  \"backend_health_ok\": ${health_ok},"
     if [[ -n "$preflight_target" ]]; then
       echo "  \"preflight_target_mode\": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$preflight_target"),"
@@ -4863,6 +4924,7 @@ capture_live_snapshot() {
     SNAP_CAN_ENABLE_ALIAS="false"
   fi
   SNAP_MIGRATIONS_ZERO="$(probe_migration_pending_zero)"
+  SNAP_MIGRATE_ENV_HAZARD="$(probe_migrate_env_inherited_hazard)"
   SNAP_HEALTH_OK="$(fetch_backend_health_ok)"
 }
 
@@ -5207,6 +5269,7 @@ action_status() {
     echo "mode=${SNAP_MODE}"
     echo "build_sha=${SNAP_BUILD_SHA:-unknown}"
     echo "migrations_pending_zero=${SNAP_MIGRATIONS_ZERO}"
+    echo "migrate_env_inherited_hazard=${SNAP_MIGRATE_ENV_HAZARD:-unknown}"
     echo "transition_applied=false"
     echo "note=${note}"
   } > "${OUTPUT_DIR}/summary.txt"
@@ -5334,6 +5397,7 @@ action_preflight() {
     echo "mode=${SNAP_MODE}"
     echo "preflight_ok=${PREFLIGHT_OK}"
     echo "migrations_pending_zero=${SNAP_MIGRATIONS_ZERO}"
+    echo "migrate_env_inherited_hazard=${SNAP_MIGRATE_ENV_HAZARD:-unknown}"
     echo "note=${PREFLIGHT_NOTE}"
     echo "transition_applied=false"
   } > "${OUTPUT_DIR}/summary.txt"
