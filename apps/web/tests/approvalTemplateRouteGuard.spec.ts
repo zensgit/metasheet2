@@ -30,11 +30,39 @@ describe('routeAccess gate (extracted from the router beforeEach)', () => {
     expect(isRoutePermitted(undefined, () => false)).toBe(true)
   })
 
+  it('permissionsAnyOf needs one held code', () => {
+    const meta = { permissionsAnyOf: ['a', 'b'] }
+    expect(isRoutePermitted(meta, () => false)).toBe(false)
+    expect(isRoutePermitted(meta, (p) => p === 'a')).toBe(true)
+    expect(isRoutePermitted(meta, (p) => p === 'b')).toBe(true)
+    expect(isRoutePermitted(meta, () => true)).toBe(true)
+    expect(isRoutePermitted({ permissionsAnyOf: [] }, () => false)).toBe(true)
+  })
+
+  it('permissions and permissionsAnyOf together: both must hold', () => {
+    const meta = { permissions: ['a'], permissionsAnyOf: ['b', 'c'] }
+    expect(isRoutePermitted(meta, (p) => p === 'a')).toBe(false)
+    expect(isRoutePermitted(meta, (p) => p === 'b')).toBe(false)
+    expect(isRoutePermitted(meta, (p) => p === 'a' || p === 'c')).toBe(true)
+  })
+
   it('routeMetaPermissions normalizes missing / non-array meta to []', () => {
     expect(routeMetaPermissions(undefined)).toEqual([])
     expect(routeMetaPermissions({})).toEqual([])
     expect(routeMetaPermissions({ permissions: 'x' })).toEqual([])
     expect(routeMetaPermissions({ permissions: ['x'] })).toEqual(['x'])
+  })
+})
+
+describe('todo center route (drift pin)', () => {
+  const SRC = readFileSync(join(__dirname, '../src/router/appRoutes.ts'), 'utf8')
+
+  it('/todo accepts exactly the read permissions of the two sources and declares no all-of list', () => {
+    const start = SRC.indexOf("path: '/todo'")
+    expect(start).toBeGreaterThan(-1)
+    const block = SRC.slice(start, SRC.indexOf('\n  },', start))
+    expect(block).toContain("permissionsAnyOf: ['approvals:read', 'tasks:read']")
+    expect(block).not.toMatch(/\bpermissions:/)
   })
 })
 
