@@ -46208,10 +46208,21 @@ module.exports = {
           return
         }
 
+        // Same rule as the update route: both dates are request strings or resolvePayrollWindow's 'YYYY-MM-DD', and
+        // plain dates compare by calendar day. Any other parseable form is compared as an instant only to choose this
+        // 400; it never reaches the INSERT, because PG stores only its written day, which can invert the range that was
+        // checked (and a cycle created closed is snapshotted on it).
         const startParsed = parseDateInput(startDate)
         const endParsed = parseDateInput(endDate)
-        if (!startParsed || !endParsed || startParsed > endParsed) {
+        const startDay = normalizeDateOnlyStrict(startDate)
+        const endDay = normalizeDateOnlyStrict(endDate)
+        const rangeInverted = startDay && endDay ? startDay > endDay : startParsed > endParsed
+        if (!startParsed || !endParsed || rangeInverted) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid date range' } })
+          return
+        }
+        if (!startDay || !endDay) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid date: startDate and endDate must be YYYY-MM-DD' } })
           return
         }
 
@@ -46236,8 +46247,8 @@ module.exports = {
                 orgId,
                 payload.templateId,
                 payload.name,
-                payload.startDate,
-                payload.endDate,
+                startDay,
+                endDay,
                 payload.status,
                 JSON.stringify(payload.metadata),
               ],
