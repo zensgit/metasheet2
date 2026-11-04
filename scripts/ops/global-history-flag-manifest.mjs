@@ -663,11 +663,12 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     key: 'DINGTALK_TODO_MIRROR_ENABLED',
     type: 'boolean',
     activationValue: 'true',
+    caseInsensitive: true, // isDingTalkTodoMirrorEnabled(): `String(env[...] ?? '').trim().toLowerCase() === 'true'`
     dependsOn: [],
     conflictsWith: [],
     danger: 'medium',
     purpose:
-      'Master gate for the DingTalk approval-todo ONE-WAY mirror (plan B, #5772/#5768). Default OFF; exact literal \'true\' only (isDingTalkTodoMirrorEnabled: String(env).trim().toLowerCase() === \'true\'). The sink (both the live eventBus leg and the durable consumer leg) checks this flag FIRST and writes nothing to dingtalk_todo_mirrors when it is off — both legs stay inert. The delivery WORKER (the only code that talks to the DingTalk API) is additionally gated: it is only ever constructed/started in index.ts when this flag is on AND NODE_ENV!==\'test\' AND !VITEST. Danger=medium, not high: an outbound convenience with its own idempotent ledger (ON CONFLICT DO NOTHING on org_id+source_key) — a missing/misconfigured mirror loses no platform state (the durable consumer keeps ACKing regardless).',
+      'Master gate for the DingTalk approval-todo ONE-WAY mirror (plan B, #5772/#5768). Default OFF; \'true\' after trimming, case-insensitive (isDingTalkTodoMirrorEnabled: String(env).trim().toLowerCase() === \'true\'), so \'TRUE\', \'True\' and \' true \' are ON too, while unset, blank, \'false\', \'1\' and \'yes\' stay OFF. The sink (both the live eventBus leg and the durable consumer leg) checks this flag FIRST and writes nothing to dingtalk_todo_mirrors when it is off — both legs stay inert. The delivery WORKER (the only code that talks to the DingTalk API) is additionally gated: it is only ever constructed/started in index.ts when this flag is on AND NODE_ENV!==\'test\' AND !VITEST. Danger=medium, not high: an outbound convenience with its own idempotent ledger (ON CONFLICT DO NOTHING on org_id+source_key) — a missing/misconfigured mirror loses no platform state (the durable consumer keeps ACKing regardless).',
     source: 'packages/core-backend/src/integrations/dingtalk/todo-mirror-flag.ts:20,23; packages/core-backend/src/services/dingtalk-todo-mirror-service.ts:15; packages/core-backend/src/services/dingtalk-todo-mirror-worker.ts:25; packages/core-backend/src/index.ts:3924,3943,3959',
   },
   {
