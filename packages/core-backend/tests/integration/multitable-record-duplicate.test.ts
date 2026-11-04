@@ -26,6 +26,7 @@ import { usePinnedServer } from '../utils/pinned-server'
 // R-66 ① exemption and the switch, on a sheet the real plugin provisioned — a cases module registered at the end of this
 // file, so it runs in this file's existing real-DB lane.
 import { defineStockPreparationManualRowsHostRealDbCases } from './stock-preparation-manual-rows-host-realdb.cases'
+import { defineStockPreparationManualRowsSwitchRealDbCases } from './stock-preparation-manual-rows-switch-realdb.cases'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -429,6 +430,10 @@ describePlmDeleteIfDatabase('R-66: PLM rows on stock-preparation template sheets
       [rec(SHEET_PM, 'keyless'), SHEET_PM, 1, JSON.stringify({ [keyField(SHEET_PM)]: '', [noteField(SHEET_PM)]: 'hand row' })])
     await q('INSERT INTO meta_records (id, sheet_id, version, data) VALUES ($1,$2,$3,$4::jsonb)',
       [rec(SHEET_PM, 'live'), SHEET_PM, 1, JSON.stringify({ [keyField(SHEET_PM)]: 'KEY-LIVE' })])
+    // PM: a keyed row WITH a creator whose key is an ordinary PLM key (not `manual:`), e.g. an old 右键复制 copy a person
+    // made. ADR adr-stock-prep-manual-rows-20261030 rule E exempts only `manual:` keys, so it stays undeletable (R-66 ①).
+    await q('INSERT INTO meta_records (id, sheet_id, version, data, created_by) VALUES ($1,$2,$3,$4::jsonb,$5)',
+      [rec(SHEET_PM, 'creator'), SHEET_PM, 1, JSON.stringify({ [keyField(SHEET_PM)]: 'KEY-2', [noteField(SHEET_PM)]: 'copied by hand' }), WRITER.id])
     for (const sheetId of [SHEET_PM, SHEET_NOKEY, SHEET_LEDGER]) {
       await q('INSERT INTO plugin_multitable_object_registry (sheet_id, project_id, object_id, plugin_name) VALUES ($1,$2,$3,$4)',
         [sheetId, `project_${PD}`, `object_${sheetId}`, 'plugin-integration-core'])
@@ -478,6 +483,31 @@ describePlmDeleteIfDatabase('R-66: PLM rows on stock-preparation template sheets
     actor = WRITER
   })
 
+  test.each([
+    ['a writer (the row creator)', WRITER],
+    ['a platform admin', ADMIN],
+  ])('a PLM-keyed row WITH a creator (not manual:): %s gets 409 RECORD_DELETE_REFUSED_PLM_ROW, values-free; the row and its cells are intact, nothing trashed', async (_label, who) => {
+    actor = who
+    const res = await del(rec(SHEET_PM, 'creator'))
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'RECORD_DELETE_REFUSED_PLM_ROW',
+        message: '这一行由备料插件（PLM 拉取）维护，不能删除；请在 PLM 里处理后重新拉取。',
+        details: { reason: 'plm_row' },
+      },
+    })
+    for (const value of [SHEET_PM, rec(SHEET_PM, 'creator'), keyField(SHEET_PM), 'KEY-2', 'plugin-integration-core', WRITER.id]) {
+      expect(res.text).not.toContain(value)
+    }
+    expect(await exists(rec(SHEET_PM, 'creator'))).toBe(true)
+    expect(await dbData(rec(SHEET_PM, 'creator'))).toEqual({ [keyField(SHEET_PM)]: 'KEY-2', [noteField(SHEET_PM)]: 'copied by hand' })
+    expect((await q('SELECT created_by FROM meta_records WHERE id = $1', [rec(SHEET_PM, 'creator')])).rows[0]?.created_by).toBe(WRITER.id)
+    expect(await trashCount(rec(SHEET_PM, 'creator'))).toBe(0)
+    actor = WRITER
+  })
+
   test('the keyless hand row on the same sheet is deleted (and lands in the trash) as before', async () => {
     actor = WRITER
     const res = await del(rec(SHEET_PM, 'keyless'))
@@ -508,14 +538,14 @@ describePlmDeleteIfDatabase('R-66: PLM rows on stock-preparation template sheets
     actor = WRITER
   })
 
-  test('GET /view: keyed PLM rows carry canDelete=false + deleteBlockedReason; the default and other rows are unchanged', async () => {
+  test('GET /view: keyed PLM rows (one with a creator included) carry canDelete=false + deleteBlockedReason; the default and other rows are unchanged', async () => {
     actor = WRITER
     const res = await request(pinned.url()).get('/api/multitable/view').query({ sheetId: SHEET_PM })
     expect(res.status).toBe(200)
     const { rowActions, rowActionOverrides } = res.body.data.meta.permissions
     expect(rowActions.canDelete).toBe(true)
     expect('deleteBlockedReason' in rowActions).toBe(false)
-    expect(Object.keys(rowActionOverrides).sort()).toEqual([rec(SHEET_PM, 'keyed'), rec(SHEET_PM, 'live')].sort())
+    expect(Object.keys(rowActionOverrides).sort()).toEqual([rec(SHEET_PM, 'keyed'), rec(SHEET_PM, 'live'), rec(SHEET_PM, 'creator')].sort())
     for (const id of Object.keys(rowActionOverrides)) {
       expect(rowActionOverrides[id]).toEqual({ ...rowActions, canDelete: false, deleteBlockedReason: 'plm_row' })
     }
@@ -579,3 +609,6 @@ describePlmDeleteIfDatabase('R-66: PLM rows on stock-preparation template sheets
 })
 
 defineStockPreparationManualRowsHostRealDbCases()
+// 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §8 「B4」 5): the plugin's switch routes write the switch, the
+// host refuses the create — on the same real database, through this file's already-registered real-DB lane.
+defineStockPreparationManualRowsSwitchRealDbCases()

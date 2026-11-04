@@ -25,9 +25,13 @@ export type YidaOwnerRuntimeDependencies = {
   fetch: typeof fetch
   readEnablement?: () => unknown
   timeoutMs?: number
+  // Y2: INTEGRATION_YIDA_MULTI_TARGET_ENABLED, read per call (exact 'true'). Absent or anything else =
+  // the original single-target authority: no targetRef accepted, slot 1 only. Never send authority.
+  readMultiTargetEnablement?: () => unknown
 }
-export type YidaOwnerPrepareDraftInput = Readonly<{ config: unknown; rowsText: string; allocation?: unknown }>
-export type YidaOwnerPreviewInput = Readonly<{ operationId: string; rowKey: string }>
+export type YidaOwnerPrepareDraftInput = Readonly<{ config: unknown; rowsText: string; allocation?: unknown; targetRef?: string }>
+export type YidaOwnerProveDraftOwnerInput = Readonly<{ targetRef?: string }>
+export type YidaOwnerPreviewInput = Readonly<{ operationId: string; rowKey: string; targetRef?: string }>
 export type YidaOwnerApproveInput = YidaOwnerPreviewInput & Readonly<{ confirmationId: string; ttlMs?: number }>
 export type YidaOwnerGrantInput = Readonly<{ grantId: string }>
 export type YidaOwnerSubmitInput = YidaOwnerGrantInput & Readonly<{ submissionId: string }>
@@ -154,9 +158,18 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
   const decrypt: YidaOwnerRuntimeDependencies['security']['decrypt'] = dependencies.security.decrypt.bind(dependencies.security)
   const fetcher = dependencies.fetch
   const readEnablement = dependencies.readEnablement ?? (() => 'false')
+  const readMultiTarget = dependencies.readMultiTargetEnablement ?? (() => 'false')
   const timeoutMs = dependencies.timeoutMs ?? 10000
-  if (typeof fetcher !== 'function' || typeof readEnablement !== 'function'
+  if (typeof fetcher !== 'function' || typeof readEnablement !== 'function' || typeof readMultiTarget !== 'function'
     || !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 60000) fail('INPUT')
+  // Exact literal, never coerced; a throwing or async switch is OFF.
+  function multiTargetOn(): boolean {
+    let flag: unknown
+    try { flag = readMultiTarget() } catch { return false }
+    const on = flag === 'true'
+    if (!on) consumeRejection(flag)
+    return on
+  }
   let active: Registration | undefined, capabilityGeneration = 0, terminal = false
   let terminalDrain: Promise<void> | undefined
   const subscriptions = new WeakMap<AbortSignal, { controllers: Set<AbortController>; abort: () => void }>()
@@ -253,7 +266,9 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
           checkpoint()
           const primitives = state.createPrimitives(context)
           checkpoint()
-          const authority = createInternalYidaSendExecutionAuthority({ database, security, context, primitives })
+          // Captured once per run: a switch flip mid-run cannot widen this authority.
+          const authority = createInternalYidaSendExecutionAuthority({ database, security, context, primitives,
+            ...(multiTargetOn() ? { multiTarget: true } : {}) })
           checkpoint()
           return await checked(() => work(authority, state, context, checkpoint, controller.signal, checked))
         } catch (error) {
@@ -319,21 +334,35 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
     },
     prepareDraft(context: YidaOwnerActor, supplied: YidaOwnerPrepareDraftInput) {
       return input(() => {
-        const parsed = record(supplied, ['config', 'rowsText', 'allocation'], ['config', 'rowsText'])
+        const parsed = record(supplied, ['config', 'rowsText', 'allocation', 'targetRef'], ['config', 'rowsText'])
         if (typeof parsed.rowsText !== 'string' || Buffer.byteLength(parsed.rowsText, 'utf8') > 16 * 1024 * 1024) fail('INPUT')
+        if (Object.hasOwn(parsed, 'targetRef')) { if (!multiTargetOn()) fail('INPUT'); id(parsed.targetRef) }
         return parsed
       }, parsed => execute(context, {}, true, authority => authority.prepareDraft(parsed)))
     },
+    // Y2 sheet source: prove the live owner (and the named target) with prepareDraft's own refusals before
+    // the route reads any sheet row. Switch ON only; no data out, nothing written.
+    proveDraftOwner(context: YidaOwnerActor, supplied: YidaOwnerProveDraftOwnerInput) {
+      return input(() => {
+        if (!multiTargetOn()) fail('INPUT')
+        const parsed = record(supplied, ['targetRef'], [])
+        return Object.hasOwn(parsed, 'targetRef') ? { targetRef: id(parsed.targetRef) } : {}
+      }, parsed => execute(context, {}, true, authority => authority.proveDraftTarget(parsed)))
+    },
     preview(context: YidaOwnerActor, supplied: YidaOwnerPreviewInput) {
       return input(() => {
-        const parsed = record(supplied, ['operationId', 'rowKey'])
-        return { operationId: id(parsed.operationId), rowKey: id(parsed.rowKey) }
+        const parsed = record(supplied, ['operationId', 'rowKey', 'targetRef'], ['operationId', 'rowKey'])
+        if (Object.hasOwn(parsed, 'targetRef') && !multiTargetOn()) fail('INPUT')
+        return { operationId: id(parsed.operationId), rowKey: id(parsed.rowKey),
+          ...(Object.hasOwn(parsed, 'targetRef') ? { targetRef: id(parsed.targetRef) } : {}) }
       }, parsed => execute(context, {}, true, authority => authority.preview(parsed)))
     },
     approve(context: YidaOwnerActor, supplied: YidaOwnerApproveInput) {
       return input(() => {
-        const parsed = record(supplied, ['operationId', 'rowKey', 'confirmationId', 'ttlMs'], ['operationId', 'rowKey', 'confirmationId'])
-        return { ...parsed, operationId: id(parsed.operationId), rowKey: id(parsed.rowKey), confirmationId: id(parsed.confirmationId) }
+        const parsed = record(supplied, ['operationId', 'rowKey', 'confirmationId', 'ttlMs', 'targetRef'], ['operationId', 'rowKey', 'confirmationId'])
+        if (Object.hasOwn(parsed, 'targetRef') && !multiTargetOn()) fail('INPUT')
+        return { ...parsed, operationId: id(parsed.operationId), rowKey: id(parsed.rowKey), confirmationId: id(parsed.confirmationId),
+          ...(Object.hasOwn(parsed, 'targetRef') ? { targetRef: id(parsed.targetRef) } : {}) }
       }, parsed => execute(context, {}, true, authority => authority.approvals.approve(parsed)))
     },
     revoke(context: YidaOwnerActor, supplied: YidaOwnerGrantInput) {
@@ -370,6 +399,9 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
       consumeRejection(value)
       return false
     },
+    // Y2 display/shape bit for the owner route (target picker, sheet source). Never authority:
+    // the run's authority re-reads the same exact literal and refuses a targetRef while OFF.
+    multiTargetEnabled(): boolean { return multiTargetOn() },
     deactivate(): Promise<void> {
       ++capabilityGeneration
       return active ? drain(active) : Promise.resolve()

@@ -65,6 +65,18 @@ export interface CellEdit {
   version: number
   oldLinkSummaries?: LinkedRecordSummary[]
   newLinkSummaries?: LinkedRecordSummary[]
+  /** 人工补充行 B3: the edit went through PATCH /records/:recordId/manual-fields (undo / redo must too). */
+  route?: 'manual'
+}
+
+/**
+ * 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.4, N12): a cell that writes through
+ * PATCH /records/:recordId/manual-fields — one of the six fillable columns of a manual row — as the workbench decides it
+ * from /context's `stockPreparationManualRows` block. `required`: the column must not be cleared (名称 / 总用量 — the
+ * route answers 422 to an empty value), so an edit whose undo would clear it never enters the undo stack.
+ */
+export interface ManualCellWrite {
+  required: boolean
 }
 
 export interface GridConflictState {
@@ -98,6 +110,11 @@ export interface GridPatchFailure {
   code?: string
   message: string
   fieldErrors?: Record<string, string>
+}
+
+/** 人工补充行 B3: the value the manual-fields route treats as CLEARING a column (its isClearingManualRowValue rule). */
+function isClearingCellValue(value: unknown): boolean {
+  return value === null || value === undefined || (typeof value === 'string' && value.trim() === '')
 }
 
 type RemoteRecordMergeOptions = {
@@ -543,6 +560,13 @@ export function useMultitableGrid(opts: {
   // and `error` set then would read as THAT call's failure (e.g. a picker's patchCell), while every loadViewData
   // caller would have to check it. The workbench shows it as a toast.
   onSortFilterWriteFailed?: (viewId: string) => void
+  // 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.4, N12): which cells write through
+  // PATCH /records/:recordId/manual-fields instead of /patch (the six fillable columns of a manual row; the workbench
+  // decides from /context's block, never from the row mark alone). patchCell, undo, redo and the conflict retry all
+  // ask it; undo / redo of a cell that can no longer take that route drop the entry instead of replaying it to /patch
+  // (which would answer 403). Absent ⇒ every cell writes through /patch, exactly as before. Range fill / paste
+  // (patchRange) never consult it: those keep treating the cells as read-only.
+  resolveManualCellWrite?: (recordId: string, fieldId: string) => ManualCellWrite | null
 }) {
   const client = opts.client ?? multitableClient
   const initialPageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE
@@ -1401,12 +1425,16 @@ export function useMultitableGrid(opts: {
     options?: {
       previousLinkSummaries?: LinkedRecordSummary[]
       nextLinkSummaries?: LinkedRecordSummary[]
+      /** 人工补充行 B3: told the record's version the server returned for THIS write (the drawer's two-step save). */
+      onCommitted?: (version: number) => void
     },
   ): Promise<GridPatchFailure | null> {
     if (rangePending) return {
       recordId, fieldId, attemptedValue: value, status: 409, code: 'RANGE_BUSY',
       message: fallback('grid.errorPatchCell'),
     }
+    // 人工补充行 B3: a fillable cell of a manual row writes through its own route (resolved once, before the write).
+    const manualWrite = opts.resolveManualCellWrite?.(recordId, fieldId) ?? null
     error.value = null
     conflict.value = null
     // PR-B2 (§1.3): the LOCAL row-action refusal never reaches the server and yields no structured
@@ -1429,19 +1457,33 @@ export function useMultitableGrid(opts: {
     }
 
     try {
-      const result = await client.patchRecords({
-        sheetId: opts.sheetId.value || undefined,
-        viewId: opts.viewId.value || undefined,
-        changes: [{ recordId, fieldId, value, expectedVersion: version }],
-      })
+      const result = manualWrite
+        ? await client.patchManualRowFields(recordId, {
+          sheetId: opts.sheetId.value || undefined,
+          expectedVersion: version,
+          data: { [fieldId]: value },
+        })
+        : await client.patchRecords({
+          sheetId: opts.sheetId.value || undefined,
+          viewId: opts.viewId.value || undefined,
+          changes: [{ recordId, fieldId, value, expectedVersion: version }],
+        })
       applyPatchResult(result)
       // W3-5: record the commit's batchId (undefined for a server that predates the seam) so a caller can
       // offer a "view in history" deep-link for THIS commit only — never carries a prior commit's id forward.
       lastBatchId.value = result.batchId ?? null
-      // Push to undo history
-      editHistory.value = editHistory.value.slice(0, historyIndex.value + 1)
-      editHistory.value.push({ recordId, fieldId, oldValue, newValue: value, version, oldLinkSummaries, newLinkSummaries: nextLinkSummaries })
-      historyIndex.value = editHistory.value.length - 1
+      const committedVersion = (result.updated ?? []).find((update) => update.recordId === recordId)?.version
+      if (typeof committedVersion === 'number') options?.onCommitted?.(committedVersion)
+      // Push to undo history — 人工补充行 B3 (N12): except a manual cell whose undo would CLEAR a column that must not be
+      // cleared (its route refuses it), which is left out of the stack instead of becoming an undo that cannot work.
+      if (!(manualWrite?.required && isClearingCellValue(oldValue))) {
+        editHistory.value = editHistory.value.slice(0, historyIndex.value + 1)
+        editHistory.value.push({
+          recordId, fieldId, oldValue, newValue: value, version, oldLinkSummaries, newLinkSummaries: nextLinkSummaries,
+          ...(manualWrite ? { route: 'manual' as const } : {}),
+        })
+        historyIndex.value = editHistory.value.length - 1
+      }
     } catch (e: any) {
       // Revert optimistic update
       if (row) row.data[fieldId] = oldValue
@@ -1478,20 +1520,49 @@ export function useMultitableGrid(opts: {
 
   // --- Undo / Redo ---
 
+  // 人工补充行 B3 (ADR §3.4, N12): undo / redo use the SAME route choice as the edit. An entry written through
+  // PATCH …/manual-fields whose cell can no longer take that route (the block changed, the row is no longer a manual
+  // row, the column is no longer writable for this actor) is DROPPED from the stack — never replayed to /patch, which
+  // would answer 403 on the locked column.
+  function manualReplayRoute(edit: CellEdit): 'manual' | 'default' | 'drop' {
+    const manual = opts.resolveManualCellWrite?.(edit.recordId, edit.fieldId) ?? null
+    if (manual) return 'manual'
+    return edit.route === 'manual' ? 'drop' : 'default'
+  }
+
+  function dropHistoryEntry(index: number) {
+    const next = [...editHistory.value]
+    next.splice(index, 1)
+    editHistory.value = next
+    if (index <= historyIndex.value) historyIndex.value -= 1
+  }
+
+  function replayCell(edit: CellEdit, value: unknown, expectedVersion: number | undefined, route: 'manual' | 'default') {
+    return route === 'manual'
+      ? client.patchManualRowFields(edit.recordId, {
+        sheetId: opts.sheetId.value || undefined,
+        expectedVersion,
+        data: { [edit.fieldId]: value },
+      })
+      : client.patchRecords({
+        sheetId: opts.sheetId.value || undefined,
+        changes: [{ recordId: edit.recordId, fieldId: edit.fieldId, value, expectedVersion }],
+      })
+  }
+
   async function undo() {
     if (rangePending || !canUndo.value) return
     const edit = editHistory.value[historyIndex.value]
     if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()
+    const route = manualReplayRoute(edit)
+    if (route === 'drop') return void dropHistoryEntry(historyIndex.value)
     activeGridWrites++
     historyIndex.value--
     const row = rows.value.find((r) => r.id === edit.recordId)
     if (row) row.data[edit.fieldId] = edit.oldValue
     setLinkSummaries(edit.recordId, edit.fieldId, edit.oldLinkSummaries)
     try {
-      const result = await client.patchRecords({
-        sheetId: opts.sheetId.value || undefined,
-        changes: [{ recordId: edit.recordId, fieldId: edit.fieldId, value: edit.oldValue, expectedVersion: row?.version }],
-      })
+      const result = await replayCell(edit, edit.oldValue, row?.version, route)
       applyPatchResult(result)
     } catch {
       // silent
@@ -1505,16 +1576,15 @@ export function useMultitableGrid(opts: {
     const nextHistoryIndex = historyIndex.value + 1
     const edit = editHistory.value[nextHistoryIndex]
     if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()
+    const route = manualReplayRoute(edit)
+    if (route === 'drop') return void dropHistoryEntry(nextHistoryIndex)
     activeGridWrites++
     historyIndex.value = nextHistoryIndex
     const row = rows.value.find((r) => r.id === edit.recordId)
     if (row) row.data[edit.fieldId] = edit.newValue
     setLinkSummaries(edit.recordId, edit.fieldId, edit.newLinkSummaries)
     try {
-      const result = await client.patchRecords({
-        sheetId: opts.sheetId.value || undefined,
-        changes: [{ recordId: edit.recordId, fieldId: edit.fieldId, value: edit.newValue, expectedVersion: row?.version }],
-      })
+      const result = await replayCell(edit, edit.newValue, row?.version, route)
       applyPatchResult(result)
     } catch {
       // silent

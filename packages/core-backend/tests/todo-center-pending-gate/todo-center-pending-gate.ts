@@ -622,6 +622,8 @@ async function fetchMe(baseUrl: string, token: string): Promise<MeResponseUser> 
 
 describe('todo-center pending-query production-path gate (real DB, dedicated process)', () => {
   let server: MetaSheetServer | undefined
+  // Read right after boot, before any Judge B case replaces the registry's contents.
+  let sourceNamesAfterBoot: string[] = []
   let baseUrl = ''
 
   // Class ① — the base shape every other class is a variant of: `users.role='employee'`, no admin
@@ -1001,6 +1003,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
 
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     await server.start()
+    sourceNamesAfterBoot = pendingSourceRegistry.sourceNames()
     const address = server.getAddress()
     expect(address?.port).toBeTruthy()
     baseUrl = `http://127.0.0.1:${address!.port}`
@@ -1052,6 +1055,11 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       // cleanup failures shouldn't mask the test result
     }
     if (server) await server.stop()
+  })
+
+  // This lane does not switch the task routes on, so the task source must not be registered either.
+  it('with the task routes off, the server registers the approval source only', () => {
+    expect(sourceNamesAfterBoot).toEqual(['approval'])
   })
 
   // Design-lock §3.0's dev-mock-fallback probe: an UNSEEDED id, run through the real
@@ -1422,6 +1430,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       const failingSourceName = `todo-center-gate-stub-b-fail-${suffix}`
       pendingSourceRegistry.register({
         name: failingSourceName,
+        permission: 'approvals:read',
         async listPendingForUser(): Promise<PendingItem[]> {
           throw new Error('todo-center-gate-stub-b: deliberate failure for judging criterion B')
         },
@@ -1454,6 +1463,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       }
       pendingSourceRegistry.register({
         name: APPROVAL_PENDING_SOURCE_NAME,
+        permission: 'approvals:read',
         async listPendingForUser(): Promise<PendingItem[]> {
           throw new Error('todo-center-gate-stub-b: approval source itself failing for judging criterion B')
         },
@@ -1463,6 +1473,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       })
       pendingSourceRegistry.register({
         name: okStubName,
+        permission: 'approvals:read',
         async listPendingForUser(): Promise<PendingItem[]> {
           return [stubItem]
         },
@@ -1505,6 +1516,7 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
 
       pendingSourceRegistry.register({
         name: APPROVAL_PENDING_SOURCE_NAME,
+        permission: 'approvals:read',
         async listPendingForUser(): Promise<PendingItem[]> {
           throw new Error('todo-center-gate-stub-b: approval source itself failing for judging criterion B (class ② shape)')
         },

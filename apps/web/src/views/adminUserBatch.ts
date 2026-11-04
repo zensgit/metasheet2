@@ -1,3 +1,5 @@
+import { sanitizeCsvCell, sanitizeCsvRow } from '../utils/csvFormulaCell'
+
 export const USER_IMPORT_HEADERS = ['name', 'email', 'roleId', 'department'] as const
 export const USER_UPDATE_HEADERS = ['userId', 'email', 'name', 'roleId', 'department', 'isActive'] as const
 export const ADMIN_USER_BATCH_LIMIT = 100
@@ -29,8 +31,8 @@ export type UpdatePreviewRow = {
 
 export function buildImportTemplateCsv(): string {
   const rows = [
-    USER_IMPORT_HEADERS.join(','),
-    '林岚,linlan@example.com,user,装配车间',
+    sanitizeCsvRow(USER_IMPORT_HEADERS),
+    sanitizeCsvRow(['林岚', 'linlan@example.com', 'user', '装配车间']),
   ]
   return `\ufeff${rows.join('\n')}\n`
 }
@@ -43,16 +45,16 @@ export function buildUpdateExportCsv(users: Array<{
   department?: string | null
   is_active: boolean
 }>): string {
-  const lines = [USER_UPDATE_HEADERS.join(',')]
+  const lines = [sanitizeCsvRow(USER_UPDATE_HEADERS)]
   for (const user of users) {
-    lines.push([
+    lines.push(sanitizeCsvRow([
       user.id,
       user.email || '',
       user.name || '',
       user.role || '',
       user.department || '',
       user.is_active ? 'true' : 'false',
-    ].map(escapeCsv).join(','))
+    ]))
   }
   return `\ufeff${lines.join('\n')}\n`
 }
@@ -178,9 +180,8 @@ export function previewUpdateRows(
   })
 }
 
-function escapeCsv(value: string): string {
-  if (!/[",\n]/.test(value)) return value
-  return `"${value.replaceAll('"', '""')}"`
+export function escapeCsv(value: string): string {
+  return sanitizeCsvCell(value)
 }
 
 function parseCsvTable(text: string): string[][] {

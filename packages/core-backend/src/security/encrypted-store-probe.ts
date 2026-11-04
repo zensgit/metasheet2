@@ -160,6 +160,14 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     columns: ['config', 'is_active', 'deleted_at'],
     sql: `SELECT config->'credentials'->>'token' AS value FROM data_sources WHERE is_active = true AND deleted_at IS NULL AND config->'credentials'->>'token' <> '' LIMIT $1`,
   }),
+  catalogEntry({
+    store: 'data_sources',
+    field: 'config.credentials.bearerToken',
+    scheme: 'platform-enc',
+    prefixOn: 'raw',
+    columns: ['config', 'is_active', 'deleted_at'],
+    sql: `SELECT config->'credentials'->>'bearerToken' AS value FROM data_sources WHERE is_active = true AND deleted_at IS NULL AND config->'credentials'->>'bearerToken' <> '' LIMIT $1`,
+  }),
   // Readers: directory-sync parseIntegrationConfig, work-notification-settings decryptStoredText,
   // approval-card-config resolvers, elearning-notification-dingtalk readSecret — every one trims
   // (normalizeText) BEFORE decryptStoredSecretValue, so the prefix is tested on the trimmed value.

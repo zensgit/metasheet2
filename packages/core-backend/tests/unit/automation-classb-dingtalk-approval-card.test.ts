@@ -268,9 +268,57 @@ describe('flag ON — two-phase intent/outcome', () => {
 
     const asyncBefore = h.fetch.mock.calls.filter((c) => String(c[0] ?? '').includes('asyncsend')).length
     const retry = await new AutomationExecutor(h.deps).execute(ruleWith(CARD), TRIGGER, undefined, ROOT)
-    expect(retry.steps[0]?.alreadyApplied).toBe(true) // skip_unknown → alreadyApplied
+    // skip_unknown → a FAILED step naming outcome_unknown (never an alreadyApplied success): the ambiguity is
+    // unresolved until reconciliation, so dependent steps must not run as if the card were known delivered.
+    expect(retry.steps[0]?.status).toBe('failed')
+    expect(retry.steps[0]?.alreadyApplied).toBeUndefined()
+    expect(retry.steps[0]?.error).toMatch(/outcome_unknown/)
     const asyncAfter = h.fetch.mock.calls.filter((c) => String(c[0] ?? '').includes('asyncsend')).length
     expect(asyncAfter).toBe(asyncBefore) // TERMINAL: never a second send
+  })
+
+  // #6715 verify P2: the card send reports success to later steps ONLY after its own token-fenced `sent`
+  // write is confirmed — the same rule send_webhook / send_email follow.
+  const twoStepRule = (): AutomationRule => ({ ...ruleWith(CARD), actions: [CARD as never, { ...CARD } as never] })
+  // What a replay does after this attempt's lease expired: flip the live `pending` row to outcome_unknown.
+  const replayFlipsPending = (intent: Map<string, IntentRow>) => {
+    for (const row of intent.values()) {
+      if (row.status === 'pending') Object.assign(row, { status: 'outcome_unknown', last_error: 'lease_expired' })
+    }
+  }
+  const asyncSends = (h: Harness) => h.fetch.mock.calls.filter((c) => String(c[0] ?? '').includes('asyncsend')).length
+  const cardMarkedSent = (h: Harness) => (h.deps.queryFn as unknown as ReturnType<typeof vi.fn>).mock.calls
+    .filter((c) => /UPDATE dingtalk_approval_card_deliveries\s+SET send_status = 'sent'/i.test(String(c[0]))).length
+
+  it('confirmed terminal write → success and the dependent step runs', async () => {
+    const h = makeHarness((call) => (call === 0 ? tokenResponse() : asyncSendOk()))
+    const exec = await new AutomationExecutor(h.deps).execute(twoStepRule(), TRIGGER, undefined, ROOT)
+    expect(exec.steps[0]?.status).toBe('success')
+    expect(exec.steps[0]?.output).not.toHaveProperty('reason')
+    expect(exec.steps[1]?.status).toBe('success')
+    expect([...h.intent.values()].map((row) => row.status)).toEqual(['sent', 'sent'])
+  })
+
+  it('terminal write unconfirmed (a replay flipped the row before the 2xx) → NOT success; dependent skipped; ledger stays outcome_unknown', async () => {
+    const h: Harness = makeHarness((call) => {
+      if (call === 1) replayFlipsPending(h.intent) // the slow send outlived its lease; a replay flipped the row
+      return call === 0 ? tokenResponse() : asyncSendOk()
+    })
+    const exec = await new AutomationExecutor(h.deps).execute(twoStepRule(), TRIGGER, undefined, ROOT)
+    expect(exec.steps[0]?.status).toBe('failed')
+    expect(exec.steps[0]?.alreadyApplied).toBeUndefined()
+    expect(exec.steps[0]?.error).toMatch(/terminal write not confirmed/)
+    expect(exec.steps[0]?.output).toMatchObject({
+      outcome: 'outcome_unknown',
+      reason: 'terminal_write_unconfirmed',
+      deliveryId: 'del_1',
+      taskId: '778899',
+    })
+    expect(exec.steps[1]?.status).toBe('skipped')
+    expect(only(h.intent)).toMatchObject({ status: 'outcome_unknown', last_error: 'lease_expired' })
+    expect(h.intent.size).toBe(1) // the dependent never claimed
+    expect(asyncSends(h)).toBe(1) // nothing resent
+    expect(cardMarkedSent(h)).toBe(1) // the delivered card's own ledger still says sent
   })
 
   it('no identity (runSingleAction ad-hoc dispatch) → no intent even with the flag ON', async () => {
