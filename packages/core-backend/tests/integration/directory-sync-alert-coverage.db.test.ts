@@ -485,9 +485,11 @@ describeIfDatabase('R5 per-run sync summary stats (real DB)', () => {
  *
  * "Linked" mirrors the `inactive_linked` review-item filter in directory-sync.ts exactly:
  * `directory_account_links.local_user_id IS NOT NULL`, independent of `link_status`. Anchor
- * for "how long inactive": `directory_accounts.updated_at`, set directly by these fixtures
- * (see the module doc-comment on `getDirectoryInactiveLinkedMetric` for why that column is
- * the correct anchor given the current schema).
+ * for "how long inactive": `directory_accounts.last_seen_at` ("last seen in DingTalk"), set
+ * directly by these fixtures; `updated_at` is left at its column default (NOW()) unless a
+ * fixture says otherwise, because several writers re-stamp it on already-inactive rows and
+ * the age must not depend on it (see the module doc-comment on
+ * `getDirectoryInactiveLinkedMetric` for the writer list).
  */
 describeIfDatabase('§7.1 directory inactive-linked backlog metric (real DB)', () => {
   const TS2 = Date.now()
@@ -518,16 +520,30 @@ describeIfDatabase('§7.1 directory inactive-linked backlog metric (real DB)', (
       )
       userIds.push(id)
     }
+    // `updatedAt` defaults to NOW() (the column default): an already-inactive row's
+    // `updated_at` is re-stamped by the openId backfill and by controlled handover, so no
+    // fixture may let the age ride on it. `provider` defaults to 'dingtalk' (column default).
     const insertAccount = async (opts: {
       externalUserId: string
       isActive: boolean
-      updatedAt: string
+      lastSeenAt: string
+      updatedAt?: string
+      provider?: string
       integration?: string
     }) => {
       const result = await query<{ id: string }>(
-        `INSERT INTO directory_accounts (integration_id, external_user_id, external_key, name, is_active, raw, updated_at)
-         VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, $6) RETURNING id`,
-        [opts.integration ?? integrationId, opts.externalUserId, `key-${opts.externalUserId}`, opts.externalUserId, opts.isActive, opts.updatedAt],
+        `INSERT INTO directory_accounts (integration_id, provider, external_user_id, external_key, name, is_active, raw, last_seen_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, $7, COALESCE($8::timestamptz, NOW())) RETURNING id`,
+        [
+          opts.integration ?? integrationId,
+          opts.provider ?? 'dingtalk',
+          opts.externalUserId,
+          `key-${opts.externalUserId}`,
+          opts.externalUserId,
+          opts.isActive,
+          opts.lastSeenAt,
+          opts.updatedAt ?? null,
+        ],
       )
       return result.rows[0].id
     }
@@ -546,6 +562,8 @@ describeIfDatabase('§7.1 directory inactive-linked backlog metric (real DB)', (
     const uLocalInactive = `dil-u-local-inactive-${TS2}`
     const uStillActiveAccount = `dil-u-still-active-account-${TS2}`
     const uOtherTenant = `dil-u-other-tenant-${TS2}`
+    const uBumpedActive = `dil-u-bumped-${TS2}`
+    const uLocalProvider = `dil-u-local-provider-${TS2}`
     await Promise.all([
       insertUser(uOldActive, true),
       insertUser(uBoundaryActive, true),
@@ -554,44 +572,61 @@ describeIfDatabase('§7.1 directory inactive-linked backlog metric (real DB)', (
       insertUser(uLocalInactive, false),
       insertUser(uStillActiveAccount, true),
       insertUser(uOtherTenant, true),
+      insertUser(uBumpedActive, true),
+      insertUser(uLocalProvider, true),
     ])
 
-    // 1. QUALIFIES — 20 days inactive (past threshold), linked, local user still active.
-    const accOld = await insertAccount({ externalUserId: `dil-old-${TS2}`, isActive: false, updatedAt: daysAgo(20) })
+    // 1. QUALIFIES — last seen 20 days ago (past threshold), linked, local user still active.
+    const accOld = await insertAccount({ externalUserId: `dil-old-${TS2}`, isActive: false, lastSeenAt: daysAgo(20) })
     await link(accOld, uOldActive)
 
     // 2. QUALIFIES — exactly AT the 10-day threshold (the predicate is `<=`, inclusive).
-    const accBoundary = await insertAccount({ externalUserId: `dil-boundary-${TS2}`, isActive: false, updatedAt: daysAgo(THRESHOLD_DAYS) })
+    const accBoundary = await insertAccount({ externalUserId: `dil-boundary-${TS2}`, isActive: false, lastSeenAt: daysAgo(THRESHOLD_DAYS) })
     await link(accBoundary, uBoundaryActive)
 
-    // 3. EXCLUDED — only 5 days inactive, short of the 10-day threshold (crosses the
+    // 3. EXCLUDED — last seen only 5 days ago, short of the 10-day threshold (crosses the
     //    boundary the OTHER way from fixture 1/2).
-    const accRecent5 = await insertAccount({ externalUserId: `dil-recent5-${TS2}`, isActive: false, updatedAt: daysAgo(5) })
+    const accRecent5 = await insertAccount({ externalUserId: `dil-recent5-${TS2}`, isActive: false, lastSeenAt: daysAgo(5) })
     await link(accRecent5, uRecentActive5)
 
-    // 4. EXCLUDED — 1 day inactive, well short of the threshold.
-    const accRecent1 = await insertAccount({ externalUserId: `dil-recent1-${TS2}`, isActive: false, updatedAt: daysAgo(1) })
+    // 4. EXCLUDED — last seen 1 day ago, well short of the threshold.
+    const accRecent1 = await insertAccount({ externalUserId: `dil-recent1-${TS2}`, isActive: false, lastSeenAt: daysAgo(1) })
     await link(accRecent1, uRecentActive1)
 
-    // 5. EXCLUDED — unlinked. 20 days inactive but no directory_account_links row at all;
-    //    this is the review-queue's OWN definition of "not linked" — must not leak in.
-    await insertAccount({ externalUserId: `dil-unlinked-${TS2}`, isActive: false, updatedAt: daysAgo(20) })
+    // 5. EXCLUDED — unlinked. Last seen 20 days ago but no directory_account_links row at
+    //    all; this is the review-queue's OWN definition of "not linked" — must not leak in.
+    await insertAccount({ externalUserId: `dil-unlinked-${TS2}`, isActive: false, lastSeenAt: daysAgo(20) })
 
-    // 6. EXCLUDED — linked, 20 days inactive, but the LOCAL USER is already inactive. This
-    //    account is not part of the offboarding blind spot: there is nothing left to revoke.
-    const accLocalInactive = await insertAccount({ externalUserId: `dil-local-inactive-${TS2}`, isActive: false, updatedAt: daysAgo(20) })
+    // 6. EXCLUDED — linked, last seen 20 days ago, but the LOCAL USER is already inactive.
+    //    This account is not part of the offboarding blind spot: nothing left to revoke.
+    const accLocalInactive = await insertAccount({ externalUserId: `dil-local-inactive-${TS2}`, isActive: false, lastSeenAt: daysAgo(20) })
     await link(accLocalInactive, uLocalInactive)
 
     // 7. EXCLUDED — linked, local user active, but the directory ACCOUNT itself is still
     //    active (never went inactive) — sanity check on `a.is_active = FALSE`.
-    const accStillActive = await insertAccount({ externalUserId: `dil-still-active-${TS2}`, isActive: true, updatedAt: daysAgo(20) })
+    const accStillActive = await insertAccount({ externalUserId: `dil-still-active-${TS2}`, isActive: true, lastSeenAt: daysAgo(20) })
     await link(accStillActive, uStillActiveAccount)
 
     // 8. EXCLUDED — same shape as fixture 1, but under a DIFFERENT integration. Kept alive
     //    through the assertions below (cleaned up in afterAll) — proves the metric is
     //    scoped by integration_id rather than trivially absent.
-    const accOtherTenant = await insertAccount({ externalUserId: `dil-other-tenant-${TS2}`, isActive: false, updatedAt: daysAgo(20), integration: otherIntegrationId })
+    const accOtherTenant = await insertAccount({ externalUserId: `dil-other-tenant-${TS2}`, isActive: false, lastSeenAt: daysAgo(20), integration: otherIntegrationId })
     await link(accOtherTenant, uOtherTenant)
+
+    // 9. QUALIFIES — last seen 15 days ago, but `updated_at` was re-stamped 1 day ago, the
+    //    way the openId backfill or a controlled handover re-stamps an already-inactive row.
+    //    The age must still read 15 days: an `updated_at` anchor would report 1 day and
+    //    drop the row below the threshold.
+    const accBumped = await insertAccount({ externalUserId: `dil-bumped-${TS2}`, isActive: false, lastSeenAt: daysAgo(15), updatedAt: daysAgo(1) })
+    await link(accBumped, uBumpedActive)
+
+    // 10. EXCLUDED — a `provider = 'local'` account under the SAME integration id, archived
+    //     (inactive) and linked to an active user, with `last_seen_at` 30 days old. Local
+    //     rows set `last_seen_at` once at creation and never refresh it, so it does not mean
+    //     "last seen" there; the metric is DingTalk-only and must leave this row out even
+    //     though it would be the oldest by that column.
+    const accLocalProvider = await insertAccount({ externalUserId: `dil-local-provider-${TS2}`, isActive: false, lastSeenAt: daysAgo(30), updatedAt: daysAgo(20), provider: 'local' })
+    await link(accLocalProvider, uLocalProvider)
 
     otherIntegrationIdRef = otherIntegrationId
   })
@@ -617,23 +652,41 @@ describeIfDatabase('§7.1 directory inactive-linked backlog metric (real DB)', (
   it('counts only linked, still-locally-active accounts inactive at least the threshold, crossing the boundary both ways (real SQL)', async () => {
     const metric = await getDirectoryInactiveLinkedMetric(integrationId, THRESHOLD_DAYS)
     expect(metric.thresholdDays).toBe(THRESHOLD_DAYS)
-    expect(metric.count).toBe(2)
+    // Fixtures 1, 2 and 9. An `updated_at` anchor would drop 9 (and, with `updated_at` at
+    // its NOW() default, 1 and 2 as well); dropping the provider limit would admit 10.
+    expect(metric.count).toBe(3)
 
     const externalIds = metric.sample.map((s) => s.externalUserId)
     expect(externalIds).toContain(`dil-old-${TS2}`)
     expect(externalIds).toContain(`dil-boundary-${TS2}`)
+    expect(externalIds).toContain(`dil-bumped-${TS2}`)
     expect(externalIds).not.toContain(`dil-recent5-${TS2}`)
     expect(externalIds).not.toContain(`dil-recent1-${TS2}`)
     expect(externalIds).not.toContain(`dil-unlinked-${TS2}`)
     expect(externalIds).not.toContain(`dil-local-inactive-${TS2}`)
     expect(externalIds).not.toContain(`dil-still-active-${TS2}`)
     expect(externalIds).not.toContain(`dil-other-tenant-${TS2}`)
+    expect(externalIds).not.toContain(`dil-local-provider-${TS2}`)
 
-    // ORDER BY updated_at ASC — the most-overdue account (20 days) sorts before the
-    // boundary account (10 days).
+    // ORDER BY last_seen_at ASC — the most-overdue account (20 days) sorts before the
+    // re-stamped one (15 days), which sorts before the boundary account (10 days).
     expect(metric.sample[0].externalUserId).toBe(`dil-old-${TS2}`)
     expect(metric.sample[0].inactiveDays).toBeGreaterThanOrEqual(20)
-    expect(metric.sample[1].externalUserId).toBe(`dil-boundary-${TS2}`)
+    expect(metric.sample[1].externalUserId).toBe(`dil-bumped-${TS2}`)
+    expect(metric.sample[1].inactiveDays).toBeGreaterThanOrEqual(15)
+    expect(metric.sample[1].inactiveDays).toBeLessThan(20)
+    // `inactiveSinceAt` is the last-seen timestamp, not the re-stamped `updated_at`.
+    expect(Date.now() - new Date(metric.sample[1].inactiveSinceAt).getTime()).toBeGreaterThanOrEqual(15 * 24 * 60 * 60 * 1000)
+    expect(metric.sample[2].externalUserId).toBe(`dil-boundary-${TS2}`)
+  })
+
+  it('leaves a local-provider account out even at a threshold its last_seen_at would satisfy', async () => {
+    // Fixture 10 is 30 days old by `last_seen_at` and 20 by `updated_at`; at a 3-day
+    // threshold either column would admit it, so only the provider limit keeps it out.
+    const metric = await getDirectoryInactiveLinkedMetric(integrationId, 3)
+    expect(metric.sample.map((s) => s.externalUserId)).not.toContain(`dil-local-provider-${TS2}`)
+    // Fixtures 1, 2, 3 and 9 (fixture 3 is 5 days old, so it now clears the bar).
+    expect(metric.count).toBe(4)
   })
 
   it('returns zero for a threshold high enough that nothing qualifies', async () => {
