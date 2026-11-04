@@ -1129,7 +1129,8 @@ function redactDingTalkErrorText(text: string): string {
 
 function classifyConfigError(error: unknown): AttendanceDeliveryChannelResult {
   const message = normalizeErrorText(error, 'DingTalk work-notification config unavailable')
-  // The integration-scoped resolver's typed failures (row missing / inactive / incomplete) are
+  // The integration-scoped resolver's typed failures (row missing / inactive / incomplete, malformed
+  // environment Agent ID) are
   // configuration facts an operator has to change; classify by type, not by words in the text.
   if (error instanceof DingTalkMessageConfigError) {
     return { ok: false, retryable: false, error: `dingtalk_work_notification_config_unavailable: ${message}` }

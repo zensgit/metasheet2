@@ -219,6 +219,26 @@ function missingTupleFields(config: { appKey: string; appSecret: string; agentId
   return missing
 }
 
+const ENV_AGENT_ID_VARIABLES = 'DINGTALK_AGENT_ID or DINGTALK_NOTIFY_AGENT_ID'
+
+/**
+ * Switch ON only: the environment Agent ID, when it is the value that would be sent, must have the shape
+ * the admin save path already enforces (normalizeDingTalkWorkNotificationAgentId: 1-32 digits). A
+ * forgotten placeholder becomes a local typed failure instead of being sent to DingTalk as it is.
+ * Returns the value unchanged when valid ('' stays '').
+ */
+function checkEnvAgentIdShape(envAgentId: string): string {
+  if (!envAgentId) return ''
+  try {
+    return normalizeDingTalkWorkNotificationAgentId(envAgentId)
+  } catch {
+    throw new DingTalkMessageConfigError(
+      'env_agent_id_invalid',
+      `DingTalk Agent ID from the environment (${ENV_AGENT_ID_VARIABLES}) must be 1-32 numeric characters; it was not sent`,
+    )
+  }
+}
+
 /**
  * Integration-scoped resolution of the work-notification credential tuple (appKey, appSecret, agentId,
  * baseUrl) for ONE named integration. Pure: takes an env snapshot and the integration row, reads no
@@ -227,12 +247,13 @@ function missingTupleFields(config: { appKey: string; appSecret: string; agentId
  *
  *  - Missing row: typed failure (integration_not_found); nothing is sent on env credentials for an
  *    integration that does not exist.
+ *  - Row not active: typed failure (integration_inactive), whichever source would have been used.
  *  - Same app (env appKey non-empty and equal to the row's appKey; the env side uses the message-side
  *    alias order, DINGTALK_APP_KEY before DINGTALK_CLIENT_ID): env overrides field by field, exactly the
- *    pre-switch per-field behaviour; an incomplete result is a typed failure.
- *  - Otherwise: the row's own appKey / appSecret / workNotificationAgentId are used as a whole; the row
- *    must be active (integration_inactive otherwise) and complete (integration_tuple_incomplete
- *    otherwise). No field is borrowed from env.
+ *    pre-switch per-field behaviour; an env Agent ID that is used must be 1-32 digits
+ *    (env_agent_id_invalid); an incomplete result is a typed failure.
+ *  - Otherwise: the row's own appKey / appSecret / workNotificationAgentId are used as a whole and must be
+ *    complete (integration_tuple_incomplete otherwise). No field is borrowed from env.
  *  - baseUrl follows the chosen source: env-then-stored for the same-app case, stored-then-env for the
  *    integration case.
  * The failure text names the integration id, field names and sources only — never a value.
@@ -249,28 +270,28 @@ export function resolveDingTalkMessageTuple(
     )
   }
 
+  if (row.integrationStatus !== 'active') {
+    throw new DingTalkMessageConfigError(
+      'integration_inactive',
+      `DingTalk directory integration ${row.integrationId} is not active; work-notification credentials were not resolved for it`,
+    )
+  }
+
   if (env.appKey && env.appKey === row.appKey) {
     const config: DingTalkMessageConfig = {
       appKey: env.appKey,
       appSecret: env.appSecret || row.appSecret,
-      agentId: env.agentId || row.agentId,
+      agentId: checkEnvAgentIdShape(env.agentId) || row.agentId,
       baseUrl: env.baseUrl || row.baseUrl || undefined,
     }
     const missing = missingTupleFields(config)
     if (missing.length > 0) {
       throw new DingTalkMessageConfigError(
         'integration_tuple_incomplete',
-        `DingTalk directory integration ${row.integrationId} work-notification credentials are incomplete (missing: ${missing.join(', ')}) after applying the environment override for the same app`,
+        `DingTalk directory integration ${row.integrationId} work-notification credentials are incomplete (missing: ${missing.join(', ')}) with the same-app environment override`,
       )
     }
     return { config, source: 'env_override' }
-  }
-
-  if (row.integrationStatus !== 'active') {
-    throw new DingTalkMessageConfigError(
-      'integration_inactive',
-      `DingTalk directory integration ${row.integrationId} is not active, so its stored work-notification credentials were not used; environment credentials were not borrowed for it`,
-    )
   }
 
   const config: DingTalkMessageConfig = {
@@ -283,7 +304,7 @@ export function resolveDingTalkMessageTuple(
   if (missing.length > 0) {
     throw new DingTalkMessageConfigError(
       'integration_tuple_incomplete',
-      `DingTalk directory integration ${row.integrationId} work-notification credentials are incomplete (missing: ${missing.join(', ')}); environment credentials were not borrowed because the environment app key is absent or belongs to a different app`,
+      `DingTalk directory integration ${row.integrationId} work-notification credentials are incomplete (missing: ${missing.join(', ')}); environment credentials of another app are not borrowed`,
     )
   }
   return { config, source: 'integration' }
@@ -297,10 +318,13 @@ async function readIntegrationScopedMessageConfig(integrationId: string): Promis
 
 export async function readDingTalkMessageConfigFromRuntime(integrationId?: string): Promise<DingTalkMessageConfig> {
   // Switch ON and an integration named: anchor the tuple to that integration (always reads the row).
-  // Switch OFF, or no integration named: the pre-switch path below, unchanged.
-  const scopedIntegrationId = normalizeText(integrationId)
-  if (scopedIntegrationId && isDingTalkIntegrationScopedCredentialsEnabled()) {
-    return readIntegrationScopedMessageConfig(scopedIntegrationId)
+  // Switch ON, no integration named: the pre-switch path below, after checking the shape of the env
+  // Agent ID (on that path a non-empty env Agent ID is always the one sent).
+  // Switch OFF: the pre-switch path below, unchanged.
+  if (isDingTalkIntegrationScopedCredentialsEnabled()) {
+    const scopedIntegrationId = normalizeText(integrationId)
+    if (scopedIntegrationId) return readIntegrationScopedMessageConfig(scopedIntegrationId)
+    checkEnvAgentIdShape(readStringEnv('DINGTALK_AGENT_ID', 'DINGTALK_NOTIFY_AGENT_ID'))
   }
 
   const envAppKey = readStringEnv('DINGTALK_APP_KEY', 'DINGTALK_CLIENT_ID')
