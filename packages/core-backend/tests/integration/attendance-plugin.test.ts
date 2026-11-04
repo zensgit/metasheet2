@@ -8834,6 +8834,86 @@ attendanceIntegrationDescribe(
         events.stop()
       }
     })
+
+    // The tests above lock the cycle row from a test connection with FOR UPDATE, which conflicts with every row-lock
+    // mode, so they pass whatever lock the route takes. Here the cycle row is locked only by two real route requests.
+    // The test connection holds a SHARE lock on the settlement TABLE, never on the cycle row: a barrier that stops the
+    // close at its first settlement INSERT, inside its own transaction, after it has locked the row and written
+    // status = closed. A rename sent then has to wait for the close and apply onto it. If the route's row lock did not
+    // conflict with the close's UPDATE (e.g. FOR KEY SHARE), the rename would read the row as it was before the close
+    // (status open) and write that back once the close commits.
+    async function openSettlementTableBarrier(): Promise<Holder> {
+      const client = await requirePool().connect()
+      try {
+        await client.query('BEGIN')
+        const pid = Number((await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+        await client.query('LOCK TABLE attendance_payroll_cycle_settlements IN SHARE MODE')
+        return { client, pid, finished: false }
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+        throw error
+      }
+    }
+
+    async function waitUntilSettlementInsertBlockedBy(barrierPid: number, pending: Promise<HttpResponse>): Promise<number> {
+      const early: { res?: HttpResponse } = {}
+      pending.then((res) => { early.res = res }, () => undefined)
+      const deadline = Date.now() + waitBudgetMs
+      while (Date.now() < deadline) {
+        if (early.res) throw new Error(`payroll-cycle-atomicity: route answered ${early.res.status} before its settlement insert waited on the barrier: ${early.res.raw}`)
+        const blocked = await requirePool().query<{ pid: number }>(
+          `SELECT pid FROM pg_stat_activity
+            WHERE pid <> $1
+              AND state = 'active'
+              AND wait_event_type = 'Lock'
+              AND $1 = ANY(pg_blocking_pids(pid))
+              AND query ILIKE '%INSERT INTO attendance_payroll_cycle_settlements%'
+            ORDER BY pid`,
+          [barrierPid],
+        )
+        if (blocked.rows.length > 1) throw new Error(`payroll-cycle-atomicity: ${blocked.rows.length} backends wait on barrier ${barrierPid}`)
+        if (blocked.rows.length === 1) return Number(blocked.rows[0].pid)
+        await delay(20)
+      }
+      throw new Error(`payroll-cycle-atomicity: no settlement insert waited on barrier ${barrierPid} within ${waitBudgetMs}ms`)
+    }
+
+    it('T17 [defect] a close stopped inside its own transaction after writing closed, then a rename through the real route: the rename waits for the close and keeps closed', async () => {
+      const settledUserId = `r7-t17-user-${randomUUID()}`
+      await seedCompTimeLot(org, settledUserId)
+      const cycleId = await createCycle(org, { startDate: '2024-03-01', endDate: '2024-03-28', name: 'r7 t17' })
+      expect(await readCycle(cycleId)).toMatchObject({ status: 'open', name: 'r7 t17' })
+      expect(await readSettlements(cycleId)).toEqual([])
+
+      const barrier = await openSettlementTableBarrier()
+      let pendingClose: Promise<HttpResponse> | undefined
+      let pendingRename: Promise<HttpResponse> | undefined
+      try {
+        pendingClose = updateCycle(org, cycleId, { status: 'closed' })
+        const closePid = await waitUntilSettlementInsertBlockedBy(barrier.pid, pendingClose)
+        pendingRename = updateCycle(org, cycleId, { name: 'r7 t17 renamed' })
+        // The rename's backend waits on the close's backend (on its row lock, or on its UPDATE if the lock is weaker).
+        await waitUntilRouteBlockedBy(closePid, pendingRename)
+        await finishHolder(barrier, 'COMMIT')
+        const closeRes = await withinBudget(pendingClose, 'close after the barrier was released')
+        const renameRes = await withinBudget(pendingRename, 'rename after the close committed')
+        expect(closeRes.status, closeRes.raw).toBe(200)
+        expect(renameRes.status, renameRes.raw).toBe(200)
+      } finally {
+        await finishHolder(barrier, 'ROLLBACK').catch(() => undefined)
+        if (pendingClose) await withinBudget(pendingClose, 'close cleanup').catch(() => undefined)
+        if (pendingRename) await withinBudget(pendingRename, 'rename cleanup').catch(() => undefined)
+      }
+
+      // Both changes are kept: the close's status and the rename's name.
+      expect(await readCycle(cycleId)).toMatchObject({
+        status: 'closed', name: 'r7 t17 renamed', start_date: '2024-03-01', end_date: '2024-03-28',
+      })
+      expect(await readSettlements(cycleId)).toEqual([
+        { user_id: settledUserId, source: 'restday', convertible_minutes: 90, must_pay_minutes: 0, period_start_date: '2024-03-01', period_end_date: '2024-03-28' },
+      ])
+    })
   })
 
   it('④ 加班银行 v1-3b — 满勤 flag surfaces on GET /summary when policy ON; ABSENT when OFF (dormant-clean)', async () => {
