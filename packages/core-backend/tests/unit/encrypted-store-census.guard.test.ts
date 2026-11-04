@@ -65,7 +65,7 @@ const SCRIPTS = 'packages/core-backend/scripts'
 
 /** Every sealing site in the scanned roots today: `<file> :: <writer>` -> count + owner. */
 const CENSUS: Readonly<Record<string, CensusEntry>> = {
-  // data_sources.config.credentials.{password,apiKey,token} — DataSourceManager.encryptCredentials
+  // data_sources.config.credentials.{password,apiKey,token,bearerToken} — DataSourceManager.encryptCredentials
   [`${CS}/data-adapters/DataSourceManager.ts :: encryptStoredSecretValue`]: { count: 1, stores: ['data_sources'] },
   // Two encrypted short-lived operator files (verify proof, re-anchor request) and one durable rollback snapshot; a
   // re-anchor copies the snapshot on the server and seals nothing new. Neither file contains a reusable provider token.

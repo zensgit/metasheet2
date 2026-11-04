@@ -41,8 +41,10 @@ const proofTables = ['integration_yida_send_approvals', 'integration_yida_send_r
 export const principals = Object.freeze({ owner: 'synthetic-http-owner', otherOwner: 'synthetic-http-other-owner',
   reader: 'synthetic-http-reader', fakeRole: 'synthetic-http-fake-role' })
 export const tenant = 'synthetic-http-tenant', otherTenant = 'synthetic-http-other-tenant'
-export const syntheticMaterial = () => ({ appKey: ' synthetic-http-app-key ', appSecret: ' synthetic-http-app-secret ',
-  systemToken: ' synthetic-http-system-token ', userId: 'synthetic-http-executor' })
+// No surrounding whitespace: the route and runtimes refuse it (a pasted line break must never be sealed),
+// and the browser proofs paste these into the panel, which would send them trimmed.
+export const syntheticMaterial = () => ({ appKey: 'synthetic-http-app-key', appSecret: 'synthetic-http-app-secret',
+  systemToken: 'synthetic-http-system-token', userId: 'synthetic-http-executor' })
 function ident(value: string) {
   if (!/^[a-z][a-z0-9_]*$/u.test(value)) throw new Error('SYNTHETIC_OWNED_IDENTIFIER_REQUIRED')
   return `"${value}"`

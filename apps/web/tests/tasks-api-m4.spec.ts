@@ -396,6 +396,15 @@ describe('createTask — M4 date keys and the 422 allowlist', () => {
     await expect(createTask({ title: 'x' })).resolves.toEqual({ kind: 'validation', code })
   })
 
+  it('resolves validation ASSIGNEE_TASK_ACCESS_REQUIRED for a 422 with that code', async () => {
+    expect(CREATE_TASK_VALIDATION_CODES).toContain('ASSIGNEE_TASK_ACCESS_REQUIRED')
+    h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' } }))
+    await expect(createTask({ title: 'x', assignees: ['u2'] })).resolves.toEqual({
+      kind: 'validation',
+      code: 'ASSIGNEE_TASK_ACCESS_REQUIRED',
+    })
+  })
+
   it('still resolves error (NOT validation) for a 422 code outside the allowlist', async () => {
     h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'VALIDATION_FAILED' } }))
     await expect(createTask({ title: 'x' })).resolves.toEqual({ kind: 'error', status: 422 })
@@ -513,6 +522,13 @@ describe('task member writes — 422 INACTIVE_ORG_MEMBER (FE-8)', () => {
     await expect(addAssignee('t1', 'u9')).resolves.toEqual({ kind: 'validation', code: 'INACTIVE_ORG_MEMBER' })
     expect(lastCall()[0]).toBe('/api/tasks/t1/assignees')
     expect(lastCall()[1]?.method).toBe('POST')
+    expect(sentBody()).toEqual({ userId: 'u9' })
+  })
+
+  it('addAssignee resolves validation ASSIGNEE_TASK_ACCESS_REQUIRED and sent { userId }', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' } }))
+    await expect(addAssignee('t1', 'u9')).resolves.toEqual({ kind: 'validation', code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' })
+    expect(lastCall()[0]).toBe('/api/tasks/t1/assignees')
     expect(sentBody()).toEqual({ userId: 'u9' })
   })
 
