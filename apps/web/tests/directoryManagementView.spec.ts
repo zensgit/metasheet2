@@ -5127,6 +5127,224 @@ describe('DirectoryManagementView', () => {
     expect(reviewCardsAfterManualFilter.join(' ')).not.toContain('可推荐成员')
   })
 
+  it('does not bulk-select a row the admin just unbound when the reload still recommends it', async () => {
+    const alpha = { id: 'user-1', email: 'alpha@example.com', name: 'Alpha' }
+    const beta = { id: 'user-2', email: 'beta@example.com', name: 'Beta' }
+    mockInitialLoad([], [createLinkedAccount('account-1', '解绑成员', alpha)])
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({
+      ok: true,
+      data: {
+        account: createAccount({
+          id: 'account-1',
+          name: '解绑成员',
+          externalUserId: 'ext-account-1',
+          linkStatus: 'unmatched',
+          matchStrategy: 'manual_unbound',
+          reviewedBy: 'admin-1',
+          reviewNote: 'unbound by admin',
+        }),
+      },
+    }))
+    // The reload proposes the same local user again for the account that was just unbound; the
+    // account keeps the fixed note the server writes on an admin unbind.
+    mockBatchReload({
+      reviewItems: [
+        createRecommendedPendingReviewItem('account-1', '解绑成员', alpha, {
+          linkStatus: 'unmatched',
+          matchStrategy: 'manual_unbound',
+          reviewedBy: 'admin-1',
+          reviewNote: 'unbound by admin',
+        }),
+        createRecommendedPendingReviewItem('account-2', '成员二', beta),
+      ],
+      accounts: [
+        createAccount({ id: 'account-1', name: '解绑成员', linkStatus: 'unmatched', matchStrategy: 'manual_unbound', reviewedBy: 'admin-1', reviewNote: 'unbound by admin' }),
+        createAccount({ id: 'account-2', name: '成员二' }),
+      ],
+    })
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    clickButton(container!, '解除绑定')
+    await flushUi(8)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/account-1/unbind',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    // Default pre-selection after the reload: only the other recommended row.
+    expect(findButtonByLabel(container!, '可推荐处理')?.className).toContain('directory-admin__button--active')
+    expect(readReviewCheckboxes(container!)).toHaveLength(2)
+    expect(findReviewCheckbox(container!, '解绑成员')?.checked).toBe(false)
+    expect(findReviewCheckbox(container!, '成员二')?.checked).toBe(true)
+    expect(findButtonByLabel(container!, '选择可推荐')?.textContent).toContain('选择可推荐 (1)')
+    expect(findButtonByLabel(container!, '选择当前筛选')?.textContent).toContain('选择当前筛选 (1)')
+    expect(findButtonByLabel(container!, '批量确认推荐')?.textContent).toContain('批量确认推荐 (1)')
+
+    // The bulk buttons do not pick it either.
+    clickButton(container!, '清空选择')
+    await flushUi(2)
+    clickButton(container!, '选择可推荐')
+    await flushUi(2)
+    expect(findReviewCheckbox(container!, '解绑成员')?.checked).toBe(false)
+    expect(findReviewCheckbox(container!, '成员二')?.checked).toBe(true)
+    clickButton(container!, '选择当前筛选')
+    await flushUi(2)
+    expect(findReviewCheckbox(container!, '解绑成员')?.checked).toBe(false)
+    expect(findButtonByLabel(container!, '批量确认推荐')?.textContent).toContain('批量确认推荐 (1)')
+
+    // The per-row checkbox still works for it.
+    setReviewChecked(container!, '解绑成员', true)
+    await flushUi(2)
+    expect(findReviewCheckbox(container!, '解绑成员')?.checked).toBe(true)
+    expect(findButtonByLabel(container!, '批量确认推荐')?.textContent).toContain('批量确认推荐 (2)')
+  })
+
+  it('keeps the default bulk selection for recommended rows that do not carry an active unbind note', async () => {
+    const alpha = { id: 'user-1', email: 'alpha@example.com', name: 'Alpha' }
+    const beta = { id: 'user-2', email: 'beta@example.com', name: 'Beta' }
+    const gamma = { id: 'user-3', email: 'gamma@example.com', name: 'Gamma' }
+    const delta = { id: 'user-4', email: 'delta@example.com', name: 'Delta' }
+    mockInitialLoad(
+      [
+        // Bound by an admin (or unbound and then bound again, which clears the note), later made
+        // non-linked by an identity ambiguity: the reviewer is kept, the note is empty.
+        createRecommendedPendingReviewItem('account-1', '歧义成员', alpha, {
+          linkStatus: 'unmatched',
+          matchStrategy: 'none',
+          reviewedBy: 'admin-1',
+          reviewNote: null,
+        }),
+        // Unbound by an admin, then a sync proposed the same user again: the note is kept.
+        createRecommendedPendingReviewItem('account-2', '同步成员', beta, {
+          linkStatus: 'pending',
+          matchStrategy: 'email',
+          reviewedBy: 'admin-1',
+          reviewNote: 'unbound by admin',
+          localUser: beta,
+        }),
+        // The note alone is not enough: a row whose link is currently linked is not excluded.
+        createRecommendedPendingReviewItem('account-3', '链接成员', gamma, {
+          linkStatus: 'linked',
+          matchStrategy: 'external_identity',
+          reviewedBy: 'admin-1',
+          reviewNote: 'unbound by admin',
+        }),
+        createRecommendedPendingReviewItem('account-4', '正常成员', delta),
+      ],
+      [
+        createAccount({ id: 'account-1', name: '歧义成员' }),
+        createAccount({ id: 'account-2', name: '同步成员' }),
+        createAccount({ id: 'account-3', name: '链接成员' }),
+        createAccount({ id: 'account-4', name: '正常成员' }),
+      ],
+    )
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    expect(findButtonByLabel(container!, '可推荐处理')?.className).toContain('directory-admin__button--active')
+    expect(readReviewCheckboxes(container!)).toHaveLength(4)
+    expect(findReviewCheckbox(container!, '歧义成员')?.checked).toBe(true)
+    expect(findReviewCheckbox(container!, '同步成员')?.checked).toBe(false)
+    expect(findReviewCheckbox(container!, '链接成员')?.checked).toBe(true)
+    expect(findReviewCheckbox(container!, '正常成员')?.checked).toBe(true)
+    expect(findButtonByLabel(container!, '选择可推荐')?.textContent).toContain('选择可推荐 (3)')
+    expect(findButtonByLabel(container!, '批量确认推荐')?.textContent).toContain('批量确认推荐 (3)')
+  })
+
+  it('does not bulk-select an inactive recommended row but still lets the admin check it by hand', async () => {
+    const alpha = { id: 'user-1', email: 'alpha@example.com', name: 'Alpha' }
+    const beta = { id: 'user-2', email: 'beta@example.com', name: 'Beta' }
+    mockInitialLoad(
+      [
+        createRecommendedPendingReviewItem('account-1', '停用成员', alpha, { isActive: false }),
+        createRecommendedPendingReviewItem('account-2', '正常成员', beta),
+      ],
+      [
+        createAccount({ id: 'account-1', name: '停用成员', isActive: false }),
+        createAccount({ id: 'account-2', name: '正常成员' }),
+      ],
+    )
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    expect(findReviewCheckbox(container!, '停用成员')?.checked).toBe(false)
+    expect(findReviewCheckbox(container!, '正常成员')?.checked).toBe(true)
+    expect(findButtonByLabel(container!, '选择可推荐')?.textContent).toContain('选择可推荐 (1)')
+    expect(findButtonByLabel(container!, '选择当前筛选')?.textContent).toContain('选择当前筛选 (1)')
+    expect(findButtonByLabel(container!, '批量确认推荐')?.textContent).toContain('批量确认推荐 (1)')
+
+    setReviewChecked(container!, '停用成员', true)
+    await flushUi(2)
+    expect(findReviewCheckbox(container!, '停用成员')?.checked).toBe(true)
+    expect(findButtonByLabel(container!, '批量确认推荐')?.textContent).toContain('批量确认推荐 (2)')
+  })
+
+  it('applies the inactive and unbind exclusions to 选择当前筛选 only on pending rows, not on inactive linked rows', async () => {
+    const alpha = { id: 'user-1', email: 'alpha@example.com', name: 'Alpha' }
+    const beta = { id: 'user-2', email: 'beta@example.com', name: 'Beta' }
+    const gamma = { id: 'user-3', email: 'gamma@example.com', name: 'Gamma' }
+    const delta = { id: 'user-4', email: 'delta@example.com', name: 'Delta' }
+    mockInitialLoad(
+      [
+        createRecommendedPendingReviewItem('account-1', '推荐成员', alpha),
+        createRecommendedPendingReviewItem('account-2', '停用推荐', beta, { isActive: false }),
+        createRecommendedPendingReviewItem('account-3', '解绑推荐', gamma, {
+          linkStatus: 'unmatched',
+          matchStrategy: 'manual_unbound',
+          reviewedBy: 'admin-1',
+          reviewNote: 'unbound by admin',
+        }),
+        createManualPendingReviewItem('account-4', '人工成员'),
+        createManualPendingReviewItem('account-5', '解绑人工', {
+          linkStatus: 'unmatched',
+          matchStrategy: 'manual_unbound',
+          reviewedBy: 'admin-1',
+          reviewNote: 'unbound by admin',
+        }),
+        createInactiveLinkedReviewItem('account-6', '停权成员', delta),
+      ],
+      [
+        createAccount({ id: 'account-1', name: '推荐成员' }),
+        createAccount({ id: 'account-2', name: '停用推荐', isActive: false }),
+        createAccount({ id: 'account-3', name: '解绑推荐' }),
+        createAccount({ id: 'account-4', name: '人工成员' }),
+        createAccount({ id: 'account-5', name: '解绑人工' }),
+        createAccount({ id: 'account-6', name: '停权成员', isActive: false }),
+      ],
+    )
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    clickButton(container!, '全部待绑定')
+    await flushUi(2)
+    expect(readReviewCheckboxes(container!)).toHaveLength(6)
+    expect(findButtonByLabel(container!, '选择当前筛选')?.textContent).toContain('选择当前筛选 (3)')
+    expect(findButtonByLabel(container!, '选择可推荐')?.textContent).toContain('选择可推荐 (1)')
+
+    clickButton(container!, '选择当前筛选')
+    await flushUi(2)
+    expect(findReviewCheckbox(container!, '推荐成员')?.checked).toBe(true)
+    expect(findReviewCheckbox(container!, '停用推荐')?.checked).toBe(false)
+    expect(findReviewCheckbox(container!, '解绑推荐')?.checked).toBe(false)
+    expect(findReviewCheckbox(container!, '人工成员')?.checked).toBe(true)
+    expect(findReviewCheckbox(container!, '解绑人工')?.checked).toBe(false)
+    expect(findReviewCheckbox(container!, '停权成员')?.checked).toBe(true)
+    expect(findButtonByLabel(container!, '批量停权处理')?.textContent).toContain('批量停权处理 (1)')
+  })
+
   it('loads additional review queue pages and resets to the first page on refresh', async () => {
     apiFetchMock
       .mockResolvedValueOnce(createJsonResponse({
@@ -7382,16 +7600,17 @@ describe('DirectoryManagementView', () => {
     expect(statusEl?.textContent?.trim()).toBe('已完成 2 个目录成员的批量停权处理')
     expect(statusEl?.className).not.toContain('directory-admin__status--error')
 
-    // Full success keeps the selection state the reload produces, as before the partial-failure
-    // change: the recommended view is chosen and its rows are auto-selected. This pins that the
-    // partial-failure retry path leaves full success alone; it does not endorse the auto-selection.
+    // Full success keeps the selection state the reload produces: the recommended view is chosen,
+    // but the reloaded rows are inactive directory accounts (the server rejects binding them), so
+    // the default pre-selection leaves them unchecked; they stay checkable by hand.
     const findButton = (label: string) => Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.trim().startsWith(label))
     expect(findButton('全部待处理')?.className).toContain('directory-admin__button--active')
     expect(findButton('可推荐处理')?.className).toContain('directory-admin__button--active')
     const reloadedCheckboxes = Array.from(container!.querySelectorAll('.directory-admin__review-item .directory-admin__review-select input[type="checkbox"]')) as HTMLInputElement[]
     expect(reloadedCheckboxes).toHaveLength(2)
-    expect(reloadedCheckboxes.map((checkbox) => checkbox.checked)).toEqual([true, true])
-    expect(findButton('批量确认推荐')?.textContent).toContain('批量确认推荐 (2)')
+    expect(reloadedCheckboxes.map((checkbox) => checkbox.checked)).toEqual([false, false])
+    expect(findButton('选择可推荐')?.textContent).toContain('选择可推荐 (0)')
+    expect(findButton('批量确认推荐')?.textContent).toContain('批量确认推荐 (0)')
     expect(findButton('批量停权处理')?.textContent).toContain('批量停权处理 (0)')
   })
 
