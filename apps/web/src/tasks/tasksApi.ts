@@ -1792,3 +1792,141 @@ export async function placeTaskInUserGroup(taskId: string, groupId: string | nul
   const sent = await sendWrite(`/api/task-groups/items/${encodeURIComponent(taskId)}`, 'PUT', { groupId, position })
   return sent.ok ? placeResult(sent) : sent.failure
 }
+
+/*
+ * ---------------------------------------------------------------------------------------------
+ * Task usability package 1b: the people picker. `GET /api/tasks/people` searches (`q`) or
+ * resolves (`ids`) the active members of the caller's org — the people the task writes accept —
+ * each with a name, a distinguishing detail and whether they can use tasks; it takes tasks:write,
+ * as the writes it feeds do. `GET /api/tasks/:id/people` names the people on one task, each with a
+ * status, for anyone who can view the task.
+ *
+ * Both are strict: `ok` only for a 200 of exactly the expected shape (one malformed row makes the
+ * whole answer `error`). Neither throws.
+ * ---------------------------------------------------------------------------------------------
+ */
+
+export interface PersonOption {
+  id: string
+  /** `''` when the person has no name; show the id instead. */
+  name: string
+  /** A masked email, or `''`. */
+  detail: string
+  canUseTasks: boolean
+}
+
+export type SearchPeopleResult =
+  /** `truncated` is present on a resolve answer only. */
+  | { kind: 'ok'; items: PersonOption[]; hasMore: boolean; requiresQuery: boolean; truncated?: boolean }
+  | { kind: 'org_missing' }
+  | { kind: 'forbidden' }
+  | { kind: 'rate_limited' }
+  | { kind: 'error'; status: number }
+
+/** Most ids one resolve sends: the most assignees one task can carry. */
+export const PEOPLE_RESOLVE_MAX_IDS = 50
+
+const PEOPLE_ID_MAX_LENGTH = 255
+const PEOPLE_PRINTABLE_ID = /^[!-~]+$/
+
+/** The server's member id rule: printable ASCII, 1..255 long, not `.` or `..`. */
+function isPeopleId(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= PEOPLE_ID_MAX_LENGTH
+    && PEOPLE_PRINTABLE_ID.test(value)
+    && value !== '.'
+    && value !== '..'
+}
+
+function isPersonOption(value: unknown): value is PersonOption {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return isPeopleId(record.id)
+    && typeof record.name === 'string'
+    && typeof record.detail === 'string'
+    && typeof record.canUseTasks === 'boolean'
+}
+
+async function readPeople(path: string, mode: 'search' | 'resolve'): Promise<SearchPeopleResult> {
+  let response: Response
+  try {
+    response = await apiFetch(path)
+  } catch {
+    return { kind: 'error', status: 0 }
+  }
+  if (response.status === 403) return { kind: 'forbidden' }
+  if (response.status === 429) return { kind: 'rate_limited' }
+  if (response.status === 422) {
+    return extractErrorCode(await safeJson(response)) === 'ORG_MISSING'
+      ? { kind: 'org_missing' }
+      : { kind: 'error', status: 422 }
+  }
+  if (response.status !== 200) return { kind: 'error', status: response.status }
+  const body = await safeJson(response)
+  if (!body || typeof body !== 'object') return { kind: 'error', status: 200 }
+  const record = body as Record<string, unknown>
+  const rows: unknown = record.items
+  if (!Array.isArray(rows) || !rows.every(isPersonOption)) return { kind: 'error', status: 200 }
+  const items: PersonOption[] = (rows as PersonOption[]).map((item) => ({ id: item.id, name: item.name, detail: item.detail, canUseTasks: item.canUseTasks }))
+  if (mode === 'resolve') {
+    if (typeof record.truncated !== 'boolean') return { kind: 'error', status: 200 }
+    return { kind: 'ok', items, hasMore: false, requiresQuery: false, truncated: record.truncated }
+  }
+  if (typeof record.hasMore !== 'boolean' || typeof record.requiresQuery !== 'boolean') return { kind: 'error', status: 200 }
+  return { kind: 'ok', items, hasMore: record.hasMore, requiresQuery: record.requiresQuery }
+}
+
+/** `GET /api/tasks/people?q=` — a blank term answers `requiresQuery: true` with no rows. */
+export async function searchPeople(q: string): Promise<SearchPeopleResult> {
+  return readPeople(`/api/tasks/people?q=${encodeURIComponent(q)}`, 'search')
+}
+
+/** `GET /api/tasks/people?ids=` — the subset of `ids` that are active members of the caller's org.
+ *  Only ids that pass the member id rule are sent, at most `PEOPLE_RESOLVE_MAX_IDS`; with none left
+ *  nothing is sent and the answer is an empty `ok`. */
+export async function resolvePeople(ids: readonly string[]): Promise<SearchPeopleResult> {
+  const sendable = Array.from(new Set(ids.filter(isPeopleId))).slice(0, PEOPLE_RESOLVE_MAX_IDS)
+  if (sendable.length === 0) return { kind: 'ok', items: [], hasMore: false, requiresQuery: false, truncated: false }
+  return readPeople(`/api/tasks/people?ids=${sendable.map(encodeURIComponent).join(',')}`, 'resolve')
+}
+
+export interface TaskPerson {
+  name: string
+  status: 'active' | 'inactive'
+}
+
+export type TaskPeopleResult =
+  | { kind: 'ok'; people: Map<string, TaskPerson> }
+  | { kind: 'not_found' }
+  | { kind: 'forbidden' }
+  | { kind: 'error'; status: number }
+
+function isTaskPerson(value: unknown): value is TaskPerson {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return typeof record.name === 'string' && (record.status === 'active' || record.status === 'inactive')
+}
+
+/** `GET /api/tasks/:id/people` — keyed by user id; a Map, so any id is just a key. */
+export async function getTaskPeople(id: string): Promise<TaskPeopleResult> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  let response: Response
+  try {
+    response = await apiFetch(`/api/tasks/${encodeURIComponent(id)}/people`)
+  } catch {
+    return { kind: 'error', status: 0 }
+  }
+  if (response.status === 403) return { kind: 'forbidden' }
+  if (response.status === 404) return { kind: 'not_found' }
+  if (response.status !== 200) return { kind: 'error', status: response.status }
+  const body = await safeJson(response)
+  const people = body && typeof body === 'object' ? (body as Record<string, unknown>).people : undefined
+  if (!people || typeof people !== 'object' || Array.isArray(people)) return { kind: 'error', status: 200 }
+  const map = new Map<string, TaskPerson>()
+  for (const [userId, entry] of Object.entries(people as Record<string, unknown>)) {
+    if (!isTaskPerson(entry)) return { kind: 'error', status: 200 }
+    map.set(userId, { name: entry.name, status: entry.status })
+  }
+  return { kind: 'ok', people: map }
+}

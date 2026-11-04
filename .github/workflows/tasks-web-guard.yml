@@ -179,6 +179,12 @@
 # step's count against `--list`, and the screenshot upload, so none of them can be dropped while the
 # job stays green.
 #
+# Task usability package 1b, the people picker (one new file, so twenty-seven whole-file args):
+# `tasks-people-picker.spec.ts` added — the picker component (`tasks/TaskPeoplePicker.vue`): search,
+# the masked distinguishing detail, people who cannot use tasks yet shown but not selectable as
+# assignees, and the typed-id entry kept as a secondary control. The task detail page and the
+# record dispatch dialog specs gain the picker's cells.
+#
 # Scope: deliberately TARGETED (same convention as elearning/approval/attendance/multitable/
 # plm-embed web-guards). NOT a required check: it cannot hang a PR, but it turns a silent FE
 # regression on the /tasks skeleton surface into a visible red.
@@ -285,7 +291,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run tasks web guard specs (targeted)
-        # Twenty-six whole-file args, listed explicitly. Do not replace with a name filter, glob, skip, or
+        # Twenty-seven whole-file args, listed explicitly. Do not replace with a name filter, glob, skip, or
         # continue-on-error — a filter matching zero tests exits green.
         run: |
           pnpm --filter @metasheet/web exec vitest run \
@@ -309,6 +315,7 @@ jobs:
             tests/tasks-nav-badge.spec.ts \
             tests/tasks-nav-feature-gate.spec.ts \
             tests/tasks-nav-relogin.spec.ts \
+            tests/tasks-people-picker.spec.ts \
             tests/tasks-record-dispatch.spec.ts \
             tests/tasks-routes.spec.ts \
             tests/tasks-settings-view.spec.ts \
