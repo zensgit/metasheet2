@@ -86,7 +86,16 @@ function isInternalHostname(host: string): boolean {
  * Validate a target URL for an egress webhook. Returns the pinned addresses on success (caller connects
  * to those, not the name). Rejects (never throws) with a stable reason on any unsafe target.
  */
-export async function checkWebhookTargetUrl(rawUrl: unknown, lookupFn: SsrfLookupFn = ((h) => dnsLookup(h, { all: true }))): Promise<SsrfCheckResult> {
+export type SsrfShapeResult =
+  | { ok: true; hostname: string; isIpLiteral: boolean }
+  | { ok: false; reason: string }
+
+/**
+ * Every check that can be decided from the URL alone — no DNS: required, parseable, https, not an internal
+ * name, not an internal IP literal. Save-time callers use it for an EARLY error (a save must not depend on
+ * the resolver); the send-time check below runs it first and then resolves and judges every address.
+ */
+export function checkWebhookTargetUrlShape(rawUrl: unknown): SsrfShapeResult {
   if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) return { ok: false, reason: 'URL is required' }
   let parsed: URL
   try {
@@ -99,10 +108,16 @@ export async function checkWebhookTargetUrl(rawUrl: unknown, lookupFn: SsrfLooku
   if (isInternalHostname(hostname)) return { ok: false, reason: 'target host is internal' }
 
   // A bare IP literal is checked directly (no DNS). A name is resolved and EVERY address checked.
-  if (isInternalAddress(hostname) && (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.includes(':'))) {
-    return { ok: false, reason: 'target IP is internal' }
-  }
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.includes(':')) {
+  const isIpLiteral = /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.includes(':')
+  if (isIpLiteral && isInternalAddress(hostname)) return { ok: false, reason: 'target IP is internal' }
+  return { ok: true, hostname, isIpLiteral }
+}
+
+export async function checkWebhookTargetUrl(rawUrl: unknown, lookupFn: SsrfLookupFn = ((h) => dnsLookup(h, { all: true }))): Promise<SsrfCheckResult> {
+  const shape = checkWebhookTargetUrlShape(rawUrl)
+  if (!shape.ok) return { ok: false, reason: (shape as { reason: string }).reason }
+  const { hostname, isIpLiteral } = shape as { hostname: string; isIpLiteral: boolean }
+  if (isIpLiteral) {
     return { ok: true, protocol: 'https:', hostname, addresses: [hostname] } // public IP literal
   }
 
