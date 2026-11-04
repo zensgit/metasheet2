@@ -20,11 +20,48 @@ import { createApp, defineComponent, h as vueH, nextTick, reactive, ref, type Ap
 //   SYNC-STRADDLE (#6591 review, follow-up O2) a 同步 run's outcome belongs to the project, scope and
 //        session it was started for: after the board opens another project, the scope moves or the
 //        session changes, the run's writes still complete but nothing of it renders and no `synced`.
+//   BOARD-MR (R80 verifier F1) the 人工补充行 section, mounted live on the board: it is always about the project the
+//        board shows — switch state, reminder and links — and its switch prompt never outlives the project or the
+//        session it was opened under; the workspace mount (no seed) still follows the submitted run.
 
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
   permissions: ['integration:admin'] as string[],
+  // BOARD-MR only (production wiring: nothing injected, so the 人工补充行 section is live): when set, the three client
+  // factories answer these doubles; otherwise they are the real ones, so every other case is unchanged.
+  board: null as null | { sync: unknown; manualRows: unknown },
 }))
+
+vi.mock('../src/services/integration/stockPreparation/projectSync', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/services/integration/stockPreparation/projectSync')>()
+  return {
+    ...actual,
+    createStockPreparationProjectSyncApi: (...args: Parameters<typeof actual.createStockPreparationProjectSyncApi>) => (
+      h.board ? h.board.sync as ReturnType<typeof actual.createStockPreparationProjectSyncApi> : actual.createStockPreparationProjectSyncApi(...args)
+    ),
+  }
+})
+
+vi.mock('../src/services/integration/stockPreparation/projectTarget', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/services/integration/stockPreparation/projectTarget')>()
+  return {
+    ...actual,
+    // The switch-off (legacy) path: no project-target client.
+    createStockPreparationProjectTargetApi: (...args: Parameters<typeof actual.createStockPreparationProjectTargetApi>) => (
+      h.board ? null : actual.createStockPreparationProjectTargetApi(...args)
+    ),
+  }
+})
+
+vi.mock('../src/services/integration/stockPreparation/projectManualRows', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/services/integration/stockPreparation/projectManualRows')>()
+  return {
+    ...actual,
+    createStockPreparationManualRowsApi: (...args: Parameters<typeof actual.createStockPreparationManualRowsApi>) => (
+      h.board ? h.board.manualRows as ReturnType<typeof actual.createStockPreparationManualRowsApi> : actual.createStockPreparationManualRowsApi(...args)
+    ),
+  }
+})
 
 vi.mock('../src/composables/useLocale', () => ({
   useLocale: () => ({
@@ -1578,6 +1615,217 @@ describe('StockPreparationProjectSyncPanel', () => {
       expect(onSynced).not.toHaveBeenCalled()
       expect(root.querySelector('[data-testid="stock-prep-project-sync-restore-prompt"]')).toBeNull()
       expect(verdictOf(root)).toBeNull()
+    })
+  })
+
+  // ---- BOARD-MR (R80 verifier F1) ----------------------------------------------------------------
+  // The 人工补充行 section as the BOARD mounts it: production wiring (nothing injected, so the section is live; the
+  // three client factories answer doubles, and the run takes the switch-off path). The board keeps this panel mounted
+  // across a project switch and only moves `projectNo`. Synthetic values only.
+  describe('BOARD-MR — the 人工补充行 section is about the project the board shows', () => {
+    const PROJECT_A = 'SYN-PROJ-A'
+    const PROJECT_B = 'SYN-PROJ-B'
+    const PROJECT_C = 'SYN-PROJ-C'
+    const SCOPE = { tenantId: 'tenant-syn', workspaceId: 'workspace-syn' }
+    const PLAN = { status: 'ready', canApply: true, dryRunToken: 'tok_syn', counts: { add: 3, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } }
+    const ROWS: Record<string, number> = { [PROJECT_A]: 7, [PROJECT_B]: 2, [PROJECT_C]: 4 }
+
+    function manualState(projectNo: string, policy: 'allowed' | 'disabled' = 'allowed') {
+      const tag = projectNo.slice(-1).toLowerCase()
+      return {
+        status: 'active' as const,
+        sheetId: `sheet_syn_${tag}`,
+        viewId: `view_syn_${tag}`,
+        manualRowsSupported: true,
+        keyColumn: 'present' as const,
+        policy,
+        policySource: 'default' as const,
+        keyLocked: true,
+        lastPull: {
+          status: 'recorded' as const,
+          at: '2026-11-01T00:00:00.000Z',
+          mode: 'apply' as const,
+          rowCount: ROWS[projectNo] ?? 0,
+          unboundKeyCount: 0,
+          matchedManualCount: 1,
+          matchedManualRecordIds: [`rec_syn_${tag}`],
+          unboundRecordIds: [],
+        },
+        may: { set: true },
+      }
+    }
+
+    function doubles() {
+      const sync = {
+        dryRun: vi.fn().mockResolvedValue(PLAN),
+        reconcile: vi.fn().mockResolvedValue({ counts: { created: 2, existing: 0, pending: 2 } }),
+        apply: vi.fn().mockResolvedValue({ status: 'succeeded', apply: { counts: { created: 3, updated: 0, inactive: 0, skipped: 0, held: 0, failed: 0 } } }),
+        archive: vi.fn().mockResolvedValue({ status: 'created', persisted: true, created: { batch: 1, lines: 3, run: 1 } }),
+      }
+      const manualRows = {
+        get: vi.fn(async (projectNo: string) => manualState(projectNo)),
+        set: vi.fn(async (projectNo: string, _confirm: string, policy: 'allowed' | 'disabled') => ({
+          ...manualState(projectNo, policy),
+          policySource: 'set' as const,
+          written: true,
+          changed: true,
+        })),
+      }
+      h.board = { sync, manualRows }
+      return { sync, manualRows }
+    }
+
+    beforeEach(() => {
+      h.permissions = ['stock-prep:admin']
+      localStorage.setItem('auth_token', 'synthetic-session-a')
+    })
+    afterEach(() => {
+      h.board = null
+      localStorage.removeItem('auth_token')
+    })
+
+    /** `seeded`: the board (a `projectNo` seed); otherwise the workspace mount (no seed). */
+    function mountPanel(seeded = true) {
+      const { sync, manualRows } = doubles()
+      const board = reactive({ projectNo: PROJECT_A, scope: { ...SCOPE } })
+      const Host = defineComponent({
+        setup: () => () => vueH(StockPreparationProjectSyncPanel as Component, {
+          ...(seeded ? { projectNo: board.projectNo } : {}),
+          scope: board.scope,
+          runVariant: 'pull',
+        }),
+      })
+      app = createApp(Host)
+      app.mount(container!)
+      return { root: container!, board, sync, manualRows }
+    }
+
+    const q = (root: HTMLElement, id: string) => root.querySelector(`[data-testid="${id}"]`) as HTMLElement | null
+    const press = async (root: HTMLElement, id: string) => {
+      const button = q(root, id) as HTMLButtonElement | null
+      expect(button, `${id} must render`).not.toBeNull()
+      button!.click()
+      await flushUi(12)
+    }
+    const typeInto = async (root: HTMLElement, id: string, value: string) => {
+      const input = q(root, id) as HTMLInputElement
+      input.value = value
+      input.dispatchEvent(new Event('input'))
+      await flushUi(12)
+    }
+    const reads = (manualRows: ReturnType<typeof doubles>['manualRows']) => manualRows.get.mock.calls.map((call) => call[0])
+    const promptProjectNo = (root: HTMLElement) => q(root, 'stock-prep-project-manual-rows-project-no')?.textContent?.trim() ?? null
+    const reminderCount = (root: HTMLElement) => q(root, 'stock-prep-project-manual-rows-count')?.getAttribute('data-count') ?? null
+    const links = (root: HTMLElement) => Array.from(root.querySelectorAll('[data-testid="stock-prep-project-manual-rows-matched-link"]')).map((link) => link.getAttribute('href') ?? '')
+
+    async function pullOnA() {
+      const mounted = mountPanel()
+      await flushUi(12)
+      await press(mounted.root, 'stock-prep-project-sync-run')
+      expect(mounted.sync.dryRun.mock.calls[0][0]).toBe(PROJECT_A)
+      expect(q(mounted.root, 'stock-prep-project-sync-verdict')?.getAttribute('data-verdict')).toBe('imported')
+      expect(reads(mounted.manualRows), 'the pull on A re-read A').toEqual([PROJECT_A, PROJECT_A])
+      return mounted
+    }
+
+    it('BOARD-MR-0 the board mounts the section live, bound to the board project (nothing pulled yet)', async () => {
+      const { root, manualRows } = mountPanel()
+      await flushUi(12)
+      expect(q(root, 'stock-prep-project-manual-rows'), 'the section is mounted and not inert').not.toBeNull()
+      expect(reads(manualRows)).toEqual([PROJECT_A])
+      expect(reminderCount(root)).toBe(String(ROWS[PROJECT_A]))
+      await press(root, 'stock-prep-project-manual-rows-set')
+      expect(promptProjectNo(root)).toBe(PROJECT_A)
+    })
+
+    it('BOARD-MR-1 after a pull on A, opening B shows B: its switch state, its reminder, its links — and a prompt names B', async () => {
+      const { root, board, manualRows } = await pullOnA()
+      expect(reminderCount(root)).toBe(String(ROWS[PROJECT_A]))
+      expect(links(root).every((href) => href.includes('sheet_syn_a') && href.includes('rec_syn_a'))).toBe(true)
+      board.projectNo = PROJECT_B
+      await flushUi(12)
+      expect(reads(manualRows).at(-1), 'the section re-read the board project').toBe(PROJECT_B)
+      expect(reads(manualRows).slice(2).every((projectNo) => projectNo === PROJECT_B), 'nothing re-read A on B\'s board').toBe(true)
+      expect(q(root, 'stock-prep-project-manual-rows-status')?.getAttribute('data-policy')).toBe('allowed')
+      expect(reminderCount(root), 'B\'s reminder, not A\'s').toBe(String(ROWS[PROJECT_B]))
+      const hrefs = links(root)
+      expect(hrefs.length).toBe(1)
+      expect(hrefs[0]).toContain('sheet_syn_b')
+      expect(hrefs[0]).toContain('rec_syn_b')
+      expect(hrefs[0]).not.toContain('_syn_a')
+      await press(root, 'stock-prep-project-manual-rows-set')
+      expect(promptProjectNo(root), 'a prompt opened on B names B').toBe(PROJECT_B)
+    })
+
+    it('BOARD-MR-2 an open prompt on A (after a pull on A) closes when the board opens B; nothing is written', async () => {
+      const { root, board, manualRows } = await pullOnA()
+      await press(root, 'stock-prep-project-manual-rows-set')
+      await typeInto(root, 'stock-prep-project-manual-rows-input', PROJECT_A)
+      board.projectNo = PROJECT_B
+      await flushUi(12)
+      expect(q(root, 'stock-prep-project-manual-rows-prompt'), 'no question about A on B\'s board').toBeNull()
+      expect(manualRows.set).not.toHaveBeenCalled()
+      // Reopened on B, the typed text is gone and the prompt is about B.
+      await press(root, 'stock-prep-project-manual-rows-set')
+      expect(promptProjectNo(root)).toBe(PROJECT_B)
+      expect((q(root, 'stock-prep-project-manual-rows-input') as HTMLInputElement).value).toBe('')
+    })
+
+    it('BOARD-MR-3 an open prompt on A closes when another principal takes the session (notified); nothing is written', async () => {
+      const { root, manualRows } = await pullOnA()
+      await press(root, 'stock-prep-project-manual-rows-set')
+      await typeInto(root, 'stock-prep-project-manual-rows-input', PROJECT_A)
+      localStorage.setItem('auth_token', 'synthetic-session-other')
+      notifyAuthPrincipalChange()
+      await flushUi(12)
+      expect(q(root, 'stock-prep-project-sync-verdict'), 'the panel itself invalidated').toBeNull()
+      expect(q(root, 'stock-prep-project-manual-rows-prompt'), 'no question carried over to another principal').toBeNull()
+      expect(manualRows.set).not.toHaveBeenCalled()
+    })
+
+    it('BOARD-MR-4 another tab replaced the session (no notification): the confirm click writes nothing and closes the prompt', async () => {
+      const { root, manualRows } = await pullOnA()
+      await press(root, 'stock-prep-project-manual-rows-set')
+      await typeInto(root, 'stock-prep-project-manual-rows-input', PROJECT_A)
+      localStorage.setItem('auth_token', 'synthetic-session-other-tab')
+      await press(root, 'stock-prep-project-manual-rows-confirm')
+      expect(manualRows.set).not.toHaveBeenCalled()
+      expect(q(root, 'stock-prep-project-manual-rows-prompt')).toBeNull()
+      expect(q(root, 'stock-prep-project-manual-rows-result')).toBeNull()
+    })
+
+    it('BOARD-MR-5 control: nothing changes — the confirm on A writes A once and reads it back', async () => {
+      const { root, manualRows } = await pullOnA()
+      await press(root, 'stock-prep-project-manual-rows-set')
+      await typeInto(root, 'stock-prep-project-manual-rows-input', PROJECT_A)
+      await press(root, 'stock-prep-project-manual-rows-confirm')
+      expect(manualRows.set.mock.calls).toEqual([[PROJECT_A, PROJECT_A, 'disabled']])
+      expect(q(root, 'stock-prep-project-manual-rows-result')?.getAttribute('data-result')).toBe('disabled')
+      expect(q(root, 'stock-prep-project-manual-rows-status')?.getAttribute('data-policy')).toBe('disabled')
+    })
+
+    it('BOARD-MR-6 a pull the operator typed for another project on B\'s board leaves the section on B, and its report does not re-read it', async () => {
+      const { root, board, sync, manualRows } = mountPanel()
+      board.projectNo = PROJECT_B
+      await flushUi(12)
+      const before = reads(manualRows).length
+      expect(reads(manualRows).at(-1)).toBe(PROJECT_B)
+      await typeInto(root, 'stock-prep-project-sync-project-no', PROJECT_C)
+      await press(root, 'stock-prep-project-sync-run')
+      expect(sync.dryRun.mock.calls[0][0]).toBe(PROJECT_C)
+      expect(q(root, 'stock-prep-project-sync-verdict')?.getAttribute('data-verdict')).toBe('imported')
+      expect(reads(manualRows).length, 'C\'s report is not this section\'s run').toBe(before)
+      expect(reminderCount(root)).toBe(String(ROWS[PROJECT_B]))
+    })
+
+    it('BOARD-MR-7 the workspace mount (no seed) follows the submitted run, as before', async () => {
+      const { root, manualRows } = mountPanel(false)
+      await flushUi(12)
+      expect(reads(manualRows), 'no project yet, no read').toEqual([])
+      await typeInto(root, 'stock-prep-project-sync-project-no', PROJECT_A)
+      await press(root, 'stock-prep-project-sync-run')
+      expect(reads(manualRows).at(-1)).toBe(PROJECT_A)
+      expect(reminderCount(root)).toBe(String(ROWS[PROJECT_A]))
     })
   })
 })
