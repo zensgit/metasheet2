@@ -84,7 +84,7 @@ on:
         options: [status, preflight, 'off', bootstrap, human-bootstrap, alias, pending, deprovision]
         default: status
       target_mode:
-        description: 'preflight only: target mode to assess (off|alias|pending|deprovision). Stack readiness only — action=pending|deprovision still require subject secret.'
+        description: 'preflight only: target mode to assess (off|alias|pending|deprovision). Stack readiness only — action=pending|deprovision still require subject secret. A non-off target also requires deploy_sha and enforces the accept-table digest match.'
         required: false
         type: choice
         options: ['off', alias, pending, deprovision]
@@ -95,7 +95,7 @@ on:
         type: string
         default: ''
       deploy_sha:
-        description: 'FULL 40-char lowercase commit SHA currently deployed on staging. Required for action=off, bootstrap, human-bootstrap, alias, pending, and deprovision; optional exact-match for preflight.'
+        description: 'FULL 40-char lowercase commit SHA currently deployed on staging. Required for action=off, bootstrap, human-bootstrap, alias, pending, deprovision, and preflight with a non-off target_mode (accept-table digest binding); optional exact-match for preflight target_mode=off.'
         required: false
         default: ''
       bootstrap_confirmation:
@@ -219,18 +219,27 @@ jobs:
         run: node --test scripts/ops/dingtalk-lifecycle-staging-canary-contract.test.mjs
 
       # Binds the canary accept table to the DEPLOYED migration sources: every accepted name's
-      # migration source at deploy_sha must hash to its accepted digest. Enforced only for the
-      # non-off executable actions; report-only for status, preflight and off (off is never
-      # blocked by this check). The checkout is shallow, so the deploy_sha commit is fetched
-      # first; a failed fetch reads as unknown, which refuses the enforced actions.
+      # migration source at deploy_sha must hash to its accepted digest. Enforced for the five
+      # non-off executable actions and for preflight with a non-off target (a not-proven table
+      # fails that preflight the same way it refuses those writes); report-only for status and
+      # preflight target=off. action=off never runs this step (step-level if), so the emergency
+      # clear never waits on the fetch below. The checkout is shallow, so the deploy_sha commit
+      # is fetched first under its own command timeout (and the step has its own timeout); a
+      # failed or timed-out fetch reads as unknown, which refuses the enforced actions.
       - name: Verify accepted migration digests at deploy SHA
+        if: ${{ inputs.action != 'off' }}
+        timeout-minutes: 3
+        # Report-only runs stay report-only even if the step backstop fires.
+        continue-on-error: ${{ inputs.action == 'status' || (inputs.action == 'preflight' && inputs.target_mode == 'off') }}
         env:
           ACTION: ${{ inputs.action }}
+          TARGET_MODE: ${{ inputs.target_mode }}
           DEPLOY_SHA: ${{ inputs.deploy_sha }}
         run: |
           set -euo pipefail
           enforce=false
           case "$ACTION" in bootstrap|human-bootstrap|alias|pending|deprovision) enforce=true ;; esac
+          if [[ "$ACTION" == "preflight" && "$TARGET_MODE" != "off" ]]; then enforce=true; fi
           if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "accept_digests_at_deploy_sha=not_applicable (no deploy_sha; enforce=${enforce})"
             if [[ "$enforce" == "true" ]]; then
@@ -239,7 +248,7 @@ jobs:
             fi
             exit 0
           fi
-          git fetch --no-tags --depth=1 origin "$DEPLOY_SHA" > /dev/null 2>&1 || echo "deploy_sha fetch failed; the check reads unknown"
+          timeout 60 git fetch --no-tags --depth=1 origin "$DEPLOY_SHA" > /dev/null 2>&1 || echo "deploy_sha fetch failed or timed out; the check reads unknown"
           rc=0
           bash scripts/ops/dingtalk-lifecycle-canary-accept-digests-at-deploy-sha.sh "$DEPLOY_SHA" || rc=$?
           if [[ "$rc" -eq 0 ]]; then

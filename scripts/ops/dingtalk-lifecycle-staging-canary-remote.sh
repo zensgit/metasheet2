@@ -94,20 +94,26 @@
 #   * Migrations gate (migrations_gate, enum whole_ledger|owner_scoped|refused|unknown):
 #     preflight_ok for non-off targets and action=alias / bootstrap / human-bootstrap /
 #     pending / deprovision (pre-write preconditions AND post-write re-checks) pass only on
-#     whole_ledger (both exclusion lists readable and the whole ledger reads Pending: 0) or
-#     owner_scoped (the whole ledger's pending NAME SET equals exactly the tolerated set =
-#     owner exclusion list from the attendance window-runner lib ∩ the canary accept table
-#     beside this script; narrowing the ledger by exactly those names drops exactly them;
-#     every tolerated name confirms pending one by one through migrate.js --confirm; and the
-#     lib's excluded tables are proven absent through node pg in the backend container).
-#     The list gate is independent of the ledger: an unreadable lib (names or table SQL) or
-#     accept table is unknown even when the whole ledger reads Pending: 0. refused and
-#     unknown always fail; unknown is never success.
+#     whole_ledger (both exclusion lists readable and the same set, and the whole ledger reads
+#     Pending: 0) or owner_scoped (the whole ledger's pending NAME SET equals exactly the
+#     tolerated set = the one set named by BOTH the owner exclusion list from the attendance
+#     window-runner lib and the canary accept table beside this script; narrowing the ledger
+#     by exactly those names drops exactly them; every tolerated name confirms pending one by
+#     one through migrate.js --confirm; and the lib's excluded tables are proven absent
+#     through node pg in the backend container).
+#     The list gate is independent of the ledger and runs before any verdict: an unreadable
+#     lib (names or table SQL) or accept table is unknown, and two lists that are not the same
+#     set after normalization (trim, drop blank/comment entries, de-duplicate, sort) are
+#     refused (exclusion_lists_mismatch) — both even when the whole ledger reads Pending: 0.
+#     There is no intersection: a name in only one list refuses the rule. refused and unknown
+#     always fail; unknown is never success.
 #   * action=off and preflight target=off use migrations_gate_off: whole ledger Pending: 0,
 #     or the ledger narrowed by the lib exclusion list itself reads Pending: 0. It is
 #     computed in its own subshell from the lib's list function alone — never from the
 #     accept table, the table-proof SQL or any proof — so every proof is report-only for off.
-#     Lib unreadable → whole ledger only; whole ledger unknown → refuse.
+#     Lib unreadable → whole ledger only; whole ledger unknown → refuse. action=off does not
+#     run the non-off rule at all (no proof probe before or after the flag clear); its
+#     migrations_gate reads unknown / not_evaluated_for_off.
 #   * The attendance lib is never sourced at top level: it is read on demand in a subshell,
 #     so a missing or broken lib degrades to the strict whole-ledger rule and never aborts
 #     status/off. Nothing in capture_live_snapshot's migration probes can fail or exit.
@@ -124,8 +130,9 @@
 #     non-empty value) is report-only — booleans, never values.
 #   * The workflow binds the accept table to the DEPLOYED migration sources before dispatch:
 #     every accepted name's source at deploy_sha must hash to its accepted digest, or
-#     bootstrap / human-bootstrap / alias / pending / deprovision are not dispatched
-#     (report-only for status, preflight and off).
+#     bootstrap / human-bootstrap / alias / pending / deprovision and preflight for a non-off
+#     target are not dispatched (report-only for status and preflight target=off; action=off
+#     skips the check entirely).
 #   * action=off|alias|pending|deprovision: recreate backend only; prove
 #     postgres/redis IDs unchanged; require backend health true after restart;
 #     prove exact mode; restore previous/OFF override and re-recreate on any
@@ -736,6 +743,16 @@ read_canary_accept_table() {
   printf '%s' "$out"
 }
 
+# normalize_exclusion_name_set: stdin = names separated by commas and/or newlines; stdout = the
+# normalized set, one name per line: each entry trimmed, blank and comment (#) entries dropped,
+# de-duplicated and sorted bytewise. Both exclusion lists go through this before the non-off
+# rule compares them for set equality. Never exits non-zero on empty input.
+normalize_exclusion_name_set() {
+  tr ',' '\n' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' -e '/^#/d' \
+    | LC_ALL=C sort -u
+}
+
 # probe_owner_excluded_tables_absent <sql>: runs the lib's excluded-tables-present SQL through
 # the backend container's own DATABASE_URL (node pg, as probe_alias_readiness does). The SQL
 # travels as argv, never interpolated. true when the count is 0, false when any excluded
@@ -817,24 +834,29 @@ snapshot_migrations_gate_off_fields() {
 #   whole-ledger list already captured. Prints key=value lines; always invoked inside $(...)
 #   so nothing here can abort the caller — an unexpected failure leaves every field unknown.
 #   The list gate is independent of the ledger: the lib exclusion list (names and table SQL)
-#   and the canary accept table must both be readable, even when nothing is pending.
-#     whole_ledger  both lists readable and the whole ledger reads Pending: 0
+#   and the canary accept table must both be readable AND, once normalized
+#   (normalize_exclusion_name_set), name exactly the same set — checked before any verdict,
+#   even when nothing is pending. The tolerated set is that one common set; a name in only one
+#   of the two lists is never tolerated and refuses the whole rule (exclusion_lists_mismatch).
+#     whole_ledger  both lists readable, the same set, and the whole ledger reads Pending: 0
 #     owner_scoped  the whole ledger's pending name set equals exactly the tolerated set
-#                   (lib exclusion list ∩ accept table, non-empty); narrowing the ledger by
-#                   exactly the tolerated names drops exactly that many (count leg); every
-#                   tolerated name confirms pending through migrate.js --confirm (per-name
-#                   leg); the lib's excluded tables are proven absent
-#     refused       the pending name set differs from the tolerated set (pending_set_mismatch:
-#                   a name outside it, an unaccepted exclusion pending, or a tolerated name
-#                   no longer pending), a count or per-name leg that answers "not pending",
-#                   an excluded table present, or no tolerated set to apply
+#                   (non-empty); narrowing the ledger by exactly the tolerated names drops
+#                   exactly that many (count leg); every tolerated name confirms pending
+#                   through migrate.js --confirm (per-name leg); the lib's excluded tables are
+#                   proven absent
+#     refused       the two lists are not the same set (exclusion_lists_mismatch), the pending
+#                   name set differs from the tolerated set (pending_set_mismatch: a name
+#                   outside it, or a tolerated name no longer pending), a count or per-name leg
+#                   that answers "not pending", an excluded table present, or no tolerated set
+#                   to apply
 #     unknown       a probe, the lib or the accept table could not be read — always refuses
 snapshot_migrations_gate_fields() {
   local whole="${1:-unknown}" list="${2:-}"
-  local lib_csv=unknown lib_sql="" accept_csv=unknown tolerated_csv=unknown
+  local lib_csv=unknown lib_sql="" accept_csv=unknown tolerated_csv=unknown lists_equal=unknown
   local pending_count=unknown names_proven='n/a' names_confirmed='n/a' tables_absent='n/a'
   local gate=unknown gate_reason=probe_unknown
-  local accepted names expected name n tol_len scoped_tol confirm confirm_verdict confirm_reason
+  local accepted names expected n tol_len scoped_tol confirm confirm_verdict confirm_reason
+  local lib_set accept_set
 
   if ! lib_csv="$(read_owner_exclusion_csv)"; then
     lib_csv=unknown
@@ -845,13 +867,18 @@ snapshot_migrations_gate_fields() {
   if accepted="$(read_canary_accept_table)"; then
     accept_csv="$(printf '%s' "$accepted" | tr '\n' ',' | sed 's/,$//')"
   fi
+  # Set equality of the two lists (never an intersection): the tolerated set exists only when
+  # both normalized sets are identical; on any difference nothing is tolerated.
   if [[ "$lib_csv" != "unknown" && "$accept_csv" != "unknown" ]]; then
-    tolerated_csv=""
-    for name in ${lib_csv//,/ }; do
-      if [[ ",${accept_csv}," == *",${name},"* ]]; then
-        tolerated_csv="${tolerated_csv}${tolerated_csv:+,}${name}"
-      fi
-    done
+    lib_set="$(printf '%s' "$lib_csv" | normalize_exclusion_name_set)"
+    accept_set="$(printf '%s' "$accept_csv" | normalize_exclusion_name_set)"
+    if [[ "$lib_set" == "$accept_set" ]]; then
+      lists_equal=true
+      tolerated_csv="$(printf '%s' "$lib_set" | tr '\n' ',' | sed 's/,$//')"
+    else
+      lists_equal=false
+      tolerated_csv=""
+    fi
   fi
   pending_count="$(migrate_list_pending_count "$list")"
 
@@ -861,13 +888,16 @@ snapshot_migrations_gate_fields() {
         gate=unknown; gate_reason=lib_unreadable
       elif [[ "$accept_csv" == "unknown" ]]; then
         gate=unknown; gate_reason=accept_table_unreadable
+      elif [[ "$lists_equal" != "true" ]]; then
+        gate=refused; gate_reason=exclusion_lists_mismatch
       else
         gate=whole_ledger; gate_reason=whole_ledger_pending_zero
       fi
       ;;
     false)
-      # Table proof (reported for both rules; load-bearing for this one only).
-      if [[ "$lib_csv" != "unknown" && -n "$lib_csv" ]]; then
+      # Table proof (reported for both rules; load-bearing for this one only). Skipped when the
+      # two lists differ: that refuses before any proof runs.
+      if [[ "$lib_csv" != "unknown" && -n "$lib_csv" && "$lists_equal" != "false" ]]; then
         if [[ -n "$lib_sql" ]]; then
           tables_absent="$(probe_owner_excluded_tables_absent "$lib_sql")"
         else
@@ -876,8 +906,10 @@ snapshot_migrations_gate_fields() {
       fi
       if [[ "$lib_csv" == "unknown" || -z "$lib_sql" ]]; then
         gate=unknown; gate_reason=lib_unreadable
-      elif [[ "$tolerated_csv" == "unknown" ]]; then
+      elif [[ "$accept_csv" == "unknown" ]]; then
         gate=unknown; gate_reason=accept_table_unreadable
+      elif [[ "$lists_equal" != "true" ]]; then
+        gate=refused; gate_reason=exclusion_lists_mismatch
       elif [[ -z "$tolerated_csv" ]]; then
         gate=refused; gate_reason=no_tolerated_exclusions_whole_ledger_pending
       elif [[ "$pending_count" == "unknown" ]]; then
@@ -946,6 +978,10 @@ snapshot_migrations_gate_fields() {
 # the captured whole list. The off rule and the non-off rule run in two separate $(...)
 # subshells (off first), so nothing on the non-off path can reach the off fields. Every field
 # defaults to unknown; never fails.
+# action=off never enters the non-off rule: no accept-table read, no table-proof SQL, no
+# tolerated scoped read, no node pg probe and no per-name --confirm run before (or after) the
+# flag clear. Its non-off fields stay unknown / n/a with migrations_gate_reason
+# not_evaluated_for_off; the pending count is parsed from the whole list already captured.
 capture_migrations_gate() {
   local off_fields="" fields="" key value
   SNAP_OWNER_EXCLUDED_CSV=unknown
@@ -970,6 +1006,15 @@ capture_migrations_gate() {
       *) ;;
     esac
   done <<< "$off_fields"
+  if [[ "${ACTION:-}" == "off" ]]; then
+    SNAP_MIGRATIONS_PENDING_COUNT="$(migrate_list_pending_count "${SNAP_MIGRATE_LIST_WHOLE:-}" 2>/dev/null)" \
+      || SNAP_MIGRATIONS_PENDING_COUNT=unknown
+    SNAP_OWNER_EXCLUSION_NAMES_PROVEN='n/a'
+    SNAP_OWNER_EXCLUSION_NAMES_CONFIRMED='n/a'
+    SNAP_OWNER_EXCLUDED_TABLES_ABSENT='n/a'
+    SNAP_MIGRATIONS_GATE_REASON=not_evaluated_for_off
+    return 0
+  fi
   fields="$(snapshot_migrations_gate_fields "${SNAP_MIGRATIONS_ZERO:-unknown}" "${SNAP_MIGRATE_LIST_WHOLE:-}" 2>/dev/null)" || fields=""
   while IFS='=' read -r key value; do
     case "$key" in

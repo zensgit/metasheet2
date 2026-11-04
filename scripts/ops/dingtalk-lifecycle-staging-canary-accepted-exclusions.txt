@@ -6,9 +6,11 @@
 # Only .ts migration sources are bound; accepting a name with no such file (for example a .sql
 # migration) fails the consistency test closed until that test learns the other source kind.
 #
-# The lifecycle canary tolerates a pending migration on staging only when its name is BOTH in
-# the owner exclusion list of scripts/ops/attendance-window-runner-pipeline.lib.sh
-# (STAGING_OWNER_EXCLUDED_MIGRATIONS) AND listed here. The digest binds the acceptance to the
+# The lifecycle canary tolerates a pending migration on staging only when the owner exclusion
+# list of scripts/ops/attendance-window-runner-pipeline.lib.sh (STAGING_OWNER_EXCLUDED_MIGRATIONS)
+# and this table name exactly the same set and the name is in it. At runtime the canary
+# normalizes both lists and refuses every non-off action (exclusion_lists_mismatch) when they
+# differ in any name, even with zero pending migrations. The digest binds the acceptance to the
 # reviewed migration source content; scripts/ops/dingtalk-lifecycle-canary-exclusion-consistency.test.mjs
 # (required CI lane) fails when a digest no longer matches the source file, an accepted name is
 # no longer in the lib list, or a lib name is not listed here: the lib list and this table name
