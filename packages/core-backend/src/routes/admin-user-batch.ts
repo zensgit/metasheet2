@@ -6,6 +6,8 @@ import { claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'
 import { revokeUserSessions } from '../auth/session-revocation'
 import {
   countLivePlatformAdmins,
+  isLastSignInPlatformAdmin,
+  lockPlatformAdminInvariant,
   moveUsersToRecycleBin,
   resolveUserRecycleRetentionDays,
 } from '../admin/user-recycle'
@@ -183,6 +185,7 @@ export async function handleAdminUserBatchCreate(req: Request, res: Response, ad
         failureCount: results.filter((item) => !item.ok).length,
       },
     })
+    res.setHeader('Cache-Control', 'no-store')
     return jsonOk(res, summarize(results))
   } catch {
     return jsonError(res, 500, 'BATCH_CREATE_FAILED', '批量创建失败')
@@ -408,12 +411,17 @@ async function applyUpdate(adminUserId: string, row: PlannedUpdate): Promise<Bat
         changes: row.changes,
       }
     }
+    const mayDropSignInAdmin = (row.roleId !== undefined && row.roleId !== PLATFORM_ADMIN_ROLE_ID) || row.isActive === false
     await transaction(async (client) => {
+      if (mayDropSignInAdmin) await lockPlatformAdminInvariant(client)
       await lockNamespaceAdmissionWrites(client, row.userId)
       const lockedUser = (await lockUsersForAccessGraphWrite(client, [row.userId])).get(row.userId)
       if (!lockedUser) throw Object.assign(new Error('找不到该用户'), { code: 'USER_NOT_FOUND' })
       if (lockedUser.deletedAt || lockedUser.purgedAt) {
         throw Object.assign(new Error('该用户在回收站中'), { code: 'USER_IN_RECYCLE_BIN' })
+      }
+      if (mayDropSignInAdmin && await isLastSignInPlatformAdmin(client, row.userId)) {
+        throw Object.assign(new Error('至少保留一名可登录的平台管理员'), { code: 'LAST_PLATFORM_ADMIN' })
       }
       if (row.name !== undefined || row.department !== undefined) {
         await client.query(
@@ -490,7 +498,7 @@ async function applyUpdate(adminUserId: string, row: PlannedUpdate): Promise<Bat
       email: row.email,
       userId: row.userId,
       code,
-      message: '更新失败',
+      message: code === 'LAST_PLATFORM_ADMIN' ? '至少保留一名可登录的平台管理员' : '更新失败',
       changes: row.changes,
     }
   }
@@ -534,10 +542,14 @@ async function applyStatus(
 
 async function setActive(adminUserId: string, userId: string, isActive: boolean, index = 0): Promise<BatchItemResult> {
   const updated = await transaction(async (client) => {
+    if (!isActive) await lockPlatformAdminInvariant(client)
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [userId])
     const lockedUser = lockedUsers.get(userId)
     if (!lockedUser) return null
-    if (lockedUser.deletedAt || lockedUser.purgedAt) return { email: null, recycled: true }
+    if (lockedUser.deletedAt || lockedUser.purgedAt) return { email: null, recycled: true as const }
+    if (!isActive && await isLastSignInPlatformAdmin(client, userId)) {
+      return { email: lockedUser.email, lastAdmin: true as const }
+    }
     if (lockedUser.isActive !== isActive) {
       await client.query(
         `UPDATE users
@@ -558,6 +570,9 @@ async function setActive(adminUserId: string, userId: string, isActive: boolean,
   }
   if ('recycled' in updated) {
     return { index, ok: false, email: null, userId, code: 'USER_IN_RECYCLE_BIN', message: '该用户在回收站中，请先恢复' }
+  }
+  if ('lastAdmin' in updated) {
+    return { index, ok: false, email: updated.email, userId, code: 'LAST_PLATFORM_ADMIN', message: '至少保留一名可登录的平台管理员' }
   }
   if (!isActive) {
     try {
