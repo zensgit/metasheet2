@@ -218,6 +218,39 @@ jobs:
       - name: Run pipeline self-test (contract suite)
         run: node --test scripts/ops/dingtalk-lifecycle-staging-canary-contract.test.mjs
 
+      # Binds the canary accept table to the DEPLOYED migration sources: every accepted name's
+      # migration source at deploy_sha must hash to its accepted digest. Enforced only for the
+      # non-off executable actions; report-only for status, preflight and off (off is never
+      # blocked by this check). The checkout is shallow, so the deploy_sha commit is fetched
+      # first; a failed fetch reads as unknown, which refuses the enforced actions.
+      - name: Verify accepted migration digests at deploy SHA
+        env:
+          ACTION: ${{ inputs.action }}
+          DEPLOY_SHA: ${{ inputs.deploy_sha }}
+        run: |
+          set -euo pipefail
+          enforce=false
+          case "$ACTION" in bootstrap|human-bootstrap|alias|pending|deprovision) enforce=true ;; esac
+          if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "accept_digests_at_deploy_sha=not_applicable (no deploy_sha; enforce=${enforce})"
+            if [[ "$enforce" == "true" ]]; then
+              echo "action=${ACTION} requires deploy_sha to bind the accept table to the deployed migrations" >&2
+              exit 2
+            fi
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "$DEPLOY_SHA" > /dev/null 2>&1 || echo "deploy_sha fetch failed; the check reads unknown"
+          rc=0
+          bash scripts/ops/dingtalk-lifecycle-canary-accept-digests-at-deploy-sha.sh "$DEPLOY_SHA" || rc=$?
+          if [[ "$rc" -eq 0 ]]; then
+            echo "accepted migration digests match the deployed sources"
+          elif [[ "$enforce" == "true" ]]; then
+            echo "action=${ACTION} refused: the canary accept table is not proven against the migration sources at deploy_sha (see accept_digests_reason above)" >&2
+            exit 2
+          else
+            echo "report-only for action=${ACTION}: accept table not proven against deploy_sha (see accept_digests_reason above)"
+          fi
+
       - name: Sync runner scripts to deploy host
         id: sync
         env:
@@ -236,12 +269,22 @@ jobs:
           runner_dir="/tmp/dingtalk-lifecycle-canary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo "runner_dir=$runner_dir" >> "$GITHUB_OUTPUT"
           # The remote script reads the attendance lib (owner exclusion list) and the canary
-          # accept table on demand from its own directory; --strip-components=2 lands all three
-          # side by side in the per-run runner dir.
-          tar -czf - \
-            scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh \
+          # accept table on demand from its own directory; --strip-components=2 lands them
+          # side by side in the per-run runner dir. Both are shipped only when present: a
+          # missing one reads as unknown on the host (non-off actions refuse) and never stops
+          # the sync, so off and status never depend on them.
+          ship=(scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh)
+          for optional in \
             scripts/ops/attendance-window-runner-pipeline.lib.sh \
-            scripts/ops/dingtalk-lifecycle-staging-canary-accepted-exclusions.txt \
+            scripts/ops/dingtalk-lifecycle-staging-canary-accepted-exclusions.txt
+          do
+            if [[ -f "$optional" ]]; then
+              ship+=("$optional")
+            else
+              echo "not shipped (reads as unknown on the host): ${optional##*/}"
+            fi
+          done
+          tar -czf - "${ship[@]}" \
           | ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts -o IdentitiesOnly=yes -i ~/.ssh/deploy_key \
               "$DEPLOY_USER@$DEPLOY_HOST" \
               "bash -o pipefail -c 'set -euo pipefail; rm -rf ${runner_dir}; mkdir -p ${runner_dir}; tar -xzf - -C ${runner_dir} --strip-components=2'"

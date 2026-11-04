@@ -23,9 +23,13 @@
 //     (migrations_gate for non-off actions: whole_ledger | owner_scoped pass, refused | unknown fail;
 //     migrations_gate_off for action=off / preflight target=off: whole ledger 0 or lib-scoped 0)
 //   * owner-scoped gate: tolerated set = lib exclusion list ∩ canary accept table; the whole
-//     ledger's pending name set must equal it exactly, each name proven known+pending, excluded
-//     tables proven absent; the lib is read in a subshell (never sourced at top level) and the
-//     dispatch self-test below uses SYNTHETIC lists only — it never asserts the real list
+//     ledger's pending name set must equal it exactly, the count leg and the per-name
+//     migrate.js --confirm leg must both prove every tolerated name pending, excluded tables
+//     proven absent; unreadable lists are unknown for non-off even on a clean ledger; the off
+//     rule is computed separately from the lib's list function only; the accept table is bound
+//     to the migration sources at deploy_sha before non-off dispatch; the lib is read in a
+//     subshell (never sourced at top level) and the dispatch self-test below uses SYNTHETIC
+//     lists only — it never asserts the real list
 //   * pending/deprovision require explicit subject (no auto-selection); omit subject refuses
 //   * alias requires pre-login(+JWT mint), backfill, readiness, post-ON login,
 //     rollback, post-rollback login, exact SHA, migrations, secret-file transport
@@ -38,8 +42,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -980,10 +986,10 @@ function runWithMigrateDockerStub(body, extraEnv = {}) {
   )
 }
 
-test('migrate list exec: every migrate.js exec goes through migrate_list_exec with all three forced -e', () => {
+test('migrate exec: every migrate.js exec goes through migrate_js_exec with all three forced -e', () => {
   const source = read(REMOTE_SH)
-  const start = source.indexOf('migrate_list_exec()')
-  assert.ok(start >= 0, 'migrate_list_exec helper must exist')
+  const start = source.indexOf('migrate_js_exec()')
+  assert.ok(start >= 0, 'migrate_js_exec helper must exist')
   const end = source.indexOf('\n}\n', start)
   const helper = source.slice(start, end)
   const container = helper.indexOf('"$BACKEND_CONTAINER"')
@@ -993,18 +999,28 @@ test('migrate list exec: every migrate.js exec goes through migrate_list_exec wi
     assert.ok(at >= 0 && at < container, `${key} must be forced empty before the container name`)
     assert.doesNotMatch(helper, new RegExp(`-e ${key}=[^ \\\\\\n]`), `${key} must be forced to EMPTY`)
   }
-  // MIGRATION_EXCLUDE is forced to the optional first argument: EMPTY with no argument (whole
-  // ledger); the only non-empty value is an owner exclusion csv read from the lib (scoped).
+  // MIGRATION_EXCLUDE is forced to the first argument: EMPTY for the whole ledger and every
+  // per-name --confirm; the only non-empty value is an owner exclusion csv read from the lib.
   const excludeAt = helper.indexOf('-e "MIGRATION_EXCLUDE=${exclude}"')
   assert.ok(excludeAt >= 0 && excludeAt < container, 'MIGRATION_EXCLUDE must be forced to ${exclude} before the container name')
-  assert.match(helper, /local exclude="\$\{1:-\}"/)
+  assert.match(helper, /local exclude="\$1"\n\s*shift\n/)
   assert.equal((helper.match(/MIGRATION_EXCLUDE/g) || []).length, 1)
-  assert.match(helper, /node "\$MIGRATE_JS" --list/)
-  // The helper is the only place that executes migrate.js.
-  const occurrences = source.split('"$MIGRATE_JS"').length - 1
-  assert.equal(occurrences, 1, 'only migrate_list_exec may execute "$MIGRATE_JS"')
-  assert.match(source, /list="\$\(migrate_list_exec\)"/)
+  assert.match(helper, /node "\$MIGRATE_JS" "\$@" < \/dev\/null$/)
+  // The helper is the only place that executes migrate.js; the only other mention is the static
+  // --confirm support read (grep of the file, no node process).
+  assert.equal(source.split('node "$MIGRATE_JS"').length - 1, 1, 'only migrate_js_exec may run node "$MIGRATE_JS"')
+  assert.equal(source.split('"$MIGRATE_JS"').length - 1, 2, 'migrate_js_exec + the static support read')
+  assert.match(source, /docker exec "\$BACKEND_CONTAINER" grep -qF -- '--confirm' "\$MIGRATE_JS" < \/dev\/null > \/dev\/null 2>&1 \|\| rc=\$\?/)
   assert.doesNotMatch(source, /docker exec "\$BACKEND_CONTAINER" node "\$MIGRATE_JS"/)
+  // Exactly two callers of the helper: the --list wrapper and the per-name --confirm probe.
+  const callers = source.split('\n').filter((l) => !/^\s*#/.test(l) && /\bmigrate_js_exec\b/.test(l) && !l.includes('migrate_js_exec()'))
+  assert.deepEqual(callers.map((l) => l.trim()), [
+    'migrate_js_exec "$exclude" --list 2>/dev/null',
+    'out="$(migrate_js_exec \'\' --confirm "$name" --list 2>&1)" || rc=$?',
+  ])
+  const list = source.slice(source.indexOf('migrate_list_exec()'), source.indexOf('\n}\n', source.indexOf('migrate_list_exec()')))
+  assert.match(list, /local exclude="\$\{1:-\}"/)
+  assert.match(source, /list="\$\(migrate_list_exec\)"/)
   // Every migrate_list_exec call site passes nothing (whole ledger) or a csv variable that is
   // only ever assigned from the lib subshell / its tolerated intersection — never a literal.
   const calls = source.match(/migrate_list_exec(?: "[^"]*")?\)/g) || []
@@ -1021,7 +1037,14 @@ test('migrate list exec: every migrate.js exec goes through migrate_list_exec wi
     .split('\n')
     .filter((l) => !/^\s*#/.test(l) && l.includes('probe_scoped_pending_count') && !l.includes('probe_scoped_pending_count()'))
   assert.equal(scopedRefs.length, 2, `no other call shape: ${scopedRefs.join(' | ')}`)
-  assert.doesNotMatch(source, /--confirm/)
+  // --confirm is executed only from probe_migration_confirm_state, with an EMPTY exclude, a
+  // trailing --list guard, and only after the support read answered true.
+  const confirmProbe = source.slice(source.indexOf('probe_migration_confirm_state()'), source.indexOf('\n}\n', source.indexOf('probe_migration_confirm_state()')))
+  assert.match(confirmProbe, /migrate_js_exec '' --confirm "\$name" --list 2>&1/)
+  assert.match(confirmProbe, /latest\|list\|rollback\|reset\|help\|h\)/)
+  const confirmLoop = source.slice(source.indexOf('confirm_tolerated_names_pending()'), source.indexOf('\n}\n', source.indexOf('confirm_tolerated_names_pending()')))
+  assert.ok(confirmLoop.indexOf('migrate_confirm_supported') < confirmLoop.indexOf('probe_migration_confirm_state'), 'support read precedes any --confirm')
+  assert.match(confirmLoop, /true\) ;;\n\s*false\) printf 'unknown confirm_unsupported'; return 0 ;;\n\s*\*\) printf 'unknown confirm_probe_unknown'; return 0 ;;/)
 })
 
 test('FUNCTIONAL: an inherited MIGRATION_EXCLUDE in the container env no longer narrows the pending probe', () => {
@@ -7445,8 +7468,44 @@ const OWNER_GATE_DOCKER_STUB = `
           printf '%s' "\${STUB_TABLES_PRESENT:-0}"
           return 0
         fi
-        local a ex='' n pending=()
-        for a in "\$@"; do case "\$a" in MIGRATION_EXCLUDE=*) ex="\${a#MIGRATION_EXCLUDE=}";; esac; done
+        # Static --confirm support read of the deployed migrate.js (grep, no node process).
+        #   STUB_NO_CONFIRM_SUPPORT   the file has no --confirm entry point (grep rc 1)
+        #   STUB_CONFIRM_SUPPORT_FAIL the read itself fails (rc 2)
+        if [[ "\$*" == *" grep -qF -- --confirm "* ]]; then
+          [[ -z "\${STUB_CONFIRM_SUPPORT_FAIL:-}" ]] || return 2
+          [[ -z "\${STUB_NO_CONFIRM_SUPPORT:-}" ]] || return 1
+          return 0
+        fi
+        local a ex='' n pending=() confirm_name='' want_confirm=0
+        for a in "\$@"; do
+          case "\$a" in MIGRATION_EXCLUDE=*) ex="\${a#MIGRATION_EXCLUDE=}";; esac
+          if [[ "\$want_confirm" -eq 1 ]]; then confirm_name="\$a"; want_confirm=0; fi
+          [[ "\$a" != '--confirm' ]] || want_confirm=1
+        done
+        # Per-name --confirm (kysely semantics: an excluded name is not a known migration).
+        #   STUB_CONFIRM_FAIL     the exec fails (rc 125)
+        #   STUB_CONFIRM_APPLIED  names that confirm as applied (rc 0)
+        #   STUB_CONFIRM_GARBLED  names whose answer is rc 1 without the exact pending line
+        #   STUB_CONFIRM_NOT_FOUND names the deployed ledger does not know (rc 2)
+        if [[ -n "\$confirm_name" ]]; then
+          [[ -z "\${STUB_CONFIRM_FAIL:-}" ]] || return 125
+          if [[ ",\$ex," == *",\$confirm_name,"* ]]; then
+            printf 'migration "%s" not found among the known migrations\n' "\$confirm_name" >&2; return 2
+          fi
+          if [[ " \${STUB_CONFIRM_APPLIED:-} " == *" \$confirm_name "* ]]; then
+            printf 'migration "%s" is applied\n' "\$confirm_name"; return 0
+          fi
+          if [[ " \${STUB_CONFIRM_GARBLED:-} " == *" \$confirm_name "* ]]; then
+            printf 'unexpected\n' >&2; return 1
+          fi
+          if [[ " \${STUB_CONFIRM_NOT_FOUND:-} " == *" \$confirm_name "* ]]; then
+            printf 'migration "%s" not found among the known migrations\n' "\$confirm_name" >&2; return 2
+          fi
+          if [[ " \${STUB_PENDING:-} " == *" \$confirm_name "* ]]; then
+            printf 'migration "%s" is NOT applied (still pending)\n' "\$confirm_name" >&2; return 1
+          fi
+          printf 'migration "%s" is applied\n' "\$confirm_name"; return 0
+        fi
         if [[ -n "\$ex" && -n "\${STUB_SCOPED_FAIL:-}" ]]; then return 125; fi
         [[ -z "\${STUB_SCOPED_IGNORES_EXCLUDE:-}" ]] || ex=''
         for n in \${STUB_PENDING:-}; do [[ ",\$ex," == *",\$n,"* ]] || pending+=("\$n"); done
@@ -7479,6 +7538,9 @@ function ownerGateHarness({ lib = 'syn_a', accept = ['syn_a'], env = {} } = {}) 
       writeFileSync(libPath, 'staging_owner_exclude_csv() { return 1; }\nstaging_owner_excluded_tables_present_sql() { printf "SELECT 0;"; }\n')
     } else if (lib === 'syntax') {
       writeFileSync(libPath, 'staging_owner_exclude_csv() {\n')
+    } else if (lib === 'sql-broken') {
+      // the list function works; only the table-proof SQL generation fails
+      writeFileSync(libPath, 'staging_owner_exclude_csv() { printf "syn_a"; }\nstaging_owner_excluded_tables_present_sql() { return 1; }\n')
     } else if (lib === 'invalid-csv') {
       writeFileSync(libPath, 'staging_owner_exclude_csv() { printf "syn a;b"; }\nstaging_owner_excluded_tables_present_sql() { printf "SELECT 0;"; }\n')
     } else {
@@ -7521,7 +7583,7 @@ function ownerGateHarness({ lib = 'syn_a', accept = ['syn_a'], env = {} } = {}) 
            "$SNAP_MIGRATIONS_GATE_OFF" "$SNAP_MIGRATIONS_GATE_OFF_REASON" "$SNAP_MIGRATIONS_ZERO" \\
            "$SNAP_MIGRATIONS_PENDING_COUNT" "$SNAP_OWNER_EXCLUDED_CSV" "$SNAP_CANARY_ACCEPTED_CSV" \\
            "$SNAP_TOLERATED_CSV" "$SNAP_MIGRATIONS_ZERO_SCOPED" "$SNAP_OWNER_EXCLUSION_NAMES_PROVEN"
-         printf '|%s' "$SNAP_OWNER_EXCLUDED_TABLES_ABSENT"
+         printf '|%s|%s' "$SNAP_OWNER_EXCLUDED_TABLES_ABSENT" "$SNAP_OWNER_EXCLUSION_NAMES_CONFIRMED"
          if ( require_migrations_gate_ok "$SNAP_MIGRATIONS_GATE" t 2>/dev/null ); then printf '|nonoff=pass'; else printf '|nonoff=refuse'; fi
          if ( require_migrations_gate_off_ok "$SNAP_MIGRATIONS_GATE_OFF" t 2>/dev/null ); then printf '|off=pass'; else printf '|off=refuse'; fi
          preflight_for_target off; printf '|pf_off=%s/%s' "$PREFLIGHT_OK" "$PREFLIGHT_NOTE"
@@ -7555,8 +7617,8 @@ function ownerGateHarness({ lib = 'syn_a', accept = ['syn_a'], env = {} } = {}) 
 
 function gateFields(result) {
   assert.equal(result.status, 0, result.stderr)
-  const [rc, gate, gateReason, gateOff, gateOffReason, zero, count, lib, acc, tol, scoped, names, tables, nonoff, off, pfOff, pfPending] = result.stdout.split('|')
-  return { rc, gate, gateReason, gateOff, gateOffReason, zero, count, lib, acc, tol, scoped, names, tables, nonoff, off, pfOff, pfPending }
+  const [rc, gate, gateReason, gateOff, gateOffReason, zero, count, lib, acc, tol, scoped, names, tables, confirmed, nonoff, off, pfOff, pfPending] = result.stdout.split('|')
+  return { rc, gate, gateReason, gateOff, gateOffReason, zero, count, lib, acc, tol, scoped, names, tables, confirmed, nonoff, off, pfOff, pfPending }
 }
 
 test('this self-test never carries the committed exclusion list', () => {
@@ -7601,6 +7663,7 @@ test('OWNER GATE: only the tolerated name pending → owner_scoped with every pr
   assert.equal(f.scoped, 'true')
   assert.equal(f.names, 'true')
   assert.equal(f.tables, 'true')
+  assert.equal(f.confirmed, 'true', 'the per-name --confirm leg is part of owner_scoped')
   assert.equal(f.gate, 'owner_scoped')
   assert.equal(f.gateReason, 'owner_scoped_proven')
   assert.equal(f.gateOff, 'owner_scoped')
@@ -7615,7 +7678,7 @@ test('OWNER GATE: only the tolerated name pending → owner_scoped with every pr
   assert.match(r.artifact, /\nowner_excluded_migrations=syn_a\n/)
   assert.match(r.artifact, /\ncanary_accepted_exclusions=syn_a\n/)
   assert.match(r.artifact, /\ntolerated_exclusions=syn_a\n/)
-  assert.match(r.artifact, /\nowner_exclusion_names_proven=true\n/)
+  assert.match(r.artifact, /\nowner_exclusion_names_proven=true\nowner_exclusion_names_confirmed=true\n/)
   assert.match(r.artifact, /\nowner_excluded_tables_absent=true\n/)
   assert.match(r.artifact, /\nmigrations_gate=owner_scoped\nmigrations_gate_reason=owner_scoped_proven\nmigrations_gate_off=owner_scoped\n/)
   const parsed = JSON.parse(r.artifactJson)
@@ -7625,6 +7688,7 @@ test('OWNER GATE: only the tolerated name pending → owner_scoped with every pr
   assert.equal(parsed.migrations_gate, 'owner_scoped')
   assert.equal(parsed.migrations_gate_off, 'owner_scoped')
   assert.equal(parsed.tolerated_exclusions, 'syn_a')
+  assert.equal(parsed.owner_exclusion_names_confirmed, 'true')
   assert.doesNotMatch(r.artifact + r.artifactJson + r.stdout + r.stderr, /DATABASE_URL|SELECT 0/)
 })
 
@@ -7729,11 +7793,67 @@ test('OWNER GATE: lib unreadable or broken → tolerated set unknown, non-off re
     assert.equal(pending.off, 'off=refuse', lib)
     assert.equal(pending.pfOff, 'pf_off=false/migrations_pending', lib)
     assert.equal(pending.pfPending, 'pf_pending=false/migrations_probe_unknown', lib)
+    // The list gate is independent of the ledger: a clean whole ledger does not let a non-off
+    // action through without a readable lib; off still passes on the whole ledger alone.
     const clean = gateFields(ownerGateHarness({ lib, env: { STUB_PENDING: '' } }))
-    assert.equal(clean.gate, 'whole_ledger', `clean ledger still passes without the lib (${lib})`)
+    assert.equal(clean.zero, 'true', lib)
+    assert.equal(clean.gate, 'unknown', `clean ledger, unreadable lib → unknown for non-off (${lib})`)
+    assert.equal(clean.gateReason, 'lib_unreadable', lib)
+    assert.equal(clean.nonoff, 'nonoff=refuse', lib)
+    assert.equal(clean.pfPending, 'pf_pending=false/migrations_probe_unknown', lib)
     assert.equal(clean.gateOff, 'whole_ledger', lib)
     assert.equal(clean.off, 'off=pass', lib)
+    assert.equal(clean.pfOff, 'pf_off=true/ok', lib)
   }
+})
+
+test('OWNER GATE: list gate — an unreadable accept table or lib refuses non-off even when the whole ledger reads Pending: 0; off is unaffected', () => {
+  for (const accept of ['missing', 'malformed', 'duplicate']) {
+    const clean = gateFields(ownerGateHarness({ accept, env: { STUB_PENDING: '' } }))
+    assert.equal(clean.zero, 'true', accept)
+    assert.equal(clean.acc, 'unknown', accept)
+    assert.equal(clean.gate, 'unknown', accept)
+    assert.equal(clean.gateReason, 'accept_table_unreadable', accept)
+    assert.equal(clean.nonoff, 'nonoff=refuse', accept)
+    assert.equal(clean.pfPending, 'pf_pending=false/migrations_probe_unknown', accept)
+    assert.equal(clean.gateOff, 'whole_ledger', accept)
+    assert.equal(clean.off, 'off=pass', accept)
+    assert.equal(clean.pfOff, 'pf_off=true/ok', accept)
+  }
+  // Both readable (even an empty accept table with an empty lib list) → whole_ledger.
+  const emptyBoth = gateFields(ownerGateHarness({ lib: '', accept: [], env: { STUB_PENDING: '' } }))
+  assert.equal(emptyBoth.gate, 'whole_ledger')
+  assert.equal(emptyBoth.nonoff, 'nonoff=pass')
+})
+
+test('OWNER GATE: off never depends on the table-proof SQL — a lib whose SQL generation fails still scopes off by its list', () => {
+  const r = ownerGateHarness({ lib: 'sql-broken', env: { STUB_PENDING: 'syn_a' } })
+  const f = gateFields(r)
+  assert.equal(f.lib, 'syn_a', 'the off rule read the list through the list-only reader')
+  assert.equal(f.scoped, 'true')
+  assert.equal(f.gateOff, 'owner_scoped')
+  assert.equal(f.gateOffReason, 'scoped_ledger_pending_zero')
+  assert.equal(f.off, 'off=pass')
+  assert.equal(f.pfOff, 'pf_off=true/ok')
+  // The proof failure is report-only for off and refuses non-off.
+  assert.equal(f.tables, 'unknown')
+  assert.equal(f.gate, 'unknown')
+  assert.equal(f.gateReason, 'lib_unreadable')
+  assert.equal(f.nonoff, 'nonoff=refuse')
+  assert.equal(f.pfPending, 'pf_pending=false/migrations_probe_unknown')
+  assert.match(r.artifact, /\nowner_excluded_tables_absent=unknown\n/)
+  // Clean ledger: off passes, non-off refuses (the lib is broken for the non-off rule).
+  const clean = gateFields(ownerGateHarness({ lib: 'sql-broken', env: { STUB_PENDING: '' } }))
+  assert.equal(clean.gateOff, 'whole_ledger')
+  assert.equal(clean.off, 'off=pass')
+  assert.equal(clean.gate, 'unknown')
+  assert.equal(clean.nonoff, 'nonoff=refuse')
+  // Every failing proof at once (accept table missing, SQL broken, table probe failing, the
+  // --confirm support read failing): off still decides on the lib-scoped ledger alone.
+  const all = gateFields(ownerGateHarness({ lib: 'sql-broken', accept: 'missing', env: { STUB_PENDING: 'syn_a', STUB_PG_FAIL: '1', STUB_CONFIRM_SUPPORT_FAIL: '1', STUB_CONFIRM_FAIL: '1' } }))
+  assert.equal(all.gateOff, 'owner_scoped')
+  assert.equal(all.off, 'off=pass')
+  assert.equal(all.nonoff, 'nonoff=refuse')
 })
 
 test('OWNER GATE: unknown refusal — any failed probe is unknown for the rule that needs it and never a pass', () => {
@@ -7872,10 +7992,21 @@ test('OWNER GATE: the lib is read in a throwaway subshell only — never sourced
   }
   const libMentions = lines.filter((l) => l.includes('attendance-window-runner-pipeline.lib.sh') && !/^\s*#/.test(l))
   assert.deepEqual(libMentions, ['OWNER_EXCLUSION_LIB_BASENAME="attendance-window-runner-pipeline.lib.sh"'])
-  const reader = source.slice(source.indexOf('read_owner_exclusion_contract()'), source.indexOf('\n}\n', source.indexOf('read_owner_exclusion_contract()')))
-  assert.match(reader, /bash -c 'set -euo pipefail; source "\$1"; csv="\$\(staging_owner_exclude_csv\)"; sql="\$\(staging_owner_excluded_tables_present_sql\)"/)
-  assert.match(reader, /_ "\$lib" 2>\/dev\/null\)" \|\| return 1/)
-  assert.match(reader, /\[\[ -r "\$lib" \]\] \|\| return 1/)
+  const body = (fn) => source.slice(source.indexOf(`${fn}()`), source.indexOf('\n}\n', source.indexOf(`${fn}()`)))
+  // Two separate throwaway subshells: the list read never generates the table-proof SQL.
+  const csvReader = body('read_owner_exclusion_csv')
+  assert.match(csvReader, /bash -c 'set -euo pipefail; source "\$1"; staging_owner_exclude_csv' _ "\$lib" 2>\/dev\/null\)" \|\| return 1/)
+  assert.doesNotMatch(csvReader, /staging_owner_excluded_tables_present_sql/)
+  assert.match(csvReader, /\[\[ -r "\$lib" \]\] \|\| return 1/)
+  const sqlReader = body('read_owner_excluded_tables_sql')
+  assert.match(sqlReader, /bash -c 'set -euo pipefail; source "\$1"; staging_owner_excluded_tables_present_sql' _ "\$lib" 2>\/dev\/null\)" \|\| return 1/)
+  assert.doesNotMatch(sqlReader, /staging_owner_exclude_csv/)
+  assert.match(sqlReader, /\[\[ -r "\$lib" \]\] \|\| return 1/)
+  assert.doesNotMatch(source, /read_owner_exclusion_contract/)
+  // The off rule reads the list through the list-only reader and nothing on the proof path.
+  const offFields = body('snapshot_migrations_gate_off_fields')
+  assert.match(offFields, /if ! lib_csv="\$\(read_owner_exclusion_csv\)"; then/)
+  assert.doesNotMatch(offFields, /read_owner_excluded_tables_sql|read_canary_accept_table|probe_owner_excluded_tables_absent|confirm|accept|tolerated|SNAP_MIGRATE_LIST_WHOLE/)
   // Paths come from functions on CANARY_HERE, not from env (no override surface in the workflow).
   assert.match(source, /^owner_exclusion_lib_path\(\) \{ printf '%s\/%s' "\$CANARY_HERE" "\$OWNER_EXCLUSION_LIB_BASENAME"; \}$/m)
   assert.match(source, /^canary_accept_table_path\(\) \{ printf '%s\/%s' "\$CANARY_HERE" "\$CANARY_ACCEPT_TABLE_BASENAME"; \}$/m)
@@ -7895,7 +8026,10 @@ test('OWNER GATE: nothing added to capture_live_snapshot can fail or exit; the g
   assert.match(gateCapture, /SNAP_MIGRATIONS_GATE=unknown\n/)
   assert.match(gateCapture, /SNAP_MIGRATIONS_GATE_OFF=unknown\n/)
   assert.match(gateCapture, /\n  return 0$/)
-  for (const fn of ['snapshot_migrations_gate_fields()', 'capture_migrations_gate()', 'read_owner_exclusion_contract()', 'read_canary_accept_table()', 'probe_owner_excluded_tables_absent()', 'probe_scoped_pending_count()', 'capture_migrate_list_whole()']) {
+  // Off first, in its own subshell; the non-off rule in a second one.
+  assert.match(gateCapture, /off_fields="\$\(snapshot_migrations_gate_off_fields "\$\{SNAP_MIGRATIONS_ZERO:-unknown\}" 2>\/dev\/null\)" \|\| off_fields=""/)
+  assert.ok(gateCapture.indexOf('snapshot_migrations_gate_off_fields') < gateCapture.indexOf('snapshot_migrations_gate_fields '), 'off is computed first')
+  for (const fn of ['snapshot_migrations_gate_fields()', 'snapshot_migrations_gate_off_fields()', 'capture_migrations_gate()', 'read_owner_exclusion_csv()', 'read_owner_excluded_tables_sql()', 'read_canary_accept_table()', 'probe_owner_excluded_tables_absent()', 'probe_scoped_pending_count()', 'capture_migrate_list_whole()', 'migrate_confirm_supported()', 'probe_migration_confirm_state()', 'confirm_tolerated_names_pending()']) {
     const at = source.indexOf(fn)
     assert.ok(at >= 0, fn)
     const body = source.slice(at, source.indexOf('\n}\n', at))
@@ -7905,10 +8039,15 @@ test('OWNER GATE: nothing added to capture_live_snapshot can fail or exit; the g
 
 test('OWNER GATE: workflow ships the lib and the accept table beside the remote script; dispatch is not gated on lib syntax; contract paths cover both', () => {
   const yaml = read(WORKFLOW)
-  const tar = yaml.slice(yaml.indexOf('tar -czf - \\'), yaml.indexOf('| ssh', yaml.indexOf('tar -czf - \\')))
-  assert.match(tar, /scripts\/ops\/dingtalk-lifecycle-staging-canary-remote\.sh \\\n/)
-  assert.match(tar, /scripts\/ops\/attendance-window-runner-pipeline\.lib\.sh \\\n/)
-  assert.match(tar, /scripts\/ops\/dingtalk-lifecycle-staging-canary-accepted-exclusions\.txt \\\n/)
+  // The remote script is always shipped; the lib and the accept table are shipped only when
+  // present, so a missing one never stops the sync (off and status never depend on them).
+  const shipStart = yaml.indexOf('ship=(scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh)')
+  assert.ok(shipStart >= 0, 'the remote script is shipped unconditionally')
+  const ship = yaml.slice(shipStart, yaml.indexOf('| ssh', shipStart))
+  assert.match(ship, /for optional in \\\n\s*scripts\/ops\/attendance-window-runner-pipeline\.lib\.sh \\\n\s*scripts\/ops\/dingtalk-lifecycle-staging-canary-accepted-exclusions\.txt\n\s*do\n/)
+  assert.match(ship, /if \[\[ -f "\$optional" \]\]; then\n\s*ship\+=\("\$optional"\)\n\s*else\n\s*echo "not shipped \(reads as unknown on the host\): \$\{optional##\*\/\}"\n\s*fi/)
+  assert.match(ship, /tar -czf - "\$\{ship\[@\]\}" \\\n\s*$/)
+  assert.doesNotMatch(ship, /\bexit\b|\bfail\b/)
   assert.match(yaml, /--strip-components=2/)
   // Pre-dispatch syntax check covers the remote script only. A lib that fails to load must read
   // as unknown at runtime (non-off refuses, off judges by the whole ledger) rather than block
@@ -7940,4 +8079,273 @@ test('OWNER GATE: docs state the collection rule instead of "exactly true"', () 
   assert.match(closeout, /migrations_gate/)
   assert.match(go, /owner_scoped/)
   assert.match(closeout, /owner_scoped/)
+})
+
+// --- owner-scoped gate: per-name --confirm leg (synthetic) ---------------------------------
+
+function argvLines(env, opts = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'lifecycle-owner-gate-confirm-'))
+  try {
+    const argvLog = join(dir, 'argv.log')
+    const f = gateFields(ownerGateHarness({ ...opts, env: { ...env, ARGV_LOG: argvLog } }))
+    const lines = existsSync(argvLog) ? readFileSync(argvLog, 'utf8').trim().split('\n') : []
+    return { f, lines }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test('OWNER GATE: per-name proof — every tolerated name runs migrate.js --confirm once, whole ledger env, after the support read', () => {
+  const { f, lines } = argvLines({ STUB_PENDING: 'syn_a syn_b' }, { lib: 'syn_a,syn_b', accept: ['syn_a', 'syn_b'] })
+  assert.equal(f.gate, 'owner_scoped')
+  assert.equal(f.names, 'true')
+  assert.equal(f.confirmed, 'true')
+  const support = lines.findIndex((l) => / grep -qF -- --confirm packages\/core-backend\/dist\/src\/db\/migrate\.js$/.test(l))
+  assert.ok(support >= 0, 'static --confirm support read')
+  const confirms = lines.filter((l) => / node packages\/core-backend\/dist\/src\/db\/migrate\.js --confirm /.test(l))
+  assert.deepEqual(confirms.map((l) => l.match(/--confirm (\S+) --list$/)[1]), ['syn_a', 'syn_b'], 'one --confirm per tolerated name, trailing --list guard')
+  for (const l of confirms) {
+    assert.match(l, /^exec -e MIGRATION_EXCLUDE= -e MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL= -e ALLOW_DB_RESET= metasheet-staging-backend node /, l)
+  }
+  assert.ok(lines.indexOf(confirms[0]) > support, 'the support read precedes any --confirm')
+  // The count leg still runs as an extra check (tolerated-scoped list).
+  const lists = lines.filter((l) => / node packages\/core-backend\/dist\/src\/db\/migrate\.js --list$/.test(l))
+  assert.deepEqual(lists.map((l) => l.match(/MIGRATION_EXCLUDE=(\S*)/)[1]), ['', 'syn_a,syn_b', 'syn_a,syn_b'])
+})
+
+test('OWNER GATE: per-name proof — applied, not-found, garbled or failed answers refuse non-off; off is unaffected', () => {
+  const cases = [
+    [{ STUB_CONFIRM_APPLIED: 'syn_a' }, 'false', 'refused', 'tolerated_name_applied'],
+    [{ STUB_CONFIRM_NOT_FOUND: 'syn_a' }, 'false', 'refused', 'tolerated_name_not_found'],
+    [{ STUB_CONFIRM_GARBLED: 'syn_a' }, 'unknown', 'unknown', 'confirm_probe_unknown'],
+    [{ STUB_CONFIRM_FAIL: '1' }, 'unknown', 'unknown', 'confirm_probe_unknown'],
+  ]
+  for (const [env, confirmed, gate, reason] of cases) {
+    const f = gateFields(ownerGateHarness({ env: { STUB_PENDING: 'syn_a', ...env } }))
+    const label = JSON.stringify(env)
+    assert.equal(f.names, 'true', `count leg alone would pass (${label})`)
+    assert.equal(f.confirmed, confirmed, label)
+    assert.equal(f.gate, gate, label)
+    assert.equal(f.gateReason, reason, label)
+    assert.equal(f.nonoff, 'nonoff=refuse', label)
+    assert.equal(f.gateOff, 'owner_scoped', `off never reads the per-name proof (${label})`)
+    assert.equal(f.off, 'off=pass', label)
+  }
+  // A later tolerated name failing still refuses (every name is confirmed, not only the first).
+  const second = gateFields(ownerGateHarness({ lib: 'syn_a,syn_b', accept: ['syn_a', 'syn_b'], env: { STUB_PENDING: 'syn_a syn_b', STUB_CONFIRM_APPLIED: 'syn_b' } }))
+  assert.equal(second.confirmed, 'false')
+  assert.equal(second.gate, 'refused')
+})
+
+test('OWNER GATE: per-name proof — a migrate.js without --confirm is never asked to confirm (it would apply migrations); unknown refuses', () => {
+  for (const [env, reason] of [
+    [{ STUB_NO_CONFIRM_SUPPORT: '1' }, 'confirm_unsupported'],
+    [{ STUB_CONFIRM_SUPPORT_FAIL: '1' }, 'confirm_probe_unknown'],
+  ]) {
+    const { f, lines } = argvLines({ STUB_PENDING: 'syn_a', ...env })
+    const label = JSON.stringify(env)
+    assert.equal(f.confirmed, 'unknown', label)
+    assert.equal(f.gate, 'unknown', label)
+    assert.equal(f.gateReason, reason, label)
+    assert.equal(f.nonoff, 'nonoff=refuse', label)
+    assert.equal(f.gateOff, 'owner_scoped', label)
+    assert.equal(lines.filter((l) => / node \S+migrate\.js --confirm /.test(l)).length, 0, `no --confirm exec (${label})`)
+  }
+})
+
+test('production function: probe_migration_confirm_state reads only exact answers and never execs a name that is not a plain basename or is a migrate.js command word', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lifecycle-confirm-state-'))
+  try {
+    const argvLog = join(dir, 'argv.log')
+    const run = (name, env = {}) => spawnSync(
+      'bash',
+      ['-o', 'pipefail', '-c', `source "$1"\n${OWNER_GATE_DOCKER_STUB}\nprobe_migration_confirm_state "$2"`, 'bash', REMOTE_SH, name],
+      { encoding: 'utf8', env: { ...process.env, ACTION: 'status', OUTPUT_DIR: dir, RUN_STAMP: 'contract', LIFECYCLE_CANARY_SOURCE_ONLY: 'true', ARGV_LOG: argvLog, ...env } },
+    )
+    assert.equal(run('syn_a', { STUB_PENDING: 'syn_a' }).stdout, 'pending')
+    assert.equal(run('syn_a', { STUB_CONFIRM_APPLIED: 'syn_a' }).stdout, 'applied')
+    assert.equal(run('syn_a', { STUB_CONFIRM_NOT_FOUND: 'syn_a' }).stdout, 'not_found')
+    assert.equal(run('syn_a', { STUB_CONFIRM_GARBLED: 'syn_a' }).stdout, 'unknown')
+    assert.equal(run('syn_a', { STUB_CONFIRM_FAIL: '1' }).stdout, 'unknown')
+    rmSync(argvLog, { force: true })
+    for (const bad of ['latest', 'list', 'reset', 'rollback', 'help', 'h', '--list', 'syn a', '', 'syn;a']) {
+      const r = run(bad, { STUB_PENDING: bad })
+      assert.equal(r.status, 0, r.stderr)
+      assert.equal(r.stdout, 'unknown', JSON.stringify(bad))
+    }
+    assert.equal(existsSync(argvLog), false, 'no exec for a rejected name')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// --- accept table bound to the DEPLOYED migration sources (workflow, pre-dispatch) --------
+
+const DIGEST_AT_SHA_SH = join(HERE, 'dingtalk-lifecycle-canary-accept-digests-at-deploy-sha.sh')
+
+function gitIn(dir, args) {
+  const r = spawnSync('git', ['-c', 'user.name=contract', '-c', 'user.email=contract@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'init.defaultBranch=main', ...args], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_DIR: undefined, GIT_WORK_TREE: undefined, GIT_INDEX_FILE: undefined },
+  })
+  assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`)
+  return r.stdout.trim()
+}
+
+function sha256Hex(text) {
+  return createHash('sha256').update(text).digest('hex')
+}
+
+// A synthetic repository: commit A carries syn_a.ts (reviewed content), commit B changes it.
+function syntheticDeployRepo() {
+  const dir = mkdtempSync(join(tmpdir(), 'lifecycle-digest-at-sha-'))
+  const migDir = join(dir, 'packages', 'core-backend', 'src', 'db', 'migrations')
+  mkdirSync(migDir, { recursive: true })
+  gitIn(dir, ['init', '-q'])
+  const reviewed = 'export async function up() { /* synthetic reviewed */ }\n'
+  writeFileSync(join(migDir, 'syn_a.ts'), reviewed)
+  writeFileSync(join(migDir, 'syn_b.ts'), 'export async function up() { /* synthetic b */ }\n')
+  gitIn(dir, ['add', '-A'])
+  gitIn(dir, ['commit', '-q', '-m', 'reviewed'])
+  const shaA = gitIn(dir, ['rev-parse', 'HEAD'])
+  writeFileSync(join(migDir, 'syn_a.ts'), 'export async function up() { /* synthetic changed */ }\n')
+  gitIn(dir, ['rm', '-q', join('packages', 'core-backend', 'src', 'db', 'migrations', 'syn_b.ts')])
+  gitIn(dir, ['add', '-A'])
+  gitIn(dir, ['commit', '-q', '-m', 'changed'])
+  const shaB = gitIn(dir, ['rev-parse', 'HEAD'])
+  return { dir, shaA, shaB, reviewedDigest: sha256Hex(reviewed), bDigest: sha256Hex('export async function up() { /* synthetic b */ }\n') }
+}
+
+function runDigestAtSha(sha, table, repo) {
+  const r = spawnSync('bash', [DIGEST_AT_SHA_SH, sha, table, repo], { encoding: 'utf8' })
+  const out = Object.fromEntries(r.stdout.trim().split('\n').filter(Boolean).map((l) => l.split('=')))
+  return { status: r.status, out, stdout: r.stdout, stderr: r.stderr }
+}
+
+test('FUNCTIONAL: accepted digests are checked against the migration source AT deploy_sha, not the dispatch checkout', () => {
+  const repo = syntheticDeployRepo()
+  try {
+    const table = join(repo.dir, 'accept.txt')
+    writeFileSync(table, `# synthetic\nsyn_a ${repo.reviewedDigest}\n`)
+    // The working tree (dispatch checkout analogue) carries the CHANGED source; only the
+    // deploy_sha content decides.
+    const atA = runDigestAtSha(repo.shaA, table, repo.dir)
+    assert.equal(atA.status, 0, atA.stdout + atA.stderr)
+    assert.equal(atA.out.accept_digests_at_deploy_sha, 'true')
+    assert.equal(atA.out.accept_digests_reason, 'all_digests_match')
+    assert.equal(atA.out.accepted_names, '1')
+    assert.equal(atA.out.accepted_names_matched, '1')
+    const atB = runDigestAtSha(repo.shaB, table, repo.dir)
+    assert.equal(atB.status, 1)
+    assert.equal(atB.out.accept_digests_at_deploy_sha, 'false')
+    assert.equal(atB.out.accept_digests_reason, 'digest_mismatch_at_deploy_sha')
+    assert.equal(atB.out.accepted_names_matched, '0')
+    // A name whose source is gone at deploy_sha.
+    writeFileSync(table, `syn_a ${sha256Hex('export async function up() { /* synthetic changed */ }\n')}\nsyn_b ${repo.bDigest}\n`)
+    const missing = runDigestAtSha(repo.shaB, table, repo.dir)
+    assert.equal(missing.status, 1)
+    assert.equal(missing.out.accept_digests_reason, 'source_missing_at_deploy_sha')
+    assert.equal(missing.out.accepted_names_matched, '1')
+    // An empty table binds nothing.
+    writeFileSync(table, '# none\n')
+    const empty = runDigestAtSha(repo.shaB, table, repo.dir)
+    assert.equal(empty.status, 0)
+    assert.equal(empty.out.accept_digests_reason, 'no_accepted_names')
+    // Values-free: no digest, no name.
+    for (const r of [atA, atB, missing]) {
+      assert.doesNotMatch(r.stdout + r.stderr, /syn_a|syn_b|[0-9a-f]{64}/)
+    }
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true })
+  }
+})
+
+test('FUNCTIONAL: digest check is unknown (exit 2) for an invalid or unavailable deploy_sha and for an unreadable or malformed table', () => {
+  const repo = syntheticDeployRepo()
+  try {
+    const table = join(repo.dir, 'accept.txt')
+    writeFileSync(table, `syn_a ${repo.reviewedDigest}\n`)
+    const cases = [
+      [repo.shaA.slice(0, 12), table, 'deploy_sha_invalid'],
+      ['f'.repeat(40), table, 'deploy_sha_unavailable'],
+      [repo.shaA, join(repo.dir, 'absent.txt'), 'accept_table_unreadable'],
+    ]
+    for (const [sha, t, reason] of cases) {
+      const r = runDigestAtSha(sha, t, repo.dir)
+      assert.equal(r.status, 2, reason)
+      assert.equal(r.out.accept_digests_at_deploy_sha, 'unknown', reason)
+      assert.equal(r.out.accept_digests_reason, reason)
+    }
+    // Same table shapes the canary runtime reader rejects.
+    const d = 'a'.repeat(64)
+    for (const bad of ['syn_a nothash\n', 'syn_a\n', `syn-a ${d}\n`, `syn_a ${d}\nsyn_a ${d}\n`, `syn_a ${d} extra\n`, `syn_a ${d.toUpperCase()}\n`]) {
+      writeFileSync(table, bad)
+      const r = runDigestAtSha(repo.shaA, table, repo.dir)
+      assert.equal(r.status, 2, JSON.stringify(bad))
+      assert.equal(r.out.accept_digests_reason, 'accept_table_malformed', JSON.stringify(bad))
+    }
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true })
+  }
+})
+
+test('workflow binds the accept table to deploy_sha before sync: enforced for non-off executables only; off, status and preflight are report-only', () => {
+  const doc = loadYaml(read(WORKFLOW))
+  const steps = doc.jobs.run.steps
+  const names = steps.map((s) => s.name)
+  const at = names.indexOf('Verify accepted migration digests at deploy SHA')
+  assert.ok(at > names.indexOf('Run pipeline self-test (contract suite)'), 'after the contract suite')
+  assert.ok(at < names.indexOf('Sync runner scripts to deploy host'), 'before anything reaches the host')
+  const step = steps[at]
+  assert.equal(step.env.ACTION, '${{ inputs.action }}')
+  assert.equal(step.env.DEPLOY_SHA, '${{ inputs.deploy_sha }}')
+  assert.equal(step['continue-on-error'], undefined)
+  const run = step.run
+  assert.match(run, /case "\$ACTION" in bootstrap\|human-bootstrap\|alias\|pending\|deprovision\) enforce=true ;; esac/)
+  assert.doesNotMatch(run, /\boff\b[^\n]*enforce=true|status[^\n]*enforce=true|preflight[^\n]*enforce=true/)
+  assert.match(run, /git fetch --no-tags --depth=1 origin "\$DEPLOY_SHA" > \/dev\/null 2>&1 \|\| echo/)
+  assert.match(run, /bash scripts\/ops\/dingtalk-lifecycle-canary-accept-digests-at-deploy-sha\.sh "\$DEPLOY_SHA" \|\| rc=\$\?/)
+  // Every exit 2 in the step sits under an enforce=true branch.
+  const exits = run.split('\n').map((l, i) => [l, i]).filter(([l]) => /exit 2/.test(l))
+  assert.equal(exits.length, 2)
+  // Functional: run the step body with a stub git/bash script for each action.
+  const dir = mkdtempSync(join(tmpdir(), 'lifecycle-digest-step-'))
+  try {
+    const scriptsDir = join(dir, 'scripts', 'ops')
+    mkdirSync(scriptsDir, { recursive: true })
+    writeFileSync(join(scriptsDir, 'dingtalk-lifecycle-canary-accept-digests-at-deploy-sha.sh'), 'echo "accept_digests_at_deploy_sha=$STUB_VERDICT"; exit "$STUB_RC"\n')
+    const binDir = join(dir, 'bin')
+    mkdirSync(binDir)
+    writeFileSync(join(binDir, 'git'), '#!/usr/bin/env bash\nexit "${STUB_FETCH_RC:-0}"\n', { mode: 0o755 })
+    const stepRun = (action, rc, deploySha = 'a'.repeat(40), extra = {}) => spawnSync('bash', ['-c', run], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, ACTION: action, DEPLOY_SHA: deploySha, STUB_RC: String(rc), STUB_VERDICT: rc === 0 ? 'true' : rc === 1 ? 'false' : 'unknown', ...extra },
+    })
+    for (const action of ['bootstrap', 'human-bootstrap', 'alias', 'pending', 'deprovision']) {
+      assert.equal(stepRun(action, 0).status, 0, action)
+      assert.equal(stepRun(action, 1).status, 2, `${action} refused on mismatch`)
+      assert.equal(stepRun(action, 2).status, 2, `${action} refused on unknown`)
+      assert.equal(stepRun(action, 0, '').status, 2, `${action} refused without deploy_sha`)
+    }
+    for (const action of ['off', 'status', 'preflight']) {
+      for (const rc of [0, 1, 2]) {
+        const r = stepRun(action, rc)
+        assert.equal(r.status, 0, `${action} is never blocked (rc=${rc})`)
+      }
+      assert.equal(stepRun(action, 2, '', {}).status, 0, `${action} without deploy_sha`)
+      assert.equal(stepRun(action, 2, 'a'.repeat(40), { STUB_FETCH_RC: '128' }).status, 0, `${action} with a failed fetch`)
+    }
+    assert.equal(stepRun('off', 1).stdout.includes('report-only for action=off'), true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  // The checker never writes and never prints values.
+  const checker = read(DIGEST_AT_SHA_SH)
+  const checkerCode = checker.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
+  assert.deepEqual([...checkerCode.matchAll(/git -C "\$REPO_DIR" (\S+)/g)].map((m) => m[1]).sort(), ['cat-file', 'cat-file', 'rev-parse'], 'read-only git only')
+  assert.doesNotMatch(checkerCode, /git (fetch|checkout|reset|commit|push|update-ref|gc|prune|clean)/)
+  assert.match(checker, /git -C "\$REPO_DIR" cat-file blob "\$blob" \| sha256_stdin/)
+  assert.doesNotMatch(checker, /printf[^\n]*\$\{?(names|digests|actual|name)\b/)
 })

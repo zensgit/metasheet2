@@ -223,8 +223,8 @@ jobs:
             scripts/ops/github-dingtalk-oauth-stability-summary.test.mjs
 
       # Lifecycle canary owner-scoped migration gate: the canary tolerates a pending staging
-      # migration only when the attendance lib's owner exclusion list, the canary accept table
-      # and the accepted migration source digests agree. The canary contract suite itself is
+      # migration only when the attendance lib's owner exclusion list and the canary accept table
+      # name the same set and the accepted migration source digests agree. The canary contract suite itself is
       # deliberately NOT referenced here (its own contract forbids that); this standalone node:test
       # holds the three files together in the required lane. No deps, no DB. Pinned (presence,
       # position, command) by plugin-tests-parallel-contract.test.mjs.

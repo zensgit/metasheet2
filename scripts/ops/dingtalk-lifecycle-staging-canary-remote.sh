@@ -94,16 +94,20 @@
 #   * Migrations gate (migrations_gate, enum whole_ledger|owner_scoped|refused|unknown):
 #     preflight_ok for non-off targets and action=alias / bootstrap / human-bootstrap /
 #     pending / deprovision (pre-write preconditions AND post-write re-checks) pass only on
-#     whole_ledger (the whole ledger reads Pending: 0) or owner_scoped (the whole ledger's
-#     pending NAME SET equals exactly the tolerated set = owner exclusion list from the
-#     attendance window-runner lib ∩ the canary accept table beside this script, every
-#     tolerated name is proven known and pending — narrowing the ledger by exactly those
-#     names empties it — and the lib's excluded tables are proven absent through node pg
-#     in the backend container). refused and unknown always fail; unknown is never success.
+#     whole_ledger (both exclusion lists readable and the whole ledger reads Pending: 0) or
+#     owner_scoped (the whole ledger's pending NAME SET equals exactly the tolerated set =
+#     owner exclusion list from the attendance window-runner lib ∩ the canary accept table
+#     beside this script; narrowing the ledger by exactly those names drops exactly them;
+#     every tolerated name confirms pending one by one through migrate.js --confirm; and the
+#     lib's excluded tables are proven absent through node pg in the backend container).
+#     The list gate is independent of the ledger: an unreadable lib (names or table SQL) or
+#     accept table is unknown even when the whole ledger reads Pending: 0. refused and
+#     unknown always fail; unknown is never success.
 #   * action=off and preflight target=off use migrations_gate_off: whole ledger Pending: 0,
-#     or the ledger narrowed by the lib exclusion list itself reads Pending: 0. The accept
-#     table, name-set and table proofs are report-only for off. Lib unreadable → whole
-#     ledger only; whole ledger unknown → refuse.
+#     or the ledger narrowed by the lib exclusion list itself reads Pending: 0. It is
+#     computed in its own subshell from the lib's list function alone — never from the
+#     accept table, the table-proof SQL or any proof — so every proof is report-only for off.
+#     Lib unreadable → whole ledger only; whole ledger unknown → refuse.
 #   * The attendance lib is never sourced at top level: it is read on demand in a subshell,
 #     so a missing or broken lib degrades to the strict whole-ledger rule and never aborts
 #     status/off. Nothing in capture_live_snapshot's migration probes can fail or exit.
@@ -111,12 +115,17 @@
 #     migrations_gate=owner_scoped must never be recorded as "zero pending migrations";
 #     record "zero pending outside the tolerated owner exclusions; exclusions proven
 #     unapplied and their tables absent".
-#   * Every migrate.js exec goes through migrate_list_exec, which forces
+#   * Every migrate.js exec goes through migrate_js_exec, which forces
 #     MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL / ALLOW_DB_RESET empty and MIGRATION_EXCLUDE to
-#     either empty (whole ledger) or the lib-read exclusion csv (scoped ledger), so no list
-#     is ever narrowed by the container env. migrate_env_inherited_hazard (whether the
-#     container env sets any of those keys to a non-empty value) is report-only —
-#     booleans, never values.
+#     either empty (whole ledger, per-name --confirm) or the lib-read exclusion csv (scoped
+#     ledger), so no read is ever narrowed by the container env. --confirm runs only after a
+#     static read of the deployed migrate.js shows that entry point exists.
+#     migrate_env_inherited_hazard (whether the container env sets any of those keys to a
+#     non-empty value) is report-only — booleans, never values.
+#   * The workflow binds the accept table to the DEPLOYED migration sources before dispatch:
+#     every accepted name's source at deploy_sha must hash to its accepted digest, or
+#     bootstrap / human-bootstrap / alias / pending / deprovision are not dispatched
+#     (report-only for status, preflight and off).
 #   * action=off|alias|pending|deprovision: recreate backend only; prove
 #     postgres/redis IDs unchanged; require backend health true after restart;
 #     prove exact mode; restore previous/OFF override and re-recreate on any
@@ -213,11 +222,13 @@ MIGRATE_JS="packages/core-backend/dist/src/db/migrate.js"
 
 # Owner-ruled staging migration exclusions have ONE source: the attendance window-runner lib
 # (STAGING_OWNER_EXCLUDED_MIGRATIONS / STAGING_OWNER_EXCLUDED_TABLES). This script never
-# sources that lib at top level; read_owner_exclusion_contract loads it in a throwaway
-# subshell. The accept table beside this script lists the exclusion names this lane has
-# reviewed, each bound to the sha256 of the reviewed migration source file; the required CI
-# consistency test keeps lib list, accept table and migration sources in agreement. Both files
-# are shipped next to this script by the workflow (same directory after extraction).
+# sources that lib at top level; read_owner_exclusion_csv (names) and
+# read_owner_excluded_tables_sql (table proof) each load it in their own throwaway subshell.
+# The accept table beside this script lists the exclusion names this lane has reviewed, each
+# bound to the sha256 of the reviewed migration source file; the required CI consistency test
+# keeps lib list, accept table and migration sources in agreement, and the workflow checks the
+# digests against the deployed commit before a non-off dispatch. Both files are shipped next
+# to this script by the workflow when present (same directory after extraction).
 CANARY_HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || printf '.')"
 OWNER_EXCLUSION_LIB_BASENAME="attendance-window-runner-pipeline.lib.sh"
 CANARY_ACCEPT_TABLE_BASENAME="dingtalk-lifecycle-staging-canary-accepted-exclusions.txt"
@@ -508,19 +519,115 @@ const { Client } = require("pg");
   fi
 }
 
+# migrate_js_exec <exclude csv> <migrate.js argv...>
 # The ONLY way this script executes migrate.js. docker exec -e overrides the container's
-# own env for this process, so a list is never narrowed by an inherited MIGRATION_EXCLUDE
-# (or the other migration-control keys). With no argument MIGRATION_EXCLUDE is forced EMPTY
-# and the list is the whole ledger; the only non-empty value ever passed is an owner
-# exclusion csv read from the attendance lib (the scoped ledger). The other two keys are
-# always forced empty.
-migrate_list_exec() {
-  local exclude="${1:-}"
+# own env for this process, so no read is ever narrowed by an inherited MIGRATION_EXCLUDE
+# (or the other migration-control keys). MIGRATION_EXCLUDE is forced to the first argument:
+# EMPTY for the whole ledger and for every per-name --confirm; the only non-empty value ever
+# passed is an owner exclusion csv read from the attendance lib (a scoped --list). The other
+# two keys are always forced empty. Callers pass read-only argv only (--list, --confirm).
+migrate_js_exec() {
+  local exclude="$1"
+  shift
   docker exec \
     -e "MIGRATION_EXCLUDE=${exclude}" \
     -e MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL= \
     -e ALLOW_DB_RESET= \
-    "$BACKEND_CONTAINER" node "$MIGRATE_JS" --list < /dev/null 2>/dev/null
+    "$BACKEND_CONTAINER" node "$MIGRATE_JS" "$@" < /dev/null
+}
+
+# migrate_list_exec [exclude csv]: the --list read (whole ledger with no argument).
+migrate_list_exec() {
+  local exclude="${1:-}"
+  migrate_js_exec "$exclude" --list 2>/dev/null
+}
+
+# migrate_confirm_supported: true when the deployed migrate.js carries the read-only
+# --confirm entry point, false when it does not, unknown on any failure. Static read of the
+# compiled file (grep; no node process). A migrate.js without that entry point treats an
+# unrecognised flag as its default command, which applies pending migrations, so --confirm
+# is executed only after this reads true. Never exits.
+migrate_confirm_supported() {
+  local rc=0
+  docker exec "$BACKEND_CONTAINER" grep -qF -- '--confirm' "$MIGRATE_JS" < /dev/null > /dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0) printf 'true' ;;
+    1) printf 'false' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# probe_migration_confirm_state <name>: the per-name ledger state from
+# `migrate.js --confirm <name>` with MIGRATION_EXCLUDE forced empty:
+#   pending    exit 1 and the exact "is NOT applied (still pending)" line
+#   applied    exit 0 and the exact "is applied" line
+#   not_found  exit 2 and the exact "not found among the known migrations" line
+#   unknown    anything else (exec failure, other output, a name that is not a plain basename)
+# The trailing --list is a second guard: a migrate.js that ignores --confirm reads it as a
+# list command (read-only), whose output matches none of the lines above → unknown.
+# Never exits.
+probe_migration_confirm_state() {
+  local name="$1" out rc=0
+  if [[ ! "$name" =~ ^[A-Za-z0-9_]+$ ]]; then
+    printf 'unknown'
+    return 0
+  fi
+  case "$name" in
+    latest|list|rollback|reset|help|h)
+      printf 'unknown'
+      return 0
+      ;;
+  esac
+  out="$(migrate_js_exec '' --confirm "$name" --list 2>&1)" || rc=$?
+  case "$rc" in
+    1)
+      if grep -qxF -- "migration \"${name}\" is NOT applied (still pending)" <<< "$out"; then
+        printf 'pending'
+        return 0
+      fi
+      ;;
+    0)
+      if grep -qxF -- "migration \"${name}\" is applied" <<< "$out"; then
+        printf 'applied'
+        return 0
+      fi
+      ;;
+    2)
+      if grep -qxF -- "migration \"${name}\" not found among the known migrations" <<< "$out"; then
+        printf 'not_found'
+        return 0
+      fi
+      ;;
+  esac
+  printf 'unknown'
+}
+
+# confirm_tolerated_names_pending <tolerated csv>: prints "<verdict> <reason>".
+#   true ok                            every tolerated name confirms pending
+#   false tolerated_name_applied       a tolerated name is already applied
+#   false tolerated_name_not_found     a tolerated name is unknown to the deployed ledger
+#   unknown confirm_unsupported        the deployed migrate.js has no --confirm entry point
+#   unknown confirm_probe_unknown      the support probe or a per-name probe failed
+# Every tolerated name is confirmed one by one; the first non-pending answer decides.
+# Never exits.
+confirm_tolerated_names_pending() {
+  local csv="$1" supported name state
+  supported="$(migrate_confirm_supported)"
+  case "$supported" in
+    true) ;;
+    false) printf 'unknown confirm_unsupported'; return 0 ;;
+    *) printf 'unknown confirm_probe_unknown'; return 0 ;;
+  esac
+  for name in ${csv//,/ }; do
+    state="$(probe_migration_confirm_state "$name")"
+    case "$state" in
+      pending) ;;
+      applied) printf 'false tolerated_name_applied'; return 0 ;;
+      not_found) printf 'false tolerated_name_not_found'; return 0 ;;
+      *) printf 'unknown confirm_probe_unknown'; return 0 ;;
+    esac
+  done
+  printf 'true ok'
 }
 
 # migrate_list_classify <list text>: true when the list reads "Pending: 0", false for any
@@ -581,16 +688,30 @@ probe_scoped_pending_count() {
   migrate_list_pending_count "$list"
 }
 
-# read_owner_exclusion_contract: stdout line 1 = the owner exclusion csv (empty for an empty
-# list), line 2 = the lib's excluded-tables-present SQL. The lib is sourced in a throwaway
-# subshell only (never in this process). rc 1 and nothing printed when the lib is unreadable,
-# fails to load, or rejects its own list.
-read_owner_exclusion_contract() {
+# read_owner_exclusion_csv: stdout = the owner exclusion csv (empty for an empty list). The
+# lib is sourced in a throwaway subshell only (never in this process) and ONLY its list
+# function runs there — the table-proof SQL is never generated on this path, so the names the
+# off rule scopes by never depend on it. rc 1 and nothing printed when the lib is unreadable,
+# fails to load, rejects its own list, or prints anything but a plain csv.
+read_owner_exclusion_csv() {
+  local lib out csv_re='^([A-Za-z0-9_]+(,[A-Za-z0-9_]+)*)?$'
+  lib="$(owner_exclusion_lib_path)"
+  [[ -r "$lib" ]] || return 1
+  out="$(bash -c 'set -euo pipefail; source "$1"; staging_owner_exclude_csv' _ "$lib" 2>/dev/null)" || return 1
+  [[ "$out" =~ $csv_re ]] || return 1
+  printf '%s' "$out"
+}
+
+# read_owner_excluded_tables_sql: stdout = the lib's excluded-tables-present SQL (the table
+# proof of the non-off rule). A separate throwaway subshell from the list read. rc 1 and
+# nothing printed when the lib is unreadable, fails to load, rejects its table list, or
+# prints nothing.
+read_owner_excluded_tables_sql() {
   local lib out
   lib="$(owner_exclusion_lib_path)"
   [[ -r "$lib" ]] || return 1
-  out="$(bash -c 'set -euo pipefail; source "$1"; csv="$(staging_owner_exclude_csv)"; sql="$(staging_owner_excluded_tables_present_sql)"; printf "%s\n%s\n" "$csv" "$sql"' _ "$lib" 2>/dev/null)" || return 1
-  [[ "$out" == *$'\n'* ]] || return 1
+  out="$(bash -c 'set -euo pipefail; source "$1"; staging_owner_excluded_tables_present_sql' _ "$lib" 2>/dev/null)" || return 1
+  [[ -n "$out" ]] || return 1
   printf '%s' "$out"
 }
 
@@ -647,39 +768,79 @@ const { Client } = require("pg");
   esac
 }
 
-# snapshot_migrations_gate_fields <whole true|false|unknown> <whole list text>
-#   Computes the migration gate from the whole-ledger list already captured. Prints key=value
-#   lines; always invoked inside $(...) so nothing here can abort the caller — an unexpected
-#   failure leaves every field unknown.
-#   gate (non-off actions and non-off preflight targets):
+# snapshot_migrations_gate_off_fields <whole true|false|unknown>
+#   The off rule (action=off and preflight target=off), computed on its own: it reads the
+#   owner exclusion names through read_owner_exclusion_csv only — never the accept table, the
+#   table-proof SQL, the name-set comparison or the per-name proofs — so no failure on the
+#   non-off path can change it. Prints key=value lines; always invoked inside $(...).
 #     whole_ledger  the whole ledger reads Pending: 0
+#     owner_scoped  the ledger narrowed by the lib exclusion list itself reads Pending: 0
+#     refused       pending migrations remain after that narrowing, or no list to narrow by
+#                   (lib unreadable or empty → the whole ledger only)
+#     unknown       the whole ledger or the scoped read could not be read — always refuses
+snapshot_migrations_gate_off_fields() {
+  local whole="${1:-unknown}"
+  local lib_csv=unknown scoped_zero='n/a' gate_off=unknown gate_off_reason=probe_unknown scoped_lib
+
+  if ! lib_csv="$(read_owner_exclusion_csv)"; then
+    lib_csv=unknown
+  fi
+  case "$whole" in
+    true)
+      gate_off=whole_ledger; gate_off_reason=whole_ledger_pending_zero
+      ;;
+    false)
+      if [[ "$lib_csv" == "unknown" ]]; then
+        gate_off=refused; gate_off_reason=lib_unreadable_whole_ledger_pending
+      elif [[ -z "$lib_csv" ]]; then
+        gate_off=refused; gate_off_reason=no_owner_exclusions_whole_ledger_pending
+      else
+        scoped_lib="$(probe_scoped_pending_count "$lib_csv")"
+        case "$scoped_lib" in
+          0) scoped_zero=true; gate_off=owner_scoped; gate_off_reason=scoped_ledger_pending_zero ;;
+          unknown) scoped_zero=unknown; gate_off=unknown; gate_off_reason=scoped_probe_unknown ;;
+          *) scoped_zero=false; gate_off=refused; gate_off_reason=scoped_ledger_pending ;;
+        esac
+      fi
+      ;;
+    *) ;;
+  esac
+
+  printf 'owner_excluded_csv=%s\n' "$lib_csv"
+  printf 'scoped_zero=%s\n' "$scoped_zero"
+  printf 'gate_off=%s\n' "$gate_off"
+  printf 'gate_off_reason=%s\n' "$gate_off_reason"
+}
+
+# snapshot_migrations_gate_fields <whole true|false|unknown> <whole list text>
+#   The non-off rule (every non-off action and non-off preflight target), computed from the
+#   whole-ledger list already captured. Prints key=value lines; always invoked inside $(...)
+#   so nothing here can abort the caller — an unexpected failure leaves every field unknown.
+#   The list gate is independent of the ledger: the lib exclusion list (names and table SQL)
+#   and the canary accept table must both be readable, even when nothing is pending.
+#     whole_ledger  both lists readable and the whole ledger reads Pending: 0
 #     owner_scoped  the whole ledger's pending name set equals exactly the tolerated set
 #                   (lib exclusion list ∩ accept table, non-empty); narrowing the ledger by
-#                   exactly the tolerated names empties it (each tolerated name is known and
-#                   pending); the lib's excluded tables are proven absent
+#                   exactly the tolerated names drops exactly that many (count leg); every
+#                   tolerated name confirms pending through migrate.js --confirm (per-name
+#                   leg); the lib's excluded tables are proven absent
 #     refused       the pending name set differs from the tolerated set (pending_set_mismatch:
 #                   a name outside it, an unaccepted exclusion pending, or a tolerated name
-#                   no longer pending), an excluded table present, or no tolerated set to apply
+#                   no longer pending), a count or per-name leg that answers "not pending",
+#                   an excluded table present, or no tolerated set to apply
 #     unknown       a probe, the lib or the accept table could not be read — always refuses
-#   gate_off (action=off and preflight target=off):
-#     whole_ledger / owner_scoped (the ledger narrowed by the lib list itself reads Pending: 0)
-#     / refused / unknown. The accept table, name-set and table proofs are report-only here;
-#     lib unreadable → whole ledger only.
 snapshot_migrations_gate_fields() {
   local whole="${1:-unknown}" list="${2:-}"
   local lib_csv=unknown lib_sql="" accept_csv=unknown tolerated_csv=unknown
-  local pending_count=unknown scoped_zero='n/a' names_proven='n/a' tables_absent='n/a'
-  local gate=unknown gate_reason=probe_unknown gate_off=unknown gate_off_reason=probe_unknown
-  local contract accepted names expected name n tol_len scoped_lib=unknown scoped_tol=unknown
-  local csv_re='^([A-Za-z0-9_]+(,[A-Za-z0-9_]+)*)?$'
+  local pending_count=unknown names_proven='n/a' names_confirmed='n/a' tables_absent='n/a'
+  local gate=unknown gate_reason=probe_unknown
+  local accepted names expected name n tol_len scoped_tol confirm confirm_verdict confirm_reason
 
-  if contract="$(read_owner_exclusion_contract)"; then
-    lib_csv="${contract%%$'\n'*}"
-    lib_sql="${contract#*$'\n'}"
-    if [[ ! "$lib_csv" =~ $csv_re ]]; then
-      lib_csv=unknown
-      lib_sql=""
-    fi
+  if ! lib_csv="$(read_owner_exclusion_csv)"; then
+    lib_csv=unknown
+  fi
+  if ! lib_sql="$(read_owner_excluded_tables_sql)"; then
+    lib_sql=""
   fi
   if accepted="$(read_canary_accept_table)"; then
     accept_csv="$(printf '%s' "$accepted" | tr '\n' ',' | sed 's/,$//')"
@@ -696,28 +857,27 @@ snapshot_migrations_gate_fields() {
 
   case "$whole" in
     true)
-      gate=whole_ledger; gate_reason=whole_ledger_pending_zero
-      gate_off=whole_ledger; gate_off_reason=whole_ledger_pending_zero
+      if [[ "$lib_csv" == "unknown" || -z "$lib_sql" ]]; then
+        gate=unknown; gate_reason=lib_unreadable
+      elif [[ "$accept_csv" == "unknown" ]]; then
+        gate=unknown; gate_reason=accept_table_unreadable
+      else
+        gate=whole_ledger; gate_reason=whole_ledger_pending_zero
+      fi
       ;;
     false)
-      # off rule: the ledger narrowed by the lib list itself.
-      if [[ "$lib_csv" == "unknown" ]]; then
-        gate_off=refused; gate_off_reason=lib_unreadable_whole_ledger_pending
-      elif [[ -z "$lib_csv" ]]; then
-        gate_off=refused; gate_off_reason=no_owner_exclusions_whole_ledger_pending
-      else
-        scoped_lib="$(probe_scoped_pending_count "$lib_csv")"
-        case "$scoped_lib" in
-          0) scoped_zero=true; gate_off=owner_scoped; gate_off_reason=scoped_ledger_pending_zero ;;
-          unknown) scoped_zero=unknown; gate_off=unknown; gate_off_reason=scoped_probe_unknown ;;
-          *) scoped_zero=false; gate_off=refused; gate_off_reason=scoped_ledger_pending ;;
-        esac
-        tables_absent="$(probe_owner_excluded_tables_absent "$lib_sql")"
+      # Table proof (reported for both rules; load-bearing for this one only).
+      if [[ "$lib_csv" != "unknown" && -n "$lib_csv" ]]; then
+        if [[ -n "$lib_sql" ]]; then
+          tables_absent="$(probe_owner_excluded_tables_absent "$lib_sql")"
+        else
+          tables_absent=unknown
+        fi
       fi
-      # non-off rule: exact tolerated name set + per-name proof + tables absent.
-      if [[ "$tolerated_csv" == "unknown" ]]; then
-        gate=unknown
-        if [[ "$lib_csv" == "unknown" ]]; then gate_reason=lib_unreadable; else gate_reason=accept_table_unreadable; fi
+      if [[ "$lib_csv" == "unknown" || -z "$lib_sql" ]]; then
+        gate=unknown; gate_reason=lib_unreadable
+      elif [[ "$tolerated_csv" == "unknown" ]]; then
+        gate=unknown; gate_reason=accept_table_unreadable
       elif [[ -z "$tolerated_csv" ]]; then
         gate=refused; gate_reason=no_tolerated_exclusions_whole_ledger_pending
       elif [[ "$pending_count" == "unknown" ]]; then
@@ -733,22 +893,38 @@ snapshot_migrations_gate_fields() {
         elif [[ "$names" != "$expected" ]]; then
           names_proven=false; gate=refused; gate_reason=pending_set_mismatch
         else
-          if [[ "$tolerated_csv" == "$lib_csv" ]]; then
-            scoped_tol="$scoped_lib"
-          else
-            scoped_tol="$(probe_scoped_pending_count "$tolerated_csv")"
-          fi
+          # Count leg (extra check): narrowing by exactly the tolerated names drops exactly them.
+          scoped_tol="$(probe_scoped_pending_count "$tolerated_csv")"
           if [[ "$scoped_tol" == "unknown" ]]; then
             names_proven=unknown; gate=unknown; gate_reason=scoped_probe_unknown
-          elif [[ "$((pending_count - scoped_tol))" == "$tol_len" ]]; then
-            names_proven=true
-            case "$tables_absent" in
-              true) gate=owner_scoped; gate_reason=owner_scoped_proven ;;
-              false) gate=refused; gate_reason=excluded_tables_present ;;
-              *) gate=unknown; gate_reason=tables_probe_unknown ;;
-            esac
-          else
+          elif [[ "$((pending_count - scoped_tol))" != "$tol_len" ]]; then
             names_proven=false; gate=refused; gate_reason=tolerated_names_not_pending
+          else
+            names_proven=true
+            # Per-name leg: every tolerated name confirms pending, one --confirm each.
+            confirm="$(confirm_tolerated_names_pending "$tolerated_csv")"
+            confirm_verdict="${confirm%% *}"
+            confirm_reason="${confirm#* }"
+            case "$confirm_verdict" in
+              true)
+                names_confirmed=true
+                case "$tables_absent" in
+                  true) gate=owner_scoped; gate_reason=owner_scoped_proven ;;
+                  false) gate=refused; gate_reason=excluded_tables_present ;;
+                  *) gate=unknown; gate_reason=tables_probe_unknown ;;
+                esac
+                ;;
+              false)
+                names_confirmed=false; gate=refused; gate_reason="$confirm_reason"
+                ;;
+              *)
+                names_confirmed=unknown; gate=unknown
+                case "$confirm_reason" in
+                  confirm_unsupported) gate_reason=confirm_unsupported ;;
+                  *) gate_reason=confirm_probe_unknown ;;
+                esac
+                ;;
+            esac
           fi
         fi
       fi
@@ -756,48 +932,55 @@ snapshot_migrations_gate_fields() {
     *) ;;
   esac
 
-  printf 'owner_excluded_csv=%s\n' "$lib_csv"
   printf 'canary_accepted_csv=%s\n' "$accept_csv"
   printf 'tolerated_csv=%s\n' "$tolerated_csv"
   printf 'pending_count=%s\n' "$pending_count"
-  printf 'scoped_zero=%s\n' "$scoped_zero"
   printf 'names_proven=%s\n' "$names_proven"
+  printf 'names_confirmed=%s\n' "$names_confirmed"
   printf 'tables_absent=%s\n' "$tables_absent"
   printf 'gate=%s\n' "$gate"
   printf 'gate_reason=%s\n' "$gate_reason"
-  printf 'gate_off=%s\n' "$gate_off"
-  printf 'gate_off_reason=%s\n' "$gate_off_reason"
 }
 
 # capture_migrations_gate: sets the SNAP_* migration gate globals from SNAP_MIGRATIONS_ZERO and
-# the captured whole list. Every field defaults to unknown; never fails.
+# the captured whole list. The off rule and the non-off rule run in two separate $(...)
+# subshells (off first), so nothing on the non-off path can reach the off fields. Every field
+# defaults to unknown; never fails.
 capture_migrations_gate() {
-  local fields="" key value
+  local off_fields="" fields="" key value
   SNAP_OWNER_EXCLUDED_CSV=unknown
   SNAP_CANARY_ACCEPTED_CSV=unknown
   SNAP_TOLERATED_CSV=unknown
   SNAP_MIGRATIONS_PENDING_COUNT=unknown
   SNAP_MIGRATIONS_ZERO_SCOPED=unknown
   SNAP_OWNER_EXCLUSION_NAMES_PROVEN=unknown
+  SNAP_OWNER_EXCLUSION_NAMES_CONFIRMED=unknown
   SNAP_OWNER_EXCLUDED_TABLES_ABSENT=unknown
   SNAP_MIGRATIONS_GATE=unknown
   SNAP_MIGRATIONS_GATE_REASON=probe_unknown
   SNAP_MIGRATIONS_GATE_OFF=unknown
   SNAP_MIGRATIONS_GATE_OFF_REASON=probe_unknown
-  fields="$(snapshot_migrations_gate_fields "${SNAP_MIGRATIONS_ZERO:-unknown}" "${SNAP_MIGRATE_LIST_WHOLE:-}" 2>/dev/null)" || fields=""
+  off_fields="$(snapshot_migrations_gate_off_fields "${SNAP_MIGRATIONS_ZERO:-unknown}" 2>/dev/null)" || off_fields=""
   while IFS='=' read -r key value; do
     case "$key" in
       owner_excluded_csv) SNAP_OWNER_EXCLUDED_CSV="$value" ;;
+      scoped_zero) SNAP_MIGRATIONS_ZERO_SCOPED="$value" ;;
+      gate_off) SNAP_MIGRATIONS_GATE_OFF="$value" ;;
+      gate_off_reason) SNAP_MIGRATIONS_GATE_OFF_REASON="$value" ;;
+      *) ;;
+    esac
+  done <<< "$off_fields"
+  fields="$(snapshot_migrations_gate_fields "${SNAP_MIGRATIONS_ZERO:-unknown}" "${SNAP_MIGRATE_LIST_WHOLE:-}" 2>/dev/null)" || fields=""
+  while IFS='=' read -r key value; do
+    case "$key" in
       canary_accepted_csv) SNAP_CANARY_ACCEPTED_CSV="$value" ;;
       tolerated_csv) SNAP_TOLERATED_CSV="$value" ;;
       pending_count) SNAP_MIGRATIONS_PENDING_COUNT="$value" ;;
-      scoped_zero) SNAP_MIGRATIONS_ZERO_SCOPED="$value" ;;
       names_proven) SNAP_OWNER_EXCLUSION_NAMES_PROVEN="$value" ;;
+      names_confirmed) SNAP_OWNER_EXCLUSION_NAMES_CONFIRMED="$value" ;;
       tables_absent) SNAP_OWNER_EXCLUDED_TABLES_ABSENT="$value" ;;
       gate) SNAP_MIGRATIONS_GATE="$value" ;;
       gate_reason) SNAP_MIGRATIONS_GATE_REASON="$value" ;;
-      gate_off) SNAP_MIGRATIONS_GATE_OFF="$value" ;;
-      gate_off_reason) SNAP_MIGRATIONS_GATE_OFF_REASON="$value" ;;
       *) ;;
     esac
   done <<< "$fields"
@@ -5169,6 +5352,7 @@ write_status_artifact() {
   local canary_accepted_exclusions="${SNAP_CANARY_ACCEPTED_CSV:-unknown}"
   local tolerated_exclusions="${SNAP_TOLERATED_CSV:-unknown}"
   local owner_exclusion_names_proven="${SNAP_OWNER_EXCLUSION_NAMES_PROVEN:-unknown}"
+  local owner_exclusion_names_confirmed="${SNAP_OWNER_EXCLUSION_NAMES_CONFIRMED:-unknown}"
   local owner_excluded_tables_absent="${SNAP_OWNER_EXCLUDED_TABLES_ABSENT:-unknown}"
   local migrations_gate="${SNAP_MIGRATIONS_GATE:-unknown}"
   local migrations_gate_reason="${SNAP_MIGRATIONS_GATE_REASON:-probe_unknown}"
@@ -5195,6 +5379,7 @@ write_status_artifact() {
     echo "canary_accepted_exclusions=${canary_accepted_exclusions}"
     echo "tolerated_exclusions=${tolerated_exclusions}"
     echo "owner_exclusion_names_proven=${owner_exclusion_names_proven}"
+    echo "owner_exclusion_names_confirmed=${owner_exclusion_names_confirmed}"
     echo "owner_excluded_tables_absent=${owner_excluded_tables_absent}"
     echo "migrations_gate=${migrations_gate}"
     echo "migrations_gate_reason=${migrations_gate_reason}"
@@ -5253,6 +5438,7 @@ write_status_artifact() {
     echo "  \"canary_accepted_exclusions\": $(json_str "$canary_accepted_exclusions"),"
     echo "  \"tolerated_exclusions\": $(json_str "$tolerated_exclusions"),"
     echo "  \"owner_exclusion_names_proven\": $(json_str "$owner_exclusion_names_proven"),"
+    echo "  \"owner_exclusion_names_confirmed\": $(json_str "$owner_exclusion_names_confirmed"),"
     echo "  \"owner_excluded_tables_absent\": $(json_str "$owner_excluded_tables_absent"),"
     echo "  \"migrations_gate\": $(json_str "$migrations_gate"),"
     echo "  \"migrations_gate_reason\": $(json_str "$migrations_gate_reason"),"

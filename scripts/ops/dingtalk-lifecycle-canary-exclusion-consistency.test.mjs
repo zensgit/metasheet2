@@ -10,9 +10,9 @@
 //   3. the migration source files packages/core-backend/src/db/migrations/<name>.ts whose sha256
 //      each accepted line is bound to.
 // Red when an accepted digest no longer matches its source file, an accepted name is not in the
-// lib list (stale acceptance), a name has no source file, or the table is malformed. A lib name
-// that is NOT accepted is allowed here on purpose: the canary refuses every non-off action for it
-// at runtime until it is accepted in a reviewed change of this lane.
+// lib list (stale acceptance), a lib name is not in the accept table (unaccepted exclusion), a
+// name has no source file, or the table is malformed. The lib list and the accept table name the
+// same set: adding or removing an exclusion updates both in the same reviewed change.
 //
 // It also runs the canary's own accept-table reader (remote script sourced in source-only mode)
 // against the committed table, so the runtime and this parser agree on it before any dispatch.
@@ -90,8 +90,12 @@ export function runtimeAcceptTableNames(tablePath) {
 }
 
 // The consistency rule. Throws on any disagreement; returns the accepted names that are in the
-// lib list (the set the canary would tolerate on this ref).
+// lib list (the set the canary would tolerate on this ref). Both directions are checked: every
+// lib name must be accepted and every accepted name must be in the lib list.
 export function assertConsistent({ libNames, accept, digestOf }) {
+  for (const name of libNames) {
+    assert.ok(accept.has(name), `lib owner exclusion ${name} is not in the canary accept table (unaccepted exclusion; add it with its reviewed source digest in the same change)`)
+  }
   const tolerated = []
   for (const [name, digest] of accept) {
     assert.ok(libNames.includes(name), `accepted exclusion ${name} is not in the lib owner exclusion list (stale acceptance; remove it in the same reviewed change)`)
@@ -130,6 +134,9 @@ test('REQUIRED: lib exclusion list, canary accept table and migration source dig
   // both are empty, this stays green and the canary falls back to the strict whole-ledger rule.
   const tolerated = assertConsistent({ libNames, accept, digestOf: (name) => migrationSourceDigest(MIGRATIONS_DIR, name) })
   for (const name of tolerated) assert.ok(existsSync(join(MIGRATIONS_DIR, `${name}.ts`)))
+  // The two lists name exactly the same set.
+  assert.deepEqual([...tolerated].sort(), [...libNames].sort())
+  assert.deepEqual([...accept.keys()].sort(), [...libNames].sort())
 })
 
 test('the canary reads the accept table by this basename and binds the lib by basename (shipped side by side)', () => {
@@ -140,7 +147,7 @@ test('the canary reads the accept table by this basename and binds the lib by ba
   assert.match(source, /\^\(\[A-Za-z0-9_\]\+\)\[\[:space:\]\]\+\(\[0-9a-f\]\{64\}\)\[\[:space:\]\]\*\$/)
 })
 
-test('MUTATION: a desynced digest, a stale name, a missing source, a malformed or repeated line are each rejected', () => {
+test('MUTATION: a desynced digest, a stale name, an unaccepted lib name, a missing source, a malformed or repeated line are each rejected', () => {
   const libNames = ['syn_a', 'syn_b']
   const digests = { syn_a: 'a'.repeat(64), syn_b: 'b'.repeat(64) }
   const digestOf = (name) => {
@@ -148,21 +155,26 @@ test('MUTATION: a desynced digest, a stale name, a missing source, a malformed o
     return digests[name]
   }
   const good = parseAcceptTable(`# c\nsyn_a ${digests.syn_a}\n`)
-  assert.deepEqual(assertConsistent({ libNames, accept: good, digestOf }), ['syn_a'])
-  // lib-only names are allowed (runtime refuses them until accepted)
-  assert.deepEqual(assertConsistent({ libNames: ['syn_a', 'syn_c'], accept: good, digestOf }), ['syn_a'])
+  assert.deepEqual(assertConsistent({ libNames: ['syn_a'], accept: good, digestOf }), ['syn_a'])
+  // a lib name the accept table does not list (the lib grew, the table did not follow)
+  assert.throws(() => assertConsistent({ libNames: ['syn_a', 'syn_c'], accept: good, digestOf }), /unaccepted exclusion/)
   // desynced digest
-  assert.throws(() => assertConsistent({ libNames, accept: parseAcceptTable(`syn_a ${'c'.repeat(64)}\n`), digestOf }), /does not match/)
+  assert.throws(() => assertConsistent({ libNames: ['syn_a'], accept: parseAcceptTable(`syn_a ${'c'.repeat(64)}\n`), digestOf }), /does not match/)
   // stale acceptance (name no longer in the lib list)
-  assert.throws(() => assertConsistent({ libNames: ['syn_b'], accept: good, digestOf }), /stale acceptance/)
+  assert.throws(() => assertConsistent({ libNames: [], accept: good, digestOf }), /stale acceptance/)
+  // both directions at once: the lib names syn_b, the table still names syn_a
+  assert.throws(() => assertConsistent({ libNames: ['syn_b'], accept: good, digestOf }), /unaccepted exclusion|stale acceptance/)
   // accepted name without a source file
-  assert.throws(() => assertConsistent({ libNames: ['syn_a', 'syn_z'], accept: parseAcceptTable(`syn_z ${'d'.repeat(64)}\n`), digestOf }), /no migration source file/)
+  assert.throws(() => assertConsistent({ libNames: ['syn_z'], accept: parseAcceptTable(`syn_z ${'d'.repeat(64)}\n`), digestOf }), /no migration source file/)
   // malformed / repeated lines
   for (const bad of ['syn_a nothash\n', 'syn_a\n', `syn-a ${digests.syn_a}\n`, `syn_a ${digests.syn_a}\nsyn_a ${digests.syn_a}\n`, `syn_a ${digests.syn_a} extra\n`, `syn_a ${digests.syn_a.toUpperCase()}\n`]) {
     assert.throws(() => parseAcceptTable(bad), bad)
   }
-  // an empty table (comments only) is consistent with any lib list and tolerates nothing
-  assert.deepEqual(assertConsistent({ libNames, accept: parseAcceptTable('# none\n'), digestOf }), [])
+  // an empty table (comments only) is consistent only with an empty lib list
+  assert.deepEqual(assertConsistent({ libNames: [], accept: parseAcceptTable('# none\n'), digestOf }), [])
+  assert.throws(() => assertConsistent({ libNames, accept: parseAcceptTable('# none\n'), digestOf }), /unaccepted exclusion/)
+  // the full two-name agreement passes
+  assert.deepEqual(assertConsistent({ libNames, accept: parseAcceptTable(`syn_a ${digests.syn_a}\nsyn_b ${digests.syn_b}\n`), digestOf }), ['syn_a', 'syn_b'])
 })
 
 test('MUTATION: the runtime reader rejects every shape this parser rejects, and accepts what it accepts', () => {
