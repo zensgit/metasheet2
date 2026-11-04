@@ -379,14 +379,21 @@ async function liveCredentials(f: Fixture) {
   expect(liveBefore.sessions).toContain(session!.id)
   expect(liveBefore.tokens).toContain(token)
   const generation = await accessGeneration(f.user)
-  const watermark: string | null =
+  const currentWatermark = async (): Promise<string | null> =>
     (
       await query(
         'SELECT revoked_after::text AS t FROM user_session_revocations WHERE user_id=$1',
         [f.user],
       )
     ).rows[0]?.t ?? null
+  const watermark = await currentWatermark()
   return {
+    /** Nothing was revoked: the same live session and token, the same generation and watermark. */
+    async expectUnchanged() {
+      expect(await live()).toEqual(liveBefore)
+      expect(await accessGeneration(f.user)).toBe(generation)
+      expect(await currentWatermark()).toBe(watermark)
+    },
     async expectRevoked() {
       expect(await live()).toEqual({ sessions: [], tokens: [] })
       expect(
@@ -4884,6 +4891,78 @@ suite('DingTalk controlled login repair', () => {
         expect(provider.exchange).not.toHaveBeenCalled()
         expect(await linkOf(x)).toEqual([])
       })
+
+      it('N27: a sealed request re-pointed at another journal, approver or preparer is refused; neither journal is written', async () => {
+        const f = await fixture(),
+          r = await applyRepair(f)
+        // A second repaired person in the same corp and integration: both journals are stuck by the same app switch.
+        const u2 = randomUUID(),
+          a2 = randomUUID()
+        await query(
+          `INSERT INTO users(id,username,name,password_hash,is_active,is_admin,activation_status,local_password_set) VALUES($1,$1,$1,$2,true,false,'activated',true)`,
+          [u2, await bcrypt.hash(f.password, 4)],
+        )
+        await query('INSERT INTO user_orgs(user_id,org_id,is_active) VALUES($1,$2,true)', [u2, f.org])
+        await query(
+          `INSERT INTO directory_accounts(id,integration_id,corp_id,external_user_id,union_id,open_id,external_key,name) VALUES($1,$2,$3,$4,$5,$6,$4,'Synthetic second member')`,
+          [a2, f.source, f.corp, u2, 'new-union-' + u2, 'new-open-' + u2],
+        )
+        await link(a2, u2)
+        await query(
+          `INSERT INTO user_external_identities(provider,external_key,local_user_id,corp_id,provider_open_id,provider_union_id) VALUES('dingtalk',$1,$2,$3,$4,$5)`,
+          [f.corp + ':old-open-' + u2, u2, f.corp, 'old-open-' + u2, 'old-union-' + u2],
+        )
+        await query(
+          "INSERT INTO user_external_auth_grants(provider,local_user_id,enabled) VALUES('dingtalk',$1,true)",
+          [u2],
+        )
+        provider.profile.mockResolvedValue({ openId: 'new-open-' + u2, unionId: 'new-union-' + u2 })
+        const proof2 = await verifyDingTalkRepair(u2, f.password, 'synthetic-code', f.admin, f.password)
+        const r2 = await applyDingTalkRepair(proof2, (await previewDingTalkRepair(proof2)).digest, 'apply')
+        const f2: Fixture = { ...f, user: u2, account: a2 }
+        await switchLoginApp(f)
+        const b = await secondAdmin(f),
+          c = await secondAdmin(f)
+        // r2 needs a re-anchor too (a scan under the new app), so the moved request names a journal that is itself stuck.
+        await expectReanchorRefused(f2, r2.id, () => requestReanchor(f2, r2.id, b), 'REPAIR_REANCHOR_SCAN_REQUIRED')
+        const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+        const raw = JSON.parse(decryptStoredSecretValue(req.request))
+        expect(raw).toMatchObject({ repairId: r.id, userId: f.user, preparerId: f.admin, approverId: b })
+        const reseal = (o: Record<string, unknown>) => encryptStoredSecretValue(JSON.stringify({ ...raw, ...o }))
+        const allAudit = async () =>
+          Number(
+            (await query("SELECT count(*)::int AS n FROM audit_logs WHERE resource_type='dingtalk_login_repairs'")).rows[0].n,
+          )
+        const secondBefore = await capture(f2, r2.id),
+          auditCount = await allAudit()
+        for (const [o, actor, code] of [
+          [{ repairId: r2.id }, b, 'REPAIR_PROOF_INVALID'],
+          [{ repairId: r2.id, userId: u2 }, b, 'REPAIR_RECOVERY_SNAPSHOT_CHANGED'],
+          [{ approverId: c }, c, 'REPAIR_RECOVERY_SNAPSHOT_CHANGED'],
+          [{ preparerId: c }, b, 'REPAIR_OPERATOR_CHANGED'],
+        ] as const) {
+          const moved = reseal(o)
+          await expectReanchorRefused(f, r.id, () => previewReanchor(f, moved, actor), code)
+          await expectReanchorRefused(f, r.id, () => reanchorWith(f, moved, actor, req.summary.digest), code)
+          expect(await capture(f2, r2.id)).toEqual(secondBefore)
+          expect(await successorOf(r2.id)).toEqual([])
+          expect(await allAudit()).toBe(auditCount)
+        }
+        // The untouched request still executes for its own journal only; the other person keeps an applied root
+        // with no successor, and their live session and token are not revoked.
+        expect((await previewReanchor(f, req.request, b)).digest).toBe(req.summary.digest)
+        const credentials = await liveCredentials(f),
+          otherCredentials = await liveCredentials(f2),
+          otherBefore = await capture(f2, r2.id)
+        const done = await reanchorWith(f, req.request, b, req.summary.digest)
+        await credentials.expectRevoked()
+        await otherCredentials.expectUnchanged()
+        expect((await successorOf(r.id)).map((s) => s.id)).toEqual([done.id])
+        expect(await capture(f2, r2.id)).toEqual(otherBefore)
+        expect(await journalRow(r2.id)).toMatchObject({ state: 'applied', released_account_ids: null })
+        expect(await successorOf(r2.id)).toEqual([])
+        expect(await allAudit()).toBe(auditCount + 2)
+      })
     })
 
     describe('database chain guard (direct SQL and the transaction() wrapper)', () => {
@@ -5222,6 +5301,70 @@ suite('DingTalk controlled login repair', () => {
           expect(await repairRow(id)).toBeUndefined()
         }
         expect(await successorOf(r.id)).toEqual([])
+      })
+
+      it('G16: a refusal at COMMIT on the real execute path rolls back the supersede, the successor, the generation, every revocation and both audit rows', async () => {
+        const { f, r } = await loginAppSwitched(),
+          b = await secondAdmin(f)
+        const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
+        const preview = await previewReanchor(f, req.request, b)
+        const nonce = String(JSON.parse(decryptStoredSecretValue(req.request)).nonce)
+        expect(nonce).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+        const name = 'test_refuse_' + nonce.replace(/-/g, '')
+        const allAudit = async () =>
+          Number(
+            (await query("SELECT count(*)::int AS n FROM audit_logs WHERE resource_type='dingtalk_login_repairs'")).rows[0].n,
+          )
+        const credentials = await liveCredentials(f)
+        const before = await capture(f, r.id),
+          untouched = await untouchedByReanchor(f),
+          auditCount = await allAudit(),
+          generation = await accessGeneration(f.user)
+        // Test-only deferred trigger: refuses this request's successor at COMMIT, after every write of the execute path
+        // ran, and reports what the transaction had written by then.
+        await query(
+          `CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$
+          DECLARE a int; g bigint; s int; t int;
+          BEGIN
+            IF NEW.proof_nonce <> '${nonce}'::uuid THEN RETURN NULL; END IF;
+            SELECT count(*) INTO a FROM audit_logs WHERE resource_type='dingtalk_login_repairs'
+              AND resource_id::text IN (NEW.id::text, NEW.supersedes_id::text) AND action IN ('superseded','reanchor');
+            SELECT access_generation INTO g FROM users WHERE id::text = NEW.user_id::text;
+            SELECT count(*) INTO s FROM user_sessions WHERE user_id::text = NEW.user_id::text AND revoked_at IS NULL;
+            SELECT count(*) INTO t FROM multitable_api_tokens WHERE created_by::text = NEW.user_id::text AND revoked = false;
+            RAISE EXCEPTION 'synthetic refusal at COMMIT' USING ERRCODE = '55000',
+              DETAIL = format('audit=%s generation=%s sessions=%s tokens=%s', a, g, s, t);
+          END $$`,
+        )
+        try {
+          await query(
+            `CREATE CONSTRAINT TRIGGER ${name} AFTER INSERT ON dingtalk_login_repairs DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.supersedes_id IS NOT NULL) EXECUTE FUNCTION ${name}()`,
+          )
+          await expect(reanchorWith(f, req.request, b, preview.digest)).rejects.toMatchObject({
+            code: '55000',
+            message: 'synthetic refusal at COMMIT',
+            // Inside the refused transaction: both audit rows, the generation bump and every revocation had been written.
+            detail: `audit=2 generation=${generation + 1} sessions=0 tokens=0`,
+          })
+          expect(await capture(f, r.id)).toEqual(before)
+          expect(await untouchedByReanchor(f)).toEqual(untouched)
+          expect(await allAudit()).toBe(auditCount)
+          await credentials.expectUnchanged()
+          expect(await successorOf(r.id)).toEqual([])
+          expect(
+            (await query('SELECT id FROM dingtalk_login_repairs WHERE proof_nonce=$1', [nonce])).rows,
+          ).toEqual([])
+          expect(await repairRow(r.id)).toMatchObject({ state: 'applied', rollback_actor_id: null, rolled_back_at: null })
+        } finally {
+          await query(`DROP TRIGGER IF EXISTS ${name} ON dingtalk_login_repairs`)
+          await query(`DROP FUNCTION IF EXISTS ${name}()`)
+        }
+        // Without the trigger the same approved request commits: generation exactly +1 from the pre-refusal value, audit +2.
+        const done = await reanchorWith(f, req.request, b, preview.digest)
+        await credentials.expectRevoked()
+        expect(await allAudit()).toBe(auditCount + 2)
+        expect((await successorOf(r.id)).map((s) => s.id)).toEqual([done.id])
+        expect(await repairRow(r.id)).toMatchObject({ state: 'superseded', rollback_actor_id: b })
       })
     })
 
