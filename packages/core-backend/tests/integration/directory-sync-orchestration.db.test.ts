@@ -545,6 +545,20 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
       expect(runStats.linkedCount).toBe(2)
       expect(runStats.unmatchedCount).toBe(1)
     })
+
+    it('§7.7 timing: admissions hashed passwords INSIDE the apply transaction, so the bcrypt window is non-zero and bounded by it', () => {
+      // The discriminating pair with the alert-coverage run (0 admissions ⇒ bcryptMsInTransaction
+      // exactly 0): here three candidates were hashed (two admitted; the poisoned one was hashed
+      // before its bind threw and the SAVEPOINT rolled it back), each hash taking milliseconds at
+      // any salt cost.
+      expect(typeof runStats.bcryptMsInTransaction).toBe('number')
+      expect(runStats.bcryptMsInTransaction as number).toBeGreaterThan(0)
+      expect(typeof runStats.applyTransactionMs).toBe('number')
+      expect(runStats.bcryptMsInTransaction as number).toBeLessThanOrEqual(runStats.applyTransactionMs as number)
+      expect(typeof runStats.fetchDurationMs).toBe('number')
+      expect(runStats.fetchDurationMs as number).toBeGreaterThanOrEqual(0)
+      expect(runStats.externalPullRetryCount).toBe(0)
+    })
   })
 
   // -------------------------------------------------------------------------

@@ -396,6 +396,21 @@ describeIfDatabase('R5 per-run sync summary stats (real DB)', () => {
     expect(typeof stats.durationMs).toBe('number')
     expect(stats.durationMs as number).toBeGreaterThanOrEqual(0)
 
+    // §7.7 per-phase timing + retry telemetry (additive). Both phase windows sit inside the
+    // run's wall-clock; nobody was admitted this run (autoAdmittedCount 0 below) so no bcrypt
+    // ran inside the transaction; and the mocked client never retries, so every bucket is 0.
+    expect(typeof stats.fetchDurationMs).toBe('number')
+    expect(stats.fetchDurationMs as number).toBeGreaterThanOrEqual(0)
+    expect(typeof stats.applyTransactionMs).toBe('number')
+    expect(stats.applyTransactionMs as number).toBeGreaterThanOrEqual(0)
+    expect((stats.fetchDurationMs as number) + (stats.applyTransactionMs as number)).toBeLessThanOrEqual(stats.durationMs as number)
+    expect(stats.bcryptMsInTransaction).toBe(0)
+    expect(stats.externalPullRetryCount).toBe(0)
+    expect(stats.externalPullRetryFlowControlCount).toBe(0)
+    expect(stats.externalPullRetryHttp429Count).toBe(0)
+    expect(stats.externalPullRetryNetworkCount).toBe(0)
+    expect(stats.externalPullRetryOtherCount).toBe(0)
+
     // The summary is ADDITIVE: pre-existing completion keys must survive the merge.
     expect(stats.linkedCount).toBe(1)
     expect(stats.pendingCount).toBe(0)
