@@ -151,8 +151,11 @@ const PROJECT_WRITE_BUMP_BACKOFF_MS = 10
 //     below), so every token / approved job planned before the decision is superseded exactly when the
 //     decision commits (E03 / E04). Reasons only: no decision ever holds the lease (it writes plugin tables,
 //     never the sheet; I2 keeps it off a live holder).
+//   * `change_plan_confirm` (batch-refresh step 5 PR-8, design §9.4 / §10.3 (1)): the change-plan confirm bumps the
+//     same way, inside its own transaction — every token planned before the confirm is superseded when it commits;
+//     the controlled update then runs under an ordinary `small_preview` token minted after it.
 const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable'])
-const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end'])
+const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm'])
 
 const PROJECT_WRITE_ERROR_CODES = Object.freeze({
   WRITE_LOCKED: 'STOCK_PREP_PROJECT_WRITE_LOCKED',

@@ -4,8 +4,12 @@ import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { assertInTransaction } from '../multitable/pg-transaction-guard'
 import { assertAutomationIntegrationActor, AutomationActorAuthorityError } from './automation-live-authority'
 
+// ENCRYPTION_NOT_READY: the initialize path refused before any writer because the host's
+// ENCRYPTION_KEY / ENCRYPTION_SALT fail the production checks, or are public or obviously invalid for a
+// permanent seal (getYidaSealMaterialIssues in yida-initialization-runtime.ts).
 export type YidaInitializationCode = 'INPUT' | 'DENIED' | 'CONFLICT' | 'INACTIVE' | 'CANCELLED' | 'UNAVAILABLE'
-const codes = new Set<unknown>(['INPUT', 'DENIED', 'CONFLICT', 'INACTIVE', 'CANCELLED', 'UNAVAILABLE'])
+  | 'ENCRYPTION_NOT_READY'
+const codes = new Set<unknown>(['INPUT', 'DENIED', 'CONFLICT', 'INACTIVE', 'CANCELLED', 'UNAVAILABLE', 'ENCRYPTION_NOT_READY'])
 const ownErrors = new WeakMap<object, YidaInitializationCode>()
 export class YidaInitializationError extends Error {
   readonly code: string

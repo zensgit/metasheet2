@@ -171,6 +171,7 @@ export const CREATE_TASK_VALIDATION_CODES = [
   'INVALID_ASSIGNEES',
   'INVALID_MODE',
   'INACTIVE_ORG_MEMBER',
+  'ASSIGNEE_TASK_ACCESS_REQUIRED',
   'LIMIT',
 ] as const
 export type CreateTaskValidationCode = (typeof CREATE_TASK_VALIDATION_CODES)[number]

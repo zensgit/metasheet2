@@ -57,6 +57,10 @@ const IDENTITY_FIELD_IDS = Object.freeze([
   'sourceVersion',
 ])
 
+// Batch-refresh step 5 PR-8: the conflict type of an UPDATE a confirmed change plan authorizes (the continuation
+// pairing module's post-condition admits it only as the plan authorizes it).
+const CHANGE_PLAN_UPDATE_TYPE = 'change_plan_update'
+
 // Frozen persisted vocabulary. Tokens are NEVER removed from this list: table-scope policy
 // selections are persisted under `integration:table-action:conflict-policies:` and re-validated
 // against this list on read, so dropping a token would turn "this selection does nothing" into
@@ -1373,6 +1377,27 @@ function makeSkipDecision(row) {
   }
 }
 
+// Batch-refresh step 5 PR-8 — THE CONTROLLED UPDATE (design §10.3 (2); plan §3.4 step 3 「受控更新机器字段。不改键、
+// 不搬结构、不覆盖人工填写」): ONE UPDATE per record a confirmed change plan authorizes, patching EXACTLY the plan's
+// fields with the plan's after values (+ the RUN stamps) — never the whole plm band (no `active`, no lineage, no key,
+// path or parent), never a human column. `key` is the existing row's own key (for a continued relationship's row: its
+// OLD key — the one exception to "continued rows receive no patch", plan §4). The values are THIS computation's (the
+// first pass observed them); the version the writer fences on comes from the apply's in-lease read, never from here.
+function makeChangePlanUpdateDecision(key, entry, runId, plannedAt, humanFields, changePlanId) {
+  const changed = Object.keys(entry.writeFields).sort()
+  const patch = {}
+  for (const fieldId of changed) patch[fieldId] = entry.writeFields[fieldId].after
+  Object.assign(patch, runPatch(runId, plannedAt, DECISIONS.UPDATE, JSON.stringify({ type: CHANGE_PLAN_UPDATE_TYPE, changePlanId, changedFields: changed })))
+  assertNoHumanFields(patch, humanFields, 'change plan patch')
+  return {
+    decision: DECISIONS.UPDATE,
+    idempotencyKey: key,
+    patch,
+    changedFields: changed,
+    conflictSummary: makeConflictSummary(CHANGE_PLAN_UPDATE_TYPE, { changePlanId, changedFieldCount: changed.length }),
+  }
+}
+
 // ── W4 carry wiring (execution-plan W4a; adjudication Layer 3) ───────────────
 //
 // The carry-policy module is required LAZILY, inside the plan pass, because it
@@ -1474,6 +1499,39 @@ function makeInactiveDecision(existing, runId, plannedAt, humanFields) {
 }
 
 function planStockPreparationConflicts(input = {}) {
+  // Batch-refresh step 4 (PR-1) — the GOVERNED-PROJECT input (design §6.1). Server-held, never
+  // request-supplied. ONLY `undefined` means "not governed": the plan below is then BYTE-IDENTICAL to the
+  // pre-step-4 planner (invariant (i), pinned on a second-pull sheet by
+  // stock-preparation-continuation-golden.test.cjs). Anything else is validated through the pairing
+  // module's closed key set; a store state other than 'ok' — or `null` — refuses rather than planning
+  // "without continuations" (invariant (ii)).
+  const continuationInput = input.continuation === undefined
+    ? null
+    : continuationModule().normalizeContinuationInput(input.continuation)
+  if (!continuationInput || !continuationInput.changePlan) return planOnce(input, continuationInput, null)
+  // Batch-refresh step 5 PR-8 (design §10.3 (2)) — A CONFIRMED CHANGE PLAN, TWO PASSES. Pass 1 is the governed plan
+  // exactly as without the plan (content detection kept on for the plan's records, M4); the pairing core compares its
+  // content-class holds with the plan (`changePlanAuthorizationOf`). `matches` => pass 2 plans with the plan's
+  // AUTHORIZATION (those changes become the controlled-update UPDATEs; every other hold stays); `stale` => pass 1
+  // stands (its holds re-open, the reconciliation invalidates the plan). Either way the values-free verdict rides
+  // `plan.continuation.changePlan` (the lanes bind the token / execution to it). Pure CPU, twice the planning cost
+  // for a project that holds a confirmed plan (stated in the PR body).
+  const first = planOnce(input, continuationInput, null)
+  const verdict = continuationModule().changePlanAuthorizationOf({ input: continuationInput, holds: first.holds || [] })
+  const chosen = verdict.verdict === 'matches' ? planOnce(input, continuationInput, verdict.authorization) : first
+  const stanza = Object.freeze({
+    id: continuationInput.changePlan.id,
+    verdict: verdict.verdict,
+    ...(verdict.reason ? { reason: verdict.reason } : {}),
+    recordCount: verdict.observedRecordCount,
+    authorizedUpdates: chosen.decisions.filter((decision) => decision.conflictSummary && decision.conflictSummary.type === CHANGE_PLAN_UPDATE_TYPE).length,
+  })
+  chosen.summary.continuation = { ...chosen.summary.continuation, changePlan: { ...stanza } }
+  chosen.continuation = { ...chosen.continuation, changePlan: { ...stanza } }
+  return chosen
+}
+
+function planOnce(input, continuationInput, changePlanAuthorization) {
   const template = normalizeTemplate(input.template)
   const strategy = normalizeStrategy(template, input.conflictStrategy)
   const runId = normalizeRunId(input.runId)
@@ -1487,15 +1545,6 @@ function planStockPreparationConflicts(input = {}) {
   const carryPolicy = input.carryPolicy === undefined || input.carryPolicy === null
     ? null
     : carryPolicyModule().normalizeCarryPolicy(input.carryPolicy)
-  // Batch-refresh step 4 (PR-1) — the GOVERNED-PROJECT input (design §6.1). Server-held, never
-  // request-supplied; in PR-1 no caller passes it. ONLY `undefined` means "not governed": the plan
-  // below is then BYTE-IDENTICAL to the pre-step-4 planner (invariant (i), pinned on a second-pull sheet
-  // by stock-preparation-continuation-golden.test.cjs). Anything else is validated through the pairing
-  // module's closed key set; a store state other than 'ok' — or `null` — refuses rather than planning
-  // "without continuations" (invariant (ii)).
-  const continuationInput = input.continuation === undefined
-    ? null
-    : continuationModule().normalizeContinuationInput(input.continuation)
 
   const templateHumanFields = fieldIdsByOwnership(template, 'human_preserved')
   if (!sameStringSet(HUMAN_PRESERVED_FIELD_IDS.slice(), templateHumanFields)) {
@@ -1620,6 +1669,8 @@ function planStockPreparationConflicts(input = {}) {
         parentIndex,
         declaredExtensionFieldIds,
         humanFields,
+        // Step 5 PR-8: the second pass's authorization (null on every other plan).
+        authorization: changePlanAuthorization,
       })
     : null
 
@@ -1665,6 +1716,9 @@ function planStockPreparationConflicts(input = {}) {
       // otherwise UPDATE / revive a copy; a protected old row would otherwise be patched).
       const continued = governed.continuedRefFor(key)
       if (continued) {
+        // Step 5 PR-8: NO change-plan exception on this branch. A continued OLD key that is still in the expansion (its own
+        // order line came back) makes the relationship verify `demand_changed` (a reconfirm, not content), so no confirmed
+        // plan matches and nothing could be authorized here; a plan's old-row UPDATEs come from the sweep below only.
         addDecision(decisions, counts, makeContinuationSkipDecision(key, continued.type, { continuationId: continued.ref.continuationId }))
         continue
       }
@@ -1678,6 +1732,10 @@ function planStockPreparationConflicts(input = {}) {
       }
     }
     if (!existingRow) {
+      // Step 5 PR-8 review fix N3-a (round 2): on a governed project, a key whose reviewed / written content is gone from
+      // the sheet (the row deleted) is HELD when the source no longer carries the reviewed value — the decision below
+      // stays as computed and the suspension dominates (no token), as for every content hold.
+      if (governed) governed.noteMissingReviewedRow(row, key)
       if (strategy.addMissing) {
         addDecision(decisions, counts, makeAddDecision(row, runId, plannedAt, plmFields, humanFields))
         if (carryPolicy) {
@@ -1719,6 +1777,13 @@ function planStockPreparationConflicts(input = {}) {
 
     const identityChanges = changedFields(row, existingRow, IDENTITY_FIELD_IDS, templateFields)
     if (identityChanges.length > 0) {
+      // Step 5 PR-8 (correction C1): a material / version / code / name change is a held identity conflict — unless a
+      // confirmed change plan authorizes exactly it, which makes it the plan's controlled UPDATE.
+      const authorized = governed ? governed.authorizedChangeFor(existingRow) : null
+      if (authorized) {
+        addDecision(decisions, counts, makeChangePlanUpdateDecision(existingRow.idempotencyKey, authorized, runId, plannedAt, humanFields, governed.authorization.changePlanId))
+        continue
+      }
       manualConfirm(decisions, counts, {
         idempotencyKey: key,
         type: 'component_identity_conflict',
@@ -1738,7 +1803,17 @@ function planStockPreparationConflicts(input = {}) {
     // TD-13): detected REGARDLESS of `conflictStrategy.refreshPlmSystemFields` — with the strategy off a
     // material change would otherwise reach a governed pilot sheet unheld. `noteContentChange` compares the
     // trigger fields itself and returns when none changed.
-    if (governed && governed.pilot && existingRow.active !== false) {
+    // Step 5 PR-8: detection also covers the records a confirmed plan writes, pilot or not (M4); the plan's own
+    // change of this row is its controlled UPDATE (REGARDLESS of `refreshPlmSystemFields`, like the detection, O-3).
+    // Review fix N3-a (round 2): an INACTIVE row is skipped (a revive is not a content change) — except under a key the
+    // reviews / the written plan left content on: its revive with other content is held like any content change, and the
+    // plan's UPDATE writes it without reviving (the revive comes on the pass after the review).
+    if (governed && governed.detectsContentOf(existingRow) && (existingRow.active !== false || governed.isReviewedKey(existingRow))) {
+      const authorized = governed.authorizedChangeFor(existingRow)
+      if (authorized) {
+        addDecision(decisions, counts, makeChangePlanUpdateDecision(existingRow.idempotencyKey, authorized, runId, plannedAt, humanFields, governed.authorization.changePlanId))
+        continue
+      }
       governed.noteContentChange(row, existingRow, { reason: 'plm_system_refresh' })
     }
     if (refreshChanges.length === 0) {
@@ -1755,6 +1830,13 @@ function planStockPreparationConflicts(input = {}) {
       // row under a continuation is a verification failure (old_record_inactive), not a silent skip.
       const continued = governed.continuedRefFor(key)
       if (continued) {
+        // Step 5 PR-8 (correction C2): the continued relationship's OLD row a confirmed change plan updates — its
+        // authorized fields + RUN stamps only, on its OLD key (never the new position's path / parent / key).
+        const authorizedOld = governed.authorizedContinuedUpdateFor(key, rows[0])
+        if (authorizedOld) {
+          addDecision(decisions, counts, makeChangePlanUpdateDecision(rows[0].idempotencyKey, authorizedOld, runId, plannedAt, humanFields, governed.authorization.changePlanId))
+          continue
+        }
         addDecision(decisions, counts, makeContinuationSkipDecision(key, continued.type, { continuationId: continued.ref.continuationId }))
         continue
       }
@@ -1885,6 +1967,7 @@ function summarizeConflictPlanForEvidence(plan = {}) {
 module.exports = {
   DECISIONS,
   RUN_FIELD_IDS,
+  CHANGE_PLAN_UPDATE_TYPE,
   LINEAGE_FIELD_IDS,
   IDENTITY_FIELD_IDS,
   DENORMALIZED_PLM_FIELD_IDS,
@@ -1908,6 +1991,7 @@ module.exports = {
   planStockPreparationConflicts,
   summarizeConflictPlanForEvidence,
   __internals: {
+    makeChangePlanUpdateDecision,
     anonymousHoldIdentity,
     anonymousRowErrorIdentity,
     anonymousRowIdentity,

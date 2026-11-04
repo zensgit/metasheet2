@@ -5,6 +5,7 @@ import {
   deleteRecord,
   getRecord,
   listRecords,
+  MultitablePlmRowDeleteRefusedError,
   MultitableRecordNotFoundError,
   MultitableRecordValidationError,
   queryRecords,
@@ -962,6 +963,57 @@ describe('multitable records helper', () => {
       sheetId: 'sheet_service_ticket',
       recordId: 'rec_missing',
     })).rejects.toBeInstanceOf(MultitableRecordNotFoundError)
+  })
+
+  // R-66 ① (owner 2026-10-28「管理员也不能删 PLM 行」): the plugin-SDK / host delete refuses a PLM row of a
+  // stock-preparation template sheet (exact `stockPreparation` stanza ∧ registry row ∧ a non-empty `key: true`
+  // column). Every SDK entry (plugin-scoped wrapper, unscoped host SDK, the overview port) lands here.
+  describe('R-66: PLM rows of a stock-preparation template sheet', () => {
+    function plmSetup(namespace: 'stockPreparation' | 'stockPreparationProjectOverview', key: unknown) {
+      const fake = createQuery()
+      fake.sheets.push({ id: 'sheet_plm', base_id: 'base_legacy', name: 'PLM', description: null })
+      fake.fields.push({
+        id: 'fld_key', sheet_id: 'sheet_plm', name: 'Key', type: 'string', order: 0,
+        property: { [namespace]: { ownership: 'plm_system', preserveOnRefresh: false, required: true, key: true } },
+      })
+      fake.records.push({ id: 'rec_plm', sheet_id: 'sheet_plm', data: { fld_key: key }, version: 3 })
+      const sql: string[] = []
+      const query: MultitableRecordsQueryFn = async (text, params = []) => {
+        const normalized = text.replace(/\s+/g, ' ').trim()
+        sql.push(normalized)
+        if (normalized.includes('FROM plugin_multitable_object_registry')) return { rows: [{ '?column?': 1 }] }
+        if (normalized === 'SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2') {
+          const [recordId, sheetId] = params as [string, string]
+          return { rows: fake.records.filter((r) => r.id === recordId && r.sheet_id === sheetId).map((r) => ({ data: r.data })) }
+        }
+        return fake.query(text, params)
+      }
+      return { ...fake, query, sql }
+    }
+
+    it('a keyed row: refused with the typed 409 error, nothing deleted, no revision', async () => {
+      const { query, records, revisions } = plmSetup('stockPreparation', 'K-1')
+      const err = await deleteRecord({ query, sheetId: 'sheet_plm', recordId: 'rec_plm' }).catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(MultitablePlmRowDeleteRefusedError)
+      expect((err as { code?: string }).code).toBe('RECORD_DELETE_REFUSED_PLM_ROW')
+      expect((err as { status?: number }).status).toBe(409)
+      expect(records.some((r) => r.id === 'rec_plm')).toBe(true)
+      expect(revisions).toEqual([])
+    })
+
+    it('a keyless row on the same sheet is deleted', async () => {
+      const { query, records } = plmSetup('stockPreparation', '')
+      await expect(deleteRecord({ query, sheetId: 'sheet_plm', recordId: 'rec_plm' })).resolves.toMatchObject({ id: 'rec_plm' })
+      expect(records.some((r) => r.id === 'rec_plm')).toBe(false)
+    })
+
+    it('an overview-shaped sheet (its own namespace only) is deleted, with no registry / data read', async () => {
+      const { query, records, sql } = plmSetup('stockPreparationProjectOverview', 'K-1')
+      await expect(deleteRecord({ query, sheetId: 'sheet_plm', recordId: 'rec_plm' })).resolves.toMatchObject({ id: 'rec_plm' })
+      expect(records.some((r) => r.id === 'rec_plm')).toBe(false)
+      expect(sql.some((s) => s.includes('plugin_multitable_object_registry'))).toBe(false)
+      expect(sql.includes('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2')).toBe(false)
+    })
   })
 })
 

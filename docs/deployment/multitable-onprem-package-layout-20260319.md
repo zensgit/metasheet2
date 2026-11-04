@@ -114,6 +114,7 @@ metasheet/
   plugins/plugin-attendance/
   plugins/plugin-integration-core/
   plugins/plugin-elearning/
+  vendor/xlsx-0.20.3.tgz
   scripts/ops/
     multitable-onprem-bootstrap-admin.ps1
     multitable-onprem-apply-package.sh
@@ -176,6 +177,9 @@ default `InstallDeps=1` uses the exact pnpm version recorded in
 `PACKAGE-METADATA.json` and the packaged root `packageManager`. Corrective
 rerolls must use `deploy.bat` or the PowerShell apply helper; hand-copying files
 or using `--no-frozen-lockfile` bypasses the preflight/rollback contract.
+The SheetJS tarball (`xlsx` 0.20.3) ships inside the package at
+`vendor/xlsx-0.20.3.tgz` and is checked against the lockfile sha512, so the
+staging preflight needs only the npm registry.
 
 On Windows, both dependency phases are logged child processes. The apply helper
 logs the resolved `pnpm` path/version, writes staging preflight logs to

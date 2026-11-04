@@ -256,6 +256,23 @@ const ROUTES = [
   //                  once. A re-POST repairs a missing stamp and writes no second audit row. NO unset.
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/pilot', 'stockPreparationProjectPilotGet'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/pilot', 'stockPreparationProjectPilotEnable'],
+  // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3 / §8 「B4」; register R-68) — THE PER-SHEET SWITCH
+  // 「允许人工补充行」 of one project sheet and the last pull's reminder. Both 404 DISABLED after the gate while the
+  // project-sheets switch is off (the host refuses a manual-row create then too), the tenant from the host-vouched
+  // operator scope (never a header).
+  //   GET  target/manual-rows   — PULL tier (OQ4: the reminder is on the project sync panel for the people who pull;
+  //                  stock-prep:admin and the platform admin through the ladder): the switch (allowed / disabled, by
+  //                  default or set), whether the key column carries the PLM lock, whether the host offers manual rows
+  //                  on this sheet at all, and the last small-lane pull's persisted reminder (B1's plugin_kv record; NO
+  //                  record = all zeros). `may.set` also needs the caller's ADMIN tier. Answers on an archived project.
+  //   POST target/manual-rows   — stock-prep:admin (OQ6: the 备料主管理员 flips it): SET the switch, body
+  //                  `{ confirmProjectNo, policy }` (the typed number must repeat the path's; policy 'allowed' |
+  //                  'disabled'): one field property of the key column, through the host's provisioning port only, read
+  //                  back after the write; an archived project is 409 ARCHIVED, a sheet the host never offers manual
+  //                  rows on 409 NOT_SUPPORTED. Audited under 088's `project_fields_update` with mode
+  //                  manual_rows_allowed / manual_rows_disabled.
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows', 'stockPreparationProjectManualRowsGet'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows', 'stockPreparationProjectManualRowsSet'],
   // S3 (ADR §5; register R-37) — the O2(a) PROJECT-LEVEL COLUMNS and the PROJECT OVERVIEW (Q5). All
   // four 404 DISABLED after the gate while the switch is off. The GET / PATCH (OPERATE, as the ADR
   // writes them) are the ONLY surfaces that carry the three free texts (负责人 / 备注 / 计划完成) — the
@@ -286,6 +303,14 @@ const ROUTES = [
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/confirm', 'stockPreparationRefreshContinuationConfirm'],
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id', 'stockPreparationRefreshContinuationGet'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id/end', 'stockPreparationRefreshContinuationEnd'],
+  // Batch-refresh step 5 PR-8 (design §10.3, §13; register R-63) — the CHANGE PLAN, PULL tier like the six above:
+  //   GET  refresh/change-plans/current        the proposal the open content holds make + the pending plan (audited
+  //                                            private read; a written plan's current diff is recorded on a receipt)
+  //   POST refresh/change-plans/confirm        the whole open content-class hold set as ONE plan (in-transaction bump)
+  //   POST refresh/change-reviews/complete     the review of the written plan, bound to the content the sheet holds
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/current', 'stockPreparationRefreshChangePlanCurrent'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/confirm', 'stockPreparationRefreshChangePlanConfirm'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/refresh/change-reviews/complete', 'stockPreparationRefreshChangeReviewComplete'],
   ['POST', '/api/integration/stock-preparation/project-overview/refresh', 'stockPreparationProjectOverviewRefresh'],
   ['POST', '/api/integration/stock-preparation/project-overview/ensure', 'stockPreparationProjectOverviewEnsure'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
@@ -618,6 +643,16 @@ const {
   collectGenericWriterTargets: collectStockPrepGenericWriterTargets,
   evaluatePilotReadiness: evaluateStockPrepPilotReadiness,
 } = require('./stock-preparation-pilot-readiness.cjs')
+// 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3): the per-sheet switch (read, and set read-back
+// confirmed, through the host's provisioning port) and the reader of B1's persisted last-pull reminder.
+const {
+  MANUAL_ROWS_POLICIES: STOCK_PREP_MANUAL_ROWS_POLICIES,
+  manualRowsSupportedOnObject,
+  manualRowsSwitchUnconfirmedError,
+  readManualRowsKeyColumn,
+  readManualRowsLastPull,
+  setManualRowsPolicy,
+} = require('./stock-preparation-manual-rows.cjs')
 // S3 (ADR §5, register R-37): the project overview — the PULL tier's ensure of the host-stamped
 // read-only sheet (+ its G1 READ grant), the bounded projection, the per-event row update, and the
 // stamped lookup the list route hands the home page.
@@ -2136,6 +2171,15 @@ const STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH_CODE = 'STOCK_PREPARATION_PROJE
 // records counts only.
 const STOCK_PREPARATION_PROJECT_FIELDS_UPDATE_AUDIT_ACTION = 'project_fields_update'
 const STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_AUDIT_ACTION = 'project_overview_refresh'
+// 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; register R-68): the per-sheet switch. Its body is the
+// closed allowlist `{ confirmProjectNo, policy }`, and its audit row REUSES 088's `project_fields_update` — the switch
+// is a project-level setting of the sheet, and a new action would need a new CHECK-constraint migration (the ADR's
+// 「不需要迁移」) — with one of these two closed modes, one per value the switch is SET to.
+const VALID_STOCK_PREPARATION_MANUAL_ROWS_SWITCH_BODY_KEYS = new Set(['confirmProjectNo', 'policy'])
+const STOCK_PREPARATION_MANUAL_ROWS_AUDIT_MODES = Object.freeze({
+  allowed: 'manual_rows_allowed',
+  disabled: 'manual_rows_disabled',
+})
 
 /** The `project_overview_refresh` audit detail of one run's summary: counts and booleans only (`refreshed` and `incomplete`). */
 function projectOverviewRefreshAuditDetail(summary) {
@@ -2283,6 +2327,10 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   // check ids) and the enable (the same, plus the outcome booleans) — handles, enums and check ids only.
   'stockPreparationProjectPilotGet',
   'stockPreparationProjectPilotEnable',
+  // 人工补充行 B4 (R-68): the per-sheet switch — closed tokens, booleans, counts, handles and capped record ids only;
+  // the switch library's refusals (typed status + code) answer as themselves, an untyped escape the fixed 500.
+  'stockPreparationProjectManualRowsGet',
+  'stockPreparationProjectManualRowsSet',
   // Batch-refresh step 4 PR-4 (R-59): the six refresh decision routes — their typed refusals (the store's, the
   // lock's, the lanes' and the decision library's) answer as themselves; an untyped escape answers the fixed 500.
   'stockPreparationRefreshHolds',
@@ -2291,6 +2339,9 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   'stockPreparationRefreshContinuationConfirm',
   'stockPreparationRefreshContinuationGet',
   'stockPreparationRefreshContinuationEnd',
+  'stockPreparationRefreshChangePlanCurrent',
+  'stockPreparationRefreshChangePlanConfirm',
+  'stockPreparationRefreshChangeReviewComplete',
   'stockPreparationAuditList',
   'stockPreparationSourceBindingGet',
   'stockPreparationSourceBindingSet',
@@ -2521,6 +2572,77 @@ function stockPreparationProjectTargetLifecycleResponse(projectNo, row) {
     restoredAt: row.restoredAt,
     // The caller passed the PULL gate, so the only thing left to decide is the state.
     may: { create: false, archive: row.status === 'active', restore: row.status === 'archived' },
+  }
+}
+
+/**
+ * 人工补充行 B4: the switch REQUEST — pure, no IO, so a malformed or unconfirmed request costs nothing. The body is
+ * the closed allowlist `{ confirmProjectNo, policy }`; the path's project number must be a plain project number; the
+ * typed confirmation must repeat it EXACTLY (the S4 rule: both sides trimmed the same way, nothing else folded); the
+ * policy must be one of the two closed values — a request never relies on the sanitizer's "anything else is disabled",
+ * which is the STORED value's rule, not a way to ask. Refusals name the FIELD and never echo a value.
+ */
+function stockPreparationManualRowsSwitchRequest(req) {
+  const body = normalizeStockPreparationConfirmBody(
+    requestBody(req),
+    VALID_STOCK_PREPARATION_MANUAL_ROWS_SWITCH_BODY_KEYS,
+    'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+  )
+  const projectNo = firstString(requestParams(req).projectNo)
+  if (!projectNo || !isValidStockPrepProjectNo(projectNo)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID', 'projectNo is required and must be a plain project number', { field: 'projectNo' })
+  }
+  const confirmProjectNo = typeof body.confirmProjectNo === 'string' ? body.confirmProjectNo.trim() : ''
+  if (confirmProjectNo !== projectNo) {
+    throw new HttpRouteError(400, STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH_CODE, 'confirmProjectNo must repeat the project number in the path exactly', { field: 'confirmProjectNo' })
+  }
+  if (!STOCK_PREP_MANUAL_ROWS_POLICIES.includes(body.policy)) {
+    throw new HttpRouteError(400, 'STOCK_PREP_MANUAL_ROWS_POLICY_INVALID', "policy must be 'allowed' or 'disabled'", { field: 'policy' })
+  }
+  return { projectNo, policy: body.policy }
+}
+
+/** 人工补充行 B4: the switch read of a project that has no registry row — a state, never an error. */
+function stockPreparationManualRowsAbsentResponse(projectNo) {
+  return {
+    projectNo,
+    status: 'absent',
+    sheetId: null,
+    viewId: null,
+    manualRowsSupported: null,
+    keyColumn: null,
+    policy: null,
+    policySource: null,
+    keyLocked: null,
+    lastPull: null,
+    may: { set: false },
+  }
+}
+
+/**
+ * 人工补充行 B4: what both switch routes answer for a registered project — the registry row's handles, whether the
+ * host offers manual rows on this sheet at all (`manualRowsSupported`: the registered project-sheet object-id shape,
+ * host predicate (a); false on an adopted older sandbox sheet), the key column's switch (`policy` the effect,
+ * `policySource` 'default' while nothing was ever set), whether the key column carries the PLM human-write lock (a
+ * manual row can only be added once it does, ADR §3.2 condition 3), and the persisted last-pull reminder. `viewId` is
+ * the fill view's derived handle (the panel's 「查看这些行」 deep links). `may.set` is the state AND the caller:
+ * `callerMaySet` is the ADMIN tier the POST gate admits (the read itself is the PULL tier). Values-free: closed
+ * tokens, booleans, counts, handles and capped record ids.
+ */
+function stockPreparationManualRowsResponse({ projectNo, row, key, lastPull, viewId, callerMaySet }) {
+  const supported = manualRowsSupportedOnObject(row.objectId)
+  return {
+    projectNo,
+    status: row.status,
+    sheetId: row.sheetId,
+    viewId: viewId || null,
+    manualRowsSupported: supported,
+    keyColumn: key.present ? 'present' : 'missing',
+    policy: key.present ? key.policy : null,
+    policySource: key.present ? key.source : null,
+    keyLocked: key.present ? key.locked === true : null,
+    lastPull,
+    may: { set: callerMaySet === true && supported && row.status === 'active' && key.present },
   }
 }
 // SOURCE preflight. `externalSystemId` is the ONE addition, and it is a REGISTERED-SYSTEM SELECTOR,
@@ -2888,6 +3010,12 @@ const VALID_STOCK_PREPARATION_REFRESH_CONFIRM_REQUEST_KEYS = new Set([
 ])
 const VALID_STOCK_PREPARATION_REFRESH_KEEP_REQUEST_KEYS = new Set(['tenantId', 'confirmProjectNo', 'holdFingerprint'])
 const VALID_STOCK_PREPARATION_REFRESH_END_REQUEST_KEYS = new Set(['tenantId', 'confirmProjectNo', 'revision', 'outcome', 'note', 'factsHoldId', 'factsHoldFingerprint'])
+// Step 5 PR-8: the change-plan page's query is paging + the receipt id; the confirm binds the hold set, the plan
+// fingerprint and the source digest the page showed (+ the combined candidates); the review binds the plan id, the
+// content digest the page showed, a conclusion and optional private notes. Nothing else selects anything.
+const VALID_STOCK_PREPARATION_REFRESH_CHANGE_PLAN_QUERY_KEYS = new Set(['tenantId', 'recordCursor', 'recordLimit', 'receipt'])
+const VALID_STOCK_PREPARATION_REFRESH_CHANGE_PLAN_CONFIRM_KEYS = new Set(['tenantId', 'confirmProjectNo', 'holdIds', 'holdSetFingerprint', 'planFingerprint', 'sourceContentDigest', 'readReceipt', 'candidates'])
+const VALID_STOCK_PREPARATION_REFRESH_CHANGE_REVIEW_KEYS = new Set(['tenantId', 'confirmProjectNo', 'changePlanId', 'contentDigest', 'conclusion', 'notes', 'readReceipt'])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
 const VALID_FIELD_OPTION_SYNC_REQUEST_KEYS = new Set([
@@ -4726,12 +4854,13 @@ function requireStockPreparationAudit() {
   // in-transaction bump and an audit store that appends inside a transaction — each refused 501 by name.
   function requireStockPreparationContinuationDecisions() {
     const { governance, store } = requireStockPreparationRefreshServices()
-    for (const method of ['confirmContinuation', 'reconfirmContinuation', 'endContinuation', 'readContinuation', 'readHold']) {
+    for (const method of ['confirmContinuation', 'reconfirmContinuation', 'endContinuation', 'readContinuation', 'readHold', 'readChangePlan', 'confirmChangePlan', 'completeChangeReview']) {
       if (typeof store[method] !== 'function') {
         throw new HttpRouteError(501, 'STOCK_PREP_REFRESH_STORE_UNAVAILABLE', 'the continuation store on this deployment cannot decide; nothing is confirmed or ended without it', { reason: 'decision_store' })
       }
     }
     const lock = requireStockPreparationProjectWriteLock()
+    // (PR-8: the review's `assertNoLiveWriter` is already required by requireStockPreparationProjectWriteLock.)
     if (typeof lock.bumpGenerationWithin !== 'function') {
       throw new HttpRouteError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the sheet write lock offers no in-transaction bump; nothing is confirmed or ended without it', { reason: 'bump_within' })
     }
@@ -4777,6 +4906,17 @@ function requireStockPreparationAudit() {
     }))
     await assertResolvedProjectTargetTenancy(action, scope.tenantId)
     const consult = await refreshGovernanceFor(scope.tenantId).consult({ projectNo, sheetId: action.target.sheetId })
+    // Step 5 PR-8 (correction C9): the change-plan page and the review READ THE MAIN SHEET, so the sheet must be proven
+    // the caller's own before a single row is read — the table-action wall, UNCONDITIONALLY (the export's own posture;
+    // `assertResolvedProjectTargetTenancy` above walls only an overlaid target). Lazy: only those two reads call it.
+    const readSheetRows = async () => {
+      await assertTableActionTargetBelongsToTenant({
+        provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
+        targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
+        target: action.target,
+      })
+      return tableActionInternals.readExistingStockPreparationRows(getMultitableRecordsApi(), action.target, projectNo)
+    }
     return Object.freeze({
       scope: Object.freeze({ tenantId: scope.tenantId, sheetId: action.target.sheetId, projectNo }),
       actorId: scope.actorId,
@@ -4787,6 +4927,12 @@ function requireStockPreparationAudit() {
       projectWriteLock: services.lock,
       audit,
       receipts: stockPreparationReadReceipts(),
+      readSheetRows,
+      // Step 5 PR-8 review fix N1: the pilot marker read ON a decision transaction's handle (PR B's projection with the
+      // handle as executor), so the combined change-plan confirm re-decides it under the state-row lock.
+      readPilotWithin: typeof services.governance.readPilotWithin === 'function'
+        ? (trx) => services.governance.readPilotWithin({ tenantId: scope.tenantId, projectNo, sheetId: action.target.sheetId }, trx)
+        : null,
     })
   }
   // THE handle a lane hands `computeDryRun` (built by the lane module, so a direct lib test drives the same
@@ -4803,6 +4949,23 @@ function requireStockPreparationAudit() {
       projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
       defaultObjectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
       extFieldMapping: stockPreparationExtFieldMapping,
+      // Step 5 PR-8 (refutation m2; C08 「每一步的状态、导出结果与审计可见」): a computation that invalidates a confirmed
+      // change plan appends ONE values-free `exception_resolve` / `change_plan_invalidated` row ON ITS OWN reconcile
+      // transaction (a system event: no actor). Resolved lazily — a deployment without the audit store refuses only
+      // that invalidation (501 by name), never an ordinary computation; a missing vocabulary fails the insert (503).
+      auditWithin: (trx, event) => requireStockPreparationAudit().appendWithin(trx, {
+        tenantId,
+        action: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionAction,
+        actor: null,
+        subjectId: event.changePlanId,
+        mode: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.modes.changePlanInvalidated,
+        detail: {
+          operation: event.operation,
+          reason: event.reason,
+          lane: event.lane,
+          recordCount: Number.isInteger(event.recordCount) ? event.recordCount : 0,
+        },
+      }),
     })
   }
   // The large lane refuses every governed project (design §7.1 rows 7-11): governed => 409
@@ -5244,6 +5407,8 @@ function requireStockPreparationAudit() {
   function previewStampCode(status) {
     if (status === 'suspended') return { code: 'STOCK_PREP_PULL_SUSPENDED' }
     if (status === 'recovery_pending') return { code: 'STOCK_PREP_REFRESH_RECOVERY_PENDING' }
+    // Step 5 PR-8: a written change awaits its review (the apply would answer REVIEW_PENDING).
+    if (status === 'review_pending') return { code: 'STOCK_PREP_REFRESH_REVIEW_PENDING' }
     return {}
   }
   const tableActions = createStockPreparationTableActionRegistry({
@@ -7885,6 +8050,10 @@ function requireStockPreparationAudit() {
             recordsApi: getMultitableRecordsApi(),
             tokenStore: context.storage,
             policyStore: context.storage,
+            // 人工补充行 B1 (ADR §5.3): the last small-lane pull's reminder lands in the plugin's own durable storage
+            // (one values-free record per sheet), best effort — logged, never the answer.
+            manualRowsStore: context.storage,
+            logger: routeLogger,
             conflictPolicyReview: body.conflictPolicyReview,
             // W3a. `false` for every caller who did not opt in — and it can only be `true` here if the
             // operator-scope gate above returned without throwing, which is what makes "operate ∧ proven
@@ -8453,6 +8622,8 @@ function requireStockPreparationAudit() {
               recordsApi: getMultitableRecordsApi(),
               tokenStore: context.storage,
               policyStore: context.storage,
+              // 人工补充行 B1 (ADR §5.3): same store as the dry-run route — the apply's in-lease reminder, best effort.
+              manualRowsStore: context.storage,
               // FOS-4b-3 P0 sandbox gate: explicit config OR env (STOCK_PREP_SANDBOX_MODE + allowlist).
               // Absent (e.g. prod default) → undefined → apply fail-closed.
               sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
@@ -11235,6 +11406,141 @@ function requireStockPreparationAudit() {
       })
     },
 
+    // ── 人工补充行 B4 — THE PER-SHEET SWITCH 「允许人工补充行」 (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3 / §8
+    // 「B4」; OQ6; register R-68) ─────────────────────────────────────────────────────────────────────────────────────
+    //
+    // GET: the switch of one project sheet and the last small-lane pull's persisted reminder. The PULL tier (OQ4: the
+    // reminder is on the project sync panel for the people who pull — ADR 「客户会看到什么 / 拉取」 and §8 「B4」 6;
+    // stock-prep:admin and the platform admin through the ladder); `may.set` additionally needs the ADMIN tier the POST
+    // gate admits (OQ6 governs who FLIPS it). The project-sheets switch (404 DISABLED, zero IO — the host refuses a
+    // manual-row create then too, ADR §3.2 condition 5), the query allowlist, the host-vouched scope (never a header),
+    // the registry (ABSENT answers 200 absent), then two reads only: the key column through the host's provisioning
+    // port and B1's plugin_kv record (`readManualRowsLastPull`: no record = all zeros, an unreadable store =
+    // 'unavailable', never zeros). No write, no audit row. Answers an ARCHIVED project as well. Values-free: states,
+    // counts and record handles only.
+    async stockPreparationProjectManualRowsGet(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      requireProjectSheetsEnabled()
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_PROJECT_TARGET_QUERY_KEYS,
+        'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+      )
+      const projectNo = stockPreparationProjectFieldsProjectNo(req)
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      const store = requireStockPreparationProjectTargets()
+      const row = await store.get({ tenantId: scope.tenantId, projectNo })
+      if (!row) return sendOk(res, stockPreparationManualRowsAbsentResponse(projectNo))
+      const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+      // Derived from the VERIFIED scope, never from the request (the write-guard suite pins this form).
+      const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
+      const key = await readManualRowsKeyColumn({ provisioning, projectId: targetProjectId, objectId: row.objectId })
+      const lastPull = await readManualRowsLastPull({ store: context.storage, sheetId: row.sheetId })
+      const handles = projectSheetViewHandles({ provisioning, projectId: targetProjectId, objectId: row.objectId })
+      return sendOk(res, stockPreparationManualRowsResponse({
+        projectNo, row, key, lastPull, viewId: handles.viewId, callerMaySet: hasPermission(user, STOCK_PREP_ADMIN),
+      }))
+    },
+
+    // POST: SET the switch. THE SEQUENCE, pinned by the switch route suite and the call-site guard (C-14):
+    //   1. gate (stock-prep:admin) → the project-sheets switch (404, zero IO) → the audit store (501 without one: a
+    //      switch nobody can audit is refused before anything) → the request, PURE (`{ confirmProjectNo, policy }`,
+    //      the typed number must repeat the path's, the policy one of the two closed values);
+    //   2. the host-vouched operator scope (never `user.tenantId`), the registry (501 without its lock), the 088
+    //      vocabulary probe;
+    //   3. the registry row: ABSENT → 409, ARCHIVED → 409 STOCK_PREPARATION_PROJECT_ARCHIVED, a sheet the host never
+    //      offers manual rows on (an adopted older sandbox sheet: not the registered project-sheet object-id shape) →
+    //      409 STOCK_PREP_MANUAL_ROWS_NOT_SUPPORTED (nothing read or written on the sheet);
+    //   4. under the registry's per-tenant lock with the row re-read ACTIVE (an archive that commits meanwhile → the
+    //      same 409): `setManualRowsPolicy` — the key column read, ONE field property patched through the host's
+    //      provisioning port (`patchObjectFieldProperty`: the host's sanitizer and per-key merge; never a raw SQL
+    //      write, never the lock or the key stanza), then READ BACK: the switch must hold the value asked for, the
+    //      column still locked (or unlocked) as before and its key stanza unchanged. A column already holding the value
+    //      is not written again;
+    //   5. ONE audit row `project_fields_update`, mode manual_rows_allowed / manual_rows_disabled, for EVERY write that
+    //      landed — confirmed or not (`detail.confirmed`, with the read-back's value): values-free (the objectId handle,
+    //      closed tokens, a boolean). An unconfirmed write then answers 500 SWITCH_UNCONFIRMED naming the failed check.
+    //      Known limit, as on archive / restore: the append runs after the write; an append that fails leaves the
+    //      switch set, unaudited, and answers its error.
+    async stockPreparationProjectManualRowsSet(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireProjectSheetsEnabled()
+      const audit = requireStockPreparationAudit()
+      const { projectNo, policy } = stockPreparationManualRowsSwitchRequest(req)
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      const store = requireStockPreparationProjectTargets()
+      if (typeof store.withActiveRowLocked !== 'function') {
+        throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot re-check a registered sheet under its lock here')
+      }
+      await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_FIELDS_UPDATE_AUDIT_ACTION, '088', tenantId)
+      const archivedRefusal = () => new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'this project\'s stock-preparation sheet is archived; restore it before changing its manual-rows switch', { field: 'projectNo' })
+      const registered = await store.get({ tenantId, projectNo })
+      if (!registered) {
+        throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'this project has no registered stock-preparation sheet in your tenant', { field: 'projectNo' })
+      }
+      if (registered.status !== 'active') throw archivedRefusal()
+      // An adopted older sandbox sheet: the host answers every manual-row route `not_project_sheet` there, so a switch
+      // on it would change nothing the host reads — refused before the sheet is touched (B4 fix round 1).
+      if (!manualRowsSupportedOnObject(registered.objectId)) {
+        throw new HttpRouteError(409, 'STOCK_PREP_MANUAL_ROWS_NOT_SUPPORTED', 'manual supplementary rows are not offered on this project sheet (an adopted older sandbox sheet), so its switch cannot be set', { reason: 'not_project_sheet' })
+      }
+      const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+      // Derived from the VERIFIED scope, never from the request (the write-guard suite pins this form).
+      const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
+      const actor = user.id || user.email
+      let outcome
+      try {
+        outcome = await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => ({
+          row: locked,
+          change: await setManualRowsPolicy({ provisioning, projectId: targetProjectId, objectId: locked.objectId, policy }),
+        }))
+      } catch (error) {
+        // An archive that committed after the read above: the lock's re-read refuses it — in this route's words.
+        if (error && error.code === 'STOCK_PREPARATION_PROJECT_ARCHIVED') throw archivedRefusal()
+        throw error
+      }
+      const { row, change } = outcome
+      if (change.written) {
+        await audit.append({
+          tenantId,
+          projectId: projectNo,
+          action: STOCK_PREPARATION_PROJECT_FIELDS_UPDATE_AUDIT_ACTION,
+          subjectId: row.sheetId,
+          mode: STOCK_PREPARATION_MANUAL_ROWS_AUDIT_MODES[policy],
+          actor,
+          detail: {
+            objectId: row.objectId,
+            fromPolicy: change.before.policy,
+            fromSource: change.before.source,
+            // What the READ-BACK shows (`unreadable` when the column could not be read back at all), and whether it
+            // confirmed the write: an unconfirmed write has landed too, so it is audited before the 500 below.
+            toPolicy: change.after && change.after.present ? change.after.policy : 'unreadable',
+            confirmed: change.unconfirmed === null,
+          },
+        })
+      }
+      if (change.unconfirmed) throw manualRowsSwitchUnconfirmedError(change.unconfirmed)
+      const lastPull = await readManualRowsLastPull({ store: context.storage, sheetId: row.sheetId })
+      const handles = projectSheetViewHandles({ provisioning, projectId: targetProjectId, objectId: row.objectId })
+      return sendOk(res, {
+        // The caller passed the ADMIN gate, so `may.set` is the state alone here.
+        ...stockPreparationManualRowsResponse({ projectNo, row, key: change.after, lastPull, viewId: handles.viewId, callerMaySet: true }),
+        written: change.written === true,
+        changed: change.before.policy !== change.after.policy,
+      })
+    },
+
     async stockPreparationProjectTargetList(req, res) {
       const user = requireAccess(req, STOCK_PREP_OPERATE)
       requireProjectSheetsEnabled()
@@ -13308,6 +13614,25 @@ function requireStockPreparationAudit() {
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_REFRESH_END_REQUEST_KEYS, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID')
       const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'write', confirmTyped: true, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionMigration })
       return sendOk(res, await stockPreparationRefreshDecisions.end(ctx, firstString(requestParams(req).id), input))
+    },
+    // Batch-refresh step 5 PR-8 (design §10.3, §13): the change plan — the same context, ONE lib call each.
+    async stockPreparationRefreshChangePlanCurrent(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      const input = normalizeStockPreparationConfirmBody(requestQuery(req), VALID_STOCK_PREPARATION_REFRESH_CHANGE_PLAN_QUERY_KEYS, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID')
+      const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'read', confirmTyped: false, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.readAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.readMigration })
+      return sendOk(res, await stockPreparationRefreshDecisions.readChangePlanCurrent(ctx, input))
+    },
+    async stockPreparationRefreshChangePlanConfirm(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_REFRESH_CHANGE_PLAN_CONFIRM_KEYS, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID')
+      const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'write', confirmTyped: true, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionMigration })
+      return sendOk(res, await stockPreparationRefreshDecisions.confirmChangePlan(ctx, input), 201)
+    },
+    async stockPreparationRefreshChangeReviewComplete(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_REFRESH_CHANGE_REVIEW_KEYS, 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID')
+      const ctx = await stockPreparationRefreshDecisionContext(req, { user, input, targetPurpose: 'write', confirmTyped: true, auditAction: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionAction, auditMigration: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionMigration })
+      return sendOk(res, await stockPreparationRefreshDecisions.completeChangeReview(ctx, input))
     },
 
     // FOS-2: generic, preset-driven field-option-sync. Admin-gated; resolves a FOS preset from the

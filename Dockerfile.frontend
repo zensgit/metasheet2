@@ -20,6 +20,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY tsconfig.json ./
 COPY apps ./apps
 COPY packages ./packages
+COPY vendor ./vendor
 
 RUN pnpm install --frozen-lockfile
 # The stock-prep YiDa preview panel (#6315) imports these three self-contained modules and their

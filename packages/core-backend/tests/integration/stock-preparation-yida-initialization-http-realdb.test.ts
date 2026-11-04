@@ -85,6 +85,71 @@ databaseSuite('YiDa initialization HTTP — empty slot, real JWT/live ACL, actua
     for (const value of [...Object.values(syntheticMaterial()), 'synthetic-http-review', 'synthetic-http-organization',
       'synthetic_http_form', 'synthetic HTTP part']) expect(output.includes(value)).toBe(false)
   })
+  it('encryption material failing the production checks is 503 ENCRYPTION_NOT_READY in every NODE_ENV and writes nothing', async () => {
+    const ready = data(await f.http('GET', '/initialization'), 200), before = await f.initializationProof()
+    const saved = ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT'].map(key => [key, process.env[key]] as const)
+    const set = (key: string, value: string | undefined) => { if (value === undefined) delete process.env[key]; else process.env[key] = value }
+    const salt = process.env.ENCRYPTION_SALT
+    try {
+      for (const nodeEnv of [undefined, 'development', 'test', 'Production', 'production']) {
+        for (const variant of [{ ENCRYPTION_KEY: undefined, ENCRYPTION_SALT: undefined },
+          { ENCRYPTION_KEY: 'default-key-change-in-production', ENCRYPTION_SALT: 'default-salt-change-in-production' },
+          { ENCRYPTION_KEY: '   ', ENCRYPTION_SALT: salt }]) {
+          set('NODE_ENV', nodeEnv); for (const [key, value] of Object.entries(variant)) set(key, value)
+          f.sql.length = 0
+          denied(await f.http('POST', '/initialization', input(ready.commandId)), 503, 'YIDA_INITIALIZATION_ENCRYPTION_NOT_READY')
+          expect(f.sql.some(sql => /^\s*(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/iu.test(sql))).toBe(false)
+          expect(f.sql.at(-1)).toBe('ROLLBACK')
+        }
+      }
+    } finally { for (const [key, value] of saved) set(key, value) }
+    expect(await f.initializationProof()).toEqual(before); await noExternalWrite()
+    expect(data(await f.http('GET', '/initialization'), 200)).toMatchObject({ commandId: ready.commandId, status: 'ready', draft: null })
+  })
+  it('a doc placeholder, swapped defaults or KEY equal to SALT is the same 503 and writes nothing; short material seals with one fixed warning', async () => {
+    const ready = data(await f.http('GET', '/initialization'), 200), before = await f.initializationProof()
+    expect(before.counts).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0])
+    const saved = ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT'].map(key => [key, process.env[key]] as const)
+    const set = (key: string, value: string | undefined) => { if (value === undefined) delete process.env[key]; else process.env[key] = value }
+    const key = process.env.ENCRYPTION_KEY, salt = process.env.ENCRYPTION_SALT
+    const warning = 'YiDa initialization sealed credentials under an encryption key or salt shorter than 32 characters. '
+      + 'This seal cannot be re-keyed. Securely back up the effective ENCRYPTION_KEY and ENCRYPTION_SALT from the configuration '
+      + 'sources used by the running service. Keep those exact values for the life of the deployment.'
+    try {
+      // Each variant passes the shared production checks; only the L4 seal-material check refuses it.
+      for (const nodeEnv of ['development', 'production']) {
+        for (const variant of [{ ENCRYPTION_KEY: '<openssl rand -hex 32>', ENCRYPTION_SALT: '<openssl rand -hex 32, generated separately>' },
+          { ENCRYPTION_KEY: '<openssl rand -hex 32>', ENCRYPTION_SALT: salt },
+          // The dev-doc 32-hex sample pair (printed in lower case), compared ignoring case.
+          { ENCRYPTION_KEY: 'ABCDEF0123456789ABCDEF0123456789', ENCRYPTION_SALT: '0123456789ABCDEF0123456789ABCDEF' },
+          { ENCRYPTION_KEY: 'default-salt-change-in-production', ENCRYPTION_SALT: 'default-key-change-in-production' },
+          { ENCRYPTION_KEY: key, ENCRYPTION_SALT: key }]) {
+          set('NODE_ENV', nodeEnv); for (const [name, value] of Object.entries(variant)) set(name, value)
+          f.sql.length = 0
+          denied(await f.http('POST', '/initialization', input(ready.commandId)), 503, 'YIDA_INITIALIZATION_ENCRYPTION_NOT_READY')
+          expect(f.sql.some(sql => /^\s*(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/iu.test(sql))).toBe(false)
+          expect(f.sql.at(-1)).toBe('ROLLBACK')
+        }
+      }
+      expect(await f.initializationProof()).toEqual(before); await noExternalWrite()
+      expect(data(await f.http('GET', '/initialization'), 200)).toMatchObject({ commandId: ready.commandId, status: 'ready', draft: null })
+      await new Promise(resolve => setImmediate(resolve))
+      expect(logs.some(entry => (entry as Data).message === warning)).toBe(false)
+      // Short but otherwise valid material is sealed (owner decision: warn, do not block). The one warning keeps
+      // its text through the private owner-HTTP Logger and carries no correlation, user or tenant field.
+      set('NODE_ENV', 'production'); set('ENCRYPTION_KEY', 'synthetic-short-key'); set('ENCRYPTION_SALT', 'synthetic-short-salt')
+      expect(data(await f.http('POST', '/initialization', input(ready.commandId)), 201).status).toBe('initialized')
+      await new Promise(resolve => setImmediate(resolve))
+      expect((await f.initializationProof()).counts).toEqual([1, 1, 1, 1, 1, 1, 1, 1, 1]); await noExternalWrite()
+      const warned = logs.filter(entry => (entry as Data).message === warning) as Array<Record<PropertyKey, unknown>>
+      expect(warned).toHaveLength(1)
+      expect(warned[0][Symbol.for('level')]).toBe('warn')
+      expect(Object.keys(warned[0]).sort()).toEqual(['context', 'level', 'message', 'service', 'timestamp'])
+      const output = inspect(logs, { depth: null, colors: false, getters: false })
+      for (const value of ['synthetic-short-key', 'synthetic-short-salt', ...Object.values(syntheticMaterial()), f.tokens.owner])
+        expect(output.includes(value)).toBe(false)
+    } finally { for (const [name, value] of saved) set(name, value) }
+  })
   it('the second actually qualified administrator cannot read ready or initialize the anchor owner slot', async () => {
     f.setEnablement('true')
     const ready = data(await f.http('GET', '/initialization'), 200), before = await f.initializationProof()

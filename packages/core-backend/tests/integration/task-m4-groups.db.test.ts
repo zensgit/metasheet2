@@ -1299,8 +1299,14 @@ describe('permission codes and missing org', () => {
     const right = await actor('codesright', stamp, orgId, [`tasks:${route.code}`])
     const listId = await listVia(owner, [[wrong.userId, 'edit'], [right.userId, 'edit']])
     const group = (await app().post(`/api/task-lists/${listId}/groups`).set(auth(owner.bearer)).send({ name: '组' })).body.id as string
-    // Each caller is an assignee of the task, an item of the list.
-    const taskId = await newTask(orgId, owner.userId, [owner.userId, wrong.userId, right.userId])
+    // Each caller is an assignee of the task, an item of the list. The two callers hold one task
+    // code each, so they cannot be named as assignees through the service: their rows are written
+    // with SQL.
+    const taskId = await newTask(orgId, owner.userId, [owner.userId])
+    await poolManager.get().query(
+      `INSERT INTO task_assignees (task_id, user_id, assigned_by) SELECT $1, u, $3 FROM unnest($2::text[]) AS u`,
+      [taskId, [wrong.userId, right.userId], owner.userId],
+    )
     await seedItem(listId, taskId, orgId)
     const mineGroup: Record<string, string> = {}
     for (const who of [wrong, right]) {

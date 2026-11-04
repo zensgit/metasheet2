@@ -1698,13 +1698,15 @@ describe('项目备料页 — the operator project board', () => {
       expect(root.querySelector('[data-testid="stock-prep-yida-owner-send-panel"]')).toBeNull()
       yida.click(); await flush()
       expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBe(panel)
-      // A protocol preview builds the owner section; with no owner-authorized ON reply its CREATE entry stays absent.
+      // A clean protocol preview makes the L4 entry openable (it is always rendered, so enabled + no blocked line is the proof);
+      // with no owner-authorized ON reply the CREATE entry stays absent.
       const mode = panel!.querySelector('[data-testid="sp-yida-preview-mode"]') as HTMLSelectElement
       mode.value = 'protocol'
       mode.dispatchEvent(new Event('change')); await flush()
       ;(panel!.querySelector('[data-testid="sp-yida-protocol-example-primary"]') as HTMLButtonElement).click(); await flush()
       ;(panel!.querySelector('[data-testid="sp-yida-run"]') as HTMLButtonElement).click(); await flush()
-      expect(panel!.querySelector('[data-testid="sp-yida-initialization-open"]')).not.toBeNull()
+      expect((panel!.querySelector('[data-testid="sp-yida-initialization-open"]') as HTMLButtonElement).disabled).toBe(false)
+      expect(panel!.querySelector('[data-testid="sp-yida-initialization-blocked"]')).toBeNull()
       expect(panel!.querySelector('[data-testid="sp-yida-owner-open"]')).toBeNull()
       expect(fetchSpy).not.toHaveBeenCalled()
       expect(h.apiFetch.mock.calls).toHaveLength(callsBefore)
