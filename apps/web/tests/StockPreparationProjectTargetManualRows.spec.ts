@@ -25,7 +25,9 @@ import { join } from 'node:path'
 //   MR-COPY   every new refusal code has its own two-line zh + en sentence; the audit mode rows; the wording rules
 //   MR-STRADDLE (R80 verifier F1) a switch prompt acts only for the project, scope and session it was opened under: a
 //             scope move or a session switch closes it (cancel, typed text cleared, re-read), a confirm click after
-//             another tab replaced the session writes nothing, and a write that lands after a switch is not painted
+//             another tab replaced the session, an unreadable session or a replaced access snapshot writes nothing,
+//             a write that lands after a project, scope or session switch is not painted, a session switch clears the
+//             result line, and an unmounted section no longer listens
 //   MR-MOUNT  the sync panel mounts the section ONCE with its five bindings; the section imports nothing from plugins/
 //
 // Synthetic, obviously-fake project numbers and handles only.
@@ -87,6 +89,7 @@ import {
   grantedStockPrepCapabilities,
 } from '../src/services/integration/stockPreparation/workbenchAccess'
 import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
+import { EXPLICIT_SESSION_ORG_KEY } from '../src/utils/explicitSessionOrg'
 
 // The SERVER's own manifest and decision, imported live (the F-01 posture).
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -723,6 +726,114 @@ describe('MR-STRADDLE — a switch prompt acts only for the project, scope and s
     await flush()
     expect(testid(host, 'stock-prep-project-manual-rows-result'), 'the old session\'s answer is not painted').toBeNull()
     expect(testid(host, 'stock-prep-project-manual-rows-status')!.dataset.policy).toBe('allowed')
+  })
+
+  /** A section whose POST is held until `release()`; its read-back says `disabled`, every read says `allowed`. */
+  function heldWriteApi() {
+    let releaseSet: () => void = () => {}
+    const getCalls: string[] = []
+    const readBack = clampStockPrepManualRowsSetResult({ ...wire(), policy: 'disabled', policySource: 'set', written: true, changed: true })!
+    const api: StockPreparationManualRowsApi = {
+      get: vi.fn(async (projectNo: string) => {
+        getCalls.push(projectNo)
+        return clampStockPrepManualRowsState(wire({ sheetId: `sheet_for_${projectNo}` }))!
+      }),
+      set: vi.fn(() => new Promise<typeof readBack>((resolve) => { releaseSet = () => resolve(readBack) })),
+    }
+    return { api, getCalls, release: () => releaseSet() }
+  }
+
+  it('a write in flight when the scope moves (tenant, then workspace): its read-back and result line are not painted under the new scope', async () => {
+    for (const moved of [{ ...SCOPE, tenantId: 'tenant-syn-other' }, { ...SCOPE, workspaceId: 'workspace-syn-other' }]) {
+      const { api, release } = heldWriteApi()
+      const { host, props } = mountMoving(api)
+      await flush()
+      await openTyped(host)
+      ;(testid(host, 'stock-prep-project-manual-rows-confirm') as HTMLButtonElement).click()
+      await flush()
+      expect(api.set).toHaveBeenCalledTimes(1)
+      props.value = { ...props.value, scope: moved }
+      await flush()
+      release()
+      await flush()
+      expect(testid(host, 'stock-prep-project-manual-rows-result'), `${JSON.stringify(moved)}: the old scope's answer is not painted`).toBeNull()
+      expect(testid(host, 'stock-prep-project-manual-rows-status')!.dataset.policy, JSON.stringify(moved)).toBe('allowed')
+      unmountAll()
+    }
+  })
+
+  it('a write in flight when the project moves: the old project\'s read-back and result line are not painted on the other project', async () => {
+    const { api, getCalls, release } = heldWriteApi()
+    const { host, props } = mountMoving(api)
+    await flush()
+    await openTyped(host)
+    ;(testid(host, 'stock-prep-project-manual-rows-confirm') as HTMLButtonElement).click()
+    await flush()
+    props.value = { ...props.value, projectNo: OTHER_PROJECT }
+    await flush()
+    expect(getCalls.at(-1)).toBe(OTHER_PROJECT)
+    release()
+    await flush()
+    expect(testid(host, 'stock-prep-project-manual-rows-result'), 'the old project\'s answer is not painted').toBeNull()
+    expect(testid(host, 'stock-prep-project-manual-rows-status')!.dataset.policy, 'the old project\'s read-back is not painted').toBe('allowed')
+  })
+
+  it('an unmounted section reads nothing on a later session switch (the subscription is released)', async () => {
+    const api = gatedApi(wire())
+    mountMoving(api)
+    await flush()
+    expect(api.getCalls).toEqual([PROJECT])
+    unmountAll()
+    localStorage.setItem('auth_token', 'synthetic-session-mr-b')
+    notifyAuthPrincipalChange()
+    await flush()
+    expect(api.getCalls, 'a torn-down section read again').toEqual([PROJECT])
+  })
+
+  it('a session switch clears the previous session\'s result line', async () => {
+    const api = gatedApi(wire())
+    const { host } = mountMoving(api)
+    await flush()
+    await openTyped(host)
+    ;(testid(host, 'stock-prep-project-manual-rows-confirm') as HTMLButtonElement).click()
+    await flush()
+    expect(testid(host, 'stock-prep-project-manual-rows-result')!.dataset.result).toBe('disabled')
+    localStorage.setItem('auth_token', 'synthetic-session-mr-b')
+    notifyAuthPrincipalChange()
+    await flush()
+    expect(testid(host, 'stock-prep-project-manual-rows-result'), 'the previous session\'s result is not carried over').toBeNull()
+  })
+
+  it('unreadable session metadata (a half-done explicit session switch) at open and at click: the confirm sends nothing', async () => {
+    const api = gatedApi(wire())
+    const { host } = mountMoving(api)
+    await flush()
+    try {
+      localStorage.setItem(EXPLICIT_SESSION_ORG_KEY, JSON.stringify({ state: 'changing', epoch: 'syn-epoch-mr' }))
+      await openTyped(host)
+      ;(testid(host, 'stock-prep-project-manual-rows-confirm') as HTMLButtonElement).click()
+      await flush()
+      expect(api.setCalls, 'never a write under an unreadable session').toEqual([])
+      expect(testid(host, 'stock-prep-project-manual-rows-prompt')).toBeNull()
+    } finally {
+      localStorage.removeItem(EXPLICIT_SESSION_ORG_KEY)
+    }
+  })
+
+  it('the access snapshot replaced after the prompt opened (same token): the confirm sends nothing', async () => {
+    const api = gatedApi(wire())
+    const { host } = mountMoving(api)
+    await flush()
+    try {
+      await openTyped(host)
+      localStorage.setItem('user_permissions', JSON.stringify(['stock-prep:read']))
+      ;(testid(host, 'stock-prep-project-manual-rows-confirm') as HTMLButtonElement).click()
+      await flush()
+      expect(api.setCalls, 'the snapshot is part of the session it was opened under').toEqual([])
+      expect(testid(host, 'stock-prep-project-manual-rows-prompt')).toBeNull()
+    } finally {
+      localStorage.removeItem('user_permissions')
+    }
   })
 })
 
