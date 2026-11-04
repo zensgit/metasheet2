@@ -682,6 +682,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/index.ts:3948',
   },
   {
+    key: 'DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "DingTalk work-notification credential resolution anchored to the recipient's directory integration (work-notification-settings.ts readDingTalkMessageConfigFromRuntime; callers: the attendance notification delivery worker, the automation executor's DingTalk person-message and approval-card sends, the todo-mirror worker). Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). Off: resolution is byte-identical to before the switch existed — a complete env triple (DINGTALK_APP_KEY|DINGTALK_CLIENT_ID, DINGTALK_APP_SECRET|DINGTALK_CLIENT_SECRET, DINGTALK_AGENT_ID|DINGTALK_NOTIFY_AGENT_ID) is used without reading the integration row, otherwise each field is env-then-stored, and failures keep their text and ledger position. On, for a call that names an integration: the row is always read; when the env app key equals the row's app key the env values override field by field (the pre-switch per-field behaviour); otherwise the row's own appKey/appSecret/workNotificationAgentId are used as a whole, the row must be active, and a missing, inactive or incomplete row raises a typed values-free DingTalkMessageConfigError instead of borrowing fields from the other source; baseUrl follows the chosen source. Calls that name no integration are unchanged either way. The admin test/save Agent ID path and the runtime-status face do not read this switch. danger=high: ON changes which DingTalk app sends work notifications to a recipient whose integration app differs from the env app, and turns some mixed configurations that send today into explicit failures (attendance: non-retryable, row failed; todo mirror: retried then failed; automation: the step fails).",
+    source: 'packages/core-backend/src/integrations/dingtalk/integration-scoped-credentials-flag.ts#isDingTalkIntegrationScopedCredentialsEnabled',
+  },
+  {
     key: 'MULTITABLE_BUSINESS_TIMEZONE',
     type: 'enum',
     activationValue: "an IANA timezone id, e.g. 'Asia/Shanghai' (trimmed); unset / blank / any id Intl rejects = 'Asia/Shanghai'",
