@@ -90,6 +90,7 @@ describe('admin user batch routes', () => {
       })
 
     expect(response.status).toBe(200)
+    expect(response.headers['cache-control']).toBe('no-store')
     expect(response.body.data.successCount).toBe(1)
     expect(response.body.data.failureCount).toBe(1)
     const failed = response.body.data.results.find((item: { ok: boolean }) => !item.ok)
@@ -369,7 +370,7 @@ describe('admin user batch routes', () => {
 
     const response = await request(pinned.url())
       .post('/api/admin/users/batch/delete')
-      .send({ userIds: ['user-lin'], mode: 'hard', confirmText: '永久删除' })
+      .send({ userIds: ['user-lin'], mode: 'hard', confirmText: '移入回收站' })
 
     expect(response.status).toBe(200)
     expect(response.body.data.mode).toBe('recycle')
@@ -384,5 +385,43 @@ describe('admin user batch routes', () => {
       resourceType: 'user-batch',
       resourceId: 'recycle',
     }))
+  })
+
+  it('refuses to disable the last sign-in platform admin', async () => {
+    pg.query.mockImplementation(async (sql: string) => {
+      const text = String(sql)
+      if (text.includes('is_sign_in_admin')) return { rows: [{ is_sign_in_admin: true }] }
+      if (text.includes('COUNT(*)')) return { rows: [{ c: 0 }] }
+      if (text.includes('FROM users')) {
+        return {
+          rows: [{
+            id: 'admin-2',
+            email: 'other@example.com',
+            name: '另一位',
+            role: 'admin',
+            department: null,
+            is_active: true,
+          }],
+        }
+      }
+      return { rows: [] }
+    })
+
+    const response = await request(pinned.url())
+      .post('/api/admin/users/batch/disable')
+      .send({ userIds: ['admin-2'], isActive: false })
+
+    expect(response.status).toBe(200)
+    expect(response.body.data.results[0].code).toBe('LAST_PLATFORM_ADMIN')
+    expect(pg.query.mock.calls.some((call) => String(call[0]).includes('UPDATE users SET is_active'))).toBe(false)
+  })
+
+  it('rejects the old permanent-delete phrase', async () => {
+    pg.query.mockResolvedValue({ rows: [] })
+    const response = await request(pinned.url())
+      .post('/api/admin/users/batch/delete')
+      .send({ userIds: ['user-lin'], mode: 'hard', confirmText: '永久删除' })
+    expect(response.status).toBe(400)
+    expect(response.body.error.code).toBe('CONFIRM_TEXT_MISMATCH')
   })
 })

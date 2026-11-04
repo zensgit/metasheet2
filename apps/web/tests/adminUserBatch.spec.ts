@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildUpdateExportCsv,
+  describeImportLimitExceeded,
   parseCsv,
   parsePastedEmails,
   previewUpdateRows,
@@ -30,6 +31,20 @@ describe('adminUserBatch', () => {
       '可以导入',
       '本批中邮箱重复',
     ])
+  })
+
+  it('neutralizes formula-leading cells in the update export', () => {
+    const csv = buildUpdateExportCsv([{
+      id: 'user-1',
+      email: '=cmd@example.com',
+      name: '=HYPERLINK("http://evil.example","x")',
+      role: 'user',
+      department: '+1+1',
+      is_active: true,
+    }])
+    expect(csv).toContain("'=cmd@example.com")
+    expect(csv).toContain("'+1+1")
+    expect(csv).not.toMatch(/(^|\n)user-1,=cmd@/)
   })
 
   it('builds an update export and previews a department diff', () => {
@@ -90,5 +105,76 @@ describe('adminUserBatch', () => {
       ['missing-user', 'linlan@example.com'],
     ])
     expect(preview.every((row) => row.changes.length === 0)).toBe(true)
+  })
+
+  it.each([100, 101, 105])('reports import limit for %i rows without accepting a partial batch', (count) => {
+    const message = describeImportLimitExceeded(count)
+    if (count <= 100) {
+      expect(message).toBeNull()
+      return
+    }
+    expect(message).toContain(`共 ${count} 行`)
+    expect(message).toContain(`超出 ${count - 100} 行`)
+    expect(message).toContain('一次最多 100 行')
+    expect(message).toContain('未写入任何数据')
+  })
+
+  it('keeps real roles, the legacy profile field, unknown roles, and multiple roles on round-trip', () => {
+    const csv = buildUpdateExportCsv([
+      {
+        id: 'user-one',
+        email: 'one@example.com',
+        name: '单角色',
+        role: 'user',
+        roleIds: ['planner'],
+        department: '计划部',
+        is_active: true,
+      },
+      {
+        id: 'user-many',
+        email: 'many@example.com',
+        name: '多角色',
+        role: 'user',
+        roleIds: ['keeper', 'planner'],
+        department: '仓储',
+        is_active: true,
+      },
+    ])
+    const parsed = parseCsv(csv)
+    expect(parsed.map((row) => row.roleId)).toEqual(['', ''])
+    expect(parsed.map((row) => row.roleIds)).toEqual(['planner', 'keeper;planner'])
+    expect(csv).not.toContain(',user,')
+    const users = [
+      { id: 'user-one', email: 'one@example.com', name: '单角色', role: 'user', roleIds: ['planner'], department: '计划部', is_active: true },
+      { id: 'user-many', email: 'many@example.com', name: '多角色', role: 'user', roleIds: ['keeper', 'planner'], department: '仓储', is_active: true },
+    ]
+    const known = new Set(['planner', 'keeper'])
+    const unchanged = previewUpdateRows(parsed, users, known)
+    expect(unchanged.every((row) => row.ok)).toBe(true)
+    expect(unchanged.every((row) => row.changes.length === 0)).toBe(true)
+
+    const legacy = previewUpdateRows(
+      [{ userId: 'user-one', email: 'one@example.com', roleId: 'user', department: '计划部' }],
+      users,
+      known,
+    )
+    expect(legacy[0]?.ok).toBe(false)
+    expect(legacy[0]?.message).toBe('角色不存在')
+
+    const unknown = previewUpdateRows(
+      [{ userId: 'user-many', email: 'many@example.com', roleId: 'not-a-real-role', department: '仓储' }],
+      users,
+      known,
+    )
+    expect(unknown[0]?.ok).toBe(false)
+    expect(unknown[0]?.message).toBe('角色不存在')
+
+    const collapsed = previewUpdateRows(
+      [{ userId: 'user-many', email: 'many@example.com', roleId: 'planner', department: '仓储' }],
+      users,
+      known,
+    )
+    expect(collapsed[0]?.ok).toBe(true)
+    expect(collapsed[0]?.changes).toEqual([{ field: '角色', before: 'keeper;planner', after: 'planner' }])
   })
 })

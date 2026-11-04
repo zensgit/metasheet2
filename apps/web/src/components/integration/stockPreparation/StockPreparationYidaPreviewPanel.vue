@@ -112,12 +112,12 @@
       <button v-if="!initializationOpen" type="button" data-testid="sp-yida-initialization-open" :disabled="ownerSendLocked || !persistentInput" @click="initializationOpen = true">打开本地初始化（不发送）</button>
       <p v-if="!initializationOpen && initializationBlockedReason" data-testid="sp-yida-initialization-blocked">暂不能打开：{{ initializationBlockedReason }}</p>
       <template v-if="persistentInput">
-      <StockPreparationYidaInitializationPanel v-if="initializationOpen" :draft-input="persistentInput" @locked-change="initializationLocked = $event" @send-enabled-change="ownerSendEnabled = $event" @progress-change="initializationProgress = $event" />
+      <StockPreparationYidaInitializationPanel v-if="initializationOpen" :draft-input="persistentInput" @locked-change="initializationLocked = $event" @send-enabled-change="ownerSendEnabled = $event" @multi-target-change="ownerMultiTarget = $event" @progress-change="initializationProgress = $event" />
       <!-- Switch off means not visible: the entry appears only after the owner-authorized initialization GET
            reported the server send switch ON. An already open panel stays mounted (never abort its request). -->
       <p v-if="ownerSendEnabled || ownerSendOpen">以下是独立服务器确认流程；仅当前人工登记目标的 owner 且具备集成管理员权限可用。它不会把上面的本地预演当发送许可。</p>
       <button v-if="ownerSendEnabled && !ownerSendOpen" type="button" data-testid="sp-yida-owner-open" :disabled="initializationLocked" @click="ownerSendOpen = true">打开单行 CREATE 确认（服务器已开通）</button>
-      <StockPreparationYidaOwnerSendPanel v-if="ownerSendOpen" :draft-input="persistentInput" @locked-change="ownerSendLocked = $event" />
+      <StockPreparationYidaOwnerSendPanel v-if="ownerSendOpen" :draft-input="persistentInput" :multi-target="ownerMultiTarget" @locked-change="ownerSendLocked = $event" />
       </template>
     </section>
   </section>
@@ -145,6 +145,8 @@ function modeOf(version: 1 | 2 | 3): PreviewMode { return version === 3 ? 'trans
 const previewMode = ref<PreviewMode>('mapping')
 const persistentInput = ref<YidaOwnerDraftInput | null>(null)
 const ownerSendOpen = ref(false)
+// Y2: shown only while the server reports its multi-target switch ON on an owner-authorized reply.
+const ownerMultiTarget = ref(false)
 const ownerSendLocked = ref(false)
 const ownerSendEnabled = ref(false)
 const initializationOpen = ref(false)
@@ -203,7 +205,7 @@ function candidateReasons(expandedIndex: number): string {
   return plan.value?.rows.find((row) => row.index === expandedIndex)?.issues.map(rowIssueReason).join(', ') ?? ''
 }
 function clearResults(): void {
-  persistentInput.value = null; ownerSendOpen.value = false; ownerSendLocked.value = false; ownerSendEnabled.value = false
+  persistentInput.value = null; ownerSendOpen.value = false; ownerSendLocked.value = false; ownerSendEnabled.value = false; ownerMultiTarget.value = false
   initializationOpen.value = false; initializationLocked.value = false
   plan.value = null; allocationPreview.value = null; errorCode.value = ''; configIssues.value = []
 }

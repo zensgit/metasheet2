@@ -108,6 +108,7 @@ vi.mock('../src/composables/useLocale', () => ({
 }))
 
 import TasksView from '../src/views/tasks/TasksView.vue'
+import { TASK_SEARCH_DEBOUNCE_MS } from '../src/tasks/tasksSearch'
 
 function taskItem(over: Partial<{ id: string; title: string; status: 'open' | 'done'; completion_mode: 'all' | 'any' }> = {}) {
   return {
@@ -277,6 +278,32 @@ describe('TasksView route-id watch — real router, SAME component instance (P2-
     await router!.push('/tasks')
     await flush()
     expect(h_.listTasks).toHaveBeenCalledTimes(2) // detail -> list: exactly one more read
+  })
+})
+
+describe('TasksView title search across a route change — SAME component instance', () => {
+  function typeSearch(el: HTMLElement, text: string): void {
+    const input = el.querySelector('[data-testid="tasks-search-input"]') as HTMLInputElement
+    input.value = text
+    input.dispatchEvent(new Event('input'))
+  }
+
+  it('text still waiting on the debounce reads nothing on the task page, and the list on the way back reads under it', async () => {
+    const el = await mountAt('/tasks')
+    expect(h_.listTasks).toHaveBeenCalledTimes(1)
+    typeSearch(el, 'alpha')
+    await flush()
+    await router!.push('/tasks/tsk_1')
+    await flush()
+    await new Promise((resolve) => setTimeout(resolve, TASK_SEARCH_DEBOUNCE_MS + 20))
+    await flush()
+    expect(h_.listTasks).toHaveBeenCalledTimes(1)
+
+    await router!.push('/tasks')
+    await flush()
+    expect(h_.listTasks).toHaveBeenCalledTimes(2)
+    expect(h_.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open', 'alpha')
+    expect((el.querySelector('[data-testid="tasks-search-input"]') as HTMLInputElement).value).toBe('alpha')
   })
 })
 

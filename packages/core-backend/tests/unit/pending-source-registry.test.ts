@@ -71,8 +71,8 @@ describe('PendingSourceRegistry — per-source catch logging (acceptance finding
   it('listPendingForUser: a throwing source stays `unavailable` (unchanged) and now logs a warn with its sourceId, message and code', async () => {
     const registry = new PendingSourceRegistry()
     const boom = Object.assign(new Error('connection refused'), { code: '42501' })
-    registry.register({ name: 'flaky-source', listPendingForUser: vi.fn().mockRejectedValue(boom) })
-    registry.register({ name: 'healthy-source', listPendingForUser: vi.fn().mockResolvedValue([item('h-1')]) })
+    registry.register({ name: 'flaky-source', permission: 'approvals:read', listPendingForUser: vi.fn().mockRejectedValue(boom) })
+    registry.register({ name: 'healthy-source', permission: 'approvals:read', listPendingForUser: vi.fn().mockResolvedValue([item('h-1')]) })
 
     const result = await registry.listPendingForUser(VIEWER)
 
@@ -93,10 +93,11 @@ describe('PendingSourceRegistry — per-source catch logging (acceptance finding
     const registry = new PendingSourceRegistry()
     registry.register({
       name: 'flaky-count-source',
+      permission: 'approvals:read',
       listPendingForUser: vi.fn().mockResolvedValue([]),
       countPendingForUser: vi.fn().mockRejectedValue(new Error('pool exhausted')),
     })
-    registry.register({ name: 'healthy-source', listPendingForUser: vi.fn().mockResolvedValue([item('h-2')]) })
+    registry.register({ name: 'healthy-source', permission: 'approvals:read', listPendingForUser: vi.fn().mockResolvedValue([item('h-2')]) })
 
     const result = await registry.countPendingForUser(VIEWER)
 
@@ -114,7 +115,7 @@ describe('PendingSourceRegistry — per-source catch logging (acceptance finding
 
   it('a non-Error throw does not crash the aggregator and is still logged with a stringified error field', async () => {
     const registry = new PendingSourceRegistry()
-    registry.register({ name: 'weird-source', listPendingForUser: vi.fn().mockRejectedValue('not-an-error') })
+    registry.register({ name: 'weird-source', permission: 'approvals:read', listPendingForUser: vi.fn().mockRejectedValue('not-an-error') })
 
     const result = await registry.listPendingForUser(VIEWER)
 
@@ -127,7 +128,7 @@ describe('PendingSourceRegistry — per-source catch logging (acceptance finding
 
   it('never fabricates an `org` field at the call site, and lets the logger\'s own `tenant_id` injection carry the request context (or omit it when none is active) — P3-2', async () => {
     const registry = new PendingSourceRegistry()
-    registry.register({ name: 'flaky-source', listPendingForUser: vi.fn().mockRejectedValue(new Error('boom')) })
+    registry.register({ name: 'flaky-source', permission: 'approvals:read', listPendingForUser: vi.fn().mockRejectedValue(new Error('boom')) })
 
     // The call-site meta (what `logSourceFailure` itself builds) never has `org` — this is the
     // "not fabricated" half, observable at the same boundary every other test in this file uses.
@@ -165,8 +166,8 @@ describe('PendingSourceRegistry — per-source catch logging (acceptance finding
 
   it('a throwing failure-logger never turns a source outage into an aggregate crash — degradation is written before the (best-effort) log runs — P3-1', async () => {
     const registry = new PendingSourceRegistry()
-    registry.register({ name: 'flaky-source', listPendingForUser: vi.fn().mockRejectedValue(new Error('boom')) })
-    registry.register({ name: 'healthy-source', listPendingForUser: vi.fn().mockResolvedValue([item('h-3')]) })
+    registry.register({ name: 'flaky-source', permission: 'approvals:read', listPendingForUser: vi.fn().mockRejectedValue(new Error('boom')) })
+    registry.register({ name: 'healthy-source', permission: 'approvals:read', listPendingForUser: vi.fn().mockResolvedValue([item('h-3')]) })
 
     warnSpy.mockImplementation(() => {
       throw new Error('logging transport exploded')
@@ -179,5 +180,84 @@ describe('PendingSourceRegistry — per-source catch logging (acceptance finding
     expect(result.sources['flaky-source']).toBe('unavailable')
     expect(result.sources['healthy-source']).toBe('ok')
     expect(result.items).toEqual([item('h-3')])
+  })
+})
+
+describe('PendingSourceRegistry — source selection and enumeration', () => {
+  function source(name: string, permission = `${name}:read`) {
+    return {
+      name,
+      permission,
+      listPendingForUser: vi.fn(async () => [{ ...item(`${name}-1`), source: name }]),
+      countPendingForUser: vi.fn(async () => 1),
+    }
+  }
+
+  it('the sources option runs only the named sources, in registration order', async () => {
+    const registry = new PendingSourceRegistry()
+    const a = source('a')
+    const b = source('b')
+    const c = source('c')
+    for (const entry of [a, b, c]) registry.register(entry)
+
+    const list = await registry.listPendingForUser(VIEWER, { sources: ['c', 'a'] })
+    expect(Object.keys(list.sources)).toEqual(['a', 'c'])
+    expect(list.items.map((row) => row.source)).toEqual(['a', 'c'])
+    expect(b.listPendingForUser).not.toHaveBeenCalled()
+
+    const count = await registry.countPendingForUser(VIEWER, { sources: ['c', 'a'] })
+    expect(count).toEqual({ count: 2, sources: { a: 'ok', c: 'ok' } })
+    expect(b.countPendingForUser).not.toHaveBeenCalled()
+  })
+
+  it('without the option every registered source runs', async () => {
+    const registry = new PendingSourceRegistry()
+    registry.register(source('a'))
+    registry.register(source('b'))
+    expect((await registry.listPendingForUser(VIEWER)).sources).toEqual({ a: 'ok', b: 'ok' })
+    expect((await registry.countPendingForUser(VIEWER)).sources).toEqual({ a: 'ok', b: 'ok' })
+  })
+
+  it('an empty list runs nothing; an unknown name is ignored', async () => {
+    const registry = new PendingSourceRegistry()
+    const a = source('a')
+    registry.register(a)
+    expect(await registry.listPendingForUser(VIEWER, { sources: [] })).toEqual({ items: [], sources: {} })
+    expect(await registry.countPendingForUser(VIEWER, { sources: ['bogus'] })).toEqual({ count: 0, sources: {} })
+    expect(a.listPendingForUser).not.toHaveBeenCalled()
+    expect(a.countPendingForUser).not.toHaveBeenCalled()
+  })
+
+  it('register refuses a source with no declared permission', () => {
+    const registry = new PendingSourceRegistry()
+    const listPendingForUser = vi.fn().mockResolvedValue([])
+    for (const permission of ['', '   ', undefined]) {
+      expect(() => registry.register({ name: 'open', permission, listPendingForUser } as never)).toThrow(/must declare/)
+    }
+    expect(registry.sourceNames()).toEqual([])
+  })
+
+  it('the enumerators follow registration order, register and clear', () => {
+    const registry = new PendingSourceRegistry()
+    expect(registry.sourceNames()).toEqual([])
+    expect(registry.sourceEntries()).toEqual([])
+
+    registry.register(source('a'))
+    registry.register(source('b', 'shared:read'))
+    expect(registry.sourceNames()).toEqual(['a', 'b'])
+    expect(registry.sourceEntries()).toEqual([
+      { name: 'a', permission: 'a:read' },
+      { name: 'b', permission: 'shared:read' },
+    ])
+
+    // Replacing by name keeps the original position and takes the new permission.
+    registry.register(source('a', 'other:read'))
+    expect(registry.sourceEntries()).toEqual([
+      { name: 'a', permission: 'other:read' },
+      { name: 'b', permission: 'shared:read' },
+    ])
+
+    registry.clear()
+    expect(registry.sourceNames()).toEqual([])
   })
 })

@@ -5,9 +5,15 @@ import {
   applyRecycleMove,
   applyRecyclePurge,
   applyRecycleRestore,
+  AuditIdentityScrubError,
+  auditCreatedAtMatch,
+  auditRowMatchesSubject,
   listDueRecycleUserIds,
+  redactAuditRow,
   resolveUserRecycleRetentionDays,
+  scrubPurgedUserIdentity,
   USER_TOMBSTONE_NAME,
+  type PurgeAuditRow,
   type RecycleClient,
 } from '../../src/admin/user-recycle'
 
@@ -35,10 +41,15 @@ function clientFor(users: UserRow[], extras: { aliases?: string[]; identities?: 
       const id = String(params[0] ?? '')
       const user = users.find((row) => row.id === id)
       if (statement.includes('SET access_generation')) return { rows: [{ access_generation: 1 }] }
+      if (statement.includes('is_sign_in_admin')) {
+        const signIn = Boolean(user && user.is_active && !user.deleted_at && !user.purged_at && (user.is_admin || user.role === 'admin'))
+        return { rows: [{ is_sign_in_admin: signIn }] }
+      }
       if (statement.includes('COUNT(*)')) {
-        const liveAdmins = users.filter((row) => row.id !== id && !row.deleted_at && !row.purged_at && (row.is_admin || row.role === 'admin'))
+        const liveAdmins = users.filter((row) => row.id !== id && row.is_active && !row.deleted_at && !row.purged_at && (row.is_admin || row.role === 'admin'))
         return { rows: [{ c: liveAdmins.length }] }
       }
+      if (statement.includes('to_regclass')) return { rows: [{ rel: String(params[0] ?? '') }] }
       if (statement.includes('FOR UPDATE') && statement.includes('FROM users')) {
         if (!user) return { rows: [] }
         return {
@@ -162,6 +173,15 @@ describe('user recycle bin', () => {
     expect(identities).toEqual([])
     expect(db.sql.some((statement) => /DELETE\s+FROM\s+users\b/i.test(statement))).toBe(false)
     expect(db.sql.some((statement) => statement.includes('DELETE FROM user_login_aliases'))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes('hire_date = NULL'))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes('cumulative_service_start_date = NULL'))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes('last_login_at = NULL'))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes('UPDATE directory_accounts'))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes("THEN 'unlinked'"))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes('user_login_alias_collision_report'))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes('FROM audit_logs') && statement.includes('split_part(resource_id'))).toBe(true)
+    expect(db.sql.some((statement) => statement.includes('position('))).toBe(false)
+    expect(db.sql.some((statement) => statement.includes("link_status = 'linked'"))).toBe(true)
   })
 
   it('declares recycle columns in the migration', () => {
@@ -170,5 +190,277 @@ describe('user recycle bin', () => {
       expect(migration).toContain(column)
     }
     expect(migration).not.toContain('DROP TABLE users')
+    expect(migration).toContain('active_before_delete')
+    expect(migration).toContain('purged_at IS NULL')
+  })
+
+  it('does not treat an inactive administrator as the last sign-in admin', async () => {
+    const users: UserRow[] = [
+      { id: 'admin-inactive', email: 'old@example.com', name: '旧管理员', is_active: false, is_admin: true, role: 'admin', deleted_at: null, deleted_by: null, purge_after: null, purged_at: null, active_before_delete: null, department: null },
+      { id: 'admin-live', email: 'live@example.com', name: '在任', is_active: true, is_admin: true, role: 'admin', deleted_at: null, deleted_by: null, purge_after: null, purged_at: null, active_before_delete: null, department: null },
+    ]
+    const db = clientFor(users)
+    const moved = await applyRecycleMove(db, { userId: 'admin-inactive', actorId: 'admin-live', retentionDays: 30, index: 0 })
+    expect(moved.ok).toBe(true)
+    const blocked = await applyRecycleMove(db, { userId: 'admin-live', actorId: 'admin-inactive', retentionDays: 30, index: 1 })
+    expect(blocked.code).toBe('LAST_PLATFORM_ADMIN')
+  })
+
+  it('redacts audit fields by subject id and leaves colliding keys and other users unchanged', async () => {
+    const subjectId = 'user-admin'
+    const unrelated: PurgeAuditRow = {
+      id: 9,
+      created_at: '2026-10-01T00:00:00.000Z',
+      resource_id: 'user-other',
+      resource_name: '其他同事',
+      user_id: 77,
+      user_email: 'other@example.com',
+      user_name: '其他同事',
+      action_details: {
+        adminUserId: 'operator-1',
+        outcome: 'updated',
+        email: 'other@example.com',
+        name: '其他同事',
+      },
+      request_body: { name: '其他同事', department: '仓储' },
+    }
+    const unrelatedSnapshot = JSON.stringify(unrelated)
+    const subject: PurgeAuditRow = {
+      id: 10,
+      created_at: '2026-10-02T00:00:00.000Z',
+      resource_id: subjectId,
+      resource_name: '管理员账号',
+      user_id: 3,
+      user_email: 'admin@example.com',
+      user_name: '管理员账号',
+      action_details: {
+        adminUserId: 'operator-1',
+        email: 'admin@example.com',
+        username: 'admin',
+        name: '管理员账号',
+        colleague: { id: 'user-other', email: 'other@example.com', name: '其他同事' },
+      },
+      request_body: { email: 'admin@example.com', note: 'keep-me' },
+    }
+    const actorOnly: PurgeAuditRow = {
+      id: 11,
+      created_at: '2026-10-03T00:00:00.000Z',
+      resource_id: 'user-other',
+      resource_name: '其他同事',
+      user_id: subjectId,
+      user_email: 'admin@example.com',
+      user_name: '管理员账号',
+      action_details: {
+        adminUserId: 'operator-1',
+        email: 'other@example.com',
+        name: '其他同事',
+      },
+      request_body: { email: 'other@example.com' },
+    }
+    const actorDetails = JSON.stringify(actorOnly.action_details)
+    const actorBody = JSON.stringify(actorOnly.request_body)
+    const rows = [unrelated, subject, actorOnly]
+    expect(auditRowMatchesSubject(unrelated, subjectId)).toBe(false)
+    expect(auditRowMatchesSubject(subject, subjectId)).toBe(true)
+    expect(auditRowMatchesSubject(actorOnly, subjectId)).toBe(true)
+
+    const client: RecycleClient = {
+      query: async (statement, params = []) => {
+        if (statement.includes('to_regclass')) {
+          const name = String(params[0] ?? '')
+          return { rows: [{ rel: name === 'audit_logs' ? 'audit_logs' : null }] }
+        }
+        if (statement.includes('FROM audit_logs') && statement.includes('split_part(resource_id')) {
+          return { rows: rows.filter((row) => auditRowMatchesSubject(row, String(params[0]))).map((row) => ({ ...row })) }
+        }
+        if (statement.includes('UPDATE audit_logs')) {
+          const id = params[0]
+          const found = rows.find((row) => row.id === id)
+          if (!found) return { rows: [], rowCount: 0 }
+          if (statement.includes('::timestamptz') && String(params[1]).includes('GMT')) {
+            return { rows: [], rowCount: 0 }
+          }
+          found.action_details = JSON.parse(String(params[2]))
+          found.request_body = JSON.parse(String(params[3]))
+          found.user_email = params[4] == null ? null : String(params[4])
+          found.user_name = params[5] == null ? null : String(params[5])
+          found.resource_name = params[6] == null ? null : String(params[6])
+          return { rows: [{ id: found.id }], rowCount: 1 }
+        }
+        return { rows: [] }
+      },
+    }
+    await scrubPurgedUserIdentity(client, {
+      userId: subjectId,
+      email: 'admin@example.com',
+      username: 'admin',
+      mobile: null,
+      at: '2026-11-01T00:00:00.000Z',
+    })
+
+    expect(JSON.stringify(unrelated)).toBe(unrelatedSnapshot)
+    expect(redactAuditRow(subject, subjectId).action_details).toMatchObject({
+      adminUserId: 'operator-1',
+      email: null,
+      username: null,
+      name: USER_TOMBSTONE_NAME,
+      colleague: { id: 'user-other', email: 'other@example.com', name: '其他同事' },
+    })
+    expect(subject.action_details).toMatchObject({
+      adminUserId: 'operator-1',
+      colleague: { id: 'user-other', email: 'other@example.com', name: '其他同事' },
+    })
+    expect(JSON.stringify(actorOnly.action_details)).toBe(actorDetails)
+    expect(JSON.stringify(actorOnly.request_body)).toBe(actorBody)
+    expect(actorOnly.user_email).toBeNull()
+    expect(actorOnly.user_name).toBeNull()
+    expect(actorOnly.resource_name).toBe('其他同事')
+  })
+
+  it('anonymizes confirmed directory links and only detaches pending guesses', async () => {
+    const accounts = [
+      { id: 'acct-linked', org: 'org-a', name: '林岚', email: 'lin@example.com', mobile: '13800000000' },
+      { id: 'acct-pending', org: 'org-b', name: '林岚', email: 'lin@example.com', mobile: '13800000000' },
+    ]
+    const pendingSnapshot = JSON.stringify(accounts[1])
+    const links = [
+      { accountId: 'acct-linked', localUserId: 'user-lin' as string | null, status: 'linked' },
+      { accountId: 'acct-pending', localUserId: 'user-lin' as string | null, status: 'pending' },
+    ]
+    const client: RecycleClient = {
+      query: async (statement, params = []) => {
+        const userId = String(params[0] ?? '')
+        if (statement.includes('to_regclass')) {
+          const name = String(params[0] ?? '')
+          return { rows: [{ rel: name.startsWith('directory_') ? name : null }] }
+        }
+        if (statement.includes('UPDATE directory_accounts')) {
+          if (!statement.includes("link_status = 'linked'")) throw new Error('directory anonymization must require a confirmed link')
+          for (const link of links) {
+            if (link.localUserId === userId && link.status === 'linked') {
+              const account = accounts.find((item) => item.id === link.accountId)
+              if (!account) continue
+              account.name = USER_TOMBSTONE_NAME
+              account.email = null
+              account.mobile = null
+            }
+          }
+          return { rows: [] }
+        }
+        if (statement.includes('UPDATE directory_account_links')) {
+          for (const link of links) {
+            if (link.localUserId !== userId) continue
+            if (link.status === 'linked') link.status = 'unlinked'
+            link.localUserId = null
+          }
+          return { rows: [] }
+        }
+        return { rows: [] }
+      },
+    }
+    await scrubPurgedUserIdentity(client, {
+      userId: 'user-lin',
+      email: 'lin@example.com',
+      username: null,
+      mobile: '13800000000',
+      at: '2026-11-01T00:00:00.000Z',
+    })
+    expect(accounts[0]).toMatchObject({ name: USER_TOMBSTONE_NAME, email: null, mobile: null })
+    expect(JSON.stringify(accounts[1])).toBe(pendingSnapshot)
+    expect(links).toEqual([
+      { accountId: 'acct-linked', localUserId: null, status: 'unlinked' },
+      { accountId: 'acct-pending', localUserId: null, status: 'pending' },
+    ])
+  })
+
+  it('matches audit rows by primary key text and refuses a JS Date string', () => {
+    expect(auditCreatedAtMatch('2026-11-04 05:31:00.123456+00')).toEqual({
+      whereSql: 'id = $1 AND created_at = $2::timestamptz',
+      param: '2026-11-04 05:31:00.123456+00',
+    })
+    const instant = new Date('2026-11-04T05:31:00.123Z')
+    expect(auditCreatedAtMatch(instant).whereSql).toContain("INTERVAL '1 millisecond'")
+    expect(auditCreatedAtMatch(instant).param).toBe(instant.toISOString())
+    expect(auditCreatedAtMatch(instant).param).not.toBe(String(instant))
+    expect(() => auditCreatedAtMatch(String(instant))).toThrow(AuditIdentityScrubError)
+  })
+
+  it('fails the purge scrub when the audit update matches no row', async () => {
+    const client: RecycleClient = {
+      query: async (statement) => {
+        if (statement.includes('to_regclass')) return { rows: [{ rel: 'audit_logs' }] }
+        if (statement.includes('FROM audit_logs')) {
+          return {
+            rows: [{
+              id: 10,
+              created_at: '2026-11-04 05:31:00.123456+00',
+              resource_id: 'user-admin',
+              resource_name: '管理员账号',
+              user_id: '3',
+              user_email: 'admin@example.com',
+              user_name: '管理员账号',
+              action_details: { email: 'admin@example.com' },
+              request_body: null,
+            }],
+          }
+        }
+        if (statement.includes('UPDATE audit_logs')) return { rows: [], rowCount: 0 }
+        return { rows: [] }
+      },
+    }
+    await expect(scrubPurgedUserIdentity(client, {
+      userId: 'user-admin',
+      email: 'admin@example.com',
+      username: null,
+      mobile: null,
+      at: '2026-11-01T00:00:00.000Z',
+    })).rejects.toMatchObject({ name: 'AuditIdentityScrubError', code: 'AUDIT_ROW_NOT_UPDATED' })
+  })
+
+  it('updates a microsecond-truncated Date without sending Date.toString to Postgres', async () => {
+    const instant = new Date('2026-11-04T05:31:00.123Z')
+    const statements: string[] = []
+    const paramsSeen: unknown[][] = []
+    const client: RecycleClient = {
+      query: async (statement, params = []) => {
+        statements.push(statement)
+        paramsSeen.push(params)
+        if (statement.includes('to_regclass')) {
+          return { rows: [{ rel: String(params[0]) === 'audit_logs' ? 'audit_logs' : null }] }
+        }
+        if (statement.includes('FROM audit_logs')) {
+          expect(statement).toContain('created_at::text')
+          return {
+            rows: [{
+              id: 10,
+              created_at: instant,
+              resource_id: 'user-admin',
+              resource_name: '管理员账号',
+              user_id: '3',
+              user_email: 'admin@example.com',
+              user_name: '管理员账号',
+              action_details: { email: 'admin@example.com' },
+              request_body: null,
+            }],
+          }
+        }
+        if (statement.includes('UPDATE audit_logs')) {
+          expect(statement).toContain("INTERVAL '1 millisecond'")
+          expect(String(params[1])).toBe(instant.toISOString())
+          expect(String(params[1])).not.toContain('GMT')
+          return { rows: [{ id: 10 }], rowCount: 1 }
+        }
+        return { rows: [] }
+      },
+    }
+    await scrubPurgedUserIdentity(client, {
+      userId: 'user-admin',
+      email: 'admin@example.com',
+      username: null,
+      mobile: null,
+      at: '2026-11-01T00:00:00.000Z',
+    })
+    expect(statements.some((statement) => statement.includes('UPDATE audit_logs'))).toBe(true)
+    expect(paramsSeen.some((params) => params.some((value) => typeof value === 'string' && value.includes('GMT')))).toBe(false)
   })
 })

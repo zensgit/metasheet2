@@ -98,9 +98,38 @@ describe('recycle review against a fresh migrated synthetic PostgreSQL database'
     expect((await transaction(client => applyRecycleRestore(client, { userId, actorId: 'synthetic-operator', index: 0 }))).ok).toBe(true)
     expect((await query('SELECT access_generation::int, is_active FROM users WHERE id = $1', [userId])).rows).toEqual([{ access_generation: 2, is_active: true }])
     expect((await move(userId)).ok).toBe(true)
+    const linkedAccountIds = (await query<{ id: string }>(
+      `SELECT directory_account_id::text AS id
+       FROM directory_account_links
+       WHERE local_user_id = $1 AND link_status = 'linked'`,
+      [userId],
+    )).rows.map((row) => row.id)
+    expect(linkedAccountIds.length).toBeGreaterThan(0)
     expect((await transaction(client => applyRecyclePurge(client, { userId, actorId: 'synthetic-operator', index: 0, passwordHash: 'synthetic-unusable' }))).ok).toBe(true)
-    expect((await query('SELECT access_generation::int, is_active, email FROM users WHERE id = $1', [userId])).rows).toEqual([{ access_generation: 4, is_active: false, email: null }])
+    expect((await query('SELECT access_generation::int, is_active, email, hire_date, last_login_at, cumulative_service_start_date FROM users WHERE id = $1', [userId])).rows).toEqual([{
+      access_generation: 4,
+      is_active: false,
+      email: null,
+      hire_date: null,
+      last_login_at: null,
+      cumulative_service_start_date: null,
+    }])
     expect((await query('SELECT role_id FROM user_roles WHERE user_id = $1', [userId])).rows).toEqual([])
+    const scrubbed = await query(
+      `SELECT a.name, a.email, a.mobile, a.is_active, l.link_status, l.local_user_id
+       FROM directory_accounts a
+       JOIN directory_account_links l ON l.directory_account_id = a.id
+       WHERE a.id = ANY($1::uuid[])`,
+      [linkedAccountIds],
+    )
+    expect(scrubbed.rows).toEqual([{
+      name: '已清除用户',
+      email: null,
+      mobile: null,
+      is_active: false,
+      link_status: 'unlinked',
+      local_user_id: null,
+    }])
   })
 
   it('revokes tokens on recycling and fails closed on a recycled or purged creator even if active', async () => {
@@ -260,6 +289,198 @@ describe('recycle review against a fresh migrated synthetic PostgreSQL database'
     } finally {
       await blocker.query('ROLLBACK')
       await blocker.end()
+    }
+  })
+
+  async function ensureAuditPartition(at: string) {
+    const meta = await query<{ name: string; start: string; finish: string }>(
+      `SELECT
+         'audit_logs_' || TO_CHAR(DATE_TRUNC('month', $1::timestamptz), 'YYYY_MM') AS name,
+         DATE_TRUNC('month', $1::timestamptz)::text AS start,
+         (DATE_TRUNC('month', $1::timestamptz) + INTERVAL '1 month')::text AS finish`,
+      [at],
+    )
+    const name = meta.rows[0]?.name ?? ''
+    const start = meta.rows[0]?.start ?? ''
+    const finish = meta.rows[0]?.finish ?? ''
+    if (!/^audit_logs_\d{4}_\d{2}$/.test(name) || !start || !finish) {
+      throw new Error('audit partition bounds were not derived')
+    }
+    const literal = (value: string) => `'${value.replace(/'/g, "''")}'`
+    await query(
+      `CREATE TABLE IF NOT EXISTS ${name} PARTITION OF audit_logs FOR VALUES FROM (${literal(start)}) TO (${literal(finish)})`,
+    )
+  }
+
+  async function insertAuditRow(input: {
+    userId: string
+    email: string
+    name: string
+    at: string
+    resourceId?: string
+  }) {
+    await ensureAuditPartition(input.at)
+    const inserted = await query<{ id: string; created_at: string }>(
+      `INSERT INTO audit_logs (
+         event_type, event_category, action, resource_type, resource_id, resource_name,
+         user_email, user_name, action_details, request_body, created_at
+       ) VALUES (
+         'UPDATE', 'USER', 'update', 'user', $1, $2,
+         $3, $2, jsonb_build_object('email', $4::text, 'name', $5::text), jsonb_build_object('email', $4::text), $6::timestamptz
+       )
+       RETURNING id::text AS id, created_at::text AS created_at`,
+      [input.resourceId ?? input.userId, input.name, input.email, input.email, input.name, input.at],
+    )
+    return inserted.rows[0]
+  }
+
+  it('purges a user with microsecond audit rows and leaves unrelated audit rows untouched', async () => {
+    const userId = await seedUser()
+    const at = '2026-11-04 05:31:00.123456+00'
+    const subject = await insertAuditRow({
+      userId,
+      email: `${userId}@example.test`,
+      name: 'Synthetic user',
+      at,
+    })
+    const unrelated = await insertAuditRow({
+      userId,
+      email: 'keep@example.test',
+      name: 'Other person',
+      at,
+      resourceId: `other-${userId}`,
+    })
+    expect(subject.created_at).toContain('123456')
+    expect((await move(userId)).ok).toBe(true)
+    expect((await transaction(client => applyRecyclePurge(client, {
+      userId,
+      actorId: 'synthetic-operator',
+      index: 0,
+      passwordHash: 'synthetic-unusable',
+    }))).ok).toBe(true)
+    const scrubbed = await query(
+      `SELECT created_at::text AS created_at, user_email, user_name, resource_name, action_details
+       FROM audit_logs WHERE id = $1`,
+      [subject.id],
+    )
+    expect(scrubbed.rows[0].created_at).toBe(subject.created_at)
+    expect(scrubbed.rows[0].user_email).toBeNull()
+    expect(scrubbed.rows[0].user_name).toBe('已清除用户')
+    expect(scrubbed.rows[0].resource_name).toBe('已清除用户')
+    expect(scrubbed.rows[0].action_details).toMatchObject({ email: null, name: '已清除用户' })
+    const kept = await query(
+      `SELECT created_at::text AS created_at, user_email, user_name, resource_name, action_details
+       FROM audit_logs WHERE id = $1`,
+      [unrelated.id],
+    )
+    expect(kept.rows[0].created_at).toBe(unrelated.created_at)
+    expect(kept.rows[0].user_email).toBe('keep@example.test')
+    expect(kept.rows[0].user_name).toBe('Other person')
+    expect(kept.rows[0].resource_name).toBe('Other person')
+    expect(kept.rows[0].action_details).toMatchObject({ email: 'keep@example.test', name: 'Other person' })
+  })
+
+  it('rolls back the whole purge when audit scrub fails', async () => {
+    const userId = await seedUser()
+    const at = '2026-11-04 05:31:00.654321+00'
+    const subject = await insertAuditRow({
+      userId,
+      email: 'scrub-fail@example.test',
+      name: 'Synthetic user',
+      at,
+    })
+    await query(`
+      CREATE OR REPLACE FUNCTION synthetic_recycle_audit_scrub_fail() RETURNS trigger
+      LANGUAGE plpgsql AS $fn$
+      BEGIN
+        IF OLD.user_email = 'scrub-fail@example.test' THEN
+          RAISE EXCEPTION 'synthetic audit scrub failure';
+        END IF;
+        RETURN NEW;
+      END
+      $fn$
+    `)
+    await query(`
+      DROP TRIGGER IF EXISTS synthetic_recycle_audit_scrub_fail ON audit_logs;
+      CREATE TRIGGER synthetic_recycle_audit_scrub_fail
+      BEFORE UPDATE ON audit_logs
+      FOR EACH ROW EXECUTE FUNCTION synthetic_recycle_audit_scrub_fail()
+    `)
+    try {
+      expect((await move(userId)).ok).toBe(true)
+      const before = await query('SELECT email, name, purged_at FROM users WHERE id = $1', [userId])
+      await expect(transaction(client => applyRecyclePurge(client, {
+        userId,
+        actorId: 'synthetic-operator',
+        index: 0,
+        passwordHash: 'synthetic-unusable',
+      }))).rejects.toThrow(/synthetic audit scrub failure/)
+      expect((await query('SELECT email, name, purged_at FROM users WHERE id = $1', [userId])).rows).toEqual(before.rows)
+      expect((await query('SELECT user_email, action_details FROM audit_logs WHERE id = $1', [subject.id])).rows).toEqual([{
+        user_email: 'scrub-fail@example.test',
+        action_details: { email: 'scrub-fail@example.test', name: 'Synthetic user' },
+      }])
+    } finally {
+      await query('DROP TRIGGER IF EXISTS synthetic_recycle_audit_scrub_fail ON audit_logs')
+      await query('DROP FUNCTION IF EXISTS synthetic_recycle_audit_scrub_fail()')
+    }
+  })
+
+  it('sweeper purges a due account that has audit rows and does not count a scrub failure as success', async () => {
+    const now = new Date()
+    const userId = await seedUser()
+    const at = '2026-11-04 05:31:00.111111+00'
+    const subject = await insertAuditRow({
+      userId,
+      email: `${userId}@example.test`,
+      name: 'Synthetic user',
+      at,
+    })
+    expect((await move(userId, new Date(now.getTime() - 40 * 86400000))).ok).toBe(true)
+    expect(await purgeDueRecycleUsers(now)).toBeGreaterThan(0)
+    expect((await query('SELECT email, purged_at IS NOT NULL AS purged FROM users WHERE id = $1', [userId])).rows).toEqual([{
+      email: null,
+      purged: true,
+    }])
+    expect((await query('SELECT user_email, created_at::text AS created_at FROM audit_logs WHERE id = $1', [subject.id])).rows).toEqual([{
+      user_email: null,
+      created_at: subject.created_at,
+    }])
+
+    const failedId = await seedUser()
+    await insertAuditRow({
+      userId: failedId,
+      email: 'scrub-fail@example.test',
+      name: 'Synthetic user',
+      at: '2026-11-04 05:31:00.222222+00',
+    })
+    expect((await move(failedId, new Date(now.getTime() - 40 * 86400000))).ok).toBe(true)
+    await query(`
+      CREATE OR REPLACE FUNCTION synthetic_recycle_audit_scrub_fail() RETURNS trigger
+      LANGUAGE plpgsql AS $fn$
+      BEGIN
+        IF OLD.user_email = 'scrub-fail@example.test' THEN
+          RAISE EXCEPTION 'synthetic audit scrub failure';
+        END IF;
+        RETURN NEW;
+      END
+      $fn$
+    `)
+    await query(`
+      DROP TRIGGER IF EXISTS synthetic_recycle_audit_scrub_fail ON audit_logs;
+      CREATE TRIGGER synthetic_recycle_audit_scrub_fail
+      BEFORE UPDATE ON audit_logs
+      FOR EACH ROW EXECUTE FUNCTION synthetic_recycle_audit_scrub_fail()
+    `)
+    try {
+      await expect(purgeDueRecycleUsers(now)).rejects.toThrow(/synthetic audit scrub failure/)
+      expect((await query('SELECT email, purged_at FROM users WHERE id = $1', [failedId])).rows).toEqual([{
+        email: `${failedId}@example.test`,
+        purged_at: null,
+      }])
+    } finally {
+      await query('DROP TRIGGER IF EXISTS synthetic_recycle_audit_scrub_fail ON audit_logs')
+      await query('DROP FUNCTION IF EXISTS synthetic_recycle_audit_scrub_fail()')
     }
   })
 })

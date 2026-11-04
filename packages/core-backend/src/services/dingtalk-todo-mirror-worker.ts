@@ -465,6 +465,11 @@ export class DingTalkTodoMirrorWorker {
         integrationId: recipient.integrationId,
       })
       if (!ok) return 'lost-lease'
+      if (!(sent.taskId ?? '').trim()) {
+        // A 2xx without a parseable task id passes the transport (no envelope discriminator), so the row
+        // settles into `created` with no task id and can only fail at completion time — say so NOW.
+        this.logger.warn(`DingTalk todo mirror: created without a task id row=${row.id}`)
+      }
       // The seat may have died WHILE we were sending. The consumer's sweeps skip `sending` rows (the
       // lease is ours), and a terminal event that already ran will never come back — so the row would
       // settle into `created` and keep a live todo for a finished approval forever. Close the window
@@ -488,8 +493,9 @@ export class DingTalkTodoMirrorWorker {
     const taskId = (row.dingtalk_task_id ?? '').trim()
     const integrationId = (row.integration_id ?? '').trim()
     if (!taskId || !integrationId) {
-      // Data anomaly (a `created` row always carries both). Definite non-delivery, but NOT
-      // redelivery-safe: a requeue has nothing to act on and an operator must look at the row.
+      // A `created` row normally carries both; a create whose 2xx carried no task id lands here (warned
+      // at create time). Definite non-delivery, but NOT redelivery-safe: a requeue has nothing to act on
+      // and an operator must look at the row.
       return await this.markTerminal(row.id, 'failed', attemptCount, TODO_MIRROR_ERROR_CODES.missingTaskId, false)
         ? 'failed'
         : 'lost-lease'

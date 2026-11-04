@@ -70,6 +70,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/index.ts#yidaConnectionTestRuntime; packages/core-backend/src/integration/yida-connection-test-runtime.ts; plugins/plugin-integration-core/lib/yida-connection-probe.cjs',
   },
   {
+    key: 'INTEGRATION_YIDA_MULTI_TARGET_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'Default OFF; byte-exact true lets the anchor owner register MORE THAN ONE owner-attested YiDa target (slots 2..16, each with its own attestation, sealed app/form identifiers and generation-1 credential material) and prepare drafts from a multitable sheet or view (with the read and export permissions of the owner, bounded to 2000 scanned records, 100 rows, 128 KiB) instead of pasted rowsText. Every draft, preview, approval and delivery stays bound to exactly one target_ref; the CREATE fence is per target. Not a grant and never the send switch: sending still requires INTEGRATION_YIDA_OWNER_SEND_ENABLED plus the unchanged owner/live-admin/one-attempt rules. While OFF every route body, SQL statement and reply is the original single-target slot-1 behaviour and /targets answers the generic 404. Amends R-50 decision 1 (one permanent target slot per deployment) only when ON: enabling it on any deployed machine is a separate owner decision (R-50, AGENTS.md owner-only steps).',
+    source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime+yidaInitializationRuntime; packages/core-backend/src/integration/yida-send-approval-service.ts; packages/core-backend/src/integration/yida-sheet-source.ts; packages/core-backend/src/routes/integration-yida-owner.ts',
+  },
+  {
     key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
     type: 'boolean',
     activationValue: 'true',
@@ -847,6 +858,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'plugins/plugin-attendance/index.cjs#isAttendanceCancelRoundEntryEnabled',
   },
   {
+    key: 'AUTOMATION_CLASSB_OUTBOUND_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "#4196 Class-B outbound two-phase intent/outcome ledger (packages/core-backend/src/multitable/automation-outbound-intent.ts, read by the automation executor's send_webhook / send_email / send_dingtalk_* and by automation-retry-eligibility). Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). Off: every send path is byte-identical to pre-slice (no intent row, no classification, no outcome write). On: a rule-driven send first commits a `pending` intent row in meta_automation_outbound_intent with an attempt token and a lease, attempts the send ONCE, then the same attempt records sent / failed / outcome_unknown (token-fenced); a replay of the same identity never resends a sent or ambiguous attempt, never declares a live in-flight attempt dead, re-arms only a definite pre-dispatch failure with exactly one winner, and reports outcome_unknown as a failed step that stops dependents until reconciliation. Requires the zzzz20260716110000 table plus the zzzz20261103120000 attempt-token/lease/target_key migration. danger=high: ON changes which automation sends happen on retry (fail-closed, never a duplicate external effect); it does not by itself enable any external write — the DingTalk/webhook/email transports keep their own gates.",
+    source: 'packages/core-backend/src/multitable/automation-outbound-intent.ts#isClassBOutboundEnabled',
+  },
+  {
     key: 'USER_RECYCLE_SWEEPER_ENABLED',
     type: 'boolean',
     activationValue: 'true',
@@ -854,7 +876,7 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'high',
     purpose:
-      "User recycle sweeper (packages/core-backend/src/admin/user-recycle-scheduler.ts). Default OFF; exact literal 'true' only (no trim, no case folding; unset, false, 1, TRUE, and trailing space stay OFF). Off: startUserRecycleSweeper returns false before any tick, interval, or database call. On: USER_RECYCLE_SWEEPER_DISABLED=1 and the test-runtime helper remain additional kill switches. A tick anonymizes recycle-bin accounts whose purge_after has passed. Tick failure logs are values-free and do not include Error.message.",
+      "User recycle sweeper (packages/core-backend/src/admin/user-recycle-scheduler.ts). Default OFF on purpose: a tick anonymizes identity and the sweeper has no leader election, so it must not start just because the retention window defaults to 30 days. Exact literal 'true' only (no trim, no case folding; unset, false, 1, TRUE, and trailing space stay OFF). Off: startUserRecycleSweeper returns false before any tick, interval, or database call, and the admin UI must not promise automatic purge. On: USER_RECYCLE_SWEEPER_DISABLED=1 and the test-runtime helper remain additional kill switches. A tick anonymizes recycle-bin accounts whose purge_after has passed. Tick failure logs are values-free and do not include Error.message.",
     source: 'packages/core-backend/src/admin/user-recycle-scheduler.ts#startUserRecycleSweeper',
   },
   // ── Automation runtime (AGENTS.md: every env flag is registered here; iPaaS follow-up 2026-11-03) ──

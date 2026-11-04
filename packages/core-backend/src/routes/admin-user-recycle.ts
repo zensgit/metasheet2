@@ -1,7 +1,9 @@
 import type { Request, Response, Router } from 'express'
 import { auditLog } from '../audit/audit'
 import {
+  acceptsRecyclePurgeConfirm,
   listRecycleBin,
+  logRecycleFailure,
   planRecycleIdList,
   purgeRecycleUsers,
   resolveUserRecycleRetentionDays,
@@ -59,9 +61,8 @@ export function registerAdminUserRecycleRoutes(router: Router): void {
         retentionDays: resolveUserRecycleRetentionDays(),
         actorId: adminUserId,
       })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '加载回收站失败'
-      return jsonError(res, 500, 'RECYCLE_LIST_FAILED', message)
+    } catch {
+      return jsonError(res, 500, 'RECYCLE_LIST_FAILED', '加载回收站失败')
     }
   })
 
@@ -86,16 +87,15 @@ export function registerAdminUserRecycleRoutes(router: Router): void {
         },
       })
       return jsonOk(res, summary)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '恢复失败'
-      return jsonError(res, 500, 'RECYCLE_RESTORE_FAILED', message)
+    } catch {
+      return jsonError(res, 500, 'RECYCLE_RESTORE_FAILED', '恢复失败')
     }
   })
 
   router.post('/api/admin/users/recycle/purge', authenticate, async (req: Request, res: Response) => {
     const adminUserId = await ensureRecycleAdmin(req, res)
     if (!adminUserId) return
-    if (req.body?.confirmText !== USER_RECYCLE_PURGE_CONFIRM_TEXT) {
+    if (!acceptsRecyclePurgeConfirm(req.body?.confirmText)) {
       return jsonError(res, 400, 'CONFIRM_TEXT_MISMATCH', `请输入「${USER_RECYCLE_PURGE_CONFIRM_TEXT}」以确认`)
     }
     const plan = planRecycleIdList(req.body?.userIds)
@@ -118,8 +118,8 @@ export function registerAdminUserRecycleRoutes(router: Router): void {
       })
       return jsonOk(res, summary)
     } catch (error) {
-      const message = error instanceof Error ? error.message : '清除失败'
-      return jsonError(res, 500, 'RECYCLE_PURGE_FAILED', message)
+      logRecycleFailure('RECYCLE_PURGE_FAILED', error)
+      return jsonError(res, 500, 'RECYCLE_PURGE_FAILED', '清除失败')
     }
   })
 }

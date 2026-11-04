@@ -1023,3 +1023,12 @@ describe('permission-service: canManageSheetAccess never comes without canRead (
     expect(managingByKind.get('elearning-projection-unmapped') ?? 0).toBe(0)
   }, 600_000)
 })
+
+describe('permission candidates hide recycled accounts', () => {
+  it('requires deleted_at and purged_at to be null', async () => {
+    const { query, calls } = makeQuery([() => ({ rows: [] })])
+    await listSheetPermissionCandidates(query, 'sheet_1', { q: 'lin', limit: 5 })
+    expect(calls[0]?.sql).toContain('u.deleted_at IS NULL')
+    expect(calls[0]?.sql).toContain('u.purged_at IS NULL')
+  })
+})
