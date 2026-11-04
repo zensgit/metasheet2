@@ -251,7 +251,7 @@ SELECT status, last_error, count(*) AS n
 
 ## 升级与回退（带「从记录派发任务」来源关联的版本）
 
-这个版本新增一条迁移 `zzzz20261101140000_create_task_source_links`，在库里新建表 `task_source_links`，记下每项从记录派发的任务来自哪条记录，以及防止重复派发的记录。
+这个版本新增一条迁移 `zzzz20261104150000_create_task_source_links`，在库里新建表 `task_source_links`，记下每项从记录派发的任务来自哪条记录，以及防止重复派发的记录。
 
 ### 升级
 
@@ -266,7 +266,7 @@ SELECT status, last_error, count(*) AS n
 2. 网页和后端分开部署时，先回退网页，再回退后端（和升级的顺序相反）。用同一个安装包一起回退时，没有先后。
 3. 不要在共享的库上（测试环境、演示环境、正式环境）执行这条迁移的回退（`--rollback`）。表里有数据时，这条迁移的回退会拒绝执行，提示 `TASK_SOURCE_LINKS_DOWN_BLOCKED`，库里什么都不改。不要为了让回退通过而手工清空这张表：清掉的是所有从记录派发的任务的来源和防重复记录，不能恢复。
 4. 只有一次性的测试库可以回退这条迁移，并且要在新安装包上执行（旧安装包没有这条迁移，做不了）。执行前：
-   - 先确认它是最后执行的一条迁移。下面查询的结果必须是 `zzzz20261101140000_create_task_source_links`；不是的话不要用 `--rollback`，它回退的是最后执行的那一条，不一定是这一条。
+   - 先确认它是最后执行的一条迁移。下面查询的结果必须是 `zzzz20261104150000_create_task_source_links`；不是的话不要用 `--rollback`，它回退的是最后执行的那一条，不一定是这一条。
 
      ```sql
      SELECT name FROM kysely_migration ORDER BY timestamp DESC, name DESC LIMIT 1;

@@ -21,7 +21,7 @@ import {
   TASK_SOURCE_LINKS_DOWN_BLOCKED_CODE,
   down as sourceLinksDown,
   up as sourceLinksUp,
-} from '../../src/db/migrations/zzzz20261101140000_create_task_source_links'
+} from '../../src/db/migrations/zzzz20261104150000_create_task_source_links'
 import { newTaskGroupId, newTaskId, newTaskListEventId, newTaskListId } from '../../src/services/task-ids-runtime'
 import { dropTaskM4Fixtures } from '../helpers/task-m4-fixtures'
 

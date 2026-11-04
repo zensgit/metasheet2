@@ -72,7 +72,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
     const rows = Number(result.rows[0]?.n ?? 0)
     if (rows > 0) {
       const error = new Error(
-        `${TASK_SOURCE_LINKS_DOWN_BLOCKED_CODE}: [zzzz20261101140000_create_task_source_links] down() refused: ${rows} row(s) in task_source_links; dropping the table removes every dispatched task's source link and retry key and cannot be undone. Nothing was changed. Leave the table in place and roll back the application build; on a disposable database, delete the rows first and run the rollback again.`,
+        `${TASK_SOURCE_LINKS_DOWN_BLOCKED_CODE}: [zzzz20261104150000_create_task_source_links] down() refused: ${rows} row(s) in task_source_links; dropping the table removes every dispatched task's source link and retry key and cannot be undone. Nothing was changed. Leave the table in place and roll back the application build; on a disposable database, delete the rows first and run the rollback again.`,
       )
       ;(error as Error & { code?: string }).code = TASK_SOURCE_LINKS_DOWN_BLOCKED_CODE
       throw error
