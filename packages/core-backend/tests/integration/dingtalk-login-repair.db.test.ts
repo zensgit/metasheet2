@@ -2819,7 +2819,10 @@ suite('DingTalk controlled login repair', () => {
       expect(blocks).toHaveLength(1)
       const lines = blocks[0].trim().split('\n')
       expect([lines[0], lines[lines.length - 1]]).toEqual(['BEGIN READ ONLY;', 'ROLLBACK;'])
-      const select = lines.slice(1, -1).join('\n').replace(/;\s*$/, '')
+      const body = lines.slice(1, -1).join('\n').replace(/;\s*$/, '')
+      // The doc gives a psql variable so the operator can run it as-is; the test binds the same slot.
+      expect(body.match(/:'repair_id'/g)).toHaveLength(1)
+      const select = body.replace(":'repair_id'", '$1')
       const c = await pool!.connect()
       try {
         await c.query('BEGIN READ ONLY')

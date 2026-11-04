@@ -30,7 +30,7 @@ rollback-preview 显示当前摘要及变动分段。后续登录、角色补齐
 
 release 不恢复旧身份，也不恢复权限。release 分两种模式，两者都从 journal 记录的来源 ID 重新读取并核实真实目录账号与集成（历史 ID 本身不是证据）：被核实的是 apply 时记录为 `canonical_account_id` 的那一行（apply 预览中显示为 canonicalAccountId），其余 journal 来源 ID 只重新读取，用于发现被其他用户占用的情形。可登录用户（授权开启、钉钉身份存在、账号可登录）走 canonical 模式：必须恰好有一个当前应用、同企业、同 UnionID、活动且仍关联到该用户的钉钉来源，否则 `REPAIR_CANONICAL_SOURCE_REQUIRED`（可 rollback、重绑原账号或撤权后终结）。已撤权用户（授权关闭、身份已删、账号停用／回收站／未激活）走终结模式：只接受恰好一个同企业、同应用、同 UnionID 的原来源（来源 inactive 允许，不恢复其活跃状态），否则 `REPAIR_HISTORICAL_SOURCE_UNVERIFIED`；终结不重新启用授权、不恢复身份、不恢复关联、用户状态、权限、组织成员或旧会话，撤权状态与证据保留。两种模式都拒绝：登录应用或企业已变（`REPAIR_LOGIN_SCOPE_CHANGED`）、同企业同 UnionID 的目录行被其他用户占用（`REPAIR_DIRECTORY_OWNER_CONFLICT`）、其他用户持有该人的钉钉身份（`REPAIR_IDENTITY_CONFLICT`）、用户名下仍有名单外的钉钉关联（`REPAIR_SOURCE_OUTSIDE_ALLOWLIST`，含 inactive 旧关联，须先安全解绑；只有被解绑的目录行按 UnionID、OpenID 或 external key 与该用户的钉钉身份相符时，解绑才删除该身份并使 release 走终结模式，否则身份保留，release 仍按上述条件选择模式；解绑时一并关闭钉钉授权同样使 release 走终结模式）。拒绝时不写任何行。**release 仅解除身份 pin，目录来源约束继续生效。** released_account_ids 恒为恰好一个账户 ID，数据库 CHECK 拒绝空数组、NULL 与含 NULL 元素的数组；历史来源 IDs 保持不变。release-preview 成功时输出 mode、releasedAccountIds、linkedDingTalkAccountIds、localLinkCount，并把当前登录 scope、最终名单与重新读取的来源行绑定进摘要，执行时在锁内重新计算：变化使某项 release 检查不成立时，以该检查自己的码拒绝（如 `REPAIR_LOGIN_SCOPE_CHANGED`、`REPAIR_DIRECTORY_OWNER_CONFLICT`、`REPAIR_HISTORICAL_SOURCE_UNVERIFIED`、`REPAIR_SOURCE_OUTSIDE_ALLOWLIST`）；各项检查仍成立、但绑定进摘要的计划或快照变了时，拒绝为 `REPAIR_RECOVERY_SNAPSHOT_CHANGED`。登录应用已变（同一企业）、apply 记录的 canonical 来源不再是当前应用的同人来源、或 journal 中另一个人的目录行已归属其他本地用户时，按下文「受控重锚」处理；企业变更、找不到当前应用下此人的目录行、此人的目录行或钉钉身份归属其他本地用户时，重锚同样拒绝（见「受控重锚」末段）。新来源接入、跨企业或解除此持久约束不在本轮范围，须另行设计和批准。正常受控交接移动原稳定账户 ID，不创建第二个账户。
 
-名单外的关联存在时，release-preview 本身就以 `REPAIR_SOURCE_OUTSIDE_ALLOWLIST` 拒绝，只打印这个码，不返回任何账户 ID（linkedDingTalkAccountIds 只在预览成功时输出），运维不能从预览读出是哪些行。查找这些行用下面的只读查询，由 DBA 在只读事务中执行（`$1` 为 journal id，即 release-preview 输入中的 id）：结果是目标账号当前所有 linked 的钉钉目录行，`is_release_target` 为 true 的一行是 apply 记录的 canonical 来源，其余各行都是名单外的关联，须逐一安全解绑（解绑后身份是否删除、release 走哪种模式见上文与「本版限制」），然后重新运行 release-preview 并批准新摘要。
+名单外的关联存在时，release-preview 本身就以 `REPAIR_SOURCE_OUTSIDE_ALLOWLIST` 拒绝，只打印这个码，不返回任何账户 ID（linkedDingTalkAccountIds 只在预览成功时输出），运维不能从预览读出是哪些行。查找这些行用下面的只读查询，由 DBA 在只读事务中执行，例如 `psql -v repair_id=<journal id> -f <文件>`，其中 journal id 即 release-preview 输入中的 id：结果是目标账号当前所有 linked 的钉钉目录行，`is_release_target` 为 true 的一行是 apply 记录的 canonical 来源，其余各行都是名单外的关联，须逐一安全解绑（解绑后身份是否删除、release 走哪种模式见上文与「本版限制」），然后重新运行 release-preview 并批准新摘要。
 
 ```sql
 BEGIN READ ONLY;
@@ -40,7 +40,7 @@ FROM dingtalk_login_repairs r
 JOIN directory_account_links l ON l.local_user_id = r.user_id AND l.link_status = 'linked'
 JOIN directory_accounts a ON a.id = l.directory_account_id AND a.provider = 'dingtalk'
 JOIN directory_integrations i ON i.id = a.integration_id
-WHERE r.id = $1
+WHERE r.id = :'repair_id'
 ORDER BY a.id;
 ROLLBACK;
 ```
@@ -101,6 +101,9 @@ verify 输入：userId/password/code/actorId/actorPassword。preview：proof。a
 - 受控重锚只在同一企业、同一 UnionID 内进行，且只能锚定已存在、未被他人关联的当前应用目录行；企业变更、UnionID 变化、此人已改用另一个本地账号或找不到此人的目录行时，journal 停在 applied（可登录用户仍可尝试 rollback）。已撤权用户的这类 journal 没有出口：除了阻止该账号的新修复，还在 source_integration_ids 中的集成仍存在时阻止这些集成的全部受控交接。这是明确接受的限制，不可恢复（仅「此人已改用另一账号且原目录行仍在」可按「受控重锚」末段退出）。已 release 的记录不提供重锚，其目录来源约束保持不变。
 - 同一用户在当前应用下有两个活动的同人来源时，verify 拒绝（`REPAIR_CANONICAL_SOURCE_REQUIRED`），须先解绑其中一个。
 - release 前必须解绑名单外的钉钉关联（任何应用，活动或 inactive）。此时 release-preview 只打印 `REPAIR_SOURCE_OUTSIDE_ALLOWLIST`，不返回账户 ID，须用「防覆盖、回退与 release」中的只读查询找出这些行。只有被解绑的目录行按 UnionID、OpenID 或 external key 与该用户的钉钉身份相符时，解绑才删除该身份，即撤销其钉钉登录，release 随之走终结模式；不相符的行（如 UnionID 与 OpenID 均为空、external key 也不同）解绑后身份保留，授权仍开启、账号可登录时 release 仍走 canonical 模式。
+
+- 缺少同人证据的 journal 是本 PR 的首版限制，本 PR 不提供退役机制。这类 journal 继续保持 applied，不得用删除 journal 记录、清空允许列表或撤掉守卫的办法强行放行；存在这类记录的集成，真实交接继续被阻断。双人控制的退役流程须另开 PR。因此，本 PR 合并不等于所有修复都能收尾。
+- 携带 generation 的会话签发保留现有的版本校验和有界等待，本 PR 不改用 advisory lock。维护窗口须避开目录同步和角色、权限变更；签发超时后先核实结果，不自动重试。受影响的入口与 30 秒的含义见「执行与互斥」：30 秒是默认的单条语句超时，不是整个请求的耗时上限。
 
 ## 本地验证与交付门槛
 
