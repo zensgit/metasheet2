@@ -282,6 +282,9 @@ export async function verifyDingTalkRepair(
   actorPassword: string,
 ) {
   const { cfg, hash } = scope()
+  // The target never acts as its own operator (re-anchoring and the journal CHECKs hold the same rule).
+  // Checked first, so a self-operated request spends neither a password check nor the authorization code.
+  requireRepair(actorId !== userId, 'REPAIR_DUAL_CONTROL_REQUIRED')
   const actorCredential = await operator({ query }, actorId, actorPassword)
   const before = await snapshot({ query }, userId)
   active(before)
@@ -324,6 +327,7 @@ export async function verifyDingTalkRepair(
   return encryptStoredSecretValue(JSON.stringify(p))
 }
 async function checks(c: Client, p: Proof) {
+  requireRepair(p.actorId !== p.userId, 'REPAIR_DUAL_CONTROL_REQUIRED')
   requireRepair(
     (await operator(c, p.actorId)) === p.actorCredential,
     'REPAIR_OPERATOR_CHANGED',
@@ -1133,6 +1137,12 @@ async function recovery(
   actorPassword: string,
   action: 'rollback' | 'release',
 ) {
+  // Before the password check: the target of a repair never ends it as its own operator.
+  const target = (
+    await c.query('SELECT user_id FROM dingtalk_login_repairs WHERE id=$1', [id])
+  ).rows[0]
+  if (target)
+    requireRepair(String(target.user_id) !== actorId, 'REPAIR_DUAL_CONTROL_REQUIRED')
   await operator(c, actorId, actorPassword)
   const row = (
     await c.query('SELECT * FROM dingtalk_login_repairs WHERE id=$1', [id])
@@ -1255,6 +1265,13 @@ async function finish(
         ],
       )
       requireRepair(!conflict.rows.length, 'REPAIR_OLD_IDENTITY_CONFLICT')
+      // The same corp-wide occupancy rule ownership() applies to the new identity: a directory row of the old
+      // person linked or hinted (pending included) to another local user refuses the restore.
+      const owners = await c.query(
+        `SELECT l.local_user_id ${SOURCE_JOIN} WHERE a.provider='dingtalk' AND a.corp_id=$1 AND (a.union_id=$2 OR (a.open_id IS NOT NULL AND a.open_id=$3)) AND l.local_user_id IS NOT NULL AND l.local_user_id<>$4 LIMIT 1`,
+        [old.corp_id, old.provider_union_id, old.provider_open_id, r.row.user_id],
+      )
+      requireRepair(!owners.rows.length, 'REPAIR_DIRECTORY_OWNER_CONFLICT')
     }
     // Never recompute the allowlist here: write the plan the approved digest bound.
     await c.query(

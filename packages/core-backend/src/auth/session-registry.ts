@@ -85,12 +85,16 @@ export async function createUserSession(
   },
 ): Promise<UserSessionRecord | null> {
   const sessionId = options.sessionId?.trim() || crypto.randomUUID()
+  // Only a generation-fenced issuance locks the users row: FOR SHARE makes it wait for a concurrent generation
+  // bump to commit and then compares the committed value. Without a generation nothing is compared, so an
+  // unfenced issuance (password login, activation, dev token) reads the row without a lock, as before the fence.
+  const fenced = options.expectedAccessGeneration !== undefined
 
   try {
     const result = await query<UserSessionRow>(
       `WITH subject AS (
          SELECT id FROM users WHERE id=$2
-           AND ($6::bigint IS NULL OR COALESCE(access_generation,0)=$6::bigint) FOR SHARE
+           AND ($6::bigint IS NULL OR COALESCE(access_generation,0)=$6::bigint)${fenced ? ' FOR SHARE' : ''}
        )
        INSERT INTO user_sessions (
          id,

@@ -824,9 +824,15 @@ suite('DingTalk controlled login repair', () => {
       verifyDingTalkRepair(f.user, 'wrong', 'code', f.admin, f.password),
     ).rejects.toThrow()
     expect(provider.exchange).not.toHaveBeenCalled()
+    // A non-admin operator other than the target (the target as its own operator is a dual-control refusal).
+    const nonAdmin = await bareUser()
+    await expect(
+      verifyDingTalkRepair(f.user, f.password, 'code', nonAdmin, f.password),
+    ).rejects.toThrow(exact('REPAIR_OPERATOR_REQUIRED'))
+    expect(provider.exchange).not.toHaveBeenCalled()
     await expect(
       verifyDingTalkRepair(f.user, f.password, 'code', f.user, f.password),
-    ).rejects.toThrow()
+    ).rejects.toThrow(exact('REPAIR_DUAL_CONTROL_REQUIRED'))
     expect(provider.exchange).not.toHaveBeenCalled()
   })
   it('refuses incomplete profile and provider failure without mutating the graph', async () => {
@@ -5507,6 +5513,338 @@ suite('DingTalk controlled login repair', () => {
         const flow = await reanchorFlow(f, r.id, 'synthetic-scan')
         expect(await untouchedByReanchor(f)).toEqual(before)
         expect(flow.done.identityChanged).toBe(false)
+      })
+    })
+  })
+
+  describe('final-review fixes: session lock scope, revocation refusal, dual control and rollback occupancy', () => {
+    /** A plain session holding the user's row FOR UPDATE, as directory sync's local apply and access-graph writers do. */
+    const holdUserRow = async (user: string) => {
+      const holder = await pool!.connect()
+      await holder.query('BEGIN')
+      await holder.query('SELECT id FROM users WHERE id=$1 FOR UPDATE', [user])
+      const pid = (await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number
+      let open = true
+      const end = async (sql: 'COMMIT' | 'ROLLBACK' = 'ROLLBACK') => {
+        if (!open) return
+        open = false
+        try {
+          await holder.query(sql)
+        } finally {
+          holder.release()
+        }
+      }
+      return { holder, pid, end }
+    }
+    const blockedBy = async (pid: number) =>
+      Number(
+        (await query('SELECT count(*) AS n FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))', [pid])).rows[0].n,
+      ) > 0
+    const waitUntilBlockedBy = async (pid: number) => {
+      for (let i = 0; i < 300; i++) {
+        if (await blockedBy(pid)) return true
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      return false
+    }
+    /** Settles to the value, or to 'timeout' after `ms`. */
+    const within = <T>(p: Promise<T>, ms: number) =>
+      Promise.race([p, new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), ms))])
+    const sessionOptions = () => ({ sessionId: randomUUID(), expiresAt: new Date(Date.now() + 600000).toISOString() })
+    const liveSession = async (id: string) =>
+      (await query('SELECT user_id FROM user_sessions WHERE id=$1 AND revoked_at IS NULL', [id])).rows
+
+    describe('session issuance and the users row lock', () => {
+      it('S1: an unfenced issuance completes while another session holds the user row FOR UPDATE', async () => {
+        const f = await fixture(),
+          h = await holdUserRow(f.user)
+        const options = sessionOptions()
+        const started = Date.now()
+        const issued = sessionRegistry.createUserSession(f.user, options)
+        try {
+          const settled = await within(issued, 2000)
+          expect(settled).not.toBe('timeout')
+          expect(settled).toMatchObject({ id: options.sessionId, userId: f.user })
+          expect(Date.now() - started).toBeLessThan(2000)
+          expect(await liveSession(options.sessionId)).toEqual([{ user_id: f.user }])
+        } finally {
+          await h.end()
+          await issued.catch(() => undefined)
+        }
+      })
+
+      it('S2: a fenced issuance waits for the holder, then registers on an unchanged generation', async () => {
+        const f = await fixture(),
+          h = await holdUserRow(f.user)
+        const options = sessionOptions()
+        const issued = sessionRegistry.createUserSession(f.user, {
+          ...options,
+          expectedAccessGeneration: await accessGeneration(f.user),
+        })
+        try {
+          expect(await waitUntilBlockedBy(h.pid)).toBe(true)
+          expect(await within(issued, 300)).toBe('timeout')
+          expect(await liveSession(options.sessionId)).toEqual([])
+          await h.end('COMMIT')
+          expect(await issued).toMatchObject({ id: options.sessionId, userId: f.user })
+          expect(await liveSession(options.sessionId)).toEqual([{ user_id: f.user }])
+        } finally {
+          await h.end()
+          await issued.catch(() => undefined)
+        }
+      })
+
+      it('S3: a fenced issuance that waited behind a generation bump registers nothing', async () => {
+        const f = await fixture(),
+          generation = await accessGeneration(f.user),
+          h = await holdUserRow(f.user)
+        const options = sessionOptions()
+        const issued = sessionRegistry.createUserSession(f.user, { ...options, expectedAccessGeneration: generation })
+        try {
+          expect(await waitUntilBlockedBy(h.pid)).toBe(true)
+          await h.holder.query('UPDATE users SET access_generation=COALESCE(access_generation,0)+1 WHERE id=$1', [f.user])
+          await h.end('COMMIT')
+          expect(await issued).toBeNull()
+          expect((await query('SELECT id FROM user_sessions WHERE id=$1', [options.sessionId])).rows).toEqual([])
+          expect(await accessGeneration(f.user)).toBe(generation + 1)
+        } finally {
+          await h.end()
+          await issued.catch(() => undefined)
+        }
+      })
+    })
+
+    describe('unresolved revocation evidence refuses the repair and its rollback', () => {
+      /** An applied event (and, for 'effect', an applied effect under a resolved event) for an active, grant-enabled user. */
+      const plantEvidence = async (f: Fixture, kind: 'event' | 'effect') => {
+        const generation = await accessGeneration(f.user)
+        const event = (
+          await query(
+            `INSERT INTO directory_deprovision_events(org_id,integration_id,directory_account_id,local_user_id,triggered_by,event_origin,link_witness_account_id,link_witness_local_user_id,policy,globally_clear,access_generation_at_apply,status) VALUES($1,$2,$3,$4,$5,'admin_manual',$3,$4,'mark_inactive',true,$6,$7) RETURNING id`,
+            [f.org, f.source, f.account, f.user, f.admin, generation, kind === 'event' ? 'applied' : 'fully_resolved'],
+          )
+        ).rows[0].id as string
+        if (kind === 'event') return { table: 'directory_deprovision_events', id: event }
+        const effect = (
+          await query(
+            `INSERT INTO directory_deprovision_effects(event_id,local_user_id,org_id,effect_type,before_active,after_active,access_generation_at_apply,status) VALUES($1,$2,NULL,'grant_changed',true,false,$3,'applied') RETURNING id`,
+            [event, f.user, generation],
+          )
+        ).rows[0].id as string
+        return { table: 'directory_deprovision_effects', id: effect }
+      }
+      const evidenceStatus = async (e: { table: string; id: string }) =>
+        (await query(`SELECT status FROM ${e.table} WHERE id=$1`, [e.id])).rows
+      const enabled = async (f: Fixture) => {
+        expect(
+          (
+            await query(
+              "SELECT u.is_active,g.enabled FROM users u JOIN user_external_auth_grants g ON g.local_user_id=u.id AND g.provider='dingtalk' WHERE u.id=$1",
+              [f.user],
+            )
+          ).rows,
+        ).toEqual([{ is_active: true, enabled: true }])
+      }
+
+      it.each(['event', 'effect'] as const)(
+        'R1 (%s): preview and apply refuse REPAIR_REVOCATION_UNRESOLVED, write nothing and keep the evidence applied',
+        async (kind) => {
+          const f = await fixture(),
+            proof = await f.verify(),
+            p = await previewDingTalkRepair(proof)
+          const evidence = await plantEvidence(f, kind)
+          await enabled(f)
+          const before = { identity: await identityOf(f.user), graph: await f.graph(), untouched: await untouchedByReanchor(f) }
+          const sessionsBefore = (await query('SELECT to_jsonb(t) AS row FROM user_sessions t WHERE user_id=$1', [f.user])).rows
+          await expect(previewDingTalkRepair(proof)).rejects.toThrow(exact('REPAIR_REVOCATION_UNRESOLVED'))
+          await expect(applyDingTalkRepair(proof, p.digest, 'apply')).rejects.toThrow(exact('REPAIR_REVOCATION_UNRESOLVED'))
+          expect((await query('SELECT id FROM dingtalk_login_repairs WHERE user_id=$1', [f.user])).rows).toEqual([])
+          expect(
+            (await query("SELECT id FROM audit_logs WHERE resource_type='dingtalk_login_repairs' AND action_details->>'actorId'=$1", [f.admin])).rows,
+          ).toEqual([])
+          expect({ identity: await identityOf(f.user), graph: await f.graph(), untouched: await untouchedByReanchor(f) }).toEqual(before)
+          expect((await identityOf(f.user))[0].row).toMatchObject(originalIdentityShape(f))
+          expect((await query('SELECT to_jsonb(t) AS row FROM user_sessions t WHERE user_id=$1', [f.user])).rows).toEqual(sessionsBefore)
+          expect(await evidenceStatus(evidence)).toEqual([{ status: 'applied' }])
+        },
+      )
+
+      it.each(['event', 'effect'] as const)(
+        'R2 (%s): rollback-preview and rollback refuse REPAIR_REVOCATION_UNRESOLVED, write nothing and keep the evidence applied',
+        async (kind) => {
+          const f = await fixture(),
+            r = await applyRepair(f)
+          const preview = await previewDingTalkRepairRecovery(r.id, f.admin, f.password, 'rollback')
+          const evidence = await plantEvidence(f, kind)
+          await enabled(f)
+          const identity = await identityOf(f.user)
+          await expectRefusedWithoutWrite(
+            f,
+            r.id,
+            () => previewDingTalkRepairRecovery(r.id, f.admin, f.password, 'rollback'),
+            'REPAIR_REVOCATION_UNRESOLVED',
+          )
+          await expectRefusedWithoutWrite(
+            f,
+            r.id,
+            () => rollbackDingTalkRepair(r.id, f.admin, preview.digest, 'rollback', f.password),
+            'REPAIR_REVOCATION_UNRESOLVED',
+          )
+          expect(await identityOf(f.user)).toEqual(identity)
+          expect(await evidenceStatus(evidence)).toEqual([{ status: 'applied' }])
+        },
+      )
+    })
+
+    describe('the repair target never acts as its own operator', () => {
+      const makeAdmin = (user: string) => query('UPDATE users SET is_admin=true WHERE id=$1', [user])
+      /** The module's approval digest of a proof (same canonical form as dingtalk-identity-repair.ts). */
+      const canonicalForm = (v: unknown): string =>
+        Array.isArray(v)
+          ? `[${v.map(canonicalForm).join(',')}]`
+          : v && typeof v === 'object'
+            ? `{${Object.entries(v)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([k, x]) => `${JSON.stringify(k)}:${canonicalForm(x)}`)
+                .join(',')}}`
+            : JSON.stringify(v)
+      const proofDigest = (p: unknown) => createHash('sha256').update(canonicalForm(p)).digest('hex')
+
+      it('D1: verify with an administrator target as its own operator refuses before any password check or provider call', async () => {
+        const f = await fixture()
+        await makeAdmin(f.user)
+        const before = await f.graph()
+        for (const password of [f.password, 'wrong'])
+          await expect(verifyDingTalkRepair(f.user, f.password, 'synthetic-code', f.user, password)).rejects.toThrow(
+            exact('REPAIR_DUAL_CONTROL_REQUIRED'),
+          )
+        expect(provider.exchange).not.toHaveBeenCalled()
+        expect(await f.graph()).toEqual(before)
+        expect((await query('SELECT id FROM dingtalk_login_repairs WHERE user_id=$1', [f.user])).rows).toEqual([])
+        // Positive control: the same target with a different administrator verifies.
+        await expect(f.verify()).resolves.toEqual(expect.any(String))
+      })
+
+      it('D2: preview and apply re-check it on a sealed self-operated proof that would otherwise pass', async () => {
+        const f = await fixture()
+        await makeAdmin(f.user)
+        const raw = JSON.parse(decryptStoredSecretValue(await f.verify()))
+        const self = (await query('SELECT * FROM users WHERE id=$1', [f.user])).rows[0]
+        // A credential digest that matches the target as operator, so only the dual-control check can refuse.
+        const forged = {
+          ...raw,
+          actorId: f.user,
+          actorCredential: proofDigest([self.password_hash, self.access_generation, self.activation_status, self.is_active]),
+        }
+        const sealed = encryptStoredSecretValue(JSON.stringify(forged))
+        const before = { identity: await identityOf(f.user), untouched: await untouchedByReanchor(f) }
+        await expect(previewDingTalkRepair(sealed)).rejects.toThrow(exact('REPAIR_DUAL_CONTROL_REQUIRED'))
+        await expect(applyDingTalkRepair(sealed, proofDigest(forged), 'apply')).rejects.toThrow(
+          exact('REPAIR_DUAL_CONTROL_REQUIRED'),
+        )
+        expect({ identity: await identityOf(f.user), untouched: await untouchedByReanchor(f) }).toEqual(before)
+        expect((await query('SELECT id FROM dingtalk_login_repairs WHERE user_id=$1', [f.user])).rows).toEqual([])
+        expect(
+          (await query("SELECT id FROM audit_logs WHERE resource_type='dingtalk_login_repairs' AND action_details->>'actorId'=$1", [f.user])).rows,
+        ).toEqual([])
+      })
+
+      it('D3: rollback and release previews and executions by the administrator target refuse before the password check', async () => {
+        const f = await fixture(),
+          r = await applyRepair(f)
+        await makeAdmin(f.user)
+        const rollback = await previewDingTalkRepairRecovery(r.id, f.admin, f.password, 'rollback')
+        const release = await releasePreview(f, r.id)
+        for (const password of [f.password, 'wrong']) {
+          for (const action of ['rollback', 'release'] as const)
+            await expectRefusedWithoutWrite(
+              f,
+              r.id,
+              () => previewDingTalkRepairRecovery(r.id, f.user, password, action),
+              'REPAIR_DUAL_CONTROL_REQUIRED',
+            )
+          await expectRefusedWithoutWrite(
+            f,
+            r.id,
+            () => rollbackDingTalkRepair(r.id, f.user, rollback.digest, 'rollback', password),
+            'REPAIR_DUAL_CONTROL_REQUIRED',
+          )
+          await expectRefusedWithoutWrite(
+            f,
+            r.id,
+            () => releaseDingTalkRepair(r.id, f.user, release.digest, 'release', password),
+            'REPAIR_DUAL_CONTROL_REQUIRED',
+          )
+        }
+        // Positive control: the other administrator still ends it with the approved digest.
+        await rollbackDingTalkRepair(r.id, f.admin, rollback.digest, 'rollback', f.password)
+        expect(await repairRow(r.id)).toMatchObject({ state: 'rolled_back', rollback_actor_id: f.admin })
+      })
+
+      it('D4: journal CHECKs refuse a row whose actor or ending actor is its target', async () => {
+        const f = await fixture(),
+          r = await applyRepair(f)
+        const before = await repairRow(r.id)
+        await expect(
+          query(
+            `INSERT INTO dingtalk_login_repairs(id,user_id,proof_nonce,state,before_identity,expected_identity,after_digest,actor_id,source_account_ids,source_integration_ids,canonical_account_id,login_client_id) SELECT $2::uuid,user_id,$3::uuid,'rolled_back',before_identity,expected_identity,after_digest,user_id,source_account_ids,source_integration_ids,canonical_account_id,login_client_id FROM dingtalk_login_repairs WHERE id=$1`,
+            [r.id, randomUUID(), randomUUID()],
+          ),
+        ).rejects.toMatchObject({ code: '23514', constraint: 'dingtalk_login_repairs_check6' })
+        for (const state of ['rolled_back', 'released'])
+          await expect(
+            query(
+              'UPDATE dingtalk_login_repairs SET state=$2,rollback_actor_id=user_id,rolled_back_at=now(),released_account_ids=CASE WHEN $2=\'released\' THEN ARRAY[canonical_account_id] END WHERE id=$1',
+              [r.id, state],
+            ),
+          ).rejects.toMatchObject({ code: '23514', constraint: 'dingtalk_login_repairs_check7' })
+        expect(await repairRow(r.id)).toEqual(before)
+        expect((await query('SELECT count(*)::int AS n FROM dingtalk_login_repairs WHERE user_id=$1', [f.user])).rows).toEqual([
+          { n: 1 },
+        ])
+      })
+    })
+
+    describe('rollback refuses when the old person\'s directory row belongs to another local user', () => {
+      it.each([
+        ['pending', 'email'],
+        ['linked', 'manual_admin'],
+      ])('O1 (%s/%s): rollback refuses REPAIR_DIRECTORY_OWNER_CONFLICT and writes nothing', async (status, strategy) => {
+        const f = await fixture(),
+          r = await applyRepair(f)
+        const preview = await previewDingTalkRepairRecovery(r.id, f.admin, f.password, 'rollback')
+        const other = await bareUser()
+        const oldRow = await addAccount(f.source, f.corp, 'old-member-' + f.user, {
+          union: 'old-union-' + f.user,
+          open: 'old-open-' + f.user,
+        })
+        await link(oldRow, other, status, strategy)
+        // The preview neither decrypts the old identity nor reads its directory rows; execution does.
+        const again = await previewDingTalkRepairRecovery(r.id, f.admin, f.password, 'rollback')
+        expect(again.digest).toBe(preview.digest)
+        const identity = await identityOf(f.user)
+        await expectRefusedWithoutWrite(
+          f,
+          r.id,
+          () => rollbackDingTalkRepair(r.id, f.admin, preview.digest, 'rollback', f.password),
+          'REPAIR_DIRECTORY_OWNER_CONFLICT',
+        )
+        expect(await identityOf(f.user)).toEqual(identity)
+        expect(
+          (await query('SELECT local_user_id,link_status FROM directory_account_links WHERE directory_account_id=$1', [oldRow])).rows,
+        ).toEqual([{ local_user_id: other, link_status: status }])
+        // Matched by OpenID alone as well: the same row with its UnionID cleared still refuses.
+        await query('UPDATE directory_accounts SET union_id=NULL WHERE id=$1', [oldRow])
+        await expectRefusedWithoutWrite(
+          f,
+          r.id,
+          () => rollbackDingTalkRepair(r.id, f.admin, preview.digest, 'rollback', f.password),
+          'REPAIR_DIRECTORY_OWNER_CONFLICT',
+        )
+        // Positive control: once the row is released by the other user, the same approved rollback completes.
+        await query('DELETE FROM directory_account_links WHERE directory_account_id=$1', [oldRow])
+        await rollbackDingTalkRepair(r.id, f.admin, preview.digest, 'rollback', f.password)
+        expect((await identityOf(f.user))[0].row).toMatchObject(originalIdentityShape(f))
       })
     })
   })

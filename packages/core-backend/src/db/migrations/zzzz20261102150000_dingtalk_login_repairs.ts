@@ -17,6 +17,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     CHECK ((supersedes_id IS NULL) = (approver_id IS NULL)),
     CHECK (supersedes_id IS NULL OR (approver_id <> actor_id AND approver_id <> user_id AND actor_id <> user_id)),
     CHECK (state <> 'superseded' OR (rollback_actor_id IS NOT NULL AND rolled_back_at IS NOT NULL)),
+    -- No repair row is acted on by its own target: not the root actor, not who ended it (rollback, release, supersede).
+    CHECK (actor_id <> user_id),
+    CHECK (rollback_actor_id IS NULL OR rollback_actor_id <> user_id),
     created_at timestamptz NOT NULL DEFAULT now(), rollback_actor_id text, rolled_back_at timestamptz
   )`.execute(db)
   await sql`CREATE UNIQUE INDEX dingtalk_login_repairs_active ON dingtalk_login_repairs(user_id) WHERE state='applied'`.execute(
