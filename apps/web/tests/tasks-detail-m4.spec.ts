@@ -12,7 +12,10 @@ import { createMemoryHistory, createRouter, RouterView, type Router } from 'vue-
  * branch, not on main. A detail body without `listIds` or `canManageMembers` (an older backend) is
  * covered too, and so is main's M3 body, which carries `version` but none of the S4 keys. FE-8 adds
  * the member-control cells (`canManageMembers`) and the 422 `INACTIVE_ORG_MEMBER` cells of the
- * assignee, follower and create forms at the end.
+ * assignee, follower and create forms at the end. Package 1b's account-switch cells sign in with a
+ * JWT-shaped token in `localStorage` and switch it, silently or with the storage event / session
+ * switch this tab would get; `authHeaders` is stubbed to carry no org header, so the identity those
+ * cells compare is the token's subject and, in the org-switch cell, its org claim.
  *
  * Mock face: `apiFetch` plays the backend by path, so the REAL tasksApi client builds every request
  * and parses every answer — request bodies are asserted as the client serialized them. Also mocked:
@@ -30,6 +33,8 @@ const h_ = vi.hoisted(() => ({
   getCurrentUserId: vi.fn(),
   /** `GET /api/tasks/:id` (the decoded id) -> the response, or a promise of it. */
   detailReply: vi.fn(),
+  peopleReply: vi.fn(),
+  peopleSearchReply: vi.fn(),
   /** `GET /api/task-lists?…` (the query) -> the response, or a promise of it. */
   myListsReply: vi.fn(),
   /** `PATCH /api/tasks/:id` (id, serialized body) -> the response, or a promise of it. */
@@ -50,6 +55,7 @@ const h_ = vi.hoisted(() => ({
 
 vi.mock('../src/utils/api', () => ({
   apiFetch: h_.apiFetch,
+  authHeaders: () => ({}),
 }))
 
 vi.mock('../src/tasks/tasksContext', () => ({
@@ -78,6 +84,7 @@ vi.mock('../src/composables/useLocale', () => ({
   }),
 }))
 
+import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 import TasksView from '../src/views/tasks/TasksView.vue'
 import { formatViewerInstant } from '../src/tasks/tasksDateDisplay'
 
@@ -190,12 +197,17 @@ async function fakeFetch(path: string, init?: FetchInit): Promise<Response> {
   const [pathname, query = ''] = path.split('?')
   let match: RegExpExecArray | null
   if (method === 'GET' && pathname === '/api/tasks') return jsonResponse(200, { items: [], total: 0 })
+  // Package 1b: the people picker's search (`h_.peopleSearchReply`; the "type a name" marker by default).
+  // Answered before the task-id pattern below, which `/api/tasks/people` would otherwise match.
+  if (method === 'GET' && pathname === '/api/tasks/people') return h_.peopleSearchReply(query)
   if ((match = /^\/api\/tasks\/([^/]+)$/.exec(pathname))) {
     const id = decodeURIComponent(match[1])
     if (method === 'GET') return h_.detailReply(id)
     if (method === 'PATCH') return h_.patchReply(id, init?.body)
   }
   if (method === 'GET' && /^\/api\/tasks\/[^/]+\/comments$/.test(pathname)) return jsonResponse(200, { items: [], total: 0 })
+  // Package 1b: the names on the task (`h_.peopleReply`; none by default).
+  if (method === 'GET' && (match = /^\/api\/tasks\/([^/]+)\/people$/.exec(pathname))) return h_.peopleReply(decodeURIComponent(match[1]))
   if (method === 'GET' && pathname === '/api/task-lists') return h_.myListsReply(query)
   if (method === 'POST' && (match = /^\/api\/task-lists\/([^/]+)\/items$/.exec(pathname))) {
     return h_.addItemReply(decodeURIComponent(match[1]), init?.body)
@@ -344,6 +356,8 @@ beforeEach(() => {
   h_.resolveViewerTimeZone.mockReset().mockReturnValue(BROWSER_ZONE)
   h_.getCurrentUserId.mockReset().mockResolvedValue('u1')
   h_.detailReply.mockReset().mockImplementation((id: string) => jsonResponse(200, detailBody({ id, title: id === 't1' ? 'Plan' : `Title-${id}` })))
+  h_.peopleReply.mockReset().mockImplementation(() => jsonResponse(200, { people: {} }))
+  h_.peopleSearchReply.mockReset().mockImplementation(() => jsonResponse(200, { items: [], hasMore: false, requiresQuery: true, limit: 20, minQueryLength: 1 }))
   h_.myListsReply.mockReset().mockImplementation((query: string) => {
     const offset = Number(new URLSearchParams(query).get('offset'))
     return jsonResponse(200, { items: offset === 0 ? MY_LISTS : [], total: MY_LISTS.length })
@@ -1959,4 +1973,549 @@ describe('FE-8 — 422 INACTIVE_ORG_MEMBER at the task member adds and the creat
     expect(requests('POST', '/api/tasks')).toHaveLength(2)
     expect(text(el, 'tasks-create-error')).toBe('创建任务失败，请稍后重试')
   })
+})
+
+// ---------------------------------------------------------------------------------------------
+// Package 1b: the names on the task (`GET /api/tasks/:id/people`) and the people picker on the
+// assignee and follower forms. The user-id forms stay, folded under a toggle.
+// ---------------------------------------------------------------------------------------------
+
+describe('package 1b — the names on the task', () => {
+  const body = () => memberBody({ canEdit: true, canManageMembers: true }, {
+    assignees: [{ userId: 'u1', completedAt: null }, { userId: 'u2', completedAt: null }, { userId: 'u3', completedAt: null }],
+  })
+
+  function assigneeTexts(el: HTMLElement): string[] {
+    return shownAll(el, 'tasks-detail-assignee').map((row) => row.querySelector('.tasks-view__detail-assignee-id')?.textContent?.trim() ?? '')
+  }
+
+  it('names replace the ids, a person no longer active carries 已停用, and an id the answer does not name stays as it is', async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, body()))
+    h_.peopleReply.mockImplementation(() => jsonResponse(200, { people: {
+      u1: { name: '张三', status: 'active' },
+      u2: { name: '李四', status: 'inactive' },
+      u5: { name: '王五', status: 'inactive' },
+    } }))
+    const el = await mountAt('/tasks/t1')
+    expect(requests('GET', '/api/tasks/t1/people')).toHaveLength(1)
+    expect(assigneeTexts(el)).toEqual(['张三', '李四', 'u3'])
+    const rows = shownAll(el, 'tasks-detail-assignee')
+    expect(rows.map((row) => row.querySelector('[data-testid="tasks-detail-person-inactive"]')?.textContent ?? null)).toEqual([null, '已停用', null])
+    const follower = must(el, 'tasks-detail-follower')
+    expect(follower.textContent).toContain('王五')
+    expect(follower.querySelector('[data-testid="tasks-detail-person-inactive"]')?.textContent).toBe('已停用')
+  })
+
+  const unusable: Array<[string, () => Response | Promise<Response>]> = [
+    ['a 404', () => jsonResponse(404, { error: { code: 'NOT_FOUND' } })],
+    ['a 403', () => jsonResponse(403, {})],
+    ['a 500', () => jsonResponse(500, {})],
+    ['a 200 with a malformed entry', () => jsonResponse(200, { people: { u1: { name: 7, status: 'active' } } })],
+    ['a 200 of another shape', () => jsonResponse(200, { items: [] })],
+    ['a transport failure', () => Promise.reject(new TypeError('network down'))],
+  ]
+  for (const [name, reply] of unusable) {
+    it(`${name} leaves the ids, shows no mark, and the rest of the page as it was`, async () => {
+      h_.detailReply.mockImplementation(() => jsonResponse(200, body()))
+      h_.peopleReply.mockImplementation(reply)
+      const el = await mountAt('/tasks/t1')
+      expect(assigneeTexts(el)).toEqual(['u1', 'u2', 'u3'])
+      expect(shownAll(el, 'tasks-detail-person-inactive')).toEqual([])
+      expect(text(el, 'tasks-detail-title')).toBe('Plan')
+      expect(must(el, 'tasks-detail-follower').textContent).toContain('u5')
+      must(el, 'tasks-detail-pick-assignee')
+      must(el, 'tasks-detail-add-assignee-form')
+      expect(shown(el, 'tasks-action-error')).toBeNull()
+    })
+  }
+
+  it('an answer for a task the viewer has since left is not applied', async () => {
+    const late = deferred<Response>()
+    h_.detailReply.mockImplementation((id: string) => jsonResponse(200, memberBody({ canEdit: true, canManageMembers: true }, { id, title: id })))
+    h_.peopleReply.mockImplementationOnce(() => late.promise)
+    const el = await mountAt('/tasks/t1')
+    await go('/tasks/t2')
+    late.resolve(jsonResponse(200, { people: { u1: { name: '张三', status: 'inactive' } } }))
+    await flush()
+    expect(assigneeTexts(el)).toEqual(['u1', 'u2'])
+    expect(shownAll(el, 'tasks-detail-person-inactive')).toEqual([])
+  })
+})
+
+describe('package 1b — the people picker on the detail page', () => {
+  const pickerRow = (el: HTMLElement, id: string) => el.querySelector<HTMLElement>(`[data-testid="task-people-picker-row"][data-person-id="${id}"]`)
+
+  async function searchFor(el: HTMLElement, term: string): Promise<void> {
+    const input = must(el, 'task-people-picker-search') as HTMLInputElement
+    input.value = term
+    input.dispatchEvent(new Event('input'))
+    await new Promise<void>((resolve) => setTimeout(resolve, 350))
+    await flush()
+  }
+
+  function tick(el: HTMLElement, id: string): void {
+    pickerRow(el, id)!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click()
+  }
+
+  function found(items: Array<{ id: string; name: string; canUseTasks: boolean }>): Response {
+    return jsonResponse(200, {
+      items: items.map((item) => ({ ...item, detail: `${item.id}***@example.test` })),
+      hasMore: false,
+      requiresQuery: false,
+      limit: 20,
+    })
+  }
+
+  beforeEach(() => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, memberBody({ canEdit: true, canManageMembers: true })))
+  })
+
+  it('the user-id forms are folded under their toggles, which unfold them', async () => {
+    const el = await mountAt('/tasks/t1')
+    for (const [toggle, form] of [
+      ['tasks-detail-add-assignee-by-id-toggle', 'tasks-detail-add-assignee-form'],
+      ['tasks-detail-add-follower-by-id-toggle', 'tasks-detail-add-follower-form'],
+    ] as const) {
+      expect(must(el, form).style.display, form).toBe('none')
+      expect(must(el, toggle).getAttribute('aria-expanded')).toBe('false')
+      await click(el, toggle)
+      expect(must(el, form).style.display, form).toBe('')
+      expect(must(el, toggle).getAttribute('aria-expanded')).toBe('true')
+    }
+  })
+
+  it('opens empty with the "type a name" hint; a term is searched once after the pause', async () => {
+    const el = await mountAt('/tasks/t1')
+    await click(el, 'tasks-detail-pick-assignee')
+    expect(text(el, 'task-people-picker-type-hint')).toBe('输入姓名开始搜索')
+    expect(shown(el, 'task-people-picker-empty')).toBeNull()
+    expect(h_.peopleSearchReply).not.toHaveBeenCalled()
+    h_.peopleSearchReply.mockImplementation(() => found([{ id: 'u7', name: '赵六', canUseTasks: true }]))
+    const input = must(el, 'task-people-picker-search') as HTMLInputElement
+    input.value = '赵'
+    input.dispatchEvent(new Event('input'))
+    await searchFor(el, '赵六')
+    expect(h_.peopleSearchReply.mock.calls.map(([query]) => new URLSearchParams(query as string).get('q'))).toEqual(['赵六'])
+    expect(text(el, 'task-people-picker-name')).toBe('赵六')
+    expect(text(el, 'task-people-picker-detail')).toBe('u7***@example.test')
+  })
+
+  it('two people picked are added in the order ticked, one write each, then the task is read again once', async () => {
+    h_.peopleSearchReply.mockImplementation(() => found([
+      { id: 'u7', name: '赵六', canUseTasks: true },
+      { id: 'u8', name: '钱七', canUseTasks: true },
+    ]))
+    const el = await mountAt('/tasks/t1')
+    await click(el, 'tasks-detail-pick-assignee')
+    await searchFor(el, '六')
+    tick(el, 'u8')
+    tick(el, 'u7')
+    await flush()
+    expect(text(el, 'task-people-picker-count')).toBe('已选人数：2')
+    await click(el, 'task-people-picker-confirm')
+    await flush()
+    await flush()
+    expect(requests('POST', '/api/tasks/t1/assignees').map(([, init]) => init?.body)).toEqual(['{"userId":"u8"}', '{"userId":"u7"}'])
+    expect(detailReads()).toBe(2)
+    expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
+    expect(shown(el, 'task-people-picker')).toBeNull()
+    expect(shown(el, 'tasks-detail-membership-error')).toBeNull()
+  })
+
+  it('stops at the first refusal and shows its code next to the assignee form', async () => {
+    h_.peopleSearchReply.mockImplementation(() => found([
+      { id: 'u7', name: '赵六', canUseTasks: true },
+      { id: 'u8', name: '钱七', canUseTasks: true },
+      { id: 'u9', name: '孙八', canUseTasks: true },
+    ]))
+    h_.assigneeReply
+      .mockImplementationOnce((id: string) => jsonResponse(200, { id, status: 'open', completionMode: 'all', assignees: [{ userId: 'u1', completedAt: null }, { userId: 'u7', completedAt: null }] }))
+      .mockImplementationOnce(() => jsonResponse(422, { error: { code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' } }))
+    const el = await mountAt('/tasks/t1')
+    await click(el, 'tasks-detail-pick-assignee')
+    await searchFor(el, '赵')
+    for (const id of ['u7', 'u8', 'u9']) tick(el, id)
+    await flush()
+    await click(el, 'task-people-picker-confirm')
+    await flush()
+    await flush()
+    expect(requests('POST', '/api/tasks/t1/assignees').map(([, init]) => init?.body)).toEqual(['{"userId":"u7"}', '{"userId":"u8"}'])
+    expect(text(el, 'tasks-detail-membership-error')).toBe('对方还不能使用任务功能，请管理员先为其开通任务权限。')
+    expect(shown(el, 'tasks-action-error')).toBeNull()
+    expect(detailReads()).toBe(2)
+  })
+
+  it('assignee mode: someone who cannot use tasks yet is marked and cannot be ticked; follower mode: marked and can be', async () => {
+    h_.peopleSearchReply.mockImplementation(() => found([
+      { id: 'u7', name: '赵六', canUseTasks: false },
+      { id: 'u8', name: '钱七', canUseTasks: true },
+    ]))
+    const el = await mountAt('/tasks/t1')
+    await click(el, 'tasks-detail-pick-assignee')
+    await searchFor(el, '六')
+    const blocked = pickerRow(el, 'u7')!
+    expect(blocked.textContent).toContain('还不能使用任务')
+    expect(blocked.querySelector<HTMLInputElement>('input[type="checkbox"]')!.disabled).toBe(true)
+    expect(blocked.querySelector('label')!.getAttribute('title')).toBe('需管理员为其开通任务权限后才能被指派')
+    tick(el, 'u7')
+    await flush()
+    expect(text(el, 'task-people-picker-count')).toBe('已选人数：0')
+    expect((must(el, 'task-people-picker-confirm') as HTMLButtonElement).disabled).toBe(true)
+    await click(el, 'task-people-picker-cancel')
+    expect(requests('POST', '/api/tasks/t1/assignees')).toEqual([])
+
+    await click(el, 'tasks-detail-pick-follower')
+    await searchFor(el, '六')
+    const marked = pickerRow(el, 'u7')!
+    expect(marked.textContent).toContain('还不能使用任务')
+    expect(marked.querySelector<HTMLInputElement>('input[type="checkbox"]')!.disabled).toBe(false)
+    tick(el, 'u7')
+    await flush()
+    await click(el, 'task-people-picker-confirm')
+    await flush()
+    await flush()
+    expect(requests('POST', '/api/tasks/t1/followers').map(([, init]) => init?.body)).toEqual(['{"userId":"u7"}'])
+  })
+
+  it('the pick buttons follow the member controls: a viewer who cannot manage members has neither', async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, memberBody({ canEdit: true, canManageMembers: false })))
+    const el = await mountAt('/tasks/t1')
+    expect(shown(el, 'tasks-detail-pick-assignee')).toBeNull()
+    expect(shown(el, 'tasks-detail-pick-follower')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// Package 1b: account switches. The names on the task and the picker's rows belong to the account
+// they were read under; a switch drops them, a late answer from before it is not applied, a batch
+// of picked people being added ends, and a token refresh for the same person changes nothing.
+// ---------------------------------------------------------------------------------------------
+
+describe('package 1b — account switches on the detail page', () => {
+  /** A JWT-shaped token the app's own payload reader understands (header and signature are not read). */
+  const fakeToken = (payload: Record<string, unknown>) => `h.${btoa(JSON.stringify(payload)).replace(/=+$/, '')}.s`
+  const TOKEN_A = fakeToken({ sub: 'u1', exp: 4102444800 })
+  const TOKEN_A_REFRESHED = fakeToken({ sub: 'u1', exp: 4102448400 })
+  const TOKEN_B = fakeToken({ sub: 'u9', exp: 4102444800 })
+
+  const signIn = (token: string) => localStorage.setItem('auth_token', token)
+  /** Another tab signs in: the shared storage changes and this tab is told nothing. */
+  const signInSilently = (token: string) => signIn(token)
+  /** The same, plus the `storage` event a browser delivers to the other tabs. */
+  const signInElsewhereWithEvent = (token: string) => {
+    signIn(token)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token', newValue: token }))
+  }
+  /** A sign-in in this tab: the session switch `useAuth` announces. */
+  const signInHere = (token: string) => {
+    signIn(token)
+    notifyAuthPrincipalChange()
+  }
+
+  const NAMES = { people: {
+    u1: { name: '张三', status: 'active' },
+    u2: { name: '李四', status: 'inactive' },
+  } }
+
+  function assigneeTexts(el: HTMLElement): string[] {
+    return shownAll(el, 'tasks-detail-assignee').map((row) => row.querySelector('.tasks-view__detail-assignee-id')?.textContent?.trim() ?? '')
+  }
+
+  const pickerRows = (el: HTMLElement) =>
+    Array.from(el.querySelectorAll<HTMLElement>('[data-testid="task-people-picker-row"]')).map((row) => row.dataset.personId)
+
+  async function searchFor(el: HTMLElement, term: string): Promise<void> {
+    const input = must(el, 'task-people-picker-search') as HTMLInputElement
+    input.value = term
+    input.dispatchEvent(new Event('input'))
+    await new Promise<void>((resolve) => setTimeout(resolve, 350))
+    await flush()
+  }
+
+  const searched = () => h_.peopleSearchReply.mock.calls.map(([query]) => new URLSearchParams(query as string).get('q'))
+
+  beforeEach(() => {
+    localStorage.removeItem('auth_token')
+    signIn(TOKEN_A)
+    h_.detailReply.mockImplementation((id: string) => jsonResponse(200, memberBody({ canEdit: true, canManageMembers: true }, { id })))
+    h_.peopleReply.mockImplementation(() => jsonResponse(200, NAMES))
+    h_.peopleSearchReply.mockImplementation(() => jsonResponse(200, {
+      items: [{ id: 'u7', name: '赵六', detail: 'zl***@example.test', canUseTasks: true }],
+      hasMore: false,
+      requiresQuery: false,
+      limit: 20,
+    }))
+  })
+
+  afterEach(() => {
+    localStorage.removeItem('auth_token')
+  })
+
+  for (const [how, switchTo] of [
+    ['another tab (a storage change)', signInElsewhereWithEvent],
+    ['this tab (a session switch)', signInHere],
+  ] as Array<[string, (token: string) => void]>) {
+    it(`a switch to another account from ${how}: the names held are dropped and the open picker closes`, async () => {
+      const el = await mountAt('/tasks/t1')
+      expect(assigneeTexts(el)).toEqual(['张三', '李四'])
+      await click(el, 'tasks-detail-pick-assignee')
+      await searchFor(el, '赵')
+      expect(pickerRows(el)).toEqual(['u7'])
+      switchTo(TOKEN_B)
+      await flush()
+      expect(assigneeTexts(el)).toEqual(['u1', 'u2'])
+      expect(shownAll(el, 'tasks-detail-person-inactive')).toEqual([])
+      expect(shown(el, 'task-people-picker')).toBeNull()
+      expect(el.textContent).not.toContain('赵六')
+      expect(el.textContent).not.toContain('zl***@example.test')
+    })
+
+    it(`a names answer asked before a switch seen from ${how} that lands after it is dropped`, async () => {
+      const late = deferred<Response>()
+      h_.peopleReply.mockImplementationOnce(() => late.promise)
+      const el = await mountAt('/tasks/t1')
+      expect(requests('GET', '/api/tasks/t1/people')).toHaveLength(1)
+      switchTo(TOKEN_B)
+      await flush()
+      late.resolve(jsonResponse(200, NAMES))
+      await flush()
+      expect(assigneeTexts(el)).toEqual(['u1', 'u2'])
+      expect(shownAll(el, 'tasks-detail-person-inactive')).toEqual([])
+    })
+  }
+
+  it('a switch to another org for the same person, seen from another tab, drops the names and closes the picker', async () => {
+    signIn(fakeToken({ sub: 'u1', tenantId: 'org_1', exp: 4102444800 }))
+    const el = await mountAt('/tasks/t1')
+    expect(assigneeTexts(el)).toEqual(['张三', '李四'])
+    await click(el, 'tasks-detail-pick-assignee')
+    await searchFor(el, '赵')
+    expect(pickerRows(el)).toEqual(['u7'])
+    signInElsewhereWithEvent(fakeToken({ sub: 'u1', tenantId: 'org_2', exp: 4102444800 }))
+    await flush()
+    expect(assigneeTexts(el)).toEqual(['u1', 'u2'])
+    expect(shownAll(el, 'tasks-detail-person-inactive')).toEqual([])
+    expect(shown(el, 'task-people-picker')).toBeNull()
+    expect(el.textContent).not.toContain('zl***@example.test')
+  })
+
+  it('after a silent switch with no read out, the next task read shows the new account\'s names', async () => {
+    const el = await mountAt('/tasks/t1')
+    expect(assigneeTexts(el)).toEqual(['张三', '李四'])
+    signInSilently(TOKEN_B)
+    await go('/tasks/t2')
+    await flush()
+    expect(requests('GET', '/api/tasks/t2/people')).toHaveLength(1)
+    expect(assigneeTexts(el)).toEqual(['张三', '李四'])
+  })
+
+  it('a names answer asked under one account that lands after a silent switch is dropped; the next task read loads the new account\'s names', async () => {
+    const late = deferred<Response>()
+    h_.peopleReply.mockImplementationOnce(() => late.promise)
+    const el = await mountAt('/tasks/t1')
+    expect(requests('GET', '/api/tasks/t1/people')).toHaveLength(1)
+    signInSilently(TOKEN_B)
+    late.resolve(jsonResponse(200, NAMES))
+    await flush()
+    expect(assigneeTexts(el)).toEqual(['u1', 'u2'])
+    expect(shownAll(el, 'tasks-detail-person-inactive')).toEqual([])
+    await go('/tasks/t2')
+    await flush()
+    expect(requests('GET', '/api/tasks/t2/people')).toHaveLength(1)
+    expect(assigneeTexts(el)).toEqual(['张三', '李四'])
+  })
+
+  it('after a silent switch the picker sends nothing and closes; opened again, it searches under the new account', async () => {
+    const el = await mountAt('/tasks/t1')
+    signInSilently(TOKEN_B)
+    await click(el, 'tasks-detail-pick-assignee')
+    await searchFor(el, '赵')
+    expect(h_.peopleSearchReply).not.toHaveBeenCalled()
+    expect(shown(el, 'task-people-picker')).toBeNull()
+    expect(assigneeTexts(el)).toEqual(['u1', 'u2'])
+    await click(el, 'tasks-detail-pick-assignee')
+    await searchFor(el, '赵')
+    expect(searched()).toEqual(['赵'])
+    expect(pickerRows(el)).toEqual(['u7'])
+  })
+
+  it('negative control: a token refresh for the same person keeps the names and the open picker\'s rows, and the next search is sent', async () => {
+    const el = await mountAt('/tasks/t1')
+    await click(el, 'tasks-detail-pick-assignee')
+    await searchFor(el, '赵')
+    signInElsewhereWithEvent(TOKEN_A_REFRESHED)
+    notifyAuthPrincipalChange()
+    await flush()
+    expect(assigneeTexts(el)).toEqual(['张三', '李四'])
+    expect(pickerRows(el)).toEqual(['u7'])
+    await searchFor(el, '赵六')
+    expect(searched()).toEqual(['赵', '赵六'])
+    expect(pickerRows(el)).toEqual(['u7'])
+  })
+
+  it('negative control: signed in and not switching, the names show and a search shows its rows', async () => {
+    const el = await mountAt('/tasks/t1')
+    expect(assigneeTexts(el)).toEqual(['张三', '李四'])
+    await click(el, 'tasks-detail-pick-follower')
+    await searchFor(el, '赵')
+    expect(searched()).toEqual(['赵'])
+    expect(text(el, 'task-people-picker-name')).toBe('赵六')
+    expect(text(el, 'task-people-picker-detail')).toBe('zl***@example.test')
+  })
+
+  // The picker's people are added one write at a time under the account the batch started under. A
+  // switch seen before a write or while one is out ends the batch: the rest is not sent and that
+  // answer is not applied; a switch away and back does not resume it.
+  const PICK = { assignee: 'tasks-detail-pick-assignee', follower: 'tasks-detail-pick-follower' } as const
+  const ADD_PATH = { assignee: '/api/tasks/t1/assignees', follower: '/api/tasks/t1/followers' } as const
+  const ADD_ERROR = { assignee: 'tasks-detail-membership-error', follower: 'tasks-detail-follower-error' } as const
+  type MemberKind = keyof typeof PICK
+
+  function tickPerson(el: HTMLElement, id: string): void {
+    el.querySelector<HTMLElement>(`[data-testid="task-people-picker-row"][data-person-id="${id}"]`)!
+      .querySelector<HTMLInputElement>('input[type="checkbox"]')!.click()
+  }
+
+  /** Opens the picker for `kind` and ticks u7, then u8 (not yet confirmed). */
+  async function tickTwo(el: HTMLElement, kind: MemberKind): Promise<void> {
+    h_.peopleSearchReply.mockImplementation(() => jsonResponse(200, {
+      items: [
+        { id: 'u7', name: '赵六', detail: 'zl***@example.test', canUseTasks: true },
+        { id: 'u8', name: '钱七', detail: 'qq***@example.test', canUseTasks: true },
+      ],
+      hasMore: false,
+      requiresQuery: false,
+      limit: 20,
+    }))
+    await click(el, PICK[kind])
+    await searchFor(el, '六')
+    tickPerson(el, 'u7')
+    tickPerson(el, 'u8')
+    await flush()
+    expect(text(el, 'task-people-picker-count')).toBe('已选人数：2')
+  }
+
+  /** The first add of `kind` waits for the cell to answer it; later ones use the default reply. */
+  function holdFirstAdd(kind: MemberKind): { resolve: (value: Response) => void } {
+    const held = deferred<Response>()
+    ;(kind === 'assignee' ? h_.assigneeReply : h_.followerReply).mockImplementationOnce(() => held.promise)
+    return held
+  }
+
+  /** A successful answer to the add of u7. */
+  const addedU7 = (kind: MemberKind) => kind === 'assignee'
+    ? jsonResponse(200, { id: 't1', status: 'open', completionMode: 'all', assignees: [{ userId: 'u1', completedAt: null }, { userId: 'u2', completedAt: null }, { userId: 'u7', completedAt: null }] })
+    : jsonResponse(200, { id: 't1', followers: ['u5', 'u7'] })
+
+  const addBodies = (kind: MemberKind) => requests('POST', ADD_PATH[kind]).map(([, init]) => init?.body)
+  const followerTexts = (el: HTMLElement) => shownAll(el, 'tasks-detail-follower').map((row) => row.querySelector('span')?.textContent?.trim() ?? '')
+
+  for (const kind of ['assignee', 'follower'] as const) {
+    for (const [how, switchTo] of [
+      ['another tab (a storage change)', signInElsewhereWithEvent],
+      ['this tab (a session switch)', signInHere],
+      ['another tab, silently', signInSilently],
+    ] as Array<[string, (token: string) => void]>) {
+      it(`${kind} batch: a switch to another account from ${how} while the first add is out sends no second add and applies no answer`, async () => {
+        const first = holdFirstAdd(kind)
+        const el = await mountAt('/tasks/t1')
+        await tickTwo(el, kind)
+        await click(el, 'task-people-picker-confirm')
+        expect(addBodies(kind)).toEqual(['{"userId":"u7"}'])
+        switchTo(TOKEN_B)
+        await flush()
+        first.resolve(addedU7(kind))
+        await flush()
+        await flush()
+        expect(addBodies(kind)).toEqual(['{"userId":"u7"}'])
+        expect(detailReads()).toBe(1)
+        expect(followerTexts(el)).toEqual(['u5'])
+        expect(shown(el, ADD_ERROR[kind])).toBeNull()
+        expect(shown(el, 'tasks-action-error')).toBeNull()
+        expect(disabled(el, PICK[kind])).toBe(false)
+      })
+    }
+
+    it(`${kind} batch: a refusal of the first add that lands after a switch is not shown, and the second add is not sent`, async () => {
+      const first = holdFirstAdd(kind)
+      const el = await mountAt('/tasks/t1')
+      await tickTwo(el, kind)
+      await click(el, 'task-people-picker-confirm')
+      signInSilently(TOKEN_B)
+      first.resolve(jsonResponse(422, { error: { code: 'INACTIVE_ORG_MEMBER' } }))
+      await flush()
+      await flush()
+      expect(addBodies(kind)).toEqual(['{"userId":"u7"}'])
+      expect(shown(el, ADD_ERROR[kind])).toBeNull()
+      expect(shown(el, 'tasks-action-error')).toBeNull()
+      expect(detailReads()).toBe(1)
+    })
+
+    for (const [how, switchTo] of [
+      ['another tab (storage changes)', signInElsewhereWithEvent],
+      ['this tab (session switches)', signInHere],
+    ] as Array<[string, (token: string) => void]>) {
+      it(`${kind} batch: a switch to another account and back from ${how} while the first add is out does not resume the batch`, async () => {
+        const first = holdFirstAdd(kind)
+        const el = await mountAt('/tasks/t1')
+        await tickTwo(el, kind)
+        await click(el, 'task-people-picker-confirm')
+        switchTo(TOKEN_B)
+        await flush()
+        switchTo(TOKEN_A)
+        await flush()
+        first.resolve(addedU7(kind))
+        await flush()
+        await flush()
+        expect(addBodies(kind)).toEqual(['{"userId":"u7"}'])
+        expect(detailReads()).toBe(1)
+        expect(followerTexts(el)).toEqual(['u5'])
+        expect(disabled(el, PICK[kind])).toBe(false)
+      })
+    }
+
+    // The picker's own confirm check turns this one away first; the batch's check before its first
+    // add stands behind it.
+    it(`${kind} batch: after a silent switch with two people ticked, confirming sends nothing`, async () => {
+      const el = await mountAt('/tasks/t1')
+      await tickTwo(el, kind)
+      signInSilently(TOKEN_B)
+      await click(el, 'task-people-picker-confirm')
+      await flush()
+      expect(addBodies(kind)).toEqual([])
+      expect(detailReads()).toBe(1)
+      expect(h_.notifyTasksChanged).not.toHaveBeenCalled()
+    })
+
+    it(`negative control, ${kind} batch: with no switch, both adds are sent in the order ticked and the task is read again once`, async () => {
+      const first = holdFirstAdd(kind)
+      const el = await mountAt('/tasks/t1')
+      await tickTwo(el, kind)
+      await click(el, 'task-people-picker-confirm')
+      expect(addBodies(kind)).toEqual(['{"userId":"u7"}'])
+      first.resolve(addedU7(kind))
+      await flush()
+      await flush()
+      expect(addBodies(kind)).toEqual(['{"userId":"u7"}', '{"userId":"u8"}'])
+      expect(detailReads()).toBe(2)
+      expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
+      expect(shown(el, ADD_ERROR[kind])).toBeNull()
+    })
+
+    it(`negative control, ${kind} batch: a token refresh for the same person while the first add is out keeps the batch going`, async () => {
+      const first = holdFirstAdd(kind)
+      const el = await mountAt('/tasks/t1')
+      await tickTwo(el, kind)
+      await click(el, 'task-people-picker-confirm')
+      signInElsewhereWithEvent(TOKEN_A_REFRESHED)
+      notifyAuthPrincipalChange()
+      await flush()
+      first.resolve(addedU7(kind))
+      await flush()
+      await flush()
+      expect(addBodies(kind)).toEqual(['{"userId":"u7"}', '{"userId":"u8"}'])
+      expect(detailReads()).toBe(2)
+      expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
+    })
+  }
 })

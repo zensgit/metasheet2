@@ -71,6 +71,9 @@ vi.mock('../src/tasks/tasksContext', () => ({
 vi.mock('../src/tasks/tasksApi', () => ({
   listTasks: h_.listTasks,
   getTask: h_.getTask,
+  // Package 1b: the detail page reads the names on the task; a bare stub answers undefined,
+  // which the page reads as "no names" and leaves the ids as they are.
+  getTaskPeople: vi.fn(),
   createTask: h_.createTask,
   completeTask: h_.completeTask,
   reopenTask: h_.reopenTask,

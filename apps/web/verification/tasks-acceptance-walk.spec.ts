@@ -7,6 +7,7 @@ import {
   WALK_ORG_ID,
   WALK_RECORD_TITLE,
   WALK_TASK_ID,
+  WALK_USER_ID,
   walkSessionBody,
   walkTaskDetailBody,
 } from './tasks-acceptance-walk-fixtures'
@@ -78,6 +79,19 @@ async function installApi(page: Page): Promise<WalkApi> {
     if (method === 'GET' && pathname === '/api/task-lists') return route.fulfill(json(200, { items: [], total: 0 }))
     if (method === 'GET' && pathname === detailPath) return route.fulfill(json(200, walkTaskDetailBody()))
     if (method === 'GET' && pathname === `${detailPath}/comments`) return route.fulfill(json(200, { items: [], total: 0 }))
+    // Package 1b: the names on the task (routes/tasks.ts `GET /api/tasks/:id/people`).
+    if (method === 'GET' && pathname === `${detailPath}/people`) {
+      return route.fulfill(json(200, { people: { [WALK_USER_ID]: { name: '派发人', status: 'active' } } }))
+    }
+    // Package 1b: the dialog looks the prefilled person up. The lookup still says they can use
+    // tasks: their access is turned off between the lookup and the create, which the create's own
+    // check refuses (the message under test).
+    if (method === 'GET' && pathname === '/api/tasks/people') {
+      return route.fulfill(json(200, {
+        items: [{ id: WALK_NO_ACCESS_USER_ID, name: '未开通任务的同事', detail: '', canUseTasks: true }],
+        truncated: false,
+      }))
+    }
     if (method === 'POST' && pathname === `${detailPath}/assignees`) {
       return route.fulfill(json(422, ASSIGNEE_TASK_ACCESS_REQUIRED_BODY))
     }
@@ -169,7 +183,9 @@ for (const viewport of [
     const time = await box(page.getByTestId('record-task-dispatch-due-time'))
     expect(time.y, 'due time starts below the due date').toBeGreaterThanOrEqual(date.y + date.height - 0.5)
 
-    for (const testId of ['record-task-dispatch-title', 'record-task-dispatch-assignee-input', 'record-task-dispatch-submit']) {
+    // The user-id entry is folded (package 1b); unfold it to check it fits too.
+    await page.getByTestId('record-task-dispatch-add-by-id-toggle').click()
+    for (const testId of ['record-task-dispatch-title', 'record-task-dispatch-pick-people', 'record-task-dispatch-assignee-input', 'record-task-dispatch-submit']) {
       await expectReachable(page, testId, viewport.width)
     }
 
@@ -231,6 +247,8 @@ for (const viewport of [
 ]) {
   test(`task detail: adding an assignee without task access shows the task-access message below the assignee form (${viewport.width}px)`, async ({ page }) => {
     const api = await openHarness(page, viewport.width, viewport.height, 'detail')
+    // The user-id form is folded under its toggle (package 1b).
+    await page.getByTestId('tasks-detail-add-assignee-by-id-toggle').click()
     const input = page.getByTestId('tasks-detail-add-assignee-input')
     await expect(input).toBeVisible()
 
