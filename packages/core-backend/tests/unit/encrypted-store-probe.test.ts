@@ -940,7 +940,7 @@ describe('runEncryptedStoreProbeAtStartup: one summary, one warning per broken s
     const report = await runEncryptedStoreProbeAtStartup({ resolvePool: () => fakeDatabase(fixture.rows), env: ENV_B, logger })
     expect(report?.totals.undecryptable).toBe(17)
     expect(logger.info).toHaveBeenCalledTimes(1)
-    expect(logger.info.mock.calls[0][0]).toMatch(/^Encrypted store probe: 17 encrypted value\(s\) across 17 store field\(s\); 17 undecryptable/)
+    expect(logger.info.mock.calls[0][0]).toMatch(/^Encrypted store probe: 17 encrypted value\(s\) across 18 store field\(s\); 17 undecryptable/)
     const broken = EXPECTED_UNDER_A.filter((row) => (row[3] as number) > 0).map((row) => row[0])
     expect(logger.warn).toHaveBeenCalledTimes(broken.length)
     expect(logger.warn.mock.calls.map((call) => `${call[1].store}.${call[1].field}`)).toEqual(broken)

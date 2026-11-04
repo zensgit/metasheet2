@@ -729,7 +729,7 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
         ['dingtalk_login_repairs.before_identity', 'ok', 2, 2, 1, 0, null],
       ])
       expect(report.material.status).toBe('ok')
-      expect(report.totals).toMatchObject({ encrypted: 33, undecryptable: 16 + approvedTargetUndecryptable, plaintext: 1, legacyNotChecked: 1, unreadable: 0, missing: 0 })
+      expect(report.totals).toMatchObject({ encrypted: 35, undecryptable: 17 + approvedTargetUndecryptable, plaintext: 1, legacyNotChecked: 1, unreadable: 0, missing: 0 })
       // one existence precheck per table + one SELECT per field, every one a SELECT, none rejected
       expect(statements).toHaveLength(TABLES.length + report.stores.length)
       expect(statements.every((sql) => /^SELECT\s/.test(sql))).toBe(true)
@@ -749,7 +749,7 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
       expect(rejected).toEqual([])
       expect(statements).toHaveLength(TABLES.length + report.stores.length - 2)
       expect(by['dingtalk_group_destinations.webhook_url']).toMatchObject({ status: 'ok', encrypted: 2, undecryptable: 1 })
-      expect(degraded.totals).toMatchObject({ encrypted: 29, undecryptable: 14 + approvedTargetUndecryptable, missing: 2, unreadable: 0 })
+      expect(degraded.totals).toMatchObject({ encrypted: 31, undecryptable: 15 + approvedTargetUndecryptable, missing: 2, unreadable: 0 })
 
       const serialized = JSON.stringify([report, degraded])
       for (const secret of [...sealed, SECRET.secondPassword, SECRET.username, 'MARKER', CURRENT.key, PREVIOUS.key]) {
