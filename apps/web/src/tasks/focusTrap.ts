@@ -9,9 +9,8 @@
  * is brought back, to the control after (or before) that input. A Tab INTO one is also left to the
  * browser, because only the browser's own move lands on the input's last part going back (a focus()
  * call always lands on the first); if that move takes focus out of the dialog, focus is put on the
- * input. A
- * browser that leaves buttons out of its own move can pass over a button inside the dialog there.
- * jsdom has no such parts; the part-to-part move itself is for a browser walk.
+ * input. A browser that leaves buttons out of its own move can pass over a button inside the dialog
+ * there. jsdom has no such parts; the part-to-part move itself is for a browser walk.
  */
 
 /** The controls a Tab can land on. */
@@ -55,15 +54,15 @@ function followSegmentedTab(container: HTMLElement, input: HTMLInputElement, bac
   setTimeout(() => input.removeEventListener('focusout', onFocusout), 0)
 }
 
-/** Moves focus one step within `container` for a Tab (Shift+Tab: back) keydown, wrapping at the ends,
- *  and holds the browser's own move back (except in or into a date or time input, see above). Controls inside
- *  a `[hidden]` element and disabled ones are skipped. From the container itself or from outside its
- *  controls, Tab goes to the first control and Shift+Tab to the last; with none, focus goes to the
- *  container. */
 /** Counts the Tabs handled here. A check scheduled for one Tab is dropped once another came: Chromium
  *  runs key input ahead of timers, so the check can come after the next key. */
 let tabCount = 0
 
+/** Moves focus one step within `container` for a Tab (Shift+Tab: back) keydown, wrapping at the ends,
+ *  and holds the browser's own move back (except in or into a date or time input, see above).
+ *  Controls inside a `[hidden]` element and disabled ones are skipped. From the container itself or
+ *  from outside its controls, Tab goes to the first control and Shift+Tab to the last; with none,
+ *  focus goes to the container. */
 export function moveFocusWithin(container: HTMLElement, event: KeyboardEvent): void {
   tabCount += 1
   const thisTab = tabCount
