@@ -112,6 +112,14 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
       }
+      if (suite === 'multitable-db' && step.id === 'multitable-real-db-integration') {
+        // Explicit additive suite: preserve the frozen original command byte-for-byte.
+        const deliveryAddition = '  tests/integration/notification-delivery-result.db.test.ts \\\n'
+        const deliveryPredecessor = '  tests/integration/multitable-automation-outbound-intent-realdb.test.ts \\\n'
+        assert.equal(step.run.split(deliveryAddition).length - 1, 1, 'Delivery-result DB suite must run exactly once')
+        assert.ok(step.run.includes(deliveryPredecessor + deliveryAddition), 'Keep the delivery-result suite at its reviewed position')
+        step.run = step.run.replace(deliveryAddition, '')
+      }
       if (suite !== 'unit' && step.name === 'Upload install log on failure') {
         assert.equal(step.with.name, `install-log-${nodeMatrix}-${suite}`)
         step.with.name = `install-log-${nodeMatrix}`
@@ -163,6 +171,8 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-controlled-handover.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/dingtalk-login-repair.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/dingtalk-login-repair.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['multitable-db'].steps.find(step => step.id === 'multitable-real-db-integration'); step.run = step.run.replace('  tests/integration/notification-delivery-result.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['multitable-db'].steps.find(step => step.id === 'multitable-real-db-integration'); const line = '  tests/integration/notification-delivery-result.db.test.ts \\\n', anchor = '  tests/integration/multitable-fwb-write-action-realdb.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const steps = doc.jobs.unit.steps; steps.splice(steps.findIndex(step => step.name === directoryClientLintStep.name), 1) },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).run += ' || true' },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).if = false },
