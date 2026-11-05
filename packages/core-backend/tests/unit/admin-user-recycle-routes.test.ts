@@ -135,4 +135,97 @@ describe('admin user recycle routes', () => {
       meta: expect.objectContaining({ outcome: 'purged' }),
     }))
   })
+
+  it('rescrubs only an already purged account and does not rewrite the user row', async () => {
+    const mismatch = await request(pinned.url())
+      .post('/api/admin/users/recycle/rescrub')
+      .send({ userIds: ['user-lin'], confirmText: '立即清除' })
+    expect(mismatch.status).toBe(400)
+    expect(mismatch.body.error.code).toBe('CONFIRM_TEXT_MISMATCH')
+
+    const seen: string[] = []
+    pg.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const text = String(sql)
+      seen.push(text)
+      if (text.includes('SET access_generation')) return { rows: [{ access_generation: 1 }] }
+      if (text.includes('FOR UPDATE') && text.includes('FROM users')) {
+        return { rows: [{ id: 'user-lin', email: null, username: null, mobile: null, deleted_at: '2026-10-01T00:00:00.000Z', purged_at: '2026-11-01T00:00:00.000Z' }] }
+      }
+      if (text.includes('to_regclass')) return { rows: [{ rel: String(params?.[0] ?? '') }] }
+      if (text.includes("'rescrub'")) return { rows: [{ id: 1 }], rowCount: 1 }
+      return { rows: [] }
+    })
+
+    const response = await request(pinned.url())
+      .post('/api/admin/users/recycle/rescrub')
+      .send({ userIds: ['user-lin'], confirmText: '重新清理' })
+
+    expect(response.status).toBe(200)
+    expect(response.body.data.results[0]).toMatchObject({ ok: true, userId: 'user-lin', email: null, code: null })
+    expect(seen.some((sql) => sql.includes('SET email = NULL'))).toBe(false)
+    expect(seen.some((sql) => /UPDATE\s+users\b/i.test(sql))).toBe(false)
+    expect(seen.some((sql) => sql.includes('UPDATE directory_accounts'))).toBe(false)
+    expect(seen.some((sql) => sql.includes('directory_account_links'))).toBe(false)
+    expect(seen.some((sql) => sql.includes('user_login_alias_collision_report'))).toBe(false)
+    expect(seen.some((sql) => sql.includes("'rescrub'") && sql.includes('adminUserId'))).toBe(true)
+    const receipt = pg.query.mock.calls.find((call) => String(call[0]).includes("'rescrub'"))
+    expect(receipt?.[1]).toEqual(['user-lin', 'rescrubbed', 0, 'admin-1'])
+    const batchAudit = audit.auditLog.mock.calls.map((call) => call[0] as { resourceId?: string; meta?: Record<string, unknown> })
+      .find((entry) => entry.resourceId === 'recycle-rescrub')
+    expect(batchAudit?.meta).toMatchObject({ outcome: 'rescrubbed', successCount: 1 })
+    expect(JSON.stringify(batchAudit?.meta)).not.toMatch(/example\.|accountLabel|@/)
+  })
+
+  it('rejects rescrub of an active account and of one still in the recycle bin', async () => {
+    pg.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (String(sql).includes('SET access_generation')) return { rows: [{ access_generation: 1 }] }
+      if (String(sql).includes('FOR UPDATE')) {
+        const id = params?.[0]
+        if (id === 'user-live') {
+          return { rows: [{ id, email: 'live@example.com', deleted_at: null, purged_at: null }] }
+        }
+        if (id === 'user-bin') {
+          return { rows: [{ id, email: 'bin@example.com', deleted_at: '2026-10-01T00:00:00.000Z', purged_at: null }] }
+        }
+        return { rows: [] }
+      }
+      if (String(sql).includes("'rescrub'")) return { rows: [{ id: 1 }], rowCount: 1 }
+      return { rows: [] }
+    })
+
+    const response = await request(pinned.url())
+      .post('/api/admin/users/recycle/rescrub')
+      .send({ userIds: ['user-live', 'user-bin'], confirmText: 'Rescrub now' })
+
+    expect(response.status).toBe(200)
+    expect(response.body.data.results.map((row: { code: string }) => row.code)).toEqual(['NOT_PURGED', 'NOT_PURGED'])
+    expect(response.body.data.successCount).toBe(0)
+  })
+
+  it('does not store an unmatched email as an audit resource id', async () => {
+    const email = 'not-a-user@example.test'
+    const receiptParams: unknown[][] = []
+    pg.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const text = String(sql)
+      if (text.includes('SET access_generation')) return { rows: [{ access_generation: 1 }] }
+      if (text.includes('FOR UPDATE') && text.includes('FROM users')) return { rows: [] }
+      if (text.includes("'rescrub'")) {
+        receiptParams.push(params ?? [])
+        return { rows: [{ id: 1 }], rowCount: 1 }
+      }
+      return { rows: [] }
+    })
+
+    const response = await request(pinned.url())
+      .post('/api/admin/users/recycle/rescrub')
+      .send({ userIds: [email], confirmText: '重新清理' })
+
+    expect(response.status).toBe(200)
+    expect(response.body.data.results[0].code).toBe('USER_NOT_FOUND')
+    expect(receiptParams).toEqual([[null, 'USER_NOT_FOUND', 0, 'admin-1']])
+    const batchAudit = audit.auditLog.mock.calls.map((call) => call[0] as { resourceId?: string; meta?: Record<string, unknown> })
+      .find((entry) => entry.resourceId === 'recycle-rescrub')
+    expect(JSON.stringify(batchAudit)).not.toContain(email)
+    expect(JSON.stringify(receiptParams)).not.toContain(email)
+  })
 })

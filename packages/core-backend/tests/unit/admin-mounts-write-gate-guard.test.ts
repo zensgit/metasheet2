@@ -451,6 +451,7 @@ const REGISTRY: readonly WriteRouteEntry[] = [
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/batch/delete', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/recycle/restore', reg: 'routes/admin-user-recycle.ts', gate: 'routes/admin-user-recycle.ts ensureRecycleAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/recycle/purge', reg: 'routes/admin-user-recycle.ts', gate: 'routes/admin-user-recycle.ts ensureRecycleAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/recycle/rescrub', reg: 'routes/admin-user-recycle.ts', gate: 'routes/admin-user-recycle.ts ensureRecycleAdmin', family: P },
   // --- routes/admin-users.ts（27 条；门为处理器第一条语句） ---
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/member-groups', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
@@ -807,12 +808,12 @@ describe('/api/admin 挂载点写路由守卫 — fixture 自检', () => {
     }
   })
 
-  it('登记表条数与分族口径固定：74 条 / 2 条委派例外 / 4 条中间件门 / 1 条 inline', () => {
-    expect(REGISTRY).toHaveLength(74)
+  it('登记表条数与分族口径固定：75 条 / 2 条委派例外 / 4 条中间件门 / 1 条 inline', () => {
+    expect(REGISTRY).toHaveLength(75)
     expect(REGISTRY.filter((e) => e.family === 'delegation')).toHaveLength(2)
     expect(REGISTRY.filter((e) => e.family === 'middleware')).toHaveLength(4)
     expect(REGISTRY.filter((e) => e.family === 'inline')).toHaveLength(1)
-    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(67)
+    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(68)
     // 每条都必须带来源：reg = 该挂载点的注册文件；gate 可解析，且每条分支链的最后一环是本族的门函数
     for (const entry of REGISTRY) {
       const delegatedRecycle = entry.mount === 'admin-users' && entry.path.startsWith('/api/admin/users/recycle/')

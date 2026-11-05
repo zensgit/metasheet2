@@ -275,6 +275,40 @@ databaseSuite('SA05 owner HTTP — actual JWT, native authority and private Post
       approval: { remainingAttempts: 0 }, delivery: first.delivery })
     expect([f.tokenPayloads.length, f.formPayloads.length]).toEqual([1, 1]); noMaterialRead(); expect(await f.proof()).toEqual(before)
   })
+  it('gate 1: a client that disconnects after admission has committed does not cancel the one-time attempt; the ledger reaches acknowledged', async () => {
+    const fixture = await confirmed()
+    f.setDisconnectAtToken(true)
+    // The socket is destroyed from inside the first token call, i.e. after the admission transaction
+    // committed; the browser never receives an answer for this request.
+    await expect(f.http('POST', '/submissions', fixture.request)).rejects.toThrow('SYNTHETIC_OWNER_HTTP_FAILURE')
+    await f.settleSubmissions()
+    const ledger = await f.rows('integration_yida_delivery_ledger')
+    expect(ledger).toHaveLength(1)
+    expect(ledger[0]).toMatchObject({ status: 'acknowledged', claim_actor_id: principals.owner, ack_status_code: 201 })
+    expect((await f.rows('integration_yida_delivery_audit')).map(row => row.event).sort()).toEqual(['acknowledgement', 'claim', 'prepare'])
+    expect([f.tokenPayloads.length, f.formPayloads.length, f.tokenCommitted, f.validRequests]).toEqual([1, 1, true, true])
+    // The owner reads the outcome back afterwards; nothing is sent again.
+    const history = bodyData(await f.http('GET', '/approvals/' + fixture.grant.grantId), 200)
+    expect(history).toMatchObject({ approval: { remainingAttempts: 0, status: 'admitted' }, delivery: { status: 'acknowledged', durable: true } })
+    const replay = bodyData(await f.http('POST', '/submissions', fixture.request), 200)
+    expect(replay).toMatchObject({ status: 'acknowledged', reused: true, externalWriteAttempted: false })
+    expect([f.tokenPayloads.length, f.formPayloads.length]).toEqual([1, 1])
+    expect((await f.proof()).counts).toEqual([1, 0, 1, 2, 1, 3])
+  })
+  it('gate 6 (a2): a 2xx whose body cannot be used is outcome_unknown with reason receipt_unparsed through the whole stack', async () => {
+    const fixture = await confirmed(); f.setFormOutcome('unparsed')
+    const first = bodyData(await f.http('POST', '/submissions', fixture.request), 200)
+    expect(first).toMatchObject({ status: 'outcome_unknown', reused: false, externalWriteAttempted: true,
+      businessVerified: false, durable: true, approval: { remainingAttempts: 0 } })
+    expect((await f.rows('integration_yida_delivery_ledger'))[0]).toMatchObject({ status: 'outcome_unknown', ack_status_code: null, ack_instance_id: null })
+    const audit = await f.rows('integration_yida_delivery_audit')
+    expect(audit.map(row => row.event).sort()).toEqual(['claim', 'prepare', 'unknown'])
+    expect(audit.find(row => row.event === 'unknown')?.reason).toBe('receipt_unparsed')
+    const before = await f.proof()
+    expect(bodyData(await f.http('POST', '/submissions', fixture.request), 200)).toMatchObject({
+      status: 'outcome_unknown', reused: true, externalWriteAttempted: false, delivery: first.delivery })
+    expect([f.tokenPayloads.length, f.formPayloads.length]).toEqual([1, 1]); expect(await f.proof()).toEqual(before)
+  })
   it('actual plugin capability becomes stale on deactivate and terminal stop leaves HTTP inactive', async () => {
     f.setEnablement('true')
     const stale = f.runtime.createPluginCapability(), before = await f.proof()

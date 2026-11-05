@@ -257,7 +257,7 @@ describe('Yida owner runtime control paths (NOT positive authority proof)', () =
     expect(settled).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps caller cancellation pending until the plugin returns and prevents preaborted callers from admission', async () => {
+  it('gate 1: a caller abort after admission neither aborts the port signal nor fails the run; a preaborted caller is refused before admission', async () => {
     const f = await active(), pending = deferred(), caller = new AbortController()
     let signal!: AbortSignal
     f.submit.mockImplementation((_input, options) => { signal = options.signal; return pending.promise })
@@ -265,14 +265,32 @@ describe('Yida owner runtime control paths (NOT positive authority proof)', () =
     run.then(settled, settled)
     await ticks()
     caller.abort()
-    expect(signal.aborted).toBe(true)
+    // The run signal handed to the plugin is the host lifetime signal only; the browser going away
+    // (timeout, unmount, dropped connection) is not a reason to burn the one-time attempt.
+    expect(signal.aborted).toBe(false)
     await ticks()
     expect(settled).not.toHaveBeenCalled()
     pending.resolve(delivered)
-    await expect(run).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_CANCELLED' })
+    await expect(run).resolves.toEqual(delivered)
     const before = f.coreFactory.mock.calls.length
     await expect(f.runtime.submit(actor, submission, { signal: caller.signal })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_CANCELLED' })
     expect(f.coreFactory).toHaveBeenCalledTimes(before)
+    await f.runtime.stop()
+  })
+
+  it('gate 1: a caller abort while the plugin is inside a host transaction does not reject its query receipt', async () => {
+    const gate = deferred<{ rows: Record<string, unknown>[]; rowCount: number | null }>(), consumed = vi.fn(), caller = new AbortController()
+    const f = await active({ factory: deps => ({ ...fakeAuthority(), observe: () => deps.database.transaction(async trx => {
+      consumed(await trx.query('synthetic query'))
+      return Object.freeze({ approval, delivery: null })
+    }) }), database: { transaction: work => work({ query: () => gate.promise }) } })
+    f.createSendPort.mockImplementation(options => ({ submit: async () => { await options.authority.observe(grant); return delivered }, inspect: vi.fn() }))
+    const run = f.runtime.submit(actor, submission, { signal: caller.signal })
+    await ticks()
+    caller.abort()
+    gate.resolve({ rows: [{ synthetic: true }], rowCount: 7 })
+    await expect(run).resolves.toEqual(delivered)
+    expect(consumed).toHaveBeenCalledTimes(1)
     await f.runtime.stop()
   })
 
@@ -406,6 +424,44 @@ describe('Yida owner runtime control paths (NOT positive authority proof)', () =
       await expect(run).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' })
       await f.runtime.stop()
     }
+  })
+
+  it('gate 6 (c4): a Response already received is handed to the port when the switch flips mid-flight; only the output recheck refuses', async () => {
+    const gate = deferred(), read = vi.fn(() => 'true'), received = vi.fn()
+    const f = await active({ readEnablement: read })
+    f.fetcher.mockImplementation(async () => { await gate.promise; return new Response('synthetic') })
+    f.createSendPort.mockImplementation(options => ({ submit: async () => {
+      received((await options.fetch('https://synthetic.invalid')) instanceof Response)
+      return delivered
+    }, inspect: vi.fn() }))
+    const run = f.runtime.submit(actor, submission)
+    await ticks()
+    read.mockReturnValue('false')
+    gate.resolve(null)
+    // The ledger (written by the plugin from that Response) is the record; the API answer is DISABLED.
+    await expect(run).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' })
+    expect(received).toHaveBeenCalledWith(true)
+    await f.runtime.stop()
+  })
+
+  it('gate 6 (c4): a Response already received is handed to the port when the host is stopped mid-flight; stop still drains it', async () => {
+    const gate = deferred(), received = vi.fn()
+    const f = await active()
+    f.fetcher.mockImplementation(async () => { await gate.promise; return new Response('synthetic') })
+    f.createSendPort.mockImplementation(options => ({ submit: async () => {
+      received((await options.fetch('https://synthetic.invalid')) instanceof Response)
+      return delivered
+    }, inspect: vi.fn() }))
+    const run = f.runtime.submit(actor, submission)
+    await ticks()
+    const stopping = f.runtime.stop(), stopped = vi.fn()
+    stopping.then(stopped)
+    await ticks()
+    expect(stopped).not.toHaveBeenCalled()
+    gate.resolve(null)
+    await expect(run).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_CANCELLED' })
+    expect(received).toHaveBeenCalledWith(true)
+    await stopping
   })
 
   it('closes foreign proxy rejections without inspecting their properties, preserving only own core brands', async () => {
@@ -620,7 +676,7 @@ describe('in-memory guard mutation probes (no repository writes)', () => {
         try { expect(done).not.toHaveBeenCalled() }
         finally { gate.resolve('synthetic-private'); await run.catch(() => {}); await f.runtime.stop() }
       } },
-      { name: 'drain/reject-retired-output', from: "if (terminal || state.closed || state !== active || (caller && abortedGetter.call(caller))) fail('CANCELLED')", to: '', test: async source => {
+      { name: 'drain/reject-retired-output', from: "if (terminal || state.closed || state !== active) fail('CANCELLED')", to: '', test: async source => {
         const gate = deferred<string>(), f = await active({ source, factory: deps => ({ ...fakeAuthority(), preview: async () => {
           deps.security.decrypt('enc:synthetic').catch(() => {})
           return selected

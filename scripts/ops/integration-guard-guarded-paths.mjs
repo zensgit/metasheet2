@@ -47,6 +47,7 @@ export const GUARDED_PATH_ENTRIES = Object.freeze([
   'packages/core-backend/src/context/request-context.ts',
   'packages/core-backend/src/core/logger.ts',
   'packages/core-backend/src/db/migrations/zzzz20261103130000_add_integration_yida_multi_target_slots.ts',
+  'packages/core-backend/src/db/migrations/zzzz20261105033000_add_integration_yida_delivery_audit_receipt_unparsed.ts',
   'packages/core-backend/src/index.ts',
   'packages/core-backend/src/integration/automation-live-authority.ts',
   'packages/core-backend/src/integration/yida-connection-test-runtime.ts',
