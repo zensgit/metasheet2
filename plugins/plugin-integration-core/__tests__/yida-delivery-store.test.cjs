@@ -67,6 +67,11 @@ test('the YiDa real-PG suites are registered in their real execution lane withou
   assert.equal(lane.length, 14)
   // A local run's report is gitignored, so a committed stale clean report cannot stand in for this run's.
   assert.equal(fs.readFileSync(path.join(root, '.gitignore'), 'utf8').split(/\r?\n/).includes('artifacts/yida-realdb/'), true)
+  // The checker's behaviour is tested only in this plugin chain, so a checker-only change must make the
+  // integration guard run it. Removing the roster entry (and its on.push.paths twin, which the wiring
+  // contract keeps set-equal) is itself a guarded-path change, so this assertion runs and goes red.
+  const { classify } = await import('../../../scripts/ops/integration-guard-classify.mjs')
+  assert.equal(classify(['scripts/ops/vitest-zero-skip.mjs']), true)
   for (const spec of specs) assert.equal(files.filter((token) => token === spec).length, 1)
   assert.deepEqual(files.filter((token) => !token.startsWith('-')).sort(), [...lane].sort())
   const config = ts.createSourceFile('vitest.config.ts', fs.readFileSync(path.join(root, 'packages/core-backend/vitest.config.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
