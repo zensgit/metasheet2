@@ -435,6 +435,7 @@ import { createMultitableAiRoutes } from './routes/multitable-ai'
 import { QueueServiceImpl } from './services/QueueService'
 import { createMultitableButtonRoutes } from './routes/multitable-button'
 import { createMultitableRecordApprovalRoutes } from './routes/multitable-record-approvals'
+import { createMultitableRecordTaskRoutes } from './routes/multitable-record-tasks'
 import { createMultitableCopySheetRoutes } from './routes/multitable-copy-sheet'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
@@ -2063,6 +2064,10 @@ export class MetaSheetServer {
       this.app.use(taskRoutes)
       pendingSourceRegistry.register(taskPendingSource)
     }
+    // The tasks dispatched from a multitable record (GET /api/multitable/sheets/:sheetId/records/
+    // :recordId/tasks), mounted only with the task routes. See routes/multitable-record-tasks.ts.
+    const recordTaskRoutes = createMultitableRecordTaskRoutes()
+    if (taskRoutes && recordTaskRoutes) this.app.use('/api/multitable', recordTaskRoutes)
     // 路由：审计日志（管理员）
     this.app.use(auditLogsRouter())
     // 路由：审批历史（从审计表衍生）

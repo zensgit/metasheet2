@@ -47,6 +47,21 @@
                 {{ t.detailRemindLabel }}{{ detailResult.task.remindAt ? formatViewerInstant(detailResult.task.remindAt, undefined, viewerLocale) : t.noReminder }}
               </p>
             </template>
+            <!-- Package 2 (S-G2): the record this task was dispatched from, for a task that has one. The
+                 link is built from the ids alone (tasks/taskSourceLink.ts) and resolved by the router;
+                 nothing is read from the record here, and the record page decides whether the viewer
+                 may open it. Without a usable link the row shows without one. A task dispatched before
+                 the structured source keeps the line its description already holds. -->
+            <p v-if="detailResult.task.source" class="tasks-view__detail-source" data-testid="tasks-detail-source">
+              {{ t.detailSourceLabel }}<router-link
+                v-if="detailSourceLink"
+                :to="detailSourceLink"
+                data-testid="tasks-detail-source-link"
+              >{{ t.detailSourceRecord }}</router-link><span
+                v-else
+                data-testid="tasks-detail-source-plain"
+              >{{ t.detailSourceRecord }}</span>
+            </p>
 
             <ul class="tasks-view__detail-assignees" data-testid="tasks-detail-assignees">
               <li
@@ -55,7 +70,12 @@
                 class="tasks-view__detail-assignee"
                 data-testid="tasks-detail-assignee"
               >
-                <span class="tasks-view__detail-assignee-id">{{ assignee.userId }}</span>
+                <span class="tasks-view__detail-assignee-id">{{ personName(assignee.userId) }}</span>
+                <span
+                  v-if="isDeactivatedPerson(assignee.userId)"
+                  class="tasks-view__person-inactive"
+                  data-testid="tasks-detail-person-inactive"
+                >{{ t.memberInactiveMark }}</span>
                 <span class="tasks-view__detail-assignee-status" data-testid="tasks-detail-assignee-status">
                   {{ assignee.completedAt ? fmt.completedAt(formatViewerInstant(assignee.completedAt, undefined, viewerLocale)) : t.assigneeNotDone }}
                 </span>
@@ -69,7 +89,24 @@
               </li>
             </ul>
 
-            <form v-if="canManageTaskMembers" class="tasks-view__add-assignee" data-testid="tasks-detail-add-assignee-form" @submit.prevent="onAddAssignee">
+            <!-- Package 1b: people are picked by name; the user-id form stays as the secondary entry,
+                 folded until it is asked for. -->
+            <div v-if="canManageTaskMembers" class="tasks-view__member-pick">
+              <button
+                type="button"
+                data-testid="tasks-detail-pick-assignee"
+                :disabled="detailActionPending"
+                @click="pickerMode = 'assignee'"
+              >{{ t.pickAssignee }}</button>
+              <button
+                type="button"
+                class="tasks-view__link-button"
+                data-testid="tasks-detail-add-assignee-by-id-toggle"
+                :aria-expanded="addAssigneeByIdOpen ? 'true' : 'false'"
+                @click="addAssigneeByIdOpen = !addAssigneeByIdOpen"
+              >{{ t.addByIdToggle }}</button>
+            </div>
+            <form v-if="canManageTaskMembers" v-show="addAssigneeByIdOpen" class="tasks-view__add-assignee" data-testid="tasks-detail-add-assignee-form" @submit.prevent="onAddAssignee">
               <input
                 v-model="newAssigneeId"
                 type="text"
@@ -254,7 +291,12 @@
               <h3>{{ t.followersHeading }}</h3>
               <ul v-if="followersState !== null" data-testid="tasks-detail-followers">
                 <li v-for="followerId in followersState" :key="followerId" data-testid="tasks-detail-follower">
-                  <span>{{ followerId }}</span>
+                  <span>{{ personName(followerId) }}</span>
+                  <span
+                    v-if="isDeactivatedPerson(followerId)"
+                    class="tasks-view__person-inactive"
+                    data-testid="tasks-detail-person-inactive"
+                  >{{ t.memberInactiveMark }}</span>
                   <button
                     v-if="canManageTaskMembers"
                     type="button"
@@ -267,7 +309,22 @@
               <p v-else class="tasks-view__message" data-testid="tasks-detail-followers-unknown">
                 {{ t.followersUnknown }}
               </p>
-              <form v-if="canManageTaskMembers" class="tasks-view__add-follower" data-testid="tasks-detail-add-follower-form" @submit.prevent="onAddFollower">
+              <div v-if="canManageTaskMembers" class="tasks-view__member-pick">
+                <button
+                  type="button"
+                  data-testid="tasks-detail-pick-follower"
+                  :disabled="detailActionPending"
+                  @click="pickerMode = 'follower'"
+                >{{ t.pickFollower }}</button>
+                <button
+                  type="button"
+                  class="tasks-view__link-button"
+                  data-testid="tasks-detail-add-follower-by-id-toggle"
+                  :aria-expanded="addFollowerByIdOpen ? 'true' : 'false'"
+                  @click="addFollowerByIdOpen = !addFollowerByIdOpen"
+                >{{ t.addByIdToggle }}</button>
+              </div>
+              <form v-if="canManageTaskMembers" v-show="addFollowerByIdOpen" class="tasks-view__add-follower" data-testid="tasks-detail-add-follower-form" @submit.prevent="onAddFollower">
                 <input
                   v-model="newFollowerId"
                   type="text"
@@ -291,6 +348,15 @@
                 {{ codeMessage(followerError, t) }}
               </p>
             </section>
+
+            <TaskPeoplePicker
+              v-if="canManageTaskMembers"
+              :visible="pickerMode !== null"
+              :mode="pickerMode ?? 'assignee'"
+              :before-request="peopleIdentityHolds"
+              @confirm="onPickerConfirm"
+              @close="pickerMode = null"
+            />
 
             <!-- M3 §3.6: comments. Tombstones render as 已删除; edit/delete gated by
                  `canEditOwnComment` (own-comment only — see the script for the "id unavailable"
@@ -688,8 +754,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { onAuthSessionSwitch } from '../../composables/authPrincipal'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
 import { TASKS_EN, TASKS_FMT_EN, TASKS_FMT_ZH, TASKS_ZH, codeMessage, type TasksText } from '../../tasks/labels'
@@ -706,6 +773,7 @@ import {
   deleteTask,
   editComment,
   getTask,
+  getTaskPeople,
   leaveTask,
   listAllTaskLists,
   listComments,
@@ -723,11 +791,14 @@ import {
   type TaskDetail,
   type TaskListItem,
   type TaskPatch,
+  type TaskPerson,
   type TaskStatusFilter,
   type TaskView,
   type WriteFailure,
 } from '../../tasks/tasksApi'
+import { readDispatchIdentity } from '../../tasks/recordTaskDispatchIdentity'
 import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
+import { taskSourceRecordPath } from '../../tasks/taskSourceLink'
 import { formatDueDisplay, formatStartDisplay, formatViewerInstant } from '../../tasks/tasksDateDisplay'
 import { focusAfterSwap } from '../../tasks/tasksFocus'
 import { onListsChanged } from '../../tasks/tasksListsBus'
@@ -755,6 +826,7 @@ import {
   type EditorState,
   type TaskDraft,
 } from '../../tasks/tasksDraft'
+import TaskPeoplePicker, { type TaskPeoplePicked, type TaskPeoplePickerMode } from '../../tasks/TaskPeoplePicker.vue'
 import TaskDetailEditor from './TaskDetailEditor.vue'
 import TaskDetailLists, { type DetailListsError, type MyListsState } from './TaskDetailLists.vue'
 import TaskListsSidebar from './TaskListsSidebar.vue'
@@ -837,6 +909,11 @@ type DetailRenderState =
   | { kind: 'error' }
 
 const detailResult = ref<DetailRenderState>({ kind: 'loading' })
+// Package 2 (S-G2): the app path of the source record, or `null` (no source, or no link can be built).
+const detailSourceLink = computed<string | null>(() => {
+  const state = detailResult.value
+  return state.kind === 'ok' && state.task.source ? taskSourceRecordPath(state.task.source) : null
+})
 
 const orgMissingFromAction = ref(false)
 
@@ -911,6 +988,39 @@ const canLeaveCurrentTask = computed(() => {
 })
 const newFollowerId = ref('')
 const followerError = ref<string | null>(null)
+// Package 1b: the people picker, the folded user-id forms, and the names on the task
+// (`GET /api/tasks/:id/people`). The names are kept only from an `ok` answer; anything else leaves
+// the ids as they are.
+const pickerMode = ref<TaskPeoplePickerMode | null>(null)
+const addAssigneeByIdOpen = ref(false)
+const addFollowerByIdOpen = ref(false)
+const taskPeople = shallowRef<Map<string, TaskPerson> | null>(null)
+let taskPeopleGeneration = 0
+// The identity (`readDispatchIdentity`: the user and org a request would carry, read the way the
+// record dispatch dialog reads it) the names and the picker's rows on screen belong to. When another
+// one is seen — a storage change from another tab, a session switch in this tab, right before a
+// picker search, or when a names answer lands — the names are dropped, a names read still out is
+// dropped with them, the picker closes, and the page holds the new identity from then on (the next
+// detail read loads that account's names). A token refresh for the same user and org is not a
+// change. Client-side and compared for equality only; the server checks every request.
+let peopleIdentity = readDispatchIdentity()
+// How many times another identity has been seen (each time `peopleIdentityHolds` takes a new one). A
+// batch of picked people is bound to the count it started under, so a switch away and back during
+// the batch still ends it: coming back to the starting identity does not resume the writes.
+let peopleIdentitySwitches = 0
+
+/** `true` while the identity a request would carry is the one the names belong to; otherwise drops
+ *  the names and closes the picker (see above), takes the new identity and answers `false`. */
+function peopleIdentityHolds(): boolean {
+  const current = readDispatchIdentity()
+  if (current === peopleIdentity) return true
+  peopleIdentity = current
+  peopleIdentitySwitches += 1
+  taskPeople.value = null
+  taskPeopleGeneration += 1
+  pickerMode.value = null
+  return false
+}
 
 // Row-level abilities from the detail body (contract §3.2). `false` hides the controls the server
 // would answer with its uniform 404; an absent flag (an older body) leaves them visible, and the
@@ -1128,6 +1238,34 @@ async function loadDetail(id: string): Promise<void> {
   if (mine !== detailGeneration) return
   detailResult.value = result.kind === 'ok' ? { kind: 'ok', task: result.task } : { kind: result.kind }
   if (result.kind === 'ok' && result.task.followers !== undefined) followersState.value = result.task.followers
+  if (result.kind === 'ok') void loadTaskPeople(id)
+}
+
+/** Package 1b: the names on the task. Read after every detail read; only an `ok` answer for the
+ *  task still on screen is kept. A failure, a thrown call or any other answer changes nothing. */
+async function loadTaskPeople(id: string): Promise<void> {
+  // Asked under the identity held from here on: one seen to differ now is taken first.
+  peopleIdentityHolds()
+  taskPeopleGeneration += 1
+  const mine = taskPeopleGeneration
+  let result: Awaited<ReturnType<typeof getTaskPeople>> | undefined
+  try {
+    result = await getTaskPeople(id)
+  } catch {
+    return
+  }
+  if (mine !== taskPeopleGeneration || taskId.value !== id) return
+  // An answer that lands under another identity than the one it was asked under is dropped.
+  if (!peopleIdentityHolds()) return
+  if (result && result.kind === 'ok') taskPeople.value = result.people
+}
+
+function personName(userId: string): string {
+  return taskPeople.value?.get(userId)?.name || userId
+}
+
+function isDeactivatedPerson(userId: string): boolean {
+  return taskPeople.value?.get(userId)?.status === 'inactive'
 }
 
 /** M3: a SECOND read the detail page needs — `GET /api/tasks/:id` (`loadDetail` above) does not
@@ -1510,6 +1648,66 @@ async function onAddAssignee(): Promise<void> {
   } finally {
     if (token === detailActionToken) detailActionPending.value = false
   }
+}
+
+/** Package 1b: the picker's people, added one at a time through the same write as the user-id form,
+ *  in the order they were ticked; the first failure stops the rest and shows next to the form.
+ *  The batch belongs to the identity the picker's rows were read under (see `peopleIdentityHolds`):
+ *  one seen to differ right before a write (the first included) or when an answer lands, or a switch
+ *  away and back in between, ends it there: the rest is not sent and that answer is not applied. */
+async function addPickedMembers(kind: TaskPeoplePickerMode, userIds: string[]): Promise<void> {
+  const id = taskId.value
+  if (!id || userIds.length === 0 || detailActionPending.value) return
+  const switchesAtStart = peopleIdentitySwitches
+  const batchIdentityHolds = () => peopleIdentityHolds() && peopleIdentitySwitches === switchesAtStart
+  const setError = (code: string | null) => {
+    if (kind === 'assignee') membershipError.value = code
+    else followerError.value = code
+  }
+  setError(null)
+  actionErrorKind.value = null
+  const token = ++detailActionToken
+  detailActionPending.value = true
+  let added = false
+  let failed = false
+  try {
+    for (const userId of userIds) {
+      if (!batchIdentityHolds()) {
+        if (added) notifyTasksChanged()
+        return
+      }
+      const result = kind === 'assignee' ? await addAssignee(id, userId) : await addFollower(id, userId)
+      if (token !== detailActionToken) {
+        if (added || result.kind === 'ok') notifyTasksChanged()
+        return
+      }
+      // A write that went through is still announced (the counts are read again under whoever is
+      // signed in now); nothing from the answer reaches the page and the detail is not read again.
+      if (!batchIdentityHolds()) {
+        if (added || result.kind === 'ok') notifyTasksChanged()
+        return
+      }
+      if (result.kind !== 'ok') {
+        applyDetailFailure(result, (code) => setError(code))
+        failed = true
+        break
+      }
+      added = true
+      if (kind === 'follower' && 'followers' in result.task) followersState.value = result.task.followers
+    }
+    if (!added) return
+    if (!failed) orgMissingFromAction.value = false
+    notifyTasksChanged()
+    await loadDetail(id)
+  } finally {
+    if (token === detailActionToken) detailActionPending.value = false
+  }
+}
+
+function onPickerConfirm(picked: TaskPeoplePicked): void {
+  const kind = pickerMode.value
+  pickerMode.value = null
+  if (kind) void addPickedMembers(kind, picked.ids)
 }
 
 async function onRemoveAssignee(userId: string): Promise<void> {
@@ -2046,8 +2244,16 @@ const unsubscribeLists = onListsChanged(() => {
   if (contextState.value?.state === 'ready' && taskId.value) void loadMyLists()
 })
 
+// The names' identity (see `peopleIdentityHolds`): checked on a session switch in this tab and on a
+// storage change from another tab, which this tab is not otherwise told about.
+const stopPeopleSessionSwitch = onAuthSessionSwitch(() => { peopleIdentityHolds() })
+const onPeopleStorage = () => { peopleIdentityHolds() }
+if (typeof window !== 'undefined') window.addEventListener('storage', onPeopleStorage)
+
 onBeforeUnmount(() => {
   unsubscribeLists()
+  stopPeopleSessionSwitch()
+  if (typeof window !== 'undefined') window.removeEventListener('storage', onPeopleStorage)
   clearSearchTimer()
 })
 
@@ -2159,6 +2365,11 @@ watch(taskId, (id) => {
   followersState.value = null
   newFollowerId.value = ''
   followerError.value = null
+  pickerMode.value = null
+  addAssigneeByIdOpen.value = false
+  addFollowerByIdOpen.value = false
+  taskPeople.value = null
+  taskPeopleGeneration += 1
   newCommentBody.value = ''
   commentError.value = null
   editingCommentId.value = null
@@ -2194,6 +2405,28 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+.tasks-view__member-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.tasks-view__link-button {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--ms-color-primary, #409eff);
+  cursor: pointer;
+}
+
+.tasks-view__person-inactive {
+  margin-left: 4px;
+  font-size: 12px;
+  color: #909399;
+}
+
 .tasks-view {
   padding: 24px;
 }
