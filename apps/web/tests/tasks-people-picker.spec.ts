@@ -400,7 +400,7 @@ describe('TaskPeoplePicker', () => {
     expect(confirmed).toEqual([])
   })
 
-  it('in the millisecond the picker opens: Esc stops at the picker, and Enter in the search box is held back', async () => {
+  it('in the millisecond the picker opens: Esc stops at the picker from the box and its buttons, Enter is held back in the box only, typing is untouched', async () => {
     // Vue stamps an event at the first of its listeners it reaches and skips any later one attached
     // in that millisecond; with the clock held there, a second listener inside the picker would let
     // the Esc through.
@@ -411,15 +411,23 @@ describe('TaskPeoplePicker', () => {
       const { el, closed, confirmed } = mountPicker('assignee')
       const reachedParent: string[] = []
       el.addEventListener('keydown', (event) => { reachedParent.push(event.key) })
-      const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
-      q(el, 'search')!.dispatchEvent(enter)
-      expect(enter.defaultPrevented).toBe(true)
-      const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
-      q(el, 'search')!.dispatchEvent(esc)
-      expect(esc.defaultPrevented).toBe(true)
+      const press = (id: string, key: string) => {
+        const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
+        q(el, id)!.dispatchEvent(event)
+        return event
+      }
+      // Typing in the search box is left alone; Enter there is held back but still bubbles.
+      expect(press('search', 'a').defaultPrevented).toBe(false)
+      expect(press('search', 'Enter').defaultPrevented).toBe(true)
+      // Enter on the picker's own buttons is left to them.
+      expect(press('confirm', 'Enter').defaultPrevented).toBe(false)
+      expect(press('cancel', 'Enter').defaultPrevented).toBe(false)
+      // Esc from the box or a button closes the picker and goes no further.
+      expect(press('search', 'Escape').defaultPrevented).toBe(true)
+      expect(press('cancel', 'Escape').defaultPrevented).toBe(true)
       await flush()
-      expect(closed.count).toBe(1)
-      expect(reachedParent).toEqual(['Enter'])
+      expect(closed.count).toBe(2)
+      expect(reachedParent).toEqual(['a', 'Enter', 'Enter', 'Enter'])
       expect(confirmed).toEqual([])
     } finally {
       now.mockRestore()
