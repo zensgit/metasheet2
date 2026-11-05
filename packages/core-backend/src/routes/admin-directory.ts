@@ -45,6 +45,10 @@ import {
   testDingTalkWorkNotificationAgentId,
 } from '../integrations/dingtalk/work-notification-settings'
 import {
+  buildDingTalkWorkNotificationVerifyAuditMeta,
+  verifyDingTalkWorkNotificationIntegration,
+} from '../integrations/dingtalk/work-notification-verify'
+import {
   generateApprovalCardLinkSecret,
   getApprovalCardConfigStatus,
   saveApprovalCardPublicAppUrl,
@@ -372,6 +376,10 @@ export function adminDirectoryRouter(): Router {
     }
   })
 
+  // PRE-SWITCH check, unchanged: the service builds the tuple env-first per field (and lets the request
+  // override the Agent ID), which is not the integration-scoped resolution. Its result says so
+  // (`credentialResolution: 'pre_switch_env_first'`, `integrationScopedEvidence: false`); the check for
+  // that resolution is POST /dingtalk/work-notification/verify below.
   router.post('/dingtalk/work-notification/test', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
@@ -402,6 +410,7 @@ export function adminDirectoryRouter(): Router {
     }
   })
 
+  // PRE-SWITCH check before the save, unchanged (same env-first rule as /test; see the note there).
   router.put('/dingtalk/work-notification', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
@@ -426,6 +435,50 @@ export function adminDirectoryRouter(): Router {
       jsonOk(res, { result })
     } catch (error) {
       sendDirectoryConfigFailure(res, error, 'DINGTALK_WORK_NOTIFICATION_SAVE_FAILED', 'Failed to save DingTalk work notification Agent ID', DINGTALK_CONFIG_FIXED_SENTENCES)
+    }
+  })
+
+  // Explicit verification of ONE integration's work-notification credentials, resolved the way the
+  // integration-scoped send path resolves them (work-notification-verify.ts), at the requested level of
+  // evidence (config / token / send). The verdict is a 200 REPORT (`result.passed`), failure included; 400
+  // is for a request that cannot be run (no uuid, bad level, no recipient at level send) or a failure to
+  // read the row (encryption material, database). Does not read or change the switch.
+  router.post('/dingtalk/work-notification/verify', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    const body = (req.body ?? {}) as Record<string, unknown>
+    // Required here, unlike the status route: there is deliberately no "preferred integration" fallback.
+    const integrationId = typeof body.integrationId === 'string' ? body.integrationId.trim() : ''
+    if (!UUID_SHAPE_RE.test(integrationId)) {
+      jsonError(res, 400, ID_PARAM_INVALID.integrationId.code, ID_PARAM_INVALID.integrationId.message)
+      return
+    }
+
+    try {
+      const result = await verifyDingTalkWorkNotificationIntegration({
+        integrationId,
+        level: body.level,
+        recipientUserId: body.recipientUserId,
+      })
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'verify',
+        resourceType: 'dingtalk-work-notification-verification',
+        resourceId: integrationId,
+        meta: buildDingTalkWorkNotificationVerifyAuditMeta(result, body.recipientUserId),
+      })
+      logger.info('DingTalk work-notification verification', {
+        integrationId,
+        requestedLevel: result.requestedLevel,
+        reachedLevel: result.reachedLevel,
+        passed: result.passed,
+        failureLevel: result.failure?.level ?? null,
+        failureCode: result.failure?.code ?? null,
+      })
+      jsonOk(res, { result })
+    } catch (error) {
+      sendDirectoryConfigFailure(res, error, 'DINGTALK_WORK_NOTIFICATION_VERIFY_FAILED', 'Failed to verify DingTalk work notification integration', DINGTALK_CONFIG_FIXED_SENTENCES)
     }
   })
 
