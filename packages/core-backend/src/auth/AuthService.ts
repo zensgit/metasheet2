@@ -56,7 +56,7 @@ interface UserRow extends User {
 }
 
 const USER_AUTH_SELECT =
-  'id, email, username, mobile, name, role, permissions, password_hash, is_active, must_change_password, activation_status, local_password_set, created_at, updated_at'
+  'id, email, username, mobile, name, role, permissions, password_hash, access_generation, is_active, must_change_password, activation_status, local_password_set, created_at, updated_at'
 
 export interface TokenPayload {
   userId: string
@@ -602,6 +602,7 @@ export class AuthService {
             activation_status: row.activation_status,
             local_password_set: row.local_password_set,
             password_hash: row.password_hash,
+            access_generation: Number(row.access_generation ?? 0),
             deleted_at: (row as UserRow & { deleted_at?: string | null }).deleted_at ?? null,
             purged_at: (row as UserRow & { purged_at?: string | null }).purged_at ?? null,
             created_at: row.created_at,
@@ -731,6 +732,7 @@ export class AuthService {
       activation_status: row.activation_status,
       local_password_set: row.local_password_set,
       password_hash: row.password_hash,
+      access_generation: Number(row.access_generation ?? 0),
       deleted_at: (row as UserRow & { deleted_at?: string | null }).deleted_at ?? null,
       purged_at: (row as UserRow & { purged_at?: string | null }).purged_at ?? null,
       created_at: row.created_at,
@@ -1004,10 +1006,12 @@ export class AuthService {
       const refreshedToken = this.createToken(refreshedUser, { sid: sessionId })
       const refreshedPayload = this.readTokenPayload(refreshedToken)
       if (refreshedPayload?.exp) {
-        await createUserSession(user.id, {
+        const session = await createUserSession(user.id, {
           sessionId,
+          expectedAccessGeneration: Number(user.access_generation ?? 0),
           expiresAt: new Date(refreshedPayload.exp * 1000).toISOString(),
         })
+        if (!session) return null
       }
 
       return refreshedToken
