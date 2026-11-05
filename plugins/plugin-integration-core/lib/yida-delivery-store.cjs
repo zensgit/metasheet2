@@ -13,7 +13,7 @@ const SNAPSHOT_KEYS = Object.freeze([
   'owner_id', 'target_ref', 'target_revision', 'plan_revision', 'payload_digest',
   'business_key_digest', 'credential_ref', 'credential_generation', 'intent', 'instance_id',
 ])
-// Mirrors the audit reason CHECK: 090 (first four) widened by migration zzzz20261104150000
+// Mirrors the audit reason CHECK: 090 (first four) widened by migration zzzz20261105033000
 // (receipt_unparsed = a 2xx status line was received but its body was unusable; R-71 ⑦.1 gate 6).
 const UNKNOWN_REASONS = new Set([
   'transport_unknown', 'commit_unknown', 'receipt_invalid', 'manual_recovery', 'receipt_unparsed',

@@ -327,7 +327,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
         .YIDA_MULTI_TARGET_UP_SQL as string
     }
     // Gate 6 (a2): the audit reason CHECK widened by receipt_unparsed, as production migrates it.
-    receiptUnparsedUp = (await load('packages/core-backend/src/db/migrations/zzzz20261104150000_add_integration_yida_delivery_audit_receipt_unparsed.ts'))
+    receiptUnparsedUp = (await load('packages/core-backend/src/db/migrations/zzzz20261105033000_add_integration_yida_delivery_audit_receipt_unparsed.ts'))
       .YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL as string
     const route = await load('packages/core-backend/src/routes/integration-yida-owner.ts')
     createRouter = route.createIntegrationYidaOwnerRouter as typeof createRouter

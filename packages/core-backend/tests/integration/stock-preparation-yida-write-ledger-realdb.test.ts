@@ -22,7 +22,7 @@ const PIN = 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED'
 const migration = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '090_create_integration_yida_delivery_ledger.sql')
 // Gate 6 (a2): widens the audit reason CHECK by receipt_unparsed; its exported SQL is what up()/down() execute.
 const receiptUnparsedMigration = path.join(repoRoot, 'packages', 'core-backend', 'src', 'db', 'migrations',
-  'zzzz20261104150000_add_integration_yida_delivery_audit_receipt_unparsed.ts')
+  'zzzz20261105033000_add_integration_yida_delivery_audit_receipt_unparsed.ts')
 type ReceiptUnparsedMigration = {
   YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL: string
   YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_DOWN_SQL: string
@@ -781,7 +781,7 @@ describeIfDatabase('SA05B1 Yida delivery ledger — real PostgreSQL, no transpor
     expect(await counts()).toEqual({ ledger: 1, audit: 1 })
   })
 
-  it('zzzz20261104150000 widens the audit reason CHECK to receipt_unparsed under the canonical name; the 090 reasons and shape CHECK stand', async () => {
+  it('zzzz20261105033000 widens the audit reason CHECK to receipt_unparsed under the canonical name; the 090 reasons and shape CHECK stand', async () => {
     const reasons = [...REASONS_090, 'receipt_unparsed']
     for (const reason of reasons) {
       const input = fixture({ rowKey: `synthetic-row-${reason}` })
@@ -806,7 +806,7 @@ describeIfDatabase('SA05B1 Yida delivery ledger — real PostgreSQL, no transpor
     expect(checks.some((check) => check.conname === 'integration_yida_delivery_audit_shape')).toBe(true)
   })
 
-  it('zzzz20261104150000 down refuses while a receipt_unparsed audit row exists (append-only evidence)', async () => {
+  it('zzzz20261105033000 down refuses while a receipt_unparsed audit row exists (append-only evidence)', async () => {
     await first.store.prepare(fixture())
     const claimed = await first.store.claim(actor())
     await first.store.markUnknown({ ...actor(), claimToken: claimed.claimToken, reason: 'receipt_unparsed' })
@@ -823,7 +823,7 @@ describeIfDatabase('SA05B1 Yida delivery ledger — real PostgreSQL, no transpor
     expect((await second.store.markUnknown({ ...actor(input), claimToken: next.claimToken, reason: 'receipt_unparsed' })).status).toBe('outcome_unknown')
   })
 
-  it('zzzz20261104150000 down without such rows restores the exact 090 reason set, and up re-widens; both replay as no-ops', async () => {
+  it('zzzz20261105033000 down without such rows restores the exact 090 reason set, and up re-widens; both replay as no-ops', async () => {
     await owner.query(receiptUnparsed.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_DOWN_SQL)
     await owner.query(receiptUnparsed.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_DOWN_SQL) // replay: already narrow
     await first.store.prepare(fixture())

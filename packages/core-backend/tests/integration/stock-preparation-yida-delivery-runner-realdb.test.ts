@@ -282,9 +282,9 @@ describeDatabase('SA05C1 single-row delivery composition — real PG, synthetic 
     createRunner = (await nativeImport(pathToFileURL(path.join(lib, 'yida-delivery-runner.mjs')).href)).createYidaDeliveryRunner as typeof createRunner
     migrationSql = ['090_create_integration_yida_delivery_ledger.sql', '091_create_integration_yida_create_fence.sql']
       .map(file => readFileSync(path.join(root, 'packages/core-backend/migrations', file), 'utf8')).join('\n')
-    // Gate 6 (a2): the audit reason CHECK as widened by zzzz20261104150000, exactly what its up() executes.
+    // Gate 6 (a2): the audit reason CHECK as widened by zzzz20261105033000, exactly what its up() executes.
     const receiptUnparsed = await import(pathToFileURL(path.join(root,
-      'packages/core-backend/src/db/migrations/zzzz20261104150000_add_integration_yida_delivery_audit_receipt_unparsed.ts')).href) as
+      'packages/core-backend/src/db/migrations/zzzz20261105033000_add_integration_yida_delivery_audit_receipt_unparsed.ts')).href) as
       { YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL: string }
     migrationSql += '\n' + receiptUnparsed.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL
     materialMigrationSql = readFileSync(path.join(root, 'packages/core-backend/migrations/092_create_integration_yida_credential_materials.sql'), 'utf8')
@@ -517,7 +517,7 @@ describeDatabase('SA05C1 single-row delivery composition — real PG, synthetic 
     h.businessFetch = async () => {
       if (mode === 'network') throw new Error('synthetic-private-network-detail')
       // refused: a non-2xx stays receipt_invalid. receipt: a 2xx with an unusable body is receipt_unparsed (a2),
-      // which the real CHECK accepts only because the fixture applied zzzz20261104150000.
+      // which the real CHECK accepts only because the fixture applied zzzz20261105033000.
       return new Response('{not-json', { status: mode === 'refused' ? 500 : 200 })
     }
     safe(await h.runner.run(request()), 'outcome_unknown', true)
