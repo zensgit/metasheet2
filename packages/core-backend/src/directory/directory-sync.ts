@@ -79,7 +79,13 @@ import {
   lockUsersForAccessGraphWrite,
   supersedeDeprovisionEvidenceForAccessGraphWrite,
   type AccessGraphTransactionClient,
+  type LockedAccessGraphUser,
 } from './access-graph-mutex'
+import {
+  evaluateDirectorySyncLocalAccountGate,
+  resolveDirectorySyncMembershipWrite,
+  type DirectorySyncLocalAccountSnapshot,
+} from './directory-sync-membership-gate'
 
 const logger = new Logger('DirectorySync')
 const DEFAULT_ORG_ID = 'default'
@@ -3604,6 +3610,8 @@ async function lockDirectorySyncAccessGraphUsers(
   },
 ): Promise<{
   lockedUserIds: Set<string>
+  /** The locked `users` rows themselves (post-lock state) — the membership gate reads these. */
+  lockedUsers: Map<string, LockedAccessGraphUser>
   openRehireAccountIds: Set<string>
   priorAccessByExternalUserId: Map<string, DirectorySyncPriorAccessRow>
 }> {
@@ -3738,6 +3746,7 @@ async function lockDirectorySyncAccessGraphUsers(
 
   return {
     lockedUserIds: new Set(lockedUsers.keys()),
+    lockedUsers,
     openRehireAccountIds: new Set(
       openRehireEvidence.rows
         .map((row) => normalizeText(row.account_id))
@@ -4385,6 +4394,12 @@ export async function syncDirectoryIntegration(
       const changedAccessGraphUserIds = new Set<string>()
       const alreadySupersededUserIds = new Set<string>()
       const newlyAdmittedUserIds = new Set<string>()
+      // Local-account snapshot of each user created in THIS transaction: those rows were not
+      // part of the mutex inventory, so the membership gate reads the creation result instead.
+      const newlyAdmittedUserSnapshots = new Map<string, DirectorySyncLocalAccountSnapshot>()
+      // Membership confirmations the local-account gate declined this run (existing users that
+      // fail the shared authentication gate, and users created in pending-activation mode).
+      let membershipWritesSkippedLocalAccountGateCount = 0
 
       // R5: created-vs-updated split for the run summary. `departmentsSynced`/`accountsSynced`
       // conflate "0 new" and "500 new"; the discriminator is `(xmax = 0)` on the upserted row —
@@ -4770,6 +4785,13 @@ export async function syncDirectoryIntegration(
                 }
                 localUserId = created.userId
                 newlyAdmittedUserIds.add(created.userId)
+                newlyAdmittedUserSnapshots.set(created.userId, {
+                  isActive: created.isActive,
+                  role: created.role,
+                  activationStatus: created.activationStatus,
+                  deletedAt: null,
+                  purgedAt: null,
+                })
                 if (
                   existing?.local_user_id
                   && existing.local_user_id !== created.userId
@@ -4838,6 +4860,15 @@ export async function syncDirectoryIntegration(
             'Directory sync resolved a local user after the mutex inventory; retry the run',
           )
         }
+        // The local account this sync may act on: the row locked by the mutex inventory, or the
+        // creation snapshot of a user admitted in this transaction. Evaluated once per account
+        // and reused by the entering-side evidence rule below and the membership write.
+        const localUser: DirectorySyncLocalAccountSnapshot | undefined = localUserId
+          ? (newlyAdmittedUserSnapshots.get(localUserId) ?? syncAccess.lockedUsers.get(localUserId))
+          : undefined
+        const localAccountDenial = localUser ? evaluateDirectorySyncLocalAccountGate(localUser) : null
+        const localAccountPassesGate = localUser !== undefined && localAccountDenial === null
+
         const priorLinkedUserId =
           existing?.link_status === 'linked' ? existing.local_user_id : null
         const nextLinkedUserId = linkStatus === 'linked' ? localUserId : null
@@ -4846,7 +4877,16 @@ export async function syncDirectoryIntegration(
           || existing?.link_status !== linkStatus
         ) {
           if (priorLinkedUserId) changedAccessGraphUserIds.add(priorLinkedUserId)
-          if (nextLinkedUserId && !newlyAdmittedUserIds.has(nextLinkedUserId)) {
+          // Entering side: a link that now points at a local account counts as an access-graph
+          // change (and supersedes that user's applied deprovision evidence) only when the local
+          // account itself passes the shared authentication gate. A link confirmed for an
+          // inactive, recycled or pending account changes no access, so it keeps its evidence
+          // and its access generation. The leaving side above is unchanged.
+          if (
+            nextLinkedUserId
+            && !newlyAdmittedUserIds.has(nextLinkedUserId)
+            && localAccountPassesGate
+          ) {
             changedAccessGraphUserIds.add(nextLinkedUserId)
           }
         }
@@ -4878,12 +4918,22 @@ export async function syncDirectoryIntegration(
           && existing?.link_status === 'linked'
           && existing.local_user_id === localUserId
           && linkStatus === 'linked'
-        if (
-          linkStatus === 'linked'
-          && localUserId
-          && account.is_active
-          && !preservesOpenRehireEvidence
-        ) {
+        //
+        // Local-account gate (directory-sync-membership-gate.ts): on top of the link, account
+        // and open-rehire conditions above, the membership is confirmed only for a local account
+        // that passes the shared user authentication gate. An external directory member who is
+        // locally inactive, in the recycle bin, role-disabled or pending activation does not
+        // receive an active membership from sync; activation and restore are their own flows.
+        // A user created in pending-activation mode in this transaction is declined here for
+        // the same reason (its creation snapshot is pending), matching the admission helper.
+        const membershipDecision = resolveDirectorySyncMembershipWrite({
+          linkStatus,
+          localUserId,
+          accountActive: account.is_active,
+          preservesOpenRehireEvidence,
+          localUser,
+        })
+        if (membershipDecision.write && localUserId) {
           const membershipChanged = await upsertActiveUserOrgMembership(client, {
             userId: localUserId,
             orgId: integration.org_id,
@@ -4891,6 +4941,8 @@ export async function syncDirectoryIntegration(
           if (membershipChanged && !newlyAdmittedUserIds.has(localUserId)) {
             changedAccessGraphUserIds.add(localUserId)
           }
+        } else if (membershipDecision.write === false && membershipDecision.reason === 'local_account_gate') {
+          membershipWritesSkippedLocalAccountGateCount += 1
         }
 
         await client.query(
@@ -5061,6 +5113,10 @@ export async function syncDirectoryIntegration(
         autoAdmissionSkippedMissingEmailCount,
         autoAdmissionExcludedCount,
         autoAdmissionFailedCount,
+        // Additive: membership confirmations the local-account gate declined this run (see the
+        // write site in the link loop). Counts existing users that fail the shared
+        // authentication gate and users created in pending-activation mode.
+        membershipWritesSkippedLocalAccountGateCount,
         memberGroupsCreatedCount: memberGroupProjection.memberGroupsCreatedCount,
         memberGroupsSyncedCount: memberGroupProjection.memberGroupsSyncedCount,
         memberGroupMembershipsUpdatedCount: memberGroupProjection.memberGroupMembershipsUpdatedCount,
@@ -6591,7 +6647,13 @@ async function createDirectoryAdmittedUserInTransaction(
     enableDingTalkGrant: boolean
     expectedPriorLocalUserId?: string | null
   },
-): Promise<{ userId: string }> {
+): Promise<{
+  userId: string
+  /** The created row's activation axis, as written — the sync loop's membership gate reads it. */
+  isActive: boolean
+  activationStatus: 'pending_activation' | 'activated'
+  role: 'user'
+}> {
   const userId = crypto.randomUUID()
   // T1: pending-create runtime is default OFF. When enabled, admit creates pending users
   // (is_active=false, no active user_orgs, grant off). When off, preserve pre-T1 behavior.
@@ -6766,7 +6828,7 @@ async function createDirectoryAdmittedUserInTransaction(
   }
   await client.query('RELEASE SAVEPOINT directory_admit_user')
 
-  return { userId }
+  return { userId, isActive, activationStatus, role: 'user' }
 }
 
 /** Narrow internal seams for invariants that are not independently observable at public APIs. */
