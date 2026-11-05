@@ -56,8 +56,8 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run
   expect(process.env.DATABASE_URL).toBeTruthy()
 })
 
-const ADMIN_USER_ID = `f01_admin_${TS}`
-const DEPT_IN = `f01din${TS}`
+const ADMIN_USER_ID = `uip_admin_${TS}`
+const DEPT_IN = `uipdin${TS}`
 
 // ---------------------------------------------------------------------------------------------
 // DingTalk pull state: one department in admission scope; the member list is switched per
@@ -81,10 +81,10 @@ function setPulledMembers(members: PulledMember[]) {
 
 function member(suffix: string, extra: { email?: string; mobile?: string } = {}): PulledMember {
   return {
-    userId: `f01u${suffix}${TS}`,
+    userId: `uipu${suffix}${TS}`,
     name: `Member ${suffix}`,
-    unionId: `f01union${suffix}${TS}`,
-    openId: `f01open${suffix}${TS}`,
+    unionId: `uipunion${suffix}${TS}`,
+    openId: `uipopen${suffix}${TS}`,
     ...extra,
   }
 }
@@ -137,9 +137,9 @@ const createdUserIds = new Set<string>([ADMIN_USER_ID])
 
 async function createIntegration(suffix: string, admissionMode: 'manual_only' | 'auto_for_scoped_departments') {
   const integration = await createDirectoryIntegration({
-    name: `f01-${suffix}-${TS}`,
-    corpId: `f01corp${suffix}${TS}`,
-    appKey: `f01-appkey-${suffix}-${TS}`,
+    name: `uip-${suffix}-${TS}`,
+    corpId: `uipcorp${suffix}${TS}`,
+    appKey: `uip-appkey-${suffix}-${TS}`,
     appSecret: 'synthetic-no-network',
     admissionMode,
     admissionDepartmentIds: [DEPT_IN],
@@ -150,8 +150,8 @@ async function createIntegration(suffix: string, admissionMode: 'manual_only' | 
 }
 
 async function createLocalUser(suffix: string, extra: { email?: string | null; mobile?: string | null } = {}) {
-  const id = `f01_user_${suffix}_${TS}`
-  const email = extra.email === undefined ? `f01-${suffix}-${TS}@example.test` : extra.email
+  const id = `uip_user_${suffix}_${TS}`
+  const email = extra.email === undefined ? `uip-${suffix}-${TS}@example.test` : extra.email
   await query(
     `INSERT INTO users (id, email, name, password_hash, role, mobile)
      VALUES ($1, $2, $3, 'x', 'user', $4)`,
@@ -250,7 +250,7 @@ describeIfDatabase('directory link intent persistence (real DB)', () => {
     await query(
       `INSERT INTO users (id, email, name, password_hash, role)
        VALUES ($1, $2, 'F01 Admin', 'x', 'admin')`,
-      [ADMIN_USER_ID, `f01-admin-${TS}@example.test`],
+      [ADMIN_USER_ID, `uip-admin-${TS}@example.test`],
     )
   })
 
@@ -423,7 +423,7 @@ describeIfDatabase('directory link intent persistence (real DB)', () => {
     }, 90_000)
 
     it('d6: an explicit admin admit with a non-colliding email replaces the hold and the next sync keeps it', async () => {
-      const email = `f01-admitted-${TS}@example.test`
+      const email = `uip-admitted-${TS}@example.test`
       const admitted = await admitDirectoryAccountUser(accountId, {
         adminUserId: ADMIN_USER_ID,
         name: 'Admitted Member',
@@ -455,7 +455,7 @@ describeIfDatabase('directory link intent persistence (real DB)', () => {
   describe('manual mode: a unique email candidate does not re-attach a held account', () => {
     it('d2: after an unbind the row stays held with no local user, across two syncs', async () => {
       const integration = await createIntegration('g2', 'manual_only')
-      const email = `f01-hint-${TS}@example.test`
+      const email = `uip-hint-${TS}@example.test`
       const hintedUserId = await createLocalUser('hint', { email })
       const B = member('b', { email })
       setPulledMembers([B])
@@ -546,9 +546,9 @@ describeIfDatabase('directory link intent persistence (real DB)', () => {
   // -------------------------------------------------------------------------------------------
   describe('concurrent writes, NULL strategy rows and reviewer columns', () => {
     let integrationId = ''
-    const C = member('c', { email: `f01-c-${TS}@example.test` })
-    const D = member('d', { email: `f01-d-${TS}@example.test` })
-    const E = member('e', { email: `f01-e-${TS}@example.test` })
+    const C = member('c', { email: `uip-c-${TS}@example.test` })
+    const D = member('d', { email: `uip-d-${TS}@example.test` })
+    const E = member('e', { email: `uip-e-${TS}@example.test` })
     const F = member('f')
     const G = member('g')
     let cUserId = ''
@@ -625,7 +625,7 @@ describeIfDatabase('directory link intent persistence (real DB)', () => {
       const gBefore = await readLink(gAccountId)
 
       const lockKey = Number(String(TS).slice(-8))
-      const fnName = `f01_hold_${TS}`
+      const fnName = `uip_hold_${TS}`
       const pool = new Pool({ connectionString: process.env.DATABASE_URL })
       const holder = await pool.connect()
       let syncOutcome: Promise<unknown> | null = null

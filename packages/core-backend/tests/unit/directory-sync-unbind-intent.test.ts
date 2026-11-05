@@ -55,7 +55,7 @@ const DEPT_ID = 'dept-in-scope'
 const EXTERNAL_USER_ID = 'dt-user-held'
 const UNION_ID = 'union-held'
 const OPEN_ID = 'open-held'
-const RUN_ID = 'run-f01'
+const RUN_ID = 'run-uip'
 
 const INTEGRATION_ROW = {
   id: INTEGRATION_ID,
