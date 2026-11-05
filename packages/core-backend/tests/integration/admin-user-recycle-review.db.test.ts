@@ -599,6 +599,110 @@ describe('recycle review against a fresh migrated synthetic PostgreSQL database'
     const binned = await send([binnedId])
     expect(binned.body.data.results[0].code).toBe('NOT_PURGED')
     expect((await query('SELECT email, deleted_at IS NOT NULL AS deleted, purged_at FROM users WHERE id = $1', [binnedId])).rows).toEqual(binnedBefore)
+    expect((await query(
+      `SELECT resource_name, user_name FROM audit_logs
+       WHERE resource_type = 'user' AND action = 'rescrub' AND resource_id = ANY($1::text[])`,
+      [[activeId, binnedId]],
+    )).rows).toEqual([{ resource_name: null, user_name: null }, { resource_name: null, user_name: null }])
+  })
+
+  it.each(['audit_logs', 'audit_logs_archive'] as const)('rescrubs namespaced permission subjects without widening ownership in %s', async (table) => {
+    const actorId = await seedUser(true)
+    const userId = await seedPurgedUser()
+    const email = `${userId}@example.test`
+    const at = '2026-11-04 05:31:00.123456+00'
+    const matched = []
+    const permissions = ['tasks:read', 'approvals:*', 'tasks.read', '*', 'tasks:records:read', 'custom/read', '自定义权限']
+    for (const permission of permissions) {
+      matched.push(await insertAuditRow({
+        userId, email, name: 'Synthetic subject', at, table,
+        resourceType: 'permission', resourceId: `${userId}:${permission}`,
+        details: { userId, email, accountLabel: email, permission, adminUserId: actorId },
+      }))
+    }
+    const untouched = []
+    for (const [resourceType, resourceId] of [
+      ['permission', `${userId}-other:tasks:read`],
+      ['permission', `other:${userId}:read`],
+      ['permission', `${userId}::read`],
+      ['permission', `${userId}:tasks:`],
+      ['permission', userId],
+      ['role', `${userId}:tasks:read`],
+      ['permission-template', `${userId}:tasks:read`],
+    ]) {
+      untouched.push(await insertAuditRow({
+        userId, email: 'keep@example.test', name: 'Keep identity', at, table,
+        resourceType, resourceId,
+      }))
+    }
+    const readUntouched = () => query(
+      `SELECT id::text, xmin::text, resource_name, user_email, user_name, action_details, request_body
+       FROM ${table} WHERE id = ANY($1::bigint[]) ORDER BY id`,
+      [untouched.map(row => row.id)],
+    )
+    const before = (await readUntouched()).rows
+    const response = await rescrubAs(actorId, [userId])
+    expect(response.status).toBe(200)
+    expect(response.body.data.results[0]).toMatchObject({ ok: true, userId })
+    const cleaned = await query(
+      `SELECT resource_id, resource_name, user_email, user_name, action_details, request_body
+       FROM ${table} WHERE id = ANY($1::bigint[]) ORDER BY id`,
+      [matched.map(row => row.id)],
+    )
+    expect(cleaned.rows).toHaveLength(permissions.length)
+    for (const row of cleaned.rows) {
+      expect(row).toMatchObject({ user_email: null, user_name: '已清除用户', resource_name: '已清除用户' })
+      expect(row.action_details).toEqual({ userId, email: null, accountLabel: null, permission: row.resource_id.slice(userId.length + 1), adminUserId: actorId })
+      expect(row.request_body).toEqual(row.action_details)
+    }
+    expect((await readUntouched()).rows).toEqual(before)
+  })
+
+  it('leaves clean audit rows and earlier receipts unchanged on consecutive rescrubs', async () => {
+    const actorId = await seedUser(true)
+    const userId = await seedPurgedUser()
+    const tables = ['audit_logs', 'audit_logs_archive'] as const
+    for (const table of tables) {
+      await insertAuditRow({
+        userId, email: `${userId}@example.test`, name: 'Legacy receipt',
+        at: '2026-11-04 05:31:00.123456+00', table, action: 'rescrub',
+        details: { outcome: 'rescrubbed', auditRowsUpdated: 1, adminUserId: actorId, email: `${userId}@example.test` },
+      })
+    }
+    const readRows = async () => {
+      const snapshots = []
+      for (const table of tables) {
+        const rows = await query(
+          `SELECT id::text, created_at::text, xmin::text, resource_name, user_email, user_name, action_details, request_body
+           FROM ${table} WHERE resource_type = 'user' AND resource_id = $1 ORDER BY id, created_at`,
+          [userId],
+        )
+        snapshots.push({ table, rows: rows.rows })
+      }
+      return snapshots
+    }
+    const userBefore = (await query('SELECT xmin::text, to_jsonb(users) AS row FROM users WHERE id = $1', [userId])).rows
+    const first = await rescrubAs(actorId, [userId])
+    expect(first.status).toBe(200)
+    let previous = await readRows()
+    expect(previous.map(snapshot => snapshot.rows.length)).toEqual([2, 1])
+    expect(previous[0].rows[1].action_details).toEqual({ outcome: 'rescrubbed', auditRowsUpdated: 2, adminUserId: actorId })
+    for (const snapshot of previous) {
+      expect(snapshot.rows[0].action_details.email).toBeNull()
+    }
+    for (const receiptCount of [2, 3]) {
+      const response = await rescrubAs(actorId, [userId])
+      expect(response.status).toBe(200)
+      expect(response.body.data.results[0]).toMatchObject({ ok: true, userId })
+      const current = await readRows()
+      for (const [index, snapshot] of previous.entries()) {
+        expect(current[index].rows.filter(row => snapshot.rows.some(old => old.id === row.id && old.created_at === row.created_at))).toEqual(snapshot.rows)
+      }
+      expect(current.map(snapshot => snapshot.rows.length)).toEqual([receiptCount + 1, 1])
+      expect(current[0].rows[receiptCount].action_details).toEqual({ outcome: 'rescrubbed', auditRowsUpdated: 0, adminUserId: actorId })
+      previous = current
+    }
+    expect((await query('SELECT xmin::text, to_jsonb(users) AS row FROM users WHERE id = $1', [userId])).rows).toEqual(userBefore)
   })
 
   it('does not rewrite residual directory accounts, links, or alias conflicts', async () => {
@@ -837,7 +941,7 @@ describe('recycle review against a fresh migrated synthetic PostgreSQL database'
     }
     expect(receipts.rows).toEqual(expect.arrayContaining([
       expect.objectContaining({ action: 'rescrub', resource_id: userId }),
-      expect.objectContaining({ action: 'rescrub', resource_id: null }),
+      expect.objectContaining({ action: 'rescrub', resource_id: null, resource_name: '', user_name: '' }),
       expect.objectContaining({ action: 'update', resource_id: 'recycle-rescrub' }),
     ]))
     const notFound = receipts.rows.find((row) => row.action === 'rescrub' && row.resource_id == null)

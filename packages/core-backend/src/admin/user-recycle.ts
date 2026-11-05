@@ -567,7 +567,7 @@ const USER_AUDIT_SUBJECT_RULES = [
   { type: 'user-session', kind: 'exact' },
   { type: 'user-role', kind: 'prefix', minSegments: 2, maxSegments: 2 },
   { type: 'user-auth-grant', kind: 'prefix', minSegments: 2, maxSegments: 2 },
-  { type: 'permission', kind: 'prefix', minSegments: 2, maxSegments: 2 },
+  { type: 'permission', kind: 'prefix', minSegments: 2 },
   { type: 'permission-template', kind: 'prefix', minSegments: 2, maxSegments: 2 },
   { type: 'user-namespace-admission', kind: 'prefix', minSegments: 2, maxSegments: 2 },
   { type: 'delegated-admin-scope', kind: 'prefix', minSegments: 2, maxSegments: 3 },
@@ -594,7 +594,7 @@ function auditRuleMatchesResource(rule: UserAuditSubjectRule, resourceId: string
   if (rule.kind === 'exact') return resourceId === userId
   const parts = auditIdSegments(resourceId)
   if (!parts) return false
-  if (parts.length < rule.minSegments || parts.length > rule.maxSegments) return false
+  if (parts.length < rule.minSegments || ('maxSegments' in rule && parts.length > rule.maxSegments)) return false
   if ('literalSegment' in rule && parts[rule.literalSegment.index - 1] !== rule.literalSegment.value) return false
   const userIndex = ('userSegment' in rule ? rule.userSegment : 1) - 1
   return parts[userIndex] === userId
@@ -633,7 +633,7 @@ export function auditSubjectMatchSql(): string {
       resource_type = ${type}
       AND resource_id IS NOT NULL
       AND split_part(resource_id, ':', ${userPart}) = $1
-      AND array_length(string_to_array(resource_id, ':'), 1) BETWEEN ${rule.minSegments} AND ${rule.maxSegments}
+      AND array_length(string_to_array(resource_id, ':'), 1) ${'maxSegments' in rule ? `BETWEEN ${rule.minSegments} AND ${rule.maxSegments}` : `>= ${rule.minSegments}`}
       AND strpos(resource_id, '::') = 0
       AND left(resource_id, 1) <> ':'
       AND right(resource_id, 1) <> ':'
@@ -899,7 +899,8 @@ async function insertRescrubReceipt(
     const inserted = await client.query(
       `INSERT INTO audit_logs (
          event_type, event_category, event_severity,
-         resource_type, resource_id, action, action_details
+         resource_type, resource_id, action, action_details,
+         resource_name, user_name
        ) VALUES (
          'UPDATE', 'USER', 'INFO',
          'user', $1::text, 'rescrub',
@@ -907,7 +908,9 @@ async function insertRescrubReceipt(
            'outcome', $2::text,
            'auditRowsUpdated', $3::int,
            'adminUserId', $4::text
-         )
+         ),
+         CASE WHEN $2::text = 'rescrubbed' THEN '${USER_TOMBSTONE_NAME}' ELSE NULL END,
+         CASE WHEN $2::text = 'rescrubbed' THEN '${USER_TOMBSTONE_NAME}' ELSE NULL END
        )
        RETURNING id`,
       [input.resourceId, input.outcome, input.auditRowsUpdated, operatorId],

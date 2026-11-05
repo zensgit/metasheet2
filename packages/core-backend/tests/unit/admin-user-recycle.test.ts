@@ -410,6 +410,79 @@ describe('user recycle bin', () => {
     expect(redactAuditRow(roleRow, userId).action_details).toEqual({ name: 'Warehouse lead' })
   })
 
+  it.each([
+    ['42:read', true],
+    ['42:tasks:read', true],
+    ['42:tasks:*', true],
+    ['42:*:*', true],
+    ['42:tenant:tasks:read', true],
+    ['42:table.read.*', true],
+    ['42:custom/read', true],
+    ['42:任务:读取', true],
+    ['42:tasks:read\n', true],
+    ['142:tasks:read', false],
+    ['420:tasks:read', false],
+    ['042:tasks:read', false],
+    ['42x:tasks:read', false],
+    ['other:42:tasks:read', false],
+    ['42', false],
+    ['42:', false],
+    [':42:read', false],
+    ['42::read', false],
+    ['42:tasks::read', false],
+    ['42:tasks:read:', false],
+  ])('matches permission resource %s only for the exact user and nonempty code segments', (resourceId, matches) => {
+    expect(auditResourceIsUserSubject('permission', resourceId, '42')).toBe(matches)
+    const row: PurgeAuditRow = {
+      id: 1,
+      created_at: '2026-11-05 00:00:00.123456+00',
+      resource_type: 'permission',
+      resource_id: resourceId,
+      resource_name: 'Synthetic subject',
+      user_id: 'admin-1',
+      user_email: 'synthetic@example.test',
+      user_name: 'Synthetic subject',
+      action_details: { email: 'synthetic@example.test', name: 'Synthetic subject', permission: resourceId },
+      request_body: { email: 'synthetic@example.test' },
+    }
+    expect(auditRowMatchesSubject(row, '42')).toBe(matches)
+    const redacted = redactAuditRow(row, '42')
+    if (matches) {
+      expect(redacted).toMatchObject({
+        resource_name: USER_TOMBSTONE_NAME,
+        user_email: null,
+        user_name: USER_TOMBSTONE_NAME,
+        action_details: { email: null, name: USER_TOMBSTONE_NAME, permission: resourceId },
+        request_body: { email: null },
+      })
+      expect(redactAuditRow(redacted, '42')).toEqual(redacted)
+    } else {
+      expect(redacted).toBe(row)
+    }
+  })
+
+  it('generates the same unbounded permission shape without expanding other resource rules', () => {
+    const sql = auditSubjectMatchSql()
+    const permissionClause = sql.match(/resource_type = 'permission'([\s\S]*?)\n    \)/)?.[1]
+    expect(permissionClause).toBeDefined()
+    expect(permissionClause).toContain("split_part(resource_id, ':', 1) = $1")
+    expect(permissionClause).toContain("array_length(string_to_array(resource_id, ':'), 1) >= 2")
+    expect(permissionClause).toContain("strpos(resource_id, '::') = 0")
+    expect(permissionClause).toContain("left(resource_id, 1) <> ':'")
+    expect(permissionClause).toContain("right(resource_id, 1) <> ':'")
+    expect(permissionClause).not.toContain('BETWEEN')
+    expect(permissionClause).not.toContain('LIKE')
+    expect(permissionClause).not.toContain(' ~ ')
+    for (const resourceType of ['permission-template', 'user-role', 'user-auth-grant', 'user-namespace-admission']) {
+      const clause = sql.match(new RegExp(`resource_type = '${resourceType}'([\\s\\S]*?)\\n    \\)`))?.[1]
+      expect(clause).toContain("array_length(string_to_array(resource_id, ':'), 1) BETWEEN 2 AND 2")
+      expect(auditResourceIsUserSubject(resourceType, '42:tasks:read', '42')).toBe(false)
+    }
+    expect(auditResourceIsUserSubject('role', '42:tasks:read', '42')).toBe(false)
+    expect(auditResourceIsUserSubject('permission', '42:tasks:read', '')).toBe(false)
+    expect(auditResourceIsUserSubject('permission', '42:tasks:read', '42:tasks')).toBe(false)
+  })
+
   it('anonymizes confirmed directory links and only detaches pending guesses', async () => {
     const accounts = [
       { id: 'acct-linked', org: 'org-a', name: '林岚', email: 'lin@example.com', mobile: '13800000000' },
