@@ -199,7 +199,7 @@ test('no independent 256 KiB literal remains on the send path; each consumer tak
   assert.match(text.route, /from '\.\.\/integration\/yida-send-budget'/)
   assert.match(text.web, /from '\.\/yidaSendBudget'/)
   // The only definition of the number on the send path is the shared module (the mirrors are pinned equal elsewhere).
-  assert.match(fs.readFileSync(path.join(LIB, 'yida-send-budget.cjs'), 'utf8'), /const YIDA_SEND_REQUEST_MAX_BYTES = 262144\n/)
+  assert.match(fs.readFileSync(path.join(LIB, 'yida-send-budget.cjs'), 'utf8'), /const YIDA_SEND_REQUEST_MAX_BYTES = 262144\r?\n/)
 })
 
 test('request body boundary: exactly 262,144 bytes with worst-case credentials is within, 262,145 is not', async () => {
