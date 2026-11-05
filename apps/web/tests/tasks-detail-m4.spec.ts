@@ -2332,6 +2332,20 @@ describe('package 1b — the people picker on the detail page', () => {
     expect(document.activeElement).toBe(must(el, 'tasks-detail-pick-assignee'))
   })
 
+  for (const button of ['tasks-detail-pick-assignee', 'tasks-detail-pick-follower']) {
+    it(`opened by a click that does not focus ${button} (macOS Safari), cancel still puts focus back on it`, async () => {
+      const el = await mountAt('/tasks/t1')
+      // Focus is on another control; the click itself moves none (a click in jsdom never does).
+      const other = button === 'tasks-detail-pick-assignee' ? 'tasks-detail-pick-follower' : 'tasks-detail-pick-assignee'
+      must(el, other).focus()
+      await click(el, button)
+      expect(document.activeElement).toBe(must(el, 'task-people-picker-search'))
+      await click(el, 'task-people-picker-cancel')
+      expect(shown(el, 'task-people-picker')).toBeNull()
+      expect(document.activeElement).toBe(must(el, button))
+    })
+  }
+
   it('confirm while the add is out leaves focus alone: the pick button is disabled and has no dialog around it', async () => {
     h_.peopleSearchReply.mockImplementation(() => found([{ id: 'u7', name: '赵六', canUseTasks: true }]))
     const held = deferred<Response>()

@@ -14,8 +14,8 @@
  *    answer, whose outcome is unknown (kept, with the body it sent, until a retry is answered, so a
  *    retry from any dialog for the record resends exactly that body under the same retry key).
  * Nothing here reads record content; a run holds a task id, flags, a message key, the body of the
- * create (page memory only, never written to storage), the identity it was bound to and the ticket of
- * the create that started it.
+ * create and the names the people picker gave for its assignees (page memory only, never written to
+ * storage), the identity it was bound to and the ticket of the create that started it.
  *
  * Runs are kept PER IDENTITY (`recordTaskDispatchIdentity.ts`): the key names the identity the
  * dispatch was bound to as well as the record, so a dialog under another user or org never sees a
@@ -72,6 +72,9 @@ export interface DispatchRun {
   /** The body the create sent, kept while it is out and while its outcome is unknown, for a retry
    *  that resends exactly these bytes. Page memory only. */
   input: CreateTaskInput | null
+  /** The names the people picker gave for the assignees in `input`, kept with it, so a dialog mounted
+   *  since shows them on the locked form. Never sent. */
+  pickedNames: Record<string, string> | null
   /** The created task's result panel has been on screen; the next open starts a fresh form. */
   seen: boolean
 }
@@ -108,13 +111,18 @@ export function readDispatchRun(key: string): DispatchRun | undefined {
 
 /** Starts a run for `identity` and returns its ticket, to be handed back to `settleDispatchRun`.
  *  `null` (and nothing changes) while a create for this record is out, or while its created task has
- *  not been shown yet. `input` is the body being sent. */
-export function beginDispatchRun(key: string, identity: string, input: CreateTaskInput | null = null): number | null {
+ *  not been shown yet. `input` is the body being sent, `pickedNames` the picker's names for its people. */
+export function beginDispatchRun(
+  key: string,
+  identity: string,
+  input: CreateTaskInput | null = null,
+  pickedNames: Record<string, string> | null = null,
+): number | null {
   watchSessionSwitch()
   const current = runs.get(key)
   if (current && (current.inFlight || (current.created !== null && !current.seen))) return null
   const ticket = nextTicket++
-  runs.set(key, { identity, ticket, inFlight: true, created: null, failure: null, input, seen: false })
+  runs.set(key, { identity, ticket, inFlight: true, created: null, failure: null, input, pickedNames, seen: false })
   return ticket
 }
 
@@ -132,6 +140,7 @@ export function settleDispatchRun(key: string, ticket: number, outcome: Dispatch
     failure: outcome.failure ?? null,
     // Kept only while a retry may need it.
     input: outcome.failure?.unknown === true ? current.input : null,
+    pickedNames: outcome.failure?.unknown === true ? current.pickedNames : null,
     seen: false,
   })
 }

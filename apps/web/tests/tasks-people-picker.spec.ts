@@ -553,16 +553,20 @@ describe('TaskPeoplePicker', () => {
     const openerDisabled = ref(false)
     const openerShown = ref(true)
     const pickerShown = ref(true)
+    const dialogShown = ref(true)
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp({
-      render: () => h('div', { role: 'dialog', tabindex: '-1', 'data-testid': 'outer-dialog' }, [
-        openerShown.value
-          ? h('button', { type: 'button', 'data-testid': 'opener', disabled: openerDisabled.value, onClick: () => { open.value = true } }, 'pick')
-          : null,
-        h('button', { type: 'button', 'data-testid': 'elsewhere' }, 'other'),
-        pickerShown.value ? h(TaskPeoplePicker, { visible: open.value, mode: 'assignee', onClose: () => { open.value = false } }) : null,
-      ]),
+      render: () => (dialogShown.value
+        ? h('div', { role: 'dialog', tabindex: '-1', 'data-testid': 'outer-dialog' }, [
+          openerShown.value
+            ? h('button', { type: 'button', 'data-testid': 'opener', disabled: openerDisabled.value, onClick: () => { open.value = true } }, 'pick')
+            : null,
+          h('button', { type: 'button', 'data-testid': 'elsewhere' }, 'other'),
+          pickerShown.value ? h(TaskPeoplePicker, { visible: open.value, mode: 'assignee', onClose: () => { open.value = false } }) : null,
+        ])
+        // A control of the page stays when the dialog is gone; the picker must not take focus to it.
+        : h('button', { type: 'button', 'data-testid': 'page-control' }, 'page')),
     })
     app.mount(container)
     const el = container
@@ -573,7 +577,7 @@ describe('TaskPeoplePicker', () => {
       await flush()
       expect(document.activeElement).toBe(q(el, 'search'))
     }
-    return { el, open, openerDisabled, openerShown, pickerShown, opener, openFromButton }
+    return { el, open, openerDisabled, openerShown, pickerShown, dialogShown, opener, openFromButton }
   }
 
   it('closing hands focus back to the opener; an opener disabled meanwhile hands it to the dialog around it', async () => {
@@ -622,7 +626,7 @@ describe('TaskPeoplePicker', () => {
     expect(document.activeElement).toBe(opener())
   })
 
-  it('the picker moves no focus on close when focus has gone elsewhere, or when the opener is gone from the page', async () => {
+  it('the picker moves no focus on close when focus has gone elsewhere; an opener gone from the page hands it to the dialog it was in', async () => {
     const { el, open, openerShown, openFromButton } = mountWithOpener()
     await flush()
     await openFromButton()
@@ -634,11 +638,24 @@ describe('TaskPeoplePicker', () => {
     expect(q(el, 'search')).toBeNull()
     expect(document.activeElement).toBe(elsewhere)
     await openFromButton()
+    // The dialog around the opener turns to another view without it (the dispatch dialog's refusal).
     openerShown.value = false
     await flush()
     ;(q(el, 'cancel') as HTMLButtonElement).click()
     await flush()
     expect(q(el, 'search')).toBeNull()
+    expect(document.activeElement).toBe(el.querySelector('[data-testid="outer-dialog"]'))
+  })
+
+  it('the picker moves no focus when the opener and the dialog it was in are both gone (the whole dialog closing)', async () => {
+    const { el, dialogShown, openFromButton } = mountWithOpener()
+    await flush()
+    await openFromButton()
+    dialogShown.value = false
+    await flush()
+    expect(q(el, 'search')).toBeNull()
+    expect(el.querySelector('[data-testid="outer-dialog"]')).toBeNull()
+    expect(el.querySelector('[data-testid="page-control"]')).not.toBeNull()
     expect(document.activeElement).toBe(document.body)
   })
 
