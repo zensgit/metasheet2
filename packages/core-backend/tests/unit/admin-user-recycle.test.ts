@@ -7,7 +7,9 @@ import {
   applyRecycleRestore,
   AuditIdentityScrubError,
   auditCreatedAtMatch,
+  auditResourceIsUserSubject,
   auditRowMatchesSubject,
+  auditSubjectMatchSql,
   listDueRecycleUserIds,
   redactAuditRow,
   resolveUserRecycleRetentionDays,
@@ -211,6 +213,7 @@ describe('user recycle bin', () => {
     const unrelated: PurgeAuditRow = {
       id: 9,
       created_at: '2026-10-01T00:00:00.000Z',
+      resource_type: 'user',
       resource_id: 'user-other',
       resource_name: '其他同事',
       user_id: 77,
@@ -228,6 +231,7 @@ describe('user recycle bin', () => {
     const subject: PurgeAuditRow = {
       id: 10,
       created_at: '2026-10-02T00:00:00.000Z',
+      resource_type: 'user',
       resource_id: subjectId,
       resource_name: '管理员账号',
       user_id: 3,
@@ -245,6 +249,7 @@ describe('user recycle bin', () => {
     const actorOnly: PurgeAuditRow = {
       id: 11,
       created_at: '2026-10-03T00:00:00.000Z',
+      resource_type: 'user',
       resource_id: 'user-other',
       resource_name: '其他同事',
       user_id: subjectId,
@@ -257,9 +262,35 @@ describe('user recycle bin', () => {
       },
       request_body: { email: 'other@example.com' },
     }
+    const sameIdRole: PurgeAuditRow = {
+      id: 12,
+      created_at: '2026-10-04T00:00:00.000Z',
+      resource_type: 'role',
+      resource_id: subjectId,
+      resource_name: 'Warehouse lead',
+      user_id: subjectId,
+      user_email: 'admin@example.com',
+      user_name: '管理员账号',
+      action_details: { name: 'Warehouse lead', permissions: ['roles.read'] },
+      request_body: { name: 'Warehouse lead' },
+    }
+    const roleGrant: PurgeAuditRow = {
+      id: 13,
+      created_at: '2026-10-05T00:00:00.000Z',
+      resource_type: 'user-role',
+      resource_id: `${subjectId}:role-1`,
+      resource_name: '管理员账号',
+      user_id: 3,
+      user_email: 'admin@example.com',
+      user_name: '管理员账号',
+      action_details: { name: '管理员账号', email: 'admin@example.com', roleId: 'role-1' },
+      request_body: { email: 'admin@example.com' },
+    }
     const actorDetails = JSON.stringify(actorOnly.action_details)
     const actorBody = JSON.stringify(actorOnly.request_body)
-    const rows = [unrelated, subject, actorOnly]
+    const roleDetails = JSON.stringify(sameIdRole.action_details)
+    const roleBody = JSON.stringify(sameIdRole.request_body)
+    const rows = [unrelated, subject, actorOnly, sameIdRole, roleGrant]
     expect(auditRowMatchesSubject(unrelated, subjectId)).toBe(false)
     expect(auditRowMatchesSubject(subject, subjectId)).toBe(true)
     expect(auditRowMatchesSubject(actorOnly, subjectId)).toBe(true)
@@ -279,6 +310,13 @@ describe('user recycle bin', () => {
           if (!found) return { rows: [], rowCount: 0 }
           if (statement.includes('::timestamptz') && String(params[1]).includes('GMT')) {
             return { rows: [], rowCount: 0 }
+          }
+          if (!statement.includes('action_details')) {
+            expect(statement).not.toContain('request_body')
+            expect(statement).toContain('user_id::text = $3')
+            found.user_email = null
+            found.user_name = null
+            return { rows: [{ id: found.id }], rowCount: 1 }
           }
           found.action_details = JSON.parse(String(params[2]))
           found.request_body = JSON.parse(String(params[3]))
@@ -315,6 +353,134 @@ describe('user recycle bin', () => {
     expect(actorOnly.user_email).toBeNull()
     expect(actorOnly.user_name).toBeNull()
     expect(actorOnly.resource_name).toBe('其他同事')
+    expect(JSON.stringify(sameIdRole.action_details)).toBe(roleDetails)
+    expect(JSON.stringify(sameIdRole.request_body)).toBe(roleBody)
+    expect(sameIdRole.resource_name).toBe('Warehouse lead')
+    expect(sameIdRole.user_email).toBeNull()
+    expect(sameIdRole.user_name).toBeNull()
+    expect(roleGrant.action_details).toMatchObject({
+      name: USER_TOMBSTONE_NAME,
+      email: null,
+      roleId: 'role-1',
+    })
+    expect(roleGrant.resource_name).toBe(USER_TOMBSTONE_NAME)
+  })
+
+  it('matches a user subject by resource type and id shape', () => {
+    const userId = 'user-admin'
+    expect(auditResourceIsUserSubject('user', userId, userId)).toBe(true)
+    expect(auditResourceIsUserSubject('user-password', userId, userId)).toBe(true)
+    expect(auditResourceIsUserSubject('user-session', userId, userId)).toBe(true)
+    expect(auditResourceIsUserSubject('user', `${userId}:extra`, userId)).toBe(false)
+    expect(auditResourceIsUserSubject('user-role', `${userId}:role-1`, userId)).toBe(true)
+    expect(auditResourceIsUserSubject('user-role', userId, userId)).toBe(false)
+    expect(auditResourceIsUserSubject('user-role', `${userId}:role-1:extra`, userId)).toBe(false)
+    expect(auditResourceIsUserSubject('role', userId, userId)).toBe(false)
+    expect(auditResourceIsUserSubject('user-batch', userId, userId)).toBe(false)
+    expect(auditResourceIsUserSubject('user-invite', userId, userId)).toBe(false)
+    expect(auditResourceIsUserSubject('platform-member-group', `group-1:${userId}`, userId)).toBe(true)
+    expect(auditResourceIsUserSubject('platform-member-group', `${userId}:someone`, userId)).toBe(false)
+    expect(auditResourceIsUserSubject('delegated-admin-scope', `${userId}:ns`, userId)).toBe(true)
+    expect(auditResourceIsUserSubject('delegated-admin-scope', `${userId}:ns:dept`, userId)).toBe(true)
+    expect(auditResourceIsUserSubject('delegated-admin-group-scope', `${userId}:ns:group:g1`, userId)).toBe(true)
+    expect(auditResourceIsUserSubject('delegated-admin-group-scope', `${userId}:ns:other:g1`, userId)).toBe(false)
+    expect(auditResourceIsUserSubject('delegated-admin-scope-template', `${userId}:ns:template:t1`, userId)).toBe(true)
+    expect(auditResourceIsUserSubject('delegated-admin-scope-template', `template:${userId}:group:g1`, userId)).toBe(false)
+    expect(auditResourceIsUserSubject('user-namespace-admission', `${userId}:attendance`, userId)).toBe(true)
+    const sql = auditSubjectMatchSql()
+    expect(sql).toContain("resource_type = 'user'")
+    expect(sql).toContain("resource_type = 'user-role'")
+    expect(sql).toContain('user_id::text = $1')
+    expect(sql).not.toContain("resource_type = 'role'")
+    expect(sql).not.toContain("resource_type = 'user-batch'")
+    expect(sql).not.toContain("resource_type = 'user-invite'")
+    const roleRow: PurgeAuditRow = {
+      id: 1,
+      created_at: '2026-10-01T00:00:00.000Z',
+      resource_type: 'role',
+      resource_id: userId,
+      resource_name: 'Warehouse lead',
+      user_id: null,
+      user_email: null,
+      user_name: null,
+      action_details: { name: 'Warehouse lead' },
+      request_body: { name: 'Warehouse lead' },
+    }
+    expect(auditRowMatchesSubject(roleRow, userId)).toBe(false)
+    expect(redactAuditRow(roleRow, userId).action_details).toEqual({ name: 'Warehouse lead' })
+  })
+
+  it.each([
+    ['42:read', true],
+    ['42:tasks:read', true],
+    ['42:tasks:*', true],
+    ['42:*:*', true],
+    ['42:tenant:tasks:read', true],
+    ['42:table.read.*', true],
+    ['42:custom/read', true],
+    ['42:任务:读取', true],
+    ['42:tasks:read\n', true],
+    ['142:tasks:read', false],
+    ['420:tasks:read', false],
+    ['042:tasks:read', false],
+    ['42x:tasks:read', false],
+    ['other:42:tasks:read', false],
+    ['42', false],
+    ['42:', false],
+    [':42:read', false],
+    ['42::read', false],
+    ['42:tasks::read', false],
+    ['42:tasks:read:', false],
+  ])('matches permission resource %s only for the exact user and nonempty code segments', (resourceId, matches) => {
+    expect(auditResourceIsUserSubject('permission', resourceId, '42')).toBe(matches)
+    const row: PurgeAuditRow = {
+      id: 1,
+      created_at: '2026-11-05 00:00:00.123456+00',
+      resource_type: 'permission',
+      resource_id: resourceId,
+      resource_name: 'Synthetic subject',
+      user_id: 'admin-1',
+      user_email: 'synthetic@example.test',
+      user_name: 'Synthetic subject',
+      action_details: { email: 'synthetic@example.test', name: 'Synthetic subject', permission: resourceId },
+      request_body: { email: 'synthetic@example.test' },
+    }
+    expect(auditRowMatchesSubject(row, '42')).toBe(matches)
+    const redacted = redactAuditRow(row, '42')
+    if (matches) {
+      expect(redacted).toMatchObject({
+        resource_name: USER_TOMBSTONE_NAME,
+        user_email: null,
+        user_name: USER_TOMBSTONE_NAME,
+        action_details: { email: null, name: USER_TOMBSTONE_NAME, permission: resourceId },
+        request_body: { email: null },
+      })
+      expect(redactAuditRow(redacted, '42')).toEqual(redacted)
+    } else {
+      expect(redacted).toBe(row)
+    }
+  })
+
+  it('generates the same unbounded permission shape without expanding other resource rules', () => {
+    const sql = auditSubjectMatchSql()
+    const permissionClause = sql.match(/resource_type = 'permission'([\s\S]*?)\n    \)/)?.[1]
+    expect(permissionClause).toBeDefined()
+    expect(permissionClause).toContain("split_part(resource_id, ':', 1) = $1")
+    expect(permissionClause).toContain("array_length(string_to_array(resource_id, ':'), 1) >= 2")
+    expect(permissionClause).toContain("strpos(resource_id, '::') = 0")
+    expect(permissionClause).toContain("left(resource_id, 1) <> ':'")
+    expect(permissionClause).toContain("right(resource_id, 1) <> ':'")
+    expect(permissionClause).not.toContain('BETWEEN')
+    expect(permissionClause).not.toContain('LIKE')
+    expect(permissionClause).not.toContain(' ~ ')
+    for (const resourceType of ['permission-template', 'user-role', 'user-auth-grant', 'user-namespace-admission']) {
+      const clause = sql.match(new RegExp(`resource_type = '${resourceType}'([\\s\\S]*?)\\n    \\)`))?.[1]
+      expect(clause).toContain("array_length(string_to_array(resource_id, ':'), 1) BETWEEN 2 AND 2")
+      expect(auditResourceIsUserSubject(resourceType, '42:tasks:read', '42')).toBe(false)
+    }
+    expect(auditResourceIsUserSubject('role', '42:tasks:read', '42')).toBe(false)
+    expect(auditResourceIsUserSubject('permission', '42:tasks:read', '')).toBe(false)
+    expect(auditResourceIsUserSubject('permission', '42:tasks:read', '42:tasks')).toBe(false)
   })
 
   it('anonymizes confirmed directory links and only detaches pending guesses', async () => {
@@ -378,6 +544,7 @@ describe('user recycle bin', () => {
     const rows = [{
       id: 177,
       created_at: '2026-11-04 05:31:00.123456+00',
+      resource_type: 'user',
       resource_id: subjectId,
       resource_name: 'QA Single',
       user_id: '3',
@@ -467,6 +634,7 @@ describe('user recycle bin', () => {
             rows: [{
               id: 10,
               created_at: '2026-11-04 05:31:00.123456+00',
+              resource_type: 'user',
               resource_id: 'user-admin',
               resource_name: '管理员账号',
               user_id: '3',
@@ -507,6 +675,7 @@ describe('user recycle bin', () => {
             rows: [{
               id: 10,
               created_at: instant,
+              resource_type: 'user',
               resource_id: 'user-admin',
               resource_name: '管理员账号',
               user_id: '3',
