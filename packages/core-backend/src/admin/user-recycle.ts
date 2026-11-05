@@ -44,6 +44,19 @@ export class AuditIdentityScrubError extends Error {
   }
 }
 
+/**
+ * The per-item rescrub receipt could not be written. The message is fixed:
+ * a driver error can echo the row that was supposed to stay out of the log.
+ */
+export class RescrubReceiptError extends Error {
+  readonly code = 'RESCRUB_RECEIPT_FAILED'
+
+  constructor() {
+    super('rescrub receipt failed')
+    this.name = 'RescrubReceiptError'
+  }
+}
+
 const JS_DATE_TO_STRING = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s/
 const SAFE_ERROR_CODE = /^[A-Za-z0-9_]{1,64}$/
 
@@ -427,14 +440,14 @@ export async function applyRecyclePurge(
 }
 
 /**
- * Re-apply the current identity scrub to an account that is already purged.
- * Does not change the users row, roles, or sessions. Safe to run again.
+ * Re-apply the current audit identity scrub to an account that is already purged.
+ * Does not change the users row, directory links, or sessions. Safe to run again.
+ * The rewrite and its per-item receipt commit in the caller's transaction.
  */
 export async function applyRecycleRescrub(
   client: RecycleClient,
   input: { userId: string; actorId: string; index: number; now?: Date },
 ): Promise<BatchItemResult> {
-  const now = input.now ?? new Date()
   await lockNamespaceAdmissionWrites(client, input.userId)
   await lockUsersForAccessGraphWrite(client, [input.userId])
   const locked = await client.query(
@@ -445,26 +458,26 @@ export async function applyRecycleRescrub(
     [input.userId],
   )
   const row = locked.rows[0]
-  if (!row) return item(input.index, input.userId, null, false, 'USER_NOT_FOUND', '找不到该用户')
+  if (!row) {
+    await insertRescrubReceipt(client, { resourceId: null, outcome: 'USER_NOT_FOUND', auditRowsUpdated: 0 })
+    return item(input.index, input.userId, null, false, 'USER_NOT_FOUND', '找不到该用户')
+  }
+  const confirmedId = String(row.id)
   if (!textOrNull(row.purged_at)) {
     const inBin = Boolean(textOrNull(row.deleted_at))
+    await insertRescrubReceipt(client, { resourceId: confirmedId, outcome: 'NOT_PURGED', auditRowsUpdated: 0 })
     return item(
       input.index,
-      input.userId,
+      confirmedId,
       textOrNull(row.email),
       false,
       'NOT_PURGED',
       inBin ? '该账号还在回收站，尚未清除' : '只能重新清理已经清除的账号',
     )
   }
-  await scrubPurgedUserIdentity(client, {
-    userId: input.userId,
-    email: textOrNull(row.email),
-    username: textOrNull(row.username),
-    mobile: textOrNull(row.mobile),
-    at: now.toISOString(),
-  })
-  return item(input.index, input.userId, null, true, null, '已按当前规则重新清理审计中的身份')
+  const auditRowsUpdated = await scrubPurgedUserAuditIdentity(client, { userId: confirmedId })
+  await insertRescrubReceipt(client, { resourceId: confirmedId, outcome: 'rescrubbed', auditRowsUpdated })
+  return item(input.index, confirmedId, null, true, null, '已按当前规则重新清理审计中的身份')
 }
 
 async function relationExists(client: RecycleClient, name: string): Promise<boolean> {
@@ -528,24 +541,98 @@ const AUDIT_NAME_KEYS = new Set([
 ])
 
 /**
- * Structured subject match. resource_id is the user id, or the known
- * `userId:roleId` shape. user_id is the actor column. No substring search.
+ * User-subject resource types and the id shape each writer actually stores.
+ * Actor columns are matched separately and never expand this list.
+ * Shapes are taken from the auditLog call sites (admin user, role grant,
+ * namespace admission, auth grant, permission, delegated scope, member group).
+ */
+const USER_AUDIT_SUBJECT_RULES = [
+  { type: 'user', kind: 'exact' },
+  { type: 'user-password', kind: 'exact' },
+  { type: 'user-session', kind: 'exact' },
+  { type: 'user-role', kind: 'prefix', minSegments: 2, maxSegments: 2 },
+  { type: 'user-auth-grant', kind: 'prefix', minSegments: 2, maxSegments: 2 },
+  { type: 'permission', kind: 'prefix', minSegments: 2, maxSegments: 2 },
+  { type: 'permission-template', kind: 'prefix', minSegments: 2, maxSegments: 2 },
+  { type: 'user-namespace-admission', kind: 'prefix', minSegments: 2, maxSegments: 2 },
+  { type: 'delegated-admin-scope', kind: 'prefix', minSegments: 2, maxSegments: 3 },
+  { type: 'delegated-admin-group-scope', kind: 'prefix', minSegments: 4, maxSegments: 4, literalSegment: { index: 3, value: 'group' } },
+  { type: 'delegated-admin-scope-template', kind: 'prefix', minSegments: 4, maxSegments: 4, literalSegment: { index: 3, value: 'template' } },
+  { type: 'platform-member-group', kind: 'segment', userSegment: 2, minSegments: 2, maxSegments: 2 },
+] as const
+
+type UserAuditSubjectRule = (typeof USER_AUDIT_SUBJECT_RULES)[number]
+
+function auditSqlLiteral(value: string): string {
+  if (!/^[a-z0-9-]+$/.test(value)) throw new AuditIdentityScrubError('AUDIT_SUBJECT_RULE_INVALID')
+  return `'${value}'`
+}
+
+function auditIdSegments(resourceId: string): string[] | null {
+  if (!resourceId || resourceId.startsWith(':') || resourceId.endsWith(':') || resourceId.includes('::')) return null
+  const parts = resourceId.split(':')
+  if (parts.some((part) => part.length === 0)) return null
+  return parts
+}
+
+function auditRuleMatchesResource(rule: UserAuditSubjectRule, resourceId: string, userId: string): boolean {
+  if (rule.kind === 'exact') return resourceId === userId
+  const parts = auditIdSegments(resourceId)
+  if (!parts) return false
+  if (parts.length < rule.minSegments || parts.length > rule.maxSegments) return false
+  if ('literalSegment' in rule && parts[rule.literalSegment.index - 1] !== rule.literalSegment.value) return false
+  const userIndex = ('userSegment' in rule ? rule.userSegment : 1) - 1
+  return parts[userIndex] === userId
+}
+
+/**
+ * True when this resource type and id are the purged user's own subject.
+ * A role (or any other resource) that happens to reuse the same id is not.
+ */
+export function auditResourceIsUserSubject(
+  resourceType: string | null | undefined,
+  resourceId: string | null | undefined,
+  userId: string,
+): boolean {
+  if (!resourceType || resourceId == null || !userId) return false
+  const rule = USER_AUDIT_SUBJECT_RULES.find((item) => item.type === resourceType)
+  if (!rule) return false
+  return auditRuleMatchesResource(rule, resourceId, userId)
+}
+
+/**
+ * Row selection for the identity scrub. The actor column is included even when
+ * the resource is not a user subject. No substring search.
  */
 export function auditSubjectMatchSql(): string {
-  return `(
-    resource_id = $1
-    OR (strpos(resource_id, ':') > 0 AND split_part(resource_id, ':', 1) = $1)
-    OR user_id::text = $1
-  )`
+  const clauses = USER_AUDIT_SUBJECT_RULES.map((rule) => {
+    const type = auditSqlLiteral(rule.type)
+    if (rule.kind === 'exact') {
+      return `(resource_type = ${type} AND resource_id = $1)`
+    }
+    const userPart = 'userSegment' in rule ? rule.userSegment : 1
+    const literal = 'literalSegment' in rule
+      ? `AND split_part(resource_id, ':', ${rule.literalSegment.index}) = ${auditSqlLiteral(rule.literalSegment.value)}`
+      : ''
+    return `(
+      resource_type = ${type}
+      AND resource_id IS NOT NULL
+      AND split_part(resource_id, ':', ${userPart}) = $1
+      AND array_length(string_to_array(resource_id, ':'), 1) BETWEEN ${rule.minSegments} AND ${rule.maxSegments}
+      AND strpos(resource_id, '::') = 0
+      AND left(resource_id, 1) <> ':'
+      AND right(resource_id, 1) <> ':'
+      ${literal}
+    )`
+  })
+  return `(user_id::text = $1 OR ${clauses.join(' OR ')})`
 }
 
 export function auditRowMatchesSubject(
-  row: { resource_id?: string | null; user_id?: string | number | null },
+  row: { resource_type?: string | null; resource_id?: string | null; user_id?: string | number | null },
   userId: string,
 ): boolean {
-  const resourceId = row.resource_id ?? null
-  if (resourceId === userId) return true
-  if (resourceId && resourceId.includes(':') && resourceId.split(':')[0] === userId) return true
+  if (auditResourceIsUserSubject(row.resource_type, row.resource_id, userId)) return true
   return row.user_id != null && String(row.user_id) === userId
 }
 
@@ -607,11 +694,10 @@ function redactOwnedAuditValue(value: unknown, subjectId: string, owned: boolean
 /**
  * Subject rows lose their own identity fields. Nested objects that name a
  * different user id are left in place. Actor-only rows clear the actor
- * columns and do not rewrite another person's event body.
+ * columns and do not rewrite another resource's event body.
  */
 export function redactAuditRow(row: PurgeAuditRow, userId: string): PurgeAuditRow {
-  const aboutSubject = row.resource_id === userId
-    || Boolean(row.resource_id && row.resource_id.includes(':') && row.resource_id.split(':')[0] === userId)
+  const aboutSubject = auditResourceIsUserSubject(row.resource_type, row.resource_id, userId)
   const actor = row.user_id != null && String(row.user_id) === userId
   if (!aboutSubject && !actor) return row
   if (!aboutSubject) {
@@ -685,13 +771,29 @@ export async function scrubPurgedUserIdentity(
       [input.userId, aliases],
     )
   }
+  await scrubPurgedUserAuditIdentity(client, { userId: input.userId })
+}
+
+/**
+ * Rewrite identity copies in the two audit tables only.
+ * An actor-only match updates the actor columns and does not write
+ * action_details or request_body back. Those JSON columns are a snapshot
+ * from this transaction; assigning them again restores a value another
+ * committed rescrub has already removed.
+ */
+export async function scrubPurgedUserAuditIdentity(
+  client: RecycleClient,
+  input: { userId: string },
+): Promise<number> {
+  let updatedRows = 0
   for (const table of ['audit_logs', 'audit_logs_archive']) {
     if (!(await relationExists(client, table))) continue
     const selected = await client.query(
       `SELECT id, created_at::text AS created_at, resource_type, resource_id, resource_name,
               user_id::text AS user_id, user_name, user_email, action_details, request_body
        FROM ${table}
-       WHERE ${auditSubjectMatchSql()}`,
+       WHERE ${auditSubjectMatchSql()}
+       ORDER BY id, created_at`,
       [input.userId],
     )
     for (const raw of selected.rows) {
@@ -707,6 +809,25 @@ export async function scrubPurgedUserIdentity(
         user_name: raw.user_name == null ? null : String(raw.user_name),
         action_details: raw.action_details ?? null,
         request_body: raw.request_body ?? null,
+      }
+      const aboutSubject = auditResourceIsUserSubject(current.resource_type, current.resource_id, input.userId)
+      const actor = current.user_id != null && String(current.user_id) === input.userId
+      if (!aboutSubject && !actor) continue
+      if (!aboutSubject) {
+        if (current.user_email == null && current.user_name == null) continue
+        const updated = await client.query(
+          `UPDATE ${table}
+           SET user_email = NULL,
+               user_name = NULL
+           WHERE ${createdAt.whereSql}
+             AND user_id::text = $3
+           RETURNING id`,
+          [current.id, createdAt.param, input.userId],
+        )
+        const updatedCount = typeof updated.rowCount === 'number' ? updated.rowCount : updated.rows.length
+        if (updatedCount !== 1) throw new AuditIdentityScrubError('AUDIT_ROW_NOT_UPDATED')
+        updatedRows += 1
+        continue
       }
       const redacted = redactAuditRow(current, input.userId)
       if (JSON.stringify(redacted) === JSON.stringify(current)) continue
@@ -730,10 +851,44 @@ export async function scrubPurgedUserIdentity(
         ],
       )
       const updatedCount = typeof updated.rowCount === 'number' ? updated.rowCount : updated.rows.length
-      if (updatedCount !== 1) {
-        throw new AuditIdentityScrubError('AUDIT_ROW_NOT_UPDATED')
-      }
+      if (updatedCount !== 1) throw new AuditIdentityScrubError('AUDIT_ROW_NOT_UPDATED')
+      updatedRows += 1
     }
+  }
+  return updatedRows
+}
+
+const RESCRUB_RECEIPT_OUTCOMES = ['rescrubbed', 'NOT_PURGED', 'USER_NOT_FOUND'] as const
+
+/**
+ * Per-item receipt. Values are an allowlisted outcome, a database id when one
+ * was resolved, and a count. Unmatched input is never stored. Throws on
+ * failure so the caller's transaction rolls the rewrite back with it.
+ */
+async function insertRescrubReceipt(
+  client: RecycleClient,
+  input: { resourceId: string | null; outcome: (typeof RESCRUB_RECEIPT_OUTCOMES)[number]; auditRowsUpdated: number },
+): Promise<void> {
+  if (!RESCRUB_RECEIPT_OUTCOMES.includes(input.outcome)) throw new RescrubReceiptError()
+  if (!Number.isInteger(input.auditRowsUpdated) || input.auditRowsUpdated < 0) throw new RescrubReceiptError()
+  if (input.outcome === 'USER_NOT_FOUND' && input.resourceId !== null) throw new RescrubReceiptError()
+  try {
+    const inserted = await client.query(
+      `INSERT INTO audit_logs (
+         event_type, event_category, event_severity,
+         resource_type, resource_id, action, action_details
+       ) VALUES (
+         'UPDATE', 'USER', 'INFO',
+         'user', $1::text, 'rescrub',
+         jsonb_build_object('outcome', $2::text, 'auditRowsUpdated', $3::int)
+       )
+       RETURNING id`,
+      [input.resourceId, input.outcome, input.auditRowsUpdated],
+    )
+    if (!inserted.rows[0]) throw new RescrubReceiptError()
+  } catch (error) {
+    if (error instanceof RescrubReceiptError) throw error
+    throw new RescrubReceiptError()
   }
 }
 
@@ -874,16 +1029,21 @@ export async function rescrubPurgedUsers(input: {
 }): Promise<BatchItemResult[]> {
   const results: BatchItemResult[] = []
   for (const row of input.rows) {
-    const outcome = await transaction((client) => applyRecycleRescrub(client, {
-      userId: row.userId,
-      actorId: input.actorId,
-      index: row.index,
-      now: input.now,
-    }))
-    await auditRecycle(input.actorId, 'user', 'update', row.userId, {
-      outcome: outcome.ok ? 'rescrubbed' : outcome.code,
-    })
-    results.push(outcome)
+    try {
+      const outcome = await transaction((client) => applyRecycleRescrub(client, {
+        userId: row.userId,
+        actorId: input.actorId,
+        index: row.index,
+        now: input.now,
+      }))
+      results.push(outcome)
+    } catch (error) {
+      if (error instanceof RescrubReceiptError) {
+        results.push(item(row.index, row.userId, null, false, 'RESCRUB_RECEIPT_FAILED', '重新清理的记录没有写入，本次清理已撤销'))
+        continue
+      }
+      throw error
+    }
   }
   return results
 }

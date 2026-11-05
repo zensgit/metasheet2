@@ -10,7 +10,7 @@ import { ApiTokenService } from '../../src/multitable/api-token-service'
 import { authService } from '../../src/auth/AuthService'
 import { restoreDeprovisionEvent } from '../../src/directory/deprovision-evidence-api'
 import { adminUsersRouter } from '../../src/routes/admin-users'
-import { applyRecycleMove, applyRecycleRestore, applyRecyclePurge, listDueRecycleUsers, purgeDueRecycleUsers } from '../../src/admin/user-recycle'
+import { applyRecycleMove, applyRecycleRestore, applyRecyclePurge, applyRecycleRescrub, listDueRecycleUsers, purgeDueRecycleUsers } from '../../src/admin/user-recycle'
 import { up, down } from '../../src/db/migrations/zzzz20261031120000_add_users_recycle_bin'
 
 beforeAll(async () => {
@@ -318,25 +318,67 @@ describe('recycle review against a fresh migrated synthetic PostgreSQL database'
     name: string
     at: string
     resourceId?: string
+    resourceType?: string
     action?: string
     details?: Record<string, unknown>
+    requestBody?: Record<string, unknown> | null
+    actorUserId?: number | null
     table?: 'audit_logs' | 'audit_logs_archive'
   }) {
     const table = input.table ?? 'audit_logs'
     if (table === 'audit_logs') await ensureAuditPartition(input.at)
     const details = input.details ?? { email: input.email, name: input.name }
+    const requestBody = input.requestBody === undefined ? details : input.requestBody
     const inserted = await query<{ id: string; created_at: string }>(
       `INSERT INTO ${table} (
          event_type, event_category, action, resource_type, resource_id, resource_name,
-         user_email, user_name, action_details, request_body, created_at
+         user_id, user_email, user_name, action_details, request_body, created_at
        ) VALUES (
-         'UPDATE', 'USER', $6, 'user', $1, $2,
-         $3, $2, $4::jsonb, $4::jsonb, $5::timestamptz
+         'UPDATE', 'USER', $6, $7, $1, $2,
+         $9, $3, $2, $4::jsonb, $8::jsonb, $5::timestamptz
        )
        RETURNING id::text AS id, created_at::text AS created_at`,
-      [input.resourceId ?? input.userId, input.name, input.email, JSON.stringify(details), input.at, input.action ?? 'update'],
+      [
+        input.resourceId ?? input.userId,
+        input.name,
+        input.email,
+        JSON.stringify(details),
+        input.at,
+        input.action ?? 'update',
+        input.resourceType ?? 'user',
+        requestBody == null ? null : JSON.stringify(requestBody),
+        input.actorUserId ?? null,
+      ],
     )
     return inserted.rows[0]
+  }
+
+  async function rescrubAs(actorId: string, ids: string[], confirmText = '重新清理') {
+    const app = express()
+    app.use(express.json())
+    app.use(adminUsersRouter())
+    const jwt = authService.createToken({
+      id: actorId,
+      email: '',
+      name: 'Synthetic',
+      role: 'admin',
+      permissions: [],
+      created_at: new Date(),
+      updated_at: new Date(),
+    })
+    return request(app)
+      .post('/api/admin/users/recycle/rescrub')
+      .auth(jwt, { type: 'bearer' })
+      .send({ userIds: ids, confirmText })
+  }
+
+  async function seedPurgedUser(id = `recycle_review_${randomUUID()}`) {
+    await query(
+      `INSERT INTO users(id, username, email, name, password_hash, role, is_admin, is_active, activation_status, deleted_at, purged_at, purged_by)
+       VALUES ($1, $1, $2, 'Synthetic user', 'synthetic-only', 'user', FALSE, FALSE, 'activated', NOW(), NOW(), 'synthetic-operator')`,
+      [id, `${id}@example.test`],
+    )
+    return id
   }
 
   it('purges a user with microsecond audit rows and leaves unrelated audit rows untouched', async () => {
@@ -557,6 +599,317 @@ describe('recycle review against a fresh migrated synthetic PostgreSQL database'
     const binned = await send([binnedId])
     expect(binned.body.data.results[0].code).toBe('NOT_PURGED')
     expect((await query('SELECT email, deleted_at IS NOT NULL AS deleted, purged_at FROM users WHERE id = $1', [binnedId])).rows).toEqual(binnedBefore)
+  })
+
+  it('does not rewrite residual directory accounts, links, or alias conflicts', async () => {
+    const actorId = await seedUser(true)
+    const userId = await seedUser()
+    expect((await move(userId)).ok).toBe(true)
+    expect((await transaction(client => applyRecyclePurge(client, {
+      userId,
+      actorId,
+      index: 0,
+      passwordHash: 'synthetic-unusable',
+    }))).ok).toBe(true)
+    const integrationId = randomUUID()
+    const accountId = randomUUID()
+    await query(
+      `INSERT INTO directory_integrations(id, org_id, provider, name, corp_id, sync_enabled)
+       VALUES ($1::uuid, 'default', 'dingtalk', $1::text, $1::text, FALSE)`,
+      [integrationId],
+    )
+    await query(
+      `INSERT INTO directory_accounts(
+         id, integration_id, provider, corp_id, external_user_id, external_key,
+         name, nick, email, mobile, job_number, title, avatar_url, org_email, open_id, union_id,
+         raw, is_active
+       ) VALUES (
+         $1::uuid, $2::uuid, 'dingtalk', $2::text, $1::text, $1::text,
+         'Residual name', 'nick', 'residual@example.test', '13800000000', 'E-9', '装配', 'avatar', 'org@example.test', 'open', 'union',
+         '{"email":"residual@example.test"}'::jsonb, TRUE
+       )`,
+      [accountId, integrationId],
+    )
+    await query(
+      `INSERT INTO directory_account_links(directory_account_id, local_user_id, link_status)
+       VALUES ($1::uuid, $2, 'linked')`,
+      [accountId, userId],
+    )
+    const collision = await query<{ id: string }>(
+      `INSERT INTO user_login_alias_collision_report(normalized_value, kind, candidate_user_ids, reason)
+       VALUES ('residual@example.test', 'email', ARRAY[$1]::text[], 'synthetic')
+       RETURNING id::text AS id`,
+      [userId],
+    )
+    const collisionId = collision.rows[0].id
+    const readVersions = async () => {
+      const account = await query(
+        `SELECT xmin::text AS xmin, name, nick, email, mobile, job_number, title, avatar_url, org_email,
+                open_id, union_id, raw, is_active, external_user_id, external_key
+         FROM directory_accounts WHERE id = $1::uuid`,
+        [accountId],
+      )
+      const link = await query(
+        `SELECT xmin::text AS xmin, local_user_id, link_status
+         FROM directory_account_links WHERE directory_account_id = $1::uuid`,
+        [accountId],
+      )
+      const report = await query(
+        `SELECT xmin::text AS xmin, normalized_value, candidate_user_ids, reason
+         FROM user_login_alias_collision_report WHERE id = $1::uuid`,
+        [collisionId],
+      )
+      return { account: account.rows[0], link: link.rows[0], report: report.rows[0] }
+    }
+    const before = await readVersions()
+    const response = await rescrubAs(actorId, [userId])
+    expect(response.status).toBe(200)
+    expect(response.body.data.results[0]).toMatchObject({ ok: true, userId })
+    expect(await readVersions()).toEqual(before)
+  })
+
+  it('keeps a subject email cleared when an actor rescrub commits a stale read', async () => {
+    const aId = await seedPurgedUser()
+    const bId = String(1_600_000_000 + Math.floor(Math.random() * 400_000_000))
+    await seedPurgedUser(bId)
+    const at = '2026-11-04 05:31:00.123456+00'
+    const secret = `actor-race-${randomUUID()}@example.test`
+    const shared = await insertAuditRow({
+      userId: aId,
+      email: secret,
+      name: 'Synthetic user',
+      at,
+      action: 'create',
+      resourceType: 'user',
+      resourceId: aId,
+      actorUserId: Number(bId),
+      details: { email: secret, accountLabel: secret, roleId: 'user' },
+      requestBody: { email: secret, accountLabel: secret },
+    })
+    let releaseWrite!: () => void
+    let markRead!: () => void
+    const readGate = new Promise<void>((resolve) => { markRead = resolve })
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve })
+    const actor = new Client({ connectionString: process.env.DATABASE_URL })
+    await actor.connect()
+    let actorRead = false
+    const wrapped = {
+      query: async (statement: string, params?: unknown[]) => {
+        if (statement.includes('UPDATE') && statement.includes('audit_logs') && JSON.stringify(params ?? []).includes(secret)) {
+          throw new Error('actor rescrub wrote the subject snapshot')
+        }
+        const result = await actor.query(statement, params)
+        const liveSelect = statement.includes('FROM audit_logs')
+          && !statement.includes('audit_logs_archive')
+          && statement.includes('action_details')
+          && !statement.includes('UPDATE')
+          && !statement.includes('INSERT')
+        if (!actorRead && liveSelect) {
+          actorRead = true
+          markRead()
+          await writeGate
+        }
+        return result
+      },
+    }
+    await actor.query('BEGIN')
+    const actorRun = applyRecycleRescrub(wrapped, { userId: bId, actorId: 'synthetic-operator', index: 0 })
+    let committed = false
+    try {
+      await Promise.race([
+        readGate,
+        new Promise((_resolve, reject) => setTimeout(() => reject(new Error('actor rescrub did not read the shared audit row')), 8000)),
+      ])
+      const subjectRun = await transaction((client) => applyRecycleRescrub(client, {
+        userId: aId,
+        actorId: 'synthetic-operator',
+        index: 0,
+      }))
+      expect(subjectRun.ok).toBe(true)
+      releaseWrite()
+      const actorResult = await actorRun
+      expect(actorResult.ok).toBe(true)
+      await actor.query('COMMIT')
+      committed = true
+      const finalRow = await query(
+        `SELECT action_details, request_body FROM audit_logs WHERE id = $1`,
+        [shared.id],
+      )
+      expect(finalRow.rows[0].action_details).toMatchObject({ email: null, accountLabel: null, roleId: 'user' })
+      expect(finalRow.rows[0].request_body).toEqual({ email: null, accountLabel: null })
+      expect(JSON.stringify(finalRow.rows[0])).not.toContain(secret)
+    } finally {
+      releaseWrite()
+      await actorRun.catch(() => undefined)
+      if (!committed) await actor.query('ROLLBACK').catch(() => undefined)
+      await actor.end()
+    }
+  })
+
+  it('cleans a user audit and leaves a role that reused the same id', async () => {
+    const actorId = await seedUser(true)
+    const userId = await seedUser()
+    const email = `${userId}@example.test`
+    expect((await move(userId)).ok).toBe(true)
+    expect((await transaction(client => applyRecyclePurge(client, {
+      userId,
+      actorId,
+      index: 0,
+      passwordHash: 'synthetic-unusable',
+    }))).ok).toBe(true)
+    const at = '2026-11-04 05:31:00.123456+00'
+    const role = await insertAuditRow({
+      userId,
+      email: 'role-admin@example.test',
+      name: 'Warehouse lead',
+      at,
+      action: 'create',
+      resourceType: 'role',
+      resourceId: userId,
+      details: { name: 'Warehouse lead', permissions: ['roles.read'] },
+      requestBody: { name: 'Warehouse lead' },
+    })
+    const userRow = await insertAuditRow({
+      userId,
+      email,
+      name: 'Synthetic user',
+      at,
+      action: 'create',
+      resourceType: 'user',
+      details: { accountLabel: email, email, name: 'Synthetic user', roleId: 'user' },
+    })
+    const before = await query(
+      `SELECT xmin::text AS xmin, action_details, resource_name FROM audit_logs WHERE id = $1`,
+      [role.id],
+    )
+    const response = await rescrubAs(actorId, [userId])
+    expect(response.status).toBe(200)
+    expect(response.body.data.results[0].ok).toBe(true)
+    const after = await query(
+      `SELECT xmin::text AS xmin, action_details, resource_name FROM audit_logs WHERE id = $1`,
+      [role.id],
+    )
+    expect(after.rows).toEqual(before.rows)
+    const cleaned = await query(`SELECT action_details, resource_name FROM audit_logs WHERE id = $1`, [userRow.id])
+    expect(cleaned.rows[0].action_details).toMatchObject({
+      accountLabel: null,
+      email: null,
+      name: '已清除用户',
+      roleId: 'user',
+    })
+    expect(cleaned.rows[0].resource_name).toBe('已清除用户')
+  })
+
+  it('records an unmatched email only as a fixed not-found reason', async () => {
+    const actorId = await seedUser(true)
+    const userId = await seedPurgedUser()
+    const email = `missing-${randomUUID()}@example.test`
+    const watermark = (await query<{ id: string }>(`SELECT COALESCE(MAX(id), 0)::text AS id FROM audit_logs`)).rows[0].id
+    const response = await rescrubAs(actorId, [email, userId])
+    expect(response.status).toBe(200)
+    expect(response.body.data.results.map((row: { code: string | null; ok: boolean }) => ({ code: row.code, ok: row.ok }))).toEqual([
+      { code: 'USER_NOT_FOUND', ok: false },
+      { code: null, ok: true },
+    ])
+    const receipts = await query<{
+      resource_id: string | null
+      action: string
+      details: string
+      body: string
+      user_email: string
+      user_name: string
+      resource_name: string
+      error_message: string
+    }>(
+      `SELECT resource_id, action, action_details::text AS details,
+              COALESCE(request_body::text, '') AS body,
+              COALESCE(user_email, '') AS user_email,
+              COALESCE(user_name, '') AS user_name,
+              COALESCE(resource_name, '') AS resource_name,
+              COALESCE(error_message, '') AS error_message
+       FROM audit_logs
+       WHERE id > $1::bigint`,
+      [watermark],
+    )
+    expect(receipts.rows.length).toBeGreaterThan(0)
+    for (const row of receipts.rows) {
+      expect(JSON.stringify(row)).not.toContain(email)
+    }
+    expect(receipts.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'rescrub', resource_id: userId }),
+      expect.objectContaining({ action: 'rescrub', resource_id: null }),
+      expect.objectContaining({ action: 'update', resource_id: 'recycle-rescrub' }),
+    ]))
+    const notFound = receipts.rows.find((row) => row.action === 'rescrub' && row.resource_id == null)
+    expect(notFound?.details).toContain('USER_NOT_FOUND')
+    expect(receipts.rows.find((row) => row.resource_id === userId)?.details).toContain('rescrubbed')
+    const archived = await query<{ c: number }>(
+      `SELECT COUNT(*)::int AS c FROM audit_logs_archive
+       WHERE resource_id = $1 OR COALESCE(action_details::text, '') LIKE $2`,
+      [email, `%${email}%`],
+    )
+    expect(archived.rows[0].c).toBe(0)
+  })
+
+  it('rolls the audit rewrite back when the per-item receipt insert fails', async () => {
+    const actorId = await seedUser(true)
+    const userId = await seedUser()
+    const email = `${userId}@example.test`
+    expect((await move(userId)).ok).toBe(true)
+    expect((await transaction(client => applyRecyclePurge(client, {
+      userId,
+      actorId,
+      index: 0,
+      passwordHash: 'synthetic-unusable',
+    }))).ok).toBe(true)
+    const at = '2026-11-04 05:31:00.123456+00'
+    const live = await insertAuditRow({
+      userId,
+      email,
+      name: 'Synthetic user',
+      at,
+      action: 'create',
+      details: { accountLabel: email, email, roleId: 'user' },
+    })
+    const before = await query(`SELECT action_details, user_email, resource_name FROM audit_logs WHERE id = $1`, [live.id])
+    await query(`
+      CREATE OR REPLACE FUNCTION synthetic_rescrub_receipt_fail() RETURNS trigger
+      LANGUAGE plpgsql AS $fn$
+      BEGIN
+        IF NEW.action = 'rescrub' THEN
+          RAISE EXCEPTION 'synthetic rescrub receipt failure';
+        END IF;
+        RETURN NEW;
+      END
+      $fn$
+    `)
+    await query(`
+      DROP TRIGGER IF EXISTS synthetic_rescrub_receipt_fail ON audit_logs;
+      CREATE TRIGGER synthetic_rescrub_receipt_fail
+      BEFORE INSERT ON audit_logs
+      FOR EACH ROW EXECUTE FUNCTION synthetic_rescrub_receipt_fail()
+    `)
+    try {
+      const response = await rescrubAs(actorId, [userId])
+      expect(response.status).toBe(200)
+      expect(response.body.data.results[0]).toMatchObject({ ok: false, code: 'RESCRUB_RECEIPT_FAILED' })
+      expect((await query(`SELECT action_details, user_email, resource_name FROM audit_logs WHERE id = $1`, [live.id])).rows).toEqual(before.rows)
+      expect((await query<{ c: number }>(
+        `SELECT COUNT(*)::int AS c FROM audit_logs WHERE action = 'rescrub' AND resource_id = $1`,
+        [userId],
+      )).rows).toEqual([{ c: 0 }])
+      const batch = await query<{ action_details: { failureCount?: number; successCount?: number } }>(
+        `SELECT action_details FROM audit_logs
+         WHERE resource_id = 'recycle-rescrub' AND action_details->>'adminUserId' = $1
+         ORDER BY created_at DESC LIMIT 1`,
+        [actorId],
+      )
+      expect(batch.rows[0].action_details).toMatchObject({ successCount: 0, failureCount: 1 })
+      expect(JSON.stringify(batch.rows[0].action_details)).not.toContain(email)
+    } finally {
+      await query('DROP TRIGGER IF EXISTS synthetic_rescrub_receipt_fail ON audit_logs')
+      await query('DROP FUNCTION IF EXISTS synthetic_rescrub_receipt_fail()')
+    }
   })
 
   it('rolls back the whole purge when audit scrub fails', async () => {
