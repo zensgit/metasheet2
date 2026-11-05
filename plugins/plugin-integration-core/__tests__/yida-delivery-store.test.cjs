@@ -65,6 +65,8 @@ test('the YiDa real-PG suites are registered in their real execution lane withou
   // step's own shell runs at the repository root) and the step's whole file count.
   assert.equal(lines[2], `node scripts/ops/vitest-zero-skip.mjs artifacts/yida-realdb/lock-protocol-vitest.json ${lane.length}`)
   assert.equal(lane.length, 14)
+  // A local run's report is gitignored, so a committed stale clean report cannot stand in for this run's.
+  assert.equal(fs.readFileSync(path.join(root, '.gitignore'), 'utf8').split(/\r?\n/).includes('artifacts/yida-realdb/'), true)
   for (const spec of specs) assert.equal(files.filter((token) => token === spec).length, 1)
   assert.deepEqual(files.filter((token) => !token.startsWith('-')).sort(), [...lane].sort())
   const config = ts.createSourceFile('vitest.config.ts', fs.readFileSync(path.join(root, 'packages/core-backend/vitest.config.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
@@ -157,6 +159,28 @@ test('the lock-protocol zero-skip check refuses every skipped, todo, failed, mis
       const result = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' })
       assert.equal(result.status, 1, key)
       assert.equal(result.stderr.trim(), `VITEST_ZERO_SKIP: ${key}`)
+    }
+    // Reached through a symlinked directory, the check still runs and still refuses (a main-module guard
+    // comparing import.meta.url with argv[1] would print nothing and exit 0 here). The link points at a
+    // scratch copy of the script, never at the repository, so cleanup cannot follow it into the checkout.
+    // 'junction' needs no privilege on Windows and is ignored on POSIX, where a plain symlink is made.
+    const real = path.join(dir, 'real')
+    const linked = path.join(dir, 'linked')
+    fs.mkdirSync(real)
+    fs.copyFileSync(cli, path.join(real, 'vitest-zero-skip.mjs'))
+    fs.symlinkSync(real, linked, 'junction')
+    try {
+      assert.notEqual(fs.realpathSync(path.join(linked, 'vitest-zero-skip.mjs')), path.join(linked, 'vitest-zero-skip.mjs'))
+      const skipped = path.join(dir, 'skipped.json')
+      fs.writeFileSync(skipped, JSON.stringify(withAssertion('skipped')))
+      const refused = spawnSync(process.execPath, [path.join(linked, 'vitest-zero-skip.mjs'), skipped, '3'], { encoding: 'utf8' })
+      assert.equal(refused.status, 1, 'symlinked directory: a skip is refused')
+      assert.equal(refused.stderr.trim(), 'VITEST_ZERO_SKIP: ASSERTION_SKIPPED')
+      const accepted = spawnSync(process.execPath, [path.join(linked, 'vitest-zero-skip.mjs'), clean, '3'], { encoding: 'utf8' })
+      assert.equal(accepted.status, 0, 'symlinked directory: a clean report passes')
+      assert.match(accepted.stdout, /^VITEST_ZERO_SKIP: ok \(3 files, 6 tests, all passed, none skipped or todo\)\r?\n$/)
+    } finally {
+      fs.unlinkSync(linked)
     }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })

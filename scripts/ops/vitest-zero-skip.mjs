@@ -6,12 +6,18 @@
 // missing case. The vitest exit code alone does not prove that: in vitest 1.x the JSON report counts an
 // it.skip as "passed" in numPassedTests and not at all in numPendingTests (which only counts tests still
 // in the "run" state), so the only reliable signal for a skip is each assertion's own status. This check
-// therefore refuses unless the summary is clean AND every assertion of every expected file passed.
+// therefore refuses unless the summary is clean AND every entry of every expected file's
+// `assertionResults` (vitest's name for a test case, not an expect() call) has status "passed".
+// Limit: it proves zero skip/todo/pending, not that each case ran an expect(); a case that returns early
+// with no expect() still passes (vitest 1.x has no requireAssertions).
 //
 // Output is values-free: a failure prints only fixed `VITEST_ZERO_SKIP: <key>` lines (no file names,
 // test titles, messages or counts from the report) and exits 1.
+//
+// CLI only, with no main-module guard on purpose: a guard comparing import.meta.url with argv[1] is
+// false when the script is reached through a symlinked directory, and the check would then print nothing
+// and exit 0 (fail-open). Nothing imports this module.
 import { readFileSync } from 'node:fs'
-import { pathToFileURL } from 'node:url'
 
 const ZERO_KEYS = Object.freeze([
   ['numFailedTests', 'FAILED_TESTS'],
@@ -32,7 +38,7 @@ const ASSERTION_KEYS = Object.freeze({
 const count = (value) => Number.isSafeInteger(value) && value >= 0
 
 /** Returns the sorted, de-duplicated failure keys; an empty array means the report is zero-skip clean. */
-export function vitestZeroSkipFailures(report, expectedFiles) {
+function vitestZeroSkipFailures(report, expectedFiles) {
   const failures = new Set()
   if (!Number.isSafeInteger(expectedFiles) || expectedFiles < 1) return ['USAGE']
   if (!report || typeof report !== 'object' || Array.isArray(report)) return ['REPORT_NOT_OBJECT']
@@ -97,8 +103,11 @@ function main(argv) {
   return failures
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const failures = main(process.argv.slice(2))
-  for (const key of failures) console.error(`VITEST_ZERO_SKIP: ${key}`)
-  if (failures.length > 0) process.exitCode = 1
+let failures
+try {
+  failures = main(process.argv.slice(2))
+} catch {
+  failures = ['INTERNAL_ERROR']
 }
+for (const key of failures) console.error(`VITEST_ZERO_SKIP: ${key}`)
+if (failures.length > 0) process.exitCode = 1
