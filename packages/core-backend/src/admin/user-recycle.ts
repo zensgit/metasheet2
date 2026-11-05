@@ -442,9 +442,42 @@ const AUDIT_IDENTITY_KEYS = new Set([
   'nick',
   'org_email',
   'orgEmail',
+  // Login and display labels copy the same identity as email/username/mobile/name.
+  'accountLabel',
+  'account_label',
+  'loginName',
+  'login_name',
+  'loginLabel',
+  'login_label',
+  'displayName',
+  'display_name',
+  'displayLabel',
+  'display_label',
+  'fullName',
+  'full_name',
+  'nickname',
+  'nickName',
+  'phone',
+  'phoneNumber',
+  'telephone',
+  'jobNumber',
+  'job_number',
+  'position',
 ])
 
-const AUDIT_NAME_KEYS = new Set(['name', 'user_name', 'userName'])
+const AUDIT_NAME_KEYS = new Set([
+  'name',
+  'user_name',
+  'userName',
+  'displayName',
+  'display_name',
+  'displayLabel',
+  'display_label',
+  'fullName',
+  'full_name',
+  'nickname',
+  'nickName',
+])
 
 /**
  * Structured subject match. resource_id is the user id, or the known
