@@ -7810,6 +7810,122 @@ test('OWNER GATE: action=off never enters the non-off proof flow — with equal 
   assert.match(body.slice(skip, nonOff), /SNAP_MIGRATIONS_GATE_REASON=not_evaluated_for_off\n\s*return 0\n/)
 })
 
+test('OWNER GATE: deprovision keep-journal failure with OFF unproven reaches the final OFF restore with no migration proof probe before it; the summary reads both gates unknown / not_evaluated_in_failure_summary', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lifecycle-owner-gate-keep-journal-'))
+  try {
+    // Equal lists and the tolerated name pending (the staging shape): on the normal gate path
+    // these stubs issue the lib-scoped and tolerated scoped --list, the node pg table probe,
+    // the static --confirm support read and the per-name --confirm (positive control below).
+    const libPath = join(dir, 'synthetic-lib.sh')
+    writeFileSync(libPath, `staging_owner_exclude_csv() { printf '%s' 'syn_a'; }\nstaging_owner_excluded_tables_present_sql() { printf '%s' 'SELECT 0;'; }\n`)
+    const acceptPath = join(dir, 'synthetic-accept.txt')
+    writeFileSync(acceptPath, `# synthetic accept table\nsyn_a ${SYN_DIGEST}\n`)
+    const stubs = `
+      ${OWNER_GATE_DOCKER_STUB}
+      owner_exclusion_lib_path() { printf 'lib-path\\n' >> "$LIB_READ_LOG"; printf '%s' "$SYN_LIB_PATH"; }
+      canary_accept_table_path() { printf 'accept-table-path\\n' >> "$ACCEPT_READ_LOG"; printf '%s' "$SYN_ACCEPT_PATH"; }
+      read_live_flags() { printf 'false false true deprovision'; }
+      resolve_deployed_sha() { printf '%s' "$SYN_SHA"; }
+      probe_alias_readiness() { printf 'true'; }
+      fetch_backend_health_ok() { printf 'true'; }
+      DEPLOY_SHA="$SYN_SHA"
+    `
+    const run = (tag, body, extraEnv = {}) => {
+      const out = join(dir, `out-${tag}`)
+      mkdirSync(out, { recursive: true })
+      const logs = { argv: join(dir, `argv-${tag}.log`), lib: join(dir, `lib-read-${tag}.log`), accept: join(dir, `accept-read-${tag}.log`) }
+      const r = spawnSync(
+        'bash',
+        ['-o', 'pipefail', '-c', `source "$1"\nSYN_LIB_PATH="$2"; SYN_ACCEPT_PATH="$3"; SYN_SHA="$4"\n${stubs}\n${body}`, 'bash', REMOTE_SH, libPath, acceptPath, 'a'.repeat(40)],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            ACTION: 'deprovision',
+            OUTPUT_DIR: out,
+            RUN_STAMP: `contract-keep-journal-${tag}`,
+            LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+            STUB_PENDING: 'syn_a',
+            ARGV_LOG: logs.argv,
+            LIB_READ_LOG: logs.lib,
+            ACCEPT_READ_LOG: logs.accept,
+            ...extraEnv,
+          },
+        },
+      )
+      const read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : '')
+      return { ...r, out, argv: read(logs.argv), libRead: read(logs.lib), acceptRead: read(logs.accept), summary: read(join(out, 'summary.txt')), emergency: read(join(out, 'alias-emergency-rollback.log')) }
+    }
+
+    const r = run(
+      'failure',
+      `_journal_read_phase() { JOURNAL_PHASE=run_bound; }
+       restore_lifecycle_override() { printf 'MARK restore\\n' >> "$ARGV_LOG"; return 0; }
+       recreate_backend_only() { printf 'MARK recreate\\n' >> "$ARGV_LOG"; return 0; }
+       assert_exact_mode_off() { printf 'MARK off-not-proven\\n' >> "$ARGV_LOG"; return 1; }
+       cleanup_prev_backup() { :; }
+       arm_alias_exit_rollback_guard
+       fail_deprovision_apply_keep_journal contract_probe`,
+    )
+    assert.notEqual(r.status, 0, 'the failure path still exits non-zero')
+    const lines = r.argv.split('\n').filter((l) => l !== '')
+    const marks = lines.map((l, i) => [l, i]).filter(([l]) => l.startsWith('MARK '))
+    assert.deepEqual(
+      marks.map(([l]) => l),
+      ['MARK restore', 'MARK recreate', 'MARK off-not-proven', 'MARK restore', 'MARK recreate', 'MARK off-not-proven'],
+      'first restore, OFF not proven, then the EXIT guard performs the final restore',
+    )
+    assert.match(r.emergency, /alias rollback guard fired; restoring explicit OFF baseline before exit/)
+    const finalRestore = marks[3][1]
+    const beforeFinal = lines.slice(marks[2][1] + 1, finalRestore)
+    assert.doesNotMatch(beforeFinal.join('\n'), / node -e /, 'no node pg table probe before the final restore')
+    assert.doesNotMatch(beforeFinal.join('\n'), /grep -qF -- --confirm/, 'no static --confirm support read before the final restore')
+    assert.doesNotMatch(beforeFinal.join('\n'), /--confirm/, 'no per-name --confirm before the final restore')
+    const lists = beforeFinal.filter((l) => / node packages\/core-backend\/dist\/src\/db\/migrate\.js --list$/.test(l))
+    assert.equal(lists.length, beforeFinal.length, 'every docker exec before the final restore is a --list read')
+    assert.deepEqual(lists.map((l) => l.match(/MIGRATION_EXCLUDE=(\S*)/)[1]), [''], 'only the whole-ledger --list: no lib-scoped or tolerated scoped read')
+    // Nothing after the final restore either: the summary was written before it.
+    assert.equal(lines.slice(finalRestore).filter((l) => !l.startsWith('MARK ')).length, 0)
+    assert.equal(r.libRead, '', 'the lib is never read on the failure summary path')
+    assert.equal(r.acceptRead, '', 'the accept table path is never resolved on the failure summary path')
+    assert.match(r.summary, /\nrolled_back_flags_off=false\n/)
+    assert.match(r.summary, /\nmigrations_gate=unknown\nmigrations_gate_reason=not_evaluated_in_failure_summary\n/)
+    assert.match(r.summary, /\nmigrations_gate_off=unknown\nmigrations_gate_off_reason=not_evaluated_in_failure_summary\n/)
+    assert.match(r.summary, /\nmode=deprovision\n/)
+    assert.match(r.summary, new RegExp(`\\nbuild_sha=${'a'.repeat(40)}\\n`))
+    assert.doesNotMatch(r.summary, /syn_a/, 'no exclusion name in the summary')
+
+    // Positive control: the same stubs on the normal deprovision gate path (capture_live_snapshot
+    // without the failure-summary flag — an environment value for it is ignored) do record the
+    // proof flow, the lib read and the accept-table read, so the absences above are observable.
+    const c = run(
+      'control',
+      `capture_live_snapshot
+       printf '%s|%s|%s|%s' "$SNAP_MIGRATIONS_GATE" "$SNAP_MIGRATIONS_GATE_REASON" "$SNAP_MIGRATIONS_GATE_OFF" "$MIGRATIONS_GATE_FAILURE_SUMMARY_ONLY"`,
+      { MIGRATIONS_GATE_FAILURE_SUMMARY_ONLY: 'true' },
+    )
+    assert.equal(c.status, 0, c.stderr)
+    assert.equal(c.stdout, 'owner_scoped|owner_scoped_proven|owner_scoped|false')
+    assert.match(c.argv, / node -e /, 'control: the table probe is issued')
+    assert.match(c.argv, /grep -qF -- --confirm/, 'control: the --confirm support read is issued')
+    assert.match(c.argv, /--confirm syn_a/, 'control: the per-name --confirm is issued')
+    assert.match(c.argv, /MIGRATION_EXCLUDE=syn_a /, 'control: a scoped --list is issued')
+    assert.notEqual(c.libRead, '', 'control: the lib is read')
+    assert.notEqual(c.acceptRead, '', 'control: the accept table path is resolved')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  // Source pin: the flag is raised only around the keep-journal summary snapshot, and the
+  // guard in capture_migrations_gate returns before either migration rule is invoked.
+  const source = read(REMOTE_SH)
+  const kj = source.slice(source.indexOf('fail_deprovision_apply_keep_journal() {'), source.indexOf('\n}\n', source.indexOf('fail_deprovision_apply_keep_journal() {')))
+  assert.match(kj, /\n  MIGRATIONS_GATE_FAILURE_SUMMARY_ONLY="true"\n  capture_live_snapshot 2>\/dev\/null \|\| true\n  MIGRATIONS_GATE_FAILURE_SUMMARY_ONLY="false"\n/)
+  assert.equal(source.split('MIGRATIONS_GATE_FAILURE_SUMMARY_ONLY="true"').length - 1, 1, 'raised at exactly one site')
+  const gate = source.slice(source.indexOf('capture_migrations_gate() {'), source.indexOf('\n}\n', source.indexOf('capture_migrations_gate() {')))
+  const guard = gate.indexOf('if [[ "${MIGRATIONS_GATE_FAILURE_SUMMARY_ONLY:-false}" == "true" ]]; then')
+  assert.ok(guard !== -1 && guard < gate.indexOf('snapshot_migrations_gate_off_fields') && guard < gate.indexOf('snapshot_migrations_gate_fields '), 'guard precedes both rules')
+})
+
 test('production function: normalize_exclusion_name_set trims, drops blank and comment entries, de-duplicates and sorts', () => {
   const r = spawnSync('bash', ['-c', 'source "$1"; printf "%s" "$2" | normalize_exclusion_name_set; printf "|rc=%s" "$?"; printf "" | normalize_exclusion_name_set; printf "|empty_rc=%s" "$?"', 'bash', REMOTE_SH, ' syn_b ,syn_a\n# note\n\n  syn_a\t\nsyn_c,,'], {
     encoding: 'utf8',

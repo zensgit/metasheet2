@@ -278,6 +278,10 @@ LIFECYCLE_PREV_STATE="absent" # absent | present
 PINNED_IMAGE_OWNER=""
 PINNED_IMAGE_TAG=""
 ALIAS_ROLLBACK_ARMED="false"
+# true only around the report-only snapshot a failure path takes while the EXIT rollback
+# guard still has a final OFF retry pending: capture_migrations_gate then evaluates neither
+# migration rule (see capture_migrations_gate). Never set from the environment.
+MIGRATIONS_GATE_FAILURE_SUMMARY_ONLY="false"
 # Subject-local ephemeral secret files written under the per-run secrets dir
 # (local user id / temp password). Never logged; cleaned with secrets dir.
 CANARY_SUBJECT_LOCAL_USER_ID_FILE=""
@@ -982,6 +986,11 @@ snapshot_migrations_gate_fields() {
 # tolerated scoped read, no node pg probe and no per-name --confirm run before (or after) the
 # flag clear. Its non-off fields stay unknown / n/a with migrations_gate_reason
 # not_evaluated_for_off; the pending count is parsed from the whole list already captured.
+# Failure summary (MIGRATIONS_GATE_FAILURE_SUMMARY_ONLY=true, set only by the deprovision
+# keep-journal path while the EXIT guard's final OFF retry is still pending): neither rule
+# runs — no lib or accept-table read, no lib-scoped or tolerated scoped --list, no table-proof
+# SQL, no node pg probe and no --confirm — so nothing added here can delay that retry. Both
+# gates read unknown with reason not_evaluated_in_failure_summary; the summary never gates.
 capture_migrations_gate() {
   local off_fields="" fields="" key value
   SNAP_OWNER_EXCLUDED_CSV=unknown
@@ -996,6 +1005,13 @@ capture_migrations_gate() {
   SNAP_MIGRATIONS_GATE_REASON=probe_unknown
   SNAP_MIGRATIONS_GATE_OFF=unknown
   SNAP_MIGRATIONS_GATE_OFF_REASON=probe_unknown
+  if [[ "${MIGRATIONS_GATE_FAILURE_SUMMARY_ONLY:-false}" == "true" ]]; then
+    SNAP_MIGRATIONS_PENDING_COUNT="$(migrate_list_pending_count "${SNAP_MIGRATE_LIST_WHOLE:-}" 2>/dev/null)" \
+      || SNAP_MIGRATIONS_PENDING_COUNT=unknown
+    SNAP_MIGRATIONS_GATE_REASON=not_evaluated_in_failure_summary
+    SNAP_MIGRATIONS_GATE_OFF_REASON=not_evaluated_in_failure_summary
+    return 0
+  fi
   off_fields="$(snapshot_migrations_gate_off_fields "${SNAP_MIGRATIONS_ZERO:-unknown}" 2>/dev/null)" || off_fields=""
   while IFS='=' read -r key value; do
     case "$key" in
@@ -5819,7 +5835,11 @@ fail_deprovision_apply_keep_journal() {
   else
     log "flags OFF not proven after keep-journal failure path; EXIT rollback guard remains armed for a final retry"
   fi
+  # Report-only snapshot for summary.txt (mode, build SHA). It must not evaluate either
+  # migration rule: when OFF is unproven the guard's final restore waits behind it.
+  MIGRATIONS_GATE_FAILURE_SUMMARY_ONLY="true"
   capture_live_snapshot 2>/dev/null || true
+  MIGRATIONS_GATE_FAILURE_SUMMARY_ONLY="false"
   {
     echo "action=deprovision"
     echo "phase=apply"
@@ -5831,6 +5851,10 @@ fail_deprovision_apply_keep_journal() {
     echo "journal_retained=true"
     echo "journal_phase=${phase}"
     echo "rolled_back_flags_off=${flags_off}"
+    echo "migrations_gate=${SNAP_MIGRATIONS_GATE:-unknown}"
+    echo "migrations_gate_reason=${SNAP_MIGRATIONS_GATE_REASON:-probe_unknown}"
+    echo "migrations_gate_off=${SNAP_MIGRATIONS_GATE_OFF:-unknown}"
+    echo "migrations_gate_off_reason=${SNAP_MIGRATIONS_GATE_OFF_REASON:-probe_unknown}"
     echo "apply_completed=false"
     echo "end_to_end_restore_claimed=false"
     echo "note=deprovision_apply_failed_recovery_journal_retained_${reason}"
