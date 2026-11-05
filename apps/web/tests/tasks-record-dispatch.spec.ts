@@ -3396,6 +3396,39 @@ describe('派发任务 dialog: its own Tab trap', () => {
     }
   })
 
+  it('leaves a Tab INTO a date or time input to the browser (only its move lands on the last part going back), and puts focus on the input only when that move left the dialog, for the latest Tab only', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    const outside = document.createElement('button')
+    document.body.appendChild(outside)
+    const turn = () => new Promise((resolve) => setTimeout(resolve, 0))
+    try {
+      // Back into the time input from 取消, forward into the date input from the mode: not held back.
+      expect(tab(q('cancel')!, true).defaultPrevented).toBe(false)
+      // Wherever the browser's move lands inside the dialog is left as it is.
+      q('submit')!.focus()
+      await turn()
+      expect(document.activeElement).toBe(q('submit'))
+      expect(tab(q('mode')!).defaultPrevented).toBe(false)
+      // A move that left the dialog: focus goes to the input the Tab was going to.
+      outside.focus()
+      await turn()
+      expect(document.activeElement).toBe(q('due-date'))
+      // Two Tabs before the check runs (Chromium runs key input ahead of timers): only the latest counts.
+      expect(tab(q('cancel')!, true).defaultPrevented).toBe(false)
+      expect(tab(q('mode')!).defaultPrevented).toBe(false)
+      outside.focus()
+      await turn()
+      expect(document.activeElement).toBe(q('due-date'))
+    } finally {
+      outside.remove()
+    }
+  })
+
   it('steps over the folded user-id entry, and onto it once it is unfolded', async () => {
     serveTasks()
     const { container } = mountInspector()

@@ -4,11 +4,14 @@
  * buttons out of its default Tab order, so a Tab left to the browser could skip them or take focus
  * out of the dialog.
  *
- * One exception: in a date or time input a Tab first steps through the input's own parts (Chromium:
- * month, day, year), so that Tab is left to the browser, and only a move that takes focus out of the
- * dialog is brought back, to the control after (or before) that input. A browser that leaves buttons
- * out of its own move can pass over a button inside the dialog there. jsdom has no such parts; the
- * part-to-part move itself is for a browser walk.
+ * Two exceptions, both for date and time inputs, whose parts (Chromium: month, day, year) a Tab steps
+ * through. A Tab inside one is left to the browser, and only a move that takes focus out of the dialog
+ * is brought back, to the control after (or before) that input. A Tab INTO one is also left to the
+ * browser, because only the browser's own move lands on the input's last part going back (a focus()
+ * call always lands on the first); if that move takes focus out of the dialog, focus is put on the
+ * input. A
+ * browser that leaves buttons out of its own move can pass over a button inside the dialog there.
+ * jsdom has no such parts; the part-to-part move itself is for a browser walk.
  */
 
 /** The controls a Tab can land on. */
@@ -17,6 +20,10 @@ export const FOCUSABLE_SELECTOR =
 
 /** Input types a browser may split into parts that a Tab steps through. */
 const SEGMENTED_INPUT_TYPES = new Set(['date', 'time', 'datetime-local', 'month', 'week'])
+
+function isSegmented(element: Element | null): element is HTMLInputElement {
+  return element instanceof HTMLInputElement && SEGMENTED_INPUT_TYPES.has(element.type)
+}
 
 function focusableWithin(container: HTMLElement): HTMLElement[] {
   return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((element) => !element.closest('[hidden]'))
@@ -49,21 +56,40 @@ function followSegmentedTab(container: HTMLElement, input: HTMLInputElement, bac
 }
 
 /** Moves focus one step within `container` for a Tab (Shift+Tab: back) keydown, wrapping at the ends,
- *  and holds the browser's own move back (except in a date or time input, see above). Controls inside
+ *  and holds the browser's own move back (except in or into a date or time input, see above). Controls inside
  *  a `[hidden]` element and disabled ones are skipped. From the container itself or from outside its
  *  controls, Tab goes to the first control and Shift+Tab to the last; with none, focus goes to the
  *  container. */
+/** Counts the Tabs handled here. A check scheduled for one Tab is dropped once another came: Chromium
+ *  runs key input ahead of timers, so the check can come after the next key. */
+let tabCount = 0
+
 export function moveFocusWithin(container: HTMLElement, event: KeyboardEvent): void {
+  tabCount += 1
+  const thisTab = tabCount
   const focusable = focusableWithin(container)
   const active = document.activeElement
-  if (active instanceof HTMLInputElement && SEGMENTED_INPUT_TYPES.has(active.type) && focusable.includes(active)) {
+  if (isSegmented(active) && focusable.includes(active)) {
     followSegmentedTab(container, active, event.shiftKey)
     return
   }
-  event.preventDefault()
   if (focusable.length === 0) {
+    event.preventDefault()
     container.focus()
     return
   }
-  focusable[stepIndex(focusable.indexOf(active as HTMLElement), focusable.length, event.shiftKey)].focus()
+  const target = focusable[stepIndex(focusable.indexOf(active as HTMLElement), focusable.length, event.shiftKey)]
+  if (isSegmented(target)) {
+    // Into a date or time input: the browser's move, which picks the part; the input only if that move
+    // left the dialog.
+    setTimeout(() => {
+      if (thisTab !== tabCount || !target.isConnected) return
+      const now = document.activeElement
+      if (now && now !== document.body && container.contains(now)) return
+      target.focus()
+    }, 0)
+    return
+  }
+  event.preventDefault()
+  target.focus()
 }
