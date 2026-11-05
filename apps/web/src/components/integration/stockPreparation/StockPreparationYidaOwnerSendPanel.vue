@@ -71,10 +71,27 @@
       <button type="button" data-testid="sp-yida-owner-refresh" :disabled="busy" @click="refreshObservation">手动刷新持久记录（只读）</button>
       <button type="button" data-testid="sp-yida-owner-revoke" :disabled="busy || grant.revoked" @click="revoke">撤销此授权</button>
       <p v-if="grant.revoked" data-testid="sp-yida-owner-revoked">授权已撤销；撤销前已准入的发送仍可能在途，撤销不代表远端写入已取消。</p>
-      <p v-if="submissionCommand" data-testid="sp-yida-owner-frozen">此页面已经提交过一次命令，已冻结再次创建。保留原提交标识，仅可手动查看记录或撤销授权。</p>
+      <p v-if="submissionCommand" data-testid="sp-yida-owner-frozen">此页面已经提交过一次命令，已冻结再次创建。保留原提交标识，仅可手动查看记录或撤销授权。结果以服务器持久记录为准；请记下授权号 {{ grant.grantId }}，刷新页面后可在下方按授权号查看。</p>
+      <p v-if="submissionCommand && errorCode" data-testid="sp-yida-owner-submit-uncertain">这次提交的应答不确定或被拒绝，服务器可能已经完成创建。请先手动刷新持久记录，不要换页面重试。本页提交最多等待 60 秒，这只是本页的等待时限，不代表服务器已经停止或完成。</p>
       <p v-if="deliveryStatus" data-testid="sp-yida-owner-delivery">持久记录状态：{{ deliveryStatus }}。</p>
       <p v-if="deliveryStatus === 'acknowledged'" data-testid="sp-yida-owner-acknowledged">仅收到协议应答，尚未核验业务创建成功。</p>
       <p v-else-if="deliveryStatus" data-testid="sp-yida-owner-unverified">尚未核验业务创建成功；发送中或结果未知时不可重试创建。</p>
+    </section>
+
+    <section data-testid="sp-yida-owner-lookup">
+      <h4>按授权号查看持久记录（只读）</h4>
+      <p>刷新页面或应答不确定后，可按授权号读取服务器持久记录。此处只读：不提交、不撤销、不重试；发送开关关闭或提交等待中也可查看。</p>
+      <label>授权号 <input v-model="lookupId" data-testid="sp-yida-owner-lookup-id" autocomplete="off" spellcheck="false"></label>
+      <button type="button" data-testid="sp-yida-owner-lookup-run" :disabled="lookupBusy" @click="lookup">查看持久记录（只读）</button>
+      <p v-if="lookupError" role="alert" data-testid="sp-yida-owner-lookup-error">{{ lookupError }}</p>
+      <section v-if="lookupResult" data-testid="sp-yida-owner-lookup-result">
+        <p>授权 {{ lookupResult.approval.grantId }}；状态 {{ lookupResult.approval.status }}{{ lookupResult.approval.revoked ? '（已撤销）' : '' }}；剩余尝试数 {{ lookupResult.approval.remainingAttempts }}；到期 {{ displayTime(lookupResult.approval.expiresAt) }}。</p>
+        <p v-if="lookupResult.delivery" data-testid="sp-yida-owner-lookup-delivery">持久记录状态：{{ lookupResult.delivery.status }}。</p>
+        <p v-else data-testid="sp-yida-owner-lookup-delivery">尚无发送记录。</p>
+        <p v-if="lookupResult.delivery?.status === 'acknowledged'" data-testid="sp-yida-owner-lookup-acknowledged">仅收到协议应答，尚未核验业务创建成功。</p>
+        <p v-else-if="lookupResult.delivery" data-testid="sp-yida-owner-lookup-unverified">尚未核验业务创建成功；发送中或结果未知时不可重试创建。</p>
+        <p>查看结果不能在此提交或撤销，也不会解除本页的发送冻结。</p>
+      </section>
     </section>
   </section>
 </template>
@@ -116,6 +133,7 @@ const expiredLocally = ref(false)
 const errorCode = ref('')
 let client: YidaOwnerClient | null = null
 let generation = 0
+const grantIdPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u
 // Y2 state: only read while props.multiTarget is true.
 const targets = shallowRef<readonly YidaOwnerTarget[]>([])
 const selectedTargetRef = ref('')
@@ -158,11 +176,47 @@ function reset(): void {
 // reappear; deep edits count, even when the object reference stays unchanged.
 watch(() => props.draftInput, reset, { deep: true, flush: 'sync' })
 watch(selectedRowKey, () => { preview.value = null; acknowledged.value = false; errorCode.value = '' }, { flush: 'sync' })
-onBeforeUnmount(reset)
+onBeforeUnmount(() => { reset(); resetLookup() })
 
 function sessionClient(): YidaOwnerClient {
-  if (!client) client = createYidaOwnerClient({ onInvalidated: code => { reset(); errorCode.value = code ?? 'YIDA_OWNER_SESSION_CHANGED' } })
+  if (!client) client = createYidaOwnerClient({ onInvalidated: code => { reset(); resetLookup(); errorCode.value = code ?? 'YIDA_OWNER_SESSION_CHANGED' } })
   return client
+}
+// Read-only lookup by grant id. It has its own client, busy flag, generation and AbortController, so it
+// works with no draft input, with the send switch off and while a submission is pending. It only ever
+// writes lookup* state: never grant/observed/submissionCommand, so a lookup can neither enable a
+// submission nor lift the freeze. A session/tenant/workspace change drops any late answer; an input
+// change does not clear it.
+const lookupId = ref('')
+const lookupResult = shallowRef<YidaOwnerObservation | null>(null)
+const lookupError = ref('')
+const lookupBusy = ref(false)
+let lookupClient: YidaOwnerClient | null = null
+let lookupGeneration = 0
+let lookupController: AbortController | null = null
+function resetLookup(): void {
+  lookupGeneration++
+  lookupController?.abort(); lookupController = null
+  lookupClient?.dispose(); lookupClient = null
+  lookupResult.value = null; lookupError.value = ''; lookupBusy.value = false
+}
+function lookupSession(): YidaOwnerClient {
+  if (!lookupClient) lookupClient = createYidaOwnerClient({ onInvalidated: code => { resetLookup(); lookupError.value = code ?? 'YIDA_OWNER_SESSION_CHANGED' } })
+  return lookupClient
+}
+async function lookup(): Promise<void> {
+  if (lookupBusy.value) return
+  const grantId = lookupId.value.trim().toLowerCase()
+  lookupResult.value = null
+  if (!grantIdPattern.test(grantId)) { lookupError.value = 'YIDA_OWNER_INPUT_INVALID'; return }
+  const started = ++lookupGeneration, controller = new AbortController()
+  lookupController = controller; lookupBusy.value = true; lookupError.value = ''
+  try {
+    const result = await lookupSession().observe(grantId, controller.signal)
+    if (started === lookupGeneration) lookupResult.value = result
+  } catch (error) {
+    if (started === lookupGeneration) lookupError.value = error instanceof YidaOwnerClientError ? error.code : 'YIDA_OWNER_UNAVAILABLE'
+  } finally { if (started === lookupGeneration) { lookupBusy.value = false; lookupController = null } }
 }
 async function perform<T>(action: (current: YidaOwnerClient) => Promise<T>, apply: (result: T) => void): Promise<void> {
   if (busy.value) return
