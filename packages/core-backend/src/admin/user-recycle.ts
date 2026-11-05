@@ -459,13 +459,23 @@ export async function applyRecycleRescrub(
   )
   const row = locked.rows[0]
   if (!row) {
-    await insertRescrubReceipt(client, { resourceId: null, outcome: 'USER_NOT_FOUND', auditRowsUpdated: 0 })
+    await insertRescrubReceipt(client, {
+      resourceId: null,
+      outcome: 'USER_NOT_FOUND',
+      auditRowsUpdated: 0,
+      actorId: input.actorId,
+    })
     return item(input.index, input.userId, null, false, 'USER_NOT_FOUND', '找不到该用户')
   }
   const confirmedId = String(row.id)
   if (!textOrNull(row.purged_at)) {
     const inBin = Boolean(textOrNull(row.deleted_at))
-    await insertRescrubReceipt(client, { resourceId: confirmedId, outcome: 'NOT_PURGED', auditRowsUpdated: 0 })
+    await insertRescrubReceipt(client, {
+      resourceId: confirmedId,
+      outcome: 'NOT_PURGED',
+      auditRowsUpdated: 0,
+      actorId: input.actorId,
+    })
     return item(
       input.index,
       confirmedId,
@@ -476,7 +486,12 @@ export async function applyRecycleRescrub(
     )
   }
   const auditRowsUpdated = await scrubPurgedUserAuditIdentity(client, { userId: confirmedId })
-  await insertRescrubReceipt(client, { resourceId: confirmedId, outcome: 'rescrubbed', auditRowsUpdated })
+  await insertRescrubReceipt(client, {
+    resourceId: confirmedId,
+    outcome: 'rescrubbed',
+    auditRowsUpdated,
+    actorId: input.actorId,
+  })
   return item(input.index, confirmedId, null, true, null, '已按当前规则重新清理审计中的身份')
 }
 
@@ -861,17 +876,25 @@ export async function scrubPurgedUserAuditIdentity(
 const RESCRUB_RECEIPT_OUTCOMES = ['rescrubbed', 'NOT_PURGED', 'USER_NOT_FOUND'] as const
 
 /**
- * Per-item receipt. Values are an allowlisted outcome, a database id when one
- * was resolved, and a count. Unmatched input is never stored. Throws on
- * failure so the caller's transaction rolls the rewrite back with it.
+ * Per-item receipt committed in the same transaction as the rewrite.
+ * The operator id is required here: a later item can fail before the batch
+ * summary is written, and that summary's audit writer swallows its own errors.
+ * Unmatched input is never stored. Throws on failure so the rewrite rolls back.
  */
 async function insertRescrubReceipt(
   client: RecycleClient,
-  input: { resourceId: string | null; outcome: (typeof RESCRUB_RECEIPT_OUTCOMES)[number]; auditRowsUpdated: number },
+  input: {
+    resourceId: string | null
+    outcome: (typeof RESCRUB_RECEIPT_OUTCOMES)[number]
+    auditRowsUpdated: number
+    actorId: string
+  },
 ): Promise<void> {
+  const operatorId = input.actorId.trim()
   if (!RESCRUB_RECEIPT_OUTCOMES.includes(input.outcome)) throw new RescrubReceiptError()
   if (!Number.isInteger(input.auditRowsUpdated) || input.auditRowsUpdated < 0) throw new RescrubReceiptError()
   if (input.outcome === 'USER_NOT_FOUND' && input.resourceId !== null) throw new RescrubReceiptError()
+  if (operatorId.length === 0 || operatorId.length > 255) throw new RescrubReceiptError()
   try {
     const inserted = await client.query(
       `INSERT INTO audit_logs (
@@ -880,10 +903,14 @@ async function insertRescrubReceipt(
        ) VALUES (
          'UPDATE', 'USER', 'INFO',
          'user', $1::text, 'rescrub',
-         jsonb_build_object('outcome', $2::text, 'auditRowsUpdated', $3::int)
+         jsonb_build_object(
+           'outcome', $2::text,
+           'auditRowsUpdated', $3::int,
+           'adminUserId', $4::text
+         )
        )
        RETURNING id`,
-      [input.resourceId, input.outcome, input.auditRowsUpdated],
+      [input.resourceId, input.outcome, input.auditRowsUpdated, operatorId],
     )
     if (!inserted.rows[0]) throw new RescrubReceiptError()
   } catch (error) {

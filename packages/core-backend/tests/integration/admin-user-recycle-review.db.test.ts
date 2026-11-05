@@ -851,6 +851,115 @@ describe('recycle review against a fresh migrated synthetic PostgreSQL database'
     expect(archived.rows[0].c).toBe(0)
   })
 
+  it('keeps the operator on earlier receipts when a later item aborts the summary', async () => {
+    const actorId = await seedUser(true)
+    const firstId = await seedPurgedUser()
+    const secondId = await seedPurgedUser()
+    const marker = `later-item-${randomUUID()}@example.test`
+    const at = '2026-11-04 05:31:00.123456+00'
+    const secondRow = await insertAuditRow({
+      userId: secondId,
+      email: marker,
+      name: 'Synthetic user',
+      at,
+      action: 'create',
+      details: { accountLabel: marker, email: marker },
+    })
+    const before = await query(`SELECT action_details, user_email FROM audit_logs WHERE id = $1`, [secondRow.id])
+    const watermark = (await query<{ id: string }>(`SELECT COALESCE(MAX(id), 0)::text AS id FROM audit_logs`)).rows[0].id
+    await query(`
+      CREATE OR REPLACE FUNCTION synthetic_rescrub_later_item_fail() RETURNS trigger
+      LANGUAGE plpgsql AS $fn$
+      BEGIN
+        IF OLD.user_email = '${marker.replace(/'/g, "''")}' THEN
+          RAISE EXCEPTION 'synthetic later rescrub failure';
+        END IF;
+        RETURN NEW;
+      END
+      $fn$
+    `)
+    await query(`
+      DROP TRIGGER IF EXISTS synthetic_rescrub_later_item_fail ON audit_logs;
+      CREATE TRIGGER synthetic_rescrub_later_item_fail
+      BEFORE UPDATE ON audit_logs
+      FOR EACH ROW EXECUTE FUNCTION synthetic_rescrub_later_item_fail()
+    `)
+    try {
+      const response = await rescrubAs(actorId, [firstId, secondId])
+      expect(response.status).toBe(500)
+      expect(response.body.error.code).toBe('RECYCLE_RESCRUB_FAILED')
+      const receipts = await query<{ resource_id: string | null; action_details: { adminUserId?: string; outcome?: string } }>(
+        `SELECT resource_id, action_details
+         FROM audit_logs
+         WHERE id > $1::bigint AND action = 'rescrub'`,
+        [watermark],
+      )
+      expect(receipts.rows).toEqual([
+        expect.objectContaining({
+          resource_id: firstId,
+          action_details: expect.objectContaining({ adminUserId: actorId, outcome: 'rescrubbed' }),
+        }),
+      ])
+      expect((await query<{ c: number }>(
+        `SELECT COUNT(*)::int AS c FROM audit_logs
+         WHERE id > $1::bigint AND resource_id = 'recycle-rescrub'`,
+        [watermark],
+      )).rows).toEqual([{ c: 0 }])
+      expect((await query(`SELECT action_details, user_email FROM audit_logs WHERE id = $1`, [secondRow.id])).rows).toEqual(before.rows)
+    } finally {
+      await query('DROP TRIGGER IF EXISTS synthetic_rescrub_later_item_fail ON audit_logs')
+      await query('DROP FUNCTION IF EXISTS synthetic_rescrub_later_item_fail()')
+    }
+  })
+
+  it('keeps the operator on per-item receipts when the batch summary write fails', async () => {
+    const actorId = await seedUser(true)
+    const userId = await seedPurgedUser()
+    const watermark = (await query<{ id: string }>(`SELECT COALESCE(MAX(id), 0)::text AS id FROM audit_logs`)).rows[0].id
+    await query(`
+      CREATE OR REPLACE FUNCTION synthetic_rescrub_batch_summary_fail() RETURNS trigger
+      LANGUAGE plpgsql AS $fn$
+      BEGIN
+        IF NEW.resource_id = 'recycle-rescrub' THEN
+          RAISE EXCEPTION 'synthetic rescrub batch summary failure';
+        END IF;
+        RETURN NEW;
+      END
+      $fn$
+    `)
+    await query(`
+      DROP TRIGGER IF EXISTS synthetic_rescrub_batch_summary_fail ON audit_logs;
+      CREATE TRIGGER synthetic_rescrub_batch_summary_fail
+      BEFORE INSERT ON audit_logs
+      FOR EACH ROW EXECUTE FUNCTION synthetic_rescrub_batch_summary_fail()
+    `)
+    try {
+      const response = await rescrubAs(actorId, [userId])
+      expect(response.status).toBe(200)
+      expect(response.body.data.results[0]).toMatchObject({ ok: true, userId })
+      const receipts = await query<{ resource_id: string | null; action_details: { adminUserId?: string; outcome?: string } }>(
+        `SELECT resource_id, action_details
+         FROM audit_logs
+         WHERE id > $1::bigint AND action = 'rescrub'`,
+        [watermark],
+      )
+      expect(receipts.rows).toEqual([
+        expect.objectContaining({
+          resource_id: userId,
+          action_details: expect.objectContaining({ adminUserId: actorId, outcome: 'rescrubbed' }),
+        }),
+      ])
+      expect((await query<{ c: number }>(
+        `SELECT COUNT(*)::int AS c FROM audit_logs
+         WHERE id > $1::bigint AND resource_id = 'recycle-rescrub'`,
+        [watermark],
+      )).rows).toEqual([{ c: 0 }])
+    } finally {
+      await query('DROP TRIGGER IF EXISTS synthetic_rescrub_batch_summary_fail ON audit_logs')
+      await query('DROP FUNCTION IF EXISTS synthetic_rescrub_batch_summary_fail()')
+    }
+  })
+
   it('rolls the audit rewrite back when the per-item receipt insert fails', async () => {
     const actorId = await seedUser(true)
     const userId = await seedUser()
