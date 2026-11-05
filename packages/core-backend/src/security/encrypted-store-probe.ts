@@ -160,6 +160,14 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     columns: ['config', 'is_active', 'deleted_at'],
     sql: `SELECT config->'credentials'->>'token' AS value FROM data_sources WHERE is_active = true AND deleted_at IS NULL AND config->'credentials'->>'token' <> '' LIMIT $1`,
   }),
+  catalogEntry({
+    store: 'data_sources',
+    field: 'config.credentials.bearerToken',
+    scheme: 'platform-enc',
+    prefixOn: 'raw',
+    columns: ['config', 'is_active', 'deleted_at'],
+    sql: `SELECT config->'credentials'->>'bearerToken' AS value FROM data_sources WHERE is_active = true AND deleted_at IS NULL AND config->'credentials'->>'bearerToken' <> '' LIMIT $1`,
+  }),
   // Readers: directory-sync parseIntegrationConfig, work-notification-settings decryptStoredText,
   // approval-card-config resolvers, elearning-notification-dingtalk readSecret — every one trims
   // (normalizeText) BEFORE decryptStoredSecretValue, so the prefix is tested on the trimmed value.
@@ -280,6 +288,11 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     columns: ['snapshot_encrypted'],
     maxRows: YIDA_SNAPSHOT_MAX_ROWS,
     sql: `SELECT snapshot_encrypted AS value FROM integration_yida_send_approvals WHERE snapshot_encrypted <> '' LIMIT $1`,
+  }),
+  catalogEntry({
+    store: 'dingtalk_login_repairs', field: 'before_identity', scheme: 'platform-enc',
+    prefixOn: 'raw', columns: ['before_identity'], maxRows: 20,
+    sql: `SELECT before_identity AS value FROM dingtalk_login_repairs WHERE before_identity <> '' LIMIT $1`,
   }),
 ])
 

@@ -516,11 +516,13 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
       expect((await tableRows(ADMISSION)).length).toBe(1)
     } finally { gate.release() }
     if (phase === 'form') {
+      // Gate 6: the fake form fetch ignored the abort and answered 201. That receipt is acknowledged,
+      // not discarded; the attempt is still consumed exactly once.
       expect(await pending).toEqual({ ok: true })
-      expect([result?.status, result?.externalWriteAttempted]).toEqual(['outcome_unknown', true])
+      expect([result?.status, result?.externalWriteAttempted]).toEqual(['acknowledged', true])
     } else expect(await pending).toEqual({ ok: false, code: 'YIDA_OWNER_SEND_UNAVAILABLE' })
     expect([fake.token, fake.form]).toEqual([1, phase === 'form' ? 1 : 0])
-    expect((await tableRows(LEDGER))[0].status).toBe(phase === 'form' ? 'outcome_unknown' : 'prepared')
+    expect((await tableRows(LEDGER))[0].status).toBe(phase === 'form' ? 'acknowledged' : 'prepared')
     const third = await session(), lateHttp = http(), late = await third.port(lateHttp).submit(f.request)
     expect(late.reused && late.approval.remainingAttempts === 0).toBe(true)
     expect([lateHttp.token, lateHttp.form]).toEqual([0, 0])

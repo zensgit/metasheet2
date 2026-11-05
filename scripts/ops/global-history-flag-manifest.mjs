@@ -36,7 +36,7 @@
  *   it is NOT a boolean, so isActivated()/isMisconfiguredTruthy() return false for it by construction and it
  *   can never participate in a dependsOn/conflicts rule (those evaluate activation).
  * @property {string} activationValue - exact string that activates a boolean flag (ignored for numeric/enum)
- * @property {boolean} [caseInsensitive] - true only for the three flags (PIT_RESET/PIT_UNDELETE/SHEET_REVERT) whose source call site lowercases+trims
+ * @property {boolean} [caseInsensitive] - true only for flags whose source call site lowercases+trims (e.g. PIT_RESET/PIT_UNDELETE/SHEET_REVERT)
  * @property {string[]} dependsOn - other flag keys that MUST also be active for this flag's gated effect to be safe/whole
  * @property {string[]} conflictsWith - other flag keys that MUST NOT be active at the same time as this one
  * @property {'low'|'medium'|'high'} danger
@@ -68,6 +68,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     purpose:
       'Default OFF; byte-exact true enables only the owner-run token-only 测试连接 before local initialization (one POST to the fixed DingTalk OAuth endpoint with the pasted appKey/appSecret, token discarded inside the plugin, nothing persisted, no form IO). Not a grant: anchor owner + live integration admin are re-proved in an RC transaction on every call, before a per-process limiter (one in flight, 5 s cooldown) that only authorized callers reach; the switch is read before any DB work and again right before the exchange. Does not read, imply or require INTEGRATION_YIDA_OWNER_SEND_ENABLED. Turning it on means customer credentials may leave the box on the owner click: enabling on a deployed machine (a backend restart on-prem) and using real credentials are separate owner decisions (R-50, R-64, AGENTS.md owner-only steps).',
     source: 'packages/core-backend/src/index.ts#yidaConnectionTestRuntime; packages/core-backend/src/integration/yida-connection-test-runtime.ts; plugins/plugin-integration-core/lib/yida-connection-probe.cjs',
+  },
+  {
+    key: 'INTEGRATION_YIDA_MULTI_TARGET_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'Default OFF; byte-exact true lets the anchor owner register MORE THAN ONE owner-attested YiDa target (slots 2..16, each with its own attestation, sealed app/form identifiers and generation-1 credential material) and prepare drafts from a multitable sheet or view (with the read and export permissions of the owner, bounded to 2000 scanned records, 100 rows, 128 KiB) instead of pasted rowsText. Every draft, preview, approval and delivery stays bound to exactly one target_ref; the CREATE fence is per target. Not a grant and never the send switch: sending still requires INTEGRATION_YIDA_OWNER_SEND_ENABLED plus the unchanged owner/live-admin/one-attempt rules. While OFF every route body, SQL statement and reply is the original single-target slot-1 behaviour and /targets answers the generic 404. Amends R-50 decision 1 (one permanent target slot per deployment) only when ON: enabling it on any deployed machine is a separate owner decision (R-50, AGENTS.md owner-only steps).',
+    source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime+yidaInitializationRuntime; packages/core-backend/src/integration/yida-send-approval-service.ts; packages/core-backend/src/integration/yida-sheet-source.ts; packages/core-backend/src/routes/integration-yida-owner.ts',
   },
   {
     key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
@@ -652,11 +663,12 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     key: 'DINGTALK_TODO_MIRROR_ENABLED',
     type: 'boolean',
     activationValue: 'true',
+    caseInsensitive: true, // isDingTalkTodoMirrorEnabled(): `String(env[...] ?? '').trim().toLowerCase() === 'true'`
     dependsOn: [],
     conflictsWith: [],
     danger: 'medium',
     purpose:
-      'Master gate for the DingTalk approval-todo ONE-WAY mirror (plan B, #5772/#5768). Default OFF; exact literal \'true\' only (isDingTalkTodoMirrorEnabled: String(env).trim().toLowerCase() === \'true\'). The sink (both the live eventBus leg and the durable consumer leg) checks this flag FIRST and writes nothing to dingtalk_todo_mirrors when it is off — both legs stay inert. The delivery WORKER (the only code that talks to the DingTalk API) is additionally gated: it is only ever constructed/started in index.ts when this flag is on AND NODE_ENV!==\'test\' AND !VITEST. Danger=medium, not high: an outbound convenience with its own idempotent ledger (ON CONFLICT DO NOTHING on org_id+source_key) — a missing/misconfigured mirror loses no platform state (the durable consumer keeps ACKing regardless).',
+      'Master gate for the DingTalk approval-todo ONE-WAY mirror (plan B, #5772/#5768). Default OFF; \'true\' after trimming, case-insensitive (isDingTalkTodoMirrorEnabled: String(env).trim().toLowerCase() === \'true\'), so \'TRUE\', \'True\' and \' true \' are ON too, while unset, blank, \'false\', \'1\' and \'yes\' stay OFF. The sink (both the live eventBus leg and the durable consumer leg) checks this flag FIRST and writes nothing to dingtalk_todo_mirrors when it is off — both legs stay inert. The delivery WORKER (the only code that talks to the DingTalk API) is additionally gated: it is only ever constructed/started in index.ts when this flag is on AND NODE_ENV!==\'test\' AND !VITEST. Danger=medium, not high: an outbound convenience with its own idempotent ledger (ON CONFLICT DO NOTHING on org_id+source_key) — a missing/misconfigured mirror loses no platform state (the durable consumer keeps ACKing regardless).',
     source: 'packages/core-backend/src/integrations/dingtalk/todo-mirror-flag.ts:20,23; packages/core-backend/src/services/dingtalk-todo-mirror-service.ts:15; packages/core-backend/src/services/dingtalk-todo-mirror-worker.ts:25; packages/core-backend/src/index.ts:3924,3943,3959',
   },
   {
@@ -669,6 +681,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     purpose:
       'Poll interval for the DingTalk todo-mirror delivery worker\'s setInterval tick (runBatch). Number(process.env...) || 30_000 then Math.max(5_000, ...): an unset/blank/non-numeric value falls back to the 30s default, and any in-range or larger value is honoured verbatim — only a value below 5000 gets clamped up to the 5s floor. No-op unless DINGTALK_TODO_MIRROR_ENABLED is active (the worker is never constructed otherwise).',
     source: 'packages/core-backend/src/index.ts:3948',
+  },
+  {
+    key: 'DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "DingTalk work-notification credential resolution anchored to the recipient's directory integration (work-notification-settings.ts readDingTalkMessageConfigFromRuntime; callers: the attendance notification delivery worker, the automation executor's DingTalk person-message and approval-card sends, the todo-mirror worker). Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). Off: resolution is byte-identical to before the switch existed — a complete env triple (DINGTALK_APP_KEY|DINGTALK_CLIENT_ID, DINGTALK_APP_SECRET|DINGTALK_CLIENT_SECRET, DINGTALK_AGENT_ID|DINGTALK_NOTIFY_AGENT_ID) is used without reading the integration row, otherwise each field is env-then-stored, and failures keep their text and ledger position. On, for a call that names an integration: the row is always read and must be active; when the env app key equals the row's app key the env values override field by field (the pre-switch per-field behaviour) and an env Agent ID that is used must be 1-32 digits; otherwise the row's own appKey/appSecret/workNotificationAgentId are used as a whole; a missing, inactive or incomplete row, or a malformed env Agent ID, raises a typed values-free DingTalkMessageConfigError instead of borrowing fields from the other source; baseUrl follows the chosen source. On, for a call that names no integration: unchanged apart from the same env Agent ID shape check. On, in the automation executor: a person message resolves the configuration of every recipient group before the first send (a configuration failure sends to nobody; a later network failure is still a partial delivery); the approval card is not sent at all (no claim, no card-delivery row, no DingTalk call, interactive or OA path, env URL set or not) when the assignee's integration is missing or not active, and otherwise reads its public URL from env or the assignee's own active integration (never another integration's stored URL), after the assignee is known, and resolves the work-notification card credentials before the outbound claim and the card-delivery row. The admin test/save Agent ID path and the runtime-status face do not read this switch. danger=high: ON changes which DingTalk app sends work notifications to a recipient whose integration app differs from the env app, and turns some mixed configurations that send today into explicit failures (attendance: non-retryable, row failed; todo mirror: retried then failed; automation: the step fails).",
+    source: 'packages/core-backend/src/integrations/dingtalk/integration-scoped-credentials-flag.ts#isDingTalkIntegrationScopedCredentialsEnabled',
   },
   {
     key: 'MULTITABLE_BUSINESS_TIMEZONE',
@@ -847,6 +870,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'plugins/plugin-attendance/index.cjs#isAttendanceCancelRoundEntryEnabled',
   },
   {
+    key: 'AUTOMATION_CLASSB_OUTBOUND_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "#4196 Class-B outbound two-phase intent/outcome ledger (packages/core-backend/src/multitable/automation-outbound-intent.ts, read by the automation executor's send_webhook / send_email / send_dingtalk_* and by automation-retry-eligibility). Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). Off: every send path is byte-identical to pre-slice (no intent row, no classification, no outcome write). On: a rule-driven send first commits a `pending` intent row in meta_automation_outbound_intent with an attempt token and a lease, attempts the send ONCE, then the same attempt records sent / failed / outcome_unknown (token-fenced); a replay of the same identity never resends a sent or ambiguous attempt, never declares a live in-flight attempt dead, re-arms only a definite pre-dispatch failure with exactly one winner, and reports outcome_unknown as a failed step that stops dependents until reconciliation. Requires the zzzz20260716110000 table plus the zzzz20261103120000 attempt-token/lease/target_key migration. danger=high: ON changes which automation sends happen on retry (fail-closed, never a duplicate external effect); it does not by itself enable any external write — the DingTalk/webhook/email transports keep their own gates.",
+    source: 'packages/core-backend/src/multitable/automation-outbound-intent.ts#isClassBOutboundEnabled',
+  },
+  {
     key: 'USER_RECYCLE_SWEEPER_ENABLED',
     type: 'boolean',
     activationValue: 'true',
@@ -854,8 +888,78 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'high',
     purpose:
-      "User recycle sweeper (packages/core-backend/src/admin/user-recycle-scheduler.ts). Default OFF; exact literal 'true' only (no trim, no case folding; unset, false, 1, TRUE, and trailing space stay OFF). Off: startUserRecycleSweeper returns false before any tick, interval, or database call. On: USER_RECYCLE_SWEEPER_DISABLED=1 and the test-runtime helper remain additional kill switches. A tick anonymizes recycle-bin accounts whose purge_after has passed. Tick failure logs are values-free and do not include Error.message.",
+      "User recycle sweeper (packages/core-backend/src/admin/user-recycle-scheduler.ts). Default OFF on purpose: a tick anonymizes identity and the sweeper has no leader election, so it must not start just because the retention window defaults to 30 days. Exact literal 'true' only (no trim, no case folding; unset, false, 1, TRUE, and trailing space stay OFF). Off: startUserRecycleSweeper returns false before any tick, interval, or database call, and the admin UI must not promise automatic purge. On: USER_RECYCLE_SWEEPER_DISABLED=1 and the test-runtime helper remain additional kill switches. A tick anonymizes recycle-bin accounts whose purge_after has passed. Tick failure logs are values-free and do not include Error.message.",
     source: 'packages/core-backend/src/admin/user-recycle-scheduler.ts#startUserRecycleSweeper',
+  },
+  // ── Automation runtime (AGENTS.md: every env flag is registered here; iPaaS follow-up 2026-11-03) ──
+  // Read under packages/core-backend/src/multitable/. AUTOMATION_CLASSB_OUTBOUND_ENABLED is registered by
+  // its own PR (#6715) and is deliberately not duplicated here.
+  {
+    key: 'AUTOMATION_DURABLE_DELIVERY_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    caseInsensitive: true, // isDurableDeliveryEnabled(): `String(env ?? '').trim().toLowerCase() === 'true'`
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "P2 durable-delivery master gate: the automation completion→delivery chain runs on the transactional outbox (meta_automation_outbox, migration zzzz20260715120000_create_automation_outbox) drained by the durable dispatch loop. Default OFF; activates on 'true' after trim + lowercase (so ' TRUE ' is ON; '1' / 'yes' stay OFF). Off: the outbox tables are never read or written, no dispatch loop starts, producers emit on the legacy event bus. On: producers of the routed event families (record events, approval completion and task-created events) enqueue in the source-write transaction and SUPPRESS their legacy post-commit emit; the dispatch loop delivers to the consumer adapters booted in index.ts, which call the same handlers the legacy bus subscribers call. The write_approval_form_values automation action fails unless this is on. Startup is fail-closed while ON: if the dispatch loop or the webhook retry scheduler cannot boot, the backend aborts startup instead of running degraded (a loop-less process would strand every outbox row). Which leg delivers is decided by the PRODUCING process's own value. danger=high: ON replaces the delivery path of approval and automation events.",
+    source: 'packages/core-backend/src/multitable/automation-durable-delivery.ts#isDurableDeliveryEnabled',
+  },
+  {
+    key: 'AUTOMATION_CLASSA_CLAIM_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "#4196 Class-A same-transaction claim gate for the automation record actions create_record / update_record / delete_record / lock_record. Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). Off: every Class-A path is byte-identical to pre-slice (no claim INSERT, no in-transaction probe, no skip), real-fire test runs of rules with a Class-A action refuse TEST_RUN_CLASS_A_PROTECTION_DISABLED, and the Class-A ledger is not consulted as retry evidence. On (and only when the executor has a real transaction): each Class-A action first claims (root execution, action key) in meta_automation_action_applied (migration zzzz20260716100000_create_automation_action_applied) inside the action's own transaction; a duplicate claim rolls back and reports already_applied instead of writing again. ON also lifts the real-fire test-run refusal above, so a test run of such a rule writes live records. danger=high: ON changes whether a replayed automation writes records.",
+    source: 'packages/core-backend/src/multitable/automation-execution-ledger.ts#isClassAExecutionClaimEnabled',
+  },
+  {
+    key: 'AUTOMATION_WEBHOOK_TIMEOUT_MS',
+    type: 'numeric',
+    activationValue: 'numeric ms (default 5000; clamped to [1000, 30000]; unset or non-integer = default)',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "Per-attempt timeout of the automation send_webhook action. Parsed with Number.parseInt(raw, 10) on every send: unset or a value that does not start with an integer uses the default 5000; anything else is clamped to [1000, 30000] (so '500' becomes 1000 and '60000' becomes 30000). DingTalk group/person sends keep their own fixed 5000 ms timeout and do not read this.",
+    source: 'packages/core-backend/src/multitable/automation-executor.ts#webhookTimeoutMs',
+  },
+  {
+    key: 'AUTOMATION_WEBHOOK_MAX_RETRIES',
+    type: 'numeric',
+    activationValue: 'numeric (default 2; capped at 5; unset, non-integer or negative = default)',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "Extra attempts of the automation send_webhook action's legacy send loop (attempts = retries + 1). Parsed with Number.parseInt(raw, 10) on every send: unset, a value that does not start with an integer, or a negative value uses the default 2; larger values are capped at 5; '0' means a single attempt. Not read on the Class-B two-phase path (AUTOMATION_CLASSB_OUTBOUND_ENABLED on and an execution identity present), which sends once. danger=medium: every retry re-sends the request to the external URL, so a receiver that is not idempotent can see the same call up to 6 times.",
+    source: 'packages/core-backend/src/multitable/automation-executor.ts#maxWebhookRetries',
+  },
+  {
+    key: 'ENABLE_SCHEDULER_LEADER_LOCK',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "Automation scheduler leader lock. Default OFF; exact literal 'true' only (no trim, no case folding). Read once at startup by resolveAutomationSchedulerLeaderOptions. Off, or ON but Redis unreachable: no leader lock, every backend process runs its own automation scheduler timers (the legacy behaviour). On with Redis: only the process holding the Redis leader lock runs the scheduled automation timers. danger=medium: in a multi-process deployment ON changes which process fires scheduled rules; if Redis is unavailable at startup the process silently falls back to running its own timers.",
+    source: 'packages/core-backend/src/multitable/automation-service.ts#resolveAutomationSchedulerLeaderOptions',
+  },
+  {
+    key: 'SCHEDULER_LEADER_LOCK_TTL_MS',
+    type: 'numeric',
+    activationValue: 'numeric ms (default 30000; any value with Number(raw) > 0 overrides, else the default)',
+    dependsOn: ['ENABLE_SCHEDULER_LEADER_LOCK'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "TTL of the automation scheduler's Redis leader lock. Read only when ENABLE_SCHEDULER_LEADER_LOCK is 'true' and Redis is reachable. Parsed with Number(raw): a positive result is used as-is (no upper bound, fractions accepted), unset / '' / non-numeric / zero / negative uses the default 30000. The attendance scheduler has its own ATTENDANCE_SCHEDULER_LEADER_LOCK_TTL_MS and does not read this.",
+    source: 'packages/core-backend/src/multitable/automation-service.ts#resolveAutomationSchedulerLeaderOptions',
   },
 ])
 

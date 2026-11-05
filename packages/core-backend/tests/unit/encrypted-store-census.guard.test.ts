@@ -65,8 +65,11 @@ const SCRIPTS = 'packages/core-backend/scripts'
 
 /** Every sealing site in the scanned roots today: `<file> :: <writer>` -> count + owner. */
 const CENSUS: Readonly<Record<string, CensusEntry>> = {
-  // data_sources.config.credentials.{password,apiKey,token} — DataSourceManager.encryptCredentials
+  // data_sources.config.credentials.{password,apiKey,token,bearerToken} — DataSourceManager.encryptCredentials
   [`${CS}/data-adapters/DataSourceManager.ts :: encryptStoredSecretValue`]: { count: 1, stores: ['data_sources'] },
+  // Two encrypted short-lived operator files (verify proof, re-anchor request) and one durable rollback snapshot; a
+  // re-anchor copies the snapshot on the server and seals nothing new. Neither file contains a reusable provider token.
+  [`${CS}/auth/dingtalk-identity-repair.ts :: encryptStoredSecretValue`]: { count: 3, stores: ['dingtalk_login_repairs'] },
   // directory_integrations.config: appSecret + workNotificationAgentId (create + update)
   [`${CS}/directory/directory-sync.ts :: normalizeStoredSecretValue`]: { count: 4, stores: ['directory_integrations'] },
   // directory_integrations.config.approvalCardLinkSecret
@@ -292,6 +295,23 @@ describe('scanner self-check (synthetic sources, memory only)', () => {
     expect(drift).toEqual([
       newSite(`${victim} :: normalizeStoredSecretValue (alias)`),
       newSite(`${victim} :: normalizeStoredSecretValue`),
+    ])
+  })
+
+  it('in-memory mutation: a fourth sealing call in the login repair module, or one fewer, turns the pinned count of 3 red', () => {
+    const victim = 'packages/core-backend/src/auth/dingtalk-identity-repair.ts'
+    const key = `${victim} :: encryptStoredSecretValue`
+    const original = readRepoFile(victim)
+    expect(PINNED_COUNTS[key]).toBe(3)
+    const fourth = `${original}\nexport const eadmRepairProbe = () => encryptStoredSecretValue('fixture')\n`
+    expect(censusDrift(countSealingSites(scanTree((rel) => (rel === victim ? fourth : readRepoFile(rel)))))).toEqual([
+      `${key}: pinned 3, found 4 — ${NEW_SITE_HELP}`,
+    ])
+    const at = original.indexOf('request: encryptStoredSecretValue(')
+    expect(at).toBeGreaterThan(0)
+    const fewer = original.slice(0, at) + 'request: String(' + original.slice(at + 'request: encryptStoredSecretValue('.length)
+    expect(censusDrift(countSealingSites(scanTree((rel) => (rel === victim ? fewer : readRepoFile(rel)))))).toEqual([
+      `${key}: pinned 3, found 2 — ${GONE_SITE_HELP}`,
     ])
   })
 

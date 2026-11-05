@@ -75,9 +75,13 @@ interface HarnessOptions {
   fallback?: Array<{ integration_id: string; provider_union_id: string | null }>
   orgHasActiveIntegration?: boolean
   casRowCount?: number
+  /** Row count for the `created` CAS only (the pre-send stamp still succeeds): a lease stolen DURING the send. */
+  createdCasRowCount?: number
   operatorUnionId?: string
   createTodoTask?: ReturnType<typeof vi.fn>
   completeTodoTask?: ReturnType<typeof vi.fn>
+  /** Injected `logger.warn` so a case can assert what (and only what) a warning carries. */
+  warn?: ReturnType<typeof vi.fn>
   readConfig?: () => Promise<typeof CONFIG>
   /** Injected app-access-token fetch (the READ tier before the create request). */
   fetchAccessToken?: () => Promise<string>
@@ -85,6 +89,8 @@ interface HarnessOptions {
   /** post-create liveness probe: is the approval seat still an ACTIVE assignment? */
   seatLive?: boolean
   instanceStatus?: string
+  /** Throw from `query` for a chosen statement (recorded in `calls` first, never applied). */
+  throwOn?: (sql: string, params: unknown[]) => Error | null
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -93,6 +99,8 @@ function harness(options: HarnessOptions = {}) {
   const trace: string[] = []
   const query = vi.fn(async (sql: string, params: unknown[] = []) => {
     calls.push({ sql, params })
+    const injected = options.throwOn?.(sql, params)
+    if (injected) throw injected
     if (sql.includes('UPDATE dingtalk_todo_mirrors')) {
       trace.push(
         sql.includes('WITH claim AS') ? 'claim' : sql.includes('SET send_issued_at') ? 'send_issued_at' : 'mirror_write',
@@ -110,17 +118,21 @@ function harness(options: HarnessOptions = {}) {
     if (sql.includes('FROM user_external_identities')) return { rows: options.fallback ?? [], rowCount: (options.fallback ?? []).length }
     if (sql.includes('SELECT EXISTS')) return { rows: [{ has_active: options.orgHasActiveIntegration ?? true }], rowCount: 1 }
     if (sql.includes('FROM approval_templates')) return { rows: [{ name: '备料审批' }], rowCount: 1 }
+    if (sql.includes("SET status = 'created'") && options.createdCasRowCount !== undefined) {
+      return { rows: [], rowCount: options.createdCasRowCount }
+    }
     if (sql.includes('UPDATE dingtalk_todo_mirrors')) return { rows: [], rowCount: options.casRowCount ?? 1 }
     return { rows: [], rowCount: 0 }
   })
   const createTodoTask = options.createTodoTask ?? vi.fn(async () => ({ taskId: 'dt-task-1', raw: {} }))
   const completeTodoTask = options.completeTodoTask ?? vi.fn(async () => ({ taskId: 'dt-task-1', raw: {} }))
+  const warn = options.warn ?? vi.fn(() => undefined)
   const worker = new DingTalkTodoMirrorWorker({
     query: query as never,
     workerId: 'worker-test',
     now: () => new Date('2026-09-16T00:00:00.000Z'),
     env: { PUBLIC_APP_URL: 'https://app.example.com' } as NodeJS.ProcessEnv,
-    logger: { info: () => undefined, warn: () => undefined, error: () => undefined } as never,
+    logger: { info: () => undefined, warn, error: () => undefined } as never,
     readConfig: options.readConfig ?? (async () => CONFIG),
     fetchAccessToken: async () => {
       trace.push('token')
@@ -136,7 +148,7 @@ function harness(options: HarnessOptions = {}) {
   // its own - exclude both so `writes()` is the terminal/retry/created write only
   const writes = () => mirrorUpdates().filter((c) => !c.sql.includes('SET send_issued_at'))
   const sendStamps = () => mirrorUpdates().filter((c) => c.sql.includes('SET send_issued_at'))
-  return { worker, query, calls, trace, writes, sendStamps, createTodoTask, completeTodoTask }
+  return { worker, query, calls, trace, writes, sendStamps, createTodoTask, completeTodoTask, warn }
 }
 
 describe('todo mirror worker — claim', () => {
@@ -179,6 +191,7 @@ describe('todo mirror worker — claim', () => {
     const refused = await h.worker.runBatch()
     expect(refused).toEqual({
       claimed: 0, created: 0, completed: 0, retrying: 0, failed: 0, skipped: 0, outcomeUnknown: 0, lostLease: 0,
+      unrecorded: 0,
     })
     expect(h.calls.filter((call) => call.sql.includes('WITH claim AS'))).toHaveLength(1)
     await new Promise((resolve) => setImmediate(resolve))
@@ -215,6 +228,43 @@ describe('todo mirror worker — create phase', () => {
     expect(write.params[2]).toBe('worker-test')
     expect(write.params[3]).toBe(1)
     expect(write.params[4]).toBe('dt-task-1')
+    // a normal create clears last_error and is nothing to warn about
+    expect(write.sql).toContain('last_error = NULL')
+    expect(h.warn).not.toHaveBeenCalled()
+  })
+
+  it('a 2xx create whose response carries no task id still lands as `created` (null id) and warns ONCE, naming only the row', async () => {
+    const h = harness({
+      claimed: [pendingRow()],
+      linked: [{ integration_id: 'integ-1', union_id: 'union-recipient' }],
+      createTodoTask: vi.fn(async () => ({ taskId: undefined, raw: {} })),
+    })
+    const result = await h.worker.runBatch()
+    expect(result).toMatchObject({ claimed: 1, created: 1, failed: 0, retrying: 0, outcomeUnknown: 0 })
+    const write = h.writes()[0]
+    expect(write.sql).toContain("SET status = 'created'")
+    expect(write.params[4]).toBeNull()
+    expect(write.sql).toContain('last_error = NULL')
+    // exactly one warning, a single string argument, pinned verbatim: the row id and NO other value
+    expect(h.warn).toHaveBeenCalledTimes(1)
+    const args = h.warn.mock.calls[0]
+    expect(args).toHaveLength(1)
+    expect(args[0]).toBe(`DingTalk todo mirror: created without a task id row=${ROW_ID}`)
+  })
+
+  it('a no-task-id create whose lease was stolen DURING the send (created CAS matches 0 rows) is lost-lease and does NOT warn', async () => {
+    const h = harness({
+      claimed: [pendingRow()],
+      linked: [{ integration_id: 'integ-1', union_id: 'union-recipient' }],
+      createTodoTask: vi.fn(async () => ({ taskId: undefined, raw: {} })),
+      createdCasRowCount: 0,
+    })
+    const result = await h.worker.runBatch()
+    // the send really went out (the pre-send stamp succeeded); only the `created` write lost the race
+    expect(h.createTodoTask).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({ claimed: 1, created: 0, lostLease: 1 })
+    // the warn sits AFTER the CAS: a row we no longer own is not ours to report on
+    expect(h.warn).not.toHaveBeenCalled()
   })
 
   it('stamps send_issued_at under the SAME CAS AFTER the token fetch and immediately BEFORE the request', async () => {
@@ -416,6 +466,172 @@ describe('todo mirror worker — create phase', () => {
     expect(written).toContain(TODO_MIRROR_ERROR_CODES.createFailed)
     expect(written).not.toContain('张三')
     expect(written).not.toContain('REQ-0001')
+  })
+})
+
+/**
+ * A ledger write that fails after the remote todo was created is not retried as a failed create. The
+ * row is left exactly as the send stage stamped it, the lease reclaim judges it ambiguous, and the
+ * rest of the batch is still delivered.
+ */
+describe('todo mirror worker — the `created` ledger write fails after the remote create', () => {
+  const ROW_ID_2 = '22222222-2222-4222-8222-222222222222'
+  const isCreatedCas = (sql: string) => sql.includes("SET status = 'created'")
+  const ledgerError = () => new Error('invalid input syntax for type uuid: "union-recipient"')
+  const throwOnFirstRowCreated = (sql: string, params: unknown[]) =>
+    (isCreatedCas(sql) && params[0] === ROW_ID ? ledgerError() : null)
+
+  it('creates the todo ONCE, writes nothing else for that row, counts it unrecorded, and still delivers the next row', async () => {
+    const h = harness({
+      claimed: [pendingRow(), pendingRow({ id: ROW_ID_2, source_key: 'approval-task:inst-1:node-a:1:user-2', recipient_user_id: 'user-2' })],
+      linked: [{ integration_id: 'integ-1', union_id: 'union-recipient' }],
+      throwOn: throwOnFirstRowCreated,
+    })
+    const result = await h.worker.runBatch()
+    expect(result).toMatchObject({
+      claimed: 2, created: 1, unrecorded: 1, retrying: 0, failed: 0, outcomeUnknown: 0, lostLease: 0,
+    })
+    const sourceIds = h.createTodoTask.mock.calls.map((call) => (call[2] as { sourceId: string }).sourceId)
+    expect(sourceIds).toEqual(['approval-task:inst-1:node-a:1:user-1', 'approval-task:inst-1:node-a:1:user-2'])
+    // first row: the only write after the send stamp is the attempted `created` CAS — no retry, no terminal
+    const firstRowWrites = h.writes().filter((c) => c.params[0] === ROW_ID)
+    expect(firstRowWrites).toHaveLength(1)
+    expect(isCreatedCas(firstRowWrites[0].sql)).toBe(true)
+    expect(h.writes().some((c) => c.sql.includes('SET status = $7'))).toBe(false)
+    expect(h.writes().some((c) => c.sql.includes('SET status = $5'))).toBe(false)
+    // no post-create probe for the unrecorded row either
+    expect(h.calls.filter((c) => c.sql.includes('AS seat_live')).map((c) => c.params[2])).toEqual(['user-2'])
+    // second row: delivered normally
+    const secondRowWrites = h.writes().filter((c) => c.params[0] === ROW_ID_2)
+    expect(secondRowWrites.map((c) => isCreatedCas(c.sql))).toEqual([true])
+  })
+
+  it('with the attempt budget already spent it still writes no failed + redelivery_safe=true row', async () => {
+    const h = harness({
+      claimed: [pendingRow({ attempt_count: 5 })],
+      linked: [{ integration_id: 'integ-1', union_id: 'union-recipient' }],
+      throwOn: throwOnFirstRowCreated,
+    })
+    const result = await h.worker.runBatch()
+    expect(result).toMatchObject({ claimed: 1, unrecorded: 1, failed: 0, retrying: 0 })
+    expect(h.createTodoTask).toHaveBeenCalledTimes(1)
+    expect(h.writes().some((c) => c.params.includes('failed'))).toBe(false)
+    expect(h.writes().some((c) => c.sql.includes('redelivery_safe'))).toBe(false)
+  })
+
+  it('warns once with only the row id and the error name, and skips the missing-task-id warning', async () => {
+    const h = harness({
+      claimed: [pendingRow()],
+      linked: [{ integration_id: 'integ-1', union_id: 'union-recipient' }],
+      createTodoTask: vi.fn(async () => ({ taskId: undefined, raw: {} })),
+      throwOn: throwOnFirstRowCreated,
+    })
+    await h.worker.runBatch()
+    expect(h.warn).toHaveBeenCalledTimes(1)
+    const args = h.warn.mock.calls[0]
+    expect(args).toHaveLength(1)
+    expect(args[0]).toBe(`DingTalk todo mirror: created but not recorded, left for lease reclaim row=${ROW_ID} error=Error`)
+  })
+
+  it('a later claim after lease expiry judges the row ambiguous and never creates it again (stateful ledger)', async () => {
+    const LEASE_MS = 60_000
+    const t0 = Date.parse('2026-09-16T00:00:00.000Z')
+    let nowMs = t0
+    const row = {
+      ...pendingRow({ status: 'pending', attempt_count: 0, prior_status: null }),
+      next_attempt_at: t0,
+      claim_expires_at: null as number | null,
+      claim_worker_id: null as string | null,
+      last_error: null as string | null,
+      redelivery_safe: false,
+    }
+    let failCreatedWrite = true
+    const casMatches = (params: unknown[], idx: { worker: number; attempt: number }) =>
+      params[0] === row.id && params[idx.worker] === row.claim_worker_id && Number(params[idx.attempt]) === Number(row.attempt_count)
+    const query = vi.fn(async (sql: string, params: unknown[] = []) => {
+      if (sql.includes('WITH claim AS')) {
+        const due = (row.status === 'pending' && row.next_attempt_at <= nowMs && (row.claim_expires_at === null || row.claim_expires_at <= nowMs))
+          || (row.status === 'sending' && row.claim_expires_at !== null && row.claim_expires_at <= nowMs)
+        if (!due) return { rows: [], rowCount: 0 }
+        const prior = row.status
+        row.status = 'sending'
+        row.attempt_count = Number(row.attempt_count) + 1
+        row.claim_expires_at = nowMs + LEASE_MS
+        row.claim_worker_id = String(params[3])
+        return { rows: [{ ...row, prior_status: prior }], rowCount: 1 }
+      }
+      if (sql.includes('FROM directory_account_links')) return { rows: [{ integration_id: 'integ-1', union_id: 'union-recipient' }], rowCount: 1 }
+      if (sql.includes('FROM approval_templates')) return { rows: [{ name: '备料审批' }], rowCount: 1 }
+      if (sql.includes('AS seat_live')) return { rows: [{ seat_live: true, instance_status: 'pending' }], rowCount: 1 }
+      if (sql.includes('SET send_issued_at')) {
+        if (row.status !== 'sending' || !casMatches(params, { worker: 2, attempt: 3 })) return { rows: [], rowCount: 0 }
+        row.send_issued_at = String(params[1])
+        return { rows: [], rowCount: 1 }
+      }
+      if (isCreatedCas(sql)) {
+        if (failCreatedWrite) {
+          failCreatedWrite = false
+          throw ledgerError()
+        }
+        if (row.status !== 'sending' || !casMatches(params, { worker: 2, attempt: 3 })) return { rows: [], rowCount: 0 }
+        Object.assign(row, { status: 'created', dingtalk_task_id: params[4], claim_expires_at: null, claim_worker_id: null })
+        return { rows: [], rowCount: 1 }
+      }
+      if (sql.includes('SET status = $7')) {
+        if (row.status !== params[7] || !casMatches(params, { worker: 4, attempt: 5 })) return { rows: [], rowCount: 0 }
+        Object.assign(row, {
+          status: params[6], next_attempt_at: Date.parse(String(params[1])), last_error: params[2],
+          claim_expires_at: null, claim_worker_id: null, send_issued_at: null,
+        })
+        return { rows: [], rowCount: 1 }
+      }
+      if (sql.includes('SET status = $5')) {
+        if (!['sending', 'completing'].includes(row.status) || !casMatches(params, { worker: 2, attempt: 3 })) return { rows: [], rowCount: 0 }
+        Object.assign(row, { status: params[4], last_error: params[5], redelivery_safe: params[6], claim_expires_at: null, claim_worker_id: null })
+        return { rows: [], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    const createTodoTask = vi.fn(async () => ({ taskId: 'dt-task-1', raw: {} }))
+    const worker = new DingTalkTodoMirrorWorker({
+      query: query as never,
+      workerId: 'worker-test',
+      leaseMs: LEASE_MS,
+      now: () => new Date(nowMs),
+      env: {} as NodeJS.ProcessEnv,
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined } as never,
+      readConfig: async () => CONFIG,
+      fetchAccessToken: async () => 'access-token',
+      resolveOperatorUnionId: async () => 'op-union-1',
+      createTodoTask: createTodoTask as never,
+      completeTodoTask: vi.fn() as never,
+    })
+
+    // Run every tick first, then assert: the duplicate create itself is the primary signal.
+    const first = await worker.runBatch()
+    const afterFirst = { status: row.status, sendIssuedAt: row.send_issued_at }
+    nowMs = t0 + LEASE_MS / 2
+    const withinLease = await worker.runBatch()
+    nowMs = t0 + LEASE_MS + 1_000
+    const reclaimed = await worker.runBatch()
+    const afterReclaim = { status: row.status, lastError: row.last_error, redeliverySafe: row.redelivery_safe }
+    nowMs = t0 + 24 * 60 * 60_000
+    const muchLater = await worker.runBatch()
+
+    expect(createTodoTask).toHaveBeenCalledTimes(1)
+    expect(first).toMatchObject({ claimed: 1, unrecorded: 1 })
+    // left exactly as the send stage stamped it, under the (still live) lease
+    expect(afterFirst.status).toBe('sending')
+    expect(afterFirst.sendIssuedAt).not.toBeNull()
+    expect(withinLease).toMatchObject({ claimed: 0 })
+    expect(reclaimed).toMatchObject({ claimed: 1, outcomeUnknown: 1, created: 0, retrying: 0, failed: 0 })
+    expect(afterReclaim).toEqual({
+      status: 'outcome_unknown',
+      lastError: TODO_MIRROR_ERROR_CODES.createReclaimAmbiguous,
+      redeliverySafe: false,
+    })
+    // terminal: nothing claims it again
+    expect(muchLater).toMatchObject({ claimed: 0 })
   })
 })
 

@@ -63,6 +63,20 @@ function crud(trx) {
   return database.createDb({ database: { query: async (sql, params) => rows(await trx.query(sql, params)) } })
 }
 const same = (left, right) => stableCanonicalStringify(left) === stableCanonicalStringify(right)
+// Y2 multi-target: the host passes `targetRef` ONLY while its multi-target switch reads exact 'true'.
+// Absent, every primitive keeps the original closed input and the permanent slot-1 read unchanged.
+const hasTarget = input => Boolean(input) && typeof input === 'object' && !types.isProxy(input)
+  && Object.hasOwn(input, 'targetRef')
+function targeted(input, keys) {
+  if (hasTarget(input)) {
+    const parsed = record(input, [...keys, 'targetRef'])
+    const targetRef = opaque(parsed.targetRef)
+    const rest = {}
+    for (const key of keys) Object.defineProperty(rest, key, { value: parsed[key], enumerable: true })
+    return { parsed: rest, targetRef }
+  }
+  return { parsed: record(input, keys), targetRef: undefined }
+}
 
 function reconstructRows(compiled) {
   const config = compiled.source.config
@@ -101,10 +115,13 @@ function createPrimitives(options) {
   async function prepareDraftInTransaction(trx, input) {
     try {
       const db = crud(trx)
-      // The permanent slot, current authenticated 090, and original 091 all
-      // pass before a candidate may reach the existing local draft writer.
-      const approved = await readTarget(db)
-      const compiled = compileYidaDraft(input)
+      const { parsed: source, targetRef } = hasTarget(input)
+        ? targeted(input, ['config', 'rowsText', 'allocation']) : { parsed: input, targetRef: undefined }
+      // The permanent slot (or, multi-target ON, the named owned target), current
+      // authenticated 090, and original 091 all pass before a candidate may reach
+      // the existing local draft writer.
+      const approved = await readTarget(db, targetRef)
+      const compiled = compileYidaDraft(source)
       if (compiled.source.config.intent !== 'create') fail('CONFLICT')
       if (approved.target.locator_digest !== compiled.locatorDigest
         || approved.target.key_definition_digest !== compiled.keyDefinitionDigest
@@ -116,12 +133,13 @@ function createPrimitives(options) {
 
   async function resolveSelectionInTransaction(trx, input) {
     try {
-      const requested = record(input, ['operationId', 'rowKey'])
+      const { parsed: requested, targetRef } = targeted(input, ['operationId', 'rowKey'])
       opaque(requested.operationId); opaque(requested.rowKey)
       const db = crud(trx)
       // This reader owns actual slot -> 090 -> original 091 locks and full
       // target/material authentication; then lock/replay the selected 091.
-      const approved = await readTarget(db)
+      // An operation compiled for another target's locator fails CONFLICT below.
+      const approved = await readTarget(db, targetRef)
       const selected = await readDraft(db, { operationId: requested.operationId })
       const compiled = selected.compiled
       if (approved.target.locator_digest !== compiled.locatorDigest
@@ -166,14 +184,14 @@ function createPrimitives(options) {
   }
   async function loadExecutionMaterialInTransaction(trx, input) {
     try {
-      const requested = record(input, ['credentialRef', 'credentialGeneration'])
+      const { parsed: requested, targetRef } = targeted(input, ['credentialRef', 'credentialGeneration'])
       opaque(requested.credentialRef)
       if (!Number.isInteger(requested.credentialGeneration) || requested.credentialGeneration < 1
         || requested.credentialGeneration > 2147483647) fail('INPUT')
       const db = crud(trx)
       // Preserve slot -> 090 -> original 091 lock order. These are reentrant
       // reads inside the host's existing authority transaction, never new ones.
-      const approved = await readTarget(db)
+      const approved = await readTarget(db, targetRef)
       if (approved.target.credential_ref !== requested.credentialRef
         || approved.target.credential_generation !== requested.credentialGeneration) fail('CONFLICT')
       const material = await readExecutionMaterial(db, requested)
@@ -186,8 +204,9 @@ function createPrimitives(options) {
   }
   async function previewInTransaction(trx, input) {
     try {
+      const { targetRef } = targeted(input, ['operationId', 'rowKey'])
       const selection = await resolveSelectionInTransaction(trx, input)
-      const approved = await readTarget(crud(trx))
+      const approved = await readTarget(crud(trx), targetRef)
       const compiled = compileYidaDraft(selection.source)
       if (approved.target.target_ref !== selection.targetRef
         || approved.target.credential_ref !== selection.credentialRef
@@ -198,8 +217,14 @@ function createPrimitives(options) {
         || !same(approved.envelope.keyDefinition, compiled.keyDefinition)) fail('CONFLICT')
       // Full material validation also compares userId with the authenticated
       // attestation through the existing loader. Discard its private result.
+      // Legacy statement kept verbatim (its mutation probe); Y2 names the same locked target.
+      if (targetRef === undefined) {
       await loadExecutionMaterialInTransaction(trx, { credentialRef: selection.credentialRef,
         credentialGeneration: selection.credentialGeneration })
+      } else {
+        await loadExecutionMaterialInTransaction(trx, { credentialRef: selection.credentialRef,
+          credentialGeneration: selection.credentialGeneration, targetRef })
+      }
       const payload = JSON.parse(selections.get(selection).formDataJson)
       return deepCloneFrozenCanonical({ operationId: selection.operationId, rowKey: selection.rowKey,
         planDigest: selection.planDigest, rowPayloadDigest: selection.rowPayloadDigest,

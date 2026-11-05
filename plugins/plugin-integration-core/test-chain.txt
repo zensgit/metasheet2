@@ -305,6 +305,8 @@ node __tests__/yida-draft-plan.test.cjs
 node __tests__/yida-form-readback.test.cjs
 node __tests__/yida-form-transport.test.cjs
 node __tests__/yida-initialization-producer.test.cjs
+node __tests__/yida-mapping-v3-parity.test.cjs
+node __tests__/yida-mapping-v3.test.cjs
 node __tests__/yida-owner-runtime-factory.test.cjs
 node __tests__/yida-owner-send-port.test.cjs
 node __tests__/yida-readback-observation.test.cjs
@@ -316,6 +318,7 @@ node __tests__/yida-token-exchange.test.cjs
 node __tests__/stock-preparation-manual-rows.test.cjs
 node __tests__/stock-preparation-manual-rows-pull.test.cjs
 node __tests__/stock-preparation-manual-rows-export.test.cjs
+node __tests__/stock-preparation-manual-rows-switch-routes.test.cjs
 # --- sealed-export stage tail: S4 -> S5 -> S6-A, in stage order, must remain LAST ---
 # (pinned by __tests__/sealed-export-s4-generation-migration.test.cjs)
 # --- 以下 24 行为 S4/S5/S6-A 有序尾窗，新测试请插在此行之前 ---

@@ -8676,18 +8676,22 @@ function mapShiftRow(row) {
 // (HttpError, resolveShiftTiming, mapShiftRow, ...) are module-scope definitions that
 // must exist before first use; routes only call this at request time.
 let attendanceShiftService = null
+// Faults raised while the timezone source is being locked, scanned or verified answer as a
+// mapped refusal: policy errors keep their status, anything else is 503 source unavailable.
+async function guardAttendanceTimezoneSourceFault(work) {
+  try { return await work() }
+  catch (error) {
+    if (error instanceof HttpError) throw error
+    if (error instanceof AttendanceTimezonePolicyError) throw new HttpError(error.status,error.code,error.code)
+    throw new HttpError(503,'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE','ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE')
+  }
+}
+
 async function prepareAttendanceTimezoneSourceChange(trx,input) {
   if (!attendanceTimezoneRuntime) {
     throw new HttpError(503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE','ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
   }
-  async function guard(work) {
-    try { return await work() }
-    catch (error) {
-      if (error instanceof HttpError) throw error
-      if (error instanceof AttendanceTimezonePolicyError) throw new HttpError(error.status,error.code,error.code)
-      throw new HttpError(503,'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE','ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE')
-    }
-  }
+  const guard = guardAttendanceTimezoneSourceFault
   const verify = await guard(() => attendanceTimezoneRuntime.prepareSourceChange(trx,input))
   return async () => guard(verify)
 }
@@ -8702,7 +8706,19 @@ async function assertAttendanceTimezoneManage(trx,{orgId,actorId}) {
 }
 
 async function withAttendanceTimezoneSourceChange(trx,input,work) {
+  if (input.actorId) {
+    // Take the organization policy prefix first, then read the actor's authority without
+    // holding membership rows across the source scan. The scan below retakes the same prefix.
+    // A fault while waiting for the prefix is mapped the same way as a fault inside the scan.
+    await guardAttendanceTimezoneSourceFault(() =>
+      lockAttendanceTimezoneOrg((sql,values) => trx.query(sql,values),input.orgId))
+    const allowed = await authorizeAttendanceTimezoneManage({
+      orgId:input.orgId,actorId:input.actorId,query:async (sql,values) => ({rows:await trx.query(sql,values)}),
+    })
+    if (!allowed) throw new HttpError(403,'ATTENDANCE_TIMEZONE_FORBIDDEN','ATTENDANCE_TIMEZONE_FORBIDDEN')
+  }
   const verify = await prepareAttendanceTimezoneSourceChange(trx,input)
+  // Recheck authority and lock membership here, just before the write.
   if (input.actorId) await assertAttendanceTimezoneManage(trx,input)
   const result = await work()
   await verify()

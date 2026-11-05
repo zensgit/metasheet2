@@ -16,6 +16,8 @@ archive_type="unknown"
 # successful run; stays "SKIPPED" if that function's call site is ever removed from
 # the main flow below, so write_optional_report cannot report a check that never ran.
 loopback_status="SKIPPED"
+# Same pattern: set to PASS only by verify_stock_preparation_manual_rows_contract() itself.
+manual_rows_status="SKIPPED"
 # The range-fill provenance check runs the probe that sits beside this verifier (shipped in the
 # package next to it, see multitable-onprem-package-build.sh REQUIRED_PATHS).
 VERIFY_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -472,6 +474,29 @@ function verify_stock_preparation_mvp_contract() {
   search_fixed_string 'metasheet-backend' "$pm2_sample" || die "stock-preparation PM2 safe projection helper must be packaged"
 }
 
+# 人工补充行 (stock-prep manual supplementary rows, ADR adr-stock-prep-manual-rows-20261030; #6663 B1, #6664 B2,
+# #6671 B3, #6672 B4). The new runtime modules are in the required list; these markers prove that files which
+# existed before the feature carry it. Route paths and identifiers only, no UI copy. The host markers matter
+# because tsc never cleans dist: a dist rebuilt from an older tree can keep a stale manual-rows .js beside an
+# older univer-meta.js, which the required list alone would accept. Each search is bound to the one file (or the
+# built JS chunks) that carries the code: the same strings also sit in comments, in the gate's own definitions,
+# in sibling plugin files and could sit in non-JS files under dist, and none of those prove the feature.
+function verify_stock_preparation_manual_rows_contract() {
+  local root="$1"
+  local plugin_routes="${root}/plugins/plugin-integration-core/lib/http-routes.cjs"
+  local host_routes="${root}/packages/core-backend/dist/src/routes/univer-meta.js"
+  local web_chunks=("${root}"/apps/web/dist/assets/*.js)
+
+  search_fixed_string "'/api/integration/stock-preparation/projects/:projectNo/target/manual-rows'" "$plugin_routes" || die "plugin http-routes.cjs must register the stock-prep manual-rows switch route (manual rows B4)"
+  search_fixed_string "'/sheets/:sheetId/manual-rows'" "$host_routes" || die "core-backend dist/src/routes/univer-meta.js must register the manual-row create route (manual rows B2)"
+  search_fixed_string 'resolveGenericCreateRefusal' "$host_routes" || die "core-backend dist/src/routes/univer-meta.js must refuse generic create on stock-prep project sheets (manual rows B3)"
+  [[ -f "${web_chunks[0]}" ]] || die "web dist has no built JS chunks under apps/web/dist/assets"
+  search_fixed_string '/manual-fields' "${web_chunks[@]}" || die "web dist JS chunks must call the manual-row edit route (manual rows B3)"
+  search_fixed_string '/target/manual-rows' "${web_chunks[@]}" || die "web dist JS chunks must call the stock-prep manual-rows switch route (manual rows B4)"
+
+  manual_rows_status="PASS"
+}
+
 function verify_sealed_export_package_provenance() {
   local root="$1"
 
@@ -784,6 +809,10 @@ function write_optional_report() {
       '    {' \
       '      "name": "loopback",' \
       "      \"status\": \"${loopback_status}\"" \
+      '    },' \
+      '    {' \
+      '      "name": "stock-prep-manual-rows",' \
+      "      \"status\": \"${manual_rows_status}\"" \
       '    }' \
       '  ],' \
       "  \"generatedAt\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"" \
@@ -818,6 +847,7 @@ function write_optional_report() {
       else
         echo "- Loopback frontend config: \`${loopback_status}\`"
       fi
+      echo "- Stock-prep manual rows (人工补充行) runtime markers: \`${manual_rows_status}\`"
     } > "$report_md_tmp"
     mv "$report_md_tmp" "$VERIFY_REPORT_MD"
   fi
@@ -1036,6 +1066,8 @@ required=(
   "packages/core-backend/dist/src/db/migrate.js"
   "packages/core-backend/dist/scripts/bootstrap-yida-initialization-owner.js"
   "packages/core-backend/dist/src/integration/yida-initialization-bootstrap.js"
+  "packages/core-backend/dist/src/multitable/stock-preparation-manual-rows.js"
+  "packages/core-backend/dist/src/multitable/stock-preparation-manual-rows-gate.js"
   "packages/core-backend/dist/scripts/attendance-timezone-legacy-repair.js"
   "packages/core-backend/dist/src/attendance/attendance-timezone-legacy-repair.js"
   "packages/core-backend/dist/src/db/migration-provider.js"
@@ -1062,6 +1094,7 @@ required=(
   "plugins/plugin-integration-core/index.cjs"
   "plugins/plugin-integration-core/lib/http-routes.cjs"
   "plugins/plugin-integration-core/lib/yida-connection-probe.cjs"
+  "plugins/plugin-integration-core/lib/stock-preparation-manual-rows.cjs"
   "plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json"
   "plugins/plugin-integration-core/lib/adapters/k3-wise-document-templates.cjs"
   "plugins/plugin-integration-core/lib/adapters/k3-wise-webapi-adapter.cjs"
@@ -1073,6 +1106,7 @@ required=(
   "plugins/plugin-elearning/index.cjs"
   "plugins/plugin-elearning/lib/feature-flags.cjs"
   "scripts/ops/integration-k3wise-onprem-preflight.mjs"
+  "scripts/ops/integration-yida-l4-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-evidence.mjs"
   "scripts/ops/integration-k3wise-delivery-readiness.mjs"
@@ -1171,6 +1205,7 @@ required=(
   "docs/deployment/multitable-platform-rc-notes-20260404.md"
   "docs/deployment/multitable-windows-onprem-easy-start-20260319.md"
   "docs/deployment/multitable-onprem-package-layout-20260319.md"
+  "docs/deployment/tasks-enablement.md"
 )
 
 for rel in "${required[@]}"; do
@@ -1190,6 +1225,7 @@ verify_build_provenance "$pkg_root"
 verify_integration_fix_markers "$pkg_root"
 verify_migration_bridge_contract "$pkg_root"
 verify_stock_preparation_mvp_contract "$pkg_root"
+verify_stock_preparation_manual_rows_contract "$pkg_root"
 verify_sealed_export_package_provenance "$pkg_root"
 verify_generic_integration_workbench_contract "$pkg_root"
 verify_bridge_agent_tooling_contract "$pkg_root"

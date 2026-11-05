@@ -15,7 +15,7 @@ import express from 'express'
 import jwt from 'jsonwebtoken'
 import supertest from 'supertest'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { tasksRouter } from '../../src/routes/tasks'
+import { disposeTasksRouter, tasksRouter } from '../../src/routes/tasks'
 
 const noKeepAlive = new http.Agent({ keepAlive: false })
 
@@ -40,7 +40,10 @@ export async function startTasksListener(router: express.Router | null = tasksRo
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
     port: address.port,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () => new Promise<void>((resolve) => server.close(() => {
+      disposeTasksRouter(router)
+      resolve()
+    })),
   }
 }
 

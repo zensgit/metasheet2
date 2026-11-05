@@ -34,6 +34,17 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   const exists = await checkTableExists(db, 'users')
   if (!exists) return
 
+  // Recycled accounts were forced inactive. Put the previous flag back before
+  // the column disappears, or a rollback leaves every recycled account disabled.
+  // Purged rows stay inactive: their identity is already gone and must not
+  // become a sign-in-capable account when the tombstone columns are dropped.
+  await sql`
+    UPDATE users
+    SET is_active = COALESCE(active_before_delete, is_active)
+    WHERE deleted_at IS NOT NULL
+      AND purged_at IS NULL
+  `.execute(db)
+
   await sql`DROP INDEX IF EXISTS idx_users_recycle_due`.execute(db)
   await sql`
     ALTER TABLE users

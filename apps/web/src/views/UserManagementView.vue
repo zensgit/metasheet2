@@ -144,7 +144,7 @@
           <p class="user-admin__hint">{{ recycleText('hint', { days: recycleRetentionDays }) }}</p>
         </div>
         <div class="user-admin__role-actions">
-          <input v-model.trim="recycleSearch" class="user-admin__search" type="text" :aria-label="recycleText('search')" :placeholder="recycleText('search')" data-testid="recycle-search" @keyup.enter="void loadRecycleBin()" />
+          <input v-model.trim="recycleSearch" class="user-admin__search" type="text" :aria-label="recycleText('search')" :placeholder="recycleText('search')" data-testid="recycle-search" @keyup.enter="void searchRecycleBin()" />
           <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loadingRecycle" @click="void loadRecycleBin()">
             {{ loadingRecycle ? recycleText('loading') : recycleText('refresh') }}
           </button>
@@ -155,20 +155,27 @@
           {{ recycleText('restoreSelected') }}
         </button>
         <input v-model.trim="purgePhrase" class="user-admin__search" type="text" :aria-label="recycleText('purgePlaceholder')" :placeholder="recycleText('purgePlaceholder')" data-testid="recycle-purge-phrase" />
-        <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="recycleBusy || recycleSelectedIds.length === 0 || purgePhrase !== '立即清除'" data-testid="recycle-purge-selected" @click="void purgeRecycleUsers()">
+        <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="recycleBusy || recycleSelectedIds.length === 0 || purgePhrase !== recycleText('purgeExact')" data-testid="recycle-purge-selected" @click="void purgeRecycleUsers()">
           {{ recycleText('purgeSelected') }}
         </button>
       </div>
       <p class="user-admin__hint">{{ recycleText('purgedHint') }}</p>
       <div v-if="loadingRecycle && recycleUsers.length === 0" class="user-admin__empty">{{ recycleText('loading') }}</div>
       <div v-else-if="recycleUsers.length === 0" class="user-admin__empty">{{ recycleText('empty') }}</div>
-      <div v-else class="user-admin__table" role="table" aria-label="回收站">
+      <div v-else class="user-admin__table" role="table" :aria-label="recycleText('title')">
+        <div class="user-admin__preview-row user-admin__preview-row--head" role="row">
+          <span role="columnheader">{{ recycleText('selectMember', { name: recycleText('colMember') }) }}</span>
+          <span role="columnheader">{{ recycleText('colMember') }}</span>
+          <span role="columnheader">{{ recycleText('colDeletedAt') }}</span>
+          <span role="columnheader">{{ recycleText('colDeletedBy') }}</span>
+          <span role="columnheader">{{ recycleText('colPurgeAfter') }}</span>
+        </div>
         <article v-for="user in recycleUsers" :key="user.id" class="user-admin__user" role="row" data-testid="recycle-row">
           <label class="user-admin__user-select">
             <input
               :checked="recycleSelectedIds.includes(user.id)"
               type="checkbox"
-              :aria-label="`${recycleText('restore')} ${user.name || user.email || user.id}`"
+              :aria-label="recycleText('selectMember', { name: user.name || user.email || user.id })"
               @change="toggleRecycleSelection(user.id, $event)"
             />
           </label>
@@ -188,6 +195,11 @@
             {{ recycleText('restore') }}
           </button>
         </article>
+        <div v-if="recyclePageCount > 1" class="user-admin__role-actions" data-testid="recycle-pager">
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="recycleBusy || recyclePage <= 1" data-testid="recycle-prev" @click="void changeRecyclePage(recyclePage - 1)">{{ recycleText('previousPage') }}</button>
+          <span>{{ recycleText('pageStatus', { page: recyclePage, pages: recyclePageCount }) }}</span>
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="recycleBusy || recyclePage >= recyclePageCount" data-testid="recycle-next" @click="void changeRecyclePage(recyclePage + 1)">{{ recycleText('nextPage') }}</button>
+        </div>
       </div>
     </div>
 
@@ -372,6 +384,12 @@
           />
         </label>
       </div>
+      <div v-if="batchTemporaryPasswords.length" class="user-admin__preset" data-testid="batch-temporary-passwords">
+        <strong>临时密码只显示这一次</strong>
+        <p class="user-admin__hint">复制后会从页面上清除。请交给对应的人，不要留在聊天记录里。</p>
+        <p v-for="item in batchTemporaryPasswords" :key="`pwd-${item.index}`">{{ item.email || '—' }}：{{ item.temporaryPassword }}</p>
+        <button class="user-admin__button" type="button" data-testid="copy-batch-passwords" @click="void copyAndClearBatchPasswords()">复制并清除</button>
+      </div>
       <div v-show="inviteTab === 'import'" data-testid="batch-import-panel">
         <p class="user-admin__hint">下载模板，填好姓名、邮箱、角色 ID 和部门后上传。先预览校验，再确认创建。一次最多 100 行。</p>
         <div class="user-admin__role-actions">
@@ -395,7 +413,7 @@
         </div>
         <div v-if="batchReport" class="user-admin__preset" data-testid="batch-import-report">
           <strong>导入结果：成功 {{ batchReport.successCount }}，失败 {{ batchReport.failureCount }}</strong>
-          <p v-for="item in batchReport.results" :key="`${item.index}-${item.email}`">{{ item.email || '—' }}：{{ item.message }}<template v-if="item.temporaryPassword">，临时密码 {{ item.temporaryPassword }}</template></p>
+          <p v-for="item in batchReport.results" :key="`${item.index}-${item.email}`">{{ item.email || '—' }}：{{ item.message }}</p>
           <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="batchReport.failureCount === 0" @click="downloadFailedRows()">下载失败行</button>
         </div>
       </div>
@@ -524,7 +542,7 @@
           <div>
             <strong>批量操作</strong>
             <p class="user-admin__hint">
-              已选择 {{ selectedUserIds.length }} / {{ displayedUsers.length }} 个当前筛选结果。
+              已选择 {{ selectedUserIds.length }} / {{ userTotal }} 个当前筛选结果。
             </p>
             <p v-if="screeningUsersMissingOpenId.length > 0" class="user-admin__hint">
               当前筛选结果中有 {{ screeningUsersMissingOpenId.length }} 个缺 OpenID 用户，可直接导出治理清单。
@@ -585,7 +603,7 @@
             <button class="user-admin__button" type="button" :disabled="bulkBusy || selectedUserIds.length === 0 || !bulkDepartment" @click="openBulkConfirm('department')">应用部门</button>
             <button class="user-admin__button" type="button" :disabled="bulkBusy || selectedUserIds.length === 0" @click="openBulkConfirm('enable')">批量启用</button>
             <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="bulkBusy || selectedUserIds.length === 0" @click="openBulkConfirm('disable')">批量停用</button>
-            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="displayedUsers.length === 0" @click="exportUsersForUpdate()">导出以便修改</button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="displayedUsers.length === 0 && userTotal === 0" @click="void exportUsersForUpdate()">导出以便修改</button>
             <button class="user-admin__button user-admin__button--secondary" type="button" @click="reimportOpen = true">导入更新</button>
           </div>
           <div v-if="bulkConfirm" class="user-admin__confirm" role="dialog" aria-label="确认批量操作" data-testid="bulk-confirm">
@@ -601,7 +619,7 @@
             <p class="user-admin__hint">{{ recycleText('dangerHint') }}</p>
             <p v-if="selectedUserIds.length">将列出：{{ selectedUserLabels }}</p>
             <input v-model.trim="hardDeletePhrase" class="user-admin__search" type="text" :aria-label="recycleText('dangerPhrase')" :placeholder="recycleText('dangerPhrase')" data-testid="recycle-move-phrase" />
-            <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="recycle-move-submit" :disabled="bulkBusy || selectedUserIds.length === 0 || hardDeletePhrase !== '永久删除'" @click="void submitHardDelete()">{{ recycleText('dangerButton') }}</button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="recycle-move-submit" :disabled="bulkBusy || selectedUserIds.length === 0 || hardDeletePhrase !== recycleText('dangerPhraseExact')" @click="void submitHardDelete()">{{ recycleText('dangerButton') }}</button>
           </details>
         </div>
         <div v-if="reimportOpen" class="user-admin__confirm" role="dialog" aria-label="导入更新" data-testid="reimport-dialog">
@@ -705,10 +723,10 @@
           </p>
         </article>
         </div>
-        <div v-if="displayedUsers.length > pageSize" class="user-admin__pager">
-          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="page <= 1" @click="page -= 1">上一页</button>
-          <span>第 {{ page }} / {{ pageCount }} 页 · 共 {{ displayedUsers.length }} 人</span>
-          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="page >= pageCount" @click="page += 1">下一页</button>
+        <div v-if="userTotal > pageSize" class="user-admin__pager">
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="page <= 1 || loading" @click="page -= 1">上一页</button>
+          <span>第 {{ page }} / {{ pageCount }} 页 · 共 {{ userTotal }} 人</span>
+          <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="page >= pageCount || loading" @click="page += 1">下一页</button>
         </div>
       </aside>
 
@@ -1255,9 +1273,9 @@
 
 <script setup lang="ts">
 import {
-  ADMIN_USER_BATCH_LIMIT,
   buildImportTemplateCsv,
   buildUpdateExportCsv,
+  describeImportLimitExceeded,
   parseCsv,
   parsePastedEmails,
   previewUpdateRows,
@@ -1270,6 +1288,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
 import { useLocale } from '../composables/useLocale'
 import { userRecycleLabel, type UserRecycleLabelKey } from './userRecycleLabels'
+import { sanitizeCsvCell, sanitizeCsvRow } from '../utils/csvFormulaCell'
 import { apiFetch } from '../utils/api'
 import { subscribeToLocationChanges } from '../utils/browserLocation'
 import { describeCreateUserError, getCreateUserRuleHints } from '../utils/createUserValidationCopy'
@@ -1301,6 +1320,7 @@ type ManagedUser = {
   position?: string | null
   hireDate?: string | null
   role: string
+  roleIds?: string[]
   is_active: boolean
   is_admin: boolean
   last_login_at: string | null
@@ -1612,6 +1632,9 @@ const recycleSearch = ref('')
 const purgePhrase = ref('')
 const recycleRetentionDays = ref(30)
 const recycleTotal = ref(0)
+const recyclePage = ref(1)
+const recyclePageSize = 20
+const recyclePageCount = computed(() => Math.max(1, Math.ceil(recycleTotal.value / recyclePageSize)))
 const recycleSelectedIds = ref<string[]>([])
 type RecycleBinUser = {
   id: string
@@ -1624,6 +1647,15 @@ type RecycleBinUser = {
 }
 const recycleUsers = ref<RecycleBinUser[]>([])
 const batchReport = ref<{ successCount: number; failureCount: number; results: Array<Record<string, unknown>> } | null>(null)
+const batchTemporaryPasswords = computed(() => (batchReport.value?.results || []).flatMap((item) => {
+  const temporaryPassword = typeof item.temporaryPassword === 'string' ? item.temporaryPassword : ''
+  if (!temporaryPassword) return []
+  return [{
+    index: Number(item.index ?? 0),
+    email: typeof item.email === 'string' ? item.email : '',
+    temporaryPassword,
+  }]
+}))
 const inviteStatusFilter = ref<'pending' | 'all'>('pending')
 const detailOpen = ref(false)
 const rowMenuUserId = ref('')
@@ -1633,8 +1665,23 @@ const sortKey = ref<'' | 'name' | 'role' | 'status' | 'lastLogin'>('')
 const sortDir = ref<'asc' | 'desc'>('asc')
 const page = ref(1)
 const pageSize = 20
+const userListFetchCap = 100
+const userTotal = ref(0)
+const serverRoleOptions = ref<string[]>([])
+const serverSummary = ref<{
+  total: number
+  accountEnabled: number
+  dingtalkEnabled: number
+  directoryLinked: number
+  dingtalkOpenIdMissing: number
+  dingtalkOpenIdGoverned: number
+  dingtalkOpenIdPending: number
+} | null>(null)
 const users = ref<ManagedUser[]>([])
 const selectedUserIds = ref<string[]>([])
+const selectedUserRecords = new Map<string, ManagedUser>()
+let userListGeneration = 0
+let selectionFilterVersion = 0
 const userListFilter = ref<UserListFilter>(readInitialUserNavigation().filter)
 const roleCatalog = ref<RoleCatalogItem[]>([])
 const accessPresets = ref<AccessPreset[]>([])
@@ -1776,15 +1823,18 @@ const createdAttendanceOnboardingSummary = computed(() => {
     ? `${target.name || target.id} · ${details.join(' · ')}`
     : `${target.name || target.id}`
 })
-const governanceSummary = computed(() => ({
-  total: users.value.length,
-  accountEnabled: users.value.filter((user) => user.is_active).length,
-  dingtalkEnabled: users.value.filter((user) => user.dingtalkLoginEnabled !== false).length,
-  directoryLinked: users.value.filter((user) => user.directoryLinked === true).length,
-  dingtalkOpenIdMissing: users.value.filter((user) => user.dingtalkOpenIdMissing === true).length,
-  dingtalkOpenIdGoverned: users.value.filter((user) => user.dingtalkOpenIdMissing === true && user.dingtalkLoginEnabled === false).length,
-  dingtalkOpenIdPending: users.value.filter((user) => user.dingtalkOpenIdMissing === true && user.dingtalkLoginEnabled !== false).length,
-}))
+const governanceSummary = computed(() => {
+  if (serverSummary.value) return serverSummary.value
+  return {
+    total: users.value.length,
+    accountEnabled: users.value.filter((user) => user.is_active).length,
+    dingtalkEnabled: users.value.filter((user) => user.dingtalkLoginEnabled !== false).length,
+    directoryLinked: users.value.filter((user) => user.directoryLinked === true).length,
+    dingtalkOpenIdMissing: users.value.filter((user) => user.dingtalkOpenIdMissing === true).length,
+    dingtalkOpenIdGoverned: users.value.filter((user) => user.dingtalkOpenIdMissing === true && user.dingtalkLoginEnabled === false).length,
+    dingtalkOpenIdPending: users.value.filter((user) => user.dingtalkOpenIdMissing === true && user.dingtalkLoginEnabled !== false).length,
+  }
+})
 const governanceWorkbenchCards = computed(() => {
   const pendingToday = users.value.filter((user) => (
     user.dingtalkOpenIdMissing === true
@@ -1835,6 +1885,9 @@ const visibleUsers = computed(() => {
   })
 })
 const roleFilterOptions = computed(() => {
+  if (serverRoleOptions.value.length > 0) {
+    return [...serverRoleOptions.value].sort((left, right) => left.localeCompare(right, 'zh'))
+  }
   const roles = new Set<string>()
   for (const user of users.value) {
     if (user.role) roles.add(user.role)
@@ -1856,16 +1909,17 @@ const displayedUsers = computed(() => {
   }
   return [...rows].sort((left, right) => valueOf(left).localeCompare(valueOf(right), 'zh') * direction)
 })
-const pageCount = computed(() => Math.max(1, Math.ceil(displayedUsers.value.length / pageSize)))
-const pagedUsers = computed(() => {
-  const current = Math.min(page.value, pageCount.value)
-  const start = (current - 1) * pageSize
-  return displayedUsers.value.slice(start, start + pageSize)
-})
+const pageCount = computed(() => Math.max(1, Math.ceil(userTotal.value / pageSize)))
+const pagedUsers = computed(() => displayedUsers.value)
 const pendingInviteCount = computed(() => inviteRecords.value.filter((record) => record.status === 'pending').length)
 const knownRoleIds = computed(() => new Set(roleCatalog.value.map((role) => role.id)))
 const pastedEmailList = computed(() => parsePastedEmails(pasteEmails.value))
-const selectedUsers = computed(() => users.value.filter((user) => selectedUserIdSet.value.has(user.id)))
+const selectedUsers = computed(() => selectedUserIds.value.flatMap((userId) => {
+  const cached = selectedUserRecords.get(userId)
+  if (cached) return [cached]
+  const visible = users.value.find((user) => user.id === userId)
+  return visible ? [visible] : []
+}))
 const selectedUserLabels = computed(() => selectedUsers.value.map((user) => user.name || user.email || user.id).join('、'))
 const bulkConfirmTitle = computed(() => {
   if (bulkConfirm.value === 'role') return `确认把所选用户的角色改为 ${bulkRoleId.value}？`
@@ -1959,16 +2013,15 @@ function readMissingOpenIdGovernanceHint(user: ManagedUser): string {
 }
 
 function escapeCsvValue(value: unknown): string {
-  const text = String(value ?? '')
-  if (!/[",\n]/.test(text)) return text
-  return `"${text.replaceAll('"', '""')}"`
+  return sanitizeCsvCell(value)
 }
 
 function downloadText(filename: string, text: string, mimeType: string): void {
   if (typeof window === 'undefined' || typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') {
     throw new Error('当前环境不支持文件导出')
   }
-  const blob = new Blob([`\ufeff${text}`], { type: mimeType })
+  const body = text.startsWith('\ufeff') ? text : `\ufeff${text}`
+  const blob = new Blob([body], { type: mimeType })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
@@ -2441,20 +2494,36 @@ function extractNamespaceFromPermission(permission: string): string | null {
 
 function reconcileSelectedUsers(): void {
   if (selectedUserIds.value.length === 0) return
-  const visibleUserIdSet = new Set(visibleUsers.value.map((user) => user.id))
-  selectedUserIds.value = selectedUserIds.value.filter((userId) => visibleUserIdSet.has(userId))
+  const loadedIds = new Set(users.value.map((user) => user.id))
+  const visibleIds = new Set(visibleUsers.value.map((user) => user.id))
+  selectedUserIds.value = selectedUserIds.value.filter((userId) => !loadedIds.has(userId) || visibleIds.has(userId))
 }
 
 function clearSelectedUsers(): void {
   selectedUserIds.value = []
 }
 
-function selectVisibleUsers(): void {
-  selectedUserIds.value = displayedUsers.value.map((user) => user.id)
+function clearSelectionForCriteriaChange(): void {
+  selectionFilterVersion += 1
+  selectedUserIds.value = []
+  selectedUserRecords.clear()
+  bulkConfirm.value = null
+  hardDeletePhrase.value = ''
+}
+
+async function selectVisibleUsers(): Promise<void> {
+  const version = selectionFilterVersion
+  const pageAlreadyComplete = userTotal.value > 0 && users.value.length >= userTotal.value
+  const collected = pageAlreadyComplete ? displayedUsers.value : await collectFilteredUsers(version)
+  if (version !== selectionFilterVersion) return
+  rememberUsers(collected)
+  selectedUserIds.value = collected.map((user) => user.id)
 }
 
 function toggleUserSelection(userId: string, checked: boolean): void {
   if (checked) {
+    const user = users.value.find((item) => item.id === userId)
+    if (user) selectedUserRecords.set(user.id, user)
     if (!selectedUserIds.value.includes(userId)) {
       selectedUserIds.value = [...selectedUserIds.value, userId]
     }
@@ -2780,38 +2849,154 @@ async function loadAttendanceOrgOptions(): Promise<void> {
   }
 }
 
+function normalizeManagedUser(item: ManagedUser): ManagedUser {
+  return {
+    ...item,
+    roleIds: Array.isArray(item.roleIds) ? item.roleIds.filter((roleId) => roleId.trim().length > 0) : [],
+    platformAdminEnabled: item.platformAdminEnabled ?? (item.role === 'admin' || item.is_admin),
+    attendanceAdminEnabled: item.attendanceAdminEnabled ?? false,
+    dingtalkLoginEnabled: item.dingtalkLoginEnabled ?? false,
+    dingtalkGrantUpdatedAt: item.dingtalkGrantUpdatedAt ?? null,
+    dingtalkGrantUpdatedBy: item.dingtalkGrantUpdatedBy ?? null,
+    directoryLinked: item.directoryLinked ?? false,
+    dingtalkIdentityExists: item.dingtalkIdentityExists ?? false,
+    dingtalkHasUnionId: item.dingtalkHasUnionId ?? false,
+    dingtalkHasOpenId: item.dingtalkHasOpenId ?? false,
+    dingtalkOpenIdMissing: item.dingtalkOpenIdMissing ?? false,
+    dingtalkCorpId: item.dingtalkCorpId ?? null,
+    lastDirectorySyncAt: item.lastDirectorySyncAt ?? null,
+    businessRoleCount: item.businessRoleCount ?? 0,
+  }
+}
+
+function rememberUsers(rows: ManagedUser[]): void {
+  for (const user of rows) selectedUserRecords.set(user.id, user)
+}
+
+function buildUserListParams(pageNumber: number, size: number, withMeta: boolean): URLSearchParams {
+  const params = new URLSearchParams()
+  params.set('q', search.value)
+  params.set('page', String(pageNumber))
+  params.set('pageSize', String(size))
+  if (withMeta) params.set('meta', '1')
+  if (roleFilter.value) params.set('role', roleFilter.value)
+  if (accountStatusFilter.value) params.set('accountStatus', accountStatusFilter.value)
+  if (userListFilter.value !== 'all') params.set('listFilter', userListFilter.value)
+  if (sortKey.value) {
+    params.set('sort', sortKey.value)
+    params.set('dir', sortDir.value)
+  }
+  const pinUserId = userNavigation.value.userId.trim()
+  if (pinUserId) params.set('userId', pinUserId)
+  return params
+}
+
+function readUserListSummary(value: unknown): typeof serverSummary.value {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const read = (key: string) => (typeof record[key] === 'number' ? record[key] as number : null)
+  const total = read('total')
+  const accountEnabled = read('accountEnabled')
+  const dingtalkEnabled = read('dingtalkEnabled')
+  const directoryLinked = read('directoryLinked')
+  const dingtalkOpenIdMissing = read('dingtalkOpenIdMissing')
+  const dingtalkOpenIdGoverned = read('dingtalkOpenIdGoverned')
+  const dingtalkOpenIdPending = read('dingtalkOpenIdPending')
+  if (
+    total === null
+    || accountEnabled === null
+    || dingtalkEnabled === null
+    || directoryLinked === null
+    || dingtalkOpenIdMissing === null
+    || dingtalkOpenIdGoverned === null
+    || dingtalkOpenIdPending === null
+  ) return null
+  return {
+    total,
+    accountEnabled,
+    dingtalkEnabled,
+    directoryLinked,
+    dingtalkOpenIdMissing,
+    dingtalkOpenIdGoverned,
+    dingtalkOpenIdPending,
+  }
+}
+
+async function fetchUserListPage(pageNumber: number, size: number, withMeta: boolean): Promise<{
+  items: ManagedUser[]
+  total: number
+  roleOptions: string[] | null
+  summary: typeof serverSummary.value
+}> {
+  const params = buildUserListParams(pageNumber, size, withMeta)
+  const response = await apiFetch(`/api/admin/users?${params.toString()}`)
+  const payload = await readJson(response)
+  if (!response.ok || payload.ok !== true) {
+    throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载用户失败'))
+  }
+  const data = payload.data as {
+    items?: ManagedUser[]
+    total?: number
+    roleOptions?: unknown
+    summary?: unknown
+  } | undefined
+  const items = Array.isArray(data?.items) ? data.items.map((item) => normalizeManagedUser(item)) : []
+  return {
+    items,
+    total: typeof data?.total === 'number' ? data.total : items.length,
+    roleOptions: Array.isArray(data?.roleOptions)
+      ? data.roleOptions.filter((role): role is string => typeof role === 'string' && role.trim().length > 0)
+      : null,
+    summary: readUserListSummary(data?.summary),
+  }
+}
+
+async function collectFilteredUsers(version = selectionFilterVersion): Promise<ManagedUser[]> {
+  const generation = userListGeneration
+  const collected: ManagedUser[] = []
+  const seen = new Set<string>()
+  let total = Number.POSITIVE_INFINITY
+  for (let pageNumber = 1; pageNumber <= 1000 && collected.length < total; pageNumber += 1) {
+    const result = await fetchUserListPage(pageNumber, userListFetchCap, false)
+    if (generation !== userListGeneration || version !== selectionFilterVersion) return []
+    total = result.total
+    const before = collected.length
+    for (const item of result.items) {
+      if (seen.has(item.id)) continue
+      seen.add(item.id)
+      collected.push(item)
+    }
+    if (result.items.length === 0 || collected.length === before) break
+  }
+  if (version !== selectionFilterVersion) return []
+  return collected
+}
+
 async function loadUsers(): Promise<void> {
+  const generation = ++userListGeneration
   loading.value = true
   try {
-    const params = new URLSearchParams()
-    params.set('q', search.value)
-    const pinUserId = userNavigation.value.userId.trim()
-    if (pinUserId) params.set('userId', pinUserId)
+    const params = buildUserListParams(page.value, pageSize, true)
     const response = await apiFetch(`/api/admin/users?${params.toString()}`)
     const payload = await readJson(response)
+    if (generation !== userListGeneration) return
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载用户失败'))
     }
-
-    const data = payload.data as { items?: ManagedUser[] } | undefined
-    users.value = Array.isArray(data?.items)
-      ? data.items.map((item) => ({
-          ...item,
-          platformAdminEnabled: item.platformAdminEnabled ?? (item.role === 'admin' || item.is_admin),
-          attendanceAdminEnabled: item.attendanceAdminEnabled ?? false,
-          dingtalkLoginEnabled: item.dingtalkLoginEnabled ?? false,
-          dingtalkGrantUpdatedAt: item.dingtalkGrantUpdatedAt ?? null,
-          dingtalkGrantUpdatedBy: item.dingtalkGrantUpdatedBy ?? null,
-          directoryLinked: item.directoryLinked ?? false,
-          dingtalkIdentityExists: item.dingtalkIdentityExists ?? false,
-          dingtalkHasUnionId: item.dingtalkHasUnionId ?? false,
-          dingtalkHasOpenId: item.dingtalkHasOpenId ?? false,
-          dingtalkOpenIdMissing: item.dingtalkOpenIdMissing ?? false,
-          dingtalkCorpId: item.dingtalkCorpId ?? null,
-          lastDirectorySyncAt: item.lastDirectorySyncAt ?? null,
-          businessRoleCount: item.businessRoleCount ?? 0,
-        }))
+    const data = payload.data as {
+      items?: ManagedUser[]
+      total?: number
+      roleOptions?: unknown
+      summary?: unknown
+    } | undefined
+    const items = Array.isArray(data?.items) ? data.items.map((item) => normalizeManagedUser(item)) : []
+    users.value = items
+    userTotal.value = typeof data?.total === 'number' ? data.total : items.length
+    serverRoleOptions.value = Array.isArray(data?.roleOptions)
+      ? data.roleOptions.filter((role): role is string => typeof role === 'string' && role.trim().length > 0)
       : []
+    serverSummary.value = readUserListSummary(data?.summary)
+    rememberUsers(items)
     reconcileSelectedUsers()
 
     if (!selectedUserId.value && users.value.length > 0) {
@@ -2832,9 +3017,10 @@ async function loadUsers(): Promise<void> {
       }
     }
   } catch (error) {
+    if (generation !== userListGeneration) return
     setStatus(error instanceof Error ? error.message : '加载用户失败', 'error')
   } finally {
-    loading.value = false
+    if (generation === userListGeneration) loading.value = false
   }
 }
 
@@ -3859,7 +4045,15 @@ async function rowsFromUpload(file: File): Promise<Array<Record<string, string>>
       return record
     })
   }
-  return parseCsv(await file.text())
+  const text = typeof file.text === 'function'
+    ? await file.text()
+    : await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result ?? ''))
+      reader.onerror = () => reject(reader.error ?? new Error('读取文件失败'))
+      reader.readAsText(file)
+    })
+  return parseCsv(text)
 }
 
 function downloadImportTemplate(kind: 'csv' | 'xlsx'): void {
@@ -3885,17 +4079,28 @@ async function onImportFile(event: Event): Promise<void> {
   const input = event.target
   if (!(input instanceof HTMLInputElement) || !input.files?.[0]) return
   const rows = await rowsFromUpload(input.files[0])
-  importPreview.value = validateImportRows(rows, knownRoleIds.value).slice(0, ADMIN_USER_BATCH_LIMIT)
+  const limitMessage = describeImportLimitExceeded(rows.length)
   batchReport.value = null
   input.value = ''
+  if (limitMessage) {
+    importPreview.value = []
+    setStatus(limitMessage, 'error')
+    return
+  }
+  importPreview.value = validateImportRows(rows, knownRoleIds.value)
 }
 
 async function submitBatchCreate(items: Array<Record<string, unknown>>): Promise<void> {
+  const limitMessage = describeImportLimitExceeded(items.length)
+  if (limitMessage) {
+    setStatus(limitMessage, 'error')
+    return
+  }
   bulkBusy.value = true
   try {
     const response = await apiFetch('/api/admin/users/batch/create', {
       method: 'POST',
-      body: JSON.stringify({ items: items.slice(0, ADMIN_USER_BATCH_LIMIT) }),
+      body: JSON.stringify({ items }),
     })
     batchReport.value = await readBatchPayload(response)
     await loadUsers()
@@ -3918,7 +4123,12 @@ async function submitImport(): Promise<void> {
 }
 
 async function submitPastedEmails(): Promise<void> {
-  const items = pastedEmailList.value.slice(0, ADMIN_USER_BATCH_LIMIT).map((email) => ({
+  const limitMessage = describeImportLimitExceeded(pastedEmailList.value.length)
+  if (limitMessage) {
+    setStatus(limitMessage, 'error')
+    return
+  }
+  const items = pastedEmailList.value.map((email) => ({
     email,
     roleId: pasteRoleId.value || undefined,
   }))
@@ -3927,8 +4137,32 @@ async function submitPastedEmails(): Promise<void> {
 
 function downloadFailedRows(): void {
   const failed = (batchReport.value?.results || []).filter((item) => item.ok !== true)
-  const lines = ['email,code,message', ...failed.map((item) => [item.email, item.code, item.message].map((value) => `"${String(value || '').replaceAll('"', '""')}"`).join(','))]
-  downloadText('user-import-failed.csv', `\ufeff${lines.join('\n')}\n`, 'text/csv;charset=utf-8')
+  const lines = [
+    sanitizeCsvRow(['email', 'code', 'message']),
+    ...failed.map((item) => sanitizeCsvRow([item.email, item.code, item.message])),
+  ]
+  downloadText('user-import-failed.csv', `${lines.join('\n')}\n`, 'text/csv;charset=utf-8')
+}
+
+async function copyAndClearBatchPasswords(): Promise<void> {
+  const lines = batchTemporaryPasswords.value.map((item) => `${item.email}\t${item.temporaryPassword}`)
+  if (lines.length === 0) return
+  const copied = await copyText(lines.join('\n'))
+  if (!copied) {
+    setStatus('复制失败，临时密码仍显示在页面上', 'error')
+    return
+  }
+  if (batchReport.value) {
+    batchReport.value = {
+      ...batchReport.value,
+      results: batchReport.value.results.map((item) => {
+        const next = { ...item }
+        delete next.temporaryPassword
+        return next
+      }),
+    }
+  }
+  setStatus('临时密码已复制，并从页面上清除')
 }
 
 async function submitBulkConfirm(): Promise<void> {
@@ -3965,8 +4199,8 @@ async function submitBulkConfirm(): Promise<void> {
   }
 }
 
-function exportUsersForUpdate(): void {
-  const source = selectedUsers.value.length > 0 ? selectedUsers.value : displayedUsers.value
+async function exportUsersForUpdate(): Promise<void> {
+  const source = selectedUserIds.value.length > 0 ? selectedUsers.value : await collectFilteredUsers()
   downloadText('user-update.csv', buildUpdateExportCsv(source), 'text/csv;charset=utf-8')
   setStatus(`已导出 ${source.length} 名用户，可修改后重新导入`)
 }
@@ -3975,10 +4209,16 @@ async function onReimportFile(event: Event): Promise<void> {
   const input = event.target
   if (!(input instanceof HTMLInputElement) || !input.files?.[0]) return
   const rows = await rowsFromUpload(input.files[0])
-  reimportPreview.value = previewUpdateRows(rows, users.value, knownRoleIds.value).slice(0, ADMIN_USER_BATCH_LIMIT)
+  const limitMessage = describeImportLimitExceeded(rows.length)
   reimportReady.value = false
   batchReport.value = null
   input.value = ''
+  if (limitMessage) {
+    reimportPreview.value = []
+    setStatus(limitMessage, 'error')
+    return
+  }
+  reimportPreview.value = previewUpdateRows(rows, users.value, knownRoleIds.value)
 }
 
 async function submitReimport(dryRun: boolean): Promise<void> {
@@ -3990,6 +4230,11 @@ async function submitReimport(dryRun: boolean): Promise<void> {
     department: row.department,
     isActive: row.isActive === 'true' ? true : row.isActive === 'false' ? false : undefined,
   }))
+  const limitMessage = describeImportLimitExceeded(items.length)
+  if (limitMessage) {
+    setStatus(limitMessage, 'error')
+    return
+  }
   bulkBusy.value = true
   try {
     const response = await apiFetch('/api/admin/users/batch/update', {
@@ -4024,7 +4269,7 @@ async function submitHardDelete(): Promise<void> {
     batchReport.value = await readBatchPayload(response)
     selectedUserIds.value = []
     await loadUsers()
-    recycleTotal.value = 0
+    await refreshRecycleTotal()
     setStatus(recycleText('moved', { ok: batchReport.value.successCount, fail: batchReport.value.failureCount }), batchReport.value.failureCount > 0 ? 'error' : 'info')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : recycleText('moved', { ok: 0, fail: selectedUserIds.value.length }), 'error')
@@ -4041,22 +4286,65 @@ function toggleRecycleSelection(userId: string, event: Event): void {
     : recycleSelectedIds.value.filter((id) => id !== userId)
 }
 
+async function refreshRecycleTotal(): Promise<void> {
+  try {
+    const response = await apiFetch('/api/admin/users/recycle?page=1&pageSize=1')
+    const payload = await readJson(response)
+    const data = payload.data as { total?: number } | undefined
+    if (response.ok && payload.ok === true) recycleTotal.value = Number(data?.total || 0)
+  } catch {
+    // The badge is refreshed on the next recycle-bin visit.
+  }
+}
+
+async function searchRecycleBin(): Promise<void> {
+  recyclePage.value = 1
+  await loadRecycleBin()
+}
+
+async function changeRecyclePage(pageNumber: number): Promise<void> {
+  recyclePage.value = Math.min(recyclePageCount.value, Math.max(1, pageNumber))
+  await loadRecycleBin()
+}
+
+async function fetchRecyclePage(pageNumber: number): Promise<{ items: RecycleBinUser[]; total: number; retentionDays?: number }> {
+  const params = new URLSearchParams()
+  if (recycleSearch.value) params.set('q', recycleSearch.value)
+  params.set('page', String(pageNumber))
+  params.set('pageSize', String(recyclePageSize))
+  const response = await apiFetch(`/api/admin/users/recycle?${params.toString()}`)
+  const payload = await readJson(response)
+  if (!response.ok || payload.ok !== true) {
+    throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || recycleText('loading')))
+  }
+  const data = payload.data as { items?: RecycleBinUser[]; total?: number; retentionDays?: number } | undefined
+  const items = Array.isArray(data?.items) ? data.items : []
+  return {
+    items,
+    total: Number(data?.total || items.length),
+    retentionDays: data?.retentionDays,
+  }
+}
+
+function applyRecyclePage(loaded: { items: RecycleBinUser[]; total: number; retentionDays?: number }): void {
+  recycleUsers.value = loaded.items
+  recycleTotal.value = loaded.total
+  if (typeof loaded.retentionDays === 'number' && loaded.retentionDays > 0) recycleRetentionDays.value = loaded.retentionDays
+  const visible = new Set(loaded.items.map((user) => user.id))
+  recycleSelectedIds.value = recycleSelectedIds.value.filter((id) => visible.has(id))
+}
+
 async function loadRecycleBin(): Promise<void> {
   loadingRecycle.value = true
   try {
-    const params = new URLSearchParams()
-    if (recycleSearch.value) params.set('q', recycleSearch.value)
-    const response = await apiFetch(`/api/admin/users/recycle?${params.toString()}`)
-    const payload = await readJson(response)
-    if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || recycleText('loading')))
+    const loaded = await fetchRecyclePage(recyclePage.value)
+    const pageCount = Math.max(1, Math.ceil(loaded.total / recyclePageSize))
+    if (recyclePage.value > pageCount) {
+      recyclePage.value = pageCount
+      applyRecyclePage(await fetchRecyclePage(recyclePage.value))
+      return
     }
-    const data = payload.data as { items?: RecycleBinUser[]; total?: number; retentionDays?: number } | undefined
-    recycleUsers.value = Array.isArray(data?.items) ? data.items : []
-    recycleTotal.value = Number(data?.total || recycleUsers.value.length)
-    if (typeof data?.retentionDays === 'number' && data.retentionDays > 0) recycleRetentionDays.value = data.retentionDays
-    const visible = new Set(recycleUsers.value.map((user) => user.id))
-    recycleSelectedIds.value = recycleSelectedIds.value.filter((id) => visible.has(id))
+    applyRecyclePage(loaded)
   } catch (error) {
     setStatus(error instanceof Error ? error.message : recycleText('loading'), 'error')
   } finally {
@@ -4084,7 +4372,7 @@ async function restoreRecycleUsers(userIds = recycleSelectedIds.value): Promise<
 }
 
 async function purgeRecycleUsers(): Promise<void> {
-  if (recycleSelectedIds.value.length === 0 || purgePhrase.value !== '立即清除') return
+  if (recycleSelectedIds.value.length === 0 || purgePhrase.value !== recycleText('purgeExact')) return
   recycleBusy.value = true
   try {
     const response = await apiFetch('/api/admin/users/recycle/purge', {
@@ -4102,8 +4390,24 @@ async function purgeRecycleUsers(): Promise<void> {
   }
 }
 
-watch([userListFilter, roleFilter, accountStatusFilter, search], () => {
-  page.value = 1
+watch(search, () => {
+  clearSelectionForCriteriaChange()
+  if (page.value !== 1) page.value = 1
+})
+
+watch([userListFilter, roleFilter, accountStatusFilter], () => {
+  clearSelectionForCriteriaChange()
+  if (page.value !== 1) page.value = 1
+  else void loadUsers()
+})
+
+watch([sortKey, sortDir], () => {
+  if (page.value !== 1) page.value = 1
+  else void loadUsers()
+})
+
+watch(page, () => {
+  void loadUsers()
 })
 
 watch(surface, (value) => {

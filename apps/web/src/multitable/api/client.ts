@@ -39,6 +39,7 @@ import type {
   PersonalViewConfigResponse,
   DeletePersonalViewConfigResponse,
   CreateRecordInput,
+  PatchManualRowFieldsInput,
   PatchRecordsInput,
   FormSubmitInput,
   MultitableComment,
@@ -793,6 +794,46 @@ function normalizeRecordApprovalSubmission(value: unknown): MetaRecordApprovalSu
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * One task dispatched from a record, as the record's 关联任务 panel lists it
+ * (`GET /api/multitable/sheets/:sheetId/records/:recordId/tasks`): ids, the title, the status and the
+ * dates. `isMine` is whether the viewer created it. No person and no record value.
+ */
+export interface MetaRecordTaskItem {
+  id: string
+  title: string
+  status: string
+  completionMode: string | null
+  dueAt: string | null
+  dueDate: string | null
+  createdAt: string | null
+  isMine: boolean
+}
+
+/** One page of a record's tasks. `hasMore` is the server's own flag; `degraded` means the server
+ *  could not tell the session's org and answered no rows. */
+export interface MetaRecordTaskListPage {
+  items: MetaRecordTaskItem[]
+  hasMore: boolean
+  degraded: boolean
+}
+
+function normalizeRecordTaskItem(value: unknown): MetaRecordTaskItem | null {
+  if (!isPlainObject(value)) return null
+  const id = optionalStringValue(value.id)
+  if (!id) return null
+  return {
+    id,
+    title: typeof value.title === 'string' ? value.title : '',
+    status: typeof value.status === 'string' ? value.status : '',
+    completionMode: optionalStringValue(value.completionMode) ?? null,
+    dueAt: optionalStringValue(value.dueAt) ?? null,
+    dueDate: optionalStringValue(value.dueDate) ?? null,
+    createdAt: optionalStringValue(value.createdAt) ?? null,
+    isMine: value.isMine === true,
+  }
 }
 
 function stringValue(value: unknown, fallback = ''): string {
@@ -2542,6 +2583,46 @@ export class MultitableApiClient implements CommentsApiClient {
   }
 
   /**
+   * The tasks dispatched from this record that the viewer can open (package 2, the 关联任务 panel).
+   * The server answers only those, and never a count of the others. `limit` is the page size the
+   * panel asks for (the server clamps it to 1..100). With `dispatchKey` (the 派发任务 dialog resolving
+   * an attempt that got no readable answer) the server answers only the caller's own live task made
+   * from this record under that key: zero or one row. A 2xx whose body is not an object with an
+   * `items` list (a proxy's page, say) throws, like a refusal: it says nothing about the record's tasks,
+   * so it is not read as an empty list.
+   */
+  async listRecordTasks(
+    sheetId: string,
+    recordId: string,
+    options: { limit?: number; dispatchKey?: string } = {},
+  ): Promise<MetaRecordTaskListPage> {
+    const limit = typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0
+      ? Math.trunc(options.limit)
+      : undefined
+    const dispatchKey = typeof options.dispatchKey === 'string' && options.dispatchKey !== '' ? options.dispatchKey : undefined
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/tasks${qs({ limit, dispatchKey })}`,
+    )
+    const raw = await this.parseJson<unknown>(res)
+    const body = isPlainObject(raw) && Array.isArray(raw.items) ? raw : null
+    if (body === null) {
+      const error = new Error('The record\'s tasks could not be read.') as Error & { status?: number }
+      error.name = 'MultitableApiError'
+      error.status = res.status
+      throw error
+    }
+    const items = (body.items as unknown[])
+      .map((row: unknown) => normalizeRecordTaskItem(row))
+      .filter((row): row is MetaRecordTaskItem => row !== null)
+    return {
+      items,
+      // Strictly boolean-true, as for the approvals list: anything else claims no more rows.
+      hasMore: body.hasMore === true,
+      degraded: body.degraded === true,
+    }
+  }
+
+  /**
    * FWB production authoring — server-owned confirmation hash (FWB0 §11 Q6 gate 3).
    * The client sends the validated mapping subject; the server derives confirmationHash over
    * {templateId, sourceTemplateVersionId, targetBaseId, targetSheetId, mappings, mode/link when
@@ -3698,6 +3779,37 @@ export class MultitableApiClient implements CommentsApiClient {
   async patchRecords(input: PatchRecordsInput): Promise<PatchResult> {
     const res = await this.fetch('/api/multitable/patch', {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return this.parseJson(res)
+  }
+
+  // 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.2–§3.4; host routes of #6664, session requests only).
+  // 新增: `data` is { <physical field id>: value }; the server stamps 项目号, the row's own `manual:v1:` key and 有效.
+  async createManualRow(sheetId: string, data: Record<string, unknown>): Promise<{ record: MetaRecord }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/manual-rows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data }),
+    })
+    return this.parseJson(res)
+  }
+
+  // 复制为新行: a NEW manual row from the whitelisted columns of `recordId` (the server picks the columns).
+  async copyAsManualRow(recordId: string, params?: { sheetId?: string }): Promise<{ record: MetaRecord }> {
+    const res = await this.fetch(`/api/multitable/records/${encodeURIComponent(recordId)}/manual-copy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params?.sheetId ? { sheetId: params.sheetId } : {}),
+    })
+    return this.parseJson(res)
+  }
+
+  // 修改: the six fillable columns of one manual row; every other column keeps going through `patchRecords`.
+  async patchManualRowFields(recordId: string, input: PatchManualRowFieldsInput): Promise<PatchResult> {
+    const res = await this.fetch(`/api/multitable/records/${encodeURIComponent(recordId)}/manual-fields`, {
+      method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })

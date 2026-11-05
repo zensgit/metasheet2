@@ -23,6 +23,21 @@ const inventoryStep = {
   name: 'Parallel test inventory and required-gate contract',
   run: 'node --test scripts/ops/plugin-tests-parallel-contract.test.mjs',
 }
+// Explicit additive contracts steps: suites promoted from the non-required k3wise-offline-poc job.
+const closeoutContractsStep = {
+  name: 'DingTalk closeout env and OAuth-stability contracts (required lane)',
+  run: 'node --test \\\n  scripts/ops/dingtalk-closeout-env-contract.test.mjs \\\n  scripts/ops/dingtalk-oauth-stability-metrics-auth-contract.test.mjs \\\n  scripts/ops/dingtalk-oauth-stability-metrics-only-contract.test.mjs \\\n  scripts/ops/dingtalk-oauth-stability-metrics-only-fullscript.test.mjs \\\n  scripts/ops/github-dingtalk-oauth-stability-summary.test.mjs\n',
+}
+// Explicit additive contracts step: the lifecycle canary exclusion consistency contract (standalone;
+// the canary contract suite itself must never be referenced by plugin-tests.yml).
+const canaryExclusionConsistencyStep = {
+  name: 'DingTalk lifecycle canary exclusion consistency contract (required lane)',
+  run: 'node --test scripts/ops/dingtalk-lifecycle-canary-exclusion-consistency.test.mjs',
+}
+const directoryWiringContractsStep = {
+  name: 'Directory grant-table, deprovision-writer and access-graph-mutex CI-wiring contracts (required lane)',
+  run: 'node --test \\\n  scripts/ops/directory-grant-table-ci-wiring.test.mjs \\\n  scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs \\\n  scripts/ops/directory-access-graph-mutex-ci-wiring.test.mjs\n',
+}
 const permissionStep = {
   name: 'Admin write-route inventory and permission preflight',
   run: 'pnpm --filter @metasheet/core-backend exec vitest run \\\n  tests/unit/admin-mounts-write-gate-guard.test.ts \\\n  tests/unit/admin-directory-routes.test.ts \\\n  tests/unit/admin-directory-5xx-values-free.test.ts\n',
@@ -61,7 +76,19 @@ function assertParallelWorkflow(doc) {
     ].sort(), 'No inherited env/defaults/services/outputs may change test execution')
     const originals = baseline.steps.filter(step => step.jobs.includes(suite))
     const actual = structuredClone(job.steps)
-    if (suite === 'contracts') assert.deepEqual(actual.splice(2, 1), [inventoryStep])
+    if (suite === 'contracts') {
+      assert.deepEqual(actual.splice(2, 1), [inventoryStep])
+      const inventoryIndex = actual.findIndex(step => step.id === 'dingtalk-production-readiness-inventory-contract')
+      assert.ok(inventoryIndex >= 0, 'Keep the original DingTalk production-readiness inventory step')
+      assert.deepEqual(actual.splice(inventoryIndex + 1, 1), [closeoutContractsStep],
+        'Keep the promoted DingTalk closeout contracts immediately after the inventory step')
+      assert.deepEqual(actual.splice(inventoryIndex + 1, 1), [canaryExclusionConsistencyStep],
+        'Keep the lifecycle canary exclusion consistency contract immediately after the closeout contracts step')
+      const sourceLockIndex = actual.findIndex(step => step.name === 'Directory activation source-lock CI-wiring contract (required lane)')
+      assert.ok(sourceLockIndex >= 0, 'Keep the original directory activation source-lock step')
+      assert.deepEqual(actual.splice(sourceLockIndex + 1, 1), [directoryWiringContractsStep],
+        'Keep the promoted directory CI-wiring contracts immediately after the source-lock step')
+    }
     if (suite === 'permissions') assert.deepEqual(actual.splice(-1), [permissionStep])
     if (suite === 'unit') {
       const lintIndex = actual.findIndex(step => step.name === 'Run linting')
@@ -79,7 +106,11 @@ function assertParallelWorkflow(doc) {
         const predecessor = '  tests/integration/directory-org-transfer-source-freeze.db.test.ts \\\n'
         assert.equal(step.run.split(addition).length - 1, 1, 'Handover DB suite must run exactly once')
         assert.ok(step.run.includes(predecessor + addition), 'Keep the new whole-file suite at its reviewed position')
+        const repairAddition = '  tests/integration/dingtalk-login-repair.db.test.ts \\\n'
+        assert.equal(step.run.split(repairAddition).length - 1, 1, 'Login repair DB suite must run exactly once')
+        assert.ok(step.run.includes(addition + repairAddition), 'Keep the login repair suite at its reviewed position')
         step.run = step.run.replace(addition, '')
+        step.run = step.run.replace(repairAddition, '')
       }
       if (suite !== 'unit' && step.name === 'Upload install log on failure') {
         assert.equal(step.with.name, `install-log-${nodeMatrix}-${suite}`)
@@ -130,6 +161,8 @@ test('each database suite owns a fresh runner/database and migration ordering', 
 test('removed/filtered/reordered steps, disabled suites and a weakened aggregate are rejected', () => {
   const mutations = [
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-controlled-handover.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/dingtalk-login-repair.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/dingtalk-login-repair.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const steps = doc.jobs.unit.steps; steps.splice(steps.findIndex(step => step.name === directoryClientLintStep.name), 1) },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).run += ' || true' },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).if = false },
@@ -141,6 +174,19 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { doc.jobs['attendance-db'].steps.find(step => step.id === 'attendance-real-db-integration').if = false },
     doc => { doc.jobs['multitable-db'].steps.find(step => step.id === 'multitable-real-db-integration').run = 'echo skipped' },
     doc => { doc.jobs.contracts.steps.reverse() },
+    ...[
+      [closeoutContractsStep, '  scripts/ops/dingtalk-closeout-env-contract.test.mjs \\\n'],
+      [canaryExclusionConsistencyStep, 'scripts/ops/dingtalk-lifecycle-canary-exclusion-consistency.test.mjs'],
+      [directoryWiringContractsStep, '  scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs \\\n'],
+    ].flatMap(([promoted, file]) => [
+      doc => { const steps = doc.jobs.contracts.steps; steps.splice(steps.findIndex(step => step.name === promoted.name), 1) },
+      doc => { doc.jobs.contracts.steps.find(step => step.name === promoted.name).run += ' || true' },
+      doc => { doc.jobs.contracts.steps.find(step => step.name === promoted.name).if = false },
+      doc => { doc.jobs.contracts.steps.find(step => step.name === promoted.name)['continue-on-error'] = true },
+      doc => { const step = doc.jobs.contracts.steps.find(step => step.name === promoted.name); assert.ok(step.run.includes(file)); step.run = step.run.replace(file, '') },
+      doc => { const steps = doc.jobs.contracts.steps; const index = steps.findIndex(step => step.name === promoted.name); [steps[index - 1], steps[index]] = [steps[index], steps[index - 1]] },
+      doc => { doc.jobs.contracts.steps.push(structuredClone(promoted)) },
+    ]),
     doc => { doc.jobs.permissions.steps.at(-1).run = 'true' },
     doc => { doc.jobs.unit.if = false },
     doc => { doc.jobs.unit['continue-on-error'] = true },

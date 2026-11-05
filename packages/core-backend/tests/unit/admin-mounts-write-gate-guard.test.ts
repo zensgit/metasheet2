@@ -6,6 +6,7 @@
  * by self-verifying anchors.（登记表不变，仍是 67 条；文件里不再有任何源码行号，改为能对源码自证的锚点。）
  *
  * 2026-10-30：新增身份元数据保存路由，当前 68 条 / platform 61 条；下述 67 条口径保留为原基线说明。
+ * 2026-11-05：新增钉钉工作通知显式验证路由（`POST /dingtalk/work-notification/verify`），当前 76 条 / platform 69 条。
  *
  * 为什么不能照搬 #5680 的「中间件首位必须是门」判据：
  *   本批 67 条写路由里只有 `canary-routes.ts` 的 4 条把门放在中间件位（`requireAdminRole()`）。
@@ -146,6 +147,8 @@ vi.mock('../../src/services/ApprovalDirectoryOrg', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'approval-directory-org'))
 vi.mock('../../src/integrations/dingtalk/work-notification-settings', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'dingtalk-work-notification-settings'))
+vi.mock('../../src/integrations/dingtalk/work-notification-verify', async (importOriginal) =>
+  probe.wrap(await importOriginal<Record<string, unknown>>(), 'dingtalk-work-notification-verify'))
 vi.mock('../../src/integrations/dingtalk/approval-card-config', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'dingtalk-approval-card-config'))
 vi.mock('../../src/auth/permission-templates', async (importOriginal) =>
@@ -451,6 +454,7 @@ const REGISTRY: readonly WriteRouteEntry[] = [
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/batch/delete', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/recycle/restore', reg: 'routes/admin-user-recycle.ts', gate: 'routes/admin-user-recycle.ts ensureRecycleAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/recycle/purge', reg: 'routes/admin-user-recycle.ts', gate: 'routes/admin-user-recycle.ts ensureRecycleAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/recycle/rescrub', reg: 'routes/admin-user-recycle.ts', gate: 'routes/admin-user-recycle.ts ensureRecycleAdmin', family: P },
   // --- routes/admin-users.ts（27 条；门为处理器第一条语句） ---
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/member-groups', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
@@ -482,9 +486,10 @@ const REGISTRY: readonly WriteRouteEntry[] = [
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/:id/activate', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/login-aliases/backfill', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
 
-  // --- routes/admin-directory.ts（21 条） ---
+  // --- routes/admin-directory.ts（22 条） ---
   { mount: 'admin-directory', method: 'post', path: '/dingtalk/work-notification/test', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory', method: 'put', path: '/dingtalk/work-notification', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/dingtalk/work-notification/verify', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory', method: 'post', path: '/integrations', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory', method: 'put', path: '/integrations/:integrationId', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-directory', method: 'put', path: '/integrations/:integrationId/identity', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
@@ -807,12 +812,12 @@ describe('/api/admin 挂载点写路由守卫 — fixture 自检', () => {
     }
   })
 
-  it('登记表条数与分族口径固定：74 条 / 2 条委派例外 / 4 条中间件门 / 1 条 inline', () => {
-    expect(REGISTRY).toHaveLength(74)
+  it('登记表条数与分族口径固定：76 条 / 2 条委派例外 / 4 条中间件门 / 1 条 inline', () => {
+    expect(REGISTRY).toHaveLength(76)
     expect(REGISTRY.filter((e) => e.family === 'delegation')).toHaveLength(2)
     expect(REGISTRY.filter((e) => e.family === 'middleware')).toHaveLength(4)
     expect(REGISTRY.filter((e) => e.family === 'inline')).toHaveLength(1)
-    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(67)
+    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(69)
     // 每条都必须带来源：reg = 该挂载点的注册文件；gate 可解析，且每条分支链的最后一环是本族的门函数
     for (const entry of REGISTRY) {
       const delegatedRecycle = entry.mount === 'admin-users' && entry.path.startsWith('/api/admin/users/recycle/')

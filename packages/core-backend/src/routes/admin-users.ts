@@ -80,6 +80,8 @@ import {
   handleAdminUserBatchDisable,
   handleAdminUserBatchUpdate,
 } from './admin-user-batch'
+import { isLastSignInPlatformAdmin, lockPlatformAdminInvariant } from '../admin/user-recycle'
+import { visibleUserPredicate } from '../admin/user-visibility'
 import { registerAdminUserRecycleRoutes } from './admin-user-recycle'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import {
@@ -485,6 +487,52 @@ class AttendanceShiftReferenceUnavailableError extends Error {
     }]
   }
 }
+const ADMIN_USER_LIST_SORTS: Record<string, string> = {
+  name: 'name',
+  role: 'role',
+  status: 'is_active',
+  lastLogin: 'last_login_at',
+}
+
+function adminUserListOrder(sort: string, dir: string): string {
+  const column = ADMIN_USER_LIST_SORTS[sort]
+  if (!column) return 'created_at DESC, id ASC'
+  return `${column} ${dir === 'asc' ? 'ASC' : 'DESC'} NULLS LAST, id ASC`
+}
+
+function adminUserListFilterSql(listFilter: string): string {
+  switch (listFilter) {
+    case 'account-disabled':
+      return 'is_active IS NOT TRUE'
+    case 'platform-admin':
+      return '(COALESCE(is_admin, FALSE) IS TRUE OR role = \'admin\')'
+    case 'dingtalk-disabled':
+      return `NOT EXISTS (
+        SELECT 1 FROM user_external_auth_grants g
+        WHERE g.provider = 'dingtalk' AND g.local_user_id = users.id AND g.enabled IS TRUE
+      )`
+    case 'directory-unlinked':
+      return `NOT EXISTS (
+        SELECT 1 FROM directory_account_links l
+        WHERE l.local_user_id = users.id AND l.link_status = 'linked'
+      )`
+    case 'dingtalk-openid-missing':
+      return `EXISTS (
+        SELECT 1 FROM (
+          SELECT i.corp_id, i.provider_open_id
+          FROM user_external_identities i
+          WHERE i.provider = 'dingtalk' AND i.local_user_id = users.id
+          ORDER BY i.updated_at DESC
+          LIMIT 1
+        ) latest
+        WHERE latest.corp_id IS NOT NULL AND btrim(latest.corp_id) <> ''
+          AND (latest.provider_open_id IS NULL OR btrim(latest.provider_open_id) = '')
+      )`
+    default:
+      return ''
+  }
+}
+
 const ADMIN_USER_PROFILE_SELECT = `
   id,
   email,
@@ -503,6 +551,15 @@ const ADMIN_USER_PROFILE_SELECT = `
   last_login_at,
   created_at,
   updated_at
+`
+
+const ADMIN_USER_LIST_SELECT = `
+  ${ADMIN_USER_PROFILE_SELECT},
+  COALESCE((
+    SELECT array_agg(ur.role_id ORDER BY ur.role_id)
+    FROM user_roles ur
+    WHERE ur.user_id = users.id
+  ), ARRAY[]::text[]) AS "roleIds"
 `
 
 // P23: exact-anchor recovery holds a per-subject advisory lease across the eight
@@ -564,7 +621,7 @@ async function fetchUserProfile(userId: string): Promise<AdminUserProfile | null
   const result = await query<AdminUserProfile>(
     `SELECT ${ADMIN_USER_PROFILE_SELECT}
      FROM users
-     WHERE id = $1`,
+     WHERE id = $1 AND ${visibleUserPredicate()}`,
     [userId],
   )
   return result.rows[0] ?? null
@@ -939,6 +996,96 @@ async function fetchAdminUserListSignals(userIds: string[]): Promise<Map<string,
   }
 
   return signalMap
+}
+
+async function fetchAdminUserListMeta(q: string): Promise<{
+  roleOptions: string[]
+  summary: {
+    total: number
+    accountEnabled: number
+    dingtalkEnabled: number
+    directoryLinked: number
+    dingtalkOpenIdMissing: number
+    dingtalkOpenIdGoverned: number
+    dingtalkOpenIdPending: number
+  }
+}> {
+  const term = q ? `%${q}%` : ''
+  const where = q
+    ? `WHERE u.deleted_at IS NULL AND (COALESCE(u.email, '') ILIKE $1 OR COALESCE(u.username, '') ILIKE $1 OR u.name ILIKE $1 OR COALESCE(u.mobile, '') ILIKE $1 OR COALESCE(u.employee_no, '') ILIKE $1 OR COALESCE(u.department, '') ILIKE $1 OR u.id ILIKE $1)`
+    : 'WHERE u.deleted_at IS NULL'
+  const roleWhere = q
+    ? `WHERE deleted_at IS NULL AND (COALESCE(email, '') ILIKE $1 OR COALESCE(username, '') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, '') ILIKE $1 OR COALESCE(employee_no, '') ILIKE $1 OR COALESCE(department, '') ILIKE $1 OR id ILIKE $1)`
+    : 'WHERE deleted_at IS NULL'
+  const params = q ? [term] : undefined
+  const [roles, counts] = await Promise.all([
+    query<{ role: string }>(
+      `SELECT role
+       FROM users
+       ${roleWhere}
+         AND role IS NOT NULL
+         AND btrim(role) <> ''
+       GROUP BY role
+       ORDER BY role ASC`,
+      params,
+    ),
+    query<{
+      total: number
+      account_enabled: number
+      dingtalk_enabled: number
+      directory_linked: number
+      openid_missing: number
+      openid_governed: number
+      openid_pending: number
+    }>(
+      `SELECT
+         COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE u.is_active IS TRUE)::int AS account_enabled,
+         COUNT(*) FILTER (WHERE g.enabled IS TRUE)::int AS dingtalk_enabled,
+         COUNT(*) FILTER (WHERE linked.local_user_id IS NOT NULL)::int AS directory_linked,
+         COUNT(*) FILTER (WHERE ident.missing IS TRUE)::int AS openid_missing,
+         COUNT(*) FILTER (
+           WHERE ident.missing IS TRUE
+             AND g.enabled IS NOT TRUE
+             AND g.updated_at >= date_trunc('day', NOW()) - INTERVAL '6 days'
+         )::int AS openid_governed,
+         COUNT(*) FILTER (WHERE ident.missing IS TRUE AND g.enabled IS TRUE)::int AS openid_pending
+       FROM users u
+       LEFT JOIN user_external_auth_grants g
+         ON g.local_user_id = u.id AND g.provider = 'dingtalk'
+       LEFT JOIN LATERAL (
+         SELECT link.local_user_id
+         FROM directory_account_links link
+         WHERE link.local_user_id = u.id AND link.link_status = 'linked'
+         LIMIT 1
+       ) linked ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT (
+           i.corp_id IS NOT NULL AND btrim(i.corp_id) <> ''
+           AND (i.provider_open_id IS NULL OR btrim(i.provider_open_id) = '')
+         ) AS missing
+         FROM user_external_identities i
+         WHERE i.provider = 'dingtalk' AND i.local_user_id = u.id
+         ORDER BY i.updated_at DESC
+         LIMIT 1
+       ) ident ON TRUE
+       ${where}`,
+      params,
+    ),
+  ])
+  const row = counts.rows[0]
+  return {
+    roleOptions: roles.rows.map((item) => item.role).filter(Boolean),
+    summary: {
+      total: row?.total ?? 0,
+      accountEnabled: row?.account_enabled ?? 0,
+      dingtalkEnabled: row?.dingtalk_enabled ?? 0,
+      directoryLinked: row?.directory_linked ?? 0,
+      dingtalkOpenIdMissing: row?.openid_missing ?? 0,
+      dingtalkOpenIdGoverned: row?.openid_governed ?? 0,
+      dingtalkOpenIdPending: row?.openid_pending ?? 0,
+    },
+  }
 }
 
 function normalizeUserIdList(value: unknown): string[] {
@@ -1364,6 +1511,7 @@ async function fetchPlatformMemberGroupMembers(groupId: string) {
      FROM platform_member_group_members gm
      JOIN users u ON u.id = gm.user_id
      WHERE gm.group_id = $1
+       AND ${visibleUserPredicate('u')}
      ORDER BY COALESCE(u.name, u.email) ASC, u.email ASC`,
     [groupId],
   )
@@ -3651,36 +3799,56 @@ export function adminUsersRouter(): Router {
     try {
       const q = String(req.query.q || '').trim()
       const pinUserId = String(req.query.userId || '').trim()
+      const role = String(req.query.role || '').trim()
+      const accountStatus = String(req.query.accountStatus || '').trim()
+      const listFilter = String(req.query.listFilter || '').trim()
+      const sort = String(req.query.sort || '').trim()
+      const dir = String(req.query.dir || '').trim()
+      const includeMeta = String(req.query.meta || '').trim() === '1'
       const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
         defaultPage: 1,
         defaultPageSize: 20,
         maxPageSize: 100,
       })
 
-      const term = q ? `%${q}%` : '%'
-      const where = q
-        ? 'WHERE deleted_at IS NULL AND (COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR COALESCE(employee_no, \'\') ILIKE $1 OR COALESCE(department, \'\') ILIKE $1 OR id ILIKE $1)'
-        : 'WHERE deleted_at IS NULL'
+      const params: unknown[] = []
+      const clauses = ['deleted_at IS NULL']
+      if (q) {
+        params.push(`%${q}%`)
+        const index = params.length
+        clauses.push(`(COALESCE(email, '') ILIKE $${index} OR COALESCE(username, '') ILIKE $${index} OR name ILIKE $${index} OR COALESCE(mobile, '') ILIKE $${index} OR COALESCE(employee_no, '') ILIKE $${index} OR COALESCE(department, '') ILIKE $${index} OR id ILIKE $${index})`)
+      }
+      if (role) {
+        params.push(role)
+        clauses.push(`role = $${params.length}`)
+      }
+      if (accountStatus === 'active') clauses.push('is_active IS TRUE')
+      if (accountStatus === 'inactive') clauses.push('is_active IS NOT TRUE')
+      const listFilterSql = adminUserListFilterSql(listFilter)
+      if (listFilterSql) clauses.push(listFilterSql)
+      const where = `WHERE ${clauses.join(' AND ')}`
       const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
+      const limitIndex = params.length + 1
+      const offsetIndex = params.length + 2
       const listSql = `
-        SELECT ${ADMIN_USER_PROFILE_SELECT}
+        SELECT ${ADMIN_USER_LIST_SELECT}
         FROM users
         ${where}
-        ORDER BY created_at DESC
-        LIMIT $${q ? 2 : 1} OFFSET $${q ? 3 : 2}
+        ORDER BY ${adminUserListOrder(sort, dir)}
+        LIMIT $${limitIndex} OFFSET $${offsetIndex}
       `
 
-      const count = await query<{ c: number }>(countSql, q ? [term] : undefined)
+      const count = await query<{ c: number }>(countSql, params.length ? params : undefined)
       const total = count.rows[0]?.c ?? 0
-      const list = await query<AdminUserProfile>(listSql, q ? [term, pageSize, offset] : [pageSize, offset])
+      const list = await query<AdminUserProfile & { roleIds?: string[] | null }>(listSql, [...params, pageSize, offset])
 
       const items = list.rows
       let pinnedUserIncluded = true
       if (pinUserId && !items.some((row) => row.id === pinUserId)) {
         // Deep-link target was not in the paginated window — fetch the single
         // row so the caller can focus it without a second round-trip.
-        const pinned = await query<AdminUserProfile>(
-          `SELECT ${ADMIN_USER_PROFILE_SELECT}
+        const pinned = await query<AdminUserProfile & { roleIds?: string[] | null }>(
+          `SELECT ${ADMIN_USER_LIST_SELECT}
            FROM users
            WHERE id = $1 AND deleted_at IS NULL`,
           [pinUserId],
@@ -3694,12 +3862,17 @@ export function adminUsersRouter(): Router {
       }
 
       const userSignals = await fetchAdminUserListSignals(items.map((row) => row.id))
+      const listMeta = includeMeta ? await fetchAdminUserListMeta(q) : null
 
       return jsonOk(res, {
         items: items.map((row) => {
           const signals = userSignals.get(row.id)
+          const roleIds = Array.isArray(row.roleIds)
+            ? row.roleIds.filter((roleId): roleId is string => typeof roleId === 'string' && roleId.trim().length > 0)
+            : []
           return {
             ...row,
+            roleIds,
             dingtalkLoginEnabled: signals?.dingtalkLoginEnabled ?? false,
             dingtalkGrantUpdatedAt: signals?.dingtalkGrantUpdatedAt ?? null,
             dingtalkGrantUpdatedBy: signals?.dingtalkGrantUpdatedBy ?? null,
@@ -3715,6 +3888,7 @@ export function adminUsersRouter(): Router {
         page,
         pageSize,
         total,
+        ...(listMeta ?? {}),
         query: q,
         pinUserId: pinUserId || '',
         pinUserIncluded: pinUserId ? pinnedUserIncluded : null,
@@ -5090,7 +5264,11 @@ export function adminUsersRouter(): Router {
 
       // The role, scoped audience and revoke witness commit together. Bootstrap uses the
       // same subject lock before reading eligibility, including when admission is absent.
-      const { membership, disabledNamespaces } = await transaction(async (client) => {
+      const unassigned = await transaction(async (client) => {
+        if (roleId === PLATFORM_ADMIN_ROLE_ID) {
+          await lockPlatformAdminInvariant(client)
+          if (await isLastSignInPlatformAdmin(client, userId)) return { blocked: true as const }
+        }
         await lockNamespaceAdmissionWrites(client, userId)
         const membership = await unassignUserRoles({
           userIds: [userId],
@@ -5105,17 +5283,32 @@ export function adminUsersRouter(): Router {
           source: 'role_unassigned',
           revokedRoleId: roleId,
         }, client.query)
-        return { membership, disabledNamespaces }
+        if (roleId === PLATFORM_ADMIN_ROLE_ID) {
+          await client.query(
+            `UPDATE users
+             SET role = CASE
+               WHEN $2::boolean THEN 'admin'
+               WHEN role = 'admin' THEN 'user'
+               ELSE role
+             END,
+             is_admin = $2,
+             updated_at = NOW()
+             WHERE id = $1`,
+            [userId, false],
+          )
+        }
+        return { blocked: false as const, membership, disabledNamespaces }
       })
+      if (unassigned.blocked) {
+        return jsonError(res, 409, 'LAST_PLATFORM_ADMIN', '至少保留一名可登录的平台管理员')
+      }
+      const { membership, disabledNamespaces } = unassigned
       await auditDelegatedAdminScopeCleanup({
         actorId: adminUserId,
         roleId,
         trigger: 'role_unassigned',
         cleanup: membership?.delegatedAdminScopeCleanup,
       })
-      if (roleId === PLATFORM_ADMIN_ROLE_ID) {
-        await syncLegacyAdminProfile(userId, false)
-      }
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -5160,6 +5353,7 @@ export function adminUsersRouter(): Router {
       }
 
       const updateResult = await transaction(async (client) => {
+        if (isActive === false) await lockPlatformAdminInvariant(client)
         const lockedUsers = await lockUsersForAccessGraphWrite(client, [userId])
         const lockedUser = lockedUsers.get(userId)
         if (!lockedUser) return null
@@ -5168,6 +5362,11 @@ export function adminUsersRouter(): Router {
           lockedUser.activationStatus ?? '',
           isActive,
         )
+        if (isActive === false && await isLastSignInPlatformAdmin(client, userId)) {
+          const lastAdmin = new Error('至少保留一名可登录的平台管理员')
+          ;(lastAdmin as Error & { code?: string }).code = 'LAST_PLATFORM_ADMIN'
+          throw lastAdmin
+        }
         if (lockedUser.deletedAt || lockedUser.purgedAt) {
           const recycled = new Error('账号在回收站中，请从回收站恢复后再修改状态')
           ;(recycled as Error & { code?: string }).code = 'USER_IN_RECYCLE_BIN'
@@ -5198,11 +5397,17 @@ export function adminUsersRouter(): Router {
         if (code === 'USER_IN_RECYCLE_BIN') {
           return { recycleError: error as Error }
         }
+        if (code === 'LAST_PLATFORM_ADMIN') {
+          return { lastAdminError: error as Error }
+        }
         throw error
       })
       if (!updateResult) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
       if ('recycleError' in updateResult) {
         return jsonError(res, 409, 'USER_IN_RECYCLE_BIN', updateResult.recycleError.message)
+      }
+      if ('lastAdminError' in updateResult) {
+        return jsonError(res, 409, 'LAST_PLATFORM_ADMIN', updateResult.lastAdminError.message)
       }
       if ('pendingActivationError' in updateResult) {
         return jsonError(

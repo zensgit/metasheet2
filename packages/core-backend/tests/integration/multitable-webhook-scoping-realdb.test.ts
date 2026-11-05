@@ -211,13 +211,13 @@ async function hook(w: World, sheetId: string | null, label: string, opts: { max
 
 async function deliver(path: EntryPath, label: string, event: string, payload: Record<string, unknown>) {
   const sink = createSink()
-  const svc = new WebhookService(db, sink.fetchFn)
+  const svc = new WebhookService(db, sink.fetchFn, sink.lookup)
   await svc.deliverEvent(event as never, payload, eventIdFor(path, label))
   return sink
 }
 
 async function tickOnce(sink = createSink()) {
-  await new WebhookService(db, sink.fetchFn).retryFailedDeliveries()
+  await new WebhookService(db, sink.fetchFn, sink.lookup).retryFailedDeliveries()
   await settle(100)
   return sink
 }
@@ -534,7 +534,7 @@ describeIfDatabase('subscription webhook delivery rules — real-DB matrix', () 
     const w = await world('m12')
     const h = await hook(w, w.s0, 'm12')
     const sink = createSink()
-    const svc = new WebhookService(db, sink.fetchFn)
+    const svc = new WebhookService(db, sink.fetchFn, sink.lookup)
     const eventId = id(`evt_m12_${w.n}`)
     await svc.deliverEvent('record.updated', { sheetId: w.s0, recordId: w.r0 }, eventId)
     await svc.deliverEvent('record.updated', { sheetId: w.s0, recordId: w.r0 }, eventId)
@@ -559,7 +559,7 @@ describeIfDatabase('subscription webhook delivery rules — real-DB matrix', () 
       const ordered = order === 'readerFirst' ? [[a, reader], [b, denied]] as const : [[b, denied], [a, reader]] as const
       for (const [h, owner] of ordered) await insertWebhook(h.id, owner, sheetId, h.url, { events: ['record.created'] })
       const sink = createSink()
-      await new WebhookService(db, sink.fetchFn).deliverEvent('record.created', { sheetId, recordId: 'rec_to' })
+      await new WebhookService(db, sink.fetchFn, sink.lookup).deliverEvent('record.created', { sheetId, recordId: 'rec_to' })
       await waitFor(() => sink.to(a.url).length, 1)
       await settle(200)
       expect((await deliveryRows(a.id)).length, 'TO.read.reader.rows').toBe(1)
@@ -589,7 +589,7 @@ describeIfDatabase('subscription webhook delivery rules — real-DB matrix', () 
       const ordered = order === 'readerFirst' ? [[a, admin], [u, user]] as const : [[u, user], [a, admin]] as const
       for (const [h, owner] of ordered) await insertWebhook(h.id, owner, sheetId, h.url, { events: ['record.created'] })
       const sink = createSink()
-      await new WebhookService(db, sink.fetchFn).deliverEvent('record.created', { sheetId, recordId, data: { [fPub]: 'p', [fHid]: 'h' } })
+      await new WebhookService(db, sink.fetchFn, sink.lookup).deliverEvent('record.created', { sheetId, recordId, data: { [fPub]: 'p', [fHid]: 'h' } })
       await waitFor(() => sink.to(a.url).length + sink.to(u.url).length, 2)
       expect(sink.to(a.url).length, 'TO.field.admin.sends').toBe(1)
       expect(sink.to(u.url).length, 'TO.field.user.sends').toBe(1)
@@ -618,7 +618,7 @@ describeIfDatabase('subscription webhook delivery rules — real-DB matrix', () 
   test('M23 [D] a failed check on one webhook does not stop the other; the redelivery completes it', async () => {
     const { w, owners } = await twoOwners('m23')
     const sink = createSink()
-    const svc = new WebhookService(db, sink.fetchFn)
+    const svc = new WebhookService(db, sink.fetchFn, sink.lookup)
     const eventId = id(`evt_m23_${w.n}`)
     hooks.failAccessOnceFor = new Set(owners.keys())
     let thrown = 0
@@ -643,7 +643,7 @@ describeIfDatabase('subscription webhook delivery rules — real-DB matrix', () 
     const { w, owners } = await twoOwners('u13l')
     const sink = createSink()
     hooks.failAccessOnceFor = new Set(owners.keys())
-    await new WebhookService(db, sink.fetchFn).deliverEvent('record.updated', { sheetId: w.s0, recordId: w.r0 })
+    await new WebhookService(db, sink.fetchFn, sink.lookup).deliverEvent('record.updated', { sheetId: w.s0, recordId: w.r0 })
     const failed = (hooks.failedOwner as string | null) ?? [...owners.keys()][0]
     const A = owners.get(failed)!
     const B = [...owners.entries()].find(([k]) => k !== failed)![1]
@@ -657,7 +657,7 @@ describeIfDatabase('subscription webhook delivery rules — real-DB matrix', () 
     const sink = createSink()
     hooks.failAccessOnceFor = new Set(owners.keys())
     let thrown = 0
-    await new WebhookService(db, sink.fetchFn)
+    await new WebhookService(db, sink.fetchFn, sink.lookup)
       .deliverEvent('record.updated', { sheetId: w.s0, recordId: w.r0 }, id(`evt_u13_${w.n}`))
       .catch(() => {
         thrown += 1
@@ -675,7 +675,7 @@ describeIfDatabase('subscription webhook delivery rules — real-DB matrix', () 
     const w = await world('u12')
     const h = await hook(w, w.s0, 'u12', { maxRetries: 3 })
     const sink = createSink(500)
-    const svc = new WebhookService(db, sink.fetchFn)
+    const svc = new WebhookService(db, sink.fetchFn, sink.lookup)
     const eventId = id(`evt_u12_${w.n}`)
     await svc.deliverEvent(
       'record.updated',
@@ -687,7 +687,7 @@ describeIfDatabase('subscription webhook delivery rules — real-DB matrix', () 
     await waitFor(() => 0, 1, 300) // let the failure handler store the backoff
     await q(`UPDATE multitable_webhook_deliveries SET next_retry_at = now() - interval '1 minute' WHERE id = $1`, [row?.id ?? null])
     sink.setStatus(200)
-    await new WebhookService(db, sink.fetchFn).retryFailedDeliveries()
+    await new WebhookService(db, sink.fetchFn, sink.lookup).retryFailedDeliveries()
     await waitFor(() => sink.to(h.url).length, 2)
     const requests = sink.to(h.url)
     expect(requests.length, 'U12.requests').toBe(2)

@@ -299,6 +299,17 @@
     <p v-if="report && afterRowsText" class="sp-sync__counts" data-testid="stock-prep-project-sync-target-rows">
       {{ afterRowsText }}
     </p>
+    <!-- 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3; R-68): the per-sheet switch and the last pull's
+         reminder live in their own component; this panel hands it the project (on the board, always the board's —
+         see `manualRowsProjectNo`), the scope, this run's report (a new report re-reads; only a run for that project)
+         and whether a project-sheet run has seen the sheet. An injected double keeps it inert. -->
+    <StockPreparationProjectTargetManualRows
+      :project-no="manualRowsProjectNo"
+      :scope="scope"
+      :last-run="manualRowsRunIsBound ? report : null"
+      :project-sheet-known="Boolean(afterState && afterState.status !== 'absent')"
+      :inert="Boolean(props.api || props.targetApi)"
+    />
     <!-- S2 fix round 1 (refuter #1): the project sheet is missing the customer's extension columns
          (dry run / write refused 422 TARGET_SCHEMA_INCOMPLETE on a project sheet). A puller repairs
          it in place — the create route's replay re-installs the pack — and the pull runs again;
@@ -596,6 +607,7 @@ import { onAuthPrincipalChange, readAuthSessionSignature } from '../../../compos
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import StockPreparationLargeBomPullPanel from './StockPreparationLargeBomPullPanel.vue'
+import StockPreparationProjectTargetManualRows from './StockPreparationProjectTargetManualRows.vue'
 import {
   STOCK_PREPARATION_DRY_RUN_JOB_POLL_INTERVAL_MS,
   STOCK_PREPARATION_PROJECT_SYNC_STEPS,
@@ -809,6 +821,17 @@ const projectNoEl = ref<HTMLInputElement | null>(null)
  * point the background channel at whatever they typed most recently instead of what this run planned.
  */
 const submittedProjectNo = ref('')
+
+/**
+ * 人工补充行 (R80 verifier F1): which project the manual-rows section is about. On the project board (a `projectNo`
+ * seed) it is ALWAYS the board's project — the board keeps this panel mounted across a project switch, and the run
+ * guard's invalidation does not reset `submittedProjectNo`, so following the last run would show project A's switch,
+ * reminder and links (and its open prompt) on project B's board. The workspace mount has no seed and follows the
+ * submitted run, as before.
+ */
+const manualRowsProjectNo = computed<string>(() => (props.projectNo ?? '').trim() || submittedProjectNo.value)
+/** Whether this panel's last run was for that project: only then is its report the section's "new run" (a re-read). */
+const manualRowsRunIsBound = computed<boolean>(() => stockPrepProjectNumbersMatch(manualRowsProjectNo.value, submittedProjectNo.value))
 
 /** The `<table>` DOM node the 缺件清单 "复制" button selects into when the Clipboard API is unavailable. */
 const missingComponentsTableEl = ref<HTMLTableElement | null>(null)

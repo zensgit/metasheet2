@@ -66,6 +66,9 @@ vi.mock('../src/tasks/tasksApi', async () => {
     // exercise through the UI exactly as production does, not re-stub.
     checkCommentBody: actual.checkCommentBody,
     getTask: h_.getTask,
+    // Package 1b: the detail page reads the names on the task; a bare stub answers undefined,
+    // which the page reads as "no names" and leaves the ids as they are.
+    getTaskPeople: vi.fn(),
     listTasks: h_.listTasks,
     createTask: h_.createTask,
     completeTask: h_.completeTask,

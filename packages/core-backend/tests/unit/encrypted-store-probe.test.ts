@@ -151,6 +151,7 @@ const EXPECTED_STORE_FIELDS = [
   'data_sources.config.credentials.password',
   'data_sources.config.credentials.apiKey',
   'data_sources.config.credentials.token',
+  'data_sources.config.credentials.bearerToken',
   'directory_integrations.config.appSecret',
   'directory_integrations.config.workNotificationAgentId|agentId',
   'directory_integrations.config.approvalCardLinkSecret',
@@ -160,6 +161,7 @@ const EXPECTED_STORE_FIELDS = [
   'attendance_integrations.config.appSecret|appsecret|app_secret',
   'system_configs.value (is_encrypted)',
   ...YIDA_FIELDS.map(([store, field]) => `${store}.${field}`),
+  'dingtalk_login_repairs.before_identity',
 ]
 
 const fixture: { rows: FixtureRows; sealed: string[]; plaintexts: string[] } = { rows: {}, sealed: [], plaintexts: [] }
@@ -300,6 +302,7 @@ beforeAll(async () => {
     'data_sources.config.credentials.password': [await p('ds-pw-1'), await p('ds-pw-2'), M('ds-pw-plain')],
     'data_sources.config.credentials.apiKey': [await p('ds-key')],
     'data_sources.config.credentials.token': [],
+    'data_sources.config.credentials.bearerToken': [],
     'directory_integrations.config.appSecret': [await p('dir-secret')],
     'directory_integrations.config.workNotificationAgentId|agentId': [agentSealed, '7654321'],
     'directory_integrations.config.approvalCardLinkSecret': [await p('card-link')],
@@ -327,6 +330,7 @@ const EXPECTED_UNDER_A = [
   ['data_sources.config.credentials.password', 'ok', 3, 2, 0, 1, null],
   ['data_sources.config.credentials.apiKey', 'ok', 1, 1, 0, 0, null],
   ['data_sources.config.credentials.token', 'ok', 0, 0, 0, 0, null],
+  ['data_sources.config.credentials.bearerToken', 'ok', 0, 0, 0, 0, null],
   ['directory_integrations.config.appSecret', 'ok', 1, 1, 0, 0, null],
   ['directory_integrations.config.workNotificationAgentId|agentId', 'ok', 2, 1, 0, 1, null],
   ['directory_integrations.config.approvalCardLinkSecret', 'ok', 1, 1, 0, 0, null],
@@ -336,9 +340,20 @@ const EXPECTED_UNDER_A = [
   ['attendance_integrations.config.appSecret|appsecret|app_secret', 'ok', 1, 1, 0, 0, null],
   ['system_configs.value (is_encrypted)', 'ok', 5, 2, 0, 3, null],
   ...YIDA_FIELDS.map(([store, field]) => [`${store}.${field}`, 'ok', 2, 1, 0, 1, null]),
+  ['dingtalk_login_repairs.before_identity', 'ok', 0, 0, 0, 0, null],
 ]
 
 describe('probeEncryptedStores: trial decrypt with the current material', () => {
+  it('login repair history uses the raw platform envelope and caps trial decryption at twenty rows', async () => {
+    const entry = ENCRYPTED_STORE_CATALOG.find(e => e.store === 'dingtalk_login_repairs')!
+    expect(entry).toMatchObject({field:'before_identity',scheme:'platform-enc',prefixOn:'raw',columns:['before_identity'],maxRows:20})
+    const sealed = (fixture.rows['data_sources.config.credentials.apiKey'] as string[])[0]
+    const db = fakeDatabase({'dingtalk_login_repairs.before_identity':Array.from({length:30},()=>sealed)})
+    const report = await probeEncryptedStores({query:db.query,env:ENV_A})
+    expect(db.catalogStatements().find(s=>s.sql===entry.sql)?.params).toEqual([21])
+    expect(report.stores.find(s=>s.store===entry.store)).toMatchObject({status:'ok',rows:20,encrypted:20,undecryptable:0,truncated:true,sampled:20})
+  })
+
 
   function assertYidaCatalog(catalog: readonly EncryptedStoreCatalogEntry[]) {
     for (const [store, field] of YIDA_FIELDS) {
@@ -434,7 +449,7 @@ describe('probeEncryptedStores: trial decrypt with the current material', () => 
   it('NULL / empty / whitespace-only values are not stored secrets: counted nowhere, not even in `rows`', async () => {
     const db = fakeDatabase({ 'directory_integrations.config.appSecret': ['   ', null, '', '\t\n'] })
     const report = await probeEncryptedStores({ query: db.query, env: ENV_A })
-    expect(report.stores[3]).toMatchObject({ rows: 0, encrypted: 0, plaintext: 0, undecryptable: 0 })
+    expect(report.stores[4]).toMatchObject({ store: 'directory_integrations', field: 'config.appSecret', rows: 0, encrypted: 0, plaintext: 0, undecryptable: 0 })
   })
 
   it('rows = encrypted + plaintext + legacyNotChecked in every store field', async () => {
@@ -535,7 +550,7 @@ describe('probeEncryptedStores: trial decrypt with the current material', () => 
     for (const s of db.catalogStatements()) {
       const entry = ENCRYPTED_STORE_CATALOG.find((e) => e.sql === s.sql) as EncryptedStoreCatalogEntry
       const yida = s.sql.includes(' FROM integration_yida_')
-      expect({ sql: s.sql, bounded: /\sLIMIT \$1$/.test(s.sql), params: s.params }).toEqual({ sql: s.sql, bounded: true, params: [yida ? yidaCap(entry.store) + 1 : 10_001] })
+      expect({ sql: s.sql, bounded: /\sLIMIT \$1$/.test(s.sql), params: s.params }).toEqual({ sql: s.sql, bounded: true, params: [entry.store === 'dingtalk_login_repairs' ? 21 : yida ? yidaCap(entry.store) + 1 : 10_001] })
     }
     expect(ENCRYPTED_STORE_COLUMNS_SQL).toBe('SELECT attname FROM pg_attribute WHERE attrelid = to_regclass($1) AND attnum > 0 AND NOT attisdropped')
     expect(db.prechecks().every((s) => s.params?.length === 1 && CATALOG_TABLES.includes(String(s.params[0])))).toBe(true)
@@ -567,7 +582,7 @@ describe('probeEncryptedStores: trial decrypt with the current material', () => 
 
   it('YiDa stores read at most maxRows (50; 20 for draft operations and send approvals): more rows are sampled with LIMIT maxRows + 1 and say `truncated`; other stores keep rowLimit', async () => {
     expect(ENCRYPTED_STORE_CATALOG.filter((e) => e.maxRows !== undefined).map((e) => `${e.store}.${e.field}`))
-      .toEqual(YIDA_FIELDS.map(([store, field]) => `${store}.${field}`))
+      .toEqual([...YIDA_FIELDS.map(([store, field]) => `${store}.${field}`), 'dingtalk_login_repairs.before_identity'])
     const many = (label: string) => Array.from({ length: 120 }, () => (fixture.rows[label] as string[])[0])
     const rows: FixtureRows = { 'data_sources.config.credentials.password': many('data_sources.config.credentials.password') }
     for (const [store, field] of YIDA_FIELDS) rows[`${store}.${field}`] = many(`${store}.${field}`)
@@ -666,7 +681,7 @@ describe('probeEncryptedStores: an absent table / column is decided by the prech
     // data_sources needs is_active / deleted_at too, not only config
     const noDeletedAt = fakeDatabase(fixture.rows, fixtureSchema({ data_sources: ['id', 'config', 'is_active'] }))
     const r2 = await probeEncryptedStores({ query: noDeletedAt.query, env: ENV_A })
-    expect(r2.stores.slice(0, 3).map((s) => s.status)).toEqual(['column_missing', 'column_missing', 'column_missing'])
+    expect(r2.stores.slice(0, 4).map((s) => s.status)).toEqual(['column_missing', 'column_missing', 'column_missing', 'column_missing'])
     expect(noDeletedAt.catalogStatements().some((s) => s.sql.includes('FROM data_sources'))).toBe(false)
     expect(spy.rejected).toEqual([])
   })
@@ -689,9 +704,9 @@ describe('probeEncryptedStores: an absent table / column is decided by the prech
       return db.query(sql, params)
     }
     const report = await probeEncryptedStores({ query, env: ENV_A })
-    expect(report.stores[8]).toMatchObject({ store: 'integration_external_systems', status: 'read_failed', sqlState: '42501', rows: 0 })
-    expect(db.catalogStatements().map((s) => s.sql)).not.toContain(ENCRYPTED_STORE_CATALOG[8].sql)
-    expect(table(report).filter((_, i) => i !== 8)).toEqual(EXPECTED_UNDER_A.filter((_, i) => i !== 8))
+    expect(report.stores[9]).toMatchObject({ store: 'integration_external_systems', status: 'read_failed', sqlState: '42501', rows: 0 })
+    expect(db.catalogStatements().map((s) => s.sql)).not.toContain(ENCRYPTED_STORE_CATALOG[9].sql)
+    expect(table(report).filter((_, i) => i !== 9)).toEqual(EXPECTED_UNDER_A.filter((_, i) => i !== 9))
     expect(JSON.stringify(report)).not.toContain('MARKER')
   })
 })
@@ -738,11 +753,11 @@ describe('probeEncryptedStores: unreadable stores are classified by SQLSTATE, an
       'dingtalk_group_destinations.secret': sqlError('42703', 'MARKER-localized-message-b'),
     })
     const report = await probeEncryptedStores({ query: db.query, env: ENV_A })
-    expect(report.stores[6]).toEqual({
+    expect(report.stores[7]).toEqual({
       store: 'dingtalk_group_destinations', field: 'webhook_url', scheme: 'platform-enc',
       status: 'table_missing', rows: 0, encrypted: 0, undecryptable: 0, plaintext: 0, sqlState: '42P01',
     })
-    expect(report.stores[7]).toMatchObject({ status: 'column_missing', sqlState: '42703', rows: 0 })
+    expect(report.stores[8]).toMatchObject({ status: 'column_missing', sqlState: '42703', rows: 0 })
     expect(report.totals).toMatchObject({ missing: 2, unreadable: 0 })
     expect(JSON.stringify(report)).not.toContain('MARKER-localized-message')
   })
@@ -779,9 +794,9 @@ describe('probeEncryptedStores: unreadable stores are classified by SQLSTATE, an
       'directory_integrations.config.appSecret': Object.assign(new Error('MARKER-socket-text'), { code: 'ECONNRESET' }),
     })
     const report = await probeEncryptedStores({ query: db.query, env: ENV_A })
-    expect(report.stores[3]).toMatchObject({ store: 'directory_integrations', status: 'read_failed', rows: 0, encrypted: 0 })
-    expect(report.stores[3].sqlState).toBeUndefined()
-    expect(table(report).filter((_, i) => i !== 3)).toEqual(EXPECTED_UNDER_A.filter((_, i) => i !== 3))
+    expect(report.stores[4]).toMatchObject({ store: 'directory_integrations', status: 'read_failed', rows: 0, encrypted: 0 })
+    expect(report.stores[4].sqlState).toBeUndefined()
+    expect(table(report).filter((_, i) => i !== 4)).toEqual(EXPECTED_UNDER_A.filter((_, i) => i !== 4))
     expect(db.catalogStatements()).toHaveLength(EXPECTED_STORE_FIELDS.length)
     expect(report.totals.unreadable).toBe(1)
     expect(JSON.stringify(report)).not.toContain('MARKER-socket-text')
@@ -797,9 +812,9 @@ describe('probeEncryptedStores: unreadable stores are classified by SQLSTATE, an
     })
     const report = await probeEncryptedStores({ query, env: ENV_A, now: () => { throw new Error('clock') } })
     expect(report.stores.filter((s) => s.status === 'read_failed').map((s) => s.store)).toEqual([
-      'data_sources', 'data_sources', 'data_sources', 'directory_integrations', 'directory_integrations', 'directory_integrations',
+      'data_sources', 'data_sources', 'data_sources', 'data_sources', 'directory_integrations', 'directory_integrations', 'directory_integrations',
     ])
-    expect(report.stores.filter((s) => s.status === 'ok')).toHaveLength(EXPECTED_STORE_FIELDS.length - 6)
+    expect(report.stores.filter((s) => s.status === 'ok')).toHaveLength(EXPECTED_STORE_FIELDS.length - 7)
     expect(typeof report.checkedAt).toBe('string')
 
     // ...and garbage from the precheck itself: no rows array -> read_failed; rows without a column
@@ -810,8 +825,8 @@ describe('probeEncryptedStores: unreadable stores are classified by SQLSTATE, an
     })
     const r2 = await probeEncryptedStores({ query: garbagePrecheck, env: ENV_A })
     expect(r2.stores.map((s) => s.status)).toEqual([
-      'read_failed', 'read_failed', 'read_failed',
-      ...Array(EXPECTED_STORE_FIELDS.length - 3).fill('column_missing'),
+      'read_failed', 'read_failed', 'read_failed', 'read_failed',
+      ...Array(EXPECTED_STORE_FIELDS.length - 4).fill('column_missing'),
     ])
   })
 })
@@ -925,7 +940,7 @@ describe('runEncryptedStoreProbeAtStartup: one summary, one warning per broken s
     const report = await runEncryptedStoreProbeAtStartup({ resolvePool: () => fakeDatabase(fixture.rows), env: ENV_B, logger })
     expect(report?.totals.undecryptable).toBe(17)
     expect(logger.info).toHaveBeenCalledTimes(1)
-    expect(logger.info.mock.calls[0][0]).toMatch(/^Encrypted store probe: 17 encrypted value\(s\) across 16 store field\(s\); 17 undecryptable/)
+    expect(logger.info.mock.calls[0][0]).toMatch(/^Encrypted store probe: 17 encrypted value\(s\) across 18 store field\(s\); 17 undecryptable/)
     const broken = EXPECTED_UNDER_A.filter((row) => (row[3] as number) > 0).map((row) => row[0])
     expect(logger.warn).toHaveBeenCalledTimes(broken.length)
     expect(logger.warn.mock.calls.map((call) => `${call[1].store}.${call[1].field}`)).toEqual(broken)
