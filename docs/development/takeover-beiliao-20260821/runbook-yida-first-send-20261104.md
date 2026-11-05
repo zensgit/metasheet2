@@ -18,7 +18,7 @@
 | 3 凭据已验证 | L3 得 `ok` + L4 成功 + L4 之前全库备份与 `docker\app.env` 副本在手 | S0 第 1 步 |
 | 4 预算在准入之前检查 | owner 接受 | S2 第 9 步（选短行） |
 | 5 密钥只经 HTTPS 或 localhost | L3/L4 在服务器本机浏览器经 localhost 完成 | S0 第 1 步 |
-| 6 收到的 2xx 绝不丢弃 | owner 接受，以操作纪律 + 宜搭人工核对兜底 | S2 第 10–12 步、S3 第 14 步 |
+| 6 收到的 2xx 绝不丢弃 | owner 接受，以操作纪律 + 宜搭人工核对兜底；代码关门（R-71 ⑦.1，PR-A `fix/yida-send-gate1-gate6-20261104`，合入并上机后生效）：状态行到达之后的中止 / 超时 / 开关翻转不再丢弃回执，2xx 但正文不可用落台账 reason `receipt_unparsed`（仍是 `outcome_unknown`、不自动重发） | S2 第 10–12 步、S3 第 14 步 |
 | 7 `ENCRYPTION_KEY` 轮换方案 | owner 接受（两项加密值在部署生命期内不变） | S0 第 1 步（备份） |
 | 8 PBKDF2 实测 | 发送前在客户机上用合成字串实测 | S0 第 4 步 |
 | 9 租户声明与锚点 | 锚点账号 GET 在开关打开前、后都显示已初始化 | S0 第 2 步、S2 第 8 步 |
@@ -92,7 +92,7 @@
 11. 点**一次**「提交此授权一次」（`StockPreparationYidaOwnerSendPanel.vue:46`），然后 30 秒内不刷新、不关页、不离开、不点任何东西。
 12. 读结果（「持久记录状态：…」，`:51-53`；出现错误码时先点「手动刷新持久记录（只读）」`:47` 读真实状态）：
     - `acknowledged`：收到宜搭协议应答。面板同时写「仅收到协议应答，尚未核验业务创建成功。」——仍要做 S3。
-    - `outcome_unknown`、`dispatching` 或面板显示 `state_unconfirmed`：结果不明，宜搭里**可能已经有**这条记录（门 6：已收到的 2xx 也可能被折成这一类）。系统永不自动重发。
+    - `outcome_unknown`、`dispatching` 或面板显示 `state_unconfirmed`：结果不明，宜搭里**可能已经有**这条记录（门 6：在 PR-A 关门之前，已收到的 2xx 也可能被折成这一类；关门之后，已收到且正文可用的 2xx 一律落 `acknowledged`，台账 reason 为 `receipt_unparsed` 时表示服务器答过 2xx 但正文不可用——`outcome_unknown` 的任何 reason 都到宜搭人工核对）。系统永不自动重发。
     - `prepared`：在认领之前被取消，什么都没发。按 DBA 手册（S3 第 15 步）处理，不要重试。
     - 错误码：`YIDA_OWNER_RUNTIME_DISABLED` = 开关没生效；`YIDA_SEND_APPROVAL_EXPIRED` = 授权过了 15 分钟；`YIDA_OWNER_CANCELLED` 或 `YIDA_OWNER_RUNTIME_CANCELLED` = 请求被中止（门 1），以「手动刷新持久记录（只读）」读到的状态为准；`YIDA_OWNER_HTTP_DENIED` 会让面板失效并清掉授权显示（`apps/web/src/services/integration/yidaOwner.ts:289`）。
     无论什么结果，都**不要**再点提交，也不要对同一行再批准（新建占位永久保留，R-50 ⑥）。

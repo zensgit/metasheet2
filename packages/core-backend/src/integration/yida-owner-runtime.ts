@@ -43,10 +43,9 @@ const META = ['grantId', 'operationId', 'rowKey', 'targetRef', 'approvedAt', 'ex
   'maxAttempts', 'remainingAttempts', 'status', 'revoked', 'admissionId', 'ledgerId', 'canSend', 'externalWriteAttempted']
 const DELIVERY_STATES = new Set(['prepared', 'dispatching', 'acknowledged', 'outcome_unknown', 'not_sent'])
 const abortedGetter = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')!.get!
-const addListener = EventTarget.prototype.addEventListener
-const removeListener = EventTarget.prototype.removeEventListener
 type Row = Record<string, unknown>
-type Checked = <T>(operation: () => Promise<T>) => Promise<T>
+// A host dependency the run must wait for before it retires, WITHOUT a checkpoint after it settles.
+type Tracked = <T>(pending: Promise<T>) => Promise<T>
 type Run = { controller: AbortController; pending: Promise<unknown>; dependencies: Set<Promise<unknown>> }
 type Registration = {
   closed: boolean; runs: Set<Run>
@@ -172,27 +171,6 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
   }
   let active: Registration | undefined, capabilityGeneration = 0, terminal = false
   let terminalDrain: Promise<void> | undefined
-  const subscriptions = new WeakMap<AbortSignal, { controllers: Set<AbortController>; abort: () => void }>()
-
-  function subscribe(source: AbortSignal, controller: AbortController): () => void {
-    let subscription = subscriptions.get(source)
-    if (!subscription) {
-      const controllers = new Set<AbortController>()
-      subscription = { controllers, abort: () => { for (const admitted of controllers) admitted.abort() } }
-      subscriptions.set(source, subscription)
-      addListener.call(source, 'abort', subscription.abort, { once: true })
-    }
-    subscription.controllers.add(controller)
-    if (abortedGetter.call(source)) controller.abort()
-    const captured = subscription
-    return () => {
-      captured.controllers.delete(controller)
-      if (captured.controllers.size === 0) {
-        removeListener.call(source, 'abort', captured.abort)
-        subscriptions.delete(source)
-      }
-    }
-  }
 
   function enabled() {
     let value: unknown
@@ -201,8 +179,8 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
   }
   function close(state: Registration) {
     state.closed = true
-    // Native lifetime and caller-combined signals abort synchronously, before
-    // drain starts. A dependency that ignores cancellation remains pending.
+    // The native lifetime signal aborts synchronously, before drain starts. A
+    // dependency that ignores cancellation remains pending.
     for (const run of state.runs) run.controller.abort()
   }
   function drain(state: Registration): Promise<void> {
@@ -214,29 +192,32 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
     return state.draining
   }
   function execute<T>(inputActor: unknown, options: unknown, requiresEnablement: boolean,
-    work: (authority: Authority, state: Registration, context: YidaOwnerActor, checkpoint: () => void, signal: AbortSignal, checked: Checked) => Promise<T>): Promise<T> {
+    work: (authority: Authority, state: Registration, context: YidaOwnerActor, checkpoint: () => void, signal: AbortSignal, tracked: Tracked) => Promise<T>): Promise<T> {
     try {
       const context = actor(inputActor), caller = signalOf(options), state = active
       if (terminal || !state || state.closed) fail('INACTIVE')
+      // Gate 1 (R-71 ⑦.1): the caller's signal is read exactly once, here, before anything is
+      // admitted. It is NOT subscribed to the run: once admission has committed (one-time grant
+      // consumed, business key fenced) a browser timeout, panel unmount or dropped connection must
+      // not cancel the attempt. The run controller below is aborted only by the host lifetime.
       if (caller && abortedGetter.call(caller)) fail('CANCELLED')
       if (requiresEnablement) enabled()
       if (state.runs.size >= MAX_RUNS) fail('UNAVAILABLE')
       const controller = new AbortController()
-      const unsubscribe = caller ? subscribe(caller, controller) : () => {}
       const checkpoint = () => {
         if (abortedGetter.call(controller.signal)) fail('CANCELLED')
         if (terminal || state.closed || state !== active) fail('INACTIVE')
         if (requiresEnablement) enabled()
       }
+      const tracked: Tracked = async pending => {
+        run.dependencies.add(pending)
+        try { return await pending } finally { run.dependencies.delete(pending) }
+      }
       async function checked<R>(operation: () => Promise<R>): Promise<R> {
         checkpoint()
-        const pending = operation()
-        run.dependencies.add(pending)
-        try {
-          const result = await pending
-          checkpoint()
-          return result
-        } finally { run.dependencies.delete(pending) }
+        const result = await tracked(operation())
+        checkpoint()
+        return result
       }
       const database = Object.freeze({
         transaction<R>(callback: (trx: Queryable) => Promise<R>): Promise<R> {
@@ -270,7 +251,7 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
           const authority = createInternalYidaSendExecutionAuthority({ database, security, context, primitives,
             ...(multiTargetOn() ? { multiTarget: true } : {}) })
           checkpoint()
-          return await checked(() => work(authority, state, context, checkpoint, controller.signal, checked))
+          return await checked(() => work(authority, state, context, checkpoint, controller.signal, tracked))
         } catch (error) {
           // A private core/plugin boundary may already have closed a host
           // cancellation to UNAVAILABLE. Local lifetime/control takes priority
@@ -283,10 +264,9 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
           // dependency settles. Keep the run admitted until every host call
           // actually finishes, and reject all further calls from that run.
           controller.abort()
-          unsubscribe()
           while (run.dependencies.size > 0) await Promise.allSettled([...run.dependencies])
           state.runs.delete(run)
-          if (terminal || state.closed || state !== active || (caller && abortedGetter.call(caller))) fail('CANCELLED')
+          if (terminal || state.closed || state !== active) fail('CANCELLED')
           if (requiresEnablement) enabled()
         }
       })
@@ -377,8 +357,13 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
       return input(() => {
         const parsed = record(supplied, ['grantId', 'submissionId'])
         return { grantId: id(parsed.grantId), submissionId: id(parsed.submissionId) }
-      }, parsed => execute(context, options, true, async (authority, state, fixed, checkpoint, signal, checked) => {
-        const boundFetch: typeof fetch = (request, init) => checked(() => fetcher(request, init))
+      }, parsed => execute(context, options, true, async (authority, state, fixed, checkpoint, signal, tracked) => {
+        // Gate 6 (R-71 ⑦.1, c4): checkpoint BEFORE the request only. A Response that has already
+        // been received is a fact about the remote system; re-checking after it resolved would turn
+        // a received 2xx into outcome_unknown when the switch flipped or the host closed mid-flight.
+        // The dependency is still tracked so drain waits for it, and the pre-output checkpoint
+        // below still refuses to expose the result while OFF/closed (the ledger is the record).
+        const boundFetch: typeof fetch = async (request, init) => { checkpoint(); return tracked(fetcher(request, init)) }
         const port = record(state.createSendPort(Object.freeze({ context: fixed, authority, fetch: boundFetch, readEnablement, timeoutMs })),
           ['submit', 'inspect'], ['submit'])
         if (typeof port.submit !== 'function' || types.isProxy(port.submit)) fail('UNAVAILABLE')
