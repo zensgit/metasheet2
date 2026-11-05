@@ -459,6 +459,106 @@ describe('recycle review against a fresh migrated synthetic PostgreSQL database'
     })
   })
 
+  it('rescrubs leftover accountLabel on an already purged user and rejects anyone not purged', async () => {
+    const actorId = await seedUser(true)
+    const userId = await seedUser()
+    const email = `${userId}@example.test`
+    expect((await move(userId)).ok).toBe(true)
+    expect((await transaction(client => applyRecyclePurge(client, {
+      userId,
+      actorId,
+      index: 0,
+      passwordHash: 'synthetic-unusable',
+    }))).ok).toBe(true)
+    const before = (await query(
+      'SELECT email, name, role, is_active, deleted_at IS NOT NULL AS deleted, purged_at IS NOT NULL AS purged FROM users WHERE id = $1',
+      [userId],
+    )).rows
+    const at = '2026-11-04 05:31:00.123456+00'
+    const details = {
+      accountLabel: email,
+      email,
+      roleId: 'user',
+      colleague: { id: 'other-person', accountLabel: 'keep@example.test' },
+    }
+    const live = await insertAuditRow({ userId, email, name: 'Synthetic user', at, action: 'create', details })
+    const archived = await insertAuditRow({
+      userId,
+      email,
+      name: 'Synthetic user',
+      at,
+      action: 'create',
+      details,
+      table: 'audit_logs_archive',
+    })
+    const app = express()
+    app.use(express.json())
+    app.use(adminUsersRouter())
+    const jwt = authService.createToken({
+      id: actorId,
+      email: '',
+      name: 'Synthetic',
+      role: 'admin',
+      permissions: [],
+      created_at: new Date(),
+      updated_at: new Date(),
+    })
+    const send = (ids: string[], confirmText = '重新清理') => request(app)
+      .post('/api/admin/users/recycle/rescrub')
+      .auth(jwt, { type: 'bearer' })
+      .send({ userIds: ids, confirmText })
+
+    const first = await send([userId])
+    expect(first.status).toBe(200)
+    expect(first.body.data.results[0]).toMatchObject({ ok: true, userId, code: null })
+    for (const row of [
+      { table: 'audit_logs', id: live.id },
+      { table: 'audit_logs_archive', id: archived.id },
+    ]) {
+      const scrubbed = await query(`SELECT action_details FROM ${row.table} WHERE id = $1`, [row.id])
+      expect(scrubbed.rows[0].action_details).toMatchObject({
+        accountLabel: null,
+        email: null,
+        roleId: 'user',
+        colleague: { id: 'other-person', accountLabel: 'keep@example.test' },
+      })
+    }
+    expect((await query(
+      'SELECT email, name, role, is_active, deleted_at IS NOT NULL AS deleted, purged_at IS NOT NULL AS purged FROM users WHERE id = $1',
+      [userId],
+    )).rows).toEqual(before)
+    const auditRow = await query(
+      `SELECT action_details FROM audit_logs
+       WHERE resource_id = 'recycle-rescrub' AND action_details->>'adminUserId' = $1
+       ORDER BY created_at DESC LIMIT 1`,
+      [actorId],
+    )
+    expect(auditRow.rows[0].action_details).toMatchObject({ outcome: 'rescrubbed' })
+    expect(JSON.stringify(auditRow.rows[0].action_details)).not.toContain(email)
+
+    const second = await send([userId])
+    expect(second.status).toBe(200)
+    expect(second.body.data.results[0].ok).toBe(true)
+    expect((await query('SELECT action_details FROM audit_logs WHERE id = $1', [live.id])).rows[0].action_details.accountLabel).toBeNull()
+    expect((await query(
+      'SELECT email, name, role, is_active, deleted_at IS NOT NULL AS deleted, purged_at IS NOT NULL AS purged FROM users WHERE id = $1',
+      [userId],
+    )).rows).toEqual(before)
+
+    const activeId = await seedUser()
+    const activeBefore = (await query('SELECT email, deleted_at, purged_at FROM users WHERE id = $1', [activeId])).rows
+    const active = await send([activeId])
+    expect(active.body.data.results[0].code).toBe('NOT_PURGED')
+    expect((await query('SELECT email, deleted_at, purged_at FROM users WHERE id = $1', [activeId])).rows).toEqual(activeBefore)
+
+    const binnedId = await seedUser()
+    expect((await move(binnedId)).ok).toBe(true)
+    const binnedBefore = (await query('SELECT email, deleted_at IS NOT NULL AS deleted, purged_at FROM users WHERE id = $1', [binnedId])).rows
+    const binned = await send([binnedId])
+    expect(binned.body.data.results[0].code).toBe('NOT_PURGED')
+    expect((await query('SELECT email, deleted_at IS NOT NULL AS deleted, purged_at FROM users WHERE id = $1', [binnedId])).rows).toEqual(binnedBefore)
+  })
+
   it('rolls back the whole purge when audit scrub fails', async () => {
     const userId = await seedUser()
     const at = '2026-11-04 05:31:00.654321+00'

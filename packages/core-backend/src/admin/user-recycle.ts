@@ -23,6 +23,9 @@ export const USER_RECYCLE_RETENTION_MAX_DAYS = 3650
 export const USER_RECYCLE_PURGE_CONFIRM_TEXT = '立即清除'
 export const USER_RECYCLE_PURGE_CONFIRM_TEXT_EN = 'Purge now'
 export const USER_RECYCLE_PURGE_CONFIRM_TEXTS = [USER_RECYCLE_PURGE_CONFIRM_TEXT, USER_RECYCLE_PURGE_CONFIRM_TEXT_EN] as const
+export const USER_RECYCLE_RESCRUB_CONFIRM_TEXT = '重新清理'
+export const USER_RECYCLE_RESCRUB_CONFIRM_TEXT_EN = 'Rescrub now'
+export const USER_RECYCLE_RESCRUB_CONFIRM_TEXTS = [USER_RECYCLE_RESCRUB_CONFIRM_TEXT, USER_RECYCLE_RESCRUB_CONFIRM_TEXT_EN] as const
 export const USER_TOMBSTONE_NAME = '已清除用户'
 export const USER_RECYCLE_SWEEP_BATCH = 100
 const recycleLogger = new Logger('UserRecycle')
@@ -99,6 +102,10 @@ export const PLATFORM_ADMIN_ADVISORY_LOCK_SQL =
 
 export function acceptsRecyclePurgeConfirm(value: unknown): boolean {
   return typeof value === 'string' && (USER_RECYCLE_PURGE_CONFIRM_TEXTS as readonly string[]).includes(value)
+}
+
+export function acceptsRecycleRescrubConfirm(value: unknown): boolean {
+  return typeof value === 'string' && (USER_RECYCLE_RESCRUB_CONFIRM_TEXTS as readonly string[]).includes(value)
 }
 
 const PLATFORM_ADMIN_PREDICATE = `(
@@ -417,6 +424,47 @@ export async function applyRecyclePurge(
   })
   await supersedeDeprovisionEvidenceForAccessGraphWrite(client, { userIds: [input.userId], actorId: input.actorId, reason: 'user-purged' })
   return item(input.index, input.userId, null, true, null, '已清除个人身份，历史记录仍保留')
+}
+
+/**
+ * Re-apply the current identity scrub to an account that is already purged.
+ * Does not change the users row, roles, or sessions. Safe to run again.
+ */
+export async function applyRecycleRescrub(
+  client: RecycleClient,
+  input: { userId: string; actorId: string; index: number; now?: Date },
+): Promise<BatchItemResult> {
+  const now = input.now ?? new Date()
+  await lockNamespaceAdmissionWrites(client, input.userId)
+  await lockUsersForAccessGraphWrite(client, [input.userId])
+  const locked = await client.query(
+    `SELECT id, email, username, mobile, deleted_at, purged_at
+     FROM users
+     WHERE id = $1
+     FOR UPDATE`,
+    [input.userId],
+  )
+  const row = locked.rows[0]
+  if (!row) return item(input.index, input.userId, null, false, 'USER_NOT_FOUND', '找不到该用户')
+  if (!textOrNull(row.purged_at)) {
+    const inBin = Boolean(textOrNull(row.deleted_at))
+    return item(
+      input.index,
+      input.userId,
+      textOrNull(row.email),
+      false,
+      'NOT_PURGED',
+      inBin ? '该账号还在回收站，尚未清除' : '只能重新清理已经清除的账号',
+    )
+  }
+  await scrubPurgedUserIdentity(client, {
+    userId: input.userId,
+    email: textOrNull(row.email),
+    username: textOrNull(row.username),
+    mobile: textOrNull(row.mobile),
+    at: now.toISOString(),
+  })
+  return item(input.index, input.userId, null, true, null, '已按当前规则重新清理审计中的身份')
 }
 
 async function relationExists(client: RecycleClient, name: string): Promise<boolean> {
@@ -813,6 +861,27 @@ export async function purgeRecycleUsers(input: {
     await auditRecycle(input.actorId, actorType, 'delete', row.userId, {
       outcome: outcome.ok ? 'purged' : outcome.code,
       tombstone: outcome.ok,
+    })
+    results.push(outcome)
+  }
+  return results
+}
+
+export async function rescrubPurgedUsers(input: {
+  actorId: string
+  rows: Array<{ index: number; userId: string }>
+  now?: Date
+}): Promise<BatchItemResult[]> {
+  const results: BatchItemResult[] = []
+  for (const row of input.rows) {
+    const outcome = await transaction((client) => applyRecycleRescrub(client, {
+      userId: row.userId,
+      actorId: input.actorId,
+      index: row.index,
+      now: input.now,
+    }))
+    await auditRecycle(input.actorId, 'user', 'update', row.userId, {
+      outcome: outcome.ok ? 'rescrubbed' : outcome.code,
     })
     results.push(outcome)
   }
