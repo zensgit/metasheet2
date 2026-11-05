@@ -150,7 +150,8 @@ function sendAdminUsersServerFailure(
   error: unknown,
 ): void {
   if (error instanceof AccessGraphUserUnavailableError) {
-    return jsonError(res, error.code === 'NOT_FOUND' ? 404 : 409, error.code, error.message)
+    if (error.code === 'NOT_FOUND') return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+    return jsonError(res, 409, 'USER_IN_RECYCLE_BIN', '账号在回收站中，请先恢复后再修改权限')
   }
   if (error instanceof DelegationAuthorityRefusal) {
     return jsonError(res, 403, error.code, error.message)
