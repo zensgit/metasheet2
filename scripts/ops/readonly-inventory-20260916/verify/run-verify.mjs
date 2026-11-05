@@ -678,37 +678,40 @@ export function runWebhookTotals(schema) {
 }
 
 /**
- * 05 under one transaction: the preamble's default_transaction_read_only only
- * covers LATER transactions, so with `psql -1` (or AUTOCOMMIT off) the open
- * transaction is read-write unless 05's own `SET transaction_read_only = on;`
- * makes it read-only. A copy of 05 with an UPDATE injected right after that
- * SET must abort (25006, no INVENTORY_RESULT, row unchanged); the control copy
- * with the SET line replaced by the UPDATE shows the write would otherwise
- * commit, i.e. the SET is the line doing the work.
+ * A pack file under one transaction: the preamble's default_transaction_read_only
+ * only covers LATER transactions, so with `psql -1` (or AUTOCOMMIT off) the open
+ * transaction is read-write unless the file's own `SET transaction_read_only = on;`
+ * makes it read-only. A copy of the file with an UPDATE of `<table>.name` injected
+ * right after that SET must abort (25006, no INVENTORY_RESULT, row unchanged);
+ * the control copy with the SET line replaced by the UPDATE shows the write
+ * would otherwise commit, i.e. the SET is the line doing the work.
+ * `name` of row `id` is restored to its starting value afterwards.
  */
-export function checkWebhookTotalsReadOnly(schema) {
+export function checkReadOnlyInOneTransaction(schema, file, table, id) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'inv05-witness-'))
   try {
     fs.copyFileSync(path.join(PACK, '_preamble.sql'), path.join(dir, '_preamble.sql'))
-    const src = fs.readFileSync(path.join(PACK, FILE_05), 'utf8').replace(/\r\n/g, '\n')
+    const src = fs.readFileSync(path.join(PACK, file), 'utf8').replace(/\r\n/g, '\n')
     // Any value, so a mutated `= off` still gets the write injected after it.
     const anchors = src.match(/^SET transaction_read_only = [^;\n]*;\n/gm) || []
-    assert.equal(anchors.length, 1, '05 must carry exactly one SET transaction_read_only line')
+    assert.equal(anchors.length, 1, `${file} must carry exactly one SET transaction_read_only line`)
     const [anchor] = anchors
-    const inject = "UPDATE automation_rules SET name = 'witness' WHERE id = 'r1';\n"
+    const inject = `UPDATE ${table} SET name = 'witness' WHERE id = '${id}';\n`
     fs.writeFileSync(path.join(dir, 'with-set.sql'), src.replace(anchor, anchor + inject))
     fs.writeFileSync(path.join(dir, 'without-set.sql'), src.replace(anchor, inject))
 
-    const nameOfR1 = () =>
-      scalar(`SELECT coalesce(name, '<null>') FROM "${schema}".automation_rules WHERE id = 'r1'`)
-    const reset = () => exec(`UPDATE "${schema}".automation_rules SET name = NULL WHERE id = 'r1'`)
-    const go = (file, mode) => {
+    const nameOfRow = () =>
+      scalar(`SELECT coalesce(name, '<null>') FROM "${schema}".${table} WHERE id = '${id}'`)
+    const go = (copy, mode) => {
       const o = run([...mode, '-A', '-v', 'VERBOSITY=verbose', '-v', `schema=${schema}`,
-        '-f', path.join(dir, file)])
-      return { exit: o.status, result: resultLine(o.stdout, FILE_05), stderr: o.stderr, nameAfter: nameOfR1() }
+        '-f', path.join(dir, copy)])
+      return { exit: o.status, result: resultLine(o.stdout, file), stderr: o.stderr, nameAfter: nameOfRow() }
     }
 
-    const before = nameOfR1()
+    const before = nameOfRow()
+    assert.notEqual(before, 'witness', `${table}.${id} must not start out as 'witness'`)
+    const original = before === '<null>' ? 'NULL' : `'${before.replace(/'/g, "''")}'`
+    const reset = () => exec(`UPDATE "${schema}".${table} SET name = ${original} WHERE id = '${id}'`)
     const single = go('with-set.sql', ['-1'])
     const autocommitOff = go('with-set.sql', ['-v', 'AUTOCOMMIT=off'])
     const control = go('without-set.sql', ['-1'])
@@ -718,6 +721,9 @@ export function checkWebhookTotalsReadOnly(schema) {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 }
+
+export const checkWebhookTotalsReadOnly = schema =>
+  checkReadOnlyInOneTransaction(schema, FILE_05, 'automation_rules', 'r1')
 
 /** Run fn(schema) on a fresh throwaway schema (fixtureSql null => empty schema), then drop it. */
 export function withFixture(prefix, fixtureSql, fn) {
@@ -750,6 +756,39 @@ export function verifyWebhookTotals() {
   }
 }
 
+// ── 06 (2026-11-05): button-field webhook totals ────────────────────────────
+// 06-trg04-button-webhook-totals.sql counts meta_fields rows of type 'button'
+// whose property.actionType (trimmed) is send_webhook, in one row of six
+// counts. No other fixture here creates meta_fields, so 06 runs on its own
+// fixture (fixture-button-webhooks.sql) and on an empty schema.
+export const FILE_06 = '06-trg04-button-webhook-totals.sql'
+export const BUTTONS_06_HEADER =
+  'button_webhooks|url_missing|refused_both|https_ip_literal|https_hostname|unclassified'
+export const BUTTON_WEBHOOKS_FIXTURE = 'fixture-button-webhooks.sql'
+
+/** Run 06 the way the runbook says; return its count row(s) (null when skipped) + result line. */
+export function runButtonWebhookTotals(schema) {
+  const o = runPackFile(FILE_06, schema)
+  assert.equal(o.status, 0, `06 exited ${o.status}: ${o.stderr}`)
+  const found = parseBlocks(o.stdout).filter(b => b.header === BUTTONS_06_HEADER)
+  assert.ok(found.length <= 1, '06 printed its count table more than once')
+  return { buttons: found.length ? found[0].rows : null, result: resultLine(o.stdout, FILE_06) }
+}
+
+export const checkButtonWebhookTotalsReadOnly = schema =>
+  checkReadOnlyInOneTransaction(schema, FILE_06, 'meta_fields', 'b1')
+
+/** Everything the 06 tests check, in one report (used by the CLI entry point below). */
+export function verifyButtonWebhookTotals() {
+  return {
+    buttons: withFixture('inventory_fixture_buttons', BUTTON_WEBHOOKS_FIXTURE, runButtonWebhookTotals),
+    empty: withFixture('inventory_fixture_empty', null, runButtonWebhookTotals),
+    internalTargets: withFixture('inventory_fixture_buttons', BUTTON_WEBHOOKS_FIXTURE,
+      s => checkInternalTargetCases(s, FILE_06)),
+    readOnly: withFixture('inventory_fixture_buttons', BUTTON_WEBHOOKS_FIXTURE, checkButtonWebhookTotalsReadOnly),
+  }
+}
+
 export async function verifyAll() {
   const modern = createFixture('inventory_fixture_modern', 'fixture-modern.sql')
   const legacy = createFixture('inventory_fixture_legacy', 'fixture-legacy.sql')
@@ -779,6 +818,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   }
   verifyAll().then(r => {
     r.webhookTotals05 = verifyWebhookTotals()
+    r.buttonWebhookTotals06 = verifyButtonWebhookTotals()
     console.log(JSON.stringify(r, null, 2))
     console.log('\nALL CHECKS PASSED (synthetic fixtures only; nothing was run against a real database).')
   }).catch(e => {

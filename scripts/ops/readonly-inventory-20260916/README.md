@@ -1,6 +1,6 @@
-# 只读盘点包（2026-09-16，2026-09-18 复核返修，2026-09-20 TRG-04 收窄，2026-11-05 新增 05）— CRED-06 / TRG-04 / ADM-08 / ADM-13
+# 只读盘点包（2026-09-16，2026-09-18 复核返修，2026-09-20 TRG-04 收窄，2026-11-05 新增 05 / 06）— CRED-06 / TRG-04 / ADM-08 / ADM-13
 
-这是一个**只读盘点包**：五个 `.sql` 文件加一个共享前言 `_preamble.sql`，全部只含
+这是一个**只读盘点包**：六个 `.sql` 文件加一个共享前言 `_preamble.sql`，全部只含
 `SELECT` / `WITH … SELECT`，没有任何 `INSERT` / `UPDATE` / `DELETE` / DDL。目的是在合并
 四条在飞/待裁决工作之前，先知道生产库上现在有多少行会受影响——**不做任何回填、不做任何
 清理、不改任何表结构**。
@@ -9,7 +9,7 @@
 > （含 222）上跑过**；真实盘点需要 owner 另行授权（目标库、只读身份、窗口、超时与输出预算）。
 > `05` 的**同一份 SQL**（当时文件名为 `03-webhook-target-totals.sql`，sha256 `8f0733a9…`）
 > 已于 2026-11-05 以只读身份在 222 上跑过**一次**：`status=complete`，**所有计数均为 0**。
-> 除这一次之外，下面的验证全部在**一次性合成 PostgreSQL 的临时 schema**（CI 为 16）、
+> `06` **尚未在任何真实数据库上跑过**。除 `05` 的这一次之外，下面的验证全部在**一次性合成 PostgreSQL 的临时 schema**（CI 为 16）、
 > **全假数据**上完成。
 
 ## 0. 2026-09-18 复核返修（F3 / F4 / F5）
@@ -73,9 +73,26 @@
 - 内网主机正则块（`WITH atom AS (` 到它的 `\gset`）与 `02` **逐字节相同**，由测试守住。
 - 只输出计数：不选 id / sheet_id / created_by / name / url / config。
 
-验证见 `docs/development/readonly-inventory-webhook-target-totals-verification-20261105.md`。
+### 同日新增 `06-trg04-button-webhook-totals.sql`（按钮字段的 webhook）
 
-## 1. 这五份文件分别解锁什么
+按钮字段的「发送 Webhook」是第三条出网路径，`05` 不统计它。它的目标检查在 R80 与 R81 上相同，但
+R80 的钉死连接在 Node 20 上对**任何主机名** url 都失败（`ERR_INVALID_IP_ADDRESS`），所以这类按钮在
+R80 上从未真正发出；R81 修好了这条连接，升级后点这种按钮会**真的发送**。按钮只在有 admin 角色或
+恰好持有 `multitable:send_webhook` 权限的用户点击时发送，不会自动发送。
+
+`06` 统计 `meta_fields` 里 `type='button'` 且 `property.actionType`（trim 后）为 `send_webhook` 的行，
+输出一行六个计数：`button_webhooks`（总数）= `url_missing` + `refused_both`（非 https，或 https 指向
+内网字面量；R80/R81 都拒）+ `https_ip_literal`（https 指向其它 IP 字面量；R80 已能发送）+
+**`https_hostname`**（https 指向主机名：R80 上失败、**R81 上开始发送**——这是要看的数字）+
+`unclassified`（`property` 或 `actionConfig` 以 JSON 字符串存储，本文件不解析，需现场逐条确认，
+只报条数）。内网主机正则块同样与 `02` 逐字节相同；`SET transaction_read_only = on;` 同样紧跟前言，
+理由同上。
+
+- **`06` 尚未在任何真实数据库上跑过**，只在合成库上验证。
+- **读权限**：需要 `meta_fields`（`type`、`property`）的 SELECT。`property` 里也存着每个按钮的
+  webhook secret，所以**由谁、用哪个身份跑，由 owner 决定**。
+
+## 1. 这六份文件分别解锁什么
 
 | 文件 | 编号 | 解锁 / 喂给 | 一句话 |
 |---|---|---|---|
@@ -84,6 +101,7 @@
 | `03-adm08-wildcard-permissions.sql` | ADM-08 | 喂 ADM-07 的裁决 | `users.permissions`（两种列形状）、`user_permissions`、`role_permissions`（含经 `user_roles` 继承）里现在有多少行/多少用户持有 `*:*` |
 | `04-adm13-declared-admins.sql` | ADM-13 | PR #5665 / #5677 的**盘点段**（不回填） | 有多少用户满足声明式 admin 字段，但 `user_roles` 里没有 `role_id='admin'` 那一行 |
 | `05-trg04-webhook-target-totals.sql` | TRG-04 | 喂 **R81 安装决策**（2026-11-05） | 每一个 `send_webhook` 目标和每一条 webhook 订阅，按启用状态分 `url_missing` / `not_https` / `https_internal_literal` / `https_other` 四桶计数；`https_other` **≠ 安全**（见 §0c） |
+| `06-trg04-button-webhook-totals.sql` | TRG-04 | 喂 **R81 安装前检查**（2026-11-05；尚未在真实库上跑过） | 按钮字段的「发送 Webhook」按六列计数；**`https_hostname` = R80 上发不出、R81 上开始发送的按钮数**；需要 `meta_fields` 的 SELECT（含按钮 secret），由 owner 定执行人和身份（见 §0c） |
 
 每个 `.sql` 顶部有更详细的背景、逐条查询的“目的 / 依据代码 / 预期输出”，以及本轮返修说明。
 
@@ -101,6 +119,7 @@ psql "$READONLY_DATABASE_URL" -v schema=public -f 02-trg04-http-targets.sql  > 0
 psql "$READONLY_DATABASE_URL" -v schema=public -f 03-adm08-wildcard-permissions.sql > 03.log 2>&1
 psql "$READONLY_DATABASE_URL" -v schema=public -f 04-adm13-declared-admins.sql > 04.log 2>&1
 psql "$READONLY_DATABASE_URL" -X -v schema=public -f 05-trg04-webhook-target-totals.sql > 05.log 2>&1
+psql "$READONLY_DATABASE_URL" -X -v schema=public -f 06-trg04-button-webhook-totals.sql > 06.log 2>&1   # 读 meta_fields（含按钮 secret），owner 定身份
 grep -h '^INVENTORY_RESULT' 0*.log
 ```
 
@@ -114,7 +133,8 @@ psql $env:READONLY_DATABASE_URL -v schema=public -f 01-cred06-secret-keys.sql *>
 psql $env:READONLY_DATABASE_URL -v schema=public -f 02-trg04-http-targets.sql  *> 02.log ; `
 psql $env:READONLY_DATABASE_URL -v schema=public -f 03-adm08-wildcard-permissions.sql *> 03.log ; `
 psql $env:READONLY_DATABASE_URL -v schema=public -f 04-adm13-declared-admins.sql *> 04.log ; `
-psql $env:READONLY_DATABASE_URL -X -v schema=public -f 05-trg04-webhook-target-totals.sql *> 05.log
+psql $env:READONLY_DATABASE_URL -X -v schema=public -f 05-trg04-webhook-target-totals.sql *> 05.log ; `
+psql $env:READONLY_DATABASE_URL -X -v schema=public -f 06-trg04-button-webhook-totals.sql *> 06.log
 Select-String -Path 0*.log -Pattern '^INVENTORY_RESULT'
 ```
 
@@ -164,6 +184,7 @@ INVENTORY_RESULT file=<文件名> status=incomplete reason=<原因> …
 | `02` | Q4（旧列 `action_config` 计数） | 同上；`actions` 为 NULL/空的行，这一列就是执行器读的配置 |
 | `02` | Q5/Q6（`multitable_webhooks` 计数 + id/created_by） | 贴进 PR #5649 的合并前盘点；按 `created_by` 通知用户（2026-11-05：#5619 / #5649 均已合并，`02` 的数字改作装 R81 前的参考，判断以 `05` 为准） |
 | `05` | R1 / W1（规则、订阅各两行：启用 t/f × 四桶） | R81 安装决策：两表全 0 ⇒ R81 不影响；任一桶非 0（**含 `https_other`**）⇒ 现场逐条确认后再装 |
+| `06` | B1（一行六个计数） | R81 安装前检查：`https_hostname` > 0 ⇒ 这些按钮升级后会真的发送，先确认目标；`unclassified` > 0 ⇒ 现场逐条确认 |
 
 ### 4b. `02-trg04` 的窄口径 / 上界两个数怎么读（2026-09-20 起）
 
@@ -191,10 +212,12 @@ scripts/ops/readonly-inventory-20260916/
 ├── 03-adm08-wildcard-permissions.sql
 ├── 04-adm13-declared-admins.sql
 ├── 05-trg04-webhook-target-totals.sql （2026-11-05：每个 webhook 目标分四桶计数）
+├── 06-trg04-button-webhook-totals.sql （2026-11-05：按钮字段 webhook 六列计数）
 ├── verify/
 │   ├── fixture-modern.sql        （合成新 schema：全假值）
 │   ├── fixture-legacy.sql        （合成旧 schema：缺 actions / is_admin / is_active）
 │   ├── fixture-webhook-totals.sql （05 专用：带 enabled 列的规则 r1–r16、订阅 w1–w6）
+│   ├── fixture-button-webhooks.sql （06 专用：meta_fields 按钮行 b1–b17）
 │   ├── run-verify.mjs            （一次性 schema 建→灌→跑→断言→DROP）
 │   └── readonly-inventory-pack.test.mjs （node --test 两层：静态契约 + 合成库）
 └── README.md                     （本文件）

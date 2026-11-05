@@ -37,7 +37,7 @@ const FILES = [
   '01-cred06-secret-keys.sql',
   '02-trg04-http-targets.sql',
   '03-adm08-wildcard-permissions.sql',
-  '04-adm13-declared-admins.sql', '05-trg04-webhook-target-totals.sql',
+  '04-adm13-declared-admins.sql', '05-trg04-webhook-target-totals.sql', '06-trg04-button-webhook-totals.sql',
 ]
 
 // ── LAYER 1 — hermetic ──────────────────────────────────────────────────────
@@ -267,25 +267,32 @@ test('F7: the guard-derived case table covers every host class at its exact edge
   }
 })
 
-// ── 05 (2026-11-05): webhook-target totals ──────────────────────────────────
+// ── 05 / 06 (2026-11-05): webhook-target totals ─────────────────────────────
 // 05-trg04-webhook-target-totals.sql counts EVERY send_webhook target and
 // subscription in four buckets (url_missing / not_https /
 // https_internal_literal / https_other). It is the same SQL that ran on site
-// on 2026-11-05 under the name 03-webhook-target-totals.sql. FILES above makes
-// the preamble / INVENTORY_RESULT / read-only tests cover it too.
+// on 2026-11-05 under the name 03-webhook-target-totals.sql.
+// 06-trg04-button-webhook-totals.sql counts button fields whose action is
+// send_webhook, in one row of six counts (https_hostname is the number that
+// matters for R81). FILES above makes the preamble / INVENTORY_RESULT /
+// read-only tests cover both.
 // Imported here rather than at the top so the sentinel line numbers that
 // ops-sql-pack-verify.yml cites stay put (import declarations are hoisted).
 import {
   checkInternalTargetCases,
   checkWebhookTotalsReadOnly,
+  checkButtonWebhookTotalsReadOnly,
   runWebhookTotals,
+  runButtonWebhookTotals,
   withFixture,
   WEBHOOK_TOTALS_FIXTURE,
+  BUTTON_WEBHOOKS_FIXTURE,
 } from './run-verify.mjs'
 
 const FILE_05 = '05-trg04-webhook-target-totals.sql'
+const FILE_06 = '06-trg04-button-webhook-totals.sql'
 
-/** 02's / 05's internal-host block: from `WITH atom AS (` through its `\gset`. */
+/** A pack file's internal-host block: from `WITH atom AS (` through its `\gset`. */
 function hostSetBlock(file) {
   const src = fs.readFileSync(path.join(PACK, file), 'utf8').replace(/\r\n/g, '\n')
   const start = src.indexOf('WITH atom AS (')
@@ -297,27 +304,40 @@ function hostSetBlock(file) {
   return src.slice(start, end + endMarker.length)
 }
 
-test('05: the internal-host regex block is byte-equal to 02 (drift guard)', () => {
-  const b02 = hostSetBlock('02-trg04-http-targets.sql')
-  const b05 = hostSetBlock(FILE_05)
-  assert.match(b05, /AS inv_internal_target_re\n\s*FROM v6\n\\gset\n$/)
-  assert.equal(b05, b02, '05 must flag exactly the internal hosts 02 flags: copy the block, do not edit it')
-})
+/** Non-comment source of a pack file (CRLF-normalised). */
+function packCode(file) {
+  const src = fs.readFileSync(path.join(PACK, file), 'utf8').replace(/\r\n/g, '\n')
+  return src.split('\n').filter(l => !/^\s*--/.test(l)).join('\n')
+}
 
-test('05: SET transaction_read_only = on; comes right after \\ir _preamble.sql', () => {
-  const src = fs.readFileSync(path.join(PACK, FILE_05), 'utf8').replace(/\r\n/g, '\n')
-  const code = src.split('\n').filter(l => l.trim() !== '' && !/^\s*--/.test(l))
-  assert.equal(code[0], '\\ir _preamble.sql', 'the preamble include is the first statement')
-  assert.equal(code[1], 'SET transaction_read_only = on;',
-    'the open transaction (psql -1 / AUTOCOMMIT off) must be made read-only before anything else runs')
-  assert.equal(code.filter(l => /transaction_read_only/.test(l)).length, 1)
-})
+for (const [tag, file] of [['05', FILE_05], ['06', FILE_06]]) {
+  test(`${tag}: the internal-host regex block is byte-equal to 02 (drift guard)`, () => {
+    const b02 = hostSetBlock('02-trg04-http-targets.sql')
+    const b = hostSetBlock(file)
+    assert.match(b, /AS inv_internal_target_re\n\s*FROM v6\n\\gset\n$/)
+    assert.equal(b, b02, `${tag} must flag exactly the internal hosts 02 flags: copy the block, do not edit it`)
+  })
+
+  test(`${tag}: SET transaction_read_only = on; comes right after \\ir _preamble.sql`, () => {
+    const code = packCode(file).split('\n').filter(l => l.trim() !== '')
+    assert.equal(code[0], '\\ir _preamble.sql', 'the preamble include is the first statement')
+    assert.equal(code[1], 'SET transaction_read_only = on;',
+      'the open transaction (psql -1 / AUTOCOMMIT off) must be made read-only before anything else runs')
+    assert.equal(code.filter(l => /transaction_read_only/.test(l)).length, 1)
+  })
+}
+
+/** The last statement of a pack file must be its own INVENTORY_RESULT SELECT. */
+function assertResultIsLast(file) {
+  const code = packCode(file)
+  const lastStmt = code.slice(code.trimEnd().slice(0, -1).lastIndexOf(';') + 1)
+  assert.ok(lastStmt.includes(`SELECT 'INVENTORY_RESULT file=${file} status='`),
+    `${file}: the INVENTORY_RESULT query must be the last statement`)
+}
 
 test('05: values-free selects and the INVENTORY_RESULT query is the last statement', () => {
-  const src = fs.readFileSync(path.join(PACK, FILE_05), 'utf8').replace(/\r\n/g, '\n')
-  const code = src.split('\n').filter(l => !/^\s*--/.test(l)).join('\n')
-  const lastStmt = code.slice(code.trimEnd().slice(0, -1).lastIndexOf(';') + 1)
-  assert.match(lastStmt, /SELECT 'INVENTORY_RESULT file=05-trg04-webhook-target-totals\.sql status='/)
+  assertResultIsLast(FILE_05)
+  const code = packCode(FILE_05)
   // Values-free: the two result queries select the flag plus counts, nothing else.
   for (const flag of ['enabled', 'active']) {
     const m = code.match(new RegExp(`\\nSELECT s\\.${flag},\\n([\\s\\S]*?)\\n  FROM \\(VALUES \\(true\\), \\(false\\)\\)`))
@@ -328,12 +348,39 @@ test('05: values-free selects and the INVENTORY_RESULT query is the last stateme
   }
 })
 
+test('06: values-free selects and the INVENTORY_RESULT query is the last statement', () => {
+  assertResultIsLast(FILE_06)
+  const code = packCode(FILE_06)
+  // Values-free: the B1 result query selects counts, nothing else.
+  const m = code.match(/\nSELECT (count\(\*\)[\s\S]*?)\n {2}FROM target;/)
+  assert.ok(m, '06: no B1 result query over `target`')
+  for (const line of m[1].split('\n')) {
+    assert.match(line.trim(), /^count\(/, `06: the B1 result query may select counts only: ${line.trim()}`)
+  }
+})
+
+/** Shared assertions for the one-transaction read-only witness (05 and 06). */
+function assertReadOnlyWitness({ before, single, autocommitOff, control }) {
+  for (const [mode, o] of [['-1', single], ['AUTOCOMMIT=off', autocommitOff]]) {
+    assert.notEqual(o.exit, 0, `${mode}: an injected UPDATE must abort the run`)
+    assert.match(o.stderr, /\b25006\b/, `${mode}: the abort must be read_only_sql_transaction (25006)`)
+    assert.equal(o.result, null, `${mode}: an aborted run must print NO INVENTORY_RESULT line`)
+    assert.equal(o.nameAfter, before, `${mode}: the row must be unchanged`)
+  }
+  // Control: with the SET line replaced by the same UPDATE, the write commits
+  // under -1 even though the preamble set default_transaction_read_only.
+  assert.equal(control.exit, 0, `control run exited ${control.exit}: ${control.stderr}`)
+  assert.match(control.result ?? '', /status=complete/)
+  assert.equal(control.nameAfter, 'witness', 'without the SET, the preamble alone does not stop the write')
+}
+
 // Each DB test builds and drops its own throwaway schema, so one red check
 // cannot take the others down with it.
 const onTotalsFixture = fn => withFixture('inventory_fixture_totals', WEBHOOK_TOTALS_FIXTURE, fn)
+const onButtonsFixture = fn => withFixture('inventory_fixture_buttons', BUTTON_WEBHOOKS_FIXTURE, fn)
 
 if (!DATABASE_URL || !psqlAvailable()) {
-  test('05 SYNTHETIC-DB CHECKS SKIPPED — no DATABASE_URL / psql', { skip: true }, () => {})
+  test('05/06 SYNTHETIC-DB CHECKS SKIPPED — no DATABASE_URL / psql', { skip: true }, () => {})
 } else {
   test('synthetic PostgreSQL: 05 sorts every target into the four buckets (modern shape)', () => {
     const r = { totals: onTotalsFixture(runWebhookTotals) }
@@ -375,23 +422,39 @@ if (!DATABASE_URL || !psqlAvailable()) {
   test('synthetic PostgreSQL: 05 host pattern agrees with every guard-derived case (same table as 02)', () => {
     // checkInternalTargetCases runs 05 itself, then matches the F7 case table
     // against 05's own \gset pattern in the same session (asserting each case).
-    const r = onTotalsFixture(s => checkInternalTargetCases(s, '05-trg04-webhook-target-totals.sql'))
+    const r = onTotalsFixture(s => checkInternalTargetCases(s, FILE_05))
     assert.equal(r.cases, INTERNAL_TARGET_CASES.length)
   })
 
   test('synthetic PostgreSQL: 05 stays read-only inside one transaction (psql -X -1, AUTOCOMMIT=off)', () => {
-    const { before, single, autocommitOff, control } = onTotalsFixture(checkWebhookTotalsReadOnly)
-    assert.equal(before, '<null>')
-    for (const [mode, o] of [['-1', single], ['AUTOCOMMIT=off', autocommitOff]]) {
-      assert.notEqual(o.exit, 0, `${mode}: an injected UPDATE must abort the run`)
-      assert.match(o.stderr, /\b25006\b/, `${mode}: the abort must be read_only_sql_transaction (25006)`)
-      assert.equal(o.result, null, `${mode}: an aborted run must print NO INVENTORY_RESULT line`)
-      assert.equal(o.nameAfter, '<null>', `${mode}: the row must be unchanged`)
-    }
-    // Control: with the SET line replaced by the same UPDATE, the write commits
-    // under -1 even though the preamble set default_transaction_read_only.
-    assert.equal(control.exit, 0, `control run exited ${control.exit}: ${control.stderr}`)
-    assert.match(control.result ?? '', /status=complete/)
-    assert.equal(control.nameAfter, 'witness', 'without the SET, the preamble alone does not stop the write')
+    const r = onTotalsFixture(checkWebhookTotalsReadOnly)
+    assert.equal(r.before, '<null>')
+    assertReadOnlyWitness(r)
+  })
+
+  test('synthetic PostgreSQL: 06 sorts every button webhook into its bucket', () => {
+    const r = onButtonsFixture(runButtonWebhookTotals)
+    // button_webhooks | url_missing | refused_both | https_ip_literal | https_hostname | unclassified
+    // (no other fixture here creates meta_fields; the row breakdown is in the fixture header)
+    assert.deepEqual(r.buttons, ['14|3|4|2|3|2'])
+    assert.equal(r.result, 'INVENTORY_RESULT file=06-trg04-button-webhook-totals.sql status=complete scope=meta_fields')
+  })
+
+  test('synthetic PostgreSQL: 06 reports a missing meta_fields as incomplete, never as zero', () => {
+    const r = withFixture('inventory_fixture_empty', null, runButtonWebhookTotals)
+    assert.equal(r.buttons, null, 'B1 must be skipped, not printed as zeros')
+    assert.equal(r.result,
+      'INVENTORY_RESULT file=06-trg04-button-webhook-totals.sql status=incomplete reason=missing-columns:meta_fields scope=none')
+  })
+
+  test('synthetic PostgreSQL: 06 host pattern agrees with every guard-derived case (same table as 02)', () => {
+    const r = onButtonsFixture(s => checkInternalTargetCases(s, FILE_06))
+    assert.equal(r.cases, INTERNAL_TARGET_CASES.length)
+  })
+
+  test('synthetic PostgreSQL: 06 stays read-only inside one transaction (psql -X -1, AUTOCOMMIT=off)', () => {
+    const r = onButtonsFixture(checkButtonWebhookTotalsReadOnly)
+    assert.equal(r.before, 'n')
+    assertReadOnlyWitness(r)
   })
 }
