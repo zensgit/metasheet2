@@ -80,7 +80,11 @@ for (const intent of ['create', 'update']) {
       assert.deepEqual(Object.keys(options).sort(), ['body', 'headers', 'method', 'redirect', 'signal'])
       assert.equal(options.method, intent === 'create' ? 'POST' : 'PUT')
       assert.equal(options.redirect, 'error')
-      assert.equal(options.signal, controller.signal)
+      // Gate 6: fetch receives a transport-owned native signal, not the run signal itself. It follows
+      // the run signal only until the status line arrives (see the forwarding tests below).
+      assert.equal(Object.getPrototypeOf(options.signal), AbortSignal.prototype)
+      assert.notEqual(options.signal, controller.signal)
+      assert.equal(options.signal.aborted, false)
       assert.deepEqual(options.headers, {
         'Content-Type': 'application/json; charset=utf-8', Accept: 'application/json',
         'x-acs-dingtalk-access-token': input.accessToken,
@@ -126,10 +130,14 @@ test('factory rejects missing implicit dependencies, extras, getters and proxy r
   const getter = Object.defineProperty({}, 'fetch', { enumerable: true, get() { touched += 1; throw new Error('synthetic-private') } })
   const proxy = new Proxy({ fetch() {} }, { getPrototypeOf() { touched += 1; throw new Error('synthetic-private') } })
   for (const value of [undefined, null, {}, { fetch: null }, { fetch() {}, readEnablement: null }, { fetch() {}, url: 'synthetic-private' },
-    Object.create({ fetch() {} }), getter, proxy, { fetch() {}, [Symbol('extra')]: 1 }]) {
+    Object.create({ fetch() {} }), getter, proxy, { fetch() {}, [Symbol('extra')]: 1 },
+    // The body deadline is an integer in [10, 60000] ms, like the runner budget; never a string or a float.
+    { fetch() {}, bodyReadTimeoutMs: 9 }, { fetch() {}, bodyReadTimeoutMs: 60001 }, { fetch() {}, bodyReadTimeoutMs: '5000' },
+    { fetch() {}, bodyReadTimeoutMs: 1.5 }, { fetch() {}, bodyReadTimeoutMs: null }]) {
     assert.throws(() => createYidaFormTransport(value), code('INPUT'))
   }
   assert.equal(touched, 0)
+  for (const bodyReadTimeoutMs of [10, 5000, 60000]) assert.deepEqual(Object.keys(createYidaFormTransport({ fetch() {}, bodyReadTimeoutMs })), ['send'])
 })
 
 test('closed request/data/options reject overrides, missing fields and accessors before enablement/fetch', async () => {
@@ -238,12 +246,12 @@ for (const status of [200, 201, 202, 206, 299]) {
   })
 }
 
-test('create does not accept missing/wrapped/non-string/unbounded/control result or empty204', async () => {
+test('create does not accept missing/wrapped/non-string/unbounded/control result or empty204: a 2xx was received, so RECEIPT', async () => {
   for (const body of ['', 'null', '[]', '"synthetic-instance"', '{}', '{"body":{"result":"synthetic-instance"}}',
     ...[null, 1, true, {}, '', ' x', 'x ', 'x\n', 'x'.repeat(129)].map((result) => JSON.stringify({ result }))]) {
-    await assert.rejects(transport(async () => new Response(body)).send(createRequest(), { signal: signal() }), code('RESPONSE'))
+    await assert.rejects(transport(async () => new Response(body)).send(createRequest(), { signal: signal() }), code('RECEIPT'))
   }
-  await assert.rejects(transport(async () => new Response(null, { status: 204 })).send(createRequest(), { signal: signal() }), code('RESPONSE'))
+  await assert.rejects(transport(async () => new Response(null, { status: 204 })).send(createRequest(), { signal: signal() }), code('RECEIPT'))
 })
 
 test('update accepts bounded non-JSON/empty/204 response and retains only the requested instance identity', async () => {
@@ -335,13 +343,13 @@ test('endless empty chunks hit16385-read cap and are cancelled; all-one-byte16Ki
   assert.equal(tracked.counts.reads, 16385)
 })
 
-test('UTF8 chunks may split codepoints, but malformed bytes/non-byte chunks reject even on update', async () => {
+test('UTF8 chunks may split codepoints, but malformed bytes/non-byte chunks are RECEIPT (2xx received) even on update', async () => {
   const bytes = Buffer.from('{"result":"synthetic-雪"}')
   const valid = streamResponse(Array.from(bytes, (byte) => Uint8Array.of(byte)))
   assert.deepEqual(await transport(async () => valid.response).send(createRequest(), { signal: signal() }), { statusCode: 200, instanceId: 'synthetic-雪' })
   for (const chunks of [[Uint8Array.of(0xc3, 0x28)], ['not-bytes']]) {
     const tracked = streamResponse(chunks)
-    await assert.rejects(transport(async () => tracked.response).send(updateRequest(), { signal: signal() }), code('RESPONSE'))
+    await assert.rejects(transport(async () => tracked.response).send(updateRequest(), { signal: signal() }), code('RECEIPT'))
     assert.equal(tracked.response.body.locked, false)
   }
 })
@@ -366,25 +374,54 @@ test('abort from enablement callback is checked before fetch', async () => {
   assert.equal(calls, 0)
 })
 
-test('aborted uncooperative fetch remains pending until settled then late response is discarded/cancelled', async () => {
+test('before the status line the run signal is forwarded to the fetch signal; after it, no later abort reaches the body', async () => {
+  const gate = deferred()
+  const controller = new AbortController()
+  let fetchSignal
+  const tracked = streamResponse([Buffer.from('{"result":"synthetic-instance"}')])
+  const result = transport((_url, options) => { fetchSignal = options.signal; return gate.promise }).send(createRequest(), { signal: controller.signal })
+  await nextTurn()
+  assert.equal(fetchSignal.aborted, false)
+  gate.resolve(tracked.response)
+  await nextTurn()
+  // The status line has arrived: the forwarding is gone, so the run signal no longer aborts the fetch signal.
+  controller.abort('synthetic-private')
+  assert.equal(fetchSignal.aborted, false)
+  assert.deepEqual(await result, { statusCode: 200, instanceId: 'synthetic-instance' })
+  assert.equal(tracked.counts.cancels, 0)
+  // Before the status line the same abort IS forwarded (the request is torn down, nothing is known).
+  const early = new AbortController(), earlyGate = deferred()
+  let earlySignal
+  const pending = transport((_url, options) => { earlySignal = options.signal; return earlyGate.promise }).send(createRequest(), { signal: early.signal })
+  await nextTurn()
+  early.abort('synthetic-private')
+  assert.equal(earlySignal.aborted, true)
+  earlyGate.reject(Object.assign(new Error('synthetic-private-abort'), { name: 'AbortError' }))
+  await assert.rejects(pending, code('ABORTED'))
+})
+
+test('aborted uncooperative fetch remains pending until settled; the late 2xx is then READ and returned (gate 6)', async () => {
   const gate = deferred()
   const controller = new AbortController()
   let settled = false
   let calls = 0
-  const result = transport((_url, options) => { calls += 1; assert.equal(options.signal, controller.signal); return gate.promise }).send(createRequest(), { signal: controller.signal })
+  let fetchSignal
+  const result = transport((_url, options) => { calls += 1; fetchSignal = options.signal; return gate.promise }).send(createRequest(), { signal: controller.signal })
   result.then(() => { settled = true }, () => { settled = true })
   controller.abort('synthetic-private')
   await nextTurn()
+  assert.equal(fetchSignal.aborted, true, 'the abort reached the fetch signal before any status line')
   assert.equal(settled, false, 'runner BUSY must retain this underlying pending fetch')
   const tracked = streamResponse([Buffer.from('{"result":"synthetic-instance"}')])
   gate.resolve(tracked.response)
-  await assert.rejects(result, code('ABORTED'))
+  // A fetch that ignored the abort and still produced a 2xx: that receipt is evidence, never discarded.
+  assert.deepEqual(await result, { statusCode: 200, instanceId: 'synthetic-instance' })
   assert.equal(calls, 1)
-  assert.equal(tracked.counts.reads, 0)
-  assert.equal(tracked.counts.cancels, 1)
+  assert.ok(tracked.counts.reads > 0)
+  assert.equal(tracked.counts.cancels, 0)
 })
 
-test('aborted stalled body cancels its reader without awaiting cleanup and releases lock', async () => {
+test('a stalled 2xx body ends as RECEIPT at the transport body deadline (not by the run signal), cancels its reader and releases the lock', async () => {
   const entered = deferred()
   const controller = new AbortController()
   let cancels = 0
@@ -392,19 +429,73 @@ test('aborted stalled body cancels its reader without awaiting cleanup and relea
     pull() { entered.resolve(); return new Promise(() => {}) },
     cancel() { cancels += 1; return Promise.reject(new Error('synthetic-private-cleanup')) },
   }, { highWaterMark: 0 })
-  const result = transport(async () => new Response(body)).send(createRequest(), { signal: controller.signal })
+  const started = Date.now()
+  const result = transport(async () => new Response(body), { bodyReadTimeoutMs: 20 }).send(createRequest(), { signal: controller.signal })
+  let settled = false
+  result.then(() => { settled = true }, () => { settled = true })
   await entered.promise
   controller.abort('synthetic-private')
-  await assert.rejects(result, code('ABORTED'))
+  await nextTurn()
+  assert.equal(settled, false, 'an abort after the status line does not end the attempt')
+  await assert.rejects(result, code('RECEIPT'))
+  assert.ok(Date.now() - started < 5000, 'the deadline, not the default budget, ended the stall')
   assert.equal(cancels, 1)
   assert.equal(body.locked, false)
   await nextTurn()
 })
 
-test('abort immediately after chunk delivery cannot publish an ACK', async () => {
+test('abort immediately after chunk delivery publishes the ACK (the 2xx had already been received)', async () => {
   const controller = new AbortController()
-  const body = new ReadableStream({ pull(stream) { stream.enqueue(Buffer.from('{"result":"synthetic-instance"}')); controller.abort('synthetic-private') } }, { highWaterMark: 0 })
-  await assert.rejects(transport(async () => new Response(body)).send(createRequest(), { signal: controller.signal }), code('ABORTED'))
+  const body = new ReadableStream({ pull(stream) { stream.enqueue(Buffer.from('{"result":"synthetic-instance"}')); stream.close(); controller.abort('synthetic-private') } }, { highWaterMark: 0 })
+  assert.deepEqual(await transport(async () => new Response(body)).send(createRequest(), { signal: controller.signal }), { statusCode: 200, instanceId: 'synthetic-instance' })
+  assert.equal(controller.signal.aborted, true)
+})
+
+test('undici model: an abort before the status line is ABORTED; one microtask after it the errored body is RECEIPT, later it is a receipt', async () => {
+  // Models real undici: the request follows options.signal for its whole life, so a late abort
+  // errors the body stream instead of being ignored. The transport must not hand it that signal
+  // after the status line, and must classify what it still gets as "2xx received".
+  function undiciLike(respond) {
+    return (_url, options) => new Promise((resolve, reject) => {
+      const fetchSignal = options.signal
+      if (fetchSignal.aborted) { reject(Object.assign(new Error('synthetic-private-abort'), { name: 'AbortError' })); return }
+      let controller
+      const body = new ReadableStream({
+        start(stream) { controller = stream },
+        pull(stream) { respond(stream) },
+      }, { highWaterMark: 0 })
+      fetchSignal.addEventListener('abort', () => { try { controller.error(Object.assign(new Error('synthetic-private-abort'), { name: 'AbortError' })) } catch { /* already closed */ } }, { once: true })
+      setImmediate(() => {
+        if (fetchSignal.aborted) reject(Object.assign(new Error('synthetic-private-abort'), { name: 'AbortError' }))
+        else resolve(new Response(body))
+      })
+    })
+  }
+  const chunk = Buffer.from('{"result":"synthetic-instance"}')
+  // (a) abort while the request is in flight (the model answers on the next turn): torn down, nothing known.
+  const early = new AbortController()
+  const earlyResult = transport(undiciLike((stream) => { stream.enqueue(chunk); stream.close() })).send(createRequest(), { signal: early.signal })
+  early.abort('synthetic-private')
+  await assert.rejects(earlyResult, code('ABORTED'))
+  // (b) abort inside the microtask window right after the fetch promise resolved: the body is errored
+  // by the undici model, but the status line was received, so it is RECEIPT, never UNAVAILABLE/ABORTED.
+  const window = new AbortController()
+  let resolvedResponse
+  const windowFetch = undiciLike((stream) => { stream.enqueue(chunk); stream.close() })
+  const windowResult = transport(async (url, options) => {
+    const response = await windowFetch(url, options)
+    resolvedResponse = response
+    window.abort('synthetic-private') // same microtask as the resolution the transport is about to observe
+    return response
+  }).send(createRequest(), { signal: window.signal })
+  await assert.rejects(windowResult, code('RECEIPT'))
+  assert.ok(resolvedResponse instanceof Response)
+  // (c) abort a whole turn after the status line: the body is read normally, the receipt is returned.
+  const late = new AbortController()
+  const lateResult = transport(undiciLike((stream) => { setImmediate(() => { stream.enqueue(chunk); stream.close() }) })).send(createRequest(), { signal: late.signal })
+  await nextTurn(); await nextTurn()
+  late.abort('synthetic-private')
+  assert.deepEqual(await lateResult, { statusCode: 200, instanceId: 'synthetic-instance' })
 })
 
 test('transport/read errors are values-free and never retried or sent through refresh', async () => {
@@ -419,7 +510,19 @@ test('transport/read errors are values-free and never retried or sent through re
     await assert.rejects(sender.send(createRequest(), { signal: signal() }), code(error === decorated ? 'RESPONSE' : 'UNAVAILABLE'))
     assert.equal(calls, 1)
   }
+  // An errored 2xx body is RECEIPT: the status line was received before the stream failed.
   const body = new ReadableStream({ pull(stream) { stream.error(new Error('synthetic-private')) } }, { highWaterMark: 0 })
-  await assert.rejects(transport(async () => new Response(body)).send(createRequest(), { signal: signal() }), code('UNAVAILABLE'))
+  await assert.rejects(transport(async () => new Response(body)).send(createRequest(), { signal: signal() }), code('RECEIPT'))
   assert.equal(touched, 0)
+})
+
+test('2xx with an oversized declared or actual body is TOO_LARGE and a 2xx non-JSON body is RECEIPT; both are post-status classes', async () => {
+  const declared = streamResponse([Buffer.from('{"result":"synthetic-instance"}')], { status: 201, headers: { 'content-length': '16385' } })
+  await assert.rejects(transport(async () => declared.response).send(createRequest(), { signal: signal() }), code('TOO_LARGE'))
+  assert.equal(declared.counts.reads, 0)
+  const actual = streamResponse([Buffer.from('x'.repeat(16385))], { status: 201 })
+  await assert.rejects(transport(async () => actual.response).send(createRequest(), { signal: signal() }), code('TOO_LARGE'))
+  await assert.rejects(transport(async () => new Response('not-json', { status: 201 })).send(createRequest(), { signal: signal() }), code('RECEIPT'))
+  // Non-2xx and redirects stay RESPONSE: nothing says the remote accepted anything.
+  await assert.rejects(transport(async () => new Response('not-json', { status: 500 })).send(createRequest(), { signal: signal() }), code('RESPONSE'))
 })

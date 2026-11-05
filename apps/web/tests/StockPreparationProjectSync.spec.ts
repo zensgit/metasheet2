@@ -40,6 +40,7 @@ import {
   clampErrorDetailToken,
   classifyPlanReadFailureReason,
   classifyPlanStep,
+  classifyRefreshApplyFailure,
   classifyWriteLockFailure,
   clampErrorCode,
   createStockPreparationProjectSyncApi,
@@ -52,7 +53,7 @@ import {
   type StockPreparationProjectSyncApi,
   type StockPreparationProjectSyncReport,
 } from '../src/services/integration/stockPreparation/projectSync'
-import { STOCK_PREP_SYNC_REASON_PLAIN, stockPrepErrorPlain } from '../src/services/integration/stockPreparation/plainLanguage'
+import { STOCK_PREP_SYNC_REASON_PLAIN, STOCK_PREP_SYNC_VERDICT_PLAIN, stockPrepErrorPlain } from '../src/services/integration/stockPreparation/plainLanguage'
 
 const PROJECT_NO = 'P2026-001'
 
@@ -1331,6 +1332,73 @@ describe('batch-refresh phase 0 step 1 — project write lock codes', () => {
       const plain = stockPrepErrorPlain(code)
       expect(`${plain.zh}${plain.zhNext}`).not.toContain('可能已写')
       expect(plain.zhNext).toContain('如果已写进一部分行')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------
+// Batch-refresh step 5 PR-8 review fix B1 — register R-63 ①: the generic version fence stops ANY project's apply with
+// 409 STOCK_PREP_CHANGE_PLAN_STALE, possibly AFTER rows were written (`details.partial: true`). The panel reads it by the
+// tri-state `partial` exactly as WL-6 reads LEASE_LOST — never 「这一步没有写成,数据没有变化」 / 「这次没有导入成功,数据没有
+// 变化」 over rows that landed, and never 变更计划 advice for a project that has no change plan.
+// ---------------------------------------------------------------------------------------------------
+describe('PR-8 review fix B1 — the version-fence stop (STOCK_PREP_CHANGE_PLAN_STALE) at the apply', () => {
+  const stop = (detailPartial: boolean | undefined, detailReason: string) => new StockPreparationProjectSyncCallError(409, '/apply', { code: 'STOCK_PREP_CHANGE_PLAN_STALE', detailReason, detailPartial })
+
+  it('WL-12: partial true ⇒ rows may have landed (verdict interrupted, archive incomplete); partial false ⇒ the neutral preview-again reason', async () => {
+    const some = await runStockPreparationProjectSync(makeApi({ apply: vi.fn().mockRejectedValue(stop(true, 'machine_columns_moved')) }), PROJECT_NO)
+    expect(stepOf(some, 'apply')).toMatchObject({ status: 'fail', reason: 'WRITE_ROW_CHANGED_MIDWAY', detail: { status: 409, code: 'STOCK_PREP_CHANGE_PLAN_STALE', reason: 'machine_columns_moved', partial: 1 } })
+    expect(some.verdict).toBe('interrupted')
+    expect(stepOf(some, 'archive')).toMatchObject({ status: 'skip', reason: 'BATCH_ARCHIVE_WRITE_INCOMPLETE' })
+    const midway = STOCK_PREP_SYNC_REASON_PLAIN.WRITE_ROW_CHANGED_MIDWAY
+    expect(midway.zh).toContain('可能已写进一部分')
+    expect(`${midway.zh}${midway.zhNext}`).not.toMatch(/没有写入|没有变化|变更计划/)
+    const interrupted = STOCK_PREP_SYNC_VERDICT_PLAIN[some.verdict]
+    expect(interrupted.zh).toContain('可能已经写进了一部分行')
+    expect(`${interrupted.zh}${interrupted.zhNext}`).not.toMatch(/没有变化|没有导入成功/)
+
+    const none = await runStockPreparationProjectSync(makeApi({ apply: vi.fn().mockRejectedValue(stop(false, 'record_missing')) }), PROJECT_NO)
+    expect(stepOf(none, 'apply')).toMatchObject({ status: 'fail', reason: 'WRITE_ROW_CHANGED', detail: { reason: 'record_missing', partial: 0 } })
+    // The server POSITIVELY reported no host write: `blocked` (「数据没有变化」) is truthful here, and the archive was not attempted.
+    expect(none.verdict).toBe('blocked')
+    expect(stepOf(none, 'archive')).toMatchObject({ status: 'skip', reason: 'BATCH_ARCHIVE_NOT_ATTEMPTED' })
+    const neutral = STOCK_PREP_SYNC_REASON_PLAIN.WRITE_ROW_CHANGED
+    expect(`${neutral.zh}${neutral.zhNext}`).not.toMatch(/没有写入|没有变化|可能已写进一部分|变更计划/)
+    expect(neutral.zhNext).toContain('重新试算')
+    for (const reading of [midway, neutral]) expect(reading.zh).not.toBe(STOCK_PREP_SYNC_REASON_PLAIN.WRITE_FAILED.zh)
+    assertValuesFree(some)
+    assertValuesFree(none)
+  })
+
+  it('WL-12b: partial NOT reported reads neutral at the step and is never `blocked`; only a plan-bound reason names the change plan', async () => {
+    const unknown = await runStockPreparationProjectSync(makeApi({ apply: vi.fn().mockRejectedValue(stop(undefined, 'machine_columns_moved')) }), PROJECT_NO)
+    expect(stepOf(unknown, 'apply')).toMatchObject({ status: 'fail', reason: 'WRITE_ROW_CHANGED' })
+    expect(stepOf(unknown, 'apply').detail.partial).toBeUndefined()
+    expect(unknown.verdict).toBe('interrupted')
+    const bound = await runStockPreparationProjectSync(makeApi({ apply: vi.fn().mockRejectedValue(stop(false, 'plan_invalidated')) }), PROJECT_NO)
+    expect(stepOf(bound, 'apply')).toMatchObject({ status: 'fail', reason: 'WRITE_CHANGE_PLAN_STALE', detail: { reason: 'plan_invalidated', partial: 0 } })
+    expect(bound.verdict).toBe('blocked')
+    expect(STOCK_PREP_SYNC_REASON_PLAIN.WRITE_CHANGE_PLAN_STALE.zhNext).toContain('变更计划')
+    // The classifier, tri-state first: `true` wins over every reason token.
+    expect(classifyRefreshApplyFailure('STOCK_PREP_CHANGE_PLAN_STALE', { partial: true, detailReason: 'plan_invalidated' })).toBe('WRITE_ROW_CHANGED_MIDWAY')
+    expect(classifyRefreshApplyFailure('STOCK_PREP_CHANGE_PLAN_STALE', { partial: false, detailReason: 'version_conflict_repeated' })).toBe('WRITE_ROW_CHANGED')
+    expect(classifyRefreshApplyFailure('STOCK_PREP_CHANGE_PLAN_STALE')).toBe('WRITE_ROW_CHANGED')
+    expect(classifyRefreshApplyFailure('STOCK_PREP_CHANGE_PLAN_STALE', { partial: null, detailReason: 'plan_replaced' })).toBe('WRITE_CHANGE_PLAN_STALE')
+  })
+
+  it('WL-13: the code-level sentence claims neither "nothing written" nor a change plan; every version-fence reason has its own reading', () => {
+    const generic = stockPrepErrorPlain('STOCK_PREP_CHANGE_PLAN_STALE')
+    expect(`${generic.zh}${generic.zhNext}${generic.en}${generic.enNext}`).not.toMatch(/没有写入|没有确认|变更计划|nothing was|change plan/)
+    for (const reason of ['machine_columns_moved', 'version_conflict_repeated', 'record_missing', 'record_replaced', 'duplicate_target_key']) {
+      const plain = stockPrepErrorPlain('STOCK_PREP_CHANGE_PLAN_STALE', reason)
+      expect(plain, reason).not.toBe(generic)
+      expect(`${plain.zh}${plain.zhNext}`, reason).not.toMatch(/没有写入|没有变化|变更计划/)
+      expect(String(plain.zhNext ?? '').length, reason).toBeGreaterThan(0)
+    }
+    for (const reason of ['plan_replaced', 'plan_written']) {
+      const plain = stockPrepErrorPlain('STOCK_PREP_CHANGE_PLAN_STALE', reason)
+      expect(plain, reason).not.toBe(generic)
+      expect(plain.zh, reason).not.toContain('没有确认')
     }
   })
 })

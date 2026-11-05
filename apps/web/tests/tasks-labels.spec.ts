@@ -107,6 +107,9 @@ vi.mock('../src/tasks/tasksApi', async () => {
     checkCommentBody: actual.checkCommentBody,
     listTasks: h_.listTasks,
     getTask: h_.getTask,
+    // Package 1b: the detail page reads the names on the task; a bare stub answers undefined,
+    // which the page reads as "no names" and leaves the ids as they are.
+    getTaskPeople: vi.fn(),
     createTask: h_.createTask,
     completeTask: h_.completeTask,
     reopenTask: h_.reopenTask,
@@ -521,6 +524,7 @@ const FMT_ARGS: Record<keyof typeof TASKS_FMT_ZH, unknown[]> = {
   groupsDeleteNamed: ['Group A'],
   groupsDeletePrompt: ['Group A'],
   groupsHiddenByFilter: [2],
+  groupsHiddenBySearch: [2],
 }
 
 describe('labels — every value is in its own language', () => {
@@ -624,6 +628,14 @@ describe('codeMessage', () => {
       TASK_BUSY: '任务正在被修改，请稍后重试',
       UNKNOWN_CODE: '操作失败，请稍后重试',
     })
+  })
+
+  it('ASSIGNEE_TASK_ACCESS_REQUIRED renders its own copy in both languages', () => {
+    expect(TASKS_CODE_KEYS.ASSIGNEE_TASK_ACCESS_REQUIRED).toBe('codeAssigneeTaskAccessRequired')
+    expect(codeMessage('ASSIGNEE_TASK_ACCESS_REQUIRED', TASKS_ZH)).toBe('对方还不能使用任务功能，请管理员先为其开通任务权限。')
+    expect(codeMessage('ASSIGNEE_TASK_ACCESS_REQUIRED', TASKS_EN)).toBe(
+      "This person can't use tasks yet. Ask an administrator to give them task access.",
+    )
   })
 })
 
@@ -737,6 +749,17 @@ describe('EN locale — TasksView list page renders no CJK', () => {
     typeInto(el, 'tasks-create-title', 'New one')
     await submitForm(el, 'tasks-create-form')
     expect(must(el, 'tasks-create-error').textContent?.trim()).toBe('This user is not in the current organization or has been deactivated')
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+  })
+
+  it('create error — 422 ASSIGNEE_TASK_ACCESS_REQUIRED shows that code\'s copy', async () => {
+    h_.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h_.createTask.mockResolvedValue({ kind: 'validation', code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' })
+    const el = await mountViewAt('/tasks')
+
+    typeInto(el, 'tasks-create-title', 'New one')
+    await submitForm(el, 'tasks-create-form')
+    expect(must(el, 'tasks-create-error').textContent?.trim()).toBe("This person can't use tasks yet. Ask an administrator to give them task access.")
     expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
   })
 
@@ -1044,6 +1067,16 @@ describe('EN locale — TasksView detail page renders no CJK', () => {
     await submitForm(el, 'tasks-detail-add-follower-form')
     expect(must(el, 'tasks-detail-follower-error').textContent?.trim()).toBe('This user is not in the current organization or has been deactivated')
 
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+  })
+
+  it('422 ASSIGNEE_TASK_ACCESS_REQUIRED next to the assignee form', async () => {
+    h_.addAssignee.mockResolvedValue({ kind: 'validation', code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' })
+    const el = await mountViewAt('/tasks/t1')
+
+    typeInto(el, 'tasks-detail-add-assignee-input', 'u9')
+    await submitForm(el, 'tasks-detail-add-assignee-form')
+    expect(must(el, 'tasks-detail-membership-error').textContent?.trim()).toBe("This person can't use tasks yet. Ask an administrator to give them task access.")
     expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
   })
 

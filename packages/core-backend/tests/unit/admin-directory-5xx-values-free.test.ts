@@ -53,6 +53,7 @@ const syncMocks = vi.hoisted(() => ({
   testDirectoryIntegration: vi.fn(),
   unbindDirectoryAccount: vi.fn(),
   updateDirectoryIntegration: vi.fn(),
+  updateDirectoryIntegrationIdentity: vi.fn(),
 }))
 
 const alertDeliveryMocks = vi.hoisted(() => ({
@@ -261,6 +262,12 @@ const CATCH_SITES: Site[] = [
     calls: [{ method: 'put', path: '/integrations/:integrationId', params: INTEGRATION, body: {} }],
     fail: rejectWith(syncMocks.updateDirectoryIntegration),
     outcome: helper('DIRECTORY_UPDATE_FAILED', 'Failed to update directory integration'),
+  },
+  {
+    owner: 'PUT /integrations/:integrationId/identity',
+    calls: [{ method: 'put', path: '/integrations/:integrationId/identity', params: INTEGRATION, body: {} }],
+    fail: rejectWith(syncMocks.updateDirectoryIntegrationIdentity),
+    outcome: helper('DIRECTORY_IDENTITY_UPDATE_FAILED', 'Failed to save directory identity metadata'),
   },
   {
     owner: 'GET /integrations/:integrationId/approval-card-config',
@@ -691,7 +698,7 @@ describe('routes/admin-directory.ts — every catch clause is enumerated (#6163 
     expect(clauses.filter((c) => !c.binding).map((c) => c.owner)).toEqual(BARE_CATCH_SITES.map((s) => s.owner))
     // The plain-text count, so a clause the AST walk could misread still has to be listed.
     expect(ROUTE_SOURCE.split('catch (').length - 1).toBe(CATCH_SITES.length)
-    expect(CATCH_SITES.length).toBe(35)
+    expect(CATCH_SITES.length).toBe(36)
   })
 
   it('every sendDirectoryFailure call in the route is a helper site of the table, with its code and literal fallback', () => {

@@ -63,6 +63,18 @@ describe('createDingTalkTodoTask', () => {
     })
   })
 
+  it('a 2xx JSON object with no task id field parses to taskId undefined and does NOT throw', async () => {
+    const fetchFn = okResponse({})
+    const result = await createDingTalkTodoTask(
+      TOKEN, OPERATOR,
+      { sourceId: 's', subject: 'x', creatorUnionId: OPERATOR, executorUnionIds: ['e'] },
+      {}, { fetchFn: fetchFn as never },
+    )
+    expect(result.taskId).toBeUndefined()
+    expect(result.raw).toEqual({})
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
   it('a business rejection (4xx) throws DingTalkRequestError and is NOT outcome-unknown', async () => {
     const fetchFn = errorResponse(400, { code: 'InvalidParameter', message: 'bad sourceId' })
     const error = await createDingTalkTodoTask(

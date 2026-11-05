@@ -1,3 +1,6 @@
+import { DirectoryUserPaginationError, getNextDirectoryUserCursor } from './directory-user-pagination'
+import { hasDirectoryDepartmentCycle } from './directory-department-cycle'
+import { readDirectoryIdentityVerification, type DirectoryIdentityVerification } from './integration-identity'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { buildOnboardingPacket } from '../auth/access-presets'
@@ -7,6 +10,11 @@ import { LoginNameRuleError, assertLoginName } from '../auth/login-name-rule'
 import { validatePassword } from '../auth/password-policy'
 import { PasswordPolicyError } from '../auth/password-policy-error'
 import { Logger } from '../core/logger'
+import {
+  DingTalkIncompleteResponseError,
+  observeDingTalkTransportRetries,
+  type DingTalkTransportRetryEvent,
+} from '../integrations/dingtalk/transport'
 import { query, transaction } from '../db/pg'
 import { RecoveryConflictError, translateRecoveryConflict } from '../db/recovery-conflict'
 import { sweepStaleDepartmentBindings } from './department-binding-reconciliation'
@@ -88,6 +96,8 @@ export type DirectoryAdmissionMode = 'manual_only' | 'auto_for_scoped_department
 export type DirectoryMemberGroupSyncMode = 'disabled' | 'sync_scoped_departments'
 
 type DirectoryIntegrationConfig = {
+  corpName: string | null
+  appName: string | null
   appKey: string
   appSecret: string
   workNotificationAgentId: string
@@ -337,6 +347,10 @@ export type DirectoryIntegrationSummary = {
   createdAt: string
   updatedAt: string
   config: {
+    corpName: string | null
+    appName: string | null
+    identityStatus: 'unverified' | 'verified' | 'mismatch'
+    identityVerification: DirectoryIdentityVerification | null
     appKey: string
     appSecretConfigured: boolean
     workNotificationAgentIdConfigured: boolean
@@ -380,6 +394,8 @@ export type DirectoryDepartmentSummary = {
 }
 
 export type DirectoryIntegrationInput = {
+  corpName?: string
+  appName?: string
   name: string
   corpId: string
   appKey: string
@@ -411,6 +427,8 @@ export type DirectoryIntegrationTestInput = DirectoryIntegrationInput & {
 type NormalizedDirectoryIntegrationInput = Omit<
   DirectoryIntegrationInput,
   | 'name'
+  | 'corpName'
+  | 'appName'
   | 'corpId'
   | 'appKey'
   | 'appSecret'
@@ -425,6 +443,8 @@ type NormalizedDirectoryIntegrationInput = Omit<
   | 'defaultDeprovisionPolicy'
   | 'status'
 > & {
+  corpName: string | null
+  appName: string | null
   name: string
   corpId: string
   appKey: string
@@ -1884,6 +1904,8 @@ function parseIntegrationConfig(row: Pick<DirectoryIntegrationRow, 'config'>): D
   const memberGroupDefaultRoleIds = normalizeMemberGroupDefaultRoleIds(config.memberGroupDefaultRoleIds)
   const memberGroupDefaultNamespaces = normalizeMemberGroupDefaultNamespaces(config.memberGroupDefaultNamespaces)
   return {
+    corpName: normalizeOptionalText(config.corpName),
+    appName: normalizeOptionalText(config.appName),
     appKey,
     appSecret,
     workNotificationAgentId,
@@ -1904,6 +1926,9 @@ function summarizeIntegration(row: DirectoryIntegrationRow): DirectoryIntegratio
   const config = parseIntegrationConfig(row)
   // Approval-card keys are presence-only in summaries (secret never decrypted here).
   const rawConfig = parseJsonRecord(row.config)
+  const identityVerification = readDirectoryIdentityVerification(rawConfig.identityVerification, {
+    corpId: row.corp_id, appKey: config.appKey, corpName: config.corpName, appName: config.appName,
+  })
   return {
     id: row.id,
     orgId: row.org_id,
@@ -1921,6 +1946,10 @@ function summarizeIntegration(row: DirectoryIntegrationRow): DirectoryIntegratio
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     config: {
+      corpName: config.corpName,
+      appName: config.appName,
+      identityVerification,
+      identityStatus: !identityVerification ? 'unverified' : identityVerification.appCorpId === row.corp_id ? 'verified' : 'mismatch',
       appKey: config.appKey,
       appSecretConfigured: Boolean(config.appSecret),
       workNotificationAgentIdConfigured: Boolean(config.workNotificationAgentId),
@@ -2380,6 +2409,14 @@ function normalizeIntegrationInput(
   input: DirectoryIntegrationInput,
   current?: DirectoryIntegrationConfig,
 ): NormalizedDirectoryIntegrationInput {
+  if (input.corpName !== undefined && (typeof input.corpName !== 'string' || input.corpName.trim().length > 200)) {
+    throw new DirectoryValidationError('corpName must be a string of at most 200 characters')
+  }
+  const corpName = input.corpName === undefined ? current?.corpName ?? null : normalizeOptionalText(input.corpName)
+  if (input.appName !== undefined && (typeof input.appName !== 'string' || input.appName.trim().length > 200)) {
+    throw new DirectoryValidationError('appName must be a string of at most 200 characters')
+  }
+  const appName = input.appName === undefined ? current?.appName ?? null : normalizeOptionalText(input.appName)
   const name = normalizeText(input.name)
   const corpId = normalizeText(input.corpId)
   const appKey = normalizeText(input.appKey)
@@ -2407,6 +2444,8 @@ function normalizeIntegrationInput(
 
   return {
     ...input,
+    corpName,
+    appName,
     name,
     corpId,
     appKey,
@@ -2504,6 +2543,8 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
       normalized.status,
       normalized.corpId,
       JSON.stringify({
+        corpName: normalized.corpName,
+        appName: normalized.appName,
         appKey: normalized.appKey,
         appSecret: normalizeStoredSecretValue(normalized.appSecret),
         workNotificationAgentId: normalized.workNotificationAgentId
@@ -2846,6 +2887,11 @@ export async function updateDirectoryIntegration(
   // otherwise silently wipe them on every integration-form save. The encrypted secret is carried
   // as-is — never decrypted here.
   const rawCurrentConfig = parseJsonRecord(current.config)
+  const identityVerification = normalized.appSecret === currentConfig.appSecret && normalized.baseUrl === currentConfig.baseUrl
+    ? readDirectoryIdentityVerification(rawCurrentConfig.identityVerification, {
+      corpId: normalized.corpId, appKey: normalized.appKey, corpName: normalized.corpName, appName: normalized.appName,
+    })
+    : null
   const carriedApprovalCardLinkSecret = normalizeText(rawCurrentConfig.approvalCardLinkSecret) || null
   const carriedApprovalCardPublicAppUrl = normalizeText(rawCurrentConfig.approvalCardPublicAppUrl) || null
   // Same carry-through, same reason, for the DingTalk todo mirror's operator unionId
@@ -2874,7 +2920,7 @@ export async function updateDirectoryIntegration(
          schedule_timezone = $8,
          default_deprovision_policy = $9,
          updated_at = NOW()
-     WHERE id = $1
+     WHERE id = $1 AND config IS NOT DISTINCT FROM $10::jsonb AND corp_id = $11
      RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
                default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
     [
@@ -2883,6 +2929,9 @@ export async function updateDirectoryIntegration(
       normalized.status,
       normalized.corpId,
       JSON.stringify({
+        corpName: normalized.corpName,
+        appName: normalized.appName,
+        identityVerification,
         appKey: normalized.appKey,
         appSecret: normalizeStoredSecretValue(normalized.appSecret),
         workNotificationAgentId: normalized.workNotificationAgentId
@@ -2906,11 +2955,68 @@ export async function updateDirectoryIntegration(
       normalized.scheduleCron,
       scheduleTimezone,
       normalized.defaultDeprovisionPolicy,
+      current.config === null ? null : JSON.stringify(rawCurrentConfig),
+      current.corp_id,
     ],
   ).catch((error: unknown) => {
     throw uniqueViolationAsConflict(error)
   })
 
+  if (!result.rows[0]) throw new DirectoryConflictError('Directory configuration changed; reload before saving')
+  return summarizeIntegration(result.rows[0])
+}
+
+/** Metadata-only save: cannot change credentials, schedules, synchronization or access. */
+export async function updateDirectoryIntegrationIdentity(
+  integrationId: string,
+  rawInput: unknown,
+  adminUserId: string,
+): Promise<DirectoryIntegrationSummary | null> {
+  const allowed = new Set(['corpId', 'appKey', 'corpName', 'appName', 'confirm', 'appCorpId', 'appCorpName'])
+  if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)
+    || Object.keys(rawInput).some((key) => !allowed.has(key))) {
+    throw new DirectoryValidationError('Identity metadata contains unsupported fields')
+  }
+  const input = rawInput as Record<string, unknown>
+  if (input.confirm !== undefined && typeof input.confirm !== 'boolean') {
+    throw new DirectoryValidationError('Identity confirmation must be a boolean')
+  }
+  for (const field of ['corpName', 'appName']) {
+    if (typeof input[field] !== 'string' || input[field].trim().length > 200) {
+      throw new DirectoryValidationError('Identity display names must be strings of at most 200 characters')
+    }
+  }
+  const current = await getIntegrationRow(integrationId)
+  if (!current || current.provider !== DEFAULT_PROVIDER) return null
+  const rawConfig = parseJsonRecord(current.config)
+  if (input.corpId !== current.corp_id || input.appKey !== rawConfig.appKey) {
+    throw new DirectoryConflictError('Directory identity changed; reload before confirming')
+  }
+  const binding = {
+    corpId: current.corp_id,
+    appKey: normalizeText(rawConfig.appKey),
+    corpName: normalizeOptionalText(input.corpName),
+    appName: normalizeOptionalText(input.appName),
+  }
+  const identityVerification = input.confirm === true
+    ? readDirectoryIdentityVerification({
+      ...binding, appCorpId: input.appCorpId, appCorpName: input.appCorpName,
+      source: 'admin_console', checkedAt: new Date().toISOString(), checkedBy: adminUserId,
+    }, binding)
+    : readDirectoryIdentityVerification(rawConfig.identityVerification, binding)
+  if (input.confirm === true && !identityVerification) {
+    throw new DirectoryValidationError('Confirm both names and the application owner in the DingTalk administrator console first')
+  }
+  const result = await query<DirectoryIntegrationRow>(
+    `UPDATE directory_integrations
+     SET config = COALESCE(config, '{}'::jsonb) || $2::jsonb, updated_at = NOW()
+     WHERE id = $1 AND config IS NOT DISTINCT FROM $3::jsonb AND corp_id = $4
+     RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+               default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
+    [integrationId, JSON.stringify({ corpName: binding.corpName, appName: binding.appName, identityVerification }),
+      current.config === null ? null : JSON.stringify(rawConfig), current.corp_id],
+  )
+  if (!result.rows[0]) throw new DirectoryConflictError('Directory configuration changed; reload before confirming')
   return summarizeIntegration(result.rows[0])
 }
 
@@ -3154,6 +3260,8 @@ export async function fetchAllDepartments(
     baseUrl: config.baseUrl,
   })
   const departments = new Map<string, DingTalkDepartment>()
+  // The seeded synthetic root is not a returned wire id until a list row replaces it.
+  const returnedWireDepartmentIds = new Set<string>()
   departments.set(config.rootDepartmentId, {
     id: config.rootDepartmentId,
     parentId: null,
@@ -3170,9 +3278,21 @@ export async function fetchAllDepartments(
     const children = await listDingTalkDepartments(accessToken, current, { baseUrl: config.baseUrl })
     for (const child of children) {
       const existing = departments.get(child.id)
+      if (
+        existing
+        && returnedWireDepartmentIds.has(child.id)
+        && existing.parentId !== child.parentId
+      ) {
+        throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', {})
+      }
       departments.set(child.id, existing ? { ...existing, ...child } : child)
+      returnedWireDepartmentIds.add(child.id)
       if (!existing) queue.push(child.id)
     }
+  }
+
+  if (hasDirectoryDepartmentCycle(departments)) {
+    throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', {})
   }
 
   // dept-head plumbing: enrich each department with its manager user ids from the
@@ -3186,10 +3306,7 @@ export async function fetchAllDepartments(
       if (apiCalls) apiCalls.departmentDetailCalls += 1
       return getDingTalkDepartmentDetail(accessToken, deptId, { baseUrl: config.baseUrl })
     },
-    (deptId, error) =>
-      logger.warn(
-        `dept-head: department/get failed for dept ${deptId} (integration ${integrationName}); carrying prior forward: ${readErrorMessage(error, 'unknown error')}`,
-      ),
+    () => logger.warn('DingTalk department detail unavailable; carrying prior manager list forward'),
   )
 
   return departments
@@ -3197,6 +3314,62 @@ export async function fetchAllDepartments(
 
 function mergeDepartmentIds(primary: string[], secondary: string[]): string[] {
   return Array.from(new Set([...primary, ...secondary].filter(Boolean)))
+}
+
+/**
+ * §7.7 sync-performance telemetry: transport retries observed during THIS run's directory
+ * pull, bucketed by the transport's failure reason so an operator can tell provider flow
+ * control (HTTP-200 envelope errcode 90018 family) from HTTP 429 and from network failures.
+ * Counts RETRIES (attempts the transport decided to repeat), not failures: the exhausted final
+ * attempt of a call is not an event. The counters reach the run record only on the completion
+ * write — a failed run carries no stats at all, and where the pull tolerates an exhausted call
+ * (department detail enrichment) the run completes with no trace of that exhaustion here.
+ */
+export interface DirectoryPullRetryCounters {
+  total: number
+  flowControl: number
+  http429: number
+  network: number
+  /** Every other retryable reason (transient 5xx, malformed 2xx body). `total` is the sum of all four. */
+  other: number
+}
+
+export function createDirectoryPullRetryCounters(): DirectoryPullRetryCounters {
+  return { total: 0, flowControl: 0, http429: 0, network: 0, other: 0 }
+}
+
+/** Bucket one transport retry event by its `reason` (the string the transport's warn line carries). */
+export function recordDirectoryPullRetry(
+  counters: DirectoryPullRetryCounters,
+  event: Pick<DingTalkTransportRetryEvent, 'reason'>,
+): void {
+  counters.total += 1
+  if (event.reason.startsWith('flow_control_errcode_')) {
+    counters.flowControl += 1
+  } else if (event.reason === 'http_429') {
+    counters.http429 += 1
+  } else if (event.reason === 'network_error') {
+    counters.network += 1
+  } else {
+    counters.other += 1
+  }
+}
+
+/** The stats-JSONB projection of the retry counters; `external*` prefix matches the call counters. */
+export function summarizeDirectoryPullRetries(counters: DirectoryPullRetryCounters): {
+  externalPullRetryCount: number
+  externalPullRetryFlowControlCount: number
+  externalPullRetryHttp429Count: number
+  externalPullRetryNetworkCount: number
+  externalPullRetryOtherCount: number
+} {
+  return {
+    externalPullRetryCount: counters.total,
+    externalPullRetryFlowControlCount: counters.flowControl,
+    externalPullRetryHttp429Count: counters.http429,
+    externalPullRetryNetworkCount: counters.network,
+    externalPullRetryOtherCount: counters.other,
+  }
 }
 
 export async function fetchAllUsers(
@@ -3216,6 +3389,7 @@ export async function fetchAllUsers(
 
   for (const departmentId of departmentMap.keys()) {
     let cursor = 0
+    const seenCursors = new Set<number>([cursor])
     let hasMore = true
     while (hasMore) {
       if (apiCalls) apiCalls.userListPageCalls += 1
@@ -3226,6 +3400,7 @@ export async function fetchAllUsers(
         pageSize,
         { baseUrl: config.baseUrl },
       )
+      const nextCursor = getNextDirectoryUserCursor(response, seenCursors)
       for (const summary of response.users) {
         const existing = users.get(summary.userId)
         if (!existing) {
@@ -3244,10 +3419,11 @@ export async function fetchAllUsers(
           departmentIds: mergeDepartmentIds(existing.departmentIds, summary.departmentIds),
         })
       }
-      if (!response.hasMore || response.nextCursor === null) {
+      if (nextCursor === null) {
         hasMore = false
       } else {
-        cursor = response.nextCursor
+        cursor = nextCursor
+        seenCursors.add(cursor)
       }
     }
   }
@@ -3825,6 +4001,18 @@ async function assertDirectorySyncNotFrozenByTransfer(
 ): Promise<void> {
   // Pool `query` is a bare function; transaction clients are `{ query }`. Normalize once.
   const q: FreezeCheckClient = client ?? { query: (sql, params) => query(sql, params) }
+  const handoverTable = await q.query<{ reg: string | null }>(
+    `SELECT to_regclass('directory_handovers')::text AS reg`,
+  )
+  if (handoverTable.rows[0]?.reg) {
+    const handover = await q.query<{ id: string }>(
+      `SELECT id FROM directory_handovers WHERE
+        (source_integration_id=$1 AND state IN ('applied','finalized'))
+        OR (target_integration_id=$1 AND state='applied') LIMIT 1`,
+      [integrationId],
+    )
+    if (handover.rows.length) throw new DirectorySyncFrozenByTransferError(handover.rows[0].id)
+  }
   const tableProbe = await q.query<{ reg: string | null }>(
     `SELECT to_regclass('provider_org_transfers')::text AS reg`,
   )
@@ -3885,6 +4073,7 @@ const DIRECTORY_FAILURE_FIXED_SENTENCES: readonly FixedSentenceErrorClass[] = [
   DirectoryConflictError,
   DirectoryTenantChangeBlockedError,
   DirectorySyncLeaseLostError,
+  DirectoryUserPaginationError,
   RecoveryConflictError,
   LoginNameRuleError,
   PasswordPolicyError,
@@ -4098,15 +4287,33 @@ export async function syncDirectoryIntegration(
   // §7.7 telemetry: one counter set per run, incremented at each external directory-pull call
   // site (departments + users) so the N+1 detail fan-out is measurable on the run record.
   const apiCallCounters = createDirectorySyncApiCallCounters()
+  // §7.7 per-phase timing + retry telemetry (additive stats keys; see the stats block below).
+  // The pull wall-clock is the two provider pulls only — the local DB read between them and the
+  // manual diagnostic sample are excluded, matching what `externalDirectoryPullCalls` covers.
+  // The transport retry observer is scoped to the same two calls (token refreshes inside them
+  // are observed too, although the call counters exclude the token fetch).
+  const pullRetryCounters = createDirectoryPullRetryCounters()
+  const observePullRetry = (event: DingTalkTransportRetryEvent) => recordDirectoryPullRetry(pullRetryCounters, event)
+  let fetchDurationMs = 0
 
   try {
-    const departments = await fetchAllDepartments(config, integration.name, apiCallCounters)
+    const fetchDepartmentsStartedAtMs = Date.now()
+    const departments = await observeDingTalkTransportRetries(
+      observePullRetry,
+      () => fetchAllDepartments(config, integration.name, apiCallCounters),
+    )
+    fetchDurationMs += Date.now() - fetchDepartmentsStartedAtMs
     const departmentPathMap = buildDepartmentPathMap(departments)
     // dept-head plumbing: capture last-known-good dept_manager_userid_list BEFORE the
     // whole-column upsert (raw = EXCLUDED.raw) overwrites raw, so a failed department/get
     // (managerUserIds left undefined) carries the prior value forward instead of wiping it.
     const priorDeptManagers = await capturePriorDeptManagers(integrationId, query)
-    const users = await fetchAllUsers(config, departments, apiCallCounters)
+    const fetchUsersStartedAtMs = Date.now()
+    const users = await observeDingTalkTransportRetries(
+      observePullRetry,
+      () => fetchAllUsers(config, departments, apiCallCounters),
+    )
+    fetchDurationMs += Date.now() - fetchUsersStartedAtMs
 
     let directoryDiagnosticStats: JsonRecord = {}
     if (triggerSource === 'manual') {
@@ -4143,6 +4350,11 @@ export async function syncDirectoryIntegration(
     // RecoveryConflictError; every other error, DirectorySyncLeaseLostError included,
     // rethrows unchanged.
     await translateRecoveryConflict(() => transaction(async (client) => {
+      // §7.7 per-phase timing: apply-transaction wall-clock anchor and the bcrypt time spent
+      // inside it (accumulated at the admission hash site below). Not statements — the
+      // isolation pin below is still the transaction's first statement.
+      const applyTransactionStartedAtMs = Date.now()
+      let bcryptMsInTransaction = 0
       // T2 lock-correctness P2 (PB4-3 idiom — see local-directory-org.ts's reparent guard): the
       // pool wrapper issues a bare BEGIN, so on a deployment where default_transaction_isolation
       // is 'repeatable read' this transaction's snapshot would be taken by the
@@ -4468,12 +4680,14 @@ export async function syncDirectoryIntegration(
                 const pendingMode = isDirectoryPendingActivationEnabled()
                 let generatedPassword: string | null = null
                 let passwordHash: string
+                const passwordHashStartedAtMs = Date.now()
                 if (pendingMode) {
                   passwordHash = await buildUnusablePasswordHash()
                 } else {
                   generatedPassword = generateDirectoryAdmissionTemporaryPassword()
                   passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
                 }
+                bcryptMsInTransaction += Date.now() - passwordHashStartedAtMs
                 // DT-HARDEN-02: mirror assertDirectoryAccountCanEnableDingTalkGrant's
                 // condition instead of hardcoding grant=true. A corp-scoped account
                 // (corp_id set) without an openId cannot use DingTalk login and would
@@ -4760,6 +4974,9 @@ export async function syncDirectoryIntegration(
         (sql, params) => client.query(sql, params),
       )
 
+      // §7.7: snapshot the apply-transaction window BEFORE the stats literal (whose `durationMs`
+      // reads the clock first) so the per-phase values can never add up past `durationMs`.
+      const applyTransactionMs = Date.now() - applyTransactionStartedAtMs
       const stats = {
         departmentsSynced: departments.size,
         accountsSynced: users.size,
@@ -4779,6 +4996,17 @@ export async function syncDirectoryIntegration(
         linkedManagerCount: managerBindingCoverage.linkedManagerCount,
         managerCoverage: managerBindingCoverage.coverage,
         durationMs: Date.now() - runStartedAtMs,
+        // §7.7 per-phase timing — additive; every pre-existing key is kept. `fetchDurationMs`:
+        // the two provider pulls (departments + users) only. `applyTransactionMs`: from the apply
+        // transaction's first line to THIS serialization point — the completion UPDATEs and the
+        // COMMIT that follow cannot be included in a value written inside the transaction.
+        // `bcryptMsInTransaction`: wall-clock spent hashing admission passwords inside that
+        // window (0 unless auto-admission candidates were hashed this run).
+        fetchDurationMs,
+        applyTransactionMs,
+        bcryptMsInTransaction,
+        // §7.7 transport retries observed during the pull, by failure reason (all 0 on a clean run).
+        ...summarizeDirectoryPullRetries(pullRetryCounters),
         deprovisionApplied: deprovisionOutcome.applied,
         // W4-PRE-1d (owner P2 item 1/3): org-membership candidates — the circuit breaker's own
         // input. See `DirectoryDeprovisionOutcome.candidateCount`'s doc-comment.

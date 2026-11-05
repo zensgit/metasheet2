@@ -228,21 +228,56 @@
           <!-- 派发任务 (R-45 step 1): creates a real task in the task centre from this record. Shown only
                where the top bar's 任务 entry is (same rule, `canDispatchTasks` in tasks/tasksAccess.ts)
                and the viewer holds tasks:write, only when the page hands a dispatch binding, and only
-               with the ids the source link needs (sheetId + viewId + record). Otherwise the menu is
-               unchanged. -->
+               with the ids the source link needs (sheetId + viewId + record), each one an id the task
+               service takes as a source (`dispatchSourceUsable`). Otherwise the menu is unchanged. -->
           <MtMenuItem
-            v-if="canDispatchTask && dispatchBinding && sheetId && viewId && record"
+            v-if="canDispatchTask && dispatchBinding && sheetId && viewId && record && dispatchSourceUsable"
             class="meta-record-drawer__btn"
             data-testid="record-inspector-dispatch-task"
             :title="l('record.dispatchTaskTitle')"
             @select="showTaskDispatch = true"
           >{{ l('record.dispatchTask') }}</MtMenuItem>
-          <MtMenuItem v-if="record && canCreate" class="meta-record-drawer__btn meta-record-drawer__btn--duplicate" :title="l('record.duplicateTitle')" @select="emit('duplicate')">{{ l('record.duplicate') }}</MtMenuItem>
+          <!-- Customer feedback 2026-10-27: on a sheet whose rows a plugin maintains, /context marks duplicate
+               blocked; the entry stays visible but DISABLED with the reason shown inline (a disabled
+               button's tooltip is unreliable). The workbench asks for confirmation before it duplicates. -->
+          <MtMenuItem
+            v-if="record && canCreate"
+            class="meta-record-drawer__btn meta-record-drawer__btn--duplicate"
+            :disabled="!!duplicateBlockedReason"
+            :title="duplicateBlockedReason || l('record.duplicateTitle')"
+            @select="emit('duplicate')"
+          >{{ l('record.duplicate') }}<span
+            v-if="duplicateBlockedReason"
+            class="meta-record-drawer__menu-reason"
+            data-testid="record-inspector-duplicate-blocked-reason"
+          >{{ duplicateBlockedReason }}</span></MtMenuItem>
+          <!-- 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.3, §8 B3.3): 「复制为新行」 — offered only when the
+               workbench says so (/context's manual-rows block in state `allowed`, for an actor who can create); any row of
+               the sheet can be the source. The workbench asks first and calls POST /records/:recordId/manual-copy. -->
+          <MtMenuItem
+            v-if="record && manualCopyAvailable"
+            class="meta-record-drawer__btn"
+            data-testid="record-inspector-manual-copy"
+            :title="manualRowLabel('entry.copyTitle', isZh)"
+            @select="emit('manual-copy')"
+          >{{ manualRowLabel('entry.copy', isZh) }}</MtMenuItem>
           <!-- gate P2 (kept verbatim): the danger class anchor stays a stable spec/test anchor even
                though the bespoke `--danger` background rule it once fought is gone in this MtMenuItem
                host — see this class's own style rule below for the current (menu-row) styling. -->
-          <hr v-if="resolvedCanDelete" class="meta-record-drawer__menu-separator" />
+          <hr v-if="resolvedCanDelete || deleteBlockedReason" class="meta-record-drawer__menu-separator" />
           <MtMenuItem v-if="resolvedCanDelete" class="meta-record-drawer__btn--danger" @select="emit('delete')">{{ l('record.delete') }}</MtMenuItem>
+          <!-- R-66: a PLM row (rowActions.deleteBlockedReason, server-derived) cannot be deleted by anyone; the entry
+               stays visible but DISABLED with the reason inline, and it emits nothing (the route refuses anyway). -->
+          <MtMenuItem
+            v-else-if="deleteBlockedReason"
+            class="meta-record-drawer__btn--danger"
+            data-testid="record-inspector-delete-blocked"
+            :disabled="true"
+            :title="deleteBlockedReason"
+          >{{ l('record.delete') }}<span
+            class="meta-record-drawer__menu-reason"
+            data-testid="record-inspector-delete-blocked-reason"
+          >{{ deleteBlockedReason }}</span></MtMenuItem>
         </MtMenu>
         <button class="meta-record-drawer__close" :aria-label="l('record.close')" @click="emit('close')">&times;</button>
       </div>
@@ -251,7 +286,12 @@
            graft from P3 §2) — primary-field value sits below it, editable when the primary field is
            an editable `string`. -->
       <div class="meta-record-drawer__titleblock">
-        <p class="meta-record-drawer__eyebrow">{{ l('record.title') }}</p>
+        <p class="meta-record-drawer__eyebrow">{{ l('record.title') }}<span
+          v-if="rowActions?.manualSupplement === true"
+          class="meta-record-drawer__manual-row-tag"
+          data-testid="record-inspector-manual-supplement-tag"
+          :title="manualRowLabel('tag.manualTitle', isZh)"
+        >{{ manualRowLabel('tag.manual', isZh) }}</span></p>
         <input
           v-if="canEditPrimaryTitle"
           ref="titleInputRef"
@@ -398,6 +438,15 @@
           :api-client="apiClient"
           :refresh-token="approvalRefreshToken"
         />
+        <!-- 关联任务 / Linked tasks (package 2): same self-gating lazy discipline as 审批 above, plus the top
+             bar's 任务 rule (tasks feature on, tasks:read). It lists only the tasks dispatched from this
+             record that the viewer can open, and re-reads after a dispatch from this drawer (the dialog's
+             task-change signal). See the component's file header. -->
+        <MetaRecordTasksPanel
+          :record="record"
+          :sheet-id="sheetId"
+          :api-client="apiClient"
+        />
       </div>
       <div
         v-else-if="activeTab === 'history'"
@@ -512,18 +561,22 @@
          record id so each record gets a fresh form. The state of a dispatch that is out or done
          (in flight / created) is NOT in the child: it is kept per identity and record under `run-key`
          (tasks/recordTaskDispatchRuns.ts), so closing the dialog or moving between records cannot
-         lose a result or allow a second create, and the dialog captures the record link at submit.
-         `binding` is the page's dispatch binding (the signed-in user and org the page was set up
-         under, changed for good once another is seen); the dialog sends nothing under any other
-         (tasks/recordTaskDispatchIdentity.ts). -->
+         lose a result or allow a second create, and the dialog captures the record's ids at submit
+         (the create's source, and the scope of the record's retry key). `api-client` is for the read
+         of the record's own task under that key. `binding` is the page's dispatch binding (the
+         signed-in user and org the page was set up under, changed for good once another is seen); the
+         dialog sends nothing under any other (tasks/recordTaskDispatchIdentity.ts). -->
     <MetaRecordTaskDispatchDialog
-      v-if="canDispatchTask && dispatchBinding && sheetId && viewId && record"
+      v-if="canDispatchTask && dispatchBinding && sheetId && viewId && record && dispatchSourceUsable"
       :key="record.id"
       :visible="showTaskDispatch"
       :default-title="dispatchDefaultTitle"
       :person-fields="dispatchPersonFields"
       :person-summaries="personSummariesByField"
-      :record-link="dispatchRecordLink"
+      :sheet-id="sheetId"
+      :record-id="record.id"
+      :view-id="viewId"
+      :api-client="apiClient ?? null"
       :binding="dispatchBinding"
       :run-key="dispatchRunKey(dispatchBinding.identity, sheetId, record.id)"
       @close="showTaskDispatch = false"
@@ -580,6 +633,7 @@ import MetaRecordFieldsPanel from './MetaRecordFieldsPanel.vue'
 import MetaRecordProvenancePanel from './MetaRecordProvenancePanel.vue'
 import MetaRecordApprovalPanel from './MetaRecordApprovalPanel.vue'
 import MetaRecordApprovalSubmitDialog from './MetaRecordApprovalSubmitDialog.vue'
+import MetaRecordTasksPanel from './MetaRecordTasksPanel.vue'
 import MetaRecordTaskDispatchDialog, { type DispatchPersonField } from './MetaRecordTaskDispatchDialog.vue'
 import MetaRecordHistoryPanel from './MetaRecordHistoryPanel.vue'
 // S3a: MetaCommentsPanel's real implementation now lives in shared/comments/components/ —
@@ -597,9 +651,9 @@ import { useFeatureFlags } from '../../stores/featureFlags'
 import { canDispatchTasks } from '../../tasks/tasksAccess'
 import { personValueAssigneeIds } from '../../tasks/recordTaskDispatch'
 import { dispatchRunKey } from '../../tasks/recordTaskDispatchRuns'
+import { isPlainSourceSegment } from '../../tasks/taskSourceLink'
 import type { DispatchBinding } from '../../tasks/recordTaskDispatchIdentity'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
-import { AppRouteNames } from '../../router/types'
 import { isNativePersonField } from '../utils/link-fields'
 import {
   recordLabel,
@@ -607,6 +661,8 @@ import {
   type MetaRecordLabelKey,
 } from '../utils/meta-record-labels'
 import { commentLabel } from '../utils/meta-comment-labels'
+import { workbenchLabel } from '../utils/workbench-labels'
+import { manualRowLabel } from '../utils/manual-row-labels'
 import type { AiShortcutState } from '../composables/useAiShortcut'
 import {
   canEditField,
@@ -628,6 +684,13 @@ const props = withDefaults(defineProps<{
   // Duplicate / clone record (design 2026-06-16): sheet-level canCreateRecord (a duplicate is a create).
   // Gates the drawer's Duplicate button; the server re-enforces it (no FE permission mirror).
   canCreate?: boolean
+  /** Customer feedback 2026-10-27: set when /context reports `recordDuplicateBlocked` — the duplicate entry is
+   *  rendered disabled with this text as its reason. null/absent ⇒ unchanged. */
+  duplicateBlockedReason?: string | null
+  /** 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.3): show 「复制为新行」. The workbench decides it from
+   *  /context's `stockPreparationManualRows` block (state `allowed`, an actor who can create) — never from the row's
+   *  `manualSupplement` mark. Default false: no entry. */
+  manualCopyAvailable?: boolean
   canManageAutomation?: boolean
   /** 记录级送审 (阶段二 §5): server-derived `multitable:submit-approval`. Default false — an older
    *  backend, the deprecated MetaRecordDrawer shell's own caller, or any harness that omits it gets NO
@@ -644,10 +707,11 @@ const props = withDefaults(defineProps<{
   deleteAttachmentFn?: MetaAttachmentDeleteFn
   canManageRecordPermissions?: boolean
   sheetId?: string
-  /** 派发任务 (R-45 step 1): the ids of the record's deep link written into the task description.
-   *  Without `viewId` there is no link to write, so the 派发任务 entry stays hidden. The deprecated
-   *  MetaRecordDrawer shell does not declare it (a caller of that shell that passes `view-id` still
-   *  reaches this prop through attribute fallthrough). `baseId` is added to the link when known. */
+  /** 派发任务 (R-45 step 1): the view the record is open in, sent with the dispatched task's source
+   *  (the task page links back to the record through it). Without `viewId` the 派发任务 entry stays
+   *  hidden. The deprecated MetaRecordDrawer shell does not declare it (a caller of that shell that
+   *  passes `view-id` still reaches this prop through attribute fallthrough). `baseId` is not sent
+   *  with the source. */
   viewId?: string
   baseId?: string
   /** 派发任务: the binding of the page holding this drawer (`createDispatchBinding()`, made by the
@@ -759,12 +823,15 @@ const props = withDefaults(defineProps<{
   fetchRecord: undefined,
   fieldErrors: null,
   canSubmitApproval: false,
+  manualCopyAvailable: false,
 })
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'delete'): void
   (e: 'duplicate'): void
+  /** 人工补充行 B3: 「复制为新行」 of this record (the workbench confirms and calls the manual-copy route). */
+  (e: 'manual-copy'): void
   /** Record inspector v3 (2026-09-05, PR-A §1.2 Row A): copy-link icon. PR-A scope is this emit
    *  only — the clipboard write + copied/failed live-region text are PR-B1 (see the button's own
    *  template comment); WB has no listener for it yet. */
@@ -1459,6 +1526,12 @@ const currentRecordIndex = computed(() => {
 const canLoadSubscription = computed(() => !!props.apiClient && !!props.sheetId && !!props.record?.id)
 const resolvedCanComment = computed(() => resolveCanComment(props.rowActions, props.canComment))
 const resolvedCanDelete = computed(() => props.rowActions?.canDelete ?? props.canDelete)
+// R-66: the reason text for a PLM row's disabled delete entry (zh = the server's refusal copy verbatim).
+const deleteBlockedReason = computed(() => (
+  !resolvedCanDelete.value && props.rowActions?.deleteBlockedReason === 'plm_row'
+    ? workbenchLabel('notice.plmRowDeleteBlocked', isZh.value)
+    : null
+))
 const drawerCommentAffordance = computed(() => resolveRecordCommentAffordance(props.commentPresence))
 const drawerCommentButtonClass = computed(() =>
   resolveCommentAffordanceStateClass('meta-record-drawer__btn--comment', drawerCommentAffordance.value),
@@ -1533,6 +1606,13 @@ const canDispatchTask = computed(() => {
 // identity it holds, and not at all once another identity has been seen on the page. No binding, no
 // 派发任务 (see the prop).
 const dispatchBinding = computed(() => props.dispatchBinding ?? null)
+// The record's ids as the dispatched task's source: each must be an id the task service takes (its
+// source-id rule, mirrored by `isPlainSourceSegment`), checked here before any of them can go into a
+// create body. One that is not hides 派发任务, as a missing view id does, instead of offering a
+// dispatch the service would refuse.
+const dispatchSourceUsable = computed(() => isPlainSourceSegment(props.sheetId)
+  && isPlainSourceSegment(props.viewId)
+  && isPlainSourceSegment(props.record?.id))
 // The title the dispatcher confirms: the header's own display text of the primary field, or nothing
 // when that value is empty (the header's '—' placeholder is not a title).
 const dispatchDefaultTitle = computed(() => {
@@ -1551,26 +1631,6 @@ const dispatchPersonFields = computed<DispatchPersonField[]>(() => {
   return filterPropertyVisibleFields(visibleRecordFields(props.fields, props.fieldPermissions))
     .filter((field) => isNativePersonField(field))
     .map((field) => ({ id: field.id, name: field.name, ids: personValueAssigneeIds(record.data[field.id]) }))
-})
-// The record's deep link, ids only: the same route + `?recordId=` query the comment inbox opens a
-// record with. Resolved through the router when there is one (the app may be served under a base
-// path), built by hand otherwise.
-const dispatchRecordLink = computed(() => {
-  const sheetId = props.sheetId
-  const viewId = props.viewId
-  const recordId = props.record?.id
-  if (!sheetId || !viewId || !recordId) return ''
-  const query: Record<string, string> = {}
-  if (props.baseId) query.baseId = props.baseId
-  query.recordId = recordId
-  if (injectedRouter) {
-    try {
-      return injectedRouter.resolve({ name: AppRouteNames.MULTITABLE, params: { sheetId, viewId }, query }).href
-    } catch {
-      // A router without the multitable route (a test harness): fall through to the plain path.
-    }
-  }
-  return `/multitable/${encodeURIComponent(sheetId)}/${encodeURIComponent(viewId)}?${new URLSearchParams(query).toString()}`
 })
 
 function onTitleChange(event: Event) {
@@ -1780,6 +1840,8 @@ function formatCommentTimestamp(iso: string): string {
 }
 .meta-record-drawer__titleblock { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .meta-record-drawer__eyebrow { margin: 0; font-size: 11px; line-height: 1.3; color: var(--ms-text-3, #999); text-transform: uppercase; letter-spacing: 0.02em; }
+/* 人工补充行 (OQ3): the same label the grid shows at the row head. */
+.meta-record-drawer__manual-row-tag { display: inline-block; margin-left: 6px; padding: 0 4px; font-size: 10px; line-height: 14px; color: #8a5a00; background: #fdf6ec; border: 1px solid #f5dab1; border-radius: 3px; text-transform: none; letter-spacing: 0; vertical-align: middle; }
 .meta-record-drawer__title-input, .meta-record-drawer__title-text {
   font-size: 18px; font-weight: 600; line-height: 1.3; min-width: 0; box-sizing: border-box;
 }
@@ -1789,6 +1851,11 @@ function formatCommentTimestamp(iso: string): string {
 }
 .meta-record-drawer__title-input:focus-visible { outline: 2px solid var(--ms-color-primary); outline-offset: -1px; }
 .meta-record-drawer__menu-separator { margin: var(--ms-space-1, 4px) 0; border: none; border-top: 1px solid var(--ms-border, #e5e7eb); }
+/* Customer feedback 2026-10-27: the reason under a disabled duplicate entry — wraps inside the menu. */
+.meta-record-drawer__menu-reason {
+  display: block; max-width: 240px; padding-bottom: var(--ms-space-1, 4px);
+  font-size: 12px; line-height: 1.4; white-space: normal; color: var(--ms-text-3);
+}
 /* Resizable panel (2026-09-05): the drag/keyboard splitter on the panel's left edge (see the
    component's `onSplitterPointerDown`/`onSplitterKeydown`). Absolutely positioned against
    `.meta-record-drawer`'s own `position: relative` (added above) so it never participates in the

@@ -262,6 +262,7 @@ import { tasksRouter } from './routes/tasks'
 import { setTaskCountsBroadcaster } from './services/task-counts-realtime'
 import { pendingSourceRegistry } from './services/pending-source-registry'
 import { approvalPendingSource } from './services/approval-pending-source'
+import { taskPendingSource } from './services/task-pending-source'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
@@ -323,6 +324,7 @@ import {
   startDingTalkCardPersonDeliveryRetentionScheduler,
   stopDingTalkCardPersonDeliveryRetentionScheduler,
 } from './services/dingtalk-card-person-delivery-retention-scheduler'
+import { startUserRecycleSweeper, stopUserRecycleSweeper } from './admin/user-recycle-scheduler'
 import { initWebhookEventBridge } from './multitable/webhook-event-bridge'
 import { ApprovalBreachNotifier } from './services/ApprovalBreachNotifier'
 import {
@@ -433,6 +435,7 @@ import { createMultitableAiRoutes } from './routes/multitable-ai'
 import { QueueServiceImpl } from './services/QueueService'
 import { createMultitableButtonRoutes } from './routes/multitable-button'
 import { createMultitableRecordApprovalRoutes } from './routes/multitable-record-approvals'
+import { createMultitableRecordTaskRoutes } from './routes/multitable-record-tasks'
 import { createMultitableCopySheetRoutes } from './routes/multitable-copy-sheet'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
@@ -465,6 +468,8 @@ import { resolvePluginRuntimeConfig } from './plugin-runtime-config'
 import { createYidaOwnerRuntime, type YidaOwnerRuntimeDependencies } from './integration/yida-owner-runtime'
 import type { TransactionalQueryable } from './multitable/pg-transaction-guard'
 import { createYidaInitializationRuntime } from './integration/yida-initialization-runtime'
+import { createYidaConnectionTestRuntime } from './integration/yida-connection-test-runtime'
+import { createYidaSheetSourceHostDependencies } from './integration/yida-sheet-source-host'
 import { isYidaOwnerHttpObservationPath } from './integration/yida-owner-http-observation'
 import { createIntegrationYidaOwnerRouter, YIDA_OWNER_HTTP_PREFIX, yidaOwnerNoStoreMiddleware,
   yidaOwnerJsonOnlyMiddleware, yidaOwnerParseErrorHandler } from './routes/integration-yida-owner'
@@ -648,6 +653,8 @@ export class MetaSheetServer {
     // Host-owned switch, not a request claim. The actual owner/admin, immutable
     // grant and one-use admission still gate every external request.
     readEnablement: () => process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED,
+    // Y2 multi-target + sheet source: its own default-OFF switch (exact 'true'), never the send switch.
+    readMultiTargetEnablement: () => process.env.INTEGRATION_YIDA_MULTI_TARGET_ENABLED,
   })
   // Local initialization is an independent authority, not the send switch or
   // an existing target owner check. The immutable server anchor and live ACL
@@ -655,6 +662,14 @@ export class MetaSheetServer {
   private yidaInitializationRuntime = createYidaInitializationRuntime({
     database: { transaction: yidaOwnerTransaction },
     security: this.pluginRuntimeSecurityService,
+    readMultiTargetEnablement: () => process.env.INTEGRATION_YIDA_MULTI_TARGET_ENABLED,
+  })
+  // Owner-run token-only 测试连接 before initialization: its own default-OFF switch, never the send
+  // switch. Anchor owner + live integration admin are re-proved per call; nothing is persisted.
+  private yidaConnectionTestRuntime = createYidaConnectionTestRuntime({
+    database: { transaction: yidaOwnerTransaction },
+    fetch: globalThis.fetch.bind(globalThis),
+    readEnablement: () => process.env.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED,
   })
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
@@ -2041,11 +2056,18 @@ export class MetaSheetServer {
       injector: this.injector,
       afterSalesApprovalBridgeService: this.afterSalesApprovalBridgeService,
     }))
-    // 路由：待办中心（v1 首切片,todo-center-design-lock §3/§4 —— 只注册审批源）
+    // 路由：待办中心（todo-center-design-lock §3/§4）。任务来源随任务路由一起注册。
     pendingSourceRegistry.register(approvalPendingSource)
     this.app.use(todoRouter())
     const taskRoutes = tasksRouter()
-    if (taskRoutes) this.app.use(taskRoutes)
+    if (taskRoutes) {
+      this.app.use(taskRoutes)
+      pendingSourceRegistry.register(taskPendingSource)
+    }
+    // The tasks dispatched from a multitable record (GET /api/multitable/sheets/:sheetId/records/
+    // :recordId/tasks), mounted only with the task routes. See routes/multitable-record-tasks.ts.
+    const recordTaskRoutes = createMultitableRecordTaskRoutes()
+    if (taskRoutes && recordTaskRoutes) this.app.use('/api/multitable', recordTaskRoutes)
     // 路由：审计日志（管理员）
     this.app.use(auditLogsRouter())
     // 路由：审批历史（从审计表衍生）
@@ -2127,7 +2149,8 @@ export class MetaSheetServer {
     // Uses a lazy resolver because AutomationService is initialized later
     // in the startup sequence than route mounting happens.
     this.app.use('/api/multitable', createAutomationRoutes(() => this.automationService))
-    this.app.use(YIDA_OWNER_HTTP_PREFIX, createIntegrationYidaOwnerRouter(this.yidaOwnerRuntime, this.yidaInitializationRuntime))
+    this.app.use(YIDA_OWNER_HTTP_PREFIX, createIntegrationYidaOwnerRouter(this.yidaOwnerRuntime, this.yidaInitializationRuntime,
+      this.yidaConnectionTestRuntime, createYidaSheetSourceHostDependencies()))
     this.app.use(YIDA_OWNER_HTTP_PREFIX, yidaOwnerParseErrorHandler)
     // AI routes — internal/not-in-OpenAPI, per-route guards; platform JWT
     // comes from the global /api/** middleware above:
@@ -3616,6 +3639,9 @@ export class MetaSheetServer {
         yidaInitializationRuntime: manifest.name === 'plugin-integration-core'
           ? this.yidaInitializationRuntime.createPluginCapability()
           : undefined,
+        yidaConnectionTestRuntime: manifest.name === 'plugin-integration-core'
+          ? this.yidaConnectionTestRuntime.createPluginCapability()
+          : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,
@@ -3654,7 +3680,8 @@ export class MetaSheetServer {
     if (name === 'plugin-integration-core') {
       const yidaDrain = this.yidaOwnerRuntime.deactivate()
       const initializationDrain = this.yidaInitializationRuntime.deactivate()
-      const drains = await Promise.allSettled([yidaDrain, initializationDrain])
+      const connectionTestDrain = this.yidaConnectionTestRuntime.deactivate()
+      const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain])
       if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
     }
     this.cleanupPluginRuntimeRegistrations(name)
@@ -3672,7 +3699,8 @@ export class MetaSheetServer {
       if (name === 'plugin-integration-core') {
         const yidaDrain = this.yidaOwnerRuntime.deactivate()
         const initializationDrain = this.yidaInitializationRuntime.deactivate()
-        const drains = await Promise.allSettled([yidaDrain, initializationDrain])
+        const connectionTestDrain = this.yidaConnectionTestRuntime.deactivate()
+        const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain])
         if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
       }
       const message = error instanceof Error ? error.message : String(error)
@@ -3695,7 +3723,8 @@ export class MetaSheetServer {
     if (name === 'plugin-integration-core') {
       const yidaDrain = this.yidaOwnerRuntime.deactivate()
       const initializationDrain = this.yidaInitializationRuntime.deactivate()
-      const drains = await Promise.allSettled([yidaDrain, initializationDrain])
+      const connectionTestDrain = this.yidaConnectionTestRuntime.deactivate()
+      const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain])
       if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
     }
     const loaded = this.pluginLoader.get(name)
@@ -3838,6 +3867,7 @@ export class MetaSheetServer {
     // unloadAll does not await its hooks and is not an adequate draining barrier.
     const yidaOwnerDrain = this.observeShutdownTask(this.yidaOwnerRuntime.stop())
     const yidaInitializationDrain = this.observeShutdownTask(this.yidaInitializationRuntime.stop())
+    const yidaConnectionTestDrain = this.observeShutdownTask(this.yidaConnectionTestRuntime.stop())
     this.logger.info(`Received ${signal}, shutting down gracefully...`)
 
     // Close every approval-completion producer admission synchronously. Their drains run while the
@@ -3925,7 +3955,7 @@ export class MetaSheetServer {
       this.logger.warn('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
     }
 
-    const shutdownTasks: Promise<void>[] = [yidaOwnerDrain, yidaInitializationDrain]
+    const shutdownTasks: Promise<void>[] = [yidaOwnerDrain, yidaInitializationDrain, yidaConnectionTestDrain]
 
     // 0. Stop background tasks
     shutdownTasks.push(Promise.resolve().then(() => {
@@ -4110,6 +4140,14 @@ export class MetaSheetServer {
         stopDingTalkCardPersonDeliveryRetentionScheduler()
       } catch (err) {
         this.logger.warn(`DingTalk approval-card/person delivery retention scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
+    shutdownTasks.push((async () => {
+      try {
+        stopUserRecycleSweeper()
+      } catch (err) {
+        this.logger.warn(`User recycle sweeper shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
       }
     })())
 
@@ -4787,6 +4825,22 @@ export class MetaSheetServer {
       )
     } catch (e) {
       this.logger.error('DingTalk approval-card/person delivery retention scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // User recycle bin. Automatic purge stays OFF unless USER_RECYCLE_SWEEPER_ENABLED
+    // is the exact string true. Anonymizing identity is irreversible, and this sweeper
+    // does not elect a leader, so the default matches the flag manifest: do not start.
+    // USER_RECYCLE_SWEEPER_DISABLED=1 is an extra kill switch. The admin UI must say
+    // that expiry does not clear identity while the sweeper is off. The users row is kept.
+    try {
+      const userRecycleSweeper = startUserRecycleSweeper()
+      this.logger.info(
+        userRecycleSweeper
+          ? 'User recycle sweeper initialized'
+          : 'User recycle sweeper disabled (set USER_RECYCLE_SWEEPER_ENABLED=true to enable; USER_RECYCLE_SWEEPER_DISABLED=1 forces off)',
+      )
+    } catch (e) {
+      this.logger.error('User recycle sweeper initialization failed; continuing in degraded mode', e as Error)
     }
 
     // B-4 BJ-5 follow-up: reconcile ORPHANED AI bulk-fill jobs at boot. A hard

@@ -21,6 +21,10 @@ vi.mock('../../src/multitable/webhook-delivery-authority', async (importOriginal
 
 import { WebhookService } from '../../src/multitable/webhook-service'
 
+// The subscription SSRF gate resolves the target before every attempt; a TEST-NET-3 answer (RFC 5737) keeps
+// `hooks.example.test` off real DNS. Nothing is dialled: fetchFn is injected.
+const PUBLIC_LOOKUP = async () => [{ address: '203.0.113.10', family: 4 }]
+
 type Op = { kind: string; table: string; data?: unknown }
 
 function recordingDb(webhookRow: Record<string, unknown>) {
@@ -83,7 +87,7 @@ describe('executeDelivery and the rule decision', () => {
     const { db, ops } = recordingDb(WEBHOOK_ROW)
     const fetchFn = vi.fn(async () => ({ ok: true, status: 200, text: async () => 'ok' }))
     const delivery = pending()
-    await new WebhookService(db, fetchFn as unknown as typeof fetch).executeDelivery(delivery)
+    await new WebhookService(db, fetchFn as unknown as typeof fetch, PUBLIC_LOOKUP).executeDelivery(delivery)
     expect(fetchFn.mock.calls.length, 'U3b.sends').toBe(0)
     const webhookWrites = ops.filter((op) => op.kind === 'update' && op.table === 'multitable_webhooks')
     expect(webhookWrites, 'U3b.failureCount').toEqual([])
@@ -96,7 +100,7 @@ describe('executeDelivery and the rule decision', () => {
     decision.next = { deliver: true, payload: { sheetId: 'sheet1', recordId: 'rec1', changes: { fld_b: 2 } } }
     const { db } = recordingDb(WEBHOOK_ROW)
     const fetchFn = vi.fn(async () => ({ ok: true, status: 200, text: async () => 'ok' }))
-    await new WebhookService(db, fetchFn as unknown as typeof fetch).executeDelivery(pending())
+    await new WebhookService(db, fetchFn as unknown as typeof fetch, PUBLIC_LOOKUP).executeDelivery(pending())
     expect(fetchFn.mock.calls.length, 'U4.sends').toBe(1)
     const body = JSON.parse(String((fetchFn.mock.calls[0] as unknown as [string, { body: string }])[1].body))
     expect(Object.keys(body.changes), 'U4.noField').not.toContain('fld_a')

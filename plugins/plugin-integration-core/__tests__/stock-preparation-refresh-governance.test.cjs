@@ -144,7 +144,7 @@ async function seedAndConfirm(w, scopeOverride = {}) {
   const holdRow = w.db.rows(T.hold).find((row) => row.status === 'open' && row.sheet_id === scope.sheetId)
   return w.continuationStore.confirmContinuation({
     ...scope, holdId: holdRow.id, echo: refreshKit.echoOf(w.hold), basis: { kind: 'puller_confirmed_same_demand' }, confirmedBy: PULLER, sourceIdentity: w.sourceIdentity,
-  }, { bumpWithin: w.bump.bumpWithin })
+  }, { bumpWithin: w.bump.bumpWithin, pilotWithin: refreshKit.seedPilotWithin })
 }
 
 // ── GR-01 / GR-02 ────────────────────────────────────────────────────────────────────────────────
@@ -439,7 +439,7 @@ test('GR-08 governed by rows: headers with memberCount, members, state, decision
   const replaced = await w.continuationStore.confirmContinuation({
     ...w.scope, holdId: rivalRow.id, echo: refreshKit.echoOf(rival), basis: { kind: 'puller_confirmed_same_demand' }, confirmedBy: PULLER, sourceIdentity: w.sourceIdentity,
     supersedes: { continuationId: confirmed.continuationId, revision: 1 },
-  }, { bumpWithin: w.bump.bumpWithin })
+  }, { bumpWithin: w.bump.bumpWithin, pilotWithin: refreshKit.seedPilotWithin })
   assert.equal(replaced.supersededContinuationId, confirmed.continuationId)
   const after = await w.governance.consult(w.scope)
   assert.equal(after.governed, true)

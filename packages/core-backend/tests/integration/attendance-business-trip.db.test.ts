@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { Kysely,PostgresDialect,sql } from 'kysely'
 import { up as applyTripMigration, down as rollbackTripMigration } from '../../src/db/migrations/zzzz20261013090000_create_attendance_business_trips'
 import { createOnlinePunchDbFixture,punchClock } from '../utils/attendance-online-punch-db'
+import { attendanceTestRunDateOverride,attendanceTestRunNow } from '../utils/attendance-test-run-date'
 if (!process.env.ATTENDANCE_TEST_DATABASE_URL) throw new Error('ATTENDANCE_TRIP_REAL_DATABASE_REQUIRED')
 const require=createRequire(import.meta.url)
 const {createAttendanceTimezonePolicyStore}=require('../../../../plugins/plugin-attendance/lib/attendance-timezone-policy-store.cjs')
@@ -44,7 +45,7 @@ describe('business trip real request approval and destination arrangement',() =>
   let admin:Awaited<ReturnType<typeof f.user>>, employee:Awaited<ReturnType<typeof f.user>>, approver:Awaited<ReturnType<typeof f.user>>
   let flowId:string, approvedId:string
   const priorCancelEntry=process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED
-  const startAt=new Date(Date.now()+7*86400000);startAt.setUTCHours(0,0,0,0)
+  const startAt=new Date(attendanceTestRunNow().getTime()+7*86400000);startAt.setUTCHours(0,0,0,0)
   const endAt=new Date(startAt.getTime()+2*86400000)
   const body=()=>({destinationTimezone:'Asia/Tokyo',startAt:startAt.toISOString(),endAt:endAt.toISOString(),approvalFlowId:flowId})
   const create=async(extra:Record<string,unknown>={}) => f.request('/api/attendance/business-trip-requests',employee.token,{...body(),...extra})
@@ -61,8 +62,14 @@ describe('business trip real request approval and destination arrangement',() =>
   },180000)
   // Configuration-positive cases use a legitimate quiet UTC boundary; cases
   // testing started shifts set the actual server clock explicitly below.
-  beforeEach(()=>{const safe=new Date();safe.setUTCHours(0,0,0,0);punchClock.setOnlinePunchInstantForTests(safe)})
-  afterAll(async()=>{await f.stop();if(priorCancelEntry===undefined)delete process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED;else process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED=priorCancelEntry},60000)
+  // Date-matrix legs (ATTENDANCE_TEST_RUN_DATE set) also pin the trusted trip
+  // clock to the same run-day instant: startAt above derives from the run day, so
+  // publish/cancel `now` must too, or a past leg turns RETROACTIVE_PUBLICATION once
+  // the real clock passes its startAt. Tests that set the trip clock themselves
+  // still override this. Unset (CI, today leg): trip clock stays real, unchanged.
+  const runDateOverridden=attendanceTestRunDateOverride()!==null
+  beforeEach(()=>{const safe=attendanceTestRunNow();safe.setUTCHours(0,0,0,0);punchClock.setOnlinePunchInstantForTests(safe);if(runDateOverridden)setBusinessTripInstantForTests(safe)})
+  afterAll(async()=>{if(runDateOverridden)setBusinessTripInstantForTests(null);await f.stop();if(priorCancelEntry===undefined)delete process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED;else process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED=priorCancelEntry},60000)
   it('only the dedicated route accepts business_trip; client approval metadata is rejected',async()=>{
     const generic=await f.request('/api/attendance/requests',employee.token,{requestType:'business_trip',workDate:startAt.toISOString().slice(0,10)})
     expect(generic.status).toBe(422);expect(generic.body.error.code).toBe('ATTENDANCE_TRIP_DEDICATED_ROUTE_ONLY')
@@ -157,7 +164,7 @@ describe('business trip real request approval and destination arrangement',() =>
   })
   it('default-rule reverse edits reject a new partial boundary and permit a valid future edit',async()=>{
     // Both UTC 09-18 and proposed Los Angeles 16-23 are idle at 07:00Z.
-    const safe=new Date();safe.setUTCHours(7,0,0,0);punchClock.setOnlinePunchInstantForTests(safe)
+    const safe=attendanceTestRunNow();safe.setUTCHours(7,0,0,0);punchClock.setOnlinePunchInstantForTests(safe)
     const before=(await f.pool.query('SELECT id,timezone FROM attendance_rules WHERE org_id=$1 AND is_default=true',[f.orgId])).rows
     const invalid=await f.request('/api/attendance/rules/default',admin.token,{orgId:f.orgId,timezone:'America/Los_Angeles',workStartTime:'16:00',workEndTime:'23:00',workingDays:[0,1,2,3,4,5,6]},'PUT')
     expect(invalid.status,invalid.body.error?.code).toBe(409)
@@ -315,6 +322,8 @@ describe('business trip real request approval and destination arrangement',() =>
     }finally{setBusinessTripInstantForTests(null)}
   },60000)
   it('a checked-in trip cancellation keeps the original frozen checkout and exact replay, then new work dates use base',async()=>{
+    // Not shifted by ATTENDANCE_TEST_RUN_DATE: the punches below must stay in
+    // the real past because the future-punch guard compares to the real clock.
     const startAt=new Date(Date.now()-7*86400000);startAt.setUTCHours(0,0,0,0)
     const endAt=new Date(startAt.getTime()+2*86400000)
     const orgId=randomUUID(),owner=await f.user(),seat=await f.user()
@@ -484,14 +493,19 @@ describe('business trip real request approval and destination arrangement',() =>
     try{expect((await decide(id,'approve',seatToken)).status).toBe(200)}finally{setBusinessTripInstantForTests(null)}
     const originalRule=(await f.pool.query('SELECT * FROM attendance_rules WHERE org_id=$1 AND is_default=true',[orgId])).rows
     const originalArrangement=await arrangements(id)
-    const rejected=await update('02:30')
-    expect(rejected.status,rejected.body.error?.code).toBe(422)
-    expect(rejected.body.error).toEqual({code:'ATTENDANCE_TIMEZONE_WALL_INVALID'})
-    expect((await f.pool.query('SELECT * FROM attendance_rules WHERE org_id=$1 AND is_default=true',[orgId])).rows).toEqual(originalRule)
-    expect(await arrangements(id)).toEqual(originalArrangement)
-    const accepted=await update('08:30')
-    expect(accepted.status,accepted.body.error?.code).toBe(200)
-    expect(await arrangements(id)).toEqual(originalArrangement)
+    // Pin the trusted server clock before the trip so the rule writer still
+    // scans this approved trip whatever the run day; JWT/network clocks stay real.
+    punchClock.setOnlinePunchInstantForTests('2027-02-20T00:00:00Z')
+    try{
+      const rejected=await update('02:30')
+      expect(rejected.status,rejected.body.error?.code).toBe(422)
+      expect(rejected.body.error).toEqual({code:'ATTENDANCE_TIMEZONE_WALL_INVALID'})
+      expect((await f.pool.query('SELECT * FROM attendance_rules WHERE org_id=$1 AND is_default=true',[orgId])).rows).toEqual(originalRule)
+      expect(await arrangements(id)).toEqual(originalArrangement)
+      const accepted=await update('08:30')
+      expect(accepted.status,accepted.body.error?.code).toBe(200)
+      expect(await arrangements(id)).toEqual(originalArrangement)
+    }finally{punchClock.setOnlinePunchInstantForTests(null)}
     expect(await f.counts(owner.userId)).toMatchObject({events:0,records:0})
   },60000)
   it('an unused interior base-zone gap does not invalidate unique destination shift instants',async()=>{
@@ -523,6 +537,18 @@ describe('business trip real request approval and destination arrangement',() =>
     const response=await f.request('/api/attendance/rules/default',token,{orgId,timezone:'UTC',workStartTime:'09:00',workEndTime:'18:00',workingDays:[0,1,2,3,4,5,6]},'PUT')
     expect(response.status,response.body.error?.code).toBe(200)
     return {orgId,token,userId:owner.userId}
+  }
+  async function waitForPolicyWaiter(pid:number,completed:()=>boolean) {
+    for(let attempt=0;attempt<250;attempt++){
+      const locks=await f.pool.query(`SELECT 1 FROM pg_locks held JOIN pg_locks waiting
+        ON held.locktype=waiting.locktype AND held.database=waiting.database
+        AND held.classid=waiting.classid AND held.objid=waiting.objid AND held.objsubid=waiting.objsubid
+        WHERE held.pid=$1 AND held.locktype='advisory' AND held.granted=true AND waiting.granted=false`,[pid])
+      if(locks.rowCount)return true
+      if(completed())break
+      await new Promise(resolve=>setTimeout(resolve,20))
+    }
+    return false
   }
   it('default-rule and holiday CRUD preserve started fallback shifts without punches or trips',async()=>{
     const owner=await calendarOwner(),date='2026-08-20'
@@ -589,7 +615,71 @@ describe('business trip real request approval and destination arrangement',() =>
     expect(status.body.data.calendarPolicy).toEqual(stable)
     expect(await f.counts(owner.userId)).toMatchObject({events:0,records:0,requests:0})
   },60000)
+  it('global settings recheck a revoked manager before another organization fold, with an authorized ambiguity control',async()=>{
+    punchClock.setOnlinePunchInstantForTests('2026-08-20T00:00:00Z')
+    const owners:Awaited<ReturnType<typeof calendarOwner>>[]=[]
+    try{
+      const manager=await calendarOwner();owners.push(manager)
+      const other=await calendarOwner();owners.push(other)
+      const rule=await f.request('/api/attendance/rules/default',other.token,{orgId:other.orgId,
+        timezone:'America/New_York',workStartTime:'00:30',workEndTime:'01:00',workingDays:[0,1,2,3,4,5,6]},'PUT')
+      expect(rule.status,rule.body.error?.code).toBe(200)
+      // 00:45 local: the active fallback shift ends at an ambiguous 01:00.
+      punchClock.setOnlinePunchInstantForTests('2026-11-01T04:45:00Z')
+      const orgIds=owners.map(owner=>owner.orgId)
+      const snapshot=async()=>({
+        rules:(await f.pool.query('SELECT * FROM attendance_rules WHERE org_id=ANY($1::text[]) ORDER BY id',[orgIds])).rows,
+        holidays:(await f.pool.query('SELECT * FROM attendance_holidays WHERE org_id=ANY($1::text[]) ORDER BY id',[orgIds])).rows,
+        settings:(await f.pool.query("SELECT * FROM system_configs WHERE key='attendance.settings'")).rows,
+        audit:(await f.pool.query('SELECT * FROM attendance_timezone_policy_audit WHERE org_id=ANY($1::text[]) ORDER BY id',[orgIds])).rows,
+        manager:await f.counts(manager.userId),other:await f.counts(other.userId),
+      })
+      const before=await snapshot()
+      const patch={calendarPolicy:{overrides:[]}}
+      const update=()=>f.request('/api/attendance/settings',manager.token,patch,'PUT')
+      const blocker=await f.pool.connect()
+      let pending:ReturnType<typeof update>|undefined
+      let completed:Awaited<ReturnType<typeof update>>|undefined
+      try{
+        await blocker.query('BEGIN')
+        const pid=(await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number
+        await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',
+          [JSON.stringify(['attendance-timezone-policy-v1',manager.orgId])])
+        pending=update().then(response=>{completed=response;return response})
+        expect(await waitForPolicyWaiter(pid,()=>completed!==undefined),
+          'global settings must wait at policy prefix; early status '+completed?.status+' code '+completed?.body.error?.code).toBe(true)
+        await blocker.query('UPDATE user_orgs SET is_active=false WHERE org_id=$1 AND user_id=$2',[manager.orgId,manager.userId])
+        await blocker.query('COMMIT')
+        const refused=await pending
+        expect(refused.status,refused.body.error?.code).toBe(403)
+        expect(refused.body.error.code).toBe('ATTENDANCE_TIMEZONE_FORBIDDEN')
+        expect(await snapshot()).toEqual(before)
+      }finally{
+        await blocker.query('ROLLBACK')
+        blocker.release()
+        if(pending)await pending
+      }
+      await f.pool.query('UPDATE user_orgs SET is_active=true WHERE org_id=$1 AND user_id=$2',[manager.orgId,manager.userId])
+      const ambiguous=await update()
+      expect(ambiguous.status,ambiguous.body.error?.code).toBe(422)
+      expect(ambiguous.body.error.code).toBe('ATTENDANCE_TIMEZONE_WALL_AMBIGUOUS')
+      expect(await snapshot()).toEqual(before)
+      expect(before.manager).toEqual({events:0,records:0,requests:0,operations:0})
+      expect(before.other).toEqual(before.manager)
+    }finally{
+      punchClock.setOnlinePunchInstantForTests(null)
+      const orgIds=owners.map(owner=>owner.orgId),userIds=owners.map(owner=>owner.userId)
+      await f.pool.query('DELETE FROM attendance_rules WHERE org_id=ANY($1::text[])',[orgIds])
+      await f.pool.query('DELETE FROM user_orgs WHERE org_id=ANY($1::text[])',[orgIds])
+      for(const table of ['user_permissions','user_roles','user_namespace_admissions']) {
+        await f.pool.query(`DELETE FROM ${table} WHERE user_id=ANY($1::text[])`,[userIds])
+      }
+      await f.pool.query('DELETE FROM users WHERE id=ANY($1::text[])',[userIds])
+    }
+  },60000)
   it('revoked actor membership refuses all calendar source-management writes without source or audit changes',async()=>{
+    // The settings writer scans every org's current shifts, including retained DST fixtures.
+    punchClock.setOnlinePunchInstantForTests('2026-08-20T00:00:00Z')
     const owner=await calendarOwner()
     const holiday=await f.request('/api/attendance/holidays',owner.token,{date:'2028-01-02',name:'synthetic membership',isWorkingDay:false})
     expect(holiday.status).toBe(201)
@@ -623,16 +713,7 @@ describe('business trip real request approval and destination arrangement',() =>
           await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',
             [JSON.stringify(['attendance-timezone-policy-v1',owner.orgId])])
           pending=request().then(response=>{completed=response;return response})
-          let waiting=false
-          for(let attempt=0;attempt<250;attempt++){
-            const locks=await f.pool.query(`SELECT 1 FROM pg_locks held JOIN pg_locks waiting
-              ON held.locktype=waiting.locktype AND held.database=waiting.database
-              AND held.classid=waiting.classid AND held.objid=waiting.objid AND held.objsubid=waiting.objsubid
-              WHERE held.pid=$1 AND held.locktype='advisory' AND held.granted=true AND waiting.granted=false`,[pid])
-            if(locks.rowCount){waiting=true;break}
-            if(completed)break
-            await new Promise(resolve=>setTimeout(resolve,20))
-          }
+          const waiting=await waitForPolicyWaiter(pid,()=>completed!==undefined)
           expect(waiting,'source writer '+requestIndex+' must wait at policy prefix; early status '+completed?.status+' code '+completed?.body.error?.code).toBe(true)
           await blocker.query('UPDATE user_orgs SET is_active=false WHERE org_id=$1 AND user_id=$2',[owner.orgId,owner.userId])
           await blocker.query('COMMIT')

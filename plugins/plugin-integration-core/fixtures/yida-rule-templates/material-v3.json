@@ -1,0 +1,244 @@
+{
+  "formatVersion": 2,
+  "kind": "stock-preparation-yida-rule-template",
+  "status": "local-unverified",
+  "rules": {
+    "version": 3,
+    "kind": "yida-form-protocol-static",
+    "intent": "create",
+    "businessKey": [
+      "project",
+      "drawingNo",
+      "partName",
+      "specification",
+      "materialGrade",
+      "versionNo",
+      "parentDrawingNo"
+    ],
+    "emptyKeyFields": [
+      "specification",
+      "parentDrawingNo"
+    ],
+    "fieldMap": [
+      {
+        "transform": "direct",
+        "source": "projectNo",
+        "target": "project",
+        "type": "string",
+        "required": true
+      },
+      {
+        "transform": "direct",
+        "source": "componentCode",
+        "target": "drawingNo",
+        "type": "string",
+        "required": true
+      },
+      {
+        "transform": "direct",
+        "source": "componentName",
+        "target": "partName",
+        "type": "string",
+        "required": true
+      },
+      {
+        "transform": "direct",
+        "source": "componentSpec",
+        "target": "specification",
+        "type": "string",
+        "required": false
+      },
+      {
+        "transform": "direct",
+        "source": "material",
+        "target": "materialGrade",
+        "type": "string",
+        "required": true
+      },
+      {
+        "transform": "direct",
+        "source": "sourceVersion",
+        "target": "versionNo",
+        "type": "string",
+        "required": true
+      },
+      {
+        "transform": "direct",
+        "source": "parentComponentCode",
+        "target": "parentDrawingNo",
+        "type": "string",
+        "required": false
+      },
+      {
+        "transform": "direct",
+        "source": "parentComponentName",
+        "target": "parentPartName",
+        "type": "string",
+        "required": false
+      },
+      {
+        "transform": "copy",
+        "copyOf": "parentPartName",
+        "target": "partCategory",
+        "type": "string",
+        "required": false
+      },
+      {
+        "transform": "direct",
+        "source": "totalQuantity",
+        "target": "totalQty",
+        "type": "number",
+        "required": true
+      },
+      {
+        "transform": "concat",
+        "parts": [
+          {
+            "source": "ext_blankLength"
+          },
+          {
+            "source": "ext_blankWidth"
+          },
+          {
+            "source": "ext_blankThickness"
+          }
+        ],
+        "separator": "*",
+        "blank": "refuse",
+        "target": "blankSize",
+        "type": "string",
+        "required": false
+      },
+      {
+        "transform": "direct",
+        "source": "blankType",
+        "target": "materialTypeText",
+        "type": "string",
+        "required": false
+      },
+      {
+        "transform": "constant",
+        "value": "SYN-RULE-A",
+        "target": "processRule",
+        "type": "string",
+        "required": true
+      },
+      {
+        "transform": "constant",
+        "value": "SYN-NO",
+        "target": "allowNegativeStock",
+        "type": "string",
+        "required": true
+      },
+      {
+        "transform": "constant",
+        "value": "SYN-DEFAULT",
+        "target": "defaultText",
+        "type": "string",
+        "required": false
+      },
+      {
+        "transform": "direct",
+        "source": "idempotencyKey",
+        "target": "sourceLineId",
+        "type": "string",
+        "required": true
+      }
+    ],
+    "fieldCatalog": [
+      {
+        "id": "project",
+        "control": "text",
+        "required": true
+      },
+      {
+        "id": "drawingNo",
+        "control": "text",
+        "required": true
+      },
+      {
+        "id": "partName",
+        "control": "text",
+        "required": true
+      },
+      {
+        "id": "specification",
+        "control": "text",
+        "required": false
+      },
+      {
+        "id": "materialGrade",
+        "control": "text",
+        "required": true
+      },
+      {
+        "id": "versionNo",
+        "control": "text",
+        "required": true
+      },
+      {
+        "id": "parentDrawingNo",
+        "control": "text",
+        "required": false
+      },
+      {
+        "id": "parentPartName",
+        "control": "text",
+        "required": false
+      },
+      {
+        "id": "partCategory",
+        "control": "text",
+        "required": false
+      },
+      {
+        "id": "totalQty",
+        "control": "number",
+        "required": true
+      },
+      {
+        "id": "blankSize",
+        "control": "text",
+        "required": false
+      },
+      {
+        "id": "materialTypeText",
+        "control": "text",
+        "required": false
+      },
+      {
+        "id": "processRule",
+        "control": "select",
+        "required": true,
+        "options": [
+          "SYN-RULE-A",
+          "SYN-RULE-B"
+        ]
+      },
+      {
+        "id": "allowNegativeStock",
+        "control": "radio",
+        "required": true,
+        "options": [
+          "SYN-YES",
+          "SYN-NO"
+        ]
+      },
+      {
+        "id": "defaultText",
+        "control": "text",
+        "required": false
+      },
+      {
+        "id": "sourceLineId",
+        "control": "text",
+        "required": true
+      }
+    ]
+  },
+  "allocation": {
+    "mode": "equal_integer",
+    "projectField": "projectNo",
+    "quantityField": "totalQuantity"
+  }
+}

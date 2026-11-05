@@ -214,6 +214,12 @@
  *      A dangling reference is NOT auto-repaired (setting approval_instance_id to NULL would be a
  *      silent, destructive rewrite of pre-existing data) — the migration throws and lists the
  *      offending ids for a human to triage.
+ *      2026-10-28 (operative): a narrow UPDATE now runs AFTER step 1 and BEFORE this precheck.
+ *      It sets workflow_key to the attendance constant on NULL-key instances that attendance
+ *      requests already reference, and only when no conflicting non-attendance workflow reference
+ *      exists. Dangling references are still not repaired. A workflow_key that is still NULL
+ *      after that UPDATE still aborts here. approval_instance_id is never set to NULL. Predicate,
+ *      determinism, and why this file is edited in place are in the addendum above the imports.
  *   3. backfill BEFORE adding constraints — `ADD CONSTRAINT ... CHECK` validates every existing
  *      row against the new predicate; if the CHECK existed first, the backfill's own UPDATE would
  *      write into a column already being validated one row at a time is fine, but a bare `ADD
@@ -244,12 +250,167 @@
  * = 'attendance.request'`), so a same-value re-`UPDATE ... SET workflow_key = EXCLUDED.workflow_key`
  * (the `ON CONFLICT` branch of `upsertAttendanceApprovalInstance`, `index.cjs:24303`) never changes
  * the key Postgres's FK check compares against either.
+ *
+ * ---- 2026-10-28 addendum: narrow backfill of legacy NULL workflow_key shells ----
+ *
+ * Operative behavior, ahead of the precheck in step 2. Some attendance_requests rows reference
+ * approval_instances whose workflow_key IS NULL. Those instances are empty shells (no template,
+ * empty metadata, no steps) created before the first keyed instance. Every other attendance-linked
+ * instance already has workflow_key equal to the only value attendance code assigns:
+ * ATTENDANCE_APPROVAL_WORKFLOW_KEY = 'attendance.request'
+ * (packages/core-backend/src/attendance/w4c3b-central-approval-hooks.ts, mirrored in
+ * plugins/plugin-attendance/index.cjs). The backfill writes that constant and nothing else.
+ * It is deterministic because there is no second attendance key to choose, and it refuses any
+ * instance whose other references imply a different workflow rather than guessing.
+ *
+ * An instance is updated only when ALL of the following hold:
+ *   - approval_instances.workflow_key IS NULL
+ *   - at least one attendance_requests.approval_instance_id equals that instance id
+ *   - when approval_instances.source_system exists, it IS NULL or exactly 'platform'
+ *     (attendance's own writer stamps 'platform'; any other source is a different product)
+ *   - it is not referenced by a non-attendance source that names a different workflow:
+ *       approval_rounds.engine_instance_id (that row is the cancel-round engine,
+ *         workflow key approval.cancel-round — document_id is NOT a conflict: the document
+ *         is the attendance instance this key belongs on)
+ *       multitable_record_approval_submissions.approval_instance_id
+ *       multitable_automation_approval_bridges.approval_instance_id
+ *     Each check runs only when that table and column exist, so a scratch database that has
+ *     not created them is not a false conflict. Satellite tables (comments, reads, metrics,
+ *     assignments, attachments, records, projections, card deliveries) do not name a workflow
+ *     and are not conflicts. attendance_business_trip_requests is attendance and requires this
+ *     same key; it is created by a later migration and is not a conflict.
+ * Instances that attendance_requests does not reference are not updated, including other NULL
+ * workflow_key rows. attendance_requests.approval_instance_id is never set to NULL, and no
+ * attendance row is omitted from the later FK or CHECK constraints.
+ *
+ * After the UPDATE, the original precheck is unchanged in spirit: a dangling
+ * approval_instance_id (no approval_instances row) still aborts, and any attendance-linked
+ * instance whose workflow_key is still NULL (the conflict cases above) still aborts. The
+ * attendance_requests.approval_workflow_key copy, uq_approval_instances_id_workflow_key,
+ * attendance_requests_instance_workflow_fkey, atr_instance_key_pair, and atr_not_cancel_round
+ * are unchanged.
+ *
+ * The UPDATE row count is logged with console.log and RAISE NOTICE, as a count only, after the
+ * precheck passes. Notices are not transactional: emitting one before a precheck abort would
+ * report writes the migrator's rollback undoes. A failed migrate therefore leaves every
+ * workflow_key as it was. Re-running up() updates zero rows once the key is set
+ * (WHERE workflow_key IS NULL) and the constraint guards are IF NOT EXISTS.
+ *
+ * Editing this already-applied file in place is safe for this repo's migrator. kysely_migration
+ * stores name and timestamp only. FileMigrationProvider and Migrator do not hash migration
+ * bodies — there is no checksum column and no comparison in src/db/migrate.ts or
+ * src/db/migration-provider.ts. allowUnorderedMigrations (migrate.ts) disables the alphabetical
+ * order check; it does not re-execute a name already stored in the ledger. A database that has
+ * already recorded this name (staging) will not run the edited body. That is safe: that database
+ * passed the previous precheck, so it has no attendance row pointing at a missing instance or a
+ * NULL workflow_key, and a direct second up() is a no-op. A database where this name was never
+ * recorded — the precheck throw aborts the migrator's transaction, so the ledger row and the DDL
+ * are both absent — runs this body on the next migrate, backfill first. A later companion cannot
+ * run before this precheck on that database. An earlier companion would run on databases that
+ * already passed this name only because unordered migrations are allowed, and would not change
+ * this precheck. The repair belongs here.
+ *
+ * ---- end 2026-10-28 addendum ----
  */
 import type { Kysely } from 'kysely'
 import { sql } from 'kysely'
 
+/** Attendance's only workflow key. Local copy so this migration does not import the app graph.
+ *  Must stay identical to ATTENDANCE_APPROVAL_WORKFLOW_KEY. */
+const ATTENDANCE_APPROVAL_WORKFLOW_KEY = 'attendance.request'
+
+/** Non-attendance references that assign a workflow other than attendance.request.
+ *  Identifiers are compile-time constants; they are never taken from the database. */
+const CONFLICTING_WORKFLOW_REFERENCES = [
+  { table: 'approval_rounds', column: 'engine_instance_id' },
+  { table: 'multitable_record_approval_submissions', column: 'approval_instance_id' },
+  { table: 'multitable_automation_approval_bridges', column: 'approval_instance_id' },
+] as const
+
+function backfillLogLine(count: number): string {
+  return `add_attendance_requests_approval_workflow_key: backfilled ${count} approval_instances.workflow_key to attendance.request`
+}
+
+async function relationColumnExists(
+  db: Kysely<unknown>,
+  table: string,
+  column: string,
+): Promise<boolean> {
+  const found = await sql<{ ok: boolean }>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_attribute AS attribute
+      JOIN pg_catalog.pg_class AS relation ON relation.oid = attribute.attrelid
+      JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+      WHERE namespace.nspname = current_schema()
+        AND relation.relname = ${table}
+        AND relation.relkind IN ('r', 'p')
+        AND attribute.attname = ${column}
+        AND attribute.attnum > 0
+        AND NOT attribute.attisdropped
+    ) AS ok
+  `.execute(db)
+  return found.rows[0]?.ok === true
+}
+
+async function backfillAttendanceLinkedNullWorkflowKeys(db: Kysely<unknown>): Promise<number> {
+  const conflictPredicates: string[] = []
+  for (const reference of CONFLICTING_WORKFLOW_REFERENCES) {
+    if (await relationColumnExists(db, reference.table, reference.column)) {
+      conflictPredicates.push(
+        `EXISTS (SELECT 1 FROM ${reference.table} AS conflict_ref WHERE conflict_ref.${reference.column} = i.id)`,
+      )
+    }
+  }
+  const conflictGuard = conflictPredicates.length === 0
+    ? sql``
+    : sql`AND NOT (${sql.raw(conflictPredicates.join(' OR '))})`
+  const sourceGuard = await relationColumnExists(db, 'approval_instances', 'source_system')
+    ? sql`AND (i.source_system IS NULL OR i.source_system = ${'platform'})`
+    : sql``
+
+  const updated = await sql<{ backfilled: string }>`
+    WITH updated AS (
+      UPDATE approval_instances AS i
+      SET workflow_key = ${ATTENDANCE_APPROVAL_WORKFLOW_KEY}
+      WHERE i.workflow_key IS NULL
+        AND EXISTS (
+          SELECT 1
+          FROM attendance_requests AS r
+          WHERE r.approval_instance_id = i.id
+        )
+        ${sourceGuard}
+        ${conflictGuard}
+      RETURNING i.id
+    )
+    SELECT count(*)::text AS backfilled FROM updated
+  `.execute(db)
+  const count = Number(updated.rows[0]?.backfilled ?? '0')
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new Error(
+      'add_attendance_requests_approval_workflow_key: backfill count is not a non-negative integer',
+    )
+  }
+  return count
+}
+
+async function logBackfillCount(db: Kysely<unknown>, count: number): Promise<void> {
+  const line = backfillLogLine(count)
+  // Visible in `tsx src/db/migrate.ts` output. node-pg does not print RAISE NOTICE unless a
+  // client listener is attached, and migrate.ts does not attach one.
+  // eslint-disable-next-line no-console
+  console.log(line)
+  // Visible to psql and any client that listens for notices. The text is the fixed log line
+  // plus a count this function just validated; it contains no row identifiers.
+  await sql.raw(
+    `DO $do$ BEGIN RAISE NOTICE '${line.replaceAll("'", "''")}'; END $do$;`,
+  ).execute(db)
+}
+
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`ALTER TABLE attendance_requests ADD COLUMN IF NOT EXISTS approval_workflow_key TEXT`.execute(db)
+
+  const backfilled = await backfillAttendanceLinkedNullWorkflowKeys(db)
 
   const preflight = await sql<{ cnt: string }>`
     SELECT count(*)::text AS cnt
@@ -278,6 +439,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         `${JSON.stringify(sample.rows)}`,
     )
   }
+
+  // Count only. Emitted after the precheck so a thrown migrate does not announce writes
+  // the migrator transaction rolls back. Notices themselves are not transactional.
+  await logBackfillCount(db, backfilled)
 
   // Backfill BEFORE the constraints below (lock:371 "回填先于约束").
   await sql`

@@ -978,4 +978,41 @@ onBeforeUnmount(() => {
   margin: 0;
   color: var(--el-color-danger, #c45656);
 }
+
+/* Up to 960px: long words in block text (list names) break instead of widening the page
+   (`break-word` leaves min-content sizes alone, so labels in flex rows keep their words); the
+   rename and add-task inputs can narrow with the page; task titles in board rows, and event rows
+   (which wrap, so only a part wider than the whole line, such as a long actor id, breaks) may
+   break anywhere. */
+@media (max-width: 960px) {
+  .tasks-list-page {
+    overflow-wrap: break-word;
+  }
+
+  .tasks-list-page__rename input,
+  .tasks-list-page__add-task input {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .tasks-list-page__items a,
+  .tasks-list-page__event {
+    overflow-wrap: anywhere;
+  }
+}
+
+/* Narrow screens: the same breakpoint and page padding as the task centre home. The task title in
+   a board row starts at 10em and grows up to its own width, so it stays on the drag handle's line
+   and the status, due date and actions move to the next line instead. */
+@media (max-width: 720px) {
+  .tasks-list-page {
+    padding: 16px;
+  }
+
+  .tasks-list-page__items a {
+    flex: 1 1 10em;
+    min-width: 0;
+    max-width: max-content;
+  }
+}
 </style>

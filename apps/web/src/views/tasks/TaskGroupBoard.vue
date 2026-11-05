@@ -13,7 +13,7 @@
       {{ t.groupsReorderOff }}
     </p>
     <p v-if="hiddenCount > 0 && !truncated" class="tasks-group-board__message" data-testid="tasks-groups-hidden-by-filter" role="status">
-      {{ fmt.groupsHiddenByFilter(hiddenCount) }}
+      {{ rowsSearched === true ? fmt.groupsHiddenBySearch(hiddenCount) : fmt.groupsHiddenByFilter(hiddenCount) }}
     </p>
     <div class="tasks-group-board__toolbar">
       <button type="button" data-testid="tasks-groups-refresh" :disabled="pending" @click="onRefresh">{{ t.groupsRefresh }}</button>
@@ -337,6 +337,9 @@ const props = defineProps<{
   /** G2-core: the host filtered the rows by status, so a placement whose task is not a row is a
    *  hidden entry of the server's index space (design task-g2-core-design-20261011.md §4.1). */
   rowsFiltered?: boolean
+  /** The rows are also narrowed by the list page's title search, so the line about hidden entries
+   *  names the search rather than the status filter. */
+  rowsSearched?: boolean
   /** Group writes and moves are offered. */
   canManage: boolean
   /** Shared with the host through `v-model:pending`. */
@@ -868,6 +871,54 @@ onBeforeUnmount(() => {
   display: inline-flex;
   gap: 4px;
   margin-left: auto;
+}
+
+/* Up to 960px: long words in block text break instead of widening the board (`break-word` leaves
+   min-content sizes alone, so labels in the rows keep their words). The group header row wraps, so
+   its labels keep their width and only a part wider than the whole line, such as a long group name
+   in the delete prompt, breaks. The move controls wrap, and the move-to select (which sizes itself
+   to the longest group name) and the create input are capped at the row. */
+@media (max-width: 960px) {
+  .tasks-group-board {
+    overflow-wrap: break-word;
+  }
+
+  .tasks-group__header {
+    overflow-wrap: anywhere;
+  }
+
+  .tasks-group__name {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .tasks-group-board__moves {
+    flex-wrap: wrap;
+    max-width: 100%;
+  }
+
+  .tasks-group-board__moves select,
+  .tasks-group-board__create input {
+    max-width: 100%;
+    min-width: 0;
+  }
+}
+
+/* Narrow screens: the move controls (the fallback for dragging rows) take a line of their own
+   under the row content, left-aligned, with the select filling what is left of that line. */
+@media (max-width: 720px) {
+  .tasks-group {
+    padding: 8px;
+  }
+
+  .tasks-group-board__moves {
+    flex: 1 1 100%;
+    margin-left: 0;
+  }
+
+  .tasks-group-board__moves select {
+    flex: 1 1 8em;
+  }
 }
 
 .tasks-group-board__error {

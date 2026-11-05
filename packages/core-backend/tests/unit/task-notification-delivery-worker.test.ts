@@ -75,6 +75,8 @@ interface Script {
   taskReadThrows?: string
   /** The recipient is not an active member. */
   inactive?: boolean
+  /** The task's assignee ids (none unless given; the recipient is always a follower). */
+  assignees?: string[]
 }
 
 function oneLine(sql: string): string {
@@ -113,7 +115,7 @@ function scriptedQuery(script: Script = {}): { query: TaskDeliveryQuery; log: Re
       return { rows: [{ title: '到点复核', status: 'open', created_by: RECIPIENT, deleted_at: null, remind_at: REMIND_AT, due_date: null, due_time: null, time_zone: null }] }
     }
     if (text.startsWith('SELECT max(occurred_at) AS floor FROM task_events')) return { rows: [{ floor: REMIND_FLOOR }] }
-    if (text.includes('FROM task_assignees WHERE task_id')) return { rows: [] }
+    if (text.includes('FROM task_assignees WHERE task_id')) return { rows: (script.assignees ?? []).map((user_id) => ({ user_id, completed_at: null })) }
     if (text.includes('FROM task_followers WHERE task_id')) return { rows: [{ user_id: RECIPIENT }] }
     if (text.includes('FROM task_list_items tli')) return { rows: [] }
     throw new Error(`unexpected statement: ${text}`)
@@ -379,6 +381,30 @@ describe('statements and the steps of one row (design §7.2)', () => {
     expect(await worker(query, channel).runBatch()).toMatchObject({ claimed: 1, skipped: 1 })
     expect(channel.prepares).toBe(0)
     expect(log.some((entry) => entry.sql === '<prepare>')).toBe(false)
+  })
+
+  it('package 2: created / assignee_added are sent only while the recipient is still an assignee; a recipient who kept only the follower role is skipped with recipient_lost_access before any channel call, with no extra statement', async () => {
+    for (const event of ['created', 'assignee_added'] as const) {
+      const row = claimedEventRow({
+        recipient_role: 'assignee',
+        payload: { kind: 'task_event', event, taskId: TASK, eventId: 'tev_unit', actorId: 'usr_unit_actor' },
+      })
+      const lost = scriptedQuery({ claimed: [row] })
+      const lostChannel = recordingChannel(lost.log)
+      expect(await worker(lost.query, lostChannel).runBatch(), event).toMatchObject({ claimed: 1, skipped: 1, sent: 0 })
+      expect(lostChannel.prepares, event).toBe(0)
+      const skipped = lost.log.find((entry) => entry.sql.startsWith("UPDATE task_notification_deliveries SET status = 'skipped'")) as Recorded
+      expect(skipped.params, event).toEqual([ROW_ID, 'w-unit', 1, ['pending', 'retrying'], NOW, 'recipient_lost_access'])
+
+      const kept = scriptedQuery({ claimed: [row], assignees: [RECIPIENT] })
+      const keptChannel = recordingChannel(kept.log)
+      expect(await worker(kept.query, keptChannel).runBatch(), event).toMatchObject({ claimed: 1, sent: 1 })
+      expect(keptChannel.messages.map((message) => message.content), event).toEqual([`任务「备料复核」已指派给你\n\n编号 ${ROW_ID.slice(0, 8)}`])
+      // The same five reads per materialisation as any event row: the check reuses the role read.
+      const reads = (log: Recorded[]): number => log.filter((entry) => !entry.sql.startsWith('UPDATE')
+        && !entry.sql.startsWith('WITH claim AS') && entry.sql !== '<prepare>' && entry.sql !== '<send>').length
+      expect([reads(lost.log), reads(kept.log)], event).toEqual([5, 10])
+    }
   })
 
   it('the reminder family: the send-time floor statement counts only the floor event types, bound from TASK_REMINDER_FLOOR_EVENT_TYPES (RULED(2026-10-07): [R06])', async () => {

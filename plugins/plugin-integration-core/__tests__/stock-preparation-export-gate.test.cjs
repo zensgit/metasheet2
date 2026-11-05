@@ -50,6 +50,9 @@
 //         refusal (the typed check); (e) a typed error's non-code-shaped code is never the refusal (the shape check).
 //   XR-10 a not-governed export under a live lease: 409 BLOCKED lease_in_flight with the cause-and-remedy message
 //         (item 3; XG-03 / XG-04 pin the messages by reason on the pure gate).
+//   XR-11 (step 5 PR-8, C05 / C12) A CHANGE PLAN through the gate, every state seeded through the REAL store: a
+//         confirmed plan => 409 confirmed_pending_execution; written and settled but not reviewed => 409
+//         change_pending_review (write success is never review complete); reviewed => 200.
 //   XH-01..04 THE HANDOFF TERMINAL HOP: refused 409 (503 unreadable) under the same predicate; non-terminal hops
 //         never consult; a settled complete passes; a not-governed project passes.
 //   XP-01 THE POSTURE: every unfinished / unreadable state is `blocked_pull_state`, never 「可以导出」; the overview
@@ -98,6 +101,8 @@ const LEASE_IN_FLIGHT_MESSAGE = 'a pull is writing this sheet or a crashed pull 
 const STATE_BLOCKED_MESSAGE = 'this project has an unfinished refresh state; the formal export is refused until it is complete and checked'
 
 // ── the golden, captured from main 8cafcc851's OWN modules (scratchpad s5_golden_main.cjs): one fixed fixture ──
+// 2026-10-29: the export appends 采购回复 / 仓库确认 (EXPORT_COLUMNS, after 毛胚质量), so the golden gains those two
+// headers and two blank cells per row (this fixture fills neither), and columnCount 28 -> 30. Nothing else moved.
 const GOLDEN_TENANT = 'tenant-golden-xg'
 const GOLDEN_STAGING = `${GOLDEN_TENANT}:integration-core`
 const GOLDEN_SHEET = 'sheet_golden_xg_hand_bound'
@@ -105,10 +110,10 @@ const GOLDEN_PROJECT = 'PRJ-GOLDEN-XG'
 const GOLDEN_OPERATOR = Object.freeze({ id: 'u_golden_op', tenantId: GOLDEN_TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] })
 const GOLDEN_XLSX = Object.freeze({
   sheetName: '备料导出-PRJ-GOLDEN-XG',
-  headers: ['父组件图号', '父组件名称', '图号', '名称', '规格', '材料', '总数量', '备料情况', '需求日期', '领料节点', '备料日期', '毛胚长度', '自制/外购', '采购完成', '采购回复日期', '仓库完成', '实际到货日期', '生产编号', '名称及规格', '材料类型', '毛胚类型', '备注', '交接工段', '提前周期(天)', '毛胚宽度', '毛胚厚度', '毛胚数量', '毛胚质量'],
+  headers: ['父组件图号', '父组件名称', '图号', '名称', '规格', '材料', '总数量', '备料情况', '需求日期', '领料节点', '备料日期', '毛胚长度', '自制/外购', '采购完成', '采购回复日期', '仓库完成', '实际到货日期', '生产编号', '名称及规格', '材料类型', '毛胚类型', '备注', '交接工段', '提前周期(天)', '毛胚宽度', '毛胚厚度', '毛胚数量', '毛胚质量', '采购回复', '仓库确认'],
   rows: [
-    [null, null, 'DWG-P-001', 'ASSY-P', 'SPEC-P', 'M-P', 2, null, null, null, null, null, null, null, null, null, null, 'PRJ-GOLDEN-XG', null, null, null, null, null, null, null, null, null, null],
-    ['DWG-P-001', 'ASSY-P', 'DWG-C-001', 'PART-C', 'SPEC-C', 'M-C', 6, null, null, null, null, null, null, null, null, null, null, 'PRJ-GOLDEN-XG', null, null, null, null, null, null, null, null, null, null],
+    [null, null, 'DWG-P-001', 'ASSY-P', 'SPEC-P', 'M-P', 2, null, null, null, null, null, null, null, null, null, null, 'PRJ-GOLDEN-XG', null, null, null, null, null, null, null, null, null, null, null, null],
+    ['DWG-P-001', 'ASSY-P', 'DWG-C-001', 'PART-C', 'SPEC-C', 'M-C', 6, null, null, null, null, null, null, null, null, null, null, 'PRJ-GOLDEN-XG', null, null, null, null, null, null, null, null, null, null, null, null],
   ],
 })
 const GOLDEN_AUDIT = Object.freeze({
@@ -117,7 +122,7 @@ const GOLDEN_AUDIT = Object.freeze({
   action: 'prep_line_export',
   actor: 'u_golden_op',
   mode: 'export',
-  detail: { operation: 'prep_line_export', totalRowCount: 3, activeRowCount: 2, columnCount: 28 },
+  detail: { operation: 'prep_line_export', totalRowCount: 3, activeRowCount: 2, columnCount: 30 },
 })
 function goldenRows() {
   return [
@@ -836,7 +841,7 @@ async function main() {
     assert.equal(workbook.rows.filter((row) => row[codeIndex] === 'D100-01-03').length, 1, 'the S root appears once, with its own quantity')
     assert.equal(workbook.rows.find((row) => row[codeIndex] === 'D100-01-03')[qtyIndex], 10, 'the old root keeps its order quantity (not the parent edge)')
     assert.deepEqual(h.auditAppends.map((entry) => entry.mode), ['export'])
-    assert.deepEqual(h.auditAppends[0].detail, { operation: 'prep_line_export', totalRowCount: 5, activeRowCount: 5, columnCount: 29, refreshState: 'complete', continuationCount: 1, continuedRowCount: 4 })
+    assert.deepEqual(h.auditAppends[0].detail, { operation: 'prep_line_export', totalRowCount: 5, activeRowCount: 5, columnCount: 31, refreshState: 'complete', continuationCount: 1, continuedRowCount: 4 })
     assert.deepEqual(h.reads, [GOV_SHEET, GOV_SHEET], 'the export rows read, THEN the digest read')
     assert.equal(h.counters.routeReadGeneration, 2)
     assert.equal(h.counters.readRefreshState, 2)
@@ -1161,6 +1166,72 @@ async function main() {
     assert.equal(errorOf(res).message, LEASE_IN_FLIGHT_MESSAGE)
     assert.deepEqual(h.reads, [], 'no records read')
     await h.rawLock.createGuard(grant).release()
+  })
+
+  // ── XR-11 ──────────────────────────────────────────────────────────────────────────────────────
+  await run('XR-11 (step 5 PR-8, C05 / C12) a change plan through the formal export: confirmed => 409 confirmed_pending_execution; written + settled but NOT reviewed => 409 change_pending_review; reviewed => 200 — every state through the REAL store', async () => {
+    const storeModule = require(path.join(LIB, 'stock-preparation-continuation-store.cjs'))
+    const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
+    const { __internals: plannerInternals } = require(path.join(LIB, 'stock-preparation-conflict-planner.cjs'))
+    const { normalizeStockPreparationTemplate } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
+    const h = mountExport({ rows: await governedRows({ withParent: false }) })
+    // The changed read over the first-pull sheet (the REAL planner): PART-A's material and PART-C's usage.
+    const sheet = await CF.firstPullSheet()
+    const parts = CF.PARTS.map((part) => (part.OBJ_ID === 'PART-A' ? { ...part, Material: 'M-XR11' } : part))
+    const expansion = await CF.expand(CF.project({ orders: [{ part: 'S-001', qty: 10 }], parts, boms: { 'S-001': [{ part: 'PART-A', usage: 2 }, { part: 'PART-B', usage: 3 }], 'PART-A': [{ part: 'PART-C', usage: 5 }] } }))
+    const planned = CF.plan(expansion, sheet, { continuation: CF.continuationInput({ pilot: true, demandEvidence: expansion.demandEvidence }) })
+    assert.equal(planned.holds.filter((hold) => hold.kind === 'content_change').length, 2)
+    await h.env.store.reconcileHolds({ ...GOV_SCOPE, decisionVersionObserved: 0, holds: planned.holds, computation: { lane: 'small_preview', suspended: true, generationToken: null, sourceContentDigest: 'c'.repeat(64) } })
+    const state = h.env.rows('state')[0]
+    const content = h.env.rows('hold').filter((row) => row.status === 'open').map(storeModule.__internals.rowToHold).filter(pairing.isContentClassHold)
+    const records = pairing.changePlanRecordsFromHolds(content)
+    const confirmed = await h.env.store.confirmChangePlan({
+      ...GOV_SCOPE,
+      confirmedBy: 'u_xg_puller',
+      holds: content.map((hold) => ({ id: hold.id, fingerprint: hold.fingerprint })),
+      echo: { holdSetFingerprint: state.hold_set_fingerprint, planFingerprint: pairing.changePlanFingerprintOf({ projectNo: GOV_PROJECT, records, sourceContentDigest: 'c'.repeat(64) }), sourceContentDigest: 'c'.repeat(64) },
+      candidates: [],
+      sourceIdentity: CF.SOURCE_IDENTITY,
+      template: TEMPLATE,
+    }, { bumpWithin: h.env.bump.bumpWithin })
+    let res = await h.exportAs(GOV_OPERATOR, GOV_PROJECT)
+    assertRefused(h, res, 409, EXPORT_GATE_ERROR_CODES.BLOCKED, { reason: 'state', state: 'confirmed_pending_execution' })
+    assert.deepEqual(h.reads, [], 'no records read for a refused state')
+    // The bound execution writes the plan's values (the after of every field), then finishes: the plan is WRITTEN.
+    const execution = await h.env.store.beginExecution({
+      ...GOV_SCOPE,
+      lane: 'small_apply',
+      guard: { leaseRunId: 'run_xr11', leaseId: 'lease_xr11', fencingEpoch: 1, generation: 1, generationToken: 'tok_xr11' },
+      tokenRevision: 'rev_xr11',
+      planDigest: 'plan_xr11',
+      plannedCounts: { add: 0, update: 2, inactive: 0 },
+      refreshBinding: { continuations: [], changePlanId: confirmed.changePlanId, holdSetFingerprint: null },
+      startedBy: 'u_xg_puller',
+    })
+    const plan = storeModule.__internals.rowToChangePlan(h.env.rows('changePlan').find((row) => row.id === confirmed.changePlanId))
+    for (const record of plan.recordSet) {
+      const changes = Object.fromEntries(Object.entries(record.fields).map(([fieldId, cell]) => [h.physical(fieldId), cell.after]))
+      await h.records.patchRecord({ sheetId: GOV_SHEET, recordId: record.recordId, changes })
+    }
+    await h.env.store.finishExecution({ ...GOV_SCOPE, executionId: execution.id, status: 'succeeded', written: 2, attemptedWrites: 2, counts: { updated: 2 } })
+    assert.equal(h.env.rows('changePlan').find((row) => row.id === confirmed.changePlanId).status, 'written')
+    await h.settle({ executionId: execution.id })
+    h.auditAppends.length = 0
+    res = await h.exportAs(GOV_OPERATOR, GOV_PROJECT)
+    assertRefused(h, res, 409, EXPORT_GATE_ERROR_CODES.BLOCKED, { reason: 'state', state: 'change_pending_review' })
+    assert.deepEqual(h.xlsxCalls, [], 'C12: written and settled is not reviewed — no workbook')
+    // The review (the content the sheet holds = what was written): the export passes.
+    const existing = await tableActions.__internals.readExistingStockPreparationRows(h.records, h.target, GOV_PROJECT)
+    const byId = new Map(existing.map((row) => [recordRefOf(row).id, row]))
+    const written = h.env.rows('changePlan').find((row) => row.id === confirmed.changePlanId)
+    const current = pairing.currentContentDigestOf({ records: plan.recordSet, rowsByRecordId: byId, templateFields: plannerInternals.fieldMapForTemplate(normalizeStockPreparationTemplate(TEMPLATE)) })
+    assert.equal(current, written.written_content_digest)
+    await h.env.store.completeChangeReview({ ...GOV_SCOPE, changePlanId: written.id, reviewedBy: 'u_xg_puller', echoDigest: written.written_content_digest, currentContentDigest: current, conclusion: 'handled' })
+    h.auditAppends.length = 0
+    h.xlsxCalls.length = 0
+    res = await h.exportAs(GOV_OPERATOR, GOV_PROJECT)
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(h.xlsxCalls.length, 1)
   })
 
   // ── XH-01..04 ──────────────────────────────────────────────────────────────────────────────────

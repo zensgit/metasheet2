@@ -12,6 +12,7 @@
 import { createHash } from 'node:crypto'
 
 import { carryHumanWriteLock, humanWriteLockKindOfProperty } from './human-write-lock'
+import { carryManualRowPolicy, manualRowsPolicyValueOf } from './stock-preparation-manual-rows'
 
 type QueryFn = (text: string, params: unknown[]) => Promise<{ rows: unknown[] }>
 
@@ -23,13 +24,20 @@ type QueryFn = (text: string, params: unknown[]) => Promise<{ rows: unknown[] }>
  * the preview's `target` (what the actor is shown) and the write (`applyConfigRevert`) go through this, so the
  * disclosed target and the stored result stay identical. An unlocked field on both sides is returned untouched
  * (byte-identical to the pre-lock behaviour).
+ *
+ * The manual-rows switch (`stockPreparationManualRows` on a project sheet's key column, stock-preparation-manual-rows.ts;
+ * ADR adr-stock-prep-manual-rows-20261030 §4) follows the same rule: the STORED value wins, so a revert can neither
+ * turn manual rows off nor back on. A field with neither key on either side is still returned untouched.
  */
 export function fieldRevertPropertyKeepingLock(storedProperty: unknown, revertProperty: unknown): unknown {
-  if (!humanWriteLockKindOfProperty(storedProperty) && !humanWriteLockKindOfProperty(revertProperty)) return revertProperty
+  if (
+    !humanWriteLockKindOfProperty(storedProperty) && !humanWriteLockKindOfProperty(revertProperty)
+    && manualRowsPolicyValueOf(storedProperty) === null && manualRowsPolicyValueOf(revertProperty) === null
+  ) return revertProperty
   const base = revertProperty && typeof revertProperty === 'object' && !Array.isArray(revertProperty)
     ? (revertProperty as Record<string, unknown>)
     : {}
-  return carryHumanWriteLock(storedProperty, base)
+  return carryManualRowPolicy(storedProperty, carryHumanWriteLock(storedProperty, base))
 }
 
 export interface ConfigRevisionRow {

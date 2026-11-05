@@ -80,8 +80,8 @@ afterEach(() => {
   setSwitches(saved)
 })
 
-function event(type: string, actorId: string, id = `tevt_${type}`): WrittenTaskEvent {
-  return { id, type, actorId, occurredAt: null }
+function event(type: string, actorId: string, id = `tevt_${type}`, targetUserId?: string): WrittenTaskEvent {
+  return targetUserId === undefined ? { id, type, actorId, occurredAt: null } : { id, type, actorId, occurredAt: null, targetUserId }
 }
 
 const TASK = { orgId: 'org_a', taskId: 'tsk_1', createdBy: 'usr_creator' }
@@ -151,8 +151,8 @@ describe('task notification producer: events that do not notify', () => {
   it('RULED(2026-10-07): [R05] [D13] with the pipeline on, a batch without a notifying event sends no statement', async () => {
     pipelineOn()
     const quiet = [
-      'assignee_added', 'assignee_removed', 'self_completed', 'self_reopened', 'completion_mode_changed',
-      'follower_added', 'follower_removed', 'left', 'created', 'remind_changed', 'parent_changed',
+      'assignee_removed', 'self_completed', 'self_reopened', 'completion_mode_changed',
+      'follower_added', 'follower_removed', 'left', 'remind_changed', 'parent_changed',
       'list_added', 'list_removed', 'group_changed', 'attachment_added', 'archived', '',
     ]
     for (const type of quiet) {
@@ -163,6 +163,19 @@ describe('task notification producer: events that do not notify', () => {
     const { db, calls } = fakeDb({ dingTalkActive: true })
     await expect(enqueueTaskEventNotifications(db, { ...TASK, events: [] })).resolves.toBe(0)
     expect(calls).toEqual([])
+  })
+
+  it('package 2: created and assignee_added are no longer quiet; with the pipeline off they still send nothing', async () => {
+    for (const ev of [event('created', 'usr_a'), event('assignee_added', 'usr_a', 'tevt_add', 'usr_b')]) {
+      setSwitches({})
+      const off = fakeDb({ dingTalkActive: true, members: [{ member_kind: 'assignee', user_id: 'usr_b' }] })
+      await expect(enqueueTaskEventNotifications(off.db, { ...TASK, events: [ev] })).resolves.toBe(0)
+      expect(off.calls, ev.type).toEqual([])
+      pipelineOn()
+      const on = fakeDb({ dingTalkActive: true, members: [{ member_kind: 'assignee', user_id: 'usr_b' }] })
+      await expect(enqueueTaskEventNotifications(on.db, { ...TASK, events: [ev] })).resolves.toBe(1)
+      expect(on.calls, ev.type).toHaveLength(3)
+    }
   })
 
   it('the list producer: only archived notifies; every other list event sends no statement', async () => {
@@ -351,6 +364,77 @@ describe('task notification producer: members, recipients and the INSERT', () =>
       channel: CHANNEL,
       payload: { kind: 'task_list_event', event: 'archived', listId: 'tlst_1', eventId: 'tlev_7', actorId: 'usr_a' },
     }])
+  })
+
+  it('package 2 (2-D1): created goes to the new task\'s assignees other than the actor, as assignee; followers and list members get none', async () => {
+    pipelineOn()
+    const { db, calls } = fakeDb({ dingTalkActive: true, members: [
+      { member_kind: 'assignee', user_id: 'usr_b' },
+      { member_kind: 'assignee', user_id: 'usr_a' },
+      { member_kind: 'follower', user_id: 'usr_f' },
+      { member_kind: 'list_member', user_id: 'usr_l' },
+    ] })
+    await expect(enqueueTaskEventNotifications(db, { ...TASK, createdBy: 'usr_a', events: [event('created', 'usr_a', 'tevt_c')] })).resolves.toBe(1)
+    expect(calls).toHaveLength(3)
+    expect(insertedRows(calls[2])).toEqual([{
+      org_id: 'org_a',
+      source_type: 'task_event',
+      source_id: 'tsk_1',
+      source_key: `task_event:tsk_1:tevt_c:recipient:usr_b:channel:${CHANNEL}`,
+      recipient_user_id: 'usr_b',
+      recipient_role: 'assignee',
+      channel: CHANNEL,
+      payload: { kind: 'task_event', event: 'created', taskId: 'tsk_1', eventId: 'tevt_c', actorId: 'usr_a' },
+    }])
+  })
+
+  it('package 2 (2-D1): assignee_added goes to the added person only; the target is passed from the written event', async () => {
+    pipelineOn()
+    const { db, calls } = fakeDb({ dingTalkActive: true, members: [
+      { member_kind: 'assignee', user_id: 'usr_a' },
+      { member_kind: 'assignee', user_id: 'usr_b' },
+      { member_kind: 'follower', user_id: 'usr_f' },
+      { member_kind: 'list_member', user_id: 'usr_l' },
+    ] })
+    await expect(enqueueTaskEventNotifications(db, { ...TASK, events: [event('assignee_added', 'usr_a', 'tevt_add', 'usr_b')] })).resolves.toBe(1)
+    const rows = insertedRows(calls[2])
+    expect(rows.map((row) => [row.recipient_user_id, row.recipient_role])).toEqual([['usr_b', 'assignee']])
+    expect(rows[0].payload).toEqual({ kind: 'task_event', event: 'assignee_added', taskId: 'tsk_1', eventId: 'tevt_add', actorId: 'usr_a' })
+  })
+
+  it('package 2 (2-D1): assignee_added without a target, with the actor as target, or with a target not in the assignee set sends the check and the member read, then no INSERT', async () => {
+    pipelineOn()
+    for (const ev of [
+      event('assignee_added', 'usr_a', 'tevt_add'),
+      event('assignee_added', 'usr_a', 'tevt_add', 'usr_a'),
+      event('assignee_added', 'usr_a', 'tevt_add', 'usr_f'),
+    ]) {
+      const { db, calls } = fakeDb({ dingTalkActive: true, members: [
+        { member_kind: 'assignee', user_id: 'usr_a' },
+        { member_kind: 'follower', user_id: 'usr_f' },
+      ] })
+      await expect(enqueueTaskEventNotifications(db, { ...TASK, events: [ev] })).resolves.toBe(0)
+      expect(calls.map((call) => call.sql.slice(0, 15)), JSON.stringify(ev)).toEqual(['SELECT EXISTS (', "SELECT 'assigne"])
+    }
+  })
+
+  it('package 2 (2-D9): an add that reopens a done task gives the added person both rows, each under its own event id, in one INSERT', async () => {
+    pipelineOn()
+    const { db, calls } = fakeDb({ dingTalkActive: true, members: [
+      { member_kind: 'assignee', user_id: 'usr_b' },
+      { member_kind: 'assignee', user_id: 'usr_x' },
+    ] })
+    await enqueueTaskEventNotifications(db, {
+      ...TASK,
+      events: [event('assignee_added', 'usr_creator', 'tevt_add', 'usr_x'), event('reopened', 'usr_creator', 'tevt_re')],
+    })
+    expect(calls.filter((call) => call.sql.startsWith('INSERT'))).toHaveLength(1)
+    const rows = insertedRows(calls[2])
+    expect(rows.map((row) => [row.recipient_user_id, (row.payload as { event: string }).event, (row.payload as { eventId: string }).eventId])).toEqual([
+      ['usr_x', 'assignee_added', 'tevt_add'],
+      ['usr_b', 'reopened', 'tevt_re'],
+      ['usr_x', 'reopened', 'tevt_re'],
+    ])
   })
 
   it('insertTaskNotificationDeliveries with no row sends nothing', async () => {

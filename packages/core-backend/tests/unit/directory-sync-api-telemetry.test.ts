@@ -28,7 +28,13 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
   getDingTalkUserDetail: clientMocks.getDingTalkUserDetail,
 }))
 
-import { fetchAllDepartments, fetchAllUsers } from '../../src/directory/directory-sync'
+import {
+  createDirectoryPullRetryCounters,
+  fetchAllDepartments,
+  fetchAllUsers,
+  recordDirectoryPullRetry,
+  summarizeDirectoryPullRetries,
+} from '../../src/directory/directory-sync'
 import {
   createDirectorySyncApiCallCounters,
   summarizeDirectorySyncApiCalls,
@@ -149,6 +155,41 @@ describe('§7.7 directory-sync external API call telemetry', () => {
       externalUserDetailCalls: 4,
       externalDirectoryPullCalls: 14, // 3 + 3 + 4 + 4 — sum of the four pull categories
     })
+  })
+
+  it('retry counters: zeroed on creation, bucketed by the transport reason string, projected to numeric externalPullRetry* keys', () => {
+    const counters = createDirectoryPullRetryCounters()
+    expect(counters).toEqual({ total: 0, flowControl: 0, http429: 0, network: 0, other: 0 })
+
+    // The reason strings are the transport's own classifications: the whole flow-control errcode
+    // family is one bucket; 5xx / malformed-body retries fall into `other` so `total` stays honest.
+    for (const reason of [
+      'flow_control_errcode_90018',
+      'flow_control_errcode_-1',
+      'http_429',
+      'network_error',
+      'http_503',
+      'malformed_response_unparseable_body',
+    ]) {
+      recordDirectoryPullRetry(counters, { reason })
+    }
+    expect(counters).toEqual({ total: 6, flowControl: 2, http429: 1, network: 1, other: 2 })
+
+    const summarized = summarizeDirectoryPullRetries(counters)
+    expect(summarized).toEqual({
+      externalPullRetryCount: 6,
+      externalPullRetryFlowControlCount: 2,
+      externalPullRetryHttp429Count: 1,
+      externalPullRetryNetworkCount: 1,
+      externalPullRetryOtherCount: 2,
+    })
+    for (const value of Object.values(summarized)) expect(typeof value).toBe('number')
+    expect(summarized.externalPullRetryCount).toBe(
+      summarized.externalPullRetryFlowControlCount
+        + summarized.externalPullRetryHttp429Count
+        + summarized.externalPullRetryNetworkCount
+        + summarized.externalPullRetryOtherCount,
+    )
   })
 
   it('counters passed to neither helper stay pristine (optional param is truly optional)', async () => {

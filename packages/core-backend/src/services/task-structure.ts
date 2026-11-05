@@ -51,6 +51,7 @@ import { taskCountsSignal } from './task-counts-realtime'
 import { newTaskCommentId, newTaskEventId } from './task-ids-runtime'
 import { enqueueTaskEventNotifications, type WrittenTaskEvent } from './task-notification-producer'
 import { assertActiveOrgMembers } from './task-org-members'
+import { assertTaskAccess } from './task-member-access'
 import {
   assertRowAbility,
   assigneeIds,
@@ -130,7 +131,8 @@ interface MembershipEventLike {
  * .payload` (PR #6126 second-round review, P2 item 6). Tree/deletion events
  * have no `targetUserId` and keep the column's `{}` default. Returns the
  * events as written, ids included (ASSUMPTION(task-m4): [own-3b-12]: each id
- * is generated before its INSERT, for the notification producer).
+ * is generated before its INSERT, for the notification producer), and the
+ * `targetUserId` of a membership event, so the producer knows who was added.
  */
 async function writeMembershipEvents(db: Db, taskId: string, events: MembershipEventLike[], fallbackAt: Date): Promise<WrittenTaskEvent[]> {
   const written: WrittenTaskEvent[] = []
@@ -142,7 +144,9 @@ async function writeMembershipEvents(db: Db, taskId: string, events: MembershipE
       `INSERT INTO task_events (id, task_id, actor_id, event_type, payload, occurred_at) VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
       [id, taskId, event.userId, event.type, payload, occurredAt],
     )
-    written.push({ id, type: event.type, actorId: event.userId, occurredAt })
+    written.push(event.targetUserId !== undefined
+      ? { id, type: event.type, actorId: event.userId, occurredAt, targetUserId: event.targetUserId }
+      : { id, type: event.type, actorId: event.userId, occurredAt })
   }
   return written
 }
@@ -343,6 +347,9 @@ export async function addAssignee(input: { orgId: string; actorId: string; taskI
       // direct-role check ([own-53]) and the id check above. ASSUMPTION(task-m4): [own-16] never for
       // the caller adding themselves.
       if (userId !== input.actorId) await assertActiveOrgMembers(db, input.orgId, [userId])
+      // Then the new assignee must be able to use tasks (task-member-access.ts), else 422
+      // ASSIGNEE_TASK_ACCESS_REQUIRED and nothing is written; never for the caller adding themselves.
+      if (userId !== input.actorId) await assertTaskAccess(db, [userId])
       await db.query(
         `INSERT INTO task_assignees (task_id, user_id, completed_at, assigned_by) VALUES ($1, $2, NULL, $3)
          ON CONFLICT (task_id, user_id) DO NOTHING`,

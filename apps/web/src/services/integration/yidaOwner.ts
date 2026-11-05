@@ -22,6 +22,29 @@ export interface YidaOwnerDraft {
 export interface YidaOwnerSelection {
   readonly operationId: string
   readonly rowKey: string
+  /** Y2 (server multi-target switch ON only): the owner-picked approved target. */
+  readonly targetRef?: string
+}
+/** Y2: one owner-attested target as the server lists it (owner-authorized, no-store reply). */
+export interface YidaOwnerTarget {
+  readonly slot: number
+  readonly targetRef: string
+  readonly appType: string
+  readonly formUuid: string
+}
+export interface YidaOwnerSheetSource {
+  readonly kind: 'sheet'
+  readonly sheetId: string
+  readonly viewId?: string
+  readonly columns: readonly Readonly<{ fieldId: string; source: string }>[]
+}
+/** Y2 draft: a named target and either pasted rowsText or a sheet/view source (never both). */
+export interface YidaOwnerTargetedDraftInput {
+  readonly targetRef: string
+  readonly config: unknown
+  readonly allocation: unknown
+  readonly rowsText?: string
+  readonly source?: YidaOwnerSheetSource
 }
 export interface YidaOwnerPreview extends YidaOwnerSelection {
   readonly planDigest: string
@@ -87,6 +110,13 @@ export type YidaOwnerApprovalResult = YidaOwnerApproval & Readonly<{ reused: boo
 
 const prefix = '/api/integration/yida-owner-send'
 const maximumBodyBytes = 1024 * 1024
+// Client wait budgets, not server completion guarantees. Every call waits 15 s except the one
+// POST /submissions, which waits 60 s: after admission the server may need its status-line limit
+// (10 s), its body limit (5 s) and the ledger write, and since #6736 an admitted send finishes even
+// when this page stops waiting. Running out of budget only ends the wait here; the durable record
+// decides the outcome, so read it before anything else. Nothing is retried or refreshed for you.
+const requestTimeoutMs = 15000
+const SUBMISSION_TIMEOUT_MS = 60000
 const uuidPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u
 const deliveryStates: readonly YidaOwnerDeliveryStatus[] = ['prepared', 'dispatching', 'acknowledged', 'outcome_unknown', 'not_sent']
 const errorStatuses: Readonly<Record<string, readonly number[]>> = Object.freeze({
@@ -97,6 +127,12 @@ const errorStatuses: Readonly<Record<string, readonly number[]>> = Object.freeze
   YIDA_SEND_APPROVAL_INPUT: [400], YIDA_SEND_APPROVAL_NOT_FOUND: [404], YIDA_SEND_APPROVAL_CONFLICT: [409],
   YIDA_SEND_APPROVAL_EXPIRED: [409], YIDA_SEND_APPROVAL_REVOKED: [409], YIDA_SEND_APPROVAL_CANCELLED: [409],
   YIDA_SEND_APPROVAL_UNAVAILABLE: [503],
+  // Y2 target list and sheet/view source.
+  YIDA_INITIALIZATION_INPUT: [400], YIDA_INITIALIZATION_DENIED: [403], YIDA_INITIALIZATION_DISABLED: [403],
+  YIDA_INITIALIZATION_CONFLICT: [409], YIDA_INITIALIZATION_CANCELLED: [409], YIDA_INITIALIZATION_INACTIVE: [503],
+  YIDA_INITIALIZATION_UNAVAILABLE: [503],
+  YIDA_SHEET_SOURCE_INPUT: [400], YIDA_SHEET_SOURCE_DENIED: [403], YIDA_SHEET_SOURCE_NOT_FOUND: [404],
+  YIDA_SHEET_SOURCE_LIMIT: [422], YIDA_SHEET_SOURCE_UNSUPPORTED: [422], YIDA_SHEET_SOURCE_UNAVAILABLE: [503],
 })
 export class YidaOwnerClientError extends Error {
   readonly code: string
@@ -125,8 +161,33 @@ function integer(value: unknown, min: number, max: number): number {
 function boolean(value: unknown): boolean { if (typeof value !== 'boolean') invalid(); return value }
 function checkedInput<T>(parse: () => T): T { try { return parse() } catch { throw new YidaOwnerClientError('YIDA_OWNER_INPUT_INVALID') } }
 function selection(value: unknown): YidaOwnerSelection {
-  const row = object(value, ['operationId', 'rowKey'])
-  return Object.freeze({ operationId: uuid(row.operationId), rowKey: uuid(row.rowKey) })
+  const row = object(value, ['operationId', 'rowKey'], ['targetRef'])
+  return Object.freeze({ operationId: uuid(row.operationId), rowKey: uuid(row.rowKey),
+    ...(Object.prototype.hasOwnProperty.call(row, 'targetRef') ? { targetRef: uuid(row.targetRef) } : {}) })
+}
+function targetList(value: unknown): readonly YidaOwnerTarget[] {
+  const row = object(value, ['targets', 'registered', 'canSend', 'tokenIssued', 'externalWriteAttempted'])
+  if (row.canSend !== false || row.tokenIssued !== false || row.externalWriteAttempted !== false
+    || !Array.isArray(row.targets) || row.targets.length < 1 || row.targets.length > 16) invalid()
+  let previous = 0
+  const targets = row.targets.map(item => {
+    const target = object(item, ['slot', 'targetRef', 'appType', 'formUuid'])
+    const slot = integer(target.slot, previous + 1, 16)
+    if (previous === 0 && slot !== 1) invalid()
+    previous = slot
+    return Object.freeze({ slot, targetRef: uuid(target.targetRef), appType: canonical(target.appType), formUuid: canonical(target.formUuid) })
+  })
+  return Object.freeze(targets)
+}
+function sheetSource(value: unknown): YidaOwnerSheetSource {
+  const row = object(value, ['kind', 'sheetId', 'columns'], ['viewId'])
+  if (row.kind !== 'sheet' || !Array.isArray(row.columns) || row.columns.length < 1 || row.columns.length > 64) invalid()
+  const columns = row.columns.map(item => {
+    const column = object(item, ['fieldId', 'source'])
+    return Object.freeze({ fieldId: canonical(column.fieldId), source: canonical(column.source) })
+  })
+  return Object.freeze({ kind: 'sheet', sheetId: canonical(row.sheetId),
+    ...(Object.prototype.hasOwnProperty.call(row, 'viewId') ? { viewId: canonical(row.viewId) } : {}), columns: Object.freeze(columns) })
 }
 function draft(value: unknown): YidaOwnerDraft {
   const row = object(value, ['targetRef', 'operationId', 'status', 'identityKind', 'canSend', 'canApply', 'tokenIssued', 'externalWriteAttempted', 'rowCount', 'rows', 'reused'])
@@ -241,14 +302,14 @@ export function createYidaOwnerClient(options: { onInvalidated?: (code?: string)
   window.addEventListener('storage', onStorage)
   window.addEventListener('focus', checkSession)
   const assertSession = () => { checkSession(); if (disposed) throw new YidaOwnerClientError('YIDA_OWNER_SESSION_CHANGED') }
-  async function request<T>(path: string, method: 'GET' | 'POST', status: number, parse: (value: unknown) => T, body?: unknown, signal?: AbortSignal): Promise<T> {
+  async function request<T>(path: string, method: 'GET' | 'POST', status: number, parse: (value: unknown) => T, body?: unknown, signal?: AbortSignal, timeoutMs = requestTimeoutMs): Promise<T> {
     assertSession()
     const controller = new AbortController()
     const abort = () => controller.abort()
     if (signal?.aborted) controller.abort()
     signal?.addEventListener('abort', abort, { once: true })
     controllers.add(controller)
-    const timeout = setTimeout(abort, 15000)
+    const timeout = setTimeout(abort, timeoutMs)
     const current = () => { assertSession(); if (controller.signal.aborted) throw new YidaOwnerClientError('YIDA_OWNER_CANCELLED') }
     try {
       current()
@@ -305,20 +366,42 @@ export function createYidaOwnerClient(options: { onInvalidated?: (code?: string)
       })
       return request('/drafts', 'POST', 201, draft, body, signal)
     },
+    /** Y2 (multi-target switch ON): a draft for a named target, from pasted rowsText or a sheet/view source. */
+    prepareTargetedDraft(input: YidaOwnerTargetedDraftInput, signal?: AbortSignal): Promise<YidaOwnerDraft> {
+      const body = checkedInput(() => {
+        const row = object(input, ['targetRef', 'config', 'allocation'], ['rowsText', 'source'])
+        const hasRows = Object.prototype.hasOwnProperty.call(row, 'rowsText'), hasSource = Object.prototype.hasOwnProperty.call(row, 'source')
+        if (hasRows === hasSource) invalid()
+        if (hasRows && (typeof row.rowsText !== 'string' || new TextEncoder().encode(row.rowsText).length > 128 * 1024)) invalid()
+        return JSON.parse(JSON.stringify({ targetRef: uuid(row.targetRef), config: row.config, allocation: row.allocation,
+          ...(hasRows ? { rowsText: row.rowsText } : { source: sheetSource(row.source) }) })) as YidaOwnerTargetedDraftInput
+      })
+      return request('/drafts', 'POST', 201, draft, body, signal)
+    },
+    /** Y2: the owner's targets; the server answers the generic 404 NOT_FOUND while its switch is off. */
+    targets(signal?: AbortSignal): Promise<readonly YidaOwnerTarget[]> {
+      return request('/targets', 'GET', 200, targetList, undefined, signal)
+    },
     preview(input: YidaOwnerSelection, signal?: AbortSignal): Promise<YidaOwnerPreview> {
       const body = checkedInput(() => selection(input))
-      return request('/preview', 'POST', 200, value => preview(value, body), body, signal)
+      return request('/preview', 'POST', 200, value => {
+        const result = preview(value, { operationId: body.operationId, rowKey: body.rowKey })
+        if (body.targetRef !== undefined && result.target.targetRef !== body.targetRef) invalid()
+        return result
+      }, body, signal)
     },
     approve(input: YidaOwnerApprovalInput, signal?: AbortSignal): Promise<YidaOwnerApprovalResult> {
       const body = checkedInput(() => {
-        const row = object(input, ['operationId', 'rowKey', 'confirmationId', 'acknowledgeOnce'], ['ttlMs'])
+        const row = object(input, ['operationId', 'rowKey', 'confirmationId', 'acknowledgeOnce'], ['ttlMs', 'targetRef'])
         if (row.acknowledgeOnce !== true) invalid()
         return { operationId: uuid(row.operationId), rowKey: uuid(row.rowKey), confirmationId: uuid(row.confirmationId), acknowledgeOnce: true,
-          ...(Object.prototype.hasOwnProperty.call(row, 'ttlMs') ? { ttlMs: integer(row.ttlMs, 1, 900000) } : {}) }
+          ...(Object.prototype.hasOwnProperty.call(row, 'ttlMs') ? { ttlMs: integer(row.ttlMs, 1, 900000) } : {}),
+          ...(Object.prototype.hasOwnProperty.call(row, 'targetRef') ? { targetRef: uuid(row.targetRef) } : {}) }
       })
       return request('/approvals', 'POST', 201, value => {
         const result = approvalResult(value)
-        if (result.operationId !== body.operationId || result.rowKey !== body.rowKey) invalid()
+        if (result.operationId !== body.operationId || result.rowKey !== body.rowKey
+          || (body.targetRef !== undefined && result.targetRef !== body.targetRef)) invalid()
         return result
       }, body, signal)
     },
@@ -336,7 +419,7 @@ export function createYidaOwnerClient(options: { onInvalidated?: (code?: string)
     },
     submit(input: YidaOwnerSubmissionInput, signal?: AbortSignal): Promise<YidaOwnerSubmission> {
       const body = checkedInput(() => { const row = object(input, ['grantId', 'submissionId']); return { grantId: uuid(row.grantId), submissionId: uuid(row.submissionId) } })
-      return request('/submissions', 'POST', 200, value => submission(value, body.grantId), body, signal)
+      return request('/submissions', 'POST', 200, value => submission(value, body.grantId), body, signal, SUBMISSION_TIMEOUT_MS)
     },
   }
 }

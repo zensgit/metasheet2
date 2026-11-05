@@ -388,6 +388,26 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
     control: 'stock-prep-project-pilot-enable',
   }),
+  // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; OQ4, OQ6; R-68) — byte-equal to the plugin manifest's two
+  // switch rows. The READ is PULL (the reminder is for the people who pull), the SET is ADMIN (the 备料主管理员 flips it).
+  // Their controls live on the project sync panel (StockPreparationProjectTargetManualRows.vue): the switch-state line,
+  // rendered once the server's read answered for a registered sheet, and the typed-confirmation switch button, rendered
+  // only for an ADMIN while the server says `may.set` — never on the confirmation-queue view;
+  // StockPreparationProjectTargetManualRows.spec.ts (MR-ALIGN) asserts their alignment where they live.
+  Object.freeze({
+    capability: 'projectTarget.manualRowsRead',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
+    control: 'stock-prep-project-manual-rows-status',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.manualRowsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
+    control: 'stock-prep-project-manual-rows-set',
+  }),
   // 备料分批拉取第一期 step 4 PR-4 (R-59) — byte-equal to the plugin manifest's six refresh rows: the puller's
   // private hold page, the evidence behind a hold, a relationship's detail, confirm / 「暂不处理」 / end. All
   // PULL tier. PR-7 (R-62) assigned their control ids: they live on 「拉取待确认」
@@ -434,6 +454,29 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     method: 'POST',
     path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id/end',
     control: 'stock-prep-refresh-end',
+  }),
+  // 备料分批拉取第一期 step 5 PR-8 (register R-63): the change plan (page / confirm / review), PULL tier, no control
+  // until PR-9 — byte-equal to the plugin manifest (F-01).
+  Object.freeze({
+    capability: 'refresh.changePlan',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/current',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'refresh.changePlanConfirm',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/confirm',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'refresh.reviewComplete',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-reviews/complete',
+    control: null,
   }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',

@@ -1527,6 +1527,7 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # The manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
 exec npx vitest run \
   adminPageContentSearch.spec.ts \
+  adminUserBatch \
   amountAutoSum \
   approval-amount-in-words \
   approval-assignee-source \
@@ -1692,6 +1693,7 @@ exec npx vitest run \
   dingtalk-recipient-field-warnings \
   directoryConfigPickers \
   DirectoryDeprovisionEvidencePanel.spec.ts \
+  DirectoryIntegrationIdentityPanel.spec.ts \
   directoryManagementView \
   featureFlagsApprovalMobile \
   formViewValidation \
@@ -2009,6 +2011,7 @@ exec npx vitest run \
   tasks-detail-m3.spec.ts \
   tasks-detail-m4.spec.ts \
   tasks-detail-view.spec.ts \
+  tasks-dispatch-key.spec.ts \
   tasks-groups.spec.ts \
   tasks-labels.spec.ts \
   tasks-list-detail.spec.ts \
@@ -2018,7 +2021,9 @@ exec npx vitest run \
   tasks-nav-badge.spec.ts \
   tasks-nav-feature-gate.spec.ts \
   tasks-nav-relogin.spec.ts \
+  tasks-people-picker.spec.ts \
   tasks-record-dispatch.spec.ts \
+  tasks-record-panel.spec.ts \
   tasks-routes.spec.ts \
   tasks-settings-view.spec.ts \
   tasks-status-filter.spec.ts \

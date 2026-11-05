@@ -197,7 +197,7 @@ async function world({ pilot = true, registered = true, sourceBindingStore, pack
         basis: { kind: 'puller_confirmed_same_demand' },
         confirmedBy: 'u_sl_puller',
         sourceIdentity: lanes.refreshSourceIdentity({ action: tableActions.assertStockPreparationTargetReady(w.action), tenantId: TENANT }),
-      }, { bumpWithin: env.bump.bumpWithin })
+      }, { bumpWithin: env.bump.bumpWithin, pilotWithin: refreshKit.seedPilotWithin })
     },
     async clearPilot() {
       // The registry row's pilot columns cleared (the admin's exit); the rows of step 4 stay (C10).
@@ -734,7 +734,7 @@ test('SL-G2 an unwired service or a malformed handle refuses 501 by name at cons
   assert.equal(w.source.state.calls.length, 0)
 })
 
-test('SL-G8 the planner input: a governed project hands BOTH planner calls exactly the 9 keys (O-16 + persistedHolds, no changePlan) and the expander the recorder options; a not-governed project hands neither key', async () => {
+test('SL-G8 the planner input: a governed project hands BOTH planner calls exactly the 11 keys (O-16 + persistedHolds + changePlan, null without a confirmed plan, + expectedContent, [] without a reviewed / written plan) and the expander the recorder options; a not-governed project hands neither key', async () => {
   const w = await world()
   await w.firstPullApplied()
   w.source.state.data = F.secondPullSource()
@@ -743,7 +743,9 @@ test('SL-G8 the planner input: a governed project hands BOTH planner calls exact
   await w.dryRun()
   assert.ok(plannerInputs.length >= 1)
   for (const input of plannerInputs) {
-    assert.deepEqual(Object.keys(input.continuation).sort(), ['continuations', 'demandEvidence', 'members', 'persistedHolds', 'pilot', 'projectNo', 'sourceIdentity', 'specSlotDeclared', 'storeState'])
+    assert.deepEqual(Object.keys(input.continuation).sort(), ['changePlan', 'continuations', 'demandEvidence', 'expectedContent', 'members', 'persistedHolds', 'pilot', 'projectNo', 'sourceIdentity', 'specSlotDeclared', 'storeState'])
+    assert.equal(input.continuation.changePlan, null)
+    assert.deepEqual(input.continuation.expectedContent, [])
     assert.equal(input.continuation.pilot, true)
     assert.equal(input.continuation.storeState, 'ok')
     assert.ok(Array.isArray(input.continuation.persistedHolds))

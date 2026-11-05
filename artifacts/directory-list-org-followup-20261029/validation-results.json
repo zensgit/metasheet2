@@ -1,0 +1,36 @@
+{
+  "baseHead": "2394fbe047a8c1dc75aaefa8c6be499fab63eabd",
+  "environment": "local Mac, isolated source/cache, reused installed dependencies",
+  "node": "20.20.2",
+  "pnpm": "10.16.1",
+  "regressionBeforeFix": {
+    "test": "untouched existing config exact payload",
+    "failed": 1,
+    "skipped": 15
+  },
+  "frontend": {
+    "files": [
+      "tests/directoryManagementView.spec.ts",
+      "tests/directoryConfigPickers.spec.ts"
+    ],
+    "passed": 108,
+    "failed": 0
+  },
+  "quality": {
+    "pluginValidation": "passed",
+    "lint": "passed",
+    "backendTypecheck": "passed",
+    "frontendAppTypecheck": "passed",
+    "validateAll": "blocked",
+    "blockedAt": "unchanged apps/web/vite.config.ts:28 TS2769",
+    "independentUnchangedViteConfigReproduces": true
+  },
+  "sourceSha256": {
+    "apps/web/src/views/DirectoryManagementView.vue": "e03f4f8dee49f2827c787804681d4b2ffb84f65ade2d94a6c578db49a296012c",
+    "apps/web/tests/directoryManagementView.spec.ts": "0beb0bf7691943bdf47e0f6a036cac1b96d33d785f418df709393fd05f1608e4"
+  },
+  "realSyncPerformed": false,
+  "memberBindingsChanged": false,
+  "onlineConfigurationChanged": false,
+  "ci": "pending on new PR head; no green claim"
+}

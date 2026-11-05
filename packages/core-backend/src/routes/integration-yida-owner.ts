@@ -3,15 +3,28 @@ import { Router, type ErrorRequestHandler, type Request, type RequestHandler, ty
 import { yidaOwnerRuntimeErrorCode, type createYidaOwnerRuntime, type YidaOwnerActor } from '../integration/yida-owner-runtime'
 import { yidaSendApprovalErrorCode } from '../integration/yida-send-approval-service'
 import { yidaInitializationErrorCode, type YidaInitializationInput } from '../integration/yida-initialization-runtime'
+import { yidaConnectionTestErrorCode, type YidaConnectionTestInput } from '../integration/yida-connection-test-runtime'
 import { YIDA_OWNER_HTTP_PREFIX as PREFIX } from '../integration/yida-owner-http-observation'
+import {
+  parseYidaSheetSourceInput, readYidaSheetSourceRows, yidaSheetSourceErrorCode, type YidaSheetSourceDependencies,
+} from '../integration/yida-sheet-source'
 
 /** Dedicated host owner boundary, after actual JWT. Never a communication API.
  * Preview values belong only to this authorized no-store response, not logs. */
 export type YidaOwnerHttpPort = Pick<ReturnType<typeof createYidaOwnerRuntime>,
   'prepareDraft' | 'preview' | 'approve' | 'revoke' | 'observe' | 'submit' | 'sendEnabled'>
+  & Partial<Pick<ReturnType<typeof createYidaOwnerRuntime>, 'multiTargetEnabled' | 'proveDraftOwner'>>
 export type YidaInitializationHttpPort = Readonly<{
   status(actor: YidaOwnerActor, options: { signal: AbortSignal }): Promise<unknown>
   initialize(actor: YidaOwnerActor, input: YidaInitializationInput, options: { signal: AbortSignal }): Promise<unknown>
+  // Y2 (INTEGRATION_YIDA_MULTI_TARGET_ENABLED exact 'true' only): the anchor owner's targets.
+  targets?(actor: YidaOwnerActor, options: { signal: AbortSignal }): Promise<unknown>
+  registerTarget?(actor: YidaOwnerActor, input: YidaInitializationInput, options: { signal: AbortSignal }): Promise<unknown>
+}>
+/** Owner-run token-only 测试连接 (ADR adr-yida-connection-test-20261028); never send authority. */
+export type YidaConnectionTestHttpPort = Readonly<{
+  test(actor: YidaOwnerActor, input: YidaConnectionTestInput, options: { signal: AbortSignal }): Promise<unknown>
+  connectionTestEnabled(): boolean
 }>
 type Data = Record<string, unknown>
 const ownErrors = new WeakMap<object, string>()
@@ -27,6 +40,12 @@ const statuses: Readonly<Record<string, number>> = Object.freeze({
   YIDA_SEND_APPROVAL_INPUT: 400, YIDA_SEND_APPROVAL_NOT_FOUND: 404, YIDA_SEND_APPROVAL_CONFLICT: 409,
   YIDA_SEND_APPROVAL_EXPIRED: 409, YIDA_SEND_APPROVAL_REVOKED: 409,
   YIDA_SEND_APPROVAL_CANCELLED: 409, YIDA_SEND_APPROVAL_UNAVAILABLE: 503,
+  YIDA_CONNECTION_TEST_INPUT: 400, YIDA_CONNECTION_TEST_DISABLED: 403, YIDA_CONNECTION_TEST_DENIED: 403,
+  YIDA_CONNECTION_TEST_CONFLICT: 409, YIDA_CONNECTION_TEST_CANCELLED: 409, YIDA_CONNECTION_TEST_THROTTLED: 429,
+  YIDA_CONNECTION_TEST_INACTIVE: 503, YIDA_CONNECTION_TEST_UNAVAILABLE: 503,
+  // Y2 sheet/view source (multi-target switch ON only). Values-free fixed codes.
+  YIDA_SHEET_SOURCE_INPUT: 400, YIDA_SHEET_SOURCE_DENIED: 403, YIDA_SHEET_SOURCE_NOT_FOUND: 404,
+  YIDA_SHEET_SOURCE_LIMIT: 422, YIDA_SHEET_SOURCE_UNSUPPORTED: 422, YIDA_SHEET_SOURCE_UNAVAILABLE: 503,
 })
 function fail(code = 'YIDA_OWNER_HTTP_INPUT'): never {
   const error = new Error(code)
@@ -51,6 +70,16 @@ function record(value: unknown, keys: readonly string[], optional: readonly stri
 function literalId(value: unknown): string {
   if (typeof value !== 'string' || !value || value.length > 128 || value.trim() !== value
     || /[\u0000-\u001f\u007f]/u.test(value)) fail()
+  return value
+}
+// Pasted credential text (appKey/appSecret/systemToken/userId). The connection test exchanges it and L4
+// seals it for good, byte for byte, so it is refused here, before any port, transaction, exchange, crypto
+// or write, when it has surrounding whitespace (a pasted line break) or holds, anywhere, a control character
+// (Cc: C0, DEL, C1), an invisible format character (Cf: zero-width, bidi, BOM, soft hyphen) or a lone
+// surrogate (Cs). Never trimmed: an API caller learns its input was wrong (the panel trims before sending).
+function credential(value: unknown, maximum: number): string {
+  if (typeof value !== 'string' || !value || value.length > maximum || value.trim() !== value
+    || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(value)) fail()
   return value
 }
 function id(value: unknown): string { const result = literalId(value); if (!UUID.test(result)) fail(); return result }
@@ -152,12 +181,34 @@ function submission(value: unknown) {
   return { ...observed, reused: row.reused, status: row.status, externalWriteAttempted: row.externalWriteAttempted,
     businessVerified: false, durable: row.durable }
 }
+// Y2 target picker DTO: slot 1 first, ascending slots, owner-authorized no-store reply only.
+function targetSummaries(value: unknown) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 16) fail()
+  let previous = 0
+  return value.map(item => {
+    const row = record(item, ['slot', 'targetRef', 'appType', 'formUuid'])
+    const slot = integer(row.slot, previous + 1, 16)
+    if (previous === 0 && slot !== 1) fail()
+    previous = slot
+    return { slot, targetRef: id(row.targetRef), appType: literalId(row.appType), formUuid: literalId(row.formUuid) }
+  })
+}
+function targetsView(value: unknown) {
+  const row = record(value, ['targets', 'registered', 'canSend', 'tokenIssued', 'externalWriteAttempted'])
+  if (row.canSend !== false || row.tokenIssued !== false || row.externalWriteAttempted !== false) fail()
+  const targets = targetSummaries(row.targets)
+  let registered = null
+  if (row.registered !== null) {
+    const made = record(row.registered, ['commandId', 'slot', 'targetRef', 'draft'])
+    registered = { commandId: id(made.commandId), slot: integer(made.slot, 2, 16), targetRef: id(made.targetRef), draft: draft(made.draft) }
+    if (!targets.some(target => target.targetRef === registered!.targetRef && target.slot === registered!.slot)) fail()
+  }
+  return { targets, registered, canSend: false, tokenIssued: false, externalWriteAttempted: false }
+}
 function initializationInput(value: unknown) {
   const parsed = record(value, ['commandId', 'material', 'draft', 'attestation'])
   const material = record(parsed.material, ['appKey', 'appSecret', 'systemToken', 'userId'])
-  for (const key of Object.keys(material)) {
-    if (typeof material[key] !== 'string' || !material[key].trim() || material[key].length > (key === 'userId' ? 128 : 4096)) fail()
-  }
+  for (const key of Object.keys(material)) credential(material[key], key === 'userId' ? 128 : 4096)
   if (Buffer.byteLength(JSON.stringify(material), 'utf8') > 16 * 1024) fail()
   const candidate = record(parsed.draft, ['config', 'rowsText', 'allocation'])
   if (typeof candidate.rowsText !== 'string' || Buffer.byteLength(candidate.rowsText, 'utf8') > 128 * 1024) fail()
@@ -175,20 +226,46 @@ function initializationInput(value: unknown) {
   if (attestation.executionIdentity !== material.userId) fail()
   return { commandId: id(parsed.commandId), material, draft: candidate, attestation }
 }
-function initialization(value: unknown, sendEnabled: boolean) {
+function connectionTestInput(value: unknown) {
+  const parsed = record(value, ['commandId', 'mode', 'material'])
+  if (parsed.mode !== 'candidate') fail()
+  const material = record(parsed.material, ['appKey', 'appSecret'])
+  for (const key of Object.keys(material)) credential(material[key], 4096)
+  if (Buffer.byteLength(JSON.stringify(material), 'utf8') > 16 * 1024) fail()
+  return { commandId: id(parsed.commandId), mode: 'candidate' as const,
+    material: { appKey: material.appKey as string, appSecret: material.appSecret as string } }
+}
+const connectionTestOutcomes = ['ok', 'upstream_rejected', 'unreachable', 'timeout']
+function connectionTestView(value: unknown, commandId: string) {
+  const row = record(value, ['commandId', 'mode', 'outcome', 'tokenIssued', 'tokenRetained', 'externalWriteAttempted', 'canSend'])
+  if (id(row.commandId) !== commandId || row.mode !== 'candidate' || typeof row.outcome !== 'string'
+    || !connectionTestOutcomes.includes(row.outcome) || row.tokenIssued !== (row.outcome === 'ok')
+    || row.tokenRetained !== false || row.externalWriteAttempted !== false || row.canSend !== false) fail()
+  return { commandId, mode: 'candidate', outcome: row.outcome, tokenIssued: row.outcome === 'ok',
+    tokenRetained: false, externalWriteAttempted: false, canSend: false }
+}
+function initialization(value: unknown, sendEnabled: boolean, connectionTestEnabled: boolean, multiTargetEnabled = false) {
   const row = record(value, ['commandId', 'status', 'draft', 'canSend', 'tokenIssued', 'externalWriteAttempted'])
   if (!['ready', 'initialized'].includes(String(row.status)) || row.canSend !== false
     || row.tokenIssued !== false || row.externalWriteAttempted !== false
     || (row.status === 'ready') !== (row.draft === null)) fail()
   return { commandId: id(row.commandId), status: row.status,
-    draft: row.draft === null ? null : draft(row.draft), canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled }
+    draft: row.draft === null ? null : draft(row.draft), canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled,
+    // Present only while the switch reads exact 'true'. While OFF the key is absent, so a page still
+    // running an older bundle (closed key set without it) keeps working on this backend.
+    ...(connectionTestEnabled ? { connectionTestEnabled: true as const } : {}),
+    // Y2: same absent-while-OFF rule, so an older bundle keeps its closed key set while the switch is off.
+    ...(multiTargetEnabled ? { multiTargetEnabled: true as const } : {}) }
 }
 function dto(project: () => unknown) { try { return project() } catch { fail('YIDA_OWNER_HTTP_UNAVAILABLE') } }
 function sendError(res: Response, error: unknown) {
   const code = ownErrors.get(error as object) ?? yidaOwnerRuntimeErrorCode(error) ?? yidaSendApprovalErrorCode(error)
+    ?? yidaConnectionTestErrorCode(error) ?? yidaSheetSourceErrorCode(error)
   const initializationCode = yidaInitializationErrorCode(error)
+  // ENCRYPTION_NOT_READY is 503 like INACTIVE/UNAVAILABLE: a host-configuration readiness refusal,
+  // not a conflict with the slot's state (409 here means CONFLICT/CANCELLED of the command).
   const initializationStatus: Readonly<Record<string, number>> = { INPUT: 400, DENIED: 403, CONFLICT: 409, CANCELLED: 409,
-    INACTIVE: 503, UNAVAILABLE: 503 }
+    INACTIVE: 503, UNAVAILABLE: 503, ENCRYPTION_NOT_READY: 503, DISABLED: 403 }
   const initialSuffix = initializationCode?.replace(/^YIDA_INITIALIZATION_/u, '')
   const isInitialization = initialSuffix !== undefined && Object.hasOwn(initializationStatus, initialSuffix)
   const safe = isInitialization ? initializationCode! : code !== undefined && Object.hasOwn(statuses, code) ? code : 'YIDA_OWNER_HTTP_UNAVAILABLE'
@@ -222,8 +299,12 @@ export const yidaOwnerParseErrorHandler: ErrorRequestHandler = (error: unknown, 
   res.status(status).json({ ok: false, error: { code: status === 503 ? 'YIDA_OWNER_HTTP_UNAVAILABLE' : 'YIDA_OWNER_HTTP_INPUT' } })
 }
 export { YIDA_OWNER_HTTP_PREFIX } from '../integration/yida-owner-http-observation'
-export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initializationPort?: YidaInitializationHttpPort): Router {
+export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initializationPort?: YidaInitializationHttpPort,
+  connectionTestPort?: YidaConnectionTestHttpPort, sheetSource?: YidaSheetSourceDependencies): Router {
   const router = Router()
+  // Y2 shape bit, read per request (exact 'true' in the owner runtime). OFF = every body below keeps its
+  // original closed key set and the new paths fall through to the same 404 as any unknown path.
+  const multiTargetEnabled = () => { try { return port.multiTargetEnabled?.() === true } catch { return false } }
   const route = (status: number, operation: (req: Request, owner: YidaOwnerActor, signal: AbortSignal) => Promise<unknown>) =>
     async (req: Request, res: Response) => {
       const controller = new AbortController()
@@ -240,21 +321,50 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
       finally { req.removeListener('aborted', aborted); res.removeListener('close', closed) }
     }
   router.post('/drafts', route(201, async (req, owner) => {
-    const input = record(req.body, ['config', 'rowsText', 'allocation'])
-    if (typeof input.rowsText !== 'string' || Buffer.byteLength(input.rowsText, 'utf8') > 128 * 1024) fail()
-    const result = await port.prepareDraft(owner, { config: input.config, rowsText: input.rowsText, allocation: input.allocation })
+    if (!multiTargetEnabled()) {
+      const input = record(req.body, ['config', 'rowsText', 'allocation'])
+      if (typeof input.rowsText !== 'string' || Buffer.byteLength(input.rowsText, 'utf8') > 128 * 1024) fail()
+      const result = await port.prepareDraft(owner, { config: input.config, rowsText: input.rowsText, allocation: input.allocation })
+      return dto(() => draft(result))
+    }
+    // Y2 (switch ON): a named target, and either pasted rowsText or a sheet/view source (never both).
+    const input = record(req.body, ['config', 'allocation'], ['rowsText', 'source', 'targetRef'])
+    if (Object.hasOwn(input, 'rowsText') === Object.hasOwn(input, 'source')) fail()
+    const targetRef = Object.hasOwn(input, 'targetRef') ? id(input.targetRef) : undefined
+    let rowsText: string
+    if (Object.hasOwn(input, 'rowsText')) {
+      if (typeof input.rowsText !== 'string' || Buffer.byteLength(input.rowsText, 'utf8') > 128 * 1024) fail()
+      rowsText = input.rowsText
+    } else {
+      if (!sheetSource) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
+      // Drafts need the send switch anyway: while it is off, do not read the sheet at all.
+      if (!sendEnabled()) fail('YIDA_OWNER_RUNTIME_DISABLED')
+      const source = parseYidaSheetSourceInput(input.source) // pure shape check, no read
+      // Owner/target proof BEFORE any sheet or view read: a non-owner (or an unknown target) gets prepareDraft's
+      // own refusal and the sheet is never touched. prepareDraft below proves it all again.
+      if (!port.proveDraftOwner) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
+      await port.proveDraftOwner(owner, targetRef === undefined ? {} : { targetRef })
+      // The owner's own multitable read (this request's actor), never an elevated or plugin read.
+      rowsText = (await readYidaSheetSourceRows(req, source, sheetSource)).rowsText
+    }
+    const result = await port.prepareDraft(owner, { config: input.config, rowsText, allocation: input.allocation,
+      ...(targetRef === undefined ? {} : { targetRef }) })
     return dto(() => draft(result))
   }))
   router.post('/preview', route(200, async (req, owner) => {
-    const input = record(req.body, ['operationId', 'rowKey'])
-    const result = await port.preview(owner, { operationId: id(input.operationId), rowKey: id(input.rowKey) })
+    const multi = multiTargetEnabled()
+    const input = record(req.body, ['operationId', 'rowKey'], multi ? ['targetRef'] : [])
+    const result = await port.preview(owner, { operationId: id(input.operationId), rowKey: id(input.rowKey),
+      ...(Object.hasOwn(input, 'targetRef') ? { targetRef: id(input.targetRef) } : {}) })
     return dto(() => preview(result))
   }))
   router.post('/approvals', route(201, async (req, owner) => {
-    const input = record(req.body, ['operationId', 'rowKey', 'confirmationId', 'acknowledgeOnce'], ['ttlMs'])
+    const multi = multiTargetEnabled()
+    const input = record(req.body, ['operationId', 'rowKey', 'confirmationId', 'acknowledgeOnce'], multi ? ['ttlMs', 'targetRef'] : ['ttlMs'])
     if (input.acknowledgeOnce !== true) fail()
     const result = await port.approve(owner, { operationId: id(input.operationId), rowKey: id(input.rowKey),
-      confirmationId: id(input.confirmationId), ...(Object.hasOwn(input, 'ttlMs') ? { ttlMs: integer(input.ttlMs, 1, 900000) } : {}) })
+      confirmationId: id(input.confirmationId), ...(Object.hasOwn(input, 'ttlMs') ? { ttlMs: integer(input.ttlMs, 1, 900000) } : {}),
+      ...(Object.hasOwn(input, 'targetRef') ? { targetRef: id(input.targetRef) } : {}) })
     return dto(() => metadata(result, true))
   }))
   router.get('/approvals/:grantId', route(200, async (req, owner) => {
@@ -275,17 +385,45 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
   // Read only after the initialization port authorized this owner + live admin,
   // so the UI may show the send entry; a display bit, never send authority.
   const sendEnabled = () => { try { return port.sendEnabled() === true } catch { return false } }
+  // Same rule for the 测试连接 display bit: shown only on an owner-authorized reply, never authority.
+  const connectionTestEnabled = () => { try { return connectionTestPort?.connectionTestEnabled() === true } catch { return false } }
   router.get('/initialization', route(200, async (req, owner, signal) => {
     empty(req.body)
     if (!initializationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
     const result = await initializationPort.status(owner, { signal })
-    return dto(() => initialization(result, sendEnabled()))
+    return dto(() => initialization(result, sendEnabled(), connectionTestEnabled(), multiTargetEnabled()))
   }))
   router.post('/initialization', route(201, async (req, owner, signal) => {
     const input = initializationInput(req.body)
     if (!initializationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
     const result = await initializationPort.initialize(owner, input, { signal })
-    return dto(() => initialization(result, sendEnabled()))
+    return dto(() => initialization(result, sendEnabled(), connectionTestEnabled(), multiTargetEnabled()))
+  }))
+  // Y2: list / register additional targets. While OFF these fall through to the generic 404 below.
+  const whenMultiTarget = (handler: RequestHandler): RequestHandler => (req, res, next) => {
+    if (!multiTargetEnabled()) { next(); return }
+    return handler(req, res, next)
+  }
+  router.get('/targets', whenMultiTarget(route(200, async (req, owner, signal) => {
+    empty(req.body)
+    if (!initializationPort?.targets) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
+    const result = await initializationPort.targets(owner, { signal })
+    return dto(() => targetsView(result))
+  })))
+  router.post('/targets', whenMultiTarget(route(201, async (req, owner, signal) => {
+    // Same closed body as initialization: its own material, draft and owner-reviewed attestation.
+    const input = initializationInput(req.body)
+    if (!initializationPort?.registerTarget) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
+    const result = await initializationPort.registerTarget(owner, input, { signal })
+    return dto(() => targetsView(result))
+  })))
+  // Owner-run token-only connection test before initialization. The runtime authorizes; the route
+  // only closes the body and the DTO. No send authority, no form IO, nothing persisted.
+  router.post('/initialization/connection-test', route(200, async (req, owner, signal) => {
+    const input = connectionTestInput(req.body)
+    if (!connectionTestPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
+    const result = await connectionTestPort.test(owner, input, { signal })
+    return dto(() => connectionTestView(result, input.commandId))
   }))
   router.use((_req, res) => { res.status(404).json({ ok: false, error: { code: 'NOT_FOUND' } }) })
   return router

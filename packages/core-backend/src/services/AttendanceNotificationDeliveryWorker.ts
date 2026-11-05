@@ -12,6 +12,7 @@ import {
   type DingTalkWorkNotificationActionCardInput,
   type DingTalkWorkNotificationResult,
 } from '../integrations/dingtalk/client'
+import { DingTalkMessageConfigError } from '../integrations/dingtalk/config-validation-error'
 import {
   readDingTalkMessageConfigFromRuntime,
 } from '../integrations/dingtalk/work-notification-settings'
@@ -1128,6 +1129,12 @@ function redactDingTalkErrorText(text: string): string {
 
 function classifyConfigError(error: unknown): AttendanceDeliveryChannelResult {
   const message = normalizeErrorText(error, 'DingTalk work-notification config unavailable')
+  // The integration-scoped resolver's typed failures (row missing / inactive / incomplete, malformed
+  // environment Agent ID) are
+  // configuration facts an operator has to change; classify by type, not by words in the text.
+  if (error instanceof DingTalkMessageConfigError) {
+    return { ok: false, retryable: false, error: `dingtalk_work_notification_config_unavailable: ${message}` }
+  }
   const retryable = !/not configured|required|not found|Agent ID/i.test(message)
   return { ok: false, retryable, error: `dingtalk_work_notification_config_unavailable: ${message}` }
 }

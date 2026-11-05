@@ -255,23 +255,36 @@ const INACTIVE_LINKED_SAMPLE_LIMIT = 20
  * `is_active = true`: a local user already deactivated by some other path is not part of
  * this specific blind spot (there is nothing left to revoke).
  *
- * Anchor for "since when": `directory_accounts.updated_at`. There is no dedicated
- * deactivation-transition column in this schema. Verified by grepping every write site
- * that can touch `directory_accounts` in this codebase — there are exactly two, both in
- * `directory-sync.ts`:
- *   1. The re-sync upsert (`INSERT ... ON CONFLICT DO UPDATE SET is_active = true, ...,
- *      updated_at = NOW()`) — only fires for accounts CURRENTLY present in the DingTalk
- *      pull, and always sets is_active back to true (which takes the row OUT of this
- *      metric's target set).
- *   2. The deactivation sweep (`UPDATE directory_accounts SET is_active = false,
- *      updated_at = NOW() WHERE ... AND is_active = true`) — guarded by `AND is_active =
- *      true`, i.e. a genuine one-way transition, not a re-stamp. Once a row is inactive,
- *      this statement's WHERE clause no longer matches it, so it cannot bump `updated_at`
- *      again while the row stays inactive.
- * No other module in `packages/core-backend/src` issues an UPDATE or INSERT against
- * `directory_accounts` (every other reference is a read-only JOIN). So for a row that is
- * CURRENTLY `is_active = false`, `updated_at` is exactly the timestamp of the transition
- * into inactivity — an honest anchor, not an approximation, given the current schema.
+ * Anchor for "since when": `directory_accounts.last_seen_at` — the sync timestamp of the
+ * last run whose DingTalk pull still contained the account, i.e. "last seen in DingTalk".
+ * `inactiveSinceAt` / `inactiveDays` carry that meaning. The metric is limited to
+ * `a.provider = 'dingtalk'`, the only provider for which the column means that (see 5).
+ * There is no dedicated deactivation-transition column in this schema, and `updated_at`
+ * is NOT a usable anchor: several writers re-stamp it on rows that are already inactive,
+ * which would reset the age. Every write site that touches `directory_accounts` in
+ * `packages/core-backend/src` (verified by grep), and what each does to the anchor:
+ *   1. The re-sync upsert (`directory-sync.ts`, `DIRECTORY_ACCOUNT_UPSERT_SQL`) — the ONLY
+ *      runtime writer of `last_seen_at` for DingTalk rows: sets it to the run's sync
+ *      timestamp for every account CURRENTLY present in the pull, and always sets
+ *      `is_active = true` (which takes the row OUT of this metric's target set).
+ *   2. The deactivation sweep (`directory-sync.ts`, `UPDATE directory_accounts SET
+ *      is_active = false, updated_at = NOW() WHERE ... last_seen_at < <sync timestamp> AND
+ *      is_active = true`) — flips the row inactive and bumps `updated_at`, but leaves
+ *      `last_seen_at` untouched. So for an inactive DingTalk row `last_seen_at` is the
+ *      previous successful sync run before the sweep that deactivated it: the age reads the
+ *      same or larger than a sweep-time anchor would, never smaller.
+ *   3. The DingTalk-login openId backfill (`dingtalk-oauth.ts`) — writes `open_id` and
+ *      `updated_at` only, regardless of `is_active`. `last_seen_at` untouched.
+ *   4. Controlled handover (`controlled-handover.ts`) — the forward move and the rollback
+ *      write `integration_id` and `updated_at` only (rollback then restores `updated_at`
+ *      from its snapshot). `last_seen_at` untouched: a handed-over inactive row surfaces
+ *      under the target integration's metric with its age intact.
+ *   5. Local-provider accounts (`local-directory-org.ts`, `provider = 'local'`) — created
+ *      with `last_seen_at = NOW()` once and never refreshed; edit and archive bump
+ *      `updated_at` only. For these rows `last_seen_at` would mean "created", not "last
+ *      seen", hence the provider limit above: they are out of this metric entirely.
+ * Every other reference in `packages/core-backend/src` is read-only (SELECT/JOIN), and the
+ * one-off migration backfills rewrite neither timestamp.
  */
 export async function getDirectoryInactiveLinkedMetric(
   integrationId: string,
@@ -288,9 +301,10 @@ export async function getDirectoryInactiveLinkedMetric(
          JOIN directory_account_links l ON l.directory_account_id = a.id
          JOIN users u ON u.id = l.local_user_id
         WHERE a.integration_id = $1
+          AND a.provider = 'dingtalk'
           AND a.is_active = FALSE
           AND u.is_active = TRUE
-          AND a.updated_at <= NOW() - ($2 || ' days')::interval`,
+          AND a.last_seen_at <= NOW() - ($2 || ' days')::interval`,
       [integrationId, normalizedThresholdDays],
     ),
     queryFn<{
@@ -309,16 +323,17 @@ export async function getDirectoryInactiveLinkedMetric(
               u.id AS local_user_id,
               u.email AS local_user_email,
               u.name AS local_user_name,
-              a.updated_at AS inactive_since_at,
-              FLOOR(EXTRACT(EPOCH FROM (NOW() - a.updated_at)) / 86400)::int AS inactive_days
+              a.last_seen_at AS inactive_since_at,
+              FLOOR(EXTRACT(EPOCH FROM (NOW() - a.last_seen_at)) / 86400)::int AS inactive_days
          FROM directory_accounts a
          JOIN directory_account_links l ON l.directory_account_id = a.id
          JOIN users u ON u.id = l.local_user_id
         WHERE a.integration_id = $1
+          AND a.provider = 'dingtalk'
           AND a.is_active = FALSE
           AND u.is_active = TRUE
-          AND a.updated_at <= NOW() - ($2 || ' days')::interval
-        ORDER BY a.updated_at ASC
+          AND a.last_seen_at <= NOW() - ($2 || ' days')::interval
+        ORDER BY a.last_seen_at ASC
         LIMIT $3`,
       [integrationId, normalizedThresholdDays, sampleLimit],
     ),

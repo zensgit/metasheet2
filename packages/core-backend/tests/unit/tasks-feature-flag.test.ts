@@ -3,6 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 // tasksRouter() only builds an express Router; no query runs. The pool module is stubbed so that
 // importing the route module does not reach for a database.
 vi.mock('../../src/db/pg', () => ({ pool: null, query: vi.fn(), transaction: vi.fn() }))
+// The record read gate of a dispatch from a record (routes/univer-meta.ts) is stubbed with it, so
+// the route module does not load the multitable router.
+vi.mock('../../src/routes/univer-meta', () => ({ requireRecordReadable: vi.fn() }))
 
 import { isTasksEnabled } from '../../src/tasks/feature-flag'
 import { tasksRouter } from '../../src/routes/tasks'
