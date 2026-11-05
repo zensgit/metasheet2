@@ -75,8 +75,9 @@ export function readPoolConnection(pool: PoolLike): RepairEffectiveConnection {
  * statement_timeout as the server applies it, read only from pg's own startup field. PostgreSQL applies the
  * startup `options` string first and the startup parameters after it, so an explicit statement_timeout
  * parameter wins over every options spelling (and over role or database settings); options are never read
- * for the budget. A missing, empty, zero or non-numeric value leaves the budget unknown (a role or database
- * default, or none). Startup fields are NUL-terminated on the wire, so a NUL inside any key or value would
+ * for the budget. A missing or empty value falls back to a role or database default (or none) and zero
+ * disables it; a negative or non-numeric value makes the server reject the connection (22023). None of
+ * these gives a known budget, so all are refused before connecting. Startup fields are NUL-terminated on the wire, so a NUL inside any key or value would
  * add a key the server applies after pg's own (seen as one value here, another on the server): refused.
  */
 function serverStatementTimeoutMs(startup: Record<string, unknown>): number | null {
