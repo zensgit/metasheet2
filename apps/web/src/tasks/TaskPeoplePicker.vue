@@ -263,7 +263,8 @@ function onPanelKeydown(event: KeyboardEvent): void {
     return
   }
   if (event.key === 'Tab') {
-    // Tab stays inside the picker: a dialog around it never sees the key, and focus moves here.
+    // Tab stays inside the picker: a dialog around it never sees the key, and focus moves here
+    // (unless the input method took the key, see tasks/focusTrap.ts).
     event.stopPropagation()
     moveFocusWithin(event.currentTarget as HTMLElement, event)
     return

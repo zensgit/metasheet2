@@ -1329,7 +1329,7 @@ describe('members dialog — closing and focus', () => {
     const el = await openDialog()
     const input = must(el, 'tasks-list-add-member-input')
     input.focus()
-    for (const init of [{ keyCode: 229, isComposing: true }, { keyCode: 229 }]) {
+    for (const init of [{ keyCode: 229, isComposing: true }, { keyCode: 229 }, { keyCode: 229, shiftKey: true }]) {
       const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, ...init })
       input.dispatchEvent(event)
       expect(event.defaultPrevented).toBe(false)

@@ -3365,7 +3365,7 @@ describe('派发任务 dialog: its own Tab trap', () => {
     await openDialog(container)
     const title = q<HTMLInputElement>('title')!
     title.focus()
-    for (const init of [{ keyCode: 229, isComposing: true }, { keyCode: 229 }]) {
+    for (const init of [{ keyCode: 229, isComposing: true }, { keyCode: 229 }, { keyCode: 229, shiftKey: true }]) {
       const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, ...init })
       title.dispatchEvent(event)
       expect(event.defaultPrevented).toBe(false)

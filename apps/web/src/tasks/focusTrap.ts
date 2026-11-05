@@ -11,6 +11,9 @@
  * call always lands on the first); if that move takes focus out of the dialog, focus is put on the
  * input. A browser that leaves buttons out of its own move can pass over a button inside the dialog
  * there. jsdom has no such parts; the part-to-part move itself is for a browser walk.
+ *
+ * A third exception: a Tab the input method took while composing text (keyCode 229) is left to it,
+ * neither moved nor held. A Tab during a composition that the input method passed on is still moved.
  */
 
 /** The controls a Tab can land on. */
@@ -60,9 +63,9 @@ let tabCount = 0
 
 /** Moves focus one step within `container` for a Tab (Shift+Tab: back) keydown, wrapping at the ends,
  *  and holds the browser's own move back (except in or into a date or time input, see above). A Tab
- *  the input method took (keyCode 229) is left alone. Controls inside a `[hidden]` element and disabled ones are skipped. From the container itself or
- *  from outside its controls, Tab goes to the first control and Shift+Tab to the last; with none,
- *  focus goes to the container. */
+ *  the input method took (keyCode 229) is left alone. Controls inside a `[hidden]` element and
+ *  disabled ones are skipped. From the container itself or from outside its controls, Tab goes to
+ *  the first control and Shift+Tab to the last; with none, focus goes to the container. */
 export function moveFocusWithin(container: HTMLElement, event: KeyboardEvent): void {
   // A Tab the input method took (keyCode 229) is its own: neither moved nor held here. A Tab during a
   // composition that the input method did not take (isComposing, but its own keyCode) is still moved

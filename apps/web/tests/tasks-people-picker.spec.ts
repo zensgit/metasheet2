@@ -468,7 +468,7 @@ describe('TaskPeoplePicker', () => {
     search.focus()
     // keyCode 229: the input method took the key (Safari's key that ends a composition also has
     // isComposing false). Not moved, not held.
-    for (const init of [{ keyCode: 229, isComposing: true }, { keyCode: 229 }]) {
+    for (const init of [{ keyCode: 229, isComposing: true }, { keyCode: 229 }, { keyCode: 229, shiftKey: true }]) {
       const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, ...init })
       search.dispatchEvent(event)
       expect(event.defaultPrevented).toBe(false)
