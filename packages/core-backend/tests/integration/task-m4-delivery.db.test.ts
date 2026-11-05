@@ -14,7 +14,7 @@ import {
 } from '../../src/services/task-notification-delivery-worker'
 import { insertTaskNotificationDeliveries } from '../../src/services/task-notification-producer'
 import { completeTask, createTask } from '../../src/services/task-records'
-import { deleteTaskById, leaveTask } from '../../src/services/task-structure'
+import { addAssignee, deleteTaskById, leaveTask, removeAssignee } from '../../src/services/task-structure'
 import { viewerToday } from '../../src/tasks/task-dates'
 import {
   TASK_DELIVERY_BACKOFF_LADDER_MS,
@@ -1065,6 +1065,37 @@ describe('send-time checks (design §4.6, §7.4)', () => {
     for (const id of [follower, listReader]) expect(await rowOf(id)).toMatchObject({ status: 'skipped', last_error: 'recipient_lost_access' })
     expect(await rowOf(assignee)).toMatchObject({ status: 'sent' })
     expect(channel.sentIds()).toEqual([assignee])
+  })
+
+  it('package 2 (D1): a created / assignee_added row is sent only while its recipient is still an assignee; one removed again who kept the follower role ⇒ recipient_lost_access, though a commented row to them is still sent; the sentence escapes the title', async () => {
+    const f = await taskFixture('d1', { title: '[备料](复核) # 标题' })
+    const extra = `usrX_d1_${f.stamp}`
+    await members(f.orgId, extra)
+    // The switches are off here, so these writes produce no row of their own.
+    await addAssignee({ orgId: f.orgId, actorId: f.creator, taskId: f.taskId, body: { userId: extra } })
+    await follow(f.taskId, extra)
+    const base = await databaseNow()
+    const at = ago(base, MINUTE)
+    const lostAdded = await seedEventRow(f, extra, { event: 'assignee_added', role: 'assignee', actorId: f.creator, nextAttemptAt: at })
+    const lostCreated = await seedEventRow(f, extra, { event: 'created', role: 'assignee', actorId: f.creator, nextAttemptAt: at })
+    const control = await seedEventRow(f, extra, { event: 'commented', role: 'follower', actorId: f.creator, nextAttemptAt: at })
+    const kept = await seedEventRow(f, f.assignee, { event: 'assignee_added', role: 'assignee', actorId: f.creator, nextAttemptAt: at })
+    const keptCreated = await seedEventRow(f, f.assignee, { event: 'created', role: 'assignee', actorId: f.creator, nextAttemptAt: at })
+    await removeAssignee({ orgId: f.orgId, actorId: f.creator, taskId: f.taskId, userId: extra })
+    expect(await rowsOfSource(f.taskId)).toHaveLength(5)
+    const { worker, channel } = makeWorker('d1', steppedClock(base))
+    await worker.runBatch()
+    for (const id of [lostAdded, lostCreated]) expect(await rowOf(id)).toMatchObject({ status: 'skipped', last_error: 'recipient_lost_access' })
+    for (const id of [control, kept, keptCreated]) expect(await rowOf(id)).toMatchObject({ status: 'sent' })
+    expect(channel.sentIds().sort()).toEqual([control, kept, keptCreated].sort())
+    for (const id of [kept, keptCreated]) {
+      const call = channel.calls.find((c) => c.phase === 'send' && c.deliveryId === id)
+      expect(call?.title).toBe('任务动态')
+      expect(call?.content).toBe(`任务「［备料］（复核） ＃ 标题」已指派给你\n\n${tag(id)}`)
+      expect(call?.content?.includes('](')).toBe(false)
+    }
+    // A skipped row never called the channel.
+    expect(channel.calls.some((c) => c.deliveryId === lostAdded || c.deliveryId === lostCreated)).toBe(false)
   })
 
   it('after a soft delete the deleted event’s rows are sent (any-state read, ASSUMPTION(task-m4): [own-3b-17]); an earlier event’s unsent row ⇒ task_missing', async () => {

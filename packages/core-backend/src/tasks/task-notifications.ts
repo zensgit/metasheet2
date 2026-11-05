@@ -30,13 +30,20 @@ import {
 // `deleted`/`commented` — `attachment_added` is deferred to P2 (D13: it joins the set when
 // attachments ship). `self_completed`/`self_reopened` NEVER notify (a solo actor completing/
 // reopening their own row in an `all`-mode task where others remain unaffected does not fan out).
-// ASSUMPTION(task-d): [R05-opt] `assignee_added` is deliberately ABSENT from this literal array —
-// notifying a newly added assignee is OFF by default. Adopting R05-opt means adding the literal string
-// `'assignee_added'` to this array (there is no separate on/off flag to flip: a closed TS union
-// this small has no clean way to be "widened" by a boolean without also touching every switch that
-// exhaustively matches `TaskNotifiableEvent`, so the array literal itself IS the single point of
-// truth — editing it is the whole change).
-export const TASK_NOTIFIABLE_EVENTS = ['completed', 'completed_by_any', 'reopened', 'deleted', 'commented'] as const
+// Package 2 (2-D1): `created` and `assignee_added` notify too, each with its own recipient rule in
+// `resolveNotificationRecipients` below (the person given the task, never the D13 union). This
+// supersedes the earlier R05-opt assumption (2026-10-07) that an assignee add stays quiet. The array
+// literal stays the single point of truth for which events notify; rows are still written only
+// while the three delivery switches are on (task-notification-flags.ts).
+export const TASK_NOTIFIABLE_EVENTS = [
+  'created',
+  'assignee_added',
+  'completed',
+  'completed_by_any',
+  'reopened',
+  'deleted',
+  'commented',
+] as const
 export type TaskNotifiableEvent = (typeof TASK_NOTIFIABLE_EVENTS)[number]
 
 // ── recipient_role closed set (D13 priority: creator > assignee > follower > list_member) ────────
@@ -72,6 +79,16 @@ export interface ResolveNotificationRecipientsInput {
   // task — INCLUDING archived lists (archiving does not change anything on the task side).
   listMemberIds: string[]
   actorId: string
+  /** `assignee_added` only: the person who was added (the event's `targetUserId`). */
+  targetUserId?: string
+}
+
+/** One row per distinct id at role `assignee`, actor excluded, sorted by `userId`. */
+function assigneeRecipients(ids: readonly string[], actorId: string): TaskNotificationRecipient[] {
+  return [...new Set(ids)]
+    .filter((id) => id !== actorId)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .map((userId) => ({ userId, recipientRole: 'assignee' as const }))
 }
 
 /**
@@ -82,10 +99,22 @@ export interface ResolveNotificationRecipientsInput {
  * Output is sorted by `userId` (own choice, not ruling-derived — for a deterministic, diffable
  * result; the pack does not specify an output order). Throws for an event outside
  * `TASK_NOTIFIABLE_EVENTS` (a caller must not silently no-op-fan-out an unrecognized event name).
+ *
+ * Two events do not use the union (package 2, 2-D1):
+ * - `created`: every assignee (post-write set) other than the actor, as `assignee`; followers and
+ *   list members are not consulted.
+ * - `assignee_added`: only `targetUserId`, as `assignee`, when it is set, is not the actor and is in
+ *   the assignee set; otherwise nobody (a missing target never falls back to the union).
  */
 export function resolveNotificationRecipients(input: ResolveNotificationRecipientsInput): TaskNotificationRecipient[] {
   if (!(TASK_NOTIFIABLE_EVENTS as readonly string[]).includes(input.event)) {
     throw new TypeError(`resolveNotificationRecipients: unknown event "${String(input.event)}"`)
+  }
+  if (input.event === 'created') return assigneeRecipients(input.assigneeIds, input.actorId)
+  if (input.event === 'assignee_added') {
+    const target = input.targetUserId
+    if (typeof target !== 'string' || target.length === 0 || !input.assigneeIds.includes(target)) return []
+    return assigneeRecipients([target], input.actorId)
   }
   // Driven BY `RECIPIENT_ROLE_PRIORITY` (not a parallel hard-coded call order) so that editing the
   // constant is the whole change if D13's priority is ever re-ruled — see the ASSUMPTION on that
