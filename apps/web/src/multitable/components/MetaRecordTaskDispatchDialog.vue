@@ -215,13 +215,13 @@
               <label class="meta-dispatch__sublabel" :for="controlId('assignee-input')">{{ l('dispatch.assigneeInputLabel') }}</label>
               <input
                 :id="controlId('assignee-input')"
+                ref="typedInputRef"
                 v-model="typedAssignee"
                 type="text"
                 class="meta-dispatch__control"
                 data-testid="record-task-dispatch-assignee-input"
                 :placeholder="l('dispatch.assigneeInputPlaceholder')"
                 :disabled="submitting"
-                @keydown.enter.prevent="onAddTyped"
               />
               <MtButton size="sm" data-testid="record-task-dispatch-assignee-add" :disabled="submitting" @click="onAddTyped">{{ l('dispatch.assigneeAdd') }}</MtButton>
             </div>
@@ -416,6 +416,7 @@ const title = ref('')
 const assignees = ref<string[]>([])
 const personFieldId = ref('')
 const typedAssignee = ref('')
+const typedInputRef = ref<HTMLInputElement | null>(null)
 const completionMode = ref<CompletionMode>('all')
 const dueDate = ref('')
 const dueTime = ref('')
@@ -1089,6 +1090,14 @@ function onKeydown(event: KeyboardEvent): void {
     // The inspector's own Escape handler closes the whole drawer; Esc in a modal closes the modal only.
     event.stopPropagation()
     emit('close')
+    return
+  }
+  // Enter in the user-id box adds the typed ids. Handled here, not by a listener on the box: Vue
+  // skips a later listener attached in the millisecond an event was first stamped (see the people
+  // picker's onPanelKeydown), so one on the box would let an Esc or Tab there skip this handler.
+  if (event.key === 'Enter' && event.target === typedInputRef.value) {
+    event.preventDefault()
+    onAddTyped()
     return
   }
   if (event.key !== 'Tab') return

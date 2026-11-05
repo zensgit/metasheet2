@@ -21,10 +21,13 @@
   change. This is not the parent's gate: `beforeRequest` is still asked first, and the parent decides
   whether anything may be sent at all.
 
-  Inline overlay (no Teleport), so it can open inside another dialog. Esc closes this picker only.
+  Inline overlay (no Teleport), so it can open inside another dialog. Esc closes this picker only;
+  Tab and Shift+Tab stay inside it. On close, focus goes back to the control that opened it (see
+  returnFocus). A mousedown on the overlay is held back: it would otherwise move focus to the nearest
+  focusable element around the picker before the click closes it, and focus would stay there.
 -->
 <template>
-  <div v-if="visible" class="task-people-picker__overlay" @click.self="emit('close')">
+  <div v-if="visible" class="task-people-picker__overlay" @mousedown.self.prevent @click.self="emit('close')">
     <div
       ref="panelRef"
       class="task-people-picker"
@@ -146,6 +149,8 @@ let timer: ReturnType<typeof setTimeout> | null = null
 let generation = 0
 // The identity the rows, the term and the ticks on screen belong to (see the header).
 let identity = readDispatchIdentity()
+// The element that had focus when the picker opened; cleared once focus has been handed back.
+let opener: HTMLElement | null = null
 
 function clearTimer(): void {
   if (timer !== null) {
@@ -171,9 +176,13 @@ function identityChanged(): boolean {
   return true
 }
 
-watch(() => props.visible, (open) => {
+watch(() => props.visible, (open, wasOpen) => {
+  if (wasOpen && !open) returnFocus()
   reset()
-  if (open) void nextTick(() => inputRef.value?.focus())
+  if (open) {
+    opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null
+    void nextTick(() => inputRef.value?.focus())
+  }
 }, { immediate: true })
 
 const stopSessionSwitch = onAuthSessionSwitch(() => { identityChanged() })
@@ -181,6 +190,7 @@ const onStorage = () => { identityChanged() }
 if (typeof window !== 'undefined') window.addEventListener('storage', onStorage)
 
 onBeforeUnmount(() => {
+  returnFocus()
   clearTimer()
   generation += 1
   stopSessionSwitch()
@@ -248,8 +258,57 @@ function onPanelKeydown(event: KeyboardEvent): void {
     emit('close')
     return
   }
+  if (event.key === 'Tab') {
+    // Tab stays inside the picker: a dialog around it never sees the key, and focus moves here.
+    event.stopPropagation()
+    trapTab(event)
+    return
+  }
   // Enter in the search box submits nothing around the picker.
   if (event.key === 'Enter' && event.target === inputRef.value) event.preventDefault()
+}
+
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+
+// Every Tab is moved here, not only the ones at the ends: macOS Safari leaves buttons out of its
+// default Tab order, so a Tab left to the browser could take focus out of the picker.
+function trapTab(event: KeyboardEvent): void {
+  event.preventDefault()
+  const panel = panelRef.value
+  if (!panel) return
+  const focusable = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((element) => !element.closest('[hidden]'))
+  // Safety check only: the search box and cancel are never disabled.
+  if (focusable.length === 0) {
+    panel.focus()
+    return
+  }
+  // From the panel itself or from outside the list: Tab goes to the first control, Shift+Tab to the last.
+  const at = focusable.indexOf(document.activeElement as HTMLElement)
+  const step = event.shiftKey ? -1 : 1
+  const next = at === -1 ? (event.shiftKey ? focusable.length - 1 : 0) : (at + step + focusable.length) % focusable.length
+  focusable[next].focus()
+}
+
+/** Hands focus back to the opener once the picker is gone (after the DOM update): only when focus
+ *  was in the picker or is on the page itself, never when it has moved to another element since (a
+ *  dialog closing around the picker restores its own), and never to an opener no longer in the page.
+ *  A disabled opener (a write it started still out) hands it to the dialog around it, if any. */
+function returnFocus(): void {
+  const target = opener
+  opener = null
+  if (!target) return
+  void nextTick(() => {
+    const active = document.activeElement
+    if (active && active !== document.body && active.isConnected) return
+    if (!target.isConnected) return
+    if (!target.matches(':disabled')) {
+      target.focus()
+      return
+    }
+    // focus() leaves an element that cannot take focus (no tabindex) as it is.
+    target.closest<HTMLElement>('[role="dialog"]')?.focus()
+  })
 }
 
 function onInput(event: Event): void {
