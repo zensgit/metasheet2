@@ -62,15 +62,22 @@ export interface RuntimeCert {
   key: string
 }
 
+export interface RuntimeCertOptions {
+  /** Test seam: the 8 random bytes the serial is built from (default: fresh `randomBytes(8)`). */
+  serialSeed?: Buffer
+}
+
 /** A fresh self-signed certificate for `dnsName`, valid from one hour ago for one day. */
-export function generateRuntimeSelfSignedCert(dnsName: string): RuntimeCert {
+export function generateRuntimeSelfSignedCert(dnsName: string, options: RuntimeCertOptions = {}): RuntimeCert {
   const { publicKey, privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
   const spki = publicKey.export({ type: 'spki', format: 'der' }) as Buffer
   const ecdsaWithSha256 = seq(oid('1.2.840.10045.4.3.2'))
   const name = seq(set(seq(oid('2.5.4.3'), tlv(0x0c, Buffer.from(dnsName, 'utf8')))))
   const now = Date.now()
-  const serial = randomBytes(8)
-  serial[0] &= 0x7f // positive INTEGER
+  const serial = Buffer.from(options.serialSeed ?? randomBytes(8))
+  // DER INTEGER: top bit clear (positive) and first byte non-zero (minimal). A 0x00 before a byte < 0x80 is
+  // padding OpenSSL rejects ("illegal padding"); clearing only the top bit hit that about once in 256 runs.
+  serial[0] = 0x40 | (serial[0] & 0x3f)
   const extensions = tlv(
     0xa3,
     seq(
