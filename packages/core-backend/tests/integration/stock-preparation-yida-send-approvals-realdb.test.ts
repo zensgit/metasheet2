@@ -68,7 +68,8 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
   let canonical: (value: unknown) => string
   let executionDigest: (input: unknown) => string
   let assertActor: (trx: Queryable, input: { actorId: string; tenantId: string; workspaceId: null }) => Promise<void>
-  let sendBudget: { YIDA_SEND_REQUEST_MAX_BYTES: number; encodeYidaFormRequestBody(data: unknown, systemToken: string, userId: string): string }
+  let sendBudget: { YIDA_SEND_REQUEST_MAX_BYTES: number; encodeYidaFormRequestBody(data: unknown, systemToken: string, userId: string): string
+    assessYidaSendBudget(input: { snapshot: Row; data: Row }): { withinBudget: boolean } }
   let plan: (input: { config: unknown; rows: unknown[] }) => { rows: Array<{ status: string; payload: Row; protocolPreview: { data: Row } }> }
   let createAdditionalWriter: (options: { security: HostSecurity; context: Context }) => (trx: unknown, input: unknown) => Promise<{ targetRef: string; slot: number }>
   let multiTargetUp = ''
@@ -731,6 +732,34 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     // Fixed values-free refusal: replaying it yields the same code and still writes nothing.
     await rejected(active.service.approve({ ...f.request, confirmationId: 'synthetic-other-confirmation' }), 'LIMIT')
     expect((await evidence()).counts).toEqual([0, 0, 0, 0, 0, 0])
+  })
+
+  it('gate 4: a joint config+row snapshot overflow (config alone and body within) is refused at approval with no grant', async () => {
+    // 16 selects x 20 long options (~124 KB config) plus 15 near-cap CJK text fields (~131 KB row JSON).
+    const row: Row = { s0: 'K', ...Object.fromEntries(Array.from({ length: 31 }, (_, index) => ['s' + (index + 1), index < 15 ? '' : null])) }
+    for (let index = 1; index <= 15; index++) {
+      const room = Math.floor((130800 - Buffer.byteLength(JSON.stringify([row]), 'utf8')) / 3)
+      row['s' + index] = '中'.repeat(Math.max(0, Math.min(4096, room)))
+    }
+    const value = budgetInput(row, shortTarget, 20)
+    const planned = plan({ config: value.config, rows: [row] }).rows[0]
+    expect(planned.status).toBe('planned_create')
+    const data = { ...planned.protocolPreview.data, formDataJson: canonical(planned.payload) }
+    const selectedRow = Object.fromEntries(Object.entries(row).filter(([, field]) => field !== null))
+    // Real-length synthetic identifiers; the verdicts below hold with tens of KB of margin either way.
+    const ids = (tag: string) => ('synthetic-' + tag).padEnd(36, '0')
+    const snapshot = (rowValue: Row): Row => ({ tenantId: ids('tenant'), workspaceId: null, ownerId: ids('owner'), actorId: ids('owner'),
+      operationId: ids('operation'), rowKey: ids('row'), grantRef: ids('grant'), expiresAt: 2000000000000, targetRef: ids('target'),
+      targetRevision: 'evidence-1', planRevision: 'f'.repeat(64), credentialRef: ids('credential'), credentialGeneration: 1,
+      config: value.config, row: rowValue })
+    expect(worstBody(value) < sendBudget.YIDA_SEND_REQUEST_MAX_BYTES - 60000).toBe(true)
+    expect(sendBudget.assessYidaSendBudget({ snapshot: snapshot({}), data }).withinBudget).toBe(true)
+    expect(sendBudget.assessYidaSendBudget({ snapshot: snapshot(selectedRow), data }).withinBudget).toBe(false)
+    const f = await fixture(value), active = await session(context())
+    active.statements.length = 0
+    await rejected(active.service.approve(f.request), 'LIMIT')
+    expect((await evidence()).counts).toEqual([0, 0, 0, 0, 0, 0])
+    expect(active.statements.some(sql => /^INSERT /i.test(sql.trim()))).toBe(false)
   })
 
   it('gate 4: a row exactly within the worst-case request budget is approved and admitted', async () => {
