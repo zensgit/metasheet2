@@ -3015,6 +3015,29 @@ describe('派发任务 dialog: the people picker (package 1b)', () => {
     expect(dialog()).not.toBeNull()
   })
 
+  it('Esc closes the picker only, also when it arrives in the millisecond the picker opened', async () => {
+    serveTasks({ people: peopleWithSearch() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    // The dialog's own listener is attached in an earlier millisecond; then the clock is held at the
+    // picker's (see the picker's onPanelKeydown).
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const opened = Date.now()
+    const now = vi.spyOn(Date, 'now').mockReturnValue(opened)
+    try {
+      await flushUi()
+      q<HTMLButtonElement>('pick-people')!.click()
+      await flushUi()
+      pickerQ<HTMLInputElement>('search')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await flushUi()
+    } finally {
+      now.mockRestore()
+    }
+    expect(pickerQ('search')).toBeNull()
+    expect(dialog()).not.toBeNull()
+  })
+
   it('after another sign-in, a search is not sent and the dialog refuses', async () => {
     serveTasks({ people: peopleWithSearch() })
     const { container } = mountInspector()
