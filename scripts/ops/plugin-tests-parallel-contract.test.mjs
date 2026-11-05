@@ -109,8 +109,12 @@ function assertParallelWorkflow(doc) {
         const repairAddition = '  tests/integration/dingtalk-login-repair.db.test.ts \\\n'
         assert.equal(step.run.split(repairAddition).length - 1, 1, 'Login repair DB suite must run exactly once')
         assert.ok(step.run.includes(addition + repairAddition), 'Keep the login repair suite at its reviewed position')
+        const intentAddition = '  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n'
+        assert.equal(step.run.split(intentAddition).length - 1, 1, 'Directory link intent DB suite must run exactly once')
+        assert.ok(step.run.includes(repairAddition + intentAddition), 'Keep the directory link intent suite at its reviewed position')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
+        step.run = step.run.replace(intentAddition, '')
       }
       if (suite !== 'unit' && step.name === 'Upload install log on failure') {
         assert.equal(step.with.name, `install-log-${nodeMatrix}-${suite}`)
@@ -163,6 +167,8 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-controlled-handover.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/dingtalk-login-repair.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/dingtalk-login-repair.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const steps = doc.jobs.unit.steps; steps.splice(steps.findIndex(step => step.name === directoryClientLintStep.name), 1) },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).run += ' || true' },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).if = false },

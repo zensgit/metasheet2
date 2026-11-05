@@ -360,6 +360,11 @@ export default defineConfig({
       'tests/integration/directory-org-transfer-source-freeze.db.test.ts',
       'tests/integration/directory-controlled-handover.db.test.ts',
       'tests/integration/dingtalk-login-repair.db.test.ts',
+      // Directory link intent: an administrator's explicit unbind must survive repeated syncs,
+      // identity/email/mobile candidates, ambiguity, preview/apply parity and a concurrent
+      // write — real PostgreSQL only; excluded here and wired whole-file into the approval
+      // real-DB step in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/directory-unbind-intent-persistence.db.test.ts',
       // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
       // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
       // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
