@@ -622,6 +622,7 @@ useApprovalBatchActions
 useApprovalDirectory
 useAttendanceAdminConfig
 useAttendanceAdminImportWorkflow.spec.ts
+useAttendanceAdminPayroll
 useAttendanceAdminProvisioning
 useAttendanceAdminRailNavigation
 useAttendanceAdminUsers
