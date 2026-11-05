@@ -3358,6 +3358,25 @@ describe('派发任务 dialog: its own Tab trap', () => {
     expect(dialog()).not.toBeNull()
   })
 
+  it('leaves a Tab the input method took (keyCode 229) in the title to it, and moves a Tab during a composition it did not take', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    const title = q<HTMLInputElement>('title')!
+    title.focus()
+    for (const init of [{ keyCode: 229, isComposing: true }, { keyCode: 229 }]) {
+      const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, ...init })
+      title.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(document.activeElement).toBe(title)
+    }
+    const passedOn = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, isComposing: true, keyCode: 9 })
+    title.dispatchEvent(passedOn)
+    expect(passedOn.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q('person-field'))
+  })
+
   it('leaves a Tab in the date and time inputs to the browser (their own parts), and brings a move out of the dialog back to the next control', async () => {
     serveTasks()
     const { container } = mountInspector()

@@ -461,6 +461,27 @@ describe('TaskPeoplePicker', () => {
     expect(reachedParent).toEqual([])
   })
 
+  it('a Tab the input method took (keyCode 229) is left to it; a Tab during a composition it did not take is moved as usual', async () => {
+    const { el } = mountPicker('assignee')
+    await flush()
+    const search = q(el, 'search')!
+    search.focus()
+    // keyCode 229: the input method took the key (Safari's key that ends a composition also has
+    // isComposing false). Not moved, not held.
+    for (const init of [{ keyCode: 229, isComposing: true }, { keyCode: 229 }]) {
+      const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, ...init })
+      search.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(document.activeElement).toBe(search)
+    }
+    // A composition is active but the input method passed the key on (Chromium: isComposing true,
+    // keyCode 9): the browser would move focus anyway, so the picker moves it, inside the picker.
+    const passedOn = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, isComposing: true, keyCode: 9 })
+    search.dispatchEvent(passedOn)
+    expect(passedOn.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q(el, 'cancel'))
+  })
+
   it('with a person ticked, Tab from the confirm wraps to the box and Shift+Tab from the box lands on the confirm', async () => {
     mocks.apiFetch.mockResolvedValue(jsonResponse(200, searchBody([row('u1', '张三', '')])))
     const { el } = mountPicker('assignee')
