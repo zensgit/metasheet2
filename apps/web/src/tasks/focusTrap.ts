@@ -1,8 +1,8 @@
 /**
- * The Tab trap of the task dialogs (the people picker and the record dispatch dialog): every Tab and
- * Shift+Tab inside one of them is moved here, not only the ones at the ends. macOS Safari leaves
- * buttons out of its default Tab order, so a Tab left to the browser could skip them or take focus
- * out of the dialog.
+ * The Tab trap of the task dialogs (the people picker, the record dispatch dialog and the list
+ * members dialog): every Tab and Shift+Tab inside one of them is moved here, not only the ones at
+ * the ends. macOS Safari leaves buttons out of its default Tab order, so a Tab left to the browser
+ * could skip them or take focus out of the dialog.
  *
  * Two exceptions, both for date and time inputs, whose parts (Chromium: month, day, year) a Tab steps
  * through. A Tab inside one is left to the browser, and only a move that takes focus out of the dialog
