@@ -81,13 +81,22 @@ export async function createUserSession(
     expiresAt: string
     ipAddress?: string | null
     userAgent?: string | null
+    expectedAccessGeneration?: number
   },
 ): Promise<UserSessionRecord | null> {
   const sessionId = options.sessionId?.trim() || crypto.randomUUID()
+  // Only a generation-fenced issuance locks the users row: FOR SHARE makes it wait for a concurrent generation
+  // bump to commit and then compares the committed value. Without a generation nothing is compared, so an
+  // unfenced issuance (password login, activation, dev token) reads the row without a lock, as before the fence.
+  const fenced = options.expectedAccessGeneration !== undefined
 
   try {
     const result = await query<UserSessionRow>(
-      `INSERT INTO user_sessions (
+      `WITH subject AS (
+         SELECT id FROM users WHERE id=$2
+           AND ($6::bigint IS NULL OR COALESCE(access_generation,0)=$6::bigint)${fenced ? ' FOR SHARE' : ''}
+       )
+       INSERT INTO user_sessions (
          id,
          user_id,
          issued_at,
@@ -101,24 +110,25 @@ export async function createUserSession(
          created_at,
          updated_at
        )
-       VALUES ($1, $2, NOW(), $3::timestamptz, NOW(), NULL, NULL, NULL, $4, $5, NOW(), NOW())
+       SELECT $1, $2, NOW(), $3::timestamptz, NOW(), NULL, NULL, NULL, $4, $5, NOW(), NOW()
+       WHERE EXISTS (SELECT 1 FROM subject)
+          OR ($6::bigint IS NULL AND $7::boolean AND NOT EXISTS (SELECT 1 FROM users WHERE id=$2))
        ON CONFLICT (id) DO UPDATE
        SET user_id = EXCLUDED.user_id,
            expires_at = EXCLUDED.expires_at,
            last_seen_at = NOW(),
-           revoked_at = NULL,
-           revoked_by = NULL,
-           revoke_reason = NULL,
            ip_address = COALESCE(EXCLUDED.ip_address, user_sessions.ip_address),
            user_agent = COALESCE(EXCLUDED.user_agent, user_sessions.user_agent),
            updated_at = NOW()
+       WHERE user_sessions.revoked_at IS NULL AND user_sessions.user_id=EXCLUDED.user_id
        RETURNING id, user_id, issued_at, expires_at, last_seen_at, revoked_at, revoked_by, revoke_reason, ip_address, user_agent, created_at, updated_at`,
-      [sessionId, userId, options.expiresAt, options.ipAddress ?? null, options.userAgent ?? null],
+      [sessionId, userId, options.expiresAt, options.ipAddress ?? null, options.userAgent ?? null, options.expectedAccessGeneration ?? null, process.env.NODE_ENV !== 'production'],
     )
     const row = result.rows[0]
-    return row ? mapRow(row) : buildSyntheticSession(userId, sessionId, options.expiresAt)
+    return row ? mapRow(row) : null
   } catch (error) {
     if (isDatabaseSchemaError(error)) {
+      if (options.expectedAccessGeneration !== undefined) return null
       return buildSyntheticSession(userId, sessionId, options.expiresAt)
     }
     throw error
