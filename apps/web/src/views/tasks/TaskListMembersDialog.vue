@@ -214,7 +214,8 @@
  * the leave button; a 404 / 403 / any other failure takes the dialog's banner; `ORG_MISSING`
  * switches the page to its guidance block.
  *
- * Focus: the title takes focus on open; Tab and Shift+Tab wrap inside the dialog; Escape and the
+ * Focus: the title takes focus on open; Tab and Shift+Tab move through the dialog's controls and
+ * wrap inside it (every Tab is moved by the shared trap, `[fe-12]`); Escape and the
  * close button close it (both inert while a write is in flight) and the page puts focus back on
  * the button that opened it. Once a write lands, focus that ended up outside the dialog comes back
  * in (`[fe-48]`): to the control the write started from while it is still there and usable, else
@@ -612,7 +613,8 @@ function close(): void {
 // [fe-12] the focus trap: every Tab and Shift+Tab is moved by the shared task dialog trap
 // (tasks/focusTrap.ts), not only the ones at the ends, since macOS Safari leaves buttons out of its
 // default Tab order. Past the last control wraps to the first, before the first to the last; the
-// set is taken at keydown time, disabled controls left out.
+// set is taken at keydown time, disabled controls left out. The dialog root takes no focus (no
+// tabindex), so with every control disabled the Tab is held and focus stays where it is.
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
     close()
