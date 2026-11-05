@@ -28,6 +28,12 @@ const closeoutContractsStep = {
   name: 'DingTalk closeout env and OAuth-stability contracts (required lane)',
   run: 'node --test \\\n  scripts/ops/dingtalk-closeout-env-contract.test.mjs \\\n  scripts/ops/dingtalk-oauth-stability-metrics-auth-contract.test.mjs \\\n  scripts/ops/dingtalk-oauth-stability-metrics-only-contract.test.mjs \\\n  scripts/ops/dingtalk-oauth-stability-metrics-only-fullscript.test.mjs \\\n  scripts/ops/github-dingtalk-oauth-stability-summary.test.mjs\n',
 }
+// Explicit additive contracts step: the lifecycle canary exclusion consistency contract (standalone;
+// the canary contract suite itself must never be referenced by plugin-tests.yml).
+const canaryExclusionConsistencyStep = {
+  name: 'DingTalk lifecycle canary exclusion consistency contract (required lane)',
+  run: 'node --test scripts/ops/dingtalk-lifecycle-canary-exclusion-consistency.test.mjs',
+}
 const directoryWiringContractsStep = {
   name: 'Directory grant-table, deprovision-writer and access-graph-mutex CI-wiring contracts (required lane)',
   run: 'node --test \\\n  scripts/ops/directory-grant-table-ci-wiring.test.mjs \\\n  scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs \\\n  scripts/ops/directory-access-graph-mutex-ci-wiring.test.mjs\n',
@@ -76,6 +82,8 @@ function assertParallelWorkflow(doc) {
       assert.ok(inventoryIndex >= 0, 'Keep the original DingTalk production-readiness inventory step')
       assert.deepEqual(actual.splice(inventoryIndex + 1, 1), [closeoutContractsStep],
         'Keep the promoted DingTalk closeout contracts immediately after the inventory step')
+      assert.deepEqual(actual.splice(inventoryIndex + 1, 1), [canaryExclusionConsistencyStep],
+        'Keep the lifecycle canary exclusion consistency contract immediately after the closeout contracts step')
       const sourceLockIndex = actual.findIndex(step => step.name === 'Directory activation source-lock CI-wiring contract (required lane)')
       assert.ok(sourceLockIndex >= 0, 'Keep the original directory activation source-lock step')
       assert.deepEqual(actual.splice(sourceLockIndex + 1, 1), [directoryWiringContractsStep],
@@ -168,6 +176,7 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { doc.jobs.contracts.steps.reverse() },
     ...[
       [closeoutContractsStep, '  scripts/ops/dingtalk-closeout-env-contract.test.mjs \\\n'],
+      [canaryExclusionConsistencyStep, 'scripts/ops/dingtalk-lifecycle-canary-exclusion-consistency.test.mjs'],
       [directoryWiringContractsStep, '  scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs \\\n'],
     ].flatMap(([promoted, file]) => [
       doc => { const steps = doc.jobs.contracts.steps; steps.splice(steps.findIndex(step => step.name === promoted.name), 1) },

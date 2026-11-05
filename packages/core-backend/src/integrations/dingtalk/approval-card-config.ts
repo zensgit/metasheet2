@@ -2,8 +2,9 @@
  * CFG-1 (card-config settings lock, §3.1): runtime resolvers for the one-tap approval-card
  * configuration — the deep-link HMAC signing secret and the public app URL the links point at.
  *
- * Resolution order (mirrors readDingTalkMessageConfigFromRuntime): env FIRST, stored
- * directory_integrations.config fallback second. The stored secret is written through
+ * Resolution order: env FIRST, stored directory_integrations.config fallback second (with
+ * DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED on, the executor reads the public URL from the
+ * assignee's own integration instead — resolveApprovalCardPublicAppUrlForIntegration). The stored secret is written through
  * security/encrypted-secrets (same path as appSecret / workNotificationAgentId) and is only
  * ever decrypted here, server-side.
  *
@@ -124,6 +125,56 @@ export async function resolveApprovalCardPublicAppUrl(queryFn: QueryFn = query):
     return stored.endsWith('/') ? stored : `${stored}/`
   } catch {
     return null
+  }
+}
+
+/**
+ * Per-assignee variant of the public base URL, used only while
+ * DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED is 'true': env (`PUBLIC_APP_URL` /
+ * `APP_BASE_URL`) first, unchanged; else the stored `approvalCardPublicAppUrl` of the ASSIGNEE's
+ * own integration, read only while that integration is active; else null (fail-closed).
+ *
+ * Deliberately NO fallback to the "one stored dingtalk integration" pick that
+ * resolveApprovalCardPublicAppUrl uses: a card for an assignee of integration A never borrows the URL
+ * another integration happens to store. An empty integration id resolves to env or null.
+ */
+export async function resolveApprovalCardPublicAppUrlForIntegration(
+  integrationId: string,
+  queryFn: QueryFn = query,
+): Promise<string | null> {
+  const fromEnv = process.env.PUBLIC_APP_URL?.trim() || process.env.APP_BASE_URL?.trim() || ''
+  if (fromEnv) return fromEnv.endsWith('/') ? fromEnv : `${fromEnv}/`
+  try {
+    const row = await loadIntegrationById(queryFn, integrationId)
+    if (!row || row.status !== 'active') return null
+    const config = parseJsonRecord(row.config)
+    const stored = normalizeText(config[APPROVAL_CARD_PUBLIC_APP_URL_CONFIG_KEY])
+    if (!stored) return null
+    return stored.endsWith('/') ? stored : `${stored}/`
+  } catch {
+    return null
+  }
+}
+
+/**
+ * SEND-side gate, used only while DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED is 'true': true only
+ * when the named integration exists and is active. A missing row, any other status, an empty id or a
+ * failing query is false (fail-closed). The executor checks it before the public URL, the signing secret,
+ * the outbound claim and the card-delivery row, on both the interactive-card and the OA-card paths.
+ *
+ * Deliberately a separate read, NOT a status check inside resolveApprovalCardLinkSecretForIntegration:
+ * that resolver is shared with the VERIFY side (the card-delivery action wrapper and the interactive-card
+ * callback), whose behaviour this switch does not change.
+ */
+export async function isApprovalCardAssigneeIntegrationActive(
+  integrationId: string,
+  queryFn: QueryFn = query,
+): Promise<boolean> {
+  try {
+    const row = await loadIntegrationById(queryFn, integrationId)
+    return row?.status === 'active'
+  } catch {
+    return false
   }
 }
 

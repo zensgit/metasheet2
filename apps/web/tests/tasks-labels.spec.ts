@@ -107,6 +107,9 @@ vi.mock('../src/tasks/tasksApi', async () => {
     checkCommentBody: actual.checkCommentBody,
     listTasks: h_.listTasks,
     getTask: h_.getTask,
+    // Package 1b: the detail page reads the names on the task; a bare stub answers undefined,
+    // which the page reads as "no names" and leaves the ids as they are.
+    getTaskPeople: vi.fn(),
     createTask: h_.createTask,
     completeTask: h_.completeTask,
     reopenTask: h_.reopenTask,
@@ -521,6 +524,7 @@ const FMT_ARGS: Record<keyof typeof TASKS_FMT_ZH, unknown[]> = {
   groupsDeleteNamed: ['Group A'],
   groupsDeletePrompt: ['Group A'],
   groupsHiddenByFilter: [2],
+  groupsHiddenBySearch: [2],
 }
 
 describe('labels — every value is in its own language', () => {

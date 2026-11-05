@@ -1,12 +1,22 @@
 -- ============================================================================
 -- 02-trg04-http-targets.sql — TRG-04 read-only inventory
 -- ============================================================================
--- Unlocks: PR #5619 (fix/automation-webhook-ssrf-guard — rule-driven
+-- Written for: PR #5619 (fix/automation-webhook-ssrf-guard — rule-driven
 --          `send_webhook` gets the SSRF guard; refuses `http://` with
 --          `WEBHOOK_TARGET_REJECTED:scheme-not-allowed`) and PR #5649
 --          (fix/webhook-service-ssrf-guard — the `multitable_webhooks`
 --          subscription delivery path gets the same guard, same refusal
---          label family). Both branches are OPEN, not on `main`.
+--          label family).
+--   CORRECTION (2026-11-05): both PRs are MERGED on `main` (#5619 as
+--   1bcef347d, #5649 as bd165412a). The on-prem R line up to R80 carries
+--   neither guard; R81 is the first R build that refuses these targets.
+--
+-- NOTE (2026-11-05): this file counts only `http://` targets and internal IP /
+--   name LITERALS. It cannot see `https://<intranet hostname>`, which the
+--   guards also refuse (the name resolves internal or does not resolve), and
+--   it does not see redirects. For "what would R81-style guards refuse", run
+--   05-trg04-webhook-target-totals.sql: it counts EVERY send_webhook target
+--   and subscription in four buckets.
 --
 -- WHY TWO TABLES. #5619's own PR description names its unfixed sibling gap:
 -- "`webhook-service.ts:394` 这条同 EventBus 的另一条未接守卫的出口" — that
@@ -16,8 +26,11 @@
 --
 -- WHAT BREAKS. Per both PR descriptions, ANY currently-working `http://`
 -- target — automation rule action or webhook subscription — starts failing
--- once its guard lands: the refusal code is `WEBHOOK_TARGET_REJECTED` with a
--- reason-class suffix of `scheme-not-allowed`.
+-- on a build that carries its guard: the refusal code is
+-- `WEBHOOK_TARGET_REJECTED` with a reason-class suffix of `scheme-not-allowed`.
+-- Before #5619/#5649 there was NO target check on rule-driven send_webhook or
+-- on subscription delivery, so `http://` and internal targets DO deliver today
+-- on any build without the guards (the on-prem R line up to R80).
 --
 -- 2026-09-18 REVIEW REPAIR — F3 (THE IMPORTANT ONE):
 --   The first version of this file scanned `actions::text ILIKE '%"url":"http://%'`
@@ -207,7 +220,7 @@ SELECT (count(*) FILTER (WHERE narrow_hit))::int      AS http_rules,
 -- ── Q3. automation_rules — http:// target IDS + sheet_id ───────────────────
 -- Purpose: same `hit` CTE as Q2 (character-for-character), so the owner can
 --   see WHICH rules are behind each of Q2's two numbers.
---   `narrow_hit = t` → this rule breaks when #5619 lands; warn its sheet team.
+--   `narrow_hit = t` → this rule breaks on a build with #5619; warn its sheet team.
 --   `narrow_hit = f AND upper_bound_hit = t` → an `http://` string lives
 --   somewhere in the rule (payload/headers/mis-cased key) but is not an egress
 --   target; informational.
@@ -418,8 +431,12 @@ SELECT '^https?:[/\\]*'                                   -- scheme, then any ru
 
 \if :has_rules_actions
 -- ── Q7 (SUPPLEMENTARY, denominator context). Rows aimed at an obvious ──────
--- ── internal literal, EITHER scheme — already failing to deliver before   ──
--- ── either guard lands; context, not new breakage.                        ──
+-- ── internal literal, EITHER scheme.                                       ──
+-- CORRECTION (2026-11-05): an earlier caption said these rows were "already
+--   failing to deliver before either guard lands; context, not new
+--   breakage". That was false: before #5619/#5649 neither path checked the
+--   target, and the on-prem R line up to R80 still has no check, so these
+--   targets deliver today and are NEWLY refused on a build with the guards.
 -- Caveat: a FLOOR of the guard's literal / name refusals (the host set above);
 --   targets that only resolve to an internal address are out of reach.
 -- F6: narrowed to the SAME read paths as Q2 — an internal-looking literal in a

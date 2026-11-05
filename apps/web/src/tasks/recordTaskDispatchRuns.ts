@@ -8,11 +8,14 @@
  * state of one dispatch lives here, keyed by sheet and record, for the life of the page.
  *
  * A run is:
- *  - in flight from the click until both writes settle;
- *  - then settled with the created task (kept until its success panel has been on screen) or with a
- *    failure message (kept until a dialog for that record shows it).
- * Nothing here reads record content; a run holds a task id, flags, a message key, the identity it was
- * bound to and the ticket of the create that started it.
+ *  - in flight from the click until the create settles;
+ *  - then settled with the created task (kept until its result panel has been on screen) or with a
+ *    failure: a 4xx (kept until a dialog for that record shows it), or a request with no readable
+ *    answer, whose outcome is unknown (kept, with the body it sent, until a retry is answered, so a
+ *    retry from any dialog for the record resends exactly that body under the same retry key).
+ * Nothing here reads record content; a run holds a task id, flags, a message key, the body of the
+ * create and the names the people picker gave for its assignees (page memory only, never written to
+ * storage), the identity it was bound to and the ticket of the create that started it.
  *
  * Runs are kept PER IDENTITY (`recordTaskDispatchIdentity.ts`): the key names the identity the
  * dispatch was bound to as well as the record, so a dialog under another user or org never sees a
@@ -28,11 +31,33 @@
 import { reactive } from 'vue'
 import { onAuthSessionSwitch } from '../composables/authPrincipal'
 import { readDispatchIdentity } from './recordTaskDispatchIdentity'
+import type { CreateTaskInput } from './tasksApi'
 
 export interface DispatchCreated {
   id: string
-  /** The second write (the source line in the description) did not land. */
-  sourceNoteFailed: boolean
+  /** The service answered with the task an earlier request under the same retry key made. */
+  reused: boolean
+  /** A new task always; for a reused one, whether a read of it found it (a task that is gone or no
+   *  longer visible reads as not found; a refusal or an error is not taken to mean it is gone). */
+  openable: boolean
+  /** The answer confirmed the source link. */
+  sourceLinked: boolean
+  /** The retry key held an attempt with no readable answer before this request, and the answer
+   *  cannot say what that attempt did (a service that does not store the link never looked it up). */
+  earlierUnresolved: boolean
+}
+
+export interface DispatchFailureState {
+  /** The message key the dialog shows. */
+  message: string
+  /** No readable answer: the task may or may not exist, the form stays as it was sent and the only
+   *  action is a retry of the same body under the same key. */
+  unknown: boolean
+  /** A 4xx answered a request whose retry key already held an attempt with no readable answer: the
+   *  earlier attempt's outcome is still not known (read before this request was sent). */
+  earlierUnresolved: boolean
+  /** The retry key could not be written to browser storage for this request. */
+  keyNotSaved: boolean
 }
 
 export interface DispatchRun {
@@ -42,15 +67,21 @@ export interface DispatchRun {
   ticket: number
   inFlight: boolean
   created: DispatchCreated | null
-  /** A message key for a create that failed; shown by the next dialog for the record that is open. */
-  failure: string | null
-  /** The created task's success panel has been on screen; the next open starts a fresh form. */
+  /** A create that failed; a 4xx is shown by the next dialog for the record that is open. */
+  failure: DispatchFailureState | null
+  /** The body the create sent, kept while it is out and while its outcome is unknown, for a retry
+   *  that resends exactly these bytes. Page memory only. */
+  input: CreateTaskInput | null
+  /** The names the people picker gave for the assignees in `input`, kept with it, so a dialog mounted
+   *  since shows them on the locked form. Never sent. */
+  pickedNames: Record<string, string> | null
+  /** The created task's result panel has been on screen; the next open starts a fresh form. */
   seen: boolean
 }
 
 export type DispatchOutcome =
   | { created: DispatchCreated; failure?: undefined }
-  | { created?: undefined; failure: string }
+  | { created?: undefined; failure: DispatchFailureState }
 
 const runs = reactive(new Map<string, DispatchRun>())
 let nextTicket = 1
@@ -80,13 +111,18 @@ export function readDispatchRun(key: string): DispatchRun | undefined {
 
 /** Starts a run for `identity` and returns its ticket, to be handed back to `settleDispatchRun`.
  *  `null` (and nothing changes) while a create for this record is out, or while its created task has
- *  not been shown yet. */
-export function beginDispatchRun(key: string, identity: string): number | null {
+ *  not been shown yet. `input` is the body being sent, `pickedNames` the picker's names for its people. */
+export function beginDispatchRun(
+  key: string,
+  identity: string,
+  input: CreateTaskInput | null = null,
+  pickedNames: Record<string, string> | null = null,
+): number | null {
   watchSessionSwitch()
   const current = runs.get(key)
   if (current && (current.inFlight || (current.created !== null && !current.seen))) return null
   const ticket = nextTicket++
-  runs.set(key, { identity, ticket, inFlight: true, created: null, failure: null, seen: false })
+  runs.set(key, { identity, ticket, inFlight: true, created: null, failure: null, input, pickedNames, seen: false })
   return ticket
 }
 
@@ -102,6 +138,9 @@ export function settleDispatchRun(key: string, ticket: number, outcome: Dispatch
     inFlight: false,
     created: outcome.created ?? null,
     failure: outcome.failure ?? null,
+    // Kept only while a retry may need it.
+    input: outcome.failure?.unknown === true ? current.input : null,
+    pickedNames: outcome.failure?.unknown === true ? current.pickedNames : null,
     seen: false,
   })
 }
@@ -111,9 +150,11 @@ export function markDispatchRunSeen(key: string): void {
   if (current && current.created !== null) current.seen = true
 }
 
-/** Drops a settled run (a shown task, or a failure that has been shown). An in-flight run stays. */
+/** Drops a settled run (a shown task, or a 4xx that has been shown). An in-flight run stays, and so
+ *  does one whose outcome is unknown: only a retry's answer settles it. */
 export function forgetDispatchRun(key: string): void {
-  if (runs.get(key)?.inFlight) return
+  const current = runs.get(key)
+  if (current?.inFlight || current?.failure?.unknown === true) return
   runs.delete(key)
 }
 

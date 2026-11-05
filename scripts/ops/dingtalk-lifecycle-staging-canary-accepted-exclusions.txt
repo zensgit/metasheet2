@@ -1,0 +1,21 @@
+# dingtalk-lifecycle-staging-canary-accepted-exclusions.txt
+#
+# Canary accept table for owner-ruled staging migration exclusions.
+#
+# Each non-comment line: <migration_name> <sha256 of packages/core-backend/src/db/migrations/<migration_name>.ts>
+# Only .ts migration sources are bound; accepting a name with no such file (for example a .sql
+# migration) fails the consistency test closed until that test learns the other source kind.
+#
+# The lifecycle canary tolerates a pending migration on staging only when the owner exclusion
+# list of scripts/ops/attendance-window-runner-pipeline.lib.sh (STAGING_OWNER_EXCLUDED_MIGRATIONS)
+# and this table name exactly the same set and the name is in it. At runtime the canary
+# normalizes both lists and refuses every gated non-off action (exclusion_lists_mismatch) when they
+# differ in any name, even with zero pending migrations. The digest binds the acceptance to the
+# reviewed migration source content; scripts/ops/dingtalk-lifecycle-canary-exclusion-consistency.test.mjs
+# (required CI lane) fails when a digest no longer matches the source file, an accepted name is
+# no longer in the lib list, or a lib name is not listed here: the lib list and this table name
+# the same set and change together in one reviewed change. Before a non-off dispatch the canary
+# workflow also checks every digest against the migration source at the deployed commit
+# (scripts/ops/dingtalk-lifecycle-canary-accept-digests-at-deploy-sha.sh). On the host the
+# canary reads names only; action=off never reads this table.
+zzzz20260919090000_create_approval_template_group_backfill_batches 9cb28389e0a070e53b870ec0fb78228c8c0c6be55609e194340f359aaa4bb36a

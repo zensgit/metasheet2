@@ -202,9 +202,11 @@
 //
 // VALUES-FREE: the project number is the one the parent hands in (the operator's own text); everything else is a
 // state, a count, a time or a record handle.
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import { useAuth } from '../../../composables/useAuth'
+import { onAuthSessionSwitch } from '../../../composables/authPrincipal'
+import { readStockPrepProjectSyncRunSession } from '../../../services/integration/stockPreparation/projectSyncRunGuard'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import { grantedStockPrepCapabilities } from '../../../services/integration/stockPreparation/workbenchAccess'
 import { stockPrepProjectNumbersMatch } from '../../../services/integration/stockPreparation/projectTarget'
@@ -231,7 +233,10 @@ import {
 
 const props = withDefaults(
   defineProps<{
-    /** The project the parent panel is about — its seed or the number its last run submitted. */
+    /**
+     * The project the parent panel is about: on the project board, the board's project (always — never a number a
+     * run on another project submitted); on the workspace (no seed), the number its last run submitted.
+     */
     projectNo?: string
     scope?: IntegrationScope
     /** Any value; a CHANGE re-reads the switch and the reminder (the parent hands in its last run's report). */
@@ -279,9 +284,39 @@ function resolveApi(): StockPreparationManualRowsApi {
   return props.api ?? createStockPreparationManualRowsApi(props.scope)
 }
 
+// A SWITCH PROMPT BELONGS TO THE PROJECT, SCOPE AND SESSION IT WAS OPENED UNDER (R80 verifier F1). The project board
+// keeps this section mounted while it moves to another project, and another principal can take the browser session
+// meanwhile. A move of the project or scope closes the prompt (the watch below), a session switch this process
+// performs closes it too (`onAuthSessionSwitch` below), and a confirm click re-checks all three BY VALUE before it
+// writes — another tab replacing the session notifies nobody. The signature is only compared, never sent.
+interface PromptContext {
+  readonly projectNo: string
+  readonly tenantId: string | null
+  readonly workspaceId: string | null
+  readonly session: string
+}
+
+function currentPromptContext(): PromptContext {
+  return {
+    projectNo: trimmedProjectNo.value,
+    tenantId: props.scope.tenantId ?? null,
+    workspaceId: props.scope.workspaceId ?? null,
+    session: readStockPrepProjectSyncRunSession(),
+  }
+}
+
+function promptContextIsCurrent(context: PromptContext): boolean {
+  const now = currentPromptContext()
+  return context.session !== 'invalid'
+    && context.projectNo === now.projectNo
+    && context.tenantId === now.tenantId
+    && context.workspaceId === now.workspaceId
+    && context.session === now.session
+}
+
 // The switch control's own state — declared before the watch below, which clears it on a project change.
 const busy = ref(false)
-const prompt = ref<{ policy: StockPrepManualRowsPolicy } | null>(null)
+const prompt = ref<{ policy: StockPrepManualRowsPolicy; context: PromptContext } | null>(null)
 const typed = ref('')
 type Notice =
   | { kind: 'allowed' | 'disabled' | 'unchanged' | 'mismatch' | 'not_permitted' }
@@ -325,6 +360,16 @@ watch(
   { immediate: true },
 )
 
+// Another principal took the session: the open question is answered as cancel, and what the section shows is read
+// again for the session now held (a read still in flight for the old one is dropped by the ticket).
+const stopSessionSwitch = onAuthSessionSwitch(() => {
+  prompt.value = null
+  typed.value = ''
+  notice.value = null
+  void refresh()
+})
+onUnmounted(() => stopSessionSwitch())
+
 // ── the switch ──────────────────────────────────────────────────────────────────────────────────────────────────
 
 const nextPolicy = computed<StockPrepManualRowsPolicy>(() => stockPrepManualRowsNextPolicy(state.value ? state.value.policy : null))
@@ -342,7 +387,7 @@ const typePrompt = computed<StockPrepPlainEntry>(() => stockPrepProjectTargetPla
 
 function openPrompt(): void {
   if (!canOfferSet.value) return
-  prompt.value = { policy: nextPolicy.value }
+  prompt.value = { policy: nextPolicy.value, context: currentPromptContext() }
   typed.value = ''
   notice.value = null
 }
@@ -355,11 +400,17 @@ function closePrompt(): void {
 async function confirmSet(): Promise<void> {
   const asked = prompt.value
   if (!asked || busy.value) return
+  // The click counts only for the project, scope and session the prompt was opened under; otherwise it is a cancel.
+  if (!promptContextIsCurrent(asked.context)) {
+    closePrompt()
+    return
+  }
   busy.value = true
-  const projectNo = trimmedProjectNo.value
+  const projectNo = asked.context.projectNo
   try {
     const outcome = await setStockPreparationManualRows({ api: resolveApi(), canSet: canSet.value }, projectNo, typed.value, asked.policy)
-    if (projectNo !== trimmedProjectNo.value) return
+    // An answer for a project, scope or session the section has left is not painted here.
+    if (!promptContextIsCurrent(asked.context)) return
     if (outcome.kind === 'mismatch') {
       notice.value = { kind: 'mismatch' }
       return

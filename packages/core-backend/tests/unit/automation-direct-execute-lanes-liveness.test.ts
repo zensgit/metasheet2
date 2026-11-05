@@ -92,7 +92,8 @@ const SHEET = 'sheet_dx'
 /** A sheet a webhook SENDER names in its body — never the rule's. */
 const BODY_SHEET = 'sheet_named_in_body'
 const RESUME_TOKEN = 'fixture-resume-token-value'
-const OUTBOUND_URL = 'https://hooks.example.invalid/out'
+// TEST-NET-3 literal (RFC 5737): public to the send_webhook SSRF gate without any DNS; never dialled (fetchFn is injected).
+const OUTBOUND_URL = 'https://203.0.113.10/out'
 /** An egress-only rule: nothing is written to the sheet, but its data still leaves the system. */
 const EGRESS_ONLY = {
   action_type: 'send_webhook',
@@ -124,7 +125,7 @@ function ruleRow(over: Record<string, unknown> = {}) {
     // A same-sheet write (the executor fast path skips the base lookup) followed by an outbound push.
     actions: [
       { type: 'create_record', config: { fields: { fld_title: 'from automation' } } },
-      { type: 'send_webhook', config: { url: 'https://hooks.example.invalid/out' } },
+      { type: 'send_webhook', config: { url: 'https://203.0.113.10/out' } },
     ],
     execution_mode: null,
     ...over,
@@ -147,7 +148,7 @@ function resumeRuleRow() {
     actions: [
       { type: 'wait_for_callback', config: {} },
       { type: 'create_record', config: { fields: { fld_title: 'after wait' } } },
-      { type: 'send_webhook', config: { url: 'https://hooks.example.invalid/out' } },
+      { type: 'send_webhook', config: { url: 'https://203.0.113.10/out' } },
     ],
   })
 }

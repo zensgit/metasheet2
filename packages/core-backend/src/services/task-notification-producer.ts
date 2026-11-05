@@ -17,7 +17,9 @@
  * DingTalk integration row; there is no fallback to another org.
  * RULED(2026-10-07): [R05] [D13] the trigger set, the four recipient roles and their priority, the
  * actor's exclusion, and list members of every list holding the task (archived lists included) are
- * the pure functions' (`task-notifications.ts`); this module only feeds them.
+ * the pure functions' (`task-notifications.ts`); this module only feeds them. Package 2 (2-D1):
+ * `created` goes to the new task's assignees and `assignee_added` to the added person only; the
+ * event's `targetUserId` is passed through for that.
  * RULED(2026-10-07): [R23] the outbox id is the column default (a uuid).
  */
 import {
@@ -44,6 +46,8 @@ export interface WrittenTaskEvent {
   actorId: string
   /** The bound `occurred_at`; `null` when the value is taken in SQL (a column default or a copy). */
   occurredAt: Date | null
+  /** The assignee or follower a membership event is about; the recipient of `assignee_added`. */
+  targetUserId?: string
 }
 
 function isNotifiableTaskEvent(type: string): type is TaskNotifiableEvent {
@@ -172,6 +176,7 @@ export async function enqueueTaskEventNotifications(db: Db, input: {
       followerIds: members.followerIds,
       listMemberIds: members.listMemberIds,
       actorId: event.actorId,
+      targetUserId: event.targetUserId,
     })
     plans.push(...planTaskEventDeliveries({
       orgId: input.orgId,

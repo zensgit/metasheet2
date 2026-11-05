@@ -8,6 +8,7 @@
     :unavailable="groupsResult.kind === 'unavailable' || placementsResult.kind === 'unavailable'"
     :truncated="truncated"
     :rows-filtered="rowsFiltered === true && rowsTruncated !== true"
+    :rows-searched="rowsSearched"
     :can-manage="true"
     :reload="reload"
     flat-testid="tasks-list"
@@ -47,6 +48,8 @@ const props = defineProps<{
   /** G2-core: the rows are filtered by status (未完成 / 已完成); the placements read is not, so the
    *  board keeps the placements of the hidden tasks in its index space (design §4.1). */
   rowsFiltered?: boolean
+  /** Title search narrows the rows as well (the status filter may be 全部 meanwhile). */
+  rowsSearched?: boolean
   /** G2-core: the rows' read stopped short of its `total`. A placement whose task is not a row may
    *  then be one the page cut off rather than one the filter left out, so the board is not told the
    *  rows are filtered and the existing rule (`[fe-35]`: such a placement holds moves off) applies. */

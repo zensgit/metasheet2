@@ -14,7 +14,7 @@
 | `DIRECTORY_PENDING_ACTIVATION_ENABLED` ON | **OFF** | **Executable only as a transient canary** on an explicit owned account. Default phase admits to pending and proves OFF rollback; optional SSO activation still records browser OAuth as `NOT_EXECUTED` until a human observes it. |
 | `AUTH_LOGIN_USE_ALIASES` ON (T2b cutover) | **OFF** | **Executable only as a transient canary** (`action=alias`). Success requires/proves OFF in the same run; failure restores the OFF override before failing. Runtime OFF cannot be proven if rollback recreate itself fails (override restored on disk). Requires secret-backed password login; short-lived admin JWT is minted from that login (never `secrets.ATTENDANCE_ADMIN_JWT`). |
 | `DIRECTORY_DEPROVISION_ENABLED` ON | **OFF** | **Executable only as a two-phase transient canary** on an explicit owned account in a dedicated exact target-plus-sentinel integration. Apply and restore are separate confirmed operations; every exit restores/proves the flags OFF or reports that runtime OFF is unproven. |
-| Env-gate clear (`action=off`) | n/a | Executable emergency only (after migrations true + exact SHA) |
+| Env-gate clear (`action=off`) | n/a | Executable emergency only (after `migrations_gate_off` whole_ledger\|owner_scoped + exact SHA) |
 | Dedicated canary admin (`action=bootstrap`) | n/a | Executable staging-only create/repair of the **fixed** owned row only (no lifecycle env write) |
 
 Presence of canary subject/integration/owner tokens is **not** a real canary and is **not** accepted as an ON enabler. There is **no** auto-selection of login identities, **no** password reset path, and **no** production fallback.
@@ -30,7 +30,7 @@ Presence of canary subject/integration/owner tokens is **not** a real canary and
 | Action | Executable? | Behavior |
 |--------|-------------|----------|
 | `status` | yes | values-free snapshot; multi-on fail-closed after report |
-| `preflight` | yes | readiness only; `migrations_pending_zero` must be exactly `true` (unknown fails) |
+| `preflight` | yes | readiness only; `migrations_gate` (non-off targets) / `migrations_gate_off` (target `off`) must be `whole_ledger` or `owner_scoped` (`refused` and `unknown` fail; unknown is never success) |
 | `off` | yes | emergency clear of the three env gates; previous-override restore on failure; health true after restart required |
 | `bootstrap` | yes (manual) | staging-only create/repair of fixed canary admin; see below; **no lifecycle env write** |
 | `alias` | yes (transient) | secret-backed cutover canary; see sequence below; success requires/proves OFF |
@@ -62,7 +62,9 @@ Any `users` row matching the email **or** the id that does **not** match **both*
 - `secrets.LIFECYCLE_CANARY_LOGIN_IDENTIFIER` — must decode+trim to exact `lifecycle-canary@staging.invalid`
 - `secrets.LIFECYCLE_CANARY_LOGIN_PASSWORD` — exact password bytes for that account (no CR/LF strip)
 
-**Gates before mutation:** exact deployed SHA (image tag + health commit agree), live mode `off`, backend health true, `migrations_pending_zero=true`.
+**Gates before mutation:** exact deployed SHA (image tag + health commit agree), live mode `off`, backend health true, `migrations_gate` = `whole_ledger` or `owner_scoped`.
+
+**Migrations gate (all non-off actions, pre-write and post-write checks):** `migrations_gate=whole_ledger` when both exclusion lists are readable, name the same set, and the whole ledger reads `Pending: 0`; `migrations_gate=owner_scoped` when the whole ledger's pending name set equals exactly the tolerated set (the one set named by both the owner exclusion list in `scripts/ops/attendance-window-runner-pipeline.lib.sh` and the canary accept table `scripts/ops/dingtalk-lifecycle-staging-canary-accepted-exclusions.txt`), narrowing the ledger by exactly those names drops exactly them, every tolerated name confirms pending one by one through `migrate.js --confirm <name>` (run only after the deployed `migrate.js` is shown to carry that read-only entry point), and the excluded tables are proven absent. The list gate is independent of the ledger and runs before any verdict: an unreadable lib or accept table is `unknown`, and two lists that are not the same set after normalization (trim, drop blank/comment entries, de-duplicate, sort) are `refused` with `exclusion_lists_mismatch` — both even when the whole ledger reads `Pending: 0`; there is no intersection. `refused`/`unknown` fail. The required CI consistency test holds the lib list and the accept table to the same set and each accepted digest to its migration source; before dispatching `bootstrap`/`human-bootstrap`/`alias`/`pending`/`deprovision` or a `preflight` with a non-off target the workflow also checks every accepted digest against the migration source at `deploy_sha` (fetched under its own timeout) and refuses on mismatch or unknown (report-only for `status` and `preflight target=off`; `action=off` skips the check). `action=off` and `preflight target=off` use `migrations_gate_off`: whole ledger 0 or the ledger narrowed by the lib list 0, computed on its own from the lib's list function only — the accept table, the table-proof SQL and every proof are report-only for off, and a missing lib or accept table never stops the off dispatch. `action=off` does not run the non-off rule at all (its `migrations_gate` reads `unknown` / `not_evaluated_for_off`). `migrations_pending_zero` keeps its whole-ledger meaning; a run with `migrations_gate=owner_scoped` is recorded as "zero pending outside the tolerated owner exclusions; exclusions proven unapplied and their tables absent", never as "zero pending migrations".
 
 **Hard safety for bootstrap credentials + row mutation:**
 
@@ -74,7 +76,7 @@ Any `users` row matching the email **or** the id that does **not** match **both*
 | `users.permissions` | Column **omitted** on insert/repair (054 `TEXT[]` default and later jsonb defaults both work; never `'[]'::jsonb`). |
 | Collision | Email **or** id match that is not **both** markers → fail closed; never mutates an arbitrary admin. |
 | Create/repair sessions | **Required primary guard** (same transaction, same shape as `session-revocation.ts` `revokeUserSessions`): upsert `user_session_revocations` (`user_id, revoked_after, updated_at, updated_by, reason` with `ON CONFLICT DO UPDATE` of the watermark). Its absence rolls back the mutation. Create also advances it because a previously deleted fixed row may have left orphaned stateless tokens. JWT verification uses `revoked_after` — updating `user_sessions` alone is **not** sufficient. Optional additional belt on repair: revoke live `user_sessions` rows when that table exists. Reasons: `lifecycle_canary_bootstrap_password_create|repair`. Before the new login proof, cross the next JWT `iat` second so the new token is newer than the watermark. |
-| Post-proof posture | After password login proof: re-capture and require mode still `off`, health true, migrations still zero, exact SHA unchanged. |
+| Post-proof posture | After password login proof: re-capture and require mode still `off`, health true, migrations gate still `whole_ledger`/`owner_scoped`, exact SHA unchanged. |
 | Env flags | **Never** writes lifecycle override / never enables alias/pending/deprovision. |
 
 **Transaction shape:** `BEGIN` → `SELECT … FOR UPDATE` on id/email → insert or repair owned row as active activated platform admin (`role=admin`, `is_admin=true`, `is_active=true`, `activation_status=activated`, `local_password_set=true`, `must_change_password=false`, `user_roles` admin + needed permissions) → optional session revoke on repair → `COMMIT`. Then prove real `POST /api/auth/login` and reassert OFF/health/SHA. Artifacts report outcome enums only (`created` / `repaired`); never credentials, tokens, or PII. `transition_applied=false` and `lifecycle_env_write=false`.
@@ -94,7 +96,7 @@ Any `users` row matching the email **or** the id that does **not** match **both*
 
 **Remote sequence (fail closed; any post-write failure restores OFF override before failing):**
 
-1. Prove exact SHA (image tag + health commit agree), backend health true, `migrations_pending_zero=true`, live mode `off`.
+1. Prove exact SHA (image tag + health commit agree), backend health true, `migrations_gate` `whole_ledger`/`owner_scoped`, live mode `off`.
 2. Real `POST /api/auth/login` with secret identifier/password (**pre-ON**) and mint short-lived admin JWT file from that response.
 3. Authenticated `POST /api/admin/login-aliases/backfill` (minted JWT file) — require success; **exact nonnegative integer counts** with **`collisions==0`** (nonzero collisions refuse env write; alias-only would lock collided users out).
 4. Authenticated `GET /api/admin/login-aliases/cutover-status` — require `ready=true` and `canEnableCutover=true`.

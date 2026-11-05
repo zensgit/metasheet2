@@ -222,6 +222,15 @@ jobs:
             scripts/ops/dingtalk-oauth-stability-metrics-only-fullscript.test.mjs \
             scripts/ops/github-dingtalk-oauth-stability-summary.test.mjs
 
+      # Lifecycle canary owner-scoped migration gate: the canary tolerates a pending staging
+      # migration only when the attendance lib's owner exclusion list and the canary accept table
+      # name the same set and the accepted migration source digests agree. The canary contract suite itself is
+      # deliberately NOT referenced here (its own contract forbids that); this standalone node:test
+      # holds the three files together in the required lane. No deps, no DB. Pinned (presence,
+      # position, command) by plugin-tests-parallel-contract.test.mjs.
+      - name: DingTalk lifecycle canary exclusion consistency contract (required lane)
+        run: node --test scripts/ops/dingtalk-lifecycle-canary-exclusion-consistency.test.mjs
+
       # REVIEW NIT-2 (exact-head round): these two suites already ran in `k3wise-offline-poc`, but
       # that job's check is "K3 WISE offline PoC", which is NOT one of main's required contexts --
       # so a red there did not block a merge. The suites carry the ONLY mechanical guard on the

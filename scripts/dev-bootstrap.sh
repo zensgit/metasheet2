@@ -283,6 +283,8 @@ else
     echo "  尝试重置: pnpm db:reset"
     echo "  (若本地库跑过 approval-template-groups backfill 真库用例, db:reset 可能撞上"
     echo "   ATG_BACKFILL_DOWN_BLOCKED —— 见该错误信息里的环境变量名)"
+    echo "  (若本地库里有从记录派发的任务, db:reset 会撞上 TASK_SOURCE_LINKS_DOWN_BLOCKED,"
+    echo "   库里什么都不改; 只在一次性的本地库上先清空 task_source_links 再重置)"
     exit 1
 fi
 
@@ -374,6 +376,8 @@ echo "  - 查看日志: tail -f logs/backend.log"
 echo "  - 重置数据库: pnpm --filter @metasheet/core-backend db:reset"
 echo "    (若本地库跑过 approval-template-groups backfill 真库用例, db:reset 可能撞上"
 echo "     ATG_BACKFILL_DOWN_BLOCKED —— 见该错误信息里的环境变量名)"
+echo "    (若本地库里有从记录派发的任务, db:reset 会撞上 TASK_SOURCE_LINKS_DOWN_BLOCKED,"
+echo "     库里什么都不改; 只在一次性的本地库上先清空 task_source_links 再重置)"
 echo ""
 
 echo "下一步:"

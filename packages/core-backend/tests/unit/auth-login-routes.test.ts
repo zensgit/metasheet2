@@ -2372,3 +2372,37 @@ describe('E1 container login — full HTTP wire (whitelist + route mount)', () =
     expect(res.status).toBe(401)
   })
 })
+
+describe('GET /api/auth/users', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('uses verifyToken and hides recycled or purged accounts', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({ id: 'admin-1', role: 'admin', email: 'admin@example.com' })
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('get', '/users', {
+      headers: { authorization: 'Bearer signed-token' },
+      query: { q: '100%' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(authServiceMocks.verifyToken).toHaveBeenCalledWith('signed-token')
+    const sql = String(pgMocks.query.mock.calls[0]?.[0])
+    expect(sql).toContain('deleted_at IS NULL')
+    expect(sql).toContain('purged_at IS NULL')
+    expect(pgMocks.query.mock.calls[0]?.[1]).toEqual(['%100\\%%'])
+  })
+
+  it('rejects a token verifyToken does not accept', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue(null)
+    const response = await invokeRoute('get', '/users', {
+      headers: { authorization: 'Bearer stale' },
+    })
+    expect(response.statusCode).toBe(401)
+    expect(pgMocks.query).not.toHaveBeenCalled()
+  })
+})

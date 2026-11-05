@@ -262,6 +262,7 @@ import { tasksRouter } from './routes/tasks'
 import { setTaskCountsBroadcaster } from './services/task-counts-realtime'
 import { pendingSourceRegistry } from './services/pending-source-registry'
 import { approvalPendingSource } from './services/approval-pending-source'
+import { taskPendingSource } from './services/task-pending-source'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
@@ -434,6 +435,7 @@ import { createMultitableAiRoutes } from './routes/multitable-ai'
 import { QueueServiceImpl } from './services/QueueService'
 import { createMultitableButtonRoutes } from './routes/multitable-button'
 import { createMultitableRecordApprovalRoutes } from './routes/multitable-record-approvals'
+import { createMultitableRecordTaskRoutes } from './routes/multitable-record-tasks'
 import { createMultitableCopySheetRoutes } from './routes/multitable-copy-sheet'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
@@ -467,6 +469,7 @@ import { createYidaOwnerRuntime, type YidaOwnerRuntimeDependencies } from './int
 import type { TransactionalQueryable } from './multitable/pg-transaction-guard'
 import { createYidaInitializationRuntime } from './integration/yida-initialization-runtime'
 import { createYidaConnectionTestRuntime } from './integration/yida-connection-test-runtime'
+import { createYidaSheetSourceHostDependencies } from './integration/yida-sheet-source-host'
 import { isYidaOwnerHttpObservationPath } from './integration/yida-owner-http-observation'
 import { createIntegrationYidaOwnerRouter, YIDA_OWNER_HTTP_PREFIX, yidaOwnerNoStoreMiddleware,
   yidaOwnerJsonOnlyMiddleware, yidaOwnerParseErrorHandler } from './routes/integration-yida-owner'
@@ -650,6 +653,8 @@ export class MetaSheetServer {
     // Host-owned switch, not a request claim. The actual owner/admin, immutable
     // grant and one-use admission still gate every external request.
     readEnablement: () => process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED,
+    // Y2 multi-target + sheet source: its own default-OFF switch (exact 'true'), never the send switch.
+    readMultiTargetEnablement: () => process.env.INTEGRATION_YIDA_MULTI_TARGET_ENABLED,
   })
   // Local initialization is an independent authority, not the send switch or
   // an existing target owner check. The immutable server anchor and live ACL
@@ -657,6 +662,7 @@ export class MetaSheetServer {
   private yidaInitializationRuntime = createYidaInitializationRuntime({
     database: { transaction: yidaOwnerTransaction },
     security: this.pluginRuntimeSecurityService,
+    readMultiTargetEnablement: () => process.env.INTEGRATION_YIDA_MULTI_TARGET_ENABLED,
   })
   // Owner-run token-only 测试连接 before initialization: its own default-OFF switch, never the send
   // switch. Anchor owner + live integration admin are re-proved per call; nothing is persisted.
@@ -2050,11 +2056,18 @@ export class MetaSheetServer {
       injector: this.injector,
       afterSalesApprovalBridgeService: this.afterSalesApprovalBridgeService,
     }))
-    // 路由：待办中心（v1 首切片,todo-center-design-lock §3/§4 —— 只注册审批源）
+    // 路由：待办中心（todo-center-design-lock §3/§4）。任务来源随任务路由一起注册。
     pendingSourceRegistry.register(approvalPendingSource)
     this.app.use(todoRouter())
     const taskRoutes = tasksRouter()
-    if (taskRoutes) this.app.use(taskRoutes)
+    if (taskRoutes) {
+      this.app.use(taskRoutes)
+      pendingSourceRegistry.register(taskPendingSource)
+    }
+    // The tasks dispatched from a multitable record (GET /api/multitable/sheets/:sheetId/records/
+    // :recordId/tasks), mounted only with the task routes. See routes/multitable-record-tasks.ts.
+    const recordTaskRoutes = createMultitableRecordTaskRoutes()
+    if (taskRoutes && recordTaskRoutes) this.app.use('/api/multitable', recordTaskRoutes)
     // 路由：审计日志（管理员）
     this.app.use(auditLogsRouter())
     // 路由：审批历史（从审计表衍生）
@@ -2137,7 +2150,7 @@ export class MetaSheetServer {
     // in the startup sequence than route mounting happens.
     this.app.use('/api/multitable', createAutomationRoutes(() => this.automationService))
     this.app.use(YIDA_OWNER_HTTP_PREFIX, createIntegrationYidaOwnerRouter(this.yidaOwnerRuntime, this.yidaInitializationRuntime,
-      this.yidaConnectionTestRuntime))
+      this.yidaConnectionTestRuntime, createYidaSheetSourceHostDependencies()))
     this.app.use(YIDA_OWNER_HTTP_PREFIX, yidaOwnerParseErrorHandler)
     // AI routes — internal/not-in-OpenAPI, per-route guards; platform JWT
     // comes from the global /api/** middleware above:
@@ -4814,15 +4827,17 @@ export class MetaSheetServer {
       this.logger.error('DingTalk approval-card/person delivery retention scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 
-    // User recycle bin: anonymize accounts whose retention window has elapsed.
-    // Enabled by default (USER_RECYCLE_RETENTION_DAYS, default 30). Opt out with
-    // USER_RECYCLE_SWEEPER_DISABLED=1. Does not delete the users row.
+    // User recycle bin. Automatic purge stays OFF unless USER_RECYCLE_SWEEPER_ENABLED
+    // is the exact string true. Anonymizing identity is irreversible, and this sweeper
+    // does not elect a leader, so the default matches the flag manifest: do not start.
+    // USER_RECYCLE_SWEEPER_DISABLED=1 is an extra kill switch. The admin UI must say
+    // that expiry does not clear identity while the sweeper is off. The users row is kept.
     try {
       const userRecycleSweeper = startUserRecycleSweeper()
       this.logger.info(
         userRecycleSweeper
           ? 'User recycle sweeper initialized'
-          : 'User recycle sweeper disabled (USER_RECYCLE_SWEEPER_DISABLED=1 or test runtime)',
+          : 'User recycle sweeper disabled (set USER_RECYCLE_SWEEPER_ENABLED=true to enable; USER_RECYCLE_SWEEPER_DISABLED=1 forces off)',
       )
     } catch (e) {
       this.logger.error('User recycle sweeper initialization failed; continuing in degraded mode', e as Error)

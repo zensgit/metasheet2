@@ -328,6 +328,11 @@ function serviceErrorResponse(res: Response, err: unknown, action: string): void
   } else if (message === 'Webhook sheetId cannot be changed') {
     status = 400
     code = 'WEBHOOK_SHEET_IMMUTABLE'
+  } else if (message.startsWith('WEBHOOK_TARGET_REJECTED:')) {
+    // S0-a: a subscription target the delivery check would always refuse. The message is a closed-set
+    // class (`WEBHOOK_TARGET_REJECTED:<class>`), never the URL.
+    status = 400
+    code = 'WEBHOOK_TARGET_REJECTED'
   } else if (
     message.includes('required')
     || message.includes('valid URL')
