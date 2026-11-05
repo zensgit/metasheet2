@@ -1,24 +1,19 @@
-import { createHash } from 'node:crypto'
+import {
+  readHandoverSnapshot as snapshot,
+  type Row,
+  type Client,
+  type Pair,
+  type Snapshot,
+} from './handover-snapshot-v1'
+import {
+  canonical,
+  digest,
+  compactHandoverJournal,
+  type HandoverJournalV2,
+} from './handover-journal-v2'
 import { transaction } from '../db/pg'
 import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
 import { lockUsersForAccessGraphWrite } from './access-graph-mutex'
-
-type Row = Record<string, unknown>
-type Client = {
-  query: (sql: string, params?: unknown[]) => Promise<{ rows: Row[] }>
-}
-type Pair = { sourceIntegrationId: string; targetIntegrationId: string }
-type Snapshot = {
-  integrations: Row[]
-  accounts: Row[]
-  departments: Row[]
-  memberships: Row[]
-  links: Row[]
-  authority: Row[]
-  cards: Row[]
-  departmentBindings: Row[]
-  dependencies: Row[]
-}
 
 export class DirectoryHandoverConflict extends Error {
   readonly code = 'DIRECTORY_HANDOVER_CONFLICT'
@@ -26,29 +21,6 @@ export class DirectoryHandoverConflict extends Error {
 
 function requireCondition(value: unknown, message: string): asserts value {
   if (!value) throw new DirectoryHandoverConflict(message)
-}
-
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
-  if (value !== null && typeof value === 'object') {
-    return `{${Object.entries(value)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`)
-      .join(',')}}`
-  }
-  return JSON.stringify(value)
-}
-
-function digest(value: unknown): string {
-  return createHash('sha256').update(canonical(value)).digest('hex')
-}
-
-async function jsonRows(
-  c: Client,
-  sql: string,
-  args: unknown[],
-): Promise<Row[]> {
-  return (await c.query(sql, args)).rows.map((r) => r.row as Row)
 }
 
 async function assertOperator(c: Client, actorId: string): Promise<void> {
@@ -104,128 +76,6 @@ async function lockPair(c: Client, p: Pair, actorId: string): Promise<void> {
     'SELECT id FROM directory_departments WHERE integration_id = ANY($1::uuid[]) ORDER BY id FOR UPDATE',
     [[p.sourceIntegrationId, p.targetIntegrationId]],
   )
-}
-
-async function snapshot(c: Client, p: Pair): Promise<Snapshot> {
-  const ids = [p.sourceIntegrationId, p.targetIntegrationId]
-  const raw = await jsonRows(
-    c,
-    'SELECT to_jsonb(i) AS row FROM directory_integrations i WHERE id = ANY($1::uuid[]) ORDER BY id',
-    [ids],
-  )
-  // The journal stores only a configuration fingerprint, never credentials or their ciphertext.
-  const integrations = raw.map(({ config, ...row }) => ({
-    ...row,
-    configDigest: digest(config),
-  }))
-  const accounts = await jsonRows(
-    c,
-    'SELECT to_jsonb(a) AS row FROM directory_accounts a WHERE integration_id = ANY($1::uuid[]) ORDER BY id',
-    [ids],
-  )
-  const departments = await jsonRows(
-    c,
-    'SELECT to_jsonb(d) AS row FROM directory_departments d WHERE integration_id = ANY($1::uuid[]) ORDER BY id',
-    [ids],
-  )
-  const accountIds = accounts.map((a) => a.id)
-  const memberships = await jsonRows(
-    c,
-    'SELECT to_jsonb(m) AS row FROM directory_account_departments m WHERE directory_account_id = ANY($1::uuid[]) ORDER BY directory_account_id,directory_department_id',
-    [accountIds],
-  )
-  const links = await jsonRows(
-    c,
-    'SELECT to_jsonb(l) AS row FROM directory_account_links l WHERE directory_account_id = ANY($1::uuid[]) ORDER BY directory_account_id',
-    [accountIds],
-  )
-  const users = links.filter((l) => l.local_user_id).map((l) => l.local_user_id)
-  // Whole authority rows: stable permission/identity membership is part of the approval digest.
-  const authority: Row[] = []
-  for (const [table, key] of [
-    ['users', 'id'],
-    ['user_roles', 'user_id'],
-    ['user_permissions', 'user_id'],
-    ['user_orgs', 'user_id'],
-    ['user_external_identities', 'local_user_id'],
-    ['user_external_auth_grants', 'local_user_id'],
-  ] as const) {
-    const rows = await jsonRows(
-      c,
-      `SELECT to_jsonb(t) AS row FROM ${table} t WHERE ${key} = ANY($1::text[]) ORDER BY to_jsonb(t)::text`,
-      [users],
-    )
-    // Login verification is expected between apply and finish. Ignore only login telemetry;
-    // all structured identity keys, passwords, active flags, permissions and generations stay pinned.
-    const pinned = rows.map((row) => {
-      if (table !== 'users' && table !== 'user_external_identities') return row
-      const { last_login_at: _login, updated_at: _updated, ...fields } = row
-      if (table === 'user_external_identities') {
-        const { profile: _profile, ...identity } = fields
-        return identity
-      }
-      return fields
-    })
-    authority.push({ table, digest: digest(pinned) })
-  }
-  const rolePermissions = await jsonRows(
-    c,
-    `SELECT DISTINCT to_jsonb(rp) AS row FROM role_permissions rp
-    JOIN user_roles ur ON ur.role_id=rp.role_id WHERE ur.user_id=ANY($1::text[]) ORDER BY row`,
-    [users],
-  )
-  authority.push({ table: 'role_permissions', digest: digest(rolePermissions) })
-  const cards = await jsonRows(
-    c,
-    `SELECT jsonb_build_object('id',d.id,'instance',jsonb_build_object('status',i.status),
-      'instanceId',d.instance_id,'node',d.node_key,'epoch',d.entry_epoch,'state',d.card_state,'send',d.send_status) AS row
-    FROM dingtalk_approval_card_deliveries d LEFT JOIN approval_instances i ON i.id=d.instance_id
-    WHERE d.integration_id = ANY($1::uuid[]) ORDER BY d.id`,
-    [ids],
-  )
-  const departmentBindings = await jsonRows(
-    c,
-    'SELECT to_jsonb(b) AS row FROM directory_department_bindings b WHERE remote_integration_id=ANY($1::uuid[]) ORDER BY id',
-    [ids],
-  )
-  const dependencies: Row[] = []
-  for (const [table, key] of [
-    ['delegated_role_admin_scopes', 'directory_department_id'],
-    ['delegated_role_scope_template_departments', 'directory_department_id'],
-    ['elearning_admin_scopes', 'directory_department_id'],
-    ['elearning_stats_daily', 'department_id'],
-    ['elearning_export_jobs', 'department_id'],
-  ]) {
-    const rows = await jsonRows(
-      c,
-      `SELECT to_jsonb(t) AS row FROM ${table} t WHERE ${key}=ANY($1::uuid[]) ORDER BY to_jsonb(t)::text`,
-      [departments.map((d) => d.id)],
-    )
-    dependencies.push(...rows.map((row) => ({ table, digest: digest(row) })))
-  }
-  const policies = await jsonRows(
-    c,
-    `SELECT to_jsonb(t) AS row FROM org_directory_routing_policy t
-    WHERE canonical_integration_id=ANY($1::uuid[]) OR fallback_integration_id=ANY($1::uuid[]) ORDER BY id`,
-    [ids],
-  )
-  dependencies.push(
-    ...policies.map((row) => ({
-      table: 'org_directory_routing_policy',
-      digest: digest(row),
-    })),
-  )
-  return {
-    integrations,
-    accounts,
-    departments,
-    memberships,
-    links,
-    authority,
-    cards,
-    departmentBindings,
-    dependencies,
-  }
 }
 
 async function preflight(c: Client, p: Pair, s: Snapshot): Promise<void> {
@@ -442,7 +292,13 @@ export async function applyDirectoryHandover(
       [
         p.sourceIntegrationId,
         p.targetIntegrationId,
-        JSON.stringify(before),
+        JSON.stringify(
+          compactHandoverJournal(
+            before,
+            p.sourceIntegrationId,
+            p.targetIntegrationId,
+          ),
+        ),
         digest(after),
         actorId,
       ],
@@ -493,55 +349,63 @@ export async function finishDirectoryHandover(
       'State changed; automatic rollback/finalize refused',
     )
     if (action === 'rollback') {
-      const before = journal.before_state as Snapshot
-      const sourceIds = before.accounts
-        .filter((a) => a.integration_id === p.sourceIntegrationId)
-        .map((a) => a.id)
-      await c.query(
-        'UPDATE directory_accounts SET integration_id=$2,updated_at=now() WHERE id=ANY($1::uuid[])',
-        [sourceIds, p.sourceIntegrationId],
+      const before = journal.before_state as HandoverJournalV2
+      requireCondition(
+        before?.version === 2,
+        'Handover journal upgrade is required',
       )
-      for (const account of before.accounts.filter((a) =>
-        sourceIds.includes(a.id),
-      )) {
-        await c.query(
-          'UPDATE directory_accounts SET updated_at=$2 WHERE id=$1',
-          [account.id, account.updated_at],
-        )
-      }
+      const sourceIds = before.accounts.map((a) => a.id)
       await c.query(
-        'DELETE FROM directory_account_departments WHERE directory_account_id=ANY($1::uuid[])',
-        [sourceIds],
+        `UPDATE directory_accounts a SET integration_id=$2,updated_at=r.updated_at
+         FROM jsonb_to_recordset($1::jsonb) AS r(id uuid, updated_at timestamptz)
+         WHERE a.id=r.id AND a.integration_id=$3`,
+        [
+          JSON.stringify(before.accounts),
+          p.sourceIntegrationId,
+          p.targetIntegrationId,
+        ],
       )
-      for (const m of before.memberships.filter((m) =>
-        sourceIds.includes(m.directory_account_id),
-      )) {
-        await c.query(
-          `INSERT INTO directory_account_departments(directory_account_id,directory_department_id,is_manager,is_primary,created_at) VALUES($1,$2,$3,$4,$5)`,
-          [
-            m.directory_account_id,
-            m.directory_department_id,
-            m.is_manager ?? false,
-            m.is_primary,
-            m.created_at,
-          ],
-        )
-      }
+      // Apply only changes the membership FK. Reverse it in place, preserving every
+      // other column. The pair (integration_id, external_department_id) is unique,
+      // and the full after-digest above pins both ends of this mapping.
+      await c.query(
+        `UPDATE directory_account_departments m SET directory_department_id=src.id
+         FROM directory_departments dst JOIN directory_departments src
+           ON src.external_department_id=dst.external_department_id
+         WHERE m.directory_account_id=ANY($1::uuid[]) AND dst.id=m.directory_department_id
+           AND dst.integration_id=$2 AND src.integration_id=$3`,
+        [sourceIds, p.targetIntegrationId, p.sourceIntegrationId],
+      )
       const created = current.departments
-        .filter((d) => !before.departments.some((b) => b.id === d.id))
+        .filter(
+          (d) =>
+            d.integration_id === p.targetIntegrationId &&
+            !before.targetDepartmentIds.includes(String(d.id)),
+        )
         .map((d) => d.id)
-      if (created.length)
+      if (created.length) {
+        // Pair snapshots exclude third-party accounts. Never cascade-delete a
+        // membership owned by another integration when removing cloned departments.
+        const attached = await c.query(
+          'SELECT 1 FROM directory_account_departments WHERE directory_department_id=ANY($1::uuid[]) LIMIT 1',
+          [created],
+        )
+        requireCondition(
+          !attached.rows.length,
+          'A created department is still in use',
+        )
         await c.query(
           'DELETE FROM directory_departments WHERE id=ANY($1::uuid[])',
           [created],
         )
+      }
       requireCondition(
-        digest(await snapshot(c, p)) === digest(before),
+        digest(await snapshot(c, p)) === before.beforeDigest,
         'Rollback could not restore the approved snapshot',
       )
     }
     await c.query(
-      'UPDATE directory_handovers SET state=$2,updated_by=$3,updated_at=now() WHERE id=$1',
+      "UPDATE directory_handovers SET state=$2,before_state='{}'::jsonb,updated_by=$3,updated_at=now() WHERE id=$1",
       [id, action === 'rollback' ? 'rolled_back' : 'finalized', actorId],
     )
     return { id, state: action === 'rollback' ? 'rolled_back' : 'finalized' }
