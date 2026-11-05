@@ -2755,6 +2755,11 @@ const alertFilterOptions = [
   { value: 'pending' as const, label: '待确认' },
   { value: 'acknowledged' as const, label: '已确认' },
 ]
+// The fixed review note the server writes when an admin unbinds a directory account
+// (unbindDirectoryAccount in packages/core-backend/src/directory/directory-sync.ts). A manual bind
+// resets it to NULL; directory sync leaves it unchanged. Copied here because the packages do not
+// share code; a backend unit test pins the written value.
+const DIRECTORY_ADMIN_UNBIND_REVIEW_NOTE = 'unbound by admin'
 const reviewFilterOptions = [
   { value: 'all' as const, label: '全部待处理' },
   { value: 'pending_binding' as const, label: '待绑定' },
@@ -3078,14 +3083,25 @@ const filteredReviewItems = computed(() => {
     && matchesPendingBindingView(item)
   ))
 })
+// Bulk selection (选择当前筛选, 选择可推荐 and the default pre-selection) skips pending rows the
+// server would reject (directory account inactive) and rows an admin unbound that are not linked
+// again, so one click cannot re-bind what was just unbound. The per-row checkbox is unaffected.
+function isBulkSelectablePendingBinding(item: DirectoryReviewItem): boolean {
+  if (item.kind !== 'pending_binding') return false
+  if (!item.account.isActive) return false
+  return !(
+    item.account.reviewNote === DIRECTORY_ADMIN_UNBIND_REVIEW_NOTE
+    && item.account.linkStatus !== 'linked'
+  )
+}
 const selectableVisibleReviewIds = computed(() => (
   filteredReviewItems.value
-    .filter((item) => item.kind === 'pending_binding' || item.actionable.canBatchUnbind)
+    .filter((item) => isBulkSelectablePendingBinding(item) || item.actionable.canBatchUnbind)
     .map((item) => item.account.id)
 ))
 const selectableVisibleRecommendedReviewIds = computed(() => (
   filteredReviewItems.value
-    .filter((item) => item.kind === 'pending_binding' && item.actionable.canConfirmRecommendation)
+    .filter((item) => isBulkSelectablePendingBinding(item) && item.actionable.canConfirmRecommendation)
     .map((item) => item.account.id)
 ))
 const selectedRecommendedReviewBindEntries = computed(() => (
