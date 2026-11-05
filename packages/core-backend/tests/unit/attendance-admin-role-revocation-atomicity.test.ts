@@ -127,7 +127,7 @@ function invokeHandler(
 }
 
 function installTransaction(options: {
-  targets?: 'present' | 'missing'
+  targets?: 'present' | 'missing' | 'missing-after-lock'
   failOn?: 'delete' | 'witness'
   failError?: Error
 } = {}): RouteCall {
@@ -172,8 +172,8 @@ function installTransaction(options: {
       return { rows: [{ ok: 1 }], rowCount: 1 }
     }
     if (/u\.id = ANY\(\$1::text\[\]\)/.test(text)) {
-      call.events.push('resolve-targets')
-      if (options.targets === 'missing') return { rows: [], rowCount: 0 }
+      call.events.push(/FOR SHARE OF u/.test(text) ? 'resolve-targets-locked' : 'resolve-targets')
+      if (options.targets === 'missing' || (options.targets === 'missing-after-lock' && call.lockKeys.length > 0)) return { rows: [], rowCount: 0 }
       const ids = Array.isArray(params?.[0]) ? params[0] as string[] : []
       return {
         rows: ids.map((id) => ({
@@ -352,6 +352,55 @@ describe('attendance-admin unassign scope and target guards do not mutate', () =
   })
 })
 
+describe('attendance-admin unassign rechecks preflight after namespace locks', () => {
+  it.each(entries)('$name refuses a target lost after preflight without DELETE or witness', async (entry) => {
+    const call = installTransaction({ targets: 'missing-after-lock' })
+    const res = mockResponse()
+    await invokeHandler(attendanceAdminRouter(), entry.path, {
+      params: entry.params,
+      query: { scope: 'global' },
+      body: entry.body,
+    }, res)
+
+    expect(res.statusCode).toBe(404)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'USER_TARGET_NOT_FOUND' } })
+    expect(call.events).toEqual([
+      'begin', 'resolve-targets',
+      ...(entry.name === 'single' ? ['lock'] : ['lock', 'lock', 'lock']),
+      'resolve-targets-locked', 'rollback',
+    ])
+    expect(call.lockKeys).toEqual((entry.name === 'single' ? [SINGLE_USER_ID] : BATCH_SORTED_ORDER)
+      .map((id) => `namespace-admission:${id}`))
+    expect(call.witnessParams).toEqual([])
+    expect(call.committed).toBe(false)
+    expect(call.events).not.toContain('delete')
+  })
+
+  it.each(entries)('$name refuses an actor revoked after preflight without DELETE or witness', async (entry) => {
+    const call = installTransaction()
+    rbacServiceMocks.isAdmin.mockResolvedValueOnce(true).mockResolvedValue(false)
+    const res = mockResponse()
+    await invokeHandler(attendanceAdminRouter(), entry.path, {
+      params: entry.params,
+      query: { scope: 'global' },
+      body: entry.body,
+      user: { id: ACTOR_ID, role: 'user' } as Request['user'],
+    }, res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    expect(call.events).toEqual([
+      'begin', 'resolve-targets',
+      ...(entry.name === 'single' ? ['lock'] : ['lock', 'lock', 'lock']),
+      'rollback',
+    ])
+    expect(rbacServiceMocks.isAdmin).toHaveBeenCalledTimes(2)
+    expect(call.witnessParams).toEqual([])
+    expect(call.committed).toBe(false)
+    expect(call.events).not.toContain('delete')
+  })
+})
+
 describe('attendance-admin unassign lock, DELETE and witness share one transaction client', () => {
   it('single unassign orders begin, lock, DELETE, witness and commit on the transaction client', async () => {
     const call = installTransaction()
@@ -377,6 +426,7 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
       'begin',
       'resolve-targets',
       'lock',
+      'resolve-targets-locked',
       'delete',
       'list-namespaces',
       'remaining-role',
@@ -423,6 +473,7 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
       'lock',
       'lock',
       'lock',
+      'resolve-targets-locked',
       'delete',
       'list-namespaces',
       'remaining-role',
