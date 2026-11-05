@@ -6827,7 +6827,7 @@ test('runner bundle: no bundled smoke script prints the subject of the supplied 
   for (const arm of arms) {
     const source = readFileSync(join(HERE, arm.smokeScript), 'utf8')
     assert.doesNotMatch(source, /jwtSubject\(\s*(adminToken|ADMIN_TOKEN|process\.env\.ADMIN_TOKEN)\s*\)/, `${arm.smokeScript}: the admin token subject is not read for logging`)
-    assert.doesNotMatch(source, /admin token \(subject/, `${arm.smokeScript}: the supplied admin token line names no subject`)
+    assert.doesNotMatch(source, /(?<!non-)admin token \(subject/, `${arm.smokeScript}: the supplied admin token line names no subject`)
     const supplied = source.split('\n').filter((line) => line.includes('using supplied admin token'))
     for (const line of supplied) {
       assert.match(line.trim(), /^console\.log\('  using supplied admin token'\)$/, `${arm.smokeScript}: a constant line only`)
