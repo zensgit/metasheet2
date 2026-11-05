@@ -512,7 +512,7 @@ test('leave cancel-round launch flag: registered against the plugin reader, exac
 })
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src, plus plugins/plugin-attendance/index.cjs for the ATTENDANCE_CANCEL_ROUND_ family', () => {
-  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource()])].sort()
+  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource()])].sort()
   assert.ok(
     sourceGH.length >= 20,
     `expected >=20 Global-History flags derived from source, got ${sourceGH.length} — the denylist is too broad or grep broke`,
@@ -1081,6 +1081,55 @@ test('automation scheduler leader lock: exact true switch plus a numeric TTL tha
   assert.equal(ttl.source, lock.source)
   assert.match(ttl.activationValue, /default 30000/)
   assert.equal(isActivated(ttl, '30000'), false)
+})
+
+// ── DingTalk integration-scoped work-notification credentials (AGENTS.md: every env flag is registered) ──
+// Derived from READ SITES, not from name shape alone: every `DINGTALK_INTEGRATION_SCOPED_*_ENABLED` token
+// under packages/core-backend/src joins the population as soon as source reads it, so a sibling switch
+// added to this family later fails completeness until it is registered. The family prefix is chosen so it
+// is not a substring of any other registered key (TASKS_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED
+// would be caught by a DINGTALK_WORK_NOTIFICATION_ prefix; this one is not).
+function dingtalkIntegrationScopedFlagsInSource() {
+  return grepFlagTokens('DINGTALK_INTEGRATION_SCOPED_[A-Z_0-9]+')
+    .filter((t) => t.endsWith('_ENABLED'))
+    .sort()
+}
+
+test('DingTalk integration-scoped credentials: the read-site scan finds the registered key (non-vacuous)', () => {
+  assert.deepEqual(dingtalkIntegrationScopedFlagsInSource(), ['DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED'])
+})
+
+test('DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED: exact true (no case folding), danger high, independent, predicate source compares the literal', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED
+  assert.ok(spec, 'DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'byte-exact family: the reader neither trims nor lowercases')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/integrations/dingtalk/integration-scoped-credentials-flag.ts#isDingTalkIntegrationScopedCredentialsEnabled',
+  )
+  const module = readRepoSource(spec.source.split('#')[0])
+  assert.match(module, /export function isDingTalkIntegrationScopedCredentialsEnabled\(/)
+  assert.ok(
+    module.includes("env.DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED === 'true'"),
+    'the reader compares the exact literal (no trim, no lowercase)',
+  )
+  assert.doesNotMatch(module, /toLowerCase\(\)|\.trim\(\)/, 'the reader must not fold case or trim')
+  assert.match(spec.purpose, /Default OFF/)
+  assert.match(spec.purpose, /byte-identical/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', '1', 'yes', 'on']) {
+    assert.equal(isActivated(spec, value), false, String(value))
+  }
+  for (const value of ['TRUE', '1', 'yes', 'on']) {
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${value} looks on but is not the exact literal`)
+  }
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  assert.equal(isMisconfiguredTruthy(spec, ''), false)
 })
 
 test('DINGTALK_TODO_MIRROR_ENABLED: the registry evaluates the same input matrix exactly like the runtime reader', () => {
