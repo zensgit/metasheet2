@@ -225,6 +225,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { TASKS_EN, TASKS_FMT_EN, TASKS_FMT_ZH, TASKS_ZH, codeMessage, type TasksText } from '../../tasks/labels'
+import { moveFocusWithin } from '../../tasks/focusTrap'
 import { focusAfterSwap } from '../../tasks/tasksFocus'
 import {
   addTaskListMember,
@@ -608,44 +609,17 @@ function close(): void {
   emit('close')
 }
 
-const FOCUSABLE = 'button, input, select, textarea, a[href]'
-
-function focusableElements(): HTMLElement[] {
-  const root = dialogRef.value
-  if (!root) return []
-  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
-    (element) => !(element as HTMLButtonElement | HTMLInputElement).disabled,
-  )
-}
-
-// [fe-12] the minimal focus trap: Tab past the last control wraps to the first, Shift+Tab before
-// the first wraps to the last; the set is taken at keydown time, disabled controls left out.
+// [fe-12] the focus trap: every Tab and Shift+Tab is moved by the shared task dialog trap
+// (tasks/focusTrap.ts), not only the ones at the ends, since macOS Safari leaves buttons out of its
+// default Tab order. Past the last control wraps to the first, before the first to the last; the
+// set is taken at keydown time, disabled controls left out.
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
     close()
     return
   }
-  if (event.key !== 'Tab') return
-  const items = focusableElements()
-  if (items.length === 0) {
-    event.preventDefault()
-    return
-  }
-  const first = items[0]
-  const last = items[items.length - 1]
-  const active = document.activeElement as HTMLElement | null
-  const inside = active !== null && items.includes(active)
-  if (event.shiftKey) {
-    if (!inside || active === first) {
-      event.preventDefault()
-      last.focus()
-    }
-    return
-  }
-  if (!inside || active === last) {
-    event.preventDefault()
-    first.focus()
-  }
+  if (event.key !== 'Tab' || !dialogRef.value) return
+  moveFocusWithin(dialogRef.value, event)
 }
 
 onMounted(() => {
