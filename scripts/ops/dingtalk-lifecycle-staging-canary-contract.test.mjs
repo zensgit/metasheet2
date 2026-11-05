@@ -7810,7 +7810,7 @@ test('OWNER GATE: action=off never enters the non-off proof flow — with equal 
   assert.match(body.slice(skip, nonOff), /SNAP_MIGRATIONS_GATE_REASON=not_evaluated_for_off\n\s*return 0\n/)
 })
 
-test('OWNER GATE: deprovision keep-journal failure with OFF unproven reaches the final OFF restore with no migration proof probe before it; the summary reads both gates unknown / not_evaluated_in_failure_summary', () => {
+test('OWNER GATE: deprovision keep-journal failure with OFF unproven reaches the final OFF restore with no migration proof probe before it; the summary reads both gates unknown / not_evaluated_in_failure_summary, also after a normal pre-write snapshot in the same process', () => {
   const dir = mkdtempSync(join(tmpdir(), 'lifecycle-owner-gate-keep-journal-'))
   try {
     // Equal lists and the tolerated name pending (the staging shape): on the normal gate path
@@ -7857,35 +7857,49 @@ test('OWNER GATE: deprovision keep-journal failure with OFF unproven reaches the
       return { ...r, out, argv: read(logs.argv), libRead: read(logs.lib), acceptRead: read(logs.accept), summary: read(join(out, 'summary.txt')), emergency: read(join(out, 'alias-emergency-rollback.log')) }
     }
 
-    const r = run(
-      'failure',
-      `_journal_read_phase() { JOURNAL_PHASE=run_bound; }
+    const failureBody = `_journal_read_phase() { JOURNAL_PHASE=run_bound; }
        restore_lifecycle_override() { printf 'MARK restore\\n' >> "$ARGV_LOG"; return 0; }
        recreate_backend_only() { printf 'MARK recreate\\n' >> "$ARGV_LOG"; return 0; }
        assert_exact_mode_off() { printf 'MARK off-not-proven\\n' >> "$ARGV_LOG"; return 1; }
        cleanup_prev_backup() { :; }
        arm_alias_exit_rollback_guard
-       fail_deprovision_apply_keep_journal contract_probe`,
-    )
+       fail_deprovision_apply_keep_journal contract_probe`
+    // Order over the WHOLE failure run (from the first restore to exit): the only docker exec is
+    // one whole-ledger --list, and it lies after the first unproven OFF and before the EXIT
+    // guard's final restore — nothing between the first recreate and the first OFF proof, and
+    // nothing after the final restore (the summary is written before it).
+    const assertFailureOrder = (failureLines, label) => {
+      const marks = failureLines.map((l, i) => [l, i]).filter(([l]) => l.startsWith('MARK '))
+      assert.deepEqual(
+        marks.map(([l]) => l),
+        ['MARK restore', 'MARK recreate', 'MARK off-not-proven', 'MARK restore', 'MARK recreate', 'MARK off-not-proven'],
+        `${label}: first restore, OFF not proven, then the EXIT guard performs the final restore`,
+      )
+      const finalRestore = marks[3][1]
+      const beforeFinal = failureLines.slice(marks[2][1] + 1, finalRestore)
+      assert.doesNotMatch(beforeFinal.join('\n'), / node -e /, `${label}: no node pg table probe before the final restore`)
+      assert.doesNotMatch(beforeFinal.join('\n'), /grep -qF -- --confirm/, `${label}: no static --confirm support read before the final restore`)
+      assert.doesNotMatch(beforeFinal.join('\n'), /--confirm/, `${label}: no per-name --confirm before the final restore`)
+      const lists = beforeFinal.filter((l) => / node packages\/core-backend\/dist\/src\/db\/migrate\.js --list$/.test(l))
+      assert.equal(lists.length, beforeFinal.length, `${label}: every docker exec before the final restore is a --list read`)
+      assert.deepEqual(lists.map((l) => l.match(/MIGRATION_EXCLUDE=(\S*)/)[1]), [''], `${label}: only the whole-ledger --list: no lib-scoped or tolerated scoped read`)
+      const execs = failureLines.map((l, i) => [l, i]).filter(([l]) => !l.startsWith('MARK '))
+      assert.equal(execs.length, 1, `${label}: the whole failure run issues exactly one docker exec line (got ${execs.length})`)
+      assert.match(
+        execs[0][0],
+        /^exec -e MIGRATION_EXCLUDE= -e .* node packages\/core-backend\/dist\/src\/db\/migrate\.js --list$/,
+        `${label}: that one docker exec is the whole-ledger --list`,
+      )
+      assert.ok(
+        execs[0][1] > marks[2][1] && execs[0][1] < finalRestore,
+        `${label}: the one --list lies between the first unproven OFF and the final restore (at ${execs[0][1]}, window ${marks[2][1]}..${finalRestore})`,
+      )
+    }
+
+    const r = run('failure', failureBody)
     assert.notEqual(r.status, 0, 'the failure path still exits non-zero')
-    const lines = r.argv.split('\n').filter((l) => l !== '')
-    const marks = lines.map((l, i) => [l, i]).filter(([l]) => l.startsWith('MARK '))
-    assert.deepEqual(
-      marks.map(([l]) => l),
-      ['MARK restore', 'MARK recreate', 'MARK off-not-proven', 'MARK restore', 'MARK recreate', 'MARK off-not-proven'],
-      'first restore, OFF not proven, then the EXIT guard performs the final restore',
-    )
+    assertFailureOrder(r.argv.split('\n').filter((l) => l !== ''), 'failure alone')
     assert.match(r.emergency, /alias rollback guard fired; restoring explicit OFF baseline before exit/)
-    const finalRestore = marks[3][1]
-    const beforeFinal = lines.slice(marks[2][1] + 1, finalRestore)
-    assert.doesNotMatch(beforeFinal.join('\n'), / node -e /, 'no node pg table probe before the final restore')
-    assert.doesNotMatch(beforeFinal.join('\n'), /grep -qF -- --confirm/, 'no static --confirm support read before the final restore')
-    assert.doesNotMatch(beforeFinal.join('\n'), /--confirm/, 'no per-name --confirm before the final restore')
-    const lists = beforeFinal.filter((l) => / node packages\/core-backend\/dist\/src\/db\/migrate\.js --list$/.test(l))
-    assert.equal(lists.length, beforeFinal.length, 'every docker exec before the final restore is a --list read')
-    assert.deepEqual(lists.map((l) => l.match(/MIGRATION_EXCLUDE=(\S*)/)[1]), [''], 'only the whole-ledger --list: no lib-scoped or tolerated scoped read')
-    // Nothing after the final restore either: the summary was written before it.
-    assert.equal(lines.slice(finalRestore).filter((l) => !l.startsWith('MARK ')).length, 0)
     assert.equal(r.libRead, '', 'the lib is never read on the failure summary path')
     assert.equal(r.acceptRead, '', 'the accept table path is never resolved on the failure summary path')
     assert.match(r.summary, /\nrolled_back_flags_off=false\n/)
@@ -7894,6 +7908,43 @@ test('OWNER GATE: deprovision keep-journal failure with OFF unproven reaches the
     assert.match(r.summary, /\nmode=deprovision\n/)
     assert.match(r.summary, new RegExp(`\\nbuild_sha=${'a'.repeat(40)}\\n`))
     assert.doesNotMatch(r.summary, /syn_a/, 'no exclusion name in the summary')
+
+    // Production order, one shell process: the normal pre-write snapshot runs first (as
+    // action_deprovision_apply does before any env write, live mode off) and leaves both gates
+    // at owner_scoped; only then does the keep-journal failure path run. The failure summary
+    // must not carry those pre-write values forward.
+    const p = run(
+      'production-order',
+      `read_live_flags() { printf 'false false false off'; }
+       capture_live_snapshot
+       require_migrations_gate_ok "$SNAP_MIGRATIONS_GATE" "action=deprovision"
+       printf 'MARK prewrite gate=%s off=%s\\n' "$SNAP_MIGRATIONS_GATE" "$SNAP_MIGRATIONS_GATE_OFF" >> "$ARGV_LOG"
+       printf 'MARK prewrite\\n' >> "$LIB_READ_LOG"
+       printf 'MARK prewrite\\n' >> "$ACCEPT_READ_LOG"
+       read_live_flags() { printf 'false false true deprovision'; }
+       ${failureBody}`,
+    )
+    assert.notEqual(p.status, 0, 'production order: the failure path still exits non-zero')
+    const pLines = p.argv.split('\n').filter((l) => l !== '')
+    const prewriteAt = pLines.findIndex((l) => l.startsWith('MARK prewrite '))
+    assert.ok(prewriteAt > 0, 'production order: the pre-write snapshot ran and issued docker execs')
+    assert.equal(pLines[prewriteAt], 'MARK prewrite gate=owner_scoped off=owner_scoped', 'production order: the pre-write snapshot leaves both gates owner_scoped')
+    const prewriteExecs = pLines.slice(0, prewriteAt).join('\n')
+    assert.match(prewriteExecs, / node -e /, 'production order: the pre-write snapshot ran the table probe')
+    assert.match(prewriteExecs, /--confirm syn_a/, 'production order: the pre-write snapshot ran the per-name --confirm')
+    assertFailureOrder(pLines.slice(prewriteAt + 1), 'production order')
+    assert.match(p.emergency, /alias rollback guard fired; restoring explicit OFF baseline before exit/)
+    const [libBefore, libAfter] = p.libRead.split('MARK prewrite\n')
+    const [acceptBefore, acceptAfter] = p.acceptRead.split('MARK prewrite\n')
+    assert.notEqual(libBefore, '', 'production order: the pre-write snapshot read the lib')
+    assert.notEqual(acceptBefore, '', 'production order: the pre-write snapshot resolved the accept table')
+    assert.equal(libAfter, '', 'production order: the lib is never read on the failure summary path')
+    assert.equal(acceptAfter, '', 'production order: the accept table path is never resolved on the failure summary path')
+    assert.match(p.summary, /\nmode=deprovision\n/)
+    assert.match(p.summary, /\nmigrations_gate=unknown\nmigrations_gate_reason=not_evaluated_in_failure_summary\n/, 'production order: the pre-write migrations_gate is cleared, not carried into the failure summary')
+    assert.match(p.summary, /\nmigrations_gate_off=unknown\nmigrations_gate_off_reason=not_evaluated_in_failure_summary\n/, 'production order: the pre-write migrations_gate_off is cleared, not carried into the failure summary')
+    assert.doesNotMatch(p.summary, /owner_scoped/, 'production order: no pre-write gate value in the failure summary')
+    assert.doesNotMatch(p.summary, /syn_a/, 'production order: no exclusion name in the summary')
 
     // Positive control: the same stubs on the normal deprovision gate path (capture_live_snapshot
     // without the failure-summary flag — an environment value for it is ignored) do record the

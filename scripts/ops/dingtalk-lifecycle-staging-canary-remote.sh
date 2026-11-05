@@ -114,6 +114,12 @@
 #     Lib unreadable → whole ledger only; whole ledger unknown → refuse. action=off does not
 #     run the non-off rule at all (no proof probe before or after the flag clear); its
 #     migrations_gate reads unknown / not_evaluated_for_off.
+#   * Failure summary: the deprovision keep-journal failure path takes a report-only snapshot
+#     for summary.txt while the EXIT rollback guard may still owe a final OFF restore. That
+#     snapshot evaluates neither rule (no lib or accept-table read, no lib-scoped or tolerated
+#     scoped --list, no table-proof SQL, no node pg probe, no --confirm), clears any pre-write
+#     gate values, and writes both migrations_gate and migrations_gate_off as unknown /
+#     not_evaluated_in_failure_summary. The summary never gates.
 #   * The attendance lib is never sourced at top level: it is read on demand in a subshell,
 #     so a missing or broken lib degrades to the strict whole-ledger rule and never aborts
 #     status/off. Nothing in capture_live_snapshot's migration probes can fail or exit.
