@@ -1113,8 +1113,8 @@ function onKeydown(event: KeyboardEvent): void {
     onAddTyped()
     return
   }
-  // Every Tab is moved here, wrapping inside the dialog, a date or time input's own parts aside
-  // (see tasks/focusTrap.ts).
+  // Every Tab is moved here, wrapping inside the dialog, a date or time input's own parts and a Tab
+  // the input method took aside (see tasks/focusTrap.ts).
   if (event.key === 'Tab' && modalRef.value) moveFocusWithin(modalRef.value, event)
 }
 </script>
