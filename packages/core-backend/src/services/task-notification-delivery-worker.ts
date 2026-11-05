@@ -47,7 +47,8 @@
  * when the reminder moment is outside the scan window at send time, or to anyone but an incomplete
  * assignee (the creator for a task without assignees). [R07] an empty digest ends as one `skipped`
  * row and nothing is sent. [R05] [D13] an event row is sent only while its recipient can still view
- * the task (list identity included); a list row only to the list's creator.
+ * the task (list identity included); a list row only to the list's creator. Package 2: a `created`
+ * or `assignee_added` row only while its recipient is still an assignee.
  *
  * Logs carry ids, counts and fixed codes only. `last_error` holds a fixed code, or the error text a
  * channel returned (a channel redacts its own transport text before returning it).
@@ -835,6 +836,11 @@ export class TaskNotificationDeliveryWorker {
           createdBy: String(task.created_by),
         })
         if (!can(roles, 'view')) return skip(codes.recipientLostAccess)
+        // Package 2: "given to you" is sent only while the recipient is still an assignee; one who
+        // was removed again but kept another role (follower, list member) gets nothing.
+        if ((payload.event === 'created' || payload.event === 'assignee_added') && !roles.includes('assignee')) {
+          return skip(codes.recipientLostAccess)
+        }
         return { kind: 'send', message: renderTaskEventMessage({ event: payload.event, taskTitle: String(task.title), deliveryId: row.id }) }
       }
       case 'task_reminder': {

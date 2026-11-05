@@ -49,6 +49,26 @@ import {
 import { LOGIN_NAME_RULE_MESSAGE, LoginNameRuleError } from '../../src/auth/login-name-rule'
 import { PasswordPolicyError } from '../../src/auth/password-policy-error'
 
+// Reads the value the directory_account_links upsert writes for one column, from the SQL text
+// (the review note is a literal in the statement, not a bound parameter).
+function readLinkUpsertColumnValue(calls: unknown[][], column: string): string | undefined {
+  const sql = calls
+    .map(([text]) => String(text))
+    .find((text) => text.includes('INSERT INTO directory_account_links'))
+  if (!sql) return undefined
+  const match = /INSERT INTO directory_account_links\s*\(([\s\S]*?)\)\s*VALUES\s*\(([\s\S]*?)\)\s*ON CONFLICT/.exec(sql)
+  if (!match) return undefined
+  const columns = match[1].split(',').map((part) => part.trim())
+  const values = match[2].split(',').map((part) => part.trim())
+  if (columns.length !== values.length) return undefined
+  const index = columns.indexOf(column)
+  return index >= 0 ? values[index] : undefined
+}
+
+function readLinkUpsertSql(calls: unknown[][]): string {
+  return calls.map(([text]) => String(text)).find((text) => text.includes('INSERT INTO directory_account_links')) ?? ''
+}
+
 describe('bindDirectoryAccount', () => {
   function installTransactionMock(
     clientQuery: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>,
@@ -222,6 +242,11 @@ describe('bindDirectoryAccount', () => {
       expect.stringContaining('INSERT INTO directory_account_links'),
       ['account-1', 'user-1', 'admin-1'],
     )
+    // A manual bind clears the review note (insert and upsert), so a later non-linked state does
+    // not look like an admin unbind to the review queue's bulk selection.
+    expect(readLinkUpsertColumnValue(clientQuery.mock.calls, 'link_status')).toBe("'linked'")
+    expect(readLinkUpsertColumnValue(clientQuery.mock.calls, 'review_note')).toBe('NULL')
+    expect(readLinkUpsertSql(clientQuery.mock.calls)).toMatch(/review_note = EXCLUDED\.review_note/)
     // W4-PRE-1b item A: same-transaction membership upsert for the newly-bound holder.
     expect(clientQuery).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO user_orgs'),
@@ -1220,6 +1245,12 @@ describe('bindDirectoryAccount', () => {
       expect.stringContaining('INSERT INTO directory_account_links'),
       ['account-1', 'admin-1'],
     )
+    // The admin unbind writes this exact review note (insert and upsert); the web review queue
+    // keeps a copy of the value to skip such rows in bulk selection, so a change here must be
+    // mirrored there.
+    expect(readLinkUpsertColumnValue(clientQuery.mock.calls, 'link_status')).toBe("'unmatched'")
+    expect(readLinkUpsertColumnValue(clientQuery.mock.calls, 'review_note')).toBe("'unbound by admin'")
+    expect(readLinkUpsertSql(clientQuery.mock.calls)).toMatch(/review_note = EXCLUDED\.review_note/)
     // W4-PRE-1b item B: same-transaction org-scoped deactivation of the just-unbound user.
     expect(clientQuery).toHaveBeenCalledWith(
       expect.stringContaining('UPDATE user_orgs'),

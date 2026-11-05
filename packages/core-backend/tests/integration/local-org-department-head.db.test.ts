@@ -435,6 +435,18 @@ describeIfDatabase('native local department-head backend', () => {
     expect((await resolve(f)).deptHeadChainIds).toEqual([f.next.localUserId])
   })
 
+  it('three whitespace-only provider tags cannot route the raw department head', async () => {
+    const f = await fixture()
+    await query("UPDATE directory_integrations SET provider = ' ', corp_id = $2 WHERE id = $1",
+      [f.integration, `synthetic-${randomUUID()}`])
+    await query("UPDATE directory_accounts SET provider = ' ' WHERE integration_id = $1", [f.integration])
+    await query("UPDATE directory_departments SET provider = ' ', raw = $2::jsonb WHERE id = $1",
+      [f.department.id, JSON.stringify({ dept_manager_userid_list: [f.next.externalUserId] })])
+    const relations = await resolve(f)
+    expect(relations.deptHeadId).toBeUndefined()
+    expect(relations.deptHeadChainIds).toBeUndefined()
+  })
+
   it('a padded account provider is not local and does not adopt the native head', async () => {
     const f = await fixture()
     await seedHead(f.head, f.department)

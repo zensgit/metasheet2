@@ -99,6 +99,19 @@
             </router-link>
           </li>
         </ul>
+        <p
+          v-if="group.source === 'task' && group.items.length === TODO_TASK_ROW_CAP"
+          class="todo-center__status todo-center__status--capped"
+          data-testid="todo-center-group-capped"
+        >
+          <template v-if="isZh">
+            最多显示最近更新的 {{ TODO_TASK_ROW_CAP }} 条任务。<router-link to="/tasks" data-testid="todo-center-group-capped-link">打开任务页</router-link>
+          </template>
+          <template v-else>
+            Showing at most the {{ TODO_TASK_ROW_CAP }} most recently updated tasks.
+            <router-link to="/tasks" data-testid="todo-center-group-capped-link">Open the Tasks page</router-link>
+          </template>
+        </p>
       </section>
 
       <p
@@ -208,6 +221,7 @@ import { useLocale } from '../../composables/useLocale'
 import { getAuthPrincipalKey, onAuthPrincipalChange } from '../../composables/authPrincipal'
 import { useTodoCountsRealtime, type TodoCountsUpdatedPayload } from '../useTodoCountsRealtime'
 import { isCancelRoundWorkflow } from '../../approvals/cancelRound'
+import { TASKS_SIGNAL_WINDOW_MS } from '../../tasks/useTasksBadge'
 
 interface RenderableItem extends PendingItem {
   // Precomputed once per `applyResult()` call (not re-evaluated per render in the template) —
@@ -280,8 +294,8 @@ function cancelRoundSubtypeLabel(): string {
   return isZh.value ? '撤销申请' : 'Cancellation request'
 }
 
-const SOURCE_LABELS_ZH: Record<string, string> = { approval: '审批' }
-const SOURCE_LABELS_EN: Record<string, string> = { approval: 'Approvals' }
+const SOURCE_LABELS_ZH: Record<string, string> = { approval: '审批', task: '任务' }
+const SOURCE_LABELS_EN: Record<string, string> = { approval: 'Approvals', task: 'Tasks' }
 
 function hasSession(): boolean {
   try {
@@ -302,6 +316,16 @@ function sourceLabel(source: string): string {
   const table = isZh.value ? SOURCE_LABELS_ZH : SOURCE_LABELS_EN
   return table[source] ?? source
 }
+
+// The task source answers with one page of the task module's pending list, and that page holds at
+// most the server's default task page size (`TASK_PAGE_LIMIT_DEFAULT` = 100,
+// `packages/core-backend/src/tasks/task-pagination.ts`, pinned in
+// `packages/core-backend/tests/unit/task-pending-source.test.ts`). The count is not capped. A task
+// group with exactly this many rows may have more open tasks than it shows, so the group says how
+// many it shows at most. The line does not promise the rest elsewhere: the task page's own list
+// reads one default page too. Keep this equal to the server default. `TASK_PAGE_LIMIT` in
+// `tasks/tasksApi.ts` is a different number (the server's upper bound), equal to it only today.
+const TODO_TASK_ROW_CAP = 100
 
 function applyResult(response: TodoItemsResponse | null): void {
   if (response === null) {
@@ -359,15 +383,36 @@ function handleCountsUpdated(_payload: TodoCountsUpdatedPayload): void {
   void refresh()
 }
 
+// A task write sends one signal per recipient, so a bulk write is a burst. The first signal opens a
+// window of `TASKS_SIGNAL_WINDOW_MS`, the signals inside it are absorbed, and one `refresh()` runs when
+// it closes. Same length as the tasks badge's window; the badge keeps its own.
+let taskSignalWindow: ReturnType<typeof setTimeout> | null = null
+
+function closeTaskSignalWindow(): void {
+  if (taskSignalWindow !== null) {
+    clearTimeout(taskSignalWindow)
+    taskSignalWindow = null
+  }
+}
+
+function handleTasksCountsUpdated(): void {
+  if (!acceptPushes || taskSignalWindow !== null) return
+  taskSignalWindow = setTimeout(() => {
+    taskSignalWindow = null
+    void refresh()
+  }, TASKS_SIGNAL_WINDOW_MS)
+}
+
 // Isolated for the same reason `ApprovalTodoBadge.vue` isolates this call — see file-level note.
 try {
-  useTodoCountsRealtime({ onCountsUpdated: handleCountsUpdated })
+  useTodoCountsRealtime({ onCountsUpdated: handleCountsUpdated, onTasksCountsUpdated: handleTasksCountsUpdated })
 } catch {
   // No realtime refresh for this session; refresh() on mount and on auth transitions still keeps
   // the list current.
 }
 
 const unsubscribeAuthPrincipal = onAuthPrincipalChange(() => {
+  closeTaskSignalWindow()
   generation += 1
   groups.value = []
   loadFailed.value = false
@@ -390,6 +435,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   disposed = true
+  closeTaskSignalWindow()
   unsubscribeAuthPrincipal()
 })
 
@@ -426,6 +472,10 @@ defineExpose({ refresh })
 
 .todo-center__status--unavailable {
   color: var(--el-color-warning, #e6a23c);
+}
+
+.todo-center__status--capped {
+  margin-top: 8px;
 }
 
 .todo-center__status--failed {

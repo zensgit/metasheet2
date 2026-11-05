@@ -97,9 +97,15 @@ describe('native local head dedicated DB lane contract', () => {
     expect(run[0]).not.toMatch(/\|\||continue-on-error/)
     const migration = steps.slice(0, index).filter((candidate) =>
       commands(candidate).some((line) => /pnpm\s+--filter\s+@metasheet\/core-backend\s+(?:db:migrate|migrate)(?:\s|$)/.test(line)))
-    expect(migration).toHaveLength(1)
+    expect(migration).toHaveLength(2)
+    expect(migration[0]!.env?.MIGRATION_EXCLUDE).toContain('zzzz20261027090000_add_local_department_head.ts')
+    const upgrade = steps.findIndex(candidate => candidate.env?.EXPECT_HANDOVER_HEAD_UPGRADE === '1')
+    expect(upgrade).toBeGreaterThan(steps.indexOf(migration[0]!))
+    expect(upgrade).toBeLessThan(steps.indexOf(migration[1]!))
+    expect(steps[upgrade]!.run).toContain('tests/integration/directory-controlled-handover.db.test.ts')
     expect(migration[0]!.if).toBeUndefined()
-    const migrationEnv = { ...doc.env, ...job.env, ...migration[0]!.env }
+    expect(migration[1]!.if).toBeUndefined()
+    const migrationEnv = { ...doc.env, ...job.env, ...migration[1]!.env }
     expect(String(migrationEnv.MIGRATION_EXCLUDE ?? '')).not.toContain('20261027090000')
   })
 

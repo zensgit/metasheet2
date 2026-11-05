@@ -10,7 +10,11 @@ import { LoginNameRuleError, assertLoginName } from '../auth/login-name-rule'
 import { validatePassword } from '../auth/password-policy'
 import { PasswordPolicyError } from '../auth/password-policy-error'
 import { Logger } from '../core/logger'
-import { DingTalkIncompleteResponseError } from '../integrations/dingtalk/transport'
+import {
+  DingTalkIncompleteResponseError,
+  observeDingTalkTransportRetries,
+  type DingTalkTransportRetryEvent,
+} from '../integrations/dingtalk/transport'
 import { query, transaction } from '../db/pg'
 import { RecoveryConflictError, translateRecoveryConflict } from '../db/recovery-conflict'
 import { sweepStaleDepartmentBindings } from './department-binding-reconciliation'
@@ -3330,6 +3334,62 @@ function mergeDepartmentIds(primary: string[], secondary: string[]): string[] {
   return Array.from(new Set([...primary, ...secondary].filter(Boolean)))
 }
 
+/**
+ * §7.7 sync-performance telemetry: transport retries observed during THIS run's directory
+ * pull, bucketed by the transport's failure reason so an operator can tell provider flow
+ * control (HTTP-200 envelope errcode 90018 family) from HTTP 429 and from network failures.
+ * Counts RETRIES (attempts the transport decided to repeat), not failures: the exhausted final
+ * attempt of a call is not an event. The counters reach the run record only on the completion
+ * write — a failed run carries no stats at all, and where the pull tolerates an exhausted call
+ * (department detail enrichment) the run completes with no trace of that exhaustion here.
+ */
+export interface DirectoryPullRetryCounters {
+  total: number
+  flowControl: number
+  http429: number
+  network: number
+  /** Every other retryable reason (transient 5xx, malformed 2xx body). `total` is the sum of all four. */
+  other: number
+}
+
+export function createDirectoryPullRetryCounters(): DirectoryPullRetryCounters {
+  return { total: 0, flowControl: 0, http429: 0, network: 0, other: 0 }
+}
+
+/** Bucket one transport retry event by its `reason` (the string the transport's warn line carries). */
+export function recordDirectoryPullRetry(
+  counters: DirectoryPullRetryCounters,
+  event: Pick<DingTalkTransportRetryEvent, 'reason'>,
+): void {
+  counters.total += 1
+  if (event.reason.startsWith('flow_control_errcode_')) {
+    counters.flowControl += 1
+  } else if (event.reason === 'http_429') {
+    counters.http429 += 1
+  } else if (event.reason === 'network_error') {
+    counters.network += 1
+  } else {
+    counters.other += 1
+  }
+}
+
+/** The stats-JSONB projection of the retry counters; `external*` prefix matches the call counters. */
+export function summarizeDirectoryPullRetries(counters: DirectoryPullRetryCounters): {
+  externalPullRetryCount: number
+  externalPullRetryFlowControlCount: number
+  externalPullRetryHttp429Count: number
+  externalPullRetryNetworkCount: number
+  externalPullRetryOtherCount: number
+} {
+  return {
+    externalPullRetryCount: counters.total,
+    externalPullRetryFlowControlCount: counters.flowControl,
+    externalPullRetryHttp429Count: counters.http429,
+    externalPullRetryNetworkCount: counters.network,
+    externalPullRetryOtherCount: counters.other,
+  }
+}
+
 export async function fetchAllUsers(
   config: DirectoryIntegrationConfig,
   departmentMap: Map<string, DingTalkDepartment>,
@@ -4245,15 +4305,33 @@ export async function syncDirectoryIntegration(
   // §7.7 telemetry: one counter set per run, incremented at each external directory-pull call
   // site (departments + users) so the N+1 detail fan-out is measurable on the run record.
   const apiCallCounters = createDirectorySyncApiCallCounters()
+  // §7.7 per-phase timing + retry telemetry (additive stats keys; see the stats block below).
+  // The pull wall-clock is the two provider pulls only — the local DB read between them and the
+  // manual diagnostic sample are excluded, matching what `externalDirectoryPullCalls` covers.
+  // The transport retry observer is scoped to the same two calls (token refreshes inside them
+  // are observed too, although the call counters exclude the token fetch).
+  const pullRetryCounters = createDirectoryPullRetryCounters()
+  const observePullRetry = (event: DingTalkTransportRetryEvent) => recordDirectoryPullRetry(pullRetryCounters, event)
+  let fetchDurationMs = 0
 
   try {
-    const departments = await fetchAllDepartments(config, integration.name, apiCallCounters)
+    const fetchDepartmentsStartedAtMs = Date.now()
+    const departments = await observeDingTalkTransportRetries(
+      observePullRetry,
+      () => fetchAllDepartments(config, integration.name, apiCallCounters),
+    )
+    fetchDurationMs += Date.now() - fetchDepartmentsStartedAtMs
     const departmentPathMap = buildDepartmentPathMap(departments)
     // dept-head plumbing: capture last-known-good dept_manager_userid_list BEFORE the
     // whole-column upsert (raw = EXCLUDED.raw) overwrites raw, so a failed department/get
     // (managerUserIds left undefined) carries the prior value forward instead of wiping it.
     const priorDeptManagers = await capturePriorDeptManagers(integrationId, query)
-    const users = await fetchAllUsers(config, departments, apiCallCounters)
+    const fetchUsersStartedAtMs = Date.now()
+    const users = await observeDingTalkTransportRetries(
+      observePullRetry,
+      () => fetchAllUsers(config, departments, apiCallCounters),
+    )
+    fetchDurationMs += Date.now() - fetchUsersStartedAtMs
 
     let directoryDiagnosticStats: JsonRecord = {}
     if (triggerSource === 'manual') {
@@ -4290,6 +4368,11 @@ export async function syncDirectoryIntegration(
     // RecoveryConflictError; every other error, DirectorySyncLeaseLostError included,
     // rethrows unchanged.
     await translateRecoveryConflict(() => transaction(async (client) => {
+      // §7.7 per-phase timing: apply-transaction wall-clock anchor and the bcrypt time spent
+      // inside it (accumulated at the admission hash site below). Not statements — the
+      // isolation pin below is still the transaction's first statement.
+      const applyTransactionStartedAtMs = Date.now()
+      let bcryptMsInTransaction = 0
       // T2 lock-correctness P2 (PB4-3 idiom — see local-directory-org.ts's reparent guard): the
       // pool wrapper issues a bare BEGIN, so on a deployment where default_transaction_isolation
       // is 'repeatable read' this transaction's snapshot would be taken by the
@@ -4615,12 +4698,14 @@ export async function syncDirectoryIntegration(
                 const pendingMode = isDirectoryPendingActivationEnabled()
                 let generatedPassword: string | null = null
                 let passwordHash: string
+                const passwordHashStartedAtMs = Date.now()
                 if (pendingMode) {
                   passwordHash = await buildUnusablePasswordHash()
                 } else {
                   generatedPassword = generateDirectoryAdmissionTemporaryPassword()
                   passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
                 }
+                bcryptMsInTransaction += Date.now() - passwordHashStartedAtMs
                 // DT-HARDEN-02: mirror assertDirectoryAccountCanEnableDingTalkGrant's
                 // condition instead of hardcoding grant=true. A corp-scoped account
                 // (corp_id set) without an openId cannot use DingTalk login and would
@@ -4907,6 +4992,9 @@ export async function syncDirectoryIntegration(
         (sql, params) => client.query(sql, params),
       )
 
+      // §7.7: snapshot the apply-transaction window BEFORE the stats literal (whose `durationMs`
+      // reads the clock first) so the per-phase values can never add up past `durationMs`.
+      const applyTransactionMs = Date.now() - applyTransactionStartedAtMs
       const stats = {
         departmentsSynced: departments.size,
         accountsSynced: users.size,
@@ -4926,6 +5014,17 @@ export async function syncDirectoryIntegration(
         linkedManagerCount: managerBindingCoverage.linkedManagerCount,
         managerCoverage: managerBindingCoverage.coverage,
         durationMs: Date.now() - runStartedAtMs,
+        // §7.7 per-phase timing — additive; every pre-existing key is kept. `fetchDurationMs`:
+        // the two provider pulls (departments + users) only. `applyTransactionMs`: from the apply
+        // transaction's first line to THIS serialization point — the completion UPDATEs and the
+        // COMMIT that follow cannot be included in a value written inside the transaction.
+        // `bcryptMsInTransaction`: wall-clock spent hashing admission passwords inside that
+        // window (0 unless auto-admission candidates were hashed this run).
+        fetchDurationMs,
+        applyTransactionMs,
+        bcryptMsInTransaction,
+        // §7.7 transport retries observed during the pull, by failure reason (all 0 on a clean run).
+        ...summarizeDirectoryPullRetries(pullRetryCounters),
         deprovisionApplied: deprovisionOutcome.applied,
         // W4-PRE-1d (owner P2 item 1/3): org-membership candidates — the circuit breaker's own
         // input. See `DirectoryDeprovisionOutcome.candidateCount`'s doc-comment.

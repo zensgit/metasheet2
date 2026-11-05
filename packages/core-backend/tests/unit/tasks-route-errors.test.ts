@@ -12,6 +12,8 @@ import { usePinnedServer } from '../utils/pinned-server'
 
 const createTask = vi.fn()
 const patchTask = vi.fn()
+/** The record read gate of a dispatch from a record (routes/univer-meta.ts). */
+const requireRecordReadable = vi.fn()
 const listService = {
   createTaskList: vi.fn(),
   getTaskList: vi.fn(),
@@ -54,6 +56,10 @@ vi.mock('../../src/middleware/auth', () => {
 
 vi.mock('../../src/rbac/rbac', () => ({
   rbacGuard: () => (_req: express.Request, _res: express.Response, next: express.NextFunction) => next(),
+}))
+
+vi.mock('../../src/routes/univer-meta', () => ({
+  requireRecordReadable: (...args: unknown[]) => requireRecordReadable(...args),
 }))
 
 vi.mock('../../src/services/task-records', async (importOriginal) => {
@@ -109,6 +115,7 @@ afterAll(() => {
 beforeEach(() => {
   createTask.mockReset()
   patchTask.mockReset()
+  requireRecordReadable.mockReset()
   for (const fn of Object.values(listService)) fn.mockReset()
   for (const fn of Object.values(groupService)) fn.mockReset()
 })
@@ -305,5 +312,110 @@ describe('tasks route sendError', () => {
     expect(groupService.renameUserTaskGroup).toHaveBeenCalledWith({ ...base, groupId: 'tgrp_y', body: { name: 'n' } })
     await request(pinned.url()).delete('/api/task-groups/tgrp_y')
     expect(groupService.deleteUserTaskGroup).toHaveBeenCalledWith({ ...base, groupId: 'tgrp_y' })
+  })
+})
+
+// A dispatch from a record: POST /api/tasks with `source` and `dispatchKey`. The record read gate is
+// stubbed here; its own refusals and the stored rows are the real-DB file's
+// (tests/integration/task-p2-source-links.db.test.ts).
+describe('POST /api/tasks: source and dispatch key at the route', () => {
+  const SOURCE = { sheetId: 'sht_route', recordId: 'rec_route' }
+  const KEY = '0f8e2c4a-6b1d-4e3f-9a7c-5d2b8e1f0a63'
+  const TODAY_KEYS = [
+    'assignees', 'completionMode', 'creatorId', 'dueDate', 'dueTime', 'orgId', 'remindAt', 'startDate', 'startTime', 'timeZone', 'title',
+  ]
+  const readable = (userId = 'usr_route_errors') => ({
+    access: { userId, permissions: ['multitable:read'], isAdminRole: false },
+    capabilities: { canRead: true },
+    capabilityOrigin: { source: 'global-rbac' },
+  })
+
+  it('a body without either key reaches the service with exactly the keys it had before, and the gate is not called', async () => {
+    createTask.mockResolvedValueOnce({ id: 'tsk_a', version: 1 })
+    const res = await request(pinned.url()).post('/api/tasks').send({ title: 't', assignees: ['usr_b'] })
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ id: 'tsk_a', version: 1 })
+    expect(createTask).toHaveBeenCalledTimes(1)
+    expect(Object.keys(createTask.mock.calls[0]?.[0] as object).sort()).toEqual(TODAY_KEYS)
+    expect(requireRecordReadable).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['a string', 'sht_route'],
+    ['null', null],
+    ['an array', [SOURCE]],
+    ['no record id', { sheetId: 'sht_route' }],
+    ['a dot-dot sheet id', { sheetId: '..', recordId: 'rec_route' }],
+    ['a sheet id with a slash', { sheetId: 'sht/route', recordId: 'rec_route' }],
+    ['a record id with a percent sign', { sheetId: 'sht_route', recordId: 'rec%2Froute' }],
+    ['a view id with a question mark', { ...SOURCE, viewId: 'viw?x' }],
+    ['a base id with a backslash', { ...SOURCE, baseId: 'bas\\x' }],
+    ['a numeric base id', { ...SOURCE, baseId: 7 }],
+  ])('a malformed source (%s) is 422 INVALID_SOURCE before the gate, and nothing reaches the service', async (_label, source) => {
+    const res = await request(pinned.url()).post('/api/tasks').send({ title: 't', source, dispatchKey: KEY })
+    expect(res.status).toBe(422)
+    expect(res.body).toEqual({ error: { code: 'INVALID_SOURCE' } })
+    expect(requireRecordReadable).not.toHaveBeenCalled()
+    expect(createTask).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['without a source', { dispatchKey: KEY }],
+    ['too short', { source: SOURCE, dispatchKey: 'k_short' }],
+    ['with a space', { source: SOURCE, dispatchKey: 'key with space 01' }],
+    ['null', { source: SOURCE, dispatchKey: null }],
+    ['a number', { source: SOURCE, dispatchKey: 12345678 }],
+  ])('a dispatch key %s is 422 INVALID_DISPATCH_KEY before the gate', async (_label, extra) => {
+    const res = await request(pinned.url()).post('/api/tasks').send({ title: 't', ...extra })
+    expect(res.status).toBe(422)
+    expect(res.body).toEqual({ error: { code: 'INVALID_DISPATCH_KEY' } })
+    expect(requireRecordReadable).not.toHaveBeenCalled()
+    expect(createTask).not.toHaveBeenCalled()
+  })
+
+  it('every refusal of the gate is the same 422 SOURCE_NOT_READABLE (a 401 stays a 401), and nothing reaches the service', async () => {
+    const texts = new Set<string>()
+    for (const status of [403, 404]) {
+      requireRecordReadable.mockResolvedValueOnce({ status, body: { ok: false, error: { code: 'X', message: 'detail' } } })
+      const res = await request(pinned.url()).post('/api/tasks').send({ title: 't', source: SOURCE, dispatchKey: KEY })
+      expect(res.status, String(status)).toBe(422)
+      texts.add(res.text)
+    }
+    expect([...texts]).toEqual([JSON.stringify({ error: { code: 'SOURCE_NOT_READABLE' } })])
+    requireRecordReadable.mockResolvedValueOnce({ status: 401, body: { error: 'Authentication required' } })
+    const unauthenticated = await request(pinned.url()).post('/api/tasks').send({ title: 't', source: SOURCE })
+    expect(unauthenticated.status).toBe(401)
+    expect(unauthenticated.body).toEqual({ error: { code: 'SOURCE_NOT_READABLE' } })
+    expect(createTask).not.toHaveBeenCalled()
+    const [, gateQuery, sheetId, recordId] = requireRecordReadable.mock.calls[0] ?? []
+    expect(typeof gateQuery).toBe('function')
+    expect([sheetId, recordId]).toEqual([SOURCE.sheetId, SOURCE.recordId])
+  })
+
+  it('a gated reader who is not the creator is the same 422, and nothing reaches the service', async () => {
+    requireRecordReadable.mockResolvedValueOnce(readable('usr_someone_else'))
+    const res = await request(pinned.url()).post('/api/tasks').send({ title: 't', source: SOURCE, dispatchKey: KEY })
+    expect(res.status).toBe(422)
+    expect(res.body).toEqual({ error: { code: 'SOURCE_NOT_READABLE' } })
+    expect(createTask).not.toHaveBeenCalled()
+  })
+
+  it('a readable source reaches the service parsed, with the key, and the service answer is sent as it is', async () => {
+    requireRecordReadable.mockResolvedValueOnce(readable())
+    createTask.mockResolvedValueOnce({ id: 'tsk_s', version: 1, sourceLinked: true })
+    const res = await request(pinned.url()).post('/api/tasks').send({ title: 't', source: SOURCE, dispatchKey: KEY })
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ id: 'tsk_s', version: 1, sourceLinked: true })
+    const input = createTask.mock.calls[0]?.[0] as Record<string, unknown>
+    expect(Object.keys(input).sort()).toEqual([...TODAY_KEYS, 'dispatchKey', 'source'].sort())
+    expect(input.source).toEqual({ sheetId: SOURCE.sheetId, recordId: SOURCE.recordId, viewId: null, baseId: null })
+    expect(input.dispatchKey).toBe(KEY)
+    expect(input.creatorId).toBe('usr_route_errors')
+
+    requireRecordReadable.mockResolvedValueOnce(readable())
+    createTask.mockResolvedValueOnce({ id: 'tsk_s', version: 1, reused: true, sourceLinked: true })
+    const again = await request(pinned.url()).post('/api/tasks').send({ title: 't', source: SOURCE })
+    expect(again.body).toEqual({ id: 'tsk_s', version: 1, reused: true, sourceLinked: true })
+    expect((createTask.mock.calls[1]?.[0] as Record<string, unknown>).dispatchKey).toBeNull()
   })
 })

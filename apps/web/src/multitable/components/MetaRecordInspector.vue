@@ -228,10 +228,10 @@
           <!-- 派发任务 (R-45 step 1): creates a real task in the task centre from this record. Shown only
                where the top bar's 任务 entry is (same rule, `canDispatchTasks` in tasks/tasksAccess.ts)
                and the viewer holds tasks:write, only when the page hands a dispatch binding, and only
-               with the ids the source link needs (sheetId + viewId + record). Otherwise the menu is
-               unchanged. -->
+               with the ids the source link needs (sheetId + viewId + record), each one an id the task
+               service takes as a source (`dispatchSourceUsable`). Otherwise the menu is unchanged. -->
           <MtMenuItem
-            v-if="canDispatchTask && dispatchBinding && sheetId && viewId && record"
+            v-if="canDispatchTask && dispatchBinding && sheetId && viewId && record && dispatchSourceUsable"
             class="meta-record-drawer__btn"
             data-testid="record-inspector-dispatch-task"
             :title="l('record.dispatchTaskTitle')"
@@ -438,6 +438,15 @@
           :api-client="apiClient"
           :refresh-token="approvalRefreshToken"
         />
+        <!-- 关联任务 / Linked tasks (package 2): same self-gating lazy discipline as 审批 above, plus the top
+             bar's 任务 rule (tasks feature on, tasks:read). It lists only the tasks dispatched from this
+             record that the viewer can open, and re-reads after a dispatch from this drawer (the dialog's
+             task-change signal). See the component's file header. -->
+        <MetaRecordTasksPanel
+          :record="record"
+          :sheet-id="sheetId"
+          :api-client="apiClient"
+        />
       </div>
       <div
         v-else-if="activeTab === 'history'"
@@ -552,18 +561,22 @@
          record id so each record gets a fresh form. The state of a dispatch that is out or done
          (in flight / created) is NOT in the child: it is kept per identity and record under `run-key`
          (tasks/recordTaskDispatchRuns.ts), so closing the dialog or moving between records cannot
-         lose a result or allow a second create, and the dialog captures the record link at submit.
-         `binding` is the page's dispatch binding (the signed-in user and org the page was set up
-         under, changed for good once another is seen); the dialog sends nothing under any other
-         (tasks/recordTaskDispatchIdentity.ts). -->
+         lose a result or allow a second create, and the dialog captures the record's ids at submit
+         (the create's source, and the scope of the record's retry key). `api-client` is for the read
+         of the record's own task under that key. `binding` is the page's dispatch binding (the
+         signed-in user and org the page was set up under, changed for good once another is seen); the
+         dialog sends nothing under any other (tasks/recordTaskDispatchIdentity.ts). -->
     <MetaRecordTaskDispatchDialog
-      v-if="canDispatchTask && dispatchBinding && sheetId && viewId && record"
+      v-if="canDispatchTask && dispatchBinding && sheetId && viewId && record && dispatchSourceUsable"
       :key="record.id"
       :visible="showTaskDispatch"
       :default-title="dispatchDefaultTitle"
       :person-fields="dispatchPersonFields"
       :person-summaries="personSummariesByField"
-      :record-link="dispatchRecordLink"
+      :sheet-id="sheetId"
+      :record-id="record.id"
+      :view-id="viewId"
+      :api-client="apiClient ?? null"
       :binding="dispatchBinding"
       :run-key="dispatchRunKey(dispatchBinding.identity, sheetId, record.id)"
       @close="showTaskDispatch = false"
@@ -620,6 +633,7 @@ import MetaRecordFieldsPanel from './MetaRecordFieldsPanel.vue'
 import MetaRecordProvenancePanel from './MetaRecordProvenancePanel.vue'
 import MetaRecordApprovalPanel from './MetaRecordApprovalPanel.vue'
 import MetaRecordApprovalSubmitDialog from './MetaRecordApprovalSubmitDialog.vue'
+import MetaRecordTasksPanel from './MetaRecordTasksPanel.vue'
 import MetaRecordTaskDispatchDialog, { type DispatchPersonField } from './MetaRecordTaskDispatchDialog.vue'
 import MetaRecordHistoryPanel from './MetaRecordHistoryPanel.vue'
 // S3a: MetaCommentsPanel's real implementation now lives in shared/comments/components/ —
@@ -637,9 +651,9 @@ import { useFeatureFlags } from '../../stores/featureFlags'
 import { canDispatchTasks } from '../../tasks/tasksAccess'
 import { personValueAssigneeIds } from '../../tasks/recordTaskDispatch'
 import { dispatchRunKey } from '../../tasks/recordTaskDispatchRuns'
+import { isPlainSourceSegment } from '../../tasks/taskSourceLink'
 import type { DispatchBinding } from '../../tasks/recordTaskDispatchIdentity'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
-import { AppRouteNames } from '../../router/types'
 import { isNativePersonField } from '../utils/link-fields'
 import {
   recordLabel,
@@ -693,10 +707,11 @@ const props = withDefaults(defineProps<{
   deleteAttachmentFn?: MetaAttachmentDeleteFn
   canManageRecordPermissions?: boolean
   sheetId?: string
-  /** 派发任务 (R-45 step 1): the ids of the record's deep link written into the task description.
-   *  Without `viewId` there is no link to write, so the 派发任务 entry stays hidden. The deprecated
-   *  MetaRecordDrawer shell does not declare it (a caller of that shell that passes `view-id` still
-   *  reaches this prop through attribute fallthrough). `baseId` is added to the link when known. */
+  /** 派发任务 (R-45 step 1): the view the record is open in, sent with the dispatched task's source
+   *  (the task page links back to the record through it). Without `viewId` the 派发任务 entry stays
+   *  hidden. The deprecated MetaRecordDrawer shell does not declare it (a caller of that shell that
+   *  passes `view-id` still reaches this prop through attribute fallthrough). `baseId` is not sent
+   *  with the source. */
   viewId?: string
   baseId?: string
   /** 派发任务: the binding of the page holding this drawer (`createDispatchBinding()`, made by the
@@ -1591,6 +1606,13 @@ const canDispatchTask = computed(() => {
 // identity it holds, and not at all once another identity has been seen on the page. No binding, no
 // 派发任务 (see the prop).
 const dispatchBinding = computed(() => props.dispatchBinding ?? null)
+// The record's ids as the dispatched task's source: each must be an id the task service takes (its
+// source-id rule, mirrored by `isPlainSourceSegment`), checked here before any of them can go into a
+// create body. One that is not hides 派发任务, as a missing view id does, instead of offering a
+// dispatch the service would refuse.
+const dispatchSourceUsable = computed(() => isPlainSourceSegment(props.sheetId)
+  && isPlainSourceSegment(props.viewId)
+  && isPlainSourceSegment(props.record?.id))
 // The title the dispatcher confirms: the header's own display text of the primary field, or nothing
 // when that value is empty (the header's '—' placeholder is not a title).
 const dispatchDefaultTitle = computed(() => {
@@ -1609,26 +1631,6 @@ const dispatchPersonFields = computed<DispatchPersonField[]>(() => {
   return filterPropertyVisibleFields(visibleRecordFields(props.fields, props.fieldPermissions))
     .filter((field) => isNativePersonField(field))
     .map((field) => ({ id: field.id, name: field.name, ids: personValueAssigneeIds(record.data[field.id]) }))
-})
-// The record's deep link, ids only: the same route + `?recordId=` query the comment inbox opens a
-// record with. Resolved through the router when there is one (the app may be served under a base
-// path), built by hand otherwise.
-const dispatchRecordLink = computed(() => {
-  const sheetId = props.sheetId
-  const viewId = props.viewId
-  const recordId = props.record?.id
-  if (!sheetId || !viewId || !recordId) return ''
-  const query: Record<string, string> = {}
-  if (props.baseId) query.baseId = props.baseId
-  query.recordId = recordId
-  if (injectedRouter) {
-    try {
-      return injectedRouter.resolve({ name: AppRouteNames.MULTITABLE, params: { sheetId, viewId }, query }).href
-    } catch {
-      // A router without the multitable route (a test harness): fall through to the plain path.
-    }
-  }
-  return `/multitable/${encodeURIComponent(sheetId)}/${encodeURIComponent(viewId)}?${new URLSearchParams(query).toString()}`
 })
 
 function onTitleChange(event: Event) {

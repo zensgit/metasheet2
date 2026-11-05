@@ -8,6 +8,7 @@ import {
   recordPosition,
   recordHiddenFieldsHeading,
   recordApprovalErrorLabel,
+  recordLabelKeys,
 } from '../src/multitable/utils/meta-record-labels'
 
 describe('meta-record-labels static keys', () => {
@@ -242,5 +243,85 @@ describe('meta-record-labels helpers', () => {
   it('the approval-centre link label exists in both locales (R-43 A)', () => {
     expect(recordLabel('approval.openApprovalCenter', true)).toBe('去审批中心发起')
     expect(recordLabel('approval.openApprovalCenter', false)).toBe('Start in the approval centre')
+  })
+})
+
+// L1 (package 2): the 派发任务 dialog's copy lives in this table, which no other spec scans
+// for language. The CJK class is tasks-labels.spec.ts's (CJK punctuation, ideographs and the
+// fullwidth forms), so an English string must use ASCII punctuation.
+const CJK = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/
+
+describe('meta-record-labels: 派发任务 copy in both languages (L1)', () => {
+  const dispatchKeys = recordLabelKeys().filter((key) => key.startsWith('dispatch.'))
+
+  it('the table has dispatch keys to check', () => {
+    expect(dispatchKeys.length).toBeGreaterThan(40)
+  })
+
+  it('every dispatch string: ZH holds CJK, EN holds none, neither is empty, and they differ', () => {
+    const offenders: string[] = []
+    for (const key of dispatchKeys) {
+      const zh = recordLabel(key, true)
+      const en = recordLabel(key, false)
+      if (!zh || !en) offenders.push(`${key}: empty`)
+      if (!CJK.test(zh)) offenders.push(`${key}: zh without CJK`)
+      if (CJK.test(en)) offenders.push(`${key}: en with CJK`)
+      if (zh === en) offenders.push(`${key}: same text`)
+    }
+    expect(offenders).toEqual([])
+  })
+
+  it('the retired keys are gone: the generic failure and the description source line', () => {
+    const keys = recordLabelKeys() as string[]
+    for (const retired of ['dispatch.errorFailed', 'dispatch.sourceNoteFailed', 'dispatch.sourceLinePrefix']) {
+      expect(keys).not.toContain(retired)
+    }
+  })
+
+  it('no reply is an unknown outcome: the copy never says the dispatch failed or that a retry cannot duplicate', () => {
+    const zh = recordLabel('dispatch.outcomeUnknown', true)
+    const en = recordLabel('dispatch.outcomeUnknown', false)
+    expect(zh).toBe('没有收到这次派发的结果：任务可能已创建，也可能没有。点「重试」会按原内容再提交一次；也可以先到任务页查看。')
+    expect(en).toBe('No result was received for this dispatch: the task may or may not have been created. Retry resubmits the same entries; you can also check the task page first.')
+    for (const claim of ['失败', '不会重复', '没有创建']) expect(zh).not.toContain(claim)
+    for (const claim of ['failed', 'Could not', 'will not', 'no duplicate']) expect(en).not.toContain(claim)
+  })
+
+  it('pins the package 2 strings', () => {
+    const pinned: Array<[string, string, string]> = [
+      ['dispatch.keyNotSaved', '本页无法记住这次派发。如果刷新页面后再派发，可能会重复创建，请先到任务页确认。', 'This page could not remember this dispatch. If you dispatch again after reloading the page, a duplicate may be created; check the task page first.'],
+      ['dispatch.errorRejected', '这次派发未被接受，没有创建任务。请检查填写内容后再试；如果仍然不行，请刷新页面。', 'This dispatch was not accepted and created no task. Check the entries and try again; if it still does not go through, reload the page.'],
+      ['dispatch.errorSourceNotReadable', '这次没有派发：无法确认这条记录可以作为任务来源。请确认你仍能打开这条记录，再试一次。', 'Nothing was dispatched this time: this record could not be confirmed as the task source. Make sure you can still open the record, then try again.'],
+      ['dispatch.errorNotSent', '这次没有派发：浏览器无法生成派发标识。请刷新页面重试，或到任务页创建。', 'Nothing was dispatched: the browser could not generate a dispatch identifier. Reload the page and try again, or create the task from the task page.'],
+      ['dispatch.earlierUnresolved', '此前有一次派发没有收到结果，无法确认它是否已创建任务。请到任务页查看后再决定是否重新派发。', 'An earlier dispatch received no result, so it is not known whether it created a task. Check the task page before dispatching again.'],
+      ['dispatch.earlierNoTask', '此前有一次派发没有收到结果，它没有留下你可以打开的任务，可以重新派发。', 'An earlier dispatch received no result and left no task that you can open. You can dispatch again.'],
+      ['dispatch.earlierCreated', '此前那次派发已创建了这个任务。', 'The earlier dispatch did create this task.'],
+      ['dispatch.reusedHeading', '任务此前已创建。', 'The task was already created.'],
+      ['dispatch.reusedNote', '这是此前那次派发创建的任务；这次提交没有另建任务，也没有改动它。如需按新内容另建一项，请点「再派一项」。', 'This is the task created by the earlier dispatch; this submission created nothing new and changed nothing on it. To create another task with new entries, choose Dispatch another.'],
+      ['dispatch.reusedNotOpenable', '此前那次派发创建的任务现在无法打开（可能已被删除）。如需重新派发，请点「再派一项」。', 'The task created by the earlier dispatch cannot be opened now (it may have been deleted). To dispatch again, choose Dispatch another.'],
+      ['dispatch.existingReadFailed', '无法读取这条记录已派发的任务。如果你之前从这条记录派发过，现在派发可能会再建一项。', 'The tasks already dispatched from this record could not be read. If you dispatched from this record before, dispatching now may create another one.'],
+      ['dispatch.sourceNotLinked', '任务已创建，但未能关联来源记录，可在任务描述里手动写明来源记录。', 'The task was created, but the source record could not be linked. You can note the source record in the task description.'],
+      ['dispatch.retry', '重试', 'Retry'],
+      ['dispatch.another', '再派一项', 'Dispatch another'],
+      ['dispatch.existingHeading', '已从此记录派发', 'Dispatched from this record'],
+    ]
+    for (const [key, zh, en] of pinned) {
+      expect(recordLabel(key as Parameters<typeof recordLabel>[0], true)).toBe(zh)
+      expect(recordLabel(key as Parameters<typeof recordLabel>[0], false)).toBe(en)
+    }
+  })
+
+  it('the access note is true whether or not notifications are switched on', () => {
+    const zh = recordLabel('dispatch.accessNote', true)
+    const en = recordLabel('dispatch.accessNote', false)
+    expect(zh).toBe('是否通知负责人取决于系统的通知设置；负责人需要已开通任务功能，未开通的负责人无法被派发。')
+    expect(en).toBe('Whether assignees are notified depends on the notification settings. Every assignee needs task access; the task cannot be dispatched to someone without it.')
+    for (const claim of ['不会通知', '会收到通知', '将通知']) expect(zh).not.toContain(claim)
+    for (const claim of ['are not notified', 'will be notified', 'are notified when']) expect(en).not.toContain(claim)
+  })
+
+  it('a refused source does not claim the record itself cannot be read (one code covers record, view, sheet and user)', () => {
+    expect(recordLabel('dispatch.errorSourceNotReadable', true)).not.toContain('无法读取这条记录')
+    expect(recordLabel('dispatch.errorSourceNotReadable', false)).not.toContain('could not be read')
   })
 })

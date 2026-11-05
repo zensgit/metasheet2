@@ -2,12 +2,16 @@ import type { Request, Response, Router } from 'express'
 import { auditLog } from '../audit/audit'
 import {
   acceptsRecyclePurgeConfirm,
+  acceptsRecycleRescrubConfirm,
   listRecycleBin,
+  logRecycleFailure,
   planRecycleIdList,
   purgeRecycleUsers,
+  rescrubPurgedUsers,
   resolveUserRecycleRetentionDays,
   restoreRecycleUsers,
   USER_RECYCLE_PURGE_CONFIRM_TEXT,
+  USER_RECYCLE_RESCRUB_CONFIRM_TEXT,
 } from '../admin/user-recycle'
 import type { BatchItemResult } from '../admin/user-batch-plan'
 import { authenticate } from '../middleware/auth'
@@ -116,8 +120,40 @@ export function registerAdminUserRecycleRoutes(router: Router): void {
         },
       })
       return jsonOk(res, summary)
-    } catch {
+    } catch (error) {
+      logRecycleFailure('RECYCLE_PURGE_FAILED', error)
       return jsonError(res, 500, 'RECYCLE_PURGE_FAILED', '清除失败')
+    }
+  })
+
+  router.post('/api/admin/users/recycle/rescrub', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensureRecycleAdmin(req, res)
+    if (!adminUserId) return
+    if (!acceptsRecycleRescrubConfirm(req.body?.confirmText)) {
+      return jsonError(res, 400, 'CONFIRM_TEXT_MISMATCH', `请输入「${USER_RECYCLE_RESCRUB_CONFIRM_TEXT}」以确认`)
+    }
+    const plan = planRecycleIdList(req.body?.userIds)
+    if (plan.ok === false) return jsonError(res, plan.status, plan.code, plan.message)
+    try {
+      const results = await rescrubPurgedUsers({ actorId: adminUserId, rows: plan.ids })
+      const summary = summarize(results)
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'user-batch',
+        resourceId: 'recycle-rescrub',
+        meta: {
+          adminUserId,
+          outcome: 'rescrubbed',
+          successCount: summary.successCount,
+          failureCount: summary.failureCount,
+        },
+      })
+      return jsonOk(res, summary)
+    } catch (error) {
+      logRecycleFailure('RECYCLE_RESCRUB_FAILED', error)
+      return jsonError(res, 500, 'RECYCLE_RESCRUB_FAILED', '重新清理失败')
     }
   })
 }

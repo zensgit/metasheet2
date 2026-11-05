@@ -7,6 +7,9 @@ const ENDPOINT = 'https://api.dingtalk.com/v1.0/yida/forms/instances'
 const MAX_REQUEST_BYTES = 256 * 1024
 const MAX_RESPONSE_BYTES = 16 * 1024
 const MAX_RESPONSE_READS = MAX_RESPONSE_BYTES + 1
+// Gate 6 (R-71 ⑦.1): once a 2xx status line has been received the run signal can no longer stop the
+// body read; this transport-owned deadline bounds it instead (together with the byte and read caps).
+const DEFAULT_BODY_READ_TIMEOUT_MS = 5000
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/
 const FIELD_ID = /^[\p{L}\p{N}_-]{1,128}$/u
 const FORBIDDEN_FIELD = /(?:__proto__|prototype|constructor|password|token|appkey|appsecret|systemtoken|authoritycode|credential|secret)/i
@@ -16,12 +19,18 @@ const responseRedirected = Object.getOwnPropertyDescriptor(Response.prototype, '
 const responseHeaders = Object.getOwnPropertyDescriptor(Response.prototype, 'headers').get
 const responseBody = Object.getOwnPropertyDescriptor(Response.prototype, 'body').get
 const typedArrayByteLength = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'byteLength').get
+const addListener = EventTarget.prototype.addEventListener
+const removeListener = EventTarget.prototype.removeEventListener
 const ownErrors = new WeakMap()
 const MESSAGES = Object.freeze({
   INPUT: 'Invalid form transport input',
   DISABLED: 'Form transport disabled',
   ABORTED: 'Form transport cancelled',
   RESPONSE: 'Invalid form transport response',
+  // A 2xx status line WAS received, but its body could not be used (not UTF-8 / not JSON / no
+  // result / errored or stalled stream). Distinct from RESPONSE (non-2xx, redirect, not a Response)
+  // so the ledger can record that the remote answered 2xx. Still never a business verification.
+  RECEIPT: 'Form transport response received but unusable',
   TOO_LARGE: 'Form transport response exceeds limit',
   UNAVAILABLE: 'Form transport unavailable',
 })
@@ -153,17 +162,21 @@ function decode(chunks, byteLength) {
   const bytes = new Uint8Array(byteLength)
   let offset = 0
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
-  try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch { fail('RESPONSE') }
+  // Only reached after a 2xx status line: a body that is not UTF-8 is an unusable receipt.
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch { fail('RECEIPT') }
 }
 
 function createYidaFormTransport(options) {
   let fetchImpl
   let readEnablement
+  let bodyReadTimeoutMs
   try {
-    const settings = record(options, ['fetch'], ['readEnablement'])
+    const settings = record(options, ['fetch'], ['readEnablement', 'bodyReadTimeoutMs'])
     fetchImpl = settings.fetch
     readEnablement = Object.hasOwn(settings, 'readEnablement') ? settings.readEnablement : () => undefined
-    if (typeof fetchImpl !== 'function' || typeof readEnablement !== 'function') fail('INPUT')
+    bodyReadTimeoutMs = Object.hasOwn(settings, 'bodyReadTimeoutMs') ? settings.bodyReadTimeoutMs : DEFAULT_BODY_READ_TIMEOUT_MS
+    if (typeof fetchImpl !== 'function' || typeof readEnablement !== 'function'
+      || !Number.isInteger(bodyReadTimeoutMs) || bodyReadTimeoutMs < 10 || bodyReadTimeoutMs > 60000) fail('INPUT')
   } catch { fail('INPUT') }
 
   async function send(input, options) {
@@ -192,11 +205,23 @@ function createYidaFormTransport(options) {
     }
     checkAbort(signal)
 
+    // Gate 6 (R-71 ⑦.1). The run signal reaches fetch only through this transport-owned controller,
+    // and only until the status line arrives: before that, an abort tears the request down exactly
+    // as before (nothing is known about the outcome, so the runner records transport_unknown).
+    // Once a Response is in hand the forwarding is removed and no later abort is consulted: undici
+    // errors the body stream on a late abort, and a received 2xx is evidence that must never be
+    // discarded. The body phase is bounded instead by the byte cap, the read cap and bodyReadTimeoutMs.
+    const local = new AbortController()
+    const forward = () => local.abort()
     let response
     let reader
+    let received = false
     let complete = false
-    const abort = () => { if (reader) cancelReader(reader); else if (response) cancelBody(response) }
-    EventTarget.prototype.addEventListener.call(signal, 'abort', abort, { once: true })
+    let expire
+    let bodyTimer
+    const expiry = new Promise((_, reject) => { expire = reject })
+    expiry.catch(() => {}) // Consumed only through the read race below; never an unhandled rejection.
+    addListener.call(signal, 'abort', forward, { once: true })
     try {
       checkAbort(signal)
       // Keep the actual await pending if fetch ignores cancellation. The runner
@@ -210,31 +235,35 @@ function createYidaFormTransport(options) {
         },
         body: request.body,
         redirect: 'error',
-        signal,
+        signal: local.signal,
       })
       if (isProxy(pending)) fail('RESPONSE')
       // Real fetch returns a native Promise. A direct synthetic Response must
       // not be assimilated as an arbitrary caller-controlled thenable.
       response = isPromise(pending) ? await pending : pending
-      checkAbort(signal)
+      // The status line (or a late, uncooperative resolution) is in hand: stop forwarding aborts.
+      removeListener.call(signal, 'abort', forward)
       let inspected
       try { inspected = inspectResponse(response) } catch (error) {
         if (ownErrors.has(error)) throw error
         fail('RESPONSE')
       }
+      // A 2xx status line has been received. From here on every failure is RECEIPT (or TOO_LARGE):
+      // the remote answered, so the runner must record that fact rather than transport_unknown.
+      received = true
+      bodyTimer = setTimeout(() => expire(new YidaFormTransportError('RECEIPT')), bodyReadTimeoutMs)
       const chunks = []
       let byteLength = 0
       if (inspected.body !== null) {
         reader = ReadableStream.prototype.getReader.call(inspected.body)
         let reads = 0
         while (true) {
-          checkAbort(signal)
           if (reads >= MAX_RESPONSE_READS) fail('TOO_LARGE')
           reads += 1
-          const { done, value } = await ReadableStreamDefaultReader.prototype.read.call(reader)
-          checkAbort(signal)
+          // The deadline wins over a stalled read; the reader is then cancelled in finally.
+          const { done, value } = await Promise.race([ReadableStreamDefaultReader.prototype.read.call(reader), expiry])
           if (done) break
-          if (isProxy(value) || !(value instanceof Uint8Array)) fail('RESPONSE')
+          if (isProxy(value) || !(value instanceof Uint8Array)) fail('RECEIPT')
           const chunkLength = typedArrayByteLength.call(value)
           byteLength += chunkLength
           if (byteLength > MAX_RESPONSE_BYTES) fail('TOO_LARGE')
@@ -249,20 +278,25 @@ function createYidaFormTransport(options) {
       let instanceId = request.data.formInstanceId
       if (request.intent === 'create') {
         let parsed
-        try { parsed = JSON.parse(text) } catch { fail('RESPONSE') }
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) fail('RESPONSE')
+        try { parsed = JSON.parse(text) } catch { fail('RECEIPT') }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) fail('RECEIPT')
         instanceId = Object.getOwnPropertyDescriptor(parsed, 'result')?.value
-        if (!boundedId(instanceId)) fail('RESPONSE')
+        if (!boundedId(instanceId)) fail('RECEIPT')
       }
       // Update has no modeled result. Even an error-looking 2xx body is only an
       // HTTP ACK here, never verified business success or remote ID agreement.
-      checkAbort(signal)
       complete = true
       return { statusCode: inspected.statusCode, instanceId }
     } catch (error) {
-      throw new YidaFormTransportError(aborted(signal) ? 'ABORTED' : ownErrors.get(error) || 'UNAVAILABLE')
+      // Own kinds keep their classification even when the run signal has since been aborted.
+      // Before the status line a torn-down request is ABORTED only when the run signal caused it;
+      // after the status line every foreign failure (errored stream, late undici abort) is RECEIPT.
+      const own = ownErrors.get(error)
+      if (own !== undefined) throw new YidaFormTransportError(own)
+      throw new YidaFormTransportError(received ? 'RECEIPT' : aborted(signal) ? 'ABORTED' : 'UNAVAILABLE')
     } finally {
-      EventTarget.prototype.removeEventListener.call(signal, 'abort', abort)
+      removeListener.call(signal, 'abort', forward)
+      clearTimeout(bodyTimer)
       if (!complete) { if (reader) cancelReader(reader); else if (response) cancelBody(response) }
       if (reader) { try { ReadableStreamDefaultReader.prototype.releaseLock.call(reader) } catch { /* Already released. */ } }
     }

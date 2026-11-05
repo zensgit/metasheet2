@@ -181,13 +181,19 @@ function validReceipt(receipt, fixed) {
   } catch { return null }
 }
 
-function receiptFailure(error) {
+function receiptReason(error) {
   // A dependency can throw any JS value. Never let inspection of that value
   // bypass the claimed-attempt cleanup or leak an upstream exception.
   try {
-    return !types.isProxy(error) && error instanceof YidaFormTransportError
-      && (error.code === 'YIDA_FORM_RESPONSE' || error.code === 'YIDA_FORM_TOO_LARGE')
-  } catch { return false }
+    if (types.isProxy(error) || !(error instanceof YidaFormTransportError)) return 'transport_unknown'
+    // Non-2xx, redirect or not a Response at all: the remote refused or never answered properly.
+    if (error.code === 'YIDA_FORM_RESPONSE') return 'receipt_invalid'
+    // Gate 6 (R-71 ⑦.1, owner choice a2): a 2xx status line WAS received but its body could not be
+    // used (not UTF-8 / not JSON / no result / over the 16 KiB cap / errored or stalled stream).
+    // The ledger keeps that fact as its own reason; the row is still outcome_unknown, never resent.
+    if (error.code === 'YIDA_FORM_RECEIPT' || error.code === 'YIDA_FORM_TOO_LARGE') return 'receipt_unparsed'
+    return 'transport_unknown'
+  } catch { return 'transport_unknown' }
 }
 
 function result(record, externalWriteAttempted, durable = true) {
@@ -337,9 +343,12 @@ export function createYidaDeliveryRunner(options) {
         externalWriteAttempted = true
         receipt = await send(Object.freeze({ intent: fixed.intent, data: fixed.data,
           accessToken, systemToken: snapshot.systemToken, userId: snapshot.userId }), signalOptions)
-        check(snapshot)
+        // Gate 6 (R-71 ⑦.1): no check() after send. A receipt the transport returned is evidence
+        // that the remote answered 2xx; a stop code, switch flip or expiry that arrived while the
+        // body was being read cannot turn it into transport_unknown. The timer still tears the
+        // request down BEFORE the status line (the transport forwards the signal only until then).
       } catch (error) {
-        return await unknown(receiptFailure(error) ? 'receipt_invalid' : 'transport_unknown')
+        return await unknown(receiptReason(error))
       }
       const ack = validReceipt(receipt, fixed)
       if (!ack) return await unknown('receipt_invalid')

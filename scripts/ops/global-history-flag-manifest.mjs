@@ -663,11 +663,12 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     key: 'DINGTALK_TODO_MIRROR_ENABLED',
     type: 'boolean',
     activationValue: 'true',
+    caseInsensitive: true, // isDingTalkTodoMirrorEnabled(): `String(env[...] ?? '').trim().toLowerCase() === 'true'`
     dependsOn: [],
     conflictsWith: [],
     danger: 'medium',
     purpose:
-      'Master gate for the DingTalk approval-todo ONE-WAY mirror (plan B, #5772/#5768). Default OFF; exact literal \'true\' only (isDingTalkTodoMirrorEnabled: String(env).trim().toLowerCase() === \'true\'). The sink (both the live eventBus leg and the durable consumer leg) checks this flag FIRST and writes nothing to dingtalk_todo_mirrors when it is off — both legs stay inert. The delivery WORKER (the only code that talks to the DingTalk API) is additionally gated: it is only ever constructed/started in index.ts when this flag is on AND NODE_ENV!==\'test\' AND !VITEST. Danger=medium, not high: an outbound convenience with its own idempotent ledger (ON CONFLICT DO NOTHING on org_id+source_key) — a missing/misconfigured mirror loses no platform state (the durable consumer keeps ACKing regardless).',
+      'Master gate for the DingTalk approval-todo ONE-WAY mirror (plan B, #5772/#5768). Default OFF; \'true\' after trimming, case-insensitive (isDingTalkTodoMirrorEnabled: String(env).trim().toLowerCase() === \'true\'), so \'TRUE\', \'True\' and \' true \' are ON too, while unset, blank, \'false\', \'1\' and \'yes\' stay OFF. The sink (both the live eventBus leg and the durable consumer leg) checks this flag FIRST and writes nothing to dingtalk_todo_mirrors when it is off — both legs stay inert. The delivery WORKER (the only code that talks to the DingTalk API) is additionally gated: it is only ever constructed/started in index.ts when this flag is on AND NODE_ENV!==\'test\' AND !VITEST. Danger=medium, not high: an outbound convenience with its own idempotent ledger (ON CONFLICT DO NOTHING on org_id+source_key) — a missing/misconfigured mirror loses no platform state (the durable consumer keeps ACKing regardless).',
     source: 'packages/core-backend/src/integrations/dingtalk/todo-mirror-flag.ts:20,23; packages/core-backend/src/services/dingtalk-todo-mirror-service.ts:15; packages/core-backend/src/services/dingtalk-todo-mirror-worker.ts:25; packages/core-backend/src/index.ts:3924,3943,3959',
   },
   {
@@ -680,6 +681,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     purpose:
       'Poll interval for the DingTalk todo-mirror delivery worker\'s setInterval tick (runBatch). Number(process.env...) || 30_000 then Math.max(5_000, ...): an unset/blank/non-numeric value falls back to the 30s default, and any in-range or larger value is honoured verbatim — only a value below 5000 gets clamped up to the 5s floor. No-op unless DINGTALK_TODO_MIRROR_ENABLED is active (the worker is never constructed otherwise).',
     source: 'packages/core-backend/src/index.ts:3948',
+  },
+  {
+    key: 'DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "DingTalk work-notification credential resolution anchored to the recipient's directory integration (work-notification-settings.ts readDingTalkMessageConfigFromRuntime; callers: the attendance notification delivery worker, the automation executor's DingTalk person-message and approval-card sends, the todo-mirror worker). Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). Off: resolution is byte-identical to before the switch existed — a complete env triple (DINGTALK_APP_KEY|DINGTALK_CLIENT_ID, DINGTALK_APP_SECRET|DINGTALK_CLIENT_SECRET, DINGTALK_AGENT_ID|DINGTALK_NOTIFY_AGENT_ID) is used without reading the integration row, otherwise each field is env-then-stored, and failures keep their text and ledger position. On, for a call that names an integration: the row is always read and must be active; when the env app key equals the row's app key the env values override field by field (the pre-switch per-field behaviour) and an env Agent ID that is used must be 1-32 digits; otherwise the row's own appKey/appSecret/workNotificationAgentId are used as a whole; a missing, inactive or incomplete row, or a malformed env Agent ID, raises a typed values-free DingTalkMessageConfigError instead of borrowing fields from the other source; baseUrl follows the chosen source. On, for a call that names no integration: unchanged apart from the same env Agent ID shape check. On, in the automation executor: a person message resolves the configuration of every recipient group before the first send (a configuration failure sends to nobody; a later network failure is still a partial delivery); the approval card is not sent at all (no claim, no card-delivery row, no DingTalk call, interactive or OA path, env URL set or not) when the assignee's integration is missing or not active, and otherwise reads its public URL from env or the assignee's own active integration (never another integration's stored URL), after the assignee is known, and resolves the work-notification card credentials before the outbound claim and the card-delivery row. The admin test/save Agent ID path and the runtime-status face do not read this switch. danger=high: ON changes which DingTalk app sends work notifications to a recipient whose integration app differs from the env app, and turns some mixed configurations that send today into explicit failures (attendance: non-retryable, row failed; todo mirror: retried then failed; automation: the step fails).",
+    source: 'packages/core-backend/src/integrations/dingtalk/integration-scoped-credentials-flag.ts#isDingTalkIntegrationScopedCredentialsEnabled',
   },
   {
     key: 'MULTITABLE_BUSINESS_TIMEZONE',

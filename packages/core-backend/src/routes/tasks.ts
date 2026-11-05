@@ -6,19 +6,23 @@
  * does not matter for correctness (contract §2 / lock §12 门 13).
  */
 import { Router } from 'express'
+import { query } from '../db/pg'
 import { authenticate } from '../middleware/auth'
 import { rbacGuard } from '../rbac/rbac'
 import { validateViewerTimeZoneHeader } from '../tasks/task-dates'
+import { parseTaskSourceInput } from '../tasks/task-source-links'
 import {
   completeTask,
   countPending,
   countPendingList,
   countTasks,
   createTask,
+  fail,
   getTask,
   listPending,
   listTasks,
   parseTaskPage,
+  plainDb,
   reopenTask,
 } from '../services/task-records'
 import {
@@ -37,13 +41,52 @@ import {
   updateComment,
 } from '../services/task-structure'
 import { isVersionConflict, patchTask } from '../services/task-patch'
+import { loadTaskPeople, resolveOrgPeople, searchOrgPeople } from '../services/task-people'
+import { createRateLimiter } from '../middleware/rate-limiter'
+import { PEOPLE_QUERY_MIN_LENGTH, parsePeopleRequest } from '../tasks/task-people-search'
 import { actorId, orgId, sendError } from './tasks-http'
 import { registerTaskListRoutes } from './tasks-lists'
 import { registerTaskSettingsRoutes } from './tasks-settings'
+import { requireRecordReadable } from './univer-meta'
+
+/** The record read gate's query function for a dispatch from a record: the task module's own
+ * database access, as a plain function. */
+const sourceQuery: Parameters<typeof requireRecordReadable>[1] = (sql, params) => query(sql, params)
+
+/**
+ * The one refusal for a dispatch source the caller may not use: a missing or unreadable record, a
+ * gated reader who is not the creator, or a view or base that is not the sheet's. Sent as
+ * `{ error: { code } }`; a 401 from the gate stays a 401.
+ */
+function sourceNotReadable(status = 422): Error {
+  return Object.assign(new Error('SOURCE_NOT_READABLE'), { status, code: 'SOURCE_NOT_READABLE' })
+}
+
+/** The per-router cleanup of `tasksRouter()`: the people search limiter's sweep timer. */
+const routerDisposers = new WeakMap<Router, () => void>()
+
+/** Stops the timer a `tasksRouter()` instance owns. The timer never keeps a process alive; tests
+ *  that build routers call this when they are done with one. */
+export function disposeTasksRouter(router: Router | null): void {
+  if (!router) return
+  routerDisposers.get(router)?.()
+  routerDisposers.delete(router)
+}
 
 export function tasksRouter(): Router | null {
   if (process.env.TASKS_ENABLED !== 'true') return null
   const router = Router()
+  // Package 1b: 120 people searches a minute per signed-in user, in memory, one counter per router.
+  const peopleRateLimit = createRateLimiter({
+    windowMs: 60_000,
+    maxRequests: 120,
+    keyPrefix: 'tasks-people',
+    keyFn: (req) => actorId(req),
+    onLimited: (_req, res) => {
+      res.status(429).json({ error: { code: 'RATE_LIMITED' } })
+    },
+  })
+  routerDisposers.set(router, peopleRateLimit._cleanup)
 
   router.get('/api/tasks/context', authenticate, rbacGuard('tasks', 'read'), (req, res) => {
     const id = orgId(req)
@@ -84,6 +127,36 @@ export function tasksRouter(): Router | null {
     }
   })
 
+  // Package 1b: the people directory of the assignee and follower pickers (task-people.ts). It
+  // takes tasks:write, the code of the writes it feeds, and answers a missing org like them.
+  router.get('/api/tasks/people', authenticate, rbacGuard('tasks', 'write'), peopleRateLimit, async (req, res) => {
+    try {
+      const org = orgId(req)
+      if (!org) {
+        res.status(422).json({ error: { code: 'ORG_MISSING' } })
+        return
+      }
+      const request = parsePeopleRequest({ q: req.query.q, ids: req.query.ids, limit: req.query.limit })
+      if (!request) {
+        res.status(422).json({ error: { code: 'PEOPLE_QUERY_INVALID' } })
+        return
+      }
+      if (request.kind === 'blank') {
+        res.json({ items: [], hasMore: false, requiresQuery: true, limit: request.limit, minQueryLength: PEOPLE_QUERY_MIN_LENGTH })
+        return
+      }
+      if (request.kind === 'resolve') {
+        const items = await resolveOrgPeople(plainDb, { orgId: org, ids: request.ids })
+        res.json({ items, truncated: request.truncated })
+        return
+      }
+      const found = await searchOrgPeople(plainDb, { orgId: org, term: request.term, limit: request.limit })
+      res.json({ items: found.items, hasMore: found.hasMore, requiresQuery: false, limit: request.limit })
+    } catch (err) {
+      sendError(res, err)
+    }
+  })
+
   router.get('/api/tasks/:id', authenticate, rbacGuard('tasks', 'read'), async (req, res) => {
     try {
       const org = orgId(req)
@@ -118,8 +191,14 @@ export function tasksRouter(): Router | null {
       const status = req.query.status === undefined
         ? undefined
         : typeof req.query.status === 'string' ? req.query.status : ''
-      const items = await listTasks({ orgId: org, actorId: actorId(req), view, status, page })
-      const total = await countTasks({ orgId: org, actorId: actorId(req), view, status })
+      // Basic title search, read like `status`: a repeated or nested `q` is not a string and is
+      // passed on as '', which the service refuses like an empty or blank one (422 INVALID_QUERY).
+      // The order of refusals stays page, view, status, then query.
+      const q = req.query.q === undefined
+        ? undefined
+        : typeof req.query.q === 'string' ? req.query.q : ''
+      const items = await listTasks({ orgId: org, actorId: actorId(req), view, status, q, page })
+      const total = await countTasks({ orgId: org, actorId: actorId(req), view, status, q })
       res.json({ items, total })
     } catch (err) {
       const code = typeof err === 'object' && err && 'code' in err ? String((err as { code: string }).code) : ''
@@ -140,6 +219,30 @@ export function tasksRouter(): Router | null {
         return
       }
       const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {}
+      // A dispatch from a multitable record adds `source` and, only with it, `dispatchKey`. Both are
+      // parsed before anything is read; a body without them is created exactly as before.
+      const dispatch = parseTaskSourceInput({ source: body.source, dispatchKey: body.dispatchKey })
+      if (dispatch.ok === false) fail(422, dispatch.reason.toUpperCase())
+      const source = dispatch.source
+      if (source) {
+        // The record routes' own read gate, for this caller, before anything is written. A missing
+        // record and an unreadable one are the same 422.
+        const gate = await requireRecordReadable(req, sourceQuery, source.sheetId, source.recordId)
+        if ('status' in gate) {
+          throw sourceNotReadable(gate.status === 401 ? 401 : 422)
+        }
+        // The gated reader is the task's creator.
+        if (gate.access.userId !== actorId(req)) throw sourceNotReadable()
+        // A view or base sent with the source must be the sheet's; read only once the gate passed.
+        if (source.viewId !== null) {
+          const view = await query('SELECT sheet_id FROM meta_views WHERE id = $1', [source.viewId])
+          if (view.rows[0]?.sheet_id !== source.sheetId) throw sourceNotReadable()
+        }
+        if (source.baseId !== null) {
+          const sheet = await query('SELECT base_id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [source.sheetId])
+          if (!sheet.rows[0] || sheet.rows[0].base_id !== source.baseId) throw sourceNotReadable()
+        }
+      }
       // RULED(2026-10-07): [R03] the date keys, `timeZone` and `remindAt` are accepted on create;
       // `description` is not (it is a PATCH field).
       const created = await createTask({
@@ -154,6 +257,7 @@ export function tasksRouter(): Router | null {
         startTime: body.startTime,
         timeZone: body.timeZone,
         remindAt: body.remindAt,
+        ...(source ? { source, dispatchKey: dispatch.dispatchKey } : {}),
       })
       res.status(200).json(created)
     } catch (err) {
@@ -240,6 +344,21 @@ export function tasksRouter(): Router | null {
       }
       const result = await getParentCandidates({ orgId: org, actorId: actorId(req), taskId: req.params.id })
       res.json(result)
+    } catch (err) {
+      sendError(res, err)
+    }
+  })
+
+  // Package 1b: the names on a task, and whether each person is still an active member.
+  router.get('/api/tasks/:id/people', authenticate, rbacGuard('tasks', 'read'), async (req, res) => {
+    try {
+      const org = orgId(req)
+      if (!org) {
+        res.status(404).json({ error: { code: 'NOT_FOUND' } })
+        return
+      }
+      const people = await loadTaskPeople({ orgId: org, actorId: actorId(req), taskId: req.params.id })
+      res.json({ people })
     } catch (err) {
       sendError(res, err)
     }
