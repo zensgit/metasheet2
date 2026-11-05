@@ -34,12 +34,13 @@ function baseInput(overrides: Partial<ResolveNotificationRecipientsInput> = {}):
 
 describe('task-notifications', () => {
   describe('TASK_NOTIFIABLE_EVENTS', () => {
-    it('is the D13 closed set (attachment_added deferred to P2)', () => {
-      expect(TASK_NOTIFIABLE_EVENTS).toEqual(['completed', 'completed_by_any', 'reopened', 'deleted', 'commented'])
+    it('is the D13 closed set plus the two package 2 events, which come first (attachment_added deferred to P2)', () => {
+      expect(TASK_NOTIFIABLE_EVENTS).toEqual(['created', 'assignee_added', 'completed', 'completed_by_any', 'reopened', 'deleted', 'commented'])
     })
 
-    it('assignee_added is NOT notifiable by default (R05-opt) — absent from the array itself', () => {
-      expect((TASK_NOTIFIABLE_EVENTS as readonly string[]).includes('assignee_added')).toBe(false)
+    it('created and assignee_added are notifiable (package 2)', () => {
+      expect((TASK_NOTIFIABLE_EVENTS as readonly string[]).includes('created')).toBe(true)
+      expect((TASK_NOTIFIABLE_EVENTS as readonly string[]).includes('assignee_added')).toBe(true)
     })
 
     it('self_completed / self_reopened are NOT notifiable', () => {
@@ -50,8 +51,43 @@ describe('task-notifications', () => {
 
   describe('resolveNotificationRecipients', () => {
     it('throws for an event outside the closed set', () => {
-      expect(() => resolveNotificationRecipients(baseInput({ event: 'assignee_added' as never }))).toThrow(TypeError)
       expect(() => resolveNotificationRecipients(baseInput({ event: 'self_completed' as never }))).toThrow(TypeError)
+      expect(() => resolveNotificationRecipients(baseInput({ event: 'assignee_removed' as never }))).toThrow(TypeError)
+    })
+
+    it('created: the assignees other than the actor, as assignee; the creator, followers and list members get nothing', () => {
+      const result = resolveNotificationRecipients(baseInput({
+        event: 'created',
+        creatorId: ACTOR,
+        assigneeIds: ['a2', ACTOR, 'a1', 'a1'],
+        followerIds: ['follower1', 'a1'],
+        listMemberIds: ['member1'],
+      }))
+      expect(result).toEqual([
+        { userId: 'a1', recipientRole: 'assignee' },
+        { userId: 'a2', recipientRole: 'assignee' },
+      ])
+      // The creator is a recipient of nothing here even when it is not the actor: only assignees are told.
+      expect(resolveNotificationRecipients(baseInput({ event: 'created', creatorId: 'creator', assigneeIds: [] }))).toEqual([])
+      expect(resolveNotificationRecipients(baseInput({ event: 'created', creatorId: ACTOR, assigneeIds: [ACTOR] }))).toEqual([])
+    })
+
+    it('assignee_added: only the added person, as assignee; the actor as target, a target outside the assignee set or no target ⇒ nobody', () => {
+      const members = { creatorId: 'creator', assigneeIds: ['a1', 'added'], followerIds: ['follower1'], listMemberIds: ['member1'] }
+      expect(resolveNotificationRecipients(baseInput({ event: 'assignee_added', ...members, targetUserId: 'added' })))
+        .toEqual([{ userId: 'added', recipientRole: 'assignee' }])
+      expect(resolveNotificationRecipients(baseInput({ event: 'assignee_added', ...members, assigneeIds: ['a1', ACTOR], targetUserId: ACTOR }))).toEqual([])
+      expect(resolveNotificationRecipients(baseInput({ event: 'assignee_added', ...members, targetUserId: 'follower1' }))).toEqual([])
+      expect(resolveNotificationRecipients(baseInput({ event: 'assignee_added', ...members }))).toEqual([])
+      expect(resolveNotificationRecipients(baseInput({ event: 'assignee_added', ...members, targetUserId: '' }))).toEqual([])
+    })
+
+    it('targetUserId is ignored by every other event (the union is unchanged)', () => {
+      const result = resolveNotificationRecipients(baseInput({ event: 'reopened', creatorId: 'creator', assigneeIds: ['a1'], targetUserId: 'a1' }))
+      expect(result).toEqual([
+        { userId: 'a1', recipientRole: 'assignee' },
+        { userId: 'creator', recipientRole: 'creator' },
+      ])
     })
 
     it('creator ∪ assignee ∪ follower ∪ list_member, each in their own role', () => {
@@ -299,11 +335,11 @@ describe('task-notifications — outbox row planners (PR-3b S1)', () => {
       expect(rows).toHaveLength(1)
     })
 
-    it('every notifiable event is accepted; self_completed / assignee_added / unknown are rejected', () => {
+    it('every notifiable event is accepted; self_completed / assignee_removed / unknown are rejected', () => {
       for (const event of TASK_NOTIFIABLE_EVENTS) {
         expect(planTaskEventDeliveries({ ...base, event })[0].payload).toMatchObject({ event })
       }
-      for (const event of ['self_completed', 'self_reopened', 'assignee_added', 'x', '']) {
+      for (const event of ['self_completed', 'self_reopened', 'assignee_removed', 'x', '']) {
         expect(() => planTaskEventDeliveries({ ...base, event: event as never })).toThrow(TypeError)
       }
     })
@@ -496,6 +532,19 @@ describe('task-notifications — outbox row planners (PR-3b S1)', () => {
       expect(parseTaskNotificationPayload({ ...good, taskId: 1 })).toEqual({ ok: false, reason: 'payload_invalid' })
       expect(parseTaskNotificationPayload({ ...good, taskId: '' })).toEqual({ ok: false, reason: 'payload_invalid' })
       expect(parseTaskNotificationPayload({ ...good, event: 'self_completed' })).toEqual({ ok: false, reason: 'payload_invalid' })
+    })
+
+    it('task_event: created and assignee_added read back with the same five keys; a stored target is not one of them', () => {
+      for (const event of ['created', 'assignee_added'] as const) {
+        const [row] = planTaskEventDeliveries({
+          orgId: 'o', taskId: 't1', eventId: 'tev_1', event, actorId: 'a',
+          recipients: [{ userId: 'u1', recipientRole: 'assignee' }], channels: [CH],
+        })
+        expect(parseTaskNotificationPayload(JSON.parse(JSON.stringify(row.payload)))).toEqual({
+          ok: true, payload: { kind: 'task_event', event, taskId: 't1', eventId: 'tev_1', actorId: 'a' },
+        })
+        expect(parseTaskNotificationPayload({ ...row.payload, targetUserId: 'u1' })).toEqual({ ok: false, reason: 'payload_invalid' })
+      }
     })
 
     it('task_reminder: remindAt must be the canonical ISO form the planner wrote', () => {

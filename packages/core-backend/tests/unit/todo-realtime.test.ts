@@ -42,6 +42,49 @@ describe('todo realtime count publisher (B-2)', () => {
       sources: { approval: 'ok' },
     }))
   })
+  it('named sources are forwarded as the second argument, on the default path and to an injected fetcher', async () => {
+    const broadcastTo = vi.fn()
+    const registrySpy = vi
+      .spyOn(pendingSourceRegistry, 'countPendingForUser')
+      .mockResolvedValue({ count: 2, sources: { approval: 'ok' } })
+
+    await publishTodoCountsUpdate({
+      collabService: { broadcastTo },
+      userId: 'u7',
+      reason: 'decide',
+      sources: ['approval'],
+    })
+    expect(registrySpy).toHaveBeenCalledTimes(1)
+    expect(registrySpy).toHaveBeenCalledWith(
+      { actorId: 'u7', roles: [], permissions: [] },
+      { sources: ['approval'] },
+    )
+
+    const injected = vi.fn(async () => ({ count: 0, sources: {} }))
+    await publishTodoCountsUpdate({
+      collabService: { broadcastTo },
+      userId: 'u8',
+      reason: 'decide',
+      sources: ['approval'],
+      countPendingForUser: injected as TodoCountFetcher,
+    })
+    expect(injected).toHaveBeenCalledWith(
+      { actorId: 'u8', roles: [], permissions: [] },
+      { sources: ['approval'] },
+    )
+  })
+
+  it('without named sources an injected fetcher receives the viewer alone', async () => {
+    const injected = vi.fn(async () => ({ count: 0, sources: {} }))
+    await publishTodoCountsUpdate({
+      collabService: { broadcastTo: vi.fn() },
+      userId: 'u9',
+      reason: 'decide',
+      countPendingForUser: injected as TodoCountFetcher,
+    })
+    expect(injected.mock.calls[0]).toEqual([{ actorId: 'u9', roles: [], permissions: [] }])
+  })
+
   it('reuses the injected countPendingForUser fetcher — the SAME shape pendingSourceRegistry.countPendingForUser returns — never computing a count itself', async () => {
     const broadcastTo = vi.fn()
     let receivedViewer: PendingViewer | undefined

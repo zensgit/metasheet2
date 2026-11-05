@@ -288,7 +288,7 @@ function blankIdentity(value: unknown): string | null {
 
 /** Providers compare raw. A padded value such as ' local ' is not the local provider. */
 function rawProvider(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null
+  return typeof value === 'string' && value.trim().length > 0 ? value : null
 }
 
 /**

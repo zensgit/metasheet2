@@ -118,6 +118,20 @@ export interface TaskDetail {
   /** M4 (PR-3a S7): ids of the lists holding this task — every such list for the task's creator,
    *  the viewer's own lists for anyone else. Always sent from S7 on; absent from an older body. */
   listIds?: string[]
+  /** Package 2: the multitable record this task was dispatched from (ids only), present only for a
+   *  task that has one; absent from a task created elsewhere and from an older body. The detail
+   *  links back through `taskSourceRecordPath` (tasks/taskSourceLink.ts). */
+  source?: TaskDetailSource
+}
+
+/** `TaskDetail.source`, the service's shape key for key: one kind today; `viewId` and `baseId` are
+ *  `null` when the dispatch did not carry them. */
+export interface TaskDetailSource {
+  kind: 'multitable_record'
+  sheetId: string
+  recordId: string
+  viewId: string | null
+  baseId: string | null
 }
 
 /** `getTask`'s result kinds — deliberately NOT `BaseResultKind`: `GET /api/tasks/:id` has no
@@ -158,6 +172,18 @@ export interface CreateTaskInput {
   startTime?: string | null
   timeZone?: string | null
   remindAt?: string | null
+  /** Package 2: the multitable record a dispatch comes from (ids only). Sent only when given; never
+   *  `null`, which the server refuses like any other malformed value. */
+  source?: CreateTaskSource
+  /** Package 2: the dispatch's retry key, sent only with `source`. Sent only when given; never `null`. */
+  dispatchKey?: string
+}
+
+/** The record a dispatched task comes from. `viewId` is sent only when given. */
+export interface CreateTaskSource {
+  sheetId: string
+  recordId: string
+  viewId?: string
 }
 
 /** The 422 codes `createTask` reports as `validation` (design §3.2, an allowlist). Any other 422
@@ -173,6 +199,11 @@ export const CREATE_TASK_VALIDATION_CODES = [
   'INACTIVE_ORG_MEMBER',
   'ASSIGNEE_TASK_ACCESS_REQUIRED',
   'LIMIT',
+  // Package 2, a create with `source` / `dispatchKey`: a malformed source, a retry key the service
+  // does not accept for this record, and a source the caller may not use.
+  'INVALID_SOURCE',
+  'INVALID_DISPATCH_KEY',
+  'SOURCE_NOT_READABLE',
 ] as const
 export type CreateTaskValidationCode = (typeof CREATE_TASK_VALIDATION_CODES)[number]
 
@@ -183,8 +214,12 @@ export type CreateTaskValidationCode = (typeof CREATE_TASK_VALIDATION_CODES)[num
  *  row instead of failing. Every caller only needs the new id (to keep it or ignore it) — the
  *  fresh row itself always comes from the subsequent `loadList()`. */
 export type CreateTaskResult =
-  /** `version` (M4, PR-3a S4) is present when the body carries it as a positive integer. */
-  | { kind: 'ok'; id: string; version?: number }
+  /** `version` (M4, PR-3a S4) is present when the body carries it as a positive integer. For a create
+   *  sent with `source` (package 2): `reused` is present (and true) when the service answered with the
+   *  task an earlier request under the same retry key made, and `sourceLinked` says whether the body
+   *  confirmed the source link (`sourceLinked: true`); a service that does not store the link answers
+   *  without it. A create without `source` carries neither key. */
+  | { kind: 'ok'; id: string; version?: number; reused?: true; sourceLinked?: boolean }
   | { kind: 'invalid_title' }
   | { kind: 'validation'; code: CreateTaskValidationCode }
   | { kind: BaseResultKind; status?: number }
@@ -245,13 +280,16 @@ export type TaskStatusFilter = 'open' | 'done' | 'all'
  *  `page`; `total` is parsed but not used (`[fe-10]`). G2-core: `status`, when given, is sent as
  *  `&status=` after the view (and before the page); without it the request string is unchanged.
  *  The list page always passes it, `all` included, so its answer never depends on the server's
- *  default for an absent status. */
-export async function listTasks(view: TaskView, page?: { offset: number }, status?: TaskStatusFilter): Promise<ListTasksResult> {
+ *  default for an absent status. Title search: `q`, when given and not empty, is sent as `&q=` after
+ *  the status (and before the page); without it the request string is unchanged. Encoding is inside
+ *  the `try`: text that cannot be encoded (a lone surrogate) reads as a failed request, not a throw. */
+export async function listTasks(view: TaskView, page?: { offset: number }, status?: TaskStatusFilter, q?: string): Promise<ListTasksResult> {
   const statusQuery = status === undefined ? '' : `&status=${encodeURIComponent(status)}`
   const query = page === undefined ? '' : `&limit=${TASK_PAGE_LIMIT}&offset=${page.offset}`
   let response: Response
   try {
-    response = await apiFetch(`/api/tasks?view=${encodeURIComponent(view)}${statusQuery}${query}`)
+    const searchQuery = q === undefined || q === '' ? '' : `&q=${encodeURIComponent(q)}`
+    response = await apiFetch(`/api/tasks?view=${encodeURIComponent(view)}${statusQuery}${searchQuery}${query}`)
   } catch {
     return { kind: 'error', status: 0 }
   }
@@ -325,7 +363,8 @@ function isTaskChild(value: unknown): value is TaskChild {
  *  The three M3 tree fields (`parentId`/`depth`/`children`) are a GROUP: a body with none of them is
  *  the M2 shape (the M2 backend) and parses as a root task with no visible children; a body with
  *  any of them must carry all three, each with the right type. The optional `followers`/`canLeave`/
- *  `canEdit`/`canDelete`/`canComment`/`canManageMembers` are validated only when present. */
+ *  `canEdit`/`canDelete`/`canComment`/`canManageMembers` are validated only when present, and so
+ *  is package 2's `source`. */
 function parseTaskDetail(value: unknown): TaskDetail | null {
   if (!value || typeof value !== 'object') return null
   const record = value as Record<string, unknown>
@@ -409,7 +448,33 @@ function parseTaskDetail(value: unknown): TaskDetail | null {
     if (!Array.isArray(record.listIds) || !record.listIds.every((id) => typeof id === 'string')) return null
     detail.listIds = record.listIds
   }
+  // Package 2: `source`, checked when present like the keys above — a malformed one makes the whole
+  // body malformed. Only the five keys are kept; the ids are checked for type here and for shape by
+  // the link helper, which refuses to link a non-segment id.
+  if (record.source !== undefined) {
+    const source = parseTaskDetailSource(record.source)
+    if (!source) return null
+    detail.source = source
+  }
   return detail
+}
+
+/** `TaskDetail.source`: an object with `kind: 'multitable_record'`, string `sheetId` / `recordId`,
+ *  and `viewId` / `baseId` each a string or `null` (all five keys present). `null` otherwise —
+ *  including for an explicit `null` source, which the service never sends (it omits the key). */
+function parseTaskDetailSource(value: unknown): TaskDetailSource | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const source = value as Record<string, unknown>
+  if (source.kind !== 'multitable_record') return null
+  if (typeof source.sheetId !== 'string' || typeof source.recordId !== 'string') return null
+  if (!isNullableString(source.viewId) || !isNullableString(source.baseId)) return null
+  return {
+    kind: 'multitable_record',
+    sheetId: source.sheetId,
+    recordId: source.recordId,
+    viewId: source.viewId,
+    baseId: source.baseId,
+  }
 }
 
 /** `GET /api/tasks/:id`. Per the backend contract, a missing task, an invisible one and one in
@@ -443,6 +508,13 @@ export async function createTask(input: CreateTaskInput): Promise<CreateTaskResu
   for (const key of ['dueDate', 'dueTime', 'startDate', 'startTime', 'timeZone', 'remindAt'] as const) {
     if (input[key] !== undefined) body[key] = input[key]
   }
+  // Package 2 keys: the same rule. An explicit `null` is never sent (the service refuses it).
+  if (input.source !== undefined) {
+    const source: Record<string, string> = { sheetId: input.source.sheetId, recordId: input.source.recordId }
+    if (input.source.viewId !== undefined) source.viewId = input.source.viewId
+    body.source = source
+  }
+  if (input.dispatchKey !== undefined) body.dispatchKey = input.dispatchKey
 
   let response: Response
   try {
@@ -471,10 +543,15 @@ export async function createTask(input: CreateTaskInput): Promise<CreateTaskResu
 
   const okBody = await safeJson(response)
   if (okBody && typeof okBody === 'object' && typeof (okBody as Record<string, unknown>).id === 'string') {
-    const { id, version } = okBody as Record<string, unknown>
-    if (version === undefined) return { kind: 'ok', id: id as string }
-    if (!isPositiveInteger(version)) return { kind: 'error', status: response.status }
-    return { kind: 'ok', id: id as string, version }
+    const { id, version, reused, sourceLinked } = okBody as Record<string, unknown>
+    if (version !== undefined && !isPositiveInteger(version)) return { kind: 'error', status: response.status }
+    const result: { kind: 'ok'; id: string; version?: number; reused?: true; sourceLinked?: boolean } = { kind: 'ok', id: id as string }
+    if (version !== undefined) result.version = version as number
+    if (input.source !== undefined) {
+      if (reused === true) result.reused = true
+      result.sourceLinked = sourceLinked === true
+    }
+    return result
   }
   return { kind: 'error', status: response.status }
 }
@@ -1788,4 +1865,142 @@ export async function placeTaskInUserGroup(taskId: string, groupId: string | nul
   if (!isPathSafeSegment(taskId)) return { kind: 'not_found' }
   const sent = await sendWrite(`/api/task-groups/items/${encodeURIComponent(taskId)}`, 'PUT', { groupId, position })
   return sent.ok ? placeResult(sent) : sent.failure
+}
+
+/*
+ * ---------------------------------------------------------------------------------------------
+ * Task usability package 1b: the people picker. `GET /api/tasks/people` searches (`q`) or
+ * resolves (`ids`) the active members of the caller's org — the people the task writes accept —
+ * each with a name, a distinguishing detail and whether they can use tasks; it takes tasks:write,
+ * as the writes it feeds do. `GET /api/tasks/:id/people` names the people on one task, each with a
+ * status, for anyone who can view the task.
+ *
+ * Both are strict: `ok` only for a 200 of exactly the expected shape (one malformed row makes the
+ * whole answer `error`). Neither throws.
+ * ---------------------------------------------------------------------------------------------
+ */
+
+export interface PersonOption {
+  id: string
+  /** `''` when the person has no name; show the id instead. */
+  name: string
+  /** A masked email, or `''`. */
+  detail: string
+  canUseTasks: boolean
+}
+
+export type SearchPeopleResult =
+  /** `truncated` is present on a resolve answer only. */
+  | { kind: 'ok'; items: PersonOption[]; hasMore: boolean; requiresQuery: boolean; truncated?: boolean }
+  | { kind: 'org_missing' }
+  | { kind: 'forbidden' }
+  | { kind: 'rate_limited' }
+  | { kind: 'error'; status: number }
+
+/** Most ids one resolve sends: the most assignees one task can carry. */
+export const PEOPLE_RESOLVE_MAX_IDS = 50
+
+const PEOPLE_ID_MAX_LENGTH = 255
+const PEOPLE_PRINTABLE_ID = /^[!-~]+$/
+
+/** The server's member id rule: printable ASCII, 1..255 long, not `.` or `..`. */
+function isPeopleId(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= PEOPLE_ID_MAX_LENGTH
+    && PEOPLE_PRINTABLE_ID.test(value)
+    && value !== '.'
+    && value !== '..'
+}
+
+function isPersonOption(value: unknown): value is PersonOption {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return isPeopleId(record.id)
+    && typeof record.name === 'string'
+    && typeof record.detail === 'string'
+    && typeof record.canUseTasks === 'boolean'
+}
+
+async function readPeople(path: string, mode: 'search' | 'resolve'): Promise<SearchPeopleResult> {
+  let response: Response
+  try {
+    response = await apiFetch(path)
+  } catch {
+    return { kind: 'error', status: 0 }
+  }
+  if (response.status === 403) return { kind: 'forbidden' }
+  if (response.status === 429) return { kind: 'rate_limited' }
+  if (response.status === 422) {
+    return extractErrorCode(await safeJson(response)) === 'ORG_MISSING'
+      ? { kind: 'org_missing' }
+      : { kind: 'error', status: 422 }
+  }
+  if (response.status !== 200) return { kind: 'error', status: response.status }
+  const body = await safeJson(response)
+  if (!body || typeof body !== 'object') return { kind: 'error', status: 200 }
+  const record = body as Record<string, unknown>
+  const rows: unknown = record.items
+  if (!Array.isArray(rows) || !rows.every(isPersonOption)) return { kind: 'error', status: 200 }
+  const items: PersonOption[] = (rows as PersonOption[]).map((item) => ({ id: item.id, name: item.name, detail: item.detail, canUseTasks: item.canUseTasks }))
+  if (mode === 'resolve') {
+    if (typeof record.truncated !== 'boolean') return { kind: 'error', status: 200 }
+    return { kind: 'ok', items, hasMore: false, requiresQuery: false, truncated: record.truncated }
+  }
+  if (typeof record.hasMore !== 'boolean' || typeof record.requiresQuery !== 'boolean') return { kind: 'error', status: 200 }
+  return { kind: 'ok', items, hasMore: record.hasMore, requiresQuery: record.requiresQuery }
+}
+
+/** `GET /api/tasks/people?q=` — a blank term answers `requiresQuery: true` with no rows. */
+export async function searchPeople(q: string): Promise<SearchPeopleResult> {
+  return readPeople(`/api/tasks/people?q=${encodeURIComponent(q)}`, 'search')
+}
+
+/** `GET /api/tasks/people?ids=` — the subset of `ids` that are active members of the caller's org.
+ *  Only ids that pass the member id rule are sent, at most `PEOPLE_RESOLVE_MAX_IDS`; with none left
+ *  nothing is sent and the answer is an empty `ok`. */
+export async function resolvePeople(ids: readonly string[]): Promise<SearchPeopleResult> {
+  const sendable = Array.from(new Set(ids.filter(isPeopleId))).slice(0, PEOPLE_RESOLVE_MAX_IDS)
+  if (sendable.length === 0) return { kind: 'ok', items: [], hasMore: false, requiresQuery: false, truncated: false }
+  return readPeople(`/api/tasks/people?ids=${sendable.map(encodeURIComponent).join(',')}`, 'resolve')
+}
+
+export interface TaskPerson {
+  name: string
+  status: 'active' | 'inactive'
+}
+
+export type TaskPeopleResult =
+  | { kind: 'ok'; people: Map<string, TaskPerson> }
+  | { kind: 'not_found' }
+  | { kind: 'forbidden' }
+  | { kind: 'error'; status: number }
+
+function isTaskPerson(value: unknown): value is TaskPerson {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return typeof record.name === 'string' && (record.status === 'active' || record.status === 'inactive')
+}
+
+/** `GET /api/tasks/:id/people` — keyed by user id; a Map, so any id is just a key. */
+export async function getTaskPeople(id: string): Promise<TaskPeopleResult> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  let response: Response
+  try {
+    response = await apiFetch(`/api/tasks/${encodeURIComponent(id)}/people`)
+  } catch {
+    return { kind: 'error', status: 0 }
+  }
+  if (response.status === 403) return { kind: 'forbidden' }
+  if (response.status === 404) return { kind: 'not_found' }
+  if (response.status !== 200) return { kind: 'error', status: response.status }
+  const body = await safeJson(response)
+  const people = body && typeof body === 'object' ? (body as Record<string, unknown>).people : undefined
+  if (!people || typeof people !== 'object' || Array.isArray(people)) return { kind: 'error', status: 200 }
+  const map = new Map<string, TaskPerson>()
+  for (const [userId, entry] of Object.entries(people as Record<string, unknown>)) {
+    if (!isTaskPerson(entry)) return { kind: 'error', status: 200 }
+    map.set(userId, { name: entry.name, status: entry.status })
+  }
+  return { kind: 'ok', people: map }
 }

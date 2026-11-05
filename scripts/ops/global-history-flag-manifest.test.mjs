@@ -512,7 +512,7 @@ test('leave cancel-round launch flag: registered against the plugin reader, exac
 })
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src, plus plugins/plugin-attendance/index.cjs for the ATTENDANCE_CANCEL_ROUND_ family', () => {
-  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource()])].sort()
+  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource()])].sort()
   assert.ok(
     sourceGH.length >= 20,
     `expected >=20 Global-History flags derived from source, got ${sourceGH.length} — the denylist is too broad or grep broke`,
@@ -1081,4 +1081,89 @@ test('automation scheduler leader lock: exact true switch plus a numeric TTL tha
   assert.equal(ttl.source, lock.source)
   assert.match(ttl.activationValue, /default 30000/)
   assert.equal(isActivated(ttl, '30000'), false)
+})
+
+// ── DingTalk integration-scoped work-notification credentials (AGENTS.md: every env flag is registered) ──
+// Derived from READ SITES, not from name shape alone: every `DINGTALK_INTEGRATION_SCOPED_*_ENABLED` token
+// under packages/core-backend/src joins the population as soon as source reads it, so a sibling switch
+// added to this family later fails completeness until it is registered. The family prefix is chosen so it
+// is not a substring of any other registered key (TASKS_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED
+// would be caught by a DINGTALK_WORK_NOTIFICATION_ prefix; this one is not).
+function dingtalkIntegrationScopedFlagsInSource() {
+  return grepFlagTokens('DINGTALK_INTEGRATION_SCOPED_[A-Z_0-9]+')
+    .filter((t) => t.endsWith('_ENABLED'))
+    .sort()
+}
+
+test('DingTalk integration-scoped credentials: the read-site scan finds the registered key (non-vacuous)', () => {
+  assert.deepEqual(dingtalkIntegrationScopedFlagsInSource(), ['DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED'])
+})
+
+test('DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED: exact true (no case folding), danger high, independent, predicate source compares the literal', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED
+  assert.ok(spec, 'DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'byte-exact family: the reader neither trims nor lowercases')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/integrations/dingtalk/integration-scoped-credentials-flag.ts#isDingTalkIntegrationScopedCredentialsEnabled',
+  )
+  const module = readRepoSource(spec.source.split('#')[0])
+  assert.match(module, /export function isDingTalkIntegrationScopedCredentialsEnabled\(/)
+  assert.ok(
+    module.includes("env.DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED === 'true'"),
+    'the reader compares the exact literal (no trim, no lowercase)',
+  )
+  assert.doesNotMatch(module, /toLowerCase\(\)|\.trim\(\)/, 'the reader must not fold case or trim')
+  assert.match(spec.purpose, /Default OFF/)
+  assert.match(spec.purpose, /byte-identical/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', '1', 'yes', 'on']) {
+    assert.equal(isActivated(spec, value), false, String(value))
+  }
+  for (const value of ['TRUE', '1', 'yes', 'on']) {
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${value} looks on but is not the exact literal`)
+  }
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  assert.equal(isMisconfiguredTruthy(spec, ''), false)
+})
+
+test('DINGTALK_TODO_MIRROR_ENABLED: the registry evaluates the same input matrix exactly like the runtime reader', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.DINGTALK_TODO_MIRROR_ENABLED
+  assert.ok(spec, 'DINGTALK_TODO_MIRROR_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, true, 'the runtime reader trims and lowercases, so the registry must too')
+  assert.equal(spec.danger, 'medium')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.doesNotMatch(spec.purpose, /exact literal/i, 'the purpose must not claim exact-literal behaviour')
+  // The runtime reader is a TypeScript module; it is read as text (Node 20 has no type stripping) and its
+  // single return expression is evaluated as-is, so this compares against what the runtime really runs.
+  const runtimePath = 'packages/core-backend/src/integrations/dingtalk/todo-mirror-flag.ts'
+  assert.ok(spec.source.startsWith(`${runtimePath}:`), 'the source cites the runtime reader first')
+  const module = readRepoSource(runtimePath)
+  const match = module.match(/export function isDingTalkTodoMirrorEnabled\([^)]*\)[^{]*\{\n\s*return ([^\n]+)\n\}/)
+  assert.ok(match, 'isDingTalkTodoMirrorEnabled is a single return expression')
+  const expression = match[1]
+  assert.equal(expression, "String(env[DINGTALK_TODO_MIRROR_ENABLED] ?? '').trim().toLowerCase() === 'true'")
+  // The env key comes from the runtime module's own constant, so a renamed key cannot pass silently.
+  const keyMatch = module.match(/export const DINGTALK_TODO_MIRROR_ENABLED = '([^']+)'/)
+  assert.ok(keyMatch, 'the runtime module declares its env key as a constant')
+  assert.equal(keyMatch[1], spec.key, 'the runtime reads the same env key the registry describes')
+  const runtimeExpression = new Function('env', 'DINGTALK_TODO_MIRROR_ENABLED', `return ${expression}`)
+  const runtimeReader = (raw) => runtimeExpression(raw === undefined ? {} : { [keyMatch[1]]: raw }, keyMatch[1])
+  const matrix = ['true', 'TRUE', ' true ', 'True', undefined, '', 'false', '1', 'yes']
+  for (const value of matrix) {
+    assert.equal(isActivated(spec, value), runtimeReader(value), `registry and runtime disagree on ${JSON.stringify(value)}`)
+  }
+  // Positive control: the matrix really has both outcomes, so agreement is not vacuous.
+  assert.deepEqual(matrix.map(runtimeReader), [true, true, true, true, false, false, false, false, false])
+  // isMisconfiguredTruthy follows isActivated: a value the runtime honours is not flagged as a footgun.
+  for (const value of ['TRUE', 'True', ' true ']) assert.equal(isMisconfiguredTruthy(spec, value), false, value)
+  for (const value of ['1', 'yes']) assert.equal(isMisconfiguredTruthy(spec, value), true, value)
 })

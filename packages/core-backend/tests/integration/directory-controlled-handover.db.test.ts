@@ -17,6 +17,8 @@ vi.mock('../../src/integrations/dingtalk/client', async (original) => ({
 }))
 import { exchangeCodeForUser } from '../../src/auth/dingtalk-oauth'
 import { pool, query } from '../../src/db/pg'
+import { db as migrationDb } from '../../src/db/db'
+import * as headColumn from '../../src/db/migrations/zzzz20261027090000_add_local_department_head'
 import {
   applyDirectoryHandover,
   finishDirectoryHandover,
@@ -222,6 +224,46 @@ async function fixture() {
 db(
   'controlled same-enterprise handover (real database, synthetic users)',
   () => {
+    // The dedicated upgrade lane provides a database migrated with only the head column excluded.
+    if (process.env.EXPECT_HANDOVER_HEAD_UPGRADE === '1') {
+      it('protects applied handovers during the department-head migration', async () => {
+        const hasHeadColumn = async () => (await q(
+          `SELECT 1 FROM pg_attribute WHERE attrelid = 'directory_account_departments'::regclass
+             AND attname = 'is_department_head' AND NOT attisdropped`,
+        )).rows.length === 1
+        expect(await hasHeadColumn()).toBe(false)
+        const start = async () => {
+          const f = await fixture()
+          const preview = await previewDirectoryHandover(f.pair, f.admin)
+          const moved = await applyDirectoryHandover(f.pair, preview.digest, f.admin)
+          return { f, moved }
+        }
+        const rollback = await start()
+        const finalize = await start()
+        const refusal = 'Finish applied directory handovers'
+        await expect(headColumn.up(migrationDb)).rejects.toThrow(refusal)
+        expect(await hasHeadColumn()).toBe(false)
+        await finishDirectoryHandover(rollback.moved.id, rollback.moved.digest, rollback.f.admin, 'rollback')
+        await finishDirectoryHandover(finalize.moved.id, finalize.moved.digest, finalize.f.admin, 'finalize')
+
+        const waiting = await fixture()
+        const beforeUpgrade = await previewDirectoryHandover(waiting.pair, waiting.admin)
+        await migrationDb.transaction().execute(async (migration) => {
+          await headColumn.up(migration)
+          await expect(applyDirectoryHandover(waiting.pair, beforeUpgrade.digest, waiting.admin))
+            .rejects.toMatchObject({ code: '55P03' })
+        })
+        expect(await hasHeadColumn()).toBe(true)
+        const current = await start()
+        await headColumn.up(migrationDb) // replay does not change the row shape
+        await expect(headColumn.down(migrationDb)).rejects.toThrow(refusal)
+        expect(await hasHeadColumn()).toBe(true)
+        await finishDirectoryHandover(current.moved.id, current.moved.digest, current.f.admin, 'rollback')
+        await headColumn.down(migrationDb)
+        expect(await hasHeadColumn()).toBe(false)
+      })
+    }
+
     it('atomically moves original accounts, preserves 2 users/roles/identities/9 actionable todos, restores exact membership on rollback', async () => {
       const f = await fixture(),
         before = await f.stable()

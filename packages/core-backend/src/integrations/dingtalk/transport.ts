@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'async_hooks'
 import { Logger } from '../../core/logger'
 
 const logger = new Logger('DingTalkTransport')
@@ -353,6 +354,46 @@ export interface DingTalkTransportRequest {
   logUpstreamMessage?: boolean
 }
 
+/**
+ * Roadmap §7.7 (sync-performance telemetry): one retry the loop below DECIDED to perform —
+ * a failed attempt that was classified retryable and had budget left — reported to the
+ * observer installed by {@link observeDingTalkTransportRetries}, just before the backoff
+ * wait. `reason` is the same classification string the retry warn line carries
+ * (`flow_control_errcode_90018`, `http_429`, `network_error`, …).
+ */
+export interface DingTalkTransportRetryEvent {
+  reason: string
+  /** 1-based index of the attempt that just FAILED; the retry about to run is `attempt + 1`. */
+  attempt: number
+  kind: DingTalkCallKind
+  delayMs: number
+}
+
+/**
+ * Synchronous observers only: the call is try/catch-wrapped, so a thrown error is swallowed,
+ * but a returned promise is not awaited and a rejection from it would surface unhandled.
+ */
+export type DingTalkTransportRetryObserver = (event: DingTalkTransportRetryEvent) => void
+
+const retryObserverStorage = new AsyncLocalStorage<DingTalkTransportRetryObserver>()
+
+/**
+ * Run `fn` with `observer` installed for every transport call made inside its async
+ * context (AsyncLocalStorage), so a caller such as directory sync can count the retries
+ * of a whole multi-call pull without threading a callback through each client signature.
+ * Observation only: with no observer the loop is the exact pre-existing one, and an
+ * observer that throws is swallowed so it can never change a retry decision or the error
+ * shape (the invariants in the header comment). Calls running concurrently OUTSIDE the
+ * context (other DingTalk callers in the same process) are not reported to it. Nested
+ * calls do not chain: inside the inner `fn` only the innermost observer receives events.
+ */
+export function observeDingTalkTransportRetries<T>(
+  observer: DingTalkTransportRetryObserver,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return retryObserverStorage.run(observer, fn)
+}
+
 export function normalizeErrorMessage(payload: Record<string, unknown> | null, fallback: string): string {
   if (!payload) return fallback
   const candidates = [
@@ -695,6 +736,14 @@ export async function requestDingTalkTransportJson(request: DingTalkTransportReq
     logger.warn(
       `DingTalk transport retry ${attempt + 1}/${config.maxAttempts} after ${failure.reason} (${kind}): backing off ${delayMs}ms`,
     )
+    const retryObserver = retryObserverStorage.getStore()
+    if (retryObserver) {
+      try {
+        retryObserver({ reason: failure.reason, attempt, kind, delayMs })
+      } catch {
+        // telemetry only — an observer failure must never alter the retry decision or the error shape
+      }
+    }
     const aborted = await sleepUnlessAborted(delayMs, callerSignal)
     if (aborted) {
       throw new DingTalkTimeoutError(timeoutMs)

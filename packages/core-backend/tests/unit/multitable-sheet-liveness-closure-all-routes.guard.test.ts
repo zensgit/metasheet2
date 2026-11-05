@@ -1205,6 +1205,9 @@ const COVERED: Record<string, CoveredFile> = {
   // canRead 403 → sendSheetNotLive pair inline, before any gate or read, so the scan proves them GUARDED.
   'routes/multitable-copy-sheet.ts': { minHandlers: 2, minInScope: 2, exempt: {} },
   'routes/multitable-record-approvals.ts': { minHandlers: 2, minInScope: 2, exempt: {} },
+  // The record's list of tasks: its one handler runs requireRecordReadable first and answers its
+  // refusal before anything else is read.
+  'routes/multitable-record-tasks.ts': { minHandlers: 1, minInScope: 1, exempt: {} },
   'routes/recovery-archive-restore-owner.ts': { minHandlers: 11, minInScope: 11, exempt: {} },
   // #5829 CLOSED: all three legacy grant-table routes now run the same capability/liveness PAIR as
   // the forward routes — resolveSheetCapabilities → 403 on !canManageSheetAccess →
@@ -1217,6 +1220,9 @@ const COVERED: Record<string, CoveredFile> = {
   // #5828 closed: all three `:sheetId` handlers now gate on loadLiveSpreadsheetSheet — see
   // "LEGACY SPREADSHEET SHEETS" for the parent-liveness AND the :sheetId → :id binding half.
   'routes/spreadsheets.ts': { minHandlers: 9, minInScope: 3, exempt: {} },
+  // POST /api/tasks with a `source` (a dispatch from a record) runs requireRecordReadable inline and
+  // throws on its refusal before any other read; the other handlers of the file address no sheet.
+  'routes/tasks.ts': { minHandlers: 22, minInScope: 1, exempt: {} },
 }
 
 /** Files whose closed world lives in a sibling guard. */
@@ -1296,8 +1302,8 @@ const OPAQUE_REGISTRATIONS: Record<string, Record<string, { handler: string; rea
  * The vetted record gate is held to the SAME rule 3 as a route (#5830): the capability lookup runs
  * first, its 401/403 precede the liveness 404, nothing — no record read — runs between, and the
  * liveness it refuses is the one of the sheet it was given. Routes that rely on it alone (AI shortcut
- * preview/run, button run, record approvals POST/GET) are GUARDED on the strength of that proof; their
- * behaviour is pinned in multitable-record-gate-capability-before-liveness.test.ts.
+ * preview/run, button run, record approvals POST/GET, the record's list of tasks) are GUARDED on the
+ * strength of that proof; their behaviour is pinned in multitable-record-gate-capability-before-liveness.test.ts.
  */
 const VETTED_RECORD_GATE_OPTIONS: AnalyzeOptions = {
   vetted: new Map(),

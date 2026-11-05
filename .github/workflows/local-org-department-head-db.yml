@@ -8,6 +8,8 @@ on:
     paths:
       - 'packages/core-backend/src/directory/local-directory-department-head.ts'
       - 'packages/core-backend/src/services/ApprovalDirectoryOrg.ts'
+      - 'packages/core-backend/src/directory/controlled-handover.ts'
+      - 'packages/core-backend/tests/integration/directory-controlled-handover.db.test.ts'
       - 'packages/core-backend/src/routes/admin-directory-local.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20261027090000_add_local_department_head.ts'
       - 'packages/core-backend/tests/integration/local-org-department-head.db.test.ts'
@@ -22,6 +24,8 @@ on:
     paths:
       - 'packages/core-backend/src/directory/local-directory-department-head.ts'
       - 'packages/core-backend/src/services/ApprovalDirectoryOrg.ts'
+      - 'packages/core-backend/src/directory/controlled-handover.ts'
+      - 'packages/core-backend/tests/integration/directory-controlled-handover.db.test.ts'
       - 'packages/core-backend/src/routes/admin-directory-local.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20261027090000_add_local_department_head.ts'
       - 'packages/core-backend/tests/integration/local-org-department-head.db.test.ts'
@@ -81,6 +85,21 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Provision the pre-head schema for the handover upgrade test
+        env:
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql,zzzz20261027090000_add_local_department_head.ts
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Verify an applied handover across the department-head upgrade
+        env:
+          EXPECT_HANDOVER_HEAD_UPGRADE: '1'
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/directory-controlled-handover.db.test.ts
+          -t 'protects applied handovers during the department-head migration'
+          --reporter=verbose
 
       - name: Run DB migrations
         env:

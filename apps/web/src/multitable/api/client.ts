@@ -796,6 +796,46 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
+/**
+ * One task dispatched from a record, as the record's 关联任务 panel lists it
+ * (`GET /api/multitable/sheets/:sheetId/records/:recordId/tasks`): ids, the title, the status and the
+ * dates. `isMine` is whether the viewer created it. No person and no record value.
+ */
+export interface MetaRecordTaskItem {
+  id: string
+  title: string
+  status: string
+  completionMode: string | null
+  dueAt: string | null
+  dueDate: string | null
+  createdAt: string | null
+  isMine: boolean
+}
+
+/** One page of a record's tasks. `hasMore` is the server's own flag; `degraded` means the server
+ *  could not tell the session's org and answered no rows. */
+export interface MetaRecordTaskListPage {
+  items: MetaRecordTaskItem[]
+  hasMore: boolean
+  degraded: boolean
+}
+
+function normalizeRecordTaskItem(value: unknown): MetaRecordTaskItem | null {
+  if (!isPlainObject(value)) return null
+  const id = optionalStringValue(value.id)
+  if (!id) return null
+  return {
+    id,
+    title: typeof value.title === 'string' ? value.title : '',
+    status: typeof value.status === 'string' ? value.status : '',
+    completionMode: optionalStringValue(value.completionMode) ?? null,
+    dueAt: optionalStringValue(value.dueAt) ?? null,
+    dueDate: optionalStringValue(value.dueDate) ?? null,
+    createdAt: optionalStringValue(value.createdAt) ?? null,
+    isMine: value.isMine === true,
+  }
+}
+
 function stringValue(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback
 }
@@ -2540,6 +2580,46 @@ export class MultitableApiClient implements CommentsApiClient {
     // Strictly boolean-true: a string 'false' / a count / a missing field all mean "do not claim more".
     const hasMore = isPlainObject(body) && (body.hasMore === true || body.has_more === true)
     return { submissions, hasMore }
+  }
+
+  /**
+   * The tasks dispatched from this record that the viewer can open (package 2, the 关联任务 panel).
+   * The server answers only those, and never a count of the others. `limit` is the page size the
+   * panel asks for (the server clamps it to 1..100). With `dispatchKey` (the 派发任务 dialog resolving
+   * an attempt that got no readable answer) the server answers only the caller's own live task made
+   * from this record under that key: zero or one row. A 2xx whose body is not an object with an
+   * `items` list (a proxy's page, say) throws, like a refusal: it says nothing about the record's tasks,
+   * so it is not read as an empty list.
+   */
+  async listRecordTasks(
+    sheetId: string,
+    recordId: string,
+    options: { limit?: number; dispatchKey?: string } = {},
+  ): Promise<MetaRecordTaskListPage> {
+    const limit = typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0
+      ? Math.trunc(options.limit)
+      : undefined
+    const dispatchKey = typeof options.dispatchKey === 'string' && options.dispatchKey !== '' ? options.dispatchKey : undefined
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/tasks${qs({ limit, dispatchKey })}`,
+    )
+    const raw = await this.parseJson<unknown>(res)
+    const body = isPlainObject(raw) && Array.isArray(raw.items) ? raw : null
+    if (body === null) {
+      const error = new Error('The record\'s tasks could not be read.') as Error & { status?: number }
+      error.name = 'MultitableApiError'
+      error.status = res.status
+      throw error
+    }
+    const items = (body.items as unknown[])
+      .map((row: unknown) => normalizeRecordTaskItem(row))
+      .filter((row): row is MetaRecordTaskItem => row !== null)
+    return {
+      items,
+      // Strictly boolean-true, as for the approvals list: anything else claims no more rows.
+      hasMore: body.hasMore === true,
+      degraded: body.degraded === true,
+    }
   }
 
   /**

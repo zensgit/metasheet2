@@ -19,6 +19,7 @@ import {
   type AttendanceNotificationDeliveryQuery,
 } from '../../src/services/AttendanceNotificationDeliveryWorker'
 import { DingTalkBusinessError, DingTalkRequestError, type DingTalkMessageConfig } from '../../src/integrations/dingtalk/client'
+import { DingTalkMessageConfigError } from '../../src/integrations/dingtalk/config-validation-error'
 import {
   AttendanceNotifier,
   createAttendanceNotifierChannelsFromEnv,
@@ -493,6 +494,24 @@ describe('Attendance C5 delivery worker primitives', () => {
       retryable: false,
       error: expect.stringContaining('dingtalk_work_notification_config_unavailable'),
     })
+
+    // A typed failure of the integration-scoped resolver is non-retryable by its TYPE: this message
+    // carries none of the words the text classifier matches, so the branch is load-bearing here.
+    const typedMessage = 'DingTalk directory integration dir-1 is not active, so its stored work-notification credentials were not used; environment credentials were not borrowed for it'
+    expect(typedMessage).not.toMatch(/not configured|required|not found|Agent ID/i)
+    await expect(new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => { throw new DingTalkMessageConfigError('integration_inactive', typedMessage) },
+    }).send(base)).resolves.toEqual({
+      ok: false,
+      retryable: false,
+      error: `dingtalk_work_notification_config_unavailable: ${typedMessage}`,
+    })
+    // The same words in a plain Error stay retryable, so the type is what decides.
+    await expect(new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => { throw new Error(typedMessage) },
+    }).send(base)).resolves.toMatchObject({ ok: false, retryable: true })
 
     await expect(new DingTalkAttendanceDeliveryChannel({
       query,

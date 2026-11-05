@@ -5,6 +5,7 @@ import {
   countConsecutiveFailedRuns,
   deliverDirectoryInactiveLinkedAlert,
   deliverDirectorySyncFailureAlert,
+  getDirectoryInactiveLinkedMetric,
   getDirectoryManagerBindingCoverage,
   readDirectoryInactiveLinkedAlertThresholdDays,
   readDirectorySyncAlertWebhookConfig,
@@ -180,6 +181,31 @@ describe('§7.1 directory inactive-linked backlog digest', () => {
     it('accepts a positive integer threshold', () => {
       vi.stubEnv('DIRECTORY_INACTIVE_LINKED_ALERT_DAYS', '45')
       expect(readDirectoryInactiveLinkedAlertThresholdDays()).toBe(45)
+    })
+  })
+
+  describe('getDirectoryInactiveLinkedMetric age anchor', () => {
+    // The predicate itself is proven against real Postgres in the .db.test.ts; this only
+    // pins WHICH column the SQL anchors on, so the anchor cannot drift back to `updated_at`
+    // (re-stamped on already-inactive rows by the openId backfill and controlled handover)
+    // without a DB. Both statements are captured and checked, not just the first.
+    it('anchors every age read on last_seen_at and limits the metric to the dingtalk provider', async () => {
+      const seen: string[] = []
+      const queryFn = (async (sql: string) => {
+        seen.push(sql)
+        return { rows: [] }
+      }) as unknown as typeof import('../../src/db/pg').query
+      await getDirectoryInactiveLinkedMetric('dir-1', 30, queryFn)
+      expect(seen).toHaveLength(2)
+      for (const sql of seen) {
+        expect(sql).toContain('a.last_seen_at')
+        expect(sql).toContain("a.provider = 'dingtalk'")
+        expect(sql).not.toContain('updated_at')
+      }
+      const sample = seen.find((sql) => /ORDER BY/.test(sql))
+      expect(sample).toContain('ORDER BY a.last_seen_at ASC')
+      expect(sample).toContain('a.last_seen_at AS inactive_since_at')
+      expect(sample).toContain('NOW() - a.last_seen_at')
     })
   })
 

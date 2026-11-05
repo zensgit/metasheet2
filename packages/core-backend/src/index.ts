@@ -262,6 +262,7 @@ import { tasksRouter } from './routes/tasks'
 import { setTaskCountsBroadcaster } from './services/task-counts-realtime'
 import { pendingSourceRegistry } from './services/pending-source-registry'
 import { approvalPendingSource } from './services/approval-pending-source'
+import { taskPendingSource } from './services/task-pending-source'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
@@ -434,6 +435,7 @@ import { createMultitableAiRoutes } from './routes/multitable-ai'
 import { QueueServiceImpl } from './services/QueueService'
 import { createMultitableButtonRoutes } from './routes/multitable-button'
 import { createMultitableRecordApprovalRoutes } from './routes/multitable-record-approvals'
+import { createMultitableRecordTaskRoutes } from './routes/multitable-record-tasks'
 import { createMultitableCopySheetRoutes } from './routes/multitable-copy-sheet'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
@@ -2054,11 +2056,18 @@ export class MetaSheetServer {
       injector: this.injector,
       afterSalesApprovalBridgeService: this.afterSalesApprovalBridgeService,
     }))
-    // 路由：待办中心（v1 首切片,todo-center-design-lock §3/§4 —— 只注册审批源）
+    // 路由：待办中心（todo-center-design-lock §3/§4）。任务来源随任务路由一起注册。
     pendingSourceRegistry.register(approvalPendingSource)
     this.app.use(todoRouter())
     const taskRoutes = tasksRouter()
-    if (taskRoutes) this.app.use(taskRoutes)
+    if (taskRoutes) {
+      this.app.use(taskRoutes)
+      pendingSourceRegistry.register(taskPendingSource)
+    }
+    // The tasks dispatched from a multitable record (GET /api/multitable/sheets/:sheetId/records/
+    // :recordId/tasks), mounted only with the task routes. See routes/multitable-record-tasks.ts.
+    const recordTaskRoutes = createMultitableRecordTaskRoutes()
+    if (taskRoutes && recordTaskRoutes) this.app.use('/api/multitable', recordTaskRoutes)
     // 路由：审计日志（管理员）
     this.app.use(auditLogsRouter())
     // 路由：审批历史（从审计表衍生）

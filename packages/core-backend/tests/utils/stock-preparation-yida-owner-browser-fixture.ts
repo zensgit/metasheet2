@@ -497,6 +497,14 @@ export async function createYidaOwnerBrowserFixture(input: {
         expectedToken = input.otherToken
         await page!.getByTestId('owner-harness-session').click()
       },
+      // A real Chromium reload of the same harness: page state (grant, commands, busy) is gone; the
+      // same synthetic owner session is installed again by the init script. Any request still in
+      // flight is aborted by the browser, which counts in abortedApiRequests, not as a violation.
+      async reload() {
+        await page!.reload({ waitUntil: 'networkidle' })
+        await page!.getByTestId(parent ? 'stock-prep-yida-preview-panel' : 'stock-prep-yida-owner-send-panel').waitFor()
+        await page!.waitForFunction(() => document.body.dataset.ownerHarnessReady === '1')
+      },
     }
   } catch (error) { await cleanup(); throw error }
 }
