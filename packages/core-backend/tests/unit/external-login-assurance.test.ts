@@ -176,7 +176,7 @@ describe('security action assurance policy', () => {
         methodConnectionId: pick(garbage), targetConnectionId: pick(garbage),
       })
       expect(typeof decision.allowed).toBe('boolean')
-      if (!decision.allowed) expect(decision.code).toMatch(/^SECURITY_ACTION_/)
+      if (decision.allowed === false) expect(decision.code).toMatch(/^SECURITY_ACTION_/)
     }
   })
 
@@ -222,7 +222,7 @@ describe('security action assurance policy', () => {
     expect(Number.isInteger(SECURITY_ACTION_POLICY_REVISION) && SECURITY_ACTION_POLICY_REVISION > 0).toBe(true)
     expect(
       { revision: SECURITY_ACTION_POLICY_REVISION, fingerprint },
-      'The policy matrix, a classification predicate or the witness composition changed: increment SECURITY_ACTION_POLICY_REVISION and re-pin the fingerprint',
+      'The policy matrix, the outcome of a pinned classification fixture or the witness composition changed: review whether SECURITY_ACTION_POLICY_REVISION must be incremented, then re-pin the fingerprint',
     ).toEqual({ revision: 1, fingerprint: '8320a7a961371d3eb707f79637264745a1b6a94cc4d63c22ab44daa4cd26929e' })
   })
 })

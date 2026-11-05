@@ -210,7 +210,13 @@ suite('security action privilege classification (real PostgreSQL)', () => {
   const singleSource: Array<[HighPrivilegeReason, string, (client: PoolClient, user: string) => Promise<void>, UserSeed?]> = [
     ['platform_admin_flag', 'the is_admin column', async () => undefined, { isAdmin: true }],
     ['platform_admin_role_column', 'the role column', async () => undefined, { role: 'admin' }],
-    ['platform_admin_role', 'the admin role', async (client, user) => grantRole(client, user, 'admin')],
+    ['platform_admin_role', 'the admin role', async (client, user) => {
+      // On a migrated database the platform admin role carries seeded permission codes. This row
+      // isolates membership of the role itself, so those codes are removed inside the rolled-back
+      // transaction before the role is granted; nothing outlives the rollback.
+      await client.query("DELETE FROM role_permissions WHERE role_id = 'admin'")
+      await grantRole(client, user, 'admin')
+    }],
     ['delegated_admin_role', 'a delegated admin role', async (client, user) => grantRole(client, user, 'p04a-attendance_admin')],
     ['delegated_admin_scope', 'a department scope row', async (client, user) => {
       const directory = await seedDirectory(client, 'p04a-org-' + user)

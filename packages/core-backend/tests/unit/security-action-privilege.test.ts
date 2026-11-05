@@ -67,11 +67,13 @@ function listSourceFiles(dir: string): string[] {
   })
 }
 
+/** Module specifiers of every `import … from` and `export … from` statement, so re-exports count as edges. */
 function importSpecifiers(source: string): string[] {
   const file = ts.createSourceFile('m.ts', source, ts.ScriptTarget.Latest, true)
   const specifiers: string[] = []
   for (const statement of file.statements) {
     if (ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier)) specifiers.push(statement.moduleSpecifier.text)
+    if (ts.isExportDeclaration(statement) && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) specifiers.push(statement.moduleSpecifier.text)
   }
   return specifiers
 }
@@ -245,6 +247,8 @@ describe('privilege inputs read', () => {
     const inputs = await readInputs({ legacy_permissions: legacy })
     expect(() => classifyPrivilege(inputs)).toThrow(PrivilegeInputsUnavailableError)
     expect(() => classifyPrivilege(inputs)).toThrow(expect.objectContaining({ reason: 'input_malformed' }))
+    expect(() => collectPrivilegeCodes(inputs)).toThrow(PrivilegeInputsUnavailableError)
+    expect(() => collectPrivilegeCodes(inputs)).toThrow(expect.objectContaining({ reason: 'input_malformed' }))
     const { executor } = privilegeHarness(privilegeFixture({ rows: [privilegeRow({ legacy_permissions: legacy })] }))
     await expectUnavailable(assessSecurityActionPrivilege(executor, SUBJECT), 'input_malformed')
   })
@@ -514,6 +518,10 @@ describe('wiring', () => {
     visit(config)
     expect(excluded).toBe(true)
     expect(existsSync(path.join(BACKEND, DB_SPEC))).toBe(true)
+  })
+
+  it('counts import and re-export statements alike as import edges', () => {
+    expect(importSpecifiers("import { a } from './x'\nexport { b } from './y'\nexport * from './z'\nexport const c = 1\n")).toEqual(['./x', './y', './z'])
   })
 
   it('has no importer in the backend source other than the classifier importing the policy module', () => {

@@ -55,8 +55,9 @@ export class PrivilegeInputsUnavailableError extends Error {
 declare const privilegeInputsBrand: unique symbol
 
 /**
- * The grant inputs of one user as read by `readPrivilegeInputs`. Branded: only that read produces a
- * value of this type, so a classification cannot be computed over inputs assembled elsewhere.
+ * The grant inputs of one user as read by `readPrivilegeInputs`. The brand is type-level only: it
+ * keeps inputs assembled elsewhere out of the classifier's signature, while a cast to this type is a
+ * review concern rather than a runtime check.
  */
 export type PrivilegeInputs = Readonly<{
   userId: string
@@ -273,12 +274,7 @@ function normalizeCode(value: unknown): string {
   return typeof value === 'string' ? value.trim() : String(value ?? '').trim()
 }
 
-/**
- * The permission codes of a user before namespace admission: direct codes, the code of every held
- * (role, code) pair and every element of the legacy array, each normalized, emptied, de-duplicated and
- * sorted by code unit. A legacy value that is not an array contributes no code.
- */
-export function collectPrivilegeCodes(inputs: PrivilegeInputs): readonly string[] {
+function collectCodes(inputs: PrivilegeInputs): readonly string[] {
   const legacy = Array.isArray(inputs.legacyPermissions) ? inputs.legacyPermissions : []
   const codes = new Set<string>()
   for (const value of [...inputs.directCodes, ...inputs.rolePermissions.map((pair) => pair[1]), ...legacy]) {
@@ -286,6 +282,25 @@ export function collectPrivilegeCodes(inputs: PrivilegeInputs): readonly string[
     if (code) codes.add(code)
   }
   return sortedStrings([...codes])
+}
+
+function asInputMalformed(error: unknown): never {
+  if (error instanceof PrivilegeInputsUnavailableError) throw error
+  throw new PrivilegeInputsUnavailableError('input_malformed')
+}
+
+/**
+ * The permission codes of a user before namespace admission: direct codes, the code of every held
+ * (role, code) pair and every element of the legacy array, each normalized, emptied, de-duplicated and
+ * sorted by code unit. A legacy value that is not an array contributes no code. Any failure while
+ * normalizing an element raises `PrivilegeInputsUnavailableError('input_malformed')`.
+ */
+export function collectPrivilegeCodes(inputs: PrivilegeInputs): readonly string[] {
+  try {
+    return collectCodes(inputs)
+  } catch (error) {
+    return asInputMalformed(error)
+  }
 }
 
 function foldCode(code: string): string {
@@ -333,11 +348,6 @@ function classify(inputs: PrivilegeInputs): PrivilegeClassification {
   }
   const reasons = Object.freeze(HIGH_PRIVILEGE_REASONS.filter((reason) => hits[reason]))
   return Object.freeze({ privilegeClass: reasons.length > 0 ? 'high' : 'standard', reasons })
-}
-
-function asInputMalformed(error: unknown): never {
-  if (error instanceof PrivilegeInputsUnavailableError) throw error
-  throw new PrivilegeInputsUnavailableError('input_malformed')
 }
 
 /**

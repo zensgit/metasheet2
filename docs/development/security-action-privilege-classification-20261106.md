@@ -29,15 +29,18 @@ No migration, table, route, environment flag, OpenAPI change or consumer is part
    `PrivilegeInputsUnavailableError` (status 503, code `SECURITY_ACTION_UNAVAILABLE`, a fixed message
    and no cause). The read never returns `standard` in any of these cases.
 5. **Witness.** `sha256("metasheet:security-action:privilege:v1|" + canonical(inputs))`, where
-   `canonical` sorts object keys by code unit and arrays arrive sorted by code unit. Any change to any
-   grant input changes the witness, including a code moving between two held roles, an equal-count
-   replacement of a delegated scope row, an admission flip and a reordering of the legacy array.
+   `canonical` sorts object keys by code unit; the collections read from the grant tables arrive
+   sorted by code unit, and the legacy value is encoded as stored. Any change to any grant input
+   changes the witness, including a code moving between two held roles, an equal-count replacement
+   of a delegated scope row, an admission flip and a reordering of the legacy array.
 6. **Policy.** The matrix below. An unknown, missing or mismatched assurance level is never sufficient;
    an unknown purpose is unavailable; an unknown privilege class is treated as `high`. The function is
    total and never throws.
 7. **Revision.** `SECURITY_ACTION_POLICY_REVISION` is pinned together with a fingerprint of the
-   matrix, a set of classification fixtures and the witness composition. A change to any of them fails
-   the pin until the revision is incremented.
+   matrix, the outcome of a fixed set of classification fixtures and the witness composition. A change
+   observable on any of them fails the pin until the fingerprint is re-pinned; whether the revision
+   must be incremented is decided in review, and a predicate change outside the pinned fixtures is
+   caught only by review.
 8. **Unavailable purposes.** Every purpose is unavailable: each prerequisite is a frozen `false`,
    availability reads no environment variable, and the production entry point takes one argument.
 9. **Inert.** Nothing in `src` imports either module except the classifier importing the policy

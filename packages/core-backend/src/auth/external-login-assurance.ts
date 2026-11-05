@@ -28,9 +28,12 @@ export const PRIVILEGE_CLASSES = ['standard', 'high'] as const
 export type PrivilegeClass = (typeof PRIVILEGE_CLASSES)[number]
 
 /**
- * Versions the interpretation below. Any change to the classification predicates, the witness
- * composition or the policy matrix changes the fingerprint a unit test pins next to this number;
- * that test fails until the revision is incremented and the fingerprint re-pinned.
+ * Versions the interpretation below. A unit test pins this number together with a fingerprint of
+ * the policy matrix, the outcome of a fixed set of classification fixtures and the witness
+ * composition, so a change observable on any of them fails that test until the fingerprint is
+ * re-pinned. The fingerprint makes such changes visible; whether a change requires incrementing
+ * the revision is a review decision, and predicate changes outside the pinned fixtures are only
+ * caught by review.
  */
 export const SECURITY_ACTION_POLICY_REVISION = 1
 
