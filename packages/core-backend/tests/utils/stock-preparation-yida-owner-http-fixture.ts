@@ -109,6 +109,11 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   // committed), observe the server-side close, and let the test wait for the host run to settle afterwards.
   let disconnectAtToken = false, inflight: ClientRequest | undefined, closedResponses = 0
   let lastSubmission: Promise<unknown> = Promise.resolve()
+  // PR-B proof control: the next synthetic form call (after admission and the token call) holds its
+  // answer until the test releases it. Stopping the runtime releases every hold, so a failing test
+  // can never leave the run (or the next reset) waiting.
+  let formHold: { enter(): void; open: Promise<void> } | undefined
+  const formReleases: Array<() => void> = []
   // Every call on the sheet read path (access, fields, view, records, record permissions) counts.
   let sheetReads = 0
   const sheetFields = [{ id: 'fld_project', type: 'string' }, { id: 'fld_line', type: 'string' }, { id: 'fld_parent', type: 'string' },
@@ -176,6 +181,9 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       formPayloads.push(JSON.parse(String(body.formDataJson)) as Data)
       validRequests &&= body.systemToken === syntheticMaterial().systemToken && body.userId === syntheticMaterial().userId
         && (init?.headers as Record<string, string>)['x-acs-dingtalk-access-token'] === 'synthetic-http-access-token'
+      const held = formHold
+      formHold = undefined
+      if (held) { held.enter(); await held.open }
       if (formOutcome === 'unknown') throw new Error('SYNTHETIC_FORM_RESULT_UNKNOWN')
       // A 2xx whose body the transport cannot use (gate 6, a2): the ledger must say receipt_unparsed.
       if (formOutcome === 'unparsed') return new Response('synthetic-not-json', { status: 201 })
@@ -184,6 +192,8 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     throw new Error('SYNTHETIC_UNEXPECTED_FETCH')
   }
   async function closeRuntime() {
+    formHold = undefined
+    for (const release of formReleases.splice(0)) release()
     const initializationDrain = initializationRuntime?.stop()
     await runtime?.stop()
     await initializationDrain
@@ -349,6 +359,13 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     setMultiTarget(value: unknown) { multiTargetEnablement = value },
     setDisconnectAtToken(value: boolean) { disconnectAtToken = value },
     async settleSubmissions() { await lastSubmission },
+    holdNextForm() {
+      if (formHold) throw new Error('SYNTHETIC_ONE_FORM_HOLD_REQUIRED')
+      let enter!: () => void, release!: () => void
+      const reached = new Promise<void>(resolve => { enter = resolve }), open = new Promise<void>(resolve => { release = resolve })
+      formHold = { enter, open }; formReleases.push(release)
+      return { reached, release }
+    },
     setSheet(patch: Partial<SheetState>) { sheet = { ...defaultSheet(), ...patch } },
     get sheetReads() { return sheetReads },
     get tokenCommitted() { return tokenCommitted }, get validRequests() { return validRequests },
