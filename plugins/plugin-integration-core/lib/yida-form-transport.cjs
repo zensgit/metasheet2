@@ -2,9 +2,13 @@
 
 const { ReadableStream, ReadableStreamDefaultReader } = require('node:stream/web')
 const { types: { isProxy, isPromise } } = require('node:util')
+const {
+  YIDA_SEND_REQUEST_MAX_BYTES, YIDA_SEND_SYSTEM_TOKEN_MAX_LENGTH, YIDA_SEND_USER_ID_MAX_LENGTH, encodeYidaFormRequestBody,
+} = require('./yida-send-budget.cjs')
 
 const ENDPOINT = 'https://api.dingtalk.com/v1.0/yida/forms/instances'
-const MAX_REQUEST_BYTES = 256 * 1024
+// Gate 4 (R-71 ⑦.2): defined once in yida-send-budget.cjs, shared with the pre-admission assessment.
+const MAX_REQUEST_BYTES = YIDA_SEND_REQUEST_MAX_BYTES
 const MAX_RESPONSE_BYTES = 16 * 1024
 const MAX_RESPONSE_READS = MAX_RESPONSE_BYTES + 1
 // Gate 6 (R-71 ⑦.1): once a 2xx status line has been received the run signal can no longer stop the
@@ -116,14 +120,14 @@ function validateFormJson(text) {
 function inputRequest(input) {
   const request = record(input, ['intent', 'data', 'accessToken', 'systemToken', 'userId'])
   if (request.intent !== 'create' && request.intent !== 'update') fail('INPUT')
-  if (!boundedId(request.accessToken, 8192) || !credential(request.systemToken, 4096)
-    || !credential(request.userId, 128)) fail('INPUT')
+  if (!boundedId(request.accessToken, 8192) || !credential(request.systemToken, YIDA_SEND_SYSTEM_TOKEN_MAX_LENGTH)
+    || !credential(request.userId, YIDA_SEND_USER_ID_MAX_LENGTH)) fail('INPUT')
   const data = request.intent === 'create'
     ? record(request.data, ['appType', 'formUuid', 'formDataJson'])
     : record(request.data, ['appType', 'formInstanceId', 'updateFormDataJson'])
   if (!boundedId(data.appType) || !boundedId(request.intent === 'create' ? data.formUuid : data.formInstanceId)) fail('INPUT')
   validateFormJson(request.intent === 'create' ? data.formDataJson : data.updateFormDataJson)
-  const body = JSON.stringify({ ...data, systemToken: request.systemToken, userId: request.userId })
+  const body = encodeYidaFormRequestBody(data, request.systemToken, request.userId)
   if (Buffer.byteLength(body, 'utf8') > MAX_REQUEST_BYTES) fail('INPUT')
   return { intent: request.intent, data, accessToken: request.accessToken, body }
 }

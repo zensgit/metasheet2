@@ -1,5 +1,6 @@
 import { onAuthPrincipalChange, readAuthSessionSignature, readStoredToken, TOKEN_KEYS } from '../../composables/authPrincipal'
 import { EXPLICIT_SESSION_ORG_KEY } from '../../utils/explicitSessionOrg'
+import { YIDA_SEND_REQUEST_MAX_BYTES } from './yidaSendBudget'
 
 export interface YidaOwnerDraftInput {
   readonly config: unknown
@@ -127,6 +128,8 @@ const errorStatuses: Readonly<Record<string, readonly number[]>> = Object.freeze
   YIDA_SEND_APPROVAL_INPUT: [400], YIDA_SEND_APPROVAL_NOT_FOUND: [404], YIDA_SEND_APPROVAL_CONFLICT: [409],
   YIDA_SEND_APPROVAL_EXPIRED: [409], YIDA_SEND_APPROVAL_REVOKED: [409], YIDA_SEND_APPROVAL_CANCELLED: [409],
   YIDA_SEND_APPROVAL_UNAVAILABLE: [503],
+  // Gate 4 (R-71 ⑦.2): the selected row exceeds the shared send budget; nothing was approved.
+  YIDA_SEND_APPROVAL_LIMIT: [422],
   // Y2 target list and sheet/view source.
   YIDA_INITIALIZATION_INPUT: [400], YIDA_INITIALIZATION_DENIED: [403], YIDA_INITIALIZATION_DISABLED: [403],
   YIDA_INITIALIZATION_CONFLICT: [409], YIDA_INITIALIZATION_CANCELLED: [409], YIDA_INITIALIZATION_INACTIVE: [503],
@@ -222,7 +225,7 @@ function preview(value: unknown, selected: YidaOwnerSelection): YidaOwnerPreview
     if (!(typeof value === 'string' || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)))) invalid()
     payload[key] = value
   }
-  if (new TextEncoder().encode(JSON.stringify(payload)).length > 256 * 1024) invalid()
+  if (new TextEncoder().encode(JSON.stringify(payload)).length > YIDA_SEND_REQUEST_MAX_BYTES) invalid()
   return Object.freeze({ ...selected, planDigest: digest(row.planDigest), rowPayloadDigest: digest(row.rowPayloadDigest),
     target: Object.freeze({ targetRef: uuid(target.targetRef), identityKind: 'owner-attested-single-target', evidenceVersion: 1,
       reviewRef: canonical(target.reviewRef), organizationId: canonical(target.organizationId), appType: canonical(target.appType), formUuid: canonical(target.formUuid) }),

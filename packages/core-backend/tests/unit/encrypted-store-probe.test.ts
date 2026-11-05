@@ -264,6 +264,8 @@ async function yidaWriterFixtures(): Promise<Record<string, string>> {
       primitives: {
         async resolveSelectionInTransaction() { return selection },
         executionPayloadDigest(value, grant) { return crypto.createHash('sha256').update(JSON.stringify({ value, grant })).digest('hex') },
+        // Gate 4: the approval service requires the send-budget primitive; this synthetic row is within it.
+        sendBudget() { return Object.freeze({ withinBudget: true }) },
         async prepareInTransaction() { throw new Error('YiDa fixture: no admission or sending') },
       },
     })

@@ -38,7 +38,11 @@ type Input = { config: Row & { fieldMap: Row[]; businessKey: string[]; emptyKeyF
 type Compiled = { source: Row; planDigest: string; plan: { rows: Array<{ payload: Row; protocolPreview: { data: Row } }> }
   rowSpecs: Array<{ index: number; businessKeyDigest: string; payloadDigest: string }> }
 type Gate = { reached: Promise<void>; release(): void }
-type Session = { client: PoolClient; pid: number; service: Service; draft: DraftStore; material: MaterialStore
+// Gate 4 session knobs: a send-budget verdict override (null = the real primitive verdict), the
+// multi-target service switch, and host security call counters.
+type BudgetSwitch = { within: boolean | null; calls: number; verdict?: () => unknown }
+type SessionOptions = { budget?: BudgetSwitch; multiTarget?: boolean; counter?: { encrypt: number; decrypt: number } }
+type Session = { client: PoolClient; pid: number; db: unknown; service: Service; draft: DraftStore; material: MaterialStore
   target: TargetStore; ledger: LedgerStore; statements: string[]; gateInsert(table: string): Gate
   release(): void; loseCommitResponse(): void }
 type Fixture = { draft: Draft; credentialRef: string; credentialGeneration: number; targetRef: string
@@ -64,6 +68,10 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
   let canonical: (value: unknown) => string
   let executionDigest: (input: unknown) => string
   let assertActor: (trx: Queryable, input: { actorId: string; tenantId: string; workspaceId: null }) => Promise<void>
+  let sendBudget: { YIDA_SEND_REQUEST_MAX_BYTES: number; encodeYidaFormRequestBody(data: unknown, systemToken: string, userId: string): string }
+  let plan: (input: { config: unknown; rows: unknown[] }) => { rows: Array<{ status: string; payload: Row; protocolPreview: { data: Row } }> }
+  let createAdditionalWriter: (options: { security: HostSecurity; context: Context }) => (trx: unknown, input: unknown) => Promise<{ targetRef: string; slot: number }>
+  let multiTargetUp = ''
   const sessions: Session[] = []
   const envKeys = ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT'] as const
   let savedEnv: Array<[typeof envKeys[number], string | undefined]> = []
@@ -128,7 +136,7 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     const rows = await Promise.all(proofTables.map(tableRows))
     return { counts: rows.map(value => value.length), digest: createHash('sha256').update(JSON.stringify(rows)).digest('hex') }
   }
-  async function session(scope = context()): Promise<Session> {
+  async function session(scope = context(), options: SessionOptions = {}): Promise<Session> {
     const client = await pool.connect()
     await client.query(`SET search_path TO ${ident(schema)}`)
     await client.query("SET statement_timeout = '10s'")
@@ -157,9 +165,23 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     const pluginDatabase: Database = { query: rowsQuery, transaction: callback => database.transaction(trx =>
       callback({ query: async (sql, params) => (await trx.query(sql, params)).rows })) }
     const db = createDb({ database: pluginDatabase }), config = { db, security, context: scope }
-    const value: Session = { client, pid, statements,
-      service: createService({ database, security, context: { tenantId: scope.tenantId, workspaceId: null, actorId: scope.ownerId },
-        primitives: createPrimitives({ security, context: scope }) }),
+    const counter = options.counter
+    const hostSecurity: HostSecurity = counter ? {
+      async encrypt(text) { counter.encrypt++; return security.encrypt(text) },
+      async decrypt(text) { counter.decrypt++; return security.decrypt(text) },
+    } : security
+    const real = createPrimitives({ security: hostSecurity, context: scope })
+    const budgetSwitch = options.budget
+    // Only the verdict is overridden; selection, digest, preparation and material are the real primitives.
+    const primitives: YidaSendAuthorityPrimitives = budgetSwitch ? { ...real, sendBudget(selection, grant) {
+      budgetSwitch.calls++
+      const verdict = real.sendBudget(selection, grant)
+      if (budgetSwitch.verdict) return budgetSwitch.verdict() as ReturnType<YidaSendAuthorityPrimitives['sendBudget']>
+      return budgetSwitch.within === null ? verdict : Object.freeze({ withinBudget: budgetSwitch.within })
+    } } : real
+    const value: Session = { client, pid, statements, db,
+      service: createService({ database, security: hostSecurity, context: { tenantId: scope.tenantId, workspaceId: null, actorId: scope.ownerId },
+        primitives, ...(options.multiTarget ? { multiTarget: true } : {}) }),
       draft: createDraft(config), material: createMaterial(config), target: createTarget(config), ledger: createLedger({ db }),
       gateInsert(table) {
         ident(table)
@@ -236,6 +258,12 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     const integration = path.join(root, 'packages/core-backend/src/integration')
     createService = (await import(pathToFileURL(path.join(integration, 'yida-send-approval-service.ts')).href)).createYidaSendApprovalService
     assertActor = (await import(pathToFileURL(path.join(integration, 'automation-live-authority.ts')).href)).assertAutomationIntegrationActor
+    sendBudget = requireCjs(path.join(lib, 'yida-send-budget.cjs'))
+    plan = (await importNative(pathToFileURL(path.join(lib, 'yida-static-plan.mjs')).href)).buildYidaStaticPlan
+    createAdditionalWriter = (await importNative(pathToFileURL(path.join(lib, 'yida-approved-target-store.mjs')).href)).createInternalYidaAdditionalTargetTransactionWriter
+    // Y2 migration SQL, exactly what zzzz20261103130000 up() executes.
+    multiTargetUp = (await import(pathToFileURL(path.join(root, 'packages/core-backend/src/db/migrations/zzzz20261103130000_add_integration_yida_multi_target_slots.ts')).href) as
+      { YIDA_MULTI_TARGET_UP_SQL: string }).YIDA_MULTI_TARGET_UP_SQL
     const migrations = path.join(root, 'packages/core-backend/migrations')
     approvalDdl = readFileSync(path.join(migrations, '095_create_integration_yida_send_approvals.sql'), 'utf8')
     ddl = ['090_create_integration_yida_delivery_ledger.sql', '091_create_integration_yida_create_fence.sql',
@@ -635,5 +663,177 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     expect([view.status, view.revoked, view.remainingAttempts]).toEqual(['admitted', true, 0])
     expect((await restarted.service.admit({ ...args, submissionId: 'synthetic-submission' })).reused).toBe(true)
     expect(await evidence()).toEqual(before)
+  })
+
+  // Gate 4 (R-71 ⑦.2): the shared send budget is checked before the grant is written (approve) and
+  // before the ledger fence is prepared (admit). Synthetic 32-field configs; nothing is a customer value.
+  const WORST = { systemToken: '\u0001'.repeat(4096), userId: '\u0001'.repeat(128) }
+  const shortTarget = (index: number) => 't' + index
+  const longTarget = (index: number) => ('t' + index).padEnd(128, 'x')
+  function budgetInput(row: Row, target = shortTarget, optionCount = 0,
+    locator = { appType: 'synthetic_budget_app', formUuid: 'synthetic_budget_form' }): Input {
+    const fields = Array.from({ length: 32 }, (_, index) => index)
+    const options = Array.from({ length: optionCount }, (_, index) => (String(index) + '选项').padEnd(128, '项'))
+    return { config: { version: 2, kind: 'yida-form-protocol-static', intent: 'create', target: { ...locator },
+      businessKey: ['s0'], emptyKeyFields: [],
+      fieldCatalog: fields.map(index => optionCount && index >= 16
+        ? { id: target(index), control: 'select', required: false, options }
+        : { id: target(index), control: 'text', required: index === 0 }),
+      fieldMap: fields.map(index => ({ source: 's' + index, target: target(index), type: 'string', required: index === 0 })) },
+    rowsText: JSON.stringify([row]), allocation: { mode: 'original' } }
+  }
+  // Key 'K', text fields s1..s<text> each 'b' + quotes, the rest null (select fields).
+  function quoteRow(count: number, text = 31): Row {
+    const row: Row = { s0: 'K' }
+    let left = count
+    for (let index = 1; index < 32; index++) {
+      if (index > text) { row['s' + index] = null; continue }
+      const take = Math.min(4095, left); row['s' + index] = 'b' + '"'.repeat(take); left -= take
+    }
+    return row
+  }
+  function worstBody(value: Input): number {
+    const planned = plan({ config: value.config, rows: JSON.parse(value.rowsText) as Row[] }).rows[0]
+    expect(planned.status).toBe('planned_create')
+    const data = { ...planned.protocolPreview.data, formDataJson: canonical(planned.payload) }
+    return Buffer.byteLength(sendBudget.encodeYidaFormRequestBody(data, WORST.systemToken, WORST.userId), 'utf8')
+  }
+  // The largest all-quote row whose worst-case request body is still within the shared limit.
+  function boundaryRow(make: (row: Row) => Input): Row {
+    let low = 0, high = 31 * 4095
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2)
+      let fits = false
+      try { fits = worstBody(make(quoteRow(mid))) <= sendBudget.YIDA_SEND_REQUEST_MAX_BYTES } catch { fits = false }
+      if (fits) low = mid; else high = mid - 1
+    }
+    return quoteRow(low)
+  }
+  // Measured identical on the pre-gate-4 source (main a066f61c7): the budget check adds no crypto call.
+  const G4_EXPECTED_COUNTS = [{ encrypt: 1, decrypt: 6 }, { encrypt: 0, decrypt: 7 }]
+  const statementsTouch = (active: Session, table: string) => active.statements.some(sql => sql.includes(table))
+
+  it.each(['snapshot', 'request-body'])('gate 4: an over-budget %s row is refused at approval with LIMIT, before any grant, seal or audit', async kind => {
+    const counter = { encrypt: 0, decrypt: 0 }
+    const value = kind === 'snapshot'
+      // 16 select fields of 64 long options: the config alone is over the snapshot limit.
+      ? budgetInput({ s0: 'K', ...Object.fromEntries(Array.from({ length: 31 }, (_, index) => ['s' + (index + 1), index < 15 ? 'b' : null])) }, shortTarget, 64)
+      // Escape doubling: every quote costs 4 bytes in the request body, so this row is over even with realistic credentials.
+      : budgetInput(quoteRow(64000), longTarget)
+    if (kind === 'request-body') expect(worstBody(value) > sendBudget.YIDA_SEND_REQUEST_MAX_BYTES).toBe(true)
+    const f = await fixture(value), active = await session(context(), { counter })
+    active.statements.length = 0
+    await rejected(active.service.approve(f.request), 'LIMIT')
+    expect((await evidence()).counts).toEqual([0, 0, 0, 0, 0, 0])
+    expect(counter.encrypt).toBe(0)
+    expect(active.statements.some(sql => /^INSERT /i.test(sql.trim()))).toBe(false)
+    expect(active.statements.filter(sql => sql === 'ROLLBACK').length).toBe(1)
+    // Fixed values-free refusal: replaying it yields the same code and still writes nothing.
+    await rejected(active.service.approve({ ...f.request, confirmationId: 'synthetic-other-confirmation' }), 'LIMIT')
+    expect((await evidence()).counts).toEqual([0, 0, 0, 0, 0, 0])
+  })
+
+  it('gate 4: a row exactly within the worst-case request budget is approved and admitted', async () => {
+    const make = (row: Row) => budgetInput(row)
+    const row = boundaryRow(make), value = make(row)
+    const body = worstBody(value)
+    expect(body <= sendBudget.YIDA_SEND_REQUEST_MAX_BYTES && body > sendBudget.YIDA_SEND_REQUEST_MAX_BYTES - 4).toBe(true)
+    const f = await fixture(value), granted = await first.service.approve(f.request)
+    expect([granted.status, granted.remainingAttempts]).toEqual(['approved', 1])
+    const admitted = await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' })
+    expect([admitted.status, admitted.remainingAttempts]).toEqual(['admitted', 0])
+    expect((await evidence()).counts).toEqual([1, 0, 1, 2, 1, 1])
+  })
+
+  it('gate 4: an admission refused by the budget leaves no trace; once lifted the same grant is admitted', async () => {
+    const budget: BudgetSwitch = { within: null, calls: 0 }
+    const f = await fixture(), active = await session(context(), { budget })
+    const granted = await active.service.approve(f.request)
+    expect(budget.calls).toBe(1)
+    const before = await evidence()
+    expect(before.counts).toEqual([1, 0, 0, 1, 0, 0])
+    budget.within = false; active.statements.length = 0
+    const args = { grantId: granted.grantId, submissionId: 'synthetic-submission' }
+    await rejected(active.service.admit(args), 'LIMIT')
+    expect(budget.calls).toBe(2)
+    // Refused before the ledger is even read: no prepare, no fence, no admission, no admit audit.
+    expect(statementsTouch(active, LEDGER) || statementsTouch(active, LEDGER_AUDIT)).toBe(false)
+    expect(active.statements.some(sql => /^INSERT /i.test(sql.trim()))).toBe(false)
+    expect(await evidence()).toEqual(before)
+    const view = await active.service.inspect({ grantId: granted.grantId })
+    expect([view.status, view.remainingAttempts, view.admissionId, view.ledgerId, view.revoked]).toEqual(['approved', 1, null, null, false])
+    expect((await owner.query(`SELECT count(*)::int AS n FROM ${ident(ADMISSION)} WHERE grant_id = $1`, [granted.grantId])).rows[0].n).toBe(0)
+    expect((await owner.query(`SELECT count(*)::int AS n FROM ${ident(LEDGER)} WHERE operation_id = $1 AND row_key = $2`,
+      [f.request.operationId, f.request.rowKey])).rows[0].n).toBe(0)
+    expect((await tableRows(AUDIT)).map(row => row.event)).toEqual(['approve'])
+    // Not revoked or consumed (h1): lift the refusal and the very same grant is admitted.
+    budget.within = null
+    const admitted = await active.service.admit(args)
+    expect([admitted.grantId, admitted.status, admitted.remainingAttempts, admitted.reused]).toEqual([granted.grantId, 'admitted', 0, false])
+    expect((await evidence()).counts).toEqual([1, 0, 1, 2, 1, 1])
+    expect((await tableRows(AUDIT)).map(row => row.event).sort()).toEqual(['admit', 'approve'])
+  })
+
+  const malformedVerdicts: Array<[string, () => unknown]> = [
+    ['string-true', () => 'true'], ['true', () => true], ['empty', () => Object.freeze({})],
+    ['truthy-number', () => Object.freeze({ withinBudget: 1 })], ['unfrozen', () => ({ withinBudget: true })],
+    ['extra-key', () => Object.freeze({ withinBudget: true, bytes: 1 })],
+    ['accessor', () => Object.freeze(Object.defineProperty({}, 'withinBudget', { enumerable: true, get: () => true }))],
+    ['proxy', () => new Proxy(Object.freeze({ withinBudget: true }), {})],
+    ['inherited', () => Object.freeze(Object.create(Object.freeze({ withinBudget: true })))],
+    ['promise', () => Promise.resolve(Object.freeze({ withinBudget: true }))],
+    ['rejected-promise', () => Promise.reject(new Error('SYNTHETIC_BUDGET_FAILURE'))],
+    ['throws', () => { throw new Error('SYNTHETIC_BUDGET_FAILURE') }],
+  ]
+  it.each(malformedVerdicts.flatMap(([name, verdict]) => [['approve', name, verdict], ['admit', name, verdict]] as const))
+  ('gate 4 fail-closed: a %s-time %s budget verdict is refused and writes nothing', async (stage, _name, verdict) => {
+    const budget: BudgetSwitch = { within: null, calls: 0 }
+    const f = await fixture(), active = await session(context(), { budget })
+    const granted = stage === 'admit' ? await active.service.approve(f.request) : undefined
+    const before = await evidence()
+    budget.verdict = verdict
+    await rejected(stage === 'approve' ? active.service.approve(f.request)
+      : active.service.admit({ grantId: granted!.grantId, submissionId: 'synthetic-submission' }), 'UNAVAILABLE')
+    expect(budget.calls).toBe(stage === 'approve' ? 1 : 2)
+    expect(await evidence()).toEqual(before)
+    expect(before.counts).toEqual(stage === 'approve' ? [0, 0, 0, 0, 0, 0] : [1, 0, 0, 1, 0, 0])
+  })
+
+  it('gate 4: approval and admission perform the same host encrypt/decrypt calls as before the budget check (no material read)', async () => {
+    const counter = { encrypt: 0, decrypt: 0 }
+    const f = await fixture(), active = await session(context(), { counter })
+    const granted = await active.service.approve(f.request)
+    const approveCounts = { ...counter }
+    counter.encrypt = 0; counter.decrypt = 0
+    await active.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' })
+    expect([approveCounts, { ...counter }]).toEqual(G4_EXPECTED_COUNTS)
+  })
+
+  it('gate 4 (Y2 multi-target): the named slot-2 target is budgeted with its own locator, not slot 1\'s', async () => {
+    await owner.query(multiTargetUp)
+    const longLocator = { appType: 'A'.repeat(128), formUuid: 'F'.repeat(128) }
+    // One row at the slot-1 boundary; the same row under the 128-character slot-2 locator is over it.
+    const row = boundaryRow(value => budgetInput(value))
+    const one = budgetInput(row), two = budgetInput(row, shortTarget, 0, longLocator)
+    expect(worstBody(one) <= sendBudget.YIDA_SEND_REQUEST_MAX_BYTES && worstBody(two) > sendBudget.YIDA_SEND_REQUEST_MAX_BYTES).toBe(true)
+    const f = await fixture(one)
+    const draft = await first.draft.createDraft(two), secret = await first.material.create({ material: material() })
+    const writer = createAdditionalWriter({ security, context: context() })
+    const slot2 = await (first.db as { transaction<T>(callback: (trx: { setTransactionIsolationLevel(level: string): Promise<void> }) => Promise<T>): Promise<T> })
+      .transaction(async trx => {
+        await trx.setTransactionIsolationLevel('read committed')
+        return writer(trx, { operationId: draft.operationId, credentialRef: secret.credentialRef,
+          credentialGeneration: secret.credentialGeneration, attestation: { kind: 'owner-reviewed-target', reviewRef: 'synthetic-review',
+            organizationId: 'synthetic-organization', executionIdentity: 'synthetic-executor' } })
+      })
+    expect(slot2.slot).toBe(2)
+    const multi = await session(context(), { multiTarget: true })
+    const granted = await multi.service.approve({ ...f.request, targetRef: f.targetRef })
+    expect([granted.status, granted.targetRef]).toEqual(['approved', f.targetRef])
+    const before = await evidence()
+    await rejected(multi.service.approve({ operationId: draft.operationId, rowKey: draft.rows[0].rowKey,
+      confirmationId: 'synthetic-slot2-confirmation', targetRef: slot2.targetRef }), 'LIMIT')
+    expect(await evidence()).toEqual(before)
+    expect(before.counts).toEqual([1, 0, 0, 1, 0, 0])
   })
 })

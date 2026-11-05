@@ -122,7 +122,7 @@ for (const mode of ['original', 'equal_integer', 'equal_decimal_exact']) {
     const f = await fixture(mode), index = mode === 'original' ? 0 : 2
     const selected = await f.port.resolveSelectionInTransaction(f.trx, f.selection(f.draft, index))
     assert.deepEqual(Object.keys(f.port).sort(), ['executionPayloadDigest', 'loadExecutionMaterialInTransaction',
-      'prepareDraftInTransaction', 'prepareInTransaction', 'previewInTransaction', 'resolveSelectionInTransaction'])
+      'prepareDraftInTransaction', 'prepareInTransaction', 'previewInTransaction', 'resolveSelectionInTransaction', 'sendBudget'])
     assert.equal(Object.isFrozen(selected) && Object.isFrozen(selected.selectedRow) && Object.isFrozen(selected.plan.rows), true)
     assert.deepEqual(Object.keys(selected).sort(), ['tenantId', 'workspaceId', 'ownerId', 'operationId', 'rowKey', 'targetRef',
       'targetRevision', 'planRevision', 'credentialRef', 'credentialGeneration', 'businessKeyDigest', 'rowPayloadDigest', 'planDigest',
@@ -163,6 +163,32 @@ test('execution digest is the original runner formula, binds grant and requires 
   assert.throws(() => f.fresh().executionPayloadDigest(selected, authorization), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
   assert.throws(() => f.port.executionPayloadDigest(selected, { ...authorization, actorId: 'synthetic-other' }), { code: 'YIDA_SEND_AUTHORITY_CONFLICT' })
   assert.equal(f.state[LEDGER].length, 0)
+})
+
+test('gate 4 send budget: one frozen boolean for this port actual selection; owner-bound; no SQL or crypto', async () => {
+  const f = await fixture('equal_integer'), selected = await f.port.resolveSelectionInTransaction(f.trx, f.selection(f.draft, 2))
+  const authorization = grant(), calls = f.calls.length
+  let crypto = 0
+  const { encrypt, decrypt } = f.security
+  f.security.encrypt = async (...args) => { crypto++; return encrypt(...args) }
+  f.security.decrypt = async (...args) => { crypto++; return decrypt(...args) }
+  const verdict = f.port.sendBudget(selected, authorization)
+  assert.deepEqual(Object.keys(verdict), ['withinBudget'])
+  assert.equal(verdict.withinBudget, true)
+  assert.equal(Object.isFrozen(verdict), true)
+  assert.equal(typeof verdict.then, 'undefined')
+  assert.throws(() => f.port.sendBudget(structuredClone(selected), authorization), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.throws(() => f.fresh().sendBudget(selected, authorization), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.throws(() => f.port.sendBudget(selected, { ...authorization, actorId: 'synthetic-other' }), { code: 'YIDA_SEND_AUTHORITY_CONFLICT' })
+  for (const bad of [{ ...authorization, expiresAt: 0 }, { ...authorization, grantRef: '' }, { ...authorization, extra: true },
+    { grantRef: authorization.grantRef, actorId: authorization.actorId }, null])
+    assert.throws(() => f.port.sendBudget(selected, bad), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.equal(f.calls.length, calls)
+  assert.equal(crypto, 0)
+  assert.equal(f.state[LEDGER].length, 0)
+  // Positive control: the counter does observe this port's real decryptions.
+  await f.port.resolveSelectionInTransaction(f.trx, f.selection(f.draft, 2))
+  assert.equal(crypto > 0, true)
 })
 
 test('private 090 current asserter verifies the full authenticated four-field envelope and returns metadata only', async () => {
