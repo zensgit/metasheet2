@@ -98,7 +98,7 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest
           --config vitest.integration.config.ts run
           tests/integration/directory-controlled-handover.db.test.ts
-          -t 'protects applied handovers during the department-head migration'
+          --testNamePattern='protects applied handovers during the department-head migration'
           --reporter=verbose
 
       - name: Run DB migrations
