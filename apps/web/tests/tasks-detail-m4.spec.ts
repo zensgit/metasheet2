@@ -51,6 +51,8 @@ const h_ = vi.hoisted(() => ({
   followerReply: vi.fn(),
   /** FE-8: `POST /api/tasks` (serialized body) -> the response. */
   createReply: vi.fn(),
+  /** Package 2 (S-G2): the locale the next mount reads (`useLocale().isZh`); ZH unless a cell says. */
+  zh: true,
 }))
 
 vi.mock('../src/utils/api', () => ({
@@ -78,8 +80,8 @@ vi.mock('../src/composables/useAuth', () => ({
 
 vi.mock('../src/composables/useLocale', () => ({
   useLocale: () => ({
-    locale: ref('zh-CN'),
-    isZh: ref(true),
+    locale: ref(h_.zh ? 'zh-CN' : 'en'),
+    isZh: ref(h_.zh),
     setLocale: vi.fn(),
   }),
 }))
@@ -87,6 +89,8 @@ vi.mock('../src/composables/useLocale', () => ({
 import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 import TasksView from '../src/views/tasks/TasksView.vue'
 import { formatViewerInstant } from '../src/tasks/tasksDateDisplay'
+import { isPlainSourceSegment, taskSourceRecordPath } from '../src/tasks/taskSourceLink'
+import type { TaskDetailSource } from '../src/tasks/tasksApi'
 
 // ---------------------------------------------------------------------------------------------
 // Fixtures and the fake backend
@@ -268,12 +272,17 @@ async function flush(cycles = 12): Promise<void> {
   }
 }
 
-async function mountAt(path: string): Promise<HTMLElement> {
+/** The multitable route of the app (router/types.ts `MULTITABLE`), so a source link resolves to a
+ *  match; nothing navigates to it. */
+const MultitableStub = defineComponent({ name: 'MultitableStub', render: () => h('div') })
+
+async function mountAt(path: string, base?: string): Promise<HTMLElement> {
   router = createRouter({
-    history: createMemoryHistory(),
+    history: createMemoryHistory(base),
     routes: [
       { path: '/tasks', component: TasksView },
       { path: '/tasks/:id', component: TasksView },
+      { path: '/multitable/:sheetId/:viewId', component: MultitableStub },
     ],
   })
   const RootShell = defineComponent({ name: 'RootShell', render: () => h(RouterView) })
@@ -350,6 +359,7 @@ function disabled(el: HTMLElement, testid: string): boolean {
 
 beforeEach(() => {
   unexpected = []
+  h_.zh = true
   h_.apiFetch.mockReset().mockImplementation(fakeFetch)
   h_.loadTasksContext.mockReset().mockResolvedValue({ state: 'ready', orgId: 'org1' })
   h_.notifyTasksChanged.mockReset()
@@ -1972,6 +1982,141 @@ describe('FE-8 — 422 INACTIVE_ORG_MEMBER at the task member adds and the creat
     await submitInto(el, 'tasks-create-title', 'tasks-create-form', 'New task')
     expect(requests('POST', '/api/tasks')).toHaveLength(2)
     expect(text(el, 'tasks-create-error')).toBe('创建任务失败，请稍后重试')
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// Package 2 (S-G2): the source row — the record a dispatched task came from
+// ---------------------------------------------------------------------------------------------
+
+/** A detail `source` in the service's shape. */
+function sourceBody(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return { kind: 'multitable_record', sheetId: 'sht_1', recordId: 'rec_1', viewId: 'viw_1', baseId: null, ...over }
+}
+
+/** Every request the page sent, as `METHOD path`. */
+function sentRequests(): string[] {
+  return fetchCalls().map(([path, init]) => `${init?.method ?? 'GET'} ${path}`)
+}
+
+describe('package 2 — the link helper (tasks/taskSourceLink.ts)', () => {
+  it('builds the record route from the ids: the view segment, then baseId and recordId in the query', () => {
+    expect(taskSourceRecordPath({ kind: 'multitable_record', sheetId: 'sht_1', recordId: 'rec_1', viewId: 'viw_1', baseId: null }))
+      .toBe('/multitable/sht_1/viw_1?recordId=rec_1')
+    expect(taskSourceRecordPath({ kind: 'multitable_record', sheetId: 'sht_1', recordId: 'rec_1', viewId: 'viw_1', baseId: 'bse_1' }))
+      .toBe('/multitable/sht_1/viw_1?baseId=bse_1&recordId=rec_1')
+  })
+
+  it('encodes every id', () => {
+    expect(taskSourceRecordPath({ kind: 'multitable_record', sheetId: 'a&b', recordId: 'r=1&x', viewId: 'v+1', baseId: 'b&c' }))
+      .toBe('/multitable/a%26b/v%2B1?baseId=b%26c&recordId=r%3D1%26x')
+  })
+
+  it('refuses a source without a view: the route needs a view segment', () => {
+    expect(taskSourceRecordPath({ kind: 'multitable_record', sheetId: 'sht_1', recordId: 'rec_1', viewId: null, baseId: 'bse_1' })).toBeNull()
+  })
+
+  it.each([
+    ['sheetId', '../admin'],
+    ['sheetId', 'sht/1'],
+    ['viewId', 'viw?x=1'],
+    ['viewId', '..'],
+    ['recordId', 'rec#1'],
+    ['recordId', 'rec%2F1'],
+    ['recordId', ''],
+    ['baseId', 'bse\\1'],
+    ['baseId', 'b c'],
+  ])('refuses a source whose %s is %j', (key, value) => {
+    const source = { kind: 'multitable_record', sheetId: 'sht_1', recordId: 'rec_1', viewId: 'viw_1', baseId: null, [key]: value } as TaskDetailSource
+    expect(taskSourceRecordPath(source)).toBeNull()
+  })
+
+  it('the segment rule is the service\'s source-id rule', () => {
+    for (const ok of ['sht_1', 'rec_0f3c', 'a.b', '...', 'x'.repeat(255), '!~']) expect(isPlainSourceSegment(ok)).toBe(true)
+    for (const bad of ['', '.', '..', 'x'.repeat(256), 'a/b', 'a?b', 'a#b', 'a%b', 'a\\b', 'a b', '记录', 1, null, undefined]) {
+      expect(isPlainSourceSegment(bad)).toBe(false)
+    }
+  })
+})
+
+describe('package 2 — the source row on /tasks/:id', () => {
+  it('shows 来源：多维表记录 with a link to the record, and reads nothing from the record', async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, detailBody({ source: sourceBody() })))
+    const el = await mountAt('/tasks/t1')
+    expect(text(el, 'tasks-detail-source')).toBe('来源：多维表记录')
+    const link = must(el, 'tasks-detail-source-link') as HTMLAnchorElement
+    expect(link.tagName).toBe('A')
+    expect(link.getAttribute('href')).toBe('/multitable/sht_1/viw_1?recordId=rec_1')
+    expect(link.textContent?.trim()).toBe('多维表记录')
+    expect(shown(el, 'tasks-detail-source-plain')).toBeNull()
+    expect(sentRequests().filter((request) => !/ \/api\/(tasks|task-lists)\b/.test(request))).toEqual([])
+  })
+
+  it('carries the base id in the link when the source has one', async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, detailBody({ source: sourceBody({ baseId: 'bse_1' }) })))
+    const el = await mountAt('/tasks/t1')
+    expect(must(el, 'tasks-detail-source-link').getAttribute('href')).toBe('/multitable/sht_1/viw_1?baseId=bse_1&recordId=rec_1')
+  })
+
+  it('resolves the link through the router: an app served under a sub-path links under it', async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, detailBody({ source: sourceBody() })))
+    const el = await mountAt('/tasks/t1', '/app/')
+    expect(must(el, 'tasks-detail-source-link').getAttribute('href')).toBe('/app/multitable/sht_1/viw_1?recordId=rec_1')
+  })
+
+  it('shows the row without a link when the source has no view', async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, detailBody({ source: sourceBody({ viewId: null }) })))
+    const el = await mountAt('/tasks/t1')
+    expect(text(el, 'tasks-detail-source')).toBe('来源：多维表记录')
+    expect(shown(el, 'tasks-detail-source-link')).toBeNull()
+    expect(text(el, 'tasks-detail-source-plain')).toBe('多维表记录')
+    expect(el.querySelector('[data-testid="tasks-detail-source"] a')).toBeNull()
+  })
+
+  it('shows the row without a link when an id is not a plain path segment', async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, detailBody({ source: sourceBody({ sheetId: '../sht_evil' }) })))
+    const el = await mountAt('/tasks/t1')
+    expect(text(el, 'tasks-detail-source')).toBe('来源：多维表记录')
+    expect(el.querySelector('[data-testid="tasks-detail-source"] a')).toBeNull()
+    expect(el.innerHTML).not.toContain('sht_evil')
+  })
+
+  it('shows no source row for a task without a source', async () => {
+    const el = await mountAt('/tasks/t1')
+    must(el, 'tasks-detail')
+    expect(shown(el, 'tasks-detail-source')).toBeNull()
+  })
+
+  it('a malformed source makes the detail fail to load, like any malformed body', async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, detailBody({ source: sourceBody({ kind: 'approval' }) })))
+    const el = await mountAt('/tasks/t1')
+    expect(shown(el, 'tasks-detail')).toBeNull()
+    expect(text(el, 'tasks-detail-error')).toBe('加载任务详情失败，请稍后重试')
+  })
+
+  it('an older task keeps the source line its description holds, beside the row (the dispatch no longer writes one)', async () => {
+    const description = '来源：/multitable/sht_1/viw_1?recordId=rec_1'
+    h_.detailReply.mockImplementation(() => jsonResponse(200, detailBody({ description, source: sourceBody() })))
+    const el = await mountAt('/tasks/t1')
+    expect(text(el, 'tasks-detail-description')).toBe(`描述：${description}`)
+    expect(text(el, 'tasks-detail-source')).toBe('来源：多维表记录')
+    expect(patchBodies()).toEqual([])
+  })
+
+  it('reads in English under the English locale', async () => {
+    h_.zh = false
+    h_.detailReply.mockImplementation(() => jsonResponse(200, detailBody({ source: sourceBody() })))
+    const el = await mountAt('/tasks/t1')
+    expect(text(el, 'tasks-detail-source')).toBe('Source: Multitable record')
+    expect(must(el, 'tasks-detail-source-link').textContent?.trim()).toBe('Multitable record')
+  })
+
+  it('shows the row in English without a link too', async () => {
+    h_.zh = false
+    h_.detailReply.mockImplementation(() => jsonResponse(200, detailBody({ source: sourceBody({ viewId: null }) })))
+    const el = await mountAt('/tasks/t1')
+    expect(text(el, 'tasks-detail-source')).toBe('Source: Multitable record')
+    expect(shown(el, 'tasks-detail-source-link')).toBeNull()
   })
 })
 

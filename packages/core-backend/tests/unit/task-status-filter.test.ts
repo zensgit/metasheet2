@@ -46,6 +46,9 @@ vi.mock('../../src/rbac/rbac', () => ({
   rbacGuard: () => (_req: express.Request, _res: express.Response, next: express.NextFunction) => next(),
 }))
 
+// The record read gate of a dispatch from a record; no cell here sends a `source`.
+vi.mock('../../src/routes/univer-meta', () => ({ requireRecordReadable: vi.fn() }))
+
 const { countTasks, listTasks, TASK_STATUS_FILTERS } = await import('../../src/services/task-records')
 
 const ORG = 'org_g2'

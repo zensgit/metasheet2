@@ -33,7 +33,7 @@
       :aria-label="title"
       tabindex="-1"
       data-testid="task-people-picker"
-      @keydown.esc.stop.prevent="emit('close')"
+      @keydown="onPanelKeydown"
     >
       <div class="task-people-picker__header">
         <strong>{{ title }}</strong>
@@ -49,7 +49,6 @@
         :placeholder="t.peopleSearchPlaceholder"
         autocomplete="off"
         @input="onInput"
-        @keydown.enter.prevent
       />
       <div class="task-people-picker__body">
         <p v-if="state.kind === 'idle'" class="task-people-picker__hint" data-testid="task-people-picker-type-hint">{{ t.peopleTypeToSearch }}</p>
@@ -236,6 +235,21 @@ async function runSearch(query: string): Promise<void> {
     return
   }
   state.value = { kind: 'failed', reason: result.kind }
+}
+
+// One keydown listener for the whole panel, never one on the search box as well. Vue stamps an event
+// at the first of its listeners the event reaches, and skips any later one attached in that same
+// millisecond or after. With a second listener on the box taking the stamp, an Esc arriving in the
+// millisecond the picker opened would skip this one and close the dialog around the picker too.
+function onPanelKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    emit('close')
+    return
+  }
+  // Enter in the search box submits nothing around the picker.
+  if (event.key === 'Enter' && event.target === inputRef.value) event.preventDefault()
 }
 
 function onInput(event: Event): void {

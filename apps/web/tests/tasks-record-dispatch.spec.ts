@@ -2,9 +2,10 @@
  * 派发任务 from a multitable record (owner ruling R-45 step 1).
  *
  * The record drawer's kebab gains 派发任务, which creates a real task through the task create wrapper
- * (`POST /api/tasks`) and then writes one source line into its description (`PATCH /api/tasks/:id`
- * with `expectedVersion`). This file mounts the REAL inspector, dialog and tasks API module; only
- * `apiFetch` (the transport), the feature-flag probe and the permission probe are replaced.
+ * (`POST /api/tasks`) with the record as its `source` and the record's retry key (`dispatchKey`); the
+ * description is not written (package 2). This file mounts the REAL inspector, dialog, tasks API module
+ * and retry key store; only `apiFetch` (the transport), the drawer's multitable client, the
+ * feature-flag probe and the permission probe are replaced.
  *
  * What it pins:
  *  1. Gating: the entry is hidden with the tasks feature off, without tasks:write, inside either
@@ -15,15 +16,15 @@
  *     and typed ids are validated, deduplicated and capped at 50.
  *  3. A due date is required: no request is sent without one.
  *  4. Request bodies: the create body carries exactly title / completionMode / due keys / assignees,
- *     with no other record value; with no assignee the key is omitted. The second write is a PATCH
- *     carrying exactly `expectedVersion` and a description of one source line with the record link.
+ *     `source` ({ sheetId, viewId, recordId }) and `dispatchKey`, with no other record value; with no
+ *     assignee the key is omitted. Nothing else is written (no PATCH, no version read).
  *  5. In-flight guard: a second click, a close/reopen and a move to another record and back during
  *     the create send no second create; a result that lands while the dialog is closed is shown on
- *     the next open; a late source-line write names the record the task was created from.
+ *     the next open; a create sent before a move names the record it was sent from.
  *  6. Error mapping: each known failure reads as its own plain message, and the inactive-member one
- *     names nobody.
- *  7. Success: a link to /tasks/:id and a nudge to the top-bar badge; a failed description write
- *     still reports the task as created, with a note.
+ *     names nobody. A request with no readable answer is an unknown outcome, never a failure.
+ *  7. Success: a link to /tasks/:id and a nudge to the top-bar badge; an answer that does not confirm
+ *     the source link still reports the task as created, with a note.
  *  8. Identity: a dispatch is sent only under the page's binding, the signed-in user and org the
  *     page was set up under, where the org is both the one the requests carry and the one the task
  *     service uses (the token's org claim, read the way the server reads it; a token without one keeps
@@ -38,6 +39,22 @@
  *     from its send. Dispatch state is kept per identity: another identity sees neither a pending
  *     note nor a created task, a session change in this tab drops the state of every other
  *     identity, and a run is settled only by the create that started it.
+ *  9. Retry key and answers (package 2; cells W1–W13, A1, K2): the key is written per
+ *     record when the first create is sent and counted before the request leaves; a 4xx settles one
+ *     request; no answer / 5xx locks the form and 重试 resends the same bytes under the same key; a
+ *     matched resend shows the earlier task (one read of it; not found → no link, 再派一项 under a
+ *     fresh key); the key goes once a result is on screen, on 再派一项, and when the service refuses
+ *     it; after a reload the open-time read under the key tells created / none / unknown; on open the
+     caller's own tasks from the record are listed before the form (再派一项 shows it), and a list
+     that cannot be read is said.
+ * 10. Late answers and the retry key (cells R1–R6): an answer that lands after a session change
+ *     changes neither the key nor the count of the entry the record holds then, nor the read under
+ *     that key on the next open; the same account's own late 4xx still counts off its request, and a
+ *     late 5xx or no answer still leaves the entry unresolved.
+ * 11. A sent form keeps what was sent (packages 1b and 2 together; cells S1–S4): a dialog mounted
+ *     while the create is out shows the sent form once the outcome is unknown; neither a picker
+ *     confirm nor a people lookup that lands after the send changes the chips of the locked form,
+ *     and 重试 resends the same bytes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type App } from 'vue'
@@ -52,7 +69,15 @@ import {
   readDispatchRun,
   resetDispatchRunsForTests,
   settleDispatchRun,
+  type DispatchCreated,
 } from '../src/tasks/recordTaskDispatchRuns'
+import {
+  DISPATCH_KEY_STORAGE_PREFIX,
+  dispatchKeyStorageKey,
+  dispatchKeys,
+  resetDispatchKeysForTests,
+} from '../src/tasks/recordTaskDispatchKey'
+import { UuidUnavailableError } from '../src/utils/uuid'
 import {
   NO_DISPATCH_IDENTITY,
   createDispatchBinding,
@@ -159,6 +184,25 @@ function taskBody(over: Record<string, unknown> = {}): Record<string, unknown> {
 
 type Route = (url: string, init: { method?: string; body?: string } | undefined) => Response | Promise<Response>
 
+// Copy pinned by equality (meta-record-labels.ts). Each says only what the browser knows.
+const ACCESS_NOTE_ZH = '是否通知负责人取决于系统的通知设置；负责人需要已开通任务功能，未开通的负责人无法被派发。'
+const OUTCOME_UNKNOWN_ZH = '没有收到这次派发的结果：任务可能已创建，也可能没有。点「重试」会按原内容再提交一次；也可以先到任务页查看。'
+const KEY_NOT_SAVED_ZH = '本页无法记住这次派发。如果刷新页面后再派发，可能会重复创建，请先到任务页确认。'
+const REJECTED_ZH = '这次派发未被接受，没有创建任务。请检查填写内容后再试；如果仍然不行，请刷新页面。'
+const SOURCE_NOT_READABLE_ZH = '这次没有派发：无法确认这条记录可以作为任务来源。请确认你仍能打开这条记录，再试一次。'
+const NOT_SENT_ZH = '这次没有派发：浏览器无法生成派发标识。请刷新页面重试，或到任务页创建。'
+const EARLIER_UNRESOLVED_ZH = '此前有一次派发没有收到结果，无法确认它是否已创建任务。请到任务页查看后再决定是否重新派发。'
+const EARLIER_NO_TASK_ZH = '此前有一次派发没有收到结果，它没有留下你可以打开的任务，可以重新派发。'
+const EARLIER_CREATED_ZH = '此前那次派发已创建了这个任务。'
+const REUSED_HEADING_ZH = '任务此前已创建。'
+const REUSED_NOTE_ZH = '这是此前那次派发创建的任务；这次提交没有另建任务，也没有改动它。如需按新内容另建一项，请点「再派一项」。'
+const REUSED_NOT_OPENABLE_ZH = '此前那次派发创建的任务现在无法打开（可能已被删除）。如需重新派发，请点「再派一项」。'
+const EXISTING_READ_FAILED_ZH = '无法读取这条记录已派发的任务。如果你之前从这条记录派发过，现在派发可能会再建一项。'
+const SOURCE_NOT_LINKED_ZH = '任务已创建，但未能关联来源记录，可在任务描述里手动写明来源记录。'
+const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/
+/** The source every create from the default harness carries: ids only, never the base id. */
+const SOURCE = { sheetId: 'sht_1', viewId: 'viw_1', recordId: 'rec_1' }
+
 /** The people lookup's answer when a cell names none: every id asked for is an active member who
  *  can use tasks, so the prefill stays as it was. */
 function everyoneUsable(url: string): Response {
@@ -167,8 +211,9 @@ function everyoneUsable(url: string): Response {
   return jsonResponse(200, { items: ids.map((id) => ({ id, name: '', detail: '', canUseTasks: true })), truncated: false })
 }
 
-/** Route the transport: POST /api/tasks, PATCH /api/tasks/:id, GET /api/tasks/:id, and the people
- *  lookup GET /api/tasks/people (package 1b). */
+/** Route the transport: the people lookup GET /api/tasks/people (package 1b), POST /api/tasks,
+ *  PATCH /api/tasks/:id, GET /api/tasks/:id (the exact paths first, then the id patterns). The default
+ *  create answer is the current service's: the source link is confirmed. */
 function serveTasks(options: { create?: Route; patch?: Route; get?: Route; people?: Route } = {}) {
   mocks.apiFetch.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
     const method = init?.method ?? 'GET'
@@ -176,7 +221,7 @@ function serveTasks(options: { create?: Route; patch?: Route; get?: Route; peopl
       return options.people ? options.people(url, init) : everyoneUsable(url)
     }
     if (url === '/api/tasks' && method === 'POST') {
-      return options.create ? options.create(url, init) : jsonResponse(200, { id: 'tsk_9', version: 1 })
+      return options.create ? options.create(url, init) : jsonResponse(200, { id: 'tsk_9', version: 1, sourceLinked: true })
     }
     if (url.startsWith('/api/tasks/') && method === 'PATCH') {
       return options.patch ? options.patch(url, init) : jsonResponse(200, { id: 'tsk_9', version: 2 })
@@ -197,6 +242,11 @@ function peopleLookups(): string[] {
   return mocks.apiFetch.mock.calls.map(([url]) => String(url)).filter((url) => url.startsWith('/api/tasks/people?'))
 }
 
+/** Every read of a task (GET /api/tasks/:id), without the people lookup (package 1b). */
+function taskReads(): Array<[string, Record<string, unknown>]> {
+  return tasksCalls('GET', '/api/tasks/').filter(([url]) => !url.startsWith('/api/tasks/people?'))
+}
+
 function tasksCalls(method: string, prefix: string): Array<[string, Record<string, unknown>]> {
   return mocks.apiFetch.mock.calls
     .filter(([url, init]) => (init?.method ?? 'GET') === method && String(url).startsWith(prefix))
@@ -210,6 +260,8 @@ function fakeApiClient() {
     unsubscribeRecord: vi.fn().mockResolvedValue({ subscribed: false, subscription: null }),
     listRecordHistory: vi.fn().mockResolvedValue([]),
     listRecordApprovals: vi.fn().mockResolvedValue({ submissions: [], hasMore: false }),
+    // The record's tasks (the dialog's open-time read under a retry key, and the 关联任务 panel).
+    listRecordTasks: vi.fn().mockResolvedValue({ items: [], hasMore: false, degraded: false }),
   }
 }
 
@@ -234,6 +286,8 @@ interface HarnessOptions {
   /** The page's dispatch binding, as the workbench passes it. By default one is made when the drawer
    *  is mounted (the page being set up); `null` passes none. */
   binding?: DispatchBinding | null
+  /** The drawer's multitable client; a fresh fake by default. */
+  client?: ReturnType<typeof fakeApiClient>
 }
 
 const bindings: DispatchBinding[] = []
@@ -250,6 +304,7 @@ function mountInspector(options: HarnessOptions = {}) {
   document.body.appendChild(container)
   const state = { record: options.record ?? RECORD }
   const binding = options.binding === undefined ? pageBinding() : options.binding
+  const client = options.client ?? fakeApiClient()
   const app = createApp({
     data: () => state,
     render() {
@@ -263,7 +318,7 @@ function mountInspector(options: HarnessOptions = {}) {
         sheetId: 'sht_1',
         ...('viewId' in options ? (options.viewId === undefined ? {} : { viewId: options.viewId }) : { viewId: 'viw_1' }),
         ...('baseId' in options ? (options.baseId === undefined ? {} : { baseId: options.baseId }) : { baseId: 'bse_1' }),
-        apiClient: fakeApiClient(),
+        apiClient: client,
         personSummariesByField: {
           fld_owner: [
             { id: 'usr_a', display: 'Person A' },
@@ -289,7 +344,7 @@ function mountInspector(options: HarnessOptions = {}) {
   }
   const vm = app.mount(container) as unknown as typeof state
   mountedApps.push(app)
-  return { container, app, vm, binding }
+  return { container, app, vm, binding, client }
 }
 
 async function openKebab(root: HTMLElement) {
@@ -355,7 +410,9 @@ function signIn(token: string | null) {
 
 beforeEach(() => {
   localStorage.clear()
+  sessionStorage.clear()
   signIn(TOKEN_A)
+  resetDispatchKeysForTests()
   mocks.apiFetch.mockReset()
   mocks.features = { tasks: true }
   mocks.permissions = new Set(['tasks:read', 'tasks:write'])
@@ -375,7 +432,9 @@ afterEach(() => {
   unmountAll()
   while (bindings.length > 0) bindings.pop()!.dispose()
   resetDispatchRunsForTests()
+  resetDispatchKeysForTests()
   localStorage.clear()
+  sessionStorage.clear()
   useLocale().setLocale('en')
 })
 
@@ -469,12 +528,25 @@ describe('dispatch helpers (tasks/recordTaskDispatch.ts)', () => {
     expect(classifyDispatchFailure({ kind: 'validation', code: 'INVALID_ASSIGNEES' })).toBe('INVALID_ASSIGNEES')
     expect(classifyDispatchFailure({ kind: 'validation', code: 'LIMIT' })).toBe('LIMIT')
     expect(classifyDispatchFailure({ kind: 'validation', code: 'TIME_ZONE_REQUIRED' })).toBe('INVALID_DATE')
-    expect(classifyDispatchFailure({ kind: 'validation', code: 'INVALID_MODE' })).toBe('FAILED')
+    expect(classifyDispatchFailure({ kind: 'validation', code: 'INVALID_MODE' })).toBe('REJECTED')
+    expect(classifyDispatchFailure({ kind: 'validation', code: 'INVALID_REMIND_AT' })).toBe('REJECTED')
+    expect(classifyDispatchFailure({ kind: 'validation', code: 'INVALID_SOURCE' })).toBe('REJECTED')
+    expect(classifyDispatchFailure({ kind: 'validation', code: 'INVALID_DISPATCH_KEY' })).toBe('INVALID_DISPATCH_KEY')
+    expect(classifyDispatchFailure({ kind: 'validation', code: 'SOURCE_NOT_READABLE' })).toBe('SOURCE_NOT_READABLE')
     expect(classifyDispatchFailure({ kind: 'org_missing' })).toBe('ORG_MISSING')
     expect(classifyDispatchFailure({ kind: 'forbidden' })).toBe('FORBIDDEN')
     expect(classifyDispatchFailure({ kind: 'not_found' })).toBe('TASKS_UNAVAILABLE')
     expect(classifyDispatchFailure({ kind: 'invalid_title' })).toBe('INVALID_TITLE')
-    expect(classifyDispatchFailure({ kind: 'error', status: 500 })).toBe('FAILED')
+    // A 4xx says this request created nothing; anything without a readable answer is unknown.
+    expect(classifyDispatchFailure({ kind: 'error', status: 422 })).toBe('REJECTED')
+    expect(classifyDispatchFailure({ kind: 'error', status: 401 })).toBe('REJECTED')
+    expect(classifyDispatchFailure({ kind: 'error', status: 409 })).toBe('REJECTED')
+    expect(classifyDispatchFailure({ kind: 'error', status: 500 })).toBe('OUTCOME_UNKNOWN')
+    expect(classifyDispatchFailure({ kind: 'error', status: 502 })).toBe('OUTCOME_UNKNOWN')
+    expect(classifyDispatchFailure({ kind: 'error', status: 0 })).toBe('OUTCOME_UNKNOWN')
+    expect(classifyDispatchFailure({ kind: 'error' })).toBe('OUTCOME_UNKNOWN')
+    // A 200 whose body could not be read: the task may exist.
+    expect(classifyDispatchFailure({ kind: 'error', status: 200 })).toBe('OUTCOME_UNKNOWN')
   })
 })
 
@@ -527,6 +599,18 @@ describe('record drawer 派发任务 entry (gating)', () => {
     expect(dispatchItem()).toBeNull()
   })
 
+  it('is hidden when an id is not one the task service takes as a source: none goes into a create body', async () => {
+    const { container } = mountInspector({ record: { ...RECORD, id: 'rec/1' } as unknown as MetaRecord })
+    await flushUi()
+    await openKebab(container)
+    expect(dispatchItem()).toBeNull()
+    unmountAll()
+    const again = mountInspector({ viewId: 'viw?1' })
+    await flushUi()
+    await openKebab(again.container)
+    expect(dispatchItem()).toBeNull()
+  })
+
   it('the workbench hands the inspector the view and base ids the source link is built from', async () => {
     const source = (await import('../src/multitable/views/MultitableWorkbench.vue?raw')).default as string
     const binding = source.slice(source.indexOf('<MetaRecordInspector'), source.indexOf('/>', source.indexOf('<MetaRecordInspector')))
@@ -571,8 +655,11 @@ describe('派发任务 dialog: prefill', () => {
     // Only native person fields are offered (the legacy link-backed one stores record ids).
     const options = Array.from(q<HTMLSelectElement>('person-field')!.options).map((o) => o.value)
     expect(options).toEqual(['', 'fld_owner', 'fld_reviewer'])
-    // The hint is scoped to the dispatch itself: a later due reminder is outside what it promises.
-    expect(q('access-note')!.textContent).toContain('派发时不会通知负责人')
+    // The hint promises neither that assignees are notified nor that they are not: whether they are
+    // depends on switches this page cannot read.
+    expect(q('access-note')!.textContent!.trim()).toBe(ACCESS_NOTE_ZH)
+    expect(q('access-note')!.textContent).not.toContain('不会通知')
+    expect(q('access-note')!.textContent).not.toContain('会收到通知')
   })
 
   it('leaves a deactivated person out of the prefill, says so, and still lets the dispatcher type them', async () => {
@@ -698,7 +785,7 @@ describe('派发任务 dialog: due date and request bodies', () => {
     expect(mocks.apiFetch.mock.calls.map(([url]) => String(url))).toEqual(peopleLookups())
   })
 
-  it('sends exactly the confirmed title, assignees, mode and due keys; then the source line under expectedVersion', async () => {
+  it('sends exactly the confirmed title, assignees, mode, due keys, the source and a retry key; nothing else is written', async () => {
     serveTasks()
     // The viewer's zone is stubbed to a non-UTC name, so the cell tells the create form's zone helper
     // apart from a hard-coded 'UTC' on a UTC machine (CI) as well.
@@ -731,17 +818,15 @@ describe('派发任务 dialog: due date and request bodies', () => {
       dueDate: '2031-05-06',
       dueTime: '09:30',
       timeZone: 'Asia/Shanghai',
+      source: SOURCE,
+      dispatchKey: expect.stringMatching(UUID),
     })
-    // No other record value reaches the wire.
+    // No other record value reaches the wire, nor the base id.
     expect(JSON.stringify(mocks.apiFetch.mock.calls)).not.toContain('internal note')
-
-    const patches = tasksCalls('PATCH', '/api/tasks/')
-    expect(patches).toHaveLength(1)
-    expect(patches[0][0]).toBe('/api/tasks/tsk_9')
-    expect(patches[0][1]).toEqual({
-      expectedVersion: 1,
-      description: '来源：多维表记录 /multitable/sht_1/viw_1?baseId=bse_1&recordId=rec_1',
-    })
+    expect(JSON.stringify(mocks.apiFetch.mock.calls)).not.toContain('bse_1')
+    // The description is not written any more (2-D2), and nothing is read back.
+    expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
+    expect(taskReads()).toHaveLength(0)
   })
 
   it('omits assignees when nobody is named (the dispatcher becomes the assignee)', async () => {
@@ -754,38 +839,34 @@ describe('派发任务 dialog: due date and request bodies', () => {
     await submit()
     const creates = tasksCalls('POST', '/api/tasks')
     expect(creates).toHaveLength(1)
-    expect(Object.keys(creates[0][1]).sort()).toEqual(['completionMode', 'dueDate', 'timeZone', 'title'])
+    expect(Object.keys(creates[0][1]).sort()).toEqual(['completionMode', 'dispatchKey', 'dueDate', 'source', 'timeZone', 'title'])
   })
 
-  it('builds the source link through the router, so a sub-path deploy keeps its base path', async () => {
+  it('the source is the same with a router under a sub-path or without a known base: ids only, no null, no description', async () => {
     serveTasks()
-    const { container } = mountInspector({ withRouter: true, routerBase: '/app/' })
+    const { container } = mountInspector({ withRouter: true, routerBase: '/app/', baseId: undefined })
     await flushUi()
     await openDialog(container)
     setInput('due-date', '2031-05-06')
     await submit()
-    expect(tasksCalls('PATCH', '/api/tasks/')[0][1].description).toBe('来源：多维表记录 /app/multitable/sht_1/viw_1?baseId=bse_1&recordId=rec_1')
+    const body = tasksCalls('POST', '/api/tasks')[0][1]
+    expect(body.source).toEqual(SOURCE)
+    // An explicit null is refused by the service, so a key is either sent or left out.
+    expect(Object.values(body).includes(null)).toBe(false)
+    expect('description' in body).toBe(false)
+    expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
   })
 
-  it('leaves baseId out of the link when the base is not known', async () => {
-    serveTasks()
-    const { container } = mountInspector({ baseId: undefined })
-    await flushUi()
-    await openDialog(container)
-    setInput('due-date', '2031-05-06')
-    await submit()
-    expect(tasksCalls('PATCH', '/api/tasks/')[0][1].description).toBe('来源：多维表记录 /multitable/sht_1/viw_1?recordId=rec_1')
-  })
-
-  it('reads the version once when the create answer carries none', async () => {
-    serveTasks({ create: () => jsonResponse(200, { id: 'tsk_9' }), get: () => jsonResponse(200, taskBody({ version: 4 })) })
+  it('a create answer without a version sends nothing further: no version read, no description write', async () => {
+    serveTasks({ create: () => jsonResponse(200, { id: 'tsk_9', sourceLinked: true }) })
     const { container } = mountInspector()
     await flushUi()
     await openDialog(container)
     setInput('due-date', '2031-05-06')
     await submit()
-    expect(tasksCalls('GET', '/api/tasks/tsk_9')).toHaveLength(1)
-    expect(tasksCalls('PATCH', '/api/tasks/')[0][1].expectedVersion).toBe(4)
+    expect(q('success')).not.toBeNull()
+    expect(taskReads()).toHaveLength(0)
+    expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
   })
 })
 
@@ -900,7 +981,7 @@ describe('派发任务 dialog: in-flight guard', () => {
     expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
   })
 
-  it('a create that lands after a move to another record writes the link of the record it came from', async () => {
+  it('a create sent before a move to another record names the record it was sent from, and nothing is written after it lands', async () => {
     let release: (value: Response) => void = () => {}
     serveTasks({ create: () => new Promise<Response>((resolve) => { release = resolve }) })
     const { container, vm } = mountInspector()
@@ -910,11 +991,11 @@ describe('派发任务 dialog: in-flight guard', () => {
     await submit()
     vm.record = { ...RECORD, id: 'rec_2' } as unknown as MetaRecord
     await flushUi(6)
-    release(jsonResponse(200, { id: 'tsk_9', version: 1 }))
+    release(jsonResponse(200, { id: 'tsk_9', version: 1, sourceLinked: true }))
     await flushUi(10)
-    const patches = tasksCalls('PATCH', '/api/tasks/')
-    expect(patches).toHaveLength(1)
-    expect(patches[0][1].description).toBe('来源：多维表记录 /multitable/sht_1/viw_1?baseId=bse_1&recordId=rec_1')
+    expect(tasksCalls('POST', '/api/tasks')[0][1].source).toEqual(SOURCE)
+    expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
+    expect(readDispatchRun(dispatchRunKey(readDispatchIdentity(), 'sht_1', 'rec_1'))?.created?.id).toBe('tsk_9')
   })
 })
 
@@ -927,10 +1008,16 @@ describe('派发任务 dialog: error mapping', () => {
     ['ORG_MISSING', () => jsonResponse(422, { error: { code: 'ORG_MISSING' } }), '请先选择组织'],
     ['403', () => jsonResponse(403, {}), '你没有创建任务的权限'],
     ['404 (tasks disabled)', () => jsonResponse(404, {}), '任务功能未开启'],
-    ['500', () => jsonResponse(500, {}), '派发任务失败'],
+    ['SOURCE_NOT_READABLE', () => jsonResponse(422, { error: { code: 'SOURCE_NOT_READABLE' } }), SOURCE_NOT_READABLE_ZH],
+    ['INVALID_SOURCE', () => jsonResponse(422, { error: { code: 'INVALID_SOURCE' } }), REJECTED_ZH],
+    ['INVALID_DISPATCH_KEY', () => jsonResponse(422, { error: { code: 'INVALID_DISPATCH_KEY' } }), REJECTED_ZH],
+    ['INVALID_MODE', () => jsonResponse(422, { error: { code: 'INVALID_MODE' } }), REJECTED_ZH],
+    ['401', () => jsonResponse(401, {}), REJECTED_ZH],
+    // No readable answer: never "failed" (the task may exist); the same button now reads 重试.
+    ['500', () => jsonResponse(500, {}), OUTCOME_UNKNOWN_ZH],
   ]
   for (const [name, response, message] of cases) {
-    it(`${name} reads as its own plain message and creates nothing further`, async () => {
+    it(`${name} reads as its own plain message and sends nothing further`, async () => {
       serveTasks({ create: response })
       const { container } = mountInspector()
       await flushUi()
@@ -960,7 +1047,10 @@ describe('派发任务 dialog: success', () => {
     const link = q<HTMLAnchorElement>('open-task')
     expect(link).not.toBeNull()
     expect(link!.getAttribute('href')).toBe('/tasks/tsk_9')
-    expect(q('source-note-failed')).toBeNull()
+    // The answer confirmed the link, and there was no earlier attempt: no note.
+    expect(q('source-not-linked')).toBeNull()
+    expect(q('earlier-unresolved')).toBeNull()
+    expect(q('success')!.textContent).toContain('任务已创建。')
   })
 
   it('nudges the top-bar task badge after a create, and not after a failed one', async () => {
@@ -984,20 +1074,21 @@ describe('派发任务 dialog: success', () => {
     }
   })
 
-  it('a failed description write still reports the task as created, with a note', async () => {
-    serveTasks({ patch: () => jsonResponse(409, { error: { code: 'VERSION_CONFLICT' }, currentVersion: 2 }) })
+  it('A1: an answer that does not confirm the source link still reports the task as created, with a note, and writes nothing else', async () => {
+    serveTasks({ create: () => jsonResponse(200, { id: 't1', version: 1 }) })
     const { container } = mountInspector({ withRouter: true })
     await flushUi()
     await openDialog(container)
     setInput('due-date', '2031-05-06')
     await submit()
     expect(q('success')).not.toBeNull()
-    expect(q<HTMLAnchorElement>('open-task')!.getAttribute('href')).toBe('/tasks/tsk_9')
-    expect(q('source-note-failed')!.textContent).toContain('来源记录链接未能写入任务描述')
+    expect(q<HTMLAnchorElement>('open-task')!.getAttribute('href')).toBe('/tasks/t1')
+    expect(q('source-not-linked')!.textContent!.trim()).toBe(SOURCE_NOT_LINKED_ZH)
+    // A first attempt: nothing to say about an earlier one.
+    expect(q('earlier-unresolved')).toBeNull()
     expect(q('error')).toBeNull()
-    // One create, one PATCH attempt, no retry loop on the conflict.
     expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
-    expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(1)
+    expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
   })
 
   it('moving to another record closes the dialog instead of carrying it over', async () => {
@@ -1008,6 +1099,711 @@ describe('派发任务 dialog: success', () => {
     vm.record = { ...RECORD, id: 'rec_2' } as unknown as MetaRecord
     await flushUi(6)
     expect(dialog()).toBeNull()
+  })
+})
+
+// ---- package 2: the retry key and what each answer says ------------------------------------------
+
+const SCOPE = { sheetId: 'sht_1', recordId: 'rec_1' }
+
+/** One row of the record's task list, as the client returns it. */
+function recordTask(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return { id: 'tsk_7', title: 'Alpha follow-up', status: 'open', completionMode: 'all', dueAt: null, dueDate: null, createdAt: null, isMine: true, ...over }
+}
+
+const NO_ROWS = { items: [], hasMore: false, degraded: false }
+
+/** A drawer client whose record-task reads answer by kind: `list` for the open-time list read, `keyed`
+ *  for the read under a retry key (an Error rejects). The keyed request is matched first. */
+function listingClient(list: unknown, keyed: unknown = NO_ROWS) {
+  const client = fakeApiClient()
+  client.listRecordTasks.mockImplementation(async (_sheetId: string, _recordId: string, options?: { dispatchKey?: string }) => {
+    const answer = options?.dispatchKey ? keyed : list
+    if (answer instanceof Error) throw answer
+    return answer
+  })
+  return client
+}
+
+function existingTaskLinks(): HTMLAnchorElement[] {
+  return Array.from(document.querySelectorAll<HTMLAnchorElement>('[data-testid="record-task-dispatch-existing-task"]'))
+}
+
+/** The stored entry of a record's retry key, parsed; `null` when there is none. */
+function storedEntry(scope = SCOPE): Record<string, unknown> | null {
+  const raw = sessionStorage.getItem(dispatchKeyStorageKey(scope))
+  return raw === null ? null : JSON.parse(raw) as Record<string, unknown>
+}
+
+function storedEntryCount(): number {
+  let count = 0
+  for (let index = 0; index < sessionStorage.length; index += 1) {
+    if (sessionStorage.key(index)?.startsWith(DISPATCH_KEY_STORAGE_PREFIX)) count += 1
+  }
+  return count
+}
+
+/** The create bodies as sent, byte for byte. */
+function rawCreateBodies(): string[] {
+  return mocks.apiFetch.mock.calls
+    .filter(([url, init]) => String(url) === '/api/tasks' && init?.method === 'POST')
+    .map(([, init]) => String(init.body))
+}
+
+function createKeys(): string[] {
+  return tasksCalls('POST', '/api/tasks').map(([, body]) => String(body.dispatchKey))
+}
+
+/** A reload of the page: page memory goes (runs, held keys, bindings), the tab's sessionStorage stays. */
+function reloadPage() {
+  unmountAll()
+  while (bindings.length > 0) bindings.pop()!.dispose()
+  resetDispatchRunsForTests()
+  resetDispatchKeysForTests()
+}
+
+async function openAndSubmit(container: HTMLElement) {
+  await openDialog(container)
+  setInput('due-date', '2031-05-06')
+  await flushUi()
+  await submit()
+}
+
+// The form's controls, the people-picking block's included (package 1b reads the same lock).
+const LOCKED_CONTROLS = ['title', 'pick-people', 'person-field', 'assignee-input', 'assignee-add', 'mode', 'due-date']
+
+describe('派发任务 dialog: the retry key (K2)', () => {
+  it('(a) an open and a cancel write nothing; the first submit writes the entry before the request leaves and sends its key', async () => {
+    const sent: { entry: Record<string, unknown> | null } = { entry: null }
+    serveTasks({
+      create: () => {
+        sent.entry = storedEntry()
+        return jsonResponse(200, { id: 'tsk_9', version: 1, sourceLinked: true })
+      },
+    })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    expect(storedEntryCount()).toBe(0)
+    await openAndSubmit(container)
+    expect(sent.entry).not.toBeNull()
+    expect(sent.entry!.unsettled).toBe(1)
+    expect(sent.entry!.key).toMatch(UUID)
+    expect(createKeys()).toEqual([sent.entry!.key])
+    // The stored value holds the key, its time and the count; no session data.
+    expect(Object.keys(sent.entry!).sort()).toEqual(['at', 'key', 'unsettled', 'v'])
+  })
+
+  it('(c) once the result is on screen the entry goes, and the next dispatch from the record carries another key', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openAndSubmit(container)
+    expect(q('success')).not.toBeNull()
+    expect(storedEntry()).toBeNull()
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    await openAndSubmit(container)
+    const keys = createKeys()
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toMatch(UUID)
+    expect(keys[1]).not.toBe(keys[0])
+  })
+
+  it('(e) when no key can be made nothing is sent, no run is left and the form says so', async () => {
+    serveTasks()
+    const uuid = vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(() => { throw new UuidUnavailableError() })
+    try {
+      const { container } = mountInspector()
+      await flushUi()
+      await openAndSubmit(container)
+      expect(q('error')!.textContent!.trim()).toBe(NOT_SENT_ZH)
+      expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+      expect(readDispatchRun(dispatchRunKey(readDispatchIdentity(), 'sht_1', 'rec_1'))).toBeUndefined()
+      expect(storedEntryCount()).toBe(0)
+      // The button is not stuck: the run never started.
+      expect(q<HTMLButtonElement>('submit')!.disabled).toBe(false)
+    } finally {
+      uuid.mockRestore()
+    }
+  })
+
+  it('K5: a key the service refuses for this record is discarded; the next submit carries a fresh one', async () => {
+    let answer: () => Response = () => jsonResponse(422, { error: { code: 'INVALID_DISPATCH_KEY' } })
+    serveTasks({ create: () => answer() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openAndSubmit(container)
+    expect(q('error')!.textContent!.trim()).toBe(REJECTED_ZH)
+    expect(storedEntry()).toBeNull()
+    answer = () => jsonResponse(200, { id: 'tsk_9', version: 1, sourceLinked: true })
+    await submit()
+    const keys = createKeys()
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).not.toBe(keys[0])
+  })
+})
+
+describe('派发任务 dialog: what each answer says', () => {
+  it('W1: a 502 is an unknown outcome, never a failure; the form is locked and 重试 resends the same bytes under the same key', async () => {
+    let answer: () => Response = () => jsonResponse(502, {})
+    serveTasks({ create: () => answer() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openAndSubmit(container)
+    const text = q('error')!.textContent!.trim()
+    expect(text).toBe(OUTCOME_UNKNOWN_ZH)
+    expect(text).not.toContain('失败')
+    expect(text).not.toContain('没有创建任务')
+    // Storage works: no line about it.
+    expect(q('key-not-saved')).toBeNull()
+    for (const id of LOCKED_CONTROLS) expect(q<HTMLInputElement>(id)!.disabled).toBe(true)
+    expect(document.querySelector<HTMLButtonElement>('[data-assignee-id="usr_a"] .meta-dispatch__chip-remove')!.disabled).toBe(true)
+    expect(q('submit')!.textContent!.trim()).toBe('重试')
+    expect(q<HTMLButtonElement>('submit')!.disabled).toBe(false)
+    expect(storedEntry()!.unsettled).toBe(1)
+    // Even an edit dispatched at a locked control cannot reach the retry.
+    setInput('title', 'Changed meanwhile')
+    answer = () => jsonResponse(200, { id: 'tsk_9', version: 1, sourceLinked: true })
+    await submit()
+    const bodies = rawCreateBodies()
+    expect(bodies).toHaveLength(2)
+    expect(bodies[1]).toBe(bodies[0])
+    expect(JSON.parse(bodies[0]).dispatchKey).toMatch(UUID)
+    expect(q('success')).not.toBeNull()
+    expect(q('earlier-unresolved')).toBeNull()
+    expect(storedEntry()).toBeNull()
+  })
+
+  it('W1: no answer at all (the transport throws) reads the same way, and the retry carries the same key', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    mocks.apiFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    await submit()
+    expect(q('error')!.textContent!.trim()).toBe(OUTCOME_UNKNOWN_ZH)
+    expect(q('submit')!.textContent!.trim()).toBe('重试')
+    await submit()
+    const bodies = rawCreateBodies()
+    expect(bodies).toHaveLength(2)
+    expect(bodies[1]).toBe(bodies[0])
+    expect(q('success')).not.toBeNull()
+  })
+
+  it('W11: the primary button is the same element before and after an unknown outcome', async () => {
+    serveTasks({ create: () => jsonResponse(502, {}) })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    const button = q<HTMLButtonElement>('submit')!
+    button.focus()
+    await submit()
+    expect(q<HTMLButtonElement>('submit')).toBe(button)
+    expect(button.textContent!.trim()).toBe('重试')
+  })
+
+  it('W2: a 4xx on the first send says only that this request created nothing; no line about an earlier attempt', async () => {
+    serveTasks({ create: () => jsonResponse(422, { error: { code: 'INVALID_TITLE' } }) })
+    const { container } = mountInspector()
+    await flushUi()
+    await openAndSubmit(container)
+    expect(q('error')!.textContent!.trim()).toBe('标题包含无法保存的字符')
+    expect(q('earlier-unresolved')).toBeNull()
+    // The entry stays, settled: the next send reuses a key the service never stored.
+    expect(storedEntry()!.unsettled).toBe(0)
+    await submit()
+    const keys = createKeys()
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('W12: after a first-send 4xx and a reload, the open is a plain form: nothing to resolve', async () => {
+    serveTasks({ create: () => jsonResponse(422, { error: { code: 'INVALID_TITLE' } }) })
+    const first = mountInspector()
+    await flushUi()
+    await openAndSubmit(first.container)
+    reloadPage()
+    const { container, client } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    // No read under the key: only the record's list (the tasks already dispatched from it).
+    expect(client.listRecordTasks).toHaveBeenCalledTimes(1)
+    expect(client.listRecordTasks).toHaveBeenCalledWith('sht_1', 'rec_1', { limit: 100 })
+    expect(q('earlier-unresolved')).toBeNull()
+    expect(q('earlier-no-task')).toBeNull()
+    expect(q('title')).not.toBeNull()
+  })
+
+  it('W3: a 4xx after a reload that follows an unknown outcome adds the line about the earlier attempt', async () => {
+    serveTasks({ create: () => jsonResponse(502, {}) })
+    const first = mountInspector()
+    await flushUi()
+    await openAndSubmit(first.container)
+    const key = String(storedEntry()!.key)
+    reloadPage()
+    serveTasks({ create: () => jsonResponse(422, { error: { code: 'INVALID_TITLE' } }) })
+    const { container, client } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    // The open-time read under the key found nothing (G2): the form, with the line saying so.
+    expect(client.listRecordTasks).toHaveBeenCalledWith('sht_1', 'rec_1', { dispatchKey: key })
+    expect(q('earlier-no-task')!.textContent!.trim()).toBe(EARLIER_NO_TASK_ZH)
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    await submit()
+    expect(q('error')!.textContent!.trim()).toBe('标题包含无法保存的字符')
+    expect(q('earlier-unresolved')!.textContent!.trim()).toBe(EARLIER_UNRESOLVED_ZH)
+    // Two requests under the key, one answered with a 4xx.
+    expect(storedEntry()!.unsettled).toBe(1)
+    expect(createKeys()).toEqual([key, key])
+  })
+
+  it('W4: SOURCE_NOT_READABLE says nothing was dispatched this time, and adds the earlier-attempt line only on a resend', async () => {
+    let answer: () => Response = () => jsonResponse(422, { error: { code: 'SOURCE_NOT_READABLE' } })
+    serveTasks({ create: () => answer() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openAndSubmit(container)
+    expect(q('error')!.textContent!.trim()).toBe(SOURCE_NOT_READABLE_ZH)
+    expect(q('earlier-unresolved')).toBeNull()
+    answer = () => jsonResponse(502, {})
+    await submit()
+    answer = () => jsonResponse(422, { error: { code: 'SOURCE_NOT_READABLE' } })
+    await submit()
+    expect(q('error')!.textContent!.trim()).toBe(SOURCE_NOT_READABLE_ZH)
+    expect(q('earlier-unresolved')!.textContent!.trim()).toBe(EARLIER_UNRESOLVED_ZH)
+  })
+
+  it('W5: when the key cannot be written to storage, the unknown outcome says the page cannot remember the dispatch', async () => {
+    serveTasks({ create: () => jsonResponse(502, {}) })
+    // On the prototype: a Storage object takes an assigned property as an item, so the method cannot
+    // be replaced on the instance itself. Only the tab's sessionStorage refuses.
+    const realSetItem = Storage.prototype.setItem
+    const write = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, name: string, value: string) {
+      if (this === sessionStorage) throw new Error('quota')
+      return realSetItem.call(this, name, value)
+    })
+    try {
+      const { container } = mountInspector()
+      await flushUi()
+      await openAndSubmit(container)
+      expect(q('error')!.textContent!.trim()).toBe(OUTCOME_UNKNOWN_ZH)
+      expect(q('key-not-saved')!.textContent!.trim()).toBe(KEY_NOT_SAVED_ZH)
+      // The send still went out with the key held in memory.
+      expect(createKeys()[0]).toMatch(UUID)
+    } finally {
+      write.mockRestore()
+    }
+  })
+
+  it('W5: after an unknown outcome, another record and back: the same locked form, and 重试 sends the same bytes', async () => {
+    let answer: () => Response = () => jsonResponse(502, {})
+    serveTasks({ create: () => answer() })
+    const { container, vm, client } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    setSelect('mode', 'any')
+    setInput('due-time', '09:30')
+    await flushUi()
+    await submit()
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    vm.record = { ...RECORD, id: 'rec_2' } as unknown as MetaRecord
+    await flushUi(6)
+    vm.record = RECORD
+    await flushUi(6)
+    await openDialog(container)
+    expect(q('error')!.textContent!.trim()).toBe(OUTCOME_UNKNOWN_ZH)
+    expect(q<HTMLInputElement>('title')!.value).toBe('Alpha')
+    expect(q<HTMLInputElement>('due-date')!.value).toBe('2031-05-06')
+    // The rest of what was sent, from the kept body (the remounted form starts from defaults).
+    expect(q<HTMLInputElement>('due-time')!.value).toBe('09:30')
+    expect(q<HTMLSelectElement>('mode')!.value).toBe('any')
+    expect(assigneeIds()).toEqual(['usr_a'])
+    for (const id of LOCKED_CONTROLS) expect(q<HTMLInputElement>(id)!.disabled).toBe(true)
+    expect(document.querySelector<HTMLButtonElement>('[data-assignee-id="usr_a"] .meta-dispatch__chip-remove')!.disabled).toBe(true)
+    expect(q('submit')!.textContent!.trim()).toBe('重试')
+    // No read on the second open: this page holds the body (the one call is the first open's list).
+    expect(client.listRecordTasks).toHaveBeenCalledTimes(1)
+    answer = () => jsonResponse(200, { id: 'tsk_9', version: 1, sourceLinked: true })
+    await submit()
+    const bodies = rawCreateBodies()
+    expect(bodies).toHaveLength(2)
+    expect(bodies[1]).toBe(bodies[0])
+  })
+
+  it('W13: a retry answered by a service that does not store the link says the earlier attempt is still unknown', async () => {
+    let answer: () => Response = () => jsonResponse(502, {})
+    serveTasks({ create: () => answer() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openAndSubmit(container)
+    answer = () => jsonResponse(200, { id: 't1', version: 1 })
+    await submit()
+    expect(q('success')).not.toBeNull()
+    expect(q('source-not-linked')!.textContent!.trim()).toBe(SOURCE_NOT_LINKED_ZH)
+    expect(q('earlier-unresolved')!.textContent!.trim()).toBe(EARLIER_UNRESOLVED_ZH)
+    expect(storedEntry()).toBeNull()
+  })
+
+  it('W6: a matched resend shows the earlier task under its own heading, after one read of it, also on a later open', async () => {
+    let release: (value: Response) => void = () => {}
+    serveTasks({ create: () => new Promise<Response>((resolve) => { release = resolve }) })
+    let nudges = 0
+    const stop = onTasksChanged(() => { nudges += 1 })
+    try {
+      const { container } = mountInspector()
+      await flushUi()
+      await openAndSubmit(container)
+      q<HTMLButtonElement>('cancel')!.click()
+      await flushUi()
+      release(jsonResponse(200, { id: 'tsk_9', version: 1, reused: true, sourceLinked: true }))
+      await flushUi(10)
+      await openDialog(container)
+      expect(q('success')).toBeNull()
+      const panel = q('reused')!
+      expect(panel.querySelector('[role="status"]')!.textContent).toContain(REUSED_HEADING_ZH)
+      expect(q('reused-note')!.textContent!.trim()).toBe(REUSED_NOTE_ZH)
+      expect(q<HTMLAnchorElement>('open-task')!.getAttribute('href')).toBe('/tasks/tsk_9')
+      expect(q('another')!.textContent!.trim()).toBe('再派一项')
+      expect(q('submit')).toBeNull()
+      expect(tasksCalls('GET', '/api/tasks/tsk_9')).toHaveLength(1)
+      // Nothing new was made.
+      expect(nudges).toBe(0)
+      expect(storedEntry()).toBeNull()
+    } finally {
+      stop()
+    }
+  })
+
+  it('W7: a matched task that reads as not found gets no link; 再派一项 shows the form and the next create carries a fresh key', async () => {
+    serveTasks({
+      create: () => jsonResponse(200, { id: 'tsk_9', version: 1, reused: true, sourceLinked: true }),
+      get: () => jsonResponse(404, {}),
+    })
+    const { container } = mountInspector()
+    await flushUi()
+    await openAndSubmit(container)
+    expect(q('reused')!.textContent).toContain(REUSED_NOT_OPENABLE_ZH)
+    expect(q('open-task')).toBeNull()
+    // Kept until 再派一项.
+    expect(storedEntry()).not.toBeNull()
+    q<HTMLButtonElement>('another')!.click()
+    await flushUi()
+    expect(storedEntry()).toBeNull()
+    expect(q('reused')).toBeNull()
+    expect(q('title')).not.toBeNull()
+    serveTasks()
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    await submit()
+    const keys = createKeys()
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).not.toBe(keys[0])
+    expect(q('success')).not.toBeNull()
+  })
+
+  it('W7: a refusal or an error on that read is not taken to mean the task is gone: it is linked', async () => {
+    for (const status of [403, 500]) {
+      serveTasks({
+        create: () => jsonResponse(200, { id: 'tsk_9', version: 1, reused: true, sourceLinked: true }),
+        get: () => jsonResponse(status, {}),
+      })
+      const { container } = mountInspector()
+      await flushUi()
+      await openAndSubmit(container)
+      expect(tasksCalls('GET', '/api/tasks/tsk_9')).toHaveLength(1)
+      expect(q('reused-note')).not.toBeNull()
+      expect(q<HTMLAnchorElement>('open-task')!.getAttribute('href')).toBe('/tasks/tsk_9')
+      reloadPage()
+      sessionStorage.clear()
+      mocks.apiFetch.mockReset()
+    }
+  })
+})
+
+describe('派发任务 dialog: the open after a reload, with an unresolved key', () => {
+  async function unknownThenReload(): Promise<string> {
+    serveTasks({ create: () => jsonResponse(502, {}) })
+    const first = mountInspector()
+    await flushUi()
+    await openAndSubmit(first.container)
+    const key = String(storedEntry()!.key)
+    reloadPage()
+    return key
+  }
+
+  it('W9 (G1): the caller\'s task under the key is shown as created by the earlier dispatch; the key goes', async () => {
+    const key = await unknownThenReload()
+    const client = fakeApiClient()
+    client.listRecordTasks.mockResolvedValue({
+      items: [{ id: 'tsk_7', title: 'Alpha', status: 'open', completionMode: 'all', dueAt: null, dueDate: null, createdAt: null, isMine: true }],
+      hasMore: false,
+      degraded: false,
+    })
+    serveTasks()
+    const { container } = mountInspector({ client })
+    await flushUi()
+    await openDialog(container)
+    expect(client.listRecordTasks).toHaveBeenCalledWith('sht_1', 'rec_1', { dispatchKey: key })
+    expect(q('earlier-created')!.querySelector('[role="status"]')!.textContent).toContain(REUSED_HEADING_ZH)
+    expect(q('earlier-created')!.textContent).toContain(EARLIER_CREATED_ZH)
+    // Nothing was submitted on this page, so the resend note is not shown.
+    expect(q('reused-note')).toBeNull()
+    expect(q<HTMLAnchorElement>('open-task')!.getAttribute('href')).toBe('/tasks/tsk_7')
+    expect(q('submit')).toBeNull()
+    expect(storedEntry()).toBeNull()
+    // Only the first page's create was sent.
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+    q<HTMLButtonElement>('another')!.click()
+    await flushUi()
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    await submit()
+    const keys = createKeys()
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).not.toBe(key)
+  })
+
+  it('W9 (G2): none found: the form with a line saying so; the key is kept, so the next create resends it', async () => {
+    const key = await unknownThenReload()
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    expect(q('earlier-no-task')!.textContent!.trim()).toBe(EARLIER_NO_TASK_ZH)
+    expect(q('existing-read-failed')).toBeNull()
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    await submit()
+    // The first page's create and this one, under the same key.
+    expect(createKeys()).toEqual([key, key])
+    expect(q('success')).not.toBeNull()
+  })
+
+  it('W9 (G3): the read fails, or the service cannot tell the org: the form with both lines; the key is kept', async () => {
+    for (const answer of [new Error('offline'), { items: [], hasMore: false, degraded: true }]) {
+      const key = await unknownThenReload()
+      const client = fakeApiClient()
+      if (answer instanceof Error) client.listRecordTasks.mockRejectedValue(answer)
+      else client.listRecordTasks.mockResolvedValue(answer)
+      serveTasks()
+      const { container } = mountInspector({ client })
+      await flushUi()
+      await openDialog(container)
+      expect(q('earlier-unresolved')!.textContent!.trim()).toBe(EARLIER_UNRESOLVED_ZH)
+      expect(q('existing-read-failed')!.textContent!.trim()).toBe(EXISTING_READ_FAILED_ZH)
+      expect(q('earlier-no-task')).toBeNull()
+      expect(q<HTMLButtonElement>('submit')!.disabled).toBe(false)
+      expect(String(storedEntry()!.key)).toBe(key)
+      reloadPage()
+      sessionStorage.clear()
+      mocks.apiFetch.mockReset()
+    }
+  })
+
+  it('W9 (G2) with the caller\'s tasks listed: the line, the list instead of the form, and 再派一项 drops the kept key', async () => {
+    const key = await unknownThenReload()
+    const client = listingClient({ items: [recordTask()], hasMore: false, degraded: false })
+    serveTasks()
+    const { container } = mountInspector({ client })
+    await flushUi()
+    await openDialog(container)
+    expect(client.listRecordTasks).toHaveBeenCalledWith('sht_1', 'rec_1', { dispatchKey: key })
+    expect(client.listRecordTasks).toHaveBeenCalledWith('sht_1', 'rec_1', { limit: 100 })
+    expect(q('existing')).not.toBeNull()
+    expect(q('earlier-no-task')!.textContent!.trim()).toBe(EARLIER_NO_TASK_ZH)
+    expect(existingTaskLinks().map((link) => link.getAttribute('href'))).toEqual(['/tasks/tsk_7'])
+    expect(q('title')).toBeNull()
+    expect(q('submit')).toBeNull()
+    expect(String(storedEntry()!.key)).toBe(key)
+    q<HTMLButtonElement>('another')!.click()
+    await flushUi()
+    expect(storedEntry()).toBeNull()
+    expect(q('existing')).toBeNull()
+    expect(q('earlier-no-task')).toBeNull()
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    await submit()
+    const keys = createKeys()
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).not.toBe(key)
+  })
+
+  it('G1 needs no list read; G3 sends none either (its two lines already say the tasks cannot be read)', async () => {
+    const key = await unknownThenReload()
+    const found = listingClient(new Error('not used'), { items: [recordTask()], hasMore: false, degraded: false })
+    serveTasks()
+    const first = mountInspector({ client: found })
+    await flushUi()
+    await openDialog(first.container)
+    expect(q('earlier-created')).not.toBeNull()
+    expect(found.listRecordTasks).toHaveBeenCalledTimes(1)
+    expect(found.listRecordTasks).toHaveBeenCalledWith('sht_1', 'rec_1', { dispatchKey: key })
+    reloadPage()
+    sessionStorage.clear()
+    await unknownThenReload()
+    const failing = listingClient(NO_ROWS, new Error('offline'))
+    serveTasks()
+    const second = mountInspector({ client: failing })
+    await flushUi()
+    await openDialog(second.container)
+    expect(q('existing-read-failed')).not.toBeNull()
+    expect(failing.listRecordTasks).toHaveBeenCalledTimes(1)
+  })
+
+  it('a reload after the stored key is gone (signed out and in, or another tab): the list still shows the task the attempt made', async () => {
+    await unknownThenReload()
+    // What the session sweep, or a tab that never held the key, leaves.
+    sessionStorage.clear()
+    const client = listingClient({ items: [recordTask({ id: 'tsk_5' })], hasMore: false, degraded: false })
+    serveTasks()
+    const { container } = mountInspector({ client })
+    await flushUi()
+    await openDialog(container)
+    expect(q('existing')).not.toBeNull()
+    expect(existingTaskLinks().map((link) => link.getAttribute('href'))).toEqual(['/tasks/tsk_5'])
+    expect(q('title')).toBeNull()
+    expect(q('submit')).toBeNull()
+    // Only the first page's create: nothing more is sent from the list.
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+  })
+
+  it('W10: a sign-in that ends during the create: the entry was written before the send, and the dialog refuses', async () => {
+    const sent: { entry: Record<string, unknown> | null } = { entry: null }
+    serveTasks({
+      create: () => {
+        sent.entry = storedEntry()
+        // What the transport's unauthorized handling does before the answer is read.
+        localStorage.removeItem('auth_token')
+        localStorage.removeItem('jwt')
+        return jsonResponse(401, {})
+      },
+    })
+    const { container } = mountInspector()
+    await flushUi()
+    await openAndSubmit(container)
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+    expect(sent.entry!.unsettled).toBe(1)
+    expect(q('identity-refused')!.textContent).toContain(REFUSAL_ZH)
+    // The 4xx landed after the sign-out: the identity the request was sent under no longer holds, so
+    // the entry is left as it was (still counted), and a later open reads under its key first.
+    expect(storedEntry()!.unsettled).toBe(1)
+  })
+})
+
+describe('派发任务 dialog: the tasks already dispatched from the record', () => {
+  it('lists the caller\'s own tasks from the record instead of the form; 再派一项 shows the form, under a fresh key', async () => {
+    const client = listingClient({
+      items: [recordTask(), recordTask({ id: 'tsk_8', title: 'Assigned to me by someone else', isMine: false })],
+      hasMore: false,
+      degraded: false,
+    })
+    serveTasks()
+    const { container } = mountInspector({ client })
+    await flushUi()
+    await openDialog(container)
+    expect(client.listRecordTasks).toHaveBeenCalledTimes(1)
+    expect(client.listRecordTasks).toHaveBeenCalledWith('sht_1', 'rec_1', { limit: 100 })
+    expect(q('existing')!.textContent).toContain('已从此记录派发')
+    const links = existingTaskLinks()
+    expect(links.map((link) => link.getAttribute('href'))).toEqual(['/tasks/tsk_7'])
+    expect(links[0].textContent!.trim()).toBe('Alpha follow-up')
+    expect(q('title')).toBeNull()
+    expect(q('submit')).toBeNull()
+    expect(q('existing-read-failed')).toBeNull()
+    expect(q('another')!.textContent!.trim()).toBe('再派一项')
+    // Nothing is written by an open.
+    expect(storedEntryCount()).toBe(0)
+    q<HTMLButtonElement>('another')!.click()
+    await flushUi()
+    expect(q('existing')).toBeNull()
+    expect(q<HTMLInputElement>('title')!.value).toBe('Alpha')
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    await submit()
+    const keys = createKeys()
+    expect(keys).toHaveLength(1)
+    expect(keys[0]).toMatch(UUID)
+    expect(q('success')).not.toBeNull()
+    // 再派一项 does not read the list again.
+    expect(client.listRecordTasks).toHaveBeenCalledTimes(1)
+  })
+
+  it('W8: a list that cannot be read is said, before the form, and submit stays usable; a readable list without the caller\'s tasks adds nothing', async () => {
+    const cases: Array<[unknown, boolean]> = [
+      [new Error('offline'), true],
+      [Object.assign(new Error('Insufficient permissions'), { status: 403 }), true],
+      [{ items: [], hasMore: false, degraded: true }, true],
+      [NO_ROWS, false],
+      [{ items: [recordTask({ isMine: false })], hasMore: false, degraded: false }, false],
+    ]
+    for (const [answer, said] of cases) {
+      const client = listingClient(answer)
+      serveTasks()
+      const { container } = mountInspector({ client })
+      await flushUi()
+      await openDialog(container)
+      if (said) expect(q('existing-read-failed')!.textContent!.trim()).toBe(EXISTING_READ_FAILED_ZH)
+      else expect(q('existing-read-failed')).toBeNull()
+      // No retry key held: nothing about an earlier attempt.
+      expect(q('earlier-unresolved')).toBeNull()
+      expect(q('existing')).toBeNull()
+      expect(q('title')).not.toBeNull()
+      expect(q<HTMLButtonElement>('submit')!.disabled).toBe(false)
+      reloadPage()
+    }
+  })
+
+  it('submit stays disabled while the list read is out; the form is usable once it is answered', async () => {
+    let answer: (value: unknown) => void = () => {}
+    const client = fakeApiClient()
+    client.listRecordTasks.mockImplementation(() => new Promise((resolve) => { answer = resolve }))
+    serveTasks()
+    const { container } = mountInspector({ client })
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    expect(q<HTMLButtonElement>('submit')!.disabled).toBe(true)
+    q<HTMLButtonElement>('submit')!.click()
+    await flushUi()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+    answer(NO_ROWS)
+    await flushUi()
+    expect(q<HTMLButtonElement>('submit')!.disabled).toBe(false)
+    await submit()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+  })
+
+  it('a list answer that lands after the dialog closed is not shown on the next open; that open reads again', async () => {
+    const answers: Array<(value: unknown) => void> = []
+    const client = fakeApiClient()
+    client.listRecordTasks.mockImplementation(() => new Promise((resolve) => { answers.push(resolve) }))
+    serveTasks()
+    const { container } = mountInspector({ client })
+    await flushUi()
+    await openDialog(container)
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    answers[0]({ items: [recordTask()], hasMore: false, degraded: false })
+    await flushUi()
+    await openDialog(container)
+    expect(answers).toHaveLength(2)
+    expect(q('existing')).toBeNull()
+    answers[1](NO_ROWS)
+    await flushUi()
+    expect(q('existing')).toBeNull()
+    expect(q<HTMLButtonElement>('submit')!.disabled).toBe(false)
   })
 })
 
@@ -1165,6 +1961,11 @@ describe('派发任务 identity (tasks/recordTaskDispatchIdentity.ts)', () => {
   })
 })
 
+/** A new task as the dialog records it (package 2's run shape). */
+function createdTask(id: string): DispatchCreated {
+  return { id, reused: false, openable: true, sourceLinked: true, earlierUnresolved: false }
+}
+
 describe('派发任务 dialog: bound to the signed-in identity', () => {
   it('a sign-in as someone else in another tab: the submit sends nothing and the dialog refuses', async () => {
     serveTasks()
@@ -1302,22 +2103,18 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     expectRefused()
   })
 
-  it('a change between the version read and the description write: the write is not sent', async () => {
-    let releaseRead: (value: Response) => void = () => {}
-    serveTasks({
-      create: () => jsonResponse(200, { id: 'tsk_9' }),
-      get: () => new Promise<Response>((resolve) => { releaseRead = resolve }),
-    })
+  it('a change while the create is out, answered as a matched resend: the read of that task is not sent', async () => {
+    let release: (value: Response) => void = () => {}
+    serveTasks({ create: () => new Promise<Response>((resolve) => { release = resolve }) })
     const { container } = mountInspector()
     await flushUi()
     await openDialog(container)
     setInput('due-date', '2031-05-06')
     await submit()
-    expect(tasksCalls('GET', '/api/tasks/tsk_9')).toHaveLength(1)
     signInElsewhere(TOKEN_B)
-    releaseRead(jsonResponse(200, taskBody({ version: 1 })))
+    release(jsonResponse(200, { id: 'tsk_9', version: 1, reused: true, sourceLinked: true }))
     await flushUi(10)
-    expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
+    expect(taskReads()).toHaveLength(0)
     expectRefused()
   })
 
@@ -1390,7 +2187,7 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     const outKey = dispatchRunKey(a, 'sht_1', 'rec_2')
     const settledTicket = beginDispatchRun(settledKey, a)
     expect(settledTicket).not.toBeNull()
-    settleDispatchRun(settledKey, settledTicket!, { created: { id: 'tsk_9', sourceNoteFailed: false } })
+    settleDispatchRun(settledKey, settledTicket!, { created: createdTask('tsk_9') })
     const outTicket = beginDispatchRun(outKey, a)
     expect(outTicket).not.toBeNull()
     useAuth().setToken(TOKEN_B)
@@ -1398,7 +2195,7 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     expect(readDispatchRun(settledKey)).toBeUndefined()
     expect(readDispatchRun(outKey)).toBeUndefined()
     // The create that was out settles into nothing.
-    settleDispatchRun(outKey, outTicket!, { created: { id: 'tsk_10', sourceNoteFailed: false } })
+    settleDispatchRun(outKey, outTicket!, { created: createdTask('tsk_10') })
     expect(readDispatchRun(outKey)).toBeUndefined()
   })
 
@@ -1417,10 +2214,10 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     expect(second).not.toBeNull()
     expect(second).not.toBe(first)
     // The first create answers: nothing changes; the second run is still out.
-    settleDispatchRun(key, first!, { created: { id: 'tsk_old', sourceNoteFailed: false } })
+    settleDispatchRun(key, first!, { created: createdTask('tsk_old') })
     expect(readDispatchRun(key)?.inFlight).toBe(true)
     expect(readDispatchRun(key)?.created).toBeNull()
-    settleDispatchRun(key, second!, { created: { id: 'tsk_new', sourceNoteFailed: false } })
+    settleDispatchRun(key, second!, { created: createdTask('tsk_new') })
     expect(readDispatchRun(key)?.created?.id).toBe('tsk_new')
   })
 
@@ -1769,6 +2566,206 @@ describe('派发任务 page binding: another identity seen once refuses for good
   })
 })
 
+// ---- late answers and the retry key (final review, 2026-11-04) ----------------------------------
+
+describe('派发任务 dialog: a late answer changes the retry key only while it is the entry it was sent under', () => {
+  /** Creates that wait to be answered, in the order they were sent. */
+  function deferredCreates(): Array<{ resolve: (value: Response) => void; reject: (error: unknown) => void }> {
+    const pending: Array<{ resolve: (value: Response) => void; reject: (error: unknown) => void }> = []
+    serveTasks({ create: () => new Promise<Response>((resolve, reject) => { pending.push({ resolve, reject }) }) })
+    return pending
+  }
+
+  async function unresolvedThenReload(): Promise<string> {
+    serveTasks({ create: () => jsonResponse(502, {}) })
+    const first = mountInspector()
+    await flushUi()
+    await openAndSubmit(first.container)
+    const key = String(storedEntry()!.key)
+    reloadPage()
+    return key
+  }
+
+  /** A drawer client whose read under a retry key waits to be answered; the list read answers at once. */
+  function waitingKeyedClient() {
+    const answers: Array<(value: unknown) => void> = []
+    const client = fakeApiClient()
+    client.listRecordTasks.mockImplementation((_sheetId: string, _recordId: string, options?: { dispatchKey?: string }) =>
+      options?.dispatchKey ? new Promise((resolve) => { answers.push(resolve) }) : Promise.resolve(NO_ROWS))
+    return { client, answers }
+  }
+
+  const lateRefusals: Array<[string, () => Response]> = [
+    ['403', () => jsonResponse(403, {})],
+    ['422', () => jsonResponse(422, { error: { code: 'INVALID_TITLE' } })],
+    ['422 INVALID_DISPATCH_KEY', () => jsonResponse(422, { error: { code: 'INVALID_DISPATCH_KEY' } })],
+  ]
+
+  for (const [name, late] of lateRefusals) {
+    it(`R1 (${name}): the previous account's late answer changes neither the new account's key, its count nor the read on the next open`, async () => {
+      const creates = deferredCreates()
+      const first = mountInspector()
+      await flushUi()
+      await openAndSubmit(first.container)
+      const keyA = String(storedEntry()!.key)
+      expect(storedEntry()!.unsettled).toBe(1)
+      // B signs in in this tab while A's create is out: A's run and every entry go.
+      useAuth().setToken(TOKEN_B)
+      await flushUi()
+      expect(storedEntry()).toBeNull()
+      unmountAll()
+      // The page is set up again under B, and B dispatches from the same record.
+      const second = mountInspector()
+      await flushUi()
+      await openAndSubmit(second.container)
+      const keyB = String(storedEntry()!.key)
+      expect(keyB).not.toBe(keyA)
+      expect(createKeys()).toEqual([keyA, keyB])
+      expect(storedEntry()).toMatchObject({ key: keyB, unsettled: 1 })
+      // A's create is answered now, with a 4xx; B's is still out.
+      creates[0].resolve(late())
+      await flushUi(10)
+      expect(storedEntry()).toMatchObject({ key: keyB, unsettled: 1 })
+      expect(q('error')).toBeNull()
+      // B's create gets no readable answer.
+      creates[1].resolve(jsonResponse(502, {}))
+      await flushUi(10)
+      expect(q('error')!.textContent!.trim()).toBe(OUTCOME_UNKNOWN_ZH)
+      expect(storedEntry()).toMatchObject({ key: keyB, unsettled: 1 })
+      // After a reload the open reads under B's key before anything else.
+      reloadPage()
+      const third = mountInspector()
+      await flushUi()
+      await openDialog(third.container)
+      expect(third.client.listRecordTasks).toHaveBeenCalledWith('sht_1', 'rec_1', { dispatchKey: keyB })
+      expect(q('earlier-no-task')!.textContent!.trim()).toBe(EARLIER_NO_TASK_ZH)
+      expect(tasksCalls('POST', '/api/tasks')).toHaveLength(2)
+      expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
+    })
+  }
+
+  it('R2: another account signed in from another tab sends under the record\'s same key; the previous account\'s late 4xx leaves its count as it is', async () => {
+    const creates = deferredCreates()
+    const first = mountInspector()
+    await flushUi()
+    await openAndSubmit(first.container)
+    const key = String(storedEntry()!.key)
+    unmountAll()
+    // B signs in in another tab: this tab is told nothing, so no entry is cleared.
+    signInElsewhere(TOKEN_B)
+    const second = mountInspector()
+    await flushUi()
+    await openAndSubmit(second.container)
+    expect(createKeys()).toEqual([key, key])
+    expect(storedEntry()).toMatchObject({ key, unsettled: 2 })
+    creates[0].resolve(jsonResponse(422, { error: { code: 'INVALID_TITLE' } }))
+    await flushUi(10)
+    expect(storedEntry()).toMatchObject({ key, unsettled: 2 })
+    expect(q('error')).toBeNull()
+    creates[1].resolve(jsonResponse(502, {}))
+    await flushUi(10)
+    expect(storedEntry()).toMatchObject({ key, unsettled: 2 })
+    reloadPage()
+    const third = mountInspector()
+    await flushUi()
+    await openDialog(third.container)
+    expect(third.client.listRecordTasks).toHaveBeenCalledWith('sht_1', 'rec_1', { dispatchKey: key })
+  })
+
+  it('R3: a late 4xx for a key the record no longer holds leaves the newer entry alone (the store is driven directly to stand for a newer key)', async () => {
+    const creates = deferredCreates()
+    const { container } = mountInspector()
+    await flushUi()
+    await openAndSubmit(container)
+    const sentKey = String(storedEntry()!.key)
+    // While the create is out the record's entry is replaced by a newer one, counted once.
+    dispatchKeys.release(SCOPE)
+    const newer = dispatchKeys.obtain(SCOPE).key
+    dispatchKeys.markSent(SCOPE)
+    expect(newer).not.toBe(sentKey)
+    creates[0].resolve(jsonResponse(422, { error: { code: 'INVALID_TITLE' } }))
+    await flushUi(10)
+    // The answer is still shown to the account that sent it; only the entry is left alone.
+    expect(q('error')!.textContent!.trim()).toBe('标题包含无法保存的字符')
+    expect(storedEntry()).toMatchObject({ key: newer, unsettled: 1 })
+  })
+
+  for (const [name, late] of lateRefusals.slice(0, 2)) {
+    it(`R4 (${name}): the same account's own late 4xx still counts off its request; the next open has nothing to resolve`, async () => {
+      const creates = deferredCreates()
+      const first = mountInspector()
+      await flushUi()
+      await openAndSubmit(first.container)
+      const key = String(storedEntry()!.key)
+      // The dialog is closed while the create is out; the answer lands later.
+      q<HTMLButtonElement>('cancel')!.click()
+      await flushUi()
+      creates[0].resolve(late())
+      await flushUi(10)
+      expect(storedEntry()).toMatchObject({ key, unsettled: 0 })
+      reloadPage()
+      const second = mountInspector()
+      await flushUi()
+      await openDialog(second.container)
+      expect(second.client.listRecordTasks).toHaveBeenCalledTimes(1)
+      expect(second.client.listRecordTasks).toHaveBeenCalledWith('sht_1', 'rec_1', { limit: 100 })
+      expect(q('earlier-unresolved')).toBeNull()
+    })
+  }
+
+  it('R5: a late 5xx or no answer at all still leaves the entry unresolved, and the next open reads under its key', async () => {
+    for (const answer of ['503', 'no answer'] as const) {
+      const creates = deferredCreates()
+      const first = mountInspector()
+      await flushUi()
+      await openAndSubmit(first.container)
+      const key = String(storedEntry()!.key)
+      q<HTMLButtonElement>('cancel')!.click()
+      await flushUi()
+      if (answer === '503') creates[0].resolve(jsonResponse(503, {}))
+      else creates[0].reject(new TypeError('Failed to fetch'))
+      await flushUi(10)
+      expect(storedEntry()).toMatchObject({ key, unsettled: 1 })
+      reloadPage()
+      const second = mountInspector()
+      await flushUi()
+      await openDialog(second.container)
+      expect(second.client.listRecordTasks).toHaveBeenCalledWith('sht_1', 'rec_1', { dispatchKey: key })
+      reloadPage()
+      sessionStorage.clear()
+    }
+  })
+
+  it('R6: the open-time read under the key answers after another account signed in elsewhere: nothing is shown and the entry is kept', async () => {
+    const key = await unresolvedThenReload()
+    const { client, answers } = waitingKeyedClient()
+    const { container } = mountInspector({ client })
+    await flushUi()
+    await openDialog(container)
+    expect(answers).toHaveLength(1)
+    signInElsewhere(TOKEN_B)
+    answers[0]({ items: [recordTask()], hasMore: false, degraded: false })
+    await flushUi(10)
+    expectRefused()
+    expect(storedEntry()).toMatchObject({ key, unsettled: 1 })
+  })
+
+  it('R6: the open-time read under the key answers after the record took a newer key: the task is shown and the newer entry kept (the store is driven directly)', async () => {
+    await unresolvedThenReload()
+    const { client, answers } = waitingKeyedClient()
+    const { container } = mountInspector({ client })
+    await flushUi()
+    await openDialog(container)
+    expect(answers).toHaveLength(1)
+    dispatchKeys.release(SCOPE)
+    const newer = dispatchKeys.obtain(SCOPE).key
+    answers[0]({ items: [recordTask()], hasMore: false, degraded: false })
+    await flushUi(10)
+    expect(q<HTMLAnchorElement>('open-task')!.getAttribute('href')).toBe('/tasks/tsk_7')
+    expect(storedEntry()).toMatchObject({ key: newer, unsettled: 0 })
+  })
+})
+
 describe('multitable client: the before-send signal (api/beforeSend.ts)', () => {
   it('tells its listeners synchronously, before the transport is called, and stops after unsubscribe', async () => {
     const order: string[] = []
@@ -2018,6 +3015,29 @@ describe('派发任务 dialog: the people picker (package 1b)', () => {
     expect(dialog()).not.toBeNull()
   })
 
+  it('Esc closes the picker only, also when it arrives in the millisecond the picker opened', async () => {
+    serveTasks({ people: peopleWithSearch() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    // The dialog's own listener is attached in an earlier millisecond; then the clock is held at the
+    // picker's (see the picker's onPanelKeydown).
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const opened = Date.now()
+    const now = vi.spyOn(Date, 'now').mockReturnValue(opened)
+    try {
+      await flushUi()
+      q<HTMLButtonElement>('pick-people')!.click()
+      await flushUi()
+      pickerQ<HTMLInputElement>('search')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await flushUi()
+    } finally {
+      now.mockRestore()
+    }
+    expect(pickerQ('search')).toBeNull()
+    expect(dialog()).not.toBeNull()
+  })
+
   it('after another sign-in, a search is not sent and the dialog refuses', async () => {
     serveTasks({ people: peopleWithSearch() })
     const { container } = mountInspector()
@@ -2030,5 +3050,208 @@ describe('派发任务 dialog: the people picker (package 1b)', () => {
     await afterDebounce()
     expect(peopleLookups().filter((url) => url.includes('?q='))).toEqual([])
     expectRefused()
+  })
+})
+
+describe('派发任务 dialog: a sent form keeps what was sent (packages 1b and 2 together)', () => {
+  /** The people route: the prefill lookup answered by `lookup` (at once by default), a search by
+   *  one person who can use tasks. */
+  function peopleRoute(lookup: Route = everyoneUsable): Route {
+    return (url, init) => {
+      if (url.includes('?ids=')) return lookup(url, init)
+      return jsonResponse(200, {
+        items: [{ id: 'usr_x', name: 'Person X', detail: 'px***@example.test', canUseTasks: true }],
+        hasMore: false,
+        requiresQuery: false,
+        limit: 20,
+      })
+    }
+  }
+
+  const NO_TASKS_FOR_A = () => jsonResponse(200, {
+    items: [{ id: 'usr_a', name: 'Person A', detail: '', canUseTasks: false }],
+    truncated: false,
+  })
+
+  async function pickPersonX() {
+    q<HTMLButtonElement>('pick-people')!.click()
+    await flushUi()
+    typeSearch('P')
+    await afterDebounce()
+    document.querySelector<HTMLInputElement>('[data-person-id="usr_x"] input[type="checkbox"]')!.click()
+    await flushUi()
+  }
+
+  it('S1: a dialog mounted while the create is out shows the sent form once the outcome is unknown; 重试 resends it', async () => {
+    let release: (value: Response) => void = () => {}
+    let creates = 0
+    serveTasks({
+      people: peopleRoute(),
+      create: () => (creates++ === 0
+        ? new Promise<Response>((resolve) => { release = resolve })
+        : jsonResponse(200, { id: 'tsk_9', version: 1, sourceLinked: true })),
+    })
+    const { container, vm } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('title', 'Changed')
+    setSelect('mode', 'any')
+    setInput('due-date', '2031-05-06')
+    await pickPersonX()
+    pickerQ<HTMLButtonElement>('confirm')!.click()
+    await flushUi()
+    expect(assigneeIds()).toEqual(['usr_a', 'usr_x'])
+    await submit()
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    vm.record = { ...RECORD, id: 'rec_2' } as unknown as MetaRecord
+    await flushUi(6)
+    vm.record = RECORD
+    await flushUi(6)
+    await openDialog(container)
+    expect(q('pending')).not.toBeNull()
+    release(jsonResponse(502, {}))
+    await flushUi(10)
+    expect(q('pending')).toBeNull()
+    expect(q('error')!.textContent!.trim()).toBe(OUTCOME_UNKNOWN_ZH)
+    expect(q<HTMLInputElement>('title')!.value).toBe('Changed')
+    expect(q<HTMLSelectElement>('mode')!.value).toBe('any')
+    expect(q<HTMLInputElement>('due-date')!.value).toBe('2031-05-06')
+    // Ids: the names the picker gave stayed with the dialog that sent the create.
+    expect(assigneeIds()).toEqual(['usr_a', 'usr_x'])
+    expect(q('inactive-skipped')).toBeNull()
+    for (const id of LOCKED_CONTROLS) expect(q<HTMLInputElement>(id)!.disabled).toBe(true)
+    expect(q('submit')!.textContent!.trim()).toBe('重试')
+    await submit()
+    const bodies = rawCreateBodies()
+    expect(bodies).toHaveLength(2)
+    expect(bodies[1]).toBe(bodies[0])
+    expect(JSON.parse(bodies[0])).toMatchObject({ title: 'Changed', assignees: ['usr_a', 'usr_x'], dueDate: '2031-05-06' })
+    expect(q('success')).not.toBeNull()
+  })
+
+  it('S2: a picker confirm on the locked form adds no chip, and 重试 resends the same bytes', async () => {
+    let answer: () => Response = () => jsonResponse(502, {})
+    serveTasks({ people: peopleRoute(), create: () => answer() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    // The picker is open with usr_x ticked, not confirmed, when the create is sent.
+    await pickPersonX()
+    await submit()
+    expect(q('submit')!.textContent!.trim()).toBe('重试')
+    expect(q<HTMLButtonElement>('pick-people')!.disabled).toBe(true)
+    pickerQ<HTMLButtonElement>('confirm')!.click()
+    await flushUi()
+    expect(pickerQ('search')).toBeNull()
+    expect(assigneeIds()).toEqual(['usr_a'])
+    expect(document.querySelector('[data-assignee-id="usr_x"]')).toBeNull()
+    answer = () => jsonResponse(200, { id: 'tsk_9', version: 1, sourceLinked: true })
+    await submit()
+    const bodies = rawCreateBodies()
+    expect(bodies).toHaveLength(2)
+    expect(bodies[1]).toBe(bodies[0])
+    expect(JSON.parse(bodies[0]).assignees).toEqual(['usr_a'])
+  })
+
+  // The unlocked form acts on the same answer (the "cannot use tasks yet" prefill cell above).
+  for (const when of ['after the 502', 'while the create is out'] as const) {
+    it(`S3: a people lookup answered ${when} leaves the locked chips as sent, and 重试 resends the same bytes`, async () => {
+      let releasePeople: (value: Response) => void = () => {}
+      let releaseCreate: (value: Response) => void = () => {}
+      let creates = 0
+      serveTasks({
+        people: peopleRoute(() => new Promise<Response>((resolve) => { releasePeople = resolve })),
+        create: () => (creates++ === 0
+          ? new Promise<Response>((resolve) => { releaseCreate = resolve })
+          : jsonResponse(200, { id: 'tsk_9', version: 1, sourceLinked: true })),
+      })
+      const { container } = mountInspector()
+      await flushUi()
+      await openDialog(container)
+      expect(peopleLookups()).toEqual(['/api/tasks/people?ids=usr_a'])
+      setInput('due-date', '2031-05-06')
+      await submit()
+      if (when === 'while the create is out') {
+        releasePeople(NO_TASKS_FOR_A())
+        await flushUi(10)
+        releaseCreate(jsonResponse(502, {}))
+      } else {
+        releaseCreate(jsonResponse(502, {}))
+        await flushUi(10)
+        releasePeople(NO_TASKS_FOR_A())
+      }
+      await flushUi(10)
+      expect(q('submit')!.textContent!.trim()).toBe('重试')
+      expect(assigneeIds()).toEqual(['usr_a'])
+      expect(chipText('usr_a')).not.toContain('还不能使用任务')
+      expect(q('access-skipped')).toBeNull()
+      await submit()
+      const bodies = rawCreateBodies()
+      expect(bodies).toHaveLength(2)
+      expect(bodies[1]).toBe(bodies[0])
+      expect(JSON.parse(bodies[0]).assignees).toEqual(['usr_a'])
+    })
+  }
+
+  it('S4: a people lookup answered while the create is out, then a 200: only the created panel', async () => {
+    let releasePeople: (value: Response) => void = () => {}
+    let releaseCreate: (value: Response) => void = () => {}
+    serveTasks({
+      people: peopleRoute(() => new Promise<Response>((resolve) => { releasePeople = resolve })),
+      create: () => new Promise<Response>((resolve) => { releaseCreate = resolve }),
+    })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    releasePeople(NO_TASKS_FOR_A())
+    await flushUi(10)
+    releaseCreate(jsonResponse(200, { id: 'tsk_9', version: 1, sourceLinked: true }))
+    await flushUi(10)
+    expect(q('success')).not.toBeNull()
+    expect(q('access-skipped')).toBeNull()
+    expect(q('assignees')).toBeNull()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+    expect(tasksCalls('POST', '/api/tasks')[0][1].assignees).toEqual(['usr_a'])
+  })
+
+  it('S5: a resend with a person from the picker answered as a matched resend writes nothing: no PATCH, one read of the task, no nudge', async () => {
+    let answer: () => Response = () => jsonResponse(502, {})
+    serveTasks({ people: peopleRoute(), create: () => answer() })
+    let nudges = 0
+    const stop = onTasksChanged(() => { nudges += 1 })
+    try {
+      const { container } = mountInspector()
+      await flushUi()
+      await openDialog(container)
+      setInput('due-date', '2031-05-06')
+      await pickPersonX()
+      pickerQ<HTMLButtonElement>('confirm')!.click()
+      await flushUi()
+      expect(assigneeIds()).toEqual(['usr_a', 'usr_x'])
+      await submit()
+      expect(q('submit')!.textContent!.trim()).toBe('重试')
+      answer = () => jsonResponse(200, { id: 'tsk_9', version: 1, reused: true, sourceLinked: true })
+      await submit()
+      await flushUi(10)
+      const bodies = rawCreateBodies()
+      expect(bodies).toHaveLength(2)
+      expect(bodies[1]).toBe(bodies[0])
+      expect(JSON.parse(bodies[0]).assignees).toEqual(['usr_a', 'usr_x'])
+      expect(q('reused')!.querySelector('[role="status"]')!.textContent).toContain(REUSED_HEADING_ZH)
+      expect(q('reused-note')!.textContent!.trim()).toBe(REUSED_NOTE_ZH)
+      expect(q<HTMLAnchorElement>('open-task')!.getAttribute('href')).toBe('/tasks/tsk_9')
+      // The two creates are the only writes; the one read is the check that the task can be opened.
+      const writes = mocks.apiFetch.mock.calls.filter(([, init]) => (init?.method ?? 'GET') !== 'GET')
+      expect(writes.map(([url, init]) => `${init.method} ${String(url)}`)).toEqual(['POST /api/tasks', 'POST /api/tasks'])
+      expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
+      expect(taskReads().map(([url]) => url)).toEqual(['/api/tasks/tsk_9'])
+      expect(nudges).toBe(0)
+    } finally {
+      stop()
+    }
   })
 })

@@ -1,0 +1,185 @@
+name: Attendance timezone date matrix
+
+# #6721 verification (owner decision 2026-11-04): run the existing attendance-db
+# timezone batch once per run day on disposable GitHub-hosted runners.
+# - File set: read at run time from plugin-tests.yml (attendance-db, the
+#   attendance_timezone_ci batch) by scripts/ops/attendance-date-matrix.mjs; no second list.
+# - Each leg: its own runner, its own freshly created and migrated database; the whole
+#   batch shares that database, serially, as attendance-db does.
+# - ATTENDANCE_TEST_RUN_DATE moves only the run day tests derive for the injectable
+#   attendance clocks; JWT, network, database and the process/system clock stay real.
+#   tests/setup.attendance-run-date.ts fails every file whose clocks do not read the day.
+# - Evidence: per-leg values-free summary (actual execution order from
+#   tests/reporters/attendance-date-matrix-order.ts, passed/failed/skipped, clock proof,
+#   bound commit) in the step summary and an artifact.
+# Not a required check. A green leg here is verification evidence, not a fix, and
+# does not authorize merging.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - '.github/workflows/attendance-date-matrix.yml'
+      - 'scripts/ops/attendance-date-matrix.mjs'
+      - 'scripts/ops/attendance-date-matrix.test.mjs'
+      - 'packages/core-backend/vitest.attendance-date-matrix.config.ts'
+      - 'packages/core-backend/tests/setup.attendance-run-date.ts'
+      - 'packages/core-backend/tests/utils/attendance-test-run-date.ts'
+      - 'packages/core-backend/tests/reporters/attendance-date-matrix-order.ts'
+      - 'packages/core-backend/tests/integration/attendance-business-trip.db.test.ts'
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Date matrix contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            /*
+            !/packages/core-backend/.env
+          sparse-checkout-cone-mode: false
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+      - name: Date matrix helper contract
+        run: node --test scripts/ops/attendance-date-matrix.test.mjs
+
+  timezone-batch:
+    name: Timezone batch (${{ matrix.run_date }})
+    needs: [contract]
+    # Same runner image as plugin-tests.yml attendance-db.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        run_date: ['2026-11-02', '2027-03-15', '2027-04-15', '2027-11-08', 'today']
+    env:
+      MATRIX_RUN_LABEL: ${{ matrix.run_date }}
+      # Empty on the 'today' leg: the helper then returns the real instant.
+      ATTENDANCE_TEST_RUN_DATE: ${{ matrix.run_date != 'today' && matrix.run_date || '' }}
+      MATRIX_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      MATRIX_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            /*
+            !/packages/core-backend/.env
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Start Postgres
+        uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 14
+          user: postgres
+
+      - name: Build web app
+        run: pnpm --filter @metasheet/web build
+
+      - name: Prepare real attendance browser qualification
+        run: |
+          mkdir -p "$RUNNER_TEMP/attendance-browser-empty-env"
+          pnpm exec playwright install --with-deps chromium
+
+      - name: Resolve timezone batch from plugin-tests.yml
+        run: |
+          node scripts/ops/attendance-date-matrix.mjs list > "$RUNNER_TEMP/attendance-date-matrix-files.txt"
+          wc -l < "$RUNNER_TEMP/attendance-date-matrix-files.txt"
+
+      - name: Create and migrate a fresh database for this run day
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/attendance_timezone_ci
+          ATTENDANCE_TEST_DATABASE_URL: postgresql://postgres@localhost:5432/attendance_timezone_ci
+        run: |
+          dropdb --host=localhost --username=postgres --if-exists attendance_timezone_ci
+          createdb --host=localhost --username=postgres attendance_timezone_ci
+          pnpm --filter @metasheet/core-backend migrate
+
+      - name: Run timezone batch on the run day
+        id: batch
+        env:
+          METASHEET_ENV_DIR: ${{ runner.temp }}/attendance-browser-empty-env
+          ATTENDANCE_BROWSER_OUTPUT_DIR: ${{ runner.temp }}/attendance-browser-evidence
+          DATABASE_URL: postgresql://postgres@localhost:5432/attendance_timezone_ci
+          ATTENDANCE_TEST_DATABASE_URL: postgresql://postgres@localhost:5432/attendance_timezone_ci
+          ATTENDANCE_DATE_MATRIX_PROOF_FILE: ${{ runner.temp }}/attendance-date-matrix-proof.jsonl
+          ATTENDANCE_DATE_MATRIX_ORDER_FILE: ${{ runner.temp }}/attendance-date-matrix-order.json
+        run: |
+          mapfile -t files < "$RUNNER_TEMP/attendance-date-matrix-files.txt"
+          test "${#files[@]}" -gt 0
+          mkdir -p artifacts/attendance-date-matrix
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.attendance-date-matrix.config.ts run \
+            "${files[@]}" \
+            --reporter=dot --reporter=json \
+            --reporter=./tests/reporters/attendance-date-matrix-order.ts \
+            --outputFile.json=../../artifacts/attendance-date-matrix/result.json
+
+      - name: Summarize run day evidence
+        if: always()
+        run: |
+          node scripts/ops/attendance-date-matrix.mjs summarize \
+            --result artifacts/attendance-date-matrix/result.json \
+            --order "$RUNNER_TEMP/attendance-date-matrix-order.json" \
+            --proof "$RUNNER_TEMP/attendance-date-matrix-proof.jsonl" \
+            --out "artifacts/attendance-date-matrix/summary-${MATRIX_RUN_LABEL}.json"
+
+      - name: Remove run day database
+        if: always()
+        run: dropdb --host=localhost --username=postgres --if-exists attendance_timezone_ci
+
+      - name: Upload run day evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-date-matrix-${{ matrix.run_date }}
+          path: artifacts/attendance-date-matrix/summary-*.json
+          if-no-files-found: warn

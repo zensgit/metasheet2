@@ -184,6 +184,9 @@ export const TASKS_ZH = {
   noDescription: '无描述',
   detailRemindLabel: '提醒：',
   noReminder: '不提醒',
+  // /tasks/:id — package 2: the record a dispatched task came from (a link when one can be built)
+  detailSourceLabel: '来源：',
+  detailSourceRecord: '多维表记录',
 
   // /tasks/:id — the editor (design §4.3, §7.2, §7.3). The submit button reads `save`.
   // RULED(2026-10-07): [R03] — editing through one PATCH, with a review prompt after a 409.
@@ -390,6 +393,11 @@ export const TASKS_ZH = {
   codeInactiveOrgMember: '该用户不在当前组织或已停用',
   // Task create and assignee adds: the named person cannot use the task feature yet.
   codeAssigneeTaskAccessRequired: '对方还不能使用任务功能，请管理员先为其开通任务权限。',
+  // Package 2, a create sent from a multitable record (the task page never sends a source). Each says
+  // only that this request created nothing.
+  codeInvalidSource: '来源记录信息无效，这次没有创建任务',
+  codeInvalidDispatchKey: '派发标识无效，这次没有创建任务',
+  codeSourceNotReadable: '无法确认来源记录，这次没有创建任务',
   codeOwnerMustTransfer: '请先转让所有权',
   codeCreatedByImmutable: '清单创建人不能被移除',
   codeTargetNotMember: '对方不是清单成员',
@@ -540,6 +548,8 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   noDescription: 'No description',
   detailRemindLabel: 'Reminder: ',
   noReminder: 'No reminder',
+  detailSourceLabel: 'Source: ',
+  detailSourceRecord: 'Multitable record',
 
   editorHeading: 'Edit task',
   editorTitleLabel: 'Title',
@@ -703,6 +713,9 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   codeInvalidRole: 'Invalid role',
   codeInactiveOrgMember: 'This user is not in the current organization or has been deactivated',
   codeAssigneeTaskAccessRequired: "This person can't use tasks yet. Ask an administrator to give them task access.",
+  codeInvalidSource: 'The source record details are not valid, so no task was created this time',
+  codeInvalidDispatchKey: 'The dispatch identifier is not valid, so no task was created this time',
+  codeSourceNotReadable: 'The source record could not be confirmed, so no task was created this time',
   codeOwnerMustTransfer: 'Transfer ownership first',
   codeCreatedByImmutable: 'The list creator cannot be removed',
   codeTargetNotMember: 'That user is not a member of the list',
@@ -823,6 +836,9 @@ export const TASKS_CODE_KEYS = {
   INVALID_ROLE: 'codeInvalidRole',
   INACTIVE_ORG_MEMBER: 'codeInactiveOrgMember',
   ASSIGNEE_TASK_ACCESS_REQUIRED: 'codeAssigneeTaskAccessRequired',
+  INVALID_SOURCE: 'codeInvalidSource',
+  INVALID_DISPATCH_KEY: 'codeInvalidDispatchKey',
+  SOURCE_NOT_READABLE: 'codeSourceNotReadable',
   OWNER_MUST_TRANSFER: 'codeOwnerMustTransfer',
   CREATED_BY_IMMUTABLE: 'codeCreatedByImmutable',
   TARGET_NOT_MEMBER: 'codeTargetNotMember',
