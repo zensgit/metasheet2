@@ -125,10 +125,13 @@ import {
 } from '../integrations/dingtalk/client'
 import { resolveDingTalkInteractiveCardStreamConfig } from '../integrations/dingtalk/interactive-card-stream'
 import { readDingTalkMessageConfigFromRuntime } from '../integrations/dingtalk/work-notification-settings'
+import { isDingTalkIntegrationScopedCredentialsEnabled } from '../integrations/dingtalk/integration-scoped-credentials-flag'
 import {
+  isApprovalCardAssigneeIntegrationActive,
   resolveApprovalCardLinkSecret,
   resolveApprovalCardLinkSecretForIntegration,
   resolveApprovalCardPublicAppUrl,
+  resolveApprovalCardPublicAppUrlForIntegration,
 } from '../integrations/dingtalk/approval-card-config'
 import {
   insertDingTalkApprovalCardDelivery,
@@ -5455,11 +5458,19 @@ export class AutomationExecutor {
       return { actionType, status: 'failed', error: 'send_dingtalk_approval_card requires an approval.task_created trigger event' }
     }
 
+    // Integration-scoped credentials switch, read ONCE for this step so every decision below agrees.
+    // OFF: the public URL, the OA card credentials and their failure bookkeeping are exactly as before.
+    const integrationScoped = isDingTalkIntegrationScopedCredentialsEnabled()
+
     // CFG-1: env first, stored directory-integration config as fallback (same-source with the
     // wrapper's verify — see approval-card-config.ts). Empty still fail-closes the send.
-    const baseUrl = await resolveApprovalCardPublicAppUrl(this.deps.queryFn)
-    if (!baseUrl) {
-      return { actionType, status: 'failed', error: 'PUBLIC_APP_URL or APP_BASE_URL (or the stored approval-card public app URL) is required for the approval decision link' }
+    // Switch ON: resolved below from the ASSIGNEE's integration instead, once it is known.
+    let baseUrl = ''
+    if (!integrationScoped) {
+      baseUrl = (await resolveApprovalCardPublicAppUrl(this.deps.queryFn)) ?? ''
+      if (!baseUrl) {
+        return { actionType, status: 'failed', error: 'PUBLIC_APP_URL or APP_BASE_URL (or the stored approval-card public app URL) is required for the approval decision link' }
+      }
     }
 
     // Instance metadata for the card summary — ids/title/request_no only, NO form values.
@@ -5518,6 +5529,35 @@ export class AutomationExecutor {
       return { actionType, status: 'failed', error: 'Recipient has no linked, active DingTalk account (skipped — mappings are never guessed)' }
     }
 
+    if (integrationScoped && assigneeIntegrationId) {
+      // Switch ON: an assignee bound to an integration that is missing or not active gets no card — checked
+      // before the public URL (env set or not), the signing secret, the outbound claim, the card-delivery row
+      // and any DingTalk call, on both the interactive-card and the OA-card paths. Send side only: the
+      // verify-side secret resolver is shared with the callback and is left unchanged.
+      if (!(await isApprovalCardAssigneeIntegrationActive(assigneeIntegrationId, this.deps.queryFn))) {
+        return {
+          actionType,
+          status: 'failed',
+          error: `The assignee's DingTalk integration (${assigneeIntegrationId}) is missing or not active; the approval card was not sent`,
+        }
+      }
+    }
+
+    if (integrationScoped) {
+      // Switch ON: env URL first, else the stored URL of the assignee's own (active) integration, else
+      // fail-closed — never the URL some other integration stores.
+      baseUrl = (await resolveApprovalCardPublicAppUrlForIntegration(assigneeIntegrationId, this.deps.queryFn)) ?? ''
+      if (!baseUrl) {
+        return {
+          actionType,
+          status: 'failed',
+          error: assigneeIntegrationId
+            ? `PUBLIC_APP_URL or APP_BASE_URL (env) or a stored approval-card public app URL on the assignee's active DingTalk integration (${assigneeIntegrationId}) is required for the approval decision link`
+            : 'PUBLIC_APP_URL or APP_BASE_URL (env) is required for the approval decision link (the assignee has no DingTalk integration to read a stored URL from)',
+        }
+      }
+    }
+
     // DT-R2 same-source signing: the deep-link token is signed with the ASSIGNEE integration's
     // secret (env `APPROVAL_CARD_LINK_SECRET` still wins) and the integration is persisted on
     // the delivery row, so the wrapper's verify resolves the identical source. No cross-corp
@@ -5548,6 +5588,18 @@ export class AutomationExecutor {
       && streamIntegrationId.length > 0
       && assigneeIntegrationId.length > 0
       && assigneeIntegrationId === streamIntegrationId
+
+    // Switch ON: the OA work-notification card's credentials are resolved HERE — before the outbound claim
+    // and before the card-delivery row — so a configuration failure leaves no card row and no claim (the
+    // step fails with the typed sentence). Switch OFF: resolved inside the send below, as before.
+    let preResolvedOaMessageConfig: Awaited<ReturnType<typeof readDingTalkMessageConfigFromRuntime>> | null = null
+    if (integrationScoped && !useInteractiveCard) {
+      try {
+        preResolvedOaMessageConfig = await readDingTalkMessageConfigFromRuntime(assigneeIntegrationId || undefined)
+      } catch (error) {
+        return { actionType, status: 'failed', error: error instanceof Error ? error.message : String(error) }
+      }
+    }
 
     // Ledger FIRST — the row is the only legitimate delivery → instance anchor.
     const entryEpochRaw = event.task?.entryEpoch
@@ -5645,7 +5697,7 @@ export class AutomationExecutor {
           )
         }
 
-        const messageConfig = await readDingTalkMessageConfigFromRuntime(assigneeIntegrationId || undefined)
+        const messageConfig = preResolvedOaMessageConfig ?? await readDingTalkMessageConfigFromRuntime(assigneeIntegrationId || undefined)
         const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
         return sendDingTalkWorkNotificationActionCard(
           accessToken,
@@ -6046,13 +6098,26 @@ export class AutomationExecutor {
       type ResolvedCredentials = { messageConfig: Awaited<ReturnType<typeof readDingTalkMessageConfigFromRuntime>>; accessToken: string }
       const configCache = new Map<string, ResolvedCredentials>()
 
+      // Integration-scoped credentials switch ON: resolve the configuration of EVERY recipient group
+      // before the first send, so a configuration failure in any group sends to nobody (it lands in the
+      // catch below with no batch sent: every recipient `failed`, the intent `failed`, re-attemptable).
+      // This guarantees zero sends on a configuration failure only; a token or send failure in a later
+      // group after an earlier group was sent is still a partial delivery (DT-HARDEN-06, not auto-resent).
+      // OFF: the map stays empty and each group is resolved lazily in the loop, as before.
+      const preResolvedMessageConfigs = new Map<string, ResolvedCredentials['messageConfig']>()
+      if (isDingTalkIntegrationScopedCredentialsEnabled()) {
+        for (const integrationId of recipientsByIntegration.keys()) {
+          preResolvedMessageConfigs.set(integrationId, await readDingTalkMessageConfigFromRuntime(integrationId))
+        }
+      }
+
       for (const { integrationId, batch } of batches) {
         let credentials = configCache.get(integrationId)
         if (!credentials) {
-          // Env-first resolution is preserved inside readDingTalkMessageConfigFromRuntime, so
+          // Env-first resolution is preserved inside readDingTalkMessageConfigFromRuntime (switch OFF), so
           // an env-configured deployment keeps its bootstrap behavior; only the stored-config
           // path stops falling back to "latest active integration".
-          const messageConfig = await readDingTalkMessageConfigFromRuntime(integrationId)
+          const messageConfig = preResolvedMessageConfigs.get(integrationId) ?? await readDingTalkMessageConfigFromRuntime(integrationId)
           const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
           credentials = { messageConfig, accessToken }
           configCache.set(integrationId, credentials)

@@ -14,3 +14,34 @@ export class DingTalkConfigValidationError extends Error {
     this.name = 'DingTalkConfigValidationError'
   }
 }
+
+export type DingTalkMessageConfigErrorCode =
+  | 'integration_not_found'
+  | 'integration_inactive'
+  | 'integration_tuple_incomplete'
+  | 'env_agent_id_invalid'
+
+/**
+ * Raised by the integration-scoped work-notification credential resolver (work-notification-settings.ts
+ * resolveDingTalkMessageTuple / readDingTalkMessageConfigFromRuntime, only reachable while
+ * DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED is 'true'): the named integration row is missing or not
+ * active, the source chosen for the credential tuple is incomplete, or the environment Agent ID that would
+ * be sent is not 1-32 digits. The message names the integration id, the field / variable names and the
+ * source — never a key, secret or agent id value — so it can be recorded in delivery ledgers as it is.
+ *
+ * A plain Error subclass, deliberately NOT a DingTalkConfigValidationError: that class is on the admin
+ * routes' fixed-sentence allow-list (routes/admin-directory.ts), and no admin route reaches this resolver;
+ * only the delivery paths (automation executor, attendance worker, todo mirror) see it. Defined here (not
+ * inside the settings module) so a test that replaces that module with a factory still sees the class the
+ * workers check with `instanceof`. The attendance delivery worker classifies it as non-retryable by
+ * `instanceof`, not by matching words in the message.
+ */
+export class DingTalkMessageConfigError extends Error {
+  readonly code: DingTalkMessageConfigErrorCode
+
+  constructor(code: DingTalkMessageConfigErrorCode, message: string) {
+    super(message)
+    this.name = 'DingTalkMessageConfigError'
+    this.code = code
+  }
+}
