@@ -142,7 +142,11 @@ export interface RenderTaskEventMessageInput {
   deliveryId: string
 }
 
+// Package 2 (2-D10): the two "given to you" events share one sentence; like the others it carries
+// no link and no actor name.
 const EVENT_SENTENCES: Readonly<Record<TaskNotifiableEvent, (title: string) => string>> = Object.freeze({
+  created: (t) => `任务「${t}」已指派给你`,
+  assignee_added: (t) => `任务「${t}」已指派给你`,
   completed: (t) => `任务「${t}」已完成`,
   completed_by_any: (t) => `任务「${t}」已完成`,
   reopened: (t) => `任务「${t}」已重启`,

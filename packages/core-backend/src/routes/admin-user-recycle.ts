@@ -3,6 +3,7 @@ import { auditLog } from '../audit/audit'
 import {
   acceptsRecyclePurgeConfirm,
   listRecycleBin,
+  logRecycleFailure,
   planRecycleIdList,
   purgeRecycleUsers,
   resolveUserRecycleRetentionDays,
@@ -116,7 +117,8 @@ export function registerAdminUserRecycleRoutes(router: Router): void {
         },
       })
       return jsonOk(res, summary)
-    } catch {
+    } catch (error) {
+      logRecycleFailure('RECYCLE_PURGE_FAILED', error)
       return jsonError(res, 500, 'RECYCLE_PURGE_FAILED', '清除失败')
     }
   })

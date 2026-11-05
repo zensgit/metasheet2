@@ -4,6 +4,14 @@ vi.mock('../../src/admin/user-recycle', () => ({
   isUserRecycleSweeperDisabled: vi.fn(() => false),
   purgeDueRecycleUsers: vi.fn(async () => 0),
   resolveUserRecycleSweeperIntervalMs: vi.fn(() => 60_000),
+  describeRecycleFailure: (error: unknown) => {
+    const errorClass = error instanceof Error ? error.name : 'unknown'
+    const rawCode = error && typeof error === 'object' && 'code' in error
+      ? (error as { code?: unknown }).code
+      : undefined
+    const code = typeof rawCode === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(rawCode) ? rawCode : ''
+    return `errorClass=${errorClass}${code ? ` code=${code}` : ''}`
+  },
 }))
 
 import { Logger } from '../../src/core/logger'
@@ -84,6 +92,8 @@ describe('user recycle sweeper enable flag', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(errorSpy).toHaveBeenCalled()
     expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(secret)
+    expect(JSON.stringify(errorSpy.mock.calls)).toContain('errorClass=Error')
+    expect(JSON.stringify(errorSpy.mock.calls)).toContain('User recycle sweeper tick failed')
     errorSpy.mockRestore()
   })
 })

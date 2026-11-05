@@ -175,7 +175,10 @@ async function eventIdOf(taskId: string, type: string): Promise<string> {
 
 /**
  * A fresh org with an active DingTalk integration (unless `integration` says otherwise), a creator,
- * two assignees and a follower, and an `all`-mode task. The creator is not an assignee.
+ * two assignees and a follower, and an `all`-mode task. The creator is not an assignee. The
+ * integration is seeded after the task is created and followed, so the create writes no `created`
+ * row and every cell sees only the rows of the writes it makes; the `created` cells (O1–O3, P8 in
+ * task-p2-source-links) seed theirs before they create.
  */
 async function fixture(label: string, opts: { integration?: 'active' | 'inactive' | 'none'; mode?: 'all' | 'any' } = {}): Promise<{
   orgId: string
@@ -192,10 +195,10 @@ async function fixture(label: string, opts: { integration?: 'active' | 'inactive
   const b = `usrB_${label}_${stamp}`
   const follower = `usrF_${label}_${stamp}`
   await members(orgId, creator, a, b, follower)
-  const integration = opts.integration ?? 'active'
-  if (integration !== 'none') await seedOrgDingTalkIntegration(orgId, { status: integration })
   const task = await createTask({ orgId, creatorId: creator, title: '备料复核', assignees: [a, b], completionMode: opts.mode ?? 'all' })
   await follow(task.id, follower)
+  const integration = opts.integration ?? 'active'
+  if (integration !== 'none') await seedOrgDingTalkIntegration(orgId, { status: integration })
   return { orgId, creator, a, b, follower, taskId: task.id }
 }
 
@@ -618,16 +621,20 @@ describe('M4-b: each touchpoint', () => {
     expect(await outboxOf(listId)).toHaveLength(1)
   })
 
-  it('RULED(2026-10-07): [R05] adding or removing an assignee without a status change, and follower changes, write no row', async () => {
+  it('package 2 (2-D1): adding an assignee without a status change writes one assignee_added row for the added person only; removing an assignee, follower changes and leaving write none', async () => {
     const f = await fixture('quiet')
     const extra = `usrX_quiet_${stampOf()}`
     await members(f.orgId, extra)
     await addAssignee({ orgId: f.orgId, actorId: f.creator, taskId: f.taskId, body: { userId: extra } })
+    const addedId = await eventIdOf(f.taskId, 'assignee_added')
     await removeAssignee({ orgId: f.orgId, actorId: f.creator, taskId: f.taskId, userId: extra })
     await addFollower({ orgId: f.orgId, actorId: f.creator, taskId: f.taskId, body: { userId: extra } })
     await removeFollower({ orgId: f.orgId, actorId: f.creator, taskId: f.taskId, userId: extra })
     await leaveTask({ orgId: f.orgId, actorId: f.follower, taskId: f.taskId })
-    expect(await outboxOf(f.taskId)).toEqual([])
+    const rows = await outboxOf(f.taskId)
+    expect(rows.map((row) => [row.recipient_user_id, row.recipient_role, row.status])).toEqual([[extra, 'assignee', 'pending']])
+    expect(rows[0].source_key).toBe(`task_event:${f.taskId}:${addedId}:recipient:${extra}:channel:${CHANNEL}`)
+    expect(rows[0].payload).toEqual({ kind: 'task_event', event: 'assignee_added', taskId: f.taskId, eventId: addedId, actorId: f.creator })
   })
 
   it('through the router: POST /api/tasks/:id/complete writes the rows', async () => {
@@ -639,9 +646,9 @@ describe('M4-b: each touchpoint', () => {
     const creator = `usrC_http_${stamp}`
     const follower = `usrF_http_${stamp}`
     await members(orgId, creator, follower)
-    await seedOrgDingTalkIntegration(orgId)
     const task = await createTask({ orgId, creatorId: creator, title: '备料复核', assignees: [actor.userId], completionMode: 'all' })
     await follow(task.id, follower)
+    await seedOrgDingTalkIntegration(orgId)
     if (!listener) throw new Error('tasks listener not started')
     const reply = await rawRequest(listener.port, 'POST', `/api/tasks/${task.id}/complete`, actor.bearer, {})
     expect(reply.status).toBe(200)
@@ -686,9 +693,16 @@ describe('M4-b: N1', () => {
     for (const row of reopened) {
       expect(row.payload).toEqual({ kind: 'task_event', event: 'reopened', taskId: f.taskId, eventId, actorId: f.creator })
     }
+    // Package 2 (2-D9): the added person also gets 「已指派给你」, under the assignee_added id; nobody else does.
+    const addedId = await eventIdOf(f.taskId, 'assignee_added')
+    const assigned = (await outboxOf(f.taskId)).filter((row) => row.payload.event === 'assignee_added')
+    expect(assigned.map((row) => [row.recipient_user_id, row.recipient_role])).toEqual([[added, 'assignee']])
+    expect(assigned[0].payload).toEqual({ kind: 'task_event', event: 'assignee_added', taskId: f.taskId, eventId: addedId, actorId: f.creator })
+    // The added person's two rows: one per fact, nothing merged (2-D9).
+    expect((await recipientsOf(f.taskId)).filter(([user]) => user === added).map(([, , event]) => event).sort()).toEqual(['assignee_added', 'reopened'])
   })
 
-  it('no status flip, no status event and no row: a done all task losing a completed row, a done any task gaining an assignee', async () => {
+  it('no status flip, no status event and no status row: a done all task losing a completed row; a done any task gaining an assignee writes only the added person\'s assignee_added row', async () => {
     const all = await fixture('n1quietall')
     await completeTask({ orgId: all.orgId, actorId: all.a, taskId: all.taskId })
     await completeTask({ orgId: all.orgId, actorId: all.b, taskId: all.taskId })
@@ -708,11 +722,103 @@ describe('M4-b: N1', () => {
     await completeTask({ orgId: any.orgId, actorId: any.a, taskId: any.taskId })
     const anyBefore = await outboxOf(any.taskId)
     await addAssignee({ orgId: any.orgId, actorId: any.creator, taskId: any.taskId, body: { userId: added } })
-    expect(await outboxOf(any.taskId)).toEqual(anyBefore)
+    const anyAfter = await outboxOf(any.taskId)
+    const beforeIds = new Set(anyBefore.map((row) => row.id))
+    expect(anyAfter.filter((row) => beforeIds.has(row.id))).toEqual(anyBefore)
+    const delta = anyAfter.filter((row) => !beforeIds.has(row.id))
+    expect(delta.map((row) => [row.recipient_user_id, row.recipient_role, row.payload.event])).toEqual([[added, 'assignee', 'assignee_added']])
     const reopened = await poolManager.get().query(
       `SELECT count(*)::int AS n FROM task_events WHERE task_id = $1 AND event_type = 'reopened'`,
       [any.taskId],
     )
     expect(reopened.rows[0].n).toBe(0)
+  })
+})
+
+// Package 2 (2-D1): `created` tells the new task's assignees, `assignee_added` the added person
+// only. Each cell seeds its active integration BEFORE the write it observes (the fixture above
+// seeds it after its own create).
+describe('package 2: created and assignee_added (O1–O5)', () => {
+  /** A fresh org with an active integration and active members who can use tasks, the creator first. */
+  async function org(label: string, count: number): Promise<{ orgId: string; users: string[] }> {
+    const stamp = stampOf()
+    const orgId = orgOf(label, stamp)
+    const users = Array.from({ length: count }, (_, i) => `usr${i}_${label}_${stamp}`)
+    await members(orgId, ...users)
+    await seedOrgDingTalkIntegration(orgId)
+    return { orgId, users }
+  }
+
+  it('O1: a create with two assignees writes one created row per assignee, as assignee, none for the creator, under the created event id; the producer called again for that event writes nothing', async () => {
+    const { orgId, users: [creator, a, b] } = await org('o1', 3)
+    const task = await createTask({ orgId, creatorId: creator, title: '备料复核', assignees: [a, b, creator] })
+    const eventId = await eventIdOf(task.id, 'created')
+    const rows = await outboxOf(task.id)
+    expect(rows.map((row) => [row.recipient_user_id, row.recipient_role])).toEqual([[a, 'assignee'], [b, 'assignee']].sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0)))
+    for (const row of rows) {
+      expect(row).toMatchObject({
+        org_id: orgId,
+        source_type: 'task_event',
+        source_id: task.id,
+        source_key: `task_event:${task.id}:${eventId}:recipient:${row.recipient_user_id}:channel:${CHANNEL}`,
+        channel: CHANNEL,
+        status: 'pending',
+        attempt_count: 0,
+      })
+      expect(row.payload).toEqual({ kind: 'task_event', event: 'created', taskId: task.id, eventId, actorId: creator })
+      expect(row.payload_text.includes('备料复核')).toBe(false)
+    }
+    const again = await withOrgStructure(orgId, (db) => enqueueTaskEventNotifications(db, {
+      orgId, taskId: task.id, createdBy: creator, events: [{ id: eventId, type: 'created', actorId: creator, occurredAt: null }],
+    }))
+    expect(again).toBe(0)
+    expect(await outboxOf(task.id)).toEqual(rows)
+  })
+
+  it('O2: a create whose only assignee is the creator writes no row, though the integration is read', async () => {
+    const { orgId, users: [creator] } = await org('o2', 1)
+    const created = await readsTable('directory_integrations', () => createTask({ orgId, creatorId: creator, title: '备料复核', assignees: [creator] }))
+    expect(created.read).toBe(true)
+    expect(await outboxOf(created.result.id)).toEqual([])
+    expect(await eventIdOf(created.result.id, 'created')).toBeTruthy()
+  })
+
+  it('O3: with a switch off a create with assignees writes no row and never reads the integration table', async () => {
+    const { orgId, users: [creator, a] } = await org('o3', 2)
+    setSwitches({ ...ALL_ON, TASKS_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED: undefined })
+    const quiet = await readsTable('directory_integrations', () => createTask({ orgId, creatorId: creator, title: '备料复核', assignees: [a] }))
+    expect(quiet.read).toBe(false)
+    expect(await outboxOf(quiet.result.id)).toEqual([])
+    setSwitches({})
+    const off = await createTask({ orgId, creatorId: creator, title: '备料复核', assignees: [a] })
+    expect(await outboxOf(off.id)).toEqual([])
+  })
+
+  it('O4: adding an assignee writes one assignee_added row for the added person; the creator, the other assignee, a follower and a list member get none', async () => {
+    const { orgId, users: [creator, a, added, follower, reader] } = await org('o4', 5)
+    setSwitches({})
+    const task = await createTask({ orgId, creatorId: creator, title: '备料复核', assignees: [a] })
+    await follow(task.id, follower)
+    await seedList(orgId, creator, [[creator, 'owner'], [reader, 'read']], [task.id])
+    setSwitches(ALL_ON)
+    await addAssignee({ orgId, actorId: a, taskId: task.id, body: { userId: added } })
+    const eventId = await eventIdOf(task.id, 'assignee_added')
+    expect(await recipientsOf(task.id)).toEqual([[added, 'assignee', 'assignee_added']])
+    const [row] = await outboxOf(task.id)
+    expect(row.source_key).toBe(`task_event:${task.id}:${eventId}:recipient:${added}:channel:${CHANNEL}`)
+    expect(row.payload).toEqual({ kind: 'task_event', event: 'assignee_added', taskId: task.id, eventId, actorId: a })
+    // Adding the same person again is a no-op: no event, no row.
+    await addAssignee({ orgId, actorId: a, taskId: task.id, body: { userId: added } })
+    expect(await outboxOf(task.id)).toHaveLength(1)
+  })
+
+  it('O5: the creator adding themselves as an assignee writes the event and no row', async () => {
+    const { orgId, users: [creator, a] } = await org('o5', 2)
+    setSwitches({})
+    const task = await createTask({ orgId, creatorId: creator, title: '备料复核', assignees: [a] })
+    setSwitches(ALL_ON)
+    await addAssignee({ orgId, actorId: creator, taskId: task.id, body: { userId: creator } })
+    expect(await eventIdOf(task.id, 'assignee_added')).toBeTruthy()
+    expect(await outboxOf(task.id)).toEqual([])
   })
 })

@@ -8,6 +8,7 @@
 import { auditLog } from '../audit/audit'
 import { buildUnusablePasswordHash } from '../auth/user-activation'
 import { revokeUserSessions } from '../auth/session-revocation'
+import { Logger } from '../core/logger'
 import { ADMIN_USER_BATCH_LIMIT, type BatchItemResult } from './user-batch-plan'
 import { query, transaction } from '../db/pg'
 import { lockUsersForAccessGraphWrite, supersedeDeprovisionEvidenceForAccessGraphWrite } from '../directory/access-graph-mutex'
@@ -24,6 +25,75 @@ export const USER_RECYCLE_PURGE_CONFIRM_TEXT_EN = 'Purge now'
 export const USER_RECYCLE_PURGE_CONFIRM_TEXTS = [USER_RECYCLE_PURGE_CONFIRM_TEXT, USER_RECYCLE_PURGE_CONFIRM_TEXT_EN] as const
 export const USER_TOMBSTONE_NAME = '已清除用户'
 export const USER_RECYCLE_SWEEP_BATCH = 100
+const recycleLogger = new Logger('UserRecycle')
+
+/**
+ * Identity scrub could not update the audit row it had selected.
+ * The message is fixed on purpose: driver text can echo a timestamp or a stored value.
+ */
+export class AuditIdentityScrubError extends Error {
+  readonly code: string
+
+  constructor(code: string) {
+    super('audit identity scrub failed')
+    this.name = 'AuditIdentityScrubError'
+    this.code = code
+  }
+}
+
+const JS_DATE_TO_STRING = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s/
+const SAFE_ERROR_CODE = /^[A-Za-z0-9_]{1,64}$/
+
+export function describeRecycleFailure(error: unknown): string {
+  let errorClass = 'unknown'
+  try {
+    if (error === null) errorClass = 'null'
+    else if (typeof error !== 'object' && typeof error !== 'function') errorClass = typeof error
+    else {
+      const name = (error as { constructor?: { name?: unknown } }).constructor?.name
+      errorClass = typeof name === 'string' && /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/.test(name) ? name : 'unknown'
+    }
+  } catch {
+    errorClass = 'unreadable'
+  }
+  const rawCode = error && typeof error === 'object' && 'code' in error
+    ? (error as { code?: unknown }).code
+    : undefined
+  const code = typeof rawCode === 'string' && SAFE_ERROR_CODE.test(rawCode) ? rawCode : ''
+  return `errorClass=${errorClass}${code ? ` code=${code}` : ''}`
+}
+
+export function logRecycleFailure(event: string, error: unknown): void {
+  try {
+    recycleLogger.error(`${event} ${describeRecycleFailure(error)}`)
+  } catch {
+    // Logging must not replace the original failure.
+  }
+}
+
+/**
+ * Primary-key match for a partitioned audit row.
+ * `created_at::text` keeps microsecond precision. A JS Date only has milliseconds,
+ * so equality on that value can update zero rows; that path matches the millisecond
+ * bucket and the caller rejects any count other than one.
+ */
+export function auditCreatedAtMatch(value: unknown): { whereSql: string; param: string } {
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) throw new AuditIdentityScrubError('AUDIT_CREATED_AT_INVALID')
+    return {
+      whereSql: `id = $1 AND created_at >= $2::timestamptz AND created_at < $2::timestamptz + INTERVAL '1 millisecond'`,
+      param: value.toISOString(),
+    }
+  }
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (!text) throw new AuditIdentityScrubError('AUDIT_CREATED_AT_MISSING')
+  if (JS_DATE_TO_STRING.test(text)) throw new AuditIdentityScrubError('AUDIT_CREATED_AT_UNPARSEABLE')
+  return {
+    whereSql: 'id = $1 AND created_at = $2::timestamptz',
+    param: text,
+  }
+}
+
 export const PLATFORM_ADMIN_ADVISORY_LOCK_SQL =
   "SELECT pg_advisory_xact_lock(hashtextextended('user-recycle:platform-admin', 0))"
 
@@ -372,9 +442,42 @@ const AUDIT_IDENTITY_KEYS = new Set([
   'nick',
   'org_email',
   'orgEmail',
+  // Login and display labels copy the same identity as email/username/mobile/name.
+  'accountLabel',
+  'account_label',
+  'loginName',
+  'login_name',
+  'loginLabel',
+  'login_label',
+  'displayName',
+  'display_name',
+  'displayLabel',
+  'display_label',
+  'fullName',
+  'full_name',
+  'nickname',
+  'nickName',
+  'phone',
+  'phoneNumber',
+  'telephone',
+  'jobNumber',
+  'job_number',
+  'position',
 ])
 
-const AUDIT_NAME_KEYS = new Set(['name', 'user_name', 'userName'])
+const AUDIT_NAME_KEYS = new Set([
+  'name',
+  'user_name',
+  'userName',
+  'displayName',
+  'display_name',
+  'displayLabel',
+  'display_label',
+  'fullName',
+  'full_name',
+  'nickname',
+  'nickName',
+])
 
 /**
  * Structured subject match. resource_id is the user id, or the known
@@ -537,16 +640,17 @@ export async function scrubPurgedUserIdentity(
   for (const table of ['audit_logs', 'audit_logs_archive']) {
     if (!(await relationExists(client, table))) continue
     const selected = await client.query(
-      `SELECT id, created_at, resource_type, resource_id, resource_name,
+      `SELECT id, created_at::text AS created_at, resource_type, resource_id, resource_name,
               user_id::text AS user_id, user_name, user_email, action_details, request_body
        FROM ${table}
        WHERE ${auditSubjectMatchSql()}`,
       [input.userId],
     )
     for (const raw of selected.rows) {
+      const createdAt = auditCreatedAtMatch(raw.created_at)
       const current: PurgeAuditRow = {
         id: raw.id as string | number,
-        created_at: String(raw.created_at),
+        created_at: createdAt.param,
         resource_id: raw.resource_id == null ? null : String(raw.resource_id),
         resource_type: raw.resource_type == null ? null : String(raw.resource_type),
         resource_name: raw.resource_name == null ? null : String(raw.resource_name),
@@ -558,17 +662,18 @@ export async function scrubPurgedUserIdentity(
       }
       const redacted = redactAuditRow(current, input.userId)
       if (JSON.stringify(redacted) === JSON.stringify(current)) continue
-      await client.query(
+      const updated = await client.query(
         `UPDATE ${table}
          SET action_details = $3::jsonb,
              request_body = $4::jsonb,
              user_email = $5,
              user_name = $6,
              resource_name = $7
-         WHERE id = $1 AND created_at = $2::timestamptz`,
+         WHERE ${createdAt.whereSql}
+         RETURNING id`,
         [
           redacted.id,
-          redacted.created_at,
+          createdAt.param,
           JSON.stringify(redacted.action_details ?? null),
           JSON.stringify(redacted.request_body ?? null),
           redacted.user_email,
@@ -576,6 +681,10 @@ export async function scrubPurgedUserIdentity(
           redacted.resource_name,
         ],
       )
+      const updatedCount = typeof updated.rowCount === 'number' ? updated.rowCount : updated.rows.length
+      if (updatedCount !== 1) {
+        throw new AuditIdentityScrubError('AUDIT_ROW_NOT_UPDATED')
+      }
     }
   }
 }

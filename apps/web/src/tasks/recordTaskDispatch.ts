@@ -1,10 +1,11 @@
 /**
  * 派发任务 from a multitable record (owner ruling R-45 step 1) — the pure half: assignee ids, the
- * create body, the source line, and the reading of a failed create. No I/O; the dialog
- * (`MetaRecordTaskDispatchDialog.vue`) does the two writes through `tasksApi.ts`.
+ * create body, and the reading of a failed create. No I/O; the dialog
+ * (`MetaRecordTaskDispatchDialog.vue`) sends the create through `tasksApi.ts`.
  *
  * What may leave the record: the title the dispatcher sees and confirms, the user ids they confirm as
- * assignees, and the record's deep link (ids only). Nothing else from `record.data` is ever read here.
+ * assignees, and the record's ids (the create's `source`). Nothing else from `record.data` is ever
+ * read here.
  */
 import type { CompletionMode, CreateTaskInput, CreateTaskResult } from './tasksApi'
 import { buildCreateDue, normalizeUserText, checkTaskTitle, type CreateDueKeys } from './tasksDraft'
@@ -105,12 +106,15 @@ export function buildDispatchCreateInput(draft: DispatchDraft, zone: string): Di
   return { ok: true, input }
 }
 
-/** The plain description line naming the source record: a fixed prefix and the deep link. */
-export function buildSourceLine(prefix: string, link: string): string {
-  return `${prefix} ${link}`
-}
-
-/** How a failed create reads in the dialog. Each kind has its own plain message. */
+/**
+ * How a failed create reads in the dialog. Each kind has its own plain message.
+ *
+ * Every kind but `OUTCOME_UNKNOWN` is a 4xx answer: THIS request created nothing (the service answers
+ * every refusal before its first write, or rolls the write back). None of them says anything about an
+ * earlier request under the same retry key. `OUTCOME_UNKNOWN` is a request with no readable answer (no
+ * answer at all, a 5xx, a 200 whose body could not be read): the task may or may not exist, so it is
+ * never reported as a failure.
+ */
 export type DispatchFailure =
   | 'INACTIVE_ORG_MEMBER'
   | 'ASSIGNEE_TASK_ACCESS_REQUIRED'
@@ -121,11 +125,18 @@ export type DispatchFailure =
   | 'TASKS_UNAVAILABLE'
   | 'INVALID_TITLE'
   | 'INVALID_DATE'
-  | 'FAILED'
+  | 'SOURCE_NOT_READABLE'
+  /** The service did not accept the retry key for this record: the caller discards it. */
+  | 'INVALID_DISPATCH_KEY'
+  /** Any other 4xx (an unnamed 422 code, `INVALID_MODE`, `INVALID_REMIND_AT`, `INVALID_SOURCE`, a 401). */
+  | 'REJECTED'
+  | 'OUTCOME_UNKNOWN'
 
 /**
  * A failed `createTask` result to its message kind. 403 is the missing `tasks:write`; 404 is
  * `/api/tasks` not mounted, i.e. the tasks feature switched off on the server since the page loaded.
+ * A plain `error` is a 4xx only when its status says so; status 0 (no answer), a 5xx, an absent
+ * status and a non-4xx status (a 200 body that could not be read) are all `OUTCOME_UNKNOWN`.
  */
 export function classifyDispatchFailure(result: Exclude<CreateTaskResult, { kind: 'ok' }>): DispatchFailure {
   switch (result.kind) {
@@ -146,8 +157,18 @@ export function classifyDispatchFailure(result: Exclude<CreateTaskResult, { kind
       if (result.code === 'INVALID_DATE' || result.code === 'INVALID_TIME_ZONE' || result.code === 'TIME_ZONE_REQUIRED') {
         return 'INVALID_DATE'
       }
-      return 'FAILED'
+      if (result.code === 'SOURCE_NOT_READABLE' || result.code === 'INVALID_DISPATCH_KEY') return result.code
+      return 'REJECTED'
     default:
-      return 'FAILED'
+      return isClientErrorStatus(result.status) ? 'REJECTED' : 'OUTCOME_UNKNOWN'
   }
+}
+
+/** Whether a failed create is a 4xx answer, i.e. this request created nothing. */
+export function isSettledDispatchFailure(failure: DispatchFailure): boolean {
+  return failure !== 'OUTCOME_UNKNOWN'
+}
+
+function isClientErrorStatus(status: number | undefined): boolean {
+  return typeof status === 'number' && status >= 400 && status < 500
 }
