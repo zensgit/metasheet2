@@ -326,7 +326,7 @@ describe('mapSendEmailDeliveryOutcome — one closed token set for every consume
   })
 })
 
-// ── F2: production default (Class-B flag OFF) — REAL channel → REAL service → REAL executor legacy mapping ──
+// ── production default (Class-B flag OFF) — REAL channel → REAL service → REAL executor legacy mapping ──
 
 function emailRule(): AutomationRule {
   return {

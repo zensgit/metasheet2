@@ -39,6 +39,10 @@ import { EmailNotificationChannel, NotificationServiceImpl } from '../../src/ser
 if (process.env.EXPECT_DB !== '1') {
   throw new Error('notification-delivery-result.db.test.ts requires EXPECT_DB=1')
 }
+// With EXPECT_DB=1 a missing DATABASE_URL must fail loudly instead of skipping the whole suite.
+if (!process.env.DATABASE_URL) {
+  throw new Error('notification-delivery-result.db.test.ts requires DATABASE_URL when EXPECT_DB=1')
+}
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const RUN = randomUUID()
