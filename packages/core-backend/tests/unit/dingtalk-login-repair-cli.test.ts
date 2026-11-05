@@ -107,7 +107,7 @@ describe('classifyRepairFailure', () => {
 })
 
 /** What a pool built like connection-pool.ts's main pool hands every client (pool options plus the URL). */
-const viaPool = (url: string, options: { query_timeout?: number; statement_timeout?: number } = {}) => {
+const viaPool = (url: string, options: Record<string, unknown> = {}) => {
   const pool = new Pool({ connectionString: url, query_timeout: 45000, statement_timeout: 30000, ...options })
   return { pool, connection: readPoolConnection(pool as unknown as Parameters<typeof readPoolConnection>[0]) }
 }
@@ -188,48 +188,111 @@ describe('resolveEffectiveRepairTimeout on the parameters pg derives for the poo
     expect(resolveEffectiveRepairTimeout(viaPool(BASE + query).connection)).toEqual({ ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' })
   })
 
-  it('URL options -c statement_timeout sets the budget when no startup statement_timeout is sent, and raises the floor', () => {
-    const options = (text: string) => '&options=' + encodeURIComponent(text)
-    const at = (text: string, query = 45000) =>
-      resolveEffectiveRepairTimeout(viaPool(BASE + '?statement_timeout=' + options(text), { query_timeout: query }).connection)
-    expect(viaPool(BASE + '?statement_timeout=' + options('-c statement_timeout=60000')).connection.startup).toEqual(
-      expect.objectContaining({ options: '-c statement_timeout=60000' }),
-    )
-    expect(at('-c statement_timeout=60000')).toEqual({ ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' })
-    expect(at('-c statement_timeout=60000', 75000)).toEqual({ ok: true, clientQueryTimeoutMs: 75000, serverStatementTimeoutMs: 60000, floor: 75000 })
-    // Server spellings: -cname=value, --name=value, dashes for underscores, any case, units; the last one wins.
-    expect(at('-cstatement_timeout=1min', 75000)).toMatchObject({ ok: true, serverStatementTimeoutMs: 60000 })
-    expect(at('--statement-timeout=60s', 75000)).toMatchObject({ ok: true, serverStatementTimeoutMs: 60000 })
-    expect(at('-c STATEMENT_TIMEOUT=1h -c statement_timeout=60000', 75000)).toMatchObject({ ok: true, serverStatementTimeoutMs: 60000 })
-    expect(at('-c statement_timeout=60000 -c statement_timeout=1h', 75000)).toEqual({ ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' })
-    // Anything this strict reading cannot resolve refuses.
-    for (const text of ['-c statement_timeout=1.5s', '-c statement_timeout=0', '-c statement_timeout', '-c statement_timeout=5us', '-c lock_timeout=1s'])
-      expect({ text, r: at(text, 2147483647) }).toEqual({ text, r: { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' } })
+  /** Every options spelling below, with what PostgreSQL 15 applied for it when no startup statement_timeout was sent. */
+  const OPTIONS_SPELLINGS = [
+    '-c statement_timeout=60000',
+    '-cstatement_timeout=1min',
+    '--statement_timeout=60000',
+    '--statement-timeout=60s',
+    '-c STATEMENT_TIMEOUT=60000',
+    '-c statement\\_timeout=60000',
+    '-c statement_timeout=1h',
+    '-c statement_timeout=0',
+    '-c statement_timeout=1.5min',
+    '-c statement_timeout=abc',
+    '-c lock_timeout=1s',
+    // Combined short options: -e then -c with the next word; the server applies 90 s or disables the budget.
+    '-ec statement_timeout=90000',
+    '-ecstatement_timeout=90000',
+    '-c statement_timeout=1 -ec statement_timeout=90000',
+    '-c statement_timeout=60000 -ec statement_timeout=0',
+    '-c x.y=1 --statement_timeout=60000 -ec statement_timeout=0',
+    '-c statement_timeout=1 -c statement_timeout=60000',
+  ] as const
+  const withOptions = (text: string) => '&options=' + encodeURIComponent(text)
+
+  it.each(OPTIONS_SPELLINGS)(
+    'no startup statement_timeout: options %j never set the budget, so the gate refuses whatever the client timeout',
+    (text) => {
+      const sent = viaPool(BASE + '?statement_timeout=' + withOptions(text), { query_timeout: 75000 }).connection
+      expect(sent.startup).not.toHaveProperty('statement_timeout')
+      expect(sent.startup).toEqual(expect.objectContaining({ options: text }))
+      for (const query of [45000, 75000, 2147483647])
+        expect({ query, r: resolveEffectiveRepairTimeout({ ...sent, queryTimeout: query }) }).toEqual({
+          query,
+          r: { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' },
+        })
+    },
+  )
+
+  it.each(OPTIONS_SPELLINGS)(
+    'an explicit startup statement_timeout decides over options %j (the server applies options first, then the startup parameters)',
+    (text) => {
+      const r = viaPool(BASE + '?options=' + encodeURIComponent(text))
+      expect(r.connection.startup).toEqual(expect.objectContaining({ statement_timeout: '30000', options: text }))
+      expect(resolveEffectiveRepairTimeout(r.connection)).toEqual({ ok: true, clientQueryTimeoutMs: 45000, serverStatementTimeoutMs: 30000, floor: 45000 })
+      // A larger startup value raises the floor whatever options say.
+      const raised = viaPool(BASE + '?statement_timeout=60000' + withOptions(text)).connection
+      expect(resolveEffectiveRepairTimeout(raised)).toEqual({ ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' })
+      expect(resolveEffectiveRepairTimeout({ ...raised, queryTimeout: 75000 })).toEqual({
+        ok: true,
+        clientQueryTimeoutMs: 75000,
+        serverStatementTimeoutMs: 60000,
+        floor: 75000,
+      })
+    },
+  )
+
+  it.each([
+    ['no statement_timeout in the pool options or the URL', '', { statement_timeout: undefined, query_timeout: 2147483647 }],
+    ['pool statement_timeout 0', '', { statement_timeout: 0, query_timeout: 2147483647 }],
+    ['URL statement_timeout empty', '?statement_timeout=&query_timeout=2147483647', {}],
+    ['URL statement_timeout 0 (pg sends "0": disabled)', '?statement_timeout=0&query_timeout=2147483647', {}],
+    ['URL statement_timeout -5 (pg sends "-5")', '?statement_timeout=-5&query_timeout=2147483647', {}],
+    ['URL statement_timeout non-numeric (pg sends "NaN")', '?statement_timeout=abc&query_timeout=2147483647', {}],
+  ] as const)('a startup statement_timeout that is not strictly readable refuses: %s', (_label, query, options) => {
+    const { connection } = viaPool(BASE + query, options)
+    expect(resolveEffectiveRepairTimeout(connection)).toEqual({ ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' })
   })
 
-  it('an explicit startup statement_timeout wins over options (the server applies options first), so options cannot lower or raise it', () => {
-    const r = viaPool(BASE + '?options=' + encodeURIComponent('-c statement_timeout=90000'))
-    expect(r.connection.startup).toEqual(expect.objectContaining({ statement_timeout: '30000', options: '-c statement_timeout=90000' }))
-    expect(resolveEffectiveRepairTimeout(r.connection)).toEqual({ ok: true, clientQueryTimeoutMs: 45000, serverStatementTimeoutMs: 30000, floor: 45000 })
-    // An unreadable setting in options still refuses: the server would reject the connection.
-    expect(resolveEffectiveRepairTimeout(viaPool(BASE + '?options=' + encodeURIComponent('-c statement_timeout=abc')).connection)).toEqual({
-      ok: false,
-      code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW',
-    })
-  })
-
-  it('PGOPTIONS reaches the startup options the same way when the URL has none', () => {
+  it('PGOPTIONS reaches the startup options but never sets the budget either', () => {
     const before = process.env.PGOPTIONS
     process.env.PGOPTIONS = '-c statement_timeout=60000'
     try {
-      expect(resolveEffectiveRepairTimeout(viaPool(BASE + '?statement_timeout=').connection)).toEqual({
-        ok: false,
-        code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW',
-      })
+      const sent = viaPool(BASE + '?statement_timeout=', { query_timeout: 75000 }).connection
+      expect(sent.startup).toEqual(expect.objectContaining({ options: '-c statement_timeout=60000' }))
+      expect(resolveEffectiveRepairTimeout(sent)).toEqual({ ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' })
+      // With pg's own startup parameter present, the options budget is ignored as the server ignores it.
+      expect(resolveEffectiveRepairTimeout(viaPool(BASE).connection)).toMatchObject({ ok: true, serverStatementTimeoutMs: 30000 })
     } finally {
       if (before === undefined) delete process.env.PGOPTIONS
       else process.env.PGOPTIONS = before
     }
+  })
+
+  it.each([
+    // A NUL ends the field on the wire; the rest becomes a startup key the server applies after pg's own.
+    ['options', BASE + '?options=' + encodeURIComponent('-c x.y=1\0statement_timeout\u000090000'), {}],
+    ['options (after a readable -c setting)', BASE + '?options=' + encodeURIComponent('-c statement_timeout=1 -c x.y=1\0statement_timeout\u000090000'), {}],
+    ['options (disabling)', BASE + '?options=' + encodeURIComponent('-c x.y=1\0statement_timeout\u00000'), {}],
+    ['application_name', BASE + '?application_name=' + encodeURIComponent('a\0statement_timeout\u000090000'), {}],
+    ['fallback_application_name', BASE, { fallback_application_name: 'a\0b' }],
+    ['user', 'postgresql://' + encodeURIComponent('u\0statement_timeout\u000090000') + '@127.0.0.1:9/synthetic', {}],
+    ['database', 'postgresql://synthetic@127.0.0.1:9/' + encodeURIComponent('d\0statement_timeout\u000090000'), {}],
+  ] as const)('a NUL inside the startup field %s refuses although the inspected statement_timeout reads 30000', (_field, url, options) => {
+    const { connection } = viaPool(url, options)
+    expect(connection.startup).toEqual(expect.objectContaining({ statement_timeout: '30000' }))
+    expect(Object.values(connection.startup as Record<string, string>).some((v) => v.includes('\0'))).toBe(true)
+    expect(resolveEffectiveRepairTimeout(connection)).toEqual({ ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' })
+  })
+
+  it.each([
+    [{ user: 'u', database: 'd', statement_timeout: '30000\u000090000' }],
+    [{ user: 'u', database: 'd', statement_timeout: '30000', 'statement_timeout\0x': '1' }],
+    [{ user: 'u', database: 'd', statement_timeout: '30000', lock_timeout: '5000\0' }],
+    [{ user: 'u', database: 'd', statement_timeout: '30000', replication: '\0' }],
+  ])('a NUL in any startup key or value refuses: %j', (startup) => {
+    expect(resolveEffectiveRepairTimeout({ queryTimeout: 2147483647, startup })).toEqual({ ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' })
   })
 
   it.each([
@@ -629,7 +692,13 @@ describe('entry process (child, no database)', () => {
       ['?statement_timeout=60000', {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
       ['?statement_timeout=60000', { DB_QUERY_TIMEOUT: '74999' }, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
       ['?statement_timeout=&options=' + encodeURIComponent('-c statement_timeout=60000'), {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+      // No startup statement_timeout: combined short options would give the server 90 s or no budget at all.
+      ['?statement_timeout=&options=' + encodeURIComponent('-c statement_timeout=1 -ec statement_timeout=90000'), {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+      ['?statement_timeout=&options=' + encodeURIComponent('-c statement_timeout=60000 -ec statement_timeout=0'), { DB_QUERY_TIMEOUT: '75000' }, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
       ['?statement_timeout=0', {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+      // A NUL in a startup field: the inspected statement_timeout reads 30000, the server would apply 90000.
+      ['?options=' + encodeURIComponent('-c statement_timeout=1 -c x.y=1\0statement_timeout\u000090000'), {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+      ['?application_name=' + encodeURIComponent('a\0b'), {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
     ] as const)('URL %s (env %j) refuses with %s before any connection', async (query, extra, code) => {
       const before = connections
       const r = await spawnEntry(['rollback-preview', await recoveryInput()], { ...platform, ...extra, DATABASE_URL: url + query })
@@ -642,6 +711,8 @@ describe('entry process (child, no database)', () => {
         ['?statement_timeout=60000', { DB_QUERY_TIMEOUT: '75000' }],
         ['?statement_timeout=60000&query_timeout=75000', {}],
         ['?query_timeout=60000', {}],
+        // The startup statement_timeout (30000 from the pool) decides; options are not read for the budget.
+        ['?options=' + encodeURIComponent('-c statement_timeout=1 -ec statement_timeout=90000'), {}],
       ] as const) {
         const before = connections
         const r = await spawnEntry(['rollback-preview', await recoveryInput()], { ...platform, ...extra, DATABASE_URL: url + query })

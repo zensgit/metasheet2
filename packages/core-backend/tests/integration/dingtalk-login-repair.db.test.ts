@@ -11,6 +11,8 @@ import * as bcrypt from 'bcryptjs'
 import express from 'express'
 import request from 'supertest'
 import { afterAll, describe, it, expect, vi } from 'vitest'
+import { Pool as PgPool } from 'pg'
+import { readPoolConnection, resolveEffectiveRepairTimeout } from '../../src/auth/dingtalk-identity-repair-cli'
 const provider = vi.hoisted(() => ({
   config: vi.fn(),
   exchange: vi.fn(),
@@ -6540,6 +6542,79 @@ globalThis.fetch = async (input, init = {}) => {
       }
       expect(await capture(f, r.id)).toEqual(before)
     }, 120000)
+
+    it('the gate decision matches the statement_timeout the server applies on a real connection built from the same pool options', async () => {
+      // The main pool's options as the CLI leaves them (preset client timeout, default server budget), plus URL parameters.
+      const decide = async (params: Record<string, string>) => {
+        const u = new URL(String(process.env.DATABASE_URL))
+        for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v)
+        const p = new PgPool({ connectionString: u.toString(), query_timeout: 45000, statement_timeout: 30000, max: 1 })
+        try {
+          const decision = resolveEffectiveRepairTimeout(readPoolConnection(p as unknown as Parameters<typeof readPoolConnection>[0]))
+          let applied: number | string
+          let clientTimeout: unknown = null
+          try {
+            const c = await p.connect()
+            try {
+              clientTimeout = (c as unknown as { connectionParameters: { query_timeout: unknown } }).connectionParameters.query_timeout
+              applied = Number((await c.query("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'")).rows[0].setting)
+            } finally {
+              c.release()
+            }
+          } catch (e) {
+            applied = 'connect failed ' + String((e as { code?: unknown }).code ?? '')
+          }
+          return { decision, applied, clientTimeout }
+        } finally {
+          await p.end()
+        }
+      }
+      const NUL = '\u0000'
+      const vectors: Array<[Record<string, string>, number | string, boolean]> = [
+        // [URL parameters, statement_timeout the server applied (ms), gate passes]
+        [{}, 30000, true],
+        [{ options: '-c statement_timeout=90000' }, 30000, true],
+        [{ options: '-cstatement_timeout=1min' }, 30000, true],
+        [{ options: '--statement-timeout=90s' }, 30000, true],
+        [{ options: '-c STATEMENT_TIMEOUT=1h' }, 30000, true],
+        [{ options: '-c statement_timeout=1 -c statement_timeout=90000' }, 30000, true],
+        [{ options: '-ec statement_timeout=90000' }, 30000, true],
+        [{ options: '-c statement_timeout=1 -ec statement_timeout=90000' }, 30000, true],
+        [{ options: '-c statement_timeout=60000 -ec statement_timeout=0' }, 30000, true],
+        [{ statement_timeout: '60000' }, 60000, false],
+        [{ statement_timeout: '60000', query_timeout: '75000' }, 60000, true],
+        // No startup statement_timeout: options (or nothing) decide on the server, the gate refuses.
+        [{ statement_timeout: '' }, 0, false],
+        [{ statement_timeout: '0' }, 0, false],
+        [{ statement_timeout: '', options: '-c statement_timeout=1 -ec statement_timeout=90000' }, 90000, false],
+        [{ statement_timeout: '', options: '-c statement_timeout=60000 -ec statement_timeout=0' }, 0, false],
+        [{ statement_timeout: '', options: '-ec statement_timeout=0' }, 0, false],
+        [{ statement_timeout: '', options: '-c STATEMENT_TIMEOUT=1h' }, 3600000, false],
+        // A NUL in a startup field adds a key the server applies after pg's own statement_timeout.
+        [{ options: `-c statement_timeout=1 -c x.y=1${NUL}statement_timeout${NUL}90000` }, 90000, false],
+        [{ options: `-c x.y=1${NUL}statement_timeout${NUL}0` }, 0, false],
+        [{ application_name: `a${NUL}statement_timeout${NUL}90000` }, 30000, false],
+      ]
+      const seen = []
+      for (const [params, applied, passes] of vectors) {
+        const { decision, applied: actual, clientTimeout } = await decide(params)
+        seen.push({ params, applied: actual, passes: decision.ok })
+        if (decision.ok) {
+          // Never a value other than what the server applied or the client arms, and the client outlasts the server.
+          expect({ params, server: actual, client: Number(clientTimeout) }).toEqual({
+            params,
+            server: decision.serverStatementTimeoutMs,
+            client: decision.clientQueryTimeoutMs,
+          })
+          expect(typeof actual === 'number' && actual > 0 && decision.clientQueryTimeoutMs >= actual + 15000).toBe(true)
+        } else {
+          expect({ params, decision }).toEqual({ params, decision: { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' } })
+        }
+        // Whenever the server budget is disabled or not covered by the client floor, the gate refused.
+        if (typeof actual === 'number' && (actual === 0 || actual + 15000 > Number(clientTimeout))) expect({ params, ok: decision.ok }).toEqual({ params, ok: false })
+      }
+      expect(seen).toEqual(vectors.map(([params, applied, passes]) => ({ params, applied, passes })))
+    }, 60000)
 
     it('a verify refusal prints only its code although every query of the run is logged as slow', async () => {
       const f = await fixture()

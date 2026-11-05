@@ -71,58 +71,23 @@ export function readPoolConnection(pool: PoolLike): RepairEffectiveConnection {
   }
 }
 
-/** PostgreSQL's split of the startup `options` string: whitespace separates, a backslash escapes the next character. */
-const splitStartupOptions = (text: string): string[] => {
-  const tokens: string[] = []
-  let current: string | null = null
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]
-    if (/\s/.test(ch)) {
-      if (current !== null) tokens.push(current)
-      current = null
-      continue
-    }
-    current = (current ?? '') + (ch === '\\' && i + 1 < text.length ? text[++i] : ch)
-  }
-  if (current !== null) tokens.push(current)
-  return tokens
-}
-
-const TIME_UNIT_MS: Readonly<Record<string, number>> = { '': 1, ms: 1, s: 1000, min: 60000, h: 3600000, d: 86400000 }
-
 /**
- * statement_timeout as the server applies it: an explicit startup parameter wins over `-c` in options (the
- * server processes options first, then the startup parameters), and within options the last setting wins.
- * Any options text naming statement_timeout that this strict reading cannot resolve gives null (refused).
+ * statement_timeout as the server applies it, read only from pg's own startup field. PostgreSQL applies the
+ * startup `options` string first and the startup parameters after it, so an explicit statement_timeout
+ * parameter wins over every options spelling (and over role or database settings); options are never read
+ * for the budget. A missing, empty, zero or non-numeric value leaves the budget unknown (a role or database
+ * default, or none). Startup fields are NUL-terminated on the wire, so a NUL inside any key or value would
+ * add a key the server applies after pg's own (seen as one value here, another on the server): refused.
  */
 function serverStatementTimeoutMs(startup: Record<string, unknown>): number | null {
-  let fromOptions: number | undefined
-  if (startup.options !== undefined) {
-    if (typeof startup.options !== 'string') return null
-    const tokens = splitStartupOptions(startup.options)
-    const settings: string[] = []
-    for (let i = 0; i < tokens.length; i++) {
-      const t = tokens[i]
-      const arg = t === '-c' ? tokens[++i] : t.startsWith('-c') ? t.slice(2) : t.startsWith('--') ? t.slice(2) : undefined
-      const eq = arg === undefined ? -1 : arg.indexOf('=')
-      if (arg !== undefined && eq > 0 && arg.slice(0, eq).toLowerCase().replace(/-/g, '_') === 'statement_timeout')
-        settings.push(arg.slice(eq + 1))
-    }
-    const mentioned = tokens.some((t) => /statement[-_]timeout/i.test(t))
-    if (mentioned && !settings.length) return null
-    for (const value of settings) {
-      const m = /^(\d+)(ms|s|min|h|d)?$/.exec(value)
-      if (!m) return null
-      fromOptions = Number(m[1]) * TIME_UNIT_MS[m[2] ?? '']
-    }
+  for (const [key, value] of Object.entries(startup)) {
+    // pg writes each value with addCString: a string, or nothing for a falsy value; anything else is unreadable.
+    if (key.includes('\0') || (value !== undefined && value !== null && typeof value !== 'string')) return null
+    if (typeof value === 'string' && value.includes('\0')) return null
   }
-  if (startup.statement_timeout !== undefined) {
-    // pg sends String(parseInt(value, 10)); "NaN" or a non-positive value gives no usable server budget.
-    const sent = String(startup.statement_timeout)
-    return /^\d+$/.test(sent) && Number(sent) > 0 ? Number(sent) : null
-  }
-  // No statement_timeout sent at all: the server default (or a role setting) applies, which cannot be read here.
-  return fromOptions !== undefined && fromOptions > 0 ? fromOptions : null
+  const sent = startup.statement_timeout
+  // pg sends String(parseInt(value, 10)); "NaN", "0" or a negative value gives no usable server budget.
+  return typeof sent === 'string' && /^\d+$/.test(sent) && Number(sent) > 0 ? Number(sent) : null
 }
 
 /**
