@@ -400,6 +400,32 @@ describe('TaskPeoplePicker', () => {
     expect(confirmed).toEqual([])
   })
 
+  it('in the millisecond the picker opens: Esc stops at the picker, and Enter in the search box is held back', async () => {
+    // Vue stamps an event at the first of its listeners it reaches and skips any later one attached
+    // in that millisecond; with the clock held there, a second listener inside the picker would let
+    // the Esc through.
+    const opened = Date.now()
+    const now = vi.spyOn(Date, 'now').mockReturnValue(opened)
+    try {
+      await flush()
+      const { el, closed, confirmed } = mountPicker('assignee')
+      const reachedParent: string[] = []
+      el.addEventListener('keydown', (event) => { reachedParent.push(event.key) })
+      const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+      q(el, 'search')!.dispatchEvent(enter)
+      expect(enter.defaultPrevented).toBe(true)
+      const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+      q(el, 'search')!.dispatchEvent(esc)
+      expect(esc.defaultPrevented).toBe(true)
+      await flush()
+      expect(closed.count).toBe(1)
+      expect(reachedParent).toEqual(['Enter'])
+      expect(confirmed).toEqual([])
+    } finally {
+      now.mockRestore()
+    }
+  })
+
   it('beforeRequest saying no: nothing is sent', async () => {
     const { el } = mountPicker('assignee', { beforeRequest: () => false })
     await flush()
