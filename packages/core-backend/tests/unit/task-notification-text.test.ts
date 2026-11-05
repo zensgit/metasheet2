@@ -96,12 +96,15 @@ describe('task-notification-text', () => {
   describe('renderTaskEventMessage', () => {
     it('one sentence per event type, then the tag as the last line', () => {
       const expected: Record<string, string> = {
+        created: '任务「T」已指派给你',
+        assignee_added: '任务「T」已指派给你',
         completed: '任务「T」已完成',
         completed_by_any: '任务「T」已完成',
         reopened: '任务「T」已重启',
         deleted: '任务「T」已被删除',
         commented: '任务「T」有新评论',
       }
+      expect(Object.keys(expected).sort()).toEqual([...TASK_NOTIFIABLE_EVENTS].sort())
       for (const event of TASK_NOTIFIABLE_EVENTS) {
         const msg = renderTaskEventMessage({ event, taskTitle: 'T', deliveryId: ID })
         expect(msg).toEqual({ title: '任务动态', content: `${expected[event]}\n\n${TAG}` })
@@ -131,7 +134,17 @@ describe('task-notification-text', () => {
       expect(msg.content.split('\n').some((l) => l.startsWith('#'))).toBe(false)
     })
 
+    it('the two "given to you" sentences escape the title, carry no link and no actor, and end with the tag', () => {
+      for (const event of ['created', 'assignee_added'] as const) {
+        const msg = renderTaskEventMessage({ event, taskTitle: '[备料](https://e) #1', deliveryId: ID })
+        expect(msg).toEqual({ title: '任务动态', content: `任务「［备料］（https：//e） ＃1」已指派给你\n\n${TAG}` })
+        expect(msg.content.includes('](')).toBe(false)
+        expect(msg.content.includes('http://') || msg.content.includes('https://')).toBe(false)
+      }
+    })
+
     it('rejects an event outside the closed set, a non-string title / id, and a non-object input', () => {
+      expect(() => renderTaskEventMessage({ event: 'assignee_removed' as never, taskTitle: 'T', deliveryId: ID })).toThrow(TypeError)
       expect(() => renderTaskEventMessage({ event: 'self_completed' as never, taskTitle: 'T', deliveryId: ID })).toThrow(TypeError)
       expect(() => renderTaskEventMessage({ event: 'completed', taskTitle: 1 as never, deliveryId: ID })).toThrow(TypeError)
       expect(() => renderTaskEventMessage({ event: 'completed', taskTitle: 'T', deliveryId: 'x' })).toThrow(TypeError)

@@ -96,6 +96,10 @@ async function installApi(page: Page): Promise<WalkApi> {
       return route.fulfill(json(422, ASSIGNEE_TASK_ACCESS_REQUIRED_BODY))
     }
     if (method === 'POST' && pathname === '/api/tasks') return route.fulfill(json(422, ASSIGNEE_TASK_ACCESS_REQUIRED_BODY))
+    // The dispatch dialog lists the tasks already dispatched from the record when it opens; none here.
+    if (method === 'GET' && /^\/api\/multitable\/sheets\/[^\/]+\/records\/[^\/]+\/tasks$/.test(pathname)) {
+      return route.fulfill(json(200, { ok: true, data: { items: [], hasMore: false } }))
+    }
     unmocked.push(`${method} ${pathname}`)
     return route.fulfill(json(404, { error: { code: 'VERIFY_UNMOCKED_ROUTE' } }))
   })
@@ -223,7 +227,7 @@ test('派发任务 naming an assignee without task access shows the task-access 
 
   const error = page.getByTestId('record-task-dispatch-error')
   await expect(error).toBeVisible()
-  expect(DIALOG_ACCESS_MESSAGE, 'the task-access copy, not the generic one').not.toBe(recordLabel('dispatch.errorFailed', true))
+  expect(DIALOG_ACCESS_MESSAGE, 'the task-access copy, not the generic one').not.toBe(recordLabel('dispatch.errorRejected', true))
   await expect(error).toHaveText(DIALOG_ACCESS_MESSAGE)
   await expect(error).toHaveAttribute('role', 'alert')
   // Still the form, not a created task.
