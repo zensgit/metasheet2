@@ -412,6 +412,40 @@ jobs:
           echo "remote_rc=$rc" >> "$GITHUB_OUTPUT"
           exit 0
 
+      - name: Mask deploy identity in collected files
+        if: always()
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          # Log masking does not apply to files, so the same secret values are replaced in every
+          # collected file here, before the summary and upload steps read them. Every file is then
+          # checked for the values; if masking failed anywhere, the collected files are withheld.
+          mkdir -p output/window-runner
+          masked=true
+          find output/window-runner -type f -exec perl -pi -e '
+                BEGIN {
+                  my ($u, $h) = ($ENV{DEPLOY_USER} // "", $ENV{DEPLOY_HOST} // "");
+                  @masked = grep { length } ((length($u) && length($h)) ? ("$u\@$h") : (), $h, $u);
+                }
+                for my $value (@masked) { s/\Q$value\E/***/g }
+              ' {} + || masked=false
+          # grep: 1 = value absent everywhere; 0 = still present, 2 = a file could not be read.
+          for value in "${DEPLOY_HOST:-}" "${DEPLOY_USER:-}"; do
+            [[ -n "$value" ]] || continue
+            grep_rc=0
+            grep -rqF -- "$value" output/window-runner 2>/dev/null || grep_rc=$?
+            if [[ "$grep_rc" != "1" ]]; then
+              masked=false
+            fi
+          done
+          if [[ "$masked" != "true" ]]; then
+            find output/window-runner -mindepth 1 -delete || true
+            echo "result=withheld: masking the collected files failed, nothing else is uploaded" > output/window-runner/summary.txt
+            exit 1
+          fi
+
       - name: Write step summary
         if: always()
         env:
@@ -458,7 +492,91 @@ jobs:
         with:
           name: ${{ steps.remote.outputs.artifact_name || format('attendance-staging-window-runner-{0}-{1}-{2}', inputs.action, github.run_id, github.run_attempt) }}
           retention-days: 30
-          path: output/window-runner
+          # Explicit allowlist: a file is uploaded only when it is named here, so a new output file
+          # stays out of the artifact until it is reviewed and listed. The pipeline self-test checks
+          # that every file the remote script writes is either listed here or deliberately excluded.
+          path: |
+            output/window-runner/ssh.log
+            output/window-runner/summary.txt
+            output/window-runner/auth-me.summary.txt
+            output/window-runner/settings-*.summary.txt
+            output/window-runner/env-flags.txt
+            output/window-runner/docker-ps-staging.txt
+            output/window-runner/deploy-identity.txt
+            output/window-runner/staging-compose.sha256
+            output/window-runner/compose-pull.log
+            output/window-runner/compose-up.log
+            output/window-runner/health-web.json
+            output/window-runner/health-backend.json
+            output/window-runner/health-last.json
+            output/window-runner/override-shape.txt
+            output/window-runner/residue-sweep.txt
+            output/window-runner/smoke-*.log
+            output/window-runner/backend-log-slice.log
+            output/window-runner/migrate-list.txt
+            output/window-runner/migrate-list-before.txt
+            output/window-runner/migrate-list-after.txt
+            output/window-runner/migrate-run.log
+            output/window-runner/migration-alignment-stdout.txt
+            output/window-runner/migration-report/report.json
+            output/window-runner/migration-report/report.md
+            output/window-runner/migration-report/schema-probes.sql
+            output/window-runner/owner-exclusions-*.txt
+            output/window-runner/rollout-shadow-flags-*.txt
+            output/window-runner/target-image-pull.log
+            output/window-runner/target-migration-image.txt
+            output/window-runner/target-migrate-list-before.txt
+            output/window-runner/target-read-only-prechecks.txt
+            output/window-runner/migration-name-universe.txt
+            output/window-runner/migration-applied-before.txt
+            output/window-runner/migration-in-play-before-owner-exclusions.txt
+            output/window-runner/migration-owner-excluded.txt
+            output/window-runner/migration-in-play.txt
+            output/window-runner/confirm-in-play.txt
+            output/window-runner/confirm-076.txt
+            output/window-runner/backup-metadata.txt
+            output/window-runner/rehearsal-create-db.log
+            output/window-runner/rehearsal-restore.log
+            output/window-runner/rehearsal-restore-compat.log
+            output/window-runner/rehearsal-search-path-shim.txt
+            output/window-runner/rehearsal-migrate-run.log
+            output/window-runner/rehearsal-isolation-check.txt
+            output/window-runner/rehearsal-migrate-list-after.txt
+            output/window-runner/apply-migrate-list-before.txt
+            output/window-runner/apply-migrate-run.log
+            output/window-runner/apply-migrate-list-after.txt
+            output/window-runner/p95-baseline-*.txt
+            output/window-runner/seed-migrate-list.txt
+            output/window-runner/soak-config.json
+            output/window-runner/soak-seed-org.sql
+            output/window-runner/soak-seed-report.txt
+            output/window-runner/soak-seed-posture.txt
+            output/window-runner/soak-seed-rotate.sql
+            output/window-runner/soak-seed-rotate.txt
+            output/window-runner/soak-seed-remint.sql
+            output/window-runner/soak-seed-remint.txt
+            output/window-runner/soak-seed-synthetic-check.txt
+            output/window-runner/w4-plan-*.json
+            output/window-runner/w4-plan-*.stderr
+            output/window-runner/w4-manifest-*.json
+            output/window-runner/w4-apply-*.json
+            output/window-runner/w4-apply-*.stderr
+            output/window-runner/w7-plan-*.json
+            output/window-runner/w7-plan-*.stderr
+            output/window-runner/w7-manifest-*.json
+            output/window-runner/w7-apply-*.json
+            output/window-runner/w7-apply-*.stderr
+            output/window-runner/soak-override.sha256
+            output/window-runner/soak-flags-compose-up.log
+            output/window-runner/soak-flags-env.txt
+            output/window-runner/soak-run-login.log
+            output/window-runner/soak-run.log
+            output/window-runner/soak-run-summary.json
+            output/window-runner/soak-run-backend-log-slice.log
+            output/window-runner/soak-status.txt
+            output/window-runner/soak-q8.mts
+            output/window-runner/soak-q8-*.json
+            output/window-runner/soak-q8-*.stderr
 
       - name: Fail on remote error
         if: steps.remote.outputs.remote_rc != '0'
