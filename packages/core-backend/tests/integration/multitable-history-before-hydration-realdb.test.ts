@@ -240,6 +240,9 @@ describeIfDatabase('T1b before-image hydration goldens (real DB)', () => {
     const visible = await detail(batchId)
     expect(visible.status).toBe(200)
     expect(changeOf(visible, REC_DELETE)?.changedFieldIds).toEqual([SALARY, STATUS])
+    // Unmasked, the value comes back as stored, so its text is what the leak check below looks for.
+    expect(changeOf(visible, REC_DELETE)?.before?.[SALARY]).toBe(salaryValue)
+    expect(JSON.stringify(visible.body.data)).toContain(String(salaryValue))
     expect(visible.body.data.visibleAffectedFieldCount).toBe(2)
     expect(visible.body.data.fieldNames[SHEET_ID]).toHaveProperty(SALARY)
     for (const countMode of ['exact', 'estimate']) {
