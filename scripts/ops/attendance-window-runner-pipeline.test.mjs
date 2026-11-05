@@ -6664,7 +6664,7 @@ const UPLOAD_ROOT = 'output/window-runner/'
 test('workflow upload: an explicit allowlist of summary files, never the whole output dir; raw response files are excluded', () => {
   const { block, paths } = workflowUploadPaths(readFileSync(WORKFLOW, 'utf8'))
   const text = block.join('\n')
-  assert.match(text, /^ {8}if: always\(\)$/m, 'the upload still runs on failure')
+  assert.match(text, /^ {8}if: always\(\) && steps\.mask\.outputs\.publish == 'ok'$/m, 'the upload runs on failure too, but only after the mask step completed')
   assert.match(text, /^ {8}uses: actions\/upload-artifact@v4$/m)
   assert.match(text, /^ {10}retention-days: 30$/m)
   assert.ok(paths.length > 20, `expected an explicit list, got ${paths.length} path(s)`)
@@ -6735,7 +6735,11 @@ test('workflow upload: every output file the runner writes is either on the allo
 const MASK_USER = 'sentineldeployuser'
 const MASK_HOST = '198.51.100.23'
 
-function runMaskStep({ files, user = MASK_USER, host = MASK_HOST, fakePerlFails = false, fakePerlNoop = false }) {
+// Options that put a fake binary first on PATH: fakePerlFails / fakePerlNoop (masking fails or
+// changes nothing), fakeDeleteFails (`find ... -delete` exits 1 and removes nothing; any other find
+// call runs the real find), abortAtStart (mkdir fails, so the script stops on its first command)
+// and abortAtCheck (the value check kills the step shell, as a cancelled or crashed run would).
+function runMaskStep({ files, user = MASK_USER, host = MASK_HOST, fakePerlFails = false, fakePerlNoop = false, fakeDeleteFails = false, abortAtStart = false, abortAtCheck = false }) {
   const steps = workflowSteps(readFileSync(WORKFLOW, 'utf8'))
   const step = steps.find((candidate) => candidate.name === 'Mask deploy identity in collected files')
   assert.ok(step && step.run, 'expected the mask step with a run script')
@@ -6755,16 +6759,41 @@ function runMaskStep({ files, user = MASK_USER, host = MASK_HOST, fakePerlFails 
     // Exits 0 without changing anything, as perl -pi does for a file it cannot open.
     writeFileSync(join(binDir, 'perl'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
   }
+  if (fakeDeleteFails) {
+    // The real find is resolved without binDir on PATH; the forwarded call keeps PATH, so its
+    // -exec perl still reaches a fake perl.
+    writeFileSync(join(binDir, 'find'), [
+      '#!/bin/sh',
+      'for arg in "$@"; do [ "$arg" = "-delete" ] && exit 1; done',
+      'real=$(PATH="${PATH#*:}" command -v find)',
+      'exec "$real" "$@"',
+      '',
+    ].join('\n'), { mode: 0o755 })
+  }
+  if (abortAtStart) {
+    writeFileSync(join(binDir, 'mkdir'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+  }
+  if (abortAtCheck) {
+    writeFileSync(join(binDir, 'grep'), '#!/bin/sh\nkill -KILL "$PPID"\nexit 1\n', { mode: 0o755 })
+  }
+  const githubOutput = join(dir, 'github-output')
+  writeFileSync(githubOutput, '')
   // GitHub runs a bash run: script as `bash --noprofile --norc -eo pipefail {0}`.
   const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step.run], {
     cwd: dir,
     encoding: 'utf8',
-    env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, DEPLOY_USER: user, DEPLOY_HOST: host },
+    env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, DEPLOY_USER: user, DEPLOY_HOST: host, GITHUB_OUTPUT: githubOutput },
   })
-  const after = readTree(outDir)
+  const after = existsSync(outDir) ? readTree(outDir) : {}
+  const outputs = readFileSync(githubOutput, 'utf8')
   rmSync(dir, { recursive: true, force: true })
-  return { ...r, after }
+  return { ...r, after, outputs }
 }
+
+const MASK_STEP = 'Mask deploy identity in collected files'
+const PUBLISH_MARKER_LINE = 'echo "publish=ok" >> "$GITHUB_OUTPUT"'
+const PUBLISH_GATE = "if: always() && steps.mask.outputs.publish == 'ok'"
+const WITHHELD_GATE = "if: always() && steps.mask.outputs.publish != 'ok'"
 
 test('workflow mask step: runs on every outcome between the remote action and the summary/upload, with the deploy secrets', () => {
   const workflow = readFileSync(WORKFLOW, 'utf8')
@@ -6789,6 +6818,7 @@ test('workflow mask step (EXECUTABLE): the deploy user and host are replaced in 
     },
   })
   assert.equal(r.status, 0, r.stderr)
+  assert.equal(r.outputs, 'publish=ok\n', 'a completed mask sets the publish marker')
   assert.equal(r.after['ssh.log'], 'scp: ***: Permission denied\nconnected to ***\n')
   assert.equal(r.after['summary.txt'], 'backup_path=/home/***/window-runner-backups/staging.dump\nresult=ok\n')
   assert.equal(r.after['migration-report/report.md'], 'host ***\n')
@@ -6800,12 +6830,14 @@ test('workflow mask step (EXECUTABLE): the deploy user and host are replaced in 
 
   const empty = runMaskStep({ files: { 'plain.txt': 'a @ b\n' }, user: '', host: '' })
   assert.equal(empty.status, 0, empty.stderr)
+  assert.equal(empty.outputs, 'publish=ok\n')
   assert.equal(empty.after['plain.txt'], 'a @ b\n', 'empty values mask nothing (a bare @ is never replaced)')
 })
 
 test('workflow mask step (EXECUTABLE): if masking fails, the collected files are withheld and the step fails', () => {
   const r = runMaskStep({ files: { 'ssh.log': `${MASK_USER}@${MASK_HOST}\n`, 'summary.txt': 'result=ok\n' }, fakePerlFails: true })
   assert.notEqual(r.status, 0, 'a failed mask fails the step')
+  assert.equal(r.outputs, '', 'no publish marker')
   assert.deepEqual(Object.keys(r.after), ['summary.txt'], 'only a withheld notice is left to upload')
   assert.match(r.after['summary.txt'], /withheld/)
   for (const content of Object.values(r.after)) assert.ok(!content.includes(MASK_USER) && !content.includes(MASK_HOST))
@@ -6814,9 +6846,79 @@ test('workflow mask step (EXECUTABLE): if masking fails, the collected files are
 test('workflow mask step (EXECUTABLE): a file left unmasked while the masking command exits 0 is caught by the check, and the collected files are withheld', () => {
   const r = runMaskStep({ files: { 'ssh.log': `${MASK_USER}@${MASK_HOST}\n`, 'nested/report.md': `${MASK_HOST}\n`, 'summary.txt': 'result=ok\n' }, fakePerlNoop: true })
   assert.notEqual(r.status, 0, 'a value still present after masking fails the step')
+  assert.equal(r.outputs, '', 'no publish marker')
   assert.deepEqual(Object.keys(r.after), ['summary.txt'], 'only a withheld notice is left to upload')
   assert.match(r.after['summary.txt'], /withheld/)
   assert.ok(!`${r.stdout}${r.stderr}`.includes(MASK_USER) && !`${r.stdout}${r.stderr}`.includes(MASK_HOST), 'the check prints neither value')
+})
+
+test('workflow mask step (EXECUTABLE): when withholding cannot delete the files, they stay on disk but no publish marker is set', () => {
+  for (const fake of [{ fakePerlNoop: true }, { fakePerlFails: true }]) {
+    const r = runMaskStep({ files: { 'ssh.log': `${MASK_USER}@${MASK_HOST}\n`, 'nested/report.md': `${MASK_HOST}\n` }, fakeDeleteFails: true, ...fake })
+    const label = Object.keys(fake)[0]
+    assert.notEqual(r.status, 0, `${label}: the step fails`)
+    assert.ok('ssh.log' in r.after && 'nested/report.md' in r.after, `${label}: the failed delete left the collected files in place (the case this marker guards)`)
+    assert.equal(r.outputs, '', `${label}: no publish marker, so neither the summary nor the upload step runs`)
+  }
+})
+
+test('workflow mask step (EXECUTABLE): a step that stops before it completes sets no publish marker', () => {
+  const files = { 'ssh.log': `${MASK_USER}@${MASK_HOST}\n`, 'summary.txt': 'result=ok\n' }
+  const start = runMaskStep({ files, abortAtStart: true })
+  assert.notEqual(start.status, 0, 'a failing first command stops the step')
+  assert.equal(start.outputs, '', 'stopped at the start: no publish marker')
+  assert.equal(start.after['ssh.log'], files['ssh.log'], 'stopped at the start: nothing was masked or withheld')
+  const killed = runMaskStep({ files, abortAtCheck: true })
+  assert.equal(killed.signal, 'SIGKILL', `the step shell is killed during the value check (status ${killed.status})`)
+  assert.equal(killed.outputs, '', 'killed mid-step: no publish marker')
+  assert.ok('ssh.log' in killed.after, 'killed mid-step: the collected files were neither withheld nor marked publishable')
+})
+
+test('workflow publish gate: the summary and upload steps run only after the mask step sets publish=ok as its last action', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const mask = workflowStepBlock(workflow, MASK_STEP).join('\n')
+  assert.match(mask, /^ {8}id: mask$/m, 'the mask step has the id the gates read')
+  const step = workflowSteps(workflow).find((candidate) => candidate.name === MASK_STEP)
+  const lines = executableLines(step.run).split('\n').filter((line) => line.trim() !== '')
+  assert.equal(lines[lines.length - 1], PUBLISH_MARKER_LINE, 'setting the marker is the last command of the mask step, at top level')
+  assert.equal(executableLines(step.run).split('publish=').length - 1, 1, 'the mask step sets the marker on exactly one executable line')
+  for (const name of ['Write step summary', 'Upload artifacts']) {
+    const block = workflowStepBlock(workflow, name)
+    const ifs = block.filter((line) => /^ {8}if:/.test(line))
+    assert.deepEqual(ifs, [`        ${PUBLISH_GATE}`], `${name} runs only when the mask step set the publish marker`)
+  }
+  const writers = workflowSteps(workflow).filter((candidate) => candidate.run !== null && /publish=/.test(executableLines(candidate.run)))
+  assert.deepEqual(writers.map(workflowStepLabel), [MASK_STEP], 'no other step can set the publish marker')
+})
+
+test('workflow publish gate (EXECUTABLE): without the marker, a fixed notice is written and nothing from the collected files is read', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const names = workflowSteps(workflow).map((candidate) => candidate.name)
+  const at = (name) => names.indexOf(name)
+  assert.ok(at(MASK_STEP) < at('Write withheld notice') && at('Write withheld notice') < at('Upload artifacts'))
+  const block = workflowStepBlock(workflow, 'Write withheld notice')
+  assert.deepEqual(block.filter((line) => /^ {8}if:/.test(line)), [`        ${WITHHELD_GATE}`])
+  assert.ok(!block.some((line) => /^ {8}(env|uses|with):/.test(line)), 'the notice step takes no inputs')
+  const step = workflowSteps(workflow).find((candidate) => candidate.name === 'Write withheld notice')
+  assert.doesNotMatch(step.run, /output\/|\$\{\{|\bcat\b/, 'the notice reads no collected file and no expression')
+  const dir = mkdtempSync(join(tmpdir(), 'wr-notice-'))
+  try {
+    mkdirSync(join(dir, 'output', 'window-runner'), { recursive: true })
+    writeFileSync(join(dir, 'output', 'window-runner', 'summary.txt'), `${MASK_USER}@${MASK_HOST}\n`)
+    const summary = join(dir, 'step-summary')
+    writeFileSync(summary, '')
+    const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step.run], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: { ...process.env, GITHUB_STEP_SUMMARY: summary, DEPLOY_USER: MASK_USER, DEPLOY_HOST: MASK_HOST },
+    })
+    assert.equal(r.status, 0, r.stderr)
+    const text = readFileSync(summary, 'utf8')
+    assert.match(text, /collected files withheld/)
+    assert.ok(!text.includes(MASK_USER) && !text.includes(MASK_HOST), 'the notice is fixed text')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 // Every smoke arm the runner can bundle (the refused ones too, so re-enabling one cannot bring the

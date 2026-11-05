@@ -413,6 +413,7 @@ jobs:
           exit 0
 
       - name: Mask deploy identity in collected files
+        id: mask
         if: always()
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -422,6 +423,8 @@ jobs:
           # Log masking does not apply to files, so the same secret values are replaced in every
           # collected file here, before the summary and upload steps read them. Every file is then
           # checked for the values; if masking failed anywhere, the collected files are withheld.
+          # The summary and upload steps run only when this step sets publish=ok, which it does as
+          # its last action; a cancelled, crashed or failed run of this step publishes nothing.
           mkdir -p output/window-runner
           masked=true
           find output/window-runner -type f -exec perl -pi -e '
@@ -445,9 +448,21 @@ jobs:
             echo "result=withheld: masking the collected files failed, nothing else is uploaded" > output/window-runner/summary.txt
             exit 1
           fi
+          echo "publish=ok" >> "$GITHUB_OUTPUT"
+
+      - name: Write withheld notice
+        if: always() && steps.mask.outputs.publish != 'ok'
+        run: |
+          set -euo pipefail
+          # A fixed notice: nothing from the collected files is read or published on this path.
+          {
+            echo "## Attendance Staging Window Runner"
+            echo ""
+            echo "- Result: collected files withheld (identity masking did not complete); no summary or artifact is published"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Write step summary
-        if: always()
+        if: always() && steps.mask.outputs.publish == 'ok'
         env:
           REMOTE_RC: ${{ steps.remote.outputs.remote_rc }}
           ARTIFACT_NAME: ${{ steps.remote.outputs.artifact_name }}
@@ -487,7 +502,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload artifacts
-        if: always()
+        if: always() && steps.mask.outputs.publish == 'ok'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.remote.outputs.artifact_name || format('attendance-staging-window-runner-{0}-{1}-{2}', inputs.action, github.run_id, github.run_attempt) }}
