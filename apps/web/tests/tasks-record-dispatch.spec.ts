@@ -2823,6 +2823,14 @@ async function afterDebounce() {
 
 const pickerQ = <T extends Element = HTMLElement>(id: string) => document.querySelector<T>(`[data-testid="task-people-picker-${id}"]`)
 
+/** Waits in real time until the clock has moved to a later millisecond. */
+async function laterMillisecond() {
+  const start = Date.now()
+  for (let i = 0; i < 50 && Date.now() <= start; i += 1) await new Promise<void>((resolve) => setTimeout(resolve, 1))
+  // A clock held by a spy left in place would end the wait unmoved; fail loudly rather than go on.
+  expect(Date.now()).toBeGreaterThan(start)
+}
+
 function typeSearch(value: string) {
   const input = pickerQ<HTMLInputElement>('search')
   expect(input).not.toBeNull()
@@ -2935,6 +2943,82 @@ describe('派发任务 dialog: the people lookup after a person-field prefill (p
     expect(toggle.getAttribute('aria-expanded')).toBe('true')
     expect(q<HTMLElement>('add-by-id')!.style.display).toBe('')
   })
+
+  /** Opens the dialog with the clock held at the millisecond it opened, so a listener on the user-id
+   *  box (attached in that same millisecond) would take the stamp and the dialog's own be skipped. */
+  async function openDialogInOneMillisecond(container: HTMLElement): Promise<() => void> {
+    await openKebab(container)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now())
+    try {
+      dispatchItem()!.click()
+      await flushUi(6)
+      expect(dialog()).not.toBeNull()
+      q<HTMLButtonElement>('add-by-id-toggle')!.click()
+      await flushUi()
+    } catch (error) {
+      now.mockRestore()
+      throw error
+    }
+    return () => now.mockRestore()
+  }
+
+  it('Esc in the user-id box closes the dialog, also when it arrives in the millisecond the dialog opened', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    const restore = await openDialogInOneMillisecond(container)
+    try {
+      const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+      q<HTMLInputElement>('assignee-input')!.dispatchEvent(event)
+      await flushUi()
+      expect(event.defaultPrevented).toBe(true)
+    } finally {
+      restore()
+    }
+    expect(dialog()).toBeNull()
+  })
+
+  // Pins Enter after its listener moved from the box to the dialog's handler; the Esc cell above is
+  // the one that turns red when a listener on the box takes the stamp.
+  it('Enter in the user-id box adds the typed id, also in the millisecond the dialog opened', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    const restore = await openDialogInOneMillisecond(container)
+    try {
+      setInput('assignee-input', 'usr_b')
+      const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+      q<HTMLInputElement>('assignee-input')!.dispatchEvent(event)
+      await flushUi()
+      expect(event.defaultPrevented).toBe(true)
+    } finally {
+      restore()
+    }
+    expect(assigneeIds()).toEqual(['usr_a', 'usr_b'])
+    expect(q<HTMLInputElement>('assignee-input')!.value).toBe('')
+    expect(dialog()).not.toBeNull()
+  })
+
+  it('another key in the user-id box is left to the box: not held back, no chip added, the typed text kept', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    q<HTMLButtonElement>('add-by-id-toggle')!.click()
+    await flushUi()
+    setInput('assignee-input', 'usr_b')
+    const before = assigneeIds()
+    for (const key of ['a', ' ']) {
+      const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
+      q<HTMLInputElement>('assignee-input')!.dispatchEvent(event)
+      await flushUi()
+      expect(event.defaultPrevented, JSON.stringify(key)).toBe(false)
+    }
+    expect(assigneeIds()).toEqual(before)
+    expect(q<HTMLInputElement>('assignee-input')!.value).toBe('usr_b')
+    expect(dialog()).not.toBeNull()
+  })
 })
 
 describe('派发任务 dialog: the people picker (package 1b)', () => {
@@ -3036,6 +3120,123 @@ describe('派发任务 dialog: the people picker (package 1b)', () => {
     }
     expect(pickerQ('search')).toBeNull()
     expect(dialog()).not.toBeNull()
+  })
+
+  it('Tab from the last control of the picker wraps to its first, never to a dialog control behind it', async () => {
+    serveTasks({ people: peopleWithSearch() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    q<HTMLButtonElement>('pick-people')!.click()
+    await flushUi()
+    // Nothing is ticked yet, so the picker's confirm is disabled and cancel is its last control.
+    const cancel = pickerQ<HTMLButtonElement>('cancel')!
+    cancel.focus()
+    const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    cancel.dispatchEvent(event)
+    await flushUi()
+    expect(event.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(pickerQ('search'))
+    expect(dialog()).not.toBeNull()
+  })
+
+  it('Enter on another control, in the dialog or in the picker, adds nothing from the user-id box', async () => {
+    serveTasks({ people: peopleWithSearch() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    q<HTMLButtonElement>('add-by-id-toggle')!.click()
+    await flushUi()
+    setInput('assignee-input', 'usr_b')
+    const before = assigneeIds()
+    const enter = (on: HTMLElement) => {
+      on.focus()
+      const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+      on.dispatchEvent(event)
+      return event
+    }
+    expect(enter(q<HTMLInputElement>('title')!).defaultPrevented).toBe(false)
+    await flushUi()
+    q<HTMLButtonElement>('pick-people')!.click()
+    await flushUi()
+    // The Enter from the picker reaches the dialog's handler only when it is stamped in a later
+    // millisecond than the one the dialog's listener was attached in (see the picker's onPanelKeydown).
+    await laterMillisecond()
+    expect(enter(pickerQ<HTMLButtonElement>('cancel')!).defaultPrevented).toBe(false)
+    await flushUi()
+    expect(assigneeIds()).toEqual(before)
+    expect(q<HTMLInputElement>('assignee-input')!.value).toBe('usr_b')
+    expect(dialog()).not.toBeNull()
+  })
+
+  it('closing the picker by Esc, cancel or confirm puts focus back on 选择人员; the dialog then keeps Shift+Tab inside and an Esc closes it', async () => {
+    serveTasks({ people: peopleWithSearch() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    const pick = () => q<HTMLButtonElement>('pick-people')!
+    const openPicker = async () => {
+      pick().focus()
+      pick().click()
+      await flushUi()
+      expect(document.activeElement).toBe(pickerQ('search'))
+    }
+    await openPicker()
+    pickerQ<HTMLInputElement>('search')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(pickerQ('search')).toBeNull()
+    expect(document.activeElement).toBe(pick())
+    await openPicker()
+    pickerQ<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    expect(pickerQ('search')).toBeNull()
+    expect(document.activeElement).toBe(pick())
+    await openPicker()
+    typeSearch('P')
+    await afterDebounce()
+    document.querySelector<HTMLInputElement>('[data-person-id="usr_x"] input[type="checkbox"]')!.click()
+    await flushUi()
+    pickerQ<HTMLButtonElement>('confirm')!.click()
+    await flushUi()
+    expect(assigneeIds()).toEqual(['usr_a', 'usr_x'])
+    expect(document.activeElement).toBe(pick())
+    // With the picker gone, the dialog's keys work again: Shift+Tab from its first control (×) is
+    // held back and wraps inside the dialog (only the dialog's handler prevents a Tab here), and an
+    // Esc closes it.
+    const close = dialog()!.querySelector<HTMLElement>('.meta-dispatch__close')!
+    close.focus()
+    expect(document.activeElement).toBe(close)
+    const shiftTab = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true })
+    close.dispatchEvent(shiftTab)
+    await flushUi()
+    expect(shiftTab.defaultPrevented).toBe(true)
+    expect(dialog()!.contains(document.activeElement)).toBe(true)
+    expect(document.activeElement).not.toBe(close)
+    document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(dialog()).toBeNull()
+  })
+
+  it('closing the whole dialog with the picker open leaves focus where the dialog put it back', async () => {
+    serveTasks({ people: peopleWithSearch() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openKebab(container)
+    // Opened with focus on the drawer's menu button, which stays in the page: the dialog puts focus
+    // back there when it closes.
+    const menu = container.querySelector<HTMLElement>('[data-testid="record-inspector-menu"]')!
+    menu.focus()
+    dispatchItem()!.click()
+    await flushUi(6)
+    expect(dialog()).not.toBeNull()
+    q<HTMLButtonElement>('pick-people')!.focus()
+    q<HTMLButtonElement>('pick-people')!.click()
+    await flushUi()
+    expect(document.activeElement).toBe(pickerQ('search'))
+    dialog()!.querySelector<HTMLElement>('.meta-dispatch__close')!.click()
+    await flushUi()
+    expect(dialog()).toBeNull()
+    expect(document.activeElement).toBe(menu)
   })
 
   it('after another sign-in, a search is not sent and the dialog refuses', async () => {

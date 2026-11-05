@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App as VueApp } from 'vue'
+import { createApp, h, nextTick, ref, type App as VueApp } from 'vue'
 
 /**
  * Task usability package 1b — the people picker.
@@ -432,6 +432,214 @@ describe('TaskPeoplePicker', () => {
     } finally {
       now.mockRestore()
     }
+  })
+
+  it('Tab and Shift+Tab stay inside the picker: the picker moves every one, wraps at the ends, skips the disabled confirm and no listener around it sees them', async () => {
+    const { el } = mountPicker('assignee')
+    await flush()
+    const reachedParent: string[] = []
+    el.addEventListener('keydown', (event) => { reachedParent.push(event.key) })
+    const panel = el.querySelector<HTMLElement>('[data-testid="task-people-picker"]')!
+    const tab = (from: HTMLElement, shiftKey = false) => {
+      from.focus()
+      expect(document.activeElement).toBe(from)
+      const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true })
+      from.dispatchEvent(event)
+      return event
+    }
+    // Nothing is ticked, so confirm is disabled and cancel is the last control.
+    expect((q(el, 'confirm') as HTMLButtonElement).disabled).toBe(true)
+    expect(tab(q(el, 'cancel')!).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q(el, 'search'))
+    expect(tab(q(el, 'search')!, true).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q(el, 'cancel'))
+    expect(tab(panel).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q(el, 'search'))
+    // A Tab between the ends is moved by the picker too (macOS Safari would skip the buttons).
+    expect(tab(q(el, 'search')!).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q(el, 'cancel'))
+    expect(reachedParent).toEqual([])
+  })
+
+  it('with a person ticked, Tab from the confirm wraps to the box and Shift+Tab from the box lands on the confirm', async () => {
+    mocks.apiFetch.mockResolvedValue(jsonResponse(200, searchBody([row('u1', '张三', '')])))
+    const { el } = mountPicker('assignee')
+    await flush()
+    type(el, '张')
+    await pause()
+    tick(el, 'u1')
+    await flush()
+    const reachedParent: string[] = []
+    el.addEventListener('keydown', (event) => { reachedParent.push(event.key) })
+    const tab = (from: HTMLElement, shiftKey = false) => {
+      from.focus()
+      expect(document.activeElement).toBe(from)
+      const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true })
+      from.dispatchEvent(event)
+      return event
+    }
+    expect(tab(q(el, 'confirm')!).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q(el, 'search'))
+    expect(tab(q(el, 'search')!, true).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q(el, 'confirm'))
+    const check = el.querySelector<HTMLElement>('[data-person-id="u1"] input[type="checkbox"]')!
+    expect(tab(q(el, 'search')!).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(check)
+    expect(tab(check).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q(el, 'cancel'))
+    // A control hidden after it was drawn is skipped.
+    check.closest('li')!.hidden = true
+    expect(tab(q(el, 'search')!).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q(el, 'cancel'))
+    expect(reachedParent).toEqual([])
+  })
+
+  it('assignee mode: Tab and Shift+Tab step over the disabled checkbox of someone who cannot use tasks yet', async () => {
+    mocks.apiFetch.mockResolvedValue(jsonResponse(200, searchBody([row('u1', '张三', '', false), row('u2', '张伟', '')])))
+    const { el } = mountPicker('assignee')
+    await flush()
+    type(el, '张')
+    await pause()
+    const blocked = el.querySelector<HTMLInputElement>('[data-person-id="u1"] input[type="checkbox"]')!
+    const usable = el.querySelector<HTMLInputElement>('[data-person-id="u2"] input[type="checkbox"]')!
+    expect(blocked.disabled).toBe(true)
+    expect(usable.disabled).toBe(false)
+    const reachedParent: string[] = []
+    el.addEventListener('keydown', (event) => { reachedParent.push(event.key) })
+    const tab = (from: HTMLElement, shiftKey = false) => {
+      from.focus()
+      expect(document.activeElement).toBe(from)
+      const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true })
+      from.dispatchEvent(event)
+      return event
+    }
+    expect(tab(q(el, 'search')!).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(usable)
+    expect(tab(usable, true).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q(el, 'search'))
+    expect(reachedParent).toEqual([])
+  })
+
+  it('Shift+Tab from a middle control moves to the one before it, and Shift+Tab from the panel itself lands on the last control', async () => {
+    mocks.apiFetch.mockResolvedValue(jsonResponse(200, searchBody([row('u1', '张三', '')])))
+    const { el } = mountPicker('assignee')
+    await flush()
+    type(el, '张')
+    await pause()
+    tick(el, 'u1')
+    await flush()
+    const reachedParent: string[] = []
+    el.addEventListener('keydown', (event) => { reachedParent.push(event.key) })
+    const panel = el.querySelector<HTMLElement>('[data-testid="task-people-picker"]')!
+    const shiftTab = (from: HTMLElement) => {
+      from.focus()
+      expect(document.activeElement).toBe(from)
+      const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true })
+      from.dispatchEvent(event)
+      return event
+    }
+    // Search, the checkbox, cancel and confirm: cancel is neither end.
+    expect(shiftTab(q(el, 'cancel')!).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(el.querySelector('[data-person-id="u1"] input[type="checkbox"]'))
+    // The panel takes focus when its title or count is clicked; Shift+Tab from there stays inside.
+    expect(shiftTab(panel).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q(el, 'confirm'))
+    expect(reachedParent).toEqual([])
+  })
+
+  /** The picker under a parent that opens it from a button, optionally inside a dialog of its own. */
+  function mountWithOpener() {
+    const open = ref(false)
+    const openerDisabled = ref(false)
+    const openerShown = ref(true)
+    const pickerShown = ref(true)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      render: () => h('div', { role: 'dialog', tabindex: '-1', 'data-testid': 'outer-dialog' }, [
+        openerShown.value
+          ? h('button', { type: 'button', 'data-testid': 'opener', disabled: openerDisabled.value, onClick: () => { open.value = true } }, 'pick')
+          : null,
+        h('button', { type: 'button', 'data-testid': 'elsewhere' }, 'other'),
+        pickerShown.value ? h(TaskPeoplePicker, { visible: open.value, mode: 'assignee', onClose: () => { open.value = false } }) : null,
+      ]),
+    })
+    app.mount(container)
+    const el = container
+    const opener = () => el.querySelector<HTMLButtonElement>('[data-testid="opener"]')
+    const openFromButton = async () => {
+      opener()!.focus()
+      opener()!.click()
+      await flush()
+      expect(document.activeElement).toBe(q(el, 'search'))
+    }
+    return { el, open, openerDisabled, openerShown, pickerShown, opener, openFromButton }
+  }
+
+  it('closing hands focus back to the opener; an opener disabled meanwhile hands it to the dialog around it', async () => {
+    const { el, openerDisabled, opener, openFromButton } = mountWithOpener()
+    await flush()
+    await openFromButton()
+    ;(q(el, 'cancel') as HTMLButtonElement).click()
+    await flush()
+    expect(q(el, 'search')).toBeNull()
+    expect(document.activeElement).toBe(opener())
+    await openFromButton()
+    openerDisabled.value = true
+    await flush()
+    q(el, 'search')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flush()
+    expect(q(el, 'search')).toBeNull()
+    expect(document.activeElement).toBe(el.querySelector('[data-testid="outer-dialog"]'))
+  })
+
+  it('a click on the overlay keeps focus in the picker on mousedown, closes it, and hands focus back to the opener', async () => {
+    const { el, opener, openFromButton } = mountWithOpener()
+    await flush()
+    await openFromButton()
+    const overlay = el.querySelector<HTMLElement>('.task-people-picker__overlay')!
+    const mousedown = (on: HTMLElement) => {
+      const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+      on.dispatchEvent(event)
+      return event
+    }
+    // Held back on the overlay itself only; a mousedown inside the panel is left alone.
+    expect(mousedown(q(el, 'search')!).defaultPrevented).toBe(false)
+    expect(mousedown(overlay).defaultPrevented).toBe(true)
+    overlay.click()
+    await flush()
+    expect(q(el, 'search')).toBeNull()
+    expect(document.activeElement).toBe(opener())
+  })
+
+  it('the parent removing the open picker hands focus back to the opener as well', async () => {
+    const { el, pickerShown, opener, openFromButton } = mountWithOpener()
+    await flush()
+    await openFromButton()
+    pickerShown.value = false
+    await flush()
+    expect(q(el, 'search')).toBeNull()
+    expect(document.activeElement).toBe(opener())
+  })
+
+  it('the picker moves no focus on close when focus has gone elsewhere, or when the opener is gone from the page', async () => {
+    const { el, open, openerShown, openFromButton } = mountWithOpener()
+    await flush()
+    await openFromButton()
+    // The parent closes the picker and puts focus on another control of its own.
+    const elsewhere = el.querySelector<HTMLElement>('[data-testid="elsewhere"]')!
+    elsewhere.focus()
+    open.value = false
+    await flush()
+    expect(q(el, 'search')).toBeNull()
+    expect(document.activeElement).toBe(elsewhere)
+    await openFromButton()
+    openerShown.value = false
+    await flush()
+    ;(q(el, 'cancel') as HTMLButtonElement).click()
+    await flush()
+    expect(q(el, 'search')).toBeNull()
+    expect(document.activeElement).toBe(document.body)
   })
 
   it('beforeRequest saying no: nothing is sent', async () => {
