@@ -373,6 +373,79 @@ describe('user recycle bin', () => {
     ])
   })
 
+  it('redacts accountLabel and sibling identity labels on a create audit', async () => {
+    const subjectId = 'qa-um-single'
+    const rows = [{
+      id: 177,
+      created_at: '2026-11-04 05:31:00.123456+00',
+      resource_id: subjectId,
+      resource_name: 'QA Single',
+      user_id: '3',
+      user_email: 'qa-um-single@example.test',
+      user_name: 'QA Single',
+      action_details: {
+        email: 'qa-um-single@example.test',
+        username: 'qa-um-single',
+        mobile: '13800001111',
+        accountLabel: 'qa-um-single@example.test',
+        account_label: 'qa-um-single@example.test',
+        loginName: 'qa-um-single',
+        displayName: 'QA Single',
+        phone: '13800001111',
+        position: '装配',
+        jobNumber: 'E-100',
+        name: 'QA Single',
+        roleId: 'user',
+        adminUserId: 'operator-1',
+        colleague: { id: 'user-other', accountLabel: 'other@example.test', displayName: '其他同事' },
+      },
+      request_body: { accountLabel: 'qa-um-single@example.test', note: 'keep-me' },
+    }]
+    const client: RecycleClient = {
+      query: async (statement, params = []) => {
+        if (statement.includes('to_regclass')) {
+          const name = String(params[0] ?? '')
+          return { rows: [{ rel: name === 'audit_logs' || name === 'audit_logs_archive' ? name : null }] }
+        }
+        if (statement.includes('FROM audit_logs')) {
+          return { rows: rows.map((row) => ({ ...row, action_details: { ...row.action_details }, request_body: { ...row.request_body } })) }
+        }
+        if (statement.includes('UPDATE audit_logs')) {
+          const found = rows.find((row) => row.id === params[0])
+          if (!found) return { rows: [], rowCount: 0 }
+          found.action_details = JSON.parse(String(params[2]))
+          found.request_body = JSON.parse(String(params[3]))
+          return { rows: [{ id: found.id }], rowCount: 1 }
+        }
+        return { rows: [] }
+      },
+    }
+    await scrubPurgedUserIdentity(client, {
+      userId: subjectId,
+      email: 'qa-um-single@example.test',
+      username: 'qa-um-single',
+      mobile: '13800001111',
+      at: '2026-11-04T05:31:00.000Z',
+    })
+    expect(rows[0]?.action_details).toMatchObject({
+      email: null,
+      username: null,
+      mobile: null,
+      accountLabel: null,
+      account_label: null,
+      loginName: null,
+      displayName: USER_TOMBSTONE_NAME,
+      phone: null,
+      position: null,
+      jobNumber: null,
+      name: USER_TOMBSTONE_NAME,
+      roleId: 'user',
+      adminUserId: 'operator-1',
+      colleague: { id: 'user-other', accountLabel: 'other@example.test', displayName: '其他同事' },
+    })
+    expect(rows[0]?.request_body).toEqual({ accountLabel: null, note: 'keep-me' })
+  })
+
   it('matches audit rows by primary key text and refuses a JS Date string', () => {
     expect(auditCreatedAtMatch('2026-11-04 05:31:00.123456+00')).toEqual({
       whereSql: 'id = $1 AND created_at = $2::timestamptz',
