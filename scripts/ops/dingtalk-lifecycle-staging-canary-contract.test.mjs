@@ -6844,8 +6844,8 @@ test('human-bootstrap enforces the backend password policy before any account mu
   assert.ok(policyEnd > 0, 'password policy must precede the first API lookup')
   const policy = helper.slice(0, policyEnd)
   assert.match(policy, /password != password\.strip\(\)/)
-  assert.match(policy, /len\(password\) < 8/)
-  assert.match(policy, /len\(password\) > 128/)
+  assert.match(policy, /password_length < 8/)
+  assert.match(policy, /password_length > 128/)
   // ASCII classes, same ranges as validatePassword's /[a-z]/, /[A-Z]/, /[0-9]/.
   // Unicode islower/isupper/isdigit would accept letters and digits the API rejects.
   assert.match(policy, /"a" <= char <= "z"/)
@@ -6857,7 +6857,7 @@ test('human-bootstrap enforces the backend password policy before any account mu
   }
 })
 
-test('FUNCTIONAL: non-ASCII upper, lower, and digit are rejected before any create or reset', async () => {
+test('FUNCTIONAL: invalid Unicode passwords are rejected before any account API request', async () => {
   // These pass Python's Unicode islower/isupper/isdigit and fail validatePassword:
   // É (U+00C9) is upper but not [A-Z]; é (U+00E9) is lower but not [a-z];
   // ١ (U+0661) is a digit but not [0-9].
@@ -6865,6 +6865,9 @@ test('FUNCTIONAL: non-ASCII upper, lower, and digit are rejected before any crea
     { password: '\u00c9bcdefg1', note: 'password_missing_uppercase' },
     { password: '\u00e9BCDEFG1', note: 'password_missing_lowercase' },
     { password: 'Abcdefg\u0661', note: 'password_missing_digit' },
+    { password: 'Aa1' + '😀'.repeat(63), note: 'password_too_long' }, // 129 UTF-16 code units
+    { password: '\ufeffAa1bcde', note: 'password_outer_whitespace' },
+    { password: 'Aa1bcdef\ufeff', note: 'password_outer_whitespace' },
   ]
   for (const { password, note } of cases) {
     const dir = mkdtempSync(join(tmpdir(), 'lifecycle-human-bootstrap-ascii-'))
@@ -6979,12 +6982,7 @@ with socketserver.TCPServer(('127.0.0.1', 0), H) as httpd:
       )
       assert.equal(result.status, 0, result.stderr + result.stdout)
       assert.match(result.stdout, new RegExp(`(?:^|\\n)fail\\|${note}(?:\\n|$)`))
-      const calls = readFileSync(callsFile, 'utf8')
-      const lines = calls.split('\n').filter(Boolean)
-      const createRequests = lines.filter((line) => line === 'POST /api/admin/users')
-      const resetRequests = lines.filter((line) => line.startsWith('POST ') && line.includes('/reset-password'))
-      assert.deepEqual(createRequests, [], `create ran before ${note}: ${calls}`)
-      assert.deepEqual(resetRequests, [], `reset ran before ${note}: ${calls}`)
+      assert.equal(readFileSync(callsFile, 'utf8'), '', `an API request ran before rejecting ${note}`)
     } finally {
       if (!serverProc.killed && serverProc.exitCode === null) {
         try {
@@ -7086,7 +7084,8 @@ test('FUNCTIONAL: bootstrap_human_platform_admin create path orders reset/access
   const passFile = join(dir, 'staging-owner-admin.password')
   const callsFile = join(dir, 'calls.txt')
   writeFileSync(jwtFile, 'canary-jwt-token', { mode: 0o600 })
-  writeFileSync(passFile, 'HumanPass9Xyz', { mode: 0o600 })
+  const password = 'Aa1bc😀d' // exactly 8 UTF-16 code units, 7 code points
+  writeFileSync(passFile, password, { mode: 0o600 })
   writeFileSync(callsFile, '', { mode: 0o600 })
   const serverPy = `
 import json, http.server, socketserver, pathlib
@@ -7135,7 +7134,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if self.path == '/api/auth/login':
             body = json.loads(raw.decode('utf-8'))
             assert body['identifier'] == 'staging-owner-admin'
-            assert body['password'] == 'HumanPass9Xyz'
+            assert body['password'] == ${JSON.stringify(password)}
             return self._write(200, {
                 'success': True,
                 'data': {
@@ -7170,7 +7169,7 @@ class H(http.server.BaseHTTPRequestHandler):
             })
         if self.path.endswith('/reset-password'):
             body = json.loads(raw.decode('utf-8'))
-            assert body.get('password') == 'HumanPass9Xyz'
+            assert body.get('password') == ${JSON.stringify(password)}
             return self._write(200, {'ok': True, 'data': {'userId': 'user-new'}})
         if self.path.endswith('/revoke-sessions'):
             return self._write(200, {
