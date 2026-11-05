@@ -1317,16 +1317,16 @@ export function attendanceAdminRouter(): Router {
 
       const { del, resolvedUsers } = await transaction(async (client) => {
         const runQuery = client.query as typeof query
-        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
-        const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
-        const resolved = await resolveBatchUsers(userIds, scope, runQuery, true)
-        assertAllRoleTargetsEligible(userIds, resolved)
         // Every subject lock is taken, in sorted id order, before the membership
         // DELETE. Each witness uses this same client and finishes before commit.
         const admissionTargetIds = [...userIds].sort()
         for (const targetId of admissionTargetIds) {
           await lockNamespaceAdmissionWrites(client, targetId)
         }
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
+        const resolved = await resolveBatchUsers(userIds, scope, runQuery, true)
+        assertAllRoleTargetsEligible(userIds, resolved)
         const result = await unassignUserRoles({
           userIds,
           roleId: finalRoleId,
@@ -1499,12 +1499,12 @@ export function attendanceAdminRouter(): Router {
       let membership: Awaited<ReturnType<typeof unassignUserRoles>> | undefined
       const profile = await transaction(async (client) => {
         const runQuery = client.query as typeof query
+        // Same client through the subject lock, membership DELETE and revoke witness.
+        await lockNamespaceAdmissionWrites(client, userId)
         const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
         const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
         const resolved = await resolveBatchUsers([userId], scope, runQuery, true)
         assertAllRoleTargetsEligible([userId], resolved)
-        // Same client through the subject lock, membership DELETE and revoke witness.
-        await lockNamespaceAdmissionWrites(client, userId)
         membership = await unassignUserRoles({
           userIds: [userId],
           roleId: finalRoleId,

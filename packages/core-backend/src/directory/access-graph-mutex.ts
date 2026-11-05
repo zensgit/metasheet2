@@ -22,6 +22,7 @@ export type LockedAccessGraphUser = {
   username: string | null
   mobile: string | null
   activationStatus: string | null
+  role: string | null
   isActive: boolean
   accessGeneration: number
   deletedAt: string | null
@@ -49,6 +50,7 @@ export async function lockUsersForAccessGraphWrite(
               username,
               mobile,
               activation_status,
+              role,
               COALESCE(is_active, TRUE) AS is_active,
               COALESCE(access_generation, 0)::bigint AS access_generation,
               (to_jsonb(users) ->> 'deleted_at') AS deleted_at,
@@ -74,6 +76,7 @@ export async function lockUsersForAccessGraphWrite(
         row.activation_status === null || row.activation_status === undefined
           ? null
           : String(row.activation_status),
+      role: row.role === null || row.role === undefined ? null : String(row.role),
       isActive: row.is_active === true,
       accessGeneration: Number(row.access_generation ?? 0),
       deletedAt: row.deleted_at === null || row.deleted_at === undefined || String(row.deleted_at).length === 0
@@ -86,6 +89,26 @@ export async function lockUsersForAccessGraphWrite(
   }
 
   return lockedUsers
+}
+
+export class AccessGraphUserUnavailableError extends Error {
+  constructor(public readonly code: 'NOT_FOUND' | 'USER_IN_RECYCLE_BIN') {
+    super(code === 'NOT_FOUND' ? 'User not found' : '账号在回收站中，请先恢复后再修改权限')
+  }
+}
+
+/** The caller holds the transaction through the dependent access writes. */
+export async function lockVisibleUsersForAccessGraphWrite(
+  client: AccessGraphTransactionClient,
+  userIds: string[],
+): Promise<Map<string, LockedAccessGraphUser>> {
+  const locked = await lockUsersForAccessGraphWrite(client, userIds)
+  for (const userId of normalizeUserIds(userIds)) {
+    const user = locked.get(userId)
+    if (!user) throw new AccessGraphUserUnavailableError('NOT_FOUND')
+    if (user.deletedAt || user.purgedAt) throw new AccessGraphUserUnavailableError('USER_IN_RECYCLE_BIN')
+  }
+  return locked
 }
 
 export async function supersedeDeprovisionEvidenceForAccessGraphWrite(
