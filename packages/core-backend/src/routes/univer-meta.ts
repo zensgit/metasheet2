@@ -22040,7 +22040,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       })
     } catch (err) {
       if (err instanceof AutomationRuleValidationError) {
-        return res.status(400).json({ ok: false, error: { code: err.code, message: err.message } })
+        // R-69 1b-ii (ADR §7): the run_integration_job switch refusal is a 403; every other save refusal stays 400.
+        return res.status(err.code === 'RUN_ACTION_DISABLED' ? 403 : 400).json({ ok: false, error: { code: err.code, message: err.message } })
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -22109,7 +22110,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       return res.json({ ok: true, data: { rule: serializeAutomationRule(updated) } })
     } catch (err) {
       if (err instanceof AutomationRuleValidationError) {
-        return res.status(400).json({ ok: false, error: { code: err.code, message: err.message } })
+        // R-69 1b-ii (ADR §7): the run_integration_job switch refusal is a 403; every other save refusal stays 400.
+        return res.status(err.code === 'RUN_ACTION_DISABLED' ? 403 : 400).json({ ok: false, error: { code: err.code, message: err.message } })
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
