@@ -811,9 +811,10 @@ test('in-memory v2 guard mutations break independent identity, parser, options a
     assert.equal(source.split(from).length, 2, 'mutation target occurs exactly once')
     return import(`data:text/javascript;base64,${Buffer.from(source.replace(from, to)).toString('base64')}`)
   }
+  // The v2 sort lives in the shared business-key helper (also used by v3 and the ⑦.5 reconciliation).
   const unsorted = await mutant(
-    '}).sort((left, right) => left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0)',
-    '})',
+    "JSON.stringify(['yida-protocol-v2', locator.appType, locator.formUuid, [...pairs].sort(byFirstElement)])",
+    "JSON.stringify(['yida-protocol-v2', locator.appType, locator.formUuid, [...pairs]])",
   )
   assert.notEqual(unsorted.buildYidaStaticPlan({ config: protocolConfig(),
     rows: [protocolRow()] }).rows[0].localBusinessKey, expectedProtocolKey())

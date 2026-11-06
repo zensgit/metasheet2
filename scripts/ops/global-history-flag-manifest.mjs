@@ -81,6 +81,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime+yidaInitializationRuntime; packages/core-backend/src/integration/yida-send-approval-service.ts; packages/core-backend/src/integration/yida-sheet-source.ts; packages/core-backend/src/routes/integration-yida-owner.ts',
   },
   {
+    key: 'INTEGRATION_YIDA_RECONCILE_READ_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'R-71 ⑦.5 cut-over reconciliation (design baseline v2.3 §8). Default OFF; byte-exact true enables only the owner-run, per-project, read-only paginated SEARCH of one approved YiDa target (fixed POST /v1.0/yida/forms/instances/advances/query, with the sealed credential material of that target) and local insert-only evidence: a legacy record already in the form is registered in the delivery ledger as reconciled_existing (it occupies the seven-key create fence, so the send path never creates it again), with a reconcile(legacy_readback) audit and its own run/page/observation tables. Zero YiDa writes: the reconciliation port has no form transport. Not a grant: anchor owner + live integration admin are re-proved on every call; while OFF both /reconciliations routes answer the generic 404 and the switch is read again before every page. Does not read, imply or require INTEGRATION_YIDA_OWNER_SEND_ENABLED, so it runs while sending stays off. Turning it on means sealed customer credentials and project numbers leave the box on the owner click: enabling it on a deployed machine and each per-project run (count first, then register) are separate owner decisions (R-71, AGENTS.md owner-only steps).',
+    source: 'packages/core-backend/src/index.ts#yidaReconciliationRuntime; packages/core-backend/src/integration/yida-reconciliation-runtime.ts; plugins/plugin-integration-core/lib/yida-reconciliation-port.mjs',
+  },
+  {
     key: 'INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS',
     type: 'list',
     activationValue:

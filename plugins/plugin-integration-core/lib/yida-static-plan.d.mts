@@ -176,6 +176,11 @@ export function transformDependencies(entry: unknown, config?: unknown): readonl
 /** Explicit configs require unique decoded JSON keys and raw decimal fidelity; v1 keeps its finite Number domain. Omitted config retains legacy parsing. */
 export function parseYidaStaticRows(text: string, config?: YidaStaticConfig): YidaStaticRow[]
 export function buildYidaStaticPlan(input: { config: unknown; rows: unknown }): YidaStaticPlan
+/** The one v2/v3 business-key string: ['yida-protocol-v2', appType, formUuid, pairs sorted by target]. Shared with the ⑦.5 reconciliation. */
+export function yidaProtocolBusinessKey(
+  locator: { appType: string; formUuid: string },
+  pairs: ReadonlyArray<readonly [string, string, unknown]>,
+): string
 export function createYidaStaticExample(variant?: 'primary' | 'renamed'): YidaStaticExample
 export function createYidaProtocolExample(variant?: 'primary' | 'renamed'): YidaProtocolExample
 export interface YidaTransformExample {

@@ -894,6 +894,30 @@ test('stock-prep project-sheet G1 grant role list (R-35): a list, danger high, s
   )
 })
 
+// R-71 ⑦.5 cut-over reconciliation: its own default-OFF switch, danger high, exact literal only, independent of
+// the send switch, every cited file real and the host reading exactly this env name.
+test('INTEGRATION_YIDA_RECONCILE_READ_ENABLED manifest entry: exact true, danger high, independent of the send switch, sources exist', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_RECONCILE_READ_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.ok(spec.purpose.includes('Does not read, imply or require INTEGRATION_YIDA_OWNER_SEND_ENABLED'))
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+  for (const cited of spec.source.split('; ').map((entry) => entry.split('#')[0])) {
+    assert.ok(readFileSync(path.join(root, cited), 'utf8').length > 0, cited)
+  }
+  const host = readFileSync(path.join(root, 'packages/core-backend/src/index.ts'), 'utf8')
+  assert.ok(host.includes('readEnablement: () => process.env.INTEGRATION_YIDA_RECONCILE_READ_ENABLED,'))
+  const runtime = readFileSync(path.join(root, 'packages/core-backend/src/integration/yida-reconciliation-runtime.ts'), 'utf8')
+  assert.equal(runtime.includes('INTEGRATION_YIDA_OWNER_SEND_ENABLED'), false)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false)
+})
+
 test('YiDa unbound test-target list (design baseline v2.3 D20): a list, danger high, no dependsOn, every cited file real and naming the exact-list reader', () => {
   const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS
   assert.ok(spec)

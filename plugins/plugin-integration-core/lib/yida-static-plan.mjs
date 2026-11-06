@@ -668,6 +668,15 @@ function planTransformFields(config, row, index, issues, payload) {
 
 const byFirstElement = (left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0)
 
+/**
+ * The ONE v2/v3 business-key string ('yida-protocol-v2' label, pairs sorted by target name). `pairs` are
+ * `[target, typeof value, value]` with the empty-key fold already applied. Shared by the planner (both
+ * versions) and the ⑦.5 cut-over reconciliation, so a remote record's digest is the send path's digest.
+ */
+export function yidaProtocolBusinessKey(locator, pairs) {
+  return JSON.stringify(['yida-protocol-v2', locator.appType, locator.formUuid, [...pairs].sort(byFirstElement)])
+}
+
 // Same key algorithm and label as v2, so a v2 layout restated as v3 keeps every row identity
 // already reserved by the delivery fence. Only the binding differs: by primary target name.
 function transformBusinessKey(config, row) {
@@ -677,8 +686,7 @@ function transformBusinessKey(config, row) {
     const value = emptyKeys.has(target) && (raw === undefined || raw === null || raw === '') ? '' : raw
     return [target, typeof value, value]
   })
-  pairs.sort(byFirstElement)
-  return JSON.stringify(['yida-protocol-v2', config.target.appType, config.target.formUuid, pairs])
+  return yidaProtocolBusinessKey(config.target, pairs)
 }
 
 function localBusinessKey(config, row) {
@@ -690,8 +698,8 @@ function localBusinessKey(config, row) {
       const raw = ownValue(row, source)
       const value = emptyKeys.has(source) && (raw === undefined || raw === null || raw === '') ? '' : raw
       return [target, typeof value, value]
-    }).sort((left, right) => left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0)
-    return JSON.stringify(['yida-protocol-v2', config.target.appType, config.target.formUuid, pairs])
+    })
+    return yidaProtocolBusinessKey(config.target, pairs)
   }
   const pairs = [...config.businessKey].sort().map((key) => [key, typeof ownValue(row, key), ownValue(row, key)])
   return JSON.stringify([config.target.appType, config.target.formUuid, pairs])
