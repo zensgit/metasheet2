@@ -568,6 +568,7 @@
       :show-quick-actions="paneShowQuickActions"
       :approve-loading="paneApproveLoading"
       :actions-disabled="paneActionsDisabled"
+      :current-user-id="currentUserId"
       @quick-approve="handleInlineApprove"
       @quick-reject="openRowReject"
       @open-full-detail="navigateToApprovalDetail"
@@ -628,6 +629,15 @@
       <p v-if="rowRejectTarget" class="approval-center__row-reject-summary">
         {{ rowRejectSummaryText(rowRejectTarget.title) }}
       </p>
+      <!-- Shared quick-phrase bar (same as the detail page): a chip fills the reason, which stays
+           editable; 「存为常用语」 saves the current text as the user's own 驳回 phrase. -->
+      <ApprovalQuickPhraseBar
+        v-model="rowRejectComment"
+        action="reject"
+        :user-id="currentUserId"
+        chip-testid-prefix="approval-row-reject-quick-phrase"
+        control-testid-prefix="approval-row-reject-phrase"
+      />
       <el-input
         v-model="rowRejectComment"
         type="textarea"
@@ -734,11 +744,13 @@ import { newTodoPillState } from '../../approvals/newTodoPill'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
 import { useLocale } from '../../composables/useLocale'
+import { useAuth } from '../../composables/useAuth'
 import { formatRelativeWait, waitingPhrase, waitSeverity } from '../../approvals/relativeWait'
 import { CENTER_EN, CENTER_ZH } from './approvalCenterLabels'
 import ApprovalMobileList from './ApprovalMobileList.vue'
 import ApprovalCenterTable from './ApprovalCenterTable.vue'
 import ApprovalCenterDetailPane from './ApprovalCenterDetailPane.vue'
+import ApprovalQuickPhraseBar from '../../approvals/components/ApprovalQuickPhraseBar.vue'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 
@@ -1248,11 +1260,14 @@ async function handleBatchReject(): Promise<void> {
 // gated per row.
 const inlineApprovingId = ref<string | null>(null)
 
-async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
+// `comment` comes only from the side pane's optional opinion box; the row-level 通过 passes none.
+// A blank opinion sends the same bare `{ action: 'approve' }` as before the box existed.
+async function handleInlineApprove(row: UnifiedApprovalDTO, comment?: string): Promise<void> {
   if (inlineApprovingId.value) return
   inlineApprovingId.value = row.id
+  const trimmed = typeof comment === 'string' ? comment.trim() : ''
   try {
-    await dispatchApprovalDecision(row, { action: 'approve' }, dispatchAction)
+    await dispatchApprovalDecision(row, trimmed ? { action: 'approve', comment: trimmed } : { action: 'approve' }, dispatchAction)
     ElMessage.success(t.value.toastApproved)
     loadCurrentTab()
   } catch (error) {
@@ -1263,6 +1278,18 @@ async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
     inlineApprovingId.value = null
   }
 }
+
+// Signed-in user id for saving personal quick phrases (row reject dialog + side pane). Read from the
+// session cache like ApprovalDetailView does; unresolved = the bars offer presets only.
+const currentUserId: string | null = ((): string | null => {
+  try {
+    const user = useAuth().getCurrentUser?.()
+    const id = user && typeof user === 'object' ? (user as { id?: unknown }).id : null
+    return typeof id === 'string' && id.length > 0 ? id : null
+  } catch {
+    return null
+  }
+})()
 
 // Per-row reject dialog — deliberately its OWN state (`rowRejectTarget`/`rowRejectComment`/
 // `rowRejectError`), never overloading the batch-reject dialog's refs above, so the two flows

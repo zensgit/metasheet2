@@ -1606,6 +1606,7 @@ exec npx vitest run \
   approvalMobileI18n \
   approvalMobileResponsive \
   approvalNewView \
+  approvalQuickPhraseBar \
   approvalQuickPhrases \
   approvalRecentTemplates \
   approvalRelativeWait \
