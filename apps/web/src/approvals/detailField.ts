@@ -795,3 +795,19 @@ export function summaryFields(
 export function formatSummaryLine(fields: DisplayField[], isZh = true): string {
   return fields.map((field) => (isZh ? `${field.label}：${field.value}` : `${field.label}: ${field.value}`)).join(' · ')
 }
+
+/**
+ * 参与打印：打印时不输出的顶层字段 id。只读实例冻结的 formSchema（不读当前模板）。
+ * 只有显式 `printable: false` 才算不参与；缺省或其他值都算参与，旧模板打印结果不变。
+ * 明细子字段没有单独的开关，随所在的明细字段一起取舍。屏幕显示不受影响：调用方只用它给
+ * 对应字段块加「打印时隐藏」的样式类。
+ */
+export function nonPrintableFieldIds(formSchema: FormSchema | null | undefined): Set<string> {
+  const ids = new Set<string>()
+  const fields = formSchema?.fields
+  if (!Array.isArray(fields)) return ids
+  for (const field of fields) {
+    if (field && field.printable === false && typeof field.id === 'string') ids.add(field.id)
+  }
+  return ids
+}

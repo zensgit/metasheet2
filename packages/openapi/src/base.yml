@@ -4599,6 +4599,9 @@ components:
           additionalProperties: true
         visibilityRule:
           $ref: '#/components/schemas/FormFieldVisibilityRule'
+        # 参与打印：缺省即参与；false 时打印页不输出该字段。只对顶层字段有效。
+        printable:
+          type: boolean
         columns:
           type: array
           items:
@@ -4630,6 +4633,9 @@ components:
           $ref: '#/components/schemas/DepartmentFieldProps'
         visibilityRule:
           $ref: '#/components/schemas/FormFieldVisibilityRule'
+        # 参与打印：缺省即参与；false 时打印页不输出该字段。只对顶层字段有效。
+        printable:
+          type: boolean
       required: [id, type, label, props]
     # record-link only: props MUST be strict RecordLinkFieldProps (baseId + sheetId required).
     # additionalProperties:false — no columns/minRows/maxRows/unknown outer keys (top-level only;
@@ -4662,6 +4668,9 @@ components:
           $ref: '#/components/schemas/RecordLinkFieldProps'
         visibilityRule:
           $ref: '#/components/schemas/FormFieldVisibilityRule'
+        # 参与打印：缺省即参与；false 时打印页不输出该字段。只对顶层字段有效。
+        printable:
+          type: boolean
       required: [id, type, label, props]
     # Discriminated union: record-link and department use strict props; remaining types use the
     # generic carrier. Distinct type enums avoid overlapping oneOf members.

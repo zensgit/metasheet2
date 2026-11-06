@@ -2016,6 +2016,14 @@ function normalizeFormField(
   if (value.placeholder !== undefined && typeof value.placeholder !== 'string') {
     failValidation(context, `formSchema.fields[${index}].placeholder must be a string`)
   }
+  // 参与打印：缺省即参与。只接受布尔值；明细子字段不支持（打印按顶层字段取舍），带了就拒绝，
+  // 不静默丢弃。
+  if (value.printable !== undefined && typeof value.printable !== 'boolean') {
+    failValidation(context, `formSchema.fields[${index}].printable must be a boolean`)
+  }
+  if (nested && value.printable !== undefined) {
+    failValidation(context, `formSchema.fields[${index}].printable is only valid on a top-level field`)
+  }
   if (
     value.options !== undefined &&
     (!Array.isArray(value.options)
@@ -2356,6 +2364,8 @@ function normalizeFormField(
     ...(value.required !== undefined ? { required: value.required } : {}),
     ...(value.placeholder !== undefined ? { placeholder: value.placeholder } : {}),
     ...(value.defaultValue !== undefined ? { defaultValue: value.defaultValue } : {}),
+    // 只保存「不参与」：`true` 与缺省同义，不落库，旧模板重存不产生差异。
+    ...(value.printable === false ? { printable: false } : {}),
     ...(Array.isArray(value.options)
       ? {
           options: value.options.map((option) => ({

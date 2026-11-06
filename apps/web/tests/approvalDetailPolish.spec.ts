@@ -496,5 +496,77 @@ describe('ApprovalDetailView — B3-13 curated FE polish', () => {
       expect(printSpy).toHaveBeenCalledTimes(1)
       printSpy.mockRestore()
     })
+
+    it('参与打印: a field the frozen schema marks printable:false gets the print-hide class; its siblings do not', async () => {
+      mockActiveApproval.value = baseInstance({
+        formSchema: {
+          fields: [
+            { id: 'fld_reason', type: 'text', label: '事由' },
+            { id: 'fld_amount', type: 'number', label: '金额', printable: false },
+            { id: 'fld_days', type: 'number', label: '天数', printable: true },
+          ],
+        },
+        formSnapshot: { fld_reason: '出差报销', fld_amount: 1200, fld_days: 3 },
+      })
+      await mountView()
+
+      const rows = Array.from(container!.querySelectorAll<HTMLElement>('.approval-detail__snapshot .approval-detail__field'))
+      const rowFor = (label: string) => rows.find((row) => row.querySelector('.approval-detail__label')?.textContent === label)
+      const amount = rowFor('金额')
+      const reason = rowFor('事由')
+      const days = rowFor('天数')
+      expect(amount).toBeTruthy()
+      expect(reason).toBeTruthy()
+      expect(days).toBeTruthy()
+      // Screen display is unchanged: the field still renders; only the print-hide class differs.
+      expect(amount!.classList.contains('approval-detail__hide-on-print')).toBe(true)
+      expect(reason!.classList.contains('approval-detail__hide-on-print')).toBe(false)
+      expect(days!.classList.contains('approval-detail__hide-on-print')).toBe(false)
+    })
+
+    it('参与打印: a detail (明细) field marked printable:false gets the print-hide class on its table block; a sibling scalar field does not', async () => {
+      mockActiveApproval.value = baseInstance({
+        formSchema: {
+          fields: [
+            { id: 'fld_reason', type: 'text', label: '事由' },
+            {
+              id: 'fld_items',
+              type: 'detail',
+              label: '费用明细',
+              printable: false,
+              columns: [
+                { id: 'col_name', type: 'text', label: '项目' },
+                { id: 'col_cost', type: 'number', label: '金额' },
+              ],
+            },
+          ],
+        },
+        formSnapshot: { fld_reason: '出差报销', fld_items: [{ col_name: '车费', col_cost: 80 }] },
+      })
+      await mountView()
+
+      const rows = Array.from(container!.querySelectorAll<HTMLElement>('.approval-detail__snapshot .approval-detail__field'))
+      const rowFor = (label: string) => rows.find((row) => row.querySelector('.approval-detail__label')?.textContent === label)
+      // The detail block is labelled by its snapshot key (the field id), rendered via the
+      // detailTables loop, not the scalar displayFields loop.
+      const items = rowFor('fld_items')
+      const reason = rowFor('事由')
+      expect(items).toBeTruthy()
+      expect(reason).toBeTruthy()
+      expect(items!.classList.contains('approval-detail__hide-on-print')).toBe(true)
+      expect(reason!.classList.contains('approval-detail__hide-on-print')).toBe(false)
+    })
+
+    it('参与打印: an old schema without the key hides nothing on paper', async () => {
+      mockActiveApproval.value = baseInstance({
+        formSchema: { fields: [{ id: 'fld_reason', type: 'text', label: '事由' }] },
+        formSnapshot: { fld_reason: '出差报销' },
+      })
+      await mountView()
+
+      const rows = Array.from(container!.querySelectorAll<HTMLElement>('.approval-detail__snapshot .approval-detail__field'))
+      expect(rows.length).toBeGreaterThan(0)
+      expect(rows.some((row) => row.classList.contains('approval-detail__hide-on-print'))).toBe(false)
+    })
   })
 })
