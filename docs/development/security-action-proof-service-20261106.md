@@ -28,9 +28,11 @@ consumes a proof; no binding, login grant, session or login behaviour changes.
    `null` and nothing is mounted, and every service entry point refuses with
    `503 SECURITY_ACTION_PROOF_UNAVAILABLE` before any statement. The route and the service read the
    same predicate; it neither trims nor folds case.
-3. **Table boundary.** The table name appears in the migration and the service module only; the
-   service module is imported by the route module only; the route module is imported by `index.ts`
-   only, inside the condition on the router factory's result.
+3. **Table boundary.** The table name appears in the migration and the service module only (the
+   migration runner's help text names the migration file, and with it the table, without reading it);
+   the service module is imported by the route module only; the route module is imported by
+   `index.ts` only, inside the condition on the router factory's result, which mounts the router and
+   its error handler for the same prefix and nothing else.
 4. **No proof without a verification.** An issued row is written only in the second transaction,
    after the password compared equal and every input of the first read is unchanged. Session age,
    token issue time, last login and token refresh never stand in for a verification.
@@ -83,7 +85,12 @@ Request (closed schema): `purpose`, `connectionId` (uuid), `targetIdentityId` (u
 purpose except `external_identity_bind`, refused for it), `expectedBindingRevision` (non-negative
 integer; present exactly when `targetIdentityId` is), `method` (`local_password` only), `password`
 (1–1024 characters, not trimmed), optional `clientBindingDigest` (64 lowercase hex). Unknown keys are
-reported under the fixed field name `_unknown`; `details.fields` names schema fields only.
+reported under the fixed field name `_unknown`; `details.fields` names schema fields or that fixed
+entry only. A body that cannot be parsed, or that is outside the accepted size or encoding, is
+answered by the error handler mounted after the router for the same prefix with `422` and
+`fields: ["_unknown"]`; any other failure raised before the handler ran is answered with `503`. Both
+answers carry the same headers as every other refusal, echo nothing from the request and log nothing.
+A failure inside the handler before it could answer is also answered with `503`.
 
 Every response carries `Cache-Control: no-store`. Success: `200` with `proof`, `purpose`, `connectionId`,
 `method`, `assurance`, `expiresAt`, `ttlSeconds`. Refusals: `401 SECURITY_ACTION_SESSION_REQUIRED`;
@@ -109,7 +116,9 @@ after the image rollback and only on an empty table. The switch is registered in
 - `tests/unit/security-action-proof.test.ts`: tokens, session context, request schema, refusals that
   need no data, both transactions, error mapping, audit, consumption decisions and statement pins.
 - `tests/unit/security-action-verify-route.test.ts`: status and detail mapping, no-store, no echo of the
-  password, organization from the session only, position behind the gates.
+  password, organization from the session only, position behind the gates, the error handler's
+  answers (unparseable or oversized body, any other upstream failure, a response already sent) and the
+  handler's last-resort `503`.
 - `tests/unit/security-action-proof-inert.test.ts`: production binding refuses every purpose before any
   statement; table, importer and mount boundaries; CI wiring; OpenAPI source.
 - `tests/unit/security-action-proof-flag.test.ts`, `tests/unit/security-action-challenges-migration.test.ts`.

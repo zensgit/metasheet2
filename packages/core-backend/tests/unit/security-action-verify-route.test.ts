@@ -30,7 +30,7 @@ import { jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 import { SecurityActionProofError } from '../../src/auth/security-action-proof'
 import type { SecurityActionErrorCode } from '../../src/auth/security-action-proof'
 import { isOapiAllowlistRequest } from '../../src/multitable/oapi-read-allowlist'
-import { securityActionsRouter } from '../../src/routes/security-actions'
+import { securityActionParseErrorHandler, securityActionsRouter } from '../../src/routes/security-actions'
 
 const PATH = '/api/auth/security-actions/verify'
 const USER = 'user-route'
@@ -144,6 +144,75 @@ describe('POST /api/auth/security-actions/verify', () => {
     expect(response.body).toEqual({ ok: false, error: { code: 'SECURITY_ACTION_UNAVAILABLE', message: 'Security action refused' } })
     expect(response.headers['cache-control']).toBe('no-store')
     expect(loggerSpy.lines).toEqual(['security action verification unavailable (code=SECURITY_ACTION_UNAVAILABLE)'])
+  })
+
+  it('answers with 503 and no-store when the handler fails before it could answer, without logging', async () => {
+    serviceMocks.readContext.mockImplementation(() => { throw new Error(`context failure ${PASSWORD}`) })
+    const response = await request(appWithStubGate()).post(PATH).send(body())
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ ok: false, error: { code: 'SECURITY_ACTION_UNAVAILABLE', message: 'Security action refused' } })
+    expect(response.headers['cache-control']).toBe('no-store')
+    expect(JSON.stringify(response.body) + JSON.stringify(response.headers)).not.toContain(PASSWORD)
+    expect(loggerSpy.lines).toEqual([])
+    expect(serviceMocks.issue).not.toHaveBeenCalled()
+  })
+
+  describe('error handler mounted after the router', () => {
+    function appWithParser(options: { limit?: string; before?: (req: Request, res: Response, next: NextFunction) => void } = {}) {
+      const app = express()
+      if (options.before) app.use(options.before)
+      app.use(express.json(options.limit ? { limit: options.limit } : {}))
+      const router = securityActionsRouter()
+      if (!router) throw new Error('router must mount')
+      app.use('/api/auth/security-actions', router)
+      app.use('/api/auth/security-actions', securityActionParseErrorHandler)
+      return app
+    }
+
+    it('answers a body that cannot be parsed with 422 and the fixed field name, no-store, no echo, nothing logged', async () => {
+      const response = await request(appWithParser()).post(PATH).set('Content-Type', 'application/json').send(`{"password":"${PASSWORD}"`)
+      expect(response.status).toBe(422)
+      expect(response.body).toEqual({ ok: false, error: { code: 'SECURITY_ACTION_INVALID_REQUEST', message: 'Security action refused', details: { fields: ['_unknown'] } } })
+      expect(response.headers['cache-control']).toBe('no-store')
+      expect(response.headers['pragma']).toBe('no-cache')
+      expect(JSON.stringify(response.body) + JSON.stringify(response.headers)).not.toContain(PASSWORD)
+      expect(loggerSpy.lines).toEqual([])
+      expect(serviceMocks.issue).not.toHaveBeenCalled()
+    })
+
+    it('answers a body outside the accepted size with 422 and the fixed field name', async () => {
+      const response = await request(appWithParser({ limit: '1kb' })).post(PATH).send(body({ password: 'p'.repeat(2048) }))
+      expect(response.status).toBe(422)
+      expect(response.body).toEqual({ ok: false, error: { code: 'SECURITY_ACTION_INVALID_REQUEST', message: 'Security action refused', details: { fields: ['_unknown'] } } })
+      expect(response.headers['cache-control']).toBe('no-store')
+      expect(serviceMocks.issue).not.toHaveBeenCalled()
+    })
+
+    it('answers any other failure raised before the handler with 503, a fixed message and no-store', async () => {
+      const app = appWithParser({ before: () => { throw new Error(`upstream detail ${PASSWORD}`) } })
+      const response = await request(app).post(PATH).send(body())
+      expect(response.status).toBe(503)
+      expect(response.body).toEqual({ ok: false, error: { code: 'SECURITY_ACTION_UNAVAILABLE', message: 'Security action refused' } })
+      expect(response.headers['cache-control']).toBe('no-store')
+      expect(JSON.stringify(response.body) + JSON.stringify(response.headers)).not.toContain(PASSWORD)
+      expect(loggerSpy.lines).toEqual([])
+    })
+
+    it('writes nothing to a response whose headers were already sent, and closes one that is still open', () => {
+      const fakeResponse = (state: { writableEnded: boolean; destroyed: boolean }) => ({
+        headersSent: true, ...state, setHeader: vi.fn(), status: vi.fn(), json: vi.fn(), destroy: vi.fn(),
+      })
+      const ended = fakeResponse({ writableEnded: true, destroyed: false })
+      securityActionParseErrorHandler(new Error('late'), {} as Request, ended as unknown as Response, vi.fn())
+      expect(ended.setHeader).not.toHaveBeenCalled()
+      expect(ended.status).not.toHaveBeenCalled()
+      expect(ended.destroy).not.toHaveBeenCalled()
+      const open = fakeResponse({ writableEnded: false, destroyed: false })
+      securityActionParseErrorHandler(new Error('late'), {} as Request, open as unknown as Response, vi.fn())
+      expect(open.setHeader).not.toHaveBeenCalled()
+      expect(open.status).not.toHaveBeenCalled()
+      expect(open.destroy).toHaveBeenCalledTimes(1)
+    })
   })
 
   it('hands the service the organization the gate authenticated, never a header', async () => {

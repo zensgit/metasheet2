@@ -133,7 +133,7 @@ afterEach(() => {
 })
 
 // ---------------------------------------------------------------------------
-// S1 / S2: tokens and hashes
+// Tokens and hashes
 // ---------------------------------------------------------------------------
 
 describe('proof token', () => {
@@ -178,7 +178,7 @@ describe('proof token', () => {
 })
 
 // ---------------------------------------------------------------------------
-// S3: session context
+// Session context
 // ---------------------------------------------------------------------------
 
 describe('session context', () => {
@@ -235,7 +235,7 @@ describe('session context', () => {
 })
 
 // ---------------------------------------------------------------------------
-// S4: request schema
+// Request schema
 // ---------------------------------------------------------------------------
 
 describe('verify request schema', () => {
@@ -287,7 +287,7 @@ describe('verify request schema', () => {
 })
 
 // ---------------------------------------------------------------------------
-// S5: refusals that need no data
+// Refusals that need no data
 // ---------------------------------------------------------------------------
 
 describe('refusals before any statement', () => {
@@ -352,7 +352,7 @@ describe('refusals before any statement', () => {
 })
 
 // ---------------------------------------------------------------------------
-// S6: the first transaction
+// The first transaction
 // ---------------------------------------------------------------------------
 
 describe('first read', () => {
@@ -364,6 +364,8 @@ describe('first read', () => {
     expect(first.slice(1, 3).map((s) => s.sql)).toEqual(["SET LOCAL lock_timeout = '5s'", "SET LOCAL statement_timeout = '30s'"])
     for (const statement of first) expect(statement.sql).not.toMatch(/READ ONLY/)
     expect(keys(runner.events, 1).slice(3, 8)).toEqual(['session', 'watermark', 'failureCount', 'account', 'membership'])
+    // The failure count is keyed by the user id alone.
+    expect(first.filter((s) => s.key === 'failureCount').map((s) => s.params)).toEqual([[USER]])
   })
 
   it.each([
@@ -493,7 +495,7 @@ describe('first read', () => {
 })
 
 // ---------------------------------------------------------------------------
-// S7 / S8: the password comparison and the second transaction
+// The password comparison and the second transaction
 // ---------------------------------------------------------------------------
 
 describe('password comparison and the second transaction', () => {
@@ -513,6 +515,7 @@ describe('password comparison and the second transaction', () => {
     expect(second[3].params).toEqual([`security-action:${USER}`])
     expect(second[4].params).toEqual([USER])
     expect(second[5].key).toBe('failureCount')
+    expect(second[5].params).toEqual([USER])
     const proofIndex = second.findIndex((s) => ['failureCount', 'supersede', 'insertIssued', 'insertFailed'].includes(s.key))
     expect(proofIndex).toBeGreaterThan(second.findIndex((s) => s.key === 'userKeyShare'))
   })
@@ -622,7 +625,7 @@ describe('password comparison and the second transaction', () => {
 })
 
 // ---------------------------------------------------------------------------
-// S9 / S10 / S11: error mapping, audit, no shortcuts
+// Error mapping, audit, no shortcuts
 // ---------------------------------------------------------------------------
 
 describe('error mapping and audit', () => {
@@ -676,7 +679,7 @@ describe('error mapping and audit', () => {
 })
 
 // ---------------------------------------------------------------------------
-// S12 / S13 / S14 / S15: consumption
+// Consumption
 // ---------------------------------------------------------------------------
 
 function consumeInput(overrides: Partial<SecurityActionConsumeInput> & Record<string, unknown> = {}): SecurityActionConsumeInput {
@@ -852,7 +855,7 @@ describe('consumption decisions', () => {
 })
 
 // ---------------------------------------------------------------------------
-// S16: static pins
+// Static pins
 // ---------------------------------------------------------------------------
 
 describe('statement pins', () => {

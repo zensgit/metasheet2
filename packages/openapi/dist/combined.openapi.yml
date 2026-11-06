@@ -21041,7 +21041,7 @@ paths:
         '422':
           description: >-
             Request does not satisfy the closed schema; details.fields names
-            schema fields only
+            schema fields or the fixed entry _unknown
           content:
             application/json:
               schema:

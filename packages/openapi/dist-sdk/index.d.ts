@@ -8785,7 +8785,7 @@ export interface paths {
                         "application/json": components["schemas"]["SecurityActionError"];
                     };
                 };
-                /** @description Request does not satisfy the closed schema; details.fields names schema fields only */
+                /** @description Request does not satisfy the closed schema; details.fields names schema fields or the fixed entry _unknown */
                 422: {
                     headers: {
                         [name: string]: unknown;

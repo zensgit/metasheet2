@@ -1,7 +1,7 @@
 /**
  * Production wiring of the action proof service: with the switch on and the production binding,
  * every purpose is refused before any statement; the table, the service module and the route module
- * have exactly the reviewed readers, importers and mount; the real-PG suite is wired into CI; and the
+ * have exactly the expected readers, importers and mount; the real-PG suite is wired into CI; and the
  * OpenAPI source declares the route.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -183,7 +183,7 @@ describe('module boundaries', () => {
     expect(help).toContain(`zzzz20261106120000_create_${TABLE}.ts refuses while`)
   })
 
-  it('has exactly the reviewed importers: the route imports the service, index imports the route', () => {
+  it('has exactly the expected importers: the route imports the service, index imports the route', () => {
     const serviceImporters: string[] = []
     const routeImporters: string[] = []
     for (const file of listSourceFiles(SRC)) {
@@ -196,7 +196,7 @@ describe('module boundaries', () => {
     expect(routeImporters).toEqual(['index.ts'])
   })
 
-  it('exports only the reviewed runtime names from the service module, and the route imports only four of them', () => {
+  it('exports only the expected runtime names from the service module, and the route imports only four of them', () => {
     expect(exportedRuntimeNames(SERVICE)).toEqual([
       'SECURITY_ACTION_CREDENTIAL_WITNESS_DOMAIN', 'SECURITY_ACTION_FAILURE_CODES', 'SECURITY_ACTION_FAILURE_LIMIT', 'SECURITY_ACTION_FAILURE_WINDOW_SECONDS',
       'SECURITY_ACTION_NEXT_STEPS', 'SECURITY_ACTION_PROOF_HASH_DOMAIN', 'SECURITY_ACTION_PROOF_STATUSES', 'SECURITY_ACTION_PROOF_TTL_SECONDS', 'SECURITY_ACTION_SQL',
@@ -237,7 +237,7 @@ describe('module boundaries', () => {
     expect(identifierCount(SERVICE, 'sessionContexts')).toBe(3)
   })
 
-  it('mounts the router in index.ts only inside the switch condition, after the auth router', () => {
+  it('mounts the router and its error handler in index.ts only inside the switch condition, after the auth router', () => {
     const source = parse(INDEX)
     const text = readFileSync(INDEX, 'utf8')
     const calls: ts.CallExpression[] = []
@@ -263,10 +263,19 @@ describe('module boundaries', () => {
     expect(ts.isIfStatement(condition.parent) && condition.parent.expression === condition).toBe(true)
     const ifStatement = condition.parent as ts.IfStatement
     expect(ifStatement.elseStatement).toBeUndefined()
-    expect(ifStatement.thenStatement.getText(source)).toBe(`this.app.use('/api/auth/security-actions', ${variable})`)
+    const block = ifStatement.thenStatement
+    expect(ts.isBlock(block)).toBe(true)
+    // The router first, then the error handler for the same prefix, and nothing else in the block.
+    expect((block as ts.Block).statements.map((entry) => entry.getText(source))).toEqual([
+      `this.app.use('/api/auth/security-actions', ${variable})`,
+      "this.app.use('/api/auth/security-actions', securityActionParseErrorHandler)",
+    ])
     expect(mountArgument.parent.getText(source)).toBe(`this.app.use('/api/auth/security-actions', ${variable})`)
     expect(text.indexOf("this.app.use('/api/auth', authRouter)")).toBeLessThan(text.indexOf('securityActionsRouter()'))
-    expect(text.split("'/api/auth/security-actions'")).toHaveLength(2)
+    expect(text.split("'/api/auth/security-actions'")).toHaveLength(3)
+    // The error handler is named at its import and its mount only.
+    expect(text.split('securityActionParseErrorHandler')).toHaveLength(3)
+    expect(importedNames(INDEX, './routes/security-actions')).toEqual(['securityActionParseErrorHandler', 'securityActionsRouter'])
   })
 })
 

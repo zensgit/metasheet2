@@ -50,14 +50,14 @@ const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
 itIfExpectDb('requires a real DB', () => expect(process.env.DATABASE_URL).toBeTruthy())
 
 const TABLE = 'security_action_challenges'
-const ORG = 'p04b-org-' + randomUUID()
-const OTHER_ORG = 'p04b-org-' + randomUUID()
+const ORG = 'sa-proof-org-' + randomUUID()
+const OTHER_ORG = 'sa-proof-org-' + randomUUID()
 const CONNECTION = randomUUID()
 const OTHER_CONNECTION = randomUUID()
 const TARGET_IDENTITY = randomUUID()
 const PASSWORD = 'correct-horse-' + randomUUID()
 const WRONG = 'wrong-' + randomUUID()
-const ROLLBACK = Symbol('p04b-rollback')
+const ROLLBACK = Symbol('sa-proof-rollback')
 
 type Runner = (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>
 
@@ -79,7 +79,7 @@ function repeatableReadPool(): PgPool {
   return rrPool
 }
 function absentSchemaPool(): PgPool {
-  absentPool ??= new PgPool({ connectionString: withOptions('-c search_path=p04b_absent'), max: 2 })
+  absentPool ??= new PgPool({ connectionString: withOptions('-c search_path=sa_proof_absent'), max: 2 })
   return absentPool
 }
 
@@ -91,6 +91,11 @@ function executorOf(client: PoolClient): Queryable {
 
 const savedEnv = new Map<string, string | undefined>()
 const seededUsers: string[] = []
+// Only rows this suite inserted itself are recorded (RETURNING on a conflict-tolerant insert), so
+// pre-existing roles and permission codes are left in place by afterAll.
+const seededRoles: string[] = []
+const seededPermissionCodes: string[] = []
+const seededRolePermissions: Array<[string, string]> = []
 
 beforeAll(() => {
   for (const key of ['SECURITY_ACTION_PROOF_ENABLED', 'PRODUCT_MODE']) savedEnv.set(key, process.env[key])
@@ -108,6 +113,11 @@ afterAll(async () => {
     await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [seededUsers])
     await q('DELETE FROM users WHERE id = ANY($1::text[])', [seededUsers])
   }
+  if (mainPool) {
+    for (const [roleId, code] of seededRolePermissions) await q('DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = $2', [roleId, code])
+    if (seededRoles.length > 0) await q('DELETE FROM roles WHERE id = ANY($1::text[])', [seededRoles])
+    if (seededPermissionCodes.length > 0) await q('DELETE FROM permissions WHERE code = ANY($1::text[])', [seededPermissionCodes])
+  }
   for (const [key, value] of savedEnv) {
     if (value === undefined) delete process.env[key]
     else process.env[key] = value
@@ -122,7 +132,7 @@ afterAll(async () => {
 type UserSeed = { localPasswordSet?: boolean; mustChange?: boolean; isActive?: boolean; isAdmin?: boolean; role?: string; legacy?: unknown; orgs?: string[] }
 
 async function seedUser(seed: UserSeed = {}): Promise<string> {
-  const id = 'p04b-' + randomUUID()
+  const id = 'sa-proof-' + randomUUID()
   const hash = await bcrypt.hash(PASSWORD, 4)
   await q(
     `INSERT INTO users (id, username, email, name, password_hash, is_active, is_admin, role, permissions, activation_status, local_password_set, must_change_password)
@@ -135,7 +145,7 @@ async function seedUser(seed: UserSeed = {}): Promise<string> {
 }
 
 async function seedSession(userId: string, options: { expired?: boolean } = {}): Promise<string> {
-  const sid = 'p04b-sid-' + randomUUID()
+  const sid = 'sa-proof-sid-' + randomUUID()
   await q(
     `INSERT INTO user_sessions (id, user_id, expires_at) VALUES ($1, $2, ${options.expired ? "now() - interval '1 minute'" : "now() + interval '1 hour'"})`,
     [sid, userId],
@@ -157,17 +167,27 @@ function contextOf(userId: string, sid: string, org: string | null = ORG, token 
   return context
 }
 
+async function ensurePermissionCode(code: string): Promise<void> {
+  const inserted = (await q('INSERT INTO permissions (code, name) VALUES ($1, $1) ON CONFLICT DO NOTHING RETURNING code', [code])).rows
+  if (inserted.length === 1) seededPermissionCodes.push(code)
+}
+
+/** Adds `code` to a role this suite created. */
+async function grantRoleCode(roleId: string, code: string): Promise<void> {
+  await ensurePermissionCode(code)
+  const inserted = (await q('INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING role_id', [roleId, code])).rows
+  if (inserted.length === 1) seededRolePermissions.push([roleId, code])
+}
+
 async function grantRole(userId: string, roleId: string, codes: readonly string[] = []): Promise<void> {
-  await q('INSERT INTO roles (id, name) VALUES ($1, $1) ON CONFLICT DO NOTHING', [roleId])
+  const inserted = (await q('INSERT INTO roles (id, name) VALUES ($1, $1) ON CONFLICT DO NOTHING RETURNING id', [roleId])).rows
+  if (inserted.length === 1) seededRoles.push(roleId)
   await q('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [userId, roleId])
-  for (const code of codes) {
-    await q('INSERT INTO permissions (code, name) VALUES ($1, $1) ON CONFLICT DO NOTHING', [code])
-    await q('INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING', [roleId, code])
-  }
+  for (const code of codes) await grantRoleCode(roleId, code)
 }
 
 async function grantDirect(userId: string, code: string): Promise<void> {
-  await q('INSERT INTO permissions (code, name) VALUES ($1, $1) ON CONFLICT DO NOTHING', [code])
+  await ensurePermissionCode(code)
   await q('INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, $2)', [userId, code])
 }
 
@@ -384,6 +404,12 @@ async function insertRow(run: Runner, userId: string, overrides: RowSeed = {}): 
   return String(row.id)
 }
 
+/** A lifetime that ended 100 s ago and spans exactly 300 s, computed from a single clock reading. */
+function expiredLifetime(): { created_at: Date; expires_at: Date } {
+  const now = Date.now()
+  return { created_at: new Date(now - 400_000), expires_at: new Date(now - 100_000) }
+}
+
 async function expectSqlState(promise: Promise<unknown>, code: string): Promise<void> {
   await expect(promise).rejects.toMatchObject({ code })
 }
@@ -406,21 +432,21 @@ async function withRollback<T>(fn: (run: Runner, client: PoolClient) => Promise<
 
 /** A savepoint so one failing statement does not abort the rolled-back case. */
 async function failing(run: Runner, sql: string, params: unknown[]): Promise<unknown> {
-  await run('SAVEPOINT p04b')
+  await run('SAVEPOINT sa_proof')
   try {
     return await run(sql, params)
   } finally {
-    await run('ROLLBACK TO SAVEPOINT p04b')
+    await run('ROLLBACK TO SAVEPOINT sa_proof')
   }
 }
 
 /** An insert expected to be refused with `code`, run under a savepoint. */
 async function refusedInsert(run: Runner, userId: string, overrides: RowSeed, code: string): Promise<void> {
-  await run('SAVEPOINT p04b_insert')
+  await run('SAVEPOINT sa_proof_insert')
   try {
     await expectSqlState(insertRow(run, userId, overrides), code)
   } finally {
-    await run('ROLLBACK TO SAVEPOINT p04b_insert')
+    await run('ROLLBACK TO SAVEPOINT sa_proof_insert')
   }
 }
 
@@ -429,7 +455,7 @@ async function refusedInsert(run: Runner, userId: string, overrides: RowSeed, co
 // ---------------------------------------------------------------------------
 
 suite('migration', () => {
-  it('creates the reviewed columns, constraints, indexes, validated foreign key and row trigger', async () => {
+  it('creates the expected columns, constraints, indexes, validated foreign key and row trigger', async () => {
     const current = await catalog(q)
     expect(current.columns.map((c) => [c.name, c.type, c.nullable, c.def])).toEqual([
       ['id', 'uuid', 'NO', null], ['user_id', 'text', 'NO', null], ['session_id', 'text', 'NO', null], ['org_id', 'text', 'YES', null],
@@ -461,7 +487,9 @@ suite('migration', () => {
     expect(Number(trigger.tgtype)).toBe(23)
   })
 
-  it('refuses every shape outside the reviewed CHECKs with 23514', async () => {
+  // A status outside the closed set is refused by the transition trigger before the CHECK is evaluated;
+  // it belongs to the trigger case below.
+  it('refuses every shape outside the expected CHECKs with 23514', async () => {
     const userId = await seedUser()
     await withRollback(async (run) => {
       const violations: RowSeed[] = [
@@ -469,7 +497,7 @@ suite('migration', () => {
         { target_kind: 'identity_revision', target_identity_id: null }, { target_kind: 'identity_revision', expected_binding_revision: null },
         { target_kind: 'empty_slot' }, { expected_binding_revision: -1 },
         { method: 'other' }, { method: 'local_password', method_connection_id: randomUUID() }, { method: 'external_reauth', assurance: 'external_platform_asserted' },
-        { status: 'other' }, { privilege_class: 'other' }, { policy_revision: 0 },
+        { privilege_class: 'other' }, { policy_revision: 0 },
         { target_witness: 'zz' }, { credential_witness: 'Z'.repeat(64) }, { privilege_witness: 'z'.repeat(63) },
         { proof_hash: 'zz' }, { client_binding_digest: 'Z'.repeat(64) }, { consumed_action_ref: 'has space' },
         { status: 'failed', failure_code: 'credential_rejected', proof_hash: 'b'.repeat(64) },
@@ -486,7 +514,7 @@ suite('migration', () => {
 
   it('refuses a row for a user that does not exist with 23503', async () => {
     await withRollback(async (run) => {
-      await expectSqlState(insertRow(run, 'p04b-absent-' + randomUUID()), '23503')
+      await expectSqlState(insertRow(run, 'sa-proof-absent-' + randomUUID()), '23503')
     })
   })
 
@@ -508,6 +536,7 @@ suite('migration', () => {
     await withRollback(async (run) => {
       await refusedInsert(run, userId, { status: 'consumed', consumed_at: new Date() }, '55000')
       await refusedInsert(run, userId, { status: 'superseded', superseded_at: new Date() }, '55000')
+      await refusedInsert(run, userId, { status: 'other' }, '55000')
       await refusedInsert(run, userId, { created_at: new Date(Date.now() + 60_000) }, '55000')
       const issued = await insertRow(run, userId)
       const failed = await insertRow(run, userId, { status: 'failed', failure_code: 'credential_rejected', proof_hash: null, assurance: null })
@@ -600,7 +629,7 @@ suite('migration', () => {
       const consumed = await insertRow(run, userId, { session_id: sid })
       await run(`UPDATE ${TABLE} SET status = 'consumed', consumed_at = now() WHERE id = $1`, [consumed])
       expect((await run(SECURITY_ACTION_SQL.consume, [consumed, userId, sid, 'external_identity_unbind', null])).rows).toEqual([])
-      const expired = await insertRow(run, userId, { session_id: sid, created_at: new Date(Date.now() - 400_000), expires_at: new Date(Date.now() - 100_000) })
+      const expired = await insertRow(run, userId, { session_id: sid, ...expiredLifetime() })
       expect((await run(SECURITY_ACTION_SQL.consume, [expired, userId, sid, 'external_identity_unbind', null])).rows).toEqual([])
       const live = await insertRow(run, userId, { session_id: 'sid-' + randomUUID() })
       const row = (await run(`SELECT session_id FROM ${TABLE} WHERE id = $1`, [live])).rows[0]
@@ -856,7 +885,7 @@ suite('consumption', () => {
     const sid = await seedSession(userId)
     const service = serviceOn()
     const secret = 'E'.repeat(43)
-    const id = await insertRow(q, userId, { session_id: sid, proof_hash: hashProofSecret(secret), created_at: new Date(Date.now() - 400_000), expires_at: new Date(Date.now() - 100_000) })
+    const id = await insertRow(q, userId, { session_id: sid, proof_hash: hashProofSecret(secret), ...expiredLifetime() })
     const context = contextOf(userId, sid)
     await expectRefusal(consumeWith(userId, context, service, consumeInput(`sap1.${id}.${secret}`, { target: { kind: 'identity_revision', witness: 'a'.repeat(64) } })), 'SECURITY_ACTION_PROOF_EXPIRED')
   })
@@ -916,7 +945,6 @@ suite('consumption', () => {
     ['the password hash changed', async (id: string) => { await q('UPDATE users SET password_hash = $2 WHERE id = $1', [id, await bcrypt.hash('other-' + randomUUID(), 4)]) }, 'SECURITY_ACTION_PROOF_STALE'],
     ['the admin role was granted (unbind)', async (id: string) => { await grantRole(id, 'admin') }, 'SECURITY_ACTION_PROOF_STALE'],
     ['a wildcard direct permission was granted', async (id: string) => { await grantDirect(id, '*:*') }, 'SECURITY_ACTION_PROOF_STALE'],
-    ['a held role gained a code', async (id: string) => { const role = 'p04b-role-' + randomUUID(); await grantRole(id, role); await q('INSERT INTO permissions (code, name) VALUES ($1, $1) ON CONFLICT DO NOTHING', ['tasks:read']); await q('INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2)', [role, 'tasks:read']) }, 'SECURITY_ACTION_PROOF_STALE'],
     ['the admin flag was set', async (id: string) => { await q('UPDATE users SET is_admin = true WHERE id = $1', [id]) }, 'SECURITY_ACTION_PROOF_STALE'],
     ['the role column became admin', async (id: string) => { await q("UPDATE users SET role = 'admin' WHERE id = $1", [id]) }, 'SECURITY_ACTION_PROOF_STALE'],
     ['the session was revoked', async (id: string, sid: string) => { await revokeUserSession(sid, { revokedBy: id, reason: 'test' }) }, 'SECURITY_ACTION_PROOF_STALE'],
@@ -931,6 +959,18 @@ suite('consumption', () => {
     const { context, issued, witness } = await issueFor(userId, sid, service)
     await change(userId, sid)
     await expectRefusal(consumeWith(userId, context, service, consumeInput(issued.proof, { target: { kind: 'identity_revision', witness } })), code)
+    expect((await rowsOf(userId))[0].status).toBe('issued')
+  })
+
+  it('refuses with STALE after a role held at issuance gained a code, the user\'s own rows untouched', async () => {
+    const userId = await seedUser()
+    const role = 'sa-proof-role-' + randomUUID()
+    await grantRole(userId, role)
+    const sid = await seedSession(userId)
+    const service = serviceOn()
+    const { context, issued, witness } = await issueFor(userId, sid, service)
+    await grantRoleCode(role, 'tasks:read')
+    await expectRefusal(consumeWith(userId, context, service, consumeInput(issued.proof, { target: { kind: 'identity_revision', witness } })), 'SECURITY_ACTION_PROOF_STALE')
     expect((await rowsOf(userId))[0].status).toBe('issued')
   })
 
