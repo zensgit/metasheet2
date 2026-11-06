@@ -100,3 +100,12 @@ export function moveFocusWithin(container: HTMLElement, event: KeyboardEvent): v
   event.preventDefault()
   target.focus()
 }
+
+/** A key an input method may be using while it composes text: any key during a composition
+ *  (isComposing), or one the input method took (keyCode 229; Safari marks the key that ends a
+ *  composition only this way). A dialog's command keys act on neither: there Escape cancels the
+ *  composition and Enter commits it. The Tab trap above checks keyCode 229 only, since a Tab the input
+ *  method passed on still has to be moved inside the dialog. */
+export function isInputMethodKey(event: KeyboardEvent): boolean {
+  return event.isComposing || event.keyCode === 229
+}
