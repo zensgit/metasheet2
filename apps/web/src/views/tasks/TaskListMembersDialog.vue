@@ -215,18 +215,18 @@
  * switches the page to its guidance block.
  *
  * Focus: the title takes focus on open; Tab and Shift+Tab move through the dialog's controls and
- * wrap inside it (every Tab is moved by the shared trap, `[fe-12]`); Escape and the
- * close button close it (both inert while a write is in flight) and the page puts focus back on
- * the button that opened it. Once a write lands, focus that ended up outside the dialog comes back
- * in (`[fe-48]`): to the control the write started from while it is still there and usable, else
- * to the title. The transfer and leave confirmations swap out the button that opened them
- * (`[fe-49]`): opening one focuses its confirm button, which its prompt describes (the prompt is
- * also a status message); cancelling it focuses the button that comes back.
+ * wrap inside it (every Tab is moved by the shared trap, `[fe-12]`, except one the input method
+ * took); Escape and the close button close it (both inert while a write is in flight) and the page
+ * puts focus back on the button that opened it. Once a write lands, focus that ended up outside the
+ * dialog comes back in (`[fe-48]`): to the control the write started from while it is still there
+ * and usable, else to the title. The transfer and leave confirmations swap out the button that
+ * opened them (`[fe-49]`): opening one focuses its confirm button, which its prompt describes (the
+ * prompt is also a status message); cancelling it focuses the button that comes back.
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { TASKS_EN, TASKS_FMT_EN, TASKS_FMT_ZH, TASKS_ZH, codeMessage, type TasksText } from '../../tasks/labels'
-import { moveFocusWithin } from '../../tasks/focusTrap'
+import { isInputMethodKey, moveFocusWithin } from '../../tasks/focusTrap'
 import { focusAfterSwap } from '../../tasks/tasksFocus'
 import {
   addTaskListMember,
@@ -611,12 +611,17 @@ function close(): void {
 }
 
 // [fe-12] the focus trap: every Tab and Shift+Tab is moved by the shared task dialog trap
-// (tasks/focusTrap.ts), not only the ones at the ends, since macOS Safari leaves buttons out of its
-// default Tab order. Past the last control wraps to the first, before the first to the last; the
-// set is taken at keydown time, disabled controls left out. The dialog root takes no focus (no
-// tabindex), so with every control disabled the Tab is held and focus stays where it is.
+// (tasks/focusTrap.ts; one the input method took aside), not only the ones at the ends, since macOS
+// Safari leaves buttons out of its default Tab order. Past the last control wraps to the first,
+// before the first to the last; the set is taken at keydown time, disabled controls left out. The
+// dialog root takes no focus (no tabindex), so with every control disabled the Tab is held and focus
+// stays where it is. An Escape the input method may be using cancels the composition, not the dialog.
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
+    if (isInputMethodKey(event)) {
+      event.stopPropagation()
+      return
+    }
     close()
     return
   }

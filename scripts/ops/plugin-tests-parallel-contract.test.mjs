@@ -42,6 +42,12 @@ const permissionStep = {
   name: 'Admin write-route inventory and permission preflight',
   run: 'pnpm --filter @metasheet/core-backend exec vitest run \\\n  tests/unit/admin-mounts-write-gate-guard.test.ts \\\n  tests/unit/admin-directory-routes.test.ts \\\n  tests/unit/admin-directory-5xx-values-free.test.ts\n',
 }
+// Explicit additive change to the runtime-db lock-protocol real-DB step (R-71 gate 10, owner f1/g1): a JSON
+// report on the same vitest command plus a zero-skip check over it. Both are asserted exactly once, at their
+// reviewed position, then stripped so the frozen original command is still compared byte-for-byte.
+const lockProtocolStepId = 'external-system-delete-bind-lock-protocol-real-db'
+const lockProtocolJsonReporter = ' --reporter=json --outputFile.json=../../artifacts/yida-realdb/lock-protocol-vitest.json'
+const lockProtocolZeroSkipLine = 'node scripts/ops/vitest-zero-skip.mjs artifacts/yida-realdb/lock-protocol-vitest.json 14\n'
 
 const directoryClientLintStep = {
   name: 'Run DingTalk directory client lint',
@@ -109,8 +115,27 @@ function assertParallelWorkflow(doc) {
         const repairAddition = '  tests/integration/dingtalk-login-repair.db.test.ts \\\n'
         assert.equal(step.run.split(repairAddition).length - 1, 1, 'Login repair DB suite must run exactly once')
         assert.ok(step.run.includes(addition + repairAddition), 'Keep the login repair suite at its reviewed position')
+        const privilegeAddition = '  tests/integration/security-action-privilege.db.test.ts \\\n'
+        assert.equal(step.run.split(privilegeAddition).length - 1, 1, 'Privilege classification DB suite must run exactly once')
+        assert.ok(step.run.includes(repairAddition + privilegeAddition), 'Keep the privilege classification suite at its reviewed position')
+        const intentAddition = '  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n'
+        assert.equal(step.run.split(intentAddition).length - 1, 1, 'Directory link intent DB suite must run exactly once')
+        assert.ok(step.run.includes(repairAddition + privilegeAddition + intentAddition), 'Keep the directory link intent suite right after the privilege classification suite')
+        const membershipGateAddition = '  tests/integration/directory-sync-membership-local-account-gate.db.test.ts \\\n'
+        assert.equal(step.run.split(membershipGateAddition).length - 1, 1, 'Sync membership local-account gate DB suite must run exactly once')
+        assert.ok(step.run.includes(repairAddition + privilegeAddition + intentAddition + membershipGateAddition), 'Keep the sync membership gate suite right after the directory link intent suite')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
+        step.run = step.run.replace(privilegeAddition, '')
+        step.run = step.run.replace(intentAddition, '')
+        step.run = step.run.replace(membershipGateAddition, '')
+      }
+      if (suite === 'runtime-db' && step.id === lockProtocolStepId) {
+        const tail = `  --reporter=verbose${lockProtocolJsonReporter}\n${lockProtocolZeroSkipLine}`
+        assert.equal(step.run.split(lockProtocolJsonReporter).length - 1, 1, 'The lock-protocol JSON reporter must appear exactly once')
+        assert.equal(step.run.split(lockProtocolZeroSkipLine).length - 1, 1, 'The lock-protocol zero-skip check must run exactly once')
+        assert.ok(step.run.endsWith(tail), 'Keep the JSON reporter right after --reporter=verbose and the zero-skip check as the last line')
+        step.run = step.run.replace(lockProtocolJsonReporter, '').replace(lockProtocolZeroSkipLine, '')
       }
       if (suite === 'multitable-db' && step.id === 'multitable-real-db-integration') {
         // Explicit additive suite: preserve the frozen original command byte-for-byte.
@@ -169,10 +194,19 @@ test('each database suite owns a fresh runner/database and migration ordering', 
 test('removed/filtered/reordered steps, disabled suites and a weakened aggregate are rejected', () => {
   const mutations = [
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-controlled-handover.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['runtime-db'].steps.find(step => step.id === lockProtocolStepId); assert.ok(step.run.includes(lockProtocolZeroSkipLine)); step.run = step.run.replace(lockProtocolZeroSkipLine, '') },
+    doc => { const step = doc.jobs['runtime-db'].steps.find(step => step.id === lockProtocolStepId); assert.ok(step.run.endsWith(lockProtocolZeroSkipLine)); step.run = `${step.run.slice(0, -1)} || true\n` },
+    doc => { const step = doc.jobs['runtime-db'].steps.find(step => step.id === lockProtocolStepId); assert.ok(step.run.includes(lockProtocolJsonReporter)); step.run = step.run.replace(lockProtocolJsonReporter, '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/dingtalk-login-repair.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/dingtalk-login-repair.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['multitable-db'].steps.find(step => step.id === 'multitable-real-db-integration'); step.run = step.run.replace('  tests/integration/notification-delivery-result.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['multitable-db'].steps.find(step => step.id === 'multitable-real-db-integration'); const line = '  tests/integration/notification-delivery-result.db.test.ts \\\n', anchor = '  tests/integration/multitable-fwb-write-action-realdb.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-sync-membership-local-account-gate.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-sync-membership-local-account-gate.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/security-action-privilege.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/security-action-privilege.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const steps = doc.jobs.unit.steps; steps.splice(steps.findIndex(step => step.name === directoryClientLintStep.name), 1) },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).run += ' || true' },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).if = false },
