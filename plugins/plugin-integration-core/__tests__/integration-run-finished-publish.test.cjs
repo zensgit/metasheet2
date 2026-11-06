@@ -82,7 +82,7 @@ function harness({ totalRows = 3, pageSize = 100, failRead = false, failFinish =
       async listObjects() { return [] },
       async getSchema() { return { fields: [] } },
       async read(input) {
-        if (failRead) throw new TypeError('source unreachable at 10.9.8.7 with secret s3cr3t')
+        if (failRead) throw new TypeError('source unreachable at HOST-SENTINEL-R69 with secret SECRET-SENTINEL-R69')
         const offset = input.cursor ? Number(input.cursor) : 0
         reads.pages += 1
         const records = Array.from({ length: Math.max(0, Math.min(pageSize, totalRows - offset)) }, (_, i) => ({ code: `C${offset + i}` }))
@@ -166,7 +166,7 @@ async function main() {
     assert.equal(summary.status, 'failed')
     assert.match(summary.errorClass, /^[A-Za-z0-9_:.-]{1,80}$/)
     const text = JSON.stringify(summary)
-    for (const needle of ['10.9.8.7', 's3cr3t', 'unreachable', TENANT]) assert.equal(text.includes(needle), false, `${needle} must not leak`)
+    for (const needle of ['HOST-SENTINEL-R69', 'SECRET-SENTINEL-R69', 'unreachable', TENANT]) assert.equal(text.includes(needle), false, `${needle} must not leak`)
   }
 
   // 4. the switch is the exact literal; finishRun failing publishes nothing; a missing port is a no-op.

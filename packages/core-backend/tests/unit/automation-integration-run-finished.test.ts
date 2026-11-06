@@ -175,7 +175,7 @@ describe('integration.run_finished — publish port (closed key set, values-free
 
   it.each([
     ['errorClass with a URL', { errorClass: 'https://host/x' }, 'errorClass'],
-    ['errorClass with a message', { errorClass: 'connect ECONNREFUSED 10.0.0.1' }, 'errorClass'],
+    ['errorClass with a message', { errorClass: 'connect ECONNREFUSED HOST-SENTINEL-R69' }, 'errorClass'],
     ['an open reason', { reason: 'free text reason' }, 'reason'],
     ['a pipelineId path', { job: { kind: 'pipeline', pipelineId: 'a/b' } }, 'job.pipelineId'],
     ['a status outside the set', { status: 'done' }, 'status'],
