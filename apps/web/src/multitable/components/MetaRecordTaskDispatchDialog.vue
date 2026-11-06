@@ -332,7 +332,7 @@ import { useLocale } from '../../composables/useLocale'
 import { dispatchAccessSkipped, recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 import { TASKS_EN, TASKS_ZH } from '../../tasks/labels'
 import TaskPeoplePicker, { type TaskPeoplePicked } from '../../tasks/TaskPeoplePicker.vue'
-import { moveFocusWithin } from '../../tasks/focusTrap'
+import { isInputMethodKey, moveFocusWithin } from '../../tasks/focusTrap'
 import {
   createTask,
   getTask,
@@ -1099,8 +1099,15 @@ function onCancel(): void {
 
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
+    // An Escape the input method may be using cancels the composition, not the dialog; it still goes
+    // no further, so no document-level listener acts on it either.
+    if (isInputMethodKey(event)) {
+      event.stopPropagation()
+      return
+    }
     event.preventDefault()
-    // The inspector's own Escape handler closes the whole drawer; Esc in a modal closes the modal only.
+    // Esc in a modal closes the modal only. The dialog is teleported to body, so the drawer's own
+    // Escape handler never sees the key; this keeps document-level listeners from acting on it too.
     event.stopPropagation()
     emit('close')
     return
@@ -1109,12 +1116,15 @@ function onKeydown(event: KeyboardEvent): void {
   // skips a later listener attached in the millisecond an event was first stamped (see the people
   // picker's onPanelKeydown), so one on the box would let an Esc or Tab there skip this handler.
   if (event.key === 'Enter' && event.target === typedInputRef.value) {
+    // An Enter that commits a composition adds nothing: the box's model does not hold the composed
+    // text until the composition ends.
+    if (isInputMethodKey(event)) return
     event.preventDefault()
     onAddTyped()
     return
   }
-  // Every Tab is moved here, wrapping inside the dialog, a date or time input's own parts aside
-  // (see tasks/focusTrap.ts).
+  // Every Tab is moved here, wrapping inside the dialog, a date or time input's own parts and a Tab
+  // the input method took aside (see tasks/focusTrap.ts).
   if (event.key === 'Tab' && modalRef.value) moveFocusWithin(modalRef.value, event)
 }
 </script>

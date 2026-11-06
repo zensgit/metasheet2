@@ -3358,6 +3358,74 @@ describe('派发任务 dialog: its own Tab trap', () => {
     expect(dialog()).not.toBeNull()
   })
 
+  it('leaves a Tab the input method took (keyCode 229) in the title to it, and moves a Tab during a composition it did not take', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    const title = q<HTMLInputElement>('title')!
+    title.focus()
+    for (const init of [{ keyCode: 229, isComposing: true }, { keyCode: 229 }, { keyCode: 229, shiftKey: true }]) {
+      const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, ...init })
+      title.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(document.activeElement).toBe(title)
+    }
+    const passedOn = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, isComposing: true, keyCode: 9 })
+    title.dispatchEvent(passedOn)
+    expect(passedOn.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q('person-field'))
+  })
+
+  it('an Escape the input method may be using leaves the dialog open and goes no further; a plain Escape closes it', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    const title = q<HTMLInputElement>('title')!
+    title.focus()
+    const reachedDocument: string[] = []
+    const onDocument = (event: KeyboardEvent) => { reachedDocument.push(event.key) }
+    document.addEventListener('keydown', onDocument)
+    try {
+      for (const init of [{ isComposing: true }, { keyCode: 229 }]) {
+        const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init })
+        title.dispatchEvent(event)
+        await flushUi()
+        expect(event.defaultPrevented).toBe(false)
+        expect(dialog()).not.toBeNull()
+      }
+      expect(reachedDocument).toEqual([])
+    } finally {
+      document.removeEventListener('keydown', onDocument)
+    }
+    title.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(dialog()).toBeNull()
+  })
+
+  it('an Enter that commits a composition in the user-id box adds nothing; the next plain Enter adds the typed id', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    q<HTMLButtonElement>('add-by-id-toggle')!.click()
+    await flushUi()
+    setInput('assignee-input', 'usr_b')
+    const before = assigneeIds()
+    for (const init of [{ isComposing: true }, { keyCode: 229 }]) {
+      const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init })
+      q<HTMLInputElement>('assignee-input')!.dispatchEvent(event)
+      await flushUi()
+      expect(event.defaultPrevented).toBe(false)
+      expect(assigneeIds()).toEqual(before)
+      expect(q<HTMLInputElement>('assignee-input')!.value).toBe('usr_b')
+    }
+    q<HTMLInputElement>('assignee-input')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(assigneeIds()).toEqual([...before, 'usr_b'])
+  })
+
   it('leaves a Tab in the date and time inputs to the browser (their own parts), and brings a move out of the dialog back to the next control', async () => {
     serveTasks()
     const { container } = mountInspector()
