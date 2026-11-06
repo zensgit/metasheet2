@@ -2078,8 +2078,8 @@ test('residue-sweep is wired into the remote-script dispatcher and the workflow 
   const yaml = readFileSync(WORKFLOW, 'utf8')
   assert.match(
     yaml,
-    /options:\s*\[deploy,\s*smoke,\s*status,\s*migrate,\s*residue-sweep,\s*soak-baseline,\s*soak-seed,\s*soak-flags,\s*soak-run,\s*soak-status\]/,
-    'expected the workflow action input to list residue-sweep (and the soak actions) as choices',
+    /options:\s*\[deploy,\s*smoke,\s*status,\s*migrate,\s*residue-sweep,\s*soak-baseline,\s*soak-seed,\s*soak-flags,\s*soak-run,\s*soak-status,\s*org-membership-inspect,\s*org-membership-repair\]/,
+    'expected the workflow action input to list residue-sweep (and the soak and org-membership actions) as choices',
   )
   assert.match(yaml, /stamps:/, 'expected a `stamps` workflow_dispatch input for action=residue-sweep')
 })
@@ -2529,7 +2529,7 @@ function assertSoakContract({ remote, workflow }) {
   }
   assert.match(
     workflow,
-    /case "\$ACTION" in deploy\|smoke\|status\|migrate\|residue-sweep\|soak-baseline\|soak-seed\|soak-flags\|soak-run\|soak-status\)/,
+    /case "\$ACTION" in deploy\|smoke\|status\|migrate\|residue-sweep\|soak-baseline\|soak-seed\|soak-flags\|soak-run\|soak-status\|org-membership-inspect\|org-membership-repair\)/,
     'workflow input validation must accept exactly the dispatcherʼs action set',
   )
   assert.match(
@@ -4159,14 +4159,25 @@ function extractWorkflowRunBlock(workflow, stepName) {
   return out.join('\n')
 }
 
+// The validation step reads repair_spec from the event payload (never from a step env), and
+// writes the validated value to $GITHUB_OUTPUT; both files are synthesized per call. `env.EVENT`
+// overrides the whole payload text (for the unreadable / non-string cells).
 function runWorkflowValidation(env) {
   const block = extractWorkflowRunBlock(readFileSync(WORKFLOW, 'utf8'), 'Validate inputs and embedded scripts')
   const repoRoot = join(HERE, '..', '..')
-  return spawnSync('bash', ['-c', block], {
+  const dir = mkdtempSync(join(tmpdir(), 'wr-validate-'))
+  const eventPath = join(dir, 'event.json')
+  const outputPath = join(dir, 'github_output')
+  writeFileSync(outputPath, '')
+  if (env.EVENT !== null) {
+    writeFileSync(eventPath, env.EVENT ?? JSON.stringify({ inputs: { action: env.ACTION, repair_spec: env.REPAIR_SPEC ?? '' } }))
+  }
+  const result = spawnSync('bash', ['-c', block], {
     cwd: repoRoot,
     encoding: 'utf8',
-    env: { ACTION: env.ACTION, SOAK_ORGS: env.SOAK_ORGS ?? '', SOAK_OPTS: env.SOAK_OPTS ?? '', DEPLOY_SHA: '', SET_WINDOW_ENV: 'none', TASKS_ENABLED_INPUT: env.TASKS_ENABLED_INPUT ?? 'false', FORCE_RECREATE: 'false', STAMPS: '', PATH: process.env.PATH },
+    env: { ACTION: env.ACTION, SOAK_ORGS: env.SOAK_ORGS ?? '', SOAK_OPTS: env.SOAK_OPTS ?? '', DEPLOY_SHA: env.DEPLOY_SHA ?? '', SET_WINDOW_ENV: 'none', TASKS_ENABLED_INPUT: env.TASKS_ENABLED_INPUT ?? 'false', FORCE_RECREATE: 'false', STAMPS: '', GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: outputPath, PATH: process.env.PATH },
   })
+  return { ...result, githubOutput: readFileSync(outputPath, 'utf8') }
 }
 
 const THREE_UUIDS = '11111111-1111-4111-8111-111111111111,22222222-2222-4222-8222-222222222222,33333333-3333-4333-8333-333333333333'
@@ -6335,5 +6346,945 @@ test('runner bundle: no workflow step runs git on the deploy host: only the two 
   for (const step of remoteSteps) {
     const gitLines = executableLines(step.run).split('\n').filter((line) => GIT_INVOCATION.test(line))
     assert.deepEqual(gitLines, [], `${workflowStepLabel(step)}: no remote command may run git on the deploy host`)
+  }
+})
+
+// --- staging org-membership inspect / repair (owner ruling 2026-10-12) ----------------------
+//
+// action=org-membership-inspect (read-only locate) and action=org-membership-repair (one
+// owner-named write driven by the `repair_spec` input). The executable cells run the REAL lib
+// generators and the REAL extracted remote functions against a recording `docker` stub, so a
+// call that is deleted, commented out or wrapped in dead control flow fails the same way.
+
+const ORGFIX_CONFIRM = 'I_CONFIRM_STAGING_ORG_MEMBERSHIP_REPAIR'
+const ORGFIX_FP = '0123456789abcdef'
+const ORGFIX_ACCEPT = [
+  [`deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM}`, `deactivate ${ORGFIX_FP} -`],
+  [`add-membership:${ORGFIX_FP}:default:${ORGFIX_CONFIRM}`, `add-membership ${ORGFIX_FP} default`],
+  [`add-membership:${ORGFIX_FP}:9b2f0c3e-1d2a-4b5c-8d7e-0f1a2b3c4d5e:${ORGFIX_CONFIRM}`, `add-membership ${ORGFIX_FP} 9b2f0c3e-1d2a-4b5c-8d7e-0f1a2b3c4d5e`],
+  [`add-membership:${ORGFIX_FP}:Org_1.x-y:${ORGFIX_CONFIRM}`, `add-membership ${ORGFIX_FP} Org_1.x-y`],
+]
+const ORGFIX_REJECT = [
+  ['empty', ''],
+  ['missing confirm', `deactivate:${ORGFIX_FP}`],
+  ['missing confirm (add)', `add-membership:${ORGFIX_FP}:default`],
+  ['wrong confirm', `deactivate:${ORGFIX_FP}:I_CONFIRM`],
+  ['lower-case confirm', `deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM.toLowerCase()}`],
+  ['confirm used as org, no confirm', `add-membership:${ORGFIX_FP}:${ORGFIX_CONFIRM}`],
+  ['extra field (deactivate)', `deactivate:${ORGFIX_FP}:default:${ORGFIX_CONFIRM}`],
+  ['extra field (add)', `add-membership:${ORGFIX_FP}:default:extra:${ORGFIX_CONFIRM}`],
+  ['trailing field', `deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM}:x`],
+  ['unknown mode', `delete:${ORGFIX_FP}:${ORGFIX_CONFIRM}`],
+  ['upper-case fp', `deactivate:${ORGFIX_FP.toUpperCase()}:${ORGFIX_CONFIRM}`],
+  ['15-hex fp', `deactivate:${ORGFIX_FP.slice(1)}:${ORGFIX_CONFIRM}`],
+  ['17-hex fp', `deactivate:${ORGFIX_FP}0:${ORGFIX_CONFIRM}`],
+  ['raw id instead of fp', `deactivate:tasks-smoke-abc:${ORGFIX_CONFIRM}`],
+  ['leading space', ` deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM}`],
+  ['semicolon', `deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM};touch /tmp/orgfix_pwn`],
+  ['command substitution', `add-membership:${ORGFIX_FP}:$(id):${ORGFIX_CONFIRM}`],
+  ['backtick', `add-membership:${ORGFIX_FP}:\`id\`:${ORGFIX_CONFIRM}`],
+  ['single quote in org', `add-membership:${ORGFIX_FP}:a'b:${ORGFIX_CONFIRM}`],
+  ['space in org', `add-membership:${ORGFIX_FP}:a b:${ORGFIX_CONFIRM}`],
+  ['pipe', `deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM}|cat`],
+  ['dollar', `add-membership:${ORGFIX_FP}:$HOME:${ORGFIX_CONFIRM}`],
+  ['newline injection', `deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM}\n'; touch /tmp/orgfix_pwn; echo '`],
+  ['trailing newline', `deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM}\n`],
+  ['carriage return', `deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM}\r`],
+  ['org starting with dot', `add-membership:${ORGFIX_FP}:.default:${ORGFIX_CONFIRM}`],
+  ['org too long', `add-membership:${ORGFIX_FP}:${'a'.repeat(129)}:${ORGFIX_CONFIRM}`],
+]
+
+function runLibFunction(body, env = {}) {
+  return spawnSync('bash', ['-o', 'pipefail', '-c', `set -euo pipefail\nsource '${LIB}'\n${body}`], {
+    encoding: 'utf8',
+    env: { PATH: process.env.PATH, ...env },
+  })
+}
+
+// The whole remote script, run with a docker stub on PATH that records every call. A malformed
+// spec must exit 2 before the staging-only guard and before any docker call.
+function runRemoteScriptTop(action, repairSpec) {
+  const dir = mkdtempSync(join(tmpdir(), 'wr-orgfix-top-'))
+  const bin = join(dir, 'bin')
+  mkdirSync(bin)
+  const dockerLog = join(dir, 'docker.log')
+  writeFileSync(join(bin, 'docker'), `#!/bin/bash\necho "docker $*" >> '${dockerLog}'\nexit 0\n`)
+  chmodSync(join(bin, 'docker'), 0o755)
+  const home = join(dir, 'home')
+  mkdirSync(home)
+  const result = spawnSync('bash', ['-o', 'pipefail', '-c', `bash '${REMOTE_SH}'`], {
+    encoding: 'utf8',
+    env: {
+      PATH: `${bin}:${process.env.PATH}`,
+      HOME: home,
+      ACTION: action,
+      REPAIR_SPEC: repairSpec,
+      OUTPUT_DIR: join(dir, 'out'),
+      RUN_STAMP: 'gh1a1',
+    },
+  })
+  return { ...result, dockerCalled: existsSync(dockerLog) }
+}
+
+test('org-membership: both actions are wired through the dispatcher, the workflow choices, validation, the prelude and the summary; total dispatch inputs stay at 10', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  assert.match(remote, /^\s*org-membership-inspect\) action_org_membership_inspect ;;$/m)
+  assert.match(remote, /^\s*org-membership-repair\) action_org_membership_repair ;;$/m)
+  assert.match(remote, /ACTION is required \([^)]*\|org-membership-inspect\|org-membership-repair\)/)
+  assert.match(remote, /expected deploy\|[^)]*\|org-membership-inspect\|org-membership-repair\)/)
+  assert.match(workflow, /options: \[[^\]]*soak-status, org-membership-inspect, org-membership-repair\]/)
+  // exactly 10 workflow_dispatch inputs (GitHub's historical cap; the owner ruled to stay at 10)
+  const inputsBlock = workflow.slice(workflow.indexOf('    inputs:\n'), workflow.indexOf('\nconcurrency:'))
+  const inputNames = [...inputsBlock.matchAll(/^ {6}([a-z_]+):\s*$/gm)].map((m) => m[1])
+  assert.deepEqual(inputNames, ['action', 'deploy_sha', 'soak_orgs', 'soak_opts', 'smoke', 'stamps', 'set_window_env', 'force_recreate', 'tasks_enabled', 'repair_spec'])
+  // The raw repair_spec reaches NO step env (GitHub prints env values in the public log header):
+  // Validate reads it from the event payload; the remote step (and its prelude) and the summary
+  // step receive only the validated output.
+  const steps = workflowSteps(workflow)
+  const envOf = (name) => {
+    const start = workflow.indexOf(`      - name: ${name}`)
+    assert.ok(start >= 0, `step ${name} found`)
+    const runAt = workflow.indexOf('        run: |', start)
+    assert.ok(runAt > start, `step ${name} has a run block`)
+    return workflow.slice(start, runAt)
+  }
+  assert.match(envOf('Validate inputs and embedded scripts'), /^ {8}id: validate$/m)
+  assert.doesNotMatch(envOf('Validate inputs and embedded scripts'), /REPAIR_SPEC/, 'the raw input must not be in the Validate env header')
+  for (const name of ['Run remote action', 'Write step summary']) {
+    assert.ok(steps.some((step) => step.name === name), `step ${name} exists`)
+    assert.match(envOf(name), /^ {10}REPAIR_SPEC: \$\{\{ steps\.validate\.outputs\.repair_spec \}\}$/m, `${name} must receive only the validated repair_spec`)
+  }
+  assert.match(workflow, /export REPAIR_SPEC='\$\{REPAIR_SPEC\}'/, 'validated repair_spec must reach the remote script')
+  // deploy_sha is not required for either action (they act on the running staging DB only)
+  const shaGate = workflow.split('\n').find((line) => line.includes('"$ACTION" == "deploy" || "$ACTION" == "migrate"'))
+  assert.ok(shaGate, 'deploy_sha gate line found')
+  assert.doesNotMatch(shaGate, /org-membership/)
+})
+
+// Every workflow expression (${{ ... }}) that could expand the raw input: one naming repair_spec
+// through `inputs` (inputs.x, github.event.inputs.x, bracket forms) or dumping the whole inputs /
+// event object. Zero is the right count: the input definition is the bare `repair_spec:` key, and
+// the Validate step reads the payload at runtime through GITHUB_EVENT_PATH instead.
+function rawRepairSpecExpressions(text) {
+  return [...text.matchAll(/\$\{\{([\s\S]*?)\}\}/g)]
+    .map((m) => m[1].trim())
+    .filter((expr) => (/\binputs\b/.test(expr) && /repair_spec/.test(expr)) || /toJSON\(\s*(?:inputs|github\.event)\s*\)/.test(expr))
+}
+
+test('org-membership: the raw repair_spec input is referenced by NO expression anywhere in the workflow (env headers and expanded run bodies are public); Validate writes the output last', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  assert.deepEqual(rawRepairSpecExpressions(workflow), [], 'no ${{ inputs.repair_spec }} / github.event.inputs.repair_spec / toJSON(inputs) expression')
+  // positive controls
+  for (const bad of ['          REPAIR_SPEC: ${{ inputs.repair_spec }}', '          X: ${{ github.event.inputs.repair_spec }}', "          X: ${{ inputs['repair_spec'] }}", 'echo "${{ inputs . repair_spec }}"', 'echo "${{ toJSON(github.event) }}"', 'X: ${{ toJSON(inputs) }}']) {
+    assert.equal(rawRepairSpecExpressions(bad).length, 1, `positive control: ${bad.trim()}`)
+  }
+  assert.deepEqual(rawRepairSpecExpressions('          REPAIR_SPEC: ${{ steps.validate.outputs.repair_spec }}'), [], 'negative control: the validated output is allowed')
+  assert.ok(workflow.includes('${{ inputs.soak_opts }}'), 'positive control: the scan sees the other inputs')
+  const block = extractWorkflowRunBlock(workflow, 'Validate inputs and embedded scripts')
+  assert.match(block, /readFileSync\(process\.env\.GITHUB_EVENT_PATH, "utf8"\)/)
+  const outAt = block.indexOf('echo "repair_spec=${validated_repair_spec}" >> "$GITHUB_OUTPUT"')
+  assert.ok(outAt > 0, 'the validated value is written to GITHUB_OUTPUT')
+  const lastExit = block.lastIndexOf('exit 2')
+  assert.ok(lastExit > 0 && lastExit < outAt, 'the output is written after every refusal')
+})
+
+test('org-membership: the repair_spec regex is one literal in the lib and both workflow checks, and names the fixed confirm phrase', () => {
+  const lib = readFileSync(LIB, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const libRe = lib.match(/^ORG_MEMBERSHIP_REPAIR_SPEC_RE='([^']+)'$/m)
+  assert.ok(libRe, 'lib must define ORG_MEMBERSHIP_REPAIR_SPEC_RE')
+  const wfRes = [...workflow.matchAll(/repair_spec_re='([^']+)'/g)].map((m) => m[1])
+  assert.equal(wfRes.length, 2, 'the validation step and the summary step each check repair_spec')
+  for (const re of wfRes) assert.equal(re, libRe[1], 'workflow and remote regex must be byte-identical')
+  assert.ok(libRe[1].endsWith(`:${ORGFIX_CONFIRM}$`), 'the confirm phrase is fixed and last')
+  assert.match(lib, new RegExp(`^ORG_MEMBERSHIP_REPAIR_CONFIRM='${ORGFIX_CONFIRM}'$`, 'm'))
+})
+
+test('org-membership: repair_spec parser accepts exactly the two shapes and rejects malformed / missing-confirm / extra-field / metacharacter specs with exit 2', () => {
+  for (const [spec, parsed] of ORGFIX_ACCEPT) {
+    const r = runLibFunction('org_membership_repair_spec_parse "$SPEC"', { SPEC: spec })
+    assert.equal(r.status, 0, `must accept ${spec}: ${r.stderr}`)
+    assert.equal(r.stdout, `${parsed}\n`)
+  }
+  for (const [why, spec] of ORGFIX_REJECT) {
+    const r = runLibFunction('rc=0; org_membership_repair_spec_parse "$SPEC" || rc=$?; echo "rc=$rc"', { SPEC: spec })
+    assert.equal(r.stdout, 'rc=2\n', `${why}: must return 2 and print nothing`)
+  }
+})
+
+test('org-membership: workflow validation (reading the event payload) accepts the two shapes, exits 2 on every malformed spec, on a missing spec and on a spec for another action; its own messages do not print the value; only a validated value reaches GITHUB_OUTPUT', () => {
+  for (const [spec] of ORGFIX_ACCEPT) {
+    const r = runWorkflowValidation({ ACTION: 'org-membership-repair', REPAIR_SPEC: spec })
+    assert.equal(r.status, 0, `must accept ${spec}: ${r.stderr}`)
+    assert.equal(r.githubOutput, `repair_spec=${spec}\n`, 'the validated value is the step output')
+  }
+  const inspect = runWorkflowValidation({ ACTION: 'org-membership-inspect', REPAIR_SPEC: '' })
+  assert.equal(inspect.status, 0, `inspect with no spec must pass: ${inspect.stderr}`)
+  assert.equal(inspect.githubOutput, 'repair_spec=\n', 'every other action gets an empty output')
+  const absent = runWorkflowValidation({ ACTION: 'status', EVENT: JSON.stringify({ inputs: { action: 'status' } }) })
+  assert.equal(absent.status, 0, `an absent repair_spec input reads as empty: ${absent.stderr}`)
+  for (const [why, spec] of ORGFIX_REJECT) {
+    const r = runWorkflowValidation({ ACTION: 'org-membership-repair', REPAIR_SPEC: spec })
+    assert.equal(r.status, 2, `${why}: workflow validation must exit 2`)
+    if (spec.trim().length > 0) assert.ok(!r.stderr.includes(spec.trim()) && !r.stdout.includes(spec.trim()), `${why}: the step's own output must not print the value`)
+    assert.equal(r.githubOutput, '', `${why}: nothing reaches GITHUB_OUTPUT`)
+  }
+  for (const action of ['org-membership-inspect', 'status', 'migrate', 'deploy']) {
+    const r = runWorkflowValidation({ ACTION: action, REPAIR_SPEC: ORGFIX_ACCEPT[0][0] })
+    assert.equal(r.status, 2, `repair_spec on action=${action} must exit 2`)
+    assert.equal(r.githubOutput, '')
+  }
+  // The payload itself: missing file, non-JSON, non-string value -> exit 2, nothing written.
+  for (const [why, EVENT] of [['missing event file', null], ['not JSON', '{'], ['non-string value', JSON.stringify({ inputs: { repair_spec: ['x'] } })]]) {
+    const r = runWorkflowValidation({ ACTION: 'org-membership-repair', EVENT })
+    assert.equal(r.status, 2, `${why}: exit 2`)
+    assert.equal(r.githubOutput, '')
+  }
+})
+
+test('workflow validation: deploy_sha is empty or a full lower-case SHA for EVERY action (it reaches the single-quoted remote prelude)', () => {
+  const sha = 'a'.repeat(40)
+  for (const action of ['status', 'org-membership-inspect', 'residue-sweep', 'soak-status']) {
+    for (const bad of ["abc'; touch x; '", 'abc1234', 'A'.repeat(40), `${sha} `]) {
+      const r = runWorkflowValidation({ ACTION: action, DEPLOY_SHA: bad })
+      assert.equal(r.status, 2, `${action} with deploy_sha=${JSON.stringify(bad)} must exit 2`)
+      assert.match(r.stderr, /deploy_sha must be empty or the FULL 40-char lowercase commit SHA/)
+    }
+  }
+  assert.equal(runWorkflowValidation({ ACTION: 'status', DEPLOY_SHA: sha }).status, 0, 'a full SHA passes')
+  assert.equal(runWorkflowValidation({ ACTION: 'org-membership-inspect', DEPLOY_SHA: '' }).status, 0, 'empty passes')
+})
+
+// The summary step runs under always(); it is given only steps.validate.outputs.repair_spec.
+function runWorkflowSummary(env) {
+  const block = extractWorkflowRunBlock(readFileSync(WORKFLOW, 'utf8'), 'Write step summary')
+  const dir = mkdtempSync(join(tmpdir(), 'wr-summary-'))
+  const summaryPath = join(dir, 'step_summary.md')
+  const r = spawnSync('bash', ['-c', block], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { REMOTE_RC: '', ARTIFACT_NAME: '', SMOKE_ID: '', DEPLOY_SHA: '', SET_WINDOW_ENV: 'none', FORCE_RECREATE: 'false', TASKS_ENABLED_INPUT: 'false', STAMPS: '', SOAK_ORGS: '', SOAK_OPTS: '', ...env, GITHUB_STEP_SUMMARY: summaryPath, PATH: process.env.PATH },
+  })
+  return { ...r, summary: existsSync(summaryPath) ? readFileSync(summaryPath, 'utf8') : '' }
+}
+
+test('org-membership: the step summary prints only mode + fp of a validated spec, and a withheld marker otherwise (never the org slot, never a non-validated value)', () => {
+  const failed = runWorkflowSummary({ ACTION: 'org-membership-repair', REPAIR_SPEC: '' })
+  assert.equal(failed.status, 0, failed.stderr)
+  assert.match(failed.summary, /^- Repair: `<not validated; withheld>`$/m)
+  // defense in depth: even a malformed value in that env is not printed
+  for (const [why, spec] of ORGFIX_REJECT.filter(([, v]) => v.trim().length > 0)) {
+    const r = runWorkflowSummary({ ACTION: 'org-membership-repair', REPAIR_SPEC: spec })
+    assert.equal(r.status, 0, `${why}: ${r.stderr}`)
+    assert.ok(!r.summary.includes(spec.trim()), `${why}: not printed`)
+    assert.match(r.summary, /<not validated; withheld>/, `${why}: withheld marker`)
+  }
+  const add = runWorkflowSummary({ ACTION: 'org-membership-repair', REPAIR_SPEC: ORGFIX_ACCEPT[2][0] })
+  assert.match(add.summary, new RegExp(`^- Repair: \`add-membership fp=${ORGFIX_FP}\`$`, 'm'))
+  assert.ok(!add.summary.includes('9b2f0c3e-1d2a-4b5c-8d7e-0f1a2b3c4d5e'), 'the org slot is not printed by the workflow summary')
+  assert.ok(!add.summary.includes(ORGFIX_CONFIRM))
+  const deact = runWorkflowSummary({ ACTION: 'org-membership-repair', REPAIR_SPEC: ORGFIX_ACCEPT[0][0] })
+  assert.match(deact.summary, new RegExp(`^- Repair: \`deactivate fp=${ORGFIX_FP}\`$`, 'm'))
+})
+
+test('org-membership: the remote script re-validates REPAIR_SPEC before the staging guard and any docker call (exit 2), and accepts a well-formed one', () => {
+  for (const [why, spec] of ORGFIX_REJECT) {
+    const r = runRemoteScriptTop('org-membership-repair', spec)
+    assert.equal(r.status, 2, `${why}: remote must exit 2, got ${r.status}: ${r.stderr}`)
+    assert.equal(r.dockerCalled, false, `${why}: no docker call before validation`)
+    if (spec.trim().length > 0) assert.ok(!r.stderr.includes(spec.trim()), `${why}: the value must be withheld`)
+  }
+  const onInspect = runRemoteScriptTop('org-membership-inspect', ORGFIX_ACCEPT[0][0])
+  assert.equal(onInspect.status, 2, 'a spec on another action exits 2')
+  assert.equal(onInspect.dockerCalled, false)
+  // Positive control: a well-formed spec passes validation and stops at the NEXT gate (the
+  // staging-only guard: this harness has no staging stack), exit 1 not 2.
+  const ok = runRemoteScriptTop('org-membership-repair', ORGFIX_ACCEPT[1][0])
+  assert.equal(ok.status, 1, `well-formed spec must pass validation: ${ok.stderr}`)
+  assert.match(ok.stderr, /staging stack directory missing/)
+})
+
+// Recording harness for the two actions: REAL lib + REAL extracted remote functions, a `docker`
+// bash function that logs each call (and the SQL piped to psql) and answers by SQL shape.
+// The stub is fingerprint-aware: the repair precheck reports `match` users only when its
+// match_count statement carries the fp clause AND psql was given `-v fp=<userFp>` (the stub's
+// users all have fingerprint userFp); any other fp matches nobody, as on a real database.
+// Knobs: commitMarker=false drops write_committed=yes; afterMoves=false leaves the after-COMMIT
+// counters unchanged; writeFails makes the write psql exit non-zero; dump = ok | fail-partial
+// (pg_dump writes some bytes then exits 1) | empty (exits 0 with no output); evidence is the
+// precheck's applied_deprovision_evidence; class6 / k feed the migrate-gate projection.
+function orgfixHarness({ action, spec = '', match = 1, orgMembers = 2, noRowBefore = 1, userFp = ORGFIX_FP, commitMarker = true, afterMoves = true, writeFails = false, dump = 'ok', evidence = '0', class6 = 0, k = 0 }) {
+  const dir = mkdtempSync(join(tmpdir(), 'wr-orgfix-'))
+  const outDir = join(dir, 'out')
+  mkdirSync(outDir)
+  const compose = join(dir, 'compose.yml')
+  writeFileSync(compose, 'services:\n  postgres:\n    container_name: metasheet-staging-postgres\n')
+  const events = join(dir, 'events.log')
+  const fns = extractRunnerFunctions([
+    'hash_value', 'resolve_postgres_creds', 'staging_db_dump',
+    'orgfix_assert_staging_postgres', 'orgfix_psql_ro', 'orgfix_org_null_predicate', 'orgfix_counters', 'orgfix_counter',
+    'action_org_membership_inspect', 'action_org_membership_repair',
+  ])
+  const script = `set -euo pipefail
+source '${LIB}'
+${extractRunnerLine('log')}
+${extractRunnerLine('fail')}
+POSTGRES_CONTAINER="metasheet-staging-postgres"
+STAGING_COMPOSE_FILE='${compose}'
+OUTPUT_DIR='${outDir}'
+BACKUP_DIR='${join(dir, 'backups')}'
+REPAIR_SPEC="$HARNESS_SPEC"
+EVENTS='${events}'
+WROTE='${join(dir, 'wrote')}'
+docker() {
+  local sub="$1"; shift
+  if [[ "$sub" == inspect ]]; then echo "inspect $*" >> "$EVENTS"; echo true; return 0; fi
+  [[ "$sub" == exec ]] || { echo "UNEXPECTED docker $sub" >> "$EVENTS"; return 99; }
+  local -a envs=(); local interactive=0
+  while [[ "$1" == -* ]]; do
+    case "$1" in -i) interactive=1; shift ;; -e) envs+=("$2"); shift 2 ;; *) shift ;; esac
+  done
+  local container="$1"; shift
+  if [[ "$1" == printenv ]]; then echo "printenv $2" >> "$EVENTS"; [[ "$2" == POSTGRES_USER ]] && echo pguser || echo pgdb; return 0; fi
+  if [[ "$1" == pg_dump ]]; then
+    echo "PG_DUMP container=$container" >> "$EVENTS"
+    case '${dump}' in
+      ok) printf 'PGDMP-fake-dump'; return 0 ;;
+      fail-partial) printf 'PGDMP-part'; return 1 ;;
+      empty) return 0 ;;
+    esac
+  fi
+  local sql=""; [[ "$interactive" == 1 ]] && sql="$(cat)"
+  {
+    echo "PSQL container=$container env=[\${envs[*]-}] args=[$*]"
+    echo "<<<SQL"; printf '%s\\n' "$sql"; echo "SQL>>>"
+  } >> "$EVENTS"
+  if [[ "$sql" == *"-- window-runner:org-membership-repair-write"* ]]; then
+    echo "WRITE" >> "$EVENTS"
+    ${writeFails ? 'echo "ORGFIX_ABORT match_count=0 (exactly 1 required)" >&2; return 3' : ':'}
+    ${afterMoves ? 'touch "$WROTE"' : ':'}
+    echo "in_txn_before zero_membership_no_row_count=${noRowBefore}"; echo "in_txn_after zero_membership_no_row_count=${noRowBefore - 1}"
+    echo "class6_shaped_requested=0"; ${commitMarker ? 'echo "write_committed=yes"' : ':'}; return 0
+  fi
+  if [[ "$sql" == *"table_name='approval_instances' AND column_name='org_id'"* ]]; then echo t; return 0; fi
+  if [[ "$sql" == *"SELECT line FROM ("* ]]; then
+    local n=${noRowBefore}; [[ -e "$WROTE" ]] && n=$((n - 1))
+    echo 'approval_action_histogram={}'; echo 'invalid_approval_action_count=0'; echo 'attachment_org_conflict_count=0'
+    echo "zero_membership_no_row_count=$n"; echo "recovery09_repairable_user_count=$n"; echo 'distinct_active_org_count=4'
+    echo "class6_candidate_count=${class6}"; return 0
+  fi
+  if [[ "$sql" == *"c.table_name || '.' || c.column_name"* ]]; then printf '%s\\n' users.created_at users.username users.email tasks.created_by; return 0; fi
+  if [[ "$sql" == *"SELECT 'user'"* ]]; then
+    local j; for ((j = 0; j < ${noRowBefore}; j += 1)); do echo "user fp=${userFp} synthetic_class=none class6_shaped_requested=${k} tasks_created=0"; done; return 0
+  fi
+  if [[ "$sql" == *"SELECT 'org '"* ]]; then echo 'org id=default spec_nameable=yes active_members=3'; return 0; fi
+  if [[ "$sql" == *"match_count="* ]]; then
+    local stmt="\${sql#*match_count=}"; stmt="\${stmt%%;*}"
+    local m=0
+    if [[ "$stmt" == *"AND left(md5(u.id), 16) = :'fp'"* && " $* " == *" -v fp=${userFp} "* ]]; then m=${match}; fi
+    echo "predicate_count=${noRowBefore}"; echo "match_count=$m"; echo "org_active_member_count=${orgMembers}"
+    echo "applied_deprovision_evidence=${evidence}"; return 0
+  fi
+  echo "UNMATCHED SQL" >> "$EVENTS"; return 98
+}
+${fns}
+action_${action.replace(/-/g, '_')}
+`
+  const result = spawnSync('bash', ['-c', script], { encoding: 'utf8', env: { PATH: process.env.PATH, HARNESS_SPEC: spec } })
+  const log = existsSync(events) ? readFileSync(events, 'utf8') : ''
+  const sqlBlocks = [...log.matchAll(/PSQL container=(\S+) env=\[([^\]]*)\] args=\[([^\]]*)\]\n<<<SQL\n([\s\S]*?)\nSQL>>>/g)]
+    .map((m) => ({ container: m[1], env: m[2], args: m[3], sql: m[4] }))
+  const read = (name) => (existsSync(join(outDir, name)) ? readFileSync(join(outDir, name), 'utf8') : '')
+  return { ...result, log, sqlBlocks, read, dir }
+}
+
+const WRITE_KEYWORDS = /\b(?:INSERT|UPDATE|DELETE|MERGE|ALTER|DROP|CREATE|TRUNCATE|GRANT|REVOKE|COPY|VACUUM|REINDEX|CLUSTER|LOCK|COMMIT|CALL)\b|\bSET\s+(?!LOCAL TIME ZONE '')|\bDO\s+\$|\bset_config\b|\bnextval\b/i
+
+function assertReadOnlySql(sql, label) {
+  const lines = sql.split('\n')
+  assert.equal(lines[0], '\\set VERBOSITY terse', `${label}: terse errors first`)
+  assert.equal(lines[1], 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;', `${label}: READ ONLY transaction`)
+  assert.equal(lines[lines.length - 1], 'ROLLBACK;', `${label}: rolled back, never committed`)
+  const body = lines.slice(2, -1).join('\n').replace(/'(?:[^']|'')*'/g, "''")
+  const hit = body.match(WRITE_KEYWORDS)
+  assert.equal(hit, null, `${label}: read-only SQL must not contain ${hit?.[0]}`)
+}
+
+test('org-membership: the read-only scan catches a write (positive control) and the repair write SQL trips it', () => {
+  const bad = ['\\set VERBOSITY terse', 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;', "UPDATE users SET is_active = FALSE WHERE id = 'x';", 'ROLLBACK;'].join('\n')
+  assert.throws(() => assertReadOnlySql(bad, 'injected'), /must not contain UPDATE/)
+  const write = runLibFunction('org_membership_repair_write_sql "AND i.org_id IS NULL"')
+  assert.equal(write.status, 0, write.stderr)
+  assert.match(write.stdout.replace(/'(?:[^']|'')*'/g, "''"), WRITE_KEYWORDS, 'the write SQL is a write (the scan is not vacuous)')
+})
+
+test('org-membership EXECUTABLE: inspect only ever runs READ ONLY rolled-back SQL with default_transaction_read_only, never dumps, never writes', () => {
+  const r = orgfixHarness({ action: 'org-membership-inspect', noRowBefore: 1 })
+  assert.equal(r.status, 0, `inspect must succeed: ${r.stderr}\n${r.log}`)
+  assert.ok(r.sqlBlocks.length >= 5, `expected predicate probe + counters + column probe + users + orgs, got ${r.sqlBlocks.length}`)
+  for (const [k, block] of r.sqlBlocks.entries()) {
+    assert.equal(block.container, 'metasheet-staging-postgres', 'only the staging postgres container')
+    assert.equal(block.env, 'PGOPTIONS=-c default_transaction_read_only=on', `query ${k}: session must default to read-only`)
+    assert.match(block.args, /^psql -X -q -tA -v ON_ERROR_STOP=1 -v VERBOSITY=terse -U pguser -d pgdb/)
+    assertReadOnlySql(block.sql, `inspect query ${k}`)
+  }
+  assert.doesNotMatch(r.log, /PG_DUMP|WRITE|UNEXPECTED|UNMATCHED/)
+  const summary = r.read('summary.txt')
+  assert.match(summary, /^action=org-membership-inspect$/m)
+  assert.match(summary, /^matched_users=1$/m)
+  assert.match(summary, /^zero_membership_no_row_count=1$/m)
+  assert.match(summary, /^org id=default spec_nameable=yes active_members=3$/m)
+  assert.match(summary, new RegExp(`^user fp=${ORGFIX_FP} .* migrate_gate_after_add=pass migrate_gate_after_deactivate=pass$`, 'm'))
+  assert.match(summary, /^migrate_gate_now=blocked \(assumes the Recovery09 migrations are already applied\)$/m)
+})
+
+test('org-membership EXECUTABLE: inspect projects the migrate gate per mode with main\'s rule (k class-6-shaped requests stay on deactivate)', () => {
+  // class6_candidate_count=2, all of them this user's (k=2): add-membership clears both, deactivate
+  // leaves them, so only add-membership unblocks.
+  const own = orgfixHarness({ action: 'org-membership-inspect', noRowBefore: 1, class6: 2, k: 2 })
+  assert.equal(own.status, 0, own.stderr)
+  assert.match(own.read('summary.txt'), /migrate_gate_after_add=pass migrate_gate_after_deactivate=blocked$/m)
+  // another requester holds one more class-6 row (class6=3, k=2): neither mode unblocks.
+  const other = orgfixHarness({ action: 'org-membership-inspect', noRowBefore: 1, class6: 3, k: 2 })
+  assert.match(other.read('summary.txt'), /migrate_gate_after_add=blocked migrate_gate_after_deactivate=blocked$/m)
+  // a second no-row user keeps recovery09_repairable_user_count above 0 after one repair.
+  const two = orgfixHarness({ action: 'org-membership-inspect', noRowBefore: 2 })
+  assert.match(two.read('summary.txt'), /migrate_gate_after_add=blocked migrate_gate_after_deactivate=blocked$/m)
+})
+
+test('org-membership: the migrate-gate rule matches action_migrate_read_only_prechecks with Recovery09 applied', () => {
+  const rule = (...args) => runLibFunction(`org_membership_migrate_gate_rule ${args.map((a) => `'${a}'`).join(' ')}`).stdout
+  assert.equal(rule(0, 0, 4, 0, 0), 'pass', 'nothing to repair')
+  assert.equal(rule(0, 0, 4, 1, 0), 'blocked', 'a repairable user on a multi-org DB')
+  assert.equal(rule(0, 0, 4, 0, 1), 'blocked', 'a class-6 candidate on a multi-org DB')
+  assert.equal(rule(0, 0, 1, 3, 5), 'pass', 'a single-org DB skips the multi-org branch')
+  assert.equal(rule(1, 0, 1, 0, 0), 'blocked', 'invalid approval actions always fail')
+  assert.equal(rule(0, 1, 1, 0, 0), 'blocked', 'attachment org conflicts always fail')
+  assert.equal(rule(0, 0, 4, 0, 'n/a'), 'unknown')
+  // the precheck's own conditions, read from the remote script (positive control that the rule
+  // is the one action=migrate applies)
+  const precheck = executableLines(extractRunnerFunctions(['action_migrate_read_only_prechecks']))
+  assert.match(precheck, /if \[\[ "\$repairable_users" -gt 0 \|\| "\$class6" -gt 0 \]\]; then\n\s+if \[\[ "\$active_orgs" != "1" \]\]; then/)
+  assert.match(precheck, /\[\[ "\$invalid" == "0" \]\] \|\| fail/)
+  assert.match(precheck, /\[\[ "\$conflicts" == "0" \]\] \|\| fail/)
+})
+
+test('org-membership EXECUTABLE: repair aborts on 0 and on >1 fingerprint matches — no backup, no write', () => {
+  for (const match of [0, 2]) {
+    for (const spec of [`deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM}`, `add-membership:${ORGFIX_FP}:default:${ORGFIX_CONFIRM}`]) {
+      const r = orgfixHarness({ action: 'org-membership-repair', spec, match, noRowBefore: 2 })
+      assert.equal(r.status, 1, `match=${match}: must refuse`)
+      assert.match(r.log, /match_count=/, 'positive control: the precheck ran')
+      assert.match(r.stderr, new RegExp(`repair refused: ${match} active no-row user\\(s\\) match fp=${ORGFIX_FP} \\(exactly 1 required\\); no backup taken, nothing written`))
+      assert.doesNotMatch(r.log, /PG_DUMP/, `match=${match}: no backup`)
+      assert.doesNotMatch(r.log, /WRITE/, `match=${match}: no write`)
+      for (const block of r.sqlBlocks) assertReadOnlySql(block.sql, `refused-repair query (match=${match})`)
+    }
+  }
+})
+
+test('org-membership EXECUTABLE: a spec fp that matches no user is refused before backup and write (the precheck filters by the named fp)', () => {
+  const otherFp = 'fedcba9876543210'
+  for (const spec of [`deactivate:${otherFp}:${ORGFIX_CONFIRM}`, `add-membership:${otherFp}:default:${ORGFIX_CONFIRM}`]) {
+    // exactly one active no-row user exists, but its fp is ORGFIX_FP, not the one named
+    const r = orgfixHarness({ action: 'org-membership-repair', spec, match: 1, noRowBefore: 1 })
+    assert.equal(r.status, 1, `must refuse: ${r.stderr}`)
+    assert.match(r.stderr, new RegExp(`repair refused: 0 active no-row user\\(s\\) match fp=${otherFp}`))
+    assert.doesNotMatch(r.log, /PG_DUMP|WRITE/)
+    const pre = r.sqlBlocks.find((block) => block.sql.includes("'match_count='"))
+    assert.ok(pre, 'precheck sent')
+    assert.match(pre.args, new RegExp(` -v fp=${otherFp} `), 'the named fp is what psql receives')
+  }
+  // positive control: the same harness with the user's own fp proceeds to the write
+  const ok = orgfixHarness({ action: 'org-membership-repair', spec: `deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM}`, match: 1, noRowBefore: 1 })
+  assert.equal(ok.status, 0, ok.stderr)
+  assert.match(ok.log, /\nWRITE\n/)
+  assert.match(ok.read('summary.txt'), /^migrate_gate_after=pass \(assumes the Recovery09 migrations are already applied\)$/m, 'the last no-row user repaired: the gate passes')
+})
+
+test('org-membership EXECUTABLE: add-membership into an org without active members is refused before backup and write, without echoing the org value', () => {
+  const r = orgfixHarness({ action: 'org-membership-repair', spec: `add-membership:${ORGFIX_FP}:org-x:${ORGFIX_CONFIRM}`, match: 1, orgMembers: 0 })
+  assert.equal(r.status, 1)
+  assert.match(r.stderr, /the named org has no active members/)
+  assert.ok(!r.stderr.includes('org-x') && !r.stdout.includes('org-x'), 'an org that did not resolve is not echoed')
+  assert.doesNotMatch(r.log, /PG_DUMP|WRITE/)
+})
+
+test('org-membership EXECUTABLE: a user with applied directory deprovision evidence is refused before backup and write (both modes)', () => {
+  for (const spec of [`deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM}`, `add-membership:${ORGFIX_FP}:default:${ORGFIX_CONFIRM}`]) {
+    const r = orgfixHarness({ action: 'org-membership-repair', spec, match: 1, evidence: '2' })
+    assert.equal(r.status, 1, r.stderr)
+    assert.match(r.stderr, /applied directory deprovision evidence \(count 2\)/)
+    assert.doesNotMatch(r.log, /PG_DUMP|WRITE/)
+  }
+  const na = orgfixHarness({ action: 'org-membership-repair', spec: `deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM}`, match: 1, evidence: 'n/a' })
+  assert.equal(na.status, 0, `without the ledger tables there is no evidence: ${na.stderr}`)
+})
+
+test('org-membership EXECUTABLE: a failed or empty pg_dump stops the repair before the write', () => {
+  for (const dump of ['fail-partial', 'empty']) {
+    const r = orgfixHarness({ action: 'org-membership-repair', spec: `deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM}`, match: 1, dump })
+    assert.equal(r.status, 1, `${dump}: must stop`)
+    assert.match(r.log, /PG_DUMP/, `${dump}: positive control, the dump was attempted`)
+    assert.doesNotMatch(r.log, /WRITE/, `${dump}: no write after a failed backup`)
+    assert.equal(r.read('org-membership-repair-backup.txt'), '', `${dump}: no backup metadata recorded`)
+  }
+})
+
+test('org-membership EXECUTABLE: an unconfirmed commit and an after-COMMIT counter mismatch are failures, never result=ok', () => {
+  const spec = `deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM}`
+  const noMarker = orgfixHarness({ action: 'org-membership-repair', spec, match: 1, commitMarker: false })
+  assert.equal(noMarker.status, 1)
+  assert.match(noMarker.stderr, /did not report a commit; re-run action=org-membership-inspect before retrying/)
+  assert.match(noMarker.read('summary.txt'), /^result=commit_unconfirmed$/m)
+  assert.doesNotMatch(noMarker.read('summary.txt'), /^result=ok$/m)
+  const aborted = orgfixHarness({ action: 'org-membership-repair', spec, match: 1, writeFails: true })
+  assert.equal(aborted.status, 1)
+  assert.match(aborted.stderr, /ORGFIX_ABORT \.\.\., METASHEET_RECOVERY_AUTHORITY_BUSY, or a lock\/deadlock\/statement timeout/)
+  assert.doesNotMatch(aborted.stderr, /nothing changed/, 'an unconfirmed outcome is not claimed as a rollback')
+  assert.match(aborted.read('summary.txt'), /^result=commit_unconfirmed$/m)
+  const stuck = orgfixHarness({ action: 'org-membership-repair', spec, match: 1, afterMoves: false, noRowBefore: 2 })
+  assert.equal(stuck.status, 1)
+  assert.match(stuck.stderr, /post-commit zero_membership_no_row_count is 2, expected 1/)
+  assert.match(stuck.read('summary.txt'), /^result=post_commit_mismatch$/m)
+  assert.doesNotMatch(stuck.read('summary.txt'), /^result=ok$/m)
+})
+
+test('org-membership EXECUTABLE: repair takes the full backup before the one write, then re-measures; metadata is file name + size + sha256 only', () => {
+  for (const [spec, mode, org] of [
+    [`deactivate:${ORGFIX_FP}:${ORGFIX_CONFIRM}`, 'deactivate', ''],
+    [`add-membership:${ORGFIX_FP}:default:${ORGFIX_CONFIRM}`, 'add-membership', 'default'],
+  ]) {
+    const r = orgfixHarness({ action: 'org-membership-repair', spec, match: 1, noRowBefore: 3 })
+    assert.equal(r.status, 0, `${mode}: ${r.stderr}\n${r.log}`)
+    const precheck = r.log.indexOf('match_count=')
+    const dump = r.log.indexOf('PG_DUMP container=metasheet-staging-postgres')
+    const write = r.log.indexOf('\nWRITE\n')
+    const after = r.log.indexOf('SELECT line FROM (', write)
+    assert.ok(precheck > 0 && dump > 0 && write > 0, `${mode}: precheck, dump and write all happened`)
+    assert.ok(precheck < dump, `${mode}: read-only preconditions precede the backup`)
+    assert.ok(dump < write, `${mode}: the backup precedes the write`)
+    assert.ok(after > write, `${mode}: counters are re-measured after the write`)
+    assert.equal((r.log.match(/\nWRITE\n/g) || []).length, 1, `${mode}: exactly one write transaction`)
+    const writeBlock = r.sqlBlocks.find((block) => block.sql.includes('-- window-runner:org-membership-repair-write'))
+    assert.ok(writeBlock, 'write SQL was sent')
+    assert.equal(writeBlock.env, '', 'the write session does not carry the read-only PGOPTIONS')
+    assert.match(writeBlock.args, new RegExp(`-v mode=${mode} -v fp=${ORGFIX_FP} -v org=${org}$`))
+    for (const block of r.sqlBlocks.filter((b) => b !== writeBlock)) assertReadOnlySql(block.sql, `${mode} non-write query`)
+    const backup = r.read('org-membership-repair-backup.txt')
+    assert.match(backup, /^file=staging-\d{8}T\d{6}Z-pre-org-membership-repair\.dump$/m)
+    assert.match(backup, /^bytes=15$/m)
+    assert.match(backup, /^sha256=[0-9a-f]{64}$/m)
+    assert.doesNotMatch(backup, /\/|pg_user|pg_db|pguser|pgdb/, 'no path, no credentials in the artifact')
+    const summary = r.read('summary.txt')
+    assert.match(summary, /^zero_membership_no_row_count_before=3$/m)
+    assert.match(summary, /^zero_membership_no_row_count_after=2$/m)
+    assert.match(summary, /^result=ok$/m)
+    assert.match(summary, /^migrate_gate_after=blocked \(assumes the Recovery09 migrations are already applied\)$/m)
+    assert.doesNotMatch(summary, /\/|pguser|pgdb/)
+  }
+})
+
+// The population, whitespace-normalized; every statement that selects it is pinned to it exactly
+// (no `AND uo.is_active` inside the NOT EXISTS: that would be zero_membership_active_user_count).
+const ORGFIX_POPULATION = 'u.is_active = TRUE AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)'
+const normalizeSql = (text) => text.replace(/\s+/g, ' ').trim()
+// The statement starting at `head` (which must occur exactly once), up to its terminating `;`.
+function sqlStatement(sql, head) {
+  const at = sql.indexOf(head)
+  assert.ok(at >= 0, `statement found: ${head}`)
+  assert.equal(sql.indexOf(head, at + 1), -1, `statement is unique: ${head}`)
+  return sql.slice(at, sql.indexOf(';', at))
+}
+// Every needle present (never -1), each after the previous one.
+function assertInOrder(text, needles, label) {
+  let last = -1
+  for (const needle of needles) {
+    const at = text.indexOf(needle)
+    assert.ok(at >= 0, `${label}: ${needle} must be present`)
+    assert.ok(at > last, `${label}: ${needle} must come after the previous step`)
+    last = at
+  }
+}
+
+test('org-membership: the population predicate and the named-fp clause are pinned per statement (inspect, precheck, evidence, in-transaction re-check)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wr-orgfix-pop-'))
+  const present = join(dir, 'present.txt')
+  writeFileSync(present, 'directory_deprovision_events.local_user_id\ndirectory_deprovision_events.status\n')
+  const pre = runLibFunction(`org_membership_repair_precheck_sql '${present}'`)
+  assert.equal(pre.status, 0, pre.stderr)
+  assert.equal(normalizeSql(sqlStatement(pre.stdout, "SELECT 'predicate_count='")), `SELECT 'predicate_count=' || count(*)::text FROM users u WHERE ${ORGFIX_POPULATION}`)
+  assert.equal(normalizeSql(sqlStatement(pre.stdout, "SELECT 'match_count='")), `SELECT 'match_count=' || count(*)::text FROM users u WHERE ${ORGFIX_POPULATION} AND left(md5(u.id), 16) = :'fp'`)
+  assert.match(normalizeSql(sqlStatement(pre.stdout, "SELECT 'applied_deprovision_evidence='")), new RegExp(`FROM users u WHERE ${ORGFIX_POPULATION.replace(/[()*]/g, '\\$&')} AND left\\(md5\\(u\\.id\\), 16\\) = :'fp'$`))
+  const users = runLibFunction(`org_membership_inspect_users_sql '${present}' ''`)
+  assert.equal(users.status, 0, users.stderr)
+  assert.ok(normalizeSql(users.stdout).endsWith(`FROM users u WHERE ${ORGFIX_POPULATION} ORDER BY left(md5(u.id), 16);`), 'inspect lists exactly the population')
+  // and it is the migrate precheck's zero_membership_no_row_count population
+  const counters = runLibFunction("target_precheck_counters_sql ''")
+  assert.ok(normalizeSql(counters.stdout).includes(`SELECT 5, 'zero_membership_no_row_count=' || count(*)::text FROM users u WHERE ${ORGFIX_POPULATION} UNION ALL`))
+  // positive control: the per-statement pin sees a drifted predicate
+  const drifted = pre.stdout.replace("WHERE uo.user_id = u.id)\n   AND left(md5(u.id), 16) = :'fp';", "WHERE uo.user_id = u.id AND uo.is_active = TRUE)\n   AND left(md5(u.id), 16) = :'fp';")
+  assert.notEqual(drifted, pre.stdout, 'positive control applied')
+  assert.notEqual(normalizeSql(sqlStatement(drifted, "SELECT 'match_count='")), `SELECT 'match_count=' || count(*)::text FROM users u WHERE ${ORGFIX_POPULATION} AND left(md5(u.id), 16) = :'fp'`)
+})
+
+test('org-membership: every RAISE in the write SQL carries only count / label arguments (terse prints them), with a positive control', () => {
+  const r = runLibFunction('org_membership_repair_write_sql "AND i.org_id IS NULL"')
+  assert.equal(r.status, 0, r.stderr)
+  const ALLOWED = new Set(['v_matches', 'v_rows', 'v_evidence', 'v_n_before', 'v_n_after', 'r.label', 'v_expected', 'r.after_value::bigint - r.before_value::bigint'])
+  const raiseArgs = (sql) => {
+    const out = []
+    for (const m of sql.matchAll(/RAISE\s+(?:EXCEPTION|NOTICE|WARNING|INFO|LOG|DEBUG)\s+'(?:[^']|'')*'\s*((?:,[^;]*)?);/g)) {
+      if (!m[1]) continue
+      for (const arg of m[1].replace(/^,/, '').split(/,(?![^(]*\))/)) out.push(normalizeSql(arg))
+    }
+    return out
+  }
+  const args = raiseArgs(r.stdout)
+  assert.ok(args.length >= 6, `RAISE arguments found: ${args.length}`)
+  for (const arg of args) assert.ok(ALLOWED.has(arg), `RAISE argument not on the count/label allowlist: ${arg}`)
+  // RAISE ... USING (MESSAGE/DETAIL/HINT) is not used at all
+  assert.doesNotMatch(r.stdout, /RAISE[^;]*\bUSING\b/)
+  // positive control
+  const leaked = raiseArgs("RAISE EXCEPTION 'ORGFIX_ABORT x=%', v_ids[1];")
+  assert.deepEqual(leaked, ['v_ids[1]'])
+  assert.ok(!ALLOWED.has(leaked[0]))
+  // terse is on the psql command line of every org-membership psql call, not only in stdin
+  const remote = executableLines(readFileSync(REMOTE_SH, 'utf8'))
+  const section = remote.slice(remote.indexOf('orgfix_assert_staging_postgres() {'), remote.indexOf('soak_validate_opts() {'))
+  const psqlLines = section.split('\n').filter((line) => /\bpsql -X\b/.test(line))
+  assert.equal(psqlLines.length, 2, 'the read-only wrapper and the write call')
+  for (const line of psqlLines) assert.match(line, /psql -X -q -tA -v ON_ERROR_STOP=1 -v VERBOSITY=terse /)
+})
+
+test('org-membership: the write transaction guards exactly one matching user, exactly one written row and the full counter delta vector before COMMIT', () => {
+  const r = runLibFunction('org_membership_repair_write_sql "AND i.org_id IS NULL"')
+  assert.equal(r.status, 0, r.stderr)
+  const sql = r.stdout
+  const lines = sql.split('\n')
+  assert.equal(lines[0], '\\set VERBOSITY terse', 'terse errors: no DETAIL line can print a key value')
+  assert.equal((sql.match(/^BEGIN;$/gm) || []).length, 1, 'one transaction')
+  assert.equal((sql.match(/^COMMIT;$/gm) || []).length, 1, 'one commit')
+  // Lock order (the app's): the matching user row first, then user_orgs, then the before-snapshot.
+  assertInOrder(sql, [
+    "FROM (SELECT 1 FROM users u WHERE left(md5(u.id), 16) = :'fp' FOR UPDATE) locked;",
+    'LOCK TABLE user_orgs IN SHARE ROW EXCLUSIVE MODE;',
+    'CREATE TEMP TABLE orgfix_before',
+  ], 'locks before the before-snapshot')
+  // The in-transaction re-check: population AND the named fp, in that one statement.
+  const recheck = sqlStatement(sql, 'SELECT array_agg(u.id) INTO v_ids')
+  assert.equal(normalizeSql(recheck), `SELECT array_agg(u.id) INTO v_ids FROM users u WHERE ${ORGFIX_POPULATION} AND left(md5(u.id), 16) = v_fp`)
+  assert.match(sql, /IF v_matches <> 1 THEN\n\s+RAISE EXCEPTION 'ORGFIX_ABORT match_count=% \(exactly 1 required\)', v_matches;/)
+  assert.match(sql, /IF v_evidence <> 0 THEN\n\s+RAISE EXCEPTION 'ORGFIX_ABORT applied_deprovision_evidence=%/)
+  assert.match(sql, /GET DIAGNOSTICS v_rows = ROW_COUNT;\n\s+IF v_rows <> 1 THEN\n\s+RAISE EXCEPTION 'ORGFIX_ABORT write_row_count=%/)
+  assert.match(sql, /IF NOT EXISTS \(SELECT 1 FROM user_orgs WHERE org_id = v_org AND is_active = TRUE\) THEN\n\s+RAISE EXCEPTION 'ORGFIX_ABORT org_has_no_active_members';/)
+  // The only writes: one INSERT (static) and one UPDATE users (dynamic, for the optional
+  // columns), each of exactly one row by id.
+  const body = sql.replace(/'(?:[^']|'')*'/g, "''")
+  const writes = [...body.matchAll(/(?<!FOR )\b(UPDATE|INSERT INTO|DELETE FROM|TRUNCATE)\b[^;]*;/g)].map((m) => m[0].replace(/\s+/g, ' '))
+  assert.deepEqual(writes, ['INSERT INTO user_orgs (user_id, org_id, is_active) VALUES (v_ids[1], v_org, TRUE);'])
+  const executes = [...sql.matchAll(/^\s*EXECUTE ([^;]*);/gm)].map((m) => normalizeSql(m[1]))
+  assert.deepEqual(executes, [
+    "'SELECT count(*) FROM approval_instances i WHERE i.requester_snapshot->>''id'' = $1 ' || current_setting('window_runner.orgfix_shaped') INTO v_shaped USING v_ids[1]",
+    "'SELECT count(*) FROM directory_deprovision_events WHERE local_user_id = $1 AND status = ''applied''' INTO v_n USING v_ids[1]",
+    "'SELECT count(*) FROM directory_deprovision_effects WHERE local_user_id = $1 AND status = ''applied''' INTO v_n USING v_ids[1]",
+    "'UPDATE users SET ' || v_set || ' WHERE id = $1 AND is_active = TRUE' USING v_ids[1]",
+  ], 'the only dynamic statements; the UPDATE is by id, bound as $1')
+  // v_set is built from fixed fragments only
+  assert.deepEqual([...sql.matchAll(/^\s*v_set := (.*);$/gm)].map((m) => m[1]), [
+    "'is_active = FALSE'",
+    "v_set || ', updated_at = now()'",
+    "v_set || ', access_generation = COALESCE(access_generation, 0) + 1'",
+  ])
+  // Counters are snapshotted from the shared generator before and after the write, and the delta
+  // vector names every counter that may move; anything else must stay put.
+  assert.equal((sql.match(/'zero_membership_no_row_count=' \|\| count\(\*\)::text/g) || []).length, 2, 'before + after snapshots')
+  assertInOrder(sql, ['CREATE TEMP TABLE orgfix_before', 'DO $orgfix_write$', 'CREATE TEMP TABLE orgfix_after', 'DO $orgfix_check$', '\nCOMMIT;'], 'snapshot / write / snapshot / check / commit')
+  for (const delta of [
+    "WHEN 'zero_membership_active_user_count' THEN -1",
+    "WHEN 'zero_membership_no_row_count' THEN -1",
+    "WHEN 'recovery09_repairable_user_count' THEN -1",
+    "WHEN 'class6_candidate_count' THEN CASE WHEN v_mode = 'add-membership' THEN -v_shaped ELSE 0 END",
+    "WHEN 'recovery09_unsupported_class6_count' THEN CASE WHEN v_mode = 'deactivate' THEN v_shaped ELSE 0 END",
+    "WHEN 'legacy_anchor_active_membership_witness_count' THEN CASE WHEN v_mode = 'add-membership' AND v_org = 'default' THEN 1 ELSE 0 END",
+    'ELSE 0',
+  ]) {
+    assert.ok(sql.includes(delta), `delta vector must include: ${delta}`)
+  }
+  assert.match(sql, /RAISE EXCEPTION 'ORGFIX_ABORT counter_delta_mismatch label=% expected=% actual=%'/)
+  // the checks themselves, exactly (the real-PG cell evaluates them; these pin the text in CI)
+  assert.match(sql, /\n {4}IF r\.after_value::bigint - r\.before_value::bigint <> v_expected THEN\n {6}RAISE EXCEPTION 'ORGFIX_ABORT counter_delta_mismatch/)
+  assert.match(sql, /\n {4}IF r\.after_value IS NULL THEN\n {6}RAISE EXCEPTION 'ORGFIX_ABORT counter_missing_after/)
+  assert.match(sql, /\n {6}IF r\.before_value <> r\.after_value THEN\n {8}RAISE EXCEPTION 'ORGFIX_ABORT counter_changed/)
+  assert.match(sql, /\n {2}IF v_n_before = 0 OR v_n_before <> v_n_after THEN\n {4}RAISE EXCEPTION 'ORGFIX_ABORT counter_set_mismatch/)
+  // An unsupported predicate is refused rather than interpolated.
+  const bad = runLibFunction('rc=0; org_membership_repair_write_sql "OR 1=1" >/dev/null || rc=$?; echo "rc=$rc"')
+  assert.equal(bad.stdout, 'rc=1\n')
+})
+
+test('org-membership: values-free — no raw id/username/email/name reaches any SELECT list or any echo/printf/log line (static scan, with positive controls)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wr-orgfix-scan-'))
+  const present = join(dir, 'present.txt')
+  writeFileSync(present, ['users.username', 'users.email', 'users.created_at', 'users.is_admin', 'users.role', 'users.last_login_at', 'user_roles.user_id', 'user_roles.role_id', 'approval_instances.requester_snapshot', 'tasks.created_by', 'task_assignees.user_id', 'meta_records.created_by', 'user_external_identities.local_user_id', 'directory_account_links.local_user_id', 'directory_deprovision_events.local_user_id', 'directory_deprovision_events.status', 'directory_deprovision_effects.local_user_id', 'directory_deprovision_effects.status'].join('\n') + '\n')
+  const gen = runLibFunction(`org_membership_inspect_users_sql '${present}' 'AND i.org_id IS NULL'; echo '-- split'; org_membership_inspect_orgs_sql; echo '-- split'; org_membership_repair_precheck_sql '${present}'; echo '-- split'; org_membership_repair_write_sql 'AND i.org_id IS NULL'`)
+  assert.equal(gen.status, 0, gen.stderr)
+  // u / x are the users-table aliases in every generated statement.
+  const IDENTITY_REF = /\b[ux]\.(id|username|email|name)\b/g
+  // A reference is allowed only inside md5(...), inside starts_with(COALESCE(...)), or as one
+  // side of an equality/IN comparison. Everything else would be an output column.
+  const scanSql = (sql) => {
+    const offenders = []
+    for (const line of sql.split('\n')) {
+      const stripped = line
+        .replace(/md5\([a-z]{1,2}\.[a-z_]+\)/g, 'md5(_)')
+        .replace(/starts_with\(COALESCE\([a-z]{1,2}\.[a-z_]+, ''\)/g, 'starts_with(_')
+        .replace(/[a-z]{1,2}\.(id|username|email|name|user_id|local_user_id|created_by)\s*=\s*(\$1|v_ids\[1\]|[a-z]{1,2}\.[a-z_]+|i\.requester_snapshot->>'id')/g, '_ = _')
+        .replace(/(=|<>)\s*[a-z]{1,2}\.(id|username|email|name|user_id|local_user_id|created_by)\b/g, '= _')
+        .replace(/i\.requester_snapshot->>'id'\s*=\s*[a-z]{1,2}\.id/g, '_ = _')
+        .replace(/array_agg\(u\.id\) INTO v_ids/g, 'array_agg(_) INTO v_ids')
+      if (IDENTITY_REF.test(stripped)) offenders.push(line.trim())
+      IDENTITY_REF.lastIndex = 0
+    }
+    return offenders
+  }
+  assert.deepEqual(scanSql(gen.stdout), [], 'generated SQL must only compare or fingerprint identity columns')
+  // every inspect output column is a literal label: the SELECT starts with 'user' and each piece
+  // is "|| ' <label>=' || <expr>"
+  const usersSql = gen.stdout.split('-- split')[0]
+  const pieces = usersSql.split('\n').filter((line) => line.trim().startsWith("|| '"))
+  assert.ok(pieces.length >= 18, 'inspect builds one labelled line per user')
+  for (const piece of pieces) assert.match(piece, /^\s+\|\| ' [a-z0-9_]+=' \|\| /, `unlabelled output piece: ${piece}`)
+  // positive controls: an output column with a raw id or email is caught
+  assert.notDeepEqual(scanSql("SELECT 'user id=' || u.id FROM users u;"), [])
+  assert.notDeepEqual(scanSql("SELECT u.email, left(md5(u.id), 16) FROM users u;"), [])
+
+  // Bash side: the new remote code never prints an identity-shaped variable.
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const sectionStart = remote.indexOf('# --- staging org-membership inspect / repair')
+  const section = remote.slice(sectionStart, remote.indexOf('# --- W4+W7 combined-soak (#4556) helpers + actions', sectionStart))
+  assert.ok(section.length > 1000, 'org-membership section found')
+  const PRINT_IDENTITY = /\b(echo|printf|log|fail)\b[^\n]*(\$\{?(user_?id|uid|username|email|name|ids?|user)\b|u\.(id|email|username|name)\b)/
+  const printOffenders = executableLines(section).split('\n').filter((line) => PRINT_IDENTITY.test(line))
+  assert.deepEqual(printOffenders, [], 'no echo/printf/log/fail of an identity variable')
+  assert.ok(PRINT_IDENTITY.test('  echo "user=${user_id}"'), 'positive control: an echoed user id is caught')
+  assert.ok(PRINT_IDENTITY.test('  log "email=$email"'), 'positive control: a logged email is caught')
+  // The malformed-spec refusals never print the value back.
+  for (const line of executableLines(section).split('\n').filter((l) => /REPAIR_SPEC/.test(l) && /\b(echo|printf|log|fail)\b/.test(l))) {
+    assert.doesNotMatch(line, /\$\{?REPAIR_SPEC/, `the spec value must not be printed: ${line.trim()}`)
+  }
+})
+
+test('org-membership: neither action can reach the production stack or the app containers — staging postgres only, no compose, no backend exec', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const sectionStart = remote.indexOf('# --- staging org-membership inspect / repair')
+  const section = executableLines(remote.slice(sectionStart, remote.indexOf('# --- W4+W7 combined-soak (#4556) helpers + actions', sectionStart)))
+  assert.ok(section.length > 1000, 'org-membership section found')
+  assert.doesNotMatch(section, /compose_staging|docker compose|docker-compose|staging_exec|BACKEND_CONTAINER|WEB_CONTAINER|REDIS_CONTAINER|PROD_REPO_DIR|DEPLOY_PATH/)
+  assert.doesNotMatch(section, /metasheet-(backend|web|postgres|redis)\b/, 'no prod-track container name')
+  const dockerLines = section.split('\n').filter((line) => /\bdocker (exec|run|start|stop|restart|rm|cp)\b/.test(line))
+  assert.ok(dockerLines.length >= 2, 'the section does call docker exec')
+  for (const line of dockerLines) assert.match(line, /docker exec (-i )?(-e 'PGOPTIONS=-c default_transaction_read_only=on' )?"\$POSTGRES_CONTAINER"/, `docker call must target the staging postgres only: ${line.trim()}`)
+  assert.match(section, /\[\[ "\$POSTGRES_CONTAINER" == "metasheet-staging-postgres" \]\]/)
+  assert.match(section, /grep -q "container_name: \$\{POSTGRES_CONTAINER\}" "\$STAGING_COMPOSE_FILE"/)
+  // the inspect action body never reaches the write path
+  const inspect = executableLines(extractRunnerFunctions(['action_org_membership_inspect']))
+  assert.doesNotMatch(inspect, /staging_db_dump|org_membership_repair_write_sql|psql -X -q -tA -v ON_ERROR_STOP=1 -U "\$pg_user" -d "\$pg_db" \\\n/)
+  assert.doesNotMatch(inspect, /docker exec/, 'inspect only reaches postgres through the read-only wrapper')
+})
+
+test('org-membership: the migrate prechecks and both org-membership actions measure the SAME counter generator; the repair backup is the migrate pg_dump', () => {
+  const precheck = executableLines(extractRunnerFunctions(['action_migrate_read_only_prechecks']))
+  assert.match(precheck, /precheck_sql="\$\(target_precheck_counters_sql "\$org_null_predicate"\)"/)
+  assert.doesNotMatch(precheck, /SELECT 'zero_membership_no_row_count='/, 'no inline copy of the counter SQL left in the precheck')
+  const counters = executableLines(extractRunnerFunctions(['orgfix_counters']))
+  assert.match(counters, /sql="\$\(target_precheck_counters_sql "\$predicate"\)"/)
+  const gen = runLibFunction("target_precheck_counters_sql ''; echo '-- split'; target_precheck_counters_sql 'AND i.org_id IS NULL'")
+  assert.equal(gen.status, 0, gen.stderr)
+  const labels = [...gen.stdout.split('-- split')[0].matchAll(/SELECT (\d+)(?: AS ord)?, '([a-z0-9_]+)='/g)].map((m) => [Number(m[1]), m[2]])
+  assert.deepEqual(labels.map(([n]) => n), [...Array(13).keys()].map((k) => k + 1), 'counters keep their order')
+  // every label the precheck parses is produced by the generator
+  for (const parsed of precheck.matchAll(/sed -n 's\/\^([a-z0-9_]+)=\/\/p'/g)) {
+    assert.ok(labels.some(([, label]) => label === parsed[1]), `generator must produce ${parsed[1]}`)
+  }
+  assert.equal(gen.stdout.split('-- split')[1].match(/AND i\.org_id IS NULL/g).length, 3, 'the org_id predicate lands in all three approval_instances counters')
+  assert.equal((gen.stdout.split('-- split')[0].match(/org_id IS NULL/g) || []).length, 0, 'and nowhere without it')
+  assert.equal(runLibFunction("rc=0; target_precheck_counters_sql 'OR TRUE' || rc=$?; echo rc=$rc").stdout, 'rc=1\n', 'an unknown predicate is refused')
+  // one pg_dump in the whole runner, shared by migrate and the repair
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const dumpCalls = executableLines(remote).split('\n').filter((line) => /\bpg_dump -Fc\b/.test(line) && !/\blog\b/.test(line))
+  assert.deepEqual(dumpCalls.map((line) => line.trim()), ['docker exec "$POSTGRES_CONTAINER" pg_dump -Fc -U "$pg_user" "$pg_db" > "$dump_path"'])
+  assert.match(executableLines(extractRunnerFunctions(['action_migrate_backup'])), /staging_db_dump "\$MIGRATE_BACKUP_PATH" "\$pg_user" "\$pg_db" "\$MIGRATE_BACKUP_PATH"/)
+  const repair = executableLines(extractRunnerFunctions(['action_org_membership_repair']))
+  assert.match(repair, /staging_db_dump "\$dump_path" "\$pg_user" "\$pg_db" "\$dump_name"/)
+  assert.ok(repair.indexOf('staging_db_dump') < repair.indexOf('org_membership_repair_write_sql'), 'backup before the write SQL is even built')
+  // staging_db_dump must not be called in an errexit-suppressing context
+  assert.doesNotMatch(remote, /(if !?|\|\||&&)\s*staging_db_dump\b|staging_db_dump[^\n]*(\|\||&&)/)
+})
+
+test('org-membership: the synthetic classes cover every smoke stamp prefix and the soak user prefix', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const lib = readFileSync(LIB, 'utf8')
+  const block = lib.slice(lib.indexOf('ORG_MEMBERSHIP_SYNTHETIC_CLASSES=('), lib.indexOf(')\n', lib.indexOf('ORG_MEMBERSHIP_SYNTHETIC_CLASSES=(')))
+  const prefixes = [...block.matchAll(/"[a-z0-9-]+:([a-z0-9-]+)"/g)].map((m) => m[1])
+  const stampPrefixes = [...remote.matchAll(/^\s+stamp_prefix="([a-z0-9-]+)"$/gm)].map((m) => `${m[1]}-`)
+  assert.ok(stampPrefixes.length >= 6, 'positive control: the smoke stamp prefixes are found')
+  for (const prefix of stampPrefixes) assert.ok(prefixes.includes(prefix), `missing synthetic class for ${prefix}`)
+  const soak = remote.match(/^SOAK_USER_PREFIX="([a-z0-9-]+)"$/m)
+  assert.ok(soak && prefixes.includes(soak[1]), 'missing synthetic class for the soak user prefix')
+  // classification uses starts_with (literal), never LIKE ('_' is a LIKE wildcard)
+  const dir = mkdtempSync(join(tmpdir(), 'wr-orgfix-cls-'))
+  writeFileSync(join(dir, 'present.txt'), 'users.username\nusers.email\n')
+  const expr = runLibFunction(`org_membership_synthetic_class_expr '${join(dir, 'present.txt')}'`)
+  assert.equal(expr.status, 0, expr.stderr)
+  assert.doesNotMatch(expr.stdout, /\bLIKE\b/i)
+  assert.match(expr.stdout, /starts_with\(COALESCE\(u\.username, ''\), 'synth-w4w7-'\) THEN 'soak-w4w7'/)
+  assert.match(expr.stdout, /starts_with\(COALESCE\(u\.id, ''\), 'tasks-smoke-'\) THEN 'tasks-smoke'/)
+})
+
+// --- opt-in real-PostgreSQL cell for the org-membership SQL ------------------------------------
+// Skipped unless WINDOW_RUNNER_ORGFIX_PG_BIN names a directory holding initdb, pg_ctl and psql (the
+// staging compose pins PostgreSQL 15). It creates a throwaway cluster in a temp dir (unix socket
+// only, no TCP), loads a synthetic schema with the columns the generators read and synthetic rows
+// only, runs the REAL generated SQL through psql exactly as the runner does, and tears the cluster
+// down. It covers what the text pins cannot: the fp re-check, the population predicate, the delta
+// vector, the evidence refusal and the read-only wrapper, all evaluated by PostgreSQL.
+const ORGFIX_PG_BIN = process.env.WINDOW_RUNNER_ORGFIX_PG_BIN || ''
+
+test('org-membership REAL-PG (opt-in): inspect, deactivate, add-membership, fp mismatch, predicate drift, delta mismatch, evidence refusal, read-only wrapper', { skip: ORGFIX_PG_BIN ? false : 'set WINDOW_RUNNER_ORGFIX_PG_BIN to a PostgreSQL bin directory to run' }, async () => {
+  const { createHash } = await import('node:crypto')
+  const fpOf = (id) => createHash('md5').update(id).digest('hex').slice(0, 16)
+  const bin = (name) => join(ORGFIX_PG_BIN, name)
+  const dir = mkdtempSync(join(tmpdir(), 'wr-pg-'))
+  const data = join(dir, 'data')
+  const sock = mkdtempSync('/tmp/wrpg-')
+  const port = String(55000 + Math.floor(Math.random() * 5000))
+  const run = (cmd, args, input) => spawnSync(cmd, args, { encoding: 'utf8', input })
+  const init = run(bin('initdb'), ['-D', data, '-U', 'postgres', '-A', 'trust', '--no-sync'])
+  assert.equal(init.status, 0, init.stderr)
+  const start = run(bin('pg_ctl'), ['-D', data, '-w', '-l', join(dir, 'pg.log'), '-o', `-k ${sock} -c listen_addresses='' -p ${port}`, 'start'])
+  assert.equal(start.status, 0, start.stderr)
+  const psql = (db, sql, vars = {}, extra = []) => run(bin('psql'), ['-h', sock, '-p', port, '-U', 'postgres', '-d', db, '-X', '-q', '-tA', '-v', 'ON_ERROR_STOP=1', '-v', 'VERBOSITY=terse', ...extra, ...Object.entries(vars).flatMap(([k, v]) => ['-v', `${k}=${v}`])], sql)
+  const ro = (db, sql, vars) => {
+    const w = spawnSync('bash', ['-c', `source '${LIB}'; org_membership_read_only_wrap`], { encoding: 'utf8', input: sql })
+    return spawnSync(bin('psql'), ['-h', sock, '-p', port, '-U', 'postgres', '-d', db, '-X', '-q', '-tA', '-v', 'ON_ERROR_STOP=1', '-v', 'VERBOSITY=terse', ...Object.entries(vars || {}).flatMap(([k, v]) => ['-v', `${k}=${v}`])], { encoding: 'utf8', input: w.stdout, env: { ...process.env, PGOPTIONS: '-c default_transaction_read_only=on' } })
+  }
+  try {
+    const schema = `
+CREATE TABLE users (id text PRIMARY KEY, username text, email text, is_active boolean NOT NULL DEFAULT TRUE,
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz, access_generation bigint NOT NULL DEFAULT 0);
+CREATE TABLE user_orgs (user_id text NOT NULL, org_id text NOT NULL, is_active boolean NOT NULL DEFAULT TRUE,
+  created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (user_id, org_id));
+CREATE TABLE approval_records (action text);
+CREATE TABLE approval_instances (id text PRIMARY KEY, source_system text, template_id text, org_id text, requester_snapshot jsonb);
+CREATE TABLE approval_attachments (instance_id text, org_id text);
+CREATE TABLE directory_integrations (org_id text);
+CREATE TABLE directory_deprovision_events (local_user_id text NOT NULL, status text NOT NULL);
+CREATE TABLE directory_deprovision_effects (local_user_id text NOT NULL, status text NOT NULL);
+INSERT INTO users (id) VALUES ('synthetic-a'), ('synthetic-b'), ('synthetic-target'), ('synthetic-inactive-only');
+INSERT INTO user_orgs (user_id, org_id, is_active) VALUES
+  ('synthetic-a', 'default', TRUE), ('synthetic-b', 'org-2', TRUE), ('synthetic-inactive-only', 'org-2', FALSE);
+INSERT INTO approval_instances (id, source_system, requester_snapshot) VALUES
+  ('synthetic-i1', 'platform', '{"id":"synthetic-target"}'), ('synthetic-i2', NULL, '{"id":"synthetic-target"}');
+INSERT INTO directory_integrations (org_id) VALUES ('default');
+`
+    assert.equal(psql('postgres', 'CREATE DATABASE base;').status, 0)
+    const loaded = psql('base', schema)
+    assert.equal(loaded.status, 0, loaded.stderr)
+    let n = 0
+    const fresh = () => {
+      const name = `t${(n += 1)}`
+      const made = psql('postgres', `CREATE DATABASE ${name} TEMPLATE base;`)
+      assert.equal(made.status, 0, made.stderr)
+      return name
+    }
+    const writeSql = runLibFunction('org_membership_repair_write_sql "AND i.org_id IS NULL"').stdout
+    const snapshot = (db) => psql(db, "SELECT string_agg(id || ':' || is_active || ':' || access_generation, ',' ORDER BY id) FROM users; SELECT string_agg(user_id || '@' || org_id || ':' || is_active, ',' ORDER BY user_id, org_id) FROM user_orgs;").stdout
+    const target = fpOf('synthetic-target')
+
+    // inspect: the read-only wrapper, the probe and the users SQL, evaluated by PostgreSQL
+    {
+      const db = fresh()
+      const probe = ro(db, runLibFunction('org_membership_probe_sql').stdout)
+      assert.equal(probe.status, 0, probe.stderr)
+      const present = join(dir, 'present.txt')
+      writeFileSync(present, probe.stdout)
+      const users = ro(db, runLibFunction(`org_membership_inspect_users_sql '${present}' 'AND i.org_id IS NULL'`).stdout)
+      assert.equal(users.status, 0, users.stderr)
+      const lines = users.stdout.trim().split('\n')
+      assert.equal(lines.length, 1, 'exactly the one active no-row user (the inactive-row user is not in the population)')
+      assert.match(lines[0], new RegExp(`^user fp=${target} fp_shared_by_users=1 .* class6_shaped_requested=2 .* applied_deprovision_evidence=0$`))
+      assert.ok(!users.stdout.includes('synthetic-'), 'no raw id in the output')
+      const write = ro(db, "UPDATE users SET is_active = FALSE WHERE id = 'synthetic-a';")
+      assert.notEqual(write.status, 0, 'the read-only wrapper refuses a write')
+      assert.match(write.stderr, /read-only transaction/)
+    }
+    // deactivate: committed, exact vector, access_generation advanced, memberships untouched
+    {
+      const db = fresh()
+      const before = snapshot(db)
+      const r = psql(db, writeSql, { mode: 'deactivate', fp: target, org: '' })
+      assert.equal(r.status, 0, r.stderr)
+      assert.match(r.stdout, /^write_committed=yes$/m)
+      assert.match(r.stdout, /^in_txn_before recovery09_unsupported_class6_count=0$/m)
+      assert.match(r.stdout, /^in_txn_after recovery09_unsupported_class6_count=2$/m)
+      const after = snapshot(db)
+      assert.notEqual(after, before)
+      assert.match(after, /synthetic-target:false:1/)
+      assert.equal(after.split('\n')[1], before.split('\n')[1], 'user_orgs unchanged')
+    }
+    // add-membership to a non-default org and to default
+    for (const [org, anchor] of [['org-2', '1'], ['default', '2']]) {
+      const db = fresh()
+      const r = psql(db, writeSql, { mode: 'add-membership', fp: target, org })
+      assert.equal(r.status, 0, `${org}: ${r.stderr}`)
+      assert.match(r.stdout, /^in_txn_after class6_candidate_count=0$/m)
+      assert.match(r.stdout, new RegExp(`^in_txn_after legacy_anchor_active_membership_witness_count=${anchor}$`, 'm'))
+      assert.match(snapshot(db), new RegExp(`synthetic-target@${org}:true`))
+    }
+    // the named fp must match: a user outside the population, an unknown fp, the wrong user
+    for (const fp of [fpOf('synthetic-inactive-only'), fpOf('synthetic-a'), '0123456789abcdef']) {
+      const db = fresh()
+      const before = snapshot(db)
+      for (const mode of ['deactivate', 'add-membership']) {
+        const r = psql(db, writeSql, { mode, fp, org: mode === 'deactivate' ? '' : 'org-2' })
+        assert.notEqual(r.status, 0, `${mode} fp=${fp} must abort`)
+        assert.match(r.stderr, /ORGFIX_ABORT match_count=0 \(exactly 1 required\)/)
+        assert.ok(!r.stderr.includes('synthetic-'), 'terse abort carries no id')
+      }
+      assert.equal(snapshot(db), before, 'nothing changed')
+      // the precheck (read-only) agrees
+      const pre = ro(db, runLibFunction(`org_membership_repair_precheck_sql '${join(dir, 'present.txt')}'`).stdout, { fp, org: 'org-2' })
+      assert.equal(pre.status, 0, pre.stderr)
+      assert.match(pre.stdout, /^match_count=0$/m)
+      assert.match(pre.stdout, /^predicate_count=1$/m)
+    }
+    // a side effect outside the expected vector aborts the whole transaction
+    {
+      const db = fresh()
+      assert.equal(psql(db, `CREATE FUNCTION side_effect() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO user_orgs (user_id, org_id) VALUES ('synthetic-a', 'org-3'); RETURN NULL; END $$;
+CREATE TRIGGER side_effect AFTER UPDATE ON users FOR EACH ROW EXECUTE FUNCTION side_effect();`).status, 0)
+      const before = snapshot(db)
+      const r = psql(db, writeSql, { mode: 'deactivate', fp: target, org: '' })
+      assert.notEqual(r.status, 0)
+      assert.match(r.stderr, /ORGFIX_ABORT counter_delta_mismatch label=distinct_active_org_count expected=0 actual=1/)
+      assert.equal(snapshot(db), before, 'rolled back')
+    }
+    // applied deprovision evidence: refused in both the precheck and the transaction
+    {
+      const db = fresh()
+      assert.equal(psql(db, "INSERT INTO directory_deprovision_effects (local_user_id, status) VALUES ('synthetic-target', 'applied');").status, 0)
+      const before = snapshot(db)
+      const r = psql(db, writeSql, { mode: 'deactivate', fp: target, org: '' })
+      assert.notEqual(r.status, 0)
+      assert.match(r.stderr, /ORGFIX_ABORT applied_deprovision_evidence=1/)
+      assert.equal(snapshot(db), before)
+      const pre = ro(db, runLibFunction(`org_membership_repair_precheck_sql '${join(dir, 'present.txt')}'`).stdout, { fp: target, org: '' })
+      assert.match(pre.stdout, /^applied_deprovision_evidence=1$/m)
+    }
+  } finally {
+    run(bin('pg_ctl'), ['-D', data, '-m', 'immediate', 'stop'])
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(sock, { recursive: true, force: true })
   }
 })
