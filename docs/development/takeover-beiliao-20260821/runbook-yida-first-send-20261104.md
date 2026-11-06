@@ -32,6 +32,7 @@
    - L4 之前的全库备份与 `docker\app.env` 副本在手、放在一起（门 3、门 7 的恢复点；清单第 3.1 版「开工前」C 段）。
    - L3、L4 是在**服务器本机**的浏览器里经 localhost 地址打开面板完成的（门 5）。不是：停，报 owner。
    - **目标是测试表单**：L4 时录入并封存的 appType / formUuid 是与 owner 约定的那张**测试**表单，不是生产表单。由 owner 用自己持有的值对照 L4 当时的录入核对，只报 `testFormTarget=True/False`，不抄标识符。`False` 或 owner 无法确认：停，不开开关（这时 1 号槽已封存为非测试目标，报 owner 另裁）。L4 还没做：L4 必须录入测试表单的标识符与凭据。初始化之后「手动 GET」不显示 appType / formUuid，所以发送前的最终核对在 S2 第 9 步的服务端预览上再做一次。
+   - **L4 草稿的键布局（R-71 ⑦.3 决策 A）**：1 号槽的 L4 草稿必须用 v2 物料模板（`docs/development/takeover-beiliao-20260821/yida-legacy-templates/material.json`）的七键布局与可空键：项目号、图号、名称、规格、材质、版本、父组件图号，其中规格（`componentSpec`）与父组件图号（`parentComponentCode`）为可空键；七个键目标对到测试副本的真实字段 id。owner 只报 `materialKeyLayout=True/False`，不抄字段 id。`False`：停，不开开关，报 owner。原因：1 号槽在 L4 时永久封存键定义，以后只收键定义完全相同的草稿；布局不对，这个槽永远收不下 v3 物料草稿。v2 物料模板与 v3 物料夹具的键定义相同，由 `plugins/plugin-integration-core/__tests__/yida-mapping-v3-parity.test.cjs` 钉住。L4 还没做：L4 必须按这个布局起草。
    - 清单第 3.1 版「L4 之后」第 1–8 条已做完：测试连接开关已改为 `INTEGRATION_YIDA_CONNECTION_TEST_ENABLED=false` 并按「重启后端的方法」重启；那段核对输出全部符合。
 2. **门 9（开关打开前）**：锚点账号退出后重新登录，Ctrl+F5，在项目备料页宜搭区点「手动 GET 本地初始化状态」（`apps/web/src/components/integration/stockPreparation/StockPreparationYidaInitializationPanel.vue:6`）：应显示「本地配置已初始化；…」（同文件 `:34`），行数等于 L4 时的行数。此时**不应**出现「打开单行 CREATE 确认（服务器已开通）」按钮（`StockPreparationYidaPreviewPanel.vue:107`；它只在 GET 回复的 `sendEnabled` 位为 true 时出现：`packages/core-backend/src/routes/integration-yida-owner.ts:213-220`、`:317-326`）。
 3. **L4 预检**：在部署根目录 `node scripts\ops\integration-yida-l4-preflight.mjs`，最后一行必须是 `L4_PREFLIGHT=PASS`（`scripts/ops/integration-yida-l4-preflight.mjs:589`）。**必须在 S1 之前跑**：开关这一行一旦进入运行中的后端环境，不论值是什么，脚本都按设计答 `sendSwitchInRunningBackend=True` 并 `L4_PREFLIGHT=STOP sendSwitchInRunningBackend`（`:571-572`）。
@@ -113,7 +114,7 @@
 
 ## 停止条件汇总
 
-- S0 第 1 步任何一条前置不满足（含 `testFormTarget=False`）、L4 预检不是 `PASS`、T ≥ 300 ms（owner 未另定）、owner 当天没有单独批准开开关 → 不开开关。
+- S0 第 1 步任何一条前置不满足（含 `testFormTarget=False`、`materialKeyLayout=False`）、L4 预检不是 `PASS`、T ≥ 300 ms（owner 未另定）、owner 当天没有单独批准开开关 → 不开开关。
 - S2 第 9 步 `previewIsTestForm=False` → 不批准，按 S4 关回，报 owner。
 - 第 7 步核对有一条对不上、第 8 步没有发送入口、第 9 步出现任何错误码（尤其 `YIDA_OWNER_HTTP_DENIED` / `YIDA_SEND_APPROVAL_NOT_FOUND`）→ 按 S4 关回，报 owner。
 - 提交之后无论结果如何 → 不再提交、不再批准同一行；按 S3 核对、按 S4 关回。
