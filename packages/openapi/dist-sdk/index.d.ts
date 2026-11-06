@@ -19332,6 +19332,11 @@ export interface components {
                 visibilityReason: "active" | "review_placeholder" | "import_rollback" | "operator_retirement";
                 /** @enum {string} */
                 posture: "shadow" | "authoritative" | "undeterminable";
+                /**
+                 * @description Present only for an active visible legacy_untracked daily projection with no current calculation pointer. Does not classify immutable history.
+                 * @enum {string}
+                 */
+                calculationMode?: "envelope_legacy";
             };
         };
         AttendanceW4ShadowBacklogItem: {
