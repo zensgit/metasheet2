@@ -193,7 +193,7 @@ export type YidaSendExecutionPrimitives = YidaSendAuthorityPrimitives & {
     Promise<YidaExecutionCredentialBinding & { appKey: string; appSecret: string; systemToken: string; userId: string }>
   prepareDraftInTransaction?(trx: Queryable, input: unknown): Promise<Readonly<Row>>
   // R-71 ⑦.3 decision C1: pure and synchronous, one frozen boolean, checked before a draft is written.
-  draftSendBudget?(input: { config: unknown; rowsText: unknown; allocation: unknown }): Readonly<{ withinBudget: boolean }>
+  draftSendBudget?(input: unknown): Readonly<{ withinBudget: boolean }>
   previewInTransaction?(trx: Queryable, input: { operationId: string; rowKey: string }): Promise<Readonly<Row>>
 }
 export type YidaSendExecutionDependencies = Omit<Dependencies, 'primitives'> & { primitives: YidaSendExecutionPrimitives }
