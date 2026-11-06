@@ -152,9 +152,16 @@ const AUDIT_SHAPE_090 = `
     OR (event = 'unknown' AND status = 'outcome_unknown' AND reason IS NOT NULL)
     OR (event = 'cancel' AND status = 'not_sent' AND reason IS NULL)
   `
-const AUDIT_SHAPE_RECONCILE = `${AUDIT_SHAPE_090}  OR (event = 'reconcile' AND status = 'reconciled_existing' AND reason = 'legacy_readback')
+// The 090 branches, except that `legacy_readback` is reconcile-only (an 'unknown' event may never carry it), plus
+// the reconcile branch. Every branch is NULL-safe (IS [NOT] NULL first): a CHECK that evaluates to NULL passes.
+const AUDIT_SHAPE_RECONCILE = `
+    (event = 'prepare' AND status = 'prepared' AND reason IS NULL)
+    OR (event = 'claim' AND status = 'dispatching' AND reason IS NULL)
+    OR (event = 'acknowledgement' AND status = 'acknowledged' AND reason IS NULL)
+    OR (event = 'unknown' AND status = 'outcome_unknown' AND reason IS NOT NULL AND reason <> 'legacy_readback')
+    OR (event = 'cancel' AND status = 'not_sent' AND reason IS NULL)
+    OR (event = 'reconcile' AND status = 'reconciled_existing' AND reason IS NOT NULL AND reason = 'legacy_readback')
   `
-// Reconcile-only reason: an 'unknown' event may never carry it (the shape CHECK pins the combination).
 const counts = YIDA_RECONCILIATION_COUNT_COLUMNS.map(column => `  ${column} INTEGER NOT NULL DEFAULT 0 CHECK (${column} BETWEEN 0 AND 60000),`).join('\n')
 const appendOnly = (table: string, code: string) => `
 CREATE OR REPLACE FUNCTION ${table}_guard() RETURNS trigger
