@@ -160,7 +160,7 @@
             </p>
 
             <!-- A demand whose history cannot be verified needs an explicit acknowledgement (the server 400s without). -->
-            <label v-if="hold.history === 'history_unknown' && stockPrepRefreshHoldConfirmMode(hold)" class="sp-refresh__ack" data-testid="stock-prep-refresh-history-ack">
+            <label v-if="hold.history === 'history_unknown' && stockPrepRefreshHoldConfirmMode(hold) && hold.confirmable" class="sp-refresh__ack" data-testid="stock-prep-refresh-history-ack">
               <input v-model="historyAck[hold.id]" type="checkbox" />
               {{ bi('我知道这份需求的历史无法查证', 'I understand this demand’s history cannot be verified') }}
             </label>
@@ -168,7 +168,8 @@
             <!-- Typed project number: confirm, re-confirm and every end need it (R-62 ⑧); 「暂不处理」 does not. PR-7b
                  (review N3): the TYPED value (trimmed) is what is sent as `confirmProjectNo`, as the archive and
                  pilot-enable flows do, so the server's own typed check is a real second check. -->
-            <label v-if="stockPrepRefreshHoldConfirmMode(hold) || endOffered(hold)" class="sp-refresh__typed">
+            <!-- PR-9 (N1b, PR-7b deviation 5's rule): the typed field renders only where a control can use it. -->
+            <label v-if="(stockPrepRefreshHoldConfirmMode(hold) && hold.confirmable) || endOffered(hold)" class="sp-refresh__typed">
               {{ bi('输入项目号以确认操作', 'Type the project number to confirm') }}
               <input
                 v-model="typedNo[hold.id]"
@@ -534,9 +535,13 @@ function typedConfirmNo(hold: StockPrepRefreshHold): string {
   return (typedNo[hold.id] ?? '').trim()
 }
 
-/** PR-7b (review N1): 「结束沿用关系」 only where the store can end it — a relationship awaiting re-confirmation. */
+/**
+ * PR-7b (review N1): 「结束沿用关系」 only where the store can end it — a relationship awaiting re-confirmation.
+ * PR-9 (N1b, the #6579 review): never on an ESCALATED (runbook-only) relationship — the store refuses its end 409
+ * CONFIRM_STALE `continuation_ended`, so the control could only loop; the runbook note says what happens instead.
+ */
 function endOffered(hold: StockPrepRefreshHold): boolean {
-  return hold.kind === 'relationship_reconfirm' && typeof hold.continuationId === 'string' && hold.continuationId.length > 0
+  return hold.kind === 'relationship_reconfirm' && typeof hold.continuationId === 'string' && hold.continuationId.length > 0 && hold.runbookOnly !== true
 }
 
 function confirmBodyFor(hold: StockPrepRefreshHold): StockPrepRefreshConfirmBody | null {

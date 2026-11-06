@@ -642,6 +642,28 @@ describe('「拉取待确认」 — StockPreparationRefreshQueueView (RQ)', () =
     expect(holdEl(root, 'relationship_reconfirm').querySelector('[data-testid="stock-prep-refresh-end"]')).not.toBeNull()
   })
 
+  it('RQ-END-RUNBOOK (PR-9, N1b): an ESCALATED (runbook-only) relationship offers no end, no typed field and no acknowledgement; an ordinary one keeps its end', async () => {
+    const escalated = relationshipHold({ id: 'hold_syn_runbook', continuationId: 'cont_syn_9', runbookOnly: true, confirmable: false, notConfirmableReason: 'specialist_repair', history: 'history_unknown' })
+    const root = await mountView(serverState({ holds: [escalated, relationshipHold()] }))
+    const holds = [...root.querySelectorAll('[data-testid="stock-prep-refresh-hold"][data-hold-kind="relationship_reconfirm"]')] as HTMLElement[]
+    expect(holds.length).toBe(2)
+    const runbook = holds.find((el) => el.querySelector('[data-testid="stock-prep-refresh-runbook-only"]'))!
+    const ordinary = holds.find((el) => el !== runbook)!
+    expect(runbook, 'the escalated hold renders').toBeDefined()
+    // The store refuses its end (409 CONFIRM_STALE continuation_ended): no control that can only loop.
+    expect(runbook.querySelector('[data-testid="stock-prep-refresh-end-fieldset"]'), 'no end fieldset').toBeNull()
+    expect(runbook.querySelector('[data-testid="stock-prep-refresh-end"]'), 'no end').toBeNull()
+    expect(runbook.querySelector('[data-testid="stock-prep-refresh-end-escalate"]'), 'no escalate').toBeNull()
+    expect(runbook.querySelector('[data-testid="stock-prep-refresh-typed-project-no"]'), 'no dead typed field').toBeNull()
+    expect(runbook.querySelector('[data-testid="stock-prep-refresh-history-ack"]'), 'no dead acknowledgement').toBeNull()
+    // 「暂不处理」 and the runbook note stay.
+    expect(runbook.querySelector('[data-testid="stock-prep-refresh-keep"]')).not.toBeNull()
+    expect(runbook.querySelector('[data-testid="stock-prep-refresh-runbook-only"]')?.textContent).toContain('运行手册')
+    // The ordinary relationship awaiting re-confirmation keeps its end fieldset.
+    expect(ordinary.querySelector('[data-testid="stock-prep-refresh-end-fieldset"]')).not.toBeNull()
+    expect(ordinary.querySelector('[data-testid="stock-prep-refresh-typed-project-no"]')).not.toBeNull()
+  })
+
   it('RQ-WORDS (PR-7b, N2 / N8): every hold kind the server opens reads in words, every non-confirmable one says why, and no raw token sits in the text', async () => {
     const pairing = nodeRequire(`${PLUGIN_LIB}stock-preparation-continuation-pairing.cjs`) as { HOLD_KINDS: readonly string[]; NOT_CONFIRMABLE_REASONS: readonly string[]; SHAPE_TOKENS: readonly string[] }
     const store = nodeRequire(`${PLUGIN_LIB}stock-preparation-continuation-store.cjs`) as { EVIDENCE_HISTORY_STATUSES: readonly string[] }
