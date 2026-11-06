@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import type { NextFunction, Request, Response } from 'express'
 import request from 'supertest'
+import { usePinnedServer } from '../utils/pinned-server'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import yaml from 'js-yaml'
@@ -42,6 +43,14 @@ import type { SecurityActionConsumeInput, SecurityActionVerifyRequest } from '..
 import { securityActionsRouter } from '../../src/routes/security-actions'
 import { importSpecifiers, listSourceFiles } from '../helpers/import-edge-allowlist'
 import { CONNECTION, contextFor, ORG, TARGET_IDENTITY, TARGET_WITNESS, tokenFor, USER } from '../helpers/security-action-proof-harness'
+
+const pinned = usePinnedServer()
+
+/** Sends through this suite's pinned server, with `app` installed for the request. */
+function via(app: express.Express) {
+  pinned.setApp(app)
+  return request(pinned.url())
+}
 
 const ROOT = path.resolve(__dirname, '..', '..', '..', '..')
 const BACKEND = path.join(ROOT, 'packages', 'core-backend')
@@ -154,7 +163,7 @@ describe('production binding', () => {
     app.use('/api/auth/security-actions', router!)
     const token = tokenFor(USER, 'sid-inert', ORG)
     for (const purpose of SECURITY_ACTION_PURPOSES) {
-      const response = await request(app).post('/api/auth/security-actions/verify').set('Authorization', `Bearer ${token}`).send(verifyBodyFor(purpose))
+      const response = await via(app).post('/api/auth/security-actions/verify').set('Authorization', `Bearer ${token}`).send(verifyBodyFor(purpose))
       expect(response.status).toBe(403)
       expect(response.body).toEqual({ ok: false, error: { code: 'SECURITY_ACTION_PURPOSE_UNAVAILABLE', message: 'Security action refused' } })
       expect(response.headers['cache-control']).toBe('no-store')
