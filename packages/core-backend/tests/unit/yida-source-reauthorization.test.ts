@@ -229,6 +229,11 @@ describe('reauthorizeYidaSourceBinding (D21, §7.2 checks 1-4 on the caller trx)
     for (const token of [/\breq\b/, /\bRequest\b/, /\bcache\b/i, /\brbac\b/i, /\buser\b/]) {
       expect({ token: String(token), found: token.test(reauthorization) }).toEqual({ token: String(token), found: false })
     }
+    // The production host hands exactly this re-check to the YiDa owner runtime (absent, a bound row fails closed; the
+    // lane fixtures construct their own runtime with a synthetic double, so only this pin watches the real wiring).
+    const index = code(readFileSync(path.resolve(__dirname, '..', '..', 'src', 'index.ts'), 'utf8'))
+    expect(/reauthorizeSourceBinding:\s*createYidaSourceBindingReauthorizer\(\)/.test(index)).toBe(true)
+    expect(index.includes("from './integration/yida-source-reauthorization-host'")).toBe(true)
   })
 })
 
