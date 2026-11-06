@@ -53,10 +53,21 @@ function stubClient(
     queries,
     query: async (sql: string, params?: unknown[]) => {
       queries.push(sql)
-      if (/FROM directory_accounts a/i.test(sql) && /JOIN directory_account_links/i.test(sql)) {
-        // The stub answers the selection query with whatever the test asked for. It does NOT
-        // evaluate the predicate — see the scope note.
+      if (
+        /FROM directory_accounts a/i.test(sql)
+        && /JOIN directory_account_links/i.test(sql)
+        && /sibling_integration\.org_id = \$2::text/.test(sql)
+      ) {
+        // The stub answers the ORG-SCOPED selection query (and only that shape: the org anchor
+        // is part of the match) with whatever the test asked for. It does NOT evaluate the
+        // predicate — see the scope note.
         return { rows: candidates }
+      }
+      // Effects-column probe: the statement names no table (table and column are parameters).
+      // The stub answers "column present"; the ledger's write shape under both answers is
+      // asserted in deprovision-effect-provider.test.ts.
+      if (/FROM information_schema\.columns/i.test(sql) && /column_name = \$2::text/.test(sql)) {
+        return { rows: [{ present: true }] }
       }
       if (/INSERT INTO user_external_auth_grants/i.test(sql)) {
         return { rows: [] }
@@ -86,8 +97,9 @@ function stubClient(
             org_membership_active: true,
             org_candidacy_clear: true,
             globally_clear: !notGloballyClear.has(userId),
-            dingtalk_grant_enabled: true,
-            dingtalk_grant_row_exists: true,
+            login_grant_provider: 'dingtalk',
+            login_grant_enabled: true,
+            login_grant_row_exists: true,
           }],
         }
       }
@@ -97,13 +109,18 @@ function stubClient(
       if (/UPDATE users\s+SET access_generation/i.test(sql)) {
         return { rows: [{ access_generation: 1 }] }
       }
-      if (/INSERT INTO directory_deprovision_events/i.test(sql)) {
+      if (/^\s*INSERT INTO directory_deprovision_events/i.test(sql)) {
         return { rows: [{ id: 'event-1' }] }
       }
-      if (
-        /directory_deprovision_(?:events|effects)/i.test(sql)
-        || /INSERT INTO directory_deprovision_effects/i.test(sql)
-      ) {
+      // The three remaining ledger statements, each matched by its own exact opening shape so a
+      // new ledger query cannot slip through on the table name alone.
+      if (/^\s*UPDATE directory_deprovision_effects\s+SET status = 'superseded'/i.test(sql)) {
+        return { rows: [] }
+      }
+      if (/^\s*UPDATE directory_deprovision_events\s+SET status = 'superseded'/i.test(sql)) {
+        return { rows: [] }
+      }
+      if (/^\s*INSERT INTO directory_deprovision_effects \(/i.test(sql)) {
         return { rows: [] }
       }
       // Anything else is drift: a new query appeared that no test has reasoned about.
