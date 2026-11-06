@@ -212,6 +212,10 @@ databaseSuite('SA05 permanent human-attested target — actual PG and no online 
     example = (await importNative(pathToFileURL(path.join(lib, 'yida-static-plan.mjs')).href)).createYidaProtocolExample
     ddl = ['092_create_integration_yida_credential_materials.sql', '093_create_integration_yida_draft_plans.sql',
       '094_create_integration_yida_approved_target.sql'].map(name => readFileSync(path.join(root, 'packages/core-backend/migrations', name), 'utf8')).join('\n')
+    // Source binding (design baseline v2.3 §7.2): the draft-row columns of zzzz20261106110300, exactly what its up() executes.
+    ddl += '\n' + ((await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts')).href)) as
+      { YIDA_SOURCE_BINDING_DRAFT_ROWS_UP_SQL: string }).YIDA_SOURCE_BINDING_DRAFT_ROWS_UP_SQL
     savedEnv = envKeys.map(key => [key, process.env[key]])
     process.env.NODE_ENV = 'production'
     process.env.ENCRYPTION_KEY = randomBytes(32).toString('hex')
