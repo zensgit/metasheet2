@@ -198,7 +198,10 @@ export interface StockPrepRefreshBanner {
   enNext: string
   /** The open-hold count folded into the sentence (pending_confirmation only), else null. */
   count: number | null
-  /** True only for a puller (`canOpenQueue`) AND a project with holds to decide: the banner links to 拉取待确认. */
+  /**
+   * True only for a puller (`canOpenQueue`) AND a project with work on 拉取待确认: holds to decide, or (PR-9, R-77 ⑥) a
+   * written change awaiting its review (变更复核 is a section of that page).
+   */
   link: boolean
 }
 
@@ -231,7 +234,7 @@ export function stockPrepRefreshBanner(
     zhNext: entry.zhNext ?? '',
     enNext: entry.enNext ?? '',
     count,
-    link: options.canOpenQueue === true && key === 'pending_confirmation',
+    link: options.canOpenQueue === true && (key === 'pending_confirmation' || key === 'change_pending_review'),
   }
 }
 
@@ -250,9 +253,14 @@ export function stockPrepPendingSplit(board: { pendingDecisionCount?: unknown } 
   return { ledger: Math.max(0, union - holds), holds }
 }
 
-/** The rail badge of 拉取待确认 for the OPEN project (R-62 ④): a positive open-hold count, else null. */
+/**
+ * The rail badge of 拉取待确认 for the OPEN project (R-62 ④): its open holds PLUS its written changes awaiting review
+ * (PR-9, R-77 ⑤ — both are the puller's work on that page), when positive; else null.
+ */
 export function stockPrepRefreshRailCount(stanza: StockPrepRefreshStanza | null): number | null {
   if (!stanza || stanza.readable !== true) return null
   const pending = stanza.counts?.pendingConfirm
-  return typeof pending === 'number' && pending > 0 ? pending : null
+  const reviews = stanza.counts?.pendingReviews
+  const total = (typeof pending === 'number' ? pending : 0) + (typeof reviews === 'number' ? reviews : 0)
+  return total > 0 ? total : null
 }

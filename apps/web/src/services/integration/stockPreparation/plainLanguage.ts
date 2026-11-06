@@ -1857,8 +1857,9 @@ export const STOCK_PREP_REFRESH_BANNER_PLAIN: Record<string, StockPrepPlainEntry
   change_pending_review: Object.freeze({
     zh: '本项目有变更待复核,正式导出已暂停。',
     en: 'This project has a change awaiting review; the formal export is paused.',
-    zhNext: '请联系拉取人员。',
-    enNext: 'Contact the puller.',
+    // PR-9 (R-77 ⑥ / ⑨): where the review happens, and that 复核 does not replace 核对.
+    zhNext: '拉取人员在「拉取待确认」里看过当前差异后完成复核;复核后还要核对一次(再试算)才能正式导出。',
+    enNext: 'The puller reads the current difference on “Pull holds” and completes the review; after it, one check (one more preview) still opens the formal export.',
   }),
   failed_pending_recovery: Object.freeze({
     zh: '本项目上次写入没有正常结束,执行失败待恢复,正式导出已暂停。',
@@ -1879,8 +1880,8 @@ export const STOCK_PREP_REFRESH_BANNER_PLAIN: Record<string, StockPrepPlainEntry
     enNext: 'The puller presses “Check” (one more preview); the export opens once it passes.',
   }),
   confirmed_pending_execution: Object.freeze({
-    zh: '沿用关系已确认、尚未写入,正式导出已暂停。',
-    en: 'The relationship is confirmed but not written yet; the formal export is paused.',
+    zh: '沿用关系或变更计划已确认、尚未写入,正式导出已暂停。',
+    en: 'A relationship or change plan is confirmed but not written yet; the formal export is paused.',
     zhNext: '拉取人员重新试算并写入。',
     enNext: 'The puller previews again and writes.',
   }),

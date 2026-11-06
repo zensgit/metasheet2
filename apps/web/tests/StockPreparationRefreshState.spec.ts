@@ -213,6 +213,36 @@ describe('RS — the board stanza on the web (refreshState.ts)', () => {
     expect(stockPrepRefreshRailCount(stanza('pending_confirmation'))).toBe(3)
     expect(stockPrepRefreshRailCount(stanza('pending_confirmation', { counts: { pendingConfirm: 0 } }))).toBeNull()
   })
+
+  // PR-9 (R-77 ⑥): the banner links a PULLER to 「拉取待确认」 for a written change awaiting review too (the review is a
+  // section of that page); the floor still gets no link (R-11). The link set 1 → 2 statuses is that decision.
+  it('RS-BANNER (PR-9): change_pending_review links for a puller, never for the floor; its second line names 核对', () => {
+    const review = parseStockPrepRefreshStanza({ readable: true, status: 'change_pending_review', governed: 'pilot', settled: false, counts: { pendingConfirm: 0, pendingReviews: 1 } })
+    expect(stockPrepRefreshBanner(review, { canOpenQueue: true })?.link).toBe(true)
+    expect(stockPrepRefreshBanner(review, { canOpenQueue: false })?.link).toBe(false)
+    expect(stockPrepRefreshBanner(review)?.link).toBe(false)
+    expect(stockPrepRefreshBanner(review)?.zhNext).toContain('拉取待确认')
+    expect(stockPrepRefreshBanner(review)?.zhNext).toContain('核对')
+    // Every other unfinished status keeps no link (only pending_confirmation and change_pending_review have one).
+    for (const status of STOCK_PREP_REFRESH_STATUS_TOKENS) {
+      const banner = stockPrepRefreshBanner(status === 'unreadable' ? parseStockPrepRefreshStanza({ readable: false, status }) : parseStockPrepRefreshStanza({ readable: true, status, governed: 'pilot', settled: false, counts: { pendingConfirm: 1, pendingReviews: 1 } }), { canOpenQueue: true })
+      if (!banner) continue
+      expect(banner.link, status).toBe(status === 'pending_confirmation' || status === 'change_pending_review')
+    }
+    // A confirmed change plan reads confirmed_pending_execution too: its words name both.
+    expect(stockPrepRefreshBanner(parseStockPrepRefreshStanza({ readable: true, status: 'confirmed_pending_execution', governed: 'pilot', settled: false, counts: null }))?.zh).toContain('变更计划')
+  })
+
+  // PR-9 (R-77 ⑤): the rail badge = open holds + pending reviews (main counted holds only: {2,1} was 2, is 3).
+  it('RS-RAIL (PR-9): open holds + pending reviews, positive only', () => {
+    const counted = (pendingConfirm: number, pendingReviews: number) => stockPrepRefreshRailCount(parseStockPrepRefreshStanza({ readable: true, status: 'pending_confirmation', governed: 'pilot', settled: false, counts: { pendingConfirm, pendingReviews } }))
+    expect(counted(2, 1)).toBe(3)
+    expect(counted(0, 1)).toBe(1)
+    expect(counted(0, 0)).toBeNull()
+    expect(counted(3, 0)).toBe(3)
+    expect(stockPrepRefreshRailCount(parseStockPrepRefreshStanza({ readable: false, status: 'unreadable' }))).toBeNull()
+    expect(stockPrepRefreshRailCount(null)).toBeNull()
+  })
 })
 
 describe('RS-COPY — every step-4 code has its own copy (the cross-side tripwire)', () => {
@@ -563,7 +593,8 @@ describe('NS — rule 3b: an unfinished batch refresh, puller vs floor', () => {
       ['confirmed_pending_execution', 'resync'],
       ['executing', null],
       ['failed_pending_recovery', null],
-      ['change_pending_review', null],
+      // PR-9 (R-77 ⑥): null → 'go-refresh-queue' — the review is a section of 「拉取待确认」 (NS-5).
+      ['change_pending_review', 'go-refresh-queue'],
       ['unreadable', null],
     ]
     for (const [status, pullerAction] of rows) {
@@ -575,6 +606,22 @@ describe('NS — rule 3b: an unfinished batch refresh, puller vs floor', () => {
     }
     expect(operatorNextStep(nextStepInput({ refreshStatus: 'pending_confirmation', refreshPendingConfirmCount: 3, canOpenRefreshQueue: false, canPull: false })).zh).toContain('请联系拉取人员')
     expect(operatorNextStep(nextStepInput({ refreshStatus: 'complete', refreshSettled: false, canOpenRefreshQueue: true })).action).toBe('check')
+  })
+
+  it('NS-5 (PR-9): change_pending_review — a puller is sent to review it; the floor gets the sentence and no action', () => {
+    const puller = operatorNextStep(nextStepInput({ refreshStatus: 'change_pending_review', refreshSettled: false, refreshPendingConfirmCount: 0, canOpenRefreshQueue: true }))
+    expect(puller).toMatchObject({ key: 'refresh', action: 'go-refresh-queue', actionZh: '去复核' })
+    expect(puller.zh).toContain('复核')
+    const floor = operatorNextStep(nextStepInput({ refreshStatus: 'change_pending_review', refreshSettled: false, canOpenRefreshQueue: false, canPull: false }))
+    expect(floor.action).toBeNull()
+    expect(floor.actionZh).toBe('')
+    expect(floor.zh).toContain('请联系拉取人员')
+    // A confirmed change plan reads confirmed_pending_execution too: the words name it, zh and en.
+    const confirmed = operatorNextStep(nextStepInput({ refreshStatus: 'confirmed_pending_execution', refreshSettled: false, canOpenRefreshQueue: true }))
+    expect(confirmed.zh).toContain('变更计划')
+    expect(confirmed.en).toContain('change plan')
+    const confirmedFloor = operatorNextStep(nextStepInput({ refreshStatus: 'confirmed_pending_execution', refreshSettled: false, canOpenRefreshQueue: false, canPull: false }))
+    expect(confirmedFloor.zh).toContain('变更计划')
   })
 
   it('NS-2: absent / not_governed / complete ∧ settled never fire rule 3b (dormancy)', () => {
