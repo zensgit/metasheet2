@@ -5,9 +5,10 @@ const { createHash } = require('node:crypto')
 const { createAttendanceTimezonePolicyStore, AttendanceTimezonePolicyError } = require('./attendance-timezone-policy-store.cjs')
 const { createAttendanceTimezoneContextLoader } = require('./attendance-timezone-context-loader.cjs')
 const { buildCalendarTimezoneDay, calendarCandidateKey } = require('./attendance-timezone-calendar-day.cjs')
+const { candidateSegmentSelectionKeyV1, createCanonicalSegmentWindowEvidenceV1 } = require('./attendance-segment-window-selection.cjs')
 
 function createAttendanceTimezoneRuntime({
-  HttpError, loadPublishedCandidates, resolveLocalWallTime, validateIanaTimezone,
+  HttpError, loadPublishedCandidates, mayResolveSegmentSelectionPosture, resolveSegmentSelectionPosture, resolveLocalWallTime, validateIanaTimezone,
   addDaysToDateKey, normalizeTimeString, readApprovedTrips, mapRuleRow, mapHolidayRow, resolveRuleContext: resolveBaseRuleContext, authorizeRequestTarget, prepareRuleContextBatch, loadShiftById, toWorkDate, resolveOvernightFlag,
   loadAttributionTail, loadApprovedOvertime, resolveScheduledCandidate, acquireRuntimeLocks, serverNow, lockOrgPolicy, prepareTripSourceChange, loadCalendarOverrides, selectCalendarCandidates, readCalculationDefinition, validateFrozenContext, validateFrozenAttribution,
 }) {
@@ -340,7 +341,49 @@ function createAttendanceTimezoneRuntime({
         })
         return { ...candidate, absoluteWindow, attributionWindow }
       })
+      // The query-free negative hint preserves the default OFF path. A true
+      // hint NEVER grants references: the original same-transaction posture does.
+      const selectionCandidates = built.filter(candidate => candidate.workDate === natural[0].workDate)
+      const selectionSources = new Map()
+      let segmentEvidence = null
+      let selectionCalendarOverrides
+      if (selectionCandidates.length > 1 && typeof mayResolveSegmentSelectionPosture === 'function'
+        && mayResolveSegmentSelectionPosture(orgId) === true) {
+        if (typeof resolveSegmentSelectionPosture !== 'function') fail('ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE',503)
+        const posture = await resolveSegmentSelectionPosture(trx,orgId)
+        if (posture?.referenceSegments === true) {
+          selectionCalendarOverrides = await loadCalendarOverrides(trx)
+          const entries = []
+          for (const candidate of selectionCandidates) {
+            const candidateTimezone = await contextAt(candidate.workDate)
+            const rule = {...await loadShiftById(trx,orgId,candidate.shiftId),timezone:candidate.timezone}
+            if (!rule.workStartTime || !rule.workEndTime) fail('ATTENDANCE_TIMEZONE_INVALID_REFERENCE')
+            const baseContext = await resolveRuleContext({db:trx,orgId,userId,workDate:candidate.workDate,
+              defaultRule,timezoneContext:candidateTimezone,calendarOverrides:selectionCalendarOverrides,strictSources:true,
+              publishedProfile:{rule,source:candidate.source,assignmentId:candidate.assignmentId,rotationRuleId:candidate.rotationRuleId},
+            })
+            const definition = await readCalculationDefinition(trx,{orgId,userId,workDate:candidate.workDate,
+              shiftId:candidate.shiftId,timezone:candidate.timezone,isWorkday:baseContext.isWorkingDay,
+              holidayKind:baseContext.holiday?.isWorkingDay === false ? 'holiday' : null,defaultRule,
+            })
+            const key = candidateSegmentSelectionKeyV1(candidate)
+            if (!key || selectionSources.has(key)) fail('ATTENDANCE_TIMEZONE_CALCULATION_SOURCE_INVALID',503)
+            entries.push({candidate,definition})
+            selectionSources.set(key,{rule,baseContext,calculationDefinition:definition})
+          }
+          segmentEvidence = createCanonicalSegmentWindowEvidenceV1(entries,{
+            resolveInstant:uniqueWallInstant,addDaysToDateKey,
+          })
+          if (!segmentEvidence) fail('ATTENDANCE_TIMEZONE_CALCULATION_SOURCE_INVALID',503)
+        }
+      }
+      const containsActualSegment = segmentEvidence === null ? undefined : (candidate,instant) => {
+        const contains = segmentEvidence.contains(candidate,instant)
+        if (contains !== true && contains !== false) fail('ATTENDANCE_TIMEZONE_CALCULATION_SOURCE_INVALID',503)
+        return contains
+      }
       const resolver = createAttendanceWorkDateResolver({
+        containsActualSegment,
         toWorkDate, buildZonedDate: uniqueWallInstant, addDaysToDateKey, normalizeTimeString,
         resolveOvernightFlag,
         loadPublishedCandidates: async () => candidates,
@@ -354,7 +397,11 @@ function createAttendanceTimezoneRuntime({
       })
       if (resolution.kind === 'ambiguous') fail('ATTENDANCE_TIMEZONE_WORK_DATE_AMBIGUOUS', 409)
       const workDate = resolution.kind === 'resolved' ? resolution.workDate : natural[0].workDate
-      if (built.filter(candidate => candidate.workDate === workDate).length > 1) {
+      const uniqueSegmentWinner = containsActualSegment !== undefined && resolution.kind === 'resolved'
+        && workDate === natural[0].workDate && resolution.fullWinner !== null
+        && containsActualSegment(resolution.fullWinner,occurredAt) === true
+        && selectionCandidates.filter(candidate => containsActualSegment(candidate,occurredAt)).length === 1
+      if (built.filter(candidate => candidate.workDate === workDate).length > 1 && !uniqueSegmentWinner) {
         fail('ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT', 409)
       }
       // A closed repair is reusable only after ordinary attribution selected its
@@ -369,14 +416,17 @@ function createAttendanceTimezoneRuntime({
       const timezoneContext = await contextAt(workDate)
       const timezone = timezoneContext.timezone
       assertClientTimezone(input.clientTimezone, timezone)
-      const calendarOverrides = await loadCalendarOverrides(trx)
+      const calendarOverrides = selectionCalendarOverrides ?? await loadCalendarOverrides(trx)
       const selected = resolution.kind === 'resolved'
         ? built.find(candidate => candidate.workDate === workDate && candidate.shiftId === resolution.shiftId
-          && candidate.assignmentId === resolution.fullWinner?.assignmentId) : null
+          && candidate.assignmentId === resolution.fullWinner?.assignmentId
+          && (!uniqueSegmentWinner || candidate.source === resolution.fullWinner?.source)) : null
       if (resolution.kind === 'resolved' && !selected) fail('ATTENDANCE_TIMEZONE_INVALID_REFERENCE')
-      const publishedRule = resolution.kind === 'resolved'
-        ? { ...await loadShiftById(trx, orgId, resolution.shiftId), timezone } : null
-      const baseContext = await resolveRuleContext({ db: trx, orgId, userId, workDate,
+      const selectedSource = uniqueSegmentWinner ? selectionSources.get(candidateSegmentSelectionKeyV1(selected)) : null
+      if (uniqueSegmentWinner && !selectedSource) fail('ATTENDANCE_TIMEZONE_CALCULATION_SOURCE_INVALID',503)
+      const publishedRule = selectedSource?.rule ?? (resolution.kind === 'resolved'
+        ? { ...await loadShiftById(trx, orgId, resolution.shiftId), timezone } : null)
+      const baseContext = selectedSource?.baseContext ?? await resolveRuleContext({ db: trx, orgId, userId, workDate,
         defaultRule, timezoneContext, calendarOverrides, strictSources:true,
         ...(selected ? { publishedProfile: {
           rule:publishedRule,source:selected.source,assignmentId:selected.assignmentId,rotationRuleId:selected.rotationRuleId,
@@ -394,14 +444,14 @@ function createAttendanceTimezoneRuntime({
         workDate, shiftId: resolution.kind === 'resolved' ? resolution.shiftId : null,
       })
       if (!absoluteWindow || !attributionWindow) fail('ATTENDANCE_TIMEZONE_WINDOW_INVALID')
-      const calculationDefinition = resolution.kind !== 'resolved' ? {
+      const calculationDefinition = selectedSource?.calculationDefinition ?? (resolution.kind !== 'resolved' ? {
         kind:'rule',isWorkday:baseContext.isWorkingDay === true,holidayKind:baseContext.holiday?.kind ?? null,
         rule:canonicalRuleProfile(rule),
       } : await readCalculationDefinition(trx,{
         orgId,userId,workDate,shiftId:resolution.shiftId,timezone,
         isWorkday:baseContext.isWorkingDay,holidayKind:baseContext.holiday?.isWorkingDay === false ? 'holiday' : null,
         defaultRule,
-      })
+      }))
       const identity = {
         workDate, shiftId: resolution.kind === 'resolved' ? resolution.shiftId : null,
         assignmentId: selected?.assignmentId ?? null, source: selected?.source ?? 'rule',
@@ -412,7 +462,7 @@ function createAttendanceTimezoneRuntime({
         context: { ...baseContext, rule }, resolution, identity,
         absoluteWindow, attributionWindow, fingerprint: canonicalContextFingerprint(identity) }
       if (timezoneContext.mode === 'multi_timezone') {
-        const target = await readFreshTargetTimezoneWindow(trx,{orgId,userId,workDate})
+        const target = await readFreshTargetTimezoneWindow(trx,{orgId,userId,workDate},undefined,uniqueSegmentWinner ? frame : undefined)
         if (target.contextFingerprint !== frame.fingerprint) fail('ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT',409)
       }
       frames.set(trx, frame)
@@ -596,7 +646,7 @@ function createAttendanceTimezoneRuntime({
   }
   // Callers already hold the canonical org-policy/facts prefix. This is the
   // same whole-work-date proof for preview, source changes, and fresh live punch.
-  async function readFreshTargetTimezoneWindow(trx,{orgId,userId,workDate,policyProjection},batch) {
+  async function readFreshTargetTimezoneWindow(trx,{orgId,userId,workDate,policyProjection},batch,selectedFrame) {
     const midnight = new Date(workDate+'T00:00:00.000Z')
     const q = queryFor(trx)
     const store = createAttendanceTimezonePolicyStore({
@@ -620,21 +670,48 @@ function createAttendanceTimezoneRuntime({
         if (epoch>from.getTime() && epoch<to.getTime()) cuts.add(epoch)
       }
     }
+    // Live unique-containing proof only; default request/source/calendar
+    // callers still prove the whole work date across all candidates.
+    const selectedStart = selectedFrame?.absoluteWindow.startAt.getTime()
+    const selectedEnd = selectedFrame?.absoluteWindow.endAt.getTime()
+    if (selectedFrame) {
+      if (selectedFrame.orgId !== orgId || selectedFrame.userId !== userId || selectedFrame.workDate !== workDate
+        || !Number.isFinite(selectedStart) || !Number.isFinite(selectedEnd) || selectedEnd <= selectedStart
+        || selectedStart < from.getTime() || selectedEnd > to.getTime()) fail('ATTENDANCE_TIMEZONE_INVALID_REFERENCE')
+      cuts.add(selectedStart)
+      cuts.add(selectedEnd)
+    }
     const boundaries = [...cuts].sort((a,b)=>a-b)
     const contexts = new Map()
+    let coveredThrough = selectedStart
     for (let index=0;index<boundaries.length-1;index+=1) {
       const start = boundaries[index],end = boundaries[index+1]
+      if (selectedFrame && !(start < selectedEnd && selectedStart < end)) continue
       const probe = new Date(start)
       const windows = await readPublishedTimezoneWindows(trx,{
         orgId,userId,from:probe,to:new Date(start+1),targetWorkDates:[workDate],includeRestDay:true,
         ...(policyProjection === undefined ? {} : {policyProjection}),
       },batch)
-      for (const window of windows) {
-        if (window.startAt.getTime()<end && start<window.endAt.getTime()) {
-          contexts.set(window.contextFingerprint,window)
+      if (selectedFrame) {
+        const selected = windows.filter(window => window.workDate === workDate
+          && window.shiftId === selectedFrame.identity.shiftId
+          && window.assignmentId === selectedFrame.identity.assignmentId && window.source === selectedFrame.identity.source)
+        // Never discard a required partition because a changed zone moved its
+        // reconstructed window elsewhere. Compare the original FULL frame.
+        if (selected.length !== 1 || selected[0].startAt.getTime() !== selectedStart
+          || selected[0].endAt.getTime() !== selectedEnd || selected[0].contextFingerprint !== selectedFrame.fingerprint
+          || start !== coveredThrough) fail('ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT',409)
+        coveredThrough = end
+        contexts.set(selected[0].contextFingerprint,selected[0])
+      } else {
+        for (const window of windows) {
+          if (window.startAt.getTime()<end && start<window.endAt.getTime()) {
+            contexts.set(window.contextFingerprint,window)
+          }
         }
       }
     }
+    if (selectedFrame && coveredThrough !== selectedEnd) fail('ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT',409)
     if (batch?.calendarSelection) {
       // Read-only display proof; never used by the single-target/write callers below.
       const day = buildCalendarTimezoneDay([...contexts.values()], {
