@@ -9,7 +9,7 @@
  *   K-03 the delete exemption E, stated per row (an explicit column, not derived), and M ⊂ E;
  *   K-04 the pinned details: a whitespace-only creator is no creator, keys are compared raw (never trimmed), a blank or
  *        whitespace-only record id is never manual;
- *   K-05 the 33 template columns, each in exactly ONE class of the host's whitelist (the ADR §3.3 table), with the
+ *   K-05 the 35 template columns (33 + the two R-71 7.4 PR-4 machine columns), each in exactly ONE class of the host's whitelist (the ADR §3.3 table), with the
  *        classes' ownership and required-ness as the plugin template declares them;
  *   K-06 the plugin registry read is a FIXED statement over columns migration 087 created (parsed from the migration);
  *   K-07 the failure direction is decided by SQLSTATE alone (42P01 = not registered; anything else = unreadable);
