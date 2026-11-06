@@ -1,0 +1,51 @@
+{
+  "at": "2026-10-28T01:13:54.667603+00:00",
+  "scope": "built SPA synthetic fixture browser; no actual authentication/PG/provider/deployment",
+  "viewports": [
+    {
+      "width": 1366,
+      "state": "passed",
+      "positionHelp": true,
+      "managerAndHeadDistinct": true,
+      "maintenanceHref": true
+    },
+    {
+      "width": 768,
+      "state": "passed",
+      "positionHelp": true,
+      "managerAndHeadDistinct": true,
+      "maintenanceHref": true
+    },
+    {
+      "width": 390,
+      "state": "passed",
+      "positionHelp": true,
+      "managerAndHeadDistinct": true,
+      "maintenanceHref": true
+    }
+  ],
+  "policyConflictClearsPriorNames": true,
+  "wholeAttempt2Passed": false,
+  "attempt2PostcheckFailure": "existing startup fixtures and no-data transport probe classification",
+  "startupOnlyContinuation": "passed with zero unknown requests, business writes, page/console errors; one explicit no-data DELETE method probe",
+  "businessScenariosRepeated": false,
+  "distIndexSHA256": "40a70dce49c6d664a90840eba44f407f39cda70e7150817418bcf833177ef739",
+  "screenshotHashes": {
+    "create-position-help-1366.png": "86ebec54ae9b1c6889132d2d9fee87d54760af819ab5bcf94f9ed7936750d6d6",
+    "approval-relations-1366.png": "78ed11d54ddc27d33a67cb5cfcb688e64beb0e9c049b5b7abfa75ab399631cf6",
+    "source-policy-409-1366.png": "64e11f0d65662d22aed34d839edb4d8f33c62bc0886e2d8ba5e4d5031e274f46",
+    "approval-relations-768.png": "672b57ee9f7290ceaf2a1ac43cbdf50d8a5207ad0ecd57f40ce8f89c48f539f8",
+    "approval-relations-390.png": "bf4a707fcf1e7390070232a8e3e430054313ad3d5cd40b62ed6e6c434e0818db"
+  },
+  "sourceReview": "final bounded source review0remaining introducedP1P2; all11hash checked",
+  "localTestPhases": "initial backend8/frontend16; changed auth controls2+denial1; changed policy copy2; not freshwhole10/18",
+  "matchingNegatives": [
+    "READ ONLY removal",
+    "initial admin gate removal",
+    "late subject refusal removal",
+    "principal refusal removal",
+    "final existing-user-admin gate removal"
+  ],
+  "quality": "new5source lint0; backendtypecheck/webbuild/validateall0 after reviewed fixes",
+  "R77Compatibility": "not verified; target build.commit pending"
+}

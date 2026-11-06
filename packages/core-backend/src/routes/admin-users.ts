@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express'
 import { Router } from 'express'
+import { userApprovalRelationsHandler } from './admin-user-approval-relations'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { buildOnboardingPacket, getAccessPreset, listAccessPresets } from '../auth/access-presets'
@@ -2659,6 +2660,7 @@ async function auditActivateSuccess(
 
 export function adminUsersRouter(): Router {
   const r = Router()
+  r.get('/api/admin/users/:userId/approval-relations', authenticate, userApprovalRelationsHandler(ensurePlatformAdmin))
   registerAdminUserRecycleRoutes(r)
 
   r.post('/api/admin/users/batch/create', authenticate, async (req: Request, res: Response) => {
