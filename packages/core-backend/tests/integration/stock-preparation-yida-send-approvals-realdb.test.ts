@@ -974,10 +974,15 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
   it('CF2 (index): a grant approved before the first row was admitted hits the identity fence at its own admission; one ledger row, no second attempt', async () => {
     await registerProject()
     const f = await fixture(boundInput())
-    // R′: approved while X is only approved (the ledger is still empty, so the early check cannot see anything).
+    // R′: approved while X is only approved (the ledger is still empty, so the early check cannot see anything). Its
+    // parent code is corrected as well: a NEW seven-key digest, so the seven-key fence cannot answer for it and only
+    // the identity index can (the identity is the key value and the project, which are unchanged).
     const corrected = input('original', 9); const rows = JSON.parse(corrected.rowsText) as Row[]
-    rows[0].description = 'synthetic corrected approval part'; corrected.rowsText = JSON.stringify(rows)
+    rows[0].description = 'synthetic corrected approval part'; rows[0].parentCode = 'PARENT-RECREATED'; corrected.rowsText = JSON.stringify(rows)
     const recreated = await second.draft.createDraft(boundInput(corrected, [{ recordId: 'rec_recreated', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }]))
+    const members = await tableRows(MEMBERS)
+    const original = members.find(row => row.operation_id === f.draft.operationId)!, moved = members.find(row => row.operation_id === recreated.operationId)!
+    expect(moved.creation_identity_digest === original.creation_identity_digest && moved.business_key_digest !== original.business_key_digest).toBe(true)
     const laterGrant = await second.service.approve({ operationId: recreated.operationId, rowKey: recreated.rows[0].rowKey, confirmationId: 'synthetic-recreated-confirmation' })
     const granted = await first.service.approve(f.request)
     const admitted = await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' })

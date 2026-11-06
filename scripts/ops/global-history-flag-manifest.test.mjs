@@ -185,6 +185,11 @@ const ELEARNING_NON_BOOLEAN_FLAGS = new Set(['ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS
 // above: a suffix rule would also catch source constants). M4 PR-3b: the scheduler tick interval.
 const TASKS_NON_BOOLEAN_FLAGS = new Set(['TASKS_SCHEDULER_INTERVAL_MS'])
 
+// Non-boolean YiDa env reads that belong in the manifest, by exact name (same reason as above: the
+// `_ENABLED` rule keeps constant names and refusal codes out). Design baseline v2.3 D20: the exact
+// list of test-copy target refs that may still take unbound rows, read in index.ts as process.env.
+const YIDA_NON_BOOLEAN_FLAGS = new Set(['INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS'])
+
 test('audience scan timeout (#6175): numeric, default 5000, sourced from the resolver parser', () => {
   const spec = GLOBAL_HISTORY_FLAG_BY_KEY.ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS
   assert.ok(spec)
@@ -426,8 +431,10 @@ function globalHistoryFlagsInSource() {
     ...grepPluginFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
     ...grepFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
   ].filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
-  // Derive the reviewed owner-send switch from actual core reads, including phantom detection.
-  const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  // Derive the reviewed owner-send switches from actual core reads, including phantom detection; the one
+  // non-boolean YiDa knob (the D20 unbound test-target list) is named exactly, as the e-learning and task
+  // families do, so a list flag that source stops reading is still reported as a phantom.
+  const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED') || YIDA_NON_BOOLEAN_FLAGS.has(t))
   const userRecycle = grepFlagTokens('USER_RECYCLE_[A-Z_0-9]+_ENABLED')
   // #4196 Class-B outbound two-phase ledger switch (S0-c, AGENTS.md: every new env flag is registered
   // here). One family by name shape, scanned where the executor and retry-eligibility read it.
