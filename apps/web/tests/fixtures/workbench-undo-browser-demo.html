@@ -1,0 +1,64 @@
+<!doctype html>
+<!-- Synthetic browser verification only; this is not an application route or a backend persistence test. -->
+<html lang="zh-CN"><meta charset="utf-8"><title>MetaSheet workbench undo verification</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif}.row{display:flex;height:100vh}.main{flex:1;padding:16px;display:flex;flex-direction:column;gap:12px;align-items:flex-start}</style>
+<div id="app"></div>
+<script type="module">
+// The REAL MetaRecordInspector (record drawer) and MetaCommentComposer inside a root wired the way
+// MultitableWorkbench wires the REAL utils/workbench-undo.ts: installed on the document; a drawer patch
+// settles its commit at once (an accepted server patch); a record switch resets every history. The
+// grid's undo/redo are counted, as are the browser's own undo/redo (`input` with inputType historyUndo /
+// historyRedo) anywhere on the page. #outside stands for a popover teleported out of the workbench;
+// #stopper for a control that stops propagation of every key (the comment affordance buttons).
+import { createApp, h, ref, watch } from '/node_modules/vue/dist/vue.esm-bundler.js'
+import '/node_modules/element-plus/dist/index.css'
+import '/src/styles/tokens.css'
+import MetaRecordInspector from '/src/multitable/components/MetaRecordInspector.vue'
+import MetaCommentComposer from '/src/shared/comments/components/MetaCommentComposer.vue'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo } from '/src/multitable/utils/workbench-undo.ts'
+import { useLocale } from '/src/composables/useLocale.ts'
+useLocale().setLocale('zh-CN')
+window.undoDemo = { grid: { undo: 0, redo: 0 }, native: 0, patches: [] }
+document.addEventListener('input', (e) => { if (e.inputType === 'historyUndo' || e.inputType === 'historyRedo') window.undoDemo.native += 1 }, true)
+const rootRef = ref(null)
+const undo = createWorkbenchUndo({ isInsideWorkbench: (node) => !!rootRef.value?.contains(node) })
+installWorkbenchUndo(undo, { undo: () => { window.undoDemo.grid.undo += 1 }, redo: () => { window.undoDemo.grid.redo += 1 } })
+const FIELDS = [
+  { id: 'fld_title', name: '标题', type: 'string' },
+  { id: 'fld_name', name: '名称', type: 'string' },
+  { id: 'fld_note', name: '备注', type: 'string' },
+  { id: 'fld_due', name: '截止日期', type: 'date' },
+  { id: 'fld_rich', name: '说明', type: 'longText', property: { rich: true } },
+  { id: 'fld_extra', name: '补充', type: 'string' },
+]
+const RECORDS = {
+  rec_1: { id: 'rec_1', version: 1, data: { fld_title: '巡检记录 A', fld_name: 'alpha', fld_note: 'beta', fld_due: '2031-01-02', fld_rich: 'rich', fld_extra: '' } },
+  rec_2: { id: 'rec_2', version: 1, data: { fld_title: '巡检记录 B', fld_name: 'gamma', fld_note: 'delta', fld_due: '2031-02-03', fld_rich: 'other', fld_extra: '' } },
+}
+const record = ref(RECORDS.rec_1)
+const draft = ref('')
+watch(() => record.value.id, () => undo.reset())
+window.undoDemo.rewrite = (fieldId, value) => { record.value = { ...record.value, version: record.value.version + 1, data: { ...record.value.data, [fieldId]: value } } }
+window.undoDemo.switchTo = (id) => { record.value = RECORDS[id] }
+window.undoDemo.draft = () => draft.value
+createApp({
+  render: () => h('div', { class: 'row', ref: rootRef }, [
+    h('div', { class: 'main', tabindex: 0, id: 'grid-area' }, [
+      h('p', '表格区域（合成）'),
+      h('div', { style: 'width: 360px' }, [h(MetaCommentComposer, { modelValue: draft.value, 'onUpdate:modelValue': (v) => { draft.value = v }, onSubmit: () => { draft.value = '' } })]),
+      h('button', { id: 'stopper', type: 'button', onKeydown: (e) => e.stopPropagation() }, 'stopper'),
+    ]),
+    h(MetaRecordInspector, {
+      visible: true, record: record.value, fields: FIELDS, canEdit: true, canComment: false, canDelete: false, recordIds: ['rec_1', 'rec_2'], sheetId: 'sht_demo',
+      onPatch: (fieldId, value) => {
+        undo.beginCommit(drawerCommitContainers(fieldId, FIELDS[0].id))()
+        window.undoDemo.patches.push(`${record.value.id}:${fieldId}=${String(value)}`)
+      },
+    }),
+  ]),
+}).mount('#app')
+const outside = Object.assign(document.createElement('input'), { id: 'outside', type: 'text', value: 'filter' })
+document.body.appendChild(outside)
+window.undoDemo.ready = true
+</script>
+</html>

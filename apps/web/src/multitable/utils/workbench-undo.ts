@@ -22,20 +22,24 @@
  *   on the way is never a step.
  * - Undo restores the control's last snapshot while it has one; redo (shift+z, or ctrl+y) re-applies
  *   what undo took back.
+ * - A text-entry control never hands the chord on: with no step of its own left, the chord does
+ *   nothing. The grid's undo / redo (which replays a recorded cell edit to the server) runs only from a
+ *   non-text target inside the workbench (the grid, a button, a date input, a select…), or from the page
+ *   itself (nothing focused, e.g. after Enter committed the title) when the last press or focus was
+ *   inside the workbench. Outside the workbench (a teleported dialog or popover, the app shell) nothing
+ *   runs.
  * - The history belongs to the control's own edits only. Content no recorded edit produced (a re-render
- *   after grid undo or a record switch, a suggestion picked into the box, a revert) is a rewrite: the
- *   history is dropped.
+ *   after grid undo, a suggestion picked into the box, a revert, a rejected commit snapping back) is a
+ *   rewrite: the history is dropped. `reset` drops every history: the workbench calls it when the drawer
+ *   shows another record (its controls are reused, and may hold equal content in both), or the sheet or
+ *   view changes.
  * - A saved commit ends the history (`beginCommit` from the workbench's drawer commit, settled once the
- *   server accepted it). A DOM `change` is not a commit: most boxes' `change` saves nothing.
- * - When the control has no step left, the chord is the grid's undo / redo (which replays a recorded
- *   cell edit to the server) if focus is inside the workbench or on the page itself, except for an
- *   auto-repeated key in a text control; outside the workbench (a teleported dialog or popover) it
- *   does nothing.
- * - During an input-method composition the chord does nothing.
- * - Date and time inputs, selects, checkboxes and other non-text controls: the grid's inside the
- *   workbench, nothing outside it. A number box holding a draft it cannot report (`validity.badInput`,
- *   e.g. a lone "-") does nothing.
- * - Cmd+Y is grid redo (on macOS it is not a text redo).
+ *   server accepted it): only edits made since stay undoable, back to the committed content. A DOM
+ *   `change` is not a commit: most boxes' `change` saves nothing.
+ * - During an input-method composition the chord does nothing. A number box holding a draft it cannot
+ *   report (`validity.badInput`: "-", "1." read as "") takes no snapshot while it holds one.
+ * - With Alt held the chord is not ours: on Windows AltGr is Ctrl+Alt, and AltGr+Z / AltGr+Y type letters
+ *   (Polish ż, Latvian ž).
  */
 
 /** Input types without a text undo of their own. */
@@ -87,6 +91,8 @@ interface History {
   /** A `beforeinput` was seen and its `input` has not arrived yet. */
   pendingBefore: boolean
   composing: boolean
+  /** The `reset` generation it belongs to; an older one is dropped. */
+  generation: number
 }
 
 function isPlainControl(host: HTMLElement): host is HTMLInputElement | HTMLTextAreaElement {
@@ -97,9 +103,15 @@ function contentOf(host: HTMLElement): string {
   return isPlainControl(host) ? host.value : host.innerHTML
 }
 
-/** A number box whose draft its `value` cannot report ("-", "1e"): its content reads as "". */
+/** A number box whose draft its `value` cannot report ("-", "1."): its content reads as "". */
 function hasUnreportableDraft(host: HTMLElement): boolean {
   return host instanceof HTMLInputElement && host.type === 'number' && host.validity?.badInput === true
+}
+
+/** The page itself rather than a control: what a key event targets when nothing has focus. */
+function isPageItself(target: EventTarget | null): boolean {
+  const doc = (target as Node | null)?.ownerDocument ?? (target as Document | null)
+  return !target || target === doc || target === doc?.documentElement || target === doc?.body
 }
 
 /** The selection inside a contenteditable host, as text offsets from its start. */
@@ -171,8 +183,8 @@ function editKind(inputType: string): string {
   return `own:${inputType}`
 }
 
-/** The letter of a chord: its `key`, or for a layout whose key is not a Latin letter (e.g. 'я') the
- *  key's position (`code`). */
+/** The letter of a chord: its `key` when that is a Latin letter (so QWERTZ's z is z), else, for a
+ *  layout whose letters are not Latin (e.g. 'я'), the key's position (`code`). */
 function chordLetter(event: KeyboardEvent): string {
   const key = typeof event.key === 'string' ? event.key.toLowerCase() : ''
   if (/^[a-z]$/.test(key)) return key
@@ -190,27 +202,36 @@ export type UndoKeyAction = 'none' | 'swallow' | 'restored' | 'grid-undo' | 'gri
 export interface WorkbenchUndoOptions {
   coalesceMs?: number
   now?: () => number
-  /** Whether `target` is inside the workbench, or is the page itself (nothing focused). */
-  isWorkbenchTarget?: (target: EventTarget | null) => boolean
+  /** Whether `node` is inside the workbench (the page itself is decided here, not by this). */
+  isInsideWorkbench?: (node: Node) => boolean
 }
 
 export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
   const coalesceMs = options.coalesceMs ?? 800
   const now = options.now ?? (() => Date.now())
-  const isWorkbenchTarget = options.isWorkbenchTarget ?? (() => true)
+  const isInsideWorkbench = options.isInsideWorkbench ?? (() => true)
   const histories = new WeakMap<HTMLElement, History>()
+  let generation = 0
   /** Set while a restore runs, so the recorder does not take its own edit as one. */
   let restoring = false
+  /** Whether the last press or focus landed outside the workbench (a teleported dialog or popover):
+   *  then a chord on the page itself belongs to that overlay, not to the grid behind it. */
+  let lastPressOutside = false
+
+  function live(host: HTMLElement): History | undefined {
+    const history = histories.get(host)
+    return history && history.generation === generation ? history : undefined
+  }
 
   function fresh(host: HTMLElement): History {
-    const history: History = { undo: [], redo: [], known: contentOf(host), lastKind: '', lastAt: 0, pendingBefore: false, composing: false }
+    const history: History = { undo: [], redo: [], known: contentOf(host), lastKind: '', lastAt: 0, pendingBefore: false, composing: false, generation }
     histories.set(host, history)
     return history
   }
 
   /** The control's history; dropped and started again when its content changed with no recorded edit. */
   function current(host: HTMLElement): History {
-    const history = histories.get(host)
+    const history = live(host)
     if (history && contentOf(host) === history.known) return history
     return fresh(host)
   }
@@ -260,7 +281,7 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
 
   /** Undo or redo one step of the control's own history; false when it has none for it. */
   function step(host: HTMLElement, undo: boolean): boolean {
-    const history = histories.get(host)
+    const history = live(host)
     if (!history) return false
     const content = contentOf(host)
     if (content !== history.known) {
@@ -285,18 +306,22 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
      *  grid's undo / redo for 'grid-undo' / 'grid-redo'; 'restored' and 'swallow' need nothing more. */
     decide(event: KeyboardEvent): UndoKeyAction {
       if (!event.metaKey && !event.ctrlKey) return 'none'
+      if (event.altKey) return 'none'
       const letter = chordLetter(event)
       const undo = letter === 'z' && !event.shiftKey
       const redo = letter === 'y' || (letter === 'z' && event.shiftKey)
       if (!undo && !redo) return 'none'
       if (event.isComposing || event.keyCode === 229) return 'swallow'
       const host = textEntryHost(event.target)
-      if (host && hasUnreportableDraft(host)) return 'swallow'
-      if (host && !(letter === 'y' && event.metaKey) && step(host, undo)) return 'restored'
-      if (!isWorkbenchTarget(event.target)) return 'swallow'
-      // Holding the key in a text control must not walk the grid's history back on the server, one
-      // write per auto-repeat, once the control's own steps are used up.
-      if (event.repeat && host) return 'swallow'
+      if (host) {
+        // A text-entry control's chord is its own: a step of its own, or nothing. Cmd+Y is never a text
+        // redo (on macOS it is not one).
+        if (!(letter === 'y' && event.metaKey) && step(host, undo)) return 'restored'
+        return 'swallow'
+      }
+      const target = event.target as Node | null
+      const inside = isPageItself(target) ? !lastPressOutside : !!target && isInsideWorkbench(target)
+      if (!inside) return 'swallow'
       return undo ? 'grid-undo' : 'grid-redo'
     },
     onBeforeInput(event: Event): void {
@@ -314,6 +339,7 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
       const history = current(host)
       history.pendingBefore = true
       if (history.composing || (event as InputEvent).isComposing || COMPOSITION_INPUT_TYPES.has(inputType)) return
+      // The box holds a draft its value cannot report ("1." reads ""): a snapshot now would be wrong.
       if (hasUnreportableDraft(host)) return
       const kind = editKind(inputType)
       const at = now()
@@ -327,7 +353,7 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
       if (restoring) return
       const host = textEntryHost(event.target)
       if (!host) return
-      const history = histories.get(host)
+      const history = live(host)
       if (!history) return
       if (!history.pendingBefore && !history.composing && history.known !== contentOf(host)) {
         // An edit with no `beforeinput` (the editor's own execCommand: paste, drop, toolbar) is a step of
@@ -350,7 +376,7 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
     },
     onCompositionEnd(event: Event): void {
       const host = textEntryHost(event.target)
-      const history = host ? histories.get(host) : undefined
+      const history = host ? live(host) : undefined
       if (!host || !history) return
       // (Its content was synced by the composition's last `input`, which comes before or after this.)
       history.composing = false
@@ -364,23 +390,39 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
       const host = textEntryHost(target)
       if (host) current(host)
     },
+    /** A press or focus landed on `target`: remember whether it was outside the workbench. */
+    onPress(target: EventTarget | null): void {
+      if (isPageItself(target)) return
+      lastPressOutside = !isInsideWorkbench(target as Node)
+    },
+    /** Drop every control's history (the drawer shows another record; the sheet or view changed). */
+    reset(): void {
+      generation += 1
+    },
     /** The workbench is committing what the controls in `containers` hold. Call the returned function
-     *  once the server accepted it: their history then ends at the commit (edits made since stay
-     *  undoable, back to the committed content). A rejected commit keeps it all. */
+     *  once the server accepted it: their history then ends at the commit, so only edits made since stay
+     *  undoable, back to the committed content. A rejected commit keeps it all (a rejection that snaps
+     *  the control back to the saved value is a rewrite, which drops it anyway). */
     beginCommit(containers: Element[]): () => void {
-      const marks: Array<{ host: HTMLElement; history: History; floor: number }> = []
+      const marks = new Map<HTMLElement, { history: History; top: Snapshot | undefined }>()
       for (const container of containers) {
         for (const el of [container, ...Array.from(container.querySelectorAll('textarea, input, [contenteditable]'))]) {
           const host = textEntryHost(el)
-          const history = host ? histories.get(host) : undefined
-          if (host && history && !marks.some((mark) => mark.host === host)) marks.push({ host, history, floor: history.undo.length })
+          const history = host ? live(host) : undefined
+          if (!host || !history || marks.has(host)) continue
+          marks.set(host, { history, top: history.undo[history.undo.length - 1] })
+          // Typing after the commit is a step of its own, back to the committed content.
+          history.lastKind = ''
+          history.lastAt = 0
         }
       }
       return () => {
-        for (const { host, history, floor } of marks) {
-          if (histories.get(host) !== history) continue
-          history.undo.splice(0, floor)
-          history.redo = []
+        for (const [host, { history, top }] of marks) {
+          if (live(host) !== history || !top) continue
+          // Everything up to the last step taken before the commit goes; what was pushed since stays.
+          // (A step undone while the patch was in flight is no longer there: then nothing goes.)
+          const at = history.undo.lastIndexOf(top)
+          if (at >= 0) history.undo.splice(0, at + 1)
         }
       }
     },
@@ -398,16 +440,23 @@ export function installWorkbenchUndo(undo: WorkbenchUndo, grid: { undo: () => vo
     if (action === 'grid-undo') grid.undo()
     else if (action === 'grid-redo') grid.redo()
   }
+  const onFocusIn = (event: Event) => {
+    undo.onPress(event.target)
+    undo.onCheckpoint(event.target)
+  }
   const onTarget = (event: Event) => undo.onCheckpoint(event.target)
-  // A press on an editor's toolbar keeps focus in the editor: checkpoint what has focus.
-  const onPress = () => undo.onCheckpoint(doc.activeElement)
+  const onPress = (event: Event) => {
+    undo.onPress(event.target)
+    // A press on an editor's toolbar keeps focus in the editor: checkpoint what has focus.
+    undo.onCheckpoint(doc.activeElement)
+  }
   const listeners: Array<[string, (event: Event) => void]> = [
     ['keydown', onKeydown],
     ['beforeinput', undo.onBeforeInput],
     ['input', undo.onInput],
     ['compositionstart', undo.onCompositionStart],
     ['compositionend', undo.onCompositionEnd],
-    ['focusin', onTarget],
+    ['focusin', onFocusIn],
     ['paste', onTarget],
     ['drop', onTarget],
     ['cut', onTarget],
