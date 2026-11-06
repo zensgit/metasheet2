@@ -4,17 +4,27 @@
  * the lease, the intent row, the heartbeat transactions and the live-authority read all go to Postgres. Short
  * synthetic leases (seconds) expire on the DATABASE clock; the system clock is never changed.
  *
- *   - T10: holder A (root exec_A) is PAUSED inside the port after page 1 and its heartbeat cannot reach the
- *     database; the lease expires on the DB clock; B (a DIFFERENT execution root, same project) claims fence+1,
- *     runs and finalizes; A resumes: its next checkpoint() is refused so NO further page is read, its renewal
- *     and its fenced Tx B are void although its intent token is still valid; only B's Tx B landed; A's step
- *     is outcome_unknown(lease_lost).
+ *   - T10 (local loss): holder A (root exec_A) is PAUSED inside the port after page 1 and its heartbeat cannot
+ *     reach the database; with safetyMs 0 its LOCAL deadline passes and marks the heartbeat lost; the lease
+ *     expires on the DB clock; B (a DIFFERENT execution root, same project) claims fence+1, runs and finalizes;
+ *     A resumes: its next checkpoint() is refused by that local loss (the executor's checkpoint throws before any
+ *     SELECT) so NO further page is read, its renewal and its fenced Tx B are void although its intent token is
+ *     still valid; only B's Tx B landed; A's step is outcome_unknown(lease_lost).
+ *   - T10 (frozen clock): the same takeover, but A's heartbeat clock is FROZEN and its renewal hangs, so A's
+ *     local deadline can never pass and nothing in-process marks its lease lost (its signal stays un-aborted).
+ *     The DATABASE-side admission guard (`assertJobLeaseCurrent` in the executor's checkpoint: fence = mine AND
+ *     not expired, a plain pool read) is then the ONLY thing that can refuse page 2 — and it does; A's step ends
+ *     outcome_unknown(lease_lost) through Tx B's lock-verify (I-6 step 1), with no terminal write of its own.
  *   - T3: A "crashes" mid-run (never settles, never renews): B is busy within the TTL and runs after it; a
  *     same-identity replay skips in-flight while A's intent lease is live and flips the row to outcome_unknown
  *     once that lease is in the past (never a second run of A's identity).
  *   - live authority (§6.4) on real auth tables: a bound principal with a single active membership and a
  *     workflow:* code resolves to the request-path permission codes (listUserPermissions parity); deactivation,
  *     a missing membership and a missing automation capability are each principal_unauthorized.
+ *   - production authority path (§6.4): the REAL executor with NO resolver seam runs its own committed READ
+ *     COMMITTED authority transaction over the production transaction seam — a seeded principal runs to success
+ *     with the request-path permission codes in the port context; deactivated ⇒ skipped(principal_unauthorized)
+ *     before anything is leased.
  *
  * Two-point wired (plugin-tests.yml multitable real-DB step + vitest.config.ts exclude); EXPECT_DB sentinel.
  */
@@ -78,11 +88,11 @@ function gate() {
   const opened = new Promise<void>((resolve) => { open = resolve })
   return { opened, open }
 }
-function intentOf(root: string): OutboundIntentIdentity {
+function intentOf(root: string, config: typeof CONFIG = CONFIG): OutboundIntentIdentity {
   return {
     kind: 'execution',
     rootExecutionId: root,
-    actionKey: deriveActionKey({ structuralPath: '0', actionType: 'run_integration_job', canonicalConfig: CONFIG }),
+    actionKey: deriveActionKey({ structuralPath: '0', actionType: 'run_integration_job', canonicalConfig: config }),
     targetKey: deriveOutboundTargetKey(['stock_prep_pull', TENANT, PROJECT]),
   }
 }
@@ -110,13 +120,17 @@ async function untilLeaseExpired(): Promise<void> {
 /**
  * A port that reads pages behind per-page barriers ("the holder is paused" between pages) and admits every page
  * through `await checkpoint()` ALONE — deliberately without consulting the signal — so what this file proves is
- * the DATABASE-side admission guard (I-5: fence = mine AND not expired), not the in-process abort.
+ * the executor's checkpoint() (I-5), never an in-process abort. That checkpoint has two halves: the heartbeat's
+ * LOCAL loss (T10: the local deadline passed ⇒ it throws before any SELECT) and the DATABASE-side admission guard
+ * `assertJobLeaseCurrent` (fence = mine AND not expired) — which only the frozen-clock T10 isolates, because there
+ * the local half can never fire. Every port input is kept so a test can read the signal / context the executor built.
  */
 function pagedPort(pageGates: Array<ReturnType<typeof gate>>) {
-  const state = { pagesRead: 0, calls: 0 }
+  const state = { pagesRead: 0, calls: 0, inputs: [] as IntegrationRunInput[] }
   const port: IntegrationRunPort = {
     async run(input: IntegrationRunInput): Promise<IntegrationRunSummary> {
       state.calls += 1
+      state.inputs.push(input)
       for (let page = 0; page < pageGates.length; page += 1) {
         await pageGates[page].opened
         await input.checkpoint()
@@ -129,7 +143,12 @@ function pagedPort(pageGates: Array<ReturnType<typeof gate>>) {
 }
 const immediatePort: IntegrationRunPort = { run: async () => ({ status: 'succeeded', reason: 'ready', canApply: true, counts: { add: 1 } }) }
 
-function executorWith(port: IntegrationRunPort, transaction: JobLeaseTransaction, seams: NonNullable<AutomationDeps['integrationJobRuntime']>) {
+/**
+ * The REAL executor over the given transaction seam. By default the principal resolver is a seam (the lease /
+ * takeover cases are about the ledgers, not authority); `extra: { resolveIntegrationRunPrincipal: undefined }`
+ * removes it, so the executor runs its OWN live-authority transaction — the production path.
+ */
+function executorWith(port: IntegrationRunPort, transaction: JobLeaseTransaction, seams: NonNullable<AutomationDeps['integrationJobRuntime']>, extra: Partial<AutomationDeps> = {}) {
   const tracked: Promise<void>[] = []
   const exec = new AutomationExecutor({
     eventBus: new EventBus(),
@@ -139,12 +158,13 @@ function executorWith(port: IntegrationRunPort, transaction: JobLeaseTransaction
     trackIntegrationJobTask: (task) => { tracked.push(task) },
     resolveIntegrationRunPrincipal: async () => ({ ok: true, user: PRINCIPAL }),
     integrationJobRuntime: seams,
+    ...extra,
   })
-  const run = (executionId: string): Promise<AutomationStepResult> => {
-    const context: ExecutionContext = { executionId, ruleId: `rule_${RUN}`, sheetId: 'sheet_1', recordId: '', recordData: {}, ruleCreatedBy: PRINCIPAL_ID, triggerEvent: {}, rootExecutionId: executionId }
+  const run = (executionId: string, config: typeof CONFIG = CONFIG): Promise<AutomationStepResult> => {
+    const context: ExecutionContext = { executionId, ruleId: `rule_${RUN}`, sheetId: 'sheet_1', recordId: '', recordData: {}, ruleCreatedBy: config.binding.principalId, triggerEvent: {}, rootExecutionId: executionId }
     const identity: ClassAActionIdentity = { structuralPath: '0', rootExecutionId: executionId }
     return (exec as unknown as { executeSingleAction(a: unknown, c: ExecutionContext, i: ClassAActionIdentity): Promise<AutomationStepResult> })
-      .executeSingleAction({ type: 'run_integration_job', config: CONFIG }, context, identity)
+      .executeSingleAction({ type: 'run_integration_job', config }, context, identity)
   }
   return { exec, run, tracked }
 }
@@ -296,4 +316,83 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
     // unknown principal ⇒ unauthorized, not an error
     expect(await onTx((trx) => resolveIntegrationRunPrincipalOnTransaction(trx, { principalId: `nobody_${RUN}`, tenantId: TENANT }))).toEqual({ ok: false, reason: 'principal_unauthorized' })
   }, 20_000)
+
+  test('production authority path (§6.4): NO resolver seam — the real executor runs its own committed READ COMMITTED authority transaction over the production transaction seam; a seeded principal runs to success with the request-path codes in the port context; deactivated ⇒ skipped(principal_unauthorized) before anything is leased', async () => {
+    await q(`DELETE FROM meta_automation_job_leases WHERE scope_key = $1`, [SCOPE])
+    // Its own principal and role (the live-authority case above owns PRINCIPAL_ID and leaves it deactivated).
+    const principalId = `svc2_${RUN}`
+    const roleId = `role2_${RUN}`
+    const config = { ...CONFIG, binding: { principalId, tenantId: TENANT } }
+    for (const code of ['workflow:write', 'integration:read']) {
+      await q(`INSERT INTO permissions (code, name) SELECT $1::varchar, $1::varchar WHERE NOT EXISTS (SELECT 1 FROM permissions WHERE code = $1::varchar)`, [code])
+    }
+    await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [principalId, `${principalId}@example.test`, 'svc2'])
+    await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [principalId, TENANT])
+    await q(`INSERT INTO roles (id, name) VALUES ($1, $2)`, [roleId, roleId])
+    await q(`INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'workflow:write'), ($1, 'integration:read')`, [roleId])
+    await q(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)`, [principalId, roleId])
+
+    const { port, state } = pagedPort([{ opened: Promise.resolve(), open: () => undefined }])
+    // the production shape: poolManager.transaction (poolTransaction) and NO resolveIntegrationRunPrincipal seam
+    const A = executorWith(port, poolTransaction, { leaseTtlMs: 5_000 }, { resolveIntegrationRunPrincipal: undefined })
+    const step = await A.run(`exec_prod_${RUN}`, config)
+    expect(step).toMatchObject({ status: 'success', output: { outcome: 'succeeded' } })
+    expect(unitOf(step)).toMatchObject({ outcome: 'succeeded', confirmed: true })
+    expect(state.calls).toBe(1)
+    const context = state.inputs[0].context
+    expect(context.user).toMatchObject({ id: principalId, tenantId: TENANT, role: 'user', roles: [] })
+    expect(context.user.permissions).toContain('workflow:write')
+    expect([...context.user.permissions].sort()).toEqual([...(await listUserPermissions(principalId))].sort())
+    expect(context.authenticatedTenantId).toBe(TENANT)
+    expect((await intentRow(intentOf(`exec_prod_${RUN}`, config)))!.status).toBe('sent')
+    expect(await leaseRow()).toMatchObject({ fence: '1', holder: null })
+    // deactivated ⇒ unauthorized: no lease claimed, no intent row, no port call (read live, every trigger)
+    await q(`UPDATE users SET is_active = false WHERE id = $1`, [principalId])
+    const refused = await A.run(`exec_prod2_${RUN}`, config)
+    expect(refused).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized' } })
+    expect(state.calls).toBe(1)
+    expect(await intentRow(intentOf(`exec_prod2_${RUN}`, config))).toBeUndefined()
+    expect(await leaseRow()).toMatchObject({ fence: '1', holder: null })
+  }, 20_000)
+
+  test('T10 (frozen clock): A’s local deadline can never pass and its renewal hangs, so after a different root took the scope the DATABASE-side admission guard is the ONLY thing that can refuse page 2 — and it does; A ends lease_lost with no Tx B of its own', async () => {
+    await q(`DELETE FROM meta_automation_job_leases WHERE scope_key = $1`, [SCOPE])
+    const txGate = gate() // A's heartbeat renewals hang here (never a renew_error, never a renew_timeout within the test)
+    const pageTwo = gate()
+    const { port: portA, state } = pagedPort([{ opened: Promise.resolve(), open: () => undefined }, pageTwo, { opened: Promise.resolve(), open: () => undefined }])
+    const gatedTransaction: JobLeaseTransaction = async (handler) => { await txGate.opened; return poolTransaction(handler) }
+    const frozen = Date.now() // the heartbeat's clock never advances ⇒ its local deadline never passes
+    const A = executorWith(portA, gatedTransaction, { leaseTtlMs: 2_000, settleGraceMs: 200, heartbeat: { intervalMs: 1_000, renewTimeoutMs: 60_000, safetyMs: 0, now: () => frozen } })
+    const stepA = A.run(`exec_frozen_A_${RUN}`)
+    for (let i = 0; i < 100 && state.pagesRead < 1; i++) await sleep(20)
+    expect(state.pagesRead).toBe(1)
+    expect(await leaseRow()).toMatchObject({ fence: '1', live: true })
+
+    // The lease expires on the DATABASE clock only; B — another execution root — takes the scope at fence 2.
+    await untilLeaseExpired()
+    const B = executorWith(immediatePort, poolTransaction, { leaseTtlMs: 2_000 })
+    const stepB = await B.run(`exec_frozen_B_${RUN}`)
+    expect(stepB.status).toBe('success')
+    expect(await leaseRow()).toMatchObject({ fence: '2', holder: null })
+    expect((await intentRow(intentOf(`exec_frozen_B_${RUN}`)))!.status).toBe('sent')
+
+    // A is still running and nothing in-process marked its lease lost: its signal is NOT aborted. Page 2 is
+    // admitted through checkpoint() alone ⇒ only the SELECT (fence = mine AND not expired) can refuse it.
+    expect(state.inputs[0].signal.aborted).toBe(false)
+    pageTwo.open()
+    await sleep(300)
+    expect(state.pagesRead).toBe(1)
+    expect(state.inputs[0].signal.aborted).toBe(false)
+
+    // Release A's hung renewal so its heartbeat.stop() can return: A's step ends lease_lost (Tx B's lock-verify),
+    // its intent row stays pending (no terminal write by A), the scope stays B's released fence 2.
+    txGate.open()
+    const resultA = await stepA
+    expect(resultA).toMatchObject({ status: 'failed', output: { outcome: 'outcome_unknown', reason: 'lease_lost' } })
+    expect(state.pagesRead).toBe(1)
+    expect(state.calls).toBe(1)
+    expect(await intentRow(intentOf(`exec_frozen_A_${RUN}`))).toMatchObject({ status: 'pending' })
+    expect(await leaseRow()).toMatchObject({ fence: '2', holder: null })
+    await Promise.all(A.tracked)
+  }, 30_000)
 })

@@ -1922,11 +1922,17 @@ export class RunIntegrationJobAbort extends Error {
   }
 }
 
+/**
+ * An abort-shaped rejection: the step's own signal (AbortError / TimeoutError), the lease checkpoint
+ * (JobLeaseLostError / JOB_LEASE_LOST) or the plugin's governed-entry refusal wrapping either of them
+ * (GovernedEntryAbortError / GOVERNED_ENTRY_ABORTED, lib/governed-entry-checkpoint.cjs) — never a fault class.
+ */
 function isAbortLikeError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
   const name = (error as { name?: unknown }).name
   const code = (error as { code?: unknown }).code
-  return name === 'AbortError' || name === 'TimeoutError' || name === 'JobLeaseLostError' || code === 'ABORT_ERR' || code === 'JOB_LEASE_LOST'
+  return name === 'AbortError' || name === 'TimeoutError' || name === 'JobLeaseLostError' || name === 'GovernedEntryAbortError'
+    || code === 'ABORT_ERR' || code === 'JOB_LEASE_LOST' || code === 'GOVERNED_ENTRY_ABORTED'
 }
 
 /** Values-free error class: a code or a name, never a message. */
@@ -4210,7 +4216,10 @@ export class AutomationExecutor {
           },
         }, binding)
       })
-    } catch {
+    } catch (error) {
+      // Values-free: the error's code or name only (never its message, never the binding), so the reason a
+      // trigger stopped at not_started(authority_unavailable) is readable in the log without the ledger.
+      logger.warn('run_integration_job live-authority read failed; unit not_started(authority_unavailable)', { errorClass: integrationRunErrorClass(error) })
       return { ok: false, reason: 'authority_unavailable' }
     }
   }

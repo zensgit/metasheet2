@@ -14,6 +14,10 @@
 //        `dryRunToken`, `revision` and `evidence` never leave; counts keep integers only.
 //   P-04 refusals: 401/403 => skipped(principal_unauthorized); PROJECT_ABSENT / ARCHIVED => held; other
 //        HttpRouteError => failed(errorClass = code); an abort or a lease-lost checkpoint rejection is RETHROWN.
+//   P-05 a REAL GovernedEntryAbortError (lib/governed-entry-checkpoint.cjs) thrown by the REAL
+//        runGovernedStockPrepPull (the I2 project-sheet harness: real routes, fake host / PLM) is RETHROWN as the
+//        same instance — the host's signal firing after page 1, and the host's checkpoint refusing page 2 (its
+//        rejection travelling as `cause`); the ungoverned run over the same entry still summarizes.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -183,6 +187,79 @@ const tests = [
     }
     const refusing = createIntegrationRunPort({ governedEntries: { async runGovernedStockPrepPull() { throw new HttpRouteError(403, 'FORBIDDEN', 'x') }, async runGovernedPipeline() {} } })
     assert.equal((await refusing.run({ context: {}, job: { kind: 'stock_prep_pull', projectNo: 'P' }, automation: {} })).reason, 'principal_unauthorized')
+  }],
+
+  ['P-05 a REAL GovernedEntryAbortError from the REAL governed entry is rethrown as the same instance: the signal after page 1 (aborted) and a refusing checkpoint at page 2 (checkpoint_refused, host error as cause); the ungoverned run still summarizes', async () => {
+    const checkpointSeam = require(path.join(LIB, 'governed-entry-checkpoint.cjs'))
+    const httpRoutes = require(ROUTES_PATH)
+    const harness = require('./support/stock-preparation-project-sheet-harness.cjs')
+    const { STOCK_PREP_OPERATE, STOCK_PREP_PULL, STOCK_PREP_READ } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
+    const TENANT = 'tenant-r69-port'
+    const PROJECT = 'PRJ-R69-PORT'
+    const silent = Object.freeze({ info() {}, warn() {}, error() {} })
+    const puller = Object.freeze({ id: 'u_r69_port_pull', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL], roles: [], role: 'user', tenantId: TENANT })
+    // The context exactly as core's buildIntegrationRunPrincipalContext shapes it: six fields, no request.
+    const coreContext = () => ({ user: puller, authUser: puller, authenticatedTenantId: TENANT, query: {}, params: {}, body: { parameters: { projectNo: PROJECT } } })
+    const job = { kind: 'stock_prep_pull', projectNo: PROJECT }
+    const automation = { ruleId: 'r', executionId: 'e', rootExecutionId: 'e' }
+    const mount = () => {
+      const h = harness.mountProjectSheetRoutes({ tenantId: TENANT, projectNo: PROJECT, switchOn: true, logger: silent })
+      h.seedRegistryRow(PROJECT)
+      h.handlers = httpRoutes.createHandlers(h.services, { context: h.context, logger: silent })
+      return h
+    }
+    const rejectionOf = async (promise) => {
+      try { await promise } catch (error) { return error }
+      assert.fail('expected the port to rethrow the governed refusal, it resolved instead')
+      return null
+    }
+
+    // Calibration: the same real entry, ungoverned, reads more than one page and summarizes (so "no page 2" below is not vacuous).
+    const base = mount()
+    let baselineReads
+    try {
+      const summary = await createIntegrationRunPort({ governedEntries: base.handlers.governedEntries }).run({ context: coreContext(), job, automation })
+      assert.ok(['succeeded', 'held'].includes(summary.status), `a real dry run summarizes to the ADR vocabulary, got ${summary.status}`)
+      baselineReads = base.source.calls.length
+      assert.ok(baselineReads >= 2, `calibration: the synthetic BOM takes ${baselineReads} reads`)
+    } finally {
+      base.restore()
+    }
+
+    // The host's signal fires once page 1 has been read ⇒ the entry throws its own GovernedEntryAbortError (aborted); the port rethrows THAT instance.
+    const h1 = mount()
+    try {
+      const port = createIntegrationRunPort({ governedEntries: h1.handlers.governedEntries })
+      const controller = new AbortController()
+      const read = h1.source.adapter.read.bind(h1.source.adapter)
+      h1.source.adapter.read = async (input) => { const page = await read(input); controller.abort(Object.assign(new Error('shutdown'), { name: 'AbortError' })); return page }
+      const error = await rejectionOf(port.run({ context: coreContext(), job, signal: controller.signal, checkpoint: async () => {}, automation }))
+      assert.ok(error instanceof checkpointSeam.GovernedEntryAbortError, `rethrown as the governed refusal itself, got ${error && error.name}`)
+      assert.equal(error.code, checkpointSeam.GOVERNED_ENTRY_ABORTED_CODE)
+      assert.equal(error.errorClass, 'aborted')
+      assert.equal(error.failureStage, 'read')
+      assert.equal(h1.source.calls.length, 1, 'page 1 was read, page 2 never was')
+    } finally {
+      h1.restore()
+    }
+
+    // The host's checkpoint refuses page 2 (the job fence is no longer ours) ⇒ GovernedEntryAbortError (checkpoint_refused) wrapping the host's rejection as `cause`; rethrown as-is.
+    const h2 = mount()
+    try {
+      const port = createIntegrationRunPort({ governedEntries: h2.handlers.governedEntries })
+      const lost = Object.assign(new Error('lost'), { name: 'JobLeaseLostError', code: 'JOB_LEASE_LOST', stage: 'verify' })
+      let checkpoints = 0
+      const checkpoint = async () => { checkpoints += 1; if (checkpoints >= 3) throw lost } // 1 = before the source read, 2 = page 1, 3 = page 2
+      const error = await rejectionOf(port.run({ context: coreContext(), job, signal: new AbortController().signal, checkpoint, automation }))
+      assert.ok(error instanceof checkpointSeam.GovernedEntryAbortError, `rethrown as the governed refusal itself, got ${error && error.name}`)
+      assert.equal(error.errorClass, 'checkpoint_refused')
+      assert.equal(error.failureStage, 'read')
+      assert.equal(error.cause, lost, 'the host’s own rejection travels as the cause (in-process only, non-enumerable)')
+      assert.equal(h2.source.calls.length, 1, 'the refused page was never read')
+      assert.equal(checkpoints, 3)
+    } finally {
+      h2.restore()
+    }
   }],
 ]
 

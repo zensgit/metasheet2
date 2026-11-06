@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { AutomationExecutor, type AutomationDeps, type AutomationStepResult, type ClassAActionIdentity, type ExecutionContext } from '../../src/multitable/automation-executor'
 import type { IntegrationRunInput, IntegrationRunPort, IntegrationRunSummary } from '../../src/core/integration-run-port'
+import { Logger } from '../../src/core/logger'
 import { EventBus } from '../../src/integration/events/event-bus'
 import { JobLeaseLostError, RUN_INTEGRATION_JOB_TIMEOUT_MAX_MS } from '../../src/multitable/automation-job-lease'
 import {
@@ -532,6 +533,49 @@ describe('run_integration_job — executor state machine (fake DB, fake clock)',
     expect(db.lease(SCOPE)).toEqual(leaseBefore)
     expect(db.log.filter((l) => l === 'intent:outcome')).toHaveLength(0)
     expect(db.log.filter((l) => l === 'lease:release')).toHaveLength(0)
+  })
+
+  it('production authority path with NO resolver seam: a transaction that cannot reach the database ⇒ not_started(authority_unavailable), nothing leased, no port call, and ONE values-free warn naming the error class only', async () => {
+    const db = createFakeJobDb()
+    const { port, run } = fakePort('immediate')
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    try {
+      const unreachable = (async () => { throw Object.assign(new Error('connection refused (a message that carries values)'), { code: 'ECONNREFUSED' }) }) as AutomationDeps['transaction']
+      // `resolveIntegrationRunPrincipal: undefined` = the executor's OWN authority transaction (the production path)
+      const step = await harness(db, port, { resolveIntegrationRunPrincipal: undefined, transaction: unreachable }).run('exec_unavail_prod')
+      expect(step).toMatchObject({ status: 'failed', output: { outcome: 'not_started', reason: 'authority_unavailable' } })
+      expect(run).not.toHaveBeenCalled()
+      expect(db.intentRows()).toHaveLength(0)
+      expect(db.lease(SCOPE)).toBeUndefined()
+      const authorityWarns = warn.mock.calls.filter(([message]) => /live-authority read failed/.test(String(message)))
+      expect(authorityWarns).toHaveLength(1)
+      expect(authorityWarns[0][1]).toEqual({ errorClass: 'ECONNREFUSED' })
+      expect(JSON.stringify(authorityWarns)).not.toMatch(/carries values|svc_user|tenant_1/)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('a governed-entry refusal (GovernedEntryAbortError / GOVERNED_ENTRY_ABORTED — the plugin checkpoint seam wrapping an abort or a lease-lost checkpoint) rejected by the port with no local abort is an abort class: failed(aborted), Tx B lands, the lease is released', async () => {
+    const db = createFakeJobDb()
+    const { port, calls } = fakePort('honor')
+    const h = harness(db, port)
+    const step = h.run('exec_1')
+    await settle()
+    expect(calls).toHaveLength(1)
+    // the shape plugins/plugin-integration-core/lib/governed-entry-checkpoint.cjs throws: name + code, own non-enumerable tags, the wrapped error as `cause`
+    const refusal = Object.assign(new Error('the governed run checkpoint refused its next call'), { name: 'GovernedEntryAbortError', code: 'GOVERNED_ENTRY_ABORTED' })
+    Object.defineProperty(refusal, 'errorClass', { value: 'checkpoint_refused', enumerable: false })
+    Object.defineProperty(refusal, 'failureStage', { value: 'read', enumerable: false })
+    Object.defineProperty(refusal, 'cause', { value: new JobLeaseLostError('verify'), enumerable: false })
+    calls[0].reject(refusal)
+    await settle()
+    const result = await step
+    expect(result).toMatchObject({ status: 'failed', output: { outcome: 'failed', reason: 'aborted' } })
+    expect(unitOf(result)).toMatchObject({ outcome: 'failed', reason: 'aborted', confirmed: true })
+    expect(db.intentRows()[0][1]).toMatchObject({ status: 'failed', lastError: 'aborted' })
+    expect(db.lease(SCOPE)).toMatchObject({ holder: null })
+    expect(h.tracked).toHaveLength(0)
   })
 
   it('every project is its own unit, in order; the step aggregates worst-wins and stops starting projects once the budget is spent', async () => {
