@@ -23,7 +23,14 @@
 // (1)–(3) failing = NOT SELECTED: no trace, no further read. (4) failing on a row the caller named
 // explicitly = the terminal outcome `source_unbound` (a pasted rowsText draft never reaches production
 // write-back; SR5) — the bounded batch reader excludes such rows in SQL, the decision re-checks anyway.
+// `source_unbound` comes from the NULL digest ONLY: a bound row whose row values cannot be read is
+// retryable (YIDA_ISSUE_CONFIRM_ROW_SOURCE_UNAVAILABLE), never a terminal trace.
 // prepared / dispatching / not_sent / outcome_unknown (incl. receipt_unparsed) are never written (D6).
+//
+// D14 (only registered project sheets are written; switch off → skip and count). The per-project sheets
+// switch MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED (exact 'true', read per row and again right before
+// the patch) is checked before the project registry is asked: off → skip `project_sheets_disabled`, no
+// trace, no registry read, so the row is decided again once the switch is on.
 //
 // THE DATE (D15). The calendar day, in MULTITABLE_BUSINESS_TIMEZONE (default Asia/Shanghai; the same rule
 // as the host's resolveMultitableBusinessTimezone, pinned by a host-equivalence test), of the ledger row's
@@ -32,7 +39,8 @@
 //
 // ONE ROW, IN ORDER (each step is the pure decision below; the executor only gathers the next fact):
 //   selector → row values (bound sheet + the payload's idempotencyKey / projectNo through the mapping's
-//   direct entries; missing → payload_unmapped) → project registry by (tenant, projectNo) (absent →
+//   direct entries; missing → payload_unmapped; unreadable → retryable) → the project-sheets switch (off →
+//   skip project_sheets_disabled) → project registry by (tenant, projectNo) (absent →
 //   project_absent, archived → project_archived, registered sheet ≠ bound sheet → sheet_mismatch) →
 //   UNDER THE SHEET WRITE LEASE (purpose issue_confirm_writeback): live authority re-check (revoked →
 //   permission_revoked) → the row by idempotencyKey, limit 2 (0 → row_absent, 2 → duplicate_key, its
@@ -43,8 +51,10 @@
 //   DO NOTHING.
 //
 // RETRYABLE = NO TRACE (§7.3). Lease busy / lost / superseded, a host refusal of the fence, a version
-// conflict, a host or store failure while gathering facts, the switch turned off mid-run: the row is
-// reported `retryable` with a fixed code and nothing is recorded; the next recovery run decides it again.
+// conflict, a host or store failure while gathering facts (ANY port that throws: row source, project
+// registry, authority, sheet open / query / patch), a bound row whose row values come back null, the switch
+// turned off mid-run: the row is reported `retryable` with a fixed code and nothing is recorded; the next
+// recovery run decides it again.
 // A failure of the TRACE INSERT itself is not swallowed: it fails the run (fail closed — evidence that
 // could not be written is never reported as written). A crash between the patch and the trace converges
 // on the next run: the cell now holds the date → already_set; two concurrent runs that both decided the
@@ -94,8 +104,15 @@ const ISSUE_CONFIRM_WRITEBACK_OUTCOMES = Object.freeze([
 ])
 // The outcomes whose trace carries the date (and its zone); every other outcome carries neither.
 const ISSUE_CONFIRM_DATED_OUTCOMES = Object.freeze(['written', 'already_set'])
-// Not selected (no trace, no further read): the first three selector conditions and a missing ack audit.
-const ISSUE_CONFIRM_SKIP_REASONS = Object.freeze(['not_acknowledged', 'not_create', 'target_not_listed', 'acknowledgement_missing'])
+// Not selected (no trace, no further read): the first three selector conditions, a missing ack audit and
+// (D14) the per-project sheets switch being off.
+const ISSUE_CONFIRM_SKIP_REASONS = Object.freeze([
+  'not_acknowledged', 'not_create', 'target_not_listed', 'acknowledgement_missing', 'project_sheets_disabled',
+])
+// The per-project sheets switch (D14). The same literal as stock-preparation-project-targets.cjs
+// PROJECT_SHEETS_ENABLED_ENV (pinned by the unit suite; not required here so the module stays IO-free).
+const PROJECT_SHEETS_ENABLED_ENV = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'
+const ROW_SOURCE_UNAVAILABLE_CODE = 'YIDA_ISSUE_CONFIRM_ROW_SOURCE_UNAVAILABLE'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const DIGEST_RE = /^[0-9a-f]{64}$/
@@ -133,6 +150,11 @@ function nonEmptyString(value) {
 
 function issueConfirmWritebackEnabled(env = process.env) {
   return Boolean(env) && env[ISSUE_CONFIRM_WRITEBACK_ENABLED_ENV] === 'true'
+}
+
+// D14: exact literal 'true' only, read per call (the project-targets predicate's rule).
+function issueConfirmProjectSheetsEnabled(env = process.env) {
+  return Boolean(env) && env[PROJECT_SHEETS_ENABLED_ENV] === 'true'
 }
 
 // Comma-separated target_ref UUIDs, trimmed, de-duplicated. An entry that is not a lowercase UUID (the
@@ -251,7 +273,8 @@ function decideIssueConfirmCell(cellValue, date) {
  *   ledger        { id, tenantId, ownerId, targetRef, status, intent, sourceRecordDigest, acknowledgedAt }
  *   targetRefs    parsed switch list
  *   timeZone      resolved business zone
- *   rowValues     null (unreadable) | { boundSheetId, config, payload }
+ *   projectSheetsEnabled  true only when MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED is 'true' (D14)
+ *   rowValues     { boundSheetId, config, payload } — null / no bound sheet throws ROW_SOURCE_UNAVAILABLE
  *   project       null (unregistered) | { sheetId, objectId, status: 'active' | 'archived' }
  *   authority     true | false — the LIVE re-check, under the lease
  *   records       array of { id, version, data } matched by idempotencyKey (limit 2), under the lease
@@ -266,11 +289,16 @@ function decideIssueConfirmWriteback(facts) {
 
   if (!Object.prototype.hasOwnProperty.call(facts, 'rowValues')) return { kind: 'need', need: 'rowValues' }
   const rowValues = facts.rowValues
+  // The digest is bound (the selector proved it), so an unreadable or malformed row-values answer is a
+  // fact-gathering failure, never `source_unbound` (SR5 defines that by the NULL digest): retryable.
+  if (rowValues === null || rowValues === undefined) fail(ROW_SOURCE_UNAVAILABLE_CODE, 'bound row values could not be read')
   const boundSheetId = isPlainObject(rowValues) ? opaqueId(rowValues.boundSheetId) : null
-  if (!boundSheetId) return { kind: 'record', outcome: 'source_unbound', sheetId: null }
+  if (!boundSheetId) fail(ROW_SOURCE_UNAVAILABLE_CODE, 'bound row values carry no bound sheet')
   const key = extractIssueConfirmRowKey(rowValues.config, rowValues.payload)
   if (!key) return { kind: 'record', outcome: 'payload_unmapped', sheetId: null }
 
+  // D14: the per-project sheets switch off → skip and count (no trace, the registry is not asked).
+  if (facts.projectSheetsEnabled !== true) return { kind: 'skip', reason: 'project_sheets_disabled' }
   if (!Object.prototype.hasOwnProperty.call(facts, 'project')) return { kind: 'need', need: 'project', projectNo: key.projectNo }
   const project = facts.project
   if (!isPlainObject(project)) return { kind: 'record', outcome: 'project_absent', sheetId: null }
@@ -375,8 +403,10 @@ function requireFunction(holder, name, label) {
  * Dependencies (all injected; this module does no IO of its own):
  *   ledgerReader.list({ tenantId, ownerId, targetRefs, ledgerIds, limit }) → ledger rows of exactly this
  *       tenant + owner (see decideIssueConfirmWriteback), at most `limit`, none already traced.
- *   rowSource.read({ tenantId, ownerId, ledger }) → null | { boundSheetId, config, payload }
- *   projectRegistry.resolve({ tenantId, projectNo }) → null | { sheetId, objectId, status }
+ *   rowSource.read({ tenantId, ownerId, ledger }) → { boundSheetId, config, payload }; THROWS on any
+ *       failure (a null answer is retryable too, never a trace)
+ *   projectRegistry.resolve({ tenantId, projectNo }) → null (no registration) | { sheetId, objectId, status };
+ *       THROWS on any failure; never called while the project-sheets switch is off (D14)
  *   sheets.open({ tenantId, project }) → a records api bound to that one sheet:
  *       { queryRecords({ filters, limit, offset }), patchRecord({ recordId, changes, expectedVersion, writeFence }) }
  *   authority.recheck({ tenantId, ownerId, sheetId, objectId }) → true | false (live, under the lease)
@@ -416,7 +446,7 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
   // Decide one row. Returns { kind: 'skip' | 'record' | 'retryable' | 'stopped', ... }. Facts are gathered
   // only when the pure decision asks for them; the lease is held only around authority, records and patch.
   async function decideRow(scope, ledger, targetRefs, timeZone) {
-    const facts = { ledger, targetRefs, timeZone }
+    const facts = { ledger, targetRefs, timeZone, projectSheetsEnabled: issueConfirmProjectSheetsEnabled(env) }
     let decision = decideIssueConfirmWriteback(facts)
     if (decision.kind === 'need' && decision.need === 'rowValues') {
       facts.rowValues = await rowSource.read({ tenantId: scope.tenantId, ownerId: scope.ownerId, ledger })
@@ -451,6 +481,8 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
       if (inner.kind !== 'patch') return inner
       // The switch is read once more right before the only write (a switch turned off mid-run stops here).
       if (!issueConfirmWritebackEnabled(env)) throw SWITCH_OFF
+      // D14 once more as well: the project-sheets switch turned off mid-row → skip and count, no patch.
+      if (!issueConfirmProjectSheetsEnabled(env)) return { kind: 'skip', reason: 'project_sheets_disabled' }
       await guard.beforeWrite({ operation: 'patchRecord', subject: 'issue_confirm_writeback' })
       try {
         await guard.withHostWrite(() => records.patchRecord({
@@ -569,6 +601,8 @@ module.exports = {
   ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE,
   ISSUE_CONFIRM_WRITEBACK_MAX_BATCH,
   ISSUE_CONFIRM_WRITEBACK_OUTCOMES,
+  PROJECT_SHEETS_ENABLED_ENV,
+  ROW_SOURCE_UNAVAILABLE_CODE,
   YidaIssueConfirmWritebackError,
   createIssueConfirmTraceStore,
   createIssueConfirmWritebackExecutor,
@@ -576,6 +610,7 @@ module.exports = {
   decideIssueConfirmWriteback,
   extractIssueConfirmRowKey,
   issueConfirmBusinessDay,
+  issueConfirmProjectSheetsEnabled,
   issueConfirmTraceRow,
   issueConfirmWritebackEnabled,
   parseIssueConfirmTargetRefs,

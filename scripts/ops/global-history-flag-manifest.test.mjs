@@ -117,6 +117,8 @@ test('INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED + _TARGET_REFS: exact tru
   assert.deepEqual(spec.conflictsWith, [])
   assert.equal(spec.source, 'plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs#issueConfirmWritebackEnabled')
   assert.match(spec.purpose, /O-level/)
+  // D14: the write-back also reads the project-sheets switch, and off is a counted skip (never a trace).
+  assert.match(spec.purpose, /MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED[^;]*project_sheets_disabled[^;]*no trace row/)
   assert.equal(isActivated(spec, 'true'), true)
   for (const value of ['TRUE', 'True', ' true', 'true ', '1', 'yes', 'on', '', undefined]) {
     assert.equal(isActivated(spec, value), false, JSON.stringify(value))

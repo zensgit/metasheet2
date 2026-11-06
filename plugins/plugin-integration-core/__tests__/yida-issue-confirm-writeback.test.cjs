@@ -19,6 +19,7 @@ const { test } = require('node:test')
 
 const writeback = require('../lib/yida-issue-confirm-writeback.cjs')
 const writeLockModule = require('../lib/stock-preparation-project-write-lock.cjs')
+const projectTargetsModule = require('../lib/stock-preparation-project-targets.cjs')
 
 const {
   ISSUE_CONFIRM_WRITEBACK_OUTCOMES,
@@ -59,7 +60,20 @@ const CONFIG = Object.freeze({
 const PAYLOAD = Object.freeze({ sourceLineId: KEY, project: PROJECT })
 
 function onEnv(extra = {}) {
-  return { INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED: 'true', INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS: TARGET, ...extra }
+  return {
+    INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED: 'true',
+    INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS: TARGET,
+    MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED: 'true',
+    ...extra,
+  }
+}
+
+// A one-shot failure of an injected port (the next call answers normally).
+function takeFailure(world, name) {
+  const failure = world.failures[name]
+  if (!failure) return null
+  world.failures[name] = null
+  return failure
 }
 
 // ── the world of doubles ─────────────────────────────────────────────────────────────────────────
@@ -67,6 +81,8 @@ function onEnv(extra = {}) {
 function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
   const calls = { ledgerList: 0, rowRead: 0, registry: 0, open: 0, query: 0, patch: [], authority: 0, acquire: [], bump: [], trace: 0 }
   const world = { calls, env, authorityAllowed, formPosts: 0, tokenRequests: 0 }
+  // One-shot port failures: rowRead, registry, open, query, authority.
+  world.failures = { rowRead: null, registry: null, open: null, query: null, authority: null }
 
   // ledger + audits (read-only to the module)
   world.ledger = []
@@ -176,12 +192,16 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
     rowSource: {
       async read({ ledger }) {
         calls.rowRead += 1
+        const failure = takeFailure(world, 'rowRead')
+        if (failure) throw failure
         return world.rowValues.has(ledger.id) ? world.rowValues.get(ledger.id) : null
       },
     },
     projectRegistry: {
       async resolve({ tenantId, projectNo }) {
         calls.registry += 1
+        const failure = takeFailure(world, 'registry')
+        if (failure) throw failure
         assert.equal(tenantId, TENANT)
         return world.projects.has(projectNo) ? { ...world.projects.get(projectNo) } : null
       },
@@ -189,10 +209,14 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
     sheets: {
       async open({ project }) {
         calls.open += 1
+        const openFailure = takeFailure(world, 'open')
+        if (openFailure) throw openFailure
         const rows = world.sheets.get(project.sheetId) || []
         return {
           async queryRecords({ filters, limit, offset }) {
             calls.query += 1
+            const failure = takeFailure(world, 'query')
+            if (failure) throw failure
             assert.equal(limit, 2)
             assert.equal(offset, 0)
             assert.deepEqual(Object.keys(filters), ['idempotencyKey'])
@@ -225,6 +249,8 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
       async recheck() {
         calls.authority += 1
         if (world.onAuthority) world.onAuthority()
+        const failure = takeFailure(world, 'authority')
+        if (failure) throw failure
         return world.authorityAllowed
       },
     },
@@ -273,8 +299,26 @@ test('the module never reaches a runner, a form transport, a token client or a l
   const source = fs.readFileSync(path.join(__dirname, '..', 'lib', 'yida-issue-confirm-writeback.cjs'), 'utf8')
   const required = [...source.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((match) => match[1])
   assert.deepEqual(required, ['node:crypto'])
+  // Every require call is a literal-string one (a require of a variable or a template would escape the
+  // list above), and no indirect loader is used. The count also sees comments and strings: keep the word
+  // 'require' directly followed by an opening parenthesis out of the module's prose.
+  assert.equal((source.match(/\brequire\s*\(/g) || []).length, required.length, 'every require( is a literal-string require')
+  assert.doesNotMatch(source, /\b(module\.require|createRequire|process\.binding|process\.dlopen|globalThis\.require)\b/)
+  assert.doesNotMatch(source, /\beval\s*\(|\bnew\s+Function\s*\(/)
   assert.doesNotMatch(source, /\bimport\s*\(/)
   assert.doesNotMatch(source, /\bfetch\s*\(/)
+})
+
+test('the D14 switch name is the project-targets switch, read as the exact literal true', () => {
+  assert.equal(writeback.PROJECT_SHEETS_ENABLED_ENV, projectTargetsModule.PROJECT_SHEETS_ENABLED_ENV)
+  assert.equal(writeback.issueConfirmProjectSheetsEnabled({ MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED: 'true' }), true)
+  for (const value of [undefined, '', 'false', 'TRUE', ' true', 'true ', '1', 'yes']) {
+    const env = { MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED: value }
+    assert.equal(writeback.issueConfirmProjectSheetsEnabled(env), false, JSON.stringify(value))
+    assert.equal(writeback.issueConfirmProjectSheetsEnabled(env), projectTargetsModule.stockPreparationProjectSheetsEnabled(env), JSON.stringify(value))
+  }
+  assert.ok(writeback.ISSUE_CONFIRM_SKIP_REASONS.includes('project_sheets_disabled'))
+  assert.equal(writeback.ISSUE_CONFIRM_WRITEBACK_OUTCOMES.includes('project_sheets_disabled'), false, 'D14 is a skip, never a trace outcome')
 })
 
 test('switch matrix: only the exact literal true enables; the target list is trimmed UUIDs only', () => {
@@ -491,7 +535,7 @@ test('already_set and kept_existing never patch (D8: the first confirmation wins
 test('every terminal non-write outcome records one trace row and patches nothing', async () => {
   const cases = [
     ['payload_unmapped', (world, row) => world.rowValues.set(row.id, { boundSheetId: SHEET, config: CONFIG, payload: { sourceLineId: KEY } })],
-    ['source_unbound', (world, row) => world.rowValues.set(row.id, null)],
+    // source_unbound comes from the NULL digest only (selector condition 4); null row values are retryable.
     ['project_absent', (world) => world.projects.clear()],
     ['project_archived', (world) => world.projects.set(PROJECT, { sheetId: SHEET, objectId: OBJECT, status: 'archived' })],
     // SR2: the project's registration moved to another sheet after the send.
@@ -557,6 +601,92 @@ test('retryable cases insert no trace row and converge on the next run', async (
   }
 })
 
+test('a port that throws while gathering facts is retryable with its code: no trace, no patch, and the next run writes', async () => {
+  const synthetic = (code) => Object.assign(new Error('synthetic port failure'), { code })
+  const cases = [
+    ['rowRead', 'SYN_ROW_SOURCE_DOWN'],
+    ['registry', 'SYN_PROJECT_REGISTRY_DOWN'],
+    // A registry store that refuses because the project-sheets feature is off is a code, never project_absent.
+    ['registry', 'STOCK_PREPARATION_PROJECT_SHEETS_DISABLED'],
+    ['authority', 'SYN_AUTHORITY_STORE_DOWN'],
+    ['open', 'SYN_SHEET_OPEN_DOWN'],
+    ['query', 'SYN_RECORDS_QUERY_DOWN'],
+  ]
+  for (const [port, code] of cases) {
+    const { world, row } = sentWorld()
+    world.failures[port] = synthetic(code)
+    const first = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+    assert.deepEqual(first.results, [{ ledgerId: row.id, kind: 'retryable', code }], `${port} ${code}`)
+    assert.equal(world.trace.length, 0, port)
+    assert.equal(world.calls.patch.length, 0, port)
+    assert.equal(world.calls.bump.length, 0, port)
+    assert.equal(world.leases.size, 0, `${port}: the lease is released`)
+    assert.equal(world.cell(), null, port)
+    const next = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+    assert.deepEqual(next.results, [{ ledgerId: row.id, kind: 'outcome', outcome: 'written', recorded: true, date: ACK_DAY, timeZone: 'Asia/Shanghai' }], port)
+    assert.equal(world.trace.length, 1, port)
+    assert.equal(world.cell(), ACK_DAY, port)
+  }
+  // A failure without a usable code reports the fixed UNAVAILABLE (never its message).
+  const { world, row } = sentWorld()
+  world.failures.registry = new Error('host said something with SYN-PROJECT-01 inside')
+  const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+  assert.deepEqual(result.results, [{ ledgerId: row.id, kind: 'retryable', code: 'UNAVAILABLE' }])
+  assert.equal(world.trace.length, 0)
+})
+
+test('a bound row whose row values come back null or without a bound sheet is retryable, never source_unbound', async () => {
+  for (const [label, arrange] of [
+    ['null', (world, row) => world.rowValues.set(row.id, null)],
+    ['no bound sheet', (world, row) => world.rowValues.set(row.id, { boundSheetId: null, config: CONFIG, payload: PAYLOAD })],
+  ]) {
+    const { world, row } = sentWorld()
+    arrange(world, row)
+    const first = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+    assert.deepEqual(first.results, [{ ledgerId: row.id, kind: 'retryable', code: 'YIDA_ISSUE_CONFIRM_ROW_SOURCE_UNAVAILABLE' }], label)
+    assert.equal(world.trace.length, 0, label)
+    assert.equal(world.calls.registry, 0, label)
+    assert.equal(world.calls.patch.length, 0, label)
+    // The source comes back: the next run decides the row again and writes it.
+    world.rowValues.set(row.id, { boundSheetId: SHEET, config: CONFIG, payload: PAYLOAD })
+    const next = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+    assert.equal(next.results[0].outcome, 'written', label)
+    assert.equal(world.cell(), ACK_DAY, label)
+  }
+})
+
+test('D14: the project-sheets switch off skips the row and counts it (no registry read, no trace); on, the next run writes', async () => {
+  for (const value of [undefined, '', 'false', 'TRUE', ' true', '1']) {
+    const env = onEnv()
+    if (value === undefined) delete env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+    else env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = value
+    const { world, row } = sentWorld({ env })
+    const off = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+    assert.deepEqual(off, { enabled: true, results: [{ ledgerId: row.id, kind: 'skip', reason: 'project_sheets_disabled' }] }, JSON.stringify(value))
+    assert.equal(world.calls.registry, 0)
+    assert.deepEqual(sheetReadsAndWrites(world.calls), { open: 0, query: 0, patch: 0, authority: 0, acquire: 0 })
+    assert.equal(world.trace.length, 0)
+    assert.equal(world.cell(), null)
+    world.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = 'true'
+    const on = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+    assert.equal(on.results[0].outcome, 'written', JSON.stringify(value))
+    assert.equal(world.trace.length, 1)
+  }
+})
+
+test('D14: the project-sheets switch turned off after the records read and before the patch: skip, no patch, no trace', async () => {
+  const { world, row } = sentWorld()
+  world.onAuthority = () => { world.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = 'false' }
+  const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+  assert.deepEqual(result.results, [{ ledgerId: row.id, kind: 'skip', reason: 'project_sheets_disabled' }])
+  assert.equal(world.calls.query, 1, 'the row was read under the lease')
+  assert.equal(world.calls.patch.length, 0)
+  assert.equal(world.calls.bump.length, 0)
+  assert.equal(world.trace.length, 0)
+  assert.equal(world.leases.size, 0)
+  assert.equal(world.cell(), null)
+})
+
 test('a ledger reader that returns a row outside the caller scope fails the run closed', async () => {
   const { world } = sentWorld()
   const other = world.addLedger({ tenantId: 'tenant-syn-b' })
@@ -584,7 +714,12 @@ test('input bounds: tenant and owner required, limit and ledgerIds bounded to 10
 test('the pure decision asks for facts in order and never patches before the authority and records are known', () => {
   const facts = { ledger: ACKED, targetRefs: [TARGET], timeZone: 'Asia/Shanghai' }
   assert.deepEqual(decideIssueConfirmWriteback(facts), { kind: 'need', need: 'rowValues' })
+  assert.throws(() => decideIssueConfirmWriteback({ ...facts, rowValues: null }), { code: 'YIDA_ISSUE_CONFIRM_ROW_SOURCE_UNAVAILABLE' })
   facts.rowValues = { boundSheetId: SHEET, config: CONFIG, payload: PAYLOAD }
+  // D14 fails closed: the fact absent or anything but true is a skip before the registry is asked.
+  assert.deepEqual(decideIssueConfirmWriteback(facts), { kind: 'skip', reason: 'project_sheets_disabled' })
+  assert.deepEqual(decideIssueConfirmWriteback({ ...facts, projectSheetsEnabled: 'true' }), { kind: 'skip', reason: 'project_sheets_disabled' })
+  facts.projectSheetsEnabled = true
   assert.deepEqual(decideIssueConfirmWriteback(facts), { kind: 'need', need: 'project', projectNo: PROJECT })
   facts.project = { sheetId: SHEET, objectId: OBJECT, status: 'active' }
   assert.deepEqual(decideIssueConfirmWriteback(facts), { kind: 'need', need: 'authority', sheetId: SHEET })
