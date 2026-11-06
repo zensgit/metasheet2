@@ -168,6 +168,26 @@ describe('WeComAttendanceDeliveryChannel.send — textcard vs text wiring (desig
     }
   })
 
+  it('deep-link flag+baseUrl present and a recipient connection in another corp -> wecom_env_corp_mismatch; no token, no textcard, no text', async () => {
+    process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED = 'true'
+    process.env.PUBLIC_APP_URL = 'https://app.example.test'
+    delete process.env.APP_BASE_URL
+    try {
+      const fetchAccessToken = vi.fn(async () => 'access-token')
+      const { channel, sendTextMessage, sendTextCardMessage } = makeChannel({
+        rows: [{ integration_id: 'integ-1', external_user_id: 'we-user-1', corp_id: 'corp-2' }],
+        fetchAccessToken,
+      })
+      const result = await channel.send(MESSAGE)
+      expect(result).toEqual({ ok: false, retryable: false, error: 'wecom_env_corp_mismatch' })
+      expect(fetchAccessToken).not.toHaveBeenCalled()
+      expect(sendTextCardMessage).not.toHaveBeenCalled()
+      expect(sendTextMessage).not.toHaveBeenCalled()
+    } finally {
+      restoreEnv()
+    }
+  })
+
   it('deep-link flag OFF (default) -> plain text; textcard NOT called', async () => {
     delete process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED
     process.env.PUBLIC_APP_URL = 'https://app.example.test'
