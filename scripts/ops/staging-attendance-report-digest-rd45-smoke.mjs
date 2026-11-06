@@ -407,8 +407,7 @@ async function resolveTokens() {
     })
     console.log('  minted admin dev-token')
   } else {
-    const subject = jwtSubject(adminToken)
-    if (subject != null) console.log(`  using supplied admin token (subject ${subject})`)
+    console.log('  using supplied admin token')
   }
 }
 

@@ -645,7 +645,7 @@ function mapDingTalkActivationFailure(error: unknown): DingTalkActivationIntentE
   )
 }
 
-async function issueAuthSessionToken(user: User, req: Request): Promise<string> {
+async function issueAuthSessionToken(user: User, req: Request, expectedAccessGeneration?: number): Promise<string> {
   const sessionId = randomUUID()
   const tenantId = await authService.resolveSessionTenantId(user.id, resolveRequestTenantId(req))
   const tokenUser = tenantId ? { ...user, tenantId } : user
@@ -653,12 +653,14 @@ async function issueAuthSessionToken(user: User, req: Request): Promise<string> 
   const payload = authService.readTokenPayload(token)
 
   if (payload?.exp) {
-    await createUserSession(user.id, {
+    const session = await createUserSession(user.id, {
       sessionId,
+      expectedAccessGeneration,
       expiresAt: new Date(payload.exp * 1000).toISOString(),
       ipAddress: getClientIP(req),
       userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
     })
+    if (!session) throw new DingTalkLoginPolicyError('Authentication changed; please sign in again', {statusCode:409,code:'authentication_changed'})
   }
 
   try {
@@ -1109,7 +1111,13 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
       ...authenticated.user,
       must_change_password: false,
     }
-    const token = await issueAuthSessionToken(refreshedUser, req)
+    // Fenced like /session-org: the new session is registered only while the access generation read
+    // when this request authenticated is still current. The password change above stays committed.
+    const token = await issueAuthSessionToken(
+      refreshedUser,
+      req,
+      Number(authenticated.user.access_generation ?? 0),
+    )
 
     return res.json({
       success: true,
@@ -1121,6 +1129,13 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
       },
     })
   } catch (error) {
+    if (error instanceof DingTalkLoginPolicyError && error.code === 'authentication_changed') {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: 'Authentication changed; please sign in again with the new password',
+        code: error.code,
+      })
+    }
     logger.error('Password change error', error instanceof Error ? error : undefined)
     return res.status(500).json({
       success: false,
@@ -1263,10 +1278,16 @@ authRouter.post('/session-org', async (req: Request, res: Response) => {
     if (!nextPayload?.exp) {
       return res.status(503).json({ success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE' })
     }
-    await createUserSession(user.id, {
+    // Fenced like refresh: the session is registered only while the access generation read when this
+    // request authenticated is still current, so a credential verified before a revocation cannot mint one.
+    const session = await createUserSession(user.id, {
       sessionId, expiresAt: new Date(nextPayload.exp * 1000).toISOString(),
+      expectedAccessGeneration: Number(user.access_generation ?? 0),
       ipAddress: getClientIP(req), userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
     })
+    if (!session) {
+      return res.status(409).json({ success: false, error: 'Authentication changed; please sign in again', code: 'authentication_changed' })
+    }
     return res.json({ success: true, data: { token: nextToken, user: tokenUser, currentOrgId: chosen } })
   } catch {
     return res.status(503).json({ success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE' })
@@ -1734,7 +1755,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       created_at: new Date(),
       updated_at: new Date(),
     }
-    const token = await issueAuthSessionToken(user, req)
+    const token = await issueAuthSessionToken(user, req, result.sessionGeneration)
 
     logger.info(`DingTalk login for ${user.email} (openId: ${result.dingtalkUser.openId}, new: ${result.isNewUser})`)
 
@@ -1847,7 +1868,7 @@ authRouter.post('/login/dingtalk/container', async (req: Request, res: Response)
       created_at: new Date(),
       updated_at: new Date(),
     }
-    const token = await issueAuthSessionToken(user, req)
+    const token = await issueAuthSessionToken(user, req, result.sessionGeneration)
 
     logger.info(`DingTalk container login for ${user.email} (unionId: ${result.dingtalkUser.unionId}, new: ${result.isNewUser})`)
 

@@ -47,7 +47,8 @@ let executeQueue: unknown[]
 let executeTakeFirstQueue: unknown[]
 let selectArgCalls: unknown[][]
 
-function makeChain(): Record<string, unknown> {
+function makeChain(table?: string): Record<string, unknown> {
+  let sharedCreatorFence = false
   const self: Record<string, unknown> = {}
   const chainFn = (..._args: unknown[]) => self
   const methods = [
@@ -65,7 +66,8 @@ function makeChain(): Record<string, unknown> {
     return self
   })
   self.execute = vi.fn(async () => executeQueue.shift() ?? [])
-  self.executeTakeFirst = vi.fn(async () => executeTakeFirstQueue.shift())
+  self.forShare = vi.fn(() => { sharedCreatorFence = true; return self })
+  self.executeTakeFirst = vi.fn(async () => sharedCreatorFence && table === 'users' ? { ...ACTIVE_CREATOR, access_generation: 0 } : executeTakeFirstQueue.shift())
   self.executeTakeFirstOrThrow = vi.fn(async () => {
     const v = executeTakeFirstQueue.shift()
     if (!v) throw new Error('no rows')
@@ -77,7 +79,7 @@ function makeChain(): Record<string, unknown> {
 function createMockDb(): Kysely<Database> {
   const rootChain: Record<string, unknown> = {}
   for (const m of ['selectFrom', 'insertInto', 'updateTable', 'deleteFrom']) {
-    rootChain[m] = vi.fn(() => makeChain())
+    rootChain[m] = vi.fn((table: string) => makeChain(table))
   }
 
   const dbProxy = new Proxy(rootChain, {
@@ -87,7 +89,7 @@ function createMockDb(): Kysely<Database> {
           execute: async (fn: (trx: unknown) => Promise<unknown>) => {
             const trxRoot: Record<string, unknown> = {}
             for (const m of ['selectFrom', 'insertInto', 'updateTable', 'deleteFrom']) {
-              trxRoot[m] = vi.fn(() => makeChain())
+              trxRoot[m] = vi.fn((table: string) => makeChain(table))
             }
             return fn(trxRoot)
           },

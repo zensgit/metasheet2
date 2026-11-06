@@ -159,6 +159,10 @@ vi.mock('../../src/directory/directory-sync-alert-delivery', () => ({
   getDirectoryInactiveLinkedMetric: alertDeliveryMocks.getDirectoryInactiveLinkedMetric,
 }))
 
+const workNotificationVerifyMocks = vi.hoisted(() => ({
+  verifyDingTalkWorkNotificationIntegration: vi.fn(),
+}))
+
 const approvalCardConfigMocks = vi.hoisted(() => ({
   generateApprovalCardLinkSecret: vi.fn(),
   getApprovalCardConfigStatus: vi.fn(),
@@ -169,6 +173,13 @@ vi.mock('../../src/integrations/dingtalk/work-notification-settings', () => ({
   getDingTalkWorkNotificationRuntimeStatusFromStore: workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore,
   saveDingTalkWorkNotificationAgentId: workNotificationMocks.saveDingTalkWorkNotificationAgentId,
   testDingTalkWorkNotificationAgentId: workNotificationMocks.testDingTalkWorkNotificationAgentId,
+}))
+
+// The verification function is mocked (its own tests are dingtalk-work-notification-verify.test.ts); the audit
+// meta builder is the REAL one, so the audit assertions below measure what the route records.
+vi.mock('../../src/integrations/dingtalk/work-notification-verify', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/integrations/dingtalk/work-notification-verify')>()),
+  verifyDingTalkWorkNotificationIntegration: workNotificationVerifyMocks.verifyDingTalkWorkNotificationIntegration,
 }))
 
 vi.mock('../../src/integrations/dingtalk/approval-card-config', () => ({
@@ -288,6 +299,7 @@ describe('adminDirectoryRouter', () => {
     workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore.mockReset()
     workNotificationMocks.saveDingTalkWorkNotificationAgentId.mockReset()
     workNotificationMocks.testDingTalkWorkNotificationAgentId.mockReset()
+    workNotificationVerifyMocks.verifyDingTalkWorkNotificationIntegration.mockReset()
     approvalCardConfigMocks.generateApprovalCardLinkSecret.mockReset()
     approvalCardConfigMocks.getApprovalCardConfigStatus.mockReset()
     approvalCardConfigMocks.saveApprovalCardPublicAppUrl.mockReset()
@@ -1134,6 +1146,133 @@ describe('adminDirectoryRouter', () => {
       }),
     }))
     expect(JSON.stringify(auditMocks.auditLog.mock.calls)).not.toContain('123456789')
+  })
+
+  describe('POST /dingtalk/work-notification/verify (explicit integration verification)', () => {
+    const VERIFY_PATH = '/dingtalk/work-notification/verify'
+    const INTEGRATION_ID = 'd1000000-0000-4000-8000-000000000001'
+    const ADMIN = { id: 'admin-1', role: 'admin' }
+    const SECRET_LABEL = 'row-app-secret-label'
+    const verifyReport = () => ({
+      integrationId: INTEGRATION_ID,
+      integration: { id: INTEGRATION_ID, name: 'DingTalk CN', status: 'active', updatedAt: '2026-05-08T00:00:00.000Z' },
+      requestedLevel: 'token',
+      reachedLevel: 'config',
+      passed: false,
+      scope: { proves: 'p', doesNotProve: 'd' },
+      resolution: {
+        source: 'integration',
+        appKey: { configured: true, length: 12, valuePrinted: false },
+        appSecret: { configured: true, valuePrinted: false },
+        agentId: { configured: true, length: 6, valuePrinted: false },
+        baseUrl: { configured: false, parseable: null },
+        environment: { appKey: false, appSecret: false, agentId: false, baseUrl: false },
+      },
+      accessToken: { verified: false, cacheBypassed: true, valuePrinted: false },
+      notification: { attempted: false, accepted: false, recipientUserIdLength: null, verificationRunId: null },
+      // A token-level failure: a gettoken was requested (cacheBypassed true) and refused.
+      failure: { level: 'token', code: 'token_rejected', message: 'Access token was not obtained: DingTalk rejected the request (errcode 40001)', providerCode: 40001, providerCodeKind: 'errcode' },
+    })
+
+    it('refuses a non-admin before anything runs (401 without a user, 403 for a non-admin)', async () => {
+      rbacMocks.isRbacAdmin.mockResolvedValue(false)
+      const anonymous = await invokeRoute('post', VERIFY_PATH, { body: { integrationId: INTEGRATION_ID, level: 'config' } })
+      expect(anonymous.statusCode).toBe(401)
+      const nonAdmin = await invokeRoute('post', VERIFY_PATH, { body: { integrationId: INTEGRATION_ID, level: 'config' }, user: { id: 'u-1', role: 'user' } })
+      expect(nonAdmin.statusCode).toBe(403)
+      expect(workNotificationVerifyMocks.verifyDingTalkWorkNotificationIntegration).not.toHaveBeenCalled()
+      expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['missing', {}],
+      ['blank', { integrationId: '   ' }],
+      ['not a uuid', { integrationId: 'dir-1' }],
+      ['not a string', { integrationId: 42 }],
+    ])('answers 400 DIRECTORY_INTEGRATION_ID_INVALID for an integrationId that is %s — no "preferred integration" fallback', async (_label, body) => {
+      const response = await invokeRoute('post', VERIFY_PATH, { body: { ...body, level: 'config' }, user: ADMIN })
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toMatchObject({ ok: false, error: { code: 'DIRECTORY_INTEGRATION_ID_INVALID', message: 'integrationId must be a UUID' } })
+      expect(workNotificationVerifyMocks.verifyDingTalkWorkNotificationIntegration).not.toHaveBeenCalled()
+    })
+
+    it('passes the level through exactly as given: the route does not normalise it (the module decides)', async () => {
+      workNotificationVerifyMocks.verifyDingTalkWorkNotificationIntegration.mockResolvedValue(verifyReport())
+      await invokeRoute('post', VERIFY_PATH, { body: { integrationId: INTEGRATION_ID, level: ' SEND ' }, user: ADMIN })
+      expect(workNotificationVerifyMocks.verifyDingTalkWorkNotificationIntegration).toHaveBeenCalledWith(
+        expect.objectContaining({ level: ' SEND ' }),
+      )
+    })
+
+    it('answers the report at 200 (failure included) and records a values-free audit entry', async () => {
+      workNotificationVerifyMocks.verifyDingTalkWorkNotificationIntegration.mockResolvedValue(verifyReport())
+
+      const response = await invokeRoute('post', VERIFY_PATH, {
+        body: { integrationId: ` ${INTEGRATION_ID} `, level: 'token', recipientUserId: 'user-1', appSecret: SECRET_LABEL },
+        user: ADMIN,
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(workNotificationVerifyMocks.verifyDingTalkWorkNotificationIntegration).toHaveBeenCalledTimes(1)
+      // Trimmed id, the level and the recipient as given — and nothing else from the body.
+      expect(workNotificationVerifyMocks.verifyDingTalkWorkNotificationIntegration).toHaveBeenCalledWith({
+        integrationId: INTEGRATION_ID,
+        level: 'token',
+        recipientUserId: 'user-1',
+      })
+      expect(response.body).toEqual({ ok: true, data: { result: verifyReport() } })
+      expect(auditMocks.auditLog).toHaveBeenCalledTimes(1)
+      expect(auditMocks.auditLog).toHaveBeenCalledWith({
+        actorId: 'admin-1',
+        actorType: 'user',
+        action: 'verify',
+        resourceType: 'dingtalk-work-notification-verification',
+        resourceId: INTEGRATION_ID,
+        meta: {
+          integrationId: INTEGRATION_ID,
+          integrationName: 'DingTalk CN',
+          requestedLevel: 'token',
+          reachedLevel: 'config',
+          passed: false,
+          failureLevel: 'token',
+          failureCode: 'token_rejected',
+          source: 'integration',
+          agentIdLength: 6,
+          agentIdValuePrinted: false,
+          accessTokenVerified: false,
+          notificationAttempted: false,
+          notificationAccepted: false,
+          verificationRunId: null,
+          recipientUserId: null,
+        },
+      })
+      expect(JSON.stringify(auditMocks.auditLog.mock.calls)).not.toContain(SECRET_LABEL)
+    })
+
+    it('a typed input sentence from the verifier answers 400 with that sentence; an untyped failure answers the fixed sentence with the text logged only', async () => {
+      workNotificationVerifyMocks.verifyDingTalkWorkNotificationIntegration.mockRejectedValue(
+        new DingTalkConfigValidationError('level must be one of config, token, send'),
+      )
+      const typed = await invokeRoute('post', VERIFY_PATH, { body: { integrationId: INTEGRATION_ID, level: 'all' }, user: ADMIN })
+      expect(typed.statusCode).toBe(400)
+      expect(typed.body).toMatchObject({
+        ok: false,
+        error: { code: 'DINGTALK_WORK_NOTIFICATION_VERIFY_FAILED', message: 'level must be one of config, token, send' },
+      })
+
+      workNotificationVerifyMocks.verifyDingTalkWorkNotificationIntegration.mockRejectedValue(
+        new Error('MARKER_verify relation "directory_integrations" does not exist at 192.0.2.12:5432'),
+      )
+      const untyped = await invokeRoute('post', VERIFY_PATH, { body: { integrationId: INTEGRATION_ID, level: 'config' }, user: ADMIN })
+      expect(untyped.statusCode).toBe(400)
+      expect(untyped.body).toEqual({
+        ok: false,
+        error: { code: 'DINGTALK_WORK_NOTIFICATION_VERIFY_FAILED', message: 'Failed to verify DingTalk work notification integration', details: undefined },
+      })
+      expect(JSON.stringify(untyped.body)).not.toContain('MARKER_verify')
+      expect(JSON.stringify(untyped.body)).not.toContain('192.0.2')
+      expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    })
   })
 
   it('refreshes scheduler state after creating an integration', async () => {

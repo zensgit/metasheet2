@@ -20,6 +20,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync, rmSync, readdirSync, chmodSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname, posix } from 'node:path'
@@ -3327,8 +3328,8 @@ function assertSoakContract({ remote, workflow }) {
   )
   assert.match(
     slices.run,
-    /filtered_pipe "\$\{OUTPUT_DIR\}\/soak-run-backend-log-slice\.log"/,
-    'the backend-log slice must go through filtered_pipe (producer failure must fail the step; zero matches must not)',
+    /masked_log_slice "\$\{OUTPUT_DIR\}\/soak-run-backend-log-slice\.log"/,
+    'the backend-log slice must go through masked_log_slice (filtered_pipe contract: producer failure must fail the step; zero matches must not)',
   )
   assert.ok(slices.run.includes('haltedReason is LOAD-BEARING'), 'soak-run must surface haltedReason semantics in its summary')
 
@@ -5098,11 +5099,11 @@ test('EXECUTABLE (owner exclusions): holds on a clean DB; stale exclusion or a p
 
   const stale = ownerCheckHarness({ applied: ['0001_init', 'zzzz20260919090000_create_approval_template_group_backfill_batches'], present: 0 })
   assert.equal(stale.status, 1)
-  assert.match(stale.stderr, /is already applied on stagingdb — the exclusion is stale/)
+  assert.match(stale.stderr, /is already applied on the staging DB — the exclusion is stale/)
 
   const tables = ownerCheckHarness({ applied: ['0001_init'], present: 2 })
   assert.equal(tables.status, 1)
-  assert.match(tables.stderr, /2 owner-excluded table\(s\) exist on stagingdb/)
+  assert.match(tables.stderr, /2 owner-excluded table\(s\) exist on the staging DB/)
 
   const unreadable = ownerCheckHarness({ applied: ['0001_init'], present: '' })
   assert.equal(unreadable.status, 1, 'an unreadable table count must not certify absence')
@@ -5690,7 +5691,7 @@ test('runner bundle (EXECUTABLE): ae4, mp6 and otbank-v18 are refused first, wit
     const arm = arms.find((candidate) => candidate.id === id)
     assert.ok(r.docker.some((line) => line.startsWith('exec ') && line.endsWith(`/scripts/ops/${arm.smokeScript}`)), `${id}: the smoke script runs in the container`)
     assert.deepEqual(r.probes, ['fetch_health_commit'], `${id}: the identity check runs once`)
-    assert.deepEqual(r.settings, ['capture_settings settings-before.json', 'capture_settings settings-after.json'], `${id}: settings are captured before and after`)
+    assert.deepEqual(r.settings, ['capture_settings settings-before.summary.txt', 'capture_settings settings-after.summary.txt'], `${id}: settings are captured before and after`)
     assert.deepEqual(r.host, [], `${id}: no host-side psql or curl`)
     assert.match(r.summary ?? '', new RegExp(`^smoke=${id}\\n[\\s\\S]*^smoke_rc=0$`, 'm'), `${id}: the run writes its summary`)
   }
@@ -6336,4 +6337,811 @@ test('runner bundle: no workflow step runs git on the deploy host: only the two 
     const gitLines = executableLines(step.run).split('\n').filter((line) => GIT_INVOCATION.test(line))
     assert.deepEqual(gitLines, [], `${workflowStepLabel(step)}: no remote command may run git on the deploy host`)
   }
+})
+
+// ---------------------------------------------------------------------------------------------
+// The uploaded artifact keeps non-identifying summaries only.
+//
+// The output dir is uploaded as a CI artifact. The auth round trip and the settings snapshots keep
+// HTTP codes and values-free summaries (never a response body), log lines name no account or
+// database, the upload step takes an explicit allowlist of file names, and a masking step replaces
+// the deploy user and host in the collected files before anything is uploaded. Synthetic sentinel
+// values are fed in and must never come back out.
+// ---------------------------------------------------------------------------------------------
+
+const ARTIFACT_SENTINELS = {
+  adminId: 'sentinel-admin-id-7c1f@example.invalid',
+  token: 'sentinel-token-0d4e',
+  email: 'sentinel-mail-4be2@example.invalid',
+  mobile: '+0-555-0191-827',
+  username: 'sentinel-login-a93d',
+  name: 'Sentinel Person 6e0b',
+  setting: 'sentinel-setting-value-31d8',
+}
+
+function sentinelMeBody() {
+  return JSON.stringify({
+    success: true,
+    data: {
+      user: {
+        id: ARTIFACT_SENTINELS.adminId,
+        email: ARTIFACT_SENTINELS.email,
+        mobile: ARTIFACT_SENTINELS.mobile,
+        username: ARTIFACT_SENTINELS.username,
+        name: ARTIFACT_SENTINELS.name,
+        role: 'admin',
+        permissions: ['attendance:admin'],
+      },
+    },
+  })
+}
+
+function sentinelSettingsBody() {
+  return JSON.stringify({ success: true, data: { orgId: 'default', reminderRecipients: [ARTIFACT_SENTINELS.email], officeLabel: ARTIFACT_SENTINELS.setting } })
+}
+
+function assertNoSentinel(where, text) {
+  for (const [key, value] of Object.entries(ARTIFACT_SENTINELS)) {
+    assert.ok(!text.includes(value), `${where} must not carry the ${key} sentinel`)
+  }
+}
+
+// Every regular file under dir, as { relativePath: content }.
+function readTree(dir) {
+  const files = {}
+  const walk = (sub) => {
+    for (const entry of readdirSync(join(dir, sub), { withFileTypes: true })) {
+      const rel = sub === '' ? entry.name : `${sub}/${entry.name}`
+      if (entry.isDirectory()) walk(rel)
+      else files[rel] = readFileSync(join(dir, rel), 'utf8')
+    }
+  }
+  walk('')
+  return files
+}
+
+// A fake curl(1) on PATH: answers /api/auth/me and /api/attendance/settings from env, writes the
+// body to the -o target, prints the code (the runner reads it through -w '%{http_code}'), and
+// records each -o target so the test can prove no body is written under OUTPUT_DIR.
+function writeFakeCurl(binDir, callLog) {
+  writeFileSync(
+    join(binDir, 'curl'),
+    `#!/bin/bash
+set -u
+out=""
+url=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -w|-H|--max-time) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+printf 'out=%s url=%s\\n' "$out" "$url" >> '${callLog}'
+case "$url" in
+  */api/auth/me) body="$FAKE_ME_BODY"; code="$FAKE_ME_CODE" ;;
+  */api/attendance/settings*) body="$FAKE_SETTINGS_BODY"; code="$FAKE_SETTINGS_CODE" ;;
+  *) echo "fake curl: unexpected url: $url" >&2; exit 7 ;;
+esac
+if [[ -n "$out" ]]; then printf '%s' "$body" > "$out"; fi
+printf '%s' "$code"
+`,
+    { mode: 0o755 },
+  )
+}
+
+// Runs the REAL auth_round_trip / capture_settings / response_body_summary (extracted verbatim)
+// with find_admin_user and mint_token stubbed to sentinel values and the fake curl above.
+function runAuthRoundTrip({ meCode = '200', settingsCode = '200', meBody = sentinelMeBody(), settingsBody = sentinelSettingsBody() } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'wr-auth-summary-'))
+  const outDir = join(dir, 'out')
+  const binDir = join(dir, 'bin')
+  const tmpDir = join(dir, 'tmp')
+  for (const sub of [outDir, binDir, tmpDir]) mkdirSync(sub)
+  const callLog = join(dir, 'curl-calls.log')
+  writeFileSync(callLog, '')
+  writeFakeCurl(binDir, callLog)
+  const script = `#!/bin/bash
+set -euo pipefail
+${extractRunnerLine('log')}
+${extractRunnerLine('fail')}
+${extractRunnerFunctions(['response_body_summary', 'capture_settings', 'auth_round_trip'])}
+find_admin_user() { printf '%s\\n' "$SENTINEL_ADMIN_ID"; }
+mint_token() { printf '%s\\n' "$SENTINEL_TOKEN"; }
+OUTPUT_DIR='${outDir}'
+auth_round_trip
+echo AUTH_ROUND_TRIP_RETURNED
+`
+  const result = spawnSync('bash', ['-c', script], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH}`,
+      TMPDIR: tmpDir,
+      SENTINEL_ADMIN_ID: ARTIFACT_SENTINELS.adminId,
+      SENTINEL_TOKEN: ARTIFACT_SENTINELS.token,
+      FAKE_ME_CODE: meCode,
+      FAKE_SETTINGS_CODE: settingsCode,
+      FAKE_ME_BODY: meBody,
+      FAKE_SETTINGS_BODY: settingsBody,
+    },
+  })
+  const files = readTree(outDir)
+  const tmpLeft = readdirSync(tmpDir)
+  const calls = readFileSync(callLog, 'utf8').split('\n').filter(Boolean)
+  rmSync(dir, { recursive: true, force: true })
+  return { ...result, files, tmpLeft, calls, outDir }
+}
+
+function assertAuthRunLeavesNoSentinel(label, r) {
+  for (const [name, content] of Object.entries(r.files)) assertNoSentinel(`${label}: output file ${name}`, content)
+  assertNoSentinel(`${label}: stdout`, r.stdout)
+  assertNoSentinel(`${label}: stderr`, r.stderr)
+  assert.deepEqual(r.tmpLeft, [], `${label}: the temp body files are removed`)
+  for (const call of r.calls) {
+    const out = call.match(/^out=(\S*) /)?.[1] ?? ''
+    assert.ok(out !== '' && !out.startsWith(r.outDir), `${label}: a response body is never written under OUTPUT_DIR: ${call}`)
+  }
+}
+
+test('auth round trip (EXECUTABLE): 200/200 passes and keeps only values-free summaries; no sentinel reaches the output dir, stdout or stderr', () => {
+  const r = runAuthRoundTrip()
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /auth round-trip OK \(me=200, settings=200\)/)
+  assert.match(r.stdout, /AUTH_ROUND_TRIP_RETURNED/)
+  assert.deepEqual(Object.keys(r.files).sort(), ['auth-me.summary.txt', 'settings-postdeploy.summary.txt'], 'only the two summaries are written')
+  const auth = r.files['auth-me.summary.txt']
+  assert.match(auth, /^http_code=200$/m)
+  assert.match(auth, /^body_json=parsed$/m)
+  assert.match(auth, /^user_object_returned=true$/m)
+  assert.doesNotMatch(auth, /^body_(bytes|sha256)=/m, 'the auth summary records neither the size nor a hash of the user record')
+  assert.doesNotMatch(auth, /\b(email|mobile|username|name|phone|role|permissions)\b/i, 'the auth summary names no user field')
+  assert.doesNotMatch(auth, /[{}"]/, 'the auth summary carries no JSON body')
+  const settings = r.files['settings-postdeploy.summary.txt']
+  assert.match(settings, /^http_code=200$/m)
+  assert.match(settings, new RegExp(`^body_bytes=${Buffer.byteLength(sentinelSettingsBody())}$`, 'm'))
+  assert.match(settings, new RegExp(`^body_sha256=${createHash('sha256').update(sentinelSettingsBody()).digest('hex')}$`, 'm'), 'the settings summary hashes the exact body')
+  assert.match(settings, /^body_canonical_sha256=[0-9a-f]{64}$/m)
+  assert.doesNotMatch(settings, /[{}"]/, 'the settings summary carries no JSON body')
+  assertAuthRunLeavesNoSentinel('200/200', r)
+  assert.match(r.stdout, /auth round-trip subject: active admin user resolved \(id not recorded\)/)
+})
+
+test('auth round trip (EXECUTABLE): the pass/fail rule is unchanged — a non-200 me or settings code fails with the same message, a 200 passes whatever the body', () => {
+  const me401 = runAuthRoundTrip({ meCode: '401', meBody: JSON.stringify({ success: false, error: ARTIFACT_SENTINELS.email }) })
+  assert.equal(me401.status, 1, me401.stderr)
+  assert.match(me401.stderr, /auth round-trip failed: GET \/api\/auth\/me -> 401 \(401 = wrong-realm token \/ missing admin user/)
+  assert.doesNotMatch(me401.stdout, /AUTH_ROUND_TRIP_RETURNED/)
+  assert.match(me401.files['auth-me.summary.txt'] ?? '', /^http_code=401$/m, 'the failing code is still recorded')
+  assert.ok(!('settings-postdeploy.summary.txt' in me401.files), 'settings are not read after a failed me check (as before)')
+  assertAuthRunLeavesNoSentinel('me=401', me401)
+
+  const settings503 = runAuthRoundTrip({ settingsCode: '503' })
+  assert.equal(settings503.status, 1, settings503.stderr)
+  assert.match(settings503.stderr, /auth round-trip failed: GET \/api\/attendance\/settings -> 503 \(503 = schema gap: STOP per bundle §3\)/)
+  assert.match(settings503.files['settings-postdeploy.summary.txt'] ?? '', /^http_code=503$/m)
+  assertAuthRunLeavesNoSentinel('settings=503', settings503)
+
+  const notJson = runAuthRoundTrip({ meBody: `not json ${ARTIFACT_SENTINELS.username}` })
+  assert.equal(notJson.status, 0, `a 200 passed before whatever its body; it still does\n${notJson.stderr}`)
+  assert.match(notJson.files['auth-me.summary.txt'], /^body_json=unparsed$/m)
+  assert.match(notJson.files['auth-me.summary.txt'], /^user_object_returned=false$/m)
+  assertAuthRunLeavesNoSentinel('me=200 non-JSON', notJson)
+
+  const noUser = runAuthRoundTrip({ meBody: JSON.stringify({ success: true, data: {} }) })
+  assert.equal(noUser.status, 0, noUser.stderr)
+  assert.match(noUser.files['auth-me.summary.txt'], /^user_object_returned=false$/m)
+})
+
+test('migrate backup (EXECUTABLE): the dump still targets the resolved DB user and name, but neither reaches backup-metadata.txt or the log', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wr-backup-meta-'))
+  const outDir = join(dir, 'out')
+  const backupDir = join(dir, 'backups')
+  mkdirSync(outDir)
+  const dockerLog = join(dir, 'docker.log')
+  const globals = join(dir, 'globals.txt')
+  const dbUser = 'sentinel_dbuser_5f2a'
+  const dbName = 'sentinel_dbname_8c3e'
+  const script = `#!/bin/bash
+set -euo pipefail
+${extractRunnerLine('log')}
+${extractRunnerLine('fail')}
+${extractRunnerFunctions(['hash_value', 'action_migrate_backup'])}
+POSTGRES_CONTAINER="fake-postgres"
+OUTPUT_DIR='${outDir}'
+BACKUP_DIR='${backupDir}'
+resolve_postgres_creds() { printf '%s %s' '${dbUser}' '${dbName}'; }
+docker() { printf '%s\\n' "$*" >> '${dockerLog}'; printf 'fake-dump-bytes'; }
+action_migrate_backup
+printf 'user=%s db=%s\\n' "$MIGRATE_BACKUP_PG_USER" "$MIGRATE_BACKUP_PG_DB" > '${globals}'
+`
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(readFileSync(dockerLog, 'utf8'), new RegExp(`^exec fake-postgres pg_dump -Fc -U ${dbUser} ${dbName}$`, 'm'), 'the dump command is unchanged')
+  assert.equal(readFileSync(globals, 'utf8'), `user=${dbUser} db=${dbName}\n`, 'the later read-only gates still receive the DB user and name')
+  const files = readTree(outDir)
+  assert.deepEqual(Object.keys(files), ['backup-metadata.txt'])
+  const meta = files['backup-metadata.txt']
+  assert.match(meta, /^sha256=[0-9a-f]{64}$/m)
+  assert.match(meta, /^bytes=15$/m)
+  assert.match(meta, /^path=.*\/staging-\d{8}T\d{6}Z-pre-migrate\.dump$/m)
+  for (const [where, text] of [['backup-metadata.txt', meta], ['stdout', r.stdout], ['stderr', r.stderr]]) {
+    assert.ok(!text.includes(dbUser) && !text.includes(dbName), `${where} must not name the DB user or DB name`)
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('owner exclusions (EXECUTABLE): messages and records name the DB by role, never by its configured name', () => {
+  const clean = ownerCheckHarness({ applied: ['0001_init'], present: 0 })
+  const stale = ownerCheckHarness({ applied: ['0001_init', 'zzzz20260919090000_create_approval_template_group_backfill_batches'], present: 0 })
+  const tables = ownerCheckHarness({ applied: ['0001_init'], present: 2 })
+  assert.equal(clean.status, 0, clean.stderr)
+  assert.match(clean.stdout, /owner exclusions hold \(before\) on the staging DB:/)
+  for (const [label, r] of [['clean', clean], ['stale', stale], ['tables', tables]]) {
+    assert.ok(!`${r.stdout}${r.stderr}${r.record}`.includes('stagingdb'), `${label}: the DB name stays out of the log and the record`)
+    assert.ok(r.docker.includes('-d stagingdb'), `${label}: the reads still target the given DB`)
+  }
+})
+
+test('no log, fail or echo line of the runner prints the admin id or a DB user/name', () => {
+  const lines = executableLines(readFileSync(REMOTE_SH, 'utf8')).split('\n')
+  const offenders = lines
+    .filter((line) => /\b(log|fail|echo)\b[^\n]*\$\{?(admin_id|user_id|tenant_id|pg_user|pg_db|deploy_pg_user|deploy_pg_db|deploy_db|real_db|db|MIGRATE_BACKUP_PG_USER|MIGRATE_BACKUP_PG_DB|SOAK_PG_USER|SOAK_PG_DB|REHEARSAL_PG_USER)\b/.test(line))
+    .map((line) => line.trim())
+  assert.deepEqual(
+    offenders,
+    // Prints only an empty value or the fixed rehearsal DB name (the guard's two failing cases).
+    ['|| fail "could not resolve the real staging DB name distinct from the rehearsal DB (got \'${real_db:-<empty>}\')"'],
+    'log/fail/echo lines must not interpolate account ids or DB identity',
+  )
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  assert.doesNotMatch(remote, /auth-me\.json|settings-[a-z]+\.json\b/, 'no raw auth or settings response file is written')
+  assert.doesNotMatch(remote, /echo "(pg_user|pg_db|real_db)=/, 'no record line carries DB identity')
+})
+
+test('mint_token (EXECUTABLE): refusing an unsafe user or tenant id does not print the value', () => {
+  const fn = `${extractRunnerLine('fail')}
+staging_exec() { echo "MINTED"; }
+CONTAINER_RUNNER_DIR=/fake
+${extractRunnerFunctions(['mint_token'])}`
+  const badUser = 'mint user;sentinel-user-4c1d'
+  const badTenant = 'mint tenant;sentinel-tenant-9e3f'
+  const user = runPlainBash(`${fn}\nmint_token '${badUser}' r p`)
+  const tenant = runPlainBash(`${fn}\nmint_token safe-user-1 r p '${badTenant}'`)
+  const ok = runPlainBash(`${fn}\nmint_token safe-user-1 r p default`)
+  assert.notEqual(user.status, 0)
+  assert.match(user.stderr, /refusing to mint token for an unsafe user id \(value not printed\)/)
+  assert.notEqual(tenant.status, 0)
+  assert.match(tenant.stderr, /refusing to mint token for an unsafe tenant id \(value not printed\)/)
+  for (const [label, r] of [['user', user], ['tenant', tenant]]) {
+    assert.ok(!`${r.stdout}${r.stderr}`.includes('sentinel-'), `${label}: the refused value is not printed`)
+    assert.doesNotMatch(r.stdout, /MINTED/, `${label}: nothing is minted`)
+  }
+  assert.equal(ok.status, 0, ok.stderr)
+  assert.match(ok.stdout, /MINTED/, 'a safe user and tenant id still mint')
+})
+
+test('runner bundle (EXECUTABLE): the runner\'s own smoke log line does not print the admin id', () => {
+  const r = runActionSmoke('tasks')
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(!`${r.stdout}${r.stderr}`.includes('fake-admin'), 'the admin id resolved by --find-admin stays out of the log')
+  assert.match(r.stdout, /smoke admin subject: active admin user resolved \(id not recorded\)/)
+})
+
+// The raw lines of one named step (`      - name: <name>` at column 6) up to the next step item.
+function workflowStepBlock(workflow, name) {
+  const lines = workflow.split('\n')
+  const starts = lines.flatMap((line, index) => (line === `      - name: ${name}` ? [index] : []))
+  assert.equal(starts.length, 1, `expected exactly one \`${name}\` step`)
+  let end = starts[0] + 1
+  while (end < lines.length && !/^ {0,6}\S/.test(lines[end])) end += 1
+  return lines.slice(starts[0], end)
+}
+
+// The upload step's `path: |` literal block, one path per line (column 12).
+function workflowUploadPaths(workflow) {
+  const block = workflowStepBlock(workflow, 'Upload artifacts')
+  const at = block.findIndex((line) => /^ {10}path:/.test(line))
+  assert.ok(at >= 0, 'the upload step names its paths')
+  assert.match(block[at], /^ {10}path: \|[ \t]*$/, 'the upload paths are a literal block, one path per line')
+  const paths = []
+  for (let k = at + 1; k < block.length && (block[k].trim() === '' || /^ {12}\S/.test(block[k])); k += 1) {
+    if (block[k].trim() !== '') paths.push(block[k].trim())
+  }
+  return { block, paths }
+}
+
+// Glob semantics of the patterns the allowlist uses: `*` within one path segment, nothing else.
+function uploadPatternMatches(pattern, relPath) {
+  const source = pattern.split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*')
+  return new RegExp(`^${source}$`).test(relPath)
+}
+
+const UPLOAD_ROOT = 'output/window-runner/'
+
+test('workflow upload: an explicit allowlist of summary files, never the whole output dir; raw response files are excluded', () => {
+  const { block, paths } = workflowUploadPaths(readFileSync(WORKFLOW, 'utf8'))
+  const text = block.join('\n')
+  assert.match(text, /^ {8}if: always\(\) && steps\.mask\.outputs\.publish == 'ok'$/m, 'the upload runs on failure too, but only after the mask step completed')
+  assert.match(text, /^ {8}uses: actions\/upload-artifact@v4$/m)
+  assert.match(text, /^ {10}retention-days: 30$/m)
+  assert.ok(paths.length > 20, `expected an explicit list, got ${paths.length} path(s)`)
+  for (const p of paths) {
+    assert.ok(p.startsWith(UPLOAD_ROOT) && p.length > UPLOAD_ROOT.length, `every path names a file under ${UPLOAD_ROOT}: ${p}`)
+    assert.match(p, /^[A-Za-z0-9._/*-]+$/, `only literal names and single-segment * globs: ${p}`)
+    assert.doesNotMatch(p, /\*\*|\/$|^output\/window-runner\/\*$|\/\*\./, `no directory-wide pattern: ${p}`)
+  }
+  for (const required of ['ssh.log', 'summary.txt', 'auth-me.summary.txt', 'settings-before.summary.txt', 'settings-after.summary.txt']) {
+    assert.ok(paths.some((p) => uploadPatternMatches(p, UPLOAD_ROOT + required)), `the allowlist uploads ${required}`)
+  }
+  for (const excluded of [
+    'auth-me.json',
+    'auth-me.http_code',
+    'settings-before.json',
+    'settings-after.json',
+    'settings-postdeploy.json',
+    'settings-sweep.json',
+    'settings-current.json',
+    'settings-before.json.http_code',
+    '.probe-err.AbC123',
+    'raw-response.json',
+    'users.json',
+    'some-new-file.txt',
+    'nested/summary.txt',
+  ]) {
+    assert.ok(!paths.some((p) => uploadPatternMatches(p, UPLOAD_ROOT + excluded)), `the allowlist must not upload ${excluded}`)
+  }
+})
+
+// Sample values for the variables that appear inside output-dir file names in the runner. An
+// unknown variable fails the test, so a new dynamic file name has to be classified here.
+const OUTPUT_NAME_SAMPLES = { phase: 'before', SMOKE_ID: 'tasks', org8: 'abcd1234', baseline_name: 'p95-baseline-abcd1234-20261105T000000Z' }
+// Output-dir names the runner uses that are deliberately not uploaded, with the reason.
+const NOT_UPLOADED_OUTPUT_NAMES = new Map([
+  ['.probe-err.XXXXXX', 'transient probe diagnostic, removed on every branch'],
+  ['migration-report', 'a directory; its report files are listed one by one'],
+])
+const MIGRATION_REPORT_FILES = ['migration-report/report.json', 'migration-report/report.md', 'migration-report/schema-probes.sql']
+
+test('workflow upload: every output file the runner writes is either on the allowlist or deliberately excluded, and every allowlist entry is used', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const { paths } = workflowUploadPaths(readFileSync(WORKFLOW, 'utf8'))
+  const raw = new Set([...remote.matchAll(/\$\{OUTPUT_DIR\}\/([A-Za-z0-9_.${}-]+)/g)].map((m) => m[1]))
+  assert.ok(raw.size > 40, `expected the runner's output file names, found ${raw.size}`)
+  const uploaded = ['ssh.log', ...MIGRATION_REPORT_FILES]
+  for (const name of raw) {
+    const sample = name.replace(/\$\{([A-Za-z0-9_]+)\}/g, (_, variable) => {
+      assert.ok(variable in OUTPUT_NAME_SAMPLES, `output file name ${name} uses an unclassified variable: ${variable}`)
+      return OUTPUT_NAME_SAMPLES[variable]
+    })
+    const matched = paths.some((p) => uploadPatternMatches(p, UPLOAD_ROOT + sample))
+    if (NOT_UPLOADED_OUTPUT_NAMES.has(name)) {
+      assert.ok(!matched, `${name} is listed as not uploaded but the allowlist matches it`)
+      continue
+    }
+    assert.ok(matched, `${name} is written to the output dir but not uploaded: add it to the upload allowlist if it carries no identifying data, or to NOT_UPLOADED_OUTPUT_NAMES with the reason`)
+    uploaded.push(sample)
+  }
+  for (const file of MIGRATION_REPORT_FILES) {
+    assert.ok(paths.some((p) => uploadPatternMatches(p, UPLOAD_ROOT + file)), `the alignment report file ${file} is uploaded`)
+  }
+  for (const p of paths) {
+    assert.ok(uploaded.some((file) => uploadPatternMatches(p, UPLOAD_ROOT + file)), `stale allowlist entry (nothing the runner writes matches it): ${p}`)
+  }
+})
+
+const MASK_USER = 'sentineldeployuser'
+const MASK_HOST = '198.51.100.23'
+
+// Options that put a fake binary first on PATH: fakePerlFails / fakePerlNoop (masking fails or
+// changes nothing), fakeDeleteFails (`find ... -delete` exits 1 and removes nothing; any other find
+// call runs the real find), abortAtStart (mkdir fails, so the script stops on its first command)
+// abortAtCheck (the value check kills the step shell, as a cancelled or crashed run would) and
+// fakeGrepUnreadable (the value check exits 2, as grep does when a file cannot be read).
+function runMaskStep({ files, user = MASK_USER, host = MASK_HOST, fakePerlFails = false, fakePerlNoop = false, fakeDeleteFails = false, abortAtStart = false, abortAtCheck = false, fakeGrepUnreadable = false }) {
+  const steps = workflowSteps(readFileSync(WORKFLOW, 'utf8'))
+  const step = steps.find((candidate) => candidate.name === 'Mask deploy identity in collected files')
+  assert.ok(step && step.run, 'expected the mask step with a run script')
+  const dir = mkdtempSync(join(tmpdir(), 'wr-mask-'))
+  const outDir = join(dir, 'output', 'window-runner')
+  mkdirSync(outDir, { recursive: true })
+  for (const [rel, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(outDir, rel)), { recursive: true })
+    writeFileSync(join(outDir, rel), content)
+  }
+  const binDir = join(dir, 'bin')
+  mkdirSync(binDir)
+  if (fakePerlFails) {
+    writeFileSync(join(binDir, 'perl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+  }
+  if (fakePerlNoop) {
+    // Exits 0 without changing anything, as perl -pi does for a file it cannot open.
+    writeFileSync(join(binDir, 'perl'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  }
+  if (fakeDeleteFails) {
+    // The real find is resolved without binDir on PATH; the forwarded call keeps PATH, so its
+    // -exec perl still reaches a fake perl.
+    writeFileSync(join(binDir, 'find'), [
+      '#!/bin/sh',
+      'for arg in "$@"; do [ "$arg" = "-delete" ] && exit 1; done',
+      'real=$(PATH="${PATH#*:}" command -v find)',
+      'exec "$real" "$@"',
+      '',
+    ].join('\n'), { mode: 0o755 })
+  }
+  if (abortAtStart) {
+    writeFileSync(join(binDir, 'mkdir'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+  }
+  if (abortAtCheck) {
+    writeFileSync(join(binDir, 'grep'), '#!/bin/sh\nkill -KILL "$PPID"\nexit 1\n', { mode: 0o755 })
+  }
+  if (fakeGrepUnreadable) {
+    writeFileSync(join(binDir, 'grep'), '#!/bin/sh\nexit 2\n', { mode: 0o755 })
+  }
+  const githubOutput = join(dir, 'github-output')
+  writeFileSync(githubOutput, '')
+  // GitHub runs a bash run: script as `bash --noprofile --norc -eo pipefail {0}`.
+  const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step.run], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, DEPLOY_USER: user, DEPLOY_HOST: host, GITHUB_OUTPUT: githubOutput },
+  })
+  const after = existsSync(outDir) ? readTree(outDir) : {}
+  const outputs = readFileSync(githubOutput, 'utf8')
+  rmSync(dir, { recursive: true, force: true })
+  return { ...r, after, outputs }
+}
+
+const MASK_STEP = 'Mask deploy identity in collected files'
+const PUBLISH_MARKER_LINE = 'echo "publish=ok" >> "$GITHUB_OUTPUT"'
+const PUBLISH_GATE = "if: always() && steps.mask.outputs.publish == 'ok'"
+const WITHHELD_GATE = "if: always() && steps.mask.outputs.publish != 'ok'"
+
+test('workflow mask step: runs on every outcome between the remote action and the summary/upload, with the deploy secrets', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const names = workflowSteps(workflow).map((step) => step.name)
+  const at = (name) => names.indexOf(name)
+  assert.ok(at('Run remote action') >= 0 && at('Run remote action') < at('Mask deploy identity in collected files'))
+  assert.ok(at('Mask deploy identity in collected files') < at('Write step summary'), 'the public step summary reads masked files')
+  assert.ok(at('Write step summary') < at('Upload artifacts'))
+  const block = workflowStepBlock(workflow, 'Mask deploy identity in collected files').join('\n')
+  assert.match(block, /^ {8}if: always\(\)$/m)
+  assert.match(block, /^ {10}DEPLOY_HOST: \$\{\{ secrets\.DEPLOY_HOST \}\}$/m)
+  assert.match(block, /^ {10}DEPLOY_USER: \$\{\{ secrets\.DEPLOY_USER \}\}$/m)
+  assert.doesNotMatch(block, /^ {8}continue-on-error:/m, 'a mask failure fails the job')
+})
+
+test('workflow mask step (EXECUTABLE): the deploy user and host are replaced in every collected file; other text is untouched', () => {
+  const r = runMaskStep({
+    files: {
+      'ssh.log': `scp: ${MASK_USER}@${MASK_HOST}: Permission denied\nconnected to ${MASK_HOST}\n`,
+      'summary.txt': `backup_path=/home/${MASK_USER}/window-runner-backups/staging.dump\nresult=ok\n`,
+      'migration-report/report.md': `host ${MASK_HOST}\n`,
+      'plain.txt': 'deployed by the runner @ noon\n',
+    },
+  })
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(r.outputs, 'publish=ok\n', 'a completed mask sets the publish marker')
+  assert.equal(r.after['ssh.log'], 'scp: ***: Permission denied\nconnected to ***\n')
+  assert.equal(r.after['summary.txt'], 'backup_path=/home/***/window-runner-backups/staging.dump\nresult=ok\n')
+  assert.equal(r.after['migration-report/report.md'], 'host ***\n')
+  assert.equal(r.after['plain.txt'], 'deployed by the runner @ noon\n')
+  for (const [name, content] of Object.entries(r.after)) {
+    assert.ok(!content.includes(MASK_USER) && !content.includes(MASK_HOST), `${name} is masked`)
+  }
+  assert.ok(!`${r.stdout}${r.stderr}`.includes(MASK_USER) && !`${r.stdout}${r.stderr}`.includes(MASK_HOST), 'the step prints neither value')
+
+  const empty = runMaskStep({ files: { 'plain.txt': 'a @ b\n' }, user: '', host: '' })
+  assert.equal(empty.status, 0, empty.stderr)
+  assert.equal(empty.outputs, 'publish=ok\n')
+  assert.equal(empty.after['plain.txt'], 'a @ b\n', 'empty values mask nothing (a bare @ is never replaced)')
+})
+
+test('workflow mask step (EXECUTABLE): if masking fails, the collected files are withheld and the step fails', () => {
+  const r = runMaskStep({ files: { 'ssh.log': `${MASK_USER}@${MASK_HOST}\n`, 'summary.txt': 'result=ok\n' }, fakePerlFails: true })
+  assert.notEqual(r.status, 0, 'a failed mask fails the step')
+  assert.equal(r.outputs, '', 'no publish marker')
+  assert.deepEqual(Object.keys(r.after), ['summary.txt'], 'the collected files are deleted; only the withheld notice remains on disk')
+  assert.match(r.after['summary.txt'], /withheld/)
+  for (const content of Object.values(r.after)) assert.ok(!content.includes(MASK_USER) && !content.includes(MASK_HOST))
+})
+
+test('workflow mask step (EXECUTABLE): a file left unmasked while the masking command exits 0 is caught by the check, and the collected files are withheld', () => {
+  const r = runMaskStep({ files: { 'ssh.log': `${MASK_USER}@${MASK_HOST}\n`, 'nested/report.md': `${MASK_HOST}\n`, 'summary.txt': 'result=ok\n' }, fakePerlNoop: true })
+  assert.notEqual(r.status, 0, 'a value still present after masking fails the step')
+  assert.equal(r.outputs, '', 'no publish marker')
+  assert.deepEqual(Object.keys(r.after), ['summary.txt'], 'the collected files are deleted; only the withheld notice remains on disk')
+  assert.match(r.after['summary.txt'], /withheld/)
+  assert.ok(!`${r.stdout}${r.stderr}`.includes(MASK_USER) && !`${r.stdout}${r.stderr}`.includes(MASK_HOST), 'the check prints neither value')
+})
+
+test('workflow mask step (EXECUTABLE): if a collected file cannot be read during the value check, no publish marker is set and the step fails', () => {
+  const r = runMaskStep({ files: { 'ssh.log': `${MASK_USER}@${MASK_HOST}\n`, 'summary.txt': 'result=ok\n' }, fakeGrepUnreadable: true })
+  assert.notEqual(r.status, 0, 'an unreadable file fails the step')
+  assert.equal(r.outputs, '', 'no publish marker')
+})
+
+test('workflow mask step (EXECUTABLE): when withholding cannot delete the files, they stay on disk but no publish marker is set', () => {
+  for (const fake of [{ fakePerlNoop: true }, { fakePerlFails: true }]) {
+    const r = runMaskStep({ files: { 'ssh.log': `${MASK_USER}@${MASK_HOST}\n`, 'nested/report.md': `${MASK_HOST}\n` }, fakeDeleteFails: true, ...fake })
+    const label = Object.keys(fake)[0]
+    assert.notEqual(r.status, 0, `${label}: the step fails`)
+    assert.ok('ssh.log' in r.after && 'nested/report.md' in r.after, `${label}: the failed delete left the collected files in place (the case this marker guards)`)
+    assert.equal(r.outputs, '', `${label}: no publish marker, so neither the summary nor the upload step runs`)
+  }
+})
+
+test('workflow mask step (EXECUTABLE): a step that stops before it completes sets no publish marker', () => {
+  const files = { 'ssh.log': `${MASK_USER}@${MASK_HOST}\n`, 'summary.txt': 'result=ok\n' }
+  const start = runMaskStep({ files, abortAtStart: true })
+  assert.notEqual(start.status, 0, 'a failing first command stops the step')
+  assert.equal(start.outputs, '', 'stopped at the start: no publish marker')
+  assert.equal(start.after['ssh.log'], files['ssh.log'], 'stopped at the start: nothing was masked or withheld')
+  const killed = runMaskStep({ files, abortAtCheck: true })
+  assert.equal(killed.signal, 'SIGKILL', `the step shell is killed during the value check (status ${killed.status})`)
+  assert.equal(killed.outputs, '', 'killed mid-step: no publish marker')
+  assert.ok('ssh.log' in killed.after, 'killed mid-step: the collected files were neither withheld nor marked publishable')
+})
+
+test('workflow publish gate: the summary and upload steps run only after the mask step sets publish=ok as its last action', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const mask = workflowStepBlock(workflow, MASK_STEP).join('\n')
+  assert.match(mask, /^ {8}id: mask$/m, 'the mask step has the id the gates read')
+  const step = workflowSteps(workflow).find((candidate) => candidate.name === MASK_STEP)
+  const lines = executableLines(step.run).split('\n').filter((line) => line.trim() !== '')
+  assert.equal(lines[lines.length - 1], PUBLISH_MARKER_LINE, 'setting the marker is the last command of the mask step, at top level')
+  assert.equal(executableLines(step.run).split('publish=').length - 1, 1, 'the mask step sets the marker on exactly one executable line')
+  for (const name of ['Write step summary', 'Upload artifacts']) {
+    const block = workflowStepBlock(workflow, name)
+    const ifs = block.filter((line) => /^ {8}if:/.test(line))
+    assert.deepEqual(ifs, [`        ${PUBLISH_GATE}`], `${name} runs only when the mask step set the publish marker`)
+  }
+  const writers = workflowSteps(workflow).filter((candidate) => candidate.run !== null && /publish=/.test(executableLines(candidate.run)))
+  assert.deepEqual(writers.map(workflowStepLabel), [MASK_STEP], 'no other step can set the publish marker')
+})
+
+test('workflow publish gate (EXECUTABLE): without the marker, a fixed notice is written and nothing from the collected files is read', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const names = workflowSteps(workflow).map((candidate) => candidate.name)
+  const at = (name) => names.indexOf(name)
+  assert.ok(at(MASK_STEP) < at('Write withheld notice') && at('Write withheld notice') < at('Upload artifacts'))
+  const block = workflowStepBlock(workflow, 'Write withheld notice')
+  assert.deepEqual(block.filter((line) => /^ {8}if:/.test(line)), [`        ${WITHHELD_GATE}`])
+  assert.ok(!block.some((line) => /^ {8}(env|uses|with):/.test(line)), 'the notice step takes no inputs')
+  const step = workflowSteps(workflow).find((candidate) => candidate.name === 'Write withheld notice')
+  assert.doesNotMatch(step.run, /output\/|\$\{\{|\bcat\b/, 'the notice reads no collected file and no expression')
+  const dir = mkdtempSync(join(tmpdir(), 'wr-notice-'))
+  try {
+    mkdirSync(join(dir, 'output', 'window-runner'), { recursive: true })
+    writeFileSync(join(dir, 'output', 'window-runner', 'summary.txt'), `${MASK_USER}@${MASK_HOST}\n`)
+    const summary = join(dir, 'step-summary')
+    writeFileSync(summary, '')
+    const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step.run], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: { ...process.env, GITHUB_STEP_SUMMARY: summary, DEPLOY_USER: MASK_USER, DEPLOY_HOST: MASK_HOST },
+    })
+    assert.equal(r.status, 0, r.stderr)
+    const text = readFileSync(summary, 'utf8')
+    assert.match(text, /collected files withheld/)
+    assert.ok(!text.includes(MASK_USER) && !text.includes(MASK_HOST), 'the notice is fixed text')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// Every smoke arm the runner can bundle (the refused ones too, so re-enabling one cannot bring the
+// line back): the supplied admin token is reported without its subject.
+test('runner bundle: no bundled smoke script prints the subject of the supplied admin token', () => {
+  const arms = smokeArms()
+  assert.ok(arms.length >= 6, `expected every smoke arm, got ${arms.length}`)
+  for (const arm of arms) {
+    const source = readFileSync(join(HERE, arm.smokeScript), 'utf8')
+    assert.doesNotMatch(source, /jwtSubject\(\s*(adminToken|ADMIN_TOKEN|process\.env\.ADMIN_TOKEN)\s*\)/, `${arm.smokeScript}: the admin token subject is not read for logging`)
+    assert.doesNotMatch(source, /(?<!non-)admin token \(subject/, `${arm.smokeScript}: the supplied admin token line names no subject`)
+    const supplied = source.split('\n').filter((line) => line.includes('using supplied admin token'))
+    for (const line of supplied) {
+      assert.match(line.trim(), /^console\.log\('  using supplied admin token'\)$/, `${arm.smokeScript}: a constant line only`)
+    }
+  }
+})
+
+test('runner: both backend log slices are written through masked_log_slice, never filtered_pipe directly', () => {
+  const lines = executableLines(readFileSync(REMOTE_SH, 'utf8')).split('\n')
+  for (const name of ['backend-log-slice.log', 'soak-run-backend-log-slice.log']) {
+    const writers = lines.filter((line) => line.includes(`\${OUTPUT_DIR}/${name}`)).map((line) => line.trim())
+    assert.deepEqual(writers, [`masked_log_slice "\${OUTPUT_DIR}/${name}" \\`], `${name}: one masked writer`)
+  }
+  assert.ok(!lines.some((line) => /^\s*filtered_pipe "\$\{OUTPUT_DIR\}/.test(line)), 'no output-dir file is written by filtered_pipe directly')
+})
+
+const SLICE_SENTINELS = {
+  userId: 'slice-user-5d1c',
+  tenantId: 'slice-tenant-8e2a',
+  actorId: 'slice-actor-41b7',
+  email: 'slice.person.9f3@example.invalid',
+  mobile: '13912345678',
+  jwt: 'eyJhbGciOiJIUzI1NiJ9.eyJpZCI6InNsaWNlLXVzZXIifQ.c2lnbmF0dXJl',
+  deniedUser: '7d0c2b1e-4f3a-4e5b-8c9d-0a1b2c3d4e5f',
+  deniedAnyUser: 'u-denied-6b2e',
+  grantee: '2c9e4d1a-8b7f-4a6e-b5d4-c3b2a1f0e9d8',
+  grantingAdmin: '5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d',
+  revokee: 'u-grantee-7c21',
+  revokingAdmin: 'u-admin-3e90',
+  echoUser: 'u-echo-55aa',
+  recordUuid: '1f2e3d4c-5b6a-4978-8a9b-0c1d2e3f4a5b',
+  batchUuid: '6c5d4e3f-2a1b-4c0d-9e8f-7a6b5c4d3e2f',
+  actorUserId: 'u-act-1a2b',
+  targetUserId: 'u-tgt-3c4d',
+  localUserId: 'u-loc-5e6f',
+  userIdsItem: 'u-ids-7a8b',
+  nestedUserId: 'u-nest-9c0d',
+}
+
+// Kept on purpose: server correlation ids and the org id, UUID-shaped or not.
+const SLICE_KEPT = {
+  requestUuid: '0e8f7a6b-5c4d-4b3a-9f2e-1d0c9b8a7f6e',
+  grantRequestUuid: '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d',
+  orgUuid: '3b4c5d6e-7f80-4192-a3b4-c5d6e7f8091a',
+  traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+  spanId: '00f067aa0ba902b7',
+}
+
+const SLS = SLICE_SENTINELS
+const SLK = SLICE_KEPT
+const SLICE_PRODUCER_LINES = [
+  `warn: [Plugin:plugin-attendance] punch failed {"service":"metasheet","user_id":"${SLS.userId}","tenant_id":"${SLS.tenantId}","orgId":"soak-org-1","requestId":"req-1","count":3}`,
+  `error: attendance recompute failed {"actorId":"${SLS.actorId}","userId":42,"email":null}`,
+  `info: attendance reminder to ${SLS.email} / ${SLS.mobile} at ts=1730812345678 bearer ${SLS.jwt}`,
+  'info: unrelated line',
+  // packages/core-backend/src/rbac/rbac.ts rbacGuard denial (winston colorized simple format;
+  // user_id comes from the request context, the same id as in the message).
+  `\u001b[33mwarn\u001b[39m: Access denied for user ${SLS.deniedUser}: missing permission attendance:admin {"context":"RBACGuard","service":"metasheet","timestamp":"2026-11-05T01:02:03.456Z","requestId":"${SLK.requestUuid}","correlation_id":"${SLK.requestUuid}","user_id":"${SLS.deniedUser}","tenant_id":"default"}`,
+  // rbac.ts rbacGuardAny denial, with a non-UUID id (caught by the message prefix and by the user_id echo).
+  `warn: Access denied for user ${SLS.deniedAnyUser}: missing any of attendance:admin, attendance:write {"context":"RBACGuard","service":"metasheet","user_id":"${SLS.deniedAnyUser}"}`,
+  // packages/core-backend/src/routes/permissions.ts grant: grantee and acting admin in the message.
+  `info: Permission 'attendance:admin' granted to user ${SLS.grantee} by admin ${SLS.grantingAdmin} {"context":"PermissionsRouter","service":"metasheet","requestId":"${SLK.grantRequestUuid}","user_id":"${SLS.grantingAdmin}"}`,
+  // permissions.ts revoke with non-UUID ids: the revokee is only caught by the message prefix.
+  `info: Permission 'attendance:write' revoked from user ${SLS.revokee} by admin ${SLS.revokingAdmin} {"context":"PermissionsRouter","service":"metasheet","user_id":"${SLS.revokingAdmin}"}`,
+  // No prefix: only the same-line echo of the masked user_id value catches the message id.
+  `info: attendance export queued for ${SLS.echoUser} {"service":"metasheet","user_id":"${SLS.echoUser}"}`,
+  // UUID rule only: a bare UUID and a UUID under an unknown key are masked; orgId/traceId/spanId kept.
+  `error: attendance sync failed for record ${SLS.recordUuid} {"orgId":"${SLK.orgUuid}","traceId":"${SLK.traceId}","spanId":"${SLK.spanId}","batchRef":"${SLS.batchUuid}"}`,
+  // Compound camelCase id keys, an id array and a nested user id.
+  `info: attendance members {"actorUserId":"${SLS.actorUserId}","targetUserId":"${SLS.targetUserId}","localUserId":"${SLS.localUserId}","userIds":["${SLS.userIdsItem}",9001],"user":{"id":"${SLS.nestedUserId}","name":"keep"}}`,
+]
+
+const SLICE_EXPECTED = [
+  'warn: [Plugin:plugin-attendance] punch failed {"service":"metasheet","user_id":"***","tenant_id":"***","orgId":"soak-org-1","requestId":"req-1","count":3}',
+  'error: attendance recompute failed {"actorId":"***","userId":"***","email":null}',
+  'info: attendance reminder to *** / *** at ts=1730812345678 bearer ***',
+  `\u001b[33mwarn\u001b[39m: Access denied for user ***: missing permission attendance:admin {"context":"RBACGuard","service":"metasheet","timestamp":"2026-11-05T01:02:03.456Z","requestId":"${SLK.requestUuid}","correlation_id":"${SLK.requestUuid}","user_id":"***","tenant_id":"***"}`,
+  'warn: Access denied for user ***: missing any of attendance:admin, attendance:write {"context":"RBACGuard","service":"metasheet","user_id":"***"}',
+  `info: Permission 'attendance:admin' granted to user *** by admin *** {"context":"PermissionsRouter","service":"metasheet","requestId":"${SLK.grantRequestUuid}","user_id":"***"}`,
+  'info: Permission \'attendance:write\' revoked from user *** by admin *** {"context":"PermissionsRouter","service":"metasheet","user_id":"***"}',
+  'info: attendance export queued for *** {"service":"metasheet","user_id":"***"}',
+  `error: attendance sync failed for record *** {"orgId":"${SLK.orgUuid}","traceId":"${SLK.traceId}","spanId":"${SLK.spanId}","batchRef":"***"}`,
+  'info: attendance members {"actorUserId":"***","targetUserId":"***","localUserId":"***","userIds":["***"],"user":{"id":"***","name":"keep"}}',
+  '',
+].join('\n')
+
+function runMaskedLogSlice({ pattern = 'attendance', producerRc = 0, fakePython = false } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'wr-masked-slice-'))
+  const tmpDir = join(dir, 'tmp')
+  const binDir = join(dir, 'bin')
+  mkdirSync(tmpDir)
+  mkdirSync(binDir)
+  if (fakePython) writeFileSync(join(binDir, 'python3'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+  const linesFile = join(dir, 'lines.txt')
+  writeFileSync(linesFile, `${SLICE_PRODUCER_LINES.join('\n')}\n`)
+  const out = join(dir, 'slice.log')
+  const r = runPipefailBash(
+    `set -euo pipefail
+export PATH='${binDir}':"$PATH" TMPDIR='${tmpDir}'
+source '${LIB}'
+rc=0
+masked_log_slice '${out}' '${pattern}' -- bash -c 'cat "$1"; exit ${producerRc}' _ '${linesFile}' || rc=$?
+echo "SLICE_RC=$rc"`,
+  )
+  const slice = existsSync(out) ? readFileSync(out, 'utf8') : null
+  const tmpLeft = readdirSync(tmpDir)
+  rmSync(dir, { recursive: true, force: true })
+  return { ...r, slice, tmpLeft }
+}
+
+test('masked_log_slice (EXECUTABLE): account ids (keyed, after a message prefix, echoed, UUID-shaped), contact-shaped values and tokens are replaced; diagnostic text and correlation ids are kept', () => {
+  const r = runMaskedLogSlice()
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /SLICE_RC=0/)
+  assert.equal(r.slice, SLICE_EXPECTED)
+  for (const [key, value] of Object.entries(SLICE_SENTINELS)) {
+    assert.ok(!`${r.slice}${r.stdout}${r.stderr}`.includes(value), `the ${key} sentinel is masked`)
+  }
+  for (const [key, value] of Object.entries(SLICE_KEPT)) {
+    assert.ok(r.slice.includes(value), `the ${key} correlation/org value is kept`)
+  }
+  assert.deepEqual(r.tmpLeft, [], 'the unmasked temp slice is removed')
+})
+
+test('masked_log_slice (EXECUTABLE): keeps the filtered_pipe contract — zero matches is 0 with an empty slice, a failed producer returns its rc with the partial slice masked', () => {
+  const none = runMaskedLogSlice({ pattern: 'PATTERN_THAT_MATCHES_NOTHING_XYZ' })
+  assert.equal(none.status, 0, none.stderr)
+  assert.match(none.stdout, /SLICE_RC=0/)
+  assert.equal(none.slice, '')
+  assert.deepEqual(none.tmpLeft, [])
+
+  const failed = runMaskedLogSlice({ producerRc: 7 })
+  assert.equal(failed.status, 0, failed.stderr)
+  assert.match(failed.stdout, /SLICE_RC=7/, 'the producer rc is returned unchanged')
+  assert.match(failed.stderr, /producer failed rc=7/)
+  assert.equal(failed.slice, SLICE_EXPECTED, 'the partial slice is still written, masked the same way')
+  for (const value of Object.values(SLICE_SENTINELS)) assert.ok(!failed.slice.includes(value))
+  assert.deepEqual(failed.tmpLeft, [])
+})
+
+test('masked_log_slice (EXECUTABLE): if masking fails the slice is withheld and the return code is unchanged', () => {
+  const r = runMaskedLogSlice({ fakePython: true })
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /SLICE_RC=0/, 'a masking failure does not change the pass/fail result')
+  assert.equal(r.slice, 'log slice withheld: identifier masking failed\n')
+  assert.match(r.stderr, /identifier masking failed; slice\.log withheld/)
+  for (const value of Object.values(SLICE_SENTINELS)) assert.ok(!`${r.slice}${r.stdout}${r.stderr}`.includes(value))
+  assert.deepEqual(r.tmpLeft, [])
+})
+
+function runMaskLogIdentifiers(lines) {
+  const dir = mkdtempSync(join(tmpdir(), 'wr-mask-ids-'))
+  const file = join(dir, 'in.log')
+  writeFileSync(file, `${lines.join('\n')}\n`)
+  const r = runPipefailBash(`set -euo pipefail
+source '${LIB}'
+mask_log_identifiers '${file}'`)
+  rmSync(dir, { recursive: true, force: true })
+  return r
+}
+
+// One row per KEY alternative (and spelling) of mask_log_identifiers: removing any alternative
+// from the regex leaves that row's sentinel in place and fails the exact comparison.
+const MASKED_KEYS = [
+  'user_id', 'userId', 'USER_ID', 'tenant_id', 'tenantId', 'actor_id', 'actorId', 'employee_id', 'employeeId',
+  'requester_id', 'approver_id', 'assignee_id', 'assigneeId', 'owner_id', 'ownerId', 'operator_id',
+  'member_id', 'memberId', 'subject_id', 'recipient_id', 'account_id', 'accountId', 'admin_id', 'adminUserId',
+  'actorUserId', 'targetUserId', 'localUserId', 'tenantIds',
+  'created_by', 'createdBy', 'updated_by', 'updatedBy', 'deleted_by', 'submitted_by', 'submittedBy', 'approved_by', 'approvedBy',
+  'email', 'e_mail', 'Email', 'phone', 'mobile', 'tel', 'user_name', 'username', 'userName', 'login',
+  'display_name', 'displayName', 'real_name', 'realName', 'full_name', 'fullName', 'nick_name', 'nickname',
+]
+
+test('mask_log_identifiers (EXECUTABLE): every keyed alternative masks its string value; integer, array and nested ids are masked too', () => {
+  const rows = MASKED_KEYS.map((key, n) => [`{"${key}":"keyed-sentinel-${n}x"}`, `{"${key}":"***"}`])
+  rows.push(
+    ['{"userId":12345,"tenantId":-7}', '{"userId":"***","tenantId":"***"}'],
+    ['{"userIds":["keyed-arr-a1","keyed-arr-b2",77],"count":2}', '{"userIds":["***"],"count":2}'],
+    ['{"user":{"id":"keyed-nested-c3","role":"member"}}', '{"user":{"id":"***","role":"member"}}'],
+    ['{"actor":{"name":"kept","id":4242}}', '{"actor":{"name":"kept","id":"***"}}'],
+  )
+  const r = runMaskLogIdentifiers(rows.map(([input]) => input))
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(r.stdout, `${rows.map(([, expected]) => expected).join('\n')}\n`)
+  assert.doesNotMatch(r.stdout, /keyed-/)
+})
+
+test('mask_log_identifiers (EXECUTABLE): diagnostic keys and values are kept; UUIDs are kept only under the correlation and org keys', () => {
+  const uuid = '8d7c6b5a-4f3e-4d2c-9b1a-0f9e8d7c6b5a'
+  const kept = [
+    '{"service":"metasheet","context":"RBACGuard","count":3,"status":"failed","orgId":"org-kept-1","code":"attendance:admin"}',
+    `{"orgId":"${uuid}","org_id":"${uuid}","requestId":"${uuid}","request_id":"${uuid}","traceId":"${uuid}","spanId":"${uuid}","correlation_id":"${uuid}"}`,
+    'info: attendance-admin route mounted at /api/attendance-admin; ts=1730812345678',
+  ]
+  const masked = [
+    [`{"batchRef":"${uuid}","sessionId":"${uuid}","OrgId":"${uuid}"}`, '{"batchRef":"***","sessionId":"***","OrgId":"***"}'],
+    [`GET /api/attendance/groups/g1/members/${uuid.toUpperCase()}`, 'GET /api/attendance/groups/g1/members/***'],
+    ['notice for admin user keyed-after-two-prefixes done', 'notice for admin user *** done'],
+    ['account keyed-acct-9 locked; Account keyed-acct-10.', 'account *** locked; Account ***.'],
+  ]
+  const r = runMaskLogIdentifiers([...kept, ...masked.map(([input]) => input)])
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(r.stdout, `${[...kept, ...masked.map(([, expected]) => expected)].join('\n')}\n`)
 })
