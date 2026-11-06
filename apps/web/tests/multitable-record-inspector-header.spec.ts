@@ -971,3 +971,63 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
     })
   })
 })
+
+// Input-method composition (Chinese, Japanese, Korean...): Escape cancels the composition and Enter
+// commits it, so in the title neither reverts, commits, blurs nor closes anything
+// (utils/ime-keys.ts: isComposing, keyCode 229 — Safari's key that ends a composition — or key 'Process').
+describe('MetaRecordInspector title keys during an input-method composition', () => {
+  const IME_INITS: KeyboardEventInit[] = [{ isComposing: true }, { keyCode: 229 }]
+
+  it('an Escape during a composition keeps the typed draft, stays in edit and closes nothing; a plain Escape still reverts without closing', async () => {
+    const onPatch = vi.fn()
+    const onClose = vi.fn()
+    const { container } = mountInspector({ onPatch, onClose })
+    await flushUi()
+    const input = container.querySelector<HTMLInputElement>('.meta-record-drawer__title-input')!
+    input.focus()
+    input.value = 'Typed but not committed'
+    for (const init of IME_INITS) {
+      const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init })
+      input.dispatchEvent(event)
+      await flushUi()
+      expect(event.defaultPrevented).toBe(false)
+      expect(input.value).toBe('Typed but not committed')
+      expect(document.activeElement).toBe(input)
+    }
+    expect(onClose).not.toHaveBeenCalled()
+    expect(onPatch).not.toHaveBeenCalled()
+    const plain = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    input.dispatchEvent(plain)
+    await flushUi()
+    expect(plain.defaultPrevented).toBe(true)
+    expect(input.value).toBe('Alpha')
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('an Enter during a composition keeps the title in edit (no blur, nothing committed); a plain Enter still blurs, and the change that follows is the one patch', async () => {
+    const onPatch = vi.fn()
+    const { container } = mountInspector({ onPatch })
+    await flushUi()
+    const input = container.querySelector<HTMLInputElement>('.meta-record-drawer__title-input')!
+    input.focus()
+    input.value = 'Beta'
+    for (const init of IME_INITS) {
+      const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init })
+      input.dispatchEvent(event)
+      await flushUi()
+      expect(event.defaultPrevented).toBe(false)
+      expect(document.activeElement).toBe(input)
+    }
+    expect(onPatch).not.toHaveBeenCalled()
+    const plain = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    input.dispatchEvent(plain)
+    await flushUi()
+    expect(plain.defaultPrevented).toBe(true)
+    expect(document.activeElement).not.toBe(input)
+    // what a browser does on blur with a changed value (jsdom does not)
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(onPatch).toHaveBeenCalledTimes(1)
+    expect(onPatch).toHaveBeenCalledWith('fld_title', 'Beta')
+  })
+})
