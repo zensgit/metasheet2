@@ -1028,7 +1028,7 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
   it('D20 is not a binding bypass: a bound draft on a formal target still needs the registry and the fence covers it', async () => {
     await owner.query(multiTargetUp)
     await registerProject()
-    await fixture()
+    const f = await fixture()
     const { draft, slot2 } = await addFormalTarget(boundInput(formalInput()))
     const multi = await session(context(), { multiTarget: true })
     const granted = await multi.service.approve({ operationId: draft.operationId, rowKey: draft.rows[0].rowKey,
@@ -1042,5 +1042,17 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     await rejected(multi.service.approve({ operationId: again.operationId, rowKey: again.rows[0].rowKey,
       confirmationId: 'synthetic-again-confirmation', targetRef: slot2.targetRef }), 'IDENTITY_RESERVED')
     expect(await evidence()).toEqual(before)
+    // The fence is per target: the same identity (same key value and project) bound on slot 1 is free there. The early
+    // look-up must scope by target_ref, or this would be a false IDENTITY_RESERVED across targets; the index then takes
+    // the second row because its target differs.
+    const onTest = await second.draft.createDraft(boundInput())
+    const slot1 = await multi.service.approve({ operationId: onTest.operationId, rowKey: onTest.rows[0].rowKey,
+      confirmationId: 'synthetic-slot1-confirmation', targetRef: f.targetRef })
+    expect([slot1.status, slot1.targetRef]).toEqual(['approved', f.targetRef])
+    const admittedOnTest = await multi.service.admit({ grantId: slot1.grantId, submissionId: 'synthetic-slot1-submission' })
+    expect(admittedOnTest.status).toBe('admitted')
+    const ledgerRows = await tableRows(LEDGER)
+    expect(ledgerRows.map(row => row.creation_identity_digest)).toEqual([ledger.creation_identity_digest, ledger.creation_identity_digest])
+    expect(new Set(ledgerRows.map(row => row.target_ref))).toEqual(new Set([slot2.targetRef, f.targetRef]))
   })
 })
