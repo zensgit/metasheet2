@@ -45,6 +45,7 @@ import { isApprovalAttachmentsEnabled } from './approval-attachments'
 import { isApprovalCanvasV2Enabled } from '../services/approval-canvas-flag'
 import { isApprovalCcUnreadBadgeEnabled, isApprovalMineOutcomeBadgeEnabled } from '../services/approval-notify-badge-flags'
 import { isFwbWritebackEnabled } from '../multitable/approval-fwb-activation'
+import { isIntegrationAutomationRunActionEnabled } from '../multitable/automation-run-integration-job'
 import { isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1 } from '../attendance/w6-group-effective-policy-panel-flag'
 import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
 import { parseUserActivationStatus } from '../auth/user-activation'
@@ -328,6 +329,11 @@ function buildFeaturePayload(authUser: User) {
     // /api/tasks. The web hides the 任务 entry, its badge and the /tasks route otherwise, so a
     // server without the flag issues no /api/tasks request at all. Never inferred from role.
     tasks: isTasksEnabled(),
+    // R-69 1b-iii: surfaces I3's INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED (default OFF, exact 'true') so the
+    // automation rule editor offers run_integration_job only when a save could succeed (ADR PR 1b-iii: not
+    // rendered while the switch is off). The SAME predicate gates the save (403 RUN_ACTION_DISABLED) and every
+    // trigger. Not a new flag. Never inferred from role/mode/plugin state.
+    integrationAutomationRunAction: isIntegrationAutomationRunActionEnabled(),
     mode,
   }
 }

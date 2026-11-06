@@ -574,6 +574,8 @@ const RERUN_LEAF_TYPES: Record<Exclude<AutomationActionType, 'condition_branch' 
   start_approval: true, send_email: true, send_dingtalk_group_message: true,
   send_dingtalk_person_message: true, send_dingtalk_approval_card: true, delete_record: true,
   lock_record: true, wait_for_callback: true, write_approval_form_values: true,
+  // R-69 1b-iii: a top-level leaf; a re-run lists it like any other action (it re-runs the dry run only).
+  run_integration_job: true,
   notify: true, update_field: true,
 }
 

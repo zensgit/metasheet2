@@ -1585,6 +1585,9 @@ export function automationActionTypeLabel(type: AutomationActionType | UnknownAu
     case 'write_approval_form_values':
       // Product copy: create-from-approval (FWB-1). Technical action id remains write_approval_form_values.
       return isZh ? '审批数据回写' : 'Write back approval data'
+    case 'run_integration_job':
+      // R-69 1b-iii: dry run only (the save refuses any apply mode).
+      return isZh ? '运行集成任务（仅预演）' : 'Run integration job (dry run)'
     case 'update_field':
       return isZh ? '更新字段值' : 'Update field value'
     default:
