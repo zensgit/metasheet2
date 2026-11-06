@@ -209,6 +209,19 @@ describe('MetaCommentComposer', () => {
       app.unmount()
     })
 
+    it('with only the type-to-search hint showing, plain arrows and Tab keep their native job', async () => {
+      const { app } = mountWithSearch('@', fakeSearch())
+      await settle()
+      expect(container!.querySelector('[data-test="comment-mention-search-required"]')).not.toBeNull()
+      const textarea = container!.querySelector('textarea') as HTMLTextAreaElement
+      for (const init of [{ key: 'ArrowDown' }, { key: 'ArrowUp' }, { key: 'Tab' }, { key: 'Tab', shiftKey: true }]) {
+        const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+        textarea.dispatchEvent(event)
+        expect(event.defaultPrevented, JSON.stringify(init)).toBe(false)
+      }
+      app.unmount()
+    })
+
     it('a real term shows the server answer (even an email-only match) and selecting it still mentions', async () => {
       const search = fakeSearch()
       const { app, submitSpy } = mountWithSearch('ping @', search)

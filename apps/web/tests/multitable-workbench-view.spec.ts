@@ -1221,6 +1221,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
 import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
+import { createUndoKeyGate, textEntryHost } from '../src/multitable/utils/undo-key-gate'
 import { useLocale } from '../src/composables/useLocale'
 
 async function flushUi(cycles = 5): Promise<void> {
@@ -5634,46 +5635,132 @@ describe('MultitableWorkbench view wiring', () => {
       }
     })
   })
-  // mod+z / mod+y run the grid's undo/redo, which replays a recorded cell edit to the server. From a
-  // text-entry control they are the control's own text undo/redo instead; from a select, a checkbox or
-  // the main area (no text undo there) the grid's undo/redo still runs.
-  describe('grid undo/redo and text-entry targets', () => {
-    const CHORDS: KeyboardEventInit[] = [
-      { key: 'z', metaKey: true },
-      { key: 'z', ctrlKey: true },
-      { key: 'y', ctrlKey: true },
-      { key: 'z', metaKey: true, shiftKey: true },
-    ]
+  // mod+z / mod+y / mod+shift+z (utils/undo-key-gate.ts): the grid's undo/redo, which replays a recorded
+  // cell edit to the server, except while the focused text control has uncommitted typing of its own.
+  // The browser's undo is page-wide, so from a control with nothing typed in it the key stays the grid's.
+  describe('undo key gate (utils/undo-key-gate.ts)', () => {
+    const made: HTMLElement[] = []
+    afterEach(() => { while (made.length) made.pop()!.remove() })
+    const add = <T extends HTMLElement>(el: T, parent: HTMLElement = document.body): T => { parent.appendChild(el); made.push(el); return el }
+    const input = (type: string) => Object.assign(document.createElement('input'), { type })
+    const ev = (target: HTMLElement, init: KeyboardEventInit) => {
+      const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+      Object.defineProperty(event, 'target', { value: target })
+      return event
+    }
+    const type = (el: HTMLElement, text: string) => {
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) el.value += text
+      else el.innerHTML += text
+    }
 
-    it('from a textarea, a text input or an editable surface the chords are left to the control; from a select, a checkbox or the main area the grid still takes them', async () => {
+    it('classifies text-entry hosts: textarea, editable contenteditable (and a child in it), text-like inputs; not date/time, select, checkbox, button', () => {
+      const editor = add(document.createElement('div'))
+      editor.setAttribute('contenteditable', 'true')
+      const child = document.createElement('span')
+      editor.appendChild(child)
+      const hosts: HTMLElement[] = [add(document.createElement('textarea')), editor, add(input('text')), add(input('search')), add(input('number')), add(input('email'))]
+      for (const el of hosts) expect(textEntryHost(el), el.tagName + (el as HTMLInputElement).type).toBe(el)
+      expect(textEntryHost(child)).toBe(editor)
+      for (const t of ['date', 'time', 'datetime-local', 'month', 'week', 'checkbox', 'radio', 'button', 'range', 'file']) expect(textEntryHost(add(input(t))), t).toBeNull()
+      expect(textEntryHost(add(document.createElement('select')))).toBeNull()
+      const standaloneFalse = add(document.createElement('div'))
+      standaloneFalse.setAttribute('contenteditable', 'false')
+      expect(textEntryHost(standaloneFalse)).toBeNull()
+    })
+
+    it('with nothing typed since focus or since the last commit, every chord is the grid\'s; with uncommitted typing, undo and the text redo chords are the control\'s, Cmd+Y stays the grid\'s', () => {
+      const editor = add(document.createElement('div'))
+      editor.setAttribute('contenteditable', 'true')
+      for (const host of [add(document.createElement('textarea')), add(input('text')), editor]) {
+        const gate = createUndoKeyGate()
+        gate.noteFocus(host)
+        expect(gate.decide(ev(host, { key: 'z', metaKey: true }))).toBe('grid-undo')
+        expect(gate.decide(ev(host, { key: 'z', ctrlKey: true, shiftKey: true }))).toBe('grid-redo')
+        expect(gate.decide(ev(host, { key: 'y', ctrlKey: true }))).toBe('grid-redo')
+        type(host, 'typed')
+        expect(gate.decide(ev(host, { key: 'z', metaKey: true }))).toBe('native')
+        expect(gate.decide(ev(host, { key: 'z', ctrlKey: true }))).toBe('native')
+        expect(gate.decide(ev(host, { key: 'Z', metaKey: true, shiftKey: true }))).toBe('native')
+        expect(gate.decide(ev(host, { key: 'y', ctrlKey: true }))).toBe('native')
+        expect(gate.decide(ev(host, { key: 'y', metaKey: true }))).toBe('grid-redo')
+        // a commit makes the content the baseline again
+        gate.noteCommit(host)
+        expect(gate.decide(ev(host, { key: 'z', metaKey: true }))).toBe('grid-undo')
+        // other keys are not this gate's
+        expect(gate.decide(ev(host, { key: 'z' }))).toBe('none')
+        expect(gate.decide(ev(host, { key: 'x', metaKey: true }))).toBe('none')
+      }
+    })
+
+    it('date/time inputs, selects and non-editable targets are always the grid\'s; no recorded baseline counts as committed; the key is case-insensitive', () => {
+      const gate = createUndoKeyGate()
+      const date = add(input('date'))
+      gate.noteFocus(date)
+      date.value = '2031-05-06'
+      expect(gate.decide(ev(date, { key: 'z', metaKey: true }))).toBe('grid-undo')
+      expect(gate.decide(ev(add(document.createElement('select')), { key: 'z', metaKey: true }))).toBe('grid-undo')
+      expect(gate.decide(ev(add(document.createElement('div')), { key: 'z', metaKey: true }))).toBe('grid-undo')
+      const unseen = add(input('text'))
+      unseen.value = 'already here'
+      expect(gate.decide(ev(unseen, { key: 'z', metaKey: true }))).toBe('grid-undo')
+      expect(gate.decide(ev(unseen, { key: 'Z', metaKey: true }))).toBe('grid-undo')
+    })
+
+    it('through the real workbench: a focused field with typing keeps the key (no grid call); a clean field, a date input, a select and the main area run the grid\'s undo/redo; a change makes the field clean again', async () => {
       mountWorkbench()
       await flushUi()
       const root = container!.querySelector('.mt-workbench') as HTMLElement
-      const made: HTMLElement[] = []
-      const add = <T extends HTMLElement>(el: T): T => { root.appendChild(el); made.push(el); return el }
-      const textarea = add(document.createElement('textarea'))
-      const text = add(Object.assign(document.createElement('input'), { type: 'text' }))
-      const search = add(Object.assign(document.createElement('input'), { type: 'search' }))
-      const editor = add(document.createElement('div'))
-      editor.setAttribute('contenteditable', 'true')
-      const inEditor = document.createElement('span')
-      editor.appendChild(inEditor)
-      const select = add(document.createElement('select'))
-      const checkbox = add(Object.assign(document.createElement('input'), { type: 'checkbox' }))
+      const text = add(input('text'), root)
+      const date = add(input('date'), root)
+      const select = add(document.createElement('select'), root)
       const main = container!.querySelector('.mt-workbench__main') as HTMLElement
       const fire = (el: HTMLElement, init: KeyboardEventInit) => {
+        gridMock.undo.mockClear()
+        gridMock.redo.mockClear()
         const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
         el.dispatchEvent(event)
-        return event.defaultPrevented
+        return { prevented: event.defaultPrevented, undo: gridMock.undo.mock.calls.length, redo: gridMock.redo.mock.calls.length }
       }
-      try {
-        for (const init of CHORDS) {
-          for (const el of [textarea, text, search, editor, inEditor]) expect(fire(el, init), `${el.tagName} ${JSON.stringify(init)}`).toBe(false)
-          for (const el of [select, checkbox, main]) expect(fire(el, init), `${el.tagName} ${JSON.stringify(init)}`).toBe(true)
-        }
-      } finally {
-        for (const el of made) el.remove()
+      text.focus()
+      expect(fire(text, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 1, redo: 0 })
+      text.value = 'typed, not committed'
+      expect(fire(text, { key: 'z', metaKey: true })).toEqual({ prevented: false, undo: 0, redo: 0 })
+      expect(fire(text, { key: 'y', ctrlKey: true })).toEqual({ prevented: false, undo: 0, redo: 0 })
+      expect(fire(text, { key: 'y', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 1 })
+      text.dispatchEvent(new Event('change', { bubbles: true }))
+      expect(fire(text, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 1, redo: 0 })
+      date.focus()
+      date.value = '2031-05-06'
+      expect(fire(date, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 1, redo: 0 })
+      expect(fire(select, { key: 'z', ctrlKey: true })).toEqual({ prevented: true, undo: 1, redo: 0 })
+      expect(fire(main, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 1 })
+    })
+
+    it('a drawer commit without a DOM change (the rich-text editor\'s Cmd/Ctrl+Enter keeps focus) makes the focused control clean: Cmd+Z there is the grid\'s again', async () => {
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      const drawer = container!.querySelector('[data-record-drawer="rec_1"]') as HTMLElement
+      expect(drawer).toBeTruthy()
+      const editor = add(document.createElement('div'), drawer)
+      editor.setAttribute('contenteditable', 'true')
+      editor.tabIndex = 0
+      editor.focus()
+      expect(document.activeElement).toBe(editor)
+      editor.innerHTML = 'typed in the editor'
+      const cmdZ = () => {
+        gridMock.undo.mockClear()
+        const event = new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true })
+        editor.dispatchEvent(event)
+        return { prevented: event.defaultPrevented, undo: gridMock.undo.mock.calls.length }
       }
+      expect(cmdZ()).toEqual({ prevented: false, undo: 0 })
+      // the stub drawer emits `patch` the way the editor's Cmd+Enter commit does: focus stays, no DOM change
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      await flushUi()
+      expect(document.activeElement).toBe(editor)
+      expect(cmdZ()).toEqual({ prevented: true, undo: 1 })
     })
   })
 })
