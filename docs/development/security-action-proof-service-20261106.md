@@ -78,8 +78,9 @@ The account gate decides whether the session is usable (`401 SECURITY_ACTION_SES
 the local password is an eligible method is decided separately (`403 SECURITY_ACTION_METHOD_UNAVAILABLE`
 with `details.nextStep`). Consumption applies the same two checks and reports either as a stale proof.
 
-The privilege witness is compared at consumption time; purposes whose outcome depends on the privilege
-class stay unavailable until every authorization-input writer serializes with consumption.
+The privilege witness is compared at consumption time; every purpose stays unavailable until every
+authorization-input writer serializes with consumption, proofs are bound to the browser that started
+them, and verification attempts are limited per user and per session.
 
 ## Route contract
 

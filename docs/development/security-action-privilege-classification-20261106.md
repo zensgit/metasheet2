@@ -96,9 +96,10 @@ Purposes: `external_identity_bind` (`empty_slot`), `external_identity_unbind`, `
 A purpose is available only when every prerequisite it depends on is delivered: the proof service;
 the local credential provenance constraint (a local credential counts as the `local_password` method
 only when its provenance satisfies the assurance policy for verification methods); the authorization
-input serialization contract, for every purpose whose outcome depends on the privilege class (derived
-from the matrix and the delivered methods); and the purpose's own target resolution. In this
-revision every prerequisite is false, so no purpose is available.
+input serialization contract; binding of the proof and its intent to the browser that started them;
+a per-user total limit on verification attempts with at most one in flight per session; and the
+purpose's own target resolution. Every purpose depends on each of them. In this revision every
+prerequisite is false, so no purpose is available.
 
 ## Tests and wiring
 

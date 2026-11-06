@@ -62,6 +62,8 @@ function prerequisites(overrides: Partial<SecurityActionPrerequisites> = {}): Se
     proofService: true,
     localCredentialProvenanceConstraint: true,
     authorizationInputSerialization: true,
+    browserBinding: true,
+    verificationAttemptLimits: true,
     externalReauthMethod: true,
     purposeTargets: {
       external_identity_bind: true, external_identity_unbind: true, login_grant_enable: true, login_grant_disable: true,
@@ -245,12 +247,14 @@ describe('security action purpose registry', () => {
     expect(SECURITY_ACTION_PREREQUISITES.proofService).toBe(false)
     expect(SECURITY_ACTION_PREREQUISITES.localCredentialProvenanceConstraint).toBe(false)
     expect(SECURITY_ACTION_PREREQUISITES.authorizationInputSerialization).toBe(false)
+    expect(SECURITY_ACTION_PREREQUISITES.browserBinding).toBe(false)
+    expect(SECURITY_ACTION_PREREQUISITES.verificationAttemptLimits).toBe(false)
     expect(SECURITY_ACTION_PREREQUISITES.externalReauthMethod).toBe(false)
     expect(SECURITY_ACTION_PREREQUISITES.purposeTargets).toEqual({
       external_identity_bind: false, external_identity_unbind: false, login_grant_enable: false, login_grant_disable: false,
     })
     expect(Object.keys(SECURITY_ACTION_PREREQUISITES).sort()).toEqual(
-      ['authorizationInputSerialization', 'externalReauthMethod', 'localCredentialProvenanceConstraint', 'proofService', 'purposeTargets'],
+      ['authorizationInputSerialization', 'browserBinding', 'externalReauthMethod', 'localCredentialProvenanceConstraint', 'proofService', 'purposeTargets', 'verificationAttemptLimits'],
     )
     expect(Object.isFrozen(SECURITY_ACTION_PREREQUISITES)).toBe(true)
     expect(Object.isFrozen(SECURITY_ACTION_PREREQUISITES.purposeTargets)).toBe(true)
@@ -270,6 +274,9 @@ describe('security action purpose registry', () => {
       expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites())).toBe(true)
       expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites({ proofService: false }))).toBe(false)
       expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites({ localCredentialProvenanceConstraint: false }))).toBe(false)
+      expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites({ authorizationInputSerialization: false }))).toBe(false)
+      expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites({ browserBinding: false }))).toBe(false)
+      expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites({ verificationAttemptLimits: false }))).toBe(false)
     }
     for (const missing of SECURITY_ACTION_PURPOSES) {
       const targets = { ...prerequisites().purposeTargets, [missing]: false }
@@ -277,14 +284,12 @@ describe('security action purpose registry', () => {
         expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites({ purposeTargets: targets }))).toBe(purpose !== missing)
       }
     }
-    const unserialized = prerequisites({ authorizationInputSerialization: false, externalReauthMethod: false })
-    expect(evaluateSecurityActionPurposeAvailability('external_identity_bind', unserialized)).toBe(false)
-    expect(evaluateSecurityActionPurposeAvailability('login_grant_enable', unserialized)).toBe(false)
-    expect(evaluateSecurityActionPurposeAvailability('external_identity_unbind', unserialized)).toBe(true)
-    expect(evaluateSecurityActionPurposeAvailability('login_grant_disable', unserialized)).toBe(true)
-    const unserializedWithExternal = prerequisites({ authorizationInputSerialization: false, externalReauthMethod: true })
-    for (const purpose of SECURITY_ACTION_PURPOSES) {
-      expect(evaluateSecurityActionPurposeAvailability(purpose, unserializedWithExternal)).toBe(false)
+    // Serialization is required for every purpose, whether or not its outcome depends on the privilege class.
+    for (const externalReauthMethod of [false, true]) {
+      const unserialized = prerequisites({ authorizationInputSerialization: false, externalReauthMethod })
+      for (const purpose of SECURITY_ACTION_PURPOSES) {
+        expect(evaluateSecurityActionPurposeAvailability(purpose, unserialized)).toBe(false)
+      }
     }
   })
 
@@ -299,7 +304,7 @@ describe('security action purpose registry', () => {
   })
 
   it.each(['true', 1, {}, [], 'yes', () => true])('treats a non-boolean prerequisite value as unmet: case %#', (value) => {
-    const fields = ['proofService', 'localCredentialProvenanceConstraint', 'authorizationInputSerialization'] as const
+    const fields = ['proofService', 'localCredentialProvenanceConstraint', 'authorizationInputSerialization', 'browserBinding', 'verificationAttemptLimits'] as const
     for (const field of fields) {
       for (const purpose of SECURITY_ACTION_PURPOSES) {
         expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites({ [field]: value } as never))).toBe(false)
