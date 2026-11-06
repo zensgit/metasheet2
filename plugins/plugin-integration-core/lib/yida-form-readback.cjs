@@ -1,5 +1,6 @@
 'use strict'
 
+const { createHash } = require('node:crypto')
 const { ReadableStream, ReadableStreamDefaultReader } = require('node:stream/web')
 const { types: { isProxy, isPromise } } = require('node:util')
 
@@ -10,6 +11,9 @@ const MAX_DEPTH = 12
 const MAX_NODES = 4096
 const MAX_ITEMS = 256
 const MAX_STRING = 8192
+// The single-instance GET budgets. The ⑦.5 paginated search passes its own (larger) budgets to the
+// same parser; omitted, every parser call keeps exactly these values.
+const DEFAULT_LIMITS = Object.freeze({ depth: MAX_DEPTH, nodes: MAX_NODES, items: MAX_ITEMS, string: MAX_STRING })
 // eslint-disable-next-line no-control-regex -- Explicitly reject control characters in bounded public identifiers and the access header.
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/
 const INSTANCE_ID = /^[A-Za-z0-9_-]{1,128}$/
@@ -27,6 +31,7 @@ const MESSAGES = Object.freeze({
   ABORTED: 'Form readback cancelled',
   RESPONSE: 'Invalid form readback response',
   TOO_LARGE: 'Form readback exceeds limit',
+  THROTTLED: 'Form readback throttled',
   UNAVAILABLE: 'Form readback unavailable',
 })
 
@@ -177,7 +182,7 @@ function decimalIdentity(token) {
 // Bounded recursive-descent parsing: duplicate keys and numeric lexemes are
 // checked BEFORE accepting values. JSON.parse is used only for one validated,
 // bounded string literal, never to round a document's numbers first.
-function parseLosslessJson(text) {
+function parseLosslessJson(text, limits = DEFAULT_LIMITS) {
   let offset = 0
   let nodes = 0
   function skipWhitespace() { while (whitespace(text[offset])) offset += 1 }
@@ -197,7 +202,7 @@ function parseLosslessJson(text) {
           for (let count = 0; count < 4; count += 1) if (!hex(text[offset++])) fail('RESPONSE')
         } else if (!['"', '\\', '/', 'b', 'f', 'n', 'r', 't'].includes(escaped)) fail('RESPONSE')
       }
-      if (++length > MAX_STRING) fail('TOO_LARGE')
+      if (++length > limits.string) fail('TOO_LARGE')
     }
     fail('RESPONSE')
   }
@@ -228,7 +233,7 @@ function parseLosslessJson(text) {
     return value
   }
   function value(depth) {
-    if (depth > MAX_DEPTH || ++nodes > MAX_NODES) fail('TOO_LARGE')
+    if (depth > limits.depth || ++nodes > limits.nodes) fail('TOO_LARGE')
     skipWhitespace()
     const character = text[offset]
     if (character === '"') return quoted()
@@ -243,7 +248,7 @@ function parseLosslessJson(text) {
       if (text[offset] !== ']') {
         // eslint-disable-next-line no-constant-condition -- Every iteration consumes one value and is capped by MAX_ITEMS and the global parser budgets.
         while (true) {
-          if (result.length >= MAX_ITEMS) fail('TOO_LARGE')
+          if (result.length >= limits.items) fail('TOO_LARGE')
           result.push(value(depth + 1))
           skipWhitespace()
           if (text[offset] === ']') break
@@ -262,7 +267,7 @@ function parseLosslessJson(text) {
       if (text[offset] !== '}') {
         // eslint-disable-next-line no-constant-condition -- Every iteration consumes a unique key/value pair and is capped by MAX_ITEMS and the global parser budgets.
         while (true) {
-          if (keys.size >= MAX_ITEMS) fail('TOO_LARGE')
+          if (keys.size >= limits.items) fail('TOO_LARGE')
           const key = quoted()
           if (keys.has(key)) fail('RESPONSE')
           keys.add(key)
@@ -397,4 +402,183 @@ function createYidaFormReadback(options) {
   return Object.freeze({ read })
 }
 
-module.exports = { createYidaFormReadback, YidaFormReadbackError }
+// R-71 ⑦.5 cut-over reconciliation: the paginated READ of one form's instances. A fixed POST
+// search endpoint (`searchFormDataSecondGenerationNoTableField` of the official SDK; it returns no
+// sub-table data), a closed request body, a closed response shape and its own bounded budgets for the
+// same lossless parser. It reads; it has no create/update path, and the endpoint is not caller data.
+const SEARCH_ENDPOINT = 'https://api.dingtalk.com/v1.0/yida/forms/instances/advances/query'
+const SEARCH_MAX_BYTES = 1024 * 1024
+const SEARCH_LIMITS = Object.freeze({ depth: 12, nodes: 65536, items: 1024, string: MAX_STRING })
+const SEARCH_MAX_PAGE_SIZE = 100
+const SEARCH_MAX_PAGE_NUMBER = 600
+const SEARCH_MAX_TOTAL = 60000
+const SEARCH_MAX_FORM_FIELDS = 256
+const SEARCH_ORDER = '{"gmt_create":"+"}'
+const SEARCH_TOP_FIELDS = ['pageNumber', 'totalCount', 'data']
+// Documented YiDa throttle codes (help center: "server API throttling"); either one, or HTTP 429.
+const THROTTLE_CODES = new Set(['failure.operation.requestTooFast', 'failure.operation.tooManyVisitors'])
+
+function searchInput(input) {
+  const request = record(input, ['appType', 'formUuid', 'accessToken', 'systemToken', 'userId', 'pageNumber', 'pageSize', 'searchCondition'])
+  if (!boundedId(request.appType, 128) || !boundedId(request.formUuid, 128) || !boundedId(request.accessToken, 8192)
+    || !privateText(request.systemToken, 4096) || !privateText(request.userId, 128)
+    || !Number.isSafeInteger(request.pageNumber) || request.pageNumber < 1 || request.pageNumber > SEARCH_MAX_PAGE_NUMBER
+    || !Number.isSafeInteger(request.pageSize) || request.pageSize < 1 || request.pageSize > SEARCH_MAX_PAGE_SIZE
+    || typeof request.searchCondition !== 'string' || request.searchCondition.length < 2 || request.searchCondition.length > 4096
+    || CONTROL.test(request.searchCondition)) fail('INPUT')
+  if (![request.appType, request.formUuid, request.systemToken, request.userId, request.searchCondition].every(wellFormedUnicode)) fail('INPUT')
+  // Closed body: exactly these keys, nothing from the caller beyond the validated values. No time
+  // filter is ever sent (an unverified date granularity could silently skip older records).
+  const body = JSON.stringify({ appType: request.appType, formUuid: request.formUuid, systemToken: request.systemToken,
+    userId: request.userId, pageNumber: request.pageNumber, pageSize: request.pageSize,
+    searchCondition: request.searchCondition, orderConfigJson: SEARCH_ORDER })
+  return { body, accessToken: request.accessToken, formUuid: request.formUuid, pageNumber: request.pageNumber, pageSize: request.pageSize }
+}
+
+function searchResponse(response) {
+  if (!response || typeof response !== 'object' || isProxy(response)
+    || Object.getPrototypeOf(response) !== Response.prototype) fail('RESPONSE')
+  const statusCode = responseStatus.call(response)
+  const redirected = responseRedirected.call(response)
+  const shadowRedirect = Object.getOwnPropertyDescriptor(response, 'redirected')
+  for (const field of ['status', 'headers', 'body']) if (Object.hasOwn(response, field)) fail('RESPONSE')
+  if (shadowRedirect && (!Object.hasOwn(shadowRedirect, 'value') || typeof shadowRedirect.value !== 'boolean')) fail('RESPONSE')
+  if (redirected || shadowRedirect?.value) fail('RESPONSE')
+  if (statusCode === 429) fail('THROTTLED')
+  const declared = Headers.prototype.get.call(responseHeaders.call(response), 'content-length')
+  if (declared !== null) {
+    if (!/^[0-9]+$/.test(declared)) fail('RESPONSE')
+    const length = Number(declared)
+    if (!Number.isSafeInteger(length) || length > SEARCH_MAX_BYTES) fail('TOO_LARGE')
+  }
+  const body = responseBody.call(response)
+  if (body === null) fail('RESPONSE')
+  return { statusCode, body }
+}
+
+function throttled(parsed) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false
+  return ['code', 'errorCode'].some(key => Object.hasOwn(parsed, key) && THROTTLE_CODES.has(parsed[key]))
+}
+
+function searchRecords(parsed, request) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+    || Object.keys(parsed).some((key) => !SEARCH_TOP_FIELDS.includes(key))
+    || SEARCH_TOP_FIELDS.some((key) => !Object.hasOwn(parsed, key))
+    || parsed.pageNumber !== request.pageNumber
+    || !Number.isSafeInteger(parsed.totalCount) || parsed.totalCount < 0 || parsed.totalCount > SEARCH_MAX_TOTAL
+    || !Array.isArray(parsed.data) || parsed.data.length > request.pageSize) fail('RESPONSE')
+  return Object.freeze(parsed.data.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)
+      || typeof item.formInstanceId !== 'string' || !INSTANCE_ID.test(item.formInstanceId)
+      || item.formUuid !== request.formUuid
+      || !Object.hasOwn(item, 'formData') || !item.formData || typeof item.formData !== 'object'
+      || Array.isArray(item.formData) || Object.keys(item.formData).length > SEARCH_MAX_FORM_FIELDS) fail('RESPONSE')
+    return Object.freeze({ formInstanceId: item.formInstanceId, formData: item.formData })
+  }))
+}
+
+function createYidaFormSearchReadback(options) {
+  let fetchImpl
+  let readEnablement
+  try {
+    const settings = record(options, ['fetch'], ['readEnablement'])
+    fetchImpl = settings.fetch
+    readEnablement = Object.hasOwn(settings, 'readEnablement') ? settings.readEnablement : () => undefined
+    if (typeof fetchImpl !== 'function' || typeof readEnablement !== 'function') fail('INPUT')
+  } catch { fail('INPUT') }
+
+  async function search(input, options) {
+    let request
+    let signal
+    try {
+      request = searchInput(input)
+      ;({ signal } = record(options, ['signal']))
+      aborted(signal)
+    } catch { fail('INPUT') }
+    checkAbort(signal)
+    let enablement
+    try { enablement = readEnablement() } catch { fail('DISABLED') }
+    if (enablement !== 'true') {
+      try {
+        if (isPromise(enablement) && !isProxy(enablement)
+          && Object.getPrototypeOf(enablement) === Promise.prototype
+          && !Object.hasOwn(enablement, 'constructor')) {
+          Promise.prototype.then.call(enablement, undefined, () => {})
+        }
+      } catch { /* Observation must never replace the closed disabled error. */ }
+      fail('DISABLED')
+    }
+    checkAbort(signal)
+
+    let response
+    let reader
+    let complete = false
+    const abort = () => { if (reader) cancelReader(reader); else if (response) cancelBody(response) }
+    EventTarget.prototype.addEventListener.call(signal, 'abort', abort, { once: true })
+    try {
+      checkAbort(signal)
+      const pending = fetchImpl(SEARCH_ENDPOINT, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'x-acs-dingtalk-access-token': request.accessToken },
+        body: request.body,
+        redirect: 'error', signal,
+      })
+      if (isProxy(pending)) fail('RESPONSE')
+      response = isPromise(pending) ? await pending : pending
+      checkAbort(signal)
+      let inspected
+      try { inspected = searchResponse(response) } catch (error) {
+        if (ownErrors.has(error)) throw error
+        fail('RESPONSE')
+      }
+      reader = ReadableStream.prototype.getReader.call(inspected.body)
+      const chunks = []
+      let byteLength = 0
+      let reads = 0
+      // eslint-disable-next-line no-constant-condition -- SEARCH_MAX_BYTES + 1 bounds all attempts, including empty chunks.
+      while (true) {
+        checkAbort(signal)
+        if (reads > SEARCH_MAX_BYTES) fail('TOO_LARGE')
+        reads += 1
+        const { done, value } = await ReadableStreamDefaultReader.prototype.read.call(reader)
+        checkAbort(signal)
+        if (done) break
+        if (isProxy(value) || !(value instanceof Uint8Array)) fail('RESPONSE')
+        const chunkLength = typedArrayByteLength.call(value)
+        byteLength += chunkLength
+        if (byteLength > SEARCH_MAX_BYTES) fail('TOO_LARGE')
+        if (chunkLength > 0) {
+          const chunk = new Uint8Array(chunkLength)
+          Uint8Array.prototype.set.call(chunk, value)
+          chunks.push(chunk)
+        }
+      }
+      const bytes = new Uint8Array(byteLength)
+      let offset = 0
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+      const parsed = parseLosslessJson(decode(chunks, byteLength), SEARCH_LIMITS)
+      // A throttle answer may come with 2xx or 4xx; either way the page is not read and may be retried.
+      if (throttled(parsed)) fail('THROTTLED')
+      if (inspected.statusCode < 200 || inspected.statusCode > 299) fail('RESPONSE')
+      const records = searchRecords(parsed, request)
+      checkAbort(signal)
+      complete = true
+      // Values-free evidence of exactly the bytes that were classified (the page cursor proof).
+      const responseDigest = createHash('sha256').update(bytes).digest('hex')
+      // Request appType is NOT echoed by the official response. This observation proves neither form
+      // ownership, historical writes nor business success.
+      return Object.freeze({ statusCode: inspected.statusCode, pageNumber: parsed.pageNumber, totalCount: parsed.totalCount,
+        records, responseDigest })
+    } catch (error) {
+      throw new YidaFormReadbackError(aborted(signal) ? 'ABORTED' : ownErrors.get(error) || 'UNAVAILABLE')
+    } finally {
+      EventTarget.prototype.removeEventListener.call(signal, 'abort', abort)
+      if (!complete) { if (reader) cancelReader(reader); else if (response) cancelBody(response) }
+      if (reader) { try { ReadableStreamDefaultReader.prototype.releaseLock.call(reader) } catch { /* Already released. */ } }
+    }
+  }
+  return Object.freeze({ search })
+}
+
+module.exports = { createYidaFormReadback, createYidaFormSearchReadback, YidaFormReadbackError }

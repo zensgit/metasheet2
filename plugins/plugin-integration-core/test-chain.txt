@@ -310,6 +310,10 @@ node __tests__/yida-mapping-v3.test.cjs
 node __tests__/yida-owner-runtime-factory.test.cjs
 node __tests__/yida-owner-send-port.test.cjs
 node __tests__/yida-readback-observation.test.cjs
+node __tests__/yida-reconciliation-binding.test.cjs
+node __tests__/yida-reconciliation-plan.test.cjs
+node __tests__/yida-reconciliation-port.test.cjs
+node __tests__/yida-reconciliation-store.test.cjs
 node __tests__/yida-rule-template.test.cjs
 node __tests__/yida-send-authority-primitives.test.cjs
 node __tests__/yida-send-budget.test.cjs

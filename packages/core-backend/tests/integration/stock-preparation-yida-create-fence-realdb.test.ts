@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
@@ -13,6 +14,8 @@ const LEDGER = 'integration_yida_delivery_ledger'
 const AUDIT = 'integration_yida_delivery_audit'
 const FENCE = 'uniq_integration_yida_delivery_create_business'
 const SCOPE = 'uniq_integration_yida_delivery_scope_row'
+// Creation-identity fence (design baseline v2.3 §3.3, D16; migration zzzz20261106110300).
+const IDENTITY_FENCE = 'uniq_integration_yida_delivery_create_identity'
 const states = ['prepared', 'dispatching', 'outcome_unknown', 'acknowledged', 'not_sent'] as const
 type Row = Record<string, unknown>
 type Preparation = { record: Row & { id: string; status: string }; reused: boolean }
@@ -42,7 +45,7 @@ const databaseSuite = process.env.EXPECT_DB === '1' && process.env.DATABASE_URL 
 
 databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without delivery', () => {
   let pool: Pool, owner: PoolClient, first: Session, second: Session
-  let schema = '', ddl090 = '', ddl091 = ''
+  let schema = '', ddl090 = '', ddl091 = '', ddlBinding = '', ddlBindingDown = '', bindingDownRefused = ''
   let createDb: (input: { database: Database }) => unknown
   let createStore: (input: { db: unknown }) => Store
   const sessions: Session[] = []
@@ -105,7 +108,7 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
       try { return (await client.query(sql, params)).rows as Row[] }
       catch (error) {
         const constraint = (error as { constraint?: string }).constraint
-        if (errorCode(error) === '23505' && (constraint === FENCE || constraint === SCOPE)) uniqueErrors.push(constraint)
+        if (errorCode(error) === '23505' && (constraint === FENCE || constraint === SCOPE || constraint === IDENTITY_FENCE)) uniqueErrors.push(constraint)
         throw error
       }
     }
@@ -165,6 +168,13 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     createStore = requireCjs(path.join(lib, 'yida-delivery-store.cjs')).createYidaDeliveryStore
     ddl090 = readFileSync(path.join(root, 'packages/core-backend/migrations/090_create_integration_yida_delivery_ledger.sql'), 'utf8')
     ddl091 = readFileSync(path.join(root, 'packages/core-backend/migrations/091_create_integration_yida_create_fence.sql'), 'utf8')
+    // Source binding (design baseline v2.3 §3.3): the ledger part of zzzz20261106110300, exactly what its up() executes.
+    const bindingMigration = (await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts')).href)) as
+      { YIDA_SOURCE_BINDING_LEDGER_UP_SQL: string; YIDA_SOURCE_BINDING_DOWN_SQL: string; YIDA_SOURCE_BINDING_DOWN_REFUSED_CODE: string }
+    ddlBinding = bindingMigration.YIDA_SOURCE_BINDING_LEDGER_UP_SQL
+    ddlBindingDown = bindingMigration.YIDA_SOURCE_BINDING_DOWN_SQL
+    bindingDownRefused = bindingMigration.YIDA_SOURCE_BINDING_DOWN_REFUSED_CODE
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 7, connectionTimeoutMillis: 5000 })
     owner = await pool.connect()
     await owner.query("SET statement_timeout = '10s'")
@@ -175,6 +185,7 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     await owner.query(`SET search_path TO ${ident(schema)}`)
     await owner.query(ddl090)
     await owner.query(ddl091)
+    await owner.query(ddlBinding)
     first = await session(); second = await session()
   }, 30000)
   afterEach(async () => {
@@ -194,7 +205,7 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
   it.each(states)('090+091 replay and restart preserve %s evidence and its CREATE reservation', async status => {
     await setState(status)
     const before = await evidence()
-    await owner.query(ddl090); await owner.query(ddl091); await owner.query(ddl091)
+    await owner.query(ddl090); await owner.query(ddl091); await owner.query(ddl091); await owner.query(ddlBinding)
     expect(await evidence()).toEqual(before)
     expect((await owner.query('SHOW search_path')).rows[0].search_path).toBe(schema)
     const restarted = await session()
@@ -380,5 +391,444 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
       await owner.query(`SET search_path TO ${ident(schema)}`)
       await owner.query(`DROP SCHEMA ${ident(empty)}`)
     }
+  })
+
+  // ---- Creation-identity fence (design baseline v2.3 §3.3, D16 a; migration zzzz20261106110300) ----
+  // Bound rows carry the two digests. Business digest = the seven keys (K1 / K2); identity digest = key value + project.
+  const identity = (patch: Row = {}): Row => fixture({ sourceRecordDigest: '1'.repeat(64), creationIdentityDigest: '2'.repeat(64), ...patch })
+  const dropIdentityFence = () => owner.query(`DROP INDEX ${ident(schema)}.${ident(IDENTITY_FENCE)}`)
+
+  it('CF1 (pinned residue): an unbound row with the same source line and a changed seven-key digest is a second reservation', async () => {
+    // X: unbound (pasted), seven keys K1, acknowledged. X′: same sourceLineId in its payload, name corrected (K2).
+    await setState('acknowledged')
+    const second2 = await second.store.prepare(fixture({ operationId: 'synthetic-operation-x2', rowKey: 'synthetic-row-x2',
+      businessKeyDigest: 'c'.repeat(64), payloadDigest: 'd'.repeat(64) }))
+    expect(second2.reused).toBe(false)
+    const ledger = await rows(LEDGER)
+    expect(ledger.length).toBe(2)
+    expect(ledger.every(row => row.source_record_digest === null && row.creation_identity_digest === null)).toBe(true)
+  })
+
+  it('CF2 (index): a new record, the same key and project, a changed seven-key digest hits the identity fence; the ACKed row and its audit stay', async () => {
+    // X: bound to record R, seven keys K1, acknowledged with a synthetic receipt.
+    await setState('acknowledged', identity())
+    const before = await evidence()
+    expect(before.ledger[0].creation_identity_digest).toBe('2'.repeat(64))
+    // R deleted and re-created as R′ (new record id → new source record digest), name corrected (K2 → new business
+    // digest), same key value and project (same identity digest). Another draft, another operation.
+    const recreated = identity({ operationId: 'synthetic-operation-r2', rowKey: 'synthetic-row-r2',
+      businessKeyDigest: 'c'.repeat(64), payloadDigest: 'd'.repeat(64), sourceRecordDigest: '3'.repeat(64) })
+    await rejectStore(second.store.prepare(recreated), 'YIDA_DELIVERY_IDENTITY_CONFLICT')
+    expect(second.uniqueErrors).toEqual([IDENTITY_FENCE])
+    // The same identity moved to another registered sheet (another source record digest again): refused too.
+    await rejectStore(second.store.prepare(identity({ operationId: 'synthetic-operation-s2', rowKey: 'synthetic-row-s2',
+      businessKeyDigest: 'e'.repeat(64), sourceRecordDigest: '4'.repeat(64) })), 'YIDA_DELIVERY_IDENTITY_CONFLICT')
+    expect(await evidence()).toEqual(before)
+    // Another identity (another key value) under the same target is independent, as is the same identity under another target.
+    expect((await second.store.prepare(identity({ operationId: 'synthetic-operation-k2', rowKey: 'synthetic-row-k2',
+      businessKeyDigest: 'f'.repeat(64), creationIdentityDigest: '5'.repeat(64) }))).reused).toBe(false)
+    expect((await second.store.prepare(identity({ operationId: 'synthetic-operation-t2', rowKey: 'synthetic-row-t2',
+      targetRef: 'synthetic-other-target' }))).reused).toBe(false)
+    // An unbound row with the same seven keys is still caught by the seven-key fence.
+    await rejectStore(second.store.prepare(fixture({ operationId: 'synthetic-operation-u', rowKey: 'synthetic-row-u' })), 'YIDA_DELIVERY_BUSINESS_CONFLICT')
+    expect((await rows(LEDGER)).length).toBe(3)
+    // A direct SQL copy of X under another operation and business digest hits the same index.
+    const duplicate = await outcome(directCopy(before.ledger[0], { id: randomUUID(), operation_id: 'synthetic-direct-other', business_key_digest: '9'.repeat(64) }))
+    expect(duplicate).toEqual({ ok: false, code: '23505' })
+    expect((await rows(LEDGER)).length).toBe(3)
+  })
+
+  it('CF2 (replay): the identical bound operation replays its own reservation after the identity race; a changed binding is CONFLICT', async () => {
+    await first.store.prepare(identity())
+    const replayed = await second.store.prepare(identity())
+    expect(replayed.reused).toBe(true)
+    await rejectStore(second.store.prepare(identity({ sourceRecordDigest: '3'.repeat(64) })), 'YIDA_DELIVERY_CONFLICT')
+    // The identity digest alone is part of the compared snapshot too: the same operation with another identity is CONFLICT, not reuse.
+    await rejectStore(second.store.prepare(identity({ creationIdentityDigest: '6'.repeat(64) })), 'YIDA_DELIVERY_CONFLICT')
+    await rejectStore(second.store.prepare(fixture()), 'YIDA_DELIVERY_CONFLICT')
+    expect((await rows(LEDGER)).length).toBe(1)
+  })
+
+  it('CF3 (concurrent admission): two drafts with the same identity on two connections; exactly one reserves, the other rolls back on the identity fence', async () => {
+    const gate = first.gateAudit(), left = outcome(first.store.prepare(identity()))
+    let right: ReturnType<typeof outcome<Preparation>> | undefined
+    try {
+      await reached(gate)
+      // Another operation, another physical record, another seven-key digest: only the identity is shared.
+      right = outcome(second.store.prepare(identity({ operationId: 'synthetic-other-operation', rowKey: 'synthetic-other-row',
+        businessKeyDigest: 'c'.repeat(64), sourceRecordDigest: '3'.repeat(64) })))
+      await blocked(second, first)
+    } finally { gate.release() }
+    expect((await left).ok).toBe(true)
+    expect(await right).toEqual({ ok: false, code: 'YIDA_DELIVERY_IDENTITY_CONFLICT' })
+    expect(second.uniqueErrors).toEqual([IDENTITY_FENCE])
+    const rollback = second.statements.indexOf('ROLLBACK')
+    expect(rollback).toBeGreaterThan(-1)
+    expect((await rows(LEDGER)).length).toBe(1); expect((await rows(AUDIT)).length).toBe(1)
+    expect((await rows(LEDGER))[0].operation_id).toBe('synthetic-operation')
+  })
+
+  it('without the identity fence the same identity under two records is two reservations (the index is the guarantee)', async () => {
+    await dropIdentityFence()
+    await first.store.prepare(identity())
+    expect((await second.store.prepare(identity({ operationId: 'synthetic-other-operation', rowKey: 'synthetic-other-row',
+      businessKeyDigest: 'c'.repeat(64), sourceRecordDigest: '3'.repeat(64) }))).reused).toBe(false)
+    expect((await rows(LEDGER)).length).toBe(2)
+    // Replaying the migration over the duplicates refuses, as 091 does, instead of choosing between them.
+    await expect(owner.query(ddlBinding)).rejects.toMatchObject({ code: '23505', message: 'YIDA_DELIVERY_IDENTITY_CONFLICT' })
+    expect((await owner.query('SELECT 1 FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = $1', [IDENTITY_FENCE])).rowCount).toBe(0)
+  })
+
+  it.each(['source_record_digest', 'creation_identity_digest'])('ordinary DML cannot rewrite the binding column %s of a reservation', async column => {
+    await first.store.prepare(identity())
+    const before = await evidence()
+    expect(await outcome(owner.query(`UPDATE ${ident(LEDGER)} SET ${ident(column)} = $1, status = 'dispatching', claim_token = $2, claim_actor_id = $3`,
+      ['7'.repeat(64), 'a'.repeat(64), 'synthetic-actor']))).toEqual({ ok: false, code: 'P0001' })
+    expect(await outcome(owner.query(`UPDATE ${ident(LEDGER)} SET ${ident(column)} = NULL, status = 'dispatching', claim_token = $1, claim_actor_id = $2`,
+      ['a'.repeat(64), 'synthetic-actor']))).toEqual({ ok: false, code: 'P0001' })
+    expect(await evidence()).toEqual(before)
+    // A malformed digest never enters the ledger.
+    expect(await outcome(directCopy(before.ledger[0], { id: randomUUID(), operation_id: 'synthetic-bad', [column]: 'not-a-digest' }))).toEqual({ ok: false, code: '23514' })
+  })
+  // ---- R-71 ⑦.5 cut-over reconciliation (migration zzzz20261106110700; design baseline v2.3 §8) ----
+  // Real 090 + 091 + 110300 + 110700 DDL, the production reconciliation store over db.cjs and the production
+  // delivery store: a reconciled legacy record occupies the CREATE fence, evidence stays apart from sends, the
+  // ledger guard keeps every binding clause, and down() refuses while evidence exists.
+  const RECONCILE_MIGRATION = 'packages/core-backend/src/db/migrations/zzzz20261106110700_add_integration_yida_delivery_reconciled_existing.ts'
+  const RECEIPT_MIGRATION = 'packages/core-backend/src/db/migrations/zzzz20261105033000_add_integration_yida_delivery_audit_receipt_unparsed.ts'
+  type ReconcileModule = { YIDA_RECONCILED_EXISTING_UP_SQL: string; YIDA_RECONCILED_EXISTING_DOWN_SQL: string }
+  // Migration order on a real deployment: 033000 (reason CHECK, five values) runs before 110300 and 110700.
+  const reconcileModule = async () => {
+    const receipt = (await import(pathToFileURL(path.join(root, RECEIPT_MIGRATION)).href)) as { YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL: string }
+    await owner.query(receipt.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL)
+    return (await import(pathToFileURL(path.join(root, RECONCILE_MIGRATION)).href)) as ReconcileModule
+  }
+  const pgFailure = async (promise: Promise<unknown>) => {
+    try { await promise; return { ok: true } } catch (error) {
+      return { ok: false, code: errorCode(error), message: (error as Error).message }
+    }
+  }
+  const guardDefinition = async () => String((await owner.query(
+    "SELECT pg_get_functiondef('integration_yida_delivery_ledger_guard'::regproc) AS body")).rows[0].body)
+  const schemaShape = async () => ({
+    constraints: (await owner.query(`SELECT c.conrelid::regclass::text AS rel, c.conname, pg_get_constraintdef(c.oid, true) AS def
+      FROM pg_constraint c WHERE c.connamespace = current_schema()::regnamespace ORDER BY 1, 2`)).rows,
+    columns: (await owner.query(`SELECT attrelid::regclass::text AS rel, attname FROM pg_attribute WHERE attrelid IN
+      ('integration_yida_delivery_ledger'::regclass, 'integration_yida_delivery_audit'::regclass) AND attnum > 0 AND NOT attisdropped ORDER BY 1, 2`)).rows,
+    indexes: (await owner.query(`SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema() ORDER BY 1`)).rows
+      .map(row => ({ name: row.indexname, def: String(row.indexdef).replace(`${schema}.`, '') })),
+    tables: (await owner.query(`SELECT relname FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relkind = 'r' ORDER BY 1`)).rows,
+    guard: await guardDefinition(),
+  })
+  /** One reconciliation run (one page, completed) through the production store on its own connection. */
+  async function reconcileOnce(entries: Array<[string, string]>, mode: 'count' | 'register' = 'register') {
+    const client = await pool.connect()
+    try {
+      await client.query(`SET search_path TO ${ident(schema)}`)
+      const query = async (sql: string, params?: unknown[]) => (await client.query(sql, params)).rows as Row[]
+      const database: Database = { query, async transaction(callback) {
+        await query('BEGIN')
+        try { const result = await callback({ query }); await query('COMMIT'); return result }
+        catch (error) { await query('ROLLBACK'); throw error }
+      } }
+      const db = createDb({ database }) as { transaction<T>(callback: (trx: unknown) => Promise<T>): Promise<T> }
+      const { createYidaReconciliationStore } = requireCjs(path.join(root, 'plugins/plugin-integration-core/lib/yida-reconciliation-store.cjs')) as {
+        createYidaReconciliationStore(input: unknown): {
+          openRunInTransaction(trx: unknown, input: Row): Promise<Row & { id: string }>
+          commitPage(input: Row): Promise<{ run: Row & { counts: Record<string, number>; status: string } }>
+        } }
+      const plan = await import(pathToFileURL(path.join(root, 'plugins/plugin-integration-core/lib/yida-reconciliation-plan.mjs')).href) as {
+        classifyYidaReconcileRecord(input: Row): string; yidaReconcileCompletion(input: Row): Row; yidaReconcilePayloadDigest(input: Row): string }
+      const store = createYidaReconciliationStore({ db, context: { tenantId: 'synthetic-tenant', workspaceId: null, ownerId: 'synthetic-owner' } })
+      const run = await db.transaction(trx => store.openRunInTransaction(trx, { commandId: randomUUID(), targetRef: 'synthetic-target',
+        projectNo: 'DEMO-P1', projectKeyTarget: 'project', keyDefinitionDigest: 'd'.repeat(64), mode, pageSize: 50 }))
+      return await store.commitPage({ runId: run.id, pageNumber: 1, totalCount: entries.length, responseDigest: 'e'.repeat(64),
+        entries: entries.map(([instance, digest]) => ({ observedInstanceId: instance, kind: 'comparable', businessKeyDigest: digest })),
+        evidence: { targetRef: 'synthetic-target', planRevision: 'synthetic-plan-revision', formUuid: 'synthetic-form',
+          credentialRef: 'synthetic-credential', credentialGeneration: 1,
+          payloadDigest: (input: Row) => plan.yidaReconcilePayloadDigest({ formUuid: 'synthetic-form', ...input }) },
+        classify: (holder: unknown, observedInstanceId: string) => plan.classifyYidaReconcileRecord({ mode, holder, observedInstanceId }),
+        completion: (input: Row) => plan.yidaReconcileCompletion({ ...input, pageSize: 50 }) })
+    } finally { client.release() }
+  }
+
+  it('⑦.5 RC11: a reconciled_existing row occupies the CREATE fence; the send path cannot prepare the same seven keys', async () => {
+    const { YIDA_RECONCILED_EXISTING_UP_SQL } = await reconcileModule()
+    await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)
+    await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL) // replayable
+    const page = await reconcileOnce([['FINST-legacy-1', 'b'.repeat(64)]])
+    expect(page.run.status).toBe('completed')
+    expect(page.run.counts.registered).toBe(1)
+    const before = await evidence()
+    expect(before.ledger).toHaveLength(1)
+    expect(before.ledger[0]).toMatchObject({ status: 'reconciled_existing', intent: 'create', instance_id: null, business_key_digest: 'b'.repeat(64),
+      observed_instance_id: 'FINST-legacy-1', ack_instance_id: null, ack_status_code: null, claim_token: null, claim_actor_id: null,
+      source_record_digest: null, creation_identity_digest: null })
+    expect(before.audit.map(row => [row.event, row.status, row.reason])).toEqual([['reconcile', 'reconciled_existing', 'legacy_readback']])
+    // The send path: same (tenant, target, seven-key digest) => BUSINESS_CONFLICT, nothing written.
+    await rejectStore(first.store.prepare(fixture()), 'YIDA_DELIVERY_BUSINESS_CONFLICT')
+    await rejectStore(second.store.prepare(fixture({ operationId: 'synthetic-other-operation', rowKey: 'synthetic-other-row' })), 'YIDA_DELIVERY_BUSINESS_CONFLICT')
+    expect(await evidence()).toEqual(before)
+    expect(first.uniqueErrors).toEqual([FENCE])
+    // The fence blocks no more than the seven keys: another digest prepares normally.
+    expect((await first.store.prepare(fixture({ operationId: 'synthetic-other-operation', businessKeyDigest: 'c'.repeat(64) }))).record.status).toBe('prepared')
+    // Separate evidence: no acknowledgement audit; the write-back selector (acknowledged + create + bound) never picks it.
+    expect((await owner.query(`SELECT count(*)::int AS n FROM ${ident(AUDIT)} WHERE event = 'acknowledgement'`)).rows[0].n).toBe(0)
+    expect((await owner.query(`SELECT count(*)::int AS n FROM ${ident(LEDGER)} WHERE status = 'acknowledged' AND intent = 'create'
+      AND source_record_digest IS NOT NULL`)).rows[0].n).toBe(0)
+    // Replaying the same legacy record (a new run) is already_reconciled; a count run inserts nothing.
+    const replay = await reconcileOnce([['FINST-legacy-1', 'b'.repeat(64)]], 'count')
+    expect(replay.run.counts.already_reconciled).toBe(1)
+    expect((await rows(LEDGER)).length).toBe(2)
+  })
+
+  it('⑦.5 RC11: the shape CHECKs admit a reconciled row only in its exact form', async () => {
+    const { YIDA_RECONCILED_EXISTING_UP_SQL } = await reconcileModule()
+    await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)
+    await reconcileOnce([['FINST-legacy-1', 'b'.repeat(64)]])
+    const [row] = await rows(LEDGER)
+    const copy = (patch: Row) => directCopy(row, { id: randomUUID(), operation_id: 'synthetic-copy', business_key_digest: 'f'.repeat(64),
+      row_key: 'FINST-copy', observed_instance_id: 'FINST-copy', ...patch })
+    expect(await outcome(copy({ observed_instance_id: null }))).toEqual({ ok: false, code: '23514' })
+    expect(await outcome(copy({ ack_instance_id: 'FINST-copy', ack_status_code: 200 }))).toEqual({ ok: false, code: '23514' })
+    expect(await outcome(copy({ claim_token: 'a'.repeat(64), claim_actor_id: 'synthetic-actor' }))).toEqual({ ok: false, code: '23514' })
+    expect(await outcome(copy({ intent: 'update', instance_id: 'FINST-copy' }))).toEqual({ ok: false, code: '23514' })
+    // F3: a reconciled row never carries a source binding, so the issue-confirm write-back can never select it.
+    expect(await outcome(copy({ source_record_digest: '7'.repeat(64) }))).toEqual({ ok: false, code: '23514' })
+    expect(await outcome(copy({ creation_identity_digest: '8'.repeat(64) }))).toEqual({ ok: false, code: '23514' })
+    expect(await outcome(copy({ observed_instance_id: 'bad id' }))).toEqual({ ok: false, code: '23514' })
+    // One reconciled row per observed instance and target.
+    expect(await outcome(copy({ observed_instance_id: 'FINST-legacy-1' }))).toEqual({ ok: false, code: '23505' })
+    const audit = (patch: Row) => owner.query(`INSERT INTO ${ident(AUDIT)} (id, ledger_id, event, status, reason) VALUES ($1, $2, $3, $4, $5)`,
+      [randomUUID(), row.id, patch.event, patch.status, patch.reason])
+    expect(await outcome(audit({ event: 'reconcile', status: 'reconciled_existing', reason: null }))).toEqual({ ok: false, code: '23514' })
+    expect(await outcome(audit({ event: 'unknown', status: 'outcome_unknown', reason: 'legacy_readback' }))).toEqual({ ok: false, code: '23514' })
+    expect(await outcome(audit({ event: 'acknowledgement', status: 'reconciled_existing', reason: null }))).toEqual({ ok: false, code: '23514' })
+    // A send row can never carry an observed instance id.
+    await first.store.prepare(fixture({ businessKeyDigest: 'c'.repeat(64) }))
+    expect(await pgFailure(owner.query(`UPDATE ${ident(LEDGER)} SET observed_instance_id = 'FINST-x', status = 'dispatching',
+      claim_token = $1, claim_actor_id = 'synthetic-actor' WHERE status = 'prepared'`, ['a'.repeat(64)]))).toEqual({ ok: false, code: 'P0001', message: 'YIDA_DELIVERY_IMMUTABLE' })
+  })
+
+  // Coordinator decision F3 (2026-11-06 ~19:45Z): a reconciled row KEEPS intent = 'create' (that is what occupies the 091
+  // fence), and the Y9a issue-confirm write-back selector still never picks it. Y9a's selectIssueConfirmCandidate lives on
+  // feat/yida-issue-confirm-writeback-core-20261106 (lib/yida-issue-confirm-writeback.cjs, c6a0e52dd :226-237), not on this
+  // stack; its four row clauses are copied here in order and fed the actual rows PostgreSQL holds.
+  const issueConfirmSelector = (ledger: Row, targetRefs: string[]) => {
+    if (ledger.status !== 'acknowledged') return { selected: false, reason: 'not_acknowledged' }
+    if (ledger.intent !== 'create') return { selected: false, reason: 'not_create' }
+    if (typeof ledger.target_ref !== 'string' || !targetRefs.includes(ledger.target_ref)) return { selected: false, reason: 'target_not_listed' }
+    if (typeof ledger.source_record_digest !== 'string' || !/^[0-9a-f]{64}$/u.test(ledger.source_record_digest)) return { selected: false, outcome: 'source_unbound' }
+    return { selected: true }
+  }
+  it('⑦.5 F3: a reconciled row keeps intent=create (the fence refuses its seven keys) and the write-back selector never picks it', async () => {
+    const { YIDA_RECONCILED_EXISTING_UP_SQL } = await reconcileModule()
+    await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)
+    await reconcileOnce([['FINST-legacy-1', 'b'.repeat(64)]])
+    // Positive control: an acknowledged, bound send row under another seven-key digest (the production store).
+    await setState('acknowledged', fixture({ operationId: 'synthetic-bound-operation', businessKeyDigest: 'c'.repeat(64),
+      sourceRecordDigest: '1'.repeat(64), creationIdentityDigest: '2'.repeat(64) }))
+    const ledger = await rows(LEDGER)
+    const reconciled = ledger.find(row => row.status === 'reconciled_existing') as Row
+    const bound = ledger.find(row => row.status === 'acknowledged') as Row
+    expect([reconciled.intent, reconciled.source_record_digest, reconciled.creation_identity_digest]).toEqual(['create', null, null])
+    // The seven keys are refused at the fence because the row is a CREATE row.
+    await rejectStore(second.store.prepare(fixture({ operationId: 'synthetic-again', rowKey: 'synthetic-again' })), 'YIDA_DELIVERY_BUSINESS_CONFLICT')
+    expect(second.uniqueErrors).toEqual([FENCE])
+    // Y9a selector: not selected on the status clause, and independently unbound on the digest clause.
+    const listed = ['synthetic-target']
+    expect(issueConfirmSelector(reconciled, listed)).toEqual({ selected: false, reason: 'not_acknowledged' })
+    expect(issueConfirmSelector({ ...reconciled, status: 'acknowledged' }, listed)).toEqual({ selected: false, outcome: 'source_unbound' })
+    expect(issueConfirmSelector(bound, listed)).toEqual({ selected: true })
+    // The same four clauses as SQL select the bound control row only.
+    const picked = (await owner.query(`SELECT id FROM ${ident(LEDGER)} WHERE status = 'acknowledged' AND intent = 'create'
+      AND target_ref = ANY($1::text[]) AND source_record_digest IS NOT NULL`, [listed])).rows.map(row => (row as Row).id)
+    expect(picked).toEqual([bound.id])
+  })
+
+  // Verifier F2: a run left 'running' (the process died after its run row committed, before any page) does not block
+  // its target for good: the same commandId resumes it, and the owner can abandon it (failed / ABORTED) so a new
+  // commandId may start. Production store on its own connection; the run guard trigger and the running index decide.
+  async function reconcileStore(ownerId = 'synthetic-owner') {
+    const client = await pool.connect()
+    await client.query(`SET search_path TO ${ident(schema)}`)
+    const query = async (sql: string, params?: unknown[]) => (await client.query(sql, params)).rows as Row[]
+    const database: Database = { query, async transaction(callback) {
+      await query('BEGIN')
+      try { const result = await callback({ query }); await query('COMMIT'); return result }
+      catch (error) { await query('ROLLBACK'); throw error }
+    } }
+    const db = createDb({ database }) as { transaction<T>(callback: (trx: unknown) => Promise<T>): Promise<T> }
+    const { createYidaReconciliationStore } = requireCjs(path.join(root, 'plugins/plugin-integration-core/lib/yida-reconciliation-store.cjs')) as {
+      createYidaReconciliationStore(input: unknown): {
+        openRunInTransaction(trx: unknown, input: Row): Promise<Row & { id: string; status: string }>
+        abandonRunningInTransaction(trx: unknown, input: Row): Promise<Row & { id: string; status: string }>
+      } }
+    const store = createYidaReconciliationStore({ db, context: { tenantId: 'synthetic-tenant', workspaceId: null, ownerId } })
+    const open = (commandId: string) => db.transaction(trx => store.openRunInTransaction(trx, { commandId, targetRef: 'synthetic-target',
+      projectNo: 'DEMO-P1', projectKeyTarget: 'project', keyDefinitionDigest: 'd'.repeat(64), mode: 'count', pageSize: 50 }))
+    const abandon = () => db.transaction(trx => store.abandonRunningInTransaction(trx, { targetRef: 'synthetic-target' }))
+    return { open, abandon, release: () => client.release() }
+  }
+  const runState = async (commandId: string) => (await owner.query(`SELECT status, last_error_code, next_page_number
+    FROM integration_yida_reconciliation_runs WHERE command_id = $1`, [commandId])).rows as Row[]
+  it('⑦.5 F2: a crashed running run is resumed by its commandId, or abandoned by its owner so a new commandId can start', async () => {
+    const { YIDA_RECONCILED_EXISTING_UP_SQL } = await reconcileModule()
+    await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)
+    const runs = await reconcileStore(), stranger = await reconcileStore('synthetic-other-owner')
+    try {
+      const crashed = randomUUID(), fresh = randomUUID()
+      // The run row (with its commandId) committed; then the process died: no page, still running.
+      const opened = await runs.open(crashed)
+      expect(opened.status).toBe('running')
+      // Resume path: the same commandId reopens the same running row.
+      expect((await runs.open(crashed)).id).toBe(opened.id)
+      // A lost commandId: a new run on the target is refused while the crashed one holds the running index.
+      await rejectStore(runs.open(fresh), 'YIDA_RECONCILE_STORE_CONFLICT')
+      // Only the run's owner can abandon it.
+      await rejectStore(stranger.abandon(), 'YIDA_RECONCILE_STORE_NOT_FOUND')
+      const abandoned = await runs.abandon()
+      expect([abandoned.id, abandoned.command_id, abandoned.status, abandoned.last_error_code]).toEqual([opened.id, crashed, 'failed', 'ABORTED'])
+      await rejectStore(runs.abandon(), 'YIDA_RECONCILE_STORE_NOT_FOUND')
+      // The target is free: a new commandId starts; the abandoned one cannot resume while the new one runs.
+      expect((await runs.open(fresh)).status).toBe('running')
+      await rejectStore(runs.open(crashed), 'YIDA_RECONCILE_STORE_CONFLICT')
+      expect(await runState(crashed)).toEqual([{ status: 'failed', last_error_code: 'ABORTED', next_page_number: 1 }])
+      expect(await runState(fresh)).toEqual([{ status: 'running', last_error_code: null, next_page_number: 1 }])
+      // ABORTED is not terminal: once the target is free again, the abandoned commandId resumes from its cursor.
+      await runs.abandon()
+      const resumed = await runs.open(crashed)
+      expect([resumed.id, resumed.status, resumed.last_error_code]).toEqual([opened.id, 'running', null])
+    } finally { runs.release(); stranger.release() }
+  })
+
+  it('⑦.5 RC12: the ledger guard keeps every 110300 binding clause and freezes reconciled rows', async () => {
+    const { YIDA_RECONCILED_EXISTING_UP_SQL } = await reconcileModule()
+    await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)
+    const guard = await guardDefinition()
+    for (const column of ['source_record_digest', 'creation_identity_digest', 'observed_instance_id', 'business_key_digest', 'intent']) {
+      expect(guard).toContain(`OLD.${column} IS DISTINCT FROM NEW.${column}`)
+    }
+    await reconcileOnce([['FINST-legacy-1', 'b'.repeat(64)]])
+    const before = await evidence()
+    const reconciled = `UPDATE ${ident(LEDGER)} SET %s WHERE status = 'reconciled_existing'`
+    expect(await pgFailure(owner.query(reconciled.replace('%s', "status = 'acknowledged', claim_token = $1, claim_actor_id = 'a', ack_status_code = 200, ack_instance_id = 'FINST-legacy-1'"), ['a'.repeat(64)])))
+      .toEqual({ ok: false, code: 'P0001', message: 'YIDA_DELIVERY_TRANSITION' })
+    expect(await pgFailure(owner.query(reconciled.replace('%s', "observed_instance_id = 'FINST-other'"))))
+      .toEqual({ ok: false, code: 'P0001', message: 'YIDA_DELIVERY_IMMUTABLE' })
+    expect(await pgFailure(owner.query(reconciled.replace('%s', 'source_record_digest = $1'), ['7'.repeat(64)])))
+      .toEqual({ ok: false, code: 'P0001', message: 'YIDA_DELIVERY_IMMUTABLE' })
+    expect(await pgFailure(owner.query(`DELETE FROM ${ident(LEDGER)} WHERE status = 'reconciled_existing'`)))
+      .toEqual({ ok: false, code: 'P0001', message: 'YIDA_DELIVERY_IMMUTABLE' })
+    expect(await evidence()).toEqual(before)
+    // The binding columns stay immutable on an ordinary send row after 110700 (a 090 guard body would let this through).
+    await first.store.prepare(fixture({ businessKeyDigest: 'c'.repeat(64) }))
+    for (const column of ['source_record_digest', 'creation_identity_digest']) {
+      expect(await pgFailure(owner.query(`UPDATE ${ident(LEDGER)} SET ${ident(column)} = $1, status = 'dispatching', claim_token = $2,
+        claim_actor_id = 'synthetic-actor' WHERE status = 'prepared'`, ['7'.repeat(64), 'a'.repeat(64)])))
+        .toEqual({ ok: false, code: 'P0001', message: 'YIDA_DELIVERY_IMMUTABLE' })
+    }
+    // Reconciliation evidence tables are append-only.
+    expect(await pgFailure(owner.query('DELETE FROM integration_yida_reconciliation_pages')))
+      .toEqual({ ok: false, code: 'P0001', message: 'YIDA_RECONCILIATION_IMMUTABLE' })
+    expect(await pgFailure(owner.query("UPDATE integration_yida_reconciliation_pages SET record_count = 0")))
+      .toEqual({ ok: false, code: 'P0001', message: 'YIDA_RECONCILIATION_IMMUTABLE' })
+    expect(await pgFailure(owner.query('DELETE FROM integration_yida_reconciliation_runs')))
+      .toEqual({ ok: false, code: 'P0001', message: 'YIDA_RECONCILIATION_IMMUTABLE' })
+    expect(await pgFailure(owner.query("UPDATE integration_yida_reconciliation_runs SET project_no = 'DEMO-P2'")))
+      .toEqual({ ok: false, code: 'P0001', message: 'YIDA_RECONCILIATION_IMMUTABLE' })
+    expect(await pgFailure(owner.query("UPDATE integration_yida_reconciliation_runs SET status = 'running', finished_at = NULL")))
+      .toEqual({ ok: false, code: 'P0001', message: 'YIDA_RECONCILIATION_TRANSITION' })
+    expect(await pgFailure(owner.query('TRUNCATE integration_yida_reconciliation_runs CASCADE')))
+      .toMatchObject({ ok: false, code: 'P0001' })
+  })
+
+  it('⑦.5 RC11: down() refuses while evidence exists and otherwise restores the exact 110300 schema', async () => {
+    const { YIDA_RECONCILED_EXISTING_UP_SQL, YIDA_RECONCILED_EXISTING_DOWN_SQL } = await reconcileModule()
+    const original = await schemaShape()
+    await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)
+    const widened = await schemaShape()
+    expect(widened).not.toEqual(original)
+    await owner.query(YIDA_RECONCILED_EXISTING_DOWN_SQL)
+    expect(await schemaShape()).toEqual(original)
+    await owner.query(YIDA_RECONCILED_EXISTING_DOWN_SQL) // replayable
+    expect(await schemaShape()).toEqual(original)
+    await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)
+    expect(await schemaShape()).toEqual(widened)
+    // With evidence: refuse, change nothing.
+    await reconcileOnce([['FINST-legacy-1', 'b'.repeat(64)]])
+    const withRows = await evidence()
+    expect(await pgFailure(owner.query(YIDA_RECONCILED_EXISTING_DOWN_SQL)))
+      .toEqual({ ok: false, code: '55000', message: 'YIDA_DELIVERY_RECONCILED_EXISTING_PRESENT' })
+    expect(await schemaShape()).toEqual(widened)
+    expect(await evidence()).toEqual(withRows)
+    // A count-only run (no ledger row) is evidence too.
+    await owner.query(`DROP SCHEMA ${ident(schema)} CASCADE`)
+    await owner.query(`CREATE SCHEMA ${ident(schema)}`)
+    await owner.query(`SET search_path TO ${ident(schema)}`)
+    await owner.query(ddl090); await owner.query(ddl091); await owner.query(ddlBinding); await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)
+    await reconcileOnce([['FINST-legacy-1', 'b'.repeat(64)]], 'count')
+    expect((await rows(LEDGER)).length).toBe(0)
+    expect(await pgFailure(owner.query(YIDA_RECONCILED_EXISTING_DOWN_SQL)))
+      .toEqual({ ok: false, code: '55000', message: 'YIDA_DELIVERY_RECONCILED_EXISTING_PRESENT' })
+  })
+
+  it('⑦.5 RC11: up() refuses (fail closed) when the 110300 binding columns are absent', async () => {
+    const { YIDA_RECONCILED_EXISTING_UP_SQL } = await reconcileModule()
+    await owner.query(`DROP SCHEMA ${ident(schema)} CASCADE`)
+    await owner.query(`CREATE SCHEMA ${ident(schema)}`)
+    await owner.query(`SET search_path TO ${ident(schema)}`)
+    await owner.query(ddl090); await owner.query(ddl091)
+    expect(await pgFailure(owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)))
+      .toEqual({ ok: false, code: '55000', message: 'YIDA_DELIVERY_RECONCILE_BINDING_MISSING' })
+    expect((await owner.query("SELECT to_regclass('integration_yida_reconciliation_runs') AS rel")).rows[0].rel).toBeNull()
+  })
+
+  // Migration zzzz20261106110300 down(): bound rows are append-only evidence, so down refuses while any exists.
+  const bindingColumns = async () => (await owner.query(
+    "SELECT attname FROM pg_attribute WHERE attrelid = to_regclass($1) AND attname IN ('source_record_digest', 'creation_identity_digest') AND NOT attisdropped ORDER BY attname",
+    [LEDGER])).rows.map(row => String((row as Row).attname))
+  const guardBody = async () => String((await owner.query(
+    "SELECT pg_get_functiondef(to_regproc('integration_yida_delivery_ledger_guard')::oid) AS body")).rows[0].body)
+  const identityFencePresent = async () => (await owner.query(
+    'SELECT 1 FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = $1', [IDENTITY_FENCE])).rowCount
+
+  it('zzzz20261106110300 down refuses while a bound reservation exists (append-only evidence); the fence and the guard stay in force', async () => {
+    await first.store.prepare(identity())
+    const before = await evidence()
+    let refused: { code?: string; message?: string; detail?: string } | undefined
+    try { await owner.query(ddlBindingDown) } catch (error) { refused = error as { code?: string; message?: string; detail?: string } }
+    expect(refused?.code).toBe('55000')
+    expect(refused?.message).toBe(bindingDownRefused)
+    expect(refused?.detail).toBeUndefined()
+    expect(await evidence()).toEqual(before)
+    expect(await identityFencePresent()).toBe(1)
+    expect(await bindingColumns()).toEqual(['creation_identity_digest', 'source_record_digest'])
+    expect((await guardBody()).includes('creation_identity_digest')).toBe(true)
+    // The identity fence still decides after the refused down: the same identity under another record is refused.
+    await rejectStore(second.store.prepare(identity({ operationId: 'synthetic-other-operation', rowKey: 'synthetic-other-row',
+      businessKeyDigest: 'c'.repeat(64), sourceRecordDigest: '3'.repeat(64) })), 'YIDA_DELIVERY_IDENTITY_CONFLICT')
+    expect((await rows(LEDGER)).length).toBe(1)
+  })
+
+  it('zzzz20261106110300 down without bound rows restores the exact 090 guard and drops the fence and the columns; replaying up restores them', async () => {
+    // An unbound reservation (NULL digests) is not bound evidence and does not block the down.
+    await first.store.prepare(fixture())
+    expect(await bindingColumns()).toEqual(['creation_identity_digest', 'source_record_digest'])
+    await owner.query(ddlBindingDown)
+    expect(await identityFencePresent()).toBe(0)
+    expect(await bindingColumns()).toEqual([])
+    const restored = await guardBody()
+    expect(restored.includes('source_record_digest') || restored.includes('creation_identity_digest')).toBe(false)
+    expect(restored.includes('YIDA_DELIVERY_IMMUTABLE') && restored.includes('YIDA_DELIVERY_TRANSITION') && restored.includes('YIDA_DELIVERY_CLAIM')).toBe(true)
+    expect((await rows(LEDGER)).length).toBe(1)
+    await owner.query(ddlBindingDown) // replay: already down, nothing to refuse or drop
+    await owner.query(ddlBinding)
+    expect(await identityFencePresent()).toBe(1)
+    expect(await bindingColumns()).toEqual(['creation_identity_digest', 'source_record_digest'])
+    expect((await guardBody()).includes('creation_identity_digest')).toBe(true)
+    const bound = await second.store.prepare(identity({ operationId: 'synthetic-operation-b', rowKey: 'synthetic-row-b', businessKeyDigest: 'c'.repeat(64) }))
+    expect(bound.reused).toBe(false)
+    expect((await rows(LEDGER)).length).toBe(2)
   })
 })

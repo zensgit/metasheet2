@@ -185,6 +185,11 @@ const ELEARNING_NON_BOOLEAN_FLAGS = new Set(['ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS
 // above: a suffix rule would also catch source constants). M4 PR-3b: the scheduler tick interval.
 const TASKS_NON_BOOLEAN_FLAGS = new Set(['TASKS_SCHEDULER_INTERVAL_MS'])
 
+// Non-boolean YiDa env reads that belong in the manifest, by exact name (same reason as above: the
+// `_ENABLED` rule keeps constant names and refusal codes out). Design baseline v2.3 D20: the exact
+// list of test-copy target refs that may still take unbound rows, read in index.ts as process.env.
+const YIDA_NON_BOOLEAN_FLAGS = new Set(['INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS'])
+
 test('audience scan timeout (#6175): numeric, default 5000, sourced from the resolver parser', () => {
   const spec = GLOBAL_HISTORY_FLAG_BY_KEY.ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS
   assert.ok(spec)
@@ -426,8 +431,10 @@ function globalHistoryFlagsInSource() {
     ...grepPluginFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
     ...grepFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
   ].filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
-  // Derive the reviewed owner-send switch from actual core reads, including phantom detection.
-  const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  // Derive the reviewed owner-send switches from actual core reads, including phantom detection; the one
+  // non-boolean YiDa knob (the D20 unbound test-target list) is named exactly, as the e-learning and task
+  // families do, so a list flag that source stops reading is still reported as a phantom.
+  const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED') || YIDA_NON_BOOLEAN_FLAGS.has(t))
   const userRecycle = grepFlagTokens('USER_RECYCLE_[A-Z_0-9]+_ENABLED')
   // #4196 Class-B outbound two-phase ledger switch (S0-c, AGENTS.md: every new env flag is registered
   // here). One family by name shape, scanned where the executor and retry-eligibility read it.
@@ -892,6 +899,51 @@ test('stock-prep project-sheet G1 grant role list (R-35): a list, danger high, s
     spec.source,
     'plugins/plugin-integration-core/lib/stock-preparation-project-targets.cjs#resolveProjectSheetGrantRoleIds',
   )
+})
+
+// R-71 ⑦.5 cut-over reconciliation: its own default-OFF switch, danger high, exact literal only, independent of
+// the send switch, every cited file real and the host reading exactly this env name.
+test('INTEGRATION_YIDA_RECONCILE_READ_ENABLED manifest entry: exact true, danger high, independent of the send switch, sources exist', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_RECONCILE_READ_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.ok(spec.purpose.includes('Does not read, imply or require INTEGRATION_YIDA_OWNER_SEND_ENABLED'))
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+  for (const cited of spec.source.split('; ').map((entry) => entry.split('#')[0])) {
+    assert.ok(readFileSync(path.join(root, cited), 'utf8').length > 0, cited)
+  }
+  const host = readFileSync(path.join(root, 'packages/core-backend/src/index.ts'), 'utf8')
+  assert.ok(host.includes('readEnablement: () => process.env.INTEGRATION_YIDA_RECONCILE_READ_ENABLED,'))
+  const runtime = readFileSync(path.join(root, 'packages/core-backend/src/integration/yida-reconciliation-runtime.ts'), 'utf8')
+  assert.equal(runtime.includes('INTEGRATION_YIDA_OWNER_SEND_ENABLED'), false)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false)
+})
+
+test('YiDa unbound test-target list (design baseline v2.3 D20): a list, danger high, no dependsOn, every cited file real and naming the exact-list reader', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS
+  assert.ok(spec)
+  assert.equal(spec.type, 'list')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  // A list is never "activated": it cannot enter a dependsOn/conflicts rule by construction.
+  assert.equal(isActivated(spec, 'true'), false)
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+  for (const cited of spec.source.split('; ').map((entry) => entry.split('#')[0])) {
+    assert.ok(readFileSync(path.join(root, cited), 'utf8').length > 0, cited)
+  }
+  // The runtime reads this exact env name and the host index wires it; slot 1 stays the only implicit unbound target.
+  const runtime = readFileSync(path.join(root, 'packages/core-backend/src/integration/yida-owner-runtime.ts'), 'utf8')
+  assert.match(runtime, /readUnboundTestTargetRefs/)
+  assert.match(readFileSync(path.join(root, 'packages/core-backend/src/index.ts'), 'utf8'), /process\.env\.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS/)
+  assert.match(readFileSync(path.join(root, 'packages/core-backend/src/integration/yida-send-approval-service.ts'), 'utf8'),
+    /if \(slot === 1 \|\| unboundTargets\.has\(targetRef\)\) return/)
 })
 
 test('stock-prep members page switch (ADR §11.4-11.6 S5b, R-39): boolean, exact true, danger high, sourced from the plugin predicate, same literal in the host port', () => {

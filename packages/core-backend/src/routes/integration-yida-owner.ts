@@ -4,10 +4,12 @@ import { yidaOwnerRuntimeErrorCode, type createYidaOwnerRuntime, type YidaOwnerA
 import { yidaSendApprovalErrorCode } from '../integration/yida-send-approval-service'
 import { yidaInitializationErrorCode, type YidaInitializationInput } from '../integration/yida-initialization-runtime'
 import { yidaConnectionTestErrorCode, type YidaConnectionTestInput } from '../integration/yida-connection-test-runtime'
+import { yidaReconciliationErrorCode, type YidaReconciliationInput } from '../integration/yida-reconciliation-runtime'
 import { YIDA_OWNER_HTTP_PREFIX as PREFIX } from '../integration/yida-owner-http-observation'
 import { YIDA_SEND_REQUEST_MAX_BYTES } from '../integration/yida-send-budget'
 import {
-  parseYidaSheetSourceInput, readYidaSheetSourceRows, yidaSheetSourceErrorCode, type YidaSheetSourceDependencies,
+  parseYidaSheetSourceInput, readYidaSheetSourceRows, yidaSheetSourceErrorCode, type YidaSheetSourceBinding,
+  type YidaSheetSourceDependencies,
 } from '../integration/yida-sheet-source'
 
 /** Dedicated host owner boundary, after actual JWT. Never a communication API.
@@ -27,6 +29,14 @@ export type YidaConnectionTestHttpPort = Readonly<{
   test(actor: YidaOwnerActor, input: YidaConnectionTestInput, options: { signal: AbortSignal }): Promise<unknown>
   connectionTestEnabled(): boolean
 }>
+/** R-71 ⑦.5 cut-over reconciliation (INTEGRATION_YIDA_RECONCILE_READ_ENABLED exact 'true' only): read-only
+ * paginated search + local insert-only evidence; never send authority. */
+export type YidaReconciliationHttpPort = Readonly<{
+  step(actor: YidaOwnerActor, input: YidaReconciliationInput, options: { signal: AbortSignal }): Promise<unknown>
+  inspect(actor: YidaOwnerActor, input: { runId: string }, options: { signal: AbortSignal }): Promise<unknown>
+  abandon(actor: YidaOwnerActor, input: { targetRef?: string }, options: { signal: AbortSignal }): Promise<unknown>
+  reconcileEnabled(): boolean
+}>
 type Data = Record<string, unknown>
 const ownErrors = new WeakMap<object, string>()
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u
@@ -43,12 +53,18 @@ const statuses: Readonly<Record<string, number>> = Object.freeze({
   YIDA_SEND_APPROVAL_CANCELLED: 409, YIDA_SEND_APPROVAL_UNAVAILABLE: 503,
   // Gate 4 (R-71 ⑦.2): the row exceeds the shared send budget; refused before any grant/admission.
   YIDA_SEND_APPROVAL_LIMIT: 422,
+  // Identity fence (design baseline v2.3 §3.3, D16): this material row's logical creation identity (key value +
+  // project) was already created under this target; nothing new is created. Refused at approval, before a grant.
+  YIDA_SEND_APPROVAL_IDENTITY_RESERVED: 409,
   YIDA_CONNECTION_TEST_INPUT: 400, YIDA_CONNECTION_TEST_DISABLED: 403, YIDA_CONNECTION_TEST_DENIED: 403,
   YIDA_CONNECTION_TEST_CONFLICT: 409, YIDA_CONNECTION_TEST_CANCELLED: 409, YIDA_CONNECTION_TEST_THROTTLED: 429,
   YIDA_CONNECTION_TEST_INACTIVE: 503, YIDA_CONNECTION_TEST_UNAVAILABLE: 503,
   // Y2 sheet/view source (multi-target switch ON only). Values-free fixed codes.
   YIDA_SHEET_SOURCE_INPUT: 400, YIDA_SHEET_SOURCE_DENIED: 403, YIDA_SHEET_SOURCE_NOT_FOUND: 404,
   YIDA_SHEET_SOURCE_LIMIT: 422, YIDA_SHEET_SOURCE_UNSUPPORTED: 422, YIDA_SHEET_SOURCE_UNAVAILABLE: 503,
+  // R-71 ⑦.5 cut-over reconciliation (its own switch). Values-free fixed codes.
+  YIDA_RECONCILE_INPUT: 400, YIDA_RECONCILE_DISABLED: 403, YIDA_RECONCILE_DENIED: 403, YIDA_RECONCILE_NOT_FOUND: 404,
+  YIDA_RECONCILE_CONFLICT: 409, YIDA_RECONCILE_CANCELLED: 409, YIDA_RECONCILE_INACTIVE: 503, YIDA_RECONCILE_UNAVAILABLE: 503,
 })
 function fail(code = 'YIDA_OWNER_HTTP_INPUT'): never {
   const error = new Error(code)
@@ -252,6 +268,9 @@ function initialization(value: unknown, sendEnabled: boolean, connectionTestEnab
   if (!['ready', 'initialized'].includes(String(row.status)) || row.canSend !== false
     || row.tokenIssued !== false || row.externalWriteAttempted !== false
     || (row.status === 'ready') !== (row.draft === null)) fail()
+  // R-71 ⑦.5 has NO display bit here yet: the shipped web bundle parses this reply with a closed key set
+  // (apps/web/src/services/integration/yidaInitialization.ts state()), so a reconcileEnabled key would break
+  // it whenever the switch is on. The bit ships together with the panel and its tolerant parse (PR-B).
   return { commandId: id(row.commandId), status: row.status,
     draft: row.draft === null ? null : draft(row.draft), canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled,
     // Present only while the switch reads exact 'true'. While OFF the key is absent, so a page still
@@ -260,10 +279,48 @@ function initialization(value: unknown, sendEnabled: boolean, connectionTestEnab
     // Y2: same absent-while-OFF rule, so an older bundle keeps its closed key set while the switch is off.
     ...(multiTargetEnabled ? { multiTargetEnabled: true as const } : {}) }
 }
+const reconcileCountKeys = ['scanned', 'registered', 'would_register', 'already_reconciled', 'duplicate_remote',
+  'own_acknowledged', 'duplicate_with_own', 'own_in_flight', 'observed_for_unknown', 'own_not_sent', 'project_mismatch',
+  'key_unmatchable']
+const reconcileErrorCodes: unknown[] = [null, 'RETRY', 'THROTTLED', 'RESPONSE', 'TOO_LARGE', 'UNAVAILABLE', 'ABORTED', 'BUDGET', 'TOTAL_CHANGED']
+function reconcileInput(value: unknown, multiTarget: boolean): YidaReconciliationInput {
+  const input = record(value, ['commandId', 'mode', 'projectNo', 'projectKeyTarget', 'expectedKeyTargets'],
+    multiTarget ? ['targetRef', 'pageSize', 'pagesPerStep'] : ['pageSize', 'pagesPerStep'])
+  if (typeof input.commandId !== 'string' || !UUID.test(input.commandId)) fail()
+  if (input.mode !== 'count' && input.mode !== 'register') fail()
+  const projectNo = literalId(input.projectNo)
+  if (projectNo.length > 64) fail()
+  const targets = input.expectedKeyTargets
+  if (!Array.isArray(targets) || targets.length < 1 || targets.length > 32) fail()
+  return { commandId: input.commandId, mode: input.mode, projectNo, projectKeyTarget: literalId(input.projectKeyTarget),
+    expectedKeyTargets: targets.map((target: unknown) => literalId(target)),
+    ...(Object.hasOwn(input, 'targetRef') ? { targetRef: literalId(input.targetRef) } : {}),
+    ...(Object.hasOwn(input, 'pageSize') ? { pageSize: integer(input.pageSize, 1, 100) } : {}),
+    ...(Object.hasOwn(input, 'pagesPerStep') ? { pagesPerStep: integer(input.pagesPerStep, 1, 10) } : {}) }
+}
+function reconcileView(value: unknown, runId?: string) {
+  const row = record(value, ['runId', 'commandId', 'targetRef', 'mode', 'status', 'nextPageNumber', 'pagesDone', 'totalCountFirst',
+    'totalCountLast', 'counts', 'lastErrorCode', 'tokenIssued', 'canSend', 'externalWriteAttempted', 'businessVerified',
+    'historyVerified', 'formOwnershipVerified'])
+  const counts = record(row.counts, reconcileCountKeys)
+  if (typeof row.runId !== 'string' || !UUID.test(row.runId) || (runId !== undefined && row.runId !== runId)
+    || typeof row.commandId !== 'string' || !UUID.test(row.commandId) || !['count', 'register'].includes(row.mode as string)
+    || !['running', 'completed', 'failed'].includes(row.status as string) || typeof row.tokenIssued !== 'boolean'
+    || !reconcileErrorCodes.includes(row.lastErrorCode)
+    || [row.canSend, row.externalWriteAttempted, row.businessVerified, row.historyVerified, row.formOwnershipVerified]
+      .some(bit => bit !== false)) fail()
+  const total = (entry: unknown) => entry === null ? null : integer(entry, 0, 60000)
+  return { runId: row.runId, commandId: row.commandId, targetRef: literalId(row.targetRef), mode: row.mode, status: row.status,
+    nextPageNumber: integer(row.nextPageNumber, 1, 601), pagesDone: integer(row.pagesDone, 0, 600),
+    totalCountFirst: total(row.totalCountFirst), totalCountLast: total(row.totalCountLast),
+    counts: Object.fromEntries(reconcileCountKeys.map(key => [key, integer(counts[key], 0, 60000)])),
+    lastErrorCode: row.lastErrorCode, tokenIssued: row.tokenIssued, canSend: false, externalWriteAttempted: false,
+    businessVerified: false, historyVerified: false, formOwnershipVerified: false }
+}
 function dto(project: () => unknown) { try { return project() } catch { fail('YIDA_OWNER_HTTP_UNAVAILABLE') } }
 function sendError(res: Response, error: unknown) {
   const code = ownErrors.get(error as object) ?? yidaOwnerRuntimeErrorCode(error) ?? yidaSendApprovalErrorCode(error)
-    ?? yidaConnectionTestErrorCode(error) ?? yidaSheetSourceErrorCode(error)
+    ?? yidaConnectionTestErrorCode(error) ?? yidaSheetSourceErrorCode(error) ?? yidaReconciliationErrorCode(error)
   const initializationCode = yidaInitializationErrorCode(error)
   // ENCRYPTION_NOT_READY is 503 like INACTIVE/UNAVAILABLE: a host-configuration readiness refusal,
   // not a conflict with the slot's state (409 here means CONFLICT/CANCELLED of the command).
@@ -303,7 +360,8 @@ export const yidaOwnerParseErrorHandler: ErrorRequestHandler = (error: unknown, 
 }
 export { YIDA_OWNER_HTTP_PREFIX } from '../integration/yida-owner-http-observation'
 export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initializationPort?: YidaInitializationHttpPort,
-  connectionTestPort?: YidaConnectionTestHttpPort, sheetSource?: YidaSheetSourceDependencies): Router {
+  connectionTestPort?: YidaConnectionTestHttpPort, sheetSource?: YidaSheetSourceDependencies,
+  reconciliationPort?: YidaReconciliationHttpPort): Router {
   const router = Router()
   // Y2 shape bit, read per request (exact 'true' in the owner runtime). OFF = every body below keeps its
   // original closed key set and the new paths fall through to the same 404 as any unknown path.
@@ -335,6 +393,9 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
     if (Object.hasOwn(input, 'rowsText') === Object.hasOwn(input, 'source')) fail()
     const targetRef = Object.hasOwn(input, 'targetRef') ? id(input.targetRef) : undefined
     let rowsText: string
+    // Source binding (design baseline v2.3 §7.2): only the server-side sheet read can produce one; a pasted body
+    // never carries it (the closed body above has no such key), so a pasted draft is always unbound.
+    let sourceBinding: YidaSheetSourceBinding | undefined
     if (Object.hasOwn(input, 'rowsText')) {
       if (typeof input.rowsText !== 'string' || Buffer.byteLength(input.rowsText, 'utf8') > 128 * 1024) fail()
       rowsText = input.rowsText
@@ -348,10 +409,12 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
       if (!port.proveDraftOwner) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
       await port.proveDraftOwner(owner, targetRef === undefined ? {} : { targetRef })
       // The owner's own multitable read (this request's actor), never an elevated or plugin read.
-      rowsText = (await readYidaSheetSourceRows(req, source, sheetSource)).rowsText
+      const read = await readYidaSheetSourceRows(req, source, sheetSource)
+      rowsText = read.rowsText
+      sourceBinding = read.binding
     }
     const result = await port.prepareDraft(owner, { config: input.config, rowsText, allocation: input.allocation,
-      ...(targetRef === undefined ? {} : { targetRef }) })
+      ...(targetRef === undefined ? {} : { targetRef }), ...(sourceBinding === undefined ? {} : { sourceBinding }) })
     return dto(() => draft(result))
   }))
   router.post('/preview', route(200, async (req, owner) => {
@@ -390,6 +453,8 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
   const sendEnabled = () => { try { return port.sendEnabled() === true } catch { return false } }
   // Same rule for the 测试连接 display bit: shown only on an owner-authorized reply, never authority.
   const connectionTestEnabled = () => { try { return connectionTestPort?.connectionTestEnabled() === true } catch { return false } }
+  // R-71 ⑦.5 route gate: read per request (exact 'true' in the reconciliation runtime). Not a display bit (see initialization()).
+  const reconcileEnabled = () => { try { return reconciliationPort?.reconcileEnabled() === true } catch { return false } }
   router.get('/initialization', route(200, async (req, owner, signal) => {
     empty(req.body)
     if (!initializationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
@@ -428,6 +493,34 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
     const result = await connectionTestPort.test(owner, input, { signal })
     return dto(() => connectionTestView(result, input.commandId))
   }))
+  // R-71 ⑦.5 cut-over reconciliation. While its switch is OFF all three paths fall through to the generic 404 below
+  // (a feature that is off is not visible); the runtime checks the switch again (DISABLED) as depth.
+  const whenReconcile = (handler: RequestHandler): RequestHandler => (req, res, next) => {
+    if (!reconcileEnabled()) { next(); return }
+    return handler(req, res, next)
+  }
+  router.post('/reconciliations', whenReconcile(route(200, async (req, owner, signal) => {
+    const input = reconcileInput(req.body, multiTargetEnabled())
+    if (!reconciliationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
+    const result = await reconciliationPort.step(owner, input, { signal })
+    return dto(() => reconcileView(result))
+  })))
+  // Owner-only abandon of the target's running run (failed / ABORTED, resumable by its own commandId).
+  router.post('/reconciliations/abandon', whenReconcile(route(200, async (req, owner, signal) => {
+    const body = record(req.body, [], multiTargetEnabled() ? ['targetRef'] : [])
+    const input = Object.hasOwn(body, 'targetRef') ? { targetRef: literalId(body.targetRef) } : {}
+    if (!reconciliationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
+    const result = await reconciliationPort.abandon(owner, input, { signal })
+    return dto(() => reconcileView(result))
+  })))
+  router.get('/reconciliations/:runId', whenReconcile(route(200, async (req, owner, signal) => {
+    empty(req.body)
+    const runId = req.params.runId
+    if (typeof runId !== 'string' || !UUID.test(runId)) fail()
+    if (!reconciliationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
+    const result = await reconciliationPort.inspect(owner, { runId }, { signal })
+    return dto(() => reconcileView(result, runId))
+  })))
   router.use((_req, res) => { res.status(404).json({ ok: false, error: { code: 'NOT_FOUND' } }) })
   return router
 }
