@@ -667,6 +667,12 @@ export function diffProvenanceWideningV1(
  * edits above a site do not churn this list.
  */
 export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Object.freeze([
+  // Approved OT keeps shadow/placeholder legacy polarity and admits both pointer owners.
+  { file: 'packages/core-backend/src/attendance/w4c3b-approved-overtime-shadow.ts', text: "if (row.projection_owner !== 'legacy_untracked' || row.current_calculation_id !== null) {", rule: 'legacy_polarity' },
+  { file: 'packages/core-backend/src/attendance/w4c3b-approved-overtime.ts', text: "&& row.projection_owner === 'legacy_untracked' && row.current_calculation_id === null", rule: 'legacy_polarity' },
+  { file: 'packages/core-backend/src/attendance/w4c3b-approved-overtime.ts', text: "const legacy = row.projection_owner === 'legacy_untracked' && row.current_calculation_id === null", rule: 'legacy_polarity' },
+  { file: 'packages/core-backend/src/attendance/w4c3b-approved-overtime.ts', text: "const owned = (row.projection_owner === 'w4' || row.projection_owner === 'w4_group')", rule: 'widened_predicate' },
+  { file: 'packages/core-backend/src/attendance/w4c3b-approved-overtime.ts', text: "projectionOwner: parent.projection_owner as 'legacy_untracked' | 'w4' | 'w4_group',", rule: 'closed_set_member_list' },
   // Reviewed ordinary-record repair and its preflight admit only legacy_untracked.
   // Both w4 and w4_group remain outside that repair scope; neither is downgraded
   // or treated as an ordinary legacy candidate. Keep the exact legacy-only tests.
