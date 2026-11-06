@@ -1765,6 +1765,21 @@ jobs:
             tests/integration/yida-host-initialization-barrier-realdb.test.ts \
             tests/integration/yida-host-connection-test-realdb.test.ts \
             tests/integration/yida-connection-test-http-realdb.test.ts \
+            --reporter=verbose
+
+      # C1/S2 synthetic integration preview (default OFF): two-connection admission/revocation proofs on an
+      # owned schema, and the actual-MetaSheetServer acceptance on this migrated database. Whole files with
+      # their own EXPECT_DB sentinel, excluded from the no-DB runner; an own step so the YiDa lane above
+      # stays byte-identical.
+      - name: Run synthetic integration preview real-DB proofs
+        id: automation-synthetic-preview-real-db
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          EXPECT_DB: '1'
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for the synthetic integration preview real-DB proofs}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/automation-synthetic-preview-realdb.test.ts \
             tests/integration/automation-synthetic-preview-host-realdb.test.ts \
             --reporter=verbose

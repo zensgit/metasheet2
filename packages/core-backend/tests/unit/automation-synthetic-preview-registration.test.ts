@@ -21,7 +21,7 @@ describe('synthetic integration preview real-DB registration', () => {
     const workflow = yaml.load(readFileSync(path.join(ROOT, '.github/workflows/plugin-tests.yml'), 'utf8')) as {
       jobs: Record<string, { steps: Array<{ id?: string; if?: string; env?: Record<string, string>; run?: string; 'continue-on-error'?: unknown }> }>
     }
-    const step = requiredSuiteJob(workflow, 'runtime-db').steps.find((entry: { id?: string }) => entry.id === 'external-system-delete-bind-lock-protocol-real-db')
+    const step = requiredSuiteJob(workflow, 'runtime-db').steps.find((entry: { id?: string }) => entry.id === 'automation-synthetic-preview-real-db')
     expect(step?.env?.EXPECT_DB).toBe('1')
     expect(step?.env?.DATABASE_URL).toBeTruthy()
     expect(step?.if).toBe("matrix.node-version == '20.x'")

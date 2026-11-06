@@ -43,6 +43,20 @@ const permissionStep = {
   run: 'pnpm --filter @metasheet/core-backend exec vitest run \\\n  tests/unit/admin-mounts-write-gate-guard.test.ts \\\n  tests/unit/admin-directory-routes.test.ts \\\n  tests/unit/admin-directory-5xx-values-free.test.ts\n',
 }
 
+// Explicit additive runtime-db step (C1/S2 synthetic integration preview): its own whole-file EXPECT_DB
+// step, immediately after the external-system / YiDa real-DB lane, which itself stays byte-identical.
+const syntheticPreviewRealDbStep = {
+  name: 'Run synthetic integration preview real-DB proofs',
+  id: 'automation-synthetic-preview-real-db',
+  if: "matrix.node-version == '20.x'",
+  env: { DATABASE_URL: 'postgresql://postgres@localhost:5432/metasheet_test', EXPECT_DB: '1' },
+  run: ': "${DATABASE_URL:?DATABASE_URL is required for the synthetic integration preview real-DB proofs}"\n'
+    + 'pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \\\n'
+    + '  tests/integration/automation-synthetic-preview-realdb.test.ts \\\n'
+    + '  tests/integration/automation-synthetic-preview-host-realdb.test.ts \\\n'
+    + '  --reporter=verbose\n',
+}
+
 const directoryClientLintStep = {
   name: 'Run DingTalk directory client lint',
   if: "matrix.node-version == '20.x'",
@@ -90,6 +104,12 @@ function assertParallelWorkflow(doc) {
         'Keep the promoted directory CI-wiring contracts immediately after the source-lock step')
     }
     if (suite === 'permissions') assert.deepEqual(actual.splice(-1), [permissionStep])
+    if (suite === 'runtime-db') {
+      const laneIndex = actual.findIndex(step => step.id === 'external-system-delete-bind-lock-protocol-real-db')
+      assert.ok(laneIndex >= 0, 'Keep the original external-system / YiDa real-DB lane')
+      assert.deepEqual(actual.splice(laneIndex + 1, 1), [syntheticPreviewRealDbStep],
+        'Keep the synthetic integration preview real-DB step immediately after the original lane')
+    }
     if (suite === 'unit') {
       const lintIndex = actual.findIndex(step => step.name === 'Run linting')
       assert.ok(lintIndex >= 0, 'Keep the original lint step')
