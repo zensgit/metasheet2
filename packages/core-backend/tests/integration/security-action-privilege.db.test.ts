@@ -25,6 +25,7 @@ import type { HighPrivilegeReason, PrivilegeInputs } from '../../src/auth/securi
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
 import { isAdminLevelPermissionCode } from '../../src/rbac/role-assignment'
 import { invalidateUserPerms, isAdmin, listUserPermissions } from '../../src/rbac/service'
+import { LEGACY_KEY_EXISTENCE_PREDICATE, legacyKeyExistencePredicateIsPinned } from '../helpers/security-action-privilege-harness'
 
 const suite = process.env.DATABASE_URL ? describe : describe.skip
 if (process.env.EXPECT_DB === '1')
@@ -428,22 +429,71 @@ suite('security action privilege classification (real PostgreSQL)', () => {
   })
 
   describe('refuses a legacy permission value that is not an array', () => {
-    const nonArray: Array<[string, unknown]> = [
-      ['a JSON object', { 'users:write': true }],
-      ['a JSON string', 'admin:all'],
-      ['a JSON number', 7],
-      ['a JSON boolean', true],
+    /** The stored value's SQL nullability and JSON type, so a JSON null is told apart from a SQL NULL. */
+    async function storedShape(client: PoolClient, user: string): Promise<{ sqlNotNull: boolean; kind: string | null }> {
+      const stored = await client.query<{ sql_not_null: boolean; kind: string | null }>(
+        'SELECT permissions IS NOT NULL AS sql_not_null, jsonb_typeof(permissions) AS kind FROM users WHERE id = $1', [user],
+      )
+      return { sqlNotNull: stored.rows[0].sql_not_null, kind: stored.rows[0].kind }
+    }
+
+    /** Rows of `users` matching the key-existence predicate for the subject, running the pinned text as stored. */
+    async function keyExistenceMatches(client: PoolClient, user: string): Promise<number> {
+      return (await client.query(`SELECT 1 FROM users u WHERE u.id = $1 AND ${LEGACY_KEY_EXISTENCE_PREDICATE}`, [user])).rows.length
+    }
+
+    it('refuses a stored object whose keys a key-existence predicate accepts, and never reads it as an empty grant set', async () => {
+      await withRollback(async (client) => {
+        const user = await seedUser(client)
+        await client.query('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [user, JSON.stringify({ 'attendance:admin': true })])
+        const empty = await seedUser(client)
+        const array = await seedUser(client, { legacy: ['attendance:admin'] })
+        const other = await seedSecondSubjectWithEverySource(client)
+
+        expect(await storedShape(client, user)).toEqual({ sqlNotNull: true, kind: 'object' })
+        expect(legacyKeyExistencePredicateIsPinned()).toBe(true)
+        expect(await keyExistenceMatches(client, user)).toBe(1)
+        expect(await keyExistenceMatches(client, empty)).toBe(0)
+        expect(await keyExistenceMatches(client, array)).toBe(1)
+
+        await expectUnavailable(readPrivilegeInputs(executorOf(client), user), 'input_malformed')
+        await expectUnavailable(assessSecurityActionPrivilege(executorOf(client), user), 'input_malformed')
+        expect((await assessSecurityActionPrivilege(executorOf(client), empty)).privilegeClass).toBe('standard')
+        expect((await assessSecurityActionPrivilege(executorOf(client), array)).reasons).toEqual(['admin_level_code'])
+        expect((await assessSecurityActionPrivilege(executorOf(client), other)).reasons).toEqual([...HIGH_PRIVILEGE_REASONS])
+      })
+    })
+
+    const nonArray: Array<[string, unknown, string]> = [
+      ['a JSON object', { 'users:write': true }, 'object'],
+      ['a JSON string', 'admin:all', 'string'],
+      ['a JSON number', 7, 'number'],
+      ['a JSON boolean', true, 'boolean'],
+      ['a JSON null', null, 'null'],
     ]
-    it.each(nonArray)('refuses with input_malformed when the stored value is %s and never assesses a class', async (_label, legacy) => {
+    it.each(nonArray)('refuses with input_malformed when the stored value is %s and never assesses a class', async (_label, legacy, kind) => {
       await withRollback(async (client) => {
         const user = await seedUser(client)
         await client.query('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [user, JSON.stringify(legacy)])
         const other = await seedSecondSubjectWithEverySource(client)
-        const stored = await client.query<{ kind: string }>('SELECT jsonb_typeof(permissions) AS kind FROM users WHERE id = $1', [user])
-        expect(stored.rows[0]?.kind).not.toBe('array')
+        expect(await storedShape(client, user)).toEqual({ sqlNotNull: true, kind })
         await expectUnavailable(readPrivilegeInputs(executorOf(client), user), 'input_malformed')
         await expectUnavailable(assessSecurityActionPrivilege(executorOf(client), user), 'input_malformed')
         expect((await assessSecurityActionPrivilege(executorOf(client), other)).reasons).toEqual([...HIGH_PRIVILEGE_REASONS])
+      })
+    })
+
+    it('cannot hold a SQL NULL: the column is NOT NULL and an update to NULL is rejected by the constraint', async () => {
+      await withRollback(async (client) => {
+        const column = await client.query<{ data_type: string; is_nullable: string; column_default: string | null }>(
+          `SELECT data_type, is_nullable, column_default FROM information_schema.columns
+            WHERE table_schema = current_schema() AND table_name = 'users' AND column_name = 'permissions'`,
+        )
+        expect(column.rows).toHaveLength(1)
+        expect(column.rows[0]).toMatchObject({ data_type: 'jsonb', is_nullable: 'NO' })
+        expect(column.rows[0].column_default).toContain("'[]'::jsonb")
+        const user = await seedUser(client)
+        await expect(client.query('UPDATE users SET permissions = NULL WHERE id = $1', [user])).rejects.toMatchObject({ code: '23502' })
       })
     })
   })

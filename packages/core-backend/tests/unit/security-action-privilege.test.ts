@@ -23,6 +23,8 @@ import { isAdminLevelPermissionCode } from '../../src/rbac/role-assignment'
 import { inspectUserPermissionGrants, isAdmin, listUserPermissions } from '../../src/rbac/service'
 import { APPROVAL_ADMIN_CAPABILITY_PREDICATE } from '../../src/services/approval-admin-capability'
 import {
+  LEGACY_KEY_EXISTENCE_PREDICATE,
+  legacyKeyExistencePredicateIsPinned,
   privilegeFixture,
   privilegeHarness,
   privilegeRow,
@@ -246,28 +248,49 @@ describe('privilege inputs read', () => {
   })
 
   const nonArrayLegacyValues: Array<[string, unknown]> = [
+    ['a JSON object whose keys are permission codes', { 'attendance:admin': true }],
     ['a JSON object', { 'users:write': true }],
     ['a JSON string', 'admin:all'],
     ['a JSON number', 7],
     ['a JSON boolean', true],
-    ['null', null],
+    ['a JSON null', null],
   ]
 
   it.each(nonArrayLegacyValues)('never assesses a class when the legacy value is %s', async (_label, legacy) => {
     const { executor, calls } = privilegeHarness(privilegeFixture({ rows: [privilegeRow({ legacy_permissions: legacy })] }))
     await expectUnavailable(assessSecurityActionPrivilege(executor, SUBJECT), 'input_malformed')
     expect(calls.filter(({ sql }) => sql.includes(DATA_STATEMENT_MARK))).toHaveLength(1)
-    await expectUnavailable(readInputs({ legacy_permissions: legacy }), 'input_malformed')
   })
 
-  it.each(nonArrayLegacyValues)('refuses to collect codes from inputs assembled outside the read path whose legacy value is %s', async (_label, legacy) => {
-    const read = await readInputs({ direct_codes: ['tasks:write'] })
-    const forged = { ...read, legacyPermissions: legacy } as unknown as PrivilegeInputs
-    expect(() => collectPrivilegeCodes(forged)).toThrow(PrivilegeInputsUnavailableError)
-    expect(() => collectPrivilegeCodes(forged)).toThrow(expect.objectContaining({ reason: 'input_malformed' }))
-    expect(() => classifyPrivilege(forged)).toThrow(PrivilegeInputsUnavailableError)
-    expect(() => classifyPrivilege(forged)).toThrow(expect.objectContaining({ reason: 'input_malformed' }))
-    expect(collectPrivilegeCodes(read)).toEqual(['tasks:write'])
+  describe('legacy array rule, each enforcement point on its own', () => {
+    // The row read never collects codes, so this case holds or fails on the row-shape check alone.
+    it.each(nonArrayLegacyValues)('the row read refuses a legacy value that is %s', async (_label, legacy) => {
+      const { executor, calls } = privilegeHarness(privilegeFixture({ rows: [privilegeRow({ legacy_permissions: legacy })] }))
+      await expectUnavailable(readPrivilegeInputs(executor, SUBJECT), 'input_malformed')
+      expect(calls.filter(({ sql }) => sql.includes(DATA_STATEMENT_MARK))).toHaveLength(1)
+    })
+
+    // The inputs are a literal, never produced by the read path, so this case holds or fails on the
+    // check at code collection alone.
+    const assembled = (legacyPermissions: unknown): PrivilegeInputs => ({
+      userId: SUBJECT, isAdmin: false, role: 'user', roleIds: [], directCodes: ['tasks:write'], rolePermissions: [],
+      legacyPermissions, admissions: [], delegatedDepartmentScopes: [], delegatedMemberGroupScopes: [],
+    }) as unknown as PrivilegeInputs
+
+    it.each(nonArrayLegacyValues)('code collection refuses inputs assembled outside the read path whose legacy value is %s', (_label, legacy) => {
+      const forged = assembled(legacy)
+      expect(() => collectPrivilegeCodes(forged)).toThrow(PrivilegeInputsUnavailableError)
+      expect(() => collectPrivilegeCodes(forged)).toThrow(expect.objectContaining({ reason: 'input_malformed' }))
+      expect(() => classifyPrivilege(forged)).toThrow(PrivilegeInputsUnavailableError)
+      expect(() => classifyPrivilege(forged)).toThrow(expect.objectContaining({ reason: 'input_malformed' }))
+      expect(collectPrivilegeCodes(assembled([]))).toEqual(['tasks:write'])
+      expect(collectPrivilegeCodes(assembled(['users:write']))).toEqual(['tasks:write', 'users:write'])
+    })
+
+    it('runs the stored-object case against a predicate text that is still present in the module it is taken from', () => {
+      expect(LEGACY_KEY_EXISTENCE_PREDICATE).toContain("?| ARRAY[ 'attendance:admin'")
+      expect(legacyKeyExistencePredicateIsPinned()).toBe(true)
+    })
   })
 
   it.each([

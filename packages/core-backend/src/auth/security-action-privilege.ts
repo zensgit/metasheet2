@@ -9,11 +9,13 @@
  * read raises PrivilegeInputsUnavailableError; it never falls back to STANDARD.
  *
  * Legacy permission column: the stored value is a grant input only when it is a JSON array. Any other
- * value, including a null, is malformed and refuses with `input_malformed`; it is never read as an
- * empty grant set. Both persisted shapes of the column are NOT NULL arrays (`jsonb` with an array
- * default, or a text array that `to_jsonb` renders as a JSON array), so a null is not an expected
- * shape either. The rule is enforced twice: on the row read, and again when the codes are collected,
- * so inputs assembled outside the read path cannot bypass it.
+ * JSON value — an object (whatever its keys), a string, a number, a boolean or a JSON null — is
+ * malformed and refuses with `input_malformed`; it is never read as an empty grant set. The column is
+ * NOT NULL in both persisted shapes (a `jsonb` column with an empty-array default, which admits any
+ * JSON value, or a text array that `to_jsonb` renders as a JSON array): a SQL NULL is rejected by the
+ * constraint before any read, while a stored JSON null reaches the read and is refused like every
+ * other non-array. The rule is enforced twice: on the row read, and again when the codes are
+ * collected, so inputs assembled outside the read path cannot bypass it.
  *
  * Each predicate is at least as wide as the authorization reader it mirrors: case and surrounding
  * whitespace are ignored, and codes are taken before namespace admission. A wider predicate can only
@@ -301,8 +303,9 @@ function asInputMalformed(error: unknown): never {
 /**
  * The permission codes of a user before namespace admission: direct codes, the code of every held
  * (role, code) pair and every element of the legacy array, each normalized, emptied, de-duplicated and
- * sorted by code unit. A legacy value that is not an array (including a null) and any failure while
- * normalizing an element raise `PrivilegeInputsUnavailableError('input_malformed')`.
+ * sorted by code unit. A legacy value that is not an array (an object whatever its keys, a string, a
+ * number, a boolean or a null) and any failure while normalizing an element raise
+ * `PrivilegeInputsUnavailableError('input_malformed')`.
  */
 export function collectPrivilegeCodes(inputs: PrivilegeInputs): readonly string[] {
   try {

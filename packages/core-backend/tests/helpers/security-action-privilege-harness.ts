@@ -7,11 +7,28 @@
  * statement names that source table. Dropping a table from the statement therefore empties the
  * column, so the classification cases that depend on that source go red along with the static checks.
  */
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
 import { readPrivilegeInputs } from '../../src/auth/security-action-privilege'
 import type { PrivilegeInputs } from '../../src/auth/security-action-privilege'
 
 export const SUBJECT = 'synthetic_subject'
+
+/**
+ * A key-existence predicate over the legacy permission column, taken verbatim (whitespace collapsed)
+ * from the module below. The stored-object case runs it against a real row and the pin below keeps
+ * the text bound to that module, so the case cannot drift away from the predicate it reasons about.
+ */
+export const LEGACY_KEY_EXISTENCE_PREDICATE_MODULE = 'src/attendance/w4c3a-import-rollback-boundary.ts'
+export const LEGACY_KEY_EXISTENCE_PREDICATE =
+  "COALESCE(to_jsonb(u)->'permissions', '[]'::jsonb) ?| ARRAY[ 'attendance:admin', 'attendance:*', '*:*' ]"
+
+/** Whether the module still contains the predicate text, compared with all whitespace runs collapsed. */
+export function legacyKeyExistencePredicateIsPinned(): boolean {
+  const source = readFileSync(path.resolve(__dirname, '..', '..', LEGACY_KEY_EXISTENCE_PREDICATE_MODULE), 'utf8')
+  return source.replace(/\s+/g, ' ').includes(LEGACY_KEY_EXISTENCE_PREDICATE)
+}
 
 export type PrivilegeRow = {
   id: unknown

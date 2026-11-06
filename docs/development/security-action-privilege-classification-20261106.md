@@ -29,12 +29,15 @@ No migration, table, route, environment flag, OpenAPI change or consumer is part
    `PrivilegeInputsUnavailableError` (status 503, code `SECURITY_ACTION_UNAVAILABLE`, a fixed message
    and no cause). The read never returns `standard` in any of these cases.
 5. **Legacy array.** The legacy permission column is a grant input only when its stored value is a
-   JSON array. Any other value — a JSON object, string, number or boolean, and a null — is malformed
-   and refuses with `input_malformed`; it is never read as an empty grant set. Both persisted shapes
-   of the column are NOT NULL arrays (`jsonb` with an array default, or a text array that `to_jsonb`
-   renders as a JSON array), so a null is not an expected shape either. The rule is enforced at the
-   row read and again when the codes are collected, so inputs assembled outside the read path cannot
-   bypass it. An empty array contributes no code; the elements of an array are normalized as before.
+   JSON array. Any other JSON value — an object (whatever its keys), a string, a number, a boolean or
+   a JSON null — is malformed and refuses with `input_malformed`; it is never read as an empty grant
+   set. The column is NOT NULL in both persisted shapes (a `jsonb` column with an empty-array
+   default, which admits any JSON value, or a text array that `to_jsonb` renders as a JSON array): a
+   SQL NULL is rejected by the constraint before any read, while a stored JSON null (`'null'::jsonb`)
+   reaches the read and is refused like every other non-array. The rule is enforced at the row read
+   and again when the codes are collected, and each enforcement point is tested on its own, so
+   inputs assembled outside the read path cannot bypass it. An empty array contributes no code; the
+   elements of an array are normalized as before.
 6. **Witness.** `sha256("metasheet:security-action:privilege:v1|" + canonical(inputs))`, where
    `canonical` sorts object keys by code unit; the collections read from the grant tables arrive
    sorted by code unit, and the legacy value is encoded as stored. Any change to any grant input
@@ -99,15 +102,22 @@ revision none is delivered, so no purpose is available.
 
 - `tests/unit/security-action-privilege.test.ts` and `tests/unit/external-login-assurance.test.ts`
   run in the default unit job: statement shape and subject binding, probes, every refusal reason,
-  row-shape single faults (including every non-array legacy value), the legacy array rule on
-  inputs assembled outside the read path, one fixture per reason, superset anchors against the approval
+  row-shape single faults (including every non-array legacy value), the legacy array rule at each
+  of its two enforcement points on its own (the row read through the query stand-in; code
+  collection on inputs assembled as a literal outside the read path), the pin that keeps the
+  key-existence predicate text run by the real-database stored-object case bound to the module it
+  is taken from, one fixture per reason, superset anchors against the approval
   administrator predicate, the web administrator literals and the role editor shapes, source
   alignment with the authorization aggregator, witness composition and ordering, the policy matrix,
   the revision pin, the registry and its prerequisites, and the CI wiring.
 - `tests/integration/security-action-privilege.db.test.ts` runs against real PostgreSQL in the
   approval real-database job: schema match, one fixture per reason with a second subject holding
   every source, the superset relation to the authorization aggregator, classification from rows
-  rather than the permission cache, refusal of every non-array legacy value stored in the column,
+  rather than the permission cache, refusal of every non-array legacy value stored in the column
+  (a stored object whose keys a key-existence predicate over the column accepts — the predicate is
+  run against the row as stored and its text is pinned to the module it is taken from — an object
+  with other keys, a string, a number, a boolean and a JSON null, each asserted to be SQL NOT NULL
+  with its JSON type), the NOT NULL constraint rejecting a SQL NULL in the column,
   refusal when any source table or column is unavailable,
   transaction and isolation requirements, and witness changes per input. It is excluded from the
   no-database runner and listed as a whole file in the workflow; both points are asserted by the unit
