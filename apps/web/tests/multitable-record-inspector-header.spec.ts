@@ -18,6 +18,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App, type VNodeChild } from 'vue'
 import MetaRecordInspector from '../src/multitable/components/MetaRecordInspector.vue'
+import { createWorkbenchUndo } from '../src/multitable/utils/workbench-undo'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
 import { recordLabel } from '../src/multitable/utils/meta-record-labels'
@@ -1029,5 +1030,52 @@ describe('MetaRecordInspector title keys during an input-method composition', ()
     await flushUi()
     expect(onPatch).toHaveBeenCalledTimes(1)
     expect(onPatch).toHaveBeenCalledWith('fld_title', 'Beta')
+  })
+})
+
+// The workbench's own undo (utils/workbench-undo.ts) with the REAL inspector: when grid undo (or a record
+// switch) rewrites the focused title, the title's typing history no longer describes it, so the next
+// Cmd+Z is the grid's again, never a restore of the stale draft.
+describe('MetaRecordInspector title and the workbench-owned undo', () => {
+  it('a re-render that rewrites the focused title drops its typing history: the next Cmd+Z is the grid\'s', async () => {
+    const record = ref<MetaRecord>(RECORD)
+    const undo = createWorkbenchUndo()
+    const gridUndo = vi.fn()
+    const { container } = mountApp(() =>
+      h('div', {
+        onKeydown: (e: KeyboardEvent) => { const a = undo.decide(e); if (a !== 'none') { e.preventDefault(); if (a === 'grid-undo') gridUndo() } },
+        onBeforeinput: undo.onBeforeInput,
+        onInput: undo.onInput,
+        onChange: undo.onChange,
+      }, [h(MetaRecordInspector, {
+        visible: true, record: record.value, fields: FIELDS, canEdit: true, canComment: false, canDelete: false,
+        recordIds: ['rec_1'], sheetId: 'sheet_1', apiClient: fakeApiClient() as any,
+      })]),
+    )
+    await flushUi()
+    const input = container.querySelector<HTMLInputElement>('.meta-record-drawer__title-input')!
+    input.focus()
+    input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText' }))
+    input.value = 'Alpha draft'
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+    const cmdZ = () => {
+      const event = new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true })
+      input.dispatchEvent(event)
+      return event.defaultPrevented
+    }
+    // own typing: undone from the title's history, no grid call
+    expect(cmdZ()).toBe(true)
+    expect(input.value).toBe('Alpha')
+    expect(gridUndo).not.toHaveBeenCalled()
+    // redo it, then the record changes underneath (as grid undo or a record switch does)
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Z', metaKey: true, shiftKey: true, bubbles: true, cancelable: true }))
+    expect(input.value).toBe('Alpha draft')
+    record.value = { id: 'rec_1', version: 2, data: { fld_title: 'Server value', fld_notes: '' } } as MetaRecord
+    await flushUi()
+    expect(input.value).toBe('Server value')
+    expect(document.activeElement).toBe(input)
+    expect(cmdZ()).toBe(true)
+    expect(gridUndo).toHaveBeenCalledTimes(1)
+    expect(input.value).toBe('Server value')
   })
 })
