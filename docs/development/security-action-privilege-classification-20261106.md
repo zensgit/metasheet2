@@ -12,7 +12,9 @@ Two backend modules:
 - `packages/core-backend/src/auth/external-login-assurance.ts` — the assurance policy matrix, the
   policy revision, and the purpose registry with its prerequisites.
 
-No migration, table, route, environment flag, OpenAPI change or consumer is part of this change.
+No migration, table, route, environment flag or OpenAPI change is part of this change; the only
+consumer of either module is the security action proof service, described in
+`security-action-proof-service-20261106.md`.
 
 ## Invariants
 
@@ -109,7 +111,9 @@ revision every prerequisite is false, so no purpose is available.
   is taken from, one fixture per reason, superset anchors against the approval
   administrator predicate, the web administrator literals and the role editor shapes, source
   alignment with the authorization aggregator, witness composition and ordering, the policy matrix,
-  the revision pin, the registry and its prerequisites, and the CI wiring.
+  the revision pin, the registry and its prerequisites, the exact allowlist of the files that import
+  either module (an import and a re-export count alike, with a self-check that an importer the
+  allowlist does not name is reported wherever it lives), and the CI wiring.
 - `tests/integration/security-action-privilege.db.test.ts` runs against real PostgreSQL in the
   approval real-database job: schema match, one fixture per reason with a second subject holding
   every source, the superset relation to the authorization aggregator, classification from rows

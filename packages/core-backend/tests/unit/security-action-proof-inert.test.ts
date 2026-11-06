@@ -26,10 +26,21 @@ vi.mock('bcryptjs', async (importOriginal) => {
   bcryptMocks.compare.mockImplementation(actual.compare)
   return { ...actual, compare: bcryptMocks.compare }
 })
+// The classifier the service calls, wrapped so that a call is observable and behaves as the original.
+const classifierMocks = vi.hoisted(() => ({ assess: vi.fn(), read: vi.fn() }))
+vi.mock('../../src/auth/security-action-privilege', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/auth/security-action-privilege')>()
+  classifierMocks.assess.mockImplementation(actual.assessSecurityActionPrivilege)
+  classifierMocks.read.mockImplementation(actual.readPrivilegeInputs)
+  return { ...actual, assessSecurityActionPrivilege: classifierMocks.assess, readPrivilegeInputs: classifierMocks.read }
+})
 
-import { SECURITY_ACTION_PURPOSES } from '../../src/auth/external-login-assurance'
+import { isSecurityActionPurposeAvailable, SECURITY_ACTION_PURPOSES } from '../../src/auth/external-login-assurance'
+import type { SecurityActionPurpose } from '../../src/auth/external-login-assurance'
+import { consumeSecurityActionProof, issueSecurityActionProof, SecurityActionProofError } from '../../src/auth/security-action-proof'
+import type { SecurityActionConsumeInput, SecurityActionVerifyRequest } from '../../src/auth/security-action-proof'
 import { securityActionsRouter } from '../../src/routes/security-actions'
-import { CONNECTION, ORG, TARGET_IDENTITY, tokenFor, USER } from '../helpers/security-action-proof-harness'
+import { CONNECTION, contextFor, ORG, TARGET_IDENTITY, TARGET_WITNESS, tokenFor, USER } from '../helpers/security-action-proof-harness'
 
 const ROOT = path.resolve(__dirname, '..', '..', '..', '..')
 const BACKEND = path.join(ROOT, 'packages', 'core-backend')
@@ -111,16 +122,49 @@ beforeEach(() => {
   process.env.SECURITY_ACTION_PROOF_ENABLED = 'true'
   for (const mock of Object.values(dbMocks)) mock.mockClear()
   bcryptMocks.compare.mockClear()
+  classifierMocks.assess.mockClear()
+  classifierMocks.read.mockClear()
 })
 afterEach(() => {
   if (saved === undefined) delete process.env.SECURITY_ACTION_PROOF_ENABLED
   else process.env.SECURITY_ACTION_PROOF_ENABLED = saved
 })
 
+/** Every statement the service could have issued through either database entry point, in order. */
+function statementsIssued(): string[] {
+  const sql: string[] = []
+  for (const mock of [dbMocks.query, dbMocks.poolQuery]) for (const call of mock.mock.calls) sql.push(String(call[0]))
+  return sql
+}
+
+function expectNothingHappened(): void {
+  // Statements, transactions, the classifier read, the password comparison and the audit row are
+  // all counted from the route handler and the service onward. The session gate in front of the
+  // route is a stub in these tests and is outside the count.
+  expect(statementsIssued()).toEqual([])
+  expect(dbMocks.transaction).not.toHaveBeenCalled()
+  expect(dbMocks.poolTransaction).not.toHaveBeenCalled()
+  expect(classifierMocks.read).not.toHaveBeenCalled()
+  expect(classifierMocks.assess).not.toHaveBeenCalled()
+  expect(bcryptMocks.compare).not.toHaveBeenCalled()
+  expect(dbMocks.audit).not.toHaveBeenCalled()
+}
+
+function verifyBodyFor(purpose: SecurityActionPurpose): Record<string, unknown> {
+  return purpose === 'external_identity_bind'
+    ? { purpose, connectionId: CONNECTION, method: 'local_password', password: 'pw' }
+    : { purpose, connectionId: CONNECTION, targetIdentityId: TARGET_IDENTITY, expectedBindingRevision: 0, method: 'local_password', password: 'pw' }
+}
+
 describe('production binding', () => {
-  it('refuses every purpose before any statement while no purpose is available', async () => {
+  it('with the switch on and the production registry, every purpose is unavailable', () => {
+    for (const purpose of SECURITY_ACTION_PURPOSES) expect(isSecurityActionPurposeAvailable(purpose)).toBe(false)
+  })
+
+  it('route: with the switch on, verify refuses every purpose with 403 before the classifier is read and before any statement; nothing is issued, consumed, superseded or audited (counted from the route handler onward; the session gate is a stub outside the count)', async () => {
     const app = express()
     app.use(express.json())
+    // The stub stands in for the session gate: it issues no statement and is not part of the count.
     app.use((req: Request, _res: Response, next: NextFunction) => {
       req.user = { id: USER }
       req.authenticatedTenantId = ORG
@@ -131,16 +175,35 @@ describe('production binding', () => {
     app.use('/api/auth/security-actions', router!)
     const token = tokenFor(USER, 'sid-inert', ORG)
     for (const purpose of SECURITY_ACTION_PURPOSES) {
-      const body = purpose === 'external_identity_bind'
-        ? { purpose, connectionId: CONNECTION, method: 'local_password', password: 'pw' }
-        : { purpose, connectionId: CONNECTION, targetIdentityId: TARGET_IDENTITY, expectedBindingRevision: 0, method: 'local_password', password: 'pw' }
-      const response = await request(app).post('/api/auth/security-actions/verify').set('Authorization', `Bearer ${token}`).send(body)
+      const response = await request(app).post('/api/auth/security-actions/verify').set('Authorization', `Bearer ${token}`).send(verifyBodyFor(purpose))
       expect(response.status).toBe(403)
       expect(response.body).toEqual({ ok: false, error: { code: 'SECURITY_ACTION_PURPOSE_UNAVAILABLE', message: 'Security action refused' } })
       expect(response.headers['cache-control']).toBe('no-store')
     }
-    for (const mock of Object.values(dbMocks)) expect(mock).not.toHaveBeenCalled()
-    expect(bcryptMocks.compare).not.toHaveBeenCalled()
+    expectNothingHappened()
+  })
+
+  it('service: with the switch on, issue and consume refuse every purpose with 403 before the classifier is read and before any statement; nothing is issued, consumed, superseded or audited (no gate is involved at this level)', async () => {
+    const client = { query: vi.fn() }
+    for (const purpose of SECURITY_ACTION_PURPOSES) {
+      const request = verifyBodyFor(purpose) as unknown as SecurityActionVerifyRequest
+      const refusal = await issueSecurityActionProof(contextFor(USER, 'sid-inert', ORG), request).then(() => null, (error: unknown) => error)
+      expect(refusal).toBeInstanceOf(SecurityActionProofError)
+      expect((refusal as SecurityActionProofError).code).toBe('SECURITY_ACTION_PURPOSE_UNAVAILABLE')
+      expect((refusal as SecurityActionProofError).status).toBe(403)
+      const input: SecurityActionConsumeInput = {
+        proof: 'sap1.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.' + 'b'.repeat(43),
+        purpose,
+        connectionId: CONNECTION,
+        target: { kind: purpose === 'external_identity_bind' ? 'empty_slot' : 'identity_revision', witness: TARGET_WITNESS },
+        lockedUser: { id: USER } as SecurityActionConsumeInput['lockedUser'],
+      }
+      const consumed = await consumeSecurityActionProof(client as never, contextFor(USER, 'sid-inert', ORG), input).then(() => null, (error: unknown) => error)
+      expect(consumed).toBeInstanceOf(SecurityActionProofError)
+      expect((consumed as SecurityActionProofError).code).toBe('SECURITY_ACTION_PURPOSE_UNAVAILABLE')
+    }
+    expect(client.query).not.toHaveBeenCalled()
+    expectNothingHappened()
   })
 
   it('binds the production dependencies without an injection point', () => {

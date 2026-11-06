@@ -1,7 +1,8 @@
 /**
  * POST /api/auth/security-actions/verify: re-verification for one security action. Mounted only
- * when SECURITY_ACTION_PROOF_ENABLED is exactly 'true', behind the session gate. Every response is
- * no-store, including the answer to a body that could not be parsed. The password is never echoed,
+ * when SECURITY_ACTION_PROOF_ENABLED is exactly 'true', behind the session gate. Every answer the
+ * route gives is no-store, including the answer to a body that could not be parsed; the route gives
+ * no answer of its own to a request without a session context. The password is never echoed,
  * logged or audited, and the organization comes only from the authenticated session.
  */
 import type { ErrorRequestHandler, Request, Response } from 'express'
@@ -71,14 +72,30 @@ function bodyFailureType(error: unknown): string | null {
   }
 }
 
+/** True only when the same session context the handler requires can be built for the request. */
+function hasSessionContext(req: Request): boolean {
+  try {
+    return readAuthenticatedSessionContext(req) !== null
+  } catch {
+    return false
+  }
+}
+
 /**
  * Answers an error raised before the handler ran (a body that could not be parsed, or one outside the
  * accepted size or encoding) with a fixed code under the same contract as every other refusal:
- * no-store, no echo of the body, nothing logged. Anything else is refused as unavailable.
+ * no-store, no echo of the body, nothing logged. Anything else is refused as unavailable. It answers
+ * only a request for which a session context can be built; for any other request the error is
+ * passed on untouched, so before authentication the route has no answer of its own and the request
+ * is answered as it would be if the route were not mounted.
  */
-export const securityActionParseErrorHandler: ErrorRequestHandler = (error: unknown, _req, res, _next) => {
+export const securityActionParseErrorHandler: ErrorRequestHandler = (error: unknown, req, res, next) => {
   if (res.headersSent || res.writableEnded || res.destroyed) {
     if (!res.writableEnded && !res.destroyed) res.destroy()
+    return
+  }
+  if (!hasSessionContext(req)) {
+    next(error)
     return
   }
   noStore(res)

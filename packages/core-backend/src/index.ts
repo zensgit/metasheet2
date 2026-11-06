@@ -2042,7 +2042,8 @@ export class MetaSheetServer {
     // 路由：认证（登录/注册/token管理）
     this.app.use('/api/auth', authRouter)
     // Security action verification; mounted only when SECURITY_ACTION_PROOF_ENABLED is exactly 'true'.
-    // The error handler answers a body-parse failure on this prefix under the route's own contract.
+    // The error handler answers a failure raised before the route handler, on this prefix and under
+    // the route's own contract, only for a request with a session context; any other is passed on.
     const securityActionRoutes = securityActionsRouter()
     if (securityActionRoutes) {
       this.app.use('/api/auth/security-actions', securityActionRoutes)

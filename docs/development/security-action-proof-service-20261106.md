@@ -27,7 +27,9 @@ consumes a proof; no binding, login grant, session or login behaviour changes.
 2. **Switch.** Unless `SECURITY_ACTION_PROOF_ENABLED` is exactly `'true'`, the router factory returns
    `null` and nothing is mounted, and every service entry point refuses with
    `503 SECURITY_ACTION_PROOF_UNAVAILABLE` before any statement. The route and the service read the
-   same predicate; it neither trims nor folds case.
+   same predicate; it neither trims nor folds case. Before authentication the route gives no answer
+   of its own: a request without a session context receives the same answer whether or not the route
+   is mounted, whatever its body.
 3. **Table boundary.** The table name appears in the migration and the service module only (the
    migration runner's help text names the migration file, and with it the table, without reading it);
    the service module is imported by the route module only; the route module is imported by
@@ -53,7 +55,8 @@ consumes a proof; no binding, login grant, session or login behaviour changes.
    `503 SECURITY_ACTION_UNAVAILABLE` and writes nothing; during consumption it is raised to the caller,
    whose transaction must roll back.
 10. **Secret once.** The proof's secret appears only in the `200` response body; the table stores a
-    domain-separated SHA-256 of it. Passwords are never echoed, logged or audited.
+    domain-separated SHA-256 of it. No answer the route gives echoes a password, and the route and
+    the service never log or audit one.
 11. **Lock order.** The user row is always the first lock. Issuance takes a per-user advisory lock, then
     the user row (`FOR KEY SHARE`), before any proof row. Consumption runs inside the caller's
     transaction after the caller took the user row through `lockUsersForAccessGraphWrite` and any other
@@ -86,11 +89,14 @@ purpose except `external_identity_bind`, refused for it), `expectedBindingRevisi
 integer; present exactly when `targetIdentityId` is), `method` (`local_password` only), `password`
 (1–1024 characters, not trimmed), optional `clientBindingDigest` (64 lowercase hex). Unknown keys are
 reported under the fixed field name `_unknown`; `details.fields` names schema fields or that fixed
-entry only. A body that cannot be parsed, or that is outside the accepted size or encoding, is
-answered by the error handler mounted after the router for the same prefix with `422` and
-`fields: ["_unknown"]`; any other failure raised before the handler ran is answered with `503`. Both
-answers carry the same headers as every other refusal, echo nothing from the request and log nothing.
-A failure inside the handler before it could answer is also answered with `503`.
+entry only. The error handler mounted after the router for the same prefix answers only a request
+for which a session context can be built: a body that cannot be parsed, or that is outside the
+accepted size or encoding, with `422` and `fields: ["_unknown"]`; any other failure raised before the
+handler ran with `503`. Both answers carry the same headers as every other refusal, echo nothing
+from the request and log nothing. For a request without a session context the error handler passes
+the failure on untouched, so before authentication the route has no answer of its own and the
+request is answered as it would be if the route were not mounted, whatever the switch. A failure
+inside the handler before it could answer is also answered with `503`.
 
 Every response carries `Cache-Control: no-store`. Success: `200` with `proof`, `purpose`, `connectionId`,
 `method`, `assurance`, `expiresAt`, `ttlSeconds`. Refusals: `401 SECURITY_ACTION_SESSION_REQUIRED`;
@@ -117,10 +123,15 @@ after the image rollback and only on an empty table. The switch is registered in
   need no data, both transactions, error mapping, audit, consumption decisions and statement pins.
 - `tests/unit/security-action-verify-route.test.ts`: status and detail mapping, no-store, no echo of the
   password, organization from the session only, position behind the gates, the error handler's
-  answers (unparseable or oversized body, any other upstream failure, a response already sent) and the
-  handler's last-resort `503`.
-- `tests/unit/security-action-proof-inert.test.ts`: production binding refuses every purpose before any
-  statement; table, importer and mount boundaries; CI wiring; OpenAPI source.
+  answers for a request with a session context (unparseable or oversized body, any other upstream
+  failure, a response already sent), the same failures passed on untouched for a request without one
+  (the application's answer, identical with the switch on and off, with a stubbed context and behind
+  the real session gate) and the handler's last-resort `503`.
+- `tests/unit/security-action-proof-inert.test.ts`: with the switch on and the production registry and
+  binding, every purpose is unavailable and the route and the service refuse each one with `403`
+  before the classifier is read and before any statement, with nothing issued, consumed, superseded
+  or audited (counted from the route handler and the service onward; the session gate is a stub
+  outside the count); table, importer and mount boundaries; CI wiring; OpenAPI source.
 - `tests/unit/security-action-proof-flag.test.ts`, `tests/unit/security-action-challenges-migration.test.ts`.
 - `tests/integration/security-action-proof.db.test.ts` against real Postgres: catalog, every CHECK, the
   foreign key, the partial unique index and the trigger; the guarded `down()`/`up()` round trip;

@@ -25,9 +25,17 @@ import {
   PRIVILEGE_WITNESS_DOMAIN,
 } from '../../src/auth/security-action-privilege'
 import { privilegeRow, readInputs } from '../helpers/security-action-privilege-harness'
+import { importEdgeViolations, importSpecifiers } from '../helpers/import-edge-allowlist'
+import type { ImportEdge } from '../helpers/import-edge-allowlist'
 
 const SRC = path.resolve(__dirname, '..', '..', 'src')
 const MODULE_PATH = path.join(SRC, 'auth', 'external-login-assurance.ts')
+/** The only files in `src` that may import the policy module, as exact edges relative to `src`. */
+const POLICY_IMPORTER_ALLOWLIST: ReadonlyArray<ImportEdge> = [
+  ['auth/security-action-privilege.ts', './external-login-assurance'],
+  ['auth/security-action-proof.ts', './external-login-assurance'],
+  ['auth/security-action-proof.ts', './external-login-assurance'],
+]
 const PROTOTYPE_KEYS = ['constructor', 'toString', '__proto__', 'hasOwnProperty'] as const
 const UNKNOWN_PURPOSES = ['', 'bind', 'EXTERNAL_IDENTITY_BIND', undefined, null, 0, {}, ...PROTOTYPE_KEYS] as const
 
@@ -343,5 +351,31 @@ describe('security action purpose registry', () => {
     const imports = source.split('\n').filter((line) => /^\s*import\b/.test(line))
     expect(imports.filter((line) => !/^\s*import\s+type\b/.test(line))).toEqual([])
     expect(source).not.toMatch(/\brequire\s*\(/)
+  })
+
+  it('is imported by exactly the allowlisted files: the classifier and the action proof service', () => {
+    const edges: ImportEdge[] = []
+    for (const file of listSourceFiles(SRC)) {
+      const source = readFileSync(file, 'utf8')
+      if (!source.includes('external-login-assurance')) continue
+      for (const specifier of importSpecifiers(source)) {
+        if (specifier.includes('external-login-assurance')) edges.push([path.relative(SRC, file), specifier])
+      }
+      expect(source).not.toMatch(/(?:require|import)\(\s*['"][^'"]*external-login-assurance/)
+    }
+    expect(importEdgeViolations(edges, POLICY_IMPORTER_ALLOWLIST)).toEqual([])
+  })
+
+  it('reports any importer the allowlist does not name, in the same directory or elsewhere, by import or by re-export', () => {
+    const allowed = POLICY_IMPORTER_ALLOWLIST
+    expect(importEdgeViolations(allowed, allowed)).toEqual([])
+    expect(importEdgeViolations([...allowed, ['auth/scratch-importer.ts', './external-login-assurance']], allowed))
+      .toEqual(['unexpected: auth/scratch-importer.ts -> ./external-login-assurance'])
+    expect(importEdgeViolations([...allowed, ['services/scratch.ts', '../auth/external-login-assurance']], allowed))
+      .toEqual(['unexpected: services/scratch.ts -> ../auth/external-login-assurance'])
+    const reExport = importSpecifiers("export { SECURITY_ACTION_PURPOSES } from './external-login-assurance'\n")
+      .map((specifier): ImportEdge => ['auth/scratch-reexport.ts', specifier])
+    expect(importEdgeViolations([...allowed, ...reExport], allowed)).toEqual(['unexpected: auth/scratch-reexport.ts -> ./external-login-assurance'])
+    expect(importEdgeViolations(allowed.slice(0, -1), allowed)).toEqual(['missing: auth/security-action-proof.ts -> ./external-login-assurance'])
   })
 })

@@ -32,10 +32,24 @@ import {
   SUBJECT,
 } from '../helpers/security-action-privilege-harness'
 import type { PrivilegeRow } from '../helpers/security-action-privilege-harness'
+import { importEdgeViolations, importSpecifiers } from '../helpers/import-edge-allowlist'
+import type { ImportEdge } from '../helpers/import-edge-allowlist'
 
 const ROOT = path.resolve(__dirname, '..', '..', '..', '..')
 const BACKEND = path.join(ROOT, 'packages', 'core-backend')
 const SRC = path.join(BACKEND, 'src')
+
+/**
+ * The only files in `src` that may import the classifier or the policy module, as exact edges
+ * relative to `src`: the classifier imports the policy types, and the action proof service imports
+ * the policy module (a type import and a value import) and the classifier. Nothing else may.
+ */
+const POLICY_MODULE_IMPORT_ALLOWLIST: ReadonlyArray<ImportEdge> = [
+  ['auth/security-action-privilege.ts', './external-login-assurance'],
+  ['auth/security-action-proof.ts', './external-login-assurance'],
+  ['auth/security-action-proof.ts', './external-login-assurance'],
+  ['auth/security-action-proof.ts', './security-action-privilege'],
+]
 const MODULE_PATH = path.join(SRC, 'auth', 'security-action-privilege.ts')
 const DB_SPEC = 'tests/integration/security-action-privilege.db.test.ts'
 const DATA_STATEMENT_MARK = 'FROM users u'
@@ -67,17 +81,6 @@ function listSourceFiles(dir: string): string[] {
     if (statSync(full).isDirectory()) return listSourceFiles(full)
     return full.endsWith('.ts') ? [full] : []
   })
-}
-
-/** Module specifiers of every `import … from` and `export … from` statement, so re-exports count as edges. */
-function importSpecifiers(source: string): string[] {
-  const file = ts.createSourceFile('m.ts', source, ts.ScriptTarget.Latest, true)
-  const specifiers: string[] = []
-  for (const statement of file.statements) {
-    if (ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier)) specifiers.push(statement.moduleSpecifier.text)
-    if (ts.isExportDeclaration(statement) && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) specifiers.push(statement.moduleSpecifier.text)
-  }
-  return specifiers
 }
 
 function count(haystack: string, needle: string): number {
@@ -577,8 +580,8 @@ describe('wiring', () => {
     expect(importSpecifiers("import { a } from './x'\nexport { b } from './y'\nexport * from './z'\nexport const c = 1\n")).toEqual(['./x', './y', './z'])
   })
 
-  it('has exactly the reviewed import edges into the two policy modules', () => {
-    const edges: Array<[string, string]> = []
+  it('is imported, together with the policy module, by exactly the allowlisted files: the classifier and the action proof service', () => {
+    const edges: ImportEdge[] = []
     for (const file of listSourceFiles(SRC)) {
       const source = readFileSync(file, 'utf8')
       if (!/security-action-privilege|external-login-assurance/.test(source)) continue
@@ -588,11 +591,26 @@ describe('wiring', () => {
       expect(source).not.toMatch(/require\(\s*['"][^'"]*(?:security-action-privilege|external-login-assurance)/)
       expect(source).not.toMatch(/import\(\s*['"][^'"]*(?:security-action-privilege|external-login-assurance)/)
     }
-    expect(edges.sort()).toEqual([
-      ['auth/security-action-privilege.ts', './external-login-assurance'],
-      ['auth/security-action-proof.ts', './external-login-assurance'],
-      ['auth/security-action-proof.ts', './external-login-assurance'],
-      ['auth/security-action-proof.ts', './security-action-privilege'],
+    expect(importEdgeViolations(edges, POLICY_MODULE_IMPORT_ALLOWLIST)).toEqual([])
+  })
+
+  it('reports any importer the allowlist does not name, in the same directory or elsewhere, by import or by re-export, and any allowlisted edge that is missing', () => {
+    const allowed = POLICY_MODULE_IMPORT_ALLOWLIST
+    expect(importEdgeViolations(allowed, allowed)).toEqual([])
+    expect(importEdgeViolations([...allowed].reverse(), allowed)).toEqual([])
+    const sameDirectory: ImportEdge = ['auth/scratch-importer.ts', './security-action-privilege']
+    expect(importEdgeViolations([...allowed, sameDirectory], allowed)).toEqual(['unexpected: auth/scratch-importer.ts -> ./security-action-privilege'])
+    const elsewhere: ImportEdge = ['routes/scratch.ts', '../auth/external-login-assurance']
+    expect(importEdgeViolations([...allowed, elsewhere], allowed)).toEqual(['unexpected: routes/scratch.ts -> ../auth/external-login-assurance'])
+    const reExport = importSpecifiers("export * from './security-action-privilege'\nexport { a } from './external-login-assurance'\n")
+      .map((specifier): ImportEdge => ['auth/scratch-reexport.ts', specifier])
+    expect(importEdgeViolations([...allowed, ...reExport], allowed)).toEqual([
+      'unexpected: auth/scratch-reexport.ts -> ./external-login-assurance',
+      'unexpected: auth/scratch-reexport.ts -> ./security-action-privilege',
     ])
+    const duplicate: ImportEdge = ['auth/security-action-proof.ts', './security-action-privilege']
+    expect(importEdgeViolations([...allowed, duplicate], allowed)).toEqual(['unexpected: auth/security-action-proof.ts -> ./security-action-privilege'])
+    expect(importEdgeViolations(allowed.slice(1), allowed)).toEqual(['missing: auth/security-action-privilege.ts -> ./external-login-assurance'])
+    expect(importEdgeViolations([], allowed)).toHaveLength(allowed.length)
   })
 })

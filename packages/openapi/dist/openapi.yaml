@@ -20921,7 +20921,8 @@ paths:
         Returns a 300-second single-use proof bound to the session, the
         authenticated organization, the purpose and the target. A purpose whose
         prerequisites are not delivered is refused before any data is read.
-        Responses are not cacheable.
+        Before authentication the route gives no answer of its own. Responses
+        are not cacheable.
       security:
         - bearerAuth: []
       requestBody:

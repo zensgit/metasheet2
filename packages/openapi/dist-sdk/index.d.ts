@@ -8697,7 +8697,7 @@ export interface paths {
         put?: never;
         /**
          * Re-verify the signed-in user for one security action
-         * @description Mounted only when SECURITY_ACTION_PROOF_ENABLED is exactly 'true'. Returns a 300-second single-use proof bound to the session, the authenticated organization, the purpose and the target. A purpose whose prerequisites are not delivered is refused before any data is read. Responses are not cacheable.
+         * @description Mounted only when SECURITY_ACTION_PROOF_ENABLED is exactly 'true'. Returns a 300-second single-use proof bound to the session, the authenticated organization, the purpose and the target. A purpose whose prerequisites are not delivered is refused before any data is read. Before authentication the route gives no answer of its own. Responses are not cacheable.
          */
         post: {
             parameters: {

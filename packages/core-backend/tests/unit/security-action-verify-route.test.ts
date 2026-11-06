@@ -6,9 +6,11 @@ import request from 'supertest'
 const serviceMocks = vi.hoisted(() => ({
   issue: vi.fn(),
   readContext: vi.fn(),
+  actualReadContext: null as null | ((req: Request) => unknown),
 }))
 vi.mock('../../src/auth/security-action-proof', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/auth/security-action-proof')>()
+  serviceMocks.actualReadContext = actual.readAuthenticatedSessionContext
   serviceMocks.readContext.mockImplementation(actual.readAuthenticatedSessionContext)
   return { ...actual, issueSecurityActionProof: serviceMocks.issue, readAuthenticatedSessionContext: serviceMocks.readContext }
 })
@@ -158,19 +160,38 @@ describe('POST /api/auth/security-actions/verify', () => {
   })
 
   describe('error handler mounted after the router', () => {
-    function appWithParser(options: { limit?: string; before?: (req: Request, res: Response, next: NextFunction) => void } = {}) {
+    const MALFORMED = `{"password":"${PASSWORD}"`
+
+    /**
+     * The parser, then the router and the handler (only while the switch is on; with `mounted: false`
+     * the factory must return null and nothing is mounted), then a final handler that stands in for
+     * the application's own error handling: it records what reached it and answers with a marker.
+     * Whether the request has a session context is decided by `readAuthenticatedSessionContext`,
+     * which the tests stub, so no gate is part of these apps.
+     */
+    function appWithParser(options: { limit?: string; before?: (req: Request, res: Response, next: NextFunction) => void; mounted?: boolean } = {}) {
       const app = express()
+      const reached: unknown[] = []
       if (options.before) app.use(options.before)
       app.use(express.json(options.limit ? { limit: options.limit } : {}))
       const router = securityActionsRouter()
-      if (!router) throw new Error('router must mount')
-      app.use('/api/auth/security-actions', router)
-      app.use('/api/auth/security-actions', securityActionParseErrorHandler)
-      return app
+      if (options.mounted === false) {
+        if (router) throw new Error('router must not mount')
+      } else {
+        if (!router) throw new Error('router must mount')
+        app.use('/api/auth/security-actions', router)
+        app.use('/api/auth/security-actions', securityActionParseErrorHandler)
+      }
+      app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+        reached.push(error)
+        res.status(400).json({ answeredBy: 'application' })
+      })
+      return { app, reached }
     }
 
-    it('answers a body that cannot be parsed with 422 and the fixed field name, no-store, no echo, nothing logged', async () => {
-      const response = await request(appWithParser()).post(PATH).set('Content-Type', 'application/json').send(`{"password":"${PASSWORD}"`)
+    it('answers a body that cannot be parsed, for a request with a session context, with 422 and the fixed field name, no-store, no echo, nothing logged', async () => {
+      const { app, reached } = appWithParser()
+      const response = await request(app).post(PATH).set('Content-Type', 'application/json').send(MALFORMED)
       expect(response.status).toBe(422)
       expect(response.body).toEqual({ ok: false, error: { code: 'SECURITY_ACTION_INVALID_REQUEST', message: 'Security action refused', details: { fields: ['_unknown'] } } })
       expect(response.headers['cache-control']).toBe('no-store')
@@ -178,23 +199,97 @@ describe('POST /api/auth/security-actions/verify', () => {
       expect(JSON.stringify(response.body) + JSON.stringify(response.headers)).not.toContain(PASSWORD)
       expect(loggerSpy.lines).toEqual([])
       expect(serviceMocks.issue).not.toHaveBeenCalled()
+      expect(reached).toEqual([])
     })
 
-    it('answers a body outside the accepted size with 422 and the fixed field name', async () => {
-      const response = await request(appWithParser({ limit: '1kb' })).post(PATH).send(body({ password: 'p'.repeat(2048) }))
+    it('answers a body outside the accepted size, for a request with a session context, with 422 and the fixed field name', async () => {
+      const { app, reached } = appWithParser({ limit: '1kb' })
+      const response = await request(app).post(PATH).send(body({ password: 'p'.repeat(2048) }))
       expect(response.status).toBe(422)
       expect(response.body).toEqual({ ok: false, error: { code: 'SECURITY_ACTION_INVALID_REQUEST', message: 'Security action refused', details: { fields: ['_unknown'] } } })
       expect(response.headers['cache-control']).toBe('no-store')
       expect(serviceMocks.issue).not.toHaveBeenCalled()
+      expect(reached).toEqual([])
     })
 
-    it('answers any other failure raised before the handler with 503, a fixed message and no-store', async () => {
-      const app = appWithParser({ before: () => { throw new Error(`upstream detail ${PASSWORD}`) } })
+    it('answers any other failure raised before the handler, for a request with a session context, with 503, a fixed message and no-store', async () => {
+      const { app, reached } = appWithParser({ before: () => { throw new Error(`upstream detail ${PASSWORD}`) } })
       const response = await request(app).post(PATH).send(body())
       expect(response.status).toBe(503)
       expect(response.body).toEqual({ ok: false, error: { code: 'SECURITY_ACTION_UNAVAILABLE', message: 'Security action refused' } })
       expect(response.headers['cache-control']).toBe('no-store')
       expect(JSON.stringify(response.body) + JSON.stringify(response.headers)).not.toContain(PASSWORD)
+      expect(loggerSpy.lines).toEqual([])
+      expect(reached).toEqual([])
+    })
+
+    const noContext: ReadonlyArray<[string, () => void]> = [
+      ['no session context can be built', () => serviceMocks.readContext.mockReturnValue(null)],
+      ['building the session context fails', () => serviceMocks.readContext.mockImplementation(() => { throw new Error(`context failure ${PASSWORD}`) })],
+    ]
+
+    it.each(noContext)('passes a failure raised before the handler on untouched when %s: the application answers, the same with the switch on as with it off', async (_label, arrange) => {
+      arrange()
+      const on = appWithParser()
+      const onParse = await request(on.app).post(PATH).set('Content-Type', 'application/json').send(MALFORMED)
+      const onUpstream = await request(appWithParser({ before: () => { throw new Error('upstream') } }).app).post(PATH).send(body())
+      process.env.SECURITY_ACTION_PROOF_ENABLED = 'false'
+      const off = appWithParser({ mounted: false })
+      const offParse = await request(off.app).post(PATH).set('Content-Type', 'application/json').send(MALFORMED)
+      const offUpstream = await request(appWithParser({ before: () => { throw new Error('upstream') }, mounted: false }).app).post(PATH).send(body())
+      for (const [mounted, unmounted] of [[onParse, offParse], [onUpstream, offUpstream]]) {
+        expect(mounted.status).toBe(400)
+        expect(mounted.status).toBe(unmounted.status)
+        expect(mounted.body).toEqual({ answeredBy: 'application' })
+        expect(mounted.body).toEqual(unmounted.body)
+        expect(mounted.headers['cache-control']).toBeUndefined()
+        expect(mounted.headers['pragma']).toBeUndefined()
+        expect(unmounted.headers['cache-control']).toBeUndefined()
+      }
+      // The same error object the parser raised reaches the application's handler, with and without the route.
+      expect(on.reached).toHaveLength(1)
+      expect(off.reached).toHaveLength(1)
+      expect((on.reached[0] as { type?: unknown }).type).toBe('entity.parse.failed')
+      expect((on.reached[0] as Error).message).toBe((off.reached[0] as Error).message)
+      expect(serviceMocks.issue).not.toHaveBeenCalled()
+      expect(loggerSpy.lines).toEqual([])
+    })
+
+    it('gives an unauthenticated request no answer of its own behind the real session gate, whether its body can be parsed or not and whether the switch is on or off', async () => {
+      serviceMocks.readContext.mockImplementation(serviceMocks.actualReadContext!)
+      const build = (mounted: boolean) => {
+        const app = express()
+        const reached: unknown[] = []
+        app.use(express.json())
+        app.use('/api', jwtAuthMiddleware)
+        const router = securityActionsRouter()
+        if (mounted) {
+          app.use('/api/auth/security-actions', router!)
+          app.use('/api/auth/security-actions', securityActionParseErrorHandler)
+        } else {
+          expect(router).toBeNull()
+        }
+        app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+          reached.push(error)
+          res.status(400).json({ answeredBy: 'application' })
+        })
+        return { app, reached }
+      }
+      const on = build(true)
+      const onParse = await request(on.app).post(PATH).set('Content-Type', 'application/json').send(MALFORMED)
+      const onWellFormed = await request(on.app).post(PATH).send(body())
+      process.env.SECURITY_ACTION_PROOF_ENABLED = 'false'
+      const off = build(false)
+      const offParse = await request(off.app).post(PATH).set('Content-Type', 'application/json').send(MALFORMED)
+      const offWellFormed = await request(off.app).post(PATH).send(body())
+      expect(onParse.status).toBe(400)
+      expect([onParse.status, onParse.body, onParse.headers['cache-control']]).toEqual([offParse.status, offParse.body, offParse.headers['cache-control']])
+      expect(on.reached).toHaveLength(1)
+      expect((on.reached[0] as Error).message).toBe((off.reached[0] as Error).message)
+      expect(onWellFormed.status).toBe(401)
+      expect([onWellFormed.status, onWellFormed.body]).toEqual([offWellFormed.status, offWellFormed.body])
+      expect(onWellFormed.body.error.code).toBe('UNAUTHORIZED')
+      expect(serviceMocks.issue).not.toHaveBeenCalled()
       expect(loggerSpy.lines).toEqual([])
     })
 
