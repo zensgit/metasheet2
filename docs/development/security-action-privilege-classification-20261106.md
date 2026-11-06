@@ -112,8 +112,10 @@ revision every prerequisite is false, so no purpose is available.
   administrator predicate, the web administrator literals and the role editor shapes, source
   alignment with the authorization aggregator, witness composition and ordering, the policy matrix,
   the revision pin, the registry and its prerequisites, the exact allowlist of the files that import
-  either module (an import and a re-export count alike, with a self-check that an importer the
-  allowlist does not name is reported wherever it lives), and the CI wiring.
+  either module (an import, a re-export, `require(…)`, dynamic `import(…)` and `import(…)` types count
+  alike, with plain or template-literal specifiers, in TypeScript and JavaScript files; a computed
+  specifier, or any other file naming either module, is reported; with self-checks that an importer
+  the allowlist does not name is reported wherever it lives), and the CI wiring.
 - `tests/integration/security-action-privilege.db.test.ts` runs against real PostgreSQL in the
   approval real-database job: schema match, one fixture per reason with a second subject holding
   every source, the superset relation to the authorization aggregator, classification from rows

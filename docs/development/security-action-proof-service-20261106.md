@@ -124,17 +124,27 @@ after the image rollback and only on an empty table. The switch is registered in
 - `tests/unit/security-action-verify-route.test.ts`: status and detail mapping, no-store, no echo of the
   password, organization from the session only, position behind the gates, the error handler's
   answers for a request with a session context (unparseable or oversized body, any other upstream
-  failure, a response already sent), the same failures passed on untouched for a request without one
-  (the application's answer, identical with the switch on and off, with a stubbed context and behind
-  the real session gate) and the handler's last-resort `503`.
+  failure, a response already sent), the same failures passed on untouched for a request without one,
+  and the handler's last-resort `503`. Before authentication the switch is not observable: in the
+  production order of correlation id, global parsers, session gate and application error handler, an
+  unauthenticated request with a body that cannot be parsed, a well-formed body or an empty body gets
+  the same status, body bytes and headers (everything but `date`) with the switch on and off; other
+  routes on the auth prefix and outside it answer exactly as without the route, anonymously and with a
+  session.
 - `tests/unit/security-action-proof-inert.test.ts`: with the switch on and the production registry and
   binding, every purpose is unavailable and the route and the service refuse each one with `403`
   before the classifier is read and before any statement, with nothing issued, consumed, superseded
   or audited (counted from the route handler and the service onward; the session gate is a stub
-  outside the count); table, importer and mount boundaries; CI wiring; OpenAPI source.
+  outside the count); table, importer and mount boundaries; the global body parsers, application
+  settings and pipeline order in `index.ts` as they are, and no parser in the route module; CI wiring;
+  OpenAPI source.
 - `tests/unit/security-action-proof-flag.test.ts`, `tests/unit/security-action-challenges-migration.test.ts`.
-- `tests/integration/security-action-proof.db.test.ts` against real Postgres: catalog, every CHECK, the
-  foreign key, the partial unique index and the trigger; the guarded `down()`/`up()` round trip;
+- `tests/integration/security-action-proof.db.test.ts` against real Postgres: catalog; every CHECK
+  refused alone and by name (23514) by an input the trigger admits, the status CHECK with the trigger
+  disabled inside a savepoint; every trigger rule refused (55000, by message) by an input that
+  satisfies every CHECK; the foreign key (23503) and the partial unique index (23505) by name; each
+  refusal under its own savepoint with every row re-read unchanged afterwards; positive controls for
+  each legal row and transition; the guarded `down()`/`up()` round trip;
   issuance, invalidation and consumption; the failure limit across sessions and purposes; a
   repeatable-read-default pool; lock order under concurrency. Excluded from the no-DB runner and run as
   a whole file in the approval real-DB step of `plugin-tests.yml`.

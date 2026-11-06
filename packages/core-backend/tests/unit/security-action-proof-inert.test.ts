@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import type { NextFunction, Request, Response } from 'express'
 import request from 'supertest'
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import yaml from 'js-yaml'
 import ts from 'typescript'
@@ -40,6 +40,7 @@ import type { SecurityActionPurpose } from '../../src/auth/external-login-assura
 import { consumeSecurityActionProof, issueSecurityActionProof, SecurityActionProofError } from '../../src/auth/security-action-proof'
 import type { SecurityActionConsumeInput, SecurityActionVerifyRequest } from '../../src/auth/security-action-proof'
 import { securityActionsRouter } from '../../src/routes/security-actions'
+import { importSpecifiers, listSourceFiles } from '../helpers/import-edge-allowlist'
 import { CONNECTION, contextFor, ORG, TARGET_IDENTITY, TARGET_WITNESS, tokenFor, USER } from '../helpers/security-action-proof-harness'
 
 const ROOT = path.resolve(__dirname, '..', '..', '..', '..')
@@ -52,35 +53,13 @@ const MIGRATION = path.join(SRC, 'db', 'migrations', 'zzzz20261106120000_create_
 const DB_SPEC = 'tests/integration/security-action-proof.db.test.ts'
 const TABLE = 'security_action_challenges'
 
-function listSourceFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((entry) => {
-    const full = path.join(dir, entry)
-    if (statSync(full).isDirectory()) return listSourceFiles(full)
-    return /\.(ts|js|cjs|mjs)$/.test(full) ? [full] : []
-  })
-}
-
 function parse(file: string): ts.SourceFile {
   return ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true)
 }
 
-/** Module specifiers of static imports, re-exports, `require(...)` and dynamic `import(...)`. */
+/** Module specifiers of every module load in the file (see the import-edge helper). */
 function importEdges(file: string): string[] {
-  const source = parse(file)
-  const specifiers: string[] = []
-  const visit = (node: ts.Node): void => {
-    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) specifiers.push(node.moduleSpecifier.text)
-    if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) specifiers.push(node.moduleSpecifier.text)
-    if (ts.isCallExpression(node)) {
-      const callee = node.expression
-      const isRequire = ts.isIdentifier(callee) && callee.text === 'require'
-      const isDynamicImport = callee.kind === ts.SyntaxKind.ImportKeyword
-      if ((isRequire || isDynamicImport) && node.arguments[0] && ts.isStringLiteral(node.arguments[0])) specifiers.push(node.arguments[0].text)
-    }
-    ts.forEachChild(node, visit)
-  }
-  visit(source)
-  return specifiers
+  return importSpecifiers(readFileSync(file, 'utf8'), file)
 }
 
 function importedNames(file: string, specifier: string): string[] {

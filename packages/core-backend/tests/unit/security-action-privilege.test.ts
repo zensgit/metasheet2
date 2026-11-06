@@ -1,7 +1,8 @@
 import { requiredSuiteJob } from '../../../../scripts/ops/plugin-tests-workflow-contract.mjs'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import yaml from 'js-yaml'
 import ts from 'typescript'
@@ -32,7 +33,7 @@ import {
   SUBJECT,
 } from '../helpers/security-action-privilege-harness'
 import type { PrivilegeRow } from '../helpers/security-action-privilege-harness'
-import { importEdgeViolations, importSpecifiers } from '../helpers/import-edge-allowlist'
+import { collectImportEdges, importEdgeViolations, importSpecifiers, listSourceFiles, NON_LITERAL_SPECIFIER } from '../helpers/import-edge-allowlist'
 import type { ImportEdge } from '../helpers/import-edge-allowlist'
 
 const ROOT = path.resolve(__dirname, '..', '..', '..', '..')
@@ -73,14 +74,6 @@ async function classifyRow(overrides: Partial<PrivilegeRow>) {
 
 async function reasonsOf(overrides: Partial<PrivilegeRow>): Promise<readonly HighPrivilegeReason[]> {
   return (await classifyRow(overrides)).reasons
-}
-
-function listSourceFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((entry) => {
-    const full = path.join(dir, entry)
-    if (statSync(full).isDirectory()) return listSourceFiles(full)
-    return full.endsWith('.ts') ? [full] : []
-  })
 }
 
 function count(haystack: string, needle: string): number {
@@ -581,17 +574,68 @@ describe('wiring', () => {
   })
 
   it('is imported, together with the policy module, by exactly the allowlisted files: the classifier and the action proof service', () => {
-    const edges: ImportEdge[] = []
+    const edges = collectImportEdges(SRC, /security-action-privilege|external-login-assurance/, (file) => readFileSync(file, 'utf8'))
+    expect(importEdgeViolations(edges, POLICY_MODULE_IMPORT_ALLOWLIST)).toEqual([])
     for (const file of listSourceFiles(SRC)) {
       const source = readFileSync(file, 'utf8')
-      if (!/security-action-privilege|external-login-assurance/.test(source)) continue
-      for (const specifier of importSpecifiers(source)) {
-        if (/security-action-privilege|external-login-assurance/.test(specifier)) edges.push([path.relative(SRC, file), specifier])
-      }
-      expect(source).not.toMatch(/require\(\s*['"][^'"]*(?:security-action-privilege|external-login-assurance)/)
-      expect(source).not.toMatch(/import\(\s*['"][^'"]*(?:security-action-privilege|external-login-assurance)/)
+      expect(source).not.toMatch(/require\(\s*['"`][^'"`]*(?:security-action-privilege|external-login-assurance)/)
+      expect(source).not.toMatch(/import\(\s*['"`][^'"`]*(?:security-action-privilege|external-login-assurance)/)
     }
-    expect(importEdgeViolations(edges, POLICY_MODULE_IMPORT_ALLOWLIST)).toEqual([])
+  })
+
+  it('sees every way a file can load a module: static, re-export, require, dynamic import and import types, with plain or template literals, in TypeScript and JavaScript', () => {
+    const typescript = [
+      "import { a } from './m1'",
+      "import type { B } from './m2'",
+      "import './m3'",
+      "export * from './m4'",
+      "export { c } from './m5'",
+      "import legacy = require('./m6')",
+      'export async function later() {',
+      "  const d = await import(`./m7`)",
+      "  const e = require(`./m8`)",
+      "  const f = await import('./m9')",
+      '  return [d, e, f]',
+      '}',
+      "export type G = typeof import('./m10')",
+      'export const name = "./m11"',
+      '',
+    ].join('\n')
+    expect(importSpecifiers(typescript, 'scratch.ts')).toEqual(['./m1', './m2', './m3', './m4', './m5', './m6', './m7', './m8', './m9', './m10'])
+    const javascript = "'use strict'\nconst a = require('./m1')\nconst b = require(`./m2`)\nmodule.exports = () => import(`./m3`)\n"
+    for (const fileName of ['scratch.js', 'scratch.cjs', 'scratch.mjs']) expect(importSpecifiers(javascript, fileName)).toEqual(['./m1', './m2', './m3'])
+    const computed = "const target = './m1'\nrequire(target)\nimport(`./${target}`)\nrequire('./m' + 2)\n"
+    expect(importSpecifiers(computed, 'scratch.ts')).toEqual([NON_LITERAL_SPECIFIER, NON_LITERAL_SPECIFIER, NON_LITERAL_SPECIFIER])
+  })
+
+  it('collects edges from every TypeScript and JavaScript file under the root, records a computed load in a file naming the module, and reports any other file naming it', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'import-edges-'))
+    try {
+      mkdirSync(path.join(root, 'auth'))
+      const files: Record<string, string> = {
+        'auth/allowed.ts': "import { a } from './watched-module'\n",
+        'auth/template.ts': 'export const load = () => import(`./watched-module`)\n',
+        'legacy.js': "module.exports = require(`./auth/watched-module`)\n",
+        'tool.cjs': "module.exports = require('./auth/watched-module')\n",
+        'tool.mjs': "export * from './auth/watched-module'\n",
+        'computed.ts': "const name = 'watched-module'\nexport const load = () => require('./auth/' + name)\n",
+        'notes.md': 'watched-module\n',
+        'unrelated.ts': "const name = 'other'\nexport const load = () => require(name)\n",
+      }
+      for (const [file, text] of Object.entries(files)) writeFileSync(path.join(root, file), text)
+      const edges = collectImportEdges(root, /watched-module/, (file) => readFileSync(file, 'utf8'))
+      expect(importEdgeViolations(edges, [['auth/allowed.ts', './watched-module']])).toEqual([
+        `unexpected: auth/template.ts -> ./watched-module`,
+        `unexpected: computed.ts -> ${NON_LITERAL_SPECIFIER}`,
+        'unexpected: legacy.js -> ./auth/watched-module',
+        'unexpected: notes.md -> <unparsed .md>',
+        'unexpected: tool.cjs -> ./auth/watched-module',
+        'unexpected: tool.mjs -> ./auth/watched-module',
+      ])
+      expect(listSourceFiles(root).map((file) => path.relative(root, file)).sort()).toEqual(['auth/allowed.ts', 'auth/template.ts', 'computed.ts', 'legacy.js', 'tool.cjs', 'tool.mjs', 'unrelated.ts'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('reports any importer the allowlist does not name, in the same directory or elsewhere, by import or by re-export, and any allowlisted edge that is missing', () => {
