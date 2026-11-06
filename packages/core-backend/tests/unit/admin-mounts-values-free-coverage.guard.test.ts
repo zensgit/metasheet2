@@ -62,7 +62,7 @@ const ADMIN = '/api/admin'
 const ADMIN_LITERAL = /^\/api\/admin(?=\/|$)/i
 
 /** Routers whose 5xx branches an existing values-free scanner covers — each one backed by check (d). */
-const SCANNED: readonly string[] = ['admin-routes.ts', 'admin-users.ts', 'admin-role-members.ts']
+const SCANNED: readonly string[] = ['admin-routes.ts', 'admin-users.ts', 'admin-role-members.ts', 'admin-local-organization-workspace.ts']
 
 /** `echo` is what the scanner must find in the file today (h): 'none' = zero offenders, 'known' = at least one (a recorded gap). */
 interface AllowlistEntry { reason: string; since: string; followUp: string; echo: 'none' | 'known' }
@@ -90,6 +90,7 @@ const EXPECTED_IN_SCOPE: readonly string[] = [
   '/api/admin/directory/org-transfers -> admin-directory-org-transfers.ts',
   '/api/admin/directory/department-bindings -> admin-directory-department-bindings.ts',
   '/api/admin/directory/routing-policy -> admin-directory-routing-policy.ts',
+  '/api/admin/directory/local -> admin-local-organization-workspace.ts',
 ]
 
 /** Where index.ts hands `this.app` to something else (g): the HTTP server, metrics, and the API gateway (which mounts its own router at '/api'). */

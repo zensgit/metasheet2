@@ -7,6 +7,7 @@
       </div>
 
       <div class="directory-admin__actions">
+        <router-link class="directory-admin__link" to="/admin/organization">组织管理</router-link>
         <router-link class="directory-admin__link" to="/admin/users">用户管理</router-link>
         <router-link class="directory-admin__link" to="/admin/roles">角色管理</router-link>
         <router-link class="directory-admin__link" to="/admin/audit">管理审计</router-link>

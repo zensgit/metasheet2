@@ -1183,20 +1183,37 @@ export async function setLocalMembershipManager(
   orgId: string,
   identity: { directoryAccountId: string; directoryDepartmentId: string },
   isManager: boolean,
+  expectedIntegrationId?: string,
 ): Promise<SetLocalMembershipManagerResult> {
   const normalizedOrgId = normalizeText(orgId) || DEFAULT_ORG_ID
   // PB4-2 (owner design lock, WRITE-POINT enforcement): the writer is the REAL archived guard — it
-  // may NOT rely on any route pre-check. It locks the ACCOUNT row first, then the DEPARTMENT row, in
-  // TWO explicit statements — the same fixed account-before-department order (design lock §2) the B2
-  // membership writers use. A single-join `FOR UPDATE OF a, d` is deliberately NOT used: its row-lock
-  // acquisition order is plan-dependent, so a concurrent add/switch (which locks account-then-
-  // department explicitly) could grab the same pair in the opposite order and deadlock. Both
-  // statements keep the full B3 scoping (membership exists AND account+department are under this
-  // org's ACTIVE local integration); a row out of scope matches nothing → `not_found`. The is_active
-  // reads and the write are in ONE transaction behind these locks, so a concurrent archive is
-  // serialized: it commits first (we see is_active=false → `archived`) or waits behind us (we win,
-  // it applies after). No getOrCreateLocalIntegration call — a manager write must not bootstrap.
+  // may NOT rely on any route pre-check. Lock the integration FOR SHARE first, in its own statement,
+  // then the ACCOUNT, then the DEPARTMENT. FOR UPDATE OF a does not lock the integration, so a
+  // deactivation that commits while this writer waits on the department would otherwise land
+  // is_manager=true on an inactive anchor. A single-join `FOR UPDATE OF a, d` is deliberately NOT
+  // used: its row-lock acquisition order is plan-dependent, so a concurrent add/switch (which locks
+  // account-then-department explicitly) could grab the same pair in the opposite order and deadlock.
+  // A row out of scope matches nothing → `not_found`. No getOrCreateLocalIntegration call — a
+  // manager write must not bootstrap.
   return await transaction(async (client) => {
+    const integration = await client.query(
+      `SELECT i.id::text AS id
+         FROM directory_integrations i
+         JOIN directory_accounts a ON a.integration_id = i.id
+         JOIN directory_account_departments ad ON ad.directory_account_id = a.id
+        WHERE ad.directory_account_id = $1::uuid
+          AND ad.directory_department_id = $2::uuid
+          AND i.org_id = $3
+          AND i.provider = 'local'
+          AND i.status = 'active'
+          AND a.provider = 'local'
+          AND ($4::uuid IS NULL OR i.id = $4::uuid)
+        FOR SHARE OF i`,
+      [identity.directoryAccountId, identity.directoryDepartmentId, normalizedOrgId, expectedIntegrationId ?? null],
+    )
+    const integrationRow = integration.rows[0] as { id: string } | undefined
+    if (!integrationRow) return { outcome: 'not_found' }
+
     const accountRes = await client.query(
       `SELECT a.is_active
          FROM directory_account_departments ad
@@ -1208,8 +1225,9 @@ export async function setLocalMembershipManager(
           AND i.status = 'active'
           AND a.provider = 'local'
           AND i.org_id = $3
+          AND a.integration_id = $4::uuid
         FOR UPDATE OF a`,
-      [identity.directoryAccountId, identity.directoryDepartmentId, normalizedOrgId],
+      [identity.directoryAccountId, identity.directoryDepartmentId, normalizedOrgId, integrationRow.id],
     )
     const accountRow = accountRes.rows[0] as { is_active: boolean } | undefined
     if (!accountRow) return { outcome: 'not_found' }

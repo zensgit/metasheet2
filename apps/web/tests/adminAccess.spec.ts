@@ -5,6 +5,7 @@ import { resolveAdminRouteRedirect } from '../src/router/adminAccess'
 const platformAdminPaths = [
   '/admin/users',
   '/admin/directory',
+  '/admin/organization',
   '/admin/roles',
   '/admin/permissions',
   '/admin/automation-executions',
@@ -27,6 +28,10 @@ function routeBlock(source: string, path: string): string {
 describe('admin route access', () => {
   it('marks platform-admin pages with requiresAdmin before their route components load', async () => {
     const source = await readFile('src/router/appRoutes.ts', 'utf8')
+
+    expect(routeBlock(source, '/admin/organization')).toContain("component: () => import('../views/LocalOrganizationView.vue')")
+    const directory = await readFile('src/views/DirectoryManagementView.vue', 'utf8')
+    expect(directory).toContain('to="/admin/organization">组织管理</router-link>')
 
     for (const path of platformAdminPaths) {
       const block = routeBlock(source, path)

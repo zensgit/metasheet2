@@ -40,19 +40,19 @@ export function checkFieldAllowlist(body: unknown, allowedFields: readonly strin
 }
 
 /** POST /api/admin/directory/local/departments */
-export const CREATE_LOCAL_DEPARTMENT_FIELDS = ['name', 'parentDepartmentId', 'orderIndex'] as const
+export const CREATE_LOCAL_DEPARTMENT_FIELDS = ['name', 'parentDepartmentId', 'orderIndex', 'expectedIntegrationId'] as const
 
 /** PATCH /api/admin/directory/local/departments/:departmentId */
-export const UPDATE_LOCAL_DEPARTMENT_FIELDS = ['name', 'parentDepartmentId', 'orderIndex'] as const
+export const UPDATE_LOCAL_DEPARTMENT_FIELDS = ['name', 'parentDepartmentId', 'orderIndex', 'expectedIntegrationId'] as const
 
 /** POST /api/admin/directory/local/accounts */
 export const CREATE_LOCAL_ACCOUNT_FIELDS = ['localUserId', 'name', 'email', 'mobile', 'title'] as const
 
 /** PATCH /api/admin/directory/local/accounts/:accountId */
-export const UPDATE_LOCAL_ACCOUNT_FIELDS = ['name', 'email', 'mobile', 'title'] as const
+export const UPDATE_LOCAL_ACCOUNT_FIELDS = ['name', 'email', 'mobile', 'title', 'expectedIntegrationId'] as const
 
 /** POST /api/admin/directory/local/memberships */
-export const ADD_LOCAL_MEMBERSHIP_FIELDS = ['accountId', 'departmentId'] as const
+export const ADD_LOCAL_MEMBERSHIP_FIELDS = ['accountId', 'departmentId', 'expectedIntegrationId'] as const
 
 /**
  * PATCH /api/admin/directory/local/memberships/:membershipId — a narrow membership update that
@@ -61,7 +61,7 @@ export const ADD_LOCAL_MEMBERSHIP_FIELDS = ['accountId', 'departmentId'] as cons
  * set/unset (`isManager: true|false`, B3 #4215 §5.4). Both keys in one body — or an empty body —
  * is a 400 before any write, so a combined request can never partially apply.
  */
-export const UPDATE_LOCAL_MEMBERSHIP_FIELDS = ['isPrimary', 'isManager'] as const
+export const UPDATE_LOCAL_MEMBERSHIP_FIELDS = ['isPrimary', 'isManager', 'expectedIntegrationId'] as const
 
 /**
  * Owner P2 (review on #4317): the allowlists above only ever checked field NAMES. A
@@ -166,6 +166,7 @@ export const CREATE_LOCAL_DEPARTMENT_FIELD_TYPES: readonly LocalDirectoryFieldSp
   { field: 'name', kind: 'string' },
   { field: 'parentDepartmentId', kind: 'stringOrNull' },
   { field: 'orderIndex', kind: 'integer' },
+  { field: 'expectedIntegrationId', kind: 'string' },
 ]
 
 /** PATCH /api/admin/directory/local/departments/:departmentId — types for `UPDATE_LOCAL_DEPARTMENT_FIELDS`. */
@@ -173,6 +174,7 @@ export const UPDATE_LOCAL_DEPARTMENT_FIELD_TYPES: readonly LocalDirectoryFieldSp
   { field: 'name', kind: 'string' },
   { field: 'parentDepartmentId', kind: 'stringOrNull' },
   { field: 'orderIndex', kind: 'integer' },
+  { field: 'expectedIntegrationId', kind: 'string' },
 ]
 
 /** POST /api/admin/directory/local/accounts — types for `CREATE_LOCAL_ACCOUNT_FIELDS`. */
@@ -190,12 +192,14 @@ export const UPDATE_LOCAL_ACCOUNT_FIELD_TYPES: readonly LocalDirectoryFieldSpec[
   { field: 'email', kind: 'stringOrNull' },
   { field: 'mobile', kind: 'stringOrNull' },
   { field: 'title', kind: 'stringOrNull' },
+  { field: 'expectedIntegrationId', kind: 'string' },
 ]
 
 /** POST /api/admin/directory/local/memberships — types for `ADD_LOCAL_MEMBERSHIP_FIELDS`. */
 export const ADD_LOCAL_MEMBERSHIP_FIELD_TYPES: readonly LocalDirectoryFieldSpec[] = [
   { field: 'accountId', kind: 'string' },
   { field: 'departmentId', kind: 'string' },
+  { field: 'expectedIntegrationId', kind: 'string' },
 ]
 
 /**
@@ -211,4 +215,5 @@ export const ADD_LOCAL_MEMBERSHIP_FIELD_TYPES: readonly LocalDirectoryFieldSpec[
 export const UPDATE_LOCAL_MEMBERSHIP_FIELD_TYPES: readonly LocalDirectoryFieldSpec[] = [
   { field: 'isPrimary', kind: 'boolean' },
   { field: 'isManager', kind: 'boolean' },
+  { field: 'expectedIntegrationId', kind: 'string' },
 ]

@@ -34,7 +34,9 @@ import {
   updateLocalAccount,
   updateLocalDepartment,
 } from '../directory/local-directory-org'
+import { LocalMemberProjectionError, projectLocalOrganizationMember } from '../directory/local-organization-member-projection'
 import { setLocalMembershipManager } from '../directory/directory-sync'
+import { getLocalMembershipDepartmentHead, setLocalMembershipDepartmentHead } from '../directory/local-directory-department-head'
 import { jsonError, jsonOk } from '../util/response'
 
 const logger = new Logger('AdminDirectoryLocalRoutes')
@@ -139,6 +141,15 @@ function isUuidShaped(value: string): boolean {
   return UUID_SHAPE_RE.test(value)
 }
 
+function readExpectedAnchor(body: Record<string, unknown>): string | undefined {
+  if (!Object.prototype.hasOwnProperty.call(body, 'expectedIntegrationId')) return undefined
+  const value = body.expectedIntegrationId
+  if (typeof value !== 'string' || !isUuidShaped(value)) {
+    throw new LocalDirectoryValidationError('expectedIntegrationId must be a UUID')
+  }
+  return value
+}
+
 /** Returns true (and writes the 400) when the given route param is not UUID-shaped. */
 function rejectNonUuidParam(res: Response, paramName: string, value: string): boolean {
   if (isUuidShaped(value)) return false
@@ -180,7 +191,9 @@ export function adminDirectoryLocalRouter(): Router {
 
     try {
       const orgId = resolveLocalDirectoryOrgId(req)
-      const department = await createLocalDepartment({ orgId, name, parentDepartmentId, orderIndex })
+      const department = await createLocalDepartment({
+        orgId, name, parentDepartmentId, orderIndex, expectedIntegrationId: readExpectedAnchor(body),
+      })
       await auditLog({
         actorId: adminUserId,
         actorType: 'user',
@@ -220,7 +233,7 @@ export function adminDirectoryLocalRouter(): Router {
     try {
       const orgId = resolveLocalDirectoryOrgId(req)
       if (rejectNonUuidParam(res, 'departmentId', req.params.departmentId)) return
-      const department = await updateLocalDepartment(orgId, req.params.departmentId, input)
+      const department = await updateLocalDepartment(orgId, req.params.departmentId, input, readExpectedAnchor(body))
       if (!department) {
         jsonError(res, 404, 'DIRECTORY_LOCAL_NOT_FOUND', 'Local department not found')
         return
@@ -247,12 +260,14 @@ export function adminDirectoryLocalRouter(): Router {
   router.post('/departments/:departmentId/archive', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
-    if (rejectUnlistedFields(req, res, [])) return
+    if (rejectUnlistedFields(req, res, ['expectedIntegrationId'])) return
 
     try {
       const orgId = resolveLocalDirectoryOrgId(req)
       if (rejectNonUuidParam(res, 'departmentId', req.params.departmentId)) return
-      const department = await archiveLocalDepartment(orgId, req.params.departmentId)
+      const department = await archiveLocalDepartment(
+        orgId, req.params.departmentId, readExpectedAnchor((req.body ?? {}) as Record<string, unknown>),
+      )
       if (!department) {
         jsonError(res, 404, 'DIRECTORY_LOCAL_NOT_FOUND', 'Local department not found')
         return
@@ -268,6 +283,47 @@ export function adminDirectoryLocalRouter(): Router {
       jsonOk(res, { department })
     } catch (error) {
       handleLocalDirectoryError(res, error, 'Failed to archive local department')
+    }
+  })
+
+
+  // Approved narrow representation door: never joins/reactivates an organization or grants access.
+  router.post('/member-projections', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    if (rejectUnlistedFields(req, res, ['integrationId', 'localUserId'])) return
+    const body = req.body as Record<string, unknown> | undefined
+    if (!body || Array.isArray(body) || typeof body.integrationId !== 'string' ||
+        !UUID_SHAPE_RE.test(body.integrationId) || typeof body.localUserId !== 'string' ||
+        !body.localUserId.trim() || body.localUserId.trim().length > 200) {
+      jsonError(res, 400, 'DIRECTORY_LOCAL_INVALID_INPUT', 'Expected a local anchor and member')
+      return
+    }
+    try {
+      const projection = await projectLocalOrganizationMember(resolveLocalDirectoryOrgId(req), {
+        integrationId: body.integrationId,
+        localUserId: body.localUserId.trim(),
+        actorId: adminUserId,
+      })
+      if (projection.created) {
+        await auditLog({
+          actorId: adminUserId, actorType: 'user', action: 'directory.local_member.project',
+          resourceType: 'directory-account', resourceId: projection.accountId,
+          meta: { integrationId: body.integrationId },
+        })
+      }
+      jsonOk(res, { projection })
+    } catch (error) {
+      if (error instanceof LocalMemberProjectionError && error.status === 404) {
+        jsonError(res, 404, error.code, error.message)
+        return
+      }
+      if (error instanceof LocalMemberProjectionError && error.status === 409) {
+        jsonError(res, 409, error.code, error.message)
+        return
+      }
+      logger.warn('Local member projection failed')
+      jsonError(res, 500, 'LOCAL_ORG_INTERNAL_ERROR', 'Local member projection failed')
     }
   })
 
@@ -331,7 +387,7 @@ export function adminDirectoryLocalRouter(): Router {
     try {
       const orgId = resolveLocalDirectoryOrgId(req)
       if (rejectNonUuidParam(res, 'accountId', req.params.accountId)) return
-      const account = await updateLocalAccount(orgId, req.params.accountId, input)
+      const account = await updateLocalAccount(orgId, req.params.accountId, input, readExpectedAnchor(body))
       if (!account) {
         jsonError(res, 404, 'DIRECTORY_LOCAL_NOT_FOUND', 'Local account not found')
         return
@@ -359,12 +415,14 @@ export function adminDirectoryLocalRouter(): Router {
   router.post('/accounts/:accountId/archive', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
-    if (rejectUnlistedFields(req, res, [])) return
+    if (rejectUnlistedFields(req, res, ['expectedIntegrationId'])) return
 
     try {
       const orgId = resolveLocalDirectoryOrgId(req)
       if (rejectNonUuidParam(res, 'accountId', req.params.accountId)) return
-      const account = await archiveLocalAccount(orgId, req.params.accountId, adminUserId)
+      const account = await archiveLocalAccount(
+        orgId, req.params.accountId, adminUserId, readExpectedAnchor((req.body ?? {}) as Record<string, unknown>),
+      )
       if (!account) {
         jsonError(res, 404, 'DIRECTORY_LOCAL_NOT_FOUND', 'Local account not found')
         return
@@ -404,7 +462,9 @@ export function adminDirectoryLocalRouter(): Router {
       // predicates in the service SQL — a non-UUID string 500s at the cast without this.
       if (!isUuidShaped(accountId)) throw new LocalDirectoryValidationError('accountId must be a UUID')
       if (!isUuidShaped(departmentId)) throw new LocalDirectoryValidationError('departmentId must be a UUID')
-      const membership = await addLocalMembership({ orgId, accountId, departmentId })
+      const membership = await addLocalMembership({
+        orgId, accountId, departmentId, expectedIntegrationId: readExpectedAnchor(body),
+      })
       await auditLog({
         actorId: adminUserId,
         actorType: 'user',
@@ -458,6 +518,7 @@ export function adminDirectoryLocalRouter(): Router {
           orgId,
           { directoryAccountId: parsed.accountId, directoryDepartmentId: parsed.departmentId },
           isManager,
+          readExpectedAnchor(body),
         )
         // PB4-2: the writer is the archived guard; its discriminated result distinguishes a
         // genuinely-missing/out-of-scope membership (404) from an in-scope but ARCHIVED target (409),
@@ -496,7 +557,9 @@ export function adminDirectoryLocalRouter(): Router {
     }
 
     try {
-      const membership = await switchLocalPrimaryDepartment(orgId, parsed.accountId, parsed.departmentId)
+      const membership = await switchLocalPrimaryDepartment(
+        orgId, parsed.accountId, parsed.departmentId, readExpectedAnchor(body),
+      )
       await auditLog({
         actorId: adminUserId,
         actorType: 'user',
@@ -508,6 +571,79 @@ export function adminDirectoryLocalRouter(): Router {
       jsonOk(res, { membership: { id: `${membership.accountId}:${membership.departmentId}`, ...membership } })
     } catch (error) {
       handleLocalDirectoryError(res, error, 'Failed to switch local primary department')
+    }
+  })
+
+  router.get('/memberships/:membershipId/department-head', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    const parsed = parseMembershipId(req.params.membershipId)
+    if (!parsed) {
+      jsonError(res, 400, 'DIRECTORY_LOCAL_INVALID_INPUT', 'membershipId must be accountUUID:departmentUUID')
+      return
+    }
+    try {
+      const membership = await getLocalMembershipDepartmentHead(resolveLocalDirectoryOrgId(req), {
+        directoryAccountId: parsed.accountId, directoryDepartmentId: parsed.departmentId,
+      })
+      if (!membership) {
+        jsonError(res, 404, 'DIRECTORY_LOCAL_NOT_FOUND', 'Local membership not found')
+        return
+      }
+      jsonOk(res, { membership: { id: `${membership.accountId}:${membership.departmentId}`, ...membership } })
+    } catch {
+      logger.warn('Failed to read local department head')
+      jsonError(res, 500, 'DIRECTORY_LOCAL_INTERNAL_ERROR', 'Failed to read local department head')
+    }
+  })
+
+  router.patch('/memberships/:membershipId/department-head', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    if (rejectUnlistedFields(req, res, ['isDepartmentHead', 'expectedIntegrationId'])) return
+    if (typeof req.body?.isDepartmentHead !== 'boolean') {
+      jsonError(res, 400, 'DIRECTORY_LOCAL_INVALID_INPUT', 'isDepartmentHead must be boolean')
+      return
+    }
+    const parsed = parseMembershipId(req.params.membershipId)
+    if (!parsed) {
+      jsonError(res, 400, 'DIRECTORY_LOCAL_INVALID_INPUT', 'membershipId must be accountUUID:departmentUUID')
+      return
+    }
+    const isDepartmentHead = req.body.isDepartmentHead as boolean
+    let expectedIntegrationId: string | undefined
+    try {
+      expectedIntegrationId = readExpectedAnchor((req.body ?? {}) as Record<string, unknown>)
+    } catch (error) {
+      if (error instanceof LocalDirectoryValidationError) {
+        jsonError(res, 400, 'DIRECTORY_LOCAL_INVALID_INPUT', error.message)
+        return
+      }
+      throw error
+    }
+    try {
+      const result = await setLocalMembershipDepartmentHead(resolveLocalDirectoryOrgId(req), {
+        directoryAccountId: parsed.accountId, directoryDepartmentId: parsed.departmentId,
+      }, isDepartmentHead, expectedIntegrationId)
+      if (result.outcome === 'not_found') {
+        jsonError(res, 404, 'DIRECTORY_LOCAL_NOT_FOUND', 'Local membership not found')
+        return
+      }
+      if (result.outcome === 'archived') {
+        jsonError(res, 409, 'DIRECTORY_LOCAL_CONFLICT', 'Archived local account or department is read-only')
+        return
+      }
+      await auditLog({
+        actorId: adminUserId, actorType: 'user', action: 'directory.local_membership.set_department_head',
+        resourceType: 'directory-membership', resourceId: req.params.membershipId,
+        meta: { isDepartmentHead },
+      })
+      jsonOk(res, { membership: {
+        id: req.params.membershipId, accountId: parsed.accountId, departmentId: parsed.departmentId, isDepartmentHead,
+      } })
+    } catch {
+      logger.warn('Failed to update local department head')
+      jsonError(res, 500, 'DIRECTORY_LOCAL_INTERNAL_ERROR', 'Failed to update local department head')
     }
   })
 
