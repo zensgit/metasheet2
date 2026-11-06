@@ -97,7 +97,8 @@ A purpose is available only when every prerequisite it depends on is delivered: 
 the local credential provenance constraint (a local credential counts as the `local_password` method
 only when its provenance satisfies the assurance policy for verification methods); the authorization
 input serialization contract; binding of the proof and its intent to the browser that started them;
-a per-user total limit on verification attempts with at most one in flight per session; and the
+a per-user total limit on verification attempts with at most one in flight per session, with the
+operating notes stating that whoever holds a session can temporarily keep its user from verifying; and the
 purpose's own target resolution. Every purpose depends on each of them. In this revision every
 prerequisite is false, so no purpose is available.
 

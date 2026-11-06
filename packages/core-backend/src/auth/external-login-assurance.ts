@@ -162,8 +162,9 @@ export type SecurityActionPrerequisites = Readonly<{
   /** A proof and the intent it serves are bound to the browser that started them. Every purpose
    *  depends on it. */
   browserBinding: boolean
-  /** Verification attempts have a per-user total limit and at most one in flight per session. Every
-   *  purpose depends on it. */
+  /** Verification attempts have a per-user total limit and at most one in flight per session, and the
+   *  operating notes state that whoever holds a session can temporarily keep its user from verifying.
+   *  Every purpose depends on it. */
   verificationAttemptLimits: boolean
   /** The external re-authentication method is delivered. It widens which purposes are privilege-sensitive. */
   externalReauthMethod: boolean
@@ -196,7 +197,9 @@ function decisionKey(decision: SecurityActionPolicyDecision): string {
 /**
  * A purpose is privilege-sensitive when, for any delivered method and any assurance level, the
  * policy decides differently for 'standard' than for 'high'. Derived from the matrix, not listed by
- * hand, so the two cannot disagree.
+ * hand, so the two cannot disagree. Availability no longer depends on it (every purpose requires
+ * serialization); it remains the matrix's own description of which purposes the privilege class
+ * changes, including once the external re-authentication method is delivered.
  */
 export function isPrivilegeSensitive(purpose: SecurityActionPurpose, prerequisites: SecurityActionPrerequisites): boolean {
   const deliveredMethods: SecurityActionMethod[] = ['local_password']

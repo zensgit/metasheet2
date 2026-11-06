@@ -24,8 +24,9 @@
  * commit or is idempotent on the proof id. Binding inputs come only from a context built by
  * readAuthenticatedSessionContext. Consumption applies the same account gate and the same method
  * eligibility check as issuance; either refusal is reported as a stale proof. The privilege witness
- * is compared at consumption time; purposes whose outcome depends on the privilege class stay
- * unavailable until every authorization-input writer serializes with consumption.
+ * is compared at consumption time; every purpose stays unavailable until every authorization-input
+ * writer serializes with consumption, proofs are bound to the browser that started them, and
+ * verification attempts are limited per user and per session.
  *
  * Every entry point refuses before any statement unless SECURITY_ACTION_PROOF_ENABLED is exactly
  * 'true'. This module is the only reader and writer of security_action_challenges.
