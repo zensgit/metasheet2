@@ -376,6 +376,11 @@ export default defineConfig({
       // skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
       // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
       'tests/integration/directory-sync-membership-local-account-gate.db.test.ts',
+      // Delivery worker deferral and lease headroom against real Postgres (requeue CAS, attempt
+      // restore, two-hour window, re-claimed rows never sent twice). DATABASE_URL-gated; excluded
+      // here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval
+      // real-DB step in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/attendance-notification-defer.db.test.ts',
       // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
       // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
       // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
