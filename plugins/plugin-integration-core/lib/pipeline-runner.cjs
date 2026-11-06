@@ -358,6 +358,26 @@ function createPipelineRunner(deps = {}) {
     ? deps.erpFeedbackWriter
     : null
   const clock = typeof deps.clock === 'function' ? deps.clock : () => Date.now()
+  // R-69 1c: the optional run-finished notifier (lib/integration-run-events.cjs createRunFinishedNotifier, wired by
+  // index.cjs to the host's publish port). Absent ⇒ nothing is published and the runner is the one it was. It is
+  // called ONCE per run, after `finishRun` returned — never per page or per row — and never awaited.
+  const notifyRunFinished = typeof deps.notifyRunFinished === 'function' ? deps.notifyRunFinished : null
+  function notifyFinishedRun(run, context, status, metrics, triggeredBy, errorClass) {
+    if (!notifyRunFinished) return
+    try {
+      notifyRunFinished({
+        runId: run && run.id,
+        pipelineId: context.pipeline.id,
+        tenantId: context.tenantId,
+        status,
+        metrics,
+        triggeredBy,
+        ...(errorClass ? { errorClass } : {}),
+      })
+    } catch {
+      // A summary never changes a run's result.
+    }
+  }
   // ─── B2a READ AUTHORIZATION, SUNK BELOW THE HTTP LAYER (W-2) ──────────────
   //
   // Both are OPTIONAL, and absent means DORMANT — the same two states the registry itself has, and
@@ -1231,6 +1251,8 @@ function createPipelineRunner(deps = {}) {
           message: finishError.message || String(finishError),
         }
       }
+      // R-69 1c: one summary for this run, after finishRun returned (the run row is terminal).
+      if (!finishRunWarning) notifyFinishedRun(run, context, status, metrics, triggeredBy)
       return {
         run,
         metrics,
@@ -1248,6 +1270,8 @@ function createPipelineRunner(deps = {}) {
           errorSummary: error.message || String(error),
           details: buildProvenanceDetails(),
         })
+        // R-69 1c: one summary for this failed run, after finishRun returned; the class only, never the message.
+        notifyFinishedRun(run, context, 'failed', metrics, triggeredBy, governedErrorClassOf(error))
       } catch {
         // Secondary failure — original error takes priority
       }

@@ -464,6 +464,16 @@ module.exports = {
       // Assigned earlier in this same activation, before this call. Null on a DORMANT deployment,
       // where the runner's fence returns before it is ever read.
       b2aOperationClaim,
+      // R-69 1c: one integration.run_finished summary per api / manual / replay run, after finishRun, through the
+      // host's publish port (offered to this plugin only; absent on an older host ⇒ nothing is published).
+      // INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED (exact 'true') is read before anything is built. R-69 is OPEN.
+      notifyRunFinished: require('./lib/integration-run-events.cjs').createRunFinishedNotifier({
+        publish: context.services && context.services.integrationRunEvents
+          && typeof context.services.integrationRunEvents.publish === 'function'
+          ? (summary, route) => context.services.integrationRunEvents.publish(summary, route)
+          : null,
+        logger,
+      }),
     })
 
     try {

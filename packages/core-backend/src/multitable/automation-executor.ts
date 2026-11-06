@@ -41,6 +41,9 @@ import {
   type IntegrationRunStatus,
   type IntegrationRunSummary,
 } from '../core/integration-run-port'
+// R-69 1c — Bridge 2: the per-job integration.run_finished summaries and their publish port.
+import { isIntegrationAutomationRunEventEnabled, publishIntegrationRunFinished } from '../core/integration-run-events'
+import { buildAutomationRunFinishedEvents } from './automation-run-finished-events'
 import {
   buildIntegrationRunPrincipalContext,
   resolveIntegrationRunPrincipalOnTransaction,
@@ -1182,6 +1185,7 @@ function simulatedGenericClassBPlan(
         recordId: context.recordId,
         actorId: context.actorId ?? '',
         record: context.recordData,
+        ...integrationRunTemplateVars(context),
       }
       target = { recipients }
       payload = {
@@ -1238,6 +1242,7 @@ function simulatedGenericClassBPlan(
         recordId: context.recordId,
         actorId: context.actorId ?? '',
         record: context.recordData,
+        ...integrationRunTemplateVars(context),
       }
       target = { destinationIds }
       payload = {
@@ -1308,6 +1313,7 @@ function simulatedGenericClassBPlan(
         recordId: context.recordId,
         actorId: context.actorId ?? '',
         record: context.recordData,
+        ...integrationRunTemplateVars(context),
       }
       target = { userIds, memberGroupIds }
       payload = {
@@ -1867,6 +1873,20 @@ export function describeDingTalkUnreachableRecipients(counts: DingTalkSkippedRec
   return `No DingTalk recipient was reached: ${total} skipped `
     + `(not linked: ${counts.notLinked}, inactive: ${counts.inactive}, not found: ${counts.notFound}) `
     + '(DINGTALK_RECIPIENTS_UNREACHABLE)'
+}
+
+// ── R-69 1c: `run.*` template variables (ADR §4.3) ───────────────────────────────────────────────────────────
+
+/**
+ * Present ONLY on an integration.run_finished execution: `run` is the dispatched, closed-key, values-free event
+ * (status, reason, counts.*, job.*, durationMs, attempts, errorClass …; AutomationService.dispatchIntegrationRunFinished
+ * strips the depth). Every other trigger renders exactly what it rendered before (no `run` key at all).
+ */
+function integrationRunTemplateVars(context: ExecutionContext): Record<string, unknown> {
+  const trigger = context.triggerEvent as Record<string, unknown> | null | undefined
+  if (!trigger || trigger.eventType !== 'integration.run_finished') return {}
+  const run = trigger.run
+  return run && typeof run === 'object' && !Array.isArray(run) ? { run } : {}
 }
 
 // ── R-69 1b-ii: run_integration_job step vocabulary (module-level, values-free) ──────────────────────────────
@@ -4229,7 +4249,61 @@ export class AutomationExecutor {
     if (this.deps.trackIntegrationJobTask) this.deps.trackIntegrationJobTask(settled)
   }
 
+  /**
+   * R-69 1c (ADR §4.2): the step, then EXACTLY ONE integration.run_finished summary per project, emitted HERE —
+   * once, after the step's final result — never inside the unit loop, never from a `timeout_unsettled`
+   * continuation (its late settlement is the intent ledger's business, not a second event). The step's result
+   * is returned unchanged whatever the publish answers.
+   */
   private async executeRunIntegrationJob(
+    config: Record<string, unknown>,
+    context: ExecutionContext,
+    identity: ClassAActionIdentity | undefined,
+  ): Promise<AutomationStepResult> {
+    const result = await this.executeRunIntegrationJobStep(config, context, identity)
+    await this.emitRunIntegrationJobSummaries(result, config, context, identity)
+    return result
+  }
+
+  /**
+   * R-69 1c — the action layer's summaries (automation-run-finished-events.ts). Reads
+   * INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED before building anything (the ADR's third read point); needs the
+   * persisted config (the projects and the binding tenant, which routes but never rides in the event) and the
+   * class-A identity (the deterministic event id). Never throws; a refusal is logged values-free.
+   */
+  private async emitRunIntegrationJobSummaries(
+    result: AutomationStepResult,
+    config: Record<string, unknown>,
+    context: ExecutionContext,
+    identity: ClassAActionIdentity | undefined,
+  ): Promise<void> {
+    if (!isIntegrationAutomationRunEventEnabled()) return
+    try {
+      const parsed = parsePersistedRunIntegrationJobConfig(config)
+      if (!parsed || !identity) return
+      const parentDepth = (context.triggerEvent as Record<string, unknown> | null | undefined)?._automationDepth
+      const events = buildAutomationRunFinishedEvents({
+        output: result.output,
+        projectNos: parsed.job.projectNos,
+        ...(parsed.job.actionId ? { actionId: parsed.job.actionId } : {}),
+        rootExecutionId: identity.rootExecutionId,
+        executionId: context.executionId,
+        actionKey: deriveActionKey({ structuralPath: identity.structuralPath, actionType: 'run_integration_job', canonicalConfig: config }),
+        automationDepth: (typeof parentDepth === 'number' && Number.isSafeInteger(parentDepth) && parentDepth >= 0 ? parentDepth : 0) + 1,
+        occurredAt: new Date().toISOString(),
+      })
+      for (const event of events) {
+        const published = await publishIntegrationRunFinished(event, { tenantId: parsed.binding.tenantId }, 'automation')
+        if (published.published === false && published.code !== 'SINK_INACTIVE') {
+          logger.warn('run_integration_job summary not published', { ruleId: context.ruleId, executionId: context.executionId, code: published.code, ...(published.field ? { field: published.field } : {}) })
+        }
+      }
+    } catch (error) {
+      logger.warn('run_integration_job summary emit failed', { ruleId: context.ruleId, executionId: context.executionId, errorClass: integrationRunErrorClass(error) })
+    }
+  }
+
+  private async executeRunIntegrationJobStep(
     config: Record<string, unknown>,
     context: ExecutionContext,
     identity: ClassAActionIdentity | undefined,
@@ -5734,6 +5808,7 @@ export class AutomationExecutor {
       recordId: context.recordId,
       actorId: context.actorId ?? '',
       record: context.recordData,
+      ...integrationRunTemplateVars(context),
     }
     const subject = renderAutomationTemplate(subjectTemplate, templateData).trim()
     const content = renderAutomationTemplate(bodyTemplate, templateData).trim()
@@ -6360,6 +6435,7 @@ export class AutomationExecutor {
       recordId: context.recordId,
       actorId: context.actorId ?? '',
       record: context.recordData,
+      ...integrationRunTemplateVars(context),
     }
     const renderedTitle = truncateDingTalkMessageText(
       renderAutomationTemplate(titleTemplate, templateData).trim(),
@@ -7031,6 +7107,7 @@ export class AutomationExecutor {
       recordId: context.recordId,
       actorId: context.actorId ?? '',
       record: context.recordData,
+      ...integrationRunTemplateVars(context),
     }
     const renderedTitle = truncateDingTalkMessageText(
       renderAutomationTemplate(titleTemplate, templateData).trim(),

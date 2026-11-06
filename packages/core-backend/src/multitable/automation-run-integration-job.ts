@@ -8,7 +8,9 @@
  *   - INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED — READ here (save) and by the executor (every trigger). Off:
  *     saving a rule that carries the action is refused with RUN_ACTION_DISABLED; an existing rule's trigger
  *     records `skipped(action_disabled)`, never a silent success.
- *   - INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED — Bridge 2 (1c). NOT READ in 1b-ii.
+ *   - INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED — Bridge 2 (1c). Not read in 1b-ii; READ by 1c at its three
+ *     points (core/integration-run-events.ts: the action layer before it emits and core on receipt; the plugin
+ *     before it publishes).
  *   - INTEGRATION_AUTOMATION_RUN_APPLY_ENABLED — unattended apply (owner layer, ADR Q12a). NOT READ in 1b-ii:
  *     `applyMode: 'apply_when_ready'` is a 400 at save whatever the switch says.
  *   - INTEGRATION_AUTOMATION_RUN_PIPELINE_WRITE_ENABLED — unattended non-dry pipeline runs (ADR Q12b). NOT READ
@@ -37,9 +39,10 @@ export function isIntegrationAutomationRunActionEnabled(env: NodeJS.ProcessEnv =
 /**
  * Registered in the flag manifest, NOT read by any 1b-ii code path (ADR §7). Listed here by name so the
  * manifest's source scan sees the registration is deliberate; a read point for any of them is a later slice.
+ * R-69 1c: INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED left this list — it is READ now (core/integration-run-events.ts
+ * isIntegrationAutomationRunEventEnabled, the plugin's lib/integration-run-events.cjs before publish).
  */
 export const INTEGRATION_AUTOMATION_RUN_FLAGS_NOT_READ_IN_1B_II = Object.freeze([
-  'INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED',
   'INTEGRATION_AUTOMATION_RUN_APPLY_ENABLED',
   'INTEGRATION_AUTOMATION_RUN_PIPELINE_WRITE_ENABLED',
 ] as const)
