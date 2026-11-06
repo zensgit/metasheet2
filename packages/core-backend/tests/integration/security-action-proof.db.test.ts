@@ -388,6 +388,9 @@ async function catalog(run: Runner) {
 
 type RowSeed = Partial<Record<string, unknown>>
 
+/** An explicit NULL expiry; an issued row without an `expires_at` override otherwise gets now() + 300 s. */
+const NULL_EXPIRY = Symbol('null-expiry')
+
 async function insertRow(run: Runner, userId: string, overrides: RowSeed = {}): Promise<string> {
   const row: Record<string, unknown> = {
     id: randomUUID(), user_id: userId, session_id: 'sid-' + randomUUID(), org_id: ORG, purpose: 'external_identity_unbind', connection_id: CONNECTION,
@@ -400,7 +403,8 @@ async function insertRow(run: Runner, userId: string, overrides: RowSeed = {}): 
   const keys = Object.keys(row).filter((key) => !(key === 'created_at' && row.created_at === null))
   const expiresExpression = row.expires_at === null && row.status !== 'failed' ? "now() + interval '300 seconds'" : null
   const values = keys.map((key, index) => (key === 'expires_at' && expiresExpression ? expiresExpression : `$${index + 1}`))
-  await run(`INSERT INTO ${TABLE} (${keys.join(', ')}) VALUES (${values.join(', ')})`, keys.map((key) => (key === 'expires_at' && expiresExpression ? null : row[key])))
+  const params = keys.map((key) => (key === 'expires_at' && (expiresExpression || row.expires_at === NULL_EXPIRY) ? null : row[key]))
+  await run(`INSERT INTO ${TABLE} (${keys.join(', ')}) VALUES (${values.join(', ')})`, params)
   return String(row.id)
 }
 
@@ -408,10 +412,6 @@ async function insertRow(run: Runner, userId: string, overrides: RowSeed = {}): 
 function expiredLifetime(): { created_at: Date; expires_at: Date } {
   const now = Date.now()
   return { created_at: new Date(now - 400_000), expires_at: new Date(now - 100_000) }
-}
-
-async function expectSqlState(promise: Promise<unknown>, code: string): Promise<void> {
-  await expect(promise).rejects.toMatchObject({ code })
 }
 
 async function withRollback<T>(fn: (run: Runner, client: PoolClient) => Promise<T>): Promise<T> {
@@ -430,24 +430,61 @@ async function withRollback<T>(fn: (run: Runner, client: PoolClient) => Promise<
   }
 }
 
-/** A savepoint so one failing statement does not abort the rolled-back case. */
-async function failing(run: Runner, sql: string, params: unknown[]): Promise<unknown> {
-  await run('SAVEPOINT sa_proof')
-  try {
-    return await run(sql, params)
-  } finally {
-    await run('ROLLBACK TO SAVEPOINT sa_proof')
-  }
+/** Every row of the given users as its full JSON image, in id order. */
+async function imageOf(run: Runner, userIds: string[]): Promise<string[]> {
+  return (await run(`SELECT to_jsonb(t)::text AS image FROM ${TABLE} t WHERE user_id = ANY($1::text[]) ORDER BY id`, [userIds])).rows.map((row) => String(row.image))
 }
 
-/** An insert expected to be refused with `code`, run under a savepoint. */
-async function refusedInsert(run: Runner, userId: string, overrides: RowSeed, code: string): Promise<void> {
-  await run('SAVEPOINT sa_proof_insert')
+async function rowImage(run: Runner, id: string): Promise<Record<string, unknown>> {
+  const rows = (await run(`SELECT to_jsonb(t) AS image FROM ${TABLE} t WHERE id = $1`, [id])).rows
+  expect(rows).toHaveLength(1)
+  return rows[0].image as Record<string, unknown>
+}
+
+/** The columns the trigger lets a transition change. */
+const TRANSITION_COLUMNS = ['status', 'consumed_at', 'consumed_action_ref', 'superseded_at'] as const
+
+function withoutTransitionColumns(image: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(image).filter(([key]) => !(TRANSITION_COLUMNS as readonly string[]).includes(key)))
+}
+
+type PgFailure = { code?: string; constraint?: string; table?: string; message?: string; where?: string }
+
+let savepoints = 0
+
+/**
+ * Runs `statement` under its own savepoint, so its failure does not abort the transaction, expects it
+ * to be refused, and then re-reads every row of `userIds` in the same transaction: the refusal must
+ * leave each of them, every column included, exactly as before (for a refused insert: no new row).
+ */
+async function refusedUnchanged(run: Runner, userIds: string[], statement: () => Promise<unknown>): Promise<PgFailure> {
+  const before = await imageOf(run, userIds)
+  const savepoint = `sa_proof_negative_${++savepoints}`
+  await run(`SAVEPOINT ${savepoint}`)
+  let failure: unknown = null
   try {
-    await expectSqlState(insertRow(run, userId, overrides), code)
-  } finally {
-    await run('ROLLBACK TO SAVEPOINT sa_proof_insert')
+    await statement()
+  } catch (error) {
+    failure = error
   }
+  await run(`ROLLBACK TO SAVEPOINT ${savepoint}`)
+  await run(`RELEASE SAVEPOINT ${savepoint}`)
+  expect(failure, 'the statement must be refused').not.toBeNull()
+  expect(await imageOf(run, userIds)).toEqual(before)
+  return failure as PgFailure
+}
+
+/** Refused by the named CHECK constraint of the table, and by nothing else. */
+async function expectCheckRefusal(run: Runner, userIds: string[], constraint: string, statement: () => Promise<unknown>): Promise<void> {
+  const failure = await refusedUnchanged(run, userIds, statement)
+  expect({ code: failure.code, constraint: failure.constraint, table: failure.table }).toEqual({ code: '23514', constraint, table: TABLE })
+}
+
+/** Refused by the transition trigger with the given message, and by no constraint. */
+async function expectTriggerRefusal(run: Runner, userIds: string[], message: string, statement: () => Promise<unknown>): Promise<void> {
+  const failure = await refusedUnchanged(run, userIds, statement)
+  expect({ code: failure.code, message: failure.message, constraint: failure.constraint }).toEqual({ code: '55000', message, constraint: undefined })
+  expect(failure.where).toContain('guard_security_action_challenge_transition')
 }
 
 // ---------------------------------------------------------------------------
@@ -487,77 +524,269 @@ suite('migration', () => {
     expect(Number(trigger.tgtype)).toBe(23)
   })
 
-  // A status outside the closed set is refused by the transition trigger before the CHECK is evaluated;
-  // it belongs to the trigger case below.
-  it('refuses every shape outside the expected CHECKs with 23514', async () => {
+  // Every negative below runs under its own savepoint, so the refused statement does not abort the
+  // case, and re-reads every row of the users involved afterwards: a refusal leaves each column as it
+  // was. Each CHECK case passes the transition trigger (an INSERT as issued or failed and not dated in
+  // the future; an UPDATE from issued to consumed or superseded touching only the transition columns)
+  // and breaks exactly one CHECK, so the refusal must name that CHECK. Each trigger case satisfies
+  // every CHECK, the index and the foreign key, so only the trigger can refuse it.
+
+  const T0 = new Date('2020-01-01T00:00:00Z')
+  const at = (seconds: number) => new Date(T0.getTime() + seconds * 1000)
+  const FAILED: RowSeed = { status: 'failed', failure_code: 'credential_rejected', proof_hash: null, assurance: null }
+
+  const INSERT_CHECK_CASES: ReadonlyArray<[label: string, constraint: string, row: RowSeed]> = [
+    ['purpose outside the closed set', 'purpose_chk', { purpose: 'other' }],
+    ['target kind outside the closed set', 'target_kind_chk', { target_kind: 'other', target_identity_id: null, expected_binding_revision: null }],
+    ['identity target without the identity', 'identity_target_chk', { target_identity_id: null }],
+    ['identity target without the binding revision', 'identity_target_chk', { expected_binding_revision: null }],
+    ['empty slot with an identity', 'empty_slot_chk', { target_kind: 'empty_slot', expected_binding_revision: null }],
+    ['empty slot with a binding revision', 'empty_slot_chk', { target_kind: 'empty_slot', target_identity_id: null }],
+    ['negative binding revision', 'binding_revision_chk', { expected_binding_revision: -1 }],
+    ['method outside the closed set', 'method_chk', { method: 'other' }],
+    ['local password with a method connection', 'method_connection_chk', { method_connection_id: randomUUID() }],
+    ['external reauthentication without a method connection', 'method_connection_chk', { method: 'external_reauth' }],
+    ['privilege class outside the closed set', 'privilege_class_chk', { privilege_class: 'other' }],
+    ['policy revision zero', 'policy_revision_chk', { policy_revision: 0 }],
+    ['target witness that is not lowercase hex', 'witness_chk', { target_witness: 'z'.repeat(64) }],
+    ['credential witness in uppercase', 'witness_chk', { credential_witness: 'A'.repeat(64) }],
+    ['privilege witness one character short', 'witness_chk', { privilege_witness: 'a'.repeat(63) }],
+    ['proof hash in uppercase', 'proof_hash_chk', { proof_hash: 'B'.repeat(64) }],
+    ['client binding digest that is not hex', 'client_binding_chk', { client_binding_digest: 'g'.repeat(64) }],
+    ['failed row with a proof hash', 'failed_shape_chk', { ...FAILED, proof_hash: 'b'.repeat(64) }],
+    ['failed row with an expiry', 'failed_shape_chk', { ...FAILED, created_at: T0, expires_at: at(60) }],
+    ['failed row with an assurance', 'failed_shape_chk', { ...FAILED, assurance: 'local_password' }],
+    ['failed row with a client binding digest', 'failed_shape_chk', { ...FAILED, client_binding_digest: 'a'.repeat(64) }],
+    ['failed row with a failure code outside the closed set', 'failed_shape_chk', { ...FAILED, failure_code: 'other' }],
+    ['failed row without a failure code', 'failed_shape_chk', { ...FAILED, failure_code: null }],
+    ['issued row without a proof hash', 'proof_shape_chk', { proof_hash: null }],
+    ['issued row without an expiry', 'proof_shape_chk', { expires_at: NULL_EXPIRY }],
+    ['issued row with a failure code', 'proof_shape_chk', { failure_code: 'credential_rejected' }],
+    ['issued row without an assurance', 'proof_shape_chk', { assurance: null }],
+    ['issued row with an assurance outside the closed set', 'proof_shape_chk', { assurance: 'other' }],
+    ['issued row with a consumption time', 'consumed_chk', { consumed_at: new Date() }],
+    ['issued row with a supersession time', 'superseded_chk', { superseded_at: new Date() }],
+    ['issued row with an action reference', 'action_ref_status_chk', { consumed_action_ref: 'ref-1' }],
+    ['lifetime of 301 seconds', 'ttl_chk', { created_at: T0, expires_at: at(301) }],
+    ['lifetime of zero seconds', 'ttl_chk', { created_at: T0, expires_at: T0 }],
+    ['expiry before creation', 'ttl_chk', { created_at: T0, expires_at: at(-1) }],
+  ]
+
+  it.each(INSERT_CHECK_CASES)('refuses an insert with %s by %s alone (23514), leaving no row', async (_label, constraint, row) => {
     const userId = await seedUser()
     await withRollback(async (run) => {
-      const violations: RowSeed[] = [
-        { purpose: 'other' }, { target_kind: 'other' },
-        { target_kind: 'identity_revision', target_identity_id: null }, { target_kind: 'identity_revision', expected_binding_revision: null },
-        { target_kind: 'empty_slot' }, { expected_binding_revision: -1 },
-        { method: 'other' }, { method: 'local_password', method_connection_id: randomUUID() }, { method: 'external_reauth', assurance: 'external_platform_asserted' },
-        { privilege_class: 'other' }, { policy_revision: 0 },
-        { target_witness: 'zz' }, { credential_witness: 'Z'.repeat(64) }, { privilege_witness: 'z'.repeat(63) },
-        { proof_hash: 'zz' }, { client_binding_digest: 'Z'.repeat(64) }, { consumed_action_ref: 'has space' },
-        { status: 'failed', failure_code: 'credential_rejected', proof_hash: 'b'.repeat(64) },
-        { status: 'failed', failure_code: 'other' }, { status: 'failed', failure_code: 'credential_rejected', client_binding_digest: 'a'.repeat(64) },
-        { proof_hash: null }, { assurance: null }, { assurance: 'other' }, { failure_code: 'credential_rejected' },
-        { consumed_action_ref: 'ref' }, { status: 'issued', consumed_at: new Date() },
+      await expectCheckRefusal(run, [userId], `security_action_challenges_${constraint}`, () => insertRow(run, userId, row))
+      expect(await imageOf(run, [userId])).toEqual([])
+    })
+  })
+
+  // Transition-time CHECKs: the trigger admits each of these updates, the CHECK refuses it.
+  const UPDATE_CHECK_CASES: ReadonlyArray<[label: string, constraint: string, set: string]> = [
+    ['consumed without a consumption time', 'consumed_chk', "status = 'consumed'"],
+    ['superseded with a consumption time', 'consumed_chk', "status = 'superseded', superseded_at = now(), consumed_at = now()"],
+    ['superseded without a supersession time', 'superseded_chk', "status = 'superseded'"],
+    ['consumed with a supersession time', 'superseded_chk', "status = 'consumed', consumed_at = now(), superseded_at = now()"],
+    ['consumed with an action reference containing a space', 'action_ref_chk', "status = 'consumed', consumed_at = now(), consumed_action_ref = 'has space'"],
+    ['consumed with an empty action reference', 'action_ref_chk', "status = 'consumed', consumed_at = now(), consumed_action_ref = ''"],
+    ['consumed with an action reference of 129 characters', 'action_ref_chk', `status = 'consumed', consumed_at = now(), consumed_action_ref = '${'r'.repeat(129)}'`],
+    ['consumed with a non-ASCII action reference', 'action_ref_chk', "status = 'consumed', consumed_at = now(), consumed_action_ref = 'réf'"],
+    ['superseded with an action reference', 'action_ref_status_chk', "status = 'superseded', superseded_at = now(), consumed_action_ref = 'ref-1'"],
+  ]
+
+  it.each(UPDATE_CHECK_CASES)('refuses an update of an issued row to %s by %s alone (23514), leaving the row as it was', async (_label, constraint, set) => {
+    const userId = await seedUser()
+    await withRollback(async (run) => {
+      const id = await insertRow(run, userId)
+      await expectCheckRefusal(run, [userId], `security_action_challenges_${constraint}`, () => run(`UPDATE ${TABLE} SET ${set} WHERE id = $1`, [id]))
+      expect((await run(`SELECT status FROM ${TABLE} WHERE id = $1`, [id])).rows).toEqual([{ status: 'issued' }])
+    })
+  })
+
+  // The trigger admits only issued, failed, consumed and superseded, so a status outside the closed
+  // set never reaches the CHECK while the trigger is enabled. The CHECK is proved on its own with the
+  // trigger disabled inside a savepoint, and the trigger is enabled again afterwards.
+  it('refuses a status outside the closed set by status_chk alone (23514) when the trigger is not there to refuse it first', async () => {
+    const userId = await seedUser()
+    await withRollback(async (run) => {
+      const id = await insertRow(run, userId)
+      await run('SAVEPOINT sa_trigger_off')
+      await run(`ALTER TABLE ${TABLE} DISABLE TRIGGER security_action_challenge_transition`)
+      await expectCheckRefusal(run, [userId], 'security_action_challenges_status_chk', () => insertRow(run, userId, { status: 'other' }))
+      await expectCheckRefusal(run, [userId], 'security_action_challenges_status_chk', () => run(`UPDATE ${TABLE} SET status = 'other' WHERE id = $1`, [id]))
+      await run('ROLLBACK TO SAVEPOINT sa_trigger_off')
+      await run('RELEASE SAVEPOINT sa_trigger_off')
+      expect((await run(`SELECT tgenabled FROM pg_trigger WHERE tgname = 'security_action_challenge_transition' AND tgrelid = $1::regclass`, [`public.${TABLE}`])).rows).toEqual([{ tgenabled: 'O' }])
+      expect((await run(`SELECT status FROM ${TABLE} WHERE id = $1`, [id])).rows).toEqual([{ status: 'issued' }])
+    })
+  })
+
+  it('admits the legal rows and boundaries: issued, failed, both target kinds, both methods, binding revision 0, a lifetime of exactly 300 seconds', async () => {
+    const userId = await seedUser()
+    await withRollback(async (run) => {
+      const issued = await insertRow(run, userId)
+      expect((await run(
+        `SELECT status, extract(epoch FROM expires_at - created_at)::int AS ttl, failure_code, consumed_at, consumed_action_ref, superseded_at, proof_hash, assurance
+           FROM ${TABLE} WHERE id = $1`, [issued],
+      )).rows).toEqual([{ status: 'issued', ttl: 300, failure_code: null, consumed_at: null, consumed_action_ref: null, superseded_at: null, proof_hash: 'b'.repeat(64), assurance: 'local_password' }])
+      const failed = await insertRow(run, userId, FAILED)
+      expect((await run(
+        `SELECT status, failure_code, proof_hash, expires_at, assurance, client_binding_digest, consumed_at, superseded_at FROM ${TABLE} WHERE id = $1`, [failed],
+      )).rows).toEqual([{ status: 'failed', failure_code: 'credential_rejected', proof_hash: null, expires_at: null, assurance: null, client_binding_digest: null, consumed_at: null, superseded_at: null }])
+      const accepted: RowSeed[] = [
+        { ...FAILED, failure_code: 'reauth_subject_mismatch' },
+        { purpose: 'external_identity_bind', target_kind: 'empty_slot', target_identity_id: null, expected_binding_revision: null },
+        { method: 'external_reauth', method_connection_id: randomUUID(), assurance: 'external_platform_asserted' },
+        { expected_binding_revision: 0 },
+        { created_at: T0, expires_at: at(300) },
+        { created_at: T0, expires_at: at(1) },
+        { client_binding_digest: 'a'.repeat(64), privilege_class: 'high' },
       ]
-      for (const violation of violations) await refusedInsert(run, userId, violation, '23514')
-      await expect(insertRow(run, userId)).resolves.toBeTruthy()
-      await expect(insertRow(run, userId, { purpose: 'external_identity_bind', target_kind: 'empty_slot', target_identity_id: null, expected_binding_revision: null })).resolves.toBeTruthy()
-      await expect(insertRow(run, userId, { status: 'failed', failure_code: 'credential_rejected', proof_hash: null, assurance: null, expires_at: null })).resolves.toBeTruthy()
+      for (const row of accepted) await insertRow(run, userId, row)
+      expect(await imageOf(run, [userId])).toHaveLength(2 + accepted.length)
     })
   })
 
-  it('refuses a row for a user that does not exist with 23503', async () => {
-    await withRollback(async (run) => {
-      await expectSqlState(insertRow(run, 'sa-proof-absent-' + randomUUID()), '23503')
-    })
-  })
-
-  it('allows at most one issued row per user, session and purpose, while failed and superseded rows share the key', async () => {
+  it('consumes an issued row: only status, consumption time and action reference change, a reference of 128 printable characters is accepted', async () => {
     const userId = await seedUser()
+    await withRollback(async (run) => {
+      const id = await insertRow(run, userId)
+      const before = await rowImage(run, id)
+      const ref = '!' + '~'.repeat(126) + 'z'
+      await run(`UPDATE ${TABLE} SET status = 'consumed', consumed_at = now(), consumed_action_ref = $2 WHERE id = $1`, [id, ref])
+      const after = await rowImage(run, id)
+      expect(withoutTransitionColumns(after)).toEqual(withoutTransitionColumns(before))
+      expect([after.status, after.consumed_action_ref, after.superseded_at, after.consumed_at === null]).toEqual(['consumed', ref, null, false])
+    })
+  })
+
+  it('supersedes an issued row: only status and supersession time change', async () => {
+    const userId = await seedUser()
+    await withRollback(async (run) => {
+      const id = await insertRow(run, userId)
+      const before = await rowImage(run, id)
+      await run(`UPDATE ${TABLE} SET status = 'superseded', superseded_at = now() WHERE id = $1`, [id])
+      const after = await rowImage(run, id)
+      expect(withoutTransitionColumns(after)).toEqual(withoutTransitionColumns(before))
+      expect([after.status, after.consumed_at, after.consumed_action_ref, after.superseded_at === null]).toEqual(['superseded', null, null, false])
+    })
+  })
+
+  it('refuses an insert in any state but issued or failed, and one dated in the future, by the trigger (55000), leaving no row', async () => {
+    const userId = await seedUser()
+    await withRollback(async (run) => {
+      const future = (await run("SELECT now() + interval '60 seconds' AS created, now() + interval '360 seconds' AS expires")).rows[0]
+      const rows: RowSeed[] = [
+        { status: 'consumed', consumed_at: new Date() },
+        { status: 'consumed', consumed_at: new Date(), consumed_action_ref: 'ref-1' },
+        { status: 'superseded', superseded_at: new Date() },
+        { created_at: future.created, expires_at: future.expires },
+        { ...FAILED, created_at: future.created },
+      ]
+      for (const row of rows) await expectTriggerRefusal(run, [userId], 'security action challenge state refused', () => insertRow(run, userId, row))
+      expect(await imageOf(run, [userId])).toEqual([])
+    })
+  })
+
+  it('refuses by the trigger (55000) every update that is not issued->consumed or issued->superseded, leaving the row as it was', async () => {
+    const userId = await seedUser()
+    await withRollback(async (run) => {
+      const issued = await insertRow(run, userId)
+      const failed = await insertRow(run, userId, FAILED)
+      const consumed = await insertRow(run, userId)
+      await run(`UPDATE ${TABLE} SET status = 'consumed', consumed_at = now(), consumed_action_ref = 'ref-1' WHERE id = $1`, [consumed])
+      const superseded = await insertRow(run, userId)
+      await run(`UPDATE ${TABLE} SET status = 'superseded', superseded_at = now() WHERE id = $1`, [superseded])
+      const proofShape = `failure_code = NULL, proof_hash = '${'b'.repeat(64)}', assurance = 'local_password', expires_at = created_at + interval '300 seconds'`
+      const refused: ReadonlyArray<[id: string, set: string]> = [
+        [issued, "status = 'issued'"],
+        [issued, "status = 'failed', failure_code = 'credential_rejected', proof_hash = NULL, assurance = NULL, expires_at = NULL"],
+        [failed, "failure_code = 'reauth_subject_mismatch'"],
+        [failed, `status = 'issued', ${proofShape}`],
+        [failed, `status = 'consumed', consumed_at = now(), ${proofShape}`],
+        [failed, `status = 'superseded', superseded_at = now(), ${proofShape}`],
+        [consumed, "consumed_action_ref = 'ref-2'"],
+        [consumed, "status = 'issued', consumed_at = NULL, consumed_action_ref = NULL"],
+        [consumed, "status = 'superseded', consumed_at = NULL, consumed_action_ref = NULL, superseded_at = now()"],
+        [superseded, "status = 'issued', superseded_at = NULL"],
+        [superseded, "status = 'consumed', superseded_at = NULL, consumed_at = now()"],
+      ]
+      for (const [id, set] of refused) {
+        await expectTriggerRefusal(run, [userId], 'security action challenge transition refused', () => run(`UPDATE ${TABLE} SET ${set} WHERE id = $1`, [id]))
+      }
+      expect((await run(`SELECT id::text AS id, status FROM ${TABLE} WHERE user_id = $1 ORDER BY status`, [userId])).rows).toEqual([
+        { id: consumed, status: 'consumed' }, { id: failed, status: 'failed' }, { id: issued, status: 'issued' }, { id: superseded, status: 'superseded' },
+      ])
+    })
+  })
+
+  it('refuses by the trigger (55000) a consumption or supersession that changes any other column, leaving the rows as they were', async () => {
+    const userId = await seedUser()
+    const otherUser = await seedUser()
+    await withRollback(async (run) => {
+      const id = await insertRow(run, userId)
+      const changes: ReadonlyArray<[column: string, expression: string, value?: unknown]> = [
+        ['id', '$2::uuid', randomUUID()], ['user_id', '$2', otherUser], ['session_id', '$2', 'sid-' + randomUUID()], ['org_id', '$2', OTHER_ORG],
+        ['purpose', '$2', 'login_grant_disable'], ['connection_id', '$2::uuid', OTHER_CONNECTION], ['target_identity_id', '$2::uuid', randomUUID()],
+        ['expected_binding_revision', '$2::bigint', 2], ['target_witness', '$2', 'e'.repeat(64)], ['assurance', '$2', 'external_platform_asserted'],
+        ['proof_hash', '$2', 'f'.repeat(64)], ['client_binding_digest', '$2', 'a'.repeat(64)], ['policy_revision', '$2::int', 2],
+        ['access_generation', '$2::bigint', 1], ['credential_witness', '$2', 'e'.repeat(64)], ['privilege_witness', '$2', 'e'.repeat(64)],
+        ['privilege_class', '$2', 'high'], ['created_at', "created_at + interval '1 second'"], ['expires_at', "expires_at - interval '1 second'"],
+      ]
+      for (const transition of ["status = 'consumed', consumed_at = now()", "status = 'superseded', superseded_at = now()"]) {
+        for (const [column, expression, value] of changes) {
+          const params = value === undefined ? [id] : [id, value]
+          await expectTriggerRefusal(run, [userId, otherUser], 'security action challenge transition refused', () => run(`UPDATE ${TABLE} SET ${transition}, ${column} = ${expression} WHERE id = $1`, params))
+        }
+      }
+      expect((await run(`SELECT status FROM ${TABLE} WHERE id = $1`, [id])).rows).toEqual([{ status: 'issued' }])
+      expect(await imageOf(run, [otherUser])).toEqual([])
+    })
+  })
+
+  it('does not guard deletion: the trigger covers inserts and updates only', async () => {
+    const userId = await seedUser()
+    await withRollback(async (run) => {
+      const issued = await insertRow(run, userId)
+      const failed = await insertRow(run, userId, FAILED)
+      await run(`DELETE FROM ${TABLE} WHERE id = ANY($1::uuid[])`, [[issued, failed]])
+      expect(await imageOf(run, [userId])).toEqual([])
+    })
+  })
+
+  it('refuses a row for a user that does not exist by the foreign key (23503), leaving no row, and admits one for a user that does', async () => {
+    const userId = await seedUser()
+    const absent = 'sa-proof-absent-' + randomUUID()
+    await withRollback(async (run) => {
+      const failure = await refusedUnchanged(run, [absent, userId], () => insertRow(run, absent))
+      expect({ code: failure.code, constraint: failure.constraint, table: failure.table }).toEqual({ code: '23503', constraint: 'security_action_challenges_user_fk', table: TABLE })
+      expect(await imageOf(run, [absent, userId])).toEqual([])
+      await insertRow(run, userId)
+      expect(await imageOf(run, [userId])).toHaveLength(1)
+    })
+  })
+
+  it('allows at most one issued row per user, session and purpose (23505 by the partial unique index), and admits another once the first is superseded or consumed', async () => {
+    const userId = await seedUser()
+    const otherUser = await seedUser()
     await withRollback(async (run) => {
       const sid = 'sid-' + randomUUID()
       const first = await insertRow(run, userId, { session_id: sid })
-      await refusedInsert(run, userId, { session_id: sid }, '23505')
-      await expect(insertRow(run, userId, { session_id: sid, status: 'failed', failure_code: 'credential_rejected', proof_hash: null, assurance: null })).resolves.toBeTruthy()
+      const duplicate = await refusedUnchanged(run, [userId, otherUser], () => insertRow(run, userId, { session_id: sid }))
+      expect({ code: duplicate.code, constraint: duplicate.constraint, table: duplicate.table }).toEqual({ code: '23505', constraint: 'uq_security_action_live_proof', table: TABLE })
+      // The key is the user, the session and the purpose; failed rows are outside the index.
+      await insertRow(run, userId, { session_id: sid, ...FAILED })
+      await insertRow(run, userId, { session_id: sid, purpose: 'login_grant_disable' })
+      await insertRow(run, userId, { session_id: 'sid-' + randomUUID() })
+      await insertRow(run, otherUser, { session_id: sid })
       await run(`UPDATE ${TABLE} SET status = 'superseded', superseded_at = now() WHERE id = $1`, [first])
-      await expect(insertRow(run, userId, { session_id: sid })).resolves.toBeTruthy()
-      expect((await run(`SELECT count(*)::int AS n FROM ${TABLE} WHERE user_id = $1 AND session_id = $2`, [userId, sid])).rows[0].n).toBe(3)
-    })
-  })
-
-  it('admits rows only as issued or failed and not dated in the future, allows only issued->consumed and issued->superseded, and never any other column change', async () => {
-    const userId = await seedUser()
-    await withRollback(async (run) => {
-      await refusedInsert(run, userId, { status: 'consumed', consumed_at: new Date() }, '55000')
-      await refusedInsert(run, userId, { status: 'superseded', superseded_at: new Date() }, '55000')
-      await refusedInsert(run, userId, { status: 'other' }, '55000')
-      await refusedInsert(run, userId, { created_at: new Date(Date.now() + 60_000) }, '55000')
-      const issued = await insertRow(run, userId)
-      const failed = await insertRow(run, userId, { status: 'failed', failure_code: 'credential_rejected', proof_hash: null, assurance: null })
-      await expectSqlState(failing(run, `UPDATE ${TABLE} SET target_witness = $2 WHERE id = $1`, [issued, 'e'.repeat(64)]), '55000')
-      await expectSqlState(failing(run, `UPDATE ${TABLE} SET status = 'consumed', consumed_at = now(), target_witness = $2 WHERE id = $1`, [issued, 'e'.repeat(64)]), '55000')
-      await expectSqlState(failing(run, `UPDATE ${TABLE} SET status = 'issued', failure_code = NULL, proof_hash = $2, assurance = 'local_password', expires_at = now() + interval '1 second' WHERE id = $1`, [failed, 'b'.repeat(64)]), '55000')
-      await run(`UPDATE ${TABLE} SET status = 'consumed', consumed_at = now(), consumed_action_ref = 'ref' WHERE id = $1`, [issued])
-      await expectSqlState(failing(run, `UPDATE ${TABLE} SET status = 'issued', consumed_at = NULL, consumed_action_ref = NULL WHERE id = $1`, [issued]), '55000')
-      const second = await insertRow(run, userId)
-      await run(`UPDATE ${TABLE} SET status = 'superseded', superseded_at = now() WHERE id = $1`, [second])
-      await run(`DELETE FROM ${TABLE} WHERE id = ANY($1::uuid[])`, [[issued, second, failed]])
-      expect((await run(`SELECT count(*)::int AS n FROM ${TABLE} WHERE user_id = $1`, [userId])).rows[0].n).toBe(0)
-    })
-  })
-
-  it('caps the lifetime at 300 seconds after creation', async () => {
-    const userId = await seedUser()
-    await withRollback(async (run) => {
-      await expect(insertRow(run, userId, { created_at: new Date('2026-01-01T00:00:00Z'), expires_at: new Date('2026-01-01T00:05:00Z') })).resolves.toBeTruthy()
-      await refusedInsert(run, userId, { created_at: new Date('2026-01-01T00:00:00Z'), expires_at: new Date('2026-01-01T00:05:01Z') }, '23514')
-      await refusedInsert(run, userId, { created_at: new Date('2026-01-01T00:00:00Z'), expires_at: new Date('2026-01-01T00:00:00Z') }, '23514')
+      const second = await insertRow(run, userId, { session_id: sid })
+      const again = await refusedUnchanged(run, [userId, otherUser], () => insertRow(run, userId, { session_id: sid }))
+      expect([again.code, again.constraint]).toEqual(['23505', 'uq_security_action_live_proof'])
+      await run(`UPDATE ${TABLE} SET status = 'consumed', consumed_at = now() WHERE id = $1`, [second])
+      await insertRow(run, userId, { session_id: sid })
+      expect((await run(
+        `SELECT status, count(*)::int AS n FROM ${TABLE} WHERE user_id = $1 AND session_id = $2 AND purpose = 'external_identity_unbind' GROUP BY status ORDER BY status`, [userId, sid],
+      )).rows).toEqual([{ status: 'consumed', n: 1 }, { status: 'failed', n: 1 }, { status: 'issued', n: 1 }, { status: 'superseded', n: 1 }])
     })
   })
 
