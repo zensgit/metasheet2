@@ -121,10 +121,14 @@ function assertParallelWorkflow(doc) {
         const intentAddition = '  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n'
         assert.equal(step.run.split(intentAddition).length - 1, 1, 'Directory link intent DB suite must run exactly once')
         assert.ok(step.run.includes(repairAddition + privilegeAddition + intentAddition), 'Keep the directory link intent suite right after the privilege classification suite')
+        const membershipGateAddition = '  tests/integration/directory-sync-membership-local-account-gate.db.test.ts \\\n'
+        assert.equal(step.run.split(membershipGateAddition).length - 1, 1, 'Sync membership local-account gate DB suite must run exactly once')
+        assert.ok(step.run.includes(repairAddition + privilegeAddition + intentAddition + membershipGateAddition), 'Keep the sync membership gate suite right after the directory link intent suite')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
         step.run = step.run.replace(privilegeAddition, '')
         step.run = step.run.replace(intentAddition, '')
+        step.run = step.run.replace(membershipGateAddition, '')
       }
       if (suite === 'runtime-db' && step.id === lockProtocolStepId) {
         const tail = `  --reporter=verbose${lockProtocolJsonReporter}\n${lockProtocolZeroSkipLine}`
@@ -187,6 +191,8 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['runtime-db'].steps.find(step => step.id === lockProtocolStepId); assert.ok(step.run.includes(lockProtocolJsonReporter)); step.run = step.run.replace(lockProtocolJsonReporter, '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/dingtalk-login-repair.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/dingtalk-login-repair.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-sync-membership-local-account-gate.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-sync-membership-local-account-gate.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/security-action-privilege.db.test.ts \\\n', '') },

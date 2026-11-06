@@ -371,6 +371,11 @@ export default defineConfig({
       // write — real PostgreSQL only; excluded here and wired whole-file into the approval
       // real-DB step in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
       'tests/integration/directory-unbind-intent-persistence.db.test.ts',
+      // Directory sync membership writes gated on the local account (real sync, real Postgres,
+      // two-connection lock barrier). DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
+      // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/directory-sync-membership-local-account-gate.db.test.ts',
       // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
       // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
       // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
