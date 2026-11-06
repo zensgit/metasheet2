@@ -5595,4 +5595,28 @@ describe('MultitableWorkbench view wiring', () => {
       expect(showSuccessSpy).not.toHaveBeenCalled()
     })
   })
+  // '?' toggles the shortcuts overlay, except while typing. A form control was already excluded; an
+  // editable surface (the rich-text editor is a contenteditable div) now is too.
+  describe("the '?' shortcut and typing targets", () => {
+    it("a '?' typed in a contenteditable does not toggle the shortcuts overlay; from a non-typing target it still does", async () => {
+      mountWorkbench()
+      await flushUi()
+      const root = container!.querySelector('.mt-workbench') as HTMLElement
+      expect(root).toBeTruthy()
+      const editable = document.createElement('div')
+      editable.setAttribute('contenteditable', 'true')
+      root.appendChild(editable)
+      try {
+        editable.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }))
+        await flushUi()
+        expect(container!.querySelector('.mt-workbench__shortcuts-overlay')).toBeNull()
+        const main = container!.querySelector('.mt-workbench__main') as HTMLElement
+        main.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }))
+        await flushUi()
+        expect(container!.querySelector('.mt-workbench__shortcuts-overlay')).not.toBeNull()
+      } finally {
+        editable.remove()
+      }
+    })
+  })
 })

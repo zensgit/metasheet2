@@ -30,12 +30,12 @@
         rows="2"
         :disabled="disabled || submitting"
         @input="onInput"
-        @keydown.down.prevent="onNavigateSuggestion(1)"
-        @keydown.up.prevent="onNavigateSuggestion(-1)"
-        @keydown.tab.prevent="onSelectActiveSuggestion"
-        @keydown.esc.prevent="dismissSuggestions"
-        @keydown.enter.ctrl.prevent="submit"
-        @keydown.enter.meta.prevent="submit"
+        @keydown.down="onArrowKey(1, $event)"
+        @keydown.up="onArrowKey(-1, $event)"
+        @keydown.tab="onTabKey"
+        @keydown.esc="onEscapeKey"
+        @keydown.enter.ctrl="onSubmitKey"
+        @keydown.enter.meta="onSubmitKey"
       />
       <div
         v-if="showSuggestions"
@@ -460,6 +460,44 @@ function selectSuggestion(suggestion: MetaCommentMentionSuggestion) {
     const caret = nextValue.length
     textareaRef.value?.setSelectionRange(caret, caret)
   })
+}
+
+// A key an input method (Chinese, Japanese, Korean...) may be using while it composes text: any key
+// during a composition (isComposing), one the input method took (keyCode 229; Safari is understood to
+// mark the key that ends a composition only this way) or one reported as key 'Process' — the rule of
+// MetaGridTable's guard. The composer's keys act on none of them: during a composition the input
+// method owns the arrows and Tab (its candidates), Escape (cancel) and Enter (commit). That is why
+// `preventDefault` is called in these handlers, after the check, and not by `.prevent` modifiers in
+// the template, which run first. For every other key each one behaves as before, `preventDefault`
+// included.
+function isInputMethodKey(event: KeyboardEvent): boolean {
+  return event.isComposing || event.keyCode === 229 || event.key === 'Process'
+}
+function onArrowKey(direction: 1 | -1, event: KeyboardEvent) {
+  if (isInputMethodKey(event)) return
+  event.preventDefault()
+  onNavigateSuggestion(direction)
+}
+function onTabKey(event: KeyboardEvent) {
+  if (isInputMethodKey(event)) return
+  event.preventDefault()
+  onSelectActiveSuggestion()
+}
+function onEscapeKey(event: KeyboardEvent) {
+  // An Escape that cancels a composition dismisses nothing. It still goes no further: it is no longer
+  // default-prevented, and a host that closes on an Escape nobody prevented (a drawer, a dialog) must
+  // not close on it either.
+  if (isInputMethodKey(event)) {
+    event.stopPropagation()
+    return
+  }
+  event.preventDefault()
+  dismissSuggestions()
+}
+function onSubmitKey(event: KeyboardEvent) {
+  if (isInputMethodKey(event)) return
+  event.preventDefault()
+  submit()
 }
 
 function onNavigateSuggestion(direction: 1 | -1) {

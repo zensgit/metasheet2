@@ -898,4 +898,102 @@ describe('MetaCommentComposer', () => {
       host.app.unmount()
     })
   })
+
+  // Input-method composition (Chinese, Japanese, Korean...): the input method owns the arrows and Tab
+  // (its candidates), Escape (cancel) and Enter (commit), so the composer acts on none of them; its
+  // `preventDefault` runs only after that check. isComposing and keyCode 229 (the key the input method
+  // took) are both covered.
+  describe('keys during an input-method composition', () => {
+    const IME_INITS: KeyboardEventInit[] = [{ isComposing: true }, { keyCode: 229 }]
+
+    function mountComposer(initial: string) {
+      const draft = ref(initial)
+      const submits: Array<{ content: string; mentions: string[] }> = []
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      const app = createApp({
+        setup() {
+          return () => h(MetaCommentComposer, {
+            modelValue: draft.value,
+            suggestions: [
+              { id: 'user_jamie', label: 'Jamie' },
+              { id: 'user_jordan', label: 'Jordan' },
+            ],
+            'onUpdate:modelValue': (value: string) => { draft.value = value },
+            onSubmit: (payload: { content: string; mentions: string[] }) => { submits.push(payload) },
+          })
+        },
+      })
+      app.mount(container)
+      const textarea = () => container!.querySelector('textarea') as HTMLTextAreaElement
+      const key = (init: KeyboardEventInit) => {
+        const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+        textarea().dispatchEvent(event)
+        return event
+      }
+      return { app, draft, submits, textarea, key }
+    }
+
+    it('with suggestions open, an arrow, Tab or Escape during a composition moves no highlight, picks and dismisses nothing, and the Escape goes no further; plain keys still do', async () => {
+      const { app, textarea, key } = mountComposer('@j')
+      await nextTick()
+      const active = () => container!.querySelector('.meta-comment-composer__suggestion--active')?.textContent ?? null
+      const open = () => container!.querySelector('.meta-comment-composer__suggestions') !== null
+      expect(open()).toBe(true)
+      const first = active()
+      expect(first).toContain('Jamie')
+      const reachedParent: string[] = []
+      container!.addEventListener('keydown', (event) => { reachedParent.push(event.key) })
+      for (const init of IME_INITS) {
+        for (const k of ['ArrowDown', 'ArrowUp', 'Tab', 'Escape']) {
+          expect(key({ key: k, ...init }).defaultPrevented).toBe(false)
+          await nextTick()
+          expect(open()).toBe(true)
+          expect(active()).toBe(first)
+          expect(textarea().value).toBe('@j')
+        }
+      }
+      // the composing Escapes stopped at the composer; the arrows and Tab bubbled as before
+      expect(reachedParent.filter((k) => k === 'Escape')).toEqual([])
+      // plain keys: ArrowDown moves, ArrowUp moves back, Tab picks, a plain Escape (after new input) dismisses
+      expect(key({ key: 'ArrowDown' }).defaultPrevented).toBe(true)
+      await nextTick()
+      expect(active()).toContain('Jordan')
+      expect(key({ key: 'ArrowUp' }).defaultPrevented).toBe(true)
+      await nextTick()
+      expect(active()).toBe(first)
+      expect(key({ key: 'Tab' }).defaultPrevented).toBe(true)
+      await nextTick()
+      expect(textarea().value).toContain('@Jamie')
+      app.unmount()
+    })
+
+    it('a plain Escape still dismisses the suggestions and is default-prevented', async () => {
+      const { app, key } = mountComposer('@ja')
+      await nextTick()
+      expect(container!.querySelector('.meta-comment-composer__suggestions')).not.toBeNull()
+      expect(key({ key: 'Escape' }).defaultPrevented).toBe(true)
+      await nextTick()
+      expect(container!.querySelector('.meta-comment-composer__suggestions')).toBeNull()
+      app.unmount()
+    })
+
+    it('a Ctrl/Cmd+Enter during a composition submits nothing; plain Ctrl+Enter and Cmd+Enter still submit', async () => {
+      const { app, submits, key } = mountComposer('hello')
+      await nextTick()
+      for (const init of IME_INITS) {
+        expect(key({ key: 'Enter', ctrlKey: true, ...init }).defaultPrevented).toBe(false)
+        expect(key({ key: 'Enter', metaKey: true, ...init }).defaultPrevented).toBe(false)
+        await nextTick()
+      }
+      expect(submits).toEqual([])
+      expect(key({ key: 'Enter', ctrlKey: true }).defaultPrevented).toBe(true)
+      await nextTick()
+      expect(key({ key: 'Enter', metaKey: true }).defaultPrevented).toBe(true)
+      await nextTick()
+      expect(submits).toHaveLength(2)
+      expect(submits[0].content).toBe('hello')
+      app.unmount()
+    })
+  })
 })
