@@ -79,3 +79,17 @@ export function fieldRowChangedSince(validated: FieldRowRecheckSnapshot, locked:
   if (validated.type !== String(locked.type ?? '')) return true
   return !isDeepStrictEqual(validated.property, locked.property === undefined ? null : locked.property)
 }
+
+/**
+ * Run one whole PATCH transaction; when it rolls back with `FieldChangedConcurrentlyError`, run it once more (validation
+ * included, on fresh data). A second conflict propagates (→ 409). Any other error propagates at once.
+ */
+export async function withFieldRowRecheckRetry<T>(attempt: () => Promise<T>): Promise<T> {
+  for (let n = 1; ; n += 1) {
+    try {
+      return await attempt()
+    } catch (err) {
+      if (!(err instanceof FieldChangedConcurrentlyError) || n >= PATCH_FIELD_MAX_ATTEMPTS) throw err
+    }
+  }
+}

@@ -38,6 +38,10 @@ type QueryResult = { rows: unknown[]; rowCount?: number }
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const normalize = (sql: string) => sql.replace(/\s+/g, ' ').trim()
+// Postgres jsonb returns object keys shorter-first, then bytewise; the mock stores properties the same way so a
+// read-back compares like the real one (the revision diff compares serialized values).
+const jsonbOrder = (value: Record<string, unknown>): Record<string, unknown> =>
+  Object.fromEntries(Object.entries(value).sort(([a], [b]) => (a.length - b.length) || (a < b ? -1 : a > b ? 1 : 0)))
 
 describe('fieldRowChangedSince / snapshotFieldRowForRecheck (pure)', () => {
   const base = { name: 'A', type: 'string', property: { x: 1, nested: { y: [1, 2] } }, order: 3 }
@@ -89,7 +93,7 @@ function createScenario(opts: {
   beforeLateReread?: (attempt: number, current: Row) => Row | null
   shifted?: Array<{ id: string; order: number }>
 }) {
-  let row: Row | null = clone(opts.first)
+  let row: Row | null = { ...clone(opts.first), property: jsonbOrder(clone(opts.first.property)) }
   let attempt = 0
   const statements: Array<{ sql: string; params: unknown[] }> = []
   const handler = (rawSql: string, params: unknown[] = []): QueryResult => {
@@ -97,7 +101,10 @@ function createScenario(opts: {
     statements.push({ sql, params })
     if (sql === 'SELECT id, sheet_id FROM meta_fields WHERE id = $1') return { rows: row ? [{ id: row.id, sheet_id: row.sheet_id }] : [] }
     if (sql === PATCH_FIELD_LOCKED_REREAD_SQL) {
-      if (opts.beforeLateReread && row) row = opts.beforeLateReread(attempt, clone(row))
+      if (opts.beforeLateReread && row) {
+        const next: Row | null = opts.beforeLateReread(attempt, clone(row))
+        row = next ? { ...next, property: jsonbOrder(next.property) } : null
+      }
       return { rows: row ? [clone(row)] : [] }
     }
     if (sql === PATCH_FIELD_READ_SQL) {
@@ -110,7 +117,7 @@ function createScenario(opts: {
     if (sql.startsWith('UPDATE meta_fields SET name = $2')) {
       if (!row) return { rows: [] }
       const [, name, type, propertyJson, order] = params as [string, string, string, string, number]
-      row = { ...row, name, type, property: JSON.parse(propertyJson), order }
+      row = { ...row, name, type, property: jsonbOrder(JSON.parse(propertyJson)), order }
       return { rows: [{ id: row.id, name: row.name, type: row.type, property: clone(row.property), order: row.order }] }
     }
     if (sql.includes('FROM meta_sheets WHERE id = $1')) {

@@ -286,8 +286,14 @@ export const FIELD_CONFIG_SNAPSHOT_SQL = 'SELECT name, type, property, "order" F
 /** The same snapshot under the row lock — the config-restore EXECUTE transaction only (never the preview). */
 export const FIELD_CONFIG_SNAPSHOT_LOCKED_SQL = `${FIELD_CONFIG_SNAPSHOT_SQL} FOR NO KEY UPDATE`
 
-export async function loadFieldConfigSnapshot(query: QueryFn, fieldId: string): Promise<Record<string, unknown> | null> {
-  const res = await query(FIELD_CONFIG_SNAPSHOT_SQL, [fieldId])
+/**
+ * `lock` (the config-restore EXECUTE transaction only): the snapshot is what the drift check and the baseline hash
+ * compare, and what the revert then writes over — so it is read under the row lock, and a concurrent field write waits
+ * until the revert commits instead of being overwritten without CONFIG_DRIFT. The preview never locks (it runs on the
+ * pool, outside any transaction, and must stay lock-free and write-free).
+ */
+export async function loadFieldConfigSnapshot(query: QueryFn, fieldId: string, lock = false): Promise<Record<string, unknown> | null> {
+  const res = await query(lock ? FIELD_CONFIG_SNAPSHOT_LOCKED_SQL : FIELD_CONFIG_SNAPSHOT_SQL, [fieldId])
   const row = res.rows[0] as { name: string; type: string; property: unknown; order: number } | undefined
   if (!row) return null
   return { name: row.name, type: row.type, property: row.property, order: row.order }
@@ -322,8 +328,13 @@ export async function loadSheetConfigSnapshot(query: QueryFn, sheetId: string): 
   }
 }
 
-export async function loadEntityConfigSnapshot(query: QueryFn, rev: ConfigRevisionRow): Promise<Record<string, unknown> | null> {
-  if (rev.entity_type === 'field') return loadFieldConfigSnapshot(query, rev.entity_id)
+/** `lockField`: lock a FIELD snapshot (see loadFieldConfigSnapshot). Views and sheet_config are not locked here. */
+export async function loadEntityConfigSnapshot(
+  query: QueryFn,
+  rev: ConfigRevisionRow,
+  opts: { lockField?: boolean } = {},
+): Promise<Record<string, unknown> | null> {
+  if (rev.entity_type === 'field') return loadFieldConfigSnapshot(query, rev.entity_id, opts.lockField === true)
   if (rev.entity_type === 'view') return loadViewConfigSnapshot(query, rev.entity_id)
   if (rev.entity_type === 'sheet_config') return loadSheetConfigSnapshot(query, rev.entity_id)
   return null

@@ -675,9 +675,17 @@ export async function ensureFields(
   }))
 }
 
-/** `patchObjectFieldProperty`'s read of the field row. Exported so the real-DB race cases hold on the production text. */
+/**
+ * `patchObjectFieldProperty`'s read of the field row, UNDER THE ROW LOCK. The patch merges onto what it read and writes
+ * the whole property back, so without the lock a field write committed in between (PATCH /fields, another plugin
+ * write, a config revert) would be reverted. With it, that write waits until this one commits and then sees it.
+ * `FOR NO KEY UPDATE` is exactly the lock the UPDATE below takes (it never changes `id`), only taken one statement
+ * earlier, so FK child inserts on the field (links, attachments, auto-number sequences; FOR KEY SHARE) never wait on it.
+ * Single-row transaction (index.ts patchObjectFieldProperty): it never waits on another field row while holding this
+ * one. Exported so the real-DB race cases hold on the production text.
+ */
 export const PATCH_OBJECT_FIELD_PROPERTY_READ_SQL =
-  'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 AND id = $2'
+  'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 AND id = $2 FOR NO KEY UPDATE'
 
 export async function patchObjectFieldProperty(
   input: PatchObjectFieldPropertyInput,
