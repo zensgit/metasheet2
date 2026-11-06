@@ -3141,6 +3141,12 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               return n
             },
             pilotExit: () => q('UPDATE integration_stock_prep_project_target SET pilot_enabled_at = NULL, pilot_enabled_by = NULL, pilot_readiness_version = NULL WHERE tenant_id = $1 AND project_no = $2', [tenantId, projectNo]),
+            // R-71 7.4 PR-4 (S3B-07): re-register the SAME routes over the SAME services with another env action target
+            // (a deployment re-pasting its exported binding). Every other case leaves the target as built.
+            rebindEnvTarget(target: any) {
+              routes.clear()
+              httpRoutesLib.registerIntegrationRoutes({ context: { ...routeContext, config: { ...routeContext.config, stockPreparationTableActions: [{ ...actionConfig, target }] } }, services, logger: { info() {}, warn() {}, error() {} } })
+            },
           }
         }
 
@@ -4182,6 +4188,10 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //          PR B's code; a registered NOT-governed project => served end to end on the env sheet, 0 step-4 rows.
         //   S3B-06 (R-12, A11 / G1 large) the step-4 tables absent from the store binding (42P01): the four routes 503
         //          STORE_FAILED `continuation` before any source read or existing-row read; nothing written, no bump.
+        //   S3B-07 (R-71 7.4 PR-4, ported from the 備料 review's VY8D-01) switch off, the env table is THE sheet with all
+        //          35 template columns present: a binding whose explicit target.fieldIdMap was exported from the 33-column
+        //          template answers 422 TARGET_SCHEMA_INCOMPLETE `explicit` with exactly the two new columns missing on
+        //          dry-run, export and large start (nothing written); re-bound with the 35-column map, all three served.
         describe('S3B step-4 large lane (real Postgres, real lock, real host)', () => {
           const LARGE_PREFIX = 'stock-preparation:large-bom:'
           // Every large-BOM plugin_kv row of one tenant, key order (the "nothing persisted" fingerprint of a refusal).
@@ -4610,6 +4620,77 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {})
               client.release()
               if (tenantId) await cleanupLarge(tenantId)
+            }
+          }, 300000)
+
+          // R-71 7.4 PR-4: the install step "re-export the env binding after the two-column template upgrade" has a test.
+          // Ported from the 備料 review's read-only reproduction VY8D-01 (its env-table legs e2 / e3): the deployment's env
+          // table keeps all 35 physical columns, so the ONLY thing that differs between the refusal and the served call
+          // is the pasted explicit binding — the 422 below is the binding gate (assertTargetFieldMapCompleteness), never
+          // the db-mode existence check.
+          test('S3B-07 (R-71 7.4 PR-4, VY8D-01) switch OFF, the env table is THE sheet with all 35 template columns present: an action bound with an explicit target.fieldIdMap exported from the 33-column (pre-PR-4) template answers 422 TARGET_SCHEMA_INCOMPLETE fieldMapMode `explicit` with missingFields exactly issueConfirmDate + projectSpecModel on dry-run, export and large start through the REAL routes — no token, no plugin_kv row, the sheet unchanged; re-bound with the 35-column map, dry-run is ready, export 200 and large start 202', async () => {
+            const NEW = ['issueConfirmDate', 'projectSpecModel']
+            const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
+            const templateIds: string[] = templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => field.id)
+            const st = await s3aStack('b07', { pilot: false, register: false, switchOn: false })
+            const envSheetId: string = st.envTarget.sheetId
+            const fullEnv = st.envTarget
+            const fullKeys = Object.keys(fullEnv.fieldIdMap || {}).sort()
+            // The 33-column template's export: the same explicit map without the two PR-4 columns.
+            const preFieldIdMap: Record<string, string> = { ...fullEnv.fieldIdMap }
+            for (const id of NEW) delete preFieldIdMap[id]
+            const preEnv = { ...fullEnv, fieldIdMap: preFieldIdMap }
+            const fieldCount = async () => Number((await q('SELECT count(*)::int AS n FROM meta_fields WHERE sheet_id = $1', [envSheetId])).rows[0].n)
+            const refusal = (res: any) => {
+              const error = errorOf(res)
+              const details = error.details || {}
+              return {
+                status: res.statusCode,
+                code: error.code,
+                fieldMapMode: details.fieldMapMode,
+                missingFields: Array.isArray(details.missingFields) ? [...details.missingFields].sort() : details.missingFields,
+              }
+            }
+            try {
+              expect(templateIds).toHaveLength(35)
+              expect(fullKeys).toEqual([...templateIds].sort())
+              expect(Object.keys(preFieldIdMap)).toHaveLength(33)
+              expect(await fieldCount(), 'the env table carries every template column').toBe(35)
+              // Before the upgrade's binding paste: the env table pulled with the full binding.
+              await firstPullApplied(st)
+
+              // The deployment keeps its 33-column explicit binding.
+              st.rebindEnvTarget(preEnv)
+              const main0 = await st.main(envSheetId)
+              const tokens0 = await kvTokens()
+              const kv0 = await largeRows(st.tenantId)
+              const refused = {
+                dryRun: refusal(await st.dryRun()),
+                export: refusal(await st.exportLines()),
+                largeStart: refusal(await st.largeStart()),
+              }
+              const writes = {
+                tokens: (await kvTokens()) - tokens0,
+                kvUnchanged: sameJson(await largeRows(st.tenantId), kv0),
+                mainUnchanged: sameJson(await st.main(envSheetId), main0),
+                fieldCount: await fieldCount(),
+              }
+              console.log(`[S3B-07] ${JSON.stringify({ refused, writes })}`)
+              const explicit422 = { status: 422, code: 'TARGET_SCHEMA_INCOMPLETE', fieldMapMode: 'explicit', missingFields: [...NEW].sort() }
+              expect(refused).toEqual({ dryRun: explicit422, export: explicit422, largeStart: explicit422 })
+              expect(writes).toEqual({ tokens: 0, kvUnchanged: true, mainUnchanged: true, fieldCount: 35 })
+
+              // The install step: the binding re-exported from the 35-column template.
+              st.rebindEnvTarget(fullEnv)
+              const ready = await st.dryRun()
+              expect(ready.statusCode, JSON.stringify(ready.body)).toBe(200)
+              expect(ready.body.data.status).toBe('ready')
+              const exported = await st.exportLines()
+              expect(exported.statusCode, JSON.stringify(exported.body)).toBe(200)
+              const started = await st.largeStart()
+              expect(started.statusCode, JSON.stringify(started.body)).toBe(202)
+            } finally {
+              await cleanupLarge(st.tenantId)
             }
           }, 300000)
         })
