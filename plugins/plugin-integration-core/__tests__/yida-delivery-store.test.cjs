@@ -16,7 +16,7 @@ const AUDIT = 'integration_yida_delivery_audit'
 const UNIQUE_SCOPE_ROW = 'uniq_integration_yida_delivery_scope_row'
 const UNIQUE_CREATE_BUSINESS = 'uniq_integration_yida_delivery_create_business'
 
-test('the YiDa real-PG suites are registered in their real execution lane without filtered DB cases', () => {
+test('the YiDa real-PG suites are registered in their real execution lane without filtered DB cases', async () => {
   const root = path.resolve(__dirname, '..', '..', '..')
   const specs = ['tests/integration/stock-preparation-yida-write-ledger-realdb.test.ts',
     'tests/integration/stock-preparation-yida-create-fence-realdb.test.ts',
@@ -42,20 +42,35 @@ test('the YiDa real-PG suites are registered in their real execution lane withou
   assert.ok(step.env.DATABASE_URL)
   // An allowlist, not a denylist: vitest also accepts kebab and short-cluster spellings of its filter
   // flags, so every token is pinned. The DATABASE_URL guard line, then one command line whose tokens
-  // before 'run' are exact and whose only option after 'run' is the reporter.
+  // before 'run' are exact and whose only options after 'run' are the verbose reporter plus the JSON
+  // report, then the zero-skip check over that exact report and file count (R-71 gate 10).
   // Join continuations and split words the way bash does: a backslash-newline pair is deleted, not
   // replaced by a space, and only spaces and tabs separate words. Anything outside printable ASCII is
   // refused, so no exotic space or unspaced continuation can hide two files in one bash argument.
   assert.match(step.run, /^[\x20-\x7e\n]*$/)
   const lines = step.run.replace(/\\\r?\n/g, '').split(/\r?\n/).filter((line) => line.trim())
-  assert.equal(lines.length, 2)
+  assert.equal(lines.length, 3)
   assert.equal(lines[0].trim(), ': "${DATABASE_URL:?DATABASE_URL is required for the lock-protocol real-DB proof}"')
   const tokens = lines[1].trim().split(/[ \t]+/)
   const runAt = tokens.indexOf('run')
   assert.deepEqual(tokens.slice(0, runAt + 1),
     ['pnpm', '--filter', '@metasheet/core-backend', 'exec', 'vitest', '--config', 'vitest.integration.config.ts', 'run'])
   const files = tokens.slice(runAt + 1)
-  assert.deepEqual(files.filter((token) => token.startsWith('-')), ['--reporter=verbose'])
+  assert.deepEqual(files.filter((token) => token.startsWith('-')),
+    ['--reporter=verbose', '--reporter=json', '--outputFile.json=../../artifacts/yida-realdb/lock-protocol-vitest.json'])
+  assert.deepEqual(files.slice(-3),
+    ['--reporter=verbose', '--reporter=json', '--outputFile.json=../../artifacts/yida-realdb/lock-protocol-vitest.json'])
+  // The check reads the same report (vitest resolves outputFile against packages/core-backend; the
+  // step's own shell runs at the repository root) and the step's whole file count.
+  assert.equal(lines[2], `node scripts/ops/vitest-zero-skip.mjs artifacts/yida-realdb/lock-protocol-vitest.json ${lane.length}`)
+  assert.equal(lane.length, 14)
+  // A local run's report is gitignored, so a committed stale clean report cannot stand in for this run's.
+  assert.equal(fs.readFileSync(path.join(root, '.gitignore'), 'utf8').split(/\r?\n/).includes('artifacts/yida-realdb/'), true)
+  // The checker's behaviour is tested only in this plugin chain, so a checker-only change must make the
+  // integration guard run it. Removing the roster entry (and its on.push.paths twin, which the wiring
+  // contract keeps set-equal) is itself a guarded-path change, so this assertion runs and goes red.
+  const { classify } = await import('../../../scripts/ops/integration-guard-classify.mjs')
+  assert.equal(classify(['scripts/ops/vitest-zero-skip.mjs']), true)
   for (const spec of specs) assert.equal(files.filter((token) => token === spec).length, 1)
   assert.deepEqual(files.filter((token) => !token.startsWith('-')).sort(), [...lane].sort())
   const config = ts.createSourceFile('vitest.config.ts', fs.readFileSync(path.join(root, 'packages/core-backend/vitest.config.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
@@ -71,6 +86,109 @@ test('the YiDa real-PG suites are registered in their real execution lane withou
   const commands = fs.readFileSync(path.join(root, 'plugins/plugin-integration-core/test-chain.txt'), 'utf8').split(/\r?\n/)
   assert.equal(commands.filter((line) => line === 'node __tests__/yida-delivery-store.test.cjs').length, 1)
   for (const spec of specs) assert.equal(commands.some((line) => line.includes(spec)), false)
+})
+
+test('the lock-protocol zero-skip check refuses every skipped, todo, failed, missing or empty report, values-free', () => {
+  const { spawnSync } = require('node:child_process')
+  const os = require('node:os')
+  const root = path.resolve(__dirname, '..', '..', '..')
+  const cli = path.join(root, 'scripts/ops/vitest-zero-skip.mjs')
+  // Synthetic reports in the exact vitest 1.x JSON reporter shape. Titles carry a sentinel that must never
+  // reach the check's output.
+  const passed = (title) => ({ title: `${title} SENTINEL-VALUE`, fullName: title, status: 'passed', failureMessages: [] })
+  const report = (patch = {}) => {
+    const testResults = [0, 1, 2].map((index) => ({
+      name: `/repo/tests/integration/sentinel-${index}-realdb.test.ts`,
+      status: 'passed', message: '', assertionResults: [passed(`case ${index}a`), passed(`case ${index}b`)],
+    }))
+    return {
+      numTotalTestSuites: 6, numPassedTestSuites: 6, numFailedTestSuites: 0, numPendingTestSuites: 0,
+      numTotalTests: 6, numPassedTests: 6, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0,
+      startTime: 1, success: true, testResults, ...patch,
+    }
+  }
+  const withAssertion = (status, summary) => {
+    const value = report(summary)
+    value.testResults[1].assertionResults[1] = { ...value.testResults[1].assertionResults[1], status }
+    return value
+  }
+  const failed = withAssertion('failed', { success: false, numFailedTests: 1, numPassedTests: 5, numFailedTestSuites: 1, numPassedTestSuites: 5 })
+  failed.testResults[1].status = 'failed'
+  failed.testResults[1].message = 'SENTINEL-VALUE failure message'
+  const cases = [
+    ['all pass', report(), 3, []],
+    // vitest 1.x counts an it.skip as passed and not as pending: only the assertion status shows it.
+    ['skip', withAssertion('skipped'), 3, ['ASSERTION_SKIPPED']],
+    ['todo', withAssertion('todo', { numTodoTests: 1 }), 3, ['ASSERTION_TODO', 'TODO_TESTS']],
+    ['pending', withAssertion('pending', { numPendingTests: 1 }), 3, ['ASSERTION_PENDING', 'PENDING_TESTS']],
+    ['failed', failed, 3, ['ASSERTION_FAILED', 'FAILED_SUITES', 'FAILED_TESTS', 'FILE_NOT_PASSED', 'SUCCESS_NOT_TRUE', 'TOTAL_NOT_PASSED']],
+    ['one file short', report(), 4, ['FILE_COUNT']],
+    ['success false', report({ success: false }), 3, ['SUCCESS_NOT_TRUE']],
+    ['bad JSON', '{"success":true,"SENTINEL-VALUE"', 3, ['REPORT_INVALID_JSON']],
+    ['zero tests', report({ numTotalTests: 0, numPassedTests: 0, numTotalTestSuites: 0, numPassedTestSuites: 0, testResults: [] }), 3, ['FILE_COUNT', 'ZERO_TESTS']],
+    ['zero tests in the expected files', report({ numTotalTests: 0, numPassedTests: 0,
+      testResults: report().testResults.map((file) => ({ ...file, assertionResults: [] })) }), 3, ['FILE_NO_ASSERTIONS', 'ZERO_TESTS']],
+    ['a file with no assertions', (() => { const value = report({ numTotalTests: 4, numPassedTests: 4 }); value.testResults[2].assertionResults = []; return value })(), 3, ['FILE_NO_ASSERTIONS']],
+    ['a duplicated file', (() => { const value = report(); value.testResults[2].name = value.testResults[0].name; return value })(), 3, ['FILE_DUPLICATE']],
+    ['summary counts out of step with the files', report({ numTotalTests: 7, numPassedTests: 7 }), 3, ['ASSERTION_COUNT']],
+    ['a pending suite', report({ numPendingTestSuites: 1 }), 3, ['PENDING_SUITES']],
+    ['a missing summary count', report({ numTodoTests: undefined }), 3, ['TODO_TESTS']],
+    ['not an object', [], 3, ['REPORT_NOT_OBJECT']],
+  ]
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yida-zero-skip-'))
+  try {
+    for (const [name, value, expectedFiles, keys] of cases) {
+      const file = path.join(dir, 'report.json')
+      fs.writeFileSync(file, typeof value === 'string' ? value : JSON.stringify(value))
+      const result = spawnSync(process.execPath, [cli, file, String(expectedFiles)], { encoding: 'utf8' })
+      assert.equal(result.error, undefined, name)
+      assert.equal(result.status, keys.length === 0 ? 0 : 1, name)
+      const output = result.stdout + result.stderr
+      assert.doesNotMatch(output, /SENTINEL|sentinel-|realdb\.test/, name)
+      if (keys.length === 0) {
+        assert.equal(result.stderr, '', name)
+        assert.match(result.stdout, /^VITEST_ZERO_SKIP: ok \(3 files, 6 tests, all passed, none skipped or todo\)\r?\n$/, name)
+      } else {
+        assert.equal(result.stdout, '', name)
+        assert.deepEqual(result.stderr.split(/\r?\n/).filter(Boolean), keys.map((key) => `VITEST_ZERO_SKIP: ${key}`), name)
+      }
+    }
+    // An unreadable report path and a malformed or missing file count are refused, not passed.
+    const clean = path.join(dir, 'clean.json')
+    fs.writeFileSync(clean, JSON.stringify(report()))
+    for (const [args, key] of [
+      [[path.join(dir, 'missing.json'), '3'], 'REPORT_UNREADABLE'],
+      [[clean], 'USAGE'], [[clean, '0'], 'USAGE'], [[clean, '03'], 'USAGE'], [[clean, '3x'], 'USAGE'], [[clean, '3', 'extra'], 'USAGE'], [[], 'USAGE'],
+    ]) {
+      const result = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' })
+      assert.equal(result.status, 1, key)
+      assert.equal(result.stderr.trim(), `VITEST_ZERO_SKIP: ${key}`)
+    }
+    // Reached through a symlinked directory, the check still runs and still refuses (a main-module guard
+    // comparing import.meta.url with argv[1] would print nothing and exit 0 here). The link points at a
+    // scratch copy of the script, never at the repository, so cleanup cannot follow it into the checkout.
+    // 'junction' needs no privilege on Windows and is ignored on POSIX, where a plain symlink is made.
+    const real = path.join(dir, 'real')
+    const linked = path.join(dir, 'linked')
+    fs.mkdirSync(real)
+    fs.copyFileSync(cli, path.join(real, 'vitest-zero-skip.mjs'))
+    fs.symlinkSync(real, linked, 'junction')
+    try {
+      assert.notEqual(fs.realpathSync(path.join(linked, 'vitest-zero-skip.mjs')), path.join(linked, 'vitest-zero-skip.mjs'))
+      const skipped = path.join(dir, 'skipped.json')
+      fs.writeFileSync(skipped, JSON.stringify(withAssertion('skipped')))
+      const refused = spawnSync(process.execPath, [path.join(linked, 'vitest-zero-skip.mjs'), skipped, '3'], { encoding: 'utf8' })
+      assert.equal(refused.status, 1, 'symlinked directory: a skip is refused')
+      assert.equal(refused.stderr.trim(), 'VITEST_ZERO_SKIP: ASSERTION_SKIPPED')
+      const accepted = spawnSync(process.execPath, [path.join(linked, 'vitest-zero-skip.mjs'), clean, '3'], { encoding: 'utf8' })
+      assert.equal(accepted.status, 0, 'symlinked directory: a clean report passes')
+      assert.match(accepted.stdout, /^VITEST_ZERO_SKIP: ok \(3 files, 6 tests, all passed, none skipped or todo\)\r?\n$/)
+    } finally {
+      fs.unlinkSync(linked)
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 const copy = (value) => structuredClone(value)

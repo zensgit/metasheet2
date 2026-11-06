@@ -108,13 +108,17 @@ it('registers the host-boundary and connection-test real-PG proofs in the EXPECT
   // Same bash-faithful join and split as the plugin guard, with the same printable-ASCII refusal.
   expect(step?.run ?? '').toMatch(/^[\x20-\x7e\n]*$/)
   const lines = (step?.run ?? '').replace(/\\\r?\n/g, '').split(/\r?\n/).filter(line => line.trim())
-  expect(lines).toHaveLength(2)
+  // R-71 gate 10: the JSON report and the zero-skip check over it are the only additions; the check's
+  // own line is pinned exactly so it cannot be softened (`|| true`) or pointed at another report.
+  expect(lines).toHaveLength(3)
   const tokens = lines[1].trim().split(/[ \t]+/)
   const runAt = tokens.indexOf('run')
   expect(tokens.slice(0, runAt + 1))
     .toEqual(['pnpm', '--filter', '@metasheet/core-backend', 'exec', 'vitest', '--config', 'vitest.integration.config.ts', 'run'])
   const files = tokens.slice(runAt + 1)
-  expect(files.filter(token => token.startsWith('-'))).toEqual(['--reporter=verbose'])
+  expect(files.filter(token => token.startsWith('-')))
+    .toEqual(['--reporter=verbose', '--reporter=json', '--outputFile.json=../../artifacts/yida-realdb/lock-protocol-vitest.json'])
+  expect(lines[2]).toBe('node scripts/ops/vitest-zero-skip.mjs artifacts/yida-realdb/lock-protocol-vitest.json 14')
   for (const spec of specs) expect(files.filter(token => token === spec), spec).toHaveLength(1)
   const config = ts.createSourceFile('vitest.config.ts', readFileSync(path.join(root, 'packages/core-backend/vitest.config.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
   const excluded = new Set<string>()
