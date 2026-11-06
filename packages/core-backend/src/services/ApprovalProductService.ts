@@ -68,6 +68,8 @@ import {
   ACTION_POLICY_KEYS,
   APPROVAL_POLICY_DENIED_ACTION,
   APPROVAL_TERMINAL_STATUSES,
+  FORM_SCHEMA_SUMMARY_FIELD_MAX,
+  FORM_SCHEMA_SUMMARY_INELIGIBLE_FIELD_TYPES,
   HANDLER_ASSIGNEE_SOURCE_KINDS,
   HANDLER_NODE_OPERATION_POLICY_KEYS,
   NODE_FIELD_ACCESS_VALUES,
@@ -1039,7 +1041,9 @@ export const REQUEST_VALIDATION_CONTEXT: ValidationContext = {
   code: 'VALIDATION_ERROR',
 }
 
-const STORED_FORM_SCHEMA_CONTEXT: ValidationContext = {
+// EXPORTED (unit-test surface) so the lenient stored-read branch of
+// normalizeFormSchemaSummaryFieldIds can be exercised directly.
+export const STORED_FORM_SCHEMA_CONTEXT: ValidationContext = {
   status: 500,
   code: 'APPROVAL_TEMPLATE_SCHEMA_INVALID',
 }
@@ -2456,7 +2460,56 @@ function assertFormSchema(value: unknown, context: ValidationContext = REQUEST_V
   validateFormFieldVisibilityRules(fields, context)
 
   const amountConsistencyCheck = normalizeAmountConsistencyCheck(value.amountConsistencyCheck, fields, context)
-  return amountConsistencyCheck ? { fields, amountConsistencyCheck } : { fields }
+  const summaryFieldIds = normalizeFormSchemaSummaryFieldIds(value.summaryFieldIds, fields, context)
+  return {
+    fields,
+    ...(amountConsistencyCheck ? { amountConsistencyCheck } : {}),
+    ...(summaryFieldIds ? { summaryFieldIds } : {}),
+  }
+}
+
+/**
+ * 列表摘要字段（formSchema.summaryFieldIds）。与 amountConsistencyCheck 同一做法：在 form_schema 里
+ * 校验并保留，不加列。保存时（请求校验）不合法直接 400；读回已存数据时只丢掉不合法的条目，
+ * 不让一个仅用于展示的设置把整个模板读成 500。空数组与未设置相同，返回 undefined（不写这个键），
+ * 所以既有模板读回的 form_schema 不变。
+ */
+export function normalizeFormSchemaSummaryFieldIds(
+  value: unknown,
+  fields: FormField[],
+  context: ValidationContext = REQUEST_VALIDATION_CONTEXT,
+): string[] | undefined {
+  if (value === undefined || value === null) return undefined
+  const lenient = context === STORED_FORM_SCHEMA_CONTEXT
+  if (!Array.isArray(value)) {
+    if (lenient) return undefined
+    failValidation(context, 'formSchema.summaryFieldIds must be an array of field ids')
+  }
+  const eligibleIds = new Set(
+    fields.filter((field) => !FORM_SCHEMA_SUMMARY_INELIGIBLE_FIELD_TYPES.has(field.type)).map((field) => field.id),
+  )
+  const result: string[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'string' || !eligibleIds.has(entry)) {
+      if (lenient) continue
+      failValidation(
+        context,
+        `formSchema.summaryFieldIds must reference top-level fields that are not attachment/detail/explanation: ${String(entry)}`,
+      )
+    }
+    if (result.includes(entry)) {
+      if (lenient) continue
+      failValidation(context, `formSchema.summaryFieldIds must not repeat a field id: ${entry}`)
+    }
+    result.push(entry)
+  }
+  if (result.length > FORM_SCHEMA_SUMMARY_FIELD_MAX) {
+    if (!lenient) {
+      failValidation(context, `formSchema.summaryFieldIds allows at most ${FORM_SCHEMA_SUMMARY_FIELD_MAX} fields`)
+    }
+    result.length = FORM_SCHEMA_SUMMARY_FIELD_MAX
+  }
+  return result.length > 0 ? result : undefined
 }
 
 // Server-side amount total-check mapping (design-lock #3161). Validated + preserved HERE so it
@@ -7002,6 +7055,8 @@ export class ApprovalProductService {
       )
 
       const formSchema = asFormSchema(version.form_schema)
+      // 列表摘要字段：读回时宽松（只丢掉不合法条目），发布是写入关口，按保存时的规则严格再查一遍。
+      normalizeFormSchemaSummaryFieldIds(version.form_schema.summaryFieldIds, formSchema.fields, REQUEST_VALIDATION_CONTEXT)
       const storedApprovalGraph = asApprovalGraph(version.approval_graph)
       // Publishing is a write choke point: historical drafts stay readable, but
       // must satisfy the current all-runtime-path contract before activation.

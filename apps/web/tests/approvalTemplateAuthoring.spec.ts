@@ -22,6 +22,7 @@ import {
   stepHiddenBlockLiveErrors,
   stepOmitsAssigneeSources,
   stepSamePersonControlState,
+  summaryEligibleDraftFields,
   unsupportedTemplateAuthoringReason,
   validateTemplateApprovalFlow,
   validateTemplateDraft,
@@ -671,6 +672,69 @@ describe('validateTemplateBasicInfo (P1-A0 typed issue model)', () => {
 })
 
 describe('approval template authoring helpers', () => {
+  describe('列表摘要字段 (formSchema.summaryFieldIds)', () => {
+    const textField = (id: string) => ({ id, type: 'text' as const, label: id.toUpperCase() })
+    const summaryTemplate = (summaryFieldIds?: string[]) =>
+      buildTemplate({
+        formSchema: {
+          fields: [
+            { id: 'amount', type: 'number', label: '金额', required: true },
+            { id: 'reviewer', type: 'user', label: '审批人', required: true },
+            textField('f1'),
+            textField('f2'),
+            textField('f3'),
+            textField('f4'),
+          ],
+          ...(summaryFieldIds ? { summaryFieldIds } : {}),
+        },
+      })
+
+    it('a template without the key hydrates and saves without the key (no churn on existing templates)', () => {
+      const draft = draftFromTemplate(summaryTemplate())
+      expect('summaryFieldIds' in draft).toBe(false)
+      expect('summaryFieldIds' in buildFormSchema(draft)).toBe(false)
+    })
+
+    it('hydrates the configured ids and round-trips them in order', () => {
+      const draft = draftFromTemplate(summaryTemplate(['f2', 'amount']))
+      expect(draft.summaryFieldIds).toEqual(['f2', 'amount'])
+      expect(buildFormSchema(draft).summaryFieldIds).toEqual(['f2', 'amount'])
+    })
+
+    it('drops ids whose field was deleted or retyped to an ineligible type, and de-duplicates', () => {
+      const draft = draftFromTemplate(summaryTemplate(['f1', 'f2', 'amount']))
+      draft.fields = draft.fields.filter((field) => field.id !== 'f1')
+      const f2 = draft.fields.find((field) => field.id === 'f2')!
+      f2.type = 'explanation'
+      draft.summaryFieldIds = ['f1', 'f2', 'amount', 'amount']
+      expect(buildFormSchema(draft).summaryFieldIds).toEqual(['amount'])
+    })
+
+    it('caps at FORM_SCHEMA_SUMMARY_FIELD_MAX (5)', () => {
+      const draft = draftFromTemplate(summaryTemplate())
+      draft.summaryFieldIds = ['f4', 'f3', 'f2', 'f1', 'amount', 'reviewer']
+      expect(buildFormSchema(draft).summaryFieldIds).toEqual(['f4', 'f3', 'f2', 'f1', 'amount'])
+    })
+
+    it('omits the key when nothing survives', () => {
+      const draft = draftFromTemplate(summaryTemplate(['f1']))
+      draft.fields = draft.fields.filter((field) => field.id !== 'f1')
+      expect('summaryFieldIds' in buildFormSchema(draft)).toBe(false)
+    })
+
+    it('summaryEligibleDraftFields excludes attachment, detail and explanation fields (and blank ids)', () => {
+      const fields = [
+        { id: 'amount', type: 'number', label: '金额' },
+        { id: 'file', type: 'attachment', label: '附件' },
+        { id: 'items', type: 'detail', label: '明细' },
+        { id: 'tip', type: 'explanation', label: '说明' },
+        { id: '  ', type: 'text', label: '空 id' },
+        { id: 'note', type: 'text', label: '备注' },
+      ]
+      expect(summaryEligibleDraftFields({ fields } as any).map((field) => field.id)).toEqual(['amount', 'note'])
+    })
+  })
+
   it('preserves visibilityRule metadata while rebuilding supported fields', () => {
     const template = buildVisibilityTemplate()
     const draft = draftFromTemplate(template)
@@ -2252,6 +2316,70 @@ describe('TemplateAuthoringView', () => {
     const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
     const node = payload.approvalGraph.nodes.find((candidate: any) => candidate.key === 'approval_1')
     expect(node.config.fieldPermissions).toEqual([{ fieldId: 'amount', access: 'readonly' }]) // WRITTEN via the control
+  })
+
+  it('列表摘要字段: the basic-info select shows the configured ids and writes the picked ids to the save payload', async () => {
+    setRouteParams({ id: 'tpl_summary_fields' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额', required: true },
+          { id: 'reviewer', type: 'user', label: '审批人', required: true },
+          { id: 'note', type: 'text', label: '备注' },
+          // 明细字段不可选，不应出现在选项里
+          {
+            id: 'items', type: 'detail', label: '明细', required: false,
+            columns: [{ id: 'line_note', type: 'text', label: '行备注', required: false }],
+          },
+        ],
+        summaryFieldIds: ['note'],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    const select = container!.querySelector('[data-testid="approval-template-summary-fields"]') as HTMLSelectElement
+    expect(select).not.toBeNull()
+    expect(JSON.parse(select.getAttribute('data-model-value')!)).toEqual(['note'])
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(['amount', 'reviewer', 'note'])
+    expect(Array.from(select.options).map((option) => option.value)).not.toContain('items')
+    expect(container!.querySelector('[data-testid="approval-template-summary-fields-hint"]')?.textContent).toContain('最多选 5 个')
+    // 摘要按单据发起时的模板版本解释：提示作者配置对已发起的单据不生效。
+    expect(container!.querySelector('[data-testid="approval-template-summary-fields-hint"]')?.textContent).toContain('发布后对新发起的单据生效')
+
+    pickOptions(select, ['amount', 'note'])
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.formSchema.summaryFieldIds).toEqual(['amount', 'note'])
+  })
+
+  it('列表摘要字段: clearing the select saves without the key (back to the default first 3 fields)', async () => {
+    setRouteParams({ id: 'tpl_summary_clear' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额', required: true },
+          { id: 'reviewer', type: 'user', label: '审批人', required: true },
+        ],
+        summaryFieldIds: ['reviewer'],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    const select = container!.querySelector('[data-testid="approval-template-summary-fields"]') as HTMLSelectElement
+    pickOptions(select, [])
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect('summaryFieldIds' in payload.formSchema).toBe(false)
   })
 
   it('T1-4 routing hint: hiding a form_field_user routing-driver field renders the routing hint and does NOT block save (non-blocking)', async () => {

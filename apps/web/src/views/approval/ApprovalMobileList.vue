@@ -132,8 +132,9 @@ function formatDate(dateStr: string): string {
   return new Date(dateStr).toLocaleString(t.value.dateLocale)
 }
 
-// B2-01: same row-summary glue the desktop table uses, resolved against the `templateSchemas`
-// cache the parent owns and passes down as a prop.
+// B2-01: same row-summary glue the desktop table uses: the row's own version-pinned
+// `summarySchema` first, the `templateSchemas` live cache (owned by the parent, passed down as a
+// prop) only for rows without one.
 function rowSummaryLine(row: UnifiedApprovalDTO): string {
   return resolveRowSummaryLine(props.templateSchemas, row, isZh.value)
 }

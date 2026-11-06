@@ -532,7 +532,13 @@ export interface FormSchema {
   // whose top-level total ≠ the sum of the detail-row amounts. Authored here / preserved by the backend
   // assertFormSchema; the FE just carries it verbatim (the backend is the sole arbiter).
   amountConsistencyCheck?: AmountConsistencyMapping
+  // 列表摘要字段：列表 / 审批中心行摘要显示的字段 id（按此顺序，最多 FORM_SCHEMA_SUMMARY_FIELD_MAX 个）。
+  // 不设或空数组 = 默认「前 3 个字段」。后端 assertFormSchema 校验并保留。
+  summaryFieldIds?: string[]
 }
+
+// 与后端 packages/core-backend/src/types/approval-product.ts 的同名常量保持一致。
+export const FORM_SCHEMA_SUMMARY_FIELD_MAX = 5
 
 export interface ApprovalRequesterSnapshot {
   id?: string
@@ -583,6 +589,9 @@ export interface UnifiedApprovalDTO {
   // Frozen form schema from the instance's pinned template version (detail `columns` included),
   // so the detail view renders rows from the FROZEN schema, not the live template.
   formSchema?: FormSchema | null
+  // 列表摘要用的表单结构，只在列表接口上出现：取自单据绑定的模板版本（不是最新模板），只含这一行
+  // 快照里有值的可用字段和该版本的摘要字段配置。没有绑定版本的行不带这个键。
+  summarySchema?: FormSchema | null
   currentNodeKey?: string | null
   /**
    * Lock-3 §2.2 — the current node's TYPE (mirrors backend). The member 待办 center reads this to
