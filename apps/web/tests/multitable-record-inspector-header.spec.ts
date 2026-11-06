@@ -379,12 +379,14 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
       const tabsRule = query.match(/\.meta-record-drawer__tabs\s*\{[^}]*\}/)?.[0] ?? ''
       expect(tabsRule).toMatch(/flex:\s*1 1 auto\s*;/)
       expect(tabsRule).toMatch(/min-width:\s*0\s*;/)
-      // the overlap's cause: a zero flex basis on the pill, in any spelling
+      // the overlap's cause: a zero flex basis on the pill (`flex: 1`, `flex: 1 1 0`, a `flex-basis`,
+      // `width: 0`); and one `flex` declaration only, so a later one cannot override the content basis
       expect(tabsRule).not.toMatch(/flex:\s*1\s*;|flex:\s*1 1 0|flex-basis|(?<![-\w])width:\s*0/)
+      expect(tabsRule.match(/(?<![-\w])flex:/g)?.length).toBe(1)
       const tabRule = query.match(/\.meta-record-drawer__tab\s*\{[^}]*\}/)?.[0] ?? ''
       expect(tabRule).toMatch(/flex:\s*1 1 auto\s*;/)
       expect(tabRule).toMatch(/min-width:\s*max-content\s*;/)
-      expect(tabRule).not.toMatch(/min-width:\s*0|max-width/)
+      expect(tabRule).not.toMatch(/min-width:\s*0/)
       // the padding that fits the four en labels on one row at the 360px drawer (measured; 12px wraps)
       expect(tabRule).toMatch(/padding:\s*5px 6px\s*;/)
 

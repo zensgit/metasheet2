@@ -2054,8 +2054,10 @@ function formatCommentTimestamp(iso: string): string {
    (2026-11-06: it only actually wraps since the @container block below gave the pill a content-sized
    flex basis -- see that block's last paragraph. It stays beside the pill whenever both fit. Measured
    on 360-520px drawers: with the zh-CN labels, beside it at every width; with the en labels, under it,
-   except in Chromium at 443-452px (the narrow block has ended, the bar has room) and from 514px; in
-   Safari, whose en labels are wider, under it at every width measured.) */
+   except in Chromium at 443-452px and from 514px; in Safari, whose en labels are wider, under it at
+   every width measured. The 443-452px band is still the narrow rules: the 283px pill and the toggle
+   just fit the 410-419px bar there; at 453px the block ends, the pill widens to 355px and the toggle
+   wraps again.) */
 .meta-record-drawer__hide-empty { margin-left: auto; flex: 0 0 auto; }
 /* P2 (2026-09-05 follow-up, verifier P2): was `inline-flex` with no wrapping -- at the (then-320px,
    now 360px) panel minimum the 4-tab pill's un-wrapped content width (355px measured in Chromium) ran
@@ -2134,8 +2136,9 @@ function formatCommentTimestamp(iso: string): string {
    labels on one row in the 327px of bar content at the 360px drawer: the pill's content width is then
    283px (Chromium) / 292px (Safari) for en and ~165px for zh-CN (the pill then grows to fill its row);
    at 12px it is 331 / 340px and would wrap. The narrow-viewport overlay drawer can be narrower than 360
-   (min(360px, 100vw - 32px)); there the en tabs wrap onto a second pill row, as designed, without
-   overlapping. The 16px radius is the same pill on one row and a rounded box, not a stadium, when it
+   (min(360px, 100vw - 32px)): the en tabs stay on one row down to a 317px drawer (Chromium) / 325px
+   (Safari) and below that wrap onto a second pill row, as designed, without overlapping (measured
+   286-332px). The 16px radius is the same pill on one row and a rounded box, not a stadium, when it
    wraps. Measured on the real component in Safari 26.6 and Chromium, en + zh-CN, 360/400/440/480px
    drawers, Details and History tabs: one row, no tab narrower than its label, the toggle never over
    the pill, no horizontal overflow. */
