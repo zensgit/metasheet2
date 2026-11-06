@@ -18,7 +18,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App, type VNodeChild } from 'vue'
 import MetaRecordInspector from '../src/multitable/components/MetaRecordInspector.vue'
-import { createWorkbenchUndo } from '../src/multitable/utils/workbench-undo'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo } from '../src/multitable/utils/workbench-undo'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
 import { recordLabel } from '../src/multitable/utils/meta-record-labels'
@@ -1033,49 +1033,98 @@ describe('MetaRecordInspector title keys during an input-method composition', ()
   })
 })
 
-// The workbench's own undo (utils/workbench-undo.ts) with the REAL inspector: when grid undo (or a record
-// switch) rewrites the focused title, the title's typing history no longer describes it, so the next
-// Cmd+Z is the grid's again, never a restore of the stale draft.
-describe('MetaRecordInspector title and the workbench-owned undo', () => {
-  it('a re-render that rewrites the focused title drops its typing history: the next Cmd+Z is the grid\'s', async () => {
-    const record = ref<MetaRecord>(RECORD)
+// The workbench's own undo (utils/workbench-undo.ts) with the REAL inspector and fields panel, wired the
+// way MultitableWorkbench wires it: installed on the document; a drawer `patch` marks a commit of that
+// field's controls (drawerCommitContainers) and settles it at once, as an accepted server patch does.
+describe('MetaRecordInspector and the workbench-owned undo', () => {
+  const removers: Array<() => void> = []
+  afterEach(() => { while (removers.length) removers.pop()!() })
+
+  function mountWithUndo(record = ref<MetaRecord>(RECORD)) {
     const undo = createWorkbenchUndo()
     const gridUndo = vi.fn()
+    const patches: string[] = []
+    removers.push(installWorkbenchUndo(undo, { undo: gridUndo, redo: vi.fn() }))
     const { container } = mountApp(() =>
-      h('div', {
-        onKeydown: (e: KeyboardEvent) => { const a = undo.decide(e); if (a !== 'none') { e.preventDefault(); if (a === 'grid-undo') gridUndo() } },
-        onBeforeinput: undo.onBeforeInput,
-        onInput: undo.onInput,
-        onChange: undo.onChange,
-      }, [h(MetaRecordInspector, {
+      h(MetaRecordInspector, {
         visible: true, record: record.value, fields: FIELDS, canEdit: true, canComment: false, canDelete: false,
         recordIds: ['rec_1'], sheetId: 'sheet_1', apiClient: fakeApiClient() as any,
-      })]),
+        onPatch: (fieldId: string, value: unknown) => {
+          patches.push(`${fieldId}=${String(value)}`)
+          undo.beginCommit(drawerCommitContainers(fieldId, resolvePrimaryField(FIELDS)?.id))()
+        },
+      }),
     )
-    await flushUi()
-    const input = container.querySelector<HTMLInputElement>('.meta-record-drawer__title-input')!
-    input.focus()
-    input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText' }))
-    input.value = 'Alpha draft'
-    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
-    const cmdZ = () => {
-      const event = new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true })
-      input.dispatchEvent(event)
+    const title = () => container.querySelector<HTMLInputElement>('.meta-record-drawer__title-input')!
+    const typeInto = (el: HTMLInputElement | HTMLTextAreaElement, next: string) => {
+      el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText' }))
+      el.value = next
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+    }
+    const press = (el: HTMLElement, init: KeyboardEventInit) => {
+      const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+      el.dispatchEvent(event)
       return event.defaultPrevented
     }
+    return { container, record, gridUndo, patches, title, typeInto, press }
+  }
+
+  it('a re-render that rewrites the focused title drops its typing history: the next Cmd+Z is the grid\'s', async () => {
+    const { record, gridUndo, title, typeInto, press } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha draft')
     // own typing: undone from the title's history, no grid call
-    expect(cmdZ()).toBe(true)
+    expect(press(input, { key: 'z', metaKey: true })).toBe(true)
     expect(input.value).toBe('Alpha')
     expect(gridUndo).not.toHaveBeenCalled()
     // redo it, then the record changes underneath (as grid undo or a record switch does)
-    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Z', metaKey: true, shiftKey: true, bubbles: true, cancelable: true }))
+    expect(press(input, { key: 'Z', metaKey: true, shiftKey: true })).toBe(true)
     expect(input.value).toBe('Alpha draft')
     record.value = { id: 'rec_1', version: 2, data: { fld_title: 'Server value', fld_notes: '' } } as MetaRecord
     await flushUi()
     expect(input.value).toBe('Server value')
     expect(document.activeElement).toBe(input)
-    expect(cmdZ()).toBe(true)
+    expect(press(input, { key: 'z', metaKey: true })).toBe(true)
     expect(gridUndo).toHaveBeenCalledTimes(1)
     expect(input.value).toBe('Server value')
+  })
+
+  it('a title commit (Enter, then the change the blur fires) ends the title\'s history: the next Cmd+Z is the grid\'s, with no second patch', async () => {
+    const { gridUndo, patches, title, typeInto, press } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha draft')
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(patches).toEqual(['fld_title=Alpha draft'])
+    input.focus()
+    expect(press(input, { key: 'z', metaKey: true })).toBe(true)
+    expect(gridUndo).toHaveBeenCalledTimes(1)
+    // not restored to the pre-commit 'Alpha' (which the next blur would save back): still the commit
+    expect(input.value).toBe('Alpha draft')
+    expect(patches).toEqual(['fld_title=Alpha draft'])
+  })
+
+  it('drawerCommitContainers finds the REAL fields panel row (and the title for the primary field), so a field commit ends that control\'s history', async () => {
+    const { container, gridUndo, title, typeInto, press } = mountWithUndo()
+    await flushUi()
+    const [notesRow] = drawerCommitContainers('fld_notes', 'fld_title')
+    expect(notesRow).toBeTruthy()
+    const notes = notesRow.querySelector<HTMLTextAreaElement>('textarea')!
+    expect(notes).toBeTruthy()
+    expect(container.contains(notes)).toBe(true)
+    expect(drawerCommitContainers('fld_title', 'fld_title')).toContain(title())
+    notes.focus()
+    typeInto(notes, 'a note')
+    notes.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    notes.focus()
+    expect(press(notes, { key: 'z', metaKey: true })).toBe(true)
+    expect(gridUndo).toHaveBeenCalledTimes(1)
+    expect(notes.value).toBe('a note')
   })
 })

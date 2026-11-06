@@ -1,5 +1,5 @@
 <template>
-  <div class="mt-workbench" @keydown="onGlobalKeydown" @beforeinput="workbenchUndo.onBeforeInput" @input="workbenchUndo.onInput" @change="workbenchUndo.onChange">
+  <div ref="workbenchRootRef" class="mt-workbench" @keydown="onGlobalKeydown">
     <MetaToast ref="toastRef" />
     <div v-if="grid.conflict.value" class="mt-workbench__conflict" role="alert">
       <div class="mt-workbench__conflict-copy">
@@ -862,7 +862,7 @@ import {
   saveTplSource as fmtSaveTplSource,
 } from '../utils/workbench-labels'
 import { recordApprovalSubmittedToast, recordLabel } from '../utils/meta-record-labels'
-import { createWorkbenchUndo } from '../utils/workbench-undo'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo } from '../utils/workbench-undo'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
 import { DEFAULT_GRID_PAGE_SIZE, GRID_PAGE_SIZE_OPTIONS, clampGridPageSize, readGridPageSize, writeGridPageSize } from '../utils/grid-page-size'
 import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
@@ -3656,17 +3656,18 @@ function clearInspectorFieldError(fieldId: string, onlyOrigin?: InspectorFieldEr
 }
 
 async function onDrawerPatch(fieldId: string, value: unknown) {
-  // The field committed: its controls' own typing history ends, so Cmd+Z there is the grid's again. Some
-  // commits come without a DOM `change` (the rich-text editor's Cmd/Ctrl+Enter keeps focus).
-  workbenchUndo.commitWithin(Array.from(document.querySelectorAll<HTMLElement>('.meta-record-drawer__field')).find((el) => el.dataset.fieldId === fieldId) ?? null)
   if (!selectedRecordResolved.value) return
   const record = selectedRecordResolved.value
   if (!ensureCanEditRecord(record.id)) return
+  // Once the server accepts the field, its controls' own edit history ends at this commit, so Cmd+Z there
+  // is the grid's again (which undoes this very commit). Marked now, settled only on success: a rejected
+  // patch keeps the typing undoable.
+  const settleUndo = workbenchUndo.beginCommit(drawerCommitContainers(fieldId, resolvePrimaryField(scopedAllFields.value)?.id))
   if (manualRowsEditGate.value && isManualRowRecord(record.id)) {
-    await runManualDrawerPatch(record.id, fieldId, value)
+    await runManualDrawerPatch(record.id, fieldId, value, settleUndo)
     return
   }
-  await commitDrawerPatch(record, fieldId, value)
+  await commitDrawerPatch(record, fieldId, value, false, settleUndo)
 }
 
 // 人工补充行 B3 (ADR §3.4 「抽屉里一次保存分两步」): on a manual row the drawer's saves run ONE AT A TIME per record — a
@@ -3681,12 +3682,12 @@ function drawerRecordById(recordId: string): MetaRecord | null {
   return grid.rows.value.find((row) => row.id === recordId) ?? null
 }
 
-async function runManualDrawerPatch(recordId: string, fieldId: string, value: unknown): Promise<void> {
+async function runManualDrawerPatch(recordId: string, fieldId: string, value: unknown, onCommitted?: () => void): Promise<void> {
   const previous = manualDrawerWriteTails.get(recordId) ?? Promise.resolve()
   const step = previous.then(async () => {
     // Re-read AFTER the previous step: its returned version is on the row by now.
     const current = drawerRecordById(recordId)
-    if (current) await commitDrawerPatch(current, fieldId, value, true)
+    if (current) await commitDrawerPatch(current, fieldId, value, true, onCommitted)
   })
   const tail = step.then(() => undefined, () => undefined)
   manualDrawerWriteTails.set(recordId, tail)
@@ -3697,7 +3698,7 @@ async function runManualDrawerPatch(recordId: string, fieldId: string, value: un
   }
 }
 
-async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, manualRow = false) {
+async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, manualRow = false, onCommitted?: () => void) {
   const patchOwner = {}
   inspectorPatchOwners.set(fieldId, patchOwner)
   // 人工补充行 B3: a manual row's step keeps the version the server returned (the next step carries it).
@@ -3754,6 +3755,7 @@ async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unk
     showError(grid.error.value)
     return
   }
+  onCommitted?.()
   // A successful patch of a field clears that field's error, whichever path wrote it (and, via the
   // panel's watch, its draft). Other fields' errors are untouched.
   if (latestRequest) clearInspectorFieldError(fieldId)
@@ -5730,19 +5732,21 @@ function onBeforeUnload(e: BeforeUnloadEvent) {
   e.returnValue = ''
 }
 
-// mod+z / mod+y / mod+shift+z belong to the workbench (utils/workbench-undo.ts): the browser's own undo
-// never runs here, since it is page-wide and can revert another field. Typing in a control is undone
-// from that control's own history first; otherwise the grid's undo/redo runs, as before.
-const workbenchUndo = createWorkbenchUndo()
+// mod+z / mod+y / mod+shift+z belong to the workbench while it is mounted (utils/workbench-undo.ts,
+// installed on the document in onMounted): the browser's own undo never runs on the page, since it is
+// page-wide and can revert another field. A control's own edits are undone from its own history first;
+// otherwise the grid's undo/redo runs when focus is in the workbench (or on the page itself).
+const workbenchRootRef = ref<HTMLElement | null>(null)
+const workbenchUndo = createWorkbenchUndo({
+  isWorkbenchTarget: (target) => {
+    const node = target as Node | null
+    if (!node || node === document || node === document.documentElement || node === document.body) return true
+    return !!workbenchRootRef.value?.contains(node)
+  },
+})
+let removeWorkbenchUndo: (() => void) | null = null
 
 function onGlobalKeydown(e: KeyboardEvent) {
-  const undoAction = workbenchUndo.decide(e)
-  if (undoAction !== 'none') {
-    e.preventDefault()
-    if (undoAction === 'grid-undo') grid.undo()
-    else if (undoAction === 'grid-redo') grid.redo()
-    return
-  }
   // '?' toggles the shortcuts overlay, except while typing: in a form control or in an editable surface
   // (the rich-text editor is a contenteditable div, not an input).
   if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) { showShortcuts.value = !showShortcuts.value }
@@ -6435,6 +6439,7 @@ watch(
 )
 
 onMounted(async () => {
+  removeWorkbenchUndo = installWorkbenchUndo(workbenchUndo, { undo: () => grid.undo(), redo: () => grid.redo() })
   window.addEventListener('beforeunload', onBeforeUnload)
   syncRailViewportState() // UI-P2-2c: establish narrow/wide state at mount. Runs in onMounted (AFTER the
   // first paint), so a narrow viewport may show the expanded rail for one frame before auto-collapse;
@@ -6521,6 +6526,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  removeWorkbenchUndo?.()
+  removeWorkbenchUndo = null
   workbenchAlive = false
   closeConfigHistory()
   window.removeEventListener('beforeunload', onBeforeUnload)

@@ -1221,7 +1221,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
 import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
-import { createWorkbenchUndo, textEntryHost } from '../src/multitable/utils/workbench-undo'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, textEntryHost } from '../src/multitable/utils/workbench-undo'
 import { useLocale } from '../src/composables/useLocale'
 
 async function flushUi(cycles = 5): Promise<void> {
@@ -5635,68 +5635,123 @@ describe('MultitableWorkbench view wiring', () => {
       }
     })
   })
-  // mod+z / mod+y / mod+shift+z belong to the workbench (utils/workbench-undo.ts): the browser's own,
-  // page-wide undo never runs here. A control's own typing is undone from its own history first;
-  // otherwise the grid's undo/redo runs, as before.
+  // mod+z / mod+y / mod+shift+z belong to the workbench while it is mounted (utils/workbench-undo.ts, on
+  // the document, capture phase): the browser's own, page-wide undo never runs. A control's own edits are
+  // undone from its own history first; otherwise the grid's undo/redo runs when focus is in the workbench
+  // or on the page itself, and nothing runs outside it.
   describe('workbench-owned undo (utils/workbench-undo.ts)', () => {
     const made: HTMLElement[] = []
-    afterEach(() => { while (made.length) made.pop()!.remove() })
+    const removers: Array<() => void> = []
+    afterEach(() => {
+      while (removers.length) removers.pop()!()
+      while (made.length) made.pop()!.remove()
+    })
     const CHORDS: KeyboardEventInit[] = [
       { key: 'z', metaKey: true }, { key: 'z', ctrlKey: true }, { key: 'Z', metaKey: true, shiftKey: true },
       { key: 'z', ctrlKey: true, shiftKey: true }, { key: 'y', ctrlKey: true }, { key: 'y', metaKey: true },
     ]
+    function withProps<T extends Event>(event: T, props: Record<string, unknown>): T {
+      for (const [name, value] of Object.entries(props)) {
+        if ((event as unknown as Record<string, unknown>)[name] !== value) Object.defineProperty(event, name, { value })
+      }
+      return event
+    }
+    /** A root standing in for `.mt-workbench`, an element outside it (a teleported dialog), and the
+     *  module installed on the document the way the workbench installs it. */
     function rig() {
       let clock = 0
-      const undo = createWorkbenchUndo({ now: () => clock })
       const root = document.createElement('div')
-      document.body.appendChild(root)
-      made.push(root)
-      root.addEventListener('beforeinput', undo.onBeforeInput)
-      root.addEventListener('input', undo.onInput)
-      root.addEventListener('change', undo.onChange)
-      const add = <T extends HTMLElement>(el: T): T => { root.appendChild(el); return el }
-      const inputEvent = (type: string, inputType: string) => {
-        const event = new InputEvent(type, { bubbles: true, cancelable: true, inputType })
-        if (event.inputType !== inputType) Object.defineProperty(event, 'inputType', { value: inputType })
-        return event
+      const outside = document.createElement('div')
+      document.body.append(root, outside)
+      made.push(root, outside)
+      const undo = createWorkbenchUndo({
+        now: () => clock,
+        isWorkbenchTarget: (target) => {
+          const node = target as Node | null
+          return !node || node === document || node === document.body || node === document.documentElement || root.contains(node)
+        },
+      })
+      const grid = { undo: 0, redo: 0 }
+      removers.push(installWorkbenchUndo(undo, { undo: () => { grid.undo += 1 }, redo: () => { grid.redo += 1 } }))
+      const add = <T extends HTMLElement>(el: T, where: HTMLElement = root): T => { where.appendChild(el); return el }
+      const editable = (where: HTMLElement = root) => {
+        const el = add(document.createElement('div'), where)
+        el.setAttribute('contenteditable', 'true')
+        el.tabIndex = 0
+        return el
+      }
+      const setContent = (host: HTMLElement, next: string) => {
+        if (host instanceof HTMLInputElement || host instanceof HTMLTextAreaElement) host.value = next
+        else host.innerHTML = next
       }
       /** One user edit the way a browser reports it: beforeinput, the DOM change, input. */
       const edit = (host: HTMLElement, next: string, inputType = 'insertText', advance = 100) => {
         clock += advance
-        host.dispatchEvent(inputEvent('beforeinput', inputType))
-        if (host instanceof HTMLInputElement || host instanceof HTMLTextAreaElement) host.value = next
-        else host.innerHTML = next
-        host.dispatchEvent(inputEvent('input', inputType))
+        host.dispatchEvent(withProps(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType }), { inputType }))
+        setContent(host, next)
+        host.dispatchEvent(withProps(new InputEvent('input', { bubbles: true, inputType }), { inputType }))
       }
-      const key = (host: HTMLElement, init: KeyboardEventInit) => {
-        const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
-        Object.defineProperty(event, 'target', { value: host })
+      /** An edit through the editor's own execCommand: `input` with no `beforeinput`. */
+      const commandEdit = (host: HTMLElement, next: string, inputType = 'insertText') => {
+        setContent(host, next)
+        host.dispatchEvent(withProps(new InputEvent('input', { bubbles: true, inputType }), { inputType }))
+      }
+      /** What the module decides for this keydown (decided directly, not dispatched). */
+      const key = (target: EventTarget, init: KeyboardEventInit, extra: Record<string, unknown> = {}) => {
+        const event = withProps(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }), { target, ...extra })
         return undo.decide(event)
       }
+      /** A keydown dispatched for real: was it default-prevented, and did the grid's undo/redo run. */
+      const press = (target: EventTarget, init: KeyboardEventInit) => {
+        const before = { ...grid }
+        const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+        target.dispatchEvent(event)
+        return { prevented: event.defaultPrevented, undo: grid.undo - before.undo, redo: grid.redo - before.redo }
+      }
       const pause = (ms: number) => { clock += ms }
-      return { undo, root, add, edit, key, pause }
+      return { undo, root, outside, add, editable, edit, commandEdit, key, press, pause, grid }
     }
     const value = (el: HTMLElement) => (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ? el.value : el.innerHTML)
 
-    it('every chord is handled (never left to the browser) from every target, in every state', () => {
-      const { add, edit, key, root } = rig()
+    it('every chord is default-prevented from every target, in every state: inside the workbench, on the page itself, and outside it', () => {
+      const { add, editable, edit, press, root, outside } = rig()
       const textarea = add(document.createElement('textarea'))
       const text = add(Object.assign(document.createElement('input'), { type: 'text' }))
-      const editor = add(document.createElement('div'))
-      editor.setAttribute('contenteditable', 'true')
+      const editor = editable()
       const date = add(Object.assign(document.createElement('input'), { type: 'date' }))
       const select = add(document.createElement('select'))
       const checkbox = add(Object.assign(document.createElement('input'), { type: 'checkbox' }))
+      const outsideText = add(Object.assign(document.createElement('input'), { type: 'text' }), outside)
+      const outsideButton = add(document.createElement('button'), outside)
+      // a control that stops propagation of every key (like the comment affordance buttons)
+      const stopper = add(document.createElement('button'))
+      stopper.addEventListener('keydown', (event) => event.stopPropagation())
       edit(textarea, 'typed')
-      for (const target of [textarea, text, editor, date, select, checkbox, root]) {
+      for (const target of [textarea, text, editor, date, select, checkbox, root, document.body, outsideText, outsideButton, stopper]) {
         for (const init of CHORDS) {
-          expect(key(target, init), `${target.tagName} ${JSON.stringify(init)}`).not.toBe('none')
-          expect(key(target, { ...init, isComposing: true })).toBe('swallow')
-          expect(key(target, { ...init, keyCode: 229 })).toBe('swallow')
+          expect(press(target, init).prevented, `${(target as HTMLElement).tagName} ${JSON.stringify(init)}`).toBe(true)
+          expect(press(target, { ...init, isComposing: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         }
       }
-      expect(key(textarea, { key: 'z' })).toBe('none')
-      expect(key(textarea, { key: 'x', metaKey: true })).toBe('none')
+      expect(press(textarea, { key: 'z' }).prevented).toBe(false)
+      expect(press(textarea, { key: 'x', metaKey: true }).prevented).toBe(false)
+    })
+
+    it('where the chord goes once the control has no step: the grid inside the workbench and on the page itself; nothing outside it', () => {
+      const { add, edit, key, root, outside } = rig()
+      const inside = add(Object.assign(document.createElement('input'), { type: 'text' }))
+      const outsideText = add(Object.assign(document.createElement('input'), { type: 'text' }), outside)
+      const outsideButton = add(document.createElement('button'), outside)
+      expect(key(inside, { key: 'z', metaKey: true })).toBe('grid-undo')
+      expect(key(root, { key: 'Z', metaKey: true, shiftKey: true })).toBe('grid-redo')
+      expect(key(document.body, { key: 'z', metaKey: true })).toBe('grid-undo')
+      expect(key(outsideButton, { key: 'z', metaKey: true })).toBe('swallow')
+      expect(key(outsideText, { key: 'z', metaKey: true })).toBe('swallow')
+      // a control outside the workbench still has its own history
+      edit(outsideText, 'filter value')
+      expect(key(outsideText, { key: 'z', metaKey: true })).toBe('restored')
+      expect(outsideText.value).toBe('')
+      expect(key(outsideText, { key: 'z', metaKey: true })).toBe('swallow')
     })
 
     it('typing is undone and redone burst by burst from the control\'s own history, then the chord is the grid\'s; new typing clears redo', () => {
@@ -5722,18 +5777,20 @@ describe('MultitableWorkbench view wiring', () => {
       }
     })
 
-    it('a different kind of edit, a paste or a line break starts a new step', () => {
+    it('a different kind of edit starts a new step, and every paste or line break is a step of its own', () => {
       const { add, edit, key } = rig()
       const host = add(document.createElement('textarea'))
       edit(host, 'ab'); edit(host, 'abc')
       edit(host, 'ab', 'deleteContentBackward')
       edit(host, 'ab pasted', 'insertFromPaste')
-      expect(key(host, { key: 'z', metaKey: true })).toBe('restored')
-      expect(host.value).toBe('ab')
-      expect(key(host, { key: 'z', metaKey: true })).toBe('restored')
-      expect(host.value).toBe('abc')
-      expect(key(host, { key: 'z', metaKey: true })).toBe('restored')
-      expect(host.value).toBe('')
+      edit(host, 'ab pasted pasted', 'insertFromPaste')
+      edit(host, 'ab pasted pasted\n', 'insertLineBreak')
+      edit(host, 'ab pasted pasted\n\n', 'insertLineBreak')
+      for (const expected of ['ab pasted pasted\n', 'ab pasted pasted', 'ab pasted', 'ab', 'abc', '']) {
+        expect(key(host, { key: 'z', metaKey: true })).toBe('restored')
+        expect(host.value).toBe(expected)
+      }
+      expect(key(host, { key: 'z', metaKey: true })).toBe('grid-undo')
     })
 
     it('a step that would change nothing (a beforeinput no edit followed) is skipped: one press always does something', () => {
@@ -5742,98 +5799,286 @@ describe('MultitableWorkbench view wiring', () => {
       edit(host, 'ab')
       pause(2000)
       // Backspace in a box with nothing to delete, or an edit someone cancelled: beforeinput, no input
-      host.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'deleteContentBackward' }))
+      host.dispatchEvent(withProps(new InputEvent('beforeinput', { bubbles: true, cancelable: true }), { inputType: 'deleteContentBackward' }))
       expect(key(host, { key: 'z', metaKey: true })).toBe('restored')
       expect(host.value).toBe('')
     })
 
-    it('a restore tells the control\'s listeners (input) and is not itself recorded as typing', () => {
-      const { add, edit, key } = rig()
+    it('a restore tells the control\'s listeners (input), plain box and editable surface alike, and is not itself recorded as an edit', () => {
+      const { add, editable, edit, key } = rig()
       const host = add(document.createElement('textarea'))
-      const seen: string[] = []
-      host.addEventListener('input', () => { seen.push(host.value) })
-      edit(host, 'one')
-      seen.length = 0
-      expect(key(host, { key: 'z', metaKey: true })).toBe('restored')
-      expect(seen).toEqual([''])
-      expect(key(host, { key: 'Z', metaKey: true, shiftKey: true })).toBe('restored')
-      expect(host.value).toBe('one')
-      expect(key(host, { key: 'Z', metaKey: true, shiftKey: true })).toBe('grid-redo')
+      const editor = editable()
+      for (const el of [host, editor]) {
+        const seen: string[] = []
+        el.addEventListener('input', () => { seen.push(value(el)) })
+        edit(el, 'one')
+        seen.length = 0
+        expect(key(el, { key: 'z', metaKey: true })).toBe('restored')
+        expect(seen).toEqual([''])
+        expect(key(el, { key: 'Z', metaKey: true, shiftKey: true })).toBe('restored')
+        expect(value(el)).toBe('one')
+        expect(key(el, { key: 'Z', metaKey: true, shiftKey: true })).toBe('grid-redo')
+      }
     })
 
-    it('content no recorded input produced (a re-render, a chip, a picked suggestion) drops the history: the chord is the grid\'s', () => {
-      const { add, edit, key } = rig()
+    it('content no recorded edit produced (a re-render, a chip, a picked suggestion) drops the history, at the next chord or the next edit', () => {
+      const { add, editable, edit, key } = rig()
       const text = add(document.createElement('textarea'))
       edit(text, 'typed')
       text.value = 'rewritten by a re-render'
       expect(key(text, { key: 'z', metaKey: true })).toBe('grid-undo')
       expect(text.value).toBe('rewritten by a re-render')
-      expect(key(text, { key: 'z', metaKey: true })).toBe('grid-undo')
-      // typing after a rewrite starts a fresh history from the rewritten content
-      edit(text, 'rewritten by a re-render!')
-      expect(key(text, { key: 'z', metaKey: true })).toBe('restored')
-      expect(text.value).toBe('rewritten by a re-render')
-      const editor = add(document.createElement('div'))
-      editor.setAttribute('contenteditable', 'true')
+      // typing straight after a rewrite (no chord in between) starts a fresh history from the rewrite
+      const other = add(document.createElement('textarea'))
+      edit(other, 'typed')
+      other.value = 'REWRITTEN'
+      edit(other, 'REWRITTEN!')
+      expect(key(other, { key: 'z', metaKey: true })).toBe('restored')
+      expect(other.value).toBe('REWRITTEN')
+      expect(key(other, { key: 'z', metaKey: true })).toBe('grid-undo')
+      const editor = editable()
       edit(editor, 'hi @')
       editor.innerHTML = 'hi <span contenteditable="false" data-mention-id="u1">@Jamie</span>'
       expect(key(editor, { key: 'z', metaKey: true })).toBe('grid-undo')
       expect(editor.innerHTML).toContain('data-mention-id')
     })
 
-    it('a formatting-only edit in an editable surface is typing too (content is compared as HTML)', () => {
-      const { add, edit, key } = rig()
-      const editor = add(document.createElement('div'))
-      editor.setAttribute('contenteditable', 'true')
+    it('a formatting-only change in an editable surface is an edit too, and a formatting-only rewrite is a rewrite (content is compared as HTML)', () => {
+      const { editable, edit, key } = rig()
+      const editor = editable()
       edit(editor, 'word')
       edit(editor, '<b>word</b>', 'formatBold')
       expect(key(editor, { key: 'z', metaKey: true })).toBe('restored')
       expect(editor.innerHTML).toBe('word')
-      // and a programmatic formatting-only rewrite (same text, other HTML) is a rewrite, not typing
       edit(editor, 'word!')
       editor.innerHTML = '<i>word!</i>'
       expect(key(editor, { key: 'z', metaKey: true })).toBe('grid-undo')
       expect(editor.innerHTML).toBe('<i>word!</i>')
     })
 
-    it('a commit ends the history: a DOM change, or commitWithin on the control\'s container', () => {
-      const { add, edit, key, root } = rig()
-      const text = add(Object.assign(document.createElement('input'), { type: 'text' }))
-      edit(text, 'typed')
-      text.dispatchEvent(new Event('change', { bubbles: true }))
-      expect(key(text, { key: 'z', metaKey: true })).toBe('grid-undo')
-      const field = add(document.createElement('div'))
-      const editor = document.createElement('div')
-      editor.setAttribute('contenteditable', 'true')
-      field.appendChild(editor)
-      edit(editor, 'rich')
-      createWorkbenchUndo().commitWithin(null) // no container: nothing happens
+    it('an edit with no beforeinput (the rich editor\'s paste, drop and toolbar go through execCommand) is a step of its own, back to the content just before it', () => {
+      const { add, editable, edit, commandEdit, key } = rig()
+      // a paste into an editor that was never typed into: the paste event is the checkpoint
+      const editor = editable()
+      editor.innerHTML = 'rich'
+      editor.dispatchEvent(new Event('paste', { bubbles: true, cancelable: true }))
+      commandEdit(editor, 'rich PASTED')
       expect(key(editor, { key: 'z', metaKey: true })).toBe('restored')
-      edit(editor, 'rich again')
-      expect(root.contains(field)).toBe(true)
+      expect(editor.innerHTML).toBe('rich')
+      expect(key(editor, { key: 'z', metaKey: true })).toBe('grid-undo')
+      // a toolbar press (focus stays in the editor) after typing: typing, then bold, are two steps
+      const other = editable()
+      other.focus()
+      expect(document.activeElement).toBe(other)
+      edit(other, 'word')
+      const bold = add(document.createElement('button'))
+      bold.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+      commandEdit(other, '<b>word</b>', 'formatBold')
+      expect(key(other, { key: 'z', metaKey: true })).toBe('restored')
+      expect(other.innerHTML).toBe('word')
+      expect(key(other, { key: 'z', metaKey: true })).toBe('restored')
+      expect(other.innerHTML).toBe('')
+      // the toolbar press makes the checkpoint: the editor was re-rendered while it kept focus, so the
+      // bold goes back to the re-rendered content, never to the stale typing before it
+      edit(other, 'typed')
+      other.innerHTML = 'from a re-render'
+      bold.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+      commandEdit(other, '<b>from a re-render</b>', 'formatBold')
+      expect(key(other, { key: 'z', metaKey: true })).toBe('restored')
+      expect(other.innerHTML).toBe('from a re-render')
+      // focus alone makes the checkpoint: a toolbar edit on content the editor got from a re-render
+      const third = editable()
+      third.innerHTML = 'from the server'
+      third.focus()
+      commandEdit(third, '<b>from the server</b>', 'formatBold')
+      expect(key(third, { key: 'z', metaKey: true })).toBe('restored')
+      expect(third.innerHTML).toBe('from the server')
     })
 
-    it('commitWithin clears the controls inside the container only', () => {
-      const { undo, add, edit, key } = rig()
-      const field = add(document.createElement('div'))
-      const editor = document.createElement('div')
-      editor.setAttribute('contenteditable', 'true')
-      field.appendChild(editor)
-      const other = add(document.createElement('textarea'))
-      edit(editor, 'rich')
-      edit(other, 'other')
-      undo.commitWithin(field)
-      expect(key(editor, { key: 'z', metaKey: true })).toBe('grid-undo')
-      expect(key(other, { key: 'z', metaKey: true })).toBe('restored')
+    it('an input-method composition is one step back to the content before it; the marked text is never a step (Chromium and Safari orders)', () => {
+      const { add, edit, key, pause } = rig()
+      const composition = (host: HTMLInputElement, marked: string[], committed: string, safariOrder: boolean) => {
+        host.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+        for (const text of marked) {
+          pause(1500) // longer than the burst window: a pause on the candidate list
+          host.dispatchEvent(withProps(new InputEvent('beforeinput', { bubbles: true, cancelable: false, inputType: 'insertCompositionText' }), { inputType: 'insertCompositionText', isComposing: true }))
+          host.value = `ok ${text}`
+          host.dispatchEvent(withProps(new InputEvent('input', { bubbles: true, inputType: 'insertCompositionText' }), { inputType: 'insertCompositionText', isComposing: true }))
+        }
+        pause(1500)
+        if (safariOrder) {
+          host.dispatchEvent(withProps(new InputEvent('beforeinput', { bubbles: true, cancelable: false }), { inputType: 'deleteCompositionText', isComposing: true }))
+          host.value = 'ok '
+          host.dispatchEvent(withProps(new InputEvent('input', { bubbles: true }), { inputType: 'deleteCompositionText', isComposing: true }))
+          host.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: committed }))
+          host.dispatchEvent(withProps(new InputEvent('beforeinput', { bubbles: true, cancelable: true }), { inputType: 'insertFromComposition' }))
+          host.value = `ok ${committed}`
+          host.dispatchEvent(withProps(new InputEvent('input', { bubbles: true }), { inputType: 'insertFromComposition' }))
+        } else {
+          host.dispatchEvent(withProps(new InputEvent('beforeinput', { bubbles: true, cancelable: false }), { inputType: 'insertCompositionText', isComposing: true }))
+          host.value = `ok ${committed}`
+          host.dispatchEvent(withProps(new InputEvent('input', { bubbles: true }), { inputType: 'insertCompositionText', isComposing: true }))
+          host.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: committed }))
+        }
+      }
+      for (const safariOrder of [false, true]) {
+        const host = add(Object.assign(document.createElement('input'), { type: 'text' }))
+        edit(host, 'ok ')
+        pause(2000)
+        composition(host, ['n', 'ni', 'ni hao'], '你好', safariOrder)
+        expect(key(host, { key: 'z', metaKey: true }), `safari order: ${safariOrder}`).toBe('restored')
+        expect(host.value).toBe('ok ')
+        expect(key(host, { key: 'z', metaKey: true })).toBe('restored')
+        expect(host.value).toBe('')
+        expect(key(host, { key: 'Z', metaKey: true, shiftKey: true })).toBe('restored')
+        expect(key(host, { key: 'Z', metaKey: true, shiftKey: true })).toBe('restored')
+        expect(host.value).toBe('ok 你好')
+      }
+    })
+
+    it('the Edit menu\'s undo (beforeinput historyUndo/historyRedo) is cancelled: the control\'s own step when it has one, never the grid', () => {
+      const { add, edit, grid } = rig()
+      const host = add(document.createElement('textarea'))
+      edit(host, 'typed')
+      const menu = (inputType: string) => {
+        const event = withProps(new InputEvent('beforeinput', { bubbles: true, cancelable: true }), { inputType })
+        host.dispatchEvent(event)
+        return event.defaultPrevented
+      }
+      expect(menu('historyUndo')).toBe(true)
+      expect(host.value).toBe('')
+      expect(menu('historyRedo')).toBe(true)
+      expect(host.value).toBe('typed')
+      expect(menu('historyRedo')).toBe(true)
+      expect(menu('historyUndo')).toBe(true)
+      expect(menu('historyUndo')).toBe(true)
+      expect(host.value).toBe('')
+      expect(grid).toEqual({ undo: 0, redo: 0 })
+    })
+
+    it('a held key does not walk the grid\'s history back once a text control\'s steps are used up; a held key on the grid itself still does', () => {
+      const { add, edit, key, root } = rig()
+      const host = add(document.createElement('textarea'))
+      edit(host, 'typed')
+      expect(key(host, { key: 'z', metaKey: true, repeat: true })).toBe('restored')
+      expect(key(host, { key: 'z', metaKey: true, repeat: true })).toBe('swallow')
+      expect(key(host, { key: 'z', metaKey: true })).toBe('grid-undo')
+      expect(key(root, { key: 'z', metaKey: true, repeat: true })).toBe('grid-undo')
+    })
+
+    it('a number box holding a draft its value cannot report ("-") does nothing: no restore, no grid', () => {
+      const { add, key } = rig()
+      const host = add(Object.assign(document.createElement('input'), { type: 'number' }))
+      Object.defineProperty(host, 'validity', { value: { badInput: true } })
+      expect(key(host, { key: 'z', metaKey: true })).toBe('swallow')
+      expect(key(host, { key: 'Z', metaKey: true, shiftKey: true })).toBe('swallow')
+    })
+
+    it('a layout whose key is not a Latin letter is matched by the key\'s position (code)', () => {
+      const { root, key } = rig()
+      expect(key(root, { key: 'я', code: 'KeyZ', metaKey: true })).toBe('grid-undo')
+      expect(key(root, { key: 'Я', code: 'KeyZ', metaKey: true, shiftKey: true })).toBe('grid-redo')
+      expect(key(root, { key: 'н', code: 'KeyY', ctrlKey: true })).toBe('grid-redo')
+      expect(key(root, { key: 'ч', code: 'KeyX', metaKey: true })).toBe('none')
+    })
+
+    it('an editable surface\'s restore puts the caret back where it was, not at the end', () => {
+      const { editable, edit, key, pause } = rig()
+      const editor = editable()
+      editor.focus()
+      edit(editor, 'hello world')
+      pause(2000)
+      const text = editor.firstChild!
+      const selection = document.getSelection()!
+      const caret = document.createRange()
+      caret.setStart(text, 5)
+      caret.collapse(true)
+      selection.removeAllRanges()
+      selection.addRange(caret)
+      edit(editor, 'hello, world')
+      expect(key(editor, { key: 'z', metaKey: true })).toBe('restored')
+      expect(editor.innerHTML).toBe('hello world')
+      const range = document.getSelection()!.getRangeAt(0)
+      expect(range.startContainer.textContent).toBe('hello world')
+      expect(range.startOffset).toBe(5)
+    })
+
+    it('each control keeps at most 100 steps', () => {
+      const { add, edit, key } = rig()
+      const host = add(document.createElement('textarea'))
+      for (let i = 1; i <= 150; i += 1) edit(host, `${host.value}${i},`, 'insertFromPaste')
+      let restored = 0
+      while (key(host, { key: 'z', metaKey: true }) === 'restored') restored += 1
+      expect(restored).toBe(100)
+    })
+
+    it('a DOM change is not a commit: after a blur and back, the control\'s typing is still its own to undo', () => {
+      const { add, edit, key } = rig()
+      const host = add(document.createElement('textarea'))
+      host.focus()
+      edit(host, 'Please re-check')
+      host.dispatchEvent(new Event('change', { bubbles: true }))
+      host.blur()
+      host.focus()
+      expect(key(host, { key: 'z', metaKey: true })).toBe('restored')
+      expect(host.value).toBe('')
+    })
+
+    it('beginCommit: settled (the server accepted it) ends the history at the commit; edits made since stay undoable; unsettled (rejected) keeps it all', () => {
+      const { undo, add, edit, key, pause } = rig()
+      const row = (fieldId: string) => {
+        const el = add(document.createElement('div'))
+        el.className = 'meta-record-drawer__field'
+        el.dataset.fieldId = fieldId
+        return el
+      }
+      const accepted = row('fld_a')
+      const a = accepted.appendChild(document.createElement('textarea'))
+      edit(a, 'committed')
+      undo.beginCommit([accepted])()
+      expect(key(a, { key: 'z', metaKey: true })).toBe('grid-undo')
+      expect(a.value).toBe('committed')
+      const inFlight = row('fld_b')
+      const b = inFlight.appendChild(document.createElement('textarea'))
+      edit(b, 'committed')
+      const settle = undo.beginCommit([inFlight])
+      pause(2000)
+      edit(b, 'committed and more') // typed while the patch is in flight
+      settle()
+      expect(key(b, { key: 'z', metaKey: true })).toBe('restored')
+      expect(b.value).toBe('committed')
+      expect(key(b, { key: 'z', metaKey: true })).toBe('grid-undo')
+      const rejected = row('fld_c')
+      const c = rejected.appendChild(document.createElement('textarea'))
+      edit(c, 'rejected draft')
+      undo.beginCommit([rejected]) // never settled
+      expect(key(c, { key: 'z', metaKey: true })).toBe('restored')
+      expect(c.value).toBe('')
+    })
+
+    it('drawerCommitContainers: the field\'s fields-panel row, plus the title input when the field is the primary one', () => {
+      const { add } = rig()
+      const rowA = add(document.createElement('div'))
+      rowA.className = 'meta-record-drawer__field'
+      rowA.dataset.fieldId = 'fld_a'
+      const rowB = add(document.createElement('div'))
+      rowB.className = 'meta-record-drawer__field'
+      rowB.dataset.fieldId = 'fld_b'
+      const title = add(Object.assign(document.createElement('input'), { className: 'meta-record-drawer__title-input' }))
+      expect(drawerCommitContainers('fld_a', 'fld_a')).toEqual([rowA, title])
+      expect(drawerCommitContainers('fld_b', 'fld_a')).toEqual([rowB])
+      expect(drawerCommitContainers('fld_missing', null)).toEqual([])
     })
 
     it('classifies text-entry hosts: textarea, editable contenteditable (and a child), text-like inputs; not date/time, select, checkbox', () => {
-      const { add } = rig()
-      const editor = add(document.createElement('div'))
-      editor.setAttribute('contenteditable', 'true')
+      const { add, editable } = rig()
+      const editor = editable()
       const child = document.createElement('span')
       editor.appendChild(child)
       expect(textEntryHost(child)).toBe(editor)
+      const off = add(document.createElement('div'))
+      off.setAttribute('contenteditable', 'false')
+      expect(textEntryHost(off)).toBeNull()
       for (const t of ['text', 'search', 'number', 'email']) {
         const el = add(Object.assign(document.createElement('input'), { type: t }))
         expect(textEntryHost(el), t).toBe(el)
@@ -5844,16 +6089,8 @@ describe('MultitableWorkbench view wiring', () => {
       expect(textEntryHost(add(document.createElement('select')))).toBeNull()
     })
 
-    it('through the real workbench: every chord is default-prevented; typing is undone with no grid call, then the grid\'s undo runs; a date, a select and the main area run the grid\'s', async () => {
-      mountWorkbench()
-      await flushUi()
-      const root = container!.querySelector('.mt-workbench') as HTMLElement
-      const add = <T extends HTMLElement>(el: T): T => { root.appendChild(el); made.push(el); return el }
-      const text = add(Object.assign(document.createElement('input'), { type: 'text' }))
-      const date = add(Object.assign(document.createElement('input'), { type: 'date' }))
-      const select = add(document.createElement('select'))
-      const main = container!.querySelector('.mt-workbench__main') as HTMLElement
-      const fire = (el: HTMLElement, init: KeyboardEventInit) => {
+    describe('through the real workbench', () => {
+      const fire = (el: EventTarget, init: KeyboardEventInit) => {
         gridMock.undo.mockClear()
         gridMock.redo.mockClear()
         const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
@@ -5861,52 +6098,74 @@ describe('MultitableWorkbench view wiring', () => {
         return { prevented: event.defaultPrevented, undo: gridMock.undo.mock.calls.length, redo: gridMock.redo.mock.calls.length }
       }
       const typeInto = (el: HTMLInputElement, next: string) => {
-        el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText' }))
+        el.dispatchEvent(withProps(new InputEvent('beforeinput', { bubbles: true, cancelable: true }), { inputType: 'insertText' }))
         el.value = next
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+        el.dispatchEvent(withProps(new InputEvent('input', { bubbles: true }), { inputType: 'insertText' }))
       }
-      text.focus()
-      typeInto(text, 'typed')
-      expect(fire(text, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
-      expect(text.value).toBe('')
-      expect(fire(text, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 1, redo: 0 })
-      expect(fire(text, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
-      expect(text.value).toBe('typed')
-      expect(fire(text, { key: 'y', ctrlKey: true })).toEqual({ prevented: true, undo: 0, redo: 1 })
-      expect(fire(text, { key: 'z', metaKey: true, isComposing: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
-      for (const el of [date, select, main]) {
-        expect(fire(el, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 1, redo: 0 })
-        expect(fire(el, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 1 })
-      }
-    })
 
-    it('through the real workbench: a drawer commit with no DOM change (the rich-text editor\'s Cmd/Ctrl+Enter) ends that field\'s typing history', async () => {
-      mountWorkbench()
-      await flushUi()
-      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
-      await flushUi()
-      const drawer = container!.querySelector('[data-record-drawer="rec_1"]') as HTMLElement
-      expect(drawer).toBeTruthy()
-      const field = document.createElement('div')
-      field.className = 'meta-record-drawer__field'
-      field.dataset.fieldId = 'fld_title'
-      const editor = document.createElement('div')
-      editor.setAttribute('contenteditable', 'true')
-      field.appendChild(editor)
-      drawer.appendChild(field)
-      made.push(field)
-      editor.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText' }))
-      editor.innerHTML = 'typed'
-      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
-      // the stub drawer emits `patch` for fld_title the way the editor's Cmd+Enter commit does
-      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
-      await flushUi()
-      gridMock.undo.mockClear()
-      const event = new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true })
-      editor.dispatchEvent(event)
-      expect(event.defaultPrevented).toBe(true)
-      expect(gridMock.undo).toHaveBeenCalledTimes(1)
-      expect(editor.innerHTML).toBe('typed')
+      it('installed on mount: typing is undone with no grid call, then the grid\'s undo runs; the page itself runs the grid\'s; outside the workbench nothing runs; a control that stops propagation cannot get past it; removed on unmount', async () => {
+        mountWorkbench()
+        await flushUi()
+        const root = container!.querySelector('.mt-workbench') as HTMLElement
+        const add = <T extends HTMLElement>(el: T, where: HTMLElement = root): T => { where.appendChild(el); made.push(el); return el }
+        const text = add(Object.assign(document.createElement('input'), { type: 'text' }))
+        const date = add(Object.assign(document.createElement('input'), { type: 'date' }))
+        const select = add(document.createElement('select'))
+        const stopper = add(document.createElement('button'))
+        stopper.addEventListener('keydown', (event) => event.stopPropagation())
+        const outsideText = add(Object.assign(document.createElement('input'), { type: 'text' }), document.body)
+        const main = container!.querySelector('.mt-workbench__main') as HTMLElement
+        text.focus()
+        typeInto(text, 'typed')
+        expect(fire(text, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        expect(text.value).toBe('')
+        expect(fire(text, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 1, redo: 0 })
+        expect(fire(text, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        expect(text.value).toBe('typed')
+        expect(fire(text, { key: 'y', ctrlKey: true })).toEqual({ prevented: true, undo: 0, redo: 1 })
+        expect(fire(text, { key: 'z', metaKey: true, isComposing: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        for (const el of [date, select, main, stopper, document.body]) {
+          expect(fire(el, { key: 'z', metaKey: true }), (el as HTMLElement).tagName).toEqual({ prevented: true, undo: 1, redo: 0 })
+          expect(fire(el, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 1 })
+        }
+        expect(fire(outsideText, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        app!.unmount()
+        app = null
+        expect(fire(document.body, { key: 'z', metaKey: true })).toEqual({ prevented: false, undo: 0, redo: 0 })
+      })
+
+      it('a drawer commit the server accepted ends that field\'s history (the title, via the primary field); a rejected one keeps it', async () => {
+        mountWorkbench()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+        await flushUi()
+        const drawer = container!.querySelector('[data-record-drawer="rec_1"]') as HTMLElement
+        expect(drawer).toBeTruthy()
+        // fld_title is the primary field: its commit covers the title input
+        const title = Object.assign(document.createElement('input'), { type: 'text', className: 'meta-record-drawer__title-input' })
+        drawer.appendChild(title)
+        made.push(title)
+        title.focus()
+        typeInto(title, 'Renamed')
+        container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+        await flushUi()
+        expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Patched title', 1)
+        title.focus()
+        expect(fire(title, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 1, redo: 0 })
+        expect(title.value).toBe('Renamed')
+        // rejected: the typing stays undoable
+        gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string) => {
+          gridMock.error.value = 'Server said no'
+          return { recordId: 'rec_1', fieldId, attemptedValue: 'Patched title', message: 'Server said no', status: 500 }
+        })
+        typeInto(title, 'Renamed again')
+        container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+        await flushUi()
+        title.focus()
+        expect(fire(title, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        expect(title.value).toBe('Renamed')
+        gridMock.error.value = null
+      })
     })
   })
 })
