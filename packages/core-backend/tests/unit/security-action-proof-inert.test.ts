@@ -340,6 +340,47 @@ describe('module boundaries', () => {
     expect(text.split('securityActionParseErrorHandler')).toHaveLength(3)
     expect(importedNames(INDEX, './routes/security-actions')).toEqual(['securityActionParseErrorHandler', 'securityActionsRouter'])
   })
+
+  it('leaves the global body parsers, the application settings and the order of the pipeline before the route as they are, and the route module parses nothing itself', () => {
+    const source = parse(INDEX)
+    const text = readFileSync(INDEX, 'utf8')
+    const parsers: string[] = []
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression)
+        && ['express', 'bodyParser'].includes(node.expression.expression.text) && ['json', 'urlencoded', 'text', 'raw'].includes(node.expression.name.text)) {
+        parsers.push(node.getText(source))
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(source)
+    expect(parsers).toEqual([
+      'express.json({ limit: attendanceImportJsonLimit })',
+      "express.json({ limit: '2mb', strict: true })",
+      "express.json({ limit: '10mb' })",
+      'express.urlencoded({ extended: true })',
+    ])
+    expect(text).not.toMatch(/\bthis\.app\.(?:set|enable|disable)\(/)
+    // The order the route tests rebuild: correlation id, global parsers, session gate, auth router,
+    // this route and its handler, then the application's error handler.
+    const order = [
+      'this.app.use(correlationIdMiddleware)',
+      "this.app.use(express.json({ limit: '10mb' }))",
+      'this.app.use(express.urlencoded({ extended: true }))',
+      'if (isWhitelisted(req.path)) return next()',
+      'if (isApiPath(req.path)) return jwtAuthMiddleware(req, res, next)',
+      "this.app.use('/api/auth', authRouter)",
+      "this.app.use('/api/auth/security-actions', securityActionRoutes)",
+      "this.app.use('/api/auth/security-actions', securityActionParseErrorHandler)",
+      'this.app.use(correlationErrorHandler(this.logger))',
+    ]
+    for (const anchor of order) expect(text.split(anchor), anchor).toHaveLength(2)
+    const positions = order.map((anchor) => text.indexOf(anchor))
+    expect(positions).toEqual([...positions].sort((a, b) => a - b))
+    const route = readFileSync(ROUTE, 'utf8')
+    for (const forbidden of ['express.json', 'express.urlencoded', 'express.text', 'express.raw', 'bodyParser', 'body-parser', '.app', 'app.set', 'app.use']) {
+      expect(route, `the route module must not reference ${forbidden}`).not.toContain(forbidden)
+    }
+  })
 })
 
 describe('wiring', () => {

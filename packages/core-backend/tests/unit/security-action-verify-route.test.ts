@@ -27,8 +27,9 @@ vi.mock('../../src/core/logger', () => ({
   Logger: class { info(m: string) { loggerSpy.lines.push(String(m)) } warn(m: string) { loggerSpy.lines.push(String(m)) } error(m: string) { loggerSpy.lines.push(String(m)) } debug(m: string) { loggerSpy.lines.push(String(m)) } },
 }))
 
-import { isGateException } from '../../src/auth/api-path-policy'
-import { jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
+import { isApiPath, isGateException } from '../../src/auth/api-path-policy'
+import { isWhitelisted, jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
+import { correlationErrorHandler, correlationIdMiddleware } from '../../src/middleware/correlation'
 import { SecurityActionProofError } from '../../src/auth/security-action-proof'
 import type { SecurityActionErrorCode } from '../../src/auth/security-action-proof'
 import { isOapiAllowlistRequest } from '../../src/multitable/oapi-read-allowlist'
@@ -44,6 +45,36 @@ const SESSION = { userId: USER, sessionId: 'sid-route', tokenIssuedAt: 1_700_000
 
 function body(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return { purpose: 'external_identity_unbind', connectionId: CONNECTION, targetIdentityId: TARGET, expectedBindingRevision: 1, method: 'local_password', password: PASSWORD, ...overrides }
+}
+
+/** Collects the response body as the exact bytes sent, whatever its content type. */
+function rawBody(res: NodeJS.ReadableStream, done: (error: Error | null, body: Buffer) => void): void {
+  const chunks: Buffer[] = []
+  res.on('data', (chunk: Buffer | string) => chunks.push(Buffer.from(chunk)))
+  res.on('end', () => done(null, Buffer.concat(chunks)))
+}
+
+type Observed = { status: number; bytes: Buffer; headers: Record<string, unknown> }
+
+/**
+ * Everything a client can observe of a response: the status, the body bytes (as collected by
+ * `rawBody`, or the raw text otherwise) and every header except `date`, which only reflects the
+ * second the response was written.
+ */
+function observed(response: request.Response): Observed {
+  const headers = Object.fromEntries(Object.entries(response.headers).filter(([name]) => name !== 'date'))
+  const bytes = Buffer.isBuffer(response.body) ? response.body : Buffer.from(response.text ?? '', 'utf8')
+  return { status: response.status, bytes, headers }
+}
+
+/** The response headers an answer of this route would add; an answer it does not give carries none of them. */
+const ROUTE_HEADERS = ['cache-control', 'pragma', 'retry-after'] as const
+
+function send(app: express.Express, path: string, payload: { malformed?: string; json?: Record<string, unknown> }, headers: Record<string, string> = {}) {
+  let call = request(app).post(path).set('X-Correlation-ID', 'fixed-correlation-id')
+  for (const [name, value] of Object.entries(headers)) call = call.set(name, value)
+  call = call.buffer(true).parse(rawBody as never)
+  return payload.malformed !== undefined ? call.set('Content-Type', 'application/json').send(payload.malformed) : call.send(payload.json ?? {})
 }
 
 function appWithStubGate(options: { user?: Record<string, unknown> | null; tenant?: string } = {}) {
@@ -67,6 +98,7 @@ beforeEach(() => {
   serviceMocks.issue.mockReset()
   serviceMocks.readContext.mockReset()
   serviceMocks.readContext.mockReturnValue(SESSION)
+  authMocks.verifyToken.mockReset()
   loggerSpy.lines.length = 0
 })
 afterEach(() => {
@@ -239,12 +271,10 @@ describe('POST /api/auth/security-actions/verify', () => {
       const offUpstream = await request(appWithParser({ before: () => { throw new Error('upstream') }, mounted: false }).app).post(PATH).send(body())
       for (const [mounted, unmounted] of [[onParse, offParse], [onUpstream, offUpstream]]) {
         expect(mounted.status).toBe(400)
-        expect(mounted.status).toBe(unmounted.status)
         expect(mounted.body).toEqual({ answeredBy: 'application' })
-        expect(mounted.body).toEqual(unmounted.body)
-        expect(mounted.headers['cache-control']).toBeUndefined()
-        expect(mounted.headers['pragma']).toBeUndefined()
-        expect(unmounted.headers['cache-control']).toBeUndefined()
+        // Status, body bytes and every header but the date are the same with and without the route.
+        expect(observed(mounted)).toEqual(observed(unmounted))
+        for (const name of ROUTE_HEADERS) expect(mounted.headers[name]).toBeUndefined()
       }
       // The same error object the parser raised reaches the application's handler, with and without the route.
       expect(on.reached).toHaveLength(1)
@@ -255,42 +285,103 @@ describe('POST /api/auth/security-actions/verify', () => {
       expect(loggerSpy.lines).toEqual([])
     })
 
-    it('gives an unauthenticated request no answer of its own behind the real session gate, whether its body can be parsed or not and whether the switch is on or off', async () => {
-      serviceMocks.readContext.mockImplementation(serviceMocks.actualReadContext!)
-      const build = (mounted: boolean) => {
-        const app = express()
-        const reached: unknown[] = []
-        app.use(express.json())
-        app.use('/api', jwtAuthMiddleware)
-        const router = securityActionsRouter()
-        if (mounted) {
-          app.use('/api/auth/security-actions', router!)
-          app.use('/api/auth/security-actions', securityActionParseErrorHandler)
-        } else {
-          expect(router).toBeNull()
-        }
-        app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
-          reached.push(error)
-          res.status(400).json({ answeredBy: 'application' })
-        })
-        return { app, reached }
+    /**
+     * The production order of the pieces that can answer a request on this prefix before or instead of
+     * the route: correlation id, the global body parsers with their production options, the session
+     * gate (gate exceptions pass, API paths go through the real `jwtAuthMiddleware`), a route on the
+     * auth prefix that is a gate exception, a gated route on the auth prefix and one outside it, the
+     * security action route and its error handler only while the switch is on, and the application's
+     * own error handler last. The source order and the parser options are pinned against index.ts by
+     * the inert wiring test.
+     */
+    function productionShapedApp(mounted: boolean) {
+      const app = express()
+      const logged: string[] = []
+      app.use(correlationIdMiddleware)
+      app.use(express.json({ limit: '10mb' }))
+      app.use(express.urlencoded({ extended: true }))
+      app.use((req: Request, res: Response, next: NextFunction) => {
+        if (isWhitelisted(req.path)) return next()
+        if (isApiPath(req.path)) return jwtAuthMiddleware(req, res, next)
+        return next()
+      })
+      const echo = (req: Request, res: Response) => { res.status(200).json({ keys: Object.keys(req.body ?? {}).sort() }) }
+      app.post('/api/auth/login', echo)
+      app.post('/api/auth/sibling', echo)
+      app.post('/api/elsewhere', echo)
+      const router = securityActionsRouter()
+      if (mounted) {
+        if (!router) throw new Error('router must mount')
+        app.use('/api/auth/security-actions', router)
+        app.use('/api/auth/security-actions', securityActionParseErrorHandler)
+      } else if (router) {
+        throw new Error('router must not mount')
       }
-      const on = build(true)
-      const onParse = await request(on.app).post(PATH).set('Content-Type', 'application/json').send(MALFORMED)
-      const onWellFormed = await request(on.app).post(PATH).send(body())
+      app.use(correlationErrorHandler({ error: (message: string) => { logged.push(message) } }, 'production'))
+      return { app, logged }
+    }
+
+    async function onAndOff(path: string, payload: { malformed?: string; json?: Record<string, unknown> }, headers: Record<string, string> = {}) {
+      process.env.SECURITY_ACTION_PROOF_ENABLED = 'true'
+      const on = productionShapedApp(true)
+      const onResponse = await send(on.app, path, payload, headers)
       process.env.SECURITY_ACTION_PROOF_ENABLED = 'false'
-      const off = build(false)
-      const offParse = await request(off.app).post(PATH).set('Content-Type', 'application/json').send(MALFORMED)
-      const offWellFormed = await request(off.app).post(PATH).send(body())
-      expect(onParse.status).toBe(400)
-      expect([onParse.status, onParse.body, onParse.headers['cache-control']]).toEqual([offParse.status, offParse.body, offParse.headers['cache-control']])
-      expect(on.reached).toHaveLength(1)
-      expect((on.reached[0] as Error).message).toBe((off.reached[0] as Error).message)
-      expect(onWellFormed.status).toBe(401)
-      expect([onWellFormed.status, onWellFormed.body]).toEqual([offWellFormed.status, offWellFormed.body])
-      expect(onWellFormed.body.error.code).toBe('UNAUTHORIZED')
+      const off = productionShapedApp(false)
+      const offResponse = await send(off.app, path, payload, headers)
+      process.env.SECURITY_ACTION_PROOF_ENABLED = 'true'
+      return { on: observed(onResponse), off: observed(offResponse), onLogged: on.logged, offLogged: off.logged }
+    }
+
+    const PRE_AUTH: ReadonlyArray<[string, { malformed?: string; json?: Record<string, unknown> }, number]> = [
+      ['a body that cannot be parsed', { malformed: MALFORMED }, 400],
+      ['a well-formed body', { json: body() }, 401],
+      ['an empty body', { json: {} }, 401],
+    ]
+
+    it.each(PRE_AUTH)('gives an unauthenticated request with %s the same status, body bytes and headers with the switch on as with it off, behind the real session gate', async (_label, payload, status) => {
+      serviceMocks.readContext.mockImplementation(serviceMocks.actualReadContext!)
+      const { on, off, onLogged, offLogged } = await onAndOff(PATH, payload)
+      expect(on.status).toBe(status)
+      expect(on).toEqual(off)
+      expect(on.bytes.equals(off.bytes)).toBe(true)
+      // The comparison covers the headers that describe the body and the stack, so it is not vacuous.
+      for (const name of ['content-type', 'content-length', 'etag', 'x-powered-by', 'x-correlation-id']) expect(on.headers[name], name).toBeDefined()
+      for (const name of [...ROUTE_HEADERS, 'vary', 'set-cookie']) {
+        expect(on.headers[name], name).toBeUndefined()
+        expect(off.headers[name], name).toBeUndefined()
+      }
+      expect(onLogged).toEqual(offLogged)
       expect(serviceMocks.issue).not.toHaveBeenCalled()
       expect(loggerSpy.lines).toEqual([])
+    })
+
+    const OTHER_ROUTES: ReadonlyArray<[string, string]> = [
+      ['a gate exception on the auth prefix', '/api/auth/login'],
+      ['a gated route on the auth prefix', '/api/auth/sibling'],
+      ['a gated route outside the auth prefix', '/api/elsewhere'],
+    ]
+
+    it.each(OTHER_ROUTES)('leaves %s answering exactly as without the route: a body that cannot be parsed, a well-formed body anonymously and with a session', async (_label, path) => {
+      serviceMocks.readContext.mockImplementation(serviceMocks.actualReadContext!)
+      authMocks.verifyToken.mockResolvedValue({ id: USER, role: 'user' })
+      const anonymous = { malformed: MALFORMED }
+      for (const [payload, headers] of [
+        [anonymous, {}],
+        [anonymous, { Authorization: 'Bearer t' }],
+        [{ json: body() }, {}],
+        [{ json: body() }, { Authorization: 'Bearer t' }],
+      ] as const) {
+        const { on, off, onLogged, offLogged } = await onAndOff(path, payload, headers)
+        expect(on).toEqual(off)
+        expect(on.bytes.equals(off.bytes)).toBe(true)
+        expect(onLogged).toEqual(offLogged)
+        for (const name of ROUTE_HEADERS) expect(on.headers[name], name).toBeUndefined()
+      }
+      // The well-formed body still reaches a route that accepts it, parsed by the global parser.
+      const reached = await onAndOff(path, { json: body() }, { Authorization: 'Bearer t' })
+      expect(reached.on.status).toBe(200)
+      expect(JSON.parse(reached.on.bytes.toString('utf8'))).toEqual({ keys: Object.keys(body()).sort() })
+      expect(serviceMocks.issue).not.toHaveBeenCalled()
     })
 
     it('writes nothing to a response whose headers were already sent, and closes one that is still open', () => {
