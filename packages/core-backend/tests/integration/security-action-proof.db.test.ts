@@ -312,7 +312,7 @@ async function callerTransaction<T>(userId: string, work: (client: Queryable, lo
 }
 
 function manualLockedUser(id: string): LockedAccessGraphUser {
-  return { id, name: null, email: null, username: null, mobile: null, activationStatus: 'activated', isActive: true, accessGeneration: 0, deletedAt: null, purgedAt: null }
+  return { id, name: null, email: null, username: null, mobile: null, role: 'user', activationStatus: 'activated', isActive: true, accessGeneration: 0, deletedAt: null, purgedAt: null }
 }
 
 function consumeInput(proof: string, overrides: Partial<SecurityActionConsumeInput> = {}): Omit<SecurityActionConsumeInput, 'lockedUser'> {

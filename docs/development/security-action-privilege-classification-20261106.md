@@ -113,11 +113,10 @@ revision every prerequisite is false, so no purpose is available.
   alignment with the authorization aggregator, witness composition and ordering, the policy matrix,
   the revision pin, the registry and its prerequisites, the exact allowlist of the files that import
   either module (an import, a re-export, `require(…)`, dynamic `import(…)` and `import(…)` types count
-  alike, with plain or template-literal specifiers, in TypeScript and JavaScript files; a computed
-  specifier, or a file that is not TypeScript or JavaScript naming either module, is reported; a load
-  written in a form the parser does not model, such as through `createRequire`, `module.require` or an
-  aliased `require`, is outside what this check can see; with self-checks that an importer the
-  allowlist does not name is reported wherever it lives), and the CI wiring.
+  alike, with plain or template-literal specifiers, in TypeScript and JavaScript files; in a file that
+  names either module, a computed specifier is reported, and a file that is not TypeScript or
+  JavaScript naming either module is reported; the check covers exactly the load forms listed here; with self-checks that an importer the allowlist does not
+  name is reported wherever it lives), and the CI wiring.
 - `tests/integration/security-action-privilege.db.test.ts` runs against real PostgreSQL in the
   approval real-database job: schema match, one fixture per reason with a second subject holding
   every source, the superset relation to the authorization aggregator, classification from rows

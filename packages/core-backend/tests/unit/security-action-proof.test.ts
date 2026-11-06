@@ -688,7 +688,7 @@ function consumeInput(overrides: Partial<SecurityActionConsumeInput> & Record<st
     purpose: 'external_identity_unbind',
     connectionId: CONNECTION,
     target: { kind: 'identity_revision', witness: TARGET_WITNESS },
-    lockedUser: { id: USER, name: null, email: null, username: null, mobile: null, activationStatus: 'activated', isActive: true, accessGeneration: 3, deletedAt: null, purgedAt: null },
+    lockedUser: { id: USER, name: null, email: null, username: null, mobile: null, role: 'user', activationStatus: 'activated', isActive: true, accessGeneration: 3, deletedAt: null, purgedAt: null },
     ...overrides,
   }
 }
@@ -710,7 +710,7 @@ describe('consumption contract', () => {
     for (const bad of [
       consumeInput({ lockedUser: undefined }),
       consumeInput({ lockedUser: { ...consumeInput().lockedUser, id: 'other' } }),
-      consumeInput({ purpose: 'constructor' }),
+      consumeInput({ purpose: 'constructor' as unknown as SecurityActionConsumeInput['purpose'] }),
       consumeInput({ connectionId: 'not-a-uuid' }),
       consumeInput({ target: { kind: 'identity_revision', witness: 'short' } }),
       consumeInput({ actionRef: 'has space' }),
@@ -796,7 +796,7 @@ describe('consumption decisions', () => {
     mutate(state)
     const { service } = serviceWith({ state })
     const { client, statements } = fakeClient(state)
-    await expectRefusal(service.consume(client, contextFor(), consumeInput()), code)
+    await expectRefusal(service.consume(client, contextFor(), consumeInput()), code as SecurityActionErrorCode)
     if (code !== 'SECURITY_ACTION_PROOF_ALREADY_USED' && code !== 'SECURITY_ACTION_PROOF_EXPIRED' && code !== 'SECURITY_ACTION_PROOF_STALE') {
       expect(statements.some((s) => s.key === 'consume')).toBe(false)
     }

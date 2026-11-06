@@ -583,7 +583,7 @@ describe('wiring', () => {
     }
   })
 
-  it('sees every way a file can load a module: static, re-export, require, dynamic import and import types, with plain or template literals, in TypeScript and JavaScript', () => {
+  it('sees each listed load form: static, re-export, require, dynamic import and import types, with plain or template literals, in TypeScript and JavaScript', () => {
     const typescript = [
       "import { a } from './m1'",
       "import type { B } from './m2'",

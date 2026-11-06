@@ -146,4 +146,4 @@ after the image rollback and only on an empty table. The switch is registered in
   that satisfies every CHECK (55000, by message); the foreign key (23503) and the partial unique index
   (23505) by name; each refusal under its own savepoint with every row re-read unchanged afterwards;
   positive controls for each legal row, both legal transitions and the boundaries. These properties are
-  established by the run of this file in the approval real-database job on the head under review.
+  established by the run of this file in the approval real-database job.

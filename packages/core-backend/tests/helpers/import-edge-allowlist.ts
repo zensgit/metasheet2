@@ -3,10 +3,10 @@
  * as (importing file, module specifier): an `import … from` or `export … from` statement, an
  * `import x = require(…)`, a `require(…)` call, a dynamic `import(…)` or an `import(…)` type, with the
  * specifier written as a string literal or a template literal without substitutions. A load whose
- * specifier is computed is an edge to NON_LITERAL_SPECIFIER. Loads in forms the parser does not model
- * (`createRequire`, `module.require`, an aliased `require`) are not seen. The
- * allowlist is an exact multiset of edges, so an importer that is not named, a re-export, or a second
- * import of the same module from an allowed file is a violation, whatever directory it lives in.
+ * specifier is computed is an edge to NON_LITERAL_SPECIFIER. Only the load forms listed here are
+ * recognised. The allowlist is an exact multiset of edges, so an importer that is not named, a
+ * re-export, or a second import of the same module from an allowed file is a violation, whatever
+ * directory it lives in.
  */
 import { readdirSync, statSync } from 'node:fs'
 import path from 'node:path'

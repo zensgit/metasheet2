@@ -135,7 +135,7 @@ describe('down()', () => {
   it('refuses while the table holds a row, with a values-free message and no DROP', async () => {
     const { db, log } = recordingDb({ lockTimeout: '0', statementTimeout: '0', exists: true, present: true })
     await expect(down(db)).rejects.toMatchObject({ code: SECURITY_ACTION_CHALLENGES_DOWN_BLOCKED_CODE })
-    const error = await down(db).catch((e: Error) => e)
+    const error = (await down(db).catch((e: unknown) => e)) as Error
     expect(error.message).toMatch(/^SECURITY_ACTION_CHALLENGES_DOWN_BLOCKED: down\(\) refused while security_action_challenges holds rows/)
     expect(error.message).not.toMatch(/\d/)
     expect(log.some((entry) => /DROP/i.test(entry.sql))).toBe(false)
