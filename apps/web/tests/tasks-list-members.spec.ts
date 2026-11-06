@@ -1341,6 +1341,30 @@ describe('members dialog — closing and focus', () => {
     expect(document.activeElement).toBe(must(el, 'tasks-list-add-member-role'))
   })
 
+  it('an Escape the input method may be using in the add field leaves the dialog open and goes no further; a plain Escape closes it', async () => {
+    const el = await openDialog()
+    const input = must(el, 'tasks-list-add-member-input')
+    input.focus()
+    const reachedDocument: string[] = []
+    const onDocument = (event: KeyboardEvent) => { reachedDocument.push(event.key) }
+    document.addEventListener('keydown', onDocument)
+    try {
+      for (const init of [{ isComposing: true }, { keyCode: 229 }]) {
+        const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init })
+        input.dispatchEvent(event)
+        await flush()
+        expect(event.defaultPrevented).toBe(false)
+        must(el, 'tasks-list-members-dialog')
+      }
+      expect(reachedDocument).toEqual([])
+    } finally {
+      document.removeEventListener('keydown', onDocument)
+    }
+    keydown(input, 'Escape')
+    await flush()
+    expect(shown(el, 'tasks-list-members-dialog')).toBeNull()
+  })
+
   // [fe-48] (FE-8): a browser moves focus off a control it disables to the page body (the focus
   // fixup rule; jsdom keeps it there and its blur() is a no-op on a disabled control, so these cells
   // drop it by hand where a browser would), and a write can take its control away; once the write

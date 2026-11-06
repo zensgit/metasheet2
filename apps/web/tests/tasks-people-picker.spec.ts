@@ -482,6 +482,28 @@ describe('TaskPeoplePicker', () => {
     expect(document.activeElement).toBe(q(el, 'cancel'))
   })
 
+  it('an Escape the input method may be using (isComposing, or keyCode 229) leaves the picker open, goes no further and is held back; a plain Escape closes it', async () => {
+    const { el, closed } = mountPicker('assignee')
+    await flush()
+    const reachedParent: string[] = []
+    el.addEventListener('keydown', (event) => { reachedParent.push(event.key) })
+    const search = q(el, 'search')!
+    search.focus()
+    // Escape during a composition cancels the composition (Safari marks that key only with keyCode 229).
+    // Its default is held back too: the box is type="search", which Chromium empties on Escape.
+    for (const init of [{ isComposing: true }, { keyCode: 229 }, { isComposing: true, keyCode: 229 }]) {
+      const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init })
+      search.dispatchEvent(event)
+      await flush()
+      expect(event.defaultPrevented).toBe(true)
+    }
+    expect(closed.count).toBe(0)
+    expect(reachedParent).toEqual([])
+    search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flush()
+    expect(closed.count).toBe(1)
+  })
+
   it('with a person ticked, Tab from the confirm wraps to the box and Shift+Tab from the box lands on the confirm', async () => {
     mocks.apiFetch.mockResolvedValue(jsonResponse(200, searchBody([row('u1', '张三', '')])))
     const { el } = mountPicker('assignee')
