@@ -1,6 +1,6 @@
-# 只读盘点包（2026-09-16，2026-09-18 复核返修，2026-09-20 TRG-04 收窄，2026-11-05 新增 05 / 06）— CRED-06 / TRG-04 / ADM-08 / ADM-13
+# 只读盘点包（2026-09-16，2026-09-18 复核返修，2026-09-20 TRG-04 收窄，2026-11-05 新增 05 / 06，2026-11-06 新增 07）— CRED-06 / TRG-04 / ADM-08 / ADM-13 / BPMN 下线前检查
 
-这是一个**只读盘点包**：六个 `.sql` 文件加一个共享前言 `_preamble.sql`，全部只含
+这是一个**只读盘点包**：七个 `.sql` 文件加一个共享前言 `_preamble.sql`，全部只含
 `SELECT` / `WITH … SELECT`，没有任何 `INSERT` / `UPDATE` / `DELETE` / DDL。目的是在合并
 四条在飞/待裁决工作之前，先知道生产库上现在有多少行会受影响——**不做任何回填、不做任何
 清理、不改任何表结构**。
@@ -9,7 +9,7 @@
 > （含 222）上跑过**；真实盘点需要 owner 另行授权（目标库、只读身份、窗口、超时与输出预算）。
 > `05` 的**同一份 SQL**（当时文件名为 `03-webhook-target-totals.sql`，sha256 `8f0733a9…`）
 > 已于 2026-11-05 以只读身份在 222 上跑过**一次**：`status=complete`，**所有计数均为 0**。
-> `06` **尚未在任何真实数据库上跑过**。除 `05` 的这一次之外，下面的验证全部在**一次性合成 PostgreSQL 的临时 schema**（CI 为 16）、
+> `06` **尚未在任何真实数据库上跑过**。`07`（2026-11-06 新增）**从未在任何站点、任何真实数据库上跑过**。除 `05` 的这一次之外，下面的验证全部在**一次性合成 PostgreSQL 的临时 schema**（CI 为 16）、
 > **全假数据**上完成。
 
 ## 0. 2026-09-18 复核返修（F3 / F4 / F5）
@@ -92,7 +92,30 @@ R80 上从未真正发出；R81 修好了这条连接，升级后点这种按钮
 - **读权限**：需要 `meta_fields`（`type`、`property`）的 SELECT。`property` 里也存着每个按钮的
   webhook secret，所以**由谁、用哪个身份跑，由 owner 决定**。
 
-## 1. 这六份文件分别解锁什么
+## 0d. 2026-11-06：新增 `07-bpmn-table-totals.sql`（11 张旧 BPMN 表的行数）
+
+为什么要有它：owner 2026-11-06 裁定「审批和自动化不用 BPMN，运行时和设计器都弃用」。在删除 BPMN
+运行时与设计器代码之前，先确认站点上没有 BPMN 数据。11 张表来自迁移
+`zz20251231_create_bpmn_tables.ts`，每个跑过迁移的库上都有；只有旧运行时
+（`routes/workflow.ts` + `BPMNWorkflowEngine.ts`）会写它们，而该运行时除非 `ENABLE_BPMN_RUNTIME`
+恰为字面量 `'true'`，否则是关闭的。R82 安装单把它列为**安装前检查，不阻断安装**。
+
+输出：每张表一行（表名 + 行数），然后是 `INVENTORY_RESULT` 行。全部为 0 ⇒ 没有要保留或迁移的东西。
+
+- **只选 `count(*)`**：不读 id、key、name、变量、载荷或审计文本（`bpmn_variables` /
+  `bpmn_audit_log` 可能存业务数据）。
+- **读权限**：需要这 11 张表的 SELECT。看不全 11 张表的角色得到
+  `status=incomplete reason=missing-tables:<缺几张> scope=none`，不输出任何计数；读到一半被拒则
+  报错中止、没有 `INVENTORY_RESULT` 行。两种都不是"零"。
+- `SET transaction_read_only = on;` 同样紧跟 `\ir _preamble.sql`，理由同 §0c；`psql -X -1` 与
+  `AUTOCOMMIT=off` 下注入的 `UPDATE` 都以 25006 中止，去掉这一句则同一条 `UPDATE` 在 `-1` 下提交。
+- **`07` 从未在任何站点上跑过**，只在合成库上验证。
+- **范围外**：旧的原生 SQL 迁移 `packages/core-backend/migrations/049_create_bpmn_workflow_tables.sql`
+  另建了第 12 张表 `bpmn_deployments`。该迁移现在是空操作的历史标记
+  （`src/db/migration-provider.ts` 的 `SUPERSEDED_LEGACY_SQL_MIGRATIONS`），当前代码不引用这张表，
+  但早年真正执行过 049 的库上可能还留着它。`07` 不统计它。
+
+## 1. 这七份文件分别解锁什么
 
 | 文件 | 编号 | 解锁 / 喂给 | 一句话 |
 |---|---|---|---|
@@ -102,6 +125,7 @@ R80 上从未真正发出；R81 修好了这条连接，升级后点这种按钮
 | `04-adm13-declared-admins.sql` | ADM-13 | PR #5665 / #5677 的**盘点段**（不回填） | 有多少用户满足声明式 admin 字段，但 `user_roles` 里没有 `role_id='admin'` 那一行 |
 | `05-trg04-webhook-target-totals.sql` | TRG-04 | 喂 **R81 安装决策**（2026-11-05） | 每一个 `send_webhook` 目标和每一条 webhook 订阅，按启用状态分 `url_missing` / `not_https` / `https_internal_literal` / `https_other` 四桶计数；`https_other` **≠ 安全**（见 §0c） |
 | `06-trg04-button-webhook-totals.sql` | TRG-04 | 喂 **R81 安装前检查**（2026-11-05；尚未在真实库上跑过） | 按钮字段的「发送 Webhook」按六列计数；**`https_hostname` = R80 上发不出、R81 上开始发送的按钮数**；需要 `meta_fields` 的 SELECT（含按钮 secret），由 owner 定执行人和身份（见 §0c） |
+| `07-bpmn-table-totals.sql` | BPMN 下线 | 喂 **R82 安装前检查**（2026-11-06；不阻断；从未在任何站点上跑过） | 11 张旧 `bpmn_*` 表各自的行数；全 0 ⇒ 删除 BPMN 运行时与设计器前没有数据要保留（见 §0d） |
 
 每个 `.sql` 顶部有更详细的背景、逐条查询的“目的 / 依据代码 / 预期输出”，以及本轮返修说明。
 
@@ -120,6 +144,7 @@ psql "$READONLY_DATABASE_URL" -v schema=public -f 03-adm08-wildcard-permissions.
 psql "$READONLY_DATABASE_URL" -v schema=public -f 04-adm13-declared-admins.sql > 04.log 2>&1
 psql "$READONLY_DATABASE_URL" -X -v schema=public -f 05-trg04-webhook-target-totals.sql > 05.log 2>&1
 psql "$READONLY_DATABASE_URL" -X -v schema=public -f 06-trg04-button-webhook-totals.sql > 06.log 2>&1   # 读 meta_fields（含按钮 secret），owner 定身份
+psql "$READONLY_DATABASE_URL" -X -v schema=public -f 07-bpmn-table-totals.sql > 07.log 2>&1
 grep -h '^INVENTORY_RESULT' 0*.log
 ```
 
@@ -134,7 +159,8 @@ psql $env:READONLY_DATABASE_URL -v schema=public -f 02-trg04-http-targets.sql  *
 psql $env:READONLY_DATABASE_URL -v schema=public -f 03-adm08-wildcard-permissions.sql *> 03.log ; `
 psql $env:READONLY_DATABASE_URL -v schema=public -f 04-adm13-declared-admins.sql *> 04.log ; `
 psql $env:READONLY_DATABASE_URL -X -v schema=public -f 05-trg04-webhook-target-totals.sql *> 05.log ; `
-psql $env:READONLY_DATABASE_URL -X -v schema=public -f 06-trg04-button-webhook-totals.sql *> 06.log
+psql $env:READONLY_DATABASE_URL -X -v schema=public -f 06-trg04-button-webhook-totals.sql *> 06.log ; `
+psql $env:READONLY_DATABASE_URL -X -v schema=public -f 07-bpmn-table-totals.sql *> 07.log
 Select-String -Path 0*.log -Pattern '^INVENTORY_RESULT'
 ```
 
@@ -185,6 +211,7 @@ INVENTORY_RESULT file=<文件名> status=incomplete reason=<原因> …
 | `02` | Q5/Q6（`multitable_webhooks` 计数 + id/created_by） | 贴进 PR #5649 的合并前盘点；按 `created_by` 通知用户（2026-11-05：#5619 / #5649 均已合并，`02` 的数字改作装 R81 前的参考，判断以 `05` 为准） |
 | `05` | R1 / W1（规则、订阅各两行：启用 t/f × 四桶） | R81 安装决策：两表全 0 ⇒ R81 不影响；任一桶非 0（**含 `https_other`**）⇒ 现场逐条确认后再装 |
 | `06` | B1（一行六个计数） | R81 安装前检查：`https_hostname` > 0 ⇒ 这些按钮升级后会真的发送，先确认目标；`unclassified` > 0 ⇒ 现场逐条确认 |
+| `07` | B1（11 行：表名 + 行数） | R82 安装前检查（不阻断）：`status=complete` 且全 0 ⇒ 删除 BPMN 运行时与设计器前没有数据要保留；任一表非 0 ⇒ 只回报表名与行数，由 owner 定保留/迁移方式；`incomplete` 或无 `INVENTORY_RESULT` 行 ⇒ 换有 11 张表 SELECT 的只读身份重跑 |
 
 ### 4b. `02-trg04` 的窄口径 / 上界两个数怎么读（2026-09-20 起）
 
@@ -213,11 +240,13 @@ scripts/ops/readonly-inventory-20260916/
 ├── 04-adm13-declared-admins.sql
 ├── 05-trg04-webhook-target-totals.sql （2026-11-05：每个 webhook 目标分四桶计数）
 ├── 06-trg04-button-webhook-totals.sql （2026-11-05：按钮字段 webhook 六列计数）
+├── 07-bpmn-table-totals.sql       （2026-11-06：11 张旧 BPMN 表的行数）
 ├── verify/
 │   ├── fixture-modern.sql        （合成新 schema：全假值）
 │   ├── fixture-legacy.sql        （合成旧 schema：缺 actions / is_admin / is_active）
 │   ├── fixture-webhook-totals.sql （05 专用：带 enabled 列的规则 r1–r16、订阅 w1–w6）
 │   ├── fixture-button-webhooks.sql （06 专用：meta_fields 按钮行 b1–b17）
+│   ├── fixture-bpmn-tables.sql   （07 专用：11 张 bpmn_* 表，非零行数各不相同）
 │   ├── run-verify.mjs            （一次性 schema 建→灌→跑→断言→DROP）
 │   └── readonly-inventory-pack.test.mjs （node --test 两层：静态契约 + 合成库）
 └── README.md                     （本文件）
@@ -239,3 +268,4 @@ DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scratch \
 - 验证：`docs/development/readonly-inventory-pack-verification-20260916.md`
 - TRG-04 收窄验证（F6，2026-09-20）：`docs/development/readonly-inventory-http-target-allowlist-narrow-verification-20260920.md`
 - 05 webhook 目标总数验证（2026-11-05）：`docs/development/readonly-inventory-webhook-target-totals-verification-20261105.md`
+- 07 BPMN 表行数验证（2026-11-06）：`docs/development/readonly-inventory-bpmn-table-totals-verification-20261106.md`

@@ -37,7 +37,7 @@ const FILES = [
   '01-cred06-secret-keys.sql',
   '02-trg04-http-targets.sql',
   '03-adm08-wildcard-permissions.sql',
-  '04-adm13-declared-admins.sql', '05-trg04-webhook-target-totals.sql', '06-trg04-button-webhook-totals.sql',
+  '04-adm13-declared-admins.sql', '05-trg04-webhook-target-totals.sql', '06-trg04-button-webhook-totals.sql', '07-bpmn-table-totals.sql',
 ]
 
 // ── LAYER 1 — hermetic ──────────────────────────────────────────────────────
@@ -455,6 +455,119 @@ if (!DATABASE_URL || !psqlAvailable()) {
   test('synthetic PostgreSQL: 06 stays read-only inside one transaction (psql -X -1, AUTOCOMMIT=off)', () => {
     const r = onButtonsFixture(checkButtonWebhookTotalsReadOnly)
     assert.equal(r.before, 'n')
+    assertReadOnlyWitness(r)
+  })
+}
+
+// ── 07 (2026-11-06): row counts of the 11 legacy BPMN tables ────────────────
+// 07-bpmn-table-totals.sql is the BPMN-removal pre-check (owner ruling
+// 2026-11-06: approvals and automation do not use BPMN; runtime and designer
+// are deprecated). It prints one row per bpmn_* table (name + count(*)) and
+// its INVENTORY_RESULT line. FILES above makes the preamble / INVENTORY_RESULT
+// / read-only tests cover it.
+import {
+  runBpmnTableTotals,
+  runBpmnTableTotalsAsLimitedRole,
+  checkBpmnTableTotalsReadOnly,
+  exec,
+  BPMN_TABLES_FIXTURE,
+} from './run-verify.mjs'
+
+const FILE_07 = '07-bpmn-table-totals.sql'
+
+// The tables packages/core-backend/src/db/migrations/zz20251231_create_bpmn_tables.ts
+// creates, in 07's B1 order. Typed here rather than read from the migration so
+// this suite keeps reading nothing outside its own pack directory.
+const BPMN_TABLES = [
+  'bpmn_process_definitions', 'bpmn_process_instances', 'bpmn_activity_instances',
+  'bpmn_user_tasks', 'bpmn_timer_jobs', 'bpmn_message_events', 'bpmn_signal_events',
+  'bpmn_variables', 'bpmn_incidents', 'bpmn_external_tasks', 'bpmn_audit_log',
+]
+
+test('07: SET transaction_read_only = on; comes right after \\ir _preamble.sql', () => {
+  const code = packCode(FILE_07).split('\n').filter(l => l.trim() !== '')
+  assert.equal(code[0], '\\ir _preamble.sql', 'the preamble include is the first statement')
+  assert.equal(code[1], 'SET transaction_read_only = on;',
+    'the open transaction (psql -1 / AUTOCOMMIT off) must be made read-only before anything else runs')
+  assert.equal(code.filter(l => /transaction_read_only/.test(l)).length, 1)
+})
+
+test('07: probe and B1 cover exactly the 11 bpmn_* tables, B1 selects only name + count(*), INVENTORY_RESULT is last', () => {
+  assertResultIsLast(FILE_07)
+  const code = packCode(FILE_07)
+
+  // Probe: the IN (...) list is the same 11 names, and the threshold is 11.
+  const probe = code.match(/AND table_name IN \(([\s\S]*?)\)\n\\gset/)
+  assert.ok(probe, '07: no probe over information_schema.tables')
+  const probed = [...probe[1].matchAll(/'([^']+)'/g)].map(m => m[1])
+  assert.deepEqual([...probed].sort(), [...BPMN_TABLES].sort(), '07: the probe must list exactly the 11 tables')
+  assert.match(code, /SELECT :bpmn_tables_present = 11 AS has_all/)
+  assert.match(code, /'complete scope=bpmn_tables:11'/)
+  assert.match(code, /'incomplete reason=missing-tables:' \|\| \(11 - :bpmn_tables_present\)/)
+
+  // B1: values-free. The outer query selects the literal name and the count;
+  // every branch is `SELECT <ord>, '<table>', count(*) FROM <same table>`.
+  const b1 = code.match(/\nSELECT table_name, row_count FROM \(\n([\s\S]*?)\n\) t ORDER BY ord;/)
+  assert.ok(b1, '07: no B1 query of the form SELECT table_name, row_count FROM (...) t ORDER BY ord')
+  const branch = /^\s*(?:UNION ALL )?SELECT\s+(\d+)(?: AS ord)?, '(bpmn_[a-z_]+)'(?: AS table_name)?,\s+count\(\*\)(?:::bigint AS row_count)? FROM (bpmn_[a-z_]+)$/
+  const lines = b1[1].split('\n')
+  assert.equal(lines.length, BPMN_TABLES.length, '07: B1 must have one branch per table')
+  lines.forEach((line, i) => {
+    const m = branch.exec(line)
+    assert.ok(m, `07: B1 branch ${i + 1} may select only its ordinal, its own name and count(*): ${line.trim()}`)
+    assert.equal(Number(m[1]), i + 1, `07: B1 branch ${i + 1} ordinal`)
+    assert.equal(m[2], BPMN_TABLES[i], `07: B1 branch ${i + 1} label`)
+    assert.equal(m[3], m[2], `07: B1 branch ${i + 1} must count the table it names`)
+  })
+})
+
+if (!DATABASE_URL || !psqlAvailable()) {
+  test('07 SYNTHETIC-DB CHECKS SKIPPED — no DATABASE_URL / psql', { skip: true }, () => {})
+} else {
+  const onBpmnFixture = fn => withFixture('inventory_fixture_bpmn', BPMN_TABLES_FIXTURE, fn)
+  const EXPECTED_07_ROWS = [
+    'bpmn_process_definitions|3', 'bpmn_process_instances|2', 'bpmn_activity_instances|0',
+    'bpmn_user_tasks|1', 'bpmn_timer_jobs|0', 'bpmn_message_events|0', 'bpmn_signal_events|0',
+    'bpmn_variables|7', 'bpmn_incidents|0', 'bpmn_external_tasks|0', 'bpmn_audit_log|4',
+  ]
+  const COMPLETE_07 = 'INVENTORY_RESULT file=07-bpmn-table-totals.sql status=complete scope=bpmn_tables:11'
+
+  test('synthetic PostgreSQL: 07 prints the exact count of every bpmn_* table (plain and psql -1)', () => {
+    const r = onBpmnFixture(s => ({ plain: runBpmnTableTotals(s), single: runBpmnTableTotals(s, ['-1']) }))
+    for (const [mode, o] of [['plain', r.plain], ['-1', r.single]]) {
+      assert.deepEqual(o.rows, EXPECTED_07_ROWS, `${mode}: row counts`)
+      assert.equal(o.result, COMPLETE_07, `${mode}: result line`)
+    }
+  })
+
+  test('synthetic PostgreSQL: 07 reports a missing bpmn_* table as incomplete, never as zero', () => {
+    const r = {
+      oneMissing: onBpmnFixture(s => {
+        exec(`DROP TABLE "${s}".bpmn_signal_events`)
+        return runBpmnTableTotals(s)
+      }),
+      empty: withFixture('inventory_fixture_empty', null, runBpmnTableTotals),
+    }
+    assert.equal(r.oneMissing.rows, null, 'B1 must be skipped, not printed with zeros')
+    assert.match(r.oneMissing.stdout, /B1 skipped/)
+    assert.equal(r.oneMissing.result,
+      'INVENTORY_RESULT file=07-bpmn-table-totals.sql status=incomplete reason=missing-tables:1 scope=none')
+    assert.equal(r.empty.rows, null)
+    assert.equal(r.empty.result,
+      'INVENTORY_RESULT file=07-bpmn-table-totals.sql status=incomplete reason=missing-tables:11 scope=none')
+  })
+
+  test('synthetic PostgreSQL: 07 run by a role that can read one table is incomplete, never zero', () => {
+    const r = onBpmnFixture(s => runBpmnTableTotalsAsLimitedRole(s, ['bpmn_process_definitions']))
+    assert.equal(r.exit, 0, `limited-role run exited ${r.exit}: ${r.stderr}`)
+    assert.equal(r.rows, null, 'no count may be printed for tables the role cannot read')
+    assert.equal(r.result,
+      'INVENTORY_RESULT file=07-bpmn-table-totals.sql status=incomplete reason=missing-tables:10 scope=none')
+  })
+
+  test('synthetic PostgreSQL: 07 stays read-only inside one transaction (psql -X -1, AUTOCOMMIT=off)', () => {
+    const r = onBpmnFixture(checkBpmnTableTotalsReadOnly)
+    assert.equal(r.before, 'fake-def-1')
     assertReadOnlyWitness(r)
   })
 }
