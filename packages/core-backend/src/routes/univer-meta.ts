@@ -314,6 +314,7 @@ import {
   loadEntityConfigSnapshot,
   applyConfigRevert,
 } from '../multitable/config-restore'
+import { PATCH_FIELD_READ_SQL } from '../multitable/field-row-write-guard'
 import { computeRecordRestoreDiff } from '../multitable/record-restore-diff'
 import {
   HISTORY_FIELD_AUDIT_GRANT_PERMISSION,
@@ -14750,10 +14751,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // Fence before re-reading the field: recovery hashes and applies against one schema
         // generation, while field retype/property/order writes serialize outside that window.
         await fenceWriterEntry(query, preflightSheetId)
-        const existing = await query(
-          'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1',
-          [fieldId],
-        )
+        const existing = await query(PATCH_FIELD_READ_SQL, [fieldId])
         if ((existing as any).rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
 
         const row = (existing as any).rows[0]

@@ -675,18 +675,17 @@ export async function ensureFields(
   }))
 }
 
+/** `patchObjectFieldProperty`'s read of the field row. Exported so the real-DB race cases hold on the production text. */
+export const PATCH_OBJECT_FIELD_PROPERTY_READ_SQL =
+  'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 AND id = $2'
+
 export async function patchObjectFieldProperty(
   input: PatchObjectFieldPropertyInput,
 ): Promise<MultitableProvisioningField> {
   const sheetId = getObjectSheetId(input.projectId, input.objectId)
   const physicalFieldId = getObjectFieldId(input.projectId, input.objectId, input.fieldId)
   await fenceWriterEntry(input.query, sheetId)
-  const existing = await input.query(
-    `SELECT id, sheet_id, name, type, property, "order"
-     FROM meta_fields
-     WHERE sheet_id = $1 AND id = $2`,
-    [sheetId, physicalFieldId],
-  )
+  const existing = await input.query(PATCH_OBJECT_FIELD_PROPERTY_READ_SQL, [sheetId, physicalFieldId])
   const row = (existing.rows as any[])[0]
   if (!row) {
     throw new Error(`Provisioned field not found: ${input.objectId}.${input.fieldId}`)
