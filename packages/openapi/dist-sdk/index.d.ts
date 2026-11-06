@@ -20281,7 +20281,7 @@ export interface components {
             startDayOffset?: 0;
             endDayOffset?: number;
         };
-        /** @description Values-safe capability projection (state and labels only). Shows that authoritative segment calculation is disabled by default; while disabled, multi-segment authoring is preview-only. */
+        /** @description Values-safe capability projection (state and labels only). Calculation availability remains disabled by default. The request-scoped canonical reference posture independently supplies the multi-segment authoring hint; admitted reference authoring does not assert authoritative calculation. */
         AttendanceShiftCapabilities: {
             segmentCalculation?: {
                 enabled?: boolean;

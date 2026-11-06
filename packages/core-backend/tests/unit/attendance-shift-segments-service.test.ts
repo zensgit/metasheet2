@@ -34,7 +34,7 @@ class FakeHttpError extends Error {
   }
 }
 
-function makeService() {
+function makeService(overrides: Record<string, unknown> = {}) {
   return shiftServiceLib.createAttendanceShiftService({
     HttpError: FakeHttpError,
     randomUUID,
@@ -53,6 +53,7 @@ function makeService() {
     }),
     DEFAULT_SHIFT: { name: 'Default', timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00', lateGraceMinutes: 10, earlyGraceMinutes: 10, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5] },
     DEFAULT_ORG_ID: 'default',
+    ...overrides,
   })
 }
 
@@ -549,5 +550,72 @@ describe('deleteShift fixed-schedule config blocker', () => {
       details: [{ field: 'fixed_schedule_configs', message: 'fixed_schedule_configs: 1 reference(s)' }],
     })
     expect(statements.some(statement => statement.startsWith('DELETE FROM'))).toBe(false)
+  })
+})
+
+describe('W6 reference-authoring capability hint', () => {
+  const closed = {
+    enabled: false,
+    defaultEnabled: false,
+    authoritativeResults: false,
+    multiSegmentAuthoring: 'preview_only',
+    flag: 'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED',
+  }
+  function fixtureDb(orgId: string, count = 1) {
+    const rows = Array.from({ length: count }, (_, n) => ({
+      id: 'synthetic-shift-' + n, org_id: orgId, name: 'Synthetic',
+      timezone: 'UTC', work_start_time: '09:00', work_end_time: '17:00', is_overnight: false,
+    }))
+    return {
+      query: async (sql: string, params?: unknown[]) => {
+        if (sql.includes('attendance_shift_segments')) return []
+        if (sql.includes('COUNT(*)')) return [{ total: count }]
+        if (sql.includes('WHERE id = $1 AND org_id = $2')) return rows.filter(row => row.id === params?.[0] && row.org_id === params?.[1])
+        if (sql.includes('FROM attendance_shifts')) return rows
+        throw new Error('Unexpected synthetic SQL')
+      },
+    }
+  }
+  it('retains the exact closed capability projection without a request reader', async () => {
+    const row = await makeService().readShift(fixtureDb('synthetic-closed'), {
+      orgId: 'synthetic-closed', shiftId: 'synthetic-shift-0',
+    })
+    expect(JSON.stringify(row.capabilities.segmentCalculation)).toBe(JSON.stringify(closed))
+  })
+  it('retains a missing shift without consulting the new hint', async () => {
+    const seen: string[] = []
+    const reader = async (_db: unknown, orgId: string) => { seen.push(orgId); return true }
+    const row = await makeService({ readReferenceSegmentsCapability: reader }).readShift(fixtureDb('synthetic-closed'), {
+      orgId: 'synthetic-closed', shiftId: 'synthetic-missing',
+    })
+    expect(row).toBeNull()
+    expect(seen).toEqual([])
+  })
+  it('reports admitted reference authoring without claiming authoritative calculation', async () => {
+    const seen: string[] = []
+    const reader = async (_db: unknown, orgId: string) => { seen.push(orgId); return true }
+    const row = await makeService({ readReferenceSegmentsCapability: reader }).readShift(fixtureDb('synthetic-admitted'), {
+      orgId: 'synthetic-admitted', shiftId: 'synthetic-shift-0',
+    })
+    expect(row.capabilities.segmentCalculation).toEqual({ ...closed, multiSegmentAuthoring: 'enabled' })
+    expect(seen).toEqual(['synthetic-admitted'])
+    expect(row.plannedMinutes).toBe(480)
+  })
+  it('reads one hint for a page and never carries it into another org response', async () => {
+    const seen: string[] = []
+    const reader = async (_db: unknown, orgId: string) => { seen.push(orgId); return orgId === 'synthetic-admitted' }
+    const scoped = makeService({ readReferenceSegmentsCapability: reader })
+    const admitted = await scoped.listShifts(fixtureDb('synthetic-admitted', 2), {
+      orgId: 'synthetic-admitted', page: 1, pageSize: 20, offset: 0,
+    })
+    expect(admitted.items.map((row: { capabilities: { segmentCalculation: unknown } }) => row.capabilities.segmentCalculation))
+      .toEqual([{ ...closed, multiSegmentAuthoring: 'enabled' }, { ...closed, multiSegmentAuthoring: 'enabled' }])
+    expect(seen).toEqual(['synthetic-admitted'])
+    const denied = await scoped.listShifts(fixtureDb('synthetic-closed', 2), {
+      orgId: 'synthetic-closed', page: 1, pageSize: 20, offset: 0,
+    })
+    expect(denied.items.map((row: { capabilities: { segmentCalculation: unknown } }) => row.capabilities.segmentCalculation))
+      .toEqual([closed, closed])
+    expect(seen).toEqual(['synthetic-admitted', 'synthetic-closed'])
   })
 })
