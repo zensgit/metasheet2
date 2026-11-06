@@ -110,6 +110,8 @@ describe('dingtalk work notification settings', () => {
 
     expect(result.saved).toBe(true)
     expect(result.accessTokenVerified).toBe(true)
+    // This result is pre-switch evidence only, and says so (the integration-scoped check is the verify route).
+    expect(result).toMatchObject({ credentialResolution: 'pre_switch_env_first', integrationScopedEvidence: false })
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const updateArgs = dbMocks.query.mock.calls[1]
     expect(String(updateArgs[0])).toContain('workNotificationAgentId')

@@ -68,6 +68,7 @@ async function lockPair(c: Client, p: Pair, actorId: string): Promise<void> {
     p.sourceIntegrationId !== p.targetIntegrationId,
     'Distinct integrations are required',
   )
+  await c.query("SELECT pg_advisory_xact_lock(hashtext('directory:identity-maintenance'))")
   // Same order as sync: freeze key before local apply. Both ends prevent a late target sync.
   for (const id of [p.sourceIntegrationId, p.targetIntegrationId].sort())
     await acquireSourceSyncFreezeLock(c, id)
@@ -83,6 +84,8 @@ async function lockPair(c: Client, p: Pair, actorId: string): Promise<void> {
     WHERE a.integration_id = ANY($1::uuid[]) AND l.local_user_id IS NOT NULL ORDER BY l.local_user_id`,
     [[p.sourceIntegrationId, p.targetIntegrationId]],
   )
+  const repairs=await c.query(`SELECT r.id FROM dingtalk_login_repairs r WHERE r.state='applied' AND (r.user_id=ANY($1::text[]) OR r.source_integration_ids && $2::uuid[]) LIMIT 1`,[users.rows.map(r=>String(r.local_user_id)),[p.sourceIntegrationId,p.targetIntegrationId]])
+  requireCondition(!repairs.rows.length,'Active login repair blocks handover')
   const userIds = [
     ...users.rows.map((r) => String(r.local_user_id)),
     actorId,

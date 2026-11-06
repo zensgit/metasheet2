@@ -100,6 +100,7 @@ export const GUARDED_PATH_ENTRIES = Object.freeze([
   'packages/core-backend/vitest.yida-owner-realdb.config.ts',
   'scripts/ops/global-history-flag-manifest.mjs',
   'scripts/ops/global-history-flag-manifest.test.mjs',
+  'scripts/ops/vitest-zero-skip.mjs',
   'plugins/plugin-integration-core/**',
   'apps/web/src/services/integration/readSourceConfigs.ts',
   'apps/web/src/services/integration/readSourceCompositions.ts',

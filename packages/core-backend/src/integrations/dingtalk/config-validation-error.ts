@@ -23,18 +23,25 @@ export type DingTalkMessageConfigErrorCode =
 
 /**
  * Raised by the integration-scoped work-notification credential resolver (work-notification-settings.ts
- * resolveDingTalkMessageTuple / readDingTalkMessageConfigFromRuntime, only reachable while
- * DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED is 'true'): the named integration row is missing or not
- * active, the source chosen for the credential tuple is incomplete, or the environment Agent ID that would
- * be sent is not 1-32 digits. The message names the integration id, the field / variable names and the
- * source — never a key, secret or agent id value — so it can be recorded in delivery ledgers as it is.
+ * resolveDingTalkMessageTuple, reached by readDingTalkMessageConfigFromRuntime while
+ * DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED is 'true', and by the admin verification route through
+ * readDingTalkIntegrationScopedMessageTuple whatever the switch says): the named integration row is missing
+ * or not active, the source chosen for the credential tuple is incomplete, or the environment Agent ID that
+ * would be sent is not 1-32 digits. The message names the integration id, the field / variable names and
+ * the source — never a key, secret or agent id value — so it can be recorded in delivery ledgers as it is.
  *
- * A plain Error subclass, deliberately NOT a DingTalkConfigValidationError: that class is on the admin
- * routes' fixed-sentence allow-list (routes/admin-directory.ts), and no admin route reaches this resolver;
- * only the delivery paths (automation executor, attendance worker, todo mirror) see it. Defined here (not
- * inside the settings module) so a test that replaces that module with a factory still sees the class the
- * workers check with `instanceof`. The attendance delivery worker classifies it as non-retryable by
- * `instanceof`, not by matching words in the message.
+ * That contract is GUARDED, not merely intended: the verification module (work-notification-verify.ts)
+ * lists this class in an inline fixed-sentence allow-list of classifyDirectoryFailureText, which puts every
+ * construction of it under tests/unit/directory-fixed-sentence-constructors.guard.test.ts — an argument that
+ * reads a caught error's message / stack / cause, or a catch binding, reds that guard. The message reaches
+ * the verification report body (a 200 report, not a 400) only through that classifier.
+ *
+ * A plain Error subclass, deliberately NOT a DingTalkConfigValidationError: the 400 responders of the admin
+ * config routes list that class, and this one must never pass as "the caller's input was wrong" there —
+ * on those routes it is reduced to the fixed sentence like any other failure. Defined here (not inside the
+ * settings module) so a test that replaces that module with a factory still sees the class the workers and
+ * the verification module check with `instanceof`. The attendance delivery worker classifies it as
+ * non-retryable by `instanceof`, not by matching words in the message.
  */
 export class DingTalkMessageConfigError extends Error {
   readonly code: DingTalkMessageConfigErrorCode
