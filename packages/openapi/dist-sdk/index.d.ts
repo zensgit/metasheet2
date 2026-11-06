@@ -8686,6 +8686,141 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/security-actions/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Re-verify the signed-in user for one security action
+         * @description Mounted only when SECURITY_ACTION_PROOF_ENABLED is exactly 'true'. Returns a 300-second single-use proof bound to the session, the authenticated organization, the purpose and the target. A purpose whose prerequisites are not delivered is refused before any data is read. Responses are not cacheable.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        purpose: "external_identity_bind" | "external_identity_unbind" | "login_grant_enable" | "login_grant_disable";
+                        /** Format: uuid */
+                        connectionId: string;
+                        /**
+                         * Format: uuid
+                         * @description Required for every purpose except external_identity_bind, and refused for it.
+                         */
+                        targetIdentityId?: string;
+                        /** @description Present exactly when targetIdentityId is present. */
+                        expectedBindingRevision?: number;
+                        /** @enum {string} */
+                        method: "local_password";
+                        /** Format: password */
+                        password: string;
+                        clientBindingDigest?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description A single-use proof was issued */
+                200: {
+                    headers: {
+                        "Cache-Control"?: "no-store";
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok?: true;
+                            data?: {
+                                /** @description Opaque; present only in this response body. */
+                                proof?: string;
+                                /** @enum {string} */
+                                purpose?: "external_identity_bind" | "external_identity_unbind" | "login_grant_enable" | "login_grant_disable";
+                                /** Format: uuid */
+                                connectionId?: string;
+                                /** @enum {string} */
+                                method?: "local_password";
+                                /** @enum {string} */
+                                assurance?: "local_password";
+                                /** Format: date-time */
+                                expiresAt?: string;
+                                /** @enum {integer} */
+                                ttlSeconds?: 300;
+                            };
+                        };
+                    };
+                };
+                /** @description No usable session */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SecurityActionError"];
+                    };
+                };
+                /** @description Refused (purpose unavailable, method unavailable, policy refusal or rejected credential) */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SecurityActionError"];
+                    };
+                };
+                /** @description Organization context, target or state conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SecurityActionError"];
+                    };
+                };
+                /** @description Request does not satisfy the closed schema; details.fields names schema fields only */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SecurityActionError"];
+                    };
+                };
+                /** @description Per-user failure limit reached; Retry-After carries details.retryAfter */
+                429: {
+                    headers: {
+                        "Retry-After"?: number;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SecurityActionError"];
+                    };
+                };
+                /** @description Verification unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SecurityActionError"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/comments": {
         parameters: {
             query?: never;
@@ -18947,6 +19082,22 @@ export interface components {
             error?: {
                 code?: string;
                 message?: string;
+            };
+        };
+        SecurityActionError: {
+            /** @enum {boolean} */
+            ok?: false;
+            error?: {
+                /** @enum {string} */
+                code?: "UNAUTHORIZED" | "PASSWORD_CHANGE_REQUIRED" | "SECURITY_ACTION_SESSION_REQUIRED" | "SECURITY_ACTION_PURPOSE_UNAVAILABLE" | "SECURITY_ACTION_METHOD_UNAVAILABLE" | "SECURITY_ACTION_HIGH_PRIVILEGE_SELF_SERVICE_DENIED" | "SECURITY_ACTION_ASSURANCE_INSUFFICIENT" | "SECURITY_ACTION_CONNECTION_NOT_PERMITTED" | "SECURITY_ACTION_CREDENTIAL_REJECTED" | "SECURITY_ACTION_ORG_CONTEXT_REQUIRED" | "SECURITY_ACTION_TARGET_CONFLICT" | "SECURITY_ACTION_STATE_CHANGED" | "SECURITY_ACTION_INVALID_REQUEST" | "SECURITY_ACTION_RATE_LIMITED" | "SECURITY_ACTION_UNAVAILABLE" | "SECURITY_ACTION_PROOF_UNAVAILABLE";
+                message?: string;
+                /** @description Closed-set values only; never a request value. */
+                details?: {
+                    /** @enum {string} */
+                    nextStep?: "admin_assisted_local_credential";
+                    retryAfter?: number;
+                    fields?: string[];
+                };
             };
         };
         DirectErrorResponse: {

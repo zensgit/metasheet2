@@ -4,7 +4,7 @@ Date: 2026-11-06
 
 ## Scope
 
-Two backend modules with no caller:
+Two backend modules:
 
 - `packages/core-backend/src/auth/security-action-privilege.ts` — reads a user's grant inputs on the
   caller's transaction, classifies the user as `standard` or `high` privilege, and computes a witness
@@ -53,8 +53,8 @@ No migration, table, route, environment flag, OpenAPI change or consumer is part
    caught only by review.
 9. **Unavailable purposes.** Every purpose is unavailable: each prerequisite is a frozen `false`,
    availability reads no environment variable, and the production entry point takes one argument.
-10. **Inert.** Nothing in `src` imports either module except the classifier importing the policy
-   types.
+10. **Callers.** In `src`, the classifier imports the policy types and the security action proof
+   service imports both modules; nothing else imports either.
 
 Classification does not cover account state; callers apply the account gate separately.
 
@@ -96,7 +96,7 @@ the local credential provenance constraint (a local credential counts as the `lo
 only when its provenance satisfies the assurance policy for verification methods); the authorization
 input serialization contract, for every purpose whose outcome depends on the privilege class (derived
 from the matrix and the delivered methods); and the purpose's own target resolution. In this
-revision none is delivered, so no purpose is available.
+revision every prerequisite is false, so no purpose is available.
 
 ## Tests and wiring
 

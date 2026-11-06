@@ -577,7 +577,7 @@ describe('wiring', () => {
     expect(importSpecifiers("import { a } from './x'\nexport { b } from './y'\nexport * from './z'\nexport const c = 1\n")).toEqual(['./x', './y', './z'])
   })
 
-  it('has no importer in the backend source other than the classifier importing the policy module', () => {
+  it('has exactly the reviewed import edges into the two policy modules', () => {
     const edges: Array<[string, string]> = []
     for (const file of listSourceFiles(SRC)) {
       const source = readFileSync(file, 'utf8')
@@ -588,6 +588,11 @@ describe('wiring', () => {
       expect(source).not.toMatch(/require\(\s*['"][^'"]*(?:security-action-privilege|external-login-assurance)/)
       expect(source).not.toMatch(/import\(\s*['"][^'"]*(?:security-action-privilege|external-login-assurance)/)
     }
-    expect(edges).toEqual([['auth/security-action-privilege.ts', './external-login-assurance']])
+    expect(edges.sort()).toEqual([
+      ['auth/security-action-privilege.ts', './external-login-assurance'],
+      ['auth/security-action-proof.ts', './external-login-assurance'],
+      ['auth/security-action-proof.ts', './external-login-assurance'],
+      ['auth/security-action-proof.ts', './security-action-privilege'],
+    ])
   })
 })

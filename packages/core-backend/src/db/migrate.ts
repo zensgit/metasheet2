@@ -149,7 +149,9 @@ Notes:
   row, and no env var unlocks it. Known example:
   zzzz20261104150000_create_task_source_links.ts refuses while
   task_source_links holds any row; roll back the application build and
-  leave the table in place.`)
+  leave the table in place. Likewise
+  zzzz20261106120000_create_security_action_challenges.ts refuses while
+  security_action_challenges holds any row.`)
 }
 
 async function main(): Promise<void> {
