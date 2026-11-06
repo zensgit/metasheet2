@@ -226,7 +226,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { TASKS_EN, TASKS_FMT_EN, TASKS_FMT_ZH, TASKS_ZH, codeMessage, type TasksText } from '../../tasks/labels'
-import { moveFocusWithin } from '../../tasks/focusTrap'
+import { isInputMethodKey, moveFocusWithin } from '../../tasks/focusTrap'
 import { focusAfterSwap } from '../../tasks/tasksFocus'
 import {
   addTaskListMember,
@@ -613,10 +613,15 @@ function close(): void {
 // [fe-12] the focus trap: every Tab and Shift+Tab is moved by the shared task dialog trap
 // (tasks/focusTrap.ts; one the input method took aside), not only the ones at the ends, since macOS
 // Safari leaves buttons out of its default Tab order. Past the last control wraps to the first,
-// before the first to the last; the set is taken at keydown time, disabled controls left out. The dialog root takes no focus (no
-// tabindex), so with every control disabled the Tab is held and focus stays where it is.
+// before the first to the last; the set is taken at keydown time, disabled controls left out. The
+// dialog root takes no focus (no tabindex), so with every control disabled the Tab is held and focus
+// stays where it is. An Escape the input method may be using cancels the composition, not the dialog.
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
+    if (isInputMethodKey(event)) {
+      event.stopPropagation()
+      return
+    }
     close()
     return
   }

@@ -95,6 +95,10 @@ artifacts/integration-k3wise/internal-trial/
 # counts only belong in committed output; the raw values are operator-local.
 artifacts/gip-authority-inventory/
 
+# The runtime-db lock-protocol real-DB step's vitest JSON report (read by scripts/ops/vitest-zero-skip.mjs).
+# A local run's report must never be committed, where it could later be read as a stale clean report.
+artifacts/yida-realdb/
+
 # Multitable on-prem release bundles are generated delivery artifacts. Keep
 # source manifests/runbooks in Git, not built archives and verification output.
 output/delivery/multitable-onprem/
