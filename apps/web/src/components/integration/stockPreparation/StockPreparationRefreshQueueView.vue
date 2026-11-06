@@ -42,9 +42,10 @@
         </button>
       </p>
 
-      <!-- THE THREE RENDERINGS (plan §8) — never one for another. -->
+      <!-- THE THREE RENDERINGS (plan §8) — never one for another. PR-9 (R-77 ①): plus `review_pending` — no hold, but a
+           written content change awaits its review (the review section renders below), never 「无待处理」. -->
       <p
-        v-if="rendering === 'not_governed' || rendering === 'unreadable' || rendering === 'none_pending'"
+        v-if="rendering === 'not_governed' || rendering === 'unreadable' || rendering === 'none_pending' || rendering === 'review_pending'"
         class="sp-refresh__state"
         data-testid="stock-prep-refresh-state"
       >
@@ -81,6 +82,18 @@
               {{ notConfirmableText(hold) }}
               <code v-if="hold.notConfirmableReason && !reasonWords(hold.notConfirmableReason)" class="sp-refresh__token" data-testid="stock-prep-refresh-unknown-token">{{ hold.notConfirmableReason }}</code>
             </p>
+            <!-- PR-9 (R-77 ①; PR-8 residual "controls for content holds"): a content change is confirmed in the
+                 「变更计划」 section below, together with the others — the button points there while that section shows. -->
+            <p v-if="stockPrepRefreshIsContentClassHold(hold)" class="sp-refresh__hint" data-testid="stock-prep-refresh-content-plan-pointer">
+              {{ bi('这一项在下面的「变更计划」里统一确认。', 'This item is confirmed together in the change plan below.') }}
+              <button
+                v-if="proposalShown"
+                type="button"
+                class="sp-refresh__link"
+                data-testid="stock-prep-refresh-go-change-plan"
+                @click="goChangePlan"
+              >{{ bi('去「变更计划」', 'Go to the change plan') }}</button>
+            </p>
             <p v-if="hold.runbookOnly" class="sp-refresh__hint" data-testid="stock-prep-refresh-runbook-only">
               {{ bi('这条沿用关系已升级为专项修复,等运行手册关闭。', 'This relationship is under specialist repair until the runbook closes it.') }}
             </p>
@@ -112,7 +125,7 @@
               <tbody>
                 <tr v-for="(row, index) in comparisonRows(hold)" :key="index">
                   <td>{{ row.path }}</td>
-                  <td>{{ row.field }}</td>
+                  <td>{{ row.field }}<code v-if="row.fieldId" class="sp-refresh__token" data-testid="stock-prep-refresh-field-id">{{ row.fieldId }}</code></td>
                   <td>{{ row.before }}</td>
                   <td>{{ row.after }}</td>
                   <td :data-comparison-status="row.status">{{ row.statusText }}</td>
@@ -124,12 +137,14 @@
                 <tr>
                   <th>{{ bi('字段', 'Field') }}</th>
                   <th>{{ bi('变化', 'Change') }}</th>
+                  <th>{{ bi('原因', 'Why') }}</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-for="(row, index) in contentRows(hold)" :key="index">
-                  <td>{{ row.field }}</td>
+                  <td>{{ row.field }}<code v-if="row.fieldId" class="sp-refresh__token" data-testid="stock-prep-refresh-field-id">{{ row.fieldId }}</code></td>
                   <td>{{ row.change }}</td>
+                  <td :data-content-reason="row.reasonToken">{{ row.reason }}<code v-if="row.reasonUnknown" class="sp-refresh__token" data-testid="stock-prep-refresh-unknown-token">{{ row.reasonToken }}</code></td>
                 </tr>
               </tbody>
             </table>
@@ -152,8 +167,19 @@
                 @click="readDetail(hold)"
               >{{ bi('查看沿用关系', 'Show the relationship') }}</button>
             </div>
+            <!-- PR-9 (#6579 residual): each demand observation in words — never an object printed as JSON; the rule
+                 tokens each in their own <code>, apart from the sentence. -->
             <p v-if="evidenceById[hold.id]" class="sp-refresh__evidence" data-testid="stock-prep-refresh-evidence-result">
-              {{ evidenceText(hold.id) }}
+              {{ bi('需求依据', 'Demand evidence') }}: <template v-if="evidenceObservations(hold.id).length === 0">—</template><span
+                v-for="(observation, index) in evidenceObservations(hold.id)"
+                :key="index"
+                data-testid="stock-prep-refresh-evidence-observation"
+              >{{ index > 0 ? bi(';', '; ') : '' }}{{ observation.text }}<template v-if="observation.rules.length > 0">{{ bi(';规则', '; rules') }} <code
+                v-for="rule in observation.rules"
+                :key="rule"
+                class="sp-refresh__token"
+                data-testid="stock-prep-refresh-evidence-rule"
+              >{{ rule }}</code></template></span> · {{ bi('历史', 'History') }}: {{ evidenceHistoryText(hold.id) }}
             </p>
             <p v-if="hold.continuationId && detailById[hold.continuationId]" class="sp-refresh__evidence" data-testid="stock-prep-refresh-continuation-result">
               {{ detailText(hold.continuationId) }}
@@ -239,16 +265,36 @@
         >{{ bi('更多待确认项', 'More holds') }}</button>
       </template>
 
+      <!-- PR-9 (R-77 ①, ⑪): the 「变更计划」 / 「变更复核」 sections — below the holds and the renderings (a review can
+           be pending with NO hold), read only for a governed project that has something for them (never not_governed:
+           RA-03 is the dormancy tripwire). -->
+      <StockPreparationRefreshChangePlan
+        v-if="changePlanShown"
+        :project-no="openedProjectNo"
+        :api="api"
+        :receipt="receipt"
+        :holds="holds"
+        :holds-page-fingerprint="holdsPageFingerprint"
+        :has-more-holds="nextCursor !== null"
+        :generation="changePlanGeneration"
+        @receipt-changed="onChangePlanReceipt"
+        @decided="onChangePlanDecided"
+        @reread="onChangePlanReread"
+        @read-more-holds="readMore"
+        @go-preview="goPreview"
+        @proposal-shown="onProposalShown"
+      />
+
       <!-- E-4: a confirm / end is recorded, and only a NEW preview makes the plan take effect. -->
-      <div v-if="previewAgain" class="sp-refresh__preview-again" data-testid="stock-prep-refresh-preview-again" role="status">
-        <p>{{ bi(previewAgainText.zh, previewAgainText.en) }}</p>
-        <p v-if="previewAgain === 'confirmed'" class="sp-refresh__hint" data-testid="stock-prep-refresh-rekey-note">{{ bi(rekeyNote.zh, rekeyNote.en) }}</p>
+      <div v-if="previewAgain" class="sp-refresh__preview-again" data-testid="stock-prep-refresh-preview-again" :data-preview-again="previewAgain" role="status">
+        <p>{{ bi(previewAgainCopy.zh, previewAgainCopy.en) }}</p>
+        <p v-if="previewAgain === 'confirmed' || previewAgain === 'plan_confirmed'" class="sp-refresh__hint" data-testid="stock-prep-refresh-rekey-note">{{ bi(rekeyNote.zh, rekeyNote.en) }}</p>
         <button
           type="button"
           class="sp-refresh__button sp-refresh__button--primary"
           data-testid="stock-prep-refresh-go-preview"
           @click="goPreview"
-        >{{ bi('去重新试算', 'Preview again') }}</button>
+        >{{ previewAgain === 'reviewed' ? bi('去项目备料页', 'Open the project page') : bi('去重新试算', 'Preview again') }}</button>
       </div>
     </template>
   </section>
@@ -260,6 +306,7 @@
 // sessionStorage, never put in an emit payload, the error banner or a clipboard string (only codes are copyable).
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
+import StockPreparationRefreshChangePlan from './StockPreparationRefreshChangePlan.vue'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import { StockPreparationConfirmApiError } from '../../../services/integration/stockPreparation/confirmApi'
 import {
@@ -270,6 +317,12 @@ import {
   STOCK_PREP_REFRESH_RECEIPT_NOTE,
   STOCK_PREP_REFRESH_RENDERING_PLAIN,
   STOCK_PREP_REFRESH_COMPARISON_STATUS_PLAIN,
+  STOCK_PREP_REFRESH_CONTENT_REASON_PLAIN,
+  STOCK_PREP_REFRESH_FIELD_OTHER,
+  STOCK_PREP_REFRESH_FIELD_PLAIN,
+  STOCK_PREP_REFRESH_OBSERVATION_ROLE_PLAIN,
+  STOCK_PREP_REFRESH_PLAN_CONFIRMED_NEXT,
+  STOCK_PREP_REFRESH_REVIEWED_NEXT,
   STOCK_PREP_REFRESH_CONTINUATION_STATUS_PLAIN,
   STOCK_PREP_REFRESH_HISTORY_PLAIN,
   STOCK_PREP_REFRESH_HOLD_KIND_PLAIN,
@@ -304,6 +357,7 @@ import {
   type StockPrepRefreshReceipt,
 } from '../../../services/integration/stockPreparation/refreshQueue'
 import { parseStockPrepRefreshStanza, type StockPrepRefreshStanza } from '../../../services/integration/stockPreparation/refreshState'
+import { stockPrepRefreshIsContentClassHold } from '../../../services/integration/stockPreparation/refreshChangePlan'
 import { stockPrepProjectNumbersMatch } from '../../../services/integration/stockPreparation/projectTarget'
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
 
@@ -330,7 +384,7 @@ function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
 }
 
-type Rendering = 'no_project' | 'loading' | 'not_governed' | 'unreadable' | 'none_pending' | 'holds' | 'refused' | 'not_registered' | 'failed'
+type Rendering = 'no_project' | 'loading' | 'not_governed' | 'unreadable' | 'none_pending' | 'review_pending' | 'holds' | 'refused' | 'not_registered' | 'failed'
 
 const openedProjectNo = computed<string>(() => (props.projectNo ?? '').trim())
 const busy = ref(false)
@@ -343,7 +397,13 @@ const errorCode = ref<string | null>(null)
 const errorReason = ref<string | null>(null)
 const errorStatus = ref<number>(0)
 const notice = ref<StockPrepPlainText | null>(null)
-const previewAgain = ref<'confirmed' | 'ended' | null>(null)
+const previewAgain = ref<'confirmed' | 'ended' | 'plan_confirmed' | 'reviewed' | null>(null)
+/** PR-9: the holds page's `holdSetFingerprint` (values-free digest) — the change plan's advisory cross-check. */
+const holdsPageFingerprint = ref<string | null>(null)
+/** PR-9: bumped on every holds re-read — the change-plan section re-reads and drops its local choices. */
+const changePlanGeneration = ref(0)
+/** PR-9: whether the change-plan section shows its proposal (the per-hold pointer button renders only then). */
+const proposalShown = ref(false)
 const evidenceById = reactive<Record<string, unknown>>({})
 const detailById = reactive<Record<string, StockPrepRefreshContinuationDetail>>({})
 const historyAck = reactive<Record<string, boolean>>({})
@@ -372,7 +432,27 @@ const rendering = computed<Rendering>(() => {
   const current = summary.value
   if (!current || current.readable !== true || current.status === 'unreadable') return 'unreadable'
   if (current.status === 'not_governed') return 'not_governed'
-  return holds.value.length > 0 ? 'holds' : 'none_pending'
+  if (holds.value.length > 0) return 'holds'
+  // PR-9 (R-77 ①): no hold, but a written change awaits its review — its own rendering, never 「无待处理」.
+  const reviews = current.counts?.pendingReviews
+  if ((typeof reviews === 'number' && reviews > 0) || current.status === 'change_pending_review') return 'review_pending'
+  return 'none_pending'
+})
+
+/**
+ * PR-9 (R-77 ⑪): read the change plan only for a GOVERNED, readable project that has something for it — a loaded
+ * content-class hold, unloaded holds (they could be content-class), a written change awaiting review, or a confirmed
+ * plan / relationship awaiting its write. Never for `not_governed` (dormancy).
+ */
+const changePlanShown = computed<boolean>(() => {
+  if (!openedProjectNo.value || !loaded.value) return false
+  const current = summary.value
+  if (!current || current.readable !== true || current.status === 'unreadable' || current.status === 'not_governed') return false
+  if (holds.value.some((hold) => stockPrepRefreshIsContentClassHold(hold))) return true
+  if (nextCursor.value !== null) return true
+  const reviews = current.counts?.pendingReviews
+  if (typeof reviews === 'number' && reviews > 0) return true
+  return current.status === 'confirmed_pending_execution' || current.status === 'change_pending_review'
 })
 
 function plainFor(key: string): StockPrepPlainEntry {
@@ -387,6 +467,8 @@ function clearValues(): void {
   receipt.value = null
   summary.value = null
   loaded.value = false
+  holdsPageFingerprint.value = null
+  proposalShown.value = false
   for (const store of [evidenceById, detailById, historyAck, typedNo, endOutcome] as Array<Record<string, unknown>>) {
     for (const key of Object.keys(store)) delete store[key]
   }
@@ -425,6 +507,7 @@ function emitSummary(): void {
 function applyPage(page: StockPrepRefreshHoldPage, mode: 'replace' | 'append' | 'one'): void {
   summary.value = page.refresh
   if (page.readReceipt) receipt.value = page.readReceipt
+  holdsPageFingerprint.value = typeof page.holdSetFingerprint === 'string' ? page.holdSetFingerprint : null
   const incoming = Array.isArray(page.page?.holds) ? page.page.holds : []
   if (mode === 'replace') {
     holds.value = incoming
@@ -452,6 +535,8 @@ async function reload(options: { keepNotice?: boolean } = {}): Promise<void> {
     const page = await api.value.listHolds(projectNo, { receipt: receipt.value?.id ?? null })
     if (ticket !== generation) return
     applyPage(page, 'replace')
+    // PR-9: the change-plan section reads again on the same receipt (and drops its local choices).
+    changePlanGeneration.value += 1
   } catch (error) {
     if (ticket !== generation) return
     loaded.value = false
@@ -625,9 +710,45 @@ async function end(hold: StockPrepRefreshHold): Promise<void> {
 }
 
 /** E-4: every decision answers `nextStep: 'preview_again'` — re-read the holds and say a preview must follow. */
-async function afterDecision(kind: 'confirmed' | 'ended', _result: { nextStep?: string } | null): Promise<void> {
+async function afterDecision(kind: 'confirmed' | 'ended' | 'plan_confirmed' | 'reviewed', _result: { nextStep?: string } | null): Promise<void> {
   previewAgain.value = kind
   await reload({ keepNotice: true })
+}
+
+/** PR-9: each decision's own next-step copy (a change plan must be written, then reviewed; a review is not 核对). */
+const previewAgainCopy = computed<StockPrepPlainText>(() => {
+  if (previewAgain.value === 'plan_confirmed') return STOCK_PREP_REFRESH_PLAN_CONFIRMED_NEXT
+  if (previewAgain.value === 'reviewed') return STOCK_PREP_REFRESH_REVIEWED_NEXT
+  return previewAgainText
+})
+
+// ── PR-9: the change-plan section's events (values-free) ─────────────────────────────────────────
+
+/** A non-null receipt from the plan page replaces the page's; ONE receipt id rides every read (R-77 ②). */
+function onChangePlanReceipt(next: StockPrepRefreshReceipt): void {
+  if (next && typeof next.id === 'string') receipt.value = next
+}
+
+async function onChangePlanDecided(kind: 'plan_confirmed' | 'reviewed'): Promise<void> {
+  await afterDecision(kind, null)
+}
+
+/** The plan moved on under a newer computation: page 1 of the holds again (same receipt), then the plan, and say so. */
+async function onChangePlanReread(): Promise<void> {
+  await reload({ keepNotice: true })
+  notice.value = STOCK_PREP_REFRESH_ITEM_UPDATED
+}
+
+function onProposalShown(shown: boolean): void {
+  proposalShown.value = shown === true
+}
+
+function goChangePlan(): void {
+  try {
+    document.getElementById('stock-prep-change-plan-proposal')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+  } catch {
+    // jsdom / an old browser without scrollIntoView options: nothing else to do.
+  }
 }
 
 function goPreview(): void {
@@ -687,7 +808,13 @@ function comparisonOf(hold: StockPrepRefreshHold) {
   return hold.candidates[0]?.comparison ?? hold.verification?.comparison ?? null
 }
 
-interface ComparisonRow { path: string; field: string; before: string; after: string; status: string; statusText: string }
+interface ComparisonRow { path: string; field: string; fieldId: string | null; before: string; after: string; status: string; statusText: string }
+
+/** PR-9 (#6579 residual): a field id in words; an id outside the map (a pack column) reads 「其他列」 with the id apart. */
+function fieldLabel(fieldId: string): { text: string; id: string | null } {
+  const entry = stockPrepRefreshTokenPlain(STOCK_PREP_REFRESH_FIELD_PLAIN, fieldId)
+  return entry ? { text: bi(entry.zh, entry.en), id: null } : { text: bi(STOCK_PREP_REFRESH_FIELD_OTHER.zh, STOCK_PREP_REFRESH_FIELD_OTHER.en), id: fieldId }
+}
 
 function comparisonRows(hold: StockPrepRefreshHold): ComparisonRow[] {
   const items = comparisonOf(hold)?.items
@@ -697,9 +824,11 @@ function comparisonRows(hold: StockPrepRefreshHold): ComparisonRow[] {
     const path = Array.isArray(item?.relativePath) && item.relativePath.length > 0 ? stockPrepRefreshCellText(item.relativePath) : bi('根', 'root')
     for (const [field, entry] of Object.entries(item?.fields ?? {})) {
       const status = typeof entry?.status === 'string' ? entry.status : ''
+      const label = fieldLabel(field)
       rows.push({
         path,
-        field,
+        field: label.text,
+        fieldId: label.id,
         before: stockPrepRefreshCellText(entry?.old),
         after: stockPrepRefreshCellText(entry?.new),
         status,
@@ -711,25 +840,67 @@ function comparisonRows(hold: StockPrepRefreshHold): ComparisonRow[] {
   return rows
 }
 
-function contentRows(hold: StockPrepRefreshHold): Array<{ field: string; change: string }> {
-  const rows: Array<{ field: string; change: string }> = []
+interface ContentRow { field: string; fieldId: string | null; change: string; reason: string; reasonToken: string; reasonUnknown: boolean }
+
+function contentRows(hold: StockPrepRefreshHold): ContentRow[] {
+  const rows: ContentRow[] = []
   for (const change of hold.contentChanges ?? []) {
+    // PR-9: why the content change was opened, in words (a token outside the map: 「未识别」 + the token apart).
+    const reasonToken = typeof change?.reason === 'string' ? change.reason : ''
+    const reasonEntry = stockPrepRefreshTokenPlain(STOCK_PREP_REFRESH_CONTENT_REASON_PLAIN, reasonToken)
     for (const [field, value] of Object.entries(change?.fields ?? {})) {
       const pair = value && typeof value === 'object' ? value as { before?: unknown; after?: unknown } : null
-      rows.push({ field, change: pair && ('before' in pair || 'after' in pair) ? `${stockPrepRefreshCellText(pair.before)} → ${stockPrepRefreshCellText(pair.after)}` : stockPrepRefreshCellText(value) })
+      const label = fieldLabel(field)
+      rows.push({
+        field: label.text,
+        fieldId: label.id,
+        change: pair && ('before' in pair || 'after' in pair) ? `${stockPrepRefreshCellText(pair.before)} → ${stockPrepRefreshCellText(pair.after)}` : stockPrepRefreshCellText(value),
+        reason: reasonEntry ? bi(reasonEntry.zh, reasonEntry.en) : (reasonToken ? bi(STOCK_PREP_REFRESH_TOKEN_UNKNOWN.zh, STOCK_PREP_REFRESH_TOKEN_UNKNOWN.en) : '—'),
+        reasonToken,
+        reasonUnknown: Boolean(reasonToken) && !reasonEntry,
+      })
     }
   }
   return rows
 }
 
-function evidenceText(holdId: string): string {
-  const evidence = evidenceById[holdId] as { current?: { observations?: unknown[]; completeness?: { status?: unknown } }; history?: { status?: unknown } } | undefined
-  if (!evidence) return ''
-  const observations = Array.isArray(evidence.current?.observations) ? evidence.current?.observations ?? [] : []
-  const history = typeof evidence.history?.status === 'string' ? evidence.history.status : 'history_unknown'
-  const lines = observations.map((entry) => stockPrepRefreshCellText(entry))
+interface EvidenceObservation { text: string; rules: string[] }
+
+function countText(value: unknown): string {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? String(value) : '—'
+}
+
+/**
+ * PR-9 (#6579 residual): one demand observation in words — its role, 部件 (a value, PULL tier), the order lines (kept
+ * as a root / dropped), the order quantity; the rule tokens are returned apart, each shown in its own <code>.
+ */
+function evidenceObservations(holdId: string): EvidenceObservation[] {
+  const evidence = evidenceById[holdId] as { current?: { observations?: unknown[] } } | undefined
+  const observations = Array.isArray(evidence?.current?.observations) ? evidence?.current?.observations ?? [] : []
+  return observations.map((raw) => {
+    const entry = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+    const role = stockPrepRefreshTokenPlain(STOCK_PREP_REFRESH_OBSERVATION_ROLE_PLAIN, typeof entry.role === 'string' ? entry.role : null)
+    const parts = [
+      role ? bi(role.zh, role.en) : bi('依据', 'evidence'),
+      `${bi('部件', 'part')} ${stockPrepRefreshCellText(entry.componentSourceId)}`,
+    ]
+    if (entry.orderLines !== undefined) {
+      parts.push(bi(
+        `订单行 ${countText(entry.orderLines)} 条(保留为根 ${countText(entry.selected)} / 去掉 ${countText(entry.dropped)})`,
+        `${countText(entry.orderLines)} order line(s) (kept as a root ${countText(entry.selected)} / dropped ${countText(entry.dropped)})`,
+      ))
+    }
+    if (entry.orderQuantity !== undefined) parts.push(`${bi('订单数量', 'order quantity')} ${stockPrepRefreshCellText(entry.orderQuantity)}`)
+    const rules = Array.isArray(entry.rules) ? entry.rules.filter((rule): rule is string => typeof rule === 'string' && rule.length > 0) : []
+    return { text: parts.join(bi(',', ', ')), rules }
+  })
+}
+
+function evidenceHistoryText(holdId: string): string {
+  const evidence = evidenceById[holdId] as { history?: { status?: unknown } } | undefined
+  const history = typeof evidence?.history?.status === 'string' ? evidence.history.status : 'history_unknown'
   // PR-7b (review N8): the history status in words, never the raw token inside the sentence.
-  return `${bi('需求依据', 'Demand evidence')}: ${lines.length > 0 ? lines.join(';') : '—'} · ${bi('历史', 'History')}: ${statusWords(STOCK_PREP_REFRESH_HISTORY_PLAIN, history)}`
+  return statusWords(STOCK_PREP_REFRESH_HISTORY_PLAIN, history)
 }
 
 function detailText(continuationId: string): string {

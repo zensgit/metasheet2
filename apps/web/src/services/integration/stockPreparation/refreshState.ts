@@ -186,11 +186,13 @@ export function stockPrepRefreshIsQuiet(stanza: StockPrepRefreshStanza | null): 
   return stanza.readable === true && stockPrepFormalSurfaceVerdict(stanza).allowed
 }
 
-export type StockPrepRefreshRendering = 'absent' | 'not_governed' | 'unreadable' | 'none_pending' | 'pending'
+export type StockPrepRefreshRendering = 'absent' | 'not_governed' | 'unreadable' | 'none_pending' | 'review_pending' | 'pending'
 
 /**
  * Plan §8's three renderings plus the two web states. `pendingHolds` is the open-hold count the caller saw (the
- * holds page's own list, or the stanza's `counts.pendingConfirm`); `null` defers to the stanza.
+ * holds page's own list, or the stanza's `counts.pendingConfirm`); `null` defers to the stanza. PR-9 (R-77 ①): no hold
+ * but a written change awaiting its review (`counts.pendingReviews > 0` or the status) is `review_pending` — a fourth
+ * distinct rendering, never 「无待处理」.
  */
 export function stockPrepRefreshRendering(
   stanza: StockPrepRefreshStanza | null,
@@ -201,7 +203,9 @@ export function stockPrepRefreshRendering(
   if (stanza.status === 'not_governed') return 'not_governed'
   const fromCaller = countOf(options.pendingHolds)
   const pending = fromCaller !== null ? fromCaller : (stanza.counts?.pendingConfirm ?? 0)
-  return pending > 0 ? 'pending' : 'none_pending'
+  if (pending > 0) return 'pending'
+  const reviews = stanza.counts?.pendingReviews ?? 0
+  return reviews > 0 || stanza.status === 'change_pending_review' ? 'review_pending' : 'none_pending'
 }
 
 export interface StockPrepRefreshBanner {

@@ -41,6 +41,15 @@ import {
   stockPrepRefreshRendering,
 } from '../src/services/integration/stockPreparation/refreshState'
 import {
+  STOCK_PREP_CONTENT_CLASS_HOLD_KINDS,
+  stockPrepRefreshIsContentClassHold,
+} from '../src/services/integration/stockPreparation/refreshChangePlan'
+import {
+  STOCK_PREP_REFRESH_CHANGE_PLAN_BLOCKED_PLAIN,
+  STOCK_PREP_REFRESH_CONTENT_REASON_PLAIN,
+  STOCK_PREP_REFRESH_FIELD_PLAIN,
+  STOCK_PREP_REFRESH_OBSERVATION_ROLE_PLAIN,
+  STOCK_PREP_REFRESH_REVIEW_CONCLUSION_PLAIN,
   STOCK_PREP_ERROR_GENERIC,
   STOCK_PREP_ERROR_PLAIN,
   STOCK_PREP_ERROR_REASON_PLAIN,
@@ -199,6 +208,12 @@ describe('RS — the board stanza on the web (refreshState.ts)', () => {
     const pending = parseStockPrepRefreshStanza({ readable: true, status: 'pending_confirmation', governed: 'pilot', counts: { pendingConfirm: 2 } })
     expect(stockPrepRefreshRendering(pending)).toBe('pending')
     expect(stockPrepRefreshRendering(pending, { pendingHolds: 0 })).toBe('none_pending')
+    // PR-9 (R-77 ①): a fourth distinct rendering — no hold, a written change awaiting its review.
+    const review = parseStockPrepRefreshStanza({ readable: true, status: 'change_pending_review', governed: 'pilot', counts: { pendingConfirm: 0, pendingReviews: 1 } })
+    expect(stockPrepRefreshRendering(review)).toBe('review_pending')
+    expect(stockPrepRefreshRendering(parseStockPrepRefreshStanza({ readable: true, status: 'executed_pending_settlement', governed: 'pilot', counts: { pendingConfirm: 0, pendingReviews: 2 } }))).toBe('review_pending')
+    expect(stockPrepRefreshRendering(parseStockPrepRefreshStanza({ readable: true, status: 'change_pending_review', governed: 'pilot', counts: null }))).toBe('review_pending')
+    expect(new Set(['not_governed', 'unreadable', 'none_pending', 'review_pending']).size).toBe(4)
   })
 
   it('RS-BANNER: per status; link only for a puller with holds; none for not_governed / complete ∧ settled / absent', () => {
@@ -375,10 +390,15 @@ describe('RS-WORDS — every hold-page token has words (the cross-side tripwire)
     HOLD_KINDS: readonly string[]
     NOT_CONFIRMABLE_REASONS: readonly string[]
     SHAPE_TOKENS: readonly string[]
+    CONTENT_CLASS_HOLD_KINDS: readonly string[]
+    REVIEWED_CONTENT_MOVED_REASON: string
+    contentTriggerFieldIds: (options: Record<string, unknown>) => string[]
+    isContentClassHold: (hold: unknown) => boolean
   }
   const store = nodeRequire(`${PLUGIN_LIB}stock-preparation-continuation-store.cjs`) as {
     EVIDENCE_HISTORY_STATUSES: readonly string[]
     CONTINUATION_ROW_STATUSES: readonly string[]
+    REVIEW_CONCLUSIONS: readonly string[]
   }
 
   /** The field statuses `compareSevenItems` assigns, scanned out of the plugin source (they are not exported). */
@@ -423,6 +443,61 @@ describe('RS-WORDS — every hold-page token has words (the cross-side tripwire)
     expect(stockPrepRefreshTokenPlain(STOCK_PREP_REFRESH_HOLD_KIND_PLAIN, 'not_a_kind')).toBeNull()
     expect(stockPrepRefreshTokenPlain(STOCK_PREP_REFRESH_HOLD_KIND_PLAIN, 'toString')).toBeNull()
     expect(stockPrepRefreshTokenPlain(STOCK_PREP_REFRESH_HOLD_KIND_PLAIN, null)).toBeNull()
+  })
+
+  /** The string literals `pattern` captures inside `function <name>(` of a plugin source (they are not exported). */
+  function scannedLiterals(file: string, functionName: string, patterns: RegExp[]): string[] {
+    const source = readFileSync(resolve(__dirname, PLUGIN_LIB, file), 'utf8').replace(/\r\n/g, '\n')
+    const start = source.indexOf(`function ${functionName}(`)
+    expect(start, `${functionName} in ${file}`).toBeGreaterThan(0)
+    const end = source.indexOf('\nfunction ', start + 1)
+    const body = source.slice(start, end > start ? end : undefined)
+    const tokens = new Set<string>()
+    for (const pattern of patterns) {
+      for (const match of body.matchAll(pattern)) for (const group of match.slice(1)) if (group) tokens.add(group)
+    }
+    return [...tokens].sort()
+  }
+
+  // PR-9 (R-77): the 「变更计划」 / 「变更复核」 vocabularies, each against its LIVE source.
+  it('RS-WORDS (PR-9): blocked tokens, review conclusions, content reasons and observation roles all have words', () => {
+    const blocked = scannedLiterals('stock-preparation-refresh-decisions.cjs', 'proposalOf', [/blocked = '([a-z_]+)'/g, /\? '([a-z_]+)' : '([a-z_]+)'/g])
+    expectWords('change-plan blocked', STOCK_PREP_REFRESH_CHANGE_PLAN_BLOCKED_PLAIN, blocked, 7)
+    expectWords('review conclusion', STOCK_PREP_REFRESH_REVIEW_CONCLUSION_PLAIN, store.REVIEW_CONCLUSIONS, 2)
+    const plannerReasons = scannedLiterals('stock-preparation-conflict-planner.cjs', 'planOnce', [/noteContentChange\([^)]*\{ reason: '([a-z_]+)' \}\)/g])
+    const contentReasons = [...new Set([pairing.REVIEWED_CONTENT_MOVED_REASON, ...plannerReasons])].sort()
+    expect(contentReasons).toEqual(expect.arrayContaining(['component_identity_conflict', 'plm_system_refresh', 'reviewed_content_moved']))
+    expectWords('content reason', STOCK_PREP_REFRESH_CONTENT_REASON_PLAIN, contentReasons, 3)
+    const roles = scannedLiterals('stock-preparation-refresh-decisions.cjs', 'observationsOfDemand', [/role: '([a-z_]+)'/g])
+    expectWords('observation role', STOCK_PREP_REFRESH_OBSERVATION_ROLE_PLAIN, roles, 2)
+  })
+
+  it('RS-FIELDS (PR-9): every content-trigger and human field of the default template has its column name, equal to the template', () => {
+    const templates = nodeRequire(`${PLUGIN_LIB}stock-preparation-templates.cjs`) as { HUMAN_PRESERVED_FIELD_IDS: readonly string[]; STOCK_PREPARATION_MAIN_TABLE_TEMPLATE: { fields: Array<{ id: string; label: string; labelZh?: string }> } }
+    const byId = new Map(templates.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, field]))
+    const ids = [...new Set([...pairing.contentTriggerFieldIds({}), ...templates.HUMAN_PRESERVED_FIELD_IDS])]
+    expect(ids.length).toBeGreaterThanOrEqual(15)
+    for (const id of ids) {
+      const field = byId.get(id)
+      expect(field, id).toBeDefined()
+      expect(STOCK_PREP_REFRESH_FIELD_PLAIN[id], `${id} has words`).toBeDefined()
+      expect(STOCK_PREP_REFRESH_FIELD_PLAIN[id].zh, id).toBe(field!.labelZh)
+      expect(STOCK_PREP_REFRESH_FIELD_PLAIN[id].en, id).toBe(field!.label)
+    }
+    expect(Object.keys(STOCK_PREP_REFRESH_FIELD_PLAIN).filter((id) => !ids.includes(id)), 'labels for fields the template no longer has').toEqual([])
+  })
+
+  it('RS-CLASS (PR-9): the web content-class mirror equals the plugin\'s isContentClassHold for every kind × verdict × reason', () => {
+    expect([...STOCK_PREP_CONTENT_CLASS_HOLD_KINDS]).toEqual([...pairing.CONTENT_CLASS_HOLD_KINDS])
+    for (const kind of pairing.HOLD_KINDS) {
+      for (const verdict of ['content_changed', 'structure_changed', null]) {
+        for (const reason of ['needs_step5', 'specialist_repair', null]) {
+          const server = pairing.isContentClassHold({ kind, notConfirmableReason: reason, detail: { verdict } })
+          const web = stockPrepRefreshIsContentClassHold({ kind, notConfirmableReason: reason, verification: { verdict } })
+          expect(web, `${kind} × ${verdict} × ${reason}`).toBe(server)
+        }
+      }
+    }
   })
 })
 

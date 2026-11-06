@@ -1616,6 +1616,95 @@ export const STOCK_PREP_ERROR_REASON_PLAIN: Record<string, StockPrepPlainEntry> 
     zhNext: '先处理新的待确认项(需要时一起确认为新的变更计划),再回来复核。',
     enNext: 'Handle the new hold first (confirm it into a new change plan if needed), then come back to review.',
   }),
+  // 备料分批拉取第一期 step 5 PR-9: the finer readings the change-plan and review sections can meet (R-77).
+  'STOCK_PREP_CHANGE_PLAN_STALE/no_content_hold': Object.freeze({
+    zh: '这个项目现在没有待确认的内容变化了,这次没有确认。',
+    en: 'This project has no open content change any more, so nothing was confirmed.',
+    zhNext: '请重新读取变更计划。',
+    enNext: 'Read the change plan again.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/candidate_set': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CHANGE_PLAN_STALE/candidate': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CHANGE_PLAN_STALE/continuation_moved': Object.freeze({
+    zh: '确认之前,有一条相关的沿用关系变了;这次没有确认。',
+    en: 'A related relationship changed before this confirm, so nothing was confirmed.',
+    zhNext: '请重新读取变更计划后再确认。',
+    enNext: 'Read the change plan again, then confirm.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_STALE/plan_moved': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CHANGE_PLAN_STALE/state_row_absent': Object.freeze({
+    zh: '找不到这个项目最近一次试算的记录,这次没有确认。',
+    en: 'This project’s latest preview record was not found, so nothing was confirmed.',
+    zhNext: '请重新试算,再打开变更计划确认。',
+    enNext: 'Preview again, then reopen the change plan and confirm.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_NOT_ALLOWED/too_many_records': Object.freeze({
+    zh: '涉及的行超过 5000 行,不能作为一份变更计划确认;请联系负责人。',
+    en: 'More than 5000 rows are involved, so this cannot be confirmed as one change plan; ask the owner.',
+    zhNext: '什么都没有改动。',
+    enNext: 'Nothing was changed.',
+  }),
+  'STOCK_PREP_CHANGE_PLAN_NOT_ALLOWED/reconfirm_not_admissible': Object.freeze({
+    zh: '其中一条沿用关系的这种变化第一期不能确认;什么都没有改动。',
+    en: 'Phase 1 cannot confirm this kind of change on one of the relationships; nothing was changed.',
+    zhNext: '请联系负责人。',
+    enNext: 'Ask the owner.',
+  }),
+  'STOCK_PREP_CHANGE_REVIEW_STALE/echo_moved': Object.freeze({
+    zh: '页面上看到的内容与写入时的不一致,这次没有复核。',
+    en: 'The content the page showed is not what was written, so nothing was reviewed.',
+    zhNext: '请重新读取变更计划,看过当前差异后再复核。',
+    enNext: 'Read the change plan again and the current difference, then review.',
+  }),
+  'STOCK_PREP_CHANGE_REVIEW_STALE/plan_replaced': Object.freeze({
+    zh: '这份变更已被新的变更计划合并,请复核新的计划。',
+    en: 'This change was absorbed into a newer change plan; review the new plan.',
+    zhNext: '请重新读取变更计划。',
+    enNext: 'Read the change plan again.',
+  }),
+  'STOCK_PREP_CHANGE_REVIEW_STALE/already_reviewed': Object.freeze({
+    zh: '这份变更已经复核过了。',
+    en: 'This change has already been reviewed.',
+    zhNext: '请重新读取变更计划;如果写入后还没核对,请到项目备料页点「核对」。',
+    enNext: 'Read the change plan again; if it was not checked after the write, press “Check” on the project page.',
+  }),
+  'STOCK_PREP_CHANGE_REVIEW_STALE/not_written': Object.freeze({
+    zh: '这份变更计划还没有写入,不能复核。',
+    en: 'This change plan has not been written yet, so it cannot be reviewed.',
+    zhNext: '请到项目备料页重新试算并写入,再回来复核。',
+    enNext: 'Preview again and write on the project page, then come back to review.',
+  }),
+  'STOCK_PREP_CHANGE_REVIEW_STALE/plan_moved': RELOAD_THIS_ITEM,
+  'STOCK_PREP_CHANGE_REVIEW_BLOCKED/change_plan_pending': Object.freeze({
+    zh: '还有一份已确认、待写入的变更计划,复核要等它写入;这次没有复核。',
+    en: 'A confirmed change plan still awaits its write; the review waits for it, and nothing was reviewed now.',
+    zhNext: '请到项目备料页重新试算并写入,再回来复核。',
+    enNext: 'Preview again and write on the project page, then come back to review.',
+  }),
+  'STOCK_PREP_CHANGE_REVIEW_READ_RECEIPT_INCOMPLETE/pages_missing': Object.freeze({
+    zh: '当前差异还有页没有打开过,不能完成复核。',
+    en: 'Some pages of the current difference have not been opened yet, so the review cannot be completed.',
+    zhNext: '把复核部分的每一页都打开看过后再完成复核。',
+    enNext: 'Open every page of the review section, then complete it.',
+  }),
+  'STOCK_PREP_CHANGE_REVIEW_READ_RECEIPT_INCOMPLETE/fingerprint_moved': Object.freeze({
+    zh: '表里的内容在您阅读之后又变了,不能完成复核。',
+    en: 'The sheet changed after you read it, so the review cannot be completed.',
+    zhNext: '请从第一页重新看一遍当前差异。',
+    enNext: 'Read the current difference again from the first page.',
+  }),
+  'STOCK_PREP_CHANGE_REVIEW_READ_RECEIPT_INCOMPLETE/hold_not_in_receipt': Object.freeze({
+    zh: '还没有打开过这份变更的当前差异,不能完成复核。',
+    en: 'The current difference of this change has not been opened yet, so the review cannot be completed.',
+    zhNext: '请重新读取变更计划,把每一页都看过。',
+    enNext: 'Read the change plan again and open every page.',
+  }),
+  'STOCK_PREP_CHANGE_REVIEW_READ_RECEIPT_INCOMPLETE/receipt_expired': Object.freeze({
+    zh: '您这次阅读的记录已过期,不能完成复核。',
+    en: 'The record of what you read has expired, so the review cannot be completed.',
+    zhNext: '请重新读取变更计划,把每一页再看一遍。',
+    enNext: 'Read the change plan again and every page of it.',
+  }),
   'STOCK_PREP_CHANGE_REVIEW_STALE/content_moved': Object.freeze({
     zh: '表里的内容在写入之后又变了,复核没有完成。',
     en: 'The sheet changed after the write, so the review did not complete.',
@@ -1917,6 +2006,13 @@ export const STOCK_PREP_REFRESH_RENDERING_PLAIN: Record<string, StockPrepPlainEn
     zhNext: '稍后刷新;一直这样请联系平台管理员。',
     enNext: 'Refresh shortly; if it persists, ask the platform admin.',
   }),
+  // PR-9 (R-77 ①): no hold, but a written content change awaits its review — the review section renders below.
+  review_pending: Object.freeze({
+    zh: '没有待确认项;有一次已写入的内容变更等您复核(见下)。',
+    en: 'No hold is open; a written content change awaits your review (below).',
+    zhNext: '复核前正式导出暂停;复核后还要核对一次(再试算)。',
+    enNext: 'The formal export stays paused until the review; after it, one more check (a preview) is still needed.',
+  }),
   none_pending: Object.freeze({
     zh: '无待处理:没有等拉取人员确认的项。',
     en: 'Nothing pending: no item awaits the puller’s confirmation.',
@@ -2045,6 +2141,124 @@ export function stockPrepRefreshTokenPlain(map: Record<string, StockPrepPlainTex
   if (typeof token !== 'string' || token.length === 0) return null
   return Object.prototype.hasOwnProperty.call(map, token) ? map[token] : null
 }
+
+// ---------------------------------------------------------------------------
+// 备料分批拉取第一期 step 5 PR-9 (design §10.3, §13; register R-77) — the 「变更计划」 / 「变更复核」 sections of
+// 「拉取待确认」, in words. Each map below covers one closed server vocabulary; StockPreparationRefreshState.spec.ts
+// RS-WORDS / RS-FIELDS read the plugin's live lists (or scan its source), so a new token without words reds CI.
+// ---------------------------------------------------------------------------
+
+/** Why no change-plan confirm can succeed right now (decisions.cjs `proposalOf`'s `blocked`, in its own order). */
+export const STOCK_PREP_REFRESH_CHANGE_PLAN_BLOCKED_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  recovery_pending: Object.freeze({ zh: '上次写入没有正常结束,在等恢复;恢复之前不能确认变更计划', en: 'the last write did not finish cleanly and awaits recovery; no change plan can be confirmed until then' }),
+  runbook_only_hold_open: Object.freeze({ zh: '有一条沿用关系在做专项修复,运行手册关闭之前不能确认变更计划', en: 'a relationship is under specialist repair; no change plan can be confirmed until the runbook closes it' }),
+  structure_change_present: Object.freeze({ zh: '同时有结构或上级(父项)的变化,内容变更计划不能借此放行,整次拉取保持挂起', en: 'a structure or parent change is open too; a content change plan cannot release it, and the whole pull stays suspended' }),
+  no_content_hold: Object.freeze({ zh: '现在没有待确认的内容变化', en: 'there is no open content change now' }),
+  record_unbound: Object.freeze({ zh: '有一行变化找不到对应的表记录,不能确认;请联系负责人检查这张表', en: 'a changed row cannot be bound to its sheet record; ask the owner to check this sheet' }),
+  records_malformed: Object.freeze({ zh: '这次变化的记录不完整,不能组成变更计划;请重新试算', en: 'the records of this change are incomplete and cannot form a change plan; preview again' }),
+  source_unknown: Object.freeze({ zh: '系统还没有记下这次试算的来源,不能确认;请重新试算', en: 'the source of this preview was not recorded, so it cannot be confirmed; preview again' }),
+})
+
+/** The review's two conclusions (store `REVIEW_CONCLUSIONS`). */
+export const STOCK_PREP_REFRESH_REVIEW_CONCLUSION_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  handled: Object.freeze({ zh: '已处理', en: 'Handled' }),
+  handled_with_notes: Object.freeze({ zh: '已处理(附说明)', en: 'Handled (with notes)' }),
+})
+
+/** Why a content change was opened (a content hold's `detail.reason`, shown on the hold card). */
+export const STOCK_PREP_REFRESH_CONTENT_REASON_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  plm_system_refresh: Object.freeze({ zh: 'PLM 里的数据变了', en: 'the data in PLM changed' }),
+  component_identity_conflict: Object.freeze({ zh: '同一位置换了另一个零件', en: 'another part now sits at the same position' }),
+  reviewed_content_moved: Object.freeze({ zh: '复核过的内容又变了', en: 'content that was already reviewed changed again' }),
+})
+
+/** The role of one demand observation (需求依据; decisions.cjs `observationsOfDemand`). */
+export const STOCK_PREP_REFRESH_OBSERVATION_ROLE_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  old_root: Object.freeze({ zh: '原来的根件', en: 'the old root' }),
+  new_parent: Object.freeze({ zh: '新的上级件', en: 'the new parent' }),
+})
+
+/**
+ * Field ids → the template's own column names (labelZh / label): the content-trigger band and the human band of the
+ * default template (RS-FIELDS pins each label against `STOCK_PREPARATION_MAIN_TABLE_TEMPLATE`). An id outside this map
+ * (a customer pack `ext_` column) reads 「其他列」 with the id apart from the sentence.
+ */
+export const STOCK_PREP_REFRESH_FIELD_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  componentCode: Object.freeze({ zh: '图号', en: 'Component Code' }),
+  componentName: Object.freeze({ zh: '名称', en: 'Component Name' }),
+  componentSpec: Object.freeze({ zh: '组件规格', en: 'Component Specification' }),
+  material: Object.freeze({ zh: '材料', en: 'Material' }),
+  sourceVersion: Object.freeze({ zh: '源版本', en: 'PLM Source Version' }),
+  rawQuantity: Object.freeze({ zh: '单层用量', en: 'Raw Quantity' }),
+  totalQuantity: Object.freeze({ zh: '总用量', en: 'Total Quantity' }),
+  materialType: Object.freeze({ zh: '材料类型', en: 'Material Type' }),
+  blankType: Object.freeze({ zh: '毛胚类型', en: 'Blank Type' }),
+  stockPreparationStatus: Object.freeze({ zh: '备料状态', en: 'Stock Preparation Status' }),
+  demandDate: Object.freeze({ zh: '需求日期', en: 'Demand Date' }),
+  leadTimeDays: Object.freeze({ zh: '提前周期(天)', en: 'Lead Time Days' }),
+  notes: Object.freeze({ zh: '备注', en: 'Notes' }),
+  procurementReply: Object.freeze({ zh: '采购回复', en: 'Procurement Reply' }),
+  warehouseConfirmation: Object.freeze({ zh: '仓库确认', en: 'Warehouse Confirmation' }),
+  makeOrBuy: Object.freeze({ zh: '自制/外购', en: 'Make or Buy' }),
+  procurementDone: Object.freeze({ zh: '采购完成', en: 'Procurement Done' }),
+  procurementReplyDate: Object.freeze({ zh: '采购回复日期', en: 'Procurement Reply Date' }),
+  warehouseDone: Object.freeze({ zh: '仓库完成', en: 'Warehouse Done' }),
+  actualArrivalDate: Object.freeze({ zh: '实际到货日期', en: 'Actual Arrival Date' }),
+})
+
+/** A field id outside STOCK_PREP_REFRESH_FIELD_PLAIN (a customer pack column): the words; the id is shown apart. */
+export const STOCK_PREP_REFRESH_FIELD_OTHER: StockPrepPlainText = Object.freeze({ zh: '其他列', en: 'Other column' })
+
+/** 「变更计划」's scope sentence (plan §3.4 step 2; R-77 ③). */
+export const STOCK_PREP_REFRESH_CHANGE_PLAN_SCOPE: StockPrepPlainText = Object.freeze({
+  zh: '确认变更计划只批准系统更新这些行的机器列(数量、材料、版本等):不改键、不搬结构、不覆盖人工填写;它不代表采购或仓库已经处理。写入后还要完成变更复核,正式导出才放行。',
+  en: 'Confirming the change plan only approves the system updating these rows’ machine columns (quantity, material, version and the like): no key changes, no structure moves, no human entry overwritten; it does not mean procurement or the warehouse has handled anything. After the write, the change review must be completed before the formal export opens.',
+})
+
+/** The explicit act (R-77 ③). */
+export const STOCK_PREP_REFRESH_CHANGE_PLAN_ACK: StockPrepPlainText = Object.freeze({
+  zh: '我已看过上面每一项变化;我确认的只是让系统更新这些机器列',
+  en: 'I have read every change above; I only confirm that the system updates these machine columns',
+})
+
+/** 「变更复核」's intro (design §10.3; C05). */
+export const STOCK_PREP_REFRESH_REVIEW_INTRO: StockPrepPlainText = Object.freeze({
+  zh: '这份变更已经写进备料表(共 {n} 行);在拉取人员看过当前差异并完成复核之前,正式导出暂停。复核确认的是:这次变化对备料业务的影响已经处理,可以交付。',
+  en: 'This change has been written to the stock-preparation sheet ({n} row(s)); the formal export stays paused until a puller reads the current difference and completes the review. The review confirms that the change’s effect on stock preparation has been handled and can be delivered.',
+})
+
+/** Plan §10: the system checks a technical permission only. */
+export const STOCK_PREP_REFRESH_REVIEW_PERMISSION_NOTE: StockPrepPlainText = Object.freeze({
+  zh: '系统只核对您有拉取权限;由谁代表客户确认备料业务已处理,以客户的指定为准。',
+  en: 'The system only checks that you have the pull permission; who confirms for the customer that stock preparation has been handled is for the customer to appoint.',
+})
+
+/** C11: the same person may review what they confirmed — as a separate act. */
+export const STOCK_PREP_REFRESH_REVIEW_SELF_NOTE: StockPrepPlainText = Object.freeze({
+  zh: '这份变更计划是您确认的。复核是另一项独立操作:请重新看过下面的当前差异再完成复核。',
+  en: 'You confirmed this change plan. The review is a separate act: read the current difference below again before completing it.',
+})
+
+/** C01 / C04: a human column holding a value is shown as present — it belongs to the state BEFORE the change. */
+export const STOCK_PREP_REFRESH_BEFORE_CHANGE_NOTE: StockPrepPlainText = Object.freeze({ zh: '属于变更前状态', en: 'belongs to the state before the change' })
+
+/** R-63 ⑥ (the S-root rule). */
+export const STOCK_PREP_REFRESH_ROOT_NOTE: StockPrepPlainText = Object.freeze({
+  zh: '根件的单层用量按根需求量写入',
+  en: 'a root’s single-level quantity is written as the root demand quantity',
+})
+
+/** After a change-plan confirm (201, `nextStep: 'preview_again'`). */
+export const STOCK_PREP_REFRESH_PLAN_CONFIRMED_NEXT: StockPrepPlainText = Object.freeze({
+  zh: '变更计划已确认。必须重新试算并写入,新的内容才会写进备料表;写入后回到这里完成变更复核。',
+  en: 'The change plan is confirmed. Preview again and write — only then does the new content reach the sheet; after the write, come back here to complete the change review.',
+})
+
+/** After a review (200). R-77 ⑨: 复核 does not replace 核对. */
+export const STOCK_PREP_REFRESH_REVIEWED_NEXT: StockPrepPlainText = Object.freeze({
+  zh: '复核已记录。复核不代替核对:如果写入之后还没有核对过,项目备料页会显示「已执行待核对」,请点「核对」(再试算一次);核对通过后才能正式导出。',
+  en: 'The review is recorded. The review does not replace the check: if the write has not been checked yet, the project page shows “written, awaiting check” — press “Check” (one more preview); the formal export opens once it passes.',
+})
 
 // ---------------------------------------------------------------------------
 // Confirmation-queue conflict types — 什么情况 (2026-09-10 field report).
