@@ -492,7 +492,7 @@ test('07: SET transaction_read_only = on; comes right after \\ir _preamble.sql',
   assert.equal(code.filter(l => /transaction_read_only/.test(l)).length, 1)
 })
 
-test('07: probe and B1 cover exactly the 11 bpmn_* tables, B1 selects only name + count(*), INVENTORY_RESULT is last', () => {
+test('07: probe and B1 cover exactly the 11 core bpmn_* tables plus the optional bpmn_deployments, B1 selects only name + count(*), INVENTORY_RESULT is last', () => {
   assertResultIsLast(FILE_07)
   const code = packCode(FILE_07)
 
@@ -511,7 +511,8 @@ test('07: probe and B1 cover exactly the 11 bpmn_* tables, B1 selects only name 
   assert.ok(b1, '07: no B1 query of the form SELECT table_name, row_count FROM (...) t ORDER BY ord')
   const branch = /^\s*(?:UNION ALL )?SELECT\s+(\d+)(?: AS ord)?, '(bpmn_[a-z_]+)'(?: AS table_name)?,\s+count\(\*\)(?:::bigint AS row_count)? FROM (bpmn_[a-z_]+)$/
   const lines = b1[1].split('\n')
-  assert.equal(lines.length, BPMN_TABLES.length, '07: B1 must have one branch per table')
+  assert.equal(lines.length, BPMN_TABLES.length + 1, '07: B1 must have one branch per core table plus the optional slot')
+  assert.equal(lines.pop(), '  :bpmn_deployments_branch', '07: the last B1 line is the optional bpmn_deployments slot')
   lines.forEach((line, i) => {
     const m = branch.exec(line)
     assert.ok(m, `07: B1 branch ${i + 1} may select only its ordinal, its own name and count(*): ${line.trim()}`)
@@ -519,6 +520,19 @@ test('07: probe and B1 cover exactly the 11 bpmn_* tables, B1 selects only name 
     assert.equal(m[2], BPMN_TABLES[i], `07: B1 branch ${i + 1} label`)
     assert.equal(m[3], m[2], `07: B1 branch ${i + 1} must count the table it names`)
   })
+
+  // Optional 12th table: its own probe (not part of has_all), and the slot is
+  // either the same values-free branch shape (ordinal 12) or empty plus an \echo.
+  const opt = code.match(/\nSELECT count\(\*\) > 0 AS has_deployments\n([\s\S]*?)\n\\gset\n\\if :has_deployments\n\\set bpmn_deployments_branch '(.*)'\n\\else\n\\set bpmn_deployments_branch ''\n\\echo '(.*)'\n\\endif\n/)
+  assert.ok(opt, '07: no optional bpmn_deployments probe + \\if/\\set/\\echo block')
+  assert.match(opt[1], /table_schema = ANY \(current_schemas\(false\)\)\n\s+AND table_name = 'bpmn_deployments'$/)
+  const m12 = branch.exec(opt[2].replace(/''/g, "'"))
+  assert.ok(m12, `07: the optional branch may select only its ordinal, its name and count(*): ${opt[2]}`)
+  assert.deepEqual([Number(m12[1]), m12[2], m12[3]], [12, 'bpmn_deployments', 'bpmn_deployments'])
+  assert.equal(opt[3], '-- bpmn_deployments not present (optional; only created by legacy 049)')
+  assert.ok(code.indexOf('AS has_deployments') > code.indexOf('AS has_all'))
+  assert.ok(!/has_deployments/.test(code.slice(code.lastIndexOf("SELECT 'INVENTORY_RESULT"))),
+    '07: completeness must not depend on the optional table')
 })
 
 if (!DATABASE_URL || !psqlAvailable()) {
@@ -530,13 +544,28 @@ if (!DATABASE_URL || !psqlAvailable()) {
     'bpmn_user_tasks|1', 'bpmn_timer_jobs|0', 'bpmn_message_events|0', 'bpmn_signal_events|0',
     'bpmn_variables|7', 'bpmn_incidents|0', 'bpmn_external_tasks|0', 'bpmn_audit_log|4',
   ]
+  const OPTIONAL_07_ROW = 'bpmn_deployments|5'
+  const OPTIONAL_07_ABSENT = '-- bpmn_deployments not present (optional; only created by legacy 049)'
   const COMPLETE_07 = 'INVENTORY_RESULT file=07-bpmn-table-totals.sql status=complete scope=bpmn_tables:11'
 
   test('synthetic PostgreSQL: 07 prints the exact count of every bpmn_* table (plain and psql -1)', () => {
     const r = onBpmnFixture(s => ({ plain: runBpmnTableTotals(s), single: runBpmnTableTotals(s, ['-1']) }))
     for (const [mode, o] of [['plain', r.plain], ['-1', r.single]]) {
-      assert.deepEqual(o.rows, EXPECTED_07_ROWS, `${mode}: row counts`)
+      assert.deepEqual(o.rows, [...EXPECTED_07_ROWS, OPTIONAL_07_ROW], `${mode}: row counts (11 core + optional)`)
       assert.equal(o.result, COMPLETE_07, `${mode}: result line`)
+      assert.ok(!o.stdout.includes(OPTIONAL_07_ABSENT), `${mode}: no "not present" line when the table exists`)
+    }
+  })
+
+  test('synthetic PostgreSQL: 07 without the optional bpmn_deployments is still complete', () => {
+    const r = onBpmnFixture(s => {
+      exec(`DROP TABLE "${s}".bpmn_deployments`)
+      return { plain: runBpmnTableTotals(s), single: runBpmnTableTotals(s, ['-1']) }
+    })
+    for (const [mode, o] of [['plain', r.plain], ['-1', r.single]]) {
+      assert.deepEqual(o.rows, EXPECTED_07_ROWS, `${mode}: the 11 core rows only, no bpmn_deployments row`)
+      assert.ok(o.stdout.split(/\r?\n/).includes(OPTIONAL_07_ABSENT), `${mode}: the optional line is printed`)
+      assert.equal(o.result, COMPLETE_07, `${mode}: completeness depends on the 11 core tables only`)
     }
   })
 
@@ -553,6 +582,7 @@ if (!DATABASE_URL || !psqlAvailable()) {
     assert.equal(r.oneMissing.result,
       'INVENTORY_RESULT file=07-bpmn-table-totals.sql status=incomplete reason=missing-tables:1 scope=none')
     assert.equal(r.empty.rows, null)
+    assert.ok(r.empty.stdout.split(/\r?\n/).includes(OPTIONAL_07_ABSENT))
     assert.equal(r.empty.result,
       'INVENTORY_RESULT file=07-bpmn-table-totals.sql status=incomplete reason=missing-tables:11 scope=none')
   })

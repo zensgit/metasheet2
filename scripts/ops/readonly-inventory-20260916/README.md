@@ -110,10 +110,13 @@ R80 上从未真正发出；R81 修好了这条连接，升级后点这种按钮
 - `SET transaction_read_only = on;` 同样紧跟 `\ir _preamble.sql`，理由同 §0c；`psql -X -1` 与
   `AUTOCOMMIT=off` 下注入的 `UPDATE` 都以 25006 中止，去掉这一句则同一条 `UPDATE` 在 `-1` 下提交。
 - **`07` 从未在任何站点上跑过**，只在合成库上验证。
-- **范围外**：旧的原生 SQL 迁移 `packages/core-backend/migrations/049_create_bpmn_workflow_tables.sql`
-  另建了第 12 张表 `bpmn_deployments`。该迁移现在是空操作的历史标记
-  （`src/db/migration-provider.ts` 的 `SUPERSEDED_LEGACY_SQL_MIGRATIONS`），当前代码不引用这张表，
-  但早年真正执行过 049 的库上可能还留着它。`07` 不统计它。
+- **可选的第 12 张表 `bpmn_deployments`**：只有旧的原生 SQL 迁移
+  `packages/core-backend/migrations/049_create_bpmn_workflow_tables.sql` 会建它。该迁移现在是空操作的
+  历史标记（`src/db/migration-provider.ts` 的 `SUPERSEDED_LEGACY_SQL_MIGRATIONS`），当前代码不引用这张表，
+  但早年真正执行过 049 的库上可能还留着它。`07` 单独探测它：在 `current_schemas(false)` 里看得见时，
+  B1 在 11 行之后多输出一行 `bpmn_deployments | <行数>`（同样只有 `count(*)`）；看不见时（不存在，
+  或当前角色无权看到）输出 `-- bpmn_deployments not present (optional; only created by legacy 049)`。
+  **完成态只由 11 张核心表决定**：有没有这张表都不影响 `status=complete`。
 
 ## 1. 这七份文件分别解锁什么
 
@@ -125,7 +128,7 @@ R80 上从未真正发出；R81 修好了这条连接，升级后点这种按钮
 | `04-adm13-declared-admins.sql` | ADM-13 | PR #5665 / #5677 的**盘点段**（不回填） | 有多少用户满足声明式 admin 字段，但 `user_roles` 里没有 `role_id='admin'` 那一行 |
 | `05-trg04-webhook-target-totals.sql` | TRG-04 | 喂 **R81 安装决策**（2026-11-05） | 每一个 `send_webhook` 目标和每一条 webhook 订阅，按启用状态分 `url_missing` / `not_https` / `https_internal_literal` / `https_other` 四桶计数；`https_other` **≠ 安全**（见 §0c） |
 | `06-trg04-button-webhook-totals.sql` | TRG-04 | 喂 **R81 安装前检查**（2026-11-05；尚未在真实库上跑过） | 按钮字段的「发送 Webhook」按六列计数；**`https_hostname` = R80 上发不出、R81 上开始发送的按钮数**；需要 `meta_fields` 的 SELECT（含按钮 secret），由 owner 定执行人和身份（见 §0c） |
-| `07-bpmn-table-totals.sql` | BPMN 下线 | 喂 **R82 安装前检查**（2026-11-06；不阻断；从未在任何站点上跑过） | 11 张旧 `bpmn_*` 表各自的行数；全 0 ⇒ 删除 BPMN 运行时与设计器前没有数据要保留（见 §0d） |
+| `07-bpmn-table-totals.sql` | BPMN 下线 | 喂 **R82 安装前检查**（2026-11-06；不阻断；从未在任何站点上跑过） | 11 张旧 `bpmn_*` 表各自的行数，另加可选的 `bpmn_deployments`（仅旧 049 建，存在才输出，不影响完成态）；全 0 ⇒ 删除 BPMN 运行时与设计器前没有数据要保留（见 §0d） |
 
 每个 `.sql` 顶部有更详细的背景、逐条查询的“目的 / 依据代码 / 预期输出”，以及本轮返修说明。
 
@@ -211,7 +214,7 @@ INVENTORY_RESULT file=<文件名> status=incomplete reason=<原因> …
 | `02` | Q5/Q6（`multitable_webhooks` 计数 + id/created_by） | 贴进 PR #5649 的合并前盘点；按 `created_by` 通知用户（2026-11-05：#5619 / #5649 均已合并，`02` 的数字改作装 R81 前的参考，判断以 `05` 为准） |
 | `05` | R1 / W1（规则、订阅各两行：启用 t/f × 四桶） | R81 安装决策：两表全 0 ⇒ R81 不影响；任一桶非 0（**含 `https_other`**）⇒ 现场逐条确认后再装 |
 | `06` | B1（一行六个计数） | R81 安装前检查：`https_hostname` > 0 ⇒ 这些按钮升级后会真的发送，先确认目标；`unclassified` > 0 ⇒ 现场逐条确认 |
-| `07` | B1（11 行：表名 + 行数） | R82 安装前检查（不阻断）：`status=complete` 且全 0 ⇒ 删除 BPMN 运行时与设计器前没有数据要保留；任一表非 0 ⇒ 只回报表名与行数，由 owner 定保留/迁移方式；`incomplete` 或无 `INVENTORY_RESULT` 行 ⇒ 换有 11 张表 SELECT 的只读身份重跑 |
+| `07` | B1（11 行：表名 + 行数；有 `bpmn_deployments` 时第 12 行） | R82 安装前检查（不阻断）：`status=complete` 且全 0 ⇒ 删除 BPMN 运行时与设计器前没有数据要保留；任一表非 0 ⇒ 只回报表名与行数，由 owner 定保留/迁移方式；`incomplete` 或无 `INVENTORY_RESULT` 行 ⇒ 换有 11 张表 SELECT 的只读身份重跑 |
 
 ### 4b. `02-trg04` 的窄口径 / 上界两个数怎么读（2026-09-20 起）
 
@@ -240,13 +243,13 @@ scripts/ops/readonly-inventory-20260916/
 ├── 04-adm13-declared-admins.sql
 ├── 05-trg04-webhook-target-totals.sql （2026-11-05：每个 webhook 目标分四桶计数）
 ├── 06-trg04-button-webhook-totals.sql （2026-11-05：按钮字段 webhook 六列计数）
-├── 07-bpmn-table-totals.sql       （2026-11-06：11 张旧 BPMN 表的行数）
+├── 07-bpmn-table-totals.sql       （2026-11-06：11 张旧 BPMN 表 + 可选 bpmn_deployments 的行数）
 ├── verify/
 │   ├── fixture-modern.sql        （合成新 schema：全假值）
 │   ├── fixture-legacy.sql        （合成旧 schema：缺 actions / is_admin / is_active）
 │   ├── fixture-webhook-totals.sql （05 专用：带 enabled 列的规则 r1–r16、订阅 w1–w6）
 │   ├── fixture-button-webhooks.sql （06 专用：meta_fields 按钮行 b1–b17）
-│   ├── fixture-bpmn-tables.sql   （07 专用：11 张 bpmn_* 表，非零行数各不相同）
+│   ├── fixture-bpmn-tables.sql   （07 专用：11 张核心 bpmn_* 表 + bpmn_deployments，非零行数各不相同）
 │   ├── run-verify.mjs            （一次性 schema 建→灌→跑→断言→DROP）
 │   └── readonly-inventory-pack.test.mjs （node --test 两层：静态契约 + 合成库）
 └── README.md                     （本文件）

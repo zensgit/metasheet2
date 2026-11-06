@@ -12,6 +12,15 @@
 -- Output: one row per table (table name + row count), then the
 --   INVENTORY_RESULT line. Every count 0 => nothing to keep or migrate.
 --
+-- OPTIONAL 12th TABLE: bpmn_deployments is created only by the legacy raw SQL
+--   migration 049_create_bpmn_workflow_tables.sql (now a no-op history marker),
+--   so it exists only where 049 really ran. When it is visible in
+--   current_schemas(false), B1 prints a 12th row for it after the 11; when it
+--   is not (absent, or this role cannot see it), the run prints
+--   `-- bpmn_deployments not present (optional; only created by legacy 049)`.
+--   Completeness is defined by the 11 core tables only: status=complete never
+--   depends on bpmn_deployments.
+--
 -- VALUES-FREE: only counts are selected. No id, key, name, variable, payload
 --   or audit text. (bpmn_variables / bpmn_audit_log can hold business data,
 --   which is why nothing but count(*) is read.)
@@ -46,6 +55,19 @@ SELECT count(DISTINCT table_name) AS bpmn_tables_present
 SELECT :bpmn_tables_present = 11 AS has_all
 \gset
 
+-- ── Probe (optional bpmn_deployments, legacy 049 only; not part of has_all) ─
+SELECT count(*) > 0 AS has_deployments
+  FROM information_schema.tables
+ WHERE table_schema = ANY (current_schemas(false))
+   AND table_name = 'bpmn_deployments'
+\gset
+\if :has_deployments
+\set bpmn_deployments_branch 'UNION ALL SELECT 12, ''bpmn_deployments'', count(*) FROM bpmn_deployments'
+\else
+\set bpmn_deployments_branch ''
+\echo '-- bpmn_deployments not present (optional; only created by legacy 049)'
+\endif
+
 
 \if :has_all
 -- ── B1. row count per table ─────────────────────────────────────────────────
@@ -61,6 +83,7 @@ SELECT table_name, row_count FROM (
   UNION ALL SELECT  9, 'bpmn_incidents',          count(*) FROM bpmn_incidents
   UNION ALL SELECT 10, 'bpmn_external_tasks',     count(*) FROM bpmn_external_tasks
   UNION ALL SELECT 11, 'bpmn_audit_log',          count(*) FROM bpmn_audit_log
+  :bpmn_deployments_branch
 ) t ORDER BY ord;
 \else
 \echo '-- not all 11 bpmn_* tables are visible — B1 skipped.'

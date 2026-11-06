@@ -791,10 +791,12 @@ export function verifyButtonWebhookTotals() {
 
 // ── 07 (2026-11-06): row counts of the 11 legacy BPMN tables ────────────────
 // 07-bpmn-table-totals.sql prints one row per bpmn_* table (name + count(*)),
-// then its INVENTORY_RESULT line. No other fixture here creates a bpmn_*
+// then its INVENTORY_RESULT line, plus a 12th row for the optional legacy-049
+// bpmn_deployments when it exists. No other fixture here creates a bpmn_*
 // table, so 07 runs on its own fixture (fixture-bpmn-tables.sql), on that
-// fixture with one table dropped, on an empty schema, as a role that can see
-// only one table, and with a write injected after its SET line.
+// fixture without the optional table, with one core table dropped, on an
+// empty schema, as a role that can see only one table, and with a write
+// injected after its SET line.
 export const FILE_07 = '07-bpmn-table-totals.sql'
 export const BPMN_07_HEADER = 'table_name|row_count'
 export const BPMN_TABLES_FIXTURE = 'fixture-bpmn-tables.sql'
@@ -851,6 +853,10 @@ export function verifyBpmnTableTotals() {
   return {
     tables: withFixture('inventory_fixture_bpmn', BPMN_TABLES_FIXTURE, runBpmnTableTotals),
     oneTransaction: withFixture('inventory_fixture_bpmn', BPMN_TABLES_FIXTURE, s => runBpmnTableTotals(s, ['-1'])),
+    optionalAbsent: withFixture('inventory_fixture_bpmn', BPMN_TABLES_FIXTURE, s => {
+      exec(`DROP TABLE "${s}".bpmn_deployments`)
+      return runBpmnTableTotals(s)
+    }),
     oneMissing: withFixture('inventory_fixture_bpmn', BPMN_TABLES_FIXTURE, s => {
       exec(`DROP TABLE "${s}".bpmn_signal_events`)
       return runBpmnTableTotals(s)
