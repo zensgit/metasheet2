@@ -52,7 +52,8 @@
  *     that key on the next open; the same account's own late 4xx still counts off its request, and a
  *     late 5xx or no answer still leaves the entry unresolved.
  * 11. A sent form keeps what was sent (packages 1b and 2 together; cells S1–S4): a dialog mounted
- *     while the create is out shows the sent form once the outcome is unknown; neither a picker
+ *     while the create is out shows the sent form, with the names the picker gave, once the outcome
+ *     is unknown; neither a picker
  *     confirm nor a people lookup that lands after the send changes the chips of the locked form,
  *     and 重试 resends the same bytes.
  */
@@ -3239,6 +3240,69 @@ describe('派发任务 dialog: the people picker (package 1b)', () => {
     expect(document.activeElement).toBe(menu)
   })
 
+  it('opened by a click that does not focus the button (macOS Safari), the picker still hands focus back to 选择人员', async () => {
+    serveTasks({ people: peopleWithSearch() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    // Focus is on another control; the click itself moves none (a click in jsdom never does).
+    q<HTMLInputElement>('title')!.focus()
+    q<HTMLButtonElement>('pick-people')!.click()
+    await flushUi()
+    expect(document.activeElement).toBe(pickerQ('search'))
+    pickerQ<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    expect(pickerQ('search')).toBeNull()
+    expect(document.activeElement).toBe(q('pick-people'))
+  })
+
+  it('a sign-in change with the picker open: the dialog refuses, focus lands on the dialog, and an Esc then closes it', async () => {
+    serveTasks({ people: peopleWithSearch() })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    q<HTMLButtonElement>('pick-people')!.focus()
+    q<HTMLButtonElement>('pick-people')!.click()
+    await flushUi()
+    expect(document.activeElement).toBe(pickerQ('search'))
+    signInElsewhereWithEvent(TOKEN_B)
+    await flushUi()
+    expectRefused()
+    expect(pickerQ('search')).toBeNull()
+    // 选择人员 went with the form; focus goes to the dialog it was in, not to the page.
+    expect(q('pick-people')).toBeNull()
+    expect(document.activeElement).toBe(dialog())
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    document.activeElement!.dispatchEvent(esc)
+    await flushUi()
+    expect(esc.defaultPrevented).toBe(true)
+    expect(dialog()).toBeNull()
+  })
+
+  it('a picker left open when the open-time list replaced the form does not come back with 再派一项', async () => {
+    let answer: (value: unknown) => void = () => {}
+    const client = fakeApiClient()
+    client.listRecordTasks.mockImplementation(() => new Promise((resolve) => { answer = resolve }))
+    serveTasks({ people: peopleWithSearch() })
+    const { container } = mountInspector({ client })
+    await flushUi()
+    await openDialog(container)
+    // The list read is still out: submit waits for it, 选择人员 does not.
+    expect(q<HTMLButtonElement>('submit')!.disabled).toBe(true)
+    q<HTMLButtonElement>('pick-people')!.click()
+    await flushUi()
+    expect(pickerQ('search')).not.toBeNull()
+    answer({ items: [recordTask()], hasMore: false, degraded: false })
+    await flushUi()
+    expect(q('existing')).not.toBeNull()
+    expect(pickerQ('search')).toBeNull()
+    q<HTMLButtonElement>('another')!.click()
+    await flushUi()
+    expect(q('title')).not.toBeNull()
+    expect(pickerQ('search')).toBeNull()
+    expect(document.querySelector('[data-testid="task-people-picker"]')).toBeNull()
+  })
+
   it('after another sign-in, a search is not sent and the dialog refuses', async () => {
     serveTasks({ people: peopleWithSearch() })
     const { container } = mountInspector()
@@ -3251,6 +3315,178 @@ describe('派发任务 dialog: the people picker (package 1b)', () => {
     await afterDebounce()
     expect(peopleLookups().filter((url) => url.includes('?q='))).toEqual([])
     expectRefused()
+  })
+})
+
+describe('派发任务 dialog: its own Tab trap', () => {
+  /** Sends a Tab (Shift+Tab with `shiftKey`) from `from`, focused first; returns the event. */
+  function tab(from: HTMLElement, shiftKey = false): KeyboardEvent {
+    from.focus()
+    expect(document.activeElement).toBe(from)
+    const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true })
+    from.dispatchEvent(event)
+    return event
+  }
+
+  const closeButton = () => dialog()!.querySelector<HTMLElement>('.meta-dispatch__close')!
+  const chipRemove = (id: string) => document.querySelector<HTMLButtonElement>(`[data-assignee-id="${id}"] .meta-dispatch__chip-remove`)!
+
+  it('moves every Tab and Shift+Tab one step, wraps at both ends, and starts from the ends when the dialog itself has focus', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    const submitButton = q<HTMLButtonElement>('submit')!
+    expect(submitButton.disabled).toBe(false)
+    // One step forward and back between two middle controls (each moved by the dialog, not the browser).
+    expect(tab(q('title')!).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q('person-field'))
+    expect(tab(q('person-field')!, true).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q('title'))
+    // Both ends wrap.
+    expect(tab(submitButton).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(closeButton())
+    expect(tab(closeButton(), true).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(submitButton)
+    // From the dialog itself (where focus goes on open): Tab to the first control, Shift+Tab to the last.
+    expect(tab(dialog()!).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(closeButton())
+    expect(tab(dialog()!, true).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(submitButton)
+    expect(dialog()).not.toBeNull()
+  })
+
+  it('leaves a Tab the input method took (keyCode 229) in the title to it, and moves a Tab during a composition it did not take', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    const title = q<HTMLInputElement>('title')!
+    title.focus()
+    for (const init of [{ keyCode: 229, isComposing: true }, { keyCode: 229 }, { keyCode: 229, shiftKey: true }]) {
+      const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, ...init })
+      title.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(document.activeElement).toBe(title)
+    }
+    const passedOn = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, isComposing: true, keyCode: 9 })
+    title.dispatchEvent(passedOn)
+    expect(passedOn.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q('person-field'))
+  })
+
+  it('leaves a Tab in the date and time inputs to the browser (their own parts), and brings a move out of the dialog back to the next control', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    const outside = document.createElement('button')
+    document.body.appendChild(outside)
+    const turn = () => new Promise((resolve) => setTimeout(resolve, 0))
+    try {
+      // A Tab between the input's parts: not held back, focus stays on the input.
+      expect(tab(q('due-date')!).defaultPrevented).toBe(false)
+      expect(document.activeElement).toBe(q('due-date'))
+      // Wherever the browser moves it inside the dialog is left as it is.
+      q('submit')!.focus()
+      await turn()
+      expect(document.activeElement).toBe(q('submit'))
+      // A move out of the dialog (Tab, then Shift+Tab) comes back to the control after (before) the input.
+      expect(tab(q('due-time')!).defaultPrevented).toBe(false)
+      outside.focus()
+      await turn()
+      expect(document.activeElement).toBe(q('cancel'))
+      expect(tab(q('due-date')!, true).defaultPrevented).toBe(false)
+      outside.focus()
+      await turn()
+      expect(document.activeElement).toBe(q('mode'))
+      // Only the move in the same turn as the Tab: focus leaving later (a click) is left as it is.
+      expect(tab(q('due-date')!).defaultPrevented).toBe(false)
+      await turn()
+      outside.focus()
+      await turn()
+      expect(document.activeElement).toBe(outside)
+    } finally {
+      outside.remove()
+    }
+  })
+
+  it('leaves a Tab INTO a date or time input to the browser (only its move lands on the last part going back), and puts focus on the input only when that move left the dialog, for the latest Tab only', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    const outside = document.createElement('button')
+    document.body.appendChild(outside)
+    const turn = () => new Promise((resolve) => setTimeout(resolve, 0))
+    try {
+      // Back into the time input from 取消, forward into the date input from the mode: not held back.
+      expect(tab(q('cancel')!, true).defaultPrevented).toBe(false)
+      // Wherever the browser's move lands inside the dialog is left as it is.
+      q('submit')!.focus()
+      await turn()
+      expect(document.activeElement).toBe(q('submit'))
+      expect(tab(q('mode')!).defaultPrevented).toBe(false)
+      // A move that left the dialog: focus goes to the input the Tab was going to.
+      outside.focus()
+      await turn()
+      expect(document.activeElement).toBe(q('due-date'))
+      // Two Tabs before the check runs (Chromium runs key input ahead of timers): only the latest counts.
+      expect(tab(q('cancel')!, true).defaultPrevented).toBe(false)
+      expect(tab(q('mode')!).defaultPrevented).toBe(false)
+      outside.focus()
+      await turn()
+      expect(document.activeElement).toBe(q('due-date'))
+    } finally {
+      outside.remove()
+    }
+  })
+
+  it('steps over the folded user-id entry, and onto it once it is unfolded', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    expect(assigneeIds()).toEqual(['usr_a'])
+    expect(tab(chipRemove('usr_a')).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q('mode'))
+    expect(tab(q('mode')!, true).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(chipRemove('usr_a'))
+    q<HTMLButtonElement>('add-by-id-toggle')!.click()
+    await flushUi()
+    expect(tab(chipRemove('usr_a')).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(q('assignee-input'))
+  })
+
+  it('skips the controls disabled while a create is out', async () => {
+    serveTasks({ create: () => new Promise<Response>(() => {}) })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    await submit()
+    expect(q<HTMLButtonElement>('submit')!.disabled).toBe(true)
+    expect(q<HTMLInputElement>('title')!.disabled).toBe(true)
+    // Left enabled: ×, the user-id toggle and 取消.
+    const toggle = q<HTMLButtonElement>('add-by-id-toggle')!
+    const cancel = q<HTMLButtonElement>('cancel')!
+    expect(tab(closeButton()).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(toggle)
+    expect(tab(toggle).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(cancel)
+    expect(tab(cancel).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(closeButton())
+    expect(tab(cancel, true).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(toggle)
+    expect(tab(closeButton(), true).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(cancel)
   })
 })
 
@@ -3318,8 +3554,9 @@ describe('派发任务 dialog: a sent form keeps what was sent (packages 1b and 
     expect(q<HTMLInputElement>('title')!.value).toBe('Changed')
     expect(q<HTMLSelectElement>('mode')!.value).toBe('any')
     expect(q<HTMLInputElement>('due-date')!.value).toBe('2031-05-06')
-    // Ids: the names the picker gave stayed with the dialog that sent the create.
+    // The name the picker gave is kept with the sent form, so this dialog shows it too.
     expect(assigneeIds()).toEqual(['usr_a', 'usr_x'])
+    expect(chipText('usr_x')).toContain('Person X')
     expect(q('inactive-skipped')).toBeNull()
     for (const id of LOCKED_CONTROLS) expect(q<HTMLInputElement>(id)!.disabled).toBe(true)
     expect(q('submit')!.textContent!.trim()).toBe('重试')
@@ -3329,6 +3566,42 @@ describe('派发任务 dialog: a sent form keeps what was sent (packages 1b and 
     expect(bodies[1]).toBe(bodies[0])
     expect(JSON.parse(bodies[0])).toMatchObject({ title: 'Changed', assignees: ['usr_a', 'usr_x'], dueDate: '2031-05-06' })
     expect(q('success')).not.toBeNull()
+  })
+
+  it('S1b: the names kept with a sent form stay with the identity that sent it', async () => {
+    serveTasks({ people: peopleRoute(), create: () => jsonResponse(502, {}) })
+    const first = mountInspector()
+    await flushUi()
+    await openDialog(first.container)
+    setInput('due-date', '2031-05-06')
+    await pickPersonX()
+    pickerQ<HTMLButtonElement>('confirm')!.click()
+    await flushUi()
+    await submit()
+    expect(q('error')!.textContent!.trim()).toBe(OUTCOME_UNKNOWN_ZH)
+    expect(chipText('usr_x')).toContain('Person X')
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    unmountAll()
+    // B signs in elsewhere and the page is loaded again under B: a fresh form, no name of A's.
+    signInElsewhere(TOKEN_B)
+    const second = mountInspector()
+    await flushUi()
+    await openDialog(second.container)
+    expect(dialog()!.textContent).not.toContain('Person X')
+    expect(q('identity-refused')).toBeNull()
+    expect(q('submit')!.textContent!.trim()).toBe('派发')
+    expect(assigneeIds()).toEqual(['usr_a'])
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    unmountAll()
+    // Back under A, the sent form comes back with the name.
+    signInElsewhere(TOKEN_A)
+    const third = mountInspector()
+    await flushUi()
+    await openDialog(third.container)
+    expect(q('submit')!.textContent!.trim()).toBe('重试')
+    expect(chipText('usr_x')).toContain('Person X')
   })
 
   it('S2: a picker confirm on the locked form adds no chip, and 重试 resends the same bytes', async () => {

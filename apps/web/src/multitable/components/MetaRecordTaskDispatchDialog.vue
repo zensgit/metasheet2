@@ -170,9 +170,10 @@
                 <option v-for="field in personFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </div>
-            <!-- Package 1b: people are picked by name; the user-id entry below is folded until asked for. -->
+            <!-- Package 1b: people are picked by name; the user-id entry below is folded until asked for
+                 (`hidden` as well, so the Tab trap steps over it). -->
             <div class="meta-dispatch__inline">
-              <MtButton size="sm" data-testid="record-task-dispatch-pick-people" :disabled="submitting" @click="pickerOpen = true">{{ l('dispatch.pickPeople') }}</MtButton>
+              <MtButton size="sm" data-testid="record-task-dispatch-pick-people" :disabled="submitting" @click="onPickPeople">{{ l('dispatch.pickPeople') }}</MtButton>
               <button
                 type="button"
                 class="meta-dispatch__link-button"
@@ -211,7 +212,7 @@
               class="meta-dispatch__hint"
               data-testid="record-task-dispatch-access-skipped"
             >{{ dispatchAccessSkipped(accessSkipped, isZh) }}</p>
-            <div v-show="typedOpen" class="meta-dispatch__inline" data-testid="record-task-dispatch-add-by-id">
+            <div v-show="typedOpen" :hidden="!typedOpen" class="meta-dispatch__inline" data-testid="record-task-dispatch-add-by-id">
               <label class="meta-dispatch__sublabel" :for="controlId('assignee-input')">{{ l('dispatch.assigneeInputLabel') }}</label>
               <input
                 :id="controlId('assignee-input')"
@@ -331,6 +332,7 @@ import { useLocale } from '../../composables/useLocale'
 import { dispatchAccessSkipped, recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 import { TASKS_EN, TASKS_ZH } from '../../tasks/labels'
 import TaskPeoplePicker, { type TaskPeoplePicked } from '../../tasks/TaskPeoplePicker.vue'
+import { moveFocusWithin } from '../../tasks/focusTrap'
 import {
   createTask,
   getTask,
@@ -665,6 +667,13 @@ async function checkPrefill(fieldId: string, ids: string[]): Promise<void> {
   assignees.value = assignees.value.filter((id) => !dropped.has(id))
 }
 
+/** 选择人员: the button is focused first (a click does not focus a button in macOS Safari), so the
+ *  picker hands focus back to it on close. */
+function onPickPeople(event: MouseEvent): void {
+  if (event.currentTarget instanceof HTMLElement) event.currentTarget.focus()
+  pickerOpen.value = true
+}
+
 function onPickerConfirm(picked: TaskPeoplePicked): void {
   pickerOpen.value = false
   if (submitting.value) return
@@ -712,6 +721,8 @@ function resetForm(): void {
   dueTime.value = ''
   formError.value = null
   sentHere.value = false
+  // A picker left open when the open-time read replaced the form does not come back with it.
+  pickerOpen.value = false
   clearOpenState()
   // Prefill from the first person field that holds an active person; the dispatcher can pick another
   // or none.
@@ -719,9 +730,9 @@ function resetForm(): void {
   applyPersonField(first ? first.id : '')
 }
 
-/** The form as the create with an unknown outcome sent it (a dialog mounted since). The controls stay
- *  locked; a retry resends the kept body, not these values. */
-function restoreSentForm(input: CreateTaskInput | null): void {
+/** The form as the create with an unknown outcome sent it (a dialog mounted since), with the names the
+ *  picker gave for its people. The controls stay locked; a retry resends the kept body, not these values. */
+function restoreSentForm(input: CreateTaskInput | null, names: Record<string, string> | null): void {
   formError.value = null
   assigneeError.value = null
   inactiveSkipped.value = false
@@ -733,6 +744,7 @@ function restoreSentForm(input: CreateTaskInput | null): void {
   accessSkipped.value = 0
   resolveGeneration += 1
   clearOpenState()
+  pickedNames.value = names ? { ...names } : {}
   if (!input) return
   title.value = input.title
   personFieldId.value = ''
@@ -849,7 +861,7 @@ watch(() => props.visible, (open) => {
   if (current?.created && !current.seen) return
   // The last create's outcome is unknown: the form as it was sent, locked, with 重试.
   if (current?.failure?.unknown) {
-    if (!sentHere.value) restoreSentForm(current.input)
+    if (!sentHere.value) restoreSentForm(current.input, current.pickedNames)
     return
   }
   if (current?.failure) {
@@ -880,7 +892,7 @@ watch(
     // A dialog mounted while the create was out showed the pending note over a fresh form; once the
     // outcome is unknown it shows the form as that create sent it, which is what 重试 resends.
     if (current.failure?.unknown) {
-      if (!sentHere.value) restoreSentForm(current.input)
+      if (!sentHere.value) restoreSentForm(current.input, current.pickedNames)
       return
     }
     if (current.failure) {
@@ -1052,7 +1064,11 @@ async function onSubmit(): Promise<void> {
       : { sheetId: scope.sheetId, recordId: scope.recordId }
     input = { ...input, source, dispatchKey: key }
   }
-  const ticket = beginDispatchRun(runKey, binding.identity, input)
+  // The picker's names for the people sent go with the run, for a dialog mounted since (never sent).
+  const sentNames = Object.fromEntries((input.assignees ?? [])
+    .filter((id) => pickedNames.value[id])
+    .map((id) => [id, pickedNames.value[id]]))
+  const ticket = beginDispatchRun(runKey, binding.identity, input, sentNames)
   if (ticket === null) return
   formError.value = null
   clearOpenState()
@@ -1081,9 +1097,6 @@ function onCancel(): void {
   emit('close')
 }
 
-const FOCUSABLE_SELECTOR =
-  'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
-
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
     event.preventDefault()
@@ -1100,28 +1113,9 @@ function onKeydown(event: KeyboardEvent): void {
     onAddTyped()
     return
   }
-  if (event.key !== 'Tab') return
-  const modal = modalRef.value
-  if (!modal) return
-  const focusable = Array.from(modal.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
-  if (focusable.length === 0) {
-    event.preventDefault()
-    modal.focus()
-    return
-  }
-  const first = focusable[0]
-  const last = focusable[focusable.length - 1]
-  const active = document.activeElement
-  const activeInModal = active instanceof HTMLElement && modal.contains(active) && active !== modal
-  if (event.shiftKey) {
-    if (!activeInModal || active === first) {
-      event.preventDefault()
-      last.focus()
-    }
-  } else if (!activeInModal || active === last) {
-    event.preventDefault()
-    first.focus()
-  }
+  // Every Tab is moved here, wrapping inside the dialog, a date or time input's own parts and a Tab
+  // the input method took aside (see tasks/focusTrap.ts).
+  if (event.key === 'Tab' && modalRef.value) moveFocusWithin(modalRef.value, event)
 }
 </script>
 

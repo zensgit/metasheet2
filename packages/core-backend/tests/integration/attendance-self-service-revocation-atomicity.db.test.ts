@@ -172,6 +172,7 @@ describe('default attendance bootstrap/revocation atomicity (real PostgreSQL)', 
       CREATE TABLE users (
         id text PRIMARY KEY, email text UNIQUE, username text, mobile text, name text,
         role text DEFAULT 'user', permissions jsonb DEFAULT '[]', password_hash text,
+        access_generation bigint NOT NULL DEFAULT 0,
         is_active boolean DEFAULT true, must_change_password boolean DEFAULT false,
         activation_status text DEFAULT 'activated', local_password_set boolean DEFAULT true,
         created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now(), last_login_at timestamptz

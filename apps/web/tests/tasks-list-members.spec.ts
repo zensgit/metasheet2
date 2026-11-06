@@ -1241,13 +1241,50 @@ describe('members dialog — closing and focus', () => {
     expect(document.activeElement).toBe(first)
   })
 
-  it('Tab between two controls inside is left to the browser', async () => {
+  // macOS Safari leaves buttons out of its default Tab order: a Tab between two controls left to the
+  // browser passes over the row buttons and the close button, and past the last text field or select
+  // it takes focus out of the dialog. Every Tab is moved by the trap instead.
+  it('every Tab between two controls is moved here too: Tab and Shift+Tab step through each usable control in order, buttons included', async () => {
     const el = await openDialog()
-    const middle = inRow(el, 'u3', 'tasks-list-member-remove')
-    middle.focus()
-    expect(keydown(middle, 'Tab').defaultPrevented).toBe(false)
-    expect(keydown(middle, 'Tab', true).defaultPrevented).toBe(false)
-    expect(document.activeElement).toBe(middle)
+    // The add button is disabled while the id field is empty, so it is not in the cycle.
+    expect(disabled(el, 'tasks-list-add-member-submit')).toBe(true)
+    const order = [
+      roleSelect(el, 'u2'),
+      inRow(el, 'u2', 'tasks-list-member-transfer'),
+      inRow(el, 'u2', 'tasks-list-member-remove'),
+      roleSelect(el, 'u3'),
+      inRow(el, 'u3', 'tasks-list-member-transfer'),
+      inRow(el, 'u3', 'tasks-list-member-remove'),
+      must(el, 'tasks-list-add-member-input'),
+      must(el, 'tasks-list-add-member-role'),
+      must(el, 'tasks-list-members-close'),
+    ]
+    order[0].focus()
+    for (let step = 1; step <= order.length; step += 1) {
+      expect(keydown(document.activeElement as HTMLElement, 'Tab').defaultPrevented, `Tab ${step}`).toBe(true)
+      expect(document.activeElement).toBe(order[step % order.length])
+    }
+    for (let step = 1; step <= order.length; step += 1) {
+      expect(keydown(document.activeElement as HTMLElement, 'Tab', true).defaultPrevented, `Shift+Tab ${step}`).toBe(true)
+      expect(document.activeElement).toBe(order[(order.length - step) % order.length])
+    }
+  })
+
+  it('the buttons a transfer confirmation swaps in are in the cycle, in their place in the row', async () => {
+    const el = await openDialog()
+    // One Tab before the confirmation opens: the set is taken at each keydown, not kept from the first.
+    const select = roleSelect(el, 'u2')
+    select.focus()
+    keydown(select, 'Tab')
+    expect(document.activeElement).toBe(inRow(el, 'u2', 'tasks-list-member-transfer'))
+    await click(rowOf(el, 'u2'), 'tasks-list-member-transfer')
+    select.focus()
+    keydown(select, 'Tab')
+    expect(document.activeElement).toBe(must(el, 'tasks-list-member-transfer-confirm-yes'))
+    keydown(document.activeElement as HTMLElement, 'Tab')
+    expect(document.activeElement).toBe(must(el, 'tasks-list-member-transfer-confirm-cancel'))
+    keydown(document.activeElement as HTMLElement, 'Tab')
+    expect(document.activeElement).toBe(inRow(el, 'u2', 'tasks-list-member-remove'))
   })
 
   it('disabled controls are left out of the cycle: with only the close button usable, Shift+Tab stays on it', async () => {
@@ -1260,6 +1297,48 @@ describe('members dialog — closing and focus', () => {
     close.focus()
     expect(keydown(close, 'Tab', true).defaultPrevented).toBe(true)
     expect(document.activeElement).toBe(close)
+    // From the title (outside the set) Tab goes to the first control and Shift+Tab to the last; the
+    // disabled add field and role select come before the close button, so both land on it only if
+    // they are left out.
+    expect(disabled(el, 'tasks-list-add-member-input')).toBe(true)
+    expect(disabled(el, 'tasks-list-add-member-role')).toBe(true)
+    const title = must(el, 'tasks-list-members-title')
+    title.focus()
+    keydown(title, 'Tab')
+    expect(document.activeElement).toBe(close)
+    title.focus()
+    keydown(title, 'Tab', true)
+    expect(document.activeElement).toBe(close)
+  })
+
+  it('keys other than Tab and Escape are left alone', async () => {
+    const el = await openDialog()
+    const input = must(el, 'tasks-list-add-member-input')
+    input.focus()
+    expect(keydown(input, 'a').defaultPrevented).toBe(false)
+    expect(document.activeElement).toBe(input)
+    const close = must(el, 'tasks-list-members-close')
+    close.focus()
+    expect(keydown(close, 'Enter').defaultPrevented).toBe(false)
+    expect(keydown(close, ' ').defaultPrevented).toBe(false)
+    expect(document.activeElement).toBe(close)
+    must(el, 'tasks-list-members-dialog')
+  })
+
+  it('a Tab the input method took (keyCode 229) in the add field is left to it; one it did not take is moved', async () => {
+    const el = await openDialog()
+    const input = must(el, 'tasks-list-add-member-input')
+    input.focus()
+    for (const init of [{ keyCode: 229, isComposing: true }, { keyCode: 229 }, { keyCode: 229, shiftKey: true }]) {
+      const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, ...init })
+      input.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(document.activeElement).toBe(input)
+    }
+    const passedOn = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, isComposing: true, keyCode: 9 })
+    input.dispatchEvent(passedOn)
+    expect(passedOn.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(must(el, 'tasks-list-add-member-role'))
   })
 
   // [fe-48] (FE-8): a browser moves focus off a control it disables to the page body (the focus
@@ -1415,6 +1494,23 @@ describe('members dialog — the transfer and leave confirmations keep focus ins
     expect(yes.getAttribute('aria-describedby')).toBe(prompt.id)
     expect(document.getElementById(prompt.id)).toBe(prompt)
     await escapeClosesTheDialog(el)
+  })
+
+  it('the leave confirmation buttons are in the Tab cycle, in their place before the close button', async () => {
+    viewAs('u2', { myRole: 'edit' })
+    const el = await openDialog()
+    await press(must(el, 'tasks-list-leave'))
+    const yes = must(el, 'tasks-list-leave-confirm-yes')
+    expect(document.activeElement).toBe(yes)
+    keydown(yes, 'Tab')
+    expect(document.activeElement).toBe(must(el, 'tasks-list-leave-confirm-cancel'))
+    keydown(document.activeElement as HTMLElement, 'Tab')
+    expect(document.activeElement).toBe(must(el, 'tasks-list-members-close'))
+    keydown(document.activeElement as HTMLElement, 'Tab', true)
+    keydown(document.activeElement as HTMLElement, 'Tab', true)
+    expect(document.activeElement).toBe(yes)
+    keydown(yes, 'Tab', true)
+    expect(document.activeElement).toBe(must(el, 'tasks-list-add-member-role'))
   })
 
   it('cancelling it focuses the leave button again; Escape from there closes the dialog', async () => {

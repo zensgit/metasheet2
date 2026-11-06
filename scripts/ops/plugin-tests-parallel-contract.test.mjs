@@ -112,7 +112,11 @@ function assertParallelWorkflow(doc) {
         const predecessor = '  tests/integration/directory-org-transfer-source-freeze.db.test.ts \\\n'
         assert.equal(step.run.split(addition).length - 1, 1, 'Handover DB suite must run exactly once')
         assert.ok(step.run.includes(predecessor + addition), 'Keep the new whole-file suite at its reviewed position')
+        const repairAddition = '  tests/integration/dingtalk-login-repair.db.test.ts \\\n'
+        assert.equal(step.run.split(repairAddition).length - 1, 1, 'Login repair DB suite must run exactly once')
+        assert.ok(step.run.includes(addition + repairAddition), 'Keep the login repair suite at its reviewed position')
         step.run = step.run.replace(addition, '')
+        step.run = step.run.replace(repairAddition, '')
       }
       if (suite === 'runtime-db' && step.id === lockProtocolStepId) {
         const tail = `  --reporter=verbose${lockProtocolJsonReporter}\n${lockProtocolZeroSkipLine}`
@@ -173,6 +177,8 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['runtime-db'].steps.find(step => step.id === lockProtocolStepId); assert.ok(step.run.includes(lockProtocolZeroSkipLine)); step.run = step.run.replace(lockProtocolZeroSkipLine, '') },
     doc => { const step = doc.jobs['runtime-db'].steps.find(step => step.id === lockProtocolStepId); assert.ok(step.run.endsWith(lockProtocolZeroSkipLine)); step.run = `${step.run.slice(0, -1)} || true\n` },
     doc => { const step = doc.jobs['runtime-db'].steps.find(step => step.id === lockProtocolStepId); assert.ok(step.run.includes(lockProtocolJsonReporter)); step.run = step.run.replace(lockProtocolJsonReporter, '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/dingtalk-login-repair.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/dingtalk-login-repair.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const steps = doc.jobs.unit.steps; steps.splice(steps.findIndex(step => step.name === directoryClientLintStep.name), 1) },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).run += ' || true' },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).if = false },
