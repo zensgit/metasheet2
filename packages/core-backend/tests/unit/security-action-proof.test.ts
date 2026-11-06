@@ -579,7 +579,7 @@ describe('password comparison and the second transaction', () => {
     ['the session', (s: HarnessState) => { s.session = { user_id: USER, live: false } }],
     ['the watermark', (s: HarnessState, context: AuthenticatedSessionContext) => { s.watermarkMs = String(context.tokenIssuedAt * 1000) }],
     ['the membership', (s: HarnessState) => { s.member = false }],
-  ])('refuses with 409 STATE_CHANGED and writes nothing when %s changed between the two reads', async (_label, drift) => {
+  ])('refuses and writes nothing when %s changed between the two reads (STATE_CHANGED, or the session or organisation refusal that the second read meets first)', async (_label, drift) => {
     const context = contextFor()
     const { service, runner } = serviceWith({ options: { before: { advisoryLock: (state) => drift(state, context) } } })
     const refusal = await expectRefusal(service.issue(context, verifyRequest({ purpose: 'external_identity_unbind' })), ['the session', 'the watermark', 'the membership'].includes(_label) ? (_label === 'the membership' ? 'SECURITY_ACTION_ORG_CONTEXT_REQUIRED' : 'SECURITY_ACTION_SESSION_REQUIRED') : 'SECURITY_ACTION_STATE_CHANGED')
