@@ -34,9 +34,11 @@
 //         no source value: an existing cell value (a person may type it on a deployment sheet) is never cleared — no
 //         add / update / inactive / change-plan payload names it, an otherwise unchanged row is a SKIP, for both
 //         band derivations (template-only and pack-aware) and for a key that is absent or present-but-undefined.
-//   Y8-16 the same guard end to end through the real route stack (dry-run → apply), on a PROJECT sheet and on a
-//         DEPLOYMENT sheet: an existing row holding a typed value and a moved PLM column → the update patch names the
-//         moved column and never `projectSpecModel`.
+//   Y8-16a/b the same guard end to end through the real route stack (dry-run → apply), on a PROJECT sheet (a) and on
+//         a DEPLOYMENT sheet (b), as two tests so one failing cannot mask the other: an existing row holding a typed
+//         value and a moved PLM column → the update patch names the moved column and never `projectSpecModel`. The
+//         deployment sheet is provisioned from the real sandbox descriptor, and (备料 review item 2) its two new
+//         columns carry NO human write lock — a person may type into them there.
 //   Y8-17 (备料 review item 1) the continuation exclusion: `projectSpecModel` (and the machine write-back column) is
 //         neither a content trigger nor in the settlement machine band; the band is part of the sheet digest, so
 //         removing the exclusion (the F1 slice) moves every governed sheet's machine digest once.
@@ -55,6 +57,7 @@ const templates = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 const planner = require(path.join(LIB, 'stock-preparation-conflict-planner.cjs'))
 const writer = require(path.join(LIB, 'stock-preparation-apply-writer.cjs'))
 const projectTargets = require(path.join(LIB, 'stock-preparation-project-targets.cjs'))
+const { buildStockPreparationTargetDescriptor, sandboxStockPreparationTemplate } = require(path.join(LIB, 'stock-preparation-target-provisioning.cjs'))
 const { assertExtensionFieldIdValid } = require(path.join(LIB, 'stock-preparation-extension-namespace.cjs'))
 const { normalizeCustomerPack } = require(path.join(LIB, 'stock-preparation-customer-pack.cjs'))
 const { FACTORY_A_REHEARSAL_PACK } = require(path.join(LIB, 'customer-packs', 'factory-a.rehearsal.cjs'))
@@ -524,44 +527,78 @@ function physicalKeyOf(data, logical) {
   return `${anchor.slice(0, anchor.length - 'componentSourceId'.length)}${logical}`
 }
 
-test('Y8-16 data-loss guard end to end: on a project sheet AND a deployment sheet, a refresh never writes projectSpecModel over a typed value', async () => {
-  for (const kind of ['project', 'deployment']) {
-    const h = mountSheetKind(kind)
-    try {
-      if (kind === 'project') {
-        const created = await projectSheet.call(h.routes, 'POST', '/api/integration/stock-preparation/projects/:projectNo/target', { user: Y16_PULLER, params: { projectNo: Y16_PROJECT }, body: {} })
-        assert.equal(created.statusCode, 201, JSON.stringify(created.body))
+// The deployment sheet a real deployment has: provisioned by the sandbox ensure path's own descriptor
+// (buildStockPreparationTargetDescriptor over sandboxStockPreparationTemplate, target-provisioning.cjs), replacing the
+// harness's bare seed, so the column properties below are the ones a deployment really gets.
+async function provisionDeploymentSheetFromDescriptor(h) {
+  const descriptor = buildStockPreparationTargetDescriptor({ template: sandboxStockPreparationTemplate({ objectId: Y16_ENV_OBJECT }) })
+  for (const id of NEW_COLUMNS) assert.ok(descriptor.fields.some((field) => field.id === id), `the sandbox descriptor carries ${id}`)
+  await h.provisioning.ensureObject({ projectId: h.staging, descriptor })
+}
+
+function deploymentColumnProperty(h, id) {
+  const object = h.provisioning.objects.get(`${h.staging}/${Y16_ENV_OBJECT}`)
+  assert.ok(object, 'the deployment sheet exists on the host')
+  const field = object.fields.get(id)
+  assert.ok(field, `deployment: the sheet has ${id}`)
+  return field.property || {}
+}
+
+async function assertRefreshNeverWritesSpecOverTypedValue(kind) {
+  const h = mountSheetKind(kind)
+  try {
+    if (kind === 'deployment') await provisionDeploymentSheetFromDescriptor(h)
+    if (kind === 'project') {
+      const created = await projectSheet.call(h.routes, 'POST', '/api/integration/stock-preparation/projects/:projectNo/target', { user: Y16_PULLER, params: { projectNo: Y16_PROJECT }, body: {} })
+      assert.equal(created.statusCode, 201, JSON.stringify(created.body))
+    }
+    const first = await pullOnce(h)
+    assert.ok(first.written >= 1, `${kind}: the first pull wrote rows`)
+    const written = (await h.records.queryRecords({ sheetId: kind === 'project' ? h.provisioning.sheetIdOf(h.staging, h.projectObjectId()) : Y16_ENV_SHEET, filters: {}, limit: 1000 }))
+    assert.ok(written.length >= 1, kind)
+    const sheetId = written[0].sheetId
+    const specKey = physicalKeyOf(written[0].data, SPEC)
+    const movedKey = physicalKeyOf(written[0].data, 'totalQuantity')
+    assert.equal(Object.prototype.hasOwnProperty.call(written[0].data, specKey), false, `${kind}: the first pull did not write ${SPEC}`)
+    // What the host now answers for the sheet: a person typed the empty column (possible on a deployment sheet,
+    // which carries no human lock) and the PLM column totalQuantity moved (not an identity column, so the next pull
+    // plans a plain UPDATE rather than an identity hold).
+    const realQuery = h.records.queryRecords
+    h.records.queryRecords = async (input) => (await realQuery(input)).map((record) => (record.sheetId === sheetId
+      ? { ...record, data: { ...record.data, [specKey]: TYPED_SPEC, [movedKey]: 999 } }
+      : record))
+    const patches = []
+    const creates = []
+    const realPatch = h.records.patchRecord
+    const realCreate = h.records.createRecord
+    h.records.patchRecord = async (input) => { patches.push(clone(input.changes || {})); return realPatch(input) }
+    h.records.createRecord = async (input) => { creates.push(clone(input.data || {})); return realCreate(input) }
+    const second = await pullOnce(h)
+    assert.ok(second.counts.updated >= 1, `${kind}: the moved PLM column is refreshed (not vacuous): ${JSON.stringify(second.counts)}`)
+    assert.ok(patches.length >= 1, kind)
+    assert.ok(patches.some((changes) => Object.prototype.hasOwnProperty.call(changes, movedKey)), `${kind}: the patch restores the moved PLM column`)
+    for (const changes of [...patches, ...creates]) {
+      assert.equal(Object.prototype.hasOwnProperty.call(changes, specKey), false, `${kind}: a refresh write named ${SPEC}: ${JSON.stringify(Object.keys(changes))}`)
+    }
+    if (kind === 'deployment') {
+      // 备料 review item 2: deployment (non-project) sheets are not locked — after provisioning and two pulls the two
+      // new columns carry the template's plm_system marker (not vacuous: the real descriptor's property reached the
+      // host) and NO humanWriteLock, so a person may type into them on this sheet.
+      for (const id of NEW_COLUMNS) {
+        const property = deploymentColumnProperty(h, id)
+        assert.equal(property.stockPreparation && property.stockPreparation.ownership, 'plm_system', `deployment: ${id} came from the real descriptor`)
+        assert.equal(Object.prototype.hasOwnProperty.call(property, 'humanWriteLock'), false, `deployment: ${id} carries no humanWriteLock: ${JSON.stringify(property)}`)
       }
-      const first = await pullOnce(h)
-      assert.ok(first.written >= 1, `${kind}: the first pull wrote rows`)
-      const written = (await h.records.queryRecords({ sheetId: kind === 'project' ? h.provisioning.sheetIdOf(h.staging, h.projectObjectId()) : Y16_ENV_SHEET, filters: {}, limit: 1000 }))
-      assert.ok(written.length >= 1, kind)
-      const sheetId = written[0].sheetId
-      const specKey = physicalKeyOf(written[0].data, SPEC)
-      const movedKey = physicalKeyOf(written[0].data, 'totalQuantity')
-      assert.equal(Object.prototype.hasOwnProperty.call(written[0].data, specKey), false, `${kind}: the first pull did not write ${SPEC}`)
-      // What the host now answers for the sheet: a person typed the empty column (possible on a deployment sheet,
-      // which carries no human lock) and the PLM column totalQuantity moved (not an identity column, so the next pull
-      // plans a plain UPDATE rather than an identity hold).
-      const realQuery = h.records.queryRecords
-      h.records.queryRecords = async (input) => (await realQuery(input)).map((record) => (record.sheetId === sheetId
-        ? { ...record, data: { ...record.data, [specKey]: TYPED_SPEC, [movedKey]: 999 } }
-        : record))
-      const patches = []
-      const creates = []
-      const realPatch = h.records.patchRecord
-      const realCreate = h.records.createRecord
-      h.records.patchRecord = async (input) => { patches.push(clone(input.changes || {})); return realPatch(input) }
-      h.records.createRecord = async (input) => { creates.push(clone(input.data || {})); return realCreate(input) }
-      const second = await pullOnce(h)
-      assert.ok(second.counts.updated >= 1, `${kind}: the moved PLM column is refreshed (not vacuous): ${JSON.stringify(second.counts)}`)
-      assert.ok(patches.length >= 1, kind)
-      assert.ok(patches.some((changes) => Object.prototype.hasOwnProperty.call(changes, movedKey)), `${kind}: the patch restores the moved PLM column`)
-      for (const changes of [...patches, ...creates]) {
-        assert.equal(Object.prototype.hasOwnProperty.call(changes, specKey), false, `${kind}: a refresh write named ${SPEC}: ${JSON.stringify(Object.keys(changes))}`)
-      }
-    } finally { h.restore() }
-  }
+    }
+  } finally { h.restore() }
+}
+
+test('Y8-16a data-loss guard end to end on a PROJECT sheet: a refresh never writes projectSpecModel over a typed value', async () => {
+  await assertRefreshNeverWritesSpecOverTypedValue('project')
+})
+
+test('Y8-16b data-loss guard end to end on a DEPLOYMENT sheet: a refresh never writes projectSpecModel over a typed value; the two columns carry no humanWriteLock', async () => {
+  await assertRefreshNeverWritesSpecOverTypedValue('deployment')
 })
 
 // ── Y8-17: the continuation exclusion (备料 review item 1) ─────────────────────────────────────────────────
