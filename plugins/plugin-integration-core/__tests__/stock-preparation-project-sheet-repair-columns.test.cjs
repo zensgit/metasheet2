@@ -104,8 +104,8 @@ function snapshotObject(object) {
  * write, so a suite can play a concurrent writer or a misbehaving host; a throw from the callback restores every
  * object the fake host holds, like a rolled-back transaction.
  */
-function mount({ switchOn = true, txPort = true, readPort = true, harness = projectSheet } = {}) {
-  const h = harness.mountProjectSheetRoutes({ tenantId: TENANT, projectNo: PROJECT, switchOn, fieldReads: readPort })
+function mount({ switchOn = true, txPort = true, readPort = true, harness = projectSheet, serviceExtras = {} } = {}) {
+  const h = harness.mountProjectSheetRoutes({ tenantId: TENANT, projectNo: PROJECT, switchOn, fieldReads: readPort, serviceExtras })
   h.harness = harness
   const p = h.provisioning
   h.tx = { ensure: null, count: 0 }
@@ -699,6 +699,49 @@ test('RC-12 (R-71 7.4 PR-4) a pre-PR-4 sheet: pull 422 and nothing written; ONE 
       assert.ok(keys.includes('componentSourceId') && keys.includes('lastPlmRefreshRunId'), `a written row carries the refresh columns: ${keys.join(',')}`)
       for (const id of NEW_COLUMNS) assert.equal(keys.includes(id), false, `a refresh write carried ${id}`)
     }
+  } finally { h.restore() }
+})
+
+// ── RC-13 ────────────────────────────────────────────────────────────────────────────────────────────
+
+// R-71 ⑦.4 PR-4, 备料 review item 5 — THE WINDOW BETWEEN INSTALL AND REPAIR on a sheet created before the template
+// gained the two columns: what the floor can still do. The pull is a recoverable 422 with nothing written (RC-12); the
+// project export (a fixed column projection, never the existence probe) and 归档 / 恢复 (registry row only) work as
+// before, and touch neither the sheet's columns nor its rows.
+test('RC-13 (R-71 7.4 PR-4) before the repair: the pull is 422, the export answers 200, archive / restore answer 200 with no host write; after the repair the pull is 200', async () => {
+  const NEW_COLUMNS = ['issueConfirmDate', 'projectSpecModel']
+  const h = mount({ serviceExtras: { stockPreparationXlsxExport: { async buildWorkbookBuffer() { return Buffer.from('xlsx-synthetic') } } } })
+  try {
+    const { objectId, sheetId, object } = await agedSheet(h, PROJECT, NEW_COLUMNS)
+    for (const id of NEW_COLUMNS) assert.equal(object.fields.has(id), false, `${id} is missing on the aged sheet`)
+    // One material row already on the sheet (written by an earlier pull), so the export has something to export.
+    const fid = (fieldId) => h.provisioning.getFieldId(STAGING, objectId, fieldId)
+    await h.records.createRecord({ sheetId, data: { [fid('projectNo')]: PROJECT, [fid('active')]: true, [fid('idempotencyKey')]: 'idem-rc13-1', [fid('componentCode')]: 'RC13-CODE' } })
+    const sheetBefore = snapshotObject(object)
+    h.provisioning.calls.length = 0
+    h.records.calls.length = 0
+
+    const blocked = await pullDryRun(h)
+    assert.equal(blocked.statusCode, 422, JSON.stringify(blocked.body))
+    assert.equal(blocked.body.error.code, 'TARGET_SCHEMA_INCOMPLETE')
+    assert.deepEqual([...blocked.body.error.details.missingFields].sort(), [...NEW_COLUMNS].sort(), 'the refusal names exactly the two new columns')
+
+    const exported = await projectSheet.call(h.routes, 'GET', '/api/integration/stock-preparation/prep-lines/export', { user: PULLER, query: { projectNo: PROJECT } })
+    assert.equal(exported.statusCode, 200, JSON.stringify(exported.body))
+
+    for (const verb of ['archive', 'restore']) {
+      const res = await projectSheet.call(h.routes, 'POST', `/api/integration/stock-preparation/projects/:projectNo/target/${verb}`, { user: PULLER, params: { projectNo: PROJECT }, body: { confirmProjectNo: PROJECT } })
+      assert.equal(res.statusCode, 200, `${verb}: ${JSON.stringify(res.body)}`)
+    }
+    assert.deepEqual(writeCalls(h), [], 'nothing in the window wrote to the host: no column, no property')
+    assert.equal(h.records.calls.filter(([method]) => method === 'createRecord' || method === 'patchRecord' || method === 'deleteRecord').length, 0, 'no row written')
+    assert.equal(snapshotObject(objectOf(h, objectId)), sheetBefore, 'the sheet is exactly as it was')
+
+    const res = await repair(h, { projectNo: PROJECT, addMissingColumns: true })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.deepEqual(plain(res.body.data.columns.addedFieldIds), NEW_COLUMNS)
+    const dry = await pullDryRun(h)
+    assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
   } finally { h.restore() }
 })
 

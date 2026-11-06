@@ -1377,8 +1377,10 @@ const PB_FRONTLINE = `u_plmro_front_${TS}`
 const PB_ADMIN = `u_plmro_admin_${TS}`
 const PB_PLM_IDS = pbTemplates.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.filter((f) => f.ownership === 'plm_system').map((f) => f.id)
 const PB_HUMAN_IDS = pbTemplates.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.filter((f) => f.ownership === 'human_preserved').map((f) => f.id)
-// The identity columns a range fill would corrupt first, plus a quantity — the 403 legs walk these.
-const PB_PROBE_PLM_IDS = ['projectNo', 'idempotencyKey', 'componentSourceId', 'path', 'componentCode', 'totalQuantity']
+// The identity columns a range fill would corrupt first, plus a quantity — the 403 legs walk these. R-71 ⑦.4 PR-4 adds
+// 发料确认日期 `issueConfirmDate`: the YiDa write-back's DATE column, which a person must not edit either.
+const PB_PROBE_PLM_IDS = ['projectNo', 'idempotencyKey', 'componentSourceId', 'path', 'componentCode', 'totalQuantity', 'issueConfirmDate']
+const pbProbeValue = (logical: string): unknown => (logical === 'totalQuantity' ? 1 : logical === 'issueConfirmDate' ? '2026-11-06' : 'HACK')
 
 function pbProductionPluginContext(): PluginContext {
   const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
@@ -1523,7 +1525,7 @@ describeIfDatabase('备料 option B — PLM columns of a project sheet: read-onl
       for (const logical of PB_PROBE_PLM_IDS) {
         const fieldId = phys(a, logical)
         const before = (await rowData(recordId))[fieldId]
-        const res = await request(pbApp).patch(`/api/multitable/records/${recordId}`).send({ sheetId: a.sheetId, data: { [fieldId]: logical === 'totalQuantity' ? 1 : 'HACK' } })
+        const res = await request(pbApp).patch(`/api/multitable/records/${recordId}`).send({ sheetId: a.sheetId, data: { [fieldId]: pbProbeValue(logical) } })
         expect(res.status, `${userId} ${logical}: ${JSON.stringify(res.body)}`).toBe(403)
         expect(res.body.error.code).toBe('FIELD_READONLY_PLM_SYSTEM')
         expect(res.body.error.fieldIds).toEqual([fieldId])

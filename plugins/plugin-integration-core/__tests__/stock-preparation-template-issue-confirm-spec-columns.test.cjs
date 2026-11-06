@@ -30,6 +30,16 @@
 //   Y8-13 the control for Y8-12: a moved plugin-written column on the same fake still stops the run.
 //   Y8-14 pilot readiness on a pre-PR-4 sheet: red (columns missing) → columns added but unlocked: still red →
 //         locked: green.
+//   Y8-15 (备料 review item 3, data-loss guard) the planner treats `projectSpecModel` as a PLM-writable column with
+//         no source value: an existing cell value (a person may type it on a deployment sheet) is never cleared — no
+//         add / update / inactive / change-plan payload names it, an otherwise unchanged row is a SKIP, for both
+//         band derivations (template-only and pack-aware) and for a key that is absent or present-but-undefined.
+//   Y8-16 the same guard end to end through the real route stack (dry-run → apply), on a PROJECT sheet and on a
+//         DEPLOYMENT sheet: an existing row holding a typed value and a moved PLM column → the update patch names the
+//         moved column and never `projectSpecModel`.
+//   Y8-17 (备料 review item 1) the continuation exclusion: `projectSpecModel` (and the machine write-back column) is
+//         neither a content trigger nor in the settlement machine band; the band is part of the sheet digest, so
+//         removing the exclusion (the F1 slice) moves every governed sheet's machine digest once.
 //
 // Synthetic values only.
 
@@ -50,6 +60,10 @@ const { normalizeCustomerPack } = require(path.join(LIB, 'stock-preparation-cust
 const { FACTORY_A_REHEARSAL_PACK } = require(path.join(LIB, 'customer-packs', 'factory-a.rehearsal.cjs'))
 const { FACTORY_A_SAMPLE_PACK } = require(path.join(LIB, 'customer-packs', 'factory-a.sample.cjs'))
 const { evaluatePilotReadiness } = require(path.join(LIB, 'stock-preparation-pilot-readiness.cjs'))
+const continuation = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
+const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
+const { STOCK_PREP_OPERATE, STOCK_PREP_PULL, STOCK_PREP_READ } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
+const projectSheet = require('./support/stock-preparation-project-sheet-harness.cjs')
 
 const {
   HUMAN_PRESERVED_FIELD_IDS,
@@ -413,6 +427,169 @@ test('Y8-14 pilot readiness on a pre-PR-4 sheet: red while the two columns are m
   const marked = await projectTargets.markProjectSheetPlmSystemColumns({ provisioning, projectId, objectId })
   assert.deepEqual([...marked.markedFieldIds].sort(), [...NEW_COLUMNS].sort(), 'the lock pass marks exactly the two new columns')
   assert.deepEqual(await verdict(), { target_fields_present: true, plm_column_lock: true }, 'locked: ready')
+})
+
+// ── Y8-15 .. Y8-16: an existing projectSpecModel value is never cleared by a refresh ────────────────────────
+
+const TYPED_SPEC = 'SPEC-TYPED-BY-HAND'
+const PACK_AWARE_INSTALLED = Object.freeze([
+  { id: 'ext_nameAndSpec', property: { stockPreparation: { ownership: 'plm_system', extension: true } } },
+])
+
+test('Y8-15 data-loss guard (planner): the source lacks projectSpecModel → an existing value is never cleared, for both band derivations', () => {
+  for (const installedFieldProperties of [undefined, PACK_AWARE_INSTALLED]) {
+    const label = installedFieldProperties ? 'pack-aware' : 'template-only'
+    // Anti-vacuity: the column IS in the writable band the planner patches from (that is the risk being guarded).
+    assert.ok(derivePackAwarePlmWritableFields({ templateFields: TEMPLATE_FIELDS, installedFieldProperties }).plmWritableFieldIds.includes(SPEC), label)
+    const plan = planStockPreparationConflicts({
+      runId: RUN_ID,
+      plannedAt: PLANNED_AT,
+      installedFieldProperties,
+      expandedRows: [
+        row('A'), // unchanged apart from the typed cell: SKIP
+        row('B', { totalQuantity: 7 }), // a real change: UPDATE without the column
+        row('C', { [SPEC]: undefined, totalQuantity: 8 }), // key present, value undefined = absent
+        row('N'), // new row: ADD without the column
+      ],
+      existingRows: [
+        row('A', { [SPEC]: TYPED_SPEC }),
+        row('B', { [SPEC]: TYPED_SPEC }),
+        row('C', { [SPEC]: TYPED_SPEC }),
+        row('D', { [SPEC]: TYPED_SPEC }), // gone from the source: INACTIVE without the column
+      ],
+    })
+    const byKey = new Map(plan.decisions.map((decision) => [decision.idempotencyKey, decision]))
+    assert.equal(byKey.get(keyOf('A')).decision, DECISIONS.SKIP, `${label}: a typed cell alone is not a change`)
+    for (const component of ['B', 'C']) {
+      const decision = byKey.get(keyOf(component))
+      assert.equal(decision.decision, DECISIONS.UPDATE, `${label} ${component}`)
+      assert.ok(Object.prototype.hasOwnProperty.call(decision.patch, 'totalQuantity'), `${label} ${component}: the real change is patched`)
+      assert.equal(Object.prototype.hasOwnProperty.call(decision.patch, SPEC), false, `${label} ${component}: the update patch never names ${SPEC}`)
+      assert.equal(decision.changedFields.includes(SPEC), false, `${label} ${component}`)
+    }
+    assert.equal(byKey.get(keyOf('N')).decision, DECISIONS.ADD, label)
+    assert.equal(Object.prototype.hasOwnProperty.call(byKey.get(keyOf('N')).record, SPEC), false, `${label}: an add record never names ${SPEC}`)
+    assert.equal(byKey.get(keyOf('D')).decision, DECISIONS.INACTIVE, label)
+    assert.equal(Object.prototype.hasOwnProperty.call(byKey.get(keyOf('D')).patch, SPEC), false, `${label}: an inactive patch never names ${SPEC}`)
+    for (const payload of payloadsOf(plan)) assert.equal(Object.prototype.hasOwnProperty.call(payload, SPEC), false, label)
+  }
+})
+
+const Y16_TENANT = 'tenant_y8_spec_survives'
+const Y16_PROJECT = 'PRJ-Y8-SPEC-1'
+const Y16_ENV_OBJECT = 'plm_stock_preparation_sandbox_y8_env'
+const Y16_ENV_SHEET = `sheet_${Y16_TENANT}:integration-core_${Y16_ENV_OBJECT}`.replace(/[^A-Za-z0-9_]/g, '_')
+const Y16_PULLER = Object.freeze({ id: 'u_y8_pull', tenantId: Y16_TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] })
+const Y16_ACTION_PATH = (verb) => `/api/integration/table-actions/:actionId/${verb}`
+
+function mountSheetKind(kind) {
+  if (kind === 'project') return projectSheet.mountProjectSheetRoutes({ tenantId: Y16_TENANT, projectNo: Y16_PROJECT, switchOn: true })
+  // The deployment's env target: the sheet provisioning derives for this tenant's env object (the shape a sanctioned
+  // config has; the switch is off, so the table action — not the registry — names the sheet).
+  return projectSheet.mountProjectSheetRoutes({
+    tenantId: Y16_TENANT,
+    projectNo: Y16_PROJECT,
+    switchOn: false,
+    envObjectId: Y16_ENV_OBJECT,
+    configExtras: {
+      stockPreparationTableActions: [{
+        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+        source: { externalSystemId: 'plm_sql_source_synthetic', kind: 'data-source:sql-readonly' },
+        target: { sheetId: Y16_ENV_SHEET, objectId: Y16_ENV_OBJECT, fieldIdMap: {} },
+      }],
+    },
+  })
+}
+
+async function pullOnce(h) {
+  const call = (verb, body) => projectSheet.call(h.routes, 'POST', Y16_ACTION_PATH(verb), {
+    user: Y16_PULLER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body,
+    query: { tenantId: Y16_TENANT },
+  })
+  const dry = await call('dry-run', { parameters: { projectNo: Y16_PROJECT } })
+  assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
+  const applied = await call('apply', { parameters: { projectNo: Y16_PROJECT }, confirm: { dryRunToken: dry.body.data.dryRunToken } })
+  assert.equal(applied.statusCode, 200, JSON.stringify(applied.body))
+  assert.equal(applied.body.data.apply.counts.failed, 0, JSON.stringify(applied.body.data.apply))
+  return applied.body.data.apply
+}
+
+// The stored key of a logical column on this sheet: the project sheet stores PHYSICAL ids (`fld_<hash>_<logical>`),
+// the deployment sheet (fieldIdMap {}) logical ids. Derived from the row the first pull wrote.
+function physicalKeyOf(data, logical) {
+  const anchor = Object.keys(data).find((key) => key === 'componentSourceId' || key.endsWith('_componentSourceId'))
+  assert.ok(anchor, 'a written row carries componentSourceId')
+  return `${anchor.slice(0, anchor.length - 'componentSourceId'.length)}${logical}`
+}
+
+test('Y8-16 data-loss guard end to end: on a project sheet AND a deployment sheet, a refresh never writes projectSpecModel over a typed value', async () => {
+  for (const kind of ['project', 'deployment']) {
+    const h = mountSheetKind(kind)
+    try {
+      if (kind === 'project') {
+        const created = await projectSheet.call(h.routes, 'POST', '/api/integration/stock-preparation/projects/:projectNo/target', { user: Y16_PULLER, params: { projectNo: Y16_PROJECT }, body: {} })
+        assert.equal(created.statusCode, 201, JSON.stringify(created.body))
+      }
+      const first = await pullOnce(h)
+      assert.ok(first.written >= 1, `${kind}: the first pull wrote rows`)
+      const written = (await h.records.queryRecords({ sheetId: kind === 'project' ? h.provisioning.sheetIdOf(h.staging, h.projectObjectId()) : Y16_ENV_SHEET, filters: {}, limit: 1000 }))
+      assert.ok(written.length >= 1, kind)
+      const sheetId = written[0].sheetId
+      const specKey = physicalKeyOf(written[0].data, SPEC)
+      const movedKey = physicalKeyOf(written[0].data, 'totalQuantity')
+      assert.equal(Object.prototype.hasOwnProperty.call(written[0].data, specKey), false, `${kind}: the first pull did not write ${SPEC}`)
+      // What the host now answers for the sheet: a person typed the empty column (possible on a deployment sheet,
+      // which carries no human lock) and the PLM column totalQuantity moved (not an identity column, so the next pull
+      // plans a plain UPDATE rather than an identity hold).
+      const realQuery = h.records.queryRecords
+      h.records.queryRecords = async (input) => (await realQuery(input)).map((record) => (record.sheetId === sheetId
+        ? { ...record, data: { ...record.data, [specKey]: TYPED_SPEC, [movedKey]: 999 } }
+        : record))
+      const patches = []
+      const creates = []
+      const realPatch = h.records.patchRecord
+      const realCreate = h.records.createRecord
+      h.records.patchRecord = async (input) => { patches.push(clone(input.changes || {})); return realPatch(input) }
+      h.records.createRecord = async (input) => { creates.push(clone(input.data || {})); return realCreate(input) }
+      const second = await pullOnce(h)
+      assert.ok(second.counts.updated >= 1, `${kind}: the moved PLM column is refreshed (not vacuous): ${JSON.stringify(second.counts)}`)
+      assert.ok(patches.length >= 1, kind)
+      assert.ok(patches.some((changes) => Object.prototype.hasOwnProperty.call(changes, movedKey)), `${kind}: the patch restores the moved PLM column`)
+      for (const changes of [...patches, ...creates]) {
+        assert.equal(Object.prototype.hasOwnProperty.call(changes, specKey), false, `${kind}: a refresh write named ${SPEC}: ${JSON.stringify(Object.keys(changes))}`)
+      }
+    } finally { h.restore() }
+  }
+})
+
+// ── Y8-17: the continuation exclusion (备料 review item 1) ─────────────────────────────────────────────────
+
+test('Y8-17 the continuation exclusion: projectSpecModel is no content trigger and not in the machine band; the band is part of the sheet digest', () => {
+  assert.deepEqual([...continuation.UNSOURCED_PLM_FIELD_IDS], [SPEC], 'removed by the slice that answers F1 (PR-6), not before')
+  for (const installedFieldProperties of [undefined, PACK_AWARE_INSTALLED]) {
+    const triggers = continuation.contentTriggerFieldIds({ installedFieldProperties })
+    const band = continuation.machineBandFieldIds({ installedFieldProperties })
+    for (const id of NEW_COLUMNS) {
+      assert.equal(triggers.includes(id), false, `${id} is not a content trigger`)
+      assert.equal(band.includes(id), false, `${id} is not in the settlement machine band`)
+    }
+    // Positive control: sourced plm_system columns are triggers and in the band.
+    for (const id of ['componentSpec', 'material']) {
+      assert.ok(triggers.includes(id), id)
+      assert.ok(band.includes(id), id)
+    }
+  }
+  // The day the exclusion is removed: the band is hashed WITH the rows, so every governed sheet's machine digest moves
+  // once even when every projectSpecModel cell is blank (the F1 slice must announce it).
+  // The record reference the existing-row read attaches (stock-preparation-conflict-planner.cjs EXISTING_ROW_RECORD_REF).
+  const rows = [{ ...row('A'), [Symbol.for('metasheet.stock-preparation.existingRow.recordRef')]: { id: 'rec_y8_a', version: 1 } }]
+  const band = continuation.machineBandFieldIds({})
+  assert.notEqual(
+    continuation.sheetMachineDigest(rows, { machineFieldIds: band }),
+    continuation.sheetMachineDigest(rows, { machineFieldIds: [...band, SPEC] }),
+  )
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-template-issue-confirm-spec-columns.test.cjs', tests)
