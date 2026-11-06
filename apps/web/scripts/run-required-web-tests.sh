@@ -1916,6 +1916,7 @@ exec npx vitest run \
   multitable-view-display-prefs-util \
   multitable-view-manager \
   multitable-view-switch-sort-filter \
+  multitable-webhook-target-ui \
   multitable-workbench-1672-1673 \
   multitable-workbench-ai-availability-wiring \
   multitable-workbench-bulk-delete \
@@ -2052,6 +2053,7 @@ exec npx vitest run \
   userManagementView \
   uuid-no-bare-randomuuid \
   view-manager-multitable-contract \
+  webhook-target-hint \
   workflowHubView \
   xlsx-mapping \
   --reporter=dot
