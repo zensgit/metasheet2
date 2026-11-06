@@ -229,12 +229,20 @@ describeIfDatabase('T1b before-image hydration goldens (real DB)', () => {
 
   test('delete snapshot keys drive detail and both summary modes only after field masking', async () => {
     const batchId = `batch_t1b_delete_keys_${TS}`
-    await insertRevision({ recordId: REC_DELETE, version: 4, action: 'delete', changedFieldIds: [], snapshot: { [STATUS]: 'deleted status', [SALARY]: 4567 }, batchId })
+    // The value the masked view must not leak. Its text holds a '.' after four digits, which none of
+    // the run's ids (all built on Date.now()), the revision uuids or the ISO times in the body can
+    // hold, so the leak check below cannot match one of them by chance (a bare 4567 did whenever
+    // the run's timestamp contained 4567).
+    const salaryValue = 4567.891
+    await insertRevision({ recordId: REC_DELETE, version: 4, action: 'delete', changedFieldIds: [], snapshot: { [STATUS]: 'deleted status', [SALARY]: salaryValue }, batchId })
     const events = (query: Record<string, string>) => request(app).get(`/api/multitable/bases/${BASE_ID}/history/events`).query({ action: 'delete', limit: '100', ...query })
 
     const visible = await detail(batchId)
     expect(visible.status).toBe(200)
     expect(changeOf(visible, REC_DELETE)?.changedFieldIds).toEqual([SALARY, STATUS])
+    // Unmasked, the value comes back as stored, so its text is what the leak check below looks for.
+    expect(changeOf(visible, REC_DELETE)?.before?.[SALARY]).toBe(salaryValue)
+    expect(JSON.stringify(visible.body.data)).toContain(String(salaryValue))
     expect(visible.body.data.visibleAffectedFieldCount).toBe(2)
     expect(visible.body.data.fieldNames[SHEET_ID]).toHaveProperty(SALARY)
     for (const countMode of ['exact', 'estimate']) {
@@ -253,7 +261,7 @@ describeIfDatabase('T1b before-image hydration goldens (real DB)', () => {
     expect(changeOf(masked, REC_DELETE)?.after).toEqual({ [STATUS]: 'deleted status' })
     expect(masked.body.data.visibleAffectedFieldCount).toBe(1)
     expect(JSON.stringify(masked.body.data)).not.toContain(SALARY)
-    expect(JSON.stringify(masked.body.data)).not.toContain('4567')
+    expect(JSON.stringify(masked.body.data)).not.toContain(String(salaryValue))
     for (const countMode of ['exact', 'estimate']) {
       const listed = await events({ countMode })
       expect(listed.status).toBe(200)

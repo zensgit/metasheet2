@@ -42,16 +42,19 @@ export interface AuditLogOptions {
   meta?: Record<string, unknown>
 }
 
-/** Local department-head maintenance is the only action whose actor id is a platform UUID. */
-const DEPARTMENT_HEAD_AUDIT_ACTION = 'directory.local_membership.set_department_head'
+/** Platform UUID actors stay on text user_name for these directory actions only. */
+const TRUSTED_TEXT_ACTOR_ACTIONS = new Set<string>([
+  'directory.local_membership.set_department_head',
+  'directory.local_member.project',
+])
 
 /**
- * `audit_logs.user_id` is an integer, and `Number(uuid)` is NaN, so this action would otherwise
- * lose the admin. Keep that trusted reference on the existing text `user_name` column. Other
- * actions stay on the numeric user id only.
+ * `audit_logs.user_id` is an integer, and `Number(uuid)` is NaN, so these actions would otherwise
+ * lose the admin. Keep that trusted reference on the existing text `user_name` column. Numeric
+ * actors still populate user_id. Other actions stay on the numeric user id only.
  */
-function departmentHeadAdminReference(options: AuditLogOptions): string | undefined {
-  if (options.action !== DEPARTMENT_HEAD_AUDIT_ACTION || options.actorType !== 'user') return undefined
+function trustedTextActorReference(options: AuditLogOptions): string | undefined {
+  if (!TRUSTED_TEXT_ACTOR_ACTIONS.has(options.action) || options.actorType !== 'user') return undefined
   if (typeof options.actorId !== 'string') return undefined
   const actorId = options.actorId.trim()
   return actorId.length > 0 ? actorId : undefined
@@ -62,7 +65,7 @@ export async function auditLog(options: AuditLogOptions): Promise<void> {
     ? Number(options.actorId)
     : undefined
   const userId = Number.isFinite(parsedUserId) ? parsedUserId : undefined
-  const departmentHeadAdmin = departmentHeadAdminReference(options)
+  const trustedTextActor = trustedTextActorReference(options)
 
   try {
     await auditService.logEvent(
@@ -70,7 +73,7 @@ export async function auditLog(options: AuditLogOptions): Promise<void> {
       options.action,
       {
         userId,
-        ...(departmentHeadAdmin ? { userName: departmentHeadAdmin } : {}),
+        ...(trustedTextActor ? { userName: trustedTextActor } : {}),
         resourceType: options.resourceType,
         resourceId: options.resourceId,
         actionDetails: options.meta

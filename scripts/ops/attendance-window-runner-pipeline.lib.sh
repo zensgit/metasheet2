@@ -6,6 +6,8 @@
 # Contract (proven by scripts/ops/attendance-window-runner-pipeline.test.mjs, which runs
 # this exact file under `bash -o pipefail -c`):
 #   filtered_pipe <output_file> <grep_ere_pattern> -- <producer command...>
+#   masked_log_slice <output_file> <grep_ere_pattern> -- <producer command...>
+#     filtered_pipe whose kept lines pass through mask_log_identifiers first (see below).
 #   dsn_replace_database <dsn> <new_db_name>
 #     Pure string transform (no I/O, no env reads) — see below.
 #     Runs `<producer> 2>&1 | grep -E <pattern> > <output_file>` and returns:
@@ -51,6 +53,108 @@ filtered_pipe() {
   fi
   # grep rc 0 (matches) or 1 (zero matches) with a healthy producer -> success.
   return 0
+}
+
+# mask_log_identifiers <file>
+#
+# Prints <file> with account-shaped values replaced by ***, so a log slice kept in the
+# uploaded output dir carries no account ids or contact details. Works line by line:
+#   - the value of a JSON key that names an account, tenant or contact field (user_id, userId,
+#     tenant_id, actor_id, created_by, email, phone, mobile, username, display_name, ...),
+#     including prefixed camelCase id keys (actorUserId, targetUserId, localUserId, ...), id
+#     arrays (userIds -> ["***"]) and a nested id ("user":{"id":...});
+#   - the id token after a message prefix "user ", "admin " or "account " (so "for user X",
+#     "to user X", "by admin X" are covered); the next word is masked even when it is not an
+#     id ("user not found" -> "user *** found"), which loses that word only;
+#   - every other occurrence, on the same line, of a value masked by the two rules above
+#     (values of 4 characters or more, matched on alphanumeric boundaries);
+#   - every UUID-shaped value, except the value of orgId, org_id, requestId, request_id,
+#     traceId, spanId or correlation_id (server correlation and org ids, kept for diagnosis);
+#   - email-shaped strings, mobile-number-shaped digit runs and JWT-shaped tokens anywhere.
+# Not recognised: non-UUID ids in free text without one of the prefixes above, keys inside an
+# escaped JSON string (\"userId\":...). Byte-preserving for everything else. Returns nonzero
+# (output then incomplete) when the file cannot be read or python3 is unavailable; the caller
+# decides what to keep.
+mask_log_identifiers() {
+  python3 - "$1" <<'PY'
+import re, sys
+ID_ROOT = (r'(?:user|tenant|actor|employee|requester|approver|assignee|owner|operator|member|'
+           r'subject|recipient|account|admin)')
+VALUE = r'("(?:[^"\\]|\\.)*"|-?[0-9]+|\[[^\[\]]*\])'
+KEY = re.compile(
+    r'("(?:[A-Za-z_]*?' + ID_ROOT + r'_?ids?|(?:created|updated|deleted|submitted|approved)_?by|'
+    r'e_?mail|phone|mobile|tel|user_?name|login|display_?name|real_?name|full_?name|nick_?name)"'
+    r'\s*:\s*)' + VALUE,
+    re.IGNORECASE,
+)
+NESTED = re.compile(r'("' + ID_ROOT + r'"\s*:\s*\{[^{}]*?"id"\s*:\s*)' + VALUE, re.IGNORECASE)
+PREFIX = re.compile(
+    r'(?<![A-Za-z0-9_-])((?:user|admin|account)\s+)'
+    r'(?!(?:user|admin|account)\b)([A-Za-z0-9_@.-]*[A-Za-z0-9_@])',
+    re.IGNORECASE,
+)
+UUID = r'[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
+UUIDS = re.compile(
+    r'("(?:orgId|org_id|requestId|request_id|traceId|spanId|correlation_id)"\s*:\s*")(' + UUID + r')(?=")'
+    r'|(?<![0-9A-Za-z])' + UUID + r'(?![0-9A-Za-z])'
+)
+EMAIL = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}')
+MOBILE = re.compile(r'(?<![0-9])(?:\+?86[- ]?)?1[3-9][0-9]{9}(?![0-9])')
+JWT = re.compile(r'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*')
+STRING_ITEM = re.compile(r'"((?:[^"\\]|\\.)*)"|(-?[0-9]+)')
+
+def mask_line(line):
+    seen = set()
+
+    def keyed(m):
+        value = m.group(2)
+        for item in STRING_ITEM.finditer(value):
+            seen.add(item.group(1) if item.group(1) is not None else item.group(2))
+        return m.group(1) + ('["***"]' if value.startswith('[') else '"***"')
+
+    def prefixed(m):
+        seen.add(m.group(2))
+        return m.group(1) + '***'
+
+    line = KEY.sub(keyed, line)
+    line = NESTED.sub(keyed, line)
+    line = PREFIX.sub(prefixed, line)
+    line = UUIDS.sub(lambda m: m.group(1) + m.group(2) if m.group(1) else '***', line)
+    line = JWT.sub('***', line)
+    line = EMAIL.sub('***', line)
+    line = MOBILE.sub('***', line)
+    for value in sorted(seen, key=len, reverse=True):
+        if len(value) >= 4 and value != '***':
+            line = re.sub(r'(?<![A-Za-z0-9])' + re.escape(value) + r'(?![A-Za-z0-9])', '***', line)
+    return line
+
+with open(sys.argv[1], 'rb') as f:
+    text = f.read().decode('utf-8', 'surrogateescape')
+text = '\n'.join(mask_line(line) for line in text.split('\n'))
+sys.stdout.buffer.write(text.encode('utf-8', 'surrogateescape'))
+PY
+}
+
+# masked_log_slice <output_file> <grep_ere_pattern> -- <producer command...>
+#
+# filtered_pipe with the result passed through mask_log_identifiers: the unmasked lines go to a
+# temp file outside the output dir (removed on every path) and only the masked text is written
+# to <output_file>. Same return contract as filtered_pipe (0 for zero matches, the producer's rc
+# when it failed, grep's rc when grep failed); a partial slice from a failed producer is masked
+# the same way. If masking fails, <output_file> holds a one-line "withheld" notice instead and
+# the return code is still filtered_pipe's, so the caller's pass/fail rule does not change.
+masked_log_slice() {
+  local out_file="$1" pattern="$2"
+  shift 2
+  local raw rc=0
+  raw="$(mktemp "${TMPDIR:-/tmp}/window-runner-log-slice.XXXXXX")" || return 1
+  filtered_pipe "$raw" "$pattern" "$@" || rc=$?
+  if ! mask_log_identifiers "$raw" > "$out_file" 2>/dev/null; then
+    echo "log slice withheld: identifier masking failed" > "$out_file"
+    echo "[masked_log_slice] identifier masking failed; ${out_file##*/} withheld" >&2
+  fi
+  rm -f "$raw"
+  return "$rc"
 }
 
 # dsn_replace_database <dsn> <new_db_name>

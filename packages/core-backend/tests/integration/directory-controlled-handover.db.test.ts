@@ -679,7 +679,11 @@ db(
         for (let i = 0; i < 100; i++) {
           const n = (
             await q(
-              `SELECT count(*)::int AS n FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))`,
+              `WITH RECURSIVE blocked AS (
+                SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))
+                UNION
+                SELECT a.pid FROM pg_stat_activity a JOIN blocked b ON b.pid=ANY(pg_blocking_pids(a.pid))
+              ) SELECT count(*)::int AS n FROM blocked`,
               [pid],
             )
           ).rows[0].n

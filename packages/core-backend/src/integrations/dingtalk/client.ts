@@ -474,6 +474,22 @@ async function fetchDingTalkAppAccessTokenUncached(
   return { token, expiresInSeconds: Number.isFinite(expiresRaw) && expiresRaw > 0 ? expiresRaw : null }
 }
 
+/**
+ * A token minted NOW for exactly this config, with the shared cache left alone: the cache is not read (a
+ * hit would say nothing about the secret in `config`), not written, not evicted, and an in-flight request
+ * of another caller for the same appKey|baseUrl is not joined (it may have been minted from another
+ * source of the secret). The request itself is the same gettoken call fetchDingTalkAppAccessToken makes on
+ * a miss. For the admin verification route (work-notification-verify.ts), whose evidence must be about the
+ * resolved secret and must not change what the delivery paths see in the cache; those keep the cached
+ * function above. Costs one gettoken on the shared quota per call.
+ */
+export async function fetchDingTalkAppAccessTokenFresh(
+  config: DingTalkDirectoryConfig,
+  options?: DingTalkRequestOptions,
+): Promise<string> {
+  return (await fetchDingTalkAppAccessTokenUncached(config, options)).token
+}
+
 export async function fetchDingTalkAppAccessToken(
   config: DingTalkDirectoryConfig,
   options?: DingTalkRequestOptions,

@@ -4,7 +4,9 @@
  * WHY. classifyDirectoryFailureText shows a caught error's OWN message only when the error is an instance of a
  * class on the caller's allow-list (`fixedSentenceClasses`): DINGTALK_CONFIG_FIXED_SENTENCES and
  * DIRECTORY_TEST_FIXED_SENTENCES (routes/admin-directory.ts), DIRECTORY_FAILURE_FIXED_SENTENCES
- * (directory/directory-sync.ts) and an inline list in routes/admin-directory.ts. That is safe only while every
+ * (directory/directory-sync.ts), an inline list in routes/admin-directory.ts and the inline list of the
+ * work-notification verification module (integrations/dingtalk/work-notification-verify.ts, whose 200 report
+ * body carries the config-level sentence). That is safe only while every
  * listed instance carries a literal, the caller's own input or our own ids — which R-41 checked by hand. One
  * `new DirectoryValidationError(err.message)` (or one caught listed instance enriched in place with driver text)
  * would put provider / driver / transport text back into an admin body, a persisted column or the outbound
@@ -127,6 +129,7 @@ const MUTATING_METHODS: ReadonlySet<string> = new Set(['push', 'unshift', 'splic
 /** The allow-lists discovered today: `<file> <const name>` or `<file> inline#<n>` (n counts inline lists per file). */
 const EXPECTED_LISTS: readonly string[] = [
   `${CORE_SRC}/directory/directory-sync.ts DIRECTORY_FAILURE_FIXED_SENTENCES`,
+  `${CORE_SRC}/integrations/dingtalk/work-notification-verify.ts inline#1`,
   `${CORE_SRC}/routes/admin-directory.ts DINGTALK_CONFIG_FIXED_SENTENCES`,
   `${CORE_SRC}/routes/admin-directory.ts DIRECTORY_TEST_FIXED_SENTENCES`,
   `${CORE_SRC}/routes/admin-directory.ts inline#1`,
@@ -140,8 +143,11 @@ const EXPECTED_LISTS: readonly string[] = [
  * from a list is red until pinned or unpinned here. Lower a count in the same change that removes sites.
  */
 const EXPECTED_CONSTRUCTION_COUNTS: Readonly<Record<string, number>> = {
-  DingTalkConfigValidationError: 9,
+  DingTalkConfigValidationError: 13,
   DingTalkCorpNotAllowedError: 2,
+  // Listed by the work-notification verification module's inline list; its five constructions (the
+  // integration-scoped tuple resolver) carry literals, field names and the integration id only.
+  DingTalkMessageConfigError: 5,
   DirectoryConflictError: 19,
   DirectoryNotFoundError: 10,
   DirectorySyncLeaseLostError: 1,

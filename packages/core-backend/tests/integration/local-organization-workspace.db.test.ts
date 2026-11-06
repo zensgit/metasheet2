@@ -93,8 +93,8 @@ describeIfDatabase('native local organization workspace', () => {
     }
   }, 15000)
 
-  async function user(label: string, isAdmin = false): Promise<string> {
-    const id = `${prefix}-${label.replace(/[^a-z0-9-]/gi, '-')}`
+  async function user(label: string, isAdmin = false, explicitId?: string): Promise<string> {
+    const id = explicitId ?? `${prefix}-${label.replace(/[^a-z0-9-]/gi, '-')}`
     users.push(id)
     await query(
       `INSERT INTO users (id, email, username, name, password_hash, role, permissions,
@@ -195,8 +195,23 @@ describeIfDatabase('native local organization workspace', () => {
   function page(path: string, integration: string, values: Record<string, string | number> = {}) {
     return `${path}?${new URLSearchParams({ integrationId: integration, ...Object.fromEntries(Object.entries(values).map(([key, value]) => [key, String(value)])) })}`
   }
-  async function project(integrationId: string, localUserId: string) {
-    return (await ok<{ projection: Projection }>(await request('/member-projections', 'POST', { integrationId, localUserId }))).projection
+  async function project(integrationId: string, localUserId: string, actor = admin) {
+    return (await ok<{ projection: Projection }>(await request('/member-projections', 'POST', { integrationId, localUserId }, actor))).projection
+  }
+  async function projectionAudits(accountId: string) {
+    return (await query<{
+      user_id: number | null
+      user_name: string | null
+      action: string
+      resource_type: string
+      resource_id: string
+    }>(
+      `SELECT user_id, user_name, action, resource_type, resource_id
+       FROM audit_logs
+       WHERE action = 'directory.local_member.project' AND resource_id = $1
+       ORDER BY id`,
+      [accountId],
+    )).rows
   }
   async function generation(id: string) {
     return (await query<{ g: string; updated: string }>(
@@ -473,6 +488,9 @@ describeIfDatabase('native local organization workspace', () => {
   it('new projection has native keys/link and canonical both-leg zero-row evidence trace with exactly one generation write', async () => {
     const a = await anchor()
     const uid = await user('subject')
+    const uuidAdmin = await user('uuid-admin', true, randomUUID())
+    expect(uuidAdmin).toMatch(UUID)
+    await token(uuidAdmin)
     await token(uid)
     // Retain legitimate historical rows: producer -> real admin-force restore -> projection.
     const evidence = await applied(uid)
@@ -493,7 +511,7 @@ describeIfDatabase('native local organization workspace', () => {
         if (target) {
           const native = result as { rowCount: number | null }
           if (sql.startsWith('UPDATE directory_deprovision_events')) {
-            expect(values[1]).toBe(admin)
+            expect(values[1]).toBe(uuidAdmin)
             expect(typeof values[2]).toBe('string')
             expect(String(values[2]).length).toBeGreaterThan(0)
             expect(String(values[2])).not.toContain(uid)
@@ -514,11 +532,19 @@ describeIfDatabase('native local organization workspace', () => {
     }) as typeof Client.prototype.query)
     let projection: Projection | undefined
     try {
-      projection = await project(a, uid)
+      projection = await project(a, uid, uuidAdmin)
+      const createdAudits = await projectionAudits(projection.accountId)
+      expect(createdAudits).toEqual([{
+        user_id: null,
+        user_name: uuidAdmin,
+        action: 'directory.local_member.project',
+        resource_type: 'directory-account',
+        resource_id: projection.accountId,
+      }])
       const createdFingerprint = await fingerprint()
-      expect(await project(a, uid)).toEqual({ accountId: projection.accountId, created: false })
+      expect(await project(a, uid, uuidAdmin)).toEqual({ accountId: projection.accountId, created: false })
+      expect(await projectionAudits(projection.accountId)).toEqual(createdAudits)
       expect(await fingerprint()).toEqual(createdFingerprint)
-      // Trace must still contain only the initial creation's three UPDATEs.
     } finally { spy.mockRestore() }
     expect(projection!.created).toBe(true)
     expect(projection!.accountId).toMatch(UUID)

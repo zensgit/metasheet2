@@ -106,6 +106,109 @@ describe('auditLog', () => {
     )
   })
 
+  it('keeps a UUID admin on user_name for local member projection only when the actor is a user', async () => {
+    logEventMock.mockResolvedValue(undefined)
+    const adminId = '26979f88-e7cc-4b40-a975-a0353d19aec0'
+
+    await auditLog({
+      actorId: adminId,
+      actorType: 'user',
+      action: 'directory.local_member.project',
+      resourceType: 'directory-account',
+      resourceId: 'account-1',
+      meta: { integrationId: 'integration-1' },
+    })
+    expect(logEventMock).toHaveBeenCalledWith(
+      'DIRECTORY.LOCAL_MEMBER.PROJECT',
+      'directory.local_member.project',
+      {
+        userId: undefined,
+        userName: adminId,
+        resourceType: 'directory-account',
+        resourceId: 'account-1',
+        actionDetails: { integrationId: 'integration-1' },
+      },
+    )
+
+    logEventMock.mockClear()
+    await auditLog({
+      actorId: '42',
+      actorType: 'user',
+      action: 'directory.local_member.project',
+      resourceType: 'directory-account',
+      resourceId: 'account-2',
+    })
+    expect(logEventMock).toHaveBeenCalledWith(
+      'DIRECTORY.LOCAL_MEMBER.PROJECT',
+      'directory.local_member.project',
+      {
+        userId: 42,
+        userName: '42',
+        resourceType: 'directory-account',
+        resourceId: 'account-2',
+        actionDetails: undefined,
+      },
+    )
+
+    logEventMock.mockClear()
+    await auditLog({
+      actorId: '7',
+      actorType: 'user',
+      action: 'directory.local_membership.set_department_head',
+      resourceType: 'directory-membership',
+      resourceId: 'account:department',
+    })
+    expect(logEventMock).toHaveBeenCalledWith(
+      'DIRECTORY.LOCAL_MEMBERSHIP.SET_DEPARTMENT_HEAD',
+      'directory.local_membership.set_department_head',
+      {
+        userId: 7,
+        userName: '7',
+        resourceType: 'directory-membership',
+        resourceId: 'account:department',
+        actionDetails: undefined,
+      },
+    )
+
+    logEventMock.mockClear()
+    await auditLog({
+      actorId: adminId,
+      actorType: 'system',
+      action: 'directory.local_member.project',
+      resourceType: 'directory-account',
+      resourceId: 'account-3',
+    })
+    expect(logEventMock).toHaveBeenCalledWith(
+      'DIRECTORY.LOCAL_MEMBER.PROJECT',
+      'directory.local_member.project',
+      {
+        userId: undefined,
+        resourceType: 'directory-account',
+        resourceId: 'account-3',
+        actionDetails: undefined,
+      },
+    )
+
+    logEventMock.mockClear()
+    await auditLog({
+      actorId: adminId,
+      actorType: 'user',
+      action: 'directory.local_account.create',
+      resourceType: 'directory-account',
+      resourceId: 'account-4',
+    })
+    expect(logEventMock).toHaveBeenCalledWith(
+      'DIRECTORY.LOCAL_ACCOUNT.CREATE',
+      'directory.local_account.create',
+      {
+        userId: undefined,
+        resourceType: 'directory-account',
+        resourceId: 'account-4',
+        actionDetails: undefined,
+      },
+    )
+  })
+
   it('swallows audit write failures so callers do not fail closed', async () => {
     const driverError = Object.assign(
       new Error('no partition of relation "audit_logs" found for row with resource_id 26979f88'),

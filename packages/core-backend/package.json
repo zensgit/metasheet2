@@ -19,6 +19,7 @@
     "seed:rbac": "tsx scripts/seed-rbac.ts",
     "preflight:dingtalk-directory-corp-scope": "tsx scripts/dingtalk-directory-corp-scope-preflight.ts",
     "ops:directory-handover": "tsx scripts/directory-controlled-handover.ts",
+    "ops:dingtalk-login-repair": "tsx scripts/dingtalk-login-repair.ts",
     "smoke:plugins": "tsx scripts/smoke-plugins.ts",
     "smoke:sqlserver": "tsx scripts/smoke-sqlserver.ts",
     "smoke:sqlserver:seed": "tsx scripts/smoke-sqlserver-seed.ts",
