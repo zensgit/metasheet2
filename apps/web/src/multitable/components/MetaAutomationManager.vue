@@ -852,6 +852,7 @@
           </div>
         </div>
       </div>
+    <MetaAutomationIntegrationPreview :visible="visible" :sheet-id="sheetId" :rules="rules" :client="client" />
     <MetaAutomationRuleEditor
       :visible="showRuleEditor"
       :sheet-id="sheetId"
@@ -922,6 +923,7 @@ import MetaAutomationRuleEditor from './MetaAutomationRuleEditor.vue'
 import MetaAutomationLogViewer from './MetaAutomationLogViewer.vue'
 import MetaAutomationGroupDeliveryViewer from './MetaAutomationGroupDeliveryViewer.vue'
 import MetaAutomationPersonDeliveryViewer from './MetaAutomationPersonDeliveryViewer.vue'
+import MetaAutomationIntegrationPreview from './MetaAutomationIntegrationPreview.vue'
 import { applyDingTalkNotificationPreset, type DingTalkNotificationPreset } from '../utils/dingtalkNotificationPresets'
 import {
   appendTemplateToken,

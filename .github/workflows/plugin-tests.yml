@@ -1765,6 +1765,8 @@ jobs:
             tests/integration/yida-host-initialization-barrier-realdb.test.ts \
             tests/integration/yida-host-connection-test-realdb.test.ts \
             tests/integration/yida-connection-test-http-realdb.test.ts \
+            tests/integration/automation-synthetic-preview-realdb.test.ts \
+            tests/integration/automation-synthetic-preview-host-realdb.test.ts \
             --reporter=verbose
 
       # These files each import the real native AuthService/JWT and scoped pool.

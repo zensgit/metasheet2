@@ -6866,3 +6866,48 @@ export class AutomationExecutor {
     }
   }
 }
+
+// ── Synthetic integration preview (C1/S2 first slice, evidence D §6) ──────────────────────────────────
+//
+// A SEPARATE, typed entry: it sequences the fixed preview plan's steps and returns only values-free step
+// summaries. It never goes through executeSingleAction, never dispatches an ordinary action, never writes
+// a job/outbox row and never sees a step value (values stay in the run's RunValueStore, owned by the
+// caller). The preview step types are not members of ALL_ACTION_TYPES, so nothing here widens the
+// ordinary action enum, the rule-save allowlist or the scheduler. Every step after a failed one is
+// skipped (no successor runs after FORBIDDEN / UNAVAILABLE / LIMIT / cancel / error).
+
+export type SyntheticPreviewStepStatus = 'success' | 'failed' | 'skipped'
+
+export type SyntheticPreviewStepSummary = Readonly<{
+  stepId: string
+  type: string
+  status: SyntheticPreviewStepStatus
+  durationMs: number
+}>
+
+export type SyntheticPreviewPlanStep = Readonly<{ id: string; type: string }>
+
+export async function executeSyntheticPreviewPlan(
+  steps: readonly SyntheticPreviewPlanStep[],
+  runStep: (step: SyntheticPreviewPlanStep, index: number) => Promise<void>,
+  now: () => number = Date.now,
+): Promise<{ steps: readonly SyntheticPreviewStepSummary[]; failure?: unknown }> {
+  const summaries: SyntheticPreviewStepSummary[] = []
+  let failure: { error: unknown } | undefined
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = steps[index]
+    if (failure) {
+      summaries.push(Object.freeze({ stepId: step.id, type: step.type, status: 'skipped' as const, durationMs: 0 }))
+      continue
+    }
+    const startedAt = now()
+    try {
+      await runStep(step, index)
+      summaries.push(Object.freeze({ stepId: step.id, type: step.type, status: 'success' as const, durationMs: Math.max(0, now() - startedAt) }))
+    } catch (error) {
+      failure = { error }
+      summaries.push(Object.freeze({ stepId: step.id, type: step.type, status: 'failed' as const, durationMs: Math.max(0, now() - startedAt) }))
+    }
+  }
+  return failure ? { steps: Object.freeze(summaries), failure: failure.error } : { steps: Object.freeze(summaries) }
+}

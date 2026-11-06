@@ -17,6 +17,26 @@ export type ExecutionLogQueryFn = (
   params?: unknown[],
 ) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
+/** The only shape `recordSyntheticPreviewSummary` accepts (fixed ids, enums and counts). */
+export type SyntheticPreviewLogEntry = Readonly<{
+  executionId: string
+  ruleId: string
+  sheetId: string
+  actorId: string
+  triggeredAt: string
+  finishedAt: string
+  summary: Readonly<{
+    outcome: string
+    operation: Readonly<{ id: string; version: number }>
+    consumer: string
+    fixtureId: string
+    mappingPresetId: string
+    counts: Readonly<{ pages: number; rows: number; bytes: number }>
+    durationMs: number
+    steps: readonly Readonly<{ stepId: string; type: string; status: string; durationMs: number }>[]
+  }>
+}>
+
 export interface AutomationStats {
   total: number
   success: number
@@ -106,6 +126,56 @@ export class AutomationLogService {
         execution.initiatedBy ?? null,
         // #4196 §4: a values-free sha256 of the RAW action identities — NOT redacted (no business values).
         execution.ruleActionFingerprint ?? null,
+      ],
+    )
+  }
+
+  /**
+   * Synthetic integration preview (C1/S2 first slice): persist ONE values-free summary row.
+   *
+   * It accepts only the dedicated `SyntheticPreviewLogEntry` (fixed ids, a fixed outcome code, counts and
+   * durations, all rebuilt by the host from enums and counts — integration/automation-synthetic-preview.ts
+   * buildSyntheticPreviewSummary). It never takes an AutomationExecution, a step output, a provider page,
+   * a compiler result or an error object, so no raw preview value can reach the insert. trigger_event and
+   * rule_snapshot stay NULL, so the unchanged retry gates refuse the row (MISSING_TRIGGER_EVENT when failed,
+   * NOT_RETRYABLE when successful), and there is no suspension, job or outbox row to resume. The existing
+   * redactor is not what keeps values out: the entry type is.
+   */
+  async recordSyntheticPreviewSummary(query: ExecutionLogQueryFn, entry: SyntheticPreviewLogEntry): Promise<void> {
+    await query(
+      `INSERT INTO multitable_automation_executions (
+         id, rule_id, triggered_by, triggered_at, status, steps, error, duration,
+         sheet_id, trigger_event, rule_snapshot, finished_at, schema_version, initiated_by
+       ) VALUES (
+         $1, $2, 'integration_preview', $3, $4, $5::jsonb, $6, $7,
+         $8, NULL, NULL, $9, $10, $11
+       )`,
+      [
+        entry.executionId,
+        entry.ruleId,
+        entry.triggeredAt,
+        entry.summary.outcome === 'OK' ? 'success' : 'failed',
+        JSON.stringify(entry.summary.steps.map((step) => ({
+          actionType: step.type,
+          status: step.status,
+          durationMs: step.durationMs,
+          output: step.type === 'integration_preview_read'
+            ? {
+              operationId: entry.summary.operation.id,
+              operationVersion: entry.summary.operation.version,
+              fixtureId: entry.summary.fixtureId,
+              pages: entry.summary.counts.pages,
+              rows: entry.summary.counts.rows,
+              bytes: entry.summary.counts.bytes,
+            }
+            : { consumer: entry.summary.consumer, mappingPresetId: entry.summary.mappingPresetId },
+        }))),
+        entry.summary.outcome === 'OK' ? null : `INTEGRATION_PREVIEW_${entry.summary.outcome}`,
+        entry.summary.durationMs,
+        entry.sheetId,
+        entry.finishedAt,
+        AUTOMATION_EXECUTION_SCHEMA_VERSION,
+        entry.actorId,
       ],
     )
   }

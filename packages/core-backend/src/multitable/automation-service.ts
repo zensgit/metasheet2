@@ -139,6 +139,16 @@ import {
 } from './stock-preparation-overview-contract'
 import { HUMAN_WRITE_LOCK_AUTOMATION_REFUSAL, findHumanWriteLockedFieldIds } from './human-write-lock'
 import type { Database } from '../db/types'
+import {
+  createAutomationSyntheticPreviewRuntime,
+  isSyntheticIntegrationPreviewEnabled,
+  type SyntheticPreviewResponse,
+  type SyntheticPreviewRuntime,
+  type SyntheticPreviewRuntimeDependencies,
+  type SyntheticPreviewScope,
+} from '../integration/automation-synthetic-preview'
+import { loadYidaLocalDraftCompiler } from '../integration/yida-automation-preview'
+import type { Queryable } from './automation-durable-dispatcher'
 
 const logger = new Logger('AutomationService')
 
@@ -1412,6 +1422,32 @@ export async function resolveAutomationSchedulerLeaderOptions(): Promise<Automat
   return { leaderLock, ownerId, ttlMs }
 }
 
+/**
+ * Production dependencies of the synthetic integration preview: the host pool's RC transaction (the same
+ * shape as the YiDa runtimes' host transaction in index.ts), the exact-literal switch read on every run,
+ * the shared pure YiDa compiler (loaded once, compileYidaLocalDraft only) and the dedicated summary writer.
+ */
+function createDefaultSyntheticPreviewDependencies(logService: AutomationLogService): SyntheticPreviewRuntimeDependencies {
+  return {
+    database: {
+      transaction: (work) => poolManager.get().transaction(async ({ query }) => {
+        await query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        const trx: Queryable = {
+          query: async (sqlText: string, params?: unknown[]) => {
+            const result = await query(sqlText, params) as { rows?: Array<Record<string, unknown>>; rowCount?: number | null }
+            return { rows: Array.isArray(result?.rows) ? result.rows : [], rowCount: result?.rowCount ?? null }
+          },
+        }
+        return work(trx)
+      }),
+    },
+    // Its own exact-literal switch only (never derived from another AUTOMATION_* / INTEGRATION_* flag).
+    readEnablement: () => (isSyntheticIntegrationPreviewEnabled() ? 'true' : 'false'),
+    loadCompiler: loadYidaLocalDraftCompiler,
+    recordSummary: (trx, entry) => logService.recordSyntheticPreviewSummary((sqlText, params) => trx.query(sqlText, params), entry),
+  }
+}
+
 export class AutomationService {
   private eventBus: EventBus
   private db: Kysely<Database>
@@ -1427,6 +1463,8 @@ export class AutomationService {
   private jobService: AutomationJobService
   private suspensionService: AutomationSuspensionService
   private approvalBridgeService: AutomationApprovalBridgeService
+  /** C1/S2 synthetic integration preview: host-owned runtime, drained by stopProducerAdmissions(). */
+  private syntheticPreview: SyntheticPreviewRuntime
   private lastDateReminderLedgerSweepMs = 0
   private lastEventDedupLedgerSweepMs = 0
   private lastAutomationRetryLedgerSweepMs = 0
@@ -1501,6 +1539,7 @@ export class AutomationService {
     this.jobService = new AutomationJobService()
     this.suspensionService = new AutomationSuspensionService(this.jobService)
     this.approvalBridgeService = new AutomationApprovalBridgeService(this.jobService)
+    this.syntheticPreview = createAutomationSyntheticPreviewRuntime(createDefaultSyntheticPreviewDependencies(this.logService))
     this.scheduler = new AutomationScheduler(
       async (rule) => {
         // SHEET LIVENESS (soft delete) — the SCHEDULED lane.
@@ -2833,8 +2872,12 @@ export class AutomationService {
     this.producerStopPromise ??= (async () => {
       for (const id of this.producerSubscriptionIds.splice(0)) this.eventBus.unsubscribe(id)
       const schedulerStop = this.scheduler.destroy()
+      // C1/S2: stop admitting synthetic previews and wait for every in-flight one (provider page,
+      // admission transaction, summary insert) in the same producer drain the host shutdown awaits.
+      const previewStop = this.syntheticPreview.stop()
       await this.drainLifecycleTasks(this.producerInFlight)
       await schedulerStop
+      await previewStop
     })()
     return this.producerStopPromise
   }
@@ -2858,6 +2901,30 @@ export class AutomationService {
     this.detachCompletionConsumers()
     await this.drainCompletionConsumers()
     logger.info('AutomationService shut down')
+  }
+
+  /**
+   * C1/S2 first slice: the manual SYNTHETIC integration preview (integration/automation-synthetic-preview.ts).
+   * The rule only supplies ownership/permission context; its actions are never executed. Default OFF
+   * (AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED exact 'true'); every admission runs in its own RC
+   * transaction; refused with INACTIVE once producer admissions stopped.
+   */
+  previewIntegrationPlan(
+    scope: SyntheticPreviewScope,
+    request: unknown,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SyntheticPreviewResponse> {
+    return this.syntheticPreview.run(scope, request, options)
+  }
+
+  /** Values-free display bit; never authority (every run re-reads the switch). */
+  syntheticIntegrationPreviewEnabled(): boolean {
+    return this.syntheticPreview.enabled()
+  }
+
+  /** Test seam: replace the preview runtime (the default is built in the constructor). */
+  replaceSyntheticPreviewRuntimeForTest(runtime: SyntheticPreviewRuntime): void {
+    this.syntheticPreview = runtime
   }
 
   /**

@@ -84,6 +84,10 @@ export default defineConfig({
       // Owner-run connection test (ADR adr-yida-connection-test-20261028): same step, whole files.
       'tests/integration/yida-host-connection-test-realdb.test.ts',
       'tests/integration/yida-connection-test-http-realdb.test.ts',
+      // C1/S2 synthetic integration preview: two-connection admission/revocation proofs on a real PG schema,
+      // and the real-host HTTP acceptance on the migrated CI database. Same EXPECT_DB plugin-tests step.
+      'tests/integration/automation-synthetic-preview-realdb.test.ts',
+      'tests/integration/automation-synthetic-preview-host-realdb.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.
