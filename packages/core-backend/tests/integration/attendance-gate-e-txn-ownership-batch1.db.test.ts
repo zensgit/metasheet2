@@ -82,9 +82,8 @@ function wrap(client: Client): AttendanceW4TransactionClientV1 {
  * still genuinely DEFINED on the connection afterward — the test proves the injection was
  * real (not vacuous) by having the caller's own `RELEASE SAVEPOINT` SUCCEED at that point
  * (contrast with the "cleanup happened" test, where the same statement FAILS 3B001) — and only
- * THEN rolls back, which is what actually removes the leftover savepoint (`ROLLBACK` ends the
- * whole transaction block, taking every savepoint defined within it, regardless of whether it
- * was ever explicitly released).
+ * THEN rolls back. The 4b legs explicitly RELEASE first; the added 4c legs separately prove
+ * that full caller ROLLBACK removes a probe that remains defined, without a prior RELEASE.
  */
 function wrapWithTeardownFailure(client: Client): AttendanceW4TransactionClientV1 {
   return {
@@ -237,7 +236,7 @@ describeDb('Gate E (#4844) batch 1 — transaction-ownership idle precondition (
       }
     })
 
-    it("4b. cleanup FAILED (the probe's own teardown rejects): the caller still sees the product code, never the injected error or a raw SQLSTATE; the leftover savepoint (proven still defined, since teardown never ran) is removed once the caller rolls back its own txn, and the connection is usable again", async () => {
+    it("4b. cleanup FAILED: typed refusal; caller RELEASE succeeds, then caller ROLLBACK keeps the connection usable", async () => {
       const client = await openClient()
       try {
         await client.query('BEGIN')
@@ -253,6 +252,41 @@ describeDb('Gate E (#4844) batch 1 — transaction-ownership idle precondition (
         await client.query('ROLLBACK')
         // `ROLLBACK` ends the whole transaction block, taking the leftover savepoint with it
         // regardless of whether it was ever explicitly released — the connection is fully usable.
+        await expect(client.query('SELECT 1 AS ok')).resolves.toMatchObject({ rows: [{ ok: 1 }] })
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        await client.end()
+      }
+    })
+
+    it('4c. caller ROLLBACK removes an unreleased probe after cleanup failure', async () => {
+      const client = await openClient()
+      const rowId = randomUUID()
+      const body = vi.fn(async () => 'should-not-run')
+      try {
+        await client.query('BEGIN')
+        await client.query(`INSERT INTO ${PROBE_TABLE} (id, tag) VALUES ($1, $2)`, [rowId, 'site1-rollback-recovery'])
+        await expect(
+          runAttendanceResultOperationTransactionV1(wrapWithTeardownFailure(client), body),
+        ).rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' })
+        expect(body).not.toHaveBeenCalled()
+        expect(await probeRowCount(rowId)).toBe(0)
+        await expect(
+          client.query(`SELECT count(*)::int AS n FROM ${PROBE_TABLE} WHERE id = $1`, [rowId]),
+        ).resolves.toMatchObject({ rows: [{ n: 1 }] })
+        // ROLLBACK TO retains the savepoint. Two successes prove it remains
+        // defined immediately before the caller's full ROLLBACK; no RELEASE.
+        for (let probe = 0; probe < 2; probe++) {
+          await expect(client.query('ROLLBACK TO SAVEPOINT w4c5_idle_probe'))
+            .resolves.toMatchObject({ command: 'ROLLBACK', rows: [] })
+        }
+        await client.query('ROLLBACK')
+        expect(await probeRowCount(rowId)).toBe(0)
+        await client.query('BEGIN')
+        await expect(client.query('RELEASE SAVEPOINT w4c5_idle_probe'))
+          .rejects.toMatchObject({ code: '3B001' })
+        await expect(client.query('SELECT 1')).rejects.toMatchObject({ code: '25P02' })
+        await client.query('ROLLBACK')
         await expect(client.query('SELECT 1 AS ok')).resolves.toMatchObject({ rows: [{ ok: 1 }] })
       } finally {
         await client.query('ROLLBACK').catch(() => undefined)
@@ -345,7 +379,7 @@ describeDb('Gate E (#4844) batch 1 — transaction-ownership idle precondition (
       }
     })
 
-    it("4b. cleanup FAILED (the probe's own teardown rejects): the caller still sees the product code, never the injected error or a raw SQLSTATE; the leftover savepoint (proven still defined, since teardown never ran) is removed once the caller rolls back its own txn, and the connection is usable again", async () => {
+    it("4b. cleanup FAILED: typed refusal; caller RELEASE succeeds, then caller ROLLBACK keeps the connection usable", async () => {
       const client = await openClient()
       try {
         await client.query('BEGIN')
@@ -356,6 +390,41 @@ describeDb('Gate E (#4844) batch 1 — transaction-ownership idle precondition (
         // Proves the injection was real: the leftover savepoint is still genuinely defined, so a
         // caller-issued RELEASE now SUCCEEDS (the opposite of 4a's 3B001).
         await expect(client.query('RELEASE SAVEPOINT w4c5_idle_probe')).resolves.toBeDefined()
+        await client.query('ROLLBACK')
+        await expect(client.query('SELECT 1 AS ok')).resolves.toMatchObject({ rows: [{ ok: 1 }] })
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        await client.end()
+      }
+    })
+
+    it('4c. caller ROLLBACK removes an unreleased probe after cleanup failure', async () => {
+      const client = await openClient()
+      const rowId = randomUUID()
+      const emit = vi.fn()
+      try {
+        await client.query('BEGIN')
+        await client.query(`INSERT INTO ${PROBE_TABLE} (id, tag) VALUES ($1, $2)`, [rowId, 'site2-rollback-recovery'])
+        await expect(
+          dispatchAttendanceResultEventOutboxV1(wrapWithTeardownFailure(client), { emit }),
+        ).rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' })
+        expect(emit).not.toHaveBeenCalled()
+        expect(await probeRowCount(rowId)).toBe(0)
+        await expect(
+          client.query(`SELECT count(*)::int AS n FROM ${PROBE_TABLE} WHERE id = $1`, [rowId]),
+        ).resolves.toMatchObject({ rows: [{ n: 1 }] })
+        // ROLLBACK TO retains the savepoint. Two successes prove it remains
+        // defined immediately before the caller's full ROLLBACK; no RELEASE.
+        for (let probe = 0; probe < 2; probe++) {
+          await expect(client.query('ROLLBACK TO SAVEPOINT w4c5_idle_probe'))
+            .resolves.toMatchObject({ command: 'ROLLBACK', rows: [] })
+        }
+        await client.query('ROLLBACK')
+        expect(await probeRowCount(rowId)).toBe(0)
+        await client.query('BEGIN')
+        await expect(client.query('RELEASE SAVEPOINT w4c5_idle_probe'))
+          .rejects.toMatchObject({ code: '3B001' })
+        await expect(client.query('SELECT 1')).rejects.toMatchObject({ code: '25P02' })
         await client.query('ROLLBACK')
         await expect(client.query('SELECT 1 AS ok')).resolves.toMatchObject({ rows: [{ ok: 1 }] })
       } finally {
