@@ -441,7 +441,7 @@ suite('migration', () => {
       ['created_at', 'timestamp with time zone', 'NO', 'now()'], ['expires_at', 'timestamp with time zone', 'YES', null],
       ['consumed_at', 'timestamp with time zone', 'YES', null], ['consumed_action_ref', 'text', 'YES', null], ['superseded_at', 'timestamp with time zone', 'YES', null],
     ])
-    expect(current.constraints.map((c) => c.name)).toEqual([
+    expect(current.constraints.map((c) => c.name).sort()).toEqual([
       'security_action_challenges_action_ref_chk', 'security_action_challenges_action_ref_status_chk', 'security_action_challenges_binding_revision_chk',
       'security_action_challenges_client_binding_chk', 'security_action_challenges_consumed_chk', 'security_action_challenges_empty_slot_chk',
       'security_action_challenges_failed_shape_chk', 'security_action_challenges_identity_target_chk', 'security_action_challenges_method_chk',
@@ -452,7 +452,7 @@ suite('migration', () => {
     ])
     expect(current.constraints.find((c) => c.name === 'security_action_challenges_user_fk')?.def).toBe('FOREIGN KEY (user_id) REFERENCES users(id)')
     expect(current.indexes.find((i) => i.name === 'uq_security_action_live_proof')?.def).toContain("WHERE (status = 'issued'::text)")
-    expect(current.indexes.map((i) => i.name)).toEqual(['idx_security_action_user_created', 'security_action_challenges_pkey', 'uq_security_action_live_proof'])
+    expect(current.indexes.map((i) => i.name).sort()).toEqual(['idx_security_action_user_created', 'security_action_challenges_pkey', 'uq_security_action_live_proof'])
     const fk = (await q(`SELECT convalidated, confdeltype FROM pg_constraint WHERE conname = 'security_action_challenges_user_fk'`)).rows[0]
     expect(fk).toEqual({ convalidated: true, confdeltype: 'a' })
     const trigger = (await q(`SELECT tgenabled, tgtype FROM pg_trigger WHERE tgname = 'security_action_challenge_transition' AND tgrelid = $1::regclass`, [`public.${TABLE}`])).rows[0]
@@ -494,14 +494,12 @@ suite('migration', () => {
     const userId = await seedUser()
     await withRollback(async (run) => {
       const sid = 'sid-' + randomUUID()
-      await insertRow(run, userId, { session_id: sid })
+      const first = await insertRow(run, userId, { session_id: sid })
       await refusedInsert(run, userId, { session_id: sid }, '23505')
       await expect(insertRow(run, userId, { session_id: sid, status: 'failed', failure_code: 'credential_rejected', proof_hash: null, assurance: null })).resolves.toBeTruthy()
-      const third = await insertRow(run, userId, { session_id: 'sid-' + randomUUID() })
-      await run(`UPDATE ${TABLE} SET session_id = session_id WHERE false`)
-      await failing(run, `UPDATE ${TABLE} SET status = 'superseded', superseded_at = now() WHERE id = $1`, [third]).catch(() => undefined)
-      await run(`UPDATE ${TABLE} SET status = 'superseded', superseded_at = now() WHERE id = $1`, [third])
-      await expect(insertRow(run, userId, { session_id: sid })).rejects.toMatchObject({ code: '23505' })
+      await run(`UPDATE ${TABLE} SET status = 'superseded', superseded_at = now() WHERE id = $1`, [first])
+      await expect(insertRow(run, userId, { session_id: sid })).resolves.toBeTruthy()
+      expect((await run(`SELECT count(*)::int AS n FROM ${TABLE} WHERE user_id = $1 AND session_id = $2`, [userId, sid])).rows[0].n).toBe(3)
     })
   })
 
@@ -949,8 +947,14 @@ suite('consumption', () => {
     const target = { kind: 'identity_revision' as const, witness }
     const otherRevision = serviceOn({ policyRevision: SECURITY_ACTION_POLICY_REVISION + 1 })
     await expectRefusal(consumeWith(other, context, otherRevision, consumeInput(issued.proof, { target })), 'SECURITY_ACTION_PROOF_STALE')
-    const createdAt = (await q(`SELECT created_at FROM ${TABLE} WHERE user_id = $1 AND status = 'issued'`, [other])).rows[0].created_at
-    await q('INSERT INTO user_session_revocations (user_id, revoked_after) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET revoked_after = EXCLUDED.revoked_after', [other, createdAt])
+    // The watermark is copied from the row inside the database, so it equals created_at to the microsecond.
+    await q(
+      `INSERT INTO user_session_revocations (user_id, revoked_after)
+       SELECT user_id, created_at FROM ${TABLE} WHERE user_id = $1 AND status = 'issued'
+       ON CONFLICT (user_id) DO UPDATE SET revoked_after = EXCLUDED.revoked_after`,
+      [other],
+    )
+    expect((await q(`SELECT (r.revoked_after = c.created_at) AS same FROM user_session_revocations r JOIN ${TABLE} c ON c.user_id = r.user_id WHERE r.user_id = $1 AND c.status = 'issued'`, [other])).rows[0].same).toBe(true)
     await expectRefusal(consumeWith(other, context, service, consumeInput(issued.proof, { target })), 'SECURITY_ACTION_PROOF_STALE')
     await q('DELETE FROM user_session_revocations WHERE user_id = $1', [other])
     const reissued = await issueFor(other, otherSid, service)

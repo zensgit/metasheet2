@@ -319,6 +319,18 @@ describe('refusals before any statement', () => {
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 
+  it('refuses an unavailable purpose before any statement even when a resolver for it is registered', async () => {
+    const unavailable = serviceWith({ isPurposeAvailable: () => false })
+    const refusal = await expectRefusal(unavailable.service.issue(contextFor(), verifyRequest()), 'SECURITY_ACTION_PURPOSE_UNAVAILABLE')
+    expect(refusal.status).toBe(403)
+    expect(unavailable.runner.events).toEqual([])
+    expect(unavailable.verifyCalls).toEqual([])
+    expect(unavailable.audits).toEqual([])
+    const { client, statements } = fakeClient(defaultState())
+    await expectRefusal(unavailable.service.consume(client, contextFor(), consumeInput()), 'SECURITY_ACTION_PURPOSE_UNAVAILABLE')
+    expect(statements).toEqual([])
+  })
+
   it('refuses an available purpose that has no resolver, and an empty organization, before any statement', async () => {
     const noResolver = serviceWith({ resolvers: {} })
     await expectRefusal(noResolver.service.issue(contextFor(), verifyRequest()), 'SECURITY_ACTION_PURPOSE_UNAVAILABLE')
@@ -761,6 +773,7 @@ describe('consumption decisions', () => {
     ['another target kind', (s: HarnessState) => { s.proof!.target_kind = 'empty_slot' }, 'SECURITY_ACTION_PROOF_SCOPE_MISMATCH'],
     ['another target witness', (s: HarnessState) => { s.proof!.target_witness = 'b'.repeat(64) }, 'SECURITY_ACTION_PROOF_SCOPE_MISMATCH'],
     ['an account the gate refuses', (s: HarnessState) => { s.account = accountState({ is_active: false }) }, 'SECURITY_ACTION_PROOF_STALE'],
+    ['an account the gate refuses by role alone, with an unchanged credential witness', (s: HarnessState) => { s.account = accountState({ role: 'disabled' }) }, 'SECURITY_ACTION_PROOF_STALE'],
     ['an account whose local password was unset', (s: HarnessState) => { s.account = accountState({ local_password_set: false }) }, 'SECURITY_ACTION_PROOF_STALE'],
     ['an advanced access generation', (s: HarnessState) => { s.account = accountState({ access_generation: '4' }) }, 'SECURITY_ACTION_PROOF_STALE'],
     ['a changed credential witness', (s: HarnessState) => { s.account = accountState({ password_hash: 'rotated' }) }, 'SECURITY_ACTION_PROOF_STALE'],
