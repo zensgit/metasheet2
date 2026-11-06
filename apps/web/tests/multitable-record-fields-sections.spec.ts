@@ -1090,3 +1090,61 @@ describe('attachments 3-up gallery (§1.3 "Attachments") — CSS provision only'
     expect(authenticatedApi.apiFetch).toHaveBeenCalledWith('/api/multitable/attachments/att_1?thumbnail=true', expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 })
+
+// Input-method composition (utils/ime-keys.ts): an Enter that commits a composition commits no field
+// and moves no focus, and an Escape that cancels one closes no drawer. Safari's key that ends a
+// composition has isComposing false and keyCode 229, which is why isComposing alone is not enough.
+describe('keyboard during an input-method composition', () => {
+  const IME_INITS: KeyboardEventInit[] = [{ isComposing: true }, { keyCode: 229 }]
+  const KB_FIELDS = [F_TITLE, F_QTY, F_STATUS, F_NOTES]
+  const KB_RECORD = record('rec_1', { fld_title: 'a', fld_qty: 1, fld_status: 'todo', fld_notes: 'n' })
+
+  it('an Enter during a composition on a single-line control, or a mod+Enter in the textarea, neither commits nor moves focus; a plain Enter still advances', async () => {
+    const onPatch = vi.fn()
+    const { container } = mountPanel({ record: KB_RECORD, fields: KB_FIELDS, onPatch })
+    await flushUi()
+    const title = container.querySelector<HTMLInputElement>('#drawer_field_fld_title')!
+    const qty = container.querySelector<HTMLInputElement>('#drawer_field_fld_qty')!
+    const textarea = container.querySelector<HTMLTextAreaElement>('#drawer_field_fld_notes')!
+    title.focus()
+    for (const init of IME_INITS) {
+      expect(keydown(title, { key: 'Enter', ...init }).defaultPrevented).toBe(false)
+      expect(document.activeElement).toBe(title)
+    }
+    textarea.focus()
+    for (const init of IME_INITS) {
+      expect(keydown(textarea, { key: 'Enter', metaKey: true, ...init }).defaultPrevented).toBe(false)
+      expect(document.activeElement).toBe(textarea)
+    }
+    expect(onPatch).not.toHaveBeenCalled()
+    title.focus()
+    expect(keydown(title, { key: 'Enter' }).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(qty)
+  })
+
+  it('an Escape during a composition in a field control bubbles to the drawer root and closes nothing; a plain Escape there closes the drawer once', async () => {
+    const onClose = vi.fn()
+    const { container } = mountInspector({
+      record: record('rec_1', { fld_title: 'Alpha', fld_qty: 1, fld_notes: 'n' }),
+      fields: [F_TITLE, F_QTY, F_NOTES],
+      recordIds: ['rec_1'],
+      onClose,
+    })
+    await flushUi()
+    const inspectorRoot = container.querySelector<HTMLElement>('.meta-record-drawer')!
+    const control = container.querySelector<HTMLInputElement>('#drawer_field_fld_title')!
+    const reachedRoot: string[] = []
+    inspectorRoot.addEventListener('keydown', (event) => { reachedRoot.push(event.key) })
+    control.focus()
+    for (const init of IME_INITS) {
+      expect(keydown(control, { key: 'Escape', ...init }).defaultPrevented).toBe(false)
+      await flushUi()
+    }
+    // the key really reached the root (bubbling, not a stop below it); the root closed nothing
+    expect(reachedRoot).toEqual(['Escape', 'Escape'])
+    expect(onClose).not.toHaveBeenCalled()
+    expect(keydown(control, { key: 'Escape' }).defaultPrevented).toBe(true)
+    await flushUi()
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+})

@@ -75,8 +75,8 @@
         @keydown.up="onMentionNavigate(-1, $event)"
         @keydown.enter="onMentionEnter($event)"
         @keydown.tab="onMentionTab($event)"
-        @keydown.meta.enter.prevent="onConfirm"
-        @keydown.ctrl.enter.prevent="onConfirm"
+        @keydown.meta.enter="onConfirmKey"
+        @keydown.ctrl.enter="onConfirmKey"
         @keydown.escape="onEscape($event)"
         @keyup="onEditableKeyup($event)"
         @mouseup="onCaretMoved"
@@ -127,6 +127,7 @@ import {
 } from '../../utils/rich-longtext-mention'
 import type { MetaCommentMentionSearch, MetaCommentMentionSuggestion } from '../../types'
 import { metaCoreLabel, type MetaCoreLabelKey } from '../../utils/meta-core-labels'
+import { isImeKeyEvent } from '../../utils/ime-keys'
 
 const props = defineProps<{
   /** Current rich-`longText` HTML value (server-sanitized). */
@@ -404,6 +405,9 @@ const CARET_MOVE_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'Home', 'End', 'Page
 let verticalKeyMovedCaret = false
 
 function onMentionNavigate(direction: 1 | -1, event: KeyboardEvent): void {
+  // An arrow during an input-method composition moves through the input method's candidates, not the
+  // mention list (and not the caret).
+  if (isImeKeyEvent(event)) return
   const len = mentionSuggestionsFiltered.value.length
   // #5795: the "type to search" prompt is not a list. With no option to move to, the arrow keeps its
   // normal caret-moving job (checked BEFORE preventDefault), exactly as when no popover is showing.
@@ -433,6 +437,8 @@ function onEditableKeyup(event: KeyboardEvent): void {
 }
 
 function onMentionEnter(event: KeyboardEvent): void {
+  // An Enter that commits an input-method composition picks no suggestion.
+  if (isImeKeyEvent(event)) return
   // Plain Enter while the popover is open selects the active suggestion; otherwise
   // Enter falls through to its normal newline behaviour. (Cmd/Ctrl+Enter commit is
   // handled by its own dedicated listener and never reaches here.)
@@ -443,12 +449,16 @@ function onMentionEnter(event: KeyboardEvent): void {
 }
 
 function onMentionTab(event: KeyboardEvent): void {
+  if (isImeKeyEvent(event)) return
   if (!showMentionSuggestions.value || !activeMention.value) return
   event.preventDefault()
   selectMention(activeMention.value)
 }
 
 function onEscape(event: KeyboardEvent): void {
+  // An Escape that cancels an input-method composition neither closes the popover nor cancels the
+  // edit. It is left unprevented, so the hosts' own Escape handlers apply the same rule.
+  if (isImeKeyEvent(event)) return
   // Esc dismisses the popover first (one Esc closes the suggester); a second Esc (or
   // Esc with no popover) cancels the edit, matching the textarea's Esc contract.
   // #5795: this deliberately includes the prompt-only popover — a visible popover is closed first so
@@ -482,6 +492,14 @@ function onBlur(): void {
  * drawer on `change`, buffered hosts on `update:modelValue`. (Plain Enter inserts a
  * newline as usual — only the modifier chord commits.)
  */
+/** The Cmd/Ctrl+Enter keydown: an Enter that commits an input-method composition confirms nothing,
+ *  so `preventDefault` is called here after the check, not by a `.prevent` modifier. */
+function onConfirmKey(event: KeyboardEvent): void {
+  if (isImeKeyEvent(event)) return
+  event.preventDefault()
+  onConfirm()
+}
+
 function onConfirm(): void {
   const value = currentValue()
   emit('update:modelValue', value)

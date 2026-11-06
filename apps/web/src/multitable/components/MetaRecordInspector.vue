@@ -300,8 +300,8 @@
           :value="primaryFieldTextValue"
           :aria-label="l('record.titleFieldAria')"
           @change="onTitleChange"
-          @keydown.enter.prevent="onTitleEnter"
-          @keydown.esc.prevent="onTitleEscape"
+          @keydown.enter="onTitleEnter"
+          @keydown.esc="onTitleEscape"
         />
         <div v-else ref="titleTextRef" class="meta-record-drawer__title-text" tabindex="-1">{{ primaryFieldDisplayText }}</div>
       </div>
@@ -663,6 +663,7 @@ import {
 import { commentLabel } from '../utils/meta-comment-labels'
 import { workbenchLabel } from '../utils/workbench-labels'
 import { manualRowLabel } from '../utils/manual-row-labels'
+import { isImeKeyEvent } from '../utils/ime-keys'
 import type { AiShortcutState } from '../composables/useAiShortcut'
 import {
   canEditField,
@@ -1122,6 +1123,10 @@ async function moveTabFocusTo(tab: InspectorTab) {
 // never reaches this listener via bubbling at all).
 function onInspectorKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
+    // An Escape that cancels an input-method composition in any control of the panel closes nothing.
+    // Checked here as well as in the controls: a control that leaves such an Escape alone does not
+    // mark it `defaultPrevented`, so the check below would not stop it.
+    if (isImeKeyEvent(event)) return
     if (kebabMenuRef.value?.isOpen) {
       event.preventDefault()
       kebabMenuRef.value.close()
@@ -1639,14 +1644,23 @@ function onTitleChange(event: Event) {
   emit('patch', field.id, (event.target as HTMLInputElement).value)
 }
 function onTitleEnter(event: KeyboardEvent) {
+  // An Enter that commits an input-method composition commits the composition only: the title stays
+  // in edit (no blur, no commit). That is why `preventDefault` is called here, after the check, and
+  // not by a `.prevent` modifier in the template, which would run first.
+  if (isImeKeyEvent(event)) return
+  event.preventDefault()
   // Mirrors `flushActiveFieldEdit`'s discipline elsewhere in this line: blurring a text-like control
   // fires its native `change`, which is this input's own commit path — no second code path needed.
   ;(event.target as HTMLInputElement).blur()
 }
 function onTitleEscape(event: KeyboardEvent) {
-  // Revert the DISPLAYED value only (no `patch` emitted) — `.prevent` (bound in the template) stops
-  // this Escape from also reaching `onInspectorKeydown` (its own Escape branch already returns early
-  // on `event.defaultPrevented`), so a title-edit Escape never closes the whole panel.
+  // An Escape that cancels an input-method composition leaves the typed draft as it is; the drawer
+  // stays open too, since `onInspectorKeydown` checks the same rule.
+  if (isImeKeyEvent(event)) return
+  // Revert the DISPLAYED value only (no `patch` emitted) — `preventDefault` stops this Escape from
+  // also reaching `onInspectorKeydown` as a close (its own Escape branch returns early on
+  // `event.defaultPrevented`), so a title-edit Escape never closes the whole panel.
+  event.preventDefault()
   const input = event.target as HTMLInputElement
   input.value = primaryFieldTextValue.value
 }
