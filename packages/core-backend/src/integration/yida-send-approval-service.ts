@@ -192,6 +192,8 @@ export type YidaSendExecutionPrimitives = YidaSendAuthorityPrimitives & {
   loadExecutionMaterialInTransaction(trx: Queryable, input: { credentialRef: string; credentialGeneration: number }):
     Promise<YidaExecutionCredentialBinding & { appKey: string; appSecret: string; systemToken: string; userId: string }>
   prepareDraftInTransaction?(trx: Queryable, input: unknown): Promise<Readonly<Row>>
+  // R-71 ⑦.3 decision C1: pure and synchronous, one frozen boolean, checked before a draft is written.
+  draftSendBudget?(input: { config: unknown; rowsText: unknown; allocation: unknown }): Readonly<{ withinBudget: boolean }>
   previewInTransaction?(trx: Queryable, input: { operationId: string; rowKey: string }): Promise<Readonly<Row>>
 }
 export type YidaSendExecutionDependencies = Omit<Dependencies, 'primitives'> & { primitives: YidaSendExecutionPrimitives }
@@ -353,7 +355,10 @@ function createApprovalInternals({ database, security, context, primitives, mult
   // passes; false is LIMIT, and any other shape (or a thrown error) is UNAVAILABLE. Either way the
   // enclosing transaction rolls back.
   function assertSendBudget(selected: YidaSendAuthoritySelection, grant: { grantRef: string; expiresAt: number; actorId: string }) {
-    const verdict: unknown = primitives.sendBudget(selected, grant)
+    assertBudgetVerdict(primitives.sendBudget(selected, grant))
+  }
+  // One verdict rule for the gate-4 budget at approval/admission and the R-71 ⑦.3 draft-time budget.
+  function assertBudgetVerdict(verdict: unknown) {
     if (types.isPromise(verdict)) {
       // Observe an ordinary local rejection only; never consult a dependency-owned constructor.
       try {
@@ -528,8 +533,11 @@ function createApprovalInternals({ database, security, context, primitives, mult
     // Literal data only, never a source/Connection reference or a query port.
     // The actual plugin compiler applies its tighter input/row budgets too.
     canonical(parsed)
-    if (!executionPrimitives?.prepareDraftInTransaction) fail('UNAVAILABLE')
+    if (!executionPrimitives?.prepareDraftInTransaction || typeof executionPrimitives.draftSendBudget !== 'function') fail('UNAVAILABLE')
     return transaction(async (trx, targetRef, bound) => {
+      // R-71 ⑦.3 decision C1: a draft the shared send budget would refuse at approval is refused
+      // here (LIMIT, 422), before any draft row is written; the transaction rolls back.
+      assertBudgetVerdict(executionPrimitives.draftSendBudget!(parsed))
       const result = await executionPrimitives.prepareDraftInTransaction!(trx, targeted(parsed, targetRef, bound))
       const view = record(result, ['targetRef', 'operationId', 'status', 'identityKind', 'canSend', 'canApply',
         'tokenIssued', 'externalWriteAttempted', 'rowCount', 'rows', 'reused'])

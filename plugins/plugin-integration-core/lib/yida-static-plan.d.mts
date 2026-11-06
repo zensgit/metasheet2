@@ -163,6 +163,10 @@ export interface YidaProtocolExample {
 }
 
 export function validateYidaStaticConfig(input: unknown): YidaStaticValidationResult
+/** The closed set of v3 transform names (R-71 ⑦.3). */
+export const YIDA_TRANSFORM_NAMES: readonly YidaTransformName[]
+/** Every row column a valid v3 config reads (direct sources and concat column parts), sorted. Throws YIDA_STATIC_CONFIG_INVALID otherwise. */
+export function yidaTransformSourceColumns(config: unknown): readonly string[]
 /** Explicit configs require unique decoded JSON keys and raw decimal fidelity; v1 keeps its finite Number domain. Omitted config retains legacy parsing. */
 export function parseYidaStaticRows(text: string, config?: YidaStaticConfig): YidaStaticRow[]
 export function buildYidaStaticPlan(input: { config: unknown; rows: unknown }): YidaStaticPlan

@@ -844,3 +844,46 @@ test('in-memory v2 guard mutations break independent identity, parser, options a
   assert.ok(buildYidaStaticPlan({ config: protocolConfig(),
     rows: duplicate }).rows.every((row) => !('protocolPreview' in row)))
 })
+
+// R-71 ⑦.3: which columns a v3 mapping reads. One case per transform name; the name list is the
+// planner's own closed table, so a new transform without a declared reader turns this red (seam for ⑦.4).
+const TRANSFORM_COLUMN_CASES = {
+  direct: { entry: { transform: 'direct', source: 'colDirect', target: 'extra', type: 'string', required: false }, columns: ['colDirect'] },
+  copy: { entry: { transform: 'copy', copyOf: 'key', target: 'extra', type: 'string', required: false }, columns: [] },
+  constant: { entry: { transform: 'constant', value: 'SYN-C', target: 'extra', type: 'string', required: false }, columns: [] },
+  concat: { entry: { transform: 'concat', parts: [{ source: 'colA' }, { literal: 'x' }, { source: 'colB' }, { source: 'colKey' }],
+    separator: '-', blank: 'skip', target: 'extra', type: 'string', required: false }, columns: ['colA', 'colB'] },
+}
+function transformLayout(extra) {
+  return { version: 3, kind: 'yida-form-protocol-static', target: { appType: 'synthetic_app', formUuid: 'synthetic_form' },
+    intent: 'create', businessKey: ['key'], emptyKeyFields: [],
+    fieldCatalog: [{ id: 'key', control: 'text', required: true }, { id: 'extra', control: 'text', required: false }],
+    fieldMap: [{ transform: 'direct', source: 'colKey', target: 'key', type: 'string', required: true }, extra] }
+}
+
+test('R-71 ⑦.3: every v3 transform name declares the columns it reads (tripwire for new transforms)', async () => {
+  const { YIDA_TRANSFORM_NAMES, yidaTransformSourceColumns } = await modulePromise
+  assert.equal(Object.isFrozen(YIDA_TRANSFORM_NAMES), true)
+  assert.deepEqual([...YIDA_TRANSFORM_NAMES].sort(), Object.keys(TRANSFORM_COLUMN_CASES).sort())
+  for (const name of YIDA_TRANSFORM_NAMES) {
+    const { entry, columns } = TRANSFORM_COLUMN_CASES[name]
+    const actual = yidaTransformSourceColumns(transformLayout(entry))
+    assert.equal(Object.isFrozen(actual), true)
+    assert.deepEqual(actual, ['colKey', ...columns].sort(), name)
+  }
+})
+
+test('R-71 ⑦.3: source columns are sorted, de-duplicated, order-independent and only for a valid v3 config', async () => {
+  const { createYidaTransformExample, createYidaProtocolExample, yidaTransformSourceColumns } = await modulePromise
+  const { config } = createYidaTransformExample()
+  const columns = yidaTransformSourceColumns(config)
+  assert.deepEqual(columns, ['blankType', 'componentCode', 'componentName', 'componentSpec', 'ext_blankLength', 'ext_blankThickness',
+    'ext_blankWidth', 'idempotencyKey', 'material', 'parentComponentCode', 'parentComponentName', 'projectNo', 'sourceVersion', 'totalQuantity'])
+  assert.deepEqual(yidaTransformSourceColumns({ ...config, fieldMap: [...config.fieldMap].reverse() }), columns)
+  const twice = transformLayout({ transform: 'concat', parts: [{ source: 'colKey' }, { source: 'colKey' }], separator: '', blank: 'skip',
+    target: 'extra', type: 'string', required: false })
+  assert.deepEqual(yidaTransformSourceColumns(twice), ['colKey'])
+  for (const invalid of [createYidaProtocolExample().config, { ...config, version: 4 }, { ...config, fieldMap: [] }, null]) {
+    assert.throws(() => yidaTransformSourceColumns(invalid), { code: 'YIDA_STATIC_CONFIG_INVALID' })
+  }
+})

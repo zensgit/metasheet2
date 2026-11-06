@@ -112,7 +112,9 @@ function compileSnapshot(raw, identity) {
     || snapshot.credentialGeneration > 2147483647) fail('SNAPSHOT_INVALID')
   privateText(snapshot.systemToken, YIDA_SEND_SYSTEM_TOKEN_MAX_LENGTH)
   privateText(snapshot.userId, YIDA_SEND_USER_ID_MAX_LENGTH)
-  if (!snapshot.config || snapshot.config.version !== 2) fail('SNAPSHOT_INVALID')
+  // R-71 ⑦.3: a v2 or a v3 mapping (exact numbers). The single row is planned again from the
+  // snapshot's own config; the data must still equal the approved execution digest below.
+  if (!snapshot.config || ![2, 3].includes(snapshot.config.version)) fail('SNAPSHOT_INVALID')
   let plan
   try { plan = buildYidaStaticPlan({ config: snapshot.config, rows: [snapshot.row] }) } catch { fail('SNAPSHOT_INVALID') }
   const planned = plan.rows[0]
