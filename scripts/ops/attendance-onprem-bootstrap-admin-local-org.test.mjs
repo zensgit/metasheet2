@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, chmodSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, chmodSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -595,6 +595,93 @@ function extractPs1Sql(source, name) {
   assert.ok(match, `ps1 SQL here-string not found: ${name}`)
   return match[1].trim()
 }
+
+// sh only (the ps1 twin keeps both responses in memory). The login and route responses are
+// written to mktemp files; the route's 200 body describes the new local account. A signal that
+// stops the script while the route call is in flight must not leave either file behind
+// (gate r2 NIT-B: the EXIT trap used to cover only the login response file).
+test('sh: a SIGTERM during the route call leaves no response file behind in the temp dir', async () => {
+  const fixture = makeFixture()
+  const scratchTmp = path.join(fixture.dir, 'tmp')
+  mkdirSync(scratchTmp)
+  // Route every bare `mktemp` into scratchTmp (macOS mktemp does not honour TMPDIR for its default).
+  const mktempStub = path.join(fixture.bin, 'mktemp')
+  writeFileSync(
+    mktempStub,
+    ['#!/usr/bin/env bash', `exec /usr/bin/env -i PATH=/usr/bin:/bin mktemp ${JSON.stringify(`${scratchTmp}/tmp.XXXXXXXX`)}`, ''].join('\n'),
+  )
+  chmodSync(mktempStub, 0o755)
+  const held = []
+  const server = createServer((req, res) => {
+    let raw = ''
+    req.on('data', chunk => {
+      raw += chunk
+    })
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/api/auth/login') {
+        res.setHeader('Content-Type', 'application/json')
+        res.statusCode = 200
+        res.end(JSON.stringify({ success: true, data: { token: SYNTHETIC_TOKEN } }))
+        return
+      }
+      if (req.method === 'POST' && req.url === ROUTE_PATH) {
+        // Never answer: the script is now parked in the route call.
+        held.push(req.socket)
+        return
+      }
+      res.statusCode = 404
+      res.end('{}')
+    })
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const apiBase = `http://127.0.0.1:${server.address().port}/api`
+  let child
+  try {
+    child = spawn('bash', [SH_SCRIPT], {
+      cwd: fixture.dir,
+      detached: true,
+      env: baseEnv(fixture, {
+        ENV_FILE: fixture.envFile,
+        ADMIN_EMAIL: SYNTHETIC_EMAIL,
+        ADMIN_PASSWORD: SYNTHETIC_PASSWORD,
+        ADMIN_NAME: 'Synthetic Contract Admin',
+        API_BASE: apiBase,
+        VERIFY_LOGIN: '1',
+        STUB_EMPTINESS: '0:0',
+      }),
+    })
+    let output = ''
+    child.stdout.on('data', chunk => {
+      output += chunk
+    })
+    child.stderr.on('data', chunk => {
+      output += chunk
+    })
+    const closed = new Promise(resolve => child.on('close', (status, signal) => resolve({ status, signal })))
+
+    for (let i = 0; i < 300 && held.length === 0; i++) {
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    assert.equal(held.length, 1, `the route call never arrived:\n${output}`)
+    // Precondition: while parked, the response files really are in the temp dir (so an empty temp dir
+    // afterwards is the trap's doing, not a script that never used it).
+    assert.ok(readdirSync(scratchTmp).length >= 1, 'expected the in-flight response file(s) in the temp dir')
+
+    process.kill(-child.pid, 'SIGTERM')
+    const exit = await closed
+    assert.ok(exit.status !== 0 || exit.signal, `script should not succeed after SIGTERM:\n${output}`)
+    assert.deepEqual(readdirSync(scratchTmp), [], 'no response file may be left in the temp dir')
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) {
+      try {
+        process.kill(-child.pid, 'SIGKILL')
+      } catch {}
+    }
+    for (const socket of held) socket.destroy()
+    await new Promise(resolve => server.close(resolve))
+    fixture.cleanup()
+  }
+})
 
 test('parity: sh and ps1 issue byte-identical read-only SQL', () => {
   const sh = read(SH_SCRIPT)

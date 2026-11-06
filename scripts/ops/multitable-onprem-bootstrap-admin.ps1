@@ -450,18 +450,20 @@ if ($resolvedVerifyLogin -eq '1') {
 # Only when user_orgs AND directory_integrations are both empty (no org data at all), the
 # logged-in bootstrap admin calls the EXISTING route POST /api/admin/directory/local/accounts
 # with its own user id. That route's existing code creates the deployment's local org anchor
-# (getOrCreateLocalIntegration) and the admin's active org membership; this script writes NO
+# (getOrCreateLocalIntegrationInTransaction, inside the route's own transaction) and the admin's
+# active org membership; this script writes NO
 # anchor/membership SQL of its own -- every psql statement below is a read-only count.
 #
 # Upgrade / directory-already-configured installs (either table has rows) are left untouched.
 # Re-running is a no-op because the first successful run makes both tables non-empty.
 #
-# Fail-closed: any error throws with a values-free message. NOTE: the route commits the anchor
-# before the membership transaction, so a failure inside that transaction can leave an anchor
-# without a membership. This script does not roll that back. It is DETECTED twice, by read-only
-# counts only: right after the call (postcondition) and on any later run (an anchor with no
-# directory accounts, links, departments or memberships at all). Both throw and say to finish it
-# by calling the same route manually; neither writes anything.
+# Fail-closed: any error throws with a values-free message. NOTE: the current route creates the
+# anchor in the same transaction as the account, link and membership, so a failure rolls all of
+# them back together. An earlier server version committed the anchor first and could leave an
+# anchor without a membership; this script does not roll that back. It is DETECTED twice, by
+# read-only counts only: right after the call (postcondition) and on any later run (an anchor with
+# no directory accounts, links, departments or memberships at all). Both throw and say how to
+# continue; neither writes anything.
 # ---------------------------------------------------------------------------------------------
 $localOrgLogPrefix = 'Local org bootstrap'
 $localOrgEmptinessSql = @'
