@@ -27,8 +27,11 @@ import net from 'node:net'
 import path from 'node:path'
 
 import { Client, Pool } from 'pg'
+import type { PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
+import { planAttendanceCalculationRolloutTransitionV1, transitionAttendanceCalculationRolloutV1 } from '../../src/attendance/w4c3a-rollout-control'
+import { acquireAttendanceCalculationRolloutLock, parseCanonicalAttendanceRolloutOrgKeyV1, type AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
 import type { MetaSheetServer as MetaSheetServerType } from '../../src/index'
 import {
   restoreAttendanceSettingsRow,
@@ -388,6 +391,355 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     )
     return scheduleGroupId
   }
+
+  it.each(['active-multi', 'unused-multi', 'active-single'] as const)(
+    'PARENT_DB10_DB11: legacy rollback reference admission and exact source preservation (%s)',
+    async scenario => {
+      const orgId = randomUUID(), userId = randomUUID(), adminId = randomUUID()
+      const token = await mintToken(adminId, orgId)
+      const oldAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      await enableShadowPosture(orgId)
+      try {
+        const isMulti = scenario !== 'active-single'
+        const created = await createShiftViaApi(token, orgId, isMulti ? {
+          name: 'Rollback split source', timezone: 'UTC',
+          segments: [{ startTime: '08:00', endTime: '12:00' }, { startTime: '13:00', endTime: '17:00' }],
+        } : { name: 'Rollback single source', timezone: 'UTC', workStartTime: '08:00', workEndTime: '17:00' })
+        expect(created.status, created.raw).toBe(201)
+        const shiftId = created.body.data.id as string
+        if (scenario !== 'unused-multi') {
+          const assignmentId = await seedPublishedAssignment(orgId, userId, shiftId, '2026-01-05')
+          await pool.query('UPDATE attendance_shift_assignments SET end_date = NULL WHERE id = $1', [assignmentId])
+        }
+        const sourceSnapshot = async () => ({
+          shifts: (await pool.query('SELECT to_jsonb(s) AS row FROM attendance_shifts s WHERE org_id = $1 ORDER BY id', [orgId])).rows,
+          segments: (await pool.query('SELECT to_jsonb(s) AS row FROM attendance_shift_segments s WHERE org_id = $1 ORDER BY shift_id, segment_index', [orgId])).rows,
+          assignments: (await pool.query('SELECT to_jsonb(a) AS row FROM attendance_shift_assignments a WHERE org_id = $1 ORDER BY id', [orgId])).rows,
+        })
+        const rolloutSnapshot = async () => ({
+          state: (await pool.query('SELECT to_jsonb(s) AS row FROM attendance_calculation_rollout_state s WHERE org_id = $1', [orgId])).rows,
+          events: (await pool.query('SELECT to_jsonb(e) AS row FROM attendance_calculation_rollout_events e WHERE org_id = $1 ORDER BY id', [orgId])).rows,
+        })
+        const beforeSource = await sourceSnapshot(), beforeRollout = await rolloutSnapshot()
+        expect(beforeSource.segments).toHaveLength(isMulti ? 2 : 1)
+        expect(beforeSource.assignments).toHaveLength(scenario === 'unused-multi' ? 0 : 1)
+        const sql: string[] = []
+        const client = await pool.connect()
+        let outcome: { resolved: boolean; code?: string }
+        try {
+          const connection: AttendanceW4TransactionClientV1 = {
+            query: (text, values) => {
+              sql.push(text)
+              return client.query(text, values as unknown[]) as unknown as Promise<{ rows: Array<Record<string, unknown>> }>
+            },
+          }
+          outcome = await transitionAttendanceCalculationRolloutV1(connection, {
+            orgId, actorId: adminId, correlationId: randomUUID(), engineVersion: 'parent-rollback-proof',
+            targetState: 'legacy', expectedState: 'shadow', expectedVersion: 1,
+            evidenceManifestSha256: 'a'.repeat(64),
+            evidenceReferences: { imageSha: 'synthetic-image', ownerAuthorizationRef: 'synthetic-owner', syntheticOrgRef: 'synthetic-org' },
+            reasonCode: 'rollout_transition',
+          }).then(
+            result => { expect(result).toEqual({ orgId, state: 'legacy', batchId: null }); return { resolved: true } },
+            (error: unknown) => {
+              if (!(error instanceof Error)) throw error
+              return { resolved: false, code: (error as Error & { code?: string }).code }
+            },
+          )
+        } finally {
+          client.release()
+        }
+        const afterSource = await sourceSnapshot(), afterRollout = await rolloutSnapshot()
+        console.log('PARENT_ROLLBACK_ADMISSION_RECEIPT ' + JSON.stringify({
+          scenario, outcome, sourceUnchanged: JSON.stringify(afterSource) === JSON.stringify(beforeSource),
+          rolloutUnchanged: JSON.stringify(afterRollout) === JSON.stringify(beforeRollout),
+          ddlStatements: sql.filter(text => /^\s*(?:CREATE|ALTER|DROP|TRUNCATE|COMMENT)\b/i.test(text)).length,
+          eventsBefore: beforeRollout.events.length, eventsAfter: afterRollout.events.length,
+          segments: afterSource.segments.length,
+        }))
+        expect(afterSource).toEqual(beforeSource)
+        expect(sql.filter(text => /^\s*(?:CREATE|ALTER|DROP|TRUNCATE|COMMENT)\b/i.test(text))).toEqual([])
+        if (scenario === 'active-multi') {
+          expect(outcome, 'PARENT_DB10_ACTIVE_MULTI_REFERENCE_MUST_REFUSE').toEqual({
+            resolved: false, code: 'W4C3A_ROLLOUT_CONTROL_ACTIVE_MULTI_SEGMENT_REFERENCE',
+          })
+          expect(afterRollout).toEqual(beforeRollout)
+        } else {
+          expect(outcome).toEqual({ resolved: true })
+          expect(afterRollout.events).toHaveLength(beforeRollout.events.length + 1)
+          const row = afterRollout.state[0]?.row
+          expect(row).toMatchObject({ state: 'legacy', prior_state: 'shadow', version: 2 })
+        }
+      } finally {
+        if (oldAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+        else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = oldAllowlist
+      }
+    },
+  )
+
+  it.each([
+    ['assignment-draft', true], ['assignment-inactive', false],
+    ['rotation-id', true], ['rotation-name', true], ['rotation-inactive', false],
+    ['fixed-config', false], ['swap-requester', true], ['swap-counterparty', true],
+    ['swap-rejected', false], ['dispatch-pending', true], ['dispatch-published', true],
+    ['dispatch-cancelled', false], ['foreign-rotation-name', false],
+  ] as const)('PARENT_DB10_SOURCE_ARM: %s plan and transition share native liveness (%s)', async (scenario, blocked) => {
+    const orgId = randomUUID(), adminId = randomUUID(), workerA = randomUUID(), workerB = randomUUID()
+    const token = await mintToken(adminId, orgId)
+    const oldAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    if (scenario !== 'fixed-config') await enableShadowPosture(orgId)
+    try {
+      const created = await createShiftViaApi(token, orgId, {
+        name: 'Rollback source arm', timezone: 'UTC',
+        segments: [{ startTime: '08:00', endTime: '12:00' }, { startTime: '13:00', endTime: '17:00' }],
+      })
+      expect(created.status, created.raw).toBe(201)
+      const shiftId = created.body.data.id as string
+      if (scenario.startsWith('assignment-')) {
+        const id = await seedPublishedAssignment(orgId, workerA, shiftId, '2026-01-05')
+        await pool.query('UPDATE attendance_shift_assignments SET end_date = NULL, is_active = $2, publish_status = $3 WHERE id = $1',
+          [id, scenario !== 'assignment-inactive', scenario === 'assignment-draft' ? 'draft' : 'published'])
+      } else if (scenario.startsWith('rotation-') || scenario === 'foreign-rotation-name') {
+        await pool.query(
+          "INSERT INTO attendance_rotation_rules (id, org_id, name, timezone, shift_sequence, is_active) VALUES ($1, $2, 'Rollback rotation', 'UTC', $3::jsonb, $4)",
+          [randomUUID(), scenario === 'foreign-rotation-name' ? randomUUID() : orgId,
+            JSON.stringify([scenario === 'rotation-id' ? shiftId : 'Rollback source arm']), scenario !== 'rotation-inactive'],
+        )
+      } else if (scenario === 'fixed-config') {
+        const group = await postJson('/api/attendance/groups', token, orgId, { name: 'Rollback fixed group' })
+        expect(group.status, group.raw).toBe(200)
+        const config = await putJson('/api/attendance/groups/' + group.body.data.id + '/fixed-schedule/config', token, orgId, {
+          shiftId, startDate: '2026-01-05', endDate: '2049-12-31',
+        })
+        expect(config.status, config.raw).toBe(200)
+        expect(config.body.data.shiftId).toBe(shiftId)
+        expect(await countRows('attendance_shift_assignments', orgId)).toBe(0)
+        expect(await countRows('attendance_calculation_rollout_state', orgId)).toBe(0)
+        console.log('PARENT_DESIRED_OFF_SAVE_RECEIPT ' + JSON.stringify({ status: config.status, assignments: 0, rolloutRows: 0, source: 'actual_config_save_HTTP' }))
+        // Desired metadata is explicitly writable while legacy/OFF. It is not
+        // an effective schedule fact; only subsequent apply materializes one.
+        await enableShadowPosture(orgId)
+      } else if (scenario.startsWith('swap-')) {
+        const other = await createShiftViaApi(token, orgId, { name: 'Rollback survivor', timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00' })
+        expect(other.status, other.raw).toBe(201)
+        const targetRequester = scenario === 'swap-requester'
+        const a = await seedPublishedAssignment(orgId, workerA, targetRequester ? shiftId : other.body.data.id, '2049-06-14')
+        const b = await seedPublishedAssignment(orgId, workerB, targetRequester ? other.body.data.id : shiftId, '2049-06-15')
+        const swap = await postJson('/api/attendance/shift-swap-requests', token, orgId, {
+          operationId: randomUUID(), requesterAssignmentId: a, counterpartyAssignmentId: b,
+        })
+        if (scenario === 'swap-requester') {
+          // Current create still refuses the requester's multi-segment work
+          // context. Keep that door as a negative control; this native fixture
+          // proves durable legacy snapshot protection, not create-path enablement.
+          expect(swap.status, swap.raw).toBe(422)
+          expect(codeOf(swap)).toBe(GUARD_CODE)
+          expect(await countRows('attendance_requests', orgId)).toBe(0)
+          expect(await countRows('attendance_shift_swap_requests', orgId)).toBe(0)
+          const legacyRequestId = randomUUID()
+          await pool.query(
+            "INSERT INTO attendance_requests (id, user_id, org_id, work_date, request_type, reason, status) VALUES ($1, $2, $3, '2049-06-14', 'shift_swap', 'synthetic legacy reference', 'pending')",
+            [legacyRequestId, workerA, orgId],
+          )
+          await pool.query(
+            "INSERT INTO attendance_shift_swap_requests (request_id, org_id, requester_user_id, counterparty_user_id, requester_assignment_id, counterparty_assignment_id, requester_work_date, counterparty_work_date, requester_shift_id, counterparty_shift_id, requester_slot_index, counterparty_slot_index, requester_start_date, requester_end_date, counterparty_start_date, counterparty_end_date, requester_publish_status, counterparty_publish_status, requester_assignment_kind, counterparty_assignment_kind, source_key) VALUES ($1, $2, $3, $4, $5, $6, '2049-06-14', '2049-06-15', $7, $8, 0, 0, '2049-06-14', '2049-06-14', '2049-06-15', '2049-06-15', 'published', 'published', 'regular', 'regular', $9)",
+            [legacyRequestId, orgId, workerA, workerB, a, b, shiftId, other.body.data.id, 'parent-legacy:' + randomUUID()],
+          )
+          console.log('PARENT_LEGACY_SWAP_SOURCE_RECEIPT ' + JSON.stringify({ createHTTP: 422,
+            createSourceRows: 0, source: 'native_constraint_checked_legacy_snapshot', publicCreateEnablementProved: false }))
+        } else {
+          expect(swap.status, swap.raw).toBe(201)
+          if (scenario === 'swap-rejected') {
+            await pool.query("UPDATE attendance_requests SET status = 'rejected' WHERE id = $1 AND org_id = $2", [swap.body.data.request.id, orgId])
+          }
+        }
+        await pool.query('UPDATE attendance_shift_assignments SET is_active = false WHERE org_id = $1', [orgId])
+      } else {
+        await seedDispatchFlow(token, orgId)
+        const scheduleGroupId = await seedScheduleGroup(orgId)
+        await seedActiveIdentity(workerA, orgId)
+        const dispatch = await postJson('/api/attendance/schedule-dispatch-requests', token, orgId, {
+          operationId: randomUUID(), userId: workerA, targetScheduleGroupId: scheduleGroupId, targetShiftId: shiftId,
+          startDate: '2049-06-10', endDate: '2049-06-10',
+        })
+        expect(dispatch.status, dispatch.raw).toBe(201)
+        const requestId = dispatch.body.data.request.id as string
+        if (scenario === 'dispatch-published') {
+          await pool.query("UPDATE attendance_schedule_dispatch_requests SET publish_status = 'published' WHERE request_id = $1 AND org_id = $2", [requestId, orgId])
+        } else if (scenario === 'dispatch-cancelled') {
+          const cancelled = await postJson('/api/attendance/schedule-dispatch-requests/' + requestId + '/cancel', token, orgId, { operationId: randomUUID() })
+          expect(cancelled.status, cancelled.raw).toBe(200)
+        }
+      }
+      const snapshot = async () => {
+        const rows: Record<string, unknown> = {}
+        for (const table of ['attendance_shifts', 'attendance_shift_segments', 'attendance_shift_assignments',
+          'attendance_group_fixed_schedule_configs', 'attendance_rotation_rules', 'attendance_requests',
+          'attendance_shift_swap_requests', 'attendance_schedule_dispatch_requests',
+          'attendance_calculation_rollout_state', 'attendance_calculation_rollout_events']) {
+          rows[table] = (await pool.query("SELECT COALESCE(jsonb_agg(row ORDER BY row::text), '[]'::jsonb) AS rows FROM (SELECT to_jsonb(t) AS row FROM " + table + ' t WHERE org_id = $1) q', [orgId])).rows[0].rows
+        }
+        return rows
+      }
+      const before = await snapshot(), client = await pool.connect(), statements: string[] = []
+      const connection: AttendanceW4TransactionClientV1 = {
+        query: (text, values) => {
+          statements.push(text)
+          return client.query(text, values as unknown[]) as unknown as Promise<{ rows: Array<Record<string, unknown>> }>
+        },
+      }
+      try {
+        const plan = await planAttendanceCalculationRolloutTransitionV1(connection, { orgId, targetState: 'legacy' })
+        expect(await snapshot()).toEqual(before)
+        const promise = transitionAttendanceCalculationRolloutV1(connection, {
+          orgId, actorId: adminId, correlationId: randomUUID(), engineVersion: 'parent-reference-arm',
+          targetState: 'legacy', expectedState: 'shadow', expectedVersion: 1,
+          evidenceManifestSha256: 'b'.repeat(64),
+          evidenceReferences: { imageSha: 'synthetic-image', ownerAuthorizationRef: 'synthetic-owner', syntheticOrgRef: 'synthetic-org' },
+          reasonCode: 'rollout_transition',
+        }).catch((error: unknown) => {
+          if (!(error instanceof Error)) throw error
+          console.log('PARENT_REFERENCE_BLOCKED_BOUNDARY_RECEIPT ' + JSON.stringify({
+            scenario, planBlocked: plan.blocked,
+            predicate: plan.predicates.find(p => p.code === 'ACTIVE_MULTI_SEGMENT_REFERENCE'),
+            code: (error as Error & { code?: string }).code,
+          }))
+          throw error
+        })
+        if (blocked) await expect(promise).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_ACTIVE_MULTI_SEGMENT_REFERENCE' })
+        else await expect(promise).resolves.toEqual({ orgId, state: 'legacy', batchId: null })
+        expect(plan.blocked).toBe(blocked)
+        expect(plan.predicates.find(p => p.code === 'ACTIVE_MULTI_SEGMENT_REFERENCE')).toEqual({
+          code: 'ACTIVE_MULTI_SEGMENT_REFERENCE', applicable: true, pass: !blocked, count: blocked ? 1 : 0,
+        })
+      } finally { client.release() }
+      const after = await snapshot()
+      if (blocked) expect(after).toEqual(before)
+      else {
+        for (const [table, rows] of Object.entries(before)) {
+          if (!table.startsWith('attendance_calculation_rollout_')) expect(after[table]).toEqual(rows)
+        }
+        expect((after.attendance_calculation_rollout_state as Array<{ state: string; version: number }>)[0])
+          .toMatchObject({ state: 'legacy', version: 2 })
+        expect(after.attendance_calculation_rollout_events).toHaveLength(1)
+      }
+      expect(statements.filter(text => /^\s*(?:CREATE|ALTER|DROP|TRUNCATE|COMMENT)\b/i.test(text))).toEqual([])
+      console.log('PARENT_REFERENCE_ARM_RECEIPT ' + JSON.stringify({
+        scenario, blocked, planAndBoundaryAgree: true, sourceRowsPreserved: true, ddlStatements: 0,
+      }))
+    } finally {
+      if (oldAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = oldAllowlist
+    }
+  })
+
+  it('PARENT_DB10_RACE: a shared writer commits an active reference while legacy transition waits', async () => {
+    const orgId = randomUUID(), adminId = randomUUID(), userId = randomUUID()
+    const token = await mintToken(adminId, orgId)
+    const oldAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    await enableShadowPosture(orgId)
+    let writer: PoolClient | undefined, control: PoolClient | undefined
+    let committed = false
+    let outcome: Promise<{ resolved: boolean; code?: string }> | undefined
+    try {
+      const created = await createShiftViaApi(token, orgId, {
+        name: 'Rollback race split', timezone: 'UTC',
+        segments: [{ startTime: '08:00', endTime: '12:00' }, { startTime: '13:00', endTime: '17:00' }],
+      })
+      expect(created.status, created.raw).toBe(201)
+      const shiftId = created.body.data.id as string
+      await seedActiveIdentity(userId, orgId)
+      const source = async () => (await pool.query(
+        'SELECT to_jsonb(s) AS shift, (SELECT jsonb_agg(to_jsonb(g) ORDER BY segment_index) FROM attendance_shift_segments g WHERE g.org_id = $1 AND g.shift_id = s.id) AS segments FROM attendance_shifts s WHERE s.org_id = $1 AND s.id = $2', [orgId, shiftId])).rows
+      const beforeSource = await source()
+      const beforeState = (await pool.query('SELECT to_jsonb(s) AS row FROM attendance_calculation_rollout_state s WHERE org_id = $1', [orgId])).rows
+      writer = await pool.connect(); control = await pool.connect()
+      const writerPid = Number((await writer.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      const controlPid = Number((await control.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      const adapt = (client: PoolClient): AttendanceW4TransactionClientV1 => ({
+        query: (text, values) => client.query(text, values as unknown[]) as unknown as Promise<{ rows: Array<Record<string, unknown>> }>,
+      })
+      await writer.query('BEGIN')
+      await acquireAttendanceCalculationRolloutLock(adapt(writer), parseCanonicalAttendanceRolloutOrgKeyV1(orgId), 'shared')
+      await writer.query(
+        "INSERT INTO attendance_shift_assignments (id, org_id, user_id, shift_id, slot_index, start_date, is_active, publish_status, assignment_kind) VALUES ($1, $2, $3, $4, 0, '2026-01-05', true, 'published', 'regular')",
+        [randomUUID(), orgId, userId, shiftId],
+      )
+      outcome = transitionAttendanceCalculationRolloutV1(adapt(control), {
+        orgId, actorId: adminId, correlationId: randomUUID(), engineVersion: 'parent-reference-race',
+        targetState: 'legacy', expectedState: 'shadow', expectedVersion: 1,
+        evidenceManifestSha256: 'c'.repeat(64),
+        evidenceReferences: { imageSha: 'synthetic-image', ownerAuthorizationRef: 'synthetic-owner', syntheticOrgRef: 'synthetic-org' },
+        reasonCode: 'rollout_transition',
+      }).then(() => ({ resolved: true }), (error: unknown) => {
+        if (!(error instanceof Error)) throw error
+        return { resolved: false, code: (error as Error & { code?: string }).code }
+      })
+      await waitUntilBlockedBy(controlPid, writerPid)
+      await writer.query('COMMIT'); committed = true
+      expect(await outcome).toEqual({ resolved: false, code: 'W4C3A_ROLLOUT_CONTROL_ACTIVE_MULTI_SEGMENT_REFERENCE' })
+      expect(await source()).toEqual(beforeSource)
+      expect((await pool.query('SELECT to_jsonb(s) AS row FROM attendance_calculation_rollout_state s WHERE org_id = $1', [orgId])).rows).toEqual(beforeState)
+      expect(await countRows('attendance_calculation_rollout_events', orgId)).toBe(0)
+      expect(await countRows('attendance_shift_assignments', orgId)).toBe(1)
+      console.log('PARENT_REFERENCE_RACE_RECEIPT ' + JSON.stringify({ sharedWriterBlockedTransitionObserved: true, committedReferenceSeen: true, rolloutUnchanged: true, sourcePreserved: true }))
+    } finally {
+      if (writer && !committed) await writer.query('ROLLBACK')
+      if (outcome) await outcome
+      control?.release(); writer?.release()
+      if (oldAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = oldAllowlist
+    }
+  })
+
+  it('PARENT_DB10_ROTATION_ID_FIRST: a valid single-shift ID must not bind an unused multi-shift name', async () => {
+    const orgId = randomUUID(), adminId = randomUUID()
+    const token = await mintToken(adminId, orgId)
+    const oldAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    await enableShadowPosture(orgId)
+    try {
+      const single = await createShiftViaApi(token, orgId, { name: 'ID-first single', timezone: 'UTC', workStartTime: '09:00', workEndTime: '17:00' })
+      expect(single.status, single.raw).toBe(201)
+      const singleId = single.body.data.id as string
+      const unused = await createShiftViaApi(token, orgId, {
+        name: singleId, timezone: 'UTC',
+        segments: [{ startTime: '08:00', endTime: '12:00' }, { startTime: '13:00', endTime: '17:00' }],
+      })
+      expect(unused.status, unused.raw).toBe(201)
+      expect(await segmentCount(unused.body.data.id)).toBe(2)
+      const rotation = await postJson('/api/attendance/rotation-rules', token, orgId, {
+        name: 'Explicit ID wins', shiftSequence: [singleId],
+      })
+      expect(rotation.status, rotation.raw).toBe(201)
+      expect(rotation.body.data.shiftSequence).toEqual([singleId])
+      const client = await pool.connect()
+      try {
+        const connection: AttendanceW4TransactionClientV1 = {
+          query: (text, values) => client.query(text, values as unknown[]) as unknown as Promise<{ rows: Array<Record<string, unknown>> }>,
+        }
+        const plan = await planAttendanceCalculationRolloutTransitionV1(connection, { orgId, targetState: 'legacy' })
+        const outcome = await transitionAttendanceCalculationRolloutV1(connection, {
+          orgId, actorId: adminId, correlationId: randomUUID(), engineVersion: 'parent-rotation-id-first',
+          targetState: 'legacy', expectedState: 'shadow', expectedVersion: 1,
+          evidenceManifestSha256: 'd'.repeat(64),
+          evidenceReferences: { imageSha: 'synthetic-image', ownerAuthorizationRef: 'synthetic-owner', syntheticOrgRef: 'synthetic-org' },
+          reasonCode: 'rollout_transition',
+        }).then(() => ({ resolved: true }), (error: unknown) => {
+          if (!(error instanceof Error)) throw error
+          return { resolved: false, code: (error as Error & { code?: string }).code }
+        })
+        const predicate = plan.predicates.find(p => p.code === 'ACTIVE_MULTI_SEGMENT_REFERENCE')
+        console.log('PARENT_ROTATION_ID_FIRST_RECEIPT ' + JSON.stringify({ predicate, outcome }))
+        expect({ predicate, outcome }, 'ROTATION_ID_FIRST_MUST_NOT_MATCH_OTHER_SHIFT_NAME').toEqual({
+          predicate: { code: 'ACTIVE_MULTI_SEGMENT_REFERENCE', applicable: true, pass: true, count: 0 },
+          outcome: { resolved: true },
+        })
+      } finally { client.release() }
+    } finally {
+      if (oldAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = oldAllowlist
+    }
+  })
 
   it('creates a legacy-envelope shift with a persisted segment 0 (dual-write)', async () => {
     const orgId = org('create-legacy')
