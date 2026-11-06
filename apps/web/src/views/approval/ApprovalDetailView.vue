@@ -1167,6 +1167,7 @@ import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { markApprovalRead, remindApproval, type ApprovalDirectoryUser } from '../../approvals/api'
+import { remindSuccessText } from '../../approvals/remindNotifySummary'
 import {
   approvalStatusTagProps,
   canDecideCancelRoundWith,
@@ -3180,7 +3181,7 @@ async function handleRemind() {
   try {
     const result = await remindApproval(id)
     if (result.ok) {
-      if (stillActingOn(id)) ElMessage.success(t.value.reminded)
+      if (stillActingOn(id)) ElMessage.success(remindSuccessText(result.data, t.value.reminded, isZh.value))
       await refreshHistoryForActedInstance(id)
     } else if (result.status === 429) {
       if (stillActingOn(id)) ElMessage.warning(remindedAgoToast(formatRemindAgo(result.error.lastRemindedAt)))

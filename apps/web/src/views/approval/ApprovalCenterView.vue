@@ -734,6 +734,7 @@ import { newTodoPillState } from '../../approvals/newTodoPill'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
 import { useLocale } from '../../composables/useLocale'
+import { remindSuccessText } from '../../approvals/remindNotifySummary'
 import { formatRelativeWait, waitingPhrase, waitSeverity } from '../../approvals/relativeWait'
 import { CENTER_EN, CENTER_ZH } from './approvalCenterLabels'
 import ApprovalMobileList from './ApprovalMobileList.vue'
@@ -1315,7 +1316,7 @@ async function handleUrge(row: UnifiedApprovalDTO): Promise<void> {
     const result = await remindApproval(row.id)
     if (result.ok) {
       remindedIds.value.add(row.id)
-      ElMessage.success(t.value.urgeSent)
+      ElMessage.success(remindSuccessText(result.data, t.value.urgeSent, isZh.value))
     } else if (result.status === 429) {
       // 429 means the server's hourly window already holds a nudge for this instance+user, so the
       // row genuinely IS 已催办 — recording it stops the user re-clicking into the same rejection.

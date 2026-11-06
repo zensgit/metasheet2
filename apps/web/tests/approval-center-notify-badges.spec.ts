@@ -14,6 +14,8 @@ import {
   type Slot,
 } from 'vue'
 import ApprovalCenterView from '../src/views/approval/ApprovalCenterView.vue'
+import { ElMessage } from 'element-plus'
+import { remindApproval } from '../src/approvals/api'
 
 // ---------------------------------------------------------------------------
 // Test report 2026-10-08 — read-state badges on the approval center's tabs.
@@ -810,6 +812,31 @@ describe('ApprovalCenterView — tab read-state badges (test report 2026-10-08)'
       await mountView()
 
       expect(q('[data-tooltip-content="1 new outcome(s)"]')).toBeTruthy()
+    })
+  })
+
+  // 列表行的「催办」：服务端带回站内通知计数时，提示里说明发给了几个人。
+  describe('催办 toast', () => {
+    it('says how many people got the in-app notification when the server returns the counts', async () => {
+      mockMyApprovals.value = [row('mine_pending', '审批中')]
+      vi.mocked(remindApproval).mockResolvedValueOnce({
+        ok: true,
+        data: {
+          id: 'mine_pending',
+          action: 'remind',
+          remindedAt: '2026-10-27T00:00:00Z',
+          bridged: false,
+          sourceSystem: 'platform',
+          notifiedUserCount: 2,
+          skippedRoleSeatCount: 0,
+        },
+      } as never)
+      await mountView()
+
+      ;(q('[data-testid="approval-urge-mine_pending"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(remindApproval).toHaveBeenCalledWith('mine_pending')
+      expect(ElMessage.success).toHaveBeenCalledWith('已催办，已发站内通知给 2 人')
     })
   })
 })
