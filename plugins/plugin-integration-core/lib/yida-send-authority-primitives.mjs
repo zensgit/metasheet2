@@ -5,6 +5,7 @@ import database from './db.cjs'
 import credentialMaterials from './yida-credential-material-store.cjs'
 import delivery from './yida-delivery-store.cjs'
 import executionDigest from './yida-execution-digest.cjs'
+import sendBudgetModule from './yida-send-budget.cjs'
 import { createInternalYidaApprovedTargetTransactionReader } from './yida-approved-target-store.mjs'
 import { createInternalYidaDraftTransactionReader, createInternalYidaDraftTransactionWriter } from './yida-draft-plan-store.mjs'
 import { compileYidaDraft } from './yida-draft-plan.mjs'
@@ -174,6 +175,28 @@ function createPrimitives(options) {
       return executionDigest.buildYidaExecutionPayloadDigest({ snapshot: { ...selection, ...grant }, intent: 'create', data })
     } catch (error) { closed(error) }
   }
+  // Gate 4 (R-71 ⑦.2): would the runner snapshot bound and the form transport request-body bound
+  // accept this selection once a grant names it? Same branded selection, same grant fields and
+  // owner rule as executionPayloadDigest; the snapshot has the exact shape the host execution
+  // handle resolves (resolveExecutionSnapshot), with the two credential fields left to the
+  // shared worst-case placeholders. No material is read or decrypted. One boolean, values-free.
+  function sendBudget(selection, input) {
+    try {
+      const data = selections.get(selection)
+      if (!data) fail('INPUT')
+      const grant = record(input, ['grantRef', 'expiresAt', 'actorId'])
+      opaque(grant.grantRef); opaque(grant.actorId)
+      if (!Number.isSafeInteger(grant.expiresAt) || grant.expiresAt < 1) fail('INPUT')
+      if (grant.actorId !== fixed.ownerId) fail('CONFLICT')
+      const snapshot = { tenantId: selection.tenantId, workspaceId: selection.workspaceId, ownerId: selection.ownerId,
+        actorId: grant.actorId, operationId: selection.operationId, rowKey: selection.rowKey, grantRef: grant.grantRef,
+        expiresAt: grant.expiresAt, targetRef: selection.targetRef, targetRevision: selection.targetRevision,
+        planRevision: selection.planRevision, credentialRef: selection.credentialRef,
+        credentialGeneration: selection.credentialGeneration, config: selection.config, row: selection.selectedRow }
+      const verdict = sendBudgetModule.assessYidaSendBudget({ snapshot, data })
+      return Object.freeze({ withinBudget: verdict.withinBudget === true })
+    } catch (error) { closed(error) }
+  }
   async function prepareInTransaction(trx, input) {
     try {
       const requested = record(input, PREPARE)
@@ -236,7 +259,7 @@ function createPrimitives(options) {
     } catch (error) { closed(error) }
   }
   return Object.freeze({ prepareDraftInTransaction, previewInTransaction, resolveSelectionInTransaction,
-    executionPayloadDigest, prepareInTransaction, loadExecutionMaterialInTransaction })
+    executionPayloadDigest, sendBudget, prepareInTransaction, loadExecutionMaterialInTransaction })
 }
 
 export function createYidaSendAuthorityPrimitives(options) {

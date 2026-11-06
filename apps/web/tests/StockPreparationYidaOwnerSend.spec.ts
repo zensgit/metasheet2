@@ -4,6 +4,11 @@ import StockPreparationYidaOwnerSendPanel from '../src/components/integration/st
 import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 import { EXPLICIT_SESSION_ORG_KEY } from '../src/utils/explicitSessionOrg'
 import { createYidaOwnerClient, type YidaOwnerApproval, type YidaOwnerDraftInput } from '../src/services/integration/yidaOwner'
+import * as yidaSendBudget from '../src/services/integration/yidaSendBudget'
+
+// Gate 4: the plugin module is the single definition; the web bundle only carries a constants mirror.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const pluginSendBudget = require('../../../plugins/plugin-integration-core/lib/yida-send-budget.cjs') as Record<string, unknown>
 
 // These mocked HTTP checks prove client/UI controls only. Actual JWT, ACL,
 // transaction admission and durable delivery require the host/real-DB lane.
@@ -551,6 +556,22 @@ describe('StockPreparationYidaOwnerSendPanel explicit owner controls', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2)
   })
 
+  it('gate 4: an approval refused with 422 YIDA_SEND_APPROVAL_LIMIT shows only that fixed code and offers no submit', async () => {
+    await preview(); await acknowledge()
+    fetchSpy.mockResolvedValueOnce(error('YIDA_SEND_APPROVAL_LIMIT', 422))
+    await click('approve')
+    expect(q('error').textContent).toBe('YIDA_SEND_APPROVAL_LIMIT')
+    expect(absent('grant')).toBe(true)
+    expect(absent('submit')).toBe(true)
+    expect(submissionPosts()).toBe(0)
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+    // The same code on any other status is not this refusal: the client calls the reply invalid.
+    fetchSpy.mockResolvedValueOnce(error('YIDA_SEND_APPROVAL_LIMIT', 503))
+    await click('approve')
+    expect(q('error').textContent).toBe('YIDA_OWNER_RESPONSE_INVALID')
+    expect(absent('submit')).toBe(true)
+  })
+
   it('the frozen notice names the grant id and the durable record; the uncertain hint needs a submission and an error', async () => {
     await save(); await selectRow()
     fetchSpy.mockResolvedValueOnce(error('YIDA_OWNER_RUNTIME_UNAVAILABLE', 503))
@@ -573,6 +594,16 @@ describe('StockPreparationYidaOwnerSendPanel explicit owner controls', () => {
     expect(q('submit-uncertain').textContent).toBe('这次提交的应答不确定或被拒绝，服务器可能已经完成创建。请先手动刷新持久记录，不要换页面重试。本页提交最多等待 60 秒，这只是本页的等待时限，不代表服务器已经停止或完成。')
     expect(q('error').textContent).toBe('YIDA_SEND_APPROVAL_UNAVAILABLE')
     expect(root?.textContent).not.toMatch(/(?<!尚未)核验业务创建成功|已创建成功|已经创建成功/u)
+  })
+})
+
+describe('Yida send budget client mirror', () => {
+  it('equals the plugin single definition, constant for constant', () => {
+    const mirrored = Object.keys(yidaSendBudget).sort()
+    expect(mirrored).toEqual(Object.keys(pluginSendBudget).filter(key => key.startsWith('YIDA_SEND_')).sort())
+    expect(mirrored.length).toBe(6)
+    for (const key of mirrored) expect((yidaSendBudget as Record<string, unknown>)[key]).toBe(pluginSendBudget[key])
+    expect(yidaSendBudget.YIDA_SEND_REQUEST_MAX_BYTES).toBe(262144)
   })
 })
 

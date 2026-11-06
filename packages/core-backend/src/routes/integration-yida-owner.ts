@@ -5,6 +5,7 @@ import { yidaSendApprovalErrorCode } from '../integration/yida-send-approval-ser
 import { yidaInitializationErrorCode, type YidaInitializationInput } from '../integration/yida-initialization-runtime'
 import { yidaConnectionTestErrorCode, type YidaConnectionTestInput } from '../integration/yida-connection-test-runtime'
 import { YIDA_OWNER_HTTP_PREFIX as PREFIX } from '../integration/yida-owner-http-observation'
+import { YIDA_SEND_REQUEST_MAX_BYTES } from '../integration/yida-send-budget'
 import {
   parseYidaSheetSourceInput, readYidaSheetSourceRows, yidaSheetSourceErrorCode, type YidaSheetSourceDependencies,
 } from '../integration/yida-sheet-source'
@@ -40,6 +41,8 @@ const statuses: Readonly<Record<string, number>> = Object.freeze({
   YIDA_SEND_APPROVAL_INPUT: 400, YIDA_SEND_APPROVAL_NOT_FOUND: 404, YIDA_SEND_APPROVAL_CONFLICT: 409,
   YIDA_SEND_APPROVAL_EXPIRED: 409, YIDA_SEND_APPROVAL_REVOKED: 409,
   YIDA_SEND_APPROVAL_CANCELLED: 409, YIDA_SEND_APPROVAL_UNAVAILABLE: 503,
+  // Gate 4 (R-71 ⑦.2): the row exceeds the shared send budget; refused before any grant/admission.
+  YIDA_SEND_APPROVAL_LIMIT: 422,
   YIDA_CONNECTION_TEST_INPUT: 400, YIDA_CONNECTION_TEST_DISABLED: 403, YIDA_CONNECTION_TEST_DENIED: 403,
   YIDA_CONNECTION_TEST_CONFLICT: 409, YIDA_CONNECTION_TEST_CANCELLED: 409, YIDA_CONNECTION_TEST_THROTTLED: 429,
   YIDA_CONNECTION_TEST_INACTIVE: 503, YIDA_CONNECTION_TEST_UNAVAILABLE: 503,
@@ -167,7 +170,7 @@ function preview(value: unknown) {
     if (!(typeof value === 'string' || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)))) fail()
     projected[key] = value
   }
-  if (Buffer.byteLength(JSON.stringify(projected), 'utf8') > 256 * 1024) fail()
+  if (Buffer.byteLength(JSON.stringify(projected), 'utf8') > YIDA_SEND_REQUEST_MAX_BYTES) fail()
   return { operationId: id(row.operationId), rowKey: id(row.rowKey), planDigest: digest(row.planDigest),
     rowPayloadDigest: digest(row.rowPayloadDigest), target: { ...target, targetRef: id(target.targetRef) },
     payload: projected, policy, canSend: false, externalWriteAttempted: false }
