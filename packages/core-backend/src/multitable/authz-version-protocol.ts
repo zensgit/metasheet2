@@ -22,11 +22,28 @@
  *   4. optionally the ONE bound `meta_records` row, FOR SHARE (conditional-read rules are evaluated
  *      on the value read after the lock; ordinary record writes never bump a table-wide version)
  *
+ * WRITER ORDER — the rule every TypeScript writer follows (the triggers stay the completeness net):
+ *   - sheet layer: the `meta_sheets` row lock(s) FIRST (the liveness `FOR UPDATE` fence of the
+ *     grant / configuration routes, the record-link phase-2 `FOR SHARE`, the plugin-port fences) →
+ *     the sheet version row (explicit bump) → any exclusive `record_permissions` / `meta_records`
+ *     lock → the DML. The holder never locks `meta_sheets`, so writers agree among themselves
+ *     (meta_sheets → version row) and with the holder (version row → record);
+ *   - subject layer: the subject version row (explicit bump) BEFORE any exclusive lock on a row the
+ *     holder shares — `users … FOR UPDATE` (the access-graph mutex, the deprovision ledger, the
+ *     evidence-API restore, the controlled handover), `user_orgs … FOR UPDATE`, the
+ *     `user_namespace_admissions` upsert, the `user_roles` / `user_permissions` / member-group DML —
+ *     and AFTER locks outside the holder's set (`roles`, the namespace-admission advisory).
+ *   A writer that skips the explicit bump (raw SQL, a data migration, an FK cascade, a plugin raw
+ *   query) is still covered by the triggers but acquires the version row LAST: against an in-flight
+ *   holder, or against another raw writer that touches the same rows in another order, PostgreSQL
+ *   detects the cycle (40P01) and aborts one side — never a silent pass.
+ *
  * Compatibility with the pre-existing in-transaction protocols (all documented, none changed):
  *   - record-link phases (`services/approval-record-link-txn-auth.ts`): phases 1–4 take FOR SHARE
- *     (compatible with the holder); phase 5 takes `meta_records` FOR UPDATE, so the record-permission
- *     PUT / DELETE routes bump their sheet row as the FIRST statement, ahead of the phases — writer
- *     order = sheet row → … → record, the holder's order;
+ *     (compatible with the holder); phase 5 takes `record_permissions` / `meta_records` FOR UPDATE,
+ *     so the record-permission PUT / DELETE routes bump their sheet row AFTER phases 1–4 and BEFORE
+ *     phase 5 — writer order = meta_sheets → sheet row → record, the holder's order for the rows they
+ *     share, and the grant routes' order (meta_sheets → sheet row) for the rows they share;
  *   - `services/stock-preparation-members.ts` locks (`roles` FOR UPDATE / advisory, grantor rows FOR
  *     SHARE, `spreadsheet_permissions` FOR SHARE): none of them is in the holder's lock set, and its
  *     writes bump through the triggers after those locks; it never waits on a holder for anything the
@@ -40,13 +57,17 @@
  *     nothing; they wait on a holder's FOR SHARE until commit (bounded) and can never form a cycle;
  *   - `directory/access-graph-mutex.ts lockUsersForAccessGraphWrite` (14 writer files): bumps the
  *     subject rows FIRST, sorted, before `users … FOR UPDATE`, so writer order = subject → users,
- *     the holder's order (judge delta B).
+ *     the holder's order (judge delta B). The three writers that lock `users` rows on their own
+ *     before (or without) the mutex bump first as well: `deprovision-ledger.ts lockCandidateUser`,
+ *     the `deprovision-evidence-api.ts` restore transaction and `controlled-handover.ts` (whose
+ *     `FOR UPDATE NOWAIT` probe now runs after the bump — the handover waits on an in-flight holder
+ *     instead of failing fast on it, and keeps its fail-fast meaning for every other users-row holder).
  *
  * DEADLOCKS. Holder-vs-writer pairs that follow the canonical order cannot deadlock. A writer that
  * acquires an exclusive lock in another order (the legacy operator-role script, a multi-row cascade,
- * a long directory sync) can form a cycle with a holder; PostgreSQL raises 40P01 in the backend that
- * detects it. The helper maps 40P01 / 40001 / 55P03 to a typed CONFLICT, never to success — the
- * caller rolls back and retries. Writer-side error mapping is unchanged.
+ * a raw UPDATE / DELETE of a holder-shared row) can form a cycle with a holder; PostgreSQL raises
+ * 40P01 in the backend that detects it. The helper maps 40P01 / 40001 / 55P03 to a typed CONFLICT,
+ * never to success — the caller rolls back and retries. Writer-side error mapping is unchanged.
  *
  * No heavy imports: callers include the route layer, the access-graph mutex and the RBAC helpers.
  */

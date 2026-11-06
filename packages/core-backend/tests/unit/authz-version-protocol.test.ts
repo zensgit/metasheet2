@@ -160,15 +160,25 @@ describe('T — the trigger set', () => {
       const entry = AUTHORIZATION_VERSION_TRIGGERS.find((candidate) => candidate.table === table)
       expect(entry).toMatchObject({ layer: 'subject', keyColumn: 'user_id', events: 'BEFORE INSERT OR UPDATE OR DELETE' })
     }
+    // Whole-row UPDATE triggers: the watched columns travel as a TG_ARGV text list and are compared
+    // inside the function (an `UPDATE OF` list or a WHEN clause would put a pg_depend edge on the
+    // columns and block the DROP COLUMN of an earlier migration's down()).
     const usersEvents = AUTHORIZATION_VERSION_TRIGGERS.filter((entry) => entry.table === 'users').map((entry) => entry.events)
-    expect(usersEvents).toEqual([`BEFORE UPDATE OF ${USERS_AUTHORITY_COLUMNS.join(', ')}`, 'BEFORE INSERT OR DELETE'])
+    expect(usersEvents).toEqual([`BEFORE UPDATE (bump when any of ${USERS_AUTHORITY_COLUMNS.join(', ')} changes)`, 'BEFORE INSERT OR DELETE'])
     expect([...USERS_AUTHORITY_COLUMNS]).toEqual(['role', 'is_active', 'activation_status', 'permissions', 'is_admin'])
     const sheetsEvents = AUTHORIZATION_VERSION_TRIGGERS.filter((entry) => entry.table === 'meta_sheets').map((entry) => entry.events)
-    expect(sheetsEvents).toEqual([`BEFORE UPDATE OF ${META_SHEETS_AUTHORITY_COLUMNS.join(', ')}`, 'BEFORE DELETE'])
+    expect(sheetsEvents).toEqual([`BEFORE UPDATE (bump when any of ${META_SHEETS_AUTHORITY_COLUMNS.join(', ')} changes)`, 'BEFORE DELETE'])
     expect([...META_SHEETS_AUTHORITY_COLUMNS]).toEqual(['row_level_read_permissions_enabled', 'conditional_read_rules', 'grid_export_closure', 'deleted_at', 'system_kind'])
     const fields = AUTHORIZATION_VERSION_TRIGGERS.filter((entry) => entry.table === 'meta_fields')
     expect(fields).toHaveLength(1)
-    expect(fields[0]!.events).toMatch(/^BEFORE UPDATE OF property/)
+    expect(fields[0]!.events).toBe('BEFORE UPDATE (bump when the hidden/visible derivation of property changes)')
+    const migration = readFileSync(path.join(SRC, 'db', 'migrations', `${MIGRATION}.ts`), 'utf8')
+    const ddl = migration.slice(migration.indexOf('export async function installAuthorizationVersionProtocol'))
+    expect(ddl).not.toMatch(/UPDATE OF /)
+    expect(ddl).not.toMatch(/\bWHEN \(/)
+    expect(ddl).toMatch(/BEFORE UPDATE ON public\.meta_sheets[\s\S]*?\('id', \$\{sql\.lit\(META_SHEETS_AUTHORITY_COLUMNS\.join\(','\)\)\}\)/)
+    expect(ddl).toMatch(/BEFORE UPDATE ON public\.users[\s\S]*?\('id', \$\{sql\.lit\(USERS_AUTHORITY_COLUMNS\.join\(','\)\)\}\)/)
+    expect(ddl).toMatch(/BEFORE UPDATE ON public\.meta_fields[\s\S]*?\('sheet_id', 'field-visibility'\)/)
   })
 
   it('T-03 every name sorts AFTER its recovery-authority sibling on the same table (same-event BEFORE ROW triggers fire in name order, so a BUSY refusal fails fast)', () => {
@@ -189,9 +199,11 @@ describe('T — the trigger set', () => {
     expect(source).toContain('DROP TRIGGER IF EXISTS')
     expect(source).toContain('CREATE OR REPLACE FUNCTION public.')
     expect(source).toContain('CREATE TABLE IF NOT EXISTS public.')
-    // Visibility derivation exactly as permission-derivation.ts: hidden === true, visible === false.
-    expect(source).toContain(`COALESCE((OLD.property -> 'hidden') = 'true'::jsonb, FALSE)`)
-    expect(source).toContain(`COALESCE((NEW.property -> 'visible') = 'false'::jsonb, FALSE)`)
+    // Visibility derivation exactly as permission-derivation.ts: hidden === true, visible === false —
+    // computed inside the function on to_jsonb(OLD) / to_jsonb(NEW) (no WHEN clause: see the docblock).
+    expect(source).toContain(`COALESCE((old_row -> 'property' -> 'hidden') = 'true'::jsonb, FALSE)`)
+    expect(source).toContain(`COALESCE((new_row -> 'property' -> 'visible') = 'false'::jsonb, FALSE)`)
+    expect(source).toContain(`IF watched = 'field-visibility' THEN`)
     // Installed ENABLED, never ALWAYS (restore rehearsals under session_replication_role = replica stay trigger-free).
     expect(source).not.toMatch(/ENABLE ALWAYS TRIGGER/)
     expect(source).not.toMatch(/DISABLE TRIGGER/)
@@ -448,22 +460,67 @@ describe('W — writers bump FIRST', () => {
     expect(adminUsers).toMatch(/async function syncLegacyAdminProfile[\s\S]*?await transaction\(async \(client\) => \{\s*await bumpSubjectAuthorizationVersions\(client, \[userId\]\)/)
   })
 
-  it('W-03 the record-permission routes bump the sheet row as the FIRST statement of their transaction, ahead of the record-link phases', () => {
+  it('W-03 sheet layer: every route bumps AFTER its meta_sheets row lock and BEFORE any exclusive record lock — the record-permission routes between record-link phases 1–4 (shared) and phase 5, the grant / configuration routes right after assertSheetLiveForUpdate', () => {
     const univer = readFileSync(path.join(SRC, 'routes', 'univer-meta.ts'), 'utf8')
     for (const outcome of ['PutRecordPermissionTxnOutcome', 'DeleteRecordPermissionTxnOutcome']) {
       const start = univer.indexOf(`pool.transaction(async ({ query }): Promise<${outcome}> => {`)
       expect(start).toBeGreaterThan(0)
-      const body = univer.slice(start, start + 1200)
-      const bumpAt = body.indexOf('await bumpSheetPermissionVersions(query, [sheetId])')
+      const body = univer.slice(start, start + 1600)
       const phasesAt = body.indexOf('await lockRecordLinkAuthorityRowsOnQuery(query, {')
-      expect(bumpAt).toBeGreaterThan(0)
-      expect(phasesAt).toBeGreaterThan(bumpAt)
-      expect(body.slice(0, bumpAt)).not.toMatch(/await query\(/)
+      const bumpAt = body.indexOf('await bumpSheetPermissionVersions(query, [sheetId])')
+      const rowAuthAt = body.indexOf('await acquireRecordLinkRowAuthLockOnQuery(query, sheetId, recordId)')
+      expect(phasesAt).toBeGreaterThan(0)
+      expect(bumpAt).toBeGreaterThan(phasesAt)
+      expect(rowAuthAt).toBeGreaterThan(bumpAt)
+      // Nothing but the shared phases precedes the bump; nothing exclusive is taken before it
+      // (code only — the comments explaining the order name the exclusive locks).
+      expect(body.slice(0, bumpAt).replace(/\/\/[^\n]*/g, '')).not.toMatch(/FOR UPDATE|pg_advisory_xact_lock|INSERT INTO|DELETE FROM|UPDATE /)
     }
     // The four sheet-configuration / grant routes bump right after the sheet row lock.
     expect(univer.match(/await assertSheetLiveForUpdate\(query, sheetId\)\s*(?:\/\/[^\n]*\n\s*)?await bumpSheetPermissionVersions\(query, \[sheetId\]\)/g)).toHaveLength(4)
     const spreadsheet = readFileSync(path.join(SRC, 'routes', 'spreadsheet-permissions.ts'), 'utf8')
     expect(spreadsheet.match(/await assertSheetLiveForUpdate\(query, req\.params\.id\)\s*(?:\/\/[^\n]*\n\s*)?await bumpSheetPermissionVersions\(query, \[req\.params\.id\]\)/g)).toHaveLength(2)
+  })
+
+  it('W-04 the controlled handover bumps the subject rows BEFORE its users FOR UPDATE NOWAIT probe, which precedes the mutex', () => {
+    const source = readFileSync(path.join(SRC, 'directory', 'controlled-handover.ts'), 'utf8')
+    const bumpAt = source.indexOf('await bumpSubjectAuthorizationVersions(c, userIds)')
+    const probeAt = source.indexOf("'SELECT id FROM users WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE NOWAIT'")
+    const mutexAt = source.indexOf('await lockUsersForAccessGraphWrite(c, userIds)')
+    expect(bumpAt).toBeGreaterThan(0)
+    expect(probeAt).toBeGreaterThan(bumpAt)
+    expect(mutexAt).toBeGreaterThan(probeAt)
+  })
+
+  it('W-05 the deprovision ledger and the evidence-API restore bump the subject row before their own users FOR UPDATE', () => {
+    const ledger = readFileSync(path.join(SRC, 'directory', 'deprovision-ledger.ts'), 'utf8')
+    const ledgerBumpAt = ledger.indexOf('await bumpSubjectAuthorizationVersions(client, [localUserId])')
+    const ledgerLockAt = ledger.indexOf('`SELECT id FROM users WHERE id = $1::text FOR UPDATE`')
+    expect(ledgerBumpAt).toBeGreaterThan(0)
+    expect(ledgerLockAt).toBeGreaterThan(ledgerBumpAt)
+    const evidence = readFileSync(path.join(SRC, 'directory', 'deprovision-evidence-api.ts'), 'utf8')
+    const bumpAt = evidence.indexOf('await bumpSubjectAuthorizationVersions(client, [eventOwner])')
+    expect(bumpAt).toBeGreaterThan(0)
+    const txnStart = evidence.lastIndexOf('transaction(async (client) => {', bumpAt)
+    expect(txnStart).toBeGreaterThan(0)
+    expect(evidence.slice(txnStart, bumpAt)).not.toMatch(/FOR UPDATE|lockUsersForAccessGraphWrite/)
+    const lockAfter = evidence.slice(bumpAt).search(/FROM users\s+WHERE id = \$1::text\s+FOR UPDATE`/)
+    expect(lockAfter).toBeGreaterThan(0)
+  })
+
+  it('W-06 setUserNamespaceAdmission bumps after the advisory and before the upsert; the two user_orgs helpers bump before their first statement', () => {
+    const admission = readFileSync(path.join(SRC, 'rbac', 'namespace-admission.ts'), 'utf8')
+    expect(admission).toMatch(/await lockNamespaceAdmissionWrites\(client, userId\)\s*(?:\/\/[^\n]*\n\s*)*await bumpSubjectAuthorizationVersions\(client, \[userId\]\)\s*await client\.query\(\s*`INSERT INTO user_namespace_admissions/)
+    const sync = readFileSync(path.join(SRC, 'directory', 'directory-sync.ts'), 'utf8')
+    for (const helper of ['upsertActiveUserOrgMembership', 'deactivateUserOrgMembershipIfNoOtherActiveBinding']) {
+      const start = sync.indexOf(`export async function ${helper}(`)
+      expect(start).toBeGreaterThan(0)
+      const body = sync.slice(start, start + 900)
+      const bumpAt = body.indexOf('await bumpSubjectAuthorizationVersions(client, [options.userId])')
+      const firstQueryAt = body.indexOf('await client.query(')
+      expect(bumpAt).toBeGreaterThan(0)
+      expect(firstQueryAt).toBeGreaterThan(bumpAt)
+    }
   })
 })
 

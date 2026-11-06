@@ -187,6 +187,11 @@ describe('default attendance bootstrap/revocation atomicity (real PostgreSQL)', 
         source text NOT NULL, granted_by text, updated_by text,
         created_at timestamptz, updated_at timestamptz, PRIMARY KEY (user_id, namespace)
       );
+      -- D21 (Y5a): the subject authorization version row that assignUserRoles / unassignUserRoles
+      -- bump as their first protocol statement (zzzz20261106110500; no triggers in this private schema).
+      CREATE TABLE subject_authorization_versions (
+        subject_id text PRIMARY KEY, version bigint NOT NULL DEFAULT 1, updated_at timestamptz NOT NULL DEFAULT now()
+      );
       CREATE SEQUENCE busy_attempts;
       CREATE TABLE busy_control (fail_count integer NOT NULL);
       INSERT INTO busy_control VALUES (0);

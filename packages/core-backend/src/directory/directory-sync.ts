@@ -6314,6 +6314,10 @@ export async function upsertActiveUserOrgMembership(
   client: MembershipWriteClient,
   options: { userId: string; orgId: string },
 ): Promise<boolean> {
+  // D21 (Y5a): subject version row first; the conflict path updates a `user_orgs` row an admission
+  // holds FOR SHARE, and the trigger alone would bump only after that row lock (a cycle). Callers
+  // that already hold the access-graph mutex re-acquire a held row here and wait for nothing.
+  await bumpSubjectAuthorizationVersions(client, [options.userId])
   const result = await client.query(
     `INSERT INTO user_orgs (user_id, org_id, is_active)
      VALUES ($1::text, $2::text, TRUE)
@@ -6372,6 +6376,9 @@ export async function deactivateUserOrgMembershipIfNoOtherActiveBinding(
   client: MembershipWriteClient,
   options: { userId: string; orgId: string },
 ): Promise<void> {
+  // D21 (Y5a): subject version row BEFORE the `user_orgs … FOR UPDATE` below (an admission locks
+  // subject → user_orgs; a revocation of the membership is a Layer-2 authority change).
+  await bumpSubjectAuthorizationVersions(client, [options.userId])
   await client.query(
     `SELECT 1 FROM user_orgs WHERE user_id = $1::text AND org_id = $2::text FOR UPDATE`,
     [options.userId, options.orgId],

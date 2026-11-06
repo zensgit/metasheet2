@@ -107,12 +107,6 @@ function normalizeSql(sql: string): string {
  * matches what the production helpers actually issue.
  */
 const RECORD_LINK_LOCK_PRELUDE: readonly string[] = [
-  // D21 (Y5a): the sheet permission version row is write-locked FIRST — ahead of the record-link
-  // phases, whose phase 5 takes meta_records FOR UPDATE — so this writer and an admission holder
-  // (version row FOR SHARE → … → record FOR SHARE) acquire their rows in the same order.
-  'INSERT INTO sheet_permission_versions AS v (sheet_id, version, updated_at) SELECT s.sheet_id, 1, now()'
-  + ' FROM unnest($1::text[]) WITH ORDINALITY AS s(sheet_id, ord) ORDER BY s.ord'
-  + ' ON CONFLICT (sheet_id) DO UPDATE SET version = v.version + 1, updated_at = now()',
   'SELECT id FROM meta_sheets WHERE id = $1 FOR SHARE',
   'SELECT role_id FROM user_roles WHERE user_id = $1 FOR SHARE',
   'SELECT permission_code FROM user_permissions WHERE user_id = $1 FOR SHARE',
@@ -123,6 +117,13 @@ const RECORD_LINK_LOCK_PRELUDE: readonly string[] = [
   "SELECT sheet_id FROM spreadsheet_permissions WHERE sheet_id = $1 AND ( (subject_type = 'user' AND subject_id = $2)"
   + " OR (subject_type = 'role' AND subject_id = ANY($3::text[]))"
   + " OR (subject_type = 'member-group' AND subject_id = ANY($4::text[])) ) FOR SHARE",
+  // D21 (Y5a): the sheet permission version row is write-locked AFTER the shared phases 1–4 (the
+  // meta_sheets FOR SHARE above comes first, as every sheet-layer writer's meta_sheets lock does)
+  // and BEFORE phase 5's exclusive record locks, so this writer and an admission holder (version
+  // row FOR SHARE → … → record FOR SHARE) acquire the rows they share in the same order.
+  'INSERT INTO sheet_permission_versions AS v (sheet_id, version, updated_at) SELECT s.sheet_id, 1, now()'
+  + ' FROM unnest($1::text[]) WITH ORDINALITY AS s(sheet_id, ord) ORDER BY s.ord'
+  + ' ON CONFLICT (sheet_id) DO UPDATE SET version = v.version + 1, updated_at = now()',
   'SELECT pg_advisory_xact_lock(hashtext($1))',
   'SAVEPOINT record_link_row_auth_perms',
   'SELECT id FROM record_permissions WHERE sheet_id = $1 AND record_id = $2 FOR UPDATE',
@@ -350,10 +351,10 @@ async function callsAnsweredDifferently(
   return differing
 }
 
-/** The real prelude, as the two production helpers issue it. */
+/** The real prelude, as the two production helpers and the D21 bump issue it (routes order: phases 1–4, bump, phase 5). */
 const runPrelude = async (query: Fake['query']) => {
-  await bumpSheetPermissionVersions(query, [SHEET_ID])
   await lockRecordLinkAuthorityRowsOnQuery(query, { userId: ACTOR_ID, baseId: '', sheetId: SHEET_ID })
+  await bumpSheetPermissionVersions(query, [SHEET_ID])
   await acquireRecordLinkRowAuthLockOnQuery(query, SHEET_ID, RECORD_ID)
 }
 

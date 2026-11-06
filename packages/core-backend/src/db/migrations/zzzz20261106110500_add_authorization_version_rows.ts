@@ -25,12 +25,13 @@ import { checkColumnExists } from './_patterns'
  * Layer 1 — per-sheet permission version (`sheet_permission_versions`, key = sheet id):
  *   - `spreadsheet_permissions`, `field_permissions`, `record_permissions`: every INSERT / UPDATE /
  *     DELETE (grants, deny rows, de-escalation, copy-sheet, migrations, cascades);
- *   - `meta_sheets`: UPDATE OF the check-2 / check-4 configuration columns
- *     (`row_level_read_permissions_enabled`, `conditional_read_rules`, `grid_export_closure`,
- *     `deleted_at`, `system_kind`) when the value actually changes, and DELETE;
- *   - `meta_fields`: UPDATE OF `property` ONLY when the `hidden === true` / `visible === false`
- *     visibility derivation (`permission-derivation.ts isFieldPermissionHidden`) changes — ordinary
- *     property edits (options, formats, rules) never bump.
+ *   - `meta_sheets`: UPDATE (whole-row trigger; the function bumps ONLY when one of the check-2 /
+ *     check-4 configuration columns `row_level_read_permissions_enabled`, `conditional_read_rules`,
+ *     `grid_export_closure`, `deleted_at`, `system_kind` actually changes), and DELETE;
+ *   - `meta_fields`: UPDATE (whole-row trigger; the function bumps ONLY when the `hidden === true` /
+ *     `visible === false` visibility derivation of `property` — `permission-derivation.ts
+ *     isFieldPermissionHidden` — changes; ordinary property edits (options, formats, rules) and
+ *     renames never bump).
  *   NOT `meta_records` (the admission locks its ONE bound record `FOR SHARE`; ordinary record writes
  *   must never contend on a table-wide version). NOT `meta_view_permissions` / `meta_views` (not
  *   inputs of the four checks: the host passes `hiddenFieldIds: []`).
@@ -38,9 +39,10 @@ import { checkColumnExists } from './_patterns'
  * Layer 2 — per-subject authorization version (`subject_authorization_versions`, key = user id):
  *   - `user_roles`, `platform_member_group_members`, `user_permissions`, `user_orgs`,
  *     `user_namespace_admissions`: every INSERT / UPDATE / DELETE, keyed by the row's `user_id`;
- *   - `users`: INSERT / DELETE, and UPDATE OF `role`, `is_active`, `activation_status`,
- *     `permissions`, `is_admin` when the value actually changes (the recovery precedent omitted
- *     `activation_status`, which live authority reads).
+ *   - `users`: INSERT / DELETE, and UPDATE (whole-row trigger; the function bumps ONLY when `role`,
+ *     `is_active`, `activation_status`, `permissions` or `is_admin` actually changes — the recovery
+ *     precedent omitted `activation_status`, which live authority reads; a `last_login_at` touch
+ *     enters the function and returns without writing).
  *   NOT `role_permissions`: positive rows are `FOR SHARE`-locked by the live-authority order and deny
  *   rows are sheet-scoped, so a role-scoped version (fan-out to every member) is not needed.
  *   NOT `users.access_generation`: that is the session-revocation generation, a different meaning.
@@ -58,8 +60,19 @@ import { checkColumnExists } from './_patterns'
  * `session_replication_role = replica` must stay trigger-free, and that window is registered as a
  * bypass class in the protocol module's hard-condition registry.
  *
+ * NO `UPDATE OF <column>` LIST AND NO `WHEN` CLAUSE on the column-sensitive triggers, deliberately:
+ * both record a pg_depend dependency on the named columns, and `ALTER TABLE … DROP COLUMN` then
+ * fails with "other objects depend on it" — which is exactly what the `down()` of the earlier
+ * migrations that added `system_kind`, `grid_export_closure`, `activation_status`, … does (the Time
+ * Machine migration replay in CI downs `zzzz20260715180000` and would be blocked). The column list
+ * is passed to the function as TEXT (TG_ARGV[1]) and compared through `to_jsonb(OLD/NEW) -> column`,
+ * which holds no dependency: a column that a down() removed compares NULL = NULL and simply stops
+ * contributing. The semantics are the same as a WHEN clause (bump only when a watched value changes).
+ *
  * Perf statement: ordinary record writes are untouched (no trigger on `meta_records`); a permission
- * or membership write pays one additional single-row upsert on a small table.
+ * or membership write pays one additional single-row upsert on a small table; an UPDATE of `users`,
+ * `meta_sheets` or `meta_fields` that touches no authority column pays one in-function jsonb
+ * comparison of the watched columns and writes nothing.
  *
  * up() is idempotent (CREATE TABLE IF NOT EXISTS, CREATE OR REPLACE FUNCTION, DROP TRIGGER IF EXISTS
  * before CREATE TRIGGER). down() removes the triggers, the functions and the two tables.
@@ -122,7 +135,7 @@ export const AUTHORIZATION_VERSION_TRIGGERS: readonly AuthorizationVersionTrigge
     fn: AUTHZ_SHEET_VERSION_BUMP_FUNCTION,
     layer: 'sheet' as const,
     keyColumn: 'id',
-    events: `BEFORE UPDATE OF ${META_SHEETS_AUTHORITY_COLUMNS.join(', ')}`,
+    events: `BEFORE UPDATE (bump when any of ${META_SHEETS_AUTHORITY_COLUMNS.join(', ')} changes)`,
   }),
   Object.freeze({
     table: 'meta_sheets',
@@ -138,7 +151,7 @@ export const AUTHORIZATION_VERSION_TRIGGERS: readonly AuthorizationVersionTrigge
     fn: AUTHZ_SHEET_VERSION_BUMP_FUNCTION,
     layer: 'sheet' as const,
     keyColumn: 'sheet_id',
-    events: 'BEFORE UPDATE OF property (WHEN the hidden/visible derivation changes)',
+    events: 'BEFORE UPDATE (bump when the hidden/visible derivation of property changes)',
   }),
   ...SUBJECT_ROW_TABLES.map((table) => Object.freeze({
     table,
@@ -154,7 +167,7 @@ export const AUTHORIZATION_VERSION_TRIGGERS: readonly AuthorizationVersionTrigge
     fn: AUTHZ_SUBJECT_VERSION_BUMP_FUNCTION,
     layer: 'subject' as const,
     keyColumn: 'id',
-    events: `BEFORE UPDATE OF ${USERS_AUTHORITY_COLUMNS.join(', ')}`,
+    events: `BEFORE UPDATE (bump when any of ${USERS_AUTHORITY_COLUMNS.join(', ')} changes)`,
   }),
   Object.freeze({
     table: 'users',
@@ -201,6 +214,13 @@ async function createVersionTables(db: Kysely<unknown>): Promise<void> {
  * OLD key are bumped (a key rewrite revokes on the old side and grants on the new side), in sorted
  * order. A NULL / blank key cannot occur on the covered tables (NOT NULL keys) and is skipped rather
  * than raised, mirroring the recovery-authority trigger.
+ *
+ * Optional TG_ARGV[1] narrows an UPDATE trigger (see the docblock on why this is not a WHEN clause):
+ *   - `'field-visibility'`: bump only when the `property.hidden === true` / `property.visible === false`
+ *     derivation changes (`permission-derivation.ts isFieldPermissionHidden`);
+ *   - otherwise a comma-separated list of watched columns: bump only when one of them changes
+ *     (`to_jsonb(OLD) -> col IS DISTINCT FROM to_jsonb(NEW) -> col`; a column absent from the row
+ *     compares NULL = NULL).
  */
 async function createBumpFunction(
   db: Kysely<unknown>,
@@ -216,7 +236,34 @@ async function createBumpFunction(
     AS $$
     DECLARE
       key_value text;
+      old_row jsonb;
+      new_row jsonb;
+      watched text;
+      watched_column text;
+      changed boolean;
     BEGIN
+      IF TG_OP = 'UPDATE' AND TG_NARGS >= 2 THEN
+        old_row := to_jsonb(OLD);
+        new_row := to_jsonb(NEW);
+        watched := TG_ARGV[1];
+        changed := FALSE;
+        IF watched = 'field-visibility' THEN
+          changed := COALESCE((old_row -> 'property' -> 'hidden') = 'true'::jsonb, FALSE)
+              IS DISTINCT FROM COALESCE((new_row -> 'property' -> 'hidden') = 'true'::jsonb, FALSE)
+            OR COALESCE((old_row -> 'property' -> 'visible') = 'false'::jsonb, FALSE)
+              IS DISTINCT FROM COALESCE((new_row -> 'property' -> 'visible') = 'false'::jsonb, FALSE);
+        ELSE
+          FOREACH watched_column IN ARRAY string_to_array(watched, ',') LOOP
+            IF (old_row -> btrim(watched_column)) IS DISTINCT FROM (new_row -> btrim(watched_column)) THEN
+              changed := TRUE;
+              EXIT;
+            END IF;
+          END LOOP;
+        END IF;
+        IF NOT changed THEN
+          RETURN NEW;
+        END IF;
+      END IF;
       FOR key_value IN
         SELECT DISTINCT btrim(candidate)
           FROM unnest(ARRAY[
@@ -249,13 +296,16 @@ async function assertColumns(db: Kysely<unknown>, table: string, columns: readon
   }
 }
 
-function distinctClause(prefixes: readonly string[]): string {
-  return prefixes.map((column) => `OLD.${column} IS DISTINCT FROM NEW.${column}`).join(' OR ')
-}
-
 export async function dropAuthorizationVersionTriggers(db: Kysely<unknown>): Promise<void> {
   for (const { table, trigger } of AUTHORIZATION_VERSION_TRIGGERS) {
-    await sql`DROP TRIGGER IF EXISTS ${sql.raw(identifier(trigger))} ON public.${sql.raw(identifier(table))}`.execute(db)
+    // Tolerate a table an earlier migration's down() already removed (DROP TRIGGER … ON <missing> errors).
+    await sql`
+      DO $$ BEGIN
+        IF to_regclass(${sql.lit(`public.${identifier(table)}`)}) IS NOT NULL THEN
+          EXECUTE ${sql.lit(`DROP TRIGGER IF EXISTS ${identifier(trigger)} ON public.${identifier(table)}`)};
+        END IF;
+      END $$
+    `.execute(db)
   }
 }
 
@@ -278,12 +328,12 @@ export async function installAuthorizationVersionProtocol(db: Kysely<unknown>): 
     `.execute(db)
   }
 
+  // Watched columns travel as TEXT (no pg_depend edge on the columns — see the docblock).
   await sql`
     CREATE TRIGGER trg_meta_sheets_zz_authz_sheet_version_update
-      BEFORE UPDATE OF ${sql.raw(META_SHEETS_AUTHORITY_COLUMNS.join(', '))} ON public.meta_sheets
+      BEFORE UPDATE ON public.meta_sheets
       FOR EACH ROW
-      WHEN (${sql.raw(distinctClause(META_SHEETS_AUTHORITY_COLUMNS))})
-      EXECUTE FUNCTION public.${sql.raw(AUTHZ_SHEET_VERSION_BUMP_FUNCTION)}('id')
+      EXECUTE FUNCTION public.${sql.raw(AUTHZ_SHEET_VERSION_BUMP_FUNCTION)}('id', ${sql.lit(META_SHEETS_AUTHORITY_COLUMNS.join(','))})
   `.execute(db)
   await sql`
     CREATE TRIGGER trg_meta_sheets_zz_authz_sheet_version_delete
@@ -292,19 +342,13 @@ export async function installAuthorizationVersionProtocol(db: Kysely<unknown>): 
   `.execute(db)
 
   // Exactly the derivation of permission-derivation.ts isFieldPermissionHidden: hidden === true or
-  // visible === false. COALESCE keeps an absent key equal to an explicit false, so adding
-  // `hidden: false` or editing options/formats does not bump.
+  // visible === false (computed inside the function). Adding `hidden: false` or editing options /
+  // formats / names does not bump.
   await sql`
     CREATE TRIGGER trg_meta_fields_zz_authz_sheet_version_visibility
-      BEFORE UPDATE OF property ON public.meta_fields
+      BEFORE UPDATE ON public.meta_fields
       FOR EACH ROW
-      WHEN (
-        COALESCE((OLD.property -> 'hidden') = 'true'::jsonb, FALSE)
-          IS DISTINCT FROM COALESCE((NEW.property -> 'hidden') = 'true'::jsonb, FALSE)
-        OR COALESCE((OLD.property -> 'visible') = 'false'::jsonb, FALSE)
-          IS DISTINCT FROM COALESCE((NEW.property -> 'visible') = 'false'::jsonb, FALSE)
-      )
-      EXECUTE FUNCTION public.${sql.raw(AUTHZ_SHEET_VERSION_BUMP_FUNCTION)}('sheet_id')
+      EXECUTE FUNCTION public.${sql.raw(AUTHZ_SHEET_VERSION_BUMP_FUNCTION)}('sheet_id', 'field-visibility')
   `.execute(db)
 
   for (const table of SUBJECT_ROW_TABLES) {
@@ -317,10 +361,9 @@ export async function installAuthorizationVersionProtocol(db: Kysely<unknown>): 
 
   await sql`
     CREATE TRIGGER trg_users_zz_authz_subject_version_update
-      BEFORE UPDATE OF ${sql.raw(USERS_AUTHORITY_COLUMNS.join(', '))} ON public.users
+      BEFORE UPDATE ON public.users
       FOR EACH ROW
-      WHEN (${sql.raw(distinctClause(USERS_AUTHORITY_COLUMNS))})
-      EXECUTE FUNCTION public.${sql.raw(AUTHZ_SUBJECT_VERSION_BUMP_FUNCTION)}('id')
+      EXECUTE FUNCTION public.${sql.raw(AUTHZ_SUBJECT_VERSION_BUMP_FUNCTION)}('id', ${sql.lit(USERS_AUTHORITY_COLUMNS.join(','))})
   `.execute(db)
   await sql`
     CREATE TRIGGER trg_users_zz_authz_subject_version_lifecycle

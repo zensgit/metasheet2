@@ -14144,10 +14144,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         | { kind: 'error'; status: number; code: string; message: string }
 
       const outcome = await pool.transaction(async ({ query }): Promise<PutRecordPermissionTxnOutcome> => {
-        // D21 (Y5a): the sheet permission version row FIRST — ahead of the record-link phases, whose
-        // phase 5 takes `meta_records` FOR UPDATE. An admission holds the version row FOR SHARE and
-        // then the bound record FOR SHARE; taking the version row last would form a cycle with it.
-        await bumpSheetPermissionVersions(query, [sheetId])
         // Lock every source consumed by the final capability read before the row-auth advisory.
         // baseId is intentionally empty: this route consumes sheet, actor, and sheet-grant
         // authority only. Shared locks let peer readers proceed while serializing revokes.
@@ -14156,6 +14152,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           baseId: '',
           sheetId,
         })
+        // D21 (Y5a): the sheet permission version row — AFTER the shared authority locks (phase 2 is
+        // `meta_sheets FOR SHARE`; every sheet-layer writer takes its meta_sheets row lock BEFORE the
+        // version row, so this route cannot cycle with a grant route that locks meta_sheets FOR
+        // UPDATE first) and BEFORE phase 5's exclusive locks (`record_permissions` / `meta_records`
+        // FOR UPDATE): an admission holds the version row FOR SHARE and then the bound record FOR
+        // SHARE, so taking the version row after the record would form a cycle with it.
+        await bumpSheetPermissionVersions(query, [sheetId])
         await acquireRecordLinkRowAuthLockOnQuery(query, sheetId, recordId)
 
         // ORDER (#5839): AUTHORITY FIRST, then existence. The sheet-row probe used to sit here, ahead
@@ -14264,13 +14267,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         | { kind: 'error'; status: number; code: string; message: string }
 
       const outcome = await pool.transaction(async ({ query }): Promise<DeleteRecordPermissionTxnOutcome> => {
-        // D21 (Y5a): sheet permission version row first (same reason as PUT above).
-        await bumpSheetPermissionVersions(query, [sheetId])
         await lockRecordLinkAuthorityRowsOnQuery(query, {
           userId: requestAccess.userId,
           baseId: '',
           sheetId,
         })
+        // D21 (Y5a): sheet permission version row after the shared phases 1–4 and before phase 5's
+        // exclusive record locks (same reason as PUT above).
+        await bumpSheetPermissionVersions(query, [sheetId])
         await acquireRecordLinkRowAuthLockOnQuery(query, sheetId, recordId)
 
         // ORDER (#5839): same as PUT — authority first, then existence. The pre-403 sheet-row probe

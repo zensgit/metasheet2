@@ -393,6 +393,25 @@ describeIfDatabase.sequential('D21 authorization version protocol (real PostgreS
       await holder.query('COMMIT')
       expect(retry.sheetVersions[0]!.version).toBeGreaterThanOrEqual(1)
     })
+
+    it('K-02 two RAW writers (no explicit bump) that touch the same two subjects in opposite order deadlock each other: exactly one side gets 40P01 — the price of skipping the canonical bump; the protocol-following form serializes (multitable-recovery-authority-stability-realdb)', async () => {
+      const [orgA, orgB] = [`${P}_k2_org_a`, `${P}_k2_org_b`]
+      await holder.query('BEGIN')
+      await writer.query('BEGIN')
+      for (const client of [holder, writer]) await client.query("SET LOCAL deadlock_timeout = '200ms'")
+      // holder holds ACTOR's subject row; writer holds SUBJECT's subject row (through the user_orgs trigger).
+      await holder.query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)`, [ACTOR, orgA])
+      await writer.query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)`, [SUBJECT, orgA])
+      // Now each wants the other's row: holder → SUBJECT, writer → ACTOR.
+      const outcomes = await Promise.allSettled([
+        holder.query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)`, [SUBJECT, orgB]),
+        writer.query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)`, [ACTOR, orgB]),
+      ])
+      const codes = outcomes.map((outcome) => outcome.status === 'rejected' ? String((outcome.reason as { code?: unknown }).code) : 'ok')
+      expect(codes.filter((code) => code === '40P01')).toHaveLength(1)
+      expect(codes.filter((code) => code === 'ok')).toHaveLength(1)
+      // Both transactions are rolled back by afterEach; nothing of this case is committed.
+    })
   })
 
   describe('P — migration down / up', () => {
