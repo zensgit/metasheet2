@@ -332,6 +332,8 @@
           :record-link-catalog-loaded="recordLinkCatalogLoaded"
           :record-link-base-options-for="recordLinkBaseOptionsFor"
           :record-link-sheet-options-for="recordLinkSheetOptionsFor"
+          :record-link-display-fields-entry-for="recordLinkDisplayFieldsEntryFor"
+          :record-link-display-field-options-for="recordLinkDisplayFieldOptionsFor"
           :visibility-field-options="visibilityFieldOptions"
           @add-field-of-type="addFieldOfType"
           @palette-drag-start="onPaletteDragStart"
@@ -345,6 +347,8 @@
           @retry-record-link-catalog="retryRecordLinkCatalog"
           @record-link-base-change="onRecordLinkBaseChange"
           @record-link-sheet-change="onRecordLinkSheetChange"
+          @record-link-display-field-change="onRecordLinkDisplayFieldChange"
+          @retry-record-link-display-fields="retryRecordLinkDisplayFields"
           @add-detail-column="addDetailColumn"
           @remove-detail-column="removeDetailColumn"
         />
@@ -372,6 +376,7 @@
             :record-link-catalog="recordLinkAuthoringCatalog"
             @draft-change="onFormBuilderDraftChange"
             @retry-record-link-catalog="retryRecordLinkCatalog"
+            @retry-record-link-display-fields="retryRecordLinkDisplayFields"
           />
         </div>
       </el-card>
@@ -1803,11 +1808,16 @@ import { useApprovalDirectory } from '../../approvals/useApprovalDirectory'
 import { assigneeSourceSummary } from '../../approvals/assigneeSource'
 import {
   buildRecordLinkBaseSelectOptions,
+  buildRecordLinkDisplayFieldSelectOptions,
   buildRecordLinkSheetSelectOptions,
   dateRangeVisibilityEndpointOptions,
   dateRangeVisibilityFieldId,
+  filterRecordLinkDisplayFieldOptions,
+  RECORD_LINK_DISPLAY_FIELDS_LOAD_FAILED,
+  recordLinkDisplayFieldIdsAfterSlotChange,
   visibilityReferenceBaseFieldId,
   type RecordLinkAuthoringCatalog,
+  type RecordLinkDisplayFieldCatalogEntry,
   type RecordLinkNamedOption,
 } from '../../approvals/recordLinkField'
 import { multitableClient } from '../../multitable/api/client'
@@ -1970,6 +1980,11 @@ const recordLinkCatalogValidation = computed(() => ({
   sheets: recordLinkSheets.value,
 }))
 
+// Optional record-link display columns: this view is also the only fetch owner of each pinned
+// target sheet's column list (text / number / single-select columns only; names, never raw ids,
+// reach the editors' option labels).
+const recordLinkDisplayFields = ref<Record<string, RecordLinkDisplayFieldCatalogEntry>>({})
+
 /**
  * Delta §3.4 / parity ledger deferral (3): the Designer 2.0 inspector's typed base/sheet pickers
  * render THIS view's catalog read-only (F0 gate #2 — this view stays the only fetch/state owner)
@@ -1982,7 +1997,67 @@ const recordLinkAuthoringCatalog = computed<RecordLinkAuthoringCatalog>(() => ({
   loading: recordLinkCatalogLoading.value,
   loaded: recordLinkCatalogLoaded.value,
   error: recordLinkCatalogError.value,
+  displayFieldsBySheet: recordLinkDisplayFields.value,
 }))
+
+async function loadRecordLinkDisplayFields(sheetId: string, force = false): Promise<void> {
+  const id = sheetId.trim()
+  if (!id) return
+  const existing = recordLinkDisplayFields.value[id]
+  if (existing?.loading) return
+  if (existing?.loaded && !force) return
+  recordLinkDisplayFields.value = {
+    ...recordLinkDisplayFields.value,
+    [id]: { fields: existing?.fields ?? [], loading: true, loaded: false, error: '' },
+  }
+  try {
+    const res = await multitableClient.listFields(id)
+    recordLinkDisplayFields.value = {
+      ...recordLinkDisplayFields.value,
+      [id]: {
+        fields: filterRecordLinkDisplayFieldOptions(res.fields ?? []),
+        loading: false,
+        loaded: true,
+        error: '',
+      },
+    }
+  } catch {
+    // Not loaded → a retry stays possible; values-free copy only.
+    recordLinkDisplayFields.value = {
+      ...recordLinkDisplayFields.value,
+      [id]: { fields: [], loading: false, loaded: false, error: RECORD_LINK_DISPLAY_FIELDS_LOAD_FAILED },
+    }
+  }
+}
+
+function retryRecordLinkDisplayFields(sheetId: string): void {
+  void loadRecordLinkDisplayFields(sheetId, true)
+}
+
+function recordLinkDisplayFieldsEntryFor(field: FieldAuthoringDraft): RecordLinkDisplayFieldCatalogEntry | null {
+  const sheetId = field.recordLinkSheetId.trim()
+  return sheetId ? recordLinkDisplayFields.value[sheetId] ?? null : null
+}
+
+function recordLinkDisplayFieldOptionsFor(field: FieldAuthoringDraft, slot: number) {
+  return buildRecordLinkDisplayFieldSelectOptions(
+    recordLinkDisplayFieldsEntryFor(field)?.fields ?? [],
+    field.recordLinkDisplayFieldIds,
+    slot,
+  )
+}
+
+function onRecordLinkDisplayFieldChange(
+  field: FieldAuthoringDraft,
+  slot: number,
+  value: string | null | undefined,
+): void {
+  field.recordLinkDisplayFieldIds = recordLinkDisplayFieldIdsAfterSlotChange(
+    field.recordLinkDisplayFieldIds,
+    slot,
+    value,
+  )
+}
 
 function recordLinkBaseOptionsFor(field: FieldAuthoringDraft) {
   return buildRecordLinkBaseSelectOptions(recordLinkBases.value, field.recordLinkBaseId)
@@ -2005,12 +2080,20 @@ function onRecordLinkBaseChange(field: FieldAuthoringDraft, value: string | null
       (s) => s.id === field.recordLinkSheetId.trim()
         && (typeof s.baseId === 'string' ? s.baseId.trim() : '') === next,
     )
-    if (!sheetStillValid) field.recordLinkSheetId = ''
+    if (!sheetStillValid) {
+      field.recordLinkSheetId = ''
+      field.recordLinkDisplayFieldIds = []
+    }
+  } else {
+    field.recordLinkDisplayFieldIds = []
   }
 }
 
 function onRecordLinkSheetChange(field: FieldAuthoringDraft, value: string | null | undefined): void {
-  field.recordLinkSheetId = typeof value === 'string' ? value.trim() : ''
+  const next = typeof value === 'string' ? value.trim() : ''
+  // Display columns belong to the sheet: a different sheet starts with none.
+  if (next !== field.recordLinkSheetId.trim()) field.recordLinkDisplayFieldIds = []
+  field.recordLinkSheetId = next
 }
 
 /** Load the multitable catalog whenever the draft contains a record-link field. */
@@ -2018,6 +2101,19 @@ watch(
   () => draft.value.fields.some((field) => field.type === 'record-link'),
   (hasRecordLink) => {
     if (hasRecordLink) void ensureRecordLinkCatalog()
+  },
+  { immediate: true },
+)
+
+/** Load the column list of every pinned record-link target sheet (once per sheet). */
+watch(
+  () => draft.value.fields
+    .filter((field) => field.type === 'record-link')
+    .map((field) => field.recordLinkSheetId.trim())
+    .filter(Boolean)
+    .join('\n'),
+  (joined) => {
+    for (const sheetId of joined ? joined.split('\n') : []) void loadRecordLinkDisplayFields(sheetId)
   },
   { immediate: true },
 )

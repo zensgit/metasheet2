@@ -244,6 +244,11 @@ import {
   userHasApprovalsWriteOnQuery,
 } from './approval-record-link-txn-auth'
 import {
+  APPROVAL_RECORD_LINK_MAX_DISPLAY_FIELDS,
+  areRecordLinkDisplayFieldIdsVisible,
+  sanitizeRecordLinkDisplayFieldIds,
+} from './approval-record-link-options'
+import {
   ApprovalOrgUnresolvedError,
   deriveApprovalInstanceOrgId,
 } from './approval-instance-org-derivation'
@@ -2034,9 +2039,10 @@ function normalizeFormField(
   }
 
   // FWB-0 Layer 2: record-link is top-level only; pin non-blank props.baseId + props.sheetId.
-  // OpenAPI RecordLinkFieldProps is additionalProperties:false — only baseId/sheetId allowed.
-  // Fail closed on any other key (do not silently drop author input). Creator read authorization
-  // against those pins is enforced at publish (async capability check).
+  // OpenAPI RecordLinkFieldProps is additionalProperties:false — only baseId/sheetId plus the
+  // optional displayFieldIds (1–3 distinct non-blank field ids) are allowed. Fail closed on any
+  // other key or a malformed displayFieldIds (do not silently drop author input). Creator read
+  // authorization against those pins (and the display columns) is enforced at publish.
   let pinnedProps: Record<string, unknown> | undefined
   if (value.type === 'record-link') {
     if (nested) {
@@ -2044,11 +2050,13 @@ function normalizeFormField(
     }
     const props = isRecord(value.props) ? value.props : null
     if (props) {
-      const extraKeys = Object.keys(props).filter((key) => key !== 'baseId' && key !== 'sheetId')
+      const extraKeys = Object.keys(props).filter(
+        (key) => key !== 'baseId' && key !== 'sheetId' && key !== 'displayFieldIds',
+      )
       if (extraKeys.length > 0) {
         failValidation(
           context,
-          `formSchema.fields[${index}] record-link props may only contain baseId and sheetId (unknown: ${extraKeys.join(', ')})`,
+          `formSchema.fields[${index}] record-link props may only contain baseId and sheetId, plus optional displayFieldIds (unknown: ${extraKeys.join(', ')})`,
         )
       }
     }
@@ -2057,8 +2065,30 @@ function normalizeFormField(
     if (!baseId || !sheetId) {
       failValidation(context, `formSchema.fields[${index}] record-link requires non-blank props.baseId and props.sheetId`)
     }
-    // Canonicalize: only the two trimmed pins (never spread residual props).
-    pinnedProps = { baseId, sheetId }
+    let displayFieldIds: string[] | undefined
+    if (props && props.displayFieldIds !== undefined) {
+      const raw = props.displayFieldIds
+      const trimmed = Array.isArray(raw)
+        ? raw.map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+        : []
+      if (
+        !Array.isArray(raw)
+        || raw.length < 1
+        || raw.length > APPROVAL_RECORD_LINK_MAX_DISPLAY_FIELDS
+        || trimmed.some((id) => !id)
+        || new Set(trimmed).size !== trimmed.length
+      ) {
+        failValidation(
+          context,
+          `formSchema.fields[${index}] record-link props.displayFieldIds must be 1-${APPROVAL_RECORD_LINK_MAX_DISPLAY_FIELDS} distinct non-blank field ids`,
+        )
+      }
+      displayFieldIds = trimmed
+    }
+    // Canonicalize: only the two trimmed pins, plus displayFieldIds when configured (never spread
+    // residual props). Unconfigured fields keep the exact two-key shape, so re-saving an older
+    // template produces no version diff.
+    pinnedProps = displayFieldIds ? { baseId, sheetId, displayFieldIds } : { baseId, sheetId }
   }
 
   // L8-C (§1.3, OD-L8-6/OD-L8-7): allowlist + canonicalize `number` props. Runs for BOTH top-level
@@ -7454,6 +7484,7 @@ export class ApprovalProductService {
         order: index,
         baseId: typeof field.props?.baseId === 'string' ? field.props.baseId.trim() : '',
         sheetId: typeof field.props?.sheetId === 'string' ? field.props.sheetId.trim() : '',
+        displayFieldIds: sanitizeRecordLinkDisplayFieldIds(field.props?.displayFieldIds),
       }))
       .sort((a, b) => {
         if (a.baseId !== b.baseId) return a.baseId < b.baseId ? -1 : 1
@@ -7480,6 +7511,20 @@ export class ApprovalProductService {
           sheetId: target.sheetId,
         })
         if (!auth.ok) {
+          throw new ServiceError(unavailable, 400, 'VALIDATION_ERROR')
+        }
+        // Configured display columns must be display-eligible fields of this sheet, checked with
+        // the same column rule the candidate picker uses for its labels.
+        if (
+          target.displayFieldIds.length > 0
+          && !(await areRecordLinkDisplayFieldIdsVisible(
+            queryFn,
+            target.sheetId,
+            creatorUserId,
+            auth.capabilities,
+            target.displayFieldIds,
+          ))
+        ) {
           throw new ServiceError(unavailable, 400, 'VALIDATION_ERROR')
         }
       }

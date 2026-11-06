@@ -80,6 +80,58 @@ export function recordLinkBaseId(field: Pick<FormField, 'props'>): string {
   return props && typeof props.baseId === 'string' ? props.baseId.trim() : ''
 }
 
+/** Authoring copy for the optional display-column pickers (both editors). */
+export const RECORD_LINK_DISPLAY_FIELDS_LABEL = '选择记录时显示的列（可选，最多 3 列）'
+export const RECORD_LINK_DISPLAY_FIELDS_HINT =
+  '第一列作为每条记录的标题，其余列显示在标题下方；搜索也会匹配这些列。填表人看不到的列不会显示；都不可用时按默认规则显示。更换目标表会清空。'
+/** Values-free failure copy for the per-sheet column list. */
+export const RECORD_LINK_DISPLAY_FIELDS_LOAD_FAILED = '目标表的列加载失败，请重试'
+
+/** Upper bound on configured display columns (mirrors the server props contract). */
+export const RECORD_LINK_MAX_DISPLAY_FIELDS = 3
+
+/**
+ * Multitable field types a display column may use: plain text / number / single select
+ * (mirrors the server's display-eligible set; computed and system fields are never offered).
+ */
+export const RECORD_LINK_DISPLAY_FIELD_TYPES: ReadonlySet<string> = new Set([
+  'string',
+  'text',
+  'textarea',
+  'select',
+  'number',
+  'singleLineText',
+  'longText',
+])
+
+/**
+ * Configured display column ids from record-link props: strings only, trimmed, non-blank,
+ * de-duplicated, capped at RECORD_LINK_MAX_DISPLAY_FIELDS. Anything else → [].
+ */
+export function recordLinkDisplayFieldIdsFromProps(
+  props: Record<string, unknown> | null | undefined,
+): string[] {
+  const raw = props && typeof props === 'object' ? props.displayFieldIds : undefined
+  if (!Array.isArray(raw)) return []
+  const out: string[] = []
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue
+    const id = entry.trim()
+    if (!id || out.includes(id)) continue
+    out.push(id)
+    if (out.length >= RECORD_LINK_MAX_DISPLAY_FIELDS) break
+  }
+  return out
+}
+
+/** Published field → its configured display column ids (fill side). */
+export function recordLinkDisplayFieldIds(field: Pick<FormField, 'props'>): string[] {
+  const props = field.props && typeof field.props === 'object'
+    ? field.props as Record<string, unknown>
+    : null
+  return recordLinkDisplayFieldIdsFromProps(props)
+}
+
 /** Type-guard helper for authoring allowlists (mirrors backend FORM_FIELD_TYPES membership). */
 export function isRecordLinkType(type: FormFieldType): boolean {
   return type === 'record-link'
@@ -271,6 +323,77 @@ export function buildRecordLinkSheetSelectOptions(
   return options
 }
 
+/** One selectable display column of the target sheet (authoring). */
+export interface RecordLinkDisplayFieldOption {
+  id: string
+  name: string
+  type: string
+}
+
+/** Per-sheet display-column catalog entry (authoring; parent-owned like the base/sheet catalog). */
+export interface RecordLinkDisplayFieldCatalogEntry {
+  readonly fields: readonly RecordLinkDisplayFieldOption[]
+  readonly loading: boolean
+  readonly loaded: boolean
+  /** Values-free failure copy; '' when ok / idle. */
+  readonly error: string
+}
+
+/** Keep only display-eligible columns that carry an id (order preserved). */
+export function filterRecordLinkDisplayFieldOptions(
+  fields: ReadonlyArray<{ id?: unknown; name?: unknown; type?: unknown }>,
+): RecordLinkDisplayFieldOption[] {
+  const out: RecordLinkDisplayFieldOption[] = []
+  for (const field of fields) {
+    const id = typeof field.id === 'string' ? field.id.trim() : ''
+    const type = typeof field.type === 'string' ? field.type : ''
+    if (!id || !RECORD_LINK_DISPLAY_FIELD_TYPES.has(type)) continue
+    out.push({ id, name: typeof field.name === 'string' ? field.name : '', type })
+  }
+  return out
+}
+
+/**
+ * Options for one display-column slot. Excludes columns already chosen in OTHER slots; a saved
+ * column missing from the loaded list stays bindable under the values-free 目标不可用 label.
+ */
+export function buildRecordLinkDisplayFieldSelectOptions(
+  fields: readonly RecordLinkDisplayFieldOption[],
+  selectedIds: readonly string[],
+  slotIndex: number,
+): Array<{ value: string; label: string }> {
+  const current = typeof selectedIds[slotIndex] === 'string' ? selectedIds[slotIndex]!.trim() : ''
+  const takenElsewhere = new Set(
+    selectedIds.filter((id, index) => index !== slotIndex).map((id) => id.trim()).filter(Boolean),
+  )
+  const options = fields
+    .filter((field) => !takenElsewhere.has(field.id))
+    .map((field) => ({ value: field.id, label: formatNamedOptionLabel(field.name) }))
+  if (current && !options.some((option) => option.value === current)) {
+    options.unshift({ value: current, label: RECORD_LINK_TARGET_UNAVAILABLE })
+  }
+  return options
+}
+
+/**
+ * Next display-column list after the author edits one slot: '' clears that slot; later slots
+ * shift up so the list stays dense; duplicates and overflow are dropped.
+ */
+export function recordLinkDisplayFieldIdsAfterSlotChange(
+  current: readonly string[],
+  slotIndex: number,
+  value: string | null | undefined,
+): string[] {
+  const next = [...current]
+  const id = typeof value === 'string' ? value.trim() : ''
+  if (slotIndex >= next.length) {
+    if (id) next.push(id)
+  } else {
+    next[slotIndex] = id
+  }
+  return recordLinkDisplayFieldIdsFromProps({ displayFieldIds: next })
+}
+
 /**
  * Parent-owned record-link authoring catalog snapshot (FWB-0 Layer 2; delta §3.4 typed pickers).
  * The authoring VIEW is the only fetch/state owner (F0 gate #2); form-builder children render this
@@ -284,6 +407,11 @@ export interface RecordLinkAuthoringCatalog {
   readonly loaded: boolean
   /** Values-free failure copy; '' when ok / idle. */
   readonly error: string
+  /**
+   * Display-column catalog keyed by sheet id, loaded by the authoring view for every pinned
+   * record-link target sheet. Absent entry = not requested yet.
+   */
+  readonly displayFieldsBySheet?: Readonly<Record<string, RecordLinkDisplayFieldCatalogEntry>>
 }
 
 /**
