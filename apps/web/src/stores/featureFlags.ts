@@ -81,6 +81,13 @@ export interface ProductFeatures {
    * explicit boolean in the session payload (or the authorized dev override). Never inferred from role/mode.
    */
   integrationAutomationRunAction: boolean
+  /**
+   * R-69 1c: the automation rule editor offers the integration.run_finished trigger (and its alert template) for a
+   * NEW rule only when this is true. Mirrors the backend's INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED, the same switch
+   * that gates publish, receipt and dispatch. Default OFF: true only from an explicit boolean in the session payload
+   * (or the authorized dev override). Never inferred from role/mode.
+   */
+  integrationAutomationRunEvent: boolean
   mode: ProductMode
 }
 
@@ -121,6 +128,7 @@ const DEFAULT_FEATURES: ProductFeatures = {
   elearning: false,
   tasks: false,
   integrationAutomationRunAction: false,
+  integrationAutomationRunEvent: false,
   mode: 'platform',
 }
 
@@ -315,6 +323,8 @@ export function extractFeaturesFromPayload(payload: any): Partial<ProductFeature
     tasks: typeof featuresNode.tasks === 'boolean' ? featuresNode.tasks : undefined,
     integrationAutomationRunAction:
       typeof featuresNode.integrationAutomationRunAction === 'boolean' ? featuresNode.integrationAutomationRunAction : undefined,
+    integrationAutomationRunEvent:
+      typeof featuresNode.integrationAutomationRunEvent === 'boolean' ? featuresNode.integrationAutomationRunEvent : undefined,
     mode: normalizeMode(
       featuresNode.mode ??
       featuresNode.productMode ??
@@ -473,6 +483,11 @@ function resolveFeatures(
     override.integrationAutomationRunAction,
     backend.integrationAutomationRunAction,
   )
+  // R-69 1c: the same default-OFF discipline for the integration.run_finished trigger offer.
+  const integrationAutomationRunEvent = boolOrDefault(
+    override.integrationAutomationRunEvent,
+    backend.integrationAutomationRunEvent,
+  )
 
   return {
     attendance,
@@ -490,6 +505,7 @@ function resolveFeatures(
     elearning,
     tasks,
     integrationAutomationRunAction,
+    integrationAutomationRunEvent,
     mode,
   }
 }

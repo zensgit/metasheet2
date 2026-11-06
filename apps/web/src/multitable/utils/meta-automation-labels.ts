@@ -1619,6 +1619,8 @@ export function automationTriggerTypeLabel(type: AutomationTriggerType | Unknown
       return isZh ? '当审批完成时' : 'When approval completes'
     case 'approval.task_created':
       return isZh ? '当产生新审批待办时' : 'When an approval task is created'
+    case 'integration.run_finished':
+      return isZh ? '当集成作业运行完成时' : 'When an integration job run finishes'
     case 'field.changed':
       return isZh ? '当字段变化时' : 'When field changed'
     default:

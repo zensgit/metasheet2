@@ -2448,6 +2448,7 @@ function describeTrigger(rule: AutomationRule): string {
     case 'webhook.received':
     case 'approval.completed':
     case 'approval.task_created':
+    case 'integration.run_finished':
       return automationTriggerTypeLabel(rule.triggerType, isZh.value)
     default:
       return String(rule.triggerType)

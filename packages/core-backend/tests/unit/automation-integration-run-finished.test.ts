@@ -664,3 +664,24 @@ describe('integration.run_finished — save gate', () => {
     expect(denied.inserted.length + none.inserted.length).toBe(0)
   })
 })
+
+// ── 6. the alert template renders from `run.*` only ──────────────────────────────────────────────────────────
+
+describe('integration.run_finished — the alert template (ADR §4.3) renders from run.* only', () => {
+  it('the web template, rendered by the executor renderer with the dispatched `run`, is complete and values-free', async () => {
+    const { INTEGRATION_RUN_FINISHED_ALERT_TEMPLATE } = await import('../../../../apps/web/src/multitable/integrationRunFinishedAuthoring')
+    const { renderAutomationTemplate } = await import('../../src/multitable/automation-executor')
+    const run: Record<string, unknown> = { ...automationEvent({ status: 'skipped', reason: 'busy' }) }
+    delete run._automationDepth
+    const title = renderAutomationTemplate(INTEGRATION_RUN_FINISHED_ALERT_TEMPLATE.titleTemplate, { run })
+    const body = renderAutomationTemplate(INTEGRATION_RUN_FINISHED_ALERT_TEMPLATE.bodyTemplate, { run })
+    expect(title).toContain('stock_prep_pull')
+    expect(title).toContain('P-1')
+    expect(title).toContain('skipped')
+    expect(body).toContain('busy')
+    expect(`${title}\n${body}`).not.toMatch(/\{\{/)
+    expect(`${title}\n${body}`).not.toContain(TENANT)
+    // a template variable outside run.* renders nothing on this record-less trigger
+    expect(renderAutomationTemplate('{{record.x}}{{sheetId}}', { run })).toBe('')
+  })
+})

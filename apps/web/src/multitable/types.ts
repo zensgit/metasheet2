@@ -1301,6 +1301,8 @@ export type AutomationTriggerType =
   | 'form.submitted'
   | 'approval.completed'
   | 'approval.task_created'
+  // R-69 1c: one values-free summary per integration job (dry run only; R-69 OPEN)
+  | 'integration.run_finished'
   // Legacy aliases
   | 'field.changed'
 

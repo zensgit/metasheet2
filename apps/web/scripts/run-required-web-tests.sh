@@ -1835,6 +1835,7 @@ exec npx vitest run \
   multitable-import \
   multitable-import-create-fields-plan \
   multitable-import-modal \
+  multitable-integration-run-finished-trigger \
   multitable-kanban-view \
   multitable-link-picker \
   multitable-linked-record-chip \

@@ -151,7 +151,7 @@ describeIfDatabase('P2 durable-delivery S4-a — producer atomic enqueue (real D
       enqueueOutboxEvent(txnStub(), { eventType: 'not.a.real.family', eventId: `evt_${RUN}_x`, payload: {} }),
     // Pinned to the CURRENT manifest version (v3 since the dingtalk-todo-mirror consumer landed) —
     // explicit, not loosened to /v\d/, so a future bump is a deliberate edit here too.
-    ).rejects.toThrow(/not routed by manifest v3/)
+    ).rejects.toThrow(/not routed by manifest v4/)
   })
 
   test('identity/depth validation is a boundary error: blank eventId and bad depth throw before any SQL', async () => {

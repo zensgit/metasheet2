@@ -531,6 +531,49 @@ describe('auth login routes', () => {
     expect((response.body as Record<string, any>).data.features.integrationAutomationRunAction).toBe(expected)
   })
 
+  // R-69 1c: the rule editor offers integration.run_finished only when the session says
+  // integrationAutomationRunEvent=true, which must be exactly when INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED is the
+  // literal 'true' (the same predicate as publish, receipt and dispatch). Login and /me; independent of the action key.
+  const RUN_EVENT_FLAG = 'INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED'
+
+  async function withRunEventEnv<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+    const had = Object.prototype.hasOwnProperty.call(process.env, RUN_EVENT_FLAG)
+    const previous = process.env[RUN_EVENT_FLAG]
+    if (value === undefined) delete process.env[RUN_EVENT_FLAG]
+    else process.env[RUN_EVENT_FLAG] = value
+    try {
+      return await run()
+    } finally {
+      if (had) process.env[RUN_EVENT_FLAG] = previous
+      else delete process.env[RUN_EVENT_FLAG]
+    }
+  }
+
+  it.each(RUN_ACTION_FLAG_CASES)('login as an administrator with INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED %s (%j): features.integrationAutomationRunEvent is %s', async (_label, value, expected) => {
+    const response = await withRunEventEnv(value, () => loginAdminForElearningPayload())
+    expect(response.statusCode).toBe(200)
+    const features = (response.body as Record<string, any>).data.features
+    expect(features.integrationAutomationRunEvent).toBe(expected)
+    expect(features.attendanceAdmin).toBe(true)
+  })
+
+  it.each(RUN_ACTION_FLAG_CASES)('/me for an administrator with INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED %s (%j): features.integrationAutomationRunEvent is %s', async (_label, value, expected) => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'admin@example.com',
+      name: 'Admin',
+      role: 'admin',
+      permissions: [],
+      created_at: new Date('2026-03-13T00:00:00.000Z'),
+      updated_at: new Date('2026-03-13T00:00:00.000Z'),
+    })
+    const response = await withRunEventEnv(value, () => invokeRoute('get', '/me', {
+      headers: { authorization: 'Bearer live-token' },
+    }))
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.features.integrationAutomationRunEvent).toBe(expected)
+  })
+
   it('accepts a generic identifier payload for login', async () => {
     authServiceMocks.login.mockResolvedValue({
       user: {
