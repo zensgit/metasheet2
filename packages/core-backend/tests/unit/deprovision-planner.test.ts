@@ -34,7 +34,7 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
         orgId: 'org-1',
         orgMembershipActive: true,
         loginGrantProvider: 'dingtalk',
-      loginGrantEnabled: true,
+        loginGrantEnabled: true,
         globallyClear: true,
       })
       expect(plan).toEqual({

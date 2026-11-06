@@ -272,7 +272,7 @@ describeIfDatabase('deprovision effect provider witness (restore, compensation, 
     })
   })
 
-  describe('restore reverses the witnessed provider row only (registry variant)', () => {
+  describe('restore reverses the witnessed provider row only (non-default integration provider)', () => {
     it('a wecom flip effect re-enables the wecom row and leaves the dingtalk row untouched', async () => {
       const seeded = await seed({ provider: 'wecom' })
       await insertGrantRow(seeded.userId, 'wecom', false)
@@ -352,7 +352,7 @@ describeIfDatabase('deprovision effect provider witness (restore, compensation, 
       expect(retry).toMatchObject({ alreadyCompensated: true, grantRow: 'already_absent' })
     })
 
-    it('(e) registry variant: a wecom creation effect deletes the wecom deny row and leaves the dingtalk deny row', async () => {
+    it('(e) non-default integration provider: a wecom creation effect deletes the wecom deny row and leaves the dingtalk deny row', async () => {
       const seeded = await seed({ provider: 'wecom' })
       await insertGrantRow(seeded.userId, 'wecom', false)
       await insertGrantRow(seeded.userId, 'dingtalk', false)
@@ -367,7 +367,7 @@ describeIfDatabase('deprovision effect provider witness (restore, compensation, 
       expect(await effectStatuses(eventId)).toEqual([{ effect_type: 'grant_changed', status: 'compensated', provider: 'wecom' }])
     })
 
-    it('(e) registry variant: a wecom witness whose wecom row is missing is drift even with a dingtalk deny row present', async () => {
+    it('(e) non-default integration provider: a wecom witness whose wecom row is missing is drift even with a dingtalk deny row present', async () => {
       const seeded = await seed({ provider: 'wecom' })
       await insertGrantRow(seeded.userId, 'dingtalk', false)
       const eventId = await insertEvent(seeded, { status: 'superseded' })
@@ -421,7 +421,7 @@ describeIfDatabase('deprovision effect provider witness (restore, compensation, 
       ])
     })
 
-    it('a wecom departure (registry variant) flips the wecom row, records provider=wecom, and leaves the dingtalk row untouched', async () => {
+    it('a wecom departure (non-default integration provider) flips the wecom row, records provider=wecom, and leaves the dingtalk row untouched', async () => {
       const seeded = await seed({ provider: 'wecom', accountActive: false })
       await insertGrantRow(seeded.userId, 'wecom', true, 'someone')
       await insertGrantRow(seeded.userId, 'dingtalk', true, 'someone')

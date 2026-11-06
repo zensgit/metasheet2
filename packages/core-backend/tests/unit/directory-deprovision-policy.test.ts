@@ -136,6 +136,8 @@ const DEACTIVATES_USER_ORG = /UPDATE user_orgs\s+SET is_active = FALSE/i
 // INSERT shape is the deny-row CREATION for a person with no row (also matched so the
 // default-off test proves NEITHER write happens in preview).
 const DISABLES_GRANT = /(?:UPDATE user_external_auth_grants[\s\S]*SET enabled = FALSE|INSERT INTO user_external_auth_grants)/i
+// The ledger's effects-column probe (table and column are parameters; see the stub).
+const PROBES_EFFECT_COLUMNS = /FROM information_schema\.columns/i
 
 const CANDIDATE = { directory_account_id: 'acct-1', local_user_id: 'user-1', deprovision_policy_override: null }
 
@@ -162,6 +164,8 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
     // this is the unit-level half of mutation ①/② (moving the write before the enabled gate,
     // or dropping the gate); the real-DB half lives in the W4-PRE-1c real-DB suite.
     expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(false)
+    // Preview writes no effect rows, so it never probes the effects table's columns.
+    expect(client.queries.filter((sql) => PROBES_EFFECT_COLUMNS.test(sql))).toHaveLength(0)
 
     // …but the operator gets the preview.
     expect(outcome).toMatchObject({
@@ -304,6 +308,29 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
     expect(outcome.candidateCount).toBe(2)
     expect(outcome.manualReviewCount).toBe(1)
     expect(outcome.affected.map((a) => a.localUserId)).toEqual(['user-2'])
+  })
+
+  // Several written candidates share one sync transaction, so the effects-column probe runs
+  // exactly once per run, ahead of the first effect write, never once per candidate.
+  it('probes the effects table columns once per run, however many candidates are written', async () => {
+    const client = stubClient([
+      { directory_account_id: 'acct-1', local_user_id: 'user-1', deprovision_policy_override: null },
+      { directory_account_id: 'acct-2', local_user_id: 'user-2', deprovision_policy_override: null },
+    ])
+    const outcome = await applyDirectoryDeprovisionPolicies(client, {
+      ...baseOptions,
+      deactivatedAccountIds: ['acct-1', 'acct-2'],
+      enabled: true,
+    })
+
+    expect(outcome.affected.map((a) => a.localUserId)).toEqual(['user-1', 'user-2'])
+    const effectInserts = client.queries.filter((sql) => /^\s*INSERT INTO directory_deprovision_effects \(/i.test(sql))
+    expect(effectInserts.length).toBeGreaterThanOrEqual(2)
+    const probes = client.queries
+      .map((sql, index) => ({ sql, index }))
+      .filter(({ sql }) => PROBES_EFFECT_COLUMNS.test(sql))
+    expect(probes).toHaveLength(1)
+    expect(probes[0]!.index).toBeLessThan(client.queries.indexOf(effectInserts[0]!))
   })
 
   // One PERSON, two departed badges. Deactivating them twice would double-count the audit and

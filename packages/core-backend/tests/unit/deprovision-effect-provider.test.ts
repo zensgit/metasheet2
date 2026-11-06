@@ -185,7 +185,7 @@ describe('effects INSERT shape under the provider-column probe', () => {
     }
   })
 
-  it('column present: the provider written is the source integration provider (registry variant)', async () => {
+  it('column present: the provider written is the source integration provider (non-default integration provider)', async () => {
     const client = writerClient({ provider: 'wecom', columnPresent: true })
     await applyDirectoryDeprovisionCandidate(client, APPLY_INPUT)
     const grantInsert = effectInserts(client.recorded).find((entry) => entry.params?.[3] === 'grant_changed')
@@ -406,7 +406,7 @@ describe('restore acts on the provider the effect row witnesses', () => {
     expect(upsert?.sql).not.toMatch(/'dingtalk'/)
   })
 
-  it('a wecom witness reads and flips the wecom row (registry variant)', async () => {
+  it('a wecom witness reads and flips the wecom row (non-default integration provider)', async () => {
     const recorded = await restoreWith({ provider: 'wecom', grantRowCreated: false })
     expect(recorded.find((entry) => evidenceShape(entry.sql) === 'read_grant')?.params).toEqual(['user-1', 'wecom'])
     expect(recorded.find((entry) => evidenceShape(entry.sql) === 'upsert_grant')?.params?.[4]).toBe('wecom')
@@ -480,7 +480,7 @@ describe('compensation acts on the provider the creation effect witnesses', () =
     expect(del?.sql).not.toMatch(/'dingtalk'/)
   })
 
-  it('DELETE branch: a wecom witness deletes the wecom row only (registry variant)', async () => {
+  it('DELETE branch: a wecom witness deletes the wecom row only (non-default integration provider)', async () => {
     const { outcome, recorded } = await compensateWith({ provider: 'wecom', status: 'superseded' })
     await expect(outcome).resolves.toMatchObject({ grantRow: 'deleted' })
     expect(recorded.find((entry) => evidenceShape(entry.sql) === 'delete_grant')?.params).toEqual(['user-1', 'wecom'])
@@ -531,7 +531,20 @@ describe('migration file and effect-writer census', () => {
   const migrationsDir = join(__dirname, '..', '..', 'src', 'db', 'migrations')
   const srcDir = join(__dirname, '..', '..', 'src')
 
-  it('the provider migration carries the zzzz prefix and the newest, unique timestamp', () => {
+  // The migrations whose objects this one reads or alters: the integrations table, the
+  // deprovision ledger and the three later shapes of its effects table. On a fresh database the
+  // migrator applies files in name order, so the stamp must sort after every one of them.
+  const DEPENDENCY_STAMPS = [
+    '20260324150000', // directory_integrations
+    '20260724170000', // directory_deprovision_events / _effects
+    '20260728100000', // ledger hardening (shared validate / immutable triggers)
+    '20260808090000', // effects.grant_row_created
+    '20260810100000', // effects compensation status
+  ]
+  // The newest zzzz stamp present when this stamp was allocated; a lower stamp cannot be new.
+  const ALLOCATION_FLOOR = '20261105033000'
+
+  it('the provider migration carries the zzzz prefix, a unique timestamp, and sorts after the migrations it depends on', () => {
     const names = readdirSync(migrationsDir).filter((name) => name.endsWith('.ts'))
     const mine = names.filter((name) => name.endsWith('_deprovision_effect_provider.ts'))
     expect(mine).toHaveLength(1)
@@ -542,7 +555,12 @@ describe('migration file and effect-writer census', () => {
       .map((name) => /^zzzz(\d{14})_/.exec(name)?.[1])
       .filter((value): value is string => typeof value === 'string')
     expect(stamps.filter((value) => value === stamp)).toHaveLength(1)
-    expect(stamps.every((value) => value <= stamp)).toBe(true)
+    for (const dependency of DEPENDENCY_STAMPS) {
+      expect(stamps).toContain(dependency)
+      expect(stamp > dependency).toBe(true)
+    }
+    expect(stamps).toContain(ALLOCATION_FLOOR)
+    expect(stamp > ALLOCATION_FLOOR).toBe(true)
   })
 
   it('the effects INSERT has exactly one production writer, and that writer probes the column', () => {
