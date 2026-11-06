@@ -107,12 +107,21 @@ export class ApiTokenService {
     this.db = db
   }
 
+  private async fenceCredentialIssuance(trx: Kysely<Database>, userId: string, expectedAccessGeneration?: number): Promise<void> {
+    const row = await trx.selectFrom('users').select(['id', 'is_active', sql<number>`access_generation`.as('access_generation')])
+      .where('id', '=', userId).forShare().executeTakeFirst()
+    if (!row || row.is_active !== true || (expectedAccessGeneration !== undefined && Number(row.access_generation) !== expectedAccessGeneration)) {
+      throw new Error('Authentication changed; please sign in again')
+    }
+  }
+
   /**
    * Create a new API token. The plain-text token is returned only once.
    */
   async createToken(
     userId: string,
     input: ApiTokenCreateInput,
+    expectedAccessGeneration?: number,
   ): Promise<ApiTokenCreateResult> {
     if (!input.name || input.name.trim().length === 0) {
       throw new Error('Token name is required')
@@ -130,7 +139,9 @@ export class ApiTokenService {
     const baseIds = normalizeScopeArray(input.baseIds)
     const sheetIds = normalizeScopeArray(input.sheetIds)
 
-    await this.db
+    await this.db.transaction().execute(async trx => {
+      await this.fenceCredentialIssuance(trx, userId, expectedAccessGeneration)
+      await trx
       .insertInto('multitable_api_tokens')
       .values({
         id,
@@ -146,6 +157,7 @@ export class ApiTokenService {
         sheet_ids: sheetIds,
       })
       .execute()
+    })
 
     const token: ApiToken = {
       id,
@@ -295,6 +307,7 @@ export class ApiTokenService {
   async rotateToken(
     tokenId: string,
     userId: string,
+    expectedAccessGeneration?: number,
   ): Promise<ApiTokenCreateResult> {
     const row = await this.db
       .selectFrom('multitable_api_tokens')
@@ -313,6 +326,7 @@ export class ApiTokenService {
 
     // Revoke old + create new in a transaction
     return this.db.transaction().execute(async (trx) => {
+      await this.fenceCredentialIssuance(trx, userId, expectedAccessGeneration)
       await trx
         .updateTable('multitable_api_tokens')
         .set({ revoked: true, revoked_at: nowTimestamp() })

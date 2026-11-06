@@ -96,7 +96,7 @@
                 type="button"
                 data-testid="tasks-detail-pick-assignee"
                 :disabled="detailActionPending"
-                @click="pickerMode = 'assignee'"
+                @click="openPicker($event, 'assignee')"
               >{{ t.pickAssignee }}</button>
               <button
                 type="button"
@@ -314,7 +314,7 @@
                   type="button"
                   data-testid="tasks-detail-pick-follower"
                   :disabled="detailActionPending"
-                  @click="pickerMode = 'follower'"
+                  @click="openPicker($event, 'follower')"
                 >{{ t.pickFollower }}</button>
                 <button
                   type="button"
@@ -1702,6 +1702,13 @@ async function addPickedMembers(kind: TaskPeoplePickerMode, userIds: string[]): 
   } finally {
     if (token === detailActionToken) detailActionPending.value = false
   }
+}
+
+/** A pick button: focused first (a click does not focus a button in macOS Safari), so the picker hands
+ *  focus back to it on close. */
+function openPicker(event: MouseEvent, mode: TaskPeoplePickerMode): void {
+  if (event.currentTarget instanceof HTMLElement) event.currentTarget.focus()
+  pickerMode.value = mode
 }
 
 function onPickerConfirm(picked: TaskPeoplePicked): void {

@@ -299,6 +299,12 @@ function getUserId(req: Request): string {
   return typeof id === 'string' ? id.trim() : ''
 }
 
+function credentialGeneration(req: Request): number {
+  const generation = (req.user as Record<string, unknown> | undefined)?.access_generation
+  if (typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 0) throw new Error('Authentication changed; please sign in again')
+  return generation
+}
+
 function zodError(res: Response, err: z.ZodError): void {
   res.status(400).json({
     ok: false,
@@ -311,7 +317,10 @@ function serviceErrorResponse(res: Response, err: unknown, action: string): void
   let status = 500
   let code = `${action.toUpperCase()}_FAILED`
 
-  if (message === 'Destination not found' || message === 'Token not found' || message === 'Webhook not found') {
+  if (message === 'Authentication changed; please sign in again') {
+    status = 409
+    code = 'AUTHENTICATION_CHANGED'
+  } else if (message === 'Destination not found' || message === 'Token not found' || message === 'Webhook not found') {
     status = 404
   } else if (message === 'Not authorized') {
     status = 403
@@ -373,7 +382,7 @@ export function apiTokensRouter(): Router {
         expiresAt: input.expiresAt,
         baseIds: input.baseIds,
         sheetIds: input.sheetIds,
-      })
+      }, credentialGeneration(req))
       res.status(201).json({
         ok: true,
         data: {
@@ -413,7 +422,7 @@ export function apiTokensRouter(): Router {
       return
     }
     try {
-      const result = await apiTokenService.rotateToken(req.params.id, userId)
+      const result = await apiTokenService.rotateToken(req.params.id, userId, credentialGeneration(req))
       res.json({
         ok: true,
         data: {
