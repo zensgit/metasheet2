@@ -11,6 +11,12 @@ import { AUTOMATION_EXECUTION_SCHEMA_VERSION } from './automation-executor'
 import type { AutomationExecution, AutomationStepResult } from './automation-executor'
 import { redactString, redactValue } from './automation-log-redact'
 
+/**
+ * Rows that are not rule executions and stay out of the rule-monitoring reads (getRecent, listExecutions):
+ * button runs (B1-S1 D0-A §6) and synthetic integration previews (C1/S2). Both remain readable by getById.
+ */
+const NON_RULE_EXECUTION_TRIGGERS = ['button', 'integration_preview']
+
 /** Minimal query surface a transaction client satisfies (pg `QueryResult` shape). */
 export type ExecutionLogQueryFn = (
   sql: string,
@@ -233,10 +239,11 @@ export class AutomationLogService {
    * DF-N1 rule-monitoring stream. It remains retrievable by getById for audit.
    */
   async getRecent(limit = 50): Promise<AutomationExecution[]> {
+    // C1/S2: a synthetic integration preview runs none of the rule's actions either; same exclusion.
     const rows = await db
       .selectFrom('multitable_automation_executions')
       .selectAll()
-      .where('triggered_by', '!=', 'button')
+      .where('triggered_by', 'not in', NON_RULE_EXECUTION_TRIGGERS)
       .orderBy('created_at', 'desc')
       .limit(limit)
       .execute()
@@ -257,7 +264,8 @@ export class AutomationLogService {
     // EXCLUDE triggered_by='button' (B1-S1 D0-A §6) — button runs are record-scoped
     // side effects, not rule executions; they stay out of the rule-monitoring reads
     // but remain retrievable by getById.
-    q = q.where('triggered_by', '!=', 'button')
+    // Synthetic integration previews (C1/S2) likewise.
+    q = q.where('triggered_by', 'not in', NON_RULE_EXECUTION_TRIGGERS)
     if (filters.sheetId) q = q.where('sheet_id', '=', filters.sheetId)
     if (filters.ruleId) q = q.where('rule_id', '=', filters.ruleId)
     if (filters.status) q = q.where('status', '=', filters.status)
@@ -292,6 +300,8 @@ export class AutomationLogService {
         sql<number>`COALESCE(AVG(duration) FILTER (WHERE duration > 0), 0)::int`.as('avg_duration'),
       ])
       .where('rule_id', '=', ruleId)
+      // C1/S2: a synthetic integration preview is not a rule execution; button rows keep their behaviour here.
+      .where('triggered_by', '!=', 'integration_preview')
       .executeTakeFirst()
 
     if (!row) {

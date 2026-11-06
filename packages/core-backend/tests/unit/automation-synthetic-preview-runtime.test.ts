@@ -23,6 +23,7 @@ import {
 } from '../../src/integration/automation-synthetic-preview'
 import {
   createSyntheticMaterialProvider,
+  SYNTHETIC_MATERIAL_OPERATION,
   SYNTHETIC_MATERIAL_PROVIDER_ID,
   SYNTHETIC_PREVIEW_BUDGET,
   syntheticMaterialFixture,
@@ -477,5 +478,61 @@ describe('S03 — retry and resume cannot replay a preview run', () => {
     // The only stored step outputs are counts and fixed ids: there is no value to take from the log.
     expect(JSON.stringify(row.steps)).not.toMatch(/SYN-DRW|SYN-LINE/)
     await service.shutdown()
+  })
+})
+
+describe('last refusal point and the RunOperations handle (verifier U11b / U28)', () => {
+  it('an abort that lands during the summary insert withholds the result: CANCELLED, no response object', async () => {
+    const controller = new AbortController()
+    const reached = deferred<void>()
+    const gate = deferred<void>()
+    const h = harness()
+    const logService = new AutomationLogService()
+    h.recordSummary.mockImplementationOnce(async (trx, entry) => {
+      reached.resolve()
+      await gate.promise
+      return logService.recordSyntheticPreviewSummary((sql, params) => trx.query(sql, params), entry)
+    })
+    const settled = refusal(h.runtime.run(scope, request(), { signal: controller.signal }))
+    await reached.promise
+    // Everything before the insert succeeded: the preview was compiled and the summary records OK.
+    expect(h.compileSpy).toHaveBeenCalledTimes(1)
+    controller.abort()
+    gate.resolve()
+    expect(await settled).toBe('CANCELLED')
+    expect(h.db.inserts).toHaveLength(1)
+    expect(h.runtime.inFlight()).toBe(0)
+  })
+
+  it('a retained operations handle refuses INACTIVE after the run settled, with no provider call', async () => {
+    let operations: { request(operation: unknown, args: unknown): Promise<unknown> } | undefined
+    const h = harness({ hooks: { onOperations: (value) => { operations = value } } })
+    await h.runtime.run(scope, request())
+    const calls = h.provider.calls.length
+    expect(calls).toBe(2)
+    expect(await refusal(operations!.request(SYNTHETIC_MATERIAL_OPERATION.id, { fixtureId: 'synthetic-materials.two-page.v1' }))).toBe('INACTIVE')
+    expect(h.provider.calls).toHaveLength(calls)
+    expect(h.db.inserts).toHaveLength(1)
+  })
+
+  it('a retained operations handle refuses INACTIVE during the consume step, with no provider call', async () => {
+    let operations: { request(operation: unknown, args: unknown): Promise<unknown> } | undefined
+    let during: string | undefined
+    let callsAtConsume = -1
+    const h = harness({
+      hooks: {
+        onOperations: (value) => { operations = value },
+        beforeAdmission: async (phase) => {
+          if (phase !== 'consume') return
+          callsAtConsume = h.provider.calls.length
+          during = await refusal(operations!.request(SYNTHETIC_MATERIAL_OPERATION.id, { fixtureId: 'synthetic-materials.two-page.v1' }))
+        },
+      },
+    })
+    const response = await h.runtime.run(scope, request())
+    expect(during).toBe('INACTIVE')
+    expect(callsAtConsume).toBe(2)
+    expect(h.provider.calls).toHaveLength(2)
+    expect(response.summary.counts).toMatchObject({ pages: 2, rows: 3 })
   })
 })

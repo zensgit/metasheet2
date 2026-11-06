@@ -47,17 +47,54 @@ async function flush() {
   }
 }
 
+// The instances the component can actually reach. tests/setup/localstorage.ts installs an in-memory
+// localStorage whose setItem is NOT Storage.prototype.setItem, so a prototype spy alone records nothing.
+// Each test replaces window/globalThis localStorage, sessionStorage and indexedDB with recording objects
+// (restored afterwards) and asserts both "no write call" and "nothing stored" (length 0).
+const STORAGE_GLOBALS = ['localStorage', 'sessionStorage', 'indexedDB'] as const
+function recordingStorage(label: string, writes: string[]): Storage {
+  const store = new Map<string, string>()
+  return {
+    get length() { return store.size },
+    key: (index: number) => [...store.keys()][index] ?? null,
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => { writes.push(`${label}.setItem:${key}`); store.set(key, String(value)) },
+    removeItem: (key: string) => { writes.push(`${label}.removeItem:${key}`); store.delete(key) },
+    clear: () => { writes.push(`${label}.clear`); store.clear() },
+  } as Storage
+}
+
 describe('MetaAutomationIntegrationPreview', () => {
   let app: App | null = null
   let container: HTMLElement
   const storageWrites: string[] = []
+  const savedDescriptors = new Map<string, PropertyDescriptor | undefined>()
+
+  function expectNoBrowserStorage() {
+    expect(storageWrites).toEqual([])
+    expect(window.localStorage.length).toBe(0)
+    expect(window.sessionStorage.length).toBe(0)
+  }
 
   beforeEach(() => {
     container = document.createElement('div')
     document.body.appendChild(container)
     storageWrites.length = 0
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation((key: string) => { storageWrites.push(key) })
-    if (typeof indexedDB !== 'undefined') vi.spyOn(indexedDB, 'open').mockImplementation(() => { storageWrites.push('indexedDB'); throw new Error('no') })
+    const replacements: Record<(typeof STORAGE_GLOBALS)[number], unknown> = {
+      localStorage: recordingStorage('localStorage', storageWrites),
+      sessionStorage: recordingStorage('sessionStorage', storageWrites),
+      indexedDB: {
+        open: (name: string) => { storageWrites.push(`indexedDB.open:${name}`); throw new Error('no indexedDB in this spec') },
+        deleteDatabase: (name: string) => { storageWrites.push(`indexedDB.deleteDatabase:${name}`); throw new Error('no indexedDB in this spec') },
+      },
+    }
+    for (const name of STORAGE_GLOBALS) {
+      for (const target of [window, globalThis] as Array<Record<string, unknown>>) {
+        savedDescriptors.set(`${target === window ? 'window' : 'globalThis'}.${name}`, Object.getOwnPropertyDescriptor(target, name))
+        Object.defineProperty(target, name, { value: replacements[name], configurable: true, writable: true })
+      }
+    }
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation((key: string) => { storageWrites.push(`Storage.prototype.setItem:${key}`) })
   })
 
   afterEach(() => {
@@ -65,6 +102,14 @@ describe('MetaAutomationIntegrationPreview', () => {
     app = null
     container.remove()
     vi.restoreAllMocks()
+    for (const name of STORAGE_GLOBALS) {
+      for (const target of [window, globalThis] as Array<Record<string, unknown>>) {
+        const descriptor = savedDescriptors.get(`${target === window ? 'window' : 'globalThis'}.${name}`)
+        if (descriptor) Object.defineProperty(target, name, descriptor)
+        else delete target[name]
+      }
+    }
+    savedDescriptors.clear()
   })
 
   function mount(fetchFn: (url: string, init?: RequestInit) => Promise<Response>, visible = true) {
@@ -122,11 +167,22 @@ describe('MetaAutomationIntegrationPreview', () => {
     })
     expect(container.querySelector('[data-integration-preview-rows]')?.textContent).toContain(SENTINEL)
     expect(container.querySelector('[data-integration-preview-no-send]')).not.toBeNull()
-    expect(storageWrites).toEqual([])
+    expectNoBrowserStorage()
     // Closing the drawer clears the panel memory.
     state.visible = false
     await flush()
     expect(container.textContent ?? '').not.toContain(SENTINEL)
+    expectNoBrowserStorage()
+    // Reopening (catalog 200 again) must not bring the previous result back before any new run:
+    // the closed drawer only hides the section, so this checks the panel memory, not just the DOM.
+    const postsBefore = calls.filter((call) => call.init?.method === 'POST').length
+    state.visible = true
+    await flush()
+    expect(container.querySelector('[data-integration-preview]')).not.toBeNull()
+    expect(container.querySelector('[data-integration-preview-result]')).toBeNull()
+    expect(container.textContent ?? '').not.toContain(SENTINEL)
+    expect(calls.filter((call) => call.init?.method === 'POST')).toHaveLength(postsBefore)
+    expectNoBrowserStorage()
   })
 
   it('cancel aborts the in-flight request and shows no result', async () => {
@@ -187,9 +243,10 @@ describe('MetaAutomationIntegrationPreview', () => {
     ;(container.querySelector('[data-integration-preview-run]') as HTMLButtonElement).click()
     await flush()
     expect(container.textContent ?? '').toContain(SENTINEL)
+    expectNoBrowserStorage()
     app?.unmount()
     app = null
     expect(container.textContent ?? '').not.toContain(SENTINEL)
-    expect(storageWrites).toEqual([])
+    expectNoBrowserStorage()
   })
 })

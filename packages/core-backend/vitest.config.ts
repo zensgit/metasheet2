@@ -88,6 +88,8 @@ export default defineConfig({
       // and the real-host HTTP acceptance on the migrated CI database. Same EXPECT_DB plugin-tests step.
       'tests/integration/automation-synthetic-preview-realdb.test.ts',
       'tests/integration/automation-synthetic-preview-host-realdb.test.ts',
+      // C1/S2 C01 real-browser case: a whole file of the real-host browser launcher (run-stock-preparation-yida-browser-ci.mjs).
+      'tests/integration/automation-synthetic-preview-browser-realdb.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.

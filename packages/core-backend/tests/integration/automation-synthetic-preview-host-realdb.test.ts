@@ -141,5 +141,18 @@ databaseSuite('synthetic integration preview — actual MetaSheetServer', () => 
     expect(stored).toHaveLength(1)
     expect(stored[0]).toMatchObject({ triggered_by: 'integration_preview', status: 'success', trigger_event: null, rule_snapshot: null, initiated_by: h.admin.id })
     expect(JSON.stringify(stored[0])).not.toMatch(VALUE_MARKERS)
+
+    // A preview is not a rule execution: it stays out of the rule's stats and the runs monitoring list
+    // (like button rows), and stays readable by id for audit.
+    const stats = await h.http('GET', `/api/multitable/sheets/${sheetId}/automations/${ruleId}/stats`, h.admin.token)
+    expect(stats.status).toBe(200)
+    expect(stats.body).toMatchObject({ total: 0, success: 0, failed: 0, skipped: 0 })
+    const runs = await h.http('GET', `/api/multitable/automation-executions?ruleId=${ruleId}`, h.admin.token)
+    expect(runs.status).toBe(200)
+    expect(runs.body.executions).toEqual([])
+    const { AutomationLogService } = await import('../../src/multitable/automation-log-service')
+    const logs = new AutomationLogService()
+    expect((await logs.getRecent(200)).map((row) => row.id)).not.toContain(stored[0].id)
+    expect((await logs.getById(String(stored[0].id)))?.ruleId).toBe(ruleId)
   })
 })

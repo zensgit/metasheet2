@@ -67,6 +67,7 @@ export const GUARDED_PATH_ENTRIES = Object.freeze([
   'packages/core-backend/src/multitable/automation-run-values.ts',
   'packages/core-backend/src/routes/integration-yida-owner.ts',
   'packages/core-backend/tests/integration/automation-live-authority-realdb.test.ts',
+  'packages/core-backend/tests/integration/automation-synthetic-preview-browser-realdb.test.ts',
   'packages/core-backend/tests/integration/automation-synthetic-preview-host-realdb.test.ts',
   'packages/core-backend/tests/integration/automation-synthetic-preview-realdb.test.ts',
   'packages/core-backend/tests/integration/stock-preparation-yida-approved-target-realdb.test.ts',

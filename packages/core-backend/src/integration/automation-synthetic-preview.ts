@@ -543,6 +543,8 @@ export function createAutomationSyntheticPreviewRuntime(dependencies: SyntheticP
             checkpoint()
             if (step.id === 'read-materials') {
               handle = await operations.request(SYNTHETIC_MATERIAL_OPERATION.id, { fixtureId: request!.fixtureId })
+              // The read step is the only caller: once it has its value the handle refuses (INACTIVE).
+              opsOpen = false
               if (hooks.onStepValue) await tracked(() => hooks.onStepValue!(handle!))
               return
             }
