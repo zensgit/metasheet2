@@ -397,4 +397,39 @@ databaseSuite('YiDa initialization HTTP — empty slot, real JWT/live ACL, actua
     expect(f.sheetReads).toBeGreaterThan(0)
     await noExternalWrite()
   })
+
+  it('D16 at the HTTP level: a re-created record of an identity already created on this target is refused at approval with 409 YIDA_SEND_APPROVAL_IDENTITY_RESERVED, before a grant', async () => {
+    const first = await initialized()
+    f.setMultiTarget('true'); f.setEnablement('true')
+    // A registered project sheet (the 087 registry row the bound admission re-reads, plus the reader's resolver) whose
+    // key column is fld_line: the server-side sheet read now yields a source binding.
+    f.setProjectSheet({ projectNo: 'SYN-P1' })
+    await f.sqlAdmin(`INSERT INTO integration_stock_prep_project_target (id, tenant_id, project_no, sheet_id, object_id, status)
+      VALUES ('synthetic-registry-p1', $1, 'SYN-P1', 'sheet_synthetic', 'synthetic_object_p1', 'active')`, [tenant])
+    const config = draftInput().config, allocation = { mode: 'original' }
+    const made = body(await f.http('POST', '/drafts', { config, allocation, source: sheetSource, targetRef: first }), 201)
+    const rowKey = (made.rows as Data[])[0].rowKey
+    const grant = body(await f.http('POST', '/approvals', approval(made.operationId, rowKey, { targetRef: first })), 201)
+    const sent = body(await f.http('POST', '/submissions', { grantId: grant.grantId, submissionId: randomUUID() }), 200)
+    expect(sent.status).toBe('acknowledged')
+    const ledger = await f.rows('integration_yida_delivery_ledger')
+    expect(ledger.map(row => [row.target_ref, row.intent, row.status])).toEqual([[first, 'create', 'acknowledged']])
+    expect(String(ledger[0].creation_identity_digest)).toMatch(/^[0-9a-f]{64}$/u)
+    // The same key cell and project come back as ANOTHER record (re-created, description changed): a new draft with a new
+    // source record, but the same logical creation identity on the same target.
+    f.setSheet({ records: [{ id: 'rec_synthetic_recreated', data: { fld_project: 'SYN-P1', fld_line: 'SYN-L1', fld_qty: 6,
+      fld_desc: 'synthetic re-created HTTP part' } }] })
+    const again = body(await f.http('POST', '/drafts', { config, allocation, source: sheetSource, targetRef: first }), 201)
+    expect(again.operationId).not.toBe(made.operationId)
+    const members = await f.rows('integration_yida_draft_rows')
+    const recreated = members.find(row => row.operation_id === again.operationId)!
+    expect(recreated.creation_identity_digest).toBe(ledger[0].creation_identity_digest)
+    expect(recreated.source_record_digest).not.toBe(ledger[0].source_record_digest)
+    const grants = await f.rows('integration_yida_send_approvals'), proof = await f.proof()
+    denied(await f.http('POST', '/approvals', approval(again.operationId, (again.rows as Data[])[0].rowKey, { targetRef: first })),
+      409, 'YIDA_SEND_APPROVAL_IDENTITY_RESERVED')
+    expect(await f.rows('integration_yida_send_approvals')).toEqual(grants)
+    expect(await f.proof()).toEqual(proof)
+    expect([f.tokenPayloads.length, f.formPayloads.length]).toEqual([1, 1])
+  })
 })

@@ -3,7 +3,7 @@
 // Only the YiDa fetch responses are synthesized. No customer/remote HTTP.
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { createYidaOwnerHttpRealdbFixture, draftInput, otherTenant, principals, syntheticMaterial, tenant,
+import { createYidaOwnerHttpRealdbFixture, draftInput, otherTenant, principals, sheetColumns, syntheticMaterial, tenant,
   type Data, type Draft, type Input, type YidaOwnerHttpRealdbFixture } from '../utils/stock-preparation-yida-owner-http-fixture'
 
 it('sentinel: real owner HTTP proof requires EXPECT_DB=1 and a dedicated DATABASE_URL', () => {
@@ -129,6 +129,29 @@ databaseSuite('SA05 owner HTTP — actual JWT, native authority and private Post
       ['/approvals', { operationId: fixture.draft.operationId, rowKey: fixture.draft.rows[0].rowKey, confirmationId: randomUUID(), acknowledgeOnce: true }],
       ['/submissions', fixture.request]] as const) denial(await f.http('POST', route, body), 403, 'YIDA_OWNER_RUNTIME_DISABLED')
     expect(f.sql).toEqual([]); noFetch(); expect(await f.proof()).toEqual(before)
+  })
+  it('the omitted multi-target reader defaults OFF at the HTTP boundary: targetRef and sheet bodies are 400, /targets is the generic 404, before owner SQL', async () => {
+    // This fixture passes NO readMultiTargetEnablement, so the owner runtime's own default ('false') is the only
+    // switch; the send switch is ON. The targetRef is a real UUID (the seeded slot-1 target), so the route's id()
+    // check cannot refuse it on its own: only the OFF branch's closed bodies can.
+    f.setEnablement('true')
+    const draft = await prepare(), targetRef = String((await f.rows('integration_yida_approved_target'))[0].target_ref)
+    const selected = { operationId: draft.operationId, rowKey: draft.rows[0].rowKey }
+    const before = await f.proof(); f.sql.length = 0
+    denial(await f.http('POST', '/drafts', { ...draftInput(), targetRef }), 400, 'YIDA_OWNER_HTTP_INPUT')
+    // The sheet/view source is the only body that can produce a source binding; while OFF it never reaches a read.
+    denial(await f.http('POST', '/drafts', { config: draftInput().config, allocation: { mode: 'original' },
+      source: { kind: 'sheet', sheetId: 'sheet_synthetic', columns: sheetColumns } }), 400, 'YIDA_OWNER_HTTP_INPUT')
+    // A client-sent sourceBinding is refused by the closed body in BOTH switch states (it is not a switch witness).
+    denial(await f.http('POST', '/drafts', { ...draftInput(), sourceBinding: { sheetId: 'sheet_synthetic' } }), 400, 'YIDA_OWNER_HTTP_INPUT')
+    denial(await f.http('GET', '/targets'), 404, 'NOT_FOUND')
+    denial(await f.http('POST', '/targets', {}), 404, 'NOT_FOUND')
+    denial(await f.http('POST', '/preview', { ...selected, targetRef }), 400, 'YIDA_OWNER_HTTP_INPUT')
+    denial(await f.http('POST', '/approvals', { ...selected, confirmationId: randomUUID(), acknowledgeOnce: true, targetRef }),
+      400, 'YIDA_OWNER_HTTP_INPUT')
+    expect(f.sql).toEqual([]); noFetch(); expect(await f.proof()).toEqual(before)
+    // Checked last, so a red above is the HTTP boundary's own answer, not this direct runtime read.
+    expect(f.runtime.multiTargetEnabled()).toBe(false)
   })
 
   it('missing or malformed JWT denies before owner SQL and material', async () => {
