@@ -59,7 +59,10 @@ async function harness(options = {}) {
   const target = { target_ref: 'synthetic-target-ref', credential_ref: 'synthetic-credential', credential_generation: 1,
     key_definition_digest: sha('layout'), plan_digest: sha('plan') }
   const internals = {
-    async readTarget(trx) {
+    async readTarget(...args) {
+      // Same call shape as createInternalYidaApprovedTargetTransactionReader: (trx, targetRef), targetRef optional.
+      if (args.length !== 2 || (args[1] !== undefined && typeof args[1] !== 'string')) throw new Error('SYNTHETIC_READ_TARGET_SHAPE')
+      const [trx] = args
       // The real reader locks the slot row; the double does the same statement so the log shows where it happens.
       await trx.selectOneForUpdate('integration_yida_approved_target', { slot: 1 })
       return { target, envelope: { locator: LOCATOR, keyDefinition: definition, attestation: { executionIdentity: 'synthetic-user' } } }

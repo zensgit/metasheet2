@@ -155,7 +155,8 @@ function build(options, internals = {}) {
   // Transaction A: everything that locks the slot row happens here and is COMMITTED before any network.
   function prepare(request) {
     return db.transaction(async trx => {
-      const approved = await readTarget(trx, true, request.targetRef)
+      // The internal transaction reader is (trx, targetRef) and always requires current material.
+      const approved = await readTarget(trx, request.targetRef)
       const target = approved.target
       const material = await readExecutionMaterial(trx, { credentialRef: target.credential_ref,
         credentialGeneration: target.credential_generation })
