@@ -1,5 +1,13 @@
+import { acquireAttendanceImportTimezonePrefixV1 } from './attendance-business-trip-locks'
+import {
+  requireAttendancePunchDetailPlanBindingV1,
+  assertAttendancePunchDetailCanonicalBranchV1,
+  type AttendanceImportJobEnvelopeV1,
+} from './w4c3a-punch-detail-command'
+import { acquireAttendanceCalculationRolloutLock, parseCanonicalAttendanceRolloutOrgKeyV1 } from './w4c0-identity'
 import {
   createAuthorizedAttendanceWriteContextV1,
+  recheckAttendanceActorLivenessInTransactionV1,
   type AttendanceActorPostureV1,
 } from './w4c0-authorization'
 import {
@@ -14,6 +22,7 @@ import {
   type AttendanceW4TransactionClientV1,
 } from './w4c0-identity'
 import {
+  AttendanceW4OperationError,
   W4_MAX_BATCH_ITEMS,
   W4_MAX_DISTINCT_TARGETS,
 } from './w4c0-operation-contract'
@@ -25,7 +34,6 @@ import {
   type AttendanceLegacyRowSourceKindV1,
   type LegacyImportArtifactCleanupV1,
   type LegacyImportBatchPlanV1,
-  type LegacyImportPublicJobEnvelopeV1,
 } from './w4c3a-legacy-execution-plan'
 import {
   reserveAttendanceLegacyImportPlanJobV1,
@@ -54,7 +62,7 @@ export type ReserveAttendanceLegacyImportPlanFromHostInputV1 = Readonly<{
   batchId: string
   idempotencyKey: string | null
   legacyInputFingerprint: string
-  payload: LegacyImportPublicJobEnvelopeV1
+  payload: AttendanceImportJobEnvelopeV1
   legacyRowSourceKind: AttendanceLegacyRowSourceKindV1
   legacySourceRowLimit: number | null
   batch: Extract<LegacyImportBatchPlanV1, { kind: 'normal' }>
@@ -127,6 +135,10 @@ export function createAttendanceLegacyPlanReservationHostV1(
   return Object.freeze({
     async reserveLegacyImportPlanV1(input) {
       validateHostInputBeforeConnection(input)
+      const punchDetail = requireAttendancePunchDetailPlanBindingV1({ ...input, envelope: input.payload })
+      if (punchDetail && (input.legacyRowSourceKind !== 'direct_rows' || input.legacyInputFingerprint !== punchDetail.requestFingerprint)) {
+        throw new Error('ATTENDANCE_PUNCH_DETAIL_COMMAND_MISMATCH')
+      }
       const acquired = await deps.acquireConnection()
       // Freshly-acquired, idle-on-entry connection — NOT a transaction handle yet (the wrapper
       // below opens the transaction on it after `assertConnectionIsIdleV1` certifies idle).
@@ -134,6 +146,10 @@ export function createAttendanceLegacyPlanReservationHostV1(
       let discard: Error | undefined
       try {
         return await runAttendanceResultOperationTransactionV1(connection, async () => {
+        if (punchDetail) {
+          await acquireAttendanceImportTimezonePrefixV1(connection, input.orgId)
+          await acquireAttendanceCalculationRolloutLock(connection, parseCanonicalAttendanceRolloutOrgKeyV1(input.orgId), 'shared')
+        }
         const posture = await resolveSegmentCalculationPosture(connection, input.orgId)
         const org = createVerifiedAttendanceOrgIdentityV1({
           orgKey: input.orgId,
@@ -154,7 +170,9 @@ export function createAttendanceLegacyPlanReservationHostV1(
           actorPosture: input.actorPosture,
           tokenSubjectUserId: input.tokenSubjectUserId,
           orgId: input.orgId,
-          subjectScope: { kind: 'self', userId: input.actorId },
+          subjectScope: punchDetail
+            ? { kind: 'explicit_users', userIds: [punchDetail.envelope.__punchDetailInput.userId] }
+            : { kind: 'self', userId: input.actorId },
           capability: 'import',
           sourceRef,
         })
@@ -173,6 +191,19 @@ export function createAttendanceLegacyPlanReservationHostV1(
           distinctTargetCount: distinctTargets.size,
           acceptedWritePosture: org.acceptedWritePosture,
         })
+        assertAttendancePunchDetailCanonicalBranchV1(punchDetail, org.acceptedWritePosture, operationalBranch)
+        if (punchDetail) {
+          await recheckAttendanceActorLivenessInTransactionV1(connection, authorization)
+          const subjectUserId = punchDetail.envelope.__punchDetailInput.userId
+          // Platform actor exemption never waives imported-subject membership.
+          if (input.actorPosture === 'platform_admin' && input.actorId === subjectUserId) {
+            const membership = await connection.query(
+              'SELECT 1 FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND is_active = true',
+              [subjectUserId, input.orgId],
+            )
+            if (membership.rows.length !== 1) throw new AttendanceW4OperationError('ATTENDANCE_WRITE_NOT_AUTHORIZED')
+          }
+        }
         const commandFingerprint = sha256HexOfCanonicalJsonV1({
           batchId: input.batchId,
           payload: input.payload,

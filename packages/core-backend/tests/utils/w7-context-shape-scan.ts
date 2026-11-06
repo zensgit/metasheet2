@@ -289,6 +289,20 @@ export const W7_CONTEXT_SHAPE_LEDGER_V1: readonly W7ContextShapeLedgerEntryV1[] 
     family: 'hand_parser', verdict: 'MUST_WIDEN',
     note: 'X7 continuation — keeps schemaVersion 1 bound to the legacy selector (the v2-shape-with-v1-tag reject)',
   },
+  {
+    file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts',
+    text: 'const routed = routeFrozenAttendanceContextV1(value)',
+    family: 'validator_call', verdict: 'MUST_WIDEN',
+    note: 'Named punch-detail stored context shares the existing V1/V2 issuer domain. The router preserves '
+      + 'V1 optional flexPolicy and exact V2 group identity before registry claims; the daily X7 parser stays separate.',
+  },
+  {
+    file: 'packages/core-backend/src/attendance/w4c3a-punch-detail-prepare.ts',
+    text: "if (attribution.posture !== 'resolved_v2' || !isSupportedFrozenAttendanceContextV1(context)",
+    family: 'validator_call', verdict: 'MUST_WIDEN',
+    note: 'Named punch-detail preparation consumes the existing shared issuer, including group-effective V2. '
+      + 'Rejecting that supported context would block preparation before all-event calculation; identity checks remain.',
+  },
   // ---- The W7-0 DRAFT contract. Its own header states it is NOT called from
   // any production path; W7-1b wired the shape into production through the
   // ROUTER instead of calling this. Recorded rather than silently skipped, so

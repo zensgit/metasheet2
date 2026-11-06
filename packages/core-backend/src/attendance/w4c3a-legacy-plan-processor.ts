@@ -1,3 +1,6 @@
+import { createAuthorizedAttendanceWriteContextV1, recheckAttendanceActorLivenessInTransactionV1 } from './w4c0-authorization'
+import { AttendanceW4OperationError } from './w4c0-operation-contract'
+import { readAttendancePunchDetailEnvelopeV1 } from './w4c3a-punch-detail-command'
 import { acquireAttendanceImportTimezonePrefixV1, prepareAttendanceImportTimezoneSourceV1 } from './attendance-business-trip-locks'
 /**
  * W4C-3a core-owned canonical legacy-plan processor (P07/P08 recovery).
@@ -271,6 +274,35 @@ function assembleCallbacks(
       await acquireAttendanceLegacyPlanClass11V1(trx, plan, identities)
     },
     async recheckPreconditions(trx, plan) {
+      const batch = plan.manifest.batch
+      const mapping = batch.kind === 'normal' ? batch.mappingSnapshot : null
+      if (mapping !== null && typeof mapping === 'object' && !Array.isArray(mapping)
+        && (mapping as Record<string, unknown>).kind === 'punch_events_v1') {
+        // The worker verified durable digests and job binding before this callback.
+        const envelope = readAttendancePunchDetailEnvelopeV1((mapping as Record<string, unknown>).envelope)
+        if (!envelope) throw new Error('ATTENDANCE_PUNCH_DETAIL_COMMAND_MISMATCH')
+        const subjectUserId = envelope.__punchDetailInput.userId
+        const manifest = plan.manifest
+        const authorization = createAuthorizedAttendanceWriteContextV1({
+          orgId: manifest.orgId, actorId: manifest.actorId, actorPosture: manifest.actorPosture,
+          tokenSubjectUserId: manifest.tokenSubjectUserId,
+          subjectScope: { kind: 'explicit_users', userIds: [subjectUserId] },
+          capability: 'import', sourceRef: manifest.sourceRef,
+        })
+        try {
+          await recheckAttendanceActorLivenessInTransactionV1(trx, authorization)
+          if (manifest.actorPosture === 'platform_admin' && manifest.actorId === subjectUserId) {
+            const membership = await trx.query(
+              'SELECT 1 FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND is_active = true',
+              [subjectUserId, manifest.orgId],
+            )
+            if (membership.rows.length !== 1) return false
+          }
+        } catch (error) {
+          if (error instanceof AttendanceW4OperationError && error.code === 'ATTENDANCE_WRITE_NOT_AUTHORIZED') return false
+          throw error
+        }
+      }
       return lockAndRecheckAttendanceLegacyPlanPreconditionsV1(trx, plan)
     },
     async executeVerifiedPlan(trx, job, plan, registryClaim) {

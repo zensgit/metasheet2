@@ -4295,12 +4295,16 @@ paths:
     x-plugin: plugin-attendance
     post:
       summary: Preview attendance import
+      description: >-
+        Accepts unchanged daily records when inputKind is absent, or the separate punch_events_v1 format.
+        Named input never falls back to daily parsing. Existing authorization, current actor/target
+        membership, canonical posture, feature gates and commit-token policy remain enforced.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/AttendanceImportRequest' }
+            schema: { $ref: '#/components/schemas/AttendanceImportPublicRequest' }
       responses:
         '200':
           description: OK
@@ -4310,21 +4314,41 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
-                  data: { $ref: '#/components/schemas/AttendanceImportPreviewData' }
+                  data: { $ref: '#/components/schemas/AttendanceImportPreviewResponseData' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: Frozen target or canonical context does not match the named command
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '500':
+          description: Values-free import failure
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
 
   /api/attendance/import/preview-async:
     x-plugin: plugin-attendance
     post:
       summary: Enqueue attendance import preview async job
+      description: >-
+        Accepts unchanged daily records when inputKind is absent, or the separate punch_events_v1 format.
+        Named input never falls back to daily parsing. Existing authorization, current actor/target
+        membership, canonical posture, feature gates and commit-token policy remain enforced.
+        The existing async disabled response remains 404. Submission returns a job; current
+        authorization is checked again when processing or reading its result.
+        A named preview freezes its complete calculation without committing attendance records.
+        Exact retries reuse the original job and key; changed command or preview limit returns 409.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/AttendanceImportRequest' }
+            schema: { $ref: '#/components/schemas/AttendanceImportPublicRequest' }
       responses:
         '200':
           description: OK
@@ -4339,17 +4363,33 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: Frozen target or canonical context does not match the named command
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '500':
+          description: Values-free import failure
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
 
   /api/attendance/import/commit:
     x-plugin: plugin-attendance
     post:
       summary: Commit attendance import
+      description: >-
+        Accepts unchanged daily records when inputKind is absent, or the separate punch_events_v1 format.
+        Named input never falls back to daily parsing. Existing authorization, current actor/target
+        membership, canonical posture, feature gates and commit-token policy remain enforced.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/AttendanceImportRequest' }
+            schema: { $ref: '#/components/schemas/AttendanceImportPublicRequest' }
       responses:
         '200':
           description: OK
@@ -4359,21 +4399,39 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
-                  data: { $ref: '#/components/schemas/AttendanceImportResult' }
+                  data: { $ref: '#/components/schemas/AttendanceImportCommitResponseData' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: Frozen target or canonical context does not match the named command
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '500':
+          description: Values-free import failure
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
 
   /api/attendance/import/commit-async:
     x-plugin: plugin-attendance
     post:
       summary: Enqueue attendance import commit async job
+      description: >-
+        Accepts unchanged daily records when inputKind is absent, or the separate punch_events_v1 format.
+        Named input never falls back to daily parsing. Existing authorization, current actor/target
+        membership, canonical posture, feature gates and commit-token policy remain enforced.
+        The existing async disabled response remains 404. Submission returns a job; current
+        authorization is checked again when processing or reading its result.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/AttendanceImportRequest' }
+            schema: { $ref: '#/components/schemas/AttendanceImportPublicRequest' }
       responses:
         '200':
           description: OK
@@ -4388,6 +4446,18 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: Frozen target or canonical context does not match the named command
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '500':
+          description: Values-free import failure
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
 
   /api/attendance/import/jobs/{id}:
     x-plugin: plugin-attendance

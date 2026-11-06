@@ -147,6 +147,8 @@ const TABLE_BUCKETS = Object.freeze({
   attendance_import_legacy_execution_plans: 'w4_canonical',
   attendance_import_legacy_execution_plan_chunks: 'w4_canonical',
   attendance_import_legacy_terminal_responses: 'w4_canonical',
+  // Immutable named-preview transport; canonical storage is not calculation authority.
+  attendance_import_punch_preview_records: 'w4_canonical',
   attendance_import_rollback_commands: 'w4_canonical',
   attendance_import_rollback_restore_witnesses: 'w4_canonical',
   attendance_record_target_revisions: 'w4_canonical',
@@ -212,6 +214,10 @@ const P25_OPERATIONAL_TABLE_SPECS = Object.freeze({
   attendance_import_jobs: p25Spec('import_job', 'operational_transport', {
     reservedIdentityTransport: true,
     allowedIdentityAdapters: ['enqueue', 'private_worker'],
+  }),
+  attendance_import_punch_preview_records: p25Spec('durable_punch_preview', 'compatibility_transport', {
+    reservedIdentityTransport: true,
+    allowedIdentityAdapters: ['punch_preview_enqueue', 'punch_preview_worker'],
   }),
   attendance_import_template_prefs: p25Spec('template_preference', 'operational_configuration'),
   attendance_import_items_stage: p25Spec('temporary_staging', 'operational_transport'),
