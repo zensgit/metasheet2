@@ -15,8 +15,25 @@ export const VALID_TLS_MIN_VERSIONS: readonly ['TLSv1', 'TLSv1.1', 'TLSv1.2', 'T
 export function optionalString(value: unknown): string | undefined
 export function requiredString(value: unknown, field: string, code?: string): string
 export function coerceBoolean(value: unknown, fallback: boolean): boolean
-export function normalizeIdentifier(value: unknown, field?: string): string
+/**
+ * Assert that a (possibly dot-qualified, at most three-part) identifier passes the rule; throws
+ * SQLSERVER_IDENTIFIER_INVALID otherwise. VOID on purpose — it replaces `normalizeIdentifier`, whose
+ * returned string could contain spaces, `]` and SQL keywords under the G52 rule and so must never be
+ * interpolated into SQL. Quote with `quoteSqlServerIdentifier` instead.
+ */
+export function assertSqlServerIdentifier(value: unknown, field?: string): void
+/**
+ * Validate + bracket-quote a (possibly dot-qualified, at most three-part) SQL Server identifier.
+ * Unicode letters/marks/digits/underscore/space separators and a literal `]` are accepted; `]` is
+ * doubled on the way out, which is the total escape T-SQL defines for delimited identifiers.
+ */
 export function quoteSqlServerIdentifier(value: unknown, field?: string): string
+/** The same rule for ONE segment (no dot splitting) — validation and quoting in one call. */
+export function quoteSqlServerIdentifierPart(part: unknown, field?: string): string
+/** The character/length/shape rule for ONE segment; returns the segment or throws. */
+export function assertSqlServerIdentifierPart(part: unknown, field?: string): string
+/** Inverse of `quoteSqlServerIdentifier` for well-formed bracketed text; strict, throws otherwise. */
+export function unquoteSqlServerIdentifier(quoted: unknown, field?: string): string
 
 export interface SqlServerEndpointInput {
   host?: unknown
