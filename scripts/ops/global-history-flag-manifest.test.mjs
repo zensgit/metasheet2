@@ -894,6 +894,27 @@ test('stock-prep project-sheet G1 grant role list (R-35): a list, danger high, s
   )
 })
 
+test('YiDa unbound test-target list (design baseline v2.3 D20): a list, danger high, no dependsOn, every cited file real and naming the exact-list reader', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS
+  assert.ok(spec)
+  assert.equal(spec.type, 'list')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  // A list is never "activated": it cannot enter a dependsOn/conflicts rule by construction.
+  assert.equal(isActivated(spec, 'true'), false)
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+  for (const cited of spec.source.split('; ').map((entry) => entry.split('#')[0])) {
+    assert.ok(readFileSync(path.join(root, cited), 'utf8').length > 0, cited)
+  }
+  // The runtime reads this exact env name and the host index wires it; slot 1 stays the only implicit unbound target.
+  const runtime = readFileSync(path.join(root, 'packages/core-backend/src/integration/yida-owner-runtime.ts'), 'utf8')
+  assert.match(runtime, /readUnboundTestTargetRefs/)
+  assert.match(readFileSync(path.join(root, 'packages/core-backend/src/index.ts'), 'utf8'), /process\.env\.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS/)
+  assert.match(readFileSync(path.join(root, 'packages/core-backend/src/integration/yida-send-approval-service.ts'), 'utf8'),
+    /if \(slot === 1 \|\| unboundTargets\.has\(targetRef\)\) return/)
+})
+
 test('stock-prep members page switch (ADR §11.4-11.6 S5b, R-39): boolean, exact true, danger high, sourced from the plugin predicate, same literal in the host port', () => {
   const spec = GLOBAL_HISTORY_FLAG_BY_KEY.STOCK_PREP_MEMBERS_PAGE_ENABLED
   assert.ok(spec)

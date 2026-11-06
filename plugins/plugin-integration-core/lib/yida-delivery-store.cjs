@@ -9,10 +9,17 @@ const LEDGER = 'integration_yida_delivery_ledger'
 const AUDIT = 'integration_yida_delivery_audit'
 const UNIQUE_SCOPE_ROW = 'uniq_integration_yida_delivery_scope_row'
 const UNIQUE_CREATE_BUSINESS = 'uniq_integration_yida_delivery_create_business'
+// Design baseline v2.3 §3.3 (D16 a): the creation-identity fence of migration zzzz20261106110300, a partial
+// unique index over (tenant, workspace, target, creation_identity_digest) for bound CREATE rows.
+const UNIQUE_CREATE_IDENTITY = 'uniq_integration_yida_delivery_create_identity'
 const SNAPSHOT_KEYS = Object.freeze([
   'owner_id', 'target_ref', 'target_revision', 'plan_revision', 'payload_digest',
   'business_key_digest', 'credential_ref', 'credential_generation', 'intent', 'instance_id',
+  'source_record_digest', 'creation_identity_digest',
 ])
+// The two source-binding digests (physical source record; logical creation identity). Both null for a row
+// drafted from pasted rowsText, both 64-hex for a row the server read from a registered project sheet.
+const BINDING_NAMES = Object.freeze(['sourceRecordDigest', 'creationIdentityDigest'])
 // Mirrors the audit reason CHECK: 090 (first four) widened by migration zzzz20261105033000
 // (receipt_unparsed = a 2xx status line was received but its body was unusable; R-71 ⑦.1 gate 6).
 const UNKNOWN_REASONS = new Set([
@@ -21,7 +28,7 @@ const UNKNOWN_REASONS = new Set([
 const ID_RE = /^[^\u0000-\u001f\u007f]+$/u
 const DIGEST_RE = /^[0-9a-f]{64}$/
 const TOKEN_RE = /^[0-9a-f]{64}$/
-const ERROR_CODES = new Set(['INPUT', 'TOKEN', 'UNAVAILABLE', 'NOT_FOUND', 'CONFLICT', 'BUSINESS_CONFLICT', 'STATE', 'ACK']
+const ERROR_CODES = new Set(['INPUT', 'TOKEN', 'UNAVAILABLE', 'NOT_FOUND', 'CONFLICT', 'BUSINESS_CONFLICT', 'IDENTITY_CONFLICT', 'STATE', 'ACK']
   .map(code => `YIDA_DELIVERY_${code}`))
 const ownErrors = new WeakMap()
 
@@ -39,6 +46,7 @@ class YidaDeliveryStoreError extends Error {
 // private to this module, and prepare consumes it only after transaction rollback.
 const PREPARE_RACE = new YidaDeliveryStoreError('YIDA_DELIVERY_CONFLICT')
 const CREATE_BUSINESS_RACE = new YidaDeliveryStoreError('YIDA_DELIVERY_BUSINESS_CONFLICT')
+const CREATE_IDENTITY_RACE = new YidaDeliveryStoreError('YIDA_DELIVERY_IDENTITY_CONFLICT')
 
 function fail(code) { throw new YidaDeliveryStoreError(`YIDA_DELIVERY_${code}`) }
 
@@ -124,6 +132,10 @@ function snapshot(parsed) {
     : opaque(parsed.instanceId)
   if (!Number.isSafeInteger(parsed.credentialGeneration)
     || parsed.credentialGeneration < 1 || parsed.credentialGeneration > 2147483647) fail('INPUT')
+  // Absent or null = an unbound row (pasted rowsText). Both digests come together or not at all.
+  const bound = name => (Object.prototype.hasOwnProperty.call(parsed, name) && parsed[name] !== null ? digest(parsed[name]) : null)
+  const sourceRecordDigest = bound('sourceRecordDigest'), creationIdentityDigest = bound('creationIdentityDigest')
+  if ((sourceRecordDigest === null) !== (creationIdentityDigest === null)) fail('INPUT')
   return {
     owner_id: opaque(parsed.ownerId),
     target_ref: opaque(parsed.targetRef),
@@ -135,6 +147,8 @@ function snapshot(parsed) {
     credential_generation: parsed.credentialGeneration,
     intent,
     instance_id: instanceId,
+    source_record_digest: sourceRecordDigest,
+    creation_identity_digest: creationIdentityDigest,
   }
 }
 
@@ -148,16 +162,16 @@ function equalToken(left, right) {
 }
 
 function dbError(error) {
-  if (error === PREPARE_RACE || error === CREATE_BUSINESS_RACE) throw error
+  if (error === PREPARE_RACE || error === CREATE_BUSINESS_RACE || error === CREATE_IDENTITY_RACE) throw error
   throw new YidaDeliveryStoreError(ownErrors.get(error) || 'YIDA_DELIVERY_UNAVAILABLE')
 }
 
 function prepareIdentity(input) {
   const names = [
     'targetRef', 'targetRevision', 'planRevision', 'payloadDigest', 'businessKeyDigest',
-    'credentialRef', 'credentialGeneration', 'intent', 'instanceId',
+    'credentialRef', 'credentialGeneration', 'intent', 'instanceId', ...BINDING_NAMES,
   ]
-  const identity = scope(input, names, names.filter(name => name !== 'instanceId'))
+  const identity = scope(input, names, names.filter(name => name !== 'instanceId' && !BINDING_NAMES.includes(name)))
   return { identity, fixed: snapshot(identity.parsed) }
 }
 
@@ -195,6 +209,7 @@ async function prepareFixedInTransaction(trx, identity, fixed) {
     const constraint = uniqueConstraint(error)
     if (constraint === UNIQUE_SCOPE_ROW) throw PREPARE_RACE
     if (constraint === UNIQUE_CREATE_BUSINESS) throw CREATE_BUSINESS_RACE
+    if (constraint === UNIQUE_CREATE_IDENTITY) throw CREATE_IDENTITY_RACE
     throw error
   }
   if (!inserted) fail('UNAVAILABLE')
@@ -240,14 +255,17 @@ function createYidaDeliveryStore({ db } = {}) {
       try {
         return await transaction(trx => prepareFixedInTransaction(trx, identity, fixed))
       } catch (error) {
-        if (error === CREATE_BUSINESS_RACE) {
-          // A concurrent IDENTICAL operation can hit either unique index. Its
+        if (error === CREATE_BUSINESS_RACE || error === CREATE_IDENTITY_RACE) {
+          // A concurrent IDENTICAL operation can hit any of the unique indexes. Its
           // winning transaction is committed by the time PG reports 23505.
           // Re-read our original identity only after rollback, in a new tx;
           // never expose a competing operation/owner's row or private snapshot.
+          // The identity fence (D16) answers with its own code: the same logical
+          // creation identity is already reserved under this target.
+          const fenced = error === CREATE_IDENTITY_RACE ? 'IDENTITY_CONFLICT' : 'BUSINESS_CONFLICT'
           return transaction(async (trx) => {
             const existing = await trx.selectOneForUpdate(LEDGER, identity.where)
-            if (!existing) fail('BUSINESS_CONFLICT')
+            if (!existing) fail(fenced)
             if (!sameSnapshot(existing, fixed)) fail('CONFLICT')
             return { record: project(existing), reused: true }
           })

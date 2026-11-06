@@ -672,3 +672,145 @@ test('raw UTF-8 input bytes, depth and node budgets refuse before planner valida
   many.config.nodes = Array.from({ length: 20001 }, () => null)
   expectError(compileYidaDraft, YidaDraftPlanError, many, 'YIDA_DRAFT_LIMIT')
 })
+
+// ---- Source binding (design baseline v2.3 §3.3 / §7.2; D1 a′, D16): the two row digests ----
+// Synthetic binding for the five-column v2 layout above: the sheet's key column is `fld_line` (idempotency key),
+// bound to the `lineId` alias; records align with the rows of rowsText.
+function binding(rows, patch = {}) {
+  return {
+    sheetId: 'sheet_synthetic', keyFieldId: 'fld_line',
+    fieldBindings: { projectNo: 'fld_project', lineId: 'fld_line', parentCode: 'fld_parent', quantity: 'fld_qty', description: 'fld_desc' },
+    records: rows.map((entry, index) => ({ recordId: `rec_${index + 1}`, keyValue: entry.lineId, projectNo: 'DEMO-P1' })),
+    ...patch,
+  }
+}
+// Independent oracle for the two digests (the baseline formulas), never the compiler's own helper.
+function expectedBinding(bound, index, projectNo, fieldDependencies) {
+  const record = bound.records[index]
+  const sourceBinding = { sheetId: bound.sheetId, recordId: record.recordId, keyFieldId: bound.keyFieldId, keyValue: record.keyValue,
+    projectNo, fieldBindings: bound.fieldBindings, fieldDependencies }
+  return { sourceBinding,
+    sourceRecordDigest: digest({ version: 1, kind: 'yida-source-record', ...sourceBinding }),
+    creationIdentityDigest: digest({ version: 1, kind: 'yida-creation-identity', keyValue: record.keyValue, projectNo }) }
+}
+const V2_DEPENDENCIES = { project: ['fld_project'], line: ['fld_line'], parent: ['fld_parent'], qty: ['fld_qty'], description: ['fld_desc'] }
+
+test('source binding: a bound row spec carries both digests, the per-row binding and dependencies by target; the plan digest covers them', async () => {
+  const { compileYidaSendDraft, compileYidaDraft } = await modulePromise
+  const rows = [row('LINE-1', 6), row('LINE-2', 3)]
+  const bound = binding(rows)
+  const unbound = compileYidaSendDraft(input(rows))
+  const result = compileYidaSendDraft({ ...input(rows), sourceBinding: bound })
+  assertFrozenTree(result)
+  assert.deepEqual(result.source, { ...unbound.source, sourceBinding: bound })
+  // Unbound specs stay byte-identical to the pre-binding shape: no binding keys at all.
+  for (const spec of unbound.rowSpecs) assert.deepEqual(Object.keys(spec).sort(), ['businessKeyDigest', 'index', 'payloadDigest'])
+  for (const [index, spec] of result.rowSpecs.entries()) {
+    assert.deepEqual(Object.keys(spec).sort(), ['businessKeyDigest', 'creationIdentityDigest', 'index', 'payloadDigest', 'sourceBinding', 'sourceRecordDigest'])
+    assert.equal(spec.businessKeyDigest, unbound.rowSpecs[index].businessKeyDigest)
+    assert.equal(spec.payloadDigest, unbound.rowSpecs[index].payloadDigest)
+    const expected = expectedBinding(bound, index, 'DEMO-P1', V2_DEPENDENCIES)
+    assert.deepEqual(spec.sourceBinding, expected.sourceBinding)
+    assert.equal(spec.sourceRecordDigest, expected.sourceRecordDigest)
+    assert.equal(spec.creationIdentityDigest, expected.creationIdentityDigest)
+    assert.match(spec.sourceRecordDigest, /^[0-9a-f]{64}$/); assert.match(spec.creationIdentityDigest, /^[0-9a-f]{64}$/)
+  }
+  // Both digests enter the plan digest (sorted row entries), so a bound draft is a different operation.
+  assert.notEqual(result.planDigest, unbound.planDigest)
+  assert.equal(result.planDigest, digest({ version: 1, kind: 'yida-local-plan', locator: result.locator, keyDefinition: result.keyDefinition,
+    intent: 'create', rows: result.rowSpecs.map(({ businessKeyDigest, payloadDigest, sourceRecordDigest, creationIdentityDigest }) =>
+      ({ businessKeyDigest, payloadDigest, sourceRecordDigest, creationIdentityDigest }))
+      .sort((left, right) => compareCodePoints(left.businessKeyDigest, right.businessKeyDigest)) }))
+  // The key definition, locator and business keys are binding-independent (the seven-key fence is unchanged).
+  assert.equal(result.keyDefinitionDigest, unbound.keyDefinitionDigest)
+  assert.equal(result.locatorDigest, unbound.locatorDigest)
+  // The initialization entry accepts a binding too (same compiler), without changing the v2 layout rules.
+  assert.equal(compileYidaDraft({ ...input(rows), sourceBinding: bound }).planDigest, result.planDigest)
+})
+
+test('source binding: the identity digest is stable across a draft rebuild and distinct per allocated project', async () => {
+  const { compileYidaSendDraft } = await modulePromise
+  const rows = [row('LINE-1', 6)]
+  const bound = binding(rows)
+  const first = compileYidaSendDraft({ ...input(rows), sourceBinding: bound })
+  const again = compileYidaSendDraft({ ...input(rows), sourceBinding: bound })
+  assert.deepEqual(again.rowSpecs, first.rowSpecs); assert.equal(again.planDigest, first.planDigest)
+  // A rebuilt draft whose unrelated column changed: same identity, same source record, a new plan digest.
+  const changed = [{ ...row('LINE-1', 6), description: 'synthetic corrected description' }]
+  const rebuilt = compileYidaSendDraft({ ...input(changed), sourceBinding: binding(changed) })
+  assert.equal(rebuilt.rowSpecs[0].creationIdentityDigest, first.rowSpecs[0].creationIdentityDigest)
+  assert.equal(rebuilt.rowSpecs[0].sourceRecordDigest, first.rowSpecs[0].sourceRecordDigest)
+  assert.notEqual(rebuilt.rowSpecs[0].payloadDigest, first.rowSpecs[0].payloadDigest)
+  assert.notEqual(rebuilt.planDigest, first.planDigest)
+  // The same key under a NEW physical record (deleted and re-created): same identity, another source record.
+  const recreated = compileYidaSendDraft({ ...input(rows), sourceBinding: binding(rows, { records: [{ recordId: 'rec_new', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }] }) })
+  assert.equal(recreated.rowSpecs[0].creationIdentityDigest, first.rowSpecs[0].creationIdentityDigest)
+  assert.notEqual(recreated.rowSpecs[0].sourceRecordDigest, first.rowSpecs[0].sourceRecordDigest)
+  // Another sheet (moved registration): same identity again, another source record.
+  const moved = compileYidaSendDraft({ ...input(rows), sourceBinding: binding(rows, { sheetId: 'sheet_other' }) })
+  assert.equal(moved.rowSpecs[0].creationIdentityDigest, first.rowSpecs[0].creationIdentityDigest)
+  assert.notEqual(moved.rowSpecs[0].sourceRecordDigest, first.rowSpecs[0].sourceRecordDigest)
+  // A different key value or project is another identity.
+  const otherKey = compileYidaSendDraft({ ...input([row('LINE-9', 6)]), sourceBinding: binding([row('LINE-9', 6)]) })
+  assert.notEqual(otherKey.rowSpecs[0].creationIdentityDigest, first.rowSpecs[0].creationIdentityDigest)
+  // Allocation: every expanded row of one source record carries its allocated project; identities differ per project,
+  // the record is shared, and the project column of the expanded row is the project of its identity.
+  const split = compileYidaSendDraft({ ...input(rows, config(), allocation('equal_integer', ['DEMO-P1', 'DEMO-P2'])), sourceBinding: bound })
+  assert.equal(split.rowSpecs.length, 2)
+  assert.deepEqual(split.rowSpecs.map(spec => spec.sourceBinding.projectNo), ['DEMO-P1', 'DEMO-P2'])
+  assert.deepEqual(split.rowSpecs.map(spec => spec.sourceBinding.recordId), ['rec_1', 'rec_1'])
+  assert.notEqual(split.rowSpecs[0].creationIdentityDigest, split.rowSpecs[1].creationIdentityDigest)
+  assert.equal(split.rowSpecs[0].creationIdentityDigest, first.rowSpecs[0].creationIdentityDigest)
+  for (const [index, spec] of split.rowSpecs.entries()) {
+    assert.equal(split.plan.rows[index].payload.project, spec.sourceBinding.projectNo)
+    const expected = expectedBinding(bound, 0, spec.sourceBinding.projectNo, V2_DEPENDENCIES)
+    assert.equal(spec.sourceRecordDigest, expected.sourceRecordDigest); assert.equal(spec.creationIdentityDigest, expected.creationIdentityDigest)
+  }
+})
+
+test('source binding: v3 dependencies follow the transform (copy primary, concat parts, no constant) through the alias map', async () => {
+  const { compileYidaSendDraft } = await modulePromise
+  const { createYidaTransformExample, transformDependencies } = await plannerPromise
+  const example = createYidaTransformExample()
+  const rows = JSON.parse(example.text)
+  const columns = [...new Set(example.config.fieldMap.flatMap(entry => transformDependencies(entry, example.config)))]
+  const fieldBindings = Object.fromEntries(columns.map(column => [column, 'fld_' + column]))
+  const keySource = example.config.fieldMap.find(entry => entry.transform === 'direct' && entry.target === 'sourceLineId')?.source
+    ?? example.config.fieldMap.find(entry => entry.transform === 'direct').source
+  const bound = { sheetId: 'sheet_v3', keyFieldId: fieldBindings[keySource], fieldBindings,
+    records: rows.map((entry, index) => ({ recordId: `rec_${index}`, keyValue: String(entry[keySource]), projectNo: 'DEMO-P1' })) }
+  const result = compileYidaSendDraft({ config: example.config, rowsText: example.text, allocation: { ...example.allocation, projects: ['DEMO-P1'] }, sourceBinding: bound })
+  const dependencies = result.rowSpecs[0].sourceBinding.fieldDependencies
+  for (const entry of example.config.fieldMap) {
+    const expected = transformDependencies(entry, example.config).map(column => fieldBindings[column]).sort()
+    if (expected.length === 0) assert.equal(Object.hasOwn(dependencies, entry.target), false, entry.target)
+    else assert.deepEqual(dependencies[entry.target], expected, entry.target)
+  }
+  const copy = example.config.fieldMap.find(entry => entry.transform === 'copy')
+  const primary = example.config.fieldMap.find(entry => entry.transform === 'direct' && entry.target === copy.copyOf)
+  assert.deepEqual(dependencies[copy.target], ['fld_' + primary.source])
+  const concat = example.config.fieldMap.find(entry => entry.transform === 'concat')
+  assert.deepEqual(dependencies[concat.target], concat.parts.filter(part => part.source).map(part => 'fld_' + part.source).sort())
+  assert.equal(example.config.fieldMap.some(entry => entry.transform === 'constant'), true)
+})
+
+test('source binding: a malformed, misaligned or smuggled binding is a fixed INPUT refusal with no plan', async () => {
+  const { compileYidaSendDraft, YidaDraftPlanError } = await modulePromise
+  const rows = [row('LINE-1', 6), row('LINE-2', 3)]
+  const reject = (patch) => expectError(compileYidaSendDraft, YidaDraftPlanError, { ...input(rows), sourceBinding: binding(rows, patch) }, 'YIDA_DRAFT_INPUT')
+  // The key the server read must be what the planner sees in that row's key column.
+  reject({ records: [{ recordId: 'rec_1', keyValue: 'LINE-OTHER', projectNo: 'DEMO-P1' }, { recordId: 'rec_2', keyValue: 'LINE-2', projectNo: 'DEMO-P1' }] })
+  // One record per source row, distinct record ids.
+  reject({ records: [{ recordId: 'rec_1', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }] })
+  reject({ records: [{ recordId: 'rec_1', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }, { recordId: 'rec_1', keyValue: 'LINE-2', projectNo: 'DEMO-P1' }] })
+  // The key column must be one of the bound columns; aliases are planner identifiers; ids are opaque text.
+  reject({ keyFieldId: 'fld_unbound' })
+  reject({ fieldBindings: { 'bad alias': 'fld_x', lineId: 'fld_line' } })
+  reject({ fieldBindings: { projectNo: 'fld_line', lineId: 'fld_line' } })
+  reject({ sheetId: ' sheet ' })
+  for (const extra of [{ extra: true }, { sheetId: undefined }]) {
+    expectError(compileYidaSendDraft, YidaDraftPlanError, { ...input(rows), sourceBinding: { ...binding(rows), ...extra } }, 'YIDA_DRAFT_INPUT')
+  }
+  expectError(compileYidaSendDraft, YidaDraftPlanError, { ...input(rows), sourceBinding: null }, 'YIDA_DRAFT_INPUT')
+  expectError(compileYidaSendDraft, YidaDraftPlanError, { ...input(rows), sourceBinding: binding(rows), extra: 1 }, 'YIDA_DRAFT_INPUT')
+})

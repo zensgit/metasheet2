@@ -38,7 +38,8 @@ function prepared(selection, payloadDigest) {
 // isolation fake: BEGIN/SET/COMMIT are rejected. Atomicity/locks are PG proofs.
 async function fixture(mode = 'original', alternateFactory) {
   const [{ createYidaSendAuthorityPrimitives }, { compileYidaSendDraft: compileYidaDraft }, { createYidaProtocolExample }] = await modules
-  const key = randomBytes(32), calls = [], state = Object.fromEntries([TARGET, MATERIAL, DRAFT, OP, ROWS, LEDGER, AUDIT, DRAFT_AUDIT].map(name => [name, []]))
+  const key = randomBytes(32), calls = [], state = Object.fromEntries([TARGET, MATERIAL, DRAFT, OP, ROWS, LEDGER, AUDIT, DRAFT_AUDIT,
+    'integration_stock_prep_project_target'].map(name => [name, []]))
   const faults = { query: null, audit: null, wrapped: true, onQuery: null }
   const security = {
     async encrypt(text) {
@@ -126,7 +127,9 @@ for (const mode of ['original', 'equal_integer', 'equal_decimal_exact']) {
     assert.equal(Object.isFrozen(selected) && Object.isFrozen(selected.selectedRow) && Object.isFrozen(selected.plan.rows), true)
     assert.deepEqual(Object.keys(selected).sort(), ['tenantId', 'workspaceId', 'ownerId', 'operationId', 'rowKey', 'targetRef',
       'targetRevision', 'planRevision', 'credentialRef', 'credentialGeneration', 'businessKeyDigest', 'rowPayloadDigest', 'planDigest',
-      'config', 'selectedRow', 'source', 'plan'].sort())
+      'sourceRecordDigest', 'creationIdentityDigest', 'sourceBinding', 'config', 'selectedRow', 'source', 'plan'].sort())
+    // A pasted (unbound) draft: no source binding, both digests null (design baseline v2.3 §7.2).
+    assert.deepEqual([selected.sourceRecordDigest, selected.creationIdentityDigest, selected.sourceBinding], [null, null, null])
     assert.equal(selected.targetRef, f.state[TARGET][0].target_ref)
     assert.notEqual(selected.targetRef, f.draft.target.target_ref)
     assert.equal(selected.targetRevision, 'evidence-1'); assert.equal(selected.planRevision, f.draft.compiled.planDigest)
@@ -151,10 +154,12 @@ test('execution digest is the original runner formula, binds grant and requires 
   const f = await fixture('equal_integer'), selected = await f.port.resolveSelectionInTransaction(f.trx, f.selection(f.draft, 2))
   const authorization = grant(), payload = selected.plan.rows[2], intent = 'create'
   const data = { ...payload.protocolPreview.data, formDataJson: stableCanonicalStringify(payload.payload) }
+  // Version 2 (design baseline v2.3 §7.2, D18): the formula also covers the two source-binding digests, null here.
   const expected = createHash('sha256').update(stableCanonicalStringify({
-    version: 1, grantRef: authorization.grantRef, expiresAt: authorization.expiresAt,
+    version: 2, grantRef: authorization.grantRef, expiresAt: authorization.expiresAt,
     actorId: authorization.actorId, targetRef: selected.targetRef, targetRevision: selected.targetRevision,
     planRevision: selected.planRevision, intent, data, formUuid: selected.config.target.formUuid,
+    sourceRecordDigest: null, creationIdentityDigest: null,
   })).digest('hex')
   assert.equal(f.port.executionPayloadDigest(selected, authorization), expected)
   assert.notEqual(f.port.executionPayloadDigest(selected, { ...authorization, grantRef: 'synthetic-other-grant' }), expected)
@@ -683,9 +688,10 @@ for (const mode of ['original', 'equal_integer']) {
     const authorization = grant()
     const data = { ...selected.plan.rows[index].protocolPreview.data, formDataJson: stableCanonicalStringify(preview.payload) }
     assert.equal(f.port.executionPayloadDigest(selected, authorization), createHash('sha256').update(stableCanonicalStringify({
-      version: 1, grantRef: authorization.grantRef, expiresAt: authorization.expiresAt, actorId: authorization.actorId,
+      version: 2, grantRef: authorization.grantRef, expiresAt: authorization.expiresAt, actorId: authorization.actorId,
       targetRef: selected.targetRef, targetRevision: selected.targetRevision, planRevision: selected.planRevision,
-      intent: 'create', data, formUuid: selected.config.target.formUuid })).digest('hex'))
+      intent: 'create', data, formUuid: selected.config.target.formUuid,
+      sourceRecordDigest: null, creationIdentityDigest: null })).digest('hex'))
     for (const target of Object.keys(preview.payload)) assert.equal(selected.config.fieldCatalog.some(item => item.id === target), true)
     assert.deepEqual(f.port.sendBudget(selected, authorization), { withinBudget: true })
     assert.deepEqual(f.port.draftSendBudget(source), { withinBudget: true })
@@ -758,4 +764,94 @@ test('R-71 ⑦.3 C1: at the exact draft-time edge the approval-time budget still
     assert.deepEqual(f.port.sendBudget(selected, { grantRef: randomUUID(), expiresAt: Date.now() + 900000, actorId: context.ownerId }),
       { withinBudget: true })
   }
+})
+
+// ---- Source binding (design baseline v2.3 §7.2): bound drafts, bound selections, the registry check at admission ----
+const REGISTRY = 'integration_stock_prep_project_target'
+function boundSource(f, index = 0) {
+  const rows = JSON.parse(f.source.rowsText)
+  const keySource = f.source.config.businessKey[1]
+  const fieldBindings = Object.fromEntries(f.source.config.fieldMap.map(entry => [entry.source, 'fld_' + entry.source]))
+  return { ...f.source, sourceBinding: { sheetId: 'sheet_registered', keyFieldId: fieldBindings[keySource], fieldBindings,
+    records: rows.map((row, ordinal) => ({ recordId: `rec_${ordinal}`, keyValue: String(row[keySource]), projectNo: 'DEMO-P1' })) } }
+}
+function registryRow(patch = {}) {
+  return { id: randomUUID(), tenant_id: context.tenantId, project_no: 'DEMO-P1', sheet_id: 'sheet_registered', object_id: 'synthetic-object', status: 'active', ...patch }
+}
+
+test('a bound draft is written with both row digests; its selection carries them and the per-row binding; the digest covers them', async () => {
+  const f = await fixture(), [, { compileYidaSendDraft }] = await modules
+  const source = boundSource(f)
+  const made = await f.port.prepareDraftInTransaction(f.trx, source)
+  assert.equal(made.reused, false)
+  const compiled = compileYidaSendDraft(source)
+  const members = f.state[ROWS].filter(row => row.operation_id === made.operationId).sort((a, b) => a.ordinal - b.ordinal)
+  assert.deepEqual(members.map(row => [row.source_record_digest, row.creation_identity_digest]),
+    compiled.rowSpecs.map(spec => [spec.sourceRecordDigest, spec.creationIdentityDigest]))
+  assert.equal(members.every(row => /^[0-9a-f]{64}$/.test(row.source_record_digest) && /^[0-9a-f]{64}$/.test(row.creation_identity_digest)), true)
+  // The unbound draft of the same rows is another operation with null digests (SR5, draft level).
+  assert.equal(f.state[ROWS].filter(row => row.operation_id === f.draft.operation.operation_id)
+    .every(row => row.source_record_digest === undefined && row.creation_identity_digest === undefined), true)
+  const selected = await f.port.resolveSelectionInTransaction(f.trx, { operationId: made.operationId, rowKey: members[0].row_key })
+  assert.equal(selected.sourceRecordDigest, compiled.rowSpecs[0].sourceRecordDigest)
+  assert.equal(selected.creationIdentityDigest, compiled.rowSpecs[0].creationIdentityDigest)
+  assert.deepEqual(selected.sourceBinding, compiled.rowSpecs[0].sourceBinding)
+  assert.equal(Object.isFrozen(selected.sourceBinding), true)
+  // Version 2 digest: the binding digests are inputs, so the same payload under another record is another digest.
+  const authorization = grant(), payload = selected.plan.rows[0]
+  const data = { ...payload.protocolPreview.data, formDataJson: stableCanonicalStringify(payload.payload) }
+  assert.equal(f.port.executionPayloadDigest(selected, authorization), createHash('sha256').update(stableCanonicalStringify({
+    version: 2, grantRef: authorization.grantRef, expiresAt: authorization.expiresAt, actorId: authorization.actorId,
+    targetRef: selected.targetRef, targetRevision: selected.targetRevision, planRevision: selected.planRevision,
+    intent: 'create', data, formUuid: selected.config.target.formUuid,
+    sourceRecordDigest: selected.sourceRecordDigest, creationIdentityDigest: selected.creationIdentityDigest })).digest('hex'))
+  const unboundSelected = await f.port.resolveSelectionInTransaction(f.trx, f.selection())
+  assert.notEqual(f.port.executionPayloadDigest(unboundSelected, authorization), f.port.executionPayloadDigest(selected, authorization))
+  assert.deepEqual(f.port.sendBudget(selected, authorization), { withinBudget: true })
+  assert.deepEqual(f.port.draftSendBudget(source), { withinBudget: true })
+  // A durable digest that no longer matches the recompiled row is refused on read.
+  members[0].creation_identity_digest = 'e'.repeat(64)
+  await rejected(f.port.resolveSelectionInTransaction(f.trx, { operationId: made.operationId, rowKey: members[0].row_key }))
+})
+
+test('admission of a bound row reads the project registry in the same transaction and refuses an absent, archived or moved registration', async () => {
+  const f = await fixture()
+  const made = await f.port.prepareDraftInTransaction(f.trx, boundSource(f))
+  const member = f.state[ROWS].filter(row => row.operation_id === made.operationId).sort((a, b) => a.ordinal - b.ordinal)[0]
+  const selected = await f.port.resolveSelectionInTransaction(f.trx, { operationId: made.operationId, rowKey: member.row_key })
+  const authorization = grant(), payloadDigest = f.port.executionPayloadDigest(selected, authorization)
+  const request = () => ({ ...prepared(selected, payloadDigest), sourceRecordDigest: selected.sourceRecordDigest,
+    creationIdentityDigest: selected.creationIdentityDigest, sourceBinding: selected.sourceBinding })
+  // No registry row for the project: CONFLICT, nothing written.
+  await rejected(f.port.prepareInTransaction(f.trx, request()), 'CONFLICT')
+  assert.equal(f.state[LEDGER].length, 0)
+  // Archived registration, and a registration that names another sheet: CONFLICT.
+  f.state[REGISTRY].push(registryRow({ status: 'archived' }))
+  await rejected(f.port.prepareInTransaction(f.trx, request()), 'CONFLICT')
+  f.state[REGISTRY][0] = registryRow({ sheet_id: 'sheet_other' })
+  await rejected(f.port.prepareInTransaction(f.trx, request()), 'CONFLICT')
+  // Another tenant's registration of the same project does not count.
+  f.state[REGISTRY][0] = registryRow({ tenant_id: 'synthetic-other-tenant' })
+  await rejected(f.port.prepareInTransaction(f.trx, request()), 'CONFLICT')
+  assert.equal(f.state[LEDGER].length, 0)
+  // The three binding keys come together: a partial set is INPUT.
+  for (const partial of [{ sourceRecordDigest: selected.sourceRecordDigest }, { sourceBinding: selected.sourceBinding },
+    { sourceRecordDigest: selected.sourceRecordDigest, creationIdentityDigest: null, sourceBinding: selected.sourceBinding }]) {
+    await rejected(f.port.prepareInTransaction(f.trx, { ...prepared(selected, payloadDigest), ...partial }), 'INPUT')
+  }
+  // Active registration naming the bound sheet: prepared, with both digests on the ledger row.
+  f.state[REGISTRY][0] = registryRow()
+  const result = await f.port.prepareInTransaction(f.trx, request())
+  assert.equal(result.reused, false); assert.equal(result.record.status, 'prepared')
+  assert.equal(f.state[LEDGER][0].source_record_digest, selected.sourceRecordDigest)
+  assert.equal(f.state[LEDGER][0].creation_identity_digest, selected.creationIdentityDigest)
+  assert.equal(f.calls.some(sql => sql.startsWith(`SELECT * FROM "${REGISTRY}"`)), true)
+  // Unbound admission (all three null, or absent) never reads the registry.
+  const unbound = await f.port.resolveSelectionInTransaction(f.trx, f.selection())
+  const unboundDigest = f.port.executionPayloadDigest(unbound, authorization)
+  f.calls.length = 0
+  const plain = await f.port.prepareInTransaction(f.trx, { ...prepared(unbound, unboundDigest), sourceRecordDigest: null, creationIdentityDigest: null, sourceBinding: null })
+  assert.equal(plain.reused, false)
+  assert.equal(f.calls.some(sql => sql.includes(REGISTRY)), false)
+  assert.deepEqual([f.state[LEDGER][1].source_record_digest, f.state[LEDGER][1].creation_identity_digest], [null, null])
 })

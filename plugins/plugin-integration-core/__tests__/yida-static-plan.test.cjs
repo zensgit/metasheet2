@@ -887,3 +887,25 @@ test('R-71 ⑦.3: source columns are sorted, de-duplicated, order-independent an
     assert.throws(() => yidaTransformSourceColumns(invalid), { code: 'YIDA_STATIC_CONFIG_INVALID' })
   }
 })
+
+test('source binding (Y4): transformDependencies names the columns ONE entry reads, by kind, and refuses unknown kinds', async () => {
+  const { transformDependencies, validateYidaStaticConfig, YidaStaticPlanError } = await modulePromise
+  const config = validateYidaStaticConfig(transformLayout(TRANSFORM_COLUMN_CASES.copy.entry)).normalized
+  const copy = config.fieldMap.find((entry) => entry.transform === 'copy')
+  assert.deepEqual(transformDependencies(copy, config), ['colKey'])
+  assert.deepEqual(transformDependencies(TRANSFORM_COLUMN_CASES.direct.entry), ['colDirect'])
+  assert.deepEqual(transformDependencies(TRANSFORM_COLUMN_CASES.constant.entry), [])
+  assert.deepEqual(transformDependencies(TRANSFORM_COLUMN_CASES.concat.entry), ['colA', 'colB', 'colKey'])
+  assert.equal(Object.isFrozen(transformDependencies(TRANSFORM_COLUMN_CASES.concat.entry)), true)
+  // Duplicated parts are reported once, sorted by code point.
+  assert.deepEqual(transformDependencies({ transform: 'concat', parts: [{ source: 'z' }, { source: 'a' }, { source: 'z' }],
+    separator: '-', blank: 'skip', target: 'extra', type: 'string', required: false }), ['a', 'z'])
+  // A v2 entry has no transform and binds exactly its source column.
+  assert.deepEqual(transformDependencies({ source: 'projectNo', target: 'project', type: 'string', required: true }), ['projectNo'])
+  for (const bad of [{ transform: 'generated', target: 'x' }, { transform: 'copy', copyOf: 'missing', target: 'x' }, { target: 'x' },
+    { source: 'bad alias', target: 'x' }, null, [], 'direct']) {
+    assert.throws(() => transformDependencies(bad, config), { code: 'YIDA_STATIC_CONFIG_INVALID' })
+  }
+  assert.throws(() => transformDependencies(copy), { code: 'YIDA_STATIC_CONFIG_INVALID' })
+  assert.ok(new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID'))
+})
