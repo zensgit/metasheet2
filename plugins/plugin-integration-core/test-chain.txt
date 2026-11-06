@@ -307,6 +307,7 @@ node __tests__/yida-form-transport.test.cjs
 node __tests__/yida-initialization-producer.test.cjs
 node __tests__/yida-mapping-v3-parity.test.cjs
 node __tests__/yida-mapping-v3.test.cjs
+node __tests__/yida-material-code.test.cjs
 node __tests__/yida-owner-runtime-factory.test.cjs
 node __tests__/yida-owner-send-port.test.cjs
 node __tests__/yida-readback-observation.test.cjs
