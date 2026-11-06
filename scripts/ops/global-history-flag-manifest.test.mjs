@@ -103,6 +103,43 @@ test('INTEGRATION_YIDA_CONNECTION_TEST_ENABLED manifest entry: exact true, dange
   for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false)
 })
 
+// YiDa 发料确认日期回写 (slice Y9a): the switch is danger high, exact literal only, read by the plugin module through
+// the exported predicate; the target list is a list (never a dependsOn). Both are read in the plugin lib, so the
+// completeness scan below covers the INTEGRATION_YIDA_ISSUE_CONFIRM_ family there (a phantom otherwise).
+test('INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED + _TARGET_REFS: exact true, danger high, plugin predicate and list parser', async () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs#issueConfirmWritebackEnabled')
+  assert.match(spec.purpose, /O-level/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', 'True', ' true', 'true ', '1', 'yes', 'on', '', undefined]) {
+    assert.equal(isActivated(spec, value), false, JSON.stringify(value))
+  }
+  // The manifest semantics are the reader semantics: the exported predicate gives the same answer on the same matrix.
+  const { createRequire } = await import('node:module')
+  const plugin = createRequire(import.meta.url)('../../plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs')
+  for (const value of ['true', 'TRUE', 'True', ' true', 'true ', '1', 'yes', 'on', '', undefined]) {
+    assert.equal(plugin.issueConfirmWritebackEnabled({ INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED: value }), isActivated(spec, value), JSON.stringify(value))
+  }
+  const source = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs'), 'utf8')
+  assert.ok(source.includes("ISSUE_CONFIRM_WRITEBACK_ENABLED_ENV = 'INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED'"))
+  assert.ok(source.includes("env[ISSUE_CONFIRM_WRITEBACK_ENABLED_ENV] === 'true'"))
+  const list = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS
+  assert.ok(list)
+  assert.equal(list.type, 'list')
+  assert.equal(list.danger, 'high')
+  assert.deepEqual(list.dependsOn, [])
+  assert.equal(list.source, 'plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs#parseIssueConfirmTargetRefs')
+  assert.equal(isActivated(list, 'true'), false)
+  assert.ok(source.includes("ISSUE_CONFIRM_TARGET_REFS_ENV = 'INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS'"))
+})
+
 // ASSUMPTION(task-m4): [own-28] the TASKS_ENABLED entry: danger medium, both read points, and the
 // M4 migration the task routes depend on (named as it is on disk, so a rename is followed here).
 test('TASKS_ENABLED manifest entry: danger medium, both read points, and the M4 migration on disk', () => {
@@ -428,6 +465,9 @@ function globalHistoryFlagsInSource() {
   ].filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
   // Derive the reviewed owner-send switch from actual core reads, including phantom detection.
   const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  // YiDa 发料确认日期回写 (slice Y9a): the switch and the target list are read by the PLUGIN module
+  // (lib/yida-issue-confirm-writeback.cjs), so this one family is scanned in the plugin lib, the members-page precedent.
+  const yidaIssueConfirm = grepPluginFlagTokens('INTEGRATION_YIDA_ISSUE_CONFIRM_[A-Z_0-9]+').filter((t) => !t.endsWith('_'))
   const userRecycle = grepFlagTokens('USER_RECYCLE_[A-Z_0-9]+_ENABLED')
   // #4196 Class-B outbound two-phase ledger switch (S0-c, AGENTS.md: every new env flag is registered
   // here). One family by name shape, scanned where the executor and retry-eligibility read it.
@@ -437,7 +477,7 @@ function globalHistoryFlagsInSource() {
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner, ...attendanceCancelRound, ...userRecycle, ...automationClassB])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner, ...yidaIssueConfirm, ...attendanceCancelRound, ...userRecycle, ...automationClassB])].sort()
 }
 
 // #4196 Class-B outbound ledger switch (S0-c): default OFF, exact literal only, danger high, sourced from its
