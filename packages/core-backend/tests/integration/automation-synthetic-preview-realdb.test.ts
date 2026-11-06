@@ -116,10 +116,13 @@ describeDatabase('synthetic integration preview: real PostgreSQL admission, revo
 
   async function waitUntilBlocked(pid: number): Promise<void> {
     // Condition barrier: the revoker's statement is waiting on a row lock held by the admission.
-    for (let attempt = 0; attempt < 500; attempt += 1) {
+    // Bounded by wall time (5 s, polled every 5 ms), not by an iteration count.
+    const deadline = Date.now() + 5_000
+    for (;;) {
       const state = (await observer.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1', [pid])).rows[0]
       if (state?.wait_event_type === 'Lock') return
-      await new Promise((resolve) => setImmediate(resolve))
+      if (Date.now() >= deadline) break
+      await new Promise((resolve) => setTimeout(resolve, 5))
     }
     throw new Error('revoker never waited on the admission lock')
   }
@@ -288,27 +291,57 @@ describeDatabase('synthetic integration preview: real PostgreSQL admission, revo
       expect((row.steps as Array<{ output?: { pages?: number } }>)[0].output?.pages).toBe(1)
     })
 
-    it('lock order: a revoker blocks on the admission locks until COMMIT; the NEXT checkpoint sees the revocation', async () => {
+    async function arrangeWriteGrantIntegrator() {
+      await admin.query('DELETE FROM user_roles WHERE user_id = $1', [ACTOR])
+      await admin.query("INSERT INTO user_roles VALUES ($1, 'synthetic-integrator')", [ACTOR])
+      await admin.query("INSERT INTO role_permissions VALUES ('synthetic-integrator', 'integration:admin'), ('synthetic-integrator', 'workflow:write')")
+      await admin.query("INSERT INTO user_namespace_admissions VALUES ($1, 'integration', true)", [ACTOR])
+      await admin.query("INSERT INTO spreadsheet_permissions VALUES ($1, 'spreadsheet:write', 'user', $2)", [SHEET, ACTOR])
+    }
+
+    // One case per authority relation whose row the admission holds FOR SHARE (L1 rule owner, L3 tenant
+    // membership, L3/L4 role binding, L5 sheet grant — the linearization point). Each revocation must
+    // block on the admission's row lock until COMMIT and be seen by the NEXT checkpoint.
+    it.each([
+      { relation: 'automation_rules', arrange: async () => undefined,
+        revoke: { sql: 'UPDATE automation_rules SET created_by = $1 WHERE id = $2', params: [OTHER, RULE] }, code: 'DENIED' },
+      { relation: 'user_orgs', arrange: async () => undefined,
+        revoke: { sql: 'UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2', params: [ACTOR, TENANT] }, code: 'DENIED' },
+      { relation: 'spreadsheet_permissions', arrange: arrangeWriteGrantIntegrator,
+        revoke: { sql: "UPDATE spreadsheet_permissions SET perm_code = 'spreadsheet:read' WHERE sheet_id = $1 AND subject_id = $2", params: [SHEET, ACTOR] }, code: 'DENIED' },
+      { relation: 'user_roles', arrange: async () => undefined,
+        revoke: { sql: "DELETE FROM user_roles WHERE user_id = $1 AND role_id = 'admin'", params: [ACTOR] }, code: 'DENIED' },
+    ] as const)('lock order ($relation): a revoker blocks on the admission row lock until COMMIT; the NEXT checkpoint refuses $code', async ({ relation, arrange, revoke, code }) => {
+      await arrange()
       let revocationDone = false
       let revocation: Promise<unknown> | undefined
-      beforeCommit = async (index) => {
+      let waitedOn: string[] = []
+      let blockedBy: number[] = []
+      let admissionPid = -1
+      beforeCommit = async (index, client) => {
         // Transaction 3 = the page-2 checkpoint, locks held, not yet committed.
         if (index !== 3) return
-        revocation = revoker.query("DELETE FROM user_roles WHERE user_id = $1 AND role_id = 'admin'", [ACTOR])
-          .then(() => { revocationDone = true })
+        admissionPid = Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+        revocation = revoker.query(revoke.sql, [...revoke.params]).then(() => { revocationDone = true })
         await waitUntilBlocked(revokerPid)
         expect(revocationDone).toBe(false)
+        // A row-lock waiter holds the tuple lock on the contended relation and waits (ungranted) on the
+        // admission transaction; read both so the relation and the blocker are asserted, not inferred.
         const locks = (await observer.query(
-          `SELECT c.relname FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
-            WHERE l.pid = $1 AND NOT l.granted`, [revokerPid])).rows.map((row) => row.relname)
-        expect(locks.length === 0 || locks.includes('user_roles')).toBe(true)
+          `SELECT l.locktype, l.granted, c.relname FROM pg_locks l LEFT JOIN pg_class c ON c.oid = l.relation
+            WHERE l.pid = $1 AND (NOT l.granted OR l.locktype = 'tuple')`, [revokerPid])).rows as Array<{ locktype: string, granted: boolean, relname: string | null }>
+        waitedOn = [...new Set(locks.map((row) => row.relname).filter((name): name is string => typeof name === 'string'))]
+        expect(locks.some((row) => !row.granted)).toBe(true)
+        blockedBy = ((await observer.query('SELECT pg_blocking_pids($1) AS pids', [revokerPid])).rows[0].pids as number[]).map(Number)
       }
       const result = await refusal(runtime().run(scope, BODY))
       await revocation
       expect(revocationDone).toBe(true)
+      expect(waitedOn).toEqual([relation])
+      expect(blockedBy).toEqual([admissionPid])
       // Page 2 was admitted before the revocation committed and ran (the disclosed gap); the consumer
       // checkpoint after it refused, so no preview was compiled or returned.
-      expect(result).toBe('DENIED')
+      expect(result).toBe(code)
       expect(providerCalls).toHaveLength(2)
       const [row] = await executions()
       expect((row.steps as Array<{ status: string }>).map((step) => step.status)).toEqual(['success', 'failed'])

@@ -81,10 +81,10 @@ describe('integration preview route', () => {
   })
 
   it('a permission-resolution failure is a fixed 503, never a fall-through', async () => {
-    resolveSheetCapabilities.mockRejectedValue(new Error('connect ECONNREFUSED 10.0.0.1:5432 password=x'))
+    resolveSheetCapabilities.mockRejectedValue(new Error('connect ECONNREFUSED SYN-HOST:1 SYN-SECRET'))
     const res = await request(pinned.url()).post(PATH).send(BODY)
     expect(res.status).toBe(503)
-    expect(JSON.stringify(res.body)).not.toMatch(/ECONNREFUSED|10\.0\.0\.1|password/)
+    expect(JSON.stringify(res.body)).not.toMatch(/ECONNREFUSED|SYN-HOST|SYN-SECRET/)
     expect(previewIntegrationPlan).not.toHaveBeenCalled()
   })
 
