@@ -398,4 +398,60 @@ describe('useAttendanceAdminPayroll', () => {
 
     expect(adminForbidden.value).toBe(true)
   })
+
+  // Same changed-fields rule as AttendanceView.vue, on a cycle bound to a template. `stored` plays the server:
+  // fields present in the /update body replace it, the rest keep their values.
+  function cycleEditFetch(stored: { id: string; templateId: string | null; name: string; startDate: string; endDate: string; status: string }) {
+    const updates: Record<string, unknown>[] = []
+    const apiFetch = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input === `/api/attendance/payroll-cycles/${stored.id}/update` && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>
+        updates.push(body)
+        for (const field of ['templateId', 'name', 'startDate', 'endDate', 'status'] as const) {
+          if (body[field] !== undefined) (stored as Record<string, unknown>)[field] = body[field]
+        }
+        return jsonResponse(200, { ok: true, data: { ...stored } })
+      }
+      if (input === '/api/attendance/payroll-cycles?orgId=org-1') {
+        return jsonResponse(200, { ok: true, data: { items: [{ ...stored }] } })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+    return { apiFetch, updates }
+  }
+
+  it('edits a cycle bound to a template: a rename sends only name and orgId, never the unchanged template', async () => {
+    const stored = { id: 'cycle-t', templateId: 'tpl-1', name: 'May', startDate: '2026-05-01', endDate: '2026-05-31', status: 'open' }
+    const { apiFetch, updates } = cycleEditFetch(stored)
+    const options = createOptions({ apiFetch })
+    const payroll = useAttendanceAdminPayroll(options)
+    payroll.editPayrollCycle({ ...stored })
+    expect(payroll.payrollCycleForm.templateId).toBe('tpl-1')
+    payroll.payrollCycleForm.name = 'May (revised)'
+
+    await payroll.savePayrollCycle()
+
+    expect(updates).toEqual([{ name: 'May (revised)', orgId: 'org-1' }])
+    expect(stored.templateId).toBe('tpl-1')
+    expect(options.setStatus).toHaveBeenLastCalledWith('Payroll cycle saved and selected.')
+  })
+
+  it('edits a cycle bound to a template: changing only the template sends the new templateId and orgId, then nothing on an unchanged save', async () => {
+    const stored = { id: 'cycle-t', templateId: 'tpl-1', name: 'May', startDate: '2026-05-01', endDate: '2026-05-31', status: 'open' }
+    const { apiFetch, updates } = cycleEditFetch(stored)
+    const options = createOptions({ apiFetch })
+    const payroll = useAttendanceAdminPayroll(options)
+    payroll.editPayrollCycle({ ...stored })
+    payroll.payrollCycleForm.templateId = 'tpl-2'
+
+    await payroll.savePayrollCycle()
+
+    expect(updates).toEqual([{ templateId: 'tpl-2', orgId: 'org-1' }])
+    expect(payroll.payrollCycleForm.templateId).toBe('tpl-2')
+
+    // The saved row is the new baseline.
+    await payroll.savePayrollCycle()
+    expect(updates).toHaveLength(1)
+    expect(options.setStatus).toHaveBeenLastCalledWith('Payroll cycle not modified.')
+  })
 })

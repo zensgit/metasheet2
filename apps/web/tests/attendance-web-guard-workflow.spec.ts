@@ -420,6 +420,31 @@ describe('attendance web guard workflow contract', () => {
     }
   })
 
+  // Payroll cycle admin composable (2026-11-06): useAttendanceAdminPayroll.spec.ts ran in no workflow until it
+  // was registered at five points - push.paths, the PR classifier, the targeted run list, the required lane's
+  // exec block and that lane's committed token manifest. Before this test, dropping it from any of the three
+  // workflow points, or from the script and the manifest together, left every check green.
+  it('runs the payroll cycle admin composable spec in both attendance and required lanes', () => {
+    const spec = 'useAttendanceAdminPayroll'
+    const path = `apps/web/tests/${spec}.spec.ts`
+    const doc = loadYaml(workflow) as { on: { push: { paths: string[] } } }
+    expect(doc.on.push.paths).toContain(path)
+    const cases = workflow.match(/case "\$path" in([\s\S]*?)\)\s*relevant=true/)?.[1]
+    expect(cases).toBeTruthy()
+    expect(cases!.split(/\|\\?\s*/).map(value => value.trim())).toContain(path)
+    expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
+    expect(targetedRunCommand(workflow).trim().split(/\s+/)).toContain(spec)
+    const required = requiredLaneExecCommand(
+      readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8'),
+    ).split(/\s+/)
+    expect(required).toContain(spec)
+    const manifest = readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.tokens'), 'utf8')
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0 && !line.startsWith('#'))
+    expect(manifest).toContain(spec)
+  })
+
   // A1 「提示与实际状态」 (gate r1 P3-2): these five specs already ran in the required lane, but the slice touches
   // AttendanceView.vue and plugin-attendance/index.cjs, which trigger THIS path-filtered guard, so they belong here
   // too - in push.paths, in the PR classifier (two occurrences of each path) and as exact words of the targeted

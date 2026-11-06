@@ -46224,10 +46224,21 @@ module.exports = {
           return
         }
 
+        // Same rule as the update route: both dates are request strings or resolvePayrollWindow's 'YYYY-MM-DD', and
+        // plain dates compare by calendar day. Any other parseable form is compared as an instant only to choose this
+        // 400; it never reaches the INSERT, because PG stores only its written day, which can invert the range that was
+        // checked (and a cycle created closed is snapshotted on it).
         const startParsed = parseDateInput(startDate)
         const endParsed = parseDateInput(endDate)
-        if (!startParsed || !endParsed || startParsed > endParsed) {
+        const startDay = normalizeDateOnlyStrict(startDate)
+        const endDay = normalizeDateOnlyStrict(endDate)
+        const rangeInverted = startDay && endDay ? startDay > endDay : startParsed > endParsed
+        if (!startParsed || !endParsed || rangeInverted) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid date range' } })
+          return
+        }
+        if (!startDay || !endDay) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid date: startDate and endDate must be YYYY-MM-DD' } })
           return
         }
 
@@ -46252,8 +46263,8 @@ module.exports = {
                 orgId,
                 payload.templateId,
                 payload.name,
-                payload.startDate,
-                payload.endDate,
+                startDay,
+                endDay,
                 payload.status,
                 JSON.stringify(payload.metadata),
               ],
@@ -46416,92 +46427,120 @@ module.exports = {
         }
 
         try {
-          const existingRows = await db.query(
-            'SELECT * FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2',
-            [payrollCycleId, orgId]
-          )
-          if (!existingRows.length) {
-            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll cycle not found' } })
-            return
-          }
-          const existing = existingRows[0]
-
-          let template = null
-          let resolvedTemplateId = parsed.data.templateId ?? existing.template_id ?? null
-          if (resolvedTemplateId) {
-            const templateRows = await db.query(
-              'SELECT * FROM attendance_payroll_templates WHERE id = $1 AND org_id = $2',
-              [resolvedTemplateId, orgId]
-            )
-            if (!templateRows.length) {
-              res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll template not found' } })
-              return
-            }
-            template = templateRows[0]
-          } else if (parsed.data.anchorDate) {
-            const defaultRows = await db.query(
-              'SELECT * FROM attendance_payroll_templates WHERE org_id = $1 AND is_default = true LIMIT 1',
-              [orgId]
-            )
-            if (defaultRows.length) {
-              template = defaultRows[0]
-              resolvedTemplateId = template.id
-            }
-          }
-
-          let startDate = parsed.data.startDate ?? existing.start_date
-          let endDate = parsed.data.endDate ?? existing.end_date
-          if (parsed.data.anchorDate) {
-            if (!template) {
-              res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Payroll template required for anchorDate' } })
-              return
-            }
-            const anchor = parseDateInput(parsed.data.anchorDate) ?? new Date()
-            const resolved = resolvePayrollWindow(mapPayrollTemplateRow(template), anchor)
-            startDate = resolved.startDate
-            endDate = resolved.endDate
-          }
-
-          const startParsed = parseDateInput(startDate)
-          const endParsed = parseDateInput(endDate)
-          if (!startParsed || !endParsed || startParsed > endParsed) {
-            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid date range' } })
-            return
-          }
-
-          const payload = {
-            templateId: resolvedTemplateId,
-            name: parsed.data.name ?? existing.name,
-            startDate,
-            endDate,
-            status: parsed.data.status ?? existing.status ?? 'open',
-            metadata: parsed.data.metadata ?? normalizeMetadata(existing.metadata),
-          }
-
-          // 加班银行 v1-5b-ii [P1/P2 owner #3233]: a POST-CLOSE cycle's period is FROZEN — the settlement snapshot
-          // was computed against this period (v1-5 design-lock §3). The freeze covers BOTH 'closed' AND
-          // 'archived' (archived is ONCE-CLOSED: closed→archived must NOT reopen the period), PLUS a durable
-          // backstop — any cycle that already has settlement rows (covers a reopened-with-settlements edge and a
-          // zero-row closed cycle's later states). Otherwise close→archive→change re-hangs the old snapshot under
-          // a new period. Only status-only transitions and name/metadata edits stay allowed.
-          const cycleIsFrozen = existing.status === 'closed' || existing.status === 'archived'
-            || (await db.query('SELECT 1 FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1 AND org_id = $2 LIMIT 1', [payrollCycleId, orgId])).length > 0
-          if (cycleIsFrozen) {
-            const sameDate = (a, b) => {
-              const pa = parseDateInput(a)
-              const pb = parseDateInput(b)
-              return pa && pb ? formatDateOnly(pa) === formatDateOnly(pb) : String(a) === String(b)
-            }
-            const periodChanged = !sameDate(payload.startDate, existing.start_date)
-              || !sameDate(payload.endDate, existing.end_date)
-              || (payload.templateId ?? null) !== (existing.template_id ?? null)
-            if (periodChanged) {
-              res.status(409).json({ ok: false, error: { code: 'CYCLE_CLOSED_PERIOD_FROZEN', message: 'A settled (closed/archived) payroll cycle has a snapshot; start_date / end_date / template_id cannot be changed. Reopen/recompute explicitly.' } })
-              return
-            }
-          }
-
           const rows = await db.transaction(async (trx) => {
+            // The cycle row is locked for the whole maintenance: every read below (current state, template,
+            // settlement backstop) and the write see the same committed row, so a concurrent close/archive/delete
+            // or maintenance cannot be overwritten with values read before it committed.
+            const existingRows = await trx.query(
+              'SELECT * FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2 FOR UPDATE',
+              [payrollCycleId, orgId]
+            )
+            if (!existingRows.length) {
+              throw new HttpError(404, 'NOT_FOUND', 'Payroll cycle not found')
+            }
+            const existing = existingRows[0]
+
+            // A settled (closed/archived) cycle is never reopened; checked before the frozen-period rule so the
+            // answer does not depend on which other fields the request also carries.
+            if ((existing.status === 'closed' || existing.status === 'archived') && parsed.data.status === 'open') {
+              throw new HttpError(409, 'ATTENDANCE_PERIOD_REOPEN_UNSUPPORTED', 'A settled (closed/archived) payroll cycle cannot be reopened.')
+            }
+
+            let template = null
+            let resolvedTemplateId = parsed.data.templateId ?? existing.template_id ?? null
+            if (resolvedTemplateId) {
+              const templateRows = await trx.query(
+                'SELECT * FROM attendance_payroll_templates WHERE id = $1 AND org_id = $2',
+                [resolvedTemplateId, orgId]
+              )
+              if (!templateRows.length) {
+                throw new HttpError(404, 'NOT_FOUND', 'Payroll template not found')
+              }
+              template = templateRows[0]
+            } else if (parsed.data.anchorDate) {
+              const defaultRows = await trx.query(
+                'SELECT * FROM attendance_payroll_templates WHERE org_id = $1 AND is_default = true LIMIT 1',
+                [orgId]
+              )
+              if (defaultRows.length) {
+                template = defaultRows[0]
+                resolvedTemplateId = template.id
+              }
+            }
+
+            let startDate = parsed.data.startDate ?? existing.start_date
+            let endDate = parsed.data.endDate ?? existing.end_date
+            if (parsed.data.anchorDate) {
+              if (!template) {
+                throw new HttpError(400, 'VALIDATION_ERROR', 'Payroll template required for anchorDate')
+              }
+              const anchor = parseDateInput(parsed.data.anchorDate) ?? new Date()
+              const resolved = resolvePayrollWindow(mapPayrollTemplateRow(template), anchor)
+              startDate = resolved.startDate
+              endDate = resolved.endDate
+            }
+
+            // Calendar day of a cycle date. pg returns a DATE column as a Date at LOCAL midnight (read it with local
+            // getters, as mapPayrollCycleRow does); the API and resolvePayrollWindow send 'YYYY-MM-DD', which
+            // new Date() reads as UTC midnight. Comparing those two instants depends on the server time zone.
+            // Any other form gives null.
+            const calendarDay = (value) => (value instanceof Date
+              ? (Number.isNaN(value.getTime()) ? null : normalizeDateOnly(value))
+              : normalizeDateOnlyStrict(value))
+
+            const startParsed = parseDateInput(startDate)
+            const endParsed = parseDateInput(endDate)
+            const startDay = calendarDay(startDate)
+            const endDay = calendarDay(endDate)
+            // Plain dates compare by calendar day; other parseable string forms keep the instant comparison here, which
+            // only decides 400 before the freeze below (a frozen cycle given an instant-inverted form answers this 400,
+            // not 409). Such a form never reaches the write (see after the freeze).
+            const rangeInverted = startDay && endDay ? startDay > endDay : startParsed > endParsed
+            if (!startParsed || !endParsed || rangeInverted) {
+              throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid date range')
+            }
+
+            const payload = {
+              templateId: resolvedTemplateId,
+              name: parsed.data.name ?? existing.name,
+              startDate,
+              endDate,
+              status: parsed.data.status ?? existing.status ?? 'open',
+              metadata: parsed.data.metadata ?? normalizeMetadata(existing.metadata),
+            }
+
+            // 加班银行 v1-5b-ii [P1/P2 owner #3233]: a POST-CLOSE cycle's period is FROZEN — the settlement snapshot
+            // was computed against this period (v1-5 design-lock §3). The freeze covers BOTH 'closed' AND
+            // 'archived' (archived is ONCE-CLOSED: closed→archived must NOT reopen the period), PLUS a durable
+            // backstop — any cycle that already has settlement rows (covers an open-with-settlements edge and a
+            // zero-row closed cycle's later states). Otherwise close→archive→change re-hangs the old snapshot under
+            // a new period. Only status transitions other than reopening and name/metadata edits stay allowed.
+            const cycleIsFrozen = existing.status === 'closed' || existing.status === 'archived'
+              || (await trx.query('SELECT 1 FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1 AND org_id = $2 LIMIT 1', [payrollCycleId, orgId])).length > 0
+            if (cycleIsFrozen) {
+              // Same calendar day on both sides. A form other than a pg Date or 'YYYY-MM-DD' cannot be shown to
+              // leave the stored day unchanged, so it counts as a change (fail closed).
+              const sameDate = (a, b) => {
+                const left = calendarDay(a)
+                return left !== null && left === calendarDay(b)
+              }
+              const periodChanged = !sameDate(payload.startDate, existing.start_date)
+                || !sameDate(payload.endDate, existing.end_date)
+                || (payload.templateId ?? null) !== (existing.template_id ?? null)
+              if (periodChanged) {
+                throw new HttpError(409, 'CYCLE_CLOSED_PERIOD_FROZEN', 'A settled (closed/archived) payroll cycle has a snapshot; start_date / end_date / template_id cannot be changed.')
+              }
+            }
+
+            // The write takes the calendar days the range check compared, never the raw values. A string other than
+            // 'YYYY-MM-DD' was compared above as an instant, while PG stores only its written day, so an open cycle
+            // could be stored inverted (and closed in the same request). It is refused here; a frozen cycle has
+            // already answered 409 above for such a string (sameDate fails closed), so its order is unchanged. The
+            // message names the format, since the edit page shows it as is and the range itself may be in order.
+            if (!startDay || !endDay) {
+              throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid date: startDate and endDate must be YYYY-MM-DD')
+            }
+
             const updated = await trx.query(
               `UPDATE attendance_payroll_cycles
                SET template_id = $3,
@@ -46518,14 +46557,15 @@ module.exports = {
                 orgId,
                 payload.templateId,
                 payload.name,
-                payload.startDate,
-                payload.endDate,
+                startDay,
+                endDay,
                 payload.status,
                 JSON.stringify(payload.metadata),
               ],
             )
             // 加班银行 v1-5b-ii: ONLY on the TRANSITION to closed, snapshot the settlement in the SAME txn
-            // (atomic with the status write). A re-PUT of an already-closed cycle does NOT re-snapshot.
+            // (atomic with the status write). A re-PUT of an already-closed cycle does NOT re-snapshot; the
+            // transition is judged on the locked row, so a close that committed first is seen here.
             if (existing.status !== 'closed' && payload.status === 'closed' && updated[0]) {
               await snapshotCycleSettlementOnClose(trx, updated[0])
             }
@@ -46536,6 +46576,10 @@ module.exports = {
           emitEvent('attendance.payrollCycle.updated', { orgId, payrollCycleId: mapped.id })
           res.json({ ok: true, data: mapped })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json(attendanceHttpErrorBody(error))
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -46561,30 +46605,35 @@ module.exports = {
           // 加班银行 v1-5b-ii [P1/P2 owner #3233]: a POST-CLOSE cycle has (or anchors) an immutable settlement
           // snapshot. Refuse to delete it for status 'closed' OR 'archived' (archived is ONCE-CLOSED:
           // closed→archived→delete must not fall through), PLUS the durable settlement-rows backstop (the FK
-          // RESTRICT blocks it once rows exist; this also covers a zero-row closed/archived cycle). Reopen/archive
-          // explicitly instead of deleting accounting facts.
-          const statusRows = await db.query(
-            'SELECT status FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2',
-            [payrollCycleId, orgId]
-          )
-          const delStatus = statusRows.length ? statusRows[0].status : null
-          const cycleIsFrozen = delStatus === 'closed' || delStatus === 'archived'
-            || (await db.query('SELECT 1 FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1 AND org_id = $2 LIMIT 1', [payrollCycleId, orgId])).length > 0
-          if (cycleIsFrozen) {
-            res.status(409).json({ ok: false, error: { code: 'CYCLE_CLOSED_NOT_DELETABLE', message: 'A settled (closed/archived) payroll cycle has a snapshot and cannot be deleted. Reopen/archive explicitly.' } })
-            return
-          }
-          const rows = await db.query(
-            'DELETE FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2 RETURNING id',
-            [payrollCycleId, orgId]
-          )
-          if (!rows.length) {
-            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll cycle not found' } })
-            return
-          }
+          // RESTRICT blocks it once rows exist; this also covers a zero-row closed/archived cycle). The state is
+          // read on the locked row in the same transaction as the delete, so a close/archive that committed first
+          // is always seen.
+          await db.transaction(async (trx) => {
+            const statusRows = await trx.query(
+              'SELECT status FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2 FOR UPDATE',
+              [payrollCycleId, orgId]
+            )
+            if (!statusRows.length) {
+              throw new HttpError(404, 'NOT_FOUND', 'Payroll cycle not found')
+            }
+            const delStatus = statusRows[0].status
+            const cycleIsFrozen = delStatus === 'closed' || delStatus === 'archived'
+              || (await trx.query('SELECT 1 FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1 AND org_id = $2 LIMIT 1', [payrollCycleId, orgId])).length > 0
+            if (cycleIsFrozen) {
+              throw new HttpError(409, 'CYCLE_CLOSED_NOT_DELETABLE', 'A settled (closed/archived) payroll cycle has a snapshot and cannot be deleted.')
+            }
+            await trx.query(
+              'DELETE FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2',
+              [payrollCycleId, orgId]
+            )
+          })
           emitEvent('attendance.payrollCycle.deleted', { orgId, payrollCycleId })
           res.json({ ok: true, data: { id: payrollCycleId } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json(attendanceHttpErrorBody(error))
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return

@@ -11840,6 +11840,14 @@ interface AttendancePayrollCycle {
   metadata?: Record<string, any>
 }
 
+interface PayrollCycleEditFields {
+  templateId: string
+  name: string
+  startDate: string
+  endDate: string
+  status: string
+}
+
 interface AttendanceImportPreviewItem {
   userId: string
   workDate: string
@@ -14315,6 +14323,8 @@ const attendanceAssignmentResolvedUsers = ref<AttendanceGroupMemberResolvedUsers
 let attendanceAssignmentResolveSeq = 0
 const payrollTemplateEditingId = ref<string | null>(null)
 const payrollCycleEditingId = ref<string | null>(null)
+// The selected cycle as it was loaded into the form; an edit sends only the fields that differ from it.
+const payrollCycleEditBaseline = ref<PayrollCycleEditFields | null>(null)
 const payrollCycleSummary = ref<AttendanceSummary | null>(null)
 const importProfileId = ref('')
 const importMode = ref<'override' | 'merge'>('override')
@@ -30290,6 +30300,7 @@ async function deletePayrollTemplate(id: string) {
 
 function resetPayrollCycleForm() {
   payrollCycleEditingId.value = null
+  payrollCycleEditBaseline.value = null
   payrollCycleForm.templateId = ''
   payrollCycleForm.name = ''
   payrollCycleForm.anchorDate = ''
@@ -30317,7 +30328,39 @@ function editPayrollCycle(item: AttendancePayrollCycle) {
   payrollCycleForm.startDate = item.startDate
   payrollCycleForm.endDate = item.endDate
   payrollCycleForm.status = item.status ?? 'open'
+  payrollCycleEditBaseline.value = {
+    templateId: payrollCycleForm.templateId,
+    name: payrollCycleForm.name,
+    startDate: payrollCycleForm.startDate,
+    endDate: payrollCycleForm.endDate,
+    status: payrollCycleForm.status,
+  }
   payrollCycleSummary.value = null
+}
+
+// Edit payload: fields whose effective value (same `x || undefined` rule as create) differs from the baseline.
+// An emptied input stays unsent, as before; anchorDate has no baseline and is sent whenever filled.
+function payrollCycleChangedFields(baseline: PayrollCycleEditFields | null): Record<string, string> {
+  const current: Record<string, string | undefined> = {
+    templateId: payrollCycleForm.templateId || undefined,
+    name: payrollCycleForm.name.trim() || undefined,
+    anchorDate: payrollCycleForm.anchorDate || undefined,
+    startDate: payrollCycleForm.startDate || undefined,
+    endDate: payrollCycleForm.endDate || undefined,
+    status: payrollCycleForm.status || undefined,
+  }
+  const previous: Record<string, string | undefined> = {
+    templateId: baseline?.templateId || undefined,
+    name: baseline?.name.trim() || undefined,
+    startDate: baseline?.startDate || undefined,
+    endDate: baseline?.endDate || undefined,
+    status: baseline?.status || undefined,
+  }
+  const changed: Record<string, string> = {}
+  for (const [field, value] of Object.entries(current)) {
+    if (value !== undefined && value !== previous[field]) changed[field] = value
+  }
+  return changed
 }
 
 async function loadPayrollCycles() {
@@ -30409,17 +30452,27 @@ async function savePayrollCycle() {
     return
   }
 
+  const changedFields = payrollCycleEditingId.value
+    ? payrollCycleChangedFields(payrollCycleEditBaseline.value)
+    : null
+  if (changedFields && Object.keys(changedFields).length === 0) {
+    setStatus(tr('Payroll cycle not modified.', '计薪周期未修改。'))
+    return
+  }
+
   payrollCycleSaving.value = true
   try {
-    const payload: Record<string, any> = {
-      templateId: payrollCycleForm.templateId || undefined,
-      name: payrollCycleForm.name.trim() || undefined,
-      anchorDate: payrollCycleForm.anchorDate || undefined,
-      startDate: payrollCycleForm.startDate || undefined,
-      endDate: payrollCycleForm.endDate || undefined,
-      status: payrollCycleForm.status,
-      orgId: normalizedOrgId(),
-    }
+    const payload: Record<string, any> = changedFields
+      ? { ...changedFields, orgId: normalizedOrgId() }
+      : {
+          templateId: payrollCycleForm.templateId || undefined,
+          name: payrollCycleForm.name.trim() || undefined,
+          anchorDate: payrollCycleForm.anchorDate || undefined,
+          startDate: payrollCycleForm.startDate || undefined,
+          endDate: payrollCycleForm.endDate || undefined,
+          status: payrollCycleForm.status,
+          orgId: normalizedOrgId(),
+        }
 
     const response = await apiFetch(
       payrollCycleEditingId.value
@@ -30442,9 +30495,10 @@ async function savePayrollCycle() {
     const savedCycle = data.data ?? null
     const savedCycleId = savedCycle?.id ?? payrollCycleEditingId.value
     await loadPayrollCycles()
-    const selectedCycle = savedCycleId
-      ? payrollCycles.value.find(item => item.id === savedCycleId) ?? savedCycle
-      : savedCycle
+    // The saved row from the response wins: a failed reload leaves the list holding the pre-save row.
+    const selectedCycle = savedCycle?.id
+      ? savedCycle
+      : savedCycleId ? payrollCycles.value.find(item => item.id === savedCycleId) ?? null : null
     if (selectedCycle?.id) {
       editPayrollCycle(selectedCycle)
     } else {
