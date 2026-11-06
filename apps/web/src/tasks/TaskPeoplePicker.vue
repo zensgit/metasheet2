@@ -102,7 +102,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, useId, watch } from 'vue'
 import { onAuthSessionSwitch } from '../composables/authPrincipal'
 import { useLocale } from '../composables/useLocale'
-import { moveFocusWithin } from './focusTrap'
+import { isInputMethodKey, moveFocusWithin } from './focusTrap'
 import { TASKS_EN, TASKS_ZH, type TasksText } from './labels'
 import { readDispatchIdentity } from './recordTaskDispatchIdentity'
 import { isPathSafeSegment, searchPeople, type PersonOption, type SearchPeopleResult } from './tasksApi'
@@ -257,6 +257,15 @@ async function runSearch(query: string): Promise<void> {
 // millisecond the picker opened would skip this one and close the dialog around the picker too.
 function onPanelKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
+    // An Escape the input method may be using cancels the composition, not the picker. It still goes
+    // no further, so a dialog around the picker does not close on it either, and its default is held
+    // back: the search box is type="search", which Chromium empties on Escape (the input method has
+    // already cancelled the composition by the time the page sees the key).
+    if (isInputMethodKey(event)) {
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
     event.preventDefault()
     event.stopPropagation()
     emit('close')
