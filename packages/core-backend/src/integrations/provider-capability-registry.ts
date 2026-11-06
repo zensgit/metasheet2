@@ -20,9 +20,13 @@ export type IntegrationScope = Readonly<{ tenant: string; appScope: string }>
 
 /** Shape of a stored provider name; identical to the table CHECK. */
 export const PROVIDER_NAME_PATTERN = '^[a-z][a-z0-9_]{0,31}$'
-/** Shapes of a stored scope anchor; identical to the table CHECKs. */
+/**
+ * Shapes of a stored scope anchor; identical to the table CHECKs. The length limit is a separate
+ * comparison, because a PostgreSQL regular expression bound may not exceed 255.
+ */
 export const ANCHOR_TENANT_PATTERN = '^[!-~]+$'
-export const ANCHOR_APP_SCOPE_PATTERN = '^[!-~]{1,256}$'
+export const ANCHOR_APP_SCOPE_PATTERN = '^[!-~]+$'
+export const ANCHOR_APP_SCOPE_MAX_LENGTH = 256
 
 const TENANT_RE = new RegExp(ANCHOR_TENANT_PATTERN)
 const APP_SCOPE_RE = new RegExp(ANCHOR_APP_SCOPE_PATTERN)
@@ -53,6 +57,7 @@ export interface ProviderCapabilityDescriptor {
 export function scopeFromValues(tenant: unknown, appScope: unknown): IntegrationScope | null {
   if (typeof tenant !== 'string' || typeof appScope !== 'string') return null
   if (!TENANT_RE.test(tenant) || !APP_SCOPE_RE.test(appScope)) return null
+  if (appScope.length > ANCHOR_APP_SCOPE_MAX_LENGTH) return null
   return Object.freeze({ tenant, appScope })
 }
 

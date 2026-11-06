@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import * as registryModule from '../../src/integrations/provider-capability-registry'
 import {
+  ANCHOR_APP_SCOPE_MAX_LENGTH,
   ANCHOR_APP_SCOPE_PATTERN,
   ANCHOR_TENANT_PATTERN,
   INTEGRATION_CAPABILITIES,
@@ -64,6 +65,7 @@ describe('production registry', () => {
 
   it('exports no function that replaces, adds to or resets the registry', () => {
     expect(Object.keys(registryModule).sort()).toEqual([
+      'ANCHOR_APP_SCOPE_MAX_LENGTH',
       'ANCHOR_APP_SCOPE_PATTERN',
       'ANCHOR_TENANT_PATTERN',
       'INTEGRATION_CAPABILITIES',
@@ -151,6 +153,7 @@ describe('shape patterns', () => {
     for (const capability of INTEGRATION_CAPABILITIES) {
       expect(migration).toContain(`${capability}_bound_tenant ~ '${ANCHOR_TENANT_PATTERN}'`)
       expect(migration).toContain(`${capability}_bound_app_scope ~ '${ANCHOR_APP_SCOPE_PATTERN}'`)
+      expect(migration).toContain(`char_length(${capability}_bound_app_scope) <= ${ANCHOR_APP_SCOPE_MAX_LENGTH})`)
     }
   })
 })

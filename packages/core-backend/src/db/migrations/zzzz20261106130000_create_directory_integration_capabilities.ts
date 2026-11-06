@@ -106,15 +106,18 @@ async function applyUp(db: Kysely<unknown>): Promise<void> {
       CONSTRAINT dic_revision_chk CHECK (revision >= 1),
       CONSTRAINT dic_directory_anchor_chk CHECK (CASE WHEN directory_enabled THEN
         (directory_bound_tenant IS NOT NULL AND directory_bound_tenant ~ '^[!-~]+$'
-         AND directory_bound_app_scope IS NOT NULL AND directory_bound_app_scope ~ '^[!-~]{1,256}$')
+         AND directory_bound_app_scope IS NOT NULL AND directory_bound_app_scope ~ '^[!-~]+$'
+         AND char_length(directory_bound_app_scope) <= 256)
         ELSE (directory_bound_tenant IS NULL AND directory_bound_app_scope IS NULL) END),
       CONSTRAINT dic_login_anchor_chk CHECK (CASE WHEN login_enabled THEN
         (login_bound_tenant IS NOT NULL AND login_bound_tenant ~ '^[!-~]+$'
-         AND login_bound_app_scope IS NOT NULL AND login_bound_app_scope ~ '^[!-~]{1,256}$')
+         AND login_bound_app_scope IS NOT NULL AND login_bound_app_scope ~ '^[!-~]+$'
+         AND char_length(login_bound_app_scope) <= 256)
         ELSE (login_bound_tenant IS NULL AND login_bound_app_scope IS NULL) END),
       CONSTRAINT dic_notification_anchor_chk CHECK (CASE WHEN notification_enabled THEN
         (notification_bound_tenant IS NOT NULL AND notification_bound_tenant ~ '^[!-~]+$'
-         AND notification_bound_app_scope IS NOT NULL AND notification_bound_app_scope ~ '^[!-~]{1,256}$')
+         AND notification_bound_app_scope IS NOT NULL AND notification_bound_app_scope ~ '^[!-~]+$'
+         AND char_length(notification_bound_app_scope) <= 256)
         ELSE (notification_bound_tenant IS NULL AND notification_bound_app_scope IS NULL) END)
     )
   `.execute(db)

@@ -157,12 +157,24 @@ describe('up()', () => {
       const check = new RegExp(
         `CONSTRAINT dic_${capability}_anchor_chk CHECK \\(CASE WHEN ${capability}_enabled THEN\\s+` +
           `\\(${capability}_bound_tenant IS NOT NULL AND ${capability}_bound_tenant ~ '\\^\\[!-~\\]\\+\\$'\\s+` +
-          `AND ${capability}_bound_app_scope IS NOT NULL AND ${capability}_bound_app_scope ~ '\\^\\[!-~\\]\\{1,256\\}\\$'\\)\\s+` +
+          `AND ${capability}_bound_app_scope IS NOT NULL AND ${capability}_bound_app_scope ~ '\\^\\[!-~\\]\\+\\$'\\s+` +
+          `AND char_length\\(${capability}_bound_app_scope\\) <= 256\\)\\s+` +
           `ELSE \\(${capability}_bound_tenant IS NULL AND ${capability}_bound_app_scope IS NULL\\) END\\)`,
       )
       expect(SOURCE, capability).toMatch(check)
     }
     expect(SOURCE.match(/IS NOT NULL AND \w+_bound_(?:tenant|app_scope) ~/g)).toHaveLength(6)
+  })
+
+  it('uses only regular expression bounds that PostgreSQL accepts (at most 255)', () => {
+    const patterns = [...SOURCE.matchAll(/~ '([^']*)'/g)].map((match) => match[1])
+    expect(patterns.length).toBeGreaterThanOrEqual(7)
+    for (const pattern of patterns) {
+      for (const bound of pattern.matchAll(/\{(\d+)(?:,(\d*))?\}/g)) {
+        expect(Number(bound[1]), pattern).toBeLessThanOrEqual(255)
+        if (bound[2]) expect(Number(bound[2]), pattern).toBeLessThanOrEqual(255)
+      }
+    }
   })
 
   it('guards updates: revision advances by exactly one and the identity, binding and creation columns never change', () => {
