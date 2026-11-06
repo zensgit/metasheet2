@@ -139,12 +139,11 @@ after the image rollback and only on an empty table. The switch is registered in
   settings and pipeline order in `index.ts` as they are, and no parser in the route module; CI wiring;
   OpenAPI source.
 - `tests/unit/security-action-proof-flag.test.ts`, `tests/unit/security-action-challenges-migration.test.ts`.
-- `tests/integration/security-action-proof.db.test.ts` against real Postgres: catalog; every CHECK
-  refused alone and by name (23514) by an input the trigger admits, the status CHECK with the trigger
-  disabled inside a savepoint; every trigger rule refused (55000, by message) by an input that
-  satisfies every CHECK; the foreign key (23503) and the partial unique index (23505) by name; each
-  refusal under its own savepoint with every row re-read unchanged afterwards; positive controls for
-  each legal row and transition; the guarded `down()`/`up()` round trip;
-  issuance, invalidation and consumption; the failure limit across sessions and purposes; a
-  repeatable-read-default pool; lock order under concurrency. Excluded from the no-DB runner and run as
-  a whole file in the approval real-DB step of `plugin-tests.yml`.
+- `tests/integration/security-action-proof.db.test.ts` against real Postgres: catalog; for every CHECK
+  a case whose input the trigger admits and that only that CHECK can refuse (23514, by name; a CHECK on
+  a nullable column also requires the value to be present, because a CHECK whose expression is NULL is
+  satisfied); the status CHECK with the trigger disabled inside a savepoint; for every trigger rule a case
+  that satisfies every CHECK (55000, by message); the foreign key (23503) and the partial unique index
+  (23505) by name; each refusal under its own savepoint with every row re-read unchanged afterwards;
+  positive controls for each legal row, both legal transitions and the boundaries. These properties are
+  established by the run of this file in the approval real-database job on the head under review.

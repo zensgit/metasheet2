@@ -113,6 +113,10 @@ describe('up()', () => {
     expect(inList('security_action_challenges_privilege_class_chk')).toEqual([...PRIVILEGE_CLASSES])
     expect(SOURCE).toContain(`assurance IN (${SECURITY_ACTION_ASSURANCE_LEVELS.map((level) => `'${level}'`).join(', ')})`)
     expect(SOURCE).toContain(`failure_code IN (${SECURITY_ACTION_FAILURE_CODES.map((code) => `'${code}'`).join(', ')})`)
+    // A CHECK is satisfied when its expression is NULL, so a closed-set test on a nullable column must
+    // also require the value to be present.
+    expect(SOURCE).toContain(`failure_code IS NOT NULL AND failure_code IN (`)
+    expect(SOURCE).toContain(`assurance IS NOT NULL AND assurance IN (`)
     expect(SOURCE).toContain(`expires_at <= created_at + interval '${SECURITY_ACTION_PROOF_TTL_SECONDS} seconds'`)
     expect(SOURCE).toContain('expires_at > created_at')
     expect(SOURCE).toContain("target_kind IN ('empty_slot', 'identity_revision')")

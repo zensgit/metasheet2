@@ -402,8 +402,14 @@ async function insertRow(run: Runner, userId: string, overrides: RowSeed = {}): 
   }
   const keys = Object.keys(row).filter((key) => !(key === 'created_at' && row.created_at === null))
   const expiresExpression = row.expires_at === null && row.status !== 'failed' ? "now() + interval '300 seconds'" : null
-  const values = keys.map((key, index) => (key === 'expires_at' && expiresExpression ? expiresExpression : `$${index + 1}`))
-  const params = keys.map((key) => (key === 'expires_at' && (expiresExpression || row.expires_at === NULL_EXPIRY) ? null : row[key]))
+  // Placeholders are numbered from the bound values only, so an expression written inline leaves no
+  // unreferenced parameter behind (an unreferenced `$n` cannot be typed and the statement would be refused).
+  const params: unknown[] = []
+  const values = keys.map((key) => {
+    if (key === 'expires_at' && expiresExpression) return expiresExpression
+    params.push(key === 'expires_at' && row.expires_at === NULL_EXPIRY ? null : row[key])
+    return `$${params.length}`
+  })
   await run(`INSERT INTO ${TABLE} (${keys.join(', ')}) VALUES (${values.join(', ')})`, params)
   return String(row.id)
 }

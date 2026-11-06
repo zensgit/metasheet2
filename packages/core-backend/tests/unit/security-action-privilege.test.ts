@@ -608,7 +608,7 @@ describe('wiring', () => {
     expect(importSpecifiers(computed, 'scratch.ts')).toEqual([NON_LITERAL_SPECIFIER, NON_LITERAL_SPECIFIER, NON_LITERAL_SPECIFIER])
   })
 
-  it('collects edges from every TypeScript and JavaScript file under the root, records a computed load in a file naming the module, and reports any other file naming it', () => {
+  it('collects edges from every TypeScript and JavaScript file under the root, records a computed load in a file naming the module, and reports a non-source file naming it', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'import-edges-'))
     try {
       mkdirSync(path.join(root, 'auth'))

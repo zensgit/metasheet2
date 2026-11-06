@@ -3,7 +3,8 @@
  * as (importing file, module specifier): an `import … from` or `export … from` statement, an
  * `import x = require(…)`, a `require(…)` call, a dynamic `import(…)` or an `import(…)` type, with the
  * specifier written as a string literal or a template literal without substitutions. A load whose
- * specifier is computed is an edge to NON_LITERAL_SPECIFIER, so it cannot hide a module name. The
+ * specifier is computed is an edge to NON_LITERAL_SPECIFIER. Loads in forms the parser does not model
+ * (`createRequire`, `module.require`, an aliased `require`) are not seen. The
  * allowlist is an exact multiset of edges, so an importer that is not named, a re-export, or a second
  * import of the same module from an allowed file is a violation, whatever directory it lives in.
  */
@@ -68,8 +69,8 @@ export function listSourceFiles(dir: string): string[] {
 /**
  * The edges of every file below `root` whose text mentions a module matched by `pattern`: each load
  * whose specifier matches `pattern`, and each load with a computed specifier. A file that mentions the
- * module but is not a TypeScript or JavaScript source is an edge to its own extension, so no file
- * under `root` can name the module unseen. Files are relative to `root`.
+ * module but is not a TypeScript or JavaScript source is an edge to its own extension. Files are
+ * relative to `root`.
  */
 export function collectImportEdges(root: string, pattern: RegExp, read: (file: string) => string): ImportEdge[] {
   const edges: ImportEdge[] = []
