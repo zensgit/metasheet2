@@ -66,6 +66,21 @@ describe('evaluateIntegrationCapability: one case per reason, in the fixed order
     expect(evaluateIntegrationCapability(input())).toEqual({ effective: true, reason: null })
   })
 
+  it('refuses a blank expected organization even when the integration organization is blank too', () => {
+    const blank = input({
+      expectedOrgId: '',
+      integration: { ...input().integration, org_id: '' },
+      state: stateRow({ bound_org_id: '' }),
+    })
+    expect(evaluateIntegrationCapability(blank)).toEqual({ effective: false, reason: 'org_mismatch' })
+    const spaces = input({
+      expectedOrgId: '  ',
+      integration: { ...input().integration, org_id: '  ' },
+      state: stateRow({ bound_org_id: '  ' }),
+    })
+    expect(evaluateIntegrationCapability(spaces)).toEqual({ effective: false, reason: 'org_mismatch' })
+  })
+
   it('refuses with each reason', () => {
     const cases: Array<[string, Partial<EvaluateInput>]> = [
       ['switch_off', { switchOn: false }],

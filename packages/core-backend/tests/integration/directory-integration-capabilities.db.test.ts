@@ -31,6 +31,11 @@ const describeIfDatabase = dbUrl ? describe : describe.skip
 const EXPECT_DB = process.env.EXPECT_DB === '1'
 const itIfExpectDb = EXPECT_DB ? it : it.skip
 
+// Module top level: it must run (and fail) when the gated describe below is skipped for want of a database.
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
+
 const CAPS = 'directory_integration_capabilities'
 const HISTORY = 'directory_integration_capability_history'
 const CAPABILITIES = ['directory', 'login', 'notification'] as const
@@ -54,7 +59,6 @@ describeIfDatabase('directory integration capability tables (real database)', ()
   let pool: Pool
   let migrationDb: Kysely<unknown>
   const integrationIds: string[] = []
-  const orgs: string[] = []
 
   const run = (text: string, values?: unknown[]) => pool.query(text, values)
 
@@ -70,7 +74,6 @@ describeIfDatabase('directory integration capability tables (real database)', ()
 
   async function insertIntegration(overrides: { provider?: string; orgId?: string; corp?: string; config?: unknown; status?: string } = {}): Promise<{ id: string; org: string }> {
     const org = overrides.orgId ?? `cap-db-${randomUUID()}`
-    orgs.push(org)
     const result = await run(
       `INSERT INTO directory_integrations (org_id, provider, name, status, corp_id, config)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb) RETURNING id::text AS id`,
@@ -101,16 +104,11 @@ describeIfDatabase('directory integration capability tables (real database)', ()
     await run(`TRUNCATE ${HISTORY}`)
     await run('DELETE FROM directory_integrations WHERE id = ANY($1::uuid[])', [integrationIds])
     integrationIds.length = 0
-    orgs.length = 0
   }
 
   beforeAll(() => {
     pool = new Pool({ connectionString: dbUrl })
     migrationDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: new Pool({ connectionString: dbUrl }) }) })
-  })
-
-  itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
-    expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
   beforeEach(async () => {
@@ -408,8 +406,8 @@ describeIfDatabase('directory integration capability tables (real database)', ()
           new Promise<string>((resolve) => setTimeout(() => resolve('blocked'), 5000)),
         ])
         expect(outcome).toBe('ok')
-        await holder.query('ROLLBACK')
       } finally {
+        await holder.query('ROLLBACK')
         holder.release()
       }
     })

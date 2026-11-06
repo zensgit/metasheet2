@@ -169,4 +169,3 @@ export async function peekIntegrationCapabilityState(
   const state = (stateResult.rows[0] as unknown as CapabilityRow | undefined) ?? null
   return { integration, state }
 }
-

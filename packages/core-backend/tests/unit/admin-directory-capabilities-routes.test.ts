@@ -12,13 +12,22 @@ import path from 'node:path'
 import ts from 'typescript'
 import { usePinnedServer } from '../utils/pinned-server'
 
-const mocks = vi.hoisted(() => ({ isRbacAdmin: vi.fn(), query: vi.fn(), audit: vi.fn() }))
+const mocks = vi.hoisted(() => ({ isRbacAdmin: vi.fn(), query: vi.fn(), audit: vi.fn(), logged: vi.fn() }))
 vi.mock('../../src/rbac/service', () => ({ isAdmin: mocks.isRbacAdmin }))
 vi.mock('../../src/db/pg', () => ({ pool: null, query: mocks.query, transaction: vi.fn() }))
 vi.mock('../../src/integration/db/connection-pool', () => ({
   poolManager: { get: () => ({ query: vi.fn(), transaction: vi.fn(), getInternalPool: () => null }) },
 }))
 vi.mock('../../src/audit/audit', () => ({ auditLog: mocks.audit }))
+vi.mock('../../src/core/logger', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/core/logger')>()),
+  Logger: class {
+    info(...args: unknown[]) { mocks.logged('info', ...args) }
+    warn(...args: unknown[]) { mocks.logged('warn', ...args) }
+    error(...args: unknown[]) { mocks.logged('error', ...args) }
+    debug(...args: unknown[]) { mocks.logged('debug', ...args) }
+  },
+}))
 
 import {
   CAPABILITIES_DISABLED,
@@ -198,6 +207,24 @@ describe('after the administrator check', () => {
       expect(response.body).toEqual({ ok: false, error: { code: 'DIRECTORY_CAPABILITIES_INTERNAL', message: 'Directory integration capabilities request failed' } })
       expect(response.text).not.toContain('hunter2')
       expect(response.text).not.toContain('10.0.0.5')
+    }
+  })
+
+  it('logs only the error class name and the five-character SQLSTATE on a failure', async () => {
+    const secret = 'password=hunter2 host=10.0.0.5'
+    const cases: Array<[Error, string]> = [
+      [Object.assign(new Error(secret), { code: '57014' }), 'Error 57014'],
+      [Object.assign(new TypeError(secret), { code: 'too-long-code' }), 'TypeError'],
+      [new Error(secret), 'Error'],
+    ]
+    for (const [failure, expected] of cases) {
+      mocks.logged.mockClear()
+      const query = vi.fn(answerWith({ fail: (sql) => (/FROM directory_integrations/.test(sql) ? failure : null) }))
+      pinned.setApp(buildApp(createAdminDirectoryCapabilitiesRouter({ service: serviceWith({ switchOn: true, query }) })))
+      const response = await request(pinned.url()).get(`${BASE}/${ID}`)
+      expect(response.status).toBe(500)
+      const lines = mocks.logged.mock.calls.map((call) => call.map(String).join(' '))
+      expect(lines).toEqual([`error Directory integration capabilities read failed: ${expected}`])
     }
   })
 

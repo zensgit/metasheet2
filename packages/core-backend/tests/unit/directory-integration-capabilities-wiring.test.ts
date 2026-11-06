@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import ts from 'typescript'
 import yaml from 'js-yaml'
 import config from '../../vitest.config'
 
@@ -41,7 +42,38 @@ describe('real-DB suite wiring', () => {
 
   it('carries the sentinel that fails a database-expected run without a database', () => {
     const text = readFileSync(path.join(BACKEND, DB_SPEC), 'utf8')
-    expect(text).toContain("process.env.EXPECT_DB === '1'")
-    expect(text).toMatch(/sentinel[\s\S]*?expect\(process\.env\.DATABASE_URL\)\.toBeTruthy\(\)/)
+    expect(sentinelPlacement(text)).toBe('top-level')
+  })
+
+  it('tells a nested sentinel from a top-level one', () => {
+    const body = "itIfExpectDb('sentinel: x', () => { expect(process.env.DATABASE_URL).toBeTruthy() })"
+    const head = "const EXPECT_DB = process.env.EXPECT_DB === '1'\nconst itIfExpectDb = EXPECT_DB ? it : it.skip\n"
+    expect(sentinelPlacement(`${head}${body}\ndescribeIfDatabase('x', () => {})`)).toBe('top-level')
+    expect(sentinelPlacement(`${head}describeIfDatabase('x', () => {\n${body}\n})`)).toBe('nested')
+    expect(sentinelPlacement(`${head}describeIfDatabase('x', () => {})`)).toBe('missing')
   })
 })
+
+/**
+ * Where the database-expected sentinel call sits: a direct statement of the module, inside another call
+ * (for example the database-gated describe), or absent. Only the first can fail when the gated describe
+ * is skipped.
+ */
+function sentinelPlacement(source: string): 'top-level' | 'nested' | 'missing' {
+  const file = ts.createSourceFile('db-spec.ts', source, ts.ScriptTarget.Latest, true)
+  const isSentinelCall = (node: ts.Node): boolean =>
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === 'itIfExpectDb' &&
+    /sentinel/.test(node.arguments[0]?.getText(file) ?? '') &&
+    /expect\(process\.env\.DATABASE_URL\)\.toBeTruthy\(\)/.test(node.getText(file))
+  const topLevel = file.statements.some((statement) => ts.isExpressionStatement(statement) && isSentinelCall(statement.expression))
+  if (topLevel) return 'top-level'
+  let found = false
+  const visit = (node: ts.Node): void => {
+    if (isSentinelCall(node)) found = true
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return found ? 'nested' : 'missing'
+}
