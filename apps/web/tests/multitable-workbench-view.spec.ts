@@ -5598,24 +5598,39 @@ describe('MultitableWorkbench view wiring', () => {
   // '?' toggles the shortcuts overlay, except while typing. A form control was already excluded; an
   // editable surface (the rich-text editor is a contenteditable div) now is too.
   describe("the '?' shortcut and typing targets", () => {
-    it("a '?' typed in a contenteditable does not toggle the shortcuts overlay; from a non-typing target it still does", async () => {
+    it("a '?' typed in an editable surface does not toggle the shortcuts overlay; from a non-editable element (or a contenteditable=\"false\" one) it still does", async () => {
       mountWorkbench()
       await flushUi()
       const root = container!.querySelector('.mt-workbench') as HTMLElement
       expect(root).toBeTruthy()
-      const editable = document.createElement('div')
-      editable.setAttribute('contenteditable', 'true')
-      root.appendChild(editable)
+      const overlay = () => container!.querySelector('.mt-workbench__shortcuts-overlay')
+      const press = async (el: HTMLElement) => {
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }))
+        await flushUi()
+      }
+      const made: HTMLElement[] = []
+      const editable = (value: string, parent: HTMLElement = root) => {
+        const el = document.createElement('div')
+        el.setAttribute('contenteditable', value)
+        parent.appendChild(el)
+        made.push(el)
+        return el
+      }
       try {
-        editable.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }))
-        await flushUi()
-        expect(container!.querySelector('.mt-workbench__shortcuts-overlay')).toBeNull()
-        const main = container!.querySelector('.mt-workbench__main') as HTMLElement
-        main.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }))
-        await flushUi()
-        expect(container!.querySelector('.mt-workbench__shortcuts-overlay')).not.toBeNull()
+        // editable surfaces: "true", "", "plaintext-only", a plain child inside an editor, and a
+        // contenteditable="false" chip inside an editor (it sits in an editable ancestor)
+        const editor = editable('true')
+        const child = document.createElement('span')
+        editor.appendChild(child)
+        for (const el of [editor, editable(''), editable('plaintext-only'), child, editable('false', editor)]) {
+          await press(el)
+          expect(overlay()).toBeNull()
+        }
+        // not editable: a standalone contenteditable="false" element toggles, as the main area does
+        await press(editable('false'))
+        expect(overlay()).not.toBeNull()
       } finally {
-        editable.remove()
+        for (const el of made) el.remove()
       }
     })
   })

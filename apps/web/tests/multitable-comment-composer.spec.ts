@@ -902,9 +902,15 @@ describe('MetaCommentComposer', () => {
   // Input-method composition (Chinese, Japanese, Korean...): the input method owns the arrows and Tab
   // (its candidates), Escape (cancel) and Enter (commit), so the composer acts on none of them; its
   // `preventDefault` runs only after that check. isComposing and keyCode 229 (the key the input method
-  // took) are both covered.
+  // took) are both covered. A Tab the input method passed on (isComposing, its own keyCode) is still
+  // held, as every Tab here was, so focus does not leave the box mid-composition; it picks nothing.
   describe('keys during an input-method composition', () => {
     const IME_INITS: KeyboardEventInit[] = [{ isComposing: true }, { keyCode: 229 }]
+    const SUGGESTIONS = [
+      { id: 'user_jamie', label: 'Jamie' },
+      { id: 'user_jordan', label: 'Jordan' },
+      { id: 'user_jules', label: 'Jules' },
+    ]
 
     function mountComposer(initial: string) {
       const draft = ref(initial)
@@ -915,10 +921,7 @@ describe('MetaCommentComposer', () => {
         setup() {
           return () => h(MetaCommentComposer, {
             modelValue: draft.value,
-            suggestions: [
-              { id: 'user_jamie', label: 'Jamie' },
-              { id: 'user_jordan', label: 'Jordan' },
-            ],
+            suggestions: SUGGESTIONS,
             'onUpdate:modelValue': (value: string) => { draft.value = value },
             onSubmit: (payload: { content: string; mentions: string[] }) => { submits.push(payload) },
           })
@@ -931,35 +934,37 @@ describe('MetaCommentComposer', () => {
         textarea().dispatchEvent(event)
         return event
       }
-      return { app, draft, submits, textarea, key }
+      const reachedParent: string[] = []
+      container.addEventListener('keydown', (event) => { reachedParent.push(event.key) })
+      return { app, draft, submits, textarea, key, reachedParent }
     }
 
-    it('with suggestions open, an arrow, Tab or Escape during a composition moves no highlight, picks and dismisses nothing, and the Escape goes no further; plain keys still do', async () => {
-      const { app, textarea, key } = mountComposer('@j')
+    it('with suggestions open, an arrow, Tab or Escape during a composition moves no highlight, picks and dismisses nothing, and only the Escape stops at the box; plain arrows and Tab still act', async () => {
+      const { app, textarea, key, reachedParent } = mountComposer('@j')
       await nextTick()
       const active = () => container!.querySelector('.meta-comment-composer__suggestion--active')?.textContent ?? null
       const open = () => container!.querySelector('.meta-comment-composer__suggestions') !== null
       expect(open()).toBe(true)
       const first = active()
       expect(first).toContain('Jamie')
-      const reachedParent: string[] = []
-      container!.addEventListener('keydown', (event) => { reachedParent.push(event.key) })
       for (const init of IME_INITS) {
         for (const k of ['ArrowDown', 'ArrowUp', 'Tab', 'Escape']) {
-          expect(key({ key: k, ...init }).defaultPrevented).toBe(false)
+          const event = key({ key: k, ...init })
+          // the one held key: a Tab the input method passed on (isComposing without keyCode 229)
+          expect(event.defaultPrevented).toBe(k === 'Tab' && init.keyCode !== 229)
           await nextTick()
           expect(open()).toBe(true)
           expect(active()).toBe(first)
           expect(textarea().value).toBe('@j')
         }
       }
-      // the composing Escapes stopped at the composer; the arrows and Tab bubbled as before
-      expect(reachedParent.filter((k) => k === 'Escape')).toEqual([])
-      // plain keys: ArrowDown moves, ArrowUp moves back, Tab picks, a plain Escape (after new input) dismisses
-      expect(key({ key: 'ArrowDown' }).defaultPrevented).toBe(true)
-      await nextTick()
-      expect(active()).toContain('Jordan')
+      // the composing arrows and Tab bubbled as before; the composing Escapes stopped at the composer
+      expect(reachedParent).toEqual(['ArrowDown', 'ArrowUp', 'Tab', 'ArrowDown', 'ArrowUp', 'Tab'])
+      // plain keys: ArrowUp from the first wraps to the last, ArrowDown comes back, Tab picks
       expect(key({ key: 'ArrowUp' }).defaultPrevented).toBe(true)
+      await nextTick()
+      expect(active()).toContain('Jules')
+      expect(key({ key: 'ArrowDown' }).defaultPrevented).toBe(true)
       await nextTick()
       expect(active()).toBe(first)
       expect(key({ key: 'Tab' }).defaultPrevented).toBe(true)
@@ -968,13 +973,14 @@ describe('MetaCommentComposer', () => {
       app.unmount()
     })
 
-    it('a plain Escape still dismisses the suggestions and is default-prevented', async () => {
-      const { app, key } = mountComposer('@ja')
+    it('a plain Escape still dismisses the suggestions, is default-prevented and still bubbles', async () => {
+      const { app, key, reachedParent } = mountComposer('@ja')
       await nextTick()
       expect(container!.querySelector('.meta-comment-composer__suggestions')).not.toBeNull()
       expect(key({ key: 'Escape' }).defaultPrevented).toBe(true)
       await nextTick()
       expect(container!.querySelector('.meta-comment-composer__suggestions')).toBeNull()
+      expect(reachedParent).toEqual(['Escape'])
       app.unmount()
     })
 
