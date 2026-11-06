@@ -4,19 +4,21 @@
 <style>*{margin:0;padding:0;box-sizing:border-box}html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif}.row{display:flex;height:100vh}.main{flex:1;padding:16px;display:flex;flex-direction:column;gap:12px;align-items:flex-start}</style>
 <div id="app"></div>
 <script type="module">
-// The REAL MetaRecordInspector (record drawer) and MetaCommentComposer inside a root wired the way
-// MultitableWorkbench wires the REAL utils/workbench-undo.ts: installed on the document; a drawer patch
-// settles its commit at once (an accepted server patch); a record switch resets every history. The
-// grid's undo/redo are counted, as are the browser's own undo/redo (`input` with inputType historyUndo /
-// historyRedo) anywhere on the page. #grid-area stands for the grid (.meta-grid); #rename for a rail
-// rename whose input goes away on Enter; #outside for a popover teleported out of the workbench;
-// #stopper for a control that stops propagation of every key (the comment affordance buttons).
+// The REAL MetaRecordInspector (record drawer, with its comments tab) inside a root wired the way
+// MultitableWorkbench wires the REAL utils/workbench-undo.ts: installed on the document with the same
+// `isWorkbenchGridSurface`; a drawer patch settles its commit at once (an accepted server patch); a
+// record switch resets every history; a comment is sent, resolved or deleted the way the workbench does
+// it (its control is disabled while the request is out, then the change lands). The grid's undo/redo
+// are counted, as are the browser's own undo/redo (`input` with inputType historyUndo / historyRedo)
+// anywhere on the page. #grid-area stands for the grid (.meta-grid), #bulk-delete for its bulk bar's
+// Delete selected (disabled once pressed); #rename for a rail rename whose input goes away on Enter;
+// #outside for a popover teleported out of the workbench; #stopper for a control that stops
+// propagation of every key (the comment affordance buttons).
 import { createApp, h, ref, watch } from '/node_modules/vue/dist/vue.esm-bundler.js'
 import '/node_modules/element-plus/dist/index.css'
 import '/src/styles/tokens.css'
 import MetaRecordInspector from '/src/multitable/components/MetaRecordInspector.vue'
-import MetaCommentComposer from '/src/shared/comments/components/MetaCommentComposer.vue'
-import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo } from '/src/multitable/utils/workbench-undo.ts'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface } from '/src/multitable/utils/workbench-undo.ts'
 import { useLocale } from '/src/composables/useLocale.ts'
 useLocale().setLocale('zh-CN')
 window.undoDemo = { grid: { undo: 0, redo: 0 }, native: 0, patches: [] }
@@ -24,7 +26,7 @@ document.addEventListener('input', (e) => { if (e.inputType === 'historyUndo' ||
 const rootRef = ref(null)
 const undo = createWorkbenchUndo({
   isInsideWorkbench: (node) => !!rootRef.value?.contains(node),
-  isGridSurface: (node) => !!(node instanceof Element ? node : node.parentElement)?.closest('.meta-grid, .meta-record-drawer'),
+  isGridSurface: isWorkbenchGridSurface,
 })
 installWorkbenchUndo(undo, { undo: () => { window.undoDemo.grid.undo += 1 }, redo: () => { window.undoDemo.grid.redo += 1 } })
 const FIELDS = [
@@ -41,11 +43,20 @@ const RECORDS = {
 }
 const record = ref(RECORDS.rec_1)
 const draft = ref('')
+const submitting = ref(false)
+const openComments = ref(false)
+const comments = ref([{ id: 'c_1', containerId: 'sht_demo', targetId: 'rec_1', mentions: [], authorId: 'u_me', authorName: '我', content: '第一条', resolved: false, createdAt: '2031-01-01T00:00:00.000Z' }])
+const resolvingIds = ref([])
+const deletingIds = ref([])
+const bulkDeleting = ref(false)
 const renaming = ref(true)
+const request = () => new Promise((resolve) => setTimeout(resolve, 300))
 watch(() => record.value.id, () => undo.reset())
 window.undoDemo.rewrite = (fieldId, value) => { record.value = { ...record.value, version: record.value.version + 1, data: { ...record.value.data, [fieldId]: value } } }
 window.undoDemo.switchTo = (id) => { record.value = RECORDS[id] }
 window.undoDemo.draft = () => draft.value
+window.undoDemo.openComments = () => { openComments.value = true }
+window.undoDemo.comment = () => ({ ...comments.value[0] })
 createApp({
   render: () => h('div', { class: 'row', ref: rootRef }, [
     h('div', { class: 'rail', style: 'width: 160px; padding: 16px' }, [
@@ -55,11 +66,18 @@ createApp({
     ]),
     h('div', { class: 'main meta-grid', tabindex: 0, id: 'grid-area' }, [
       h('p', '表格区域（合成）'),
-      h('div', { style: 'width: 360px' }, [h(MetaCommentComposer, { modelValue: draft.value, 'onUpdate:modelValue': (v) => { draft.value = v }, onSubmit: () => { draft.value = '' } })]),
+      h('button', { id: 'bulk-delete', type: 'button', disabled: bulkDeleting.value, onClick: () => { bulkDeleting.value = true } }, 'Delete selected'),
       h('button', { id: 'stopper', type: 'button', onKeydown: (e) => e.stopPropagation() }, 'stopper'),
     ]),
     h(MetaRecordInspector, {
-      visible: true, record: record.value, fields: FIELDS, canEdit: true, canComment: false, canDelete: false, recordIds: ['rec_1', 'rec_2'], sheetId: 'sht_demo',
+      visible: true, record: record.value, fields: FIELDS, canEdit: true, canDelete: false, recordIds: ['rec_1', 'rec_2'], sheetId: 'sht_demo',
+      canComment: true, canResolveComments: true, currentUserId: 'u_me', comments: comments.value, openComments: openComments.value,
+      commentDraft: draft.value, 'onUpdate:commentDraft': (v) => { draft.value = v }, commentSubmitting: submitting.value,
+      commentResolvingIds: resolvingIds.value, commentDeletingIds: deletingIds.value,
+      // The workbench's order (useMultitableComments, then onSubmitComment): disabled while it sends, then cleared.
+      onCommentSubmit: async () => { submitting.value = true; try { await request() } finally { submitting.value = false }; draft.value = '' },
+      onCommentResolve: async (id) => { resolvingIds.value = [id]; await request(); comments.value = comments.value.map((c) => (c.id === id ? { ...c, resolved: true } : c)); resolvingIds.value = [] },
+      onCommentDelete: async (id) => { deletingIds.value = [id]; await request(); comments.value = comments.value.filter((c) => c.id !== id); deletingIds.value = [] },
       onPatch: (fieldId, value) => {
         undo.beginCommit(drawerCommitContainers(fieldId, FIELDS[0].id))()
         window.undoDemo.patches.push(`${record.value.id}:${fieldId}=${String(value)}`)

@@ -1221,7 +1221,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
 import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
-import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, textEntryHost } from '../src/multitable/utils/workbench-undo'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface, textEntryHost } from '../src/multitable/utils/workbench-undo'
 import { useLocale } from '../src/composables/useLocale'
 
 async function flushUi(cycles = 5): Promise<void> {
@@ -6222,6 +6222,96 @@ describe('MultitableWorkbench view wiring', () => {
       expect(f.el.value).toBe('')
     })
 
+    it('beginCommit: a step from before an accepted commit never comes back (undone in flight, redone once accepted); a commit after an undo marks the step on top, so a redo in flight stays undoable; an edit with no beforeinput or a composition made in flight stays undoable', () => {
+      const { undo, add, edit, commandEdit, key, pause } = rig()
+      const box = () => {
+        const row = add(document.createElement('div'))
+        row.className = 'meta-record-drawer__field'
+        return { row, el: row.appendChild(document.createElement('textarea')) }
+      }
+      const z = { key: 'z', metaKey: true }
+      const shiftZ = { key: 'Z', metaKey: true, shiftKey: true }
+      // undone while in flight, redone after it was accepted: back at the committed text, and no further
+      const a = box()
+      edit(a.el, 'X')
+      const settleA = undo.beginCommit([a.row])
+      expect(key(a.el, z)).toBe('restored')
+      expect(a.el.value).toBe('')
+      settleA()
+      expect(key(a.el, shiftZ)).toBe('restored')
+      expect(a.el.value).toBe('X')
+      expect(key(a.el, z)).toBe('swallow')
+      expect(a.el.value).toBe('X')
+      // two bursts, both undone in flight and both redone after: still no step back past the commit
+      const b = box()
+      edit(b.el, 'X')
+      pause(2000)
+      edit(b.el, 'XY')
+      const settleB = undo.beginCommit([b.row])
+      expect(key(b.el, z)).toBe('restored')
+      expect(key(b.el, z)).toBe('restored')
+      expect(b.el.value).toBe('')
+      settleB()
+      expect(key(b.el, shiftZ)).toBe('restored')
+      expect(key(b.el, shiftZ)).toBe('restored')
+      expect(b.el.value).toBe('XY')
+      expect(key(b.el, z)).toBe('swallow')
+      expect(b.el.value).toBe('XY')
+      // two overlapping commits, both undone in flight, accepted in reverse order, then redone: the later
+      // commit still holds
+      const r = box()
+      edit(r.el, 'one')
+      const first = undo.beginCommit([r.row])
+      pause(2000)
+      edit(r.el, 'one two')
+      const second = undo.beginCommit([r.row])
+      expect(key(r.el, z)).toBe('restored')
+      expect(key(r.el, z)).toBe('restored')
+      expect(r.el.value).toBe('')
+      second()
+      first()
+      expect(key(r.el, shiftZ)).toBe('restored')
+      expect(key(r.el, shiftZ)).toBe('restored')
+      expect(r.el.value).toBe('one two')
+      expect(key(r.el, z)).toBe('swallow')
+      expect(r.el.value).toBe('one two')
+      // committed after an undo (the step on top is the first burst), then redone in flight: the redo is
+      // an edit since the commit, undoable back to the committed text
+      const c = box()
+      edit(c.el, 'X')
+      pause(2000)
+      edit(c.el, 'XY')
+      expect(key(c.el, z)).toBe('restored')
+      const settleC = undo.beginCommit([c.row])
+      expect(key(c.el, shiftZ)).toBe('restored')
+      settleC()
+      expect(key(c.el, z)).toBe('restored')
+      expect(c.el.value).toBe('X')
+      expect(key(c.el, z)).toBe('swallow')
+      // an edit through the editor's own command (no beforeinput) while in flight
+      const d = box()
+      edit(d.el, 'sent')
+      const settleD = undo.beginCommit([d.row])
+      commandEdit(d.el, 'sent pasted')
+      settleD()
+      expect(key(d.el, z)).toBe('restored')
+      expect(d.el.value).toBe('sent')
+      expect(key(d.el, z)).toBe('swallow')
+      // a composition while in flight
+      const e = box()
+      edit(e.el, 'ok')
+      const settleE = undo.beginCommit([e.row])
+      e.el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+      e.el.dispatchEvent(withProps(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertCompositionText' }), { inputType: 'insertCompositionText', isComposing: true }))
+      e.el.value = 'ok 中'
+      e.el.dispatchEvent(withProps(new InputEvent('input', { bubbles: true, inputType: 'insertCompositionText' }), { inputType: 'insertCompositionText', isComposing: true }))
+      e.el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '中' }))
+      settleE()
+      expect(key(e.el, z)).toBe('restored')
+      expect(e.el.value).toBe('ok')
+      expect(key(e.el, z)).toBe('swallow')
+    })
+
     it('reset drops every control\'s history (the drawer showing another record reuses its controls, maybe with equal content)', () => {
       const { undo, add, edit, key } = rig()
       const notes = add(document.createElement('textarea'))
@@ -6250,6 +6340,39 @@ describe('MultitableWorkbench view wiring', () => {
       expect(drawerCommitContainers('fld_a', 'fld_a')).toEqual([rowA, title])
       expect(drawerCommitContainers('fld_b', 'fld_a')).toEqual([rowB])
       expect(drawerCommitContainers('fld_missing', null)).toEqual([])
+    })
+
+    it('isWorkbenchGridSurface: the grid and the drawer\'s title, fields and attachments; not a button, link or menu item on them (Send, Resolve, Delete selected), nor the drawer\'s other panels or header', () => {
+      const { add } = rig()
+      const host = add(document.createElement('div'))
+      host.innerHTML = `
+        <div class="meta-grid" tabindex="0">
+          <div data-k="cell"><span data-k="cell-text">v</span></div><input data-k="row-check" type="checkbox">
+          <div class="meta-grid__bulk-bar"><button data-k="bulk-delete"><span data-k="bulk-delete-label">Delete selected</span></button></div>
+        </div>
+        <div class="meta-record-drawer" data-k="drawer">
+          <div class="meta-record-drawer__header"><button data-k="next">next</button>
+            <div class="meta-record-drawer__titleblock"><input data-k="title" class="meta-record-drawer__title-input"></div>
+          </div>
+          <div class="meta-record-drawer__body"><button role="tab" data-k="tab">Details</button>
+            <div role="tabpanel" tabindex="0" data-k="details-panel">
+              <div class="meta-record-drawer__fields"><div class="meta-record-drawer__field">
+                <input data-k="field"><textarea data-k="field-text"></textarea><button data-k="comment-anchor"></button>
+                <a href="#x" data-k="link">link</a><div role="menuitem" data-k="menuitem">m</div><div role="button" data-k="role-button">r</div>
+              </div></div>
+              <div class="meta-record-approval-panel"><span data-k="approval">x</span></div>
+            </div>
+            <div role="tabpanel" tabindex="0" data-k="comments-panel"><textarea data-k="composer"></textarea><button data-k="send">Send</button></div>
+            <div class="meta-record-attachments-panel"><input type="file" data-k="file"><button data-k="remove">x</button></div>
+          </div>
+        </div>`
+      const at = (k: string) => host.querySelector(`[data-k="${k}"]`)!
+      expect(isWorkbenchGridSurface(host.querySelector('.meta-grid')!)).toBe(true)
+      expect(isWorkbenchGridSurface(at('cell-text').firstChild!), 'a text node').toBe(true)
+      for (const k of ['cell', 'cell-text', 'row-check', 'title', 'field', 'field-text', 'file']) expect(isWorkbenchGridSurface(at(k)), k).toBe(true)
+      for (const k of ['bulk-delete', 'bulk-delete-label', 'drawer', 'next', 'tab', 'details-panel', 'comment-anchor', 'link', 'menuitem', 'role-button', 'approval', 'comments-panel', 'composer', 'send', 'remove']) {
+        expect(isWorkbenchGridSurface(at(k)), k).toBe(false)
+      }
     })
 
     it('classifies text-entry hosts: textarea, editable contenteditable (and a child), text-like inputs; not date/time, select, checkbox', () => {
@@ -6311,12 +6434,12 @@ describe('MultitableWorkbench view wiring', () => {
           expect(fire(el, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 1 })
         }
         expect(fire(outsideText, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
-        // the page itself: the grid's only after a press or focus on the grid (.meta-grid) or the record
-        // drawer (.meta-record-drawer); after the last focus was a non-grid control (here the text box) or
-        // an overlay, nothing
+        // the page itself: the grid's only after a press or focus on the grid (.meta-grid) or the drawer's
+        // fields (.meta-record-drawer__fields); after the last focus was a non-grid control (here the text
+        // box) or an overlay, nothing
         expect(fire(document.body, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         const gridSurface = add(Object.assign(document.createElement('div'), { className: 'meta-grid' }))
-        const drawerSurface = add(Object.assign(document.createElement('div'), { className: 'meta-record-drawer' }))
+        const drawerSurface = add(Object.assign(document.createElement('div'), { className: 'meta-record-drawer__fields' }))
         gridSurface.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
         expect(fire(document.body, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 1, redo: 0 })
         outsideText.focus()
@@ -6440,6 +6563,34 @@ describe('MultitableWorkbench view wiring', () => {
         expect(document.activeElement).toBe(document.body)
         expect(fire(document.body, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         expect(fire(document.body, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+      })
+
+      it('a press on what is not a cell edit, in the grid or the drawer (Delete selected; a comment sent, resolved or deleted), whose control then goes away: Cmd+Z on the page does nothing, never the grid', async () => {
+        mountWorkbench()
+        await flushUi()
+        const root = container!.querySelector('.mt-workbench') as HTMLElement
+        const add = (html: string) => {
+          const el = document.createElement('div')
+          el.innerHTML = html
+          root.appendChild(el)
+          made.push(el)
+          return el
+        }
+        const grid = add('<div class="meta-grid" tabindex="0"><div class="meta-grid__bulk-bar"><button>Delete selected</button></div></div>')
+        const drawer = add('<div class="meta-record-drawer"><div role="tabpanel"><textarea></textarea><button>Send</button><button>Resolve</button></div></div>')
+        const press = (el: HTMLElement) => {
+          grid.querySelector<HTMLElement>('.meta-grid')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+          el.focus()
+          el.remove() // disabled or unmounted once pressed: focus falls to the page
+          expect(document.activeElement).toBe(document.body)
+        }
+        const [send, resolve] = Array.from(drawer.querySelectorAll('button'))
+        for (const el of [grid.querySelector('button')!, send, resolve, drawer.querySelector('textarea')!]) {
+          press(el)
+          expect(fire(document.body, { key: 'z', metaKey: true }), el.textContent || el.tagName).toEqual({ prevented: true, undo: 0, redo: 0 })
+          expect(fire(document.body, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        }
       })
 
       it('wiring: a local refusal (the row cannot be edited; no server answer) is not a commit: the typing stays undoable', async () => {

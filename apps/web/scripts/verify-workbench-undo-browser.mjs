@@ -12,9 +12,10 @@ const browser = await chromium.launch({ headless: true })
 const failures = []
 const state = (page) => page.evaluate(() => ({
   title: document.querySelector('.meta-record-drawer__title-input').value,
-  name: document.querySelector('#drawer_field_fld_name').value,
-  extra: document.querySelector('#drawer_field_fld_extra').value,
-  rich: document.querySelector('[data-test="rich-longtext-editor"]').innerHTML,
+  // (Not rendered while the drawer shows its comments tab.)
+  name: document.querySelector('#drawer_field_fld_name')?.value,
+  extra: document.querySelector('#drawer_field_fld_extra')?.value,
+  rich: document.querySelector('[data-test="rich-longtext-editor"]')?.innerHTML,
   composer: window.undoDemo.draft(),
   outside: document.querySelector('#outside').value,
   grid: { ...window.undoDemo.grid },
@@ -22,6 +23,11 @@ const state = (page) => page.evaluate(() => ({
 }))
 const saved = (page) => page.evaluate(() => window.undoDemo.patches.slice())
 const leave = (page) => page.locator('#grid-area').click({ position: { x: 5, y: 5 } })
+const onPage = (page) => page.evaluate(() => document.activeElement === document.body)
+async function openComments(page) {
+  await page.evaluate(() => window.undoDemo.openComments())
+  await page.locator('.meta-comment-composer textarea').waitFor()
+}
 function check(name, actual, expected) {
   const ok = JSON.stringify(actual) === JSON.stringify(expected)
   if (!ok) failures.push(`${name}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
@@ -83,15 +89,51 @@ const SCENARIOS = {
     const s = await state(page); check('unbold', s.rich, 'rich'); check('grid', s.grid, { undo: 0, redo: 0 })
   },
   async 'comment box: type, click away, click back, Cmd+Z: the typing goes'(page) {
+    await openComments(page)
     const box = page.locator('.meta-comment-composer textarea'); await box.click(); await page.keyboard.type('please')
     await leave(page); await box.click(); await page.keyboard.press(`${mod}+z`)
     const s = await state(page); check('composer', s.composer, ''); check('grid', s.grid, { undo: 0, redo: 0 })
   },
-  async 'comment box: send (the box clears), Cmd+Z: nothing'(page) {
-    const box = page.locator('.meta-comment-composer textarea'); await box.click(); await page.keyboard.type('sent text'); await page.keyboard.press(`${mod}+Enter`); await page.waitForTimeout(100)
-    check('cleared', (await state(page)).composer, '')
-    await page.keyboard.press(`${mod}+z`)
+  async 'comment box: send with Cmd+Enter (the box is disabled while it sends, so focus goes to the page), Cmd+Z: nothing, never the grid'(page) {
+    await openComments(page)
+    const box = page.locator('.meta-comment-composer textarea'); await box.click(); await page.keyboard.type('sent text'); await page.keyboard.press(`${mod}+Enter`)
+    await page.waitForFunction(() => window.undoDemo.draft() === '' && !document.querySelector('.meta-comment-composer textarea').disabled)
+    check('focus on the page', await onPage(page), true)
+    await page.keyboard.press(`${mod}+z`); await page.keyboard.press(`${mod}+Shift+z`)
     const s = await state(page); check('composer', s.composer, ''); check('grid', s.grid, { undo: 0, redo: 0 })
+  },
+  async 'comment box: send with the Send button, Cmd+Z while it sends and after: nothing, never the grid'(page) {
+    await openComments(page)
+    await page.locator('.meta-comment-composer textarea').click(); await page.keyboard.type('sent text')
+    await page.locator('.meta-comment-composer__submit').click(); await page.waitForTimeout(50)
+    check('focus on the page while it sends', await onPage(page), true)
+    await page.keyboard.press(`${mod}+z`)
+    await page.waitForFunction(() => window.undoDemo.draft() === '')
+    check('focus on the page', await onPage(page), true)
+    await page.keyboard.press(`${mod}+z`)
+    check('grid', (await state(page)).grid, { undo: 0, redo: 0 })
+  },
+  async 'own comment: Resolve (its button goes), Cmd+Z: nothing, never the grid'(page) {
+    await openComments(page)
+    await page.locator('.meta-comments-drawer__resolve').click()
+    await page.waitForFunction(() => window.undoDemo.comment().resolved === true)
+    check('focus on the page', await onPage(page), true)
+    await page.keyboard.press(`${mod}+z`)
+    check('grid', (await state(page)).grid, { undo: 0, redo: 0 })
+  },
+  async 'own comment: Delete (disabled while it deletes, then gone), Cmd+Z: nothing, never the grid'(page) {
+    await openComments(page)
+    await page.locator('.meta-comments-drawer__reply').last().click()
+    await page.waitForFunction(() => window.undoDemo.comment().id === undefined)
+    check('focus on the page', await onPage(page), true)
+    await page.keyboard.press(`${mod}+z`)
+    check('grid', (await state(page)).grid, { undo: 0, redo: 0 })
+  },
+  async 'a press on the grid, then its Delete selected (disabled once pressed): focus goes to the page; Cmd+Z: nothing, never the grid'(page) {
+    await leave(page); await page.locator('#bulk-delete').click(); await page.waitForTimeout(100)
+    check('focus on the page', await onPage(page), true)
+    await page.keyboard.press(`${mod}+z`); await page.keyboard.press(`${mod}+Shift+z`)
+    check('grid', (await state(page)).grid, { undo: 0, redo: 0 })
   },
   async 'a box outside the workbench (a popover): its own typing goes, then nothing; the page itself after it: nothing'(page) {
     await page.locator('#outside').click(); await page.keyboard.press('End'); await page.keyboard.type('X'); await page.keyboard.press(`${mod}+z`)

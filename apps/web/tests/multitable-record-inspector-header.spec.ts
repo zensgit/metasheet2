@@ -18,7 +18,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, watch, type App, type VNodeChild } from 'vue'
 import MetaRecordInspector from '../src/multitable/components/MetaRecordInspector.vue'
-import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo } from '../src/multitable/utils/workbench-undo'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface } from '../src/multitable/utils/workbench-undo'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
 import { recordLabel } from '../src/multitable/utils/meta-record-labels'
@@ -1174,5 +1174,34 @@ describe('MetaRecordInspector and the workbench-owned undo', () => {
     expect(press(notes, { key: 'z', metaKey: true })).toBe(true)
     expect(gridUndo).not.toHaveBeenCalled()
     expect(notes.value).toBe('a note')
+  })
+
+  it('isWorkbenchGridSurface on the REAL drawer: after a press on the title or a field, Cmd+Z on the page is the grid\'s; after one on a tab, the comment box or Send, nothing', async () => {
+    const undo = createWorkbenchUndo({ isGridSurface: isWorkbenchGridSurface })
+    const gridUndo = vi.fn()
+    removers.push(installWorkbenchUndo(undo, { undo: gridUndo, redo: vi.fn() }))
+    const { container } = mountApp(() =>
+      h(MetaRecordInspector, {
+        visible: true, record: RECORD, fields: FIELDS, canEdit: true, canComment: true, canDelete: false,
+        recordIds: ['rec_1', 'rec_2'], sheetId: 'sheet_1', apiClient: fakeApiClient() as any, commentDraft: 'a comment',
+      }),
+    )
+    await flushUi()
+    const pressThenChord = (el: Element | null) => {
+      expect(el).toBeTruthy()
+      el!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+      gridUndo.mockClear()
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'z', metaKey: true }))
+      return gridUndo.mock.calls.length
+    }
+    const title = () => container.querySelector('.meta-record-drawer__title-input')
+    expect(pressThenChord(title())).toBe(1)
+    expect(pressThenChord(container.querySelector('.meta-record-drawer__tab'))).toBe(0)
+    expect(pressThenChord(container.querySelector('.meta-record-drawer__field[data-field-id="fld_notes"] textarea, .meta-record-drawer__field[data-field-id="fld_notes"] input'))).toBe(1)
+    container.querySelector<HTMLButtonElement>('.meta-record-drawer__tab[id$="-tab-comments"]')!.click()
+    await flushUi()
+    expect(pressThenChord(container.querySelector('.meta-comment-composer textarea'))).toBe(0)
+    expect(pressThenChord(title())).toBe(1)
+    expect(pressThenChord(container.querySelector('.meta-comment-composer__submit'))).toBe(0)
   })
 })

@@ -27,9 +27,11 @@
  *   nothing. The grid's undo / redo (which replays a recorded cell edit to the server) runs only from a
  *   non-text target inside the workbench (the grid, a button, a date input, a select…), or from the page
  *   itself (nothing focused, e.g. after Enter committed the title) when the last press or focus was on a
- *   grid surface (`isGridSurface`: the grid or the record drawer, whose edits are the grid's history). A
- *   rename in the rail or a manager, or a press in a dialog, does not make the page itself the grid's.
- *   Outside the workbench (a teleported dialog or popover, the app shell) nothing runs.
+ *   grid surface (`isGridSurface`; the workbench's is `isWorkbenchGridSurface`: the grid, and the drawer's
+ *   title, fields and attachments, whose edits are cell patches). A button there (Send, Resolve, Delete
+ *   selected), the drawer's comments, history, approval or task panels, a rename in the rail or a manager,
+ *   or a press in a dialog does not make the page itself the grid's. Outside the workbench (a teleported
+ *   dialog or popover, the app shell) nothing runs.
  * - The history belongs to the control's own edits only. Content no recorded edit produced (a re-render
  *   after grid undo, a suggestion picked into the box, a revert, a rejected commit snapping back) is a
  *   rewrite: the history is dropped. `reset` drops every history: the workbench calls it when the drawer
@@ -37,8 +39,8 @@
  *   view changes.
  * - A saved commit ends the history (`beginCommit` from the workbench's drawer commit, settled once the
  *   server accepted it): only edits made since stay undoable, back to the committed content, also when
- *   the control was undone and redone while the patch was in flight. A DOM `change` is not a commit:
- *   most boxes' `change` saves nothing.
+ *   the control was undone (and redone) while the patch was in flight, or redone after it was accepted.
+ *   A DOM `change` is not a commit: most boxes' `change` saves nothing.
  * - During an input-method composition the chord does nothing. A number box holding a draft it cannot
  *   report (`validity.badInput`: "-", "1." read as "") does nothing on the chord and takes no snapshot
  *   while it holds one: its value would be misread.
@@ -79,6 +81,21 @@ export function drawerCommitContainers(fieldId: string, primaryFieldId: string |
   return [...rows, ...title]
 }
 
+/** The parts of the workbench whose edits are the grid's cell patches: the grid, and in the record drawer
+ *  the title, the fields panel and the attachments panel (not its comments, history, approval or task
+ *  panels). */
+const GRID_SURFACES = '.meta-grid, .meta-record-drawer__titleblock, .meta-record-drawer__fields, .meta-record-attachments-panel'
+/** Controls on those parts that are not a cell edit (Send, Resolve, Delete selected, a section toggle…).
+ *  One that disables or removes itself when pressed leaves focus on the page itself. */
+const NOT_CELL_EDITS = 'button, [role="button"], [role="menuitem"], a[href]'
+
+/** The workbench's `isGridSurface`: whether, after a press or focus on `node`, a chord on the page itself
+ *  is the grid's. */
+export function isWorkbenchGridSurface(node: Node): boolean {
+  const el = node instanceof Element ? node : node.parentElement
+  return !!el?.closest(GRID_SURFACES) && !el.closest(NOT_CELL_EDITS)
+}
+
 interface Snapshot {
   content: string
   start: number | null
@@ -103,6 +120,8 @@ interface History {
   generation: number
   /** The last step number handed out. */
   seq: number
+  /** The step number of the last accepted commit: an undo never goes back to a step at or below it. */
+  floor: number
 }
 
 function isPlainControl(host: HTMLElement): host is HTMLInputElement | HTMLTextAreaElement {
@@ -214,8 +233,8 @@ export interface WorkbenchUndoOptions {
   now?: () => number
   /** Whether `node` is inside the workbench (the page itself is decided here, not by this). */
   isInsideWorkbench?: (node: Node) => boolean
-  /** Whether `node` is on a surface whose edits are the grid's undo history (the grid, the record
-   *  drawer): only after a press or focus there is a chord on the page itself the grid's. */
+  /** Whether `node` is on a surface whose edits are the grid's undo history (`isWorkbenchGridSurface`):
+   *  only after a press or focus there is a chord on the page itself the grid's. */
   isGridSurface?: (node: Node) => boolean
 }
 
@@ -239,7 +258,7 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
   }
 
   function fresh(host: HTMLElement): History {
-    const history: History = { undo: [], redo: [], known: contentOf(host), lastKind: '', lastAt: 0, pendingBefore: false, composing: false, generation, seq: 0 }
+    const history: History = { undo: [], redo: [], known: contentOf(host), lastKind: '', lastAt: 0, pendingBefore: false, composing: false, generation, seq: 0, floor: 0 }
     histories.set(host, history)
     return history
   }
@@ -307,8 +326,9 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
     const from = undo ? history.undo : history.redo
     // An undo step that would change nothing (a `beforeinput` no edit followed, e.g. Backspace in an
     // empty box or a cancelled edit) is skipped, so one press always does something. (A redo step
-    // always differs: it is what the undo before it replaced.)
-    while (undo && from.length > 0 && from[from.length - 1].content === content) from.pop()
+    // always differs: it is what the undo before it replaced.) So is one from before an accepted commit:
+    // a redo after the commit can bring one back (an undo in flight moved it to the redo stack).
+    while (undo && from.length > 0 && (from[from.length - 1].content === content || from[from.length - 1].seq <= history.floor)) from.pop()
     const snapshot = from.pop()
     if (!snapshot) return false
     pushCapped(undo ? history.redo : history.undo, snapshotOf(host, snapshot.seq))
@@ -438,9 +458,9 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
       return () => {
         for (const [host, { history, mark }] of marks) {
           if (live(host) !== history) continue
-          // Every step taken before the commit goes (an undo and a redo in flight keep a step's number);
-          // what was typed since stays.
-          history.undo = history.undo.filter((snapshot) => snapshot.seq > mark)
+          // Every step taken before the commit goes (an undo and a redo in flight keep a step's number;
+          // `step` drops them, also one a redo brings back); what was typed since stays.
+          history.floor = Math.max(history.floor, mark)
         }
       }
     },
