@@ -1,5 +1,5 @@
 <template>
-  <div class="mt-workbench" @keydown="onGlobalKeydown" @focusin="onWorkbenchFocusin" @change="onWorkbenchChange">
+  <div class="mt-workbench" @keydown="onGlobalKeydown">
     <MetaToast ref="toastRef" />
     <div v-if="grid.conflict.value" class="mt-workbench__conflict" role="alert">
       <div class="mt-workbench__conflict-copy">
@@ -862,7 +862,6 @@ import {
   saveTplSource as fmtSaveTplSource,
 } from '../utils/workbench-labels'
 import { recordApprovalSubmittedToast, recordLabel } from '../utils/meta-record-labels'
-import { createUndoKeyGate } from '../utils/undo-key-gate'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
 import { DEFAULT_GRID_PAGE_SIZE, GRID_PAGE_SIZE_OPTIONS, clampGridPageSize, readGridPageSize, writeGridPageSize } from '../utils/grid-page-size'
 import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
@@ -3656,9 +3655,6 @@ function clearInspectorFieldError(fieldId: string, onlyOrigin?: InspectorFieldEr
 }
 
 async function onDrawerPatch(fieldId: string, value: unknown) {
-  // A drawer commit can come without a DOM `change` (the rich-text editor's Cmd/Ctrl+Enter keeps focus):
-  // what the focused control holds now is committed, so Cmd+Z there is the grid's again.
-  undoKeyGate.noteCommit(document.activeElement)
   if (!selectedRecordResolved.value) return
   const record = selectedRecordResolved.value
   if (!ensureCanEditRecord(record.id)) return
@@ -5730,21 +5726,13 @@ function onBeforeUnload(e: BeforeUnloadEvent) {
   e.returnValue = ''
 }
 
-// mod+z / mod+y / mod+shift+z: the grid's undo/redo, except while the focused text control has
-// uncommitted typing of its own, which is then the control's to undo (utils/undo-key-gate.ts: the
-// browser's undo is page-wide, so it never gets the key from a control with nothing typed in it).
-const undoKeyGate = createUndoKeyGate()
-function onWorkbenchFocusin(e: FocusEvent) { undoKeyGate.noteFocus(e.target) }
-function onWorkbenchChange(e: Event) { undoKeyGate.noteCommit(e.target) }
-
 function onGlobalKeydown(e: KeyboardEvent) {
-  const undoAction = undoKeyGate.decide(e)
-  if (undoAction === 'grid-undo') { e.preventDefault(); grid.undo(); return }
-  if (undoAction === 'grid-redo') { e.preventDefault(); grid.redo(); return }
-  if (undoAction === 'native') return
+  const mod = e.metaKey || e.ctrlKey
+  if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); grid.undo() }
+  else if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); grid.redo() }
   // '?' toggles the shortcuts overlay, except while typing: in a form control or in an editable surface
   // (the rich-text editor is a contenteditable div, not an input).
-  if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) { showShortcuts.value = !showShortcuts.value }
+  else if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) { showShortcuts.value = !showShortcuts.value }
   // UI-P2-2c: Escape closes the narrow-width drawer — scoped to events that originate FROM WITHIN the
   // rail (the toggle button, a tree node, the base picker) so it never steals Escape from an unrelated
   // in-progress interaction elsewhere in the workbench (e.g. a cell editor) that isn't inside the rail
