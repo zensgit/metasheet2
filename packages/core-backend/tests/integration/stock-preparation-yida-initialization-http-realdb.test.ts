@@ -298,6 +298,13 @@ databaseSuite('YiDa initialization HTTP — empty slot, real JWT/live ACL, actua
     expect(await f.rows('integration_yida_send_approvals')).toEqual([])
     const preview = body(await f.http('POST', '/preview', { operationId: d2.operationId, rowKey: row2, targetRef: second }), 200)
     expect(preview.target).toMatchObject({ targetRef: second, formUuid: 'synthetic_http_form_two', reviewRef: 'synthetic-http-review-two' })
+    // The list is exact and all-or-nothing (flag manifest: byte-exact, no trim, no case folding; an empty or non-UUID entry
+    // empties the WHOLE list): none of these values names the target, so the formal target still refuses and nothing is written.
+    for (const malformed of [second.toUpperCase(), ' ' + second, second + ',not-a-target', second + ',']) {
+      f.setUnboundTestTargetRefs(malformed)
+      denied(await f.http('POST', '/approvals', approval(d2.operationId, row2, { targetRef: second })), 409, 'YIDA_SEND_APPROVAL_CONFLICT')
+    }
+    expect(await f.rows('integration_yida_send_approvals')).toEqual([])
     f.setUnboundTestTargetRefs(second)
     const g2 = body(await f.http('POST', '/approvals', approval(d2.operationId, row2, { targetRef: second })), 201)
     const g1 = body(await f.http('POST', '/approvals', approval(d1.operationId, row1)), 201)
