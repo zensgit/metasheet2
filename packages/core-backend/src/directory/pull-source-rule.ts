@@ -19,6 +19,8 @@
  *                 for the same external enterprise are one source.
  *  - multi-source: an organisation with at least `PULL_SOURCE_THRESHOLD` pull sources.
  *  - governed:    the organisation has a `purpose = 'approval_routing'` policy row.
+ *  - unreadable count: `PullSourceCountUnavailableError`; a gate treats it as a refusal and a status
+ *                 view omits its block; it is never read as zero.
  * The local directory is never counted and can neither trigger nor satisfy the rule.
  */
 
@@ -54,7 +56,7 @@ function assertSqlAlias(alias: string): string {
 /** WHERE-fragment: the row is an active pull-type integration. */
 export function pullSourcePredicateSql(alias = 'i'): string {
   const a = assertSqlAlias(alias)
-  return `${a}.provider <> 'local' AND ${a}.status = 'active'`
+  return `(${a}.provider <> 'local' AND ${a}.status = 'active')`
 }
 
 /** Expression identifying the external source a row belongs to. */
@@ -91,9 +93,10 @@ export async function countActivePullSources(query: PullSourceRuleQuery, orgId: 
   const result = await query(COUNT_ACTIVE_PULL_SOURCES_SQL, [orgId])
   const raw = result.rows[0]?.pull_source_count
   const count = typeof raw === 'number' ? raw : typeof raw === 'string' && /^[0-9]+$/.test(raw) ? Number(raw) : Number.NaN
-  // An unreadable count fails closed: callers are gates, and zero would read as "no policy needed".
+  // An unreadable count fails closed: a gate treats it as a refusal and a status view omits its block;
+  // it is never zero.
   if (!Number.isSafeInteger(count) || count < 0) {
-    throw new ApprovalRoutingPolicyError(PULL_SOURCE_COUNT_UNAVAILABLE_MESSAGE, 'canonical_unavailable', orgId)
+    throw new PullSourceCountUnavailableError(orgId)
   }
   return count
 }
@@ -116,7 +119,7 @@ export async function isApprovalRoutingPolicyRequired(
 // ── organisation lock ───────────────────────────────────────────────────────────────────────────
 
 /** Prefix of the transaction-scoped advisory lock key that guards changes to an organisation's sources. */
-export const DIRECTORY_ORG_LOCK_KEY_PREFIX = 'directory:capability-directory:' as const
+export const DIRECTORY_ORG_LOCK_KEY_PREFIX = 'directory:pull-sources:' as const
 
 /** The lock key text for an organisation. */
 export function directoryOrgLockKey(orgId: string): string {
@@ -125,7 +128,7 @@ export function directoryOrgLockKey(orgId: string): string {
 
 /** Statement that takes the organisation lock for the current transaction; `orgIdParam` is a `$n` placeholder. */
 export function directoryOrgLockSql(orgIdParam = '$1'): string {
-  if (!/^\$\d+$/.test(orgIdParam)) throw new TypeError('invalid parameter placeholder')
+  if (!/^\$[1-9]\d*$/.test(orgIdParam)) throw new TypeError('invalid parameter placeholder')
   return `SELECT pg_advisory_xact_lock(hashtext('${DIRECTORY_ORG_LOCK_KEY_PREFIX}' || ${orgIdParam}::text))`
 }
 
@@ -143,6 +146,16 @@ export const APPROVAL_ROUTING_POLICY_REQUIRED_CODE = 'APPROVAL_ROUTING_POLICY_RE
 
 /** Fixed sentence for a source count that could not be read. */
 export const PULL_SOURCE_COUNT_UNAVAILABLE_MESSAGE = 'The directory source count for this organization is unavailable'
+
+/** The source count could not be read. Not an ApprovalRoutingPolicyError: a gate refuses, a status view omits its block. */
+export class PullSourceCountUnavailableError extends Error {
+  readonly orgId: string | null
+  constructor(orgId: string | null = null) {
+    super(PULL_SOURCE_COUNT_UNAVAILABLE_MESSAGE)
+    this.name = 'PullSourceCountUnavailableError'
+    this.orgId = orgId
+  }
+}
 
 /**
  * Fail-closed routing configuration error. `reason` discriminates the cause; `orgId` and `sourceCount`

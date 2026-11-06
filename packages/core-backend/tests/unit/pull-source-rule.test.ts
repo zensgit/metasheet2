@@ -19,6 +19,7 @@ import {
   DirectoryRoutingPolicyRequiredError,
   POLICY_REQUIRED_MESSAGE,
   PULL_SOURCE_COUNT_UNAVAILABLE_MESSAGE,
+  PullSourceCountUnavailableError,
   PULL_SOURCE_KEY_SQL,
   PULL_SOURCE_PREDICATE_SQL,
   PULL_SOURCE_RULE_TABLES,
@@ -108,8 +109,10 @@ describe('switch predicate', () => {
 
 describe('pull-source predicate', () => {
   it('counts only active pull-type integrations and never reads sync_enabled', () => {
-    expect(PULL_SOURCE_PREDICATE_SQL).toBe("i.provider <> 'local' AND i.status = 'active'")
-    expect(pullSourcePredicateSql('x')).toBe("x.provider <> 'local' AND x.status = 'active'")
+    expect(PULL_SOURCE_PREDICATE_SQL).toBe("(i.provider <> 'local' AND i.status = 'active')")
+    expect(pullSourcePredicateSql('x')).toBe("(x.provider <> 'local' AND x.status = 'active')")
+    // Parenthesised, so a caller can negate or combine it without changing its meaning.
+    expect(`NOT ${pullSourcePredicateSql()}`).toBe("NOT (i.provider <> 'local' AND i.status = 'active')")
     expect(PULL_SOURCE_KEY_SQL).toBe('(i.provider, i.corp_id)')
     expect(pullSourceKeySql('x')).toBe('(x.provider, x.corp_id)')
     expect(COUNT_ACTIVE_PULL_SOURCES_SQL).not.toContain('sync_enabled')
@@ -122,7 +125,7 @@ describe('pull-source predicate', () => {
     expect(COUNT_ACTIVE_PULL_SOURCES_SQL).not.toMatch(/count\(\*\)/i)
     expect(COUNT_ACTIVE_PULL_SOURCES_SQL).toBe(
       "SELECT count(DISTINCT (i.provider, i.corp_id))::int AS pull_source_count FROM directory_integrations i " +
-        "WHERE i.org_id = $1 AND i.provider <> 'local' AND i.status = 'active'",
+        "WHERE i.org_id = $1 AND (i.provider <> 'local' AND i.status = 'active')",
     )
   })
 
@@ -159,9 +162,11 @@ describe('countActivePullSources / isApprovalRoutingPolicyRequired', () => {
     await expect(countActivePullSources(fakeQuery(0, 0).query, 'o')).resolves.toBe(0)
     for (const unreadable of [undefined, null, 'x', '', '-1', '1.5', -1, 1.5, Number.NaN, Infinity]) {
       const failure = await countActivePullSources(fakeQuery(unreadable, 0).query, 'o').catch((error: unknown) => error)
-      expect(failure, String(unreadable)).toBeInstanceOf(ApprovalRoutingPolicyError)
-      expect((failure as ApprovalRoutingPolicyError).reason).toBe('canonical_unavailable')
-      expect((failure as ApprovalRoutingPolicyError).message).toBe(PULL_SOURCE_COUNT_UNAVAILABLE_MESSAGE)
+      expect(failure, String(unreadable)).toBeInstanceOf(PullSourceCountUnavailableError)
+      expect(failure).not.toBeInstanceOf(ApprovalRoutingPolicyError)
+      expect((failure as PullSourceCountUnavailableError).name).toBe('PullSourceCountUnavailableError')
+      expect((failure as PullSourceCountUnavailableError).orgId).toBe('o')
+      expect((failure as PullSourceCountUnavailableError).message).toBe(PULL_SOURCE_COUNT_UNAVAILABLE_MESSAGE)
       expect(PULL_SOURCE_COUNT_UNAVAILABLE_MESSAGE).not.toMatch(/[0-9]/)
     }
   })
@@ -223,16 +228,19 @@ describe('countActivePullSources / isApprovalRoutingPolicyRequired', () => {
 })
 
 describe('organisation lock key', () => {
-  it('is the pinned key text shared with other writers of the same lock', () => {
-    expect(DIRECTORY_ORG_LOCK_KEY_PREFIX).toBe('directory:capability-directory:')
-    expect(directoryOrgLockKey('default')).toBe('directory:capability-directory:default')
+  it('is the pinned key text of the organisation pull-source lock', () => {
+    expect(DIRECTORY_ORG_LOCK_KEY_PREFIX).toBe('directory:pull-sources:')
+    expect(directoryOrgLockKey('default')).toBe('directory:pull-sources:default')
   })
 
   it('builds the advisory-lock statement from the same prefix', () => {
     expect(directoryOrgLockSql()).toBe(
-      "SELECT pg_advisory_xact_lock(hashtext('directory:capability-directory:' || $1::text))",
+      "SELECT pg_advisory_xact_lock(hashtext('directory:pull-sources:' || $1::text))",
     )
-    expect(directoryOrgLockSql('$2')).toContain("hashtext('directory:capability-directory:' || $2::text)")
+    expect(directoryOrgLockSql('$2')).toContain("hashtext('directory:pull-sources:' || $2::text)")
+    expect(directoryOrgLockSql('$12')).toContain("hashtext('directory:pull-sources:' || $12::text)")
+    expect(() => directoryOrgLockSql('$0')).toThrow(TypeError)
+    expect(() => directoryOrgLockSql('$01')).toThrow(TypeError)
     expect(() => directoryOrgLockSql("1'); --")).toThrow(TypeError)
     expect(() => directoryOrgLockSql('org')).toThrow(TypeError)
   })
@@ -240,7 +248,7 @@ describe('organisation lock key', () => {
   it('is defined once: no other source file carries the key text', () => {
     const files = walkTs(SRC_ROOT)
     expect(files.length).toBeGreaterThan(100)
-    const carriers = files.filter((file) => readFileSync(file, 'utf8').includes('directory:capability-directory:'))
+    const carriers = files.filter((file) => readFileSync(file, 'utf8').includes('directory:pull-sources:'))
     expect(carriers).toEqual([LEAF_PATH])
   })
 })
