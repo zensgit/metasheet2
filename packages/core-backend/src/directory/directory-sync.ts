@@ -44,6 +44,10 @@ import {
   summarizeDirectorySyncApiCalls,
   type DirectorySyncApiCallCounters,
 } from './directory-sync-api-telemetry'
+import {
+  DIRECTORY_LINK_NOT_ADMIN_UNBOUND_SQL,
+  isAdminUnboundDirectoryLink,
+} from './directory-link-intent'
 import { assertDingTalkCorpAllowed } from '../integrations/dingtalk/runtime-policy'
 import {
   deriveDelegatedAdminNamespace,
@@ -1319,10 +1323,16 @@ export type DirectoryIdentityMatchAccount = {
   mobile: string | null
 }
 
-/** Just enough of the existing link row to decide the already-linked short-circuit. */
+/**
+ * Just enough of the existing link row to decide the two early outcomes of the cascade: the
+ * administrator-unbound hold (`isAdminUnboundDirectoryLink`, all three columns) and the
+ * already-linked short-circuit. `match_strategy` is required rather than optional so a caller
+ * that forgets to pass it fails to type-check instead of silently losing the hold.
+ */
 export type DirectoryIdentityExistingLink = {
   local_user_id: string | null
   link_status: string
+  match_strategy: string | null
 }
 
 export type DirectoryIdentityMatchMaps = {
@@ -1339,6 +1349,7 @@ export type DirectoryIdentityMatchMaps = {
 }
 
 export type DirectoryIdentityMatchOutcome =
+  | { matched: 'admin_unbound' }
   | { matched: 'already_linked' }
   | { matched: 'external_identity'; localUserId: string }
   | { matched: 'email'; localUserId: string }
@@ -1349,20 +1360,26 @@ export type DirectoryIdentityMatchOutcome =
 /**
  * The identity-matching cascade `syncDirectoryIntegration` walks for every pulled DingTalk
  * user, extracted so `previewDirectorySyncIntegration` can walk the exact same cascade
- * instead of approximating it. Order matters and mirrors apply: ambiguous external identity
- * first (including an account that was linked before the duplicate appeared), then the
- * already-linked short-circuit, external-identity (union/open id or external_key), unique email,
- * then unique
- * mobile, then ambiguous-identifier. `{ matched: 'none' }` is the ONLY outcome under which
- * apply reaches the auto-admission branch — that is the exact condition preview must gate
- * `autoAdmissionCandidateCount` behind to avoid over-counting accounts that would actually be
- * linked (or already are) rather than newly created.
+ * instead of approximating it. Order matters and mirrors apply: the administrator-unbound hold
+ * first, then ambiguous external identity (including an account that was linked before the
+ * duplicate appeared), then the already-linked short-circuit, external-identity (union/open id
+ * or external_key), unique email, then unique mobile, then ambiguous-identifier.
+ * `{ matched: 'none' }` is the ONLY outcome under which apply reaches the auto-admission
+ * branch — that is the exact condition preview must gate `autoAdmissionCandidateCount` behind
+ * to avoid over-counting accounts that would actually be linked (or already are) rather than
+ * newly created.
+ *
+ * The hold sits before the ambiguity check on purpose: an account an administrator explicitly
+ * unbound keeps that intent even when a duplicate identity appears later. Both outcomes leave
+ * the account unlinked, but only `admin_unbound` keeps the persisted strategy untouched.
  */
 export function resolveDirectoryIdentityMatch(
   account: DirectoryIdentityMatchAccount,
   existingLink: DirectoryIdentityExistingLink | null | undefined,
   maps: DirectoryIdentityMatchMaps,
 ): DirectoryIdentityMatchOutcome {
+  if (isAdminUnboundDirectoryLink(existingLink)) return { matched: 'admin_unbound' }
+
   const scopedOpenIdentityKey = buildScopedIdentityKey(account.corpId, account.openId)
   const scopedUnionIdentityKey = buildScopedIdentityKey(account.corpId, account.unionId)
   const scopedExternalIdentityKey = buildScopedIdentityKey(account.corpId, account.externalKey)
@@ -4601,6 +4618,11 @@ export async function syncDirectoryIntegration(
       let autoAdmissionSkippedMissingEmailCount = 0
       let autoAdmissionExcludedCount = 0
       let autoAdmissionFailedCount = 0
+      // Accounts pulled in THIS run whose link row carries an administrator's explicit unbind
+      // and was therefore left alone. Counted for pulled accounts only, which is the same
+      // population `previewDirectorySyncIntegration` walks, so the two keys are comparable
+      // (this loop also visits retained-but-departed accounts; preview never sees those).
+      let adminUnboundHeldCount = 0
       const linkedUserIdByExternalUserId = new Map<string, string>()
       for (const account of accountIdMap.values()) {
         const directoryUser = users.get(account.external_user_id)
@@ -4634,7 +4656,16 @@ export async function syncDirectoryIntegration(
         )
 
         if (identityMatch.matched !== 'already_linked') {
-          if (identityMatch.matched === 'external_identity') {
+          if (identityMatch.matched === 'admin_unbound') {
+            // An administrator explicitly unbound this account: keep the persisted row exactly
+            // as it is (the link write below is skipped for this outcome too). This branch must
+            // stay explicit — the chain below ends in auto-admission, and an outcome that is
+            // not named here would fall through into it.
+            localUserId = null
+            linkStatus = existing?.link_status ?? 'unmatched'
+            matchStrategy = existing?.match_strategy ?? null
+            if (directoryUser) adminUnboundHeldCount += 1
+          } else if (identityMatch.matched === 'external_identity') {
             localUserId = identityMatch.localUserId
             linkStatus = 'linked'
             matchStrategy = 'external_identity'
@@ -4650,7 +4681,7 @@ export async function syncDirectoryIntegration(
             localUserId = null
             linkStatus = 'unmatched'
             matchStrategy = 'none'
-          } else {
+          } else if (identityMatch.matched === 'none') {
             const autoAdmission = evaluateDirectoryAutoAdmissionEligibility({
               admissionMode: config.admissionMode,
               admissionDepartmentIds: config.admissionDepartmentIds,
@@ -4818,6 +4849,11 @@ export async function syncDirectoryIntegration(
               linkStatus = 'unmatched'
               matchStrategy = 'none'
             }
+          } else {
+            // Exhaustiveness: a new cascade outcome must be handled above by name; it must never
+            // reach auto-admission by falling through.
+            const unhandled: never = identityMatch
+            throw new Error(`Unhandled directory identity match outcome: ${JSON.stringify(unhandled)}`)
           }
         }
 
@@ -4893,19 +4929,30 @@ export async function syncDirectoryIntegration(
           }
         }
 
-        await client.query(
-          `INSERT INTO directory_account_links (
-             directory_account_id, local_user_id, link_status, match_strategy, created_at, updated_at
-           )
-           VALUES ($1, $2, $3, $4, NOW(), NOW())
-           ON CONFLICT (directory_account_id)
-           DO UPDATE SET
-             local_user_id = EXCLUDED.local_user_id,
-             link_status = EXCLUDED.link_status,
-             match_strategy = EXCLUDED.match_strategy,
-             updated_at = NOW()`,
-          [account.id, localUserId, linkStatus, matchStrategy],
-        )
+        // A row an administrator explicitly unbound is not written at all (every column,
+        // `updated_at` included, stays as the unbind left it). For every other row the write
+        // is conditional on the row's LATEST committed version not carrying that intent: the
+        // link rows were read above without row locks, and an unbind of an account this run
+        // did not pull (and that has no local user to serialize on) can commit in between.
+        // `ON CONFLICT ... DO UPDATE ... WHERE` is evaluated after the conflicting row is
+        // locked, against its current version, so such an unbind is honoured without the
+        // sync taking link-row locks before it writes.
+        if (identityMatch.matched !== 'admin_unbound') {
+          await client.query(
+            `INSERT INTO directory_account_links (
+               directory_account_id, local_user_id, link_status, match_strategy, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, NOW(), NOW())
+             ON CONFLICT (directory_account_id)
+             DO UPDATE SET
+               local_user_id = EXCLUDED.local_user_id,
+               link_status = EXCLUDED.link_status,
+               match_strategy = EXCLUDED.match_strategy,
+               updated_at = NOW()
+             WHERE ${DIRECTORY_LINK_NOT_ADMIN_UNBOUND_SQL}`,
+            [account.id, localUserId, linkStatus, matchStrategy],
+          )
+        }
       }
 
       for (const userId of alreadySupersededUserIds) {
@@ -5061,6 +5108,7 @@ export async function syncDirectoryIntegration(
         autoAdmissionSkippedMissingEmailCount,
         autoAdmissionExcludedCount,
         autoAdmissionFailedCount,
+        adminUnboundHeldCount,
         memberGroupsCreatedCount: memberGroupProjection.memberGroupsCreatedCount,
         memberGroupsSyncedCount: memberGroupProjection.memberGroupsSyncedCount,
         memberGroupMembershipsUpdatedCount: memberGroupProjection.memberGroupMembershipsUpdatedCount,
@@ -5329,6 +5377,11 @@ export type DirectorySyncPreview = {
   autoAdmissionCandidateCount: number
   autoAdmissionSkippedMissingEmailCount: number
   autoAdmissionExcludedCount: number
+  /**
+   * Pulled accounts whose link row carries an administrator's explicit unbind; apply leaves
+   * them alone and reports the same key (same definition: pulled accounts only) in run stats.
+   */
+  adminUnboundHeldCount: number
   sampledNewAccounts: Array<{ externalUserId: string; name: string }>
   sampledDeactivations: Array<{ externalUserId: string; name: string; linked: boolean }>
 }
@@ -5338,6 +5391,10 @@ type ExistingAccountPreviewRow = {
   name: string
   is_active: boolean
   linked: boolean
+  /** NULL for an account without a link row (LEFT JOIN). */
+  local_user_id: string | null
+  link_status: string | null
+  match_strategy: string | null
 }
 
 export async function previewDirectorySyncIntegration(integrationId: string): Promise<DirectorySyncPreview> {
@@ -5361,7 +5418,10 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
     `SELECT a.external_user_id,
             a.name,
             a.is_active,
-            (l.local_user_id IS NOT NULL AND l.link_status = 'linked') AS linked
+            (l.local_user_id IS NOT NULL AND l.link_status = 'linked') AS linked,
+            l.local_user_id,
+            l.link_status,
+            l.match_strategy
        FROM directory_accounts a
        LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
       WHERE a.integration_id = $1`,
@@ -5396,6 +5456,7 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
   let autoAdmissionCandidateCount = 0
   let autoAdmissionSkippedMissingEmailCount = 0
   let autoAdmissionExcludedCount = 0
+  let adminUnboundHeldCount = 0
 
   for (const account of pulledAccountsForMatching) {
     const user = users.get(account.external_user_id)
@@ -5409,7 +5470,19 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
     // Walk the exact cascade apply walks: only an account apply would reach the
     // auto-admission branch for ('none' matched — not already-linked, not identity/email/
     // mobile/ambiguous-matched) can possibly be an auto-admission candidate.
-    const existingLink = existingByExternalId.get(user.userId)
+    // Pass the real link row (apply passes `existingLinks.get(account.id)`): the cascade's
+    // early outcomes read `local_user_id`, `link_status` AND `match_strategy`, so a synthetic
+    // `linked` stand-in would hide an administrator-unbound row from preview. An account
+    // without a link row has NULL `link_status` through the LEFT JOIN; apply passes
+    // `undefined` for it, so pass `null` here — identical cascade result.
+    const existingRow = existingByExternalId.get(user.userId)
+    const existingLink = existingRow && existingRow.link_status !== null
+      ? {
+        local_user_id: existingRow.local_user_id,
+        link_status: existingRow.link_status,
+        match_strategy: existingRow.match_strategy,
+      }
+      : null
     const identityMatch = resolveDirectoryIdentityMatch(
       {
         corpId: account.corp_id,
@@ -5419,9 +5492,10 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
         email: account.email,
         mobile: account.mobile,
       },
-      existingLink?.linked ? { local_user_id: 'linked', link_status: 'linked' } : null,
+      existingLink,
       identityMatchMaps,
     )
+    if (identityMatch.matched === 'admin_unbound') adminUnboundHeldCount += 1
     if (identityMatch.matched !== 'none') continue
 
     const eligibility = evaluateDirectoryAutoAdmissionEligibility({
@@ -5513,6 +5587,7 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
     autoAdmissionCandidateCount,
     autoAdmissionSkippedMissingEmailCount,
     autoAdmissionExcludedCount,
+    adminUnboundHeldCount,
     sampledNewAccounts,
     sampledDeactivations,
   }
