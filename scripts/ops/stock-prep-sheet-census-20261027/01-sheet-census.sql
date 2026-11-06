@@ -30,6 +30,12 @@
 --                  attaches the creator only for a non-blank string).
 --   project rows   `data ->> <projectNo field> = registry.project_no` — the
 --                  project-scoped reader's own equality filter.
+--   manual rows    rows whose key starts with manual: are outside the census
+--                  — the reader removes them (ADR
+--                  adr-stock-prep-manual-rows-20261030 §5.1). The test is the
+--                  reader's RAW prefix rule: the key cell is a JSON string
+--                  whose first 7 characters are 'manual:' (no trim); a
+--                  keyless or non-string key is never a prefix row.
 --
 -- COUNTS (one line per sheet; integers only):
 --   row_count, active_row_count,
@@ -201,6 +207,7 @@ cells AS (
    CROSS JOIN ws
    WHERE c.reason IS NULL
      AND m.data ->> (c.fid ->> 'projectNo') = c.project_no
+     AND NOT COALESCE(jsonb_typeof(m.data -> (c.fid ->> 'idempotencyKey')) = 'string' AND left(m.data ->> (c.fid ->> 'idempotencyKey'), 7) = 'manual:', false)
 ),
 classified AS (
   SELECT x.ordinal,

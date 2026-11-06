@@ -13,14 +13,18 @@
  *
  *   S9D-02 pack parity: three synthetic project sheets built by the REAL provisioning (staging project
  *          `T:integration-core`, the project-sheet objectId, the registry row through the registry store), seeded
- *          with D1-D5 plus creator variants, a row of another project and an empty sheet. The pack's SQL text, run
+ *          with D1-D5 plus creator variants, a row of another project and an empty sheet, plus rows that pin single
+ *          clauses (a revived root, an active root with only inactive nested rows, inactive keyless rows, untrimmed
+ *          components / keys) and two `manual:` prefix rows (one M′, one unbound) the reader removes and the pack
+ *          must skip too (ADR adr-stock-prep-manual-rows-20261030 §5.1). The pack's SQL text, run
  *          by the real `psql` on the same PostgreSQL, prints per-sheet counts EQUAL to `censusOfRows` over the
  *          project-scoped reader (`readExistingStockPreparationRows` over the host records API). Every count is
  *          non-zero on some sheet. The default output carries no project number, objectId, sheet id or tenant;
  *          the ordinal -> objectId map appears only with `-v emit_private_map=1` (SC-02 on real output).
  *   S9D-03 fail closed: a registry row whose sheet_id does not match the derived one reports
  *          `status=incomplete reason=sheet_id_mismatch` and NO counts; a registry row whose derived sheet was never
- *          provisioned reports `reason=sheet_missing`; the run's CENSUS_RESULT is then incomplete; the good sheets
+ *          provisioned reports `reason=sheet_missing`, and so does a provisioned sheet that is soft-deleted; a sheet
+ *          that lost a required field reports `reason=field_missing`; the run's CENSUS_RESULT is then incomplete; the good sheets
  *          keep their complete lines.
  *
  * Edge cells (the string 'false', 0, NBSP, a creator) are shaped with direct `UPDATE meta_records` on this
@@ -56,6 +60,7 @@ const { syncStockPreparationContractOptionsForObject } = require(path.join(PLUGI
 
 const { censusOfRows, SHEET_CENSUS_COUNT_KEYS } = censusLib
 const { readExistingStockPreparationRows } = tableActionsLib.__internals
+const { manualPrefixRowsOf } = require(path.join(PLUGIN_LIB, 'stock-preparation-manual-rows.cjs')) as any
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const execFileAsync = promisify(execFile)
@@ -115,7 +120,8 @@ export function defineStockPreparationSheetCensusRealDbCases(): void {
     type Sheet = { projectNo: string; objectId: string; sheetId: string; fields: Record<string, string>; target: any }
     const built: Sheet[] = []
 
-    async function projectSheet(projectNo: string): Promise<Sheet> {
+    // `track: false` builds a sheet S9D-03 then breaks on purpose: it is not one of the S9D-02 parity sheets.
+    async function projectSheet(projectNo: string, { track = true }: { track?: boolean } = {}): Promise<Sheet> {
       const objectId: string = ownBaseLib.deriveStockPreparationProjectSheetObjectId(TENANT, projectNo)
       const ensured = await ensureStockPreparationSandboxTarget({ context: { api: { multitable } }, projectId: PROJECT_ID, permission: 'admin', objectId })
       expect(ensured.ready).toBe(true)
@@ -125,15 +131,16 @@ export function defineStockPreparationSheetCensusRealDbCases(): void {
       sheets.push(sheetId)
       await registry.create({ tenantId: TENANT, projectNo, sheetId, objectId, createdBy: 'u_s60_puller' })
       const sheet = { projectNo, objectId, sheetId, fields: ensured.target.fieldIdMap || {}, target: ensured.target }
-      built.push(sheet)
+      if (track) built.push(sheet)
       return sheet
     }
 
     // One row: created through the host records API (projectNo only), then its stored cells shaped directly.
-    async function seed(sheet: Sheet, cells: Record<string, unknown>, creator?: string) {
+    // `cells` may be a function of the new record's id (the M′ key `manual:v1:<own record id>` needs it).
+    async function seed(sheet: Sheet, cells: Record<string, unknown> | ((recordId: string) => Record<string, unknown>), creator?: string) {
       const created = await multitable.records.createRecord({ sheetId: sheet.sheetId, data: { [sheet.fields.projectNo]: sheet.projectNo } })
       const patch: Record<string, unknown> = {}
-      for (const [logical, value] of Object.entries(cells)) {
+      for (const [logical, value] of Object.entries(typeof cells === 'function' ? cells(String(created.id)) : cells)) {
         const physical = sheet.fields[logical]
         if (!physical) throw new Error(`fixture field ${logical} is not on the sheet`)
         patch[physical] = value
@@ -185,6 +192,26 @@ export function defineStockPreparationSheetCensusRealDbCases(): void {
       await seed(b, { componentSourceId: 'S60-M2', parentSourceId: 'S60-P', active: true }, 'u_s60_hand')
       await seed(b, { idempotencyKey: '', parentSourceId: 'S60-P', active: true }, 'u_s60_hand')
       await seed(b, { idempotencyKey: 7, componentSourceId: 'S60-K3', parentSourceId: 'S60-P', active: true })
+      // Sheet B, review fixes (each row pins one clause; none carries a human cell). A REVIVED root (an inactive root,
+      // an active root and an active nested row of S60-V) is D1, never D2. An active root with only an INACTIVE nested
+      // row (S60-W) is neither. INACTIVE keyless rows, with and without a creator, are not D4. Components and keys
+      // compare UNTRIMMED: root 'S60-X ' / nested 'S60-X' is no two-copy, keys ' k' / 'k' are no duplicate group.
+      await seed(b, { idempotencyKey: 'b-V-old', componentSourceId: 'S60-V', parentSourceId: '', active: false })
+      await seed(b, { idempotencyKey: 'b-V', componentSourceId: 'S60-V', parentSourceId: '', active: true })
+      await seed(b, { idempotencyKey: 'b-P-V', componentSourceId: 'S60-V', parentSourceId: 'S60-P', active: true })
+      await seed(b, { idempotencyKey: 'b-W', componentSourceId: 'S60-W', parentSourceId: '', active: true })
+      await seed(b, { idempotencyKey: 'b-P-W', componentSourceId: 'S60-W', parentSourceId: 'S60-P', active: false })
+      await seed(b, { componentSourceId: 'S60-K5', parentSourceId: 'S60-P', active: false })
+      await seed(b, { componentSourceId: 'S60-M5', parentSourceId: 'S60-P', active: false }, 'u_s60_hand')
+      await seed(b, { idempotencyKey: ' k', componentSourceId: 'S60-X ', parentSourceId: '', active: true })
+      await seed(b, { idempotencyKey: 'k', componentSourceId: 'S60-X', parentSourceId: 'S60-P', active: true })
+      // 人工补充行 B1 (ADR adr-stock-prep-manual-rows-20261030 §5.1): the reader removes EVERY row whose key starts with
+      // `manual:` (raw, no trim), so the census never counts one. An M′ row (key `manual:v1:<its own record id>`, a
+      // creator) and an unbound prefix row (an inactive row with a human cell, no creator) are on the sheet and outside
+      // both counts; a key with a LEADING space is not a prefix row and is counted.
+      await seed(b, (recordId) => ({ idempotencyKey: `manual:v1:${recordId}`, componentSourceId: 'S60-MAN', parentSourceId: 'S60-P', active: true, notes: 'S60 hand row' }), 'u_s60_hand')
+      await seed(b, { idempotencyKey: 'manual:v1:s60-unbound', componentSourceId: 'S60-U', parentSourceId: 'S60-P', active: false, notes: 'S60 hand row' })
+      await seed(b, { idempotencyKey: ' manual:s60-lead', componentSourceId: 'S60-L', parentSourceId: 'S60-P', active: true })
       // Sheet C: provisioned and registered, no rows.
       await projectSheet(`S60-C-${TOKEN}`)
     }, 300000)
@@ -233,9 +260,21 @@ export function defineStockPreparationSheetCensusRealDbCases(): void {
       expect(new Set(Object.values(observed).map((entry) => JSON.stringify(entry))).size).toBe(built.length)
       // Pinned values for the two shaped sheets (the module and the pack could otherwise agree on a shared bug).
       expect(observed[SENTINEL_PROJECT]).toMatchObject({ rowCount: 13, activeRowCount: 12, twoCopyComponents: 1, inactiveRootRemnantComponents: 0, duplicateKeyGroups: 1, keylessRowsWithoutCreator: 3, keylessRowsWithCreator: 1, nonBooleanActiveCells: 2, inactiveRowsWithHumanCells: 0, nestedCopiesWithHumanCells: 1 })
-      expect(observed[`S60-B-${TOKEN}`]).toMatchObject({ rowCount: 11, activeRowCount: 8, twoCopyComponents: 1, inactiveRootRemnantComponents: 1, duplicateKeyGroups: 0, keylessRowsWithoutCreator: 1, keylessRowsWithCreator: 2, nonBooleanActiveCells: 0, inactiveRowsWithHumanCells: 2, nestedCopiesWithHumanCells: 1 })
+      // B: 23 rows on the sheet, 2 of them `manual:` prefix rows outside the census; 21 counted (14 active). Two-copy:
+      // S60-R and the revived S60-V (S60-W, 'S60-X ' / 'S60-X' are not); remnant: S60-S only (S60-V has an active
+      // root again); keys ' k' / 'k' are no group; the inactive keyless rows S60-K5 / S60-M5 count in no D4 bucket.
+      expect(observed[`S60-B-${TOKEN}`]).toMatchObject({ rowCount: 21, activeRowCount: 14, twoCopyComponents: 2, inactiveRootRemnantComponents: 1, duplicateKeyGroups: 0, keylessRowsWithoutCreator: 1, keylessRowsWithCreator: 2, nonBooleanActiveCells: 0, inactiveRowsWithHumanCells: 2, nestedCopiesWithHumanCells: 1 })
       const sentinelLine = sheetLines.get(String(ordinalOf.get(built[0].objectId)))!
       expect(sentinelLine.sheet_rows_all_projects).toBe('14')
+      const bLine = sheetLines.get(String(ordinalOf.get(built[1].objectId)))!
+      expect(bLine.sheet_rows_all_projects).toBe('23')
+      // The fixture is what it claims: the reader took out exactly one M′ row and one unbound prefix row on B.
+      const bRows = await readExistingStockPreparationRows(multitable.records, built[1].target, built[1].projectNo)
+      const bPrefix = manualPrefixRowsOf(bRows)
+      expect(bPrefix).toBeTruthy()
+      expect(bPrefix.manualRows.length).toBe(1)
+      expect(bPrefix.unboundKeyCount).toBe(1)
+      expect(bRows.some((entry: any) => entry.idempotencyKey === ' manual:s60-lead')).toBe(true)
 
       const result = plain.lines[plain.lines.length - 1]
       expect(result.kind).toBe('CENSUS_RESULT')
@@ -249,7 +288,7 @@ export function defineStockPreparationSheetCensusRealDbCases(): void {
       expect(priv.stdout.includes(SENTINEL_PROJECT)).toBe(false)
     }, 300000)
 
-    test('S9D-03 a registry row whose derived sheet id does not match reports sheet_id_mismatch and no counts; an unprovisioned sheet reports sheet_missing; the run is incomplete', async () => {
+    test('S9D-03 a registry row whose derived sheet id does not match reports sheet_id_mismatch and no counts; an unprovisioned or soft-deleted sheet reports sheet_missing; a sheet without a required field reports field_missing; the run is incomplete', async () => {
       if (!psqlAvailable()) {
         if (process.env.METASHEET_REAL_DB_TEST_STEP === '1') throw new Error('psql is required in the real-DB step')
         console.warn('[S9D-03] psql not runnable — skipped outside the real-DB step')
@@ -267,16 +306,31 @@ export function defineStockPreparationSheetCensusRealDbCases(): void {
         'INSERT INTO integration_stock_prep_project_target (id, tenant_id, project_no, sheet_id, object_id, status, archived_at) VALUES ($1, $2, $3, $4, $5, $6, now())',
         [`spt_s60_ms_${TOKEN}`, TENANT, missingProject, sha1Id('sheet', PROJECT_ID, missingObject), missingObject, 'archived'],
       )
+      // A provisioned, registered sheet that lost a REQUIRED field (its meta_fields row gone, the key stripped from its
+      // records): without the field_missing check it would print `status=complete` with counts over a missing column.
+      const fieldGone = await projectSheet(`S60-FIELD-${TOKEN}`, { track: false })
+      await seed(fieldGone, { idempotencyKey: 'f-S', componentSourceId: 'S60-S', parentSourceId: '', active: false, notes: 'S60 note' })
+      await seed(fieldGone, { idempotencyKey: 'f-P-S', componentSourceId: 'S60-S', parentSourceId: 'S60-P', active: true })
+      const removed = await q('DELETE FROM meta_fields WHERE sheet_id = $1 AND id = $2', [fieldGone.sheetId, fieldGone.fields.active])
+      expect(removed.rowCount).toBe(1)
+      await q('UPDATE meta_records SET data = data - $2::text WHERE sheet_id = $1', [fieldGone.sheetId, fieldGone.fields.active])
+      // A provisioned, registered sheet that is SOFT-deleted (meta_sheets.deleted_at set; its rows still stored).
+      const softDeleted = await projectSheet(`S60-SOFTDEL-${TOKEN}`, { track: false })
+      await seed(softDeleted, { idempotencyKey: 'sd-S', componentSourceId: 'S60-S', parentSourceId: '', active: true })
+      const softened = await q('UPDATE meta_sheets SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL', [softDeleted.sheetId])
+      expect(softened.rowCount).toBe(1)
       const priv = await runPack(['-v', 'emit_private_map=1'])
       const plain = await runPack()
       const ordinalOf = new Map(priv.lines.filter((entry) => entry.kind === 'CENSUS_PRIVATE').map((entry) => [entry.fields.object_id, entry.fields.ordinal]))
       const lineOf = (objectId: string) => plain.stdout.split(/\r?\n/).find((line) => line.startsWith(`CENSUS_SHEET ordinal=${ordinalOf.get(objectId)} `))
       expect(lineOf(mismatchObject)).toBe(`CENSUS_SHEET ordinal=${ordinalOf.get(mismatchObject)} registry_status=active status=incomplete reason=sheet_id_mismatch`)
       expect(lineOf(missingObject)).toBe(`CENSUS_SHEET ordinal=${ordinalOf.get(missingObject)} registry_status=archived status=incomplete reason=sheet_missing`)
+      expect(lineOf(fieldGone.objectId)).toBe(`CENSUS_SHEET ordinal=${ordinalOf.get(fieldGone.objectId)} registry_status=active status=incomplete reason=field_missing`)
+      expect(lineOf(softDeleted.objectId)).toBe(`CENSUS_SHEET ordinal=${ordinalOf.get(softDeleted.objectId)} registry_status=active status=incomplete reason=sheet_missing`)
       for (const sheet of built) expect(lineOf(sheet.objectId)).toMatch(/ status=complete row_count=\d+ /)
       const result = plain.lines[plain.lines.length - 1]
       expect(result.kind).toBe('CENSUS_RESULT')
-      expect(result.fields).toMatchObject({ status: 'incomplete', reason: 'sheet_checks_failed', sheets: '5', complete: '3', incomplete: '2' })
+      expect(result.fields).toMatchObject({ status: 'incomplete', reason: 'sheet_checks_failed', sheets: '7', complete: '3', incomplete: '4' })
       expect(plain.stdout.includes(mismatchProject) || plain.stdout.includes(mismatchObject)).toBe(false)
     }, 300000)
   })

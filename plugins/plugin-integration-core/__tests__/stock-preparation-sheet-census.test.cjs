@@ -101,6 +101,18 @@ test('SC-01 D2 is not a remnant once S has an active root again, nor without an 
   assert.equal(censusOfRows(noCopy).inactiveRootRemnantComponents, 0)
 })
 
+test('SC-01 an active root with only INACTIVE nested rows is neither D1 nor D2 (the nested side of D1 is active-only)', () => {
+  const rows = [
+    row({ idempotencyKey: 'k-P', componentSourceId: 'S6C-P', parentSourceId: '', active: true }),
+    row({ idempotencyKey: 'k-W', componentSourceId: 'S6C-W', parentSourceId: '', active: true }),
+    row({ idempotencyKey: 'k-P-W', componentSourceId: 'S6C-W', parentSourceId: 'S6C-P', active: false }),
+    row({ idempotencyKey: 'k-P-W-2', componentSourceId: 'S6C-W', parentSourceId: 'S6C-P', active: false }),
+  ]
+  const census = censusOfRows(rows)
+  assert.deepEqual(countsOf(census), { ...ZERO, rowCount: 4, activeRowCount: 2 })
+  assert.equal(countTwoCopyComponents(rows), 0, 'readiness O-6 agrees')
+})
+
 test('SC-01 D3: duplicate key groups count active and inactive rows; a resolved-duplicate suffix is a different key', () => {
   const rows = [
     row({ idempotencyKey: 'k-dup', componentSourceId: 'S6C-A', active: true }),

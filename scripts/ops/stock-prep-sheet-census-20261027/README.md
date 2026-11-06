@@ -97,6 +97,7 @@ integration/stock-preparation-sheet-census-realdb.cases.ts`）。只数这张表
 | 根行 | `parentSourceId` 为空 |
 | 组件 / 键 | `componentSourceId` / `idempotencyKey` 为非空字符串时取其**原值**（不 trim），否则无 |
 | 创建人 | `meta_records.created_by` 非空（去空白后） |
+| 人工补充行 | rows whose key starts with manual: are outside the census — the reader removes them (ADR adr-stock-prep-manual-rows-20261030 §5.1)。即：`idempotencyKey` 是 JSON 字符串、且**原值**（不 trim）以 `manual:` 开头的行（M′ 行与未绑定前缀行都算）不进任何计数，与项目作用域读取同一条规则；无键或非字符串键的行不是前缀行。它们仍计入仅本包的 `sheet_rows_all_projects` |
 | `two_copy_components` | D1：同一组件既有有效根行、又有有效嵌套行（即就绪检查 O-6 的数） |
 | `inactive_root_remnant_components` | D2（第 10 项形状）：有失效根行、**没有**有效根行、且至少一行有效嵌套副本。O-6 看不到它 |
 | `duplicate_key_groups` | D3：被两行及以上占用的键（有效失效都算——失效行仍占着键） |

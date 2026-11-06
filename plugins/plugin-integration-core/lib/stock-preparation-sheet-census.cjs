@@ -27,6 +27,10 @@
 //                      (the pairing module's keyOf).
 //   creator(row)       row[EXISTING_ROW_CREATED_BY] is a string with non-empty trim() (GOV-05; the
 //                      reader sets it only for a non-blank meta_records.created_by).
+//   manual rows        rows whose key starts with manual: are outside the census — the reader removes
+//                      them (ADR adr-stock-prep-manual-rows-20261030 §5.1), so they never reach `rows`
+//                      here. The pack applies the reader's RAW prefix rule itself: a JSON string key
+//                      whose first 7 characters are 'manual:' (no trim).
 //
 //   rowCount                     every row.
 //   activeRowCount               active rows.
