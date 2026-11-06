@@ -314,7 +314,8 @@ jobs:
           node --test \
             scripts/ops/directory-grant-table-ci-wiring.test.mjs \
             scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs \
-            scripts/ops/directory-access-graph-mutex-ci-wiring.test.mjs
+            scripts/ops/directory-access-graph-mutex-ci-wiring.test.mjs \
+            scripts/ops/directory-deprovision-provider-scope-ci-wiring.test.mjs
 
       # Integration Guard required-wiring contract (governance slice, standalone from #4603/#4604/
       # #4610 by owner instruction; hardened 2026-07-25 after a P1x2/P2 review — see the workflow's own
@@ -2657,6 +2658,8 @@ jobs:
             tests/integration/security-action-privilege.db.test.ts \
             tests/integration/directory-unbind-intent-persistence.db.test.ts \
             tests/integration/directory-sync-membership-local-account-gate.db.test.ts \
+            tests/integration/directory-deprovision-effect-provider-schema.db.test.ts \
+            tests/integration/directory-deprovision-provider-evidence.db.test.ts \
             tests/integration/directory-source-freeze-lock-correctness.db.test.ts \
             tests/integration/invite-accept-concurrency-rollback.db.test.ts \
             tests/integration/directory-account-external-key-collision-mechanism.db.test.ts \

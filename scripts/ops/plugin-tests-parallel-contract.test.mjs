@@ -36,7 +36,7 @@ const canaryExclusionConsistencyStep = {
 }
 const directoryWiringContractsStep = {
   name: 'Directory grant-table, deprovision-writer and access-graph-mutex CI-wiring contracts (required lane)',
-  run: 'node --test \\\n  scripts/ops/directory-grant-table-ci-wiring.test.mjs \\\n  scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs \\\n  scripts/ops/directory-access-graph-mutex-ci-wiring.test.mjs\n',
+  run: 'node --test \\\n  scripts/ops/directory-grant-table-ci-wiring.test.mjs \\\n  scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs \\\n  scripts/ops/directory-access-graph-mutex-ci-wiring.test.mjs \\\n  scripts/ops/directory-deprovision-provider-scope-ci-wiring.test.mjs\n',
 }
 const permissionStep = {
   name: 'Admin write-route inventory and permission preflight',
@@ -124,11 +124,19 @@ function assertParallelWorkflow(doc) {
         const membershipGateAddition = '  tests/integration/directory-sync-membership-local-account-gate.db.test.ts \\\n'
         assert.equal(step.run.split(membershipGateAddition).length - 1, 1, 'Sync membership local-account gate DB suite must run exactly once')
         assert.ok(step.run.includes(repairAddition + privilegeAddition + intentAddition + membershipGateAddition), 'Keep the sync membership gate suite right after the directory link intent suite')
+        const providerSchemaAddition = '  tests/integration/directory-deprovision-effect-provider-schema.db.test.ts \\\n'
+        assert.equal(step.run.split(providerSchemaAddition).length - 1, 1, 'Deprovision effect provider schema DB suite must run exactly once')
+        assert.ok(step.run.includes(membershipGateAddition + providerSchemaAddition), 'Keep the deprovision effect provider schema suite right after the sync membership gate suite')
+        const providerEvidenceAddition = '  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n'
+        assert.equal(step.run.split(providerEvidenceAddition).length - 1, 1, 'Deprovision provider evidence DB suite must run exactly once')
+        assert.ok(step.run.includes(providerSchemaAddition + providerEvidenceAddition), 'Keep the deprovision provider evidence suite right after the provider schema suite')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
         step.run = step.run.replace(privilegeAddition, '')
         step.run = step.run.replace(intentAddition, '')
         step.run = step.run.replace(membershipGateAddition, '')
+        step.run = step.run.replace(providerSchemaAddition, '')
+        step.run = step.run.replace(providerEvidenceAddition, '')
       }
       if (suite === 'runtime-db' && step.id === lockProtocolStepId) {
         const tail = `  --reporter=verbose${lockProtocolJsonReporter}\n${lockProtocolZeroSkipLine}`
@@ -193,6 +201,10 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/dingtalk-login-repair.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-sync-membership-local-account-gate.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-sync-membership-local-account-gate.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-deprovision-effect-provider-schema.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-deprovision-effect-provider-schema.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/security-action-privilege.db.test.ts \\\n', '') },
@@ -212,6 +224,7 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
       [closeoutContractsStep, '  scripts/ops/dingtalk-closeout-env-contract.test.mjs \\\n'],
       [canaryExclusionConsistencyStep, 'scripts/ops/dingtalk-lifecycle-canary-exclusion-consistency.test.mjs'],
       [directoryWiringContractsStep, '  scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs \\\n'],
+      [directoryWiringContractsStep, ' \\\n  scripts/ops/directory-deprovision-provider-scope-ci-wiring.test.mjs'],
     ].flatMap(([promoted, file]) => [
       doc => { const steps = doc.jobs.contracts.steps; steps.splice(steps.findIndex(step => step.name === promoted.name), 1) },
       doc => { doc.jobs.contracts.steps.find(step => step.name === promoted.name).run += ' || true' },

@@ -376,6 +376,14 @@ export default defineConfig({
       // skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
       // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
       'tests/integration/directory-sync-membership-local-account-gate.db.test.ts',
+      // Deprovision effect provider witness: the provider column migration (isolated schema:
+      // triggers, CHECK, replay, down, lock bound) and restore / compensation / writer against the
+      // migrated schema. DATABASE_URL-gated with the EXPECT_DB sentinel; excluded here so the
+      // no-DB job cannot skip-green them, and wired as WHOLE FILES into the approval real-DB step
+      // in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
+      // directory-deprovision-provider-scope-ci-wiring.test.mjs).
+      'tests/integration/directory-deprovision-effect-provider-schema.db.test.ts',
+      'tests/integration/directory-deprovision-provider-evidence.db.test.ts',
       // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
       // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
       // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
