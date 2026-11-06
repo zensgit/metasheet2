@@ -358,31 +358,45 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
     })
 
     // P2-A (2026-09-05, design brief §1.3): `.meta-record-drawer__tabs-bar` is the container-query
-    // container, and below 420px both the tabs pill and each tab get `flex: 1; min-width: 0` so all
-    // four stay on one row at the 360px panel floor. Source-text pin only — jsdom implements neither
-    // layout nor CSS Container Queries, so the resulting one-row layout itself is NOT verified here
-    // (same caveat this file's sibling flex-wrap pin above already discloses); real-browser
-    // verification is this PR's own checklist item "four tabs on one row at 360".
-    it('[source] .meta-record-drawer__tabs-bar is a container, and @container (width < 420px) sets flex:1/min-width:0 on both the tabs pill and each tab (jsdom cannot verify the resulting one-row layout)', () => {
+    // container; below 420px the tabs pill and each tab get narrow-width flex rules. Source-text pin
+    // only — jsdom implements neither layout nor CSS Container Queries, so the resulting layout itself
+    // is NOT verified here (same caveat this file's sibling flex-wrap pin above already discloses).
+    // 2026-11-06: the original `flex: 1; min-width: 0` on both was measured in Safari and Chromium to
+    // overlap the en tab labels at 360-440px (`flex: 1` = a zero basis, so the pill never wrapped away
+    // from the hide-empty toggle and the tabs shrank below their text). The pin now holds the fix: a
+    // content-sized basis on the pill (never `flex: 1` / a 0 basis), and tabs never narrower than their
+    // labels. The measured outcome (no tab narrower than its text, en + zh-CN, 360/400/440/480px) is
+    // in that PR's description.
+    it('[source] .meta-record-drawer__tabs-bar is a container, and @container (width < 420px) gives the pill a content-sized basis (min-width 0) and each tab at least its label width (jsdom cannot verify the resulting layout)', () => {
       const src = readSrc('src/multitable/components/MetaRecordInspector.vue')
       const tabsBarRule = src.match(/\.meta-record-drawer__tabs-bar\s*\{[^}]*\}/)?.[0] ?? ''
       expect(tabsBarRule).toMatch(/container-type:\s*inline-size/)
       const query = src.match(/@container \(width < 420px\)\s*\{[\s\S]*?\n\}/)?.[0] ?? ''
       expect(query).toBeTruthy()
+      // one rule each for the pill and the tab inside the block (a second one could undo the first)
+      expect(query.match(/\.meta-record-drawer__tabs\s*\{/g)?.length).toBe(1)
+      expect(query.match(/\.meta-record-drawer__tab\s*\{/g)?.length).toBe(1)
       const tabsRule = query.match(/\.meta-record-drawer__tabs\s*\{[^}]*\}/)?.[0] ?? ''
-      expect(tabsRule).toMatch(/flex:\s*1/)
-      expect(tabsRule).toMatch(/min-width:\s*0/)
+      expect(tabsRule).toMatch(/flex:\s*1 1 auto\s*;/)
+      expect(tabsRule).toMatch(/min-width:\s*0\s*;/)
+      // the overlap's cause: a zero flex basis on the pill (`flex: 1`, `flex: 1 1 0`, a `flex-basis`,
+      // `width: 0`); and one `flex` declaration only, so a later one cannot override the content basis
+      expect(tabsRule).not.toMatch(/flex:\s*1\s*;|flex:\s*1 1 0|flex-basis|(?<![-\w])width:\s*0/)
+      expect(tabsRule.match(/(?<![-\w])flex:/g)?.length).toBe(1)
       const tabRule = query.match(/\.meta-record-drawer__tab\s*\{[^}]*\}/)?.[0] ?? ''
-      expect(tabRule).toMatch(/flex:\s*1/)
-      expect(tabRule).toMatch(/min-width:\s*0/)
+      expect(tabRule).toMatch(/flex:\s*1 1 auto\s*;/)
+      expect(tabRule).toMatch(/min-width:\s*max-content\s*;/)
+      expect(tabRule).not.toMatch(/min-width:\s*0/)
+      // the padding that fits the four en labels on one row at the 360px drawer (measured; 12px wraps)
+      expect(tabRule).toMatch(/padding:\s*5px 6px\s*;/)
 
       // Placement (real-browser-verified defect, caught before landing — see the @container block's
       // own comment): the block must come AFTER the UNCONDITIONAL base `.meta-record-drawer__tab`
-      // rule (`min-width: 76px`), not before it. The `flex:1`/`min-width:0` assertions above alone
-      // do NOT catch a regression that moves the block back above that base rule — both strings
-      // would still be present, just in the wrong relative order, and same-specificity CSS cascade
-      // order (a `@container` wrapper adds none of its own) would then let the LATER, unconditional
-      // `min-width: 76px` win at every width, silently reintroducing the exact defect this PR fixed.
+      // rule (`min-width: 76px`), not before it. The rule-text assertions above alone do NOT catch a
+      // regression that moves the block back above that base rule — the strings would still be
+      // present, just in the wrong relative order, and same-specificity CSS cascade order (a
+      // `@container` wrapper adds none of its own) would then let the LATER, unconditional base rule
+      // (`min-width: 76px; padding: 5px 12px`) win at every width, so the en tabs wrap again.
       const baseTabRuleIndex = src.indexOf('.meta-record-drawer__tab { min-width: 76px')
       const containerQueryIndex = src.indexOf('@container (width < 420px)')
       expect(baseTabRuleIndex).toBeGreaterThan(0)
