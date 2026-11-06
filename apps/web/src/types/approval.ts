@@ -262,11 +262,14 @@ export interface ApprovalNodeConfig {
  * Lock-5 §1.1 L5-A — byte-mirrors backend
  * `packages/core-backend/src/types/approval-product.ts` `NodeOperationPolicy`.
  *
- * Only the four boolean switches have LANDED server enforcement (the §2.1 dispatch choke, 409
- * `APPROVAL_NODE_OPERATION_DISABLED`) and therefore only they may render a control (master M7/M8,
- * Lock-5 gate E-2). `returnReviewMode` (OD-L5-6(a) ships `'resume_forward'` only; §1.2: "no
- * `returnReviewMode` control renders") and `commentRequired` (§1.3, its own slice) are carried for
- * round-trip preservation and publish-time validation ONLY — do not add controls for them here.
+ * A key may render a control only once its server enforcement has landed (master M7/M8, Lock-5
+ * gate E-2). The four boolean switches are enforced at the §2.1 dispatch choke (409
+ * `APPROVAL_NODE_OPERATION_DISABLED`); `commentRequired` is enforced at the approve / reject
+ * decision (§1.3: node value first, instance snapshot as fallback; a bare reject is refused unless
+ * the node says `'never'`, a bare approve is refused when it says `'always'`) and renders as ONE
+ * three-way select on approval nodes. `returnReviewMode` (OD-L5-6(a) ships `'resume_forward'`
+ * only; §1.2: "no `returnReviewMode` control renders") stays carried for round-trip preservation
+ * and publish-time validation ONLY — do not add a control for it here.
  */
 export interface NodeOperationPolicy {
   allowTransfer?: boolean
@@ -283,8 +286,17 @@ export const RENDERED_NODE_OPERATION_POLICY_KEYS = [
   'allowAddSign',
   'allowReduceSign',
   'allowReturn',
+  'commentRequired',
 ] as const
 export type RenderedNodeOperationPolicyKey = typeof RENDERED_NODE_OPERATION_POLICY_KEYS[number]
+/** The rendered keys that are boolean switches (one 操作权限 checkbox each). `commentRequired` is
+ *  three-valued and renders as its own select, so it is excluded here. */
+export type RenderedNodeOperationPolicySwitchKey = Exclude<RenderedNodeOperationPolicyKey, 'commentRequired'>
+
+/** Lock-5 §1.3 — the three `commentRequired` values, in strictness order (never < reject_only <
+ *  always). Byte-mirrors the backend's publish-time enum. */
+export const NODE_COMMENT_REQUIRED_VALUES = ['never', 'reject_only', 'always'] as const
+export type NodeCommentRequired = typeof NODE_COMMENT_REQUIRED_VALUES[number]
 
 /**
  * Lock-5 §2.3 / gate A-2 — the ACTOR-SCOPED effective policy the SERVER resolved for this viewer at

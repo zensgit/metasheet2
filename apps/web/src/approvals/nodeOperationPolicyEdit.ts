@@ -1,5 +1,6 @@
 import type { ApprovalOperationPolicyCapability } from './approvalCapabilityRegistry'
-import type { NodeOperationPolicy } from '../types/approval'
+import type { NodeCommentRequired, NodeOperationPolicy } from '../types/approval'
+import { NODE_COMMENT_REQUIRED_VALUES } from '../types/approval'
 
 /**
  * Lock-5 §1.1 L5-A / OD-L5-2(a) — the pure projection between the persisted `nodeOperationPolicy`
@@ -97,6 +98,74 @@ export function applyOperationPolicyControl(
     } else {
       next[key] = false
     }
+  }
+  return Object.keys(next).length > 0 ? next : undefined
+}
+
+// ── Lock-5 §1.3 L5-C/L5-D — the 审批意见 select (`commentRequired`) ─────────────────────────────
+//
+// One three-way select, not two checkboxes (OD-L5-7(a)): today's default — a reject needs a
+// comment, an approve does not — is neither "on" nor "off" of a single switch. The server reads the
+// node value first and, when the node carries none, falls back to the instance snapshot, which for
+// every instance created after a publish resolves to `'reject_only'`. So ABSENT ≡ 驳回时必填, and
+// the same absent-is-default grammar as the checkboxes above applies: choosing the default REMOVES
+// the key (gate A-6), and every sibling field survives every choice (A-7's third clause).
+
+/** The value an ABSENT `commentRequired` resolves to for a newly created instance. */
+export const COMMENT_REQUIRED_DEFAULT: NodeCommentRequired = 'reject_only'
+
+/** Select value for a persisted value outside the three known ones (read-only, never overwritten). */
+export const COMMENT_REQUIRED_UNKNOWN_SELECT_VALUE = '__unknown__'
+
+/** Honest label for that read-only option — never the raw persisted string. */
+export const COMMENT_REQUIRED_UNKNOWN_LABEL = '无法识别的设置（只读，保存不会改动它）'
+
+/** Shown beside the select while 同意和驳回都必填 is chosen. The approval-center quick approve and
+ *  batch approve send no comment, so at such a node they are refused row by row with the server's
+ *  message; the detail page asks for the comment before submitting. Stated so an administrator is
+ *  not surprised by those refusals. */
+export const COMMENT_REQUIRED_ALWAYS_HINT =
+  '选择「同意和驳回都必填」后，审批中心的快捷同意和批量同意不带意见，会被拒绝；审批人需在审批详情中填写意见后同意。'
+
+export function isNodeCommentRequired(value: unknown): value is NodeCommentRequired {
+  return (NODE_COMMENT_REQUIRED_VALUES as readonly unknown[]).includes(value)
+}
+
+/** The rendered state of the 审批意见 select. */
+export type CommentRequiredControlState =
+  /** `explicit` is false when the key is absent and the value shown is the default. */
+  | { kind: 'editable'; value: NodeCommentRequired; explicit: boolean }
+  /** A persisted value outside the enum — rendered read-only, never projected onto a known value. */
+  | { kind: 'unknown' }
+
+export function commentRequiredControlState(policy: NodeOperationPolicy | undefined): CommentRequiredControlState {
+  const declared = policy?.commentRequired as unknown
+  if (declared === undefined) return { kind: 'editable', value: COMMENT_REQUIRED_DEFAULT, explicit: false }
+  if (isNodeCommentRequired(declared)) return { kind: 'editable', value: declared, explicit: true }
+  return { kind: 'unknown' }
+}
+
+/**
+ * Return the policy after the author picks `value`, leaving every other field byte-identical.
+ *
+ *  - An unknown persisted value is never overwritten (fail-closed): the SAME reference comes back.
+ *  - Re-picking the value already shown is a no-op: the SAME reference comes back, so an explicit
+ *    `'reject_only'` written through the publish API keeps its exact bytes until the author changes it.
+ *  - Picking the default removes the key (absent ≡ `'reject_only'`); `undefined` when nothing is
+ *    left, so the caller removes `nodeOperationPolicy` entirely.
+ *  - `'never'` / `'always'` are written explicitly.
+ */
+export function applyCommentRequiredChoice(
+  policy: NodeOperationPolicy | undefined,
+  value: NodeCommentRequired,
+): NodeOperationPolicy | undefined {
+  const state = commentRequiredControlState(policy)
+  if (state.kind !== 'editable' || state.value === value) return policy
+  const next: NodeOperationPolicy = { ...(policy ?? {}) }
+  if (value === COMMENT_REQUIRED_DEFAULT) {
+    delete next.commentRequired
+  } else {
+    next.commentRequired = value
   }
   return Object.keys(next).length > 0 ? next : undefined
 }
