@@ -276,6 +276,7 @@ import {
   type SheetLiveness,
 } from '../multitable/sheet-liveness'
 import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
+import { bumpSheetPermissionVersions } from '../multitable/authz-version-protocol'
 import {
   isTombstoneCaptureEnabled,
   countFieldDeleteCaptureRows,
@@ -10258,6 +10259,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // and without seeing the pre-delete row version, and wrote grants onto a dead sheet. The throw
         // rolls back before the DELETE/INSERT below; the outer catch answers the gate's own 404 body.
         await assertSheetLiveForUpdate(query, sheetId)
+        // D21 (Y5a): the sheet permission version row, write-locked before the grant rows change.
+        await bumpSheetPermissionVersions(query, [sheetId])
         const configBatchId = randomUUID()
         const beforeResult = await query(
           `SELECT perm_code FROM spreadsheet_permissions
@@ -10392,6 +10395,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // first, so the UPDATE below cannot land on a sheet that is dead at write time. Taken AFTER
         // the fence, so the lock order (fence → sheet row) is the one every fenced writer uses.
         await assertSheetLiveForUpdate(query, sheetId)
+        // D21 (Y5a): row-level read-deny is check-4 configuration; bump the sheet version row first.
+        await bumpSheetPermissionVersions(query, [sheetId])
         const beforeResult = await query('SELECT row_level_read_permissions_enabled AS enabled FROM meta_sheets WHERE id = $1', [sheetId])
         const before = {
           rowLevelReadPermissionsEnabled: ((beforeResult as any).rows?.[0] as { enabled?: boolean } | undefined)?.enabled === true,
@@ -10485,6 +10490,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // which carries no `deleted_at` predicate of its own and would otherwise overwrite the
         // read-deny rules of a sheet soft-deleted inside the window.
         await assertSheetLiveForUpdate(query, sheetId)
+        // D21 (Y5a): conditional-read rules are check-4 configuration; bump the sheet version row first.
+        await bumpSheetPermissionVersions(query, [sheetId])
         const beforeResult = await query('SELECT conditional_read_rules AS rules FROM meta_sheets WHERE id = $1', [sheetId])
         const before = {
           conditionalReadRules: parseConditionalRules(((beforeResult as any).rows?.[0] as { rules?: unknown } | undefined)?.rules).rules,
@@ -10921,6 +10928,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // pre-transaction gate read liveness on the pool; a soft delete committing between that read and
         // this lock leaves the lock free, so `field_permissions` writes would land on a dead sheet.
         await assertSheetLiveForUpdate(query, sheetId)
+        // D21 (Y5a): the sheet permission version row, write-locked before the field grants change.
+        await bumpSheetPermissionVersions(query, [sheetId])
         const configBatchId = randomUUID()
         const beforeResult = await query(
           `SELECT visible, read_only
@@ -14135,6 +14144,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         | { kind: 'error'; status: number; code: string; message: string }
 
       const outcome = await pool.transaction(async ({ query }): Promise<PutRecordPermissionTxnOutcome> => {
+        // D21 (Y5a): the sheet permission version row FIRST — ahead of the record-link phases, whose
+        // phase 5 takes `meta_records` FOR UPDATE. An admission holds the version row FOR SHARE and
+        // then the bound record FOR SHARE; taking the version row last would form a cycle with it.
+        await bumpSheetPermissionVersions(query, [sheetId])
         // Lock every source consumed by the final capability read before the row-auth advisory.
         // baseId is intentionally empty: this route consumes sheet, actor, and sheet-grant
         // authority only. Shared locks let peer readers proceed while serializing revokes.
@@ -14251,6 +14264,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         | { kind: 'error'; status: number; code: string; message: string }
 
       const outcome = await pool.transaction(async ({ query }): Promise<DeleteRecordPermissionTxnOutcome> => {
+        // D21 (Y5a): sheet permission version row first (same reason as PUT above).
+        await bumpSheetPermissionVersions(query, [sheetId])
         await lockRecordLinkAuthorityRowsOnQuery(query, {
           userId: requestAccess.userId,
           baseId: '',

@@ -972,7 +972,8 @@ describe('R8 — the write boundary refuses by itself under the delegated `names
     const exec = executor()
     const result = await assignUserRoles({ userIds: [TARGET], roleId: 'attendance_employee', scope: delegated, executor: exec })
     expect(result.affectedUserIds).toEqual([TARGET])
-    expect(exec.seen.map((sql) => sql.split(' ').slice(0, 3).join(' '))).toEqual(['SELECT id FROM', 'SELECT permission_code FROM', 'INSERT INTO user_roles'])
+    // D21 (Y5a): the subject authorization version bump sits between the code read and the write.
+    expect(exec.seen.map((sql) => sql.split(' ').slice(0, 3).join(' '))).toEqual(['SELECT id FROM', 'SELECT permission_code FROM', 'INSERT INTO subject_authorization_versions', 'INSERT INTO user_roles'])
   })
 
   it('POSITIVE CONTROL — the platform arms skip the code review: a platform admin through the attendance router appoints attendance_admin', async () => {

@@ -55,6 +55,7 @@ import {
   normalizeNamespace,
 } from '../rbac/namespace-admission'
 import { assignUserRoles, type RoleAssignmentScope } from '../rbac/role-assignment'
+import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
 import { invalidateUserPerms } from '../rbac/service'
 import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../security/encrypted-secrets'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
@@ -6991,6 +6992,10 @@ async function applyDirectoryProjectedMemberGroupGovernanceInTransaction(
       }
     }
 
+    // D21 (Y5a): canonical sorted subject bump before the multi-user admission upsert, so the
+    // trigger bumps that follow (in unnest order) never acquire a subject row the admission holder
+    // or a concurrent writer takes in another order.
+    await bumpSubjectAuthorizationVersions(client, grantSet.userIds)
     await client.query(
       `INSERT INTO user_namespace_admissions (
          user_id, namespace, enabled, source, granted_by, updated_by, created_at, updated_at
@@ -7106,6 +7111,11 @@ async function syncProjectedDepartmentMemberGroupsInTransaction(
 
     const membersToDelete = Array.from(currentMembers).filter((value) => !desiredMembers.has(value))
     const membersToInsert = Array.from(desiredMembers).filter((value) => !currentMembers.has(value))
+
+    // D21 (Y5a): one sorted subject bump for every member the projection removes or adds (joining a
+    // group that carries a deny row is a revocation), ahead of the multi-row DELETE whose trigger
+    // bumps would otherwise land in scan order.
+    await bumpSubjectAuthorizationVersions(client, [...membersToDelete, ...membersToInsert])
 
     if (membersToDelete.length > 0) {
       await client.query(
