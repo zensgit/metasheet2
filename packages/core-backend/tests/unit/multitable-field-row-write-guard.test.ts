@@ -10,7 +10,11 @@
  *   W-2 a change on the first attempt → the whole transaction runs again → 200, the concurrent change carried;
  *   W-3 a change on both attempts → 409 FIELD_CHANGED_CONCURRENTLY, values-free; no UPDATE, no config revision;
  *   W-4 the row gone at the late re-read → 404 (was a 500 'Update returned no rows');
- *   W-5 a PATCH without `order` takes its order from the locked row, and its config revision does not claim a move.
+ *   W-5 a PATCH without `order` takes its order from the locked row, and its config revision does not claim a move;
+ *   G-1a/G-1b only a concurrent field change is retried: a statement timeout (57014) at the late re-read or a unique
+ *       violation (23505) at the UPDATE runs ONE transaction, so a PATCH parked on the row lock waits at most one
+ *       statement timeout and a failure never runs the whole transaction twice;
+ *   G-2 the per-attempt reset: a rolled-back attempt's bulk-recompute snapshot does not leak into the committed attempt.
  * The real-Postgres interleavings live in tests/integration/multitable-field-row-concurrency-realdb.cases.ts and
  * tests/integration/stock-preparation-field-property-race-realdb.cases.ts.
  */
@@ -32,6 +36,8 @@ import { usePinnedServer } from '../utils/pinned-server'
 const SHEET_ID = 'sheet_frwg_1'
 const FIELD_ID = 'fld_frwg_secret_id'
 const FIELD_NAME = 'Secret column name'
+// The route's expression-change bulk-recompute snapshot read (the live record ids, taken inside the transaction).
+const BULK_RECOMPUTE_SNAPSHOT_SQL = 'SELECT id FROM meta_records WHERE sheet_id = $1 ORDER BY id ASC'
 
 type Row = { id: string; sheet_id: string; name: string; type: string; property: Record<string, unknown>; order: number }
 type QueryResult = { rows: unknown[]; rowCount?: number }
@@ -86,12 +92,16 @@ describe('fieldRowChangedSince / snapshotFieldRowForRecheck (pure)', () => {
 
 /**
  * A scenario mock of the field row. `beforeLateReread(attempt, current)` runs right before the route's locked re-read
- * and may "commit" a concurrent change (return the new row) or delete the row (return null).
+ * and may "commit" a concurrent change (return the new row) or delete the row (return null). `failAt` makes every
+ * statement it matches throw a pg-shaped error with that SQLSTATE `code` (recorded first, so the attempt is countable).
+ * `records` answers the expression-change bulk-recompute snapshot read.
  */
 function createScenario(opts: {
   first: Row
   beforeLateReread?: (attempt: number, current: Row) => Row | null
   shifted?: Array<{ id: string; order: number }>
+  failAt?: { sql: (s: string) => boolean; code: string }
+  records?: string[]
 }) {
   let row: Row | null = { ...clone(opts.first), property: jsonbOrder(clone(opts.first.property)) }
   let attempt = 0
@@ -99,6 +109,7 @@ function createScenario(opts: {
   const handler = (rawSql: string, params: unknown[] = []): QueryResult => {
     const sql = normalize(rawSql)
     statements.push({ sql, params })
+    if (opts.failAt && opts.failAt.sql(sql)) throw Object.assign(new Error('injected'), { code: opts.failAt.code })
     if (sql === 'SELECT id, sheet_id FROM meta_fields WHERE id = $1') return { rows: row ? [{ id: row.id, sheet_id: row.sheet_id }] : [] }
     if (sql === PATCH_FIELD_LOCKED_REREAD_SQL) {
       if (opts.beforeLateReread && row) {
@@ -113,6 +124,9 @@ function createScenario(opts: {
     }
     if (sql.startsWith('UPDATE meta_fields SET "order" = "order"')) {
       return { rows: clone(opts.shifted ?? []), rowCount: (opts.shifted ?? []).length }
+    }
+    if (sql === BULK_RECOMPUTE_SNAPSHOT_SQL) {
+      return { rows: (opts.records ?? []).map((id) => ({ id })), rowCount: (opts.records ?? []).length }
     }
     if (sql.startsWith('UPDATE meta_fields SET name = $2')) {
       if (!row) return { rows: [] }
@@ -272,5 +286,48 @@ describe('PATCH /fields/:fieldId late locked re-read (route, mocked pool)', () =
     expect(revision.params[3]).toBe(FIELD_ID)
     expect(revision.params[7]).toEqual(['name'])
     expect(JSON.parse(String(revision.params[5]))).toEqual({ name: FIELD_NAME })
+  })
+
+  it('G-1a a statement timeout (57014) at the late re-read is not retried: one transaction, 500', async () => {
+    // A PATCH parked on the row lock until the statement timeout must not park a second time on a retry.
+    const scenario = createScenario({ first: baseRow(), failAt: { sql: (s) => s === PATCH_FIELD_LOCKED_REREAD_SQL, code: '57014' } })
+    const { app, mockPool } = await createApp(scenario.handler)
+    pinned.setApp(app)
+    const res = await request(pinned.url()).patch(`/api/multitable/fields/${FIELD_ID}`).send({ name: 'Renamed' })
+    expect(res.status, JSON.stringify(res.body)).toBe(500)
+    expect(mockPool.transaction, 'only FieldChangedConcurrentlyError is retried').toHaveBeenCalledTimes(1)
+    expect(scenario.statements.filter((s) => s.sql === PATCH_FIELD_LOCKED_REREAD_SQL)).toHaveLength(1)
+    expect(scenario.fieldUpdates()).toHaveLength(0)
+  })
+
+  it('G-1b a unique violation (23505) at the UPDATE is not retried: one transaction, 409 CONFLICT', async () => {
+    const scenario = createScenario({ first: baseRow(), failAt: { sql: (s) => s.startsWith('UPDATE meta_fields SET name = $2'), code: '23505' } })
+    const { app, mockPool } = await createApp(scenario.handler)
+    pinned.setApp(app)
+    const res = await request(pinned.url()).patch(`/api/multitable/fields/${FIELD_ID}`).send({ name: 'Renamed' })
+    expect(res.status, JSON.stringify(res.body)).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(mockPool.transaction, 'only FieldChangedConcurrentlyError is retried').toHaveBeenCalledTimes(1)
+    expect(scenario.fieldUpdates()).toHaveLength(1)
+  })
+
+  it('G-2 a rolled-back attempt does not leak its bulk-recompute snapshot into the committed attempt', async () => {
+    // Attempt 1: an expression PATCH on a formula field snapshots the live record ids for the post-commit recompute;
+    // the field is retyped away from formula before the late re-read, so attempt 1 rolls back. Attempt 2 commits the
+    // PATCH on a plain field: there is nothing to recompute and the response must not claim a recompute.
+    const scenario = createScenario({
+      first: { ...baseRow(), type: 'formula', property: { expression: '=1' } },
+      beforeLateReread: (attempt, current) => (attempt === 1 ? { ...current, type: 'string' } : current),
+      records: ['rec_frwg_1', 'rec_frwg_2'],
+    })
+    const { app, mockPool } = await createApp(scenario.handler)
+    pinned.setApp(app)
+    const res = await request(pinned.url()).patch(`/api/multitable/fields/${FIELD_ID}`).send({ property: { expression: '=2' } })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(mockPool.transaction).toHaveBeenCalledTimes(2)
+    // the snapshot was taken on attempt 1 only (so the reset is what keeps it out of the response)
+    expect(scenario.statements.filter((s) => s.sql === BULK_RECOMPUTE_SNAPSHOT_SQL)).toHaveLength(1)
+    expect(res.body.data.field.type).toBe('string')
+    expect(res.body.data.bulkRecompute, 'attempt 1 recompute snapshot must not leak into the committed attempt').toBeUndefined()
   })
 })
