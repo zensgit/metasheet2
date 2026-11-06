@@ -45,8 +45,18 @@ export interface ActionSummaryWebhook {
   method: string
 }
 
+export interface ActionSummaryNotificationRecipient {
+  /** Directory display name; '' when the id has not been matched to a user (yet). Never a raw id. */
+  name: string
+}
+
 export interface ActionSummaryNotification {
-  userId: string
+  /**
+   * 客户反馈 2026-10-27 4f-b: one entry per distinct selected recipient, in selection order, already
+   * resolved to a display name by the editor. The raw user id never reaches this module, so it can
+   * never be printed into the sentence.
+   */
+  recipients: ActionSummaryNotificationRecipient[]
   message: string
 }
 
@@ -183,10 +193,17 @@ export function summarizeAutomationAction(snapshot: ActionSummarySnapshot, isZh:
 
     case 'send_notification': {
       const n = snapshot.notification
-      const userId = n?.userId.trim()
-      if (!userId) return `${label}${notConfigured(isZh)}`
+      const recipients = n?.recipients ?? []
+      if (recipients.length === 0) return `${label}${notConfigured(isZh)}`
+      // Lead with the first recipient that has a name; an unmatched id is shown as a placeholder,
+      // never as the raw id (客户反馈 2026-10-27 4f-b).
+      const leadName = recipients.find((recipient) => recipient.name.trim())?.name.trim()
+      const lead = leadName ? truncate(leadName, 16) : pick(isZh, '未匹配用户', 'unmatched user')
+      const recipientText = recipients.length === 1
+        ? lead
+        : pick(isZh, `${lead} 等 ${recipients.length} 人`, `${lead} and ${recipients.length - 1} more`)
       const msgText = n?.message.trim() ? truncate(n.message) : pick(isZh, '(未填写内容)', '(no message)')
-      return pick(isZh, `发送通知给 ${userId}：${msgText}`, `Send notification to ${userId}: ${msgText}`)
+      return pick(isZh, `发送通知给 ${recipientText}：${msgText}`, `Send notification to ${recipientText}: ${msgText}`)
     }
 
     case 'start_approval': {
