@@ -308,6 +308,7 @@ on:
       - 'packages/core-backend/tests/unit/yida-initialization-runtime.test.ts'
       - 'packages/core-backend/tests/unit/yida-owner-request-logging.test.ts'
       - 'packages/core-backend/tests/unit/yida-owner-runtime.test.ts'
+      - 'packages/core-backend/tests/unit/yida-reconciliation-http-boundary.test.ts'
       - 'packages/core-backend/tests/unit/yida-reconciliation-runtime.test.ts'
       - 'packages/core-backend/tests/unit/yida-send-budget-mirror.test.ts'
       - 'packages/core-backend/tests/unit/yida-sheet-source.test.ts'

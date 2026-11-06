@@ -23,7 +23,7 @@ const view = (patch: Row = {}) => Object.freeze({ runId, commandId, targetRef: '
   canSend: false, externalWriteAttempted: false, businessVerified: false, historyVerified: false, formOwnershipVerified: false, ...patch })
 
 function fixture(options: { anchor?: Row | null; denied?: boolean; enablement?: unknown; multiTarget?: unknown
-  step?: (input: unknown, options: { signal: AbortSignal }) => Promise<unknown> } = {}) {
+  step?: (input: unknown, options: { signal: AbortSignal }) => Promise<unknown>; abandon?: (input: unknown) => Promise<unknown> } = {}) {
   let enablement: unknown = Object.hasOwn(options, 'enablement') ? options.enablement : 'true'
   const anchor = options.anchor === undefined ? { slot: 1, owner_id: actor.actorId, tenant_id: actor.tenantId, workspace_id: null } : options.anchor
   let transactions = 0
@@ -45,6 +45,7 @@ function fixture(options: { anchor?: Row | null; denied?: boolean; enablement?: 
   const database: YidaInitializationDatabase = { async transaction<T>(work: (trx: Queryable) => Promise<T>) { transactions++; return work({ query }) } }
   const fetch = vi.fn(async () => new Response('{}')) as unknown as typeof globalThis.fetch
   const portInputs: unknown[] = []
+  const abandonInputs: unknown[] = []
   const created: unknown[] = []
   const binding: YidaReconciliationRuntimeBinding = {
     createReconciliationPort(config) {
@@ -52,12 +53,14 @@ function fixture(options: { anchor?: Row | null; denied?: boolean; enablement?: 
       return Object.freeze({
         step: async (value: unknown, stepOptions: { signal: AbortSignal }) => { portInputs.push(value); return options.step ? options.step(value, stepOptions) : view() },
         inspect: async () => view(),
+        abandon: async (value: unknown) => { abandonInputs.push(value); return options.abandon ? options.abandon(value)
+          : view({ status: 'failed', lastErrorCode: 'ABORTED' }) },
       })
     },
   }
   const runtime = createYidaReconciliationRuntime({ database, fetch, readEnablement: () => enablement,
     readMultiTargetEnablement: () => options.multiTarget ?? 'false' })
-  return { runtime, binding, portInputs, created, fetch, transactions: () => transactions, setEnablement: (value: unknown) => { enablement = value } }
+  return { runtime, binding, portInputs, abandonInputs, created, fetch, transactions: () => transactions, setEnablement: (value: unknown) => { enablement = value } }
 }
 async function code(promise: Promise<unknown>): Promise<string | undefined> {
   try { await promise; return 'resolved' } catch (error) { return yidaReconciliationErrorCode(error) ?? 'foreign' }
@@ -164,6 +167,48 @@ describe('YiDa ⑦.5 reconciliation host runtime', () => {
     const pending = f.runtime.step(actor, input(), { signal: later.signal })
     later.abort()
     expect(await code(pending)).toBe('resolved')
+  })
+
+  // Verifier F2: owner-only abandon of the target's running run, after the same authorization as a step.
+  it('F2 abandon: authorized like a step (switch, live admin, anchor owner), closed input, closed view, no fetch', async () => {
+    const f = fixture()
+    await f.runtime.createPluginCapability().activate(f.binding)
+    const result = await f.runtime.abandon(actor, {})
+    expect(result).toEqual(view({ status: 'failed', lastErrorCode: 'ABORTED' }))
+    expect(f.abandonInputs).toEqual([{}])
+    expect(f.transactions()).toBe(1)
+    expect((f.created[0] as Row).context).toEqual(actor)
+    expect(f.portInputs).toHaveLength(0)
+    expect(f.fetch).not.toHaveBeenCalled()
+    // targetRef only while multi-target is ON; any other key is INPUT before any transaction.
+    expect(await code(f.runtime.abandon(actor, { targetRef: 'synthetic-target' }))).toBe('YIDA_RECONCILE_INPUT')
+    expect(await code(f.runtime.abandon(actor, { runId } as unknown as { targetRef?: string }))).toBe('YIDA_RECONCILE_INPUT')
+    expect(f.transactions()).toBe(1)
+    const on = fixture({ multiTarget: 'true' })
+    await on.runtime.createPluginCapability().activate(on.binding)
+    expect(await code(on.runtime.abandon(actor, { targetRef: 'synthetic-target' }))).toBe('resolved')
+    expect(on.abandonInputs).toEqual([{ targetRef: 'synthetic-target' }])
+    for (const options of [{ anchor: { slot: 1, owner_id: 'synthetic-other', tenant_id: actor.tenantId, workspace_id: null } }, { denied: true }]) {
+      const denied = fixture(options)
+      await denied.runtime.createPluginCapability().activate(denied.binding)
+      expect(await code(denied.runtime.abandon(actor, {}))).toBe('YIDA_RECONCILE_DENIED')
+      expect(denied.abandonInputs).toHaveLength(0)
+    }
+    for (const value of ['TRUE', ' true', undefined]) {
+      const off = fixture({ enablement: value })
+      await off.runtime.createPluginCapability().activate(off.binding)
+      expect(await code(off.runtime.abandon(actor, {}))).toBe('YIDA_RECONCILE_DISABLED')
+      expect(off.transactions()).toBe(0)
+      expect(off.abandonInputs).toHaveLength(0)
+    }
+    const bad = fixture({ abandon: async () => Object.freeze({ ...view(), canSend: true }) })
+    await bad.runtime.createPluginCapability().activate(bad.binding)
+    expect(await code(bad.runtime.abandon(actor, {}))).toBe('YIDA_RECONCILE_UNAVAILABLE')
+    // A plugin port without abandon is refused as a whole (closed port shape), before the port is called.
+    const partial = fixture()
+    await partial.runtime.createPluginCapability().activate({ createReconciliationPort: () => Object.freeze({
+      step: async () => view(), inspect: async () => view() }) } as unknown as YidaReconciliationRuntimeBinding)
+    expect(await code(partial.runtime.step(actor, input()))).toBe('YIDA_RECONCILE_INPUT')
   })
 
   it('inspect returns the closed view of the requested run only', async () => {

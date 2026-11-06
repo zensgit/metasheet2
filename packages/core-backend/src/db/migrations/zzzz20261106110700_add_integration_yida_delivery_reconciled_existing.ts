@@ -143,7 +143,7 @@ const STATUS_SHAPE_RECONCILE = `
       AND ack_status_code IS NOT NULL AND ack_instance_id IS NOT NULL AND observed_instance_id IS NULL)
     OR (status = 'reconciled_existing' AND intent = 'create' AND instance_id IS NULL AND claim_token IS NULL
       AND claim_actor_id IS NULL AND ack_status_code IS NULL AND ack_instance_id IS NULL
-      AND observed_instance_id IS NOT NULL)
+      AND observed_instance_id IS NOT NULL AND source_record_digest IS NULL AND creation_identity_digest IS NULL)
   `
 const AUDIT_SHAPE_090 = `
     (event = 'prepare' AND status = 'prepared' AND reason IS NULL)

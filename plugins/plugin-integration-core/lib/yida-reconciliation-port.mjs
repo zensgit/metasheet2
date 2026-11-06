@@ -278,7 +278,23 @@ function build(options, internals = {}) {
       return view(await store.inspect({ runId }), false)
     } catch (error) { closed(error) }
   }
-  return Object.freeze({ step, inspect })
+
+  // Owner-only abandon of the target's running run (verifier F2). No network: one transaction resolves the
+  // slot's target exactly as a step does, then marks that target's running run failed/ABORTED. The returned
+  // view carries the run's commandId, so an owner who lost it can resume the run with it instead.
+  async function abandon(input) {
+    try {
+      const parsed = record(input, [], ['targetRef'])
+      const targetRef = Object.hasOwn(parsed, 'targetRef') ? id(parsed.targetRef) : undefined
+      enabled()
+      const run = await db.transaction(async trx => {
+        const approved = await readTarget(trx, targetRef)
+        return store.abandonRunningInTransaction(trx, { targetRef: approved.target.target_ref })
+      })
+      return view(store.projectRun(run), false)
+    } catch (error) { closed(error) }
+  }
+  return Object.freeze({ step, inspect, abandon })
 }
 
 export function createYidaReconciliationPort(options) {

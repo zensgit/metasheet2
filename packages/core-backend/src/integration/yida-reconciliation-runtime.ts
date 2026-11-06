@@ -26,6 +26,7 @@ export type YidaReconciliationView = Readonly<{
 type Port = Readonly<{
   step(input: unknown, options: { signal: AbortSignal }): Promise<unknown>
   inspect(input: unknown): Promise<unknown>
+  abandon(input: unknown): Promise<unknown>
 }>
 export type YidaReconciliationRuntimeBinding = Readonly<{
   createReconciliationPort(options: Readonly<{
@@ -241,9 +242,8 @@ export function createYidaReconciliationRuntime(dependencies: YidaReconciliation
           const port = record(state.createPort(Object.freeze({ context: actor,
             // Charged to this run and aborted with it (host deactivate / stop).
             fetch: ((request, init) => { checkpoint(); return fetcher(request, init) }) as typeof fetch,
-            readEnablement, timeoutMs })), ['step', 'inspect'])
-          if (typeof port.step !== 'function' || typeof port.inspect !== 'function' || types.isProxy(port.step)
-            || types.isProxy(port.inspect)) fail('UNAVAILABLE')
+            readEnablement, timeoutMs })), ['step', 'inspect', 'abandon'])
+          if (['step', 'inspect', 'abandon'].some(name => typeof port[name] !== 'function' || types.isProxy(port[name]))) fail('UNAVAILABLE')
           const value = await work(port as unknown as Port, captured, controller.signal)
           // A host stopped meanwhile answers CANCELLED; committed pages stay committed and the same
           // commandId reports (or resumes) the run as it stands.
@@ -292,6 +292,15 @@ export function createYidaReconciliationRuntime(dependencies: YidaReconciliation
         if (typeof runId !== 'string' || !UUID.test(runId)) fail('INPUT')
         return runId
       }, (port, runId) => port.inspect({ runId }), runId => runId)
+    },
+    // Owner-only abandon (verifier F2): stops the target's running run as failed/ABORTED after the same live-admin +
+    // anchor-owner authorization as a step. No network. The view names the run's commandId, so a lost commandId
+    // is recoverable; ABORTED is not terminal, the same commandId may still resume the run.
+    abandon(actor: YidaReconciliationActor, input: { targetRef?: string }, options: { signal?: AbortSignal } = {}) {
+      return execute(actor, options, () => {
+        const row = record(input, literal(readMultiTarget) ? ['targetRef'] : [], [])
+        return Object.freeze(Object.hasOwn(row, 'targetRef') ? { targetRef: id(row.targetRef) } : {})
+      }, (port, captured) => port.abandon({ ...captured }))
     },
     // Values-free display bit for a reply the caller already authorized. Never authority: every call
     // rechecks enabled() twice.

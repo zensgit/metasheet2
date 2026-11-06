@@ -146,6 +146,23 @@ function createYidaReconciliationStore(options = {}) {
     return row
   }
 
+  /**
+   * Owner-only abandon (verifier F2): a run left `running` (host stopped, switch turned off mid-step, lost
+   * commandId) holds the target's running index until it is resumed. This stops THE running run of
+   * (tenant, target, owner) inside the caller's transaction as `failed` / `ABORTED`. ABORTED is not terminal:
+   * the same commandId can still resume it (from its cursor), and a new commandId can start because the
+   * running index is free. The run row is the audit: owner, status, last_error_code, updated_at.
+   */
+  async function abandonRunningInTransaction(trx, input) {
+    const targetRef = opaque(input && input.targetRef)
+    const run = await trx.selectOneForUpdate(RUNS, { tenant_id: tenantId, target_ref: targetRef, owner_id: ownerId, status: 'running' })
+    if (!run) fail('NOT_FOUND')
+    const updated = first(await trx.updateRow(RUNS, { status: 'failed', last_error_code: 'ABORTED' },
+      { id: run.id, tenant_id: tenantId, owner_id: ownerId, status: 'running' }))
+    if (!updated || updated.status !== 'failed' || updated.last_error_code !== 'ABORTED') fail('UNAVAILABLE')
+    return updated
+  }
+
   async function inspect(input) {
     try {
       const runId = input && input.runId
@@ -275,7 +292,7 @@ function createYidaReconciliationStore(options = {}) {
     } catch (error) { closed(error) }
   }
 
-  return Object.freeze({ openRunInTransaction, commitPage, failRun, inspect, projectRun })
+  return Object.freeze({ openRunInTransaction, abandonRunningInTransaction, commitPage, failRun, inspect, projectRun })
 }
 
 function yidaReconciliationStoreErrorKind(error) { return ownErrors.get(error) }

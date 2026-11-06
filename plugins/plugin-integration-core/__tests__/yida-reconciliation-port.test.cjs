@@ -47,6 +47,7 @@ async function harness(options = {}) {
   const readEnablement = options.readEnablement ?? (() => { enablementReads += 1; return 'true' })
   const fetch = async (url, init) => {
     if (memory.state.open !== 0) violations.push('fetch while a transaction is open')
+    if (options.onFetch) options.onFetch(memory, String(url))
     calls.push({ url: String(url), method: init.method })
     if (url === TOKEN_URL) return new Response(JSON.stringify({ accessToken: 'synthetic-access', expireIn: 7200 }))
     if (url === SEARCH_URL) {
@@ -206,4 +207,88 @@ test('RC10: every URL the step fetches is one of the two fixed read endpoints', 
     assert.equal(url.search, '')
     assert.equal(call.method, 'POST')
   }
+})
+
+// Verifier F2: a run left 'running' must not block its target for good.
+const RUNS = 'integration_yida_reconciliation_runs'
+const OTHER_COMMAND = '99999999-8888-4777-8666-555555555555'
+
+test('F2: the run row carrying the commandId is committed before the first network call of a run', async () => {
+  const seen = []
+  const h = await harness({ onFetch: (memory, url) => {
+    if (seen.length === 0) seen.push({ url, open: memory.state.open, runs: memory.rows(RUNS).map(row => ({ ...row })) })
+  } })
+  await h.port.step(h.input())
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].url, TOKEN_URL)
+  assert.equal(seen[0].open, 0)
+  assert.deepEqual(seen[0].runs.map(row => [row.command_id, row.status, row.next_page_number]), [[h.input().commandId, 'running', 1]])
+})
+
+test('F2: a run left running (switch off mid-step) blocks a new commandId until the owner abandons it; abandon reads nothing', async () => {
+  let on = true
+  const h = await harness({ pages: [[remote(1), remote(2)], [remote(3), remote(4)], [remote(5)]],
+    readEnablement: () => (on ? 'true' : 'false') })
+  // Turn the switch off after the first page has committed: the step stops at a page boundary, run still running.
+  let commits = 0
+  h.memory.state.beforeStatement = async (table, verb) => {
+    if (table === 'integration_yida_reconciliation_pages' && verb === 'insert' && ++commits === 1) on = false
+  }
+  await assert.rejects(h.port.step(h.input()), { code: 'YIDA_RECONCILE_DISABLED' })
+  h.memory.state.beforeStatement = null
+  on = true
+  assert.deepEqual(h.memory.rows(RUNS).map(row => [row.status, row.next_page_number]), [['running', 2]])
+  // Lost commandId: a new run on the same target is refused while the old one holds the running index.
+  await assert.rejects(h.port.step(h.input({ commandId: OTHER_COMMAND })), { code: 'YIDA_RECONCILE_CONFLICT' })
+  const before = h.calls.length
+  // Switch off: abandon is DISABLED before any transaction.
+  on = false
+  const transactions = h.memory.transactions.length
+  await assert.rejects(h.port.abandon({}), { code: 'YIDA_RECONCILE_DISABLED' })
+  assert.equal(h.memory.transactions.length, transactions)
+  on = true
+  const abandoned = await h.port.abandon({})
+  assert.equal(abandoned.status, 'failed')
+  assert.equal(abandoned.lastErrorCode, 'ABORTED')
+  assert.equal(abandoned.commandId, h.input().commandId, 'the view names the lost commandId')
+  assert.equal(abandoned.nextPageNumber, 2, 'the cursor is kept')
+  assert.equal(abandoned.tokenIssued, false)
+  for (const key of ['canSend', 'externalWriteAttempted', 'businessVerified', 'historyVerified', 'formOwnershipVerified']) assert.equal(abandoned[key], false)
+  assert.equal(JSON.stringify(abandoned).includes('DEMO-P1'), false)
+  assert.equal(h.calls.length, before, 'abandon makes no network call')
+  // Nothing is running any more: a second abandon is NOT_FOUND, and a new commandId reads the project from page 1.
+  await assert.rejects(h.port.abandon({}), { code: 'YIDA_RECONCILE_NOT_FOUND' })
+  const fresh = await h.port.step(h.input({ commandId: OTHER_COMMAND, mode: 'count' }))
+  assert.equal(fresh.status, 'completed')
+  assert.equal(fresh.counts.already_reconciled, 2, 'page 1 of the abandoned run stays registered')
+  assert.equal(h.memory.rows(RUNS).find(row => row.command_id === h.input().commandId).last_error_code, 'ABORTED')
+})
+
+test('F2: ABORTED is not terminal: the same commandId resumes the abandoned run from its cursor', async () => {
+  let on = true
+  const h = await harness({ pages: [[remote(1), remote(2)], [remote(3), remote(4)], [remote(5)]],
+    readEnablement: () => (on ? 'true' : 'false') })
+  let commits = 0
+  h.memory.state.beforeStatement = async (table, verb) => {
+    if (table === 'integration_yida_reconciliation_pages' && verb === 'insert' && ++commits === 1) on = false
+  }
+  await assert.rejects(h.port.step(h.input()), { code: 'YIDA_RECONCILE_DISABLED' })
+  h.memory.state.beforeStatement = null
+  on = true
+  assert.equal((await h.port.abandon({})).lastErrorCode, 'ABORTED')
+  const resumed = await h.port.step(h.input())
+  assert.equal(resumed.status, 'completed')
+  assert.equal(resumed.counts.registered, 5)
+  assert.equal(h.memory.rows(LEDGER).length, 5)
+  assert.deepEqual(h.memory.rows('integration_yida_reconciliation_pages').map(row => row.page_number), [1, 2, 3])
+})
+
+test('F2: abandon input is closed (targetRef only); another owner never sees the run', async () => {
+  const h = await harness()
+  await assert.rejects(h.port.abandon({ runId: '11111111-2222-4333-8444-555555555555' }), { code: 'YIDA_RECONCILE_INPUT' })
+  await assert.rejects(h.port.abandon({ targetRef: ' padded' }), { code: 'YIDA_RECONCILE_INPUT' })
+  h.memory.seed(RUNS, { command_id: OTHER_COMMAND, tenant_id: CONTEXT.tenantId, workspace_id: null, owner_id: 'synthetic-other-owner',
+    target_ref: 'synthetic-target-ref', status: 'running' })
+  await assert.rejects(h.port.abandon({}), { code: 'YIDA_RECONCILE_NOT_FOUND' })
+  assert.equal(h.memory.rows(RUNS)[0].status, 'running')
 })

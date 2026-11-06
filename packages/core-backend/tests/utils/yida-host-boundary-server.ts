@@ -24,10 +24,11 @@ const FIXTURE_KEY = Symbol.for('metasheet.test.yida-host-boundary.fixture')
 // Keys this harness overrides; every one is restored (or deleted again) by cleanup().
 // RBAC_BYPASS is not listed: no module under src/ reads it, so overriding it proves nothing.
 const ENV_KEYS = ['SKIP_PLUGINS', 'PORT', 'RBAC_TOKEN_TRUST', 'JWT_SECRET', 'INTEGRATION_YIDA_OWNER_SEND_ENABLED',
-  'INTEGRATION_YIDA_CONNECTION_TEST_ENABLED'] as const
+  'INTEGRATION_YIDA_CONNECTION_TEST_ENABLED', 'INTEGRATION_YIDA_RECONCILE_READ_ENABLED'] as const
 const WINDOW_MS = 2000
 
-export type FixtureObservation = Readonly<{ called: boolean; securityType: string; owner: unknown; init: unknown; probe: unknown }>
+export type FixtureObservation = Readonly<{ called: boolean; securityType: string; owner: unknown; init: unknown; probe: unknown
+  reconcile: unknown }>
 export type HostActor = Readonly<{ actorId: string; tenantId: string; workspaceId: null }>
 export type HostUser = Readonly<{ id: string; token: string }>
 export type HttpResult = Readonly<{ status: number; headers: IncomingHttpHeaders; body: Record<string, unknown> }>
@@ -106,7 +107,8 @@ async function writeFixturePlugin(root: string): Promise<string> {
     '  async activate(context) {',
     '    const services = (context && context.services) || {}',
     '    globalThis[key] = Object.freeze({ called: true, securityType: typeof services.security,',
-    '      owner: services.yidaOwnerRuntime, init: services.yidaInitializationRuntime, probe: services.yidaConnectionTestRuntime })',
+    '      owner: services.yidaOwnerRuntime, init: services.yidaInitializationRuntime, probe: services.yidaConnectionTestRuntime,',
+    '      reconcile: services.yidaReconciliationRuntime })',
     '  },',
     '  async deactivate() {},',
     '}',
@@ -194,6 +196,7 @@ export async function bootYidaHostBoundaryServer(): Promise<YidaHostBoundaryHarn
     process.env.JWT_SECRET = randomBytes(32).toString('hex')
     delete process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED
     delete process.env.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED
+    delete process.env.INTEGRATION_YIDA_RECONCILE_READ_ENABLED
     // Installed before import AND construction: the host binds globalThis.fetch into the owner
     // runtime inside its constructor, so the runtime can only ever reach this refusing stub.
     globalThis.fetch = (async () => {

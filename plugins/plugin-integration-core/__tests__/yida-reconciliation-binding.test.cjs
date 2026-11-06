@@ -13,13 +13,13 @@ const security = { encrypt: () => 'x', decrypt: () => 'x' }
 const options = (patch = {}) => ({ context: { actorId: 'synthetic-owner', tenantId: 'synthetic-tenant', workspaceId: null },
   fetch: async () => { throw new Error('SYNTHETIC_NO_NETWORK') }, readEnablement: () => 'true', timeoutMs: 5000, ...patch })
 
-test('binding exposes only createReconciliationPort, and the port only step/inspect', async () => {
+test('binding exposes only createReconciliationPort, and the port only step/inspect/abandon', async () => {
   const { createYidaReconciliationBinding } = await bindingPromise
   const binding = createYidaReconciliationBinding({ db, security })
   assert.deepEqual(Object.keys(binding), ['createReconciliationPort'])
   assert.equal(Object.isFrozen(binding), true)
   const port = binding.createReconciliationPort(options())
-  assert.deepEqual(Object.keys(port).sort(), ['inspect', 'step'])
+  assert.deepEqual(Object.keys(port).sort(), ['abandon', 'inspect', 'step'])
 })
 
 test('binding refuses widened or malformed host input (closed keys, workspace, timeout)', async () => {

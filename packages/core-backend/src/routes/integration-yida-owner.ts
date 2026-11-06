@@ -34,6 +34,7 @@ export type YidaConnectionTestHttpPort = Readonly<{
 export type YidaReconciliationHttpPort = Readonly<{
   step(actor: YidaOwnerActor, input: YidaReconciliationInput, options: { signal: AbortSignal }): Promise<unknown>
   inspect(actor: YidaOwnerActor, input: { runId: string }, options: { signal: AbortSignal }): Promise<unknown>
+  abandon(actor: YidaOwnerActor, input: { targetRef?: string }, options: { signal: AbortSignal }): Promise<unknown>
   reconcileEnabled(): boolean
 }>
 type Data = Record<string, unknown>
@@ -262,21 +263,21 @@ function connectionTestView(value: unknown, commandId: string) {
   return { commandId, mode: 'candidate', outcome: row.outcome, tokenIssued: row.outcome === 'ok',
     tokenRetained: false, externalWriteAttempted: false, canSend: false }
 }
-function initialization(value: unknown, sendEnabled: boolean, connectionTestEnabled: boolean, multiTargetEnabled = false,
-  reconcileEnabled = false) {
+function initialization(value: unknown, sendEnabled: boolean, connectionTestEnabled: boolean, multiTargetEnabled = false) {
   const row = record(value, ['commandId', 'status', 'draft', 'canSend', 'tokenIssued', 'externalWriteAttempted'])
   if (!['ready', 'initialized'].includes(String(row.status)) || row.canSend !== false
     || row.tokenIssued !== false || row.externalWriteAttempted !== false
     || (row.status === 'ready') !== (row.draft === null)) fail()
+  // R-71 ⑦.5 has NO display bit here yet: the shipped web bundle parses this reply with a closed key set
+  // (apps/web/src/services/integration/yidaInitialization.ts state()), so a reconcileEnabled key would break
+  // it whenever the switch is on. The bit ships together with the panel and its tolerant parse (PR-B).
   return { commandId: id(row.commandId), status: row.status,
     draft: row.draft === null ? null : draft(row.draft), canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled,
     // Present only while the switch reads exact 'true'. While OFF the key is absent, so a page still
     // running an older bundle (closed key set without it) keeps working on this backend.
     ...(connectionTestEnabled ? { connectionTestEnabled: true as const } : {}),
     // Y2: same absent-while-OFF rule, so an older bundle keeps its closed key set while the switch is off.
-    ...(multiTargetEnabled ? { multiTargetEnabled: true as const } : {}),
-    // R-71 ⑦.5: same absent-while-OFF rule.
-    ...(reconcileEnabled ? { reconcileEnabled: true as const } : {}) }
+    ...(multiTargetEnabled ? { multiTargetEnabled: true as const } : {}) }
 }
 const reconcileCountKeys = ['scanned', 'registered', 'would_register', 'already_reconciled', 'duplicate_remote',
   'own_acknowledged', 'duplicate_with_own', 'own_in_flight', 'observed_for_unknown', 'own_not_sent', 'project_mismatch',
@@ -452,19 +453,19 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
   const sendEnabled = () => { try { return port.sendEnabled() === true } catch { return false } }
   // Same rule for the 测试连接 display bit: shown only on an owner-authorized reply, never authority.
   const connectionTestEnabled = () => { try { return connectionTestPort?.connectionTestEnabled() === true } catch { return false } }
-  // R-71 ⑦.5 display bit and route gate: read per request (exact 'true' in the reconciliation runtime).
+  // R-71 ⑦.5 route gate: read per request (exact 'true' in the reconciliation runtime). Not a display bit (see initialization()).
   const reconcileEnabled = () => { try { return reconciliationPort?.reconcileEnabled() === true } catch { return false } }
   router.get('/initialization', route(200, async (req, owner, signal) => {
     empty(req.body)
     if (!initializationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
     const result = await initializationPort.status(owner, { signal })
-    return dto(() => initialization(result, sendEnabled(), connectionTestEnabled(), multiTargetEnabled(), reconcileEnabled()))
+    return dto(() => initialization(result, sendEnabled(), connectionTestEnabled(), multiTargetEnabled()))
   }))
   router.post('/initialization', route(201, async (req, owner, signal) => {
     const input = initializationInput(req.body)
     if (!initializationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
     const result = await initializationPort.initialize(owner, input, { signal })
-    return dto(() => initialization(result, sendEnabled(), connectionTestEnabled(), multiTargetEnabled(), reconcileEnabled()))
+    return dto(() => initialization(result, sendEnabled(), connectionTestEnabled(), multiTargetEnabled()))
   }))
   // Y2: list / register additional targets. While OFF these fall through to the generic 404 below.
   const whenMultiTarget = (handler: RequestHandler): RequestHandler => (req, res, next) => {
@@ -492,7 +493,7 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
     const result = await connectionTestPort.test(owner, input, { signal })
     return dto(() => connectionTestView(result, input.commandId))
   }))
-  // R-71 ⑦.5 cut-over reconciliation. While its switch is OFF both paths fall through to the generic 404 below
+  // R-71 ⑦.5 cut-over reconciliation. While its switch is OFF all three paths fall through to the generic 404 below
   // (a feature that is off is not visible); the runtime checks the switch again (DISABLED) as depth.
   const whenReconcile = (handler: RequestHandler): RequestHandler => (req, res, next) => {
     if (!reconcileEnabled()) { next(); return }
@@ -502,6 +503,14 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
     const input = reconcileInput(req.body, multiTargetEnabled())
     if (!reconciliationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
     const result = await reconciliationPort.step(owner, input, { signal })
+    return dto(() => reconcileView(result))
+  })))
+  // Owner-only abandon of the target's running run (failed / ABORTED, resumable by its own commandId).
+  router.post('/reconciliations/abandon', whenReconcile(route(200, async (req, owner, signal) => {
+    const body = record(req.body, [], multiTargetEnabled() ? ['targetRef'] : [])
+    const input = Object.hasOwn(body, 'targetRef') ? { targetRef: literalId(body.targetRef) } : {}
+    if (!reconciliationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
+    const result = await reconciliationPort.abandon(owner, input, { signal })
     return dto(() => reconcileView(result))
   })))
   router.get('/reconciliations/:runId', whenReconcile(route(200, async (req, owner, signal) => {
