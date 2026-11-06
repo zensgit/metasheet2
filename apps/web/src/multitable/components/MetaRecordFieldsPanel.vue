@@ -786,8 +786,8 @@ function onFieldsFocusOut(event: FocusEvent) {
 // bubble exactly as before.
 const SINGLE_LINE_INPUT_TYPES: ReadonlySet<string> = new Set(['text', 'number', 'date', 'datetime-local'])
 function onFieldsKeydown(event: KeyboardEvent) {
-  // isImeKeyEvent, not isComposing alone: Safari's Enter that ends a composition has isComposing false
-  // and keyCode 229, and must not commit and move on either.
+  // isImeKeyEvent, not isComposing alone: an Enter that ends a composition may come with isComposing
+  // false and keyCode 229 (Safari, per engine behaviour), and must not commit and move on either.
   if (event.key !== 'Enter' || isImeKeyEvent(event) || event.altKey) return
   const target = event.target
   const mod = event.metaKey || event.ctrlKey

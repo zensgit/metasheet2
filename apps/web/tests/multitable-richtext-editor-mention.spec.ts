@@ -425,13 +425,30 @@ describe('MetaRichLongTextEditor — keys during an input-method composition', (
       }
     }
     expect(onCancel).not.toHaveBeenCalled()
-    // plain keys: ArrowDown moves the highlight, Enter picks it
+    // plain keys: ArrowDown and ArrowUp move the highlight, Enter picks it
     expect(key(editable, { key: 'ArrowDown' }).defaultPrevented).toBe(true)
     await nextTick()
     expect(active()).not.toBe(firstActive)
+    expect(key(editable, { key: 'ArrowUp' }).defaultPrevented).toBe(true)
+    await nextTick()
+    expect(active()).toBe(firstActive)
     expect(key(editable, { key: 'Enter' }).defaultPrevented).toBe(true)
     await nextTick()
     expect(popover()).toBeNull()
+    expect(editable.querySelector('span[data-mention-id]')).not.toBeNull()
+  })
+
+  it('a plain Tab picks the active suggestion, as Enter does', async () => {
+    mount({ modelValue: '', mentionSuggestions: SUGGESTIONS })
+    await nextTick()
+    const editable = container!.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.focus()
+    typeInto(editable, '@j')
+    await nextTick()
+    expect(container!.querySelector('[data-test="rich-longtext-mention-popover"]')).not.toBeNull()
+    expect(key(editable, { key: 'Tab' }).defaultPrevented).toBe(true)
+    await nextTick()
+    expect(container!.querySelector('[data-test="rich-longtext-mention-popover"]')).toBeNull()
     expect(editable.querySelector('span[data-mention-id]')).not.toBeNull()
   })
 
@@ -458,6 +475,11 @@ describe('MetaRichLongTextEditor — keys during an input-method composition', (
     await nextTick()
     expect(onConfirm).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledTimes(1)
+    // Ctrl+Enter, the commit chord on Windows and Linux, confirms the same way
+    expect(key(editable, { key: 'Enter', ctrlKey: true }).defaultPrevented).toBe(true)
+    await nextTick()
+    expect(onConfirm).toHaveBeenCalledTimes(2)
+    expect(onChange).toHaveBeenCalledTimes(2)
     expect(key(editable, { key: 'Escape' }).defaultPrevented).toBe(true)
     await nextTick()
     expect(onCancel).toHaveBeenCalledTimes(1)

@@ -261,7 +261,8 @@ function onPanelKeydown(event: KeyboardEvent): void {
     // no further, so a dialog around the picker does not close on it either, and its default is held
     // back: the search box is type="search", which Chromium empties on Escape. Holding it back does not
     // stop the cancel: in Chromium the input method's cancel reaches the box as its own input after
-    // this keydown, not as the keydown's default (WebKit applies it before the keydown).
+    // this keydown, not as the keydown's default (seen with a CDP-set composition, not a real input
+    // method; WebKit is understood to apply it before the keydown).
     if (isInputMethodKey(event)) {
       event.preventDefault()
       event.stopPropagation()

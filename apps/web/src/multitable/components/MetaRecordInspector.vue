@@ -31,7 +31,9 @@
     header's x button already uses (lock §3.3: "Esc 从 panel 回到关闭/grid"). Guarded by
     `event.defaultPrevented` so it does NOT fire when a descendant already consumed Escape for its own
     purpose (e.g. MetaRichLongTextEditor's mention-popover-dismiss / edit-cancel, which calls
-    `preventDefault()` on its own `onEscape` -- confirmed by reading that handler). Only bare Escape
+    `preventDefault()` on its own `onEscape` -- confirmed by reading that handler), and it does NOT fire
+    for an Escape an input method may be using (utils/ime-keys.ts), which no control marks
+    defaultPrevented. Only bare Escape
     (no modifier key) is handled, and no other key is inspected here at all, so mod+z / mod+y / `?`
     always bubble untouched to MultitableWorkbench's own `onGlobalKeydown` exactly as they do today --
     this component adds no listener that could intercept them (lock §3.3's non-negotiable).
@@ -1112,7 +1114,8 @@ async function moveTabFocusTo(tab: InspectorTab) {
 //      never `[role="separator"]`), so there is no ordering ambiguity between the two branches.
 //   3. Escape -- closes the inspector (same `close` emit the header's × button already uses; lock
 //      §3.3 "Esc 从 panel 回到关闭/grid"), guarded so it never fires when a descendant already
-//      consumed Escape (defaultPrevented) and never inspects any other key -- mod+z / mod+y / `?`
+//      consumed Escape (defaultPrevented) or for an Escape an input method may be using
+//      (isImeKeyEvent), and never inspects any other key -- mod+z / mod+y / `?`
 //      are untouched here and bubble to MultitableWorkbench's own `onGlobalKeydown` unmodified.
 // Record inspector v3 (2026-09-05, PR-A §1.5): dispatch order is (1) Escape, (2) splitter, (3)
 // prev/next chord, (4) tablist — the design's own numbering. Escape's own first clause (kebab open
@@ -1149,8 +1152,8 @@ function onInspectorKeydown(event: KeyboardEvent) {
   // — `event.code` (the physical key), not `event.key` (which shift already remaps to `<`/`>` on a
   // US layout), and layout-independent; works with the caret inside a text control since it never
   // collides with a printable character or a native caret-movement chord. Alt+Arrow was rejected
-  // (macOS Option+Arrow has caret/word-jump semantics); `j`/`k` was rejected (IME hazard, no
-  // `isComposing` handling exists in this file or the workbench).
+  // (macOS Option+Arrow has caret/word-jump semantics); `j`/`k` was rejected (IME hazard: a bare letter
+  // is what an input method composes with, and no letter shortcut here checks for that).
   const mod = event.metaKey || event.ctrlKey
   if (mod && event.shiftKey && (event.code === 'Comma' || event.code === 'Period')) {
     event.preventDefault()

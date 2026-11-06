@@ -1092,8 +1092,9 @@ describe('attachments 3-up gallery (§1.3 "Attachments") — CSS provision only'
 })
 
 // Input-method composition (utils/ime-keys.ts): an Enter that commits a composition commits no field
-// and moves no focus, and an Escape that cancels one closes no drawer. Safari's key that ends a
-// composition has isComposing false and keyCode 229, which is why isComposing alone is not enough.
+// and moves no focus, and an Escape that cancels one closes no drawer. The key that ends a composition
+// may come with isComposing false and keyCode 229 (Safari, per engine behaviour), which is why
+// isComposing alone is not enough.
 describe('keyboard during an input-method composition', () => {
   const IME_INITS: KeyboardEventInit[] = [{ isComposing: true }, { keyCode: 229 }]
   const KB_FIELDS = [F_TITLE, F_QTY, F_STATUS, F_NOTES]

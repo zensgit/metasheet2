@@ -492,19 +492,19 @@ function onBlur(): void {
  * drawer on `change`, buffered hosts on `update:modelValue`. (Plain Enter inserts a
  * newline as usual — only the modifier chord commits.)
  */
+function onConfirm(): void {
+  const value = currentValue()
+  emit('update:modelValue', value)
+  emit('change', value)
+  emit('confirm')
+}
+
 /** The Cmd/Ctrl+Enter keydown: an Enter that commits an input-method composition confirms nothing,
  *  so `preventDefault` is called here after the check, not by a `.prevent` modifier. */
 function onConfirmKey(event: KeyboardEvent): void {
   if (isImeKeyEvent(event)) return
   event.preventDefault()
   onConfirm()
-}
-
-function onConfirm(): void {
-  const value = currentValue()
-  emit('update:modelValue', value)
-  emit('change', value)
-  emit('confirm')
 }
 
 /** Paste as PLAIN text only — never trust pasted HTML in the editor surface. */
