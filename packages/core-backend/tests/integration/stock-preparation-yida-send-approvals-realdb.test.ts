@@ -1392,56 +1392,65 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     })
   })
 
-  it('RA4 lock order (closes Y5a B-05 at the service level): an access-graph writer (lockUsersForAccessGraphWrite: the subject row bump first, then users FOR UPDATE) is SERIALIZED behind a bound admission parked (A) after its subject row and before its users row, and (C) after its users row and before its sheet row; each time the admission commits first and the writer locks after it, no deadlock', async () => {
+  // RA4 lock order (closes Y5a B-05 at the service level). One bound admission parked on `gate`; one access-graph writer
+  // on connection 2 — lockUsersForAccessGraphWrite: the subject version row bump FIRST, then users FOR UPDATE. The writer
+  // must block until the admission commits and lock only after it ("admission first, writer after"), with no deadlock.
+  // Where the holder was parked is asserted LAST, so a broken lock order shows up as the behaviour (not blocked, or a
+  // deadlock), never only as a statement-shape pin.
+  async function accessGraphWriterWaits(grantId: string, gate: Gate, parkedAt: (statements: string[]) => void) {
+    const writer = second.client
+    const admission = first.service.admit({ grantId, submissionId: 'synthetic-lock-order-submission' })
+    admission.catch(() => {})
+    await reached(gate)
+    const parked = [...first.statements]
+    await writer.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+    const order: string[] = []
+    const writerRun = (async () => {
+      const locked = await lockUsers(writer, [context().ownerId])
+      order.push('writer:locked')
+      expect(locked.get(context().ownerId)?.id).toBe(context().ownerId)
+      await writer.query('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [context().ownerId, '[]'])
+      await writer.query('COMMIT')
+      order.push('writer:committed')
+    })()
+    writerRun.catch(() => {})
+    await blocked(second, first)
+    expect(order).toEqual([])
+    order.push('holder:released'); first.release()
+    const admitted = await admission
+    order.push('holder:admitted')
+    await writerRun
+    expect(admitted.status).toBe('admitted')
+    expect(order).toEqual(['holder:released', 'holder:admitted', 'writer:locked', 'writer:committed'])
+    expect((await evidence()).counts).toEqual([1, 0, 1, 2, 1, 1])
+    parkedAt(parked)
+  }
+  async function lockOrderGrant() {
     // The writer reads the profile columns the mutex returns; the private users fixture carries only the live-ACL ones.
     await owner.query('ALTER TABLE users ADD COLUMN name text, ADD COLUMN email text, ADD COLUMN username text, ADD COLUMN mobile text, ADD COLUMN access_generation bigint NOT NULL DEFAULT 0')
     const f = await boundFixture()
-    const writer = second.client
-    // One admission parked on `gate`, one access-graph writer on connection 2: the writer must wait for the commit.
-    async function serialized(grantId: string, submissionId: string, gate: Gate, parkedAt: (statements: string[]) => void) {
-      const admission = first.service.admit({ grantId, submissionId })
-      admission.catch(() => {})
-      await reached(gate)
-      parkedAt([...first.statements])
-      await writer.query('BEGIN ISOLATION LEVEL READ COMMITTED')
-      const order: string[] = []
-      const writerRun = (async () => {
-        const locked = await lockUsers(writer, [context().ownerId])
-        order.push('writer:locked')
-        expect(locked.get(context().ownerId)?.id).toBe(context().ownerId)
-        await writer.query('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [context().ownerId, '[]'])
-        await writer.query('COMMIT')
-        order.push('writer:committed')
-      })()
-      writerRun.catch(() => {})
-      await blocked(second, first)
-      expect(order).toEqual([])
-      order.push('holder:released'); first.release()
-      const admitted = await admission
-      order.push('holder:admitted')
-      await writerRun
-      expect(admitted.status).toBe('admitted')
-      expect(order).toEqual(['holder:released', 'holder:admitted', 'writer:locked', 'writer:committed'])
-    }
-    // (A) The first `FROM user_roles` is the live-actor check's first locking read: the subject row is held, users is not.
-    // A writer that locked users FIRST would get it here and then wait on the subject row: a deadlock, not this order.
-    const grant1 = await first.service.approve(f.request)
+    const granted = await first.service.approve(f.request)
     first.statements.length = 0
-    await serialized(grant1.grantId, 'synthetic-submission', first.gateMatch(/FROM user_roles/), statements => {
+    return granted.grantId
+  }
+
+  it('RA4 lock order (A): an access-graph writer is serialized behind a bound admission parked after its subject version row and before its users row (a writer taking users first would deadlock here)', async () => {
+    // The first `FROM user_roles` is the live-actor check's first locking read: the subject row is held, users is not.
+    await accessGraphWriterWaits(await lockOrderGrant(), first.gateMatch(/FROM user_roles/), statements => {
       expect(/FROM user_roles/.test(statements[statements.length - 1])).toBe(true)
       expect([indexOf(statements, SUBJECT_SHARE) >= 0, indexOf(statements, USERS_SHARE)]).toEqual([true, -1])
     })
-    // (C) The re-authorization's registry read: users and the rest of the live-actor rows are held, the sheet row and the
-    // helper are not. Without the phase-1 subject lock this is the B-05 cycle (holder: users → subject; writer: subject →
-    // users); with it the writer's bump waits on the subject row the holder took first.
-    const grant2 = await first.service.approve(await draftOf(first, boundRow(1, 7), 'synthetic-lock-order-confirmation'))
-    first.statements.length = 0
-    await serialized(grant2.grantId, 'synthetic-lock-order-submission', first.gateMatch(REGISTRY_SHARE), statements => {
+  })
+
+  it('RA4 lock order (C, the Y5a B-05 point): an access-graph writer is serialized behind a bound admission parked after its users row and before its sheet row and helper (without the phase-1 subject lock this is the users-vs-subject deadlock)', async () => {
+    // The re-authorization's registry read: users and the rest of the live-actor rows are held, the sheet row and the
+    // helper are not. Holder users → subject against writer subject → users is the B-05 cycle; the phase-1 subject row
+    // the holder took first makes the writer's bump wait instead.
+    await accessGraphWriterWaits(await lockOrderGrant(), first.gateMatch(REGISTRY_SHARE), statements => {
       expect(REGISTRY_SHARE.test(statements[statements.length - 1])).toBe(true)
       expect([indexOf(statements, SUBJECT_SHARE) >= 0, indexOf(statements, USERS_SHARE) > indexOf(statements, SUBJECT_SHARE),
         indexOf(statements, SHEET_SHARE)]).toEqual([true, true, -1])
     })
-    expect((await evidence()).counts).toEqual([2, 0, 2, 4, 2, 2])
   })
 
   it('RA5: a session whose triggers do not fire (session_replication_role = replica) is refused at approval and at admission as UNAVAILABLE with nothing written; back in origin the same grant is admitted', async () => {
