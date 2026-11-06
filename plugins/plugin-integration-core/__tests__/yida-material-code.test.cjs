@@ -10,6 +10,7 @@ const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
+const vm = require('node:vm')
 
 const modulePath = path.join(__dirname, '..', 'lib', 'yida-material-code.mjs')
 const typesPath = path.join(__dirname, '..', 'lib', 'yida-material-code.d.mts')
@@ -192,13 +193,16 @@ test('input validation: fixed codes, values-free, nothing is trimmed or rewritte
     Object.defineProperty({ projectNo: 'SYN-P' }, 'keyValue', { enumerable: true, get: () => MANUAL_KEY }),
   ]) assert.throws(gen(input), rejects('INPUT'))
 
-  const bad = [undefined, null, 7, '', ' SYN', 'SYN ', '　SYN', 'SYN﻿', '\tSYN', 'SY\nN', 'SY\u0000N', 'SY\u007FN',
-    'SY\u0085N', 'SY\uD800N', 'SY\uDC00N', 'SYN\uD83D', '\uDE00SYN', 'x'.repeat(4097)]
+  // Both control ranges are pinned at each boundary: C0 is U+0000..U+001F (U+0010 and U+001F pin the top half), C1 is
+  // U+007F..U+009F (U+0080 and U+009F pin the ends). U+00A0 is rejected only at an edge (trim), never in the middle.
+  const bad = [undefined, null, 7, '', ' SYN', 'SYN ', '　SYN', 'SYN﻿', ' SYN', 'SYN ', '\tSYN', 'SY\nN',
+    'SY\u0000N', 'SY\u0010N', 'SY\u001FN', 'SY\u007FN', 'SY\u0080N', 'SY\u0085N', 'SY\u009FN',
+    'SY\uD800N', 'SY\uDC00N', 'SYN\uD83D', '\uDE00SYN', 'x'.repeat(4097)]
   for (const value of bad) {
     assert.throws(gen({ keyValue: value, projectNo: 'SYN-P' }), rejects('KEY_VALUE'))
     assert.throws(gen({ keyValue: MANUAL_KEY, projectNo: value }), rejects('PROJECT_NO'))
   }
-  for (const value of ['x', 'x'.repeat(4096), 'SY N', 'SY　N', '𠀋', '😀SYN']) {
+  for (const value of ['x', 'x'.repeat(4096), 'SY N', 'SY N', 'SY~N', 'SY N', 'SY¡N', 'SY　N', '𠀋', '😀SYN']) {
     assert.match(m.generateYidaMaterialCode({ keyValue: value, projectNo: value }), FORMAT)
   }
   assert.equal(new m.YidaMaterialCodeError('UNKNOWN_KIND').code, 'YIDA_MATERIAL_CODE_INPUT')
@@ -214,6 +218,75 @@ test('module is browser-capable: no imports, no node built-ins, no I/O, no Web C
   assert.doesNotMatch(source, /\bnode:/)
   assert.doesNotMatch(source, /\b(?:require|fetch|XMLHttpRequest|WebSocket|localStorage|indexedDB|process|Buffer|crypto|Date|Math\.random|setTimeout)\s*[.(]/)
   assert.doesNotMatch(source, /\b(?:async|await)\b/)
+})
+
+// Runs the module source as a script in a fresh vm realm: no require, process, Buffer or crypto, and a TextEncoder that
+// belongs to ANOTHER realm (the outer Node one), so the name bytes are a foreign-realm Uint8Array. That is the shape of
+// apps/web's vitest + jsdom runtime, where `encoder.encode()` fails `instanceof Uint8Array` against the module's realm.
+function loadInForeignRealm() {
+  const raw = fs.readFileSync(modulePath, 'utf8')
+  let exported = 0
+  const script = raw.replace(/^export (?=const |function |class )/gm, () => { exported += 1; return '' })
+  const context = vm.createContext({ TextEncoder })
+  const realm = vm.runInContext(`${script}
+;({
+  generate: (keyValue, projectNo) => generateYidaMaterialCode({ keyValue, projectNo }),
+  generateWith: generateYidaMaterialCode,
+  name: (keyValue, projectNo) => yidaMaterialCodeName({ keyValue, projectNo }),
+  sha1: yidaMaterialCodeSha1,
+  uuidV5: yidaMaterialCodeUuidV5,
+  Uint8Array,
+  hasHostGlobals: [typeof require, typeof process, typeof Buffer, typeof crypto, typeof module].some((t) => t !== 'undefined'),
+})`, context, { filename: 'yida-material-code.vm.js' })
+  return { realm, exported }
+}
+
+test('cross-realm bytes: a foreign-realm TextEncoder / Uint8Array (jsdom, iframe) gives the golden codes', async () => {
+  const m = await load()
+  const { realm, exported } = loadInForeignRealm()
+  assert.equal(exported, Object.keys(m).length, 'every export must be rewritten for the script realm')
+  assert.equal(realm.hasHostGlobals, false, 'the vm realm must not see Node host globals')
+  assert.notEqual(realm.Uint8Array, Uint8Array)
+  assert.equal(new TextEncoder().encode('x') instanceof realm.Uint8Array, false, 'the encoder must be foreign to the realm')
+
+  // Executed (not scanned) proof that the generator runs without Node: foreign-realm encoder output, golden output.
+  for (const vector of GOLDEN) assert.equal(realm.generate(vector.keyValue, vector.projectNo), vector.code)
+  assert.deepEqual(Buffer.from(realm.name(MANUAL_KEY, 'SYN-P002')), Buffer.from(m.yidaMaterialCodeName({ keyValue: MANUAL_KEY, projectNo: 'SYN-P002' })))
+
+  // Both directions of the byte entry points: outer bytes into the vm module, vm-realm bytes into the Node module.
+  const abc = 'a9993e364706816aba3e25717850c26c9cd0d89d'
+  assert.equal(hexOf(realm.sha1(encode('abc'))), abc)
+  const innerAbc = vm.runInContext('new Uint8Array([0x61, 0x62, 0x63])', vm.createContext({}))
+  assert.equal(innerAbc instanceof Uint8Array, false)
+  assert.equal(hexOf(m.yidaMaterialCodeSha1(innerAbc)), abc)
+  assert.equal(realm.uuidV5(NAMESPACE_DNS, encode('python.org')), '886313e1-3b8a-5372-9b90-0c9aee199e5d')
+  const innerName = vm.runInContext('new Uint8Array([' + [...encode('www.example.com')].join(',') + '])', vm.createContext({}))
+  assert.equal(m.yidaMaterialCodeUuidV5(NAMESPACE_DNS, innerName), '2ed6657d-e927-568b-95e1-2665a8aea6a2')
+
+  // Still only Uint8Array: other views, spoofed tags and array-likes from either realm are refused.
+  const other = vm.createContext({})
+  const spoofed = [
+    vm.runInContext('new Uint16Array([0x61, 0x62, 0x63])', other),
+    vm.runInContext('new Int8Array([0x61, 0x62, 0x63])', other),
+    vm.runInContext('new DataView(new ArrayBuffer(3))', other),
+    vm.runInContext('Object.defineProperty(new Uint16Array(3), Symbol.toStringTag, { value: "Uint8Array" })', other),
+    vm.runInContext('({ [Symbol.toStringTag]: "Uint8Array", length: 3, 0: 97, 1: 98, 2: 99 })', other),
+    new Uint8ClampedArray([0x61, 0x62, 0x63]),
+    Object.defineProperty(new Uint16Array(3), Symbol.toStringTag, { value: 'Uint8Array' }),
+    { [Symbol.toStringTag]: 'Uint8Array', length: 3, 0: 97, 1: 98, 2: 99 },
+    new Uint8Array(3).buffer,
+    [0x61, 0x62, 0x63],
+  ]
+  for (const value of spoofed) {
+    assert.throws(() => m.yidaMaterialCodeSha1(value), rejects('INPUT'))
+    assert.throws(() => realm.sha1(value), rejects('INPUT'))
+    assert.throws(() => m.yidaMaterialCodeUuidV5(NAMESPACE_DNS, value), rejects('INPUT'))
+    assert.throws(() => realm.uuidV5(NAMESPACE_DNS, value), rejects('INPUT'))
+  }
+
+  // Input OBJECTS stay realm-bound on purpose (fail-closed): a plain object from another realm is refused, so the
+  // caller (PR-2's preview) must build `{ keyValue, projectNo }` in the realm that loaded the module.
+  assert.throws(() => realm.generateWith({ keyValue: MANUAL_KEY, projectNo: 'SYN-P002' }), rejects('INPUT'))
 })
 
 test('type declarations name every runtime export', async () => {

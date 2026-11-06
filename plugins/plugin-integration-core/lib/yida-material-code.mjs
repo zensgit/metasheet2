@@ -46,6 +46,14 @@ export class YidaMaterialCodeError extends Error {
 
 function fail(kind) { throw new YidaMaterialCodeError(kind) }
 
+// Realm-independent Uint8Array check. `instanceof Uint8Array` is false for bytes made in another realm (jsdom's
+// TextEncoder under vitest, an iframe), although they are real Uint8Arrays. The %TypedArray%.prototype[@@toStringTag]
+// getter reads the internal [[TypedArrayName]] slot, so it works across realms, cannot be spoofed by an own
+// Symbol.toStringTag, and returns undefined for anything that is not a typed array. Output bytes are unchanged.
+const typedArrayName = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get
+
+function isBytes(value) { return typedArrayName.call(value) === 'Uint8Array' }
+
 function isTrimmed(value) { return value.trim() === value }
 
 function hasControl(value) {
@@ -104,7 +112,7 @@ function rotl(value, bits) { return (value << bits) | (value >>> (32 - bits)) }
  * @returns {Uint8Array} 20 bytes
  */
 export function yidaMaterialCodeSha1(bytes) {
-  if (!(bytes instanceof Uint8Array)) fail('INPUT')
+  if (!isBytes(bytes)) fail('INPUT')
   const length = bytes.length
   const blocks = Math.ceil((length + 9) / 64)
   const padded = new Uint8Array(blocks * 64)
@@ -184,7 +192,7 @@ function hex(bytes) {
  */
 export function yidaMaterialCodeUuidV5(namespace, nameBytes) {
   if (typeof namespace !== 'string' || !UUID_PATTERN.test(namespace)) fail('INPUT')
-  if (!(nameBytes instanceof Uint8Array)) fail('INPUT')
+  if (!isBytes(nameBytes)) fail('INPUT')
   const nsHex = namespace.replace(/-/g, '')
   const message = new Uint8Array(16 + nameBytes.length)
   for (let i = 0; i < 16; i += 1) message[i] = parseInt(nsHex.slice(i * 2, i * 2 + 2), 16)
