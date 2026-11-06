@@ -43,6 +43,7 @@ describe('real-DB suite wiring', () => {
   it('carries the sentinel that fails a database-expected run without a database', () => {
     const text = readFileSync(path.join(BACKEND, DB_SPEC), 'utf8')
     expect(sentinelPlacement(text)).toBe('top-level')
+    expect(text).toContain("const EXPECT_DB = process.env.EXPECT_DB === '1'\nconst itIfExpectDb = EXPECT_DB ? it : it.skip\n")
   })
 
   it('tells a nested sentinel from a top-level one', () => {

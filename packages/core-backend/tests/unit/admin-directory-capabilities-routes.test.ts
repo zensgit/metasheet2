@@ -215,6 +215,8 @@ describe('after the administrator check', () => {
     const cases: Array<[Error, string]> = [
       [Object.assign(new Error(secret), { code: '57014' }), 'Error 57014'],
       [Object.assign(new TypeError(secret), { code: 'too-long-code' }), 'TypeError'],
+      [Object.assign(new RangeError(secret), { code: 'ABCDEF' }), 'RangeError'],
+      [Object.assign(new SyntaxError(secret), { code: 'ab012' }), 'SyntaxError'],
       [new Error(secret), 'Error'],
     ]
     for (const [failure, expected] of cases) {
