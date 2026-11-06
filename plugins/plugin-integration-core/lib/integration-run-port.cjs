@@ -21,7 +21,8 @@
  *   refusal 404/409 STOCK_PREPARATION_PROJECT_ABSENT / _ARCHIVED → held (reason project_absent / project_archived)
  *   refusal 401/403 → skipped (reason principal_unauthorized)
  *   any other HttpRouteError → failed (errorClass = its code); any other error → failed (errorClass = code | name)
- *   an abort (the host's signal, or the checkpoint's lease-lost rejection) is RETHROWN — core classifies it.
+ *   an abort (the host's signal, the checkpoint's lease-lost rejection, or the governed entry's own
+ *   GovernedEntryAbortError that wraps either — governed-entry-checkpoint.cjs) is RETHROWN — core classifies it.
  */
 
 const HELD_DRY_RUN_STATUSES = new Set(['manual_confirm_required', 'suspended', 'large_bom_bounded'])
@@ -45,10 +46,14 @@ function boundedClass(value, fallback) {
   return typeof value === 'string' && CLASS_SHAPE.test(value) ? value : fallback
 }
 
+// An abort-shaped rejection: the host's signal reason (AbortError / TimeoutError), the host's lease checkpoint
+// (JobLeaseLostError / JOB_LEASE_LOST), or the governed entries' own refusal that wraps either of them
+// (GovernedEntryAbortError / GOVERNED_ENTRY_ABORTED, lib/governed-entry-checkpoint.cjs). Rethrown, never classified.
 function isAbortLike(error) {
   if (!error || typeof error !== 'object') return false
   return error.name === 'AbortError' || error.name === 'TimeoutError' || error.name === 'JobLeaseLostError'
-    || error.code === 'ABORT_ERR' || error.code === 'JOB_LEASE_LOST'
+    || error.name === 'GovernedEntryAbortError'
+    || error.code === 'ABORT_ERR' || error.code === 'JOB_LEASE_LOST' || error.code === 'GOVERNED_ENTRY_ABORTED'
 }
 
 /** The stock-prep dry-run payload → values-free summary. */
