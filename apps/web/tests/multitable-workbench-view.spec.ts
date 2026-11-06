@@ -5634,4 +5634,46 @@ describe('MultitableWorkbench view wiring', () => {
       }
     })
   })
+  // mod+z / mod+y run the grid's undo/redo, which replays a recorded cell edit to the server. From a
+  // text-entry control they are the control's own text undo/redo instead; from a select, a checkbox or
+  // the main area (no text undo there) the grid's undo/redo still runs.
+  describe('grid undo/redo and text-entry targets', () => {
+    const CHORDS: KeyboardEventInit[] = [
+      { key: 'z', metaKey: true },
+      { key: 'z', ctrlKey: true },
+      { key: 'y', ctrlKey: true },
+      { key: 'z', metaKey: true, shiftKey: true },
+    ]
+
+    it('from a textarea, a text input or an editable surface the chords are left to the control; from a select, a checkbox or the main area the grid still takes them', async () => {
+      mountWorkbench()
+      await flushUi()
+      const root = container!.querySelector('.mt-workbench') as HTMLElement
+      const made: HTMLElement[] = []
+      const add = <T extends HTMLElement>(el: T): T => { root.appendChild(el); made.push(el); return el }
+      const textarea = add(document.createElement('textarea'))
+      const text = add(Object.assign(document.createElement('input'), { type: 'text' }))
+      const search = add(Object.assign(document.createElement('input'), { type: 'search' }))
+      const editor = add(document.createElement('div'))
+      editor.setAttribute('contenteditable', 'true')
+      const inEditor = document.createElement('span')
+      editor.appendChild(inEditor)
+      const select = add(document.createElement('select'))
+      const checkbox = add(Object.assign(document.createElement('input'), { type: 'checkbox' }))
+      const main = container!.querySelector('.mt-workbench__main') as HTMLElement
+      const fire = (el: HTMLElement, init: KeyboardEventInit) => {
+        const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+        el.dispatchEvent(event)
+        return event.defaultPrevented
+      }
+      try {
+        for (const init of CHORDS) {
+          for (const el of [textarea, text, search, editor, inEditor]) expect(fire(el, init), `${el.tagName} ${JSON.stringify(init)}`).toBe(false)
+          for (const el of [select, checkbox, main]) expect(fire(el, init), `${el.tagName} ${JSON.stringify(init)}`).toBe(true)
+        }
+      } finally {
+        for (const el of made) el.remove()
+      }
+    })
+  })
 })

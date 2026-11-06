@@ -5726,10 +5726,30 @@ function onBeforeUnload(e: BeforeUnloadEvent) {
   e.returnValue = ''
 }
 
+// Input types without a native text undo: grid undo/redo keeps working from them.
+const NON_TEXT_INPUT_TYPES = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file', 'image', 'hidden'])
+
+/** A control whose own mod+z / mod+y is the browser's text undo/redo: a textarea, an editable surface
+ *  (the rich-text editor) or a text-like input — the comment box, a drawer field, the grid's inline
+ *  cell editor. A select or a checkbox has no text undo, so the grid's undo still runs from them. */
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  if (!el?.closest) return false
+  if (el.closest('textarea, [contenteditable]:not([contenteditable="false"])')) return true
+  const input = el.closest('input')
+  return input !== null && !NON_TEXT_INPUT_TYPES.has(input.type)
+}
+
 function onGlobalKeydown(e: KeyboardEvent) {
   const mod = e.metaKey || e.ctrlKey
-  if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); grid.undo() }
-  else if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); grid.redo() }
+  // Grid undo/redo replays a recorded cell edit to the server. From a text-entry control the keys are
+  // the control's own text undo/redo instead: the typed text is undone, and no earlier cell edit is
+  // reverted behind the user's back.
+  const undoKey = mod && e.key === 'z' && !e.shiftKey
+  const redoKey = mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))
+  if ((undoKey || redoKey) && isTextEntryTarget(e.target)) return
+  if (undoKey) { e.preventDefault(); grid.undo() }
+  else if (redoKey) { e.preventDefault(); grid.redo() }
   // '?' toggles the shortcuts overlay, except while typing: in a form control or in an editable surface
   // (the rich-text editor is a contenteditable div, not an input).
   else if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) { showShortcuts.value = !showShortcuts.value }
