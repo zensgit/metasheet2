@@ -15,10 +15,16 @@ const { buildYidaExecutionPayloadDigest } = executionDigest
 const { YidaFormTransportError } = formProtocol
 const { boundYidaExecutionSnapshot, YIDA_SEND_SYSTEM_TOKEN_MAX_LENGTH, YIDA_SEND_USER_ID_MAX_LENGTH } = sendBudget
 const CONTEXT_KEYS = ['tenantId', 'workspaceId', 'ownerId', 'actorId']
+// Source binding (design baseline v2.3 §7.2): the two digests are optional snapshot members. Absent or null
+// means an unbound row (pasted rowsText); present, each is a 64-hex sha256 and both come together. They
+// enter the execution digest (version 2) and the ledger row, so the admitted grant, the snapshot and the
+// ledger all agree on the row's binding.
+const BINDING_KEYS = ['sourceRecordDigest', 'creationIdentityDigest']
+const DIGEST_RE = /^[0-9a-f]{64}$/
 const SNAPSHOT_KEYS = [
   ...CONTEXT_KEYS, 'operationId', 'rowKey', 'grantRef', 'expiresAt', 'targetRef',
   'targetRevision', 'planRevision', 'credentialRef', 'credentialGeneration',
-  'config', 'row', 'systemToken', 'userId', 'instanceId',
+  'config', 'row', 'systemToken', 'userId', 'instanceId', ...BINDING_KEYS,
 ]
 const ERROR_CODES = new Set([
   'INVALID_INPUT', 'DISABLED', 'BUSY', 'CANCELLED', 'TIMEOUT', 'CLOCK_INVALID',
@@ -98,12 +104,17 @@ function boundedSnapshot(value) {
 function compileSnapshot(raw, identity) {
   const bounded = boundedSnapshot(raw)
   const snapshot = bounded.snapshot
-  const parsed = dataObject(snapshot, SNAPSHOT_KEYS, SNAPSHOT_KEYS.filter((key) => key !== 'instanceId'), 'SNAPSHOT_INVALID')
+  const parsed = dataObject(snapshot, SNAPSHOT_KEYS, SNAPSHOT_KEYS.filter((key) => key !== 'instanceId' && !BINDING_KEYS.includes(key)), 'SNAPSHOT_INVALID')
   for (const key of [...CONTEXT_KEYS, 'operationId', 'rowKey', 'grantRef', 'targetRef',
     'targetRevision', 'planRevision', 'credentialRef']) {
     if (key === 'workspaceId' && parsed[key] === null) continue
     opaque(parsed[key], 'SNAPSHOT_INVALID')
   }
+  const binding = Object.fromEntries(BINDING_KEYS.map((key) => [key, Object.hasOwn(parsed, key) ? parsed[key] : null]))
+  for (const value of Object.values(binding)) {
+    if (value !== null && (typeof value !== 'string' || !DIGEST_RE.test(value))) fail('SNAPSHOT_INVALID')
+  }
+  if ((binding.sourceRecordDigest === null) !== (binding.creationIdentityDigest === null)) fail('SNAPSHOT_INVALID')
   for (const key of Object.keys(identity)) {
     if (snapshot[key] !== identity[key]) fail('SNAPSHOT_INVALID')
   }
@@ -112,7 +123,9 @@ function compileSnapshot(raw, identity) {
     || snapshot.credentialGeneration > 2147483647) fail('SNAPSHOT_INVALID')
   privateText(snapshot.systemToken, YIDA_SEND_SYSTEM_TOKEN_MAX_LENGTH)
   privateText(snapshot.userId, YIDA_SEND_USER_ID_MAX_LENGTH)
-  if (!snapshot.config || snapshot.config.version !== 2) fail('SNAPSHOT_INVALID')
+  // R-71 ⑦.3: a v2 or a v3 mapping (exact numbers). The single row is planned again from the
+  // snapshot's own config; the data must still equal the approved execution digest below.
+  if (!snapshot.config || ![2, 3].includes(snapshot.config.version)) fail('SNAPSHOT_INVALID')
   let plan
   try { plan = buildYidaStaticPlan({ config: snapshot.config, rows: [snapshot.row] }) } catch { fail('SNAPSHOT_INVALID') }
   const planned = plan.rows[0]
@@ -130,7 +143,7 @@ function compileSnapshot(raw, identity) {
   })
   const payloadDigest = buildYidaExecutionPayloadDigest({ snapshot, intent, data })
   const businessKeyDigest = createHash('sha256').update(planned.localBusinessKey).digest('hex')
-  return { ...bounded, intent, data, payloadDigest, businessKeyDigest }
+  return { ...bounded, intent, data, payloadDigest, businessKeyDigest, binding }
 }
 
 function validReceipt(receipt, fixed) {
@@ -269,6 +282,7 @@ export function createYidaDeliveryRunner(options) {
           businessKeyDigest: fixed.businessKeyDigest, credentialRef: snapshot.credentialRef,
           credentialGeneration: snapshot.credentialGeneration, intent: fixed.intent,
           ...(fixed.intent === 'update' ? { instanceId: snapshot.instanceId } : {}),
+          sourceRecordDigest: fixed.binding.sourceRecordDigest, creationIdentityDigest: fixed.binding.creationIdentityDigest,
         })
       } catch { check(snapshot); fail('PREPARE_FAILED') }
       check(snapshot)

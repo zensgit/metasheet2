@@ -65,7 +65,30 @@ export type YidaSheetSourceDependencies = Readonly<{
     leafMatches(fieldType: string, value: unknown, leaf: FilterLeaf): boolean
     effectiveType(field: YidaSheetSourceField): string
   }>
+  /**
+   * Source binding (design baseline v2.3 §7.2): the ACTIVE project-sheet registry row (migration 087) that names
+   * this sheet for the request's verified tenant, or null when the sheet is not a registered project sheet. Only
+   * a registered sheet yields a binding; without this dependency every read stays unbound (pasted-text shape).
+   */
+  resolveProjectSheet?(req: Request, sheetId: string): Promise<Readonly<{ projectNo: string }> | null>
 }>
+/**
+ * The binding the server captured while reading a registered project sheet (never reconstructible from
+ * rowsText): the sheet, its key column (the template column flagged `stockPreparation.key`), the alias → field
+ * id map of the columns actually read, and per row the record id, the key cell and the registered project.
+ * `records[i]` is the row `rowsText[i]` came from. The draft compiler turns it into the two row digests.
+ */
+export type YidaSheetSourceBinding = Readonly<{
+  sheetId: string; keyFieldId: string; fieldBindings: Readonly<Record<string, string>>
+  records: readonly Readonly<{ recordId: string; keyValue: string; projectNo: string }>[]
+}>
+const MAX_KEY_VALUE_LENGTH = 4096
+function isKeyColumn(field: YidaSheetSourceField): boolean {
+  const property = field.property
+  if (!property || typeof property !== 'object' || Array.isArray(property)) return false
+  const marker = (property as Record<string, unknown>).stockPreparation
+  return Boolean(marker) && typeof marker === 'object' && !Array.isArray(marker) && (marker as Record<string, unknown>).key === true
+}
 
 function literal(value: unknown): string {
   if (typeof value !== 'string' || !value || value.length > 128 || value.trim() !== value
@@ -107,10 +130,13 @@ function cell(value: unknown): string | number | boolean | undefined {
 
 /**
  * Reads the mapped columns of the owner-visible rows and returns rowsText for the existing draft compiler.
- * Never returns record ids or values other than inside rowsText, and never logs.
+ * Never returns values other than inside rowsText, and never logs. When the sheet is a REGISTERED project
+ * sheet the result also carries the source binding (record ids, key cells, registered project), which the
+ * host hands to the draft compiler and which never enters rowsText; a registered sheet whose key column is
+ * not among the read columns, or whose row lacks a key, is refused rather than drafted unbound.
  */
 export async function readYidaSheetSourceRows(req: Request, input: YidaSheetSourceInput,
-  dependencies: YidaSheetSourceDependencies): Promise<Readonly<{ rowsText: string; rowCount: number }>> {
+  dependencies: YidaSheetSourceDependencies): Promise<Readonly<{ rowsText: string; rowCount: number; binding?: YidaSheetSourceBinding }>> {
   try {
     const access = await dependencies.resolveAccess(req, input.sheetId)
     if (!access.userId) fail('DENIED')
@@ -128,6 +154,18 @@ export async function readYidaSheetSourceRows(req: Request, input: YidaSheetSour
       if (!field || !readable.has(field.id)) fail('INPUT')
       if (!YIDA_SHEET_SOURCE_FIELD_TYPES.has(field.type)) fail('UNSUPPORTED')
     }
+    // Binding (§7.2): only a registered, active project sheet is bound. Exactly one key column must exist, it
+    // must be one of the read (so owner-readable) columns, and the registered project is every row's project.
+    const registered = dependencies.resolveProjectSheet ? await dependencies.resolveProjectSheet(req, input.sheetId) : null
+    let keyFieldId: string | null = null
+    if (registered) {
+      literal(registered.projectNo)
+      const keyColumns = fields.filter(isKeyColumn)
+      if (keyColumns.length !== 1) fail('UNSUPPORTED')
+      keyFieldId = keyColumns[0].id
+      if (!input.columns.some(column => column.fieldId === keyFieldId)) fail('INPUT')
+    }
+    const boundRecords: Array<{ recordId: string; keyValue: string; projectNo: string }> = []
     let filter: FilterNode | null = null
     if (input.viewId !== undefined) {
       const view = await dependencies.loadView(input.viewId)
@@ -158,13 +196,25 @@ export async function readYidaSheetSourceRows(req: Request, input: YidaSheetSour
         const value = cell(Object.hasOwn(data, column.fieldId) ? data[column.fieldId] : undefined)
         if (value !== undefined) row[column.source] = value
       }
+      if (registered && keyFieldId !== null) {
+        // The key cell is the server-read idempotency key: a non-empty, trimmed, control-free string.
+        const keyValue = Object.hasOwn(data, keyFieldId) ? data[keyFieldId] : undefined
+        if (typeof keyValue !== 'string' || !keyValue || keyValue.length > MAX_KEY_VALUE_LENGTH
+          || keyValue.trim() !== keyValue || /[\u0000-\u001f\u007f]/u.test(keyValue)) fail('INPUT')
+        boundRecords.push({ recordId: literal(record.id), keyValue, projectNo: registered.projectNo })
+      }
       rows.push(row)
       if (rows.length > YIDA_SHEET_SOURCE_LIMITS.maxRows) fail('LIMIT')
     }
     if (rows.length === 0) fail('INPUT')
     const rowsText = JSON.stringify(rows)
     if (Buffer.byteLength(rowsText, 'utf8') > YIDA_SHEET_SOURCE_LIMITS.maxTextBytes) fail('LIMIT')
-    return Object.freeze({ rowsText, rowCount: rows.length })
+    if (!registered || keyFieldId === null) return Object.freeze({ rowsText, rowCount: rows.length })
+    const fieldBindings: Record<string, string> = {}
+    for (const column of input.columns) fieldBindings[column.source] = column.fieldId
+    const binding: YidaSheetSourceBinding = Object.freeze({ sheetId: input.sheetId, keyFieldId,
+      fieldBindings: Object.freeze(fieldBindings), records: Object.freeze(boundRecords.map(entry => Object.freeze(entry))) })
+    return Object.freeze({ rowsText, rowCount: rows.length, binding })
   } catch (error) {
     // Never forward a dependency message, row, id or value.
     throw new YidaSheetSourceError(ownErrors.get(error as object) ?? 'UNAVAILABLE')
