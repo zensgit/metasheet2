@@ -477,6 +477,60 @@ describe('auth login routes', () => {
     expect((response.body as Record<string, any>).data.features.tasks).toBe(expected)
   })
 
+  // R-69 1b-iii (I4 verifier F2): the rule editor offers run_integration_job only when the session says
+  // integrationAutomationRunAction=true, which must be exactly when INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED is the
+  // literal 'true' (the same predicate as the save gate and the executor's per-trigger check). Login and /me.
+  const RUN_ACTION_FLAG = 'INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED'
+  const RUN_ACTION_FLAG_CASES = [
+    ['unset', undefined, false],
+    ['empty', '', false],
+    ['TRUE', 'TRUE', false],
+    ['1', '1', false],
+    ['leading space', ' true', false],
+    ['trailing space', 'true ', false],
+    ['false', 'false', false],
+    ['exact true', 'true', true],
+  ] as const
+
+  async function withRunActionEnv<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+    const had = Object.prototype.hasOwnProperty.call(process.env, RUN_ACTION_FLAG)
+    const previous = process.env[RUN_ACTION_FLAG]
+    if (value === undefined) delete process.env[RUN_ACTION_FLAG]
+    else process.env[RUN_ACTION_FLAG] = value
+    try {
+      return await run()
+    } finally {
+      if (had) process.env[RUN_ACTION_FLAG] = previous
+      else delete process.env[RUN_ACTION_FLAG]
+    }
+  }
+
+  it.each(RUN_ACTION_FLAG_CASES)('login as an administrator with INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED %s (%j): features.integrationAutomationRunAction is %s', async (_label, value, expected) => {
+    const response = await withRunActionEnv(value, () => loginAdminForElearningPayload())
+    expect(response.statusCode).toBe(200)
+    const features = (response.body as Record<string, any>).data.features
+    expect(features.integrationAutomationRunAction).toBe(expected)
+    // Not inferred from role: the administrator's role-derived features are unaffected.
+    expect(features.attendanceAdmin).toBe(true)
+  })
+
+  it.each(RUN_ACTION_FLAG_CASES)('/me for an administrator with INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED %s (%j): features.integrationAutomationRunAction is %s', async (_label, value, expected) => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'admin@example.com',
+      name: 'Admin',
+      role: 'admin',
+      permissions: [],
+      created_at: new Date('2026-03-13T00:00:00.000Z'),
+      updated_at: new Date('2026-03-13T00:00:00.000Z'),
+    })
+    const response = await withRunActionEnv(value, () => invokeRoute('get', '/me', {
+      headers: { authorization: 'Bearer live-token' },
+    }))
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.features.integrationAutomationRunAction).toBe(expected)
+  })
+
   it('accepts a generic identifier payload for login', async () => {
     authServiceMocks.login.mockResolvedValue({
       user: {
