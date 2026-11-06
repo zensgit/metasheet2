@@ -5690,18 +5690,64 @@ function requireStockPreparationAudit() {
         },
       })
     }
-    const repaired = await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => {
-      // R-71 ⑦.4 PR-3: columns FIRST, so a column added here gets its option set and its PLM lock below.
-      const columns = await reconcileProjectSheetTemplateColumns({ provisioning, projectId: targetProjectId, objectId: locked.objectId, sheetId: locked.sheetId, add: addMissingColumns })
-      return {
-        row: locked,
-        columns,
-        options: await syncProjectSheetContractOptions({ provisioning, projectId: targetProjectId, objectId: locked.objectId }),
+    // R-71 ⑦.4 PR-3 (review round 1): the column add COMMITS in its own host transaction, BEFORE the option sync
+    // and the PLM lock run. A failure in either of those (or in releasing the registry row) leaves the added
+    // columns in place — a field-creating write with no UI undo — so that write is audited on its OWN failure
+    // path: `committedColumns` is set the moment the add returns, `laterStep` names the step that was running,
+    // and the catch below appends ONE row (same action and mode, `outcome: 'failed_after_columns_added'`) with
+    // the column counts before the original error is rethrown. Nothing added ⇒ no extra row (the pre-PR-3
+    // failure behaviour, unchanged).
+    let committedColumns = null
+    let laterStep = null
+    let repaired
+    try {
+      repaired = await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => {
+        // R-71 ⑦.4 PR-3: columns FIRST, so a column added here gets its option set and its PLM lock below.
+        const columns = await reconcileProjectSheetTemplateColumns({ provisioning, projectId: targetProjectId, objectId: locked.objectId, sheetId: locked.sheetId, add: addMissingColumns })
+        if (addMissingColumns) committedColumns = { row: locked, columns }
+        laterStep = 'options'
+        const options = await syncProjectSheetContractOptions({ provisioning, projectId: targetProjectId, objectId: locked.objectId })
+        laterStep = 'plm_lock'
         // B (awaiting owner): the same call marks the sheet's PLM columns read-only for people — the rollout
         // path for sheets created before the lock existed. Idempotent; registry-resolved objectId only.
-        plmColumnLock: await markProjectSheetPlmSystemColumns({ provisioning, projectId: targetProjectId, objectId: locked.objectId }),
+        const plmColumnLock = await markProjectSheetPlmSystemColumns({ provisioning, projectId: targetProjectId, objectId: locked.objectId })
+        laterStep = 'registry_release'
+        return { row: locked, columns, options, plmColumnLock }
+      })
+    } catch (error) {
+      const committedReport = committedColumns ? publicProjectSheetColumnReport(committedColumns.columns, 'add') : null
+      if (committedReport && committedReport.added > 0) {
+        const failureCode = error && typeof error.code === 'string' && /^[A-Z0-9_]{1,80}$/.test(error.code) ? error.code : 'UNTYPED'
+        try {
+          await audit.append({
+            tenantId,
+            projectId: projectNo,
+            action: STOCK_PREPARATION_PROJECT_TARGET_CREATE_AUDIT_ACTION,
+            subjectId: committedColumns.row.sheetId,
+            mode: STOCK_PREPARATION_PROJECT_SHEET_OPTION_REPAIR_AUDIT_MODE,
+            actor: user.id || user.email,
+            detail: {
+              objectId: committedColumns.row.objectId,
+              outcome: 'failed_after_columns_added',
+              failedStep: laterStep || 'columns',
+              failureCode,
+              ...projectSheetColumnAuditDetail(committedReport),
+            },
+          })
+        } catch (auditError) {
+          // The caller gets the ORIGINAL failure; the missing audit row is logged (codes only, never a value).
+          if (routeLogger && typeof routeLogger.error === 'function') {
+            try {
+              routeLogger.error('stock-prep project-sheet repair: columns were added but the failure audit row could not be written', {
+                failureCode,
+                auditCode: auditError && typeof auditError.code === 'string' ? auditError.code : 'UNTYPED',
+              })
+            } catch (_ignored) { /* a broken logger must not replace the original failure */ }
+          }
+        }
       }
-    })
+      throw error
+    }
     const columnReport = publicProjectSheetColumnReport(repaired.columns, addMissingColumns ? 'add' : 'report')
     await audit.append({
       tenantId,
@@ -5719,13 +5765,7 @@ function requireStockPreparationAudit() {
         plmLockAlreadyMarkedFieldCount: repaired.plmColumnLock.alreadyMarked,
         plmLockMissingFieldCount: repaired.plmColumnLock.missing,
         // R-71 ⑦.4 PR-3: how many template columns this call found missing, added, and left (counts only).
-        columnMode: columnReport.mode,
-        columnsChecked: columnReport.checked,
-        templateColumnCount: columnReport.templateFieldCount,
-        columnAlreadyPresentCount: columnReport.checked ? columnReport.alreadyPresent : 0,
-        columnMissingBeforeCount: columnReport.missingFieldIds.length,
-        columnAddedCount: columnReport.added,
-        columnRefusedCount: columnReport.refusedFieldIds.length,
+        ...projectSheetColumnAuditDetail(columnReport),
       },
     })
     return sendOk(res, {
@@ -5736,6 +5776,22 @@ function requireStockPreparationAudit() {
       plmColumnLock: { marked: repaired.plmColumnLock.marked, alreadyMarked: repaired.plmColumnLock.alreadyMarked, missing: repaired.plmColumnLock.missing },
       columns: columnReport,
     })
+  }
+
+  /**
+   * R-71 ⑦.4 PR-3: the seven column counts both audit rows of the repair leg carry (the success row and the
+   * `failed_after_columns_added` row), from a public column report. Counts, booleans and the mode enum only.
+   */
+  function projectSheetColumnAuditDetail(columnReport) {
+    return {
+      columnMode: columnReport.mode,
+      columnsChecked: columnReport.checked,
+      templateColumnCount: columnReport.templateFieldCount,
+      columnAlreadyPresentCount: columnReport.checked ? columnReport.alreadyPresent : 0,
+      columnMissingBeforeCount: columnReport.missingFieldIds.length,
+      columnAddedCount: columnReport.added,
+      columnRefusedCount: columnReport.refusedFieldIds.length,
+    }
   }
 
   /**

@@ -31,6 +31,15 @@
 //         existence read → `checked: false`; a registry row whose sheet id is not the object's sheet → 409.
 //   RC-09 REFUSED BEFORE ANY IO: the overview, the deployment's env object, anything outside the stock-prep sandbox
 //         namespace. Archived → 409 in every mode; switch off → 404 with zero IO.
+//   RC-10 OWNERSHIP REFUSAL (review round 1): a template whose human column is NOT in the human whitelist (the two
+//         authorities disagree — injected by reloading the route stack against a whitelist without that column):
+//         the add is 422 REPAIR_HUMAN_FIELD_FORBIDDEN with ZERO additive writes, the sheet restored, no option or lock
+//         patch, no audit row; the report and the dry-run list the column in `refusedFieldIds` and keep it out of
+//         `wouldAddFieldIds`.
+//   RC-11 A COMMITTED ADD IS AUDITED EVEN WHEN A LATER STEP FAILS (review round 1): the PLM lock patch fails after the
+//         column transaction committed → the call fails (500; 422 for the option sync), the added columns stay, and ONE audit row records them
+//         (`outcome: failed_after_columns_added`, `failedStep: plm_lock`, columnAddedCount 3). The same for the
+//         option sync. Nothing added + a later failure → no row (unchanged). The healed retry writes its normal row.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -77,10 +86,10 @@ const tests = []
 const test = (name, fn) => tests.push([name, fn])
 const plain = (value) => JSON.parse(JSON.stringify(value))
 
-function cloneObjects(objects) {
+function cloneObjects(objects, harness = projectSheet) {
   const out = new Map()
   for (const [key, object] of objects) {
-    out.set(key, { ...object, fields: new Map([...object.fields].map(([id, field]) => [id, projectSheet.clone(field)])) })
+    out.set(key, { ...object, fields: new Map([...object.fields].map(([id, field]) => [id, harness.clone(field)])) })
   }
   return out
 }
@@ -95,15 +104,16 @@ function snapshotObject(object) {
  * write, so a suite can play a concurrent writer or a misbehaving host; a throw from the callback restores every
  * object the fake host holds, like a rolled-back transaction.
  */
-function mount({ switchOn = true, txPort = true, readPort = true } = {}) {
-  const h = projectSheet.mountProjectSheetRoutes({ tenantId: TENANT, projectNo: PROJECT, switchOn, fieldReads: readPort })
+function mount({ switchOn = true, txPort = true, readPort = true, harness = projectSheet } = {}) {
+  const h = harness.mountProjectSheetRoutes({ tenantId: TENANT, projectNo: PROJECT, switchOn, fieldReads: readPort })
+  h.harness = harness
   const p = h.provisioning
   h.tx = { ensure: null, count: 0 }
   if (txPort) {
     p.runObjectFieldsRepairTransaction = async (fn) => {
       p.calls.push(['runObjectFieldsRepairTransaction'])
       h.tx.count += 1
-      const saved = cloneObjects(p.objects)
+      const saved = cloneObjects(p.objects, harness)
       const surface = {
         findObjectSheet: (input) => p.findObjectSheet(input),
         resolveExistingObjectFieldIds: (input) => p.resolveExistingObjectFieldIds(input),
@@ -123,8 +133,8 @@ function mount({ switchOn = true, txPort = true, readPort = true } = {}) {
 }
 
 const objectOf = (h, objectId) => h.provisioning.objects.get(`${STAGING}/${objectId}`)
-const createTarget = (h, projectNo = PROJECT) => projectSheet.call(h.routes, 'POST', CREATE_PATH, { user: PULLER, params: { projectNo }, body: {} })
-const repair = (h, body, { user = ADMIN } = {}) => projectSheet.call(h.routes, 'POST', OPTIONS_SYNC_PATH, { user, body, query: {} })
+const createTarget = (h, projectNo = PROJECT) => h.harness.call(h.routes, 'POST', CREATE_PATH, { user: PULLER, params: { projectNo }, body: {} })
+const repair = (h, body, { user = ADMIN } = {}) => h.harness.call(h.routes, 'POST', OPTIONS_SYNC_PATH, { user, body, query: {} })
 const writeCalls = (h) => h.provisioning.calls.filter((call) => WRITE_CALLS.has(call[0]))
 const ensureCalls = (h) => h.provisioning.calls.filter((call) => call[0] === 'ensureMissingObjectFields')
 
@@ -489,6 +499,152 @@ test('RC-09 refused before any IO off the project-sheet namespace; archived 409 
       assert.deepEqual(off.provisioning.calls, [])
     }
   } finally { off.restore() }
+})
+
+// ── RC-10 ────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Loads a FRESH copy of the plugin lib and the project-sheet harness in which `HUMAN_PRESERVED_FIELD_IDS` lacks
+ * `removedId` (the frozen template is untouched, so that column is human_preserved in the template and NOT
+ * whitelisted — the disagreement `assertRepairableFieldOwnership` exists to refuse). Every module the swap could
+ * reach is dropped from the require cache first and the original cache entries are put back afterwards, so no
+ * other case (and no other suite in the chain) ever sees the patched whitelist.
+ */
+async function withWhitelistWithout(removedId, fn) {
+  const Module = require('node:module')
+  const libDir = path.resolve(LIB) + path.sep
+  const supportDir = path.resolve(__dirname, 'support') + path.sep
+  const templatesPath = require.resolve(path.join(LIB, 'stock-preparation-templates.cjs'))
+  const ownedByTheSwap = (key) => key.startsWith(libDir) || key.startsWith(supportDir)
+  const saved = Object.entries(require.cache).filter(([key]) => ownedByTheSwap(key))
+  const original = require(templatesPath)
+  assert.ok(original.HUMAN_PRESERVED_FIELD_IDS.includes(removedId), 'the column is whitelisted today')
+  const dropOwned = () => { for (const key of Object.keys(require.cache)) if (ownedByTheSwap(key)) delete require.cache[key] }
+  dropOwned()
+  const patched = new Module(templatesPath, module)
+  patched.filename = templatesPath
+  patched.loaded = true
+  patched.exports = { ...original, HUMAN_PRESERVED_FIELD_IDS: Object.freeze(original.HUMAN_PRESERVED_FIELD_IDS.filter((id) => id !== removedId)) }
+  require.cache[templatesPath] = patched
+  try {
+    const harness = require(path.join(__dirname, 'support', 'stock-preparation-project-sheet-harness.cjs'))
+    const provisioningLib = require(path.join(LIB, 'stock-preparation-target-provisioning.cjs'))
+    return await fn({ harness, provisioningLib })
+  } finally {
+    dropOwned()
+    for (const [key, entry] of saved) require.cache[key] = entry
+  }
+}
+
+test('RC-10 a human column the whitelist does not name: add is 422 REPAIR_HUMAN_FIELD_FORBIDDEN with zero writes; report and dry-run list it as refused, never as would-add', async () => {
+  assert.equal(OWNERSHIP.get(HUMAN_COLUMN), 'human_preserved')
+  await withWhitelistWithout(HUMAN_COLUMN, async ({ harness, provisioningLib }) => {
+    // The swap reached the module under test (otherwise this case would prove nothing).
+    assert.throws(
+      () => provisioningLib.assertRepairableFieldOwnership({ fieldId: HUMAN_COLUMN, ownership: 'human_preserved', isWhitelisted: false, templateFieldIds: TEMPLATE_IDS, objectId: 'x' }),
+      (error) => error.code === 'REPAIR_HUMAN_FIELD_FORBIDDEN',
+    )
+    const h = mount({ harness })
+    try {
+      const { objectId, object } = await agedSheet(h)
+      const before = snapshotObject(object)
+      const expectedWouldAdd = DROPPED.filter((id) => id !== HUMAN_COLUMN)
+
+      // Add mode: refused as a whole, before any write — nothing half-added.
+      const auditBefore = h.auditAppends.length
+      const res = await repair(h, { projectNo: PROJECT, addMissingColumns: true })
+      assert.equal(res.statusCode, 422, JSON.stringify(res.body))
+      assert.equal(res.body.error.code, 'REPAIR_HUMAN_FIELD_FORBIDDEN')
+      assert.deepEqual(plain(res.body.error.details), { objectId, fieldId: HUMAN_COLUMN }, 'logical ids only')
+      assert.deepEqual(ensureCalls(h), [], 'ZERO additive writes')
+      assert.equal(snapshotObject(objectOf(h, objectId)), before, 'the sheet is byte-identical')
+      assert.deepEqual(h.provisioning.calls.filter((call) => call[0] === 'patchObjectFieldProperty'), [], 'no option or lock patch')
+      assert.equal(h.auditAppends.length, auditBefore, 'no audit row for a refused add')
+
+      // Dry-run: the refused column is reported as refused and is NOT something an add would add.
+      h.provisioning.calls.length = 0
+      const dry = await repair(h, { projectNo: PROJECT, dryRun: true })
+      assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
+      assert.deepEqual(plain(dry.body.data.columns.missingFieldIds), DROPPED)
+      assert.deepEqual(plain(dry.body.data.columns.refusedFieldIds), [HUMAN_COLUMN])
+      assert.deepEqual(plain(dry.body.data.columns.wouldAddFieldIds), expectedWouldAdd)
+      assert.deepEqual(writeCalls(h), [], 'the dry-run still writes nothing')
+
+      // Report (the plain call): the same verdict, and its audit row counts the refusal. The plain call's option
+      // sync needs the decision column, so this sheet keeps it.
+      const r = mount({ harness })
+      try {
+        const kept = DROPPED.filter((id) => id !== DECISION_FIELD)
+        await agedSheet(r, PROJECT, kept)
+        const rAuditBefore = r.auditAppends.length
+        const report = await repair(r, { projectNo: PROJECT })
+        assert.equal(report.statusCode, 200, JSON.stringify(report.body))
+        assert.deepEqual(plain(report.body.data.columns.refusedFieldIds), [HUMAN_COLUMN])
+        assert.deepEqual(plain(report.body.data.columns.wouldAddFieldIds), kept.filter((id) => id !== HUMAN_COLUMN))
+        assert.deepEqual(ensureCalls(r), [], 'the report adds nothing')
+        const appended = r.auditAppends.slice(rAuditBefore)
+        assert.equal(appended.length, 1)
+        assert.equal(appended[0].detail.columnRefusedCount, 1)
+      } finally { r.restore() }
+    } finally { h.restore() }
+  })
+  // And the swap is gone: the module the other cases use still whitelists the column.
+  assert.ok(require(path.join(LIB, 'stock-preparation-templates.cjs')).HUMAN_PRESERVED_FIELD_IDS.includes(HUMAN_COLUMN))
+})
+
+// ── RC-11 ────────────────────────────────────────────────────────────────────────────────────────────
+
+test('RC-11 a committed add is audited even when the option sync (422) or the PLM lock (500) fails after it; nothing added → no row; the healed retry audits normally', async () => {
+  const lockPatch = (input) => Boolean(input && input.propertyPatch && Object.prototype.hasOwnProperty.call(input.propertyPatch, HUMAN_WRITE_LOCK_PROPERTY_KEY))
+  for (const [step, failsOn, status] of [['plm_lock', lockPatch, 500], ['options', (input) => !lockPatch(input), 422]]) {
+    const h = mount()
+    try {
+      const { objectId } = await agedSheet(h)
+      const p = h.provisioning
+      const realPatch = p.patchObjectFieldProperty
+      p.patchObjectFieldProperty = async (input) => {
+        if (failsOn(input)) throw new Error(`synthetic ${step} patch failure`)
+        return realPatch(input)
+      }
+      const auditBefore = h.auditAppends.length
+      const res = await repair(h, { projectNo: PROJECT, addMissingColumns: true })
+      assert.equal(res.statusCode, status, `${step}: ${JSON.stringify(res.body)}`)
+      for (const id of DROPPED) assert.ok(objectOf(h, objectId).fields.has(id), `${step}: ${id} stays (the column transaction committed)`)
+      const appended = h.auditAppends.slice(auditBefore)
+      assert.equal(appended.length, 1, `${step}: ONE audit row records the committed add`)
+      assert.equal(appended[0].action, 'project_target_create')
+      assert.equal(appended[0].mode, 'contract_options_synced')
+      assert.equal(appended[0].subjectId, h.registryRows().find((row) => row.project_no === PROJECT).sheet_id)
+      assert.deepEqual(plain(appended[0].detail), {
+        objectId,
+        outcome: 'failed_after_columns_added',
+        failedStep: step,
+        failureCode: res.body.error.code,
+        columnMode: 'add',
+        columnsChecked: true,
+        templateColumnCount: TEMPLATE_IDS.length,
+        columnAlreadyPresentCount: TEMPLATE_IDS.length - DROPPED.length,
+        columnMissingBeforeCount: DROPPED.length,
+        columnAddedCount: DROPPED.length,
+        columnRefusedCount: 0,
+      }, `${step}: counts only, values-free`)
+
+      // Nothing to add + the same later failure → no row (the pre-PR-3 failure behaviour).
+      const quiet = h.auditAppends.length
+      const again = await repair(h, { projectNo: PROJECT, addMissingColumns: true })
+      assert.equal(again.statusCode, status)
+      assert.equal(again.body.data, undefined)
+      assert.equal(h.auditAppends.length, quiet, `${step}: nothing added, no failure row`)
+
+      // Healed: the normal row, with nothing more to add.
+      p.patchObjectFieldProperty = realPatch
+      const healed = await repair(h, { projectNo: PROJECT, addMissingColumns: true })
+      assert.equal(healed.statusCode, 200, JSON.stringify(healed.body))
+      const last = h.auditAppends[h.auditAppends.length - 1]
+      assert.equal(last.detail.outcome, undefined, 'the success row is unchanged')
+      assert.equal(last.detail.columnAddedCount, 0)
+    } finally { h.restore() }
+  }
 })
 
 runFailClosedSuite('stock-preparation-project-sheet-repair-columns.test.cjs', tests)
