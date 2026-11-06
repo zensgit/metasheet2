@@ -2927,6 +2927,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       //   S3A-30 (PR-3a follow-up) a run `running` at the preview's snapshot that finishes before the preview's lock
       //          read: the preview re-consults once and answers 409 STATE_MOVED execution_finished_during_preview,
       //          never a false recovery_pending; no token, no bump.
+      //   S3A-31 (R-71 ⑦.4 PR-3, plan 7.4 real-DB 补列) an aged project sheet missing two template columns: the
+      //          pull preview 422, the repair route's dry-run writes nothing, a registry row naming another sheet 409,
+      //          the add lands exactly the two with every existing meta_fields row byte-identical, the preview ready.
       describe('S3A step-4 lanes (real Postgres, real lock, real host)', () => {
         const ownBaseLib = require(path.join(PLUGIN_LIB, 'stock-preparation-own-base.cjs')) as any
         const projectTargetsLib = require(path.join(PLUGIN_LIB, 'stock-preparation-project-targets.cjs')) as any
@@ -4060,6 +4063,102 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             executions: ['succeeded', 'succeeded'],
             next: '200:ready',
           })
+        }, 180000)
+
+        // R-71 ⑦.4 PR-3 (plan 7.4 verification matrix, core-backend real DB: 补列): a project sheet created before the
+        // template grew — two template columns (one plm_system, one whitelisted human column) deleted from meta_fields —
+        // healed through the REAL repair route (`POST …/options/sync` with projectNo) over the production plugin-scoped
+        // host: its `runObjectFieldsRepairTransaction` (assertProjectIdAllowedForPlugin + assertObjectScope on the
+        // project-sheet object) and the real `findObjectSheet`, whose sheet id must equal the registry row's.
+        test('S3A-31 (R-71 ⑦.4 PR-3) an aged project sheet missing two template columns on the real stack: the pull preview is 422 TARGET_SCHEMA_INCOMPLETE; dry-run reports both and writes nothing; a registry row naming another sheet is 409 SHEET_MISMATCH with nothing written; the add lands exactly the two, every pre-existing meta_fields row byte-identical, one audit row counts them; the preview is ready afterwards; a second add adds 0', async () => {
+          const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
+          const ownership = new Map<string, string>(templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => [field.id, field.ownership]))
+          const humanColumn: string = templatesLib.HUMAN_PRESERVED_FIELD_IDS.find((id: string) => ownership.get(id) === 'human_preserved')
+          const templateOrder: string[] = templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => field.id)
+          const dropped = templateOrder.filter((id) => id === 'componentSpec' || id === humanColumn)
+          expect(dropped).toHaveLength(2)
+          expect(ownership.get('componentSpec')).toBe('plm_system')
+          const st = await s3aStack('s31', { pilot: false })
+          const REPAIR_PATH = '/api/integration/stock-preparation/options/sync'
+          const before = process.env[SWITCH]
+          process.env[SWITCH] = 'true'
+          const repair = (body: Record<string, unknown>) => callRoute(st.routes, 'POST', REPAIR_PATH, { user: st.users.admin, body: { projectNo: st.projectNo, ...body }, query: {} })
+          // Every meta_fields row of the sheet, byte for byte (the row as PostgreSQL serialises it).
+          const fieldRows = async () => new Map<string, string>(
+            (await q('SELECT id, row_to_json(f)::text AS text FROM meta_fields f WHERE sheet_id = $1 ORDER BY id', [st.sheetId])).rows.map((row: any) => [String(row.id), String(row.text)]),
+          )
+          const auditRows = async () => (await q(
+            `SELECT detail FROM integration_stock_prep_audit WHERE tenant_id = $1 AND action = 'project_target_create' AND mode = 'contract_options_synced' ORDER BY created_at`,
+            [st.tenantId],
+          )).rows.map((row: any) => row.detail)
+          try {
+            // Age the sheet: the two columns leave meta_fields (their physical ids are the host's stable ids).
+            const physical = await st.multitable.provisioning.resolveExistingObjectFieldIds({ projectId: st.projectId, objectId: st.objectId, fieldIds: dropped })
+            expect(Object.keys(physical).sort()).toEqual([...dropped].sort())
+            const droppedPhysical = dropped.map((id) => physical[id])
+            const deleted = await q('DELETE FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])', [st.sheetId, droppedPhysical])
+            expect(deleted.rowCount).toBe(2)
+            const aged = await fieldRows()
+
+            // The pull is blocked by the missing columns.
+            const blocked = await st.dryRun()
+            expect(blocked.statusCode, JSON.stringify(blocked.body)).toBe(422)
+            expect(errorOf(blocked).code).toBe('TARGET_SCHEMA_INCOMPLETE')
+
+            // Dry-run: both reported, nothing written, no audit row.
+            const auditBefore = (await auditRows()).length
+            const dry = await repair({ dryRun: true })
+            expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+            expect(dry.body.data.columns.missingFieldIds).toEqual(dropped)
+            expect(dry.body.data.columns.wouldAddFieldIds).toEqual(dropped)
+            expect(dry.body.data.columns.refusedFieldIds).toEqual([])
+            expect(sameJson([...(await fieldRows())], [...aged]), 'a dry-run writes no meta_fields row').toBe(true)
+            expect((await auditRows()).length).toBe(auditBefore)
+
+            // The registry row names another sheet: the real findObjectSheet disagrees → 409, the transaction rolls back.
+            await q('UPDATE integration_stock_prep_project_target SET sheet_id = $3 WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo, `sheet_not_this_object_${TOKEN}`])
+            try {
+              const mismatch = await repair({ addMissingColumns: true })
+              expect(mismatch.statusCode, JSON.stringify(mismatch.body)).toBe(409)
+              expect(errorOf(mismatch).code).toBe('TEMPLATE_COLUMN_REPAIR_SHEET_MISMATCH')
+            } finally {
+              await q('UPDATE integration_stock_prep_project_target SET sheet_id = $3 WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo, st.sheetId])
+            }
+            expect(sameJson([...(await fieldRows())], [...aged]), 'the refused add wrote nothing').toBe(true)
+            expect((await auditRows()).length).toBe(auditBefore)
+
+            // The add: exactly the two, existing rows byte-identical, one audit row.
+            const added = await repair({ addMissingColumns: true })
+            expect(added.statusCode, JSON.stringify(added.body)).toBe(200)
+            expect(added.body.data.columns.addedFieldIds).toEqual(dropped)
+            expect(added.body.data.columns.added).toBe(2)
+            const after = await fieldRows()
+            expect([...after.keys()].filter((id) => !aged.has(id)).sort()).toEqual([...droppedPhysical].sort())
+            for (const [id, text] of aged) expect(after.get(id), `meta_fields ${id} byte-identical`).toBe(text)
+            const lockOf = (text: string | undefined) => JSON.parse(String(text)).property?.humanWriteLock
+            expect(lockOf(after.get(physical.componentSpec)), 'the added PLM column is locked in the same call').toBe('plm_system')
+            expect(lockOf(after.get(physical[humanColumn])), 'the added human column stays editable').toBeUndefined()
+            const audits = await auditRows()
+            expect(audits.length).toBe(auditBefore + 1)
+            expect(audits[audits.length - 1]).toMatchObject({ columnMode: 'add', columnAddedCount: 2, columnMissingBeforeCount: 2, columnRefusedCount: 0 })
+
+            // The pull is no longer blocked.
+            const ready = await st.dryRun()
+            expect(ready.statusCode, JSON.stringify(ready.body)).toBe(200)
+            expect(ready.body.data.status).toBe('ready')
+
+            // Idempotent: a second add adds 0 and moves no meta_fields row.
+            const settled = await fieldRows()
+            const again = await repair({ addMissingColumns: true })
+            expect(again.statusCode, JSON.stringify(again.body)).toBe(200)
+            expect(again.body.data.columns.added).toBe(0)
+            expect(again.body.data.columns.missingFieldIds).toEqual([])
+            expect(sameJson([...(await fieldRows())], [...settled])).toBe(true)
+          } finally {
+            if (before === undefined) delete process.env[SWITCH]
+            else process.env[SWITCH] = before
+            await q('DELETE FROM integration_stock_prep_audit WHERE tenant_id = $1', [st.tenantId]).catch(() => {})
+          }
         }, 180000)
         // ── S3B: batch-refresh step 4 PR-3b — the LARGE lane on the real stack ────────────────────────────────────
         // Nested in S3A for its stack (`s3aStack`, now with the four large non-write routes), its fixtures and its
