@@ -291,9 +291,14 @@ databaseSuite('YiDa initialization HTTP — empty slot, real JWT/live ACL, actua
     denied(await f.http('POST', '/approvals', approval(d1.operationId, row1, { targetRef: second })), 409, 'YIDA_SEND_APPROVAL_CONFLICT')
     expect((await f.http('POST', '/approvals', approval(d2.operationId, row2))).status).toBeGreaterThanOrEqual(400)
     denied(await f.http('POST', '/approvals', approval(d2.operationId, row2, { targetRef: randomUUID() })), 404, 'YIDA_SEND_APPROVAL_NOT_FOUND')
+    // D20 (design baseline v2.3 §3.3 / §7.2): the second target is a formal one, so its pasted (unbound) draft is refused at
+    // approval — no grant row — until the exact list INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS names it (the runtime parses
+    // the string per call). Slot 1, the material TEST copy, never needs the list.
+    denied(await f.http('POST', '/approvals', approval(d2.operationId, row2, { targetRef: second })), 409, 'YIDA_SEND_APPROVAL_CONFLICT')
     expect(await f.rows('integration_yida_send_approvals')).toEqual([])
     const preview = body(await f.http('POST', '/preview', { operationId: d2.operationId, rowKey: row2, targetRef: second }), 200)
     expect(preview.target).toMatchObject({ targetRef: second, formUuid: 'synthetic_http_form_two', reviewRef: 'synthetic-http-review-two' })
+    f.setUnboundTestTargetRefs(second)
     const g2 = body(await f.http('POST', '/approvals', approval(d2.operationId, row2, { targetRef: second })), 201)
     const g1 = body(await f.http('POST', '/approvals', approval(d1.operationId, row1)), 201)
     expect([g2.targetRef, g1.targetRef]).toEqual([second, first])
