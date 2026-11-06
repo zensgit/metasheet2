@@ -427,6 +427,27 @@ suite('security action privilege classification (real PostgreSQL)', () => {
     })
   })
 
+  describe('refuses a legacy permission value that is not an array', () => {
+    const nonArray: Array<[string, unknown]> = [
+      ['a JSON object', { 'users:write': true }],
+      ['a JSON string', 'admin:all'],
+      ['a JSON number', 7],
+      ['a JSON boolean', true],
+    ]
+    it.each(nonArray)('refuses with input_malformed when the stored value is %s and never assesses a class', async (_label, legacy) => {
+      await withRollback(async (client) => {
+        const user = await seedUser(client)
+        await client.query('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [user, JSON.stringify(legacy)])
+        const other = await seedSecondSubjectWithEverySource(client)
+        const stored = await client.query<{ kind: string }>('SELECT jsonb_typeof(permissions) AS kind FROM users WHERE id = $1', [user])
+        expect(stored.rows[0]?.kind).not.toBe('array')
+        await expectUnavailable(readPrivilegeInputs(executorOf(client), user), 'input_malformed')
+        await expectUnavailable(assessSecurityActionPrivilege(executorOf(client), user), 'input_malformed')
+        expect((await assessSecurityActionPrivilege(executorOf(client), other)).reasons).toEqual([...HIGH_PRIVILEGE_REASONS])
+      })
+    })
+  })
+
   it('refuses with subject_missing for a user that does not exist', async () => {
     await withRollback(async (client) => {
       await expectUnavailable(readPrivilegeInputs(executorOf(client), 'p04a-' + randomUUID()), 'subject_missing')

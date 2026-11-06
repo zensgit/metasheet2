@@ -28,22 +28,29 @@ No migration, table, route, environment flag, OpenAPI change or consumer is part
    failing statement, a missing row, more than one row, or a row of unexpected shape raises
    `PrivilegeInputsUnavailableError` (status 503, code `SECURITY_ACTION_UNAVAILABLE`, a fixed message
    and no cause). The read never returns `standard` in any of these cases.
-5. **Witness.** `sha256("metasheet:security-action:privilege:v1|" + canonical(inputs))`, where
+5. **Legacy array.** The legacy permission column is a grant input only when its stored value is a
+   JSON array. Any other value — a JSON object, string, number or boolean, and a null — is malformed
+   and refuses with `input_malformed`; it is never read as an empty grant set. Both persisted shapes
+   of the column are NOT NULL arrays (`jsonb` with an array default, or a text array that `to_jsonb`
+   renders as a JSON array), so a null is not an expected shape either. The rule is enforced at the
+   row read and again when the codes are collected, so inputs assembled outside the read path cannot
+   bypass it. An empty array contributes no code; the elements of an array are normalized as before.
+6. **Witness.** `sha256("metasheet:security-action:privilege:v1|" + canonical(inputs))`, where
    `canonical` sorts object keys by code unit; the collections read from the grant tables arrive
    sorted by code unit, and the legacy value is encoded as stored. Any change to any grant input
    changes the witness, including a code moving between two held roles, an equal-count replacement
    of a delegated scope row, an admission flip and a reordering of the legacy array.
-6. **Policy.** The matrix below. An unknown, missing or mismatched assurance level is never sufficient;
+7. **Policy.** The matrix below. An unknown, missing or mismatched assurance level is never sufficient;
    an unknown purpose is unavailable; an unknown privilege class is treated as `high`. The function is
    total and never throws.
-7. **Revision.** `SECURITY_ACTION_POLICY_REVISION` is pinned together with a fingerprint of the
+8. **Revision.** `SECURITY_ACTION_POLICY_REVISION` is pinned together with a fingerprint of the
    matrix, the outcome of a fixed set of classification fixtures and the witness composition. A change
    observable on any of them fails the pin until the fingerprint is re-pinned; whether the revision
    must be incremented is decided in review, and a predicate change outside the pinned fixtures is
    caught only by review.
-8. **Unavailable purposes.** Every purpose is unavailable: each prerequisite is a frozen `false`,
+9. **Unavailable purposes.** Every purpose is unavailable: each prerequisite is a frozen `false`,
    availability reads no environment variable, and the production entry point takes one argument.
-9. **Inert.** Nothing in `src` imports either module except the classifier importing the policy
+10. **Inert.** Nothing in `src` imports either module except the classifier importing the policy
    types.
 
 Classification does not cover account state; callers apply the account gate separately.
@@ -92,14 +99,16 @@ revision none is delivered, so no purpose is available.
 
 - `tests/unit/security-action-privilege.test.ts` and `tests/unit/external-login-assurance.test.ts`
   run in the default unit job: statement shape and subject binding, probes, every refusal reason,
-  row-shape single faults, one fixture per reason, superset anchors against the approval
+  row-shape single faults (including every non-array legacy value), the legacy array rule on
+  inputs assembled outside the read path, one fixture per reason, superset anchors against the approval
   administrator predicate, the web administrator literals and the role editor shapes, source
   alignment with the authorization aggregator, witness composition and ordering, the policy matrix,
   the revision pin, the registry and its prerequisites, and the CI wiring.
 - `tests/integration/security-action-privilege.db.test.ts` runs against real PostgreSQL in the
   approval real-database job: schema match, one fixture per reason with a second subject holding
   every source, the superset relation to the authorization aggregator, classification from rows
-  rather than the permission cache, refusal when any source table or column is unavailable,
+  rather than the permission cache, refusal of every non-array legacy value stored in the column,
+  refusal when any source table or column is unavailable,
   transaction and isolation requirements, and witness changes per input. It is excluded from the
   no-database runner and listed as a whole file in the workflow; both points are asserted by the unit
   test and by `scripts/ops/plugin-tests-parallel-contract.test.mjs`.

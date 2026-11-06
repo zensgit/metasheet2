@@ -214,6 +214,11 @@ describe('privilege inputs read', () => {
     ['department scope with a non-string', { department_scopes: [['attendance', 1]] }],
     ['department scope with one element', { department_scopes: [['attendance']] }],
     ['member group scope with a non-string', { member_group_scopes: [[null, 'g']] }],
+    ['legacy value is a JSON object', { legacy_permissions: { 'users:write': true } }],
+    ['legacy value is a JSON string', { legacy_permissions: 'admin:all' }],
+    ['legacy value is a JSON number', { legacy_permissions: 7 }],
+    ['legacy value is a JSON boolean', { legacy_permissions: true }],
+    ['legacy value is null', { legacy_permissions: null }],
     ['legacy value with undefined', { legacy_permissions: [undefined] }],
     ['legacy value with a non-finite number', { legacy_permissions: [Infinity] }],
     ['legacy value with a bigint', { legacy_permissions: [1n] }],
@@ -235,9 +240,34 @@ describe('privilege inputs read', () => {
     const elements = [7, { a: 1 }, null, true, ['x', 'y'], ' spaced ']
     expect(collectPrivilegeCodes(await readInputs({ legacy_permissions: elements })))
       .toEqual([...new Set(elements.map((e) => normalizeNamespace(e)).filter(Boolean))].sort())
-    for (const legacy of [{ 0: 'x' }, 'users:write', null, 7, true]) {
-      expect(collectPrivilegeCodes(await readInputs({ legacy_permissions: legacy }))).toEqual([])
-    }
+    expect(collectPrivilegeCodes(await readInputs({ legacy_permissions: [] }))).toEqual([])
+    expect(await classifyRow({ legacy_permissions: [] })).toEqual({ privilegeClass: 'standard', reasons: [] })
+    expect(await classifyRow({ legacy_permissions: ['admin:all'] })).toEqual({ privilegeClass: 'high', reasons: ['admin_level_code'] })
+  })
+
+  const nonArrayLegacyValues: Array<[string, unknown]> = [
+    ['a JSON object', { 'users:write': true }],
+    ['a JSON string', 'admin:all'],
+    ['a JSON number', 7],
+    ['a JSON boolean', true],
+    ['null', null],
+  ]
+
+  it.each(nonArrayLegacyValues)('never assesses a class when the legacy value is %s', async (_label, legacy) => {
+    const { executor, calls } = privilegeHarness(privilegeFixture({ rows: [privilegeRow({ legacy_permissions: legacy })] }))
+    await expectUnavailable(assessSecurityActionPrivilege(executor, SUBJECT), 'input_malformed')
+    expect(calls.filter(({ sql }) => sql.includes(DATA_STATEMENT_MARK))).toHaveLength(1)
+    await expectUnavailable(readInputs({ legacy_permissions: legacy }), 'input_malformed')
+  })
+
+  it.each(nonArrayLegacyValues)('refuses to collect codes from inputs assembled outside the read path whose legacy value is %s', async (_label, legacy) => {
+    const read = await readInputs({ direct_codes: ['tasks:write'] })
+    const forged = { ...read, legacyPermissions: legacy } as unknown as PrivilegeInputs
+    expect(() => collectPrivilegeCodes(forged)).toThrow(PrivilegeInputsUnavailableError)
+    expect(() => collectPrivilegeCodes(forged)).toThrow(expect.objectContaining({ reason: 'input_malformed' }))
+    expect(() => classifyPrivilege(forged)).toThrow(PrivilegeInputsUnavailableError)
+    expect(() => classifyPrivilege(forged)).toThrow(expect.objectContaining({ reason: 'input_malformed' }))
+    expect(collectPrivilegeCodes(read)).toEqual(['tasks:write'])
   })
 
   it.each([
@@ -488,7 +518,7 @@ describe('privilege witness', () => {
   it('refuses inputs whose legacy value cannot be canonically encoded', () => {
     const forged = { ...({} as PrivilegeInputs), isAdmin: false, role: 'user', roleIds: [], directCodes: [], rolePermissions: [], admissions: [], delegatedDepartmentScopes: [], delegatedMemberGroupScopes: [] }
     for (const legacy of [[Infinity], [undefined], { a: () => undefined }, [Symbol('x')], Array.from({ length: 70 }).reduce<unknown>((inner) => [inner], 'x')]) {
-      expect(() => computePrivilegeWitness({ ...forged, legacyPermissions: legacy } as PrivilegeInputs))
+      expect(() => computePrivilegeWitness({ ...forged, legacyPermissions: legacy } as unknown as PrivilegeInputs))
         .toThrow(expect.objectContaining({ reason: 'input_malformed' }))
     }
   })

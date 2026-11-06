@@ -8,6 +8,13 @@
  * never consulted. When a source cannot be read, or the row does not have the expected shape, the
  * read raises PrivilegeInputsUnavailableError; it never falls back to STANDARD.
  *
+ * Legacy permission column: the stored value is a grant input only when it is a JSON array. Any other
+ * value, including a null, is malformed and refuses with `input_malformed`; it is never read as an
+ * empty grant set. Both persisted shapes of the column are NOT NULL arrays (`jsonb` with an array
+ * default, or a text array that `to_jsonb` renders as a JSON array), so a null is not an expected
+ * shape either. The rule is enforced twice: on the row read, and again when the codes are collected,
+ * so inputs assembled outside the read path cannot bypass it.
+ *
  * Each predicate is at least as wide as the authorization reader it mirrors: case and surrounding
  * whitespace are ignored, and codes are taken before namespace admission. A wider predicate can only
  * refuse more.
@@ -69,8 +76,8 @@ export type PrivilegeInputs = Readonly<{
   directCodes: readonly string[]
   /** `[roleId, permissionCode]` pairs, ascending by canonical encoding. */
   rolePermissions: readonly (readonly [string, string])[]
-  /** The stored legacy column value, as stored. */
-  legacyPermissions: unknown
+  /** The stored legacy column value; always an array, its elements as stored. */
+  legacyPermissions: readonly unknown[]
   /** `[namespace, enabled]` pairs, ascending by canonical encoding. */
   admissions: readonly (readonly [string, boolean])[]
   /** `[namespace, departmentId]` pairs, ascending by canonical encoding. */
@@ -210,6 +217,7 @@ function parsePrivilegeRow(row: Record<string, unknown>, userId: string): Privil
   if (!isPairArray(row.admissions, isString, isBoolean)) throw new PrivilegeInputsUnavailableError('input_malformed')
   if (!isPairArray(row.department_scopes, isString, isString)) throw new PrivilegeInputsUnavailableError('input_malformed')
   if (!isPairArray(row.member_group_scopes, isString, isString)) throw new PrivilegeInputsUnavailableError('input_malformed')
+  if (!Array.isArray(row.legacy_permissions)) throw new PrivilegeInputsUnavailableError('input_malformed')
   try {
     canonicalJson(row.legacy_permissions)
   } catch {
@@ -275,9 +283,10 @@ function normalizeCode(value: unknown): string {
 }
 
 function collectCodes(inputs: PrivilegeInputs): readonly string[] {
-  const legacy = Array.isArray(inputs.legacyPermissions) ? inputs.legacyPermissions : []
+  // A legacy value that is not an array is malformed, never an empty grant set.
+  if (!Array.isArray(inputs.legacyPermissions)) throw new PrivilegeInputsUnavailableError('input_malformed')
   const codes = new Set<string>()
-  for (const value of [...inputs.directCodes, ...inputs.rolePermissions.map((pair) => pair[1]), ...legacy]) {
+  for (const value of [...inputs.directCodes, ...inputs.rolePermissions.map((pair) => pair[1]), ...inputs.legacyPermissions]) {
     const code = normalizeCode(value)
     if (code) codes.add(code)
   }
@@ -292,8 +301,8 @@ function asInputMalformed(error: unknown): never {
 /**
  * The permission codes of a user before namespace admission: direct codes, the code of every held
  * (role, code) pair and every element of the legacy array, each normalized, emptied, de-duplicated and
- * sorted by code unit. A legacy value that is not an array contributes no code. Any failure while
- * normalizing an element raises `PrivilegeInputsUnavailableError('input_malformed')`.
+ * sorted by code unit. A legacy value that is not an array (including a null) and any failure while
+ * normalizing an element raise `PrivilegeInputsUnavailableError('input_malformed')`.
  */
 export function collectPrivilegeCodes(inputs: PrivilegeInputs): readonly string[] {
   try {
