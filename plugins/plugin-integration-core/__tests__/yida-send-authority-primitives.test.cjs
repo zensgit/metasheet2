@@ -122,7 +122,7 @@ for (const mode of ['original', 'equal_integer', 'equal_decimal_exact']) {
     const f = await fixture(mode), index = mode === 'original' ? 0 : 2
     const selected = await f.port.resolveSelectionInTransaction(f.trx, f.selection(f.draft, index))
     assert.deepEqual(Object.keys(f.port).sort(), ['executionPayloadDigest', 'loadExecutionMaterialInTransaction',
-      'prepareDraftInTransaction', 'prepareInTransaction', 'previewInTransaction', 'resolveSelectionInTransaction'])
+      'prepareDraftInTransaction', 'prepareInTransaction', 'previewInTransaction', 'resolveSelectionInTransaction', 'sendBudget'])
     assert.equal(Object.isFrozen(selected) && Object.isFrozen(selected.selectedRow) && Object.isFrozen(selected.plan.rows), true)
     assert.deepEqual(Object.keys(selected).sort(), ['tenantId', 'workspaceId', 'ownerId', 'operationId', 'rowKey', 'targetRef',
       'targetRevision', 'planRevision', 'credentialRef', 'credentialGeneration', 'businessKeyDigest', 'rowPayloadDigest', 'planDigest',
@@ -163,6 +163,76 @@ test('execution digest is the original runner formula, binds grant and requires 
   assert.throws(() => f.fresh().executionPayloadDigest(selected, authorization), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
   assert.throws(() => f.port.executionPayloadDigest(selected, { ...authorization, actorId: 'synthetic-other' }), { code: 'YIDA_SEND_AUTHORITY_CONFLICT' })
   assert.equal(f.state[LEDGER].length, 0)
+})
+
+test('gate 4 send budget: the selected row counts — a joint config+row snapshot overflow is refused although config alone and the body are within', async () => {
+  const f = await fixture(), [, , { createYidaProtocolExample }] = await modules
+  const budget = require('../lib/yida-send-budget.cjs')
+  const LIMIT = budget.YIDA_SEND_SNAPSHOT_MAX_BYTES
+  const worst = { systemToken: '\u0001'.repeat(4096), userId: '\u0001'.repeat(128) }
+  const bytes = text => Buffer.byteLength(text, 'utf8')
+  // Same locator and key definition as the registered target; 11 extra text fields and 12 selects of
+  // 30 long options each. The config alone is far within the snapshot budget, and so is the body.
+  const example = createYidaProtocolExample(), base = example.config
+  const notes = Array.from({ length: 11 }, (_, i) => 'note' + i), picks = Array.from({ length: 12 }, (_, i) => 'pick' + i)
+  const options = Array.from({ length: 30 }, (_, k) => (String(k) + '选项').padEnd(128, '项'))
+  const config = { ...base,
+    fieldCatalog: [...base.fieldCatalog, ...notes.map(id => ({ id, control: 'text', required: false })),
+      ...picks.map(id => ({ id, control: 'select', required: false, options }))],
+    fieldMap: [...base.fieldMap, ...[...notes, ...picks].map(id => ({ source: 'src_' + id, target: id, type: 'string', required: false }))] }
+  const row = { ...example.rows[0], ...Object.fromEntries(picks.map(id => ['src_' + id, null])) }
+  for (const id of notes) {
+    row['src_' + id] = ''
+    const room = Math.floor((130000 - bytes(JSON.stringify([row]))) / 3)
+    row['src_' + id] = '中'.repeat(Math.max(0, Math.min(4096, room)))
+  }
+  const custom = await f.addDraft({ config, rowsText: JSON.stringify([row]), allocation: { mode: 'original' } })
+  const selected = await f.port.resolveSelectionInTransaction(f.trx, f.selection(custom, 0))
+  const authorization = grant(), planned = selected.plan.rows[0]
+  const data = { ...planned.protocolPreview.data, formDataJson: stableCanonicalStringify(planned.payload) }
+  // The exact snapshot shape the primitive assesses (and the host execution handle resolves).
+  const snapshot = selectedRow => ({ tenantId: selected.tenantId, workspaceId: selected.workspaceId, ownerId: selected.ownerId,
+    actorId: authorization.actorId, operationId: selected.operationId, rowKey: selected.rowKey, grantRef: authorization.grantRef,
+    expiresAt: authorization.expiresAt, targetRef: selected.targetRef, targetRevision: selected.targetRevision,
+    planRevision: selected.planRevision, credentialRef: selected.credentialRef, credentialGeneration: selected.credentialGeneration,
+    config: selected.config, row: selectedRow, ...worst })
+  assert.ok(bytes(JSON.stringify(selected.selectedRow)) > 120000)
+  assert.ok(bytes(stableCanonicalStringify(snapshot(selected.selectedRow))) > LIMIT)
+  assert.ok(bytes(stableCanonicalStringify(snapshot({}))) < LIMIT - 60000)
+  assert.ok(bytes(budget.encodeYidaFormRequestBody(data, worst.systemToken, worst.userId)) < budget.YIDA_SEND_REQUEST_MAX_BYTES - 60000)
+  assert.throws(() => budget.boundYidaExecutionSnapshot(snapshot(selected.selectedRow)), { code: 'YIDA_SEND_BUDGET_INVALID' })
+  const verdict = f.port.sendBudget(selected, authorization)
+  assert.deepEqual([Object.isFrozen(verdict), Object.keys(verdict), verdict.withinBudget], [true, ['withinBudget'], false])
+  // Control: the registered example row under the same target and config shape is within.
+  const small = await f.port.resolveSelectionInTransaction(f.trx, f.selection(f.draft, 0))
+  assert.equal(f.port.sendBudget(small, authorization).withinBudget, true)
+  assert.equal(f.state[LEDGER].length, 0)
+})
+
+test('gate 4 send budget: one frozen boolean for this port actual selection; owner-bound; no SQL or crypto', async () => {
+  const f = await fixture('equal_integer'), selected = await f.port.resolveSelectionInTransaction(f.trx, f.selection(f.draft, 2))
+  const authorization = grant(), calls = f.calls.length
+  let crypto = 0
+  const { encrypt, decrypt } = f.security
+  f.security.encrypt = async (...args) => { crypto++; return encrypt(...args) }
+  f.security.decrypt = async (...args) => { crypto++; return decrypt(...args) }
+  const verdict = f.port.sendBudget(selected, authorization)
+  assert.deepEqual(Object.keys(verdict), ['withinBudget'])
+  assert.equal(verdict.withinBudget, true)
+  assert.equal(Object.isFrozen(verdict), true)
+  assert.equal(typeof verdict.then, 'undefined')
+  assert.throws(() => f.port.sendBudget(structuredClone(selected), authorization), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.throws(() => f.fresh().sendBudget(selected, authorization), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.throws(() => f.port.sendBudget(selected, { ...authorization, actorId: 'synthetic-other' }), { code: 'YIDA_SEND_AUTHORITY_CONFLICT' })
+  for (const bad of [{ ...authorization, expiresAt: 0 }, { ...authorization, grantRef: '' }, { ...authorization, extra: true },
+    { grantRef: authorization.grantRef, actorId: authorization.actorId }, null])
+    assert.throws(() => f.port.sendBudget(selected, bad), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.equal(f.calls.length, calls)
+  assert.equal(crypto, 0)
+  assert.equal(f.state[LEDGER].length, 0)
+  // Positive control: the counter does observe this port's real decryptions.
+  await f.port.resolveSelectionInTransaction(f.trx, f.selection(f.draft, 2))
+  assert.equal(crypto > 0, true)
 })
 
 test('private 090 current asserter verifies the full authenticated four-field envelope and returns metadata only', async () => {

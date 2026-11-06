@@ -375,3 +375,113 @@ describe('MetaRichLongTextEditor — B5 aria labels come from the typed label mo
     })
   }
 })
+
+// Input-method composition (utils/ime-keys.ts): during a composition the input method owns Enter
+// (commit), Escape (cancel), Tab and the arrows (its candidates). The editor's own keys act on none of
+// them, and their `preventDefault` runs only after that check.
+describe('MetaRichLongTextEditor — keys during an input-method composition', () => {
+  let container: HTMLDivElement | null = null
+  const IME_INITS: KeyboardEventInit[] = [{ isComposing: true }, { keyCode: 229 }]
+
+  afterEach(() => {
+    container?.remove()
+    container = null
+  })
+
+  function mount(props: Record<string, unknown>) {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp({ setup: () => () => h(MetaRichLongTextEditor, props) })
+    app.mount(container)
+    return { app }
+  }
+
+  function key(el: HTMLElement, init: KeyboardEventInit): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+    el.dispatchEvent(event)
+    return event
+  }
+
+  it('with the mention popover open, an Enter or Tab during a composition picks no suggestion, an arrow moves no highlight and an Escape keeps the popover; plain keys still do', async () => {
+    const onCancel = vi.fn()
+    mount({ modelValue: '', mentionSuggestions: SUGGESTIONS, onCancel })
+    await nextTick()
+    const editable = container!.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.focus()
+    typeInto(editable, '@j')
+    await nextTick()
+    const popover = () => container!.querySelector('[data-test="rich-longtext-mention-popover"]')
+    const active = () => container!.querySelector('[data-test="rich-longtext-mention-option"][aria-selected="true"]')?.textContent ?? null
+    expect(popover()).not.toBeNull()
+    const firstActive = active()
+    expect(firstActive).not.toBeNull()
+    for (const init of IME_INITS) {
+      for (const k of ['Enter', 'Tab', 'ArrowDown', 'ArrowUp', 'Escape']) {
+        expect(key(editable, { key: k, ...init }).defaultPrevented).toBe(false)
+        await nextTick()
+        expect(popover()).not.toBeNull()
+        expect(active()).toBe(firstActive)
+        expect(editable.querySelector('span[data-mention-id]')).toBeNull()
+      }
+    }
+    expect(onCancel).not.toHaveBeenCalled()
+    // plain keys: ArrowDown and ArrowUp move the highlight, Enter picks it
+    expect(key(editable, { key: 'ArrowDown' }).defaultPrevented).toBe(true)
+    await nextTick()
+    expect(active()).not.toBe(firstActive)
+    expect(key(editable, { key: 'ArrowUp' }).defaultPrevented).toBe(true)
+    await nextTick()
+    expect(active()).toBe(firstActive)
+    expect(key(editable, { key: 'Enter' }).defaultPrevented).toBe(true)
+    await nextTick()
+    expect(popover()).toBeNull()
+    expect(editable.querySelector('span[data-mention-id]')).not.toBeNull()
+  })
+
+  it('a plain Tab picks the active suggestion, as Enter does', async () => {
+    mount({ modelValue: '', mentionSuggestions: SUGGESTIONS })
+    await nextTick()
+    const editable = container!.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.focus()
+    typeInto(editable, '@j')
+    await nextTick()
+    expect(container!.querySelector('[data-test="rich-longtext-mention-popover"]')).not.toBeNull()
+    expect(key(editable, { key: 'Tab' }).defaultPrevented).toBe(true)
+    await nextTick()
+    expect(container!.querySelector('[data-test="rich-longtext-mention-popover"]')).toBeNull()
+    expect(editable.querySelector('span[data-mention-id]')).not.toBeNull()
+  })
+
+  it('with no popover, an Escape during a composition cancels nothing and a Cmd/Ctrl+Enter during one confirms nothing; plain ones still cancel and confirm', async () => {
+    const onCancel = vi.fn()
+    const onConfirm = vi.fn()
+    const onChange = vi.fn()
+    mount({ modelValue: '', onCancel, onConfirm, onChange })
+    await nextTick()
+    const editable = container!.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.focus()
+    typeInto(editable, 'hello')
+    await nextTick()
+    for (const init of IME_INITS) {
+      expect(key(editable, { key: 'Escape', ...init }).defaultPrevented).toBe(false)
+      expect(key(editable, { key: 'Enter', metaKey: true, ...init }).defaultPrevented).toBe(false)
+      expect(key(editable, { key: 'Enter', ctrlKey: true, ...init }).defaultPrevented).toBe(false)
+      await nextTick()
+    }
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(onConfirm).not.toHaveBeenCalled()
+    expect(onChange).not.toHaveBeenCalled()
+    expect(key(editable, { key: 'Enter', metaKey: true }).defaultPrevented).toBe(true)
+    await nextTick()
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledTimes(1)
+    // Ctrl+Enter, the commit chord on Windows and Linux, confirms the same way
+    expect(key(editable, { key: 'Enter', ctrlKey: true }).defaultPrevented).toBe(true)
+    await nextTick()
+    expect(onConfirm).toHaveBeenCalledTimes(2)
+    expect(onChange).toHaveBeenCalledTimes(2)
+    expect(key(editable, { key: 'Escape' }).defaultPrevented).toBe(true)
+    await nextTick()
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+})
