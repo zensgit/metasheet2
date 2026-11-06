@@ -56,7 +56,7 @@
   "externalModules": {
     "gipProfileCertificationContracts": "253000b5f5676340f2d1876cf2810e5ba90561207840ba3ba12a89717771293d",
     "gipCanonicalJson": "99c2f954e35ab1c943c59872def8722b00dccb11401783d77839ae0ed98298b1",
-    "pluginDb": "084a29566b9cba5a91aa076f1d4559c2a4779b73767bf5f6d416439d1628d549",
+    "pluginDb": "b3a5206e2c7f2a49b406cd8d47274e76e1244170b24eba51ee751d7a03a55eb1",
     "stockPreparationDecoder": "8868b8c51c7f96d81eb224c81d8d270b1dc79b1f7bca702b4e8b7849259b0c6a",
     "stockPreparationReadonlyIntake": "d518a5310e5b8da97f0e85db717ab2816210793d9e2e658690c0635fa19e3704",
     "stockPreparationPlmSourcePersistBridge": "d5051a1e2baee502fa2ee809d62490e108c26ed8d1da3812444798cbda36a8c2",
