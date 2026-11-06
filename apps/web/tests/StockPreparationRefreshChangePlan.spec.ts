@@ -951,10 +951,26 @@ describe('「变更计划」 / 「变更复核」 — StockPreparationRefreshCha
     expect(control(root, 'stock-prep-refresh-go-preview').textContent).toContain('去项目备料页')
   })
 
-  it('CP-VALUES: cells, keys and notes show on the page, never in storage, an emit, the error banner, the clipboard or any console call; a project switch clears them first', async () => {
+  it('CP-VALUES: cells, keys and notes show on the page, never in storage, an emit, the error banner, the clipboard or any console call — after a refusal, a 201 confirm and a 200 review; a project switch clears them first', async () => {
     const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((name) => vi.spyOn(console, name).mockImplementation(() => {}))
+    const NOTE = 'SYN-NOTE-SENTINEL'
+    // Every place a value must never reach: the clipboard, every emit, every console call, both storages.
+    const sweep = (leg: string): void => {
+      const everywhere = [
+        JSON.stringify(h.clipboard.mock.calls),
+        JSON.stringify(emitted),
+        JSON.stringify(spies.map((spy) => spy.mock.calls)),
+      ]
+      for (const storage of [window.localStorage, window.sessionStorage]) {
+        for (let index = 0; index < storage.length; index += 1) everywhere.push(`${storage.key(index)}=${storage.getItem(storage.key(index) ?? '')}`)
+      }
+      for (const text of everywhere) {
+        expect(text, leg).not.toContain(SENTINEL)
+        expect(text, leg).not.toContain(NOTE)
+        expect(text, leg).not.toContain('SYN-KEY-1')
+      }
+    }
     try {
-      const NOTE = 'SYN-NOTE-SENTINEL'
       const state = reviewState({ holds: [contentHold()], status: 'pending_confirmation', proposal: serverState().proposal, proposalRecords: serverState().proposalRecords })
       const viewProps = reactive({ projectNo: PROJECT })
       h.apiFetch.mockImplementation(router(state))
@@ -974,24 +990,31 @@ describe('「变更计划」 / 「变更复核」 — StockPreparationRefreshCha
       expect(banner.textContent).not.toContain(SENTINEL)
       await click(control(root, 'stock-prep-refresh-change-plan-error-copy'))
       expect(h.clipboard).toHaveBeenCalled()
-      const everywhere = [
-        JSON.stringify(h.clipboard.mock.calls),
-        JSON.stringify(emitted),
-        JSON.stringify(spies.map((spy) => spy.mock.calls)),
-      ]
-      for (const storage of [window.localStorage, window.sessionStorage]) {
-        for (let index = 0; index < storage.length; index += 1) everywhere.push(`${storage.key(index)}=${storage.getItem(storage.key(index) ?? '')}`)
-      }
-      for (const text of everywhere) {
-        expect(text).not.toContain(SENTINEL)
-        expect(text).not.toContain(NOTE)
-        expect(text).not.toContain('SYN-KEY-1')
-      }
+      sweep('after the 409 refusal')
+      // Review fix: the SUCCESS branches leave values behind too if anything persists them — a 201 confirm on the same
+      // mounted page (the refusal kept the acknowledgement and the typed number), then the same sweep.
+      state.postAnswer = null
+      expect(control(root, 'stock-prep-refresh-change-plan-confirm').disabled, 'the confirm is offered again').toBe(false)
+      await click(control(root, 'stock-prep-refresh-change-plan-confirm'))
+      expect(posts(state, '/change-plans/confirm').length, 'a second confirm was sent').toBe(2)
+      expect(q(root, 'stock-prep-refresh-preview-again')?.getAttribute('data-preview-again'), 'the 201 landed').toBe('plan_confirmed')
+      sweep('after the 201 confirm')
       // A project switch drops every value of the previous one before the next is read.
       viewProps.projectNo = 'SYN-PROJ-0002'
       await nextTick()
       expect(root.textContent).not.toContain(SENTINEL)
       expect(root.textContent).not.toContain(NOTE)
+      // Review fix, second leg: a 200 review WITH notes — the notes are the only free text a puller writes, and the
+      // review body is their one legitimate exit. Same sweep after the 200.
+      teardown(); setup()
+      const review = reviewState()
+      const reviewRoot = await mountView(review)
+      expect(reviewRoot.textContent).toContain(SENTINEL)
+      await readyReview(reviewRoot, { conclusion: 'handled_with_notes', notes: NOTE })
+      await click(control(reviewRoot, 'stock-prep-refresh-change-review-complete'))
+      expect(posts(review, '/change-reviews/complete').map((post) => post.body?.notes), 'the 200 review carried the notes').toEqual([NOTE])
+      expect(q(reviewRoot, 'stock-prep-refresh-preview-again')?.getAttribute('data-preview-again'), 'the 200 landed').toBe('reviewed')
+      sweep('after the 200 review')
     } finally {
       for (const spy of spies) spy.mockRestore()
     }

@@ -1947,8 +1947,8 @@ export const STOCK_PREP_REFRESH_BANNER_PLAIN: Record<string, StockPrepPlainEntry
     zh: '本项目有变更待复核,正式导出已暂停。',
     en: 'This project has a change awaiting review; the formal export is paused.',
     // PR-9 (R-77 ⑥ / ⑨): where the review happens, and that 复核 does not replace 核对.
-    zhNext: '拉取人员在「拉取待确认」里看过当前差异后完成复核;复核后还要核对一次(再试算)才能正式导出。',
-    enNext: 'The puller reads the current difference on “Pull holds” and completes the review; after it, one check (one more preview) still opens the formal export.',
+    zhNext: '拉取人员在「拉取待确认」里看过当前差异后完成复核;复核后如果项目显示「已执行待核对」,还要核对一次(再试算)才能正式导出。',
+    enNext: 'The puller reads the current difference on “Pull holds” and completes the review; if the project then shows “written, awaiting check”, one more check (a preview) opens the formal export.',
   }),
   failed_pending_recovery: Object.freeze({
     zh: '本项目上次写入没有正常结束,执行失败待恢复,正式导出已暂停。',
@@ -2010,8 +2010,8 @@ export const STOCK_PREP_REFRESH_RENDERING_PLAIN: Record<string, StockPrepPlainEn
   review_pending: Object.freeze({
     zh: '没有待确认项;有一次已写入的内容变更等您复核(见下)。',
     en: 'No hold is open; a written content change awaits your review (below).',
-    zhNext: '复核前正式导出暂停;复核后还要核对一次(再试算)。',
-    enNext: 'The formal export stays paused until the review; after it, one more check (a preview) is still needed.',
+    zhNext: '复核前正式导出暂停;复核后如果项目显示「已执行待核对」,再核对一次(再试算)。',
+    enNext: 'The formal export stays paused until the review; if the project then shows “written, awaiting check”, check once more (a preview).',
   }),
   none_pending: Object.freeze({
     zh: '无待处理:没有等拉取人员确认的项。',
@@ -3833,8 +3833,8 @@ export const STOCK_PREP_SYNC_VERDICT_PLAIN: Record<string, StockPrepPlainEntry> 
   review_pending: Object.freeze({
     zh: '这次没有写入 —— 本项目有一次已写入的内容变更在等拉取人员复核。',
     en: 'Nothing was written this time — a written content change of this project awaits the puller’s review.',
-    zhNext: '不是出错:拉取人员在「拉取待确认」里完成变更复核;复核不代替核对,复核后还要核对一次(再试算)才能正式导出。',
-    enNext: 'This is not an error: the puller completes the change review on “Pull holds”; the review does not replace the check — one more check (a preview) still opens the formal export.',
+    zhNext: '不是出错:拉取人员在「拉取待确认」里完成变更复核;复核不代替核对——复核后以项目备料页为准,显示「已执行待核对」时再核对一次(再试算)才能正式导出。',
+    enNext: 'This is not an error: the puller completes the change review on “Pull holds”; the review does not replace the check — after it the project page decides: when it shows “written, awaiting check”, one more check (a preview) opens the formal export.',
   }),
   // PR-7 (F-19): awaiting recovery — not the source, not a retry.
   awaiting_recovery: Object.freeze({

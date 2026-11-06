@@ -49,6 +49,7 @@ import {
   STOCK_PREP_REFRESH_CONTENT_REASON_PLAIN,
   STOCK_PREP_REFRESH_FIELD_PLAIN,
   STOCK_PREP_REFRESH_OBSERVATION_ROLE_PLAIN,
+  STOCK_PREP_REFRESH_RENDERING_PLAIN,
   STOCK_PREP_REFRESH_REVIEW_CONCLUSION_PLAIN,
   STOCK_PREP_ERROR_GENERIC,
   STOCK_PREP_ERROR_PLAIN,
@@ -249,6 +250,14 @@ describe('RS — the board stanza on the web (refreshState.ts)', () => {
     expect(stockPrepRefreshBanner(review)?.link).toBe(false)
     expect(stockPrepRefreshBanner(review)?.zhNext).toContain('拉取待确认')
     expect(stockPrepRefreshBanner(review)?.zhNext).toContain('核对')
+    // Review fix (R-77 ⑨): after the review a 核对 is only MAYBE still needed — when the board shows 「已执行待核对」.
+    // The banner's second line and the 「拉取待确认」 review_pending rendering line both say so conditionally.
+    for (const [name, entry] of [['banner', stockPrepRefreshBanner(review)], ['rendering', STOCK_PREP_REFRESH_RENDERING_PLAIN.review_pending]] as const) {
+      expect(entry?.zhNext, name).toContain('已执行待核对')
+      expect(entry?.zhNext, name).not.toMatch(/复核后还要核对一次|再点一次「核对」/)
+      expect(entry?.enNext, name).toContain('awaiting check')
+      expect(entry?.enNext, name).not.toMatch(/still opens|presses “Check” again|is still needed/)
+    }
     // Every other unfinished status keeps no link (only pending_confirmation and change_pending_review have one).
     for (const status of STOCK_PREP_REFRESH_STATUS_TOKENS) {
       const banner = stockPrepRefreshBanner(status === 'unreadable' ? parseStockPrepRefreshStanza({ readable: false, status }) : parseStockPrepRefreshStanza({ readable: true, status, governed: 'pilot', settled: false, counts: { pendingConfirm: 1, pendingReviews: 1 } }), { canOpenQueue: true })
@@ -701,6 +710,11 @@ describe('PS — projectSync learns the batch refresh (W4)', () => {
     // Not the source-data failure main read it as.
     expect(classifyPlanStep(1, REVIEW_PENDING_PLAN).reason).toBe('PLAN_REVIEW_PENDING')
     expect(stockPrepSyncVerdictPlain('review_pending')?.zhNext).toContain('复核不代替核对')
+    // Review fix (R-77 ⑨): after the review a 核对 is only MAYBE still needed — when the board shows 「已执行待核对」.
+    expect(stockPrepSyncVerdictPlain('review_pending')?.zhNext).toContain('已执行待核对')
+    expect(stockPrepSyncVerdictPlain('review_pending')?.zhNext).not.toMatch(/复核后还要核对一次|再点一次「核对」/)
+    expect(stockPrepSyncVerdictPlain('review_pending')?.enNext).toContain('awaiting check')
+    expect(stockPrepSyncVerdictPlain('review_pending')?.enNext).not.toMatch(/still opens|presses “Check” again|is still needed/)
   })
 
   it('PS-AP-6 (PR-9): apply 409 REVIEW_PENDING ⇒ ③ skip WRITE_REVIEW_PENDING (partial 0), verdict review_pending, archive not attempted', async () => {

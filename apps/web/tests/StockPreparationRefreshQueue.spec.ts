@@ -1253,6 +1253,9 @@ describe('SP — the sync panel learns the batch refresh', () => {
     expect(line.textContent).toContain('复核不代替核对')
     expect(line.textContent).not.toContain('核对通过')
     expect(line.textContent).not.toContain('没有完成')
+    // Review fix (R-77 ⑨): after the review a 核对 is only MAYBE still needed — when the board shows 「已执行待核对」.
+    expect(line.textContent).toContain('已执行待核对')
+    expect(line.textContent).not.toMatch(/复核后还要核对一次|再点一次「核对」/)
     expect(check.apply).not.toHaveBeenCalled()
   })
 

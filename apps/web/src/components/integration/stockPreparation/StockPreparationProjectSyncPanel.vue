@@ -1379,7 +1379,7 @@ const checkLine = computed<{ text: string; next: string } | null>(() => {
         '核对已提交;本项目有一次已写入的变更等待复核——复核不代替核对,核对也不代替复核,两样都完成后才能正式导出。',
         'Check submitted; a written change of this project awaits its review — the review does not replace the check, nor the check the review; the formal export opens once both are done.',
       ),
-      next: bi('拉取人员在「拉取待确认」里完成变更复核,再点一次「核对」。', 'The puller completes the change review on “Pull holds”, then presses “Check” again.'),
+      next: bi('拉取人员在「拉取待确认」里完成变更复核;之后以项目备料页为准,显示「已执行待核对」时再点「核对」。', 'The puller completes the change review on “Pull holds”; after that the project page decides — when it shows “written, awaiting check”, press “Check”.'),
     }
   }
   const plain = stockPrepSyncReasonPlain(result.reason)
