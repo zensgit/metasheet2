@@ -512,7 +512,7 @@ test('leave cancel-round launch flag: registered against the plugin reader, exac
 })
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src, plus plugins/plugin-attendance/index.cjs for the ATTENDANCE_CANCEL_ROUND_ family', () => {
-  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource()])].sort()
+  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource(), ...approvalRoutingFlagsInSource()])].sort()
   assert.ok(
     sourceGH.length >= 20,
     `expected >=20 Global-History flags derived from source, got ${sourceGH.length} — the denylist is too broad or grep broke`,
@@ -1130,6 +1130,73 @@ test('DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED: exact true (no case foldi
   }
   assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
   assert.equal(isMisconfiguredTruthy(spec, ''), false)
+})
+
+// ── Approval-routing source requirement (AGENTS.md: every env flag is registered) ──
+// Derived from READ SITES: every `APPROVAL_ROUTING_*_ENABLED` token under packages/core-backend/src joins the
+// population, so a sibling switch added to this family later fails completeness until it is registered.
+// The same prefix is also used by error codes (APPROVAL_ROUTING_POLICY_REQUIRED, ..._MISCONFIGURED), which
+// are not flags: the `_ENABLED` suffix filter is what tells them apart.
+function approvalRoutingTokensInSource() {
+  return grepFlagTokens('APPROVAL_ROUTING_[A-Z_0-9]+').sort()
+}
+
+function approvalRoutingFlagsInSource() {
+  return approvalRoutingTokensInSource().filter((t) => t.endsWith('_ENABLED')).sort()
+}
+
+test('approval-routing family: the read-site scan finds exactly the registered key (non-vacuous), error codes are filtered out', () => {
+  assert.deepEqual(approvalRoutingFlagsInSource(), ['APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED'])
+  const all = approvalRoutingTokensInSource()
+  assert.ok(
+    all.some((t) => !t.endsWith('_ENABLED')),
+    'the family prefix also matches error-code tokens; the suffix filter must be what excludes them',
+  )
+  assert.ok(approvalRoutingFlagsInSource().every((t) => GLOBAL_HISTORY_FLAG_KEYS.includes(t)))
+})
+
+test('APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED: exact true (no case folding), danger high, independent, predicate source compares the literal', () => {
+  const key = 'APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED'
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+  assert.ok(spec, `${key} must be registered in the manifest`)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'byte-exact: the reader neither trims nor lowercases')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/directory/pull-source-rule.ts#isApprovalRoutingRequirePolicyEnabled',
+  )
+  const module = readRepoSource(spec.source.split('#')[0])
+  assert.match(module, /export function isApprovalRoutingRequirePolicyEnabled\(/)
+  assert.ok(
+    module.includes(`env.${key} === 'true'`),
+    'the reader compares the exact literal (no trim, no lowercase)',
+  )
+  assert.doesNotMatch(module, /toLowerCase\(\)|\.trim\(\)/, 'the reader must not fold case or trim')
+  assert.match(spec.purpose, /Default OFF/)
+  assert.match(spec.purpose, /byte-identical/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', ' true ', '1', 'yes', 'on']) {
+    assert.equal(isActivated(spec, value), false, String(value))
+  }
+  for (const value of ['TRUE', '1', 'yes', 'on']) {
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${value} looks on but is not the exact literal`)
+  }
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  assert.equal(isMisconfiguredTruthy(spec, ''), false)
+  assert.equal(isMisconfiguredTruthy(spec, undefined), false)
+})
+
+test('APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED: both environment templates list it as a commented sample that is OFF', () => {
+  for (const template of ['docker/app.env.example', 'docker/app.staging.env.example']) {
+    const text = readRepoSource(template)
+    const lines = text.split('\n').filter((line) => line.includes('APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED='))
+    assert.deepEqual(lines, ['# APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED=false'], template)
+    assert.match(text, /already in the multi-source, no-policy state/, template)
+  }
 })
 
 test('DINGTALK_TODO_MIRROR_ENABLED: the registry evaluates the same input matrix exactly like the runtime reader', () => {
