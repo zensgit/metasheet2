@@ -8,8 +8,10 @@ import { assertAutomationIntegrationActor } from './automation-live-authority'
 // A committed admission consumes the attempt, but does not perform external IO.
 type Context = { actorId: string; tenantId: string; workspaceId: null }
 type Row = Record<string, unknown>
-type ErrorCode = 'INPUT' | 'NOT_FOUND' | 'CONFLICT' | 'EXPIRED' | 'REVOKED' | 'CANCELLED' | 'UNAVAILABLE'
-const CODES = new Set<unknown>(['INPUT', 'NOT_FOUND', 'CONFLICT', 'EXPIRED', 'REVOKED', 'CANCELLED', 'UNAVAILABLE'])
+// LIMIT (gate 4, R-71 ⑦.2): the selected row would exceed the shared YiDa send budget (runner snapshot
+// or form request body). Fixed and values-free: no byte count, field name or value.
+type ErrorCode = 'INPUT' | 'NOT_FOUND' | 'CONFLICT' | 'EXPIRED' | 'REVOKED' | 'CANCELLED' | 'UNAVAILABLE' | 'LIMIT'
+const CODES = new Set<unknown>(['INPUT', 'NOT_FOUND', 'CONFLICT', 'EXPIRED', 'REVOKED', 'CANCELLED', 'UNAVAILABLE', 'LIMIT'])
 const ownErrors = new WeakMap<object, ErrorCode>()
 const MAX_TTL = 900000
 const MAX_PLAIN = 16 * 1024 * 1024
@@ -153,6 +155,8 @@ export type YidaSendAuthoritySelection = Readonly<{
 export type YidaSendAuthorityPrimitives = {
   resolveSelectionInTransaction(trx: Queryable, input: { operationId: string; rowKey: string }): Promise<YidaSendAuthoritySelection>
   executionPayloadDigest(selection: YidaSendAuthoritySelection, input: { grantRef: string; expiresAt: number; actorId: string }): string | Promise<string>
+  // Gate 4: synchronous, one frozen boolean. Anything else (a promise, a Proxy, an accessor) is refused.
+  sendBudget(selection: YidaSendAuthoritySelection, input: { grantRef: string; expiresAt: number; actorId: string }): Readonly<{ withinBudget: boolean }>
   prepareInTransaction(trx: Queryable, input: {
     tenantId: string; workspaceId: null; ownerId: string; operationId: string; rowKey: string
     targetRef: string; targetRevision: string; planRevision: string; credentialRef: string
@@ -212,7 +216,7 @@ function createApprovalInternals({ database, security, context, primitives, mult
   if (rawContext.workspaceId !== null) fail('INPUT')
   if (!database || typeof database.transaction !== 'function' || !security || typeof security.encrypt !== 'function'
     || typeof security.decrypt !== 'function' || !primitives
-    || ['resolveSelectionInTransaction', 'executionPayloadDigest', 'prepareInTransaction']
+    || ['resolveSelectionInTransaction', 'executionPayloadDigest', 'sendBudget', 'prepareInTransaction']
       .some(key => typeof primitives[key as keyof YidaSendAuthorityPrimitives] !== 'function')) fail('UNAVAILABLE')
 
   async function transaction<T>(callback: (trx: Queryable, targetRef: string, bound: TargetBinding) => Promise<T>,
@@ -344,6 +348,28 @@ function createApprovalInternals({ database, security, context, primitives, mult
     checkpoint()
     return { selected, executionDigest }
   }
+  // Gate 4 (R-71 ⑦.2): the shared send budget, checked before a grant is written and before an
+  // admission prepares the ledger. Only an own, frozen, plain { withinBudget: true } data property
+  // passes; false is LIMIT, and any other shape (or a thrown error) is UNAVAILABLE. Either way the
+  // enclosing transaction rolls back.
+  function assertSendBudget(selected: YidaSendAuthoritySelection, grant: { grantRef: string; expiresAt: number; actorId: string }) {
+    const verdict: unknown = primitives.sendBudget(selected, grant)
+    if (types.isPromise(verdict)) {
+      // Observe an ordinary local rejection only; never consult a dependency-owned constructor.
+      try {
+        if (!types.isProxy(verdict) && Object.getPrototypeOf(verdict) === Promise.prototype && !Object.hasOwn(verdict, 'constructor'))
+          Promise.prototype.then.call(verdict, undefined, () => {})
+      } catch { /* Still refused below. */ }
+      fail('UNAVAILABLE')
+    }
+    if (!verdict || typeof verdict !== 'object' || types.isProxy(verdict) || Array.isArray(verdict) || !Object.isFrozen(verdict)) fail('UNAVAILABLE')
+    const proto = Object.getPrototypeOf(verdict)
+    if (proto !== Object.prototype && proto !== null) fail('UNAVAILABLE')
+    const descriptors = Object.getOwnPropertyDescriptors(verdict), keys = Reflect.ownKeys(descriptors)
+    if (keys.length !== 1 || keys[0] !== 'withinBudget' || !Object.hasOwn(descriptors.withinBudget, 'value')
+      || typeof descriptors.withinBudget.value !== 'boolean') fail('UNAVAILABLE')
+    if (descriptors.withinBudget.value !== true) fail('LIMIT')
+  }
   async function audit(trx: Queryable, grantId: unknown, event: 'approve' | 'revoke' | 'admit') {
     const result = await trx.query('INSERT INTO integration_yida_send_approval_audit (id, grant_id, event, actor_id) VALUES ($1, $2, $3, $4) RETURNING id, grant_id, event, actor_id',
       [randomUUID(), grantId, event, fixed.actorId])
@@ -377,6 +403,8 @@ function createApprovalInternals({ database, security, context, primitives, mult
       const approvedAt = millis(window.rows[0].approved_at_ms), expiresAt = millis(window.rows[0].expires_at_ms), grantId = randomUUID()
       if (expiresAt - approvedAt !== ttlMs) fail('UNAVAILABLE')
       const executionDigest = digest(await primitives.executionPayloadDigest(selected, { grantRef: grantId, expiresAt, actorId: fixed.actorId }))
+      // Gate 4: refuse before the grant row (and its sealed snapshot) exists.
+      assertSendBudget(selected, { grantRef: grantId, expiresAt, actorId: fixed.actorId })
       const row: Row = { grant_id: grantId, confirmation_id: confirmationId, tenant_id: fixed.tenantId, workspace_id: null,
         owner_id: fixed.actorId, target_ref: targetRef, operation_id: operationId, row_key: rowKey, target_revision: selected.targetRevision,
         plan_revision: selected.planRevision, plan_digest: selected.planDigest, credential_ref: selected.credentialRef,
@@ -430,6 +458,9 @@ function createApprovalInternals({ database, security, context, primitives, mult
       if (state.revocation) fail('REVOKED')
       if (await now(trx) >= millis(row.expires_at_ms)) fail('EXPIRED')
       const { selected, executionDigest } = await authenticatedSelection(trx, targetRef, row, noCheckpoint, bound)
+      // Gate 4: refuse before the ledger row (the permanent business-key fence) is prepared. The grant
+      // stays approved with its one attempt; nothing is revoked or consumed (owner choice h1).
+      assertSendBudget(selected, { grantRef: id(row.grant_id), expiresAt: millis(row.expires_at_ms), actorId: fixed.actorId })
       const prepared = await primitives.prepareInTransaction(trx, { tenantId: fixed.tenantId, workspaceId: null,
         ownerId: fixed.actorId, operationId: selected.operationId, rowKey: selected.rowKey, targetRef,
         targetRevision: selected.targetRevision, planRevision: selected.planRevision, credentialRef: selected.credentialRef,
