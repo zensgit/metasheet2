@@ -13,8 +13,8 @@
 // host multitable provisioning API:
 //
 //   a. normalize the 19-column rehearsal pack
-//   b. install run #1 onto a table that already carries the frozen 33 canonical
-//      columns  ->  52 logical columns, ownership-stamped
+//   b. install run #1 onto a table that already carries the frozen 35 canonical
+//      columns  ->  54 logical columns, ownership-stamped
 //   c. install run #2  ->  nothing created, nothing destroyed, same wire
 //   d. REFRESH-PRESERVATION PROOF: seed a row with BOTH bands filled, project a
 //      PLM refresh through the ownership filter DERIVED FROM THE INSTALLED FIELD
@@ -47,6 +47,7 @@ const {
 } = require(path.join(LIB, 'stock-preparation-customer-pack.cjs'))
 
 const {
+  MACHINE_WRITEBACK_FIELD_IDS,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   HUMAN_PRESERVED_FIELD_IDS,
 } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
@@ -294,8 +295,11 @@ function rehearsalPackNormalizes() {
     // 28 -> 33: on top of those three PLM columns, the template ALSO gained 自制/外购 plus the
   // four departmental response columns. All five are human_preserved, so the PLM band is unmoved
   // by them; the two growths are independent and both land here.
-  assert.equal(CANONICAL_FIELD_COUNT, 33, 'the frozen canonical template carries 33 columns')
-  assert.equal(LANDING_SHEET_FIELD_COUNT, 52)
+  // 33 -> 35 (R-71 ⑦.4 PR-4): 发料确认日期 `issueConfirmDate` and 项目规格型号 `projectSpecModel`, both
+  // plm_system and appended last. Neither id is the suffix of any ext_ column this pack installs (asserted
+  // in stock-preparation-templates.test.cjs), so this install is not refused.
+  assert.equal(CANONICAL_FIELD_COUNT, 35, 'the frozen canonical template carries 35 columns')
+  assert.equal(LANDING_SHEET_FIELD_COUNT, 54)
 
   const byOwnership = { plm_system: [], human_preserved: [] }
   for (const field of pack.extensionFields) {
@@ -427,7 +431,7 @@ async function installRunOneRegeneratesTheSheet(pack) {
   assert.equal(
     fake.fields.size,
     LANDING_SHEET_FIELD_COUNT,
-    'canonical + pack = 52 logical columns on the landing sheet',
+    'canonical + pack = 54 logical columns on the landing sheet',
   )
 
   // Options synced on all five selects; the canonical three keep the TEMPLATE's
@@ -596,6 +600,9 @@ function plmWritableFieldIds(fields) {
   for (const row of fields.values()) {
     const meta = row.property && row.property.stockPreparation
     if (!meta) continue
+    // R-71 ⑦.4 PR-4: a machine write-back column is plm_system (so no person may edit it) but a refresh
+    // never writes it either — its only writer is the YiDa issue-confirm write-back.
+    if (MACHINE_WRITEBACK_FIELD_IDS.includes(row.logicalId)) continue
     if (meta.ownership !== 'human_preserved' && !meta.preserveOnRefresh) writable.push(row.logicalId)
   }
   return writable
@@ -624,13 +631,18 @@ async function refreshPreservesHumanCells() {
   const writableSet = new Set(writable)
   const allFieldIds = [...fake.fields.values()].map((row) => row.logicalId)
   const humanFieldIds = allFieldIds.filter((fieldId) => ownershipOf(fieldId) === 'human_preserved')
-  const plmFieldIds = allFieldIds.filter((fieldId) => ownershipOf(fieldId) === 'plm_system')
+  // The machine write-back columns (R-71 ⑦.4 PR-4) are plm_system but outside the refresh band.
+  const machineFieldIds = allFieldIds.filter((fieldId) => MACHINE_WRITEBACK_FIELD_IDS.includes(fieldId))
+  const plmFieldIds = allFieldIds.filter((fieldId) => ownershipOf(fieldId) === 'plm_system' && !machineFieldIds.includes(fieldId))
 
   assert.equal(allFieldIds.length, LANDING_SHEET_FIELD_COUNT)
   // 16 -> 21: the five new canonical human columns land on the human side of the
   // ownership wall, which is the point — a PLM refresh must not be able to write them.
   assert.equal(humanFieldIds.length, 21, '13 canonical + 8 pack human columns')
-  assert.equal(plmFieldIds.length, 31, '20 canonical + 11 pack PLM columns')
+  // 31 -> 32 (+1 machine): PR-4 added 项目规格型号 (refreshable, empty) and 发料确认日期 (machine write-back).
+  assert.equal(plmFieldIds.length, 32, '21 canonical + 11 pack PLM columns a refresh writes')
+  assert.deepEqual(machineFieldIds, ['issueConfirmDate'], 'one machine write-back column on the landing sheet')
+  assert.equal(ownershipOf('issueConfirmDate'), 'plm_system', 'the machine column is plm_system, so it is human-locked')
   assert.deepEqual([...writable].sort(), [...plmFieldIds].sort(), 'the guard admits exactly the PLM band')
   for (const fieldId of humanFieldIds) {
     assert.equal(writableSet.has(fieldId), false, `a refresh must not be allowed to write ${fieldId}`)
@@ -698,6 +710,10 @@ async function refreshPreservesHumanCells() {
     rawQuantity: 2,
     totalQuantity: 4,
     active: true,
+    // R-71 ⑦.4 PR-4: 项目规格型号 (a refresh may write it once it has a source) and 发料确认日期 (written only by
+    // the YiDa issue-confirm write-back — a refresh must leave it byte-identical).
+    projectSpecModel: 'SPEC-SYN-01',
+    issueConfirmDate: '2026-09-10',
     lastPlmRefreshRunId: 'run-0001',
     lastPlmRefreshAt: '2026-08-20T01:00:00.000Z',
     lastPlmRefreshDecision: 'update',
@@ -746,7 +762,7 @@ async function refreshPreservesHumanCells() {
   assert.deepEqual(
     Object.keys(seededRow).sort(),
     [...allFieldIds].sort(),
-    'the seeded row must cover the whole 52-column sheet, or the proof has blind spots',
+    'the seeded row must cover the whole 54-column sheet, or the proof has blind spots',
   )
 
   // A refresh payload shaped like the SHEET, not like the PLM band — this is
@@ -778,6 +794,14 @@ async function refreshPreservesHumanCells() {
       `${fieldId}: a human cell must be byte-identical after a PLM refresh`,
     )
   }
+  for (const fieldId of machineFieldIds) {
+    assert.equal(
+      JSON.stringify(refreshed[fieldId]),
+      JSON.stringify(seededRow[fieldId]),
+      `${fieldId}: a machine write-back cell must be byte-identical after a PLM refresh`,
+    )
+    assert.equal(production.plmWritableFieldIds.includes(fieldId), false, `production must not let a refresh write ${fieldId}`)
+  }
   for (const fieldId of plmFieldIds) {
     assert.equal(
       JSON.stringify(refreshed[fieldId]),
@@ -805,12 +829,12 @@ async function refreshPreservesHumanCells() {
     .sort()
   assert.deepEqual(
     divergent,
-    [...humanFieldIds].sort(),
-    'filtered and unfiltered refresh differ on EXACTLY the 16 human cells, nothing else',
+    [...humanFieldIds, ...machineFieldIds].sort(),
+    'filtered and unfiltered refresh differ on EXACTLY the human cells and the machine write-back cell, nothing else',
   )
 
   // BOTH HALVES of the guard have to carry weight. On a correctly written sheet
-  // `ownership` and `preserveOnRefresh` agree on all 52 columns, so the two
+  // `ownership` and `preserveOnRefresh` agree on all 54 columns, so the two
   // clauses are redundant and either could rot unnoticed. They stop agreeing on
   // a sheet a person has touched: a deployer pins a hand-maintained column by
   // setting preserveOnRefresh WITHOUT restating ownership. The flag must win.

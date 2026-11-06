@@ -1377,8 +1377,10 @@ const PB_FRONTLINE = `u_plmro_front_${TS}`
 const PB_ADMIN = `u_plmro_admin_${TS}`
 const PB_PLM_IDS = pbTemplates.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.filter((f) => f.ownership === 'plm_system').map((f) => f.id)
 const PB_HUMAN_IDS = pbTemplates.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.filter((f) => f.ownership === 'human_preserved').map((f) => f.id)
-// The identity columns a range fill would corrupt first, plus a quantity — the 403 legs walk these.
-const PB_PROBE_PLM_IDS = ['projectNo', 'idempotencyKey', 'componentSourceId', 'path', 'componentCode', 'totalQuantity']
+// The identity columns a range fill would corrupt first, plus a quantity — the 403 legs walk these. R-71 ⑦.4 PR-4 adds
+// 发料确认日期 `issueConfirmDate`: the YiDa write-back's DATE column, which a person must not edit either.
+const PB_PROBE_PLM_IDS = ['projectNo', 'idempotencyKey', 'componentSourceId', 'path', 'componentCode', 'totalQuantity', 'issueConfirmDate']
+const pbProbeValue = (logical: string): unknown => (logical === 'totalQuantity' ? 1 : logical === 'issueConfirmDate' ? '2026-11-06' : 'HACK')
 
 function pbProductionPluginContext(): PluginContext {
   const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
@@ -1523,7 +1525,7 @@ describeIfDatabase('备料 option B — PLM columns of a project sheet: read-onl
       for (const logical of PB_PROBE_PLM_IDS) {
         const fieldId = phys(a, logical)
         const before = (await rowData(recordId))[fieldId]
-        const res = await request(pbApp).patch(`/api/multitable/records/${recordId}`).send({ sheetId: a.sheetId, data: { [fieldId]: logical === 'totalQuantity' ? 1 : 'HACK' } })
+        const res = await request(pbApp).patch(`/api/multitable/records/${recordId}`).send({ sheetId: a.sheetId, data: { [fieldId]: pbProbeValue(logical) } })
         expect(res.status, `${userId} ${logical}: ${JSON.stringify(res.body)}`).toBe(403)
         expect(res.body.error.code).toBe('FIELD_READONLY_PLM_SYSTEM')
         expect(res.body.error.fieldIds).toEqual([fieldId])
@@ -1560,11 +1562,36 @@ describeIfDatabase('备料 option B — PLM columns of a project sheet: read-onl
     })
     expect(humanOnly.status, JSON.stringify(humanOnly.body)).toBe(200)
     for (const recordId of rowIds) expect((await rowData(recordId))[notes]).toBe('filled note')
+
+    // R-71 ⑦.4 PR-4: the bulk (range paste / fill) route refuses the machine DATE column `issueConfirmDate` too — the
+    // YiDa write-back's column — for a frontline user AND an admin, and nothing moves.
+    const issue = phys(a, 'issueConfirmDate')
+    for (const [user, roles] of [[PB_FRONTLINE, []], [PB_ADMIN, ['admin']]] as Array<[string, string[]]>) {
+      asUser(user, roles)
+      const issueBefore = await sheetData(a.sheetId)
+      const issueBulk = await request(pbApp).post('/api/multitable/patch').send({ sheetId: a.sheetId, changes: rowIds.map((recordId) => ({ recordId, fieldId: issue, value: '2026-11-06' })) })
+      expect(issueBulk.status, `bulk issueConfirmDate as ${user}: ${JSON.stringify(issueBulk.body).slice(0, 300)}`).toBe(403)
+      expect(issueBulk.body.error.code).toBe('FIELD_READONLY_PLM_SYSTEM')
+      expect(await sheetData(a.sheetId)).toEqual(issueBefore)
+    }
+    asUser(PB_FRONTLINE)
   })
 
   test('PB-05 POST /records (and so xlsx import, which shares RecordService.createRecord): seeding a PLM column → 403 FIELD_READONLY_PLM_SYSTEM, no row', async () => {
     asUser(PB_FRONTLINE)
     const countBefore = (await sheetData(a.sheetId)).length
+    // R-71 ⑦.4 PR-4: the create spine and the xlsx import refuse the machine DATE column `issueConfirmDate`, no row.
+    const issue = phys(a, 'issueConfirmDate')
+    const issueCreate = await request(pbApp).post('/api/multitable/records').send({ sheetId: a.sheetId, data: { [issue]: '2026-11-06', [phys(a, 'notes')]: 'x' } })
+    expect(issueCreate.status, `create issueConfirmDate: ${JSON.stringify(issueCreate.body).slice(0, 300)}`).toBe(403)
+    expect(issueCreate.body.error.code).toBe('FIELD_READONLY_PLM_SYSTEM')
+    expect((await sheetData(a.sheetId)).length).toBe(countBefore)
+    const issueXlsx = buildXlsxBuffer(pbXlsx, { sheetName: 'Rows', headers: ['plmro-pb05-issue'], rows: [['2026-11-06']] })
+    const issueImport = await request(pbApp).post(`/api/multitable/sheets/${a.sheetId}/import-xlsx`).field('mapping', JSON.stringify({ '0': issue })).attach('file', issueXlsx, 'rows.xlsx')
+    expect(issueImport.status, `import issueConfirmDate: ${JSON.stringify(issueImport.body).slice(0, 400)}`).toBe(200)
+    expect(issueImport.body.data.imported, 'the import wrote no row').toBe(0)
+    expect(issueImport.body.data.failures.map((f: { code?: string }) => f.code), `import refusal: ${JSON.stringify(issueImport.body.data.failures).slice(0, 300)}`).toEqual(['FIELD_READONLY_PLM_SYSTEM'])
+    expect((await sheetData(a.sheetId)).length).toBe(countBefore)
     const res = await request(pbApp).post('/api/multitable/records').send({ sheetId: a.sheetId, data: { [phys(a, 'idempotencyKey')]: 'FAKE-KEY', [phys(a, 'notes')]: 'x' } })
     expect(res.status, JSON.stringify(res.body)).toBe(403)
     expect(res.body.error.code).toBe('FIELD_READONLY_PLM_SYSTEM')
@@ -1760,6 +1787,14 @@ describeIfDatabase('备料 option B — PLM columns of a project sheet: read-onl
     expect((await rowData(recordId))[code]).toEqual(before)
 
     const countBefore = (await sheetData(a.sheetId)).length
+    // R-71 ⑦.4 PR-4: the form's own field guard refuses the machine DATE column `issueConfirmDate` too, value untouched.
+    const issue = phys(a, 'issueConfirmDate')
+    const issueBefore = (await rowData(recordId))[issue]
+    const issueEdit = await request(pbApp).post(`/api/multitable/views/${viewId}/submit`).send({ recordId, data: { [issue]: '2026-11-06' } })
+    expect(issueEdit.status, `form issueConfirmDate: ${JSON.stringify(issueEdit.body).slice(0, 300)}`).toBe(403)
+    expect(issueEdit.body.error.code).toBe('FIELD_READONLY')
+    expect((await rowData(recordId))[issue]).toEqual(issueBefore)
+
     const create = await request(pbApp).post(`/api/multitable/views/${viewId}/submit`).send({ data: { [phys(a, 'idempotencyKey')]: 'FORM-FAKE-KEY' } })
     expect(create.status, JSON.stringify(create.body)).toBe(403)
     expect(create.body.error.code).toBe('FIELD_READONLY')

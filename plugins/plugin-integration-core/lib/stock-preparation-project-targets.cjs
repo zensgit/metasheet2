@@ -42,6 +42,7 @@ const {
   ensureStockPreparationCanonicalTarget,
   ensureStockPreparationTodoView,
   resolveFieldExistence,
+  reconcileFrozenTemplateColumnsOnObject,
   STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID,
 } = require('./stock-preparation-target-provisioning.cjs')
 const {
@@ -434,6 +435,37 @@ async function markProjectSheetPlmSystemColumns({ provisioning, projectId, objec
 }
 
 /**
+ * R-71 ⑦.4 PR-3: THE FROZEN TEMPLATE'S MISSING COLUMNS on ONE registered project sheet — the repair leg of
+ * `POST …/options/sync` with `projectNo` calls this with the REGISTRY ROW's objectId and sheetId, before the
+ * option sync and the PLM column lock, inside the same registry-row lock.
+ *
+ * `add: false` (the default) READS ONLY and reports `{ missingFieldIds, alreadyPresent, refusedFieldIds }`;
+ * `add: true` is the field-creating write (additive, atomic, frozen template only — see
+ * `reconcileFrozenTemplateColumnsOnObject`). The same project-sheet namespace guard as the PLM lock refuses
+ * the overview, the deployment's env object and anything outside the stock-prep sandbox namespace BEFORE
+ * any IO. A host failure that is not already a typed provisioning refusal is ONE typed code,
+ * `STOCK_PREPARATION_PROJECT_TARGET_COLUMNS_REPAIR_FAILED`, naming the object only.
+ */
+async function reconcileProjectSheetTemplateColumns({ provisioning, projectId, objectId, sheetId, add = false } = {}) {
+  if (!isPlmLockTargetObjectId(objectId)) {
+    throw new StockPreparationProjectTargetError(500, 'STOCK_PREPARATION_PROJECT_TARGET_COLUMNS_OBJECT_REFUSED', 'only a project\'s registered stock-preparation sheet can be given the template\'s missing columns here', { objectIdShape: 'not_project_sheet' })
+  }
+  try {
+    return await reconcileFrozenTemplateColumnsOnObject({ provisioning, projectId, objectId, expectedSheetId: sheetId, apply: add === true })
+  } catch (error) {
+    if (error instanceof StockPreparationTargetProvisioningError) throw error
+    const wrapped = new StockPreparationProjectTargetError(
+      error && Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500,
+      'STOCK_PREPARATION_PROJECT_TARGET_COLUMNS_REPAIR_FAILED',
+      'the project sheet\'s missing template columns could not be checked or added; nothing was kept, the same request can be retried',
+      { objectId },
+    )
+    wrapped.cause = error
+    throw wrapped
+  }
+}
+
+/**
  * G1 field defect (R67): the contract option sets onto ONE project sheet — the create path above and
  * the registry-resolved repair route. `objectId` is the caller's server-held handle (the derived id it
  * just ensured, or the registry row's). Returns a values-free summary (`synced` = contract fields
@@ -785,6 +817,7 @@ module.exports = {
   resolveProjectTargetForAction,
   provisionProjectSheet,
   syncProjectSheetContractOptions,
+  reconcileProjectSheetTemplateColumns,
   markProjectSheetPlmSystemColumns,
   readProjectSheetPlmSystemColumnLock,
   PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS,
