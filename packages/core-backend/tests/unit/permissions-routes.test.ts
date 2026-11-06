@@ -31,6 +31,10 @@ vi.mock('../../src/middleware/auth', () => ({
 }))
 
 vi.mock('../../src/db/pg', () => ({
+  // D21 (Y5a): the grant / revoke / template writes run inside transaction(); the client's query is
+  // backed by the SAME mock so the once-chains below script the transaction statements in order.
+  transaction: vi.fn(async (handler: (client: { query: typeof poolMocks.query }) => Promise<unknown>) =>
+    handler({ query: poolMocks.query })),
   pool: {
     query: poolMocks.query,
   },
@@ -141,6 +145,7 @@ describe('permissions routes', () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     poolMocks.query
       .mockResolvedValueOnce({ rows: [{ code: 'attendance:approve' }] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] }) // D21 subject version bump
       .mockResolvedValueOnce({ rowCount: 1, rows: [] })
 
     const response = await invokeRoute('post', '/api/permissions/grant', {
@@ -157,13 +162,21 @@ describe('permissions routes', () => {
       resourceType: 'permission',
       resourceId: 'user-1:attendance:approve',
     }))
-    expect(poolMocks.query.mock.calls.map((call) => String(call[0])).join('\n'))
-      .not.toMatch(/user_namespace_admissions/)
+    const statements = poolMocks.query.mock.calls.map((call) => String(call[0]))
+    expect(statements.join('\n')).not.toMatch(/user_namespace_admissions/)
+    // D21 (Y5a): the subject authorization version row is bumped first, in the same transaction.
+    const bumpAt = statements.findIndex((statement) => statement.includes('INSERT INTO subject_authorization_versions'))
+    const grantAt = statements.findIndex((statement) => statement.includes('INSERT INTO user_permissions'))
+    expect(bumpAt).toBeGreaterThanOrEqual(0)
+    expect(grantAt).toBe(bumpAt + 1)
+    expect(poolMocks.query.mock.calls[bumpAt][1]).toEqual([['user-1']])
   })
 
   it('revokes direct permissions and writes an audit entry', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
-    poolMocks.query.mockResolvedValueOnce({ rowCount: 1, rows: [] })
+    poolMocks.query
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] }) // D21 subject version bump
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] })
 
     const response = await invokeRoute('post', '/api/permissions/revoke', {
       body: {
@@ -200,7 +213,9 @@ describe('permissions routes', () => {
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false)
     rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read', 'attendance:write'])
-    poolMocks.query.mockResolvedValueOnce({ rowCount: 2, rows: [] })
+    poolMocks.query
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] }) // D21 subject version bump
+      .mockResolvedValueOnce({ rowCount: 2, rows: [] })
 
     const response = await invokeRoute('post', '/api/admin/permission-templates/apply', {
       body: {
@@ -372,6 +387,7 @@ describe('permissions routes', () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     poolMocks.query
       .mockResolvedValueOnce({ rows: [{ code: 'crm:read' }] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] }) // D21 subject version bump
       .mockResolvedValueOnce({ rowCount: 1, rows: [] })
 
     const response = await invokeRoute('post', '/api/permissions/grant', {
@@ -390,6 +406,9 @@ describe('permissions routes', () => {
     const sql = poolMocks.query.mock.calls.map((call) => String(call[0]))
     expect(sql.some((statement) => statement.includes('INSERT INTO user_permissions'))).toBe(true)
     expect(sql.join('\n')).not.toMatch(/user_namespace_admissions/)
-    expect(sql.join('\n')).not.toMatch(/\bUPDATE\b/i)
+    // The only write besides the grant is the D21 subject version upsert (its ON CONFLICT DO UPDATE
+    // targets subject_authorization_versions, never users or admissions).
+    const otherWrites = sql.filter((statement) => !statement.includes('INSERT INTO subject_authorization_versions'))
+    expect(otherWrites.join('\n')).not.toMatch(/\bUPDATE\b/i)
   })
 })

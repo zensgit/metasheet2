@@ -106,6 +106,8 @@ async function fakeQuery(sql: string, params: unknown[] = []) {
   if (text.startsWith('UPDATE directory_deprovision_effects')) return { rows: [] }
   if (text.startsWith('UPDATE directory_deprovision_events')) return { rows: [] }
   if (text.startsWith('UPDATE users SET access_generation')) return { rows: [{ access_generation: '8' }] }
+  // D21 (Y5a): the access-graph mutex bumps the subject authorization version row before `users FOR UPDATE`.
+  if (text.startsWith('INSERT INTO subject_authorization_versions')) return { rows: [] }
   if (text.includes('FROM directory_accounts a LEFT JOIN directory_account_links l')) {
     return {
       rows: [{
