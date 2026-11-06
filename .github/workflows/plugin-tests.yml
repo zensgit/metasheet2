@@ -1797,7 +1797,7 @@ jobs:
         run: |
           # Clean before the FIRST Node exec, not only before its children.
           # The launcher owns a fresh local PG and a loopback-only USER/NET/PID tree;
-          # All six whole files still exercise actual JWT/HTTP/Chromium.
+          # All five whole files still exercise actual JWT/HTTP/Chromium.
           if ! yida_node_command="$(command -v node 2>/dev/null)" || test -z "$yida_node_command"; then
             echo 'YIDA_CALLER_PREFLIGHT: node-resolution' >&2
             exit 1
