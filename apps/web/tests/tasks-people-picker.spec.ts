@@ -482,7 +482,7 @@ describe('TaskPeoplePicker', () => {
     expect(document.activeElement).toBe(q(el, 'cancel'))
   })
 
-  it('an Escape the input method may be using (isComposing, or keyCode 229) leaves the picker open and goes no further; a plain Escape closes it', async () => {
+  it('an Escape the input method may be using (isComposing, or keyCode 229) leaves the picker open, goes no further and is held back; a plain Escape closes it', async () => {
     const { el, closed } = mountPicker('assignee')
     await flush()
     const reachedParent: string[] = []
@@ -490,11 +490,12 @@ describe('TaskPeoplePicker', () => {
     const search = q(el, 'search')!
     search.focus()
     // Escape during a composition cancels the composition (Safari marks that key only with keyCode 229).
+    // Its default is held back too: the box is type="search", which Chromium empties on Escape.
     for (const init of [{ isComposing: true }, { keyCode: 229 }, { isComposing: true, keyCode: 229 }]) {
       const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init })
       search.dispatchEvent(event)
       await flush()
-      expect(event.defaultPrevented).toBe(false)
+      expect(event.defaultPrevented).toBe(true)
     }
     expect(closed.count).toBe(0)
     expect(reachedParent).toEqual([])

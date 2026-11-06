@@ -258,8 +258,11 @@ async function runSearch(query: string): Promise<void> {
 function onPanelKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
     // An Escape the input method may be using cancels the composition, not the picker. It still goes
-    // no further, so a dialog around the picker does not close on it either.
+    // no further, so a dialog around the picker does not close on it either, and its default is held
+    // back: the search box is type="search", which Chromium empties on Escape (the input method has
+    // already cancelled the composition by the time the page sees the key).
     if (isInputMethodKey(event)) {
+      event.preventDefault()
       event.stopPropagation()
       return
     }

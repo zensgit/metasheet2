@@ -1100,13 +1100,14 @@ function onCancel(): void {
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
     // An Escape the input method may be using cancels the composition, not the dialog; it still goes
-    // no further, so nothing around the dialog closes on it either.
+    // no further, so no document-level listener acts on it either.
     if (isInputMethodKey(event)) {
       event.stopPropagation()
       return
     }
     event.preventDefault()
-    // The inspector's own Escape handler closes the whole drawer; Esc in a modal closes the modal only.
+    // Esc in a modal closes the modal only. The dialog is teleported to body, so the drawer's own
+    // Escape handler never sees the key; this keeps document-level listeners from acting on it too.
     event.stopPropagation()
     emit('close')
     return
