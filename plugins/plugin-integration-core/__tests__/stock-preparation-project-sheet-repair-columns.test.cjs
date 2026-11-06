@@ -180,7 +180,7 @@ test('RC-01 the report call (no flag) reports the missing columns and adds none;
     assert.deepEqual(ensureCalls(h), [], 'no column write')
     assert.equal(h.tx.count, 0, 'no repair transaction')
     for (const id of expectedMissing) assert.equal(object.fields.has(id), false, `${id} still absent`)
-    assert.deepEqual(res.body.data.plmColumnLock, { marked: 0, alreadyMarked: 19, missing: 1 }, 'the lock leg ran as before (the missing PLM column is counted, not invented)')
+    assert.deepEqual(res.body.data.plmColumnLock, { marked: 0, alreadyMarked: 21, missing: 1 }, 'the lock leg ran as before (the missing PLM column is counted, not invented)')
     const appended = h.auditAppends.slice(auditBefore)
     assert.equal(appended.length, 1)
     assert.equal(appended[0].mode, 'contract_options_synced')
@@ -225,7 +225,7 @@ test('RC-02 dry-run changes nothing — no column, no patch, no transaction, no 
           added: 0,
           refusedFieldIds: [],
         },
-        plmColumnLock: { checked: true, alreadyMarked: 17, unmarked: 1, missing: 2 },
+        plmColumnLock: { checked: true, alreadyMarked: 19, unmarked: 1, missing: 2 },
       })
     }
     assert.equal(h.records.calls.length, 0)
@@ -304,7 +304,7 @@ test('RC-04 idempotent: a second add reports every column already present, adds 
     assert.equal(again.body.data.columns.added, 0)
     assert.deepEqual(plain(again.body.data.columns.missingFieldIds), [])
     assert.deepEqual(ensureCalls(h), [], 'no column write call on the second run')
-    assert.deepEqual(again.body.data.plmColumnLock, { marked: 0, alreadyMarked: 20, missing: 0 })
+    assert.deepEqual(again.body.data.plmColumnLock, { marked: 0, alreadyMarked: 22, missing: 0 })
     assert.equal(snapshotObject(objectOf(h, objectId)), settled, 'the sheet did not move')
     const appended = h.auditAppends.slice(auditBefore)
     assert.equal(appended.length, 1)
@@ -645,6 +645,61 @@ test('RC-11 a committed add is audited even when the option sync (422) or the PL
       assert.equal(last.detail.columnAddedCount, 0)
     } finally { h.restore() }
   }
+})
+
+// ── RC-12 ────────────────────────────────────────────────────────────────────────────────────────────
+
+// R-71 ⑦.4 PR-4, THE UPGRADE ORDER on a sheet created before the template gained 发料确认日期 / 项目规格型号: install
+// PR-3 + PR-4 → (pull now) a recoverable 422 with nothing written → the repair route once → the pull works, and the
+// refresh writes neither column (issueConfirmDate is machine write-back only; projectSpecModel has no source yet).
+test('RC-12 (R-71 7.4 PR-4) a pre-PR-4 sheet: pull 422 and nothing written; ONE repair adds + locks the two new columns, existing columns byte-identical; the pull then writes rows carrying neither column', async () => {
+  const NEW_COLUMNS = ['issueConfirmDate', 'projectSpecModel']
+  for (const id of NEW_COLUMNS) assert.equal(OWNERSHIP.get(id), 'plm_system', `${id} is a plm_system template column`)
+  assert.deepEqual(TEMPLATE_IDS.slice(-2), NEW_COLUMNS, 'appended last, so no deployed column moves')
+  const h = mount()
+  try {
+    const { objectId, sheetId, object } = await agedSheet(h, PROJECT, NEW_COLUMNS)
+    const existingBefore = JSON.stringify([...object.fields].map(([id, f]) => [id, f]))
+    const blocked = await pullDryRun(h)
+    assert.equal(blocked.statusCode, 422, JSON.stringify(blocked.body))
+    assert.equal(blocked.body.error.code, 'TARGET_SCHEMA_INCOMPLETE')
+    assert.equal(h.records.calls.filter(([method]) => method === 'createRecord' || method === 'patchRecord').length, 0, 'the refused pull wrote nothing')
+    const res = await repair(h, { projectNo: PROJECT, addMissingColumns: true })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.deepEqual(plain(res.body.data.columns.addedFieldIds), NEW_COLUMNS)
+    const after = objectOf(h, objectId)
+    for (const id of NEW_COLUMNS) {
+      assert.equal(after.fields.get(id).property[HUMAN_WRITE_LOCK_PROPERTY_KEY], 'plm_system', `${id} is locked for people by the same repair call`)
+    }
+    assert.equal(
+      JSON.stringify([...after.fields].filter(([id]) => !NEW_COLUMNS.includes(id)).map(([id, f]) => [id, f])),
+      existingBefore,
+      'every pre-existing column is byte-identical',
+    )
+    const again = await repair(h, { projectNo: PROJECT, addMissingColumns: true })
+    assert.deepEqual(plain(again.body.data.columns.addedFieldIds), [], 'a second repair adds nothing (idempotent)')
+    const dry = await pullDryRun(h)
+    assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
+    const apply = await projectSheet.call(h.routes, 'POST', APPLY_PATH, {
+      user: PULLER,
+      params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+      body: { parameters: { projectNo: PROJECT }, confirm: { dryRunToken: dry.body.data.dryRunToken } },
+      query: { tenantId: TENANT },
+    })
+    assert.equal(apply.statusCode, 200, JSON.stringify(apply.body))
+    assert.equal(apply.body.data.apply.counts.failed, 0, JSON.stringify(apply.body.data.apply))
+    // The rows the pull created (onto an empty sheet a pull only creates), read back through the fake host. They must
+    // carry the ordinary refresh columns (anti-vacuity) and neither new column.
+    const written = await h.records.queryRecords({ sheetId, filters: {}, limit: 1000 })
+    assert.ok(written.length >= 1, 'the pull wrote rows')
+    for (const record of written) {
+      const written = record
+      // The fake host stores PHYSICAL ids (`fld_<sheet hash>_<logical id>`); compare on the logical part.
+      const keys = Object.keys(written.data || {}).map((key) => key.replace(/^fld_[0-9a-f]+_/, ''))
+      assert.ok(keys.includes('componentSourceId') && keys.includes('lastPlmRefreshRunId'), `a written row carries the refresh columns: ${keys.join(',')}`)
+      for (const id of NEW_COLUMNS) assert.equal(keys.includes(id), false, `a refresh write carried ${id}`)
+    }
+  } finally { h.restore() }
 })
 
 runFailClosedSuite('stock-preparation-project-sheet-repair-columns.test.cjs', tests)
