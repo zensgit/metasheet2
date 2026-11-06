@@ -48,6 +48,7 @@ import type { YidaOwnerDraftInput } from '../../../services/integration/yidaOwne
 
 const props = defineProps<{ draftInput: YidaOwnerDraftInput | null }>()
 const emit = defineEmits<{ 'locked-change': [locked: boolean]; 'send-enabled-change': [enabled: boolean]
+  'multi-target-change': [enabled: boolean]
   'progress-change': [progress: { statusRead: boolean; tested: boolean; initialized: boolean; connectionTestEnabled: boolean }] }>()
 const materialFields = ['appKey', 'appSecret', 'systemToken', 'userId'] as const
 const material = reactive<Record<keyof YidaInitializationMaterial, string>>({ appKey: '', appSecret: '', systemToken: '', userId: '' })
@@ -120,6 +121,8 @@ const locked = computed(() => busy.value || uncertain.value)
 watch(locked, value => emit('locked-change', value), { immediate: true, flush: 'sync' })
 // Only an owner-authorized reply carries the server's send switch; any cleared state reads OFF.
 watch(() => state.value?.sendEnabled === true, value => emit('send-enabled-change', value), { immediate: true, flush: 'sync' })
+// Y2: same rule for the multi-target switch (target picker and sheet source in the owner panel).
+watch(() => state.value?.multiTargetEnabled === true, value => emit('multi-target-change', value), { immediate: true, flush: 'sync' })
 const mayInitialize = computed(() => !busy.value && !invalidated.value && !uncertain.value && state.value?.status === 'ready'
   && !!props.draftInput && acknowledged.value && materialFields.every(field => material[field].trim().length > 0)
   && reviewRef.value.length > 0 && organizationId.value.length > 0 && blockedFields.value.length === 0

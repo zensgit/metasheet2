@@ -70,6 +70,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/index.ts#yidaConnectionTestRuntime; packages/core-backend/src/integration/yida-connection-test-runtime.ts; plugins/plugin-integration-core/lib/yida-connection-probe.cjs',
   },
   {
+    key: 'INTEGRATION_YIDA_MULTI_TARGET_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'Default OFF; byte-exact true lets the anchor owner register MORE THAN ONE owner-attested YiDa target (slots 2..16, each with its own attestation, sealed app/form identifiers and generation-1 credential material) and prepare drafts from a multitable sheet or view (with the read and export permissions of the owner, bounded to 2000 scanned records, 100 rows, 128 KiB) instead of pasted rowsText. Every draft, preview, approval and delivery stays bound to exactly one target_ref; the CREATE fence is per target. Not a grant and never the send switch: sending still requires INTEGRATION_YIDA_OWNER_SEND_ENABLED plus the unchanged owner/live-admin/one-attempt rules. While OFF every route body, SQL statement and reply is the original single-target slot-1 behaviour and /targets answers the generic 404. Amends R-50 decision 1 (one permanent target slot per deployment) only when ON: enabling it on any deployed machine is a separate owner decision (R-50, AGENTS.md owner-only steps).',
+    source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime+yidaInitializationRuntime; packages/core-backend/src/integration/yida-send-approval-service.ts; packages/core-backend/src/integration/yida-sheet-source.ts; packages/core-backend/src/routes/integration-yida-owner.ts',
+  },
+  {
     key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
     type: 'boolean',
     activationValue: 'true',
