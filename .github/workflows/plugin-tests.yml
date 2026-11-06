@@ -1770,6 +1770,23 @@ jobs:
             --reporter=verbose --reporter=json --outputFile.json=../../artifacts/yida-realdb/lock-protocol-vitest.json
           node scripts/ops/vitest-zero-skip.mjs artifacts/yida-realdb/lock-protocol-vitest.json 14
 
+      # C1/S2 synthetic integration preview (default OFF): two-connection admission/revocation proofs on an
+      # owned schema, and the actual-MetaSheetServer acceptance on this migrated database. Whole files with
+      # their own EXPECT_DB sentinel, excluded from the no-DB runner; an own step so the YiDa lane above
+      # stays byte-identical.
+      - name: Run synthetic integration preview real-DB proofs
+        id: automation-synthetic-preview-real-db
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          EXPECT_DB: '1'
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for the synthetic integration preview real-DB proofs}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/automation-synthetic-preview-realdb.test.ts \
+            tests/integration/automation-synthetic-preview-host-realdb.test.ts \
+            --reporter=verbose
+
       # These files each import the real native AuthService/JWT and scoped pool.
       # Isolated fresh forks, no broad setup RBAC bypass, no suite skip-green.
       # Chromium comes from the required owner-browser install step above; only YiDa responses
