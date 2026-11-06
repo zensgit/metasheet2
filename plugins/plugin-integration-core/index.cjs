@@ -115,6 +115,9 @@ let stockPreparationRuntimeDatabase = null
 let stopYidaOwnerRuntime = null
 let stopYidaInitializationRuntime = null
 let stopYidaConnectionTestRuntime = null
+// R-69 1b-ii: the unbind of the IntegrationRunPort registered with the host (null when the host did not offer
+// the capability — only plugin-integration-core receives it — or before activate).
+let unbindIntegrationRunPort = null
 
 function buildCapabilityStatus() {
   return {
@@ -512,7 +515,7 @@ module.exports = {
       res.json(buildHealthPayload())
     })
     registeredRoutes.push('GET /api/integration/health')
-    registeredRoutes.push(...registerIntegrationRoutes({
+    const integrationRoutes = registerIntegrationRoutes({
       context,
       logger,
       services: {
@@ -596,10 +599,24 @@ module.exports = {
           ? { stockPreparationSqlServerRuntime }
           : {}),
       },
-    }))
+    })
+    registeredRoutes.push(...integrationRoutes)
 
     // --- Cross-plugin communication --------------------------------------
     context.communication.register(COMMUNICATION_NAMESPACE, buildCommunicationApi())
+
+    // --- R-69 1b-ii: IntegrationRunPort (plugin → host) --------------------
+    // The core `run_integration_job` action reaches the SAME governed entries the HTTP handlers run
+    // (runGovernedStockPrepPull / runGovernedPipeline) through this port — never through
+    // buildCommunicationApi(), never by HTTP, never with a runAs or write-lifecycle marker of its own. Only the
+    // host offers `services.integrationRun`, and only to this plugin. Dry-run only; R-69 is OPEN.
+    const integrationRun = context.services && context.services.integrationRun
+    if (integrationRun && typeof integrationRun.register === 'function' && integrationRoutes.governedEntries) {
+      const { createIntegrationRunPort } = require('./lib/integration-run-port.cjs')
+      unbindIntegrationRunPort = integrationRun.register(createIntegrationRunPort({
+        governedEntries: integrationRoutes.governedEntries,
+      }))
+    }
 
     logger.info(`[${PLUGIN_ID}] activated (${PLUGIN_PHASE}). routes=${registeredRoutes.length}`)
     // Only the host receives these actual factories. Never publish them, their
@@ -658,6 +675,13 @@ module.exports = {
   async deactivate() {
     if (!activeContext) return
     const logger = activeContext.logger || console
+    // R-69 1b-ii: unbind the IntegrationRunPort first, so no new job is admitted into a plugin that is
+    // going away (the host also unbinds by owner on deactivate / reload / activation failure).
+    if (unbindIntegrationRunPort) {
+      const unbind = unbindIntegrationRunPort
+      unbindIntegrationRunPort = null
+      try { unbind() } catch { /* the host's owner-scoped cleanup is the backstop */ }
+    }
     // Latch the private runtimes before the legacy read drain's first await. A stopped
     // owner request retains actual pending work, so observe its rejection now
     // but await the original drain before any plugin DB is closed below.
