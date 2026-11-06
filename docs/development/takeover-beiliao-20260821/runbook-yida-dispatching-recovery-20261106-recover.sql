@@ -41,9 +41,11 @@ ROLLBACK;
 \echo DISPATCHING_RECOVERY=STOP status_not_dispatching
 \quit
 \endif
-SELECT abs(extract(epoch FROM clock_timestamp() - :'host_now'::timestamptz)) < 2
+-- now() is the transaction start (BEGIN), taken before the row-lock wait above:
+-- a wait on the row lock is never read as clock skew.
+SELECT abs(extract(epoch FROM now() - :'host_now'::timestamptz)) < 2
          AS clock_skew_ok,
-       :'backend_started_at'::timestamptz <= clock_timestamp() + interval '2 seconds'
+       :'backend_started_at'::timestamptz <= now() + interval '2 seconds'
          AS start_not_future,
        count(*) = 1
          AND coalesce(bool_and(c.created_at + interval '2 seconds'

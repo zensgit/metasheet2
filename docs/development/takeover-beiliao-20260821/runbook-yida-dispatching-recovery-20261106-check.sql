@@ -12,8 +12,19 @@
 \endif
 BEGIN READ ONLY;
 SELECT 'clock' AS kind,
-       abs(extract(epoch FROM clock_timestamp() - :'host_now'::timestamptz)) < 2 AS skew_ok,
-       :'backend_started_at'::timestamptz <= clock_timestamp() + interval '2 seconds' AS start_not_future;
+       abs(extract(epoch FROM now() - :'host_now'::timestamptz)) < 2 AS skew_ok,
+       :'backend_started_at'::timestamptz <= now() + interval '2 seconds' AS start_not_future;
+-- Other connections to this database (this psql session excluded). The backend's pools name
+-- themselves 'metasheet-...'; sources = distinct client addresses among them. Counts only.
+SELECT 'sessions' AS kind,
+       count(*) FILTER (WHERE s.application_name LIKE 'metasheet-%') AS backend_sessions,
+       count(DISTINCT coalesce(host(s.client_addr), 'local'))
+         FILTER (WHERE s.application_name LIKE 'metasheet-%') AS backend_sources,
+       count(*) FILTER (WHERE s.application_name NOT LIKE 'metasheet-%') AS other_sessions,
+       count(*) FILTER (WHERE s.backend_type IS NULL) AS hidden_sessions
+  FROM pg_stat_activity s
+ WHERE s.datname = current_database() AND s.pid <> pg_backend_pid()
+   AND (s.backend_type = 'client backend' OR s.backend_type IS NULL);
 SELECT 'ledger' AS kind, status, count(*) AS n
   FROM integration_yida_delivery_ledger GROUP BY status ORDER BY status;
 SELECT 'audit' AS kind, event, status, coalesce(reason, '-') AS reason, count(*) AS n

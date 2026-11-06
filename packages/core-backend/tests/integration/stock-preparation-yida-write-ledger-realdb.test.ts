@@ -5,7 +5,7 @@
 // Run only in the EXPECT_DB lane / a freshly-created disposable synthetic DB.
 
 import { spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
@@ -971,6 +971,29 @@ describeIfDatabase('SA05B1 Yida delivery ledger — real PostgreSQL, no transpor
       for (const file of [checkSql, recoverSql]) expect(/^[\t\n\r\x20-\x7e]*$/.test(readFileSync(file, 'latin1'))).toBe(true)
     })
 
+    it('the runbook prints the SHA-256 of each script\'s LF bytes; the scripts are pinned eol=lf, and a CRLF, BOM or UTF-16 copy does not match', () => {
+      const lf = (text: string) => text.replaceAll('\r\n', '\n')
+      const doc = lf(readFileSync(runbookDoc, 'utf8'))
+      const printed = [...doc.matchAll(/^(yida-dispatching-(?:check|recover)\.sql) +([0-9A-F]{64})$/gm)].map((match) => [match[1], match[2]])
+      const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex').toUpperCase()
+      const files: Record<string, string> = { 'yida-dispatching-check.sql': checkSql, 'yida-dispatching-recover.sql': recoverSql }
+      expect(printed.map(([name]) => name)).toEqual(Object.keys(files))
+      for (const [name, digest] of printed) {
+        const text = lf(readFileSync(files[name], 'utf8'))
+        expect(digest).toBe(sha(Buffer.from(text, 'utf8')))
+        // What a pasted or re-encoded copy looks like: each hashes differently, so the operator's check stops on it.
+        const copies = [
+          Buffer.from(text.replaceAll('\n', '\r\n'), 'utf8'),
+          Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(text, 'utf8')]),
+          Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, 'utf16le')]),
+        ]
+        for (const copy of copies) expect(sha(copy)).not.toBe(digest)
+      }
+      // A Windows checkout (core.autocrlf=true) must still hand the operator the LF bytes the digests are of.
+      const attributes = lf(readFileSync(path.join(repoRoot, '.gitattributes'), 'utf8')).split('\n')
+      expect(attributes).toContain('docs/development/takeover-beiliao-20260821/runbook-yida-dispatching-recovery-20261106-*.sql text eol=lf')
+    })
+
     it('ACK first: the runbook waits on the row lock, re-reads acknowledged and exits; row and audit unchanged', async () => {
       const row = await dispatchingRow()
       const commit = first.gateBefore('COMMIT')
@@ -1082,6 +1105,54 @@ describeIfDatabase('SA05B1 Yida delivery ledger — real PostgreSQL, no transpor
       await insertRow(ADMISSIONS, { grant_id: preparedGrant, ledger_id: prepared.record.id })
       expect(await stop({ ...(await processFacts()), grant_id: preparedGrant })).toBe('DISPATCHING_RECOVERY=STOP status_not_dispatching')
       expect((await first.store.get(scope(fixture({ operationId: 'synthetic-operation-p', rowKey: 'synthetic-row-p' }))))?.status).toBe('prepared')
+    })
+
+    it('a row-lock wait longer than the 2 s clock tolerance is not reported as clock skew: the script compares against its transaction start', async () => {
+      const row = await dispatchingRow()
+      await second.client.query('BEGIN')
+      await second.client.query(`SELECT id FROM ${ident(LEDGER)} WHERE id = $1 FOR UPDATE`, [row.ledgerId])
+      const variables = await recoverVars(row.grantId)
+      const run = psql(recoverSql, variables)
+      await lockWait({ app: run.app }, second.pid)
+      // Keep the row locked until the database clock is 2.5 s past host_now: the elapsed wait alone
+      // is beyond the tolerance, so only a transaction-start comparison lets the script through.
+      for (;;) {
+        const past = await owner.query(`SELECT clock_timestamp() > $1::timestamptz + interval '2.5 seconds' AS past`, [variables.host_now])
+        if (past.rows[0].past === true) break
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      await second.client.query('ROLLBACK')
+      const result = await run.exit
+      expect(result.code).toBe(0)
+      expect(result.stdout.trim()).toBe(DONE)
+      expect((await rows(LEDGER))[0]).toMatchObject({ id: row.ledgerId, status: 'outcome_unknown', claim_token: row.claimToken })
+    })
+
+    it('the read-only check counts the MetaSheet backend connections to this database (counts only; its own session excluded)', async () => {
+      await dispatchingRow()
+      const sessions = async () => {
+        const result = await psql(checkSql, await processFacts()).exit
+        expect(result.code).toBe(0)
+        const lines = dataLines(result.stdout, 'sessions')
+        expect(lines).toHaveLength(1)
+        expect(lines[0]).toMatch(/^sessions\|\d+\|\d+\|\d+\|\d+$/)
+        const [backend, sources, other, hidden] = lines[0].split('|').slice(1).map(Number)
+        return { backend, sources, other, hidden }
+      }
+      const before = await sessions()
+      // A synthetic connection named the way the backend's main pool names itself.
+      const backendPool = new Pool({ connectionString: process.env.DATABASE_URL, application_name: 'metasheet-backend', max: 1 })
+      const held = await backendPool.connect()
+      try {
+        const after = await sessions()
+        expect(after.backend).toBe(before.backend + 1)
+        expect(after.sources).toBe(before.backend === 0 ? 1 : before.sources)
+        expect(after.other).toBe(before.other)
+        expect(after.hidden).toBe(before.hidden)
+      } finally {
+        held.release()
+        await backendPool.end()
+      }
     })
   })
 })
