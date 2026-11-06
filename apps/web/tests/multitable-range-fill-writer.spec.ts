@@ -60,6 +60,42 @@ async function setup() {
   return { grid, client, sheetId, viewId, patchRecords, patchFetch }
 }
 
+// A cell patch joins the undo history only once it succeeds (after its await): an undo or redo while one
+// is in flight would step over it and replay an earlier, unrelated edit to the server instead.
+describe('useMultitableGrid undo/redo while a cell patch is in flight', () => {
+  beforeEach(() => useLocale().setLocale('en'))
+
+  it('does nothing until the patch settles; then undo reverts that very patch', async () => {
+    const { grid, patchFetch, patchRecords } = await setup()
+    // mid-history: both an undo and a redo are available while the patch is in flight
+    expect(grid.canUndo.value).toBe(true)
+    expect(grid.canRedo.value).toBe(true)
+    const pending = deferred<Response>()
+    patchFetch.mockReturnValueOnce(pending.promise)
+    const commit = grid.patchCell('r2', 'f1', 'renamed', 8)
+    await grid.undo()
+    await grid.redo()
+    expect(patchRecords).toHaveBeenCalledTimes(1)
+    expect(grid.historyIndex.value).toBe(0)
+    pending.resolve(response({ ...success, updated: [{ recordId: 'r2', version: 9 }] }))
+    await commit
+    expect(grid.editHistory.value.at(-1)).toMatchObject({ recordId: 'r2', fieldId: 'f1', newValue: 'renamed' })
+    await grid.undo()
+    expect(patchRecords).toHaveBeenCalledTimes(2)
+    expect(patchRecords.mock.calls[1][0].changes).toEqual([expect.objectContaining({ recordId: 'r2', fieldId: 'f1', value: 'old too' })])
+  })
+
+  it('two undos in a row still both run (an undo\'s own replay does not block the next one)', async () => {
+    const { grid, patchRecords } = await setup()
+    grid.historyIndex.value = 1
+    const first = grid.undo()
+    const second = grid.undo()
+    await Promise.all([first, second])
+    expect(patchRecords).toHaveBeenCalledTimes(2)
+    expect(grid.historyIndex.value).toBe(-1)
+  })
+})
+
 describe('useMultitableGrid patchRange', () => {
   beforeEach(() => useLocale().setLocale('en'))
 

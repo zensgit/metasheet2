@@ -2,6 +2,9 @@
 // record drawer: Chromium's Meta+Z runs the browser's own undo command unless the page prevents it, so
 // these scenarios prove the chords never reach it and that restores commit on blur. Synthetic data only.
 // Run from apps/web: `npx vite --port 18919 --strictPort` in one shell, then `node scripts/verify-workbench-undo-browser.mjs`.
+// Chromium only. One property needs Safari: a restored plain box goes through the browser's editing
+// command because Safari saves on blur only an edit the user made, never a value set from script, and
+// Chromium saves both. Check the two "leave the field" scenarios by hand in Safari when that path changes.
 import { chromium } from '@playwright/test'
 const URL = 'http://127.0.0.1:18919/tests/fixtures/workbench-undo-browser-demo.html'
 const mod = process.platform === 'darwin' ? 'Meta' : 'Control'
@@ -29,7 +32,7 @@ const SCENARIOS = {
     const s = await state(page); check('value', s.name, 'alpha'); check('grid', s.grid, { undo: 0, redo: 0 })
     await leave(page); check('saved', (await saved(page)).filter((p) => p.includes('fld_name')), [])
   },
-  async 'type, pause, type, Cmd+Z, leave: the second burst goes; the rest is saved (Safari-safe restore)'(page) {
+  async 'type, pause, type, Cmd+Z, leave: the second burst goes; the rest is saved'(page) {
     await page.locator('#drawer_field_fld_name').click(); await page.keyboard.press('End'); await page.keyboard.type('X'); await page.waitForTimeout(1200); await page.keyboard.type('Y'); await page.keyboard.press(`${mod}+z`)
     check('value', (await state(page)).name, 'alphaX')
     await leave(page); check('saved', (await saved(page)).filter((p) => p.includes('fld_name')), ['rec_1:fld_name=alphaX'])
@@ -52,6 +55,12 @@ const SCENARIOS = {
     check('focus on the page', await page.evaluate(() => document.activeElement === document.body), true)
     await page.keyboard.press(`${mod}+z`)
     const s = await state(page); check('title', s.title, '巡检记录 A X'); check('grid', s.grid, { undo: 1, redo: 0 })
+  },
+  async 'a rename outside the grid (rail): Enter removes its input and focus goes to the page; Cmd+Z: nothing, never the grid'(page) {
+    await page.locator('#rename').click(); await page.keyboard.press('End'); await page.keyboard.type(' X'); await page.keyboard.press('Enter'); await page.waitForTimeout(100)
+    check('focus on the page', await page.evaluate(() => document.activeElement === document.body), true)
+    await page.keyboard.press(`${mod}+z`); await page.keyboard.press(`${mod}+Shift+z`)
+    check('grid', (await state(page)).grid, { undo: 0, redo: 0 })
   },
   async 'title rewritten by the record (grid undo, a record re-render), Cmd+Z: nothing'(page) {
     const t = page.locator('.meta-record-drawer__title-input'); await t.click(); await page.keyboard.press('End'); await page.keyboard.type(' T')

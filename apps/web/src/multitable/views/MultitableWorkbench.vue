@@ -5735,9 +5735,13 @@ function onBeforeUnload(e: BeforeUnloadEvent) {
 // mod+z / mod+y / mod+shift+z belong to the workbench while it is mounted (utils/workbench-undo.ts,
 // installed on the document in onMounted): the browser's own undo never runs on the page, since it is
 // page-wide and can revert another field. A text control's chord is its own step or nothing; the grid's
-// undo/redo runs from a non-text target in the workbench (or the page itself after a press in it).
+// undo/redo runs from a non-text target in the workbench, or from the page itself after a press on the
+// grid or the record drawer (whose edits are the grid's history; a rail or manager rename is not).
 const workbenchRootRef = ref<HTMLElement | null>(null)
-const workbenchUndo = createWorkbenchUndo({ isInsideWorkbench: (node) => !!workbenchRootRef.value?.contains(node) })
+const workbenchUndo = createWorkbenchUndo({
+  isInsideWorkbench: (node) => !!workbenchRootRef.value?.contains(node),
+  isGridSurface: (node) => !!(node instanceof Element ? node : node.parentElement)?.closest('.meta-grid, .meta-record-drawer'),
+})
 let removeWorkbenchUndo: (() => void) | null = null
 // The drawer's controls are reused when it shows another record (and the sheet's and view's controls
 // when those change), so a control's history must not outlive what it was typed for: with equal content

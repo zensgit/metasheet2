@@ -5656,15 +5656,17 @@ describe('MultitableWorkbench view wiring', () => {
       }
       return event
     }
-    /** A root standing in for `.mt-workbench`, an element outside it (a teleported dialog), and the
-     *  module installed on the document the way the workbench installs it. */
+    /** A root standing in for `.mt-workbench` with a grid surface in it (the grid / the record drawer), an
+     *  element outside it (a teleported dialog), and the module installed on the document the way the
+     *  workbench installs it. */
     function rig() {
       let clock = 0
       const root = document.createElement('div')
+      const gridSurface = root.appendChild(document.createElement('div'))
       const outside = document.createElement('div')
       document.body.append(root, outside)
       made.push(root, outside)
-      const undo = createWorkbenchUndo({ now: () => clock, isInsideWorkbench: (node) => root.contains(node) })
+      const undo = createWorkbenchUndo({ now: () => clock, isInsideWorkbench: (node) => root.contains(node), isGridSurface: (node) => gridSurface.contains(node) })
       const grid = { undo: 0, redo: 0 }
       removers.push(installWorkbenchUndo(undo, { undo: () => { grid.undo += 1 }, redo: () => { grid.redo += 1 } }))
       const add = <T extends HTMLElement>(el: T, where: HTMLElement = root): T => { where.appendChild(el); return el }
@@ -5703,7 +5705,7 @@ describe('MultitableWorkbench view wiring', () => {
         return { prevented: event.defaultPrevented, undo: grid.undo - before.undo, redo: grid.redo - before.redo }
       }
       const pause = (ms: number) => { clock += ms }
-      return { undo, root, outside, add, editable, edit, commandEdit, key, press, pause, grid }
+      return { undo, root, gridSurface, outside, add, editable, edit, commandEdit, key, press, pause, grid }
     }
     const value = (el: HTMLElement) => (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ? el.value : el.innerHTML)
 
@@ -5733,39 +5735,48 @@ describe('MultitableWorkbench view wiring', () => {
       expect(press(textarea, { key: 'x', metaKey: true }).prevented).toBe(false)
     })
 
-    it('where the chord goes when no control step applies: a text control never hands it on; the grid runs from a non-text target inside, and from the page itself unless the last press was outside; nothing outside', () => {
-      const { add, edit, key, root, outside } = rig()
+    it('where the chord goes when no control step applies: a text control never hands it on; the grid runs from a non-text target inside, and from the page itself only after a press or focus on a grid surface; nothing outside', () => {
+      const { add, edit, key, root, gridSurface, outside } = rig()
       const inside = add(Object.assign(document.createElement('input'), { type: 'text' }))
       const insideButton = add(document.createElement('button'))
+      const gridButton = add(document.createElement('button'), gridSurface)
+      const gridText = add(Object.assign(document.createElement('input'), { type: 'text' }), gridSurface)
       const date = add(Object.assign(document.createElement('input'), { type: 'date' }))
       const outsideText = add(Object.assign(document.createElement('input'), { type: 'text' }), outside)
       const outsideButton = add(document.createElement('button'), outside)
+      const mousedown = (el: HTMLElement) => el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
       expect(key(inside, { key: 'z', metaKey: true })).toBe('swallow')
       expect(key(inside, { key: 'Z', metaKey: true, shiftKey: true })).toBe('swallow')
       expect(key(inside, { key: 'y', metaKey: true })).toBe('swallow')
       expect(key(insideButton, { key: 'z', metaKey: true })).toBe('grid-undo')
+      expect(key(gridButton, { key: 'z', metaKey: true })).toBe('grid-undo')
       expect(key(date, { key: 'y', metaKey: true })).toBe('grid-redo')
       expect(key(root, { key: 'Z', metaKey: true, shiftKey: true })).toBe('grid-redo')
-      expect(key(document.body, { key: 'z', metaKey: true })).toBe('grid-undo')
       expect(key(outsideButton, { key: 'z', metaKey: true })).toBe('swallow')
       expect(key(outsideText, { key: 'z', metaKey: true })).toBe('swallow')
-      // the page itself after a press in an overlay (a popover's background, a dialog's button, which
-      // Safari does not focus): the overlay's, so nothing; after a press back in the workbench: the grid's
-      outsideButton.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
-      expect(key(document.body, { key: 'z', metaKey: true })).toBe('swallow')
-      insideButton.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+      // the page itself: the grid's after a press or focus on a grid surface (the title committed by
+      // Enter); nothing after one elsewhere in the workbench (a rail or manager rename whose input went
+      // away), in an overlay (a popover's background, a dialog's button, which Safari does not focus)
+      mousedown(gridButton)
       expect(key(document.body, { key: 'z', metaKey: true })).toBe('grid-undo')
+      mousedown(insideButton)
+      expect(key(document.body, { key: 'z', metaKey: true })).toBe('swallow')
+      gridText.focus()
+      expect(key(document.body, { key: 'z', metaKey: true })).toBe('grid-undo')
+      inside.focus()
+      expect(key(document.body, { key: 'Z', metaKey: true, shiftKey: true })).toBe('swallow')
+      mousedown(gridButton)
+      mousedown(outsideButton)
+      expect(key(document.body, { key: 'z', metaKey: true })).toBe('swallow')
+      mousedown(gridButton)
       // a press on the page itself (outside every control) changes nothing either way
       document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
       expect(key(document.body, { key: 'z', metaKey: true })).toBe('grid-undo')
-      outsideButton.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+      mousedown(outsideButton)
       document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
       expect(key(document.body, { key: 'z', metaKey: true })).toBe('swallow')
-      insideButton.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
       outsideText.focus()
       expect(key(document.body, { key: 'z', metaKey: true })).toBe('swallow')
-      inside.focus()
-      expect(key(document.body, { key: 'z', metaKey: true })).toBe('grid-undo')
       // a control outside the workbench still has its own history
       edit(outsideText, 'filter value')
       expect(key(outsideText, { key: 'z', metaKey: true })).toBe('restored')
@@ -5982,6 +5993,7 @@ describe('MultitableWorkbench view wiring', () => {
     it('the Edit menu\'s undo (beforeinput historyUndo/historyRedo) is cancelled: the control\'s own step when it has one, never the grid', () => {
       const { add, edit, grid } = rig()
       const host = add(document.createElement('textarea'))
+      host.focus()
       edit(host, 'typed')
       const menu = (inputType: string) => {
         const event = withProps(new InputEvent('beforeinput', { bubbles: true, cancelable: true }), { inputType })
@@ -5997,6 +6009,11 @@ describe('MultitableWorkbench view wiring', () => {
       expect(menu('historyUndo')).toBe(true)
       expect(host.value).toBe('')
       expect(grid).toEqual({ undo: 0, redo: 0 })
+      // aimed at a control that does not have focus: cancelled, and the control is left as it is
+      edit(host, 'typed again')
+      host.blur()
+      expect(menu('historyUndo')).toBe(true)
+      expect(host.value).toBe('typed again')
     })
 
     it('a held key in a text control stops at its last step (never the grid); a held key on the grid itself still runs the grid\'s', () => {
@@ -6010,12 +6027,30 @@ describe('MultitableWorkbench view wiring', () => {
     })
 
     it('after a restore the next typing starts a new step, even within the burst window', () => {
-      const { add, edit, key } = rig()
+      const { add, edit, key, pause } = rig()
       const host = add(document.createElement('textarea'))
-      edit(host, 'a'); edit(host, 'ab')
+      edit(host, 'a')
+      pause(2000)
+      edit(host, 'ab')
+      expect(key(host, { key: 'z', metaKey: true })).toBe('restored')
+      expect(host.value).toBe('a')
+      edit(host, 'ax') // 100ms later: same kind, inside the window, with an earlier step still there
+      expect(key(host, { key: 'z', metaKey: true })).toBe('restored')
+      expect(host.value).toBe('a')
       expect(key(host, { key: 'z', metaKey: true })).toBe('restored')
       expect(host.value).toBe('')
-      edit(host, 'x') // 100ms later: same kind, inside the window
+    })
+
+    it('consecutive deletes are one step; a restore puts a plain box\'s selection back where it was', () => {
+      const { add, edit, key, pause } = rig()
+      const host = add(document.createElement('textarea'))
+      edit(host, 'abcdef')
+      pause(2000)
+      host.setSelectionRange(3, 3)
+      edit(host, 'abdef', 'deleteContentBackward'); edit(host, 'adef', 'deleteContentBackward')
+      expect(key(host, { key: 'z', metaKey: true })).toBe('restored')
+      expect(host.value).toBe('abcdef')
+      expect([host.selectionStart, host.selectionEnd]).toEqual([3, 3])
       expect(key(host, { key: 'z', metaKey: true })).toBe('restored')
       expect(host.value).toBe('')
     })
@@ -6039,6 +6074,12 @@ describe('MultitableWorkbench view wiring', () => {
       host.dispatchEvent(withProps(new InputEvent('input', { bubbles: true }), { inputType: 'insertText' }))
       expect(key(host, { key: 'z', metaKey: true })).toBe('restored')
       expect(host.value).toBe('1')
+      // a box holding a bad draft with an earlier step: the chord does nothing (its value is misread)
+      pause(2000)
+      edit(host, '') // '1-': reads ""
+      bad = true
+      expect(key(host, { key: 'z', metaKey: true })).toBe('swallow')
+      expect(key(host, { key: 'Z', metaKey: true, shiftKey: true })).toBe('swallow')
     })
 
     it('a layout whose key is not a Latin letter is matched by the key\'s position (code); a Latin key wins over its position (QWERTZ); Alt held is never ours (Windows AltGr)', () => {
@@ -6148,6 +6189,18 @@ describe('MultitableWorkbench view wiring', () => {
       settleD()
       expect(key(d.el, { key: 'z', metaKey: true })).toBe('restored')
       expect(d.el.value).toBe('')
+      // an undo and a redo while the patch is in flight: the commit still ends the history
+      const g = box()
+      edit(g.el, 'X')
+      pause(2000)
+      edit(g.el, 'XY')
+      const settleG = undo.beginCommit([g.row])
+      expect(key(g.el, { key: 'z', metaKey: true })).toBe('restored')
+      expect(key(g.el, { key: 'Z', metaKey: true, shiftKey: true })).toBe('restored')
+      expect(g.el.value).toBe('XY')
+      settleG()
+      expect(key(g.el, { key: 'z', metaKey: true })).toBe('swallow')
+      expect(g.el.value).toBe('XY')
       // a control marked twice (a contenteditable chip inside the editor maps back to the editor)
       const e = add(document.createElement('div'))
       e.className = 'meta-record-drawer__field'
@@ -6253,16 +6306,25 @@ describe('MultitableWorkbench view wiring', () => {
         expect(text.value).toBe('typed')
         expect(fire(text, { key: 'y', ctrlKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         expect(fire(text, { key: 'z', metaKey: true, isComposing: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
-        for (const el of [date, select, main, stopper, document.body]) {
+        for (const el of [date, select, main, stopper]) {
           expect(fire(el, { key: 'z', metaKey: true }), (el as HTMLElement).tagName).toEqual({ prevented: true, undo: 1, redo: 0 })
           expect(fire(el, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 1 })
         }
         expect(fire(outsideText, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
-        // the page itself after focus in an overlay: the overlay's, so nothing
+        // the page itself: the grid's only after a press or focus on the grid (.meta-grid) or the record
+        // drawer (.meta-record-drawer); after the last focus was a non-grid control (here the text box) or
+        // an overlay, nothing
+        expect(fire(document.body, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        const gridSurface = add(Object.assign(document.createElement('div'), { className: 'meta-grid' }))
+        const drawerSurface = add(Object.assign(document.createElement('div'), { className: 'meta-record-drawer' }))
+        gridSurface.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+        expect(fire(document.body, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 1, redo: 0 })
         outsideText.focus()
         expect(fire(document.body, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        drawerSurface.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+        expect(fire(document.body, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 1 })
         main.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
-        expect(fire(document.body, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 1, redo: 0 })
+        expect(fire(document.body, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         app!.unmount()
         app = null
         expect(fire(document.body, { key: 'z', metaKey: true })).toEqual({ prevented: false, undo: 0, redo: 0 })
@@ -6343,6 +6405,56 @@ describe('MultitableWorkbench view wiring', () => {
         expect(notes.value).toBe('')
         expect(fire(notes, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         expect(notes.value).toBe('')
+      })
+
+      it('a view change drops the controls\' histories too (a view\'s inputs are reused across views)', async () => {
+        mountWorkbench()
+        await flushUi()
+        const root = container!.querySelector('.mt-workbench') as HTMLElement
+        const field = document.createElement('input')
+        root.appendChild(field)
+        made.push(field)
+        field.focus()
+        typeInto(field, 'typed in view 1')
+        field.dispatchEvent(withProps(new InputEvent('beforeinput', { bubbles: true, cancelable: true }), { inputType: 'deleteContentBackward' }))
+        field.value = ''
+        field.dispatchEvent(withProps(new InputEvent('input', { bubbles: true }), { inputType: 'deleteContentBackward' }))
+        workbenchMock.activeViewId.value = 'view_gallery'
+        await flushUi()
+        if (!field.isConnected) root.appendChild(field)
+        field.focus()
+        expect(fire(field, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        expect(field.value).toBe('')
+      })
+
+      it('a rename outside the grid surfaces (its input goes away, focus falls to the page): Cmd+Z does nothing, never the grid', async () => {
+        mountWorkbench()
+        await flushUi()
+        const root = container!.querySelector('.mt-workbench') as HTMLElement
+        const rename = document.createElement('input')
+        root.appendChild(rename)
+        rename.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+        rename.focus()
+        typeInto(rename, 'Sheet renamed')
+        rename.remove() // Enter: the rename commits and its input unmounts
+        expect(document.activeElement).toBe(document.body)
+        expect(fire(document.body, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        expect(fire(document.body, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+      })
+
+      it('wiring: a local refusal (the row cannot be edited; no server answer) is not a commit: the typing stays undoable', async () => {
+        const { title } = await openDrawerWithTitle()
+        gridMock.patchCell.mockImplementation(async () => {
+          gridMock.error.value = 'Not editable'
+          return null
+        })
+        typeInto(title, 'Renamed')
+        clickPatch()
+        await flushUi()
+        title.focus()
+        expect(fire(title, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        expect(title.value).toBe('')
+        gridMock.error.value = null
       })
     })
   })

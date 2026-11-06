@@ -10,7 +10,8 @@
  * the listeners sit on the document in the capture phase (a control that stops propagation of every
  * key, like the comment affordance buttons, cannot get past them), and every one of these chords is
  * default-prevented, in every state, wherever focus is. An Edit-menu undo (`beforeinput` historyUndo /
- * historyRedo) is cancelled too, and is the focused control's own step when it has one.
+ * historyRedo) is cancelled too, and is the focused control's own step when it has one (an unfocused
+ * control is left alone: restoring it without a focus would never be saved).
  *
  * - Typing in a text-entry control (a textarea, an editable contenteditable, a text-like input) is
  *   recorded per control, in bursts: a `beforeinput` takes a snapshot of the content (and selection)
@@ -25,19 +26,22 @@
  * - A text-entry control never hands the chord on: with no step of its own left, the chord does
  *   nothing. The grid's undo / redo (which replays a recorded cell edit to the server) runs only from a
  *   non-text target inside the workbench (the grid, a button, a date input, a select…), or from the page
- *   itself (nothing focused, e.g. after Enter committed the title) when the last press or focus was
- *   inside the workbench. Outside the workbench (a teleported dialog or popover, the app shell) nothing
- *   runs.
+ *   itself (nothing focused, e.g. after Enter committed the title) when the last press or focus was on a
+ *   grid surface (`isGridSurface`: the grid or the record drawer, whose edits are the grid's history). A
+ *   rename in the rail or a manager, or a press in a dialog, does not make the page itself the grid's.
+ *   Outside the workbench (a teleported dialog or popover, the app shell) nothing runs.
  * - The history belongs to the control's own edits only. Content no recorded edit produced (a re-render
  *   after grid undo, a suggestion picked into the box, a revert, a rejected commit snapping back) is a
  *   rewrite: the history is dropped. `reset` drops every history: the workbench calls it when the drawer
  *   shows another record (its controls are reused, and may hold equal content in both), or the sheet or
  *   view changes.
  * - A saved commit ends the history (`beginCommit` from the workbench's drawer commit, settled once the
- *   server accepted it): only edits made since stay undoable, back to the committed content. A DOM
- *   `change` is not a commit: most boxes' `change` saves nothing.
+ *   server accepted it): only edits made since stay undoable, back to the committed content, also when
+ *   the control was undone and redone while the patch was in flight. A DOM `change` is not a commit:
+ *   most boxes' `change` saves nothing.
  * - During an input-method composition the chord does nothing. A number box holding a draft it cannot
- *   report (`validity.badInput`: "-", "1." read as "") takes no snapshot while it holds one.
+ *   report (`validity.badInput`: "-", "1." read as "") does nothing on the chord and takes no snapshot
+ *   while it holds one: its value would be misread.
  * - With Alt held the chord is not ours: on Windows AltGr is Ctrl+Alt, and AltGr+Z / AltGr+Y type letters
  *   (Polish ż, Latvian ž).
  */
@@ -79,6 +83,10 @@ interface Snapshot {
   content: string
   start: number | null
   end: number | null
+  /** Where the step sits in the control's history: a new step takes the next number; the step an undo
+   *  or redo moves to the other stack keeps the number of the one it replaced, so a commit's mark still
+   *  covers it after an undo and a redo. */
+  seq: number
 }
 
 interface History {
@@ -93,6 +101,8 @@ interface History {
   composing: boolean
   /** The `reset` generation it belongs to; an older one is dropped. */
   generation: number
+  /** The last step number handed out. */
+  seq: number
 }
 
 function isPlainControl(host: HTMLElement): host is HTMLInputElement | HTMLTextAreaElement {
@@ -159,10 +169,10 @@ function restoreEditableSelection(host: HTMLElement, start: number | null, end: 
   selection.addRange(range)
 }
 
-function snapshotOf(host: HTMLElement): Snapshot {
+function snapshotOf(host: HTMLElement, seq: number): Snapshot {
   if (!isPlainControl(host)) {
     const selection = editableSelection(host)
-    return { content: host.innerHTML, start: selection?.start ?? null, end: selection?.end ?? null }
+    return { content: host.innerHTML, start: selection?.start ?? null, end: selection?.end ?? null, seq }
   }
   let start: number | null = null
   let end: number | null = null
@@ -172,7 +182,7 @@ function snapshotOf(host: HTMLElement): Snapshot {
   } catch {
     // some input types have no selection
   }
-  return { content: host.value, start, end }
+  return { content: host.value, start, end, seq }
 }
 
 /** The kind of an edit for grouping into bursts: consecutive inserts or deletes of plain text group;
@@ -204,19 +214,24 @@ export interface WorkbenchUndoOptions {
   now?: () => number
   /** Whether `node` is inside the workbench (the page itself is decided here, not by this). */
   isInsideWorkbench?: (node: Node) => boolean
+  /** Whether `node` is on a surface whose edits are the grid's undo history (the grid, the record
+   *  drawer): only after a press or focus there is a chord on the page itself the grid's. */
+  isGridSurface?: (node: Node) => boolean
 }
 
 export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
   const coalesceMs = options.coalesceMs ?? 800
   const now = options.now ?? (() => Date.now())
   const isInsideWorkbench = options.isInsideWorkbench ?? (() => true)
+  const isGridSurface = options.isGridSurface ?? (() => true)
   const histories = new WeakMap<HTMLElement, History>()
   let generation = 0
   /** Set while a restore runs, so the recorder does not take its own edit as one. */
   let restoring = false
-  /** Whether the last press or focus landed outside the workbench (a teleported dialog or popover):
-   *  then a chord on the page itself belongs to that overlay, not to the grid behind it. */
-  let lastPressOutside = false
+  /** Whether the last press or focus landed on a grid surface. A chord on the page itself is the grid's
+   *  only then: after a rename in the rail or a manager, or a press in a dialog or popover (in the
+   *  workbench or teleported out of it), it is not, and the grid's history is not what the user meant. */
+  let lastPressOnGrid = true
 
   function live(host: HTMLElement): History | undefined {
     const history = histories.get(host)
@@ -224,7 +239,7 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
   }
 
   function fresh(host: HTMLElement): History {
-    const history: History = { undo: [], redo: [], known: contentOf(host), lastKind: '', lastAt: 0, pendingBefore: false, composing: false, generation }
+    const history: History = { undo: [], redo: [], known: contentOf(host), lastKind: '', lastAt: 0, pendingBefore: false, composing: false, generation, seq: 0 }
     histories.set(host, history)
     return history
   }
@@ -296,7 +311,7 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
     while (undo && from.length > 0 && from[from.length - 1].content === content) from.pop()
     const snapshot = from.pop()
     if (!snapshot) return false
-    pushCapped(undo ? history.redo : history.undo, snapshotOf(host))
+    pushCapped(undo ? history.redo : history.undo, snapshotOf(host, snapshot.seq))
     restore(host, history, snapshot)
     return true
   }
@@ -316,12 +331,13 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
       if (host) {
         // A text-entry control's chord is its own: a step of its own, or nothing. Cmd+Y is never a text
         // redo (on macOS it is not one).
+        if (hasUnreportableDraft(host)) return 'swallow'
         if (!(letter === 'y' && event.metaKey) && step(host, undo)) return 'restored'
         return 'swallow'
       }
       const target = event.target as Node | null
-      const inside = isPageItself(target) ? !lastPressOutside : !!target && isInsideWorkbench(target)
-      if (!inside) return 'swallow'
+      const grids = isPageItself(target) ? lastPressOnGrid : !!target && isInsideWorkbench(target)
+      if (!grids) return 'swallow'
       return undo ? 'grid-undo' : 'grid-redo'
     },
     onBeforeInput(event: Event): void {
@@ -330,10 +346,12 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
       if (!host) return
       const inputType = (event as InputEvent).inputType ?? ''
       if (inputType === 'historyUndo' || inputType === 'historyRedo') {
-        // The Edit menu's (or a context menu's) undo: never the browser's own. It is the control's own
-        // step when it has one, and never reaches the grid.
+        // The Edit menu's (or a context menu's) undo: never the browser's own. It is the focused control's
+        // own step when it has one, and never reaches the grid. A control without focus is left as it is
+        // (restored without focus it would never blur, so never be saved).
         event.preventDefault()
-        step(host, inputType === 'historyUndo')
+        const focused = host.ownerDocument.activeElement
+        if (focused === host || (!!focused && host.contains(focused))) step(host, inputType === 'historyUndo')
         return
       }
       const history = current(host)
@@ -344,7 +362,7 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
       const kind = editKind(inputType)
       const at = now()
       if (history.undo.length === 0 || kind !== history.lastKind || kind.startsWith('own:') || at - history.lastAt > coalesceMs) {
-        pushCapped(history.undo, snapshotOf(host))
+        pushCapped(history.undo, snapshotOf(host, ++history.seq))
       }
       history.lastKind = kind
       history.lastAt = at
@@ -358,7 +376,7 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
       if (!history.pendingBefore && !history.composing && history.known !== contentOf(host)) {
         // An edit with no `beforeinput` (the editor's own execCommand: paste, drop, toolbar) is a step of
         // its own, back to the content the control had just before.
-        pushCapped(history.undo, { content: history.known, start: null, end: null })
+        pushCapped(history.undo, { content: history.known, start: null, end: null, seq: ++history.seq })
         history.lastKind = ''
         history.lastAt = 0
       }
@@ -371,7 +389,7 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
       if (!host) return
       const history = current(host)
       // The content before the composition is its one step; nothing it shows on the way is.
-      pushCapped(history.undo, snapshotOf(host))
+      pushCapped(history.undo, snapshotOf(host, ++history.seq))
       history.composing = true
     },
     onCompositionEnd(event: Event): void {
@@ -390,10 +408,11 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
       const host = textEntryHost(target)
       if (host) current(host)
     },
-    /** A press or focus landed on `target`: remember whether it was outside the workbench. */
+    /** A press or focus landed on `target`: remember whether it was on a grid surface. */
     onPress(target: EventTarget | null): void {
       if (isPageItself(target)) return
-      lastPressOutside = !isInsideWorkbench(target as Node)
+      const node = target as Node
+      lastPressOnGrid = isInsideWorkbench(node) && isGridSurface(node)
     },
     /** Drop every control's history (the drawer shows another record; the sheet or view changed). */
     reset(): void {
@@ -404,25 +423,24 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
      *  undoable, back to the committed content. A rejected commit keeps it all (a rejection that snaps
      *  the control back to the saved value is a rewrite, which drops it anyway). */
     beginCommit(containers: Element[]): () => void {
-      const marks = new Map<HTMLElement, { history: History; top: Snapshot | undefined }>()
+      const marks = new Map<HTMLElement, { history: History; mark: number }>()
       for (const container of containers) {
         for (const el of [container, ...Array.from(container.querySelectorAll('textarea, input, [contenteditable]'))]) {
           const host = textEntryHost(el)
           const history = host ? live(host) : undefined
           if (!host || !history || marks.has(host)) continue
-          marks.set(host, { history, top: history.undo[history.undo.length - 1] })
+          marks.set(host, { history, mark: history.undo[history.undo.length - 1]?.seq ?? 0 })
           // Typing after the commit is a step of its own, back to the committed content.
           history.lastKind = ''
           history.lastAt = 0
         }
       }
       return () => {
-        for (const [host, { history, top }] of marks) {
-          if (live(host) !== history || !top) continue
-          // Everything up to the last step taken before the commit goes; what was pushed since stays.
-          // (A step undone while the patch was in flight is no longer there: then nothing goes.)
-          const at = history.undo.lastIndexOf(top)
-          if (at >= 0) history.undo.splice(0, at + 1)
+        for (const [host, { history, mark }] of marks) {
+          if (live(host) !== history) continue
+          // Every step taken before the commit goes (an undo and a redo in flight keep a step's number);
+          // what was typed since stays.
+          history.undo = history.undo.filter((snapshot) => snapshot.seq > mark)
         }
       }
     },

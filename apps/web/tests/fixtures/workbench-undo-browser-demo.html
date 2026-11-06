@@ -8,7 +8,8 @@
 // MultitableWorkbench wires the REAL utils/workbench-undo.ts: installed on the document; a drawer patch
 // settles its commit at once (an accepted server patch); a record switch resets every history. The
 // grid's undo/redo are counted, as are the browser's own undo/redo (`input` with inputType historyUndo /
-// historyRedo) anywhere on the page. #outside stands for a popover teleported out of the workbench;
+// historyRedo) anywhere on the page. #grid-area stands for the grid (.meta-grid); #rename for a rail
+// rename whose input goes away on Enter; #outside for a popover teleported out of the workbench;
 // #stopper for a control that stops propagation of every key (the comment affordance buttons).
 import { createApp, h, ref, watch } from '/node_modules/vue/dist/vue.esm-bundler.js'
 import '/node_modules/element-plus/dist/index.css'
@@ -21,7 +22,10 @@ useLocale().setLocale('zh-CN')
 window.undoDemo = { grid: { undo: 0, redo: 0 }, native: 0, patches: [] }
 document.addEventListener('input', (e) => { if (e.inputType === 'historyUndo' || e.inputType === 'historyRedo') window.undoDemo.native += 1 }, true)
 const rootRef = ref(null)
-const undo = createWorkbenchUndo({ isInsideWorkbench: (node) => !!rootRef.value?.contains(node) })
+const undo = createWorkbenchUndo({
+  isInsideWorkbench: (node) => !!rootRef.value?.contains(node),
+  isGridSurface: (node) => !!(node instanceof Element ? node : node.parentElement)?.closest('.meta-grid, .meta-record-drawer'),
+})
 installWorkbenchUndo(undo, { undo: () => { window.undoDemo.grid.undo += 1 }, redo: () => { window.undoDemo.grid.redo += 1 } })
 const FIELDS = [
   { id: 'fld_title', name: '标题', type: 'string' },
@@ -37,13 +41,19 @@ const RECORDS = {
 }
 const record = ref(RECORDS.rec_1)
 const draft = ref('')
+const renaming = ref(true)
 watch(() => record.value.id, () => undo.reset())
 window.undoDemo.rewrite = (fieldId, value) => { record.value = { ...record.value, version: record.value.version + 1, data: { ...record.value.data, [fieldId]: value } } }
 window.undoDemo.switchTo = (id) => { record.value = RECORDS[id] }
 window.undoDemo.draft = () => draft.value
 createApp({
   render: () => h('div', { class: 'row', ref: rootRef }, [
-    h('div', { class: 'main', tabindex: 0, id: 'grid-area' }, [
+    h('div', { class: 'rail', style: 'width: 160px; padding: 16px' }, [
+      renaming.value
+        ? h('input', { id: 'rename', value: 'Sheet 1', onKeydown: (e) => { if (e.key === 'Enter') renaming.value = false } })
+        : h('span', { id: 'renamed' }, 'renamed'),
+    ]),
+    h('div', { class: 'main meta-grid', tabindex: 0, id: 'grid-area' }, [
       h('p', '表格区域（合成）'),
       h('div', { style: 'width: 360px' }, [h(MetaCommentComposer, { modelValue: draft.value, 'onUpdate:modelValue': (v) => { draft.value = v }, onSubmit: () => { draft.value = '' } })]),
       h('button', { id: 'stopper', type: 'button', onKeydown: (e) => e.stopPropagation() }, 'stopper'),
