@@ -680,6 +680,9 @@ describe('「拉取待确认」 — StockPreparationRefreshQueueView (RQ)', () =
     const card = holdEl(container!, 'content_change')
     expect(card.querySelector('[data-testid="stock-prep-refresh-content-plan-pointer"]')?.textContent).toContain('在下面的「变更计划」里统一确认')
     expect(card.querySelector('[data-testid="stock-prep-refresh-go-change-plan"]'), 'the section is on the page').not.toBeNull()
+    // The reason reads in words (needs_step5: the change plan below), never 「上线后」.
+    expect(card.querySelector('[data-testid="stock-prep-refresh-not-confirmable"]')?.textContent).toContain('变更计划')
+    expect(card.querySelector('[data-testid="stock-prep-refresh-not-confirmable"]')?.textContent).not.toContain('上线')
     // A non-content hold has no pointer.
     expect(holdEl(container!, 'relationship_reconfirm').querySelector('[data-testid="stock-prep-refresh-content-plan-pointer"]')).toBeNull()
     teardown(); setup()

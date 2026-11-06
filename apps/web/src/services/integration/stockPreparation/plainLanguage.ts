@@ -2083,9 +2083,11 @@ export const STOCK_PREP_REFRESH_HOLD_KIND_PLAIN: Record<string, StockPrepPlainTe
   candidate_shape_unresolved: Object.freeze({ zh: '疑似换了位置,但这种 BOM 形态还没有客户规则', en: 'Possibly moved, but this BOM shape has no customer rule yet' }),
   dropped_order_head_unresolved: Object.freeze({ zh: '一个下了单的上级件不在这次的 BOM 根件里了,去向待定', en: 'An ordered top-level part is no longer a root of this BOM; where it went is unresolved' }),
   relationship_reconfirm: Object.freeze({ zh: '已有沿用关系需要重新确认', en: 'An existing relationship needs re-confirmation' }),
-  relationship_content_change: Object.freeze({ zh: '已有沿用关系的机器列内容有变化(待复核)', en: 'A machine column of an existing relationship changed (awaiting review)' }),
-  content_change: Object.freeze({ zh: '机器列内容有变化(待复核)', en: 'A machine column changed (awaiting review)' }),
-  structure_change: Object.freeze({ zh: '结构或上级(父项)有变化(待复核)', en: 'The structure or the parent changed (awaiting review)' }),
+  // PR-9: content changes are confirmed together in the 「变更计划」 section below the holds (R-77 ①); a structure change
+  // cannot be released here in phase 1 (#6579 residual: it used to read 「(待复核)」).
+  relationship_content_change: Object.freeze({ zh: '已有沿用关系的机器列内容有变化(在下面的「变更计划」里确认)', en: 'A machine column of an existing relationship changed (confirm it in the change plan below)' }),
+  content_change: Object.freeze({ zh: '机器列内容有变化(在下面的「变更计划」里确认)', en: 'A machine column changed (confirm it in the change plan below)' }),
+  structure_change: Object.freeze({ zh: '结构或上级(父项)有变化(第一期不能在这里放行)', en: 'The structure or the parent changed (phase 1 cannot release it here)' }),
 })
 
 /** Why a hold has no confirm (plugin `NOT_CONFIRMABLE_REASONS`). Read after 「这一项现在不能确认:」. */
@@ -2096,7 +2098,8 @@ export const STOCK_PREP_REFRESH_NOT_CONFIRMABLE_PLAIN: Record<string, StockPrepP
   customer_rule_pending: Object.freeze({ zh: '这种情况还没有客户确认过的处理规则', en: 'there is no customer-approved rule for this case yet' }),
   phase_2: Object.freeze({ zh: '第一期不处理这类结构变化,留到第二期', en: 'phase 1 does not handle this kind of structural change; it waits for phase 2' }),
   evidence_incomplete: Object.freeze({ zh: '需求依据不完整', en: 'the demand evidence is incomplete' }),
-  needs_step5: Object.freeze({ zh: '要等「变更复核」上线后才能处理', en: 'it waits for the change review, which is not available yet' }),
+  // PR-9: the change plan is here now (it used to say the review "is not available yet").
+  needs_step5: Object.freeze({ zh: '这类内容变化不单项确认:在下面的「变更计划」里统一确认,写入后再完成变更复核', en: 'content changes are not confirmed one by one: confirm them together in the change plan below, then complete the change review after the write' }),
   reconfirm_not_admissible: Object.freeze({ zh: '这种变化第一期不能重新确认', en: 'phase 1 cannot re-confirm this kind of change' }),
 })
 
