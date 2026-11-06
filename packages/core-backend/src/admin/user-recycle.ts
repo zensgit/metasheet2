@@ -129,6 +129,8 @@ const PLATFORM_ADMIN_PREDICATE = `(
 
 const SIGN_IN_PLATFORM_ADMIN_PREDICATE = `
   COALESCE(u.is_active, FALSE) IS TRUE
+  AND u.activation_status = 'activated'
+  AND u.role IS DISTINCT FROM 'disabled'
   AND u.deleted_at IS NULL
   AND u.purged_at IS NULL
   AND ${PLATFORM_ADMIN_PREDICATE}

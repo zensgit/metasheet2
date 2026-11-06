@@ -4,6 +4,7 @@ import * as crypto from 'crypto'
 import { auditLog } from '../audit/audit'
 import { claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'
 import { revokeUserSessions } from '../auth/session-revocation'
+import { assertPendingUserCannotBeActivatedViaGenericStatusApi, PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE } from '../auth/user-activation'
 import {
   countLivePlatformAdmins,
   isLastSignInPlatformAdmin,
@@ -84,11 +85,12 @@ async function loadKnownUsers(ids: string[], emails: string[]): Promise<KnownBat
     role: string
     department: string | null
     is_active: boolean
+    activation_status: string | null
     deleted_at: string | null
     purged_at: string | null
     is_platform_admin: boolean
   }>(
-    `SELECT id, email, name, role, department, is_active, deleted_at, purged_at,
+    `SELECT id, email, name, role, department, is_active, activation_status, deleted_at, purged_at,
             (COALESCE(is_admin, FALSE) IS TRUE OR role = 'admin' OR EXISTS (
               SELECT 1 FROM user_roles ur WHERE ur.user_id = users.id AND ur.role_id = 'admin'
             )) AS is_platform_admin
@@ -104,6 +106,7 @@ async function loadKnownUsers(ids: string[], emails: string[]): Promise<KnownBat
     role: row.role,
     department: row.department,
     isActive: row.is_active,
+    activationStatus: row.activation_status,
     deletedAt: row.deleted_at ? String(row.deleted_at) : null,
     purgedAt: row.purged_at ? String(row.purged_at) : null,
     isPlatformAdmin: row.is_platform_admin === true,
@@ -420,6 +423,7 @@ async function applyUpdate(adminUserId: string, row: PlannedUpdate): Promise<Bat
       if (lockedUser.deletedAt || lockedUser.purgedAt) {
         throw Object.assign(new Error('该用户在回收站中'), { code: 'USER_IN_RECYCLE_BIN' })
       }
+      assertPendingUserCannotBeActivatedViaGenericStatusApi(lockedUser.activationStatus, row.isActive === true)
       if (mayDropSignInAdmin && await isLastSignInPlatformAdmin(client, row.userId)) {
         throw Object.assign(new Error('至少保留一名可登录的平台管理员'), { code: 'LAST_PLATFORM_ADMIN' })
       }
@@ -547,6 +551,12 @@ async function setActive(adminUserId: string, userId: string, isActive: boolean,
     const lockedUser = lockedUsers.get(userId)
     if (!lockedUser) return null
     if (lockedUser.deletedAt || lockedUser.purgedAt) return { email: null, recycled: true as const }
+    try {
+      assertPendingUserCannotBeActivatedViaGenericStatusApi(lockedUser.activationStatus, isActive)
+    } catch (error) {
+      if ((error as { code?: string }).code !== PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE) throw error
+      return { email: lockedUser.email, pendingActivation: (error as Error).message }
+    }
     if (!isActive && await isLastSignInPlatformAdmin(client, userId)) {
       return { email: lockedUser.email, lastAdmin: true as const }
     }
@@ -570,6 +580,9 @@ async function setActive(adminUserId: string, userId: string, isActive: boolean,
   }
   if ('recycled' in updated) {
     return { index, ok: false, email: null, userId, code: 'USER_IN_RECYCLE_BIN', message: '该用户在回收站中，请先恢复' }
+  }
+  if ('pendingActivation' in updated) {
+    return { index, ok: false, email: updated.email, userId, code: PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE, message: updated.pendingActivation }
   }
   if ('lastAdmin' in updated) {
     return { index, ok: false, email: updated.email, userId, code: 'LAST_PLATFORM_ADMIN', message: '至少保留一名可登录的平台管理员' }

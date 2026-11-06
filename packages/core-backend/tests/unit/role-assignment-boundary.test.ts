@@ -785,12 +785,13 @@ describe('role-delegation seam — a boundary refusal answers 403, not 500', () 
       if (/SELECT\s+role_id\s+FROM\s+user_roles/i.test(sql)) {
         return { rows: [{ role_id: actorRoleId }], rowCount: 1 }
       }
+      if (/AS configured/i.test(sql)) return { rows: [{ configured: true }], rowCount: 1 }
       if (/FROM users/i.test(sql)) {
         return {
           rows: [{
             id: TARGET_USER_ID, email: 'target@example.com', name: 'Target', role: 'user',
             is_active: true, is_admin: false, last_login_at: null, created_at: 'now',
-            updated_at: 'now',
+            updated_at: 'now', activation_status: 'activated',
           }],
           rowCount: 1,
         }

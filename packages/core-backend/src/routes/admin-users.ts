@@ -29,6 +29,7 @@ import {
   normalizeNamespace,
   roleIdMatchesNamespaces as matchRoleIdToNamespaces,
   setUserNamespaceAdmission,
+  writeUserNamespaceAdmission,
 } from '../rbac/namespace-admission'
 import {
   assignUserRoles,
@@ -43,6 +44,7 @@ import {
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import {
   assertPendingUserCannotBeActivatedViaGenericStatusApi,
+  evaluateUserAuthenticationGate,
   PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
 } from '../auth/user-activation'
 import { activatePendingUser, isActivateMode } from '../auth/user-activate'
@@ -61,9 +63,12 @@ import {
   LoginAliasClaimError,
 } from '../auth/login-alias-service'
 import {
+  AccessGraphUserUnavailableError,
   lockUsersForAccessGraphWrite,
+  lockVisibleUsersForAccessGraphWrite,
   supersedeDeprovisionEvidenceForAccessGraphWrite,
   type AccessGraphTransactionClient,
+  type LockedAccessGraphUser,
 } from '../directory/access-graph-mutex'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { readOrgMembershipHistory } from '../directory/org-membership-history'
@@ -144,6 +149,16 @@ function sendAdminUsersServerFailure(
   message: string,
   error: unknown,
 ): void {
+  if (error instanceof AccessGraphUserUnavailableError) {
+    if (error.code === 'NOT_FOUND') return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+    return jsonError(res, 409, 'USER_IN_RECYCLE_BIN', '账号在回收站中，请先恢复后再修改权限')
+  }
+  if (error instanceof DelegationAuthorityRefusal) {
+    return jsonError(res, 403, error.code, error.message)
+  }
+  if (error instanceof RoleDelegationWriteConflict) {
+    return jsonError(res, 409, error.code, error.message)
+  }
   const correlationId = readFailureCorrelationId(req)
   try {
     logger.error(
@@ -627,15 +642,48 @@ async function fetchUserProfile(userId: string): Promise<AdminUserProfile | null
   return result.rows[0] ?? null
 }
 
-async function fetchUserRoleIds(userId: string): Promise<string[]> {
-  const result = await query<{ role_id: string }>(
+async function fetchUserRoleIds(userId: string, runQuery: AccessGraphTransactionClient['query'] = query): Promise<string[]> {
+  const result = await runQuery(
     `SELECT role_id
      FROM user_roles
      WHERE user_id = $1
      ORDER BY role_id ASC`,
     [userId],
   )
-  return result.rows.map((row) => row.role_id).filter(Boolean)
+  return result.rows.map((row) => String(row.role_id ?? '')).filter(Boolean)
+}
+
+class RoleDelegationWriteConflict extends Error {
+  constructor(public readonly code: 'LAST_PLATFORM_ADMIN' | 'ROLE_DELEGATION_NAMESPACE_NOT_HELD') {
+    super(code === 'LAST_PLATFORM_ADMIN'
+      ? '至少保留一名可登录的平台管理员'
+      : 'Selected user does not hold that delegated admin namespace')
+  }
+}
+
+async function lockUserAccessWrite(client: AccessGraphTransactionClient, userId: string, actorId?: string): Promise<Map<string, LockedAccessGraphUser>> {
+  const ids = Array.from(new Set([userId, ...(actorId ? [actorId] : [])])).sort()
+  for (const id of ids) await lockNamespaceAdmissionWrites(client, id)
+  return lockVisibleUsersForAccessGraphWrite(client, ids)
+}
+
+async function assertDelegatedScopeNamespaceHeld(client: AccessGraphTransactionClient, userId: string, namespace: string): Promise<void> {
+  if (!deriveDelegableNamespaces(await fetchUserRoleIds(userId, client.query)).includes(namespace)) {
+    throw new RoleDelegationWriteConflict('ROLE_DELEGATION_NAMESPACE_NOT_HELD')
+  }
+}
+
+async function writeUserAccess(
+  userId: string,
+  write: (client: AccessGraphTransactionClient) => Promise<unknown>,
+  namespace?: string,
+  actorId?: string,
+): Promise<void> {
+  await transaction(async (client) => {
+    await lockUserAccessWrite(client, userId, actorId)
+    if (namespace) await assertDelegatedScopeNamespaceHeld(client, userId, namespace)
+    await write(client)
+  })
 }
 
 async function fetchRoleCatalog() {
@@ -2046,10 +2094,10 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
   }
 }
 
-async function isUserWithinDelegatedScope(adminUserId: string, namespaces: string[], userId: string): Promise<boolean> {
+async function isUserWithinDelegatedScope(adminUserId: string, namespaces: string[], userId: string, runQuery: AccessGraphTransactionClient['query'] = query): Promise<boolean> {
   if (namespaces.length === 0) return false
 
-  const result = await query<{ allowed: boolean }>(
+  const result = await runQuery(
     `WITH RECURSIVE seed_departments AS (
         SELECT DISTINCT d.id, d.integration_id, d.external_department_id
         FROM delegated_role_admin_scopes s
@@ -2098,6 +2146,47 @@ async function isUserWithinDelegatedScope(adminUserId: string, namespaces: strin
   )
 
   return result.rows[0]?.allowed === true
+}
+
+class DelegationAuthorityRefusal extends Error {
+  constructor(public readonly code: 'ROLE_DELEGATION_FORBIDDEN' | 'ROLE_DELEGATION_SCOPE_REQUIRED' | 'ROLE_DELEGATION_USER_OUT_OF_SCOPE') {
+    super(code === 'ROLE_DELEGATION_FORBIDDEN'
+      ? 'Namespace is outside your delegated admin scope'
+      : code === 'ROLE_DELEGATION_SCOPE_REQUIRED'
+        ? 'No delegated department or member-group scope is configured for your plugin admin role'
+        : 'User is outside your delegated department or member-group scope')
+  }
+}
+
+async function recheckDelegatedAuthority(
+  client: AccessGraphTransactionClient,
+  actorId: string,
+  userId: string,
+  requestedNamespaces: string[],
+  actor: LockedAccessGraphUser | undefined,
+): Promise<string[]> {
+  if (!actor || evaluateUserAuthenticationGate({
+    role: actor.role,
+    is_active: actor.isActive,
+    activation_status: actor.activationStatus,
+    deleted_at: actor.deletedAt,
+    purged_at: actor.purgedAt,
+  })) throw new DelegationAuthorityRefusal('ROLE_DELEGATION_FORBIDDEN')
+  const namespaces = deriveDelegableNamespaces(await fetchUserRoleIds(actorId, client.query))
+  const matching = requestedNamespaces.filter(namespace => namespaces.includes(namespace))
+  if (matching.length === 0) throw new DelegationAuthorityRefusal('ROLE_DELEGATION_FORBIDDEN')
+  const audience = await client.query(
+    `SELECT EXISTS (
+       SELECT 1 FROM delegated_role_admin_scopes WHERE admin_user_id = $1 AND namespace = ANY($2::text[])
+       UNION ALL
+       SELECT 1 FROM delegated_role_admin_member_groups WHERE admin_user_id = $1 AND namespace = ANY($2::text[])
+     ) AS configured`, [actorId, namespaces],
+  )
+  if (audience.rows[0]?.configured !== true) throw new DelegationAuthorityRefusal('ROLE_DELEGATION_SCOPE_REQUIRED')
+  if (!await isUserWithinDelegatedScope(actorId, matching, userId, client.query)) {
+    throw new DelegationAuthorityRefusal('ROLE_DELEGATION_USER_OUT_OF_SCOPE')
+  }
+  return namespaces
 }
 
 function deriveVisibleDelegatedMemberGroupIds(groupAssignments: Array<{ groupId: string }>): string[] {
@@ -2347,8 +2436,8 @@ async function fetchMemberAdmissionSnapshot(userId: string) {
   }
 }
 
-async function syncLegacyAdminProfile(userId: string, enabled: boolean): Promise<void> {
-  await query(
+async function syncLegacyAdminProfile(userId: string, enabled: boolean, runQuery: AccessGraphTransactionClient['query']): Promise<void> {
+  await runQuery(
     `UPDATE users
      SET role = CASE
        WHEN $2::boolean THEN 'admin'
@@ -3106,7 +3195,7 @@ export function adminUsersRouter(): Router {
         if (!department.rows.length) {
           return jsonError(res, 404, 'DIRECTORY_DEPARTMENT_NOT_FOUND', 'Directory department not found')
         }
-        await query(
+        await writeUserAccess(userId, (client) => client.query(
           `INSERT INTO delegated_role_admin_scopes (
              admin_user_id, namespace, directory_department_id, created_by, created_at, updated_at
            )
@@ -3116,15 +3205,15 @@ export function adminUsersRouter(): Router {
              created_by = EXCLUDED.created_by,
              updated_at = NOW()`,
           [userId, namespace, directoryDepartmentId, adminUserId],
-        )
+        ), namespace, adminUserId)
       } else {
-        await query(
+        await writeUserAccess(userId, (client) => client.query(
           `DELETE FROM delegated_role_admin_scopes
            WHERE admin_user_id = $1
              AND namespace = $2
              AND directory_department_id = $3`,
           [userId, namespace, directoryDepartmentId],
-        )
+        ), undefined, adminUserId)
       }
 
       await auditLog({
@@ -3183,7 +3272,7 @@ export function adminUsersRouter(): Router {
       }
 
       if (action === 'assign') {
-        await query(
+        await writeUserAccess(userId, (client) => client.query(
           `INSERT INTO delegated_role_admin_member_groups (
              admin_user_id, namespace, group_id, created_by, created_at, updated_at
            )
@@ -3193,15 +3282,15 @@ export function adminUsersRouter(): Router {
              created_by = EXCLUDED.created_by,
              updated_at = NOW()`,
           [userId, namespace, groupId, adminUserId],
-        )
+        ), namespace, adminUserId)
       } else {
-        await query(
+        await writeUserAccess(userId, (client) => client.query(
           `DELETE FROM delegated_role_admin_member_groups
            WHERE admin_user_id = $1
              AND namespace = $2
              AND group_id = $3`,
           [userId, namespace, groupId],
-        )
+        ), undefined, adminUserId)
       }
 
       await auditLog({
@@ -3253,19 +3342,19 @@ export function adminUsersRouter(): Router {
       if (!groupRow.rows.length) return jsonError(res, 404, 'PLATFORM_MEMBER_GROUP_NOT_FOUND', 'Platform member group not found')
 
       if (action === 'assign') {
-        await query(
+        await writeUserAccess(userId, (client) => client.query(
           `INSERT INTO platform_member_group_members (group_id, user_id, created_at)
            VALUES ($1, $2, NOW())
            ON CONFLICT DO NOTHING`,
           [groupId, userId],
-        )
+        ), undefined, adminUserId)
       } else {
-        await query(
+        await writeUserAccess(userId, (client) => client.query(
           `DELETE FROM platform_member_group_members
            WHERE group_id = $1
              AND user_id = $2`,
           [groupId, userId],
-        )
+        ), undefined, adminUserId)
       }
 
       const [snapshot, memberGroups] = await Promise.all([
@@ -3329,50 +3418,52 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 409, 'ROLE_DELEGATION_SCOPE_TEMPLATE_EMPTY', 'Scope template has no departments or member groups to apply')
       }
 
-      if (mode === 'replace') {
-        await Promise.all([
-          query(
-            `DELETE FROM delegated_role_admin_scopes
-             WHERE admin_user_id = $1
-               AND namespace = $2`,
-            [userId, namespace],
-          ),
-          query(
-            `DELETE FROM delegated_role_admin_member_groups
-             WHERE admin_user_id = $1
-               AND namespace = $2`,
-            [userId, namespace],
-          ),
-        ])
-      }
+      await writeUserAccess(userId, async (client) => {
+        if (mode === 'replace') {
+          await Promise.all([
+            client.query(
+              `DELETE FROM delegated_role_admin_scopes
+               WHERE admin_user_id = $1
+                 AND namespace = $2`,
+              [userId, namespace],
+            ),
+            client.query(
+              `DELETE FROM delegated_role_admin_member_groups
+               WHERE admin_user_id = $1
+                 AND namespace = $2`,
+              [userId, namespace],
+            ),
+          ])
+        }
 
-      for (const department of template.departments) {
-        await query(
-          `INSERT INTO delegated_role_admin_scopes (
-             admin_user_id, namespace, directory_department_id, created_by, created_at, updated_at
-           )
-           VALUES ($1, $2, $3, $4, NOW(), NOW())
-           ON CONFLICT (admin_user_id, namespace, directory_department_id)
-           DO UPDATE SET
-             created_by = EXCLUDED.created_by,
-             updated_at = NOW()`,
-          [userId, namespace, department.directoryDepartmentId, adminUserId],
-        )
-      }
+        for (const department of template.departments) {
+          await client.query(
+            `INSERT INTO delegated_role_admin_scopes (
+               admin_user_id, namespace, directory_department_id, created_by, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, NOW(), NOW())
+             ON CONFLICT (admin_user_id, namespace, directory_department_id)
+             DO UPDATE SET
+               created_by = EXCLUDED.created_by,
+               updated_at = NOW()`,
+            [userId, namespace, department.directoryDepartmentId, adminUserId],
+          )
+        }
 
-      for (const group of template.memberGroups) {
-        await query(
-          `INSERT INTO delegated_role_admin_member_groups (
-             admin_user_id, namespace, group_id, created_by, created_at, updated_at
-           )
-           VALUES ($1, $2, $3, $4, NOW(), NOW())
-           ON CONFLICT (admin_user_id, namespace, group_id)
-           DO UPDATE SET
-             created_by = EXCLUDED.created_by,
-             updated_at = NOW()`,
-          [userId, namespace, group.id, adminUserId],
-        )
-      }
+        for (const group of template.memberGroups) {
+          await client.query(
+            `INSERT INTO delegated_role_admin_member_groups (
+               admin_user_id, namespace, group_id, created_by, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, NOW(), NOW())
+             ON CONFLICT (admin_user_id, namespace, group_id)
+             DO UPDATE SET
+               created_by = EXCLUDED.created_by,
+               updated_at = NOW()`,
+            [userId, namespace, group.id, adminUserId],
+          )
+        }
+      }, namespace, adminUserId)
 
       const [scopeAssignments, groupAssignments] = await Promise.all([
         fetchDelegatedScopeAssignments(userId),
@@ -3566,13 +3657,15 @@ export function adminUsersRouter(): Router {
         }
       }
 
-      const namespaceAdmissions = await setUserNamespaceAdmission({
-        userId,
-        namespace,
-        enabled,
-        actorId: delegation.actorId,
-        source: delegation.isPlatformAdmin ? 'platform_admin' : 'delegated_admin',
+      await transaction(async (client) => {
+        const lockedUsers = await lockUserAccessWrite(client, userId, delegation.isPlatformAdmin ? undefined : delegation.actorId)
+        if (!delegation.isPlatformAdmin) await recheckDelegatedAuthority(client, delegation.actorId, userId, [namespace], lockedUsers.get(delegation.actorId))
+        await writeUserNamespaceAdmission({
+          userId, namespace, enabled, actorId: delegation.actorId,
+          source: delegation.isPlatformAdmin ? 'platform_admin' : 'delegated_admin',
+        }, client)
       })
+      const namespaceAdmissions = await listUserNamespaceAdmissionSnapshots(userId)
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -3665,14 +3758,22 @@ export function adminUsersRouter(): Router {
       // check above; a delegated admin is bounded by the namespaces that check already computed,
       // so the boundary re-states the route's own rule at the write rather than adding a
       // second, separately-maintained one.
-      const delegationScope: RoleAssignmentScope = delegation.isPlatformAdmin
+      let delegationScope: RoleAssignmentScope = delegation.isPlatformAdmin
         ? { kind: 'platform-admin' }
         : { kind: 'namespaces', namespaces: delegation.delegableNamespaces }
       let membership: RoleAssignmentResult
       let disabledNamespaces: string[] = []
       try {
         membership = await transaction(async (client) => {
+          if (roleId === PLATFORM_ADMIN_ROLE_ID) await lockPlatformAdminInvariant(client)
+          const lockedUsers = await lockUserAccessWrite(client, userId, delegation.isPlatformAdmin ? undefined : delegation.actorId)
+          if (roleId === PLATFORM_ADMIN_ROLE_ID && action === 'unassign' && await isLastSignInPlatformAdmin(client, userId)) {
+            throw new RoleDelegationWriteConflict('LAST_PLATFORM_ADMIN')
+          }
           if (!delegation.isPlatformAdmin) {
+            const namespaces = await recheckDelegatedAuthority(client, delegation.actorId, userId,
+              deriveMatchingNamespacesForRole(roleId, delegation.delegableNamespaces), lockedUsers.get(delegation.actorId))
+            delegationScope = { kind: 'namespaces', namespaces }
             // The role's codes are read INSIDE the transaction that writes the membership, with
             // the role row held FOR SHARE: the role editor (`PUT`/`POST /api/roles`) takes the
             // same row FOR UPDATE before it touches `role_permissions`, so a platform code cannot
@@ -3693,15 +3794,16 @@ export function adminUsersRouter(): Router {
             const refusal = delegatedRoleCodeRefusalFor(
               roleId,
               permissionCodes,
-              delegation.delegableNamespaces,
+              namespaces,
               action === 'assign' ? 'assign' : 'unassign',
             )
             if (refusal) throw refusal
           }
           if (action === 'assign') {
-            return assignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
+            const assigned = await assignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
+            if (roleId === PLATFORM_ADMIN_ROLE_ID) await syncLegacyAdminProfile(userId, true, client.query)
+            return assigned
           }
-          await lockNamespaceAdmissionWrites(client, userId)
           const removed = await unassignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
           disabledNamespaces = await disableNamespaceAdmissionsWithoutRoles({
             userId,
@@ -3710,6 +3812,7 @@ export function adminUsersRouter(): Router {
             source: 'role_unassigned',
             revokedRoleId: roleId,
           }, client.query)
+          if (roleId === PLATFORM_ADMIN_ROLE_ID) await syncLegacyAdminProfile(userId, false, client.query)
           return removed
         })
       } catch (error) {
@@ -3732,9 +3835,6 @@ export function adminUsersRouter(): Router {
         trigger: action === 'assign' ? 'role_appointed' : 'role_unassigned',
         cleanup: membership?.delegatedAdminScopeCleanup,
       })
-      if (roleId === PLATFORM_ADMIN_ROLE_ID) {
-        await syncLegacyAdminProfile(userId, action === 'assign')
-      }
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -5046,14 +5146,15 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 404, 'USERS_NOT_FOUND', 'One or more users were not found', { missingUserIds })
       }
 
+      await transaction(async (client) => {
+        const sortedIds = [...userIds].sort()
+        for (const userId of sortedIds) await lockNamespaceAdmissionWrites(client, userId)
+        await lockVisibleUsersForAccessGraphWrite(client, sortedIds)
+        for (const userId of sortedIds) {
+          await writeUserNamespaceAdmission({ userId, namespace, enabled, actorId: adminUserId, source: 'platform_admin' }, client)
+        }
+      })
       await Promise.all(userIds.map(async (userId) => {
-        await setUserNamespaceAdmission({
-          userId,
-          namespace,
-          enabled,
-          actorId: adminUserId,
-          source: 'platform_admin',
-        })
         invalidateUserPerms(userId)
         await auditLog({
           actorId: adminUserId,
@@ -5203,21 +5304,19 @@ export function adminUsersRouter(): Router {
 
       // One transaction so that a fresh main-admin appointment and the removal of any audience
       // left over from an earlier tenure land together (see `assignUserRoles`).
-      const membership = await transaction((client) => assignUserRoles({
-        userIds: [userId],
-        roleId,
-        scope: { kind: 'platform-admin' },
-        executor: client,
-      }))
+      const membership = await transaction(async (client) => {
+        if (roleId === PLATFORM_ADMIN_ROLE_ID) await lockPlatformAdminInvariant(client)
+        await lockUserAccessWrite(client, userId)
+        const assigned = await assignUserRoles({ userIds: [userId], roleId, scope: { kind: 'platform-admin' }, executor: client })
+        if (roleId === PLATFORM_ADMIN_ROLE_ID) await syncLegacyAdminProfile(userId, true, client.query)
+        return assigned
+      })
       await auditDelegatedAdminScopeCleanup({
         actorId: adminUserId,
         roleId,
         trigger: 'role_appointed',
         cleanup: membership?.delegatedAdminScopeCleanup,
       })
-      if (roleId === PLATFORM_ADMIN_ROLE_ID) {
-        await syncLegacyAdminProfile(userId, true)
-      }
       const disabledNamespaces: string[] = []
       invalidateUserPerms(userId)
 
@@ -5267,9 +5366,9 @@ export function adminUsersRouter(): Router {
       const unassigned = await transaction(async (client) => {
         if (roleId === PLATFORM_ADMIN_ROLE_ID) {
           await lockPlatformAdminInvariant(client)
-          if (await isLastSignInPlatformAdmin(client, userId)) return { blocked: true as const }
         }
-        await lockNamespaceAdmissionWrites(client, userId)
+        await lockUserAccessWrite(client, userId)
+        if (roleId === PLATFORM_ADMIN_ROLE_ID && await isLastSignInPlatformAdmin(client, userId)) return { blocked: true as const }
         const membership = await unassignUserRoles({
           userIds: [userId],
           roleId,
@@ -5284,18 +5383,7 @@ export function adminUsersRouter(): Router {
           revokedRoleId: roleId,
         }, client.query)
         if (roleId === PLATFORM_ADMIN_ROLE_ID) {
-          await client.query(
-            `UPDATE users
-             SET role = CASE
-               WHEN $2::boolean THEN 'admin'
-               WHEN role = 'admin' THEN 'user'
-               ELSE role
-             END,
-             is_admin = $2,
-             updated_at = NOW()
-             WHERE id = $1`,
-            [userId, false],
-          )
+          await syncLegacyAdminProfile(userId, false, client.query)
         }
         return { blocked: false as const, membership, disabledNamespaces }
       })

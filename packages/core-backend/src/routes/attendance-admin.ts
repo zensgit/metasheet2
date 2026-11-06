@@ -1317,16 +1317,21 @@ export function attendanceAdminRouter(): Router {
 
       const { del, resolvedUsers } = await transaction(async (client) => {
         const runQuery = client.query as typeof query
-        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
-        const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
-        const resolved = await resolveBatchUsers(userIds, scope, runQuery, true)
-        assertAllRoleTargetsEligible(userIds, resolved)
+        // Refuse invalid scope/targets without locking any subject. These reads take no
+        // row locks; the authoritative checks run again after all namespace locks.
+        const preflightScope = await resolveAttendanceAdminUserScope(req, runQuery)
+        deriveAttendanceRoleAssignmentScope(preflightScope)
+        assertAllRoleTargetsEligible(userIds, await resolveBatchUsers(userIds, preflightScope, runQuery))
         // Every subject lock is taken, in sorted id order, before the membership
         // DELETE. Each witness uses this same client and finishes before commit.
         const admissionTargetIds = [...userIds].sort()
         for (const targetId of admissionTargetIds) {
           await lockNamespaceAdmissionWrites(client, targetId)
         }
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
+        const resolved = await resolveBatchUsers(userIds, scope, runQuery, true)
+        assertAllRoleTargetsEligible(userIds, resolved)
         const result = await unassignUserRoles({
           userIds,
           roleId: finalRoleId,
@@ -1499,12 +1504,16 @@ export function attendanceAdminRouter(): Router {
       let membership: Awaited<ReturnType<typeof unassignUserRoles>> | undefined
       const profile = await transaction(async (client) => {
         const runQuery = client.query as typeof query
+        // Refuse invalid scope/targets without users FOR SHARE before the namespace lock.
+        const preflightScope = await resolveAttendanceAdminUserScope(req, runQuery)
+        deriveAttendanceRoleAssignmentScope(preflightScope)
+        assertAllRoleTargetsEligible([userId], await resolveBatchUsers([userId], preflightScope, runQuery))
+        // Same client through the subject lock, membership DELETE and revoke witness.
+        await lockNamespaceAdmissionWrites(client, userId)
         const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
         const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
         const resolved = await resolveBatchUsers([userId], scope, runQuery, true)
         assertAllRoleTargetsEligible([userId], resolved)
-        // Same client through the subject lock, membership DELETE and revoke witness.
-        await lockNamespaceAdmissionWrites(client, userId)
         membership = await unassignUserRoles({
           userIds: [userId],
           roleId: finalRoleId,

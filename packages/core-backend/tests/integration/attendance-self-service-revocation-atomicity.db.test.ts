@@ -175,6 +175,7 @@ describe('default attendance bootstrap/revocation atomicity (real PostgreSQL)', 
         access_generation bigint NOT NULL DEFAULT 0,
         is_active boolean DEFAULT true, must_change_password boolean DEFAULT false,
         activation_status text DEFAULT 'activated', local_password_set boolean DEFAULT true,
+        access_generation bigint NOT NULL DEFAULT 0,
         created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now(), last_login_at timestamptz
       );
       CREATE TABLE user_orgs (user_id text, org_id text, is_active boolean);
@@ -344,6 +345,7 @@ describe('default attendance bootstrap/revocation atomicity (real PostgreSQL)', 
       await setUserNamespaceAdmission({ userId, namespace: 'attendance', enabled: false })
     } finally {
       gate.release.resolve()
+      await pending
     }
     expect((await pending)?.permissions).toEqual(['workflow:read'])
     expect(await persistedState()).toEqual({ roles: [], admission: [{ enabled: false, source: 'platform_admin' }] })

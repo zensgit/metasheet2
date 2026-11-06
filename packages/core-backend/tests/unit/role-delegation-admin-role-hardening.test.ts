@@ -71,6 +71,13 @@ const pgMocks = vi.hoisted(() => {
         && (!namespaces || namespaces.includes(scope.namespace)))
 
     if (/WITH RECURSIVE/i.test(s)) return { rows: [{ allowed: true }], rowCount: 1 }
+    if (/AS configured$/i.test(s)) {
+      const [actorId, namespaces] = params as [string, string[]]
+      return {
+        rows: [{ configured: db.scopes.some((scope) => scope.adminUserId === actorId && namespaces.includes(scope.namespace)) }],
+        rowCount: 1,
+      }
+    }
     if (/^SELECT id FROM roles WHERE id = \$1 FOR SHARE$/i.test(s)) {
       const roleId = String(params[0])
       return db.roles.has(roleId) ? { rows: [{ id: roleId }], rowCount: 1 } : { rows: [], rowCount: 0 }
@@ -190,7 +197,7 @@ const TARGET = 'target-user-1'
 function profile(id: string) {
   return {
     id, email: `${id}@example.test`, username: null, name: id, mobile: null, employeeNo: null, department: null,
-    position: null, hireDate: null, role: 'user', is_active: true, is_admin: false, last_login_at: null,
+    position: null, hireDate: null, role: 'user', is_active: true, activation_status: 'activated', is_admin: false, last_login_at: null,
     created_at: 'now', updated_at: 'now',
   }
 }

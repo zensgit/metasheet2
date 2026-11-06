@@ -6,6 +6,8 @@
  * row: attendance, audit, and directory history keep the user id. Later purge anonymizes it.
  */
 
+import { assertPendingUserCannotBeActivatedViaGenericStatusApi, PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE } from '../auth/user-activation'
+
 export const ADMIN_USER_BATCH_LIMIT = 100
 export const DISABLE_CONFIRM_TEXT = '停用'
 /** Chinese confirmation. English UI sends HARD_DELETE_CONFIRM_TEXT_EN. Both move to the recycle bin. */
@@ -45,6 +47,7 @@ export type KnownBatchUser = {
   role: string
   department: string | null
   isActive: boolean
+  activationStatus?: string | null
   deletedAt?: string | null
   purgedAt?: string | null
   isPlatformAdmin?: boolean
@@ -82,6 +85,16 @@ function cleanEmail(value: unknown): string {
 function cleanRoleId(value: unknown): string {
   if (typeof value !== 'string') return ''
   return value.trim().slice(0, 64)
+}
+
+function pendingActivationRefusal(status: unknown, nextIsActive: boolean): { code: string; message: string } | null {
+  try {
+    assertPendingUserCannotBeActivatedViaGenericStatusApi(status, nextIsActive)
+    return null
+  } catch (error) {
+    if ((error as { code?: string }).code !== PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE) throw error
+    return { code: PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE, message: (error as Error).message }
+  }
 }
 
 export function nameFromEmail(email: string): string {
@@ -225,6 +238,12 @@ export function planUpdateBatch(input: {
       return
     }
 
+    const activationRefusal = pendingActivationRefusal(user.activationStatus, record.isActive === true)
+    if (activationRefusal) {
+      fail(activationRefusal.code, activationRefusal.message, user.id)
+      return
+    }
+
     const roleId = cleanRoleId(record.roleId)
     if (hasRole && !input.knownRoleIds.has(roleId)) {
       fail('ROLE_NOT_FOUND', '角色不存在', user.id)
@@ -360,6 +379,11 @@ export function planStatusBatch(input: {
         code: 'SELF_DISABLE_FORBIDDEN',
         message: '不能停用自己的账号',
       })
+      return
+    }
+    const activationRefusal = pendingActivationRefusal(known?.activationStatus, input.isActive === true)
+    if (activationRefusal) {
+      failures.push({ index, ok: false, email: known?.email ?? null, userId, ...activationRefusal })
       return
     }
     rows.push({ index, userId })

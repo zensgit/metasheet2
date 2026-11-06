@@ -37,6 +37,7 @@ const namespaceAdmissionMocks = vi.hoisted(() => ({
   normalizeNamespace: vi.fn(),
   roleIdMatchesNamespaces: vi.fn(),
   setUserNamespaceAdmission: vi.fn(),
+  writeUserNamespaceAdmission: vi.fn(),
 }))
 
 const inviteMocks = vi.hoisted(() => ({
@@ -81,6 +82,15 @@ vi.mock('../../src/db/pg', () => ({
   // chains) is unaffected — transaction() is transparent here, not a second mock surface.
   transaction: vi.fn(async (handler: (client: { query: typeof pgMocks.query }) => Promise<unknown>) =>
     handler({ query: pgMocks.query })),
+}))
+
+// Lifecycle locking is exercised with real PostgreSQL in admin-user-batch-review.db.test.ts.
+// Keep these existing response fixtures focused on their route-specific reads and writes.
+vi.mock('../../src/directory/access-graph-mutex', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/directory/access-graph-mutex')>(),
+  lockVisibleUsersForAccessGraphWrite: vi.fn(async (_client, ids: string[]) => new Map(ids.map(id => [id, {
+    id, role: 'user', isActive: true, activationStatus: 'activated', deletedAt: null, purgedAt: null,
+  }]))),
 }))
 
 // Alias full-writer hooks: default stubs keep existing create/profile once-chains green.
@@ -140,6 +150,7 @@ vi.mock('../../src/rbac/namespace-admission', async () => ({
   normalizeNamespace: namespaceAdmissionMocks.normalizeNamespace,
   roleIdMatchesNamespaces: namespaceAdmissionMocks.roleIdMatchesNamespaces,
   setUserNamespaceAdmission: namespaceAdmissionMocks.setUserNamespaceAdmission,
+  writeUserNamespaceAdmission: namespaceAdmissionMocks.writeUserNamespaceAdmission,
 }))
 
 vi.mock('../../src/auth/invite-tokens', () => ({
@@ -298,6 +309,8 @@ describe('admin-users routes', () => {
     namespaceAdmissionMocks.roleIdMatchesNamespaces.mockImplementation((roleId: string, namespaces: string[]) => (
       Array.isArray(namespaces) && namespaces.some((namespace) => roleId === namespace || roleId.startsWith(`${namespace}_`))
     ))
+    namespaceAdmissionMocks.writeUserNamespaceAdmission.mockReset()
+    namespaceAdmissionMocks.writeUserNamespaceAdmission.mockResolvedValue(undefined)
     namespaceAdmissionMocks.setUserNamespaceAdmission.mockReset()
     namespaceAdmissionMocks.setUserNamespaceAdmission.mockResolvedValue([])
     inviteMocks.issueInviteToken.mockClear()
@@ -1696,7 +1709,7 @@ describe('admin-users routes', () => {
 
   it('updates namespace admission in bulk and records an audit entry per user', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
-    namespaceAdmissionMocks.setUserNamespaceAdmission.mockResolvedValue([
+    namespaceAdmissionMocks.writeUserNamespaceAdmission.mockResolvedValue([
       {
         namespace: 'crm',
         enabled: false,
@@ -1731,21 +1744,21 @@ describe('admin-users routes', () => {
       updatedCount: 2,
       userIds: ['user-1', 'user-2'],
     })
-    expect(namespaceAdmissionMocks.setUserNamespaceAdmission).toHaveBeenCalledTimes(2)
-    expect(namespaceAdmissionMocks.setUserNamespaceAdmission).toHaveBeenNthCalledWith(1, expect.objectContaining({
+    expect(namespaceAdmissionMocks.writeUserNamespaceAdmission).toHaveBeenCalledTimes(2)
+    expect(namespaceAdmissionMocks.writeUserNamespaceAdmission).toHaveBeenNthCalledWith(1, expect.objectContaining({
       userId: 'user-1',
       namespace: 'crm',
       enabled: false,
       actorId: 'admin-1',
       source: 'platform_admin',
-    }))
-    expect(namespaceAdmissionMocks.setUserNamespaceAdmission).toHaveBeenNthCalledWith(2, expect.objectContaining({
+    }), expect.objectContaining({ query: pgMocks.query }))
+    expect(namespaceAdmissionMocks.writeUserNamespaceAdmission).toHaveBeenNthCalledWith(2, expect.objectContaining({
       userId: 'user-2',
       namespace: 'crm',
       enabled: false,
       actorId: 'admin-1',
       source: 'platform_admin',
-    }))
+    }), expect.objectContaining({ query: pgMocks.query }))
     expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-1')
     expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-2')
     expect(auditMocks.auditLog).toHaveBeenCalledTimes(2)
@@ -1775,7 +1788,7 @@ describe('admin-users routes', () => {
       role: 'user',
     }
     rbacMocks.isAdmin.mockResolvedValue(false)
-    namespaceAdmissionMocks.setUserNamespaceAdmission.mockResolvedValue([
+    namespaceAdmissionMocks.listUserNamespaceAdmissionSnapshots.mockResolvedValue([
       {
         namespace: 'crm',
         enabled: true,
@@ -1826,6 +1839,9 @@ describe('admin-users routes', () => {
       })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ allowed: true }] })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
+      .mockResolvedValueOnce({ rows: [{ configured: true }] })
+      .mockResolvedValueOnce({ rows: [{ allowed: true }] })
 
     const response = await invokeRoute('patch', '/api/admin/role-delegation/users/:userId/namespaces/:namespace/admission', {
       params: { userId: 'user-1', namespace: 'crm' },
@@ -1833,13 +1849,13 @@ describe('admin-users routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(namespaceAdmissionMocks.setUserNamespaceAdmission).toHaveBeenCalledWith(expect.objectContaining({
+    expect(namespaceAdmissionMocks.writeUserNamespaceAdmission).toHaveBeenCalledWith(expect.objectContaining({
       userId: 'user-1',
       namespace: 'crm',
       enabled: true,
       actorId: 'crm-admin-1',
       source: 'delegated_admin',
-    }))
+    }), expect.objectContaining({ query: pgMocks.query }))
   })
 
   it('rejects delegated role assignment outside allowed namespaces', async () => {
@@ -1978,6 +1994,9 @@ describe('admin-users routes', () => {
       })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ allowed: true }] })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
+      .mockResolvedValueOnce({ rows: [{ configured: true }] })
+      .mockResolvedValueOnce({ rows: [{ allowed: true }] })
       // in-transaction role lock + the role's codes (delegated platform-code check)
       .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
       .mockResolvedValueOnce({ rows: [{ permission_code: 'crm:read' }, { permission_code: 'crm:write' }] })
@@ -2080,6 +2099,9 @@ describe('admin-users routes', () => {
           member_count: 3,
         }],
       })
+      .mockResolvedValueOnce({ rows: [{ allowed: true }] })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
+      .mockResolvedValueOnce({ rows: [{ configured: true }] })
       .mockResolvedValueOnce({ rows: [{ allowed: true }] })
       // in-transaction role lock + the role's codes (delegated platform-code check)
       .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
@@ -2270,6 +2292,7 @@ describe('admin-users routes', () => {
         rows: [{ role_id: 'crm_admin' }],
       })
       .mockResolvedValueOnce({ rows: [{ id: 'dept-1' }] })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
@@ -2473,6 +2496,7 @@ describe('admin-users routes', () => {
         rows: [{ role_id: 'crm_admin' }],
       })
       .mockResolvedValueOnce({ rows: [{ id: 'group-1' }] })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
@@ -2550,6 +2574,7 @@ describe('admin-users routes', () => {
           member_count: 2,
         }],
       })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -2681,6 +2706,7 @@ describe('admin-users routes', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
@@ -3077,6 +3103,7 @@ describe('admin-users routes', () => {
           updated_at: '2026-03-12T00:00:00.000Z',
         }],
       })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
