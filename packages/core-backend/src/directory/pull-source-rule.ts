@@ -89,8 +89,13 @@ export interface PullSourceRuleStatus {
 /** Number of distinct active pull sources in the organisation. */
 export async function countActivePullSources(query: PullSourceRuleQuery, orgId: string): Promise<number> {
   const result = await query(COUNT_ACTIVE_PULL_SOURCES_SQL, [orgId])
-  const count = Number(result.rows[0]?.pull_source_count ?? 0)
-  return Number.isFinite(count) && count > 0 ? count : 0
+  const raw = result.rows[0]?.pull_source_count
+  const count = typeof raw === 'number' ? raw : typeof raw === 'string' && /^[0-9]+$/.test(raw) ? Number(raw) : Number.NaN
+  // An unreadable count fails closed: callers are gates, and zero would read as "no policy needed".
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new ApprovalRoutingPolicyError(PULL_SOURCE_COUNT_UNAVAILABLE_MESSAGE, 'canonical_unavailable', orgId)
+  }
+  return count
 }
 
 /**
@@ -135,6 +140,9 @@ export type ApprovalRoutingPolicyErrorReason =
 export const POLICY_REQUIRED_MESSAGE = 'Approval routing requires a canonical directory source policy for this organization'
 
 export const APPROVAL_ROUTING_POLICY_REQUIRED_CODE = 'APPROVAL_ROUTING_POLICY_REQUIRED' as const
+
+/** Fixed sentence for a source count that could not be read. */
+export const PULL_SOURCE_COUNT_UNAVAILABLE_MESSAGE = 'The directory source count for this organization is unavailable'
 
 /**
  * Fail-closed routing configuration error. `reason` discriminates the cause; `orgId` and `sourceCount`

@@ -6,7 +6,9 @@
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import ts from 'typescript'
 import { afterEach, describe, expect, it } from 'vitest'
+import * as leafModule from '../../src/directory/pull-source-rule'
 import {
   APPROVAL_ROUTING_POLICY_EXISTS_SQL,
   APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED,
@@ -16,6 +18,7 @@ import {
   DIRECTORY_ROUTING_POLICY_REQUIRED_CODE,
   DirectoryRoutingPolicyRequiredError,
   POLICY_REQUIRED_MESSAGE,
+  PULL_SOURCE_COUNT_UNAVAILABLE_MESSAGE,
   PULL_SOURCE_KEY_SQL,
   PULL_SOURCE_PREDICATE_SQL,
   PULL_SOURCE_RULE_TABLES,
@@ -151,11 +154,16 @@ describe('countActivePullSources / isApprovalRoutingPolicyRequired', () => {
     expect(calls).toEqual([{ sql: COUNT_ACTIVE_PULL_SOURCES_SQL, params: ['org-a'] }])
   })
 
-  it('coerces the count and treats a missing row as zero', async () => {
+  it('accepts a numeric or digit-string count and fails closed on an unreadable one', async () => {
     await expect(countActivePullSources(fakeQuery('3', 0).query, 'o')).resolves.toBe(3)
-    await expect(countActivePullSources(fakeQuery(undefined, 0).query, 'o')).resolves.toBe(0)
-    await expect(countActivePullSources(fakeQuery(null, 0).query, 'o')).resolves.toBe(0)
-    await expect(countActivePullSources(fakeQuery('x', 0).query, 'o')).resolves.toBe(0)
+    await expect(countActivePullSources(fakeQuery(0, 0).query, 'o')).resolves.toBe(0)
+    for (const unreadable of [undefined, null, 'x', '', '-1', '1.5', -1, 1.5, Number.NaN, Infinity]) {
+      const failure = await countActivePullSources(fakeQuery(unreadable, 0).query, 'o').catch((error: unknown) => error)
+      expect(failure, String(unreadable)).toBeInstanceOf(ApprovalRoutingPolicyError)
+      expect((failure as ApprovalRoutingPolicyError).reason).toBe('canonical_unavailable')
+      expect((failure as ApprovalRoutingPolicyError).message).toBe(PULL_SOURCE_COUNT_UNAVAILABLE_MESSAGE)
+      expect(PULL_SOURCE_COUNT_UNAVAILABLE_MESSAGE).not.toMatch(/[0-9]/)
+    }
   })
 
   it('requires a policy only when there are two or more sources and no policy', async () => {
@@ -284,11 +292,17 @@ describe('leaf module shape', () => {
     expect(leafSource).not.toMatch(/^\s*export\s+(type\s+)?(\*(\s+as\s+\w+)?|\{[^}]*\})\s+from\s/m)
     expect(leafSource).not.toMatch(/\bfrom\s+['"]/)
     expect(leafSource).not.toMatch(/directory-sync|db\/|connection-pool/)
+    expect(ts.preProcessFile(leafSource, true, true).importedFiles).toEqual([])
   })
 
   it('reads only tables that already exist', () => {
-    const referenced = [...leafSource.matchAll(/\b(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)/g)].map((m) => m[1])
+    const code = leafSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    const referenced = [...code.matchAll(/\b(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)/gi)].map((m) => m[1].toLowerCase())
     expect([...new Set(referenced)].sort()).toEqual([...PULL_SOURCE_RULE_TABLES].sort())
+    const exportedText = Object.values(leafModule).filter((value): value is string => typeof value === 'string')
+    const exportedTables = exportedText.flatMap((text) =>
+      [...text.matchAll(/\b(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)/gi)].map((m) => m[1].toLowerCase()))
+    expect([...new Set(exportedTables)].sort()).toEqual([...PULL_SOURCE_RULE_TABLES].sort())
     const runtime = [COUNT_ACTIVE_PULL_SOURCES_SQL, APPROVAL_ROUTING_POLICY_EXISTS_SQL]
       .flatMap((sql) => [...sql.matchAll(/\b(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)/g)].map((m) => m[1]))
     expect([...new Set(runtime)].sort()).toEqual([...PULL_SOURCE_RULE_TABLES].sort())
