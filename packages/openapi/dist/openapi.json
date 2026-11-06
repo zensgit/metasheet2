@@ -651,6 +651,126 @@
           }
         }
       },
+      "DirectoryIntegrationCapability": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "governance",
+          "effective",
+          "reason",
+          "anchor"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "governance": {
+            "nullable": true,
+            "type": "string",
+            "enum": [
+              "legacy",
+              "gated",
+              "unsupported"
+            ],
+            "description": "Null when the provider is not registered"
+          },
+          "effective": {
+            "nullable": true,
+            "type": "boolean",
+            "description": "Set only where governance is gated; null means the stored state does not govern the capability"
+          },
+          "reason": {
+            "nullable": true,
+            "type": "string",
+            "enum": [
+              "switch_off",
+              "schema_unavailable",
+              "org_mismatch",
+              "state_mismatch",
+              "provider_not_registered",
+              "governed_by_legacy_path",
+              "unsupported",
+              "implementation_missing",
+              "not_enabled",
+              "integration_inactive",
+              "scope_changed"
+            ]
+          },
+          "anchor": {
+            "type": "object",
+            "required": [
+              "bound",
+              "matchesCurrent"
+            ],
+            "properties": {
+              "bound": {
+                "type": "boolean"
+              },
+              "matchesCurrent": {
+                "type": "boolean",
+                "nullable": true
+              }
+            }
+          },
+          "legacy": {
+            "type": "object",
+            "description": "Present only for a legacy-governed capability of a registered provider; booleans and fixed strings only",
+            "additionalProperties": true
+          }
+        }
+      },
+      "DirectoryIntegrationCapabilities": {
+        "type": "object",
+        "required": [
+          "integrationId",
+          "provider",
+          "integrationStatus",
+          "revision",
+          "updatedAt",
+          "capabilities"
+        ],
+        "properties": {
+          "integrationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "integrationStatus": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Zero while the integration has no capability row"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "capabilities": {
+            "type": "object",
+            "required": [
+              "directory",
+              "login",
+              "notification"
+            ],
+            "properties": {
+              "directory": {
+                "$ref": "#/components/schemas/DirectoryIntegrationCapability"
+              },
+              "login": {
+                "$ref": "#/components/schemas/DirectoryIntegrationCapability"
+              },
+              "notification": {
+                "$ref": "#/components/schemas/DirectoryIntegrationCapability"
+              }
+            }
+          }
+        }
+      },
       "DirectErrorResponse": {
         "type": "object",
         "properties": {
@@ -14901,6 +15021,99 @@
     }
   },
   "paths": {
+    "/api/admin/directory/integration-capabilities/{integrationId}": {
+      "get": {
+        "summary": "Show the capability state of one directory integration",
+        "description": "Platform administrators only. Answers 404 DIRECTORY_CAPABILITIES_DISABLED while DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED is not the exact string true. Read-only and display only: the response carries no scope value, corp id, application key, environment value or configuration value. `effective` is null where the stored state does not govern the capability (legacy path, unsupported capability, unregistered provider); null does not mean the capability is off.",
+        "operationId": "getDirectoryIntegrationCapabilities",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "integrationId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Capability state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/DirectoryIntegrationCapabilities"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "integrationId is not a UUID (DIRECTORY_INTEGRATION_ID_INVALID)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "The surface is switched off (DIRECTORY_CAPABILITIES_DISABLED) or the integration does not exist (DIRECTORY_NOT_FOUND)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Fixed-sentence failure (DIRECTORY_CAPABILITIES_INTERNAL)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability tables are not present (DIRECTORY_CAPABILITIES_SCHEMA_UNAVAILABLE)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/plugins": {
       "get": {
         "summary": "List plugins (admin)",

@@ -307,6 +307,61 @@ components:
               type: string
             message:
               type: string
+    DirectoryIntegrationCapability:
+      type: object
+      required: [enabled, governance, effective, reason, anchor]
+      properties:
+        enabled: { type: boolean }
+        governance:
+          nullable: true
+          type: string
+          enum: [legacy, gated, unsupported]
+          description: Null when the provider is not registered
+        effective:
+          nullable: true
+          type: boolean
+          description: Set only where governance is gated; null means the stored state does not govern the capability
+        reason:
+          nullable: true
+          type: string
+          enum:
+            - switch_off
+            - schema_unavailable
+            - org_mismatch
+            - state_mismatch
+            - provider_not_registered
+            - governed_by_legacy_path
+            - unsupported
+            - implementation_missing
+            - not_enabled
+            - integration_inactive
+            - scope_changed
+        anchor:
+          type: object
+          required: [bound, matchesCurrent]
+          properties:
+            bound: { type: boolean }
+            matchesCurrent: { type: boolean, nullable: true }
+        legacy:
+          type: object
+          description: Present only for a legacy-governed capability of a registered provider; booleans and fixed strings only
+          additionalProperties: true
+    DirectoryIntegrationCapabilities:
+      type: object
+      required: [integrationId, provider, integrationStatus, revision, updatedAt, capabilities]
+      properties:
+        integrationId: { type: string, format: uuid }
+        provider: { type: string }
+        integrationStatus: { type: string }
+        revision: { type: integer, minimum: 0, description: Zero while the integration has no capability row }
+        updatedAt: { type: string, format: date-time, nullable: true }
+        capabilities:
+          type: object
+          required: [directory, login, notification]
+          properties:
+            directory: { $ref: '#/components/schemas/DirectoryIntegrationCapability' }
+            login: { $ref: '#/components/schemas/DirectoryIntegrationCapability' }
+            notification: { $ref: '#/components/schemas/DirectoryIntegrationCapability' }
     DirectErrorResponse:
       type: object
       properties:

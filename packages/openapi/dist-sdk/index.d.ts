@@ -4,6 +4,26 @@
  */
 
 export interface paths {
+    "/api/admin/directory/integration-capabilities/{integrationId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Show the capability state of one directory integration
+         * @description Platform administrators only. Answers 404 DIRECTORY_CAPABILITIES_DISABLED while DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED is not the exact string true. Read-only and display only: the response carries no scope value, corp id, application key, environment value or configuration value. `effective` is null where the stored state does not govern the capability (legacy path, unsupported capability, unregistered provider); null does not mean the capability is off.
+         */
+        get: operations["getDirectoryIntegrationCapabilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/plugins": {
         parameters: {
             query?: never;
@@ -18949,6 +18969,41 @@ export interface components {
                 message?: string;
             };
         };
+        DirectoryIntegrationCapability: {
+            enabled: boolean;
+            /**
+             * @description Null when the provider is not registered
+             * @enum {string|null}
+             */
+            governance: "legacy" | "gated" | "unsupported" | null;
+            /** @description Set only where governance is gated; null means the stored state does not govern the capability */
+            effective: boolean | null;
+            /** @enum {string|null} */
+            reason: "switch_off" | "schema_unavailable" | "org_mismatch" | "state_mismatch" | "provider_not_registered" | "governed_by_legacy_path" | "unsupported" | "implementation_missing" | "not_enabled" | "integration_inactive" | "scope_changed" | null;
+            anchor: {
+                bound: boolean;
+                matchesCurrent: boolean | null;
+            };
+            /** @description Present only for a legacy-governed capability of a registered provider; booleans and fixed strings only */
+            legacy?: {
+                [key: string]: unknown;
+            };
+        };
+        DirectoryIntegrationCapabilities: {
+            /** Format: uuid */
+            integrationId: string;
+            provider: string;
+            integrationStatus: string;
+            /** @description Zero while the integration has no capability row */
+            revision: number;
+            /** Format: date-time */
+            updatedAt: string | null;
+            capabilities: {
+                directory: components["schemas"]["DirectoryIntegrationCapability"];
+                login: components["schemas"]["DirectoryIntegrationCapability"];
+                notification: components["schemas"]["DirectoryIntegrationCapability"];
+            };
+        };
         DirectErrorResponse: {
             error?: {
                 code?: string;
@@ -22988,6 +23043,69 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    getDirectoryIntegrationCapabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                integrationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Capability state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                        data: components["schemas"]["DirectoryIntegrationCapabilities"];
+                    };
+                };
+            };
+            /** @description integrationId is not a UUID (DIRECTORY_INTEGRATION_ID_INVALID) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description The surface is switched off (DIRECTORY_CAPABILITIES_DISABLED) or the integration does not exist (DIRECTORY_NOT_FOUND) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Fixed-sentence failure (DIRECTORY_CAPABILITIES_INTERNAL) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The capability tables are not present (DIRECTORY_CAPABILITIES_SCHEMA_UNAVAILABLE) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     listApprovals: {
         parameters: {
             query?: {

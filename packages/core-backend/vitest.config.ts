@@ -376,6 +376,13 @@ export default defineConfig({
       // skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
       // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
       'tests/integration/directory-sync-membership-local-account-gate.db.test.ts',
+      // Directory integration capability tables against real PostgreSQL: structure and constraints,
+      // update and append-only guards, the guarded down(), the table-existence probe on an open
+      // transaction, and the login scope unique index. DATABASE_URL-gated; excluded here so the no-DB
+      // job cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
+      // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
+      // tests/unit/directory-integration-capabilities-wiring.test.ts).
+      'tests/integration/directory-integration-capabilities.db.test.ts',
       // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
       // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
       // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
