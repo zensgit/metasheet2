@@ -5736,8 +5736,9 @@ function onBeforeUnload(e: BeforeUnloadEvent) {
 // installed on the document in onMounted): the browser's own undo never runs on the page, since it is
 // page-wide and can revert another field. A text control's chord is its own step or nothing; the grid's
 // undo/redo runs from a non-text target in the workbench, or from the page itself after a press on the
-// grid or the drawer's title, fields or attachments (their edits are cell patches; a button there, the
-// drawer's comments, or a rail or manager rename is not: `isWorkbenchGridSurface`).
+// grid's cells or the drawer's title or fields (their edits are cell patches; a button or file input
+// there, the grid's footer, the drawer's comments, or a rail or manager rename is not:
+// `isWorkbenchGridSurface`).
 const workbenchRootRef = ref<HTMLElement | null>(null)
 const workbenchUndo = createWorkbenchUndo({
   isInsideWorkbench: (node) => !!workbenchRootRef.value?.contains(node),

@@ -6310,6 +6310,28 @@ describe('MultitableWorkbench view wiring', () => {
       expect(key(e.el, z)).toBe('restored')
       expect(e.el.value).toBe('ok')
       expect(key(e.el, z)).toBe('swallow')
+      // a beforeinput no edit followed (Backspace at the start) between an undo and a redo: the commit's
+      // mark is the highest step number, not the top one's
+      const f = box()
+      edit(f.el, 'X')
+      pause(2000)
+      edit(f.el, 'XY')
+      expect(key(f.el, z)).toBe('restored')
+      expect(f.el.value).toBe('X')
+      f.el.dispatchEvent(withProps(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'deleteContentBackward' }), { inputType: 'deleteContentBackward' }))
+      expect(key(f.el, shiftZ)).toBe('restored')
+      expect(f.el.value).toBe('XY')
+      undo.beginCommit([f.row])()
+      expect(key(f.el, z)).toBe('swallow')
+      expect(f.el.value).toBe('XY')
+      // committed before the control had a step of its own (focused, nothing typed): typing since is undoable
+      const g = box()
+      g.el.value = 'saved'
+      g.el.focus()
+      undo.beginCommit([g.row])()
+      edit(g.el, 'saved more')
+      expect(key(g.el, z)).toBe('restored')
+      expect(g.el.value).toBe('saved')
     })
 
     it('reset drops every control\'s history (the drawer showing another record reuses its controls, maybe with equal content)', () => {
@@ -6342,13 +6364,18 @@ describe('MultitableWorkbench view wiring', () => {
       expect(drawerCommitContainers('fld_missing', null)).toEqual([])
     })
 
-    it('isWorkbenchGridSurface: the grid and the drawer\'s title, fields and attachments; not a button, link or menu item on them (Send, Resolve, Delete selected), nor the drawer\'s other panels or header', () => {
+    it('isWorkbenchGridSurface: the grid itself and its cells, the drawer\'s title and fields; not a button, link, menu item or file input there (Send, Resolve, Delete selected, an upload), nor the grid\'s footer and bars or the drawer\'s other panels', () => {
       const { add } = rig()
       const host = add(document.createElement('div'))
       host.innerHTML = `
-        <div class="meta-grid" tabindex="0">
-          <div data-k="cell"><span data-k="cell-text">v</span></div><input data-k="row-check" type="checkbox">
+        <div class="meta-grid" tabindex="0" data-k="grid">
           <div class="meta-grid__bulk-bar"><button data-k="bulk-delete"><span data-k="bulk-delete-label">Delete selected</span></button></div>
+          <table><tbody><tr>
+            <td class="meta-grid__check-col"><input data-k="row-check" type="checkbox"></td>
+            <td class="meta-grid__cell" data-k="cell"><span data-k="cell-text">v</span></td>
+            <td class="meta-grid__cell"><input data-k="cell-editor"><input type="file" data-k="cell-file"><button data-k="cell-button">x</button></td>
+          </tr></tbody><tfoot><tr><td class="meta-grid__foot-cell"><select data-k="foot-select"></select></td></tr></tfoot></table>
+          <div class="meta-grid__pagination"><select data-k="page-size"></select></div>
         </div>
         <div class="meta-record-drawer" data-k="drawer">
           <div class="meta-record-drawer__header"><button data-k="next">next</button>
@@ -6357,20 +6384,24 @@ describe('MultitableWorkbench view wiring', () => {
           <div class="meta-record-drawer__body"><button role="tab" data-k="tab">Details</button>
             <div role="tabpanel" tabindex="0" data-k="details-panel">
               <div class="meta-record-drawer__fields"><div class="meta-record-drawer__field">
-                <input data-k="field"><textarea data-k="field-text"></textarea><button data-k="comment-anchor"></button>
+                <input data-k="field"><textarea data-k="field-text"></textarea><select data-k="field-select"></select><button data-k="comment-anchor"></button>
                 <a href="#x" data-k="link">link</a><div role="menuitem" data-k="menuitem">m</div><div role="button" data-k="role-button">r</div>
+                <input type="file" data-k="field-file">
               </div></div>
               <div class="meta-record-approval-panel"><span data-k="approval">x</span></div>
             </div>
             <div role="tabpanel" tabindex="0" data-k="comments-panel"><textarea data-k="composer"></textarea><button data-k="send">Send</button></div>
-            <div class="meta-record-attachments-panel"><input type="file" data-k="file"><button data-k="remove">x</button></div>
+            <div class="meta-record-attachments-panel"><input type="file" data-k="file"><span data-k="drop-zone">drop</span><button data-k="remove">x</button></div>
           </div>
         </div>`
       const at = (k: string) => host.querySelector(`[data-k="${k}"]`)!
-      expect(isWorkbenchGridSurface(host.querySelector('.meta-grid')!)).toBe(true)
       expect(isWorkbenchGridSurface(at('cell-text').firstChild!), 'a text node').toBe(true)
-      for (const k of ['cell', 'cell-text', 'row-check', 'title', 'field', 'field-text', 'file']) expect(isWorkbenchGridSurface(at(k)), k).toBe(true)
-      for (const k of ['bulk-delete', 'bulk-delete-label', 'drawer', 'next', 'tab', 'details-panel', 'comment-anchor', 'link', 'menuitem', 'role-button', 'approval', 'comments-panel', 'composer', 'send', 'remove']) {
+      for (const k of ['grid', 'cell', 'cell-text', 'cell-editor', 'title', 'field', 'field-text', 'field-select']) expect(isWorkbenchGridSurface(at(k)), k).toBe(true)
+      for (const k of [
+        'bulk-delete', 'bulk-delete-label', 'row-check', 'cell-file', 'cell-button', 'foot-select', 'page-size',
+        'drawer', 'next', 'tab', 'details-panel', 'comment-anchor', 'link', 'menuitem', 'role-button', 'field-file', 'approval',
+        'comments-panel', 'composer', 'send', 'file', 'drop-zone', 'remove',
+      ]) {
         expect(isWorkbenchGridSurface(at(k)), k).toBe(false)
       }
     })
@@ -6565,7 +6596,7 @@ describe('MultitableWorkbench view wiring', () => {
         expect(fire(document.body, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
       })
 
-      it('a press on what is not a cell edit, in the grid or the drawer (Delete selected; a comment sent, resolved or deleted), whose control then goes away: Cmd+Z on the page does nothing, never the grid', async () => {
+      it('a press on what is not a cell edit, in the grid or the drawer (Delete selected, the footer; a comment sent, resolved or deleted; an upload), whose control then goes away: Cmd+Z on the page does nothing, never the grid', async () => {
         mountWorkbench()
         await flushUi()
         const root = container!.querySelector('.mt-workbench') as HTMLElement
@@ -6576,8 +6607,8 @@ describe('MultitableWorkbench view wiring', () => {
           made.push(el)
           return el
         }
-        const grid = add('<div class="meta-grid" tabindex="0"><div class="meta-grid__bulk-bar"><button>Delete selected</button></div></div>')
-        const drawer = add('<div class="meta-record-drawer"><div role="tabpanel"><textarea></textarea><button>Send</button><button>Resolve</button></div></div>')
+        const grid = add('<div class="meta-grid" tabindex="0"><div class="meta-grid__bulk-bar"><button>Delete selected</button></div><div class="meta-grid__foot"><select></select></div></div>')
+        const drawer = add('<div class="meta-record-drawer"><div role="tabpanel"><textarea></textarea><button>Send</button><button>Resolve</button></div><div class="meta-record-drawer__fields"><input type="file"></div></div>')
         const press = (el: HTMLElement) => {
           grid.querySelector<HTMLElement>('.meta-grid')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
           el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
@@ -6586,7 +6617,9 @@ describe('MultitableWorkbench view wiring', () => {
           expect(document.activeElement).toBe(document.body)
         }
         const [send, resolve] = Array.from(drawer.querySelectorAll('button'))
-        for (const el of [grid.querySelector('button')!, send, resolve, drawer.querySelector('textarea')!]) {
+        // (the footer's aggregation select goes when its last aggregation is removed; the file input is
+        // disabled for the whole upload, whose patch comes only once it ends)
+        for (const el of [grid.querySelector('button')!, grid.querySelector('select')!, send, resolve, drawer.querySelector('textarea')!, drawer.querySelector<HTMLElement>('input[type="file"]')!]) {
           press(el)
           expect(fire(document.body, { key: 'z', metaKey: true }), el.textContent || el.tagName).toEqual({ prevented: true, undo: 0, redo: 0 })
           expect(fire(document.body, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })

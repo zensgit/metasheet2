@@ -27,11 +27,12 @@
  *   nothing. The grid's undo / redo (which replays a recorded cell edit to the server) runs only from a
  *   non-text target inside the workbench (the grid, a button, a date input, a select…), or from the page
  *   itself (nothing focused, e.g. after Enter committed the title) when the last press or focus was on a
- *   grid surface (`isGridSurface`; the workbench's is `isWorkbenchGridSurface`: the grid, and the drawer's
- *   title, fields and attachments, whose edits are cell patches). A button there (Send, Resolve, Delete
- *   selected), the drawer's comments, history, approval or task panels, a rename in the rail or a manager,
- *   or a press in a dialog does not make the page itself the grid's. Outside the workbench (a teleported
- *   dialog or popover, the app shell) nothing runs.
+ *   grid surface (`isGridSurface`; the workbench's is `isWorkbenchGridSurface`: the grid itself and its
+ *   cells, and the drawer's title and fields, whose edits are cell patches). A button, link or file input
+ *   there (Send, Resolve, Delete selected, an upload), the grid's footer and bars, the drawer's comments,
+ *   history, approval, task or attachments panels, a rename in the rail or a manager, a picker, or a press
+ *   in a dialog does not make the page itself the grid's. Outside the workbench (a teleported dialog or
+ *   popover, the app shell) nothing runs.
  * - The history belongs to the control's own edits only. Content no recorded edit produced (a re-render
  *   after grid undo, a suggestion picked into the box, a revert, a rejected commit snapping back) is a
  *   rewrite: the history is dropped. `reset` drops every history: the workbench calls it when the drawer
@@ -81,19 +82,23 @@ export function drawerCommitContainers(fieldId: string, primaryFieldId: string |
   return [...rows, ...title]
 }
 
-/** The parts of the workbench whose edits are the grid's cell patches: the grid, and in the record drawer
- *  the title, the fields panel and the attachments panel (not its comments, history, approval or task
- *  panels). */
-const GRID_SURFACES = '.meta-grid, .meta-record-drawer__titleblock, .meta-record-drawer__fields, .meta-record-attachments-panel'
-/** Controls on those parts that are not a cell edit (Send, Resolve, Delete selected, a section toggle…).
- *  One that disables or removes itself when pressed leaves focus on the page itself. */
-const NOT_CELL_EDITS = 'button, [role="button"], [role="menuitem"], a[href]'
+/** The parts of the workbench whose edits are the grid's cell patches: the grid's cells, and in the record
+ *  drawer the title and the fields panel (not the grid's footer or bars, nor the drawer's comments,
+ *  history, approval, task or attachments panels). */
+const CELL_EDIT_SURFACES = '.meta-grid__cell, .meta-record-drawer__titleblock, .meta-record-drawer__fields'
+/** Controls on those parts whose action is not a cell patch (Send, Resolve, Delete selected, a section
+ *  toggle…), or not yet one (a file input: its patch comes once the upload ends). One that disables or
+ *  removes itself when pressed leaves focus on the page itself. */
+const NOT_CELL_EDITS = 'button, [role="button"], [role="menuitem"], a[href], input[type="file"]'
 
 /** The workbench's `isGridSurface`: whether, after a press or focus on `node`, a chord on the page itself
  *  is the grid's. */
 export function isWorkbenchGridSurface(node: Node): boolean {
   const el = node instanceof Element ? node : node.parentElement
-  return !!el?.closest(GRID_SURFACES) && !el.closest(NOT_CELL_EDITS)
+  if (!el) return false
+  // The grid itself has focus while you move between its cells.
+  if (el.classList.contains('meta-grid')) return true
+  return !!el.closest(CELL_EDIT_SURFACES) && !el.closest(NOT_CELL_EDITS)
 }
 
 interface Snapshot {
@@ -449,7 +454,9 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
           const host = textEntryHost(el)
           const history = host ? live(host) : undefined
           if (!host || !history || marks.has(host)) continue
-          marks.set(host, { history, mark: history.undo[history.undo.length - 1]?.seq ?? 0 })
+          // The highest step number, not the top one's: a `beforeinput` no edit followed, between an undo
+          // and a redo, leaves a newer number under the redone step.
+          marks.set(host, { history, mark: history.undo.reduce((top, snapshot) => Math.max(top, snapshot.seq), 0) })
           // Typing after the commit is a step of its own, back to the committed content.
           history.lastKind = ''
           history.lastAt = 0

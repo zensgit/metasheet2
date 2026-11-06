@@ -135,6 +135,24 @@ const SCENARIOS = {
     await page.keyboard.press(`${mod}+z`); await page.keyboard.press(`${mod}+Shift+z`)
     check('grid', (await state(page)).grid, { undo: 0, redo: 0 })
   },
+  async 'the grid footer\'s aggregation select set to none (the footer goes, focus falls to the page): Cmd+Z: nothing, never the grid'(page) {
+    const select = page.locator('#foot-select')
+    await leave(page); await select.dispatchEvent('mousedown'); await select.focus(); await select.selectOption(''); await page.waitForTimeout(100)
+    check('focus on the page', await onPage(page), true)
+    await page.keyboard.press(`${mod}+z`)
+    check('grid', (await state(page)).grid, { undo: 0, redo: 0 })
+  },
+  async 'an attachment upload (its input is disabled until the upload ends), Cmd+Z while it uploads: nothing, never the grid; the upload is then saved'(page) {
+    const input = page.locator('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]')
+    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), input.click()])
+    await chooser.setFiles({ name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('x') })
+    await page.waitForFunction(() => document.querySelector('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]').disabled)
+    check('focus on the page while it uploads', await onPage(page), true)
+    await page.keyboard.press(`${mod}+z`)
+    check('grid', (await state(page)).grid, { undo: 0, redo: 0 })
+    await page.waitForFunction(() => window.undoDemo.patches.some((p) => p.includes('fld_files')))
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_files')), ['rec_1:fld_files=att_1'])
+  },
   async 'a box outside the workbench (a popover): its own typing goes, then nothing; the page itself after it: nothing'(page) {
     await page.locator('#outside').click(); await page.keyboard.press('End'); await page.keyboard.type('X'); await page.keyboard.press(`${mod}+z`)
     check('restored', (await state(page)).outside, 'filter')
