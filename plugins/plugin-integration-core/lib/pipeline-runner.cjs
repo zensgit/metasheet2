@@ -43,6 +43,14 @@ const {
   refuseB2aSourceConfigChangedAfterAuthorization,
   refuseB2aArtifactReplayNotAuthorized,
 } = require('./b2a-trial-registry.cjs')
+// R-69 1b-i: the optional abort signal / checkpoint of a governed entry, and the values-free
+// `failureStage` / `errorClass` own properties a failed run's error carries (never inside `details`).
+const {
+  governedErrorClassOf,
+  normalizeGovernedEntryOptions,
+  passGovernedCheckpoint,
+  tagGovernedFailure,
+} = require('./governed-entry-checkpoint.cjs')
 
 class PipelineRunnerError extends Error {
   constructor(message, details = {}) {
@@ -898,7 +906,24 @@ function createPipelineRunner(deps = {}) {
     }
   }
 
-  async function runPipeline(input) {
+  // R-69 1b-i: the optional second argument is `{ signal, checkpoint }` from a governed entry
+  // (http-routes.cjs `runGovernedPipeline`). Neither given => `governedEntry` is null and every
+  // checkpoint below is a no-op: the run is the one it was before 1b-i. Every caller that existed
+  // before 1b-i passes one argument.
+  async function runPipeline(input, governedEntryOptions) {
+    const governedEntry = normalizeGovernedEntryOptions(governedEntryOptions)
+    // The stage a failure is attributed to (own `failureStage` on the thrown error; see the catch).
+    let failureStage = 'authorize'
+    try {
+      return await runPipelineStages(input, governedEntry, (stage) => { failureStage = stage })
+    } catch (error) {
+      // Own, non-enumerable, never in `details`: the HTTP envelope serializes `details` only, so no
+      // response changes. An error that already carries a stage (the governed abort) keeps its own.
+      throw tagGovernedFailure(error, failureStage)
+    }
+  }
+
+  async function runPipelineStages(input, governedEntry, enterStage) {
     // R-wave (finding 4): the C6 write-lifecycle fence, FIRST — before the read fence, so a write
     // that will be refused for want of the lifecycle context never spends the registration's one
     // operation, and before any platform read of any kind.
@@ -913,7 +938,9 @@ function createPipelineRunner(deps = {}) {
     // second-read object, which `loadPipelineContext` binds against the decrypting reload.
     const { authorization: b2aAuthorization, sourceConfigSnapshot } =
       await assertB2aPipelineSourceReadAuthorized(input)
+    enterStage('load')
     const context = await loadPipelineContext(input, b2aAuthorization, sourceConfigSnapshot)
+    enterStage('read')
     const mode = input.mode || context.pipeline.mode || 'manual'
     const triggeredBy = input.triggeredBy || 'manual'
     const dryRun = coerceTruthyFlag(input.dryRun, 'input.dryRun')
@@ -1024,6 +1051,11 @@ function createPipelineRunner(deps = {}) {
         : null
 
       while (page < maxPages) {
+        // R-69 1b-i — BEFORE EACH PAGE (the first one is the source read): the signal, then
+        // `await checkpoint()`. A refusal throws inside this try, so the run row is closed `failed`
+        // below and no further page is read. No-op without a governed entry.
+        enterStage('read')
+        await passGovernedCheckpoint(governedEntry, 'read')
         page += 1
         const sourceReadOptions = resolveSourceReadOptions(context.pipeline)
         const readResult = Array.isArray(input.sourceRecords)
@@ -1041,6 +1073,7 @@ function createPipelineRunner(deps = {}) {
               filters: sourceReadOptions.filters,
               options: sourceReadOptions.options,
             })
+        enterStage('transform')
         const cleanRecords = []
         const records = remainingDryRunSamples === null
           ? readResult.records
@@ -1055,6 +1088,7 @@ function createPipelineRunner(deps = {}) {
         }
 
         if (!dryRun && cleanRecords.length > 0) {
+          enterStage('write')
           const writeResult = normalizeTargetWriteResult(await context.targetAdapter.upsert({
             object: context.pipeline.targetObject,
             records: cleanRecords.map((item) => item.targetRecord),
@@ -1159,6 +1193,7 @@ function createPipelineRunner(deps = {}) {
       const watermarkMayAdvance = !dryRun && metrics.rowsFailed === 0 && !maxPagesReached
 
       if (watermarkMayAdvance && lastSuccessfulWatermark) {
+        enterStage('write')
         const advance = typeof watermarkStore.advanceWatermark === 'function'
           ? watermarkStore.advanceWatermark.bind(watermarkStore)
           : watermarkStore.setWatermark.bind(watermarkStore)
@@ -1216,10 +1251,13 @@ function createPipelineRunner(deps = {}) {
       } catch {
         // Secondary failure — original error takes priority
       }
-      throw new PipelineRunnerError('pipeline run failed', {
+      // R-69 1b-i: the wrapped error says WHERE (the stage the run was in) and WHAT CLASS of failure
+      // (the governed abort class, else the cause's constructor name) as own, non-enumerable
+      // properties — `details` (the only part a response serializes) is exactly what it was.
+      throw tagGovernedFailure(new PipelineRunnerError('pipeline run failed', {
         run,
         cause: error.message || String(error),
-      })
+      }), error && typeof error.failureStage === 'string' ? error.failureStage : undefined, governedErrorClassOf(error))
     }
   }
 
