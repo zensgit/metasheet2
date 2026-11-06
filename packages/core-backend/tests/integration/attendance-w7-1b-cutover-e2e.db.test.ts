@@ -34,14 +34,14 @@
  *
  * Shared-DB discipline: every fixture id is a file-namespaced random UUID.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { createRequire } from 'module'
 import * as path from 'node:path'
 import net from 'net'
 import http from 'http'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'crypto'
-import { Pool } from 'pg'
+import { Pool, Client } from 'pg'
 import type { MetaSheetServer } from '../../src/index'
 import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
 import { createLegacyLivePunchBoundaryDriver } from '../utils/attendance-legacy-live-punch-boundary-driver'
@@ -819,4 +819,92 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
       else process.env[W4_ENV] = priorW4Env
     }
   }, 60_000)
+  // Randomly namespaced immutable history is retained in the disposable integration DB.
+  // Do not bypass append-only triggers or partially delete its source facts.
+  const frozenFamilies = [
+    { family: 'membership', prefix: '76160001', table: 'attendance_calculation_group_memberships', change: "effective_to = effective_from" },
+    { family: 'group-policy', prefix: '76160002', table: 'attendance_groups', change: "attendance_type = 'scheduled_shift'" },
+    { family: 'FSER-schedule', prefix: '76160003', table: 'attendance_group_fixed_schedule_configs', change: 'end_date = start_date, revision = revision + 1' },
+  ] as const
+
+  it.each(frozenFamilies)('W7-R6 frozen_prior preserves snapshots and fingerprints after $family change without live reads', async ({ prefix, table, change }) => {
+    const fixture = { orgId: prefix + randomUUID().slice(8), userId: randomUUID(), shiftId: randomUUID(), groupId: randomUUID() }
+    const { orgId, userId, shiftId, groupId } = fixture
+    await insertActiveUser(userId, orgId)
+    // Recompute rechecks stored attendance-admin authority, independently of JWT claims.
+    await pool.query(`UPDATE users SET permissions = '["attendance:admin"]'::jsonb WHERE id = $1`, [userId])
+    await seedAuthoritativeRollout(orgId)
+    await seedShiftAndEffectiveGroup(orgId, userId, shiftId, groupId)
+    await withEnv({ [W4_ENV]: orgId.toLowerCase(), [W7_ENV]: orgId.toLowerCase() }, async () => {
+      const created = await punch(userId, orgId, 'check_in')
+      expect(created.status, 'real group punch must succeed before freezing').toBe(200)
+      const priorRows = await pool.query(
+        `SELECT c.*, to_jsonb(c)::text AS whole_bytes
+           FROM attendance_record_calculations c
+           JOIN attendance_records r ON r.current_calculation_id = c.id
+          WHERE r.org_id = $1 AND r.user_id = $2`, [orgId, userId],
+      )
+      expect(priorRows.rows).toHaveLength(1)
+      const prior = priorRows.rows[0]
+      expect(prior.outcome).toBe('completed')
+      expect(prior.context_snapshot.selector).toBe('group_effective')
+      expect(prior.context_snapshot.calculationGroupId).toBe(groupId)
+      expect(prior.evidence_snapshot.length).toBeGreaterThan(0)
+      const snapshotFields = ['attribution_snapshot', 'context_snapshot', 'evidence_snapshot', 'approved_facts_snapshot', 'manual_override_snapshot'] as const
+      const snapshotSql = snapshotFields.map(column => `${column}::text AS ${column}`).join(', ')
+      const before = (await pool.query(`SELECT ${snapshotSql} FROM attendance_record_calculations WHERE id=$1`, [prior.id])).rows[0]
+      const liveBefore = (await pool.query(`SELECT to_jsonb(t)::text AS bytes FROM ${table} t WHERE org_id=$1`, [orgId])).rows
+      expect(liveBefore).toHaveLength(1)
+      const changed = await pool.query(`UPDATE ${table} SET ${change} WHERE org_id=$1 RETURNING org_id`, [orgId])
+      expect(changed.rowCount, 'ordinary live fact UPDATE must actually affect one row').toBe(1)
+      const liveAfter = (await pool.query(`SELECT to_jsonb(t)::text AS bytes FROM ${table} t WHERE org_id=$1`, [orgId])).rows
+      expect(liveAfter).toHaveLength(1)
+      expect(liveAfter).not.toEqual(liveBefore)
+
+      const token = await mintToken(userId)
+      const sqlTrace: string[] = []
+      const originalQuery = Client.prototype.query
+      // Observe actual native delegation; no SQL/result substitution and no provider IO.
+      const querySpy = vi.spyOn(Client.prototype, 'query').mockImplementation(function (this: Client, ...args: Parameters<Client['query']>) {
+        const carrier: unknown = args[0]
+        const text = typeof carrier === 'string' ? carrier : carrier && typeof carrier === 'object' && 'text' in carrier ? String(carrier.text) : ''
+        sqlTrace.push(text.replace(/\s+/g, ' ').trim())
+        return Reflect.apply(originalQuery, this, args)
+      })
+      let response: HttpResponse
+      try {
+        response = await requestJson(`${baseUrl}/api/attendance/records/${prior.attendance_record_id}/recompute`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orgId, policy: 'frozen_prior', operationId: randomUUID(), expectedCalculationId: prior.id, expectedCalculationVersion: prior.version }),
+        })
+      } finally { querySpy.mockRestore() }
+      expect(response.status, 'actual frozen_prior HTTP recompute must append: ' + String(response.body?.error?.code ?? 'NO_ERROR_CODE')).toBe(200)
+      expect(sqlTrace.some(sql => /\bFROM attendance_records\b/i.test(sql)), 'native trace must observe actual record read').toBe(true)
+      expect(sqlTrace.some(sql => /\bINSERT INTO attendance_record_calculations\b/i.test(sql)), 'native trace must observe actual calculation append').toBe(true)
+      const liveTables = ['attendance_calculation_group_memberships', 'attendance_groups', 'attendance_group_members', 'attendance_group_fixed_schedule_configs', 'attendance_shift_assignments', 'attendance_shifts', 'attendance_shift_segments', 'attendance_rotation_rules', 'attendance_rotation_assignments']
+      // Conservative identifier ban, not a FROM/JOIN grammar: also catches ONLY,
+      // quoted/schema-qualified relations, comma joins and nested subqueries.
+      const liveReads = liveTables.filter(name => sqlTrace.some(sql => new RegExp('\\b' + name + '\\b', 'i').test(sql)))
+      expect(liveReads, 'W7-R6 forbids live membership/group/shift/FSER reads during frozen_prior').toEqual([])
+      const nextRows = await pool.query(
+        `SELECT c.*, ${snapshotFields.map(column => `c.${column}::text AS ${column}_bytes`).join(', ')}
+           FROM attendance_record_calculations c
+           JOIN attendance_records r ON r.current_calculation_id = c.id
+          WHERE r.org_id = $1 AND r.user_id = $2`, [orgId, userId],
+      )
+      expect(nextRows.rows).toHaveLength(1)
+      const next = nextRows.rows[0]
+      expect(next.id).not.toBe(prior.id)
+      expect(next.version).toBe(prior.version + 1)
+      expect(next.entrypoint).toBe('recompute')
+      expect(next.outcome).toBe('completed')
+      for (const column of snapshotFields) expect(next[column + '_bytes'], column).toBe(before[column])
+      expect(next.source_definition_fingerprint).toBe(prior.source_definition_fingerprint)
+      expect(next.merge_policy).toBe(prior.merge_policy)
+      expect(next.semantic_input_fingerprint).toBe(prior.semantic_input_fingerprint)
+      expect((await pool.query('SELECT to_jsonb(c)::text AS whole_bytes FROM attendance_record_calculations c WHERE id=$1', [prior.id])).rows[0].whole_bytes).toBe(prior.whole_bytes)
+    })
+  }, 60_000)
+
 })
