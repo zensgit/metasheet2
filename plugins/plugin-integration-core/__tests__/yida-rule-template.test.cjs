@@ -276,3 +276,33 @@ test('core modules stay browser-capable and introduce no I/O or runtime dependen
   assert.deepEqual(imports, ['./yida-static-plan.mjs', './stock-preparation-yida-allocation.mjs'])
   assert.doesNotMatch(source, /\b(?:fetch|XMLHttpRequest|WebSocket|localStorage|indexedDB|process|Buffer|require)\s*[.(]/)
 })
+
+// R-71 ⑦.4 PR-2 (A12): a generated template is rule data like every other v3 entry: it round-trips
+// through export -> parse -> export byte for byte in a formatVersion 2 envelope, and only there.
+test('A12 generated entries round-trip byte for byte in formatVersion 2 and are refused in formatVersion 1', async () => {
+  const [api, planner] = await modules
+  const example = planner.createYidaTransformExample()
+  const rules = withoutTarget(clone(example.config))
+  rules.fieldCatalog.push({ id: 'syntheticCode', control: 'text', required: false })
+  rules.fieldMap.push({ transform: 'generated', target: 'syntheticCode', type: 'string', required: false, template: [
+    { literal: 'SYN-' }, { field: 'totalQty' }, { literal: '-' },
+    { hash: ['parentDrawingNo', ...rules.businessKey.filter((key) => key !== 'parentDrawingNo'), 'materialTypeText'], form: 'uuid-32' },
+  ] })
+  const text = api.exportYidaRuleTemplate({ rules, allocation: example.allocation })
+  assert.match(text, /"formatVersion": 2,/)
+  const imported = api.parseYidaRuleTemplate(text)
+  assert.equal(imported.formatVersion, 2)
+  // The normalized entry keeps the closed key order (transform, template, target, type, required).
+  const generated = imported.rules.fieldMap.filter((entry) => entry.transform === 'generated')
+  assert.deepEqual(generated.map((entry) => Object.keys(entry)), [['transform', 'template', 'target', 'type', 'required'],
+    ['transform', 'template', 'target', 'type', 'required']])
+  assert.deepEqual(generated[1].template, rules.fieldMap.at(-1).template)
+  assert.equal(api.exportYidaRuleTemplate({ rules: imported.rules, allocation: imported.allocation }), text)
+  assertFrozen(imported)
+  assert.throws(() => api.parseYidaRuleTemplate(text.replace('"formatVersion": 2', '"formatVersion": 1')), code('TEXT'))
+  // A template the validator refuses is refused as a template config, never stripped.
+  const brokenRules = clone(rules)
+  brokenRules.fieldMap.at(-1).template = [{ literal: 'SYN-' }, { hash: ['drawingNo'], form: 'uuid-32' }]
+  assert.throws(() => api.exportYidaRuleTemplate({ rules: brokenRules, allocation: example.allocation }), code('CONFIG'))
+  assert.throws(() => api.parseYidaRuleTemplate(text.replace('"form": "uuid-32"', '"form": "uuid-64"')), code('CONFIG'))
+})

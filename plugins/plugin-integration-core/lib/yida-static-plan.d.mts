@@ -37,7 +37,16 @@ export interface YidaProtocolBaseConfig {
 export type YidaProtocolConfig =
   | (YidaProtocolBaseConfig & { intent: 'create'; instanceIdField?: never })
   | (YidaProtocolBaseConfig & { intent: 'update'; instanceIdField: string })
-/** v3: one direct entry per source column; copy/constant/concat are derived and never key parts. */
+/** One part of a generated template (closed kinds, exact keys). */
+export type YidaGeneratedTemplatePart =
+  | { literal: string }
+  /** A direct target; text verbatim, a number as String(n). */
+  | { field: string }
+  /** 1..16 string-typed direct targets covering every business-key target (rule G1). */
+  | { hash: string[]; form: 'uuid-36' | 'uuid-32' }
+  /** The frozen material-code-v1 generator; projectOf is a business-key target. */
+  | { preset: 'material-code-v1'; rowIdOf: string; projectOf: string }
+/** v3: one direct entry per source column; copy/constant/concat/generated are derived and never key parts. */
 export type YidaTransformFieldMapEntry =
   | { transform: 'direct'; source: string; target: string; type: 'string' | 'number'; required: boolean }
   | { transform: 'copy'; copyOf: string; target: string; type: 'string' | 'number'; required: boolean }
@@ -47,6 +56,14 @@ export type YidaTransformFieldMapEntry =
     parts: Array<{ source: string; literal?: never } | { literal: string; source?: never }>
     separator: string
     blank: 'skip' | 'refuse'
+    target: string
+    type: 'string'
+    required: boolean
+  }
+  | {
+    transform: 'generated'
+    /** 1..8 parts, at least one not a literal, exactly one hash or preset (G1). */
+    template: YidaGeneratedTemplatePart[]
     target: string
     type: 'string'
     required: boolean
@@ -110,12 +127,13 @@ export type YidaStaticRowIssueCode =
   | 'FIELD_NUMBER_INVALID'
   | 'FIELD_PART_MISSING'
   | 'FIELD_VALUE_TOO_LONG'
+  | 'DUPLICATE_GENERATED_VALUE'
 export interface YidaStaticRowIssue {
   index: number
   code: YidaStaticRowIssueCode
   /**
    * Fixed metadata projected from the validated mapping; no row values or catalog options.
-   * v3 adds the transform; constant and concat fields have no single source column.
+   * v3 adds the transform; constant, concat and generated fields have no single source column.
    */
   fields?: Array<{ source?: string; target: string; type: YidaStaticFieldType; transform?: YidaTransformName }>
 }
@@ -167,6 +185,8 @@ export function validateYidaStaticConfig(input: unknown): YidaStaticValidationRe
 export const YIDA_TRANSFORM_NAMES: readonly YidaTransformName[]
 /** Every row column a valid v3 config reads (direct sources and concat column parts), sorted. Throws YIDA_STATIC_CONFIG_INVALID otherwise. */
 export function yidaTransformSourceColumns(config: unknown): readonly string[]
+/** The source columns one generated entry of a valid v3 config reads (field parts, hash members, preset inputs), sorted. Throws YIDA_STATIC_CONFIG_INVALID otherwise. */
+export function generatedTemplateDependencies(entry: unknown, config: unknown): readonly string[]
 /** Explicit configs require unique decoded JSON keys and raw decimal fidelity; v1 keeps its finite Number domain. Omitted config retains legacy parsing. */
 export function parseYidaStaticRows(text: string, config?: YidaStaticConfig): YidaStaticRow[]
 export function buildYidaStaticPlan(input: { config: unknown; rows: unknown }): YidaStaticPlan

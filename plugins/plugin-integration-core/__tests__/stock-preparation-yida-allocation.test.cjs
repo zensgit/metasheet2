@@ -490,3 +490,48 @@ test('R-71 ⑦.3: the shared expansion plans to the preview plan in both modes a
   }
   assert.throws(() => expandYidaProjectAllocationRows({ config: example.config, rowsText: example.text }), { code: 'YIDA_ALLOCATION_INPUT_INVALID' })
 })
+
+// R-71 ⑦.4 PR-2 (A5): generated values are evaluated on the split rows, so every split row has its own
+// code; a template that does not read the split project is refused before any row is planned.
+test('A5 generated after allocation: one code per split row, original equals a single split, project-blind templates refused', async () => {
+  const { buildYidaProjectAllocationPreview, validateYidaProjectAllocationRules } = await modulePromise
+  const { buildYidaStaticPlan, createYidaTransformExample, parseYidaStaticRows } = await plannerPromise
+  const { generateYidaMaterialCode } = await import(pathToFileURL(path.join(__dirname, '..', 'lib', 'yida-material-code.mjs')).href)
+  const example = createYidaTransformExample()
+  const source = [example.rows[0]]
+  const split = buildYidaProjectAllocationPreview({ config: example.config, rowsText: JSON.stringify(source),
+    allocation: { ...example.allocation, projects: ['SYN-P1', 'SYN-P2'] } })
+  assert.deepEqual(split.issues, [])
+  const codes = split.plan.rows.map((row) => row.payload.materialCodeText)
+  assert.deepEqual(codes, ['SYN-P1', 'SYN-P2'].map((projectNo) => generateYidaMaterialCode({ keyValue: 'SYN-LINE-1', projectNo })))
+  assert.notEqual(codes[0], codes[1])
+  // allocation 'original' over a row that already holds P1 equals equal_integer over [P1].
+  const single = buildYidaProjectAllocationPreview({ config: example.config, rowsText: JSON.stringify(source),
+    allocation: { ...example.allocation, projects: ['DEMO-P1'] } })
+  const original = buildYidaStaticPlan({ config: example.config, rows: parseYidaStaticRows(JSON.stringify(source), example.config) })
+  assert.equal(single.plan.rows[0].payload.materialCodeText, original.rows[0].payload.materialCodeText)
+  assert.equal(original.rows[0].payload.materialCodeText, generateYidaMaterialCode({ keyValue: 'SYN-LINE-1', projectNo: 'DEMO-P1' }))
+  // A hash over every key target also splits: each split row hashes its own project.
+  const hashed = JSON.parse(JSON.stringify(example.config))
+  hashed.fieldMap = hashed.fieldMap.map((entry) => entry.transform === 'generated'
+    ? { ...entry, template: [{ hash: [...hashed.businessKey], form: 'uuid-32' }] } : entry)
+  const hashedSplit = buildYidaProjectAllocationPreview({ config: hashed, rowsText: JSON.stringify(source),
+    allocation: { ...example.allocation, projects: ['SYN-P1', 'SYN-P2'] } })
+  assert.deepEqual(hashedSplit.issues, [])
+  assert.equal(new Set(hashedSplit.plan.rows.map((row) => row.payload.materialCodeText)).size, 2)
+  // G1 lets a preset take any key target as its project; allocation requires the split project itself.
+  const elsewhere = JSON.parse(JSON.stringify(example.config))
+  elsewhere.fieldMap = elsewhere.fieldMap.map((entry) => entry.transform === 'generated'
+    ? { ...entry, template: [{ preset: 'material-code-v1', rowIdOf: 'sourceLineId', projectOf: 'drawingNo' }] } : entry)
+  const rules = { mode: 'equal_integer', projectField: 'projectNo', quantityField: 'totalQuantity' }
+  assert.throws(() => validateYidaProjectAllocationRules(elsewhere, rules), { code: 'YIDA_ALLOCATION_FIELDS_INVALID' })
+  // Reading the project in a field part is not enough: the preset itself must take the split project.
+  const decorated = JSON.parse(JSON.stringify(elsewhere))
+  decorated.fieldMap = decorated.fieldMap.map((entry) => entry.transform === 'generated'
+    ? { ...entry, template: [{ field: 'project' }, { literal: '-' }, ...entry.template] } : entry)
+  assert.throws(() => validateYidaProjectAllocationRules(decorated, rules), { code: 'YIDA_ALLOCATION_FIELDS_INVALID' })
+  assert.throws(() => buildYidaProjectAllocationPreview({ config: elsewhere, rowsText: JSON.stringify(source),
+    allocation: { ...rules, projects: ['SYN-P1', 'SYN-P2'] } }), { code: 'YIDA_ALLOCATION_FIELDS_INVALID' })
+  assert.deepEqual(validateYidaProjectAllocationRules(example.config, rules), rules)
+  assert.deepEqual(validateYidaProjectAllocationRules(hashed, rules), rules)
+})
