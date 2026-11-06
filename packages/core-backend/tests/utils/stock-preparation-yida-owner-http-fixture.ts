@@ -417,6 +417,10 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
         CREATE TABLE user_sessions(id text PRIMARY KEY,user_id text,issued_at timestamptz,expires_at timestamptz,
           last_seen_at timestamptz,revoked_at timestamptz,revoked_by text,revoke_reason text,ip_address text,user_agent text,
           created_at timestamptz,updated_at timestamptz);
+        -- D21 (slice Y5): the two authorization version rows of zzzz20261106110500 (table shapes only: the lane sends
+        -- pasted, unbound rows, so no trigger and no sheet row is ever consulted; approve/admit hold the actor's subject row).
+        CREATE TABLE sheet_permission_versions(sheet_id text PRIMARY KEY,version bigint NOT NULL DEFAULT 1,updated_at timestamptz NOT NULL DEFAULT now());
+        CREATE TABLE subject_authorization_versions(subject_id text PRIMARY KEY,version bigint NOT NULL DEFAULT 1,updated_at timestamptz NOT NULL DEFAULT now());
       `)
       for (const [key, actorId] of Object.entries(principals)) {
         await admin!.query(`INSERT INTO users(id,email,username,name,role,permissions,password_hash,is_active,

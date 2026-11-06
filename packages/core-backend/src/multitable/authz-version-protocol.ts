@@ -21,6 +21,10 @@
  *      → `user_namespace_admissions`
  *   4. optionally the ONE bound `meta_records` row, FOR SHARE (conditional-read rules are evaluated
  *      on the value read after the lock; ordinary record writes never bump a table-wide version)
+ *   The YiDa approval / admission holder (slice Y5) takes the actor's `subject_authorization_versions`
+ *   row FOR SHARE FIRST — phase 1, `lockSubjectAuthorizationVersionForAdmission`, before its live-actor
+ *   prerequisite locks `users` — because its transaction prelude runs before the binding (and so the
+ *   sheet) is known; the helper then re-takes that row as a no-op. See that function's docblock.
  *
  * WRITER ORDER — the rule every TypeScript writer follows (the triggers stay the completeness net):
  *   - sheet layer: the `meta_sheets` row lock(s) FIRST (the liveness `FOR UPDATE` fence of the
@@ -379,6 +383,35 @@ async function lockVersionRow(
     throw new AuthorizationVersionProtocolError('AUTHZ_VERSION_UNAVAILABLE')
   }
   return version
+}
+
+/**
+ * Phase-1 lock of a holder whose transaction PRELUDE already locks the live-authority rows (`users`
+ * FOR SHARE and the rest of `automation-live-authority.ts`) before it knows which sheet it will
+ * re-authorize: the YiDa approval and admission transactions (slice Y5,
+ * `integration/yida-send-approval-service.ts`). Taken as the FIRST protocol statement, before the
+ * live-actor prerequisite, it keeps the holder's order on the subject layer equal to the writer rule
+ * (subject version row → `users`): an access-graph writer that bumped the subject row first waits
+ * here until the holder commits, instead of forming the users-vs-subject cycle (B-05 at the service
+ * level). The sheet version rows and the bound record follow later through
+ * {@link lockAuthorizationVersionsForAdmission}, which re-takes this row as a no-op. No src writer
+ * touches a sheet-layer table and a subject-layer table in one transaction (census in the Y5 PR
+ * body), so subject-before-sheet cannot cycle with a protocol-following writer either.
+ *
+ * 40P01 / 40001 / 55P03 → the typed CONFLICT (the caller refuses, never passes); any other failure →
+ * UNAVAILABLE. The caller holds an open transaction (the live-actor prerequisite that follows probes it).
+ */
+export async function lockSubjectAuthorizationVersionForAdmission(
+  trx: AuthorizationVersionQueryable,
+  actorId: string,
+): Promise<{ subjectId: string; version: number }> {
+  if (!isCanonicalId(actorId)) throw new AuthorizationVersionProtocolError('AUTHZ_VERSION_INPUT_INVALID')
+  const query = queryFnOf(trx)
+  try {
+    return { subjectId: actorId, version: await lockVersionRow(query, SUBJECT_VERSION_ENSURE_SQL, SUBJECT_VERSION_SHARE_SQL, actorId) }
+  } catch (error) {
+    throw toProtocolError(error)
+  }
 }
 
 /**

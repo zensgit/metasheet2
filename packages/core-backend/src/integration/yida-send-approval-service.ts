@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { types } from 'node:util'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
+import { isAuthorizationVersionConflict, lockSubjectAuthorizationVersionForAdmission } from '../multitable/authz-version-protocol'
 import { assertAutomationIntegrationActor } from './automation-live-authority'
 
 // Internal host service only. Trusted authentication must supply context; this
@@ -162,6 +163,14 @@ export type YidaSourceRowBinding = Readonly<{
   sheetId: string; recordId: string; keyFieldId: string; keyValue: string; projectNo: string
   fieldBindings: Readonly<Record<string, string>>; fieldDependencies: Readonly<Record<string, readonly string[]>>
 }>
+/**
+ * D21 (design baseline v2.3 §7.2 「分界是准入提交」): the host's in-transaction re-authorization of ONE bound row
+ * (`yida-sheet-source.ts reauthorizeYidaSourceBinding`, wired through the runtime). Called by approve() and
+ * persistAdmission() on their own `trx`, after the actor's subject version row and the live-authority rows are
+ * held. Answers a frozen plain verdict (`{ authorized: true }` or `{ authorized: false, code }`); this service
+ * maps it to its own fixed codes and never inspects anything else about it.
+ */
+export type YidaSourceBindingReauthorizer = (trx: Queryable, actor: Readonly<Context>, binding: YidaSourceRowBinding) => Promise<unknown>
 export type YidaSendAuthoritySelection = Readonly<{
   tenantId: string; workspaceId: null; ownerId: string; operationId: string; rowKey: string
   targetRef: string; targetRevision: 'evidence-1'; planRevision: string
@@ -202,6 +211,9 @@ type Dependencies = {
   // TEST copy, R-71 decision 1). Every other target refuses an unbound row at approval and at admission. The
   // runtime parses INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS once per run; absent = empty.
   unboundTestTargetRefs?: ReadonlySet<string>
+  // D21 (§7.2): re-authorizes a BOUND row inside approve() / persistAdmission(); never consulted for an unbound row.
+  // Absent = every bound row is refused (fail closed); the host runtime always wires it (yida-owner-runtime.ts).
+  reauthorizeSourceBinding?: YidaSourceBindingReauthorizer
 }
 // A multi-target transaction names its target: explicitly (draft/preview/approve) or through the
 // immutable grant row (inspect/revoke/admit/observe/execution). Never chosen from a request scope.
@@ -233,7 +245,7 @@ export type YidaSendExecutionHandle = Readonly<{
   close(): void
 }>
 
-function createApprovalInternals({ database, security, context, primitives, multiTarget, unboundTestTargetRefs }: Dependencies,
+function createApprovalInternals({ database, security, context, primitives, multiTarget, unboundTestTargetRefs, reauthorizeSourceBinding }: Dependencies,
   executionPrimitives?: YidaSendExecutionPrimitives) {
   const multi = multiTarget === true
   // Captured once: a Set of exact target refs, or empty. Never widened after construction.
@@ -247,15 +259,25 @@ function createApprovalInternals({ database, security, context, primitives, mult
     || ['resolveSelectionInTransaction', 'executionPayloadDigest', 'sendBudget', 'prepareInTransaction']
       .some(key => typeof primitives[key as keyof YidaSendAuthorityPrimitives] !== 'function')) fail('UNAVAILABLE')
 
+  // D21 phase 1 (approve / admit only): the actor's subject authorization version row FOR SHARE BEFORE the
+  // live-actor rows, so this holder's order on the subject layer is the writer rule's (subject row → users): an
+  // access-graph writer that bumped the subject row first waits here until the commit instead of forming a cycle
+  // with the `users FOR SHARE` the live-actor check takes next. The sheet version rows and the bound record follow
+  // inside the re-authorization. A lock conflict (40P01 / 40001 / 55P03) is CONFLICT, never a pass.
+  async function lockSubjectVersion(trx: Queryable) {
+    try { await lockSubjectAuthorizationVersionForAdmission(trx, fixed.actorId) }
+    catch (error) { fail(isAuthorizationVersionConflict(error) ? 'CONFLICT' : 'UNAVAILABLE') }
+  }
   // The callback also learns the locked target's slot: slot 1 is the material TEST copy (R-71 decision 1), the
   // one target that may take unbound rows without being listed (D20).
   async function transaction<T>(callback: (trx: Queryable, targetRef: string, bound: TargetBinding, slot: number) => Promise<T>,
-    checkpoint = noCheckpoint, selector?: TargetSelector): Promise<T> {
+    checkpoint = noCheckpoint, selector?: TargetSelector, subjectLock = false): Promise<T> {
     try {
       if (selector !== undefined && !multi) fail('INPUT')
       return await checked(checkpoint, () => database.transaction(async trx => {
         // The provider has BEGIN already. This must precede even the xid probe.
         await checked(checkpoint, () => trx.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED'))
+        if (subjectLock) await checked(checkpoint, () => lockSubjectVersion(trx))
         await checked(checkpoint, () => assertAutomationIntegrationActor(trx, fixed))
         if (selector === undefined) {
           const result = await checked(checkpoint, () => trx.query('SELECT slot, target_ref, tenant_id, workspace_id, owner_id, evidence_version, status FROM integration_yida_approved_target WHERE slot = 1 FOR UPDATE'))
@@ -301,6 +323,34 @@ function createApprovalInternals({ database, security, context, primitives, mult
     const reserved = await trx.query('SELECT 1 FROM integration_yida_delivery_ledger WHERE tenant_id = $1 AND workspace_id IS NULL AND target_ref = $2 AND intent = $3 AND creation_identity_digest = $4 LIMIT 1',
       [fixed.tenantId, targetRef, 'create', selected.creationIdentityDigest])
     if (reserved.rows.length !== 0) fail('IDENTITY_RESERVED')
+  }
+  // D21 (§7.2): a bound row is re-authorized INSIDE this transaction, on this trx, by the host's in-transaction re-check
+  // (every check of the draft-time read, from locked rows). Only a frozen plain verdict passes. A refused check or a
+  // lock conflict is CONFLICT (nothing written: the enclosing transaction rolls back, the grant keeps its attempt);
+  // a protocol gap, a malformed verdict, a thrown error or an absent re-authorizer is UNAVAILABLE. An unbound row
+  // (pasted rowsText) has nothing to re-authorize: D20 decides whether its target may take it.
+  async function reauthorize(trx: Queryable, selected: YidaSendAuthoritySelection) {
+    if (selected.sourceBinding === null) return
+    if (typeof reauthorizeSourceBinding !== 'function' || types.isProxy(reauthorizeSourceBinding)) fail('UNAVAILABLE')
+    let verdict: unknown
+    try { verdict = await reauthorizeSourceBinding(trx, fixed, selected.sourceBinding) } catch { fail('UNAVAILABLE') }
+    assertReauthorizationVerdict(verdict)
+  }
+  function assertReauthorizationVerdict(verdict: unknown) {
+    if (!verdict || typeof verdict !== 'object' || types.isProxy(verdict) || Array.isArray(verdict) || !Object.isFrozen(verdict)) fail('UNAVAILABLE')
+    const proto = Object.getPrototypeOf(verdict)
+    if (proto !== Object.prototype && proto !== null) fail('UNAVAILABLE')
+    const descriptors = Object.getOwnPropertyDescriptors(verdict), keys = Reflect.ownKeys(descriptors)
+    if (keys.some(key => typeof key !== 'string') || !Object.hasOwn(descriptors, 'authorized') || !Object.hasOwn(descriptors.authorized, 'value')) fail('UNAVAILABLE')
+    if (descriptors.authorized.value === true) {
+      if (keys.length !== 1) fail('UNAVAILABLE')
+      return
+    }
+    if (descriptors.authorized.value !== false || keys.length !== 2 || !Object.hasOwn(descriptors, 'code')
+      || !Object.hasOwn(descriptors.code, 'value')) fail('UNAVAILABLE')
+    // The check that refused (registry, table, field, record) or a lock conflict: the operator re-checks and retries.
+    if (['REGISTRY', 'SHEET', 'FIELD', 'RECORD', 'CONFLICT'].includes(descriptors.code.value as string)) fail('CONFLICT')
+    fail('UNAVAILABLE')
   }
   // Y2: an operation (draft) is compiled for exactly one target's app/form. Under a named target it
   // must belong to that target's draft locator, or the request is a cross-target attempt: CONFLICT.
@@ -464,9 +514,10 @@ function createApprovalInternals({ database, security, context, primitives, mult
       const executionDigest = digest(await primitives.executionPayloadDigest(selected, { grantRef: grantId, expiresAt, actorId: fixed.actorId }))
       // Gate 4: refuse before the grant row (and its sealed snapshot) exists.
       assertSendBudget(selected, { grantRef: grantId, expiresAt, actorId: fixed.actorId })
-      // D20, then the early identity rejection (§3.3): both before any grant row exists.
+      // D20, then the early identity rejection (§3.3), then the D21 re-authorization: all before any grant row exists.
       assertBindingRequired(selected, targetRef, slot)
       await assertIdentityFree(trx, selected, targetRef)
+      await reauthorize(trx, selected)
       const row: Row = { grant_id: grantId, confirmation_id: confirmationId, tenant_id: fixed.tenantId, workspace_id: null,
         owner_id: fixed.actorId, target_ref: targetRef, operation_id: operationId, row_key: rowKey, target_revision: selected.targetRevision,
         plan_revision: selected.planRevision, plan_digest: selected.planDigest, credential_ref: selected.credentialRef,
@@ -487,7 +538,7 @@ function createApprovalInternals({ database, security, context, primitives, mult
         ? millis(inserted[key]) !== value : inserted[key] !== value)) fail('UNAVAILABLE')
       await audit(trx, grantId, 'approve')
       return Object.freeze({ ...await metadata(trx, inserted), reused: false })
-    }, noCheckpoint, selector)
+    }, noCheckpoint, selector, true)
   }
   async function inspect(input: unknown) {
     const grantId = id(record(input, ['grantId']).grantId)
@@ -530,6 +581,8 @@ function createApprovalInternals({ database, security, context, primitives, mult
       assertBindingRequired(selected, targetRef, slot)
       if (selected.sourceRecordDigest !== optionalDigest(row.source_record_digest)
         || selected.creationIdentityDigest !== optionalDigest(row.creation_identity_digest)) fail('CONFLICT')
+      // D21: the four checks, inside THIS transaction, before the ledger row (the admission's first write).
+      await reauthorize(trx, selected)
       const prepared = await primitives.prepareInTransaction(trx, { tenantId: fixed.tenantId, workspaceId: null,
         ownerId: fixed.actorId, operationId: selected.operationId, rowKey: selected.rowKey, targetRef,
         targetRevision: selected.targetRevision, planRevision: selected.planRevision, credentialRef: selected.credentialRef,
@@ -556,7 +609,7 @@ function createApprovalInternals({ database, security, context, primitives, mult
       const admissionId = id(result.rows[0].id), ledgerId = id(ledger.id)
       if (approval.status !== 'admitted' || approval.admissionId !== admissionId || approval.ledgerId !== ledgerId) fail('UNAVAILABLE')
       return { approval, anchor: Object.freeze({ grantId, admissionId, submissionId, ledgerId, grant: grantAnchor(row) }) }
-    }, noCheckpoint, grantSelector(grantId))
+    }, noCheckpoint, grantSelector(grantId), true)
   }
   async function admit(input: unknown): Promise<ApprovalResult> {
     // A public admission never inserts anything into the execution-permit map.

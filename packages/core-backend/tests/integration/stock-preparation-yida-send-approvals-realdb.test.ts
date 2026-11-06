@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
-import type { createYidaSendApprovalService, YidaSendAuthorityPrimitives, YidaSendApprovalMetadata } from '../../src/integration/yida-send-approval-service'
+import type { createYidaSendApprovalService, YidaSendAuthorityPrimitives, YidaSendApprovalMetadata, YidaSourceBindingReauthorizer } from '../../src/integration/yida-send-approval-service'
 
 const root = path.resolve(__dirname, '..', '..', '..', '..')
 const requireCjs = createRequire(import.meta.url)
@@ -19,6 +19,11 @@ const ADMISSION = 'integration_yida_send_admissions', AUDIT = 'integration_yida_
 const LEDGER = 'integration_yida_delivery_ledger', LEDGER_AUDIT = 'integration_yida_delivery_audit'
 const OP = 'integration_yida_draft_operations', MEMBERS = 'integration_yida_draft_rows'
 const PIN = 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED'
+// D21 (slice Y5): approve and admit first ENSURE the actor's subject authorization version row (an idempotent upsert of
+// a version row, never a grant, admission, audit or ledger row) and hold it FOR SHARE. "No INSERT" in this file means
+// no business write: only this exact statement is exempt, every other INSERT still fails those assertions.
+const SUBJECT_VERSION_ENSURE = /^INSERT INTO subject_authorization_versions \(subject_id\) VALUES \(\$1\) ON CONFLICT \(subject_id\) DO NOTHING$/
+const businessInsert = (sql: string) => /^INSERT /i.test(sql.trim()) && !SUBJECT_VERSION_ENSURE.test(sql.trim())
 const proofTables = [APPROVAL, REVOCATION, ADMISSION, AUDIT, LEDGER, LEDGER_AUDIT]
 type Row = Record<string, unknown>
 type Context = { tenantId: string; workspaceId: null; ownerId: string }
@@ -43,9 +48,13 @@ type Gate = { reached: Promise<void>; release(): void }
 type BudgetSwitch = { within: boolean | null; calls: number; verdict?: () => unknown }
 type SessionOptions = { budget?: BudgetSwitch; multiTarget?: boolean; counter?: { encrypt: number; decrypt: number }
   // D20: the exact-listed target refs that may take unbound rows besides slot 1 (the runtime parses the env list).
-  unboundTestTargetRefs?: ReadonlySet<string> }
+  unboundTestTargetRefs?: ReadonlySet<string>
+  // D21: a service built WITHOUT the host re-authorization (the fail-closed pin); every other session gets the real one.
+  withoutReauthorization?: boolean }
 type Session = { client: PoolClient; pid: number; db: unknown; service: Service; draft: DraftStore; material: MaterialStore
   target: TargetStore; ledger: LedgerStore; statements: string[]; gateInsert(table: string): Gate
+  // Parks this session's transaction right BEFORE the n-th statement matching `pattern` executes (the RA4 barriers).
+  gateMatch(pattern: RegExp, occurrence?: number): Gate
   release(): void; loseCommitResponse(): void }
 type Fixture = { draft: Draft; credentialRef: string; credentialGeneration: number; targetRef: string
   request: { operationId: string; rowKey: string; confirmationId: string }; input: Input }
@@ -74,6 +83,9 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     assessYidaSendBudget(input: { snapshot: Row; data: Row }): { withinBudget: boolean } }
   let plan: (input: { config: unknown; rows: unknown[] }) => { rows: Array<{ status: string; payload: Row; protocolPreview: { data: Row } }> }
   let createAdditionalWriter: (options: { security: HostSecurity; context: Context }) => (trx: unknown, input: unknown) => Promise<{ targetRef: string; slot: number }>
+  // D21 (slice Y5): the host's in-transaction re-authorization and the access-graph mutex (the RA4 lock-order writer).
+  let reauthorize: YidaSourceBindingReauthorizer
+  let lockUsers: (client: PoolClient, userIds: string[]) => Promise<Map<string, { id: string }>>
   let multiTargetUp = ''
   const sessions: Session[] = []
   const envKeys = ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT'] as const
@@ -141,15 +153,17 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
   }
   async function session(scope = context(), options: SessionOptions = {}): Promise<Session> {
     const client = await pool.connect()
-    await client.query(`SET search_path TO ${ident(schema)}`)
+    // The private schema shadows every table it defines; the migrated PUBLIC schema answers the rest (D21: the
+    // version rows, their triggers, meta_* and the permission tables the re-authorization reads).
+    await client.query(`SET search_path TO ${ident(schema)}, public`)
     await client.query("SET statement_timeout = '10s'")
     await client.query("SET default_transaction_isolation = 'repeatable read'")
     const pid = Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
     const statements: string[] = []
-    let lostCommit = false, gate: (Gate & { table: string; enter(): void; open: Promise<void> }) | undefined
+    let lostCommit = false, gate: (Gate & { matches(sql: string): boolean; enter(): void; open: Promise<void> }) | undefined
     const query: Queryable['query'] = async (sql, params) => {
       statements.push(sql) // SQL shapes only, never parameter values or driver errors.
-      if (gate && new RegExp(`^INSERT INTO "?${gate.table}"?(?:\\s|\\()`, 'i').test(sql.trim())) {
+      if (gate && gate.matches(sql.trim())) {
         const held = gate; held.enter(); await held.open
         if (gate === held) gate = undefined
       }
@@ -185,13 +199,19 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     const value: Session = { client, pid, statements, db,
       service: createService({ database, security: hostSecurity, context: { tenantId: scope.tenantId, workspaceId: null, actorId: scope.ownerId },
         primitives, ...(options.multiTarget ? { multiTarget: true } : {}),
-        ...(options.unboundTestTargetRefs ? { unboundTestTargetRefs: options.unboundTestTargetRefs } : {}) }),
+        ...(options.unboundTestTargetRefs ? { unboundTestTargetRefs: options.unboundTestTargetRefs } : {}),
+        // D21 (slice Y5): the REAL host re-authorization — the multitable permission primitives on this session's trx.
+        ...(options.withoutReauthorization ? {} : { reauthorizeSourceBinding: reauthorize }) }),
       draft: createDraft(config), material: createMaterial(config), target: createTarget(config), ledger: createLedger({ db }),
       gateInsert(table) {
         ident(table)
-        let enter!: () => void, release!: () => void
+        const pattern = new RegExp(`^INSERT INTO "?${table}"?(?:\\s|\\()`, 'i')
+        return value.gateMatch(pattern)
+      },
+      gateMatch(pattern, occurrence = 1) {
+        let enter!: () => void, release!: () => void, seen = 0
         const reached = new Promise<void>(resolve => { enter = resolve }), open = new Promise<void>(resolve => { release = resolve })
-        gate = { table, reached, open, enter, release }; return gate
+        gate = { matches: sql => pattern.test(sql) && ++seen === occurrence, reached, open, enter, release }; return gate
       }, release() { gate?.release() }, loseCommitResponse() { lostCommit = true },
     }
     sessions.push(value); return value
@@ -265,6 +285,8 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     sendBudget = requireCjs(path.join(lib, 'yida-send-budget.cjs'))
     plan = (await importNative(pathToFileURL(path.join(lib, 'yida-static-plan.mjs')).href)).buildYidaStaticPlan
     createAdditionalWriter = (await importNative(pathToFileURL(path.join(lib, 'yida-approved-target-store.mjs')).href)).createInternalYidaAdditionalTargetTransactionWriter
+    reauthorize = (await import(pathToFileURL(path.join(integration, 'yida-source-reauthorization-host.ts')).href)).createYidaSourceBindingReauthorizer()
+    lockUsers = (await import(pathToFileURL(path.join(root, 'packages/core-backend/src/directory/access-graph-mutex.ts')).href)).lockUsersForAccessGraphWrite
     // Y2 migration SQL, exactly what zzzz20261103130000 up() executes.
     multiTargetUp = (await import(pathToFileURL(path.join(root, 'packages/core-backend/src/db/migrations/zzzz20261103130000_add_integration_yida_multi_target_slots.ts')).href) as
       { YIDA_MULTI_TARGET_UP_SQL: string }).YIDA_MULTI_TARGET_UP_SQL
@@ -291,6 +313,8 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
   }, 30000)
   beforeEach(async () => {
     schema = 'yida_approval_' + randomUUID().replaceAll('-', '')
+    // The private DDL runs with ONLY the private schema on the path: a migration's own existence probe (the identity
+    // fence's `to_regclass(…)` in zzzz20261106110300) must not find the migrated PUBLIC copy and skip the private one.
     await owner.query(`CREATE SCHEMA ${ident(schema)}`); await owner.query(`SET search_path TO ${ident(schema)}`)
     await owner.query(ddl)
     // Schema fixture of the six tables/columns actually consumed by live ACL.
@@ -306,19 +330,26 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
       INSERT INTO users VALUES ('synthetic-owner','user','[]',true,'activated',false,false),
         ('synthetic-other-actor','admin','["role:admin"]',true,'activated',false,true);
       INSERT INTO user_roles VALUES ('synthetic-owner','integration_admin'),('synthetic-other-actor','admin'),('synthetic-other-actor','foreign_admin');
-      INSERT INTO role_permissions VALUES ('foreign_admin','integration:admin'),('foreign_admin','role:admin');
+      INSERT INTO role_permissions VALUES ('foreign_admin','integration:admin'),('foreign_admin','role:admin'),
+        ('integration_admin','multitable:read');
       INSERT INTO user_permissions VALUES ('synthetic-owner','integration:admin'),('synthetic-other-actor','role:admin');
       INSERT INTO user_orgs VALUES ('synthetic-owner','synthetic-tenant',true),('synthetic-owner','synthetic-other-tenant',true),
         ('synthetic-other-actor','synthetic-tenant',true);
       INSERT INTO user_namespace_admissions VALUES ('synthetic-owner','integration',true),('synthetic-other-actor','integration',true);
     `)
+    // D21 (slice Y5): from here on the path falls back to the migrated PUBLIC schema for what this private schema does
+    // not define — the two version rows and their triggers (zzzz20261106110500), meta_sheets / meta_fields /
+    // meta_records and the permission tables — exactly what the re-authorization locks and reads; the YiDa and ACL
+    // tables stay private.
+    await owner.query(`SET search_path TO ${ident(schema)}, public`)
+    await seedPublicSheet()
     first = await session(); second = await session()
   }, 30000)
   afterEach(async () => {
     for (const active of sessions) active.release()
     for (const active of sessions) { await active.client.query('ROLLBACK').catch(() => {}); active.client.release() }
     sessions.length = 0
-    if (schema) { await owner.query(`DROP SCHEMA ${ident(schema)} CASCADE`); schema = '' }
+    if (schema) { await cleanPublicSheet(); await owner.query(`DROP SCHEMA ${ident(schema)} CASCADE`); schema = '' }
   })
   afterAll(async () => {
     try {
@@ -480,7 +511,7 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     first.loseCommitResponse(); await rejected(invoke(first))
     const before = await evidence(), restarted = await session(), observed = await invoke(restarted)
     expect(observed.reused).toBe(true); expect(await evidence()).toEqual(before)
-    expect(restarted.statements.some(sql => /^INSERT /i.test(sql.trim()))).toBe(false)
+    expect(restarted.statements.some(businessInsert)).toBe(false)
     if (mode === 'admit') {
       expect(observed.remainingAttempts).toBe(0)
       expect(restarted.statements.some(sql => sql.includes(OP) || sql.includes('integration_yida_credential_materials') || sql.includes(LEDGER))).toBe(false)
@@ -541,7 +572,7 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     const recovered = await restarted.service.approve({ ...f.request, ttlMs: 900000 })
     expect(recovered.reused && recovered.grantId === old.grant_id && recovered.approvedAt === Number(old.approved_at_ms)
       && recovered.expiresAt === Number(old.expires_at_ms)).toBe(true)
-    expect(restarted.statements.some(sql => sql.includes(OP) || sql.includes('integration_yida_credential_materials') || /^INSERT /i.test(sql.trim()))).toBe(false)
+    expect(restarted.statements.some(sql => sql.includes(OP) || sql.includes('integration_yida_credential_materials') || businessInsert(sql))).toBe(false)
     await rejected(restarted.service.approve({ ...f.request, ttlMs: 1000 }), 'CONFLICT')
     await rejected(restarted.service.approve({ ...f.request, rowKey: f.draft.rows[1].rowKey }), 'CONFLICT')
     await rejected(restarted.service.approve({ ...f.request, operationId: changed.operationId, rowKey: changed.rows[0].rowKey }), 'CONFLICT')
@@ -736,7 +767,7 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     await rejected(active.service.approve(f.request), 'LIMIT')
     expect((await evidence()).counts).toEqual([0, 0, 0, 0, 0, 0])
     expect(counter.encrypt).toBe(0)
-    expect(active.statements.some(sql => /^INSERT /i.test(sql.trim()))).toBe(false)
+    expect(active.statements.some(businessInsert)).toBe(false)
     expect(active.statements.filter(sql => sql === 'ROLLBACK').length).toBe(1)
     // Fixed values-free refusal: replaying it yields the same code and still writes nothing.
     await rejected(active.service.approve({ ...f.request, confirmationId: 'synthetic-other-confirmation' }), 'LIMIT')
@@ -768,7 +799,7 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     active.statements.length = 0
     await rejected(active.service.approve(f.request), 'LIMIT')
     expect((await evidence()).counts).toEqual([0, 0, 0, 0, 0, 0])
-    expect(active.statements.some(sql => /^INSERT /i.test(sql.trim()))).toBe(false)
+    expect(active.statements.some(businessInsert)).toBe(false)
   })
 
   it('gate 4: a row exactly within the worst-case request budget is approved and admitted', async () => {
@@ -796,7 +827,7 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     expect(budget.calls).toBe(2)
     // Refused before the ledger is even read: no prepare, no fence, no admission, no admit audit.
     expect(statementsTouch(active, LEDGER) || statementsTouch(active, LEDGER_AUDIT)).toBe(false)
-    expect(active.statements.some(sql => /^INSERT /i.test(sql.trim()))).toBe(false)
+    expect(active.statements.some(businessInsert)).toBe(false)
     expect(await evidence()).toEqual(before)
     const view = await active.service.inspect({ grantId: granted.grantId })
     expect([view.status, view.remainingAttempts, view.admissionId, view.ledgerId, view.revoked]).toEqual(['approved', 1, null, null, false])
@@ -877,15 +908,58 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
 
   // ---- Source binding, identity fence and D20 (design baseline v2.3 §3.3 / §7.2; D16 a, D20) ----
   const REGISTRY = 'integration_stock_prep_project_target'
+  // D21 (slice Y5): the bound sheet, its fields, its records and every deny / membership row live in PUBLIC — the migrated
+  // schema that carries the protocol's triggers and version rows (nothing in the private schema shadows them) — under
+  // per-test ids that `afterEach` removes. The owner reads the sheet through `multitable:read` (role permission above).
+  const ids = () => ({ sheet: `${schema}_sheet`, rec: (index: number) => `${schema}_rec_${index}`, fld: (target: string) => `${schema}_fld_${target}` })
+  const LINES = ['LINE-1', 'LINE-2', 'LINE-3']
+  // RA2 (i): a VISIBLE field whose id is the alias `description`; the real column behind that alias is `…_fld_description`.
+  const DECOY_FIELD_ID = 'description'
+  async function seedPublicSheet() {
+    const { sheet, rec, fld } = ids()
+    await owner.query('INSERT INTO public.meta_sheets (id, name, row_level_read_permissions_enabled) VALUES ($1, $2, true)', [sheet, 'synthetic bound sheet'])
+    const columns: Array<[string, string]> = [['project', 'text'], ['line', 'text'], ['parent', 'text'], ['qty', 'number'],
+      ['description', 'text'], ['note', 'text'], ['status', 'text']]
+    for (const [order, [target, type]] of columns.entries()) {
+      await owner.query('INSERT INTO public.meta_fields (id, sheet_id, name, type, "order", property) VALUES ($1, $2, $3, $4, $5, $6::jsonb)',
+        [fld(target), sheet, target, type, order, JSON.stringify(target === 'line' ? { stockPreparation: { key: true } } : {})])
+    }
+    await owner.query('INSERT INTO public.meta_fields (id, sheet_id, name, type, "order", property) VALUES ($1, $2, $3, $4, $5, $6::jsonb)',
+      [DECOY_FIELD_ID, sheet, 'decoy', 'text', columns.length, '{}'])
+    for (const [index, line] of LINES.entries()) {
+      await owner.query('INSERT INTO public.meta_records (id, sheet_id, data) VALUES ($1, $2, $3::jsonb)', [rec(index), sheet, JSON.stringify({
+        [fld('project')]: 'DEMO-P1', [fld('line')]: line, [fld('qty')]: 6, [fld('description')]: 'synthetic approval part',
+        [fld('note')]: 'synthetic note', [fld('status')]: 'open' })])
+    }
+    // The sheet's version row exists before any holder (as it does after the registering grants in production): a
+    // writer's bump is then an UPDATE the holder's FOR SHARE blocks.
+    await owner.query('INSERT INTO public.sheet_permission_versions (sheet_id) VALUES ($1) ON CONFLICT (sheet_id) DO NOTHING', [ids().sheet])
+  }
+  async function cleanPublicSheet() {
+    const prefix = `${schema}%`
+    await owner.query('DELETE FROM public.platform_member_group_members WHERE user_id = $1', [context().ownerId])
+    await owner.query('DELETE FROM public.platform_member_groups WHERE name LIKE $1', [prefix])
+    await owner.query('DELETE FROM public.users WHERE id = $1', [context().ownerId])
+    await owner.query('DELETE FROM public.record_permissions WHERE sheet_id LIKE $1', [prefix])
+    await owner.query('DELETE FROM public.field_permissions WHERE sheet_id LIKE $1', [prefix])
+    await owner.query('DELETE FROM public.meta_sheets WHERE id LIKE $1', [prefix]) // cascades the fields, the records and the sheet grants
+    await owner.query('DELETE FROM public.sheet_permission_versions WHERE sheet_id LIKE $1', [prefix])
+  }
   function boundInput(value: Input = input(), records?: Array<{ recordId: string; keyValue: string; projectNo: string }>): Input & { sourceBinding: Row } {
-    const rows = JSON.parse(value.rowsText) as Row[]
-    const fieldBindings = Object.fromEntries(value.config.fieldMap.map(field => [String(field.source), 'fld_' + String(field.target)]))
-    return { ...value, sourceBinding: { sheetId: 'sheet_registered', keyFieldId: fieldBindings.lineId, fieldBindings,
-      records: records ?? rows.map((row, index) => ({ recordId: 'rec_' + index, keyValue: String(row.lineId), projectNo: String(row.projectNo) })) } }
+    const rows = JSON.parse(value.rowsText) as Row[], { sheet, rec, fld } = ids()
+    const fieldBindings = Object.fromEntries(value.config.fieldMap.map(field => [String(field.source), fld(String(field.target))]))
+    return { ...value, sourceBinding: { sheetId: sheet, keyFieldId: fieldBindings.lineId, fieldBindings,
+      records: records ?? rows.map((row, index) => ({ recordId: rec(index), keyValue: String(row.lineId), projectNo: String(row.projectNo) })) } }
+  }
+  // A bound draft of public record `index` (its own key LINE-n, so its creation identity is its own).
+  function boundRow(index: number, quantity = 6): Input & { sourceBinding: Row } {
+    const value = input('original', quantity), rows = JSON.parse(value.rowsText) as Row[]
+    rows[0].lineId = LINES[index]; value.rowsText = JSON.stringify(rows)
+    return boundInput(value, [{ recordId: ids().rec(index), keyValue: LINES[index], projectNo: 'DEMO-P1' }])
   }
   async function registerProject(patch: Row = {}) {
     await owner.query(`INSERT INTO ${ident(REGISTRY)} (id, tenant_id, project_no, sheet_id, object_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
-      [randomUUID(), patch.tenant_id ?? context().tenantId, patch.project_no ?? 'DEMO-P1', patch.sheet_id ?? 'sheet_registered',
+      [randomUUID(), patch.tenant_id ?? context().tenantId, patch.project_no ?? 'DEMO-P1', patch.sheet_id ?? ids().sheet,
         patch.object_id ?? 'synthetic-object', patch.status ?? 'active'])
   }
   async function acknowledge(f: Fixture, admitted: MutationMetadata) {
@@ -908,7 +982,7 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     const sealed = JSON.parse(await security.decrypt(String(grantRow.snapshot_encrypted))) as Row
     const selection = sealed.selection as Row
     expect([selection.sourceRecordDigest, selection.creationIdentityDigest]).toEqual([members[0].source_record_digest, members[0].creation_identity_digest])
-    expect((selection.sourceBinding as Row).sheetId === 'sheet_registered' && (selection.sourceBinding as Row).recordId === 'rec_0'
+    expect((selection.sourceBinding as Row).sheetId === ids().sheet && (selection.sourceBinding as Row).recordId === ids().rec(0)
       && (selection.sourceBinding as Row).keyValue === 'LINE-1' && (selection.sourceBinding as Row).projectNo === 'DEMO-P1').toBe(true)
     const admitted = await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' })
     const ledger = (await tableRows(LEDGER))[0]
@@ -916,15 +990,17 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
       && ledger.creation_identity_digest === members[0].creation_identity_digest).toBe(true)
     expect(first.statements.some(sql => sql.includes(REGISTRY))).toBe(true)
     expect((await evidence()).counts).toEqual([1, 0, 1, 2, 1, 1])
-    // The registry is read inside the admission transaction: archived or moved, admission is CONFLICT and nothing is written.
-    const otherInput = input('original', 7); const otherRows = JSON.parse(otherInput.rowsText) as Row[]
-    otherRows[0].lineId = 'LINE-2'; otherInput.rowsText = JSON.stringify(otherRows)
-    const other = await second.draft.createDraft(boundInput(otherInput, [{ recordId: 'rec_other', keyValue: 'LINE-2', projectNo: 'DEMO-P1' }]))
-    await owner.query(`UPDATE ${ident(REGISTRY)} SET status = 'archived', archived_at = NOW()`)
+    // The registry is read inside the approval AND the admission transaction (D21 check 1, held FOR SHARE): archived between
+    // the two, the admission is CONFLICT and nothing is written; archived before an approval, that approval is CONFLICT as
+    // well — both from the host re-authorization, ahead of the plugin primitive's own registry read (masked as UNAVAILABLE).
+    const other = await second.draft.createDraft(boundRow(1, 7))
     const grant2 = await second.service.approve({ operationId: other.operationId, rowKey: other.rows[0].rowKey, confirmationId: 'synthetic-archived-confirmation' })
+    await owner.query(`UPDATE ${ident(REGISTRY)} SET status = 'archived', archived_at = NOW()`)
     const before = await evidence()
-    // The plugin primitive refuses CONFLICT; the host closes every primitive refusal to UNAVAILABLE (the existing fence mask).
-    await rejected(second.service.admit({ grantId: grant2.grantId, submissionId: 'synthetic-archived-submission' }))
+    await rejected(second.service.admit({ grantId: grant2.grantId, submissionId: 'synthetic-archived-submission' }), 'CONFLICT')
+    expect(await evidence()).toEqual(before)
+    const third = await second.draft.createDraft(boundRow(2, 7))
+    await rejected(second.service.approve({ operationId: third.operationId, rowKey: third.rows[0].rowKey, confirmationId: 'synthetic-archived-approval' }), 'CONFLICT')
     expect(await evidence()).toEqual(before)
   })
   // A FORMAL target: another owner-attested target (slot 2) with its own app/form locator, registered through the Y2 writer.
@@ -955,7 +1031,7 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     // R deleted, re-created as R′ (new record id) with the description corrected: same key value, same project.
     const corrected = input(); const rows = JSON.parse(corrected.rowsText) as Row[]
     rows[0].description = 'synthetic corrected approval part'; corrected.rowsText = JSON.stringify(rows)
-    const recreated = await second.draft.createDraft(boundInput(corrected, [{ recordId: 'rec_recreated', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }]))
+    const recreated = await second.draft.createDraft(boundInput(corrected, [{ recordId: ids().rec(1), keyValue: 'LINE-1', projectNo: 'DEMO-P1' }]))
     expect(recreated.operationId).not.toBe(f.draft.operationId)
     const members = await tableRows(MEMBERS)
     const original = members.find(row => row.operation_id === f.draft.operationId)!, moved = members.find(row => row.operation_id === recreated.operationId)!
@@ -979,7 +1055,7 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     // the identity index can (the identity is the key value and the project, which are unchanged).
     const corrected = input('original', 9); const rows = JSON.parse(corrected.rowsText) as Row[]
     rows[0].description = 'synthetic corrected approval part'; rows[0].parentCode = 'PARENT-RECREATED'; corrected.rowsText = JSON.stringify(rows)
-    const recreated = await second.draft.createDraft(boundInput(corrected, [{ recordId: 'rec_recreated', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }]))
+    const recreated = await second.draft.createDraft(boundInput(corrected, [{ recordId: ids().rec(1), keyValue: 'LINE-1', projectNo: 'DEMO-P1' }]))
     const members = await tableRows(MEMBERS)
     const original = members.find(row => row.operation_id === f.draft.operationId)!, moved = members.find(row => row.operation_id === recreated.operationId)!
     expect(moved.creation_identity_digest === original.creation_identity_digest && moved.business_key_digest !== original.business_key_digest).toBe(true)
@@ -1037,7 +1113,7 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     const ledger = (await tableRows(LEDGER)).find(row => row.id === admitted.ledgerId)!
     expect(/^[0-9a-f]{64}$/.test(String(ledger.creation_identity_digest)) && ledger.target_ref === slot2.targetRef).toBe(true)
     // The same identity again on this target (another record): IDENTITY_RESERVED at approval.
-    const again = await second.draft.createDraft(boundInput(formalInput(input('original', 9)), [{ recordId: 'rec_again', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }]))
+    const again = await second.draft.createDraft(boundInput(formalInput(input('original', 9)), [{ recordId: ids().rec(1), keyValue: 'LINE-1', projectNo: 'DEMO-P1' }]))
     const before = await evidence()
     await rejected(multi.service.approve({ operationId: again.operationId, rowKey: again.rows[0].rowKey,
       confirmationId: 'synthetic-again-confirmation', targetRef: slot2.targetRef }), 'IDENTITY_RESERVED')
@@ -1054,5 +1130,355 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     const ledgerRows = await tableRows(LEDGER)
     expect(ledgerRows.map(row => row.creation_identity_digest)).toEqual([ledger.creation_identity_digest, ledger.creation_identity_digest])
     expect(new Set(ledgerRows.map(row => row.target_ref))).toEqual(new Set([slot2.targetRef, f.targetRef]))
+  })
+
+  // ---- D21 in-transaction re-authorization (design baseline v2.3 §7.2 「进授权」 and 「分界是准入提交」; slice Y5) ----
+  // The service's own transaction re-runs the four source checks on its own `trx` from the rows the protocol locked
+  // there (never a request or the RBAC cache). No send port exists in this file: a refused approval or admission means
+  // zero form requests by construction (the port is built only after an admission committed).
+  const SUBJECT_ENSURE = /^INSERT INTO subject_authorization_versions \(subject_id\)/
+  const SUBJECT_SHARE = /^SELECT subject_id, version::text AS version FROM subject_authorization_versions WHERE subject_id = \$1 FOR SHARE$/
+  const USERS_SHARE = /FROM users\s+WHERE id = \$1 FOR SHARE/
+  const REGISTRY_SHARE = /FROM integration_stock_prep_project_target WHERE tenant_id = \$1 AND project_no = \$2 FOR SHARE$/
+  const SHEET_SHARE = /FROM sheet_permission_versions WHERE sheet_id = \$1 FOR SHARE$/
+  const RECORD_SHARE = /FROM meta_records\s+WHERE id = \$1 AND sheet_id = ANY\(\$2::text\[\]\) FOR SHARE/
+  const GRANT_INSERT = /^INSERT INTO integration_yida_send_approvals/, LEDGER_INSERT = /^INSERT INTO "?integration_yida_delivery_ledger"?/i
+  const indexOf = (statements: string[], pattern: RegExp) => statements.findIndex(sql => pattern.test(sql))
+  const ascending = (statements: string[], patterns: RegExp[]) => {
+    const at = patterns.map(pattern => indexOf(statements, pattern))
+    return at.every((index, i) => index >= 0 && (i === 0 || index > at[i - 1])) ? at : at
+  }
+  async function boundFixture() { await registerProject(); return fixture(boundInput()) }
+  async function draftOf(session: Session, value: Input, confirmationId: string) {
+    const draft = await session.draft.createDraft(value)
+    return { operationId: draft.operationId, rowKey: draft.rows[0].rowKey, confirmationId }
+  }
+  const sql = {
+    revokeRead: () => owner.query("DELETE FROM role_permissions WHERE role_id = 'integration_admin' AND permission_code = 'multitable:read'"),
+    restoreRead: () => owner.query("INSERT INTO role_permissions VALUES ('integration_admin','multitable:read')"),
+    hide: (fieldId: string) => owner.query(`UPDATE public.meta_fields SET property = property || '{"hidden": true}'::jsonb WHERE id = $1`, [fieldId]),
+    unhide: (fieldId: string) => owner.query("UPDATE public.meta_fields SET property = property - 'hidden' WHERE id = $1", [fieldId]),
+    denyRecord: (recordId: string) => owner.query("INSERT INTO public.record_permissions (sheet_id, record_id, subject_type, subject_id, access_level) VALUES ($1, $2, 'user', $3, 'none')", [ids().sheet, recordId, context().ownerId]),
+    clearRecordDenies: () => owner.query('DELETE FROM public.record_permissions WHERE sheet_id = $1', [ids().sheet]),
+  }
+
+  it('D21 lock order: approve and admit hold the actor\'s subject version row BEFORE the live-authority rows, then — inside the same transaction — the registry FOR SHARE, the sheet version row and the bound record, all before the first write; inspect never does', async () => {
+    const f = await boundFixture()
+    first.statements.length = 0
+    const granted = await first.service.approve(f.request)
+    const approve = [...first.statements]
+    expect([approve[0], approve[1], indexOf(approve, SUBJECT_ENSURE), indexOf(approve, SUBJECT_SHARE)]).toEqual(['BEGIN', PIN, 2, 3])
+    const approveChain = ascending(approve, [SUBJECT_SHARE, USERS_SHARE, REGISTRY_SHARE, SHEET_SHARE, RECORD_SHARE, GRANT_INSERT])
+    expect(approveChain.every((index, i) => index >= 0 && (i === 0 || index > approveChain[i - 1]))).toBe(true)
+    expect(approve.filter(statement => statement === 'COMMIT')).toHaveLength(1)
+    first.statements.length = 0
+    const admitted = await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' })
+    expect(admitted.status).toBe('admitted')
+    const admit = [...first.statements]
+    expect([admit[0], admit[1], indexOf(admit, SUBJECT_ENSURE), indexOf(admit, SUBJECT_SHARE)]).toEqual(['BEGIN', PIN, 2, 3])
+    const admitChain = ascending(admit, [SUBJECT_SHARE, USERS_SHARE, REGISTRY_SHARE, SHEET_SHARE, RECORD_SHARE, LEDGER_INSERT])
+    expect(admitChain.every((index, i) => index >= 0 && (i === 0 || index > admitChain[i - 1]))).toBe(true)
+    // inspect / observe never re-authorize and never take a protocol row.
+    first.statements.length = 0
+    await first.service.inspect({ grantId: granted.grantId })
+    expect(first.statements.some(statement => statement.includes('authorization_versions') || REGISTRY_SHARE.test(statement) || RECORD_SHARE.test(statement))).toBe(false)
+    expect((await evidence()).counts).toEqual([1, 0, 1, 2, 1, 1])
+  })
+
+  it('fail closed: a service without the host re-authorization refuses every bound row (UNAVAILABLE, nothing written) and still takes an unbound one', async () => {
+    const f = await boundFixture()
+    const bare = await session(context(), { withoutReauthorization: true })
+    const before = await evidence()
+    await rejected(bare.service.approve(f.request))
+    expect(await evidence()).toEqual(before)
+    const pasted = await draftOf(bare, input('original', 7), 'synthetic-pasted-confirmation')
+    expect((await bare.service.approve(pasted)).status).toBe('approved')
+  })
+
+  it('RA1: table permissions unchanged, only a record-level read deny on the bound record — before approval the approval is CONFLICT with no grant row; before admission the admission is CONFLICT with no admission and no ledger row; lifted, the same grant is admitted', async () => {
+    const f = await boundFixture()
+    await sql.denyRecord(ids().rec(0))
+    const before = await evidence()
+    await rejected(first.service.approve(f.request), 'CONFLICT')
+    expect(await evidence()).toEqual(before)
+    expect(before.counts).toEqual([0, 0, 0, 0, 0, 0])
+    await sql.clearRecordDenies()
+    const granted = await first.service.approve(f.request)
+    await sql.denyRecord(ids().rec(0))
+    const approved = await evidence()
+    await rejected(first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' }), 'CONFLICT')
+    expect(await evidence()).toEqual(approved)
+    expect(approved.counts).toEqual([1, 0, 0, 1, 0, 0])
+    // The grant keeps its single attempt (nothing consumed, nothing revoked): the deny lifted, it is admitted.
+    await sql.clearRecordDenies()
+    expect((await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' })).status).toBe('admitted')
+    expect((await evidence()).counts).toEqual([1, 0, 1, 2, 1, 1])
+  })
+
+  it('RA2 and RA2 (i): table and record permissions unchanged, one source column hidden — by field visibility before approval and by a per-subject field permission before admission — refuses; the alias differs from the field id and hiding the visible decoy field that carries the alias changes nothing', async () => {
+    const f = await boundFixture(), real = ids().fld('description')
+    await sql.hide(real)
+    const before = await evidence()
+    await rejected(first.service.approve(f.request), 'CONFLICT')
+    expect(await evidence()).toEqual(before)
+    await sql.unhide(real)
+    const granted = await first.service.approve(f.request)
+    await owner.query("INSERT INTO public.field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1, $2, 'user', $3, FALSE, FALSE)",
+      [ids().sheet, real, context().ownerId])
+    const approved = await evidence()
+    await rejected(first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' }), 'CONFLICT')
+    expect(await evidence()).toEqual(approved)
+    expect(approved.counts).toEqual([1, 0, 0, 1, 0, 0])
+    // (i) by field id, never by alias: the decoy field named `description` is hidden, the real column is visible again.
+    await owner.query('DELETE FROM public.field_permissions WHERE sheet_id = $1', [ids().sheet])
+    await sql.hide(DECOY_FIELD_ID)
+    expect((await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' })).status).toBe('admitted')
+  })
+
+  // RA2 (ii): a v3 config whose `label` target is a concat of the key column and `partNote`, a column NO target maps directly.
+  function v3BoundRow(index: number, quantity = 6): Input & { sourceBinding: Row } {
+    const { sheet, rec, fld } = ids()
+    const value: Input = {
+      config: { version: 3, kind: 'yida-form-protocol-static', intent: 'create',
+        target: { appType: 'synthetic_approval_app', formUuid: 'synthetic_approval_form' },
+        // The SAME key definition as the v2 fixture's (project, line, parent; parent may be empty), named by primary
+        // target as v3 does: one target keeps one key definition (the draft store refuses another).
+        businessKey: ['project', 'line', 'parent'], emptyKeyFields: ['parent'],
+        fieldCatalog: [{ id: 'project', control: 'text', required: true }, { id: 'line', control: 'text', required: true },
+          { id: 'parent', control: 'text', required: false }, { id: 'qty', control: 'number', required: true },
+          { id: 'label', control: 'text', required: false }],
+        fieldMap: [{ transform: 'direct', source: 'projectNo', target: 'project', type: 'string', required: true },
+          { transform: 'direct', source: 'lineId', target: 'line', type: 'string', required: true },
+          { transform: 'direct', source: 'parentCode', target: 'parent', type: 'string', required: false },
+          { transform: 'direct', source: 'quantity', target: 'qty', type: 'number', required: true },
+          { transform: 'concat', parts: [{ source: 'lineId' }, { literal: '/' }, { source: 'partNote' }], separator: '', blank: 'skip',
+            target: 'label', type: 'string', required: false }] },
+      rowsText: JSON.stringify([{ projectNo: 'DEMO-P1', lineId: LINES[index], parentCode: null, quantity, partNote: 'synthetic note' }]),
+      allocation: { mode: 'original' },
+    }
+    const fieldBindings = { projectNo: fld('project'), lineId: fld('line'), parentCode: fld('parent'), quantity: fld('qty'), partNote: fld('note') }
+    return { ...value, sourceBinding: { sheetId: sheet, keyFieldId: fld('line'), fieldBindings,
+      records: [{ recordId: rec(index), keyValue: LINES[index], projectNo: 'DEMO-P1' }] } }
+  }
+
+  it('RA2 (ii): a column that is only a concat dependency (never directly mapped) hidden before approval and before admission refuses; visible again, the row is approved and admitted', async () => {
+    await boundFixture()
+    const note = ids().fld('note')
+    const members = (await tableRows(MEMBERS)).length
+    const request = await draftOf(first, v3BoundRow(1), 'synthetic-v3-confirmation')
+    const row = (await tableRows(MEMBERS)).find(member => member.operation_id === request.operationId)!
+    expect((await tableRows(MEMBERS)).length).toBe(members + 1)
+    expect(/^[0-9a-f]{64}$/.test(String(row.source_record_digest))).toBe(true)
+    await sql.hide(note)
+    const before = await evidence()
+    await rejected(first.service.approve(request), 'CONFLICT')
+    expect(await evidence()).toEqual(before)
+    await sql.unhide(note)
+    const granted = await first.service.approve(request)
+    // The sealed binding names `…_fld_note` ONLY as the concat target's dependency: no target maps it directly.
+    const grantRow = (await tableRows(APPROVAL)).find(grant => grant.grant_id === granted.grantId)!
+    const sealed = (JSON.parse(await security.decrypt(String(grantRow.snapshot_encrypted))) as Row).selection as Row
+    const dependencies = (sealed.sourceBinding as Row).fieldDependencies as Record<string, string[]>
+    expect(Object.entries(dependencies).filter(([, fieldIds]) => fieldIds.includes(note)).map(([target]) => target)).toEqual(['label'])
+    expect(Object.values((sealed.sourceBinding as Row).fieldBindings as Record<string, string>).includes(note)).toBe(true)
+    await sql.hide(note)
+    const approved = await evidence()
+    await rejected(first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-v3-submission' }), 'CONFLICT')
+    expect(await evidence()).toEqual(approved)
+    await sql.unhide(note)
+    expect((await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-v3-submission' })).status).toBe('admitted')
+  })
+
+  // RA4 harness. Forward: connection 1 (`first`) admits, runs its four checks and parks on the barrier — the ledger INSERT,
+  // its first write, after every check and before COMMIT; connection 2 (`second.client`, READ COMMITTED) issues the
+  // revocation and must stay blocked until connection 1 commits ("admission in front, revocation after"); the committed
+  // revocation then refuses the next bound approval of another record of the sheet. Reverse: the revocation commits
+  // FIRST (connection 1 parked before its first protocol lock), connection 1 is released, runs its checks and refuses.
+  type Ra4Case = { arm?: () => Promise<void>; revoke: (writer: PoolClient) => Promise<unknown>; undo: () => Promise<void> }
+  async function ra4(spec: Ra4Case) {
+    await registerProject()
+    await spec.arm?.()
+    const f = await fixture(boundInput())
+    const granted = await first.service.approve(f.request)
+    const gate = first.gateInsert(LEDGER)
+    const admission = first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' })
+    admission.catch(() => {})
+    await reached(gate)
+    const writer = second.client
+    await writer.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+    let settled = false
+    const write = spec.revoke(writer).then(() => { settled = true })
+    write.catch(() => {})
+    await blocked(second, first)
+    expect(settled).toBe(false)
+    first.release()
+    const admitted = await admission
+    expect(admitted.status).toBe('admitted')
+    await write
+    expect(settled).toBe(true)
+    await writer.query('COMMIT')
+    expect((await evidence()).counts).toEqual([1, 0, 1, 2, 1, 1])
+    // The committed revocation is effective: the next bound approval on this sheet is refused, nothing written.
+    const next = await draftOf(first, boundRow(1, 7), 'synthetic-next-confirmation')
+    const afterRevoke = await evidence()
+    await rejected(first.service.approve(next), 'CONFLICT')
+    expect(await evidence()).toEqual(afterRevoke)
+    // Reverse direction.
+    await spec.undo()
+    const again = await draftOf(first, boundRow(2, 8), 'synthetic-reverse-confirmation')
+    const grant2 = await first.service.approve(again)
+    const early = first.gateInsert('subject_authorization_versions')
+    const admission2 = first.service.admit({ grantId: grant2.grantId, submissionId: 'synthetic-reverse-submission' })
+    admission2.catch(() => {})
+    await reached(early)
+    await spec.revoke(writer) // autocommit: committed before connection 1 takes its first lock
+    const before = await evidence()
+    first.release()
+    await rejected(admission2, 'CONFLICT')
+    expect(await evidence()).toEqual(before)
+    expect(before.counts).toEqual([2, 0, 1, 3, 1, 1])
+  }
+
+  it('RA4 ①: deleting a role permission (positive authority) blocks until the parked admission commits; committed first, the admission is refused', async () => {
+    await ra4({
+      revoke: writer => writer.query("DELETE FROM role_permissions WHERE role_id = 'integration_admin' AND permission_code = 'multitable:read'"),
+      undo: async () => { await sql.restoreRead() },
+    })
+  })
+
+  it('RA4 ②: inserting a record-level read deny (negative, a new row) blocks on the sheet version row until the parked admission commits; committed first, the admission is refused', async () => {
+    const { sheet, rec } = ids()
+    await ra4({
+      revoke: writer => writer.query(`INSERT INTO public.record_permissions (sheet_id, record_id, subject_type, subject_id, access_level)
+        SELECT $1, unnest($2::text[]), 'user', $3, 'none'`, [sheet, [rec(0), rec(1), rec(2)], context().ownerId]),
+      undo: async () => { await sql.clearRecordDenies() },
+    })
+  })
+
+  it('RA4 ③: hiding a dependency field (configuration) blocks on the sheet version row until the parked admission commits; committed first, the admission is refused', async () => {
+    const real = ids().fld('description')
+    await ra4({
+      revoke: writer => writer.query(`UPDATE public.meta_fields SET property = property || '{"hidden": true}'::jsonb WHERE id = $1`, [real]),
+      undo: async () => { await sql.unhide(real) },
+    })
+  })
+
+  it('RA4 ④: joining a member group that carries a read deny (membership) blocks on the SUBJECT version row until the parked admission commits; committed first, the admission is refused', async () => {
+    const { sheet, rec } = ids()
+    let groupId = ''
+    await ra4({
+      arm: async () => {
+        // The member-group FK points at public.users: the owner exists there for this case only (removed by afterEach).
+        await owner.query(`INSERT INTO public.users (id, email, password_hash, role, is_active, activation_status, is_admin, permissions)
+          VALUES ($1, $1 || '@synthetic.invalid', 'x', 'user', TRUE, 'activated', FALSE, '[]'::jsonb)`, [context().ownerId])
+        groupId = String((await owner.query('INSERT INTO public.platform_member_groups (name) VALUES ($1) RETURNING id::text AS id', [`${schema}_deny_group`])).rows[0].id)
+        await owner.query(`INSERT INTO public.record_permissions (sheet_id, record_id, subject_type, subject_id, access_level)
+          SELECT $1, unnest($2::text[]), 'member-group', $3, 'none'`, [sheet, [rec(0), rec(1), rec(2)], groupId])
+      },
+      revoke: writer => writer.query('INSERT INTO public.platform_member_group_members (group_id, user_id, created_at) VALUES ($1::uuid, $2, now())', [groupId, context().ownerId]),
+      undo: async () => { await owner.query('DELETE FROM public.platform_member_group_members WHERE group_id = $1::uuid', [groupId]) },
+    })
+  })
+
+  it('RA4 ⑤: changing the bound record so a conditional read rule denies it (record value) blocks on the record FOR SHARE until the parked admission commits; committed first, the admission is refused', async () => {
+    const { sheet, fld } = ids(), status = fld('status')
+    await ra4({
+      arm: () => owner.query('UPDATE public.meta_sheets SET conditional_read_rules = $2::jsonb WHERE id = $1',
+        // A complete rule (the parser rejects one without an id, which would leave the sheet rule-free), active only
+        // because row-level read permissions are enabled on the seeded sheet.
+        [sheet, JSON.stringify([{ id: 'synthetic-secret-rule', fieldId: status, operator: 'eq', value: 'secret', effect: 'deny_read' }])]).then(() => undefined),
+      revoke: writer => writer.query("UPDATE public.meta_records SET data = data || jsonb_build_object($2::text, 'secret'::text) WHERE sheet_id = $1", [sheet, status]),
+      undo: async () => { await owner.query("UPDATE public.meta_records SET data = data || jsonb_build_object($2::text, 'open'::text) WHERE sheet_id = $1", [sheet, status]) },
+    })
+  })
+
+  it('RA4 lock order (closes Y5a B-05 at the service level): an access-graph writer (lockUsersForAccessGraphWrite: the subject row bump first, then users FOR UPDATE) is SERIALIZED behind a bound admission parked (A) after its subject row and before its users row, and (C) after its users row and before its sheet row; each time the admission commits first and the writer locks after it, no deadlock', async () => {
+    // The writer reads the profile columns the mutex returns; the private users fixture carries only the live-ACL ones.
+    await owner.query('ALTER TABLE users ADD COLUMN name text, ADD COLUMN email text, ADD COLUMN username text, ADD COLUMN mobile text, ADD COLUMN access_generation bigint NOT NULL DEFAULT 0')
+    const f = await boundFixture()
+    const writer = second.client
+    // One admission parked on `gate`, one access-graph writer on connection 2: the writer must wait for the commit.
+    async function serialized(grantId: string, submissionId: string, gate: Gate, parkedAt: (statements: string[]) => void) {
+      const admission = first.service.admit({ grantId, submissionId })
+      admission.catch(() => {})
+      await reached(gate)
+      parkedAt([...first.statements])
+      await writer.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+      const order: string[] = []
+      const writerRun = (async () => {
+        const locked = await lockUsers(writer, [context().ownerId])
+        order.push('writer:locked')
+        expect(locked.get(context().ownerId)?.id).toBe(context().ownerId)
+        await writer.query('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [context().ownerId, '[]'])
+        await writer.query('COMMIT')
+        order.push('writer:committed')
+      })()
+      writerRun.catch(() => {})
+      await blocked(second, first)
+      expect(order).toEqual([])
+      order.push('holder:released'); first.release()
+      const admitted = await admission
+      order.push('holder:admitted')
+      await writerRun
+      expect(admitted.status).toBe('admitted')
+      expect(order).toEqual(['holder:released', 'holder:admitted', 'writer:locked', 'writer:committed'])
+    }
+    // (A) The first `FROM user_roles` is the live-actor check's first locking read: the subject row is held, users is not.
+    // A writer that locked users FIRST would get it here and then wait on the subject row: a deadlock, not this order.
+    const grant1 = await first.service.approve(f.request)
+    first.statements.length = 0
+    await serialized(grant1.grantId, 'synthetic-submission', first.gateMatch(/FROM user_roles/), statements => {
+      expect(/FROM user_roles/.test(statements[statements.length - 1])).toBe(true)
+      expect([indexOf(statements, SUBJECT_SHARE) >= 0, indexOf(statements, USERS_SHARE)]).toEqual([true, -1])
+    })
+    // (C) The re-authorization's registry read: users and the rest of the live-actor rows are held, the sheet row and the
+    // helper are not. Without the phase-1 subject lock this is the B-05 cycle (holder: users → subject; writer: subject →
+    // users); with it the writer's bump waits on the subject row the holder took first.
+    const grant2 = await first.service.approve(await draftOf(first, boundRow(1, 7), 'synthetic-lock-order-confirmation'))
+    first.statements.length = 0
+    await serialized(grant2.grantId, 'synthetic-lock-order-submission', first.gateMatch(REGISTRY_SHARE), statements => {
+      expect(REGISTRY_SHARE.test(statements[statements.length - 1])).toBe(true)
+      expect([indexOf(statements, SUBJECT_SHARE) >= 0, indexOf(statements, USERS_SHARE) > indexOf(statements, SUBJECT_SHARE),
+        indexOf(statements, SHEET_SHARE)]).toEqual([true, true, -1])
+    })
+    expect((await evidence()).counts).toEqual([2, 0, 2, 4, 2, 2])
+  })
+
+  it('RA5: a session whose triggers do not fire (session_replication_role = replica) is refused at approval and at admission as UNAVAILABLE with nothing written; back in origin the same grant is admitted', async () => {
+    const superuser = await owner.query('SELECT rolsuper FROM pg_roles WHERE rolname = current_user')
+    expect(superuser.rows[0]?.rolsuper, 'session_replication_role is a superuser setting; the CI database user is one').toBe(true)
+    const f = await boundFixture()
+    await first.client.query("SET session_replication_role = 'replica'")
+    try {
+      const before = await evidence()
+      await rejected(first.service.approve(f.request))
+      expect(await evidence()).toEqual(before)
+      await first.client.query("SET session_replication_role = 'origin'")
+      const granted = await first.service.approve(f.request)
+      await first.client.query("SET session_replication_role = 'replica'")
+      const approved = await evidence()
+      await rejected(first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' }))
+      expect(await evidence()).toEqual(approved)
+      expect(approved.counts).toEqual([1, 0, 0, 1, 0, 0])
+      await first.client.query("SET session_replication_role = 'origin'")
+      expect((await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' })).status).toBe('admitted')
+    } finally { await first.client.query("SET session_replication_role = 'origin'") }
+  })
+
+  it('SR4 (the approval and admission time points): the owner\'s export authority on the bound sheet revoked before approval refuses the approval (no grant row); revoked before admission refuses the admission (no admission, no ledger row); restored, the grant is admitted', async () => {
+    const f = await boundFixture()
+    await sql.revokeRead()
+    const before = await evidence()
+    await rejected(first.service.approve(f.request), 'CONFLICT')
+    expect(await evidence()).toEqual(before)
+    await sql.restoreRead()
+    const granted = await first.service.approve(f.request)
+    await sql.revokeRead()
+    const approved = await evidence()
+    await rejected(first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' }), 'CONFLICT')
+    expect(await evidence()).toEqual(approved)
+    expect(approved.counts).toEqual([1, 0, 0, 1, 0, 0])
+    await sql.restoreRead()
+    expect((await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' })).status).toBe('admitted')
   })
 })

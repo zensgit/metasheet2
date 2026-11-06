@@ -4,6 +4,7 @@ import {
   createInternalYidaSendExecutionAuthority,
   yidaSendApprovalErrorCode,
   type YidaSendExecutionPrimitives,
+  type YidaSourceBindingReauthorizer,
 } from './yida-send-approval-service'
 
 // Host private: authentication supplies actor, and the actual core authority
@@ -32,6 +33,10 @@ export type YidaOwnerRuntimeDependencies = {
   // list of target refs that, like slot 1 (the material TEST copy, R-71 decision 1), may still take unbound
   // rows. Read per call; absent, empty or malformed = no such target. Every other target requires binding.
   readUnboundTestTargetRefs?: () => unknown
+  // D21 (design baseline v2.3 §7.2): the host's in-transaction re-authorization of a bound row, run by the core
+  // service inside its approval and admission transactions (yida-source-reauthorization-host.ts). Captured once;
+  // absent = the service refuses every bound row (fail closed). Never authority for an unbound (pasted) row.
+  reauthorizeSourceBinding?: YidaSourceBindingReauthorizer
 }
 export type YidaOwnerPrepareDraftInput = Readonly<{ config: unknown; rowsText: string; allocation?: unknown; targetRef?: string; sourceBinding?: unknown }>
 export type YidaOwnerProveDraftOwnerInput = Readonly<{ targetRef?: string }>
@@ -164,9 +169,11 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
   const readEnablement = dependencies.readEnablement ?? (() => 'false')
   const readMultiTarget = dependencies.readMultiTargetEnablement ?? (() => 'false')
   const readUnboundTestTargetRefs = dependencies.readUnboundTestTargetRefs ?? (() => undefined)
+  const reauthorizeSourceBinding = dependencies.reauthorizeSourceBinding
   const timeoutMs = dependencies.timeoutMs ?? 10000
   if (typeof fetcher !== 'function' || typeof readEnablement !== 'function' || typeof readMultiTarget !== 'function'
     || typeof readUnboundTestTargetRefs !== 'function'
+    || (reauthorizeSourceBinding !== undefined && (typeof reauthorizeSourceBinding !== 'function' || types.isProxy(reauthorizeSourceBinding)))
     || !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 60000) fail('INPUT')
   // Exact literal, never coerced; a throwing or async switch is OFF.
   function multiTargetOn(): boolean {
@@ -268,7 +275,8 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
           checkpoint()
           // Captured once per run: a switch flip mid-run cannot widen this authority.
           const authority = createInternalYidaSendExecutionAuthority({ database, security, context, primitives,
-            ...(multiTargetOn() ? { multiTarget: true } : {}), unboundTestTargetRefs: unboundTestTargetRefs() })
+            ...(multiTargetOn() ? { multiTarget: true } : {}), unboundTestTargetRefs: unboundTestTargetRefs(),
+            ...(reauthorizeSourceBinding ? { reauthorizeSourceBinding } : {}) })
           checkpoint()
           return await checked(() => work(authority, state, context, checkpoint, controller.signal, tracked))
         } catch (error) {

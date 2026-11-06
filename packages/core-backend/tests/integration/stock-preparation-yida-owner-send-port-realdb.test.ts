@@ -19,6 +19,11 @@ const ADMISSION = 'integration_yida_send_admissions', AUDIT = 'integration_yida_
 const LEDGER = 'integration_yida_delivery_ledger', LEDGER_AUDIT = 'integration_yida_delivery_audit'
 const OP = 'integration_yida_draft_operations', TARGET = 'integration_yida_approved_target'
 const PIN = 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED'
+// D21 (slice Y5): approve and admit first ENSURE the actor's subject authorization version row (an idempotent upsert of
+// a version row, never a grant, admission, audit or ledger row). "No INSERT" below means no business write: only this
+// exact statement is exempt, every other INSERT still fails those assertions.
+const SUBJECT_VERSION_ENSURE = /^INSERT INTO subject_authorization_versions \(subject_id\) VALUES \(\$1\) ON CONFLICT \(subject_id\) DO NOTHING$/
+const businessInsert = (sql: string) => /^INSERT /i.test(sql.trim()) && !SUBJECT_VERSION_ENSURE.test(sql.trim())
 const proofTables = [APPROVAL, REVOCATION, ADMISSION, AUDIT, LEDGER, LEDGER_AUDIT]
 type Row = Record<string, unknown>
 type Context = { tenantId: string; workspaceId: null; ownerId: string }
@@ -315,6 +320,9 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
       CREATE TABLE user_permissions (user_id varchar(255),permission_code varchar(255),PRIMARY KEY(user_id,permission_code));
       CREATE TABLE user_orgs (user_id text,org_id text,is_active boolean NOT NULL,PRIMARY KEY(user_id,org_id));
       CREATE TABLE user_namespace_admissions (user_id text,namespace text,enabled boolean NOT NULL DEFAULT false,UNIQUE(user_id,namespace));
+      -- D21 (slice Y5): the subject authorization version row approve/admit hold first (zzzz20261106110500 shape; this
+      -- file sends pasted, unbound rows only, so no trigger, sheet row or record lock is consulted here).
+      CREATE TABLE subject_authorization_versions (subject_id text PRIMARY KEY, version bigint NOT NULL DEFAULT 1, updated_at timestamptz NOT NULL DEFAULT now());
       INSERT INTO users VALUES ('synthetic-owner','user','[]',true,'activated',false,false),
         ('synthetic-other-actor','admin','["role:admin"]',true,'activated',false,true);
       INSERT INTO user_roles VALUES ('synthetic-owner','integration_admin'),('synthetic-other-actor','admin'),('synthetic-other-actor','foreign_admin');
@@ -368,7 +376,7 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
       .toEqual(['acknowledged', true, false, 0])
     expect(observed.delivery?.id === result.delivery?.id && inspected.delivery?.id === result.delivery?.id).toBe(true)
     expect([freshHttp.token, freshHttp.form]).toEqual([0, 0])
-    expect(restarted.statements.some(sql => sql.includes(OP) || sql.includes('integration_yida_credential_materials') || /^INSERT /i.test(sql.trim()))).toBe(false)
+    expect(restarted.statements.some(sql => sql.includes(OP) || sql.includes('integration_yida_credential_materials') || businessInsert(sql))).toBe(false)
     expect(await evidence()).toEqual(before)
     const publicText = JSON.stringify([result, observed, inspected])
     for (const privateValue of [...Object.values(material()), 'synthetic-token', 'synthetic-instance', 'synthetic owner port part', 'synthetic_owner_form'])
@@ -754,7 +762,7 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     await rejected(port.submit(request), 'YIDA_OWNER_SEND_UNAVAILABLE')
     expect(budget.calls).toBe(2)
     expect([fake.token, fake.form]).toEqual([0, 0])
-    expect(active.statements.some(sql => sql.includes(LEDGER) || /^INSERT /i.test(sql.trim()))).toBe(false)
+    expect(active.statements.some(sql => sql.includes(LEDGER) || businessInsert(sql))).toBe(false)
     expect(await evidence()).toEqual(before)
     const view = await port.inspect({ grantId: grant.grantId })
     expect([view.delivery, view.approval.status, view.approval.remainingAttempts]).toEqual([null, 'approved', 1])
