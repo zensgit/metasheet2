@@ -2409,6 +2409,7 @@ jobs:
             tests/integration/multitable-action-applied-ledger-realdb.test.ts \
             tests/integration/multitable-automation-execution-ledger-realdb.test.ts \
             tests/integration/multitable-automation-outbound-intent-realdb.test.ts \
+            tests/integration/multitable-automation-job-lease-realdb.test.ts \
             tests/integration/multitable-fwb-write-action-realdb.test.ts \
             tests/integration/multitable-fwb-activation-realdb.test.ts \
             tests/integration/multitable-fwb-update-activation-realdb.test.ts \

@@ -1427,6 +1427,10 @@ export default defineConfig({
       // status='pending' single-writer guard): real Postgres only — excluded HERE so it cannot skip-green in
       // the no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-automation-outbound-intent-realdb.test.ts',
+      // R-69 1b-ii job lease (fence-CAS claim/renew/release, FOR UPDATE linearization, dead-holder takeover,
+      // migration down refusal): real Postgres only, two connections — excluded HERE so it cannot skip-green in
+      // the no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-automation-job-lease-realdb.test.ts',
       // FWB-1 slice ③ write_approval_form_values same-txn composition — real-DB. Two-point wiring.
       'tests/integration/multitable-fwb-write-action-realdb.test.ts',
       // FWB activation — production write_approval_form_values wiring (save gate + real trigger chain +
