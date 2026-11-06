@@ -2671,6 +2671,9 @@ jobs:
             tests/integration/directory-org-transfer-source-freeze.db.test.ts \
             tests/integration/directory-controlled-handover.db.test.ts \
             tests/integration/dingtalk-login-repair.db.test.ts \
+            tests/integration/security-action-privilege.db.test.ts \
+            tests/integration/directory-unbind-intent-persistence.db.test.ts \
+            tests/integration/directory-sync-membership-local-account-gate.db.test.ts \
             tests/integration/directory-source-freeze-lock-correctness.db.test.ts \
             tests/integration/invite-accept-concurrency-rollback.db.test.ts \
             tests/integration/directory-account-external-key-collision-mechanism.db.test.ts \

@@ -44,6 +44,10 @@ import {
   summarizeDirectorySyncApiCalls,
   type DirectorySyncApiCallCounters,
 } from './directory-sync-api-telemetry'
+import {
+  DIRECTORY_LINK_NOT_ADMIN_UNBOUND_SQL,
+  isAdminUnboundDirectoryLink,
+} from './directory-link-intent'
 import { assertDingTalkCorpAllowed } from '../integrations/dingtalk/runtime-policy'
 import {
   deriveDelegatedAdminNamespace,
@@ -79,7 +83,13 @@ import {
   lockUsersForAccessGraphWrite,
   supersedeDeprovisionEvidenceForAccessGraphWrite,
   type AccessGraphTransactionClient,
+  type LockedAccessGraphUser,
 } from './access-graph-mutex'
+import {
+  evaluateDirectorySyncLocalAccountGate,
+  resolveDirectorySyncMembershipWrite,
+  type DirectorySyncLocalAccountSnapshot,
+} from './directory-sync-membership-gate'
 
 const logger = new Logger('DirectorySync')
 const DEFAULT_ORG_ID = 'default'
@@ -1319,10 +1329,16 @@ export type DirectoryIdentityMatchAccount = {
   mobile: string | null
 }
 
-/** Just enough of the existing link row to decide the already-linked short-circuit. */
+/**
+ * Just enough of the existing link row to decide the two early outcomes of the cascade: the
+ * administrator-unbound hold (`isAdminUnboundDirectoryLink`, all three columns) and the
+ * already-linked short-circuit. `match_strategy` is required rather than optional so a caller
+ * that forgets to pass it fails to type-check instead of silently losing the hold.
+ */
 export type DirectoryIdentityExistingLink = {
   local_user_id: string | null
   link_status: string
+  match_strategy: string | null
 }
 
 export type DirectoryIdentityMatchMaps = {
@@ -1339,6 +1355,7 @@ export type DirectoryIdentityMatchMaps = {
 }
 
 export type DirectoryIdentityMatchOutcome =
+  | { matched: 'admin_unbound' }
   | { matched: 'already_linked' }
   | { matched: 'external_identity'; localUserId: string }
   | { matched: 'email'; localUserId: string }
@@ -1349,20 +1366,26 @@ export type DirectoryIdentityMatchOutcome =
 /**
  * The identity-matching cascade `syncDirectoryIntegration` walks for every pulled DingTalk
  * user, extracted so `previewDirectorySyncIntegration` can walk the exact same cascade
- * instead of approximating it. Order matters and mirrors apply: ambiguous external identity
- * first (including an account that was linked before the duplicate appeared), then the
- * already-linked short-circuit, external-identity (union/open id or external_key), unique email,
- * then unique
- * mobile, then ambiguous-identifier. `{ matched: 'none' }` is the ONLY outcome under which
- * apply reaches the auto-admission branch — that is the exact condition preview must gate
- * `autoAdmissionCandidateCount` behind to avoid over-counting accounts that would actually be
- * linked (or already are) rather than newly created.
+ * instead of approximating it. Order matters and mirrors apply: the administrator-unbound hold
+ * first, then ambiguous external identity (including an account that was linked before the
+ * duplicate appeared), then the already-linked short-circuit, external-identity (union/open id
+ * or external_key), unique email, then unique mobile, then ambiguous-identifier.
+ * `{ matched: 'none' }` is the ONLY outcome under which apply reaches the auto-admission
+ * branch — that is the exact condition preview must gate `autoAdmissionCandidateCount` behind
+ * to avoid over-counting accounts that would actually be linked (or already are) rather than
+ * newly created.
+ *
+ * The hold sits before the ambiguity check on purpose: an account an administrator explicitly
+ * unbound keeps that intent even when a duplicate identity appears later. Both outcomes leave
+ * the account unlinked, but only `admin_unbound` keeps the persisted strategy untouched.
  */
 export function resolveDirectoryIdentityMatch(
   account: DirectoryIdentityMatchAccount,
   existingLink: DirectoryIdentityExistingLink | null | undefined,
   maps: DirectoryIdentityMatchMaps,
 ): DirectoryIdentityMatchOutcome {
+  if (isAdminUnboundDirectoryLink(existingLink)) return { matched: 'admin_unbound' }
+
   const scopedOpenIdentityKey = buildScopedIdentityKey(account.corpId, account.openId)
   const scopedUnionIdentityKey = buildScopedIdentityKey(account.corpId, account.unionId)
   const scopedExternalIdentityKey = buildScopedIdentityKey(account.corpId, account.externalKey)
@@ -3604,6 +3627,8 @@ async function lockDirectorySyncAccessGraphUsers(
   },
 ): Promise<{
   lockedUserIds: Set<string>
+  /** The locked `users` rows themselves (post-lock state) — the membership gate reads these. */
+  lockedUsers: Map<string, LockedAccessGraphUser>
   openRehireAccountIds: Set<string>
   priorAccessByExternalUserId: Map<string, DirectorySyncPriorAccessRow>
 }> {
@@ -3738,6 +3763,7 @@ async function lockDirectorySyncAccessGraphUsers(
 
   return {
     lockedUserIds: new Set(lockedUsers.keys()),
+    lockedUsers,
     openRehireAccountIds: new Set(
       openRehireEvidence.rows
         .map((row) => normalizeText(row.account_id))
@@ -4385,6 +4411,12 @@ export async function syncDirectoryIntegration(
       const changedAccessGraphUserIds = new Set<string>()
       const alreadySupersededUserIds = new Set<string>()
       const newlyAdmittedUserIds = new Set<string>()
+      // Local-account snapshot of each user created in THIS transaction: those rows were not
+      // part of the mutex inventory, so the membership gate reads the creation result instead.
+      const newlyAdmittedUserSnapshots = new Map<string, DirectorySyncLocalAccountSnapshot>()
+      // Membership confirmations the local-account gate declined this run (existing users that
+      // fail the shared authentication gate, and users created in pending-activation mode).
+      let membershipWritesSkippedLocalAccountGateCount = 0
 
       // R5: created-vs-updated split for the run summary. `departmentsSynced`/`accountsSynced`
       // conflate "0 new" and "500 new"; the discriminator is `(xmax = 0)` on the upserted row —
@@ -4601,6 +4633,11 @@ export async function syncDirectoryIntegration(
       let autoAdmissionSkippedMissingEmailCount = 0
       let autoAdmissionExcludedCount = 0
       let autoAdmissionFailedCount = 0
+      // Accounts pulled in THIS run whose link row carries an administrator's explicit unbind
+      // and was therefore left alone. Counted for pulled accounts only, which is the same
+      // population `previewDirectorySyncIntegration` walks, so the two keys are comparable
+      // (this loop also visits retained-but-departed accounts; preview never sees those).
+      let adminUnboundHeldCount = 0
       const linkedUserIdByExternalUserId = new Map<string, string>()
       for (const account of accountIdMap.values()) {
         const directoryUser = users.get(account.external_user_id)
@@ -4634,7 +4671,16 @@ export async function syncDirectoryIntegration(
         )
 
         if (identityMatch.matched !== 'already_linked') {
-          if (identityMatch.matched === 'external_identity') {
+          if (identityMatch.matched === 'admin_unbound') {
+            // An administrator explicitly unbound this account: keep the persisted row exactly
+            // as it is (the link write below is skipped for this outcome too). This branch must
+            // stay explicit — the chain below ends in auto-admission, and an outcome that is
+            // not named here would fall through into it.
+            localUserId = null
+            linkStatus = existing?.link_status ?? 'unmatched'
+            matchStrategy = existing?.match_strategy ?? null
+            if (directoryUser) adminUnboundHeldCount += 1
+          } else if (identityMatch.matched === 'external_identity') {
             localUserId = identityMatch.localUserId
             linkStatus = 'linked'
             matchStrategy = 'external_identity'
@@ -4650,7 +4696,7 @@ export async function syncDirectoryIntegration(
             localUserId = null
             linkStatus = 'unmatched'
             matchStrategy = 'none'
-          } else {
+          } else if (identityMatch.matched === 'none') {
             const autoAdmission = evaluateDirectoryAutoAdmissionEligibility({
               admissionMode: config.admissionMode,
               admissionDepartmentIds: config.admissionDepartmentIds,
@@ -4770,6 +4816,13 @@ export async function syncDirectoryIntegration(
                 }
                 localUserId = created.userId
                 newlyAdmittedUserIds.add(created.userId)
+                newlyAdmittedUserSnapshots.set(created.userId, {
+                  isActive: created.isActive,
+                  role: created.role,
+                  activationStatus: created.activationStatus,
+                  deletedAt: null,
+                  purgedAt: null,
+                })
                 if (
                   existing?.local_user_id
                   && existing.local_user_id !== created.userId
@@ -4818,6 +4871,11 @@ export async function syncDirectoryIntegration(
               linkStatus = 'unmatched'
               matchStrategy = 'none'
             }
+          } else {
+            // Exhaustiveness: a new cascade outcome must be handled above by name; it must never
+            // reach auto-admission by falling through.
+            const unhandled: never = identityMatch
+            throw new Error(`Unhandled directory identity match outcome: ${JSON.stringify(unhandled)}`)
           }
         }
 
@@ -4838,6 +4896,15 @@ export async function syncDirectoryIntegration(
             'Directory sync resolved a local user after the mutex inventory; retry the run',
           )
         }
+        // The local account this sync may act on: the row locked by the mutex inventory, or the
+        // creation snapshot of a user admitted in this transaction. Evaluated once per account
+        // and reused by the entering-side evidence rule below and the membership write.
+        const localUser: DirectorySyncLocalAccountSnapshot | undefined = localUserId
+          ? (newlyAdmittedUserSnapshots.get(localUserId) ?? syncAccess.lockedUsers.get(localUserId))
+          : undefined
+        const localAccountDenial = localUser ? evaluateDirectorySyncLocalAccountGate(localUser) : null
+        const localAccountPassesGate = localUser !== undefined && localAccountDenial === null
+
         const priorLinkedUserId =
           existing?.link_status === 'linked' ? existing.local_user_id : null
         const nextLinkedUserId = linkStatus === 'linked' ? localUserId : null
@@ -4846,7 +4913,16 @@ export async function syncDirectoryIntegration(
           || existing?.link_status !== linkStatus
         ) {
           if (priorLinkedUserId) changedAccessGraphUserIds.add(priorLinkedUserId)
-          if (nextLinkedUserId && !newlyAdmittedUserIds.has(nextLinkedUserId)) {
+          // Entering side: a link that now points at a local account counts as an access-graph
+          // change (and supersedes that user's applied deprovision evidence) only when the local
+          // account itself passes the shared authentication gate. A link confirmed for an
+          // inactive, recycled or pending account changes no access, so it keeps its evidence
+          // and its access generation. The leaving side above is unchanged.
+          if (
+            nextLinkedUserId
+            && !newlyAdmittedUserIds.has(nextLinkedUserId)
+            && localAccountPassesGate
+          ) {
             changedAccessGraphUserIds.add(nextLinkedUserId)
           }
         }
@@ -4878,12 +4954,22 @@ export async function syncDirectoryIntegration(
           && existing?.link_status === 'linked'
           && existing.local_user_id === localUserId
           && linkStatus === 'linked'
-        if (
-          linkStatus === 'linked'
-          && localUserId
-          && account.is_active
-          && !preservesOpenRehireEvidence
-        ) {
+        //
+        // Local-account gate (directory-sync-membership-gate.ts): on top of the link, account
+        // and open-rehire conditions above, the membership is confirmed only for a local account
+        // that passes the shared user authentication gate. An external directory member who is
+        // locally inactive, in the recycle bin, role-disabled or pending activation does not
+        // receive an active membership from sync; activation and restore are their own flows.
+        // A user created in pending-activation mode in this transaction is declined here for
+        // the same reason (its creation snapshot is pending), matching the admission helper.
+        const membershipDecision = resolveDirectorySyncMembershipWrite({
+          linkStatus,
+          localUserId,
+          accountActive: account.is_active,
+          preservesOpenRehireEvidence,
+          localUser,
+        })
+        if (membershipDecision.write && localUserId) {
           const membershipChanged = await upsertActiveUserOrgMembership(client, {
             userId: localUserId,
             orgId: integration.org_id,
@@ -4891,21 +4977,34 @@ export async function syncDirectoryIntegration(
           if (membershipChanged && !newlyAdmittedUserIds.has(localUserId)) {
             changedAccessGraphUserIds.add(localUserId)
           }
+        } else if (membershipDecision.write === false && membershipDecision.reason === 'local_account_gate') {
+          membershipWritesSkippedLocalAccountGateCount += 1
         }
 
-        await client.query(
-          `INSERT INTO directory_account_links (
-             directory_account_id, local_user_id, link_status, match_strategy, created_at, updated_at
-           )
-           VALUES ($1, $2, $3, $4, NOW(), NOW())
-           ON CONFLICT (directory_account_id)
-           DO UPDATE SET
-             local_user_id = EXCLUDED.local_user_id,
-             link_status = EXCLUDED.link_status,
-             match_strategy = EXCLUDED.match_strategy,
-             updated_at = NOW()`,
-          [account.id, localUserId, linkStatus, matchStrategy],
-        )
+        // A row an administrator explicitly unbound is not written at all (every column,
+        // `updated_at` included, stays as the unbind left it). For every other row the write
+        // is conditional on the row's LATEST committed version not carrying that intent: the
+        // link rows were read above without row locks, and an unbind of an account this run
+        // did not pull (and that has no local user to serialize on) can commit in between.
+        // `ON CONFLICT ... DO UPDATE ... WHERE` is evaluated after the conflicting row is
+        // locked, against its current version, so such an unbind is honoured without the
+        // sync taking link-row locks before it writes.
+        if (identityMatch.matched !== 'admin_unbound') {
+          await client.query(
+            `INSERT INTO directory_account_links (
+               directory_account_id, local_user_id, link_status, match_strategy, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, NOW(), NOW())
+             ON CONFLICT (directory_account_id)
+             DO UPDATE SET
+               local_user_id = EXCLUDED.local_user_id,
+               link_status = EXCLUDED.link_status,
+               match_strategy = EXCLUDED.match_strategy,
+               updated_at = NOW()
+             WHERE ${DIRECTORY_LINK_NOT_ADMIN_UNBOUND_SQL}`,
+            [account.id, localUserId, linkStatus, matchStrategy],
+          )
+        }
       }
 
       for (const userId of alreadySupersededUserIds) {
@@ -5061,6 +5160,11 @@ export async function syncDirectoryIntegration(
         autoAdmissionSkippedMissingEmailCount,
         autoAdmissionExcludedCount,
         autoAdmissionFailedCount,
+        adminUnboundHeldCount,
+        // Additive: membership confirmations the local-account gate declined this run (see the
+        // write site in the link loop). Counts existing users that fail the shared
+        // authentication gate and users created in pending-activation mode.
+        membershipWritesSkippedLocalAccountGateCount,
         memberGroupsCreatedCount: memberGroupProjection.memberGroupsCreatedCount,
         memberGroupsSyncedCount: memberGroupProjection.memberGroupsSyncedCount,
         memberGroupMembershipsUpdatedCount: memberGroupProjection.memberGroupMembershipsUpdatedCount,
@@ -5329,6 +5433,11 @@ export type DirectorySyncPreview = {
   autoAdmissionCandidateCount: number
   autoAdmissionSkippedMissingEmailCount: number
   autoAdmissionExcludedCount: number
+  /**
+   * Pulled accounts whose link row carries an administrator's explicit unbind; apply leaves
+   * them alone and reports the same key (same definition: pulled accounts only) in run stats.
+   */
+  adminUnboundHeldCount: number
   sampledNewAccounts: Array<{ externalUserId: string; name: string }>
   sampledDeactivations: Array<{ externalUserId: string; name: string; linked: boolean }>
 }
@@ -5338,6 +5447,10 @@ type ExistingAccountPreviewRow = {
   name: string
   is_active: boolean
   linked: boolean
+  /** NULL for an account without a link row (LEFT JOIN). */
+  local_user_id: string | null
+  link_status: string | null
+  match_strategy: string | null
 }
 
 export async function previewDirectorySyncIntegration(integrationId: string): Promise<DirectorySyncPreview> {
@@ -5361,7 +5474,10 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
     `SELECT a.external_user_id,
             a.name,
             a.is_active,
-            (l.local_user_id IS NOT NULL AND l.link_status = 'linked') AS linked
+            (l.local_user_id IS NOT NULL AND l.link_status = 'linked') AS linked,
+            l.local_user_id,
+            l.link_status,
+            l.match_strategy
        FROM directory_accounts a
        LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
       WHERE a.integration_id = $1`,
@@ -5396,6 +5512,7 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
   let autoAdmissionCandidateCount = 0
   let autoAdmissionSkippedMissingEmailCount = 0
   let autoAdmissionExcludedCount = 0
+  let adminUnboundHeldCount = 0
 
   for (const account of pulledAccountsForMatching) {
     const user = users.get(account.external_user_id)
@@ -5409,7 +5526,19 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
     // Walk the exact cascade apply walks: only an account apply would reach the
     // auto-admission branch for ('none' matched — not already-linked, not identity/email/
     // mobile/ambiguous-matched) can possibly be an auto-admission candidate.
-    const existingLink = existingByExternalId.get(user.userId)
+    // Pass the real link row (apply passes `existingLinks.get(account.id)`): the cascade's
+    // early outcomes read `local_user_id`, `link_status` AND `match_strategy`, so a synthetic
+    // `linked` stand-in would hide an administrator-unbound row from preview. An account
+    // without a link row has NULL `link_status` through the LEFT JOIN; apply passes
+    // `undefined` for it, so pass `null` here — identical cascade result.
+    const existingRow = existingByExternalId.get(user.userId)
+    const existingLink = existingRow && existingRow.link_status !== null
+      ? {
+        local_user_id: existingRow.local_user_id,
+        link_status: existingRow.link_status,
+        match_strategy: existingRow.match_strategy,
+      }
+      : null
     const identityMatch = resolveDirectoryIdentityMatch(
       {
         corpId: account.corp_id,
@@ -5419,9 +5548,10 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
         email: account.email,
         mobile: account.mobile,
       },
-      existingLink?.linked ? { local_user_id: 'linked', link_status: 'linked' } : null,
+      existingLink,
       identityMatchMaps,
     )
+    if (identityMatch.matched === 'admin_unbound') adminUnboundHeldCount += 1
     if (identityMatch.matched !== 'none') continue
 
     const eligibility = evaluateDirectoryAutoAdmissionEligibility({
@@ -5513,6 +5643,7 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
     autoAdmissionCandidateCount,
     autoAdmissionSkippedMissingEmailCount,
     autoAdmissionExcludedCount,
+    adminUnboundHeldCount,
     sampledNewAccounts,
     sampledDeactivations,
   }
@@ -6591,7 +6722,13 @@ async function createDirectoryAdmittedUserInTransaction(
     enableDingTalkGrant: boolean
     expectedPriorLocalUserId?: string | null
   },
-): Promise<{ userId: string }> {
+): Promise<{
+  userId: string
+  /** The created row's activation axis, as written — the sync loop's membership gate reads it. */
+  isActive: boolean
+  activationStatus: 'pending_activation' | 'activated'
+  role: 'user'
+}> {
   const userId = crypto.randomUUID()
   // T1: pending-create runtime is default OFF. When enabled, admit creates pending users
   // (is_active=false, no active user_orgs, grant off). When off, preserve pre-T1 behavior.
@@ -6766,7 +6903,7 @@ async function createDirectoryAdmittedUserInTransaction(
   }
   await client.query('RELEASE SAVEPOINT directory_admit_user')
 
-  return { userId }
+  return { userId, isActive, activationStatus, role: 'user' }
 }
 
 /** Narrow internal seams for invariants that are not independently observable at public APIs. */
