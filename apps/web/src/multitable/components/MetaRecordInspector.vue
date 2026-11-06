@@ -2052,8 +2052,10 @@ function formatCommentTimestamp(iso: string): string {
    floor the toggle wraps UNDER the pill (design §1.6 mock: "wraps under pill only at 360") instead of
    squeezing the four tabs. `margin-left: auto` keeps it on the right whenever it shares the row.
    (2026-11-06: it only actually wraps since the @container block below gave the pill a content-sized
-   flex basis -- see that block's last paragraph. It stays beside the pill when both fit, e.g. the
-   zh-CN labels at 360-440px; the en labels wrap it under the pill.) */
+   flex basis -- see that block's last paragraph. It stays beside the pill whenever both fit. Measured
+   on 360-520px drawers: with the zh-CN labels, beside it at every width; with the en labels, under it,
+   except in Chromium at 443-452px (the narrow block has ended, the bar has room) and from 514px; in
+   Safari, whose en labels are wider, under it at every width measured.) */
 .meta-record-drawer__hide-empty { margin-left: auto; flex: 0 0 auto; }
 /* P2 (2026-09-05 follow-up, verifier P2): was `inline-flex` with no wrapping -- at the (then-320px,
    now 360px) panel minimum the 4-tab pill's un-wrapped content width (355px measured in Chromium) ran
@@ -2088,7 +2090,8 @@ function formatCommentTimestamp(iso: string): string {
    content width at the 360px floor, which is exactly what forced the `flex-wrap: wrap` fallback above
    to engage there before this query existed). The pill's `flex: 1; min-width: 0` declarations are
    deliberately LEFT IN PLACE (harmless, inert): the design brief §1.3 and the header spec's source
-   pin both name them, and removing them is a separate, visible change to that pin -- not a layout
+   pin both name them (2026-11-06: no longer -- see the correction at the end of this comment; the
+   pin now forbids them), and removing them is a separate, visible change to that pin -- not a layout
    fix. The one-row OUTCOME is unchanged by this correction (comment-only).
    PR-B1 update (record inspector v3, 2026-09-05): `.meta-record-drawer__tabs-bar` IS now a wrapping
    flex row (it hosts the hide-empty toggle beside the pill — see its own rule/comment above), so the
@@ -2118,20 +2121,24 @@ function formatCommentTimestamp(iso: string): string {
    row breaks lines by the items' flex-basis-derived sizes -- so the pill counted as 0px wide, always
    "fit" beside the hide-empty toggle, and the toggle never wrapped under it. The pill was then squeezed
    to what the toggle left (~200px at the 360px floor) and the tabs, at `min-width: 0`, shrank BELOW
-   their own labels: with the en labels every tab was narrower than its text (Safari: "Attachments"
-   43px for 88px of text) and the labels drew over each other, at 360/400/440px; zh-CN labels are short
+   their own labels: with the en labels the text of 4 / 3 / 2 tabs (Safari; Chromium 4 / 2 / 2) ran past
+   the tab's edge at a 360 / 400 / 440px drawer, drawing over the next label at 360 (e.g. "Attachments":
+   a 43px tab whose scrollWidth is 88 = 12px start padding + ~76px of text); zh-CN labels are short
    enough that nothing overflowed. Now: the pill's basis is its content (`1 1 auto`), so it shares the
    row with the toggle only when both fit and otherwise takes the row alone (the toggle wraps under --
    the design mock's "wraps under pill only at 360"); `min-width: 0` stays on the pill so it never
    overflows the bar. Each tab is never narrower than its label (`min-width: max-content`), so a row
    that cannot hold all four wraps a tab onto a second pill row (the base rule's `flex-wrap: wrap`)
    instead of overlapping; `flex: 1 1 auto` lets the tabs share any spare width. The 6px tab side
-   padding (12px at >=420px) is what fits the four en labels on one row in the 327px of bar content at
-   the 360px floor: the pill's own width is then 283px (Chromium) / 292px (Safari) for en and ~165px for
-   zh-CN; at 12px it is 331 / 340px and would wrap. The 16px radius is the same pill on one row and a
-   rounded box, not a stadium, if a wider font ever makes it wrap. Measured on the real component in
-   Safari 26.6 and Chromium, en + zh-CN, 360/400/440/480px, Details and History tabs: one row, no tab
-   narrower than its label, the toggle never over the pill, no horizontal overflow. */
+   padding (12px once the bar is 420px wide, i.e. a drawer of about 453px) is what fits the four en
+   labels on one row in the 327px of bar content at the 360px drawer: the pill's content width is then
+   283px (Chromium) / 292px (Safari) for en and ~165px for zh-CN (the pill then grows to fill its row);
+   at 12px it is 331 / 340px and would wrap. The narrow-viewport overlay drawer can be narrower than 360
+   (min(360px, 100vw - 32px)); there the en tabs wrap onto a second pill row, as designed, without
+   overlapping. The 16px radius is the same pill on one row and a rounded box, not a stadium, when it
+   wraps. Measured on the real component in Safari 26.6 and Chromium, en + zh-CN, 360/400/440/480px
+   drawers, Details and History tabs: one row, no tab narrower than its label, the toggle never over
+   the pill, no horizontal overflow. */
 @container (width < 420px) {
   .meta-record-drawer__tabs { flex: 1 1 auto; min-width: 0; border-radius: 16px; }
   .meta-record-drawer__tab { flex: 1 1 auto; min-width: max-content; padding: 5px 6px; }
