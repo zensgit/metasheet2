@@ -3,6 +3,7 @@ import type { AutomationRule } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
 import { useLocale } from '../../composables/useLocale'
 import { automationLabel } from '../utils/meta-automation-labels'
+import { webhookTargetSaveErrorMessage } from '../utils/webhookTargetHint'
 
 export function useMultitableAutomations(client?: MultitableApiClient) {
   const api = client ?? multitableClient
@@ -12,7 +13,8 @@ export function useMultitableAutomations(client?: MultitableApiClient) {
   const error = ref<string | null>(null)
 
   function errorMessage(e: any, fallbackKey: Parameters<typeof automationLabel>[0]): string {
-    return e?.message ?? automationLabel(fallbackKey, isZh.value)
+    // A refused send_webhook target (WEBHOOK_TARGET_REJECTED) reads as plain copy, never the raw code.
+    return webhookTargetSaveErrorMessage(e, isZh.value) ?? e?.message ?? automationLabel(fallbackKey, isZh.value)
   }
 
   async function loadRules(sheetId: string): Promise<void> {
