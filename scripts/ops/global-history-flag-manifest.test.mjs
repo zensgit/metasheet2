@@ -432,12 +432,16 @@ function globalHistoryFlagsInSource() {
   // #4196 Class-B outbound two-phase ledger switch (S0-c, AGENTS.md: every new env flag is registered
   // here). One family by name shape, scanned where the executor and retry-eligibility read it.
   const automationClassB = grepFlagTokens('AUTOMATION_CLASSB_[A-Z_0-9]+_ENABLED')
+  // R-69 1b-ii (ADR §7): the four run_integration_job switches, one family by name shape. Three of them are
+  // registered names with NO read point yet (their own test below pins that); the family scan sees the names
+  // where automation-run-integration-job.ts declares them, so the registration is deliberate, not phantom.
+  const integrationAutomationRun = grepFlagTokens('INTEGRATION_AUTOMATION_RUN_[A-Z_0-9]+_ENABLED')
   // The leave cancel-round launch flag (AGENTS.md: every new env flag; reviewer finding F3, 2026-10-08) is
   // read by the attendance PLUGIN, not under packages/core-backend/src. Only this one family is scanned
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner, ...attendanceCancelRound, ...userRecycle, ...automationClassB])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner, ...attendanceCancelRound, ...userRecycle, ...automationClassB, ...integrationAutomationRun])].sort()
 }
 
 // #4196 Class-B outbound ledger switch (S0-c): default OFF, exact literal only, danger high, sourced from its
@@ -975,6 +979,7 @@ test('automation flags: the read-site scan finds every registered automation key
   assert.deepEqual(automationFlagsInSource(), [
     'AUTOMATION_CLASSA_CLAIM_ENABLED',
     'AUTOMATION_DURABLE_DELIVERY_ENABLED',
+    'AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED',
     'AUTOMATION_WEBHOOK_MAX_RETRIES',
     'AUTOMATION_WEBHOOK_TIMEOUT_MS',
     'ENABLE_SCHEDULER_LEADER_LOCK',
@@ -1026,6 +1031,114 @@ test('AUTOMATION_CLASSA_CLAIM_ENABLED: exact true, danger high, predicate source
   assert.ok(spec.purpose.includes(migrationOnDisk(/^zzzz\d{14}_create_automation_action_applied\.ts$/)), 'purpose names the claim-table migration on disk')
   assert.equal(isActivated(spec, 'true'), true)
   for (const value of [undefined, '', 'TRUE', ' true', 'true ', '1', 'yes']) assert.equal(isActivated(spec, value), false, String(value))
+})
+
+test('AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED: exact true, danger low, single predicate, no coupling to any other flag', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED
+  assert.ok(spec, 'AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'low')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/integration/automation-synthetic-preview.ts#isSyntheticIntegrationPreviewEnabled')
+  const module = readRepoSource(spec.source.split('#')[0])
+  const reader = /\nexport function isSyntheticIntegrationPreviewEnabled\([^)]*\): boolean \{\n([\s\S]*?)\n\}\n/.exec(module)
+  assert.ok(reader, 'the predicate is found')
+  assert.equal(reader[1].trim(), "return env.AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED === 'true'", 'exact literal, its own key only')
+  // The host wires the runtime through this predicate only; no other flag is read on that line.
+  const service = readRepoSource('packages/core-backend/src/multitable/automation-service.ts')
+  const wiring = service.split('\n').filter((line) => line.includes('readEnablement:') && line.includes('SyntheticIntegrationPreview'))
+  assert.deepEqual(wiring, ["    readEnablement: () => (isSyntheticIntegrationPreviewEnabled() ? 'true' : 'false'),"])
+  // No other module reads the key, and no reader matches it by prefix.
+  const reads = grepFlagTokens('AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED')
+  assert.ok(reads.length >= 1)
+  const code = module.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+  assert.equal(/startsWith\(|AUTOMATION_\[|RegExp\(|\/\^AUTOMATION_/.test(code), false, 'no prefix-based flag matching in the preview runtime')
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'TRUE', ' true', 'true ', '1', 'yes']) assert.equal(isActivated(spec, value), false, String(value))
+  // .env.example documents it as OFF.
+  assert.match(readRepoSource('.env.example'), /\n# AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED=false\n/)
+})
+
+// ── R-69 1b-ii: the four run_integration_job switches (ADR adr-automation-pipeline-bridge-20261103 §7) ────────────
+// grepFlagTokens throws on a zero-match grep; for a NEGATIVE read-site claim that is the answer we want.
+function hasReadSite(pattern, options) {
+  try {
+    return grepFlagTokens(pattern, options).length > 0
+  } catch {
+    return false
+  }
+}
+const RUN_INTEGRATION_JOB_MODULE = 'packages/core-backend/src/multitable/automation-run-integration-job.ts'
+
+test('INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED: exact true, danger high, predicate source, save + trigger read points, both migrations on disk, .env.example OFF', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED
+  assert.ok(spec, 'INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, `${RUN_INTEGRATION_JOB_MODULE}#isIntegrationAutomationRunActionEnabled`)
+  const module = readRepoSource(RUN_INTEGRATION_JOB_MODULE)
+  const reader = /\nexport function isIntegrationAutomationRunActionEnabled\([^)]*\): boolean \{\n([\s\S]*?)\n\}\n/.exec(module)
+  assert.ok(reader, 'the predicate is found')
+  assert.equal(reader[1].trim(), "return env.INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED === 'true'", 'exact literal, its own key only')
+  // The two read points: the save gate (403 RUN_ACTION_DISABLED) and the executor on every trigger (skipped action_disabled).
+  const service = readRepoSource('packages/core-backend/src/multitable/automation-service.ts')
+  assert.ok(service.includes("if (!isIntegrationAutomationRunActionEnabled()) {"), 'save gate reads the predicate')
+  assert.ok(service.includes("'RUN_ACTION_DISABLED',"), 'save gate refuses with RUN_ACTION_DISABLED')
+  const executor = readRepoSource('packages/core-backend/src/multitable/automation-executor.ts')
+  assert.ok(
+    executor.includes("if (!isIntegrationAutomationRunActionEnabled()) return this.runIntegrationJobStep('skipped', 'skipped', 'action_disabled')"),
+    'the executor reads the predicate on every trigger and records skipped(action_disabled)',
+  )
+  // No other module reads the key, and no reader matches it by prefix.
+  const code = module.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+  assert.equal(/startsWith\(|INTEGRATION_AUTOMATION_RUN_\[|RegExp\(|\/\^INTEGRATION_AUTOMATION/.test(code), false, 'no prefix-based flag matching')
+  assert.equal(hasReadSite('env[.]INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED'), true)
+  // The purpose names the two migrations the ON path depends on, as they are on disk.
+  for (const pattern of [/^zzzz\d{14}_create_automation_job_leases\.ts$/, /^zzzz\d{14}_add_run_integration_job_automation_action\.ts$/]) {
+    const onDisk = migrationOnDisk(pattern)
+    assert.ok(spec.purpose.includes(onDisk.slice(0, 'zzzz00000000000000'.length)), `purpose names ${onDisk}`)
+  }
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false, String(value))
+  assert.match(readRepoSource('.env.example'), /\n# INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED=false\n/)
+})
+
+test('INTEGRATION_AUTOMATION_RUN_{EVENT,APPLY,PIPELINE_WRITE}_ENABLED: registered, exact true, default OFF, and NOT READ anywhere in 1b-ii (the refusals they would gate are flag-independent)', () => {
+  const module = readRepoSource(RUN_INTEGRATION_JOB_MODULE)
+  for (const [key, danger] of [
+    ['INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED', 'medium'],
+    ['INTEGRATION_AUTOMATION_RUN_APPLY_ENABLED', 'high'],
+    ['INTEGRATION_AUTOMATION_RUN_PIPELINE_WRITE_ENABLED', 'high'],
+  ]) {
+    const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+    assert.ok(spec, `${key} must be registered in the manifest`)
+    assert.equal(spec.type, 'boolean', key)
+    assert.equal(spec.activationValue, 'true', key)
+    assert.equal(spec.caseInsensitive, undefined, key)
+    assert.equal(spec.danger, danger, key)
+    assert.deepEqual(spec.dependsOn, [], key)
+    assert.deepEqual(spec.conflictsWith, [], key)
+    assert.equal(spec.source, `${RUN_INTEGRATION_JOB_MODULE}#INTEGRATION_AUTOMATION_RUN_FLAGS_NOT_READ_IN_1B_II`, key)
+    assert.ok(spec.purpose.includes('NOT READ in 1b-ii'), `${key} purpose says it is not read`)
+    assert.ok(module.includes(`'${key}',`), `${key} is listed in INTEGRATION_AUTOMATION_RUN_FLAGS_NOT_READ_IN_1B_II`)
+    assert.equal(hasReadSite(`env[.]${key}`), false, `${key} must have no read site under packages/core-backend/src`)
+    assert.equal(hasReadSite(`env[.]${key}`, { file: 'plugins/plugin-integration-core/index.cjs' }), false, `${key} must have no read site in the plugin entry`)
+    assert.equal(hasReadSite(`env[.]${key}`, { file: 'plugins/plugin-integration-core/lib/integration-run-port.cjs' }), false, `${key} must have no read site in the plugin port`)
+    assert.equal(isActivated(spec, 'true'), true, key)
+    for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false, `${key} ${String(value)}`)
+    assert.match(readRepoSource('.env.example'), new RegExp(`\\n# ${key}=false\\n`), `${key} documented OFF in .env.example`)
+  }
+  // The two refusals these switches would one day relax are flag-independent today (ADR §3.1: an early flip
+  // must never create a saveable-but-unimplemented rule).
+  assert.ok(module.includes("'apply_when_ready' is not accepted"), 'apply_when_ready refused at save, no switch read')
+  assert.ok(module.includes("'pipeline' is not deliverable in this slice"), 'pipeline kind refused at save, no switch read')
 })
 
 test('automation webhook knobs: numeric, defaults and bounds match the executor parsers', () => {

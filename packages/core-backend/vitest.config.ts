@@ -84,6 +84,12 @@ export default defineConfig({
       // Owner-run connection test (ADR adr-yida-connection-test-20261028): same step, whole files.
       'tests/integration/yida-host-connection-test-realdb.test.ts',
       'tests/integration/yida-connection-test-http-realdb.test.ts',
+      // C1/S2 synthetic integration preview: two-connection admission/revocation proofs on a real PG schema,
+      // and the real-host HTTP acceptance on the migrated CI database. Same EXPECT_DB plugin-tests step.
+      'tests/integration/automation-synthetic-preview-realdb.test.ts',
+      'tests/integration/automation-synthetic-preview-host-realdb.test.ts',
+      // C1/S2 C01 real-browser case: a whole file of the real-host browser launcher (run-stock-preparation-yida-browser-ci.mjs).
+      'tests/integration/automation-synthetic-preview-browser-realdb.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.
@@ -1421,6 +1427,15 @@ export default defineConfig({
       // status='pending' single-writer guard): real Postgres only — excluded HERE so it cannot skip-green in
       // the no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-automation-outbound-intent-realdb.test.ts',
+      // R-69 1b-ii job lease (fence-CAS claim/renew/release, FOR UPDATE linearization, dead-holder takeover,
+      // migration down refusal): real Postgres only, two connections — excluded HERE so it cannot skip-green in
+      // the no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-automation-job-lease-realdb.test.ts',
+      // R-69 1b-ii run_integration_job on the real executor + real ledgers (T3 restart / same-identity replay,
+      // T10 takeover by a different execution root while the holder is paused, live authority on real auth
+      // tables): real Postgres only — excluded HERE so it cannot skip-green, whole-file wired into
+      // `Run multitable real-DB integration` in plugin-tests.yml. Two-point wiring.
+      'tests/integration/multitable-automation-run-integration-job-realdb.test.ts',
       // FWB-1 slice ③ write_approval_form_values same-txn composition — real-DB. Two-point wiring.
       'tests/integration/multitable-fwb-write-action-realdb.test.ts',
       // FWB activation — production write_approval_form_values wiring (save gate + real trigger chain +

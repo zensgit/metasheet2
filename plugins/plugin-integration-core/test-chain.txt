@@ -187,6 +187,8 @@ node __tests__/transform-validator.test.cjs
 node __tests__/runner-support.test.cjs
 node __tests__/payload-redaction.test.cjs
 node __tests__/pipeline-runner.test.cjs
+node __tests__/governed-entry-abort-checkpoints.test.cjs
+node __tests__/integration-run-port.test.cjs
 node __tests__/df-n2-2c-provenance-read.test.cjs
 node __tests__/http-routes.test.cjs
 node __tests__/integration-hub-overview.test.cjs
