@@ -312,6 +312,7 @@ node __tests__/yida-owner-send-port.test.cjs
 node __tests__/yida-readback-observation.test.cjs
 node __tests__/yida-rule-template.test.cjs
 node __tests__/yida-send-authority-primitives.test.cjs
+node __tests__/yida-send-budget.test.cjs
 node __tests__/yida-static-plan.test.cjs
 node __tests__/yida-token-client.test.cjs
 node __tests__/yida-token-exchange.test.cjs
