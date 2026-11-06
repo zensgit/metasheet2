@@ -285,7 +285,8 @@ async function refresh(): Promise<void> {
   generation += 1
   const mine = generation
   try {
-    const result = await getTodoCount()
+    // This badge counts approvals only, whatever other sources the viewer's todo center lists.
+    const result = await getTodoCount({ sources: ['approval'] })
     // Superseded by a later refresh — either a fresh call, or the transition listener's own bump
     // — says nothing about the principal this badge now represents.
     if (mine !== generation) return

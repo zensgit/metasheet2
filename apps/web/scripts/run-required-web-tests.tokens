@@ -6,6 +6,7 @@
 # See docs/development/required-web-lane-token-manifest-guard-design-20260922.md §1.
 accountIdentityDisplay
 adminPageContentSearch.spec.ts
+adminUserBatch
 amountAutoSum
 approval-amount-in-words
 approval-assignee-source
@@ -219,6 +220,7 @@ dingtalk-public-form-link-warnings
 dingtalk-recipient-field-warnings
 directoryConfigPickers
 DirectoryDeprovisionEvidencePanel.spec.ts
+DirectoryIntegrationIdentityPanel.spec.ts
 directoryManagementView
 featureFlags.plm.spec.ts
 featureFlagsApprovalAttachments
@@ -448,6 +450,7 @@ multitable-ui
 multitable-view-display-prefs-util
 multitable-view-manager
 multitable-view-switch-sort-filter
+multitable-webhook-target-ui
 multitable-workbench-1672-1673
 multitable-workbench-ai-availability-wiring
 multitable-workbench-bulk-delete
@@ -550,6 +553,7 @@ tasks-counts-realtime.spec.ts
 tasks-detail-m3.spec.ts
 tasks-detail-m4.spec.ts
 tasks-detail-view.spec.ts
+tasks-dispatch-key.spec.ts
 tasks-groups.spec.ts
 tasks-labels.spec.ts
 tasks-list-detail.spec.ts
@@ -559,7 +563,9 @@ tasks-lists-sidebar.spec.ts
 tasks-nav-badge.spec.ts
 tasks-nav-feature-gate.spec.ts
 tasks-nav-relogin.spec.ts
+tasks-people-picker.spec.ts
 tasks-record-dispatch.spec.ts
+tasks-record-panel.spec.ts
 tasks-routes.spec.ts
 tasks-settings-view.spec.ts
 tasks-status-filter.spec.ts
@@ -628,5 +634,6 @@ userManagementRoleMembership
 userManagementView
 uuid-no-bare-randomuuid
 view-manager-multitable-contract
+webhook-target-hint
 workflowHubView
 xlsx-mapping

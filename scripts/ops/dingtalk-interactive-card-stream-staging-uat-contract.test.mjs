@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { requiredSuiteJob } from './plugin-tests-workflow-contract.mjs'
 // dingtalk-interactive-card-stream-staging-uat-contract.test.mjs
 //
 // Durable synthetic contract for the MINIMAL controlled Stream staging UAT lane:
@@ -301,8 +302,8 @@ test('workflow Validate inputs runs bash -n on remote script and self-test step 
 
 test('contract suite is wired into the required Node 20 plugin-tests lane', () => {
   const doc = loadYaml(read(PLUGIN_TESTS_WORKFLOW))
-  const requiredJob = doc.jobs?.test
-  assert.ok(requiredJob, 'plugin-tests test job must exist')
+  const requiredJob = requiredSuiteJob(doc, 'contracts')
+  assert.ok(requiredJob, 'plugin-tests contracts dependency must exist')
   const step = requiredJob.steps?.find(
     (candidate) => candidate.id === 'dingtalk-production-readiness-inventory-contract',
   )

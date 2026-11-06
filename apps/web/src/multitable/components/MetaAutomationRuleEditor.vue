@@ -12,7 +12,7 @@
     </template>
 
     <div class="meta-rule-editor__body" ref="editorBodyRef">
-        <div v-if="error" class="meta-rule-editor__error" role="alert">{{ error }}</div>
+        <div v-if="error || saveError" class="meta-rule-editor__error" role="alert" data-field="saveError">{{ error || saveError }}</div>
 
         <!-- Name -->
         <label class="meta-rule-editor__label">{{ automationLabel('editor.name', isZh) }}</label>
@@ -503,7 +503,16 @@
             <!-- send_webhook config -->
             <div v-if="action.type === 'send_webhook'" class="meta-rule-editor__action-config">
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.url', isZh) }}</label>
-              <el-input v-model="action.config.url" type="url" placeholder="https://..." />
+              <el-input v-model="action.config.url" type="url" placeholder="https://..." data-field="webhookTargetUrl" />
+              <!-- Since R81 the server refuses any non-public / non-https target. The help line is fixed; the
+                   warning mirrors the server's URL-only check (webhookTargetHint.ts) and never blocks save. -->
+              <div class="meta-rule-editor__hint" data-field="webhookTargetHelp">{{ webhookTargetHelpText(isZh) }}</div>
+              <div
+                v-if="webhookTargetHint(action.config.url, isZh)"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+                role="status"
+                data-field="webhookTargetWarning"
+              >{{ webhookTargetHint(action.config.url, isZh) }}</div>
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.method', isZh) }}</label>
               <el-select v-model="action.config.method" class="meta-rule-editor__select">
                 <el-option value="POST" data-value="POST" label="POST" />
@@ -1874,6 +1883,7 @@ import {
   AUTOMATION_RESULT_WRITEBACK_OUTCOMES,
   type AutomationResultWritebackOutcome,
 } from '../utils/meta-automation-labels'
+import { webhookTargetHelpText, webhookTargetHint } from '../utils/webhookTargetHint'
 import {
   analyzeCronForBusinessSwitch,
   automationBusinessTimezone,
@@ -2056,6 +2066,8 @@ const props = defineProps<{
   views?: MetaView[]
   /** 客户反馈 2026-10-21 (c): the host can open API & Webhooks > DingTalk Groups on request. */
   canOpenDingTalkGroupSettings?: boolean
+  /** The host's save failure (the drawer covers the host's own error line), already in readable copy. */
+  saveError?: string | null
 }>()
 
 const emit = defineEmits<{

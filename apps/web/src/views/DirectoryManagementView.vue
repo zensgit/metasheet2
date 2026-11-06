@@ -204,17 +204,30 @@
           </div>
         </div>
 
-        <div v-if="integrations.length === 0" class="directory-admin__empty">暂无目录集成</div>
+        <div v-if="integrationsLoadError" role="alert" data-testid="directory-list-error">
+          <p>目录集成加载失败，无法确认当前集成。请重试；若仍失败，请联系管理员检查服务端配置。</p>
+          <button type="button" class="directory-admin__button" :disabled="loading" @click="void loadIntegrations()">重试加载集成</button>
+        </div>
+        <div v-else-if="!integrationsLoaded" class="directory-admin__empty">正在加载目录集成…</div>
+        <div v-else-if="integrations.length === 0" class="directory-admin__empty">暂无目录集成</div>
         <button
-          v-for="integration in integrations"
+          v-for="integration in (integrationsLoaded && !integrationsLoadError ? integrations : [])"
           :key="integration.id"
           class="directory-admin__item"
           :class="{ 'directory-admin__item--active': selectedIntegrationId === integration.id }"
           type="button"
           @click="void selectIntegration(integration.id)"
         >
-          <strong>{{ integration.name }}</strong>
-          <span>{{ integration.corpId }}</span>
+          <strong>钉钉 · {{ integration.config.corpName || '企业名称未提供' }}</strong>
+          <span>用途：{{ integration.name }}</span>
+          <span>应用：{{ integration.config.appName || '应用名称未提供' }}</span>
+          <small data-testid="directory-identity-status" :class="{ 'directory-admin__chip directory-admin__chip--warning': integration.config.identityStatus === 'mismatch' }" :role="integration.config.identityStatus === 'mismatch' ? 'alert' : undefined">
+            身份：{{ integration.config.identityStatus === 'mismatch' ? '企业与应用归属不一致' : integration.config.identityStatus === 'verified' ? '管理员已核验' : '未核验' }}
+          </small>
+          <small v-if="integration.config.identityVerification">应用所属企业：{{ integration.config.identityVerification.appCorpName }}</small>
+          <small>自动同步：{{ integration.syncEnabled ? '开启' : '关闭' }}</small>
+          <small>Corp ID：{{ integration.corpId }}</small>
+          <small>本地组织：{{ integration.orgId || '未提供' }}</small>
           <small>{{ readAdmissionModeLabel(integration) }}</small>
           <small>{{ readMemberGroupSyncLabel(integration) }}</small>
           <small>
@@ -254,6 +267,7 @@
           </div>
           <div class="directory-admin__summary" v-if="selectedIntegration">
             <span class="directory-admin__badge">{{ selectedIntegration.status }}</span>
+            <span v-if="selectedIntegration.config.identityStatus === 'mismatch'" class="directory-admin__chip directory-admin__chip--warning" role="alert">企业与应用归属不一致</span>
             <span class="directory-admin__badge" :class="{ 'directory-admin__badge--inactive': !selectedIntegration.syncEnabled }">
               {{ selectedIntegration.syncEnabled ? '已启用同步' : '仅手动同步' }}
             </span>
@@ -265,6 +279,15 @@
           <label class="directory-admin__field">
             <span>集成名称</span>
             <input v-model.trim="draft.name" class="directory-admin__input" type="text" placeholder="例如 DingTalk CN" />
+          </label>
+          <label class="directory-admin__field">
+            <span>钉钉企业名称（展示）</span>
+            <input v-model.trim="draft.corpName" class="directory-admin__input" type="text" maxlength="200" placeholder="填写已确认的企业名称" />
+            <small>管理员填写的展示名称；填写名称不代表已核验，不改变账号关联。</small>
+          </label>
+          <label class="directory-admin__field">
+            <span>钉钉应用名称（展示）</span>
+            <input v-model.trim="draft.appName" class="directory-admin__input" type="text" maxlength="200" placeholder="填写已确认的应用名称" />
           </label>
           <label class="directory-admin__field">
             <span>Corp ID</span>
@@ -577,6 +600,15 @@
             <span>保存后允许自动同步</span>
           </label>
         </div>
+
+        <DirectoryIntegrationIdentityPanel
+          v-if="selectedIntegration"
+          :integration="selectedIntegration"
+          :corp-name="draft.corpName"
+          :app-name="draft.appName"
+          :configuration-changed="draft.corpId.trim() !== selectedIntegration.corpId || draft.appKey.trim() !== selectedIntegration.config.appKey || draft.appSecret.trim().length > 0 || draft.baseUrl.trim() !== (selectedIntegration.config.baseUrl ?? '')"
+          @saved="void loadIntegrations()"
+        />
 
         <footer class="directory-admin__footer">
           <button class="directory-admin__button" type="button" :disabled="busy || !canSave" @click="void saveIntegration()">
@@ -2207,6 +2239,7 @@ import { canCopyText, copyText } from '../utils/clipboard'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import DirectoryDeprovisionEvidencePanel from '../components/directory/DirectoryDeprovisionEvidencePanel.vue'
+import DirectoryIntegrationIdentityPanel from '../components/directory/DirectoryIntegrationIdentityPanel.vue'
 import DirectoryOptionPicker from '../components/directory/DirectoryOptionPicker.vue'
 import { presentRoleTitle } from './builtinCatalogPresentation'
 import {
@@ -2227,6 +2260,7 @@ import {
 import { subscribeToLocationChanges } from '../utils/browserLocation'
 
 type DirectoryIntegration = {
+  orgId?: string
   id: string
   name: string
   corpId: string
@@ -2238,6 +2272,10 @@ type DirectoryIntegration = {
   lastSuccessAt: string | null
   lastError: string | null
   config: {
+    corpName?: string | null
+    appName?: string | null
+    identityStatus?: 'unverified' | 'verified' | 'mismatch'
+    identityVerification?: { appCorpId: string; appCorpName: string; checkedAt: string } | null
     appKey: string
     appSecretConfigured: boolean
     workNotificationAgentIdConfigured?: boolean
@@ -2553,6 +2591,8 @@ type TestResult = {
 }
 
 type DirectoryDraft = {
+  appName: string
+  corpName: string
   name: string
   corpId: string
   appKey: string
@@ -2577,6 +2617,8 @@ type DirectoryDraft = {
 }
 
 const integrations = ref<DirectoryIntegration[]>([])
+const integrationsLoaded = ref(false)
+const integrationsLoadError = ref(false)
 const runs = ref<DirectoryRun[]>([])
 const accounts = ref<DirectoryAccount[]>([])
 const departments = ref<DirectoryDepartment[]>([])
@@ -2713,6 +2755,11 @@ const alertFilterOptions = [
   { value: 'pending' as const, label: '待确认' },
   { value: 'acknowledged' as const, label: '已确认' },
 ]
+// The fixed review note the server writes when an admin unbinds a directory account
+// (unbindDirectoryAccount in packages/core-backend/src/directory/directory-sync.ts). A manual bind
+// resets it to NULL; directory sync leaves it unchanged. Copied here because the packages do not
+// share code; a backend unit test pins the written value.
+const DIRECTORY_ADMIN_UNBIND_REVIEW_NOTE = 'unbound by admin'
 const reviewFilterOptions = [
   { value: 'all' as const, label: '全部待处理' },
   { value: 'pending_binding' as const, label: '待绑定' },
@@ -2746,6 +2793,8 @@ const directoryNavigation = ref(readInitialDirectoryNavigation())
 const draft = reactive<DirectoryDraft>({
   name: '',
   corpId: '',
+  corpName: '',
+  appName: '',
   appKey: '',
   appSecret: '',
   workNotificationAgentId: '',
@@ -3034,14 +3083,25 @@ const filteredReviewItems = computed(() => {
     && matchesPendingBindingView(item)
   ))
 })
+// Bulk selection (选择当前筛选, 选择可推荐 and the default pre-selection) skips pending rows the
+// server would reject (directory account inactive) and rows an admin unbound that are not linked
+// again, so one click cannot re-bind what was just unbound. The per-row checkbox is unaffected.
+function isBulkSelectablePendingBinding(item: DirectoryReviewItem): boolean {
+  if (item.kind !== 'pending_binding') return false
+  if (!item.account.isActive) return false
+  return !(
+    item.account.reviewNote === DIRECTORY_ADMIN_UNBIND_REVIEW_NOTE
+    && item.account.linkStatus !== 'linked'
+  )
+}
 const selectableVisibleReviewIds = computed(() => (
   filteredReviewItems.value
-    .filter((item) => item.kind === 'pending_binding' || item.actionable.canBatchUnbind)
+    .filter((item) => isBulkSelectablePendingBinding(item) || item.actionable.canBatchUnbind)
     .map((item) => item.account.id)
 ))
 const selectableVisibleRecommendedReviewIds = computed(() => (
   filteredReviewItems.value
-    .filter((item) => item.kind === 'pending_binding' && item.actionable.canConfirmRecommendation)
+    .filter((item) => isBulkSelectablePendingBinding(item) && item.actionable.canConfirmRecommendation)
     .map((item) => item.account.id)
 ))
 const selectedRecommendedReviewBindEntries = computed(() => (
@@ -3190,6 +3250,8 @@ function resetDraft() {
   batchAdmissionOnboardingPackets.value = []
   draft.name = ''
   draft.corpId = ''
+  draft.corpName = ''
+  draft.appName = ''
   draft.appKey = ''
   draft.appSecret = ''
   draft.workNotificationAgentId = ''
@@ -3215,6 +3277,8 @@ function resetDraft() {
 function applyIntegrationToDraft(integration: DirectoryIntegration) {
   draft.name = integration.name
   draft.corpId = integration.corpId
+  draft.corpName = integration.config.corpName ?? ''
+  draft.appName = integration.config.appName ?? ''
   draft.appKey = integration.config.appKey
   draft.appSecret = ''
   draft.workNotificationAgentId = ''
@@ -4151,13 +4215,18 @@ async function readJson(response: Response): Promise<any> {
 }
 
 async function loadIntegrations() {
+  if (integrationsLoadError.value) setStatus('')
   loading.value = true
+  integrationsLoadError.value = false
+  integrationsLoaded.value = false
   try {
     const response = await apiFetch('/api/admin/directory/integrations')
     const payload = await readJson(response)
     if (!response.ok) throw new Error(readApiError(payload, '加载目录集成失败'))
 
-    integrations.value = Array.isArray(payload?.data?.items) ? payload.data.items : []
+    if (!Array.isArray(payload?.data?.items)) throw new Error('目录集成响应格式错误')
+    integrations.value = payload.data.items
+    integrationsLoaded.value = true
     const navigation = directoryNavigation.value
     const navigationKey = buildDirectoryNavigationKey(navigation)
     const hasPendingCrossIntegrationNavigation = (
@@ -4211,6 +4280,7 @@ async function loadIntegrations() {
       if (current) applyIntegrationToDraft(current)
     }
   } catch (error) {
+    integrationsLoadError.value = !integrationsLoaded.value
     setStatus(error instanceof Error ? error.message : '加载目录集成失败', 'error')
   } finally {
     loading.value = false
@@ -4602,10 +4672,16 @@ function readDirectoryOnboardingPackets(rawPackets: unknown[]): AutoAdmissionOnb
 }
 
 function buildPayload() {
+  const corpName = draft.corpName.trim()
+  const currentCorpName = selectedIntegration.value?.config.corpName ?? ''
+  const appName = draft.appName.trim()
+  const currentAppName = selectedIntegration.value?.config.appName ?? ''
   return {
     integrationId: selectedIntegration.value?.id,
     name: draft.name.trim(),
     corpId: draft.corpId.trim(),
+    ...(corpName !== currentCorpName ? { corpName } : {}),
+    ...(appName !== currentAppName ? { appName } : {}),
     appKey: draft.appKey.trim(),
     appSecret: draft.appSecret.trim(),
     rootDepartmentId: draft.rootDepartmentId.trim() || '1',
@@ -5693,9 +5769,9 @@ interface ReviewBindingsOutcome {
   failed: unknown[]
 }
 
-// Shared by the batch-bind and batch-admit-users partial-failure toasts: both server
-// routes return `failed: [{ accountId, error }]` for per-item failures (DT-HARDEN-04).
-// Both call sites use the same limit so the two toasts stay visually consistent.
+// Shared by the batch-bind, batch-admit-users and batch-unbind partial-failure toasts: all
+// three server routes return `failed: [{ accountId, error }]` for per-item failures
+// (DT-HARDEN-04). All call sites use the same limit so the toasts stay visually consistent.
 const FAILED_BINDINGS_PREVIEW_LIMIT = 3
 
 function readFailedBindingsPreview(failed: unknown[], limit: number): string {
@@ -5735,7 +5811,12 @@ async function postReviewBindings(bindings: Array<{
   }
 }
 
-async function refreshAfterReviewBindings(): Promise<void> {
+// Writes the outcome status, then reloads the integration, queue and member list. The status is
+// set before the reload so a failed reload's own error status is not overwritten; a stale
+// integrations-load flag clears the status when the reload starts, so the outcome is written back
+// when the reload left the status empty.
+async function refreshAfterReviewBindings(message: string, tone: 'info' | 'error' = 'info'): Promise<void> {
+  setStatus(message, tone)
   if (!selectedIntegration.value) return
   for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
   await Promise.all([
@@ -5743,6 +5824,36 @@ async function refreshAfterReviewBindings(): Promise<void> {
     loadReviewItems(selectedIntegration.value.id),
     loadAccounts(selectedIntegration.value.id),
   ])
+  if (!status.value) setStatus(message, tone)
+}
+
+// After a partial batch failure, re-select the failed rows that are still in the reloaded queue and
+// still eligible for the same action, so they can be retried. Committed rows are never re-selected,
+// and the retry selection replaces whatever the reload pre-selected. The reload may switch to a view
+// that hides these rows; `reveal` is only called when some of them are hidden.
+function reselectFailedReviewRows(
+  batchIds: string[],
+  failedItems: unknown[],
+  isEligible: (item: DirectoryReviewItem) => boolean,
+  countSelectedVisible: () => number,
+  reveal: () => void,
+): void {
+  const failedIds = new Set(failedItems.map((entry) => (
+    entry && typeof entry === 'object' ? (entry as Record<string, unknown>).accountId : undefined
+  )))
+  const retryableIds = new Set(reviewItems.value.filter(isEligible).map((item) => item.account.id))
+  const retryIds = batchIds.filter((accountId) => failedIds.has(accountId) && retryableIds.has(accountId))
+  if (retryIds.length === 0) return
+  clearReviewSelection()
+  for (const accountId of retryIds) selectedReviewIds[accountId] = true
+  if (countSelectedVisible() < retryIds.length) reveal()
+}
+
+function showPendingBindingView(view: PendingBindingView): void {
+  if (reviewFilter.value !== 'all' && reviewFilter.value !== 'pending_binding') reviewFilter.value = 'pending_binding'
+  updatePendingBindingView(view)
+  // A manual-reason sub-filter could still hide the revealed rows, so show every manual reason.
+  if (view === 'manual') pendingBindingManualReason.value = 'all'
 }
 
 async function submitReviewBindings(bindings: Array<{
@@ -5774,12 +5885,34 @@ async function submitReviewBindings(bindings: Array<{
         message: `已提交 ${appliedCount} / ${bindings.length}，正在刷新目录成员与待处理队列...`,
       })
     }
-    await refreshAfterReviewBindings()
     const failedPreview = readFailedBindingsPreview(outcome.failed, FAILED_BINDINGS_PREVIEW_LIMIT)
     const message = outcome.failedCount > 0
       ? `已绑定 ${appliedCount} 个目录成员，另有 ${outcome.failedCount} 个失败${failedPreview ? `：${failedPreview}` : '，请重试'}`
       : successMessage
-    setStatus(message, outcome.failedCount > 0 ? 'error' : 'info')
+    await refreshAfterReviewBindings(message, outcome.failedCount > 0 ? 'error' : 'info')
+    const batchIds = bindings.map((binding) => binding.accountId)
+    if (progressKind === 'bind') {
+      reselectFailedReviewRows(
+        batchIds,
+        outcome.failed,
+        (item) => item.kind === 'pending_binding' && item.account.isActive && readBindingDraft(item.account).trim().length > 0,
+        () => selectedReviewBindEntries.value.length,
+        () => showPendingBindingView('all'),
+      )
+    } else if (progressKind === 'recommend') {
+      reselectFailedReviewRows(
+        batchIds,
+        outcome.failed,
+        (item) => (
+          item.kind === 'pending_binding'
+          && item.account.isActive
+          && item.actionable.canConfirmRecommendation
+          && item.recommendations.length > 0
+        ),
+        () => selectedRecommendedReviewBindEntries.value.length,
+        () => showPendingBindingView('recommended'),
+      )
+    }
     if (progressKind) {
       setReviewBatchProgress({
         kind: progressKind,
@@ -5923,7 +6056,7 @@ async function createAndBindDirectoryAccountUser(account: DirectoryAccount, cont
     delete mobileConflictHints[account.id]
     delete manualAdmissionExpanded[account.id]
     delete manualAdmissionDrafts[account.id]
-    await refreshAfterReviewBindings()
+    await refreshAfterReviewBindings(`${memberLabel} ${account.name} 已创建本地用户并完成绑定`)
     manualAdmissionResult.value = {
       accountId: account.id,
       accountName: account.name,
@@ -5940,7 +6073,6 @@ async function createAndBindDirectoryAccountUser(account: DirectoryAccount, cont
       mobileBackfilled: nextDraft.mobile.length === 0 || (createdUser.mobile ?? '') === nextDraft.mobile,
       mobileBackfillError: '',
     }
-    setStatus(`${memberLabel} ${account.name} 已创建本地用户并完成绑定`)
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '创建本地用户并绑定失败', 'error')
   } finally {
@@ -5997,14 +6129,25 @@ async function batchAdmitReviewItems() {
       applied: appliedCount,
       message: `已创建并绑定 ${appliedCount} / ${batchIds.length}，正在刷新目录成员与待处理队列...`,
     })
-    await refreshAfterReviewBindings()
     const failedCount = Number(data?.failedCount ?? 0)
     const failedItems = Array.isArray(data?.failed) ? data.failed : []
     const failedPreview = readFailedBindingsPreview(failedItems, FAILED_BINDINGS_PREVIEW_LIMIT)
     const message = failedCount > 0
       ? `已创建并绑定 ${appliedCount} 个目录成员，另有 ${failedCount} 个失败${failedPreview ? `：${failedPreview}` : '，请重试'}`
       : `已创建并绑定 ${appliedCount} 个目录成员`
-    setStatus(message, failedCount > 0 ? 'error' : 'info')
+    await refreshAfterReviewBindings(message, failedCount > 0 ? 'error' : 'info')
+    reselectFailedReviewRows(
+      batchIds,
+      failedItems,
+      (item) => (
+        item.kind === 'pending_binding'
+        && item.account.isActive
+        && !item.account.localUser
+        && !item.actionable.canConfirmRecommendation
+      ),
+      () => selectedReviewAdmissionIds.value.length,
+      () => showPendingBindingView('manual'),
+    )
     setReviewBatchProgress({
       kind: 'admit',
       phase: 'completed',
@@ -6089,8 +6232,11 @@ async function batchUnbindReviewItems() {
     })
     const body = await readJson(response)
     if (!response.ok) throw new Error(readApiError(body, '批量停权处理失败'))
-    const processedItems = Array.isArray(body?.data?.items) ? body.data.items : []
-    appliedCount = processedItems.length > 0 ? processedItems.length : batchIds.length
+    const data = body?.data as Record<string, unknown> | undefined
+    const processedItems = Array.isArray(data?.items) ? data.items : []
+    appliedCount = Number(data?.updatedCount ?? processedItems.length)
+    const failedCount = Number(data?.failedCount ?? 0)
+    const failedItems = Array.isArray(data?.failed) ? data.failed : []
     setReviewBatchProgress({
       kind: 'unbind',
       phase: 'refreshing',
@@ -6098,19 +6244,25 @@ async function batchUnbindReviewItems() {
       applied: appliedCount,
       message: `已提交 ${appliedCount} / ${batchIds.length}，正在刷新目录成员与待处理队列...`,
     })
-    for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
-    setStatus(`已完成 ${batchIds.length} 个目录成员的批量停权处理`)
-    await Promise.all([
-      loadIntegrations(),
-      loadReviewItems(selectedIntegration.value.id),
-      loadAccounts(selectedIntegration.value.id),
-    ])
+    const failedPreview = readFailedBindingsPreview(failedItems, FAILED_BINDINGS_PREVIEW_LIMIT)
+    const message = failedCount > 0
+      ? `已停权处理 ${appliedCount} 个目录成员，另有 ${failedCount} 个失败${failedPreview ? `：${failedPreview}` : '，请重试'}`
+      : `已完成 ${batchIds.length} 个目录成员的批量停权处理`
+    await refreshAfterReviewBindings(message, failedCount > 0 ? 'error' : 'info')
+    // Deprovision acts on inactive linked accounts, so eligibility is canBatchUnbind alone.
+    reselectFailedReviewRows(
+      batchIds,
+      failedItems,
+      (item) => item.actionable.canBatchUnbind,
+      () => selectedReviewBatchIds.value.length,
+      () => { reviewFilter.value = 'inactive_linked' },
+    )
     setReviewBatchProgress({
       kind: 'unbind',
       phase: 'completed',
       total: batchIds.length,
       applied: appliedCount,
-      message: `已完成 ${batchIds.length} 个目录成员的批量停权处理`,
+      message,
     })
   } catch (error) {
     setReviewBatchProgress({

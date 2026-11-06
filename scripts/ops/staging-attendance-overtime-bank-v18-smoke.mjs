@@ -278,8 +278,7 @@ async function resolveTokens() {
     })
     console.log('  minted admin dev-token')
   } else {
-    const subject = jwtSubject(adminToken)
-    if (subject != null) console.log(`  using supplied admin token (subject ${subject})`)
+    console.log('  using supplied admin token')
   }
   for (const key of BUSINESS_USER_KEYS) {
     const supplied = process.env[USER_TOKEN_ENVS[key]] || ''

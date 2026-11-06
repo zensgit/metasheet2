@@ -186,7 +186,8 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     }
     doubles.push(value); return value
   }
-  async function session(scope = context()): Promise<Session> {
+  // Gate 4: `budget` overrides only the send-budget verdict (null = the real primitive verdict).
+  async function session(scope = context(), budget?: { within: boolean | null; calls: number }): Promise<Session> {
     const client = await pool.connect()
     await client.query(`SET search_path TO ${ident(schema)}`)
     await client.query("SET statement_timeout='10s'")
@@ -222,8 +223,14 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     const pluginDatabase: Database = { query: async (sql, params) => (await query(sql, params)).rows,
       transaction: callback => database.transaction(trx => callback({ query: async (sql, params) => (await trx.query(sql, params)).rows })) }
     const db = createDb({ database: pluginDatabase }), config = { db, security, context: scope }
+    const real = createPrimitives({ security, context: scope }) as Record<string, unknown> & { sendBudget(selection: unknown, grant: unknown): unknown }
+    const primitives = budget ? { ...real, sendBudget(selection: unknown, grant: unknown) {
+      budget.calls++
+      const verdict = real.sendBudget(selection, grant)
+      return budget.within === null ? verdict : Object.freeze({ withinBudget: budget.within })
+    } } : real
     const authority = createAuthority({ database, security, context: { actorId: scope.ownerId, tenantId: scope.tenantId, workspaceId: null },
-      primitives: createPrimitives({ security, context: scope }) })
+      primitives })
     const value: Session = { client, pid, db, authority, statements, draft: createDraft(config), target: createTarget(config),
       material: createMaterial(config), ledger: createLedger({ db }),
       port(fake, enablement = () => 'true', timeoutMs = 10000) {
@@ -516,11 +523,13 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
       expect((await tableRows(ADMISSION)).length).toBe(1)
     } finally { gate.release() }
     if (phase === 'form') {
+      // Gate 6: the fake form fetch ignored the abort and answered 201. That receipt is acknowledged,
+      // not discarded; the attempt is still consumed exactly once.
       expect(await pending).toEqual({ ok: true })
-      expect([result?.status, result?.externalWriteAttempted]).toEqual(['outcome_unknown', true])
+      expect([result?.status, result?.externalWriteAttempted]).toEqual(['acknowledged', true])
     } else expect(await pending).toEqual({ ok: false, code: 'YIDA_OWNER_SEND_UNAVAILABLE' })
     expect([fake.token, fake.form]).toEqual([1, phase === 'form' ? 1 : 0])
-    expect((await tableRows(LEDGER))[0].status).toBe(phase === 'form' ? 'outcome_unknown' : 'prepared')
+    expect((await tableRows(LEDGER))[0].status).toBe(phase === 'form' ? 'acknowledged' : 'prepared')
     const third = await session(), lateHttp = http(), late = await third.port(lateHttp).submit(f.request)
     expect(late.reused && late.approval.remainingAttempts === 0).toBe(true)
     expect([lateHttp.token, lateHttp.form]).toEqual([0, 0])
@@ -718,5 +727,37 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     await rejected(first.port(fake).submit(f.request))
     expect([fake.token, fake.form]).toEqual([0, 0]); expect(await evidence()).toEqual(before)
     expect(before.counts).toEqual([1, 0, 0, 1, 1, 1])
+  })
+
+  it('gate 4: a submit whose admission the send budget refuses stays 503-masked, performs zero fetch and consumes nothing', async () => {
+    const budget = { within: null as boolean | null, calls: 0 }
+    const active = await session(context(), budget)
+    const value = input(), draft = await active.draft.createDraft(value), secret = await active.material.create({ material: material() })
+    await active.target.register({ operationId: draft.operationId, credentialRef: secret.credentialRef,
+      credentialGeneration: secret.credentialGeneration, attestation: { kind: 'owner-reviewed-target', reviewRef: 'synthetic-review',
+        organizationId: 'synthetic-organization', executionIdentity: 'synthetic-executor' } })
+    const grant = await active.authority.approvals.approve({ operationId: draft.operationId, rowKey: draft.rows[0].rowKey,
+      confirmationId: 'synthetic-confirmation' })
+    const request = { grantId: grant.grantId, submissionId: 'synthetic-submission' }
+    expect(budget.calls).toBe(1)
+    const before = await evidence()
+    expect(before.counts).toEqual([1, 0, 0, 1, 0, 0])
+    budget.within = false
+    const fake = http(), port = active.port(fake)
+    active.statements.length = 0
+    // c1: the port keeps its existing mask; the fixed approval code stays behind the 503 boundary.
+    await rejected(port.submit(request), 'YIDA_OWNER_SEND_UNAVAILABLE')
+    expect(budget.calls).toBe(2)
+    expect([fake.token, fake.form]).toEqual([0, 0])
+    expect(active.statements.some(sql => sql.includes(LEDGER) || /^INSERT /i.test(sql.trim()))).toBe(false)
+    expect(await evidence()).toEqual(before)
+    const view = await port.inspect({ grantId: grant.grantId })
+    expect([view.delivery, view.approval.status, view.approval.remainingAttempts]).toEqual([null, 'approved', 1])
+    // h1: not revoked or consumed. Lifting the refusal lets the very same grant send once.
+    budget.within = null
+    const sent = await port.submit(request)
+    expect([sent.status, sent.reused, sent.externalWriteAttempted, sent.approval.grantId]).toEqual(['acknowledged', false, true, grant.grantId])
+    expect([fake.token, fake.form, fake.requestValid]).toEqual([1, 1, true])
+    expect((await evidence()).counts).toEqual([1, 0, 1, 2, 1, 3])
   })
 })

@@ -7,7 +7,8 @@ import {
   type DingTalkWorkNotificationResult,
   type DingTalkWorkNotificationRuntimeStatus,
 } from './client'
-import { DingTalkConfigValidationError } from './config-validation-error'
+import { DingTalkConfigValidationError, DingTalkMessageConfigError } from './config-validation-error'
+import { isDingTalkIntegrationScopedCredentialsEnabled } from './integration-scoped-credentials-flag'
 
 const DEFAULT_PROVIDER = 'dingtalk'
 const AGENT_ID_CONFIG_KEY = 'workNotificationAgentId'
@@ -56,6 +57,15 @@ export type DingTalkWorkNotificationAgentIdTestResult = {
   accessTokenVerified: boolean
   notificationSent: boolean
   notificationResult?: Pick<DingTalkWorkNotificationResult, 'taskId' | 'requestId'>
+  /**
+   * How the credentials of this test were put together: the PRE-SWITCH per-field rule (each of appKey /
+   * appSecret / baseUrl env-then-stored, the Agent ID from the request or the row), which is not the rule the
+   * integration-scoped send path applies. A passing test is therefore no evidence about that path — see
+   * `integrationScopedEvidence` and work-notification-verify.ts.
+   */
+  credentialResolution: 'pre_switch_env_first'
+  /** Always false here: this result never proves what the integration-scoped resolution would send with. */
+  integrationScopedEvidence: false
 }
 
 export type DingTalkWorkNotificationAgentIdSaveResult =
@@ -180,7 +190,216 @@ function buildSelectedKeyStatus(
   return { configured: false, selectedKey: null }
 }
 
-export async function readDingTalkMessageConfigFromRuntime(integrationId?: string): Promise<DingTalkMessageConfig> {
+/** The env side of the work-notification credential tuple, each value already trimmed ('' = unset). */
+export type DingTalkMessageEnvSnapshot = {
+  appKey: string
+  appSecret: string
+  agentId: string
+  baseUrl?: string
+}
+
+/** The integration-row side of the tuple, as loadStoredWorkNotificationConfig returns it ('' = not stored). */
+export type DingTalkMessageTupleRow = Pick<
+  StoredWorkNotificationConfig,
+  'integrationId' | 'integrationStatus' | 'appKey' | 'appSecret' | 'agentId' | 'baseUrl'
+>
+
+export type DingTalkMessageTupleSource = 'env_override' | 'integration'
+
+export type DingTalkMessageTupleResolution = {
+  config: DingTalkMessageConfig
+  source: DingTalkMessageTupleSource
+}
+
+/** Which env inputs were present (non-blank) when a tuple was resolved — presence only, never a value. */
+export type DingTalkMessageEnvPresence = {
+  appKey: boolean
+  appSecret: boolean
+  agentId: boolean
+  baseUrl: boolean
+}
+
+/** The integration-scoped resolution plus the row's identity, for callers that report on it. */
+export type DingTalkIntegrationScopedMessageTuple = DingTalkMessageTupleResolution & {
+  integration: {
+    id: string
+    name: string
+    status: string
+    updatedAt: string
+  }
+  environment: DingTalkMessageEnvPresence
+}
+
+function readDingTalkMessageEnvSnapshot(): DingTalkMessageEnvSnapshot {
+  return {
+    appKey: readStringEnv('DINGTALK_APP_KEY', 'DINGTALK_CLIENT_ID'),
+    appSecret: readStringEnv('DINGTALK_APP_SECRET', 'DINGTALK_CLIENT_SECRET'),
+    agentId: readStringEnv('DINGTALK_AGENT_ID', 'DINGTALK_NOTIFY_AGENT_ID'),
+    baseUrl: readStringEnv('DINGTALK_BASE_URL') || undefined,
+  }
+}
+
+function missingTupleFields(config: { appKey: string; appSecret: string; agentId: string }): string[] {
+  const missing: string[] = []
+  if (!config.appKey) missing.push('appKey')
+  if (!config.appSecret) missing.push('appSecret')
+  if (!config.agentId) missing.push('agentId')
+  return missing
+}
+
+const ENV_AGENT_ID_VARIABLES = 'DINGTALK_AGENT_ID or DINGTALK_NOTIFY_AGENT_ID'
+
+/**
+ * Switch ON only: the environment Agent ID, when it is the value that would be sent, must have the shape
+ * the admin save path already enforces (normalizeDingTalkWorkNotificationAgentId: 1-32 digits). A
+ * forgotten placeholder becomes a local typed failure instead of being sent to DingTalk as it is.
+ * Returns the value unchanged when valid ('' stays '').
+ */
+function checkEnvAgentIdShape(envAgentId: string): string {
+  if (!envAgentId) return ''
+  try {
+    return normalizeDingTalkWorkNotificationAgentId(envAgentId)
+  } catch {
+    throw new DingTalkMessageConfigError(
+      'env_agent_id_invalid',
+      `DingTalk Agent ID from the environment (${ENV_AGENT_ID_VARIABLES}) must be 1-32 numeric characters; it was not sent`,
+    )
+  }
+}
+
+/**
+ * Integration-scoped resolution of the work-notification credential tuple (appKey, appSecret, agentId,
+ * baseUrl) for ONE named integration. Pure: takes an env snapshot and the integration row, reads no
+ * process.env and runs no query, so the decision table can be tested directly. On the send path it is
+ * reached only while DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED is 'true' and the caller named an
+ * integration; the admin verification route reaches it (through readDingTalkIntegrationScopedMessageTuple)
+ * whatever the switch says.
+ *
+ *  - Missing row: typed failure (integration_not_found); nothing is sent on env credentials for an
+ *    integration that does not exist.
+ *  - Row not active: typed failure (integration_inactive), whichever source would have been used.
+ *  - Same app (env appKey non-empty and equal to the row's appKey; the env side uses the message-side
+ *    alias order, DINGTALK_APP_KEY before DINGTALK_CLIENT_ID): env overrides field by field, exactly the
+ *    pre-switch per-field behaviour; an env Agent ID that is used must be 1-32 digits
+ *    (env_agent_id_invalid); an incomplete result is a typed failure.
+ *  - Otherwise: the row's own appKey / appSecret / workNotificationAgentId are used as a whole and must be
+ *    complete (integration_tuple_incomplete otherwise). No field is borrowed from env.
+ *  - baseUrl follows the chosen source: env-then-stored for the same-app case, stored-then-env for the
+ *    integration case.
+ * The failure text names the integration id, field names and sources only — never a value.
+ */
+export function resolveDingTalkMessageTuple(
+  env: DingTalkMessageEnvSnapshot,
+  row: DingTalkMessageTupleRow | null,
+  integrationId: string,
+): DingTalkMessageTupleResolution {
+  if (!row) {
+    throw new DingTalkMessageConfigError(
+      'integration_not_found',
+      `DingTalk directory integration ${integrationId} was not found; work-notification credentials were not resolved from the environment for it`,
+    )
+  }
+
+  if (row.integrationStatus !== 'active') {
+    throw new DingTalkMessageConfigError(
+      'integration_inactive',
+      `DingTalk directory integration ${row.integrationId} is not active; work-notification credentials were not resolved for it`,
+    )
+  }
+
+  if (env.appKey && env.appKey === row.appKey) {
+    const config: DingTalkMessageConfig = {
+      appKey: env.appKey,
+      appSecret: env.appSecret || row.appSecret,
+      agentId: checkEnvAgentIdShape(env.agentId) || row.agentId,
+      baseUrl: env.baseUrl || row.baseUrl || undefined,
+    }
+    const missing = missingTupleFields(config)
+    if (missing.length > 0) {
+      throw new DingTalkMessageConfigError(
+        'integration_tuple_incomplete',
+        `DingTalk directory integration ${row.integrationId} work-notification credentials are incomplete (missing: ${missing.join(', ')}) with the same-app environment override`,
+      )
+    }
+    return { config, source: 'env_override' }
+  }
+
+  const config: DingTalkMessageConfig = {
+    appKey: row.appKey,
+    appSecret: row.appSecret,
+    agentId: row.agentId,
+    baseUrl: row.baseUrl || env.baseUrl || undefined,
+  }
+  const missing = missingTupleFields(config)
+  if (missing.length > 0) {
+    throw new DingTalkMessageConfigError(
+      'integration_tuple_incomplete',
+      `DingTalk directory integration ${row.integrationId} work-notification credentials are incomplete (missing: ${missing.join(', ')}); environment credentials of another app are not borrowed`,
+    )
+  }
+  return { config, source: 'integration' }
+}
+
+/**
+ * The ONE integration-scoped reader: the env snapshot, the named row, and resolveDingTalkMessageTuple over
+ * them. It is the only branch the send path takes while the switch is ON and an integration is named
+ * (readDingTalkMessageConfigFromRuntime below), and the admin verification route
+ * (work-notification-verify.ts) calls this same export, so what it verifies is what that path would send
+ * with. It does not read the switch itself: the decision whether the send path takes this branch is the
+ * caller's, which is what lets an admin verify an integration before the switch is turned on.
+ * Throws the resolver's typed DingTalkMessageConfigError (row missing / inactive / incomplete, malformed
+ * env Agent ID); EncryptionMaterialError and driver errors from the row read pass through untouched.
+ * The id must be non-blank: for a blank id the row loader falls back to the store's preferred row (the
+ * pre-switch behaviour it shares), so both callers refuse a blank id before calling this — the send path
+ * only calls it for a non-empty normalised id, the verification throws a typed error first.
+ */
+export async function readDingTalkIntegrationScopedMessageTuple(
+  integrationId: string,
+): Promise<DingTalkIntegrationScopedMessageTuple> {
+  const env = readDingTalkMessageEnvSnapshot()
+  const stored = await loadStoredWorkNotificationConfig(integrationId)
+  // Throws integration_not_found on a missing row, so `stored` is non-null past this line.
+  const resolution = resolveDingTalkMessageTuple(env, stored, integrationId)
+  return {
+    ...resolution,
+    integration: {
+      id: stored.integrationId,
+      name: stored.integrationName,
+      status: stored.integrationStatus,
+      updatedAt: stored.integrationUpdatedAt,
+    },
+    environment: {
+      appKey: Boolean(env.appKey),
+      appSecret: Boolean(env.appSecret),
+      agentId: Boolean(env.agentId),
+      baseUrl: Boolean(env.baseUrl),
+    },
+  }
+}
+
+/**
+ * Injection seam for the switch-ON branch, so a test can pin that the branch calls the exported reader
+ * (the one the verification route shares) rather than a private copy of its three lines. Production
+ * callers pass nothing and get the default.
+ */
+export type DingTalkMessageConfigRuntimeDeps = {
+  readScoped: (integrationId: string) => Promise<DingTalkIntegrationScopedMessageTuple>
+}
+
+export async function readDingTalkMessageConfigFromRuntime(
+  integrationId?: string,
+  deps: DingTalkMessageConfigRuntimeDeps = { readScoped: readDingTalkIntegrationScopedMessageTuple },
+): Promise<DingTalkMessageConfig> {
+  // Switch ON and an integration named: anchor the tuple to that integration (always reads the row).
+  // Switch ON, no integration named: the pre-switch path below, after checking the shape of the env
+  // Agent ID (on that path a non-empty env Agent ID is always the one sent).
+  // Switch OFF: the pre-switch path below, unchanged.
+  if (isDingTalkIntegrationScopedCredentialsEnabled()) {
+    const scopedIntegrationId = normalizeText(integrationId)
+    if (scopedIntegrationId) return (await deps.readScoped(scopedIntegrationId)).config
+    checkEnvAgentIdShape(readStringEnv('DINGTALK_AGENT_ID', 'DINGTALK_NOTIFY_AGENT_ID'))
+  }
+
   const envAppKey = readStringEnv('DINGTALK_APP_KEY', 'DINGTALK_CLIENT_ID')
   const envAppSecret = readStringEnv('DINGTALK_APP_SECRET', 'DINGTALK_CLIENT_SECRET')
   const envAgentId = readStringEnv('DINGTALK_AGENT_ID', 'DINGTALK_NOTIFY_AGENT_ID')
@@ -295,6 +514,15 @@ function buildTestContent(input: DingTalkWorkNotificationAgentIdTestInput): stri
   return content || 'This message verifies the configured DingTalk Agent ID.'
 }
 
+/**
+ * PRE-SWITCH rule, kept as it is (the admin test / save path of the Agent ID form and its ops helper):
+ * a blank integrationId falls back to the preferred row, the request may override the stored Agent ID,
+ * and appKey / appSecret / baseUrl are each env-then-stored with no same-app check and no status check.
+ * None of that is the integration-scoped resolution (readDingTalkIntegrationScopedMessageTuple), so a
+ * passing test here is NOT evidence that the credentials the switch-ON send path would use are accepted —
+ * the result says so (`credentialResolution`, `integrationScopedEvidence: false`); the verification route
+ * in work-notification-verify.ts is the check for that.
+ */
 export async function testDingTalkWorkNotificationAgentId(
   input: DingTalkWorkNotificationAgentIdTestInput,
 ): Promise<DingTalkWorkNotificationAgentIdTestResult> {
@@ -345,6 +573,8 @@ export async function testDingTalkWorkNotificationAgentId(
     },
     accessTokenVerified: true,
     notificationSent: Boolean(notificationResult),
+    credentialResolution: 'pre_switch_env_first',
+    integrationScopedEvidence: false,
     ...(notificationResult
       ? {
           notificationResult: {
@@ -356,6 +586,11 @@ export async function testDingTalkWorkNotificationAgentId(
   }
 }
 
+/**
+ * Saves the Agent ID after the PRE-SWITCH test above (token only, no send): the same env-then-stored rule,
+ * so "verified" in its result means the env-first tuple obtained a token — not that the integration-scoped
+ * send path would (its result carries `integrationScopedEvidence: false` for that reason).
+ */
 export async function saveDingTalkWorkNotificationAgentId(
   input: DingTalkWorkNotificationAgentIdTestInput,
 ): Promise<DingTalkWorkNotificationAgentIdSaveResult> {

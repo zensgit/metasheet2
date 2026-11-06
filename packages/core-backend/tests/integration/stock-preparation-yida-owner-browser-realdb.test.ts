@@ -209,7 +209,7 @@ databaseSuite('SA05 owner browser — isolated real panel and actual HTTP/PG aut
     await page.getByTestId('sp-yida-allocation-project-field').selectOption('projectNo')
     await page.getByTestId('sp-yida-allocation-quantity-field').selectOption('quantity')
     await page.getByTestId('sp-yida-run').click()
-    await page.getByTestId('sp-yida-initialization-open').waitFor()
+    await page.locator('[data-testid="sp-yida-initialization-open"]:enabled').waitFor()
     expect(await page.getByTestId('sp-yida-summary').innerText()).toBe('共 3 行；计划创建 3；计划更新 0；无效 0；本地重复键 0。')
     expect(JSON.parse(await page.getByTestId('sp-yida-payload-2').innerText())).toEqual(host.compiledPayload(expected, 2))
     await ui.settled()
@@ -277,6 +277,54 @@ databaseSuite('SA05 owner browser — isolated real panel and actual HTTP/PG aut
     expect([host.tokenPayloads.length, host.formPayloads.length]).toEqual([1, 1]); expect(await host.proof()).toEqual(before)
     expect((await host.rows('integration_yida_delivery_ledger'))[0].status).toBe('outcome_unknown')
   }, 45000)
+
+  it('a reloaded page finds an admitted, still-held send by grant id and then the durable ACK, with one form and one token request', async () => {
+    // R-71 ⑦.1 PR-B: the server admitted the send and the synthetic form endpoint is holding its answer,
+    // so the browser has no response yet. The page is reloaded (all page state is gone) and the owner
+    // reads the durable record only through the read-only lookup by grant id.
+    host.setEnablement('true')
+    const draft = await saveAndSelect(), preview = await readPreview(draft), grant = await approve()
+    const page = ui!.page, grantId = grant.grantId as string, form = host.holdNextForm()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await page.getByTestId('sp-yida-owner-submit').click()
+      await Promise.race([form.reached, new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('YIDA_OWNER_BROWSER_FORM_HOLD_NOT_REACHED')), 10000)
+      })])
+      clearTimeout(timer)
+      expect([host.tokenPayloads.length, host.formPayloads.length, host.tokenCommitted]).toEqual([1, 1, true])
+      expect(await page.getByTestId('sp-yida-owner-frozen').innerText()).toContain(grantId)
+      await ui!.reload()
+      expect(await page.getByTestId('sp-yida-owner-grant').count()).toBe(0)
+      expect(await page.getByTestId('sp-yida-owner-lookup').count()).toBe(1)
+      await page.getByTestId('sp-yida-owner-lookup-id').fill(grantId.toUpperCase())
+      const held = ui!.waitApi('GET', '/approvals/' + grantId)
+      await page.getByTestId('sp-yida-owner-lookup-run').click()
+      const seen = await realBrowserData(await held, 200)
+      expect(seen).toMatchObject({ approval: { grantId, status: 'admitted', remainingAttempts: 0 } })
+      expect(['prepared', 'dispatching']).toContain((seen.delivery as Data).status)
+      await page.getByTestId('sp-yida-owner-lookup-unverified').waitFor()
+      expect(await page.getByTestId('sp-yida-owner-lookup-acknowledged').count()).toBe(0)
+    } finally { clearTimeout(timer); form.release() }
+    await host.settleSubmissions()
+    expect((await host.rows('integration_yida_delivery_ledger'))[0]).toMatchObject({ status: 'acknowledged', ack_status_code: 201 })
+    const after = ui!.waitApi('GET', '/approvals/' + grantId)
+    await page.getByTestId('sp-yida-owner-lookup-run').click()
+    expect(await realBrowserData(await after, 200)).toMatchObject({ approval: { grantId, remainingAttempts: 0 }, delivery: { status: 'acknowledged' } })
+    await page.getByTestId('sp-yida-owner-lookup-acknowledged').waitFor()
+    expect(await page.getByTestId('sp-yida-owner-lookup-acknowledged').innerText()).toBe('仅收到协议应答，尚未核验业务创建成功。')
+    expect(await page.getByTestId('sp-yida-owner-lookup-delivery').innerText()).toContain('acknowledged')
+    expect(await page.getByTestId('sp-yida-owner-submit').count()).toBe(0)
+    await ui!.settled()
+    expect(ui!.requests.map(request => [request.method, request.path])).toEqual([
+      ['POST', prefix + '/drafts'], ['POST', prefix + '/preview'], ['POST', prefix + '/approvals'], ['POST', prefix + '/submissions'],
+      ['GET', prefix + '/approvals/' + grantId], ['GET', prefix + '/approvals/' + grantId],
+    ])
+    expect(ui!.abortedApiRequests).toBe(1)
+    expect([host.tokenPayloads.length, host.formPayloads.length, host.validRequests]).toEqual([1, 1, true])
+    expect(host.formPayloads[0]).toEqual(preview.payload)
+    expect((await host.proof()).counts).toEqual([1, 0, 1, 2, 1, 3])
+  }, 60000)
 
   it.each(['configuration', 'session'])('%s invalidation closes an already-computed real preview response', async change => {
     host.setEnablement('true')

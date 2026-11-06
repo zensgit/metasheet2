@@ -115,7 +115,16 @@
             <label class="meta-api-mgr__label">{{ a('webhook.name') }}</label>
             <input v-model="webhookDraft.name" class="meta-api-mgr__input" type="text" :placeholder="a('webhook.namePlaceholder')" data-webhook-name="true" />
             <label class="meta-api-mgr__label">{{ a('webhook.url') }}</label>
-            <input v-model="webhookDraft.url" class="meta-api-mgr__input" type="url" :placeholder="a('webhook.urlPlaceholder')" data-webhook-url="true" />
+            <input v-model="webhookDraft.url" class="meta-api-mgr__input" type="url" :placeholder="a('webhook.urlPlaceholder')" aria-describedby="webhook-target-help" data-webhook-url="true" />
+            <!-- Since R81 the server refuses any non-public / non-https target. Fixed help line + a live warning that
+                 mirrors the server's URL-only check (webhookTargetHint.ts); the warning never blocks save on its own. -->
+            <p id="webhook-target-help" class="meta-api-mgr__help" data-webhook-url-help="true">{{ webhookTargetHelpText(isZh) }}</p>
+            <p
+              v-if="webhookUrlWarning"
+              class="meta-api-mgr__help meta-api-mgr__help--warning"
+              role="status"
+              data-webhook-url-warning="true"
+            >{{ webhookUrlWarning }}</p>
             <label class="meta-api-mgr__label">{{ a('webhook.events') }}</label>
             <div class="meta-api-mgr__checkboxes">
               <label v-for="evt in availableEvents" :key="evt" class="meta-api-mgr__checkbox-label">
@@ -456,6 +465,7 @@ import type { MultitableApiClient } from '../api/client'
 import { MtButton, MtIconButton } from '../ui'
 import { managerLabel, type MetaManagerLabelKey } from '../utils/meta-manager-labels'
 import { formatBusinessTimestamp } from '../utils/business-timezone'
+import { webhookTargetHelpText, webhookTargetHint, webhookTargetSaveErrorMessage } from '../utils/webhookTargetHint'
 import {
   apiDeliveryResultLabel,
   apiDingTalkDeliverySourceLabel,
@@ -601,6 +611,8 @@ const webhookRetryPolicyValid = computed(() => {
   const p = webhookRetryPolicy.value
   return p.maxRetries.ok && p.retryBaseDelayMs.ok && p.retryMaxDelayMs.ok
 })
+
+const webhookUrlWarning = computed(() => webhookTargetHint(webhookDraft.value.url, isZh.value))
 
 const canSaveWebhook = computed(() => {
   return (
@@ -824,6 +836,9 @@ function webhookActionError(err: unknown, fallback: MetaApiTokenLabelKey): strin
   const e = err as { status?: number; code?: string } | null
   if (e?.code === 'WEBHOOK_SHEET_REQUIRED') return a('webhook.notice.bindFirst')
   if (e?.status === 403) return a('webhook.notice.manageRequired')
+  // A refused target (http / malformed / WEBHOOK_TARGET_REJECTED:<class>) reads as plain copy, never the raw code.
+  const targetRefusal = webhookTargetSaveErrorMessage(err, isZh.value)
+  if (targetRefusal) return targetRefusal
   return err instanceof Error ? err.message : a(fallback)
 }
 
@@ -1403,6 +1418,10 @@ watch(canManageDingTalkGroups, (canManage) => {
 
 .meta-api-mgr__help--error {
   color: #b91c1c;
+}
+
+.meta-api-mgr__help--warning {
+  color: #92400e;
 }
 
 .meta-api-mgr__checkboxes {

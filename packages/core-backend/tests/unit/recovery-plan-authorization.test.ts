@@ -73,6 +73,51 @@ describe('shared recovery true-delta authorization', () => {
     expect(await createRecoveryPlanAuthorization('source', async () => authority(), async () => true)(query, ctx)).toBe(type === 'string')
   })
 
+  // R-66 ① (owner 2026-10-28「管理员也不能删 PLM 行」): an exact-anchor reset whose delete set holds a PLM row of a
+  // stock-preparation template sheet is refused as a whole (uniform forbidden), for an ADMIN authority too.
+  describe('R-66: PLM rows in a reset delete set', () => {
+    const KEY_PROPERTY = { stockPreparation: { ownership: 'plm_system', preserveOnRefresh: false, required: true, key: true } }
+    const plmQuery = (opts: { key: unknown; registered?: boolean; stanza?: boolean }) =>
+      vi.fn<Parameters<QueryFn>, ReturnType<QueryFn>>(async (sql) => ({ rows: sql.includes('FROM meta_fields')
+        ? [{ id: 'k', name: 'Key', type: 'string', property: opts.stanza === false ? {} : KEY_PROPERTY }]
+        : sql.includes('plugin_multitable_object_registry') ? (opts.registered === false ? [] : [{ '?column?': 1 }])
+          : sql.includes('SELECT id, created_by') ? [{ id: 'record', created_by: 'actor', data: { k: opts.key } }] : [] }))
+    const resetCtx = () => {
+      const ctx = context()
+      ctx.mode = 'reset'
+      ctx.deleteRecordIds = ['record']
+      return ctx
+    }
+    const evaluate = () => createRecoveryPlanAuthorization('source', async () => authority(), async () => true)
+
+    test('a keyed PLM row in deleteRecordIds ⇒ false (admin authority)', async () => {
+      expect(authority().access.isAdminRole).toBe(true)
+      expect(await evaluate()(plmQuery({ key: 'K-1' }), resetCtx())).toBe(false)
+    })
+
+    test('a keyless row on the same sheet ⇒ true', async () => {
+      expect(await evaluate()(plmQuery({ key: '' }), resetCtx())).toBe(true)
+    })
+
+    test('a keyed row on a tagged but NOT registered copy ⇒ true', async () => {
+      expect(await evaluate()(plmQuery({ key: 'K-1', registered: false }), resetCtx())).toBe(true)
+    })
+
+    test('an ordinary sheet ⇒ true and no registry statement', async () => {
+      const query = plmQuery({ key: 'K-1', stanza: false })
+      expect(await evaluate()(query, resetCtx())).toBe(true)
+      expect(query.mock.calls.some(([sql]) => sql.includes('plugin_multitable_object_registry'))).toBe(false)
+    })
+
+    test('a revert-only plan on the PLM sheet is untouched (no delete set ⇒ no registry statement)', async () => {
+      const query = plmQuery({ key: 'K-1' })
+      const ctx = context()
+      ctx.revertWrites = [{ recordId: 'record', liveVersion: 1, changedFieldIds: [], patch: {}, projectedData: {}, linkUpdates: [] }]
+      expect(await evaluate()(query, ctx)).toBe(true)
+      expect(query.mock.calls.some(([sql]) => sql.includes('plugin_multitable_object_registry'))).toBe(false)
+    })
+  })
+
   test('foreign authority denial precedes target record lookup', async () => {
     const query = vi.fn<Parameters<QueryFn>, ReturnType<QueryFn>>(async (sql) => ({ rows: sql.includes('FROM meta_fields')
       ? [{ id: 'link', name: 'Link', type: 'link', property: { foreignSheetId: 'foreign' } }]

@@ -532,7 +532,8 @@ test('L11 constants and vocabularies are pinned', () => {
   assert.deepEqual(PROJECT_WRITE_PURPOSES, ['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable'])
   // Batch-refresh step 4 PR-4: the continuation confirm / re-confirm and end bump INSIDE their transaction
   // (bumpGenerationWithin) — reasons only, never a purpose (a decision never holds the lease).
-  assert.deepEqual(PROJECT_WRITE_GENERATION_REASONS, ['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end'])
+  // Batch-refresh step 5 PR-8: the change-plan confirm bumps INSIDE its transaction the same way (a reason, never a purpose).
+  assert.deepEqual(PROJECT_WRITE_GENERATION_REASONS, ['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm'])
   assert.deepEqual(PROJECT_WRITE_ERROR_CODES, {
     WRITE_LOCKED: 'STOCK_PREP_PROJECT_WRITE_LOCKED',
     PLAN_SUPERSEDED: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED',
@@ -1052,6 +1053,11 @@ test('L20a free row: +1, a fresh token, an INTEGER fencingEpoch (O-17), the reas
   assert.equal(ended.generation, bumped.generation + 1)
   assert.equal(row().generation_reason, 'continuation_end')
   assert.equal((await lock.readState(scope)).generationReason, 'continuation_end', 'readState admits the new reasons')
+  // L20i (step 5 PR-8): `change_plan_confirm` is accepted by the in-transaction bump and admitted by readState.
+  const planned = await bumpWithin(env, 'change_plan_confirm')
+  assert.equal(planned.generation, ended.generation + 1)
+  assert.equal(row().generation_reason, 'change_plan_confirm')
+  assert.equal((await lock.readState(scope)).generationReason, 'change_plan_confirm')
   // The default bound is the pinned constant.
   const env2 = setup()
   await bumpWithin(env2)

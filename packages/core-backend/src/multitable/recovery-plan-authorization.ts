@@ -11,6 +11,12 @@ import {
   type QueryFn,
 } from './permission-service'
 import { createPersonMemberResolver, personRestrictGroupIds } from './person-field-restriction'
+import {
+  fieldsCarryExactStockPreparationStanza,
+  loadPlmRowSheetProfile,
+  normalizePlmRowData,
+  plmRowDeleteRefusalReason,
+} from './plm-row-delete-guard'
 import { acquireRecoveryAuthorityLease, type RecoverySheetAuthority } from './recovery-authorization-stability'
 
 export const createRecoveryAuthorizationStabilizer = () =>
@@ -68,12 +74,16 @@ export const createRecoveryPlanAuthorization = (
     // 2. Source-row authority: CURRENT created_by + record permission scopes, whole-refuse.
     const sourceIds = [...new Set([...ctx.revertWrites.map((rw) => rw.recordId), ...ctx.deleteRecordIds])]
     const createdByById = new Map<string, string | null>()
+    const dataById = new Map<string, Record<string, unknown>>()
     if (sourceIds.length > 0) {
       const rows = (await query(
-        'SELECT id, created_by FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+        'SELECT id, created_by, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
         [sheetId, sourceIds],
-      )).rows as Array<{ id: unknown; created_by: unknown }>
-      for (const r of rows) createdByById.set(String(r.id), typeof r.created_by === 'string' ? r.created_by : null)
+      )).rows as Array<{ id: unknown; created_by: unknown; data?: unknown }>
+      for (const r of rows) {
+        createdByById.set(String(r.id), typeof r.created_by === 'string' ? r.created_by : null)
+        dataById.set(String(r.id), normalizePlmRowData(r.data))
+      }
     }
     const recordScopeMap = sourceIds.length > 0
       ? await loadRecordPermissionScopeMap(query, sheetId, sourceIds, access.userId)
@@ -86,6 +96,16 @@ export const createRecoveryPlanAuthorization = (
       if (!capabilities.canDeleteRecord) return false
       if (!createdByById.has(recordId)) return false
       if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, createdByById.get(recordId) ?? null, 'delete', recordScopeMap, recordId)) return false
+    }
+    // R-66 ① (owner 2026-10-28, plm-row-delete-guard.ts): a reset whose delete set holds a PLM row of a
+    // stock-preparation template sheet is refused as a whole — the uniform `forbidden`, for every actor (no admin
+    // branch). Checked on the in-fence rows read above; the registry is asked only on an exact-stanza sheet with a
+    // non-empty delete set, so a revert-only plan and an ordinary sheet cost no statement.
+    if (ctx.deleteRecordIds.length > 0 && fieldsCarryExactStockPreparationStanza(fields)) {
+      const profile = await loadPlmRowSheetProfile(query, sheetId, fields)
+      for (const recordId of ctx.deleteRecordIds) {
+        if (plmRowDeleteRefusalReason(profile, dataById.get(recordId))) return false
+      }
     }
 
     // 3. Layer-3 field-write gate over the TRUE changed set.

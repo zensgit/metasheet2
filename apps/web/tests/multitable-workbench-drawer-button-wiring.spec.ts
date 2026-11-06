@@ -297,10 +297,12 @@ describe('MultitableWorkbench drawer run-button handler wiring (B1-e)', () => {
   })
 })
 
-// Wire-drift lock for the duplicate / clone record affordance (design 2026-06-16). Both the drawer Duplicate
-// button (`@duplicate`) and the grid right-click (`@duplicate-record`) must be threaded by the workbench into
-// the SAME onDuplicateRecord handler → grid.duplicateRecord. A component-level test (drawer/grid emit) stays
-// green even if the workbench forgets the listener, shipping a dead feature — so capture the real listeners.
+// Wire-drift lock for the duplicate / clone record affordance (design 2026-06-16; customer feedback 2026-10-27).
+// The drawer's 复制 (`@duplicate`) and the grid's reserved `@duplicate-record` listener (no gesture emits it since
+// the right-click duplicate was removed) are threaded by the workbench into the SAME onDuplicateRecord handler →
+// grid.duplicateRecord. A component-level test (drawer/grid emit) stays green even if the workbench forgets the
+// listener, shipping a dead feature — so capture the real listeners. Since 2026-10-27 the handler ASKS first
+// (window.confirm), the toast says a record was ADDED, and a /context `recordDuplicateBlocked` sheet refuses it.
 describe('MultitableWorkbench duplicate-record handler wiring (2026-06-16)', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -319,6 +321,8 @@ describe('MultitableWorkbench duplicate-record handler wiring (2026-06-16)', () 
     if (container) container.remove()
     app = null; container = null
     showErrorSpy.mockReset(); showSuccessSpy.mockReset()
+    useLocale().setLocale('en')
+    vi.restoreAllMocks()
     vi.unstubAllGlobals(); vi.clearAllMocks()
   })
 
@@ -329,7 +333,20 @@ describe('MultitableWorkbench duplicate-record handler wiring (2026-06-16)', () 
     await flushUi()
   }
 
-  it('threads the grid @duplicate-record emit into grid.duplicateRecord and shows the success toast', async () => {
+  async function selectAndDuplicateFromDrawer(recordId = 'rec_open'): Promise<void> {
+    // The workbench wires `@duplicate="onDuplicateRecord(selectedRecordId)"`. Drive a selection first so the
+    // handler has a source id to duplicate (mirrors a user opening a record then clicking 复制).
+    const onSelectRecord = capturedGridAttrs!.onSelectRecord as (id: string) => void
+    onSelectRecord(recordId)
+    await flushUi()
+    const onDuplicate = capturedDrawerAttrs!.onDuplicate as () => Promise<void>
+    expect(typeof onDuplicate).toBe('function')
+    await onDuplicate()
+    await flushUi()
+  }
+
+  it('threads the grid @duplicate-record listener into grid.duplicateRecord after a confirm, with the "added" toast', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     await mountWorkbench()
     expect(capturedGridAttrs).not.toBeNull()
     const onDuplicateRecord = capturedGridAttrs!.onDuplicateRecord as (recordId: string) => Promise<void>
@@ -338,30 +355,65 @@ describe('MultitableWorkbench duplicate-record handler wiring (2026-06-16)', () 
     await onDuplicateRecord('rec_source')
     await flushUi()
 
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(confirmSpy).toHaveBeenCalledWith(workbenchLabel('confirm.duplicateRecord', false))
     expect(gridMock.duplicateRecord).toHaveBeenCalledTimes(1)
     expect(gridMock.duplicateRecord).toHaveBeenCalledWith('rec_source')
     expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+    expect(showSuccessSpy.mock.calls[0][0]).toBe('Added 1 duplicated record')
     expect(showErrorSpy).not.toHaveBeenCalled()
   })
 
-  it('threads the drawer @duplicate emit into grid.duplicateRecord with the selected record id', async () => {
+  it('drawer 复制 + user CONFIRMS → grid.duplicateRecord with the selected record id; zh copy says a record was ADDED', async () => {
+    useLocale().setLocale('zh-CN')
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     await mountWorkbench()
     expect(capturedDrawerAttrs).not.toBeNull()
-    // The workbench wires `@duplicate="onDuplicateRecord(selectedRecordId)"`. Drive a selection first so the
-    // handler has a source id to duplicate (mirrors a user opening a record then clicking Duplicate).
-    const onSelectRecord = capturedGridAttrs!.onSelectRecord as (id: string) => void
-    onSelectRecord('rec_open')
-    await flushUi()
 
-    const onDuplicate = capturedDrawerAttrs!.onDuplicate as () => Promise<void>
-    expect(typeof onDuplicate).toBe('function')
-    await onDuplicate()
-    await flushUi()
+    await selectAndDuplicateFromDrawer('rec_open')
 
+    expect(confirmSpy).toHaveBeenCalledWith('将在本表新增一条与此行内容相同的记录（不是复制到剪贴板），确定吗？')
     expect(gridMock.duplicateRecord).toHaveBeenCalledWith('rec_open')
+    // Customer feedback 2026-10-27: 「记录已复制」 read as a clipboard copy — the toast must say a record was added.
+    expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+    expect(showSuccessSpy.mock.calls[0][0]).toBe('已新增 1 条复制的记录')
+  })
+
+  it('drawer 复制 + user CANCELS → no duplicate request, no toast', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    await mountWorkbench()
+
+    await selectAndDuplicateFromDrawer('rec_open')
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(gridMock.duplicateRecord).not.toHaveBeenCalled()
+    expect(showSuccessSpy).not.toHaveBeenCalled()
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('/context recordDuplicateBlocked → the drawer gets the reason, and a (stale) 复制 is refused before any confirm or request', async () => {
+    workbenchMock.capabilities.value = { ...workbenchMock.capabilities.value, recordDuplicateBlocked: true }
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    await mountWorkbench()
+    const reason = capturedDrawerAttrs!['duplicate-blocked-reason'] ?? capturedDrawerAttrs!.duplicateBlockedReason
+    expect(reason).toBe(workbenchLabel('notice.recordDuplicateBlocked', false))
+
+    await selectAndDuplicateFromDrawer('rec_open')
+
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(gridMock.duplicateRecord).not.toHaveBeenCalled()
+    expect(showSuccessSpy).not.toHaveBeenCalled()
+    expect(showErrorSpy).toHaveBeenCalledWith(workbenchLabel('notice.recordDuplicateBlocked', false))
+  })
+
+  it('marker absent → the drawer gets no blocked reason (ordinary sheets unchanged)', async () => {
+    await mountWorkbench()
+    const reason = capturedDrawerAttrs!['duplicate-blocked-reason'] ?? capturedDrawerAttrs!.duplicateBlockedReason
+    expect(reason ?? null).toBeNull()
   })
 
   it('surfaces grid.error on a failed duplicate (null id) instead of a success toast', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
     gridMock.duplicateRecord.mockResolvedValueOnce(null)
     gridMock.error.value = 'Failed to duplicate record'
     await mountWorkbench()

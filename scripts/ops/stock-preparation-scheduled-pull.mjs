@@ -484,7 +484,7 @@ function errorCodeOf(envelope) {
     : null
 }
 
-/** An error envelope's `details` object, or null. Read only by `holdCountOf` below. */
+/** An error envelope's `details` object, or null. Read only by `holdCountOf` and `applyStopFactsOf` below. */
 function errorDetailsOf(envelope) {
   const details = envelope && envelope.json && envelope.json.error ? envelope.json.error.details : null
   return details && typeof details === 'object' && !Array.isArray(details) ? details : null
@@ -498,6 +498,20 @@ function errorDetailsOf(envelope) {
 function holdCountOf(source) {
   const value = source && typeof source === 'object' ? source.holdCount : null
   return Number.isInteger(value) && value >= 0 ? value : null
+}
+
+/**
+ * Batch-refresh step 5 PR-8 review fix B1: what an apply REFUSAL says about rows already written — the server's
+ * TRI-STATE `details.partial` (only the literal booleans: `true` = a host write was attempted, rows may have landed;
+ * `false` = none was) and `details.written` (a non-negative integer: rows confirmed written before the stop). A version
+ * fence stop (409 STOCK_PREP_CHANGE_PLAN_STALE, register R-63 ①) can land after rows were written, so the error record
+ * must not read as "nothing happened". Values-free: a boolean and an integer, each copied only when well-formed.
+ */
+function applyStopFactsOf(details) {
+  const out = {}
+  if (details && (details.partial === true || details.partial === false)) out.partial = details.partial
+  if (details && Number.isInteger(details.written) && details.written >= 0) out.written = details.written
+  return out
 }
 
 /**
@@ -649,6 +663,8 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
       ...record,
       action: 'error',
       error: code || `apply failed with HTTP ${apply.httpStatus ?? 'unknown'}`,
+      // PR-8 review fix B1: `partial` / `written` of the refusal, when the server reported them (see applyStopFactsOf).
+      ...applyStopFactsOf(errorDetailsOf(apply)),
       failed: true,
       durationMs: Date.now() - startedAt,
     }

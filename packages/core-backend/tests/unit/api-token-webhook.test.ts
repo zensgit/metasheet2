@@ -22,10 +22,21 @@ vi.mock('../../src/multitable/webhook-delivery-authority', async (importOriginal
 
 import { ApiTokenService } from '../../src/multitable/api-token-service'
 import { WebhookService } from '../../src/multitable/webhook-service'
+import type { SsrfLookupFn } from '../../src/multitable/webhook-ssrf-guard'
 import type { ApiTokenScope } from '../../src/multitable/api-tokens'
 import type { WebhookEventType } from '../../src/multitable/webhooks'
 import type { Kysely } from 'kysely'
 import type { Database } from '../../src/db/types'
+
+/**
+ * F-3 SSRF gate (`webhook-service.ts` -> `checkWebhookTargetUrl`): delivery now resolves the target and
+ * refuses anything internal, and an UNRESOLVABLE name is refused fail-closed. The sink names below are
+ * reserved TLDs that never resolve, so the specs inject this deterministic resolver through the service's
+ * third constructor argument: a RESOLVER seam only (the guard still judges the address it returns), which
+ * keeps these specs off real DNS instead of weakening the gate. TEST-NET-3 (RFC 5737) is public as far as
+ * the guard is concerned and is not routable.
+ */
+const publicLookup: SsrfLookupFn = async () => [{ address: '203.0.113.10', family: 4 }]
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Mock DB builder
@@ -34,8 +45,10 @@ import type { Database } from '../../src/db/types'
 /** Result queues: push values to control what execute / executeTakeFirst return. */
 let executeQueue: unknown[]
 let executeTakeFirstQueue: unknown[]
+let selectArgCalls: unknown[][]
 
-function makeChain(): Record<string, unknown> {
+function makeChain(table?: string): Record<string, unknown> {
+  let sharedCreatorFence = false
   const self: Record<string, unknown> = {}
   const chainFn = (..._args: unknown[]) => self
   const methods = [
@@ -48,8 +61,13 @@ function makeChain(): Record<string, unknown> {
   for (const m of methods) {
     self[m] = vi.fn(chainFn)
   }
+  self.select = vi.fn((...args: unknown[]) => {
+    selectArgCalls.push(args)
+    return self
+  })
   self.execute = vi.fn(async () => executeQueue.shift() ?? [])
-  self.executeTakeFirst = vi.fn(async () => executeTakeFirstQueue.shift())
+  self.forShare = vi.fn(() => { sharedCreatorFence = true; return self })
+  self.executeTakeFirst = vi.fn(async () => sharedCreatorFence && table === 'users' ? { ...ACTIVE_CREATOR, access_generation: 0 } : executeTakeFirstQueue.shift())
   self.executeTakeFirstOrThrow = vi.fn(async () => {
     const v = executeTakeFirstQueue.shift()
     if (!v) throw new Error('no rows')
@@ -61,7 +79,7 @@ function makeChain(): Record<string, unknown> {
 function createMockDb(): Kysely<Database> {
   const rootChain: Record<string, unknown> = {}
   for (const m of ['selectFrom', 'insertInto', 'updateTable', 'deleteFrom']) {
-    rootChain[m] = vi.fn(() => makeChain())
+    rootChain[m] = vi.fn((table: string) => makeChain(table))
   }
 
   const dbProxy = new Proxy(rootChain, {
@@ -71,7 +89,7 @@ function createMockDb(): Kysely<Database> {
           execute: async (fn: (trx: unknown) => Promise<unknown>) => {
             const trxRoot: Record<string, unknown> = {}
             for (const m of ['selectFrom', 'insertInto', 'updateTable', 'deleteFrom']) {
-              trxRoot[m] = vi.fn(() => makeChain())
+              trxRoot[m] = vi.fn((table: string) => makeChain(table))
             }
             return fn(trxRoot)
           },
@@ -95,6 +113,15 @@ const ACTIVE_CREATOR = {
   role: 'user',
   activation_status: 'activated',
   local_password_set: true,
+}
+
+function renderSelectArg(value: unknown): string {
+  if (Array.isArray(value)) return value.map(renderSelectArg).join('\n')
+  if (value && typeof value === 'object' && 'toOperationNode' in value) {
+    const node = value as { toOperationNode?: () => unknown }
+    if (typeof node.toOperationNode === 'function') return JSON.stringify(node.toOperationNode())
+  }
+  return JSON.stringify(value)
 }
 
 function tokenRow(
@@ -121,6 +148,7 @@ describe('ApiTokenService', () => {
   beforeEach(() => {
     executeQueue = []
     executeTakeFirstQueue = []
+    selectArgCalls = []
     db = createMockDb()
     svc = new ApiTokenService(db)
   })
@@ -275,7 +303,45 @@ describe('ApiTokenService', () => {
     if (!result.valid) expect(result.reason).toMatch(/invalid/i)
   })
 
-  test('mutation: omitting creator gate would green the four negative creator cases', async () => {
+  test('validateToken creator query reads deleted_at and purged_at via to_jsonb(users)', async () => {
+    const created = await svc.createToken('user1', { name: 'JsonbCreator', scopes: ['records:read'] })
+    selectArgCalls = []
+    executeTakeFirstQueue.push(tokenRow(created), { ...ACTIVE_CREATOR, deleted_at: null, purged_at: null })
+    const result = await svc.validateToken(created.plainTextToken)
+    expect(result.valid).toBe(true)
+    const rendered = selectArgCalls.map((args) => args.map(renderSelectArg).join('\n')).join('\n')
+    expect(rendered).toContain('to_jsonb(users)')
+    expect(rendered).toContain("->> 'deleted_at'")
+    expect(rendered).toContain("->> 'purged_at'")
+  })
+
+  test('validateToken fails when creator is recycled despite is_active', async () => {
+    const created = await svc.createToken('user1', { name: 'RecycledCreator', scopes: ['records:read'] })
+    executeTakeFirstQueue.push(tokenRow(created), {
+      ...ACTIVE_CREATOR,
+      is_active: true,
+      deleted_at: '2026-10-01T00:00:00.000Z',
+      purged_at: null,
+    })
+    const result = await svc.validateToken(created.plainTextToken)
+    expect(result.valid).toBe(false)
+    if (!result.valid) expect(result.reason).toMatch(/recycle bin/i)
+  })
+
+  test('validateToken fails when creator is purged despite is_active', async () => {
+    const created = await svc.createToken('user1', { name: 'PurgedCreator', scopes: ['records:read'] })
+    executeTakeFirstQueue.push(tokenRow(created), {
+      ...ACTIVE_CREATOR,
+      is_active: true,
+      deleted_at: null,
+      purged_at: '2026-10-02T00:00:00.000Z',
+    })
+    const result = await svc.validateToken(created.plainTextToken)
+    expect(result.valid).toBe(false)
+    if (!result.valid) expect(result.reason).toMatch(/recycle bin/i)
+  })
+
+  test('mutation: omitting creator gate would green the negative creator cases', async () => {
     // Load-bearing: each negative creator state must fail with the current gate.
     // If the creator query/gate is deleted, these would incorrectly become valid.
     const cases = [
@@ -283,6 +349,8 @@ describe('ApiTokenService', () => {
       { label: 'pending', creator: { ...ACTIVE_CREATOR, activation_status: 'pending_activation' }, reason: /pending activation/i },
       { label: 'inactive', creator: { ...ACTIVE_CREATOR, is_active: false }, reason: /inactive|disabled/i },
       { label: 'invalid', creator: { ...ACTIVE_CREATOR, activation_status: 'corrupted' }, reason: /invalid/i },
+      { label: 'recycled', creator: { ...ACTIVE_CREATOR, is_active: true, deleted_at: '2026-10-01T00:00:00.000Z', purged_at: null }, reason: /recycle bin/i },
+      { label: 'purged', creator: { ...ACTIVE_CREATOR, is_active: true, deleted_at: null, purged_at: '2026-10-02T00:00:00.000Z' }, reason: /recycle bin/i },
     ] as const
     for (const c of cases) {
       const created = await svc.createToken('user1', { name: c.label, scopes: ['records:read'] })
@@ -569,7 +637,7 @@ describe('WebhookService', () => {
     executeQueue = []
     executeTakeFirstQueue = []
     db = createMockDb()
-    svc = new WebhookService(db, okFetch as unknown as typeof fetch)
+    svc = new WebhookService(db, okFetch as unknown as typeof fetch, publicLookup)
   })
 
   // ── CRUD ──────────────────────────────────────────────────────────
@@ -797,7 +865,7 @@ describe('WebhookService', () => {
     const failFetch = vi.fn().mockResolvedValue({
       ok: false, status: 500, text: async () => 'Internal Server Error',
     })
-    const failSvc = new WebhookService(db, failFetch as unknown as typeof fetch)
+    const failSvc = new WebhookService(db, failFetch as unknown as typeof fetch, publicLookup)
 
     const wh = await failSvc.createWebhook('u1', {
       sheetId: 'sheet1', name: 'Fail', url: 'https://example.com/hook', events: ['record.created'],
@@ -830,7 +898,7 @@ describe('WebhookService', () => {
     const failFetch = vi.fn().mockResolvedValue({
       ok: false, status: 500, text: async () => 'error',
     })
-    const failSvc = new WebhookService(db, failFetch as unknown as typeof fetch)
+    const failSvc = new WebhookService(db, failFetch as unknown as typeof fetch, publicLookup)
 
     const wh = await failSvc.createWebhook('u1', {
       sheetId: 'sheet1', name: 'Will disable', url: 'https://example.com/hook', events: ['record.created'],
@@ -870,7 +938,7 @@ describe('WebhookService', () => {
       }
       return { ok: true, status: 200, text: async () => 'ok' }
     })
-    const mixSvc = new WebhookService(db, mixFetch as unknown as typeof fetch)
+    const mixSvc = new WebhookService(db, mixFetch as unknown as typeof fetch, publicLookup)
 
     const wh = await mixSvc.createWebhook('u1', {
       sheetId: 'sheet1', name: 'Mix', url: 'https://example.com/hook', events: ['record.created'],
@@ -942,7 +1010,7 @@ describe('WebhookService', () => {
       .mockResolvedValueOnce({ ok: false, status: 502, text: async () => 'bad' })
       .mockResolvedValue({ ok: true, status: 200, text: async () => 'ok' })
 
-    const retrySvc = new WebhookService(db, failOnceFetch as unknown as typeof fetch)
+    const retrySvc = new WebhookService(db, failOnceFetch as unknown as typeof fetch, publicLookup)
     const wh = await retrySvc.createWebhook('u1', {
       sheetId: 'sheet1', name: 'Retry', url: 'https://example.com/hook', events: ['record.created'],
     })

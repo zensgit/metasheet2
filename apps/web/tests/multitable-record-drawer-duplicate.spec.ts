@@ -11,6 +11,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type App } from 'vue'
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
+import MetaRecordInspector from '../src/multitable/components/MetaRecordInspector.vue'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
 
@@ -97,6 +98,78 @@ describe('MetaRecordDrawer duplicate button', () => {
     const { container } = mountDrawer({ canCreate: true, onDuplicate })
     await openKebabMenu(container)
     dupBtn()!.click()
+    expect(onDuplicate).toHaveBeenCalledTimes(1)
+  })
+})
+
+// Customer feedback 2026-10-27: on a sheet whose rows a plugin maintains, /context sends
+// `recordDuplicateBlocked` and the workbench passes the reason down. The entry stays VISIBLE (people can see
+// why) but DISABLED, with the reason rendered inline — a disabled button's tooltip is unreliable. Mounted on
+// MetaRecordInspector directly: the workbench renders it, and the MetaRecordDrawer shell above is a deprecated
+// compat wrapper that does not forward the new prop.
+describe('MetaRecordInspector duplicate entry on a plugin-maintained sheet (duplicateBlockedReason)', () => {
+  const REASON = 'Rows on this sheet are maintained by the stock-preparation plugin (PLM pull) and cannot be duplicated.'
+  let mounted: App | null = null
+
+  afterEach(() => {
+    mounted?.unmount()
+    mounted = null
+    document.body.innerHTML = ''
+    useLocale().setLocale('en')
+    vi.restoreAllMocks()
+  })
+
+  function mountInspector(options: { duplicateBlockedReason?: string | null; onDuplicate?: () => void }): HTMLElement {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    mounted = createApp({
+      render() {
+        return h(MetaRecordInspector, {
+          visible: true,
+          record: RECORD,
+          fields: FIELDS,
+          canEdit: true,
+          canComment: false,
+          canDelete: false,
+          canCreate: true,
+          ...('duplicateBlockedReason' in options ? { duplicateBlockedReason: options.duplicateBlockedReason } : {}),
+          ...(options.onDuplicate ? { onDuplicate: options.onDuplicate } : {}),
+        })
+      },
+    })
+    mounted.mount(container)
+    return container
+  }
+
+  const reasonEl = () => document.querySelector('[data-testid="record-inspector-duplicate-blocked-reason"]')
+
+  it('with a reason: the entry is visible, disabled, shows the reason, and a click emits nothing', async () => {
+    const onDuplicate = vi.fn()
+    const container = mountInspector({ duplicateBlockedReason: REASON, onDuplicate })
+    await openKebabMenu(container)
+    const btn = dupBtn()
+    expect(btn).not.toBeNull()
+    expect(btn!.disabled).toBe(true)
+    expect(btn!.getAttribute('title')).toBe(REASON)
+    expect((reasonEl()?.textContent ?? '').trim()).toBe(REASON)
+    btn!.click()
+    btn!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(onDuplicate).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['null', { duplicateBlockedReason: null }],
+    ['absent', {}],
+  ])('without a reason (%s): unchanged — enabled, no reason, a click emits duplicate', async (_label, options) => {
+    const onDuplicate = vi.fn()
+    const container = mountInspector({ ...options, onDuplicate })
+    await openKebabMenu(container)
+    const btn = dupBtn()
+    expect(btn).not.toBeNull()
+    expect(btn!.disabled).toBe(false)
+    expect(btn!.getAttribute('title')).toBe('Duplicate this record')
+    expect(reasonEl()).toBeNull()
+    btn!.click()
     expect(onDuplicate).toHaveBeenCalledTimes(1)
   })
 })

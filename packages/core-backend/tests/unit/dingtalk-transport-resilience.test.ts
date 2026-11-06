@@ -20,10 +20,18 @@ import {
   DINGTALK_TRANSPORT_DEFAULTS,
   computeDingTalkRetryDelayMs,
   isDingTalkFlowControlErrcode,
+  observeDingTalkTransportRetries,
   parseRetryAfterMs,
   requestDingTalkTransportJson,
   resolveDingTalkTransportConfig,
+  type DingTalkTransportRetryEvent,
 } from '../../src/integrations/dingtalk/transport'
+import {
+  createDirectoryPullRetryCounters,
+  fetchAllDepartments,
+  recordDirectoryPullRetry,
+  summarizeDirectoryPullRetries,
+} from '../../src/directory/directory-sync'
 
 /**
  * Roadmap §7.2 unified DingTalk transport: retry / backoff / rate-limit handling at
@@ -769,6 +777,132 @@ describe('DingTalk transport resilience (roadmap §7.2)', () => {
 
       await expect(listDingTalkDepartments('tok', '1')).rejects.toMatchObject({ statusCode: 503 })
       expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  // Roadmap §7.7 sync-performance telemetry: the retry observer is OBSERVATION ONLY. Every test
+  // here pins both halves — the events the observer sees AND that the transport's own behaviour
+  // (fetch call count, result/error shape, retry warn lines) is exactly what it is without one.
+  describe('retry observer (roadmap §7.7 sync-performance telemetry)', () => {
+    it('reports each retry the loop performs — reason, attempt, kind — and leaves the result untouched', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0)
+      vi.stubEnv('DINGTALK_TRANSPORT_MAX_ATTEMPTS', '4')
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(jsonResponse({ errcode: 90018, errmsg: '触发流控' }))
+        .mockResolvedValueOnce(jsonResponse({ message: 'too many requests' }, 429))
+        .mockRejectedValueOnce(new TypeError('fetch failed'))
+        .mockResolvedValueOnce(okDeptEnvelope())
+      vi.stubGlobal('fetch', fetchMock)
+      const events: DingTalkTransportRetryEvent[] = []
+
+      const departments = await observeDingTalkTransportRetries(
+        (event) => { events.push(event) },
+        () => listDingTalkDepartments('tok', '1'),
+      )
+
+      expect(departments).toEqual([expect.objectContaining({ id: '1', name: '技术部' })])
+      expect(fetchMock).toHaveBeenCalledTimes(4)
+      // One event per retry the loop DECIDED to run, carrying the warn line's reason string; the
+      // final successful attempt is not a retry event.
+      expect(events).toEqual([
+        { reason: 'flow_control_errcode_90018', attempt: 1, kind: 'read', delayMs: 0 },
+        { reason: 'http_429', attempt: 2, kind: 'read', delayMs: 0 },
+        { reason: 'network_error', attempt: 3, kind: 'read', delayMs: 0 },
+      ])
+      expect(retryLogs()).toHaveLength(3)
+    })
+
+    it('is scoped to the observed async context: a call made outside it reports nothing and retries exactly as before', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0)
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(jsonResponse({ errcode: 90018, errmsg: '触发流控' }))
+        .mockResolvedValueOnce(okDeptEnvelope())
+      vi.stubGlobal('fetch', fetchMock)
+      const observer = vi.fn()
+
+      // The context is entered and left WITHOUT making a transport call …
+      await observeDingTalkTransportRetries(observer, async () => undefined)
+      // … so this call runs with no observer installed: the pre-existing loop, unobserved.
+      const departments = await listDingTalkDepartments('tok', '1')
+
+      expect(departments).toEqual([expect.objectContaining({ id: '1', name: '技术部' })])
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(retryLogs()).toEqual([expect.stringMatching(/retry 2\/3 after flow_control_errcode_90018 \(read\)/)])
+      expect(observer).not.toHaveBeenCalled()
+    })
+
+    it('a throwing observer changes neither the retry decision nor the exhausted error shape', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0)
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(jsonResponse({ errcode: 90018, errmsg: 'a' }))
+        .mockResolvedValueOnce(jsonResponse({ errcode: 90018, errmsg: 'b' }))
+        .mockResolvedValueOnce(jsonResponse({ errcode: 90018, errmsg: 'c' }))
+      vi.stubGlobal('fetch', fetchMock)
+      const observer = vi.fn(() => {
+        throw new Error('observer boom')
+      })
+
+      await expect(
+        observeDingTalkTransportRetries(observer, () => listDingTalkDepartments('tok', '1')),
+      ).rejects.toBeInstanceOf(DingTalkBusinessError)
+
+      // The full attempt budget was still used, and the observer saw the two retries (not the
+      // exhausted third attempt, which is a failure, not a retry).
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+      expect(observer).toHaveBeenCalledTimes(2)
+      expect(retryLogs()).toHaveLength(2)
+    })
+
+    it('end to end: the directory pull helpers bucket observed retries by reason through the real client (stubbed fetch)', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0)
+      // Route by endpoint so each pull call fails ONCE in a different class, then succeeds:
+      //   gettoken        → network error, then OK
+      //   department/listsub → HTTP-200 errcode 90018, then OK (root has no children)
+      //   department/get  → HTTP 429, then OK
+      const firstHit = new Set<string>()
+      const fetchMock = vi.fn(async (input: string | URL | Request) => {
+        const path = new URL(String(input)).pathname
+        const isFirst = !firstHit.has(path)
+        firstHit.add(path)
+        if (path === '/gettoken') {
+          if (isFirst) throw new TypeError('fetch failed')
+          return jsonResponse({ errcode: 0, errmsg: 'ok', access_token: 'tok', expires_in: 7200 })
+        }
+        if (path === '/topapi/v2/department/listsub') {
+          if (isFirst) return jsonResponse({ errcode: 90018, errmsg: '触发流控' })
+          return jsonResponse({ errcode: 0, errmsg: 'ok', result: [] })
+        }
+        if (path === '/topapi/v2/department/get') {
+          if (isFirst) return jsonResponse({ message: 'too many requests' }, 429)
+          return jsonResponse({ errcode: 0, errmsg: 'ok', result: { dept_id: 1, name: 'root', dept_manager_userid_list: '' } })
+        }
+        throw new Error(`unexpected path ${path}`)
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      const config = {
+        appKey: 'bench-k',
+        appSecret: 's',
+        rootDepartmentId: '1',
+        baseUrl: 'https://example.test',
+      } as unknown as Parameters<typeof fetchAllDepartments>[0]
+      const counters = createDirectoryPullRetryCounters()
+
+      const departments = await observeDingTalkTransportRetries(
+        (event) => recordDirectoryPullRetry(counters, event),
+        () => fetchAllDepartments(config, 'Acme', undefined),
+      )
+
+      // The pull itself is unaffected: the synthetic root alone, every endpoint called twice.
+      expect(departments.size).toBe(1)
+      expect(fetchMock).toHaveBeenCalledTimes(6)
+      expect(counters).toEqual({ total: 3, flowControl: 1, http429: 1, network: 1, other: 0 })
+      expect(summarizeDirectoryPullRetries(counters)).toEqual({
+        externalPullRetryCount: 3,
+        externalPullRetryFlowControlCount: 1,
+        externalPullRetryHttp429Count: 1,
+        externalPullRetryNetworkCount: 1,
+        externalPullRetryOtherCount: 0,
+      })
     })
   })
 

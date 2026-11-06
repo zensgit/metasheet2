@@ -1,3 +1,4 @@
+import { requiredSuiteJobBody } from './plugin-tests-workflow-contract.mjs'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
@@ -466,14 +467,13 @@ test('the runbook never tells an operator to expect 503 from / on 222, where onl
   )
 })
 
-test('CI wiring: this test file is actually invoked by the required `test` job (P0 fix)', () => {
+test('CI wiring: this test file is actually invoked by the required contracts dependency (P0 fix)', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8')
-  const testJobMatch = workflow.match(/\n {2}test:\n[\s\S]*?(?=\n {2}\S)/)
-  assert.ok(testJobMatch, 'the required `test` job must exist in plugin-tests.yml')
+  const testJobMatch = requiredSuiteJobBody(workflow, 'contracts')
   assert.match(
-    testJobMatch[0],
+    testJobMatch,
     /node --test[^\n]*multitable-onprem-package-upgrade-inplace\.test\.mjs/,
-    'this test file must be invoked by a `node --test` step inside the required `test` (18.x/20.x) job — ' +
+    'this test file must be invoked by a `node --test` step inside the contracts dependency of required `test (20.x)` — ' +
       'a workflow that never runs it is a dead tripwire, the exact class of gap adversarial verification found',
   )
 })

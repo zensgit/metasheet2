@@ -108,7 +108,11 @@ function build(options) {
       const grantId = id(parsed.grantId), submissionId = id(parsed.submissionId), signal = signalOf(options)
       cancellation(signal); enabled()
       const admitted = record(await config.authority.admitForExecution({ grantId, submissionId }), ['approval', 'permit'])
-      cancellation(signal); enabled()
+      // Gate 1 (R-71 ⑦.1): once admission has committed, the one-time grant is consumed and the
+      // business key is permanently fenced. From here on the signal is not consulted by this port;
+      // it is handed to the runner as the run's lifetime signal (host deactivate/stop), which may
+      // still stop the attempt before anything is sent but never discards a received receipt.
+      enabled()
       const approval = metadata(admitted.approval, grantId, true)
       if (approval.reused) {
         if (admitted.permit !== null) fail('UNAVAILABLE')
@@ -121,7 +125,7 @@ function build(options) {
       handle = config.authority.takeExecution(admitted.permit)
       for (const key of CONTEXT) if (handle.context[key] !== scope[key]) fail('UNAVAILABLE')
       if (handle.operation.operationId !== approval.operationId || handle.operation.rowKey !== approval.rowKey) fail('UNAVAILABLE')
-      cancellation(signal); enabled()
+      enabled()
       const actualExchange = tokenExchangeModule.createDingTalkAppTokenExchange({ fetch: config.fetch })
       const exchangeToken = async (material, options) => {
         // A token request is external IO too. Recheck the literal switch after

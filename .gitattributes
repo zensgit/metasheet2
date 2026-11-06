@@ -5,6 +5,10 @@ scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs text eol=lf
 scripts/ops/multitable-onprem-backend-log-rotate.ps1 text eol=lf
 scripts/ops/__tests__/multitable-onprem-backend-log-rotate.tests.ps1 text eol=lf
 
+# Vendored dependency tarballs (resolved via `file:` in package.json). pnpm verifies each one
+# against the pnpm-lock.yaml sha512, so no line-ending conversion may ever touch their bytes.
+vendor/*.tgz binary
+
 # ---------------------------------------------------------------------------
 # content-digest-pinned by sealed-export-package-provenance
 # ---------------------------------------------------------------------------

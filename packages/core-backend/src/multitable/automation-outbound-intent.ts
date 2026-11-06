@@ -6,39 +6,65 @@
  * egress), so NO transaction can span the network call (§0). The correct answer is NOT a durability trade
  * but TWO-PHASE state plus an `outcome_unknown` terminal state that NEVER auto-resends:
  *
- *   (1) record intent  — a durable row keyed by (kind, root_execution_id, action_key), committed in state
- *       `pending` BEFORE the network call (Tx A, its OWN commit — there is no DB mutation to co-commit, so
- *       unlike the class-A claim it does not require the same-transaction guarantee; it only needs its own
- *       commit to LAND FIRST so a crash cannot lose the fact that a send was about to happen);
+ *   (1) record intent  — a durable row keyed by (kind, root_execution_id, action_key, target_key), committed
+ *       in state `pending` BEFORE the network call (Tx A, its OWN commit — there is no DB mutation to
+ *       co-commit, so unlike the class-A claim it does not require the same-transaction guarantee; it only
+ *       needs its own commit to LAND FIRST so a crash cannot lose the fact that a send was about to happen).
+ *       The claim mints an ATTEMPT TOKEN and a LEASE for the attempt it authorizes.
  *   (2) attempt        — the actual HTTP/DingTalk call, OUTSIDE any DB transaction;
  *   (3) record outcome — a SECOND, separate commit (Tx B) flipping the row to a terminal state
- *       `sent` / `failed` / `outcome_unknown`, guarded `WHERE status='pending'` so a concurrent zombie that
- *       already terminalized the row writes 0 rows (single-writer for the terminal outcome).
+ *       `sent` / `failed` / `outcome_unknown`, guarded `WHERE status='pending' AND attempt_token = <mine>` so
+ *       only THE attempt that was authorized can confirm its own result, and it learns (rowCount) whether its
+ *       write landed. A caller that did not land its terminal write MUST NOT report success.
  *
  * The core hazard is the CRASH-MID-SEND window: intent committed `pending`, the send MAY have gone out, but
- * the process died before recording an outcome. A retry that finds `pending` MUST fail closed — flip it to
- * `outcome_unknown` and NEVER auto-resend (a resend on ambiguity is a duplicate external effect §3).
+ * the process died before recording an outcome. A replay that finds `pending` MUST fail closed — but only
+ * once the attempt's LEASE has expired may it flip the row to `outcome_unknown` (token-guarded), because a
+ * `pending` row with a LIVE lease is an attempt that is still in flight on another worker, not a corpse. A
+ * replay never resends on ambiguity (a resend on ambiguity is a duplicate external effect §3).
  *
- * VALUES-FREE by construction: the row carries only the identity (a sha256 `action_key`, never a payload),
- * a status, an attempt count, and a BOUNDED, REDACTED reason CLASS in `last_error` — never a raw response
- * body, a URL, or a token.
+ * Single winner: the `failed → pending` re-arm is a compare-and-set (`WHERE status='failed'`) whose rowCount
+ * decides the winner; a loser re-consults the row and never sends.
  *
- * V7/V8/V9 scope (§9): this v1 slice writes intent/outcome INLINE in the dispatch path (not a background
- * re-lease worker), so it introduces NO new lease surface — the zombie-fence (V7), poison-terminal (V8),
- * and class-B storm-leg (V9) obligations remain satisfied by the S6 event_fires lease (#4426) plus the
- * `status='pending'` single-writer outcome guard here. Any FUTURE time-based re-lease of class-B would
- * inherit #4203 Layer-1 fencing.
+ * Per-target keys (#4450 §2.1, PROPOSED): `target_key` is the resolved recipient's stable identity for fan-out
+ * actions (`deriveOutboundTargetKey`), `''` for whole-action intents (every single-send action). Rows written
+ * before `target_key` existed carry `''` by column default and stay recognized; a per-target claim also
+ * consults the whole-action sentinel row of the same action so a key-format upgrade never resends history.
+ *
+ * VALUES-FREE by construction: the row carries only the identity (sha256 keys, never a payload), a status, an
+ * attempt count, an opaque attempt token, a lease timestamp, and a BOUNDED, REDACTED reason CLASS in
+ * `last_error` — never a raw response body, a URL, or a credential.
+ *
+ * V7/V8/V9 scope (§9): intent/outcome is written INLINE in the dispatch path (not a background re-lease
+ * worker). The lease here fences REPLAYS of the same identity (who may declare an attempt dead); it is not a
+ * scheduler. The zombie-fence (V7), poison-terminal (V8), and class-B storm-leg (V9) obligations remain
+ * satisfied by the S6 event_fires lease (#4426) plus the token-fenced single-writer outcome guard here.
  */
+import { createHash, randomUUID } from 'node:crypto'
 
 const NON_BLANK = /[!-~]/
 const OUTBOUND_KINDS: ReadonlySet<string> = new Set(['execution', 'test_run'])
 /** last_error is a bounded, redacted CLASS string — hard cap so a caller can never smuggle a body in. */
 const LAST_ERROR_MAX = 200
+/** #4450 §2.2 target_key shape: '' (whole-action sentinel) or a 16..64 hex digest. */
+const TARGET_KEY_SHAPE = /^[0-9a-f]{16,64}$/
+/** How many times a claim re-consults the row after losing a compare-and-set before failing closed. */
+const MAX_CONSULT_PASSES = 3
 
 export type OutboundIntentKind = 'execution' | 'test_run'
 export type OutboundIntentStatus = 'pending' | 'sent' | 'failed' | 'outcome_unknown'
 export type OutboundOutcome = 'sent' | 'failed' | 'outcome_unknown'
-export type OutboundClaimDecision = 'proceed' | 'skip_sent' | 'skip_unknown' | 'retry_failed'
+export type OutboundSkipDecision = 'skip_sent' | 'skip_unknown' | 'skip_inflight'
+export type OutboundClaimDecision = 'proceed' | 'retry_failed' | OutboundSkipDecision
+
+/** `target_key` of a whole-action intent (every single-send action; the pre-#4450 row shape). */
+export const WHOLE_ACTION_TARGET_KEY = ''
+/** Lease for call sites without a single bounded transport timeout (email, DingTalk multi-call sends). */
+export const DEFAULT_OUTBOUND_LEASE_MS = 120_000
+/** Slack added on top of a bounded transport timeout so a slow-but-alive attempt is never declared dead early. */
+export const OUTBOUND_LEASE_GRACE_MS = 30_000
+export const OUTBOUND_LEASE_MIN_MS = 1_000
+export const OUTBOUND_LEASE_MAX_MS = 3_600_000
 
 export interface OutboundIntentIdentity {
   kind: OutboundIntentKind
@@ -46,6 +72,35 @@ export interface OutboundIntentIdentity {
   rootExecutionId: string
   /** the §2.1 triple identity — produce with deriveActionKey (injective JSON-array encoding). */
   actionKey: string
+  /**
+   * #4450 §2.1 per-target segment: `deriveOutboundTargetKey(...)` for ONE resolved recipient of a fan-out
+   * action; omitted / '' = the whole-action intent every single-send action writes.
+   */
+  targetKey?: string
+}
+
+export interface OutboundClaimOptions {
+  /** Lease length for the attempt this claim authorizes (clamped to [1s, 1h]); default 120s. */
+  leaseMs?: number
+  /** Test seam: the attempt token to mint instead of a random UUID. */
+  attemptToken?: string
+}
+
+/**
+ * The claim result. `proceed` / `retry_failed` authorize exactly ONE attempt and carry the token that attempt
+ * must present to {@link recordOutboundOutcome}; every `skip_*` decision means: do NOT send.
+ *   - skip_sent      → already delivered (a success-shaped alreadyApplied step is honest);
+ *   - skip_unknown   → §3 TERMINAL ambiguity; dependents must stop until reconciliation, never auto-resent;
+ *   - skip_inflight  → another attempt holds a LIVE lease on this identity; nothing is known yet, nothing is
+ *                      declared dead, nothing is sent.
+ */
+export type OutboundClaim =
+  | { decision: 'proceed' | 'retry_failed'; attemptToken: string; leaseMs: number }
+  | { decision: OutboundSkipDecision; attemptToken: null }
+
+export interface OutboundOutcomeRecord {
+  /** true iff THIS attempt's terminal write landed on exactly one `pending` row carrying its token. */
+  confirmed: boolean
 }
 
 /** The autocommit query fn shape used across the automation executor (AutomationDeps['queryFn']). */
@@ -73,95 +128,240 @@ function assertIdentity(id: OutboundIntentIdentity, fn: string): void {
       throw new RangeError(`${fn}: ${name} must be non-blank`)
     }
   }
+  if (id.targetKey !== undefined && id.targetKey !== WHOLE_ACTION_TARGET_KEY) {
+    if (typeof id.targetKey !== 'string' || !TARGET_KEY_SHAPE.test(id.targetKey)) {
+      throw new RangeError(`${fn}: targetKey must be '' or a 16..64 hex digest (deriveOutboundTargetKey)`)
+    }
+  }
+}
+
+function clampLeaseMs(leaseMs: number | undefined): number {
+  if (typeof leaseMs !== 'number' || !Number.isFinite(leaseMs)) return DEFAULT_OUTBOUND_LEASE_MS
+  return Math.min(Math.max(Math.floor(leaseMs), OUTBOUND_LEASE_MIN_MS), OUTBOUND_LEASE_MAX_MS)
+}
+
+/** Lease for an attempt bounded by a transport timeout: the timeout plus a fixed grace. */
+export function outboundLeaseForTimeout(timeoutMs: number): number {
+  return clampLeaseMs(Math.max(0, Number.isFinite(timeoutMs) ? timeoutMs : 0) + OUTBOUND_LEASE_GRACE_MS)
+}
+
+/**
+ * #4450 §2.1 — a stable per-target key for ONE resolved recipient/record of a fan-out step. Injective
+ * JSON-array encoding of the identity parts, then sha256 hex (64 chars; satisfies the §2.2 CHECK). The key
+ * depends ONLY on the parts (never on position in a batch, a display name, or a timestamp), so two records
+ * give two keys, the same record gives the same key after a crash, and reordering changes nothing.
+ * Examples of parts: ['dingtalk_user', integrationId, dingtalkUserId]; ['dingtalk_group_destination', id];
+ * ['yida_form_record', formUuid, recordId].
+ */
+export function deriveOutboundTargetKey(parts: readonly string[]): string {
+  if (!Array.isArray(parts) || parts.length === 0) {
+    throw new RangeError('deriveOutboundTargetKey: parts must be a non-empty array')
+  }
+  for (const part of parts) {
+    if (typeof part !== 'string' || !NON_BLANK.test(part)) {
+      throw new RangeError('deriveOutboundTargetKey: every part must be a non-blank string')
+    }
+  }
+  return createHash('sha256').update(JSON.stringify(parts)).digest('hex')
+}
+
+function rowCountOf(result: { rowCount?: number | null }): number {
+  return Number(result.rowCount ?? 0)
+}
+
+interface ConsultedRow {
+  status?: string
+  attempt_token?: string | null
+  lease_live?: boolean | null
+}
+
+interface IdentityParams {
+  kind: string
+  root: string
+  actionKey: string
+  targetKey: string
+}
+
+async function consultRow(query: OutboundQueryFn, p: IdentityParams): Promise<ConsultedRow | undefined> {
+  // The DB clock decides liveness (every worker compares against the same now()). A NULL lease (a row written
+  // before leases existed) is never live.
+  const consult = await query(
+    `SELECT status, attempt_token,
+            (lease_expires_at IS NOT NULL AND lease_expires_at > now()) AS lease_live
+       FROM meta_automation_outbound_intent
+      WHERE kind = $1 AND root_execution_id = $2 AND action_key = $3 AND target_key = $4`,
+    [p.kind, p.root, p.actionKey, p.targetKey],
+  )
+  return consult.rows[0] as ConsultedRow | undefined
+}
+
+/**
+ * Flip an EXPIRED `pending` row to `outcome_unknown`. Token-guarded: the flip names the attempt it observed,
+ * so a row re-armed by a newer attempt in between (different token, live lease) is left alone. Returns true
+ * iff this call performed the flip.
+ */
+async function expirePendingRow(query: OutboundQueryFn, p: IdentityParams, observedToken: string | null): Promise<boolean> {
+  const flipped = await query(
+    `UPDATE meta_automation_outbound_intent
+        SET status = 'outcome_unknown', last_error = 'lease_expired', updated_at = now()
+      WHERE kind = $1 AND root_execution_id = $2 AND action_key = $3 AND target_key = $4
+        AND status = 'pending'
+        AND attempt_token IS NOT DISTINCT FROM $5
+        AND (lease_expires_at IS NULL OR lease_expires_at <= now())`,
+    [p.kind, p.root, p.actionKey, p.targetKey, observedToken],
+  )
+  return rowCountOf(flipped) === 1
+}
+
+/**
+ * Shared consult loop over ONE row identity. Returns a skip decision when the row forbids sending, a
+ * `retry_failed` claim when this caller WON the failed→pending compare-and-set (only when `allowRearm`), or
+ * null when there is nothing blocking (`absent` ⇒ null only when `absentMeans` says so).
+ */
+async function resolveExistingRow(
+  query: OutboundQueryFn,
+  p: IdentityParams,
+  token: string,
+  leaseMs: number,
+  mode: { allowRearm: boolean; absentMeans: 'proceed' | 'skip_unknown' },
+): Promise<OutboundClaim | null> {
+  for (let pass = 0; pass < MAX_CONSULT_PASSES; pass++) {
+    const row = await consultRow(query, p)
+    if (!row) {
+      // Row vanished (swept/deleted concurrently) — for the OWN identity this cannot prove non-delivery, so
+      // never send; for the legacy sentinel probe absence simply means no history.
+      return mode.absentMeans === 'proceed' ? null : { decision: 'skip_unknown', attemptToken: null }
+    }
+    if (row.status === 'sent') return { decision: 'skip_sent', attemptToken: null }
+    if (row.status === 'outcome_unknown') return { decision: 'skip_unknown', attemptToken: null }
+    if (row.status === 'pending') {
+      // A LIVE lease is an attempt still in flight elsewhere: do not send, do not declare it dead.
+      if (row.lease_live === true) return { decision: 'skip_inflight', attemptToken: null }
+      // Expired (or lease-less legacy) pending ⇒ CRASH-MID-SEND fail-closed flip, fenced by the observed
+      // token. Losing the flip means the row moved under us (re-armed or terminalized) ⇒ re-consult.
+      if (await expirePendingRow(query, p, row.attempt_token ?? null)) {
+        return { decision: 'skip_unknown', attemptToken: null }
+      }
+      continue
+    }
+    if (row.status === 'failed') {
+      if (!mode.allowRearm) return null // legacy sentinel: definite non-delivery blocks nothing
+      // Definite pre-dispatch non-delivery last time (nothing left the client) ⇒ safe to re-attempt — but
+      // EXACTLY ONE re-attempt wins: the CAS is decided by rowCount, never assumed.
+      const rearmed = await query(
+        `UPDATE meta_automation_outbound_intent
+            SET status = 'pending', attempts = attempts + 1, attempt_token = $5,
+                lease_expires_at = now() + ($6::int * interval '1 millisecond'), updated_at = now()
+          WHERE kind = $1 AND root_execution_id = $2 AND action_key = $3 AND target_key = $4
+            AND status = 'failed'`,
+        [p.kind, p.root, p.actionKey, p.targetKey, token, leaseMs],
+      )
+      if (rowCountOf(rearmed) === 1) return { decision: 'retry_failed', attemptToken: token, leaseMs }
+      continue // a concurrent re-arm won; re-consult (it now holds a live lease ⇒ skip_inflight)
+    }
+    // Unknown status literal (schema drift) — never send when the state cannot be proven.
+    return { decision: 'skip_unknown', attemptToken: null }
+  }
+  // Lost every compare-and-set race — the row is being driven by someone else; fail closed.
+  return { decision: 'skip_unknown', attemptToken: null }
 }
 
 /**
  * Tx A — record intent (its own committed transaction, BEFORE the network call). INSERT a fresh `pending`
- * row; ON CONFLICT DO NOTHING. The decision governs whether the caller performs the send:
+ * row carrying THIS attempt's token and lease; ON CONFLICT DO NOTHING. The decision governs whether the caller
+ * performs the send:
  *
- *   - fresh insert (rowCount 1) → 'proceed' — we own a fresh `pending`; attempt the send.
+ *   - fresh insert (rowCount 1) → 'proceed' — we own a fresh `pending`; attempt the send ONCE.
  *   - row already exists (rowCount 0) → consult its status:
- *       'sent'            → 'skip_sent'    — already delivered; do NOT resend.
- *       'outcome_unknown' → 'skip_unknown' — §3 TERMINAL; NEVER auto-resend.
- *       'pending'         → a prior attempt committed intent then CRASHED before recording an outcome ⇒ the
- *                           send MAY have happened ⇒ FAIL CLOSED: flip pending→outcome_unknown (guarded
- *                           `AND status='pending'`) and return 'skip_unknown' — never a second send.
+ *       'sent'            → 'skip_sent'     — already delivered; do NOT resend.
+ *       'outcome_unknown' → 'skip_unknown'  — §3 TERMINAL; NEVER auto-resend.
+ *       'pending', lease LIVE    → 'skip_inflight' — an attempt is in flight elsewhere: do not send, do not
+ *                                  flip (the in-flight attempt still owns the terminal write).
+ *       'pending', lease expired → the attempt crashed (or ran past its lease) ⇒ the send MAY have happened
+ *                                  ⇒ FAIL CLOSED: flip pending→outcome_unknown, guarded by status AND the
+ *                                  observed token, and return 'skip_unknown' — never a second send.
  *       'failed'          → prior attempt was DEFINITE pre-dispatch non-delivery (nothing ever sent) ⇒
- *                           eligible to re-attempt: flip failed→pending (attempts+1) and return
- *                           'retry_failed' (caller attempts the send).
+ *                           eligible to re-attempt: compare-and-set failed→pending (attempts+1, new token +
+ *                           lease). EXACTLY ONE concurrent caller wins ('retry_failed'); losers re-consult.
  *       (absent/other)    → the row vanished between the conflict and the SELECT (concurrent delete) ⇒ fail
  *                           closed to 'skip_unknown'; never send when the state cannot be proven.
+ *
+ * Per-target identities (#4450) first consult the whole-action sentinel row of the same action: history
+ * written under the pre-#4450 key format (`sent` / `outcome_unknown` / a crashed `pending`) is recognized and
+ * blocks the per-target send; a sentinel `failed` (definite non-delivery) blocks nothing.
+ *
+ * The consult is ONE-directional (whole-action → per-target upgrade only): a whole-action claim does NOT
+ * consult per-target rows. An action type's key shape is therefore fixed once it is wired — never mix
+ * whole-action and per-target claims for the same action, or a whole-action claim would proceed over a
+ * per-target `sent` row (a resend). A reverse consult is a follow-up for when fan-out actions are wired.
  */
 export async function claimOutboundIntent(
   query: OutboundQueryFn,
   id: OutboundIntentIdentity,
-): Promise<OutboundClaimDecision> {
+  opts: OutboundClaimOptions = {},
+): Promise<OutboundClaim> {
   assertIdentity(id, 'claimOutboundIntent')
+  const targetKey = id.targetKey ?? WHOLE_ACTION_TARGET_KEY
+  const token = typeof opts.attemptToken === 'string' && NON_BLANK.test(opts.attemptToken) ? opts.attemptToken : randomUUID()
+  const leaseMs = clampLeaseMs(opts.leaseMs)
+  const own: IdentityParams = { kind: id.kind, root: id.rootExecutionId, actionKey: id.actionKey, targetKey }
+
+  if (targetKey !== WHOLE_ACTION_TARGET_KEY) {
+    // Key-format upgrade guard: a whole-action row written before per-target keys existed is still history.
+    const legacy = await resolveExistingRow(
+      query,
+      { ...own, targetKey: WHOLE_ACTION_TARGET_KEY },
+      token,
+      leaseMs,
+      { allowRearm: false, absentMeans: 'proceed' },
+    )
+    if (legacy) return legacy
+  }
+
   const inserted = await query(
-    `INSERT INTO meta_automation_outbound_intent (kind, root_execution_id, action_key)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (kind, root_execution_id, action_key) DO NOTHING`,
-    [id.kind, id.rootExecutionId, id.actionKey],
+    `INSERT INTO meta_automation_outbound_intent
+       (kind, root_execution_id, action_key, target_key, attempt_token, lease_expires_at)
+     VALUES ($1, $2, $3, $4, $5, now() + ($6::int * interval '1 millisecond'))
+     ON CONFLICT (kind, root_execution_id, action_key, target_key) DO NOTHING`,
+    [own.kind, own.root, own.actionKey, own.targetKey, token, leaseMs],
   )
-  if (Number(inserted.rowCount ?? 0) === 1) return 'proceed'
+  if (rowCountOf(inserted) === 1) return { decision: 'proceed', attemptToken: token, leaseMs }
 
-  const consult = await query(
-    `SELECT status FROM meta_automation_outbound_intent
-      WHERE kind = $1 AND root_execution_id = $2 AND action_key = $3`,
-    [id.kind, id.rootExecutionId, id.actionKey],
-  )
-  const status = (consult.rows[0] as { status?: string } | undefined)?.status
-
-  if (status === 'sent') return 'skip_sent'
-  if (status === 'outcome_unknown') return 'skip_unknown'
-  if (status === 'pending') {
-    // CRASH-MID-SEND fail-closed flip. Guarded `AND status='pending'` so a racing writer that already
-    // terminalized the row does not get clobbered back to unknown. NEVER auto-resend after this.
-    await query(
-      `UPDATE meta_automation_outbound_intent
-          SET status = 'outcome_unknown', updated_at = now()
-        WHERE kind = $1 AND root_execution_id = $2 AND action_key = $3 AND status = 'pending'`,
-      [id.kind, id.rootExecutionId, id.actionKey],
-    )
-    return 'skip_unknown'
-  }
-  if (status === 'failed') {
-    // Definite pre-dispatch non-delivery last time (nothing left the client) ⇒ safe to re-attempt.
-    await query(
-      `UPDATE meta_automation_outbound_intent
-          SET status = 'pending', attempts = attempts + 1, updated_at = now()
-        WHERE kind = $1 AND root_execution_id = $2 AND action_key = $3 AND status = 'failed'`,
-      [id.kind, id.rootExecutionId, id.actionKey],
-    )
-    return 'retry_failed'
-  }
-  // Row vanished (swept/deleted concurrently) — cannot prove non-delivery, so never send.
-  return 'skip_unknown'
+  const existing = await resolveExistingRow(query, own, token, leaseMs, { allowRearm: true, absentMeans: 'skip_unknown' })
+  return existing ?? { decision: 'skip_unknown', attemptToken: null }
 }
 
 /**
- * Tx B — record outcome (a SECOND, separate commit AFTER the attempt). The `AND status='pending'` guard is
- * the SINGLE-WRITER guard: a concurrent zombie that already terminalized the row writes 0 rows, so the
- * terminal outcome is written exactly once. `lastError` is bounded + stored as-is: callers pass a REDACTED
- * reason CLASS (see {@link outboundReasonClass}), never a raw body/URL/token; the bound is defense-in-depth.
+ * Tx B — record outcome (a SECOND, separate commit AFTER the attempt). The guard
+ * `status='pending' AND attempt_token = <mine>` is the SINGLE-WRITER + SAME-ATTEMPT fence: a zombie whose
+ * row was already terminalized, or whose lease expired and was flipped by a replay, writes 0 rows — and is
+ * TOLD so (`confirmed:false`), because a step may only report success for a terminal write it landed itself.
+ * `lastError` is bounded + stored as-is: callers pass a REDACTED reason CLASS (see
+ * {@link outboundReasonClass}), never a raw body/URL/token; the bound is defense-in-depth.
  */
 export async function recordOutboundOutcome(
   query: OutboundQueryFn,
   id: OutboundIntentIdentity,
   outcome: OutboundOutcome,
-  lastError?: string | null,
-): Promise<void> {
+  lastError: string | null | undefined,
+  attemptToken: string,
+): Promise<OutboundOutcomeRecord> {
   assertIdentity(id, 'recordOutboundOutcome')
   if (outcome !== 'sent' && outcome !== 'failed' && outcome !== 'outcome_unknown') {
     throw new RangeError(`recordOutboundOutcome: outcome must be 'sent' | 'failed' | 'outcome_unknown'`)
   }
+  if (typeof attemptToken !== 'string' || !NON_BLANK.test(attemptToken)) {
+    throw new RangeError('recordOutboundOutcome: attemptToken must be the non-blank token the claim issued')
+  }
   const boundedError = lastError == null ? null : String(lastError).slice(0, LAST_ERROR_MAX)
-  await query(
+  const updated = await query(
     `UPDATE meta_automation_outbound_intent
         SET status = $4, last_error = $5, updated_at = now()
-      WHERE kind = $1 AND root_execution_id = $2 AND action_key = $3 AND status = 'pending'`,
-    [id.kind, id.rootExecutionId, id.actionKey, outcome, boundedError],
+      WHERE kind = $1 AND root_execution_id = $2 AND action_key = $3 AND target_key = $6
+        AND status = 'pending' AND attempt_token = $7`,
+    [id.kind, id.rootExecutionId, id.actionKey, outcome, boundedError, id.targetKey ?? WHOLE_ACTION_TARGET_KEY, attemptToken],
   )
+  return { confirmed: rowCountOf(updated) === 1 }
 }
 
 /**

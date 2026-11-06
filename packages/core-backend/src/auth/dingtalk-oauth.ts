@@ -61,6 +61,7 @@ export interface DingTalkUserInfo {
 export interface DingTalkExchangeResult {
   dingtalkUser: DingTalkUserInfo
   localUserId: string
+  sessionGeneration: number
   localUserEmail: string
   localUserName: string
   localUserRole: string
@@ -74,6 +75,8 @@ interface LocalUserRow {
   role: string
   is_active: boolean
   activation_status?: string | null
+  deleted_at?: string | null
+  purged_at?: string | null
 }
 
 export type DingTalkOAuthIntent = 'login' | 'bind' | 'activate'
@@ -592,7 +595,9 @@ async function recheckLocalUserAuthorization(
   const result = await client.query(
     `SELECT COALESCE(role, 'user') AS role,
             COALESCE(is_active, TRUE) AS is_active,
-            activation_status
+            activation_status,
+            (to_jsonb(users) ->> 'deleted_at') AS deleted_at,
+            (to_jsonb(users) ->> 'purged_at') AS purged_at
        FROM users
       WHERE id = $1::text
       LIMIT 1`,
@@ -612,6 +617,8 @@ async function recheckLocalUserAuthorization(
       row.activation_status === null || row.activation_status === undefined
         ? null
         : String(row.activation_status),
+    deleted_at: row.deleted_at === null || row.deleted_at === undefined ? null : String(row.deleted_at),
+    purged_at: row.purged_at === null || row.purged_at === undefined ? null : String(row.purged_at),
   })
   const grantState = await readGrantState(localUserId, client)
   if (requireGrant && grantState !== 'enabled') {
@@ -840,16 +847,30 @@ type ImplicitIdentityWriteOptions = {
 }
 
 /** Recheck lookup results after acquiring the users mutex before any implicit identity write. */
+/** Only a fresh provider-authenticated OAuth profile may advance an active repair's OpenID pin. */
+async function advanceRepairPinForVerifiedOAuth(client: AccessGraphTransactionClient, userId: string, profile: DingTalkUserInfo, corpId: string | null | undefined, clientId: string): Promise<void> {
+  if (!profile.openId) return // Enterprise container login never rewrites the web OpenID.
+  const table = await client.query("SELECT to_regclass('dingtalk_login_repairs')::text AS reg")
+  if (!table.rows[0]?.reg) return // Schema before this optional operator feature has no pin.
+  const pin = (await client.query("SELECT id,expected_identity,login_client_id FROM dingtalk_login_repairs WHERE user_id=$1 AND state='applied'", [userId])).rows[0]
+  if (!pin) return
+  const expected = pin.expected_identity as Record<string, unknown>
+  if (pin.login_client_id !== clientId || expected.corp_id !== corpId || !profile.unionId || expected.provider_union_id !== profile.unionId) {
+    throw createPolicyError('Verified profile does not match the active identity repair', { statusCode: 409, code: 'repair_identity_mismatch' })
+  }
+  await client.query(`UPDATE dingtalk_login_repairs SET expected_identity=expected_identity || $2::jsonb WHERE id=$1`, [pin.id, {provider_open_id:profile.openId, external_key:`${corpId}:${profile.openId}`}])
+}
+
 async function upsertExternalIdentity(
   localUserId: string,
   dtUser: DingTalkUserInfo,
   options: ImplicitIdentityWriteOptions,
-): Promise<void> {
+): Promise<number> {
   const config = readDingTalkOauthConfig()
   const externalKey = buildExternalKey(dtUser)
   const profile = JSON.stringify(dtUser)
 
-  await transaction(async (client) => {
+  return transaction(async (client) => {
     if (!config.corpId) await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
     if (!lockedUsers.has(localUserId)) {
@@ -909,6 +930,7 @@ async function upsertExternalIdentity(
         || (existing.provider_union_id ?? null) !== nextUnionId
         || (existing.provider_open_id ?? null) !== nextOpenId
         || (existing.corp_id ?? null) !== nextCorpId
+      await advanceRepairPinForVerifiedOAuth(client, localUserId, dtUser, identityCorpId, config.clientId)
       await client.query(
         `UPDATE user_external_identities
          SET external_key = CASE WHEN $8::boolean THEN $3 ELSE COALESCE(NULLIF(external_key, ''), $3) END,
@@ -971,6 +993,7 @@ async function upsertExternalIdentity(
     }
 
     await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId, localUserId)
+    return lockedUsers.get(localUserId)!.accessGeneration + (accessGraphChanged ? 1 : 0)
   })
 }
 
@@ -1050,7 +1073,9 @@ async function findUserByEmail(email: string): Promise<LocalUserRow | null> {
             COALESCE(name, '') AS name,
             COALESCE(role, 'user') AS role,
             COALESCE(is_active, TRUE) AS is_active,
-            activation_status
+            activation_status,
+            (to_jsonb(users) ->> 'deleted_at') AS deleted_at,
+            (to_jsonb(users) ->> 'purged_at') AS purged_at
      FROM users
      WHERE LOWER(email) = LOWER($1)
      LIMIT 1`,
@@ -1071,7 +1096,9 @@ async function findIdentityUser(
               COALESCE(u.name, '') AS name,
               COALESCE(u.role, 'user') AS role,
               COALESCE(u.is_active, TRUE) AS is_active,
-              u.activation_status
+              u.activation_status,
+              (to_jsonb(u) ->> 'deleted_at') AS deleted_at,
+              (to_jsonb(u) ->> 'purged_at') AS purged_at
        FROM user_external_identities identity
        JOIN users u ON u.id = identity.local_user_id
        WHERE identity.provider = $1
@@ -1123,13 +1150,15 @@ async function findIdentityUser(
 }
 
 function assertLocalUserLoginAllowed(
-  localUser: Pick<LocalUserRow, 'is_active' | 'role' | 'activation_status'>,
+  localUser: Pick<LocalUserRow, 'is_active' | 'role' | 'activation_status' | 'deleted_at' | 'purged_at'>,
 ): void {
   // Shared closed-set gate (PR #4559): only exact pending_activation | activated.
   const denial = evaluateUserAuthenticationGate({
     is_active: localUser.is_active,
     role: localUser.role,
     activation_status: localUser.activation_status,
+    deleted_at: localUser.deleted_at,
+    purged_at: localUser.purged_at,
   })
   if (!denial) return
   if (denial.code === 'ACCOUNT_PENDING_ACTIVATION' || denial.code === 'ACCOUNT_ACTIVATION_INVALID') {
@@ -1261,7 +1290,7 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
   }
 }
 
-async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: LocalUserRow; isNewUser: boolean }> {
+async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: LocalUserRow; isNewUser: boolean; sessionGeneration: number }> {
   const requireGrant = shouldRequireGrant()
   const identityUser = await findIdentityUser(dtUser)
   if (identityUser) {
@@ -1281,12 +1310,12 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
         code: 'grant_disabled',
       })
     }
-    await upsertExternalIdentity(identityUser.id, dtUser, {
+    const sessionGeneration = await upsertExternalIdentity(identityUser.id, dtUser, {
       resolvedBy: 'identity',
       requireGrant,
       createGrantIfAbsent: false,
     })
-    return { localUser: identityUser, isNewUser: false }
+    return { localUser: identityUser, isNewUser: false, sessionGeneration }
   }
 
   if (dtUser.email && shouldAutoLinkEmail()) {
@@ -1308,12 +1337,12 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
       }
       // The non-strict creation-only grant is written inside the identity transaction, after its
       // authorization and association rechecks — never ahead of them in a separate transaction.
-      await upsertExternalIdentity(emailUser.id, dtUser, {
+      const sessionGeneration = await upsertExternalIdentity(emailUser.id, dtUser, {
         resolvedBy: 'association',
         requireGrant,
         createGrantIfAbsent: !requireGrant,
       })
-      return { localUser: emailUser, isNewUser: false }
+      return { localUser: emailUser, isNewUser: false, sessionGeneration }
     }
   }
 
@@ -1377,12 +1406,12 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
 
   const provisionedUser = await createProvisionedUser(dtUser)
   await ensureGrant(provisionedUser.id)
-  await upsertExternalIdentity(provisionedUser.id, dtUser, {
+  const sessionGeneration = await upsertExternalIdentity(provisionedUser.id, dtUser, {
     resolvedBy: 'association',
     requireGrant,
     createGrantIfAbsent: false,
   })
-  return { localUser: provisionedUser, isNewUser: true }
+  return { localUser: provisionedUser, isNewUser: true, sessionGeneration }
 }
 
 export function isDingTalkConfigured(): boolean {
@@ -1632,11 +1661,12 @@ export async function exchangeEnterpriseAuthCodeForUser(authCode: string): Promi
     mobile: detailMobile,
     avatarUrl: detailAvatar,
   }
-  const { localUser, isNewUser } = await resolveLocalUser(dingtalkUser)
+  const { localUser, isNewUser, sessionGeneration } = await resolveLocalUser(dingtalkUser)
 
   return {
     dingtalkUser,
     localUserId: localUser.id,
+    sessionGeneration,
     localUserEmail: localUser.email,
     localUserName: localUser.name,
     localUserRole: localUser.role,
@@ -1646,11 +1676,12 @@ export async function exchangeEnterpriseAuthCodeForUser(authCode: string): Promi
 
 export async function exchangeCodeForUser(code: string): Promise<DingTalkExchangeResult> {
   const dingtalkUser = await exchangeCodeForDingTalkProfile(code)
-  const { localUser, isNewUser } = await resolveLocalUser(dingtalkUser)
+  const { localUser, isNewUser, sessionGeneration } = await resolveLocalUser(dingtalkUser)
 
   return {
     dingtalkUser,
     localUserId: localUser.id,
+    sessionGeneration,
     localUserEmail: localUser.email,
     localUserName: localUser.name,
     localUserRole: localUser.role,
