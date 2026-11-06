@@ -360,6 +360,12 @@ export default defineConfig({
       'tests/integration/directory-org-transfer-source-freeze.db.test.ts',
       'tests/integration/directory-controlled-handover.db.test.ts',
       'tests/integration/dingtalk-login-repair.db.test.ts',
+      // Privilege classification for security actions against real Postgres: one-statement grant read on a
+      // read-committed transaction, refusal when any source cannot be read, superset of the authorization
+      // aggregator. DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as a
+      // WHOLE FILE into the approval real-DB step in plugin-tests.yml (both points asserted by
+      // tests/unit/security-action-privilege.test.ts).
+      'tests/integration/security-action-privilege.db.test.ts',
       // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
       // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
       // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
