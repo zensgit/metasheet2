@@ -803,6 +803,14 @@ test('source binding: a malformed, misaligned or smuggled binding is a fixed INP
   // One record per source row, distinct record ids.
   reject({ records: [{ recordId: 'rec_1', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }] })
   reject({ records: [{ recordId: 'rec_1', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }, { recordId: 'rec_1', keyValue: 'LINE-2', projectNo: 'DEMO-P1' }] })
+  // One sheet is one registered project (087 maps a sheet to exactly one project_no): records naming two projects
+  // under one sheetId are not a binding the sheet source can produce, in either allocation mode.
+  reject({ records: [{ recordId: 'rec_1', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }, { recordId: 'rec_2', keyValue: 'LINE-2', projectNo: 'DEMO-P2' }] })
+  const divisible = [row('LINE-1', 6), row('LINE-2', 4)]
+  expectError(compileYidaSendDraft, YidaDraftPlanError, { ...input(divisible, config(), allocation('equal_integer', ['DEMO-P1', 'DEMO-P2'])),
+    sourceBinding: binding(divisible, { records: [{ recordId: 'rec_1', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }, { recordId: 'rec_2', keyValue: 'LINE-2', projectNo: 'DEMO-P2' }] }) }, 'YIDA_DRAFT_INPUT')
+  // The same split with one project per binding is a valid draft (the refusal above is the mixed projects, not the split).
+  assert.equal(compileYidaSendDraft({ ...input(divisible, config(), allocation('equal_integer', ['DEMO-P1', 'DEMO-P2'])), sourceBinding: binding(divisible) }).rowSpecs.length, 4)
   // The key column must be one of the bound columns; aliases are planner identifiers; ids are opaque text.
   reject({ keyFieldId: 'fld_unbound' })
   reject({ fieldBindings: { 'bad alias': 'fld_x', lineId: 'fld_line' } })

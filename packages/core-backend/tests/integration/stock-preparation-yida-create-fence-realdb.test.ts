@@ -45,7 +45,7 @@ const databaseSuite = process.env.EXPECT_DB === '1' && process.env.DATABASE_URL 
 
 databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without delivery', () => {
   let pool: Pool, owner: PoolClient, first: Session, second: Session
-  let schema = '', ddl090 = '', ddl091 = '', ddlBinding = ''
+  let schema = '', ddl090 = '', ddl091 = '', ddlBinding = '', ddlBindingDown = '', bindingDownRefused = ''
   let createDb: (input: { database: Database }) => unknown
   let createStore: (input: { db: unknown }) => Store
   const sessions: Session[] = []
@@ -169,9 +169,12 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     ddl090 = readFileSync(path.join(root, 'packages/core-backend/migrations/090_create_integration_yida_delivery_ledger.sql'), 'utf8')
     ddl091 = readFileSync(path.join(root, 'packages/core-backend/migrations/091_create_integration_yida_create_fence.sql'), 'utf8')
     // Source binding (design baseline v2.3 §3.3): the ledger part of zzzz20261106110300, exactly what its up() executes.
-    ddlBinding = ((await import(pathToFileURL(path.join(root,
+    const bindingMigration = (await import(pathToFileURL(path.join(root,
       'packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts')).href)) as
-      { YIDA_SOURCE_BINDING_LEDGER_UP_SQL: string }).YIDA_SOURCE_BINDING_LEDGER_UP_SQL
+      { YIDA_SOURCE_BINDING_LEDGER_UP_SQL: string; YIDA_SOURCE_BINDING_DOWN_SQL: string; YIDA_SOURCE_BINDING_DOWN_REFUSED_CODE: string }
+    ddlBinding = bindingMigration.YIDA_SOURCE_BINDING_LEDGER_UP_SQL
+    ddlBindingDown = bindingMigration.YIDA_SOURCE_BINDING_DOWN_SQL
+    bindingDownRefused = bindingMigration.YIDA_SOURCE_BINDING_DOWN_REFUSED_CODE
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 7, connectionTimeoutMillis: 5000 })
     owner = await pool.connect()
     await owner.query("SET statement_timeout = '10s'")
@@ -440,6 +443,8 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     const replayed = await second.store.prepare(identity())
     expect(replayed.reused).toBe(true)
     await rejectStore(second.store.prepare(identity({ sourceRecordDigest: '3'.repeat(64) })), 'YIDA_DELIVERY_CONFLICT')
+    // The identity digest alone is part of the compared snapshot too: the same operation with another identity is CONFLICT, not reuse.
+    await rejectStore(second.store.prepare(identity({ creationIdentityDigest: '6'.repeat(64) })), 'YIDA_DELIVERY_CONFLICT')
     await rejectStore(second.store.prepare(fixture()), 'YIDA_DELIVERY_CONFLICT')
     expect((await rows(LEDGER)).length).toBe(1)
   })
@@ -682,5 +687,53 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     expect(await pgFailure(owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)))
       .toEqual({ ok: false, code: '55000', message: 'YIDA_DELIVERY_RECONCILE_BINDING_MISSING' })
     expect((await owner.query("SELECT to_regclass('integration_yida_reconciliation_runs') AS rel")).rows[0].rel).toBeNull()
+  })
+
+  // Migration zzzz20261106110300 down(): bound rows are append-only evidence, so down refuses while any exists.
+  const bindingColumns = async () => (await owner.query(
+    "SELECT attname FROM pg_attribute WHERE attrelid = to_regclass($1) AND attname IN ('source_record_digest', 'creation_identity_digest') AND NOT attisdropped ORDER BY attname",
+    [LEDGER])).rows.map(row => String((row as Row).attname))
+  const guardBody = async () => String((await owner.query(
+    "SELECT pg_get_functiondef(to_regproc('integration_yida_delivery_ledger_guard')::oid) AS body")).rows[0].body)
+  const identityFencePresent = async () => (await owner.query(
+    'SELECT 1 FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = $1', [IDENTITY_FENCE])).rowCount
+
+  it('zzzz20261106110300 down refuses while a bound reservation exists (append-only evidence); the fence and the guard stay in force', async () => {
+    await first.store.prepare(identity())
+    const before = await evidence()
+    let refused: { code?: string; message?: string; detail?: string } | undefined
+    try { await owner.query(ddlBindingDown) } catch (error) { refused = error as { code?: string; message?: string; detail?: string } }
+    expect(refused?.code).toBe('55000')
+    expect(refused?.message).toBe(bindingDownRefused)
+    expect(refused?.detail).toBeUndefined()
+    expect(await evidence()).toEqual(before)
+    expect(await identityFencePresent()).toBe(1)
+    expect(await bindingColumns()).toEqual(['creation_identity_digest', 'source_record_digest'])
+    expect((await guardBody()).includes('creation_identity_digest')).toBe(true)
+    // The identity fence still decides after the refused down: the same identity under another record is refused.
+    await rejectStore(second.store.prepare(identity({ operationId: 'synthetic-other-operation', rowKey: 'synthetic-other-row',
+      businessKeyDigest: 'c'.repeat(64), sourceRecordDigest: '3'.repeat(64) })), 'YIDA_DELIVERY_IDENTITY_CONFLICT')
+    expect((await rows(LEDGER)).length).toBe(1)
+  })
+
+  it('zzzz20261106110300 down without bound rows restores the exact 090 guard and drops the fence and the columns; replaying up restores them', async () => {
+    // An unbound reservation (NULL digests) is not bound evidence and does not block the down.
+    await first.store.prepare(fixture())
+    expect(await bindingColumns()).toEqual(['creation_identity_digest', 'source_record_digest'])
+    await owner.query(ddlBindingDown)
+    expect(await identityFencePresent()).toBe(0)
+    expect(await bindingColumns()).toEqual([])
+    const restored = await guardBody()
+    expect(restored.includes('source_record_digest') || restored.includes('creation_identity_digest')).toBe(false)
+    expect(restored.includes('YIDA_DELIVERY_IMMUTABLE') && restored.includes('YIDA_DELIVERY_TRANSITION') && restored.includes('YIDA_DELIVERY_CLAIM')).toBe(true)
+    expect((await rows(LEDGER)).length).toBe(1)
+    await owner.query(ddlBindingDown) // replay: already down, nothing to refuse or drop
+    await owner.query(ddlBinding)
+    expect(await identityFencePresent()).toBe(1)
+    expect(await bindingColumns()).toEqual(['creation_identity_digest', 'source_record_digest'])
+    expect((await guardBody()).includes('creation_identity_digest')).toBe(true)
+    const bound = await second.store.prepare(identity({ operationId: 'synthetic-operation-b', rowKey: 'synthetic-row-b', businessKeyDigest: 'c'.repeat(64) }))
+    expect(bound.reused).toBe(false)
+    expect((await rows(LEDGER)).length).toBe(2)
   })
 })

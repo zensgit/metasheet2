@@ -152,6 +152,10 @@ function parseSourceBinding(value, sourceRows) {
     if (sourceRows[index][keyAlias] !== keyValue) fail('INPUT')
     return { recordId, keyValue, projectNo }
   })
+  // One binding is one registered project sheet, and the registry (087) maps a sheet to exactly one project:
+  // every record carries that project, so in `original` mode every row's identity project is the sheet's.
+  // A binding whose records name different projects is not something the sheet source can produce.
+  if (new Set(records.map(record => record.projectNo)).size !== 1) fail('INPUT')
   return { sheetId, keyFieldId, fieldBindings, records }
 }
 
