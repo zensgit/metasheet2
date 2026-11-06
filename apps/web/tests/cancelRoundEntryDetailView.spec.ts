@@ -516,6 +516,23 @@ describe('ApprovalDetailView — P-6 seat display on a cancel-round instance', (
     expect(section.textContent).not.toContain('王五')
   })
 
+  it('the 流程进度 rows name no one on a pending cancel round: the open step carries the V1 word', async () => {
+    mockActiveApproval.value = cancelRoundInstance({ assignments: NAMED_SEATS })
+    mockHistory.value = [
+      { id: 'h1', action: 'created', actorId: 'employee_1', actorName: '张三', comment: null, fromStatus: null, toStatus: 'pending', occurredAt: '2026-09-29T01:00:00.000Z', metadata: { nodeKey: 'start' } },
+    ]
+    await mountView()
+    const progress = q(container!, 'approval-flow-progress')!
+    expect(progress).toBeTruthy()
+    const open = Array.from(progress.querySelectorAll<HTMLElement>('[data-testid="approval-flow-progress-step"]'))
+      .filter((el) => el.dataset.state === 'current')
+    expect(open).toHaveLength(1)
+    expect(open[0].textContent).toContain('撤销申请审批中')
+    // No graph here: the step reads a neutral word, not 「节点已变更」 and never the node key.
+    expect(open[0].textContent).toContain('审批节点')
+    for (const word of ['李四', '王五', '张三', '当前处理人', '节点已变更', 'cancel_approval']) expect(progress.textContent).not.toContain(word)
+  })
+
   it('an ordinary pending instance still names each current handler', async () => {
     mockActiveApproval.value = cancelRoundInstance({ workflowKey: 'attendance.request', assignments: NAMED_SEATS })
     await mountView()

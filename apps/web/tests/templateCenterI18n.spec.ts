@@ -1008,6 +1008,8 @@ describe('O-8 / F8-1 — approval member-surface source guard (per changed file)
       ternary: 1,
     },
     { file: 'src/approvals/approvalCenterDetailPaneController.ts', ternary: 1 },
+    // 流程进度 rows on the detail page: every word comes from the detail label table, none in the module.
+    { file: 'src/approvals/approvalProgress.ts' },
     {
       file: 'src/approvals/assigneeSource.ts',
       ternary: 5,
@@ -1102,6 +1104,8 @@ describe('O-8 / F8-1 — approval member-surface source guard (per changed file)
       ],
     },
     { file: 'src/approvals/relativeWait.ts', ternary: 4 },
+    // Customer issue 2026-10-27 6a-1: the role-seat line (count, or role names for a template admin).
+    { file: 'src/approvals/roleSeatDisplay.ts', ternary: 2 },
     { file: 'src/approvals/routePreviewController.ts', ternary: 1 },
     { file: 'src/approvals/routePreviewSummary.ts', ternary: 4 },
     { file: 'src/approvals/store.ts', ternary: 9 },

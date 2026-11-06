@@ -121,9 +121,10 @@ function requesterFacingSourceSummary(source: ApprovalAssigneeSource, isZh: bool
 }
 
 /**
- * O-8 / F8-1: the only caller is `buildUpcomingNodes`, which forwards the shell locale from
- * ApprovalDetailView (upcoming nodes) and ApprovalNewView (flow preview, via graphSummary.ts); the
- * zh-CN default only keeps the existing unit tests' calls unchanged.
+ * O-8 / F8-1: callers are `buildUpcomingNodes`, which forwards the shell locale from
+ * ApprovalDetailView (upcoming nodes) and ApprovalNewView (flow preview, via graphSummary.ts), and
+ * approvalProgress.ts (the detail page's progress rows, for a parallel region's join node), which
+ * forwards the same locale; the zh-CN default only keeps the existing unit tests' calls unchanged.
  */
 export function nodeAssigneeSourceSummary(node: ApprovalNode, schema?: FormSchema | null, isZh = true): string {
   const listSeparator = isZh ? '、' : ', '
