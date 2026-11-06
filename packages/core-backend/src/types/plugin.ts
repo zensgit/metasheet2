@@ -4,6 +4,14 @@
  */
 
 import type { RequestHandler } from 'express'
+import type { parseAttendancePunchDetailInputV1 } from '../attendance/w4c3a-punch-detail-input'
+import type { fingerprintAttendancePunchDetailCommandV1 } from '../attendance/w4c3a-punch-detail-command'
+import type { buildAttendancePunchDetailPreparedPlanV1 } from '../attendance/w4c3a-punch-detail-prepare'
+import type { createAttendancePunchDetailPreparationHostV1 } from '../attendance/w4c3a-punch-detail-preparation-host'
+import type { createAttendancePunchDetailReplayHostV1 } from '../attendance/w4c3a-punch-detail-replay-host'
+import type { createAttendancePunchDetailJobReplayHostV1 } from '../attendance/w4c3a-punch-detail-job-replay-host'
+import type { createAttendancePunchDetailPreviewHostV1 } from '../attendance/w4c3a-punch-detail-preview-host'
+import type { createAttendancePunchDetailPreviewJobHostV1 } from '../attendance/w4c3a-punch-detail-preview-job-host'
 import type { Injector } from '@wendellhu/redi'
 import type {
   MultitableProvisioningFieldDescriptor,
@@ -2126,6 +2134,17 @@ export interface PluginServices {
     commitSyncImportPlan(
       input: CommitAttendanceSyncImportPlanFromHostInputV1,
     ): Promise<AttendanceSyncImportResponseV1>
+    /** Pure punch-detail adapters; the producer and hosts retain all authorization and locks. */
+    readPunchDetailImportReplay: ReturnType<typeof createAttendancePunchDetailReplayHostV1>['readPunchDetailImportReplay']
+    readPunchDetailImportJobReplay: ReturnType<typeof createAttendancePunchDetailJobReplayHostV1>['readPunchDetailImportJobReplay']
+    preparePunchDetailImport: ReturnType<typeof createAttendancePunchDetailPreparationHostV1>['preparePunchDetailImport']
+    readPunchDetailPreviewReplay: ReturnType<typeof createAttendancePunchDetailPreviewHostV1>['readPunchDetailPreviewReplay']
+    reservePunchDetailPreview: ReturnType<typeof createAttendancePunchDetailPreviewHostV1>['reservePunchDetailPreview']
+    readPunchDetailPreviewJob: ReturnType<typeof createAttendancePunchDetailPreviewJobHostV1>['readPunchDetailPreviewJob']
+    processPunchDetailPreviewJob: ReturnType<typeof createAttendancePunchDetailPreviewJobHostV1>['processPunchDetailPreviewJob']
+    parsePunchDetailInput: typeof parseAttendancePunchDetailInputV1
+    fingerprintPunchDetailCommand: typeof fingerprintAttendancePunchDetailCommandV1
+    buildPunchDetailPreparedPlan: typeof buildAttendancePunchDetailPreparedPlanV1
     buildImportAttributionFreeze(
       input: AttendanceImportFrozenAttributionBuildInputV1,
     ): AttendanceImportAttributionFreezeBuildResultV1

@@ -1,3 +1,6 @@
+import { readPreservedAuthoritativeCalculationInputsV1 } from '../../src/attendance/w4c2-preserved-calculation-inputs'
+import { buildAttendancePunchDetailPreparedPlanV1 } from '../../src/attendance/w4c3a-punch-detail-prepare'
+import { punchDetailPreparationFixture, type PunchDetailFixtureKind } from '../../src/attendance/__tests__/helpers/punch-detail-plan-fixture'
 import crypto from 'node:crypto'
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -7,6 +10,7 @@ import { Client, Pool, type PoolClient } from 'pg'
 import {
   claimAttendanceCanonicalImportRegistryV1,
   executeAttendanceCanonicalImportPlanV1,
+  validateAttendanceCanonicalImportFreezeV1,
 } from '../../src/attendance/w4c3a-canonical-import-kernel'
 import { canonicalAttendanceJsonV1 } from '../../src/attendance/w4c0-fingerprints'
 import {
@@ -468,6 +472,52 @@ function withSecondFoldedSource(input: ReturnType<typeof fixture>): ReturnType<t
   }
 }
 
+function punchDetailKernelFixture(
+  kind: PunchDetailFixtureKind,
+  posture: 'shadow' | 'authoritative',
+  options: { prior?: { orgId: string; recordId: string }; explicitStrict?: boolean } = {},
+) {
+  const base = fixture(posture)
+  const orgId = options.prior?.orgId ?? base.orgId
+  const recordId = options.prior?.recordId ?? base.recordId
+  const source = punchDetailPreparationFixture(kind, {
+    orgId, actorId: base.job.actorId, actorPosture: 'platform_admin',
+    tokenSubjectUserId: base.job.tokenSubjectUserId as string,
+  }, base.batchId)
+  const prepared = buildAttendancePunchDetailPreparedPlanV1({
+    ...source,
+    context: options.explicitStrict ? { ...source.context, flexPolicy: { mode: 'strict' } } : source.context,
+  }).plan
+  const org = rehydrateVerifiedAttendanceOrgIdentityV1({ orgId, acceptedWritePosture: posture })
+  const batchIdentity = createVerifiedAttendanceOperationIdentityV1({
+    org, kind: 'batch', entrypoint: 'import_batch',
+    source: { sourceKind: 'import_batch', batchCommandId: base.batchId },
+  })
+  const itemIdentities = prepared.items.map((item) => createVerifiedAttendanceOperationIdentityV1({
+    org, kind: 'item', entrypoint: 'import_batch',
+    source: { sourceKind: 'import_item', batchCommandId: base.batchId, ordinal: item.ordinal,
+      semanticFingerprint: crypto.createHash('sha256').update(canonicalAttendanceJsonV1(item.rawEvidence)).digest('hex') },
+  }))
+  const recordWriteId = base.plan.recordWrites[0].recordWriteId
+  return {
+    ...base, orgId, recordId,
+    job: { ...base.job, orgId, legacyInputFingerprint: prepared.legacyInputFingerprint,
+      itemCount: prepared.items.length,
+      identityProofVector: itemIdentities.map((identity, ordinal) => ({
+        ordinal, semanticFingerprint: identity.sourceProof.semanticFingerprint,
+        derivedOperationId: identity.id, commandFingerprint: hex('f'),
+      })),
+    },
+    plan: {
+      ...base.plan,
+      manifest: { ...base.plan.manifest, orgId, batch: prepared.batch, legacyInputFingerprint: prepared.legacyInputFingerprint },
+      items: prepared.items.map((item) => ({ ...item, itemId: crypto.randomUUID(), recordWriteRef: recordWriteId })),
+      recordWrites: [{ ...base.plan.recordWrites[0], ...prepared.recordWrites[0], recordId }],
+    },
+    identities: [batchIdentity, ...itemIdentities],
+  }
+}
+
 describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
   const scratchName = `ms2_w4c3a_kernel_${run}`
   let adminPool: Pool
@@ -720,6 +770,194 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
       client.release()
     }
   }
+
+
+
+  it.each(['shadow', 'authoritative'] as const)(
+    'PUNCH_DETAIL_REVIEW_ALIGN preserves explicit strict context through execution (%s)', async (posture) => {
+      const input = punchDetailKernelFixture('fold_start', posture, { explicitStrict: true })
+      await execute(input)
+      expect((await pool.query(
+        `SELECT outcome, projected_work_minutes, context_snapshot->'flexPolicy' AS flex,
+                jsonb_array_length(segment_snapshot) AS segments
+           FROM attendance_record_calculations WHERE attendance_record_id = $1::uuid`, [input.recordId])).rows)
+        .toEqual([{ outcome: 'completed', projected_work_minutes: 165, flex: { mode: 'strict' }, segments: 2 }])
+    })
+
+  it('PUNCH_DETAIL_REVIEW_ALIGN retains completed inputs after a later review with immutable snapshots', async () => {
+    await pool.query(`CREATE TABLE IF NOT EXISTS attendance_request_calculation_snapshots (
+      org_id text, request_id uuid, payload jsonb)`)
+    await pool.query(`CREATE TABLE IF NOT EXISTS attendance_events (
+      id uuid, org_id text, user_id text, event_type text, occurred_at timestamptz, source text, work_date date)`)
+    const prior = punchDetailKernelFixture('fold_start', 'authoritative')
+    await execute(prior)
+    const parent = (await pool.query('SELECT * FROM attendance_records WHERE id = $1::uuid', [prior.recordId])).rows[0]
+    const frozenRow = (await pool.query(
+      'SELECT attribution_snapshot, context_snapshot FROM attendance_record_calculations WHERE id = $1::uuid',
+      [parent.current_calculation_id])).rows[0]
+    const scope = {
+      trx: { query: (text: string, values?: readonly unknown[]) => pool.query(text, values as unknown[]) },
+      org: rehydrateVerifiedAttendanceOrgIdentityV1({ orgId: prior.orgId, acceptedWritePosture: 'authoritative' }),
+      subjectUserId: prior.plan.recordWrites[0].userId,
+    }
+    const frozen = {
+      payload: { workDate: prior.plan.recordWrites[0].workDate },
+      attribution: frozenRow.attribution_snapshot, context: frozenRow.context_snapshot,
+    }
+    const before = await readPreservedAuthoritativeCalculationInputsV1(scope, parent, frozen, null)
+    expect(before.evidence).toHaveLength(4)
+    expect(before.priorCalculations).toHaveLength(1)
+    expect(before.reviewReason).toBeNull()
+    const review = punchDetailKernelFixture('shared_fold', 'authoritative', { prior })
+    await execute(review)
+    expect((await pool.query('SELECT * FROM attendance_records WHERE id = $1::uuid', [prior.recordId])).rows).toEqual([parent])
+    const preserved = await readPreservedAuthoritativeCalculationInputsV1(scope, parent, frozen, null)
+    expect(preserved.evidence).toHaveLength(8)
+    expect(preserved.priorCalculations).toHaveLength(2)
+    expect(preserved.approvedFacts).toEqual([])
+    expect(preserved.manualOverride).toBeNull()
+    expect(preserved.reviewReason).toBe('context_mismatch')
+    const reviewRow = (await pool.query(
+      `SELECT id, context_snapshot, segment_snapshot, expected_segment_count, projection_effect
+         FROM attendance_record_calculations WHERE source_batch_id = $1::uuid`, [review.batchId])).rows[0]
+    expect(reviewRow.segment_snapshot).toEqual([])
+    expect(reviewRow.context_snapshot.segments).toHaveLength(2)
+    expect(reviewRow.expected_segment_count).toBe(0)
+    expect(reviewRow.projection_effect).toBe('none')
+    await expect(pool.query(
+      "UPDATE attendance_record_calculations SET segment_snapshot = context_snapshot->'segments' WHERE id = $1::uuid",
+      [reviewRow.id])).rejects.toThrow('W4C0_IMMUTABLE')
+    expect((await pool.query(
+      'SELECT segment_snapshot FROM attendance_record_calculations WHERE id = $1::uuid',
+      [reviewRow.id])).rows).toEqual([{ segment_snapshot: [] }])
+  })
+
+  it.each([{ mode: 'unknown' }, { mode: 'strict', extra: true }])(
+    'PUNCH_DETAIL_REVIEW_ALIGN rejects corrupted policy %j before registry SQL', async (flexPolicy) => {
+      const input = punchDetailKernelFixture('fold_start', 'authoritative')
+      const write = input.plan.recordWrites[0]
+      const snapshot = JSON.parse(JSON.stringify(write.attributionSnapshot))
+      for (const source of snapshot.sources) source.context.flexPolicy = flexPolicy
+      Object.assign(write, { attributionSnapshot: snapshot })
+      const statements: string[] = []
+      await expect(claimAttendanceCanonicalImportRegistryV1({
+        query: async (sql) => { statements.push(sql); return { rows: [] } },
+      }, input)).rejects.toThrow('W4C3A_IMPORT_FREEZE_INVALID')
+      expect(statements).toEqual([])
+    })
+
+  it('PUNCH_DETAIL_REVIEW_ALIGN keeps the legacy freeze validator closed to explicit flexPolicy', () => {
+    const input = punchDetailKernelFixture('fold_start', 'authoritative', { explicitStrict: true })
+    expect(() => validateAttendanceCanonicalImportFreezeV1(input.plan.recordWrites[0]))
+      .toThrow('W4C3A_IMPORT_FREEZE_INVALID')
+  })
+
+  it.each(['shadow', 'authoritative'] as const)(
+    'PUNCH_DETAIL_KERNEL fold physical totals and all-event evidence (%s)', async (posture) => {
+      for (const [kind, minutes] of [['fold_start', 165], ['fold_end', 195]] as const) {
+        const input = punchDetailKernelFixture(kind, posture)
+        await execute(input)
+        const result = await pool.query(
+          `SELECT r.work_minutes, r.visibility_state, r.projection_owner,
+                  r.current_calculation_id IS NOT NULL AS has_pointer,
+                  c.mode, c.outcome, c.projected_work_minutes,
+                  jsonb_array_length(c.evidence_snapshot) AS events,
+                  (SELECT count(*)::int FROM attendance_record_segments s WHERE s.calculation_id = c.id) AS segments,
+                  (SELECT count(*)::int FROM attendance_result_operations o
+                    WHERE o.resolved_calculation_id = c.id AND o.state = 'completed') AS completed_operations
+             FROM attendance_records r JOIN attendance_record_calculations c ON c.attendance_record_id = r.id
+            WHERE r.id = $1::uuid AND c.calculation_kind = 'calculation'`, [input.recordId])
+        expect(result.rows).toEqual([{
+          work_minutes: minutes, visibility_state: 'active',
+          projection_owner: posture === 'authoritative' ? 'w4' : 'legacy_untracked',
+          has_pointer: posture === 'authoritative', mode: posture, outcome: 'completed',
+          projected_work_minutes: minutes, events: 4, segments: 2, completed_operations: 4,
+        }])
+      }
+    })
+
+  for (const posture of ['shadow', 'authoritative'] as const) {
+    for (const existing of [false, true]) {
+      it.each([['gap', 'dst_gap_local_time'], ['shared_fold', 'dst_fold_shared_boundary_ambiguous']] as const)(
+        'PUNCH_DETAIL_KERNEL review %s keeps projection absent (' + posture + ', existing=' + existing + ')',
+        async (kind, reason) => {
+          const input = punchDetailKernelFixture(kind, posture)
+          const write = input.plan.recordWrites[0]
+          if (existing) {
+            await pool.query(
+              `INSERT INTO attendance_records (id, org_id, user_id, work_date, timezone,
+                 first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status,
+                 is_workday, meta, projection_owner, current_calculation_id, visibility_state, visibility_reason)
+               VALUES ($1::uuid,$2,$3,$4::date,$5,$6,$7,12,3,4,'late',true,'{"sentinel":"keep"}'::jsonb,
+                       'legacy_untracked',NULL,'active','active')`,
+              [input.recordId, input.orgId, write.userId, write.workDate, write.timezone,
+                write.workDate + 'T04:30:00.000Z', write.workDate + 'T04:42:00.000Z'])
+          }
+          const before = await pool.query('SELECT to_jsonb(r) AS row FROM attendance_records r WHERE id = $1::uuid', [input.recordId])
+          await execute(input)
+          const calculation = await pool.query(
+            `SELECT mode, outcome, outcome_reason_code, projection_effect, expected_segment_count,
+                    projected_status, projected_first_in_at, projected_last_out_at,
+                    projected_work_minutes, projected_late_minutes, projected_early_leave_minutes,
+                    projected_daily_fingerprint,
+                    jsonb_array_length(evidence_snapshot) AS events,
+                    input_provenance->'compatibilitySnapshot' AS compatibility
+               FROM attendance_record_calculations WHERE attendance_record_id = $1::uuid`, [input.recordId])
+          expect(calculation.rows).toEqual([{
+            mode: posture, outcome: 'review_required', outcome_reason_code: reason, projection_effect: 'none',
+            expected_segment_count: 0, projected_status: null, projected_first_in_at: null, projected_last_out_at: null,
+            projected_work_minutes: null, projected_late_minutes: null, projected_early_leave_minutes: null,
+            projected_daily_fingerprint: null, events: 4,
+            compatibility: { kind: 'punch_events_v1', projection: null },
+          }])
+          expect((await pool.query('SELECT s.id FROM attendance_record_segments s JOIN attendance_record_calculations c ON c.id = s.calculation_id WHERE c.attendance_record_id = $1::uuid', [input.recordId])).rows).toEqual([])
+          if (existing) {
+            expect((await pool.query('SELECT to_jsonb(r) AS row FROM attendance_records r WHERE id = $1::uuid', [input.recordId])).rows).toEqual(before.rows)
+          } else {
+            expect((await pool.query(
+              `SELECT projection_owner, current_calculation_id, visibility_state, visibility_reason,
+                      first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes
+                 FROM attendance_records WHERE id = $1::uuid`, [input.recordId])).rows).toEqual([{
+              projection_owner: 'legacy_untracked', current_calculation_id: null,
+              visibility_state: 'retired', visibility_reason: 'review_placeholder',
+              first_in_at: null, last_out_at: null, work_minutes: 0, late_minutes: 0, early_leave_minutes: 0,
+            }])
+          }
+          const sealed = await pool.query(
+            `SELECT state, response_snapshot->>'outcome' AS outcome,
+                    response_snapshot->>'reasonCode' AS reason FROM attendance_result_operations
+              WHERE org_id = $1 ORDER BY input_ordinal`, [input.orgId])
+          expect(sealed.rows).toEqual(Array.from({ length: 4 }, () => ({ state: 'completed', outcome: 'review_required', reason })))
+        })
+    }
+  }
+
+
+  it.each([
+    ['gap', 'workMinutes', 0],
+    ['fold_start', 'workMinutes', 166],
+    ['gap', 'firstInAt', '2026-03-08T05:30:00.000Z'],
+  ] as const)('PUNCH_DETAIL_KERNEL rejects forged %s %s before SQL', async (kind, field, value) => {
+    const input = punchDetailKernelFixture(kind, 'authoritative')
+    Object.assign(input.plan.recordWrites[0], { [field]: value })
+    const statements: string[] = []
+    await expect(executeAttendanceCanonicalImportPlanV1({
+      query: async (sql) => { statements.push(sql); return { rows: [] } },
+    }, { job: input.job, plan: input.plan,
+      registryClaim: { batchIdentity: input.identities[0], itemIdentities: input.identities.slice(1) } }))
+      .rejects.toThrow('ATTENDANCE_PUNCH_DETAIL_PROJECTION_MISMATCH')
+    expect(statements).toEqual([])
+  })
+
+  it('PUNCH_DETAIL_KERNEL rejects a missing canonical claim before any SQL', async () => {
+    const input = punchDetailKernelFixture('gap', 'authoritative')
+    const statements: string[] = []
+    await expect(executeAttendanceCanonicalImportPlanV1({
+      query: async (sql) => { statements.push(sql); return { rows: [] } },
+    }, { job: input.job, plan: input.plan, registryClaim: null }))
+      .rejects.toThrow('ATTENDANCE_PUNCH_DETAIL_COMMAND_MISMATCH')
+    expect(statements).toEqual([])
+  })
 
   it('shadow import persists a parsed diff while preserving the compatibility projection', async () => {
     const input = fixture('shadow')

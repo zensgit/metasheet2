@@ -8,6 +8,7 @@ vi.mock('../src/utils/api', () => ({ apiFetch: mocks.apiFetch, getApiBase: () =>
 const jwt = (org: string) => `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
 const response = (data: unknown, ok = true) => ({ ok, json: async () => ({ success: ok, data }) })
 let scopes: ReturnType<typeof effectScope>[] = []
+let initialToken: string
 function session() {
   const scope = effectScope()
   scopes.push(scope)
@@ -18,16 +19,18 @@ describe('explicit session organization', () => {
   beforeEach(() => {
     localStorage.clear()
     mocks.apiFetch.mockReset()
-    useAuth().setToken(jwt('org-a'))
+    initialToken = jwt('org-a')
+    useAuth().setToken(initialToken)
   })
   afterEach(() => { scopes.forEach(scope => scope.stop()); scopes = [] })
 
   it('commits a consistent explicit response without changing the stored login hint', async () => {
-    mocks.apiFetch.mockResolvedValue(response({ token: jwt('org-b'), currentOrgId: 'org-b', user: { id: 'actor' } }))
+    const switchedToken = jwt('org-b')
+    mocks.apiFetch.mockResolvedValue(response({ token: switchedToken, currentOrgId: 'org-b', user: { id: 'actor' } }))
     const state = session()
     expect(await state.switchSessionOrg('org-b')).toBe(true)
     expect(state.currentOrgId.value).toBe('org-b')
-    expect(useAuth().getToken()).toBe(jwt('org-b'))
+    expect(useAuth().getToken()).toBe(switchedToken)
     expect(localStorage.getItem('tenantId')).toBe('org-a')
   })
 
@@ -35,7 +38,7 @@ describe('explicit session organization', () => {
     mocks.apiFetch.mockResolvedValue(response({ token, currentOrgId: 'org-b', user: { id: 'actor' } }))
     const state = session()
     expect(await state.switchSessionOrg('org-b')).toBe(false)
-    expect(useAuth().getToken()).toBe(jwt('org-a'))
+    expect(useAuth().getToken()).toBe(initialToken)
     expect(state.currentOrgId.value).toBeNull()
   })
 
@@ -44,10 +47,11 @@ describe('explicit session organization', () => {
     mocks.apiFetch.mockImplementation(() => new Promise(done => { resolve = done }))
     const state = session()
     const pending = state.switchSessionOrg('org-b')
-    useAuth().setToken(jwt('org-c'))
+    const newLoginToken = jwt('org-c')
+    useAuth().setToken(newLoginToken)
     resolve(response({ token: jwt('org-b'), currentOrgId: 'org-b', user: { id: 'actor' } }))
     expect(await pending).toBe(false)
-    expect(useAuth().getToken()).toBe(jwt('org-c'))
+    expect(useAuth().getToken()).toBe(newLoginToken)
     expect(state.currentOrgId.value).toBeNull()
   })
 
@@ -56,10 +60,10 @@ describe('explicit session organization', () => {
     mocks.apiFetch.mockImplementation(() => new Promise(done => { resolve = done }))
     const state = session()
     const pending = state.switchSessionOrg('org-b')
-    useAuth().setToken(jwt('org-a'))
+    useAuth().setToken(initialToken)
     resolve(response({ token: jwt('org-b'), currentOrgId: 'org-b', user: { id: 'actor' } }))
     expect(await pending).toBe(false)
-    expect(useAuth().getToken()).toBe(jwt('org-a'))
+    expect(useAuth().getToken()).toBe(initialToken)
   })
 
   it('refuses server denial and suppresses duplicate in-flight switches', async () => {
@@ -71,7 +75,7 @@ describe('explicit session organization', () => {
     resolve(response(null, false))
     expect(await pending).toBe(false)
     expect(mocks.apiFetch).toHaveBeenCalledTimes(1)
-    expect(useAuth().getToken()).toBe(jwt('org-a'))
+    expect(useAuth().getToken()).toBe(initialToken)
   })
 
   it('does not publish an old organization list after the session changes', async () => {

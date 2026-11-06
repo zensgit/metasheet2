@@ -1,7 +1,7 @@
 /**
  * P1-1 「连接销毁语义」(r6.1 §1.1), the part a real-database test cannot reach cheaply: the composition
  * root. Every W4 connection provider in `src/index.ts` forwards the error its boundary passes to
- * pg's `release(err?)` (seven closures: LSB, BND, REC, PROC, RES, SYNC, RB), and the two OPS entry
+ * pg's `release(err?)` (fourteen closures: the original seven plus seven punch-detail providers), and the two OPS entry
  * points receive the raw pool. The two transition CLIs are excluded from the rule only as process
  * entries (r6.1 §1.1, D.3.4): their pool is closed by the entry guard after `main()` returns, `main`
  * itself closes nothing, the entry guard's block is exactly those three statements (no borrow between
@@ -58,7 +58,7 @@ function entryGuardIsPinned(source: ts.SourceFile, expected: readonly string[]):
 describe('W4 connection providers in the composition root', () => {
   const source = parse(INDEX)
 
-  it('all seven acquireConnection closures forward the error to pg release', () => {
+  it('all fourteen acquireConnection closures forward the error to pg release', () => {
     const releases: string[] = []
     walk(source, (node) => {
       if (!ts.isPropertyAssignment(node) || !ts.isIdentifier(node.name) || node.name.text !== 'acquireConnection') return
@@ -66,8 +66,46 @@ describe('W4 connection providers in the composition root', () => {
         if (ts.isPropertyAssignment(inner) && ts.isIdentifier(inner.name) && inner.name.text === 'release') releases.push(inner.initializer.getText(source))
       })
     })
-    expect(releases).toHaveLength(7)
+    expect(releases).toHaveLength(14)
     expect(releases.filter((text) => text !== FORWARDING)).toEqual([])
+  })
+
+
+  it('control: each of the seven punch-detail providers rejects dropping the release error', () => {
+    const sites: Array<{ factory: string; release: ts.Expression }> = []
+    walk(source, (node) => {
+      if (!ts.isPropertyAssignment(node) || !ts.isIdentifier(node.name) || node.name.text !== 'acquireConnection') return
+      const call = node.parent.parent
+      if (!ts.isCallExpression(call) || !ts.isIdentifier(call.expression) || !call.expression.text.startsWith('createAttendancePunchDetail')) return
+      walk(node.initializer, (inner) => {
+        if (ts.isPropertyAssignment(inner) && ts.isIdentifier(inner.name) && inner.name.text === 'release') {
+          sites.push({ factory: call.expression.getText(source), release: inner.initializer })
+        }
+      })
+    })
+    expect(sites.map(({ factory }) => factory)).toEqual([
+      'createAttendancePunchDetailPreparationHostV1',
+      'createAttendancePunchDetailReplayHostV1',
+      'createAttendancePunchDetailJobReplayHostV1',
+      'createAttendancePunchDetailPreviewHostV1',
+      'createAttendancePunchDetailPreviewHostV1',
+      'createAttendancePunchDetailPreviewJobHostV1',
+      'createAttendancePunchDetailPreviewJobHostV1',
+    ])
+    const dropped = '(error?: Error) => client.release()'
+    for (const { release } of sites) {
+      expect(release.getText(source)).toBe(FORWARDING)
+      const mutant = parseText(INDEX, source.text.slice(0, release.getStart(source)) + dropped + source.text.slice(release.end))
+      const releases: string[] = []
+      walk(mutant, (node) => {
+        if (!ts.isPropertyAssignment(node) || !ts.isIdentifier(node.name) || node.name.text !== 'acquireConnection') return
+        walk(node.initializer, (inner) => {
+          if (ts.isPropertyAssignment(inner) && ts.isIdentifier(inner.name) && inner.name.text === 'release') releases.push(inner.initializer.getText(mutant))
+        })
+      })
+      expect(releases).toHaveLength(14)
+      expect(releases.filter((text) => text !== FORWARDING)).toEqual([dropped])
+    }
   })
 
   it('the sweep and the admin abandon-run entry points receive the raw pool', () => {
