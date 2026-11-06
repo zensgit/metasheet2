@@ -838,6 +838,14 @@ export class AttendanceNotificationDeliveryWorker {
     this.quietHours = options.quietHours !== undefined
       ? options.quietHours
       : resolveAttendanceNotificationQuietHours(process.env, this.logger)
+    for (const channel of this.channelsByName.values()) {
+      const budget = Number(channel.maxSendDurationMs)
+      if (Number.isFinite(budget) && budget >= this.leaseMs) {
+        this.logger.warn(
+          `Attendance delivery channel "${channel.name}" declares maxSendDurationMs=${budget}, not below the batch lease ${this.leaseMs}ms; its rows are deferred on every claim`,
+        )
+      }
+    }
   }
 
   async claimDueDeliveries(): Promise<DeliveryRow[]> {

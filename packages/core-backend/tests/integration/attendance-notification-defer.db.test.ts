@@ -13,8 +13,8 @@
  *   5. Other results (retryable, permanent, skip, unknown outcome) and channels that declare nothing
  *      behave as before.
  *
- * The worker's claim is not scoped to an organisation, so every case clears this file's rows first and
- * uses a channel name no other suite writes.
+ * The worker's claim is not scoped to an organisation, so every case clears this file's rows first.
+ * Integration files run one at a time (serial config), so no other suite holds due rows meanwhile.
  */
 import { randomUUID } from 'crypto'
 

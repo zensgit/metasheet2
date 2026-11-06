@@ -243,6 +243,14 @@ describe('deferral window', () => {
     expect(h.table.get('a')!.status).toBe('skipped')
   })
 
+  it('the expired error text keeps at most 200 characters of the deferral reason', async () => {
+    const clock = { ms: T0 }
+    const h = makeHarness([{ id: 'a', created_at: new Date(T0 - 3 * HOUR).toISOString() }], clock)
+    const channel = channelReturning({ ok: false, defer: true, deferMs: 30_000, error: 'x'.repeat(300) })
+    await makeWorker(h, channel, clock).runBatch()
+    expect(h.table.get('a')!.last_error).toBe(`${'x'.repeat(200)}_expired`)
+  })
+
   it('an expired skip is also guarded by the lease CAS', async () => {
     const clock = { ms: T0 }
     const h = makeHarness([{ id: 'a', created_at: new Date(T0 - 3 * HOUR).toISOString() }], clock)
@@ -291,6 +299,47 @@ describe('lease headroom', () => {
     expect(channel.send).toHaveBeenCalledTimes(2)
     expect(result.sent).toBe(2)
     expect(result.deferred).toBeUndefined()
+  })
+
+  it('a zero budget declares nothing and is never held back', async () => {
+    const clock = { ms: T0 }
+    const h = makeHarness([{ id: 'a' }, { id: 'b' }], clock)
+    const channel = channelReturning({ ok: true }, { maxSendDurationMs: 0 })
+    channel.send.mockImplementationOnce(async () => {
+      clock.ms += 61_000
+      return { ok: true } as AttendanceDeliveryChannelResult
+    })
+    const result = await makeWorker(h, channel, clock, { leaseMs: 60_000 }).runBatch()
+    expect(channel.send).toHaveBeenCalledTimes(2)
+    expect(result.sent).toBe(2)
+  })
+
+  it('the claim returns the creation time that the deferral window is measured from', async () => {
+    const clock = { ms: T0 }
+    const h = makeHarness([{ id: 'a' }], clock)
+    await makeWorker(h, channelReturning({ ok: true }), clock).runBatch()
+    const claim = h.statements.find((s) => s.includes('FOR UPDATE SKIP LOCKED'))!
+    expect(claim).toMatch(/RETURNING[\s\S]*d\.created_at/)
+  })
+
+  it('warns once per construction about a budget that is not below the lease, and only then', () => {
+    const clock = { ms: T0 }
+    const h = makeHarness([], clock)
+    const build = (budget: number) => {
+      const logger = { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() }
+      new AttendanceNotificationDeliveryWorker({
+        query: h.query,
+        channels: [channelReturning({ ok: true }, { maxSendDurationMs: budget })],
+        quietHours: null,
+        leaseMs: 60_000,
+        logger: logger as never,
+      })
+      return logger.warn
+    }
+    expect(build(60_000)).toHaveBeenCalledTimes(1)
+    expect(build(90_000)).toHaveBeenCalledTimes(1)
+    expect(build(59_999)).not.toHaveBeenCalled()
+    expect(build(0)).toHaveBeenCalledTimes(0)
   })
 
   it('a margin deferral past the window ends as skipped with the expired suffix', async () => {
