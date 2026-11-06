@@ -117,6 +117,10 @@ describe('pull-source predicate', () => {
     expect(COUNT_ACTIVE_PULL_SOURCES_SQL).toContain('i.org_id = $1')
     expect(COUNT_ACTIVE_PULL_SOURCES_SQL).toContain(PULL_SOURCE_PREDICATE_SQL)
     expect(COUNT_ACTIVE_PULL_SOURCES_SQL).not.toMatch(/count\(\*\)/i)
+    expect(COUNT_ACTIVE_PULL_SOURCES_SQL).toBe(
+      "SELECT count(DISTINCT (i.provider, i.corp_id))::int AS pull_source_count FROM directory_integrations i " +
+        "WHERE i.org_id = $1 AND i.provider <> 'local' AND i.status = 'active'",
+    )
   })
 
   it('uses a threshold of two', () => {
@@ -134,6 +138,9 @@ describe('pull-source predicate', () => {
     expect(APPROVAL_ROUTING_POLICY_EXISTS_SQL).toContain('FROM org_directory_routing_policy')
     expect(APPROVAL_ROUTING_POLICY_EXISTS_SQL).toContain('org_id = $1')
     expect(APPROVAL_ROUTING_POLICY_EXISTS_SQL).toContain("purpose = 'approval_routing'")
+    expect(APPROVAL_ROUTING_POLICY_EXISTS_SQL).toBe(
+      "SELECT 1 AS present FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = 'approval_routing'",
+    )
   })
 })
 
@@ -191,6 +198,7 @@ describe('countActivePullSources / isApprovalRoutingPolicyRequired', () => {
     const { query, calls } = fakeQuery(2, 0)
     await isApprovalRoutingPolicyRequired(query, 'o')
     expect(calls).toHaveLength(2)
+    expect(calls.map((call) => call.params)).toEqual([['o'], ['o']])
     for (const { sql } of calls) {
       expect(sql).toMatch(/^SELECT /)
       expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|LOCK|FOR UPDATE|FOR SHARE|advisory)\b/i)
@@ -273,6 +281,8 @@ describe('leaf module shape', () => {
     expect(leafSource).not.toMatch(/\bimport\s*\(/)
     expect(leafSource).not.toMatch(/\brequire\s*\(/)
     expect(leafSource).not.toMatch(/^\s*export\s+(\*|\{[^}]*\})\s+from\s/m)
+    expect(leafSource).not.toMatch(/^\s*export\s+(type\s+)?(\*(\s+as\s+\w+)?|\{[^}]*\})\s+from\s/m)
+    expect(leafSource).not.toMatch(/\bfrom\s+['"]/)
     expect(leafSource).not.toMatch(/directory-sync|db\/|connection-pool/)
   })
 
@@ -282,6 +292,8 @@ describe('leaf module shape', () => {
     const runtime = [COUNT_ACTIVE_PULL_SOURCES_SQL, APPROVAL_ROUTING_POLICY_EXISTS_SQL]
       .flatMap((sql) => [...sql.matchAll(/\b(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)/g)].map((m) => m[1]))
     expect([...new Set(runtime)].sort()).toEqual([...PULL_SOURCE_RULE_TABLES].sort())
+    // The rule reads exactly these two pre-existing tables; a later table must not appear here.
+    expect([...PULL_SOURCE_RULE_TABLES].sort()).toEqual(['directory_integrations', 'org_directory_routing_policy'])
     const migrations = readdirSync(join(SRC_ROOT, 'db/migrations'))
       .filter((name) => name.endsWith('.ts'))
       .map((name) => readFileSync(join(SRC_ROOT, 'db/migrations', name), 'utf8'))
