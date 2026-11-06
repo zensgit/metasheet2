@@ -110,6 +110,13 @@ export type YidaOwnerApprovalResult = YidaOwnerApproval & Readonly<{ reused: boo
 
 const prefix = '/api/integration/yida-owner-send'
 const maximumBodyBytes = 1024 * 1024
+// Client wait budgets, not server completion guarantees. Every call waits 15 s except the one
+// POST /submissions, which waits 60 s: after admission the server may need its status-line limit
+// (10 s), its body limit (5 s) and the ledger write, and since #6736 an admitted send finishes even
+// when this page stops waiting. Running out of budget only ends the wait here; the durable record
+// decides the outcome, so read it before anything else. Nothing is retried or refreshed for you.
+const requestTimeoutMs = 15000
+const SUBMISSION_TIMEOUT_MS = 60000
 const uuidPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u
 const deliveryStates: readonly YidaOwnerDeliveryStatus[] = ['prepared', 'dispatching', 'acknowledged', 'outcome_unknown', 'not_sent']
 const errorStatuses: Readonly<Record<string, readonly number[]>> = Object.freeze({
@@ -295,14 +302,14 @@ export function createYidaOwnerClient(options: { onInvalidated?: (code?: string)
   window.addEventListener('storage', onStorage)
   window.addEventListener('focus', checkSession)
   const assertSession = () => { checkSession(); if (disposed) throw new YidaOwnerClientError('YIDA_OWNER_SESSION_CHANGED') }
-  async function request<T>(path: string, method: 'GET' | 'POST', status: number, parse: (value: unknown) => T, body?: unknown, signal?: AbortSignal): Promise<T> {
+  async function request<T>(path: string, method: 'GET' | 'POST', status: number, parse: (value: unknown) => T, body?: unknown, signal?: AbortSignal, timeoutMs = requestTimeoutMs): Promise<T> {
     assertSession()
     const controller = new AbortController()
     const abort = () => controller.abort()
     if (signal?.aborted) controller.abort()
     signal?.addEventListener('abort', abort, { once: true })
     controllers.add(controller)
-    const timeout = setTimeout(abort, 15000)
+    const timeout = setTimeout(abort, timeoutMs)
     const current = () => { assertSession(); if (controller.signal.aborted) throw new YidaOwnerClientError('YIDA_OWNER_CANCELLED') }
     try {
       current()
@@ -412,7 +419,7 @@ export function createYidaOwnerClient(options: { onInvalidated?: (code?: string)
     },
     submit(input: YidaOwnerSubmissionInput, signal?: AbortSignal): Promise<YidaOwnerSubmission> {
       const body = checkedInput(() => { const row = object(input, ['grantId', 'submissionId']); return { grantId: uuid(row.grantId), submissionId: uuid(row.submissionId) } })
-      return request('/submissions', 'POST', 200, value => submission(value, body.grantId), body, signal)
+      return request('/submissions', 'POST', 200, value => submission(value, body.grantId), body, signal, SUBMISSION_TIMEOUT_MS)
     },
   }
 }
