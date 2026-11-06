@@ -325,6 +325,7 @@ describe('rule editor: run_integration_job item', () => {
   })
 
   it('save sends the dry-run shape without binding, and the trigger keeps its timezone', async () => {
+    runActionFlag = true
     const onSave = vi.fn()
     const { container } = mountEditor({ rule: rijRule(STORED_CONFIG), onSave })
     await flushPromises()
@@ -338,6 +339,19 @@ describe('rule editor: run_integration_job item', () => {
     })
     expect(JSON.stringify(payload)).not.toContain('binding')
     expect(payload.triggerConfig?.timezone).toBe('Asia/Shanghai')
+  })
+
+  it('switch OFF + a loaded action: listed, but save is blocked with a reason (the server would answer 403)', async () => {
+    const off = mountEditor({ rule: rijRule(STORED_CONFIG) })
+    await flushPromises()
+    expect(blockKeys(off.container)).toEqual(['runIntegrationJobSwitch'])
+    expect((off.container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(true)
+    off.app.unmount()
+    document.body.innerHTML = ''
+    runActionFlag = true
+    const on = mountEditor({ rule: rijRule(STORED_CONFIG) })
+    await flushPromises()
+    expect(blockKeys(on.container)).toEqual([])
   })
 
   it('a legacy cron rule without a timezone blocks save (the server would answer 400)', async () => {
@@ -360,6 +374,7 @@ describe('rule editor: run_integration_job item', () => {
     ['56 minutes', '[data-field="rijTimeoutMinutes"]', '56'],
     ['0 minutes', '[data-field="rijTimeoutMinutes"]', '0'],
   ])('the save mirror blocks %s', async (_name, selector, value) => {
+    runActionFlag = true
     const { container } = mountEditor({ rule: rijRule(STORED_CONFIG) })
     await flushPromises()
     expect(blockKeys(container)).toEqual([])
@@ -369,6 +384,7 @@ describe('rule editor: run_integration_job item', () => {
   })
 
   it('55 minutes is accepted (the cap is inclusive)', async () => {
+    runActionFlag = true
     const { container } = mountEditor({ rule: rijRule(STORED_CONFIG) })
     await flushPromises()
     setTextarea(container, '[data-field="rijTimeoutMinutes"]', '55')

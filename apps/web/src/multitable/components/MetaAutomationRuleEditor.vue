@@ -4181,6 +4181,17 @@ const runIntegrationJobSaveBlockReasons = computed<SaveBlockReason[]>(() => {
     .filter((idx) => idx >= 0)
   if (indexes.length === 0) return []
   const reasons: SaveBlockReason[] = []
+  // Same order as the server gate: the switch first (its 403 RUN_ACTION_DISABLED). A loaded action stays listed
+  // while the switch is off, but the rule cannot be saved with it — say so instead of an opaque 403.
+  if (!integrationRunActionEnabled.value) {
+    reasons.push({
+      key: 'runIntegrationJobSwitch',
+      message: isZh.value
+        ? '此服务器未开启「运行集成任务」动作，带此动作的规则不能保存；请移除该动作或请管理员开启。'
+        : 'The run integration job action is switched off on this server, so a rule with it cannot be saved; remove the action or ask an administrator.',
+      anchor: `[data-action-index="${indexes[0]}"] [data-action-config="run_integration_job"]`,
+    })
+  }
   for (const idx of indexes) {
     const check = checkRunIntegrationJobConfig(buildRunIntegrationJobConfig(draft.value.actions[idx].config), `actions[${idx}].config`)
     if (check) {
