@@ -30,6 +30,7 @@ vi.mock('../src/utils/api', async () => {
 })
 
 import {
+  STOCK_PREP_REFRESH_STATUS_LABELS_EN,
   STOCK_PREP_REFRESH_STATUS_LABELS_ZH,
   STOCK_PREP_REFRESH_STATUS_TOKENS,
   parseStockPrepRefreshStanza,
@@ -59,6 +60,7 @@ import {
   stockPrepSyncVerdictPlain,
 } from '../src/services/integration/stockPreparation/plainLanguage'
 import {
+  STOCK_PREPARATION_DRY_RUN_STATUSES,
   StockPreparationProjectSyncCallError,
   classifyPlanStep,
   classifyRefreshApplyFailure,
@@ -129,6 +131,15 @@ describe('RS — the board stanza on the web (refreshState.ts)', () => {
   it('RS-MIRROR: tokens and zh labels are byte-equal to the plugin module', () => {
     expect([...STOCK_PREP_REFRESH_STATUS_TOKENS]).toEqual([...backendState.STATUS_TOKENS])
     expect({ ...STOCK_PREP_REFRESH_STATUS_LABELS_ZH }).toEqual({ ...backendState.STATUS_LABELS_ZH })
+  })
+
+  // PR-9 (the #6579 version-skew residual): the English status words are a map of their own, one per live token.
+  it('RS-LABEL-EN (PR-9): the en status words cover exactly the status tokens, and none is a raw token', () => {
+    expect(Object.keys(STOCK_PREP_REFRESH_STATUS_LABELS_EN).sort()).toEqual([...STOCK_PREP_REFRESH_STATUS_TOKENS].sort())
+    for (const token of STOCK_PREP_REFRESH_STATUS_TOKENS) {
+      expect(STOCK_PREP_REFRESH_STATUS_LABELS_EN[token].trim().length, token).toBeGreaterThan(0)
+      expect(STOCK_PREP_REFRESH_STATUS_LABELS_EN[token], token).not.toMatch(/[a-z]+_[a-z_]+/)
+    }
   })
 
   it('RS-MIRROR: 「可以导出」 is the server verdict over the REAL derivation, for every status × settled', () => {
@@ -463,8 +474,42 @@ const SUSPENDED_PLAN = {
   refreshHold: { held: true, holdCount: 2, confirmableCount: 1, kinds: { syn_kind_sentinel: 2 }, holdSetFingerprint: 'f'.repeat(64) },
 }
 
-function callError(status: number, code: string, details: { reason?: string; partial?: boolean; holdCount?: number } = {}): StockPreparationProjectSyncCallError {
-  return new StockPreparationProjectSyncCallError(status, 'route', { code, detailReason: details.reason ?? null, detailPartial: details.partial, detailHoldCount: details.holdCount })
+function callError(status: number, code: string, details: { reason?: string; partial?: boolean; holdCount?: number; pendingReviews?: number } = {}): StockPreparationProjectSyncCallError {
+  return new StockPreparationProjectSyncCallError(status, 'route', { code, detailReason: details.reason ?? null, detailPartial: details.partial, detailHoldCount: details.holdCount, detailPendingReviews: details.pendingReviews })
+}
+
+/** PR-9: a governed preview whose written change awaits review (server table-actions.cjs `withReviewStatus`). */
+const REVIEW_PENDING_PLAN = {
+  status: 'review_pending',
+  canApply: false,
+  dryRunToken: null,
+  counts: { add: 0, update: 2, skip: 4, inactive: 0, manual_confirm: 0 },
+  refreshReview: { pending: true, pendingReviews: 1, blocksMint: true, syn_review_sentinel: 'SYN-REVIEW-SENTINEL' },
+}
+
+/**
+ * PR-9 (RS-DRYRUN): the dry-run status literals the server can answer, scanned out of the plugin source (they are not
+ * exported): every literal `dryRunStatus` and `withReviewStatus` return, plus the preview answer's `recovery_pending`.
+ */
+function serverDryRunStatuses(): string[] {
+  const source = readFileSync(resolve(__dirname, PLUGIN_LIB, 'stock-preparation-table-actions.cjs'), 'utf8').replace(/\r\n/g, '\n')
+  const bodyOf = (name: string): string => {
+    const start = source.indexOf(`function ${name}(`)
+    expect(start, `${name} in the table-actions source`).toBeGreaterThan(0)
+    const end = source.indexOf('\nfunction ', start + 1)
+    return source.slice(start, end > start ? end : undefined)
+  }
+  const tokens = new Set<string>()
+  for (const name of ['dryRunStatus', 'withReviewStatus']) {
+    for (const match of bodyOf(name).matchAll(/return (?:[^\n]*\? )?'([a-z_]+)'(?: : '([a-z_]+)')?/g)) {
+      tokens.add(match[1])
+      if (match[2]) tokens.add(match[2])
+    }
+  }
+  const recovery = source.match(/\bstatus: recovery \? '([a-z_]+)'/)
+  expect(recovery, 'the preview answer\'s recovery status').not.toBeNull()
+  tokens.add(recovery![1])
+  return [...tokens].sort()
 }
 
 describe('PS — projectSync learns the batch refresh (W4)', () => {
@@ -554,16 +599,75 @@ describe('PS — projectSync learns the batch refresh (W4)', () => {
     }
   })
 
+  it('RS-DRYRUN (PR-9): every dry-run status the server can answer is in the web vocabulary, and nothing else is', () => {
+    const live = serverDryRunStatuses()
+    expect(live).toEqual(expect.arrayContaining(['ready', 'manual_confirm_required', 'suspended', 'recovery_pending', 'review_pending']))
+    expect([...STOCK_PREPARATION_DRY_RUN_STATUSES].sort()).toEqual(live)
+  })
+
+  it('PS-REV-1 (PR-9): review_pending ⇒ ① OK with pendingReviews, ② / ③ / ④ skips (never apply), verdict review_pending', async () => {
+    const api = syncApi({ dryRun: vi.fn().mockResolvedValue(REVIEW_PENDING_PLAN) })
+    const report = await runStockPreparationProjectSync(api, SYN_PROJECT)
+    expect(report.steps.map((step) => [step.id, step.status, step.reason])).toEqual([
+      ['dry-run', 'ok', 'PLAN_REVIEW_PENDING'],
+      ['confirm-queue', 'skip', 'RECONCILE_DEFERRED_REVIEW_PENDING'],
+      ['apply', 'skip', 'WRITE_REVIEW_PENDING'],
+      ['archive', 'skip', 'BATCH_ARCHIVE_NOT_ATTEMPTED'],
+    ])
+    expect(report.steps[0].detail).toMatchObject({ planStatus: 'review_pending', pendingReviews: 1 })
+    expect(report.verdict).toBe('review_pending')
+    expect(report.pass).toBe(true)
+    expect(api.reconcile).not.toHaveBeenCalled()
+    expect(api.apply).not.toHaveBeenCalled()
+    expect(api.archive).not.toHaveBeenCalled()
+    // Values-free: only the integer leaves the stanza — never `blocksMint`, never anything else in it.
+    expect(JSON.stringify(report)).not.toContain('SYN-REVIEW-SENTINEL')
+    expect(JSON.stringify(report)).not.toContain('blocksMint')
+    // Not the source-data failure main read it as.
+    expect(classifyPlanStep(1, REVIEW_PENDING_PLAN).reason).toBe('PLAN_REVIEW_PENDING')
+    expect(stockPrepSyncVerdictPlain('review_pending')?.zhNext).toContain('复核不代替核对')
+  })
+
+  it('PS-AP-6 (PR-9): apply 409 REVIEW_PENDING ⇒ ③ skip WRITE_REVIEW_PENDING (partial 0), verdict review_pending, archive not attempted', async () => {
+    const api = syncApi({ apply: vi.fn().mockRejectedValue(callError(409, 'STOCK_PREP_REFRESH_REVIEW_PENDING', { partial: false, pendingReviews: 2 })) })
+    const report = await runStockPreparationProjectSync(api, SYN_PROJECT)
+    const write = report.steps.find((step) => step.id === 'apply')!
+    expect(write).toMatchObject({ status: 'skip', reason: 'WRITE_REVIEW_PENDING' })
+    expect(write.detail).toMatchObject({ partial: 0, pendingReviews: 2 })
+    expect(report.verdict).toBe('review_pending')
+    expect(report.pass).toBe(true)
+    expect(report.steps.find((step) => step.id === 'archive')?.reason).toBe('BATCH_ARCHIVE_NOT_ATTEMPTED')
+    expect(api.archive).not.toHaveBeenCalled()
+    expect(classifyRefreshApplyFailure('STOCK_PREP_REFRESH_REVIEW_PENDING')).toBe('WRITE_REVIEW_PENDING')
+  })
+
+  it('PS-CHK-5 (PR-9): 「核对」 meeting review_pending ⇒ outcome review_pending (not failed); one dry run only', async () => {
+    const api = syncApi({ dryRun: vi.fn().mockResolvedValue(REVIEW_PENDING_PLAN) })
+    const result = await runStockPreparationSettlementCheck(api, SYN_PROJECT)
+    expect(result).toMatchObject({ outcome: 'review_pending', reason: 'PLAN_REVIEW_PENDING' })
+    expect(api.dryRun).toHaveBeenCalledTimes(1)
+    expect(api.reconcile).not.toHaveBeenCalled()
+    expect(api.apply).not.toHaveBeenCalled()
+    expect(api.archive).not.toHaveBeenCalled()
+  })
+
   it('PS-COPY: every new projectSync reason has sync-panel copy with a second line', () => {
     for (const reason of [
       'PLAN_SUSPENDED', 'PLAN_RECOVERY_PENDING', 'PLAN_STATE_MOVED', 'PLAN_REFRESH_STORE_UNAVAILABLE', 'PLAN_REFRESH_SCOPE_CHANGED',
       'RECONCILE_DEFERRED_SUSPENDED', 'WRITE_PULL_SUSPENDED', 'WRITE_BINDING_STALE', 'WRITE_RECOVERY_PENDING', 'WRITE_STATE_MOVED',
       'WRITE_REFRESH_STORE_UNAVAILABLE', 'WRITE_REFRESH_SCOPE_CHANGED',
+      // PR-9 (R-77 ⑦).
+      'PLAN_REVIEW_PENDING', 'RECONCILE_DEFERRED_REVIEW_PENDING', 'WRITE_REVIEW_PENDING',
     ]) {
       expect(Object.prototype.hasOwnProperty.call(STOCK_PREP_SYNC_REASON_PLAIN, reason), reason).toBe(true)
       expect(String(STOCK_PREP_SYNC_REASON_PLAIN[reason].zhNext ?? '').length, reason).toBeGreaterThan(0)
     }
     expect(stockPrepSyncVerdictPlain('awaiting_recovery')?.zhNext).toContain('平台管理员')
+    // PR-9: the review_pending verdict has both lines and is not the source-data sentence.
+    const review = stockPrepSyncVerdictPlain('review_pending')
+    expect(String(review?.zh ?? '').length).toBeGreaterThan(0)
+    expect(String(review?.zhNext ?? '').length).toBeGreaterThan(0)
+    expect(`${review?.zh}${review?.zhNext}`).not.toContain('源数据')
   })
 })
 

@@ -3028,6 +3028,16 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '拉取人员在「拉取待确认」里逐项处理(确认沿用、暂不处理或结束沿用关系),处理完再重新试算;什么都没有写。',
     enNext: 'The puller decides them on “Pull holds” (confirm, keep for now, or end the relationship), then previews again; nothing was written.',
   }),
+  /**
+   * 备料分批拉取第一期 step 5 PR-9 (R-77 ⑦): a written content change awaits its review by a puller — the preview was
+   * produced with no token. Not a fault, never the source-data sentence; 复核 and 核对 are both still needed.
+   */
+  PLAN_REVIEW_PENDING: Object.freeze({
+    zh: '试算完成,但本项目有一次已写入的内容变更在等复核,这次不写入',
+    en: 'The preview is done, but a written content change of this project awaits its review, so nothing is written this time',
+    zhNext: '拉取人员在「拉取待确认」里看过当前差异后完成变更复核,再重新试算;什么都没有写。这不是出错。',
+    enNext: 'The puller reads the current difference on “Pull holds” and completes the change review, then previews again; nothing was written. This is not an error.',
+  }),
   PLAN_RECOVERY_PENDING: Object.freeze({
     zh: '上次写入没有正常结束,这个项目在等恢复',
     en: 'The last write did not finish cleanly; this project awaits recovery',
@@ -3175,6 +3185,14 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     enNext: 'Uncertain rows reach the confirmation queue after the puller decides “Pull holds” and previews again (a confirmed relationship re-reconciles the queue, so asking now would be asked again).',
   }),
 
+  // PR-9 (R-77 ⑦): a review-pending pull defers the ledger too — nothing is written until the review is done.
+  RECONCILE_DEFERRED_REVIEW_PENDING: Object.freeze({
+    zh: '有一次已写入的变更在等复核,确认队列这一步先不跑',
+    en: 'A written change awaits its review, so the confirmation-queue step waits',
+    zhNext: '拉取人员完成变更复核并重新试算后,拿不准的行才会进「确认队列」。',
+    enNext: 'Uncertain rows reach the confirmation queue after the puller completes the change review and previews again.',
+  }),
+
   // 3. 写入
   IMPORTED: Object.freeze({
     zh: 'BOM 已经写进多维表',
@@ -3294,6 +3312,13 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     en: 'This pull is suspended as a whole, so nothing was written',
     zhNext: '有等拉取人员确认的项;拉取人员在「拉取待确认」里处理完再重新试算。这不是出错。',
     enNext: 'Items await the puller’s confirmation; the puller decides them on “Pull holds” and previews again. This is not an error.',
+  }),
+  // PR-9 (R-77 ⑦): a SKIP — at the preview (no token) or refused at the apply before any write.
+  WRITE_REVIEW_PENDING: Object.freeze({
+    zh: '有一次已写入的内容变更在等复核,这次没有写入',
+    en: 'A written content change awaits its review, so nothing was written this time',
+    zhNext: '拉取人员在「拉取待确认」里完成变更复核后再重新试算。这不是出错。',
+    enNext: 'The puller completes the change review on “Pull holds”, then previews again. This is not an error.',
   }),
   WRITE_BINDING_STALE: Object.freeze({
     zh: '试算之后沿用关系变了,这份计划作废,没有写入',
@@ -3586,6 +3611,13 @@ export const STOCK_PREP_SYNC_VERDICT_PLAIN: Record<string, StockPrepPlainEntry> 
     en: 'This pull is suspended as a whole — some items await the puller’s confirmation, and nothing was written.',
     zhNext: '不是出错:拉取人员在「拉取待确认」里处理完再重新试算,就会照常写入。',
     enNext: 'This is not an error: once the puller decides them on “Pull holds” and previews again, it writes as usual.',
+  }),
+  // PR-9 (R-77 ⑦): a written content change awaits its review — work for a puller, not a fault.
+  review_pending: Object.freeze({
+    zh: '这次没有写入 —— 本项目有一次已写入的内容变更在等拉取人员复核。',
+    en: 'Nothing was written this time — a written content change of this project awaits the puller’s review.',
+    zhNext: '不是出错:拉取人员在「拉取待确认」里完成变更复核;复核不代替核对,复核后还要核对一次(再试算)才能正式导出。',
+    enNext: 'This is not an error: the puller completes the change review on “Pull holds”; the review does not replace the check — one more check (a preview) still opens the formal export.',
   }),
   // PR-7 (F-19): awaiting recovery — not the source, not a retry.
   awaiting_recovery: Object.freeze({

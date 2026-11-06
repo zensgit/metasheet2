@@ -54,6 +54,22 @@ export const STOCK_PREP_REFRESH_STATUS_LABELS_ZH: Readonly<Record<StockPrepRefre
   complete: '已完成',
 })
 
+/**
+ * PR-9 (closes the #6579 version-skew residual): the en words for each status, so an English sentence never carries
+ * the raw token. RS-LABEL-EN pins the keys against `STOCK_PREP_REFRESH_STATUS_TOKENS`.
+ */
+export const STOCK_PREP_REFRESH_STATUS_LABELS_EN: Readonly<Record<StockPrepRefreshStatus, string>> = Object.freeze({
+  unreadable: 'state unreadable',
+  not_governed: 'not enabled',
+  executing: 'writing',
+  failed_pending_recovery: 'failed, awaiting recovery',
+  pending_confirmation: 'awaiting confirmation',
+  change_pending_review: 'change awaiting review',
+  confirmed_pending_execution: 'confirmed, awaiting the write',
+  executed_pending_settlement: 'written, awaiting check',
+  complete: 'complete',
+})
+
 export type StockPrepRefreshGoverned = 'pilot' | 'protected' | 'none' | 'unknown'
 
 const GOVERNED_TOKENS: readonly StockPrepRefreshGoverned[] = Object.freeze(['pilot', 'protected', 'none', 'unknown'])

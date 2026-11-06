@@ -1153,6 +1153,58 @@ describe('SP — the sync panel learns the batch refresh', () => {
     expect(root.querySelector('[data-testid="stock-prep-project-sync-open-refresh-queue"]')).toBeNull()
   })
 
+  it('SP-REV-1 (PR-9): a review-pending run — verdict review_pending, the PULL-only 去复核 link, never the ledger link; 「核对」 says the review is pending, never 「核对通过」', async () => {
+    const reviewPlan = { status: 'review_pending', canApply: false, dryRunToken: null, counts: { add: 0, update: 1, skip: 2, inactive: 0, manual_confirm: 2 }, refreshReview: { pending: true, pendingReviews: 1, blocksMint: true } }
+    const api = panelApi({ dryRun: vi.fn().mockResolvedValue(reviewPlan) })
+    let root = mountPanel({ api, canOpenRefreshQueue: true })
+    await flush(2)
+    await runPanel(root)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-verdict"]')?.getAttribute('data-verdict')).toBe('review_pending')
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-open-queue"]'), 'never the ledger queue link').toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-open-refresh-queue"]'), 'not the suspended link').toBeNull()
+    const link = root.querySelector('[data-testid="stock-prep-project-sync-open-refresh-review"]') as HTMLElement
+    expect(link?.textContent).toContain('复核')
+    expect(link?.textContent).toContain('(1)')
+    await click(link)
+    expect(emitted.filter((entry) => entry.event === 'navigate-stage').pop()?.args).toEqual(['refresh-queue'])
+    expect(api.apply).not.toHaveBeenCalled()
+    teardown(); setup()
+    root = mountPanel({ api: panelApi({ dryRun: vi.fn().mockResolvedValue(reviewPlan) }), canOpenRefreshQueue: false })
+    await flush(2)
+    await runPanel(root)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-open-refresh-review"]'), 'PULL only').toBeNull()
+    teardown(); setup()
+    // 「核对」 meeting review_pending: the review is pending — never 「核对通过」, never a failed check.
+    const check = panelApi({ dryRun: vi.fn().mockResolvedValue(reviewPlan) })
+    root = mountPanel({ api: check, refreshStatus: 'executed_pending_settlement', refreshSettled: false })
+    await flush(2)
+    await click(root.querySelector('[data-testid="stock-prep-project-sync-check"]') as HTMLElement)
+    const line = root.querySelector('[data-testid="stock-prep-project-sync-check-result"]') as HTMLElement
+    expect(line.getAttribute('data-check')).toBe('review_pending')
+    expect(line.textContent).toContain('等待复核')
+    expect(line.textContent).toContain('复核不代替核对')
+    expect(line.textContent).not.toContain('核对通过')
+    expect(line.textContent).not.toContain('没有完成')
+    expect(check.apply).not.toHaveBeenCalled()
+  })
+
+  it('SP-LABEL-EN (PR-9): the English 「核对」 sentence never carries a raw status token; an unknown one reads "not recognised"', async () => {
+    h.locale = 'en-US'
+    const api = panelApi()
+    const root = mountPanel({ api, refreshStatus: 'executed_pending_settlement', refreshSettled: false })
+    await flush(2)
+    await click(root.querySelector('[data-testid="stock-prep-project-sync-check"]') as HTMLElement)
+    const line = () => root.querySelector('[data-testid="stock-prep-project-sync-check-result"]') as HTMLElement
+    panelProps.refreshStatus = 'change_pending_review'
+    await flush(2)
+    expect(line().textContent).toContain('change awaiting review')
+    expect(line().textContent).not.toContain('change_pending_review')
+    panelProps.refreshStatus = 'status_from_a_newer_server'
+    await flush(2)
+    expect(line().textContent).toContain('not recognised')
+    expect(line().textContent).not.toContain('status_from_a_newer_server')
+  })
+
   it('SP-REC-1: awaiting recovery names the platform admin, not the source', async () => {
     const root = mountPanel({ api: panelApi({ dryRun: vi.fn().mockResolvedValue({ status: 'recovery_pending', canApply: false, dryRunToken: null, counts: {}, refreshRecovery: { pending: true, openExecutions: 1 } }) }) })
     await flush(2)
