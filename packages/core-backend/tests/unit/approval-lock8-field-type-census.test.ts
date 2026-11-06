@@ -245,7 +245,7 @@ describe('Lock-8 L8-A field-type census (N-1) — backend sites', () => {
   it('MS-4: DETAIL_LEAF_FIELD_TYPES is DERIVED — exactly FORM_FIELD_TYPES minus the excluded set', () => {
     const expected = new Set(
       [...FORM_FIELD_TYPES].filter(
-        (type) => type !== 'detail' && type !== 'record-link' && type !== 'date_range' && type !== 'explanation' && type !== 'department',
+        (type) => type !== 'detail' && type !== 'record-link' && type !== 'date_range' && type !== 'explanation' && type !== 'department' && type !== 'attachment',
       ),
     )
     expect([...DETAIL_LEAF_FIELD_TYPES].sort()).toEqual([...expected].sort())
@@ -257,6 +257,11 @@ describe('Lock-8 L8-A field-type census (N-1) — backend sites', () => {
     expect(DETAIL_LEAF_FIELD_TYPES.has('date_range')).toBe(false)
     expect(DETAIL_LEAF_FIELD_TYPES.has('explanation')).toBe(false)
     expect(DETAIL_LEAF_FIELD_TYPES.has('department')).toBe(false)
+    // approval-detail-leaf-attachment-pin-20260904: attachment is excluded UNCONDITIONALLY (not
+    // behind the APPROVAL_ATTACHMENTS_ENABLED flag) — see the source-site comment above the
+    // filter. Mirrored cross-package against the web literal in
+    // approval-detail-leaf-set-mirror.test.ts.
+    expect(DETAIL_LEAF_FIELD_TYPES.has('attachment')).toBe(false)
     expect(DETAIL_LEAF_FIELD_TYPES.has('text')).toBe(true)
   })
 
