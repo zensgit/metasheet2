@@ -4,6 +4,7 @@
 // database-observed blocking, and database-raised audit failures are deliberate.
 // Run only in the EXPECT_DB lane / a freshly-created disposable synthetic DB.
 
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -865,5 +866,222 @@ describeIfDatabase('SA05B1 Yida delivery ledger — real PostgreSQL, no transpor
       expect(JSON.stringify(row)).not.toMatch(/synthetic-tenant|synthetic-owner|synthetic-credential|synthetic-target|synthetic-instance/)
       expect(JSON.stringify(row)).not.toContain(claimed.claimToken)
     }
+  })
+
+  // Y1 (§3.2 first-send prerequisite): DBA recovery for a row left in `dispatching` after its sending
+  // process died. Every case below runs the runbook's checked-in psql scripts with the real psql client
+  // against this case's schema; nothing re-types the SQL. Interleavings use the statement gates above and
+  // a real table lock, never sleeps. The admissions table is a minimal synthetic stub with the two
+  // columns the runbook reads (grant_id, ledger_id); 095's own constraints are covered by its own suite.
+  describe('Y1 dispatching recovery runbook (synthetic PostgreSQL acceptance)', () => {
+    const runbookDir = path.join(repoRoot, 'docs', 'development', 'takeover-beiliao-20260821')
+    const runbookDoc = path.join(runbookDir, 'runbook-yida-dispatching-recovery-20261106.md')
+    const checkSql = path.join(runbookDir, 'runbook-yida-dispatching-recovery-20261106-check.sql')
+    const recoverSql = path.join(runbookDir, 'runbook-yida-dispatching-recovery-20261106-recover.sql')
+    const createFence = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '091_create_integration_yida_create_fence.sql')
+    const ADMISSIONS = 'integration_yida_send_admissions'
+    const DONE = 'DISPATCHING_RECOVERY=DONE status=outcome_unknown reason=manual_recovery'
+    const AUDIT_WRITE = 'INSERT INTO integration_yida_delivery_audit'
+    type PsqlExit = { code: number | null; stdout: string; stderr: string }
+    type Dispatching = { ledgerId: string; claimToken: string; grantId: string }
+
+    function psql(file: string, variables: Record<string, string>): { app: string; exit: Promise<PsqlExit> } {
+      const app = `y1_runbook_${randomUUID().replaceAll('-', '').slice(0, 16)}`
+      const args = ['-X', '-q', '-A', '-d', String(process.env.DATABASE_URL)]
+      for (const [name, value] of Object.entries(variables)) args.push('-v', `${name}=${value}`)
+      args.push('-f', file)
+      // The search_path pin keeps the script inside this case's schema; it never falls through to public.
+      const child = spawn(process.env.PSQL || 'psql', args, {
+        env: { ...process.env, PGOPTIONS: `-c search_path=${schema}`, PGAPPNAME: app },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      let stdout = ''
+      let stderr = ''
+      child.stdout.setEncoding('utf8')
+      child.stderr.setEncoding('utf8')
+      child.stdout.on('data', (chunk: string) => { stdout += chunk })
+      child.stderr.on('data', (chunk: string) => { stderr += chunk })
+      const exit = new Promise<PsqlExit>((resolve, reject) => {
+        child.on('error', reject)
+        child.on('close', (code) => resolve({ code, stdout, stderr }))
+      })
+      return { app, exit }
+    }
+
+    // Waits until a session (by pid, or the runbook's psql by application_name) is in a real lock wait
+    // behind `blockerPid`, optionally at a statement with the given prefix. Returns the waiting pid.
+    async function lockWait(waiter: { pid: number } | { app: string }, blockerPid: number, statementPrefix = ''): Promise<number> {
+      const byPid = 'pid' in waiter
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline) {
+        const result = await owner.query(
+          `SELECT pid FROM pg_stat_activity
+            WHERE ${byPid ? 'pid = $1::int' : 'application_name = $1::text'}
+              AND wait_event_type = 'Lock' AND $2::int = ANY(pg_blocking_pids(pid))
+              AND left(ltrim(query, E' \\t\\r\\n'), length($3::text)) = $3::text`,
+          [byPid ? waiter.pid : waiter.app, blockerPid, statementPrefix],
+        )
+        if (result.rows.length === 1) return Number(result.rows[0].pid)
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      throw new Error('Expected real PostgreSQL lock wait was not observed')
+    }
+
+    // Synthetic process facts, read from the database clock: the "current backend" started at the
+    // latest instant the script's 2 s clock tolerance admits (now + 2 s), so a claim committed before
+    // this call is "before the backend start" and a claim made after it is not.
+    async function processFacts(): Promise<{ backend_started_at: string; host_now: string }> {
+      const format = 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+      const result = await owner.query(
+        `SELECT to_char(t AT TIME ZONE 'UTC', $1) AS host_now,
+                to_char((t + interval '2 seconds') AT TIME ZONE 'UTC', $1) AS backend_started_at
+           FROM (SELECT clock_timestamp() AS t) s`, [format])
+      return { host_now: String(result.rows[0].host_now), backend_started_at: String(result.rows[0].backend_started_at) }
+    }
+
+    async function recoverVars(grantId: string): Promise<Record<string, string>> {
+      return { grant_id: grantId, ...(await processFacts()) }
+    }
+
+    async function dispatchingRow(input: Input = fixture()): Promise<Dispatching> {
+      await owner.query(readFileSync(createFence, 'utf8'))
+      await owner.query(`CREATE TABLE IF NOT EXISTS ${ident(ADMISSIONS)} (
+        grant_id TEXT PRIMARY KEY, ledger_id TEXT NOT NULL UNIQUE REFERENCES ${ident(LEDGER)}(id))`)
+      const prepared = await first.store.prepare(input)
+      const grantId = randomUUID()
+      await insertRow(ADMISSIONS, { grant_id: grantId, ledger_id: prepared.record.id })
+      const claimed = await first.store.claim(actor(input))
+      expect(claimed.record.status).toBe('dispatching')
+      return { ledgerId: prepared.record.id, claimToken: claimed.claimToken, grantId }
+    }
+
+    function sortedById(list: Row[]): Row[] {
+      return [...list].sort((a, b) => String(a.id).localeCompare(String(b.id)))
+    }
+
+    function dataLines(stdout: string, kind: string): string[] {
+      return stdout.split('\n').map((line) => line.trim()).filter((line) => line.startsWith(`${kind}|`))
+    }
+
+    it('the SQL printed in the runbook is the checked-in scripts these cases execute, byte for byte (ASCII)', () => {
+      const lf = (text: string) => text.replaceAll('\r\n', '\n')
+      const doc = lf(readFileSync(runbookDoc, 'utf8'))
+      const blocks = [...doc.matchAll(/^```sql\n([\s\S]*?)^```$/gm)].map((match) => match[1])
+      expect(blocks).toEqual([checkSql, recoverSql].map((file) => lf(readFileSync(file, 'utf8'))))
+      for (const file of [checkSql, recoverSql]) expect(/^[\t\n\r\x20-\x7e]*$/.test(readFileSync(file, 'latin1'))).toBe(true)
+    })
+
+    it('ACK first: the runbook waits on the row lock, re-reads acknowledged and exits; row and audit unchanged', async () => {
+      const row = await dispatchingRow()
+      const commit = first.gateBefore('COMMIT')
+      const ack = outcome(first.store.recordAcknowledgement(acknowledgement(row.claimToken)))
+      await reach(commit) // The ACK's status change and audit row are written but not committed; it holds the row lock.
+      const run = psql(recoverSql, await recoverVars(row.grantId))
+      await lockWait({ app: run.app }, first.pid)
+      commit.release()
+      expect((await ack).ok).toBe(true)
+      const result = await run.exit
+      expect(result.code).toBe(0)
+      expect(result.stdout.trim()).toBe('DISPATCHING_RECOVERY=STOP status_not_dispatching')
+      const ledger = await rows(LEDGER)
+      expect(ledger).toHaveLength(1)
+      expect(ledger[0]).toMatchObject({ id: row.ledgerId, status: 'acknowledged', claim_token: row.claimToken, ack_status_code: 200 })
+      const audit = await rows(AUDIT)
+      expect(audit.map((entry) => entry.event).sort()).toEqual(['acknowledgement', 'claim', 'prepare'])
+      expect(audit.some((entry) => entry.reason === 'manual_recovery')).toBe(false)
+    })
+
+    it('recovery first: a late finish() is refused because the row is no longer dispatching; one manual_recovery audit, claim and reservation kept', async () => {
+      const row = await dispatchingRow()
+      const ledgerBefore = (await rows(LEDGER))[0]
+      const auditBefore = sortedById(await rows(AUDIT))
+      const checkBefore = await psql(checkSql, await processFacts()).exit
+      expect(checkBefore.code).toBe(0)
+      expect(dataLines(checkBefore.stdout, 'clock')).toEqual(['clock|t|t'])
+      expect(dataLines(checkBefore.stdout, 'ledger')).toEqual(['ledger|dispatching|1'])
+      expect(dataLines(checkBefore.stdout, 'dispatching')).toEqual(['dispatching|1|0|0|0'])
+      // Barrier: hold the audit table so the runbook stops at its audit write, after its row lock and status change.
+      await second.client.query('BEGIN')
+      await second.client.query(`LOCK TABLE ${ident(AUDIT)} IN SHARE ROW EXCLUSIVE MODE`)
+      const run = psql(recoverSql, await recoverVars(row.grantId))
+      const runPid = await lockWait({ app: run.app }, second.pid, AUDIT_WRITE)
+      // The holder's late ACK arrives while the runbook transaction is open: it waits on the runbook's row lock.
+      const lateAck = outcome(first.store.recordAcknowledgement(acknowledgement(row.claimToken)))
+      await lockWait({ pid: first.pid }, runPid)
+      await second.client.query('ROLLBACK')
+      const result = await run.exit
+      expect(result.code).toBe(0)
+      expect(result.stdout.trim()).toBe(DONE)
+      expect(await lateAck).toEqual({ ok: false, code: 'YIDA_DELIVERY_STATE' })
+      await rejected(first.store.markUnknown({ ...actor(), claimToken: row.claimToken, reason: 'transport_unknown' }), 'YIDA_DELIVERY_STATE')
+      // Only the status moved (updated_at is the trigger's own stamp); identity and claim columns are kept.
+      const ledgerAfter = await rows(LEDGER)
+      expect(ledgerAfter).toHaveLength(1)
+      const { status: statusBefore, updated_at: _updatedBefore, ...keptBefore } = ledgerBefore
+      const { status: statusAfter, updated_at: _updatedAfter, ...keptAfter } = ledgerAfter[0]
+      expect([statusBefore, statusAfter]).toEqual(['dispatching', 'outcome_unknown'])
+      expect(keptAfter).toEqual(keptBefore)
+      expect(keptAfter).toMatchObject({ claim_token: row.claimToken, claim_actor_id: 'synthetic-actor-a', ack_status_code: null })
+      const auditAfter = sortedById(await rows(AUDIT))
+      const added = auditAfter.filter((entry) => !auditBefore.some((before) => before.id === entry.id))
+      expect(added).toHaveLength(1)
+      expect(added[0]).toMatchObject({ ledger_id: row.ledgerId, event: 'unknown', status: 'outcome_unknown', reason: 'manual_recovery' })
+      expect(auditAfter.filter((entry) => entry.id !== added[0].id)).toEqual(auditBefore)
+      // The creation reservation is not released: the same business key cannot be prepared again.
+      await rejected(first.store.prepare(fixture({ operationId: 'synthetic-operation-b', rowKey: 'synthetic-row-b' })), 'YIDA_DELIVERY_BUSINESS_CONFLICT')
+      const checkAfter = await psql(checkSql, await processFacts()).exit
+      expect(dataLines(checkAfter.stdout, 'ledger')).toEqual(['ledger|outcome_unknown|1'])
+      expect(dataLines(checkAfter.stdout, 'audit')).toContain('audit|unknown|outcome_unknown|manual_recovery|1')
+      expect(dataLines(checkAfter.stdout, 'dispatching')).toEqual(['dispatching|0|0|0|0'])
+      // A second run for the same grant finds nothing to do.
+      expect((await psql(recoverSql, await recoverVars(row.grantId)).exit).stdout.trim()).toBe('DISPATCHING_RECOVERY=STOP status_not_dispatching')
+      expect(await rows(AUDIT)).toHaveLength(auditAfter.length)
+    })
+
+    it('interrupted before the audit write: the single transaction rolls back; the row stays dispatching and the audit is unchanged', async () => {
+      const row = await dispatchingRow()
+      const ledgerBefore = await rows(LEDGER)
+      const auditBefore = sortedById(await rows(AUDIT))
+      await second.client.query('BEGIN')
+      await second.client.query(`LOCK TABLE ${ident(AUDIT)} IN SHARE ROW EXCLUSIVE MODE`)
+      const run = psql(recoverSql, await recoverVars(row.grantId))
+      // The runbook has locked the row and executed its status UPDATE; it now waits to write the audit row.
+      const runPid = await lockWait({ app: run.app }, second.pid, AUDIT_WRITE)
+      expect((await owner.query('SELECT pg_terminate_backend($1) AS terminated', [runPid])).rows[0].terminated).toBe(true)
+      const result = await run.exit
+      expect(result.code).not.toBe(0)
+      expect(result.stdout).not.toContain('DISPATCHING_RECOVERY=DONE')
+      await second.client.query('ROLLBACK')
+      expect(await rows(LEDGER)).toEqual(ledgerBefore)
+      expect(ledgerBefore[0].status).toBe('dispatching')
+      expect(sortedById(await rows(AUDIT))).toEqual(auditBefore)
+      // Nothing half-done is left behind: a fresh run completes normally.
+      expect((await psql(recoverSql, await recoverVars(row.grantId)).exit).stdout.trim()).toBe(DONE)
+    })
+
+    it('refuses without changing anything: missing inputs, unknown grant, a claim not before the backend start, a prepared row', async () => {
+      const row = await dispatchingRow()
+      const facts = await processFacts()
+      const before = { ledger: await rows(LEDGER), audit: sortedById(await rows(AUDIT)) }
+      const stop = async (variables: Record<string, string>) => (await psql(recoverSql, variables).exit).stdout.trim()
+      expect(await stop({ backend_started_at: facts.backend_started_at, host_now: facts.host_now })).toBe('DISPATCHING_RECOVERY=STOP missing_grant_id')
+      expect(await stop({ grant_id: row.grantId, host_now: facts.host_now })).toBe('DISPATCHING_RECOVERY=STOP missing_backend_started_at')
+      expect(await stop({ grant_id: row.grantId, backend_started_at: facts.backend_started_at })).toBe('DISPATCHING_RECOVERY=STOP missing_host_now')
+      expect(await stop({ ...facts, grant_id: randomUUID() })).toBe('DISPATCHING_RECOVERY=STOP no_single_row')
+      // The backend process started BEFORE the claim: the claim may belong to the live process.
+      expect(await stop({ grant_id: row.grantId, host_now: facts.host_now, backend_started_at: '2000-01-01T00:00:00.000Z' }))
+        .toBe('DISPATCHING_RECOVERY=STOP claim_not_before_backend_start')
+      expect(await stop({ grant_id: row.grantId, host_now: facts.host_now, backend_started_at: '2999-01-01T00:00:00.000Z' }))
+        .toBe('DISPATCHING_RECOVERY=STOP backend_start_in_future')
+      expect(await stop({ grant_id: row.grantId, backend_started_at: facts.backend_started_at, host_now: '2000-01-01T00:00:00.000Z' }))
+        .toBe('DISPATCHING_RECOVERY=STOP clock_skew')
+      expect({ ledger: await rows(LEDGER), audit: sortedById(await rows(AUDIT)) }).toEqual(before)
+      // A prepared row (never claimed) is gate 2's runbook, not this one.
+      const prepared = await first.store.prepare(fixture({ operationId: 'synthetic-operation-p', rowKey: 'synthetic-row-p', businessKeyDigest: 'c'.repeat(64) }))
+      const preparedGrant = randomUUID()
+      await insertRow(ADMISSIONS, { grant_id: preparedGrant, ledger_id: prepared.record.id })
+      expect(await stop({ ...(await processFacts()), grant_id: preparedGrant })).toBe('DISPATCHING_RECOVERY=STOP status_not_dispatching')
+      expect((await first.store.get(scope(fixture({ operationId: 'synthetic-operation-p', rowKey: 'synthetic-row-p' }))))?.status).toBe('prepared')
+    })
   })
 })
