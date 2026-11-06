@@ -11712,7 +11712,7 @@ export class ApprovalProductService {
   async dispatchAction(
     id: string,
     request: ApprovalActionRequest,
-    actor: CreateApprovalActor & { ip?: string | null; userAgent?: string | null },
+    actor: CreateApprovalActor & { ip?: string | null; userAgent?: string | null; requesterRevokeRoute?: true },
     settlementCoordinationHandover?: ApprovalSettlementCoordinationHandoverV1,
   ): Promise<UnifiedApprovalDTO> {
     if (!pool) throw new Error('Database not available')
@@ -11782,7 +11782,7 @@ export class ApprovalProductService {
         if (!handover) await client.query('BEGIN')
       }
 
-      const instanceResult = await client.query<ApprovalInstanceRow>(
+      const instanceResult = await client.query<ApprovalInstanceRow & { org_id: string | null }>(
         `SELECT * FROM approval_instances WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform' FOR UPDATE`,
         [id],
       )
@@ -11815,6 +11815,24 @@ export class ApprovalProductService {
       // P17/P22/P26: attendance instances fail closed before assignment/instance DML
       // (including adversarial rows carrying published_definition_id).
       await guardAttendanceCentralMutationOrThrow(client, instance)
+      // The requester-only HTTP exception must authorize before instance-derived validation errors.
+      if (request.action === 'revoke' && actor.requesterRevokeRoute === true) {
+        if (toNullableRecord(instance.requester_snapshot)?.id !== actor.userId) {
+          throw new ServiceError('Only the requester can revoke this approval', 403, 'APPROVAL_REVOKE_FORBIDDEN')
+        }
+        const orgId = typeof instance.org_id === 'string' ? instance.org_id.trim() : ''
+        const membership = orgId
+          ? await client.query(
+              `SELECT 1 FROM user_orgs
+               WHERE user_id = $1 AND org_id = $2 AND is_active = true
+               LIMIT 1`,
+              [actor.userId, orgId],
+            )
+          : null
+        if (membership?.rows.length !== 1) {
+          throw new ServiceError('Requester cannot revoke this approval', 403, 'APPROVAL_REVOKE_FORBIDDEN')
+        }
+      }
       // H-5 — OPTIONAL optimistic-lock precondition, placed exactly where `adminJump` places its
       // own (same file, `if (instance.version !== request.version)`): AFTER the attendance
       // fail-closed guard, so an attendance-sourced instance keeps answering with the attendance
