@@ -614,6 +614,10 @@ export function useMultitableGrid(opts: {
   let appendGeneration = 0
   let rangePending = false
   let activeGridWrites = 0
+  // Cell patches whose answer has not come back. A patch joins the undo history only once it succeeds
+  // (after its await), so an undo or redo while one is in flight would step over it and replay an earlier,
+  // unrelated edit to the server instead: undo and redo do nothing until it settles.
+  let pendingCellPatches = 0
   let rangeContextId = 0
   let loadedRangeContextId = -1
   // Invalidate immediately, including an away/back roundtrip hidden by Vue's batched watcher.
@@ -1448,6 +1452,7 @@ export function useMultitableGrid(opts: {
     const oldLinkSummaries = options?.previousLinkSummaries ?? linkSummaries.value[recordId]?.[fieldId]
     let nextLinkSummaries: LinkedRecordSummary[] | undefined
     activeGridWrites++
+    pendingCellPatches++
 
     // Optimistic update
     if (row) row.data[fieldId] = value
@@ -1514,6 +1519,7 @@ export function useMultitableGrid(opts: {
       }
     } finally {
       activeGridWrites--
+      pendingCellPatches--
     }
     return null
   }
@@ -1551,7 +1557,7 @@ export function useMultitableGrid(opts: {
   }
 
   async function undo() {
-    if (rangePending || !canUndo.value) return
+    if (rangePending || pendingCellPatches > 0 || !canUndo.value) return
     const edit = editHistory.value[historyIndex.value]
     if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()
     const route = manualReplayRoute(edit)
@@ -1572,7 +1578,7 @@ export function useMultitableGrid(opts: {
   }
 
   async function redo() {
-    if (rangePending || !canRedo.value) return
+    if (rangePending || pendingCellPatches > 0 || !canRedo.value) return
     const nextHistoryIndex = historyIndex.value + 1
     const edit = editHistory.value[nextHistoryIndex]
     if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()
