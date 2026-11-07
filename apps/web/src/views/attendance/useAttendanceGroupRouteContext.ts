@@ -83,7 +83,7 @@ export function useAttendanceGroupRouteContext({
       }
       const payload = await response.json()
       if (currentGeneration !== generation || !isSessionCurrent()) return
-      if (!payload?.ok || !isAuthorizedGroup(payload.data)) {
+      if (!payload?.ok || !isAuthorizedGroup(payload.data) || payload.data.id !== currentContext.groupId) {
         state.value = { kind: 'error' }
         return
       }
