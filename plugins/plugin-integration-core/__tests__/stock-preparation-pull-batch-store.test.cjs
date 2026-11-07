@@ -221,7 +221,7 @@ test('ST-A10 (M-CFG-2) allocate with a stale expectedRule => 409 CONFLICT settin
   // expectedRule is required and closed (validated before any statement).
   const fresh = setup()
   const logBefore = fresh.db.log.length
-  // The removed C2 tokens ('off') are pinned in the vocabulary-migration suite (VM-6), which runs last in the chain.
+  // The removed C2 tokens ('off') are pinned in the vocabulary-migration suite (VM-6).
   for (const bad of [undefined, '', 'Material', ' material', 'position']) {
     await rejects(alloc(fresh.store, { expectedRule: bad }), PULL_BATCH_ERROR_CODES.STAMP_INVALID, `expectedRule ${JSON.stringify(bad)}`)
   }

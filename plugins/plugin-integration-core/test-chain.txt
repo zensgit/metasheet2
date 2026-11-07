@@ -153,6 +153,7 @@ node __tests__/stock-preparation-pull-batch.test.cjs
 node __tests__/stock-preparation-pull-batch-store.test.cjs
 node __tests__/stock-preparation-pull-batch-portability.test.cjs
 node __tests__/stock-preparation-pull-batch-band.test.cjs
+node __tests__/stock-preparation-pull-batch-vocabulary-migration.test.cjs
 node __tests__/stock-preparation-project-write-lock-holder-within.test.cjs
 node __tests__/stock-preparation-carry-plan-wiring.test.cjs
 node __tests__/stock-preparation-carry-ledger.test.cjs
@@ -329,7 +330,6 @@ node __tests__/stock-preparation-manual-rows-switch-routes.test.cjs
 # --- sealed-export stage tail: S4 -> S5 -> S6-A, in stage order, must remain LAST ---
 # (pinned by __tests__/sealed-export-s4-generation-migration.test.cjs)
 # --- 以下 24 行为 S4/S5/S6-A 有序尾窗，新测试请插在此行之前 ---
-node __tests__/stock-preparation-pull-batch-vocabulary-migration.test.cjs
 node __tests__/sealed-export-s4-generation-kernel.test.cjs
 node __tests__/sealed-export-s4-generation-migration.test.cjs
 node __tests__/sealed-export-sqlserver-sealed-snapshot-profile.test.cjs

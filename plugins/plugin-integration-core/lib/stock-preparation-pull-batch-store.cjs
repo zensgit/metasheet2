@@ -965,7 +965,7 @@ function createStockPreparationPullBatchStore({ db, idGenerator, now } = {}) {
         // The helper judges the captured values it is handed; landing / placement are NULL until applied, so only the
         // keys the row actually carries are passed (a NULL is "not captured", never a value).
         const captured = Object.fromEntries(Object.entries(before).filter(([, value]) => isSet(value)))
-        const refused = refusedPullBatchConfigEdits({ captured, edit: { ...patch }, stamped: state.hasStamped })
+        const refused = refusedPullBatchConfigEdits({ captured, edit: { ...patch }, state })
         if (refused.length > 0) {
           throw pullBatchError(409, PULL_BATCH_ERROR_CODES.CONFIG_LOCKED, 'these settings are locked because the sheet already carries batch labels', { locked: Array.from(refused) })
         }
