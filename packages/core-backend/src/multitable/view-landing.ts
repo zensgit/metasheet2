@@ -34,6 +34,7 @@ import {
   getObjectViewId,
   type MultitableProvisioningQueryFn,
 } from './provisioning'
+import { normalizeJsonArray } from './field-codecs'
 import { countFrozenPrefix, isFieldPropertyHidden, parseFrozenLeftColumnIds } from './frozen-prefix'
 
 export const VIEW_LANDING_INPUT_INVALID_CODE = 'MULTITABLE_VIEW_LANDING_INPUT_INVALID'
@@ -180,7 +181,22 @@ export const DESCRIBE_LAYOUT_RESULT_KEYS = Object.freeze([
 
 /** Same ordering as the context route and GET /views (`ORDER BY created_at ASC`, no tie-break). */
 export const DESCRIBE_LAYOUT_VIEWS_SQL =
-  'SELECT id, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC'
+  'SELECT id, type, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC'
+/**
+ * View types the web never renders as a grid: MultitableWorkbench.vue renders MetaGridTable — the only component that
+ * applies `frozenLeftColumnIds` — in the v-else after exactly these branches (form, kanban, gallery, calendar,
+ * timeline, gantt, hierarchy; exact, case-sensitive match on `view.type ?? 'grid'`). Any other type, a missing type
+ * included, renders the grid and is counted.
+ */
+export const DESCRIBE_LAYOUT_NON_GRID_VIEW_TYPES: ReadonlySet<string> = new Set([
+  'form',
+  'kanban',
+  'gallery',
+  'calendar',
+  'timeline',
+  'gantt',
+  'hierarchy',
+])
 /** The shared sheet order the grid renders (multitable/loaders.ts loadFieldsForSheet). */
 export const DESCRIBE_LAYOUT_FIELDS_SQL =
   'SELECT id, property FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC'
@@ -203,11 +219,6 @@ function parseJsonish(value: unknown): unknown {
 function asPlainObject(value: unknown): Record<string, unknown> | null {
   const parsed = parseJsonish(value)
   return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null
-}
-
-function asStringArray(value: unknown): string[] {
-  const parsed = parseJsonish(value)
-  return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []
 }
 
 function countOf(result: { rows: unknown[] }): number {
@@ -234,7 +245,7 @@ export async function describeObjectSheetLayout(
   const personalResult = await input.query(DESCRIBE_LAYOUT_PERSONAL_SQL, [sheetId])
   const trashResult = await input.query(DESCRIBE_LAYOUT_TRASH_SQL, [sheetId])
 
-  const views = viewsResult.rows as Array<{ id?: unknown; hidden_field_ids?: unknown; config?: unknown }>
+  const views = viewsResult.rows as Array<{ id?: unknown; type?: unknown; hidden_field_ids?: unknown; config?: unknown }>
   const fields = (fieldsResult.rows as Array<{ id?: unknown; property?: unknown }>)
     .filter((row) => typeof row.id === 'string')
     .map((row) => ({ id: row.id as string, propertyHidden: isFieldPropertyHidden(asPlainObject(row.property)) }))
@@ -254,9 +265,13 @@ export async function describeObjectSheetLayout(
   let viewsWithFrozenColumns = 0
   let viewsLosingFrozen = 0
   for (const view of views) {
+    if (DESCRIBE_LAYOUT_NON_GRID_VIEW_TYPES.has(String(view.type ?? 'grid'))) continue
     const frozenIds = parseFrozenLeftColumnIds(asPlainObject(view.config))
     if (frozenIds.length === 0) continue
-    const hidden = new Set(asStringArray(view.hidden_field_ids))
+    // The hidden ids exactly as every host view read ships them to the grid (GET /view's tryResolveView, /context and
+    // the meta_views serializers all use normalizeJsonArray: trimmed, finite numbers stringified); the grid then
+    // hides by exact id.
+    const hidden = new Set(normalizeJsonArray(view.hidden_field_ids))
     const ordered = fields.filter((field) => !field.propertyHidden && !hidden.has(field.id)).map((field) => field.id)
     const current = countFrozenPrefix(ordered, frozenIds)
     if (current === 0) continue

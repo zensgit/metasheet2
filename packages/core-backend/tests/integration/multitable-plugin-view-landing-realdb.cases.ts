@@ -11,8 +11,10 @@
  *   BI5-RD-01 promote: `prep-fill` becomes views[0] of the context route AND of GET /views; only its created_at moved
  *             (every other column of it, and every column of every other view, byte-identical); a repeat answers
  *             alreadyFirst and writes nothing (idempotent).
- *   BI5-RD-02 a later re-ensure of the plugin's views (the real provisioning run again → `ensureView` upserts) keeps the
- *             promotion: created_at unchanged, still first.
+ *   BI5-RD-02 a later re-ensure keeps the promotion: the real provisioning run again AND a re-ensure of the PROMOTED view
+ *             itself (the plugin's ensureStockPreparationFillView → the host `ensureView` upsert of that very row; the
+ *             provisioning re-run alone returns before any view write on a ready sheet) — created_at unchanged at
+ *             microsecond precision, still first.
  *   BI5-RD-03 template-installed ties: every view of the sheet on ONE created_at (a pre-#6091 template install); the
  *             promotion of a view tied AT the minimum still moves it strictly before all others and the route lists it
  *             first (the design's literal `created_at > min(all)` guard would answer alreadyFirst and move nothing).
@@ -22,6 +24,10 @@
  *   BI5-RD-06 describe: viewCount / firstView / the frozen prefix (a frozen first-visible column → counted, lost under a
  *             left insert, kept with leftInsertCount 0) / personal fieldOrder overrides (non-empty only) / the trash count;
  *             exactly the six keys and no view name, physical id or field id in the answer.
+ *   BI5-RD-07 ONE transaction: while the promotion sits inside its UPDATE (a per-run sleeping BEFORE UPDATE trigger on
+ *             this sheet's views holds it there), a second pooled connection can take neither the canonical sheet fence
+ *             (fence flag on) nor a FOR UPDATE NOWAIT lock on another view of the sheet — the fence and the row locks are
+ *             held until the UPDATE commits, which only one transaction around fence → lock → UPDATE gives.
  * Values-free: every id is synthetic and per-run; the sheet's rows are deleted at the end.
  */
 import { createRequire } from 'module'
@@ -36,7 +42,11 @@ import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import type { LoadedPlugin } from '../../src/core/plugin-loader'
 import type { PluginContext } from '../../src/types/plugin'
-import { __resetRecoveryWriterStateColumnProbe, SheetWriterBlockedError } from '../../src/multitable/canonical-sheet-fence'
+import {
+  __resetRecoveryWriterStateColumnProbe,
+  canonicalSheetFenceKey,
+  SheetWriterBlockedError,
+} from '../../src/multitable/canonical-sheet-fence'
 import { getObjectViewId } from '../../src/multitable/provisioning'
 import { StockPreparationOverviewStructureWriteError } from '../../src/multitable/stock-preparation-overview-contract'
 import { DESCRIBE_LAYOUT_RESULT_KEYS, VIEW_LANDING_INPUT_INVALID_CODE } from '../../src/multitable/view-landing'
@@ -48,13 +58,14 @@ const require = createRequire(import.meta.url)
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
 const PLUGIN_LIB = path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib')
 /* eslint-disable @typescript-eslint/no-explicit-any */
-const { ensureStockPreparationSandboxTarget, ensureStockPreparationTodoView } = require(path.join(PLUGIN_LIB, 'stock-preparation-target-provisioning.cjs')) as any
+const { ensureStockPreparationSandboxTarget, ensureStockPreparationFillView, ensureStockPreparationTodoView } = require(path.join(PLUGIN_LIB, 'stock-preparation-target-provisioning.cjs')) as any
 const ownBaseLib = require(path.join(PLUGIN_LIB, 'stock-preparation-own-base.cjs')) as any
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 const FENCE_ENV = 'MULTITABLE_ENABLE_WRITER_FENCE'
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function createProductionPluginContext(): PluginContext {
   const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
@@ -113,6 +124,15 @@ export function defineMultitablePluginViewLandingRealDbCases(): void {
       expect(todo.created).toBe(true)
       return ensured
     }
+    // created_at at microsecond precision (a JS Date drops the 1 µs step the promotion uses).
+    const createdMicros = async (id: string) =>
+      String((await q(`SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') AS c FROM meta_views WHERE id = $1`, [id])).rows[0].c)
+    const SLEEP_FN = `bi5rd07_sleep_fn_${TOKEN}`
+    const SLEEP_TRG = `bi5rd07_sleep_trg_${TOKEN}`
+    const dropSleepTrigger = async () => {
+      await q(`DROP TRIGGER IF EXISTS ${SLEEP_TRG} ON meta_views`)
+      await q(`DROP FUNCTION IF EXISTS ${SLEEP_FN}()`)
+    }
     const promote = (viewLogicalId: string, overrides: Record<string, unknown> = {}) =>
       multitable.provisioning.promoteObjectViewToFirst({ projectId, objectId, viewLogicalId, ...overrides })
 
@@ -135,6 +155,7 @@ export function defineMultitablePluginViewLandingRealDbCases(): void {
       if (fenceBefore === undefined) delete process.env[FENCE_ENV]
       else process.env[FENCE_ENV] = fenceBefore
       __resetRecoveryWriterStateColumnProbe()
+      await dropSleepTrigger().catch(() => {})
       if (!sheetId) return
       await q('UPDATE meta_sheets SET recovery_writer_state = NULL WHERE id = $1', [sheetId]).catch(() => {})
       await q('DELETE FROM meta_view_personal_configs WHERE view_id IN (SELECT id FROM meta_views WHERE sheet_id = $1)', [sheetId]).catch(() => {})
@@ -177,11 +198,17 @@ export function defineMultitablePluginViewLandingRealDbCases(): void {
     })
 
     test('BI5-RD-02 a re-ensure of the plugin views keeps the promotion (ensureView never touches created_at)', async () => {
-      const before = byId(await viewRows()).get(FILL)!.created_at!.getTime()
+      const before = await createdMicros(FILL)
       await provision()
-      const rows = byId(await viewRows())
-      expect(rows.get(FILL)!.created_at!.getTime()).toBe(before)
+      expect(await createdMicros(FILL)).toBe(before)
       expect((await contextFirst())[0]).toBe(FILL)
+      // The provisioning re-run returns before any view write on a ready sheet, so re-ensure the PROMOTED view itself:
+      // the plugin's own fill-view ensure runs the host ensureView upsert on that very row.
+      const ensured = await ensureStockPreparationFillView({ provisioning: multitable.provisioning, projectId, objectId, sheetId })
+      expect(ensured.created).toBe(true)
+      expect(await createdMicros(FILL)).toBe(before)
+      expect((await contextFirst())[0]).toBe(FILL)
+      expect((await listFirst())[0]).toBe(FILL)
       expect(await promote('prep-fill')).toEqual({ promoted: false, alreadyFirst: true, missing: false })
     })
 
@@ -280,5 +307,37 @@ export function defineMultitablePluginViewLandingRealDbCases(): void {
       expect(noInsert.viewsLosingFrozen).toBe(0)
       expect(noInsert.firstView).toBe('other')
     })
+
+    test('BI5-RD-07 one transaction: during the UPDATE the canonical fence and the other view rows are still held', async () => {
+      await q(`UPDATE meta_views SET created_at = CASE id WHEN $2 THEN timestamptz '2026-07-01 00:00:00+00' WHEN $3 THEN timestamptz '2026-07-01 00:00:01+00' ELSE timestamptz '2026-07-01 00:00:02+00' END WHERE sheet_id = $1`, [sheetId, DEFAULT, FILL])
+      process.env[FENCE_ENV] = 'true'
+      __resetRecoveryWriterStateColumnProbe()
+      try {
+        await q(`CREATE OR REPLACE FUNCTION ${SLEEP_FN}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(2); RETURN NEW; END $$`)
+        await q(`CREATE TRIGGER ${SLEEP_TRG} BEFORE UPDATE OF created_at ON meta_views FOR EACH ROW WHEN (NEW.sheet_id = '${sheetId.replace(/'/g, "''")}') EXECUTE FUNCTION ${SLEEP_FN}()`)
+        const running = promote('prep-fill')
+        // Wait (bounded) until the promotion's backend sits in the trigger's pg_sleep, i.e. inside its UPDATE.
+        let sleeping = false
+        for (let i = 0; i < 100 && !sleeping; i += 1) {
+          const probe = await q(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND state = 'active' AND wait_event = 'PgSleep' AND position('UPDATE meta_views' in query) > 0`)
+          sleeping = Number(probe.rows[0].n) > 0
+          if (!sleeping) await pause(25)
+        }
+        const fence = await q('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS got', [canonicalSheetFenceKey(sheetId)])
+        const fenceFree = fence.rows[0].got === true
+        const row = await q('SELECT id FROM meta_views WHERE id = $1 FOR UPDATE NOWAIT', [TODO]).then(() => 'acquired', (e: unknown) => String((e as { code?: string })?.code ?? e))
+        const result = await running
+        expect(sleeping, 'the promotion must have reached its UPDATE (the sleeping trigger)').toBe(true)
+        expect(result).toEqual({ promoted: true, alreadyFirst: false, missing: false })
+        expect(fenceFree, 'the canonical fence must still be held by the promotion during its UPDATE').toBe(false)
+        expect(row, 'the other view rows must still be locked by the promotion during its UPDATE').toBe('55P03')
+        expect((await contextFirst())[0]).toBe(FILL)
+      } finally {
+        if (fenceBefore === undefined) delete process.env[FENCE_ENV]
+        else process.env[FENCE_ENV] = fenceBefore
+        __resetRecoveryWriterStateColumnProbe()
+        await dropSleepTrigger()
+      }
+    }, 60_000)
   })
 }

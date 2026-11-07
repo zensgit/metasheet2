@@ -13,8 +13,14 @@
  *   VL-U06 describe: counts over a fixture (frozen prefix incl. hidden / property-hidden fields and a non-prefix frozen
  *          id, leftInsertCount 0 vs 2, personal overrides, trash), firstView mapping to 'default' / a candidate /
  *          'other' / null, read-only SQL, input refusals.
+ *   VL-U06b describe reads hidden ids like every host view read (normalizeJsonArray): a leading / trailing / both-side
+ *          padded id and a finite number id hide the field (the next column is the frozen prefix); the exact-id control.
+ *   VL-U06c describe skips the view types the web never renders as a grid (form, kanban, gallery, calendar, timeline,
+ *          gantt, hierarchy); grid, a missing type and unknown types are counted; viewCount / firstView count all.
  *   VL-U07 describe: VALUES-FREE — the key set is exactly the six, no view name / physical id / field id in the output.
- *   VL-U08 the server frozen-prefix mirror answers like the web util on the web unit's own cases.
+ *   VL-U08 the server frozen-prefix mirror answers like the web util on the web unit's own cases, and end to end: the
+ *          web rule over the hidden ids as the route ships them (normalizeJsonArray, then exact-id hiding) agrees with
+ *          describe on padded, numeric and JSON-string hidden ids.
  *   VL-U09 plugin scope: exposed iff the host has them; project namespace and the overview object refused before the
  *          hook or the host; object scope asserted; values read once and the checked values forwarded.
  */
@@ -29,6 +35,7 @@ import {
   canonicalSheetFenceKey,
   SheetWriterBlockedError,
 } from '../../src/multitable/canonical-sheet-fence'
+import { normalizeJsonArray } from '../../src/multitable/field-codecs'
 import { countFrozenPrefix, parseFrozenLeftColumnIds } from '../../src/multitable/frozen-prefix'
 import {
   createPluginScopedMultitableApi,
@@ -211,12 +218,12 @@ const VIEWS = [
   { id: 'view_plain_secret', name: 'Plain', hidden_field_ids: null, config: null },
 ]
 
-function describeQuery(views: unknown[] = VIEWS, counts = { personal: 3, trash: 4 }) {
+function describeQuery(views: unknown[] = VIEWS, counts = { personal: 3, trash: 4 }, fields: unknown[] = FIELDS) {
   const seen: Seen[] = []
   const query: MultitableProvisioningQueryFn = async (sql, params = []) => {
     seen.push({ sql: norm(sql), params })
     if (sql === DESCRIBE_LAYOUT_VIEWS_SQL) return { rows: views }
-    if (sql === DESCRIBE_LAYOUT_FIELDS_SQL) return { rows: FIELDS }
+    if (sql === DESCRIBE_LAYOUT_FIELDS_SQL) return { rows: fields }
     if (sql === DESCRIBE_LAYOUT_PERSONAL_SQL) return { rows: [{ n: counts.personal }] }
     if (sql === DESCRIBE_LAYOUT_TRASH_SQL) return { rows: [{ n: counts.trash }] }
     throw new Error(`unexpected SQL in the describe fake: ${norm(sql)}`)
@@ -276,6 +283,47 @@ describe('describeObjectSheetLayout (host)', () => {
     }
   })
 
+  it('VL-U06b hidden ids are read like every host view read (normalizeJsonArray: trimmed, finite numbers stringified)', async () => {
+    // The shared order: a numeric-looking field id first, then fld_n1..fld_n3. Every view freezes the column that is the
+    // first visible one ONLY when its hidden ids are normalised the way GET /view ships them to the grid.
+    const fields = [{ id: '7', property: {} }, { id: 'fld_n1', property: {} }, { id: 'fld_n2', property: {} }, { id: 'fld_n3', property: {} }]
+    const cases: Array<[string, unknown, string]> = [
+      ['a finite number id', [7], 'fld_n1'],
+      ['a leading-space id', ['7', ' fld_n1'], 'fld_n2'],
+      ['a trailing-space id (as a JSON string)', JSON.stringify(['7', 'fld_n1 ']), 'fld_n2'],
+      ['a padded id on both sides', ['  7  '], 'fld_n1'],
+      ['the exact-id control', ['7', 'fld_n1'], 'fld_n2'],
+    ]
+    for (const [label, hidden, frozen] of cases) {
+      const views = [{ id: DEFAULT, name: 'v', type: 'grid', hidden_field_ids: hidden, config: { frozenLeftColumnIds: [frozen] } }]
+      const got = await describeObjectSheetLayout({ query: describeQuery(views, { personal: 0, trash: 0 }, fields).query, projectId: PROJECT, objectId: OBJECT, candidateViewLogicalIds: [], leftInsertCount: 2 })
+      expect.soft({ with: got.viewsWithFrozenColumns, losing: got.viewsLosingFrozen }, label).toEqual({ with: 1, losing: 1 })
+    }
+    // Non-finite numbers and non-string, non-number elements hide nothing (normalizeJsonArray drops them).
+    const dropped = [{ id: DEFAULT, name: 'v', type: 'grid', hidden_field_ids: [Number.NaN, null, { id: '7' }, ''], config: { frozenLeftColumnIds: ['7'] } }]
+    expect((await describeObjectSheetLayout({ query: describeQuery(dropped, { personal: 0, trash: 0 }, fields).query, projectId: PROJECT, objectId: OBJECT, candidateViewLogicalIds: [], leftInsertCount: 0 })).viewsWithFrozenColumns).toBe(1)
+  })
+
+  it('VL-U06c views the web never renders as a grid are not counted; grid, a missing type and unknown types are', async () => {
+    // MultitableWorkbench.vue renders MetaGridTable (the only place frozenLeftColumnIds applies) in the v-else after the
+    // form / kanban / gallery / calendar / timeline / gantt / hierarchy branches.
+    const frozenFirst = { frozenLeftColumnIds: ['fld_secret_1'] }
+    for (const type of ['form', 'kanban', 'gallery', 'calendar', 'timeline', 'gantt', 'hierarchy']) {
+      const views = [{ id: DEFAULT, name: 'v', type, hidden_field_ids: [], config: frozenFirst }]
+      const got = await describeObjectSheetLayout({ query: describeQuery(views).query, projectId: PROJECT, objectId: OBJECT, candidateViewLogicalIds: [], leftInsertCount: 2 })
+      expect.soft({ type, with: got.viewsWithFrozenColumns, losing: got.viewsLosingFrozen }).toEqual({ type, with: 0, losing: 0 })
+      // viewCount and firstView still count every view, whatever its type.
+      expect(got.viewCount).toBe(1)
+      expect(got.firstView).toBe('default')
+    }
+    for (const type of ['grid', undefined, null, 'some-future-type', 'Kanban']) {
+      const views = [{ id: DEFAULT, name: 'v', type, hidden_field_ids: [], config: frozenFirst }]
+      const got = await describeObjectSheetLayout({ query: describeQuery(views).query, projectId: PROJECT, objectId: OBJECT, candidateViewLogicalIds: [], leftInsertCount: 2 })
+      expect.soft({ type, with: got.viewsWithFrozenColumns, losing: got.viewsLosingFrozen }).toEqual({ type, with: 1, losing: 1 })
+    }
+    expect(norm(DESCRIBE_LAYOUT_VIEWS_SQL)).toBe('SELECT id, type, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC')
+  })
+
   it('VL-U07 values-free: exactly the six keys; no view name, physical view id or field id anywhere in the answer', async () => {
     const got = await describeObjectSheetLayout({ query: describeQuery().query, projectId: PROJECT, objectId: OBJECT, candidateViewLogicalIds: ['prep-fill'], leftInsertCount: 2 })
     expect(Object.keys(got).sort()).toEqual([...DESCRIBE_LAYOUT_RESULT_KEYS])
@@ -303,6 +351,18 @@ describe('describeObjectSheetLayout (host)', () => {
     const order = ['f1', 'f2', 'f3', 'f4']
     for (const frozen of [['f1', 'f2'], ['f1'], [], ['f3'], ['f1', 'f3'], ['f1', 'f2', 'f3', 'f4', 'gone']]) {
       expect(countFrozenPrefix(order, frozen)).toBe(web.frozenPrefixCount(order, frozen))
+    }
+    // End to end against the web rule: the grid hides by EXACT id over the hidden ids GET /view ships, which the host
+    // reads with normalizeJsonArray (multitable/loaders.ts tryResolveView). describe must see the same visible order.
+    const fields = ['7', 'f1', 'f2', 'f3'].map((id) => ({ id, property: {} }))
+    for (const stored of [[' f1'], ['f1 '], [7], ['7', ' f1 '], JSON.stringify([' 7', 'f1']), ['f1'], [], ['nope']]) {
+      for (const frozen of [['f1'], ['f2'], ['7'], ['f1', 'f2']]) {
+        const shipped = new Set(normalizeJsonArray(stored))
+        const webPrefix = web.frozenPrefixCount(fields.map((f) => f.id).filter((id) => !shipped.has(id)), web.parseFrozenIds({ frozenLeftColumnIds: frozen }))
+        const views = [{ id: DEFAULT, name: 'v', type: 'grid', hidden_field_ids: stored, config: { frozenLeftColumnIds: frozen } }]
+        const got = await describeObjectSheetLayout({ query: describeQuery(views, { personal: 0, trash: 0 }, fields).query, projectId: PROJECT, objectId: OBJECT, candidateViewLogicalIds: [], leftInsertCount: 0 })
+        expect.soft(got.viewsWithFrozenColumns, JSON.stringify({ stored, frozen })).toBe(webPrefix > 0 ? 1 : 0)
+      }
     }
   })
 })

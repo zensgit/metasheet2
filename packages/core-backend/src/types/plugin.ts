@@ -624,7 +624,10 @@ export interface MultitableProvisioningAPI {
    * name, a physical id, a field id of a user's view or a cell value). `firstView` is `'default'`, one of
    * `candidateViewLogicalIds`, `'other'`, or null on a sheet without views. `viewsLosingFrozen` counts views whose
    * frozen left prefix (the web rule over the shared order) is > 0 now and would be 0 after `leftInsertCount` fields
-   * were inserted leftmost. Same scope as `findObjectView`; refuses the overview object. OPTIONAL like it.
+   * were inserted leftmost. Parity with the web: hidden field ids are read the way the host ships them to the grid
+   * (normalizeJsonArray: trimmed, finite numbers stringified), and views of a type the web never renders as a grid
+   * (form, kanban, gallery, calendar, timeline, gantt, hierarchy) have no frozen columns; `viewCount` and
+   * `firstView` still count every view. Same scope as `findObjectView`; refuses the overview object. OPTIONAL like it.
    */
   describeObjectSheetLayout?(input: {
     projectId: string
