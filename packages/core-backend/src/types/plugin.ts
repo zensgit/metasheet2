@@ -605,6 +605,40 @@ export interface MultitableProvisioningAPI {
     hiddenFieldIds: string[]
     config: Record<string, unknown>
   } | null>
+  /**
+   * 批次标识 BI-5: make ONE of the caller's provisioned views (by logical id) the sheet's first view — the view the
+   * context route and GET /views list first (`ORDER BY created_at ASC`), i.e. where a person lands when they click
+   * the sheet. Writes ONLY that view's `meta_views.created_at`, to strictly before every other view of the sheet
+   * (also on bases whose views share one template-install timestamp). Never creates a view; refuses the host
+   * default view (`'default'`) and, in the plugin scope, the stock-preparation overview object. Idempotent: a second
+   * call answers `alreadyFirst`. A later `ensureView` re-ensure keeps the promotion (its upsert never touches
+   * `created_at`). Same project namespace and object scope as `findObjectView`. OPTIONAL: an older host has none.
+   */
+  promoteObjectViewToFirst?(input: {
+    projectId: string
+    objectId: string
+    viewLogicalId: string
+  }): Promise<{ promoted: boolean; alreadyFirst: boolean; missing: boolean }>
+  /**
+   * 批次标识 BI-5: a VALUES-FREE read of the caller's object sheet layout — counts and logical ids only (never a view
+   * name, a physical id, a field id of a user's view or a cell value). `firstView` is `'default'`, one of
+   * `candidateViewLogicalIds`, `'other'`, or null on a sheet without views. `viewsLosingFrozen` counts views whose
+   * frozen left prefix (the web rule over the shared order) is > 0 now and would be 0 after `leftInsertCount` fields
+   * were inserted leftmost. Same scope as `findObjectView`; refuses the overview object. OPTIONAL like it.
+   */
+  describeObjectSheetLayout?(input: {
+    projectId: string
+    objectId: string
+    candidateViewLogicalIds: string[]
+    leftInsertCount: number
+  }): Promise<{
+    viewCount: number
+    firstView: string | null
+    viewsWithFrozenColumns: number
+    viewsLosingFrozen: number
+    personalOrderOverrides: number
+    trashedRecordCount: number
+  }>
   patchObjectFieldProperty(input: {
     projectId: string
     objectId: string
