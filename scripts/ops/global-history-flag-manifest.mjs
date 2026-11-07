@@ -717,6 +717,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/integrations/directory-integration-capabilities-flag.ts#isDirectoryIntegrationCapabilitiesEnabled',
   },
   {
+    key: 'APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "Approval-routing source requirement for organisations that have two or more active pull-type directory sources (provider other than 'local', status 'active', de-duplicated by provider and corp id; the local directory is never counted) and no approval_routing policy. Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF); read on every call. Off: routing resolution and the legacy integration write paths are byte-identical to before the switch existed. On: for a requester with a linked directory account in such an organisation the routing resolution does not pick a source and fails closed with a typed, values-free error instead of choosing one, and the legacy integration write paths (creating a second pull source, setting a non-active pull source active) refuse until the organisation has a policy. danger=high: ON changes the outcome of approval creation for organisations that are already in the multi-source, no-policy state; run the read-only census for such organisations and set their policies before turning it on.",
+    source: 'packages/core-backend/src/directory/pull-source-rule.ts#isApprovalRoutingRequirePolicyEnabled',
+  },
+  {
     key: 'MULTITABLE_BUSINESS_TIMEZONE',
     type: 'enum',
     activationValue: "an IANA timezone id, e.g. 'Asia/Shanghai' (trimmed); unset / blank / any id Intl rejects = 'Asia/Shanghai'",
