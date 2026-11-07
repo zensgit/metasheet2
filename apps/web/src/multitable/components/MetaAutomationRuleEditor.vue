@@ -66,6 +66,9 @@
             <el-option value="webhook.received" data-value="webhook.received" :label="automationTriggerTypeLabel('webhook.received', isZh)" />
             <el-option value="approval.completed" data-value="approval.completed" :label="automationTriggerTypeLabel('approval.completed', isZh)" />
             <el-option value="approval.task_created" data-value="approval.task_created" :label="automationTriggerTypeLabel('approval.task_created', isZh)" />
+            <!-- R-69 1c: offered for a NEW rule only while the server's INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED is on
+                 (session feature integrationAutomationRunEvent); a loaded rule of this type always stays listed. -->
+            <el-option v-if="integrationRunFinishedSelectable" value="integration.run_finished" data-value="integration.run_finished" :label="automationTriggerTypeLabel('integration.run_finished', isZh)" />
           </el-select>
 
           <!-- field.value_changed config -->
@@ -208,6 +211,40 @@
             </div>
             <div v-if="approvalTaskCreatedBlockReason" class="meta-rule-editor__hint meta-rule-editor__hint--danger" data-field="approvalTaskCreatedBlockReason">
               {{ approvalTaskCreatedBlockReason }}
+            </div>
+          </template>
+
+          <!-- R-69 1c integration.run_finished (dry run only; R-69 OPEN): one values-free summary per job. -->
+          <template v-if="draft.triggerType === 'integration.run_finished'">
+            <label class="meta-rule-editor__label">{{ isZh ? '作业种类' : 'Job kind' }}</label>
+            <el-select v-model="runFinishedJobKind" class="meta-rule-editor__select" data-field="runFinishedJobKind">
+              <el-option value="stock_prep_pull" data-value="stock_prep_pull" :label="isZh ? '备料拉取（逐项目）' : 'Stock-prep pull (per project)'" />
+              <el-option value="pipeline" data-value="pipeline" :label="isZh ? '管道' : 'Pipeline'" />
+            </el-select>
+            <template v-if="runFinishedJobKind === 'pipeline'">
+              <label class="meta-rule-editor__label">{{ isZh ? '管道 ID' : 'Pipeline id' }}</label>
+              <el-input v-model="runFinishedJobId" type="text" :placeholder="isZh ? '管道 ID' : 'Pipeline id'" data-field="runFinishedPipelineId" />
+            </template>
+            <template v-else>
+              <label class="meta-rule-editor__label">{{ isZh ? '动作 ID（可选，留空 = 本租户全部备料拉取）' : 'Action id (optional; empty = every stock-prep pull of the tenant)' }}</label>
+              <el-input v-model="runFinishedJobId" type="text" :placeholder="isZh ? '动作 ID' : 'Action id'" data-field="runFinishedActionId" />
+            </template>
+            <label class="meta-rule-editor__label">{{ isZh ? '告警状态' : 'Alert on statuses' }}</label>
+            <el-checkbox-group v-model="runFinishedStatuses" data-field="runFinishedStatuses">
+              <el-checkbox v-for="status in INTEGRATION_RUN_FINISHED_STATUS_OPTIONS" :key="status" :value="status" :data-status="status">
+                {{ runIntegrationJobOutcomeLabel(status, isZh) }}
+              </el-checkbox>
+            </el-checkbox-group>
+            <div class="meta-rule-editor__hint" data-field="runFinishedHint">
+              {{ isZh
+                ? '每个作业（备料拉取的每个项目、每次管道运行）在最终尝试之后恰好产生一条摘要，只含状态、原因、可应用标记、计数（含新增 / 更新 / 跳过 / 停用 / 待人工确认）、耗时与错误类别，不含任何行值、租户或连接信息。默认告警：失败、部分完成、跳过、结果未知、未开始；「待人工处理」默认不告警，需要时请勾选。无记录上下文：动作仅支持通知类，不支持触发条件。'
+                : 'Exactly one summary per job (each project of a stock-prep pull, each pipeline run), after the final attempt: status, reason, the can-apply flag, counts (add / update / skip / inactive / manual confirm included), duration and error class only — never a row value, a tenant or connection details. Default alerts: failed, partial, skipped, outcome unknown, not started; "held for a person" stays quiet unless you tick it. Record-less: notification-family actions only, no conditions.' }}
+            </div>
+            <el-button size="small" data-action="applyRunFinishedAlertTemplate" :disabled="!canApplyRunFinishedAlertTemplate" @click="applyRunFinishedAlertTemplate">
+              {{ isZh ? '使用告警模板（钉钉群消息）' : 'Use the alert template (DingTalk group message)' }}
+            </el-button>
+            <div v-if="integrationRunFinishedBlockReason" class="meta-rule-editor__hint meta-rule-editor__hint--danger" data-field="integrationRunFinishedBlockReason">
+              {{ integrationRunFinishedBlockReason }}
             </div>
           </template>
         </section>
@@ -1398,6 +1435,55 @@
               </div>
             </div>
 
+            <!-- R-69 1b-iii run_integration_job config: DRY RUN ONLY. Job kind is the closed set (pipeline shown,
+                 not selectable yet), the apply mode is a fixed display (no other mode is authorable), the timeout
+                 is in whole minutes (≤ 55, default 30). Save blocks mirror the server gate exactly. -->
+            <div v-if="action.type === 'run_integration_job'" class="meta-rule-editor__action-config" data-action-config="run_integration_job">
+              <div class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="rij-dry-run-hint">
+                {{ isZh
+                  ? '仅预演：按计划对所列项目做备料拉取的预演，不写入任何业务数据；需定时（Cron）触发器并声明时区。'
+                  : 'Dry run only: runs the stock-prep pull as a dry run for the listed projects on schedule and writes no business data. Needs a scheduled (cron) trigger with a timezone.' }}
+              </div>
+              <label class="meta-rule-editor__label">{{ isZh ? '任务种类' : 'Job kind' }}</label>
+              <el-select v-model="(action.config.rijKind as string)" class="meta-rule-editor__select" data-field="rijKind">
+                <el-option
+                  v-for="kind in RUN_INTEGRATION_JOB_KINDS"
+                  :key="kind"
+                  :value="kind"
+                  :data-value="kind"
+                  :disabled="kind !== RUN_INTEGRATION_JOB_AUTHORABLE_KIND"
+                  :label="kind === RUN_INTEGRATION_JOB_AUTHORABLE_KIND
+                    ? (isZh ? '备料拉取（stock_prep_pull）' : 'Stock-prep pull (stock_prep_pull)')
+                    : (isZh ? '管道（pipeline，暂不可用）' : 'Pipeline (pipeline, not available yet)')"
+                />
+              </el-select>
+              <label class="meta-rule-editor__label">
+                {{ isZh ? `项目号（每行一个，最多 ${RUN_INTEGRATION_JOB_MAX_PROJECTS} 个）` : `Project numbers (one per line, at most ${RUN_INTEGRATION_JOB_MAX_PROJECTS})` }}
+              </label>
+              <el-input
+                v-model="(action.config.rijProjectNosText as string)"
+                type="textarea"
+                :rows="3"
+                class="meta-rule-editor__input"
+                data-field="rijProjectNosText"
+              />
+              <label class="meta-rule-editor__label">{{ isZh ? '应用方式' : 'Apply mode' }}</label>
+              <div class="meta-rule-editor__hint" data-field="rijApplyMode" :data-value="RUN_INTEGRATION_JOB_AUTHORABLE_APPLY_MODE">
+                {{ isZh ? '仅预演（dry_run_only）' : 'Dry run only (dry_run_only)' }}
+              </div>
+              <label class="meta-rule-editor__label">
+                {{ isZh ? `超时（分钟，1–${RUN_INTEGRATION_JOB_TIMEOUT_MAX_MINUTES}）` : `Timeout (minutes, 1–${RUN_INTEGRATION_JOB_TIMEOUT_MAX_MINUTES})` }}
+              </label>
+              <el-input
+                v-model="(action.config.rijTimeoutMinutes as number | string)"
+                type="number"
+                :min="1"
+                :max="RUN_INTEGRATION_JOB_TIMEOUT_MAX_MINUTES"
+                class="meta-rule-editor__input"
+                data-field="rijTimeoutMinutes"
+              />
+            </div>
+
             <!-- lock_record config -->
             <div v-if="action.type === 'lock_record'" class="meta-rule-editor__action-config">
               <el-checkbox
@@ -1932,6 +2018,31 @@ import {
 import { automationTargetSheetOptions, type AutomationTargetSheetOption } from '../utils/automation-target-sheet-options'
 import { fieldTypeLabel } from '../utils/meta-core-labels'
 import {
+  RUN_INTEGRATION_JOB_ACTION_TYPE,
+  RUN_INTEGRATION_JOB_AUTHORABLE_APPLY_MODE,
+  RUN_INTEGRATION_JOB_AUTHORABLE_KIND,
+  RUN_INTEGRATION_JOB_KINDS,
+  RUN_INTEGRATION_JOB_MAX_PROJECTS,
+  RUN_INTEGRATION_JOB_TIMEOUT_MAX_MINUTES,
+  buildRunIntegrationJobConfig,
+  checkRunIntegrationJobConfig,
+  checkRunIntegrationJobTriggerCoupling,
+  defaultRunIntegrationJobDraft,
+  isRunIntegrationJobSelectable,
+  runIntegrationJobDraftFromConfig,
+  runIntegrationJobOutcomeLabel,
+} from '../runIntegrationJobAuthoring'
+// R-69 1c: the integration.run_finished trigger item and its alert template.
+import {
+  INTEGRATION_RUN_FINISHED_ALERT_TEMPLATE,
+  INTEGRATION_RUN_FINISHED_DEFAULT_STATUSES,
+  INTEGRATION_RUN_FINISHED_STATUS_OPTIONS,
+  INTEGRATION_RUN_FINISHED_TRIGGER_TYPE,
+  integrationRunFinishedRuleBlockReason,
+  isIntegrationRunFinishedTriggerSelectable,
+  normalizeIntegrationRunFinishedTriggerConfig,
+} from '../integrationRunFinishedAuthoring'
+import {
   PENDING_CONDITION_OPERATOR,
   coerceConditionValue,
   conditionFieldDisplayType,
@@ -2085,6 +2196,85 @@ const editorBodyRef = ref<HTMLElement | null>(null)
 const featureFlags = useFeatureFlags()
 // FWB production authoring — surfaces APPROVAL_FWB_WRITEBACK_ENABLED (default OFF).
 const fwbWritebackEnabled = computed(() => featureFlags.hasFeature('approvalFwbWriteback'))
+// R-69 1b-iii: run_integration_job is offered for a NEW selection only while the server switch is on
+// (INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED, surfaced as the session feature integrationAutomationRunAction).
+const integrationRunActionEnabled = computed(() => featureFlags.hasFeature('integrationAutomationRunAction'))
+// R-69 1c: integration.run_finished is offered for a NEW rule only while the server switch is on
+// (INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED, surfaced as the session feature integrationAutomationRunEvent).
+const integrationRunEventEnabled = computed(() => featureFlags.hasFeature('integrationAutomationRunEvent'))
+const integrationRunFinishedSelectable = computed(() => (
+  isIntegrationRunFinishedTriggerSelectable(integrationRunEventEnabled.value, draft.value.triggerType)
+  || props.rule?.triggerType === INTEGRATION_RUN_FINISHED_TRIGGER_TYPE
+))
+function runFinishedJob(): Record<string, unknown> {
+  const job = draft.value.triggerConfig.job
+  if (job && typeof job === 'object' && !Array.isArray(job)) return job as Record<string, unknown>
+  const fresh: Record<string, unknown> = { kind: 'stock_prep_pull' }
+  draft.value.triggerConfig.job = fresh
+  return fresh
+}
+const runFinishedJobKind = computed<string>({
+  get: () => {
+    const job = draft.value.triggerConfig.job as Record<string, unknown> | undefined
+    return typeof job?.kind === 'string' ? job.kind : 'stock_prep_pull'
+  },
+  set: (kind) => {
+    const job = runFinishedJob()
+    const id = typeof job.pipelineId === 'string' ? job.pipelineId : typeof job.actionId === 'string' ? job.actionId : ''
+    draft.value.triggerConfig.job = kind === 'pipeline' ? { kind, pipelineId: id } : { kind, ...(id ? { actionId: id } : {}) }
+  },
+})
+const runFinishedJobId = computed<string>({
+  get: () => {
+    const job = draft.value.triggerConfig.job as Record<string, unknown> | undefined
+    if (!job) return ''
+    const id = job.kind === 'pipeline' ? job.pipelineId : job.actionId
+    return typeof id === 'string' ? id : ''
+  },
+  set: (value) => {
+    const job = runFinishedJob()
+    if (job.kind === 'pipeline') draft.value.triggerConfig.job = { kind: 'pipeline', pipelineId: value }
+    else draft.value.triggerConfig.job = { kind: 'stock_prep_pull', ...(value.trim() ? { actionId: value } : {}) }
+  },
+})
+const runFinishedStatuses = computed<string[]>({
+  get: () => {
+    const raw = draft.value.triggerConfig.statuses
+    return Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === 'string') : [...INTEGRATION_RUN_FINISHED_DEFAULT_STATUSES]
+  },
+  set: (value) => {
+    draft.value.triggerConfig.statuses = [...value]
+  },
+})
+// The client mirror of the server save gate (closed config, no conditions, notification-family actions only).
+const integrationRunFinishedBlockReason = computed<string>(() => integrationRunFinishedRuleBlockReason({
+  triggerType: draft.value.triggerType,
+  triggerConfig: draft.value.triggerType === INTEGRATION_RUN_FINISHED_TRIGGER_TYPE
+    ? normalizeIntegrationRunFinishedTriggerConfig({ ...draft.value.triggerConfig, job: draft.value.triggerConfig.job ?? { kind: 'stock_prep_pull' } })
+    : draft.value.triggerConfig,
+  conditionsCount: draft.value.conditions.conditions.length,
+  actionTypes: draft.value.actions.map((action) => action.type),
+  isZh: isZh.value,
+  actionLabel: (type) => automationActionTypeLabel(type, isZh.value),
+}))
+const canApplyRunFinishedAlertTemplate = computed(() => (
+  draft.value.actions.some((action) => action.type === INTEGRATION_RUN_FINISHED_ALERT_TEMPLATE.actionType)
+  || draft.value.actions.length < 3
+))
+// ADR §4.3 alert template: fills the first DingTalk group message (or adds one) with run.* title / body templates.
+// The destination group is still the author's choice (bound per sheet + creator on the server).
+function applyRunFinishedAlertTemplate(): void {
+  let target = draft.value.actions.find((action) => action.type === INTEGRATION_RUN_FINISHED_ALERT_TEMPLATE.actionType)
+  if (!target) {
+    if (draft.value.actions.length >= 3) return
+    const blank = draft.value.actions.length === 1 && draft.value.actions[0].type === 'update_record' && !draft.value.actions[0].persisted
+    target = createDraftAction(INTEGRATION_RUN_FINISHED_ALERT_TEMPLATE.actionType as AutomationActionType)
+    if (blank) draft.value.actions.splice(0, 1, target)
+    else draft.value.actions.push(target)
+  }
+  target.config.titleTemplate = INTEGRATION_RUN_FINISHED_ALERT_TEMPLATE.titleTemplate
+  target.config.bodyTemplate = INTEGRATION_RUN_FINISHED_ALERT_TEMPLATE.bodyTemplate
+}
 const fwbTemplateFields = ref<Array<{ id: string; label: string }>>([])
 const fwbRecordLinkFields = ref<FwbRecordLinkOption[]>([])
 type FwbTargetField = ReturnType<typeof sheetFieldsToFwbTargets>[number]
@@ -2385,6 +2575,11 @@ function selectableActionTypes(currentType: AutomationActionType): AutomationAct
     approvalCompletedOutcomes.value,
   )) {
     if (!types.includes(FWB_ACTION_TYPE)) types.push(FWB_ACTION_TYPE)
+  }
+  // R-69 1b-iii: run_integration_job — new only with the switch ON and a schedule.cron trigger; a loaded one
+  // always stays listed (never silently dropped). Top-level only: not in any branch-authorable list.
+  if (isRunIntegrationJobSelectable(integrationRunActionEnabled.value, draft.value.triggerType, currentType)) {
+    if (!types.includes(RUN_INTEGRATION_JOB_ACTION_TYPE)) types.push(RUN_INTEGRATION_JOB_ACTION_TYPE)
   }
   if (isUnsupportedSelectableActionType(currentType) && !types.includes(currentType)) {
     types.push(currentType)
@@ -3294,6 +3489,10 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
     // (FwbDraftActionConfig is a closed interface without a string index signature).
     return { ...draftConfigFromFwbAction(config, { persisted: true }) }
   }
+  if (type === RUN_INTEGRATION_JOB_ACTION_TYPE) {
+    // R-69 1b-iii: UI keys only (rij*); the stamped `binding` is not carried — the server re-stamps it.
+    return { ...runIntegrationJobDraftFromConfig(config) }
+  }
   return { ...config }
 }
 
@@ -4095,6 +4294,100 @@ const firstIncompleteConditionAnchor = computed<string | undefined>(() => {
   return undefined
 })
 
+// R-69 1b-iii: the client mirror of the server's run_integration_job save gate (validateRunIntegrationJobConfig
+// + validateRunIntegrationJobTriggerCoupling, pinned byte-identical by the core-backend web-parity test), run on
+// exactly what buildPayload would send: the rebuilt config and the trigger timezone triggerTimezoneForSave
+// writes. A refusal becomes an inline save-block line instead of an opaque 400. The switch itself (403) is the
+// server's: the action is not offered for a new selection while it is off.
+const runIntegrationJobSaveBlockReasons = computed<SaveBlockReason[]>(() => {
+  const indexes = draft.value.actions
+    .map((action, idx) => (action.type === RUN_INTEGRATION_JOB_ACTION_TYPE ? idx : -1))
+    .filter((idx) => idx >= 0)
+  if (indexes.length === 0) return []
+  const reasons: SaveBlockReason[] = []
+  // Same order as the server gate: the switch first (its 403 RUN_ACTION_DISABLED). A loaded action stays listed
+  // while the switch is off, but the rule cannot be saved with it — say so instead of an opaque 403.
+  if (!integrationRunActionEnabled.value) {
+    reasons.push({
+      key: 'runIntegrationJobSwitch',
+      message: isZh.value
+        ? '此服务器未开启「运行集成任务」动作，带此动作的规则不能保存；请移除该动作或请管理员开启。'
+        : 'The run integration job action is switched off on this server, so a rule with it cannot be saved; remove the action or ask an administrator.',
+      anchor: `[data-action-index="${indexes[0]}"] [data-action-config="run_integration_job"]`,
+    })
+  }
+  for (const idx of indexes) {
+    const check = checkRunIntegrationJobConfig(buildRunIntegrationJobConfig(draft.value.actions[idx].config), `actions[${idx}].config`)
+    if (check) {
+      reasons.push({
+        key: `runIntegrationJob:${idx}`,
+        message: runIntegrationJobConfigBlockText(check.code, idx),
+        anchor: `[data-action-index="${idx}"] [data-action-config="run_integration_job"]`,
+      })
+    }
+  }
+  const triggerTimezone = triggerTimezoneForSave({
+    triggerType: draft.value.triggerType,
+    draftTimezone: draft.value.triggerConfig.timezone,
+    storedRule: props.rule ?? null,
+  })
+  const coupling = checkRunIntegrationJobTriggerCoupling(
+    draft.value.triggerType,
+    triggerTimezone ? { ...draft.value.triggerConfig, timezone: triggerTimezone } : { ...draft.value.triggerConfig, timezone: undefined },
+  )
+  if (coupling) {
+    reasons.push({
+      key: 'runIntegrationJobTrigger',
+      message: runIntegrationJobCouplingBlockText(coupling.code),
+      anchor: `[data-action-index="${indexes[0]}"] [data-action-config="run_integration_job"]`,
+    })
+  }
+  return reasons
+})
+
+function runIntegrationJobConfigBlockText(code: string, idx: number): string {
+  const zh = isZh.value
+  const step = zh ? `动作 ${idx + 1}（运行集成任务）：` : `Action ${idx + 1} (run integration job): `
+  switch (code) {
+    case 'projects_empty':
+      return step + (zh ? '请至少填写一个项目号。' : 'enter at least one project number.')
+    case 'projects_too_many':
+      return step + (zh ? `最多 ${RUN_INTEGRATION_JOB_MAX_PROJECTS} 个项目。` : `at most ${RUN_INTEGRATION_JOB_MAX_PROJECTS} projects.`)
+    case 'project_shape':
+      return step + (zh ? '项目号只能是 1–128 个可见 ASCII 字符（不含空格，不含 ://）。' : 'a project number must be 1–128 visible ASCII characters (no spaces, no "://").')
+    case 'project_repeat':
+      return step + (zh ? '项目号不能重复。' : 'a project number is listed twice.')
+    case 'timeout_integer':
+    case 'timeout_min':
+    case 'timeout_max':
+      return step + (zh
+        ? `超时须为 1–${RUN_INTEGRATION_JOB_TIMEOUT_MAX_MINUTES} 分钟。`
+        : `the timeout must be 1–${RUN_INTEGRATION_JOB_TIMEOUT_MAX_MINUTES} minutes.`)
+    case 'pipeline_key':
+    case 'pipeline_dry_run':
+    case 'pipeline_not_deliverable':
+      return step + (zh ? '「管道」任务种类暂不可用，请选择「备料拉取」。' : 'the pipeline job kind is not available yet; choose stock-prep pull.')
+    case 'apply_mode':
+    case 'apply_when_ready':
+      return step + (zh ? '只支持「仅预演」。' : 'only dry run is supported.')
+    default:
+      return step + (zh ? '配置无效，请重新选择任务种类与项目。' : 'the configuration is invalid; choose the job kind and projects again.')
+  }
+}
+
+function runIntegrationJobCouplingBlockText(code: string): string {
+  const zh = isZh.value
+  if (code === 'trigger_not_cron') {
+    return zh ? '运行集成任务只能用于「定时（Cron）」触发器。' : 'Run integration job needs a scheduled (cron) trigger.'
+  }
+  if (code === 'timezone_invalid') {
+    return zh ? '定时触发器的时区无效。' : 'The schedule trigger timezone is not a valid timezone.'
+  }
+  return zh
+    ? '运行集成任务要求定时触发器声明时区：请先点「切换到业务时区」。'
+    : 'Run integration job needs the schedule trigger to declare a timezone: use "switch to business time" first.'
+}
+
 // G-B2-22: saveBlockReasons is the single source of truth for "why can't I save" — canSave is
 // derived from it below so the button's disabled state and the reasons shown to the author can
 // never disagree. See automationSaveBlockReasons.ts for the aggregation itself; every condition
@@ -4128,7 +4421,9 @@ const saveBlockReasons = computed<SaveBlockReason[]>(() => {
     actions: saveBlockActionSnapshots.value,
     // #5742: client mirror of the backend select-option check on the approval-result writeback.
     startApprovalOutcomeValueBlocks: resultWritebackOutcomeBlocks.value,
-  })
+  }).concat(runIntegrationJobSaveBlockReasons.value).concat(integrationRunFinishedBlockReason.value
+    ? [{ key: 'integrationRunFinished', message: integrationRunFinishedBlockReason.value, anchor: '[data-field="integrationRunFinishedBlockReason"]' }]
+    : [])
 })
 
 const canSave = computed(() => saveBlockReasons.value.length === 0)
@@ -5010,6 +5305,8 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
         // Bind the currently known active version if the trigger template already loaded.
         sourceTemplateVersionId: fwbActiveVersionId.value,
       }
+    case 'run_integration_job':
+      return { ...defaultRunIntegrationJobDraft() }
     default:
       return {}
   }
@@ -5496,6 +5793,12 @@ function buildPayload(): Partial<AutomationRule> {
     })
     if (timezone) triggerConfig.timezone = timezone
   }
+  if (d.triggerType === INTEGRATION_RUN_FINISHED_TRIGGER_TYPE) {
+    // R-69 1c: the closed job + statuses only; the server stamps the binding (a client one is dropped anyway).
+    const normalized = normalizeIntegrationRunFinishedTriggerConfig({ ...triggerConfig, job: triggerConfig.job ?? { kind: 'stock_prep_pull' } })
+    for (const key of Object.keys(triggerConfig)) delete triggerConfig[key]
+    Object.assign(triggerConfig, normalized)
+  }
   if (d.triggerType === 'approval.task_created') {
     // A-2a: trimmed templateId is the only config key.
     triggerConfig.templateId = typeof triggerConfig.templateId === 'string' ? triggerConfig.templateId.trim() : ''
@@ -5774,6 +6077,11 @@ function buildPayload(): Partial<AutomationRule> {
         type: action.type,
         config: built.config,
       }
+    }
+    if (action.type === RUN_INTEGRATION_JOB_ACTION_TYPE) {
+      // R-69 1b-iii: rebuilt from the modelled keys only — { job: { kind, projectNos, applyMode: dry_run_only,
+      // actionId? }, timeoutMs }. No binding (server-stamped from the rule's creator), no retry (reserved).
+      return { type: action.type, config: buildRunIntegrationJobConfig(action.config) }
     }
     // Passthrough types (send_webhook, lock_record, wait_for_callback, send_dingtalk_approval_card,
     // record_click): there is NO rebuild, so nothing can be dropped — `draftConfigFromAction` returns

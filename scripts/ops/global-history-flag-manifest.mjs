@@ -940,6 +940,63 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/multitable/automation-executor.ts#maxWebhookRetries',
   },
   {
+    key: 'AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "C1/S2 first slice (iPaaS baseline v2.3 §10.3.1): the MANUAL, SYNTHETIC multitable-automation integration preview (POST /api/multitable/sheets/:sheetId/automations/:ruleId/integration-preview and its catalog GET). Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF), read on every run and at every admission checkpoint. Off: both routes answer a fixed 404 INTEGRATION_PREVIEW_DISABLED after the existing authentication and sheet-capability gate, before any catalog, provider, compiler or database read, and the panel stays hidden. On: an owner of the rule with canManageAutomation on the sheet scope and live integration authority can run one fixed plan: a host-registered synthetic provider (no network, database, file, env or credential) pages repo fixtures, values pass only through a per-run in-memory store, and the YiDa consumer calls the pure compileYidaLocalDraft in memory; one values-free summary row is written to multitable_automation_executions (triggered_by integration_preview, not retryable). It never sends, prepares/approves/submits a YiDa draft, issues a token or writes a business row, and it is not coupled to any other switch: AUTOMATION_DURABLE_DELIVERY_ENABLED, AUTOMATION_CLASSA_CLAIM_ENABLED, AUTOMATION_CLASSB_OUTBOUND_ENABLED and the INTEGRATION_YIDA_* switches neither open nor widen it (no prefix matching). danger=low: synthetic data only; real reads or sends need separate owner approval.",
+    source: 'packages/core-backend/src/integration/automation-synthetic-preview.ts#isSyntheticIntegrationPreviewEnabled',
+  },
+  // ── R-69 1b-ii (ADR adr-automation-pipeline-bridge-20261103 §7): the four run_integration_job switches. R-69
+  // is OPEN; every path they gate is dry-run only; only the first has a read point in 1b-ii.
+  {
+    key: 'INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "R-69 1b-ii Bridge 1 — the run_integration_job automation action (packages/core-backend/src/multitable/automation-run-integration-job.ts, read by AutomationService.assertRunIntegrationJobAtSave at save and by the executor on EVERY trigger). Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). Off: saving a rule that carries the action is refused 403 RUN_ACTION_DISABLED, and an already-saved rule's trigger records skipped(action_disabled) — never a silent success. On: a schedule.cron rule (IANA timezone required) whose creator is bound to exactly one active tenant may run the stock-prep pull DRY RUN per project through the plugin-registered IntegrationRunPort, under a per-project outbound-intent row and a fenced heartbeat job lease (meta_automation_job_leases, migration zzzz20261106111100; action CHECK zzzz20261106111300). Only dry-run jobs exist on this path: applyMode apply_when_ready and the pipeline kind are refused at save whatever any switch says. It does not read, imply or require AUTOMATION_CLASSB_OUTBOUND_ENABLED (the action always writes its intent row) or any other switch. danger=high: ON lets a saved automation rule read the bound tenant's PLM source through the plugin's governed dry-run chain on a schedule (a read, never a write; R-69 must be ruled before it is turned on).",
+    source: 'packages/core-backend/src/multitable/automation-run-integration-job.ts#isIntegrationAutomationRunActionEnabled',
+  },
+  {
+    key: 'INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "R-69 1c Bridge 2 — the integration.run_finished trigger (packages/core-backend/src/core/integration-run-events.ts). Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). READ at the three points the ADR names: the run_integration_job action layer before it emits its per-project summaries (automation-executor.ts), core on receipt (publishIntegrationRunFinished, and again when AutomationService dispatches), and the plugin before it publishes a pipeline-run summary (plugins/plugin-integration-core/lib/integration-run-events.cjs). Off: nothing is published or received; integration.run_finished rules can be saved (trigger CHECK zzzz20261106111500) but never fire. On: one values-free summary per job (one project of a stock-prep pull, one api/manual/replay pipeline run) is routed — inside the run's tenant, by job — to the enabled integration.run_finished rules, whose default alert set has skipped and not held; with AUTOMATION_DURABLE_DELIVERY_ENABLED it rides routing manifest v4 (consumer integration-run-trigger). It does not read, imply or require INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED or any other switch. danger=medium: ON routes job summaries into automation rules (alerts: outbound messages to the configured destinations).",
+    source: 'packages/core-backend/src/core/integration-run-events.ts#isIntegrationAutomationRunEventEnabled',
+  },
+  {
+    key: 'INTEGRATION_AUTOMATION_RUN_APPLY_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "R-69 unattended stock-prep APPLY (ADR Q12a; owner layer O ②). REGISTERED, NOT READ in 1b-ii: applyMode 'apply_when_ready' is refused at save (400) WHATEVER this switch says, so an early flip can never create a saveable-but-unimplemented rule (automation-run-integration-job.ts validateRunIntegrationJobConfig). Default OFF; exact literal 'true' only. A later, owner-approved slice adds the read points (save validation and the action after a ready dry run, before the dry-run token is consumed). danger=high: once read, ON lets an automation rule APPLY a stock-prep plan to a customer table unattended — a production write.",
+    source: 'packages/core-backend/src/multitable/automation-run-integration-job.ts#INTEGRATION_AUTOMATION_RUN_FLAGS_NOT_READ_IN_1B_II',
+  },
+  {
+    key: 'INTEGRATION_AUTOMATION_RUN_PIPELINE_WRITE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "R-69 unattended NON-DRY pipeline runs (ADR Q12b; owner layer O ②/③). REGISTERED, NOT READ in 1b-ii: the pipeline job kind is refused at save in this slice and the port only ever calls the dry-run path (dryRun: true, no C6 write-lifecycle marker), so no code consults this switch (automation-run-integration-job.ts). Default OFF; exact literal 'true' only. A later, owner-approved slice adds the read points (save validation of dryRun:false and the trigger-time check). danger=high: once read, ON lets an automation rule run a pipeline that writes its target (multitable rows, or an allow-listed HTTP target) unattended.",
+    source: 'packages/core-backend/src/multitable/automation-run-integration-job.ts#INTEGRATION_AUTOMATION_RUN_FLAGS_NOT_READ_IN_1B_II',
+  },
+  {
     key: 'ENABLE_SCHEDULER_LEADER_LOCK',
     type: 'boolean',
     activationValue: 'true',

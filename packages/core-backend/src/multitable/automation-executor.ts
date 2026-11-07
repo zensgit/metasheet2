@@ -14,10 +14,46 @@ import {
   type ExecutionLedgerKind,
 } from './automation-execution-ledger'
 import { deriveActionKey } from './automation-action-idempotency'
+// R-69 1b-ii — run_integration_job: fenced heartbeat job lease, port registry, live authority, config vocabulary.
+import {
+  DEFAULT_JOB_LEASE_TTL_MS,
+  JobLeaseLostError,
+  anyAbortSignal,
+  assertJobLeaseCurrent,
+  claimJobLease,
+  finalizeJobWithFencedOutcome,
+  jobLeaseScopeKey,
+  renewJobAndIntentLeases,
+  startJobLeaseHeartbeat,
+  type JobLeaseHeartbeatOptions,
+} from './automation-job-lease'
+import {
+  isIntegrationAutomationRunActionEnabled,
+  jobLeaseHolderId,
+  parsePersistedRunIntegrationJobConfig,
+  type NormalizedRunIntegrationJobConfig,
+} from './automation-run-integration-job'
+import {
+  sanitizeIntegrationRunSummary,
+  type IntegrationRunJob,
+  type IntegrationRunPort,
+  type IntegrationRunPrincipalUser,
+  type IntegrationRunStatus,
+  type IntegrationRunSummary,
+} from '../core/integration-run-port'
+// R-69 1c — Bridge 2: the per-job integration.run_finished summaries and their publish port.
+import { isIntegrationAutomationRunEventEnabled, publishIntegrationRunFinished } from '../core/integration-run-events'
+import { buildAutomationRunFinishedEvents } from './automation-run-finished-events'
+import {
+  buildIntegrationRunPrincipalContext,
+  resolveIntegrationRunPrincipalOnTransaction,
+  type IntegrationRunPrincipalResolution,
+} from '../integration/automation-run-authority'
 import {
   classifyFetchError,
   classifyOutboundResult,
   claimOutboundIntent,
+  deriveOutboundTargetKey,
   isClassBOutboundEnabled,
   outboundLeaseForTimeout,
   outboundReasonClass,
@@ -984,6 +1020,7 @@ function simulationDisposition(actionType: AutomationActionType): 'execute' | 's
     case 'wait_for_callback':
     case 'start_approval':
     case 'write_approval_form_values':
+    case 'run_integration_job': // R-69 1b-ii: a test run must never reach the integration port (no PLM read from a test run)
       return 'simulate'
   }
 
@@ -1148,6 +1185,7 @@ function simulatedGenericClassBPlan(
         recordId: context.recordId,
         actorId: context.actorId ?? '',
         record: context.recordData,
+        ...integrationRunTemplateVars(context),
       }
       target = { recipients }
       payload = {
@@ -1204,6 +1242,7 @@ function simulatedGenericClassBPlan(
         recordId: context.recordId,
         actorId: context.actorId ?? '',
         record: context.recordData,
+        ...integrationRunTemplateVars(context),
       }
       target = { destinationIds }
       payload = {
@@ -1274,6 +1313,7 @@ function simulatedGenericClassBPlan(
         recordId: context.recordId,
         actorId: context.actorId ?? '',
         record: context.recordData,
+        ...integrationRunTemplateVars(context),
       }
       target = { userIds, memberGroupIds }
       payload = {
@@ -1724,6 +1764,32 @@ export interface AutomationDeps {
    * zero-DB executor test seams stay zero-DB. Production (`AutomationService`) binds it to `meta_fields`.
    */
   loadConditionFields?: (sheetId: string) => Promise<ReadonlyArray<AutomationConditionField>>
+  /**
+   * R-69 1b-ii — the plugin-registered IntegrationRunPort, LATE-BOUND (plugins activate after the service is
+   * built: index.ts constructs AutomationService before pluginLoader.loadPlugins()). OMITTED or returning null ⇒
+   * the run_integration_job step fails closed as `port_inactive`.
+   */
+  integrationRunPort?: () => IntegrationRunPort | null
+  /** R-69 1b-ii — aborted by AutomationService.stopProducerAdmissions() BEFORE the scheduler is destroyed (I-4). */
+  shutdownSignal?: AbortSignal
+  /**
+   * R-69 1b-ii — registers a continuation that outlives its step (a port call still running after a
+   * `timeout_unsettled` early return, its heartbeat and its eventual Tx B) with the service's lifecycle set,
+   * which the host's FINAL shutdown barrier drains. OMITTED ⇒ the continuation is merely observed.
+   */
+  trackIntegrationJobTask?: (task: Promise<void>) => void
+  /**
+   * R-69 1b-ii test seam: replaces the production live-authority read (one committed READ COMMITTED
+   * transaction over the bound principal's rows). Production wiring passes nothing here.
+   */
+  resolveIntegrationRunPrincipal?: (binding: { principalId: string; tenantId: string }) => Promise<IntegrationRunPrincipalResolution>
+  /** R-69 1b-ii test seams for the lease TTL, the settle graces and the heartbeat cadence. */
+  integrationJobRuntime?: {
+    leaseTtlMs?: number
+    settleGraceMs?: number
+    shutdownSettleGraceMs?: number
+    heartbeat?: Pick<JobLeaseHeartbeatOptions, 'intervalMs' | 'safetyMs' | 'renewTimeoutMs' | 'now'>
+  }
 }
 
 /** FWB fail-closed default: every gate denies. Production binds real checks at AutomationService
@@ -1807,6 +1873,133 @@ export function describeDingTalkUnreachableRecipients(counts: DingTalkSkippedRec
   return `No DingTalk recipient was reached: ${total} skipped `
     + `(not linked: ${counts.notLinked}, inactive: ${counts.inactive}, not found: ${counts.notFound}) `
     + '(DINGTALK_RECIPIENTS_UNREACHABLE)'
+}
+
+// ── R-69 1c: `run.*` template variables (ADR §4.3) ───────────────────────────────────────────────────────────
+
+/**
+ * Present ONLY on an integration.run_finished execution: `run` is the dispatched, closed-key, values-free event
+ * (status, reason, counts.*, job.*, durationMs, attempts, errorClass …; AutomationService.dispatchIntegrationRunFinished
+ * strips the depth). Every other trigger renders exactly what it rendered before (no `run` key at all).
+ */
+function integrationRunTemplateVars(context: ExecutionContext): Record<string, unknown> {
+  const trigger = context.triggerEvent as Record<string, unknown> | null | undefined
+  if (!trigger || trigger.eventType !== 'integration.run_finished') return {}
+  const run = trigger.run
+  return run && typeof run === 'object' && !Array.isArray(run) ? { run } : {}
+}
+
+// ── R-69 1b-ii: run_integration_job step vocabulary (module-level, values-free) ──────────────────────────────
+
+/** A unit's / the step's outcome: the ADR §4.1 status set plus the two-phase `outcome_unknown`. */
+export type RunIntegrationJobOutcome = IntegrationRunStatus | 'outcome_unknown'
+
+/** Worst-wins aggregation order across a job's project units. */
+const RUN_INTEGRATION_JOB_OUTCOME_SEVERITY: Record<RunIntegrationJobOutcome, number> = {
+  succeeded: 0,
+  held: 1,
+  partial: 2,
+  skipped: 3,
+  not_started: 4,
+  failed: 5,
+  outcome_unknown: 6,
+}
+const RUN_INTEGRATION_JOB_SUCCESS_OUTCOMES: ReadonlySet<RunIntegrationJobOutcome> = new Set(['succeeded', 'held', 'partial'])
+
+export interface RunIntegrationJobUnitResult {
+  projectNo?: string
+  scopeKey: string
+  outcome: RunIntegrationJobOutcome
+  /** closed reason / bounded error class — never a message body */
+  reason: string
+  /** true iff THIS unit's fenced Tx B landed (or the ledger already said `sent`). */
+  confirmed: boolean
+  summary?: IntegrationRunSummary
+  durationMs: number
+  cause?: 'timeout' | 'shutdown'
+}
+
+function serializeRunIntegrationJobUnit(unit: RunIntegrationJobUnitResult): Record<string, unknown> {
+  return {
+    ...(unit.projectNo !== undefined ? { projectNo: unit.projectNo } : {}),
+    scopeKey: unit.scopeKey,
+    outcome: unit.outcome,
+    reason: unit.reason,
+    confirmed: unit.confirmed,
+    durationMs: unit.durationMs,
+    ...(unit.cause ? { cause: unit.cause } : {}),
+    ...(unit.summary ? { summary: unit.summary } : {}),
+  }
+}
+
+type PortSettlement = { kind: 'resolved'; summary: IntegrationRunSummary } | { kind: 'rejected'; error: unknown }
+
+/** The reason the step's own timeout signal aborts with; `name` is AbortError so standard checks recognize it. */
+export class RunIntegrationJobAbort extends Error {
+  constructor(readonly abortCause: 'timeout' | 'shutdown') {
+    super(`run_integration_job aborted (${abortCause})`)
+    this.name = 'AbortError'
+  }
+}
+
+/**
+ * An abort-shaped rejection: the step's own signal (AbortError / TimeoutError), the lease checkpoint
+ * (JobLeaseLostError / JOB_LEASE_LOST) or the plugin's governed-entry refusal wrapping either of them
+ * (GovernedEntryAbortError / GOVERNED_ENTRY_ABORTED, lib/governed-entry-checkpoint.cjs) — never a fault class.
+ */
+function isAbortLikeError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const name = (error as { name?: unknown }).name
+  const code = (error as { code?: unknown }).code
+  return name === 'AbortError' || name === 'TimeoutError' || name === 'JobLeaseLostError' || name === 'GovernedEntryAbortError'
+    || code === 'ABORT_ERR' || code === 'JOB_LEASE_LOST' || code === 'GOVERNED_ENTRY_ABORTED'
+}
+
+/** Values-free error class: a code or a name, never a message. */
+function integrationRunErrorClass(error: unknown): string {
+  if (error && typeof error === 'object') {
+    const code = (error as { code?: unknown }).code
+    if (typeof code === 'string' && code.trim()) return code.trim().replace(/[^A-Za-z0-9_:-]/g, '_').slice(0, 80)
+    const name = (error as { name?: unknown }).name
+    if (typeof name === 'string' && name.trim()) return name.trim().replace(/[^A-Za-z0-9_:-]/g, '_').slice(0, 80)
+  }
+  return 'error'
+}
+
+/**
+ * Map the port's settlement to the unit outcome and the intent ledger's terminal state. A dry run writes
+ * nothing, so every failure is a DEFINITE non-delivery (`failed`, re-armable by a replay); `succeeded` / `partial`
+ * / `held` are `sent` (the job ran to its own terminal state — `held` is a human to-do, not a fault).
+ */
+function classifyIntegrationRunSettlement(
+  settled: PortSettlement,
+  abortCause: 'timeout' | 'shutdown' | null,
+): { outcome: RunIntegrationJobOutcome; reason: string; intentOutcome: OutboundOutcome; summary?: IntegrationRunSummary } {
+  // Baseline §10.2.3 steps 7 / 9: once the step's timeout or the host's shutdown fired before the port settled,
+  // the unit is `failed(timeout | shutdown)` whatever the port returned late (a dry run writes nothing, so this is
+  // a definite non-delivery); the late summary stays attached for the record.
+  if (abortCause) {
+    return { outcome: 'failed', reason: abortCause, intentOutcome: 'failed', ...(settled.kind === 'resolved' ? { summary: settled.summary } : {}) }
+  }
+  if (settled.kind === 'resolved') {
+    const summary = settled.summary
+    const reason = summary.reason ?? summary.errorClass ?? summary.status
+    const intentOutcome: OutboundOutcome = RUN_INTEGRATION_JOB_SUCCESS_OUTCOMES.has(summary.status) ? 'sent' : 'failed'
+    return { outcome: summary.status, reason, intentOutcome, summary }
+  }
+  if (isAbortLikeError(settled.error)) return { outcome: 'failed', reason: 'aborted', intentOutcome: 'failed' }
+  return { outcome: 'failed', reason: integrationRunErrorClass(settled.error), intentOutcome: 'failed' }
+}
+
+function whenAborted(signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) { resolve(); return }
+    signal.addEventListener('abort', () => resolve(), { once: true })
+  })
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => { setTimeout(resolve, Math.max(0, ms)) })
 }
 
 // ── Executor class ────────────────────────────────────────────────────────
@@ -2854,6 +3047,12 @@ export class AutomationExecutor {
           // here we only return a succeeded step so the click runs through the
           // SAME dispatch as every other action (no parallel path).
           result = { actionType: 'record_click', status: 'success' }
+          break
+        case 'run_integration_job':
+          // R-69 1b-ii (dry-run only, default OFF): intent (Tx A) → fenced job lease → heartbeat → port with
+          // timeout | shutdown | lostSignal → settle → fenced Tx B. The identity is required (the intent row
+          // is ALWAYS written for this action, independent of AUTOMATION_CLASSB_OUTBOUND_ENABLED).
+          result = await this.executeRunIntegrationJob(action.config, context, identity)
           break
         default:
           result = {
@@ -3968,6 +4167,362 @@ export class AutomationExecutor {
       logger.warn(`class-B terminal write (${outcome}, ${reason}) not confirmed by its own attempt; ledger row owned elsewhere`)
     }
     return confirmed
+  }
+
+  // ── R-69 1b-ii: run_integration_job (design baseline v2.3 §10.2.3 "一次调用的顺序" steps 1-9) ──────────────
+  //
+  // DRY-RUN ONLY, default OFF (INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED read on EVERY trigger), R-69 OPEN.
+  // One step = one job; a stock_prep_pull job runs its projects SEQUENTIALLY, each project as one UNIT with its
+  // own intent row (per-target key), its own job lease (scope stock_prep_pull:<tenant>:<project>), its own
+  // heartbeat and its own fenced Tx B — so I-6 holds literally per scope. The step's timeout and the host's
+  // shutdown signal are shared by every unit.
+  //
+  //   0. switch; persisted config re-parsed; identity required; binding.principalId must be the rule creator;
+  //      port present; transaction seam present.
+  //   1. LIVE authority: one committed RC transaction over the bound principal (membership + canManageAutomation,
+  //      permission codes from the request-path resolver) — COMMITTED before any port call.
+  //   per unit:
+  //   2. Tx A claimOutboundIntent (skip decisions per the class-B semantics: sent ⇒ already applied; unknown /
+  //      in-flight ⇒ a failed-shaped unit, nothing runs).
+  //   3. claimJobLease — null ⇒ Tx B records `failed(busy)` on the intent row, unit `skipped(busy)`.
+  //   4. heartbeat (renewJobAndIntentLeases on the transaction seam, ttl/3) → lostSignal.
+  //   5. signal = timeout | shutdown | lostSignal; checkpoint() = pool-level assertJobLeaseCurrent.
+  //   6. port.run({ context, job, signal, checkpoint, automation }) — the plugin's governed entry.
+  //   7. settled ⇒ stop heartbeat (await its tick) ⇒ Tx B (lock → fenced outcome → release → commit).
+  //   8. aborted and not settled within the grace ⇒ `outcome_unknown(timeout_unsettled)`: the lease is NOT
+  //      released, the heartbeat keeps running, and the port call + the eventual Tx B are handed to the
+  //      service's lifecycle set (trackIntegrationJobTask) so the host's final shutdown barrier drains them.
+  //   9. lease lost ⇒ `outcome_unknown(lease_lost)`: no Tx B, no release (the row is not ours any more).
+
+  private integrationJobRuntime(): { leaseTtlMs: number; settleGraceMs: number; shutdownSettleGraceMs: number; heartbeat: NonNullable<AutomationDeps['integrationJobRuntime']>['heartbeat'] } {
+    const seams = this.deps.integrationJobRuntime ?? {}
+    return {
+      leaseTtlMs: seams.leaseTtlMs ?? DEFAULT_JOB_LEASE_TTL_MS,
+      // evidence B §12.8 T-level default: one source read (120 s) + 30 s; T-level default for the SHUTDOWN grace
+      // is short so stopProducerAdmissions() stays inside the host's 10 s producer barrier.
+      settleGraceMs: seams.settleGraceMs ?? 150_000,
+      shutdownSettleGraceMs: seams.shutdownSettleGraceMs ?? 2_000,
+      heartbeat: seams.heartbeat,
+    }
+  }
+
+  private runIntegrationJobStep(
+    status: AutomationStepResult['status'],
+    outcome: RunIntegrationJobOutcome,
+    reason: string,
+    extra: Record<string, unknown> = {},
+  ): AutomationStepResult {
+    const result: AutomationStepResult = {
+      actionType: 'run_integration_job',
+      status,
+      output: { outcome, reason, ...extra },
+    }
+    if (status !== 'success') result.error = `run_integration_job ${outcome} (${reason})`
+    return result
+  }
+
+  private async resolveIntegrationRunPrincipal(
+    binding: { principalId: string; tenantId: string },
+    transaction: NonNullable<AutomationDeps['transaction']>,
+  ): Promise<IntegrationRunPrincipalResolution> {
+    if (this.deps.resolveIntegrationRunPrincipal) return this.deps.resolveIntegrationRunPrincipal(binding)
+    try {
+      return await transaction(async ({ query }) => {
+        await query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        return resolveIntegrationRunPrincipalOnTransaction({
+          query: async (sqlText, params) => {
+            const result = await query(sqlText, params)
+            return { rows: (Array.isArray(result.rows) ? result.rows : []) as Array<Record<string, unknown>>, rowCount: result.rowCount ?? null }
+          },
+        }, binding)
+      })
+    } catch (error) {
+      // Values-free: the error's code or name only (never its message, never the binding), so the reason a
+      // trigger stopped at not_started(authority_unavailable) is readable in the log without the ledger.
+      logger.warn('run_integration_job live-authority read failed; unit not_started(authority_unavailable)', { errorClass: integrationRunErrorClass(error) })
+      return { ok: false, reason: 'authority_unavailable' }
+    }
+  }
+
+  private trackIntegrationJob(task: Promise<unknown>): void {
+    const settled = task.then(() => undefined, () => undefined)
+    if (this.deps.trackIntegrationJobTask) this.deps.trackIntegrationJobTask(settled)
+  }
+
+  /**
+   * R-69 1c (ADR §4.2): the step, then EXACTLY ONE integration.run_finished summary per project, emitted HERE —
+   * once, after the step's final result — never inside the unit loop, never from a `timeout_unsettled`
+   * continuation (its late settlement is the intent ledger's business, not a second event). The step's result
+   * is returned unchanged whatever the publish answers.
+   */
+  private async executeRunIntegrationJob(
+    config: Record<string, unknown>,
+    context: ExecutionContext,
+    identity: ClassAActionIdentity | undefined,
+  ): Promise<AutomationStepResult> {
+    let result: AutomationStepResult
+    try {
+      result = await this.executeRunIntegrationJobStep(config, context, identity)
+    } catch (error) {
+      // R-69 1c (ADR §4.1 "exactly one per job", fix-I5): a throw OUTSIDE the unit loop (the unit loop turns its
+      // own throws into closed unit results) still ends as a closed step result, so every configured project gets
+      // its one summary. Values-free: the error's code or name only — never its message.
+      result = this.runIntegrationJobStep('failed', 'failed', integrationRunErrorClass(error))
+    }
+    await this.emitRunIntegrationJobSummaries(result, config, context, identity)
+    return result
+  }
+
+  /**
+   * R-69 1c — the action layer's summaries (automation-run-finished-events.ts). Reads
+   * INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED before building anything (the ADR's third read point); needs the
+   * persisted config (the projects and the binding tenant, which routes but never rides in the event) and the
+   * class-A identity (the deterministic event id). Never throws; a refusal is logged values-free.
+   */
+  private async emitRunIntegrationJobSummaries(
+    result: AutomationStepResult,
+    config: Record<string, unknown>,
+    context: ExecutionContext,
+    identity: ClassAActionIdentity | undefined,
+  ): Promise<void> {
+    if (!isIntegrationAutomationRunEventEnabled()) return
+    try {
+      const parsed = parsePersistedRunIntegrationJobConfig(config)
+      if (!parsed || !identity) return
+      const parentDepth = (context.triggerEvent as Record<string, unknown> | null | undefined)?._automationDepth
+      const events = buildAutomationRunFinishedEvents({
+        output: result.output,
+        projectNos: parsed.job.projectNos,
+        ...(parsed.job.actionId ? { actionId: parsed.job.actionId } : {}),
+        rootExecutionId: identity.rootExecutionId,
+        executionId: context.executionId,
+        actionKey: deriveActionKey({ structuralPath: identity.structuralPath, actionType: 'run_integration_job', canonicalConfig: config }),
+        automationDepth: (typeof parentDepth === 'number' && Number.isSafeInteger(parentDepth) && parentDepth >= 0 ? parentDepth : 0) + 1,
+        occurredAt: new Date().toISOString(),
+      })
+      for (const event of events) {
+        const published = await publishIntegrationRunFinished(event, { tenantId: parsed.binding.tenantId }, 'automation')
+        if (published.published === false && published.code !== 'SINK_INACTIVE') {
+          logger.warn('run_integration_job summary not published', { ruleId: context.ruleId, executionId: context.executionId, code: published.code, ...(published.field ? { field: published.field } : {}) })
+        }
+      }
+    } catch (error) {
+      logger.warn('run_integration_job summary emit failed', { ruleId: context.ruleId, executionId: context.executionId, errorClass: integrationRunErrorClass(error) })
+    }
+  }
+
+  private async executeRunIntegrationJobStep(
+    config: Record<string, unknown>,
+    context: ExecutionContext,
+    identity: ClassAActionIdentity | undefined,
+  ): Promise<AutomationStepResult> {
+    // 0. The switch is read on EVERY trigger (ADR §7): off ⇒ skipped(action_disabled), never a silent success.
+    if (!isIntegrationAutomationRunActionEnabled()) return this.runIntegrationJobStep('skipped', 'skipped', 'action_disabled')
+    const parsed = parsePersistedRunIntegrationJobConfig(config)
+    if (!parsed) return this.runIntegrationJobStep('failed', 'not_started', 'config_invalid')
+    if (!identity) return this.runIntegrationJobStep('failed', 'not_started', 'identity_required')
+    if (parsed.binding.principalId !== context.ruleCreatedBy) {
+      // ADR §6.2: the binding is frozen to created_by; a config whose binding names someone else never runs.
+      return this.runIntegrationJobStep('skipped', 'skipped', 'principal_unauthorized', { cause: 'binding_principal_mismatch' })
+    }
+    const port = this.deps.integrationRunPort ? this.deps.integrationRunPort() : null
+    if (!port) return this.runIntegrationJobStep('failed', 'not_started', 'port_inactive')
+    const transaction = this.deps.transaction
+    if (!transaction) return this.runIntegrationJobStep('failed', 'not_started', 'transaction_seam_required')
+
+    // 1. Live authority, committed before the port runs (ADR §6.4).
+    const principal = await this.resolveIntegrationRunPrincipal(parsed.binding, transaction)
+    if (principal.ok === false) {
+      return principal.reason === 'principal_unauthorized'
+        ? this.runIntegrationJobStep('skipped', 'skipped', 'principal_unauthorized')
+        : this.runIntegrationJobStep('failed', 'not_started', 'authority_unavailable')
+    }
+
+    const runtime = this.integrationJobRuntime()
+    const timeoutController = new AbortController()
+    const timeoutTimer = setTimeout(() => timeoutController.abort(new RunIntegrationJobAbort('timeout')), parsed.timeoutMs)
+    const shutdownSignal = this.deps.shutdownSignal
+    const startedMs = Date.now()
+    const units: RunIntegrationJobUnitResult[] = []
+    try {
+      for (const projectNo of parsed.job.projectNos) {
+        const scopeKey = jobLeaseScopeKey({ kind: 'stock_prep_pull', tenantId: parsed.binding.tenantId, projectNo })
+        const abortedBy = shutdownSignal?.aborted ? 'shutdown' : timeoutController.signal.aborted ? 'timeout' : null
+        if (abortedBy) {
+          // The step's budget is spent: later projects never start (nothing to lease, nothing to release).
+          units.push({ projectNo, scopeKey, outcome: 'not_started', reason: abortedBy, confirmed: false, durationMs: 0 })
+          continue
+        }
+        let unit: RunIntegrationJobUnitResult
+        try {
+          unit = await this.runIntegrationJobUnit({
+            rawConfig: config,
+            context,
+            identity,
+            parsed,
+            projectNo,
+            scopeKey,
+            principal: principal.user,
+            port,
+            transaction,
+            timeoutSignal: timeoutController.signal,
+            shutdownSignal,
+            runtime,
+          })
+        } catch (error) {
+          // R-69 1c (fix-I5): a throw the unit did not classify itself (it classifies Tx A, the lease claim and the
+          // busy write) never ends the loop — the next project still runs and every project keeps its one summary.
+          // Where it threw is not known, so the job MAY have started: outcome_unknown, error class only.
+          unit = { projectNo, scopeKey, outcome: 'outcome_unknown', reason: integrationRunErrorClass(error), confirmed: false, durationMs: 0 }
+        }
+        units.push(unit)
+        if (unit.outcome === 'outcome_unknown' && unit.reason === 'timeout_unsettled') break
+      }
+    } finally {
+      clearTimeout(timeoutTimer)
+    }
+    return this.aggregateRunIntegrationJobUnits(units, Date.now() - startedMs)
+  }
+
+  private async runIntegrationJobUnit(input: {
+    rawConfig: Record<string, unknown>
+    context: ExecutionContext
+    identity: ClassAActionIdentity
+    parsed: NormalizedRunIntegrationJobConfig
+    projectNo: string
+    scopeKey: string
+    principal: IntegrationRunPrincipalUser
+    port: IntegrationRunPort
+    transaction: NonNullable<AutomationDeps['transaction']>
+    timeoutSignal: AbortSignal
+    shutdownSignal: AbortSignal | undefined
+    runtime: ReturnType<AutomationExecutor['integrationJobRuntime']>
+  }): Promise<RunIntegrationJobUnitResult> {
+    const { parsed, projectNo, scopeKey, runtime } = input
+    const startedMs = Date.now()
+    const unit = (outcome: RunIntegrationJobOutcome, reason: string, extra: Partial<RunIntegrationJobUnitResult> = {}): RunIntegrationJobUnitResult => ({
+      projectNo,
+      scopeKey,
+      outcome,
+      reason,
+      confirmed: false,
+      durationMs: Date.now() - startedMs,
+      ...extra,
+    })
+    const tenantId = parsed.binding.tenantId
+    // Per-project intent identity (T-level default recorded in the PR): one row per (action, project).
+    const intentId: OutboundIntentIdentity = {
+      kind: input.identity.kind ?? 'execution',
+      rootExecutionId: input.identity.rootExecutionId,
+      actionKey: deriveActionKey({ structuralPath: input.identity.structuralPath, actionType: 'run_integration_job', canonicalConfig: input.rawConfig }),
+      targetKey: deriveOutboundTargetKey(['stock_prep_pull', tenantId, projectNo]),
+    }
+    const intentLeaseMs = outboundLeaseForTimeout(parsed.timeoutMs)
+
+    // 2. Tx A — the intent row is ALWAYS written for this action (ADR §5), whatever the class-B switch says.
+    // R-69 1c (fix-I5): a database failure here is a closed unit result, never a throw past the loop (ADR §4.1:
+    // every project keeps its one summary). The port was not called: `failed`, the error CLASS only.
+    let claim: Awaited<ReturnType<typeof claimOutboundIntent>>
+    try {
+      claim = await claimOutboundIntent(this.deps.queryFn, intentId, { leaseMs: intentLeaseMs })
+    } catch (error) {
+      return unit('failed', integrationRunErrorClass(error))
+    }
+    if (claim.decision !== 'proceed' && claim.decision !== 'retry_failed') {
+      if (claim.decision === 'skip_sent') return unit('succeeded', 'already_applied', { confirmed: true })
+      return unit('outcome_unknown', claim.decision === 'skip_inflight' ? 'inflight_lease' : 'prior_outcome_unknown')
+    }
+    const attemptToken = claim.attemptToken
+
+    // 3. Job lease — busy ⇒ Tx B records a definite non-delivery (`failed`, busy) and the unit is skipped(busy).
+    let lease: Awaited<ReturnType<typeof claimJobLease>>
+    try {
+      lease = await claimJobLease(this.deps.queryFn, scopeKey, jobLeaseHolderId(input.context.executionId), runtime.leaseTtlMs)
+    } catch (error) {
+      // R-69 1c (fix-I5): the port was not called — a definite non-delivery, recorded best effort (a write that
+      // fails too leaves the pending row to its intent lease; a lease row that did commit is left to its TTL).
+      const errorClass = integrationRunErrorClass(error)
+      await recordOutboundOutcome(this.deps.queryFn, intentId, 'failed', errorClass, attemptToken).catch(() => undefined)
+      return unit('failed', errorClass)
+    }
+    if (!lease) {
+      const busy = await recordOutboundOutcome(this.deps.queryFn, intentId, 'failed', 'busy', attemptToken)
+        .catch((): { confirmed: boolean } => ({ confirmed: false }))
+      return unit('skipped', 'busy', { confirmed: busy.confirmed })
+    }
+
+    // 4. Heartbeat — one transaction per tick in the unified lock order; any 0 rows ⇒ lostSignal.
+    const heartbeat = startJobLeaseHeartbeat({
+      renew: () => renewJobAndIntentLeases(input.transaction, lease, { id: intentId, attemptToken, leaseMs: intentLeaseMs }, runtime.leaseTtlMs),
+      ttlMs: runtime.leaseTtlMs,
+      ...(runtime.heartbeat ?? {}),
+    })
+    // 5. The port's signal and checkpoint (I-5): checkpoint is a plain pool read, never inside a transaction.
+    const signal = anyAbortSignal([input.timeoutSignal, ...(input.shutdownSignal ? [input.shutdownSignal] : []), heartbeat.lostSignal])
+    const checkpoint = async (): Promise<void> => {
+      if (heartbeat.lost || !(await assertJobLeaseCurrent(this.deps.queryFn, lease))) throw new JobLeaseLostError('verify')
+    }
+    const job: IntegrationRunJob = { kind: 'stock_prep_pull', projectNo, ...(parsed.job.actionId ? { actionId: parsed.job.actionId } : {}) }
+    const principalContext = buildIntegrationRunPrincipalContext(input.principal, { parameters: { projectNo } })
+    const automation = { ruleId: input.context.ruleId, executionId: input.context.executionId, rootExecutionId: input.identity.rootExecutionId }
+
+    // 6. The port call — its settlement is captured, never thrown past this point.
+    const portRun: Promise<PortSettlement> = Promise.resolve()
+      .then(() => input.port.run({ context: principalContext, job, signal, checkpoint, automation }))
+      .then(
+        (summary): PortSettlement => ({ kind: 'resolved', summary: sanitizeIntegrationRunSummary(summary) }),
+        (error): PortSettlement => ({ kind: 'rejected', error }),
+      )
+
+    // The abort cause as observed at a given moment (settlement time), never re-read later: a timer that fires
+    // while Tx B is being prepared must not relabel a run that settled in time.
+    const abortCauseNow = (): 'timeout' | 'shutdown' | null =>
+      (input.shutdownSignal?.aborted ? 'shutdown' : input.timeoutSignal.aborted ? 'timeout' : null)
+
+    // 7. After the port SETTLED: stop the heartbeat (await its in-flight tick), then Tx B — or nothing, if lost.
+    const finalize = async (settled: PortSettlement, abortCause: 'timeout' | 'shutdown' | null): Promise<RunIntegrationJobUnitResult> => {
+      await heartbeat.stop()
+      if (heartbeat.lost) return unit('outcome_unknown', 'lease_lost')
+      const classified = classifyIntegrationRunSettlement(settled, abortCause)
+      const finalization = await finalizeJobWithFencedOutcome(input.transaction, lease, { id: intentId, attemptToken }, classified.intentOutcome, classified.reason)
+      if (finalization.confirmed === false) {
+        return unit('outcome_unknown', finalization.reason === 'lease_lost' ? 'lease_lost' : 'terminal_write_unconfirmed', { summary: classified.summary })
+      }
+      return unit(classified.outcome, classified.reason, { confirmed: true, summary: classified.summary })
+    }
+
+    const settledBeforeAbort = await Promise.race([portRun.then(() => true as const), whenAborted(signal).then(() => false as const)])
+    if (settledBeforeAbort) return finalize(await portRun, abortCauseNow())
+
+    // 8/9. Aborted first: wait the cause's grace for the port to settle.
+    const cause: 'lease_lost' | 'shutdown' | 'timeout' = heartbeat.lost ? 'lease_lost' : (abortCauseNow() ?? 'timeout')
+    const graceMs = cause === 'shutdown' ? runtime.shutdownSettleGraceMs : runtime.settleGraceMs
+    const settledInGrace = await Promise.race([portRun.then(() => true as const), delay(graceMs).then(() => false as const)])
+    if (settledInGrace) return finalize(await portRun, cause === 'lease_lost' ? abortCauseNow() : cause)
+    if (cause === 'lease_lost') {
+      // Not the holder any more: nothing to write, nothing to release; shutdown still waits for the dangling call.
+      this.trackIntegrationJob(portRun.then(() => heartbeat.stop()))
+      return unit('outcome_unknown', 'lease_lost')
+    }
+    // The port is still running: the lease stays held, the heartbeat keeps renewing, Tx B runs when it settles.
+    this.trackIntegrationJob(portRun.then((settled) => finalize(settled, cause)))
+    return unit('outcome_unknown', 'timeout_unsettled', { cause })
+  }
+
+  private aggregateRunIntegrationJobUnits(units: RunIntegrationJobUnitResult[], durationMs: number): AutomationStepResult {
+    const worst = units.reduce<RunIntegrationJobUnitResult | null>(
+      (acc, unit) => (acc === null || RUN_INTEGRATION_JOB_OUTCOME_SEVERITY[unit.outcome] > RUN_INTEGRATION_JOB_OUTCOME_SEVERITY[acc.outcome] ? unit : acc),
+      null,
+    )
+    const output = { units: units.map(serializeRunIntegrationJobUnit), durationMs }
+    if (!worst) return this.runIntegrationJobStep('failed', 'not_started', 'no_units', output)
+    const allConfirmed = units.every((unit) => unit.confirmed)
+    if (RUN_INTEGRATION_JOB_SUCCESS_OUTCOMES.has(worst.outcome) && allConfirmed) {
+      const alreadyApplied = units.every((unit) => unit.reason === 'already_applied')
+      return { ...this.runIntegrationJobStep('success', worst.outcome, worst.reason, output), ...(alreadyApplied ? { alreadyApplied: true } : {}) }
+    }
+    if (worst.outcome === 'skipped') return this.runIntegrationJobStep('skipped', 'skipped', worst.reason, output)
+    return this.runIntegrationJobStep('failed', worst.outcome, worst.reason, output)
   }
 
   private async executeCreateRecord(
@@ -5286,6 +5841,7 @@ export class AutomationExecutor {
       recordId: context.recordId,
       actorId: context.actorId ?? '',
       record: context.recordData,
+      ...integrationRunTemplateVars(context),
     }
     const subject = renderAutomationTemplate(subjectTemplate, templateData).trim()
     const content = renderAutomationTemplate(bodyTemplate, templateData).trim()
@@ -5912,6 +6468,7 @@ export class AutomationExecutor {
       recordId: context.recordId,
       actorId: context.actorId ?? '',
       record: context.recordData,
+      ...integrationRunTemplateVars(context),
     }
     const renderedTitle = truncateDingTalkMessageText(
       renderAutomationTemplate(titleTemplate, templateData).trim(),
@@ -6583,6 +7140,7 @@ export class AutomationExecutor {
       recordId: context.recordId,
       actorId: context.actorId ?? '',
       record: context.recordData,
+      ...integrationRunTemplateVars(context),
     }
     const renderedTitle = truncateDingTalkMessageText(
       renderAutomationTemplate(titleTemplate, templateData).trim(),
@@ -6865,4 +7423,49 @@ export class AutomationExecutor {
       output: groupOutput,
     }
   }
+}
+
+// ── Synthetic integration preview (C1/S2 first slice, evidence D §6) ──────────────────────────────────
+//
+// A SEPARATE, typed entry: it sequences the fixed preview plan's steps and returns only values-free step
+// summaries. It never goes through executeSingleAction, never dispatches an ordinary action, never writes
+// a job/outbox row and never sees a step value (values stay in the run's RunValueStore, owned by the
+// caller). The preview step types are not members of ALL_ACTION_TYPES, so nothing here widens the
+// ordinary action enum, the rule-save allowlist or the scheduler. Every step after a failed one is
+// skipped (no successor runs after FORBIDDEN / UNAVAILABLE / LIMIT / cancel / error).
+
+export type SyntheticPreviewStepStatus = 'success' | 'failed' | 'skipped'
+
+export type SyntheticPreviewStepSummary = Readonly<{
+  stepId: string
+  type: string
+  status: SyntheticPreviewStepStatus
+  durationMs: number
+}>
+
+export type SyntheticPreviewPlanStep = Readonly<{ id: string; type: string }>
+
+export async function executeSyntheticPreviewPlan(
+  steps: readonly SyntheticPreviewPlanStep[],
+  runStep: (step: SyntheticPreviewPlanStep, index: number) => Promise<void>,
+  now: () => number = Date.now,
+): Promise<{ steps: readonly SyntheticPreviewStepSummary[]; failure?: unknown }> {
+  const summaries: SyntheticPreviewStepSummary[] = []
+  let failure: { error: unknown } | undefined
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = steps[index]
+    if (failure) {
+      summaries.push(Object.freeze({ stepId: step.id, type: step.type, status: 'skipped' as const, durationMs: 0 }))
+      continue
+    }
+    const startedAt = now()
+    try {
+      await runStep(step, index)
+      summaries.push(Object.freeze({ stepId: step.id, type: step.type, status: 'success' as const, durationMs: Math.max(0, now() - startedAt) }))
+    } catch (error) {
+      failure = { error }
+      summaries.push(Object.freeze({ stepId: step.id, type: step.type, status: 'failed' as const, durationMs: Math.max(0, now() - startedAt) }))
+    }
+  }
+  return failure ? { steps: Object.freeze(summaries), failure: failure.error } : { steps: Object.freeze(summaries) }
 }

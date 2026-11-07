@@ -2,7 +2,14 @@ import { randomUUID } from 'crypto'
 import { sql, type Kysely } from 'kysely'
 import type { EventBus } from '../integration/events/event-bus'
 import { Logger } from '../core/logger'
-import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, type AutomationTriggerType } from './automation-triggers'
+import {
+  INTEGRATION_RUN_FINISHED_TRIGGER,
+  integrationRunFinishedConfiguredStatuses,
+  matchesTrigger,
+  TRIGGER_TYPE_BY_EVENT,
+  validateIntegrationRunFinishedTriggerConfig,
+  type AutomationTriggerType,
+} from './automation-triggers'
 import {
   computeDateReminderOccurrence,
   isDateReminderDue,
@@ -139,6 +146,43 @@ import {
 } from './stock-preparation-overview-contract'
 import { HUMAN_WRITE_LOCK_AUTOMATION_REFUSAL, findHumanWriteLockedFieldIds } from './human-write-lock'
 import type { Database } from '../db/types'
+import {
+  createAutomationSyntheticPreviewRuntime,
+  isSyntheticIntegrationPreviewEnabled,
+  type SyntheticPreviewResponse,
+  type SyntheticPreviewRuntime,
+  type SyntheticPreviewRuntimeDependencies,
+  type SyntheticPreviewScope,
+} from '../integration/automation-synthetic-preview'
+import { loadYidaLocalDraftCompiler } from '../integration/yida-automation-preview'
+import type { Queryable } from './automation-durable-dispatcher'
+// R-69 1b-ii — run_integration_job: the plugin-registered port (late-bound), the save gate and the shutdown signal.
+import { getIntegrationRunPort } from '../core/integration-run-port'
+import {
+  RUN_INTEGRATION_JOB_ACTION_TYPE,
+  collectRunIntegrationJobOccurrences,
+  isIntegrationAutomationRunActionEnabled,
+  stampRunIntegrationJobConfig,
+  validateRunIntegrationJobConfig,
+  validateRunIntegrationJobTriggerCoupling,
+} from './automation-run-integration-job'
+// R-69 1c — Bridge 2: the integration.run_finished trigger (save gate, job-keyed dispatch, durable leg); its
+// trigger vocabulary is imported with the other automation-triggers names above.
+import {
+  INTEGRATION_RUN_FINISHED_EVENT_TYPE,
+  IntegrationRunSinkStoppedError,
+  isIntegrationAutomationRunEventEnabled,
+  validateIntegrationRunEventRoute,
+  validateIntegrationRunFinishedEvent,
+  type IntegrationRunEventRoute,
+  type IntegrationRunFinishedEvent,
+} from '../core/integration-run-events'
+import { produceAutomationEvent } from './automation-durable-activation'
+import type { TransactionalQueryable } from './pg-transaction-guard'
+import {
+  resolveIntegrationRunPrincipalOnTransaction,
+  type IntegrationRunPrincipalResolution,
+} from '../integration/automation-run-authority'
 
 const logger = new Logger('AutomationService')
 
@@ -164,6 +208,9 @@ export type AutomationRuleValidationCode =
   | typeof STOCK_PREP_OVERVIEW_READ_ONLY_CODE
   // S0-a: a send_webhook target that can never be sent (http, internal name / IP literal, malformed).
   | typeof WEBHOOK_TARGET_REJECTED
+  // R-69 1b-ii (ADR §7): a rule carrying run_integration_job while INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED is
+  // not 'true' — the automation routes answer this one code with 403, every other code with 400.
+  | 'RUN_ACTION_DISABLED'
 
 /**
  * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — the rule-save refusal for "record.deleted + same-base
@@ -269,7 +316,20 @@ const VALID_TRIGGER_TYPES = new Set([
   'form.submitted',
   'approval.completed',
   'approval.task_created',
+  // R-69 1c: job-keyed dedicated dispatch (handleIntegrationRunFinished), never the record lane.
+  'integration.run_finished',
 ])
+
+/**
+ * R-69 1c: an integration.run_finished rule's creator must be able to READ integration results — `integration:*`
+ * (read and above) or `stock-prep:read` (ADR §4.2), checked at save and re-checked live at fire, on top of the
+ * automation capability and the single active membership resolveIntegrationRunPrincipalOnTransaction decides.
+ */
+const INTEGRATION_RUN_FINISHED_READ_CODES: ReadonlySet<string> = new Set([
+  'integration:read', 'integration:write', 'integration:admin', 'stock-prep:read',
+])
+/** The durable consumer key for the integration.run_finished family (routing manifest v4). */
+export const INTEGRATION_RUN_TRIGGER_CONSUMER_KEY = 'integration-run-trigger'
 
 // ── T1-3 approval.completed trigger (first-batch ballot 2026-07-01) ────────
 // Routed by REQUIRED trigger_config.templateId (cross-sheet — completion events carry no sheet/record).
@@ -1412,6 +1472,32 @@ export async function resolveAutomationSchedulerLeaderOptions(): Promise<Automat
   return { leaderLock, ownerId, ttlMs }
 }
 
+/**
+ * Production dependencies of the synthetic integration preview: the host pool's RC transaction (the same
+ * shape as the YiDa runtimes' host transaction in index.ts), the exact-literal switch read on every run,
+ * the shared pure YiDa compiler (loaded once, compileYidaLocalDraft only) and the dedicated summary writer.
+ */
+function createDefaultSyntheticPreviewDependencies(logService: AutomationLogService): SyntheticPreviewRuntimeDependencies {
+  return {
+    database: {
+      transaction: (work) => poolManager.get().transaction(async ({ query }) => {
+        await query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        const trx: Queryable = {
+          query: async (sqlText: string, params?: unknown[]) => {
+            const result = await query(sqlText, params) as { rows?: Array<Record<string, unknown>>; rowCount?: number | null }
+            return { rows: Array.isArray(result?.rows) ? result.rows : [], rowCount: result?.rowCount ?? null }
+          },
+        }
+        return work(trx)
+      }),
+    },
+    // Its own exact-literal switch only (never derived from another AUTOMATION_* / INTEGRATION_* flag).
+    readEnablement: () => (isSyntheticIntegrationPreviewEnabled() ? 'true' : 'false'),
+    loadCompiler: loadYidaLocalDraftCompiler,
+    recordSummary: (trx, entry) => logService.recordSyntheticPreviewSummary((sqlText, params) => trx.query(sqlText, params), entry),
+  }
+}
+
 export class AutomationService {
   private eventBus: EventBus
   private db: Kysely<Database>
@@ -1421,12 +1507,25 @@ export class AutomationService {
   private readonly transitiveCompletionInFlight = new Set<Promise<void>>()
   private readonly completionConsumerInFlight = new Set<Promise<void>>()
   private producerStopPromise: Promise<void> | null = null
+  /** R-69 1c (fix-I5): set by detachCompletionConsumers — the integration.run_finished sink admits nothing after it. */
+  private completionConsumersDetached = false
   private executor: AutomationExecutor
   private scheduler: AutomationScheduler
   private logService: AutomationLogService
   private jobService: AutomationJobService
   private suspensionService: AutomationSuspensionService
   private approvalBridgeService: AutomationApprovalBridgeService
+  /** C1/S2 synthetic integration preview: host-owned runtime, drained by stopProducerAdmissions(). */
+  private syntheticPreview: SyntheticPreviewRuntime
+  /**
+   * R-69 1b-ii: continuations of run_integration_job steps that returned early (`timeout_unsettled`): the port
+   * call still running, its heartbeat and its eventual Tx B. Drained by drainIntegrationJobs(), which the host
+   * registers on its FINAL shutdown barrier (index.ts stopOnce) — never a background task outside the lifecycle.
+   */
+  private readonly integrationJobsInFlight = new Set<Promise<void>>()
+  /** R-69 1b-ii (I-4): aborted in stopProducerAdmissions() BEFORE the scheduler is destroyed, so an in-flight job
+   *  is told to stop instead of blocking the producer drain for its whole timeout. */
+  private readonly shutdownController = new AbortController()
   private lastDateReminderLedgerSweepMs = 0
   private lastEventDedupLedgerSweepMs = 0
   private lastAutomationRetryLedgerSweepMs = 0
@@ -1475,6 +1574,13 @@ export class AutomationService {
       }),
       fetchFn,
       notificationService,
+      // R-69 1b-ii: the plugin-registered IntegrationRunPort (late-bound: plugins activate after this
+      // constructor), the shutdown signal and the continuation tracker (see integrationJobsInFlight).
+      integrationRunPort: () => getIntegrationRunPort() ?? null,
+      shutdownSignal: this.shutdownController.signal,
+      trackIntegrationJobTask: (task) => this.trackLifecycleTask(this.integrationJobsInFlight, task, (error) => {
+        logger.warn(`run_integration_job continuation failed: ${error instanceof Error ? error.name : 'error'}`)
+      }),
       // FWB activation (§11 Q6): construct the REAL four-gate set from the CURRENT write
       // transaction. Pool/cached permission reads here would reopen a revoke-after-check race.
       fwbGateChecksFactory: (transactionQuery) => buildProductionFwbGateChecks({
@@ -1501,6 +1607,7 @@ export class AutomationService {
     this.jobService = new AutomationJobService()
     this.suspensionService = new AutomationSuspensionService(this.jobService)
     this.approvalBridgeService = new AutomationApprovalBridgeService(this.jobService)
+    this.syntheticPreview = createAutomationSyntheticPreviewRuntime(createDefaultSyntheticPreviewDependencies(this.logService))
     this.scheduler = new AutomationScheduler(
       async (rule) => {
         // SHEET LIVENESS (soft delete) — the SCHEDULED lane.
@@ -1639,10 +1746,10 @@ export class AutomationService {
       input.actionConfig ?? {},
       input.actions ?? null,
     )
-    const actionConfig = normalizedDingTalkInputs.actionConfig && typeof normalizedDingTalkInputs.actionConfig === 'object'
+    let actionConfig = normalizedDingTalkInputs.actionConfig && typeof normalizedDingTalkInputs.actionConfig === 'object'
       ? normalizedDingTalkInputs.actionConfig as Record<string, unknown>
       : input.actionConfig ?? {}
-    const actions = Array.isArray(normalizedDingTalkInputs.actions)
+    let actions = Array.isArray(normalizedDingTalkInputs.actions)
       ? normalizedDingTalkInputs.actions as AutomationAction[]
       : input.actions ?? null
     const executionMode = normalizeExecutionMode(input.executionMode)
@@ -1655,6 +1762,21 @@ export class AutomationService {
     if (startApprovalValidationError) throw new AutomationRuleValidationError(startApprovalValidationError)
     const crossBaseWriteValidationError = validateCrossBaseWriteActionConfigs(input.actionType, actionConfig, actionsForValidation)
     if (crossBaseWriteValidationError) throw new AutomationRuleValidationError(crossBaseWriteValidationError)
+    // R-69 1b-ii: run_integration_job save gate — switch (403 RUN_ACTION_DISABLED), closed config, cron + timezone
+    // coupling, and the SERVER-STAMPED binding (created_by + its single active tenant); a client binding is dropped.
+    const runIntegrationJobSave = await this.assertRunIntegrationJobAtSave({
+      triggerType: input.triggerType,
+      triggerConfig: (input.triggerConfig ?? null) as Record<string, unknown> | null,
+      actionType: input.actionType,
+      actionConfig,
+      actions,
+      allActions: actionsForValidation,
+      createdBy: input.createdBy ?? null,
+    })
+    if (runIntegrationJobSave) {
+      actionConfig = runIntegrationJobSave.actionConfig
+      actions = runIntegrationJobSave.actions
+    }
     // S3 fix round 2 (F2): a result write-back may not target the read-only stock-preparation overview.
     const overviewWritebackError = await validateStockPrepOverviewResultWritebackTargets(
       this.queryFn as StockPreparationOverviewQueryFn,
@@ -1756,12 +1878,23 @@ export class AutomationService {
     const cardPlacementError = validateApprovalCardActionPlacement(input.triggerType, input.actionType, actionsForValidation)
     if (cardPlacementError) throw new AutomationRuleValidationError(cardPlacementError)
 
+    // R-69 1c: integration.run_finished — closed config, record-less side-effect actions only, creator able to
+    // read integration results, and the SERVER-STAMPED binding (creator + its single active tenant).
+    const runFinishedTriggerConfig = await this.assertIntegrationRunFinishedRuleAtSave({
+      triggerType: input.triggerType,
+      triggerConfig: (input.triggerConfig ?? null) as Record<string, unknown> | null,
+      actionType: input.actionType,
+      nestedActions: actionsForValidation,
+      conditions: input.conditions ?? null,
+      createdBy: input.createdBy ?? null,
+    })
+
     // date_field rules carry a SERVER-SET activation `effectiveAt` (= now) so the firing floor is the rule's
     // activation, not its row createdAt. Spread-then-set overwrites any client-supplied effectiveAt (no backfill bypass).
     const persistedTriggerConfig: Record<string, unknown> =
       input.triggerType === 'schedule.date_field'
         ? { ...((input.triggerConfig ?? {}) as Record<string, unknown>), effectiveAt: now }
-        : ((input.triggerConfig ?? {}) as Record<string, unknown>)
+        : runFinishedTriggerConfig ?? ((input.triggerConfig ?? {}) as Record<string, unknown>)
 
     const row = {
       id: ruleId,
@@ -1860,6 +1993,10 @@ export class AutomationService {
     // rewritten together below, even if the caller only sent one of them.
     let legacyActionTypeRewrite: string | undefined
     let legacyActionConfigRewrite: Record<string, unknown> | undefined
+    // R-69 1b-ii: set when the save gate re-stamped a run_integration_job binding — the stamped column is then
+    // written even if the caller did not send that column itself.
+    let runIntegrationJobConfigRewrite: Record<string, unknown> | undefined
+    let runIntegrationJobActionsRewrite: AutomationAction[] | null | undefined
     // T1-3: reuse the rule row already fetched by the action/trigger validation blocks below so the
     // approval.completed resulting-shape check does NOT add a getRule call for those input shapes
     // (unit tests mock getRule as a strict response queue — an extra fetch drains it and regresses
@@ -1921,6 +2058,21 @@ export class AutomationService {
         actionsForValidation,
       )
       if (crossBaseWriteValidationError) throw new AutomationRuleValidationError(crossBaseWriteValidationError)
+      // R-69 1b-ii: the RESULTING rule (trigger = incoming ?? stored; actions as merged) must satisfy the save
+      // gate; the binding is re-stamped from the STORED created_by (ADR §6.2: the editor never takes it over).
+      const runIntegrationJobUpdate = await this.assertRunIntegrationJobAtSave({
+        triggerType: input.triggerType ?? existing.trigger_type,
+        triggerConfig: (input.triggerConfig !== undefined ? input.triggerConfig : existing.trigger_config) as Record<string, unknown> | null,
+        actionType: nextActionType,
+        actionConfig: normalizedNextActionConfig,
+        actions: normalizedNextActions,
+        allActions: actionsForValidation,
+        createdBy: existing.created_by ?? null,
+      })
+      const persistedNextActionConfig = runIntegrationJobUpdate ? runIntegrationJobUpdate.actionConfig : normalizedNextActionConfig
+      const persistedNextActions = runIntegrationJobUpdate ? runIntegrationJobUpdate.actions : normalizedNextActions
+      if (runIntegrationJobUpdate?.stampedTopLevel) runIntegrationJobConfigRewrite = persistedNextActionConfig
+      if (runIntegrationJobUpdate?.stampedActions) runIntegrationJobActionsRewrite = persistedNextActions
       // S3 fix round 2 (F2): the same overview refusal as createRule, on every action-shaped edit.
       const overviewWritebackError = await validateStockPrepOverviewResultWritebackTargets(
         this.queryFn as StockPreparationOverviewQueryFn,
@@ -1942,10 +2094,10 @@ export class AutomationService {
 
       if (legacyNormalizedUpdate.changed) {
         legacyActionTypeRewrite = nextActionType
-        legacyActionConfigRewrite = normalizedNextActionConfig
+        legacyActionConfigRewrite = persistedNextActionConfig
       }
-      if (input.actionConfig !== undefined) normalizedActionConfigForUpdate = normalizedNextActionConfig
-      if (input.actions !== undefined) normalizedActionsForUpdate = Array.isArray(input.actions) ? normalizedNextActions : null
+      if (input.actionConfig !== undefined) normalizedActionConfigForUpdate = persistedNextActionConfig
+      if (input.actions !== undefined) normalizedActionsForUpdate = Array.isArray(input.actions) ? persistedNextActions : null
       if (input.executionMode !== undefined) normalizedExecutionModeForUpdate = nextExecutionMode
     }
 
@@ -1961,6 +2113,9 @@ export class AutomationService {
       updates.action_type = legacyActionTypeRewrite
       updates.action_config = JSON.stringify(legacyActionConfigRewrite ?? {})
     }
+    // R-69 1b-ii: a re-stamped binding is persisted whichever columns the caller sent.
+    if (runIntegrationJobConfigRewrite !== undefined) updates.action_config = JSON.stringify(runIntegrationJobConfigRewrite)
+    if (runIntegrationJobActionsRewrite !== undefined) updates.actions = runIntegrationJobActionsRewrite ? JSON.stringify(runIntegrationJobActionsRewrite) : null
     if (input.enabled !== undefined) updates.enabled = input.enabled
     if (input.conditions !== undefined) updates.conditions = input.conditions ? JSON.stringify(input.conditions) : null
     if (input.actions !== undefined) updates.actions = normalizedActionsForUpdate ? JSON.stringify(normalizedActionsForUpdate) : null
@@ -1993,6 +2148,19 @@ export class AutomationService {
         nextTriggerConfig as Record<string, unknown> | null,
       )
       if (inboundWebhookError) throw new AutomationRuleValidationError(inboundWebhookError)
+
+      // R-69 1b-ii: a trigger-only edit of a rule that carries run_integration_job keeps the coupling
+      // (schedule.cron + a present IANA timezone). Action-shaped edits already ran the full gate above.
+      if (!shouldValidateActions) {
+        const couplingError = this.runIntegrationJobTriggerCouplingError(
+          nextTriggerType,
+          nextTriggerConfig as Record<string, unknown> | null,
+          existingForTrigger.action_type,
+          (existingForTrigger.action_config ?? null) as Record<string, unknown> | null,
+          existingForTrigger.actions ?? null,
+        )
+        if (couplingError) throw new AutomationRuleValidationError(couplingError)
+      }
 
       // SERVER-SET activation floor: when the RESULT is a date_field rule, persist `effectiveAt`. Converting
       // INTO date_field (prev type differs) activates NOW; staying date_field (config edit) PRESERVES the
@@ -2104,6 +2272,20 @@ export class AutomationService {
           existingForApproval.created_by,
         )
         if (approvalTaskCreatedError) throw new AutomationRuleValidationError(approvalTaskCreatedError)
+      }
+      // R-69 1c: the RESULTING integration.run_finished rule passes the same save gate on every write shape, and
+      // its binding is re-stamped from the STORED creator and persisted whichever columns the caller sent.
+      const runFinishedUpdateConfig = await this.assertIntegrationRunFinishedRuleAtSave({
+        triggerType: nextTriggerType,
+        triggerConfig: nextTriggerConfig,
+        actionType: nextActionType,
+        nestedActions: approvalActions,
+        conditions: nextConditions,
+        createdBy: existingForApproval.created_by ?? null,
+      })
+      if (runFinishedUpdateConfig) {
+        updates.trigger_config = JSON.stringify(runFinishedUpdateConfig)
+        if (updates.trigger_type === undefined) updates.trigger_type = nextTriggerType
       }
       // FWB activation: the same fail-closed save gate for every resulting shape of a partial update.
       const fwbUpdateError = await this.validateFwbActionAtSave(
@@ -2804,6 +2986,324 @@ export class AutomationService {
   }
 
   /**
+   * R-69 1b-ii save gate for `run_integration_job` (ADR §3.1, §3.5, §6.1 ①③, §6.2, §7; baseline §10.2.2 ②,
+   * §10.2.4). Returns null when the rule carries no such action (nothing touched); otherwise the rule's action
+   * columns with the SERVER-STAMPED binding, or throws:
+   *   - nested occurrence (inside a branch) → 400;
+   *   - INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED !== 'true' → RUN_ACTION_DISABLED (the route answers 403);
+   *   - closed config (kind, projectNos ≤ 20, applyMode dry_run_only only, timeoutMs ≤ 55 min, no retry) → 400;
+   *   - trigger coupling: schedule.cron with a present, valid IANA timezone → 400;
+   *   - binding: `createdBy` must be bound to EXACTLY ONE active tenant (user_orgs) — a tenantless or
+   *     multi-tenant principal cannot bind the job (ADR §6.1 ③) → 400.
+   * The binding is derived from the rule's creator (create) or its STORED creator (update); a client-supplied
+   * `binding` is dropped (the same posture as the stock-prep `dataSourceOwnerId` stamp).
+   */
+  private async assertRunIntegrationJobAtSave(input: {
+    triggerType: string
+    triggerConfig: Record<string, unknown> | null
+    actionType: string
+    actionConfig: Record<string, unknown>
+    actions: AutomationAction[] | null
+    allActions: AutomationAction[]
+    createdBy: string | null
+  }): Promise<{ actionConfig: Record<string, unknown>; actions: AutomationAction[] | null; stampedTopLevel: boolean; stampedActions: boolean } | null> {
+    const { occurrences, error } = collectRunIntegrationJobOccurrences(input.actionType, input.actionConfig, input.actions, input.allActions)
+    if (error) throw new AutomationRuleValidationError(error)
+    if (occurrences.length === 0) return null
+    if (!isIntegrationAutomationRunActionEnabled()) {
+      throw new AutomationRuleValidationError(
+        "run_integration_job is disabled on this deployment (INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED is not 'true')",
+        'RUN_ACTION_DISABLED',
+      )
+    }
+    for (const occurrence of occurrences) {
+      const configError = validateRunIntegrationJobConfig(occurrence.config, occurrence.path)
+      if (configError) throw new AutomationRuleValidationError(configError)
+    }
+    const couplingError = validateRunIntegrationJobTriggerCoupling(input.triggerType, input.triggerConfig)
+    if (couplingError) throw new AutomationRuleValidationError(couplingError)
+    const binding = await this.resolveRunIntegrationJobBinding(input.createdBy)
+    let actionConfig = input.actionConfig
+    let stampedTopLevel = false
+    if (input.actionType === RUN_INTEGRATION_JOB_ACTION_TYPE) {
+      actionConfig = stampRunIntegrationJobConfig(input.actionConfig, binding) as unknown as Record<string, unknown>
+      stampedTopLevel = true
+    }
+    let actions = input.actions
+    let stampedActions = false
+    if (Array.isArray(input.actions) && input.actions.some((action) => action.type === RUN_INTEGRATION_JOB_ACTION_TYPE)) {
+      actions = input.actions.map((action) => (
+        action.type === RUN_INTEGRATION_JOB_ACTION_TYPE
+          ? { ...action, config: stampRunIntegrationJobConfig(action.config, binding) as unknown as Record<string, unknown> }
+          : action
+      ))
+      stampedActions = true
+    }
+    return { actionConfig, actions, stampedTopLevel, stampedActions }
+  }
+
+  /**
+   * ADR §6.1 ③ / §6.5: the binding tenant is the creator's SINGLE active `user_orgs` row — never a request field.
+   * `label` names the rule kind in the refusal (R-69 1c reuses this for integration.run_finished rules).
+   */
+  private async resolveRunIntegrationJobBinding(createdBy: string | null, label = 'run_integration_job'): Promise<{ principalId: string; tenantId: string }> {
+    const principalId = typeof createdBy === 'string' ? createdBy.trim() : ''
+    if (!principalId) throw new AutomationRuleValidationError(`${label} rules need an authenticated creator (the binding principal)`)
+    let rows: unknown[]
+    try {
+      rows = (await this.queryFn('SELECT org_id FROM user_orgs WHERE user_id = $1 AND is_active = true ORDER BY org_id', [principalId])).rows
+    } catch {
+      throw new AutomationRuleValidationError(`${label}: the creator's tenant membership could not be read; the rule was not saved`)
+    }
+    const tenantIds = [...new Set(rows
+      .map((row) => (row as { org_id?: unknown }).org_id)
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0))]
+    if (tenantIds.length !== 1) {
+      throw new AutomationRuleValidationError(tenantIds.length === 0
+        ? `${label} rules need a creator bound to exactly one active tenant (none found): a tenantless principal cannot bind the job`
+        : `${label} rules need a creator bound to exactly one active tenant (several found)`)
+    }
+    return { principalId, tenantId: tenantIds[0] }
+  }
+
+  // ── R-69 1c: integration.run_finished (Bridge 2) ────────────────────────────────────────────────────────
+  //
+  // ADR adr-automation-pipeline-bridge-20261103 §4; design baseline v2.3 §10.2. Dry-run only, default OFF
+  // (INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED), R-69 OPEN. Save gate → job-keyed, tenant-scoped dispatch →
+  // per-rule exactly-once claim (`integration.run_finished:<eventId>`) → record-less executeRule.
+
+  /**
+   * Save gate for integration.run_finished rules (create AND every write shape of update). Returns null when
+   * the resulting rule is not one; otherwise the PERSISTED trigger config (closed job + statuses + the
+   * server-stamped binding), or throws AutomationRuleValidationError:
+   *   - closed trigger config (validateIntegrationRunFinishedTriggerConfig);
+   *   - no conditions (record-less);
+   *   - record-less side-effect actions only (the approval.completed side-effect set: no record write, no
+   *     run_integration_job — so "run finished → rule → run again" cannot be authored);
+   *   - creator bound to exactly one active tenant, and — live — active, able to manage automation and able to
+   *     read integration results (integration:* or stock-prep:read).
+   */
+  private async assertIntegrationRunFinishedRuleAtSave(input: {
+    triggerType: string
+    triggerConfig: Record<string, unknown> | null
+    actionType: string
+    nestedActions: AutomationAction[]
+    conditions: ConditionGroup | null | undefined
+    createdBy: string | null
+  }): Promise<Record<string, unknown> | null> {
+    if (input.triggerType !== INTEGRATION_RUN_FINISHED_TRIGGER) return null
+    const config = input.triggerConfig ?? {}
+    const configError = validateIntegrationRunFinishedTriggerConfig(config)
+    if (configError) throw new AutomationRuleValidationError(configError)
+    if (input.conditions) {
+      const nodes = Array.isArray(input.conditions.conditions) ? input.conditions.conditions : null
+      if (!nodes || nodes.length > 0) {
+        throw new AutomationRuleValidationError('integration.run_finished rules cannot carry conditions (no record context)')
+      }
+    }
+    const actionTypes = new Set<string>([input.actionType, ...input.nestedActions.map((action) => action.type)])
+    for (const type of actionTypes) {
+      if (!APPROVAL_COMPLETED_SIDE_EFFECT_ACTION_TYPES.has(type)) {
+        throw new AutomationRuleValidationError(
+          `action ${type} is not allowed on integration.run_finished rules (record-less: ${[...APPROVAL_COMPLETED_SIDE_EFFECT_ACTION_TYPES].join(', ')})`,
+        )
+      }
+    }
+    const binding = await this.resolveRunIntegrationJobBinding(input.createdBy, 'integration.run_finished')
+    if (!(await this.integrationRunFinishedCreatorAuthorized(binding))) {
+      throw new AutomationRuleValidationError(
+        'integration.run_finished rules require the creator to be active, to manage automation and to hold integration:read (or above) or stock-prep:read',
+      )
+    }
+    const job = config.job as Record<string, unknown>
+    const persistedJob: Record<string, unknown> = { kind: job.kind }
+    if (typeof job.pipelineId === 'string') persistedJob.pipelineId = job.pipelineId
+    if (typeof job.actionId === 'string') persistedJob.actionId = job.actionId
+    return {
+      job: persistedJob,
+      ...(Array.isArray(config.statuses) ? { statuses: [...(config.statuses as string[])] } : {}),
+      binding: { principalId: binding.principalId, tenantId: binding.tenantId },
+    }
+  }
+
+  /** Test seam: replaces the live creator-authority read of integration.run_finished rules. */
+  private integrationRunFinishedCreatorResolver: ((binding: { principalId: string; tenantId: string }) => Promise<IntegrationRunPrincipalResolution>) | null = null
+
+  setIntegrationRunFinishedCreatorResolverForTest(resolver: ((binding: { principalId: string; tenantId: string }) => Promise<IntegrationRunPrincipalResolution>) | null): void {
+    this.integrationRunFinishedCreatorResolver = resolver
+  }
+
+  /**
+   * The LIVE creator check (save and fire): one committed READ COMMITTED transaction over the creator's authority
+   * rows (resolveIntegrationRunPrincipalOnTransaction — active, authentication gate, exactly one active membership
+   * in the binding tenant, canManageAutomation), plus an integration read code. Fail closed on any error.
+   */
+  private async integrationRunFinishedCreatorAuthorized(binding: { principalId: string; tenantId: string }): Promise<boolean> {
+    let resolution: IntegrationRunPrincipalResolution
+    try {
+      resolution = this.integrationRunFinishedCreatorResolver
+        ? await this.integrationRunFinishedCreatorResolver(binding)
+        : await poolManager.get().transaction(async ({ query }) => {
+          await query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+          return resolveIntegrationRunPrincipalOnTransaction({
+            query: async (sqlText: string, params?: unknown[]) => {
+              const result = await query(sqlText, params) as { rows?: Array<Record<string, unknown>>; rowCount?: number | null }
+              return { rows: Array.isArray(result?.rows) ? result.rows : [], rowCount: result?.rowCount ?? null }
+            },
+          }, binding)
+        })
+    } catch {
+      return false
+    }
+    if (resolution.ok === false) return false
+    return resolution.user.roles.includes('admin') || resolution.user.permissions.some((code) => INTEGRATION_RUN_FINISHED_READ_CODES.has(code))
+  }
+
+  /** Test seam for the durable leg's enqueue transaction (production: a pool transaction). */
+  private integrationRunEventEnqueue: ((input: { eventId: string; payload: unknown; automationDepth: number }) => Promise<void>) | null = null
+
+  setIntegrationRunEventEnqueueForTest(enqueue: ((input: { eventId: string; payload: unknown; automationDepth: number }) => Promise<void>) | null): void {
+    this.integrationRunEventEnqueue = enqueue
+  }
+
+  /**
+   * THE SINK the host binds to core/integration-run-events.ts (index.ts). The event and route are already
+   * validated by the publish port. Durable delivery ON ⇒ enqueue on the routing manifest's
+   * `integration.run_finished` family in its own transaction (an unrouted family throws — publish fails
+   * closed, ADR §4.2); OFF ⇒ dispatch in-process as a tracked lifecycle task (the publisher is never blocked
+   * by the rules it triggers). ADR §4.2 accepted residual: the event is not committed with the run row, so a
+   * crash between the two loses one alert; the next run produces the next event.
+   */
+  async handleIntegrationRunFinished(event: IntegrationRunFinishedEvent, route: IntegrationRunEventRoute, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+    // fix-I5: the gate is the COMPLETION-consumer detach, not the producer stop. Every `shutdown`-reason summary is
+    // emitted DURING the producer drain (stopProducerAdmissions aborts the jobs, then the scheduler's destroy()
+    // awaits the running rule, whose step emits), so gating on the producer stop dropped all of them while the
+    // port answered published:true. Until detach: durable ON enqueues (the row waits in the outbox for the next
+    // process — the delivery loop is stopping concurrently); OFF dispatches on completionConsumerInFlight, which
+    // the host drains after detach (index.ts stopOnce). After detach: refused with the closed SINK_STOPPED code.
+    if (this.completionConsumersDetached) throw new IntegrationRunSinkStoppedError()
+    if (isDurableDeliveryEnabled(env)) {
+      const payload = { event, route }
+      if (this.integrationRunEventEnqueue) {
+        await this.integrationRunEventEnqueue({ eventId: event.eventId, payload, automationDepth: event._automationDepth })
+        return
+      }
+      await poolManager.get().transaction(async ({ query }) => {
+        await produceAutomationEvent(
+          { query: async (sqlText: string, params?: unknown[]) => query(sqlText, params), isTransaction: true } as unknown as TransactionalQueryable,
+          { eventType: INTEGRATION_RUN_FINISHED_EVENT_TYPE, eventId: event.eventId, payload, automationDepth: event._automationDepth },
+          env,
+        )
+      })
+      return
+    }
+    this.trackLifecycleTask(this.completionConsumerInFlight, this.dispatchIntegrationRunFinished(event, route, env), (error) => {
+      logger.error('Automation integration.run_finished dispatch error', error instanceof Error ? error : undefined)
+    })
+  }
+
+  /**
+   * The durable consumer (`integration-run-trigger`, manifest v4): the stored `{ event, route }` is re-validated
+   * (closed key set again — the outbox row is data, not trust) and dispatched. A malformed row throws, so it
+   * surfaces through the retry / dead-letter ceiling instead of being dropped silently.
+   */
+  async handleIntegrationRunFinishedDelivery(payload: unknown, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+    const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {}
+    const rawEvent = record.event as Record<string, unknown> | undefined
+    const origin = rawEvent && rawEvent.triggeredBy === 'automation' ? 'automation' : 'plugin'
+    const validation = validateIntegrationRunFinishedEvent(rawEvent, origin)
+    const route = validateIntegrationRunEventRoute(record.route)
+    if (validation.ok === false || !route) {
+      throw new Error('integration-run-trigger: the durable row is not a valid integration.run_finished event')
+    }
+    await this.dispatchIntegrationRunFinished(validation.event, route, env)
+  }
+
+  /**
+   * Job-keyed, tenant-scoped dispatch: the switch again (it may have been turned off since publish), the depth
+   * guard, the enabled rules of this tenant and job kind, then per rule — job id match, status filter (the
+   * DEFAULT alert set when the rule names none: held quiet, skipped alerts), the live creator re-check, and the
+   * per-rule exactly-once claim keyed `integration.run_finished:<eventId>` (a replay of the same id runs
+   * nothing). The rule sees a record-less payload carrying `run` (the event minus its depth) — never the route.
+   */
+  async dispatchIntegrationRunFinished(event: IntegrationRunFinishedEvent, route: IntegrationRunEventRoute, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+    if (!isIntegrationAutomationRunEventEnabled(env)) return
+    const depth = event._automationDepth
+    if (depth >= MAX_AUTOMATION_DEPTH) {
+      logger.warn(`Automation recursion guard triggered (depth=${depth}) for integration.run_finished`)
+      return
+    }
+    const rules = await this.loadEnabledIntegrationRunFinishedRules(event.job.kind, route.tenantId)
+    this.kickEventDedupLedgerSweepIfDue(Date.now())
+    if (rules.length === 0) return
+    const run: Record<string, unknown> = { ...event }
+    delete run._automationDepth
+    for (const rule of rules) {
+      const config = (rule.trigger_config ?? {}) as Record<string, unknown>
+      const job = (config.job ?? {}) as Record<string, unknown>
+      if (job.pipelineId !== undefined && job.pipelineId !== event.job.pipelineId) continue
+      if (job.actionId !== undefined && job.actionId !== event.job.actionId) continue
+      if (!integrationRunFinishedConfiguredStatuses(config).has(event.status)) continue
+      const binding = (config.binding ?? {}) as Record<string, unknown>
+      if (binding.principalId !== rule.created_by || binding.tenantId !== route.tenantId || typeof rule.created_by !== 'string') {
+        logger.warn(`integration.run_finished rule ${rule.id} skipped: binding does not match its creator`)
+        continue
+      }
+      if (!(await this.integrationRunFinishedCreatorAuthorized({ principalId: rule.created_by, tenantId: route.tenantId }))) {
+        logger.warn(`integration.run_finished rule ${rule.id} skipped: creator not authorized at fire time`)
+        continue
+      }
+      try {
+        const payload: AutomationEventPayload & Record<string, unknown> = {
+          sheetId: rule.sheet_id,
+          recordId: '',
+          data: {},
+          actorId: null,
+          _automationDepth: depth,
+          eventId: event.eventId,
+          eventType: INTEGRATION_RUN_FINISHED_EVENT_TYPE,
+          occurredAt: event.occurredAt,
+          run,
+        }
+        await this.runWithEventDedup(rule.id, `${INTEGRATION_RUN_FINISHED_EVENT_TYPE}:${event.eventId}`, () => this.executeRule(toExecutorRule(rule), payload), env)
+      } catch (err) {
+        logger.error(`integration.run_finished rule ${rule.id} failed`, err instanceof Error ? err : undefined)
+      }
+    }
+  }
+
+  /**
+   * The enabled integration.run_finished rules of one tenant (the server-stamped binding) and one job kind, with
+   * the same sheet-liveness filter as the template-keyed approval channels.
+   */
+  async loadEnabledIntegrationRunFinishedRules(kind: string, tenantId: string): Promise<AutomationRule[]> {
+    const rows = await this.db
+      .selectFrom('automation_rules')
+      .selectAll()
+      .where('trigger_type', '=', INTEGRATION_RUN_FINISHED_TRIGGER)
+      .where('enabled', '=', true)
+      .where(sql<string>`trigger_config->'job'->>'kind'`, '=', kind)
+      .where(sql<string>`trigger_config->'binding'->>'tenantId'`, '=', tenantId)
+      .orderBy('created_at', 'asc')
+      .execute()
+    return this.dropRulesOnDeletedSheets(rows.map((r) => this.mapRow(r)), INTEGRATION_RUN_FINISHED_TRIGGER)
+  }
+
+  /** Trigger-only edits: the stored actions decide whether the cron + timezone coupling applies. Pure. */
+  private runIntegrationJobTriggerCouplingError(
+    triggerType: string,
+    triggerConfig: Record<string, unknown> | null,
+    actionType: string,
+    actionConfig: Record<string, unknown> | null,
+    actions: AutomationAction[] | null,
+  ): string | null {
+    const { occurrences, error } = collectRunIntegrationJobOccurrences(actionType, actionConfig, actions, actions)
+    if (error) return error
+    if (occurrences.length === 0) return null
+    return validateRunIntegrationJobTriggerCoupling(triggerType, triggerConfig)
+  }
+
+  /**
    * Unregister a rule from the scheduler.
    */
   unregisterSchedule(ruleId: string): void {
@@ -2832,9 +3332,18 @@ export class AutomationService {
   stopProducerAdmissions(): Promise<void> {
     this.producerStopPromise ??= (async () => {
       for (const id of this.producerSubscriptionIds.splice(0)) this.eventBus.unsubscribe(id)
+      // R-69 1b-ii (I-4): tell every in-flight run_integration_job to stop BEFORE the scheduler drain — the
+      // scheduler's destroy() awaits the whole executeRule promise of a running cron job, and a job that is not
+      // aborted would hold the producer barrier for its whole timeout. Abort only hastens the end: nothing is
+      // released by this call (a job that cannot settle is left to its lease TTL).
+      this.shutdownController.abort(new Error('AUTOMATION_SHUTDOWN'))
       const schedulerStop = this.scheduler.destroy()
+      // C1/S2: stop admitting synthetic previews and wait for every in-flight one (provider page,
+      // admission transaction, summary insert) in the same producer drain the host shutdown awaits.
+      const previewStop = this.syntheticPreview.stop()
       await this.drainLifecycleTasks(this.producerInFlight)
       await schedulerStop
+      await previewStop
     })()
     return this.producerStopPromise
   }
@@ -2843,7 +3352,23 @@ export class AutomationService {
     await this.drainLifecycleTasks(this.transitiveCompletionInFlight)
   }
 
+  /**
+   * R-69 1b-ii (baseline §10.2.3 step 9 / T12): wait for every run_integration_job continuation that outlived
+   * its step — the port call still running after a `timeout_unsettled` early return, its heartbeat and its
+   * eventual fenced Tx B. The host puts this on its FINAL shutdown barrier (SHUTDOWN_TIMEOUT, pool left open),
+   * so a continuation that does not finish inside the barrier is left to its lease TTL — never released early.
+   */
+  async drainIntegrationJobs(): Promise<void> {
+    await this.drainLifecycleTasks(this.integrationJobsInFlight)
+  }
+
+  /** R-69 1b-ii test seam: the signal the executor's run_integration_job step listens to for shutdown. */
+  get shutdownSignalForTest(): AbortSignal {
+    return this.shutdownController.signal
+  }
+
   detachCompletionConsumers(): void {
+    this.completionConsumersDetached = true
     for (const id of this.completionSubscriptionIds.splice(0)) this.eventBus.unsubscribe(id)
   }
 
@@ -2858,6 +3383,30 @@ export class AutomationService {
     this.detachCompletionConsumers()
     await this.drainCompletionConsumers()
     logger.info('AutomationService shut down')
+  }
+
+  /**
+   * C1/S2 first slice: the manual SYNTHETIC integration preview (integration/automation-synthetic-preview.ts).
+   * The rule only supplies ownership/permission context; its actions are never executed. Default OFF
+   * (AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED exact 'true'); every admission runs in its own RC
+   * transaction; refused with INACTIVE once producer admissions stopped.
+   */
+  previewIntegrationPlan(
+    scope: SyntheticPreviewScope,
+    request: unknown,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SyntheticPreviewResponse> {
+    return this.syntheticPreview.run(scope, request, options)
+  }
+
+  /** Values-free display bit; never authority (every run re-reads the switch). */
+  syntheticIntegrationPreviewEnabled(): boolean {
+    return this.syntheticPreview.enabled()
+  }
+
+  /** Test seam: replace the preview runtime (the default is built in the constructor). */
+  replaceSyntheticPreviewRuntimeForTest(runtime: SyntheticPreviewRuntime): void {
+    this.syntheticPreview = runtime
   }
 
   /**

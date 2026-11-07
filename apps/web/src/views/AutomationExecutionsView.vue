@@ -109,6 +109,14 @@
               <div v-if="stepOutputView(step).reason" class="automation-runs__step-reason" data-field="step-reason">
                 {{ stepOutputView(step).reason }}
               </div>
+              <!-- R-69 1b-iii (I4 verifier F1): one values-free line per project unit, as in the rule's run log. -->
+              <ul v-if="rijStepView(step)?.units.length" class="automation-runs__step-units" data-field="step-units">
+                <li
+                  v-for="(unit, unitIdx) in rijStepView(step)?.units ?? []"
+                  :key="unitIdx"
+                  data-field="step-unit"
+                >{{ unit.projectNo ? `${unit.projectNo}: ` : '' }}{{ unit.text }}{{ unit.counts ? ` · ${unit.counts}` : '' }}</li>
+              </ul>
               <div v-if="stepOutputView(step).output !== undefined && stepOutputView(step).output !== null && !conditionBranchSelection(step) && !parallelBranchSummary(step)" class="automation-runs__step-output" data-field="step-output">
                 {{ summarizeStepOutput(stepOutputView(step).output) }}
               </div>
@@ -174,7 +182,7 @@
             <h2 class="automation-runs__detail-h">{{ automationLabel('runs.triggerEvent', isZh) }}</h2>
             <pre class="automation-runs__json" data-field="trigger-event">{{ jsonView(detail.triggerEvent) }}</pre>
             <h2 class="automation-runs__detail-h">{{ automationLabel('runs.ruleSnapshot', isZh) }}</h2>
-            <pre class="automation-runs__json" data-field="rule-snapshot">{{ jsonView(detail.ruleSnapshot) }}</pre>
+            <pre class="automation-runs__json" data-field="rule-snapshot">{{ jsonView(ruleSnapshotForDisplay(detail.ruleSnapshot)) }}</pre>
           </template>
         </div>
       </div>
@@ -194,6 +202,7 @@ import type { AutomationActionType, AutomationRunView, AutomationRunStepView, Wo
 import { automationActionTypeLabel, automationLabel, automationStatusLabel, automationStepErrorText, automationStepOutputView, type AutomationLabelKey, type AutomationStepOutputView } from '../multitable/utils/meta-automation-labels'
 import { redactString, redactValue, summarizeStepError, summarizeStepOutput } from '../multitable/utils/automation-log-redact'
 import { formatBusinessTimestamp } from '../multitable/utils/business-timezone'
+import { RUN_INTEGRATION_JOB_ACTION_TYPE, runIntegrationJobStepView, type RunIntegrationJobStepView } from '../multitable/runIntegrationJobAuthoring'
 import StatusTag from '../components/status/StatusTag.vue'
 import EmptyState from '../components/status/EmptyState.vue'
 
@@ -215,6 +224,8 @@ const loadError = ref<string | null>(null)
 const statusFilter = ref('')
 const sheetFilter = ref('')
 const expandedId = ref<string | null>(null)
+/** R-69 1b-iii: what the snapshot pane shows in place of a run_integration_job action's server-stamped binding. */
+const RUN_INTEGRATION_JOB_BINDING_MARKER = '[server-stamped]'
 const detail = ref<AutomationRunView | null>(null)
 const detailLoading = ref(false)
 const resuming = ref<string | null>(null)
@@ -270,12 +281,55 @@ function conditionBranchSelection(step: AutomationRunStepView): { key: string; l
   return null
 }
 function stepOutputView(step: AutomationRunStepView): AutomationStepOutputView {
+  // R-69 1b-iii (I4 verifier F1): run_integration_job reads as a values-free sentence, exactly as in the rule's
+  // run log; its output JSON is never rendered raw (each unit's scopeKey carries the tenant id).
+  if (isRunIntegrationJobStep(step)) return { reason: rijStepView(step)?.text ?? null, output: null }
   return automationStepOutputView(step.result, isZh.value)
 }
 // 客户反馈 2026-10-21 item 1 follow-up: same step-error text as the rule's run log (no raw user ids from legacy
 // DingTalk errors; zh shows the count sentence alone).
 function stepErrorText(step: AutomationRunStepView): string {
+  // R-69 1b-iii: the executor's error line repeats the outcome/reason codes in English; the sentence says it.
+  if (rijStepView(step)) return ''
   return summarizeStepError(automationStepErrorText(step.error, step.result, isZh.value))
+}
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+/**
+ * A run step carries no actionType (the runs API projects it away), so the step is classified by the rule snapshot:
+ * run_integration_job is top-level only (not branch-authorable), and a top-level step's key is its action index.
+ * Fail-closed floor when the snapshot is missing or malformed: only the executor's run_integration_job output carries
+ * a `units` array (automation-executor.ts aggregateRunIntegrationJobUnits), so a result with one is treated the same.
+ */
+function isRunIntegrationJobStep(step: AutomationRunStepView): boolean {
+  if (/^\d+$/.test(step.stepKey)) {
+    const actions = asRecord(detail.value?.ruleSnapshot)?.actions
+    const action = Array.isArray(actions) ? asRecord(actions[Number(step.stepKey)]) : null
+    if (action?.type === RUN_INTEGRATION_JOB_ACTION_TYPE) return true
+  }
+  return Array.isArray(asRecord(step.result)?.units)
+}
+function rijStepView(step: AutomationRunStepView): RunIntegrationJobStepView | null {
+  if (!isRunIntegrationJobStep(step)) return null
+  return runIntegrationJobStepView(step.result, isZh.value)
+}
+/**
+ * The persisted run_integration_job config carries the server-stamped `binding` (creator principal id + tenant id).
+ * The snapshot pane shows it as a fixed marker; every other part of the snapshot is rendered as before.
+ */
+function ruleSnapshotForDisplay(snapshot: unknown): unknown {
+  const rule = asRecord(snapshot)
+  if (!rule || !Array.isArray(rule.actions)) return snapshot
+  return {
+    ...rule,
+    actions: rule.actions.map((entry) => {
+      const action = asRecord(entry)
+      const config = asRecord(action?.config)
+      if (!action || action.type !== RUN_INTEGRATION_JOB_ACTION_TYPE || !config || !('binding' in config)) return entry
+      return { ...action, config: { ...config, binding: RUN_INTEGRATION_JOB_BINDING_MARKER } }
+    }),
+  }
 }
 function branchChildStep(stepKey: string): { branchKey: string; actionIndex: string } | null {
   const m = /\.branch\.([A-Za-z0-9_-]+)\.(\d+)$/.exec(stepKey)
@@ -574,6 +628,8 @@ const RERUN_LEAF_TYPES: Record<Exclude<AutomationActionType, 'condition_branch' 
   start_approval: true, send_email: true, send_dingtalk_group_message: true,
   send_dingtalk_person_message: true, send_dingtalk_approval_card: true, delete_record: true,
   lock_record: true, wait_for_callback: true, write_approval_form_values: true,
+  // R-69 1b-iii: a top-level leaf; a re-run lists it like any other action (it re-runs the dry run only).
+  run_integration_job: true,
   notify: true, update_field: true,
 }
 

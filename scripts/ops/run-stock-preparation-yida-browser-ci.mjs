@@ -15,6 +15,7 @@ export const TEST_FILES = Object.freeze([
   'tests/integration/stock-preparation-yida-owner-browser-realdb.test.ts',
   'tests/integration/stock-preparation-yida-initialization-http-realdb.test.ts',
   'tests/integration/stock-preparation-yida-initialization-browser-realdb.test.ts',
+  'tests/integration/automation-synthetic-preview-browser-realdb.test.ts',
 ])
 export const CONFIG = 'vitest.yida-owner-realdb.config.ts'
 export const MAX_OUTPUT = 32 * 1024 * 1024
@@ -277,8 +278,8 @@ export default class Collector {
 
 export function validateTaskReceipt(receipt) {
   assert.deepEqual(receipt.files, [...TEST_FILES].sort())
-  assert.deepEqual(receipt.counts, { files: 5, tests: 80, passed: 80, failed: 0, skipped: 0,
-    sentinels: 5, retries: 0, repeats: 0, unhandled: 0, missingRetryFields: 0 })
+  assert.deepEqual(receipt.counts, { files: 6, tests: 83, passed: 83, failed: 0, skipped: 0,
+    sentinels: 6, retries: 0, repeats: 0, unhandled: 0, missingRetryFields: 0 })
   assert.deepEqual(receipt.policy, { pool: 'forks', config: CONFIG, retry: 0, repeat: 0,
     watch: false, filtered: false, setupFiles: 0, globalSetup: 0 })
   return true
@@ -400,7 +401,7 @@ async function worker(owner, ownerPath, ownerSha) {
     for (const file of [tasks, json]) assert(plain(file, false, 0o600).size < 4 * 1024 * 1024)
     validateTaskReceipt(JSON.parse(fs.readFileSync(tasks, 'utf8')))
     const report = JSON.parse(fs.readFileSync(json, 'utf8'))
-    assert.equal(report.success, true); assert.equal(report.numTotalTests, 80); assert.equal(report.numPassedTests, 80)
+    assert.equal(report.success, true); assert.equal(report.numTotalTests, 83); assert.equal(report.numPassedTests, 83)
     for (const key of ['numFailedTests', 'numPendingTests', 'numTodoTests']) assert.equal(report[key], 0)
     assert.deepEqual(native.assertBrowserNetworkIsolation(), isolation)
     verifyHashes(owner)
@@ -417,7 +418,7 @@ async function worker(owner, ownerPath, ownerSha) {
     // available; only the original owned-PG module removes its own PG subtree.
     const receiptRaw = JSON.stringify({ protocol: owner.protocol,
       ownerSha, sourceSha: hash(JSON.stringify(owner.hashes)), passed, cleanup,
-      tests: passed ? 80 : 0, sentinels: passed ? 5 : 0, business: passed ? 75 : 0,
+      tests: passed ? 83 : 0, sentinels: passed ? 6 : 0, business: passed ? 77 : 0,
       isolatedNetwork: isolation.isolatedNetwork, unixIpcIsolated: false,
       sameProcessHostileCodeIsolated: false, filesystemIsolated: false, failureStage, result })
     privateWrite(path.join(evidence, 'receipt.json'), receiptRaw)
@@ -474,13 +475,13 @@ export function reportOuterResult(owner, ownerSha, terminal, evidence, write = c
     const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'))
     assert.equal(receipt.ownerSha, ownerSha); assert.equal(receipt.sourceSha, hash(JSON.stringify(owner.hashes)))
     assert.equal(receipt.cleanup, 'stopped-owned-pg-removed')
-    assert.equal(receipt.passed, true); assert.equal(receipt.tests, 80)
+    assert.equal(receipt.passed, true); assert.equal(receipt.tests, 83)
     passed = terminal.passed
   } catch { /* Original refusal remains; diagnostics carry only fixed fields. */ }
   if (!passed) write('YIDA_BROWSER_CI_CHILD_FAILED ' + JSON.stringify(
     childFailureDiagnostic(terminal, evidence, ownerSha, hash(JSON.stringify(owner.hashes)), postHashesVerified)))
-  write('YIDA_BROWSER_CI_RESULT ' + JSON.stringify({ passed, tests: passed ? 80 : 0,
-    business: passed ? 75 : 0, sentinels: passed ? 5 : 0 }))
+  write('YIDA_BROWSER_CI_RESULT ' + JSON.stringify({ passed, tests: passed ? 83 : 0,
+    business: passed ? 77 : 0, sentinels: passed ? 6 : 0 }))
   if (!passed) process.exitCode = 1
   return passed
 }
