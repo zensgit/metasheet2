@@ -29,6 +29,7 @@ export type YidaIssueConfirmRecheckDatabase = { transaction<T>(callback: (trx: Q
 export type YidaIssueConfirmRecheck = (database: YidaIssueConfirmRecheckDatabase, actor: YidaIssueConfirmRecheckActor,
   input: unknown) => Promise<boolean>
 
+// eslint-disable-next-line no-control-regex -- Scope identifiers must explicitly reject embedded ASCII controls.
 const ID = /^[^\u0000-\u001f\u007f]{1,128}$/u
 // The operate tier, role-granted only: stock-prep:admin, or operate AND read (the conjunction of the workbench ladder).
 export const ISSUE_CONFIRM_ROLE_CODES = Object.freeze(['stock-prep:admin', 'stock-prep:operate', 'stock-prep:read'])
