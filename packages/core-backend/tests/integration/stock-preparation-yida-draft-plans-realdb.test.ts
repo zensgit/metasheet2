@@ -167,6 +167,10 @@ databaseSuite('SA05 immutable local-unverified drafts — real PG, compiler and 
     const plannerModule = pathToFileURL(path.join(lib, 'yida-static-plan.mjs')).href
     example = (await import(plannerModule)).createYidaProtocolExample
     ddl = readFileSync(path.join(root, 'packages/core-backend/migrations/093_create_integration_yida_draft_plans.sql'), 'utf8')
+    // Source binding (design baseline v2.3 §7.2): the draft-row columns of zzzz20261106110300, exactly what its up() executes.
+    ddl += '\n' + ((await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts')).href)) as
+      { YIDA_SOURCE_BINDING_DRAFT_ROWS_UP_SQL: string }).YIDA_SOURCE_BINDING_DRAFT_ROWS_UP_SQL
     savedEnv = envKeys.map(key => [key, process.env[key]])
     process.env.NODE_ENV = 'production'
     process.env.ENCRYPTION_KEY = randomBytes(32).toString('hex')
@@ -464,5 +468,53 @@ databaseSuite('SA05 immutable local-unverified drafts — real PG, compiler and 
       await rejected(second.store.replay({ operationId: one.operationId }), 'YIDA_DRAFT_UNAVAILABLE')
       expect(await evidence()).toEqual(before)
     } finally { process.env[key] = prior }
+  })
+
+  // ---- Source binding (design baseline v2.3 §7.2): the two row digests are durable and stable across a draft rebuild ----
+  function bound(value: Input = input()): Input & { sourceBinding: Row } {
+    // The sheet's key column is the component code; the example rows share it, so each bound row gets its own.
+    const keyField = value.config.fieldMap.find(field => field.target === 'componentCode')!.source
+    const rows = (JSON.parse(value.rowsText) as Row[]).map((row, index) => ({ ...row, [keyField]: 'DEMO-PART-' + String.fromCharCode(65 + index) }))
+    const fieldBindings = Object.fromEntries(value.config.fieldMap.map(field => [field.source, 'fld_' + field.target]))
+    return { ...value, rowsText: JSON.stringify(rows), sourceBinding: { sheetId: 'sheet_registered', keyFieldId: fieldBindings[keyField], fieldBindings,
+      records: rows.map((entry, index) => ({ recordId: 'rec_' + index, keyValue: String(entry[keyField]), projectNo: 'SYN-P1' })) } }
+  }
+  it('bound drafts persist both row digests; a rebuilt draft with an unrelated change is a new operation with the same digests', async () => {
+    const one = await first.store.createDraft(bound())
+    const members = (await tableRows(ROWS)).filter(row => row.operation_id === one.operationId).sort((a, b) => Number(a.ordinal) - Number(b.ordinal))
+    expect(members.every(row => /^[0-9a-f]{64}$/.test(String(row.source_record_digest)) && /^[0-9a-f]{64}$/.test(String(row.creation_identity_digest)))).toBe(true)
+    expect(new Set(members.map(row => row.creation_identity_digest)).size).toBe(members.length)
+    // The unbound draft of the same rows is another operation whose rows carry NULL digests (SR5, draft level).
+    const plain = await second.store.createDraft(input())
+    expect(plain.operationId !== one.operationId && plain.reused === false).toBe(true)
+    expect((await tableRows(ROWS)).filter(row => row.operation_id === plain.operationId)
+      .every(row => row.source_record_digest === null && row.creation_identity_digest === null)).toBe(true)
+    // Rebuild: the quantity of the first row corrected (not a key). New operation and row keys; identical binding digests per ordinal.
+    const two = await second.store.createDraft(bound(changedPlan()))
+    expect(two.operationId !== one.operationId && two.reused === false).toBe(true)
+    const rebuilt = (await tableRows(ROWS)).filter(row => row.operation_id === two.operationId).sort((a, b) => Number(a.ordinal) - Number(b.ordinal))
+    expect(rebuilt.map(row => row.row_key).some(key => members.some(row => row.row_key === key))).toBe(false)
+    expect(rebuilt.map(row => [row.source_record_digest, row.creation_identity_digest])).toEqual(members.map(row => [row.source_record_digest, row.creation_identity_digest]))
+    expect(rebuilt[0].payload_digest).not.toBe(members[0].payload_digest)
+    // The same binding again reuses the first operation; a re-created record (new id) is another operation, same identity.
+    expect((await second.store.createDraft(bound())).operationId).toBe(one.operationId)
+    const recreated = bound(); (recreated.sourceBinding.records as Row[])[0] = { ...(recreated.sourceBinding.records as Row[])[0], recordId: 'rec_new' }
+    const three = await second.store.createDraft(recreated)
+    const moved = (await tableRows(ROWS)).filter(row => row.operation_id === three.operationId).sort((a, b) => Number(a.ordinal) - Number(b.ordinal))
+    expect(three.operationId !== one.operationId && moved[0].creation_identity_digest === members[0].creation_identity_digest
+      && moved[0].source_record_digest !== members[0].source_record_digest).toBe(true)
+    for (const operationId of [one.operationId, two.operationId, three.operationId]) {
+      expect((await second.store.replay({ operationId })).replayVerified).toBe(true)
+    }
+    const persisted = JSON.stringify([await tableRows(TARGETS), await tableRows(OPERATIONS), await tableRows(ROWS), await tableRows(AUDIT)])
+    for (const value of ['sheet_registered', 'rec_0', 'SYN-P1', 'fld_line']) expect(persisted.includes(value)).toBe(false)
+  })
+  it.each(['source_record_digest', 'creation_identity_digest'])('replay independently checks the durable binding digest %s against the sealed source', async column => {
+    const one = await first.store.createDraft(bound())
+    await corrupt(ROWS, 'row_key', one.rows[0].rowKey, column, 'c'.repeat(64))
+    await rejected(second.store.replay({ operationId: one.operationId }), 'YIDA_DRAFT_UNAVAILABLE')
+    const plain = await first.store.createDraft(input())
+    await corrupt(ROWS, 'row_key', plain.rows[0].rowKey, column, 'c'.repeat(64))
+    await rejected(second.store.replay({ operationId: plain.operationId }), 'YIDA_DRAFT_UNAVAILABLE')
   })
 })

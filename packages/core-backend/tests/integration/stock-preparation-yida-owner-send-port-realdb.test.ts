@@ -31,7 +31,8 @@ type Handle = { context: Row; operation: Row; credentialBinding: Row
   resolveExecutionSnapshot(identity: unknown, options: { signal: AbortSignal }): Promise<Row>
   loadCredential(binding: unknown, options: { signal: AbortSignal }): Promise<Row>; close(): void }
 type Authority = { approvals: Approvals; admitForExecution(input: unknown): Promise<{ approval: Approval; permit: object | null }>
-  takeExecution(permit: unknown): Handle; observe(input: unknown): Promise<Observation> }
+  takeExecution(permit: unknown): Handle; observe(input: unknown): Promise<Observation>
+  prepareDraft(input: unknown): Promise<Draft & { reused: boolean }>; preview(input: unknown): Promise<{ payload: Row }> }
 type Submit = Observation & { reused: boolean; status: string; externalWriteAttempted: boolean; businessVerified: false; durable: boolean }
 type Port = { submit(input: unknown, options?: { signal?: AbortSignal }): Promise<Submit>; inspect(input: unknown): Promise<Observation> }
 type Database = { query(sql: string, params?: unknown[]): Promise<Row[]>
@@ -289,6 +290,10 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
       '092_create_integration_yida_credential_materials.sql', '093_create_integration_yida_draft_plans.sql',
       '094_create_integration_yida_approved_target.sql', '095_create_integration_yida_send_approvals.sql']
       .map(name => readFileSync(path.join(root, 'packages/core-backend/migrations', name), 'utf8')).join('\n')
+    // Source binding (design baseline v2.3 §7.2): migration zzzz20261106110300 exactly as its up() executes.
+    ddl += '\n' + ((await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts')).href)) as
+      { YIDA_SOURCE_BINDING_UP_SQL: string }).YIDA_SOURCE_BINDING_UP_SQL
     savedEnv = envKeys.map(key => [key, process.env[key]])
     process.env.NODE_ENV = 'production'; process.env.ENCRYPTION_KEY = randomBytes(32).toString('hex'); process.env.ENCRYPTION_SALT = randomBytes(32).toString('hex')
     const { PluginRuntimeSecurityService } = await import(pathToFileURL(path.join(root,
@@ -535,6 +540,33 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     expect([lateHttp.token, lateHttp.form]).toEqual([0, 0])
   })
 
+  it('gate 1: an abort while the admission COMMIT reply is held is not consulted by the port; the runner refuses before any IO and the attempt stays consumed', async () => {
+    // gateCommit holds the reply AFTER PostgreSQL has committed the admission, so the abort lands past the durable
+    // point. From there the port no longer reads the signal; it hands it to the runner, which refuses an aborted run
+    // before its first write or fetch, and the port seals that as UNAVAILABLE. A port that consulted the signal again
+    // right after admission would answer CANCELLED instead (same ledger and HTTP outcome; only the sealed code moves).
+    const f = await fixture(), fake = http(), gate = first.gateCommit('admission')
+    const controller = new AbortController()
+    let result: Submit | undefined
+    const pending = outcome(first.port(fake).submit(f.request, { signal: controller.signal }).then(value => { result = value }))
+    try {
+      await reached(gate)
+      expect((await tableRows(ADMISSION)).length).toBe(1)
+      controller.abort()
+    } finally { gate.release() }
+    expect(await pending).toEqual({ ok: false, code: 'YIDA_OWNER_SEND_UNAVAILABLE' })
+    expect(result).toBeUndefined()
+    expect([fake.token, fake.form]).toEqual([0, 0])
+    expect((await evidence()).counts).toEqual([1, 0, 1, 2, 1, 1])
+    expect((await tableRows(LEDGER)).map(row => row.status)).toEqual(['prepared'])
+    expect((await tableRows(LEDGER_AUDIT)).map(row => row.event)).toEqual(['prepare'])
+    const before = await evidence(), replayHttp = http(), replay = await second.port(replayHttp).submit(f.request)
+    expect([replay.reused, replay.approval.remainingAttempts, replay.status, replay.externalWriteAttempted])
+      .toEqual([true, 0, 'prepared', false])
+    expect([replayHttp.token, replayHttp.form, fake.token, fake.form]).toEqual([0, 0, 0, 0])
+    expect(await evidence()).toEqual(before)
+  })
+
   it.each(['admission', 'claim'] as const)('lost real %s COMMIT reply yields no resumed permit or second token/send', async stage => {
     const f = await fixture(), fake = http(); first.loseCommit(stage)
     await rejected(first.port(fake).submit(f.request))
@@ -759,5 +791,97 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     expect([sent.status, sent.reused, sent.externalWriteAttempted, sent.approval.grantId]).toEqual(['acknowledged', false, true, grant.grantId])
     expect([fake.token, fake.form, fake.requestValid]).toEqual([1, 1, true])
     expect((await evidence()).counts).toEqual([1, 0, 1, 2, 1, 3])
+  })
+
+  // R-71 ⑦.3: a v2 layout restated as v3 keeps the slot's locator and key definition (key parts are
+  // the same targets, types and nullable parts), so its rows keep their business-key digests. It adds
+  // a copy, a constant and a concat that reads ext_size, a column no payload carries; ext_unmapped is
+  // read by nothing and must never reach a grant, snapshot or form body.
+  function liftV3(value: Input, extras: Row[] = []): Input {
+    const config = value.config as { businessKey: string[]; emptyKeyFields: string[]; fieldCatalog: Row[]
+      fieldMap: Array<Row & { source: string; target: string }> }
+    const target = (source: string) => config.fieldMap.find(entry => entry.source === source)!.target
+    const rows = (JSON.parse(value.rowsText) as Row[]).map((row, index) => ({ ...row, ext_size: 1200 + index, ext_unmapped: 'SYN-UNMAPPED' }))
+    return { config: { ...value.config, version: 3, businessKey: config.businessKey.map(target), emptyKeyFields: config.emptyKeyFields.map(target),
+      fieldCatalog: [...config.fieldCatalog, { id: 'keyCopy', control: 'text', required: false }, { id: 'rule', control: 'text', required: true },
+        { id: 'label', control: 'text', required: false }, ...extras.map(entry => ({ id: entry.target, control: 'text', required: false }))],
+      fieldMap: [...config.fieldMap.map(entry => ({ transform: 'direct', ...entry })),
+        { transform: 'copy', copyOf: target(config.businessKey[1]), target: 'keyCopy', type: 'string', required: false },
+        { transform: 'constant', value: 'SYN-RULE', target: 'rule', type: 'string', required: true },
+        { transform: 'concat', parts: [{ source: 'ext_size' }, { literal: 'mm' }], separator: ' ', blank: 'skip', target: 'label', type: 'string', required: false },
+        ...extras] },
+    rowsText: JSON.stringify(rows), allocation: value.allocation }
+  }
+  const constants = (count: number) => Array.from({ length: count }, (_, index) => ({ transform: 'constant',
+    value: '中'.repeat(4096), target: 'big' + index, type: 'string', required: false }))
+  async function slot(value: Input = input()) {
+    const draft = await first.draft.createDraft(value), secret = await first.material.create({ material: material() })
+    await first.target.register({ operationId: draft.operationId, credentialRef: secret.credentialRef,
+      credentialGeneration: secret.credentialGeneration, attestation: { kind: 'owner-reviewed-target', reviewRef: 'synthetic-review',
+        organizationId: 'synthetic-organization', executionIdentity: 'synthetic-executor' } })
+    return draft
+  }
+  const draftCounts = async () => Promise.all(['integration_yida_draft_targets', OP, 'integration_yida_draft_rows', 'integration_yida_draft_audit']
+    .map(async table => (await tableRows(table)).length))
+
+  it('R-71 ⑦.3: a v3 draft for the v2-initialized slot is drafted, previewed, approved, admitted and sent once; the form body is the preview payload', async () => {
+    await slot()
+    const drafted = await first.authority.prepareDraft(liftV3(input()))
+    expect(drafted.reused).toBe(false)
+    const rowKey = drafted.rows[0].rowKey
+    const previewed = await first.authority.preview({ operationId: drafted.operationId, rowKey })
+    expect(previewed.payload).toEqual({ project: 'DEMO-P1', line: 'LINE-1', qty: 6, description: 'synthetic owner port part',
+      keyCopy: 'LINE-1', rule: 'SYN-RULE', label: '1200 mm' })
+    const grant = await first.authority.approvals.approve({ operationId: drafted.operationId, rowKey, confirmationId: 'synthetic-confirmation' })
+    const fake = http()
+    const sent = await first.port(fake).submit({ grantId: grant.grantId, submissionId: 'synthetic-submission' })
+    expect([sent.status, sent.reused, sent.externalWriteAttempted]).toEqual(['acknowledged', false, true])
+    expect([fake.token, fake.form, fake.requestValid]).toEqual([1, 1, true])
+    expect(canonical(fake.formPayload) === canonical(previewed.payload)).toBe(true)
+    expect(JSON.stringify(fake.formPayload).includes('SYN-UNMAPPED')).toBe(false)
+    expect((await tableRows(LEDGER)).length).toBe(1)
+  })
+
+  it('R-71 ⑦.3: a row sent through v2 and then drafted in v3 with the same seven-key business digest is refused at admission with no send', async () => {
+    const planner = await importNative(pathToFileURL(path.join(root, 'plugins/plugin-integration-core/lib/yida-static-plan.mjs')).href) as {
+      createYidaProtocolExample(): { config: Row; text: string } }
+    const example = planner.createYidaProtocolExample()
+    const sevenKey: Input = { config: { ...example.config, target: { appType: 'synthetic_owner_app', formUuid: 'synthetic_owner_form' } },
+      rowsText: example.text, allocation: { mode: 'original' } }
+    expect((sevenKey.config.businessKey as string[]).length).toBe(7)
+    const draft = await slot(sevenKey)
+    const sentGrant = await first.authority.approvals.approve({ operationId: draft.operationId, rowKey: draft.rows[0].rowKey,
+      confirmationId: 'synthetic-confirmation' })
+    const sentHttp = http()
+    const sent = await first.port(sentHttp).submit({ grantId: sentGrant.grantId, submissionId: 'synthetic-submission' })
+    expect([sent.status, sentHttp.form]).toEqual(['acknowledged', 1])
+    const drafted = await first.authority.prepareDraft(liftV3(sevenKey))
+    expect(drafted.operationId === draft.operationId).toBe(false)
+    const [delivered] = await tableRows(LEDGER)
+    const members = (await owner.query('SELECT business_key_digest FROM integration_yida_draft_rows WHERE operation_id = $1 ORDER BY ordinal',
+      [drafted.operationId])).rows as Row[]
+    expect(members[0].business_key_digest === delivered.business_key_digest).toBe(true)
+    const grant = await first.authority.approvals.approve({ operationId: drafted.operationId, rowKey: drafted.rows[0].rowKey,
+      confirmationId: 'synthetic-confirmation-v3' })
+    const request = { grantId: grant.grantId, submissionId: 'synthetic-submission-v3' }
+    const before = await evidence(), fake = http()
+    await rejected(first.authority.admitForExecution(request), 'YIDA_SEND_APPROVAL_UNAVAILABLE')
+    await rejected(first.port(fake).submit(request))
+    expect([fake.token, fake.form]).toEqual([0, 0])
+    expect(await evidence()).toEqual(before)
+    expect((await tableRows(LEDGER)).length).toBe(1)
+    expect((await tableRows(ADMISSION)).length).toBe(1)
+    const view = await first.port(fake).inspect({ grantId: grant.grantId })
+    expect([view.delivery, view.approval.status, view.approval.remainingAttempts]).toEqual([null, 'approved', 1])
+  })
+
+  it('R-71 ⑦.3 C1: an over-budget v3 draft is refused at creation with YIDA_SEND_APPROVAL_LIMIT and writes no draft row', async () => {
+    await slot()
+    const before = await draftCounts()
+    await rejected(first.authority.prepareDraft(liftV3(input(), constants(20))), 'YIDA_SEND_APPROVAL_LIMIT')
+    expect(await draftCounts()).toEqual(before)
+    const within = await first.authority.prepareDraft(liftV3(input(), constants(2)))
+    expect(within.reused).toBe(false)
+    expect(await draftCounts()).toEqual([before[0], before[1] + 1, before[2] + 1, before[3] + 1])
   })
 })

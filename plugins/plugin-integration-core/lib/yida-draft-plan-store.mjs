@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { types } from 'node:util'
 import canonical from './gip-canonical-json.cjs'
 import credentials from './credential-store.cjs'
-import { compileYidaDraft } from './yida-draft-plan.mjs'
+import { compileYidaSendDraft } from './yida-draft-plan.mjs'
 
 // Unregistered, local-only persistence. A declared app/form is NOT a verified
 // remote organization/physical form. No method can approve, issue a grant, load
@@ -182,14 +182,18 @@ function createDraftInternals({ db, security, context } = {}) {
     bound(envelope, { purpose: 'yida-draft-operation', schemaVersion: 1, targetRef: target.target_ref,
       operationId: operation.operation_id, planDigest: operation.plan_digest })
     let compiled
-    try { compiled = compileYidaDraft(envelope.source) } catch { fail('UNAVAILABLE') }
+    try { compiled = compileYidaSendDraft(envelope.source) } catch { fail('UNAVAILABLE') }
     if (compiled.planDigest !== operation.plan_digest || compiled.rowSpecs.length !== operation.row_count
       || encode(envelope.plan) !== encode(compiled.plan)) fail('UNAVAILABLE')
     await verifyTarget(target, compiled)
     const members = rows(await trx.select(ROWS, { where: { operation_id: operation.operation_id }, orderBy: ['ordinal', 'ASC'], limit: 101 }))
+    // Every read compares the durable binding digests with the recompiled ones too (null for an unbound row).
     if (members.length !== operation.row_count || members.some((row, index) => row.operation_id !== operation.operation_id
       || row.ordinal !== index || row.business_key_digest !== compiled.rowSpecs[index].businessKeyDigest
-      || row.payload_digest !== compiled.rowSpecs[index].payloadDigest || typeof row.row_key !== 'string'
+      || row.payload_digest !== compiled.rowSpecs[index].payloadDigest
+      || (row.source_record_digest ?? null) !== (compiled.rowSpecs[index].sourceRecordDigest ?? null)
+      || (row.creation_identity_digest ?? null) !== (compiled.rowSpecs[index].creationIdentityDigest ?? null)
+      || typeof row.row_key !== 'string'
       || !/^[0-9a-f-]{36}$/.test(row.row_key)) || new Set(members.map(row => row.row_key)).size !== members.length) fail('UNAVAILABLE')
     return { compiled, members }
   }
@@ -199,7 +203,7 @@ function createDraftInternals({ db, security, context } = {}) {
       tokenIssued: false, externalWriteAttempted: false, rowCount: members.length,
       rows: members.map(row => ({ rowKey: row.row_key, index: row.ordinal })) })
   }
-  async function createDraftInTransaction(trx, input, compiled = compileYidaDraft(input)) {
+  async function createDraftInTransaction(trx, input, compiled = compileYidaSendDraft(input)) {
     // Only the host's structured CRUD transaction is accepted. This private
     // writer never starts a transaction, pins isolation, commits, or retries.
     if (!trx || typeof trx !== 'object' || types.isProxy(trx) || Array.isArray(trx)
@@ -222,7 +226,8 @@ function createDraftInternals({ db, security, context } = {}) {
     if (!operation || operation.operation_id !== operationId) fail('UNAVAILABLE')
     for (const row of compiled.rowSpecs) {
       await trx.insertOne(ROWS, { row_key: randomUUID(), operation_id: operationId, ordinal: row.index,
-        business_key_digest: row.businessKeyDigest, payload_digest: row.payloadDigest })
+        business_key_digest: row.businessKeyDigest, payload_digest: row.payloadDigest,
+        source_record_digest: row.sourceRecordDigest ?? null, creation_identity_digest: row.creationIdentityDigest ?? null })
     }
     const audit = first(await trx.insertOne(AUDIT, { id: randomUUID(), operation_id: operationId,
       target_ref: target.target_ref, actor_id: fixed.ownerId, event: 'create_draft' }))
@@ -232,7 +237,7 @@ function createDraftInternals({ db, security, context } = {}) {
     return Object.freeze({ ...metadata(target, operation, checked.members), reused: false })
   }
   async function createDraft(input) {
-    const compiled = compileYidaDraft(input)
+    const compiled = compileYidaSendDraft(input)
     // Only a precisely identified target INSERT race permits one fresh tx.
     // Commit failures and operation identity conflicts are never auto-retried.
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -271,7 +276,7 @@ function createDraftInternals({ db, security, context } = {}) {
       // The actual compiler owns INPUT/CONFIG/PLAN/LIMIT and its error name.
       // Compile before closing persistence failures so DB-supplied lookalikes
       // cannot borrow compiler identity to carry private details.
-      const compiled = compileYidaDraft(input)
+      const compiled = compileYidaSendDraft(input)
       try { return await createDraftInTransaction(trx, input, compiled) }
       // A shared transaction gets a fresh closed CONFLICT, never TARGET_RACE
       // or an independent retry/transaction/isolation/commit from this writer.
