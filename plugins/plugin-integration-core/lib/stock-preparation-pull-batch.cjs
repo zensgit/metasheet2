@@ -566,20 +566,16 @@ function openedAtIndex(ledgerBatches) {
   return byLabel
 }
 
-/** L* (design §5.2 step 3): the earliest known label — by n when every known label has one, else by day. */
+/**
+ * L* (design §5.2 step 3): the earliest known label, by number. Known labels of MORE THAN ONE format are not
+ * comparable (null => 历史批次未知): one sheet holds one locked format, so a mix is a copy from elsewhere, and
+ * copying either label would spread the mix (MF3).
+ */
 function earliestKnownLabel(known) {
-  const byN = known.every((entry) => entry.parsed.n !== null)
-  const byDay = known.every((entry) => entry.parsed.day !== null)
-  if (!byN && !byDay) return null
+  if (new Set(known.map((entry) => entry.parsed.format)).size > 1) return null
   let best = null
   for (const entry of known) {
-    if (best === null) {
-      best = entry
-      continue
-    }
-    const a = byN ? entry.parsed.n : entry.parsed.day
-    const b = byN ? best.parsed.n : best.parsed.day
-    if (a < b || (a === b && entry.label < best.label)) best = entry
+    if (best === null || entry.parsed.n < best.parsed.n || (entry.parsed.n === best.parsed.n && entry.label < best.label)) best = entry
   }
   return best
 }
@@ -783,8 +779,8 @@ function anchorOfRow(row, anchorSet) {
  *   locale        the sheet's label locale; config: the sheet's captured configuration
  * Trashed rows are never evidence (PULL_BATCH_FIXED_FACTS). Under rule F the predecessors are judged by the
  * rows' CURRENT active state (R-65 C10, see the header).
- * Answers { plan, assignments }: the persisted plan (values-free; its digest covers every input that moves a
- * label, the meaning-locked configuration included) and the per-row assignment Map recordId ->
+ * Answers { plan, assignments }: the persisted plan (values-free; its digest, `pullBatchHistoryPlanDigest`, covers
+ * the clustering and the meaning-locked configuration, not the clock) and the per-row assignment Map recordId ->
  * { k, pullBatch, firstPullBatch } (recomputable from the plan; never persisted).
  */
 function planPullBatchHistory({ rows, priorRows, gapMinutes, base, coveredUntil, locale, config, ledgerBatches } = {}) {
@@ -797,6 +793,9 @@ function planPullBatchHistory({ rows, priorRows, gapMinutes, base, coveredUntil,
   if (!Number.isSafeInteger(startBase) || startBase < 0) throw historyInvalid('base')
   const coveredMs = timeMsOf(coveredUntil)
   if (coveredMs === null) throw historyInvalid('coveredUntil')
+  // MF1(c): every input row comes from the read that coveredUntil clocks, so none can be created after it; one that
+  // is would be counted in K while membership answers 'uncovered'. A caller defect: refused, never planned.
+  for (const row of input) if (row.createdMs !== null && row.createdMs > coveredMs) throw historyInvalid('coveredUntil')
   const gapMs = gap * 60 * 1000
   const { anchors, degenerate } = historyAnchors(input)
   const anchorSet = new Set(anchors)
@@ -852,6 +851,7 @@ function planPullBatchHistory({ rows, priorRows, gapMinutes, base, coveredUntil,
   }
   const assignment = new Map()
   const exceptionRows = []
+  const placementRows = []
   let unplacedRows = 0
   for (const row of input) {
     if (degenerate) {
@@ -860,6 +860,7 @@ function planPullBatchHistory({ rows, priorRows, gapMinutes, base, coveredUntil,
       if (cluster) {
         cluster.members.push(row)
         assignment.set(row.recordId, cluster)
+        placementRows.push(row)
       } else {
         assignment.set(row.recordId, null)
         unplacedRows += 1
@@ -883,18 +884,21 @@ function planPullBatchHistory({ rows, priorRows, gapMinutes, base, coveredUntil,
     }
     assignment.set(row.recordId, byTime || null)
   }
-  // The persisted bounds of a cluster are those of its TIME members only (an exception is found by its record id
-  // first, so it must not widen an interval — the intervals stay disjoint and membership stays unambiguous). A
-  // cluster that holds only exceptions takes its bounds from them.
-  if (!degenerate) {
-    const exceptionSet = new Set(exceptionRows)
-    for (const cluster of clusters) {
-      const timeMembers = cluster.members.filter((member) => !exceptionSet.has(member))
-      const span = timeMembers.length > 0 ? timeMembers : cluster.members
-      if (span.length === 0) continue
-      cluster.startMs = Math.min(...span.map((member) => member.createdMs))
-      cluster.endMs = Math.max(...span.map((member) => member.createdMs))
-    }
+  // The persisted bounds of a cluster are those of its TIME members only (`timeRows` of them): an exception is found
+  // by its record id first, so it must not widen an interval. The time intervals are disjoint (the time members
+  // partition the createdAt order: segments are half-open, and splits inside one need a gap longer than G). A
+  // cluster that holds ONLY exceptions (timeRows 0) takes its bounds — and so its label day — from them; its span can
+  // overlap another cluster's, which is why membership never matches a createdAt against it (MF1(b)). In a
+  // degenerate plan every member is a placement found by record id, and timeRows is 0 throughout.
+  const exceptionSet = new Set(exceptionRows)
+  for (const cluster of clusters) {
+    const timeMembers = degenerate ? [] : cluster.members.filter((member) => !exceptionSet.has(member))
+    cluster.timeRows = timeMembers.length
+    if (degenerate) continue
+    const span = timeMembers.length > 0 ? timeMembers : cluster.members
+    if (span.length === 0) continue
+    cluster.startMs = Math.min(...span.map((member) => member.createdMs))
+    cluster.endMs = Math.max(...span.map((member) => member.createdMs))
   }
   // Step 5: a time interval whose only rows became exceptions holds nothing and is no cluster. Number the rest in
   // time order, base + 1 …; evidence = plan_time when the interval holds add rows of its anchor, else created_at.
@@ -968,11 +972,16 @@ function planPullBatchHistory({ rows, priorRows, gapMinutes, base, coveredUntil,
       startAt: isoOf(cluster.startMs),
       endAt: isoOf(cluster.endMs),
       rows: cluster.members.length,
+      timeRows: cluster.timeRows,
       active: cluster.members.filter((row) => row.active !== false).length,
       inactive: cluster.members.filter((row) => row.active === false).length,
       label: cluster.label,
     })),
     exceptions: exceptionRows
+      .map((row) => ({ recordId: row.recordId, k: assignment.get(row.recordId).k }))
+      .sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0)),
+    // MF1(a): a degenerate plan places add rows by anchor, not by time: each placement is persisted by record id.
+    placements: placementRows
       .map((row) => ({ recordId: row.recordId, k: assignment.get(row.recordId).k }))
       .sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0)),
     unplacedRows,
@@ -983,25 +992,38 @@ function planPullBatchHistory({ rows, priorRows, gapMinutes, base, coveredUntil,
   return { plan: Object.freeze(plan), assignments }
 }
 
+/**
+ * The confirmation digest of a plan (design §8.3 step 8, §8.2 I0/I3/I5): its content without itself and WITHOUT
+ * `coveredUntil` (MF2). coveredUntil is the DB clock of the read, so the same rows read at the dry-run and again at
+ * the install would never share a digest; it stays in the persisted plan for I5 and for membership. Every other
+ * field moves it: cuts, clusters (and so the rows' counts), exceptions, placements, base, gap, locale, rule and
+ * format. The 首次 inputs that are not rows of the read (a gap pass's priorRows, the ledger's openings) are not
+ * part of the plan and do not move it.
+ */
 function pullBatchHistoryPlanDigest(plan) {
-  const { digest: _digest, ...rest } = isPlainObject(plan) ? plan : {}
+  const { digest: _digest, coveredUntil: _coveredUntil, ...rest } = isPlainObject(plan) ? plan : {}
   return sha256Hex(canonicalJson(rest))
 }
 
 /**
  * Which cluster of a PERSISTED plan a row belongs to (design §8.3 step 6, §8.2 I3): the persisted exceptions
- * first, then the persisted interval that contains its createdAt — never a RUN stamp. A row created after
- * `coveredUntil` is not covered (answers 'uncovered'); a row the plan could not place answers null.
+ * first, then the persisted placements (a degenerate plan), then the persisted interval of TIME members that
+ * contains its createdAt (a cluster with timeRows 0 has no interval) — never a RUN stamp. A row created after
+ * `coveredUntil` is not covered (answers 'uncovered'); a row the plan could not place answers null. For every
+ * row of the plan's own input this equals its assignment's k (the crash-continuation contract, R8 / G1).
  */
 function pullBatchHistoryMembership(plan, { recordId, createdAt } = {}) {
   if (!isPlainObject(plan) || plan.scheme !== PULL_BATCH_HISTORY_SCHEME) throw historyInvalid('plan')
   const exception = (plan.exceptions || []).find((entry) => entry.recordId === recordId)
   if (exception) return exception.k
+  const placement = (plan.placements || []).find((entry) => entry.recordId === recordId)
+  if (placement) return placement.k
   const createdMs = timeMsOf(createdAt)
   if (createdMs === null) return null
   if (createdMs > timeMsOf(plan.coveredUntil)) return 'uncovered'
   if (plan.degenerate) return null
   for (const cluster of plan.clusters || []) {
+    if (!(cluster.timeRows > 0)) continue
     const startMs = timeMsOf(cluster.startAt)
     const endMs = timeMsOf(cluster.endAt)
     if (createdMs >= startMs && createdMs <= endMs) return cluster.k

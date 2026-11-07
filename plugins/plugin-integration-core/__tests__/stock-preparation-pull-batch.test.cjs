@@ -7,9 +7,11 @@
 //   PB-E  the evidence set E (plugin rows only, R-65 C4; the shared manual: predicate, C3) and the gap-row predicate
 //   PB-C  首次批次 — the §5.4 worked cases under BOTH rules; OWN-1 / Q6-a / R through the REAL planner
 //   PB-D  the content-only digest: lane-free, ext_-free, key-order-free
-//   PB-H  the history plan (§8.3) and the attested count (§8.5)
+//   PB-H  the history plan (§8.3) and the attested count (§8.5); H9/H10 = review fixes MF1 (membership reproduces the
+//         assignment) and MF2 (the plan digest is clock-free)
+//   PB-V  the verifier's round-1 killing assertions (MF4), one per design rule no other test pinned
 //   PB-K  the configuration vocabulary (R-65 C2): defaults = the 10-27 design, four closed keys, fixed facts, locks
-//   PB-P  portability, not-wired pin, closed vocabularies
+//   PB-P  portability and not-wired pins over the file TEXT (MF5), closed vocabularies
 //
 // Synthetic values only (S-01, P-07, C, X, A, B).
 
@@ -373,6 +375,23 @@ test("PB-C5 the 'ordinal' format: L* by number; two ledger batches with one labe
   assert.equal(only(carry({ decisions: [add('X', ['C', 'X'])], existingRows: [...ordinalSheet, after], ledgerBatches: twinLedger })), '第1批')
   const bareDate = [row('X', ['A', 'X'], {}, { firstPullBatch: ord(1) }), row('X', ['B', 'X'], {}, { firstPullBatch: '2026-10-19' })]
   assert.equal(only(carry({ decisions: [add('X', ['C', 'X'])], existingRows: bareDate })), UNKNOWN, 'a bare date parses unknown, so it is an open row that could predate L*')
+  // MF3: known labels of DIFFERENT formats are not comparable => 历史批次未知, never one of them copied (a copy would
+  // spread the mix onto the new row). The ledger knows both openings, so only the format rule can decide.
+  const mixedLedger = [
+    { label: ord(1), openedAt: '2026-10-19T01:00:00.000Z', status: 'closed' },
+    { label: L(2, '2026-10-22'), openedAt: '2026-10-22T01:00:00.000Z', status: 'closed' },
+  ]
+  for (const pair of [
+    [row('X', ['A', 'X'], {}, { firstPullBatch: L(2, '2026-10-22') }), row('X', ['B', 'X'], {}, { firstPullBatch: ord(1) })],
+    [row('X', ['B', 'X'], {}, { firstPullBatch: ord(1) }), row('X', ['A', 'X'], {}, { firstPullBatch: L(2, '2026-10-22') })],
+  ]) {
+    for (const rule of RULES) {
+      const existingRows = rule === 'material' ? pair : pair.map((entry) => ({ ...entry, active: false, path: JSON.stringify(['X']) }))
+      assert.equal(only(carry({ decisions: [add('X', ['C', 'X'])], existingRows, ledgerBatches: mixedLedger, config: ruleConfig(rule) })), UNKNOWN, `${rule}: 第2批（D） + 第1批 are not comparable`)
+    }
+  }
+  const dateMix = [row('X', ['A', 'X'], {}, { firstPullBatch: L(2, '2026-10-22') }), row('X', ['B', 'X'], {}, { firstPullBatch: '2026-10-19' })]
+  assert.equal(only(carry({ decisions: [add('X', ['C', 'X'])], existingRows: dateMix, ledgerBatches: mixedLedger })), UNKNOWN, '第2批（D） + a bare date: never the date copied')
 })
 
 test('PB-C6 trashed rows are never evidence (a fixed fact, R-65 C2): a trashedRows input is not read, and naming the setting is refused', () => {
@@ -564,6 +583,232 @@ test('PB-H8 the attested count (§8.5): inferred needs count = K (degenerate too
   assert.throws(() => PB.nextLivePullBatchNo({ maxBatchNo: -1 }), codeIs(PULL_BATCH_ERROR_CODES.STAMP_INVALID))
 })
 
+// ── PB-H9..H10: review fixes MF1 / MF2 (the persisted plan reproduces its own assignment; the digest is clock-free) ──
+
+/** Every row's membership over the PERSISTED plan equals its assignment's k (design §8.2 I3, §8.3 step 6). */
+const membershipMismatches = (answer, rows) => rows
+  .map((entry) => ({ recordId: entry.recordId, k: answer.assignments.get(entry.recordId).k, membership: PB.pullBatchHistoryMembership(answer.plan, { recordId: entry.recordId, createdAt: entry.createdAt }) }))
+  .filter((entry) => entry.k !== entry.membership)
+
+test('PB-H9 MF1: the persisted plan reproduces its own assignment — degenerate placements, exception-only clusters, rows after coveredUntil, and a seeded sweep', () => {
+  // (a) a degenerate plan places add rows by anchor: the placements are persisted, so membership recovers them.
+  const degenerateRows = [
+    hrow('a', '2026-10-20T01:00:00.000Z', { decision: 'add', plannedAt: '2026-10-19T01:00:00.000Z' }),
+    hrow('b', '2026-10-20T01:00:00.100Z', { decision: 'add', plannedAt: '2026-10-18T01:00:00.000Z' }),
+    hrow('c', '2026-10-20T01:00:00.200Z', { decision: 'inactive', plannedAt: '2026-10-19T01:00:00.000Z', active: false }),
+  ]
+  const degenerate = plan({ rows: degenerateRows })
+  assert.equal(degenerate.plan.degenerate, true)
+  assert.deepEqual(membershipMismatches(degenerate, degenerateRows), [], '(a) degenerate placements')
+  assert.deepEqual(degenerate.plan.placements, [{ recordId: 'a', k: 2 }, { recordId: 'b', k: 1 }], 'placements persisted, sorted by record id')
+  assert.deepEqual(degenerate.plan.exceptions, [], 'placements are not exceptions')
+  assert.equal(degenerate.plan.interleavedRows, 0, 'interleavedRows counts true interleaves only')
+  assert.deepEqual(plan({ rows: C09_ROWS }).plan.placements, [], 'a non-degenerate plan places by time: no placements')
+  // (b) an exception-only cluster: its span (from its exceptions) holds a TIME member of another cluster.
+  const a1 = '2026-10-20T01:00:00.000Z'
+  const exceptionOnlyRows = [
+    hrow('old', '2026-10-20T00:00:00.000Z', { decision: 'inactive', plannedAt: a1, active: false }),
+    hrow('e1', '2026-10-20T00:59:56.000Z', { decision: 'add', plannedAt: a1 }),
+    hrow('mid', '2026-10-20T00:59:58.000Z', { decision: 'update', plannedAt: '2026-10-20T05:00:00.000Z' }),
+    hrow('e2', '2026-10-20T00:59:59.000Z', { decision: 'add', plannedAt: a1 }),
+  ]
+  const exceptionOnly = plan({ rows: exceptionOnlyRows })
+  assert.equal(exceptionOnly.plan.degenerate, false)
+  assert.deepEqual(membershipMismatches(exceptionOnly, exceptionOnlyRows), [], '(b) the time member is answered by its own cluster')
+  const anchored = exceptionOnly.plan.clusters.find((cluster) => cluster.anchorAt === a1)
+  assert.equal(anchored.timeRows, 0, 'the anchor cluster holds exceptions only')
+  assert.equal(exceptionOnly.plan.clusters.reduce((sum, cluster) => sum + cluster.timeRows, 0) + exceptionOnly.plan.exceptions.length, exceptionOnlyRows.length)
+  // (c) an input row created after coveredUntil is a caller defect (the same DB read): refused, never counted in K.
+  const afterRows = [
+    hrow('in1', '2026-10-20T01:00:01.000Z', { decision: 'add', plannedAt: '2026-10-20T01:00:00.000Z' }),
+    hrow('after', '2026-10-22T01:00:01.000Z', { decision: 'add', plannedAt: '2026-10-22T01:00:00.000Z' }),
+  ]
+  assert.throws(() => plan({ rows: afterRows }), (error) => error.code === PULL_BATCH_ERROR_CODES.STAMP_INVALID && error.details.field === 'coveredUntil', '(c)')
+  assert.equal(plan({ rows: afterRows, coveredUntil: '2026-10-22T01:00:01.000Z' }).plan.K, 2, 'a row created AT coveredUntil is covered')
+  // (d) a seeded sweep biased toward copy-like and clock-slack shapes.
+  let seed = 20261107
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    return seed / 2147483648
+  }
+  const pick = (list) => list[Math.floor(rand() * list.length)]
+  const baseMs = Date.parse('2026-10-20T00:00:00.000Z')
+  const stats = { trials: 0, degenerate: 0, exceptions: 0, mismatched: 0 }
+  for (let trial = 0; trial < 5000; trial += 1) {
+    const anchors = []
+    for (let i = 0, n = Math.floor(rand() * 4); i < n; i += 1) anchors.push(baseMs + Math.floor(rand() * 6 * 3600) * 1000)
+    const rows = []
+    const copyLike = rand() < 0.25
+    for (let i = 0, n = 1 + Math.floor(rand() * 9); i < n; i += 1) {
+      const isAnchored = anchors.length > 0 && rand() < 0.6
+      const p = isAnchored ? pick(anchors) : null
+      let c
+      if (copyLike) c = baseMs + 3600 * 1000 + Math.floor(rand() * 1500)
+      else if (isAnchored) c = p - 4900 + Math.floor(rand() * 4900) + (rand() < 0.4 ? Math.floor(rand() * 3 * 3600 * 1000) : 0)
+      else c = baseMs + Math.floor(rand() * 7 * 3600) * 1000 + Math.floor(rand() * 1000)
+      rows.push(hrow(`r${i}`, new Date(c).toISOString(), { decision: isAnchored ? 'add' : pick(['inactive', 'update']), plannedAt: isAnchored ? new Date(p).toISOString() : null, active: rand() < 0.7, partId: pick(['X', 'Y']) }))
+    }
+    const answer = plan({ rows, coveredUntil: '2026-10-22T00:00:00.000Z' })
+    stats.trials += 1
+    if (answer.plan.degenerate) stats.degenerate += 1
+    if (answer.plan.exceptions.length) stats.exceptions += 1
+    if (membershipMismatches(answer, rows).length) stats.mismatched += 1
+  }
+  assert.equal(stats.trials, 5000)
+  assert.ok(stats.degenerate > 0 && stats.exceptions > 0, `the sweep reaches both shapes: ${JSON.stringify(stats)}`)
+  assert.equal(stats.mismatched, 0, `(d) ${JSON.stringify(stats)}`)
+})
+
+test('PB-H10 MF2: the plan digest is clock-free — the same rows read at two coveredUntil values share it (dry-run -> install I0/I3); a new row moves it; coveredUntil stays in the plan', () => {
+  const rows = [
+    hrow('x1', '2026-10-20T01:00:01.000Z', { decision: 'add', plannedAt: '2026-10-20T01:00:00.000Z' }),
+    hrow('x2', '2026-10-20T01:00:02.000Z', { decision: 'add', plannedAt: '2026-10-20T01:00:00.000Z' }),
+  ]
+  const dryRun = plan({ rows, coveredUntil: '2026-10-21T00:00:00.000Z' }).plan
+  const install = plan({ rows, coveredUntil: '2026-10-21T00:05:00.000Z' }).plan
+  assert.equal(install.digest, dryRun.digest)
+  assert.equal(PB.pullBatchHistoryPlanDigest({ ...install, coveredUntil: '2030-01-01T00:00:00.000Z' }), install.digest, 'the digest never reads coveredUntil')
+  assert.equal(dryRun.coveredUntil, '2026-10-21T00:00:00.000Z', 'coveredUntil is persisted (I5 and membership read it)')
+  assert.equal(install.coveredUntil, '2026-10-21T00:05:00.000Z')
+  const grown = plan({ rows: [...rows, hrow('x3', '2026-10-20T03:00:00.000Z', { decision: 'update' })], coveredUntil: '2026-10-21T00:05:00.000Z' }).plan
+  assert.notEqual(grown.digest, install.digest, 'a new row in the read moves the digest')
+  assert.notEqual(plan({ rows, coveredUntil: '2026-10-21T00:05:00.000Z', base: 2 }).plan.digest, install.digest, 'the base moves it')
+})
+
+// ── PB-V: the verifier's killing assertions (round 1, MF4) — each guards one design rule no other test pins ──
+
+test('PB-V03 R6 boundary: an open row created EXACTLY at L*\'s opening does not predate it ("earlier than", §5.2 step 5)', () => {
+  const known = row('X', ['A', 'X'], {}, { pullBatch: L(1), firstPullBatch: L(1) })
+  const atOpening = row('X', ['Z', 'X'], { active: false }, { createdAt: LEDGER[0].openedAt })
+  assert.equal(only(carry({ decisions: [add('X', ['B', 'X'])], existingRows: [known, atOpening] })), L(1))
+})
+
+test('PB-V06 history rule F: an inactive earlier row at the SAME path is not a PROPER suffix', () => {
+  const rows = [
+    hrow('X_old', '2026-10-20T01:00:00.000Z', { decision: 'update', active: false, partId: 'X', pathTokens: ['A', 'X'] }),
+    hrow('X_new', '2026-10-20T03:00:00.000Z', { decision: 'update', active: true, partId: 'X', pathTokens: ['A', 'X'] }),
+  ]
+  const { plan: p, assignments } = plan({ rows, config: ruleConfig('predecessor_suffix') })
+  assert.equal(p.K, 2)
+  assert.equal(assignments.get('X_new').firstPullBatch, assignments.get('X_new').pullBatch)
+})
+
+test('PB-V10 the 5 s clock slack (§8.3 step 1): an add row created 3 s BEFORE its plan time is an anchor and a cut', () => {
+  const p = '2026-10-20T01:10:00.000Z'
+  const rows = [hrow('old', '2026-10-20T01:00:00.000Z'), hrow('early', '2026-10-20T01:09:57.000Z', { decision: 'add', plannedAt: p })]
+  const { plan: out, assignments } = plan({ rows })
+  assert.deepEqual(out.cuts, [p])
+  assert.equal(out.K, 2)
+  assert.equal(assignments.get('early').k, 2)
+  assert.equal(assignments.get('old').k, 1)
+})
+
+test('PB-V11 ONE anchor with a sub-2 s createdAt spread is NOT degenerate (§8.3 step 2 needs |A| > 1)', () => {
+  const rows = [
+    hrow('a', '2026-10-20T01:00:00.500Z', { decision: 'add', plannedAt: '2026-10-20T01:00:00.000Z' }),
+    hrow('b', '2026-10-20T01:00:01.000Z'),
+  ]
+  const { plan: out, assignments } = plan({ rows })
+  assert.equal(out.degenerate, false)
+  assert.equal(assignments.get('b').k, 1)
+})
+
+test('PB-V24 the copied 首次 label is trimmed', () => {
+  assert.equal(only(carry({ decisions: [add('X', ['B', 'X'])], existingRows: [row('X', ['A', 'X'], {}, { pullBatch: L(1), firstPullBatch: `  ${L(1)}  ` })] })), L(1))
+})
+
+test('PB-V27 history rule F, ACTIVE-ROOT: an ACTIVE earlier-cluster row is not a predecessor (rule A still carries)', () => {
+  const rows = [
+    hrow('S-01_root', '2026-10-20T01:00:00.000Z', { decision: 'update', active: true, pathTokens: ['S-01'] }),
+    hrow('S-01_under', '2026-10-20T03:00:00.000Z', { decision: 'update', active: true, pathTokens: ['P-07', 'S-01'] }),
+  ]
+  const ruleF = plan({ rows, config: ruleConfig('predecessor_suffix') })
+  assert.equal(ruleF.assignments.get('S-01_under').firstPullBatch, ruleF.assignments.get('S-01_under').pullBatch, 'rule F: 第2批 / 第2批')
+  const ruleA = plan({ rows })
+  assert.equal(ruleA.assignments.get('S-01_under').firstPullBatch, ruleA.assignments.get('S-01_root').pullBatch, 'rule A: 第1批 / 第2批')
+})
+
+test('PB-V28 an UNPLACED row (degenerate plan) gets 本次 历史批次未知 and 首次 by §5 — the placed row of its material decides', () => {
+  const rows = [
+    hrow('X_a', '2026-10-20T01:00:00.000Z', { decision: 'add', plannedAt: '2026-10-18T01:00:00.000Z' }),
+    hrow('Y_b', '2026-10-20T01:00:00.100Z', { decision: 'add', plannedAt: '2026-10-19T01:00:00.000Z' }),
+    hrow('X_c', '2026-10-20T01:00:00.200Z', { decision: 'inactive', active: false }),
+  ]
+  const { plan: out, assignments } = plan({ rows })
+  assert.equal(out.degenerate, true)
+  assert.equal(assignments.get('X_c').pullBatch, UNKNOWN)
+  assert.equal(assignments.get('X_c').firstPullBatch, assignments.get('X_a').pullBatch)
+})
+
+test('PB-V29 prototype-chain keys are refused 400 CONFIG_INVALID naming the key (not a TypeError)', () => {
+  for (const name of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+    assert.throws(() => normalizePullBatchConfig(JSON.parse(`{"${name}": 1}`)), (error) => error.code === PULL_BATCH_ERROR_CODES.CONFIG_INVALID && error.status === 400 && error.details.field === name, name)
+  }
+})
+
+test('PB-V34 a blank-string creator is no creator (the reader convention)', () => {
+  assert.equal(PB.isPullBatchEvidenceRow(row('X', ['X'], {}, { createdBy: '   ' })), true)
+})
+
+test('PB-V35 the degenerate spread is measured over the WHOLE input, not the add rows only', () => {
+  const rows = [
+    hrow('a', '2026-10-20T01:00:00.000Z', { decision: 'add', plannedAt: '2026-10-20T00:59:59.000Z' }),
+    hrow('b', '2026-10-20T01:00:00.500Z', { decision: 'add', plannedAt: '2026-10-20T00:59:58.000Z' }),
+    hrow('c', '2026-10-20T02:00:00.000Z'),
+  ]
+  assert.equal(plan({ rows }).plan.degenerate, false)
+})
+
+test('PB-V36 exactly ONE late add stamp is not degenerate ("more than one", §8.3 step 2)', () => {
+  const rows = [
+    hrow('a', '2026-10-20T01:00:00.000Z', { decision: 'add', plannedAt: '2026-10-20T02:00:00.000Z' }),
+    hrow('b', '2026-10-20T03:00:00.000Z'),
+  ]
+  assert.equal(plan({ rows }).plan.degenerate, false)
+})
+
+test('PB-V37 a createdAt gap of EXACTLY G does not split ("longer than G")', () => {
+  assert.equal(plan({ rows: [hrow('a', '2026-10-20T01:00:00.000Z', { decision: 'update' }), hrow('b', '2026-10-20T01:30:00.000Z', { decision: 'update' })] }).plan.K, 1)
+})
+
+test('PB-V40 membership: a persisted exception wins over a time interval that contains its createdAt', () => {
+  const p1 = '2026-10-20T01:00:00.000Z'
+  const p2 = '2026-10-20T01:10:00.000Z'
+  const rows = [
+    hrow('a1', '2026-10-20T01:00:01.000Z', { decision: 'add', plannedAt: p1 }),
+    hrow('b1', '2026-10-20T01:10:01.000Z', { decision: 'add', plannedAt: p2 }),
+    hrow('late', '2026-10-20T01:12:00.000Z', { decision: 'add', plannedAt: p1 }),
+    hrow('b2', '2026-10-20T01:15:00.000Z', { decision: 'add', plannedAt: p2 }),
+  ]
+  const { plan: out, assignments } = plan({ rows })
+  assert.equal(assignments.get('late').k, 1)
+  assert.equal(PB.pullBatchHistoryMembership(out, { recordId: 'late', createdAt: '2026-10-20T01:12:00.000Z' }), 1)
+})
+
+test('PB-V41 an add-stamped row WITHOUT createdAt is no anchor (p ≤ c + 5 s needs c)', () => {
+  const rows = [
+    hrow('x', null, { decision: 'add', plannedAt: '2026-10-20T01:10:00.000Z' }),
+    hrow('y', '2026-10-20T01:00:00.000Z', { decision: 'update' }),
+    hrow('z', '2026-10-20T01:20:00.000Z', { decision: 'update' }),
+  ]
+  const { plan: out, assignments } = plan({ rows })
+  assert.deepEqual(out.cuts, [])
+  assert.equal(out.K, 1)
+  assert.equal(assignments.get('x').k, null)
+})
+
+test('PB-V51 a whitespace-only 本次 cell is blank: the row is a gap row', () => {
+  assert.equal(PB.isPullBatchGapRow(row('X', ['X'], {}, { pullBatch: '   ', firstPullBatch: L(1) })), true)
+})
+
+test('PB-V55 history rule F, OWN-1 (C09): the batch-2 copies carry 首次 = cluster 1 through the swept predecessors; P-07 is new', () => {
+  const { plan: out, assignments } = plan({ rows: C09_ROWS, config: ruleConfig('predecessor_suffix') })
+  const [one, two] = out.clusters.map((cluster) => cluster.label)
+  assert.equal(assignments.get('S-01_new').firstPullBatch, one)
+  assert.equal(assignments.get('C_new').firstPullBatch, one)
+  assert.equal(assignments.get('P-07_new').firstPullBatch, two)
+})
+
 // ── PB-K: the configuration vocabulary ─────────────────────────────────────────────────────────────
 
 test('PB-K1 DEFAULT_PULL_BATCH_CONFIG is exactly the 10-27 design, frozen; undefined / null / {} normalize to it; the fixed facts are not settings', () => {
@@ -697,15 +942,20 @@ test('PB-K5 R-65 C10: the settings help text names rule F\'s history caveat (tod
 
 // ── PB-P ───────────────────────────────────────────────────────────────────────────────────────────
 
-const requiresOf = (file) => [...fs.readFileSync(file, 'utf8').matchAll(/require\((['"])([^'"]+)\1\)/g)].map((match) => match[2])
-
-test('PB-P1 PORTABILITY (S6 C-1, design §12.2): the pure core requires node:crypto and nothing else', () => {
-  assert.deepEqual(requiresOf(MODULE_PATH), ['node:crypto'])
+// MF5: both pins read the TEXT, whatever the require form (a quoted literal, path.join(__dirname, …), a
+// concatenation, a template, a dynamic import) — a regex over quoted literals alone passes vacuously.
+test('PB-P1 PORTABILITY (S6 C-1, design §12.2): the pure core contains exactly one require( — require(\'node:crypto\') — and no import(', () => {
+  const source = fs.readFileSync(MODULE_PATH, 'utf8')
+  assert.equal(source.split('require(').length - 1, 1, 'exactly one require( in the core')
+  assert.equal(source.split("require('node:crypto')").length - 1, 1, "and it is require('node:crypto')")
+  assert.equal(/\bimport\s*\(|^\s*import\s/m.test(source), false, 'no dynamic import( and no import statement')
 })
 
-test('PB-P2 NOT WIRED (BI-1a): no plugin runtime file requires the pure core yet — the lane / store PR replaces this pin', () => {
+test('PB-P2 NOT WIRED (BI-1a): no plugin runtime file but the core itself names stock-preparation-pull-batch, in any form — the lane / store PR replaces this pin', () => {
   const runtime = ['index.cjs', ...fs.readdirSync(LIB).filter((name) => name.endsWith('.cjs')).map((name) => `lib/${name}`)]
-  const wired = runtime.filter((file) => requiresOf(path.join(PLUGIN, file)).some((entry) => entry.includes('stock-preparation-pull-batch')))
+    .filter((file) => file !== 'lib/stock-preparation-pull-batch.cjs')
+  assert.ok(runtime.length > 100, 'the scan sees the plugin runtime')
+  const wired = runtime.filter((file) => fs.readFileSync(path.join(PLUGIN, file), 'utf8').includes('stock-preparation-pull-batch'))
   assert.deepEqual(wired, [])
 })
 
