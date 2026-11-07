@@ -76,6 +76,8 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts',
   'plugins/plugin-attendance/lib/attendance-timezone-default-recovery.cjs',
   'packages/core-backend/src/attendance/attendance-timezone-runtime-locks.ts',
+  // Requester display preparation shares the canonical request transaction.
+  'plugins/plugin-attendance/lib/attendance-requester-display.cjs',
   'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs',
   'plugins/plugin-attendance/lib/attendance-business-trip.cjs',
   'plugins/plugin-attendance/lib/attendance-calendar-settings-writer.cjs',
