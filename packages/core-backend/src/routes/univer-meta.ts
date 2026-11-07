@@ -172,6 +172,7 @@ import {
   resolvePlmRowDisplay,
   withManualSupplementMark,
   withPlmRowDeleteBlock,
+  fieldsCarryExactStockPreparationStanza,
   type PlmRowDisplay,
 } from '../multitable/plm-row-delete-guard'
 import {
@@ -181,6 +182,7 @@ import {
   stripManualRowPolicyKey,
   withManualRowPolicyKey,
 } from '../multitable/stock-preparation-manual-rows'
+import { carryPullBatchBandMarker, stripPullBatchBandMarker } from '../multitable/stock-preparation-pull-batch-band'
 import {
   assertManualRowEditInTransaction,
   assertManualRowsAllowed,
@@ -197,6 +199,15 @@ import {
   type ManualRowsContextBlock,
   type ManualRowsSheet,
 } from '../multitable/stock-preparation-manual-rows-gate'
+import { resolveBomRelationsContextBlock, type BomRelationsContextBlock } from '../multitable/stock-preparation-bom-relations-context'
+import {
+  VIEWER_FILTER_FIELD_NOT_PERMITTED_MESSAGE,
+  VIEWER_FILTER_INVALID_MESSAGE,
+  VIEWER_FILTER_QUERY_PARAM,
+  composeViewerFilter,
+  parseViewerFilterParam,
+  viewerFilterFieldsPermitted,
+} from '../multitable/viewer-filter'
 import { isApiTokenBearer } from '../multitable/oapi-read-allowlist'
 import { managedFieldDeleteRefusalBody, resolveManagedFieldDeleteRefusal } from '../multitable/managed-field-delete-guard'
 import {
@@ -6357,7 +6368,8 @@ async function normalizeFieldWriteInput(
     // write lock (human-write-lock.ts). PATCH re-applies the STORED lock afterwards (`carryHumanWriteLock`),
     // so a person can never clear it either. Only plugin provisioning writes it. The manual-rows switch
     // (stock-preparation-manual-rows.ts) follows the same rule: stripped here, the STORED value carried by PATCH.
-    property: stripManualRowPolicyKey(stripHumanWriteLockKey(sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty))),
+    // The pull-batch band marker (stock-preparation-pull-batch-band.ts, R-65) too: a person can never forge a band.
+    property: stripPullBatchBandMarker(stripManualRowPolicyKey(stripHumanWriteLockKey(sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty)))),
   }
 }
 
@@ -9772,6 +9784,23 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           manualRowsBlock = { state: 'unavailable', reason: 'registry_unreadable', editableFieldIds: [], requiredFieldIds: [], dialogFieldIds: [] }
         }
       }
+      // 备料 「查看子件」 / 「查看所有使用位置」 (owner question 2026-11-07): on a stock-preparation main-template sheet,
+      // the physical ids of the five columns the drawer's two viewer-only filters use — for EVERY reader (these are
+      // read-only buttons), and only when each column exists with the plugin's stanza and this actor may read it
+      // (multitable/stock-preparation-bom-relations-context.ts). Every other sheet gets no key and issues no extra
+      // query (the stanza pre-check is in memory). A thrown registry read fails closed to no block, values-free log.
+      let bomRelationsBlock: BomRelationsContextBlock | null = null
+      if (effectiveSheetId && capabilities.canRead === true && fieldsCarryExactStockPreparationStanza(activeFields)) {
+        try {
+          bomRelationsBlock = await resolveBomRelationsContextBlock(pool.query.bind(pool), effectiveSheetId, activeFields, allowedFieldIds)
+        } catch (err) {
+          console.error(
+            '[univer-meta] load context: bom-relations probe failed; failing closed to no block',
+            { reason: 'bom_relations_probe_failed', ...describeLivenessLookupError(err) },
+          )
+          bomRelationsBlock = null
+        }
+      }
       // Customer feedback 2026-10-27: the duplicate route refuses a sheet whose rows the stock-preparation
       // plugin maintains (multitable/record-duplicate-guard.ts); tell the web so the drawer's duplicate entry is
       // shown disabled with the reason. Only for an actor who could otherwise create. The namespace half runs
@@ -9869,6 +9898,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             // 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7): sent ONLY on a P_reg sheet to an actor who can
             // create, edit or delete (see `manualRowsBlock` above); the manual-row routes re-gate on their own.
             ...(manualRowsBlock ? { stockPreparationManualRows: manualRowsBlock } : {}),
+            // 备料 「查看子件」 / 「查看所有使用位置」: sent ONLY on a stock-preparation main-template sheet (see
+            // `bomRelationsBlock` above). Field ids only; the buttons narrow GET /view with `viewerFilter`, never a write.
+            ...(bomRelationsBlock ? { stockPreparationBomRelations: bomRelationsBlock } : {}),
             // Customer feedback 2026-10-27: sent ONLY when true (see `recordDuplicateBlocked` above); the
             // duplicate route answers 409 RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET on its own.
             ...(recordDuplicateBlocked ? { recordDuplicateBlocked: true } : {}),
@@ -14824,13 +14856,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // changed or omitted). No administrator override — only plugin provisioning changes it. The manual-rows
         // switch is carried the same way (ADR adr-stock-prep-manual-rows-20261030 §4: only the plugin's switch route
         // writes it).
-        const nextProperty = carryManualRowPolicy(row.property, carryHumanWriteLock(row.property, normalizedNextProperty))
+        // The pull-batch band marker likewise (R-65): a body without it can never drop it, a body with it never sets it.
+        const nextProperty = carryPullBatchBandMarker(row.property, carryManualRowPolicy(row.property, carryHumanWriteLock(row.property, normalizedNextProperty)))
         // D21 field-row writer rule (authz-version-protocol.ts): when this write can trip the meta_fields visibility
         // trigger — the trigger's own test, on the property this attempt validates against vs the one it will write —
         // the sheet version row is taken HERE: after the fence, before the sibling order shift and the locked re-read
         // below (the first field-row locks of this transaction), never by the trigger after them. Exact for the attempt
         // that writes: the locked re-read must equal `validated` or the attempt retries on fresh data, and
-        // `writeProperty` differs from `nextProperty` only in the human write lock and manual-rows keys. A PATCH that
+        // `writeProperty` differs from `nextProperty` only in the human write lock, manual-rows and pull-batch band keys. A PATCH that
         // cannot trip it (order, name, options) takes no version row, so the shared column drag never queues on it.
         if (fieldVisibilityTriggerWouldFire(validated.property, nextProperty)) await bumpSheetPermissionVersions(query, [sheetId])
         const desiredOrder = parsed.data.order
@@ -15018,7 +15051,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (fieldRowChangedSince(validated, locked)) throw new FieldChangedConcurrentlyError()
         // Equal to `nextProperty` after the compare; carried from the locked row so the stored lock and switch can never
         // be dropped by a stale read even if the compare were weakened.
-        const writeProperty = carryManualRowPolicy(locked.property, carryHumanWriteLock(locked.property, nextProperty))
+        const writeProperty = carryPullBatchBandMarker(locked.property, carryManualRowPolicy(locked.property, carryHumanWriteLock(locked.property, nextProperty)))
         // `order` is not compared (a sibling's shift moves this row during a shared drag): a PATCH without `order`
         // keeps the row's CURRENT order instead of writing back the one it read.
         const nextOrder = typeof desiredOrder === 'number' ? desiredOrder : Number(locked.order ?? 0)
@@ -17538,6 +17571,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const viewId = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : ''
     const search = normalizeSearchTerm(req.query.search) // same normalization as /view (trim+lowercase) → search parity
+    // Viewer filter parity with GET /view (multitable/viewer-filter.ts): the footer must total the rows the grid shows.
+    const viewerFilter = parseViewerFilterParam(req.query[VIEWER_FILTER_QUERY_PARAM])
     // A5 full-column scale stats: optional CSV of field ids the caller wants numeric min/max/count for
     // (conditional-formatting scale endpoints — data-bar denominator + color-scale gradient bounds, computed
     // over the WHOLE filtered column, not the client page). ABSENT (or empty) → `stats` is OMITTED from the
@@ -17604,11 +17639,22 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const viewHiddenFieldIds = view?.hiddenFieldIds ?? []
       const visibleFields = filterVisiblePropertyFields(await loadFieldsForSheetShared(pool.query.bind(pool), sheetId))
       const filterFieldTypeById = new Map(visibleFields.map((field) => [field.id, resolveEffectiveFieldType(field)]))
-      const filterInfo = view ? parseMetaFilterInfo(view.filterInfo) : null
+      const storedFilterInfo = view ? parseMetaFilterInfo(view.filterInfo) : null
 
       const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
       const selectionFieldPermissions = deriveFieldPermissions(visibleFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
       const selectableFieldIds = new Set(visibleFields.filter((field) => selectionFieldPermissions[field.id]?.visible !== false).map((field) => field.id))
+      // Viewer filter: same refusals as GET /view, gated by the same selection set this route prunes its stored
+      // filter with; composed for this read only.
+      if (viewerFilter.kind === 'invalid') {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: VIEWER_FILTER_INVALID_MESSAGE } })
+      }
+      if (viewerFilter.kind === 'present' && !viewerFilterFieldsPermitted(viewerFilter.conditions, selectableFieldIds, filterFieldTypeById)) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: VIEWER_FILTER_FIELD_NOT_PERMITTED_MESSAGE } })
+      }
+      const filterInfo = viewerFilter.kind === 'present'
+        ? (composeViewerFilter(storedFilterInfo, viewerFilter.conditions) as MetaFilterInfo)
+        : storedFilterInfo
       const selectableFields = visibleFields.filter((field) => selectableFieldIds.has(field.id))
 
       // Computed (lookup/rollup/formula) filter conditions can't be evaluated here (no applyLookupRollup),
@@ -17916,6 +17962,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const seed = req.query.seed === 'true'
     const includeLinkSummaries = req.query.includeLinkSummaries === 'true'
     const search = normalizeSearchTerm(req.query.search)
+    // Viewer filter (multitable/viewer-filter.ts): a per-request AND onto the stored filter, never stored. Parsed
+    // here, refused with a fixed message after the read gate, field-gated once allowedFieldIds is known below.
+    const viewerFilter = parseViewerFilterParam(req.query[VIEWER_FILTER_QUERY_PARAM])
     const limitParam = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : undefined
     const offsetParam = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : undefined
     // #5807: `let`, not `const` — a bounded (People) sheet re-clamps both to its window right after the
@@ -18023,9 +18072,23 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const ignoredFilterFieldIds = collectLeafConditions(rawFilterInfo)
         .filter((condition) => !fieldTypeById.has(condition.fieldId))
         .map((c) => c.fieldId)
-      const filterInfo = rawFilterInfo
+      const storedFilterInfo = rawFilterInfo
         ? pruneFilterNode(rawFilterInfo, (condition) => fieldTypeById.has(condition.fieldId) && allowedFieldIds.has(condition.fieldId))
         : null
+      // Viewer filter: refused (one fixed message, no field named) when malformed or when a condition names a field
+      // the caller may not filter on — the SAME allowedFieldIds the stored filter is pruned by (layer-2 ∧ layer-3;
+      // view-hidden columns ARE filterable, layer-1 is display-only here). Composed for the row selection only:
+      // the response's `view` below is still serialised from `viewConfig`, so the narrowing is never echoed back
+      // as the view's own filter and nothing is written.
+      if (viewerFilter.kind === 'invalid') {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: VIEWER_FILTER_INVALID_MESSAGE } })
+      }
+      if (viewerFilter.kind === 'present' && !viewerFilterFieldsPermitted(viewerFilter.conditions, allowedFieldIds, fieldTypeById)) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: VIEWER_FILTER_FIELD_NOT_PERMITTED_MESSAGE } })
+      }
+      const filterInfo = viewerFilter.kind === 'present'
+        ? (composeViewerFilter(storedFilterInfo, viewerFilter.conditions) as MetaFilterInfo)
+        : storedFilterInfo
 
       if (ignoredSortFieldIds.length > 0) {
         warnings.push(`排序字段不存在，已忽略: ${ignoredSortFieldIds.join(', ')}`)

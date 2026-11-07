@@ -103,6 +103,8 @@ const STATE_BLOCKED_MESSAGE = 'this project has an unfinished refresh state; the
 // ── the golden, captured from main 8cafcc851's OWN modules (scratchpad s5_golden_main.cjs): one fixed fixture ──
 // 2026-10-29: the export appends 采购回复 / 仓库确认 (EXPORT_COLUMNS, after 毛胚质量), so the golden gains those two
 // headers and two blank cells per row (this fixture fills neither), and columnCount 28 -> 30. Nothing else moved.
+// 2026-11-07: the export appends 层级 (the row's stored template `depth`) LAST, so the golden gains that header and
+// each row's stored level as its last cell (P = 0, C = 1), and columnCount 30 -> 31. Nothing else moved.
 const GOLDEN_TENANT = 'tenant-golden-xg'
 const GOLDEN_STAGING = `${GOLDEN_TENANT}:integration-core`
 const GOLDEN_SHEET = 'sheet_golden_xg_hand_bound'
@@ -110,10 +112,10 @@ const GOLDEN_PROJECT = 'PRJ-GOLDEN-XG'
 const GOLDEN_OPERATOR = Object.freeze({ id: 'u_golden_op', tenantId: GOLDEN_TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] })
 const GOLDEN_XLSX = Object.freeze({
   sheetName: '备料导出-PRJ-GOLDEN-XG',
-  headers: ['父组件图号', '父组件名称', '图号', '名称', '规格', '材料', '总数量', '备料情况', '需求日期', '领料节点', '备料日期', '毛胚长度', '自制/外购', '采购完成', '采购回复日期', '仓库完成', '实际到货日期', '生产编号', '名称及规格', '材料类型', '毛胚类型', '备注', '交接工段', '提前周期(天)', '毛胚宽度', '毛胚厚度', '毛胚数量', '毛胚质量', '采购回复', '仓库确认'],
+  headers: ['父组件图号', '父组件名称', '图号', '名称', '规格', '材料', '总数量', '备料情况', '需求日期', '领料节点', '备料日期', '毛胚长度', '自制/外购', '采购完成', '采购回复日期', '仓库完成', '实际到货日期', '生产编号', '名称及规格', '材料类型', '毛胚类型', '备注', '交接工段', '提前周期(天)', '毛胚宽度', '毛胚厚度', '毛胚数量', '毛胚质量', '采购回复', '仓库确认', '层级'],
   rows: [
-    [null, null, 'DWG-P-001', 'ASSY-P', 'SPEC-P', 'M-P', 2, null, null, null, null, null, null, null, null, null, null, 'PRJ-GOLDEN-XG', null, null, null, null, null, null, null, null, null, null, null, null],
-    ['DWG-P-001', 'ASSY-P', 'DWG-C-001', 'PART-C', 'SPEC-C', 'M-C', 6, null, null, null, null, null, null, null, null, null, null, 'PRJ-GOLDEN-XG', null, null, null, null, null, null, null, null, null, null, null, null],
+    [null, null, 'DWG-P-001', 'ASSY-P', 'SPEC-P', 'M-P', 2, null, null, null, null, null, null, null, null, null, null, 'PRJ-GOLDEN-XG', null, null, null, null, null, null, null, null, null, null, null, null, 0],
+    ['DWG-P-001', 'ASSY-P', 'DWG-C-001', 'PART-C', 'SPEC-C', 'M-C', 6, null, null, null, null, null, null, null, null, null, null, 'PRJ-GOLDEN-XG', null, null, null, null, null, null, null, null, null, null, null, null, 1],
   ],
 })
 const GOLDEN_AUDIT = Object.freeze({
@@ -122,7 +124,7 @@ const GOLDEN_AUDIT = Object.freeze({
   action: 'prep_line_export',
   actor: 'u_golden_op',
   mode: 'export',
-  detail: { operation: 'prep_line_export', totalRowCount: 3, activeRowCount: 2, columnCount: 30 },
+  detail: { operation: 'prep_line_export', totalRowCount: 3, activeRowCount: 2, columnCount: 31 },
 })
 function goldenRows() {
   return [
@@ -841,7 +843,7 @@ async function main() {
     assert.equal(workbook.rows.filter((row) => row[codeIndex] === 'D100-01-03').length, 1, 'the S root appears once, with its own quantity')
     assert.equal(workbook.rows.find((row) => row[codeIndex] === 'D100-01-03')[qtyIndex], 10, 'the old root keeps its order quantity (not the parent edge)')
     assert.deepEqual(h.auditAppends.map((entry) => entry.mode), ['export'])
-    assert.deepEqual(h.auditAppends[0].detail, { operation: 'prep_line_export', totalRowCount: 5, activeRowCount: 5, columnCount: 31, refreshState: 'complete', continuationCount: 1, continuedRowCount: 4 })
+    assert.deepEqual(h.auditAppends[0].detail, { operation: 'prep_line_export', totalRowCount: 5, activeRowCount: 5, columnCount: 32, refreshState: 'complete', continuationCount: 1, continuedRowCount: 4 })
     assert.deepEqual(h.reads, [GOV_SHEET, GOV_SHEET], 'the export rows read, THEN the digest read')
     assert.equal(h.counters.routeReadGeneration, 2)
     assert.equal(h.counters.readRefreshState, 2)

@@ -36,7 +36,7 @@ const canaryExclusionConsistencyStep = {
 }
 const directoryWiringContractsStep = {
   name: 'Directory grant-table, deprovision-writer and access-graph-mutex CI-wiring contracts (required lane)',
-  run: 'node --test \\\n  scripts/ops/directory-grant-table-ci-wiring.test.mjs \\\n  scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs \\\n  scripts/ops/directory-access-graph-mutex-ci-wiring.test.mjs\n',
+  run: 'node --test \\\n  scripts/ops/directory-grant-table-ci-wiring.test.mjs \\\n  scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs \\\n  scripts/ops/directory-access-graph-mutex-ci-wiring.test.mjs \\\n  scripts/ops/directory-deprovision-provider-scope-ci-wiring.test.mjs\n',
 }
 const permissionStep = {
   name: 'Admin write-route inventory and permission preflight',
@@ -53,7 +53,7 @@ const directoryClientLintStep = {
   name: 'Run DingTalk directory client lint',
   if: "matrix.node-version == '20.x'",
   'working-directory': 'packages/core-backend',
-  run: 'pnpm exec eslint --no-cache src/integrations/dingtalk/client.ts src/integrations/dingtalk/directory-response-ids.ts src/directory/directory-sync.ts src/directory/directory-department-cycle.ts',
+  run: 'pnpm exec eslint --no-cache src/integrations/dingtalk/client.ts src/integrations/dingtalk/directory-response-ids.ts src/directory/directory-sync.ts src/directory/directory-department-cycle.ts src/directory/directory-adapter.ts src/directory/directory-adapter-registry.ts src/directory/adapters/index.ts src/directory/adapters/dingtalk-directory-adapter.ts src/directory/directory-user-pagination.ts src/directory/department-manager-enrichment.ts',
 }
 
 function resultUpload(suite) {
@@ -140,11 +140,17 @@ function assertParallelWorkflow(doc) {
         assert.ok(step.run.includes(proofAddition + goldenParityAddition), 'Keep the directory sync characterization suite right after the action proof suite')
         const capabilitiesAddition = '  tests/integration/directory-integration-capabilities.db.test.ts \\\n'
         assert.equal(step.run.split(capabilitiesAddition).length - 1, 1, 'Directory integration capabilities DB suite must run exactly once')
+        const providerSchemaAddition = '  tests/integration/directory-deprovision-effect-provider-schema.db.test.ts \\\n'
+        assert.equal(step.run.split(providerSchemaAddition).length - 1, 1, 'Deprovision effect provider schema DB suite must run exactly once')
+        assert.ok(step.run.includes(capabilitiesAddition + providerSchemaAddition), 'Keep the deprovision effect provider schema suite right after the directory integration capabilities suite')
+        const providerEvidenceAddition = '  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n'
+        assert.equal(step.run.split(providerEvidenceAddition).length - 1, 1, 'Deprovision provider evidence DB suite must run exactly once')
+        assert.ok(step.run.includes(providerSchemaAddition + providerEvidenceAddition), 'Keep the deprovision provider evidence suite right after the provider schema suite')
         // D21 authorization version protocol (slice Y5a): trigger coverage matrix, barrier and deadlock
-        // cases against real Postgres, whole file, right after the directory integration capabilities suite.
+        // cases against real Postgres, whole file, right after the two deprovision provider suites (#6799).
         const authzVersionAddition = '  tests/integration/authz-version-protocol.db.test.ts \\\n'
         assert.equal(step.run.split(authzVersionAddition).length - 1, 1, 'Authorization version protocol DB suite must run exactly once')
-        assert.ok(step.run.includes(capabilitiesAddition + authzVersionAddition), 'Keep the authorization version protocol suite right after the directory integration capabilities suite')
+        assert.ok(step.run.includes(providerEvidenceAddition + authzVersionAddition), 'Keep the authorization version protocol suite right after the deprovision provider evidence suite')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
         step.run = step.run.replace(privilegeAddition, '')
@@ -153,6 +159,8 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(proofAddition, '')
         step.run = step.run.replace(goldenParityAddition, '')
         step.run = step.run.replace(capabilitiesAddition, '')
+        step.run = step.run.replace(providerSchemaAddition, '')
+        step.run = step.run.replace(providerEvidenceAddition, '')
         step.run = step.run.replace(authzVersionAddition, '')
       }
       if (suite === 'runtime-db' && step.id === lockProtocolStepId) {
@@ -230,6 +238,10 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-sync-membership-local-account-gate.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/authz-version-protocol.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/authz-version-protocol.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-deprovision-effect-provider-schema.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-deprovision-effect-provider-schema.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-adapter-golden-parity.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-adapter-golden-parity.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
@@ -246,6 +258,7 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name)['working-directory'] = '.' },
     doc => { const steps = doc.jobs.unit.steps; const index = steps.findIndex(step => step.name === directoryClientLintStep.name); [steps[index - 1], steps[index]] = [steps[index], steps[index - 1]] },
     doc => { doc.jobs.unit.steps.push(structuredClone(directoryClientLintStep)) },
+    doc => { const step = doc.jobs.unit.steps.find(s => s.name === directoryClientLintStep.name); assert.ok(step.run.includes(' src/directory/adapters/dingtalk-directory-adapter.ts')); step.run = step.run.replace(' src/directory/adapters/dingtalk-directory-adapter.ts', '') },
     doc => { doc.jobs.unit.steps.pop() },
     doc => { doc.jobs.unit.steps.find(step => step.name === 'Run core-backend tests').run += ' -t selected' },
     doc => { doc.jobs['attendance-db'].steps.find(step => step.id === 'attendance-real-db-integration').if = false },
@@ -255,6 +268,7 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
       [closeoutContractsStep, '  scripts/ops/dingtalk-closeout-env-contract.test.mjs \\\n'],
       [canaryExclusionConsistencyStep, 'scripts/ops/dingtalk-lifecycle-canary-exclusion-consistency.test.mjs'],
       [directoryWiringContractsStep, '  scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs \\\n'],
+      [directoryWiringContractsStep, ' \\\n  scripts/ops/directory-deprovision-provider-scope-ci-wiring.test.mjs'],
     ].flatMap(([promoted, file]) => [
       doc => { const steps = doc.jobs.contracts.steps; steps.splice(steps.findIndex(step => step.name === promoted.name), 1) },
       doc => { doc.jobs.contracts.steps.find(step => step.name === promoted.name).run += ' || true' },

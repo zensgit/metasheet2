@@ -18,12 +18,12 @@
  * and the upsert composer carries the prior value forward only on `undefined`.
  */
 
-import type { DingTalkDepartment } from '../integrations/dingtalk/client'
+import type { DirectoryDepartmentRecord } from './directory-adapter'
 
 type QueryFn = <Row>(text: string, params?: unknown[]) => Promise<{ rows: Row[] }>
 
 /** A department carrying its (optional) freshly-fetched manager list. */
-export type EnrichableDepartment = DingTalkDepartment & { managerUserIds?: string[] }
+export type EnrichableDepartment = DirectoryDepartmentRecord & { managerUserIds?: string[] }
 
 /** Normalize a `dept_manager_userid_list` value (DingTalk comma-string OR array) to string[]. */
 export function normalizeDeptManagerList(value: unknown): string[] {
