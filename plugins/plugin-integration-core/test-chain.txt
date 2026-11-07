@@ -151,7 +151,6 @@ node __tests__/source-vendor-presets.test.cjs
 node __tests__/stock-preparation-carry-policy.test.cjs
 node __tests__/stock-preparation-pull-batch.test.cjs
 node __tests__/stock-preparation-pull-batch-store.test.cjs
-node __tests__/stock-preparation-pull-batch-vocabulary-migration.test.cjs
 node __tests__/stock-preparation-pull-batch-portability.test.cjs
 node __tests__/stock-preparation-pull-batch-band.test.cjs
 node __tests__/stock-preparation-project-write-lock-holder-within.test.cjs
@@ -354,3 +353,4 @@ node __tests__/sealed-export-s6a-runtime-config.test.cjs
 node __tests__/sealed-export-s6a-runtime-persist.test.cjs
 node __tests__/sealed-export-s6a-runtime-core.test.cjs
 node __tests__/sealed-export-s6a-product-runtime.test.cjs
+node __tests__/stock-preparation-pull-batch-vocabulary-migration.test.cjs

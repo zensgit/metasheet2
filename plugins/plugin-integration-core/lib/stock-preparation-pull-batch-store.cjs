@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------------------------------
 // 批次标识 (pull batch) — THE LEDGER STORE over migration 105 (batch-identifier design BI-1a §3.3-§3.6, §3.9, §8.2;
 // coordinator rulings C2 / C7 / C8; register R-65). DORMANT: nothing in the plugin requires this file yet (BI-1b
-// wires the lanes, BI-2 the install, BI-7 the settings routes — each behind STOCK_PREP_PULL_BATCH_ENABLED, which
+// wires the lanes, BI-2 the install, BI-7 the settings routes — each behind the pull-batch switch BI-1b adds, which
 // does not exist yet and will default OFF). The only writer and the only reader of
 //   integration_stock_prep_pull_batch_settings    one row per tenant: the tenant DEFAULT of the page settings
 //   integration_stock_prep_pull_batch_sheet       one row per (sheet, project): readiness, install, CAPTURED settings

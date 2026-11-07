@@ -2,7 +2,7 @@
 -- plugin-integration-core · 备料 批次标识 (pull batch; batch-identifier design BI-1a, register R-65) — the LEDGER behind
 -- the two sheet columns 首次批次 (firstPullBatch) and 本次拉取 (pullBatch), and the PAGE SETTINGS of the owner's
 -- 2026-11-07 configuration request. Dormant: no build reads or writes these tables yet (BI-1b wires stamping, BI-2
--- the install, BI-7 the settings routes; every one of them sits behind STOCK_PREP_PULL_BATCH_ENABLED, default OFF).
+-- the install, BI-7 the settings routes; every one of them sits behind the pull-batch switch BI-1b adds, default OFF).
 --
 -- OWNER DECISIONS. 2026-10-27: 批次标识 goes to ALL stock-prep projects. 首次批次 = the first batch in which this
 -- material appeared in the project; 本次拉取 = the batch of the pull that CREATED this row (UPDATE / INACTIVE never

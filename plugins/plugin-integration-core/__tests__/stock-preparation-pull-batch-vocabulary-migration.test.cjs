@@ -96,4 +96,27 @@ test('VM-5 the parser itself is witnessed: a token added to a CHECK in a copy of
   same(entry.values, ['material', 'predecessor_suffix', 'off'])
 })
 
+// Ruling C2: the tokens removed from accepted input are refused fail-closed at the store's boundary BEFORE any
+// statement — never handed to the database, whose CHECK would answer 23514 (a 503 to the caller).
+test('VM-6 the store refuses the removed C2 tokens (rule \'off\', format \'date\', the three fixed-fact keys) before any statement', async () => {
+  const db = kit.createFakePullBatchDb()
+  const s = store.createStockPreparationPullBatchStore({ db })
+  db.seed(kit.T.sheet, kit.sheetRow({ tenantId: 'tenant-syn-vm', sheetId: 'sheet_syn_vm', projectNo: 'P-07' }))
+  const scope = { tenantId: 'tenant-syn-vm', sheetId: 'sheet_syn_vm', projectNo: 'P-07' }
+  const before = db.log.length
+  await assert.rejects(s.allocate({ ...scope, executionRef: 'small:vm_1', lane: 'small_apply', sourceDigest: 'a'.repeat(32), labelsOnSheet: new Set(), voidReuse: 'in_lease', expectedRule: 'off' }),
+    (error) => error.code === pure.PULL_BATCH_ERROR_CODES.STAMP_INVALID && error.details.field === 'expectedRule')
+  for (const patch of [{ firstPullBatchRule: 'off' }, { labelFormat: 'date' }, { formalExport: 'excluded' }, { trashedRowsAreEvidence: false }, { pullBatchMeaning: 'created' }]) {
+    await assert.rejects(s.writeTenantSettings({ tenantId: scope.tenantId, expectedVersion: 0, patch }), (error) => error.status === 400 && error.code === pure.PULL_BATCH_ERROR_CODES.CONFIG_INVALID, JSON.stringify(patch))
+    await assert.rejects(s.setSheetSettings({ ...scope, expectedVersion: 0, patch }), (error) => error.status === 400, JSON.stringify(patch))
+  }
+  assert.equal(db.log.length, before, 'refused before any statement')
+  for (const settings of [{ firstPullBatchRule: 'off', labelFormat: 'ordinal' }, { firstPullBatchRule: 'material', labelFormat: 'date' }]) {
+    const fresh = kit.createFakePullBatchDb()
+    const freshStore = store.createStockPreparationPullBatchStore({ db: fresh })
+    await assert.rejects(fresh.transaction((trx) => freshStore.createSheetRowWithin(trx, { ...scope, historyStatus: 'pending', labelLocale: 'zh-CN', settings })), (error) => error.code === pure.PULL_BATCH_ERROR_CODES.STAMP_INVALID, JSON.stringify(settings))
+    assert.equal(fresh.rows(kit.T.sheet).length, 0)
+  }
+})
+
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-pull-batch-vocabulary-migration.test.cjs', tests)

@@ -221,7 +221,8 @@ test('ST-A10 (M-CFG-2) allocate with a stale expectedRule => 409 CONFLICT settin
   // expectedRule is required and closed (validated before any statement).
   const fresh = setup()
   const logBefore = fresh.db.log.length
-  for (const bad of [undefined, '', 'Material', ' material', 'off', 'position']) {
+  // The removed C2 tokens ('off') are pinned in the vocabulary-migration suite (VM-6), which runs last in the chain.
+  for (const bad of [undefined, '', 'Material', ' material', 'position']) {
     await rejects(alloc(fresh.store, { expectedRule: bad }), PULL_BATCH_ERROR_CODES.STAMP_INVALID, `expectedRule ${JSON.stringify(bad)}`)
   }
   assert.equal(fresh.db.log.length, logBefore)
@@ -551,7 +552,7 @@ test('ST-C1 createSheetRowWithin captures rule / format / locale from the caller
   await rejects(pending.db.transaction((trx) => pending.store.createSheetRowWithin(trx, { ...SCOPE, historyStatus: 'pending', labelLocale: 'zh-CN', settings: PULL_BATCH_BUILT_IN_SETTINGS })), PULL_BATCH_ERROR_CODES.CONFLICT, 'one row per (sheet, project)')
   for (const bad of [
     { historyStatus: 'backfilled' }, { historyStatus: 'installing' }, { labelLocale: 'zh' },
-    { settings: { firstPullBatchRule: 'off', labelFormat: 'ordinal' } }, { settings: { firstPullBatchRule: 'material', labelFormat: 'date' } }, { settings: null },
+    { settings: { firstPullBatchRule: 'position', labelFormat: 'ordinal' } }, { settings: { firstPullBatchRule: 'material', labelFormat: 'ORDINAL' } }, { settings: null },
   ]) {
     const fresh = setup({ status: null })
     await rejects(fresh.db.transaction((trx) => fresh.store.createSheetRowWithin(trx, { ...SCOPE, historyStatus: 'pending', labelLocale: 'zh-CN', settings: PULL_BATCH_BUILT_IN_SETTINGS, ...bad })), PULL_BATCH_ERROR_CODES.STAMP_INVALID, JSON.stringify(bad))
