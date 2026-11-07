@@ -13,7 +13,12 @@ export const EMAIL_SMTP_REQUIRED_ENV = [
   'MULTITABLE_EMAIL_SMTP_FROM',
 ] as const
 
-export type EmailTransportMode = 'mock' | 'smtp' | 'unsupported'
+/**
+ * `mock` (the default when unset) is the development simulation: the channel reports `simulated` and makes
+ * no transport call. `disabled` (`disabled` / `off`) is an explicit opt-out: the channel reports `cancelled`
+ * and makes no transport call. Both are readiness `pass`; only `smtp` ever sends.
+ */
+export type EmailTransportMode = 'mock' | 'disabled' | 'smtp' | 'unsupported'
 export type EmailTransportReadinessStatus = 'pass' | 'blocked'
 
 export interface EmailTransportEnvStatus {
@@ -63,7 +68,8 @@ function isExplicitFalseEnv(value: string): boolean {
 function resolveMode(value: string): EmailTransportMode {
   if (!value) return 'mock'
   const normalized = value.toLowerCase()
-  if (normalized === 'mock' || normalized === 'disabled' || normalized === 'off') return 'mock'
+  if (normalized === 'mock') return 'mock'
+  if (normalized === 'disabled' || normalized === 'off') return 'disabled'
   if (normalized === 'smtp') return 'smtp'
   return 'unsupported'
 }
@@ -135,9 +141,11 @@ export function resolveEmailTransportReadiness(
   const messages: string[] = []
 
   if (mode === 'unsupported') {
-    messages.push(`${EMAIL_TRANSPORT_ENV} must be "mock" or "smtp".`)
+    messages.push(`${EMAIL_TRANSPORT_ENV} must be "mock", "disabled", "off" or "smtp".`)
   } else if (mode === 'mock') {
     messages.push('Email transport is mock; no real email will be sent.')
+  } else if (mode === 'disabled') {
+    messages.push('Email transport is disabled; no email will be sent.')
   } else {
     if (missing.length > 0) {
       messages.push(`SMTP transport is enabled but missing required env: ${missing.join(', ')}.`)

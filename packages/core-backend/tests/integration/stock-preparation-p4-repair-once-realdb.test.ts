@@ -22,6 +22,7 @@ import { defineStockPreparationGenericWriterGovernanceRealDbCases } from './stoc
 import { defineStockPreparationManualRowsRealDbCases } from './stock-preparation-manual-rows-realdb.cases'
 import { defineStockPreparationSheetCensusRealDbCases } from './stock-preparation-sheet-census-realdb.cases'
 import { defineStockPreparationPullBatchSiteProbeRealDbCases } from './stock-preparation-pull-batch-site-probe-realdb.cases'
+import { defineStockPreparationPullBatchBandRealDbCases } from './stock-preparation-pull-batch-band-realdb.cases'
 
 const require = createRequire(import.meta.url)
 const {
@@ -512,3 +513,5 @@ defineStockPreparationManualRowsRealDbCases()
 defineStockPreparationSheetCensusRealDbCases()
 // Pull batch BI-6a (O-BI-9): the read-only site probe pack runs on real PG on synthetic sheets (BI-PROBE-RD-01/02).
 defineStockPreparationPullBatchSiteProbeRealDbCases()
+// 批次标识 BI-5b (R-65): manual rows on a sheet carrying the pull-batch band get 人工补充 in both band cells; the marker cannot be forged or dropped (real PG, BIM-RD-*).
+defineStockPreparationPullBatchBandRealDbCases()
