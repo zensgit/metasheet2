@@ -35,6 +35,7 @@ import {
   updateLocalDepartment,
 } from '../directory/local-directory-org'
 import { setLocalMembershipManager } from '../directory/directory-sync'
+import { getLocalMembershipDepartmentHead, setLocalMembershipDepartmentHead } from '../directory/local-directory-department-head'
 import { jsonError, jsonOk } from '../util/response'
 
 const logger = new Logger('AdminDirectoryLocalRoutes')
@@ -508,6 +509,69 @@ export function adminDirectoryLocalRouter(): Router {
       jsonOk(res, { membership: { id: `${membership.accountId}:${membership.departmentId}`, ...membership } })
     } catch (error) {
       handleLocalDirectoryError(res, error, 'Failed to switch local primary department')
+    }
+  })
+
+  router.get('/memberships/:membershipId/department-head', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    const parsed = parseMembershipId(req.params.membershipId)
+    if (!parsed) {
+      jsonError(res, 400, 'DIRECTORY_LOCAL_INVALID_INPUT', 'membershipId must be accountUUID:departmentUUID')
+      return
+    }
+    try {
+      const membership = await getLocalMembershipDepartmentHead(resolveLocalDirectoryOrgId(req), {
+        directoryAccountId: parsed.accountId, directoryDepartmentId: parsed.departmentId,
+      })
+      if (!membership) {
+        jsonError(res, 404, 'DIRECTORY_LOCAL_NOT_FOUND', 'Local membership not found')
+        return
+      }
+      jsonOk(res, { membership: { id: `${membership.accountId}:${membership.departmentId}`, ...membership } })
+    } catch {
+      logger.warn('Failed to read local department head')
+      jsonError(res, 500, 'DIRECTORY_LOCAL_INTERNAL_ERROR', 'Failed to read local department head')
+    }
+  })
+
+  router.patch('/memberships/:membershipId/department-head', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    if (rejectUnlistedFields(req, res, ['isDepartmentHead'])) return
+    if (typeof req.body?.isDepartmentHead !== 'boolean') {
+      jsonError(res, 400, 'DIRECTORY_LOCAL_INVALID_INPUT', 'isDepartmentHead must be boolean')
+      return
+    }
+    const parsed = parseMembershipId(req.params.membershipId)
+    if (!parsed) {
+      jsonError(res, 400, 'DIRECTORY_LOCAL_INVALID_INPUT', 'membershipId must be accountUUID:departmentUUID')
+      return
+    }
+    const isDepartmentHead = req.body.isDepartmentHead as boolean
+    try {
+      const result = await setLocalMembershipDepartmentHead(resolveLocalDirectoryOrgId(req), {
+        directoryAccountId: parsed.accountId, directoryDepartmentId: parsed.departmentId,
+      }, isDepartmentHead)
+      if (result.outcome === 'not_found') {
+        jsonError(res, 404, 'DIRECTORY_LOCAL_NOT_FOUND', 'Local membership not found')
+        return
+      }
+      if (result.outcome === 'archived') {
+        jsonError(res, 409, 'DIRECTORY_LOCAL_CONFLICT', 'Archived local account or department is read-only')
+        return
+      }
+      await auditLog({
+        actorId: adminUserId, actorType: 'user', action: 'directory.local_membership.set_department_head',
+        resourceType: 'directory-membership', resourceId: req.params.membershipId,
+        meta: { isDepartmentHead },
+      })
+      jsonOk(res, { membership: {
+        id: req.params.membershipId, accountId: parsed.accountId, departmentId: parsed.departmentId, isDepartmentHead,
+      } })
+    } catch {
+      logger.warn('Failed to update local department head')
+      jsonError(res, 500, 'DIRECTORY_LOCAL_INTERNAL_ERROR', 'Failed to update local department head')
     }
   })
 
