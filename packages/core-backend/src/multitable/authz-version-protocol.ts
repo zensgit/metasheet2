@@ -33,6 +33,17 @@
  *     evidence-API restore, the controlled handover), `user_orgs … FOR UPDATE`, the
  *     `user_namespace_admissions` upsert, the `user_roles` / `user_permissions` / member-group DML —
  *     and AFTER locks outside the holder's set (`roles`, the namespace-admission advisory).
+ *   - field rows (FIELD-ROW WRITER RULE, the #6792 follow-up): a writer that locks a `meta_fields`
+ *     row — an explicit `FOR UPDATE` / `FOR NO KEY UPDATE` read, a sibling `"order"` shift, or the
+ *     UPDATE itself, whose BEFORE ROW trigger locks the row before it runs — and whose write can trip
+ *     the `field-visibility` trigger takes the sheet version row FIRST (explicit bump, after its
+ *     advisory fence), then the field row(s): fence → sheet version row → field rows → records → DML.
+ *     "Can trip" is decided BEFORE the first field-row lock with the trigger's own test
+ *     ({@link fieldVisibilityTriggerWouldFire}, PATCH /fields: the unlocked read it validated against vs
+ *     the property it will write), or unconditionally where that test would itself need the locked row
+ *     (a config revert that writes `property`, the plugin property port's merge patch, an `ensureFields`
+ *     overwrite). Writes that cannot trip it (a PATCH of order, name, type or options only, a name /
+ *     order revert) never take the version row, so a shared column drag never queues on it.
  *   A writer that skips the explicit bump (raw SQL, a data migration, an FK cascade, a plugin raw
  *   query) is still covered by the triggers but acquires the version row LAST: against an in-flight
  *   holder, or against another raw writer that touches the same rows in another order, PostgreSQL
@@ -267,6 +278,32 @@ export async function bumpSubjectAuthorizationVersions(
   if (ids.length === 0) return ids
   await queryFnOf(queryable)(SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL, [ids])
   return ids
+}
+
+/**
+ * The two flags the `meta_fields` trigger watches (migration zzzz20261106110500, `TG_ARGV[1] = 'field-visibility'`):
+ * `property.hidden = true` and `property.visible = false`.
+ */
+function visibilityFlagsOf(property: unknown): { hidden: boolean; visibleFalse: boolean } {
+  // `property -> 'hidden'` is NULL for a non-object jsonb value (array, string, number, null): neither flag.
+  if (!property || typeof property !== 'object' || Array.isArray(property)) return { hidden: false, visibleFalse: false }
+  const record = property as Record<string, unknown>
+  return { hidden: record.hidden === true, visibleFalse: record.visible === false }
+}
+
+/**
+ * The `meta_fields` trigger's own test, in TypeScript: would writing `next` over the stored `stored` property bump
+ * the sheet version row? Exactly the SQL of the trigger function (`COALESCE((old -> 'property' -> 'hidden') =
+ * 'true'::jsonb, FALSE) IS DISTINCT FROM …` for `hidden`, the same with `'false'` for `visible`), on the same two
+ * values — the raw stored jsonb as node-pg parses it and the object about to be written. A field writer evaluates it
+ * BEFORE its first field-row lock and, when true, bumps the sheet version row first (the field-row writer rule above),
+ * so the trigger never takes that row after the field-row lock. Note it is not the visibility DERIVATION: adding
+ * `visible: false` to an already `hidden: true` field changes no derivation and still fires the trigger.
+ */
+export function fieldVisibilityTriggerWouldFire(stored: unknown, next: unknown): boolean {
+  const before = visibilityFlagsOf(stored)
+  const after = visibilityFlagsOf(next)
+  return before.hidden !== after.hidden || before.visibleFalse !== after.visibleFalse
 }
 
 /** Canonical combined bump: sheets ascending first, then subjects ascending. */
