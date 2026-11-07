@@ -230,6 +230,9 @@
         :annual-self-balance-summary="annualSelfBalanceSummary"
         :balance-leave-type="selfBalanceLeaveType"
         :balance-trace-href="selfBalanceTraceHref"
+        :fixed-schedule-groups="selfRulesData?.assignment?.attendanceGroups ?? []"
+        :fixed-schedule-org-id="selfRulesData?.orgId"
+        :fixed-schedule-context-key="selfRulesData?.resolvedForDate ?? ''"
         :self-rules-loading="selfRulesLoading"
         :self-rules-error="selfRulesError"
         :self-rules-has-data="selfRulesHasData"
@@ -396,6 +399,16 @@
         calendar. Quick actions and approval-center deep links open it.
       -->
       <section v-if="showReports" class="attendance__reports-brief" data-reports-layout="table-first">
+        <AttendanceFixedScheduleProjection
+          surface="report"
+          :groups="attendanceGroups"
+          :expected-org-id="normalizedOrgId()"
+          :context-key="normalizedOrgId() ?? ''"
+          :catalog-loading="attendanceGroupLoading"
+          :auto-load-groups="true"
+          :enabled="!attendanceSessionStale"
+          @load-groups="loadAttendanceGroups"
+        />
         <div
           v-if="reportsUnavailable"
           class="attendance__empty"
@@ -1237,6 +1250,13 @@
             {{ selfTrace.state.value === 'loading' ? tr('Loading...', '加载中...') : tr('Load trace', '查询轨迹') }}
           </button>
         </div>
+        <AttendanceFixedScheduleProjection
+          surface="self-trace"
+          :groups="selfRulesData?.assignment?.attendanceGroups ?? []"
+          :expected-org-id="selfRulesData?.orgId"
+          :context-key="selfTraceOrgId"
+          :enabled="!!selfRulesData && !selfRulesLoading && !attendanceSessionStale && (!selfTraceOrgId.trim() || selfTraceOrgId.trim() === selfRulesData.orgId)"
+        />
         <AttendanceDecisionTrace
           :tr="tr"
           audience="self"
@@ -1976,6 +1996,13 @@
                   {{ adminTrace.state.value === 'loading' ? tr('Loading...', '加载中...') : tr('Load trace', '查询轨迹') }}
                 </button>
               </div>
+              <AttendanceFixedScheduleProjection
+                surface="admin-trace"
+                :groups="attendanceGroups"
+                :expected-org-id="normalizedOrgId()"
+                :context-key="normalizedOrgId() ?? ''"
+                :enabled="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.decisionTrace) && !attendanceSessionStale"
+              />
               <AttendanceDecisionTrace
                 :tr="tr"
                 audience="admin"
@@ -5960,6 +5987,15 @@
                         />
                       </label>
                     </div>
+                    <AttendanceFixedScheduleProjection
+                      surface="group"
+                      :group-id="attendanceGroupEditingId"
+                      :expected-org-id="normalizedOrgId()"
+                      :context-key="normalizedOrgId() ?? ''"
+                      :refresh-key="attendanceGroupFixedSchedule.operation.value"
+                      :editor-revision="attendanceGroupFixedSchedule.loadState.value === 'ready' ? (attendanceGroupFixedSchedule.editor.value?.desired?.revision ?? 0) : null"
+                      :enabled="attendancePluginActive && !attendanceSessionStale"
+                    />
                     <AttendanceGroupFixedScheduleConfig
                       :editor="attendanceGroupFixedSchedule.editor.value"
                       :load-state="attendanceGroupFixedSchedule.loadState.value"
@@ -10544,6 +10580,7 @@ import {
 import { resolveAttendanceReadinessOrgId, useAttendanceApprovalDirectoryReadiness } from './attendance/useAttendanceApprovalDirectoryReadiness'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import AttendanceEmployeeWorkspace from './attendance/AttendanceEmployeeWorkspace.vue'
+import AttendanceFixedScheduleProjection from './attendance/AttendanceFixedScheduleProjection.vue'
 import AttendanceEmployeeLeaveRequestCard from './attendance/AttendanceEmployeeLeaveRequestCard.vue'
 import AttendanceEmployeeMakeupRequestCard from './attendance/AttendanceEmployeeMakeupRequestCard.vue'
 import AttendanceEmployeeOvertimeRequestCard from './attendance/AttendanceEmployeeOvertimeRequestCard.vue'

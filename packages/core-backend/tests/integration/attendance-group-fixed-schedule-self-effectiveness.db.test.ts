@@ -194,6 +194,19 @@ describeDb('attendance group fixed-schedule self effectiveness (real DB, #4709 F
     expect(queryLog).toHaveLength(1)
   })
 
+  it('EXCL-subject: another legitimate member cannot witness the authenticated non-member subject', async () => {
+    await liveMember('legitimate-witness')
+    await user('authenticated-non-member')
+    await orgMembership('authenticated-non-member', orgId)
+    await expect(readSelf('legitimate-witness')).resolves.toMatchObject({
+      state: 'not_configured', applicability: 'not_configured', desired: null,
+    })
+    queryLog = []
+    await expect(service.getSelfEffectiveness(db(), { orgId, groupId, userId: 'authenticated-non-member' }),
+      'FSER4_AUTHENTICATED_SUBJECT_NOT_WITNESS').rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+    expect(queryLog).toHaveLength(1)
+  })
+
   it('AUTHZ-3: inactive subject (users.is_active=false) is the same 404, one query', async () => {
     await liveMember('member-a', { isActive: false })
     queryLog = []
