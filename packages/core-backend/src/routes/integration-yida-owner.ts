@@ -15,7 +15,8 @@ import {
  * Preview values belong only to this authorized no-store response, not logs. */
 export type YidaOwnerHttpPort = Pick<ReturnType<typeof createYidaOwnerRuntime>,
   'prepareDraft' | 'preview' | 'approve' | 'revoke' | 'observe' | 'submit' | 'sendEnabled'>
-  & Partial<Pick<ReturnType<typeof createYidaOwnerRuntime>, 'multiTargetEnabled' | 'proveDraftOwner'>>
+  & Partial<Pick<ReturnType<typeof createYidaOwnerRuntime>, 'multiTargetEnabled' | 'proveDraftOwner'
+    | 'issueConfirmWritebackEnabled' | 'issueConfirmWriteback'>>
 export type YidaInitializationHttpPort = Readonly<{
   status(actor: YidaOwnerActor, options: { signal: AbortSignal }): Promise<unknown>
   initialize(actor: YidaOwnerActor, input: YidaInitializationInput, options: { signal: AbortSignal }): Promise<unknown>
@@ -264,6 +265,36 @@ function initialization(value: unknown, sendEnabled: boolean, connectionTestEnab
     // Y2: same absent-while-OFF rule, so an older bundle keeps its closed key set while the switch is off.
     ...(multiTargetEnabled ? { multiTargetEnabled: true as const } : {}) }
 }
+// YiDa 发料确认日期回写 recovery reply (slice Y9): ledger ids, closed kinds and fixed codes, the written day and zone.
+const writebackKinds = ['skip', 'retryable', 'outcome']
+function writebackResult(value: unknown) {
+  const row = record(value, ['ledgerId', 'kind'], ['reason', 'code', 'outcome', 'recorded', 'date', 'timeZone'])
+  if (typeof row.kind !== 'string' || !writebackKinds.includes(row.kind)) fail()
+  const ledgerId = literalId(row.ledgerId)
+  if (row.kind === 'skip') {
+    const skip = record(value, ['ledgerId', 'kind', 'reason'])
+    if (typeof skip.reason !== 'string' || !/^[a-z_]{1,64}$/u.test(skip.reason)) fail()
+    return { ledgerId, kind: 'skip', reason: skip.reason }
+  }
+  if (row.kind === 'retryable') {
+    const retry = record(value, ['ledgerId', 'kind', 'code'])
+    if (typeof retry.code !== 'string' || !/^[A-Z][A-Z0-9_]{0,95}$/u.test(retry.code)) fail()
+    return { ledgerId, kind: 'retryable', code: retry.code }
+  }
+  const dated = Object.hasOwn(row, 'date')
+  const done = record(value, dated ? ['ledgerId', 'kind', 'outcome', 'recorded', 'date', 'timeZone'] : ['ledgerId', 'kind', 'outcome', 'recorded'])
+  if (typeof done.outcome !== 'string' || !/^[a-z_]{1,64}$/u.test(done.outcome) || typeof done.recorded !== 'boolean'
+    || (dated && (typeof done.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(done.date) || typeof done.timeZone !== 'string'
+      || !done.timeZone || done.timeZone.length > 64))) fail()
+  return { ledgerId, kind: 'outcome', outcome: done.outcome, recorded: done.recorded,
+    ...(dated ? { date: done.date, timeZone: done.timeZone } : {}) }
+}
+function writebackRun(value: unknown) {
+  const row = record(value, ['enabled', 'results'], ['stopped'])
+  if (typeof row.enabled !== 'boolean' || !Array.isArray(row.results) || row.results.length > 100
+    || (Object.hasOwn(row, 'stopped') && row.stopped !== 'SWITCH_OFF')) fail()
+  return { enabled: row.enabled, results: row.results.map(writebackResult), ...(Object.hasOwn(row, 'stopped') ? { stopped: 'SWITCH_OFF' } : {}) }
+}
 function dto(project: () => unknown) { try { return project() } catch { fail('YIDA_OWNER_HTTP_UNAVAILABLE') } }
 function sendError(res: Response, error: unknown) {
   const code = ownErrors.get(error as object) ?? yidaOwnerRuntimeErrorCode(error) ?? yidaSendApprovalErrorCode(error)
@@ -428,6 +459,29 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
     if (!initializationPort?.registerTarget) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
     const result = await initializationPort.registerTarget(owner, input, { signal })
     return dto(() => targetsView(result))
+  })))
+  // YiDa 发料确认日期回写 owner recovery entry (design baseline v2.3 §7.3, D5 b / D9; slice Y9). While the write-back
+  // switch is OFF (exact 'true' only, read by the plugin core's own predicate through the runtime) the path falls
+  // through to the same generic 404 as any unknown path. ON: a closed body — optional `ledgerIds` (1..100 of this
+  // owner's ledger rows) and optional `limit` (1..100) — and one bounded, idempotent run; the runtime proves the
+  // live owner first and every row is re-checked under its sheet lease. Never the send switch, never a send.
+  const issueConfirmWritebackEnabled = () => { try { return port.issueConfirmWritebackEnabled?.() === true } catch { return false } }
+  const whenIssueConfirmWriteback = (handler: RequestHandler): RequestHandler => (req, res, next) => {
+    if (!issueConfirmWritebackEnabled()) { next(); return }
+    return handler(req, res, next)
+  }
+  router.post('/issue-confirm-writeback', whenIssueConfirmWriteback(route(200, async (request, owner) => {
+      const input = record(request.body, [], ['ledgerIds', 'limit'])
+      let ledgerIds: string[] | undefined
+      if (Object.hasOwn(input, 'ledgerIds')) {
+        if (!Array.isArray(input.ledgerIds) || types.isProxy(input.ledgerIds) || input.ledgerIds.length < 1 || input.ledgerIds.length > 100) fail()
+        ledgerIds = input.ledgerIds.map(value => literalId(value))
+        if (new Set(ledgerIds).size !== ledgerIds.length) fail()
+      }
+      const limit = Object.hasOwn(input, 'limit') ? integer(input.limit, 1, 100) : undefined
+      if (!port.issueConfirmWriteback) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
+      const result = await port.issueConfirmWriteback(owner, { ...(ledgerIds ? { ledgerIds } : {}), ...(limit === undefined ? {} : { limit }) })
+      return dto(() => writebackRun(result))
   })))
   // Owner-run token-only connection test before initialization. The runtime authorizes; the route
   // only closes the body and the DTO. No send authority, no form IO, nothing persisted.

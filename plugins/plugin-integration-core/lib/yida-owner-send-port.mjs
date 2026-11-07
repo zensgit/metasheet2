@@ -76,7 +76,7 @@ function metadata(value, grantId, withReuse = false) {
   return value
 }
 function build(options) {
-  const config = record(options, ['db', 'context', 'authority', 'fetch', 'readEnablement', 'timeoutMs'],
+  const config = record(options, ['db', 'context', 'authority', 'fetch', 'readEnablement', 'timeoutMs', 'issueConfirmWriteback'],
     ['db', 'context', 'authority', 'fetch'])
   const scope = record(config.context, CONTEXT)
   for (const key of CONTEXT) if (key !== 'workspaceId') id(scope[key])
@@ -87,6 +87,21 @@ function build(options) {
   const readEnablement = Object.hasOwn(config, 'readEnablement') ? config.readEnablement : () => 'false'
   const timeoutMs = Object.hasOwn(config, 'timeoutMs') ? config.timeoutMs : 10000
   if (typeof readEnablement !== 'function' || !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 60000) fail('INPUT')
+  // YiDa 发料确认日期回写 (design baseline v2.3 §7.3, decision D5 a; slice Y9): an optional, already-bound write-back
+  // (the runtime factory binds it to this port's owner scope and the host's live re-check). Absent = the port is
+  // the original. It is NEVER consulted before or during the send: see afterAcknowledged below.
+  const writeback = Object.hasOwn(config, 'issueConfirmWriteback') ? config.issueConfirmWriteback : null
+  if (writeback !== null && (!writeback || typeof writeback !== 'object' || types.isProxy(writeback)
+    || typeof writeback.run !== 'function')) fail('INPUT')
+  // BEST EFFORT, AFTER SETTLE. Called only once the runner has returned, every one of its transactions has committed
+  // and the durable history agrees (the checks above the return); the write-back opens its own plugin-db reads and
+  // its own sheet lease, never this send's transaction, and names only this ledger row. Whatever it does — written,
+  // skipped, retryable, a throw, a rejection — the send's answer is unchanged: a missed write-back is filled later by
+  // the owner recovery entry (POST /issue-confirm-writeback), whose date is the acknowledgement audit's day anyway.
+  async function afterAcknowledged(ledgerId) {
+    if (writeback === null) return
+    try { await writeback.run({ ledgerIds: [ledgerId] }) } catch { /* best effort; recovery is the owner entry */ }
+  }
   function enabled() {
     let value
     try { value = readEnablement() } catch { fail('DISABLED') }
@@ -146,8 +161,12 @@ function build(options) {
       if (![...STATES, 'state_unconfirmed'].includes(execution.status) || typeof execution.durable !== 'boolean'
         || typeof execution.externalWriteAttempted !== 'boolean' || execution.businessVerified !== false) fail('UNAVAILABLE')
       if (execution.durable && (history.delivery?.id !== approval.ledgerId || history.delivery?.status !== execution.status)) fail('UNAVAILABLE')
-      return Object.freeze({ ...history, reused: false, status: execution.status,
+      const settled = Object.freeze({ ...history, reused: false, status: execution.status,
         externalWriteAttempted: execution.externalWriteAttempted, businessVerified: false, durable: execution.durable })
+      // Only a durable acknowledged CREATE of THIS grant's ledger row (never prepared / dispatching / not_sent /
+      // outcome_unknown / state_unconfirmed, never a reused submit — that branch returned above without a runner).
+      if (execution.status === 'acknowledged' && execution.durable === true) await afterAcknowledged(approval.ledgerId)
+      return settled
     } catch (error) { closed(error) }
     finally {
       // Failed construction/late cancellation must not leave a reusable private

@@ -1,12 +1,13 @@
 'use strict'
 
 // ---------------------------------------------------------------------------------------------------
-// 发料确认日期回写 (issue-confirm date write-back) — CORE ONLY, NOT WIRED.
+// 发料确认日期回写 (issue-confirm date write-back) — the CORE: decision, executor, trace store, switches.
 //
 // Design baseline v2.3 §7.3 and the frozen ⑦.4 plan §2.2 / §3 (R-71 ④ Q5). Slice Y9a: the decision, the
-// executor with injected dependencies, the trace store and the two switches. Nothing in the send port,
-// the runtime factory, the plugin index, the host route or the host runtime calls this module yet; that
-// wiring (and its real-PG cases) is slice Y9.
+// executor with injected dependencies, the trace store and the two switches. Slice Y9 wires it: the real
+// ports are lib/yida-issue-confirm-writeback-ports.cjs (assembled in index.cjs), the runtime factory hands
+// the capability to the host runtime, the send port calls it best-effort after an acknowledged CREATE, and
+// the owner recovery entry is POST /api/integration/yida-owner/issue-confirm-writeback.
 //
 // TWO INDEPENDENT STATE MACHINES (§7.3).
 //   * The delivery ledger (prepared → dispatching → acknowledged / outcome_unknown; prepared → not_sent)
@@ -321,6 +322,13 @@ function decideIssueConfirmWriteback(facts) {
   const record = records[0]
   if (!isPlainObject(record) || !opaqueId(record.id) || !isPlainObject(record.data)) {
     fail('YIDA_ISSUE_CONFIRM_RECORDS_INVALID', 'records read returned a malformed record')
+  }
+  // ONE VERSION-CONDITIONAL PATCH (Y9a review r2 MEDIUM, slice Y9): the host's patchRecord treats an absent
+  // expectedVersion as an UNCONDITIONAL write (packages/core-backend/src/multitable/records.ts patchRecord), so a
+  // records row without a positive safe-integer `version` would turn the only write into a blind overwrite of
+  // whatever a human typed after this read. Refused here, before the cell is even looked at: retryable, no trace.
+  if (!Number.isSafeInteger(record.version) || record.version < 1) {
+    fail('YIDA_ISSUE_CONFIRM_RECORDS_INVALID', 'records read returned a record without a version')
   }
   if (record.data[ISSUE_CONFIRM_PROJECT_FIELD_ID] !== key.projectNo) return { kind: 'record', outcome: 'project_mismatch', sheetId }
   const cell = decideIssueConfirmCell(record.data[ISSUE_CONFIRM_DATE_FIELD_ID], date)

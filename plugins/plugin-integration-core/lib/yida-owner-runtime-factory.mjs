@@ -67,9 +67,36 @@ function context(value) {
 
 export function createYidaOwnerRuntimeBinding(options) {
   try {
-    const parsed = record(options, ['db', 'security'])
+    // YiDa 发料确认日期回写 (slice Y9): the plugin MAY hand one more frozen capability (index.cjs builds it from its own
+    // db, project registry, sheet write lock and multitable records; lib/yida-issue-confirm-writeback-ports.mjs).
+    // Absent, the binding keeps its original two members exactly.
+    const withWriteback = Boolean(options) && typeof options === 'object' && !types.isProxy(options)
+      && Object.hasOwn(options, 'issueConfirmWriteback')
+    const parsed = record(options, withWriteback ? ['db', 'security', 'issueConfirmWriteback'] : ['db', 'security'])
     const db = capability(parsed.db, ['transaction', 'selectOne'])
     const security = capability(parsed.security, ['encrypt', 'decrypt'])
+    const writeback = withWriteback ? capability(parsed.issueConfirmWriteback, ['enabled', 'create']) : null
+    // The host's live re-check (owner live integration admin + role-granted stock-prep code + sheet read), supplied per
+    // call by the host runtime and never by a request. The executor calls it under the sheet write lease.
+    function boundWriteback(scope, recheck) {
+      const check = callable(recheck)
+      const created = capability(writeback.create(Object.freeze({
+        context: Object.freeze({ tenantId: scope.tenantId, ownerId: scope.ownerId }),
+        recheck: (input) => Reflect.apply(check, undefined, [input]),
+      })), ['run'])
+      return Object.freeze({ run: (input) => created.run(input) })
+    }
+    function createIssueConfirmWriteback(input) {
+      try {
+        const config = record(input, ['context', 'recheck'])
+        return boundWriteback(context(config.context), config.recheck)
+      } catch (error) { closed(error) }
+    }
+    // Display/shape bit for the host route (generic 404 while OFF): the core's own exact-literal predicate. Never
+    // authority: every run reads the same switch again before any dependency is touched.
+    function issueConfirmWritebackEnabled() {
+      try { return writeback.enabled() === true } catch { return false }
+    }
     function createPrimitives(input) {
       try {
         const scope = context(input)
@@ -80,15 +107,26 @@ export function createYidaOwnerRuntimeBinding(options) {
     }
     function createSendPort(input) {
       try {
-        const config = record(input, SEND_OPTIONS)
+        // Y9: the host may add its live re-check, which arms the best-effort post-ACK write-back hook of this port.
+        const withRecheck = writeback !== null && Boolean(input) && typeof input === 'object' && !types.isProxy(input)
+          && Object.hasOwn(input, 'issueConfirmRecheck')
+        const config = record(input, withRecheck ? [...SEND_OPTIONS, 'issueConfirmRecheck'] : SEND_OPTIONS)
         const scope = context(config.context)
         const authority = capability(config.authority, ['admitForExecution', 'takeExecution', 'observe'])
         const fetch = callable(config.fetch)
         const readEnablement = callable(config.readEnablement)
         if (!Number.isInteger(config.timeoutMs) || config.timeoutMs < 10 || config.timeoutMs > 60000) fail()
-        return createYidaOwnerSendPort({ db, context: scope, authority, fetch, readEnablement, timeoutMs: config.timeoutMs })
+        // Best effort end to end: a write-back that cannot even be bound leaves the send port exactly as before (no
+        // hook); the owner recovery entry fills the date later. It never refuses or alters a send.
+        let issueConfirmWriteback = null
+        if (withRecheck) {
+          try { issueConfirmWriteback = boundWriteback(scope, config.issueConfirmRecheck) } catch { issueConfirmWriteback = null }
+        }
+        return createYidaOwnerSendPort({ db, context: scope, authority, fetch, readEnablement, timeoutMs: config.timeoutMs,
+          ...(issueConfirmWriteback ? { issueConfirmWriteback } : {}) })
       } catch (error) { closed(error) }
     }
+    if (writeback) return Object.freeze({ createPrimitives, createSendPort, createIssueConfirmWriteback, issueConfirmWritebackEnabled })
     return Object.freeze({ createPrimitives, createSendPort })
   } catch (error) { closed(error) }
 }
