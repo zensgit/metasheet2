@@ -1061,7 +1061,7 @@ jobs:
       - name: Run DingTalk directory client lint
         if: matrix.node-version == '20.x'
         working-directory: packages/core-backend
-        run: pnpm exec eslint --no-cache src/integrations/dingtalk/client.ts src/integrations/dingtalk/directory-response-ids.ts src/directory/directory-sync.ts src/directory/directory-department-cycle.ts
+        run: pnpm exec eslint --no-cache src/integrations/dingtalk/client.ts src/integrations/dingtalk/directory-response-ids.ts src/directory/directory-sync.ts src/directory/directory-department-cycle.ts src/directory/directory-adapter.ts src/directory/directory-adapter-registry.ts src/directory/adapters/index.ts src/directory/adapters/dingtalk-directory-adapter.ts src/directory/directory-user-pagination.ts src/directory/department-manager-enrichment.ts
 
       - name: Run type checking
         if: matrix.node-version == '20.x'
@@ -2392,6 +2392,7 @@ jobs:
             tests/integration/multitable-action-applied-ledger-realdb.test.ts \
             tests/integration/multitable-automation-execution-ledger-realdb.test.ts \
             tests/integration/multitable-automation-outbound-intent-realdb.test.ts \
+            tests/integration/notification-delivery-result.db.test.ts \
             tests/integration/multitable-fwb-write-action-realdb.test.ts \
             tests/integration/multitable-fwb-activation-realdb.test.ts \
             tests/integration/multitable-fwb-update-activation-realdb.test.ts \
@@ -2658,6 +2659,8 @@ jobs:
             tests/integration/directory-unbind-intent-persistence.db.test.ts \
             tests/integration/directory-sync-membership-local-account-gate.db.test.ts \
             tests/integration/security-action-proof.db.test.ts \
+            tests/integration/directory-adapter-golden-parity.db.test.ts \
+            tests/integration/directory-integration-capabilities.db.test.ts \
             tests/integration/directory-source-freeze-lock-correctness.db.test.ts \
             tests/integration/invite-accept-concurrency-rollback.db.test.ts \
             tests/integration/directory-account-external-key-collision-mechanism.db.test.ts \

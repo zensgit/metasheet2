@@ -2664,9 +2664,23 @@ export interface Notification {
   scheduledAt?: Date
 }
 
+/**
+ * Delivery result contract. The literals are distinct outcomes and must not be conflated by consumers:
+ *   - `sent`       — the transport / provider accepted EVERY recipient the channel addressed (at least one).
+ *                    It is provider acceptance, NOT proof of delivery or of being read.
+ *   - `simulated`  — a development simulation handled the message; NO transport call was made. Never a
+ *                    business success.
+ *   - `cancelled`  — no attempt was made: no recipient of the channel's type, the transport is disabled, or
+ *                    every recipient was filtered by preference. `metadata.reason` names which.
+ *   - `failed`     — configuration failure, transport error, or a channel with no sender configured.
+ *                    `failedReason` is redacted text; `metadata.acceptedCount` (when present) counts the
+ *                    recipients accepted before the failure.
+ *   - `pending` / `scheduled` — deferred; the outcome is not known yet.
+ * A consumer that needs "did a real send happen" must match `sent` positively, never "not failed".
+ */
 export interface NotificationResult {
   id: string
-  status: 'sent' | 'failed' | 'pending' | 'scheduled' | 'cancelled'
+  status: 'sent' | 'simulated' | 'failed' | 'pending' | 'scheduled' | 'cancelled'
   sentAt?: Date
   failedReason?: string
   metadata?: Record<string, unknown>

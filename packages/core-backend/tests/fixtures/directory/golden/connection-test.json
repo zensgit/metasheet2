@@ -1,0 +1,104 @@
+{
+  "_meta": {
+    "allowlistVersion": 1,
+    "baseMainSha": "7363f2d570707c075e6a5e22687613bf4d2eba4a",
+    "rule": "A change that only adds a key updates this allowlist and the goldens in the same change; any other difference is a behavior change."
+  },
+  "calls": [
+    {
+      "args": [
+        {
+          "appKey": "<appKey>",
+          "appSecret": "<secret>"
+        }
+      ],
+      "fn": "fetchDingTalkAppAccessToken"
+    },
+    {
+      "args": [
+        "<token>",
+        "1",
+        {}
+      ],
+      "fn": "listDingTalkDepartments"
+    },
+    {
+      "args": [
+        "<token>",
+        "dA",
+        0,
+        5,
+        {}
+      ],
+      "fn": "listDingTalkDepartmentUsers"
+    },
+    {
+      "args": [
+        "<token>",
+        "1",
+        0,
+        50,
+        {}
+      ],
+      "fn": "listDingTalkDepartmentUsers"
+    },
+    {
+      "args": [
+        "<token>",
+        "1",
+        0,
+        50,
+        {
+          "containAccessLimit": true
+        }
+      ],
+      "fn": "listDingTalkDepartmentUsers"
+    }
+  ],
+  "result": {
+    "appKey": "a0g-appkey-d",
+    "corpId": "a0g-corp-d",
+    "departmentSampleCount": 3,
+    "diagnostics": {
+      "rootDepartmentChildCount": 3,
+      "rootDepartmentDirectUserCount": 0,
+      "rootDepartmentDirectUserCountWithAccessLimit": 0,
+      "rootDepartmentDirectUserHasMore": false,
+      "rootDepartmentDirectUserHasMoreWithAccessLimit": false,
+      "sampledRootDepartmentUsers": [],
+      "sampledRootDepartmentUsersWithAccessLimit": []
+    },
+    "rootDepartmentId": "1",
+    "sampledDepartments": [
+      {
+        "id": "dA",
+        "name": "Dept A"
+      },
+      {
+        "id": "dB",
+        "name": "Dept B"
+      },
+      {
+        "id": "dC",
+        "name": "Dept C"
+      }
+    ],
+    "sampledUsers": [
+      {
+        "name": "User 1",
+        "userId": "a0g-u1"
+      },
+      {
+        "name": "User 2",
+        "userId": "a0g-u2"
+      }
+    ],
+    "summary": {
+      "code": "healthy",
+      "nextAction": "通讯录范围正常，可执行目录同步。",
+      "title": "通讯录连通正常"
+    },
+    "userSampleCount": 2,
+    "warnings": []
+  }
+}

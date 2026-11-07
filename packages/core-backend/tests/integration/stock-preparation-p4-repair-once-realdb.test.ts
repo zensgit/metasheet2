@@ -22,6 +22,7 @@ import { defineStockPreparationGenericWriterGovernanceRealDbCases } from './stoc
 import { defineStockPreparationManualRowsRealDbCases } from './stock-preparation-manual-rows-realdb.cases'
 import { defineStockPreparationSheetCensusRealDbCases } from './stock-preparation-sheet-census-realdb.cases'
 import { defineStockPreparationPullBatchRealDbCases } from './stock-preparation-pull-batch-realdb.cases'
+import { defineStockPreparationPullBatchBandRealDbCases } from './stock-preparation-pull-batch-band-realdb.cases'
 
 const require = createRequire(import.meta.url)
 const {
@@ -513,3 +514,5 @@ defineStockPreparationSheetCensusRealDbCases()
 // 批次标识 BI-1a (register R-65): migration 105 and the pull-batch ledger store on real PG — CHECK vocabulary, allocation
 // races, the zombie holder after a takeover, the settings lock and its C7 release (BI-R*).
 defineStockPreparationPullBatchRealDbCases()
+// 批次标识 BI-5b (R-65): manual rows on a sheet carrying the pull-batch band get 人工补充 in both band cells; the marker cannot be forged or dropped (real PG, BIM-RD-*).
+defineStockPreparationPullBatchBandRealDbCases()
