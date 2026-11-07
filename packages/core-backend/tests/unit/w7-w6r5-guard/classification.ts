@@ -215,6 +215,7 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'plugins/plugin-attendance/lib/attendance-record-read-identity.cjs',
   'plugins/plugin-attendance/lib/attendance-report-managed-content-drift.cjs',
   'plugins/plugin-attendance/lib/attendance-report-cleaning-proposal.cjs',
+  'plugins/plugin-attendance/lib/attendance-segment-window-selection.cjs',
   'plugins/plugin-attendance/lib/attendance-shift-service.cjs',
   'plugins/plugin-attendance/lib/attendance-work-date-adapters.cjs',
   'plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs',
