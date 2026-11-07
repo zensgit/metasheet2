@@ -14,6 +14,7 @@ import {
   type RestoreEffectView,
 } from './deprovision-restore'
 import { lockUsersForAccessGraphWrite } from './access-graph-mutex'
+import { effectGrantProvider } from './login-grant-registry'
 
 export function readDeprovisionRuntimeFlags() {
   const enabled = ['true', '1', 'yes'].includes(
@@ -194,18 +195,25 @@ export async function listDeprovisionEvents(options: {
 }
 
 export async function listDeprovisionEffects(eventId: string) {
+  // `provider` is read through to_jsonb so a ledger that predates the column yields NULL
+  // instead of an error; `login_grant_provider` is the resolved provider of a grant effect.
   const result = await query(
-    `SELECT id, event_id, local_user_id, org_id, effect_type,
-            before_active, after_active, grant_row_created,
-            access_generation_at_apply,
-            status, reversed_at, reversed_by, compensation_note,
-            created_at, updated_at
-       FROM directory_deprovision_effects
-      WHERE event_id = $1
-      ORDER BY created_at ASC`,
+    `SELECT effect.id, effect.event_id, effect.local_user_id, effect.org_id, effect.effect_type,
+            effect.before_active, effect.after_active, effect.grant_row_created,
+            effect.access_generation_at_apply,
+            effect.status, effect.reversed_at, effect.reversed_by, effect.compensation_note,
+            effect.created_at, effect.updated_at,
+            (to_jsonb(effect) ->> 'provider') AS provider
+       FROM directory_deprovision_effects effect
+      WHERE effect.event_id = $1
+      ORDER BY effect.created_at ASC`,
     [eventId],
   )
-  return result.rows
+  return result.rows.map((row) => ({
+    ...row,
+    login_grant_provider:
+      row.effect_type === 'grant_changed' ? effectGrantProvider(row) : null,
+  }))
 }
 
 type RestoreEventRow = {
@@ -225,6 +233,7 @@ type RestoreEffectRow = {
   grant_row_created: boolean
   id: string
   org_id: string | null
+  provider: string | null
   status: string
 }
 
@@ -248,6 +257,7 @@ type CompensationEffectRow = {
   effect_type: string
   grant_row_created: boolean
   id: string
+  provider: string | null
   status: string
 }
 
@@ -326,10 +336,14 @@ export async function compensateSupersededDenyGrant(options: {
     }
 
     const effectsResult = await client.query(
-      `SELECT id::text AS id, effect_type, grant_row_created, status
-         FROM directory_deprovision_effects
-        WHERE event_id = $1::uuid
-        ORDER BY id
+      `SELECT effect.id::text AS id,
+              effect.effect_type,
+              effect.grant_row_created,
+              effect.status,
+              (to_jsonb(effect) ->> 'provider') AS provider
+         FROM directory_deprovision_effects effect
+        WHERE effect.event_id = $1::uuid
+        ORDER BY effect.id
         FOR UPDATE`,
       [options.eventId],
     )
@@ -346,16 +360,17 @@ export async function compensateSupersededDenyGrant(options: {
       )
     }
     const effect = candidates[0]
+    const grantProvider = effectGrantProvider(effect)
 
     if (effect.status === 'compensated') {
       const residual = await client.query(
         `SELECT 1
            FROM user_external_auth_grants
-          WHERE provider = 'dingtalk'
+          WHERE provider = $2::text
             AND local_user_id = $1::text
           LIMIT 1
           FOR UPDATE`,
-        [event.local_user_id],
+        [event.local_user_id, grantProvider],
       )
       if (residual.rows[0]) {
         throw restoreError(
@@ -489,12 +504,12 @@ export async function compensateSupersededDenyGrant(options: {
 
     const removed = await client.query(
       `DELETE FROM user_external_auth_grants
-        WHERE provider = 'dingtalk'
+        WHERE provider = $2::text
           AND local_user_id = $1::text
           AND enabled = FALSE
           AND granted_by = 'system:directory-deprovision'
         RETURNING local_user_id`,
-      [event.local_user_id],
+      [event.local_user_id, grantProvider],
     )
     if (!removed.rows[0]) {
       throw restoreError(
@@ -665,17 +680,18 @@ export async function restoreDeprovisionEvent(options: {
     }
 
     const effectsResult = await client.query(
-      `SELECT id::text AS id,
-              effect_type,
-              org_id,
-              before_active,
-              after_active,
-              grant_row_created,
-              access_generation_at_apply,
-              status
-         FROM directory_deprovision_effects
-        WHERE event_id = $1::uuid
-        ORDER BY id
+      `SELECT effect.id::text AS id,
+              effect.effect_type,
+              effect.org_id,
+              effect.before_active,
+              effect.after_active,
+              effect.grant_row_created,
+              effect.access_generation_at_apply,
+              effect.status,
+              (to_jsonb(effect) ->> 'provider') AS provider
+         FROM directory_deprovision_effects effect
+        WHERE effect.event_id = $1::uuid
+        ORDER BY effect.id
         FOR UPDATE`,
       [options.eventId],
     )
@@ -752,9 +768,9 @@ export async function restoreDeprovisionEvent(options: {
           `SELECT enabled
              FROM user_external_auth_grants
             WHERE local_user_id = $1::text
-              AND provider = 'dingtalk'
+              AND provider = $2::text
             LIMIT 1`,
-          [event.local_user_id],
+          [event.local_user_id, effectGrantProvider(effect)],
         )
         currentMatchesAfter[effect.id] =
           grant.rows[0] !== undefined && grant.rows[0].enabled !== true
@@ -763,9 +779,9 @@ export async function restoreDeprovisionEvent(options: {
           `SELECT enabled
              FROM user_external_auth_grants
             WHERE local_user_id = $1::text
-              AND provider = 'dingtalk'
+              AND provider = $2::text
             LIMIT 1`,
-          [event.local_user_id],
+          [event.local_user_id, effectGrantProvider(effect)],
         )
         currentMatchesAfter[effect.id] =
           (grant.rows[0]?.enabled === true) === effect.after_active
@@ -848,11 +864,11 @@ export async function restoreDeprovisionEvent(options: {
         // since apply, deleting it would destroy state this ledger never created.
         const removed = await client.query(
           `DELETE FROM user_external_auth_grants
-            WHERE provider = 'dingtalk'
+            WHERE provider = $2::text
               AND local_user_id = $1::text
               AND enabled = FALSE
             RETURNING local_user_id`,
-          [event.local_user_id],
+          [event.local_user_id, effectGrantProvider(effect)],
         )
         if (!removed.rows[0]) {
           throw restoreError(
@@ -864,7 +880,7 @@ export async function restoreDeprovisionEvent(options: {
         const changed = await client.query(
           `INSERT INTO user_external_auth_grants (
              provider, local_user_id, enabled, granted_by, created_at, updated_at
-           ) VALUES ('dingtalk', $1::text, $2::boolean, $3::text, NOW(), NOW())
+           ) VALUES ($5::text, $1::text, $2::boolean, $3::text, NOW(), NOW())
            ON CONFLICT (provider, local_user_id)
            DO UPDATE SET enabled = EXCLUDED.enabled,
                          granted_by = EXCLUDED.granted_by,
@@ -877,6 +893,7 @@ export async function restoreDeprovisionEvent(options: {
             effect.before_active,
             `restore:${options.adminUserId}`,
             effect.after_active,
+            effectGrantProvider(effect),
           ],
         )
         if (!changed.rows[0]) {
