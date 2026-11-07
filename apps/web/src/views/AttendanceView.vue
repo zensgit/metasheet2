@@ -9222,10 +9222,10 @@
                       <td>
                         <span class="attendance__group-member-identity" data-attendance-rotation-assignment-user-identity>
                           <strong
-                            v-if="attendanceAssignmentUserPrimaryLabel(item.assignment.userId)"
+                            v-if="attendanceAssignmentUserDisplayLabel(item.assignment.userId)"
                             data-attendance-rotation-assignment-user-label
                           >
-                            {{ attendanceAssignmentUserPrimaryLabel(item.assignment.userId) }}
+                            {{ attendanceAssignmentUserDisplayLabel(item.assignment.userId) }}
                           </strong>
                           <span data-attendance-rotation-assignment-user-id>{{ item.assignment.userId }}</span>
                           <small
@@ -9875,10 +9875,10 @@
                       <td>
                         <span class="attendance__group-member-identity" data-attendance-assignment-user-identity>
                           <strong
-                            v-if="attendanceAssignmentUserPrimaryLabel(item.assignment.userId)"
+                            v-if="attendanceAssignmentUserDisplayLabel(item.assignment.userId)"
                             data-attendance-assignment-user-label
                           >
-                            {{ attendanceAssignmentUserPrimaryLabel(item.assignment.userId) }}
+                            {{ attendanceAssignmentUserDisplayLabel(item.assignment.userId) }}
                           </strong>
                           <span data-attendance-assignment-user-id>{{ item.assignment.userId }}</span>
                           <small
@@ -10548,6 +10548,7 @@ import AttendanceEmployeeLeaveRequestCard from './attendance/AttendanceEmployeeL
 import AttendanceEmployeeMakeupRequestCard from './attendance/AttendanceEmployeeMakeupRequestCard.vue'
 import AttendanceEmployeeOvertimeRequestCard from './attendance/AttendanceEmployeeOvertimeRequestCard.vue'
 import AttendanceEmployeeShiftSwapRequestCard from './attendance/AttendanceEmployeeShiftSwapRequestCard.vue'
+import { attendanceGroupEffectivePolicyNeutralMemberLabel } from './attendance/attendanceGroupEffectivePolicyLabels'
 import AttendanceEmployeeQuickActionIconsField from './attendance/AttendanceEmployeeQuickActionIconsField.vue'
 import { resolveMakeupCardPrefill } from './attendance/makeupRequestCardPrefill'
 import {
@@ -14630,6 +14631,16 @@ function attendanceAssignmentUserPrimaryLabel(userId: string): string {
   const item = attendanceAssignmentResolvedUsers.value[userId]
   if (!item) return ''
   return item.name?.trim() || item.email.trim() || ''
+}
+
+function attendanceAssignmentUserDisplayLabel(userId: string): string {
+  return attendanceAssignmentUserPrimaryLabel(userId)
+    || attendanceGroupEffectivePolicyNeutralMemberLabel('unknown', tr)
+}
+
+function attendanceAssignmentUserOptionLabel(userId: string): string {
+  return attendanceAssignmentUserPrimaryLabel(userId)
+    || `${attendanceAssignmentUserDisplayLabel(userId)} (${tr('User ID', '用户 ID')}: ${userId})`
 }
 
 function attendanceAssignmentUserSecondaryLabel(userId: string): string {
@@ -24926,7 +24937,7 @@ function assignmentDateRangeLabel(assignment: Pick<AttendanceAssignment, 'startD
 }
 
 function formatTemporaryReplacementAssignmentOption(item: AttendanceAssignmentItem): string {
-  const userLabel = attendanceAssignmentUserPrimaryLabel(item.assignment.userId) || item.assignment.userId
+  const userLabel = attendanceAssignmentUserOptionLabel(item.assignment.userId)
   return `${userLabel} · ${item.shift.name} · ${assignmentDateRangeLabel(item.assignment)} · ${assignmentSlotLabel(item.assignment)}`
 }
 
@@ -24951,7 +24962,7 @@ function shiftSwapRequesterUserId(): string {
 }
 
 function formatShiftSwapAssignmentOption(item: AttendanceAssignmentItem): string {
-  const userLabel = attendanceAssignmentUserPrimaryLabel(item.assignment.userId) || item.assignment.userId
+  const userLabel = attendanceAssignmentUserOptionLabel(item.assignment.userId)
   return `${userLabel} · ${item.shift.name} · ${item.assignment.startDate} · ${assignmentSlotLabel(item.assignment)}`
 }
 
