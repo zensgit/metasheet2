@@ -14,9 +14,11 @@
  *   7. autoNumber-backfill — autoNumber field on existing-records sheet + verify backfilled values
  *
  * The harness does NOT trigger real SMTP — the default
- * EmailNotificationChannel mocks the send and returns
- * notificationStatus='sent', so the smoke validates the wire
- * without depending on mail infrastructure.
+ * EmailNotificationChannel is the mock transport, which reports
+ * notificationStatus='simulated' and a SKIPPED step / execution
+ * (never success, never 'sent'), so the smoke validates the wire
+ * and the truthful result shape without depending on mail
+ * infrastructure.
  *
  * Companion to the local Playwright specs at
  * `packages/core-backend/tests/e2e/multitable-*-smoke.spec.ts`. The
@@ -427,21 +429,26 @@ registerCheck('automation-email', async () => {
       lastBody = body
       const execution = body?.executions?.[0]
       if (execution) {
-        if (execution.status !== 'success') {
-          throw new Error(`Execution status='${execution.status}'; expected 'success'. Body: ${JSON.stringify(body)}`)
+        // Mock email transport on the target: the truthful shape is a SKIPPED execution and step with
+        // notificationStatus 'simulated' and the shared reason token (never success / 'sent').
+        if (execution.status !== 'skipped') {
+          throw new Error(`Execution status='${execution.status}'; expected 'skipped'. Body: ${JSON.stringify(body)}`)
         }
         const step = execution.steps?.[0]
         if (step?.actionType !== 'send_email') {
           throw new Error(`step.actionType='${step?.actionType}'; expected 'send_email'`)
         }
-        if (step?.status !== 'success') {
-          throw new Error(`step.status='${step?.status}'; expected 'success'`)
+        if (step?.status !== 'skipped') {
+          throw new Error(`step.status='${step?.status}'; expected 'skipped'`)
         }
         if (step?.output?.recipientCount !== recipients.length) {
           throw new Error(`step.output.recipientCount=${step?.output?.recipientCount}; expected ${recipients.length}`)
         }
-        if (step?.output?.notificationStatus !== 'sent') {
-          throw new Error(`step.output.notificationStatus='${step?.output?.notificationStatus}'; expected 'sent'`)
+        if (step?.output?.notificationStatus !== 'simulated') {
+          throw new Error(`step.output.notificationStatus='${step?.output?.notificationStatus}'; expected 'simulated'`)
+        }
+        if (step?.output?.outcome !== 'not_sent' || step?.output?.reason !== 'email_transport_simulated') {
+          throw new Error(`step.output.outcome='${step?.output?.outcome}' reason='${step?.output?.reason}'; expected 'not_sent' / 'email_transport_simulated'`)
         }
         return { sheetId: sheet.id, ruleId: rule.id, executionId: execution.id }
       }

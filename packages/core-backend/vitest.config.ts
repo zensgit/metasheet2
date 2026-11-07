@@ -1446,6 +1446,11 @@ export default defineConfig({
       // status='pending' single-writer guard): real Postgres only — excluded HERE so it cannot skip-green in
       // the no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-automation-outbound-intent-realdb.test.ts',
+      // Delivery-result truthfulness: the real EmailNotificationChannel driven through the executor's two-phase
+      // send_email path against the REAL outbound-intent ledger + AutomationLogService.getStats — real Postgres
+      // only (EXPECT_DB sentinel throws at import without it), excluded HERE so it cannot skip-green in the
+      // no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/notification-delivery-result.db.test.ts',
       // FWB-1 slice ③ write_approval_form_values same-txn composition — real-DB. Two-point wiring.
       'tests/integration/multitable-fwb-write-action-realdb.test.ts',
       // FWB activation — production write_approval_form_values wiring (save gate + real trigger chain +
