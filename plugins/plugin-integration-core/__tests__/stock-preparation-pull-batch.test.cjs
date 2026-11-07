@@ -245,13 +245,14 @@ test("PB-C1 OWN-1 through the REAL expander and planner: batch 1 = S-01 + C; bat
 
 test('PB-C2 Q6-a and R through the REAL planner: an identity change is HELD and a same-key revival is an UPDATE — neither reaches the carry map', async () => {
   const { sheet1 } = await ownOneSheets()
-  // Q6-a: S-01's identity (its name) changes under the same key.
-  const renamed = [CF.part('P-07', 'D-P07', 'Assembly'), CF.part('S-01', 'D-S01', 'Sub renamed'), CF.part('C', 'D-C', 'Child')]
+  // Q6-a: S-01's identity (its material) changes under the same key (F29).
+  const renamed = [CF.part('P-07', 'D-P07', 'Assembly'), CF.part('S-01', 'D-S01', 'Sub', { Material: 'M-ALU' }), CF.part('C', 'D-C', 'Child')]
   const held = CF.plan(await CF.expand(CF.project({ orders: [{ part: 'S-01', qty: 2 }], parts: renamed, boms: { 'S-01': [{ part: 'C', usage: 3 }] } })), sheet1)
   const s01Key = sheet1.find((entry) => entry.componentSourceId === 'S-01').idempotencyKey
   const s01Decision = held.decisions.find((entry) => entry.idempotencyKey === s01Key)
   assert.ok(s01Decision, 'the planner answers the S-01 key')
-  assert.notEqual(s01Decision.decision, 'add', 'Q6-a: an identity change is never an ADD')
+  assert.equal(s01Decision.decision, 'manual_confirm', 'Q6-a: an identity change is HELD, never an ADD or an UPDATE')
+  assert.equal(s01Decision.conflictSummary.type, 'component_identity_conflict')
   // R: C removed in batch 2 (only S-01 remains, without its BOM), back at the SAME key in batch 3.
   const swept = CF.plan(await CF.expand(CF.project({ orders: [{ part: 'S-01', qty: 2 }], parts: OWN_PARTS, boms: {} })), sheet1)
   const sheet2 = CF.applyToSheet(swept, sheet1).map((entry) => readerRow(entry, entry[EXISTING_ROW_PULL_BATCH] ? { ...entry[EXISTING_ROW_PULL_BATCH] } : {}))
