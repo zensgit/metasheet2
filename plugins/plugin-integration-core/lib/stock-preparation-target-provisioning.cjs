@@ -24,6 +24,8 @@ const {
   STOCK_PREPARATION_FILL_VIEW_GROUP_FIELD_IDS,
   STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID,
   pickFillViewName,
+  // 批次标识 (BI-1a, R-65; design Q-BI-13): the two band ids join the `ext_` collision catalog below.
+  STOCK_PREPARATION_PULL_BATCH_FIELD_IDS,
 } = require('./stock-preparation-templates.cjs')
 
 // W2 canonical repair: namespace positive control for a repaired-in field.
@@ -328,7 +330,7 @@ function normalizeExtensionFieldIds(input, template) {
       { field: 'extensionFieldIds' },
     )
   }
-  const catalog = templateFieldIds(template)
+  const catalog = templateFieldIds(template).concat(STOCK_PREPARATION_PULL_BATCH_FIELD_IDS)
   const seen = new Set()
   const out = []
   for (const fieldId of input) {

@@ -646,10 +646,15 @@ test('PB-P1 PORTABILITY (S6 C-1, design §12.2): the pure core requires node:cry
   assert.deepEqual(requiresOf(MODULE_PATH), ['node:crypto'])
 })
 
-test('PB-P2 NOT WIRED (BI-1a): no plugin runtime file requires the pure core yet — the lane / store PR replaces this pin', () => {
+// BI-1a ledger PR (the store PR this pin named): the pure core is required by exactly two DORMANT files — the ledger
+// store and the template band constants — and NOTHING in the runtime requires the store, so no request reaches the
+// ledger yet. BI-1b (the lanes) replaces this pin.
+test('PB-P2 NOT WIRED (BI-1a): only the dormant ledger store and the template band require the pure core; no runtime file requires the store', () => {
   const runtime = ['index.cjs', ...fs.readdirSync(LIB).filter((name) => name.endsWith('.cjs')).map((name) => `lib/${name}`)]
-  const wired = runtime.filter((file) => requiresOf(path.join(PLUGIN, file)).some((entry) => entry.includes('stock-preparation-pull-batch')))
-  assert.deepEqual(wired, [])
+  const wired = runtime.filter((file) => requiresOf(path.join(PLUGIN, file)).some((entry) => /stock-preparation-pull-batch\.cjs/.test(entry)))
+  assert.deepEqual(wired, ['lib/stock-preparation-pull-batch-store.cjs', 'lib/stock-preparation-templates.cjs'])
+  const storeUsers = runtime.filter((file) => requiresOf(path.join(PLUGIN, file)).some((entry) => entry.includes('stock-preparation-pull-batch-store')))
+  assert.deepEqual(storeUsers, [], 'the ledger store has no caller yet')
 })
 
 test('PB-P3 the error codes are closed, code-shaped, unique and carry their HTTP status; the vocabularies are frozen', () => {
