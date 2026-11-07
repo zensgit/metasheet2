@@ -9,17 +9,18 @@
 //         with one display key lost one of them. Now every prefix row stays out of the tree and the dedupe and is
 //         appended after it: nothing is lost, the PLM tree prints exactly as without the prefix row, an unbound prefix
 //         row is treated the same way.
-//   ME-03 来源 — the three values (人工补充 / 人工（非补充） / PLM), the 31st column, after 仓库确认; with 沿用说明 the
-//         32nd column is 沿用说明 (it stays last); the result's values-free counts.
+//   ME-03 来源 — the three values (人工补充 / 人工（非补充） / PLM), the 32nd column, after 层级 (the last projected
+//         column since 2026-11-07; 仓库确认 before that); with 沿用说明 the 33rd column is 沿用说明 (it stays last); the
+//         result's values-free counts.
 //   ME-04 来源 appears only for PRINTED non-PLM rows: a person-created PLM-key row the dedupe collapsed adds no column.
 //   ME-05 an explicit-map target: 来源 is never field-resolved and never in `unresolvedColumns`.
 //   ME-06 an env target (not a project sheet): its `manual:` rows are 人工（非补充） — the column appears there too.
-//   ME-07 through the mounted route: the workbook carries 来源 and the audit row's columnCount is 31 (30 without a
+//   ME-07 through the mounted route: the workbook carries 来源 and the audit row's columnCount is 32 (31 without a
 //         person's row) — no new audit key.
 //
 // R line (R79 on onprem-r78): 沿用说明 (batch-refresh step 4 PR-5), the project write lock and the refresh governance
-// are not on this line. The 沿用说明 halves of ME-01 and ME-03 are dropped (here 来源 is always the 31st and last
-// column), and ME-07 mounts the routes without the lock and governance services. Everything else is main's.
+// are not on this line. The 沿用说明 halves of ME-01 and ME-03 are dropped (here 来源 is always the 32nd and last
+// column, after 层级), and ME-07 mounts the routes without the lock and governance services. Everything else is main's.
 //
 // Synthetic values only.
 
@@ -40,7 +41,7 @@ const tests = []
 const test = (name, fn) => tests.push([name, fn])
 
 const CODE = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
-const SOURCE_AT = EXPORT_COLUMNS.length // the 31st column (index 30)
+const SOURCE_AT = EXPORT_COLUMNS.length // the 32nd column (index 31) since 层级 (2026-11-07)
 
 function exportOf(records, extra = {}) {
   return exportStockPreparationPrepLines({ recordsApi: F.recordsApiOver(records), target: F.target(), projectNo: F.PROJECT_NO, permission: 'admin', ...extra })
@@ -49,10 +50,12 @@ const codes = (result) => result.rows.map((row) => row[CODE])
 const sourceCells = (result) => result.rows.map((row) => row[SOURCE_AT])
 
 // Captured from main d5bc16c55's OWN stock-preparation-prep-line-export.cjs over F.plmTree(), before any B1 change —
-// the JSON of the whole result object (onprem-r78's own module answers the same bytes).
-const HEADERS_30 = '["父组件图号","父组件名称","图号","名称","规格","材料","总数量","备料情况","需求日期","领料节点","备料日期","毛胚长度","自制/外购","采购完成","采购回复日期","仓库完成","实际到货日期","生产编号","名称及规格","材料类型","毛胚类型","备注","交接工段","提前周期(天)","毛胚宽度","毛胚厚度","毛胚数量","毛胚质量","采购回复","仓库确认"'
-const TAIL_BLANKS = 'null,null,null,null,null,null,null,null,null,null,null,null'
-const GOLDEN_PURE_PLM = `{"projectNo":"SYN-MR-EXP","totalRowCount":6,"activeRowCount":5,"headers":${HEADERS_30}],"rows":[["SYN-X","Gone parent","SYN-O","Orphan",null,"SYN-MAT",4,null,null,null,null,null,null,null,null,null,null,"SYN-MR-EXP",${TAIL_BLANKS}],[null,null,"SYN-R","Root",null,"SYN-MAT",1,null,null,null,null,null,null,null,null,null,null,"SYN-MR-EXP",${TAIL_BLANKS}],["SYN-R","Root","SYN-C1","Child one",null,"SYN-MAT",2,null,null,null,null,null,null,null,null,null,null,"SYN-MR-EXP",${TAIL_BLANKS}],["SYN-R","Root","SYN-C2","Child two",null,"SYN-MAT",3,null,null,null,null,null,null,null,null,null,null,"SYN-MR-EXP",${TAIL_BLANKS}]],"collapsedRowCount":1,"treeOrdered":true,"treeIdentity":"path","treeDegraded":false,"unresolvedColumns":[]}`
+// the JSON of the whole result object (onprem-r78's own module answers the same bytes). 2026-11-07: the export appends
+// 层级 (the row's stored template `depth`) as the 31st column; these fixture rows carry no stored level, so every row
+// gains exactly one trailing null cell (TAIL_BLANKS 12 -> 13). Nothing else moved.
+const HEADERS_31 = '["父组件图号","父组件名称","图号","名称","规格","材料","总数量","备料情况","需求日期","领料节点","备料日期","毛胚长度","自制/外购","采购完成","采购回复日期","仓库完成","实际到货日期","生产编号","名称及规格","材料类型","毛胚类型","备注","交接工段","提前周期(天)","毛胚宽度","毛胚厚度","毛胚数量","毛胚质量","采购回复","仓库确认","层级"'
+const TAIL_BLANKS = 'null,null,null,null,null,null,null,null,null,null,null,null,null'
+const GOLDEN_PURE_PLM = `{"projectNo":"SYN-MR-EXP","totalRowCount":6,"activeRowCount":5,"headers":${HEADERS_31}],"rows":[["SYN-X","Gone parent","SYN-O","Orphan",null,"SYN-MAT",4,null,null,null,null,null,null,null,null,null,null,"SYN-MR-EXP",${TAIL_BLANKS}],[null,null,"SYN-R","Root",null,"SYN-MAT",1,null,null,null,null,null,null,null,null,null,null,"SYN-MR-EXP",${TAIL_BLANKS}],["SYN-R","Root","SYN-C1","Child one",null,"SYN-MAT",2,null,null,null,null,null,null,null,null,null,null,"SYN-MR-EXP",${TAIL_BLANKS}],["SYN-R","Root","SYN-C2","Child two",null,"SYN-MAT",3,null,null,null,null,null,null,null,null,null,null,"SYN-MR-EXP",${TAIL_BLANKS}]],"collapsedRowCount":1,"treeOrdered":true,"treeIdentity":"path","treeDegraded":false,"unresolvedColumns":[]}`
 
 test('ME-01 a pure-PLM sheet exports byte-identically to main', async () => {
   assert.equal(JSON.stringify(await exportOf(F.plmTree())), GOLDEN_PURE_PLM)
@@ -96,7 +99,7 @@ test('ME-02 the probe\'s three dedupe cases: nothing is swallowed any more, pref
   assert.equal(codes(adopted)[codes(adopted).length - 1], 'SYN-R', 'the prefix row is appended last')
 })
 
-test('ME-03 来源: three values in the 31st column; the values-free counts', async () => {
+test('ME-03 来源: three values in the 32nd column (after 层级); the values-free counts', async () => {
   const records = [
     ...F.plmTree(),
     F.person('rec_1_manual', { componentCode: 'SYN-M1', componentName: 'Manual one' }),
@@ -108,9 +111,9 @@ test('ME-03 来源: three values in the 31st column; the values-free counts', as
   copied.createdBy = F.PERSON
   records.push(copied)
   const result = await exportOf(records)
-  assert.equal(result.headers.length, 31)
-  assert.equal(result.headers[30], '来源')
-  assert.equal(result.headers[29], '仓库确认', '来源 follows the 30th column')
+  assert.equal(result.headers.length, 32)
+  assert.equal(result.headers[31], '来源')
+  assert.equal(result.headers[30], '层级', '来源 follows the last projected column (层级, the 31st)')
   const byCode = Object.fromEntries(result.rows.map((row) => [row[CODE], row[SOURCE_AT]]))
   assert.deepEqual(byCode, {
     'SYN-O': 'PLM', 'SYN-R': 'PLM', 'SYN-C1': 'PLM', 'SYN-C2': 'PLM', 'SYN-C3': '人工（非补充）',
@@ -119,7 +122,7 @@ test('ME-03 来源: three values in the 31st column; the values-free counts', as
   assert.equal(result.sourceColumn, true)
   assert.equal(result.manualSupplementRowCount, 1)
   assert.equal(result.manualOtherRowCount, 3)
-  assert.ok(result.rows.every((row) => row.length === 31))
+  assert.ok(result.rows.every((row) => row.length === 32))
   // R line: no 沿用说明 column, so the export ends at 来源 and carries no continuation stanza.
   assert.equal(Object.prototype.hasOwnProperty.call(result, 'continuationColumn'), false)
   // The labels are the ADR's, byte for byte (the full-width parentheses included).
@@ -133,7 +136,7 @@ test('ME-04 来源 counts PRINTED rows only: a person-created PLM-key row the de
   twin.createdBy = F.PERSON
   const result = await exportOf([...F.plmTree(), twin])
   assert.equal(result.collapsedRowCount, 2, 'the person\'s twin collapsed like any twin')
-  assert.equal(result.headers.length, 30, 'no printed non-PLM row => no 来源')
+  assert.equal(result.headers.length, 31, 'no printed non-PLM row => no 来源')
   assert.equal(Object.prototype.hasOwnProperty.call(result, 'sourceColumn'), false)
 })
 
@@ -154,8 +157,8 @@ test('ME-05 an explicit-map target: 来源 is not field-resolved and never in un
     },
   }
   const result = await exportStockPreparationPrepLines({ recordsApi, target: F.target(F.PROJECT_OBJECT_ID, fieldIdMap), projectNo: F.PROJECT_NO, permission: 'admin' })
-  assert.equal(result.headers[30], '来源')
-  assert.equal(result.rows.find((row) => row[CODE] === 'SYN-M1')[30], '人工补充')
+  assert.equal(result.headers[31], '来源')
+  assert.equal(result.rows.find((row) => row[CODE] === 'SYN-M1')[31], '人工补充')
   assert.ok(result.unresolvedColumns.length > 0, 'the explicit map leaves columns unbound (the check is not vacuous)')
   for (const entry of result.unresolvedColumns) {
     assert.notEqual(entry, exportInternals.SOURCE_COLUMN.id)
@@ -168,8 +171,8 @@ test('ME-05 an explicit-map target: 来源 is not field-resolved and never in un
 test('ME-06 an env target: its manual: rows are 人工（非补充） (M′ needs a project sheet), and the column appears there too', async () => {
   const records = [...F.plmTree(), F.person('rec_1_manual', { componentCode: 'SYN-M1' })]
   const result = await exportStockPreparationPrepLines({ recordsApi: F.recordsApiOver(records), target: F.target(F.ENV_OBJECT_ID), projectNo: F.PROJECT_NO, permission: 'admin' })
-  assert.equal(result.headers[30], '来源')
-  assert.equal(result.rows.find((row) => row[CODE] === 'SYN-M1')[30], '人工（非补充）')
+  assert.equal(result.headers[31], '来源')
+  assert.equal(result.rows.find((row) => row[CODE] === 'SYN-M1')[31], '人工（非补充）')
   assert.equal(result.manualSupplementRowCount, 0)
   assert.equal(result.manualOtherRowCount, 1)
   assert.deepEqual(codes(result), ['SYN-O', 'SYN-R', 'SYN-C1', 'SYN-C2', 'SYN-M1'], 'still appended after the tree')
@@ -229,21 +232,21 @@ function mountExport(records) {
   return { get, auditAppends, workbooks }
 }
 
-test('ME-07 the mounted route: 来源 in the workbook, audit columnCount 31 (30 without a person\'s row), no new audit key', async () => {
+test('ME-07 the mounted route: 来源 in the workbook, audit columnCount 32 (31 without a person\'s row), no new audit key', async () => {
   const plain = mountExport(F.plmTree())
   const plainRes = await plain.get()
   assert.equal(plainRes.statusCode, 200, JSON.stringify(plainRes.body))
-  assert.equal(plain.workbooks[0].headers.length, 30)
-  assert.deepEqual(plain.auditAppends[0].detail, { operation: 'prep_line_export', totalRowCount: 6, activeRowCount: 5, columnCount: 30 })
+  assert.equal(plain.workbooks[0].headers.length, 31)
+  assert.deepEqual(plain.auditAppends[0].detail, { operation: 'prep_line_export', totalRowCount: 6, activeRowCount: 5, columnCount: 31 })
 
   const withManual = mountExport([...F.plmTree(), F.person('rec_1_manual', { componentCode: 'SYN-M1', componentName: 'Manual one' })])
   const res = await withManual.get()
   assert.equal(res.statusCode, 200, JSON.stringify(res.body))
   const workbook = withManual.workbooks[0]
-  assert.equal(workbook.headers.length, 31)
-  assert.equal(workbook.headers[30], '来源')
-  assert.equal(workbook.rows[workbook.rows.length - 1][30], '人工补充')
-  assert.deepEqual(withManual.auditAppends[0].detail, { operation: 'prep_line_export', totalRowCount: 7, activeRowCount: 6, columnCount: 31 })
+  assert.equal(workbook.headers.length, 32)
+  assert.equal(workbook.headers[31], '来源')
+  assert.equal(workbook.rows[workbook.rows.length - 1][31], '人工补充')
+  assert.deepEqual(withManual.auditAppends[0].detail, { operation: 'prep_line_export', totalRowCount: 7, activeRowCount: 6, columnCount: 32 })
   assert.equal(res.headers['X-Stock-Prep-Export-Row-Count'], '6')
 })
 

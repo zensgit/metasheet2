@@ -183,17 +183,43 @@ const EXPORT_COLUMNS = Object.freeze([
   // still comes after these two: it is pushed after the whole EXPORT_COLUMNS projection.
   Object.freeze({ id: 'procurementReply', label: '采购回复' }),
   Object.freeze({ id: 'warehouseConfirmation', label: '仓库确认' }),
+  // ── 层级: the row's BOM level, APPENDED AT THE END (2026-11-07) ──────────────────────────────────
+  //
+  // WHY. The owner asked whether the system shows a material's parents and children. The workbook is
+  // already printed in depth-first BOM tree order (orderRowsAsBomTree) with 父组件图号 / 父组件名称 in
+  // front, but nothing on the line said how deep it sits, so the tree shape was invisible on paper.
+  // The owner confirmed that no program or macro reads this workbook by column count, so one more
+  // trailing column is safe; same rule as #5447 / F1c / 2026-10-29 above — appended, nothing above
+  // moves, the first 30 columns keep their position.
+  //
+  // WHAT IT PRINTS. The row's own stored template column `depth` (BOM层级, plm_system, written by the
+  // expander: the root row is 0, each level down adds 1) — the same number the grid shows in its
+  // BOM层级 column. NOT the level the tree walk happened to place the row at: for a normal row the two
+  // agree by construction (a path of N tokens is written at depth N-1, and the walk hangs a row under
+  // the row whose path is its own minus one token), but the walk can print a row as a ROOT while its
+  // BOM level is deeper — an orphan whose parent row is inactive, a stranded row, a degraded
+  // (part-id) tree. There the stored level is the truth about the BOM and the walk position is an
+  // artifact of what this batch contains, so the stored value wins.
+  //
+  // A ROW WITHOUT A STORED LEVEL (a manual row, a row from before the column was bound) prints BLANK —
+  // no `type`, so exportCellValue passes a stored number through natively (0 included: 0 is a value,
+  // not a blank) and an unset cell stays null. The export never derives or guesses a level. The
+  // column is a template column, so it resolves on every install; an explicit map that leaves it
+  // unbound reports `depth` in `unresolvedColumns` like any other projected column (unchanged rule).
+  // 来源 / 沿用说明, when present, still come after it: they are pushed after the whole projection.
+  Object.freeze({ id: 'depth', label: '层级' }),
 ])
 const EXPORT_COLUMN_IDS = Object.freeze(EXPORT_COLUMNS.map((column) => column.id))
 // 来源 (人工补充行 B1, ADR §6; owner OQ3: no 来源 column on the sheet). ONE column, its own constant like 沿用说明 —
 // deliberately OUTSIDE EXPORT_COLUMNS and EXPORT_SOURCE_FIELD_IDS, so it is never field-resolved and never reported in
 // `unresolvedColumns`. Present ONLY when a PRINTED active row is not a PLM row (env sheet or project sheet alike);
-// placed right after the 30th column (仓库确认) and before 沿用说明, which stays last — so 沿用说明 is the 31st or the
-// 32nd column and a reader takes columns by header, never by position. A pure-PLM workbook, its headers and its
+// placed right after the last projected column (层级, the 31st since 2026-11-07; 仓库确认 before that) and before
+// 沿用说明, which stays last — so 来源 is the 32nd column, 沿用说明 the 32nd or the 33rd, and a reader takes columns by
+// header, never by position. A pure-PLM workbook, its headers and its
 // audit row are byte-identical to before (C09). The three values (stock-preparation-manual-rows.cjs
 // exportRowSourceOf): M′ => 人工补充; any other `manual:` prefix row and any other row with a creator => 人工（非补充）;
 // the rest => PLM.
-// R line: 沿用说明 (batch-refresh step 4 PR-5) is not on this line, so here 来源, when present, is always the 31st and
+// R line: 沿用说明 (batch-refresh step 4 PR-5) is not on this line, so here 来源, when present, is always the 32nd and
 // last column.
 const SOURCE_COLUMN = Object.freeze({ id: '__source', label: '来源' })
 const SOURCE_LABELS = Object.freeze({
