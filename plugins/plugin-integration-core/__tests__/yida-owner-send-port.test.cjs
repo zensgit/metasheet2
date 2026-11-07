@@ -64,6 +64,25 @@ test('already aborted native signal consumes no admission and starts no dependen
   await assert.rejects(createYidaOwnerSendPort(options).submit(request(), { signal: controller.signal }), fixed('CANCELLED'))
   assert.deepEqual(calls, { admit: 0, take: 0, observe: 0, fetch: 0 })
 })
+test('after admission has committed the port no longer consults the signal; the runner does', async () => {
+  // Gate 1 (R-71 ⑦.1): the signal is read once before admission; afterwards it is only handed to the runner as the
+  // run's lifetime signal. Here it is aborted while admission is resolving, and takeExecution is still reached
+  // (this stub then throws, sealed as UNAVAILABLE). Pins R82 mutant G1_port_cancellation_after_admit
+  // (`cancellation(signal)` re-inserted after admission -> CANCELLED and takeExecution never runs).
+  // Durable state and the HTTP outcome are identical either way: the ledger stays 'prepared' from admission, the
+  // grant is consumed, nothing is sent, and the runner re-consults the same signal (yida-delivery-runner.mjs
+  // `if (caller && abortedGetter.call(caller)) fail('CANCELLED')`) before any durable write; the runtime then
+  // answers 409 CANCELLED. Only the sealed port code and the permit take/close bookkeeping differ.
+  const { createYidaOwnerSendPort } = await modulePromise
+  const { calls, options } = dependencies({ readEnablement: () => 'true' }), controller = new AbortController()
+  const approval = Object.freeze({ grantId: 'test-grant', operationId: 'test-operation', rowKey: 'test-row', targetRef: 'test-target',
+    approvedAt: 1, expiresAt: 100, maxAttempts: 1, remainingAttempts: 0, status: 'admitted', revoked: false,
+    admissionId: 'test-admission', ledgerId: 'test-ledger', canSend: false, externalWriteAttempted: false, reused: false })
+  options.authority.admitForExecution = async () => { calls.admit++; controller.abort(); return { approval, permit: {} } }
+  await assert.rejects(createYidaOwnerSendPort(options).submit(request(), { signal: controller.signal }), fixed('UNAVAILABLE'))
+  assert.equal(controller.signal.aborted, true)
+  assert.deepEqual(calls, { admit: 1, take: 1, observe: 0, fetch: 0 })
+})
 test('foreign rejection/proxy never leaks or invokes exception inspection traps', async () => {
   const { createYidaOwnerSendPort } = await modulePromise
   let traps = 0
