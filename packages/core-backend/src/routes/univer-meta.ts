@@ -310,6 +310,15 @@ import {
   loadEntityConfigSnapshot,
   applyConfigRevert,
 } from '../multitable/config-restore'
+import {
+  FIELD_CHANGED_CONCURRENTLY_CODE,
+  FieldChangedConcurrentlyError,
+  PATCH_FIELD_LOCKED_REREAD_SQL,
+  PATCH_FIELD_READ_SQL,
+  fieldRowChangedSince,
+  snapshotFieldRowForRecheck,
+  withFieldRowRecheckRetry,
+} from '../multitable/field-row-write-guard'
 import { computeRecordRestoreDiff } from '../multitable/record-restore-diff'
 import {
   HISTORY_FIELD_AUDIT_GRANT_PERMISSION,
@@ -12119,7 +12128,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (revertWritesFieldTypeOrProperty(rev) && (await isFieldRetypeConversionRevision(query as unknown as FieldRetypeConvertQuery, String(rev.id)))) {
           return fieldRetypeConversionRestoreRefusal()
         }
-        const snapshot = await loadEntityConfigSnapshot(query, rev)
+        // A field snapshot is read under the row lock (FOR NO KEY UPDATE) and held until commit: the identity/drift
+        // checks below compare it, and applyConfigRevert writes over it, so a field write committed in between would be
+        // overwritten without CONFIG_DRIFT. Fence → this one row → UPDATE → revision: no wait on another field row.
+        const snapshot = await loadEntityConfigSnapshot(query, rev, { lockField: true })
         if (!snapshot) return { status: 409, code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' }
         const preview = computeRevertPreview(rev, snapshot)
         // T9-W-L4/D5: REQUIRE + verify the server-minted preview identity. It binds revision/entity/actor, and its
@@ -14734,17 +14746,25 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // for BOTH the pre-commit cap check and the post-commit chunked recompute (B3) so the
       // response counts are internally consistent (no re-query drift between the two).
       let bulkRecomputeRecordIds: string[] | null = null
-      const updated = await pool.transaction(async ({ query }) => {
+      // Lost-update guard (multitable/field-row-write-guard.ts): the UPDATE below writes every column from the read
+      // just below, so the row is re-read under the row lock right before it and compared. A concurrent change of
+      // name, type or property rolls the attempt back and the whole transaction runs once more on fresh data
+      // (validation included); a second conflict answers 409 FIELD_CHANGED_CONCURRENTLY.
+      const updated = await withFieldRowRecheckRetry(() => pool.transaction(async ({ query }) => {
+        // Per-attempt state: a rolled-back attempt must not leak its recompute snapshot into the next one.
+        sheetId = ''
+        bulkRecomputeRecordIds = null
         // Fence before re-reading the field: recovery hashes and applies against one schema
         // generation, while field retype/property/order writes serialize outside that window.
         await fenceWriterEntry(query, preflightSheetId)
-        const existing = await query(
-          'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1',
-          [fieldId],
-        )
+        // Unlocked on purpose: locking here would hold the row through validation and the sibling shift below, and the
+        // web client's shared column drag (one PATCH per field, all at once) would deadlock on it.
+        const existing = await query(PATCH_FIELD_READ_SQL, [fieldId])
         if ((existing as any).rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
 
         const row = (existing as any).rows[0]
+        // What this attempt validates, deep-copied before any validation code can touch it (compared under the lock).
+        const validated = snapshotFieldRowForRecheck(row)
         sheetId = String(row.sheet_id)
         const currentOrder = Number(row.order ?? 0)
         const currentType = mapFieldType(String(row.type))
@@ -14939,14 +14959,26 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           }
         }
 
-        const nextOrder = typeof desiredOrder === 'number' ? desiredOrder : currentOrder
+        // Lost-update guard: the locked re-read, one statement before the UPDATE. It sits after the sibling shift, so
+        // the row is first locked where the UPDATE used to lock it (no new lock-order edge); FOR NO KEY UPDATE is the
+        // lock the UPDATE itself takes, so FK child inserts (links, attachments, auto-number) are never blocked by it.
+        const lockedRes = await query(PATCH_FIELD_LOCKED_REREAD_SQL, [fieldId])
+        const locked = (lockedRes as any).rows?.[0]
+        if (!locked) throw new NotFoundError(`Field not found: ${fieldId}`)
+        if (fieldRowChangedSince(validated, locked)) throw new FieldChangedConcurrentlyError()
+        // Equal to `nextProperty` after the compare; carried from the locked row so the stored lock and switch can never
+        // be dropped by a stale read even if the compare were weakened.
+        const writeProperty = carryManualRowPolicy(locked.property, carryHumanWriteLock(locked.property, nextProperty))
+        // `order` is not compared (a sibling's shift moves this row during a shared drag): a PATCH without `order`
+        // keeps the row's CURRENT order instead of writing back the one it read.
+        const nextOrder = typeof desiredOrder === 'number' ? desiredOrder : Number(locked.order ?? 0)
 
         const update = await query(
           `UPDATE meta_fields
            SET name = $2, type = $3, property = $4::jsonb, "order" = $5, updated_at = now()
            WHERE id = $1
            RETURNING id, name, type, property, "order"`,
-          [fieldId, nextName, nextType, JSON.stringify(nextProperty), nextOrder],
+          [fieldId, nextName, nextType, JSON.stringify(writeProperty), nextOrder],
         )
         const updatedRow = (update as any).rows?.[0]
         if (!updatedRow) throw new Error('Update returned no rows')
@@ -14968,8 +15000,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         }
 
         // T9-R1: record the field update — only the CHANGED config keys; a no-op (nothing changed) records nothing.
+        // `before` is the LOCKED row: a sibling's shift that moved this row between the two reads is already recorded
+        // by recordFieldOrderShifts and is not this PATCH's change (reverting it must not restore the stale order).
         const updateDiff = fieldUpdateDiff(
-          { name: String(row.name), type: String(row.type), property: row.property, order: Number(row.order) },
+          { name: String(locked.name), type: String(locked.type), property: locked.property, order: Number(locked.order) },
           { name: String(updatedRow.name), type: String(updatedRow.type), property: updatedRow.property, order: Number(updatedRow.order) },
         )
         if (updateDiff) {
@@ -14981,7 +15015,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         }
 
         return serializeFieldRow(updatedRow)
-      })
+      }))
 
       invalidateFieldCache(sheetId)
 
@@ -15043,6 +15077,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // fence-then-block-checked; a durable recovery block surfaces here → 409 RECOVERY_IN_PROGRESS.
       if (err instanceof SheetWriterBlockedError) {
         return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
+      // Lost-update guard: the field changed under BOTH attempts (field-row-write-guard.ts). Values-free; nothing written.
+      if (err instanceof FieldChangedConcurrentlyError) {
+        return res.status(409).json({ ok: false, error: { code: FIELD_CHANGED_CONCURRENTLY_CODE, message: err.message } })
       }
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })

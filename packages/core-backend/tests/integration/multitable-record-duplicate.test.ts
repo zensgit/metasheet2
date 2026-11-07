@@ -27,6 +27,10 @@ import { usePinnedServer } from '../utils/pinned-server'
 // file, so it runs in this file's existing real-DB lane.
 import { defineStockPreparationManualRowsHostRealDbCases } from './stock-preparation-manual-rows-host-realdb.cases'
 import { defineStockPreparationManualRowsSwitchRealDbCases } from './stock-preparation-manual-rows-switch-realdb.cases'
+// Field-row lost updates (PATCH /fields, the provisioning patch, the config revert vs a concurrent change of the same
+// field row): two cases modules, registered at the end of this file so they run in its existing real-DB lane.
+import { defineStockPreparationFieldPropertyRaceRealDbCases } from './stock-preparation-field-property-race-realdb.cases'
+import { defineMultitableFieldRowConcurrencyRealDbCases } from './multitable-field-row-concurrency-realdb.cases'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -583,3 +587,7 @@ defineStockPreparationManualRowsHostRealDbCases()
 // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §8 「B4」 5): the plugin's switch routes write the switch, the
 // host refuses the create — on the same real database, through this file's already-registered real-DB lane.
 defineStockPreparationManualRowsSwitchRealDbCases()
+// Field-row lost updates: the plugin's switch and lock stamp vs PATCH /fields (stock-prep sheet), then the host-only
+// interleavings (config revert, the shared column drag, one concurrent change per column).
+defineStockPreparationFieldPropertyRaceRealDbCases()
+defineMultitableFieldRowConcurrencyRealDbCases()
