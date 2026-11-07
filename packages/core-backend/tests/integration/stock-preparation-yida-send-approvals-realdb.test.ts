@@ -41,7 +41,9 @@ type Gate = { reached: Promise<void>; release(): void }
 // Gate 4 session knobs: a send-budget verdict override (null = the real primitive verdict), the
 // multi-target service switch, and host security call counters.
 type BudgetSwitch = { within: boolean | null; calls: number; verdict?: () => unknown }
-type SessionOptions = { budget?: BudgetSwitch; multiTarget?: boolean; counter?: { encrypt: number; decrypt: number } }
+type SessionOptions = { budget?: BudgetSwitch; multiTarget?: boolean; counter?: { encrypt: number; decrypt: number }
+  // D20: the exact-listed target refs that may take unbound rows besides slot 1 (the runtime parses the env list).
+  unboundTestTargetRefs?: ReadonlySet<string> }
 type Session = { client: PoolClient; pid: number; db: unknown; service: Service; draft: DraftStore; material: MaterialStore
   target: TargetStore; ledger: LedgerStore; statements: string[]; gateInsert(table: string): Gate
   release(): void; loseCommitResponse(): void }
@@ -182,7 +184,8 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     } } : real
     const value: Session = { client, pid, statements, db,
       service: createService({ database, security: hostSecurity, context: { tenantId: scope.tenantId, workspaceId: null, actorId: scope.ownerId },
-        primitives, ...(options.multiTarget ? { multiTarget: true } : {}) }),
+        primitives, ...(options.multiTarget ? { multiTarget: true } : {}),
+        ...(options.unboundTestTargetRefs ? { unboundTestTargetRefs: options.unboundTestTargetRefs } : {}) }),
       draft: createDraft(config), material: createMaterial(config), target: createTarget(config), ledger: createLedger({ db }),
       gateInsert(table) {
         ident(table)
@@ -267,9 +270,15 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
       { YIDA_MULTI_TARGET_UP_SQL: string }).YIDA_MULTI_TARGET_UP_SQL
     const migrations = path.join(root, 'packages/core-backend/migrations')
     approvalDdl = readFileSync(path.join(migrations, '095_create_integration_yida_send_approvals.sql'), 'utf8')
+    // Source binding (design baseline v2.3 §3.3/§7.2): the three-table migration zzzz20261106110300 exactly as its up()
+    // executes, plus the project-sheet registry (087) the bound admission reads.
+    const sourceBindingUp = ((await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts')).href)) as
+      { YIDA_SOURCE_BINDING_UP_SQL: string }).YIDA_SOURCE_BINDING_UP_SQL
     ddl = ['090_create_integration_yida_delivery_ledger.sql', '091_create_integration_yida_create_fence.sql',
       '092_create_integration_yida_credential_materials.sql', '093_create_integration_yida_draft_plans.sql',
       '094_create_integration_yida_approved_target.sql'].map(name => readFileSync(path.join(migrations, name), 'utf8')).join('\n') + '\n' + approvalDdl
+      + '\n' + sourceBindingUp + '\n' + readFileSync(path.join(migrations, '087_create_integration_stock_prep_project_target.sql'), 'utf8')
     savedEnv = envKeys.map(key => [key, process.env[key]])
     process.env.NODE_ENV = 'production'
     process.env.ENCRYPTION_KEY = randomBytes(32).toString('hex')
@@ -864,5 +873,186 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
       confirmationId: 'synthetic-slot2-confirmation', targetRef: slot2.targetRef }), 'LIMIT')
     expect(await evidence()).toEqual(before)
     expect(before.counts).toEqual([1, 0, 0, 1, 0, 0])
+  })
+
+  // ---- Source binding, identity fence and D20 (design baseline v2.3 §3.3 / §7.2; D16 a, D20) ----
+  const REGISTRY = 'integration_stock_prep_project_target'
+  function boundInput(value: Input = input(), records?: Array<{ recordId: string; keyValue: string; projectNo: string }>): Input & { sourceBinding: Row } {
+    const rows = JSON.parse(value.rowsText) as Row[]
+    const fieldBindings = Object.fromEntries(value.config.fieldMap.map(field => [String(field.source), 'fld_' + String(field.target)]))
+    return { ...value, sourceBinding: { sheetId: 'sheet_registered', keyFieldId: fieldBindings.lineId, fieldBindings,
+      records: records ?? rows.map((row, index) => ({ recordId: 'rec_' + index, keyValue: String(row.lineId), projectNo: String(row.projectNo) })) } }
+  }
+  async function registerProject(patch: Row = {}) {
+    await owner.query(`INSERT INTO ${ident(REGISTRY)} (id, tenant_id, project_no, sheet_id, object_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [randomUUID(), patch.tenant_id ?? context().tenantId, patch.project_no ?? 'DEMO-P1', patch.sheet_id ?? 'sheet_registered',
+        patch.object_id ?? 'synthetic-object', patch.status ?? 'active'])
+  }
+  async function acknowledge(f: Fixture, admitted: MutationMetadata) {
+    // Store-level claim and synthetic receipt: the row reaches acknowledged without any transport.
+    const store = first.ledger as LedgerStore & { claim(input: unknown): Promise<{ claimToken: string }>; recordAcknowledgement(input: unknown): Promise<Row> }
+    const scope = { ...context(), operationId: f.draft.operationId, rowKey: f.request.rowKey, actorId: context().ownerId }
+    const { claimToken } = await store.claim(scope)
+    await store.recordAcknowledgement({ ...scope, claimToken, ack: { statusCode: 201, instanceId: 'synthetic-instance' } })
+    expect(String((await tableRows(LEDGER)).find(row => row.id === admitted.ledgerId)!.status)).toBe('acknowledged')
+  }
+
+  it('bound draft: approval and admission carry both digests into the grant and the ledger; the registry must name the bound sheet', async () => {
+    await registerProject()
+    const f = await fixture(boundInput())
+    const members = (await tableRows(MEMBERS)).filter(row => row.operation_id === f.draft.operationId).sort((a, b) => Number(a.ordinal) - Number(b.ordinal))
+    expect(members.every(row => /^[0-9a-f]{64}$/.test(String(row.source_record_digest)) && /^[0-9a-f]{64}$/.test(String(row.creation_identity_digest)))).toBe(true)
+    const granted = await first.service.approve(f.request)
+    const grantRow = (await tableRows(APPROVAL))[0]
+    expect([grantRow.source_record_digest, grantRow.creation_identity_digest]).toEqual([members[0].source_record_digest, members[0].creation_identity_digest])
+    const sealed = JSON.parse(await security.decrypt(String(grantRow.snapshot_encrypted))) as Row
+    const selection = sealed.selection as Row
+    expect([selection.sourceRecordDigest, selection.creationIdentityDigest]).toEqual([members[0].source_record_digest, members[0].creation_identity_digest])
+    expect((selection.sourceBinding as Row).sheetId === 'sheet_registered' && (selection.sourceBinding as Row).recordId === 'rec_0'
+      && (selection.sourceBinding as Row).keyValue === 'LINE-1' && (selection.sourceBinding as Row).projectNo === 'DEMO-P1').toBe(true)
+    const admitted = await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' })
+    const ledger = (await tableRows(LEDGER))[0]
+    expect(ledger.id === admitted.ledgerId && ledger.source_record_digest === members[0].source_record_digest
+      && ledger.creation_identity_digest === members[0].creation_identity_digest).toBe(true)
+    expect(first.statements.some(sql => sql.includes(REGISTRY))).toBe(true)
+    expect((await evidence()).counts).toEqual([1, 0, 1, 2, 1, 1])
+    // The registry is read inside the admission transaction: archived or moved, admission is CONFLICT and nothing is written.
+    const otherInput = input('original', 7); const otherRows = JSON.parse(otherInput.rowsText) as Row[]
+    otherRows[0].lineId = 'LINE-2'; otherInput.rowsText = JSON.stringify(otherRows)
+    const other = await second.draft.createDraft(boundInput(otherInput, [{ recordId: 'rec_other', keyValue: 'LINE-2', projectNo: 'DEMO-P1' }]))
+    await owner.query(`UPDATE ${ident(REGISTRY)} SET status = 'archived', archived_at = NOW()`)
+    const grant2 = await second.service.approve({ operationId: other.operationId, rowKey: other.rows[0].rowKey, confirmationId: 'synthetic-archived-confirmation' })
+    const before = await evidence()
+    // The plugin primitive refuses CONFLICT; the host closes every primitive refusal to UNAVAILABLE (the existing fence mask).
+    await rejected(second.service.admit({ grantId: grant2.grantId, submissionId: 'synthetic-archived-submission' }))
+    expect(await evidence()).toEqual(before)
+  })
+  // A FORMAL target: another owner-attested target (slot 2) with its own app/form locator, registered through the Y2 writer.
+  function formalInput(value: Input = input('original', 8)): Input {
+    return { ...value, config: { ...value.config, target: { appType: 'synthetic_formal_app', formUuid: 'synthetic_formal_form' } } }
+  }
+  async function addFormalTarget(draftInput: Input) {
+    const draft = await first.draft.createDraft(draftInput), secret = await first.material.create({ material: material() })
+    const writer = createAdditionalWriter({ security, context: context() })
+    const slot2 = await (first.db as { transaction<T>(callback: (trx: { setTransactionIsolationLevel(level: string): Promise<void> }) => Promise<T>): Promise<T> })
+      .transaction(async trx => {
+        await trx.setTransactionIsolationLevel('read committed')
+        return writer(trx, { operationId: draft.operationId, credentialRef: secret.credentialRef,
+          credentialGeneration: secret.credentialGeneration, attestation: { kind: 'owner-reviewed-target', reviewRef: 'synthetic-review',
+            organizationId: 'synthetic-organization', executionIdentity: 'synthetic-executor' } })
+      })
+    expect(slot2.slot).toBe(2)
+    return { draft, slot2 }
+  }
+
+  it('CF2 (early rejection): a re-created record with the same key and project and a changed name is refused at approval with IDENTITY_RESERVED; the ACKed row, its audit and the form stay untouched', async () => {
+    await registerProject()
+    const f = await fixture(boundInput())
+    const granted = await first.service.approve(f.request)
+    const admitted = await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' })
+    await acknowledge(f, admitted)
+    const before = await evidence()
+    // R deleted, re-created as R′ (new record id) with the description corrected: same key value, same project.
+    const corrected = input(); const rows = JSON.parse(corrected.rowsText) as Row[]
+    rows[0].description = 'synthetic corrected approval part'; corrected.rowsText = JSON.stringify(rows)
+    const recreated = await second.draft.createDraft(boundInput(corrected, [{ recordId: 'rec_recreated', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }]))
+    expect(recreated.operationId).not.toBe(f.draft.operationId)
+    const members = await tableRows(MEMBERS)
+    const original = members.find(row => row.operation_id === f.draft.operationId)!, moved = members.find(row => row.operation_id === recreated.operationId)!
+    expect(moved.creation_identity_digest === original.creation_identity_digest && moved.source_record_digest !== original.source_record_digest).toBe(true)
+    // The seven keys did NOT change here (description is not a key); the identity fence answers before the seven-key fence could.
+    await rejected(second.service.approve({ operationId: recreated.operationId, rowKey: recreated.rows[0].rowKey, confirmationId: 'synthetic-recreated-confirmation' }), 'IDENTITY_RESERVED')
+    // Same record re-created on another registered sheet (registration moved): refused the same way.
+    await owner.query(`UPDATE ${ident(REGISTRY)} SET sheet_id = 'sheet_moved'`)
+    const movedSheet = await second.draft.createDraft({ ...boundInput(corrected, [{ recordId: 'rec_moved', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }]),
+      sourceBinding: { ...boundInput(corrected).sourceBinding, sheetId: 'sheet_moved', records: [{ recordId: 'rec_moved', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }] } })
+    await rejected(second.service.approve({ operationId: movedSheet.operationId, rowKey: movedSheet.rows[0].rowKey, confirmationId: 'synthetic-moved-confirmation' }), 'IDENTITY_RESERVED')
+    expect(await evidence()).toEqual(before)
+    expect(before.counts).toEqual([1, 0, 1, 2, 1, 3])
+  })
+
+  it('CF2 (index): a grant approved before the first row was admitted hits the identity fence at its own admission; one ledger row, no second attempt', async () => {
+    await registerProject()
+    const f = await fixture(boundInput())
+    // R′: approved while X is only approved (the ledger is still empty, so the early check cannot see anything). Its
+    // parent code is corrected as well: a NEW seven-key digest, so the seven-key fence cannot answer for it and only
+    // the identity index can (the identity is the key value and the project, which are unchanged).
+    const corrected = input('original', 9); const rows = JSON.parse(corrected.rowsText) as Row[]
+    rows[0].description = 'synthetic corrected approval part'; rows[0].parentCode = 'PARENT-RECREATED'; corrected.rowsText = JSON.stringify(rows)
+    const recreated = await second.draft.createDraft(boundInput(corrected, [{ recordId: 'rec_recreated', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }]))
+    const members = await tableRows(MEMBERS)
+    const original = members.find(row => row.operation_id === f.draft.operationId)!, moved = members.find(row => row.operation_id === recreated.operationId)!
+    expect(moved.creation_identity_digest === original.creation_identity_digest && moved.business_key_digest !== original.business_key_digest).toBe(true)
+    const laterGrant = await second.service.approve({ operationId: recreated.operationId, rowKey: recreated.rows[0].rowKey, confirmationId: 'synthetic-recreated-confirmation' })
+    const granted = await first.service.approve(f.request)
+    const admitted = await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' })
+    await acknowledge(f, admitted)
+    const before = await evidence()
+    // The index decides: the admission of R′ rolls back (closed by the private port), the grant stays approved with its attempt.
+    await rejected(second.service.admit({ grantId: laterGrant.grantId, submissionId: 'synthetic-recreated-submission' }))
+    expect(await evidence()).toEqual(before)
+    const view = await second.service.inspect({ grantId: laterGrant.grantId })
+    expect([view.status, view.remainingAttempts, view.ledgerId]).toEqual(['approved', 1, null])
+    expect(before.counts).toEqual([2, 0, 1, 3, 1, 3])
+  })
+
+  it('RA3 / D20: a formal target refuses an unbound draft at approval and at admission; slot 1 and an exact-listed test target still take it', async () => {
+    await owner.query(multiTargetUp)
+    const f = await fixture()
+    // Slot 2: a second owner-attested target (the formal form), registered through the Y2 writer; its pasted draft is unbound.
+    const { draft, slot2 } = await addFormalTarget(formalInput())
+    const multi = await session(context(), { multiTarget: true })
+    const before = await evidence()
+    // The pasted (unbound) draft of slot 2: approval refused, no grant row.
+    await rejected(multi.service.approve({ operationId: draft.operationId, rowKey: draft.rows[0].rowKey,
+      confirmationId: 'synthetic-slot2-confirmation', targetRef: slot2.targetRef }), 'CONFLICT')
+    expect(await evidence()).toEqual(before)
+    // The same unbound draft of slot 1 (the material TEST copy) is approved as before.
+    const onTest = await multi.service.approve({ ...f.request, targetRef: f.targetRef })
+    expect(onTest.status).toBe('approved')
+    // A target listed in INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS takes the unbound row.
+    const listed = await session(context(), { multiTarget: true, unboundTestTargetRefs: new Set([slot2.targetRef]) })
+    const onListed = await listed.service.approve({ operationId: draft.operationId, rowKey: draft.rows[0].rowKey,
+      confirmationId: 'synthetic-slot2-confirmation', targetRef: slot2.targetRef })
+    expect([onListed.status, onListed.targetRef]).toEqual(['approved', slot2.targetRef])
+    // The list is read per run: a run without the listing refuses the admission of that grant, nothing written.
+    const grants = await evidence()
+    await rejected(multi.service.admit({ grantId: onListed.grantId, submissionId: 'synthetic-slot2-submission' }), 'CONFLICT')
+    expect(await evidence()).toEqual(grants)
+    expect(grants.counts).toEqual([2, 0, 0, 2, 0, 0])
+    const admitted = await listed.service.admit({ grantId: onListed.grantId, submissionId: 'synthetic-slot2-submission' })
+    expect(admitted.status).toBe('admitted')
+    expect((await tableRows(LEDGER)).map(row => [row.source_record_digest, row.creation_identity_digest])).toEqual([[null, null]])
+  })
+
+  it('D20 is not a binding bypass: a bound draft on a formal target still needs the registry and the fence covers it', async () => {
+    await owner.query(multiTargetUp)
+    await registerProject()
+    const f = await fixture()
+    const { draft, slot2 } = await addFormalTarget(boundInput(formalInput()))
+    const multi = await session(context(), { multiTarget: true })
+    const granted = await multi.service.approve({ operationId: draft.operationId, rowKey: draft.rows[0].rowKey,
+      confirmationId: 'synthetic-slot2-confirmation', targetRef: slot2.targetRef })
+    const admitted = await multi.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-slot2-submission' })
+    const ledger = (await tableRows(LEDGER)).find(row => row.id === admitted.ledgerId)!
+    expect(/^[0-9a-f]{64}$/.test(String(ledger.creation_identity_digest)) && ledger.target_ref === slot2.targetRef).toBe(true)
+    // The same identity again on this target (another record): IDENTITY_RESERVED at approval.
+    const again = await second.draft.createDraft(boundInput(formalInput(input('original', 9)), [{ recordId: 'rec_again', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }]))
+    const before = await evidence()
+    await rejected(multi.service.approve({ operationId: again.operationId, rowKey: again.rows[0].rowKey,
+      confirmationId: 'synthetic-again-confirmation', targetRef: slot2.targetRef }), 'IDENTITY_RESERVED')
+    expect(await evidence()).toEqual(before)
+    // The fence is per target: the same identity (same key value and project) bound on slot 1 is free there. The early
+    // look-up must scope by target_ref, or this would be a false IDENTITY_RESERVED across targets; the index then takes
+    // the second row because its target differs.
+    const onTest = await second.draft.createDraft(boundInput())
+    const slot1 = await multi.service.approve({ operationId: onTest.operationId, rowKey: onTest.rows[0].rowKey,
+      confirmationId: 'synthetic-slot1-confirmation', targetRef: f.targetRef })
+    expect([slot1.status, slot1.targetRef]).toEqual(['approved', f.targetRef])
+    const admittedOnTest = await multi.service.admit({ grantId: slot1.grantId, submissionId: 'synthetic-slot1-submission' })
+    expect(admittedOnTest.status).toBe('admitted')
+    const ledgerRows = await tableRows(LEDGER)
+    expect(ledgerRows.map(row => row.creation_identity_digest)).toEqual([ledger.creation_identity_digest, ledger.creation_identity_digest])
+    expect(new Set(ledgerRows.map(row => row.target_ref))).toEqual(new Set([slot2.targetRef, f.targetRef]))
   })
 })

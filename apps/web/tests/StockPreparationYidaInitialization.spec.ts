@@ -11,7 +11,7 @@ import StockPreparationYidaInitializationPanel from '../src/components/integrati
 import StockPreparationYidaPreviewPanel from '../src/components/integration/stockPreparation/StockPreparationYidaPreviewPanel.vue'
 import * as initializationService from '../src/services/integration/yidaInitialization'
 import { createYidaInitializationClient, type YidaInitializationInput, type YidaInitializationMaterial, type YidaInitializationState } from '../src/services/integration/yidaInitialization'
-import { createYidaProtocolExample } from '../../../plugins/plugin-integration-core/lib/yida-static-plan.mjs'
+import { createYidaProtocolExample, createYidaTransformExample } from '../../../plugins/plugin-integration-core/lib/yida-static-plan.mjs'
 import type { YidaOwnerDraftInput } from '../src/services/integration/yidaOwner'
 
 // Mocked HTTP/jsdom evidence only: no real JWT validation, deployment anchor,
@@ -145,6 +145,17 @@ describe('Yida initialization explicit local management UI', () => {
     await click('submit'); fetchSpy.mockResolvedValueOnce(json({ ...ready(), commandId: ids.other })); await click('refresh')
     expect(q('error').textContent).toBe('YIDA_INITIALIZATION_RESPONSE_INVALID')
     expect(q('command').textContent).toContain(ids.command); expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+  })
+
+  it('R-71 ⑦.3: a v3 draft input keeps initialization disabled with the reason and never POSTs', async () => {
+    mountPanel()
+    const example = createYidaTransformExample()
+    currentInput.value = { config: example.config, rowsText: example.text, allocation: { ...example.allocation, projects: ['DEMO-P1'] } }
+    await flush(); await observeReady(); await fill()
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(true)
+    expect(q('v3-blocked').textContent).toContain('初始化只接受协议 v2 合同')
+    await click('submit'); expect(fetchSpy).toHaveBeenCalledTimes(1)
+    expect(fetchSpy.mock.calls.every(([, init]) => (init as RequestInit | undefined)?.method !== 'POST')).toBe(true)
   })
 
   it('requires permanent single-slot acknowledgement and compatible original userId without normalization', async () => {

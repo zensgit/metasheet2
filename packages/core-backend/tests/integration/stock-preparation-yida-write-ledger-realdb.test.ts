@@ -259,6 +259,10 @@ describeIfDatabase('SA05B1 Yida delivery ledger — real PostgreSQL, no transpor
     createStore = requireCjs(path.join(pluginLib, 'yida-delivery-store.cjs')).createYidaDeliveryStore
     receiptUnparsed = await import(pathToFileURL(receiptUnparsedMigration).href) as ReceiptUnparsedMigration
     migrationSql = readFileSync(migration, 'utf8') + '\n' + receiptUnparsed.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL
+    // Source binding (design baseline v2.3 §7.2): the ledger part of zzzz20261106110300, exactly what its up() executes.
+    migrationSql += '\n' + ((await import(pathToFileURL(path.join(repoRoot,
+      'packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts')).href)) as
+      { YIDA_SOURCE_BINDING_LEDGER_UP_SQL: string }).YIDA_SOURCE_BINDING_LEDGER_UP_SQL
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 7, connectionTimeoutMillis: 5000 })
     owner = await pool.connect()
     await owner.query("SET statement_timeout = '10s'")

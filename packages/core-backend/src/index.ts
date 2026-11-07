@@ -661,6 +661,9 @@ export class MetaSheetServer {
     readEnablement: () => process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED,
     // Y2 multi-target + sheet source: its own default-OFF switch (exact 'true'), never the send switch.
     readMultiTargetEnablement: () => process.env.INTEGRATION_YIDA_MULTI_TARGET_ENABLED,
+    // D20 (design baseline v2.3): the exact list of target refs that may still take unbound rows besides slot 1.
+    // Default empty: every target other than slot 1 requires a source binding.
+    readUnboundTestTargetRefs: () => process.env.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS,
   })
   // Local initialization is an independent authority, not the send switch or
   // an existing target owner check. The immutable server anchor and live ACL
