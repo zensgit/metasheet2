@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto'
 
 import { carryHumanWriteLock, humanWriteLockKindOfProperty } from './human-write-lock'
 import { carryManualRowPolicy, manualRowsPolicyValueOf } from './stock-preparation-manual-rows'
+import { carryPullBatchBandMarker, hasPullBatchBandMarkerKey } from './stock-preparation-pull-batch-band'
 
 type QueryFn = (text: string, params: unknown[]) => Promise<{ rows: unknown[] }>
 
@@ -27,17 +28,20 @@ type QueryFn = (text: string, params: unknown[]) => Promise<{ rows: unknown[] }>
  *
  * The manual-rows switch (`stockPreparationManualRows` on a project sheet's key column, stock-preparation-manual-rows.ts;
  * ADR adr-stock-prep-manual-rows-20261030 §4) follows the same rule: the STORED value wins, so a revert can neither
- * turn manual rows off nor back on. A field with neither key on either side is still returned untouched.
+ * turn manual rows off nor back on. The pull-batch band marker (`stockPreparationPullBatch`, stock-preparation-pull-batch-band.ts;
+ * R-65) too: a revert can neither drop a band nor forge one. A field with none of the keys on either side is still
+ * returned untouched.
  */
 export function fieldRevertPropertyKeepingLock(storedProperty: unknown, revertProperty: unknown): unknown {
   if (
     !humanWriteLockKindOfProperty(storedProperty) && !humanWriteLockKindOfProperty(revertProperty)
     && manualRowsPolicyValueOf(storedProperty) === null && manualRowsPolicyValueOf(revertProperty) === null
+    && !hasPullBatchBandMarkerKey(storedProperty) && !hasPullBatchBandMarkerKey(revertProperty)
   ) return revertProperty
   const base = revertProperty && typeof revertProperty === 'object' && !Array.isArray(revertProperty)
     ? (revertProperty as Record<string, unknown>)
     : {}
-  return carryManualRowPolicy(storedProperty, carryHumanWriteLock(storedProperty, base))
+  return carryPullBatchBandMarker(storedProperty, carryManualRowPolicy(storedProperty, carryHumanWriteLock(storedProperty, base)))
 }
 
 export interface ConfigRevisionRow {
