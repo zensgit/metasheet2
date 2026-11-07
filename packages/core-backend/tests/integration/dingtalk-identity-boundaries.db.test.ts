@@ -13,6 +13,7 @@ const clientMocks = vi.hoisted(() => ({
 vi.mock('../../src/integrations/dingtalk/client', () => clientMocks)
 import { query } from '../../src/db/pg'
 import { bindDingTalkIdentityToUser, exchangeCodeForUser, exchangeEnterpriseAuthCodeForUser } from '../../src/auth/dingtalk-oauth'
+import { bumpSubjectAuthorizationVersions } from '../../src/multitable/authz-version-protocol'
 
 if (!process.env.DATABASE_URL) throw new Error('DingTalk identity boundary gate requires DATABASE_URL')
 const RUN = `dt-boundary-${randomUUID()}`
@@ -80,6 +81,10 @@ async function committedRace(id: string, write: (holder: pg.Client) => Promise<u
   let pending: Promise<{ error: unknown; value?: unknown }> | undefined
   try {
     await holder.query('BEGIN')
+    // D21 (Y5a): the holder stands in for a production access-graph writer, which bumps the subject
+    // authorization version row BEFORE its users FOR UPDATE (the mutex order); a holder that took the
+    // users row first and then wrote an authority column would deadlock the operation on purpose.
+    await bumpSubjectAuthorizationVersions(holder, [id])
     await holder.query('SELECT id FROM users WHERE id=$1 FOR UPDATE', [id])
     const pid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
     let settled = false
@@ -94,7 +99,9 @@ async function committedRace(id: string, write: (holder: pg.Client) => Promise<u
     }
     expect(settled, 'operation must still be waiting for the canonical user lock').toBe(false)
     expect(waiting).toHaveLength(1)
-    expect(waiting[0].query).toMatch(/FROM users[\s\S]*FOR UPDATE/i)
+    // The operation blocks on the mutex's first protocol statement (the subject version bump the
+    // holder already holds), or on the users row itself.
+    expect(waiting[0].query).toMatch(/INSERT INTO subject_authorization_versions|FROM users[\s\S]*FOR UPDATE/i)
     await write(holder)
     await holder.query('COMMIT')
     return await pending

@@ -79,7 +79,8 @@ function instanceId(value) {
 }
 
 function planRow(config, row, expectedInstanceId) {
-  if (!config || config.version !== 2) fail('PLAN')
+  // R-71 ⑦.3 decision H: v2 or v3 (a seam for the ⑦.5 cut-over reconciliation; no runtime caller).
+  if (!config || ![2, 3].includes(config.version)) fail('PLAN')
   let plan
   try { plan = buildYidaStaticPlan({ config, rows: [row] }) } catch { fail('PLAN') }
   const planned = plan.rows[0]
@@ -121,10 +122,16 @@ export function compareYidaReadback(input) {
   if (observation.instanceId !== expectedInstanceId) return result('inconclusive', counts, ['INSTANCE_MISMATCH'])
 
   const emptySources = new Set(config.emptyKeyFields)
-  const keyTargets = new Map(config.businessKey.map((source) => {
-    const target = config.fieldMap.find((entry) => entry.source === source).target
-    return [target, { source, allowsEmpty: emptySources.has(source) }]
-  }))
+  // v2 names key parts by source column; v3 by direct TARGET, whose own entry names the column.
+  const keyTargets = config.version === 3
+    ? new Map(config.businessKey.map((target) => {
+      const source = config.fieldMap.find((entry) => entry.transform === 'direct' && entry.target === target).source
+      return [target, { source, allowsEmpty: emptySources.has(target) }]
+    }))
+    : new Map(config.businessKey.map((source) => {
+      const target = config.fieldMap.find((entry) => entry.source === source).target
+      return [target, { source, allowsEmpty: emptySources.has(source) }]
+    }))
   const fields = new Set([...Object.keys(planned.payload), ...keyTargets.keys()])
   for (const target of fields) {
     counts.comparedFieldCount += 1

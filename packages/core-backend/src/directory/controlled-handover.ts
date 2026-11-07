@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { transaction } from '../db/pg'
 import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
 import { lockUsersForAccessGraphWrite } from './access-graph-mutex'
+import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
 
 type Row = Record<string, unknown>
 type Client = {
@@ -90,6 +91,13 @@ async function lockPair(c: Client, p: Pair, actorId: string): Promise<void> {
     ...users.rows.map((r) => String(r.local_user_id)),
     actorId,
   ].sort()
+  // D21 (Y5a): the subject authorization version rows FIRST (sorted), before any users-row lock.
+  // The access-graph mutex below bumps them too, but only AFTER the NOWAIT probe had taken the
+  // users rows — users → subject, the reverse of an admission's subject → users — which is the one
+  // holder-vs-writer cycle the protocol forbids. The handover therefore now WAITS here behind an
+  // in-flight admission or protocol-following writer; the NOWAIT probe then runs against released
+  // users rows and keeps its fail-fast meaning for every other concurrent users-row holder.
+  await bumpSubjectAuthorizationVersions(c, userIds)
   await c.query(
     'SELECT id FROM users WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE NOWAIT',
     [userIds],

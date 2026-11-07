@@ -61,6 +61,7 @@
 import type { Response } from 'express'
 import { Logger } from '../core/logger'
 import { query as poolQuery } from '../db/pg'
+import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
 import { jsonError } from '../util/response'
 import {
   deriveDelegatedAdminNamespace,
@@ -574,6 +575,11 @@ export async function assignUserRoles(options: {
 
   const executor = executorOf(options.executor)
   await assertDelegatedRoleCodesAssignable(executor, roleId, options.scope, 'assign')
+  // D21 (Y5a): the subject version rows of every affected user, sorted, in one statement, right
+  // before the membership write. AFTER the `roles FOR SHARE` review on purpose: `roles` is not in
+  // the admission holder's lock set, while the role editor takes `roles FOR UPDATE` first and then
+  // unassigns members — bumping before the role lock would put two admin routes in a cycle.
+  await bumpSubjectAuthorizationVersions(executor, userIds)
   const result = await executor.query(
     `INSERT INTO user_roles (user_id, role_id)
      SELECT unnest($1::text[]), $2
@@ -617,6 +623,10 @@ export async function unassignUserRoles(options: {
 
   const executor = executorOf(options.executor)
   await assertDelegatedRoleCodesAssignable(executor, roleId, options.scope, 'unassign')
+  // D21 (Y5a): same canonical sorted bump as assignUserRoles, so two concurrent multi-user
+  // revocations acquire the subject rows in one global order (a plain multi-row DELETE would bump
+  // them in scan order through the trigger).
+  await bumpSubjectAuthorizationVersions(executor, userIds)
   const result = await executor.query(
     `DELETE FROM user_roles
      WHERE role_id = $2 AND user_id = ANY($1::text[])

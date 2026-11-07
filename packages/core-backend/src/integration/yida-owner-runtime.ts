@@ -4,6 +4,7 @@ import {
   createInternalYidaSendExecutionAuthority,
   yidaSendApprovalErrorCode,
   type YidaSendExecutionPrimitives,
+  type YidaSourceBindingReauthorizer,
 } from './yida-send-approval-service'
 
 // Host private: authentication supplies actor, and the actual core authority
@@ -28,8 +29,16 @@ export type YidaOwnerRuntimeDependencies = {
   // Y2: INTEGRATION_YIDA_MULTI_TARGET_ENABLED, read per call (exact 'true'). Absent or anything else =
   // the original single-target authority: no targetRef accepted, slot 1 only. Never send authority.
   readMultiTargetEnablement?: () => unknown
+  // D20 (design baseline v2.3 §3.3/§7.2): INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS, an exact comma-separated
+  // list of target refs that, like slot 1 (the material TEST copy, R-71 decision 1), may still take unbound
+  // rows. Read per call; absent, empty or malformed = no such target. Every other target requires binding.
+  readUnboundTestTargetRefs?: () => unknown
+  // D21 (design baseline v2.3 §7.2): the host's in-transaction re-authorization of a bound row, run by the core
+  // service inside its approval and admission transactions (yida-source-reauthorization-host.ts). Captured once;
+  // absent = the service refuses every bound row (fail closed). Never authority for an unbound (pasted) row.
+  reauthorizeSourceBinding?: YidaSourceBindingReauthorizer
 }
-export type YidaOwnerPrepareDraftInput = Readonly<{ config: unknown; rowsText: string; allocation?: unknown; targetRef?: string }>
+export type YidaOwnerPrepareDraftInput = Readonly<{ config: unknown; rowsText: string; allocation?: unknown; targetRef?: string; sourceBinding?: unknown }>
 export type YidaOwnerProveDraftOwnerInput = Readonly<{ targetRef?: string }>
 export type YidaOwnerPreviewInput = Readonly<{ operationId: string; rowKey: string; targetRef?: string }>
 export type YidaOwnerApproveInput = YidaOwnerPreviewInput & Readonly<{ confirmationId: string; ttlMs?: number }>
@@ -39,6 +48,7 @@ type Code = 'INPUT' | 'DISABLED' | 'INACTIVE' | 'UNAVAILABLE' | 'CANCELLED'
 const CODES = new Set<unknown>(['INPUT', 'DISABLED', 'INACTIVE', 'UNAVAILABLE', 'CANCELLED'])
 const ownErrors = new WeakMap<object, Code>()
 const MAX_RUNS = 32
+const TARGET_REF = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const META = ['grantId', 'operationId', 'rowKey', 'targetRef', 'approvedAt', 'expiresAt',
   'maxAttempts', 'remainingAttempts', 'status', 'revoked', 'admissionId', 'ledgerId', 'canSend', 'externalWriteAttempted']
 const DELIVERY_STATES = new Set(['prepared', 'dispatching', 'acknowledged', 'outcome_unknown', 'not_sent'])
@@ -158,8 +168,12 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
   const fetcher = dependencies.fetch
   const readEnablement = dependencies.readEnablement ?? (() => 'false')
   const readMultiTarget = dependencies.readMultiTargetEnablement ?? (() => 'false')
+  const readUnboundTestTargetRefs = dependencies.readUnboundTestTargetRefs ?? (() => undefined)
+  const reauthorizeSourceBinding = dependencies.reauthorizeSourceBinding
   const timeoutMs = dependencies.timeoutMs ?? 10000
   if (typeof fetcher !== 'function' || typeof readEnablement !== 'function' || typeof readMultiTarget !== 'function'
+    || typeof readUnboundTestTargetRefs !== 'function'
+    || (reauthorizeSourceBinding !== undefined && (typeof reauthorizeSourceBinding !== 'function' || types.isProxy(reauthorizeSourceBinding)))
     || !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 60000) fail('INPUT')
   // Exact literal, never coerced; a throwing or async switch is OFF.
   function multiTargetOn(): boolean {
@@ -168,6 +182,18 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
     const on = flag === 'true'
     if (!on) consumeRejection(flag)
     return on
+  }
+  // D20 allowlist, exact list: comma-separated target refs (UUIDs), each byte-exact (no trim, no case folding).
+  // Anything else (a throwing or async reader, an empty entry, a non-UUID entry) is the empty list, so a
+  // malformed value can only make formal targets stricter, never admit an unbound row.
+  function unboundTestTargetRefs(): ReadonlySet<string> {
+    let value: unknown
+    try { value = readUnboundTestTargetRefs() } catch { return new Set() }
+    if (typeof value !== 'string') { consumeRejection(value); return new Set() }
+    if (value === '') return new Set()
+    const entries = value.split(',')
+    if (entries.some(entry => !TARGET_REF.test(entry))) return new Set()
+    return new Set(entries)
   }
   let active: Registration | undefined, capabilityGeneration = 0, terminal = false
   let terminalDrain: Promise<void> | undefined
@@ -249,7 +275,8 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
           checkpoint()
           // Captured once per run: a switch flip mid-run cannot widen this authority.
           const authority = createInternalYidaSendExecutionAuthority({ database, security, context, primitives,
-            ...(multiTargetOn() ? { multiTarget: true } : {}) })
+            ...(multiTargetOn() ? { multiTarget: true } : {}), unboundTestTargetRefs: unboundTestTargetRefs(),
+            ...(reauthorizeSourceBinding ? { reauthorizeSourceBinding } : {}) })
           checkpoint()
           return await checked(() => work(authority, state, context, checkpoint, controller.signal, tracked))
         } catch (error) {
@@ -314,9 +341,12 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
     },
     prepareDraft(context: YidaOwnerActor, supplied: YidaOwnerPrepareDraftInput) {
       return input(() => {
-        const parsed = record(supplied, ['config', 'rowsText', 'allocation', 'targetRef'], ['config', 'rowsText'])
+        const parsed = record(supplied, ['config', 'rowsText', 'allocation', 'targetRef', 'sourceBinding'], ['config', 'rowsText'])
         if (typeof parsed.rowsText !== 'string' || Buffer.byteLength(parsed.rowsText, 'utf8') > 16 * 1024 * 1024) fail('INPUT')
         if (Object.hasOwn(parsed, 'targetRef')) { if (!multiTargetOn()) fail('INPUT'); id(parsed.targetRef) }
+        // A source binding exists only on the multi-target sheet-source path (D17 a); the route produces it, a
+        // request body cannot. The plugin compiler owns its closed shape.
+        if (Object.hasOwn(parsed, 'sourceBinding') && !multiTargetOn()) fail('INPUT')
         return parsed
       }, parsed => execute(context, {}, true, authority => authority.prepareDraft(parsed)))
     },
