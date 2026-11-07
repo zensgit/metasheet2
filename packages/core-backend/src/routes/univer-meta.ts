@@ -182,6 +182,7 @@ import {
   stripManualRowPolicyKey,
   withManualRowPolicyKey,
 } from '../multitable/stock-preparation-manual-rows'
+import { carryPullBatchBandMarker, stripPullBatchBandMarker } from '../multitable/stock-preparation-pull-batch-band'
 import {
   assertManualRowEditInTransaction,
   assertManualRowsAllowed,
@@ -6365,7 +6366,8 @@ async function normalizeFieldWriteInput(
     // write lock (human-write-lock.ts). PATCH re-applies the STORED lock afterwards (`carryHumanWriteLock`),
     // so a person can never clear it either. Only plugin provisioning writes it. The manual-rows switch
     // (stock-preparation-manual-rows.ts) follows the same rule: stripped here, the STORED value carried by PATCH.
-    property: stripManualRowPolicyKey(stripHumanWriteLockKey(sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty))),
+    // The pull-batch band marker (stock-preparation-pull-batch-band.ts, R-65) too: a person can never forge a band.
+    property: stripPullBatchBandMarker(stripManualRowPolicyKey(stripHumanWriteLockKey(sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty)))),
   }
 }
 
@@ -14824,7 +14826,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // changed or omitted). No administrator override — only plugin provisioning changes it. The manual-rows
         // switch is carried the same way (ADR adr-stock-prep-manual-rows-20261030 §4: only the plugin's switch route
         // writes it).
-        const nextProperty = carryManualRowPolicy(row.property, carryHumanWriteLock(row.property, normalizedNextProperty))
+        // The pull-batch band marker likewise (R-65): a body without it can never drop it, a body with it never sets it.
+        const nextProperty = carryPullBatchBandMarker(row.property, carryManualRowPolicy(row.property, carryHumanWriteLock(row.property, normalizedNextProperty)))
         const desiredOrder = parsed.data.order
         const configBatchId = randomUUID() // T9-R1: one batchId per request — the updated field + any shifted fields share it
 
@@ -15010,7 +15013,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (fieldRowChangedSince(validated, locked)) throw new FieldChangedConcurrentlyError()
         // Equal to `nextProperty` after the compare; carried from the locked row so the stored lock and switch can never
         // be dropped by a stale read even if the compare were weakened.
-        const writeProperty = carryManualRowPolicy(locked.property, carryHumanWriteLock(locked.property, nextProperty))
+        const writeProperty = carryPullBatchBandMarker(locked.property, carryManualRowPolicy(locked.property, carryHumanWriteLock(locked.property, nextProperty)))
         // `order` is not compared (a sibling's shift moves this row during a shared drag): a PATCH without `order`
         // keeps the row's CURRENT order instead of writing back the one it read.
         const nextOrder = typeof desiredOrder === 'number' ? desiredOrder : Number(locked.order ?? 0)

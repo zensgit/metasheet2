@@ -79,6 +79,7 @@ const ALLOWLIST: Readonly<Record<string, AllowlistEntry>> = {
   'admin-directory-department-bindings.ts': { since: SINCE, echo: 'none', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} Three 500s, ${FIXED_500S}` },
   'admin-directory-routing-policy.ts': { since: SINCE, echo: 'none', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} Three 500s, ${FIXED_500S}` },
   'admin-directory-org-transfers.ts': { since: SINCE, echo: 'none', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} Its one 500 (handleOrgTransferError) sends the fixed fallbackMessage and logs fixed metadata only; 4xx carry typed messages; the scanner finds no echo (h).` },
+  'admin-directory-capabilities.ts': { since: '2026-11-06', echo: 'none', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} Read-only display route; its one 500 is the fixed sentence DIRECTORY_CAPABILITIES_INTERNAL and the log line carries the error class and SQLSTATE only; the scanner finds no echo (h).` },
   'canary-routes.ts': { since: SINCE, echo: 'none', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} 6 fixed-status 5xx branches with literal bodies; the scanner finds no echo (h).` },
   'permissions.ts': { since: SINCE, echo: 'none', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} Mounted path-less; defines /api/admin/permission-templates and …/apply. 12 fixed-status 5xx branches with literal bodies; the scanner finds no echo (h).` },
 }
@@ -90,6 +91,7 @@ const EXPECTED_IN_SCOPE: readonly string[] = [
   '/api/admin/directory/org-transfers -> admin-directory-org-transfers.ts',
   '/api/admin/directory/department-bindings -> admin-directory-department-bindings.ts',
   '/api/admin/directory/routing-policy -> admin-directory-routing-policy.ts',
+  '/api/admin/directory/integration-capabilities -> admin-directory-capabilities.ts',
 ]
 
 /** Where index.ts hands `this.app` to something else (g): the HTTP server, metrics, and the API gateway (which mounts its own router at '/api'). */
