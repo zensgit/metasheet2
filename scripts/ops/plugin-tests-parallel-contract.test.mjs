@@ -53,7 +53,7 @@ const directoryClientLintStep = {
   name: 'Run DingTalk directory client lint',
   if: "matrix.node-version == '20.x'",
   'working-directory': 'packages/core-backend',
-  run: 'pnpm exec eslint --no-cache src/integrations/dingtalk/client.ts src/integrations/dingtalk/directory-response-ids.ts src/directory/directory-sync.ts src/directory/directory-department-cycle.ts',
+  run: 'pnpm exec eslint --no-cache src/integrations/dingtalk/client.ts src/integrations/dingtalk/directory-response-ids.ts src/directory/directory-sync.ts src/directory/directory-department-cycle.ts src/directory/directory-adapter.ts src/directory/directory-adapter-registry.ts src/directory/adapters/index.ts src/directory/adapters/dingtalk-directory-adapter.ts src/directory/directory-user-pagination.ts src/directory/department-manager-enrichment.ts',
 }
 
 function resultUpload(suite) {
@@ -238,6 +238,7 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name)['working-directory'] = '.' },
     doc => { const steps = doc.jobs.unit.steps; const index = steps.findIndex(step => step.name === directoryClientLintStep.name); [steps[index - 1], steps[index]] = [steps[index], steps[index - 1]] },
     doc => { doc.jobs.unit.steps.push(structuredClone(directoryClientLintStep)) },
+    doc => { const step = doc.jobs.unit.steps.find(s => s.name === directoryClientLintStep.name); assert.ok(step.run.includes(' src/directory/adapters/dingtalk-directory-adapter.ts')); step.run = step.run.replace(' src/directory/adapters/dingtalk-directory-adapter.ts', '') },
     doc => { doc.jobs.unit.steps.pop() },
     doc => { doc.jobs.unit.steps.find(step => step.name === 'Run core-backend tests').run += ' -t selected' },
     doc => { doc.jobs['attendance-db'].steps.find(step => step.id === 'attendance-real-db-integration').if = false },
