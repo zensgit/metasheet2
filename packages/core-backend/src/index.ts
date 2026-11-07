@@ -264,6 +264,7 @@ import { pendingSourceRegistry } from './services/pending-source-registry'
 import { approvalPendingSource } from './services/approval-pending-source'
 import { taskPendingSource } from './services/task-pending-source'
 import { authRouter } from './routes/auth'
+import { securityActionParseErrorHandler, securityActionsRouter } from './routes/security-actions'
 import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
 import { approvalMetricsRouter } from './routes/approval-metrics'
@@ -407,6 +408,7 @@ import { adminDirectoryRouter } from './routes/admin-directory'
 import { adminDirectoryLocalRouter } from './routes/admin-directory-local'
 import { adminDirectoryDepartmentBindingsRouter } from './routes/admin-directory-department-bindings'
 import { adminDirectoryRoutingPolicyRouter } from './routes/admin-directory-routing-policy'
+import { adminDirectoryCapabilitiesRouter } from './routes/admin-directory-capabilities'
 import { adminDirectoryOrgTransfersRouter } from './routes/admin-directory-org-transfers'
 import { startDirectorySyncScheduler, stopDirectorySyncScheduler } from './directory/directory-sync-scheduler'
 import { canaryRoutes } from './routes/canary-routes'
@@ -2040,6 +2042,14 @@ export class MetaSheetServer {
 
     // 路由：认证（登录/注册/token管理）
     this.app.use('/api/auth', authRouter)
+    // Security action verification; mounted only when SECURITY_ACTION_PROOF_ENABLED is exactly 'true'.
+    // The error handler answers a failure raised before the route handler, on this prefix and under
+    // the route's own contract, only for a request with a session context; any other is passed on.
+    const securityActionRoutes = securityActionsRouter()
+    if (securityActionRoutes) {
+      this.app.use('/api/auth/security-actions', securityActionRoutes)
+      this.app.use('/api/auth/security-actions', securityActionParseErrorHandler)
+    }
 
     // 路由：审批填单草稿（P3-3，服务端存储）— registered BEFORE approvalsRouter() below: its list
     // endpoint is `GET /api/approvals/form-drafts` (a single literal path segment), which would
@@ -2243,6 +2253,7 @@ export class MetaSheetServer {
     this.app.use('/api/admin/directory/local', adminDirectoryLocalRouter())
     this.app.use('/api/admin/directory/department-bindings', adminDirectoryDepartmentBindingsRouter())
     this.app.use('/api/admin/directory/routing-policy', adminDirectoryRoutingPolicyRouter())
+    this.app.use('/api/admin/directory/integration-capabilities', adminDirectoryCapabilitiesRouter())
 
     // Canary routing (behind ENABLE_CANARY_ROUTING feature flag)
     const canaryEnabled = process.env.ENABLE_CANARY_ROUTING === 'true'
