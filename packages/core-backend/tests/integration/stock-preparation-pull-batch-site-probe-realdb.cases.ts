@@ -128,7 +128,10 @@ export function defineStockPreparationPullBatchSiteProbeRealDbCases(): void {
     // One row: created through the host records API (projectNo only), then its stored cells and envelope shaped directly.
     async function seed(sheet: Sheet, cells: Record<string, unknown>, envelope: { creator?: string; createdAt?: string; locked?: boolean; projectNo?: string | null } = {}) {
       const projectNo = envelope.projectNo === undefined ? sheet.projectNo : envelope.projectNo
-      const created = await multitable.records.createRecord({ sheetId: sheet.sheetId, data: projectNo === null ? {} : { [sheet.fields.projectNo]: projectNo } })
+      // A row WITHOUT a project is created with a placeholder project and the cell removed afterwards (the column is
+      // required on create).
+      const created = await multitable.records.createRecord({ sheetId: sheet.sheetId, data: { [sheet.fields.projectNo]: projectNo === null ? `BIP-PLACEHOLDER-${TOKEN}` : projectNo } })
+      if (projectNo === null) await q('UPDATE meta_records SET data = data - $2::text WHERE id = $1', [created.id, sheet.fields.projectNo])
       const patch: Record<string, unknown> = {}
       for (const [logical, value] of Object.entries(cells)) {
         const physical = sheet.fields[logical]
@@ -216,8 +219,8 @@ export function defineStockPreparationPullBatchSiteProbeRealDbCases(): void {
           [`rec_bip_trash_${projectNo}`, main.sheetId, JSON.stringify({ [main.fields.projectNo]: projectNo })])
       }
       // A sheet copy of the project sheet (live, two rows, one with the source creator) and a soft-deleted copy of the copy.
-      await q(`INSERT INTO meta_sheets (id, base_id, name, copied_from_sheet_id, copied_from_kind, copied_at) SELECT $1, base_id, 'bip copy', $2, 'plugin-managed', '2026-10-07T00:00:00Z' FROM meta_sheets WHERE id = $2`, [copyIds[0], main.sheetId])
-      await q(`INSERT INTO meta_sheets (id, base_id, name, copied_from_sheet_id, copied_from_kind, copied_at) SELECT $1, base_id, 'bip copy 2', $2, 'user', '2026-10-08T00:00:00Z' FROM meta_sheets WHERE id = $2`, [copyIds[1], copyIds[0]])
+      await q(`INSERT INTO meta_sheets (id, base_id, name, copied_from_sheet_id, copied_from_kind, copied_at) SELECT $1, base_id, 'bip copy', $2, 'plugin-managed', $3::timestamptz FROM meta_sheets WHERE id = $2`, [copyIds[0], main.sheetId, '2026-10-07T00:00:00Z'])
+      await q(`INSERT INTO meta_sheets (id, base_id, name, copied_from_sheet_id, copied_from_kind, copied_at) SELECT $1, base_id, 'bip copy 2', $2, 'user', $3::timestamptz FROM meta_sheets WHERE id = $2`, [copyIds[1], copyIds[0], '2026-10-08T00:00:00Z'])
       await q(`UPDATE meta_sheets SET deleted_at = now() WHERE id = $1`, [copyIds[1]])
       sheets.push(...copyIds)
       await q(`INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1, $2, '{}'::jsonb, 1, 'u_bip_src'), ($3, $2, '{}'::jsonb, 1, NULL)`, [`rec_bip_c1_${TOKEN}`, copyIds[0], `rec_bip_c2_${TOKEN}`])
@@ -254,12 +257,16 @@ export function defineStockPreparationPullBatchSiteProbeRealDbCases(): void {
       return false
     }
 
+    // The context route's order (`created_at ASC`), compared at the database's own (microsecond) precision.
     async function firstViewOf(sheet: Sheet): Promise<{ firstView: string; atFirst: number }> {
-      const rows = (await q('SELECT id, created_at FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC', [sheet.sheetId])).rows as Array<{ id: string; created_at: Date }>
-      const atFirst = rows.filter((row) => row.created_at.getTime() === rows[0].created_at.getTime()).length
-      if (atFirst > 1) return { firstView: 'tie', atFirst }
+      const row = (await q(
+        'SELECT count(*)::int AS n, array_agg(id) AS ids FROM meta_views WHERE sheet_id = $1 AND created_at = (SELECT min(created_at) FROM meta_views WHERE sheet_id = $1)',
+        [sheet.sheetId],
+      )).rows[0] as { n: number; ids: string[] | null }
+      if (row.n === 0) return { firstView: 'none', atFirst: 0 }
+      if (row.n > 1) return { firstView: 'tie', atFirst: row.n }
       const byId = new Map(['default', 'prep-fill', 'prep-todo'].map((logical) => [sha1Id('view', PROJECT_ID, sheet.objectId, logical), logical]))
-      return { firstView: byId.get(rows[0].id) || 'other', atFirst }
+      return { firstView: byId.get(row.ids![0]) || 'other', atFirst: 1 }
     }
 
     test('BI-PROBE-RD-01 every number on the project line equals the fixture; the first view is the context route\'s; copies are listed; the default output is values-free', async () => {
