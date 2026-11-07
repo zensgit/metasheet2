@@ -168,6 +168,11 @@ import type {
 import { evaluateConditions, normalizeConditionFields } from './automation-conditions'
 import type { AutomationTrigger } from './automation-triggers'
 import type { Notification, NotificationResult, NotificationService } from '../types/plugin'
+import {
+  SEND_EMAIL_NOT_SENT_OUTCOME,
+  SEND_EMAIL_OUTCOME_REASONS,
+  mapSendEmailDeliveryOutcome,
+} from '../services/notification-delivery-outcome'
 import { WebhookService } from './webhook-service'
 
 const logger = new Logger('AutomationExecutor')
@@ -5325,10 +5330,40 @@ export class AutomationExecutor {
       }
     }
 
+    // Positive match: only `sent` (provider accepted) is success. A simulated or not-attempted result is a
+    // skipped step (never success, never a transport error); a deferred / unrecognised literal fails closed.
+    const delivery = mapSendEmailDeliveryOutcome(result)
+    if (delivery.outcome === 'sent') {
+      return {
+        actionType: 'send_email',
+        status: 'success',
+        output: {
+          notificationId: result.id,
+          notificationStatus: result.status,
+          recipientCount: recipients.length,
+        },
+      }
+    }
+    if (delivery.outcome === 'failed') {
+      return {
+        actionType: 'send_email',
+        status: 'skipped',
+        output: {
+          outcome: SEND_EMAIL_NOT_SENT_OUTCOME,
+          reason: delivery.reason,
+          notificationId: result.id,
+          notificationStatus: result.status,
+          recipientCount: recipients.length,
+        },
+      }
+    }
     return {
       actionType: 'send_email',
-      status: 'success',
+      status: 'failed',
+      error: `send_email outcome_unknown (${delivery.reason}: deferred or unrecognised notification result); not auto-resent`,
       output: {
+        outcome: 'outcome_unknown',
+        reason: delivery.reason,
         notificationId: result.id,
         notificationStatus: result.status,
         recipientCount: recipients.length,
@@ -5341,15 +5376,18 @@ export class AutomationExecutor {
    * EXACTLY ONCE (at-most-once — no in-call resend on an ambiguous failure), classify, record the outcome
    * (Tx B, guarded single-writer), and map to a step result.
    *
-   * CLASSIFICATION (fail-closed, see the PR body): `NotificationService.send()` catches every transport
-   * error internally and returns `{ status:'failed', failedReason:<REDACTED string> }` (or throws, rarely).
-   * It NEVER surfaces the socket-level error code that would distinguish DEFINITE pre-dispatch non-delivery
-   * (DNS / connection-refused / TLS handshake = nothing left the client) from post-dispatch loss (timeout /
-   * reset after the DATA phase = the message MAY have been delivered). So `classifyOutboundResult` /
-   * `classifyFetchError` are INAPPLICABLE here (there is no HTTP status and no undici code to read). Because
-   * pre-dispatch non-delivery CANNOT be proven, a failed/thrown send maps to `outcome_unknown`, NEVER a plain
-   * `failed` — a plain `failed` is retryable and a resend would risk a DUPLICATE email. Only a non-failed
-   * result is `sent`. There is therefore no `failed` (retryable) terminal state on this path by construction.
+   * CLASSIFICATION (fail-closed; the single mapping is `mapSendEmailDeliveryOutcome`):
+   *   - `sent`  ⇐ ONLY a `NotificationResult.status === 'sent'` (the transport / provider accepted the
+   *     recipients). Matched positively; "not failed" is never success.
+   *   - `failed` (the ledger's retryable literal) ⇐ ONLY when the channel EXPLICITLY reported that nothing was
+   *     attempted: `simulated` (development mock, no transport call) or `cancelled` (no recipient of the
+   *     channel's type / transport disabled). Nothing left the client, so a re-attempt cannot duplicate an
+   *     email; the step is `skipped`, never success. `last_error` carries the closed-set reason token.
+   *   - `outcome_unknown` ⇐ a `failed` result, a throw, `pending` / `scheduled`, or any literal the mapping does
+   *     not know. `NotificationService.send()` catches transport errors and returns a REDACTED reason with no
+   *     socket code, so DEFINITE pre-dispatch non-delivery (DNS / connection-refused / TLS = nothing left the
+   *     client) cannot be told apart from post-dispatch loss (timeout / reset after DATA = MAY have been
+   *     delivered); `classifyOutboundResult` / `classifyFetchError` are inapplicable. Never auto-resent.
    */
   private async executeSendEmailTwoPhase(
     outboundId: OutboundIntentIdentity,
@@ -5370,20 +5408,39 @@ export class AutomationExecutor {
     let sendResult: NotificationResult | null = null
     try {
       sendResult = await notificationService.send(notification)
-      // Fail-closed mapping (see the method doc): only a non-failed result proves the send left the client;
-      // a 'failed' result carries a REDACTED reason with no socket code, so it is un-provable as pre-dispatch
-      // non-delivery ⇒ outcome_unknown (never a false `failed` that would permit a resend / duplicate email).
-      outcome = sendResult.status === 'failed' ? 'outcome_unknown' : 'sent'
-      reason = sendResult.status === 'failed' ? 'email_send_failed' : 'sent'
+      // The single fail-closed mapping (see the method doc): `sent` only on a positive `sent`; explicit
+      // simulated / not-attempted ⇒ `failed` (nothing left the client, retryable); everything else ⇒
+      // outcome_unknown (never a false `failed` that would permit a resend / duplicate email).
+      const delivery = mapSendEmailDeliveryOutcome(sendResult)
+      outcome = delivery.outcome
+      reason = delivery.reason
     } catch {
       // send() is not expected to throw (it catches internally), but a throw is equally un-provable as
       // pre-dispatch non-delivery ⇒ fail closed to outcome_unknown, never plain failed.
       outcome = 'outcome_unknown'
-      reason = 'email_send_threw'
+      reason = SEND_EMAIL_OUTCOME_REASONS.sendThrew
     }
 
     // Tx B — the SAME attempt records the terminal outcome (fenced `status='pending' AND attempt_token=mine`).
     const record = await recordOutboundOutcome(this.deps.queryFn, outboundId, outcome, reason, claim.attemptToken)
+
+    if (outcome === 'failed') {
+      // The channel explicitly reported no attempt (simulated / not attempted): a skipped step, never success.
+      // The ledger row is `failed` (retryable) when this attempt's terminal write landed; when it did not
+      // (lease expired and flipped elsewhere) the step still made no send, so it stays skipped and says so.
+      return {
+        actionType: 'send_email',
+        status: 'skipped',
+        output: {
+          outcome: SEND_EMAIL_NOT_SENT_OUTCOME,
+          reason,
+          notificationId: sendResult?.id,
+          notificationStatus: sendResult?.status,
+          recipientCount,
+          ...(record.confirmed ? {} : { terminalWriteConfirmed: false }),
+        },
+      }
+    }
 
     if (outcome === 'sent') {
       if (!record.confirmed) {
