@@ -1,3 +1,4 @@
+import { attendanceOwnedNativeQueryProbeV1 } from '../helpers/attendance-owned-native-query-probe'
 import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 /**
  * W4C-2 (#4556 lock §12.3) — Stage E residual gate matrix (real DB, real
@@ -110,7 +111,8 @@ import * as path from 'path'
 import net from 'net'
 import http from 'http'
 import { randomUUID } from 'crypto'
-import { Pool } from 'pg'
+import type { Pool } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import {
   snapshotAttendanceSettingsRow,
   restoreAttendanceSettingsRow,
@@ -568,7 +570,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     const address = server.getAddress()
     if (!address || typeof address === 'string') throw new Error('server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
-    pool = new Pool({ connectionString: dbUrl })
+    pool = new AttendanceManagedPgPool({ connectionString: dbUrl })
     await insertActiveUser(settingsAdminUserId, settingsAdminOrg)
     await pool.query(
       `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
@@ -916,12 +918,10 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     // discriminating harness, then rolling everything back via a sentinel.
     const raw = await pool.connect()
     let issued = 0
-    const countingReal = {
-      query: async (text: string, params?: unknown[]) => {
-        issued += 1
-        return raw.query(text, params as any[])
-      },
-    } as unknown as AttendanceW4TransactionClientV1
+    const countingReal = attendanceOwnedNativeQueryProbeV1(pool, raw, ({ next }) => {
+      issued += 1
+      return next()
+    }).session
     try {
       await expect(
         runAttendanceResultOperationTransactionV1(countingReal, async (trx) => {
@@ -1004,12 +1004,10 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     })
     const raw = await pool.connect()
     let issued = 0
-    const countingReal = {
-      query: async (text: string, params?: unknown[]) => {
-        issued += 1
-        return raw.query(text, params as any[])
-      },
-    } as unknown as AttendanceW4TransactionClientV1
+    const countingReal = attendanceOwnedNativeQueryProbeV1(pool, raw, ({ next }) => {
+      issued += 1
+      return next()
+    }).session
     try {
       await expect(
         runAttendanceResultOperationTransactionV1(countingReal, async (trx) => {
@@ -1044,7 +1042,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     const raw = await pool.connect()
     try {
       await expect(
-        runAttendanceResultOperationTransactionV1(raw as unknown as AttendanceW4TransactionClientV1, (trx) =>
+        runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(raw), (trx) =>
           attendanceResultOperationPreflightV1(trx, forgedSchedulerWitness, envelope.registryInput),
         ),
       ).rejects.toThrow('ATTENDANCE_WRITE_NOT_AUTHORIZED')
@@ -1071,7 +1069,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     const rawControl = await pool.connect()
     try {
       await expect(
-        runAttendanceResultOperationTransactionV1(rawControl as unknown as AttendanceW4TransactionClientV1, async (trx) => {
+        runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(rawControl), async (trx) => {
           const preflight = await attendanceResultOperationPreflightV1(trx, registered, envelope.registryInput)
           expect(preflight.kind).toBe('claimed')
           throw new Error('W4C2_E5_LEG5E_ROLLBACK_SENTINEL')
@@ -1103,7 +1101,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     const raw = await pool.connect()
     try {
       await expect(
-        runAttendanceResultOperationTransactionV1(raw as unknown as AttendanceW4TransactionClientV1, (trx) =>
+        runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(raw), (trx) =>
           attendanceResultOperationPreflightV1(trx, witness, envelope.registryInput),
         ),
       ).rejects.toThrow('ATTENDANCE_WRITE_NOT_AUTHORIZED')
@@ -1313,7 +1311,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     const raw = await pool.connect()
     try {
       await expect(
-        runAttendanceResultOperationTransactionV1(raw as unknown as AttendanceW4TransactionClientV1, async (trx) => {
+        runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(raw), async (trx) => {
           const preflight = await attendanceResultOperationPreflightV1(trx, controlWitness, controlEnvelope.registryInput)
           expect(preflight.kind).toBe('claimed')
           if (preflight.kind !== 'claimed') throw new Error('unreachable')
@@ -1793,7 +1791,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     // shape of the race this check exists for (an operator abandons a run
     // between its per-user transactions; section 1.7's fail-closed rule).
     const created = await withConnDirect(async (client) =>
-      runAttendanceResultOperationTransactionV1(client as unknown as AttendanceW4TransactionClientV1, (trx) =>
+      runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(client), (trx) =>
         createOrResumeAttendanceScheduledRunV1(
           trx,
           { orgId, initiator: 'cron', workDate },
@@ -1813,7 +1811,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       sourceRef: 'w4c2-e5:leg9i-straggler-abandon',
     })
     const abandoned = await withConnDirect(async (client) =>
-      runAttendanceResultOperationTransactionV1(client as unknown as AttendanceW4TransactionClientV1, (trx) =>
+      runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(client), (trx) =>
         abandonAttendanceScheduledRunV1(
           trx,
           abandonCaller,
@@ -1832,7 +1830,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     const { adapters, absenceCallCount } = realScheduledAdapters()
     let rejected: unknown
     await withConnDirect(async (client) =>
-      runAttendanceResultOperationTransactionV1(client as unknown as AttendanceW4TransactionClientV1, async (trx) => {
+      runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(client), async (trx) => {
         try {
           await requireAttendanceScheduledRunRunningBeforeSourceDmlV1(trx, orgId, created.runId)
         } catch (error) {
@@ -1849,7 +1847,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     await insertRolloutRow(runningOrgId, 'shadow')
     await insertActiveUser(runningUser, runningOrgId)
     const runningCreated = await withConnDirect(async (client) =>
-      runAttendanceResultOperationTransactionV1(client as unknown as AttendanceW4TransactionClientV1, (trx) =>
+      runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(client), (trx) =>
         createOrResumeAttendanceScheduledRunV1(
           trx,
           { orgId: runningOrgId, initiator: 'cron', workDate },
@@ -1860,7 +1858,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     if (runningCreated.kind !== 'created_running') throw new Error('expected created_running')
     let passed = false
     await withConnDirect(async (client) =>
-      runAttendanceResultOperationTransactionV1(client as unknown as AttendanceW4TransactionClientV1, async (trx) => {
+      runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(client), async (trx) => {
         await requireAttendanceScheduledRunRunningBeforeSourceDmlV1(trx, runningOrgId, runningCreated.runId)
         passed = true
       }),
@@ -1934,7 +1932,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
             )
             const runId = runRow.rows[0].run_id as string
             const abandonOutcome = await runAttendanceResultOperationTransactionV1(
-              raceClient as unknown as AttendanceW4TransactionClientV1,
+              attendanceOwningSessionForClientV1(raceClient),
               (raceTrx) =>
                 abandonAttendanceScheduledRunV1(
                   raceTrx,
@@ -2075,7 +2073,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     const delivered: Array<{ eventKind: string; payload: unknown }> = []
     const raw = await pool.connect()
     try {
-      const outcome = await dispatchAttendanceResultEventOutboxV1(raw as unknown as AttendanceW4TransactionClientV1, {
+      const outcome = await dispatchAttendanceResultEventOutboxV1(attendanceOwningSessionForClientV1(raw), {
         emit: async (delivery) => {
           delivered.push({ eventKind: delivery.eventKind, payload: delivery.payload })
         },
@@ -2103,7 +2101,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     const raw2 = await pool.connect()
     try {
       const secondDelivered: unknown[] = []
-      await dispatchAttendanceResultEventOutboxV1(raw2 as unknown as AttendanceW4TransactionClientV1, {
+      await dispatchAttendanceResultEventOutboxV1(attendanceOwningSessionForClientV1(raw2), {
         emit: async (delivery) => { secondDelivered.push(delivery) },
       })
       expect(secondDelivered.filter((d: any) => d.payload?.orgId === orgId).length).toBe(0)
@@ -2444,7 +2442,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       async acquireConnection(): Promise<AttendanceW4BoundaryConnectionV1> {
         const raw = await pool.connect()
         return {
-          client: raw as unknown as AttendanceW4TransactionClientV1,
+          client: attendanceOwningSessionForClientV1(raw),
           release: () => raw.release(),
         }
       },

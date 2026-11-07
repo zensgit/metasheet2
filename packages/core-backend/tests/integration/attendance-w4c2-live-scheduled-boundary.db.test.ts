@@ -1,3 +1,4 @@
+import { AttendanceManagedPgPool } from '../../src/attendance/attendance-owning-session'
 import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 import { createLegacyLivePunchBoundaryDriver } from '../utils/attendance-legacy-live-punch-boundary-driver'
 /**
@@ -42,7 +43,7 @@ import * as path from 'path'
 import net from 'net'
 import http from 'http'
 import { randomUUID } from 'crypto'
-import { Pool } from 'pg'
+import type { Pool } from 'pg'
 import { acquireAttendanceTimezoneRuntimeLocksV1, buildAttendanceTimezoneRuntimeOrgLockKeyV1 } from '../../src/attendance/attendance-timezone-runtime-locks'
 import {
   snapshotAttendanceSettingsRow,
@@ -246,7 +247,7 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     const address = server.getAddress()
     if (!address || typeof address === 'string') throw new Error('server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
-    pool = new Pool({ connectionString: dbUrl })
+    pool = new AttendanceManagedPgPool({ connectionString: dbUrl })
     await insertActiveUser(legacyLiveUser, 'default')
     await insertActiveUser(settingsAdminUserId, settingsAdminOrg)
     await pool.query(

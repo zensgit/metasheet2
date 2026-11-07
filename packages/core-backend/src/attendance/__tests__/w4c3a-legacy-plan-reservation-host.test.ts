@@ -1,4 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  createAttendanceOwningSessionUnitFixture,
+  disposeAttendanceOwningSessionUnitFixtures,
+} from '../../../tests/helpers/attendance-owning-session-unit-fixture'
 
 import {
   createAttendanceLegacyPlanReservationHostV1,
@@ -11,6 +15,8 @@ const BATCH_ID = '10000000-0000-4000-8000-000000000001'
 const ORG_ID = '20000000-0000-4000-8000-000000000001'
 const ORIGINAL_ALLOWLIST =
   process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+
+afterEach(disposeAttendanceOwningSessionUnitFixtures)
 
 afterEach(() => {
   if (ORIGINAL_ALLOWLIST === undefined) {
@@ -59,34 +65,24 @@ describe('W4C-3a P07 production reservation host', () => {
     let released = 0
     let rolloutAttempts = 0
     const host = createAttendanceLegacyPlanReservationHostV1({
-      acquireConnection: async () => ({
-        client: {
-          query: async (text: string) => {
-            sql.push(text)
-            // This is a freshly-acquired (idle) connection — the SAME affirmative-proof
-            // contract the real driver gives `assertConnectionIsIdleV1`'s own
-            // `SAVEPOINT w4c5_idle_probe` (SQLSTATE 25P01, no active transaction).
-            if (text === 'SAVEPOINT w4c5_idle_probe') {
-              throw Object.assign(new Error('no_active_sql_transaction'), { code: '25P01' })
+      acquireConnection: async () => createAttendanceOwningSessionUnitFixture(
+        async (text: string) => {
+          sql.push(text)
+          if (text.includes('attendance_calculation_rollout_state')) {
+            rolloutAttempts += 1
+            if (rolloutAttempts === 1) {
+              throw Object.assign(new Error('serialization failure'), {
+                code: '40001',
+              })
             }
-            if (text.includes('attendance_calculation_rollout_state')) {
-              rolloutAttempts += 1
-              if (rolloutAttempts === 1) {
-                throw Object.assign(new Error('serialization failure'), {
-                  code: '40001',
-                })
-              }
-              return {
-                rows: [{ state: 'authoritative', scope: 'synthetic_staging' }],
-              }
+            return {
+              rows: [{ state: 'authoritative', scope: 'synthetic_staging' }],
             }
-            return { rows: [] }
-          },
+          }
+          return { rows: [] }
         },
-        release: () => {
-          released += 1
-        },
-      }),
+        { onRelease: () => { released += 1 } },
+      ),
     })
     const items = Array.from({ length: 5001 }, (_, ordinal) => ({
       kind: 'apply' as const,
@@ -175,10 +171,7 @@ describe('W4C-3a P07 production reservation host', () => {
     expect(released).toBe(1)
     expect(rolloutAttempts).toBe(2)
     expect(sql).toEqual([
-      // Gate E (#4844): the idle-precondition probe runs exactly ONCE, before the retry loop —
-      // never re-issued per attempt (the loop's own ROLLBACK already restores idle between
-      // attempts).
-      'SAVEPOINT w4c5_idle_probe',
+      // Admission reads protocol state without adding SQL, including on retry.
       'BEGIN ISOLATION LEVEL SERIALIZABLE',
       "SELECT set_config('statement_timeout', $1, true)",
       "SELECT set_config('lock_timeout', $1, true)",
@@ -193,5 +186,17 @@ describe('W4C-3a P07 production reservation host', () => {
     expect(sql.join('\n')).not.toMatch(
       /INSERT|UPDATE|DELETE|COPY|attendance_import_legacy_execution_plan|attendance_result_operations/i,
     )
+
+    for (const initialStatus of ['T', 'E', '?'] as const) {
+      const query = vi.fn(async () => { throw Object.freeze(new Error('query must not run')) })
+      const release = vi.fn()
+      const refusedHost = createAttendanceLegacyPlanReservationHostV1({
+        acquireConnection: () => createAttendanceOwningSessionUnitFixture(query, { initialStatus, onRelease: release }),
+      })
+      await expect(refusedHost.reserveLegacyImportPlanV1(input))
+        .rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' })
+      expect(query).not.toHaveBeenCalled()
+      expect(release.mock.calls).toEqual([[undefined]])
+    }
   })
 })

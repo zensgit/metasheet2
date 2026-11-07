@@ -1,3 +1,5 @@
+import { attendanceOwnedNativeQueryProbeV1, attendanceNativeClientForCheckoutV1 } from '../helpers/attendance-owned-native-query-probe'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
@@ -7,9 +9,13 @@ import { buildOnlinePunchRequestV1, ONLINE_PUNCH_SOURCE_REF } from '../../src/at
 import * as liveModule from '../../src/attendance/w4c2-live-scheduled-boundary'
 import * as requestModule from '../../src/attendance/w4c3b-request-operation-boundary'
 import { createOnlinePunchDbFixture, punchClock } from '../utils/attendance-online-punch-db'
-import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
+
+import { waitForBackendGone } from '../helpers/settlement-coordination-db'
 
 const fixture = createOnlinePunchDbFixture()
+const owningPool = new AttendanceManagedPgPool({
+  connectionString: process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL,
+})
 const instant = '2026-08-19T23:59:30.000Z'
 function deferred() {
   let resolve!: () => void
@@ -17,7 +23,8 @@ function deferred() {
   return { promise, resolve }
 }
 type FailureHook = (sql: string, params: unknown[], error: unknown) => void
-type Hook = (sql: string, params: unknown[], client: PoolClient) => Promise<void>
+type HookClient = Pick<PoolClient, 'query'> & { processID: number }
+type Hook = (sql: string, params: unknown[], client: HookClient) => Promise<void>
 describe('online common receipt replay and real two-connection races', () => {
   let admin: Awaited<ReturnType<typeof fixture.user>>
   let adapters: Parameters<typeof liveModule.createAttendanceLiveScheduledBoundaryV1>[0]['legacyAdapters']
@@ -42,19 +49,28 @@ describe('online common receipt replay and real two-connection races', () => {
     const rule = await fixture.request('/api/attendance/leave-types',admin.token,{orgId:fixture.orgId,name:'online leave',code:'online-clock-leave',unit:'hour',isActive:true,minMinutes:1,defaultMinutesPerDay:60,requiresApproval:false})
     expect(rule.status).toBe(201)
   }, 180_000)
-  afterAll(async () => { await fixture.stop() }, 60_000)
+  afterAll(async () => { await owningPool.end(); await fixture.stop() }, 60_000)
 
   function connection(after?: Hook, before?: Hook, onFailure?: FailureHook) {
     return async () => {
-      const client = await fixture.pool.connect()
-      const wrapped: AttendanceW4TransactionClientV1 = { query: async (sql, params = []) => {
-        await before?.(sql, params, client)
+      const client = await owningPool.connect()
+      const pid = attendanceNativeClientForCheckoutV1(owningPool, client).processID
+      const probe = attendanceOwnedNativeQueryProbeV1(owningPool, client, async (call) => {
+        const sql = call.text
+        const params = call.values ?? []
+        // Test hook IO uses the original native method, never the guarded facade
+        // recursively. This port is query-only and cannot mint an owner.
+        const hookClient: HookClient = {
+          processID: pid,
+          query: ((...args: unknown[]) => call.next(...args)) as PoolClient['query'],
+        }
+        await before?.(sql, params, hookClient)
         let result
-        try { result = await client.query(sql, params) } catch (error) { onFailure?.(sql,params,error); throw error }
-        await after?.(sql, params, client)
-        return { rows: result.rows }
-      } }
-      return { client: wrapped, release: (error?: Error) => client.release(error) }
+        try { result = await call.next() } catch (error) { onFailure?.(sql, params, error); throw error }
+        await after?.(sql, params, hookClient)
+        return result
+      })
+      return { client: probe.session, release: (error?: Error) => { probe.restore(); client.release(error) } }
     }
   }
   function boundary(after?: Hook, before?: Hook, onFailure?: FailureHook) {
@@ -227,7 +243,8 @@ describe('online common receipt replay and real two-connection races', () => {
     },commitReceipt)).rejects.toMatchObject({name:'OnlinePunchConnectionUncertainError',httpStatus:503})
     expect(exactPk).toBe(1);expect(acquisitions).toBe(1);expect(begins).toBe(1);expect(rollbacks).toBe(1)
     expect(releases).toHaveLength(1);expect(releases[0]).toMatchObject({name:'OnlinePunchConnectionUncertainError'})
-    const replacement=await fixture.pool.connect()
+    expect(await waitForBackendGone(fixture.pool,backendPid)).toBe(true)
+    const replacement=await owningPool.connect()
     try {expect(replacement.processID).not.toBe(backendPid)} finally {replacement.release()}
     expect(await rows(f.online.operationId)).toHaveLength(1)
   })
@@ -247,8 +264,8 @@ describe('online common receipt replay and real two-connection races', () => {
     const auth=createAuthorizedAttendanceWriteContextV1({actorId:actor.userId,actorPosture:'self',tokenSubjectUserId:actor.userId,orgId:fixture.orgId,subjectScope:{kind:'self',userId:actor.userId},capability:'punch',sourceRef:ONLINE_PUNCH_SOURCE_REF})
     if(field==='membership') await fixture.pool.query('UPDATE user_orgs SET is_active=false WHERE user_id=$1 AND org_id=$2',[actor.userId,fixture.orgId])
     else await fixture.pool.query('UPDATE users SET is_active=false WHERE id=$1',[actor.userId])
-    const conn=await fixture.pool.connect()
-    try { await expect(runAttendanceResultOperationTransactionV1(conn,trx=>readOnlinePunchReplayV1(trx,auth,request))).rejects.toMatchObject({code:'ATTENDANCE_WRITE_NOT_AUTHORIZED'}) }
+    const conn=await owningPool.connect()
+    try { await expect(runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(conn),trx=>readOnlinePunchReplayV1(trx,auth,request))).rejects.toMatchObject({code:'ATTENDANCE_WRITE_NOT_AUTHORIZED'}) }
     finally { conn.release() }
     expect(await fixture.counts(actor.userId)).toEqual({events:1,records:1,requests:0,operations:1})
   })

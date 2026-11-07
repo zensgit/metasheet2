@@ -1,7 +1,9 @@
+import { attendanceOwnedNativeQueryProbeV1 } from '../helpers/attendance-owned-native-query-probe'
 import crypto from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import { up as importTablesUp } from '../../src/db/migrations/zzzz20260131160000_create_attendance_import_tables'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import {
@@ -13,7 +15,6 @@ import {
   recheckAttendanceActorLivenessInTransactionV1,
 } from '../../src/attendance/w4c0-authorization'
 import { recheckAttendanceFullImportAuthorizationInTransactionV1 } from '../../src/attendance/w4c3a-legacy-plan-enqueue'
-import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
 import {
   AttendanceImportRollbackError,
   type AttendanceImportRollbackAuthorizationPortV1,
@@ -56,14 +57,7 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve: () => resolve?.() }
 }
 
-function trx(client: PoolClient): AttendanceW4TransactionClientV1 {
-  return {
-    query: (statement, values) =>
-      client.query(statement, values as unknown[]) as unknown as Promise<{
-        rows: Array<Record<string, unknown>>
-      }>,
-  }
-}
+
 
 it('sentinel: DATABASE_URL is set (real-DB lane must not silently skip)', () => {
   expect(dbUrl).toBeTruthy()
@@ -86,7 +80,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     await adminPool.query(`CREATE DATABASE ${scratchName}`)
     const scratchUrl = new URL(dbUrl as string)
     scratchUrl.pathname = `/${scratchName}`
-    pool = new Pool({ connectionString: scratchUrl.toString(), max: 5 })
+    pool = new AttendanceManagedPgPool({ connectionString: scratchUrl.toString(), max: 5 })
     kyselyPool = new Pool({ connectionString: scratchUrl.toString(), max: 2 })
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: kyselyPool }) })
 
@@ -666,7 +660,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     const command = rollbackCommand({ batchId, fingerprint, targets: [target] })
     const client = await pool.connect()
     try {
-      const result = await rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort)
+      const result = await rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), command, rollbackAuthorizationPort)
       return { batchId, fingerprint, target, command, result }
     } finally {
       client.release()
@@ -677,7 +671,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     return createAttendanceImportRollbackBoundaryV1({
       async acquireConnection() {
         const client = await pool.connect()
-        return { client: trx(client), release: () => client.release() }
+        return { client: attendanceOwningSessionForClientV1(client), release: () => client.release() }
       },
     })
   }
@@ -784,17 +778,13 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     const command = rollbackCommand({ batchId, fingerprint, targets: [target] })
     const statements: Array<{ sql: string; values: readonly unknown[] }> = []
     const client = await pool.connect()
-    const traced: AttendanceW4TransactionClientV1 = {
-      query: async (statement, values) => {
-        statements.push({
-          sql: statement.replace(/\s+/g, ' ').trim(),
-          values: [...(values ?? [])],
-        })
-        return client.query(statement, values as unknown[]) as unknown as Promise<{
-          rows: Array<Record<string, unknown>>
-        }>
-      },
-    }
+    const traced = attendanceOwnedNativeQueryProbeV1(pool, client, ({ text: statement, values, next }) => {
+      statements.push({
+        sql: statement.replace(/\s+/g, ' ').trim(),
+        values: [...(values ?? [])],
+      })
+      return next()
+    }).session
     try {
       await rollbackAttendanceImportV1(traced, command, rollbackAuthorizationPort)
     } finally {
@@ -898,17 +888,13 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
       async acquireConnection() {
         const client = await pool.connect()
         return {
-          client: {
-            query: async (statement, values) => {
+          client: attendanceOwnedNativeQueryProbeV1(pool, client, ({ text: statement, values, next }) => {
               statements.push({
                 sql: statement.replace(/\s+/g, ' ').trim(),
                 values: [...(values ?? [])],
               })
-              return client.query(statement, values as unknown[]) as unknown as Promise<{
-                rows: Array<Record<string, unknown>>
-              }>
-            },
-          },
+              return next()
+          }).session,
           release: () => client.release(),
         }
       },
@@ -1114,17 +1100,13 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
       async acquireConnection() {
         const client = await pool.connect()
         return {
-          client: {
-            query: async (statement, values) => {
+          client: attendanceOwnedNativeQueryProbeV1(pool, client, ({ text: statement, values, next }) => {
               statements.push({
                 sql: statement.replace(/\s+/g, ' ').trim(),
                 values: [...(values ?? [])],
               })
-              return client.query(statement, values as unknown[]) as unknown as Promise<{
-                rows: Array<Record<string, unknown>>
-              }>
-            },
-          },
+              return next()
+          }).session,
           release: () => client.release(),
         }
       },
@@ -1250,17 +1232,13 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
       async acquireConnection() {
         const client = await pool.connect()
         return {
-          client: {
-            query: async (statement, values) => {
+          client: attendanceOwnedNativeQueryProbeV1(pool, client, ({ text: statement, values, next }) => {
               statements.push({
                 sql: statement.replace(/\s+/g, ' ').trim(),
                 values: [...(values ?? [])],
               })
-              return client.query(statement, values as unknown[]) as unknown as Promise<{
-                rows: Array<Record<string, unknown>>
-              }>
-            },
-          },
+              return next()
+          }).session,
           release: () => client.release(),
         }
       },
@@ -1445,7 +1423,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     const priorAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     try {
-      const close = closeLegacyRollbackWindowV1(trx(closeClient), {
+      const close = closeLegacyRollbackWindowV1(attendanceOwningSessionForClientV1(closeClient), {
         orgId: fixture.raceOrgId,
         batchId: fixture.batchId,
         actorId,
@@ -1508,7 +1486,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
       })
       await entered.promise
       let closeSettled = false
-      const close = closeLegacyRollbackWindowV1(trx(closeClient), {
+      const close = closeLegacyRollbackWindowV1(attendanceOwningSessionForClientV1(closeClient), {
         orgId: fixture.raceOrgId,
         batchId: fixture.batchId,
         actorId,
@@ -1565,7 +1543,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     const priorAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = raceOrgId
     try {
-      await expect(closeLegacyRollbackWindowV1(trx(closeClient), {
+      await expect(closeLegacyRollbackWindowV1(attendanceOwningSessionForClientV1(closeClient), {
         orgId: raceOrgId,
         batchId,
         actorId,
@@ -1583,7 +1561,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
           await release.promise
         }
       })
-      const transition = transitionAttendanceCalculationRolloutV1(trx(transitionClient), {
+      const transition = transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(transitionClient), {
         orgId: raceOrgId,
         actorId,
         correlationId: id(),
@@ -1666,7 +1644,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
       })
       await entered.promise
       let transitionSettled = false
-      const transition = transitionAttendanceCalculationRolloutV1(trx(transitionClient), {
+      const transition = transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(transitionClient), {
         orgId: raceOrgId,
         actorId,
         correlationId: id(),
@@ -1723,14 +1701,10 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
       async acquireConnection() {
         const client = await pool.connect()
         return {
-          client: {
-            query: async (statement, values) => {
+          client: attendanceOwnedNativeQueryProbeV1(pool, client, ({ text: statement, next }) => {
               statements.push(statement.replace(/\s+/g, ' ').trim())
-              return client.query(statement, values as unknown[]) as unknown as Promise<{
-                rows: Array<Record<string, unknown>>
-              }>
-            },
-          },
+              return next()
+          }).session,
           release: () => client.release(),
         }
       },
@@ -1785,14 +1759,10 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
           async acquireConnection() {
             const client = await pool.connect()
             return {
-              client: {
-                query: async (statement, values) => {
+              client: attendanceOwnedNativeQueryProbeV1(pool, client, ({ text: statement, next }) => {
                   statements.push(statement.replace(/\s+/g, ' ').trim())
-                  return client.query(statement, values as unknown[]) as unknown as Promise<{
-                    rows: Array<Record<string, unknown>>
-                  }>
-                },
-              },
+                  return next()
+          }).session,
               release: () => client.release(),
             }
           },
@@ -1989,7 +1959,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     })
     const client = await pool.connect()
     try {
-      const replay = await rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort)
+      const replay = await rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), command, rollbackAuthorizationPort)
       expect(replay).toEqual({ ...result, replayed: true })
     } finally {
       client.release()
@@ -2027,7 +1997,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     })
     const client = await pool.connect()
     try {
-      await expect(rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort)).rejects.toMatchObject({
+      await expect(rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), command, rollbackAuthorizationPort)).rejects.toMatchObject({
         code: 'IMPORT_ROLLBACK_PREIMAGE_INVALID',
       } satisfies Partial<AttendanceImportRollbackError>)
       expect((await pool.query(
@@ -2126,7 +2096,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     })
     const client = await pool.connect()
     try {
-      await expect(rollbackAttendanceImportV1(trx(client), conflicting, rollbackAuthorizationPort)).rejects.toMatchObject({
+      await expect(rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), conflicting, rollbackAuthorizationPort)).rejects.toMatchObject({
         code: 'IMPORT_ROLLBACK_CONFLICT',
       } satisfies Partial<AttendanceImportRollbackError>)
     } finally {
@@ -2145,17 +2115,14 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     ])
     const command = rollbackCommand({ batchId, fingerprint, targets })
     const client = await pool.connect()
-    const base = trx(client)
     let reversalInsertCount = 0
-    const injected: AttendanceW4TransactionClientV1 = {
-      query: async (statement, values) => {
-        if (statement.includes('INSERT INTO attendance_record_calculations')) {
-          reversalInsertCount += 1
-          if (reversalInsertCount === 2) throw new Error('INJECTED_SECOND_REVERSAL_FAILURE')
-        }
-        return base.query(statement, values)
-      },
-    }
+    const injected = attendanceOwnedNativeQueryProbeV1(pool, client, ({ text: statement, next }) => {
+      if (statement.includes('INSERT INTO attendance_record_calculations')) {
+        reversalInsertCount += 1
+        if (reversalInsertCount === 2) throw new Error('INJECTED_SECOND_REVERSAL_FAILURE')
+      }
+      return next()
+    }).session
     try {
       await expect(rollbackAttendanceImportV1(injected, command, rollbackAuthorizationPort)).rejects.toThrow(
         'INJECTED_SECOND_REVERSAL_FAILURE',
@@ -2205,7 +2172,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     const client = await pool.connect()
     try {
       await expect(
-        rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort),
+        rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), command, rollbackAuthorizationPort),
       ).rejects.toMatchObject({
         code: 'IMPORT_ROLLBACK_BATCH_CHANGED',
       } satisfies Partial<AttendanceImportRollbackError>)
@@ -2242,7 +2209,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     const client = await pool.connect()
     try {
       await expect(
-        rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort),
+        rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), command, rollbackAuthorizationPort),
       ).rejects.toMatchObject({
         code: 'IMPORT_ROLLBACK_BATCH_CHANGED',
       } satisfies Partial<AttendanceImportRollbackError>)
@@ -2271,8 +2238,8 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     const second = await pool.connect()
     try {
       const results = await Promise.all([
-        rollbackAttendanceImportV1(trx(first), command, rollbackAuthorizationPort),
-        rollbackAttendanceImportV1(trx(second), command, rollbackAuthorizationPort),
+        rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(first), command, rollbackAuthorizationPort),
+        rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(second), command, rollbackAuthorizationPort),
       ])
       expect(results.map((result) => result.replayed).sort()).toEqual([false, true])
       expect(results[0].reversalCalculationIds).toEqual(results[1].reversalCalculationIds)
@@ -2303,7 +2270,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     })
     const client = await pool.connect()
     try {
-      await expect(rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort)).rejects.toMatchObject({
+      await expect(rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), command, rollbackAuthorizationPort)).rejects.toMatchObject({
         code: 'IMPORT_ROLLBACK_BATCH_CHANGED',
       } satisfies Partial<AttendanceImportRollbackError>)
     } finally {
@@ -2354,7 +2321,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     const command = rollbackCommand({ batchId, fingerprint, targets: [untouched, changed] })
     const client = await pool.connect()
     try {
-      await expect(rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort)).rejects.toMatchObject({
+      await expect(rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), command, rollbackAuthorizationPort)).rejects.toMatchObject({
         code: 'IMPORT_ROLLBACK_SUPERSEDED',
       } satisfies Partial<AttendanceImportRollbackError>)
     } finally {
@@ -2420,7 +2387,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     const command = rollbackCommand({ batchId, fingerprint, targets: [target] })
     const client = await pool.connect()
     try {
-      await expect(rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort)).rejects.toMatchObject({
+      await expect(rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), command, rollbackAuthorizationPort)).rejects.toMatchObject({
         code: 'IMPORT_ROLLBACK_CONFLICT',
       } satisfies Partial<AttendanceImportRollbackError>)
     } finally {
@@ -2452,7 +2419,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     })
     const client = await pool.connect()
     try {
-      await expect(rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort)).rejects.toMatchObject({
+      await expect(rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), command, rollbackAuthorizationPort)).rejects.toMatchObject({
         code: 'IMPORT_ROLLBACK_AUTHORIZATION_STALE',
       } satisfies Partial<AttendanceImportRollbackError>)
     } finally {
@@ -2487,7 +2454,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     })
     const client = await pool.connect()
     try {
-      await expect(rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort)).rejects.toThrow(
+      await expect(rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), command, rollbackAuthorizationPort)).rejects.toThrow(
         /ATTENDANCE_WRITE_NOT_AUTHORIZED/,
       )
     } finally {
@@ -2516,7 +2483,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     })
     const client = await pool.connect()
     try {
-      await expect(rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort)).rejects.toMatchObject({
+      await expect(rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), command, rollbackAuthorizationPort)).rejects.toMatchObject({
         code: 'IMPORT_ROLLBACK_BATCH_CHANGED',
       } satisfies Partial<AttendanceImportRollbackError>)
     } finally {
@@ -2549,7 +2516,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     const client = await pool.connect()
     try {
       await expect(
-        rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort),
+        rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), command, rollbackAuthorizationPort),
       ).rejects.toMatchObject({
         code: 'IMPORT_ROLLBACK_AUTHORIZATION_STALE',
       } satisfies Partial<AttendanceImportRollbackError>)
@@ -2576,7 +2543,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     const client = await pool.connect()
     try {
       await expect(
-        rollbackAttendanceImportV1(trx(client), command, forgedPort),
+        rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), command, forgedPort),
       ).rejects.toMatchObject({
         code: 'IMPORT_ROLLBACK_AUTHORIZATION_STALE',
       } satisfies Partial<AttendanceImportRollbackError>)
@@ -2607,7 +2574,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
       const client = await pool.connect()
       try {
         const result = await rollbackAttendanceImportV1(
-          trx(client),
+          attendanceOwningSessionForClientV1(client),
           command,
           fullAdminRollbackAuthorizationPort,
         )
@@ -2882,7 +2849,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     })
     const client = await pool.connect()
     try {
-      const result = await rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort)
+      const result = await rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), command, rollbackAuthorizationPort)
       expect(result.replayed).toBe(false)
       expect(result.reversalCalculationIds).toHaveLength(2)
       const rows = await pool.query(
@@ -2911,7 +2878,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
           work_minutes: 120,
         },
       ])
-      const replay = await rollbackAttendanceImportV1(trx(client), command, rollbackAuthorizationPort)
+      const replay = await rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), command, rollbackAuthorizationPort)
       expect(replay).toEqual({ ...result, replayed: true })
       expect(await rollbackResidue(batchId)).toEqual({ commands: 1, reversals: 2, witnesses: 1 })
     } finally {
@@ -2946,7 +2913,7 @@ describeIfDatabase('W4C-3a import rollback foundation (fresh PostgreSQL)', () =>
     })
     const client = await pool.connect()
     try {
-      await expect(rollbackAttendanceImportV1(trx(client), stale, rollbackAuthorizationPort)).rejects.toMatchObject({
+      await expect(rollbackAttendanceImportV1(attendanceOwningSessionForClientV1(client), stale, rollbackAuthorizationPort)).rejects.toMatchObject({
         code: 'IMPORT_ROLLBACK_AUTHORIZATION_STALE',
       } satisfies Partial<AttendanceImportRollbackError>)
       expect((await pool.query('SELECT count(*)::int AS n FROM attendance_import_rollback_commands WHERE source_batch_id = $1', [batchId])).rows[0].n).toBe(0)

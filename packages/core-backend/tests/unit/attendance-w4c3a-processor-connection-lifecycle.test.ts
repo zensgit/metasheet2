@@ -1,18 +1,25 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  createAttendanceOwningSessionUnitFixture,
+  disposeAttendanceOwningSessionUnitFixtures,
+} from '../helpers/attendance-owning-session-unit-fixture'
 import { createAttendanceLegacyPlanProcessorV1 } from '../../src/attendance/w4c3a-legacy-plan-processor'
+
+afterEach(disposeAttendanceOwningSessionUnitFixtures)
 
 describe('W4C-3a processor connection lifecycle', () => {
   it('does not release the connection until the worker promise settles', async () => {
-    let resolveCandidate!: (value: { rows: readonly [] }) => void
-    const candidate = new Promise<{ rows: readonly [] }>((resolve) => {
+    let resolveCandidate!: (value: { rows: [] }) => void
+    const candidate = new Promise<{ rows: [] }>((resolve) => {
       resolveCandidate = resolve
     })
     const client = {
       query: vi.fn(() => candidate),
     }
     const release = vi.fn()
+    const owned = await createAttendanceOwningSessionUnitFixture(client.query, { onRelease: release })
     const processor = createAttendanceLegacyPlanProcessorV1({
-      acquireConnection: async () => ({ client, release }),
+      acquireConnection: async () => owned,
     })
 
     const processing = processor.processLegacyImportPlanV1(

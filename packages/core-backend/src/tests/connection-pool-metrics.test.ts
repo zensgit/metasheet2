@@ -21,6 +21,12 @@ vi.mock('pg', () => ({
   }))
 }))
 
+// Metrics tests replace the DB adapter, not the owning-session admission gate.
+// Protocol/lease behavior is covered by its dedicated driver and real-PG suites.
+vi.mock('../attendance/attendance-owning-session', async () => ({
+  AttendanceManagedPgPool: (await import('pg')).Pool
+}))
+
 // Mock secretManager
 vi.mock('../security/SecretManager', () => ({
   secretManager: {

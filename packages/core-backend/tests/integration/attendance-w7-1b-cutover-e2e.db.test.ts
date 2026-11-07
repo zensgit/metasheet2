@@ -1,3 +1,4 @@
+import { AttendanceManagedPgPool } from '../../src/attendance/attendance-owning-session'
 /**
  * W7-1b (#4556) — THE CUTOVER, END TO END, with BOTH state machines ON.
  *
@@ -41,7 +42,7 @@ import net from 'net'
 import http from 'http'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'crypto'
-import { Pool } from 'pg'
+import type { Pool } from 'pg'
 import type { MetaSheetServer } from '../../src/index'
 import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
 import { createLegacyLivePunchBoundaryDriver } from '../utils/attendance-legacy-live-punch-boundary-driver'
@@ -303,7 +304,7 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     const address = server.getAddress()
     if (!address || typeof address === 'string') throw new Error('no TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
-    pool = new Pool({ connectionString: dbUrl })
+    pool = new AttendanceManagedPgPool({ connectionString: dbUrl })
 
     await insertActiveUser(bothUser, bothOrg)
     await seedAuthoritativeRollout(bothOrg)

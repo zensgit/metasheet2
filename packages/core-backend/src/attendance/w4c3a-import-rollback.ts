@@ -1,3 +1,4 @@
+import type { AttendanceOwningSessionV1, AttendanceSessionLeaseV1 } from './attendance-owning-session'
 import crypto from 'node:crypto'
 import { canonicalAttendanceJsonV1 } from './w4c0-fingerprints'
 import {
@@ -1463,7 +1464,7 @@ async function executeRollback(
  * transaction recheck port. There is deliberately no full-import fallback.
  */
 export async function rollbackAttendanceImportV1(
-  connection: AttendanceW4TransactionClientV1,
+  connection: AttendanceOwningSessionV1 | AttendanceSessionLeaseV1,
   command: FrozenAttendanceImportRollbackCommandV1,
   authorizationPort: AttendanceImportRollbackAuthorizationPortV1,
 ): Promise<AttendanceImportRollbackResultV1> {

@@ -1,3 +1,4 @@
+import { attendanceOwningSessionForClientV1, AttendanceManagedPgPool } from '../../src/attendance/attendance-owning-session'
 import { up as timezonePolicyUp } from '../../src/db/migrations/zzzz20261012100000_create_attendance_timezone_policy'
 import { registerAttendanceRequestTimezoneSourceGuardV1 } from '../../src/attendance/attendance-business-trip-locks'
 /**
@@ -639,12 +640,12 @@ export async function processP08JobId(
 ): Promise<{ kind: string }> {
   // Test-only legacy-plan fixture: its runtime/calendar semantics are outside this lane.
   registerAttendanceRequestTimezoneSourceGuardV1(async () => async () => {})
-  const pool = new Pool({ connectionString })
+  const pool = new AttendanceManagedPgPool({ connectionString })
   try {
     const processor = createAttendanceLegacyPlanProcessorV1({
       acquireConnection: async () => {
         const client = await pool.connect()
-        return { client, release: () => client.release() }
+        return { client: attendanceOwningSessionForClientV1(client), release: () => client.release() }
       },
     })
     const result = await processor.processLegacyImportPlanV1(jobId)

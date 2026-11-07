@@ -7,6 +7,7 @@ import crypto from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import { up as w4c3aUp } from '../../src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan'
@@ -335,7 +336,7 @@ describeIfDatabase('W4C-3a P06 sync import host (fresh PostgreSQL)', () => {
 
     const scratchUrl = new URL(dbUrl as string)
     scratchUrl.pathname = `/${scratchName}`
-    pool = new Pool({ connectionString: scratchUrl.toString() })
+    pool = new AttendanceManagedPgPool({ connectionString: scratchUrl.toString() })
     kyselyPool = new Pool({ connectionString: scratchUrl.toString() })
     db = new Kysely<unknown>({
       dialect: new PostgresDialect({ pool: kyselyPool }),
@@ -373,7 +374,7 @@ describeIfDatabase('W4C-3a P06 sync import host (fresh PostgreSQL)', () => {
     return createAttendanceSyncImportHostV1({
       acquireConnection: async () => {
         const client = await pool.connect()
-        return { client, release: () => client.release() }
+        return { client: attendanceOwningSessionForClientV1(client), release: () => client.release() }
       },
     })
   }
@@ -382,7 +383,7 @@ describeIfDatabase('W4C-3a P06 sync import host (fresh PostgreSQL)', () => {
     return createAttendanceImportRollbackBoundaryV1({
       acquireConnection: async () => {
         const client = await pool.connect()
-        return { client, release: () => client.release() }
+        return { client: attendanceOwningSessionForClientV1(client), release: () => client.release() }
       },
     })
   }
@@ -492,7 +493,7 @@ describeIfDatabase('W4C-3a P06 sync import host (fresh PostgreSQL)', () => {
     const host = createAttendanceSyncImportHostV1({
       acquireConnection: async () => {
         const client = await pool.connect()
-        return { client, release: () => client.release() }
+        return { client: attendanceOwningSessionForClientV1(client), release: () => client.release() }
       },
     })
 
@@ -669,7 +670,7 @@ describeIfDatabase('W4C-3a P06 sync import host (fresh PostgreSQL)', () => {
     const host = createAttendanceSyncImportHostV1({
       acquireConnection: async () => {
         const client = await pool.connect()
-        return { client, release: () => client.release() }
+        return { client: attendanceOwningSessionForClientV1(client), release: () => client.release() }
       },
     })
 
@@ -934,7 +935,7 @@ describeIfDatabase('W4C-3a P06 sync import host (fresh PostgreSQL)', () => {
     const host = createAttendanceSyncImportHostV1({
       acquireConnection: async () => {
         const client = await pool.connect()
-        return { client, release: () => client.release() }
+        return { client: attendanceOwningSessionForClientV1(client), release: () => client.release() }
       },
     })
 
