@@ -394,9 +394,15 @@ async function lockVersionRow(
  * (subject version row → `users`): an access-graph writer that bumped the subject row first waits
  * here until the holder commits, instead of forming the users-vs-subject cycle (B-05 at the service
  * level). The sheet version rows and the bound record follow later through
- * {@link lockAuthorizationVersionsForAdmission}, which re-takes this row as a no-op. No src writer
- * touches a sheet-layer table and a subject-layer table in one transaction (census in the Y5 PR
- * body), so subject-before-sheet cannot cycle with a protocol-following writer either.
+ * {@link lockAuthorizationVersionsForAdmission}, which re-takes this row as a no-op. No runtime src
+ * transaction writes both a sheet-layer and a subject-layer table (census in the Y5 PR body; at file
+ * level the only src matches are this module, whose statements are the version-row helpers that
+ * writers call, and the historical data migration `zzzz20260318110000`, whose `meta_sheets` UPDATE
+ * sets only `base_id`, not a watched column), so subject-before-sheet cannot cycle with a
+ * protocol-following writer either. A writer that breaks the rule (ops scripts, migrations, raw SQL)
+ * can deadlock with this holder; the holder's answer is then CONFLICT, or UNAVAILABLE when the cycle
+ * closes inside its live-actor prelude, never a pass (the Y5 real-DB deadlock cases pin both victims
+ * of both cycles).
  *
  * 40P01 / 40001 / 55P03 → the typed CONFLICT (the caller refuses, never passes); any other failure →
  * UNAVAILABLE. The caller holds an open transaction (the live-actor prerequisite that follows probes it).

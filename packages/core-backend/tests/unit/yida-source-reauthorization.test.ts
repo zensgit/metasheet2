@@ -256,6 +256,8 @@ describe('yida-send-approval-service: D21 wiring of approve()', () => {
     const statements: string[] = []
     const inserted: Data[] = []
     const reauthorizations: Array<{ trx: unknown; actor: unknown; binding: unknown }> = []
+    // Every selection the primitive handed out (the binding the re-authorizer receives must be the selection's own).
+    const resolved: YidaSendAuthoritySelection[] = []
     const instant = 1_700_000_000_000
     let transactionTrx: Queryable | undefined
     const query: Queryable['query'] = async (sql, params = []) => {
@@ -283,7 +285,11 @@ describe('yida-send-approval-service: D21 wiring of approve()', () => {
       throw new Error('synthetic fixture: unexpected SQL shape')
     }
     const primitives: YidaSendAuthorityPrimitives = {
-      async resolveSelectionInTransaction() { return selection(options.bound) },
+      async resolveSelectionInTransaction() {
+        const value = selection(options.bound)
+        resolved.push(value)
+        return value
+      },
       executionPayloadDigest(value, grant) { return sha({ value, grant }) },
       sendBudget() { return Object.freeze({ withinBudget: true }) },
       async prepareInTransaction() { throw new Error('synthetic fixture: no admission here') },
@@ -300,7 +306,7 @@ describe('yida-send-approval-service: D21 wiring of approve()', () => {
       primitives, ...(reauthorizeSourceBinding ? { reauthorizeSourceBinding } : {}),
     })
     const approve = () => approvals.approve({ operationId: 'synthetic-operation', rowKey: 'synthetic-row', confirmationId: 'synthetic-confirmation' })
-    return { approve, statements, inserted, reauthorizations, trx: () => transactionTrx, inspect: () => approvals.inspect({ grantId: 'synthetic-grant' }) }
+    return { approve, statements, inserted, reauthorizations, resolved, trx: () => transactionTrx, inspect: () => approvals.inspect({ grantId: 'synthetic-grant' }) }
   }
   const codeOf = async (promise: Promise<unknown>) => {
     try { await promise } catch (error) { return (error as { code: string }).code }
@@ -314,7 +320,11 @@ describe('yida-send-approval-service: D21 wiring of approve()', () => {
     expect(s.reauthorizations).toHaveLength(1)
     expect(s.reauthorizations[0].trx).toBe(s.trx())
     expect(s.reauthorizations[0].actor).toEqual({ actorId: context.ownerId, tenantId: context.tenantId, workspaceId: null })
-    expect(s.reauthorizations[0].binding).toBe(selection(true).sourceBinding === null ? null : s.reauthorizations[0].binding)
+    // The binding handed over IS the selection's own sourceBinding (identity, not a copy), i.e. exactly the fixture binding.
+    expect(s.resolved).toHaveLength(1)
+    expect(s.resolved[0].sourceBinding).not.toBeNull()
+    expect(s.reauthorizations[0].binding).toBe(s.resolved[0].sourceBinding)
+    expect(s.reauthorizations[0].binding).toEqual(binding())
     expect((s.reauthorizations[0].binding as Data).recordId).toBe('rec_bound')
     expect(s.inserted.map(row => row.table)).toEqual(['integration_yida_send_approvals', 'integration_yida_send_approval_audit'])
     // Phase 1: the subject row is ensured and held FOR SHARE right after the isolation pin, before the live-actor rows.
