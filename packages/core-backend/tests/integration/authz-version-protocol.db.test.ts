@@ -19,7 +19,8 @@
  * Waits are bounded by wall time and observed through pg_stat_activity / pg_blocking_pids — no sleeps
  * stand in for a lock. CI: DATABASE_URL-gated; excluded from the no-DB default vitest config (so a
  * describeIfDatabase skip cannot pass as green) and wired as a WHOLE FILE into the approval real-DB
- * step of .github/workflows/plugin-tests.yml. EXPECT_DB=1 arms the anti-skip sentinel.
+ * step of .github/workflows/plugin-tests.yml. EXPECT_DB=1 arms the anti-skip sentinel. The field-row writer rule
+ * cases (the #6792 follow-up) are registered at the end: authz-version-field-row-order-realdb.cases.ts.
  */
 import { randomUUID } from 'node:crypto'
 import { Kysely, PostgresDialect } from 'kysely'
@@ -41,6 +42,7 @@ import {
   lockAuthorizationVersionsForAdmission,
   verifyAuthorizationVersionTriggerPosture,
 } from '../../src/multitable/authz-version-protocol'
+import { defineAuthzVersionFieldRowOrderRealDbCases } from './authz-version-field-row-order-realdb.cases'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const expectDatabase = process.env.EXPECT_DB === '1' ? it : it.skip
@@ -437,3 +439,6 @@ describeIfDatabase.sequential('D21 authorization version protocol (real PostgreS
     })
   })
 })
+
+// The field-row writer rule (#6792 follow-up): the sheet version row before the meta_fields row lock, path by path.
+defineAuthzVersionFieldRowOrderRealDbCases()

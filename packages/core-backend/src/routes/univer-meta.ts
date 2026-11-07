@@ -276,7 +276,7 @@ import {
   type SheetLiveness,
 } from '../multitable/sheet-liveness'
 import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
-import { bumpSheetPermissionVersions } from '../multitable/authz-version-protocol'
+import { bumpSheetPermissionVersions, fieldVisibilityTriggerWouldFire } from '../multitable/authz-version-protocol'
 import {
   isTombstoneCaptureEnabled,
   countFieldDeleteCaptureRows,
@@ -314,6 +314,7 @@ import {
   computeRevertPreview,
   loadEntityConfigSnapshot,
   applyConfigRevert,
+  configRevertCanTripFieldVisibility,
 } from '../multitable/config-restore'
 import {
   FIELD_CHANGED_CONCURRENTLY_CODE,
@@ -12071,6 +12072,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             if (revertWritesFieldTypeOrProperty(rev) && (await isFieldRetypeConversionRevision(query as unknown as FieldRetypeConvertQuery, String(rev.id)))) {
               return fieldRetypeConversionRestoreRefusal()
             }
+            // D21 field-row writer rule (authz-version-protocol.ts): this branch always writes the property, and it locks
+            // the field row and then every cell of the field FOR UPDATE before that write. The sheet version row is taken
+            // first: an admission holds it FOR SHARE and then wants the bound record FOR SHARE, so the trigger-only order
+            // (field row → cells → version row) was a cycle with it.
+            if (configRevertCanTripFieldVisibility(rev)) await bumpSheetPermissionVersions(query, [sheetId])
             const fieldRow = await loadLossyRetypeFieldRow(query, rev.entity_id, true)
             if (!fieldRow) return { status: 409, code: 'ENTITY_GONE', message: 'The field no longer exists; cannot restore.' }
             if (fieldRow.sheetId !== sheetId) return { status: 400, code: 'INVALID_REVISION', message: 'field revision entity does not belong to this sheet.' }
@@ -12149,9 +12155,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (revertWritesFieldTypeOrProperty(rev) && (await isFieldRetypeConversionRevision(query as unknown as FieldRetypeConvertQuery, String(rev.id)))) {
           return fieldRetypeConversionRestoreRefusal()
         }
+        // D21 field-row writer rule (authz-version-protocol.ts): a revert that writes the field property can trip the
+        // meta_fields visibility trigger, so the sheet version row is taken HERE, before the snapshot's field-row lock
+        // below — never by the trigger after it (configRevertCanTripFieldVisibility).
+        if (configRevertCanTripFieldVisibility(rev)) await bumpSheetPermissionVersions(query, [sheetId])
         // A field snapshot is read under the row lock (FOR NO KEY UPDATE) and held until commit: the identity/drift
         // checks below compare it, and applyConfigRevert writes over it, so a field write committed in between would be
-        // overwritten without CONFIG_DRIFT. Fence → this one row → UPDATE → revision: no wait on another field row.
+        // overwritten without CONFIG_DRIFT. Fence → (sheet version row) → this one row → UPDATE → revision: no wait on
+        // another field row.
         const snapshot = await loadEntityConfigSnapshot(query, rev, { lockField: true })
         if (!snapshot) return { status: 409, code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' }
         const preview = computeRevertPreview(rev, snapshot)
@@ -14814,6 +14825,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // switch is carried the same way (ADR adr-stock-prep-manual-rows-20261030 §4: only the plugin's switch route
         // writes it).
         const nextProperty = carryManualRowPolicy(row.property, carryHumanWriteLock(row.property, normalizedNextProperty))
+        // D21 field-row writer rule (authz-version-protocol.ts): when this write can trip the meta_fields visibility
+        // trigger — the trigger's own test, on the property this attempt validates against vs the one it will write —
+        // the sheet version row is taken HERE: after the fence, before the sibling order shift and the locked re-read
+        // below (the first field-row locks of this transaction), never by the trigger after them. Exact for the attempt
+        // that writes: the locked re-read must equal `validated` or the attempt retries on fresh data, and
+        // `writeProperty` differs from `nextProperty` only in the human write lock and manual-rows keys. A PATCH that
+        // cannot trip it (order, name, options) takes no version row, so the shared column drag never queues on it.
+        if (fieldVisibilityTriggerWouldFire(validated.property, nextProperty)) await bumpSheetPermissionVersions(query, [sheetId])
         const desiredOrder = parsed.data.order
         const configBatchId = randomUUID() // T9-R1: one batchId per request — the updated field + any shifted fields share it
 

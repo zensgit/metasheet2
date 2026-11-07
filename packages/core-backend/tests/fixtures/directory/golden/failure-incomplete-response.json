@@ -1,0 +1,322 @@
+{
+  "_meta": {
+    "allowlistVersion": 1,
+    "baseMainSha": "7363f2d570707c075e6a5e22687613bf4d2eba4a",
+    "rule": "A change that only adds a key updates this allowlist and the goldens in the same change; any other difference is a behavior change."
+  },
+  "accountDepartments": [],
+  "accounts": [
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-f",
+      "email": null,
+      "external_key": "a0g-f-old1-union",
+      "external_user_id": "a0g-old1",
+      "is_active": true,
+      "job_number": null,
+      "mobile": null,
+      "name": "Old One",
+      "nick": null,
+      "open_id": null,
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-f-old1-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-f",
+      "email": null,
+      "external_key": "a0g-f-u10-union",
+      "external_user_id": "a0g-u10",
+      "is_active": true,
+      "job_number": null,
+      "mobile": null,
+      "name": "User 10",
+      "nick": null,
+      "open_id": "a0g-f-u10-open",
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-f-u10-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-f",
+      "email": null,
+      "external_key": "a0g-f-u11-union",
+      "external_user_id": "a0g-u11",
+      "is_active": true,
+      "job_number": null,
+      "mobile": null,
+      "name": "User 11",
+      "nick": null,
+      "open_id": "a0g-f-u11-open",
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-f-u11-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-f",
+      "email": null,
+      "external_key": "a0g-f-u12-union",
+      "external_user_id": "a0g-u12",
+      "is_active": true,
+      "job_number": null,
+      "mobile": null,
+      "name": "User 12",
+      "nick": null,
+      "open_id": "a0g-f-u12-open",
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-f-u12-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-f",
+      "email": null,
+      "external_key": "a0g-f-u9-union",
+      "external_user_id": "a0g-u9",
+      "is_active": true,
+      "job_number": null,
+      "mobile": null,
+      "name": "User 9",
+      "nick": null,
+      "open_id": "a0g-f-u9-open",
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-f-u9-union"
+    }
+  ],
+  "alerts": [
+    {
+      "code": "sync_failed",
+      "details": {},
+      "level": "error",
+      "message": "Directory sync failed: DingTalk returned a response without the expected data"
+    }
+  ],
+  "calls": [
+    {
+      "args": [
+        {
+          "appKey": "<appKey>",
+          "appSecret": "<secret>"
+        }
+      ],
+      "fn": "fetchDingTalkAppAccessToken"
+    },
+    {
+      "args": [
+        "<token>",
+        "1",
+        {}
+      ],
+      "fn": "listDingTalkDepartments"
+    }
+  ],
+  "departments": [
+    {
+      "external_department_id": "dA1",
+      "external_parent_department_id": "dA",
+      "full_path": "Dept A1",
+      "is_active": true,
+      "name": "Dept A1",
+      "order_index": 1,
+      "provider": "dingtalk",
+      "raw": {
+        "dept_manager_userid_list": [
+          "a0g-u3"
+        ]
+      }
+    },
+    {
+      "external_department_id": "dOld",
+      "external_parent_department_id": "1",
+      "full_path": "Dept Old",
+      "is_active": true,
+      "name": "Dept Old",
+      "order_index": 9,
+      "provider": "dingtalk",
+      "raw": {}
+    }
+  ],
+  "grants": [],
+  "identities": [
+    {
+      "corp_id": "a0g-corp-f",
+      "external_key": "a0g-corp-f:a0g-f-u9-open",
+      "local_user_id": "a0g-lu-f-u9",
+      "provider": "dingtalk",
+      "provider_open_id": "a0g-f-u9-open",
+      "provider_union_id": "a0g-f-u9-union"
+    }
+  ],
+  "integration": {
+    "has_last_success": false,
+    "last_error": "Directory sync failed: DingTalk returned a response without the expected data"
+  },
+  "links": [
+    {
+      "external_user_id": "a0g-old1",
+      "link_status": "linked",
+      "local_user_id": "a0g-lu-f-old1",
+      "match_strategy": "manual_admin"
+    },
+    {
+      "external_user_id": "a0g-u10",
+      "link_status": "linked",
+      "local_user_id": "a0g-lu-f-u10",
+      "match_strategy": "manual_admin"
+    },
+    {
+      "external_user_id": "a0g-u11",
+      "link_status": "unmatched",
+      "local_user_id": null,
+      "match_strategy": "manual_unbound"
+    },
+    {
+      "external_user_id": "a0g-u12",
+      "link_status": "linked",
+      "local_user_id": "a0g-lu-f-u12",
+      "match_strategy": "manual_admin"
+    },
+    {
+      "external_user_id": "a0g-u9",
+      "link_status": "unmatched",
+      "local_user_id": null,
+      "match_strategy": "none"
+    }
+  ],
+  "runs": [
+    {
+      "error_message": "Directory sync failed: DingTalk returned a response without the expected data",
+      "status": "failed",
+      "trigger_source": "scheduler"
+    }
+  ],
+  "userOrgs": [],
+  "users": [
+    {
+      "activation_status": "activated",
+      "email": "a0g-f-lu-old1@example.test",
+      "id": "a0g-lu-f-old1",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": false,
+      "name": "Local old1",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-f-lu-u10@example.test",
+      "id": "a0g-lu-f-u10",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": false,
+      "name": "Local u10",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-f-u11@example.test",
+      "id": "a0g-lu-f-u11",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": false,
+      "name": "Local u11",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-f-lu-u12@example.test",
+      "id": "a0g-lu-f-u12",
+      "is_active": false,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": false,
+      "name": "Local u12",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-f-u3@example.test",
+      "id": "a0g-lu-f-u3",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": false,
+      "name": "Local u3",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-f-lu-u4@example.test",
+      "id": "a0g-lu-f-u4",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": "13900060004",
+      "must_change_password": false,
+      "name": "Local u4",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-f-lu-u5a@example.test",
+      "id": "a0g-lu-f-u5a",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": "13900060005",
+      "must_change_password": false,
+      "name": "Local u5a",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-f-lu-u5b@example.test",
+      "id": "a0g-lu-f-u5b",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": "13900060005",
+      "must_change_password": false,
+      "name": "Local u5b",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-f-lu-u9@example.test",
+      "id": "a0g-lu-f-u9",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": false,
+      "name": "Local u9",
+      "role": "user",
+      "username": null
+    }
+  ]
+}

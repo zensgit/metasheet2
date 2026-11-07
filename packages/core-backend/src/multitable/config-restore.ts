@@ -357,6 +357,18 @@ const SHEET_CONFIG_COLUMN: Record<string, ColumnMap> = {
   rowLevelReadPermissionsEnabled: { col: 'row_level_read_permissions_enabled' },
 }
 
+/**
+ * D21 field-row writer rule (`authz-version-protocol.ts`): a FIELD revert that writes `property` can trip the
+ * `meta_fields` visibility trigger, and whether it does depends on the stored row, which the execute route reads only
+ * under the row lock. Such a revert therefore takes the sheet version row (explicit bump) BEFORE that lock — the
+ * snapshot lock of the generic branch, the `FOR UPDATE` field read of the lossy-retype branch — so the trigger never
+ * takes it after the field row. A name / order / type-only field revert, a view revert and a sheet_config revert
+ * (meta_sheets row → version row through its own trigger, the sheet-layer order) take no explicit bump.
+ */
+export function configRevertCanTripFieldVisibility(rev: Pick<ConfigRevisionRow, 'entity_type' | 'changed_keys'>): boolean {
+  return rev.entity_type === 'field' && Array.isArray(rev.changed_keys) && rev.changed_keys.includes('property')
+}
+
 /** `applyConfigRevert`'s re-read of the stored property (the lock and switch carry). Exported for the real-DB race cases. */
 export const FIELD_REVERT_STORED_PROPERTY_SQL = 'SELECT property FROM meta_fields WHERE id = $1'
 
