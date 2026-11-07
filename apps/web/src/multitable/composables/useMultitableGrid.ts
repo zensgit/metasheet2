@@ -57,6 +57,24 @@ export function isFilterGroup(node: FilterNode): node is FilterGroup {
 // Authoring depth cap — mirror the backend MAX_FILTER_DEPTH so the UI never builds a filter the server 400s.
 export const MAX_FILTER_DEPTH = 5
 
+/**
+ * 备料 「查看子件」 / 「查看所有使用位置」 (owner question 2026-11-07): a VIEWER filter — per-browser-tab state that
+ * narrows the rows GET /view returns (its `viewerFilter` parameter, backend multitable/viewer-filter.ts) and is
+ * NEVER written anywhere: it is not part of `filterRules` / `currentFilterInfo()`, never in the sort/filter
+ * baseline, never sets `sortFilterDirty`, so no load can PATCH it into the shared view or PUT it into the
+ * personal overlay. Equality (`is`) leaves only, ANDed with the view's own stored filter on the server.
+ */
+export interface ViewerFilterCondition {
+  fieldId: string
+  operator: 'is'
+  value: string | boolean
+}
+export interface ViewerFilterState {
+  /** What the banner says, e.g. 「正在查看：S-01 的子件」 — composed by the caller. */
+  label: string
+  conditions: ViewerFilterCondition[]
+}
+
 export interface CellEdit {
   recordId: string
   fieldId: string
@@ -682,6 +700,16 @@ export function useMultitableGrid(opts: {
   // faithful passthrough, and ANY edit clears it so the editable filterRules+filterGroups become the truth.
   const filterGroups = ref<FilterGroup[]>([])
   const sortFilterDirty = ref(false)
+  // Viewer filter (see ViewerFilterState): transient, never persisted. `viewerFilterParam` is the exact query value
+  // every records read of this grid sends (loadViewData, loadMore) and the workbench's footer aggregate reuses.
+  const viewerFilter = ref<ViewerFilterState | null>(null)
+  // The page offset the grid was on when the viewer filter was set, so clearing it returns to the same page.
+  let offsetBeforeViewerFilter = 0
+  const viewerFilterParam = computed<string | undefined>(() => (
+    viewerFilter.value && viewerFilter.value.conditions.length > 0
+      ? JSON.stringify({ conditions: viewerFilter.value.conditions.map((c) => ({ fieldId: c.fieldId, operator: c.operator, value: c.value })) })
+      : undefined
+  ))
   // WHICH view the sort/filter state above belongs to, plus what this client believes that view stores, exactly
   // as this client serialises it (客户反馈 2026-09-24 #5). Set from the loaded view by syncFromView, and moved to
   // the SENT state by persistSortFilter BEFORE its write's await (#6075 round 2), so a 应用 pressed while a write
@@ -799,6 +827,7 @@ export function useMultitableGrid(opts: {
         offset,
         includeLinkSummaries: true,
         search: searchQuery.value || undefined,
+        viewerFilter: viewerFilterParam.value,
       })
       if (requestId !== latestLoadRequestId) return
       const serverPage = data.page
@@ -896,6 +925,7 @@ export function useMultitableGrid(opts: {
         offset: startCount,
         includeLinkSummaries: true,
         search: searchQuery.value || undefined,
+        viewerFilter: viewerFilterParam.value,
       })
       // A reset (filter/sort/search/view/sheet change, or a mutation reload) bumped the id while we were
       // in flight → DROP this page. Appending it would mix stale, cross-filter rows onto the fresh set,
@@ -1980,6 +2010,30 @@ export function useMultitableGrid(opts: {
     return true
   }
 
+  // --- Viewer filter (备料 「查看子件」 / 「查看所有使用位置」) ---
+  // Set: replaces any previous viewer filter (the view's own filter stays as stored) and reloads from the first page.
+  // Clear: drops it and reloads the page the grid was on before. Neither may cause a view-config write (review fix,
+  // PR #6805): loadViewData flushes a sort/filter edit staged in the toolbar (not yet 应用) through persistSortFilter,
+  // which would PATCH the shared view (or PUT the personal config) from a button that says it changes nothing. So a
+  // staged edit is DISCARDED first, as on a view switch: the reload's syncFromView re-syncs the toolbar to the stored
+  // view. Should that reload fail, the baseline stays "not known" and a later 应用 writes nothing until a load
+  // re-establishes it — the existing fail-closed rule, not a gap. filterRules themselves are never written here.
+  function setViewerFilter(state: ViewerFilterState): Promise<void> {
+    if (!viewerFilter.value) offsetBeforeViewerFilter = page.value.offset
+    viewerFilter.value = { label: state.label, conditions: state.conditions.map((c) => ({ ...c })) }
+    page.value = { ...page.value, offset: 0 }
+    if (sortFilterDirty.value) discardUnappliedSortFilterEdits()
+    return loadViewData(0)
+  }
+  function clearViewerFilter(): Promise<void> {
+    if (!viewerFilter.value) return Promise.resolve()
+    viewerFilter.value = null
+    const offset = offsetBeforeViewerFilter
+    offsetBeforeViewerFilter = 0
+    if (sortFilterDirty.value) discardUnappliedSortFilterEdits()
+    return loadViewData(offset)
+  }
+
   // --- Watch sheet/view changes ---
 
   watch(
@@ -1992,6 +2046,9 @@ export function useMultitableGrid(opts: {
       // sortFilterBaseline check, which is what actually keeps foreign/unknown state from being persisted.
       // The hidden columns / grouping / column order go too (#6075 round 2), and with them the right to write them.
       resetViewState()
+      // A viewer filter belongs to the view it was set on: another view or sheet starts without it.
+      viewerFilter.value = null
+      offsetBeforeViewerFilter = 0
       clearEditHistory()
       dismissConflict()
       if (opts.sheetId.value) loadViewData(0)
@@ -2005,6 +2062,7 @@ export function useMultitableGrid(opts: {
     // A1 infinite-scroll accumulation state
     loadingMore, accumulationCapped,
     sortRules, filterRules, filterConjunction, nestedFilterNodes, filterGroups, sortFilterDirty,
+    viewerFilter, viewerFilterParam,
     groupFieldId, groupFieldIds, groupField, groupFields,
     editHistory, historyIndex, canUndo, canRedo,
     searchQuery,
@@ -2018,6 +2076,7 @@ export function useMultitableGrid(opts: {
     addFilterRule, updateFilterRule, removeFilterRule, clearFilters,
     addFilterGroup, updateFilterGroup, removeFilterGroup,
     applySortFilter,
+    setViewerFilter, clearViewerFilter,
     createRecord, duplicateRecord, deleteRecord, patchCell, bulkPatch, patchRange,
     // A3: exposed as the single echo-application seam for the AI shortcut
     // run adapter (useAiShortcut synthesizes a PatchResult and feeds it here).
