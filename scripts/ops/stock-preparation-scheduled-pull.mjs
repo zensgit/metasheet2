@@ -156,7 +156,9 @@ Flags:
 Exit code is non-zero if any project's dry-run (or apply) failed outright — never for a project that
 was simply skipped as manual_confirm_required, suspended (a governed project's pull waits for a
 拉取人员 to decide its holds on the 拉取待确认 page — at the preview or, if a hold opened in between,
-at the apply), large_bom_bounded, not_found, (without --apply) ready-but-not-applied, or — with
+at the apply), review_pending (a written content change awaits its review by a 拉取人员 on the
+拉取待确认 page — at the preview or at the apply), large_bom_bounded, not_found, (without --apply)
+ready-but-not-applied, or — with
 per-project sheets enabled on the server — project_sheet_absent (no 拉取人员 has created that
 project's sheet yet; this script NEVER creates one) or project_sheet_archived. A governed project
 whose earlier write did not finish (recovery_pending) IS a failure.
@@ -501,6 +503,16 @@ function holdCountOf(source) {
 }
 
 /**
+ * Batch-refresh step 5 PR-9 (register R-77 ⑧): the ONE field a review-pending project's record copies — a
+ * non-negative integer `pendingReviews` from the preview's `refreshReview` stanza or the apply refusal's `details`;
+ * anything else is null. Never `blocksMint` or any other key (the values-free rule above).
+ */
+function pendingReviewsOf(source) {
+  const value = source && typeof source === 'object' ? source.pendingReviews : null
+  return Number.isInteger(value) && value >= 0 ? value : null
+}
+
+/**
  * Batch-refresh step 5 PR-8 review fix B1: what an apply REFUSAL says about rows already written — the server's
  * TRI-STATE `details.partial` (only the literal booleans: `true` = a host write was attempted, rows may have landed;
  * `false` = none was) and `details.written` (a non-negative integer: rows confirmed written before the stop). A version
@@ -622,6 +634,18 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
   if (data.status === 'recovery_pending') {
     return { ...record, action: 'error', error: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', note: 'an earlier execution of this project did not finish cleanly; it must be recovered (step 6, or the owner runbook until step 6 exists) before any pull applies — nothing was applied', failed: true, durationMs: Date.now() - startedAt }
   }
+  // Batch-refresh step 5 PR-9 (register R-77 ⑧): a GOVERNED project with a WRITTEN content change awaiting its review
+  // (变更复核, by a 拉取人员 on the 「拉取待确认」 page) previews `review_pending` (no token). Human work, not a fault: the
+  // same class as R-62 ②'s skipped_suspended (recorded, exit code unaffected), never applied. Only the integer count
+  // is copied off the values-free `refreshReview` stanza — never `blocksMint` or anything else in it.
+  if (data.status === 'review_pending') {
+    return { ...record, action: 'skipped_review_pending', pendingReviews: pendingReviewsOf(data.refreshReview), note: 'a written content change awaits its review by a puller on the 拉取待确认 page; nothing was applied', durationMs: Date.now() - startedAt }
+  }
+  // PR-9 (the status tripwire): the server's own `failed` (a computation that produced no applicable plan) is named
+  // too, so the generic branch below is reached ONLY by a status this script does not know — a newer server.
+  if (data.status === 'failed') {
+    return { ...record, action: 'error', error: 'dry-run status: failed', note: 'the preview produced no applicable plan; nothing was applied', failed: true, durationMs: Date.now() - startedAt }
+  }
   if (data.status !== 'ready') {
     return { ...record, action: 'error', error: `unexpected dry-run status: ${data.status}`, failed: true, durationMs: Date.now() - startedAt }
   }
@@ -659,6 +683,11 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
     if (code === 'STOCK_PREP_PULL_SUSPENDED') {
       return { ...record, action: 'skipped_suspended', phase: 'apply', holdCount: holdCountOf(errorDetailsOf(apply)), note: 'the project became suspended between the preview and the apply; nothing was written', durationMs: Date.now() - startedAt }
     }
+    // PR-9 (R-77 ⑧): a written change began awaiting its review between the preview and the apply — the server refuses
+    // 409 STOCK_PREP_REFRESH_REVIEW_PENDING before any write (`partial: false` by construction): the same skip.
+    if (code === 'STOCK_PREP_REFRESH_REVIEW_PENDING') {
+      return { ...record, action: 'skipped_review_pending', phase: 'apply', pendingReviews: pendingReviewsOf(errorDetailsOf(apply)), note: 'a written content change began awaiting its review between the preview and the apply; nothing was written', durationMs: Date.now() - startedAt }
+    }
     return {
       ...record,
       action: 'error',
@@ -682,6 +711,7 @@ export function summarize(results, applyFlag) {
     applied: count('applied'),
     skippedManualConfirmRequired: count('skipped_manual_confirm_required'),
     skippedSuspended: count('skipped_suspended'),
+    skippedReviewPending: count('skipped_review_pending'),
     skippedLargeBomBounded: count('skipped_large_bom_bounded'),
     skippedNotFound: count('skipped_not_found'),
     skippedDryRunOnly: count('skipped_dry_run_only'),
