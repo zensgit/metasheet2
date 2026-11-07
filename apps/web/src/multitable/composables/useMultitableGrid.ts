@@ -2012,13 +2012,17 @@ export function useMultitableGrid(opts: {
 
   // --- Viewer filter (备料 「查看子件」 / 「查看所有使用位置」) ---
   // Set: replaces any previous viewer filter (the view's own filter stays as stored) and reloads from the first page.
-  // Clear: drops it and reloads the page the grid was on before. Neither touches filterRules, the baseline or the
-  // dirty flag, so neither can cause a view-config write; a sort/filter edit staged in the toolbar is flushed by
-  // loadViewData exactly as it would be by any other reload (that is the toolbar's own 应用 path, not this one).
+  // Clear: drops it and reloads the page the grid was on before. Neither may cause a view-config write (review fix,
+  // PR #6805): loadViewData flushes a sort/filter edit staged in the toolbar (not yet 应用) through persistSortFilter,
+  // which would PATCH the shared view (or PUT the personal config) from a button that says it changes nothing. So a
+  // staged edit is DISCARDED first, as on a view switch: the reload's syncFromView re-syncs the toolbar to the stored
+  // view. Should that reload fail, the baseline stays "not known" and a later 应用 writes nothing until a load
+  // re-establishes it — the existing fail-closed rule, not a gap. filterRules themselves are never written here.
   function setViewerFilter(state: ViewerFilterState): Promise<void> {
     if (!viewerFilter.value) offsetBeforeViewerFilter = page.value.offset
     viewerFilter.value = { label: state.label, conditions: state.conditions.map((c) => ({ ...c })) }
     page.value = { ...page.value, offset: 0 }
+    if (sortFilterDirty.value) discardUnappliedSortFilterEdits()
     return loadViewData(0)
   }
   function clearViewerFilter(): Promise<void> {
@@ -2026,6 +2030,7 @@ export function useMultitableGrid(opts: {
     viewerFilter.value = null
     const offset = offsetBeforeViewerFilter
     offsetBeforeViewerFilter = 0
+    if (sortFilterDirty.value) discardUnappliedSortFilterEdits()
     return loadViewData(offset)
   }
 

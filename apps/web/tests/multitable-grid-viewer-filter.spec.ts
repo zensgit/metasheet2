@@ -67,7 +67,7 @@ function makeServer() {
   const putPersonal = vi.spyOn(client, 'putPersonalViewConfig').mockResolvedValue({} as never)
   const deletePersonal = vi.spyOn(client, 'deletePersonalViewConfig').mockResolvedValue(undefined as never)
   const viewConfigWrites = () => updateView.mock.calls.length + putPersonal.mock.calls.length + deletePersonal.mock.calls.length
-  return { client, store, loadView, updateView, getPersonal, putPersonal, viewConfigWrites }
+  return { client, store, loadView, updateView, getPersonal, putPersonal, deletePersonal, viewConfigWrites }
 }
 
 const flush = async () => {
@@ -216,4 +216,42 @@ describe('V-05 a view switch drops it', () => {
     expect(grid.viewerFilter.value).toBeNull()
     expect(server.viewConfigWrites()).toBe(0)
   })
+})
+
+describe('V-06 a toolbar edit staged (not applied) when the button / the clear is pressed', () => {
+  const STAGED = { fieldId: 'fld_vf_code', operator: 'contains', value: 'STAGED-X' }
+  const expectNoWriteAndResynced = (server: ReturnType<typeof makeServer>, grid: ReturnType<typeof useMultitableGrid>) => {
+    expect(server.updateView).not.toHaveBeenCalled()
+    expect(server.putPersonal).not.toHaveBeenCalled()
+    expect(server.deletePersonal).not.toHaveBeenCalled()
+    expect(server.viewConfigWrites()).toBe(0)
+    expect(server.store.view_fill).toEqual(STORED_FILL)
+    // The staged rule is dropped and the toolbar shows the stored view again.
+    expect(grid.filterRules.value).toEqual([{ fieldId: 'fld_vf_active', operator: 'is', value: true }])
+    expect(grid.sortFilterDirty.value).toBe(false)
+  }
+  for (const personal of [false, true]) {
+    it(`${personal ? 'personal' : 'shared'} mode: addFilterRule (no 应用) then setViewerFilter writes nothing`, async () => {
+      const server = makeServer()
+      const { grid } = await mountGrid(server, { personal })
+      grid.addFilterRule({ ...STAGED })
+      expect(grid.sortFilterDirty.value).toBe(true)
+      await grid.setViewerFilter(CHILDREN_OF_S01)
+      await flush()
+      expect(lastLoad(server)).toMatchObject({ viewId: 'view_fill', offset: 0, viewerFilter: EXPECTED_PARAM })
+      expectNoWriteAndResynced(server, grid)
+    })
+    it(`${personal ? 'personal' : 'shared'} mode: setViewerFilter, addFilterRule (no 应用), then clearViewerFilter writes nothing`, async () => {
+      const server = makeServer()
+      const { grid } = await mountGrid(server, { personal })
+      await grid.setViewerFilter(CHILDREN_OF_S01)
+      await flush()
+      grid.addFilterRule({ ...STAGED })
+      expect(grid.sortFilterDirty.value).toBe(true)
+      await grid.clearViewerFilter()
+      await flush()
+      expect(lastLoad(server).viewerFilter).toBeUndefined()
+      expectNoWriteAndResynced(server, grid)
+    })
+  }
 })

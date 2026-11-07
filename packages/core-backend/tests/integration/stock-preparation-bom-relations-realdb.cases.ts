@@ -21,7 +21,9 @@
  *            byte-identical after the reads; without the parameter the response rows are the view's own.
  *   BR-RD-05 refusals: malformed / blank value / another operator → 400 Invalid viewer filter; a field-permission
  *            hidden column or an unknown id → 400 with the GET /records message, naming no field.
- *   BR-RD-06 view-aggregate: the footer count equals the filtered row count, and a blank value is refused there too.
+ *   BR-RD-06 view-aggregate: the footer count equals the filtered row count, and it refuses the way GET /view does — a
+ *            blank value (Invalid viewer filter), an unknown id and a field-permission hidden column (the GET /records
+ *            message, naming no field).
  * Values-free: every id and value is synthetic and per-run (S-01 / P-07 / X).
  */
 import { createRequire } from 'module'
@@ -269,6 +271,24 @@ export function defineStockPreparationBomRelationsRealDbCases(): void {
       const blank = await http().get(`/api/multitable/sheets/${sheetId}/view-aggregate`)
         .query({ viewId: V_FILL, viewerFilter: viewerFilter([{ fieldId: phys('parentSourceId'), operator: 'is', value: ' ' }]) })
       expect(blank.status).toBe(400)
+
+      // The field gate holds here too (review fix, PR #6805): an unknown id, and a column hidden from the actor.
+      const notPermitted = { code: 'VALIDATION_ERROR', message: 'Field not permitted for filter/sort' }
+      const unknown = await http().get(`/api/multitable/sheets/${sheetId}/view-aggregate`)
+        .query({ viewId: V_ALL, viewerFilter: viewerFilter([{ fieldId: `fld_missing_${TOKEN}`, operator: 'is', value: 'x' }]) })
+      expect(unknown.status, JSON.stringify(unknown.body)).toBe(400)
+      expect(unknown.body.error).toEqual(notPermitted)
+
+      await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)',
+        [sheetId, phys('parentSourceId'), 'user', READER.id, false, true])
+      try {
+        const denied = await http().get(`/api/multitable/sheets/${sheetId}/view-aggregate`)
+          .query({ viewId: V_ALL, viewerFilter: childrenOf(SRC.p07) })
+        expect(denied.status, JSON.stringify(denied.body)).toBe(400)
+        expect(denied.body.error).toEqual(notPermitted)
+      } finally {
+        await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND subject_id = $2', [sheetId, READER.id])
+      }
     })
   })
 }
