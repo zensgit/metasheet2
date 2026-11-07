@@ -694,6 +694,28 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/integrations/dingtalk/integration-scoped-credentials-flag.ts#isDingTalkIntegrationScopedCredentialsEnabled',
   },
   {
+    key: 'DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "Directory integration capability surface: GET /api/admin/directory/integration-capabilities/:integrationId and the capability service behind it. Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). Off: the route answers 404 after the administrator check and the service issues no statement. On: the two capability tables are read after a non-throwing existence probe, and the route shows each capability's stored state, governance and reason. Apply the migration before turning it on; every replica must carry the same value. danger=low: no existing path reads the capability tables, so the switch changes what an administrator can see and nothing else; it is not an authorization input.",
+    source: 'packages/core-backend/src/integrations/directory-integration-capabilities-flag.ts#isDirectoryIntegrationCapabilitiesEnabled',
+  },
+  {
+    key: 'APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "Approval-routing source requirement for organisations that have two or more active pull-type directory sources (provider other than 'local', status 'active', de-duplicated by provider and corp id; the local directory is never counted) and no approval_routing policy. Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF); read on every call. Off: routing resolution and the legacy integration write paths are byte-identical to before the switch existed. On: for a requester with a linked directory account in such an organisation the routing resolution does not pick a source and fails closed with a typed, values-free error instead of choosing one, and the legacy integration write paths (creating a second pull source, setting a non-active pull source active) refuse until the organisation has a policy. danger=high: ON changes the outcome of approval creation for organisations that are already in the multi-source, no-policy state; run the read-only census for such organisations and set their policies before turning it on.",
+    source: 'packages/core-backend/src/directory/pull-source-rule.ts#isApprovalRoutingRequirePolicyEnabled',
+  },
+  {
     key: 'MULTITABLE_BUSINESS_TIMEZONE',
     type: 'enum',
     activationValue: "an IANA timezone id, e.g. 'Asia/Shanghai' (trimmed); unset / blank / any id Intl rejects = 'Asia/Shanghai'",
