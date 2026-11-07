@@ -2659,6 +2659,7 @@ jobs:
             tests/integration/directory-sync-membership-local-account-gate.db.test.ts \
             tests/integration/security-action-proof.db.test.ts \
             tests/integration/directory-adapter-golden-parity.db.test.ts \
+            tests/integration/directory-integration-capabilities.db.test.ts \
             tests/integration/authz-version-protocol.db.test.ts \
             tests/integration/directory-source-freeze-lock-correctness.db.test.ts \
             tests/integration/invite-accept-concurrency-rollback.db.test.ts \

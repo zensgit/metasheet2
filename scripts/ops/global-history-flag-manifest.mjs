@@ -706,6 +706,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/integrations/dingtalk/integration-scoped-credentials-flag.ts#isDingTalkIntegrationScopedCredentialsEnabled',
   },
   {
+    key: 'DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "Directory integration capability surface: GET /api/admin/directory/integration-capabilities/:integrationId and the capability service behind it. Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). Off: the route answers 404 after the administrator check and the service issues no statement. On: the two capability tables are read after a non-throwing existence probe, and the route shows each capability's stored state, governance and reason. Apply the migration before turning it on; every replica must carry the same value. danger=low: no existing path reads the capability tables, so the switch changes what an administrator can see and nothing else; it is not an authorization input.",
+    source: 'packages/core-backend/src/integrations/directory-integration-capabilities-flag.ts#isDirectoryIntegrationCapabilitiesEnabled',
+  },
+  {
     key: 'MULTITABLE_BUSINESS_TIMEZONE',
     type: 'enum',
     activationValue: "an IANA timezone id, e.g. 'Asia/Shanghai' (trimmed); unset / blank / any id Intl rejects = 'Asia/Shanghai'",
