@@ -1077,12 +1077,19 @@ test('PB-P1 PORTABILITY (S6 C-1, design §12.2): the pure core contains exactly 
   assert.equal(/\bimport\s*\(|^\s*import\s/m.test(source), false, 'no dynamic import( and no import statement')
 })
 
-test('PB-P2 NOT WIRED (BI-1a): no plugin runtime file but the core itself names stock-preparation-pull-batch, in any form — the lane / store PR replaces this pin', () => {
+// BI-1a ledger PR (the store PR this pin named): #6801's text-level pin, widened by exactly the ledger. Besides the core,
+// only the two DORMANT files — the ledger store and the template band constants — name stock-preparation-pull-batch in
+// any form, and NOTHING in the runtime but the store itself names the store, so no request reaches the ledger yet.
+// BI-1b (the lanes) replaces this pin.
+test('PB-P2 NOT WIRED (BI-1a ledger): only the dormant ledger store and the template band name stock-preparation-pull-batch, in any form; no runtime file names the store', () => {
   const runtime = ['index.cjs', ...fs.readdirSync(LIB).filter((name) => name.endsWith('.cjs')).map((name) => `lib/${name}`)]
     .filter((file) => file !== 'lib/stock-preparation-pull-batch.cjs')
   assert.ok(runtime.length > 100, 'the scan sees the plugin runtime')
-  const wired = runtime.filter((file) => fs.readFileSync(path.join(PLUGIN, file), 'utf8').includes('stock-preparation-pull-batch'))
-  assert.deepEqual(wired, [])
+  const textOf = (file) => fs.readFileSync(path.join(PLUGIN, file), 'utf8')
+  const wired = runtime.filter((file) => textOf(file).includes('stock-preparation-pull-batch'))
+  assert.deepEqual(wired, ['lib/stock-preparation-pull-batch-store.cjs', 'lib/stock-preparation-templates.cjs'])
+  const storeUsers = runtime.filter((file) => file !== 'lib/stock-preparation-pull-batch-store.cjs' && textOf(file).includes('stock-preparation-pull-batch-store'))
+  assert.deepEqual(storeUsers, [], 'the ledger store has no caller yet')
 })
 
 test('PB-P3 the error codes are closed, code-shaped, unique and carry their HTTP status; the vocabularies are frozen', () => {
