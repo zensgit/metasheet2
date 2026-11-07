@@ -126,6 +126,25 @@ describe('non-default pull settings reach every provider call', () => {
     ])
   })
 
+  it('the connection test never reads a page larger than the configured size', async () => {
+    clear()
+    await testDirectoryIntegration({
+      name: 'a0g-int-k',
+      corpId: 'a0g-corp-k',
+      appKey: 'a0g-appkey-k',
+      appSecret: 'a0g-secret',
+      rootDepartmentId: ROOT,
+      pageSize: 3,
+      baseUrl: BASE_URL,
+    })
+
+    expect(clientMocks.listDingTalkDepartmentUsers.mock.calls).toEqual([
+      ['token', ROOT, 0, 3, { baseUrl: BASE_URL }],
+      ['token', ROOT, 0, 3, { baseUrl: BASE_URL }],
+      ['token', ROOT, 0, 3, { baseUrl: BASE_URL, containAccessLimit: true }],
+    ])
+  })
+
   it('every provider call of the four entry points carries the base url', async () => {
     clear()
     const departments = await fetchAllDepartments(config, 'a0g-int-k')
