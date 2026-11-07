@@ -135,12 +135,16 @@ function assertParallelWorkflow(doc) {
         const proofAddition = '  tests/integration/security-action-proof.db.test.ts \\\n'
         assert.equal(step.run.split(proofAddition).length - 1, 1, 'Action proof DB suite must run exactly once')
         assert.ok(step.run.includes(repairAddition + privilegeAddition + intentAddition + membershipGateAddition + proofAddition), 'Keep the action proof suite right after the sync membership gate suite')
+        const goldenParityAddition = '  tests/integration/directory-adapter-golden-parity.db.test.ts \\\n'
+        assert.equal(step.run.split(goldenParityAddition).length - 1, 1, 'Directory sync characterization DB suite must run exactly once')
+        assert.ok(step.run.includes(proofAddition + goldenParityAddition), 'Keep the directory sync characterization suite right after the action proof suite')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
         step.run = step.run.replace(privilegeAddition, '')
         step.run = step.run.replace(intentAddition, '')
         step.run = step.run.replace(membershipGateAddition, '')
         step.run = step.run.replace(proofAddition, '')
+        step.run = step.run.replace(goldenParityAddition, '')
       }
       if (suite === 'runtime-db' && step.id === lockProtocolStepId) {
         const tail = `  --reporter=verbose${lockProtocolJsonReporter}\n${lockProtocolZeroSkipLine}`
@@ -206,6 +210,8 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-sync-membership-local-account-gate.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-sync-membership-local-account-gate.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-adapter-golden-parity.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-adapter-golden-parity.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/security-action-privilege.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/security-action-privilege.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
