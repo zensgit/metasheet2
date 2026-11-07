@@ -242,6 +242,9 @@ describe('organisation lock key', () => {
     expect(() => directoryOrgLockSql('$0')).toThrow(TypeError)
     expect(() => directoryOrgLockSql('$01')).toThrow(TypeError)
     expect(() => directoryOrgLockSql("1'); --")).toThrow(TypeError)
+    expect(() => directoryOrgLockSql("$1'); --")).toThrow(TypeError)
+    expect(() => directoryOrgLockSql('x$1')).toThrow(TypeError)
+    expect(() => directoryOrgLockSql('$1 ')).toThrow(TypeError)
     expect(() => directoryOrgLockSql('org')).toThrow(TypeError)
   })
 
@@ -285,9 +288,17 @@ describe('typed errors', () => {
     expect(error.message).not.toMatch(/\d/)
   })
 
-  it('both error classes extend Error directly in source', () => {
+  it('all three error classes extend Error directly', () => {
     expect(leafSource).toMatch(/class ApprovalRoutingPolicyError extends Error \{/)
     expect(leafSource).toMatch(/class DirectoryRoutingPolicyRequiredError extends Error \{/)
+    expect(leafSource).toMatch(/class PullSourceCountUnavailableError extends Error \{/)
+    expect(Object.getPrototypeOf(PullSourceCountUnavailableError.prototype)).toBe(Error.prototype)
+  })
+
+  it('PullSourceCountUnavailableError carries no organisation when constructed without one', () => {
+    const error = new PullSourceCountUnavailableError()
+    expect(error.orgId).toBeNull()
+    expect(error.message).toBe(PULL_SOURCE_COUNT_UNAVAILABLE_MESSAGE)
   })
 })
 
