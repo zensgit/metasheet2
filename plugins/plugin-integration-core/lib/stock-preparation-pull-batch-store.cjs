@@ -844,9 +844,15 @@ function createStockPreparationPullBatchStore({ db, idGenerator, now } = {}) {
       entry.createdRowCount += intOrNull(link.created_row_count) || 0
       byBatch.set(link.batch_id, entry)
     }
-    const page = batches
+    // A voided batch keeps its number and the batch that reuses it carries the same one, so the page never splits one
+    // batch_no across two pages (the cursor is a number): it extends to the end of the tie. Ties are ordered by id.
+    const after = batches
       .filter((row) => (intOrNull(row.batch_no) || 0) > cursor)
-      .slice(0, limit)
+      .sort((a, b) => ((intOrNull(a.batch_no) || 0) - (intOrNull(b.batch_no) || 0)) || (String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0))
+    let take = Math.min(limit, after.length)
+    while (take > 0 && take < after.length && intOrNull(after[take].batch_no) === intOrNull(after[take - 1].batch_no)) take += 1
+    const page = after
+      .slice(0, take)
       .map((row) => {
         const counts = byBatch.get(row.id) || { createdRowCount: 0, linkCount: 0 }
         return Object.freeze({

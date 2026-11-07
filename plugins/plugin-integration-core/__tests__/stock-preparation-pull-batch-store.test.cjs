@@ -340,6 +340,7 @@ test('ST-S2 (S6 C-3) batchWithin: landed closes the linked open batch recovery_v
   assert.equal(landed.db.rows(kit.T.execution)[0].created_row_count, 4)
   const own = await run('landed', { finishFirst: 'succeeded' })
   assert.equal(own.outcome, 'already_closed', 'closed by this link\'s own succeeded finish')
+  assert.equal(own.db.rows(kit.T.execution)[0].created_row_count, 4, 'the verified count is set BY VALUE over the finish count (5), never added (9)')
   for (const result of ['mixed', 'nothing_landed', 'unknown']) {
     const kept = await run(result)
     assert.equal(kept.outcome, 'kept_open', result)
@@ -376,6 +377,27 @@ test('ST-S4 (S6 C-10) listBatches: values-free rows with COMPUTED counts (sum of
   assert.equal(rest.nextCursor, null)
   const text = JSON.stringify([page, rest])
   assert.ok(!text.includes(PROJECT) && !text.includes(SHEET) && !text.includes(TENANT), 'values-free')
+})
+
+test('ST-S4b (S6 C-10) listBatches after a void-reuse: one batch number is never split across two pages, the tie order is (number, id), nothing is dropped', async () => {
+  const { store } = setup()
+  await alloc(store)
+  await alloc(store, { executionRef: 'small:run_2', sourceDigest: D2, labelsOnSheet: new Set() })
+  // The ledger now holds two rows numbered 1: the voided batch and the open batch that reused its number.
+  const page = await store.listBatches({ scope: SCOPE, limit: 1 })
+  assert.deepEqual(page.batches.map((row) => [row.batchNo, row.status]).sort(), [[1, 'open'], [1, 'void']], 'limit 1 still lists BOTH rows of number 1')
+  assert.equal(page.nextCursor, null, 'nothing is left after number 1')
+  const again = await store.listBatches({ scope: SCOPE, limit: 1 })
+  assert.deepEqual(again.batches.map((row) => row.status), page.batches.map((row) => row.status), 'the tie order is deterministic')
+  // With a later number the page ends at the tie and the cursor resumes after it.
+  await store.finish({ ...SCOPE, executionRef: 'small:run_2', writerStatus: 'succeeded', createdRowCount: 1 })
+  await alloc(store, { executionRef: 'small:run_3', sourceDigest: D1, labelsOnSheet: new Set([label(1)]) })
+  const first = await store.listBatches({ scope: SCOPE, limit: 1 })
+  assert.deepEqual(first.batches.map((row) => row.batchNo), [1, 1])
+  assert.equal(first.nextCursor, 1)
+  const rest = await store.listBatches({ scope: SCOPE, limit: 1, cursor: first.nextCursor })
+  assert.deepEqual(rest.batches.map((row) => [row.batchNo, row.status]), [[2, 'open']])
+  assert.equal(rest.nextCursor, null)
 })
 
 // ── tenant settings ──────────────────────────────────────────────────────────────────────────────────
