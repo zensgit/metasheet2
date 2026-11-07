@@ -29,6 +29,7 @@
  * absent sink is a quiet `SINK_INACTIVE` (fail closed: nothing fires).
  */
 import { createHash } from 'node:crypto'
+import { types } from 'node:util'
 
 import {
   INTEGRATION_RUN_FINISHED_JOB_KINDS,
@@ -110,13 +111,34 @@ export type IntegrationRunEventRefusal =
   | 'EVENT_FIELD_INVALID'
   | 'AUTOMATION_ORIGIN_RESERVED'
   | 'ROUTE_INVALID'
+  | 'EVENT_SHAPE_NOT_PLAIN'
 
 export type IntegrationRunEventValidation =
   | { ok: true; event: IntegrationRunFinishedEvent }
   | { ok: false; code: IntegrationRunEventRefusal; field?: string }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+/**
+ * ADR §2 ⑤ (fix-I5) — the record() posture of plugins/plugin-integration-core/lib/yida-owner-runtime-factory.mjs:
+ * a non-array object that is NOT a Proxy, whose prototype is Object.prototype or null, whose own keys are all
+ * strings and whose own properties are all enumerable DATA properties. Each property is read ONCE (through its
+ * descriptor) into a fresh null-prototype snapshot; validation and the frozen copy both use the snapshot only, so an
+ * accessor or a Proxy trap cannot answer the shape check with one value and the copy with another (TOCTOU).
+ * Returns null when `value` is not an object at all, 'exotic' when it is an object of any other kind.
+ */
+function plainSnapshot(value: unknown): Record<string, unknown> | 'exotic' | null {
+  if (typeof value !== 'object' || value === null) return null
+  if (Array.isArray(value) || types.isProxy(value)) return 'exotic'
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype !== Object.prototype && prototype !== null) return 'exotic'
+  const descriptors = Object.getOwnPropertyDescriptors(value)
+  const snapshot: Record<string, unknown> = Object.create(null)
+  for (const key of Reflect.ownKeys(descriptors)) {
+    if (typeof key !== 'string') return 'exotic'
+    const descriptor = descriptors[key]
+    if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) return 'exotic'
+    snapshot[key] = descriptor.value
+  }
+  return snapshot
 }
 
 function nonNegativeInteger(value: unknown): value is number {
@@ -133,8 +155,10 @@ function firstForeignKey(value: Record<string, unknown>, accepted: readonly stri
  * Validate (and return a FROZEN copy of) a summary event. The refusal carries a closed code and, at most, the
  * NAME of the offending key — never its value. `origin` decides who may say `triggeredBy: 'automation'`.
  */
-export function validateIntegrationRunFinishedEvent(raw: unknown, origin: IntegrationRunEventOrigin): IntegrationRunEventValidation {
-  if (!isRecord(raw)) return { ok: false, code: 'EVENT_NOT_OBJECT' }
+export function validateIntegrationRunFinishedEvent(input: unknown, origin: IntegrationRunEventOrigin): IntegrationRunEventValidation {
+  const raw = plainSnapshot(input)
+  if (raw === null) return { ok: false, code: 'EVENT_NOT_OBJECT' }
+  if (raw === 'exotic') return { ok: false, code: 'EVENT_SHAPE_NOT_PLAIN' }
   const foreign = firstForeignKey(raw, INTEGRATION_RUN_FINISHED_EVENT_KEYS)
   if (foreign !== null) return { ok: false, code: 'EVENT_KEY_NOT_ACCEPTED', field: foreign.slice(0, 64) }
   for (const key of REQUIRED_EVENT_KEYS) if (raw[key] === undefined) return { ok: false, code: 'EVENT_KEY_MISSING', field: key }
@@ -143,8 +167,9 @@ export function validateIntegrationRunFinishedEvent(raw: unknown, origin: Integr
   if (typeof raw.eventId !== 'string' || !INTEGRATION_RUN_JOB_ID_SHAPE.test(raw.eventId)) return invalid('eventId')
   if (typeof raw.occurredAt !== 'string' || !OCCURRED_AT_SHAPE.test(raw.occurredAt) || !Number.isFinite(Date.parse(raw.occurredAt))) return invalid('occurredAt')
 
-  const rawJob = raw.job
-  if (!isRecord(rawJob)) return invalid('job')
+  const rawJob = plainSnapshot(raw.job)
+  if (rawJob === 'exotic') return { ok: false, code: 'EVENT_SHAPE_NOT_PLAIN', field: 'job' }
+  if (rawJob === null) return invalid('job')
   const foreignJob = firstForeignKey(rawJob, INTEGRATION_RUN_FINISHED_JOB_KEYS)
   if (foreignJob !== null) return { ok: false, code: 'EVENT_KEY_NOT_ACCEPTED', field: `job.${foreignJob.slice(0, 64)}` }
   if (typeof rawJob.kind !== 'string' || !(INTEGRATION_RUN_FINISHED_JOB_KINDS as readonly string[]).includes(rawJob.kind)) return invalid('job.kind')
@@ -167,8 +192,9 @@ export function validateIntegrationRunFinishedEvent(raw: unknown, origin: Integr
 
   if (typeof raw.status !== 'string' || !(INTEGRATION_RUN_FINISHED_STATUSES as readonly string[]).includes(raw.status)) return invalid('status')
 
-  const rawCounts = raw.counts
-  if (!isRecord(rawCounts)) return invalid('counts')
+  const rawCounts = plainSnapshot(raw.counts)
+  if (rawCounts === 'exotic') return { ok: false, code: 'EVENT_SHAPE_NOT_PLAIN', field: 'counts' }
+  if (rawCounts === null) return invalid('counts')
   const foreignCount = firstForeignKey(rawCounts, INTEGRATION_RUN_FINISHED_COUNT_KEYS)
   if (foreignCount !== null) return { ok: false, code: 'EVENT_KEY_NOT_ACCEPTED', field: `counts.${foreignCount.slice(0, 64)}` }
   for (const key of INTEGRATION_RUN_FINISHED_COUNT_KEYS) if (!nonNegativeInteger(rawCounts[key])) return invalid(`counts.${key}`)
@@ -204,8 +230,9 @@ export function validateIntegrationRunFinishedEvent(raw: unknown, origin: Integr
   return { ok: true, event: Object.freeze(event) }
 }
 
-export function validateIntegrationRunEventRoute(raw: unknown): IntegrationRunEventRoute | null {
-  if (!isRecord(raw) || firstForeignKey(raw, ROUTE_KEYS) !== null) return null
+export function validateIntegrationRunEventRoute(input: unknown): IntegrationRunEventRoute | null {
+  const raw = plainSnapshot(input)
+  if (raw === null || raw === 'exotic' || firstForeignKey(raw, ROUTE_KEYS) !== null) return null
   if (typeof raw.tenantId !== 'string' || !TENANT_ID_SHAPE.test(raw.tenantId)) return null
   return Object.freeze({ tenantId: raw.tenantId })
 }
@@ -252,9 +279,21 @@ export function clearIntegrationRunFinishedSinkForTest(): void {
   boundOwner = null
 }
 
+/**
+ * Thrown by a sink that no longer admits events (fix-I5: AutomationService after its completion consumers were
+ * detached at shutdown). The port answers the closed `SINK_STOPPED` code instead of `published: true`.
+ */
+export class IntegrationRunSinkStoppedError extends Error {
+  readonly code = 'SINK_STOPPED'
+  constructor() {
+    super('integration.run_finished sink stopped')
+    this.name = 'IntegrationRunSinkStoppedError'
+  }
+}
+
 export type IntegrationRunPublishResult =
   | { published: true }
-  | { published: false; code: 'EVENT_DISABLED' | 'SINK_INACTIVE' | 'SINK_FAILED' | IntegrationRunEventRefusal; field?: string }
+  | { published: false; code: 'EVENT_DISABLED' | 'SINK_INACTIVE' | 'SINK_FAILED' | 'SINK_STOPPED' | IntegrationRunEventRefusal; field?: string }
 
 /**
  * THE publish port (both origins). Never throws: a refused or failed publish answers a closed code, so a
@@ -278,7 +317,7 @@ export async function publishIntegrationRunFinished(
   try {
     await sink(validation.event, route)
     return { published: true }
-  } catch {
-    return { published: false, code: 'SINK_FAILED' }
+  } catch (error) {
+    return { published: false, code: error instanceof IntegrationRunSinkStoppedError ? 'SINK_STOPPED' : 'SINK_FAILED' }
   }
 }

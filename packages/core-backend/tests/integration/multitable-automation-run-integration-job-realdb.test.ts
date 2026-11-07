@@ -460,6 +460,36 @@ describeIfDatabase('R-69 1c integration.run_finished on real tables (event-fires
     expect(executeRule).toHaveBeenCalledTimes(2)
   }, 20_000)
 
+  // fix-I5 F5: the tenant wall on the REAL loader (its SQL filter on the stamped binding) AND the in-loop binding
+  // check. A rule bound to another tenant (same creator, same job kind, same statuses) must never fire on this
+  // tenant's summary. Red only when BOTH layers are removed (each is the other's defense in depth); the unit suite
+  // pins the in-loop layer alone.
+  test('tenant wall: a rule bound to ANOTHER tenant never fires on this tenant\'s summary (real loader + in-loop check)', async () => {
+    const ruleA = `${RULE}_tenant_a`
+    const ruleB = `${RULE}_tenant_b`
+    const insertBound = (id: string, tenantId: string) => q(
+      `INSERT INTO automation_rules (id, sheet_id, name, trigger_type, trigger_config, action_type, action_config, enabled, created_by)
+       VALUES ($1, $2, 'rf', 'integration.run_finished', $3::jsonb, 'send_notification', '{}'::jsonb, true, $4)`,
+      [id, `sheet_rf_${RUN}`, JSON.stringify({ job: { kind: 'stock_prep_pull' }, statuses: ['succeeded'], binding: { principalId: PRINCIPAL_ID, tenantId } }), PRINCIPAL_ID],
+    )
+    try {
+      await insertBound(ruleA, TENANT)
+      await insertBound(ruleB, `${TENANT}_other`)
+      const service = new AutomationService(new EventBus(), db as never, q as never)
+      service.setIntegrationRunFinishedCreatorResolverForTest(async () => ({ ok: true, user: { ...PRINCIPAL, permissions: ['integration:read', 'workflow:write'] } }))
+      const executeRule = vi.spyOn(service, 'executeRule').mockResolvedValue({} as never)
+      registerIntegrationRunFinishedSink(`rf_tenant_${RUN}`, (event, route) => service.dispatchIntegrationRunFinished(event, route))
+      const X = executorWith(immediatePort, poolTransaction, { leaseTtlMs: 2_000 })
+      const step = await X.run(`exec_rft_${RUN}`, RF_CONFIG)
+      expect(step.status).toBe('success')
+      const fired = executeRule.mock.calls.map((call) => (call[0] as { id: string }).id).filter((id) => id === ruleA || id === ruleB)
+      expect(fired).toEqual([ruleA])
+    } finally {
+      await q(`DELETE FROM meta_automation_event_fires WHERE rule_id = ANY($1::text[])`, [[ruleA, ruleB]])
+      await q(`DELETE FROM automation_rules WHERE id = ANY($1::text[])`, [[ruleA, ruleB]])
+    }
+  }, 20_000)
+
   test('trigger CHECK migration: up admits the type; down REFUSES while a rule uses it, then restores the prior set; up again', async () => {
     await expect(runFinishedTriggerDown(db as never)).rejects.toThrow(/still use trigger_type 'integration.run_finished'/)
     await q(`DELETE FROM automation_rules WHERE id = $1`, [RULE])

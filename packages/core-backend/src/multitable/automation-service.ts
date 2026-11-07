@@ -170,6 +170,7 @@ import {
 // trigger vocabulary is imported with the other automation-triggers names above.
 import {
   INTEGRATION_RUN_FINISHED_EVENT_TYPE,
+  IntegrationRunSinkStoppedError,
   isIntegrationAutomationRunEventEnabled,
   validateIntegrationRunEventRoute,
   validateIntegrationRunFinishedEvent,
@@ -1506,6 +1507,8 @@ export class AutomationService {
   private readonly transitiveCompletionInFlight = new Set<Promise<void>>()
   private readonly completionConsumerInFlight = new Set<Promise<void>>()
   private producerStopPromise: Promise<void> | null = null
+  /** R-69 1c (fix-I5): set by detachCompletionConsumers — the integration.run_finished sink admits nothing after it. */
+  private completionConsumersDetached = false
   private executor: AutomationExecutor
   private scheduler: AutomationScheduler
   private logService: AutomationLogService
@@ -3172,8 +3175,13 @@ export class AutomationService {
    * crash between the two loses one alert; the next run produces the next event.
    */
   async handleIntegrationRunFinished(event: IntegrationRunFinishedEvent, route: IntegrationRunEventRoute, env: NodeJS.ProcessEnv = process.env): Promise<void> {
-    // Producer admissions stopped (host shutdown): no new run summary is admitted, like the bus subscriptions.
-    if (this.producerStopPromise) return
+    // fix-I5: the gate is the COMPLETION-consumer detach, not the producer stop. Every `shutdown`-reason summary is
+    // emitted DURING the producer drain (stopProducerAdmissions aborts the jobs, then the scheduler's destroy()
+    // awaits the running rule, whose step emits), so gating on the producer stop dropped all of them while the
+    // port answered published:true. Until detach: durable ON enqueues (the row waits in the outbox for the next
+    // process — the delivery loop is stopping concurrently); OFF dispatches on completionConsumerInFlight, which
+    // the host drains after detach (index.ts stopOnce). After detach: refused with the closed SINK_STOPPED code.
+    if (this.completionConsumersDetached) throw new IntegrationRunSinkStoppedError()
     if (isDurableDeliveryEnabled(env)) {
       const payload = { event, route }
       if (this.integrationRunEventEnqueue) {
@@ -3360,6 +3368,7 @@ export class AutomationService {
   }
 
   detachCompletionConsumers(): void {
+    this.completionConsumersDetached = true
     for (const id of this.completionSubscriptionIds.splice(0)) this.eventBus.unsubscribe(id)
   }
 

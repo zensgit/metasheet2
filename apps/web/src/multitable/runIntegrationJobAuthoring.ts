@@ -41,6 +41,8 @@ const CONFIG_KEYS: readonly string[] = ['job', 'timeoutMs', 'binding', 'retry']
 const STOCK_PREP_JOB_KEYS: readonly string[] = ['kind', 'projectNos', 'applyMode', 'actionId']
 const PIPELINE_JOB_KEYS: readonly string[] = ['kind', 'pipelineId', 'dryRun', 'mode', 'pipelineFingerprint']
 const PROJECT_NO_SHAPE = /^[!-~]{1,128}$/
+/** Mirror of the server's RUN_INTEGRATION_JOB_ACTION_ID_SHAPE (R-69 1c: the shape every run summary carries). */
+const ACTION_ID_SHAPE = /^[A-Za-z0-9_:.-]{1,128}$/
 
 /** Closed codes for the editor's localized save-block line; the `message` is the server's string. */
 export type RunIntegrationJobConfigErrorCode =
@@ -119,8 +121,8 @@ export function checkRunIntegrationJobConfig(config: unknown, path: string): Run
     if (seen.has(projectNo)) return fail('project_repeat', `${path}.job.projectNos must not repeat a project`)
     seen.add(projectNo)
   }
-  if (job.actionId !== undefined && (typeof job.actionId !== 'string' || !PROJECT_NO_SHAPE.test(job.actionId))) {
-    return fail('action_id', `${path}.job.actionId must be a non-blank string when present`)
+  if (job.actionId !== undefined && (typeof job.actionId !== 'string' || !ACTION_ID_SHAPE.test(job.actionId))) {
+    return fail('action_id', `${path}.job.actionId must be an identifier when present (1..128 of A-Z a-z 0-9 _ : . -)`)
   }
   if (config.timeoutMs !== undefined) {
     const timeoutMs = config.timeoutMs

@@ -27,6 +27,7 @@ import {
   INTEGRATION_RUN_FINISHED_REASONS_ADDED_IN_1C,
   INTEGRATION_RUN_FINISHED_SKIPPED_REASONS,
   INTEGRATION_RUN_FINISHED_STATUSES,
+  INTEGRATION_RUN_JOB_ID_SHAPE,
   TRIGGER_TYPE_BY_EVENT,
   integrationRunFinishedConfiguredStatuses,
   validateIntegrationRunFinishedTriggerConfig,
@@ -37,6 +38,7 @@ import {
   deriveAutomationRunFinishedEventId,
   publishIntegrationRunFinished,
   registerIntegrationRunFinishedSink,
+  validateIntegrationRunEventRoute,
   validateIntegrationRunFinishedEvent,
   type IntegrationRunEventRoute,
   type IntegrationRunFinishedEvent,
@@ -47,6 +49,7 @@ import { AutomationRuleValidationError, AutomationService } from '../../src/mult
 import { buildDurableConsumerHandlers } from '../../src/multitable/automation-durable-consumer-handlers'
 import { DURABLE_CONSUMER_KEYS } from '../../src/multitable/automation-durable-activation'
 import { createFakeJobDb } from '../utils/run-integration-job-fake-db'
+import { RUN_INTEGRATION_JOB_ACTION_ID_SHAPE, validateRunIntegrationJobConfig } from '../../src/multitable/automation-run-integration-job'
 import {
   AUTOMATION_TRIGGER_TYPES_BEFORE_INTEGRATION_RUN_FINISHED,
   AUTOMATION_TRIGGER_TYPES_WITH_INTEGRATION_RUN_FINISHED,
@@ -683,5 +686,257 @@ describe('integration.run_finished — the alert template (ADR §4.3) renders fr
     expect(`${title}\n${body}`).not.toContain(TENANT)
     // a template variable outside run.* renders nothing on this record-less trigger
     expect(renderAutomationTemplate('{{record.x}}{{sheetId}}', { run })).toBe('')
+  })
+})
+
+// ── 7. verifier findings (fix-I5): the failure path, shutdown, exotic objects, one actionId shape, the walls ─────
+
+/** A database error whose MESSAGE is a sentinel: it must never reach a summary or the step's error. */
+function dbError(code = '08006'): Error {
+  return Object.assign(new Error('connection to HOST-SENTINEL-R69 lost (SECRET-SENTINEL-R69)'), { code })
+}
+
+describe('fix-I5 F1 — a throw inside the step still yields EXACTLY ONE summary per job (ADR §4.1, baseline §10.2)', () => {
+  beforeEach(() => {
+    vi.stubEnv(ACTION_FLAG, 'true')
+    vi.stubEnv(EVENT_FLAG, 'true')
+  })
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    clearIntegrationRunFinishedSinkForTest()
+  })
+  const valuesFree = (events: Array<{ event: IntegrationRunFinishedEvent }>, step: AutomationStepResult) => {
+    // the error MESSAGE reaches neither the summaries nor the step; the tenant never rides in a summary (the step's
+    // own unit scopeKey carries it, as I3 always did — the step output is the run log, not an event)
+    const eventText = JSON.stringify(events.map((e) => e.event))
+    for (const needle of ['SENTINEL', 'connection', TENANT]) expect(eventText).not.toContain(needle)
+    for (const needle of ['SENTINEL', 'connection']) expect(JSON.stringify(step)).not.toContain(needle)
+  }
+
+  it('Tx A of project 3 of 3 throws: P-1 / P-2 keep their results, P-3 is failed with the error CLASS, the step is a closed failure', async () => {
+    const events = captureSink()
+    const db = createFakeJobDb()
+    let claims = 0
+    const query: AutomationDeps['queryFn'] = async (sql, params) => {
+      if (/INSERT INTO meta_automation_outbound_intent/.test(sql) && ++claims === 3) throw dbError()
+      return db.query(sql, params)
+    }
+    const { run } = harness(db, fakePort('immediate').port, { queryFn: query })
+    const step = await run('exec_f1a', CONFIG3)
+    expect(step).toMatchObject({ status: 'failed', output: { outcome: 'failed', reason: '08006' } })
+    expect(events.map((e) => [e.event.job.projectNo, e.event.status, e.event.reason ?? null, e.event.errorClass ?? null])).toEqual([
+      ['P-1', 'succeeded', 'ready', null], ['P-2', 'succeeded', 'ready', null], ['P-3', 'failed', null, '08006'],
+    ])
+    valuesFree(events, step)
+  })
+
+  it('the job-lease claim of project 1 throws: the loop goes on (P-2, P-3 run), P-1 is failed and its intent is a definite non-delivery', async () => {
+    const events = captureSink()
+    const db = createFakeJobDb()
+    let leaseClaims = 0
+    const query: AutomationDeps['queryFn'] = async (sql, params) => {
+      if (/INSERT INTO meta_automation_job_leases/.test(sql) && ++leaseClaims === 1) throw dbError('40001')
+      return db.query(sql, params)
+    }
+    const { run } = harness(db, fakePort('immediate').port, { queryFn: query })
+    const step = await run('exec_f1b', CONFIG3)
+    expect(step.status).toBe('failed')
+    expect(events.map((e) => [e.event.job.projectNo, e.event.status, e.event.errorClass ?? null])).toEqual([
+      ['P-1', 'failed', '40001'], ['P-2', 'succeeded', null], ['P-3', 'succeeded', null],
+    ])
+    expect(db.intentRows().map(([, row]) => row.status)).toEqual(['failed', 'sent', 'sent'])
+    valuesFree(events, step)
+  })
+
+  it('a throw the unit does not classify (heartbeat start) ⇒ that project outcome_unknown, the others still run and summarize', async () => {
+    const events = captureSink()
+    let starts = 0
+    const now = () => { if (++starts === 1) throw dbError('HEARTBEAT_CLOCK'); return Date.now() }
+    const { run } = harness(createFakeJobDb(), fakePort('immediate').port, {
+      integrationJobRuntime: { leaseTtlMs: 3_000, settleGraceMs: 500, shutdownSettleGraceMs: 300, heartbeat: { now } },
+    })
+    const step = await run('exec_f1c', CONFIG3)
+    expect(step).toMatchObject({ status: 'failed', output: { outcome: 'outcome_unknown', reason: 'HEARTBEAT_CLOCK' } })
+    expect(events.map((e) => [e.event.job.projectNo, e.event.status, e.event.errorClass ?? null])).toEqual([
+      ['P-1', 'outcome_unknown', 'HEARTBEAT_CLOCK'], ['P-2', 'succeeded', null], ['P-3', 'succeeded', null],
+    ])
+    valuesFree(events, step)
+  })
+
+  it('a throw outside the unit loop (the port factory) ⇒ one failed summary per project, a values-free step error', async () => {
+    const events = captureSink()
+    const { run } = harness(createFakeJobDb(), null, { integrationRunPort: () => { throw dbError('PORT_FACTORY') } })
+    const step = await run('exec_f1d', CONFIG3)
+    expect(step).toMatchObject({ status: 'failed', output: { outcome: 'failed', reason: 'PORT_FACTORY' } })
+    expect(events.map((e) => [e.event.job.projectNo, e.event.status, e.event.errorClass ?? null])).toEqual([
+      ['P-1', 'failed', 'PORT_FACTORY'], ['P-2', 'failed', 'PORT_FACTORY'], ['P-3', 'failed', 'PORT_FACTORY'],
+    ])
+    valuesFree(events, step)
+  })
+})
+
+describe('fix-I5 F2 — shutdown-reason summaries are admitted during the producer drain, refused (closed code) after detach', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllEnvs()
+    clearIntegrationRunFinishedSinkForTest()
+  })
+  const shutdownEvent = () => ({
+    eventId: 'd'.repeat(64), occurredAt: '2026-11-06T06:00:00.000Z', job: { kind: 'stock_prep_pull', projectNo: 'P-2' }, status: 'not_started',
+    counts: { read: 0, cleaned: 0, written: 0, failed: 0 }, durationMs: 0, attempts: 1, triggeredBy: 'automation', reason: 'shutdown', _automationDepth: 1,
+  })
+
+  it('durable ON: after stopProducerAdmissions the not_started(shutdown) summary is still enqueued', async () => {
+    const { service } = dispatchHarness([ruleRow()])
+    const enqueue = vi.fn(async () => undefined)
+    service.setIntegrationRunEventEnqueueForTest(enqueue)
+    const env = { ...ON, AUTOMATION_DURABLE_DELIVERY_ENABLED: 'true' } as NodeJS.ProcessEnv
+    registerIntegrationRunFinishedSink('fix-i5-svc', (event, route) => service.handleIntegrationRunFinished(event, route, env))
+    await service.stopProducerAdmissions()
+    expect(await publishIntegrationRunFinished(shutdownEvent(), { tenantId: TENANT }, 'automation', ON)).toEqual({ published: true })
+    expect(enqueue).toHaveBeenCalledTimes(1)
+  })
+
+  it('durable OFF: after stopProducerAdmissions it is dispatched on the completion consumers (drained by the host after detach)', async () => {
+    vi.stubEnv(EVENT_FLAG, 'true')
+    const { service, executeRule } = dispatchHarness([ruleRow()])
+    registerIntegrationRunFinishedSink('fix-i5-svc', (event, route) => service.handleIntegrationRunFinished(event, route, ON))
+    await service.stopProducerAdmissions()
+    expect(await publishIntegrationRunFinished(shutdownEvent(), { tenantId: TENANT }, 'automation', ON)).toEqual({ published: true })
+    service.detachCompletionConsumers()
+    await service.drainCompletionConsumers()
+    expect(executeRule).toHaveBeenCalledTimes(1)
+    expect((executeRule.mock.calls[0][1] as { run: { reason: string } }).run.reason).toBe('shutdown')
+  })
+
+  it('after detachCompletionConsumers: refused with SINK_STOPPED (never published:true), nothing enqueued or dispatched', async () => {
+    for (const durable of [false, true]) {
+      const { service, executeRule } = dispatchHarness([ruleRow()])
+      const enqueue = vi.fn(async () => undefined)
+      service.setIntegrationRunEventEnqueueForTest(enqueue)
+      const env = { ...ON, ...(durable ? { AUTOMATION_DURABLE_DELIVERY_ENABLED: 'true' } : {}) } as NodeJS.ProcessEnv
+      registerIntegrationRunFinishedSink('fix-i5-svc', (event, route) => service.handleIntegrationRunFinished(event, route, env))
+      await service.shutdown()
+      expect(await publishIntegrationRunFinished(shutdownEvent(), { tenantId: TENANT }, 'automation', ON)).toEqual({ published: false, code: 'SINK_STOPPED' })
+      await service.drainCompletionConsumers()
+      expect(enqueue).not.toHaveBeenCalled()
+      expect(executeRule).not.toHaveBeenCalled()
+      clearIntegrationRunFinishedSinkForTest()
+      vi.restoreAllMocks()
+    }
+  })
+})
+
+describe('fix-I5 F3 — the publish port reads every level ONCE and refuses Proxies / accessors (ADR §2 ⑤, the record() posture)', () => {
+  afterEach(() => clearIntegrationRunFinishedSinkForTest())
+  const SMUGGLED = 'SMUGGLED-SENTINEL-R69 token'
+  const flipping = (good: unknown, reads: { n: number }, after = 1) => ({ enumerable: true, get() { reads.n += 1; return reads.n <= after ? good : SMUGGLED } })
+
+  it('an accessor on the event (errorClass) is refused — nothing is delivered, whatever it would answer on a second read', async () => {
+    const events = captureSink()
+    const reads = { n: 0 }
+    const evil = Object.defineProperty(pluginEvent(), 'errorClass', flipping('PipelineRunnerError', reads, 3))
+    expect(await publishIntegrationRunFinished(evil, { tenantId: TENANT }, 'plugin', ON)).toEqual({ published: false, code: 'EVENT_SHAPE_NOT_PLAIN' })
+    expect(events).toHaveLength(0)
+    expect(reads.n).toBe(0) // never invoked: the descriptor is inspected, not the getter
+  })
+
+  it('a Proxy (event, job, counts) is refused', async () => {
+    const events = captureSink()
+    const trap = <T extends object>(target: T) => new Proxy(target, {})
+    expect(await publishIntegrationRunFinished(trap(pluginEvent()), { tenantId: TENANT }, 'plugin', ON)).toEqual({ published: false, code: 'EVENT_SHAPE_NOT_PLAIN' })
+    expect(await publishIntegrationRunFinished(pluginEvent({ job: trap({ kind: 'pipeline', pipelineId: 'pipe_1' }) }), { tenantId: TENANT }, 'plugin', ON)).toEqual({ published: false, code: 'EVENT_SHAPE_NOT_PLAIN', field: 'job' })
+    expect(await publishIntegrationRunFinished(pluginEvent({ counts: trap({ read: 1, cleaned: 1, written: 0, failed: 0 }) }), { tenantId: TENANT }, 'plugin', ON)).toEqual({ published: false, code: 'EVENT_SHAPE_NOT_PLAIN', field: 'counts' })
+    expect(events).toHaveLength(0)
+  })
+
+  it('nested accessors (counts.failed, job.pipelineId), a class instance and a symbol key are refused', () => {
+    const reads = { n: 0 }
+    const counts = Object.defineProperty({ read: 1, cleaned: 1, written: 0 }, 'failed', flipping(0, reads))
+    expect(validateIntegrationRunFinishedEvent(pluginEvent({ counts }), 'plugin')).toEqual({ ok: false, code: 'EVENT_SHAPE_NOT_PLAIN', field: 'counts' })
+    const job = Object.defineProperty({ kind: 'pipeline' }, 'pipelineId', flipping('pipe_1', reads))
+    expect(validateIntegrationRunFinishedEvent(pluginEvent({ job }), 'plugin')).toEqual({ ok: false, code: 'EVENT_SHAPE_NOT_PLAIN', field: 'job' })
+    class Summary { constructor() { Object.assign(this, pluginEvent()) } }
+    expect(validateIntegrationRunFinishedEvent(new Summary(), 'plugin')).toEqual({ ok: false, code: 'EVENT_SHAPE_NOT_PLAIN' })
+    expect(validateIntegrationRunFinishedEvent({ ...pluginEvent(), [Symbol('x')]: 1 }, 'plugin')).toEqual({ ok: false, code: 'EVENT_SHAPE_NOT_PLAIN' })
+    expect(reads.n).toBe(0)
+    // a null-prototype plain object and a frozen one are fine
+    expect(validateIntegrationRunFinishedEvent(Object.assign(Object.create(null), pluginEvent()), 'plugin').ok).toBe(true)
+    expect(validateIntegrationRunFinishedEvent(Object.freeze(pluginEvent()), 'plugin').ok).toBe(true)
+  })
+
+  it('the route is snapshotted too: an accessor tenantId or a Proxy route is refused', async () => {
+    const reads = { n: 0 }
+    expect(validateIntegrationRunEventRoute(Object.defineProperty({}, 'tenantId', flipping(TENANT, reads)))).toBeNull()
+    expect(validateIntegrationRunEventRoute(new Proxy({ tenantId: TENANT }, {}))).toBeNull()
+    expect(validateIntegrationRunEventRoute({ tenantId: TENANT })).toEqual({ tenantId: TENANT })
+    expect(reads.n).toBe(0)
+    captureSink()
+    expect(await publishIntegrationRunFinished(pluginEvent(), new Proxy({ tenantId: TENANT }, {}), 'plugin', ON)).toEqual({ published: false, code: 'ROUTE_INVALID' })
+  })
+})
+
+describe('fix-I5 F4 — one job-id shape: an actionId the I3 save gate accepts always fits the summary', () => {
+  beforeEach(() => {
+    vi.stubEnv(ACTION_FLAG, 'true')
+    vi.stubEnv(EVENT_FLAG, 'true')
+  })
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    clearIntegrationRunFinishedSinkForTest()
+  })
+
+  it('the I3 action shape is byte-identical to the event shape', () => {
+    expect(RUN_INTEGRATION_JOB_ACTION_ID_SHAPE.source).toBe(INTEGRATION_RUN_JOB_ID_SHAPE.source)
+    expect(RUN_INTEGRATION_JOB_ACTION_ID_SHAPE.flags).toBe(INTEGRATION_RUN_JOB_ID_SHAPE.flags)
+  })
+
+  it('the I3 save gate refuses an actionId the summary could not carry, and every id it accepts yields one summary per project', async () => {
+    const job = (actionId: string) => ({ kind: 'stock_prep_pull', projectNos: ['P-1', 'P-2', 'P-3'], applyMode: 'dry_run_only', actionId })
+    for (const bad of ['plm.stock-preparation.pull-bom.v1@site', 'plm/pull', 'a b', 'a'.repeat(129)]) {
+      expect(validateRunIntegrationJobConfig({ job: job(bad) }, 'config')).toMatch(/actionId must be an identifier/)
+    }
+    const good = 'plm.stock-preparation.pull-bom.v1'
+    expect(validateRunIntegrationJobConfig({ job: job(good) }, 'config')).toBeNull()
+    const events = captureSink()
+    const { run } = harness(createFakeJobDb(), fakePort('immediate').port)
+    await run('exec_f4', { ...CONFIG3, job: job(good) })
+    expect(events.map((e) => [e.event.job.projectNo, e.event.job.actionId])).toEqual([['P-1', good], ['P-2', good], ['P-3', good]])
+  })
+})
+
+describe('fix-I5 F5/F6 — the dispatch walls: another tenant\'s rule never fires; the creator needs an integration read code', () => {
+  afterEach(() => vi.restoreAllMocks())
+  const noReadCode = async () => ({ ok: true as const, user: { id: 'alerter', permissions: ['workflow:write'], roles: [] as string[], role: 'user', tenantId: TENANT } })
+
+  it('the in-loop tenant check holds even when the loader hands back another tenant\'s rule (loader NOT tenant-filtered here)', async () => {
+    const { service, executeRule } = dispatchHarness([])
+    const tenantB = ruleRow({ id: 'r_tenant_b', trigger_config: { job: { kind: 'stock_prep_pull' }, binding: { principalId: 'alerter', tenantId: 'tenant_2' } } })
+    const tenantA = ruleRow({ id: 'r_tenant_a' })
+    vi.spyOn(service, 'loadEnabledIntegrationRunFinishedRules').mockImplementation(async () => [tenantB, tenantA].map((r) => (service as unknown as { mapRow(r: unknown): never }).mapRow(r)))
+    await service.dispatchIntegrationRunFinished(automationEvent(), { tenantId: TENANT }, ON)
+    expect(executeRule.mock.calls.map((call) => (call[0] as { id: string }).id)).toEqual(['r_tenant_a'])
+  })
+
+  it('save: a creator who resolves (active, one tenant, manages automation) but holds no integration / stock-prep read code is refused', async () => {
+    const inserted: Record<string, unknown>[] = []
+    const queryFn = vi.fn(async (sql: string) => (/FROM user_orgs/i.test(sql) ? { rows: [{ org_id: TENANT }], rowCount: 1 } : { rows: [], rowCount: 0 }))
+    const service = new AutomationService(new EventBus(), chainDb(inserted) as never, queryFn as never)
+    service.setIntegrationRunFinishedCreatorResolverForTest(noReadCode)
+    await expect(service.createRule('sheet_1', {
+      triggerType: 'integration.run_finished', triggerConfig: { job: { kind: 'stock_prep_pull' } },
+      actionType: 'send_dingtalk_group_message', actionConfig: { destinationIds: ['d1'], titleTemplate: 't', bodyTemplate: 'b' }, createdBy: 'alerter',
+    } as never)).rejects.toThrow(/integration:read/)
+    expect(inserted).toHaveLength(0)
+  })
+
+  it('fire: a rule whose creator resolves but lost the read code is skipped; stock-prep:read alone is enough', async () => {
+    const { service, executeRule } = dispatchHarness([ruleRow()])
+    service.setIntegrationRunFinishedCreatorResolverForTest(noReadCode)
+    await service.dispatchIntegrationRunFinished(automationEvent(), { tenantId: TENANT }, ON)
+    expect(executeRule).not.toHaveBeenCalled()
+    service.setIntegrationRunFinishedCreatorResolverForTest(async () => ({ ok: true as const, user: { id: 'alerter', permissions: ['stock-prep:read'], roles: [] as string[], role: 'user', tenantId: TENANT } }))
+    await service.dispatchIntegrationRunFinished(automationEvent({ eventId: 'e'.repeat(64) }), { tenantId: TENANT }, ON)
+    expect(executeRule).toHaveBeenCalledTimes(1)
   })
 })

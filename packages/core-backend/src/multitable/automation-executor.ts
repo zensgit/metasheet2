@@ -4260,7 +4260,15 @@ export class AutomationExecutor {
     context: ExecutionContext,
     identity: ClassAActionIdentity | undefined,
   ): Promise<AutomationStepResult> {
-    const result = await this.executeRunIntegrationJobStep(config, context, identity)
+    let result: AutomationStepResult
+    try {
+      result = await this.executeRunIntegrationJobStep(config, context, identity)
+    } catch (error) {
+      // R-69 1c (ADR §4.1 "exactly one per job", fix-I5): a throw OUTSIDE the unit loop (the unit loop turns its
+      // own throws into closed unit results) still ends as a closed step result, so every configured project gets
+      // its one summary. Values-free: the error's code or name only — never its message.
+      result = this.runIntegrationJobStep('failed', 'failed', integrationRunErrorClass(error))
+    }
     await this.emitRunIntegrationJobSummaries(result, config, context, identity)
     return result
   }
@@ -4345,20 +4353,28 @@ export class AutomationExecutor {
           units.push({ projectNo, scopeKey, outcome: 'not_started', reason: abortedBy, confirmed: false, durationMs: 0 })
           continue
         }
-        const unit = await this.runIntegrationJobUnit({
-          rawConfig: config,
-          context,
-          identity,
-          parsed,
-          projectNo,
-          scopeKey,
-          principal: principal.user,
-          port,
-          transaction,
-          timeoutSignal: timeoutController.signal,
-          shutdownSignal,
-          runtime,
-        })
+        let unit: RunIntegrationJobUnitResult
+        try {
+          unit = await this.runIntegrationJobUnit({
+            rawConfig: config,
+            context,
+            identity,
+            parsed,
+            projectNo,
+            scopeKey,
+            principal: principal.user,
+            port,
+            transaction,
+            timeoutSignal: timeoutController.signal,
+            shutdownSignal,
+            runtime,
+          })
+        } catch (error) {
+          // R-69 1c (fix-I5): a throw the unit did not classify itself (it classifies Tx A, the lease claim and the
+          // busy write) never ends the loop — the next project still runs and every project keeps its one summary.
+          // Where it threw is not known, so the job MAY have started: outcome_unknown, error class only.
+          unit = { projectNo, scopeKey, outcome: 'outcome_unknown', reason: integrationRunErrorClass(error), confirmed: false, durationMs: 0 }
+        }
         units.push(unit)
         if (unit.outcome === 'outcome_unknown' && unit.reason === 'timeout_unsettled') break
       }
@@ -4404,7 +4420,14 @@ export class AutomationExecutor {
     const intentLeaseMs = outboundLeaseForTimeout(parsed.timeoutMs)
 
     // 2. Tx A — the intent row is ALWAYS written for this action (ADR §5), whatever the class-B switch says.
-    const claim = await claimOutboundIntent(this.deps.queryFn, intentId, { leaseMs: intentLeaseMs })
+    // R-69 1c (fix-I5): a database failure here is a closed unit result, never a throw past the loop (ADR §4.1:
+    // every project keeps its one summary). The port was not called: `failed`, the error CLASS only.
+    let claim: Awaited<ReturnType<typeof claimOutboundIntent>>
+    try {
+      claim = await claimOutboundIntent(this.deps.queryFn, intentId, { leaseMs: intentLeaseMs })
+    } catch (error) {
+      return unit('failed', integrationRunErrorClass(error))
+    }
     if (claim.decision !== 'proceed' && claim.decision !== 'retry_failed') {
       if (claim.decision === 'skip_sent') return unit('succeeded', 'already_applied', { confirmed: true })
       return unit('outcome_unknown', claim.decision === 'skip_inflight' ? 'inflight_lease' : 'prior_outcome_unknown')
@@ -4412,9 +4435,19 @@ export class AutomationExecutor {
     const attemptToken = claim.attemptToken
 
     // 3. Job lease — busy ⇒ Tx B records a definite non-delivery (`failed`, busy) and the unit is skipped(busy).
-    const lease = await claimJobLease(this.deps.queryFn, scopeKey, jobLeaseHolderId(input.context.executionId), runtime.leaseTtlMs)
+    let lease: Awaited<ReturnType<typeof claimJobLease>>
+    try {
+      lease = await claimJobLease(this.deps.queryFn, scopeKey, jobLeaseHolderId(input.context.executionId), runtime.leaseTtlMs)
+    } catch (error) {
+      // R-69 1c (fix-I5): the port was not called — a definite non-delivery, recorded best effort (a write that
+      // fails too leaves the pending row to its intent lease; a lease row that did commit is left to its TTL).
+      const errorClass = integrationRunErrorClass(error)
+      await recordOutboundOutcome(this.deps.queryFn, intentId, 'failed', errorClass, attemptToken).catch(() => undefined)
+      return unit('failed', errorClass)
+    }
     if (!lease) {
       const busy = await recordOutboundOutcome(this.deps.queryFn, intentId, 'failed', 'busy', attemptToken)
+        .catch((): { confirmed: boolean } => ({ confirmed: false }))
       return unit('skipped', 'busy', { confirmed: busy.confirmed })
     }
 

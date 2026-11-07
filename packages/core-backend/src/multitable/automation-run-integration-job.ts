@@ -56,6 +56,13 @@ const CONFIG_KEYS: ReadonlySet<string> = new Set(['job', 'timeoutMs', 'binding',
 const STOCK_PREP_JOB_KEYS: ReadonlySet<string> = new Set(['kind', 'projectNos', 'applyMode', 'actionId'])
 const PIPELINE_JOB_KEYS: ReadonlySet<string> = new Set(['kind', 'pipelineId', 'dryRun', 'mode', 'pipelineFingerprint'])
 const PROJECT_NO_SHAPE = /^[!-~]{1,128}$/
+/**
+ * R-69 1c (fix-I5): the job identifier shape — byte-identical to automation-triggers.ts INTEGRATION_RUN_JOB_ID_SHAPE
+ * (pinned by tests/unit/automation-integration-run-finished.test.ts). The action's `actionId` rides in every
+ * integration.run_finished summary, whose port refuses any other shape: a wider id here would have been accepted
+ * at save and then dropped every summary of the job.
+ */
+export const RUN_INTEGRATION_JOB_ACTION_ID_SHAPE = /^[A-Za-z0-9_:.-]{1,128}$/
 
 export interface RunIntegrationJobBinding {
   principalId: string
@@ -117,8 +124,8 @@ export function validateRunIntegrationJobConfig(config: unknown, path: string): 
     if (seen.has(projectNo)) return `${path}.job.projectNos must not repeat a project`
     seen.add(projectNo)
   }
-  if (job.actionId !== undefined && (typeof job.actionId !== 'string' || !PROJECT_NO_SHAPE.test(job.actionId))) {
-    return `${path}.job.actionId must be a non-blank string when present`
+  if (job.actionId !== undefined && (typeof job.actionId !== 'string' || !RUN_INTEGRATION_JOB_ACTION_ID_SHAPE.test(job.actionId))) {
+    return `${path}.job.actionId must be an identifier when present (1..128 of A-Z a-z 0-9 _ : . -)`
   }
   if (config.timeoutMs !== undefined) {
     const timeoutMs = config.timeoutMs
