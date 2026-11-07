@@ -97,10 +97,21 @@
             type="button"
             class="attendance-group-effective-policy-panel__domain-action"
             :data-attendance-w6-effective-policy-domain-nav="row.key"
-            @click="navigate(row.nav.href)"
+            @click="navigate(row.nav, row.editorRef)"
           >
             {{ tr('Open', '前往') }}
           </button>
+          <dl v-if="row.details.length" class="attendance-group-effective-policy-panel__domain-details">
+            <div
+              v-for="detail in row.details"
+              :key="detail.key"
+              class="attendance-group-effective-policy-panel__detail-row"
+              :data-attendance-w6-effective-policy-detail="detail.key"
+            >
+              <dt>{{ detail.label }}</dt>
+              <dd>{{ detail.value }}</dd>
+            </div>
+          </dl>
         </li>
       </ul>
 
@@ -151,7 +162,7 @@
               type="button"
               class="attendance-group-effective-policy-panel__conflict-action"
               :data-attendance-w6-effective-policy-conflict-nav="index"
-              @click="navigate(row.nav.href)"
+              @click="navigate(row.nav, row.editorRef)"
             >
               {{ tr('Resolve', '前往处理') }}
             </button>
@@ -163,8 +174,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onScopeDispose, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { resolveAttendanceGroupRouteContext } from '../../router/attendanceGroupContextRoute'
 import { useLocale } from '../../composables/useLocale'
 import { apiFetch as sendApiFetch } from '../../utils/api'
 import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
@@ -186,14 +198,26 @@ import {
   resolveAttendanceGroupEffectivePolicyEditorNavigationV1,
   ATTENDANCE_GROUP_EFFECTIVE_POLICY_DOMAIN_SUMMARY_KEYS_V1,
   type AttendanceGroupEffectivePolicyAggregateRawV1,
+  type AttendanceGroupEffectivePolicyEditorNavigationV1,
+  type AttendanceGroupEffectivePolicyEditorRefV1,
+  type AttendanceGroupEffectivePolicyStageActionV1,
   type AttendanceGroupEffectivePolicyDomainSummaryKeyV1,
 } from './attendanceGroupEffectivePolicyLabels'
+import { attendanceGroupEffectivePolicyDetails } from './attendanceGroupEffectivePolicyDetails'
 
 const props = defineProps<{
   groupId: string
   returnTo: string
+  delegateNavigation?: boolean
 }>()
 
+const emit = defineEmits<{
+  (event: 'open-group-stage', target: AttendanceGroupEffectivePolicyStageActionV1): void
+  (event: 'navigate-editor', target: { groupId: string; editorRef: AttendanceGroupEffectivePolicyEditorRefV1 }): void
+}>()
+
+let active = true
+onScopeDispose(() => { active = false })
 const { isZh } = useLocale()
 const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
 const router = useRouter()
@@ -205,12 +229,20 @@ type PanelStatus = 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
 const status = ref<PanelStatus>('idle')
 const aggregate = ref<AttendanceGroupEffectivePolicyAggregateRawV1 | null>(null)
 
+let loadGeneration = 0
+
 async function load(): Promise<void> {
+  if (props.delegateNavigation && !active) return
+  const groupId = props.groupId
+  const generation = ++loadGeneration
+  const acceptsResponse = () => !props.delegateNavigation
+    || (active && generation === loadGeneration && groupId === props.groupId && sessionGuard.isCurrent())
   try { sessionGuard.assertCurrent() } catch { return }
   status.value = 'loading'
   aggregate.value = null
   try {
     const response = await apiFetch(`/api/attendance/groups/${encodeURIComponent(props.groupId)}/effective-policy`)
+    if (!acceptsResponse()) return
     if (response.status === 403 || response.status === 404) {
       status.value = 'unavailable'
       return
@@ -220,21 +252,53 @@ async function load(): Promise<void> {
       return
     }
     const payload = await response.json()
+    if (!acceptsResponse()) return
     const parsed = parseAttendanceGroupEffectivePolicyEnvelopeV1(payload)
-    if (!parsed) {
+    if (!parsed || parsed.groupId !== props.groupId) {
       status.value = 'error'
       return
     }
     aggregate.value = parsed
     status.value = 'ready'
   } catch {
-    if (!sessionGuard.isCurrent()) return
+    if (!acceptsResponse() || !sessionGuard.isCurrent()) return
     status.value = 'error'
   }
 }
 
-function navigate(href: string): void {
-  void router.push(href)
+function navigate(
+  target: AttendanceGroupEffectivePolicyEditorNavigationV1,
+  editorRef: AttendanceGroupEffectivePolicyEditorRefV1 | null,
+): void {
+  if (!active || status.value !== 'ready' || !sessionGuard.isCurrent()) return
+  if (props.delegateNavigation) {
+    if (!editorRef || aggregate.value?.groupId !== props.groupId
+      || ![...domainRows.value, ...conflictRows.value].some(row => row.nav === target && row.editorRef === editorRef)) return
+    emit('navigate-editor', { groupId: props.groupId, editorRef })
+    return
+  }
+  if (target.kind === 'group-stage') {
+    if (target.groupId !== props.groupId) return
+    emit('open-group-stage', { groupId: target.groupId, stage: target.stage })
+    return
+  }
+  if (target.sameRouteStage && target.sameRouteStage.groupId === props.groupId) {
+    const current = router.currentRoute.value
+    const destination = router.resolve(target.href)
+    const context = resolveAttendanceGroupRouteContext({
+      groupId: current.params.groupId,
+      step: target.sameRouteStage.stage === 'policies' ? 'rules' : 'schedule',
+      surface: current.query.surface,
+      returnTo: current.query.returnTo,
+      currentPath: current.path,
+    })
+    // Preserve an accepted same-destination editor rather than normalizing benign returnTo spelling.
+    if (current.path === destination.path && context?.groupId === props.groupId && context.surface === null) {
+      emit('open-group-stage', target.sameRouteStage)
+      return
+    }
+  }
+  void router.push(target.href)
 }
 
 const UNRECOGNIZED = () => (isZh.value ? '未识别' : 'Unrecognized')
@@ -265,7 +329,9 @@ interface DomainRow {
   key: AttendanceGroupEffectivePolicyDomainSummaryKeyV1
   domainText: string
   labelText: string
-  nav: { kind: 'route' | 'group-list'; href: string } | null
+  details: ReturnType<typeof attendanceGroupEffectivePolicyDetails>
+  nav: AttendanceGroupEffectivePolicyEditorNavigationV1 | null
+  editorRef: AttendanceGroupEffectivePolicyEditorRefV1 | null
 }
 
 const domainRows = computed<DomainRow[]>(() => {
@@ -288,7 +354,9 @@ const domainRows = computed<DomainRow[]>(() => {
       key: key as AttendanceGroupEffectivePolicyDomainSummaryKeyV1,
       domainText: attendanceGroupEffectivePolicyDomainText(domainEnumValue, tr),
       labelText,
+      details: attendanceGroupEffectivePolicyDetails(key as AttendanceGroupEffectivePolicyDomainSummaryKeyV1, summary, tr),
       nav,
+      editorRef,
     })
   }
   return rows
@@ -316,7 +384,8 @@ interface ConflictRow {
   codeText: string
   domainText: string
   affectedUserCount: number | null
-  nav: { kind: 'route' | 'group-list'; href: string } | null
+  nav: AttendanceGroupEffectivePolicyEditorNavigationV1 | null
+  editorRef: AttendanceGroupEffectivePolicyEditorRefV1 | null
 }
 
 const conflictRows = computed<ConflictRow[]>(() => {
@@ -342,6 +411,7 @@ const conflictRows = computed<ConflictRow[]>(() => {
       domainText,
       affectedUserCount: typeof record.affectedUserCount === 'number' ? record.affectedUserCount : null,
       nav,
+      editorRef,
     }
   })
 })
@@ -384,9 +454,25 @@ const conflictRows = computed<ConflictRow[]>(() => {
 }
 .attendance-group-effective-policy-panel__domain-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   font-size: 12px;
+}
+.attendance-group-effective-policy-panel__domain-details {
+  flex-basis: 100%;
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+.attendance-group-effective-policy-panel__detail-row {
+  display: grid;
+  grid-template-columns: minmax(96px, max-content) minmax(0, 1fr);
+  gap: 8px;
+}
+.attendance-group-effective-policy-panel__detail-row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 .attendance-group-effective-policy-panel__conflicts ul {
   list-style: none;
