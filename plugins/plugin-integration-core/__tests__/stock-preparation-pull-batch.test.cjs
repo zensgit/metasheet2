@@ -8,7 +8,8 @@
 //   PB-C  首次批次 — the §5.4 worked cases under BOTH rules; OWN-1 / Q6-a / R through the REAL planner
 //   PB-D  the content-only digest: lane-free, ext_-free, key-order-free
 //   PB-H  the history plan (§8.3) and the attested count (§8.5); H9/H10 = review fixes MF1 (membership reproduces the
-//         assignment) and MF2 (the plan digest is clock-free)
+//         assignment) and MF2 (the plan digest is clock-free); H11/H12 = review fixes round 3, R2-1 (the plan is
+//         input-order invariant) and R2-2 (the digest covers the exceptions and placements lists)
 //   PB-V  the verifier's round-1 killing assertions (MF4), one per design rule no other test pinned
 //   PB-K  the configuration vocabulary (R-65 C2): defaults = the 10-27 design, four closed keys, fixed facts, locks
 //   PB-P  portability and not-wired pins over the file TEXT (MF5), closed vocabularies
@@ -18,6 +19,7 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
+const util = require('node:util')
 const { spawnSync } = require('node:child_process')
 
 const PLUGIN = path.join(__dirname, '..')
@@ -673,6 +675,130 @@ test('PB-H10 MF2: the plan digest is clock-free — the same rows read at two co
   const grown = plan({ rows: [...rows, hrow('x3', '2026-10-20T03:00:00.000Z', { decision: 'update' })], coveredUntil: '2026-10-21T00:05:00.000Z' }).plan
   assert.notEqual(grown.digest, install.digest, 'a new row in the read moves the digest')
   assert.notEqual(plan({ rows, coveredUntil: '2026-10-21T00:05:00.000Z', base: 2 }).plan.digest, install.digest, 'the base moves it')
+})
+
+// ── PB-H11..H12: review fixes round 3 (R2-1 the plan is input-order invariant; R2-2 the digest covers the per-record lists) ──
+
+/** Every row's full assignment, in record-id order (the Map's own order follows the input and is never persisted). */
+const assignmentList = (answer, rows) => rows
+  .map((entry) => entry.recordId)
+  .sort()
+  .map((recordId) => [recordId, answer.assignments.get(recordId)])
+const permutations = (list) => (list.length <= 1
+  ? [list.slice()]
+  : list.flatMap((head, index) => permutations([...list.slice(0, index), ...list.slice(index + 1)]).map((tail) => [head, ...tail])))
+
+// Two exception-only clusters whose earliest createdAt is the same millisecond (the R2-1 P4 shape), in S0.
+const TIE_ROWS = [
+  hrow('r0', '2026-10-20T00:00:00.000Z', { decision: 'update' }),
+  hrow('r1', '2026-10-20T00:59:58.000Z', { decision: 'add', plannedAt: '2026-10-20T01:00:00.000Z' }),
+  hrow('r2', '2026-10-20T00:59:58.000Z', { decision: 'add', plannedAt: '2026-10-20T01:00:03.000Z' }),
+]
+
+test('PB-H11 R2-1: the plan never depends on the input order — the whole persisted plan (exceptions and placements lists included), its digest and every assignment, over every permutation of exception-tie, degenerate and exception shapes', () => {
+  const a1 = '2026-10-20T01:00:00.000Z'
+  const shapes = {
+    'two exception-only clusters, same earliest createdAt, S0': TIE_ROWS,
+    'two exception-only clusters, same earliest createdAt, a later segment': [
+      hrow('s3', '2026-10-20T01:20:01.000Z', { decision: 'add', plannedAt: '2026-10-20T01:20:00.000Z' }),
+      hrow('s1', '2026-10-20T01:25:00.000Z', { decision: 'add', plannedAt: '2026-10-20T01:00:00.000Z' }),
+      hrow('s2', '2026-10-20T01:25:00.000Z', { decision: 'add', plannedAt: '2026-10-20T01:10:00.000Z' }),
+    ],
+    'degenerate placements (PB-H4)': [
+      hrow('a', '2026-10-20T01:00:00.000Z', { decision: 'add', plannedAt: '2026-10-19T01:00:00.000Z' }),
+      hrow('b', '2026-10-20T01:00:00.100Z', { decision: 'add', plannedAt: '2026-10-18T01:00:00.000Z' }),
+      hrow('c', '2026-10-20T01:00:00.200Z', { decision: 'inactive', plannedAt: '2026-10-19T01:00:00.000Z', active: false }),
+    ],
+    'degenerate late stamps, every row unplaced (PB-H4)': [
+      hrow('d', '2026-10-20T01:00:00.000Z', { decision: 'add', plannedAt: '2026-10-20T21:00:00.000Z' }),
+      hrow('e', '2026-10-20T03:00:00.000Z', { decision: 'add', plannedAt: '2026-10-20T21:00:00.000Z' }),
+      hrow('f', '2026-10-20T03:00:01.000Z', { decision: 'update' }),
+    ],
+    'an exception-only cluster with two exceptions (PB-H9 b)': [
+      hrow('old', '2026-10-20T00:00:00.000Z', { decision: 'inactive', plannedAt: a1, active: false }),
+      hrow('e1', '2026-10-20T00:59:56.000Z', { decision: 'add', plannedAt: a1 }),
+      hrow('mid', '2026-10-20T00:59:58.000Z', { decision: 'update', plannedAt: '2026-10-20T05:00:00.000Z' }),
+      hrow('e2', '2026-10-20T00:59:59.000Z', { decision: 'add', plannedAt: a1 }),
+    ],
+    "R1's C09 shape (PB-H1)": C09_ROWS,
+  }
+  const reached = { exceptions: 0, placements: 0, unplaced: 0 }
+  for (const [label, rows] of Object.entries(shapes)) {
+    const first = plan({ rows })
+    if (first.plan.exceptions.length > 1) reached.exceptions += 1
+    if (first.plan.placements.length > 1) reached.placements += 1
+    if (first.plan.unplacedRows > 0) reached.unplaced += 1
+    for (const order of permutations(rows)) {
+      const other = plan({ rows: order })
+      const at = `${label} [${order.map((entry) => entry.recordId).join(',')}]`
+      assert.deepEqual(other.plan, first.plan, `${at}: the persisted plan`)
+      assert.equal(other.plan.digest, first.plan.digest, `${at}: the digest`)
+      assert.deepEqual(assignmentList(other, rows), assignmentList(first, rows), `${at}: the assignments`)
+    }
+  }
+  assert.ok(reached.exceptions >= 3 && reached.placements >= 1 && reached.unplaced >= 2, `the shapes reach every per-record list: ${JSON.stringify(reached)}`)
+  // The tie is broken by anchor time: the earlier anchor's cluster takes the smaller number.
+  const tie = plan({ rows: TIE_ROWS })
+  assert.deepEqual(tie.plan.clusters.map((cluster) => [cluster.k, cluster.anchorAt, cluster.timeRows]), [
+    [1, null, 1], [2, '2026-10-20T01:00:00.000Z', 0], [3, '2026-10-20T01:00:03.000Z', 0],
+  ])
+  assert.deepEqual(tie.plan.exceptions, [{ recordId: 'r1', k: 2 }, { recordId: 'r2', k: 3 }])
+  // A seeded sweep: each plan re-planned in two shuffled orders.
+  let seed = 20261108
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    return seed / 2147483648
+  }
+  const shuffled = (list) => {
+    const out = list.slice()
+    for (let i = out.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(rand() * (i + 1))
+      ;[out[i], out[j]] = [out[j], out[i]]
+    }
+    return out
+  }
+  const baseMs = Date.parse('2026-10-20T00:00:00.000Z')
+  let moved = 0
+  for (let trial = 0; trial < 1500; trial += 1) {
+    const anchors = []
+    for (let i = 0, n = 1 + Math.floor(rand() * 3); i < n; i += 1) anchors.push(baseMs + Math.floor(rand() * 6 * 3600) * 1000)
+    const copyLike = rand() < 0.25
+    const rows = []
+    for (let i = 0, n = 2 + Math.floor(rand() * 7); i < n; i += 1) {
+      const isAnchored = rand() < 0.6
+      const p = isAnchored ? anchors[Math.floor(rand() * anchors.length)] : null
+      let c
+      if (copyLike) c = baseMs + 3600 * 1000 + Math.floor(rand() * 1500)
+      else if (isAnchored) c = p - 4900 + Math.floor(rand() * 4900) + (rand() < 0.4 ? Math.floor(rand() * 3 * 3600 * 1000) : 0)
+      else c = baseMs + Math.floor(rand() * 7 * 3600) * 1000
+      rows.push(hrow(`r${i}`, new Date(c).toISOString(), { decision: isAnchored ? 'add' : (rand() < 0.5 ? 'inactive' : 'update'), plannedAt: isAnchored ? new Date(p).toISOString() : null, active: rand() < 0.7, partId: rand() < 0.5 ? 'X' : 'Y' }))
+    }
+    const first = plan({ rows, coveredUntil: '2026-10-22T00:00:00.000Z' })
+    for (let again = 0; again < 2; again += 1) {
+      const other = plan({ rows: shuffled(rows), coveredUntil: '2026-10-22T00:00:00.000Z' })
+      if (!util.isDeepStrictEqual(other.plan, first.plan) || !util.isDeepStrictEqual(assignmentList(other, rows), assignmentList(first, rows))) moved += 1
+    }
+  }
+  assert.equal(moved, 0, 'shuffled re-plans that moved')
+})
+
+test('PB-H12 R2-2: the plan digest covers the per-record lists — two plans with deepEqual clusters but different placements (degenerate) or different exceptions never share a digest', () => {
+  const p1 = '2026-10-18T01:00:00.000Z'
+  const p2 = '2026-10-19T01:00:00.000Z'
+  const one = plan({ rows: [hrow('a', '2026-10-20T01:00:00.000Z', { decision: 'add', plannedAt: p1 }), hrow('b', '2026-10-20T01:00:00.100Z', { decision: 'add', plannedAt: p2 })] }).plan
+  const two = plan({ rows: [hrow('a', '2026-10-20T01:00:00.000Z', { decision: 'add', plannedAt: p2 }), hrow('b', '2026-10-20T01:00:00.100Z', { decision: 'add', plannedAt: p1 })] }).plan
+  assert.equal(one.degenerate && two.degenerate, true)
+  assert.deepEqual(one.clusters, two.clusters, 'placements: the clusters are the same')
+  assert.notDeepEqual(one.placements, two.placements, 'placements: the per-record anchors are swapped')
+  assert.notEqual(one.digest, two.digest, 'placements: a per-record reassignment moves the digest')
+  // The exception-tie shape with the two rows' anchors swapped: same clusters, the exceptions' k swapped.
+  const swapped = TIE_ROWS.map((entry) => (entry.recordId === 'r1' ? { ...entry, plannedAt: '2026-10-20T01:00:03.000Z' } : entry.recordId === 'r2' ? { ...entry, plannedAt: '2026-10-20T01:00:00.000Z' } : entry))
+  const three = plan({ rows: TIE_ROWS }).plan
+  const four = plan({ rows: swapped }).plan
+  assert.equal(three.degenerate || four.degenerate, false)
+  assert.deepEqual(three.clusters, four.clusters, 'exceptions: the clusters are the same')
+  assert.notDeepEqual(three.exceptions, four.exceptions, "exceptions: the rows' clusters are swapped")
+  assert.notEqual(three.digest, four.digest, 'exceptions: a per-record reassignment moves the digest')
 })
 
 // ── PB-V: the verifier's killing assertions (round 1, MF4) — each guards one design rule no other test pins ──

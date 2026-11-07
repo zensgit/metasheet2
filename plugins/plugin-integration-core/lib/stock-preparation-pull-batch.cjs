@@ -840,7 +840,9 @@ function planPullBatchHistory({ rows, priorRows, gapMinutes, base, coveredUntil,
   // Step 6: membership. A row belongs to the interval holding its createdAt; the ONE exception is an add-stamped
   // row whose createdAt falls in ANOTHER anchor's segment (concurrent pulls on the R-line, or clock skew): it joins
   // its own anchor's cluster and is listed in `exceptions`. An anchor whose segment holds none of its rows gets its
-  // cluster here, so every exception has one.
+  // cluster here, so every exception has one. The loop walks the input in its given order; nothing it builds is
+  // order-bearing: the bounds are recomputed from the members below, kept's sort is total, and the persisted
+  // exceptions / placements lists are sorted by record id (R2-1).
   const anchorCluster = (anchorMs, row) => {
     let cluster = clusters.find((entry) => entry.anchorMs === anchorMs)
     if (!cluster) {
@@ -902,9 +904,15 @@ function planPullBatchHistory({ rows, priorRows, gapMinutes, base, coveredUntil,
   }
   // Step 5: a time interval whose only rows became exceptions holds nothing and is no cluster. Number the rest in
   // time order, base + 1 …; evidence = plan_time when the interval holds add rows of its anchor, else created_at.
+  // The order is TOTAL, so the numbering never depends on the input order (R2-1): by start, then anchored before
+  // unanchored, then by anchor time. Two anchored clusters never share an anchor (anchorCluster reuses one), and
+  // two unanchored ones never share a start (time intervals are disjoint), so no tie is left to insertion order —
+  // in particular not to the order in which the membership loop met the exceptions of exception-only clusters.
   const kept = clusters
     .filter((cluster) => cluster.members.length > 0)
-    .sort((a, b) => a.startMs - b.startMs || (a.anchorMs === null ? 1 : 0) - (b.anchorMs === null ? 1 : 0))
+    .sort((a, b) => a.startMs - b.startMs
+      || (a.anchorMs === null ? 1 : 0) - (b.anchorMs === null ? 1 : 0)
+      || (a.anchorMs !== null && b.anchorMs !== null ? a.anchorMs - b.anchorMs : 0))
   kept.forEach((cluster, index) => {
     cluster.k = startBase + index + 1
     cluster.label = formatPullBatchLabel({ kind: 'inferred', n: cluster.k, day: pullBatchLabelDay(cluster.startMs), locale: lang, labelFormat: cfg.labelFormat })
