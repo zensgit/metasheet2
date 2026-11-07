@@ -86,6 +86,8 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
   // D21 (slice Y5): the host's in-transaction re-authorization and the access-graph mutex (the RA4 lock-order writer).
   let reauthorize: YidaSourceBindingReauthorizer
   let lockUsers: (client: PoolClient, userIds: string[]) => Promise<Map<string, { id: string }>>
+  // D21 deadlock cases (Y5 rulings): the protocol's own explicit bump statements, issued by a writer that breaks the rule.
+  let bumpSql: { SHEET_PERMISSION_VERSIONS_BUMP_SQL: string; SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL: string }
   let multiTargetUp = ''
   const sessions: Session[] = []
   const envKeys = ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT'] as const
@@ -287,6 +289,7 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     createAdditionalWriter = (await importNative(pathToFileURL(path.join(lib, 'yida-approved-target-store.mjs')).href)).createInternalYidaAdditionalTargetTransactionWriter
     reauthorize = (await import(pathToFileURL(path.join(integration, 'yida-source-reauthorization-host.ts')).href)).createYidaSourceBindingReauthorizer()
     lockUsers = (await import(pathToFileURL(path.join(root, 'packages/core-backend/src/directory/access-graph-mutex.ts')).href)).lockUsersForAccessGraphWrite
+    bumpSql = await import(pathToFileURL(path.join(root, 'packages/core-backend/src/multitable/authz-version-protocol.ts')).href) as typeof bumpSql
     // Y2 migration SQL, exactly what zzzz20261103130000 up() executes.
     multiTargetUp = (await import(pathToFileURL(path.join(root, 'packages/core-backend/src/db/migrations/zzzz20261103130000_add_integration_yida_multi_target_slots.ts')).href) as
       { YIDA_MULTI_TARGET_UP_SQL: string }).YIDA_MULTI_TARGET_UP_SQL
@@ -1392,6 +1395,37 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     })
   })
 
+  // Check 1 (the registry, gap `stock-prep-project-registry`): the re-check holds the (tenant, project) registry row FOR
+  // SHARE to its commit. Archiving the bound project (what the plugin store's transition does to that row) must wait for
+  // an admission parked after all four checks — the ledger INSERT — and the committed archive then refuses the next
+  // bound approval. The reverse order (archived first, then the admission refuses) is the bound-draft case above.
+  it('RA4 check 1 (registry): archiving the bound project blocks until the parked admission commits; committed, the next bound approval is refused', async () => {
+    const f = await boundFixture()
+    const granted = await first.service.approve(f.request)
+    const gate = first.gateInsert(LEDGER)
+    const admission = first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' })
+    admission.catch(() => {})
+    await reached(gate)
+    const writer = second.client
+    await writer.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+    let settled = false
+    const archive = writer.query(`UPDATE ${ident(REGISTRY)} SET status = 'archived', archived_at = NOW() WHERE tenant_id = $1 AND project_no = $2`,
+      [context().tenantId, 'DEMO-P1']).then(result => { settled = true; return result.rowCount })
+    archive.catch(() => {})
+    try {
+      await blocked(second, first)
+      expect(settled).toBe(false)
+    } finally { first.release() }
+    expect((await admission).status).toBe('admitted')
+    expect(await archive).toBe(1)
+    await writer.query('COMMIT')
+    expect((await evidence()).counts).toEqual([1, 0, 1, 2, 1, 1])
+    const next = await draftOf(first, boundRow(1, 7), 'synthetic-next-confirmation')
+    const archived = await evidence()
+    await rejected(first.service.approve(next), 'CONFLICT')
+    expect(await evidence()).toEqual(archived)
+  })
+
   // RA4 lock order (closes Y5a B-05 at the service level). One bound admission parked on `gate`; one access-graph writer
   // on connection 2 — lockUsersForAccessGraphWrite: the subject version row bump FIRST, then users FOR UPDATE. The writer
   // must block until the admission commits and lock only after it ("admission first, writer after"), with no deadlock.
@@ -1451,6 +1485,129 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
       expect([indexOf(statements, SUBJECT_SHARE) >= 0, indexOf(statements, USERS_SHARE) > indexOf(statements, SUBJECT_SHARE),
         indexOf(statements, SHEET_SHARE)]).toEqual([true, true, -1])
     })
+  })
+
+  // ---- D21 deadlock outcomes of the phase-1 holder order (Y5 rulings 1-2, coordinator, T-level default-forward) ----
+  // The phase-1 order (the actor's subject version row before the live-actor rows) never cycles with a writer that follows
+  // the writer rule (the two lock-order cases above). A writer that BREAKS the rule can close a cycle with a parked
+  // admission, and PostgreSQL then aborts one side (40P01). Such writers exist only in ops scripts, migrations and raw SQL
+  // (census in the Y5 PR body). Two cycles, each pinned with both victims:
+  //   PB — the writer takes the SHEET version row, then the SUBJECT version row (a script that grants on a sheet and moves
+  //        a membership in one transaction). The admission parks at its registry read: subject and users held, sheet not.
+  //   PA — the writer takes the actor's `users` row, then the SUBJECT version row (a trigger-only authority UPDATE of
+  //        `users`: the row lock, then the BEFORE ROW trigger's bump). The admission parks at its first live-actor read:
+  //        the subject row held, users not.
+  // Never a false ALLOW, whichever side PostgreSQL aborts:
+  //   - the admission is the victim: nothing is written. PB answers CONFLICT (the re-check's typed conflict). PA answers
+  //     UNAVAILABLE: the cycle closes inside the shared live-actor prelude (automation-live-authority.ts), which maps every
+  //     failure to AUTHORITY_UNAVAILABLE, and ruling 2 keeps that prelude unchanged. The writer commits, and the SAME
+  //     grant is then refused;
+  //   - the writer is the victim: the admission is admitted and the writer's change never commits.
+  // The victim is chosen deterministically. PostgreSQL looks for a deadlock once per wait, `deadlock_timeout` after that wait
+  // began, and aborts the backend that finds the cycle: the side that waits FIRST gets a long timeout, the side that closes
+  // the cycle a short one (a superuser setting, like `session_replication_role` in RA5).
+  type DeadlockWriter = {
+    // Where the admission parks before the writer moves.
+    park: () => Gate
+    // The writer's statements that never wait on the parked admission: PB the sheet version bump and a record-level read
+    // deny of the bound record; PA the deactivating UPDATE of the actor's (private fixture) users row, i.e. its row lock.
+    ahead: (writer: PoolClient) => Promise<unknown>
+    // The observable state of the writer's change: committed (`changed`) or not (`unchanged`).
+    change: () => Promise<unknown>
+    changed: unknown
+    unchanged: unknown
+    // The admission's answer when it is the victim, and the answer to the same grant once the writer has committed.
+    victim: 'CONFLICT' | 'UNAVAILABLE'
+    retry: 'CONFLICT' | 'UNAVAILABLE'
+  }
+  const DEADLOCK_SHORT_MS = 100, DEADLOCK_LONG_MS = 8000
+  const sheetThenSubject = (): DeadlockWriter => ({
+    park: () => first.gateMatch(REGISTRY_SHARE),
+    ahead: async writer => {
+      await writer.query(bumpSql.SHEET_PERMISSION_VERSIONS_BUMP_SQL, [[ids().sheet]])
+      await writer.query("INSERT INTO public.record_permissions (sheet_id, record_id, subject_type, subject_id, access_level) VALUES ($1, $2, 'user', $3, 'none')",
+        [ids().sheet, ids().rec(0), context().ownerId])
+    },
+    change: async () => ({ denies: Number((await owner.query('SELECT count(*)::int AS n FROM public.record_permissions WHERE sheet_id = $1', [ids().sheet])).rows[0].n) }),
+    changed: { denies: 1 }, unchanged: { denies: 0 },
+    victim: 'CONFLICT', retry: 'CONFLICT',
+  })
+  const usersThenSubject = (): DeadlockWriter => ({
+    park: () => first.gateMatch(/FROM user_roles/),
+    ahead: writer => writer.query('UPDATE users SET is_active = false WHERE id = $1', [context().ownerId]),
+    change: async () => ({ active: (await owner.query('SELECT is_active FROM users WHERE id = $1', [context().ownerId])).rows[0]?.is_active }),
+    changed: { active: false }, unchanged: { active: true },
+    // The retry meets the committed deactivation in the same prelude (DENIED), which the service also answers UNAVAILABLE.
+    victim: 'UNAVAILABLE', retry: 'UNAVAILABLE',
+  })
+  async function deadlock(spec: DeadlockWriter, victim: 'admission' | 'writer') {
+    const superuser = await owner.query('SELECT rolsuper FROM pg_roles WHERE rolname = current_user')
+    expect(superuser.rows[0]?.rolsuper, 'deadlock_timeout is a superuser setting; the CI database user is one').toBe(true)
+    const f = await boundFixture()
+    const granted = await first.service.approve(f.request)
+    const approved = await evidence()
+    expect([approved.counts, await spec.change()]).toEqual([[1, 0, 0, 1, 0, 0], spec.unchanged])
+    const writer = second.client, args = { grantId: granted.grantId, submissionId: 'synthetic-deadlock-submission' }
+    const bumpSubject = () => writer.query(bumpSql.SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL, [[context().ownerId]])
+    let admission: ReturnType<Service['admit']> | undefined
+    try {
+      const [admissionMs, writerMs] = victim === 'admission' ? [DEADLOCK_SHORT_MS, DEADLOCK_LONG_MS] : [DEADLOCK_LONG_MS, DEADLOCK_SHORT_MS]
+      await first.client.query(`SET deadlock_timeout = '${admissionMs}ms'`)
+      await second.client.query(`SET deadlock_timeout = '${writerMs}ms'`)
+      const gate = spec.park()
+      admission = first.service.admit(args)
+      admission.catch(() => {})
+      await reached(gate)
+      await writer.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+      await spec.ahead(writer)
+      if (victim === 'admission') {
+        // The writer waits first, on the admission's phase-1 subject row; released, the admission closes the cycle.
+        let writerError: unknown = null
+        const bump = bumpSubject().then(() => undefined, (error: unknown) => { writerError = error })
+        await blocked(second, first)
+        first.release()
+        await rejected(admission, spec.victim)
+        await bump
+        expect(writerError).toBeNull()
+        await writer.query('COMMIT')
+        // Nothing written; the committed change refuses the SAME grant (no false ALLOW after the deadlock either).
+        expect([await evidence(), await spec.change()]).toEqual([approved, spec.changed])
+        await rejected(first.service.admit(args), spec.retry)
+        expect(await evidence()).toEqual(approved)
+      } else {
+        // Released, the admission waits first, on a row the writer holds; the writer's subject bump closes the cycle.
+        first.release()
+        await blocked(first, second)
+        let writerError: unknown = null
+        await bumpSubject().catch((error: unknown) => { writerError = error })
+        expect(codeOf(writerError)).toBe('40P01')
+        expect((await admission).status).toBe('admitted')
+        await writer.query('ROLLBACK')
+        expect([(await evidence()).counts, await spec.change()]).toEqual([[1, 0, 1, 2, 1, 1], spec.unchanged])
+      }
+    } finally {
+      first.release()
+      await writer.query('ROLLBACK').catch(() => {})
+      await admission?.catch(() => undefined)
+      await first.client.query('RESET deadlock_timeout').catch(() => {})
+      await second.client.query('RESET deadlock_timeout').catch(() => {})
+    }
+  }
+
+  it('D21 deadlock PB, admission victim: a sheet-then-subject writer (rule-breaking) against an admission parked at its registry read — the admission is CONFLICT with nothing written; the writer commits and the same grant is then refused', async () => {
+    await deadlock(sheetThenSubject(), 'admission')
+  })
+
+  it('D21 deadlock PB, writer victim: a sheet-then-subject writer (rule-breaking) against an admission parked at its registry read — the writer is aborted (40P01) and its record deny never commits; the admission is admitted', async () => {
+    await deadlock(sheetThenSubject(), 'writer')
+  })
+
+  it('D21 deadlock PA, admission victim: a users-row-first writer (a trigger-only authority UPDATE) against an admission parked at its first live-actor read — the admission is UNAVAILABLE (the cycle closes in the shared live-actor prelude) with nothing written; the deactivation commits and the same grant is then refused', async () => {
+    await deadlock(usersThenSubject(), 'admission')
+  })
+
+  it('D21 deadlock PA, writer victim: a users-row-first writer (a trigger-only authority UPDATE) against an admission parked at its first live-actor read — the writer is aborted (40P01) and the deactivation never commits; the admission is admitted', async () => {
+    await deadlock(usersThenSubject(), 'writer')
   })
 
   it('RA5: a session whose triggers do not fire (session_replication_role = replica) is refused at approval and at admission as UNAVAILABLE with nothing written; back in origin the same grant is admitted', async () => {
