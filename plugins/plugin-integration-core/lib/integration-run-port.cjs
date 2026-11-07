@@ -16,7 +16,8 @@
  *
  * STATUS MAPPING (the OS task's own classification, scripts/ops/stock-preparation-scheduled-pull.mjs):
  *   ready → succeeded (canApply carried as a boolean; nothing is applied — dry run only)
- *   manual_confirm_required | suspended | large_bom_bounded → held (human work, not a fault)
+ *   manual_confirm_required | suspended | large_bom_bounded | review_pending → held (human work, not a fault)
+ *   not_found → skipped (reason not_found; the script's skipped_not_found)
  *   recovery_pending → failed (errorClass STOCK_PREP_REFRESH_RECOVERY_PENDING)
  *   refusal 404/409 STOCK_PREPARATION_PROJECT_ABSENT / _ARCHIVED → held (reason project_absent / project_archived)
  *   refusal 401/403 → skipped (reason principal_unauthorized)
@@ -25,7 +26,9 @@
  *   GovernedEntryAbortError that wraps either — governed-entry-checkpoint.cjs) is RETHROWN — core classifies it.
  */
 
-const HELD_DRY_RUN_STATUSES = new Set(['manual_confirm_required', 'suspended', 'large_bom_bounded'])
+// R-69 1c (I5 ruling N4): `review_pending` (a written change awaits its review, #6791) is held, as the scheduled pull
+// logs it skipped_review_pending — human work on the 拉取待确认 page, never applicable (the dry run mints no token).
+const HELD_DRY_RUN_STATUSES = new Set(['manual_confirm_required', 'suspended', 'large_bom_bounded', 'review_pending'])
 const HELD_REFUSAL_CODES = new Map([
   ['STOCK_PREPARATION_PROJECT_ABSENT', 'project_absent'],
   ['STOCK_PREPARATION_PROJECT_ARCHIVED', 'project_archived'],
@@ -66,6 +69,10 @@ function summarizeStockPrepDryRun(data, startedAt) {
   }
   if (status && HELD_DRY_RUN_STATUSES.has(status)) {
     return { status: 'held', reason: status, canApply: false, ...(counts ? { counts } : {}), durationMs }
+  }
+  // R-69 1c (I5 ruling N4): the source does not know the project — the scheduled pull's skipped_not_found.
+  if (status === 'not_found') {
+    return { status: 'skipped', reason: 'not_found', canApply: false, ...(counts ? { counts } : {}), durationMs }
   }
   if (status === 'recovery_pending') {
     return { status: 'failed', errorClass: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', failureStage: 'read', durationMs }

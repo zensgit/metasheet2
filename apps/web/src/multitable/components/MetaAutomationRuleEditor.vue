@@ -4354,7 +4354,7 @@ function runIntegrationJobConfigBlockText(code: string, idx: number): string {
     case 'projects_too_many':
       return step + (zh ? `最多 ${RUN_INTEGRATION_JOB_MAX_PROJECTS} 个项目。` : `at most ${RUN_INTEGRATION_JOB_MAX_PROJECTS} projects.`)
     case 'project_shape':
-      return step + (zh ? '项目号只能是 1–128 个可见 ASCII 字符（不含空格）。' : 'a project number must be 1–128 visible ASCII characters (no spaces).')
+      return step + (zh ? '项目号只能是 1–128 个可见 ASCII 字符（不含空格，不含 ://）。' : 'a project number must be 1–128 visible ASCII characters (no spaces, no "://").')
     case 'project_repeat':
       return step + (zh ? '项目号不能重复。' : 'a project number is listed twice.')
     case 'timeout_integer':

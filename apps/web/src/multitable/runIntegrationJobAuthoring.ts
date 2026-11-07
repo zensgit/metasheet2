@@ -118,6 +118,8 @@ export function checkRunIntegrationJobConfig(config: unknown, path: string): Run
     if (typeof projectNo !== 'string' || !PROJECT_NO_SHAPE.test(projectNo)) {
       return fail('project_shape', `${path}.job.projectNos entries must be non-blank strings (1..128 visible ASCII characters)`)
     }
+    // Mirror of the server (R-69 1c, I5 ruling N2): the run summary refuses a projectNo containing '://'.
+    if (projectNo.includes('://')) return fail('project_shape', `${path}.job.projectNos entries must not contain "://" (a project number is never a URL)`)
     if (seen.has(projectNo)) return fail('project_repeat', `${path}.job.projectNos must not repeat a project`)
     seen.add(projectNo)
   }
@@ -299,6 +301,8 @@ export const RUN_INTEGRATION_JOB_REASON_LABELS: Readonly<Record<string, { zh: st
   manual_confirm_required: { zh: '需人工确认', en: 'manual confirmation required' },
   suspended: { zh: '已暂停', en: 'suspended' },
   large_bom_bounded: { zh: 'BOM 过大，已限量', en: 'BOM too large, bounded' },
+  review_pending: { zh: '变更待复核', en: 'a written change awaits review' },
+  not_found: { zh: '源系统中未找到该项目', en: 'project not found in the source' },
   project_absent: { zh: '项目不存在', en: 'project absent' },
   project_archived: { zh: '项目已归档', en: 'project archived' },
 })

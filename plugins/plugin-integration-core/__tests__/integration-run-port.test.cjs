@@ -147,12 +147,18 @@ const tests = [
     assert.deepEqual(ready.counts, { add: 1 })
     assert.equal(JSON.stringify(ready).includes('PART-X'), false)
     assert.equal(JSON.stringify(ready).includes('secret'), false)
-    for (const status of ['manual_confirm_required', 'suspended', 'large_bom_bounded']) {
+    for (const status of ['manual_confirm_required', 'suspended', 'large_bom_bounded', 'review_pending']) {
       const held = summarizeStockPrepDryRun({ status, canApply: true, counts: { add: 2 } }, t0)
       assert.equal(held.status, 'held', status)
       assert.equal(held.reason, status)
       assert.equal(held.canApply, false, 'a held preview is never applicable')
     }
+    // R-69 1c (I5 ruling N4): review_pending is held with its counts and nothing of its review stanza; not_found is
+    // skipped(not_found) — the scheduled pull's skipped_review_pending / skipped_not_found.
+    const review = summarizeStockPrepDryRun({ status: 'review_pending', canApply: false, refreshReview: { pendingReviews: 2, blocksMint: true }, counts: { add: 0, update: 3 } }, t0)
+    assert.deepEqual(review, { status: 'held', reason: 'review_pending', canApply: false, counts: { add: 0, update: 3 }, durationMs: review.durationMs })
+    const notFound = summarizeStockPrepDryRun({ status: 'not_found', canApply: false, counts: { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } }, t0)
+    assert.deepEqual(notFound, { status: 'skipped', reason: 'not_found', canApply: false, counts: { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 }, durationMs: notFound.durationMs })
     assert.deepEqual(summarizeStockPrepDryRun({ status: 'recovery_pending' }, t0), { status: 'failed', errorClass: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', failureStage: 'read', durationMs: summarizeStockPrepDryRun({ status: 'recovery_pending' }, t0).durationMs })
     assert.equal(summarizeStockPrepDryRun({ status: 'something_new' }, t0).errorClass, 'unexpected_dry_run_status')
     assert.equal(summarizeStockPrepDryRun(null, t0).status, 'failed')

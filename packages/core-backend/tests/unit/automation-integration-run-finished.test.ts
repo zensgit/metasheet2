@@ -101,7 +101,9 @@ describe('integration.run_finished — trigger vocabulary (pure)', () => {
     for (const reason of [...INTEGRATION_RUN_FINISHED_REASONS_ADDED_IN_1C, ...INTEGRATION_RUN_FINISHED_HELD_REASONS, ...INTEGRATION_RUN_FINISHED_SKIPPED_REASONS]) {
       expect(INTEGRATION_RUN_FINISHED_REASONS.has(reason)).toBe(true)
     }
-    expect([...INTEGRATION_RUN_FINISHED_SKIPPED_REASONS]).toEqual(['principal_unauthorized', 'busy', 'pipeline_changed', 'stale_plan', 'action_disabled'])
+    // + not_found (skipped) and review_pending (held): the I5 ruling N4 mappings of the dry run's own statuses.
+    expect([...INTEGRATION_RUN_FINISHED_SKIPPED_REASONS]).toEqual(['principal_unauthorized', 'busy', 'pipeline_changed', 'stale_plan', 'action_disabled', 'not_found'])
+    expect([...INTEGRATION_RUN_FINISHED_HELD_REASONS]).toEqual(['manual_confirm_required', 'suspended', 'large_bom_bounded', 'review_pending', 'project_absent', 'project_archived'])
   })
 
   it('the reason set is byte-identical to I4\'s step-result label table (+ the two ADR skipped reasons I3 does not write yet)', () => {
@@ -935,6 +937,8 @@ describe('fix-I5 F4 — one job-id shape: an actionId the I3 save gate accepts a
     }
     const good = 'plm.stock-preparation.pull-bom.v1'
     expect(validateRunIntegrationJobConfig({ job: job(good) }, 'config')).toBeNull()
+    // I5 ruling N2: the same holds for a project number — one with '://' (the summary refuses it) is refused at save.
+    expect(validateRunIntegrationJobConfig({ job: { ...job(good), projectNos: ['P-1', 'x://y', 'P-3'] } }, 'config')).toMatch(/projectNos entries must not contain ":\/\/"/)
     const events = captureSink()
     const { run } = harness(createFakeJobDb(), fakePort('immediate').port)
     await run('exec_f4', { ...CONFIG3, job: job(good) })
@@ -1055,36 +1059,74 @@ const { createIntegrationRunPort } = requireFromTest('../../../../plugins/plugin
 }
 
 /**
- * ONE synthetic decision set: the dry-run `data` the server answers, per project (synthetic values only; the token
- * and revision are never read by the summary path). Both sides consume the SAME object: the script through its own
- * HTTP client (fetch stubbed), the event through the plugin's real IntegrationRunPort → core sanitize → the real
- * run_integration_job step → buildAutomationRunFinishedEvents → the publish port's validator.
+ * ONE synthetic decision set: the dry-run `data` the server answers, per project. REALISTIC (I5 ruling N1, round 2):
+ * every entry is a combination the real dry run can answer (plugins/plugin-integration-core/lib/
+ * stock-preparation-table-actions.cjs — `dryRunStatus`, `withReviewStatus`, `mintable`, and the one response that
+ * ALWAYS carries `counts: cloneJson(dryRun.plan.counts)`):
+ *   - `ready` only with canApply:true (ready needs dryRun.canApply, and every case that withholds the token has its
+ *     own status);
+ *   - `manual_confirm_required` WITH canApply:true (a held duplicate batch still mints a token — the plugin's own
+ *     stock-preparation-table-actions.test.cjs "a held duplicate batch still mints a token");
+ *   - `suspended`, `review_pending`, `recovery_pending` with canApply:false AND the plan counts;
+ *   - `not_found` with the empty plan's zero counts (`emptyPlan()`).
+ * Synthetic values only; the token, revision and the hold / review stanzas never reach the summary. Both sides
+ * consume the SAME object: the script through its own HTTP client (fetch stubbed), the event through the plugin's
+ * real IntegrationRunPort → core sanitize → the real run_integration_job step → buildAutomationRunFinishedEvents →
+ * the publish port's validator.
  */
 const GATE3_DRY_RUNS: Record<string, Record<string, unknown>> = {
   'P-READY': { status: 'ready', canApply: true, largeBom: false, dryRunToken: 'tok_synthetic', revision: 'rev_synthetic', counts: { add: 3, update: 1, skip: 5, inactive: 2, manual_confirm: 0 } },
-  'P-READY-NA': { status: 'ready', canApply: false, largeBom: false, counts: { add: 0, update: 0, skip: 7, inactive: 0, manual_confirm: 0 } },
-  'P-MANUAL': { status: 'manual_confirm_required', canApply: false, largeBom: false, counts: { add: 1, update: 2, skip: 0, inactive: 0, manual_confirm: 4 } },
+  'P-READY-2': { status: 'ready', canApply: true, largeBom: false, dryRunToken: 'tok_synthetic_2', revision: 'rev_synthetic_2', counts: { add: 0, update: 0, skip: 7, inactive: 0, manual_confirm: 0 } },
+  'P-MANUAL': { status: 'manual_confirm_required', canApply: true, largeBom: false, dryRunToken: 'tok_synthetic_3', revision: 'rev_synthetic_3', counts: { add: 1, update: 2, skip: 0, inactive: 0, manual_confirm: 4 } },
   'P-SUSPENDED': { status: 'suspended', canApply: false, largeBom: false, refreshHold: { holdCount: 2 }, counts: { add: 2, update: 0, skip: 1, inactive: 1, manual_confirm: 0 } },
   'P-LARGE': { status: 'large_bom_bounded', canApply: false, largeBom: true, counts: { add: 9, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } },
-  'P-RECOVERY': { status: 'recovery_pending', canApply: false, largeBom: false },
+  'P-REVIEW': { status: 'review_pending', canApply: false, largeBom: false, refreshReview: { pendingReviews: 1, blocksMint: true }, counts: { add: 0, update: 3, skip: 4, inactive: 0, manual_confirm: 0 } },
+  'P-NOT-FOUND': { status: 'not_found', canApply: false, largeBom: false, counts: { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } },
+  'P-RECOVERY': { status: 'recovery_pending', canApply: false, largeBom: false, counts: { add: 2, update: 1, skip: 3, inactive: 0, manual_confirm: 0 } },
 }
 
 /**
- * The comparison contract for STATUS: the script logs the dry run's own status verbatim; the summary carries the
- * closed status and keeps the dry run's status as its reason (ready / the held trio), or its error class as
- * errorClass (recovery_pending, the same code the script logs as `error`). Known gap, reported, NOT widened here:
- * a dry-run `not_found` is `skipped_not_found` in the script but `failed / unexpected_dry_run_status` in the I4
- * port (lib/integration-run-port.cjs summarizeStockPrepDryRun).
+ * The comparison contract for STATUS (every project): the script logs the dry run's own status verbatim; the summary
+ * carries the closed status and keeps the dry run's status as its reason (ready / the held four / not_found), or its
+ * error class as errorClass (recovery_pending, the same code the script logs as `error`). I5 ruling N4: not_found →
+ * skipped (reason not_found; the script's skipped_not_found) and review_pending → held (reason review_pending; the
+ * script's skipped_review_pending, #6791) — both mapped in the plugin port (lib/integration-run-port.cjs).
  */
 const GATE3_CLOSED_STATUS: Record<string, string> = {
   ready: 'succeeded',
   manual_confirm_required: 'held',
   suspended: 'held',
   large_bom_bounded: 'held',
+  review_pending: 'held',
+  not_found: 'skipped',
   recovery_pending: 'failed',
 }
+/** The script action each dry-run status ends in (dry-run mode, the scheduled task's default). */
+const GATE3_SCRIPT_ACTION: Record<string, string> = {
+  ready: 'skipped_dry_run_only',
+  manual_confirm_required: 'skipped_manual_confirm_required',
+  suspended: 'skipped_suspended',
+  large_bom_bounded: 'skipped_large_bom_bounded',
+  review_pending: 'skipped_review_pending',
+  not_found: 'skipped_not_found',
+  recovery_pending: 'error',
+}
+/**
+ * The comparison contract for canApply (I5 ruling N1, option (a) — baseline v2.3 §10.2.2 ③ as written: "脚本
+ * skipped_dry_run_only 对应新路径 succeeded（试算成功、未套用），摘要里带布尔 canApply"): canApply is compared ONLY on
+ * that pair (dry-run status `ready`). DECLARED EXCEPTION 1: every other summary carries canApply:false (the pinned
+ * 1b-ii port contract "a held preview is never applicable"), whatever the script logs — a manual_confirm_required
+ * preview logs canApply:true.
+ */
+const GATE3_CANAPPLY_COMPARED: ReadonlySet<string> = new Set(['ready'])
+/**
+ * The comparison contract for the five decision counts: compared for every project whose summary is not `failed`.
+ * DECLARED EXCEPTION 2: a failed summary carries no decision counts (all 0; the 1b-ii port answers none for
+ * recovery_pending), whatever the script logs — a recovery_pending preview logs the plan counts.
+ */
+const GATE3_COUNTS_COMPARED = (eventStatus: string): boolean => eventStatus !== 'failed'
 
-describe('F7 gate ③ — per project, the summary event equals what the scheduled-pull script logs (status, canApply, counts)', () => {
+describe('F7 gate ③ — per project, the summary event equals what the scheduled-pull script logs (status; canApply on the ready pair; counts unless failed)', () => {
   beforeEach(() => {
     vi.stubEnv(ACTION_FLAG, 'true')
     vi.stubEnv(EVENT_FLAG, 'true')
@@ -1095,8 +1137,10 @@ describe('F7 gate ③ — per project, the summary event equals what the schedul
     clearIntegrationRunFinishedSinkForTest()
   })
 
-  it('the same synthetic decision set ⇒ equal per-project status, canApply and the five decision counts', async () => {
+  it('the same realistic decision set ⇒ equal per-project status, canApply (ready pair) and decision counts (non-failed), and exactly the two declared exceptions', async () => {
     const projectNos = Object.keys(GATE3_DRY_RUNS)
+    // Anti-vacuous: the fixture covers every mapped status.
+    expect([...new Set(projectNos.map((p) => GATE3_DRY_RUNS[p].status as string))].sort()).toEqual(Object.keys(GATE3_CLOSED_STATUS).sort())
     // (a) The script's per-project records (dry-run only, the scheduled task's default mode).
     vi.stubGlobal('fetch', async (_url: string, init: { body: string }) => {
       const projectNo = (JSON.parse(init.body) as { parameters: { projectNo: string } }).parameters.projectNo
@@ -1126,28 +1170,46 @@ describe('F7 gate ③ — per project, the summary event equals what the schedul
     await run('exec_gate3', { ...CONFIG, job: { ...CONFIG.job, projectNos } })
     expect(events.map((e) => e.event.job.projectNo)).toEqual(projectNos)
 
+    const exceptions: string[] = []
     for (const projectNo of projectNos) {
       const record = records.get(projectNo)!
       const { event } = events.find((e) => e.event.job.projectNo === projectNo)!
       const label = `project ${projectNo}`
-      // status
-      expect(typeof record.status, label).toBe('string')
-      expect(event.status, label).toBe(GATE3_CLOSED_STATUS[record.status as string])
+      const dryRunStatus = record.status as string
+      // status — compared for every project
+      expect(typeof dryRunStatus, label).toBe('string')
+      expect(record.action, label).toBe(GATE3_SCRIPT_ACTION[dryRunStatus])
+      expect(event.status, label).toBe(GATE3_CLOSED_STATUS[dryRunStatus])
       if (event.status === 'failed') {
         expect(event.errorClass, label).toBe(record.error)
       } else {
-        expect(event.reason, label).toBe(record.status)
+        expect(event.reason, label).toBe(dryRunStatus)
       }
-      // canApply: the script logs `data.canApply === true`
-      expect(event.canApply, label).toBe(record.canApply === true)
-      // the five decision counts: the script logs the dry run's `counts` verbatim (absent ⇒ none ⇒ 0)
+      // canApply — compared on the ready ↔ skipped_dry_run_only / succeeded pair only (the script logs data.canApply === true)
+      if (GATE3_CANAPPLY_COMPARED.has(dryRunStatus)) {
+        expect(event.canApply, label).toBe(record.canApply === true)
+      } else {
+        expect(event.canApply, `${label} (declared exception 1)`).toBe(false)
+        if (record.canApply === true) exceptions.push(`${projectNo}:canApply`)
+      }
+      // the five decision counts — the script logs the dry run's `counts` verbatim (absent ⇒ none ⇒ 0)
       const logged = (record.counts ?? {}) as Record<string, unknown>
-      for (const key of INTEGRATION_RUN_FINISHED_DECISION_COUNT_KEYS) {
-        expect(event.counts[key], `${label} counts.${key}`).toBe(typeof logged[key] === 'number' ? logged[key] : 0)
-      }
-      // and the script logs no decision count the event cannot carry
       for (const key of Object.keys(logged)) expect(INTEGRATION_RUN_FINISHED_DECISION_COUNT_KEYS as readonly string[], label).toContain(key)
+      if (GATE3_COUNTS_COMPARED(event.status)) {
+        for (const key of INTEGRATION_RUN_FINISHED_DECISION_COUNT_KEYS) {
+          expect(event.counts[key], `${label} counts.${key}`).toBe(typeof logged[key] === 'number' ? logged[key] : 0)
+        }
+      } else {
+        for (const key of INTEGRATION_RUN_FINISHED_DECISION_COUNT_KEYS) expect(event.counts[key], `${label} counts.${key} (declared exception 2)`).toBe(0)
+        if (INTEGRATION_RUN_FINISHED_DECISION_COUNT_KEYS.some((key) => typeof logged[key] === 'number' && logged[key] !== 0)) exceptions.push(`${projectNo}:counts`)
+      }
+      // values-free: nothing of the token, revision or the hold / review stanzas rides the event
+      const serialized = JSON.stringify(event)
+      for (const leak of ['tok_synthetic', 'rev_synthetic', 'pendingReviews', 'blocksMint', 'holdCount']) expect(serialized.includes(leak), `${label} ${leak}`).toBe(false)
     }
+    // The realistic fixture EXERCISES both declared exceptions (they are real divergences, not vacuous) — and
+    // nothing else diverges.
+    expect(exceptions.sort()).toEqual(['P-MANUAL:canApply', 'P-RECOVERY:counts'])
     // Per-status totals match too (the per-day roll-up a reader compares).
     const tally = (statuses: string[]) => statuses.reduce<Record<string, number>>((acc, s) => ({ ...acc, [s]: (acc[s] ?? 0) + 1 }), {})
     expect(tally(events.map((e) => e.event.status))).toEqual(tally(projectNos.map((p) => GATE3_CLOSED_STATUS[records.get(p)!.status as string])))

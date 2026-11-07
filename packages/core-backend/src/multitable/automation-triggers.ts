@@ -111,13 +111,19 @@ export const INTEGRATION_RUN_FINISHED_DEFAULT_STATUSES = Object.freeze([
   'failed', 'partial', 'skipped', 'outcome_unknown', 'not_started',
 ] as const satisfies readonly IntegrationRunFinishedStatus[])
 
-/** `held` reasons — human work, not a fault (ADR §3.2, §4.1; the plugin port's HELD set, byte-identical). */
+/**
+ * `held` reasons — human work, not a fault (ADR §3.2, §4.1; the plugin port's HELD set + its two held refusals).
+ * `review_pending` (I5 ruling N4, T-level default-forward): the scheduled pull logs it skipped_review_pending (#6791).
+ */
 export const INTEGRATION_RUN_FINISHED_HELD_REASONS = Object.freeze([
-  'manual_confirm_required', 'suspended', 'large_bom_bounded', 'project_absent', 'project_archived',
+  'manual_confirm_required', 'suspended', 'large_bom_bounded', 'review_pending', 'project_absent', 'project_archived',
 ] as const)
-/** `skipped` reasons — the system did not run what it should have (ADR §4.1). */
+/**
+ * `skipped` reasons — the system did not run what it should have (ADR §4.1). `not_found` (I5 ruling N4, T-level
+ * default-forward): the dry run's not_found, the scheduled pull's skipped_not_found.
+ */
 export const INTEGRATION_RUN_FINISHED_SKIPPED_REASONS = Object.freeze([
-  'principal_unauthorized', 'busy', 'pipeline_changed', 'stale_plan', 'action_disabled',
+  'principal_unauthorized', 'busy', 'pipeline_changed', 'stale_plan', 'action_disabled', 'not_found',
 ] as const)
 /** 1c adds these three to the ADR's reason set (baseline §10.2.4, 1c row): the lifecycle endings of 1b-ii. */
 export const INTEGRATION_RUN_FINISHED_REASONS_ADDED_IN_1C = Object.freeze([

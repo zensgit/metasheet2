@@ -121,6 +121,9 @@ export function validateRunIntegrationJobConfig(config: unknown, path: string): 
     if (typeof projectNo !== 'string' || !PROJECT_NO_SHAPE.test(projectNo)) {
       return `${path}.job.projectNos entries must be non-blank strings (1..128 visible ASCII characters)`
     }
+    // R-69 1c (I5 ruling N2): the run summary refuses a projectNo containing '://' (core/integration-run-events.ts),
+    // so a number saved with one would run and then drop its summary — refuse it here, as the actionId shape is.
+    if (projectNo.includes('://')) return `${path}.job.projectNos entries must not contain "://" (a project number is never a URL)`
     if (seen.has(projectNo)) return `${path}.job.projectNos must not repeat a project`
     seen.add(projectNo)
   }

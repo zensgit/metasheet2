@@ -85,6 +85,8 @@ const CONFIG_CASES: Array<[string, unknown, boolean]> = [
   ['project 129 chars', stock({ projectNos: ['A'.repeat(129)] }), false],
   ['project not a string', stock({ projectNos: [1001] }), false],
   ['project repeated', stock({ projectNos: ['P-1', 'P-2', 'P-1'] }), false],
+  ['project containing :// (the run summary refuses it; R-69 1c, I5 ruling N2)', stock({ projectNos: ['P-1', 'x://y', 'P-3'] }), false],
+  ['project with a single colon or slash is still a project number', stock({ projectNos: ['P:1', 'P/2'] }), true],
   ['actionId blank', stock({ actionId: '' }), false],
   ['actionId not a string', stock({ actionId: 7 }), false],
   ['actionId outside the run-summary identifier shape (R-69 1c)', stock({ actionId: 'plm.stock-preparation.pull-bom.v1@site' }), false],
