@@ -47,9 +47,9 @@
     <div class="sp-yida-preview__mapping">
       <h4>字段映射</h4>
       <p>source 是本地 JSON 字段；target 是目标表单字段。业务键仅作本地重复检查，不能验证远端状态。</p>
-      <p v-if="previewMode === 'transforms'" data-testid="sp-yida-transform-hint">v3：业务键和允许空键勾选的是「直接映射」行的 target，复制、常量、拼接永不参与业务键。复制取所指直接映射行的同一列；拼接按列出顺序用分隔符连接，数字按 String() 书写，空部分按所选规则跳过或拒绝，全部为空则视为缺失。查表不在这里：所需的值须先由获批的只读备成列。</p>
+      <p v-if="previewMode === 'transforms'" data-testid="sp-yida-transform-hint">v3：业务键和允许空键勾选的是「直接映射」行的 target，复制、常量、拼接永不参与业务键。复制取所指直接映射行的同一列；拼接按列出顺序用分隔符连接，数字按 String() 书写，空部分按所选规则跳过或拒绝，全部为空则视为缺失。查表不在这里：所需的值须先由获批的只读备成列。生成按模板部件 JSON 顺序拼接（字面量、字段、哈希、物料编码预置），恰好一个哈希（覆盖全部业务键目标）或一个预置，在拆分之后逐行计算；任一部分为空即拒绝，同批两行得到同一个值时两行都拒绝。</p>
       <div v-for="(entry, index) in fieldMap" :key="index" class="sp-yida-preview__map-row" :data-testid="`sp-yida-map-row-${index}`">
-        <label v-if="previewMode === 'transforms'">变换<select v-model="entry.transform" :data-testid="`sp-yida-map-transform-${index}`"><option value="direct">直接映射</option><option value="copy">复制</option><option value="constant">常量</option><option value="concat">拼接</option></select></label>
+        <label v-if="previewMode === 'transforms'">变换<select v-model="entry.transform" :data-testid="`sp-yida-map-transform-${index}`"><option value="direct">直接映射</option><option value="copy">复制</option><option value="constant">常量</option><option value="concat">拼接</option><option value="generated">生成</option></select></label>
         <label v-if="previewMode !== 'transforms' || entry.transform === 'direct'">source<input v-model="entry.source" :data-testid="`sp-yida-map-source-${index}`" autocomplete="off"></label>
         <label v-if="previewMode === 'transforms' && entry.transform === 'copy'">复制自（直接映射行的 target）<input v-model="entry.copyOf" :data-testid="`sp-yida-map-copy-of-${index}`" autocomplete="off"></label>
         <label v-if="previewMode === 'transforms' && entry.transform === 'constant'">常量值（数字按 JSON 数字原样书写）<input v-model="entry.constantText" :data-testid="`sp-yida-map-constant-${index}`" autocomplete="off"></label>
@@ -58,6 +58,7 @@
           <label>分隔符<input v-model="entry.separator" :data-testid="`sp-yida-map-concat-separator-${index}`" autocomplete="off"></label>
           <label>空部分<select v-model="entry.blank" :data-testid="`sp-yida-map-concat-blank-${index}`"><option value="refuse">部分为空即拒绝</option><option value="skip">跳过空部分</option></select></label>
         </template>
+        <label v-if="previewMode === 'transforms' && entry.transform === 'generated'">生成模板 JSON（按顺序；每项 {"literal": 文字}、{"field": 直接映射 target}、{"hash": [直接映射 target…], "form": "uuid-36" 或 "uuid-32"} 或 {"preset": "material-code-v1", "rowIdOf": target, "projectOf": target}）<textarea v-model="entry.templateText" :data-testid="`sp-yida-map-generated-template-${index}`" rows="2" spellcheck="false"></textarea></label>
         <label>target<input v-model="entry.target" :data-testid="`sp-yida-map-target-${index}`" autocomplete="off"></label>
         <label>type<select v-model="entry.type" :data-testid="`sp-yida-map-type-${index}`"><option value="string">string</option><option value="number">number</option><option value="boolean">boolean</option></select></label>
         <label><input v-model="entry.required" type="checkbox" :data-testid="`sp-yida-map-required-${index}`">必填</label>
@@ -133,13 +134,13 @@ import StockPreparationYidaInitializationPanel from './StockPreparationYidaIniti
 import type { YidaOwnerDraftInput } from '../../../services/integration/yidaOwner'
 
 // One editor row for every contract; the v3-only fields (transform, copyOf, constantText,
-// partsText, separator, blank) are rendered and read only in the v3 contract.
+// partsText, separator, blank, templateText) are rendered and read only in the v3 contract.
 type FieldMapEntry = { source: string; target: string; type: 'string' | 'number' | 'boolean'; required: boolean; businessKey: boolean; emptyKey: boolean
-  transform: YidaTransformName; copyOf: string; constantText: string; partsText: string; separator: string; blank: 'skip' | 'refuse' }
+  transform: YidaTransformName; copyOf: string; constantText: string; partsText: string; separator: string; blank: 'skip' | 'refuse'; templateText: string }
 type CatalogEntry = { id: string; control: 'text' | 'number' | 'select' | 'radio'; required: boolean; optionsText: string; optionsMode: 'lines' | 'json' }
 type AllocationMode = 'original' | 'equal_integer' | 'equal_decimal_exact'
 type PreviewMode = 'mapping' | 'protocol' | 'transforms'
-function blankFieldMap(): FieldMapEntry { return { source: '', target: '', type: 'string', required: false, businessKey: false, emptyKey: false, transform: 'direct', copyOf: '', constantText: '', partsText: '', separator: '', blank: 'refuse' } }
+function blankFieldMap(): FieldMapEntry { return { source: '', target: '', type: 'string', required: false, businessKey: false, emptyKey: false, transform: 'direct', copyOf: '', constantText: '', partsText: '', separator: '', blank: 'refuse', templateText: '' } }
 function blankCatalogEntry(): CatalogEntry { return { id: '', control: 'text', required: false, optionsText: '', optionsMode: 'lines' } }
 function modeOf(version: 1 | 2 | 3): PreviewMode { return version === 3 ? 'transforms' : version === 2 ? 'protocol' : 'mapping' }
 const previewMode = ref<PreviewMode>('mapping')
@@ -191,12 +192,13 @@ function candidateReason(code: YidaStaticRowIssueCode): string {
     FIELD_NUMBER_INVALID: 'FIELD_NUMBER_INVALID（数字须有限且不是负零，整数须在安全范围内）',
     FIELD_PART_MISSING: 'FIELD_PART_MISSING（拼接有部分为空，规则为拒绝）',
     FIELD_VALUE_TOO_LONG: 'FIELD_VALUE_TOO_LONG（拼接结果超过 4096 字符）',
+    DUPLICATE_GENERATED_VALUE: 'DUPLICATE_GENERATED_VALUE（同批另一行生成了同一个值）',
   }
   return labels[code] ?? '候选校验失败'
 }
 function rowIssueReason(issue: YidaStaticRowIssue): string {
   const types = { string: '文本', number: '数字', boolean: '布尔值' }
-  const derived: Record<YidaTransformName, string> = { direct: '直接映射', copy: '复制', constant: '常量', concat: '拼接' }
+  const derived: Record<YidaTransformName, string> = { direct: '直接映射', copy: '复制', constant: '常量', concat: '拼接', generated: '生成' }
   return [candidateReason(issue.code), ...(issue.fields ?? []).map((field) =>
     `${field.source ?? derived[field.transform ?? 'direct']} → ${field.target}（期望${types[field.type]}）`)].join('；')
 }
@@ -247,6 +249,7 @@ function mapEditorEntries(config: YidaRuleTemplateRules): FieldMapEntry[] {
       partsText: entry.transform === 'concat' ? JSON.stringify(entry.parts) : '',
       separator: entry.transform === 'concat' ? entry.separator : '',
       blank: entry.transform === 'concat' ? entry.blank : 'refuse',
+      templateText: entry.transform === 'generated' ? JSON.stringify(entry.template) : '',
       businessKey: entry.transform === 'direct' && config.businessKey.includes(entry.target),
       emptyKey: entry.transform === 'direct' && config.emptyKeyFields.includes(entry.target),
     }))
@@ -267,6 +270,10 @@ function transformConfigEntry(entry: FieldMapEntry): YidaTransformFieldMapEntry 
     // A number constant is read only in its exact spelling, like the template parser does.
     if (entry.type === 'number' && !(NUMBER_TEXT.test(entry.constantText) && String(Number(entry.constantText)) === entry.constantText)) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
     return { transform: 'constant', value: entry.type === 'number' ? Number(entry.constantText) : entry.constantText, ...common }
+  }
+  if (entry.transform === 'generated') {
+    const template: unknown = JSON.parse(entry.templateText)
+    return { transform: 'generated', template: template as Extract<YidaTransformFieldMapEntry, { transform: 'generated' }>['template'], target: entry.target, type: entry.type as 'string', required: entry.required }
   }
   const parts: unknown = JSON.parse(entry.partsText)
   return { transform: 'concat', parts: parts as Extract<YidaTransformFieldMapEntry, { transform: 'concat' }>['parts'], separator: entry.separator, blank: entry.blank, target: entry.target, type: entry.type as 'string', required: entry.required }
