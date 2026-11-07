@@ -97,7 +97,7 @@
             type="button"
             class="attendance-group-effective-policy-panel__domain-action"
             :data-attendance-w6-effective-policy-domain-nav="row.key"
-            @click="navigate(row.nav.href)"
+            @click="navigate(row.nav)"
           >
             {{ tr('Open', '前往') }}
           </button>
@@ -151,7 +151,7 @@
               type="button"
               class="attendance-group-effective-policy-panel__conflict-action"
               :data-attendance-w6-effective-policy-conflict-nav="index"
-              @click="navigate(row.nav.href)"
+              @click="navigate(row.nav)"
             >
               {{ tr('Resolve', '前往处理') }}
             </button>
@@ -163,8 +163,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onScopeDispose, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { resolveAttendanceGroupRouteContext } from '../../router/attendanceGroupContextRoute'
 import { useLocale } from '../../composables/useLocale'
 import { apiFetch as sendApiFetch } from '../../utils/api'
 import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
@@ -186,6 +187,8 @@ import {
   resolveAttendanceGroupEffectivePolicyEditorNavigationV1,
   ATTENDANCE_GROUP_EFFECTIVE_POLICY_DOMAIN_SUMMARY_KEYS_V1,
   type AttendanceGroupEffectivePolicyAggregateRawV1,
+  type AttendanceGroupEffectivePolicyEditorNavigationV1,
+  type AttendanceGroupEffectivePolicyStageActionV1,
   type AttendanceGroupEffectivePolicyDomainSummaryKeyV1,
 } from './attendanceGroupEffectivePolicyLabels'
 
@@ -194,6 +197,12 @@ const props = defineProps<{
   returnTo: string
 }>()
 
+const emit = defineEmits<{
+  (event: 'open-group-stage', target: AttendanceGroupEffectivePolicyStageActionV1): void
+}>()
+
+let active = true
+onScopeDispose(() => { active = false })
 const { isZh } = useLocale()
 const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
 const router = useRouter()
@@ -221,7 +230,7 @@ async function load(): Promise<void> {
     }
     const payload = await response.json()
     const parsed = parseAttendanceGroupEffectivePolicyEnvelopeV1(payload)
-    if (!parsed) {
+    if (!parsed || parsed.groupId !== props.groupId) {
       status.value = 'error'
       return
     }
@@ -233,8 +242,30 @@ async function load(): Promise<void> {
   }
 }
 
-function navigate(href: string): void {
-  void router.push(href)
+function navigate(target: AttendanceGroupEffectivePolicyEditorNavigationV1): void {
+  if (!active || status.value !== 'ready' || !sessionGuard.isCurrent()) return
+  if (target.kind === 'group-stage') {
+    if (target.groupId !== props.groupId) return
+    emit('open-group-stage', { groupId: target.groupId, stage: target.stage })
+    return
+  }
+  if (target.sameRouteStage && target.sameRouteStage.groupId === props.groupId) {
+    const current = router.currentRoute.value
+    const destination = router.resolve(target.href)
+    const context = resolveAttendanceGroupRouteContext({
+      groupId: current.params.groupId,
+      step: target.sameRouteStage.stage === 'policies' ? 'rules' : 'schedule',
+      surface: current.query.surface,
+      returnTo: current.query.returnTo,
+      currentPath: current.path,
+    })
+    // Preserve an accepted same-destination editor rather than normalizing benign returnTo spelling.
+    if (current.path === destination.path && context?.groupId === props.groupId && context.surface === null) {
+      emit('open-group-stage', target.sameRouteStage)
+      return
+    }
+  }
+  void router.push(target.href)
 }
 
 const UNRECOGNIZED = () => (isZh.value ? '未识别' : 'Unrecognized')
@@ -265,7 +296,7 @@ interface DomainRow {
   key: AttendanceGroupEffectivePolicyDomainSummaryKeyV1
   domainText: string
   labelText: string
-  nav: { kind: 'route' | 'group-list'; href: string } | null
+  nav: AttendanceGroupEffectivePolicyEditorNavigationV1 | null
 }
 
 const domainRows = computed<DomainRow[]>(() => {
@@ -316,7 +347,7 @@ interface ConflictRow {
   codeText: string
   domainText: string
   affectedUserCount: number | null
-  nav: { kind: 'route' | 'group-list'; href: string } | null
+  nav: AttendanceGroupEffectivePolicyEditorNavigationV1 | null
 }
 
 const conflictRows = computed<ConflictRow[]>(() => {
