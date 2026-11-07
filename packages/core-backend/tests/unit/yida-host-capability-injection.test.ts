@@ -119,7 +119,7 @@ it('registers the host-boundary and connection-test real-PG proofs in the EXPECT
   const files = tokens.slice(runAt + 1)
   expect(files.filter(token => token.startsWith('-')))
     .toEqual(['--reporter=verbose', '--reporter=json', '--outputFile.json=../../artifacts/yida-realdb/lock-protocol-vitest.json'])
-  expect(lines[2]).toBe('node scripts/ops/vitest-zero-skip.mjs artifacts/yida-realdb/lock-protocol-vitest.json 14')
+  expect(lines[2]).toBe('node scripts/ops/vitest-zero-skip.mjs artifacts/yida-realdb/lock-protocol-vitest.json 15')
   for (const spec of specs) expect(files.filter(token => token === spec), spec).toHaveLength(1)
   const config = ts.createSourceFile('vitest.config.ts', readFileSync(path.join(root, 'packages/core-backend/vitest.config.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
   const excluded = new Set<string>()

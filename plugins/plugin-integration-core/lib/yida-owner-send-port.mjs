@@ -90,8 +90,8 @@ function build(options) {
   // YiDa 发料确认日期回写 (design baseline v2.3 §7.3, decision D5 a; slice Y9): an optional, already-bound write-back
   // (the runtime factory binds it to this port's owner scope and the host's live re-check). Absent = the port is
   // the original. It is NEVER consulted before or during the send: see afterAcknowledged below.
-  const writeback = Object.hasOwn(config, 'issueConfirmWriteback') ? config.issueConfirmWriteback : null
-  if (writeback !== null && (!writeback || typeof writeback !== 'object' || types.isProxy(writeback)
+  const writeback = Object.hasOwn(config, 'issueConfirmWriteback') ? config.issueConfirmWriteback : undefined
+  if (writeback !== undefined && (!writeback || typeof writeback !== 'object' || types.isProxy(writeback)
     || typeof writeback.run !== 'function')) fail('INPUT')
   // BEST EFFORT, AFTER SETTLE. Called only once the runner has returned, every one of its transactions has committed
   // and the durable history agrees (the checks above the return); the write-back opens its own plugin-db reads and
@@ -99,7 +99,7 @@ function build(options) {
   // skipped, retryable, a throw, a rejection — the send's answer is unchanged: a missed write-back is filled later by
   // the owner recovery entry (POST /issue-confirm-writeback), whose date is the acknowledgement audit's day anyway.
   async function afterAcknowledged(ledgerId) {
-    if (writeback === null) return
+    if (writeback === undefined) return
     try { await writeback.run({ ledgerIds: [ledgerId] }) } catch { /* best effort; recovery is the owner entry */ }
   }
   function enabled() {

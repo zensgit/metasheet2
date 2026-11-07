@@ -310,6 +310,7 @@ node __tests__/yida-form-readback.test.cjs
 node __tests__/yida-form-transport.test.cjs
 node __tests__/yida-initialization-producer.test.cjs
 node __tests__/yida-issue-confirm-writeback.test.cjs
+node __tests__/yida-issue-confirm-writeback-wiring.test.cjs
 node __tests__/yida-mapping-v3-parity.test.cjs
 node __tests__/yida-mapping-v3.test.cjs
 node __tests__/yida-material-code.test.cjs

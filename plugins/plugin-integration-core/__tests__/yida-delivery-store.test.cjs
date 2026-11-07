@@ -23,7 +23,9 @@ test('the YiDa real-PG suites are registered in their real execution lane withou
     'tests/integration/stock-preparation-yida-approved-target-realdb.test.ts',
     'tests/integration/stock-preparation-yida-send-approvals-realdb.test.ts',
     'tests/integration/stock-preparation-yida-owner-send-port-realdb.test.ts',
-    'tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts']
+    'tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts',
+    // Slice Y9: the issue-confirm write-back wiring proof (same step, whole file, excluded from the no-DB run).
+    'tests/integration/stock-preparation-yida-issue-confirm-writeback-realdb.test.ts']
   // The step's whole file list: a dropped file, or an unexpected positional filter, is red.
   const lane = ['tests/integration/external-system-delete-bind-lock-protocol.db.test.ts', ...specs,
     'tests/integration/stock-preparation-yida-credential-materials-realdb.test.ts',
@@ -64,7 +66,7 @@ test('the YiDa real-PG suites are registered in their real execution lane withou
   // The check reads the same report (vitest resolves outputFile against packages/core-backend; the
   // step's own shell runs at the repository root) and the step's whole file count.
   assert.equal(lines[2], `node scripts/ops/vitest-zero-skip.mjs artifacts/yida-realdb/lock-protocol-vitest.json ${lane.length}`)
-  assert.equal(lane.length, 14)
+  assert.equal(lane.length, 15)
   // A local run's report is gitignored, so a committed stale clean report cannot stand in for this run's.
   assert.equal(fs.readFileSync(path.join(root, '.gitignore'), 'utf8').split(/\r?\n/).includes('artifacts/yida-realdb/'), true)
   // The checker's behaviour is tested only in this plugin chain, so a checker-only change must make the

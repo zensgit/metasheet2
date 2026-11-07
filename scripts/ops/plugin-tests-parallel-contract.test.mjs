@@ -47,7 +47,11 @@ const permissionStep = {
 // reviewed position, then stripped so the frozen original command is still compared byte-for-byte.
 const lockProtocolStepId = 'external-system-delete-bind-lock-protocol-real-db'
 const lockProtocolJsonReporter = ' --reporter=json --outputFile.json=../../artifacts/yida-realdb/lock-protocol-vitest.json'
-const lockProtocolZeroSkipLine = 'node scripts/ops/vitest-zero-skip.mjs artifacts/yida-realdb/lock-protocol-vitest.json 14\n'
+const lockProtocolZeroSkipLine = 'node scripts/ops/vitest-zero-skip.mjs artifacts/yida-realdb/lock-protocol-vitest.json 15\n'
+// Explicit additive suite in the same step (slice Y9, the YiDa issue-confirm write-back wiring): one whole file at its
+// reviewed position, right after the delivery-runner suite; asserted once, then stripped like the two additions above.
+const lockProtocolWritebackAddition = '  tests/integration/stock-preparation-yida-issue-confirm-writeback-realdb.test.ts \\\n'
+const lockProtocolWritebackPredecessor = '  tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts \\\n'
 
 const directoryClientLintStep = {
   name: 'Run DingTalk directory client lint',
@@ -169,6 +173,9 @@ function assertParallelWorkflow(doc) {
         assert.equal(step.run.split(lockProtocolZeroSkipLine).length - 1, 1, 'The lock-protocol zero-skip check must run exactly once')
         assert.ok(step.run.endsWith(tail), 'Keep the JSON reporter right after --reporter=verbose and the zero-skip check as the last line')
         step.run = step.run.replace(lockProtocolJsonReporter, '').replace(lockProtocolZeroSkipLine, '')
+        assert.equal(step.run.split(lockProtocolWritebackAddition).length - 1, 1, 'The issue-confirm write-back real-DB suite must run exactly once')
+        assert.ok(step.run.includes(lockProtocolWritebackPredecessor + lockProtocolWritebackAddition), 'Keep the issue-confirm write-back suite right after the delivery-runner suite')
+        step.run = step.run.replace(lockProtocolWritebackAddition, '')
       }
       if (suite === 'multitable-db' && step.id === 'multitable-real-db-integration') {
         // Explicit additive suite: preserve the frozen original command byte-for-byte.

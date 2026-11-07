@@ -65,6 +65,11 @@ function loadRuntime(factory: Factory, source = originalSource, ownCoreErrors = 
       createInternalYidaSendExecutionAuthority: factory,
       yidaSendApprovalErrorCode: (error: unknown) => ownCoreErrors.get(error as object),
     }
+    // Y9: the host live re-check of the issue-confirm write-back. The control path never reaches it (no binding here
+    // carries the write-back capability); it refuses if anything ever calls it.
+    if (specifier === './yida-issue-confirm-writeback-authority') return {
+      yidaIssueConfirmLiveRecheck: async () => { throw new Error('UNIT_RECHECK_MUST_NOT_RUN') },
+    }
     throw new Error('Unexpected unit import')
   }, exports)
   return exports as RuntimeModule

@@ -76,6 +76,8 @@ export default defineConfig({
       'tests/integration/stock-preparation-yida-owner-browser-realdb.test.ts',
       'tests/integration/stock-preparation-yida-initialization-browser-realdb.test.ts',
       'tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts',
+      // Slice Y9: the issue-confirm write-back wiring (crash tests, selectors, flag matrix); same EXPECT_DB step.
+      'tests/integration/stock-preparation-yida-issue-confirm-writeback-realdb.test.ts',
       'tests/integration/automation-live-authority-realdb.test.ts',
       // #6315 host boundaries boot the actual MetaSheetServer on the migrated CI database; whole
       // files in the same EXPECT_DB plugin-tests step as the YiDa real-DB proofs above.
