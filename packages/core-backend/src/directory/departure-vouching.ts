@@ -42,7 +42,7 @@ export type LegacyLoginVouchingInput = VouchingCommon & { providerParam: number;
 export type StrictLoginVouchingInput = VouchingCommon & { connectionIdsParam: number }
 export type GlobalVouchingInput = VouchingCommon
 
-/** Aliases are fixed; callers' own statements never use these names, so a correlated reference stays unambiguous. */
+/** Aliases are constant; callers' own statements never use these names, so a correlated reference stays unambiguous. */
 const LINK_ALIAS = 'sibling_link'
 const ACCOUNT_ALIAS = 'sibling'
 const INTEGRATION_ALIAS = 'sibling_integration'
