@@ -1,3 +1,5 @@
+import { computeAttendanceProvenanceFingerprintV1, computeAttendanceSemanticInputFingerprintV1 } from '../../src/attendance/w4c0-fingerprints'
+import { computeAttendanceSourceDefinitionFingerprintV1 } from '../../src/attendance/w4c1-fingerprints'
 import { acquireAttendanceImportTimezonePrefixV1, prepareAttendanceImportTimezoneSourceV1 } from '../../src/attendance/attendance-business-trip-locks'
 import { applyAttendanceLegacyGroupEffectsV1 } from '../../src/attendance/w4c3a-legacy-plan-group-effects'
 import type { VerifiedAttendanceLegacyPlanV1 } from '../../src/attendance/w4c3a-legacy-plan-worker'
@@ -793,16 +795,38 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
     const actor = await fixture.user()
     // Seed isolated historical storage from an actual core-produced calculation shape;
     // this proves continuation, not a new claim about a past import writer.
-    const source = (await fixture.pool.query(`SELECT * FROM attendance_record_calculations
+    const template = (await fixture.pool.query(`SELECT * FROM attendance_record_calculations
       WHERE org_id=$1 AND mode='authoritative' AND context_snapshot IS NOT NULL
       ORDER BY created_at,id LIMIT 1`,[fixture.orgId])).rows[0]
-    const recordId = randomUUID(),calculationId = randomUUID()
-    const context = {...source.context_snapshot,userId:actor.userId,workDate:'2026-02-28'}
-    const attribution = {...source.attribution_snapshot,value:{
-      ...source.attribution_snapshot.value,userId:actor.userId,workDate:'2026-02-28',
+    const recordId = randomUUID(),calculationId = randomUUID(),eventId = randomUUID()
+    const context = {...template.context_snapshot,userId:actor.userId,workDate:'2026-02-28'}
+    const attribution = {...template.attribution_snapshot,value:{
+      ...template.attribution_snapshot.value,userId:actor.userId,workDate:'2026-02-28',
       absoluteWindow:{startAt:'2026-02-28T09:00:00.000Z',endAt:'2026-02-28T18:00:00.000Z'},
       attributionWindow:{startAt:'2026-02-28T09:00:00.000Z',endAt:'2026-02-28T20:00:00.000Z'},
     }}
+    // Bind the copied historical inputs to this actor's actual seeded check-in,
+    // and recompute all closed fingerprints after changing the frozen definition.
+    const evidence = [{kind:'punch',ref:eventId,direction:'check_in',
+      occurredAt:'2026-02-28T09:00:00.000Z',source:'attendance_event'}]
+    const provenance = {
+      transport:template.input_provenance.transport,sourceRef:template.input_provenance.sourceRef,
+      artifactSha256:template.input_provenance.artifactSha256,
+      normalizedCsvSha256:template.input_provenance.normalizedCsvSha256,
+      convertedSheetName:template.input_provenance.convertedSheetName,
+    }
+    const source = {
+      ...template,context_snapshot:context,attribution_snapshot:attribution,
+      evidence_snapshot:evidence,input_provenance:provenance,
+      semantic_input_fingerprint:computeAttendanceSemanticInputFingerprintV1({
+        attribution,context,evidence,approvedFacts:template.approved_facts_snapshot,
+        manualOverride:template.manual_override_snapshot,mergePolicy:template.merge_policy,
+        calculationTier:template.calculation_tier,engineVersion:template.engine_version,
+        snapshotSchemaVersion:template.snapshot_schema_version,
+      }),
+      provenance_fingerprint:computeAttendanceProvenanceFingerprintV1(provenance),
+      source_definition_fingerprint:computeAttendanceSourceDefinitionFingerprintV1({attribution,context}),
+    }
     const historical = {
       ...source,id:calculationId,attendance_record_id:recordId,version:1,
       operation_id:randomUUID(),source_batch_id:null,supersedes_calculation_id:null,restores_calculation_id:null,
@@ -816,7 +840,7 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
       VALUES($1,$2,$3,'2026-02-28','UTC','2026-02-28T09:00:00Z',NULL,0,0,0,'normal',true,'{}'::jsonb)`,
     [recordId,fixture.orgId,actor.userId])
     await fixture.pool.query(`INSERT INTO attendance_events(id,org_id,user_id,event_type,work_date,timezone,occurred_at)
-      VALUES($1,$2,$3,'check_in','2026-02-28','UTC','2026-02-28T09:00:00Z')`,[randomUUID(),fixture.orgId,actor.userId])
+      VALUES($1,$2,$3,'check_in','2026-02-28','UTC','2026-02-28T09:00:00Z')`,[eventId,fixture.orgId,actor.userId])
     const seedClient = await fixture.pool.connect()
     try {
       await seedClient.query('BEGIN')
