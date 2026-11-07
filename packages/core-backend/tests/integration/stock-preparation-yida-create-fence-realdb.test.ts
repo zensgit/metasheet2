@@ -593,7 +593,7 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     expect(two.rowSpecs[0].sourceRecordDigest).toBe(one.rowSpecs[0].sourceRecordDigest)
   })
 
-  it('A10 (generated): the identity digest is independent of the template; equal codes never stand in for a fence, each refusal is the fence that applies', async () => {
+  it('A10 (generated): the identity digest is independent of the template; equal codes never stand in for a fence; for a key-tied template each refusal is the fence that applies', async () => {
     // Two templates over one row: one identity, one seven-key digest, two codes.
     const preset = await generatedDraft([PRESET]), hashed = await generatedDraft([{ literal: 'SYN-' }, KEY_HASH])
     await setState('acknowledged', reservation(preset, {}))

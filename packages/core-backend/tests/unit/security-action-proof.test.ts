@@ -744,11 +744,13 @@ describe('consumption contract', () => {
     const { service } = serviceWith({ state })
     const { client, statements } = fakeClient(state)
     await service.consume(client, contextFor(), consumeInput())
-    expect(statements.slice(0, 6).map((s) => s.key)).toEqual(['isolation', 'xid', 'xid', 'lockUser', 'sessionForShare', 'lockProof'])
-    expect(statements[4].sql).toContain('FOR SHARE')
-    expect(statements[5].sql).toContain('user_id = $2')
-    expect(statements[5].sql).toContain('FOR UPDATE')
-    expect(statements[5].params).toEqual([PROOF_ID, USER])
+    // D21 (access-graph mutex): the subject authorization version row is bumped before the users row is locked.
+    expect(statements.slice(0, 7).map((s) => s.key)).toEqual(['isolation', 'xid', 'xid', 'versionBump', 'lockUser', 'sessionForShare', 'lockProof'])
+    expect(statements[3].params).toEqual([[USER]])
+    expect(statements[5].sql).toContain('FOR SHARE')
+    expect(statements[6].sql).toContain('user_id = $2')
+    expect(statements[6].sql).toContain('FOR UPDATE')
+    expect(statements[6].params).toEqual([PROOF_ID, USER])
     expect(statements.at(-1)!.key).toBe('consume')
   })
 
