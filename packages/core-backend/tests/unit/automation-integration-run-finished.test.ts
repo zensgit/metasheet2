@@ -6,6 +6,7 @@
  * no message is sent. R-69 is OPEN: dry-run only, default OFF.
  */
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -33,6 +34,8 @@ import {
   validateIntegrationRunFinishedTriggerConfig,
 } from '../../src/multitable/automation-triggers'
 import {
+  INTEGRATION_RUN_FINISHED_COUNT_KEYS,
+  INTEGRATION_RUN_FINISHED_DECISION_COUNT_KEYS,
   INTEGRATION_RUN_FINISHED_EVENT_KEYS,
   clearIntegrationRunFinishedSinkForTest,
   deriveAutomationRunFinishedEventId,
@@ -44,6 +47,8 @@ import {
   type IntegrationRunFinishedEvent,
 } from '../../src/core/integration-run-events'
 import { buildAutomationRunFinishedEvents, runFinishedCountsFrom } from '../../src/multitable/automation-run-finished-events'
+// Gate ③ (baseline v2.3 §10.2.2): the OS task's own per-project record, and the plugin's real port.
+import { pullOneProject } from '../../../../scripts/ops/stock-preparation-scheduled-pull.mjs'
 import { deriveActionKey } from '../../src/multitable/automation-action-idempotency'
 import { AutomationRuleValidationError, AutomationService } from '../../src/multitable/automation-service'
 import { buildDurableConsumerHandlers } from '../../src/multitable/automation-durable-consumer-handlers'
@@ -61,6 +66,8 @@ const TENANT = 'tenant_1'
 const PRINCIPAL = { id: 'svc_user', permissions: ['stock-prep:pull', 'stock-prep:read', 'workflow:write'], roles: [], role: 'user', tenantId: TENANT }
 const BINDING = { principalId: 'svc_user', tenantId: TENANT }
 const ON = { [EVENT_FLAG]: 'true' } as NodeJS.ProcessEnv
+/** The five stock-prep decision counts at zero (I5 ruling on verifier F7: every event carries all nine counts). */
+const ZERO_DECISIONS = { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 }
 
 function pluginEvent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -69,7 +76,8 @@ function pluginEvent(overrides: Record<string, unknown> = {}): Record<string, un
     job: { kind: 'pipeline', pipelineId: 'pipe_1' },
     runId: 'run_7',
     status: 'failed',
-    counts: { read: 10, cleaned: 9, written: 0, failed: 1 },
+    canApply: false,
+    counts: { read: 10, cleaned: 9, written: 0, failed: 1, ...ZERO_DECISIONS },
     durationMs: 1234,
     attempts: 1,
     triggeredBy: 'manual',
@@ -170,8 +178,8 @@ describe('integration.run_finished — publish port (closed key set, values-free
   it('nested keys are closed too (job, counts)', () => {
     expect(validateIntegrationRunFinishedEvent(pluginEvent({ job: { kind: 'pipeline', pipelineId: 'pipe_1', tenantId: TENANT } }), 'plugin'))
       .toEqual({ ok: false, code: 'EVENT_KEY_NOT_ACCEPTED', field: 'job.tenantId' })
-    expect(validateIntegrationRunFinishedEvent(pluginEvent({ counts: { read: 1, cleaned: 1, written: 0, failed: 0, add: 1 } }), 'plugin'))
-      .toEqual({ ok: false, code: 'EVENT_KEY_NOT_ACCEPTED', field: 'counts.add' })
+    expect(validateIntegrationRunFinishedEvent(pluginEvent({ counts: { read: 1, cleaned: 1, written: 0, failed: 0, ...ZERO_DECISIONS, created: 1 } }), 'plugin'))
+      .toEqual({ ok: false, code: 'EVENT_KEY_NOT_ACCEPTED', field: 'counts.created' })
     expect(validateIntegrationRunFinishedEvent(pluginEvent({ counts: { read: 1, cleaned: 1, written: 0 } }), 'plugin'))
       .toMatchObject({ ok: false, field: 'counts.failed' })
   })
@@ -182,7 +190,10 @@ describe('integration.run_finished — publish port (closed key set, values-free
     ['an open reason', { reason: 'free text reason' }, 'reason'],
     ['a pipelineId path', { job: { kind: 'pipeline', pipelineId: 'a/b' } }, 'job.pipelineId'],
     ['a status outside the set', { status: 'done' }, 'status'],
-    ['a negative count', { counts: { read: -1, cleaned: 0, written: 0, failed: 0 } }, 'counts.read'],
+    ['a negative count', { counts: { read: -1, cleaned: 0, written: 0, failed: 0, ...ZERO_DECISIONS } }, 'counts.read'],
+    ['a negative decision count', { counts: { read: 0, cleaned: 0, written: 0, failed: 0, ...ZERO_DECISIONS, manual_confirm: -1 } }, 'counts.manual_confirm'],
+    ['a string canApply', { canApply: 'true' }, 'canApply'],
+    ['a numeric canApply', { canApply: 1 }, 'canApply'],
     ['a plugin depth', { _automationDepth: 1 }, '_automationDepth'],
   ])('a value outside its bounded shape is refused: %s', (_label, overrides, field) => {
     expect(validateIntegrationRunFinishedEvent(pluginEvent(overrides), 'plugin')).toMatchObject({ ok: false, code: 'EVENT_FIELD_INVALID', field })
@@ -300,6 +311,7 @@ describe('integration.run_finished — the action layer emits EXACTLY ONE summar
       job: { kind: 'stock_prep_pull', projectNo: 'P-1' },
       status: 'succeeded',
       reason: 'ready',
+      canApply: true,
       counts: { read: 3, cleaned: 3, written: 0, failed: 0 },
       attempts: 1,
       triggeredBy: 'automation',
@@ -308,6 +320,8 @@ describe('integration.run_finished — the action layer emits EXACTLY ONE summar
     const actionKey = deriveActionKey({ structuralPath: '0', actionType: 'run_integration_job', canonicalConfig: CONFIG })
     expect(event.eventId).toBe(deriveAutomationRunFinishedEventId({ rootExecutionId: 'exec_1', executionId: 'exec_1', actionKey, projectNo: 'P-1' }))
     expect(event.eventId).toMatch(/^[0-9a-f]{64}$/)
+    // F7: the port's decision counts ride as they are (fakePort: add 2, update 1).
+    expect(event.counts).toEqual({ read: 3, cleaned: 3, written: 0, failed: 0, add: 2, update: 1, skip: 0, inactive: 0, manual_confirm: 0 })
     // values-free: no tenant id, no lease scope key, no principal, no URL
     const text = JSON.stringify(event)
     for (const needle of [TENANT, 'stock_prep_pull:tenant_1', 'svc_user', 'scopeKey', 'http', 'binding']) expect(text).not.toContain(needle)
@@ -398,9 +412,10 @@ describe('integration.run_finished — the action layer emits EXACTLY ONE summar
   })
 
   it('the builder maps counts into the closed four and moves an open reason to errorClass', () => {
-    expect(runFinishedCountsFrom({ add: 5, update: 2, skip: 1, inactive: 0, manual_confirm: 3 })).toEqual({ read: 11, cleaned: 11, written: 0, failed: 0 })
-    expect(runFinishedCountsFrom({ read: 4, cleaned: 3, written: 2, failed: 1 })).toEqual({ read: 4, cleaned: 3, written: 2, failed: 1 })
-    expect(runFinishedCountsFrom(undefined)).toEqual({ read: 0, cleaned: 0, written: 0, failed: 0 })
+    expect(runFinishedCountsFrom({ add: 5, update: 2, skip: 1, inactive: 0, manual_confirm: 3 }))
+      .toEqual({ read: 11, cleaned: 11, written: 0, failed: 0, add: 5, update: 2, skip: 1, inactive: 0, manual_confirm: 3 })
+    expect(runFinishedCountsFrom({ read: 4, cleaned: 3, written: 2, failed: 1 })).toEqual({ read: 4, cleaned: 3, written: 2, failed: 1, ...ZERO_DECISIONS })
+    expect(runFinishedCountsFrom(undefined)).toEqual({ read: 0, cleaned: 0, written: 0, failed: 0, ...ZERO_DECISIONS })
     const [event] = buildAutomationRunFinishedEvents({
       output: { outcome: 'failed', reason: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', units: [{ projectNo: 'P-1', scopeKey: `stock_prep_pull:${TENANT}:P-1`, outcome: 'failed', reason: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', durationMs: 5, summary: { status: 'failed', errorClass: 'STOCK_PREP_REFRESH_RECOVERY_PENDING' } }] },
       projectNos: ['P-1'], rootExecutionId: 'r', executionId: 'e', actionKey: 'k', automationDepth: 1, occurredAt: '2026-11-06T06:00:00.000Z',
@@ -475,7 +490,8 @@ function automationEvent(overrides: Record<string, unknown> = {}): IntegrationRu
     occurredAt: '2026-11-06T06:00:00.000Z',
     job: { kind: 'stock_prep_pull', projectNo: 'P-1' },
     status: 'failed',
-    counts: { read: 0, cleaned: 0, written: 0, failed: 0 },
+    canApply: false,
+    counts: { read: 0, cleaned: 0, written: 0, failed: 0, ...ZERO_DECISIONS },
     durationMs: 10,
     attempts: 1,
     triggeredBy: 'automation',
@@ -682,6 +698,9 @@ describe('integration.run_finished — the alert template (ADR §4.3) renders fr
     expect(title).toContain('P-1')
     expect(title).toContain('skipped')
     expect(body).toContain('busy')
+    // F7: canApply and the five decision counts render (a boolean renders as its literal).
+    expect(body).toContain('可应用：false')
+    expect(body).toContain('待人工确认 0')
     expect(`${title}\n${body}`).not.toMatch(/\{\{/)
     expect(`${title}\n${body}`).not.toContain(TENANT)
     // a template variable outside run.* renders nothing on this record-less trigger
@@ -801,7 +820,7 @@ describe('fix-I5 F2 — shutdown-reason summaries are admitted during the produc
   })
   const shutdownEvent = () => ({
     eventId: 'd'.repeat(64), occurredAt: '2026-11-06T06:00:00.000Z', job: { kind: 'stock_prep_pull', projectNo: 'P-2' }, status: 'not_started',
-    counts: { read: 0, cleaned: 0, written: 0, failed: 0 }, durationMs: 0, attempts: 1, triggeredBy: 'automation', reason: 'shutdown', _automationDepth: 1,
+    canApply: false, counts: { read: 0, cleaned: 0, written: 0, failed: 0, ...ZERO_DECISIONS }, durationMs: 0, attempts: 1, triggeredBy: 'automation', reason: 'shutdown', _automationDepth: 1,
   })
 
   it('durable ON: after stopProducerAdmissions the not_started(shutdown) summary is still enqueued', async () => {
@@ -956,5 +975,181 @@ describe('fix-I5 F5/F6 — the dispatch walls: another tenant\'s rule never fire
     service.setIntegrationRunFinishedCreatorResolverForTest(async () => ({ ok: true as const, user: { id: 'alerter', permissions: ['stock-prep:read'], roles: [] as string[], role: 'user', tenantId: TENANT } }))
     await service.dispatchIntegrationRunFinished(automationEvent({ eventId: 'e'.repeat(64) }), { tenantId: TENANT }, ON)
     expect(executeRule).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ── 8. I5 ruling on verifier F7: canApply + the five decision counts (baseline v2.3 §10.2.2 ③ wins over ADR §4.1) ──
+
+describe('F7 — the closed set carries canApply and the five per-decision counts, and nothing else new', () => {
+  afterEach(() => clearIntegrationRunFinishedSinkForTest())
+
+  it('the closed key sets are exactly these (adding or dropping a key goes red)', () => {
+    expect([...INTEGRATION_RUN_FINISHED_EVENT_KEYS]).toEqual([
+      'eventId', 'occurredAt', 'job', 'runId', 'status', 'canApply', 'counts', 'durationMs', 'attempts', 'triggeredBy', 'errorClass', 'reason', '_automationDepth',
+    ])
+    // The names the scheduled-pull script logs (its per-project `counts` = the dry run's planner DECISIONS).
+    expect([...INTEGRATION_RUN_FINISHED_DECISION_COUNT_KEYS]).toEqual(['add', 'update', 'skip', 'inactive', 'manual_confirm'])
+    expect([...INTEGRATION_RUN_FINISHED_COUNT_KEYS]).toEqual(['read', 'cleaned', 'written', 'failed', 'add', 'update', 'skip', 'inactive', 'manual_confirm'])
+  })
+
+  it('an event without canApply is REFUSED (required), for both origins', () => {
+    const plugin = pluginEvent()
+    delete plugin.canApply
+    expect(validateIntegrationRunFinishedEvent(plugin, 'plugin')).toEqual({ ok: false, code: 'EVENT_KEY_MISSING', field: 'canApply' })
+    const automation = pluginEvent({ job: { kind: 'stock_prep_pull', projectNo: 'P-1' }, triggeredBy: 'automation', _automationDepth: 1 })
+    delete automation.canApply
+    expect(validateIntegrationRunFinishedEvent(automation, 'automation')).toEqual({ ok: false, code: 'EVENT_KEY_MISSING', field: 'canApply' })
+  })
+
+  it.each(['add', 'update', 'skip', 'inactive', 'manual_confirm'])('an event whose counts lack %s is REFUSED (required)', (key) => {
+    const counts: Record<string, number> = { read: 1, cleaned: 1, written: 0, failed: 0, ...ZERO_DECISIONS }
+    delete counts[key]
+    expect(validateIntegrationRunFinishedEvent(pluginEvent({ counts }), 'plugin')).toEqual({ ok: false, code: 'EVENT_FIELD_INVALID', field: `counts.${key}` })
+  })
+
+  it.each([
+    ['largeBom', { largeBom: true }],
+    ['holdCount', { holdCount: 2 }],
+    ['applyCounts', { applyCounts: { created: 1 } }],
+    ['projectStatus', { projectStatus: 'ready' }],
+  ])('a script-log key the ruling did not admit (%s) is still REFUSED, never trimmed', (key, extra) => {
+    expect(validateIntegrationRunFinishedEvent(pluginEvent(extra), 'plugin')).toEqual({ ok: false, code: 'EVENT_KEY_NOT_ACCEPTED', field: key })
+  })
+
+  it('the validated, frozen copy carries canApply and all nine counts exactly (values-free integers)', () => {
+    const counts = { read: 15, cleaned: 15, written: 0, failed: 0, add: 4, update: 3, skip: 2, inactive: 1, manual_confirm: 5 }
+    const result = validateIntegrationRunFinishedEvent(pluginEvent({ canApply: true, counts }), 'plugin')
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.event.canApply).toBe(true)
+    expect(result.event.counts).toEqual(counts)
+    expect(Object.isFrozen(result.event.counts)).toBe(true)
+    expect(Object.keys(result.event.counts)).toEqual([...INTEGRATION_RUN_FINISHED_COUNT_KEYS])
+  })
+
+  it('the action layer builder emits canApply and the five decision counts from the unit summary; units without one carry false / 0', () => {
+    const units = [
+      { projectNo: 'P-1', scopeKey: `stock_prep_pull:${TENANT}:P-1`, outcome: 'succeeded', reason: 'ready', durationMs: 5, summary: { status: 'succeeded', reason: 'ready', canApply: true, counts: { add: 4, update: 3, skip: 2, inactive: 1, manual_confirm: 0 } } },
+      { projectNo: 'P-2', scopeKey: `stock_prep_pull:${TENANT}:P-2`, outcome: 'held', reason: 'manual_confirm_required', durationMs: 5, summary: { status: 'held', reason: 'manual_confirm_required', canApply: false, counts: { add: 1, manual_confirm: 6 } } },
+      { projectNo: 'P-3', scopeKey: `stock_prep_pull:${TENANT}:P-3`, outcome: 'failed', reason: 'X', durationMs: 5 },
+    ]
+    const events = buildAutomationRunFinishedEvents({
+      output: { outcome: 'failed', units }, projectNos: ['P-1', 'P-2', 'P-3', 'P-4'], rootExecutionId: 'r', executionId: 'e', actionKey: 'k', automationDepth: 1, occurredAt: '2026-11-06T06:00:00.000Z',
+    })
+    expect(events.map((event) => event.canApply)).toEqual([true, false, false, false])
+    expect(events[0].counts).toEqual({ read: 10, cleaned: 10, written: 0, failed: 0, add: 4, update: 3, skip: 2, inactive: 1, manual_confirm: 0 })
+    expect(events[1].counts).toEqual({ read: 7, cleaned: 7, written: 0, failed: 0, add: 1, update: 0, skip: 0, inactive: 0, manual_confirm: 6 })
+    expect(events[2].counts).toEqual({ read: 0, cleaned: 0, written: 0, failed: 0, ...ZERO_DECISIONS })
+    expect(events[3]).toMatchObject({ status: 'not_started', canApply: false, counts: { ...ZERO_DECISIONS } })
+    for (const event of events) expect(validateIntegrationRunFinishedEvent(event, 'automation').ok).toBe(true)
+  })
+})
+
+// ── 9. gate ③: the summary events vs the scheduled-pull script's log, per project ─────────────────────────────
+
+const requireFromTest = createRequire(import.meta.url)
+const { createIntegrationRunPort } = requireFromTest('../../../../plugins/plugin-integration-core/lib/integration-run-port.cjs') as {
+  createIntegrationRunPort(deps: { governedEntries: { runGovernedStockPrepPull: (...args: unknown[]) => Promise<unknown>; runGovernedPipeline: (...args: unknown[]) => Promise<unknown> } }): {
+    run(input: Record<string, unknown>): Promise<IntegrationRunSummary>
+  }
+}
+
+/**
+ * ONE synthetic decision set: the dry-run `data` the server answers, per project (synthetic values only; the token
+ * and revision are never read by the summary path). Both sides consume the SAME object: the script through its own
+ * HTTP client (fetch stubbed), the event through the plugin's real IntegrationRunPort → core sanitize → the real
+ * run_integration_job step → buildAutomationRunFinishedEvents → the publish port's validator.
+ */
+const GATE3_DRY_RUNS: Record<string, Record<string, unknown>> = {
+  'P-READY': { status: 'ready', canApply: true, largeBom: false, dryRunToken: 'tok_synthetic', revision: 'rev_synthetic', counts: { add: 3, update: 1, skip: 5, inactive: 2, manual_confirm: 0 } },
+  'P-READY-NA': { status: 'ready', canApply: false, largeBom: false, counts: { add: 0, update: 0, skip: 7, inactive: 0, manual_confirm: 0 } },
+  'P-MANUAL': { status: 'manual_confirm_required', canApply: false, largeBom: false, counts: { add: 1, update: 2, skip: 0, inactive: 0, manual_confirm: 4 } },
+  'P-SUSPENDED': { status: 'suspended', canApply: false, largeBom: false, refreshHold: { holdCount: 2 }, counts: { add: 2, update: 0, skip: 1, inactive: 1, manual_confirm: 0 } },
+  'P-LARGE': { status: 'large_bom_bounded', canApply: false, largeBom: true, counts: { add: 9, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } },
+  'P-RECOVERY': { status: 'recovery_pending', canApply: false, largeBom: false },
+}
+
+/**
+ * The comparison contract for STATUS: the script logs the dry run's own status verbatim; the summary carries the
+ * closed status and keeps the dry run's status as its reason (ready / the held trio), or its error class as
+ * errorClass (recovery_pending, the same code the script logs as `error`). Known gap, reported, NOT widened here:
+ * a dry-run `not_found` is `skipped_not_found` in the script but `failed / unexpected_dry_run_status` in the I4
+ * port (lib/integration-run-port.cjs summarizeStockPrepDryRun).
+ */
+const GATE3_CLOSED_STATUS: Record<string, string> = {
+  ready: 'succeeded',
+  manual_confirm_required: 'held',
+  suspended: 'held',
+  large_bom_bounded: 'held',
+  recovery_pending: 'failed',
+}
+
+describe('F7 gate ③ — per project, the summary event equals what the scheduled-pull script logs (status, canApply, counts)', () => {
+  beforeEach(() => {
+    vi.stubEnv(ACTION_FLAG, 'true')
+    vi.stubEnv(EVENT_FLAG, 'true')
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+    clearIntegrationRunFinishedSinkForTest()
+  })
+
+  it('the same synthetic decision set ⇒ equal per-project status, canApply and the five decision counts', async () => {
+    const projectNos = Object.keys(GATE3_DRY_RUNS)
+    // (a) The script's per-project records (dry-run only, the scheduled task's default mode).
+    vi.stubGlobal('fetch', async (_url: string, init: { body: string }) => {
+      const projectNo = (JSON.parse(init.body) as { parameters: { projectNo: string } }).parameters.projectNo
+      return { ok: true, status: 200, json: async () => ({ ok: true, data: GATE3_DRY_RUNS[projectNo] }) }
+    })
+    const records = new Map<string, Record<string, unknown>>()
+    for (const projectNo of projectNos) {
+      records.set(projectNo, await pullOneProject({ apiBase: 'http://stub.invalid', token: 'synthetic-token', tenantId: TENANT, projectNo, applyFlag: false, timeoutMs: 1_000 }) as Record<string, unknown>)
+    }
+    vi.unstubAllGlobals()
+
+    // (b) The summary events of ONE run_integration_job step over the same projects, through the plugin's real port.
+    const events = captureSink()
+    const port: IntegrationRunPort = {
+      run: async (input) => {
+        const projectNo = (input.job as { projectNo: string }).projectNo
+        const pluginPort = createIntegrationRunPort({
+          governedEntries: {
+            runGovernedStockPrepPull: async () => GATE3_DRY_RUNS[projectNo],
+            runGovernedPipeline: async () => { throw new Error('not used') },
+          },
+        })
+        return pluginPort.run({ context: input.context, job: input.job, signal: input.signal, checkpoint: input.checkpoint })
+      },
+    }
+    const { run } = harness(createFakeJobDb(), port)
+    await run('exec_gate3', { ...CONFIG, job: { ...CONFIG.job, projectNos } })
+    expect(events.map((e) => e.event.job.projectNo)).toEqual(projectNos)
+
+    for (const projectNo of projectNos) {
+      const record = records.get(projectNo)!
+      const { event } = events.find((e) => e.event.job.projectNo === projectNo)!
+      const label = `project ${projectNo}`
+      // status
+      expect(typeof record.status, label).toBe('string')
+      expect(event.status, label).toBe(GATE3_CLOSED_STATUS[record.status as string])
+      if (event.status === 'failed') {
+        expect(event.errorClass, label).toBe(record.error)
+      } else {
+        expect(event.reason, label).toBe(record.status)
+      }
+      // canApply: the script logs `data.canApply === true`
+      expect(event.canApply, label).toBe(record.canApply === true)
+      // the five decision counts: the script logs the dry run's `counts` verbatim (absent ⇒ none ⇒ 0)
+      const logged = (record.counts ?? {}) as Record<string, unknown>
+      for (const key of INTEGRATION_RUN_FINISHED_DECISION_COUNT_KEYS) {
+        expect(event.counts[key], `${label} counts.${key}`).toBe(typeof logged[key] === 'number' ? logged[key] : 0)
+      }
+      // and the script logs no decision count the event cannot carry
+      for (const key of Object.keys(logged)) expect(INTEGRATION_RUN_FINISHED_DECISION_COUNT_KEYS as readonly string[], label).toContain(key)
+    }
+    // Per-status totals match too (the per-day roll-up a reader compares).
+    const tally = (statuses: string[]) => statuses.reduce<Record<string, number>>((acc, s) => ({ ...acc, [s]: (acc[s] ?? 0) + 1 }), {})
+    expect(tally(events.map((e) => e.event.status))).toEqual(tally(projectNos.map((p) => GATE3_CLOSED_STATUS[records.get(p)!.status as string])))
   })
 })

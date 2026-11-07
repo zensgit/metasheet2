@@ -57,20 +57,37 @@ export interface IntegrationRunFinishedJob {
   projectNo?: string
 }
 
+/**
+ * ADR §4.1's four run counts PLUS (I5 ruling on verifier F7, baseline v2.3 §10.2.2 ③) the stock-prep planner's
+ * five per-decision counts, named exactly as scripts/ops/stock-preparation-scheduled-pull.mjs logs them (its
+ * per-project `counts` = the dry run's `data.counts`, keys from the conflict planner's DECISIONS). All nine are
+ * required non-negative integers; a pipeline run (no planner) carries the five as 0.
+ */
 export interface IntegrationRunFinishedCounts {
   read: number
   cleaned: number
   written: number
   failed: number
+  add: number
+  update: number
+  skip: number
+  inactive: number
+  manual_confirm: number
 }
 
-/** ADR §4.1, closed. */
+/**
+ * ADR §4.1, closed — widened by the I5 ruling on F7 (baseline §10.2.2 ③ wins): `canApply` (required boolean, the
+ * dry run's apply bit as the script logs it; false for a pipeline run and for any job without a ready dry run) and
+ * the five decision counts inside `counts`. Still no id beyond the job's config identifiers, no tenant, no URL, no
+ * message.
+ */
 export interface IntegrationRunFinishedEvent {
   eventId: string
   occurredAt: string
   job: IntegrationRunFinishedJob
   runId?: string
   status: IntegrationRunFinishedStatus
+  canApply: boolean
   counts: IntegrationRunFinishedCounts
   durationMs: number
   attempts: number
@@ -88,11 +105,15 @@ export type IntegrationRunEventOrigin = 'plugin' | 'automation'
 
 /** The closed key sets (exported so tests and the plugin side can pin them). */
 export const INTEGRATION_RUN_FINISHED_EVENT_KEYS = Object.freeze([
-  'eventId', 'occurredAt', 'job', 'runId', 'status', 'counts', 'durationMs', 'attempts', 'triggeredBy', 'errorClass', 'reason', '_automationDepth',
+  'eventId', 'occurredAt', 'job', 'runId', 'status', 'canApply', 'counts', 'durationMs', 'attempts', 'triggeredBy', 'errorClass', 'reason', '_automationDepth',
 ] as const)
-const REQUIRED_EVENT_KEYS = Object.freeze(['eventId', 'occurredAt', 'job', 'status', 'counts', 'durationMs', 'attempts', 'triggeredBy', '_automationDepth'] as const)
+const REQUIRED_EVENT_KEYS = Object.freeze(['eventId', 'occurredAt', 'job', 'status', 'canApply', 'counts', 'durationMs', 'attempts', 'triggeredBy', '_automationDepth'] as const)
 export const INTEGRATION_RUN_FINISHED_JOB_KEYS = Object.freeze(['kind', 'pipelineId', 'actionId', 'projectNo'] as const)
-export const INTEGRATION_RUN_FINISHED_COUNT_KEYS = Object.freeze(['read', 'cleaned', 'written', 'failed'] as const)
+/** The stock-prep planner's decision counts, byte-identical to the names the scheduled-pull script logs. */
+export const INTEGRATION_RUN_FINISHED_DECISION_COUNT_KEYS = Object.freeze(['add', 'update', 'skip', 'inactive', 'manual_confirm'] as const)
+export const INTEGRATION_RUN_FINISHED_COUNT_KEYS = Object.freeze([
+  'read', 'cleaned', 'written', 'failed', ...INTEGRATION_RUN_FINISHED_DECISION_COUNT_KEYS,
+] as const)
 const ROUTE_KEYS = Object.freeze(['tenantId'] as const)
 
 const ERROR_CLASS_SHAPE = /^[A-Za-z0-9_:.-]{1,80}$/
@@ -191,6 +212,7 @@ export function validateIntegrationRunFinishedEvent(input: unknown, origin: Inte
   }
 
   if (typeof raw.status !== 'string' || !(INTEGRATION_RUN_FINISHED_STATUSES as readonly string[]).includes(raw.status)) return invalid('status')
+  if (typeof raw.canApply !== 'boolean') return invalid('canApply')
 
   const rawCounts = plainSnapshot(raw.counts)
   if (rawCounts === 'exotic') return { ok: false, code: 'EVENT_SHAPE_NOT_PLAIN', field: 'counts' }
@@ -213,13 +235,16 @@ export function validateIntegrationRunFinishedEvent(input: unknown, origin: Inte
   if (raw.errorClass !== undefined && (typeof raw.errorClass !== 'string' || !ERROR_CLASS_SHAPE.test(raw.errorClass))) return invalid('errorClass')
   if (raw.reason !== undefined && (typeof raw.reason !== 'string' || !INTEGRATION_RUN_FINISHED_REASONS.has(raw.reason))) return invalid('reason')
 
+  const counts: Record<string, number> = {}
+  for (const key of INTEGRATION_RUN_FINISHED_COUNT_KEYS) counts[key] = rawCounts[key] as number
   const event: IntegrationRunFinishedEvent = {
     eventId: raw.eventId,
     occurredAt: raw.occurredAt,
     job: Object.freeze(job),
     ...(raw.runId !== undefined ? { runId: raw.runId as string } : {}),
     status: raw.status as IntegrationRunFinishedStatus,
-    counts: Object.freeze({ read: rawCounts.read as number, cleaned: rawCounts.cleaned as number, written: rawCounts.written as number, failed: rawCounts.failed as number }),
+    canApply: raw.canApply,
+    counts: Object.freeze(counts) as unknown as IntegrationRunFinishedCounts,
     durationMs: raw.durationMs,
     attempts: raw.attempts,
     triggeredBy: raw.triggeredBy as IntegrationRunTriggeredBy,

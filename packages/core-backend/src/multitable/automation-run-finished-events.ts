@@ -17,16 +17,27 @@
  * VALUES-FREE: the event carries the closed key set of core/integration-run-events.ts — never the unit's
  * `scopeKey` (it embeds the tenant id), never a summary message, never the binding.
  *
- * COUNTS (closed {read, cleaned, written, failed}; T-level default recorded in the PR): a pipeline summary's
- * read/cleaned/written/failed are taken as they are; a stock-prep dry run's planner decision counts
- * (add/update/skip/inactive/manual_confirm) become read = cleaned = their sum, written = 0 (a dry run writes
- * nothing), failed = 0. `attempts` is 1: bounded retry (ADR §5) is not delivered (`retry` is refused at save).
+ * COUNTS (closed, nine keys; the I5 ruling on verifier F7 — baseline v2.3 §10.2.2 ③ wins over ADR §4.1): a
+ * stock-prep dry run's planner decision counts (add / update / skip / inactive / manual_confirm, the names the
+ * scheduled-pull script logs) are carried AS THEY ARE, so the summary's per-project counts equal the script log's;
+ * the four run counts keep the T-level default: read = cleaned = the decisions' sum, written = 0 (a dry run writes
+ * nothing), failed = 0. A pipeline summary's read/cleaned/written/failed are taken as they are and its five
+ * decision counts are 0 (no planner). A missing or non-integer count is 0.
+ *
+ * CANAPPLY (same ruling): the port summary's boolean `canApply` (core/integration-run-port.ts
+ * sanitizeIntegrationRunSummary keeps it), `=== true` — false for every unit without one (held, failed, a
+ * project the step never reached, a step that stopped before any unit). The script logs `data.canApply === true`.
+ *
+ * `attempts` is 1: bounded retry (ADR §5) is not delivered (`retry` is refused at save).
  */
-import { deriveAutomationRunFinishedEventId, type IntegrationRunFinishedCounts } from '../core/integration-run-events'
+import {
+  deriveAutomationRunFinishedEventId,
+  INTEGRATION_RUN_FINISHED_DECISION_COUNT_KEYS,
+  type IntegrationRunFinishedCounts,
+} from '../core/integration-run-events'
 import { INTEGRATION_RUN_FINISHED_REASONS, INTEGRATION_RUN_FINISHED_STATUSES } from './automation-triggers'
 
 const ERROR_CLASS_SHAPE = /^[A-Za-z0-9_:.-]{1,80}$/
-const STOCK_PREP_DECISION_COUNT_KEYS = Object.freeze(['add', 'update', 'skip', 'inactive', 'manual_confirm'] as const)
 const PIPELINE_COUNT_KEYS = Object.freeze(['read', 'cleaned', 'written', 'failed'] as const)
 
 /** The serialized unit the step writes into `output.units` (automation-executor.ts serializeRunIntegrationJobUnit). */
@@ -59,19 +70,29 @@ function nonNegativeInteger(value: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0
 }
 
-/** Map a unit summary's counts into the closed four (see the header). */
+const ZERO_DECISIONS = Object.freeze({ add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 })
+
+/** Map a unit summary's counts into the closed nine (see the header). */
 export function runFinishedCountsFrom(rawCounts: unknown): IntegrationRunFinishedCounts {
-  if (!isRecord(rawCounts)) return { read: 0, cleaned: 0, written: 0, failed: 0 }
+  if (!isRecord(rawCounts)) return { read: 0, cleaned: 0, written: 0, failed: 0, ...ZERO_DECISIONS }
   if (PIPELINE_COUNT_KEYS.some((key) => key in rawCounts)) {
     return {
       read: nonNegativeInteger(rawCounts.read),
       cleaned: nonNegativeInteger(rawCounts.cleaned),
       written: nonNegativeInteger(rawCounts.written),
       failed: nonNegativeInteger(rawCounts.failed),
+      ...ZERO_DECISIONS,
     }
   }
-  const planned = STOCK_PREP_DECISION_COUNT_KEYS.reduce((sum, key) => sum + nonNegativeInteger(rawCounts[key]), 0)
-  return { read: planned, cleaned: planned, written: 0, failed: 0 }
+  const decisions = {
+    add: nonNegativeInteger(rawCounts.add),
+    update: nonNegativeInteger(rawCounts.update),
+    skip: nonNegativeInteger(rawCounts.skip),
+    inactive: nonNegativeInteger(rawCounts.inactive),
+    manual_confirm: nonNegativeInteger(rawCounts.manual_confirm),
+  }
+  const planned = INTEGRATION_RUN_FINISHED_DECISION_COUNT_KEYS.reduce((sum, key) => sum + decisions[key], 0)
+  return { read: planned, cleaned: planned, written: 0, failed: 0, ...decisions }
 }
 
 /**
@@ -112,7 +133,8 @@ export function buildAutomationRunFinishedEvents(input: RunFinishedStepInput): A
     const unit = byProject.get(projectNo)
     let status: string
     let reasonFields: { reason?: string; errorClass?: string }
-    let counts: IntegrationRunFinishedCounts = { read: 0, cleaned: 0, written: 0, failed: 0 }
+    let counts: IntegrationRunFinishedCounts = runFinishedCountsFrom(undefined)
+    let canApply = false
     let durationMs = 0
     let runId: string | undefined
     if (unit) {
@@ -120,6 +142,7 @@ export function buildAutomationRunFinishedEvents(input: RunFinishedStepInput): A
       const summary = isRecord(unit.summary) ? unit.summary : undefined
       reasonFields = splitRunFinishedReason(unit.reason, status, summary?.errorClass)
       counts = runFinishedCountsFrom(summary?.counts)
+      canApply = summary?.canApply === true
       durationMs = nonNegativeInteger(unit.durationMs)
       if (typeof summary?.runId === 'string' && /^[A-Za-z0-9_:.-]{1,128}$/.test(summary.runId)) runId = summary.runId
     } else if (units.length > 0) {
@@ -142,6 +165,7 @@ export function buildAutomationRunFinishedEvents(input: RunFinishedStepInput): A
       job: { kind: 'stock_prep_pull', ...(input.actionId ? { actionId: input.actionId } : {}), projectNo },
       ...(runId ? { runId } : {}),
       status,
+      canApply,
       counts,
       durationMs,
       attempts: 1,

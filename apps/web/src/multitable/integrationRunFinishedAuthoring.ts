@@ -12,7 +12,10 @@
  *      non-empty statuses without repeats, no conditions, record-less side-effect actions only. The server stays
  *      the authority (it also stamps the binding and checks the creator live).
  *   3. THE ALERT TEMPLATE (ADR §4.3): DingTalk group message whose title / body use ONLY `run.*` variables —
- *      status, reason, counts, job, duration, attempts, error class. Nothing else exists in the event.
+ *      status, reason, canApply, counts, job, duration, attempts, error class. Nothing else exists in the event.
+ *      The I5 ruling on verifier F7 (baseline v2.3 §10.2.2 ③) widened the event: `run.canApply` (boolean) and the
+ *      stock-prep planner's five decision counts `run.counts.add` / `update` / `skip` / `inactive` /
+ *      `manual_confirm` (the names the scheduled-pull script logs; 0 for a pipeline run).
  */
 
 export const INTEGRATION_RUN_FINISHED_TRIGGER_TYPE = 'integration.run_finished'
@@ -147,6 +150,7 @@ export const INTEGRATION_RUN_FINISHED_ALERT_TEMPLATE = Object.freeze({
   bodyTemplate: [
     '状态：{{run.status}}（{{run.reason}}{{run.errorClass}}）',
     '计数：读取 {{run.counts.read}} / 清洗 {{run.counts.cleaned}} / 写入 {{run.counts.written}} / 失败 {{run.counts.failed}}',
+    '决策：新增 {{run.counts.add}} / 更新 {{run.counts.update}} / 跳过 {{run.counts.skip}} / 停用 {{run.counts.inactive}} / 待人工确认 {{run.counts.manual_confirm}}，可应用：{{run.canApply}}',
     '耗时：{{run.durationMs}} ms，尝试 {{run.attempts}} 次',
   ].join('\n'),
 })

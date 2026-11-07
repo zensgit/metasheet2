@@ -26,7 +26,11 @@ const {
 
 const TENANT = 'tenant_1'
 const ON = { INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED: 'true' }
-const EVENT_KEYS = ['eventId', 'occurredAt', 'job', 'runId', 'status', 'counts', 'durationMs', 'attempts', 'triggeredBy', 'errorClass', 'reason', '_automationDepth']
+const EVENT_KEYS = ['eventId', 'occurredAt', 'job', 'runId', 'status', 'canApply', 'counts', 'durationMs', 'attempts', 'triggeredBy', 'errorClass', 'reason', '_automationDepth']
+// The core closed set's REQUIRED keys (core/integration-run-events.ts): a summary missing one is refused there.
+const REQUIRED_EVENT_KEYS = ['eventId', 'occurredAt', 'job', 'status', 'canApply', 'counts', 'durationMs', 'attempts', 'triggeredBy', '_automationDepth']
+// I5 ruling on verifier F7: the four run counts plus the five stock-prep decision counts, all required.
+const COUNT_KEYS = ['read', 'cleaned', 'written', 'failed', 'add', 'update', 'skip', 'inactive', 'manual_confirm']
 
 function createMockDb() {
   const tables = new Map()
@@ -135,11 +139,14 @@ async function main() {
     const { summary, route } = port.published[0]
     assert.deepEqual(route, { tenantId: TENANT })
     assert.deepEqual(Object.keys(summary).filter((key) => !EVENT_KEYS.includes(key)), [], 'closed key set')
+    assert.deepEqual(REQUIRED_EVENT_KEYS.filter((key) => !(key in summary)), [], 'every required key is present (canApply included)')
+    assert.deepEqual(Object.keys(summary.counts).sort(), [...COUNT_KEYS].sort(), 'counts carry exactly the nine closed keys')
+    assert.equal(summary.canApply, false, 'a pipeline run carries canApply false (no stock-prep dry-run apply bit)')
     assert.equal(summary.eventId, result.run.id, 'eventId = the run id (deterministic)')
     assert.equal(summary.runId, result.run.id)
     assert.deepEqual(summary.job, { kind: 'pipeline', pipelineId: 'pipe_1' })
     assert.equal(summary.status, 'succeeded')
-    assert.deepEqual(summary.counts, { read: 1000, cleaned: 1000, written: 1000, failed: 0 })
+    assert.deepEqual(summary.counts, { read: 1000, cleaned: 1000, written: 1000, failed: 0, add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 })
     assert.equal(summary.triggeredBy, 'manual')
     assert.equal(summary._automationDepth, 0)
     assert.equal(summary.attempts, 1)
@@ -164,6 +171,8 @@ async function main() {
     assert.equal(port.published.length, 1)
     const { summary } = port.published[0]
     assert.equal(summary.status, 'failed')
+    assert.equal(summary.canApply, false)
+    assert.deepEqual(REQUIRED_EVENT_KEYS.filter((key) => !(key in summary)), [], 'a failed run carries every required key')
     assert.match(summary.errorClass, /^[A-Za-z0-9_:.-]{1,80}$/)
     const text = JSON.stringify(summary)
     for (const needle of ['HOST-SENTINEL-R69', 'SECRET-SENTINEL-R69', 'unreachable', TENANT]) assert.equal(text.includes(needle), false, `${needle} must not leak`)

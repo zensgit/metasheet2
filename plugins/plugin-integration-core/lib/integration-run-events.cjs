@@ -12,8 +12,11 @@
  *     a 1000-row run is ONE event. A run whose `finishRun` failed publishes nothing (ADR §4.2 accepted residual:
  *     the next run produces the next event).
  *   - WHAT: eventId = the run id (deterministic: a re-publish of the same run dedups per rule in core); job =
- *     { kind: 'pipeline', pipelineId }; status; counts = the run metrics (read / cleaned / written / failed);
- *     durationMs; attempts 1; errorClass (a bounded class, never the error message). No tenant, no URL, no row.
+ *     { kind: 'pipeline', pipelineId }; status; canApply false (a pipeline run has no stock-prep dry-run apply
+ *     bit); counts = the run metrics (read / cleaned / written / failed) plus the five stock-prep decision counts
+ *     (add / update / skip / inactive / manual_confirm) as 0 — a pipeline run has no planner (the core closed key
+ *     set requires all nine, I5 ruling on verifier F7); durationMs; attempts 1; errorClass (a bounded class, never
+ *     the error message). No tenant, no URL, no row.
  *     The run's tenant goes BESIDE the event as `route.tenantId` (core routes by it, never forwards it).
  *   - SWITCH: INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED, exact literal 'true', read here before anything is built
  *     (core reads it again on receipt).
@@ -51,7 +54,18 @@ function buildPipelineRunFinishedSummary({ runId, pipelineId, tenantId, status, 
     job: { kind: 'pipeline', pipelineId },
     runId,
     status,
-    counts: { read: count(m.rowsRead), cleaned: count(m.rowsCleaned), written: count(m.rowsWritten), failed: count(m.rowsFailed) },
+    canApply: false,
+    counts: {
+      read: count(m.rowsRead),
+      cleaned: count(m.rowsCleaned),
+      written: count(m.rowsWritten),
+      failed: count(m.rowsFailed),
+      add: 0,
+      update: 0,
+      skip: 0,
+      inactive: 0,
+      manual_confirm: 0,
+    },
     durationMs: count(m.durationMs),
     attempts: 1,
     triggeredBy,

@@ -237,8 +237,8 @@
             </el-checkbox-group>
             <div class="meta-rule-editor__hint" data-field="runFinishedHint">
               {{ isZh
-                ? '每个作业（备料拉取的每个项目、每次管道运行）在最终尝试之后恰好产生一条摘要，只含状态、原因、计数、耗时与错误类别，不含任何行值、租户或连接信息。默认告警：失败、部分完成、跳过、结果未知、未开始；「待人工处理」默认不告警，需要时请勾选。无记录上下文：动作仅支持通知类，不支持触发条件。'
-                : 'Exactly one summary per job (each project of a stock-prep pull, each pipeline run), after the final attempt: status, reason, counts, duration and error class only — never a row value, a tenant or connection details. Default alerts: failed, partial, skipped, outcome unknown, not started; "held for a person" stays quiet unless you tick it. Record-less: notification-family actions only, no conditions.' }}
+                ? '每个作业（备料拉取的每个项目、每次管道运行）在最终尝试之后恰好产生一条摘要，只含状态、原因、可应用标记、计数（含新增 / 更新 / 跳过 / 停用 / 待人工确认）、耗时与错误类别，不含任何行值、租户或连接信息。默认告警：失败、部分完成、跳过、结果未知、未开始；「待人工处理」默认不告警，需要时请勾选。无记录上下文：动作仅支持通知类，不支持触发条件。'
+                : 'Exactly one summary per job (each project of a stock-prep pull, each pipeline run), after the final attempt: status, reason, the can-apply flag, counts (add / update / skip / inactive / manual confirm included), duration and error class only — never a row value, a tenant or connection details. Default alerts: failed, partial, skipped, outcome unknown, not started; "held for a person" stays quiet unless you tick it. Record-less: notification-family actions only, no conditions.' }}
             </div>
             <el-button size="small" data-action="applyRunFinishedAlertTemplate" :disabled="!canApplyRunFinishedAlertTemplate" @click="applyRunFinishedAlertTemplate">
               {{ isZh ? '使用告警模板（钉钉群消息）' : 'Use the alert template (DingTalk group message)' }}

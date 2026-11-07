@@ -116,7 +116,11 @@ describe('integration.run_finished alert template (ADR §4.3)', () => {
     const vars = integrationRunFinishedTemplateVariables()
     expect(vars.length).toBeGreaterThan(5)
     for (const name of vars) expect(name.startsWith('run.')).toBe(true)
-    for (const required of ['run.status', 'run.reason', 'run.errorClass', 'run.counts.read', 'run.counts.failed', 'run.durationMs', 'run.attempts']) {
+    // I5 ruling on verifier F7 (baseline §10.2.2 ③): canApply and the five decision counts are shown too.
+    for (const required of [
+      'run.status', 'run.reason', 'run.errorClass', 'run.counts.read', 'run.counts.failed', 'run.durationMs', 'run.attempts',
+      'run.canApply', 'run.counts.add', 'run.counts.update', 'run.counts.skip', 'run.counts.inactive', 'run.counts.manual_confirm',
+    ]) {
       expect(vars).toContain(required)
     }
     expect(vars.some((name) => /tenant|scope|binding|record|actor/i.test(name))).toBe(false)
