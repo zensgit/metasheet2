@@ -90,6 +90,9 @@ export function createYidaSourceReauthorizationHostDependencies(): YidaSourceRea
         Object.freeze({ id: field.id, type: field.type, property: field.property }))
     },
     async readableFieldIds(trx, sheetId, userId, fields, capabilities) {
+      // Redundant with the `baseVisible` of deriveFieldPermissions (which applies isFieldPermissionHidden again), and kept
+      // on purpose: it is the exact sequence of the draft-time read (yida-sheet-source-host.ts readableFieldIds), so both
+      // reads stay the same function. Removing this filter alone changes no answer (an equivalent mutant).
       const visible = fields.filter(field => !isFieldPermissionHidden(field as Parameters<typeof isFieldPermissionHidden>[0]))
       const fieldScopeMap = await loadFieldPermissionScopeMap(queryOf(trx), sheetId, userId)
       const permissions = deriveFieldPermissions(visible as Parameters<typeof deriveFieldPermissions>[0],
