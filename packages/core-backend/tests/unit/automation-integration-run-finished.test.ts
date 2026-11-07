@@ -748,6 +748,24 @@ describe('fix-I5 F1 — a throw inside the step still yields EXACTLY ONE summary
     valuesFree(events, step)
   })
 
+  it('project 1 is busy and its busy-outcome write throws: P-1 stays skipped(busy) (unconfirmed), P-2 / P-3 still run', async () => {
+    const events = captureSink()
+    const db = createFakeJobDb()
+    let leaseClaims = 0
+    const query: AutomationDeps['queryFn'] = async (sql, params) => {
+      if (/INSERT INTO meta_automation_job_leases/.test(sql) && ++leaseClaims === 1) return { rows: [], rowCount: 0 } // held by someone else
+      if (/UPDATE meta_automation_outbound_intent\s+SET status = \$4/.test(sql) && params?.[4] === 'busy') throw dbError('57P01')
+      return db.query(sql, params)
+    }
+    const { run } = harness(db, fakePort('immediate').port, { queryFn: query })
+    const step = await run('exec_f1busy', CONFIG3)
+    expect(step).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'busy' } })
+    expect(events.map((e) => [e.event.job.projectNo, e.event.status, e.event.reason ?? null])).toEqual([
+      ['P-1', 'skipped', 'busy'], ['P-2', 'succeeded', 'ready'], ['P-3', 'succeeded', 'ready'],
+    ])
+    valuesFree(events, step)
+  })
+
   it('a throw the unit does not classify (heartbeat start) ⇒ that project outcome_unknown, the others still run and summarize', async () => {
     const events = captureSink()
     let starts = 0
