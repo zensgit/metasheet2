@@ -13,6 +13,12 @@ import type {
   PlannedEffect,
 } from './deprovision-planner'
 import { planDirectoryDeprovision } from './deprovision-planner'
+import {
+  bindProspectiveAccountIds,
+  globalVouchExists,
+  noProspectiveDeactivation,
+  orgVouchExists,
+} from './departure-vouching'
 import { DEFAULT_LEGACY_LOGIN_GRANT_PROVIDER } from './login-grant-registry'
 import { translateRecoveryConflict } from '../db/recovery-conflict'
 
@@ -58,6 +64,18 @@ export type PlanDeprovisionCandidateInput = Pick<
   requireSourceInactive?: boolean
 }
 
+/**
+ * Whether the only thing keeping a departure from taking effect is a local directory account.
+ * `membership`: the organization still has a vouching account but none of them is non-local;
+ * `global`: the same over every organization. Observability only.
+ */
+export type DeprovisionSuppressedByLocal = { membership: boolean; global: boolean }
+
+/** A plan read from candidate state also reports `suppressedByLocal`; skip plans do not. */
+export type DirectoryDeprovisionStatePlan = DirectoryDeprovisionPlan & {
+  suppressedByLocal?: DeprovisionSuppressedByLocal
+}
+
 export type DirectoryDeprovisionCandidateSnapshot = {
   activationStatus: string | null
   isActive: boolean
@@ -84,7 +102,7 @@ export type ApplyDeprovisionCandidateResult = {
    * `accessGeneration` is a meaningless 0 — discriminate on THIS field, never on the number.
    */
   skipReason: 'candidate_vanished' | null
-  plan: DirectoryDeprovisionPlan
+  plan: DirectoryDeprovisionStatePlan
 }
 
 type CandidateStateRow = {
@@ -95,9 +113,20 @@ type CandidateStateRow = {
   org_membership_active: boolean
   org_candidacy_clear: boolean
   globally_clear: boolean
+  /** Same expressions with local accounts left out; observability only, never a decision input. */
+  org_candidacy_clear_non_local?: boolean
+  globally_clear_non_local?: boolean
   login_grant_provider: string | null
   login_grant_enabled: boolean
   login_grant_row_exists: boolean
+}
+
+function suppressedByLocalFrom(state: CandidateStateRow): DeprovisionSuppressedByLocal {
+  return {
+    membership:
+      state.org_candidacy_clear === false && state.org_candidacy_clear_non_local === true,
+    global: state.globally_clear === false && state.globally_clear_non_local === true,
+  }
 }
 
 function hasEffect(
@@ -137,12 +166,8 @@ async function loadCandidateState(
   // always runs with the strict defaults. NEVER a lock here in either mode: the apply path
   // takes the users FOR UPDATE mutex FIRST as its own statement (adversarial-review P1 — the
   // lock and this read must not share a statement/snapshot), and preview locks nothing.
-  const prospectiveDeactivatedAccountIds = Array.from(
-    new Set(
-      (input.prospectiveDeactivatedAccountIds ?? [])
-        .map((accountId) => String(accountId || '').trim())
-        .filter(Boolean),
-    ),
+  const prospectiveDeactivatedAccountIds = bindProspectiveAccountIds(
+    input.prospectiveDeactivatedAccountIds ?? [],
   )
   const requireSourceInactive = input.requireSourceInactive !== false
   const result = await client.query(
@@ -180,29 +205,10 @@ async function loadCandidateState(
             AND membership.org_id = $4::text
             AND COALESCE(membership.is_active, TRUE) = TRUE
        ) AS org_membership_active,
-       NOT EXISTS (
-         SELECT 1
-           FROM directory_account_links sibling_link
-           JOIN directory_accounts sibling
-             ON sibling.id = sibling_link.directory_account_id
-           JOIN directory_integrations sibling_integration
-             ON sibling_integration.id = sibling.integration_id
-          WHERE sibling_link.local_user_id = candidate_user.id
-            AND sibling_link.link_status = 'linked'
-            AND sibling.is_active = TRUE
-            AND sibling.id <> ALL($5::uuid[])
-            AND sibling_integration.org_id = $4::text
-       ) AS org_candidacy_clear,
-       NOT EXISTS (
-         SELECT 1
-           FROM directory_account_links sibling_link
-           JOIN directory_accounts sibling
-             ON sibling.id = sibling_link.directory_account_id
-          WHERE sibling_link.local_user_id = candidate_user.id
-            AND sibling_link.link_status = 'linked'
-            AND sibling.is_active = TRUE
-            AND sibling.id <> ALL($5::uuid[])
-       ) AS globally_clear,
+       NOT ${orgVouchExists({ user: 'candidate_user.id', prospectiveParam: 5, orgParam: 4 })} AS org_candidacy_clear,
+       NOT ${globalVouchExists({ user: 'candidate_user.id', prospectiveParam: 5 })} AS globally_clear,
+       NOT ${orgVouchExists({ user: 'candidate_user.id', prospectiveParam: 5, orgParam: 4, nonLocalOnly: true })} AS org_candidacy_clear_non_local,
+       NOT ${globalVouchExists({ user: 'candidate_user.id', prospectiveParam: 5, nonLocalOnly: true })} AS globally_clear_non_local,
        source_integration_row.provider AS login_grant_provider,
        COALESCE((
          SELECT grant_row.enabled
@@ -243,7 +249,7 @@ export async function planDirectoryDeprovisionCandidate(
   client: DirectoryTransactionClient,
   input: PlanDeprovisionCandidateInput,
 ): Promise<{
-  plan: DirectoryDeprovisionPlan
+  plan: DirectoryDeprovisionStatePlan
   snapshot: DirectoryDeprovisionCandidateSnapshot
 }> {
   const state = await loadCandidateState(client, input)
@@ -269,19 +275,22 @@ export async function planDirectoryDeprovisionCandidate(
   }
   return {
     snapshot,
-    plan: planDirectoryDeprovision({
-      localUserId: input.localUserId,
-      policy: input.policy,
-      activationStatus: snapshot.activationStatus,
-      isActive: snapshot.isActive,
-      orgId: input.orgId,
-      orgMembershipActive:
-        snapshot.orgMembershipActive && snapshot.orgCandidacyClear,
-      loginGrantProvider: snapshot.loginGrantProvider,
-      loginGrantEnabled: snapshot.loginGrantEnabled,
-      loginGrantRowExists: snapshot.loginGrantRowExists,
-      globallyClear: snapshot.globallyClear,
-    }),
+    plan: {
+      ...planDirectoryDeprovision({
+        localUserId: input.localUserId,
+        policy: input.policy,
+        activationStatus: snapshot.activationStatus,
+        isActive: snapshot.isActive,
+        orgId: input.orgId,
+        orgMembershipActive:
+          snapshot.orgMembershipActive && snapshot.orgCandidacyClear,
+        loginGrantProvider: snapshot.loginGrantProvider,
+        loginGrantEnabled: snapshot.loginGrantEnabled,
+        loginGrantRowExists: snapshot.loginGrantRowExists,
+        globallyClear: snapshot.globallyClear,
+      }),
+      suppressedByLocal: suppressedByLocalFrom(state),
+    },
   }
 }
 
@@ -455,19 +464,22 @@ async function applyDirectoryDeprovisionCandidateWrites(
     }
   }
   const loginGrantProvider = requireLoginGrantProvider(state)
-  const plan = planDirectoryDeprovision({
-    localUserId: input.localUserId,
-    policy: input.policy,
-    activationStatus: state.activation_status,
-    isActive: state.is_active,
-    orgId: input.orgId,
-    orgMembershipActive:
-      state.org_membership_active && state.org_candidacy_clear,
-    loginGrantProvider,
-    loginGrantEnabled: state.login_grant_enabled,
-    loginGrantRowExists: state.login_grant_row_exists,
-    globallyClear: state.globally_clear,
-  })
+  const plan: DirectoryDeprovisionStatePlan = {
+    ...planDirectoryDeprovision({
+      localUserId: input.localUserId,
+      policy: input.policy,
+      activationStatus: state.activation_status,
+      isActive: state.is_active,
+      orgId: input.orgId,
+      orgMembershipActive:
+        state.org_membership_active && state.org_candidacy_clear,
+      loginGrantProvider,
+      loginGrantEnabled: state.login_grant_enabled,
+      loginGrantRowExists: state.login_grant_row_exists,
+      globallyClear: state.globally_clear,
+    }),
+    suppressedByLocal: suppressedByLocalFrom(state),
+  }
   const currentGeneration = Number(state.access_generation)
 
   if (!input.write || plan.effects.length === 0) {
@@ -520,20 +532,9 @@ async function applyDirectoryDeprovisionCandidateWrites(
         WHERE user_id = $1::text
           AND org_id = $2::text
           AND COALESCE(is_active, TRUE) = TRUE
-          AND NOT EXISTS (
-            SELECT 1
-              FROM directory_account_links sibling_link
-              JOIN directory_accounts sibling
-                ON sibling.id = sibling_link.directory_account_id
-              JOIN directory_integrations sibling_integration
-                ON sibling_integration.id = sibling.integration_id
-             WHERE sibling_link.local_user_id = $1::text
-               AND sibling_link.link_status = 'linked'
-               AND sibling.is_active = TRUE
-               AND sibling_integration.org_id = $2::text
-          )
+          AND NOT ${orgVouchExists({ user: '$1::text', prospectiveParam: 3, orgParam: 2 })}
         RETURNING user_id`,
-      [input.localUserId, input.orgId],
+      [input.localUserId, input.orgId, noProspectiveDeactivation()],
     )
     if (!membership.rows[0]) {
       throw new Error(
