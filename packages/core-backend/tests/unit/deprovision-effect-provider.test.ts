@@ -67,6 +67,8 @@ const FROZEN_LEGACY_INSERT = `INSERT INTO directory_deprovision_effects (
 type Recorded = { sql: string; params: unknown[] | undefined }
 
 function statementShape(sql: string): string {
+  // D21 (Y5a): the access-graph mutex bumps the subject authorization version row before the users FOR UPDATE.
+  if (/^\s*INSERT INTO subject_authorization_versions\b/.test(sql)) return 'bump_subject_version'
   if (/^\s*SELECT id FROM users WHERE id = \$1::text\s+FOR UPDATE/.test(sql)) return 'lock_user'
   if (/FROM users candidate_user/.test(sql)) return 'read_state'
   if (/^\s*UPDATE users\s+SET access_generation/.test(sql)) return 'bump_generation'
@@ -93,6 +95,8 @@ function writerClient(options: {
     query: async (sql: string, params?: unknown[]) => {
       recorded.push({ sql, params })
       switch (statementShape(sql)) {
+        case 'bump_subject_version':
+          return { rows: [], rowCount: 1 }
         case 'lock_user':
           return { rows: [{ id: String(params?.[0]) }] }
         case 'read_state':
@@ -284,6 +288,7 @@ describe('provider-column probe', () => {
 
 describe('statement sequence', () => {
   const WRITE_SEQUENCE_BEFORE_COLUMN = [
+    'bump_subject_version',
     'lock_user',
     'read_state',
     'bump_generation',
@@ -324,12 +329,16 @@ function recordedClient(answer: (shape: string, params: unknown[] | undefined) =
     recorded,
     query: vi.fn(async (sql: string, params?: unknown[]) => {
       recorded.push({ sql, params })
-      return answer(evidenceShape(sql), params)
+      const shape = evidenceShape(sql)
+      if (shape === 'bump_subject_version') return { rows: [], rowCount: 1 }
+      return answer(shape, params)
     }),
   }
 }
 
 function evidenceShape(sql: string): string {
+  // D21 (Y5a): the access-graph mutex bumps the subject authorization version row before the users FOR UPDATE.
+  if (/^\s*INSERT INTO subject_authorization_versions\b/.test(sql)) return 'bump_subject_version'
   if (/^\s*SELECT local_user_id\s+FROM directory_deprovision_events/.test(sql)) return 'event_owner'
   if (/FROM users\s+WHERE id = \$1::text\s+FOR UPDATE/.test(sql)) return 'lock_user'
   if (/FROM directory_deprovision_events\s+WHERE id = \$1::uuid\s+FOR UPDATE/.test(sql)) return 'read_event'

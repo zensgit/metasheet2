@@ -331,3 +331,61 @@ describe('PATCH /fields/:fieldId late locked re-read (route, mocked pool)', () =
     expect(res.body.data.bulkRecompute, 'attempt 1 recompute snapshot must not leak into the committed attempt').toBeUndefined()
   })
 })
+
+// D21 field-row writer rule (authz-version-protocol.ts, the #6792 follow-up): a PATCH whose write can trip the
+// meta_fields visibility trigger takes the sheet version row BEFORE its first field-row lock (the sibling order shift,
+// the late locked re-read), never through the trigger after them; a PATCH that cannot trip it takes no version row.
+// The real-Postgres order witness and holder barrier are FO-F1 / FO-F2 in
+// tests/integration/authz-version-field-row-order-realdb.cases.ts.
+describe('PATCH /fields/:fieldId and the sheet version row (route, mocked pool)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+  })
+  const BUMP_PREFIX = 'INSERT INTO sheet_permission_versions'
+  const ROW_LOCKING_FIELD_STATEMENT = (sql: string) => sql === PATCH_FIELD_LOCKED_REREAD_SQL || sql.startsWith('UPDATE meta_fields')
+  const run = async (first: Row, body: Record<string, unknown>, shifted: Array<{ id: string; order: number }> = []) => {
+    const scenario = createScenario({ first, shifted })
+    const { app } = await createApp(scenario.handler)
+    pinned.setApp(app)
+    const res = await request(pinned.url()).patch(`/api/multitable/fields/${FIELD_ID}`).send(body)
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    const sqls = scenario.statements.map((s) => s.sql)
+    return { scenario, sqls, bumps: scenario.statements.filter((s) => s.sql.startsWith(BUMP_PREFIX)) }
+  }
+
+  it('D-1 hiding a field with a reorder: ONE bump of its sheet, after the unlocked first read and before the sibling shift and the locked re-read', async () => {
+    const { sqls, bumps } = await run({ ...baseRow(), order: 0 }, { property: { hidden: true }, order: 2 }, [{ id: 'fld_sib_1', order: 0 }])
+    expect(bumps.map((s) => s.params)).toEqual([[[SHEET_ID]]])
+    const bump = sqls.findIndex((s) => s.startsWith(BUMP_PREFIX))
+    const firstRead = sqls.indexOf(PATCH_FIELD_READ_SQL)
+    const shift = sqls.findIndex((s) => s.startsWith('UPDATE meta_fields SET "order" = "order" - 1'))
+    const reread = sqls.indexOf(PATCH_FIELD_LOCKED_REREAD_SQL)
+    expect(bump).toBeGreaterThan(firstRead)
+    expect(shift).toBeGreaterThan(bump)
+    expect(reread).toBeGreaterThan(shift)
+    // nothing locks a field row before the version row
+    expect(sqls.slice(0, bump).filter(ROW_LOCKING_FIELD_STATEMENT)).toEqual([])
+  })
+
+  it('D-2 the shared column drag (order only), a rename and an options edit never take the version row', async () => {
+    const drag = await run({ ...baseRow(), order: 0 }, { order: 2 }, [{ id: 'fld_sib_1', order: 0 }])
+    expect(drag.bumps).toEqual([])
+    const rename = await run(baseRow(), { name: 'Renamed' })
+    expect(rename.bumps).toEqual([])
+    const options = await run({ ...baseRow(), type: 'select', property: { options: [{ value: 'a' }] } }, { property: { options: [{ value: 'b' }] } })
+    expect(options.bumps).toEqual([])
+  })
+
+  it('D-3 the trigger\'s own test, not the derivation: adding visible:false to a hidden field, unhiding, and un-setting visible:false each bump', async () => {
+    const addVisibleFalse = await run({ ...baseRow(), property: { hidden: true } }, { property: { hidden: true, visible: false } })
+    expect(addVisibleFalse.bumps).toHaveLength(1)
+    const unhide = await run({ ...baseRow(), property: { hidden: true } }, { property: {} })
+    expect(unhide.bumps).toHaveLength(1)
+    const reshow = await run({ ...baseRow(), property: { visible: false } }, { property: { visible: true } })
+    expect(reshow.bumps).toHaveLength(1)
+    // `hidden: false` over an unhidden field changes neither watched flag
+    const noop = await run(baseRow(), { property: { humanWriteLock: 'plm_system', note: 'kept', hidden: false } })
+    expect(noop.bumps).toEqual([])
+  })
+})

@@ -113,6 +113,17 @@ function enumerateProjections(file: string, src: string): Projection[] {
  */
 type Disposition = 'PRE-MASKED' | 'MASKED-DOWNSTREAM' | 'WRITE-PATH' | 'INTERNAL'
 const ALLOWLIST: Record<string, Record<string, { disposition: Disposition; reason: string }>> = {
+  'multitable/authz-version-protocol.ts': {
+    'data: row.data': {
+      disposition: 'INTERNAL',
+      reason:
+        'D21 admission lock helper (lockAuthorizationVersionsForAdmission): the ONE bound record is read ' +
+        'FOR SHARE as the last lock and its cell map is returned to the caller\'s in-transaction check-4 ' +
+        'evaluation (conditional read rules are evaluated against meta_records.data). The helper is not a ' +
+        'route and nothing echoes the map; the YiDa send payload is built by the v3 planner from the masked ' +
+        'readback, never from this row (slice Y5 wires it; Y5a is infrastructure only)',
+    },
+  },
   'routes/univer-meta.ts': {
     '...existing.data': {
       disposition: 'PRE-MASKED',

@@ -8,6 +8,7 @@ import {
 } from './ensureFieldsOverwriteMode'
 import { assertRichLongTextToggleAllowed, mapFieldType, sanitizeFieldProperty } from './field-codecs'
 import { fenceWriterEntry } from './canonical-sheet-fence'
+import { bumpSheetPermissionVersions } from './authz-version-protocol'
 import { isSystemSheetKind, STOCK_PREP_OVERVIEW_SHEET_KIND } from './system-sheet-predicate'
 import {
   SheetSystemKindConflictError,
@@ -586,6 +587,14 @@ export async function ensureFields(
   // literal MULTITABLE_ENSURE_FIELDS_OVERWRITE_MODE=overwrite restores the pre-P0-S SQL
   // (and is then the ONLY mode that skips the per-field pre-read).
   const overwriteMode = input.overwriteMode ?? resolveEnsureFieldsOverwriteMode()
+  // D21 field-row writer rule (authz-version-protocol.ts): in 'overwrite' / 'observe' mode the upsert below rewrites
+  // an EXISTING field's property (ON CONFLICT DO UPDATE locks that row, then the meta_fields visibility trigger may take
+  // the sheet version row), one field after another. Whether any of them trips the trigger depends on the stored rows,
+  // so the sheet version row is taken once, unconditionally, before the first field row. 'refuse' / 'preserve' never
+  // rewrite a differing property (a diff throws or keeps the row), so they take no version row.
+  if (fields.length > 0 && (overwriteMode === 'overwrite' || overwriteMode === 'observe')) {
+    await bumpSheetPermissionVersions(input.query, [input.sheetId])
+  }
   for (const [index, field] of fields.entries()) {
     const order = typeof field.order === 'number' ? field.order : index
     const nextProperty = JSON.stringify(buildFieldProperty(field))
@@ -693,6 +702,11 @@ export async function patchObjectFieldProperty(
   const sheetId = getObjectSheetId(input.projectId, input.objectId)
   const physicalFieldId = getObjectFieldId(input.projectId, input.objectId, input.fieldId)
   await fenceWriterEntry(input.query, sheetId)
+  // D21 field-row writer rule (authz-version-protocol.ts): the merged, sanitized property can trip the meta_fields
+  // visibility trigger, and whether it does depends on the stored row this port reads only under the row lock just
+  // below (a stored jsonb STRING is normalized into an object by the merge, for one). So the sheet version row is taken
+  // unconditionally here, after the fence and before that lock — never by the trigger after it.
+  await bumpSheetPermissionVersions(input.query, [sheetId])
   const existing = await input.query(PATCH_OBJECT_FIELD_PROPERTY_READ_SQL, [sheetId, physicalFieldId])
   const row = (existing.rows as any[])[0]
   if (!row) {

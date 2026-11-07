@@ -146,6 +146,11 @@ function assertParallelWorkflow(doc) {
         const providerEvidenceAddition = '  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n'
         assert.equal(step.run.split(providerEvidenceAddition).length - 1, 1, 'Deprovision provider evidence DB suite must run exactly once')
         assert.ok(step.run.includes(providerSchemaAddition + providerEvidenceAddition), 'Keep the deprovision provider evidence suite right after the provider schema suite')
+        // D21 authorization version protocol (slice Y5a): trigger coverage matrix, barrier and deadlock
+        // cases against real Postgres, whole file, right after the deprovision provider evidence suite.
+        const authzVersionAddition = '  tests/integration/authz-version-protocol.db.test.ts \\\n'
+        assert.equal(step.run.split(authzVersionAddition).length - 1, 1, 'Authorization version protocol DB suite must run exactly once')
+        assert.ok(step.run.includes(providerEvidenceAddition + authzVersionAddition), 'Keep the authorization version protocol suite right after the deprovision provider evidence suite')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
         step.run = step.run.replace(privilegeAddition, '')
@@ -156,6 +161,7 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(capabilitiesAddition, '')
         step.run = step.run.replace(providerSchemaAddition, '')
         step.run = step.run.replace(providerEvidenceAddition, '')
+        step.run = step.run.replace(authzVersionAddition, '')
       }
       if (suite === 'runtime-db' && step.id === lockProtocolStepId) {
         const tail = `  --reporter=verbose${lockProtocolJsonReporter}\n${lockProtocolZeroSkipLine}`
@@ -234,6 +240,8 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-deprovision-effect-provider-schema.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/authz-version-protocol.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/authz-version-protocol.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-adapter-golden-parity.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-adapter-golden-parity.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },

@@ -15,6 +15,7 @@ import {
 } from './deprovision-restore'
 import { lockUsersForAccessGraphWrite } from './access-graph-mutex'
 import { effectGrantProvider } from './login-grant-registry'
+import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
 
 export function readDeprovisionRuntimeFlags() {
   const enabled = ['true', '1', 'yes'].includes(
@@ -624,6 +625,10 @@ export async function restoreDeprovisionEvent(options: {
       throw restoreError('EVENT_NOT_FOUND', 'Deprovision event not found')
     }
 
+    // D21 (Y5a): the owner's subject authorization version row BEFORE the users-row lock (an
+    // admission locks subject → users); this restore writes `users` / `user_orgs` authority columns
+    // below, whose triggers would otherwise bump the subject row only after the users row is held.
+    await bumpSubjectAuthorizationVersions(client, [eventOwner])
     const userResult = await client.query(
       `SELECT id,
               email,

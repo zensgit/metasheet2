@@ -739,16 +739,18 @@ describe('consumption contract', () => {
     expect(statements.some((s) => s.key === 'lockUser' || s.key === 'lockProof' || s.key === 'sessionForShare')).toBe(false)
   })
 
-  it('locks the user row, then the session row, then the proof row by id and user', async () => {
+  it('bumps the subject version row (the access-graph mutex, D21), then locks the user row, then the session row, then the proof row by id and user', async () => {
     const state = await consumableState()
     const { service } = serviceWith({ state })
     const { client, statements } = fakeClient(state)
     await service.consume(client, contextFor(), consumeInput())
-    expect(statements.slice(0, 6).map((s) => s.key)).toEqual(['isolation', 'xid', 'xid', 'lockUser', 'sessionForShare', 'lockProof'])
-    expect(statements[4].sql).toContain('FOR SHARE')
-    expect(statements[5].sql).toContain('user_id = $2')
-    expect(statements[5].sql).toContain('FOR UPDATE')
-    expect(statements[5].params).toEqual([PROOF_ID, USER])
+    expect(statements.slice(0, 7).map((s) => s.key)).toEqual(['isolation', 'xid', 'xid', 'subjectVersionBump', 'lockUser', 'sessionForShare', 'lockProof'])
+    // The mutex takes the user's subject authorization version row first, one statement with the sorted id list.
+    expect(statements[3].params).toEqual([[USER]])
+    expect(statements[5].sql).toContain('FOR SHARE')
+    expect(statements[6].sql).toContain('user_id = $2')
+    expect(statements[6].sql).toContain('FOR UPDATE')
+    expect(statements[6].params).toEqual([PROOF_ID, USER])
     expect(statements.at(-1)!.key).toBe('consume')
   })
 
@@ -844,7 +846,7 @@ describe('consumption decisions', () => {
   })
 
   it('maps a read failure during consumption to 503 without a cause', async () => {
-    for (const key of ['lockUser', 'sessionForShare', 'lockProof', 'account', 'privilegeData', 'watermark', 'membership', 'consume'] as StatementKey[]) {
+    for (const key of ['subjectVersionBump', 'lockUser', 'sessionForShare', 'lockProof', 'account', 'privilegeData', 'watermark', 'membership', 'consume'] as StatementKey[]) {
       const state = await consumableState()
       const { service } = serviceWith({ state })
       const { client } = fakeClient(state, { failAt: { key, code: '40001' } })

@@ -43,7 +43,14 @@ describe('activatePendingUser (T3)', () => {
     pgMocks.query.mockReset()
     pgMocks.transaction.mockImplementation(
       async (handler: (c: { query: typeof pgMocks.query }) => Promise<unknown>) =>
-        handler({ query: pgMocks.query }),
+        // D21 (Y5a): the access-graph mutex now bumps the subject authorization version row before
+        // `users FOR UPDATE`; answer that protocol statement inline so the positional once-chains
+        // below keep scripting the activation's own statements.
+        handler({
+          query: ((sql: string, params?: unknown[]) => /INSERT INTO subject_authorization_versions/.test(String(sql))
+            ? Promise.resolve({ rows: [], rowCount: 1 })
+            : pgMocks.query(sql, params)) as typeof pgMocks.query,
+        }),
     )
     const { claimLoginAlias } = await import('../../src/auth/login-alias-service')
     vi.mocked(claimLoginAlias).mockReset()

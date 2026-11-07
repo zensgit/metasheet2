@@ -409,3 +409,31 @@ test('actual byte budget and strict UTF-8 reject oversized or invalid streamed b
   const invalidUtf8 = new ReadableStream({ start(controller) { controller.enqueue(Uint8Array.from([0xc3, 0x28])); controller.close() } })
   await rejectsReadback(h, fetchObservation(h, invalidUtf8), 'RESPONSE')
 })
+
+// R-71 ⑦.3 decision H: the comparison is version-aware. v3 key parts are direct TARGETS (their own
+// entry names the column); derived targets (copy / constant / concat) are compared like any field.
+test('R-71 ⑦.3: a v3 observation compares derived targets and binds key parts by target', async () => {
+  const planner = await import('../lib/yida-static-plan.mjs')
+  const h = await fixture()
+  const example = planner.createYidaTransformExample()
+  h.config = example.config; h.row = { ...example.rows[1] }
+  const payload = h.plan().rows[0].payload
+  // Row 2 has a blank nullable key part (specification) and a copy of a parent name.
+  assert.equal(Object.hasOwn(payload, 'specification'), false)
+  assert.equal(payload.partCategory, payload.parentPartName)
+  const keyAndPayload = new Set([...Object.keys(payload), ...example.config.businessKey]).size
+  fullMatch(h.compare(), keyAndPayload)
+  // The blank nullable key part may come back empty; a derived value that differs is a mismatch,
+  // not a key mismatch; a changed key part is a key mismatch.
+  fullMatch(h.compare({ observation: h.observation({ ...payload, specification: '' }) }), keyAndPayload)
+  assertResult(h.compare({ observation: h.observation({ ...payload, processRule: 'SYN-RULE-B' }) }),
+    { status: 'observed_mismatch', mismatchedFieldCount: 1, businessKeyMismatchCount: 0, reasonCodes: ['FIELD_MISMATCH'] })
+  assertResult(h.compare({ observation: h.observation({ ...payload, partCategory: 'SYN-OTHER' }) }),
+    { status: 'observed_mismatch', mismatchedFieldCount: 1, businessKeyMismatchCount: 0 })
+  assertResult(h.compare({ observation: h.observation({ ...payload, drawingNo: 'SYN-OTHER' }) }),
+    { status: 'observed_mismatch', mismatchedFieldCount: 1, businessKeyMismatchCount: 1 })
+  const missing = { ...payload }; delete missing.project
+  assertResult(h.compare({ observation: h.observation(missing) }),
+    { status: 'observed_mismatch', missingFieldCount: 1, businessKeyMismatchCount: 1, reasonCodes: ['FIELD_MISSING'] })
+  for (const version of [4, '3']) throwsObservation(h, () => h.compare({ config: { ...h.config, version } }), 'PLAN')
+})
