@@ -2,13 +2,13 @@
 
 // 批次标识 BI-1a — THE PORTABLE PURE CORE (lib/stock-preparation-pull-batch.cjs). Pure and not wired.
 //
-//   PB-G  the label grammar: 3 formats x 2 locales x live/inferred, unknown, 人工补充 = manual, blank, fail-safe
+//   PB-G  the label grammar: 2 formats x 2 locales x live/inferred, unknown, 人工补充 = manual, blank, fail-safe
 //   PB-S  the reader's Symbol is the shared registry key; the planner's created-by key is the planner's own
-//   PB-E  the evidence set E and the gap-row predicate (rule 'off' reads the 本次 cell only)
-//   PB-C  首次批次 — the §5.4 worked cases under BOTH rules (+ 'off'); OWN-1 / Q6-a / R through the REAL planner
+//   PB-E  the evidence set E (plugin rows only, R-65 C4; the shared manual: predicate, C3) and the gap-row predicate
+//   PB-C  首次批次 — the §5.4 worked cases under BOTH rules; OWN-1 / Q6-a / R through the REAL planner
 //   PB-D  the content-only digest: lane-free, ext_-free, key-order-free
 //   PB-H  the history plan (§8.3) and the attested count (§8.5)
-//   PB-K  the configuration vocabulary: defaults = the 10-27 design, closed keys, meaning-locking
+//   PB-K  the configuration vocabulary (R-65 C2): defaults = the 10-27 design, four closed keys, fixed facts, locks
 //   PB-P  portability, not-wired pin, closed vocabularies
 //
 // Synthetic values only (S-01, P-07, C, X, A, B).
@@ -62,6 +62,7 @@ const row = (component, pathTokens, extra = {}, band = {}) => readerRow({
   componentSourceId: component,
   path: JSON.stringify(pathTokens),
   active: true,
+  lastPlmRefreshDecision: 'add',
   ...extra,
 }, band)
 const add = (component, pathTokens) => ({ decision: 'add', idempotencyKey: key(component, pathTokens), record: { componentSourceId: component, path: JSON.stringify(pathTokens), idempotencyKey: key(component, pathTokens) } })
@@ -78,12 +79,12 @@ const only = (map) => {
 
 // ── PB-G: the label grammar ────────────────────────────────────────────────────────────────────────
 
-test('PB-G1 the twelve strings: three formats x two locales x live / inferred, exactly as the grammar table says', () => {
+test('PB-G1 the eight strings: two formats x two locales x live / inferred, exactly as the grammar table says', () => {
   const expected = {
     ordinal_date: { 'zh-CN': ['第3批（2026-10-20）', '第3批（推定，2026-10-20）'], en: ['Batch 3 (2026-10-20)', 'Batch 3 (inferred, 2026-10-20)'] },
     ordinal: { 'zh-CN': ['第3批', '第3批（推定）'], en: ['Batch 3', 'Batch 3 (inferred)'] },
-    date: { 'zh-CN': ['2026-10-20', '2026-10-20（推定）'], en: ['2026-10-20', '2026-10-20 (inferred)'] },
   }
+  assert.deepEqual([...PB.PULL_BATCH_LABEL_FORMATS], Object.keys(expected))
   for (const [labelFormat, byLocale] of Object.entries(expected)) {
     for (const [locale, [live, inferred]] of Object.entries(byLocale)) {
       assert.equal(formatPullBatchLabel({ kind: 'live', n: 3, day: '2026-10-20', locale, labelFormat }), live, `${labelFormat} ${locale} live`)
@@ -98,7 +99,7 @@ test('PB-G1 the twelve strings: three formats x two locales x live / inferred, e
   assert.deepEqual({ ...PB.PULL_BATCH_MANUAL_LABELS }, { en: 'Manual row', 'zh-CN': '人工补充' })
 })
 
-test('PB-G2 every format parses in both locales whatever is configured: kind and format recovered, n where printed, day where printed; no string parses as another kind', () => {
+test('PB-G2 both formats parse in both locales whatever is configured: kind, format and n recovered, day where printed; no string parses as another kind', () => {
   const seen = new Map()
   for (const labelFormat of PB.PULL_BATCH_LABEL_FORMATS) {
     for (const locale of PB.PULL_BATCH_LOCALES) {
@@ -108,7 +109,7 @@ test('PB-G2 every format parses in both locales whatever is configured: kind and
           const parsed = parsePullBatchLabel(text)
           assert.equal(parsed.kind, kind, text)
           assert.equal(parsed.format, labelFormat, text)
-          assert.equal(parsed.n, labelFormat === 'date' ? null : n, `${text}: n`)
+          assert.equal(parsed.n, n, `${text}: n`)
           assert.equal(parsed.day, labelFormat === 'ordinal' ? null : day, `${text}: day`)
           assert.ok(Object.isFrozen(parsed))
           const signature = `${kind}/${labelFormat}`
@@ -129,6 +130,8 @@ test('PB-G3 blank and garbage parse fail-safe: blank is blank, everything else i
     '第0批（2026-10-20）', '第01批（2026-10-20）', '第1批（2026-13-01）', '第1批（2026-02-30）', '第1批(2026-10-20)',
     'Batch 0', 'Batch 01', 'batch 1', 'Batch 1 (Inferred)', '第1批（推定)', '2026-02-30', '2026-2-3', '2026-10-20(推定)',
     '1', 7, true, {}, '第一批', 'Batch  1',
+    // R-65 C2: the 'date' format is cut, so a bare date (or a dated 推定) is no label of any format
+    '2026-10-20', '2026-10-20（推定）', '2026-10-20 (inferred)',
   ]) {
     assert.equal(parsePullBatchLabel(value).kind, 'unknown', JSON.stringify(value))
   }
@@ -143,13 +146,15 @@ test('PB-G4 a malformed label request is refused (500 STAMP_INVALID): kind, n, d
     { kind: 'live', n: 1, day: '20261020', locale: 'zh-CN' },
     { kind: 'live', n: 1, day: '2026-10-20', locale: 'zh-CN', labelFormat: 'latest' },
     { kind: 'live', n: 1, day: '2026-10-20', locale: 'zh-CN', labelFormat: 'DATE' },
+    { kind: 'live', n: 1, day: '2026-10-20', locale: 'zh-CN', labelFormat: 'date' },
     { kind: 'other', n: 1, day: '2026-10-20', locale: 'zh-CN' },
     { kind: 'live', n: 1, day: '2026-10-20', locale: 'zh' },
     { kind: 'unknown' },
   ]) {
     assert.throws(() => formatPullBatchLabel(bad), codeIs(PULL_BATCH_ERROR_CODES.STAMP_INVALID, 500), JSON.stringify(bad))
   }
-  assert.equal(formatPullBatchLabel({ kind: 'live', n: 5, day: '2026-10-20', locale: 'en', labelFormat: 'date' }), '2026-10-20', "'date' still needs n: a batch always has a number")
+  assert.throws(() => formatPullBatchLabel({ kind: 'live', n: 5, locale: 'en', labelFormat: 'ordinal' }), codeIs(PULL_BATCH_ERROR_CODES.STAMP_INVALID, 500), "'ordinal' still needs the day: a batch always has both")
+  assert.throws(() => formatPullBatchLabel({ kind: 'inferred', day: '2026-10-20', locale: 'en', labelFormat: 'ordinal' }), codeIs(PULL_BATCH_ERROR_CODES.STAMP_INVALID, 500), "'ordinal' needs n")
 })
 
 test('PB-G5 the label day is the PROCESS-LOCAL calendar day (never toISOString().slice), witnessed under three time zones', () => {
@@ -180,10 +185,11 @@ test("PB-S1 the reader Symbol is the shared registry key; the created-by key equ
 
 // ── PB-E ───────────────────────────────────────────────────────────────────────────────────────────
 
-test('PB-E1 E = machine-created ∧ not manual:v1: ∧ a non-blank normalized part id; gap rows = E rows unlocked with a blank cell', () => {
+test('PB-E1 E = no creator ∧ a plugin key, not manual: ∧ a RUN stamp ∧ a non-blank normalized part id; gap rows = E rows unlocked with a blank cell', () => {
   assert.equal(PB.isPullBatchEvidenceRow(row('X', ['X'])), true)
   assert.equal(PB.isPullBatchEvidenceRow(row('X', ['X'], {}, { createdBy: 'u_person' })), false, 'a person-created row (新建记录 / import / right-click duplicate)')
   assert.equal(PB.isPullBatchEvidenceRow(row('X', ['X'], { idempotencyKey: 'manual:v1:rec_1' })), false, 'a manual row')
+  assert.equal(PB.isPullBatchEvidenceRow(row('X', ['X'], { idempotencyKey: 'manual:other' })), false, 'any key in the reserved manual: namespace (the shared raw prefix, not only manual:v1:)')
   assert.equal(PB.isPullBatchEvidenceRow(row('  ', ['X'])), false, 'a blank part id never matches')
   assert.equal(PB.isPullBatchEvidenceRow(row(null, ['X'])), false)
   assert.equal(PB.normalizePartId('  S-01 '), 'S-01')
@@ -196,13 +202,31 @@ test('PB-E1 E = machine-created ∧ not manual:v1: ∧ a non-blank normalized pa
   assert.equal(PB.countPullBatchGapRows([row('X', ['X']), row('Y', ['Y'], {}, { pullBatch: L(1), firstPullBatch: L(1) })]), 1)
 })
 
-test("PB-E2 rule 'off' writes no 首次, so a blank 首次 cell is NOT a gap row; a blank 本次 cell still is", () => {
-  const off = { config: ruleConfig('off') }
-  assert.equal(PB.isPullBatchGapRow(row('X', ['X'], {}, { pullBatch: L(1) }), off), false)
-  assert.equal(PB.isPullBatchGapRow(row('X', ['X'], {}, { firstPullBatch: L(1) }), off), true)
-  assert.equal(PB.isPullBatchGapRow(row('X', ['X']), off), true)
-  assert.equal(PB.countPullBatchGapRows([row('X', ['X'], {}, { pullBatch: L(1) }), row('Y', ['Y'])], off), 1)
-  assert.throws(() => PB.isPullBatchGapRow(row('X', ['X']), { config: { firstPullBatchRule: 'none' } }), codeIs(PULL_BATCH_ERROR_CODES.CONFIG_INVALID, 400))
+test('PB-E2 R-65 C4: a creator-less row is evidence only when it is a PLUGIN row — automation-like and forged-key rows are excluded, never gap rows, never carried', () => {
+  const automationLike = row('X', ['X'], { idempotencyKey: 'rec_auto_1', lastPlmRefreshDecision: undefined }, { pullBatch: L(1), firstPullBatch: L(1) })
+  assert.equal(PB.isPullBatchEvidenceRow(automationLike), false, 'automation create_record / FWB / public form: creator absent, non-JSON key, no RUN stamp')
+  const forgedKey = row('X', ['X'], { lastPlmRefreshDecision: undefined }, { pullBatch: L(1), firstPullBatch: L(1) })
+  assert.equal(forgedKey.idempotencyKey.startsWith('{'), true)
+  assert.equal(PB.isPullBatchEvidenceRow(forgedKey), false, 'a forged JSON key without a RUN stamp')
+  for (const stamp of ['', '   ', null, 7]) assert.equal(PB.isPullBatchEvidenceRow(row('X', ['X'], { lastPlmRefreshDecision: stamp })), false, `RUN stamp ${JSON.stringify(stamp)}`)
+  assert.equal(PB.isPullBatchEvidenceRow(row('X', ['X'], { idempotencyKey: 'plain-key' })), false, 'a stamped row whose key is not a plugin key')
+  assert.equal(PB.isPullBatchEvidenceRow(row('X', ['X'], { idempotencyKey: ` ${key('X', ['X'])}` })), false, 'the plugin-key test is raw (no trim)')
+  for (const stamp of ['add', 'update', 'inactive']) assert.equal(PB.isPullBatchEvidenceRow(row('X', ['X'], { lastPlmRefreshDecision: stamp })), true, stamp)
+  for (const excluded of [automationLike, forgedKey]) {
+    assert.equal(PB.isPullBatchGapRow({ ...excluded, [EXISTING_ROW_PULL_BATCH]: Object.freeze({ pullBatch: '', firstPullBatch: '', createdAt: null, locked: false }) }), false, 'never a gap row, so never labelled')
+    for (const rule of RULES) {
+      assert.equal(only(carry({ decisions: [add('X', ['B', 'X'])], existingRows: [excluded], config: ruleConfig(rule) })), null, `${rule}: never carried`)
+    }
+  }
+})
+
+test('PB-E3 R-65 C3: the reserved prefix is the SHARED raw manual: predicate of stock-preparation-manual-rows.cjs (pinned, not required: the core stays portable)', () => {
+  const manualRows = require(path.join(LIB, 'stock-preparation-manual-rows.cjs'))
+  assert.equal(PB.MANUAL_ROW_KEY_PREFIX, manualRows.MANUAL_ROW_KEY_PREFIX)
+  assert.equal(PB.MANUAL_ROW_KEY_PREFIX, 'manual:')
+  for (const value of ['manual:', 'manual:v1:rec_1', 'manual:x', ' manual:v1:rec_1', 'Manual:v1:rec_1', 'manual', '{"a":1}', '', null, undefined, 7]) {
+    assert.equal(PB.__internals.isManualRowKey(value), manualRows.isManualPrefixKey(value), JSON.stringify(value))
+  }
 })
 
 // ── PB-C: the §5.4 worked cases ─────────────────────────────────────────────────────────────────────
@@ -240,7 +264,6 @@ test("PB-C1 OWN-1 through the REAL expander and planner: batch 1 = S-01 + C; bat
     assert.equal(firstOf('C'), L(1), `${rule}: the C copy carries 首次 第1批`)
     assert.equal(firstOf('P-07'), L(2), `${rule}: P-07 is new in batch 2`)
   }
-  assert.equal(carry({ decisions: plan2.decisions, existingRows: sheet1, config: ruleConfig('off') }).size, 0, "'off': nothing is computed")
 })
 
 test('PB-C2 Q6-a and R through the REAL planner: an identity change is HELD and a same-key revival is an UPDATE — neither reaches the carry map', async () => {
@@ -296,7 +319,7 @@ test('PB-C3 the §5.4 table under both rules (TWO-POS, COMMON, STD-PART, ACTIVE-
       [row('X', ['A', 'X'], {}, { pullBatch: L(1), firstPullBatch: L(1) }), row('X', ['Z', 'X'], { active: false }, { createdAt: '2026-10-21T00:00:00.000Z' })],
       [add('X', ['B', 'X'])], { material: [L(1)], predecessor_suffix: [null] }],
     ['UNK-NEW under rule F (a blank suffix predecessor created after the known one opened)',
-      [row('X', ['X'], { active: false }, { pullBatch: L(1), firstPullBatch: L(1) }), row('X', ['X'], { active: false, idempotencyKey: 'k-x-copy' }, { createdAt: '2026-10-21T00:00:00.000Z' })],
+      [row('X', ['X'], { active: false }, { pullBatch: L(1), firstPullBatch: L(1) }), row('X', ['X'], { active: false, idempotencyKey: '{"copy":"X"}' }, { createdAt: '2026-10-21T00:00:00.000Z' })],
       [add('X', ['B', 'X'])], { material: [L(1)], predecessor_suffix: [L(1)] }],
     ['GAP-C09 (batch 2 pulled while the switch was off: blank copies, created after batch 1 opened; live batch 3 reads 第1批)',
       [row('S-01', ['S-01'], { active: false }, { pullBatch: L(1), firstPullBatch: L(1) }), row('S-01', ['P-07', 'S-01'], {}, { createdAt: '2026-10-21T00:00:00.000Z' }), row('P-07', ['P-07'], {}, { createdAt: '2026-10-21T00:00:00.000Z' })],
@@ -304,7 +327,7 @@ test('PB-C3 the §5.4 table under both rules (TWO-POS, COMMON, STD-PART, ACTIVE-
     ['UNK (a matching row labelled 历史批次未知, no known label)', [row('X', ['A', 'X'], {}, { pullBatch: UNKNOWN, firstPullBatch: UNKNOWN })], [add('X', ['B', 'X'])], { material: [UNKNOWN], predecessor_suffix: [null] }],
     ['PERSON-DUP (a right-click duplicate of a batch-1 row: creator present, same part id, cells copied) is never evidence',
       [row('X', ['X'], { active: false }, { pullBatch: L(1), firstPullBatch: L(1), createdBy: 'u_person' })], [add('X', ['B', 'X'])], { material: [null], predecessor_suffix: [null] }],
-    ['MANUAL (a manual:v1: row) is never evidence', [row('X', ['X'], { active: false, idempotencyKey: 'manual:v1:rec_9' }, { pullBatch: '人工补充', firstPullBatch: '人工补充' })], [add('X', ['B', 'X'])], { material: [null], predecessor_suffix: [null] }],
+    ['MANUAL (a manual: row) is never evidence', [row('X', ['X'], { active: false, idempotencyKey: 'manual:v1:rec_9' }, { pullBatch: '人工补充', firstPullBatch: '人工补充' })], [add('X', ['B', 'X'])], { material: [null], predecessor_suffix: [null] }],
     ['inferred history travels verbatim (推定 and its date)', [row('X', ['X'], { active: false }, { pullBatch: I(1), firstPullBatch: I(1) })], [add('X', ['A2', 'X'])], { material: [I(1)], predecessor_suffix: [I(1)] }],
     ['the SMALLEST known number wins, whatever the row order', [row('X', ['B', 'X'], {}, { pullBatch: L(2), firstPullBatch: L(2) }), row('X', ['A', 'X'], {}, { pullBatch: L(1), firstPullBatch: L(1) })], [add('X', ['C', 'X'])], { material: [L(1)], predecessor_suffix: [null] }],
     ['part ids are normalized (trim) before matching', [row(' X ', ['A', 'X'], {}, { pullBatch: L(1), firstPullBatch: L(1) })], [add('X', ['B', 'X'])], { material: [L(1)], predecessor_suffix: [null] }],
@@ -318,7 +341,6 @@ test('PB-C3 the §5.4 table under both rules (TWO-POS, COMMON, STD-PART, ACTIVE-
       assert.deepEqual(adds.map((entry) => map.get(entry.idempotencyKey)), expected[rule], `${label} [${rule}]`)
       assert.equal(map.size, new Set(adds.map((entry) => entry.idempotencyKey)).size, `${label} [${rule}]: ONE entry per ADD key`)
     }
-    assert.equal(carry({ decisions, existingRows, ledgerBatches: ledger, config: ruleConfig('off') }).size, 0, `${label} ['off']: nothing is computed`)
   }
 })
 
@@ -334,38 +356,32 @@ test('PB-C4 R6: an open row decides only if it could predate L* — a missing cr
   assert.throws(() => carry({ decisions: [], locale: undefined }), codeIs(PULL_BATCH_ERROR_CODES.STAMP_INVALID), 'the locale is required')
 })
 
-test("PB-C5 the 'ordinal' and 'date' formats: L* by number, else by day; two same-day 'date' batches read the LATEST opening (fail-safe); mixed formats are not comparable", () => {
+test("PB-C5 the 'ordinal' format: L* by number; two ledger batches with one label read the LATEST opening (fail-safe); a bare date is no label", () => {
   const ord = (n) => L(n, '2026-10-20', 'zh-CN', 'ordinal')
   const ordinalSheet = [row('X', ['B', 'X'], {}, { pullBatch: ord(2), firstPullBatch: ord(2) }), row('X', ['A', 'X'], {}, { pullBatch: ord(1), firstPullBatch: ord(1) })]
   const ordinalLedger = [{ label: ord(1), openedAt: '2026-10-20T01:00:00.000Z', status: 'closed' }, { label: ord(2), openedAt: '2026-10-22T01:00:00.000Z', status: 'closed' }]
   assert.equal(only(carry({ decisions: [add('X', ['C', 'X'])], existingRows: ordinalSheet, ledgerBatches: ordinalLedger })), '第1批')
-  const day = (d) => L(9, d, 'zh-CN', 'date')
-  const dateSheet = [row('X', ['B', 'X'], {}, { pullBatch: day('2026-10-22'), firstPullBatch: day('2026-10-22') }), row('X', ['A', 'X'], {}, { pullBatch: day('2026-10-20'), firstPullBatch: day('2026-10-20') })]
-  const dateLedger = [
-    { label: '2026-10-20', openedAt: '2026-10-20T01:00:00.000Z', status: 'closed' },
-    { label: '2026-10-20', openedAt: '2026-10-20T09:00:00.000Z', status: 'closed' },
-    { label: '2026-10-22', openedAt: '2026-10-22T01:00:00.000Z', status: 'closed' },
+  const twinLedger = [
+    { label: ord(1), openedAt: '2026-10-20T01:00:00.000Z', status: 'closed' },
+    { label: ord(1), openedAt: '2026-10-20T09:00:00.000Z', status: 'closed' },
+    { label: ord(2), openedAt: '2026-10-22T01:00:00.000Z', status: 'closed' },
   ]
-  assert.equal(only(carry({ decisions: [add('X', ['C', 'X'])], existingRows: dateSheet, ledgerBatches: dateLedger })), '2026-10-20', "'date': the earliest DAY wins")
   const between = row('X', ['Z', 'X'], {}, { createdAt: '2026-10-20T05:00:00.000Z' })
-  assert.equal(only(carry({ decisions: [add('X', ['C', 'X'])], existingRows: [...dateSheet, between], ledgerBatches: dateLedger })), UNKNOWN,
-    'an open row between two same-day openings could predate the first appearance: 历史批次未知')
+  assert.equal(only(carry({ decisions: [add('X', ['C', 'X'])], existingRows: [...ordinalSheet, between], ledgerBatches: twinLedger })), UNKNOWN,
+    'an open row between two openings of one label could predate the first appearance: 历史批次未知')
   const after = row('X', ['Z', 'X'], {}, { createdAt: '2026-10-20T10:00:00.000Z' })
-  assert.equal(only(carry({ decisions: [add('X', ['C', 'X'])], existingRows: [...dateSheet, after], ledgerBatches: dateLedger })), '2026-10-20')
-  const mixed = [row('X', ['A', 'X'], {}, { firstPullBatch: ord(1) }), row('X', ['B', 'X'], {}, { firstPullBatch: day('2026-10-19') })]
-  assert.equal(only(carry({ decisions: [add('X', ['C', 'X'])], existingRows: mixed })), UNKNOWN, 'a number-only and a day-only label cannot be ordered')
+  assert.equal(only(carry({ decisions: [add('X', ['C', 'X'])], existingRows: [...ordinalSheet, after], ledgerBatches: twinLedger })), '第1批')
+  const bareDate = [row('X', ['A', 'X'], {}, { firstPullBatch: ord(1) }), row('X', ['B', 'X'], {}, { firstPullBatch: '2026-10-19' })]
+  assert.equal(only(carry({ decisions: [add('X', ['C', 'X'])], existingRows: bareDate })), UNKNOWN, 'a bare date parses unknown, so it is an open row that could predate L*')
 })
 
-test('PB-C6 trashedRowsAreEvidence: trashed rows are ignored while the setting is off and read (as predecessors) when it is on, under both rules', () => {
+test('PB-C6 trashed rows are never evidence (a fixed fact, R-65 C2): a trashedRows input is not read, and naming the setting is refused', () => {
   const trashed = [row('X', ['X'], {}, { pullBatch: L(1), firstPullBatch: L(1) })]
-  const base = { decisions: [add('X', ['B', 'X'])], existingRows: [], trashedRows: trashed }
   for (const rule of RULES) {
-    assert.equal(only(carry({ ...base, config: { firstPullBatchRule: rule } })), null, `${rule}: off by default — the trash is not evidence`)
-    assert.equal(only(carry({ ...base, config: { firstPullBatchRule: rule, trashedRowsAreEvidence: false } })), null, `${rule}: explicitly off`)
-    assert.equal(only(carry({ ...base, config: { firstPullBatchRule: rule, trashedRowsAreEvidence: true } })), L(1), `${rule}: on — the trashed batch-1 row decides`)
+    assert.equal(only(carry({ decisions: [add('X', ['B', 'X'])], existingRows: [], trashedRows: trashed, config: ruleConfig(rule) })), null, `${rule}: the trash is not evidence`)
+    assert.throws(() => carry({ decisions: [add('X', ['B', 'X'])], existingRows: [], config: { firstPullBatchRule: rule, trashedRowsAreEvidence: true } }), codeIs(PULL_BATCH_ERROR_CODES.CONFIG_INVALID, 400))
   }
-  const personTrash = [row('X', ['X'], {}, { pullBatch: L(1), firstPullBatch: L(1), createdBy: 'u_person' })]
-  assert.equal(only(carry({ ...base, trashedRows: personTrash, config: { trashedRowsAreEvidence: true } })), null, 'a trashed person row is still never evidence')
+  assert.equal(PB.PULL_BATCH_FIXED_FACTS.trashedRowsAreEvidence, false)
 })
 
 // ── PB-D: the digest ───────────────────────────────────────────────────────────────────────────────
@@ -506,27 +522,23 @@ test('PB-H6 a gap pass (extension of a persisted plan) appends after the base, a
   assert.throws(() => plan({ rows, base: -1 }), codeIs(PULL_BATCH_ERROR_CODES.STAMP_INVALID))
 })
 
-test("PB-H7 the configuration reaches the plan: label format, rule 'off' (首次 left blank), trashed evidence; the digest moves with every meaning-locked key", () => {
+test('PB-H7 the configuration reaches the plan: label format and rule; trashed rows are not read; the digest moves with rule, format and locale, never with landing / placement', () => {
   const ordinal = plan({ rows: C09_ROWS, config: { labelFormat: 'ordinal' } })
   assert.deepEqual(ordinal.plan.clusters.map((c) => c.label), ['第1批（推定）', '第2批（推定）'])
-  const dated = plan({ rows: C09_ROWS, config: { labelFormat: 'date' }, locale: 'en' })
-  assert.match(dated.plan.clusters[0].label, /^\d{4}-\d{2}-\d{2} \(inferred\)$/)
-  const off = plan({ rows: C09_ROWS, config: ruleConfig('off') })
-  for (const [, value] of off.assignments) assert.equal(value.firstPullBatch, '', "'off': no 首次 value")
+  assert.throws(() => plan({ rows: C09_ROWS, config: { labelFormat: 'date' } }), codeIs(PULL_BATCH_ERROR_CODES.CONFIG_INVALID, 400))
+  assert.throws(() => plan({ rows: C09_ROWS, config: ruleConfig('off') }), codeIs(PULL_BATCH_ERROR_CODES.CONFIG_INVALID, 400))
   const trashed = [{ partId: 'P-07', path: JSON.stringify(['P-07']), firstPullBatch: I(1, '2026-10-01'), createdAt: '2026-10-01T00:00:00.000Z' }]
   const ledger = [{ label: I(1, '2026-10-01'), openedAt: '2026-10-01T00:00:00.000Z', status: 'closed' }]
-  assert.equal(plan({ rows: C09_ROWS, trashedRows: trashed, ledgerBatches: ledger }).assignments.get('P-07_new').firstPullBatch, plan({ rows: C09_ROWS }).plan.clusters[1].label, 'trash ignored by default')
-  assert.equal(plan({ rows: C09_ROWS, trashedRows: trashed, ledgerBatches: ledger, config: { trashedRowsAreEvidence: true } }).assignments.get('P-07_new').firstPullBatch, I(1, '2026-10-01'), 'trash read when on')
+  assert.equal(plan({ rows: C09_ROWS, trashedRows: trashed, ledgerBatches: ledger }).assignments.get('P-07_new').firstPullBatch, plan({ rows: C09_ROWS }).plan.clusters[1].label, 'trashed rows are never read')
+  assert.equal(Object.prototype.hasOwnProperty.call(plan({ rows: C09_ROWS }).plan, 'trashedRowsAreEvidence'), false)
   const digests = new Set([
     plan({ rows: C09_ROWS }).plan.digest,
     plan({ rows: C09_ROWS, config: ruleConfig('predecessor_suffix') }).plan.digest,
-    plan({ rows: C09_ROWS, config: ruleConfig('off') }).plan.digest,
     ordinal.plan.digest,
-    plan({ rows: C09_ROWS, config: { trashedRowsAreEvidence: true } }).plan.digest,
     plan({ rows: C09_ROWS, locale: 'en' }).plan.digest,
   ])
-  assert.equal(digests.size, 6, 'rule, format, trash switch and locale each move the plan digest')
-  assert.equal(plan({ rows: C09_ROWS, config: { placement: 'right', landing: 'keep_current', formalExport: 'included' } }).plan.digest, plan({ rows: C09_ROWS }).plan.digest, 'presentation keys do not')
+  assert.equal(digests.size, 4, 'rule, format and locale each move the plan digest')
+  assert.equal(plan({ rows: C09_ROWS, config: { placement: 'right', landing: 'keep_current' } }).plan.digest, plan({ rows: C09_ROWS }).plan.digest, 'landing and placement do not')
 })
 
 test('PB-H8 the attested count (§8.5): inferred needs count = K (degenerate too); unknown takes any count ≥ 0; the live floor follows base + count', () => {
@@ -554,34 +566,32 @@ test('PB-H8 the attested count (§8.5): inferred needs count = K (degenerate too
 
 // ── PB-K: the configuration vocabulary ─────────────────────────────────────────────────────────────
 
-test('PB-K1 DEFAULT_PULL_BATCH_CONFIG is exactly the 10-27 design, frozen; undefined / null / {} normalize to it', () => {
+test('PB-K1 DEFAULT_PULL_BATCH_CONFIG is exactly the 10-27 design, frozen; undefined / null / {} normalize to it; the fixed facts are not settings', () => {
   assert.deepEqual({ ...DEFAULT_PULL_BATCH_CONFIG }, {
     firstPullBatchRule: 'material',
-    pullBatchMeaning: 'created',
     labelFormat: 'ordinal_date',
     landing: 'promote_prep_fill',
-    formalExport: 'excluded',
     placement: 'left',
-    trashedRowsAreEvidence: false,
   })
   assert.ok(Object.isFrozen(DEFAULT_PULL_BATCH_CONFIG))
-  assert.deepEqual([...PB.PULL_BATCH_CONFIG_KEYS], ['firstPullBatchRule', 'pullBatchMeaning', 'labelFormat', 'landing', 'formalExport', 'placement', 'trashedRowsAreEvidence'])
+  assert.deepEqual([...PB.PULL_BATCH_CONFIG_KEYS], ['firstPullBatchRule', 'labelFormat', 'landing', 'placement'])
   for (const input of [undefined, null, {}]) assert.deepEqual({ ...normalizePullBatchConfig(input) }, { ...DEFAULT_PULL_BATCH_CONFIG }, JSON.stringify(input))
   assert.ok(Object.isFrozen(normalizePullBatchConfig({ placement: 'right' })))
+  assert.deepEqual({ ...PB.PULL_BATCH_FIXED_FACTS }, { pullBatchMeaning: 'created', formalExport: 'excluded', trashedRowsAreEvidence: false, firstPullBatchColumn: 'shown' })
+  assert.ok(Object.isFrozen(PB.PULL_BATCH_FIXED_FACTS))
+  for (const fact of Object.keys(PB.PULL_BATCH_FIXED_FACTS)) assert.equal(PB.PULL_BATCH_CONFIG_KEYS.includes(fact), false, `${fact} is a fixed fact, not a setting`)
 })
 
-test('PB-K2 every valid value of every key is accepted and merged over the defaults', () => {
+test('PB-K2 R-65 C2: the ONE token set — every valid value of every key is accepted and merged over the defaults', () => {
   const expected = {
-    firstPullBatchRule: ['material', 'predecessor_suffix', 'off'],
-    pullBatchMeaning: ['created'],
-    labelFormat: ['ordinal_date', 'ordinal', 'date'],
+    firstPullBatchRule: ['material', 'predecessor_suffix'],
+    labelFormat: ['ordinal_date', 'ordinal'],
     landing: ['promote_prep_fill', 'keep_current'],
-    formalExport: ['excluded', 'included'],
     placement: ['left', 'right'],
-    trashedRowsAreEvidence: [false, true],
   }
   assert.deepEqual(Object.fromEntries(Object.entries(PB.PULL_BATCH_CONFIG_VALUES).map(([k, v]) => [k, [...v]])), expected)
   for (const [configKey, values] of Object.entries(expected)) {
+    assert.equal(values[0], DEFAULT_PULL_BATCH_CONFIG[configKey], `${configKey}: the first value is the default`)
     for (const value of values) {
       const normalized = normalizePullBatchConfig({ [configKey]: value })
       assert.equal(normalized[configKey], value, `${configKey}=${value}`)
@@ -590,18 +600,27 @@ test('PB-K2 every valid value of every key is accepted and merged over the defau
   }
 })
 
-test("PB-K3 fail-closed: an unknown key, an unknown value (the deferred 'latest' meaning included), a loose type or a non-object is refused 400 CONFIG_INVALID naming the field", () => {
+test("PB-K3 fail-closed: rule 'off', format 'date', the fixed-fact keys (whatever their value), an unknown key / value, a loose type or a non-object is refused 400 CONFIG_INVALID naming the field", () => {
   const refused = [
+    // R-65 C2: removed from accepted input — refused, never ignored
+    [{ firstPullBatchRule: 'off' }, 'firstPullBatchRule'],
+    [{ labelFormat: 'date' }, 'labelFormat'],
+    [{ formalExport: 'excluded' }, 'formalExport'],
+    [{ formalExport: 'included' }, 'formalExport'],
+    [{ trashedRowsAreEvidence: false }, 'trashedRowsAreEvidence'],
+    [{ trashedRowsAreEvidence: true }, 'trashedRowsAreEvidence'],
+    [{ pullBatchMeaning: 'created' }, 'pullBatchMeaning'],
+    [{ pullBatchMeaning: 'latest' }, 'pullBatchMeaning'],
+    [{ firstPullBatchColumn: 'shown' }, 'firstPullBatchColumn'],
+    // the vocabulary of other drafts is not this one
+    [{ firstPullBatchRule: 'position' }, 'firstPullBatchRule'],
+    [{ landing: 'promote_fill' }, 'landing'],
     [{ firstPullBatchRule: 'path' }, 'firstPullBatchRule'],
     [{ firstPullBatchRule: 'Material' }, 'firstPullBatchRule'],
-    [{ pullBatchMeaning: 'latest' }, 'pullBatchMeaning'],
-    [{ pullBatchMeaning: 'latest_pull' }, 'pullBatchMeaning'],
     [{ labelFormat: 'ordinal_date ' }, 'labelFormat'],
     [{ landing: 'prep-fill' }, 'landing'],
-    [{ formalExport: true }, 'formalExport'],
     [{ placement: 'middle' }, 'placement'],
-    [{ trashedRowsAreEvidence: 'true' }, 'trashedRowsAreEvidence'],
-    [{ trashedRowsAreEvidence: 1 }, 'trashedRowsAreEvidence'],
+    [{ placement: true }, 'placement'],
     [{ batchColumns: 'two' }, 'batchColumns'],
     [{ __proto__x: 1 }, '__proto__x'],
     [[], 'config'],
@@ -615,27 +634,65 @@ test("PB-K3 fail-closed: an unknown key, an unknown value (the deferred 'latest'
   assert.throws(() => plan({ rows: [], config: { mystery: 1 } }), codeIs(PULL_BATCH_ERROR_CODES.CONFIG_INVALID))
 })
 
-test('PB-K4 the meaning lock: once a sheet has stamped, edits to firstPullBatchRule / pullBatchMeaning / labelFormat / trashedRowsAreEvidence are refused; presentation keys stay editable', () => {
-  assert.deepEqual([...PB.PULL_BATCH_MEANING_LOCKED_KEYS], ['firstPullBatchRule', 'pullBatchMeaning', 'labelFormat', 'trashedRowsAreEvidence'])
-  const everyEdit = { firstPullBatchRule: 'predecessor_suffix', labelFormat: 'date', trashedRowsAreEvidence: true, landing: 'keep_current', formalExport: 'included', placement: 'right' }
-  assert.deepEqual([...refusedPullBatchConfigEdits({ captured: null, edit: everyEdit, stamped: false })], [], 'not stamped: everything is editable')
-  assert.deepEqual([...refusedPullBatchConfigEdits({ captured: null, edit: everyEdit, stamped: true })], ['firstPullBatchRule', 'labelFormat', 'trashedRowsAreEvidence'], 'stamped: the meaning keys are locked (null captured = the defaults)')
-  for (const lockedKey of ['firstPullBatchRule', 'labelFormat', 'trashedRowsAreEvidence']) {
-    assert.deepEqual([...refusedPullBatchConfigEdits({ captured: {}, edit: { [lockedKey]: everyEdit[lockedKey] }, stamped: true })], [lockedKey], lockedKey)
+const UNLOCKED = Object.freeze({ hasStamped: false, landingApplied: false, placementApplied: false })
+
+test('PB-K4 the lock helper (R-65 C2): rule and format lock when the sheet first stamps; landing and placement lock once applied; each flag locks only its own keys', () => {
+  assert.deepEqual({ ...PB.PULL_BATCH_CONFIG_LOCKS }, { firstPullBatchRule: 'hasStamped', labelFormat: 'hasStamped', landing: 'landingApplied', placement: 'placementApplied' })
+  assert.deepEqual([...PB.PULL_BATCH_CONFIG_LOCK_STATES], ['hasStamped', 'landingApplied', 'placementApplied'])
+  assert.deepEqual([...PB.PULL_BATCH_MEANING_LOCKED_KEYS], ['firstPullBatchRule', 'labelFormat'])
+  const everyEdit = { firstPullBatchRule: 'predecessor_suffix', labelFormat: 'ordinal', landing: 'keep_current', placement: 'right' }
+  const refusedWith = (state, edit = everyEdit, captured = null) => [...refusedPullBatchConfigEdits({ captured, edit, state: { ...UNLOCKED, ...state } })]
+  assert.deepEqual(refusedWith({}), [], 'nothing applied: everything is editable')
+  assert.deepEqual(refusedWith({ hasStamped: true }), ['firstPullBatchRule', 'labelFormat'], 'stamped: rule and format (null captured = the defaults)')
+  assert.deepEqual(refusedWith({ landingApplied: true }), ['landing'])
+  assert.deepEqual(refusedWith({ placementApplied: true }), ['placement'])
+  assert.deepEqual(refusedWith({ hasStamped: true, landingApplied: true, placementApplied: true }), ['firstPullBatchRule', 'labelFormat', 'landing', 'placement'])
+  for (const [flag, keys] of [['hasStamped', ['firstPullBatchRule', 'labelFormat']], ['landingApplied', ['landing']], ['placementApplied', ['placement']]]) {
+    for (const lockedKey of keys) assert.deepEqual(refusedWith({ [flag]: true }, { [lockedKey]: everyEdit[lockedKey] }, {}), [lockedKey], `${flag} locks ${lockedKey}`)
+    for (const freeKey of PB.PULL_BATCH_CONFIG_KEYS.filter((entry) => !keys.includes(entry))) {
+      assert.deepEqual(refusedWith({ [flag]: true }, { [freeKey]: everyEdit[freeKey] }, {}), [], `${flag} leaves ${freeKey} editable`)
+    }
   }
-  for (const freeKey of ['landing', 'formalExport', 'placement']) {
-    assert.deepEqual([...refusedPullBatchConfigEdits({ captured: {}, edit: { [freeKey]: everyEdit[freeKey] }, stamped: true })], [], freeKey)
+  const captured = { firstPullBatchRule: 'predecessor_suffix', labelFormat: 'ordinal', landing: 'keep_current', placement: 'right' }
+  const all = { hasStamped: true, landingApplied: true, placementApplied: true }
+  assert.deepEqual(refusedWith(all, captured, captured), [], 'repeating the captured value is no change')
+  assert.deepEqual(refusedWith(all, { firstPullBatchRule: 'material' }, captured), ['firstPullBatchRule'], 'back to the default is a change too')
+  assert.throws(() => refusedPullBatchConfigEdits({ captured: null, edit: { labelFormat: 'date' }, state: UNLOCKED }), codeIs(PULL_BATCH_ERROR_CODES.CONFIG_INVALID), 'an invalid edit is refused before the lock is read')
+  assert.throws(() => refusedPullBatchConfigEdits({ captured: { mystery: 1 }, edit: {}, state: UNLOCKED }), codeIs(PULL_BATCH_ERROR_CODES.CONFIG_INVALID))
+  assert.throws(() => refusedPullBatchConfigEdits({ captured: null, edit: null, state: UNLOCKED }), codeIs(PULL_BATCH_ERROR_CODES.CONFIG_INVALID))
+  for (const [state, field] of [
+    [undefined, 'state'],
+    [true, 'state'],
+    [{ hasStamped: true, landingApplied: false }, 'placementApplied'],
+    [{ ...UNLOCKED, hasStamped: 'yes' }, 'hasStamped'],
+    [{ ...UNLOCKED, landingApplied: 1 }, 'landingApplied'],
+    [{ ...UNLOCKED, stamped: true }, 'stamped'],
+  ]) {
+    assert.throws(() => refusedPullBatchConfigEdits({ captured: null, edit: {}, state }), (error) => error.code === PULL_BATCH_ERROR_CODES.CONFIG_INVALID && error.status === 400 && error.details.field === field, JSON.stringify(state))
   }
-  const captured = { firstPullBatchRule: 'off', labelFormat: 'ordinal' }
-  assert.deepEqual([...refusedPullBatchConfigEdits({ captured, edit: { firstPullBatchRule: 'off', labelFormat: 'ordinal', pullBatchMeaning: 'created' }, stamped: true })], [], 'repeating the captured value is no change')
-  assert.deepEqual([...refusedPullBatchConfigEdits({ captured, edit: { firstPullBatchRule: 'material' }, stamped: true })], ['firstPullBatchRule'], 'back to the default is a change too')
-  assert.throws(() => refusedPullBatchConfigEdits({ captured: null, edit: { pullBatchMeaning: 'latest' }, stamped: false }), codeIs(PULL_BATCH_ERROR_CODES.CONFIG_INVALID), 'an invalid edit is refused before the lock is read')
-  assert.throws(() => refusedPullBatchConfigEdits({ captured: { mystery: 1 }, edit: {}, stamped: true }), codeIs(PULL_BATCH_ERROR_CODES.CONFIG_INVALID))
-  assert.throws(() => refusedPullBatchConfigEdits({ captured: null, edit: {}, stamped: 'yes' }), codeIs(PULL_BATCH_ERROR_CODES.CONFIG_INVALID))
-  assert.throws(() => refusedPullBatchConfigEdits({ captured: null, edit: null, stamped: true }), codeIs(PULL_BATCH_ERROR_CODES.CONFIG_INVALID))
-  assert.ok(Object.isFrozen(refusedPullBatchConfigEdits({ captured: null, edit: {}, stamped: true })))
+  assert.ok(Object.isFrozen(refusedPullBatchConfigEdits({ captured: null, edit: {}, state: UNLOCKED })))
   assert.equal(PULL_BATCH_ERROR_CODES.CONFIG_LOCKED, 'STOCK_PREP_PULL_BATCH_CONFIG_LOCKED')
   assert.equal(PB.PULL_BATCH_ERROR_HTTP_STATUS[PULL_BATCH_ERROR_CODES.CONFIG_LOCKED], 409)
+})
+
+test('PB-K5 R-65 C10: the settings help text names rule F\'s history caveat (today\'s 有效 state) in both locales; rule A says it is time-consistent; values-free and frozen', () => {
+  const help = PB.PULL_BATCH_SETTINGS_HELP
+  assert.deepEqual(Object.keys(help), ['firstPullBatchRule'])
+  assert.deepEqual(Object.keys(help.firstPullBatchRule), [...PB.FIRST_PULL_BATCH_RULES], 'one entry per rule')
+  for (const rule of PB.FIRST_PULL_BATCH_RULES) {
+    assert.deepEqual(Object.keys(help.firstPullBatchRule[rule]).sort(), [...PB.PULL_BATCH_LOCALES].sort())
+    assert.ok(Object.isFrozen(help.firstPullBatchRule[rule]))
+  }
+  assert.ok(Object.isFrozen(help) && Object.isFrozen(help.firstPullBatchRule))
+  const f = help.firstPullBatchRule.predecessor_suffix
+  assert.match(f['zh-CN'], /^按位置/)
+  assert.match(f['zh-CN'], /今天的「有效」状态/)
+  assert.match(f['zh-CN'], /可能与当时实时拉取/)
+  assert.match(f.en, /today's active state/)
+  assert.match(f.en, /can differ from what a live pull would have written/)
+  assert.match(help.firstPullBatchRule.material['zh-CN'], /^按物料/)
+  assert.match(help.firstPullBatchRule.material.en, /same result as live pulls/)
+  assert.equal(/S-01|P-07|PRJ|\d{4}-\d{2}-\d{2}/.test(JSON.stringify(help)), false, 'values-free copy')
 })
 
 // ── PB-P ───────────────────────────────────────────────────────────────────────────────────────────
@@ -661,11 +718,11 @@ test('PB-P3 the error codes are closed, code-shaped, unique and carry their HTTP
   const error = new PB.StockPreparationPullBatchError(PULL_BATCH_ERROR_CODES.STORE_FAILED, 'm', { operation: 'read' })
   assert.equal(error.status, 503)
   assert.equal(error.details.operation, 'read')
-  for (const list of [PB.PULL_BATCH_CLOSED_REASONS, PB.PULL_BATCH_RESPONSE_REASONS, PB.PULL_BATCH_LABEL_KINDS, PB.PULL_BATCH_LOCALES, PB.PULL_BATCH_LABEL_FORMATS, PB.FIRST_PULL_BATCH_RULES, PB.PULL_BATCH_CONFIG_VALUES, PB.PULL_BATCH_ERROR_CODES]) {
+  for (const list of [PB.PULL_BATCH_CLOSED_REASONS, PB.PULL_BATCH_RESPONSE_REASONS, PB.PULL_BATCH_LABEL_KINDS, PB.PULL_BATCH_LOCALES, PB.PULL_BATCH_LABEL_FORMATS, PB.FIRST_PULL_BATCH_RULES, PB.PULL_BATCH_CONFIG_VALUES, PB.PULL_BATCH_ERROR_CODES, PB.PULL_BATCH_FIXED_FACTS, PB.PULL_BATCH_CONFIG_LOCKS, PB.PULL_BATCH_CONFIG_LOCK_STATES, PB.PULL_BATCH_MEANING_LOCKED_KEYS, PB.PULL_BATCH_SETTINGS_HELP]) {
     assert.ok(Object.isFrozen(list))
   }
   assert.deepEqual([...PB.PULL_BATCH_LABEL_KINDS], ['live', 'inferred', 'unknown', 'manual', 'blank'])
-  assert.deepEqual([...PB.FIRST_PULL_BATCH_RULES], ['material', 'predecessor_suffix', 'off'])
+  assert.deepEqual([...PB.FIRST_PULL_BATCH_RULES], ['material', 'predecessor_suffix'])
   assert.ok(PB.PULL_BATCH_CLOSED_REASONS.includes('recovery_verified'), 'S6 C-3 token')
 })
 
