@@ -371,12 +371,24 @@ export function defineAuthzVersionFieldRowOrderRealDbCases(): void {
           const parked = await raceParkedOrSettled({ blockerPid: writerPid, settled: locking.settled })
           expect(parked, 'the holder waits on the revert').toBe('parked')
           // Where it waits: with the canonical order the revert holds the version row, so the holder has not reached
-          // the bound record yet (its first lock is that row). A record FOR SHARE wait would be the cycle's first half.
-          const waiting = await q('SELECT query FROM pg_stat_activity WHERE pid = $1', [holder.pid])
-          expect(String(waiting.rows[0]?.query ?? ''), 'FO-L2: the holder waits at the sheet version row, not at the bound record').toContain(SHEET_PERMISSION_VERSIONS_TABLE)
+          // the bound record yet (its first lock is that row). A record FOR SHARE wait is the cycle's first half: on
+          // release the revert's UPDATE then wants the version row the holder shares, and PostgreSQL aborts one side.
+          const waiting = String((await q('SELECT query FROM pg_stat_activity WHERE pid = $1', [holder.pid])).rows[0]?.query ?? '')
           hold.release()
-          expectOk(await executing.promise)
-          const locked = await locking.promise
+          const reverted = (await executing.promise) as Response
+          const holderOutcome = await locking.promise.then(
+            () => 'locked',
+            (error: unknown) => `${String((error as { code?: unknown }).code)}/${String((error as { sqlState?: unknown }).sqlState)}`,
+          )
+          // Observed together, so a red shows the whole interleaving (a deadlock answers CONFLICT/40P01 on the holder).
+          expect({
+            waitsAt: waiting.includes(SHEET_PERMISSION_VERSIONS_TABLE) ? 'the sheet version row' : 'the bound record',
+            revert: reverted.status,
+            holder: holderOutcome,
+          }, 'FO-L2: the holder waits at the version row, the revert commits, the holder then locks — no 40P01').toEqual({
+            waitsAt: 'the sheet version row', revert: 200, holder: 'locked',
+          })
+          const locked = await holder.lock()
           expect(locked.record?.recordId).toBe(boundRecord)
           expect(await holder.seesHidden(id), 'the holder reads the committed revert: the field is hidden').toBe(true)
           await holder.end('COMMIT')
