@@ -568,4 +568,19 @@ databaseSuite('SA05 immutable local-unverified drafts — real PG, compiler and 
     const persisted = JSON.stringify([await tableRows(TARGETS), await tableRows(OPERATIONS), await tableRows(ROWS), await tableRows(AUDIT)])
     for (const value of ['WLBH-', ...codes, 'SYN-LINE-1', 'sheet_registered']) expect(persisted.includes(value)).toBe(false)
   })
+
+  it('A4 (generated) at the draft store: a bound draft whose two rows carry one preset code (one key value, other seven keys) is refused and writes nothing', async () => {
+    // Verifier r2 L4 (probe PD): the in-batch DUPLICATE_GENERATED_VALUE pass through the persisted entry.
+    const a = await generatedInputs()
+    const base = (JSON.parse(a.unbound.rowsText) as Row[])[0]
+    const twin = [{ ...base }, { ...base, componentCode: 'DEMO-DRW-7' }]
+    const binding = (a.bound as unknown as { sourceBinding: Row }).sourceBinding
+    const sourceBinding = { ...binding, records: twin.map((row, index) => ({ recordId: 'rec_d' + index, keyValue: String(row.idempotencyKey), projectNo: String(row.projectNo) })) }
+    const before = await evidence()
+    expect(await outcome(first.store.createDraft({ ...a.unbound, rowsText: JSON.stringify(twin), sourceBinding }))).toEqual({ ok: false, code: 'YIDA_DRAFT_PLAN' })
+    expect(await evidence()).toEqual(before)
+    // Each row alone is an ordinary bound draft: the refusal is the shared code, not the rows.
+    const single = await first.store.createDraft({ ...a.unbound, rowsText: JSON.stringify([twin[1]]), sourceBinding: { ...binding, records: [sourceBinding.records[1]] } })
+    expect(single.reused).toBe(false)
+  })
 })

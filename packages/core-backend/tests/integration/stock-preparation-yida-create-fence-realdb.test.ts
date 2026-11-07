@@ -657,4 +657,39 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     }
     expect(await evidence()).toEqual(before)
   })
+
+  it('A10 (generated, hash member order; ruling L1): two templates listing one member set in two orders give one code per tuple; two tuples whose nullable values swap members keep two codes after both creates commit', async () => {
+    const ORDER_A = { hash: ['project', 'drawingNo', 'partName', 'specification', 'materialGrade', 'versionNo', 'parentDrawingNo'], form: 'uuid-36' }
+    const ORDER_B = { hash: ['project', 'drawingNo', 'partName', 'parentDrawingNo', 'materialGrade', 'versionNo', 'specification'], form: 'uuid-36' }
+    // Two source lines whose only difference is which nullable key member holds DEMO-DRW-0 (verifier r2 probe PA).
+    const lineA: Row = { idempotencyKey: 'SYN-LINE-21', componentSpec: 'DEMO-DRW-0', parentComponentCode: null, parentComponentName: null }
+    const lineB: Row = { idempotencyKey: 'SYN-LINE-22', componentSpec: '', parentComponentCode: 'DEMO-DRW-0', parentComponentName: 'SYN-PARENT-0' }
+    const a = await generatedDraft([{ literal: 'SYN-' }, ORDER_A], lineA)
+    const b = await generatedDraft([{ literal: 'SYN-' }, ORDER_B], lineB)
+    const aReordered = await generatedDraft([{ literal: 'SYN-' }, ORDER_B], lineA)
+    const code = (compiled: Compiled) => String(compiled.plan.rows[0].payload.materialCodeText)
+    // One tuple, either order: one code. Two tuples: two codes, also across the two orders.
+    expect(code(aReordered)).toBe(code(a))
+    expect(code(b)).not.toBe(code(a))
+    expect(b.rowSpecs[0].businessKeyDigest).not.toBe(a.rowSpecs[0].businessKeyDigest)
+    expect(b.rowSpecs[0].creationIdentityDigest).not.toBe(a.rowSpecs[0].creationIdentityDigest)
+    // Both creates commit (two identities, two seven-key tuples), and no two committed identities share a code.
+    await setState('acknowledged', reservation(a, {}))
+    const inputB = reservation(b, { operationId: 'synthetic-operation-l1b', rowKey: 'synthetic-row-l1b' })
+    expect((await second.store.prepare(inputB)).reused).toBe(false)
+    const { claimToken } = await second.store.claim(actor(inputB))
+    await second.store.recordAcknowledgement({ ...actor(inputB), claimToken, ack: { statusCode: 200, instanceId: 'synthetic-instance-l1b' } })
+    expect(second.uniqueErrors).toEqual([])
+    const ledger = await rows(LEDGER)
+    expect(ledger.map(row => row.status)).toEqual(['acknowledged', 'acknowledged'])
+    const codeByIdentity = new Map([[a.rowSpecs[0].creationIdentityDigest, code(a)], [b.rowSpecs[0].creationIdentityDigest, code(b)]])
+    expect(new Set(ledger.map(row => String(row.creation_identity_digest)))).toEqual(new Set(codeByIdentity.keys()))
+    expect(new Set(ledger.map(row => codeByIdentity.get(String(row.creation_identity_digest)))).size).toBe(ledger.length)
+    // The same tuple under the other order is the same seven keys: the 091 fence refuses it, evidence unchanged.
+    const before = await evidence()
+    await rejectStore(second.store.prepare(reservation(aReordered, { operationId: 'synthetic-operation-l1c', rowKey: 'synthetic-row-l1c' })),
+      'YIDA_DELIVERY_BUSINESS_CONFLICT')
+    expect(second.uniqueErrors).toEqual([FENCE])
+    expect(await evidence()).toEqual(before)
+  })
 })

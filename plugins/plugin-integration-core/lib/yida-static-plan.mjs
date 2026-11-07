@@ -270,16 +270,22 @@ const MAX_SEPARATOR_LENGTH = 16
 //   { literal }                          - plain text, 1..128 characters, no control characters;
 //   { field: <direct target> }           - that column: text verbatim, a number as String(n);
 //   { hash: [<direct targets>], form }   - UUIDv5 of the listed columns, upper case, 'uuid-36' or 'uuid-32';
+//     the name holds each member's (target, value) pair, sorted by target, so the order members are listed
+//     in never changes a code (coordinator ruling L1, 2026-11-07: two templates collide only for one tuple);
 //   { preset: 'material-code-v1', rowIdOf, projectOf } - the frozen WLBH- material code, byte for byte.
 // Rule G1: exactly one identity part, a hash over every business-key target or the preset (whose
 // projectOf is a key target), so one code carries one key tuple (hash) or one (rowIdOf, projectOf)
-// pair (preset); literal and field parts are decoration. The planner alone does not tie a preset to the
+// pair (preset); literal and field parts are decoration. Field parts are the only parts of variable
+// length, so they may stand on one side of the identity part only (ruling G1 shift, 2026-11-07): the
+// identity part then sits at a fixed offset from one end and two equal codes carry equal identity parts.
+// Literals may stand on both sides. The planner alone does not tie a preset to the
 // creation identity: the persisted compile (yida-draft-compiler.mjs) refuses a bound row whose rowIdOf or
 // projectOf cell is not its binding's key value or project. A blank part is always refused; inside a hash a
 // blank emptyKeyFields member counts as ''. Hash members and preset inputs are string-typed direct
 // targets read verbatim. The value is evaluated per planned row, so split rows get their own codes,
 // and two rows of one batch with one value are both refused (DUPLICATE_GENERATED_VALUE).
-// FROZEN: the namespace, label, version and forms are part of every code; a change is a new version.
+// FROZEN: the namespace, label, version, name layout and forms are part of every code; a change is a new
+// version. (The layout moved to sorted pairs under 'v1' before any code was sent: no v1 code exists elsewhere.)
 const MAX_TEMPLATE_PARTS = 8
 const MAX_HASH_MEMBERS = 16
 const HASH_FORMS = new Set(['uuid-36', 'uuid-32'])
@@ -346,12 +352,19 @@ function generatedInputs(entry) {
     : hasPart(part, 'hash') ? part.hash : hasPart(part, 'preset') ? [part.rowIdOf, part.projectOf] : [])
 }
 
-// Every part names a direct primary (hash members and preset inputs a string one), and G1 holds.
+// Every part names a direct primary (hash members and preset inputs a string one), and G1 holds:
+// one identity part, with field parts on at most one side of it.
 function generatedTemplateValid(entry, primaries, businessKey) {
   const stringPrimary = (target) => primaries.get(target)?.type === 'string'
   let identities = 0
+  let fieldBefore = false
+  let fieldAfter = false
   for (const part of entry.template) {
-    if (hasPart(part, 'field') && !primaries.has(part.field)) return false
+    if (hasPart(part, 'field')) {
+      if (!primaries.has(part.field)) return false
+      if (identities === 0) fieldBefore = true
+      else fieldAfter = true
+    }
     if (hasPart(part, 'hash')) {
       identities += 1
       if (!part.hash.every(stringPrimary) || !businessKey.every((key) => part.hash.includes(key))) return false
@@ -361,7 +374,7 @@ function generatedTemplateValid(entry, primaries, businessKey) {
       if (!stringPrimary(part.rowIdOf) || !stringPrimary(part.projectOf) || !businessKey.includes(part.projectOf)) return false
     }
   }
-  return identities === 1
+  return identities === 1 && !(fieldBefore && fieldAfter)
 }
 
 function transformEntry(value, catalog) {
@@ -763,15 +776,18 @@ function generatedValue(config, entry, row) {
       continue
     }
     if (hasPart(part, 'hash')) {
-      const values = []
+      // Each member as its (target, value) pair, sorted by target (members are unique): the listed order
+      // is not part of the name, and a value moved to another member is another name.
+      const pairs = []
       for (const target of part.hash) {
         const raw = read(target)
-        if (emptyKeys.has(target) && (raw === undefined || raw === null || raw === '')) { values.push(''); continue }
+        if (emptyKeys.has(target) && (raw === undefined || raw === null || raw === '')) { pairs.push([target, '']); continue }
         if (missing(raw)) return { code: 'FIELD_PART_MISSING' }
         if (!identityText(raw)) return { code: 'FIELD_TYPE' }
-        values.push(raw)
+        pairs.push([target, raw])
       }
-      const name = encoder.encode(JSON.stringify([GENERATED_HASH_LABEL, GENERATED_HASH_VERSION, ...values]))
+      pairs.sort(byFirstElement)
+      const name = encoder.encode(JSON.stringify([GENERATED_HASH_LABEL, GENERATED_HASH_VERSION, pairs]))
       const uuid = yidaMaterialCodeUuidV5(GENERATED_HASH_NAMESPACE_V1, name).toUpperCase()
       pieces.push(part.form === 'uuid-32' ? uuid.replaceAll('-', '') : uuid)
       continue

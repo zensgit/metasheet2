@@ -388,8 +388,13 @@ test('examples are local, parseable, and provide two distinct hand-authored layo
 //     catches what the line-bound specifier scan cannot see, e.g. a multi-line `export {<newline>} from 'x'` or
 //     `export * from /* c */ 'x'` (Y6 verifier r1, mutants V9g/V9h). It also counts prose in comments, which can
 //     only make the pin stricter (neither scanned file has any).
-// A dynamic import or require is refused with whitespace or a block comment before its parenthesis. What this
-// still does not see is code assembled at run time (eval, Function); the vm-realm test of the leaf covers that.
+// A dynamic import or require is refused with whitespace, a block comment or a line comment before its parenthesis
+// (verifier r2 L3, mutants V9j/V9l). Neither file may name the host's module loader without import syntax:
+// `process` (as a word; `processRule` is another identifier), `getBuiltinModule` and `globalThis` are refused on both
+// (mutants V9k/V9m: `globalThis.process?.getBuiltinModule?.('fs')`). What this static scan still does not see is code
+// that builds such a name at run time (eval, Function, a computed property on another global object). For the leaf,
+// the vm-realm test in yida-material-code.test.cjs runs it in a context that has no process, require, Buffer or
+// module, so a run-time lookup finds nothing to load with; the planner has no such test and relies on review there.
 const PLANNER_IMPORT_ALLOWLIST = ['./yida-material-code.mjs']
 const NETWORK_CALL = /\b(?:fetch|XMLHttpRequest|WebSocket|sendBeacon|EventSource)\s*\(|\bnew\s+(?:XMLHttpRequest|WebSocket|EventSource)\b/
 const STATEMENT_START = String.raw`(?:^|[;{}]|\*\/)\s*`
@@ -397,7 +402,8 @@ const STATIC_IMPORT = new RegExp(STATEMENT_START + String.raw`(?:import|export)\
   + STATEMENT_START + String.raw`import\s*['"]([^'"]+)['"]`, 'gm')
 const IMPORT_STATEMENT = new RegExp(STATEMENT_START + String.raw`import\b(?!\s*[(.])`, 'gm')
 const FROM_CLAUSE = /\bfrom(?:\s|\/\*[\s\S]*?\*\/)*['"]/g
-const DYNAMIC_IMPORT = /\b(?:import|require)(?:\s|\/\*[\s\S]*?\*\/)*\(/
+const DYNAMIC_IMPORT = /\b(?:import|require)(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*)*\(/
+const HOST_LOADER = /\b(?:process|getBuiltinModule|globalThis)\b/
 function moduleImports(source) {
   const statements = [...source.matchAll(STATIC_IMPORT)]
   return { specifiers: statements.map((match) => match[1] ?? match[2]), dynamic: DYNAMIC_IMPORT.test(source),
@@ -417,6 +423,7 @@ function importClosure(entryPath, allowlist) {
     // Every allowed import is an `import { … } from '…'` statement, so each has exactly one from-clause.
     assert.equal(fromClauses, allowed.length, `from-clauses of ${path.basename(file)}`)
     assert.equal(dynamic, false, `dynamic import or require in ${path.basename(file)}`)
+    assert.doesNotMatch(source, HOST_LOADER, `host module loader named in ${path.basename(file)}`)
     assert.doesNotMatch(source, NETWORK_CALL, path.basename(file))
     for (const specifier of specifiers) queue.push([path.resolve(path.dirname(file), specifier), []])
   }
@@ -982,6 +989,18 @@ test('R-71 ⑦.4 (Y6): transformDependencies of a generated entry are the source
   assert.equal(Object.isFrozen(hashed), true)
   // It is the same answer as the generated reader's own export, and the config's union covers it.
   assert.deepEqual(hashed, generatedTemplateDependencies(normalized.fieldMap.at(-1), normalized))
+  // A field part on a column that is NOT a hash member or preset input is read too (verifier r2 L2, mutant V5c: the
+  // dependency list without field parts). materialTypeText (blankType) is not a key; the hash covers only the keys.
+  const decorated = structuredClone(example.config)
+  decorated.fieldMap.at(-1).template = [{ field: 'materialTypeText' }, { literal: '/' }, { hash: [...decorated.businessKey], form: 'uuid-36' }]
+  const decoratedNormalized = validateYidaStaticConfig(decorated).normalized
+  const fieldRead = transformDependencies(decoratedNormalized.fieldMap.at(-1), decoratedNormalized)
+  assert.deepEqual(fieldRead, ['blankType', 'componentCode', 'componentName', 'componentSpec', 'material', 'parentComponentCode', 'projectNo', 'sourceVersion'])
+  assert.deepEqual(generatedTemplateDependencies(decoratedNormalized.fieldMap.at(-1), decoratedNormalized), fieldRead)
+  // The same field part next to the preset: the preset reads two columns, the field part a third.
+  decorated.fieldMap.at(-1).template = [{ preset: 'material-code-v1', rowIdOf: 'sourceLineId', projectOf: 'project' }, { literal: '/' }, { field: 'materialTypeText' }]
+  const presetNormalized = validateYidaStaticConfig(decorated).normalized
+  assert.deepEqual(transformDependencies(presetNormalized.fieldMap.at(-1), presetNormalized), ['blankType', 'idempotencyKey', 'projectNo'])
   // Without its config, or against a config that is not its own, a generated entry is refused (never an empty list).
   for (const config of [undefined, null, example.config, transformLayout(TRANSFORM_COLUMN_CASES.direct.entry)]) {
     assert.throws(() => transformDependencies(normalized.fieldMap.at(-1), config), { code: 'YIDA_STATIC_CONFIG_INVALID' })

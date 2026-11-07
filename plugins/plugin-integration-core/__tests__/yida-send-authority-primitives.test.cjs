@@ -860,10 +860,12 @@ test('admission of a bound row reads the project registry in the same transactio
 // ⑦.3 points 3/4/5 re-run with the generated value: projected selection, re-plan equality, preview ≡ executed data) ----
 const GENERATED_ENTRY = { transform: 'generated', target: 'code', type: 'string', required: true,
   template: [{ literal: 'SYN-' }, { hash: ['project', 'componentCode', 'componentName', 'specification', 'material', 'version', 'parentCode'], form: 'uuid-36' }] }
-// Independent oracle (node:crypto SHA-1, RFC 4122 UUIDv5 bit layout, the frozen generated-hash name layout).
-function oracleGeneratedHash(values) {
+// Independent oracle (node:crypto SHA-1, RFC 4122 UUIDv5 bit layout, the generated-hash name layout: [target, value] pairs
+// sorted by target, coordinator ruling L1).
+function oracleGeneratedHash(members) {
+  const pairs = Object.entries(members).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
   const digest = createHash('sha1').update(Buffer.from('de2dfbd78b3f41a493228487ec85637f', 'hex'))
-    .update(Buffer.from(JSON.stringify(['metasheet.stock-prep.yida-generated-hash', 'v1', ...values]), 'utf8')).digest().subarray(0, 16)
+    .update(Buffer.from(JSON.stringify(['metasheet.stock-prep.yida-generated-hash', 'v1', pairs]), 'utf8')).digest().subarray(0, 16)
   digest[6] = (digest[6] & 0x0f) | 0x50
   digest[8] = (digest[8] & 0x3f) | 0x80
   const h = digest.toString('hex')
@@ -905,7 +907,8 @@ for (const mode of ['original', 'equal_integer']) {
     assert.equal(new Set(codes).size, codes.length)
     for (const row of compiled.plan.rows) {
       const p = row.payload
-      assert.equal(p.code, 'SYN-' + oracleGeneratedHash([p.project, p.componentCode, p.componentName, p.specification, p.material, p.version, p.parentCode ?? '']))
+      assert.equal(p.code, 'SYN-' + oracleGeneratedHash({ project: p.project, componentCode: p.componentCode, componentName: p.componentName,
+        specification: p.specification, material: p.material, version: p.version, parentCode: p.parentCode ?? '' }))
     }
     const request = { operationId: made.operationId, rowKey: members[index].row_key }
     const selected = await f.port.resolveSelectionInTransaction(f.trx, request)
