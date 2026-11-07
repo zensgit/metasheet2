@@ -107,7 +107,7 @@ function stripLocks(object) {
 test('PL-01 create marks exactly the plm_system columns of THIS sheet, nothing human_preserved; counts in response + audit', async () => {
   const h = mount()
   try {
-    assert.equal(PLM_IDS.length, 20, 'the frozen template carries 20 plm_system columns (13 human_preserved)')
+    assert.equal(PLM_IDS.length, 22, 'the frozen template carries 22 plm_system columns (13 human_preserved; R-71 7.4 PR-4 added issueConfirmDate + projectSpecModel)')
     assert.equal(HUMAN_IDS.length, 13)
     assert.deepEqual(PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS, PLM_IDS, 'the lock list IS the template ownership band, in template order')
     const created = await createTarget(h)
@@ -117,10 +117,10 @@ test('PL-01 create marks exactly the plm_system columns of THIS sheet, nothing h
     const object = objectOf(h, objectId)
     for (const id of PLM_IDS) assert.equal(lockOf(object, id), 'plm_system', `${id} locked`)
     for (const id of HUMAN_IDS) assert.equal(lockOf(object, id), undefined, `${id} stays editable`)
-    assert.deepEqual(created.body.data.plmColumnLock, { marked: 20, alreadyMarked: 0, missing: 0 })
+    assert.deepEqual(created.body.data.plmColumnLock, { marked: 22, alreadyMarked: 0, missing: 0 })
     const createAudit = h.auditAppends.find((entry) => entry.mode === 'sheet_created')
     assert.ok(createAudit, 'the create audit row')
-    assert.equal(createAudit.detail.plmLockMarkedFieldCount, 20)
+    assert.equal(createAudit.detail.plmLockMarkedFieldCount, 22)
     assert.equal(createAudit.detail.plmLockAlreadyMarkedFieldCount, 0)
     assert.equal(createAudit.detail.plmLockMissingFieldCount, 0)
   } finally { h.restore() }
@@ -132,11 +132,11 @@ test('PL-02 idempotent with the host read port: a re-provision writes no lock an
   const h = mount({ readPort: true })
   try {
     const first = await provisionProjectSheet({ context: h.context, projectId: STAGING, tenantId: TENANT, projectNo: PROJECT_B, env: process.env })
-    assert.deepEqual(plain(first.plmColumnLock), { fieldCount: 20, marked: 20, alreadyMarked: 0, missing: 0, readBeforeWrite: true, markedFieldIds: PLM_IDS })
+    assert.deepEqual(plain(first.plmColumnLock), { fieldCount: 22, marked: 22, alreadyMarked: 0, missing: 0, readBeforeWrite: true, markedFieldIds: PLM_IDS })
     const patchesAfterFirst = h.lockPatches.length
     const second = await provisionProjectSheet({ context: h.context, projectId: STAGING, tenantId: TENANT, projectNo: PROJECT_B, env: process.env })
     assert.equal(second.created, false)
-    assert.deepEqual(plain(second.plmColumnLock), { fieldCount: 20, marked: 0, alreadyMarked: 20, missing: 0, readBeforeWrite: true, markedFieldIds: [] })
+    assert.deepEqual(plain(second.plmColumnLock), { fieldCount: 22, marked: 0, alreadyMarked: 22, missing: 0, readBeforeWrite: true, markedFieldIds: [] })
     assert.equal(h.lockPatches.length, patchesAfterFirst, 'no lock write on the second call')
   } finally { h.restore() }
 })
@@ -150,7 +150,7 @@ test('PL-03 a column the sheet lacks is counted missing and skipped, never inven
     objectOf(h, objectId).fields.delete('componentSpec')
     const summary = await markProjectSheetPlmSystemColumns({ provisioning: h.provisioning, projectId: STAGING, objectId })
     assert.equal(summary.missing, 1)
-    assert.equal(summary.marked, 19)
+    assert.equal(summary.marked, 21)
     assert.equal(objectOf(h, objectId).fields.has('componentSpec'), false, 'nothing created')
     assert.ok(!h.lockPatches.some(([, fieldId]) => fieldId === 'componentSpec'))
   } finally { h.restore() }
@@ -198,7 +198,7 @@ test('PL-05 a host failure part-way is ONE typed code naming the column; the ret
     h.provisioning.patchObjectFieldProperty = real
     const retried = await markProjectSheetPlmSystemColumns({ provisioning: h.provisioning, projectId: STAGING, objectId })
     assert.equal(retried.alreadyMarked, 5)
-    assert.equal(retried.marked, 15)
+    assert.equal(retried.marked, 17)
     for (const id of PLM_IDS) assert.equal(lockOf(objectOf(h, objectId), id), 'plm_system', id)
   } finally { h.restore() }
 })
@@ -213,7 +213,7 @@ test('PL-06 the rollout: the repair leg marks a pre-lock registered sheet at the
     const auditBefore = h.auditAppends.length
     const res = await repair(h, { projectNo: PROJECT })
     assert.equal(res.statusCode, 200, JSON.stringify(res.body))
-    assert.deepEqual(res.body.data.plmColumnLock, { marked: 20, alreadyMarked: 0, missing: 0 })
+    assert.deepEqual(res.body.data.plmColumnLock, { marked: 22, alreadyMarked: 0, missing: 0 })
     assert.deepEqual(h.lockPatches, PLM_IDS.map((id) => [objectId, id]))
     for (const id of PLM_IDS) assert.equal(lockOf(objectOf(h, objectId), id), 'plm_system', id)
     for (const id of HUMAN_IDS) assert.equal(lockOf(objectOf(h, objectId), id), undefined, id)
@@ -221,14 +221,14 @@ test('PL-06 the rollout: the repair leg marks a pre-lock registered sheet at the
     assert.equal(appended.length, 1, 'ONE audit row')
     assert.equal(appended[0].subjectId, sheetId)
     assert.equal(appended[0].mode, 'contract_options_synced')
-    assert.equal(appended[0].detail.plmLockMarkedFieldCount, 20)
+    assert.equal(appended[0].detail.plmLockMarkedFieldCount, 22)
     assert.equal(appended[0].detail.plmLockAlreadyMarkedFieldCount, 0)
     assert.equal(appended[0].detail.plmLockMissingFieldCount, 0)
 
     h.lockPatches.length = 0
     const again = await repair(h, { projectNo: PROJECT })
     assert.equal(again.statusCode, 200)
-    assert.deepEqual(again.body.data.plmColumnLock, { marked: 0, alreadyMarked: 20, missing: 0 })
+    assert.deepEqual(again.body.data.plmColumnLock, { marked: 0, alreadyMarked: 22, missing: 0 })
     assert.deepEqual(h.lockPatches, [], 'the second rollout call writes no lock')
     assert.equal(h.records.calls.length, 0, 'the rollout touches no row — metadata only')
   } finally { h.restore() }

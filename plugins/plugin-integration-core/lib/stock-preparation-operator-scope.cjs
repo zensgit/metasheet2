@@ -175,7 +175,9 @@
 //           (its repair leg, `repairProjectSheetContractOptions`) — G1 field defect (R67): a WRITE of
 //           field metadata (the server-held contract option sets) onto the sheet the proven tenant's
 //           registry row names, in the staging project derived from this scope with no request
-//           projectId. A header-fillable tenant here would patch another tenant's project sheet. The
+//           projectId. R-71 ⑦.4 PR-3: with `addMissingColumns: true` the same leg also ADDS the frozen
+//           template's missing columns there (field metadata again, never a row; `dryRun: true` writes
+//           nothing). A header-fillable tenant here would patch another tenant's project sheet. The
 //           route's projectNo-less leg is unchanged and is NOT on this list: it keeps its
 //           `resolveAuthUserTenantId` normalizer (the GHSA step-1 write face).
 //       21. GET  …/projects/:projectNo/target/pilot    `stockPreparationProjectPilotGet`

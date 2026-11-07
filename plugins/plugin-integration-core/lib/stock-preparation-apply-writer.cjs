@@ -7,6 +7,7 @@
 
 const {
   HUMAN_PRESERVED_FIELD_IDS,
+  MACHINE_WRITEBACK_FIELD_IDS,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
@@ -255,6 +256,35 @@ function assertNoHumanFields(payload, context, humanFields = HUMAN_PRESERVED_FIE
       })
     }
   }
+}
+
+// R-71 ⑦.4 PR-4: a PLM refresh never writes a machine write-back column (MACHINE_WRITEBACK_FIELD_IDS, today
+// `issueConfirmDate`). The planner already keeps it out of every payload it builds; this is the writer's own
+// copy of that wall, so a forged or hand-built plan is refused here too, before any lookup or write.
+function assertNoMachineWritebackFields(payload, context) {
+  for (const field of MACHINE_WRITEBACK_FIELD_IDS) {
+    if (Object.prototype.hasOwnProperty.call(payload, field)) {
+      throw new StockPreparationApplyWriterError(`${context} must not include machine write-back field ${field}`, {
+        field,
+        context,
+      })
+    }
+  }
+}
+
+// The PR-8 one-re-read band must never contain a machine write-back column: if it did, a write-back landing
+// between plan and apply would stop the whole pull with `machine_columns_moved` instead of sending the patch
+// once more. The band is derived from the planner's writable band, which already excludes these ids; this
+// makes that a checked property rather than an inherited one.
+function assertWrittenBandExcludesMachineWriteback(band) {
+  for (const field of MACHINE_WRITEBACK_FIELD_IDS) {
+    if (band.includes(field)) {
+      throw new StockPreparationApplyWriterError(`the plugin-written band must not include machine write-back field ${field}`, {
+        field,
+      })
+    }
+  }
+  return band
 }
 
 // The per-row lookup, unchanged: ONE key, `LIMIT 2` so that "more than one row carries this key"
@@ -627,6 +657,7 @@ async function applyAddDecision({ recordsApi, target, decision, humanFields, tem
   let record = copyPayload(decision.record, 'decision.record')
   if (!Object.prototype.hasOwnProperty.call(record, target.keyField)) record[target.keyField] = key
   assertNoHumanFields(record, 'add record', humanFields)
+  assertNoMachineWritebackFields(record, 'add record')
   record = normalizePayloadForTemplate(record, templateFields)
 
   const existing = await findExistingRecord(recordsApi, target, key, keyIndex)
@@ -802,6 +833,7 @@ async function applyPatchDecision({ recordsApi, target, decision, humanFields, t
   const key = decisionKey(decision, target)
   let patch = copyPayload(decision.patch, 'decision.patch')
   assertNoHumanFields(patch, `${decision.decision} patch`, humanFields)
+  assertNoMachineWritebackFields(patch, `${decision.decision} patch`)
   patch = normalizePayloadForTemplate(patch, templateFields)
 
   const existing = await findExistingRecord(recordsApi, target, key, keyIndex)
@@ -1006,7 +1038,9 @@ async function applyStockPreparationPlan(input = {}) {
   const humanFields = ownership.humanPreservedFieldIds
   // PR-8: the columns THE PLUGIN WRITES (the pack-aware plm_system band + the RUN stamps), from the SAME derivation
   // as the human wall above — what the one-re-read rule compares (see patchWithVersionFence).
-  const writtenBand = Array.from(new Set([...ownership.plmWritableFieldIds, ...RUN_FIELD_IDS])).sort()
+  const writtenBand = assertWrittenBandExcludesMachineWriteback(
+    Array.from(new Set([...ownership.plmWritableFieldIds, ...RUN_FIELD_IDS])).sort(),
+  )
   // PR-8: optional; validated before any IO (a malformed map is a caller defect, never a skipped fence).
   const expectedRecords = normalizeExpectedRecords(input.expectedRecords)
   const templateFields = fieldMapForTemplate(template)
@@ -1242,6 +1276,8 @@ module.exports = {
   countAttemptedHostWrites,
   __internals: {
     assertNoHumanFields,
+    assertNoMachineWritebackFields,
+    assertWrittenBandExcludesMachineWriteback,
     isRecordVersionConflict,
     logicalRowOf,
     normalizeExpectedRecords,

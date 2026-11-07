@@ -2927,6 +2927,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       //   S3A-30 (PR-3a follow-up) a run `running` at the preview's snapshot that finishes before the preview's lock
       //          read: the preview re-consults once and answers 409 STATE_MOVED execution_finished_during_preview,
       //          never a false recovery_pending; no token, no bump.
+      //   S3A-31 (R-71 ⑦.4 PR-3, plan 7.4 real-DB 补列) an aged project sheet missing two template columns: the
+      //          pull preview 422, the repair route's dry-run writes nothing, a registry row naming another sheet 409,
+      //          the add lands exactly the two with every existing meta_fields row byte-identical, the preview ready.
       describe('S3A step-4 lanes (real Postgres, real lock, real host)', () => {
         const ownBaseLib = require(path.join(PLUGIN_LIB, 'stock-preparation-own-base.cjs')) as any
         const projectTargetsLib = require(path.join(PLUGIN_LIB, 'stock-preparation-project-targets.cjs')) as any
@@ -3138,6 +3141,12 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               return n
             },
             pilotExit: () => q('UPDATE integration_stock_prep_project_target SET pilot_enabled_at = NULL, pilot_enabled_by = NULL, pilot_readiness_version = NULL WHERE tenant_id = $1 AND project_no = $2', [tenantId, projectNo]),
+            // R-71 7.4 PR-4 (S3B-07): re-register the SAME routes over the SAME services with another env action target
+            // (a deployment re-pasting its exported binding). Every other case leaves the target as built.
+            rebindEnvTarget(target: any) {
+              routes.clear()
+              httpRoutesLib.registerIntegrationRoutes({ context: { ...routeContext, config: { ...routeContext.config, stockPreparationTableActions: [{ ...actionConfig, target }] } }, services, logger: { info() {}, warn() {}, error() {} } })
+            },
           }
         }
 
@@ -4061,6 +4070,102 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             next: '200:ready',
           })
         }, 180000)
+
+        // R-71 ⑦.4 PR-3 (plan 7.4 verification matrix, core-backend real DB: 补列): a project sheet created before the
+        // template grew — two template columns (one plm_system, one whitelisted human column) deleted from meta_fields —
+        // healed through the REAL repair route (`POST …/options/sync` with projectNo) over the production plugin-scoped
+        // host: its `runObjectFieldsRepairTransaction` (assertProjectIdAllowedForPlugin + assertObjectScope on the
+        // project-sheet object) and the real `findObjectSheet`, whose sheet id must equal the registry row's.
+        test('S3A-31 (R-71 ⑦.4 PR-3) an aged project sheet missing two template columns on the real stack: the pull preview is 422 TARGET_SCHEMA_INCOMPLETE; dry-run reports both and writes nothing; a registry row naming another sheet is 409 SHEET_MISMATCH with nothing written; the add lands exactly the two, every pre-existing meta_fields row byte-identical, one audit row counts them; the preview is ready afterwards; a second add adds 0', async () => {
+          const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
+          const ownership = new Map<string, string>(templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => [field.id, field.ownership]))
+          const humanColumn: string = templatesLib.HUMAN_PRESERVED_FIELD_IDS.find((id: string) => ownership.get(id) === 'human_preserved')
+          const templateOrder: string[] = templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => field.id)
+          const dropped = templateOrder.filter((id) => id === 'componentSpec' || id === humanColumn)
+          expect(dropped).toHaveLength(2)
+          expect(ownership.get('componentSpec')).toBe('plm_system')
+          const st = await s3aStack('s31', { pilot: false })
+          const REPAIR_PATH = '/api/integration/stock-preparation/options/sync'
+          const before = process.env[SWITCH]
+          process.env[SWITCH] = 'true'
+          const repair = (body: Record<string, unknown>) => callRoute(st.routes, 'POST', REPAIR_PATH, { user: st.users.admin, body: { projectNo: st.projectNo, ...body }, query: {} })
+          // Every meta_fields row of the sheet, byte for byte (the row as PostgreSQL serialises it).
+          const fieldRows = async () => new Map<string, string>(
+            (await q('SELECT id, row_to_json(f)::text AS text FROM meta_fields f WHERE sheet_id = $1 ORDER BY id', [st.sheetId])).rows.map((row: any) => [String(row.id), String(row.text)]),
+          )
+          const auditRows = async () => (await q(
+            `SELECT detail FROM integration_stock_prep_audit WHERE tenant_id = $1 AND action = 'project_target_create' AND mode = 'contract_options_synced' ORDER BY created_at`,
+            [st.tenantId],
+          )).rows.map((row: any) => row.detail)
+          try {
+            // Age the sheet: the two columns leave meta_fields (their physical ids are the host's stable ids).
+            const physical = await st.multitable.provisioning.resolveExistingObjectFieldIds({ projectId: st.projectId, objectId: st.objectId, fieldIds: dropped })
+            expect(Object.keys(physical).sort()).toEqual([...dropped].sort())
+            const droppedPhysical = dropped.map((id) => physical[id])
+            const deleted = await q('DELETE FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])', [st.sheetId, droppedPhysical])
+            expect(deleted.rowCount).toBe(2)
+            const aged = await fieldRows()
+
+            // The pull is blocked by the missing columns.
+            const blocked = await st.dryRun()
+            expect(blocked.statusCode, JSON.stringify(blocked.body)).toBe(422)
+            expect(errorOf(blocked).code).toBe('TARGET_SCHEMA_INCOMPLETE')
+
+            // Dry-run: both reported, nothing written, no audit row.
+            const auditBefore = (await auditRows()).length
+            const dry = await repair({ dryRun: true })
+            expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+            expect(dry.body.data.columns.missingFieldIds).toEqual(dropped)
+            expect(dry.body.data.columns.wouldAddFieldIds).toEqual(dropped)
+            expect(dry.body.data.columns.refusedFieldIds).toEqual([])
+            expect(sameJson([...(await fieldRows())], [...aged]), 'a dry-run writes no meta_fields row').toBe(true)
+            expect((await auditRows()).length).toBe(auditBefore)
+
+            // The registry row names another sheet: the real findObjectSheet disagrees → 409, the transaction rolls back.
+            await q('UPDATE integration_stock_prep_project_target SET sheet_id = $3 WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo, `sheet_not_this_object_${TOKEN}`])
+            try {
+              const mismatch = await repair({ addMissingColumns: true })
+              expect(mismatch.statusCode, JSON.stringify(mismatch.body)).toBe(409)
+              expect(errorOf(mismatch).code).toBe('TEMPLATE_COLUMN_REPAIR_SHEET_MISMATCH')
+            } finally {
+              await q('UPDATE integration_stock_prep_project_target SET sheet_id = $3 WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo, st.sheetId])
+            }
+            expect(sameJson([...(await fieldRows())], [...aged]), 'the refused add wrote nothing').toBe(true)
+            expect((await auditRows()).length).toBe(auditBefore)
+
+            // The add: exactly the two, existing rows byte-identical, one audit row.
+            const added = await repair({ addMissingColumns: true })
+            expect(added.statusCode, JSON.stringify(added.body)).toBe(200)
+            expect(added.body.data.columns.addedFieldIds).toEqual(dropped)
+            expect(added.body.data.columns.added).toBe(2)
+            const after = await fieldRows()
+            expect([...after.keys()].filter((id) => !aged.has(id)).sort()).toEqual([...droppedPhysical].sort())
+            for (const [id, text] of aged) expect(after.get(id), `meta_fields ${id} byte-identical`).toBe(text)
+            const lockOf = (text: string | undefined) => JSON.parse(String(text)).property?.humanWriteLock
+            expect(lockOf(after.get(physical.componentSpec)), 'the added PLM column is locked in the same call').toBe('plm_system')
+            expect(lockOf(after.get(physical[humanColumn])), 'the added human column stays editable').toBeUndefined()
+            const audits = await auditRows()
+            expect(audits.length).toBe(auditBefore + 1)
+            expect(audits[audits.length - 1]).toMatchObject({ columnMode: 'add', columnAddedCount: 2, columnMissingBeforeCount: 2, columnRefusedCount: 0 })
+
+            // The pull is no longer blocked.
+            const ready = await st.dryRun()
+            expect(ready.statusCode, JSON.stringify(ready.body)).toBe(200)
+            expect(ready.body.data.status).toBe('ready')
+
+            // Idempotent: a second add adds 0 and moves no meta_fields row.
+            const settled = await fieldRows()
+            const again = await repair({ addMissingColumns: true })
+            expect(again.statusCode, JSON.stringify(again.body)).toBe(200)
+            expect(again.body.data.columns.added).toBe(0)
+            expect(again.body.data.columns.missingFieldIds).toEqual([])
+            expect(sameJson([...(await fieldRows())], [...settled])).toBe(true)
+          } finally {
+            if (before === undefined) delete process.env[SWITCH]
+            else process.env[SWITCH] = before
+            await q('DELETE FROM integration_stock_prep_audit WHERE tenant_id = $1', [st.tenantId]).catch(() => {})
+          }
+        }, 180000)
         // ── S3B: batch-refresh step 4 PR-3b — the LARGE lane on the real stack ────────────────────────────────────
         // Nested in S3A for its stack (`s3aStack`, now with the four large non-write routes), its fixtures and its
         // tenant-prefix cleanup. Each case drives the REAL route module over the production host, lock, registry, plugin
@@ -4083,6 +4188,10 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //          PR B's code; a registered NOT-governed project => served end to end on the env sheet, 0 step-4 rows.
         //   S3B-06 (R-12, A11 / G1 large) the step-4 tables absent from the store binding (42P01): the four routes 503
         //          STORE_FAILED `continuation` before any source read or existing-row read; nothing written, no bump.
+        //   S3B-07 (R-71 7.4 PR-4, ported from the 備料 review's VY8D-01) switch off, the env table is THE sheet with all
+        //          35 template columns present: a binding whose explicit target.fieldIdMap was exported from the 33-column
+        //          template answers 422 TARGET_SCHEMA_INCOMPLETE `explicit` with exactly the two new columns missing on
+        //          dry-run, export and large start (nothing written); re-bound with the 35-column map, all three served.
         describe('S3B step-4 large lane (real Postgres, real lock, real host)', () => {
           const LARGE_PREFIX = 'stock-preparation:large-bom:'
           // Every large-BOM plugin_kv row of one tenant, key order (the "nothing persisted" fingerprint of a refusal).
@@ -4511,6 +4620,77 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {})
               client.release()
               if (tenantId) await cleanupLarge(tenantId)
+            }
+          }, 300000)
+
+          // R-71 7.4 PR-4: the install step "re-export the env binding after the two-column template upgrade" has a test.
+          // Ported from the 備料 review's read-only reproduction VY8D-01 (its env-table legs e2 / e3): the deployment's env
+          // table keeps all 35 physical columns, so the ONLY thing that differs between the refusal and the served call
+          // is the pasted explicit binding — the 422 below is the binding gate (assertTargetFieldMapCompleteness), never
+          // the db-mode existence check.
+          test('S3B-07 (R-71 7.4 PR-4, VY8D-01) switch OFF, the env table is THE sheet with all 35 template columns present: an action bound with an explicit target.fieldIdMap exported from the 33-column (pre-PR-4) template answers 422 TARGET_SCHEMA_INCOMPLETE fieldMapMode `explicit` with missingFields exactly issueConfirmDate + projectSpecModel on dry-run, export and large start through the REAL routes — no token, no plugin_kv row, the sheet unchanged; re-bound with the 35-column map, dry-run is ready, export 200 and large start 202', async () => {
+            const NEW = ['issueConfirmDate', 'projectSpecModel']
+            const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
+            const templateIds: string[] = templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => field.id)
+            const st = await s3aStack('b07', { pilot: false, register: false, switchOn: false })
+            const envSheetId: string = st.envTarget.sheetId
+            const fullEnv = st.envTarget
+            const fullKeys = Object.keys(fullEnv.fieldIdMap || {}).sort()
+            // The 33-column template's export: the same explicit map without the two PR-4 columns.
+            const preFieldIdMap: Record<string, string> = { ...fullEnv.fieldIdMap }
+            for (const id of NEW) delete preFieldIdMap[id]
+            const preEnv = { ...fullEnv, fieldIdMap: preFieldIdMap }
+            const fieldCount = async () => Number((await q('SELECT count(*)::int AS n FROM meta_fields WHERE sheet_id = $1', [envSheetId])).rows[0].n)
+            const refusal = (res: any) => {
+              const error = errorOf(res)
+              const details = error.details || {}
+              return {
+                status: res.statusCode,
+                code: error.code,
+                fieldMapMode: details.fieldMapMode,
+                missingFields: Array.isArray(details.missingFields) ? [...details.missingFields].sort() : details.missingFields,
+              }
+            }
+            try {
+              expect(templateIds).toHaveLength(35)
+              expect(fullKeys).toEqual([...templateIds].sort())
+              expect(Object.keys(preFieldIdMap)).toHaveLength(33)
+              expect(await fieldCount(), 'the env table carries every template column').toBe(35)
+              // Before the upgrade's binding paste: the env table pulled with the full binding.
+              await firstPullApplied(st)
+
+              // The deployment keeps its 33-column explicit binding.
+              st.rebindEnvTarget(preEnv)
+              const main0 = await st.main(envSheetId)
+              const tokens0 = await kvTokens()
+              const kv0 = await largeRows(st.tenantId)
+              const refused = {
+                dryRun: refusal(await st.dryRun()),
+                export: refusal(await st.exportLines()),
+                largeStart: refusal(await st.largeStart()),
+              }
+              const writes = {
+                tokens: (await kvTokens()) - tokens0,
+                kvUnchanged: sameJson(await largeRows(st.tenantId), kv0),
+                mainUnchanged: sameJson(await st.main(envSheetId), main0),
+                fieldCount: await fieldCount(),
+              }
+              console.log(`[S3B-07] ${JSON.stringify({ refused, writes })}`)
+              const explicit422 = { status: 422, code: 'TARGET_SCHEMA_INCOMPLETE', fieldMapMode: 'explicit', missingFields: [...NEW].sort() }
+              expect(refused).toEqual({ dryRun: explicit422, export: explicit422, largeStart: explicit422 })
+              expect(writes).toEqual({ tokens: 0, kvUnchanged: true, mainUnchanged: true, fieldCount: 35 })
+
+              // The install step: the binding re-exported from the 35-column template.
+              st.rebindEnvTarget(fullEnv)
+              const ready = await st.dryRun()
+              expect(ready.statusCode, JSON.stringify(ready.body)).toBe(200)
+              expect(ready.body.data.status).toBe('ready')
+              const exported = await st.exportLines()
+              expect(exported.statusCode, JSON.stringify(exported.body)).toBe(200)
+              const started = await st.largeStart()
+              expect(started.statusCode, JSON.stringify(started.body)).toBe(202)
+            } finally {
+              await cleanupLarge(st.tenantId)
             }
           }, 300000)
         })
