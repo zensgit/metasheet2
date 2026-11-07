@@ -959,7 +959,7 @@ describe('slice 3b — C2-F1: a write inside the body of an entry or a seam, thr
     ])
   })
 
-  const PROVISIONING_ANCHOR = '  await fenceWriterEntry(input.query, sheetId)\n  const existing = await input.query(\n    `SELECT id, sheet_id, name, type, property, "order"\n     FROM meta_fields\n     WHERE sheet_id = $1 AND id = $2`,'
+  const PROVISIONING_ANCHOR = '  await fenceWriterEntry(input.query, sheetId)\n  const existing = await input.query(PATCH_OBJECT_FIELD_PROPERTY_READ_SQL, [sheetId, physicalFieldId])'
 
   it('W1a (REAL tree): provisioning.patchObjectFieldProperty calling a new writer after its fence reds the guard — and only this check', () => {
     const c = patchedReal(
