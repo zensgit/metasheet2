@@ -500,6 +500,51 @@ components:
               type: string
             message:
               type: string
+    SecurityActionError:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          enum:
+            - false
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - UNAUTHORIZED
+                - PASSWORD_CHANGE_REQUIRED
+                - SECURITY_ACTION_SESSION_REQUIRED
+                - SECURITY_ACTION_PURPOSE_UNAVAILABLE
+                - SECURITY_ACTION_METHOD_UNAVAILABLE
+                - SECURITY_ACTION_HIGH_PRIVILEGE_SELF_SERVICE_DENIED
+                - SECURITY_ACTION_ASSURANCE_INSUFFICIENT
+                - SECURITY_ACTION_CONNECTION_NOT_PERMITTED
+                - SECURITY_ACTION_CREDENTIAL_REJECTED
+                - SECURITY_ACTION_ORG_CONTEXT_REQUIRED
+                - SECURITY_ACTION_TARGET_CONFLICT
+                - SECURITY_ACTION_STATE_CHANGED
+                - SECURITY_ACTION_INVALID_REQUEST
+                - SECURITY_ACTION_RATE_LIMITED
+                - SECURITY_ACTION_UNAVAILABLE
+                - SECURITY_ACTION_PROOF_UNAVAILABLE
+            message:
+              type: string
+            details:
+              type: object
+              description: Closed-set values only; never a request value.
+              properties:
+                nextStep:
+                  type: string
+                  enum:
+                    - admin_assisted_local_credential
+                retryAfter:
+                  type: integer
+                fields:
+                  type: array
+                  items:
+                    type: string
     DirectoryIntegrationCapability:
       type: object
       required:
@@ -21032,6 +21077,158 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/auth/security-actions/verify:
+    post:
+      summary: Re-verify the signed-in user for one security action
+      description: >-
+        Mounted only when SECURITY_ACTION_PROOF_ENABLED is exactly 'true'.
+        Returns a 300-second single-use proof bound to the session, the
+        authenticated organization, the purpose and the target. A purpose whose
+        prerequisites are not delivered is refused before any data is read.
+        Before authentication the route gives no answer of its own. Responses
+        are not cacheable.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - purpose
+                - connectionId
+                - method
+                - password
+              properties:
+                purpose:
+                  type: string
+                  enum:
+                    - external_identity_bind
+                    - external_identity_unbind
+                    - login_grant_enable
+                    - login_grant_disable
+                connectionId:
+                  type: string
+                  format: uuid
+                targetIdentityId:
+                  type: string
+                  format: uuid
+                  description: >-
+                    Required for every purpose except external_identity_bind,
+                    and refused for it.
+                expectedBindingRevision:
+                  type: integer
+                  minimum: 0
+                  description: Present exactly when targetIdentityId is present.
+                method:
+                  type: string
+                  enum:
+                    - local_password
+                password:
+                  type: string
+                  format: password
+                  minLength: 1
+                  maxLength: 1024
+                clientBindingDigest:
+                  type: string
+                  pattern: ^[0-9a-f]{64}$
+      responses:
+        '200':
+          description: A single-use proof was issued
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum:
+                  - no-store
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    type: object
+                    properties:
+                      proof:
+                        type: string
+                        description: Opaque; present only in this response body.
+                      purpose:
+                        type: string
+                        enum:
+                          - external_identity_bind
+                          - external_identity_unbind
+                          - login_grant_enable
+                          - login_grant_disable
+                      connectionId:
+                        type: string
+                        format: uuid
+                      method:
+                        type: string
+                        enum:
+                          - local_password
+                      assurance:
+                        type: string
+                        enum:
+                          - local_password
+                      expiresAt:
+                        type: string
+                        format: date-time
+                      ttlSeconds:
+                        type: integer
+                        enum:
+                          - 300
+        '401':
+          description: No usable session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityActionError'
+        '403':
+          description: >-
+            Refused (purpose unavailable, method unavailable, policy refusal or
+            rejected credential)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityActionError'
+        '409':
+          description: Organization context, target or state conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityActionError'
+        '422':
+          description: >-
+            Request does not satisfy the closed schema; details.fields names
+            schema fields or the fixed entry _unknown
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityActionError'
+        '429':
+          description: >-
+            Per-user failure limit reached; Retry-After carries
+            details.retryAfter
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityActionError'
+        '503':
+          description: Verification unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityActionError'
   /api/comments:
     get:
       summary: List comments

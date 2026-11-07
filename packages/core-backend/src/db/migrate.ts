@@ -150,6 +150,8 @@ Notes:
   zzzz20261104150000_create_task_source_links.ts refuses while
   task_source_links holds any row; roll back the application build and
   leave the table in place. Likewise
+  zzzz20261106120000_create_security_action_challenges.ts refuses while
+  security_action_challenges holds any row, and
   zzzz20261106130000_create_directory_integration_capabilities.ts refuses
   while directory_integration_capabilities or
   directory_integration_capability_history holds any row.`)
