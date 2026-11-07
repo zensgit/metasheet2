@@ -401,8 +401,12 @@ export class SnapshotService {
       // Restore items by type
       for (const item of items) {
         try {
-          const data = JSON.parse(item.data) as Record<string, unknown>
-          await this.restoreItem(item.item_type, item.item_id, data)
+          // PostgreSQL decodes JSONB already; older adapters may return serialized JSON.
+          const data: unknown = typeof item.data === 'string' ? JSON.parse(item.data) : item.data
+          if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+            throw new Error('Invalid snapshot item data')
+          }
+          await this.restoreItem(item.item_type, item.item_id, data as Record<string, unknown>)
           itemsRestored++
         } catch (err) {
           this.logger.warn(`Failed to restore item ${item.id}`, err as Error)
