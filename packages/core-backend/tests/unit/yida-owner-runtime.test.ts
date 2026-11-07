@@ -71,6 +71,7 @@ function fixture(options: {
   source?: string; enablement?: unknown; readEnablement?: () => unknown
   factory?: Factory; database?: YidaOwnerRuntimeDependencies['database']
   security?: YidaOwnerRuntimeDependencies['security']; result?: unknown
+  readMultiTarget?: () => unknown
 } = {}) {
   const authority = fakeAuthority()
   const coreFactory = vi.fn(options.factory ?? (() => authority))
@@ -80,7 +81,8 @@ function fixture(options: {
   const security = options.security ?? { encrypt: vi.fn(async text => `enc:${text}`), decrypt: vi.fn(async () => 'synthetic-plain') }
   const fetcher = vi.fn(async () => { throw new Error('No protocol IO in control unit tests') })
   const readEnablement = vi.fn(options.readEnablement ?? (() => Object.hasOwn(options, 'enablement') ? options.enablement : 'true'))
-  const runtime = module.createYidaOwnerRuntime({ database, security, fetch: fetcher, readEnablement })
+  const runtime = module.createYidaOwnerRuntime({ database, security, fetch: fetcher, readEnablement,
+    ...(options.readMultiTarget ? { readMultiTargetEnablement: options.readMultiTarget } : {}) })
   const submit = vi.fn(async () => options.result ?? delivered)
   const createPrimitives = vi.fn(() => Object.freeze({}))
   const createSendPort = vi.fn(() => Object.freeze({ submit, inspect: vi.fn() }))
@@ -91,6 +93,24 @@ async function active(options: Parameters<typeof fixture>[0] = {}) {
   const f = fixture(options)
   const registration = await f.runtime.createPluginCapability().activate(f.binding)
   return { ...f, registration }
+}
+
+// Y6 (carry-forward from #6794): a source binding is produced only by the sheet-source route, which exists only
+// while the multi-target switch reads exactly 'true'. If the switch flips OFF during the sheet read, the route
+// still hands prepareDraft a binding; the runtime must refuse it at its input boundary, before any authority work.
+const boundDraft = Object.freeze({ config: {}, rowsText: '[]', sourceBinding: Object.freeze({ sheetId: 'synthetic-sheet' }) })
+const MULTI_TARGET_OFF: ReadonlyArray<[string, (() => unknown) | undefined]> = [['absent', undefined], ["'false'", () => 'false'],
+  ["'TRUE'", () => 'TRUE'], ['boolean true', () => true], ['throwing', () => { throw new Error('synthetic-private-switch') }]]
+async function sourceBindingRefusedWhileOff(source = originalSource) {
+  for (const [name, readMultiTarget] of MULTI_TARGET_OFF) {
+    const f = await active({ source, readMultiTarget })
+    try {
+      await expect(f.runtime.prepareDraft(actor, boundDraft), name).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+      expect(f.authority.prepareDraft, name).not.toHaveBeenCalled()
+      expect(f.coreFactory, name).not.toHaveBeenCalled()
+      expect(f.database.transaction, name).not.toHaveBeenCalled()
+    } finally { await f.runtime.stop() }
+  }
 }
 
 const networkSpies: ReturnType<typeof vi.spyOn>[] = []
@@ -485,6 +505,23 @@ describe('Yida owner runtime control paths (NOT positive authority proof)', () =
     await runtime.stop()
   })
 
+  it('Y6: prepareDraft refuses a sourceBinding unless the multi-target switch reads exactly true (absent, false, TRUE, true, throwing)', async () => {
+    await sourceBindingRefusedWhileOff()
+    // Positive control: with the switch exactly 'true' the same input reaches the authority unchanged.
+    const on = await active({ readMultiTarget: () => 'true' })
+    try {
+      await expect(on.runtime.prepareDraft(actor, boundDraft)).resolves.toEqual({ operationId: 'synthetic-operation' })
+      expect(on.authority.prepareDraft).toHaveBeenCalledTimes(1)
+      expect(on.authority.prepareDraft.mock.calls[0][0]).toEqual(boundDraft)
+    } finally { await on.runtime.stop() }
+    // A draft without a binding (pasted rows) is not affected by the switch.
+    const off = await active({ readMultiTarget: () => 'false' })
+    try {
+      const { sourceBinding: _binding, ...pasted } = boundDraft
+      await expect(off.runtime.prepareDraft(actor, pasted)).resolves.toEqual({ operationId: 'synthetic-operation' })
+    } finally { await off.runtime.stop() }
+  })
+
   it('projects a closed submit view and rejects execution authority/material additions', async () => {
     for (const key of ['permit', 'handle', 'credential', 'material', 'token', 'config']) {
       const f = await active({ result: { ...delivered, [key]: 'synthetic-private' } })
@@ -773,6 +810,8 @@ describe('in-memory guard mutation probes (no repository writes)', () => {
         try { await expect(f.runtime.submit(actor, submission)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_UNAVAILABLE' }) }
         finally { await f.runtime.stop() }
       } },
+      { name: 'draft/source-binding-switch-gated', from: "if (Object.hasOwn(parsed, 'sourceBinding') && !multiTargetOn()) fail('INPUT')", to: '',
+        test: source => sourceBindingRefusedWhileOff(source) },
       { name: 'errors/own-runtime-brand', from: 'if (own) fail(own)', to: '', test: async source => {
         const f = await active({ source, enablement: 'false' })
         try { await expect(f.runtime.preview(actor, selected)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' }) }

@@ -380,12 +380,19 @@ test('examples are local, parseable, and provide two distinct hand-authored layo
 // R-71 ⑦.4 (A8): the planner may import exactly one module, the material-code leaf, and every module
 // reached from it (the leaf, which must import nothing) is scanned the same way: no import or require
 // of any kind, no network primitive. A new import anywhere in that closure turns this red.
+// A static import or re-export can start a line, or follow a statement end (';' or '}'), a block opening or a
+// block comment on the same line: the scan anchors at any of those, not only at the line start (Y6a verifier
+// LOW-1, mutant MK4: `function fail(kind) { … }; import { createHash } from 'node:crypto'`).
 const PLANNER_IMPORT_ALLOWLIST = ['./yida-material-code.mjs']
 const NETWORK_CALL = /\b(?:fetch|XMLHttpRequest|WebSocket|sendBeacon|EventSource)\s*\(|\bnew\s+(?:XMLHttpRequest|WebSocket|EventSource)\b/
+const STATEMENT_START = String.raw`(?:^|[;{}]|\*\/)\s*`
+const STATIC_IMPORT = new RegExp(STATEMENT_START + String.raw`(?:import|export)\b[^\n]*?\bfrom\s*['"]([^'"]+)['"]|`
+  + STATEMENT_START + String.raw`import\s*['"]([^'"]+)['"]`, 'gm')
+const IMPORT_STATEMENT = new RegExp(STATEMENT_START + String.raw`import\b(?!\s*[(.])`, 'gm')
 function moduleImports(source) {
-  const statements = [...source.matchAll(/^\s*(?:import|export)\b[^\n]*?\bfrom\s*['"]([^'"]+)['"]|^\s*import\s*['"]([^'"]+)['"]/gm)]
+  const statements = [...source.matchAll(STATIC_IMPORT)]
   return { specifiers: statements.map((match) => match[1] ?? match[2]), dynamic: /\bimport\s*\(|\brequire\s*\(/.test(source),
-    importLines: (source.match(/^\s*import\b/gm) || []).length }
+    importLines: (source.match(IMPORT_STATEMENT) || []).length }
 }
 function importClosure(entryPath, allowlist) {
   const scanned = []
@@ -944,4 +951,28 @@ test('source binding (Y4): transformDependencies names the columns ONE entry rea
   }
   assert.throws(() => transformDependencies(copy), { code: 'YIDA_STATIC_CONFIG_INVALID' })
   assert.ok(new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID'))
+})
+
+test('R-71 ⑦.4 (Y6): transformDependencies of a generated entry are the sources of its field parts, hash members and preset inputs', async () => {
+  const { createYidaTransformExample, transformDependencies, generatedTemplateDependencies, validateYidaStaticConfig } = await modulePromise
+  const example = createYidaTransformExample()
+  const preset = example.config.fieldMap.find((entry) => entry.transform === 'generated')
+  // The shipped material template: one preset part reading sourceLineId (idempotencyKey) and project (projectNo).
+  const presetColumns = transformDependencies(preset, example.config)
+  assert.deepEqual(presetColumns, ['idempotencyKey', 'projectNo'])
+  assert.equal(Object.isFrozen(presetColumns), true)
+  // A field part, a literal and a hash over the key: every member resolved through its direct target, sorted by code
+  // point, de-duplicated (materialGrade is both a field part and a hash member), literals read nothing.
+  const layout = structuredClone(example.config)
+  layout.fieldMap.at(-1).template = [{ field: 'materialGrade' }, { literal: '/' }, { hash: [...layout.businessKey, 'materialTypeText'], form: 'uuid-32' }]
+  const normalized = validateYidaStaticConfig(layout).normalized
+  const hashed = transformDependencies(normalized.fieldMap.at(-1), normalized)
+  assert.deepEqual(hashed, ['blankType', 'componentCode', 'componentName', 'componentSpec', 'material', 'parentComponentCode', 'projectNo', 'sourceVersion'])
+  assert.equal(Object.isFrozen(hashed), true)
+  // It is the same answer as the generated reader's own export, and the config's union covers it.
+  assert.deepEqual(hashed, generatedTemplateDependencies(normalized.fieldMap.at(-1), normalized))
+  // Without its config, or against a config that is not its own, a generated entry is refused (never an empty list).
+  for (const config of [undefined, null, example.config, transformLayout(TRANSFORM_COLUMN_CASES.direct.entry)]) {
+    assert.throws(() => transformDependencies(normalized.fieldMap.at(-1), config), { code: 'YIDA_STATIC_CONFIG_INVALID' })
+  }
 })

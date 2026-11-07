@@ -554,6 +554,42 @@ test('R-71 ⑦.3: a v3 snapshot that loses its concat-only columns after the tok
   assert.equal(h.businessFetches.length, 0)
 })
 
+// R-71 ⑦.4 (Y6): the shipped v3 example carries the generated material code (one preset part). The runner never
+// stores or receives a code: it re-plans the snapshot row, so the form body carries the code recomputed from the
+// snapshot, byte-equal to an independent oracle (node:crypto SHA-1, RFC 4122 UUIDv5 layout, frozen name layout).
+function oracleMaterialCode(keyValue, projectNo) {
+  const digest = createHash('sha1').update(Buffer.from('6d37f698e75c4b5e8eefb702478a1cfb', 'hex'))
+    .update(Buffer.from(JSON.stringify(['metasheet.stock-prep.yida-material-code', 'v1', keyValue, projectNo]), 'utf8')).digest().subarray(0, 16)
+  digest[6] = (digest[6] & 0x0f) | 0x50
+  digest[8] = (digest[8] & 0x3f) | 0x80
+  const h = digest.toString('hex')
+  return `WLBH-${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`.toUpperCase()
+}
+
+test('R-71 ⑦.4: a v3 snapshot with a generated entry sends the code recomputed from the snapshot row', async (t) => {
+  const h = await v3Harness(t)
+  assert.equal(h.snapshot.config.fieldMap.some((entry) => entry.transform === 'generated'), true)
+  safeResult(await h.runner.run(request()), 'acknowledged', true)
+  assert.equal(h.businessFetches.length, 1)
+  const sent = JSON.parse(JSON.parse(h.businessFetches[0][1].body).formDataJson)
+  assert.equal(sent.materialCodeText, oracleMaterialCode(h.snapshot.row.idempotencyKey, h.snapshot.row.projectNo))
+  assert.equal(sent.materialCodeText, h.plan().rows[0].payload.materialCodeText)
+  assert.deepEqual(sent, h.plan().rows[0].payload)
+})
+
+test('R-71 ⑦.4: a v3 snapshot whose code input changes after the token sends nothing', async (t) => {
+  const h = await v3Harness(t)
+  h.resolver = async () => {
+    const next = copy(h.snapshot)
+    // The project of the code changes between the two reads: another code, so the verified payload no longer matches.
+    if (h.snapshots.length === 2) next.row.projectNo = 'DEMO-P9'
+    return next
+  }
+  await rejects(h.runner.run(request()), 'CHANGED')
+  assert.equal(h.db.rows()[0].status, 'prepared')
+  assert.equal(h.businessFetches.length, 0)
+})
+
 // ---- Source binding (design baseline v2.3 §7.2): the two row digests travel from the snapshot into the ledger ----
 test('a bound snapshot carries both digests into the ledger row and the version-2 execution digest; a half binding is SNAPSHOT_INVALID', async (t) => {
   const h = await harness(t)

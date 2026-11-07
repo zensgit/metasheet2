@@ -855,3 +855,83 @@ test('admission of a bound row reads the project registry in the same transactio
   assert.equal(f.calls.some(sql => sql.includes(REGISTRY)), false)
   assert.deepEqual([f.state[LEDGER][1].source_record_digest, f.state[LEDGER][1].creation_identity_digest], [null, null])
 })
+
+// ---- R-71 ⑦.4 PR-2 (Y6): a v3 draft with a generated entry through the send authority (SR5 generated part, and the
+// ⑦.3 points 3/4/5 re-run with the generated value: projected selection, re-plan equality, preview ≡ executed data) ----
+const GENERATED_ENTRY = { transform: 'generated', target: 'code', type: 'string', required: true,
+  template: [{ literal: 'SYN-' }, { hash: ['project', 'componentCode', 'componentName', 'specification', 'material', 'version', 'parentCode'], form: 'uuid-36' }] }
+// Independent oracle (node:crypto SHA-1, RFC 4122 UUIDv5 bit layout, the frozen generated-hash name layout).
+function oracleGeneratedHash(values) {
+  const digest = createHash('sha1').update(Buffer.from('de2dfbd78b3f41a493228487ec85637f', 'hex'))
+    .update(Buffer.from(JSON.stringify(['metasheet.stock-prep.yida-generated-hash', 'v1', ...values]), 'utf8')).digest().subarray(0, 16)
+  digest[6] = (digest[6] & 0x0f) | 0x50
+  digest[8] = (digest[8] & 0x3f) | 0x80
+  const h = digest.toString('hex')
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`.toUpperCase()
+}
+function generatedSource(f) {
+  const source = v3Source(f.source, [GENERATED_ENTRY])
+  const columns = [...new Set(source.config.fieldMap.flatMap(entry => entry.source ? [entry.source] : []).concat(['ext_size']))]
+  const fieldBindings = Object.fromEntries(columns.map(column => [column, 'fld_' + column]))
+  const rows = JSON.parse(source.rowsText)
+  return { unbound: source, bound: { ...source, sourceBinding: { sheetId: 'sheet_registered', keyFieldId: 'fld_componentCode', fieldBindings,
+    records: rows.map((row, ordinal) => ({ recordId: `rec_${ordinal}`, keyValue: row.componentCode, projectNo: 'DEMO-P1' })) } } }
+}
+
+test('R-71 ⑦.4 SR5 (generated): an unbound draft with a generated entry is refused before any draft row; without it the pasted draft is written unbound', async () => {
+  const f = await fixture(), { unbound } = generatedSource(f)
+  const operations = f.state[OP].length, rows = f.state[ROWS].length
+  await rejected(f.port.prepareDraftInTransaction(f.trx, unbound))
+  assert.deepEqual([f.state[OP].length, f.state[ROWS].length, f.state[DRAFT_AUDIT].length], [operations, rows, 0])
+  // The draft-time budget answers the same refusal (one compiler, one rule).
+  assert.throws(() => f.port.draftSendBudget(unbound), { code: 'YIDA_SEND_AUTHORITY_UNAVAILABLE' })
+  // The same pasted rows without the generated entry: an ordinary v3 draft whose rows carry no binding digest.
+  const made = await f.port.prepareDraftInTransaction(f.trx, v3Source(f.source))
+  const members = f.state[ROWS].filter(row => row.operation_id === made.operationId)
+  assert.equal(members.length, 2)
+  assert.equal(members.every(row => row.source_record_digest === null && row.creation_identity_digest === null), true)
+})
+
+for (const mode of ['original', 'equal_integer']) {
+  test(`R-71 ⑦.4 (⑦.3 points 3-5 with generated) ${mode}: a bound generated draft selects projected rows; re-plan, preview and executed data carry the same code`, async () => {
+    const f = await fixture(mode), [, { compileYidaSendDraft }, { buildYidaStaticPlan, yidaTransformSourceColumns }] = await modules
+    const { bound } = generatedSource(f), index = mode === 'original' ? 0 : 2
+    const made = await f.port.prepareDraftInTransaction(f.trx, bound)
+    const members = f.state[ROWS].filter(row => row.operation_id === made.operationId).sort((a, b) => a.ordinal - b.ordinal)
+    const compiled = compileYidaSendDraft(bound)
+    assert.deepEqual(members.map(row => row.payload_digest), compiled.rowSpecs.map(spec => spec.payloadDigest))
+    // Every planned row has its own code (split rows included), equal to the independent oracle over its own key tuple.
+    const codes = compiled.plan.rows.map(row => row.payload.code)
+    assert.equal(new Set(codes).size, codes.length)
+    for (const row of compiled.plan.rows) {
+      const p = row.payload
+      assert.equal(p.code, 'SYN-' + oracleGeneratedHash([p.project, p.componentCode, p.componentName, p.specification, p.material, p.version, p.parentCode ?? '']))
+    }
+    const request = { operationId: made.operationId, rowKey: members[index].row_key }
+    const selected = await f.port.resolveSelectionInTransaction(f.trx, request)
+    // (4) the selection is projected onto the columns the mapping reads, generated inputs included, nothing else.
+    const columns = yidaTransformSourceColumns(selected.config)
+    assert.deepEqual(Object.keys(selected.selectedRow).sort(), [...columns])
+    assert.equal(JSON.stringify(selected.selectedRow).includes('SYN-UNMAPPED'), false)
+    // (3) a one-row re-plan of the projected row reproduces the compiled payload, code included.
+    const planned = buildYidaStaticPlan({ config: selected.config, rows: [selected.selectedRow] }).rows[0]
+    assert.deepEqual(planned.payload, selected.plan.rows[index].payload)
+    assert.equal(planned.payload.code, codes[index])
+    // (5) preview is the executed data, and the execution digest covers exactly those bytes (with both binding digests).
+    const preview = await f.port.previewInTransaction(f.trx, request)
+    assert.deepEqual(preview.payload, selected.plan.rows[index].payload)
+    const authorization = grant()
+    const data = { ...selected.plan.rows[index].protocolPreview.data, formDataJson: stableCanonicalStringify(preview.payload) }
+    assert.equal(JSON.parse(data.formDataJson).code, codes[index])
+    assert.equal(f.port.executionPayloadDigest(selected, authorization), createHash('sha256').update(stableCanonicalStringify({
+      version: 2, grantRef: authorization.grantRef, expiresAt: authorization.expiresAt, actorId: authorization.actorId,
+      targetRef: selected.targetRef, targetRevision: selected.targetRevision, planRevision: selected.planRevision,
+      intent: 'create', data, formUuid: selected.config.target.formUuid,
+      sourceRecordDigest: selected.sourceRecordDigest, creationIdentityDigest: selected.creationIdentityDigest })).digest('hex'))
+    assert.deepEqual(selected.sourceBinding.fieldDependencies.code, ['fld_componentCode', 'fld_componentName', 'fld_material',
+      'fld_parentCode', 'fld_projectNo', 'fld_specification', 'fld_version'])
+    assert.deepEqual(f.port.sendBudget(selected, authorization), { withinBudget: true })
+    assert.deepEqual(f.port.draftSendBudget(bound), { withinBudget: true })
+    assert.equal(f.state[LEDGER].length, 0)
+  })
+}

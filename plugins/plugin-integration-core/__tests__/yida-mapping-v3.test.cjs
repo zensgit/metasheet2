@@ -346,7 +346,8 @@ test('lookup stays out: the static plan, allocation and local compile run with z
 // if the shipped v2 material template (the L4 layout) and the v3 material template define the key
 // identically: same key targets, types and nullable parts, so the same rows keep the same identity.
 test('the shipped v2 material template and the v3 material template share one key definition and row identities', async () => {
-  const { compileYidaSendDraft } = await persistedPromise
+  const { compileYidaSendDraft, YidaDraftPlanError } = await persistedPromise
+  const { compileYidaLocalDraft } = await draftPromise
   const { createYidaTransformExample } = await plannerPromise
   const fs = require('node:fs')
   const read = (file) => JSON.parse(fs.readFileSync(file, 'utf8'))
@@ -357,7 +358,12 @@ test('the shipped v2 material template and the v3 material template share one ke
   const allocation = { ...v2.allocation, projects: ['DEMO-P1', 'DEMO-P2'] }
   assert.deepEqual(v3.allocation, v2.allocation)
   const before = compileYidaSendDraft({ config: { ...v2.rules, target }, rowsText, allocation })
-  const after = compileYidaSendDraft({ config: { ...v3.rules, target }, rowsText, allocation })
+  // The v3 template carries the generated material code, so its persisted entry needs a server source binding
+  // (SOURCE_UNBOUND, R-71 ⑦.4): pasted rows are refused there and compared through the same compiler's local entry.
+  assert.equal(v3.rules.fieldMap.some((entry) => entry.transform === 'generated'), true)
+  assert.throws(() => compileYidaSendDraft({ config: { ...v3.rules, target }, rowsText, allocation }),
+    (error) => error instanceof YidaDraftPlanError && error.code === 'YIDA_DRAFT_PLAN')
+  const after = compileYidaLocalDraft({ config: { ...v3.rules, target }, rowsText, allocation })
   assert.equal(after.keyDefinition.fields.length, 7)
   assert.deepEqual(after.keyDefinition, before.keyDefinition)
   assert.equal(after.keyDefinitionDigest, before.keyDefinitionDigest)
@@ -441,6 +447,10 @@ test('A1 generated config closure: shape, caps, part targets, G1 and key placeme
     'unknown entry key': generatedConfig(undefined, {}, { separator: '-' }),
     'entry without template': (() => { const layout = generatedConfig(); delete layout.fieldMap.at(-1).template; return layout })(),
     'unknown part key': generatedConfig([{ literal: 'x', note: 'y' }, KEY_HASH]),
+    // Every part kind has an exact key list (Y6a verifier LOW-2: MI2 / MI3), not only literal and field.
+    'unknown key on a hash part': generatedConfig([{ ...KEY_HASH, note: 'y' }]),
+    'unknown key on a field part': generatedConfig([{ field: 'project', note: 'y' }, KEY_HASH]),
+    'unknown key on a preset part': generatedConfig([{ preset: 'material-code-v1', rowIdOf: 'drawing', projectOf: 'project', note: 'y' }]),
     'part with two kinds': generatedConfig([{ field: 'project', literal: 'x' }, KEY_HASH]),
     'unknown part kind': generatedConfig([{ date: 'project', format: 'YYYYMMDD' }, KEY_HASH]),
     'template not an array': generatedConfig('PRJ-'),
