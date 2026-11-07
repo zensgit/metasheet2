@@ -530,6 +530,7 @@ StockPreparationProjectSyncPanel.spec.ts
 StockPreparationProjectTarget
 StockPreparationProjectWorkspaceView
 StockPreparationRail
+StockPreparationRefreshChangePlan
 StockPreparationRefreshQueue
 StockPreparationRefreshState
 StockPreparationRouteFailedPlain
