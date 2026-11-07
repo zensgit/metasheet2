@@ -388,6 +388,13 @@ export default defineConfig({
       // wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml (pinned by
       // plugin-tests-parallel-contract.test.mjs).
       'tests/integration/directory-adapter-golden-parity.db.test.ts',
+      // Directory integration capability tables against real PostgreSQL: structure and constraints,
+      // update and append-only guards, the guarded down(), the table-existence probe on an open
+      // transaction, and the login scope unique index. DATABASE_URL-gated; excluded here so the no-DB
+      // job cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
+      // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
+      // tests/unit/directory-integration-capabilities-wiring.test.ts).
+      'tests/integration/directory-integration-capabilities.db.test.ts',
       // D21 authorization version protocol (slice Y5a): the trigger coverage matrix (raw SQL + FK
       // cascade writers), the two-connection barrier cases and the holder-vs-writer deadlock
       // mapping need real PostgreSQL. DATABASE_URL-gated; excluded here so the no-DB job cannot
