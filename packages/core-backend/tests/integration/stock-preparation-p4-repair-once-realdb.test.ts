@@ -20,6 +20,8 @@ import type { PluginContext } from '../../src/types/plugin'
 import { defineStockPreparationProjectWriteLockRealDbCases } from './stock-preparation-project-write-lock-realdb.cases'
 import { defineStockPreparationGenericWriterGovernanceRealDbCases } from './stock-preparation-generic-writer-governance-realdb.cases'
 import { defineStockPreparationManualRowsRealDbCases } from './stock-preparation-manual-rows-realdb.cases'
+import { defineStockPreparationSheetCensusRealDbCases } from './stock-preparation-sheet-census-realdb.cases'
+import { defineStockPreparationPullBatchBandRealDbCases } from './stock-preparation-pull-batch-band-realdb.cases'
 
 const require = createRequire(import.meta.url)
 const {
@@ -506,3 +508,7 @@ defineStockPreparationGenericWriterGovernanceRealDbCases()
 // 人工补充行 B1 (ADR adr-stock-prep-manual-rows-20261030 §8 「B1 插件」 1 / 10): the pull never touches a `manual:` row, the
 // export carries 来源, and the R-60 boundary holds (real PG, MR-RD-*).
 defineStockPreparationManualRowsRealDbCases()
+// Batch-refresh step 6d-1a (S6-0): the R-line doubled-sheet census pack runs on real PG with parity to the pure module (S9D-02/03).
+defineStockPreparationSheetCensusRealDbCases()
+// 批次标识 BI-5b (R-65): manual rows on a sheet carrying the pull-batch band get 人工补充 in both band cells; the marker cannot be forged or dropped (real PG, BIM-RD-*).
+defineStockPreparationPullBatchBandRealDbCases()

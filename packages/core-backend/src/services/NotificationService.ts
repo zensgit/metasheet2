@@ -35,6 +35,12 @@ import {
   type EmailTransportEnv,
   type EmailTransportReadinessReport,
 } from './email-transport-readiness'
+import {
+  NOTIFICATION_NO_CHANNEL_RECIPIENTS_REASON,
+  NOTIFICATION_TRANSPORT_DISABLED_REASON,
+  NOTIFICATION_TRANSPORT_NOT_CONFIGURED_REASON,
+  NOTIFICATION_TRANSPORT_SIMULATED_REASON,
+} from './notification-delivery-outcome'
 
 /**
  * Email notification payload
@@ -82,15 +88,6 @@ interface WebhookPayload {
   content: string
   data?: unknown
   metadata?: Record<string, unknown>
-}
-
-/**
- * Feishu message payload
- */
-interface FeishuMessagePayload {
-  title: string
-  content: string
-  data?: unknown
 }
 
 function resolvePositiveInt(value: unknown, fallback: number, min = 1, max = Number.MAX_SAFE_INTEGER): number {
@@ -208,20 +205,77 @@ export class EmailNotificationChannel implements NotificationChannel {
     this.smtpTransportFactory = resolveEmailSmtpTransportFactory(config)
   }
 
+  /**
+   * Result contract (see `NotificationResult`): `sent` only after the SMTP transport accepted every
+   * email-type recipient (at least one); `simulated` in mock mode (no transport call); `cancelled` when
+   * nothing is attempted (no email-type recipient, or transport disabled); `failed` for configuration
+   * failures and transport errors, with `acceptedCount` naming how many recipients were accepted first.
+   */
   async sender(notification: Notification, recipients: NotificationRecipient[]): Promise<NotificationResult> {
     const id = `email_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`
+    const emailRecipients = recipients.filter(r => r.type === 'email')
+    const recipientCount = emailRecipients.length
 
+    if (recipientCount === 0) {
+      return {
+        id,
+        status: 'cancelled',
+        metadata: {
+          channel: 'email',
+          reason: NOTIFICATION_NO_CHANNEL_RECIPIENTS_REASON,
+          recipientCount: 0,
+        },
+      }
+    }
+
+    const mode = this.readiness.mode
+    if (mode === 'mock') {
+      // Development simulation: no transport is touched, and the result says so.
+      this.logger.info('Mock email transport simulated the notification; no email was sent', {
+        channel: 'email',
+        transport: 'mock',
+        recipientCount,
+      })
+      return {
+        id,
+        status: 'simulated',
+        metadata: {
+          channel: 'email',
+          transport: 'mock',
+          reason: NOTIFICATION_TRANSPORT_SIMULATED_REASON,
+          recipientCount,
+        },
+      }
+    }
+    if (mode === 'disabled') {
+      return {
+        id,
+        status: 'cancelled',
+        metadata: {
+          channel: 'email',
+          transport: 'disabled',
+          reason: NOTIFICATION_TRANSPORT_DISABLED_REASON,
+          recipientCount,
+        },
+      }
+    }
+
+    let acceptedCount = 0
     try {
-      // 这里应该集成实际的邮件服务(如 SendGrid, SES, SMTP)
-      const emailRecipients = recipients.filter(r => r.type === 'email')
-
+      if (mode === 'unsupported') {
+        throw new Error(`Email transport configuration is unsupported: ${this.readiness.messages.join(' ')}`)
+      }
+      if (!this.readiness.ok) {
+        throw new Error(`SMTP email transport blocked: ${this.readiness.messages.join(' ')}`)
+      }
       for (const recipient of emailRecipients) {
-        await this.sendEmail({
+        await this.sendSmtpEmail({
           to: recipient.id,
           subject: notification.subject,
           content: notification.content,
           metadata: notification.metadata
         })
+        acceptedCount += 1
       }
 
       return {
@@ -230,7 +284,9 @@ export class EmailNotificationChannel implements NotificationChannel {
         sentAt: new Date(),
         metadata: {
           channel: 'email',
-          recipientCount: emailRecipients.length
+          transport: 'smtp',
+          recipientCount,
+          acceptedCount,
         }
       }
     } catch (error) {
@@ -244,32 +300,12 @@ export class EmailNotificationChannel implements NotificationChannel {
         status: 'failed',
         failedReason,
         metadata: {
-          channel: 'email'
+          channel: 'email',
+          recipientCount,
+          acceptedCount,
         }
       }
     }
-  }
-
-  private async sendEmail(params: EmailPayload): Promise<void> {
-    if (this.readiness.mode === 'smtp') {
-      if (!this.readiness.ok) {
-        throw new Error(`SMTP email transport blocked: ${this.readiness.messages.join(' ')}`)
-      }
-      await this.sendSmtpEmail(params)
-      return
-    }
-    if (this.readiness.mode === 'unsupported') {
-      throw new Error(`Email transport configuration is unsupported: ${this.readiness.messages.join(' ')}`)
-    }
-
-    this.logger.info('Mock email channel accepted notification', {
-      channel: 'email',
-      transport: 'mock',
-      metadata: params.metadata,
-    })
-
-    // 模拟异步发送
-    await new Promise(resolve => setTimeout(resolve, 100))
   }
 
   private async sendSmtpEmail(params: EmailPayload): Promise<void> {
@@ -346,9 +382,20 @@ export class WebhookNotificationChannel implements NotificationChannel {
   async sender(notification: Notification, recipients: NotificationRecipient[]): Promise<NotificationResult> {
     const id = `webhook_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`
 
-    try {
-      const webhookRecipients = recipients.filter(r => r.type === 'webhook')
+    const webhookRecipients = recipients.filter(r => r.type === 'webhook')
+    if (webhookRecipients.length === 0) {
+      return {
+        id,
+        status: 'cancelled',
+        metadata: {
+          channel: 'webhook',
+          reason: NOTIFICATION_NO_CHANNEL_RECIPIENTS_REASON,
+          recipientCount: 0,
+        },
+      }
+    }
 
+    try {
       for (const recipient of webhookRecipients) {
         await this.sendWebhook(recipient.id, {
           subject: notification.subject,
@@ -484,49 +531,29 @@ export class FeishuNotificationChannel implements NotificationChannel {
     this.logger = new Logger('FeishuChannel')
   }
 
-  async sender(notification: Notification, recipients: NotificationRecipient[]): Promise<NotificationResult> {
+  /**
+   * No Feishu sender is configured on this channel. It reports `failed` with a stable reason and makes
+   * no call and no wait, so a caller cannot read the result as delivery.
+   */
+  async sender(_notification: Notification, recipients: NotificationRecipient[]): Promise<NotificationResult> {
     const id = `feishu_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`
+    const userRecipients = recipients.filter(r => r.type === 'user')
 
-    try {
-      // 集成飞书 API
-      const userRecipients = recipients.filter(r => r.type === 'user')
+    this.logger.warn('Feishu notification channel has no sender configured; nothing was sent', {
+      channel: 'feishu',
+      recipientCount: userRecipients.length,
+    })
 
-      for (const recipient of userRecipients) {
-        await this.sendFeishuMessage(recipient.id, {
-          title: notification.subject,
-          content: notification.content,
-          data: notification.data
-        })
-      }
-
-      return {
-        id,
-        status: 'sent',
-        sentAt: new Date(),
-        metadata: {
-          channel: 'feishu',
-          recipientCount: userRecipients.length
-        }
-      }
-    } catch (error) {
-      this.logger.error('Failed to send feishu notification', error as Error)
-      return {
-        id,
-        status: 'failed',
-        failedReason: (error as Error).message,
-        metadata: {
-          channel: 'feishu'
-        }
-      }
+    return {
+      id,
+      status: 'failed',
+      failedReason: 'feishu transport is not configured',
+      metadata: {
+        channel: 'feishu',
+        reason: NOTIFICATION_TRANSPORT_NOT_CONFIGURED_REASON,
+        recipientCount: userRecipients.length,
+      },
     }
-  }
-
-  private async sendFeishuMessage(userId: string, _message: FeishuMessagePayload): Promise<void> {
-    // 实际飞书消息发送实现
-    this.logger.info(`Sending feishu message to user ${userId}`)
-
-    // 模拟异步发送
-    await new Promise(resolve => setTimeout(resolve, 150))
   }
 }
 

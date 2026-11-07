@@ -157,9 +157,15 @@ export type SecurityActionPrerequisites = Readonly<{
    *  assurance policy for verification methods. Every purpose depends on it. */
   localCredentialProvenanceConstraint: boolean
   /** Every writer of an authorization input serializes with proof consumption under one documented
-   *  lock order, with concurrency regressions. Every purpose whose outcome depends on the privilege
-   *  class depends on it. */
+   *  lock order, with concurrency regressions. Every purpose depends on it. */
   authorizationInputSerialization: boolean
+  /** A proof and the intent it serves are bound to the browser that started them. Every purpose
+   *  depends on it. */
+  browserBinding: boolean
+  /** Verification attempts have a per-user total limit and at most one in flight per session, and the
+   *  operating notes state that whoever holds a session can temporarily keep its user from verifying.
+   *  Every purpose depends on it. */
+  verificationAttemptLimits: boolean
   /** The external re-authentication method is delivered. It widens which purposes are privilege-sensitive. */
   externalReauthMethod: boolean
   /** Per purpose: its target resolution and its own feature gate are delivered. */
@@ -171,6 +177,8 @@ export const SECURITY_ACTION_PREREQUISITES: SecurityActionPrerequisites = deepFr
   proofService: false,
   localCredentialProvenanceConstraint: false,
   authorizationInputSerialization: false,
+  browserBinding: false,
+  verificationAttemptLimits: false,
   externalReauthMethod: false,
   purposeTargets: {
     external_identity_bind: false,
@@ -189,7 +197,9 @@ function decisionKey(decision: SecurityActionPolicyDecision): string {
 /**
  * A purpose is privilege-sensitive when, for any delivered method and any assurance level, the
  * policy decides differently for 'standard' than for 'high'. Derived from the matrix, not listed by
- * hand, so the two cannot disagree.
+ * hand, so the two cannot disagree. Availability no longer depends on it (every purpose requires
+ * serialization); it remains the matrix's own description of which purposes the privilege class
+ * changes, including once the external re-authentication method is delivered.
  */
 export function isPrivilegeSensitive(purpose: SecurityActionPurpose, prerequisites: SecurityActionPrerequisites): boolean {
   const deliveredMethods: SecurityActionMethod[] = ['local_password']
@@ -219,7 +229,9 @@ export function evaluateSecurityActionPurposeAvailability(purpose: unknown, prer
   if (prerequisites.localCredentialProvenanceConstraint !== true) return false
   const targets = prerequisites.purposeTargets
   if (!targets || typeof targets !== 'object' || !Object.hasOwn(targets, purpose) || targets[purpose] !== true) return false
-  if (isPrivilegeSensitive(purpose, prerequisites) && prerequisites.authorizationInputSerialization !== true) return false
+  if (prerequisites.authorizationInputSerialization !== true) return false
+  if (prerequisites.browserBinding !== true) return false
+  if (prerequisites.verificationAttemptLimits !== true) return false
   return true
 }
 
