@@ -395,6 +395,12 @@ export default defineConfig({
       // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
       // tests/unit/directory-integration-capabilities-wiring.test.ts).
       'tests/integration/directory-integration-capabilities.db.test.ts',
+      // Real PostgreSQL x local HTTP harness feasibility for the Feishu integration: a database
+      // transaction stays open while the Feishu transport talks to the local mock server, and nothing
+      // leaves the loopback. DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it,
+      // and wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml (pinned by
+      // plugin-tests-parallel-contract.test.mjs and tests/unit/feishu-mock-harness-smoke-wiring.test.ts).
+      'tests/integration/feishu-mock-harness-smoke.db.test.ts',
       // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
       // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
       // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
