@@ -55,6 +55,7 @@ import {
   normalizeNamespace,
 } from '../rbac/namespace-admission'
 import { assignUserRoles, type RoleAssignmentScope } from '../rbac/role-assignment'
+import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
 import { invalidateUserPerms } from '../rbac/service'
 import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../security/encrypted-secrets'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
@@ -6313,6 +6314,10 @@ export async function upsertActiveUserOrgMembership(
   client: MembershipWriteClient,
   options: { userId: string; orgId: string },
 ): Promise<boolean> {
+  // D21 (Y5a): subject version row first; the conflict path updates a `user_orgs` row an admission
+  // holds FOR SHARE, and the trigger alone would bump only after that row lock (a cycle). Callers
+  // that already hold the access-graph mutex re-acquire a held row here and wait for nothing.
+  await bumpSubjectAuthorizationVersions(client, [options.userId])
   const result = await client.query(
     `INSERT INTO user_orgs (user_id, org_id, is_active)
      VALUES ($1::text, $2::text, TRUE)
@@ -6371,6 +6376,9 @@ export async function deactivateUserOrgMembershipIfNoOtherActiveBinding(
   client: MembershipWriteClient,
   options: { userId: string; orgId: string },
 ): Promise<void> {
+  // D21 (Y5a): subject version row BEFORE the `user_orgs … FOR UPDATE` below (an admission locks
+  // subject → user_orgs; a revocation of the membership is a Layer-2 authority change).
+  await bumpSubjectAuthorizationVersions(client, [options.userId])
   await client.query(
     `SELECT 1 FROM user_orgs WHERE user_id = $1::text AND org_id = $2::text FOR UPDATE`,
     [options.userId, options.orgId],
@@ -6991,6 +6999,10 @@ async function applyDirectoryProjectedMemberGroupGovernanceInTransaction(
       }
     }
 
+    // D21 (Y5a): canonical sorted subject bump before the multi-user admission upsert, so the
+    // trigger bumps that follow (in unnest order) never acquire a subject row the admission holder
+    // or a concurrent writer takes in another order.
+    await bumpSubjectAuthorizationVersions(client, grantSet.userIds)
     await client.query(
       `INSERT INTO user_namespace_admissions (
          user_id, namespace, enabled, source, granted_by, updated_by, created_at, updated_at
@@ -7106,6 +7118,11 @@ async function syncProjectedDepartmentMemberGroupsInTransaction(
 
     const membersToDelete = Array.from(currentMembers).filter((value) => !desiredMembers.has(value))
     const membersToInsert = Array.from(desiredMembers).filter((value) => !currentMembers.has(value))
+
+    // D21 (Y5a): one sorted subject bump for every member the projection removes or adds (joining a
+    // group that carries a deny row is a revocation), ahead of the multi-row DELETE whose trigger
+    // bumps would otherwise land in scan order.
+    await bumpSubjectAuthorizationVersions(client, [...membersToDelete, ...membersToInsert])
 
     if (membersToDelete.length > 0) {
       await client.query(

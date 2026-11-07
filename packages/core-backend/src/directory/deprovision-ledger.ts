@@ -14,6 +14,7 @@ import type {
 } from './deprovision-planner'
 import { planDirectoryDeprovision } from './deprovision-planner'
 import { translateRecoveryConflict } from '../db/recovery-conflict'
+import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
 
 export type DirectoryTransactionClient = {
   query: (
@@ -110,6 +111,10 @@ async function lockCandidateUser(
   client: DirectoryTransactionClient,
   localUserId: string,
 ): Promise<boolean> {
+  // D21 (Y5a): the subject authorization version row BEFORE the users-row lock, in this helper so
+  // the order (subject → users, an admission's order) does not depend on whether the sync already
+  // took the access-graph mutex for this candidate; a re-acquisition of a held row waits for nothing.
+  await bumpSubjectAuthorizationVersions(client, [localUserId])
   const locked = await client.query(
     `SELECT id FROM users WHERE id = $1::text FOR UPDATE`,
     [localUserId],
