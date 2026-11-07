@@ -181,6 +181,7 @@ import {
   stripManualRowPolicyKey,
   withManualRowPolicyKey,
 } from '../multitable/stock-preparation-manual-rows'
+import { carryPullBatchBandMarker, stripPullBatchBandMarker } from '../multitable/stock-preparation-pull-batch-band'
 import {
   assertManualRowEditInTransaction,
   assertManualRowsAllowed,
@@ -6357,7 +6358,8 @@ async function normalizeFieldWriteInput(
     // write lock (human-write-lock.ts). PATCH re-applies the STORED lock afterwards (`carryHumanWriteLock`),
     // so a person can never clear it either. Only plugin provisioning writes it. The manual-rows switch
     // (stock-preparation-manual-rows.ts) follows the same rule: stripped here, the STORED value carried by PATCH.
-    property: stripManualRowPolicyKey(stripHumanWriteLockKey(sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty))),
+    // The pull-batch band marker (stock-preparation-pull-batch-band.ts, R-65) too: a person can never forge a band.
+    property: stripPullBatchBandMarker(stripManualRowPolicyKey(stripHumanWriteLockKey(sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty)))),
   }
 }
 
@@ -14824,13 +14826,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // changed or omitted). No administrator override — only plugin provisioning changes it. The manual-rows
         // switch is carried the same way (ADR adr-stock-prep-manual-rows-20261030 §4: only the plugin's switch route
         // writes it).
-        const nextProperty = carryManualRowPolicy(row.property, carryHumanWriteLock(row.property, normalizedNextProperty))
+        // The pull-batch band marker likewise (R-65): a body without it can never drop it, a body with it never sets it.
+        const nextProperty = carryPullBatchBandMarker(row.property, carryManualRowPolicy(row.property, carryHumanWriteLock(row.property, normalizedNextProperty)))
         // D21 field-row writer rule (authz-version-protocol.ts): when this write can trip the meta_fields visibility
         // trigger — the trigger's own test, on the property this attempt validates against vs the one it will write —
         // the sheet version row is taken HERE: after the fence, before the sibling order shift and the locked re-read
         // below (the first field-row locks of this transaction), never by the trigger after them. Exact for the attempt
         // that writes: the locked re-read must equal `validated` or the attempt retries on fresh data, and
-        // `writeProperty` differs from `nextProperty` only in the human write lock and manual-rows keys. A PATCH that
+        // `writeProperty` differs from `nextProperty` only in the human write lock, manual-rows and pull-batch band keys. A PATCH that
         // cannot trip it (order, name, options) takes no version row, so the shared column drag never queues on it.
         if (fieldVisibilityTriggerWouldFire(validated.property, nextProperty)) await bumpSheetPermissionVersions(query, [sheetId])
         const desiredOrder = parsed.data.order
@@ -15018,7 +15021,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (fieldRowChangedSince(validated, locked)) throw new FieldChangedConcurrentlyError()
         // Equal to `nextProperty` after the compare; carried from the locked row so the stored lock and switch can never
         // be dropped by a stale read even if the compare were weakened.
-        const writeProperty = carryManualRowPolicy(locked.property, carryHumanWriteLock(locked.property, nextProperty))
+        const writeProperty = carryPullBatchBandMarker(locked.property, carryManualRowPolicy(locked.property, carryHumanWriteLock(locked.property, nextProperty)))
         // `order` is not compared (a sibling's shift moves this row during a shared drag): a PATCH without `order`
         // keeps the row's CURRENT order instead of writing back the one it read.
         const nextOrder = typeof desiredOrder === 'number' ? desiredOrder : Number(locked.order ?? 0)
