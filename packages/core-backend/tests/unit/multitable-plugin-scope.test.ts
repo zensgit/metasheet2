@@ -160,6 +160,9 @@ describe('multitable plugin scope helper', () => {
       patchObjectFieldProperty: async () => ({}),
       // B3: optional on the host; wrapped (prefix-checked) whenever the host has it.
       ensureSystemBase: async () => ({}),
+      // 批次标识 BI-5: optional on the host; wrapped (namespace + overview + object scope) whenever the host has it.
+      promoteObjectViewToFirst: async () => ({}),
+      describeObjectSheetLayout: async () => ({}),
     }
     const scoped = createPluginScopedMultitableApi(
       { provisioning: delegateProvisioning, records: {} } as any,
