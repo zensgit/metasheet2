@@ -1,0 +1,199 @@
+{
+  "state": "passed-local-scoped-not-human-AT-or-product-acceptance",
+  "base": "9bcaf4b8197eb9752f7eb5010bc0e0ba3cd6d651",
+  "sourcePathsBeforeDocsProof": {
+    "apps/web/scripts/run-required-web-tests.sh": "19d517201978cdec65339026c8836418830a69f414e9eabc52d8d0415fd5a657",
+    "apps/web/scripts/run-required-web-tests.tokens": "cd2b2684d61f03aa392b9e11b307928b3abe855a03f9443cd61d10f5c97c1085",
+    "apps/web/src/views/attendance/AttendanceLocaleTimeInput.vue": "e47d368a025a7481676730fcfccb44fd1e8c6b773c2474b78513f5fc79f06eb4",
+    "apps/web/src/views/attendance/AttendanceShiftSegmentsEditor.vue": "0f7b8ac83972dfc63d8111c9d7247664dc081f9e4984a5e48deefa0e3cf61970",
+    "apps/web/tests/attendance-shift-segments.spec.ts": "27c90692d3e3bec192cf0de9e56fd2a2bb12d3c169f49efc99fb58e2ea074275",
+    "docs/development/attendance-segment-keyboard-accessibility-design-lock-20261026.md": "304b0244376f4f8093551a83fe7c967da2745b41037e8bfe24f14e7bfe0d0bda"
+  },
+  "reproduction": {
+    "newFocusedCasesFailed": 4,
+    "actualPassed": 0,
+    "filteredExcluded": 10,
+    "originalMainBrowserAmbiguousNames": 4,
+    "originalKeyboardRemoveFocus": "BODY"
+  },
+  "initialAffectedRun": {
+    "files": 5,
+    "actualPassed": 63,
+    "skipped": 0,
+    "failed": 0
+  },
+  "reviewCorrection": {
+    "confirmedP2": "unconditional shared hiding removed sibling context",
+    "newBoundaryRed": 1,
+    "filteredExcluded": 14,
+    "correctedAffectedActualPassed": 2,
+    "correctedAffectedExcluded": 13,
+    "repeatedOldWholeSuites": false
+  },
+  "mutations": [
+    {
+      "name": "visible-name",
+      "namedFailed": 2,
+      "excluded": 12
+    },
+    {
+      "name": "hidden-value-v1",
+      "namedFailed": 1,
+      "excluded": 13
+    },
+    {
+      "name": "focus",
+      "namedFailed": 1,
+      "excluded": 13
+    },
+    {
+      "name": "hidden-value-v2",
+      "namedFailed": 1,
+      "excluded": 14
+    }
+  ],
+  "quality": {
+    "initialValidateAllExit": 0,
+    "finalAffectedWebTypeCheckExit": 0,
+    "finalFocusedEslintExit": 0,
+    "focusedEslintWarnings": 2,
+    "warnings": "one existing and one added multi-component test fixture; no errors",
+    "tokenManifestCheckExit": 0,
+    "bashSyntaxExit": 0
+  },
+  "browser": [
+    {
+      "id": "candidate1440-en",
+      "width": 1440,
+      "locale": "en",
+      "status": "passed-native-keyboard-and-AX-repair",
+      "AX": {
+        "qualifiedVisibleNames": [
+          "Segment 1 start",
+          "Segment 1 end",
+          "Segment 2 start",
+          "Segment 2 end"
+        ],
+        "hiddenCanonicalTextboxesInAX": 0,
+        "fullHumanScreenReaderTrial": false
+      },
+      "removeFocus": {
+        "tag": "INPUT",
+        "label": "Segment 1 start"
+      },
+      "siblingFlexContextPreserved": true
+    },
+    {
+      "id": "candidate768-zh",
+      "width": 768,
+      "locale": "zh-CN",
+      "status": "passed-native-keyboard-and-AX-repair",
+      "AX": {
+        "qualifiedVisibleNames": [
+          "时段 1 开始",
+          "时段 1 结束",
+          "时段 2 开始",
+          "时段 2 结束"
+        ],
+        "hiddenCanonicalTextboxesInAX": 0,
+        "fullHumanScreenReaderTrial": false
+      },
+      "removeFocus": {
+        "tag": "INPUT",
+        "label": "时段 1 开始"
+      },
+      "siblingFlexContextPreserved": true
+    },
+    {
+      "id": "candidate375-en",
+      "width": 375,
+      "locale": "en",
+      "status": "passed-native-keyboard-and-AX-repair",
+      "AX": {
+        "qualifiedVisibleNames": [
+          "Segment 1 start",
+          "Segment 1 end",
+          "Segment 2 start",
+          "Segment 2 end"
+        ],
+        "hiddenCanonicalTextboxesInAX": 0,
+        "fullHumanScreenReaderTrial": false
+      },
+      "removeFocus": {
+        "tag": "INPUT",
+        "label": "Segment 1 start"
+      },
+      "siblingFlexContextPreserved": true
+    }
+  ],
+  "writesAttempted": 0,
+  "externalForwarded": 0,
+  "pageErrors": 0,
+  "expectedBootstrap405": 3,
+  "independentReview": {
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "initialConfirmedP2": 1,
+    "closedAtSource": true,
+    "newConfirmedP1P2": 0,
+    "mainIndependentlyVerified": true
+  },
+  "screenshots": [
+    {
+      "path": "artifacts/attendance-segment-keyboard-accessibility/screenshots/candidate1440-en.png",
+      "sha256": "3a6f98ff5cb1398cf5ca5573cd345d2e96ca94c40461a2af3a8e8ddafdcb136f",
+      "case": "candidate1440-en"
+    },
+    {
+      "path": "artifacts/attendance-segment-keyboard-accessibility/screenshots/candidate768-zh.png",
+      "sha256": "815f91f59e558458143dfed533f97ce360da7b9bf68095dc5ca47aa208d1a7a9",
+      "case": "candidate768-zh"
+    },
+    {
+      "path": "artifacts/attendance-segment-keyboard-accessibility/screenshots/candidate375-en.png",
+      "sha256": "e900884ef4f835f166ebc8972902fe842550a49c7cf9529d5648edcfd9575e3d",
+      "case": "candidate375-en"
+    }
+  ],
+  "visualReviewByMain": {
+    "images": 3,
+    "result": "readable fields and responsive wrapping, no clipped or overlapping controls; focus ring stays on surviving Start"
+  },
+  "limits": [
+    "Desktop fine-pointer widths, not mobile touch editor acceptance",
+    "Chromium AX and keyboard, no human VoiceOver/screen-reader session",
+    "No full rerun of all64 final applicable assertions; 63 initial plus2 affected across source phases with1 overlap",
+    "No backend/schema/calculator/writer/flags changes",
+    "All PRDraft/HOLD; no merge/deploy/R71; realUAT/business50004excluded"
+  ],
+  "ciFixtureCorrection": {
+    "failedParent": "bfa19b9394ee2b1bd6bed3b3378ed2df65a9b8b5",
+    "failedJobs": [
+      121280207832,
+      121280207212
+    ],
+    "sameCaseBothJobs": "adds, reorders, and removes shift segments while calculating paid time without gaps",
+    "matchedLocalRed": {
+      "failed": 1,
+      "excluded": 145
+    },
+    "observationalControls": {
+      "originalAndCandidate": 2,
+      "notFeatureAcceptancePasses": true,
+      "sameFocusedHiddenWriteBlurLimitation": true
+    },
+    "minimalPatch": "Only named test input setup focuses and commits visible input/change; four setup calls use it",
+    "original7OutcomeAssertionsMocksBudgetsUnchanged": true,
+    "fixedCaseActualPassed": 1,
+    "fixedCaseExcluded": 145,
+    "scopedEslintExit": 0,
+    "productSourceAndOriginalBrowserProofByteIdentical": true,
+    "priorGreenSuitesAndBrowserNotRerun": true,
+    "independentReview": {
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "confirmedNewP1P2": 0
+    },
+    "newHeadCI": "pending; never borrow parent green"
+  }
+}

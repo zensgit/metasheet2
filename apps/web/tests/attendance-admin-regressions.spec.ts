@@ -1091,12 +1091,22 @@ describe('Attendance admin regressions', () => {
   it('adds, reorders, and removes shift segments while calculating paid time without gaps', async () => {
     installShiftSegmentApi([])
     const section = await mountShiftAdmin()
-    setInput(section, '[data-attendance-shift-segment-start="0"]', '08:00')
-    setInput(section, '[data-attendance-shift-segment-end="0"]', '12:00')
+    // Commit the visible field: keyboard focus leaves direct hidden-value writes with a stale draft.
+    const setTime = (selector: string, value: string) => {
+      const canonical = section.querySelector<HTMLInputElement>(selector)
+      const typed = canonical?.parentElement?.querySelector<HTMLInputElement>('[data-attendance-locale-time-typed]')
+      expect(typed).toBeTruthy()
+      typed!.focus()
+      typed!.value = value
+      typed!.dispatchEvent(new Event('input', { bubbles: true }))
+      typed!.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    setTime('[data-attendance-shift-segment-start="0"]', '08:00')
+    setTime('[data-attendance-shift-segment-end="0"]', '12:00')
     section.querySelector<HTMLButtonElement>('[data-attendance-shift-segment-add]')!.click()
     await flushUi(2)
-    setInput(section, '[data-attendance-shift-segment-start="1"]', '13:00')
-    setInput(section, '[data-attendance-shift-segment-end="1"]', '17:00')
+    setTime('[data-attendance-shift-segment-start="1"]', '13:00')
+    setTime('[data-attendance-shift-segment-end="1"]', '17:00')
     await flushUi(2)
 
     const preview = section.querySelector<HTMLElement>('[data-attendance-shift-segment-preview]')
