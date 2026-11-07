@@ -106,6 +106,8 @@ const PROJECT_NO = 'PRJ-0001'
 const DECISION_ID = 'decision_matrix_1'
 const FINGERPRINT = 'sha16:0123456789abcdef'
 const HTTP_ROUTES_SOURCE = fs.readFileSync(path.join(LIB, 'http-routes.cjs'), 'utf8')
+// R-69 1b-i: a delegating route handler's chain lives in the governed entry it calls; see the module.
+const { governedEntrySourceFor } = require(path.join(__dirname, 'support', 'governed-entry-source.cjs'))
 
 // ---------------------------------------------------------------------------
 // actors
@@ -1688,7 +1690,14 @@ function projectSyncGatesAreUnchanged() {
     const pattern = route.operatorMayRun
       ? new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}?await requireTableActionAccess\\(req, [A-Za-z]+, '([a-z]+)'`)
       : new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}?requireAccess\\(req, '([a-z]+)'\\)`)
-    const match = pattern.exec(HTTP_ROUTES_SOURCE)
+    // R-69 1b-i: a handler that delegates to a request-free governed entry opens with the delegation;
+    // its gate is the FIRST gate call of that entry, so the window is laid over the entry's body
+    // (governedEntrySourceFor asserts the handler really calls it). Every other handler: unchanged.
+    const governed = governedEntrySourceFor(HTTP_ROUTES_SOURCE, route.handler)
+    const subject = governed
+      ? `async ${route.handler}(req, res) {${governed.replace(/^\n {2}async function [A-Za-z0-9_$]+\([^)]*\) \{/, '')}`
+      : HTTP_ROUTES_SOURCE
+    const match = pattern.exec(subject)
     assert.ok(match, `M-10a: ${route.handler} must open with its gate call`)
     assert.equal(
       match[1],

@@ -27,7 +27,10 @@ const VALID_MODES = new Set(['incremental', 'full', 'manual'])
 const VALID_RUN_MODES = new Set(['incremental', 'full', 'manual', 'replay'])
 const VALID_STATUSES = new Set(['draft', 'active', 'paused', 'disabled'])
 const VALID_RUN_STATUSES = new Set(['pending', 'running', 'succeeded', 'partial', 'failed', 'cancelled'])
-const VALID_TRIGGERS = new Set(['cron', 'manual', 'api', 'replay'])
+// R-69 1b-i (ADR adr-automation-pipeline-bridge-20261103 §2 ⑧): `'automation'` is a WORD ONLY — the run
+// a multitable automation rule starts through the governed entry (1b-ii). No producer exists yet;
+// `integration_runs.triggered_by` has no CHECK (057 only comments it), so no migration accompanies it.
+const VALID_TRIGGERS = new Set(['cron', 'manual', 'api', 'replay', 'automation'])
 const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'partial', 'failed', 'cancelled'])
 const SOURCE_ROLES = new Set(['source', 'bidirectional'])
 const TARGET_ROLES = new Set(['target', 'bidirectional'])
