@@ -1294,4 +1294,168 @@ describeIfDatabase('W4C-2 Gate D2 — authoritative live_punch writer (real DB)'
     expect((await parentRow(seed.userId))?.current_calculation_id).not.toBeNull()
     expect((await outboxRows(seed.orgId)).length).toBe(1)
   })
+
+  async function retainedEdgeHistory(seed: { orgId: string; userId: string }): Promise<Array<Record<string, unknown>>> {
+    return (await pool.query(
+      `SELECT to_jsonb(c) AS value FROM attendance_record_calculations c
+         JOIN attendance_records r ON r.id=c.attendance_record_id AND r.org_id=c.org_id
+        WHERE r.org_id=$1 AND r.user_id=$2 ORDER BY c.version`,
+      [seed.orgId, seed.userId],
+    )).rows.map(row => row.value)
+  }
+
+  async function retainedEdgeImmutable(seed: { orgId: string; userId: string }, firstId: string) {
+    return (await pool.query(
+      `SELECT jsonb_build_object(
+         'parent',(SELECT to_jsonb(r) FROM attendance_records r WHERE r.org_id=$1 AND r.user_id=$2 AND r.work_date=$3::date),
+         'first',(SELECT to_jsonb(c) FROM attendance_record_calculations c WHERE c.org_id=$1 AND c.id=$4::uuid),
+         'children',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.segment_index) FROM attendance_record_segments s WHERE s.org_id=$1 AND s.calculation_id=$4::uuid)
+       ) AS value`,
+      [seed.orgId, seed.userId, WORK_DATE, firstId],
+    )).rows[0].value
+  }
+
+  async function assertRetainedEdgeProof(seed: { orgId: string; userId: string }, inputs: AttendanceLivePunchBoundaryInputV1[]) {
+    const { computeAttendanceSemanticInputFingerprintV1, computeAttendanceProvenanceFingerprintV1 } =
+      await import('../../src/attendance/w4c0-fingerprints')
+    const { computeAttendanceSourceDefinitionFingerprintV1 } = await import('../../src/attendance/w4c1-fingerprints')
+    const history = await retainedEdgeHistory(seed)
+    expect(history).toHaveLength(3)
+    expect(history[0]).toMatchObject({ outcome: 'completed', projection_effect: 'set_active' })
+    for (const row of history) {
+      const material = {
+        attribution: row.attribution_snapshot, context: row.context_snapshot,
+        evidence: row.evidence_snapshot, approvedFacts: row.approved_facts_snapshot,
+        manualOverride: row.manual_override_snapshot, mergePolicy: row.merge_policy,
+        calculationTier: row.calculation_tier, engineVersion: row.engine_version,
+        snapshotSchemaVersion: row.snapshot_schema_version,
+      } as Parameters<typeof computeAttendanceSemanticInputFingerprintV1>[0]
+      expect(row.semantic_input_fingerprint).toBe(computeAttendanceSemanticInputFingerprintV1(material))
+      const provenance = row.input_provenance as Record<string, unknown>
+      const source = (provenance.provenance ?? provenance) as Record<string, unknown>
+      expect(row.provenance_fingerprint).toBe(computeAttendanceProvenanceFingerprintV1({
+        transport: source.transport, sourceRef: source.sourceRef,
+        artifactSha256: source.artifactSha256, normalizedCsvSha256: source.normalizedCsvSha256,
+        convertedSheetName: source.convertedSheetName,
+      }))
+      expect(row.source_definition_fingerprint).toBe(computeAttendanceSourceDefinitionFingerprintV1({
+        attribution: material.attribution, context: material.context,
+      }))
+    }
+    const operations = await operationRows(seed.orgId)
+    expect(operations).toHaveLength(3)
+    expect(await outboxRows(seed.orgId)).toHaveLength(3)
+    expect(await eventCount(seed.userId)).toBe(3)
+    for (const [index, input] of inputs.entries()) {
+      const matching = operations.filter(row => row.operation_id === input.operationId)
+      expect(matching).toHaveLength(1)
+      expect(matching[0]).toMatchObject({
+        state: 'completed', resolved_record_id: history[0].attendance_record_id,
+        resolved_calculation_id: history[index].id,
+        result_semantic_fingerprint: history[index].semantic_input_fingerprint,
+      })
+    }
+    for (const row of history.slice(1)) {
+      expect(row).toMatchObject({ outcome: 'review_required', projection_effect: 'none', expected_segment_count: 0 })
+      expect(await segmentCount(String(row.id))).toBe(0)
+      expect(row.segment_snapshot).toEqual([])
+      expect(row.manual_override_snapshot).toEqual(history[0].manual_override_snapshot)
+      expect(row.approved_facts_snapshot).toEqual(history[0].approved_facts_snapshot)
+    }
+    return history
+  }
+
+  it('EP01 retained input native edge: repeated unsupported reviews preserve a completed current pointer', async () => {
+    // Existing Gate D2 factory + real adapters, not current HTTP timezone admission.
+    const seed = await seedAuthoritativeOrg('retained-null', { withShift: true })
+    const { boundary, spies } = makeBoundary()
+    const first = await buildPunchInput(seed)
+    expect((await boundary.executeLivePunch(first)).kind).toBe('w4')
+    const initial = await retainedEdgeHistory(seed)
+    expect(initial).toHaveLength(1)
+    expect(initial[0].outcome).toBe('completed')
+    const frozen = await retainedEdgeImmutable(seed, String(initial[0].id))
+    await pool.query('UPDATE attendance_shift_assignments SET is_active=false WHERE org_id=$1 AND user_id=$2', [seed.orgId, seed.userId])
+    // A check-out intentionally restores supported frozen context; check-in exercises
+    // the existing unsupported-review producer rather than bypassing that contract.
+    const second = await buildPunchInput(seed, { eventType: 'check_in', occurredAtResolved: '2026-05-04T01:10:00.000Z' })
+    const secondResult = await boundary.executeLivePunch(second)
+    expect(secondResult.kind).toBe('w4')
+    const afterSecond = await retainedEdgeHistory(seed)
+    expect(afterSecond).toHaveLength(2)
+    expect(afterSecond[1]).toMatchObject({
+      outcome: 'review_required', outcome_reason_code: 'missing_frozen_context', projection_effect: 'none', context_snapshot: null,
+      attribution_snapshot: { posture: 'unsupported' },
+    })
+    expect(await retainedEdgeImmutable(seed, String(initial[0].id))).toEqual(frozen)
+    const third = await buildPunchInput(seed, { eventType: 'check_in', occurredAtResolved: '2026-05-04T01:15:00.000Z' })
+    const thirdResult = await boundary.executeLivePunch(third)
+    expect(thirdResult.kind).toBe('w4')
+    const history = await assertRetainedEdgeProof(seed, [first, second, third])
+    expect(history[2]).toMatchObject({ outcome_reason_code: 'missing_frozen_context', context_snapshot: null })
+    expect(history[2].attribution_snapshot).toMatchObject({ posture: 'unsupported' })
+    expect((history[2].input_provenance as Record<string, unknown>).priorCalculations).toEqual(
+      history.slice(0, 2).map(row => ({
+        id: row.id, semanticFingerprint: row.semantic_input_fingerprint, provenanceFingerprint: row.provenance_fingerprint,
+      })),
+    )
+    expect(await retainedEdgeImmutable(seed, String(initial[0].id))).toEqual(frozen)
+    expect((await boundary.executeLivePunch(second)).kind).toBe('replay')
+    expect((await boundary.executeLivePunch(third)).kind).toBe('replay')
+    expect(await retainedEdgeHistory(seed)).toEqual(history)
+    expect(await eventCount(seed.userId)).toBe(3)
+    expect(await outboxRows(seed.orgId)).toHaveLength(3)
+    expect(await operationRows(seed.orgId)).toHaveLength(3)
+    expect(await retainedEdgeImmutable(seed, String(initial[0].id))).toEqual(frozen)
+    expect(spies).toEqual({ applyLivePunchLegacy: 0, insertLivePunchEvent: 3 })
+  }, 120_000)
+
+  it('EP01 retained input native edge: stale owner date keeps resolver-date reviews on the original parent', async () => {
+    // A stale outer command is supplied at the existing core-factory seam. The
+    // resolver/context adapters and PG writes are real; this is not an HTTP race.
+    const seed = await seedAuthoritativeOrg('retained-date', { withShift: true })
+    const { boundary, spies } = makeBoundary()
+    const first = await buildPunchInput(seed)
+    expect((await boundary.executeLivePunch(first)).kind).toBe('w4')
+    const initial = await retainedEdgeHistory(seed)
+    expect(initial).toHaveLength(1)
+    expect(initial[0].outcome).toBe('completed')
+    const frozen = await retainedEdgeImmutable(seed, String(initial[0].id))
+    const second = await buildPunchInput(seed, {
+      eventType: 'check_in', occurredAtResolved: '2026-05-05T01:05:00.000Z', workDate: WORK_DATE,
+    })
+    expect(second.workDate).toBe(WORK_DATE)
+    expect((await boundary.executeLivePunch(second)).kind).toBe('w4')
+    const afterSecond = await retainedEdgeHistory(seed)
+    expect(afterSecond).toHaveLength(2)
+    expect(afterSecond[1]).toMatchObject({
+      outcome: 'review_required', outcome_reason_code: 'context_mismatch', projection_effect: 'none',
+      attribution_snapshot: { posture: 'resolved_v2', value: { workDate: '2026-05-05' } },
+      context_snapshot: { workDate: '2026-05-05' },
+    })
+    expect(await retainedEdgeImmutable(seed, String(initial[0].id))).toEqual(frozen)
+    const third = await buildPunchInput(seed, {
+      eventType: 'check_in', occurredAtResolved: '2026-05-05T01:10:00.000Z', workDate: WORK_DATE,
+    })
+    expect((await boundary.executeLivePunch(third)).kind).toBe('w4')
+    const history = await assertRetainedEdgeProof(seed, [first, second, third])
+    expect(history[2]).toMatchObject({
+      outcome: 'review_required', outcome_reason_code: 'context_mismatch',
+      attribution_snapshot: { posture: 'resolved_v2', value: { workDate: '2026-05-05' } },
+      context_snapshot: { workDate: '2026-05-05' },
+    })
+    expect(await retainedEdgeImmutable(seed, String(initial[0].id))).toEqual(frozen)
+    expect(Number((await pool.query(
+      'SELECT count(*) AS n FROM attendance_records WHERE org_id=$1 AND user_id=$2 AND work_date=$3::date',
+      [seed.orgId, seed.userId, '2026-05-05'],
+    )).rows[0].n)).toBe(0)
+    expect((await boundary.executeLivePunch(second)).kind).toBe('replay')
+    expect((await boundary.executeLivePunch(third)).kind).toBe('replay')
+    expect(await retainedEdgeHistory(seed)).toEqual(history)
+    expect(await eventCount(seed.userId)).toBe(3)
+    expect(await operationRows(seed.orgId)).toHaveLength(3)
+    expect(await outboxRows(seed.orgId)).toHaveLength(3)
+    expect(await retainedEdgeImmutable(seed, String(initial[0].id))).toEqual(frozen)
+    expect(spies).toEqual({ applyLivePunchLegacy: 0, insertLivePunchEvent: 3 })
+  }, 120_000)
 })
