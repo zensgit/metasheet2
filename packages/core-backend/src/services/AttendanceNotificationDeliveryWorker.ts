@@ -85,13 +85,28 @@ export interface AttendanceDeliveryMessage {
  * reconciles when a task_id exists, and a lost response has none). Only the DingTalk channel's
  * classifier produces it today; WeCom/email transports do not emit the marker and are untouched.
  * `skip` and `outcomeUnknown` are mutually exclusive; the worker checks `outcomeUnknown` first.
+ *
+ * `defer` is a third, non-failure outcome: the channel declined to start an external call (for
+ * example a local pacing limit) and asks for a later attempt. The worker returns the row to `pending`
+ * at `now + deferMs` (clamped to 5 seconds .. 5 minutes) and gives back the attempt the claim took, so
+ * a deferral never counts toward `maxAttempts`. A row still deferred more than two hours after it was
+ * created terminates as `skipped` with `<error>_expired`. A deferral is checked before every other
+ * classification.
  */
+export type AttendanceDeliveryChannelDeferral = { ok: false; defer: true; deferMs: number; error: string; retryable?: undefined }
+
 export type AttendanceDeliveryChannelResult =
   | { ok: true }
-  | { ok: false; retryable: boolean; error: string; skip?: boolean; outcomeUnknown?: boolean }
+  | { ok: false; retryable: boolean; error: string; skip?: boolean; outcomeUnknown?: boolean; defer?: undefined }
+  | AttendanceDeliveryChannelDeferral
 
 export interface AttendanceDeliveryChannel {
   readonly name: string
+  /**
+   * Upper bound on one `send` call. When declared, the worker starts a send only if at least this
+   * much of the batch lease is left; otherwise the row is deferred without any external call.
+   */
+  readonly maxSendDurationMs?: number
   send(message: AttendanceDeliveryMessage): Promise<AttendanceDeliveryChannelResult>
 }
 
@@ -161,6 +176,8 @@ export interface AttendanceNotificationDeliveryResult {
   lostLease?: number
   /** PR #4046 Phase B: rows terminated `outcome_unknown` this batch (present only when > 0, like lostLease). */
   outcomeUnknown?: number
+  /** Rows returned to `pending` this batch without consuming an attempt (present only when > 0). */
+  deferred?: number
 }
 
 interface DeliveryRow {
@@ -174,6 +191,7 @@ interface DeliveryRow {
   channel: string
   attempt_count: number | string
   payload: unknown
+  created_at?: Date | string
 }
 
 const DEFAULT_BATCH_SIZE = 50
@@ -183,6 +201,10 @@ const MIN_BATCH_SIZE = 1
 const MAX_BATCH_SIZE = 200
 const MIN_LEASE_MS = 5_000
 const MAX_LEASE_MS = 10 * 60_000
+const DEFER_WINDOW_MS = 2 * 60 * 60_000
+const DEFER_MIN_MS = 5_000
+const DEFER_MAX_MS = 5 * 60_000
+const LEASE_MARGIN_DEFER_ERROR = 'attendance_delivery_lease_margin_insufficient'
 export const DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME = 'dingtalk_work_notification'
 export const EMAIL_SMTP_CHANNEL_NAME = 'email_smtp'
 export const WECOM_WORK_NOTIFICATION_CHANNEL_NAME = 'wecom_work_notification'
@@ -816,6 +838,7 @@ export class AttendanceNotificationDeliveryWorker {
   private readonly quietHours: AttendanceNotificationQuietHoursConfig | null
   private quietHoursLogged = false
   private running = false
+  private claimLeaseExpiresAtMs = 0
 
   constructor(options: AttendanceNotificationDeliveryWorkerOptions = {}) {
     this.query = options.query ?? (defaultQuery as AttendanceNotificationDeliveryQuery)
@@ -831,10 +854,20 @@ export class AttendanceNotificationDeliveryWorker {
     this.quietHours = options.quietHours !== undefined
       ? options.quietHours
       : resolveAttendanceNotificationQuietHours(process.env, this.logger)
+    for (const channel of this.channelsByName.values()) {
+      const budget = Number(channel.maxSendDurationMs)
+      if (Number.isFinite(budget) && budget >= this.leaseMs) {
+        this.logger.warn(
+          `Attendance delivery channel "${channel.name}" declares maxSendDurationMs=${budget}, not below the batch lease ${this.leaseMs}ms; its rows are deferred on every claim`,
+        )
+      }
+    }
   }
 
   async claimDueDeliveries(): Promise<DeliveryRow[]> {
-    const asOf = this.now().toISOString()
+    const claimAt = this.now()
+    const asOf = claimAt.toISOString()
+    this.claimLeaseExpiresAtMs = claimAt.getTime() + this.leaseMs
     const { rows } = await this.query<DeliveryRow>(
       `WITH claim AS (
          SELECT id
@@ -871,7 +904,8 @@ export class AttendanceNotificationDeliveryWorker {
                     d.recipient_role,
                     d.channel,
                     d.attempt_count,
-                    d.payload
+                    d.payload,
+                    d.created_at
        )
        SELECT *
          FROM claimed
@@ -913,6 +947,7 @@ export class AttendanceNotificationDeliveryWorker {
       result.claimed = rows.length
       let lostLease = 0
       let outcomeUnknown = 0
+      let deferred = 0
       for (const row of rows) {
         const outcome = await this.deliver(row)
         if (outcome === 'sent') result.sent += 1
@@ -920,6 +955,7 @@ export class AttendanceNotificationDeliveryWorker {
         else if (outcome === 'failed') result.failed += 1
         else if (outcome === 'skipped') result.skipped += 1
         else if (outcome === 'outcome_unknown') outcomeUnknown += 1
+        else if (outcome === 'deferred') deferred += 1
         else lostLease += 1
       }
       if (lostLease > 0) {
@@ -928,8 +964,11 @@ export class AttendanceNotificationDeliveryWorker {
       if (outcomeUnknown > 0) {
         result.outcomeUnknown = outcomeUnknown
       }
+      if (deferred > 0) {
+        result.deferred = deferred
+      }
       if (result.claimed > 0) {
-        this.logger.info(`Attendance deliveries claimed=${result.claimed} sent=${result.sent} retrying=${result.retrying} failed=${result.failed} skipped=${result.skipped} outcomeUnknown=${outcomeUnknown} lostLease=${lostLease}`)
+        this.logger.info(`Attendance deliveries claimed=${result.claimed} sent=${result.sent} retrying=${result.retrying} failed=${result.failed} skipped=${result.skipped} deferred=${deferred} outcomeUnknown=${outcomeUnknown} lostLease=${lostLease}`)
       }
       return result
     } finally {
@@ -937,7 +976,7 @@ export class AttendanceNotificationDeliveryWorker {
     }
   }
 
-  private async deliver(row: DeliveryRow): Promise<'sent' | 'retrying' | 'failed' | 'skipped' | 'outcome_unknown' | 'lost-lease'> {
+  private async deliver(row: DeliveryRow): Promise<'sent' | 'retrying' | 'failed' | 'skipped' | 'outcome_unknown' | 'deferred' | 'lost-lease'> {
     const channel = this.channelsByName.get(row.channel)
     const attemptCount = Number(row.attempt_count)
     if (!channel) {
@@ -958,6 +997,15 @@ export class AttendanceNotificationDeliveryWorker {
       payload: parsePayload(row.payload),
     }
 
+    const maxSendDurationMs = Number(channel.maxSendDurationMs)
+    if (
+      Number.isFinite(maxSendDurationMs)
+      && maxSendDurationMs > 0
+      && this.claimLeaseExpiresAtMs - this.now().getTime() < maxSendDurationMs
+    ) {
+      return await this.settleDeferred(row, attemptCount, LEASE_MARGIN_DEFER_ERROR, DEFER_MIN_MS)
+    }
+
     let channelResult: AttendanceDeliveryChannelResult
     try {
       channelResult = await channel.send(message)
@@ -969,7 +1017,11 @@ export class AttendanceNotificationDeliveryWorker {
       return await this.markSent(row.id, attemptCount) ? 'sent' : 'lost-lease'
     }
 
-    const failure = channelResult as Extract<AttendanceDeliveryChannelResult, { ok: false }>
+    const failure = channelResult as Exclude<Extract<AttendanceDeliveryChannelResult, { ok: false }>, AttendanceDeliveryChannelDeferral>
+    const deferral = channelResult as AttendanceDeliveryChannelDeferral
+    if (deferral.defer === true) {
+      return await this.settleDeferred(row, attemptCount, deferral.error, deferral.deferMs)
+    }
     if (!failure.retryable || attemptCount >= this.maxAttempts) {
       // PR #4046 Phase B: an outcome-unknown send (attempted, response lost — maybe delivered)
       // terminates as the DISTINCT `outcome_unknown` state on the FIRST such classification: it
@@ -989,6 +1041,21 @@ export class AttendanceNotificationDeliveryWorker {
     }
 
     return await this.markRetrying(row.id, failure.error, attemptCount) ? 'retrying' : 'lost-lease'
+  }
+
+  // A deferral past its window ends as `skipped`; otherwise the row goes back to `pending`.
+  private async settleDeferred(
+    row: DeliveryRow,
+    attemptCount: number,
+    error: string,
+    deferMs: number,
+  ): Promise<'skipped' | 'deferred' | 'lost-lease'> {
+    const createdAtMs = row.created_at === undefined ? Number.NaN : new Date(row.created_at).getTime()
+    if (!Number.isFinite(createdAtMs) || this.now().getTime() - createdAtMs > DEFER_WINDOW_MS) {
+      return await this.markSkipped(row.id, `${error.slice(0, 200)}_expired`, attemptCount) ? 'skipped' : 'lost-lease'
+    }
+    const delayMs = Number.isFinite(deferMs) ? Math.min(DEFER_MAX_MS, Math.max(DEFER_MIN_MS, Math.floor(deferMs))) : DEFER_MIN_MS
+    return await this.markDeferred(row.id, error, attemptCount, delayMs) ? 'deferred' : 'lost-lease'
   }
 
   private async markSent(id: string, attemptCount: number): Promise<boolean> {
@@ -1016,6 +1083,29 @@ export class AttendanceNotificationDeliveryWorker {
     const result = await this.query(
       `UPDATE attendance_notification_deliveries
           SET status = 'retrying',
+              next_attempt_at = $2::timestamptz,
+              last_error = $3,
+              claim_expires_at = NULL,
+              claim_worker_id = NULL,
+              updated_at = $4::timestamptz
+        WHERE id = $1::uuid
+          AND status = 'sending'
+          AND claim_worker_id = $5
+          AND attempt_count = $6::int`,
+      [id, next, error.slice(0, 1000), now.toISOString(), this.workerId, attemptCount],
+    )
+    return Number(result.rowCount ?? 0) === 1
+  }
+
+  // Same CAS guard as markRetrying; the only differences are the target status and that the attempt
+  // taken by the claim is given back, so a deferral never counts toward maxAttempts.
+  private async markDeferred(id: string, error: string, attemptCount: number, delayMs: number): Promise<boolean> {
+    const now = this.now()
+    const next = new Date(now.getTime() + delayMs).toISOString()
+    const result = await this.query(
+      `UPDATE attendance_notification_deliveries
+          SET status = 'pending',
+              attempt_count = attempt_count - 1,
               next_attempt_at = $2::timestamptz,
               last_error = $3,
               claim_expires_at = NULL,

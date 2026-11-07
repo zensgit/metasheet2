@@ -957,6 +957,16 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # token or of the other (they diverge right after `StockPreparationRefresh`), and each matches exactly one
 # file on disk. Case-insensitive order: …Rail < …RefreshQueue < …RefreshState < …RouteFailedPlain.
 #
+# 备料分批拉取第一期 step 5 PR-9 (batch-refresh, register R-77, 2026-11-06): ONE token added,
+# `StockPreparationRefreshChangePlan` — the NEW spec (apps/web/tests/StockPreparationRefreshChangePlan.spec.ts) for
+# 「拉取待确认」's 「变更计划」 / 「变更复核」 sections (fail-closed reads, allow-listed bodies parsed out of the plugin
+# source and fed to its real normalizers, the read receipt over every named hold and every written-plan page, C11 /
+# C12, values staying in the page) and CP-ALIGN through the real shell for the three change-plan controls the
+# permission matrix defers to. Substring collision checked in BOTH directions: no existing token is a substring of it
+# (`StockPreparationRefreshQueue` / `StockPreparationRefreshState` diverge right after `StockPreparationRefresh`,
+# `StockPreparationRail` right after `StockPreparationR`), it is a substring of no token, and it matches exactly one
+# file on disk. Case-insensitive order: …Rail < …RefreshChangePlan < …RefreshQueue.
+#
 # 一个项目一张备料表 S2 (ADR adr-stock-prep-project-sheets-20261008, register R-36, 2026-10-09): ONE
 # token added, `StockPreparationProjectTarget` — the NEW spec (apps/web/tests/
 # StockPreparationProjectTarget.spec.ts) for projectTarget.ts (the three S1 routes' client and the
@@ -1986,6 +1996,7 @@ exec npx vitest run \
   StockPreparationProjectTarget \
   StockPreparationProjectWorkspaceView \
   StockPreparationRail \
+  StockPreparationRefreshChangePlan \
   StockPreparationRefreshQueue \
   StockPreparationRefreshState \
   StockPreparationRouteFailedPlain \

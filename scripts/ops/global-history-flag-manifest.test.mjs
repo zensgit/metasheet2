@@ -274,6 +274,9 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_BASE_ADOPTION_REFUSED',
   'MULTITABLE_BASE_SCOPE_FORBIDDEN',
   'MULTITABLE_SYSTEM_BASE_INPUT_INVALID',
+  // 批次标识 BI-5: the input refusal code of the view landing primitives (multitable/view-landing.ts) — an error
+  // code, not a flag; nobody reads it from process.env.
+  'MULTITABLE_VIEW_LANDING_INPUT_INVALID',
   'MULTITABLE_AGGREGATE_MAX_ROWS', // read-aggregation row cap
   // 自定义模板表名常量(#5617)，不是环境开关：它是 migration 与 custom-template-store 共用的表名字面量，
   // 被这条 `MULTITABLE_[A-Z_0-9]+` grep 当成 flag 抓到。列在这里等于声明「不得要求它出现在
@@ -512,7 +515,7 @@ test('leave cancel-round launch flag: registered against the plugin reader, exac
 })
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src, plus plugins/plugin-attendance/index.cjs for the ATTENDANCE_CANCEL_ROUND_ family', () => {
-  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource()])].sort()
+  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource(), ...securityActionFlagsInSource(), ...directoryIntegrationCapabilitiesFlagsInSource(), ...approvalRoutingFlagsInSource()])].sort()
   assert.ok(
     sourceGH.length >= 20,
     `expected >=20 Global-History flags derived from source, got ${sourceGH.length} — the denylist is too broad or grep broke`,
@@ -1132,6 +1135,58 @@ test('DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED: exact true (no case foldi
   assert.equal(isMisconfiguredTruthy(spec, ''), false)
 })
 
+// ── Directory integration capabilities (AGENTS.md: every env flag is registered) ──
+// Derived from READ SITES: every `DIRECTORY_INTEGRATION_CAPABILITIES_*_ENABLED` token under
+// packages/core-backend/src joins the population as soon as source reads it, so a sibling switch added
+// to this family later fails completeness until it is registered.
+function directoryIntegrationCapabilitiesFlagsInSource() {
+  return grepFlagTokens('DIRECTORY_INTEGRATION_CAPABILITIES_[A-Z_0-9]+')
+    .filter((t) => t.endsWith('_ENABLED'))
+    .sort()
+}
+
+test('directory integration capabilities: the read-site scan finds the registered key (non-vacuous)', () => {
+  assert.deepEqual(directoryIntegrationCapabilitiesFlagsInSource(), ['DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED'])
+})
+
+test('directory integration capabilities: a key absent from the manifest is reported by the completeness comparison', () => {
+  const manifestKeys = new Set(GLOBAL_HISTORY_FLAG_KEYS.filter((key) => key !== 'DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED'))
+  const missing = directoryIntegrationCapabilitiesFlagsInSource().filter((flag) => !manifestKeys.has(flag))
+  assert.deepEqual(missing, ['DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED'])
+})
+
+test('DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED: exact true (no case folding), danger low, independent, predicate source compares the literal', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED
+  assert.ok(spec, 'DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'byte-exact family: the reader neither trims nor lowercases')
+  assert.equal(spec.danger, 'low')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/integrations/directory-integration-capabilities-flag.ts#isDirectoryIntegrationCapabilitiesEnabled',
+  )
+  const module = readRepoSource(spec.source.split('#')[0])
+  assert.match(module, /export function isDirectoryIntegrationCapabilitiesEnabled\(/)
+  assert.ok(
+    module.includes("env.DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED === 'true'"),
+    'the reader compares the exact literal (no trim, no lowercase)',
+  )
+  assert.doesNotMatch(module.replace(/\/\*[\s\S]*?\*\//g, ''), /toLowerCase\(\)|\.trim\(\)/, 'the reader must not fold case or trim')
+  assert.match(spec.purpose, /Default OFF/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', '1', 'yes', 'on']) {
+    assert.equal(isActivated(spec, value), false, String(value))
+  }
+  for (const value of ['TRUE', '1', 'yes', 'on']) {
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${value} looks on but is not the exact literal`)
+  }
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  assert.equal(isMisconfiguredTruthy(spec, ''), false)
+})
+
 test('DINGTALK_TODO_MIRROR_ENABLED: the registry evaluates the same input matrix exactly like the runtime reader', () => {
   const spec = GLOBAL_HISTORY_FLAG_BY_KEY.DINGTALK_TODO_MIRROR_ENABLED
   assert.ok(spec, 'DINGTALK_TODO_MIRROR_ENABLED must be registered in the manifest')
@@ -1166,4 +1221,122 @@ test('DINGTALK_TODO_MIRROR_ENABLED: the registry evaluates the same input matrix
   // isMisconfiguredTruthy follows isActivated: a value the runtime honours is not flagged as a footgun.
   for (const value of ['TRUE', 'True', ' true ']) assert.equal(isMisconfiguredTruthy(spec, value), false, value)
   for (const value of ['1', 'yes']) assert.equal(isMisconfiguredTruthy(spec, value), true, value)
+})
+
+// ── Security action proofs (AGENTS.md: every env flag is registered) ─────────────────────────────────
+// Derived from READ SITES: every `SECURITY_ACTION_*_ENABLED` token under packages/core-backend/src joins
+// the population as soon as source reads it. The `_ENABLED` suffix keeps the policy constants and error
+// codes of the same family (SECURITY_ACTION_PURPOSES, SECURITY_ACTION_UNAVAILABLE, ...) out of it.
+function securityActionFlagsInSource() {
+  return grepFlagTokens('SECURITY_ACTION_[A-Z_0-9]+')
+    .filter((t) => t.endsWith('_ENABLED'))
+    .sort()
+}
+
+test('security action flags: the read-site scan finds the registered key (non-vacuous)', () => {
+  assert.deepEqual(securityActionFlagsInSource(), ['SECURITY_ACTION_PROOF_ENABLED'])
+})
+
+test('SECURITY_ACTION_PROOF_ENABLED: exact true, danger high, independent, predicate source compares the literal, migration on disk', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.SECURITY_ACTION_PROOF_ENABLED
+  assert.ok(spec, 'SECURITY_ACTION_PROOF_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'byte-exact family: the reader neither trims nor lowercases')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/auth/security-action-proof-flag.ts#isSecurityActionProofEnabled; packages/core-backend/src/routes/security-actions.ts#securityActionsRouter',
+  )
+  const [flagSource, routeSource] = spec.source.split('; ').map((entry) => readRepoSource(entry.split('#')[0]))
+  assert.match(flagSource, /export function isSecurityActionProofEnabled\(/)
+  assert.ok(flagSource.includes("env.SECURITY_ACTION_PROOF_ENABLED === 'true'"), 'the reader compares the exact literal (no trim, no lowercase)')
+  assert.doesNotMatch(flagSource, /toLowerCase\(\)|\.trim\(\)/, 'the reader must not fold case or trim')
+  assert.match(routeSource, /export function securityActionsRouter\(\): Router \| null/)
+  assert.ok(routeSource.includes('if (!isSecurityActionProofEnabled()) return null'), 'the router factory returns null while OFF')
+  const migrations = readdirSync(path.join(REPO_ROOT, 'packages/core-backend/src/db/migrations'))
+    .filter((name) => name.startsWith('zzzz20261106120000_create_security_action_challenges'))
+  assert.deepEqual(migrations, ['zzzz20261106120000_create_security_action_challenges.ts'])
+  assert.match(spec.purpose, /Default OFF/)
+  assert.match(spec.purpose, /byte-identical/)
+  assert.match(spec.purpose, /zzzz20261106120000_create_security_action_challenges/)
+  assert.match(spec.purpose, /Not a grant/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', ' true ', '1', 'yes', 'on']) {
+    assert.equal(isActivated(spec, value), false, String(value))
+  }
+  for (const value of ['TRUE', '1', 'yes', 'on']) {
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${value} looks on but is not the exact literal`)
+  }
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  assert.equal(isMisconfiguredTruthy(spec, ''), false)
+})
+
+// ── Approval-routing source requirement (AGENTS.md: every env flag is registered) ──
+// Derived from READ SITES: every `APPROVAL_ROUTING_*_ENABLED` token under packages/core-backend/src joins the
+// population, so a sibling switch added to this family later fails completeness until it is registered.
+// The same prefix is also used by error codes (APPROVAL_ROUTING_POLICY_REQUIRED, ..._MISCONFIGURED), which
+// are not flags: the `_ENABLED` suffix filter is what tells them apart.
+function approvalRoutingTokensInSource() {
+  return grepFlagTokens('APPROVAL_ROUTING_[A-Z_0-9]+').sort()
+}
+
+function approvalRoutingFlagsInSource() {
+  return approvalRoutingTokensInSource().filter((t) => t.endsWith('_ENABLED')).sort()
+}
+
+test('approval-routing family: the read-site scan finds exactly the registered key (non-vacuous), error codes are filtered out', () => {
+  assert.deepEqual(approvalRoutingFlagsInSource(), ['APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED'])
+  const all = approvalRoutingTokensInSource()
+  assert.ok(
+    all.some((t) => !t.endsWith('_ENABLED')),
+    'the family prefix also matches error-code tokens; the suffix filter must be what excludes them',
+  )
+  assert.ok(approvalRoutingFlagsInSource().every((t) => GLOBAL_HISTORY_FLAG_KEYS.includes(t)))
+})
+
+test('APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED: exact true (no case folding), danger high, independent, predicate source compares the literal', () => {
+  const key = 'APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED'
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+  assert.ok(spec, `${key} must be registered in the manifest`)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'byte-exact: the reader neither trims nor lowercases')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/directory/pull-source-rule.ts#isApprovalRoutingRequirePolicyEnabled',
+  )
+  const module = readRepoSource(spec.source.split('#')[0])
+  assert.match(module, /export function isApprovalRoutingRequirePolicyEnabled\(/)
+  assert.ok(
+    module.includes(`env.${key} === 'true'`),
+    'the reader compares the exact literal (no trim, no lowercase)',
+  )
+  assert.doesNotMatch(module, /toLowerCase\(\)|\.trim\(\)/, 'the reader must not fold case or trim')
+  assert.match(spec.purpose, /Default OFF/)
+  assert.match(spec.purpose, /byte-identical/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', ' true ', '1', 'yes', 'on']) {
+    assert.equal(isActivated(spec, value), false, String(value))
+  }
+  for (const value of ['TRUE', '1', 'yes', 'on']) {
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${value} looks on but is not the exact literal`)
+  }
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  assert.equal(isMisconfiguredTruthy(spec, ''), false)
+  assert.equal(isMisconfiguredTruthy(spec, undefined), false)
+})
+
+test('APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED: both environment templates list it as a commented sample that is OFF', () => {
+  for (const template of ['docker/app.env.example', 'docker/app.staging.env.example']) {
+    const text = readRepoSource(template)
+    const lines = text.split('\n').filter((line) => line.includes('APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED='))
+    assert.deepEqual(lines, ['# APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED=false'], template)
+    assert.match(text, /already in the multi-source, no-policy state/, template)
+  }
 })
