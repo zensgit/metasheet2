@@ -434,9 +434,15 @@ export function defineAuthzVersionFieldRowOrderRealDbCases(): void {
         })
       })
 
-      test('FO-P3 ensureFields in overwrite mode: the version row is held when the first field upsert runs', async () => {
+      test('FO-P3 ensureFields in overwrite mode: the version row is held once the FIRST field row is locked, before a later field trips the trigger', async () => {
         expect(isWriterFenceEnabled()).toBe(false)
+        // Two existing fields, upserted in order: the first keeps its visibility (its upsert locks the row and fires no
+        // bump), the second is hidden and the descriptor unhides it (the trigger fires there). Held right after the
+        // FIRST upsert, the writer holds a field row and nothing the trigger did yet: only the explicit bump can have
+        // taken the version row. (A hold after a visibility-changing upsert would see the trigger's own bump.)
+        const first = fld('p3a')
         const id = fld('p3')
+        await seedField(SHEET, first, 'string', {}, 39)
         await seedField(SHEET, id, 'string', { hidden: true }, 40)
         const client = await rawClient()
         let released!: () => void
@@ -458,13 +464,14 @@ export function defineAuthzVersionFieldRowOrderRealDbCases(): void {
             },
             sheetId: SHEET,
             overwriteMode: 'overwrite',
-            // The descriptor carries no `hidden`: the overwrite UNHIDES the stored field (a trigger-relevant rewrite).
-            fields: [{ id, name: 'F p3', type: 'string', order: 40 }],
+            // The descriptors carry no `hidden`: the second overwrite UNHIDES the stored field (a trigger-relevant rewrite).
+            fields: [{ id: first, name: 'F p3a', type: 'string', order: 39 }, { id, name: 'F p3', type: 'string', order: 40 }],
           })
           running.catch(() => {})
           await upsertReached
-          expect(await fieldRowProbe(id), 'the upsert holds the existing field row').toBe('held')
-          expect(await versionRowProbe(SHEET), 'FO-P3: the version row was taken BEFORE the first field upsert').toBe('held')
+          expect(await fieldRowProbe(first), 'the first upsert holds its existing field row').toBe('held')
+          expect(await fieldRowProbe(id), 'the second field is not locked yet').toBe('free')
+          expect(await versionRowProbe(SHEET), 'FO-P3: the version row was taken BEFORE the first field row').toBe('held')
           released()
           await running
           await client.query('COMMIT')
