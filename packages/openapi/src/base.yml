@@ -307,6 +307,48 @@ components:
               type: string
             message:
               type: string
+    SecurityActionError:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          enum: [false]
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - UNAUTHORIZED
+                - PASSWORD_CHANGE_REQUIRED
+                - SECURITY_ACTION_SESSION_REQUIRED
+                - SECURITY_ACTION_PURPOSE_UNAVAILABLE
+                - SECURITY_ACTION_METHOD_UNAVAILABLE
+                - SECURITY_ACTION_HIGH_PRIVILEGE_SELF_SERVICE_DENIED
+                - SECURITY_ACTION_ASSURANCE_INSUFFICIENT
+                - SECURITY_ACTION_CONNECTION_NOT_PERMITTED
+                - SECURITY_ACTION_CREDENTIAL_REJECTED
+                - SECURITY_ACTION_ORG_CONTEXT_REQUIRED
+                - SECURITY_ACTION_TARGET_CONFLICT
+                - SECURITY_ACTION_STATE_CHANGED
+                - SECURITY_ACTION_INVALID_REQUEST
+                - SECURITY_ACTION_RATE_LIMITED
+                - SECURITY_ACTION_UNAVAILABLE
+                - SECURITY_ACTION_PROOF_UNAVAILABLE
+            message:
+              type: string
+            details:
+              type: object
+              description: Closed-set values only; never a request value.
+              properties:
+                nextStep:
+                  type: string
+                  enum: [admin_assisted_local_credential]
+                retryAfter:
+                  type: integer
+                fields:
+                  type: array
+                  items: { type: string }
     DirectErrorResponse:
       type: object
       properties:

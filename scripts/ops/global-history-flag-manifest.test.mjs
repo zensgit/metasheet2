@@ -519,7 +519,7 @@ test('leave cancel-round launch flag: registered against the plugin reader, exac
 })
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src, plus plugins/plugin-attendance/index.cjs for the ATTENDANCE_CANCEL_ROUND_ family', () => {
-  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource()])].sort()
+  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource(), ...securityActionFlagsInSource()])].sort()
   assert.ok(
     sourceGH.length >= 20,
     `expected >=20 Global-History flags derived from source, got ${sourceGH.length} — the denylist is too broad or grep broke`,
@@ -1194,4 +1194,55 @@ test('DINGTALK_TODO_MIRROR_ENABLED: the registry evaluates the same input matrix
   // isMisconfiguredTruthy follows isActivated: a value the runtime honours is not flagged as a footgun.
   for (const value of ['TRUE', 'True', ' true ']) assert.equal(isMisconfiguredTruthy(spec, value), false, value)
   for (const value of ['1', 'yes']) assert.equal(isMisconfiguredTruthy(spec, value), true, value)
+})
+
+// ── Security action proofs (AGENTS.md: every env flag is registered) ─────────────────────────────────
+// Derived from READ SITES: every `SECURITY_ACTION_*_ENABLED` token under packages/core-backend/src joins
+// the population as soon as source reads it. The `_ENABLED` suffix keeps the policy constants and error
+// codes of the same family (SECURITY_ACTION_PURPOSES, SECURITY_ACTION_UNAVAILABLE, ...) out of it.
+function securityActionFlagsInSource() {
+  return grepFlagTokens('SECURITY_ACTION_[A-Z_0-9]+')
+    .filter((t) => t.endsWith('_ENABLED'))
+    .sort()
+}
+
+test('security action flags: the read-site scan finds the registered key (non-vacuous)', () => {
+  assert.deepEqual(securityActionFlagsInSource(), ['SECURITY_ACTION_PROOF_ENABLED'])
+})
+
+test('SECURITY_ACTION_PROOF_ENABLED: exact true, danger high, independent, predicate source compares the literal, migration on disk', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.SECURITY_ACTION_PROOF_ENABLED
+  assert.ok(spec, 'SECURITY_ACTION_PROOF_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'byte-exact family: the reader neither trims nor lowercases')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/auth/security-action-proof-flag.ts#isSecurityActionProofEnabled; packages/core-backend/src/routes/security-actions.ts#securityActionsRouter',
+  )
+  const [flagSource, routeSource] = spec.source.split('; ').map((entry) => readRepoSource(entry.split('#')[0]))
+  assert.match(flagSource, /export function isSecurityActionProofEnabled\(/)
+  assert.ok(flagSource.includes("env.SECURITY_ACTION_PROOF_ENABLED === 'true'"), 'the reader compares the exact literal (no trim, no lowercase)')
+  assert.doesNotMatch(flagSource, /toLowerCase\(\)|\.trim\(\)/, 'the reader must not fold case or trim')
+  assert.match(routeSource, /export function securityActionsRouter\(\): Router \| null/)
+  assert.ok(routeSource.includes('if (!isSecurityActionProofEnabled()) return null'), 'the router factory returns null while OFF')
+  const migrations = readdirSync(path.join(REPO_ROOT, 'packages/core-backend/src/db/migrations'))
+    .filter((name) => name.startsWith('zzzz20261106120000_create_security_action_challenges'))
+  assert.deepEqual(migrations, ['zzzz20261106120000_create_security_action_challenges.ts'])
+  assert.match(spec.purpose, /Default OFF/)
+  assert.match(spec.purpose, /byte-identical/)
+  assert.match(spec.purpose, /zzzz20261106120000_create_security_action_challenges/)
+  assert.match(spec.purpose, /Not a grant/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', ' true ', '1', 'yes', 'on']) {
+    assert.equal(isActivated(spec, value), false, String(value))
+  }
+  for (const value of ['TRUE', '1', 'yes', 'on']) {
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${value} looks on but is not the exact literal`)
+  }
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  assert.equal(isMisconfiguredTruthy(spec, ''), false)
 })

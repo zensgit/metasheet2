@@ -376,6 +376,18 @@ export default defineConfig({
       // skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
       // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
       'tests/integration/directory-sync-membership-local-account-gate.db.test.ts',
+      // One-time action proofs against real Postgres: schema, constraints and the transition trigger,
+      // the guarded down/up round trip, issuance and consumption bindings, invalidation, and
+      // concurrency on read-committed and repeatable-read-default pools. DATABASE_URL-gated; excluded
+      // here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval
+      // real-DB step in plugin-tests.yml (both points asserted by
+      // tests/unit/security-action-proof-inert.test.ts).
+      'tests/integration/security-action-proof.db.test.ts',
+      // Directory sync characterization against real PostgreSQL (mocked provider client, real
+      // reconcile). DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and
+      // wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml (pinned by
+      // plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/directory-adapter-golden-parity.db.test.ts',
       // D21 authorization version protocol (slice Y5a): the trigger coverage matrix (raw SQL + FK
       // cascade writers), the two-connection barrier cases and the holder-vs-writer deadlock
       // mapping need real PostgreSQL. DATABASE_URL-gated; excluded here so the no-DB job cannot
