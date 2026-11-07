@@ -307,6 +307,31 @@
         />
         <div v-else ref="titleTextRef" class="meta-record-drawer__title-text" tabindex="-1">{{ primaryFieldDisplayText }}</div>
       </div>
+      <!-- 备料 「查看子件」 / 「查看所有使用位置」 (owner question 2026-11-07): shown only when the workbench passes
+           `bomRelations` (from /context's stockPreparationBomRelations block — a stock-preparation main-template sheet).
+           The buttons only EMIT; the workbench sets a viewer-only filter on the grid (never a view write). Disabled with
+           the reason inline when the row has no PLM material id. -->
+      <div v-if="record && bomRelations" class="meta-record-drawer__bom-relations" data-testid="record-inspector-bom-relations">
+        <div class="meta-record-drawer__bom-relations-actions">
+          <MtButton
+            size="sm"
+            data-testid="record-inspector-bom-children"
+            :disabled="!!bomRelations.disabledReason"
+            :title="bomRelations.disabledReason || bomRelationsLabel('action.childrenTitle', isZh)"
+            @click="emit('bom-relations', 'children')"
+          >{{ bomRelationsLabel('action.children', isZh) }}</MtButton>
+          <MtButton
+            size="sm"
+            data-testid="record-inspector-bom-where-used"
+            :disabled="!!bomRelations.disabledReason"
+            :title="bomRelations.disabledReason || bomRelationsLabel('action.whereUsedTitle', isZh)"
+            @click="emit('bom-relations', 'whereUsed')"
+          >{{ bomRelationsLabel('action.whereUsed', isZh) }}</MtButton>
+        </div>
+        <p class="meta-record-drawer__bom-relations-hint" data-testid="record-inspector-bom-relations-hint">{{
+          bomRelations.disabledReason || bomRelationsLabel('action.hint', isZh)
+        }}</p>
+      </div>
     </div>
     <div
       v-if="record"
@@ -665,6 +690,7 @@ import {
 import { commentLabel } from '../utils/meta-comment-labels'
 import { workbenchLabel } from '../utils/workbench-labels'
 import { manualRowLabel } from '../utils/manual-row-labels'
+import { bomRelationsLabel, type BomRelationKind } from '../utils/bom-relations'
 import { isImeKeyEvent } from '../utils/ime-keys'
 import type { AiShortcutState } from '../composables/useAiShortcut'
 import {
@@ -694,6 +720,10 @@ const props = withDefaults(defineProps<{
    *  /context's `stockPreparationManualRows` block (state `allowed`, an actor who can create) — never from the row's
    *  `manualSupplement` mark. Default false: no entry. */
   manualCopyAvailable?: boolean
+  /** 备料 「查看子件」 / 「查看所有使用位置」: the workbench passes this only on a stock-preparation main-template sheet
+   *  (/context's stockPreparationBomRelations block). `disabledReason` set ⇒ both buttons disabled with it shown.
+   *  null/absent ⇒ no buttons (every other sheet). */
+  bomRelations?: { disabledReason: string | null } | null
   canManageAutomation?: boolean
   /** 记录级送审 (阶段二 §5): server-derived `multitable:submit-approval`. Default false — an older
    *  backend, the deprecated MetaRecordDrawer shell's own caller, or any harness that omits it gets NO
@@ -827,6 +857,7 @@ const props = withDefaults(defineProps<{
   fieldErrors: null,
   canSubmitApproval: false,
   manualCopyAvailable: false,
+  bomRelations: null,
 })
 
 const emit = defineEmits<{
@@ -835,6 +866,8 @@ const emit = defineEmits<{
   (e: 'duplicate'): void
   /** 人工补充行 B3: 「复制为新行」 of this record (the workbench confirms and calls the manual-copy route). */
   (e: 'manual-copy'): void
+  /** 备料: 「查看子件」 (`children`) / 「查看所有使用位置」 (`whereUsed`) for this record — the workbench sets the viewer filter. */
+  (e: 'bom-relations', kind: BomRelationKind): void
   /** Record inspector v3 (2026-09-05, PR-A §1.2 Row A): copy-link icon. PR-A scope is this emit
    *  only — the clipboard write + copied/failed live-region text are PR-B1 (see the button's own
    *  template comment); WB has no listener for it yet. */
@@ -1856,6 +1889,10 @@ function formatCommentTimestamp(iso: string): string {
   .meta-record-drawer__toolbar :deep(.meta-comment-action-chip__label) { display: none; }
 }
 .meta-record-drawer__titleblock { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+/* 备料 「查看子件」 / 「查看所有使用位置」 row under the title. */
+.meta-record-drawer__bom-relations { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.meta-record-drawer__bom-relations-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.meta-record-drawer__bom-relations-hint { margin: 0; font-size: 12px; line-height: 1.4; color: var(--ms-text-3, #888); }
 .meta-record-drawer__eyebrow { margin: 0; font-size: 11px; line-height: 1.3; color: var(--ms-text-3, #999); text-transform: uppercase; letter-spacing: 0.02em; }
 /* 人工补充行 (OQ3): the same label the grid shows at the row head. */
 .meta-record-drawer__manual-row-tag { display: inline-block; margin-left: 6px; padding: 0 4px; font-size: 10px; line-height: 14px; color: #8a5a00; background: #fdf6ec; border: 1px solid #f5dab1; border-radius: 3px; text-transform: none; letter-spacing: 0; vertical-align: middle; }
