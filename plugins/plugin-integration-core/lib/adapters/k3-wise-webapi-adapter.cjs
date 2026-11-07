@@ -3,10 +3,8 @@
 // ---------------------------------------------------------------------------
 // K3 WISE WebAPI adapter - plugin-integration-core
 //
-// PoC-level ERP target adapter for Kingdee K3 WISE. It intentionally keeps the
-// adapter contract small: login/test, object discovery, schema, and target
-// upsert through configured WebAPI endpoints. Submit/Audit are opt-in because
-// many K3 WISE deployments require a customer-specific approval policy.
+// K3 WISE WebAPI adapter. Login/test and bounded reads remain available;
+// lifecycle writes are permanently refused before any outbound request.
 // ---------------------------------------------------------------------------
 
 const {
@@ -1237,6 +1235,35 @@ function buildBomListByMaterialReadBody(request) {
   }
 }
 
+// BL2's confirmed envelope uses these exact keys. A short array without the total/paging echo cannot
+// establish uniqueness; do not infer a complete candidate set from missing metadata or alias containers.
+function bomListByMaterialEnvelopeInteger(value) {
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && /^[0-9]+$/.test(value) ? Number(value) : null
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null
+}
+
+function bomListByMaterialResponseViolation(data, request) {
+  const status = bomListByMaterialEnvelopeInteger(getPath(data, 'StatusCode'))
+  // Generic historical businessSuccess can accept Code=Y before considering StatusCode. BL2 must not
+  // let that override an explicitly rejected (or absent/malformed) canonical status envelope.
+  if (status === null || status < 200 || status >= 300) return 'K3_WISE_BOM_LIST_BY_MATERIAL_REJECTED'
+
+  const rows = getPath(data, 'Data.DATA')
+  const rowCount = bomListByMaterialEnvelopeInteger(getPath(data, 'Data.ROWCOUNT'))
+  const pageSize = bomListByMaterialEnvelopeInteger(getPath(data, 'Data.PAGESIZE'))
+  const pageIndex = bomListByMaterialEnvelopeInteger(getPath(data, 'Data.PAGEINDEX'))
+  if (!Array.isArray(rows) || rowCount === null || pageSize === null || pageIndex === null
+    || rowCount < rows.length) return 'K3_WISE_BOM_LIST_BY_MATERIAL_SHAPE_MISMATCH'
+  // Includes an empty visible page with positive total: neither uniqueness nor NOT_FOUND is proven.
+  if (rowCount > rows.length) return 'K3_WISE_BOM_LIST_BY_MATERIAL_AMBIGUOUS'
+  if (pageIndex !== 1 || pageSize !== request.limit || rows.length > pageSize) {
+    return 'K3_WISE_BOM_LIST_BY_MATERIAL_SHAPE_MISMATCH'
+  }
+  return null
+}
+
 function defaultMaterialReferenceFields(objectConfig) {
   return Array.isArray(objectConfig.schema)
     ? objectConfig.schema
@@ -1846,7 +1873,18 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
         headers: requestHeaders,
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller ? controller.signal : undefined,
+        // Fetch otherwise follows Location before this adapter can check the next pathname.
+        // A POST read redirected with 307/308 can become a POST to Save with the same body.
+        redirect: 'error',
       })
+      // An injected fetch implementation may ignore the option and return a redirect response.
+      // Refuse before parsing any body, including a forged successful business envelope.
+      if ((Number.isInteger(response.status) && response.status >= 300 && response.status < 400)
+        || response.redirected === true) {
+        throw new K3WiseWebApiAdapterError('K3_WISE_REDIRECT_REFUSED', {
+          code: 'K3_WISE_REDIRECT_REFUSED',
+        })
+      }
       const data = await parseResponseBody(response)
       if (!responseOk(response)) {
         throw new K3WiseWebApiAdapterError(`K3 WISE WebAPI request failed: ${method} ${path}`, {
@@ -2111,6 +2149,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           body: buildListReadBody(request, objectConfig),
         })
       } catch (error) {
+        if (error && error.details && error.details.code === 'K3_WISE_REDIRECT_REFUSED') throw error
         throw new K3WiseWebApiAdapterError(`K3 WISE WebAPI list read failed: ${error && error.message ? error.message : String(error)}`, {
           code: 'K3_WISE_READ_FAILED',
           object: request.object,
@@ -2191,6 +2230,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           body: buildBomReadBody(request, objectConfig),
         })
       } catch (error) {
+        if (error && error.details && error.details.code === 'K3_WISE_REDIRECT_REFUSED') throw error
         throw new K3WiseWebApiAdapterError(`K3 WISE WebAPI BOM read failed: ${error && error.message ? error.message : String(error)}`, {
           code: 'K3_WISE_BOM_READ_FAILED',
           object: request.object,
@@ -2243,9 +2283,9 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     }
 
     // BL2 (#1709): by-material BOM-list lookup — ONE read-only BOM/GetList call. No GetDetail, no
-    // recursion, no write method, no reference resolution. The adapter returns the bounded candidate
-    // rows + raw envelope; multiplicity selection (unique-only fail-closed) belongs to the shared
-    // resolver evaluator in the read runtime, never "first row wins" here.
+    // recursion, no write method, no reference resolution. The adapter first validates the complete
+    // candidate envelope, then returns rows + raw. Multiplicity selection (unique-only fail-closed)
+    // belongs to the shared resolver evaluator in the read runtime, never "first row wins" here.
     if (readMode === 'bom_list_by_material') {
       assertBomListByMaterialReadOnlyScope(request)
       const readPath = objectConfig.readPath
@@ -2269,6 +2309,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           body: buildBomListByMaterialReadBody(request),
         })
       } catch (error) {
+        if (error && error.details && error.details.code === 'K3_WISE_REDIRECT_REFUSED') throw error
         throw new K3WiseWebApiAdapterError(`K3 WISE WebAPI BOM list-by-material read failed: ${error && error.message ? error.message : String(error)}`, {
           code: 'K3_WISE_BOM_LIST_BY_MATERIAL_FAILED',
           object: request.object,
@@ -2290,6 +2331,14 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           dataRowCount,
           listShapeProbe,
           responseShapeProbe,
+        })
+      }
+
+      const responseViolation = bomListByMaterialResponseViolation(readResponse.data, request)
+      if (responseViolation !== null) {
+        throw new K3WiseWebApiAdapterError('K3 WISE BOM list-by-material candidate envelope is incomplete or invalid', {
+          code: responseViolation,
+          object: request.object,
         })
       }
 
@@ -2341,6 +2390,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
         body: buildReadBody(materialNumber, objectConfig),
       })
     } catch (error) {
+      if (error && error.details && error.details.code === 'K3_WISE_REDIRECT_REFUSED') throw error
       throw new K3WiseWebApiAdapterError(`K3 WISE WebAPI read failed: ${error && error.message ? error.message : String(error)}`, {
         code: 'K3_WISE_READ_FAILED',
         object: request.object,

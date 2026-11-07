@@ -7,6 +7,7 @@
 // the contract/evidence handoff that S2-b (live probe) and S2-c (save version) may consume later.
 
 const { validateReadSourceConfig } = require('./read-source-config.cjs')
+const { isB4ReadOperationProfile } = require('./k3-read-operation-profiles.cjs')
 const { readSmokeResponseShapeContainerEvidence } = require('./read-smoke.cjs')
 // BL2 (#1709, BL0 design-lock): the by-material BOM-list preset's registered coarse-code family + the
 // full-field contract lock. The BL1 module stays pure (it requires nothing); this contract layer consumes it.
@@ -193,6 +194,7 @@ function normalizeReadSourceProbeContract(input) {
     rowCap: READ_SOURCE_PROBE_ROW_CAP,
   }
   if (config.keyField) plan.keyField = config.keyField
+  if (isB4ReadOperationProfile(config.actionProfileVersion)) plan.actionProfileVersion = config.actionProfileVersion
   if (config.keyEncoding) plan.keyEncoding = config.keyEncoding
   if (config.multiplicityRuleField) plan.multiplicityRuleField = config.multiplicityRuleField
   return Object.freeze(plan)

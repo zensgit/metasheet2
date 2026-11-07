@@ -74,20 +74,21 @@ const SYSTEMS: WorkbenchExternalSystem[] = [
 describe('IntegrationReadSourceWizard (via IntegrationReadSourceConfigPanel default surface)', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
-  let originalConfirm: typeof window.confirm | undefined
+  let originalConfirmDescriptor: PropertyDescriptor | undefined
   let confirmMock: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
     apiFetchMock.mockReset()
-    originalConfirm = window.confirm
+    originalConfirmDescriptor = Object.getOwnPropertyDescriptor(window, 'confirm')
     confirmMock = vi.fn(() => true)
-    Object.defineProperty(window, 'confirm', { configurable: true, value: confirmMock })
+    Object.defineProperty(window, 'confirm', { configurable: true, writable: true, value: confirmMock })
   })
 
   afterEach(() => {
     if (app) app.unmount()
     if (container) container.remove()
-    Object.defineProperty(window, 'confirm', { configurable: true, value: originalConfirm })
+    if (originalConfirmDescriptor) Object.defineProperty(window, 'confirm', originalConfirmDescriptor)
+    else Reflect.deleteProperty(window, 'confirm')
     app = null
     container = null
   })
@@ -408,6 +409,50 @@ describe('IntegrationReadSourceWizard (via IntegrationReadSourceConfigPanel defa
     await flushUi()
     expect(approveCalls).toHaveLength(1)
     expect(approveCalls[0]).toContain('/api/integration/read-source-configs/cfg_wiz/approve')
+  })
+
+  it('does not offer approval for a late save of an older wizard draft', async () => {
+    let resolveSave!: (response: Response) => void
+    const pendingSave = new Promise<Response>((resolve) => { resolveSave = resolve })
+    const approveCalls: string[] = []
+    apiFetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.includes('/approve') && init?.method === 'POST') {
+        approveCalls.push(url)
+        return Promise.resolve(jsonResponse(null))
+      }
+      if (url.startsWith('/api/integration/read-source-configs') && init?.method === 'POST') return pendingSave
+      return Promise.resolve(jsonResponse([]))
+    })
+    const root = mountPanel()
+    await flushUi()
+    await toStep2(root)
+    await fillValidSingleRecordStep2(root)
+    q<HTMLButtonElement>(root, 'rsc-wizard-next').click()
+    await flushUi()
+    q<HTMLButtonElement>(root, 'rsc-wizard-next').click()
+    await flushUi()
+    q<HTMLButtonElement>(root, 'rsc-wizard-save').click()
+    await flushUi()
+    expect(apiFetchMock.mock.calls.some(([url, init]) =>
+      String(url).startsWith('/api/integration/read-source-configs') && init?.method === 'POST',
+    )).toBe(true)
+
+    q<HTMLButtonElement>(root, 'rsc-wizard-back').click()
+    await flushUi()
+    q<HTMLButtonElement>(root, 'rsc-wizard-back').click()
+    await flushUi()
+    setInput(root, 'rsc-wizard-object', 'new-material')
+    await flushUi()
+    q<HTMLButtonElement>(root, 'rsc-wizard-next').click()
+    await flushUi()
+    q<HTMLButtonElement>(root, 'rsc-wizard-next').click()
+    await flushUi()
+
+    resolveSave(jsonResponse({ id: 'cfg_old', version: 1, status: 'draft', reused: false, contentKey: 'old' }))
+    await flushUi()
+    expect(maybe(root, 'rsc-wizard-save-result')).toBeNull()
+    expect(maybe(root, 'rsc-wizard-approve')).toBeNull()
+    expect(approveCalls).toHaveLength(0)
   })
 
   // THE byte-equality hard-lock test (design-lock §2): the same inputs driven through the wizard
