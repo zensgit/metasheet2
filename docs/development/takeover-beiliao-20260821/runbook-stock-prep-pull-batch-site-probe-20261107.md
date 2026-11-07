@@ -4,7 +4,7 @@
 > 授权里写明：目标库、只读身份（只有 `GRANT SELECT` 的角色）、执行窗口、`app.env` 的读取人、证据去向（私有记录在哪）。
 > 没有授权就不跑；授权只覆盖本手册列出的两个文件，不覆盖任何写操作。开发机**从未**在任何客户系统上跑过本包。
 >
-> **values-free**：本手册不含主机、地址、口令、令牌、账号名或真实项目号。`<安装根目录>`、`<只读连接串>`、
+> **values-free**：本手册不含主机、地址、口令、令牌、账号名或真实项目号。`<安装根目录>`、`<私有连接串文件>`（只读连接串所在的私有文件）、
 > `<env 项目 id>`、`<env objectId>` 等占位符在执行时替换，替换后的值只记在私有记录里。
 >
 > 依据：设计定稿 design-final §14（BI-6a 行）、§7.3（上机顺序：先读探查结果，再翻开关）、§8（装机步骤与历史回填）、
@@ -26,9 +26,13 @@
    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
    $env:PGAPPNAME = 'stock-prep-pull-batch-site-probe-20261107'
    $env:PGCLIENTENCODING = 'UTF8'
-   & '<psql 完整路径>' '<只读连接串>' -X -q -v schema=public -f 01-site-probe.sql *> probe.log
+   $env:READONLY_DATABASE_URL = (Get-Content -Raw -LiteralPath '<私有连接串文件>').Trim()
+   & '<psql 完整路径>' $env:READONLY_DATABASE_URL -X -q -v schema=public -f 01-site-probe.sql *> probe.log
+   Remove-Item Env:\READONLY_DATABASE_URL
    Select-String -Path probe.log -Pattern '^PROBE_'
    ```
+
+   连接串只经环境变量传入；PowerShell 5.1 在 psql 往 stderr 写任何一行时会把整条命令行原文写进 `*>` 的日志。probe.log 本身是私有文件（psql 的连接错误还会带主机与账号），只有 PROBE_ 行可以外贴。
 
    客户反映的那个项目若可能还在 env 绑定的旧表上，再加两个参数跑一次（两个值从 `app.env` 里
    `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON` 的目标 `objectId` 与运行时项目 id 私下读出，**不要**贴出）：
@@ -69,6 +73,9 @@
 | `personal_order_overrides>0` | 有人用了个人列顺序 | 这些人会在自己列序的末尾看到两列（§10.3，计数写进批复） |
 | `person_rows>0`、`person_rows_with_key>0` | 有人建的行；带唯一键的多半是右击复制 | 这些行**不打标签**、不当证据（§8.4 person 类），计数写进批复 |
 | `manual_rows>0` | 人工补充行 | 两列显示「人工补充」（main 包之后） |
+| `null_creator_rows_not_plugin>0` | 有无创建人、却不通过插件行判定（插件键 ∧ 拉取决定戳，R-65 C4）的行 | 这些行**不当首次批次证据、不打拉取批次标签**（两列留空），计数写进批复 |
+| `null_creator_rows_by_birth_source_automation>0` 或 `_public_form>0` | 自动化「新建记录」或匿名公开表单在这张表上建过行 | 同上不打标签；把这些规则 / 表单列入装机窗口的暂停清单（§8.9），并告知 owner 这张表并非只有拉取在建行 |
+| `null_creator_rows_by_birth_source_none>0` | 修订记录上线前建的行，看不出由谁建 | 只按 C4 判定（插件键 ∧ 决定戳）决定是否当证据 |
 | `locked_rows>0` | 锁定行 | 跳过并计数（G12） |
 | `trashed_rows>0` | 回收站里有本项目的行 | 默认不算「出现过」（O-BI-10） |
 | `add_stamp_clusters` 与 `created_at_gap_clusters` | 两种口径下的历史拉取次数 | 与客户 / owner 自己记得的拉取次数对照（§8.5 `confirmHistoricalBatchCount`）；对不上就选别的 G 或 `unknown` 模式 |

@@ -8,14 +8,20 @@
 //         ASCII.
 //   SP-02 what it reads: the closed relation list; every (table, column) of the required-columns block exists in the
 //         migration that creates it (on main, and the pack refuses on a schema without them).
-//   SP-03 pinned vocabularies: the plm_system column list = the main template's; the view logical ids, the 'add'
+//   SP-03 pinned vocabularies: the plm_system column list = the installed R-line build's (onprem-r82), every one of
+//         them still a plm_system column on main; the view logical ids, the 'add'
 //         decision, the lock property, the active-column labels, `frozenLeftColumnIds` and `fieldOrder` are the
 //         product's own; ids derive exactly as provisioning.ts stableMetaId; the JS trim() whitespace set.
 //   SP-04 values-free: outside the private section, an output line only ever concatenates literal tokens, closed
-//         columns and integers; handles are selected only inside the section gated by `-v emit_private_map=1`.
+//         columns and integers, never a function-call operand (a transformed value); handles are selected only inside
+//         the section gated by `-v emit_private_map=1`.
 //   SP-05 the plan-time cell is cast only when it is a strict ISO-8601 instant whose day exists.
 //   SP-06 the host half (02-site-env.ps1) prints yes/no and counts only, and resolves keys the way
 //         ecosystem.config.cjs reads app.env.
+//   SP-07 the runbook and README pass the connection string to psql only through an environment variable (Windows
+//         PowerShell 5.1 echoes the whole native command line into the `*>` log when psql writes to stderr).
+//   SP-08 the birth-source split and the plugin-row count (R-65 C9 / C4): closed buckets over the shared raw
+//         `manual:` predicate, the birth revision read with its 'create' filter.
 // The pack's SQL is run on real PostgreSQL by BI-PROBE-RD-01 / -02 (core-backend tests/integration/
 // stock-preparation-pull-batch-site-probe-realdb.cases.ts).
 //
@@ -112,7 +118,7 @@ test('SP-01 no write statement, no persisted object, no psql file / shell / exec
 // ── SP-02 ─────────────────────────────────────────────────────────────────────────────────────────────────────
 const RELATIONS = [
   'automation_rules', 'information_schema.columns', 'integration_external_systems', 'integration_pipelines',
-  'integration_stock_prep_project_target', 'meta_fields', 'meta_records', 'meta_records_trash', 'meta_sheets',
+  'integration_stock_prep_project_target', 'meta_fields', 'meta_record_revisions', 'meta_records', 'meta_records_trash', 'meta_sheets',
   'meta_view_personal_configs', 'meta_views', 'multitable_webhooks', 'pg_timezone_names',
 ]
 
@@ -141,6 +147,7 @@ const TABLE_MIGRATIONS = {
   meta_view_personal_configs: ['src/db/migrations/zzzz20260705150000_create_meta_view_personal_configs.ts'],
   meta_records: ['src/db/migrations/zzz20251231_create_meta_schema.ts', 'src/db/migrations/zzzz20260404153000_repair_meta_core_schema.ts', 'src/db/migrations/zzzz20260406093000_add_meta_record_created_by.ts', 'src/db/migrations/zzzz20260612140000_add_meta_record_locked.ts'],
   meta_records_trash: ['src/db/migrations/zzzz20260617120000_create_meta_records_trash.ts'],
+  meta_record_revisions: ['src/db/migrations/zzzz20260430172000_create_meta_record_revisions.ts'],
   automation_rules: ['src/db/migrations/zzzz20260413120000_create_automation_rules.ts', 'src/db/migrations/zzzz20260414100000_extend_automation_rules.ts'],
   multitable_webhooks: ['src/db/migrations/zzzz20260414100002_create_multitable_api_tokens_and_webhooks.ts', 'src/db/migrations/zzzz20261019100000_multitable_webhook_sheet_scope.ts'],
   integration_external_systems: ['migrations/057_create_integration_core_tables.sql'],
@@ -165,11 +172,27 @@ test('SP-02 every required (table, column) is declared by the migration that cre
 })
 
 // ── SP-03 ─────────────────────────────────────────────────────────────────────────────────────────────────────
-test('SP-03 the plm_system column list is the main template\'s, in template order', () => {
+// The template of the INSTALLED R-line build (onprem-r82, a7f23ec17: `git show onprem-r82:plugins/plugin-integration-core/
+// lib/stock-preparation-templates.cjs`, fields with ownership 'plm_system', template order). The pack reads the site's
+// installed sheets, so it follows this list, not main: a column main adds later (open Draft #6778) is not on the site
+// until a new R-line package installs it. Main must still carry every one of these, in this order.
+const R82_PLM_SYSTEM_FIELD_IDS = Object.freeze(['projectNo', 'idempotencyKey', 'componentSourceId', 'parentSourceId', 'parentComponentCode',
+  'parentComponentName', 'path', 'depth', 'componentCode', 'componentName', 'componentSpec', 'material', 'sourceVersion', 'rawQuantity',
+  'totalQuantity', 'active', 'lastPlmRefreshRunId', 'lastPlmRefreshAt', 'lastPlmRefreshDecision', 'lastPlmConflictSummary'])
+
+function isOrderedSubset(subset, list) {
+  let at = 0
+  for (const id of list) if (at < subset.length && id === subset[at]) at += 1
+  return at === subset.length
+}
+
+test('SP-03 the plm_system column list is the installed R-line build\'s (onprem-r82); main still carries every one of them, in order', () => {
   const block = between(PACK, 'probe-plm-system-field-ids:begin', 'probe-plm-system-field-ids:end')
   const ids = [...block.matchAll(/'([A-Za-z]+)'/g)].map((match) => match[1])
-  assert.deepEqual(ids, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.filter((field) => field.ownership === 'plm_system').map((field) => field.id))
-  assert.deepEqual(ids, PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS.slice())
+  assert.deepEqual(ids, R82_PLM_SYSTEM_FIELD_IDS.slice())
+  const mainPlm = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.filter((field) => field.ownership === 'plm_system').map((field) => field.id)
+  assert.ok(isOrderedSubset(ids, mainPlm), 'every R82 plm_system column is still a plm_system column on main, in the same order')
+  assert.ok(isOrderedSubset(ids, PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS.slice()), 'and in the project-sheet lock list')
   for (const id of ['projectNo', 'idempotencyKey', 'active', 'lastPlmRefreshAt', 'lastPlmRefreshDecision']) assert.ok(ids.includes(id))
 })
 
@@ -214,8 +237,9 @@ test('SP-03 ids derive exactly as provisioning.ts stableMetaId; the JS trim() wh
   const jsWhitespace = []
   for (let code = 0; code <= 0xffff; code += 1) if (String.fromCharCode(code).trim() === '') jsWhitespace.push(code)
   assert.deepEqual(ws, jsWhitespace)
-  // The manual-row prefix is the ADR's `manual:v1:` (no LIKE wildcard inside it).
+  // The manual-row prefix is the ADR's `manual:v1:` (no LIKE wildcard inside it); the shared raw predicate is `manual:`.
   assert.match(PACK_CODE, /x\.row_key LIKE 'manual:v1:%'/)
+  assert.match(PACK_CODE, /COALESCE\(x\.row_key LIKE 'manual:%', false\) AS is_manual_prefix/)
 })
 
 // ── SP-04 ─────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -246,13 +270,16 @@ test('SP-04 values-free output: line expressions concatenate literal tokens, clo
     'automation_rules', 'automation_rules_enabled', 'automation_rules_elsewhere', 'webhooks_active', 'writer_systems', 'writer_pipelines',
     'writer_pipelines_active', 'sheet_rows_all_projects', 'row_count', 'active_row_count', 'machine_rows', 'person_rows', 'person_rows_with_key',
     'manual_rows', 'locked_rows', 'trashed_rows', 'created_span_days', 'created_days', 'created_at_gap_clusters', 'stamped_rows', 'add_stamp_rows',
-    'add_stamp_iso_rows', 'add_stamp_clusters', 'add_stamps_after_create'])
+    'add_stamp_iso_rows', 'add_stamp_clusters', 'add_stamps_after_create', 'null_creator_rows', 'null_creator_rows_by_birth_source_plugin',
+    'null_creator_rows_by_birth_source_automation', 'null_creator_rows_by_birth_source_public_form', 'null_creator_rows_by_birth_source_other',
+    'null_creator_rows_by_birth_source_none', 'null_creator_rows_not_plugin'])
   for (const body of bodies) {
     assert.ok(body.length > 0)
     for (const match of body.matchAll(/\|\|\s*(?:COALESCE\()?([a-z]+)\.([a-z_]+)/g)) {
       assert.ok(closed.has(match[2]), `line column ${match[1]}.${match[2]} is a closed one`)
     }
     assert.equal(/\|\|\s*:'/.test(body), false, 'no psql variable is concatenated into a line')
+    assert.equal(/\|\|\s*(?!COALESCE\(|count\()[A-Za-z_][A-Za-z_0-9]*\s*\(/.test(body), false, 'no function-call operand (a transformed value) is concatenated into a line')
     for (const forbidden of ['project_no', 'object_id', 'tenant_id', 'staging_project', 'env_project', 'env_object', 'env_sheet', 'expected_tz', 'created_by', 'row_key', 'stamp', 'name', 'url']) {
       assert.equal(new RegExp(`\\|\\|\\s*(?:COALESCE\\()?(?:[a-z]+\\.)?${forbidden}\\b`).test(body), false, `a line never concatenates ${forbidden}`)
     }
@@ -307,6 +334,68 @@ test('SP-06 the host half prints counts and yes/no only, and resolves app.env ke
   const templates = readLf(path.join(LIB, 'stock-preparation-templates.cjs'))
   assert.match(templates, /if \(raw === 'zh' \|\| raw === 'zh-cn' \|\| raw === 'zh-hans' \|\| raw === 'zh-hans-cn'\) return 'zh-CN'/)
   assert.match(code, /@\('zh', 'zh-cn', 'zh-hans', 'zh-hans-cn'\) -contains \$locale/)
+})
+
+// ── SP-07 ─────────────────────────────────────────────────────────────────────────────────────────────────────
+const RUNBOOK = readLf(path.join(REPO_ROOT, 'docs', 'development', 'takeover-beiliao-20260821', 'runbook-stock-prep-pull-batch-site-probe-20261107.md'))
+const README = readLf(path.join(PACK_DIR, 'README.md'))
+
+function fencedLines(markdown, language) {
+  const out = []
+  for (const match of markdown.matchAll(new RegExp('^[ \\t]*```' + language + '\\n([\\s\\S]*?)^[ \\t]*```', 'gm'))) out.push(...match[1].split('\n').map((line) => line.trim()).filter(Boolean))
+  return out
+}
+
+test('SP-07 every psql command line in the runbook and README takes the connection string from an environment variable, never as a literal', () => {
+  // Windows PowerShell 5.1 turns any psql stderr line into a NativeCommandError record that repeats the whole command
+  // line into the `*>` log, so a literal (or placeholder-for-a-literal) connection string there lands in probe.log.
+  const blocks = [
+    ['runbook powershell', fencedLines(RUNBOOK, 'powershell')], ['README powershell', fencedLines(README, 'powershell')],
+    ['README bash', fencedLines(README, 'bash').filter((line) => !line.startsWith('DATABASE_URL=') && !line.includes('vitest'))],
+  ]
+  let psqlLines = 0
+  for (const [label, lines] of blocks) {
+    for (const line of lines.filter((text) => /(?:^|[&\s'])(?:psql\b|'<psql)/.test(text))) {
+      psqlLines += 1
+      assert.match(line, /(?:\$env:READONLY_DATABASE_URL|"\$READONLY_DATABASE_URL")/, `${label}: psql reads the connection string from the environment: ${line}`)
+      assert.equal(/postgres(?:ql)?:\/\/|<[^>]*连接串[^>]*>|'<只读/.test(line), false, `${label}: no literal connection string on the psql command line: ${line}`)
+    }
+  }
+  assert.ok(psqlLines >= 3, 'the runbook and README psql invocations were found')
+  // The runbook sets the variable from a private file and removes it afterwards; the reason is written next to it.
+  const runbookPs = fencedLines(RUNBOOK, 'powershell')
+  assert.ok(runbookPs.includes("$env:READONLY_DATABASE_URL = (Get-Content -Raw -LiteralPath '<私有连接串文件>').Trim()"))
+  assert.ok(runbookPs.includes('Remove-Item Env:\\READONLY_DATABASE_URL'))
+  assert.ok(runbookPs.indexOf('Remove-Item Env:\\READONLY_DATABASE_URL') > runbookPs.findIndex((line) => line.includes('01-site-probe.sql')))
+  assert.ok(RUNBOOK.includes('连接串只经环境变量传入；PowerShell 5.1 在 psql 往 stderr 写任何一行时会把整条命令行原文写进 `*>` 的日志。'))
+})
+
+// ── SP-08 ─────────────────────────────────────────────────────────────────────────────────────────────────────
+test('SP-08 the birth-source split reads the create revision into closed buckets over creator-absent, non-manual: rows; the plugin-row test is C4\'s', () => {
+  const cells = cteBody(PACK_CODE, 'cells', 'stamped')
+  // Every revisions column the split reads is in the required-columns block, so an R line without it refuses.
+  const required = between(PACK, 'probe-required-columns:begin', 'probe-required-columns:end')
+  for (const column of ['sheet_id', 'record_id', 'version', 'action', 'source', 'created_at']) assert.ok(required.includes("('meta_record_revisions', '" + column + "')"), 'meta_record_revisions.' + column + ' is required')
+  assert.ok(required.includes("('meta_records', 'id')"))
+  assert.match(cells, /LEFT JOIN LATERAL \(SELECT r\.source FROM meta_record_revisions r\s+WHERE r\.sheet_id = m\.sheet_id AND r\.record_id = m\.id\s+AND r\.action = 'create'\s+ORDER BY r\.version, r\.created_at\s+LIMIT 1\) birth ON true/)
+  const buckets = [...cells.matchAll(/WHEN birth\.source = '([a-z-]+)' THEN '([a-z-]+)'/g)].map((match) => [match[1], match[2]])
+  assert.deepEqual(buckets, [['plugin', 'plugin'], ['automation', 'automation'], ['public-form', 'public-form']])
+  assert.match(cells, /CASE WHEN birth\.source IS NULL THEN 'none'/)
+  assert.match(cells, /ELSE 'other' END AS birth_source/)
+  // The product's own revision sources: the plugin create, the automation create_record, the anonymous form create.
+  const src = (...parts) => readLf(path.join(REPO_ROOT, 'packages', 'core-backend', 'src', ...parts))
+  assert.match(src('multitable', 'records.ts'), /action: 'create',\s+source: 'plugin',/)
+  assert.match(src('multitable', 'automation-executor.ts'), /action: 'create',\s+source: 'automation',/)
+  assert.match(src('routes', 'univer-meta.ts'), /recordRecordRevision\(action:'create', source:'public-form'\)/)
+  assert.match(cteBody(PACK_CODE, 'classified', 'gaps'), /NOT p\.has_creator AND NOT p\.is_manual_prefix AS is_null_creator_non_manual/)
+  const counts = cteBody(PACK_CODE, 'row_counts', 'unit_lines')
+  const split = [...counts.matchAll(/FILTER \(WHERE k\.is_null_creator_non_manual AND k\.birth_source = '([a-z-]+)'\) AS null_creator_rows_by_birth_source_([a-z_]+)/g)].map((match) => [match[1], match[2]])
+  assert.deepEqual(split, [['plugin', 'plugin'], ['automation', 'automation'], ['public-form', 'public_form'], ['other', 'other'], ['none', 'none']])
+  assert.match(counts, /FILTER \(WHERE k\.is_null_creator_non_manual\) AS null_creator_rows,/)
+  // C4: evidence needs a JSON key (the apply writer's PLM key starts with '{') AND a RUN decision stamp.
+  assert.match(counts, /FILTER \(WHERE k\.is_null_creator_non_manual\s+AND NOT COALESCE\(k\.row_key LIKE '\{%' AND k\.has_decision, false\)\) AS null_creator_rows_not_plugin/)
+  assert.match(readLf(path.join(LIB, 'stock-preparation-apply-writer.cjs')), /a PLM key starts with `\{`/)
+  assert.match(readLf(path.join(LIB, 'stock-preparation-manual-rows.cjs')), /MANUAL_ROW_KEY_PREFIX = 'manual:'/)
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-pull-batch-site-probe.test.cjs', tests)

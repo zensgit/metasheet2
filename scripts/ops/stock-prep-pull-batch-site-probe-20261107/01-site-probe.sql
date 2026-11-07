@@ -56,6 +56,19 @@
 --   locked_rows   meta_records.locked is true.
 --   trashed_rows  meta_records_trash rows of the sheet whose stored projectNo
 --                 cell equals the project number.
+--   null_creator_rows  no creator and no `manual:` key at all (the shared raw
+--                 predicate, lib/stock-preparation-manual-rows.cjs), split by
+--                 the source of the row's birth revision (meta_record_revisions,
+--                 action 'create', lowest version): plugin (records.ts plugin
+--                 create), automation (automation-executor create_record),
+--                 public-form (anonymous form submit), other, none (no create
+--                 revision: a row older than revision recording). Automation
+--                 and form rows have no creator either, so "no creator" is not
+--                 "plugin row" (R-65 C4).
+--   null_creator_rows_not_plugin  those rows failing the R-65 C4 plugin-row
+--                 test: a JSON key (raw text starts '{', the apply writer's
+--                 key shape) AND a non-blank lastPlmRefreshDecision. They are
+--                 never first-batch evidence and never labelled.
 --
 -- STAMPS (F24'): lastPlmRefreshDecision = 'add' marks the row the creating
 --   execution wrote; lastPlmRefreshAt is that execution's PLAN time, a stored
@@ -129,11 +142,18 @@ WITH need(t, c) AS (
          ('meta_views', 'created_at'),
          ('meta_view_personal_configs', 'view_id'),
          ('meta_view_personal_configs', 'config'),
+         ('meta_records', 'id'),
          ('meta_records', 'sheet_id'),
          ('meta_records', 'data'),
          ('meta_records', 'created_by'),
          ('meta_records', 'created_at'),
          ('meta_records', 'locked'),
+         ('meta_record_revisions', 'sheet_id'),
+         ('meta_record_revisions', 'record_id'),
+         ('meta_record_revisions', 'version'),
+         ('meta_record_revisions', 'action'),
+         ('meta_record_revisions', 'source'),
+         ('meta_record_revisions', 'created_at'),
          ('meta_records_trash', 'sheet_id'),
          ('meta_records_trash', 'data'),
          ('automation_rules', 'sheet_id'),
@@ -209,7 +229,8 @@ ws AS (
 ),
 logical AS (
   SELECT
-         -- probe-plm-system-field-ids:begin (pinned to the main template's plm_system columns by the plugin suite)
+         -- probe-plm-system-field-ids:begin (the plm_system columns of the INSTALLED R-line build's template,
+         -- onprem-r82; pinned by the plugin suite, which also checks main still carries every one of them)
          ARRAY['projectNo', 'idempotencyKey', 'componentSourceId', 'parentSourceId', 'parentComponentCode',
                'parentComponentName', 'path', 'depth', 'componentCode', 'componentName', 'componentSpec',
                'material', 'sourceVersion', 'rawQuantity', 'totalQuantity', 'active', 'lastPlmRefreshRunId',
@@ -371,15 +392,28 @@ cells AS (
               THEN btrim(m.data ->> (u.fid ->> 'lastPlmRefreshDecision'), ws.s) <> '' ELSE false END AS has_decision,
          CASE WHEN jsonb_typeof(m.data -> (u.fid ->> 'lastPlmRefreshAt')) = 'string'
               THEN m.data ->> (u.fid ->> 'lastPlmRefreshAt') END AS stamp,
-         m.locked IS TRUE AS is_locked
+         m.locked IS TRUE AS is_locked,
+         -- The writer that created the row, from its birth revision (a closed bucket; the raw source never prints).
+         CASE WHEN birth.source IS NULL THEN 'none'
+              WHEN birth.source = 'plugin' THEN 'plugin'
+              WHEN birth.source = 'automation' THEN 'automation'
+              WHEN birth.source = 'public-form' THEN 'public-form'
+              ELSE 'other' END AS birth_source
     FROM units u
     JOIN meta_records m ON m.sheet_id = u.sheet_id AND m.data ->> (u.fid ->> 'projectNo') = u.project_no
+    LEFT JOIN LATERAL (SELECT r.source FROM meta_record_revisions r
+                        WHERE r.sheet_id = m.sheet_id AND r.record_id = m.id
+                          AND r.action = 'create'
+                        ORDER BY r.version, r.created_at
+                        LIMIT 1) birth ON true
    CROSS JOIN ws
 ),
 stamped AS (
   SELECT x.*,
          COALESCE(x.stamp ~ '^[1-9][0-9]{3}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,6})?(Z|[+-](0[0-9]|1[0-5]):[0-5][0-9])$', false) AS stamp_shape,
          COALESCE(x.row_key LIKE 'manual:v1:%', false) AS is_manual,
+         -- The shared raw predicate (lib/stock-preparation-manual-rows.cjs isManualPrefixKey): any `manual:` key.
+         COALESCE(x.row_key LIKE 'manual:%', false) AS is_manual_prefix,
          COALESCE(btrim(x.row_key, ws.s) <> '', false) AS has_key
     FROM cells x
    CROSS JOIN ws
@@ -394,7 +428,8 @@ parsed AS (
 classified AS (
   SELECT p.*,
          CASE WHEN p.stamp_ok THEN p.stamp::timestamptz END AS plan_at,
-         NOT p.has_creator AND NOT p.is_manual AS is_machine
+         NOT p.has_creator AND NOT p.is_manual AS is_machine,
+         NOT p.has_creator AND NOT p.is_manual_prefix AS is_null_creator_non_manual
     FROM parsed p
 ),
 gaps AS (
@@ -429,7 +464,17 @@ row_counts AS (
          count(*) FILTER (WHERE k.is_add) AS add_stamp_rows,
          count(*) FILTER (WHERE k.is_add AND k.stamp_ok) AS add_stamp_iso_rows,
          count(DISTINCT k.stamp) FILTER (WHERE k.is_add AND k.stamp_ok) AS add_stamp_clusters,
-         count(*) FILTER (WHERE k.is_add AND k.plan_at > k.created_at + interval '5 seconds') AS add_stamps_after_create
+         count(*) FILTER (WHERE k.is_add AND k.plan_at > k.created_at + interval '5 seconds') AS add_stamps_after_create,
+         -- Creator-absent rows without a `manual:` key, split by the writer that created them (R-65 C9), and how
+         -- many of them fail the plugin-row test of R-65 C4 (a JSON key starting '{' AND a RUN decision stamp).
+         count(*) FILTER (WHERE k.is_null_creator_non_manual) AS null_creator_rows,
+         count(*) FILTER (WHERE k.is_null_creator_non_manual AND k.birth_source = 'plugin') AS null_creator_rows_by_birth_source_plugin,
+         count(*) FILTER (WHERE k.is_null_creator_non_manual AND k.birth_source = 'automation') AS null_creator_rows_by_birth_source_automation,
+         count(*) FILTER (WHERE k.is_null_creator_non_manual AND k.birth_source = 'public-form') AS null_creator_rows_by_birth_source_public_form,
+         count(*) FILTER (WHERE k.is_null_creator_non_manual AND k.birth_source = 'other') AS null_creator_rows_by_birth_source_other,
+         count(*) FILTER (WHERE k.is_null_creator_non_manual AND k.birth_source = 'none') AS null_creator_rows_by_birth_source_none,
+         count(*) FILTER (WHERE k.is_null_creator_non_manual
+                            AND NOT COALESCE(k.row_key LIKE '{%' AND k.has_decision, false)) AS null_creator_rows_not_plugin
     FROM classified k
    GROUP BY k.kind, k.ordinal
 ),
@@ -450,7 +495,14 @@ unit_lines AS (
       || ' add_stamp_rows=' || COALESCE(rc.add_stamp_rows, 0)
       || ' add_stamp_iso_rows=' || COALESCE(rc.add_stamp_iso_rows, 0)
       || ' add_stamp_clusters=' || COALESCE(rc.add_stamp_clusters, 0)
-      || ' add_stamps_after_create=' || COALESCE(rc.add_stamps_after_create, 0) AS counts
+      || ' add_stamps_after_create=' || COALESCE(rc.add_stamps_after_create, 0)
+      || ' null_creator_rows=' || COALESCE(rc.null_creator_rows, 0)
+      || ' null_creator_rows_by_birth_source_plugin=' || COALESCE(rc.null_creator_rows_by_birth_source_plugin, 0)
+      || ' null_creator_rows_by_birth_source_automation=' || COALESCE(rc.null_creator_rows_by_birth_source_automation, 0)
+      || ' null_creator_rows_by_birth_source_public_form=' || COALESCE(rc.null_creator_rows_by_birth_source_public_form, 0)
+      || ' null_creator_rows_by_birth_source_other=' || COALESCE(rc.null_creator_rows_by_birth_source_other, 0)
+      || ' null_creator_rows_by_birth_source_none=' || COALESCE(rc.null_creator_rows_by_birth_source_none, 0)
+      || ' null_creator_rows_not_plugin=' || COALESCE(rc.null_creator_rows_not_plugin, 0) AS counts
     FROM units u
     LEFT JOIN row_counts rc ON rc.kind = u.kind AND rc.ordinal = u.ordinal
     LEFT JOIN trash_counts tc ON tc.kind = u.kind AND tc.ordinal = u.ordinal

@@ -21,6 +21,14 @@
  *          kind=env line per project number on it; a wrong `env_sheet_id` and a registry row whose sheet id is not
  *          the derived one each report `status=incomplete reason=sheet_id_mismatch` with no numbers, and the run's
  *          PROBE_RESULT is incomplete.
+ *   BI-PROBE-RD-03 creator-absent rows split by the writer that created them (R-65 C9) and counted against the plugin-row
+ *          test (R-65 C4): a plugin row with a JSON key and a RUN stamp, a forged JSON key without a RUN stamp, an
+ *          automation-created row (non-JSON key, no stamp), an anonymous-form row, a row of another source, a row whose
+ *          create revision is gone (a later automation update remains), a creator-absent unbound `manual:` row and a
+ *          person row. Every bucket equals the fixture's own.
+ *
+ * Every run of the pack (runPack) also checks the whole default output values-free: each non-private line carries only
+ * its documented keys, and every value is an integer or a closed lower-case token.
  *
  * Edge cells (stamps, creators, created_at, locked) are shaped with direct UPDATEs on this throwaway database — the
  * records API would coerce or refuse them, and the probe must read what is stored. Values-free: every id is synthetic
@@ -28,6 +36,7 @@
  */
 import { execFile, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'module'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -85,6 +94,48 @@ function parsePack(stdout: string): PackLine[] {
     const [kind, ...pairs] = line.trim().split(' ')
     return { kind, fields: Object.fromEntries(pairs.map((pair) => { const at = pair.indexOf('='); return [pair.slice(0, at), pair.slice(at + 1)] })) }
   })
+}
+
+// The documented keys of every default-output line (README §3). A key outside its line's list, or a value that is not an
+// integer or a closed lower-case token, fails every case: a zone name, an upper-cased or otherwise transformed handle
+// cannot pass.
+const SHEET_KEYS = ['plm_lock', 'plm_cols_locked', 'plm_cols_unlocked', 'plm_cols_missing', 'labels', 'view_count', 'first_view', 'views_at_first',
+  'plugin_views', 'views_with_frozen', 'personal_order_overrides', 'automation_rules', 'automation_rules_enabled', 'automation_rules_elsewhere',
+  'webhooks_active', 'writer_systems', 'writer_pipelines', 'writer_pipelines_active', 'copies', 'sheet_rows_all_projects']
+const UNIT_KEYS = ['row_count', 'active_row_count', 'machine_rows', 'person_rows', 'person_rows_with_key', 'manual_rows', 'locked_rows', 'trashed_rows',
+  'created_span_days', 'created_days', 'created_at_gap_clusters', 'stamped_rows', 'add_stamp_rows', 'add_stamp_iso_rows', 'add_stamp_clusters',
+  'add_stamps_after_create', 'null_creator_rows', 'null_creator_rows_by_birth_source_plugin', 'null_creator_rows_by_birth_source_automation',
+  'null_creator_rows_by_birth_source_public_form', 'null_creator_rows_by_birth_source_other', 'null_creator_rows_by_birth_source_none',
+  'null_creator_rows_not_plugin']
+const LINE_KEYS: Record<string, string[]> = {
+  PROBE_SITE: ['server_encoding_utf8', 'expected_tz_known', 'db_timezone_is_expected', 'db_utc_offset_is_expected', 'registry_rows', 'webhooks_active_total',
+    'webhooks_active_unbound', 'writer_systems_total', 'env_input', 'tenant_filter'],
+  PROBE_PROJECT: ['kind', 'ordinal', 'registry_status', 'object_shape', 'status', 'reason', ...SHEET_KEYS, ...UNIT_KEYS],
+  PROBE_ENV_SHEET: ['status', 'reason', 'in_registry', 'projects', 'rows_without_project', ...SHEET_KEYS],
+  PROBE_COPY: ['ordinal', 'source_kind', 'source_ordinal', 'depth', 'deleted', 'row_count', 'person_rows', 'locked_rows', 'locked_fields', 'view_count',
+    'automation_rules', 'webhooks_active'],
+  PROBE_RESULT: ['file', 'status', 'reason', 'targets', 'complete', 'incomplete', 'copies', 'env'],
+}
+function assertValuesFreeLines(lines: PackLine[]): void {
+  for (const line of lines) {
+    if (line.kind === 'PROBE_PRIVATE') continue
+    expect(Object.keys(LINE_KEYS), line.kind).toContain(line.kind)
+    for (const [key, value] of Object.entries(line.fields)) {
+      expect(LINE_KEYS[line.kind], `${line.kind} key ${key}`).toContain(key)
+      expect(value, `${line.kind} ${key}`).toMatch(/^(?:\d+|[a-z][a-z0-9_-]*|01-site-probe\.sql)$/)
+    }
+  }
+}
+
+// The pack's own embedded plm_system list (the installed R-line build's template, pinned by the plugin suite SP-03), so a
+// column main adds later does not shift the expected lock counts.
+function packPlmSystemFieldIds(): string[] {
+  const pack = readFileSync(PACK_FILE, 'utf8')
+  const start = pack.indexOf('probe-plm-system-field-ids:begin')
+  const stop = pack.indexOf('probe-plm-system-field-ids:end')
+  if (start < 0 || stop < start) throw new Error('the pack lost its plm_system list markers')
+  const block = pack.slice(start, stop).split(/\r?\n/).filter((line) => !line.trim().startsWith('--')).join('\n')
+  return [...block.matchAll(/'([A-Za-z]+)'/g)].map((match) => match[1])
 }
 
 export function defineStockPreparationPullBatchSiteProbeRealDbCases(): void {
@@ -148,7 +199,9 @@ export function defineStockPreparationPullBatchSiteProbeRealDbCases(): void {
     async function runPack(extra: string[] = []) {
       const [command, args] = psqlCommand(['-X', '-q', '-d', String(process.env.DATABASE_URL), '-v', `tenant=${TENANT}`, ...extra, '-f', PACK_FILE])
       const { stdout, stderr } = await execFileAsync(command, args, { env: { ...process.env, PGCLIENTENCODING: 'UTF8' }, maxBuffer: 4 * 1024 * 1024 })
-      return { stdout, stderr, lines: parsePack(stdout) }
+      const lines = parsePack(stdout)
+      assertValuesFreeLines(lines)
+      return { stdout, stderr, lines }
     }
 
     const envArgs = () => ['-v', `env_project_id=${PROJECT_ID}`, '-v', `env_object_id=${ENV_OBJECT}`]
@@ -280,7 +333,8 @@ export function defineStockPreparationPullBatchSiteProbeRealDbCases(): void {
       expect(projectLine).toBeTruthy()
       const { firstView, atFirst } = await firstViewOf(main)
       const labels = templatesLib.resolveTemplateLabelLocale() === 'zh-CN' ? 'zh' : 'en'
-      const plmTotal = projectTargetsLib.PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS.length
+      const plmTotal = packPlmSystemFieldIds().length
+      expect(plmTotal).toBe(20)
       expect(projectLine.fields).toEqual({
         kind: 'project', ordinal, registry_status: 'active', object_shape: 'derived', status: 'complete',
         plm_lock: 'partial', plm_cols_locked: String(plmTotal - 1), plm_cols_unlocked: '1', plm_cols_missing: '0', labels,
@@ -295,6 +349,11 @@ export function defineStockPreparationPullBatchSiteProbeRealDbCases(): void {
         locked_rows: '1', trashed_rows: '1', created_span_days: '4', created_days: expect.stringMatching(/^[34]$/),
         created_at_gap_clusters: '2', stamped_rows: '6', add_stamp_rows: '5', add_stamp_iso_rows: '4', add_stamp_clusters: '3',
         add_stamps_after_create: '1',
+        // The six machine rows came through the plugin records API (birth revision source 'plugin'); their keys are not
+        // JSON, so all six fail the plugin-row test.
+        null_creator_rows: '6', null_creator_rows_by_birth_source_plugin: '6', null_creator_rows_by_birth_source_automation: '0',
+        null_creator_rows_by_birth_source_public_form: '0', null_creator_rows_by_birth_source_other: '0', null_creator_rows_by_birth_source_none: '0',
+        null_creator_rows_not_plugin: '6',
       })
       // The copies: depth 1 live with its rows, depth 2 soft-deleted; both lead back to this project's ordinal.
       const copies = plain.lines.filter((line) => line.kind === 'PROBE_COPY' && line.fields.source_kind === 'project' && line.fields.source_ordinal === ordinal)
@@ -345,6 +404,53 @@ export function defineStockPreparationPullBatchSiteProbeRealDbCases(): void {
       expect(mismatchLine).toMatch(/^PROBE_PROJECT kind=project ordinal=\d+ registry_status=active object_shape=derived status=incomplete reason=sheet_id_mismatch$/)
       expect(broken.lines[broken.lines.length - 1].fields).toMatchObject({ status: 'incomplete', reason: 'target_checks_failed', targets: '3', complete: '1', incomplete: '2', env: 'incomplete' })
       expect(broken.stdout.includes(mismatchProject) || broken.stdout.includes(mismatchObject)).toBe(false)
+    }, 300000)
+
+    test('BI-PROBE-RD-03 creator-absent rows are split by the writer that created them, and the rows failing the plugin-row test are counted', async () => {
+      if (!requirePsql('BI-PROBE-RD-03')) return
+      const birthProject = `BIP-BIRTH-${TOKEN}`
+      const birth = await provision(ownBaseLib.deriveStockPreparationProjectSheetObjectId(TENANT, birthProject), birthProject, { register: true })
+      const plan = '2026-10-12T02:00:00.000Z'
+      const jsonKey = (tag: string) => JSON.stringify({ bip: tag, token: TOKEN })
+      // Every row is born through the plugin records API (create revision source 'plugin'); the birth revision of some is
+      // then reshaped to what the other writers leave: automation-executor create_record and the anonymous public-form
+      // submit insert a creator-absent row with a create revision of their own source.
+      await seed(birth, { idempotencyKey: jsonKey('p1'), active: true, lastPlmRefreshDecision: 'add', lastPlmRefreshAt: plan }, { createdAt: '2026-10-12T02:00:01Z' })
+      await seed(birth, { idempotencyKey: jsonKey('p2'), active: true }, { createdAt: '2026-10-12T02:00:02Z' })
+      const automation = await seed(birth, { idempotencyKey: `bip-auto-${TOKEN}`, active: true }, { createdAt: '2026-10-12T03:00:00Z' })
+      const form = await seed(birth, { active: true }, { createdAt: '2026-10-12T04:00:00Z' })
+      const other = await seed(birth, { idempotencyKey: jsonKey('o1'), active: true, lastPlmRefreshDecision: 'add', lastPlmRefreshAt: plan }, { createdAt: '2026-10-12T02:00:03Z' })
+      const legacy = await seed(birth, { idempotencyKey: jsonKey('n1'), active: true, lastPlmRefreshDecision: 'add', lastPlmRefreshAt: plan }, { createdAt: '2026-10-12T02:00:04Z' })
+      await seed(birth, { idempotencyKey: `manual:bip-unbound-${TOKEN}`, active: true }, { createdAt: '2026-10-12T05:00:00Z' })
+      await seed(birth, { idempotencyKey: jsonKey('h1'), active: true, lastPlmRefreshDecision: 'add', lastPlmRefreshAt: plan }, { creator: 'u_bip_hand', createdAt: '2026-10-12T06:00:00Z' })
+      const created = await q(`SELECT record_id, source FROM meta_record_revisions WHERE sheet_id = $1 AND action = 'create'`, [birth.sheetId])
+      expect(created.rows.length).toBe(8)
+      expect(new Set(created.rows.map((row: { source: string }) => row.source))).toEqual(new Set(['plugin']))
+      const reshape = async (recordId: string, sql: string) => expect((await q(sql, [birth.sheetId, recordId])).rowCount).toBe(1)
+      await reshape(automation, `UPDATE meta_record_revisions SET source = 'automation' WHERE sheet_id = $1 AND record_id = $2 AND action = 'create'`)
+      await reshape(form, `UPDATE meta_record_revisions SET source = 'public-form' WHERE sheet_id = $1 AND record_id = $2 AND action = 'create'`)
+      await reshape(other, `UPDATE meta_record_revisions SET source = 'rest' WHERE sheet_id = $1 AND record_id = $2 AND action = 'create'`)
+      // A row older than revision recording: no create revision; a later automation UPDATE is not its birth.
+      await reshape(legacy, `UPDATE meta_record_revisions SET action = 'update', source = 'automation', version = 2 WHERE sheet_id = $1 AND record_id = $2 AND action = 'create'`)
+
+      const plain = await runPack()
+      const priv = await runPack(['-v', 'emit_private_map=1'])
+      const ordinal = priv.lines.find((line) => line.kind === 'PROBE_PRIVATE' && line.fields.kind === 'project' && line.fields.object_id === birth.objectId)!.fields.ordinal
+      const line = plain.lines.find((entry) => entry.kind === 'PROBE_PROJECT' && entry.fields.kind === 'project' && entry.fields.ordinal === ordinal)!
+      expect(line.fields).toMatchObject({
+        status: 'complete', row_count: '8', person_rows: '1', manual_rows: '0',
+        // machine_rows keeps its own rule (no creator, not `manual:v1:`), so the unbound `manual:` row is in it; the split
+        // uses the shared raw `manual:` predicate and leaves it out.
+        machine_rows: '7', null_creator_rows: '6',
+        null_creator_rows_by_birth_source_plugin: '2', null_creator_rows_by_birth_source_automation: '1',
+        null_creator_rows_by_birth_source_public_form: '1', null_creator_rows_by_birth_source_other: '1',
+        null_creator_rows_by_birth_source_none: '1',
+        // Failing the plugin-row test: the forged JSON key (no RUN stamp), the automation row, the form row.
+        null_creator_rows_not_plugin: '3',
+      })
+      for (const needle of [birthProject, birth.objectId, birth.sheetId, 'bip-auto', 'manual:bip', '"bip"', 'u_bip', '2026-10']) {
+        expect(plain.stdout.includes(needle), needle).toBe(false)
+      }
     }, 300000)
   })
 }

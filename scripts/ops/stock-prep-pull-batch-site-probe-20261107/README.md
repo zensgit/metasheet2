@@ -10,7 +10,8 @@
 
 它回答 design-final §14 BI-6a 行（O-BI-9）列出的问题：每个项目用的是哪种表（登记的项目表 / env 绑定表 /
 复制出来的表）、PLM 列锁、打开表时落在哪个视图、冻结列与个人列顺序、行的创建时间分布与「新增」痕迹覆盖、
-人建的行（含右击复制）、人工补充行、锁定行、回收站行，以及指向这些表的自动化规则、webhook 与通用写入器。
+人建的行（含右击复制）、人工补充行、锁定行、回收站行、无创建人的行由谁建（插件 / 自动化 / 匿名表单 / 其它）及其中
+不通过插件行判定的行数，以及指向这些表的自动化规则、webhook 与通用写入器。
 
 > **生产执行状态：未执行。** 本包**从未在任何真实系统上跑过**。在客户机上运行属于读取客户数据（owner 闸门 ①），
 > 须 owner 另行授权：目标库、只读身份、窗口、证据去向逐项由 owner 定。执行步骤见
@@ -54,7 +55,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File 02-site-env.ps1 -EnvFile '<�
 
 ```
 PROBE_SITE server_encoding_utf8=yes expected_tz_known=yes db_timezone_is_expected=… db_utc_offset_is_expected=… registry_rows=… webhooks_active_total=… webhooks_active_unbound=… writer_systems_total=… env_input=given|absent tenant_filter=off|on
-PROBE_PROJECT kind=project ordinal=1 registry_status=active object_shape=derived status=complete plm_lock=… … add_stamps_after_create=…
+PROBE_PROJECT kind=project ordinal=1 registry_status=active object_shape=derived status=complete plm_lock=… … add_stamps_after_create=… null_creator_rows=… null_creator_rows_by_birth_source_plugin=… … null_creator_rows_not_plugin=…
 PROBE_PROJECT kind=project ordinal=2 registry_status=archived object_shape=adopted status=incomplete reason=sheet_id_mismatch
 PROBE_ENV_SHEET status=complete in_registry=no projects=… rows_without_project=… plm_lock=… …
 PROBE_PROJECT kind=env ordinal=1 status=complete row_count=… …
@@ -77,7 +78,7 @@ PROBE_RESULT file=01-site-probe.sql status=complete targets=… complete=… inc
 | 字段 | 定义 |
 |---|---|
 | `object_shape` | `derived`：objectId 符合项目表形状 `plm_stock_preparation_sandbox_p_<24 位十六进制>`；`adopted`：其它（按 runbook 认领的旧沙箱表） |
-| `plm_lock` / `plm_cols_locked` / `_unlocked` / `_missing` | 模板全部 `plm_system` 列（20 列，插件测试钉死与模板一致）中：带 `humanWriteLock = 'plm_system'` 的、在表上但没锁的、表上没有的。`all` = 20 列都在且都锁；`none` = 一列都没锁 |
+| `plm_lock` / `plm_cols_locked` / `_unlocked` / `_missing` | **现场已装 R 线包**（`onprem-r82`）模板的全部 `plm_system` 列（20 列；插件测试 SP-03 钉死为 R82 的列表，并检查 main 仍含其中每一列、次序不变——main 以后新加的列（如在开草稿 #6778）在新 R 线包装上之前不在现场表上，所以不跟 main 走）中：带 `humanWriteLock = 'plm_system'` 的、在表上但没锁的、表上没有的。`all` = 20 列都在且都锁；`none` = 一列都没锁 |
 | `labels` | 「有效」列的列名：`zh`（有效）/ `en`（Active）/ `other`（被改过名）/ `missing`。即建表那一刻的表头语言 |
 | `view_count` / `first_view` / `views_at_first` | 视图数；按上下文路由的排序（`created_at ASC`，没有次序键）排在第一的视图：`default`（全部记录）/ `prep-fill` / `prep-todo` / `other` / `none`；若最早时间上有多个视图则为 `tie`，`views_at_first` 给出并列个数 |
 | `plugin_views` | `prep-fill` / `prep-todo` 两个插件视图在表上的个数 |
@@ -100,6 +101,15 @@ PROBE_RESULT file=01-site-probe.sql status=complete targets=… complete=… inc
 | `add_stamp_rows` / `add_stamp_iso_rows` | 决定为 `add` 的行 / 其中「最近刷新时间」是合法 ISO-8601 时刻（日期真实存在）的 |
 | `add_stamp_clusters` | 上述合法时刻的不同原文个数 = 产生过行的拉取执行数的下界（F24′） |
 | `add_stamps_after_create` | 计划时刻晚于建行时间 5 秒以上的 `add` 行（设计 §8.3 第 2 步的「createdAt 退化」信号） |
+| `null_creator_rows` | 无创建人、且唯一键**不以** `manual:` 开头的行（人工补充行的共享原文判定 `isManualPrefixKey`，`lib/stock-preparation-manual-rows.cjs`）。与 `machine_rows` 的差 = 无创建人、唯一键以 `manual:` 开头但不是 `manual:v1:` 的行 |
+| `null_creator_rows_by_birth_source_plugin` / `_automation` / `_public_form` / `_other` / `_none`（合称 `null_creator_rows_by_birth_source`） | 上一行按「建这一行的那次写入」拆开：取该行 `meta_record_revisions` 里 `action = 'create'`、版本最小的那条修订的 `source`：`plugin`（插件记录接口建行，`records.ts`）/ `automation`（自动化「新建记录」，`automation-executor.ts`）/ `public-form`（匿名公开表单提交，`univer-meta.ts`）/ 其它来源 / `none`（没有建行修订：修订记录上线前建的行）。五项之和 = `null_creator_rows` |
+| `null_creator_rows_not_plugin` | `null_creator_rows` 中**不通过插件行判定**的行数（R-65 C4：唯一键原文以 `{` 开头——拉取写入器的键形——**且**「最近刷新决定」非空，两者缺一即不通过） |
+
+**无创建人 ≠ 插件行（R-65 C4）。** 自动化「新建记录」、FWB、匿名公开表单在已登记的项目表上建的行同样没有创建人。
+按 R-65 C4，只有「无创建人 ∧ 唯一键是插件键（以 `{` 开头）∧ 带拉取决定戳」的行才算首次批次的机器证据；其余无创建人的行
+**不当证据、也不会被打上拉取批次标签**。所以 `null_creator_rows_not_plugin > 0` 的意思是：这张表上有这么多行没有创建人，
+却不会显示为某一批拉取的行（装机时它们的两列留空），计数写进批复；`_automation` / `_public_form` 非零说明该表上
+自动化或匿名表单确实在建行，装机窗口前应一并列入暂停清单（设计 §8.9）。
 
 复制表的字段与视图 id 在复制时全部重新生成（`copy-sheet-remap.ts`），推导 id 对它不成立，所以 `PROBE_COPY`
 只给表级计数（`locked_fields` = 带 `plm_system` 锁的列数；复制会去掉锁，正常为 0）。
@@ -126,13 +136,16 @@ PROBE_RESULT file=01-site-probe.sql status=complete targets=… complete=… inc
 | `meta_sheets` / `meta_fields` / `meta_views` / `meta_records` | 多维表核心迁移；`meta_views.config` 自 `zzzz20260321124000`；`meta_records.created_by` 自 `zzzz20260406093000`；`locked` 自 `zzzz20260612140000`；`copied_from_sheet_id` / `copied_at` 自 `zzzz20260927120500` |
 | `meta_view_personal_configs` | `zzzz20260705150000` |
 | `meta_records_trash` | `zzzz20260617120000` |
+| `meta_record_revisions`（`sheet_id` / `record_id` / `version` / `action` / `source` / `created_at`） | `zzzz20260430172000` |
 | `automation_rules` | `zzzz20260413120000` / `zzzz20260414100000` |
 | `multitable_webhooks`（含 `sheet_id`） | `zzzz20260414100002` / `zzzz20261019100000` |
 | `integration_external_systems` / `integration_pipelines` | 迁移 057 |
 | `pg_timezone_names`、`information_schema.columns` | PostgreSQL 系统视图 |
 
 表 / 字段 / 视图 id 的推导（`provisioning.ts` `stableMetaId`）、模板 `plm_system` 列表、视图逻辑 id、`'add'`
-决定值在 R82 与 main 上一致。
+决定值在 R82 与 main 上一致。内嵌的模板列表跟**现场已装的 R 线包**（`onprem-r82`），不跟 main：main 以后加列时
+SP-03 仍要求内嵌列表等于 R82 的列表、只检查 main 没有删改其中任何一列。插件记录接口、自动化与匿名表单写建行修订
+（`source = 'plugin' / 'automation' / 'public-form'`）在 R82 与 main 上一致；更早的包上建的行没有建行修订，归 `none`。
 
 ## 6. 已知局限
 
@@ -145,15 +158,18 @@ PROBE_RESULT file=01-site-probe.sql status=complete targets=… complete=… inc
 ## 7. 验证（只连一次性合成库）
 
 - 插件封闭测试 `plugins/plugin-integration-core/__tests__/stock-preparation-pull-batch-site-probe.test.cjs`
-  （SP-01..SP-06）：前言与单一只读快照；无写语句、无持久对象、无 psql 文件 / shell 元命令、SQL 与 ps1 都是 ASCII；
+  （SP-01..SP-08）：前言与单一只读快照；无写语句、无持久对象、无 psql 文件 / shell 元命令、SQL 与 ps1 都是 ASCII；
   只读封闭表清单；每个必需（表, 列）都由其创建迁移声明；`plm_system` 列表、视图逻辑 id、`'add'`、锁属性、
   列名、`frozenLeftColumnIds`、`fieldOrder`、项目表 objectId 形状、通用写入器目标形状都钉到产品代码；id 推导
-  与 JS 空白字符集；默认输出只拼接封闭列；时刻只在严格 ISO 且日期存在时才转换；主机脚本只打印计数与是 / 否、
-  解析规则与 `ecosystem.config.cjs` 一致。
-- 真库用例 BI-PROBE-RD-01 / -02（挂在已接线的 stock-prep 真库宿主
+  与 JS 空白字符集；默认输出只拼接封闭列、不拼接任何函数调用的结果；时刻只在严格 ISO 且日期存在时才转换；主机脚本
+  只打印计数与是 / 否、解析规则与 `ecosystem.config.cjs` 一致；运行手册与本文件里每条 psql 命令行都只经环境变量拿
+  连接串（SP-07）；建行来源拆分与插件行判定的口径（SP-08）。
+- 真库用例 BI-PROBE-RD-01 / -02 / -03（挂在已接线的 stock-prep 真库宿主
   `stock-preparation-p4-repair-once-realdb.test.ts` 下，不改工作流）：用真实开表流程建合成项目表与 env 表，由 CI
   机器自带的 `psql` 真跑本包，逐字段核对每个数；默认输出不含哨兵项目号 / objectId / 表 id / 租户；env 表 id
-  不符与登记表 id 不符各输出一行 `incomplete`、不给数字。
+  不符与登记表 id 不符各输出一行 `incomplete`、不给数字；RD-03 逐桶核对建行来源拆分（插件 / 自动化 / 匿名表单 /
+  其它 / 无建行修订）与不通过插件行判定的行数。每次真跑都对整份默认输出做去值检查：每行只含本文 §3 列出的键，
+  每个值只能是整数或小写封闭词。
 
 本地复现（只连一次性合成库）：
 
