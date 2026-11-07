@@ -395,6 +395,14 @@ export default defineConfig({
       // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
       // tests/unit/directory-integration-capabilities-wiring.test.ts).
       'tests/integration/directory-integration-capabilities.db.test.ts',
+      // Deprovision effect provider witness: the provider column migration (isolated schema:
+      // triggers, CHECK, replay, down, lock bound) and restore / compensation / writer against the
+      // migrated schema. DATABASE_URL-gated with the EXPECT_DB sentinel; excluded here so the
+      // no-DB job cannot skip-green them, and wired as WHOLE FILES into the approval real-DB step
+      // in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
+      // directory-deprovision-provider-scope-ci-wiring.test.mjs).
+      'tests/integration/directory-deprovision-effect-provider-schema.db.test.ts',
+      'tests/integration/directory-deprovision-provider-evidence.db.test.ts',
       // D21 authorization version protocol (slice Y5a): the trigger coverage matrix (raw SQL + FK
       // cascade writers), the two-connection barrier cases and the holder-vs-writer deadlock
       // mapping need real PostgreSQL. DATABASE_URL-gated; excluded here so the no-DB job cannot

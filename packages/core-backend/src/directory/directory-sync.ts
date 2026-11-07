@@ -1719,6 +1719,9 @@ export async function applyDirectoryDeprovisionPolicies(
   const orderedCandidates = [...byUser.entries()].sort(([leftUserId], [rightUserId]) =>
     leftUserId.localeCompare(rightUserId),
   )
+  // One scope per run: the ledger's effects-column probe is cached on it, so a run with several
+  // candidates probes once; a pooled client is never the cache key.
+  const ledgerScope = {}
   for (const [localUserId, { directoryAccountId, policy }] of orderedCandidates) {
     if (policy === 'manual_review') {
       outcome.manualReviewCount += 1
@@ -1745,6 +1748,7 @@ export async function applyDirectoryDeprovisionPolicies(
       triggeredBy: options.triggeredBy,
       policy,
       write: options.enabled,
+      ledgerScope,
     })
     if (result.skipReason) {
       // Per-candidate race (user vanished / source unbound mid-run): skip THIS person, never
