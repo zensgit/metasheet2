@@ -106,6 +106,14 @@ function assertParallelWorkflow(doc) {
       assert.deepEqual(actual.splice(-1), [resultUpload(suite)])
     }
     for (const step of actual) {
+      if (suite === 'unit' && step.name === 'Run scripts/ops/__tests__ node:test suites') {
+        // Batch-refresh step 5 PR-9 (register R-77 ⑧): the two scheduled-pull subtests for `review_pending` move the
+        // EXACT ops subtest count 138 -> 140. Only that number changed; the frozen original command is otherwise
+        // preserved byte-for-byte.
+        const reviewed = '\nEXPECTED_OPS_TESTS_COUNT=140\n'
+        assert.equal(step.run.split(reviewed).length - 1, 1, 'The scripts/ops subtest count must be the reviewed exact count, once')
+        step.run = step.run.replace(reviewed, '\nEXPECTED_OPS_TESTS_COUNT=138\n')
+      }
       if (suite === 'approval-db' && step.id === 'approval-real-db-integration') {
         // Explicit additive suite: preserve the frozen original command byte-for-byte.
         const addition = '  tests/integration/directory-controlled-handover.db.test.ts \\\n'
