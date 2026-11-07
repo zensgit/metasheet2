@@ -343,6 +343,13 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   'stock-prep-refresh-confirm',
   'stock-prep-refresh-continuation',
   'stock-prep-refresh-end',
+  // 备料分批拉取第一期 step 5 PR-9 (R-77 ⑩): the change-plan read, the change-plan confirm and the review complete live
+  // on the 「变更计划」 / 「变更复核」 sections of 「拉取待确认」 (StockPreparationRefreshChangePlan.vue) — never on this
+  // view. Their alignment, both directions, per actor, through the real shell, is asserted where they live:
+  // apps/web/tests/StockPreparationRefreshChangePlan.spec.ts (CP-ALIGN).
+  'stock-prep-refresh-change-plan',
+  'stock-prep-refresh-change-plan-confirm',
+  'stock-prep-refresh-change-review-complete',
 ])
 
   /** The control testids actually present in the DOM, restricted to the manifest's control set. */
