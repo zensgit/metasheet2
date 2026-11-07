@@ -379,20 +379,29 @@ test('examples are local, parseable, and provide two distinct hand-authored layo
 
 // R-71 ⑦.4 (A8): the planner may import exactly one module, the material-code leaf, and every module
 // reached from it (the leaf, which must import nothing) is scanned the same way: no import or require
-// of any kind, no network primitive. A new import anywhere in that closure turns this red.
-// A static import or re-export can start a line, or follow a statement end (';' or '}'), a block opening or a
-// block comment on the same line: the scan anchors at any of those, not only at the line start (Y6a verifier
-// LOW-1, mutant MK4: `function fail(kind) { … }; import { createHash } from 'node:crypto'`).
+// of any kind, no network primitive. Three independent counts must each equal the allowlist:
+//   - specifiers of a static import or re-export that starts a line, or follows a statement end (';' or '}'), a
+//     block opening or a block comment on the same line (Y6a verifier LOW-1, mutant MK4:
+//     `function fail(kind) { … }; import { createHash } from 'node:crypto'`);
+//   - import statements at any of those statement starts (a side-effect `import 'x'` has no from-clause);
+//   - from-clauses anywhere in the source: `from`, then whitespace, newlines or block comments, then a quote. This
+//     catches what the line-bound specifier scan cannot see, e.g. a multi-line `export {<newline>} from 'x'` or
+//     `export * from /* c */ 'x'` (Y6 verifier r1, mutants V9g/V9h). It also counts prose in comments, which can
+//     only make the pin stricter (neither scanned file has any).
+// A dynamic import or require is refused with whitespace or a block comment before its parenthesis. What this
+// still does not see is code assembled at run time (eval, Function); the vm-realm test of the leaf covers that.
 const PLANNER_IMPORT_ALLOWLIST = ['./yida-material-code.mjs']
 const NETWORK_CALL = /\b(?:fetch|XMLHttpRequest|WebSocket|sendBeacon|EventSource)\s*\(|\bnew\s+(?:XMLHttpRequest|WebSocket|EventSource)\b/
 const STATEMENT_START = String.raw`(?:^|[;{}]|\*\/)\s*`
 const STATIC_IMPORT = new RegExp(STATEMENT_START + String.raw`(?:import|export)\b[^\n]*?\bfrom\s*['"]([^'"]+)['"]|`
   + STATEMENT_START + String.raw`import\s*['"]([^'"]+)['"]`, 'gm')
 const IMPORT_STATEMENT = new RegExp(STATEMENT_START + String.raw`import\b(?!\s*[(.])`, 'gm')
+const FROM_CLAUSE = /\bfrom(?:\s|\/\*[\s\S]*?\*\/)*['"]/g
+const DYNAMIC_IMPORT = /\b(?:import|require)(?:\s|\/\*[\s\S]*?\*\/)*\(/
 function moduleImports(source) {
   const statements = [...source.matchAll(STATIC_IMPORT)]
-  return { specifiers: statements.map((match) => match[1] ?? match[2]), dynamic: /\bimport\s*\(|\brequire\s*\(/.test(source),
-    importLines: (source.match(IMPORT_STATEMENT) || []).length }
+  return { specifiers: statements.map((match) => match[1] ?? match[2]), dynamic: DYNAMIC_IMPORT.test(source),
+    importLines: (source.match(IMPORT_STATEMENT) || []).length, fromClauses: (source.match(FROM_CLAUSE) || []).length }
 }
 function importClosure(entryPath, allowlist) {
   const scanned = []
@@ -402,9 +411,11 @@ function importClosure(entryPath, allowlist) {
     if (scanned.includes(file)) continue
     scanned.push(file)
     const source = fs.readFileSync(file, 'utf8')
-    const { specifiers, dynamic, importLines } = moduleImports(source)
+    const { specifiers, dynamic, importLines, fromClauses } = moduleImports(source)
     assert.deepEqual(specifiers, allowed, `imports of ${path.basename(file)}`)
     assert.equal(importLines, allowed.length, `import statements of ${path.basename(file)}`)
+    // Every allowed import is an `import { … } from '…'` statement, so each has exactly one from-clause.
+    assert.equal(fromClauses, allowed.length, `from-clauses of ${path.basename(file)}`)
     assert.equal(dynamic, false, `dynamic import or require in ${path.basename(file)}`)
     assert.doesNotMatch(source, NETWORK_CALL, path.basename(file))
     for (const specifier of specifiers) queue.push([path.resolve(path.dirname(file), specifier), []])

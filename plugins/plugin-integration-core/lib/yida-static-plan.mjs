@@ -272,8 +272,10 @@ const MAX_SEPARATOR_LENGTH = 16
 //   { hash: [<direct targets>], form }   - UUIDv5 of the listed columns, upper case, 'uuid-36' or 'uuid-32';
 //   { preset: 'material-code-v1', rowIdOf, projectOf } - the frozen WLBH- material code, byte for byte.
 // Rule G1: exactly one identity part, a hash over every business-key target or the preset (whose
-// projectOf is a key target), so one code always means one key tuple (hash) or one creation identity
-// (preset); literal and field parts are decoration. A blank part is always refused; inside a hash a
+// projectOf is a key target), so one code carries one key tuple (hash) or one (rowIdOf, projectOf)
+// pair (preset); literal and field parts are decoration. The planner alone does not tie a preset to the
+// creation identity: the persisted compile (yida-draft-compiler.mjs) refuses a bound row whose rowIdOf or
+// projectOf cell is not its binding's key value or project. A blank part is always refused; inside a hash a
 // blank emptyKeyFields member counts as ''. Hash members and preset inputs are string-typed direct
 // targets read verbatim. The value is evaluated per planned row, so split rows get their own codes,
 // and two rows of one batch with one value are both refused (DUPLICATE_GENERATED_VALUE).

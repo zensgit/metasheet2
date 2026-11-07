@@ -26,7 +26,10 @@ const MAX_KEY_VALUE_LENGTH = 4096
 //   SOURCE_UNBOUND           - a generated entry on a row the server did not read (no source binding).
 //   SOURCE_PROJECT_MISMATCH  - a bound row whose preset projectOf cell is not the project its binding names
 //                              (「同码必同身份」 in original mode, Y4-05 option a; in a split it holds by construction).
-const ROW_PROBLEM = Object.freeze({ SOURCE_UNBOUND: 'PLAN', SOURCE_PROJECT_MISMATCH: 'PLAN' })
+//   SOURCE_KEY_MISMATCH      - a bound row whose preset rowIdOf cell is not the key value its binding names (the
+//                              key the server read): a preset reading another column could give one code to two
+//                              identities (one component under two parents), and no fence would refuse the second.
+const ROW_PROBLEM = Object.freeze({ SOURCE_UNBOUND: 'PLAN', SOURCE_PROJECT_MISMATCH: 'PLAN', SOURCE_KEY_MISMATCH: 'PLAN' })
 
 export class YidaDraftPlanError extends Error {
   constructor(kind = 'INPUT') {
@@ -238,7 +241,8 @@ function compile(input, versions, persistent = false) {
     // guarantee (v2.3 §3.3: the fences are).
     if (persistent && binding === null && config.fieldMap.some(entry => entry.transform === 'generated')) fail(ROW_PROBLEM.SOURCE_UNBOUND)
     const fieldDependencies = binding ? dependenciesByTarget(config, binding.fieldBindings) : null
-    // The preset parts whose projectOf names the project the code is minted for (G1 makes it a key target).
+    // The preset parts: rowIdOf and projectOf name the two inputs the code is minted from (G1 makes projectOf a key
+    // target; the hook below ties both to the row's creation identity).
     const presetParts = config.fieldMap.filter(entry => entry.transform === 'generated')
       .flatMap(entry => entry.template.filter(part => Object.hasOwn(part, 'preset')))
     const source = { config, rowsText: owned.rowsText, allocation, ...(hasBinding ? { sourceBinding: owned.sourceBinding } : {}) }
@@ -260,12 +264,20 @@ function compile(input, versions, persistent = false) {
     // to the pre-binding shape, so every stored unbound plan_digest and every v2 golden stays as it was.
     const rowSpecs = plan.rows.map(row => {
       const bound = binding ? bindRow(binding, origins[row.index], fieldDependencies) : null
-      // 「同码必同身份」: a bound row's material code is minted from its own project cell, so that cell must be the
-      // project of the row's creation identity (the registry's project in original mode, the allocated one in a
-      // split). Otherwise one identity could carry another project's code. Compared verbatim: both sides refuse
-      // padding and control characters (the compiler's text(), the planner's identity text).
+      // 「同码必同身份」: a bound row's material code is minted from its own rowIdOf and projectOf cells, and its creation
+      // identity is (keyValue, projectNo) of its binding. Both cells must be exactly those two values, so the preset
+      // code is WLBH(identity) and one code always means one identity:
+      //   - projectOf = the identity project (the registry's project in original mode, the allocated one in a split);
+      //     otherwise one identity could carry another project's code;
+      //   - rowIdOf = the key value the server read; otherwise a preset reading another column (e.g. a drawing number
+      //     shared by one component under two parents) gives two identities one code, and no fence applies.
+      // Compared verbatim: both sides refuse padding and control characters (the compiler's text(), the planner's
+      // identity text).
       if (bound && presetParts.some(part => row.payload[part.projectOf] !== bound.sourceBinding.projectNo)) {
         fail(ROW_PROBLEM.SOURCE_PROJECT_MISMATCH)
+      }
+      if (bound && presetParts.some(part => row.payload[part.rowIdOf] !== bound.sourceBinding.keyValue)) {
+        fail(ROW_PROBLEM.SOURCE_KEY_MISMATCH)
       }
       return {
         index: row.index,

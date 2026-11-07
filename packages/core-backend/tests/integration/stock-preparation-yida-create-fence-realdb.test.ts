@@ -623,4 +623,38 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     expect((await second.store.prepare(reservation(other, { operationId: 'synthetic-operation-o', rowKey: 'synthetic-row-o' }))).reused).toBe(false)
     expect((await rows(LEDGER)).length).toBe(2)
   })
+
+  it('A10 (generated, off-key preset): one code under two identities passes both fences, so the persisted compile refuses a preset whose rowIdOf is not the key column', async () => {
+    // One component (DEMO-DRW-1) under two parents: two source lines, two identities, two seven-key tuples.
+    const lineA: Row = { idempotencyKey: 'SYN-LINE-1' }, lineB: Row = { idempotencyKey: 'SYN-LINE-5', parentComponentCode: 'DEMO-DRW-9' }
+    const OFF_KEY = { preset: 'material-code-v1', rowIdOf: 'drawingNo', projectOf: 'project' }
+    // The fences see only the identity and seven-key digests, and both are independent of the template (A10 above):
+    // the two lines' reservations both commit, so no fence would refuse a second draft carrying the first one's code.
+    const a = await generatedDraft([PRESET], lineA), b = await generatedDraft([PRESET], lineB)
+    expect(b.rowSpecs[0].creationIdentityDigest).not.toBe(a.rowSpecs[0].creationIdentityDigest)
+    expect(b.rowSpecs[0].businessKeyDigest).not.toBe(a.rowSpecs[0].businessKeyDigest)
+    await setState('acknowledged', reservation(a, {}))
+    expect((await second.store.prepare(reservation(b, { operationId: 'synthetic-operation-b5', rowKey: 'synthetic-row-b5' }))).reused).toBe(false)
+    expect(second.uniqueErrors).toEqual([])
+    expect((await rows(LEDGER)).length).toBe(2)
+    // Under an off-key preset (valid for the planner: rowIdOf only has to be a string direct target) both lines would
+    // carry the SAME code, WLBH(drawing number, project) — the never-persisted local recompute shows it ...
+    const { compileYidaLocalDraft } = await import(lib('yida-draft-compiler.mjs')) as { compileYidaLocalDraft(input: unknown): Compiled }
+    const { createYidaTransformExample } = await import(lib('yida-static-plan.mjs')) as {
+      createYidaTransformExample(): { config: Row & { fieldMap: Row[] }; rows: Row[] } }
+    const localCode = (patchRow: Row) => {
+      const example = createYidaTransformExample(), config = structuredClone(example.config)
+      config.fieldMap[config.fieldMap.length - 1] = { ...config.fieldMap[config.fieldMap.length - 1], template: [OFF_KEY] }
+      return compileYidaLocalDraft({ config, rowsText: JSON.stringify([{ ...example.rows[0], ...patchRow }]), allocation: { mode: 'original' } })
+        .plan.rows[0].payload.materialCodeText
+    }
+    expect(localCode(lineB)).toBe(localCode(lineA))
+    // ... so the persisted compile refuses both bound drafts (row problem SOURCE_KEY_MISMATCH → PLAN) before any
+    // reservation is attempted: one code never names two identities.
+    const before = await evidence()
+    for (const line of [lineA, lineB]) {
+      await expect(generatedDraft([OFF_KEY], line)).rejects.toMatchObject({ code: 'YIDA_DRAFT_PLAN' })
+    }
+    expect(await evidence()).toEqual(before)
+  })
 })

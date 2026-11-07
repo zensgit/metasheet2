@@ -918,6 +918,39 @@ test('generated: a bound row whose preset project cell is not the project of its
   assert.deepEqual(allocated.rowSpecs.map((spec) => spec.sourceBinding.projectNo).sort(), ['DEMO-P1', 'DEMO-P1', 'DEMO-P2', 'DEMO-P2'])
 })
 
+test('generated: a bound row whose preset rowIdOf cell is not the key value of its identity is refused (one code, two identities)', async () => {
+  const { compileYidaSendDraft, YidaDraftPlanError } = await modulePromise
+  const { compileYidaLocalDraft } = await compilerPromise
+  // A valid planner config (rowIdOf only has to be a string direct target): the preset reads the drawing number,
+  // not the key column idempotencyKey the binding names.
+  const offKey = (layout) => {
+    layout.fieldMap.at(-1).template = [{ preset: 'material-code-v1', rowIdOf: 'drawingNo', projectOf: 'project' }]
+    return layout
+  }
+  // One component (DEMO-DRW-1) under two parents: two source lines, two creation identities, one drawing number.
+  const lineOf = (key, parent) => (rows) => [{ ...rows[0], idempotencyKey: key, parentComponentCode: parent }]
+  const drafts = [await generatedInput({ config: offKey, rows: lineOf('SYN-LINE-1', null) }),
+    await generatedInput({ config: offKey, rows: lineOf('SYN-LINE-5', 'DEMO-DRW-9') })]
+  // Locally both compile to the SAME code with different seven keys, so neither fence would refuse the second draft.
+  const locals = drafts.map((draft) => compileYidaLocalDraft(draft.unbound))
+  assert.equal(codesOf(locals[0])[0], oracleMaterialCode('DEMO-DRW-1', 'DEMO-P1'))
+  assert.equal(codesOf(locals[1])[0], codesOf(locals[0])[0])
+  assert.notEqual(locals[1].rowSpecs[0].businessKeyDigest, locals[0].rowSpecs[0].businessKeyDigest)
+  // The persisted compile refuses both bound drafts (row problem SOURCE_KEY_MISMATCH → PLAN), before any fence.
+  for (const draft of drafts) expectError(compileYidaSendDraft, YidaDraftPlanError, draft.bound, 'YIDA_DRAFT_PLAN')
+  // The default template (rowIdOf = the key column) still compiles bound, and its code is WLBH(identity).
+  const keyed = await generatedInput({ rows: lineOf('SYN-LINE-5', 'DEMO-DRW-9') })
+  const compiled = compileYidaSendDraft(keyed.bound)
+  assert.equal(codesOf(compiled)[0], oracleMaterialCode(compiled.rowSpecs[0].sourceBinding.keyValue, compiled.rowSpecs[0].sourceBinding.projectNo))
+  // The rule is on values: an off-key column holding exactly the key value mints WLBH(identity) and is accepted.
+  const equalCell = await generatedInput({ config: offKey, rows: (rows) => [{ ...rows[0], componentCode: rows[0].idempotencyKey }] })
+  const accepted = compileYidaSendDraft(equalCell.bound)
+  assert.equal(codesOf(accepted)[0], oracleMaterialCode(accepted.rowSpecs[0].sourceBinding.keyValue, 'DEMO-P1'))
+  // Split: every expanded row keeps the record's key value, so an off-key preset is refused there as well.
+  expectError(compileYidaSendDraft, YidaDraftPlanError, (await generatedInput({ config: offKey,
+    allocation: { mode: 'equal_integer', projects: ['DEMO-P1', 'DEMO-P2'], projectField: 'projectNo', quantityField: 'totalQuantity' } })).bound, 'YIDA_DRAFT_PLAN')
+})
+
 test('generated: fieldDependencies of a bound row name the field ids a generated target reads (preset inputs, hash members, field parts)', async () => {
   const { compileYidaSendDraft } = await modulePromise
   const preset = compileYidaSendDraft((await generatedInput()).bound)
