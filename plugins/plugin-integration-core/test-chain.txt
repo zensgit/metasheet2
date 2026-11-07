@@ -80,6 +80,7 @@ node __tests__/stock-preparation-project-target-archive.test.cjs
 node __tests__/stock-preparation-project-overview.test.cjs
 node __tests__/stock-preparation-project-sheet-contract-options.test.cjs
 node __tests__/stock-preparation-project-sheet-plm-column-lock.test.cjs
+node __tests__/stock-preparation-sheet-census.test.cjs
 node __tests__/stock-preparation-route-values-free.test.cjs
 node __tests__/stock-preparation-audit-store.test.cjs
 node __tests__/stock-preparation-audit-migration.test.cjs

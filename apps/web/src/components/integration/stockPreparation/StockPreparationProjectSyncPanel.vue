@@ -461,10 +461,20 @@
       >
         {{ bi('去「拉取待确认」处理', 'Go to “Pull holds”') }}<template v-if="suspendedHoldCount !== null && suspendedHoldCount > 0"> ({{ suspendedHoldCount }})</template>
       </button>
-      <!-- …and never the ledger queue: on a suspended run `pendingConfirmCount` is the plan's manual_confirm tally,
-           not anything queued (the reconcile was deferred). -->
+      <!-- PR-9 (R-77 ⑦): a run that met a written change awaiting review — the review is on 「拉取待确认」, PULL only. -->
       <button
-        v-if="report.pendingConfirmCount > 0 && report.verdict !== 'suspended'"
+        v-if="report.verdict === 'review_pending' && canOpenRefreshQueue"
+        type="button"
+        class="sp-sync__link"
+        data-testid="stock-prep-project-sync-open-refresh-review"
+        @click="emit('navigate-stage', 'refresh-queue')"
+      >
+        {{ bi('去「拉取待确认」复核', 'Review it on “Pull holds”') }}<template v-if="reviewPendingCount !== null && reviewPendingCount > 0"> ({{ reviewPendingCount }})</template>
+      </button>
+      <!-- …and never the ledger queue: on a suspended (or review-pending) run `pendingConfirmCount` is the plan's
+           manual_confirm tally, not anything queued (the reconcile was deferred). -->
+      <button
+        v-if="report.pendingConfirmCount > 0 && report.verdict !== 'suspended' && report.verdict !== 'review_pending'"
         type="button"
         class="sp-sync__link"
         data-testid="stock-prep-project-sync-open-queue"
@@ -627,6 +637,7 @@ import type { StockPreparationLargeBomJobApi } from '../../../services/integrati
 import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
 import {
   STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT,
+  STOCK_PREP_REFRESH_TOKEN_UNKNOWN,
   STOCK_PREP_TOOLTIP_MISSING_COMPONENTS,
   stockPrepErrorPlain,
   stockPrepNoSheetLinkHint,
@@ -656,7 +667,7 @@ import { createStockPrepProjectSyncRunGuard, type StockPrepProjectSyncRunTicket 
 import { downloadCsvFile, escapeTsvCell } from '../../../services/integration/stockPreparation/stockPrepCsv'
 import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
 import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
-import { STOCK_PREP_REFRESH_STATUS_LABELS_ZH } from '../../../services/integration/stockPreparation/refreshState'
+import { STOCK_PREP_REFRESH_STATUS_LABELS_EN, STOCK_PREP_REFRESH_STATUS_LABELS_ZH } from '../../../services/integration/stockPreparation/refreshState'
 
 const props = withDefaults(
   defineProps<{
@@ -1360,6 +1371,17 @@ const checkLine = computed<{ text: string; next: string } | null>(() => {
     const plain = stockPrepSyncVerdictPlain('awaiting_recovery')
     return { text: plain ? bi(plain.zh, plain.en) : '', next: plain ? bi(plain.zhNext ?? '', plain.enNext ?? '') : '' }
   }
+  // PR-9 (R-77 ⑨): 复核 ≠ 核对. The check met a written change still awaiting its review: say so — never 「核对通过」
+  // and never a failed check; the board's re-read stays the only authority (R-62 ⑦).
+  if (result.outcome === 'review_pending') {
+    return {
+      text: bi(
+        '核对已提交;本项目有一次已写入的变更等待复核——复核不代替核对,核对也不代替复核,两样都完成后才能正式导出。',
+        'Check submitted; a written change of this project awaits its review — the review does not replace the check, nor the check the review; the formal export opens once both are done.',
+      ),
+      next: bi('拉取人员在「拉取待确认」里完成变更复核;之后以项目备料页为准,显示「已执行待核对」时再点「核对」。', 'The puller completes the change review on “Pull holds”; after that the project page decides — when it shows “written, awaiting check”, press “Check”.'),
+    }
+  }
   const plain = stockPrepSyncReasonPlain(result.reason)
   return {
     text: plain ? bi(plain.zh, plain.en) : bi('核对没有完成。', 'The check did not complete.'),
@@ -1370,11 +1392,24 @@ const checkLine = computed<{ text: string; next: string } | null>(() => {
 function stockPrepRefreshStatusLabel(status: string | null | undefined): { zh: string; en: string } {
   // A complete-but-unsettled project is 「待核对」, never 「已完成」 (the posture's own word — #6566 review N5).
   if (status === 'complete') return { zh: '待核对', en: 'awaiting check' }
-  const zh = typeof status === 'string' && Object.prototype.hasOwnProperty.call(STOCK_PREP_REFRESH_STATUS_LABELS_ZH, status)
-    ? STOCK_PREP_REFRESH_STATUS_LABELS_ZH[status as keyof typeof STOCK_PREP_REFRESH_STATUS_LABELS_ZH]
-    : STOCK_PREP_REFRESH_STATUS_LABELS_ZH.unreadable
-  return { zh, en: typeof status === 'string' ? status : 'unreadable' }
+  // PR-9 (the #6579 version-skew residual): the en form reads its own map too; a token this build does not know reads
+  // 「未识别」 / "not recognised" — never the raw token inside the sentence.
+  const known = typeof status === 'string' && Object.prototype.hasOwnProperty.call(STOCK_PREP_REFRESH_STATUS_LABELS_ZH, status)
+  if (!known) return { zh: STOCK_PREP_REFRESH_TOKEN_UNKNOWN.zh, en: STOCK_PREP_REFRESH_TOKEN_UNKNOWN.en }
+  const key = status as keyof typeof STOCK_PREP_REFRESH_STATUS_LABELS_ZH
+  return { zh: STOCK_PREP_REFRESH_STATUS_LABELS_ZH[key], en: STOCK_PREP_REFRESH_STATUS_LABELS_EN[key] }
 }
+
+/** PR-9: the review-pending run's pending reviews (values-free integer, from the step detail), or null. */
+const reviewPendingCount = computed<number | null>(() => {
+  const value = report.value
+  if (!value || value.verdict !== 'review_pending') return null
+  for (const step of value.steps) {
+    const count = step.detail ? step.detail.pendingReviews : undefined
+    if (typeof count === 'number' && Number.isInteger(count) && count >= 0) return count
+  }
+  return null
+})
 
 /** The suspended run's holds, from the report (values-free integer), or null. */
 const suspendedHoldCount = computed<number | null>(() => {
@@ -1494,6 +1529,10 @@ const posture = computed<StockPrepPosture>(() => {
   }
   if (value.verdict === 'awaiting_recovery') {
     return stockPrepPosture({ busy: busy.value, refreshStatus: 'failed_pending_recovery' })
+  }
+  // PR-9: a review-pending run speaks the refresh posture's own words (变更待复核).
+  if (value.verdict === 'review_pending') {
+    return stockPrepPosture({ busy: busy.value, refreshStatus: 'change_pending_review' })
   }
   const pendingDecisionCount = value.queuedDecisionCount > 0 ? value.queuedDecisionCount : value.pendingConfirmCount
   const missingList = value.missingComponents
