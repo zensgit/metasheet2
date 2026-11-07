@@ -286,7 +286,10 @@ async function runConfiguredSoak(config, fetchFn) {
   ])
 
   assertAllExecutions(updateExecutions, 'update_record', 'success', 'update_record')
-  assertAllExecutions(emailExecutions, 'send_email', 'success', 'send_email')
+  // Email safe mode is `mock`: the deployment's email channel simulates and reports it truthfully. The
+  // gate therefore proves that a simulated send is recorded as a SKIPPED step / execution with the
+  // `simulated` status and the shared reason token — never as success and never as `sent`.
+  assertAllExecutions(emailExecutions, 'send_email', 'skipped', 'send_email')
   assertAllExecutions(webhookExecutions, 'send_webhook', 'success', 'send_webhook')
   assertAllExecutions(failWebhookExecutions, 'send_webhook expected failure', 'failed', 'send_webhook')
 
@@ -294,8 +297,13 @@ async function runConfiguredSoak(config, fetchFn) {
     if (step?.output?.recipientCount !== 2) {
       throw new Error(`send_email recipientCount=${step?.output?.recipientCount}; expected 2`)
     }
-    if (step?.output?.notificationStatus !== 'sent') {
-      throw new Error(`send_email notificationStatus=${step?.output?.notificationStatus}; expected sent`)
+    if (step?.output?.notificationStatus !== 'simulated') {
+      throw new Error(`send_email notificationStatus=${step?.output?.notificationStatus}; expected simulated`)
+    }
+    if (step?.output?.outcome !== 'not_sent' || step?.output?.reason !== 'email_transport_simulated') {
+      throw new Error(
+        `send_email outcome=${step?.output?.outcome} reason=${step?.output?.reason}; expected not_sent / email_transport_simulated`,
+      )
     }
   }
   for (const step of webhookExecutions.map((execution) => execution.steps?.[0])) {
