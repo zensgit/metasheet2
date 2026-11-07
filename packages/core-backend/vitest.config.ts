@@ -389,6 +389,11 @@ export default defineConfig({
       // real-DB step in plugin-tests.yml (both points asserted by
       // tests/unit/security-action-proof-inert.test.ts).
       'tests/integration/security-action-proof.db.test.ts',
+      // Directory sync characterization against real PostgreSQL (mocked provider client, real
+      // reconcile). DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and
+      // wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml (pinned by
+      // plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/directory-adapter-golden-parity.db.test.ts',
       // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
       // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
       // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
