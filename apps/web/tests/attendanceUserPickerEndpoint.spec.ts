@@ -1,5 +1,6 @@
+import { personnelPickerHost } from './fixtures/personnelPickerHost'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, ref, type App } from 'vue'
+import { createApp, nextTick, reactive, ref, type App } from 'vue'
 import fs from 'node:fs'
 import path from 'node:path'
 import AttendanceView from '../src/views/AttendanceView.vue'
@@ -406,6 +407,36 @@ describe('attendance user picker typeahead empty hint', () => {
     app = null
     container?.remove()
     container = null
+  })
+
+  it.each([false, true])('keeps identity provenance through the mounted picker (typeahead=%s)', async (typeahead) => {
+    const suppliedIdName = '11111111-1111-4111-8111-111111111111'
+    const names: string[] = []
+    const state = reactive({ id: 'retained-only' })
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, { ok: true, data: { items: [
+      { id: 'blank-person', name: null, email: null, role: 'user', created_at: '2026-01-01' },
+      { id: suppliedIdName, name: suppliedIdName, email: '', role: 'user', created_at: '2026-01-01' },
+      { id: 'alice', name: 'Alice', email: 'alice@example.com', role: 'user', created_at: '2026-01-01' },
+    ] } }))
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(personnelPickerHost(state, typeahead, name => { names.push(name) }))
+    app.provide(attendanceSessionGuardKey, createAttendanceSessionGuard('default', () => 'epoch'))
+    app.mount(container)
+    await flushUi()
+    const select = container.querySelector('select')!
+    expect(select.querySelector('option[value="retained-only"]')?.textContent).toContain('Current value: retained-only')
+    expect(names.at(-1)).toBe('')
+    if (typeahead) expect(container.querySelector<HTMLInputElement>('input')!.value).toBe('Current value: retained-only')
+    expect(select.querySelector('option[value="blank-person"]')?.textContent).toContain('Unnamed employee')
+    for (const [id, expected] of [['blank-person', ''], [suppliedIdName, suppliedIdName], ['alice', 'Alice · alice@example.com'], ['retained-only', '']]) {
+      if (!select.querySelector(`option[value="${id}"]`)) state.id = id!
+      await flushUi()
+      select.value = id!
+      select.dispatchEvent(new Event('change'))
+      await flushUi()
+      expect(names.at(-1)).toBe(expected)
+    }
   })
 
   it('shows 搜索不到 only after a non-empty name query settles empty', async () => {
