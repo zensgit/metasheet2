@@ -28,6 +28,7 @@ import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { SHEET_PERMISSION_VERSIONS_BUMP_SQL } from '../../src/multitable/authz-version-protocol'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const SHEET_ID = 'sheet_lrq'
@@ -220,8 +221,22 @@ function recordStatements(sqlLog: string[]): string[] {
   return sqlLog.filter((sql) => RECORD_TABLE.test(sql))
 }
 
+/**
+ * Data writes. The D21 sheet-version bump is a lock-protocol statement, not a data write: the lossy branch takes the
+ * sheet version row BEFORE its field-row lock (authz-version-protocol.ts, the field-row writer rule), so it necessarily
+ * precedes every gate that runs under that lock. Its position is pinned by the execute cases below.
+ */
 function writeStatements(sqlLog: string[]): string[] {
-  return sqlLog.filter((sql) => WRITE_STATEMENT.test(sql))
+  return sqlLog.filter((sql) => WRITE_STATEMENT.test(sql) && sql !== SHEET_PERMISSION_VERSIONS_BUMP_SQL)
+}
+
+/** The bump precedes the lossy branch's locked field-row read (never the trigger after it). */
+function expectSheetVersionBumpBeforeFieldRowLock(sqlLog: string[]): void {
+  const bumpAt = sqlLog.indexOf(SHEET_PERMISSION_VERSIONS_BUMP_SQL)
+  const lockAt = sqlLog.findIndex((sql) => sql.startsWith(`${LOSSY_FIELD_ROW} FOR UPDATE`))
+  expect(bumpAt).toBeGreaterThanOrEqual(0)
+  expect(lockAt).toBeGreaterThan(bumpAt)
+  expect(sqlLog.filter((sql) => sql === SHEET_PERMISSION_VERSIONS_BUMP_SQL)).toHaveLength(1)
 }
 
 // ── suite ──────────────────────────────────────────────────────────────────────
@@ -286,6 +301,7 @@ describe('config-restore lossy retype-revert requires read on the sheet', () => 
       expectNoLeak(res.body)
       // Refused INSIDE the lossy transaction, at the full-read gate (the locked field-row read ran first).
       expect(h.pool.sqlLog.some((sql) => sql.startsWith(`${LOSSY_FIELD_ROW} FOR UPDATE`))).toBe(true)
+      expectSheetVersionBumpBeforeFieldRowLock(h.pool.sqlLog)
       expect(recordStatements(h.pool.sqlLog)).toEqual([])
       expect(writeStatements(h.pool.sqlLog)).toEqual([])
     })
@@ -302,6 +318,7 @@ describe('config-restore lossy retype-revert requires read on the sheet', () => 
       expect(res.body?.ok).toBe(true)
       expect(res.body?.data?.lossSummary).toEqual(EXPECTED_SUMMARY)
       expect(res.body?.data?.restored).toMatchObject({ revisionId: REVISION_ID, entityType: 'field', entityId: FIELD_ID })
+      expectSheetVersionBumpBeforeFieldRowLock(h.pool.sqlLog)
       const writes = writeStatements(h.pool.sqlLog)
       expect(writes.filter((sql) => /^\s*UPDATE\s+meta_records\b/i.test(sql))).toHaveLength(1)
       expect(writes.filter((sql) => /^\s*INSERT\s+INTO\s+meta_record_revisions\b/i.test(sql))).toHaveLength(

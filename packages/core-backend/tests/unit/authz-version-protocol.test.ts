@@ -47,6 +47,7 @@ import {
   bumpSheetPermissionVersions,
   bumpSubjectAuthorizationVersions,
   canonicalAuthorizationIds,
+  fieldVisibilityTriggerWouldFire,
   isAuthorizationVersionConflict,
   lockAuthorizationVersionsForAdmission,
   verifyAuthorizationVersionTriggerPosture,
@@ -521,6 +522,68 @@ describe('W — writers bump FIRST', () => {
       expect(bumpAt).toBeGreaterThan(0)
       expect(firstQueryAt).toBeGreaterThan(bumpAt)
     }
+  })
+})
+
+describe('F — the field-row writer rule (sheet version row before the first meta_fields row lock; the #6792 follow-up)', () => {
+  it('F-01 fieldVisibilityTriggerWouldFire is the trigger\'s own test: the M-05 matrix of the real-DB file, step for step', () => {
+    // Same sequence as authz-version-protocol.db.test.ts M-05 (each step's expected trigger delta: 1 = bump).
+    const steps: Array<[unknown, unknown, boolean]> = [
+      [{ options: [] }, { options: ['a'] }, false],
+      [{ options: ['a'] }, { options: ['a'], hidden: false }, false],
+      [{ options: ['a'], hidden: false }, { options: ['a'], hidden: true }, true],
+      [{ options: ['a'], hidden: true }, { options: ['b'], hidden: true }, false],
+      [{ options: ['b'], hidden: true }, { options: ['b'] }, true],
+      [{ options: ['b'] }, { visible: false }, true],
+      [{ visible: false }, { visible: false, format: 'x' }, false],
+      [{ visible: false, format: 'x' }, { visible: true }, true],
+    ]
+    for (const [stored, next, fires] of steps) expect(fieldVisibilityTriggerWouldFire(stored, next), JSON.stringify([stored, next])).toBe(fires)
+  })
+
+  it('F-02 the flags, not the derivation; JSON true / false only; a non-object property has neither flag', () => {
+    // already hidden: adding visible:false changes no derivation, and the trigger still fires
+    expect(fieldVisibilityTriggerWouldFire({ hidden: true }, { hidden: true, visible: false })).toBe(true)
+    // `= 'true'::jsonb` / `= 'false'::jsonb`: a string or a number is neither flag
+    expect(fieldVisibilityTriggerWouldFire({ hidden: 'true' }, {})).toBe(false)
+    expect(fieldVisibilityTriggerWouldFire({ hidden: 1, visible: 0 }, {})).toBe(false)
+    expect(fieldVisibilityTriggerWouldFire({ visible: 'false' }, { visible: null })).toBe(false)
+    // `property -> 'hidden'` is NULL for an array, a string, a number or null
+    for (const nonObject of [null, undefined, [], ['hidden'], 'x', JSON.stringify({ hidden: true }), 7]) {
+      expect(fieldVisibilityTriggerWouldFire(nonObject, {}), JSON.stringify(nonObject)).toBe(false)
+      expect(fieldVisibilityTriggerWouldFire(nonObject, { hidden: true }), JSON.stringify(nonObject)).toBe(true)
+      expect(fieldVisibilityTriggerWouldFire({ visible: false }, nonObject), JSON.stringify(nonObject)).toBe(true)
+    }
+  })
+
+  it('F-03 source order: every meta_fields writer that can trip the trigger bumps after its fence and before its first field-row lock', () => {
+    // LF-normalized: a Windows checkout is CRLF, CI is LF.
+    const readLf = (file: string) => readFileSync(file, 'utf8').replace(/\r\n/g, '\n')
+    const univer = readLf(path.join(SRC, 'routes', 'univer-meta.ts'))
+    const at = (source: string, needle: string, from = 0) => {
+      const index = source.indexOf(needle, from)
+      expect(index, needle).toBeGreaterThan(0)
+      return index
+    }
+    // config-restore, generic branch: the bump precedes the snapshot's FOR NO KEY UPDATE
+    const genericBump = at(univer, 'if (configRevertCanTripFieldVisibility(rev)) await bumpSheetPermissionVersions(query, [sheetId])\n        // A field snapshot')
+    expect(at(univer, 'await loadEntityConfigSnapshot(query, rev, { lockField: true })', genericBump)).toBeGreaterThan(genericBump)
+    // config-restore, lossy-retype branch: the bump precedes the FOR UPDATE field read (and therefore its cell locks)
+    const lossyRead = at(univer, 'const fieldRow = await loadLossyRetypeFieldRow(query, rev.entity_id, true)')
+    const lossyBump = univer.lastIndexOf('if (configRevertCanTripFieldVisibility(rev)) await bumpSheetPermissionVersions(query, [sheetId])', lossyRead)
+    expect(lossyBump).toBeGreaterThan(univer.lastIndexOf('await fenceWriterEntry(query, sheetId)', lossyRead))
+    expect(univer.match(/if \(configRevertCanTripFieldVisibility\(rev\)\) await bumpSheetPermissionVersions\(query, \[sheetId\]\)/g)).toHaveLength(2)
+    // PATCH /fields: the conditional bump precedes the sibling shift and the late locked re-read
+    const patchBump = at(univer, 'if (fieldVisibilityTriggerWouldFire(validated.property, nextProperty)) await bumpSheetPermissionVersions(query, [sheetId])')
+    expect(at(univer, 'UPDATE meta_fields SET "order" = "order" + 1', patchBump)).toBeGreaterThan(patchBump)
+    expect(at(univer, 'await query(PATCH_FIELD_LOCKED_REREAD_SQL, [fieldId])', patchBump)).toBeGreaterThan(patchBump)
+    expect(univer.lastIndexOf('await fenceWriterEntry(query, preflightSheetId)', patchBump)).toBeGreaterThan(0)
+    // the plugin property port and an overwriting ensureFields
+    const provisioning = readLf(path.join(SRC, 'multitable', 'provisioning.ts'))
+    const portBump = at(provisioning, 'await bumpSheetPermissionVersions(input.query, [sheetId])\n  const existing = await input.query(PATCH_OBJECT_FIELD_PROPERTY_READ_SQL')
+    expect(provisioning.lastIndexOf('await fenceWriterEntry(input.query, sheetId)', portBump)).toBeGreaterThan(0)
+    const ensureBump = at(provisioning, "if (fields.length > 0 && (overwriteMode === 'overwrite' || overwriteMode === 'observe')) {")
+    expect(at(provisioning, 'for (const [index, field] of fields.entries()) {', ensureBump)).toBeGreaterThan(ensureBump)
   })
 })
 

@@ -13,6 +13,7 @@ import type { Request } from 'express'
 import { randomUUID } from 'node:crypto'
 import { authService } from '../../src/auth/AuthService'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
+import { SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL } from '../../src/multitable/authz-version-protocol'
 import {
   createSecurityActionProofService,
   readAuthenticatedSessionContext,
@@ -37,7 +38,7 @@ export const TARGET_IDENTITY = '66666666-7777-4888-8999-000000000000'
 export const PASSWORD_HASH = '$2a$04$synthetic.hash.that.is.not.a.secret.value'
 export const TARGET_WITNESS = 'a'.repeat(64)
 
-export type StatementKey = keyof typeof SECURITY_ACTION_SQL | 'privilegeData' | 'xid' | 'versionBump' | 'lockUser' | 'unknown'
+export type StatementKey = keyof typeof SECURITY_ACTION_SQL | 'privilegeData' | 'xid' | 'subjectVersionBump' | 'lockUser' | 'unknown'
 
 const KEY_BY_SQL = new Map<string, StatementKey>(
   (Object.keys(SECURITY_ACTION_SQL) as Array<keyof typeof SECURITY_ACTION_SQL>).map((key) => [SECURITY_ACTION_SQL[key], key]),
@@ -48,9 +49,10 @@ export function statementKey(sql: string): StatementKey {
   if (known) return known
   if (sql.includes('pg_current_xact_id')) return 'xid'
   if (sql.includes('FROM users u')) return 'privilegeData'
-  // The access-graph mutex (directory/access-graph-mutex.ts): D21 bumps the subject authorization version row
-  // first (multitable/authz-version-protocol.ts), then locks the users row.
-  if (/^INSERT INTO subject_authorization_versions\b/.test(sql)) return 'versionBump'
+  // The access-graph mutex bumps the user's D21 subject authorization version row FIRST, before its users FOR UPDATE
+  // (multitable/authz-version-protocol.ts, the subject-layer writer rule): one statement, the sorted id list.
+  if (sql === SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL) return 'subjectVersionBump'
+  // The access-graph mutex statement (directory/access-graph-mutex.ts).
   if (/FROM users\s+WHERE id = \$1::text\s+FOR UPDATE/.test(sql)) return 'lockUser'
   return 'unknown'
 }
@@ -176,7 +178,7 @@ async function answer(key: StatementKey, sql: string, params: unknown[], state: 
     case 'advisoryLock':
     case 'supersede':
     case 'insertFailed':
-    case 'versionBump':
+    case 'subjectVersionBump':
       return []
     case 'isolation':
       return [{ isolation: state.isolation }]
