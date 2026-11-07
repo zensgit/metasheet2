@@ -316,6 +316,20 @@
         <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :can-delete-sheet="canDeleteSheet" :can-copy-sheet="canCopySheet" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" @delete-sheet="onDeleteSheet" @copy-sheet="onOpenCopySheet" />
       </aside>
       <div class="mt-workbench__main">
+        <!-- 备料 「查看子件」 / 「查看所有使用位置」: the viewer filter the drawer set (utils/bom-relations.ts). Per-viewer and
+             never stored; 清除 drops it and reloads the page the grid was on, with the view exactly as stored. -->
+        <div
+          v-if="viewerFilterState && !showDashboardView"
+          class="mt-workbench__viewer-filter"
+          role="status"
+          data-testid="workbench-viewer-filter-banner"
+        >
+          <div class="mt-workbench__viewer-filter-copy">
+            <strong data-testid="workbench-viewer-filter-label">{{ viewerFilterState.label }}</strong>
+            <span class="mt-workbench__viewer-filter-note">{{ bomRelationsLabel('banner.note', isZh) }}</span>
+          </div>
+          <MtButton size="sm" data-testid="workbench-viewer-filter-clear" @click="onClearViewerFilter">{{ bomRelationsLabel('banner.clear', isZh) }}</MtButton>
+        </div>
         <MetaDashboardView
           v-if="showDashboardView"
           :sheet-id="workbench.activeSheetId.value"
@@ -503,6 +517,7 @@
         :can-create="canCreateRecordByHand"
         :duplicate-blocked-reason="recordDuplicateBlockedReason"
         :manual-copy-available="manualRowsCreateAvailable"
+        :bom-relations="inspectorBomRelations"
         :can-submit-approval="canSubmitApproval"
         :can-manage-automation="canOpenWorkflowDesigner"
         :field-permissions="inspectorFieldPermissions"
@@ -540,6 +555,7 @@
         :open-comments="showComments"
         @close="onCloseDrawer" @delete="onDeleteRecord" @duplicate="onDuplicateRecord(selectedRecordId)" @patch="onDrawerPatch"
         @manual-copy="onManualCopyRecord(selectedRecordId)"
+        @bom-relations="onBomRelations"
         @copy-link="onCopyRecordLink"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
@@ -912,6 +928,13 @@ import {
   resolveManualRowEditableFieldIds,
 } from '../utils/manual-rows'
 import MetaManualRowDialog from '../components/MetaManualRowDialog.vue'
+import {
+  bomRelationsLabel,
+  bomRelationsSourceValue,
+  buildBomRelationsViewerFilter,
+  readBomRelationsBlock,
+  type BomRelationKind,
+} from '../utils/bom-relations'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
 import { fieldAnchoredPatchMessage, resolvePatchFailureRoute } from '../utils/patch-failure-routing'
@@ -4236,7 +4259,7 @@ async function loadAggregates() {
     return
   }
   try {
-    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined })
+    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined, viewerFilter: grid.viewerFilterParam?.value })
     if (seq !== aggregateReqSeq) return // a newer request superseded this one
     aggregateValues.value = r.aggregates ?? {}
     aggregateGroups.value = r.groups ?? []
@@ -4249,7 +4272,7 @@ async function loadAggregates() {
   }
 }
 watch(
-  [() => workbench.activeViewId.value, () => workbench.activeSheetId.value, () => JSON.stringify(activeAggregationConfig.value), () => searchText.value],
+  [() => workbench.activeViewId.value, () => workbench.activeSheetId.value, () => JSON.stringify(activeAggregationConfig.value), () => searchText.value, () => grid.viewerFilterParam?.value],
   () => { void loadAggregates() },
   { immediate: true },
 )
@@ -4269,7 +4292,7 @@ async function loadScaleStats() {
     return
   }
   try {
-    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined, statsFields })
+    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined, viewerFilter: grid.viewerFilterParam?.value, statsFields })
     if (seq !== scaleStatsReqSeq) return // a newer request superseded this one
     scaleServerStats.value = r.stats ?? {}
   } catch {
@@ -4297,6 +4320,7 @@ const scaleStatsKey = () => JSON.stringify([
   grid.filterRules.value,
   grid.filterGroups.value,
   searchText.value,
+  grid.viewerFilterParam?.value ?? null,
   autoScaleStatsFieldIds.value,
 ])
 let lastScaleStatsKey = ''
@@ -6121,6 +6145,37 @@ const selectedRecordResolved = computed<MetaRecord | null>(() => {
   return null
 })
 
+// 备料 「查看子件」 / 「查看所有使用位置」 (owner question 2026-11-07; utils/bom-relations.ts). The buttons exist only when
+// /context sends the stockPreparationBomRelations block for the ACTIVE sheet (never from stale capabilities of the
+// previous sheet). Pressing one sets the grid's VIEWER filter (useMultitableGrid setViewerFilter): GET /view narrows
+// this viewer's rows; nothing is written to the shared view or the personal overlay. 查看子件 closes the drawer first
+// (the open row is the parent and is not among its own children); 查看所有使用位置 keeps it open (the row is one of
+// the positions).
+const bomRelationsBlock = computed(() => (capabilitiesStale.value ? null : readBomRelationsBlock(capabilitySource.value)))
+const inspectorBomRelations = computed<{ disabledReason: string | null } | null>(() => {
+  const block = bomRelationsBlock.value
+  const record = selectedRecordResolved.value
+  if (!block || !record) return null
+  return { disabledReason: bomRelationsSourceValue(block, record) === null ? bomRelationsLabel('action.noSource', isZh.value) : null }
+})
+const viewerFilterState = computed(() => grid.viewerFilter?.value ?? null)
+async function onBomRelations(kind: BomRelationKind) {
+  const block = bomRelationsBlock.value
+  const record = selectedRecordResolved.value
+  if (!block || !record) return
+  const state = buildBomRelationsViewerFilter(kind, block, record, isZh.value)
+  if (!state) return
+  if (kind === 'children') {
+    onCloseDrawer()
+    // A pending edit the user chose to keep (confirmDiscardRecordChanges declined) keeps the drawer — and the grid as it is.
+    if (inspectorOpen.value) return
+  }
+  await grid.setViewerFilter(state)
+}
+async function onClearViewerFilter() {
+  await grid.clearViewerFilter()
+}
+
 watch(
   [() => workbench.activeSheetId.value, visibleCommentPresenceRecordIds, () => effectiveRowActions.value.canComment],
   ([sheetId, recordIds, canComment]) => {
@@ -6525,6 +6580,20 @@ defineExpose({
    against — inert for every other child, which all stay in normal flow. */
 .mt-workbench__content { display: flex; flex: 1; min-height: 0; position: relative; }
 .mt-workbench__main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.mt-workbench__viewer-filter {
+  margin: 8px 16px 0;
+  padding: 8px 12px;
+  border: 1px solid #b3d8ff;
+  border-radius: 10px;
+  background: #ecf5ff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.mt-workbench__viewer-filter-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mt-workbench__viewer-filter-note { font-size: 12px; line-height: 1.4; color: #606266; }
 .mt-workbench__conflict {
   margin: 8px 16px 0;
   padding: 10px 12px;

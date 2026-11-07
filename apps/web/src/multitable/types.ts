@@ -368,6 +368,19 @@ export interface MetaManualRowsContextBlock {
   dialogFieldIds?: string[]
 }
 
+/**
+ * 备料 「查看子件」 / 「查看所有使用位置」: /context `capabilities.stockPreparationBomRelations` as the host sends it
+ * (multitable/stock-preparation-bom-relations-context.ts) — the PHYSICAL ids of five main-template columns, only on a
+ * stock-preparation main-template sheet and only when the actor may read each of them. Field ids only, never a value.
+ */
+export interface MetaBomRelationsBlock {
+  componentSourceFieldId: string
+  parentSourceFieldId: string
+  activeFieldId: string
+  componentCodeFieldId: string
+  componentNameFieldId: string
+}
+
 /** The block as the web reads it (utils/manual-rows.ts readManualRowsBlock): every list present, malformed → unavailable. */
 export interface MetaManualRowsBlock {
   state: MetaManualRowsState
@@ -649,6 +662,13 @@ export interface MetaCapabilities {
    * unchanged. Display only: every route re-gates on its own (generic create answers 409 / 503 by state).
    */
   stockPreparationManualRows?: MetaManualRowsContextBlock
+  /**
+   * 备料 「查看子件」 / 「查看所有使用位置」 (owner question 2026-11-07): set by /context ONLY on a stock-preparation
+   * main-template sheet, to any reader who may read the five columns (see MetaBomRelationsBlock). The record drawer then
+   * offers the two viewer-only filters (utils/bom-relations.ts); absent ⇒ no buttons. Display only: the narrowing is
+   * the GET /view `viewerFilter` parameter, which never writes the view.
+   */
+  stockPreparationBomRelations?: MetaBomRelationsBlock
 }
 
 export interface YjsPresenceUser {
