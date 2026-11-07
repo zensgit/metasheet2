@@ -303,6 +303,8 @@ describe('calculateAttendanceSegmentsV1 — completed shapes', () => {
       workedMinutes: 540,
       status: 'normal',
     })
+    expect(result.dailyProjection?.workDate).toBe('2026-07-01')
+    expect(result.dailyProjection?.timezone).toBe('Asia/Shanghai')
     expect(result.dailyProjection?.workedMinutes).toBe(540)
   })
 
