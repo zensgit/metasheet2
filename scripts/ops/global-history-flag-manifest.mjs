@@ -694,6 +694,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/integrations/dingtalk/integration-scoped-credentials-flag.ts#isDingTalkIntegrationScopedCredentialsEnabled',
   },
   {
+    key: 'DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "Directory integration capability surface: GET /api/admin/directory/integration-capabilities/:integrationId and the capability service behind it. Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). Off: the route answers 404 after the administrator check and the service issues no statement. On: the two capability tables are read after a non-throwing existence probe, and the route shows each capability's stored state, governance and reason. Apply the migration before turning it on; every replica must carry the same value. danger=low: no existing path reads the capability tables, so the switch changes what an administrator can see and nothing else; it is not an authorization input.",
+    source: 'packages/core-backend/src/integrations/directory-integration-capabilities-flag.ts#isDirectoryIntegrationCapabilitiesEnabled',
+  },
+  {
     key: 'APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED',
     type: 'boolean',
     activationValue: 'true',
@@ -971,6 +982,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     purpose:
       "TTL of the automation scheduler's Redis leader lock. Read only when ENABLE_SCHEDULER_LEADER_LOCK is 'true' and Redis is reachable. Parsed with Number(raw): a positive result is used as-is (no upper bound, fractions accepted), unset / '' / non-numeric / zero / negative uses the default 30000. The attendance scheduler has its own ATTENDANCE_SCHEDULER_LEADER_LOCK_TTL_MS and does not read this.",
     source: 'packages/core-backend/src/multitable/automation-service.ts#resolveAutomationSchedulerLeaderOptions',
+  },
+  {
+    key: 'SECURITY_ACTION_PROOF_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "Default OFF; exact literal 'true' only, byte-identical (no trim, no case folding; unset, '', false, TRUE, ' true', 'true ', 1 and yes stay OFF). While OFF the router factory returns null, so POST /api/auth/security-actions/verify is not mounted, and every action-proof service entry point refuses before any SQL statement. Turn it on only after `migrate.js --confirm zzzz20261106120000_create_security_action_challenges` exits 0. While ON, the route issues a 300-second single-use proof only for a purpose whose own prerequisites are delivered; in this revision no purpose is, so every verify request is refused before any data is read and the table receives no row. Not a grant: it enables no binding, login grant or session change. Deploying and enabling are separate owner decisions.",
+    source: 'packages/core-backend/src/auth/security-action-proof-flag.ts#isSecurityActionProofEnabled; packages/core-backend/src/routes/security-actions.ts#securityActionsRouter',
   },
 ])
 
