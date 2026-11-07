@@ -538,4 +538,89 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     expect(bound.reused).toBe(false)
     expect((await rows(LEDGER)).length).toBe(2)
   })
+
+  // ---- R-71 ⑦.4 PR-2 (Y6): the generated code against the two fences (design B acceptance A9 / A10) ----
+  // The digests come from the real compiler (bound drafts of the shipped v3 example, whose material template is one
+  // preset part reading sourceLineId and project); the code is never stored and never compared by any fence.
+  type CompiledSpec = { businessKeyDigest: string; payloadDigest: string; sourceRecordDigest: string; creationIdentityDigest: string }
+  type Compiled = { planDigest: string; rowSpecs: CompiledSpec[]; plan: { rows: Array<{ payload: Row }> } }
+  const lib = (name: string) => pathToFileURL(path.join(root, 'plugins/plugin-integration-core/lib', name)).href
+  async function generatedDraft(template?: Row[], patchRow: Row = {}): Promise<Compiled> {
+    const { compileYidaSendDraft } = await import(lib('yida-draft-compiler.mjs')) as { compileYidaSendDraft(input: unknown): Compiled }
+    const { createYidaTransformExample, transformDependencies } = await import(lib('yida-static-plan.mjs')) as {
+      createYidaTransformExample(): { config: Row & { fieldMap: Row[] }; rows: Row[] }
+      transformDependencies(entry: unknown, config: unknown): string[] }
+    const example = createYidaTransformExample()
+    const config = structuredClone(example.config)
+    if (template) config.fieldMap[config.fieldMap.length - 1] = { ...config.fieldMap[config.fieldMap.length - 1], template }
+    const row = { ...example.rows[0], ...patchRow }
+    const columns = [...new Set(config.fieldMap.flatMap(entry => transformDependencies(entry, config)))]
+    const fieldBindings = Object.fromEntries(columns.map(column => [column, 'fld_' + column]))
+    return compileYidaSendDraft({ config, rowsText: JSON.stringify([row]), allocation: { mode: 'original' },
+      sourceBinding: { sheetId: 'sheet_generated', keyFieldId: 'fld_idempotencyKey', fieldBindings,
+        records: [{ recordId: 'rec_generated', keyValue: String(row.idempotencyKey), projectNo: String(row.projectNo) }] } })
+  }
+  const PRESET = { preset: 'material-code-v1', rowIdOf: 'sourceLineId', projectOf: 'project' }
+  const KEY_HASH = { hash: ['project', 'drawingNo', 'partName', 'specification', 'materialGrade', 'versionNo', 'parentDrawingNo'], form: 'uuid-36' }
+  const reservation = (compiled: Compiled, patch: Row): Row => {
+    const { businessKeyDigest, payloadDigest, sourceRecordDigest, creationIdentityDigest } = compiled.rowSpecs[0]
+    return fixture({ businessKeyDigest, payloadDigest, sourceRecordDigest, creationIdentityDigest, ...patch })
+  }
+
+  it('A9 (generated): a second bound draft with the same seven keys and a changed template literal is a new operation that the fences refuse; the ACKed row and its audits stay', async () => {
+    const one = await generatedDraft([{ literal: 'SYN-A-' }, PRESET])
+    const two = await generatedDraft([{ literal: 'SYN-B-' }, PRESET])
+    await setState('acknowledged', reservation(one, {}))
+    const before = await evidence()
+    expect(before.ledger[0].business_key_digest).toBe(one.rowSpecs[0].businessKeyDigest)
+    // Both fences cover this row; PostgreSQL reports the first unique index it checks, the 091 seven-key fence.
+    await rejectStore(second.store.prepare(reservation(two, { operationId: 'synthetic-operation-a9', rowKey: 'synthetic-row-a9' })),
+      'YIDA_DELIVERY_BUSINESS_CONFLICT')
+    expect(second.uniqueErrors).toEqual([FENCE])
+    expect(await evidence()).toEqual(before)
+    // Without the seven-key fence the identity fence still refuses it: the code never creates a second identity.
+    await dropFence()
+    await rejectStore(second.store.prepare(reservation(two, { operationId: 'synthetic-operation-a9b', rowKey: 'synthetic-row-a9b' })),
+      'YIDA_DELIVERY_IDENTITY_CONFLICT')
+    expect(second.uniqueErrors).toEqual([FENCE, IDENTITY_FENCE])
+    expect(await evidence()).toEqual(before)
+    // Why: a new operation (another code, payload and plan digest) whose seven keys, identity and source record are the same.
+    expect(two.plan.rows[0].payload.materialCodeText).not.toBe(one.plan.rows[0].payload.materialCodeText)
+    expect(two.planDigest).not.toBe(one.planDigest)
+    expect(two.rowSpecs[0].payloadDigest).not.toBe(one.rowSpecs[0].payloadDigest)
+    expect(two.rowSpecs[0].businessKeyDigest).toBe(one.rowSpecs[0].businessKeyDigest)
+    expect(two.rowSpecs[0].creationIdentityDigest).toBe(one.rowSpecs[0].creationIdentityDigest)
+    expect(two.rowSpecs[0].sourceRecordDigest).toBe(one.rowSpecs[0].sourceRecordDigest)
+  })
+
+  it('A10 (generated): the identity digest is independent of the template; equal codes never stand in for a fence, each refusal is the fence that applies', async () => {
+    // Two templates over one row: one identity, one seven-key digest, two codes.
+    const preset = await generatedDraft([PRESET]), hashed = await generatedDraft([{ literal: 'SYN-' }, KEY_HASH])
+    await setState('acknowledged', reservation(preset, {}))
+    const before = await evidence()
+    // Same identity, corrected seven keys (K2), another template and code: refused by the IDENTITY fence only.
+    const corrected = await generatedDraft([{ literal: 'SYN-' }, KEY_HASH], { componentName: '示例部件（改）' })
+    await rejectStore(second.store.prepare(reservation(corrected, { operationId: 'synthetic-operation-k2', rowKey: 'synthetic-row-k2' })),
+      'YIDA_DELIVERY_IDENTITY_CONFLICT')
+    expect(second.uniqueErrors).toEqual([IDENTITY_FENCE])
+    expect(await evidence()).toEqual(before)
+    expect(hashed.plan.rows[0].payload.materialCodeText).not.toBe(preset.plan.rows[0].payload.materialCodeText)
+    expect(hashed.rowSpecs[0].creationIdentityDigest).toBe(preset.rowSpecs[0].creationIdentityDigest)
+    expect(hashed.rowSpecs[0].businessKeyDigest).toBe(preset.rowSpecs[0].businessKeyDigest)
+    expect(corrected.rowSpecs[0].businessKeyDigest).not.toBe(preset.rowSpecs[0].businessKeyDigest)
+    expect(corrected.rowSpecs[0].creationIdentityDigest).toBe(preset.rowSpecs[0].creationIdentityDigest)
+    // Equal codes under two identities (a hash over the seven keys, another idempotency key): refused by the SEVEN-KEY
+    // fence because the keys are equal, not because the codes are.
+    const sameKeys = await generatedDraft([{ literal: 'SYN-' }, KEY_HASH], { idempotencyKey: 'SYN-LINE-9' })
+    expect(sameKeys.plan.rows[0].payload.materialCodeText).toBe(hashed.plan.rows[0].payload.materialCodeText)
+    expect(sameKeys.rowSpecs[0].creationIdentityDigest).not.toBe(preset.rowSpecs[0].creationIdentityDigest)
+    await rejectStore(second.store.prepare(reservation(sameKeys, { operationId: 'synthetic-operation-l9', rowKey: 'synthetic-row-l9' })),
+      'YIDA_DELIVERY_BUSINESS_CONFLICT')
+    expect(second.uniqueErrors).toEqual([IDENTITY_FENCE, FENCE])
+    expect(await evidence()).toEqual(before)
+    // Another identity and other seven keys reserve, whatever its code: no fence compares codes.
+    const other = await generatedDraft([PRESET], { idempotencyKey: 'SYN-LINE-7', componentCode: 'DEMO-DRW-7' })
+    expect((await second.store.prepare(reservation(other, { operationId: 'synthetic-operation-o', rowKey: 'synthetic-row-o' }))).reused).toBe(false)
+    expect((await rows(LEDGER)).length).toBe(2)
+  })
 })

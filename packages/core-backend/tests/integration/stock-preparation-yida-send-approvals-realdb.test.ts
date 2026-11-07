@@ -1490,4 +1490,42 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     await sql.restoreRead()
     expect((await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-submission' })).status).toBe('admitted')
   })
+
+  // RA2 (ii) with the generated transform (R-71 ⑦.4, Y6): the re-check covers generated inputs through transformDependencies.
+  // Every generated input is a direct target, so a hidden input is also refused through its direct entry; what this
+  // case adds is that the sealed binding names the input under the generated target too (fieldDependencies by target).
+  function v3GeneratedRow(index: number): Input & { sourceBinding: Row } {
+    const value = v3BoundRow(index)
+    const config = value.config as unknown as { fieldCatalog: Row[]; fieldMap: Row[] }
+    config.fieldCatalog.push({ id: 'code', control: 'text', required: false })
+    config.fieldMap.push({ transform: 'generated', template: [{ literal: 'SYN-' }, { hash: ['project', 'line', 'parent'], form: 'uuid-32' }],
+      target: 'code', type: 'string', required: false })
+    return value
+  }
+  it('RA2 (ii) with generated: a generated input hidden before approval and before admission refuses; the sealed binding names it under the generated target', async () => {
+    await boundFixture()
+    const { fld } = ids(), parent = fld('parent')
+    const request = await draftOf(first, v3GeneratedRow(1), 'synthetic-v3g-confirmation')
+    const row = (await tableRows(MEMBERS)).find(member => member.operation_id === request.operationId)!
+    expect(/^[0-9a-f]{64}$/.test(String(row.source_record_digest))).toBe(true)
+    await sql.hide(parent)
+    const before = await evidence()
+    await rejected(first.service.approve(request), 'CONFLICT')
+    expect(await evidence()).toEqual(before)
+    await sql.unhide(parent)
+    const granted = await first.service.approve(request)
+    const grantRow = (await tableRows(APPROVAL)).find(grant => grant.grant_id === granted.grantId)!
+    const sealed = (JSON.parse(await security.decrypt(String(grantRow.snapshot_encrypted))) as Row).selection as Row
+    const dependencies = (sealed.sourceBinding as Row).fieldDependencies as Record<string, string[]>
+    expect(dependencies.code).toEqual([fld('project'), fld('line'), fld('parent')].sort())
+    expect(Object.entries(dependencies).filter(([, fieldIds]) => fieldIds.includes(parent)).map(([target]) => target).sort()).toEqual(['code', 'parent'])
+    // The selected (projected) row carries the code's inputs and the planned payload carries the code.
+    expect(String(((sealed.plan as Row).rows as Row[])[0] && (((sealed.plan as Row).rows as Row[])[0].payload as Row).code)).toMatch(/^SYN-[0-9A-F]{32}$/)
+    await sql.hide(parent)
+    const approved = await evidence()
+    await rejected(first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-v3g-submission' }), 'CONFLICT')
+    expect(await evidence()).toEqual(approved)
+    await sql.unhide(parent)
+    expect((await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-v3g-submission' })).status).toBe('admitted')
+  })
 })
