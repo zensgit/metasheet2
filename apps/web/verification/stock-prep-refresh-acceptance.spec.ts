@@ -76,6 +76,69 @@ test.describe('备料分批拉取 step 4 PR-7 —— 拉取待确认', () => {
     expectNoUnmockedRoutes(log)
   })
 
+  // 备料分批拉取第一期 step 5 PR-9 (R-77) —— 「变更计划」/「变更复核」 in the real browser.
+  test('RA-04 拉取人员:内容变化指向「变更计划」;勾选 + 输入项目号才可确认;确认后要求重新试算并写入', async ({ page }) => {
+    const log = await openStockPrepHarness(page, { actor: 'puller', scenario: 'governedChangePlan', tab: 'refresh-queue', projectNo: SYN_PROJECT_A })
+    const card = page.locator('[data-testid="stock-prep-refresh-hold"][data-hold-kind="content_change"]')
+    await expect(card.locator('[data-testid="stock-prep-refresh-content-plan-pointer"]')).toContainText('变更计划')
+    await expect(card.locator('[data-testid="stock-prep-refresh-go-change-plan"]')).toBeVisible()
+    const plan = page.locator('[data-testid="stock-prep-refresh-change-plan-proposal"]')
+    await expect(plan).toContainText('这次有 1 项内容变化')
+    await expect(plan).toContainText('总用量')
+    const confirm = plan.locator('[data-testid="stock-prep-refresh-change-plan-confirm"]')
+    await expect(confirm).toBeDisabled()
+    await plan.locator('[data-testid="stock-prep-refresh-change-plan-ack"] input').check()
+    await expect(confirm).toBeDisabled()
+    await plan.locator('[data-testid="stock-prep-refresh-change-plan-typed-project-no"]').fill(SYN_PROJECT_A)
+    await expect(confirm).toBeEnabled()
+    await confirm.click()
+    const next = page.locator('[data-testid="stock-prep-refresh-preview-again"]')
+    await expect(next).toContainText('变更计划')
+    await expect(next).toContainText('必须重新试算')
+    expect(log.count('POST', '/refresh/change-plans/confirm')).toBe(1)
+    for (const call of log.calls.filter((entry) => entry.path.includes('/refresh/'))) {
+      expect(call.search, call.url).not.toContain('workspaceId')
+    }
+    expectNoUnmockedRoutes(log)
+  })
+
+  test('RA-05 拉取人员:变更待复核 —— rail 计数 1、横幅入口;读完两页 + 结论 + 项目号才可复核;复核后回到项目备料要核对', async ({ page }) => {
+    const log = await openStockPrepHarness(page, { actor: 'puller', scenario: 'governedReview', projectNo: SYN_PROJECT_A })
+    const banner = page.locator('[data-testid="stock-prep-project-board-refresh-banner"]')
+    await expect(banner).toHaveAttribute('data-refresh-status', 'change_pending_review')
+    await expect(page.locator('[data-testid="stock-prep-rail-count-refresh-queue"]')).toHaveText('1')
+    await page.locator('[data-testid="stock-prep-project-board-refresh-open-queue"]').click()
+    await expect(page.locator('[data-testid="stock-prep-panel"]')).toHaveAttribute('data-active', 'refresh-queue')
+    await expect(page.locator('[data-testid="stock-prep-refresh-queue"]')).toHaveAttribute('data-refresh-rendering', 'review_pending')
+    const review = page.locator('[data-testid="stock-prep-refresh-change-review"]')
+    await expect(review).toContainText('这份变更计划是您确认的')
+    const complete = review.locator('[data-testid="stock-prep-refresh-change-review-complete"]')
+    await review.locator('[data-testid="stock-prep-refresh-change-review-conclusion-handled"] input').check()
+    await review.locator('[data-testid="stock-prep-refresh-change-review-typed-project-no"]').fill(SYN_PROJECT_A)
+    await expect(complete, 'page 2 of 2 not read yet').toBeDisabled()
+    await review.locator('[data-testid="stock-prep-refresh-change-review-next"]').click()
+    await expect(review.locator('[data-testid="stock-prep-refresh-change-review-pages"]')).toContainText('已看 2 / 2 页')
+    await expect(complete).toBeEnabled()
+    await complete.click()
+    await expect(page.locator('[data-testid="stock-prep-refresh-preview-again"]')).toContainText('核对')
+    expect(log.count('POST', '/refresh/change-reviews/complete')).toBe(1)
+    await page.locator('[data-testid="stock-prep-refresh-go-preview"]').click()
+    await expect(page.locator('[data-testid="stock-prep-panel"]')).toHaveAttribute('data-active', 'project-board')
+    await expect(page.locator('[data-testid="stock-prep-project-board-refresh-banner"]')).toContainText('待核对')
+    await expect(page.locator('[data-testid="stock-prep-project-sync-check"]')).toBeVisible()
+    expectNoUnmockedRoutes(log)
+  })
+
+  test('RA-06 一线:变更待复核只有横幅,没有入口、没有 rail 计数、没有「拉取待确认」', async ({ page }) => {
+    const log = await openStockPrepHarness(page, { actor: 'operator', scenario: 'governedReview', projectNo: SYN_PROJECT_A })
+    await expect(page.locator('[data-testid="stock-prep-project-board-refresh-banner"]')).toContainText('变更待复核')
+    await expect(page.locator('[data-testid="stock-prep-project-board-refresh-open-queue"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid="stock-prep-rail-count-refresh-queue"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid="stock-prep-tab-refresh-queue"]')).toHaveCount(0)
+    expect(log.calls.some((call) => call.path.includes('/change-plans/') || call.path.includes('/change-reviews/'))).toBe(false)
+    expectNoUnmockedRoutes(log)
+  })
+
   test('RA-03 不受分批拉取管辖的项目:没有横幅、没有核对,rail 上也没有计数(休眠)', async ({ page }) => {
     const log = await openStockPrepHarness(page, { actor: 'puller', scenario: 'ready', projectNo: SYN_PROJECT_A })
     await expect(page.locator('[data-testid="stock-prep-project-board-title"]')).toBeVisible()
@@ -85,6 +148,8 @@ test.describe('备料分批拉取 step 4 PR-7 —— 拉取待确认', () => {
     // The tab is there for a puller — and says 未启用 for this project.
     await page.locator('[data-testid="stock-prep-tab-refresh-queue"]').click()
     await expect(page.locator('[data-testid="stock-prep-refresh-queue"]')).toHaveAttribute('data-refresh-rendering', 'not_governed')
+    // PR-9 dormancy tripwire: a not-governed project never reads the change plan.
+    expect(log.calls.some((call) => call.path.includes('/change-plans/') || call.path.includes('/change-reviews/'))).toBe(false)
     expectNoUnmockedRoutes(log)
   })
 })

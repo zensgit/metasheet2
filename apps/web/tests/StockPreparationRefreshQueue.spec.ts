@@ -642,6 +642,76 @@ describe('「拉取待确认」 — StockPreparationRefreshQueueView (RQ)', () =
     expect(holdEl(root, 'relationship_reconfirm').querySelector('[data-testid="stock-prep-refresh-end"]')).not.toBeNull()
   })
 
+  it('RQ-END-RUNBOOK (PR-9, N1b): an ESCALATED (runbook-only) relationship offers no end, no typed field and no acknowledgement; an ordinary one keeps its end', async () => {
+    const escalated = relationshipHold({ id: 'hold_syn_runbook', continuationId: 'cont_syn_9', runbookOnly: true, confirmable: false, notConfirmableReason: 'specialist_repair', history: 'history_unknown' })
+    const root = await mountView(serverState({ holds: [escalated, relationshipHold()] }))
+    const holds = [...root.querySelectorAll('[data-testid="stock-prep-refresh-hold"][data-hold-kind="relationship_reconfirm"]')] as HTMLElement[]
+    expect(holds.length).toBe(2)
+    const runbook = holds.find((el) => el.querySelector('[data-testid="stock-prep-refresh-runbook-only"]'))!
+    const ordinary = holds.find((el) => el !== runbook)!
+    expect(runbook, 'the escalated hold renders').toBeDefined()
+    // The store refuses its end (409 CONFIRM_STALE continuation_ended): no control that can only loop.
+    expect(runbook.querySelector('[data-testid="stock-prep-refresh-end-fieldset"]'), 'no end fieldset').toBeNull()
+    expect(runbook.querySelector('[data-testid="stock-prep-refresh-end"]'), 'no end').toBeNull()
+    expect(runbook.querySelector('[data-testid="stock-prep-refresh-end-escalate"]'), 'no escalate').toBeNull()
+    expect(runbook.querySelector('[data-testid="stock-prep-refresh-typed-project-no"]'), 'no dead typed field').toBeNull()
+    expect(runbook.querySelector('[data-testid="stock-prep-refresh-history-ack"]'), 'no dead acknowledgement').toBeNull()
+    // 「暂不处理」 and the runbook note stay.
+    expect(runbook.querySelector('[data-testid="stock-prep-refresh-keep"]')).not.toBeNull()
+    expect(runbook.querySelector('[data-testid="stock-prep-refresh-runbook-only"]')?.textContent).toContain('运行手册')
+    // The ordinary relationship awaiting re-confirmation keeps its end fieldset.
+    expect(ordinary.querySelector('[data-testid="stock-prep-refresh-end-fieldset"]')).not.toBeNull()
+    expect(ordinary.querySelector('[data-testid="stock-prep-refresh-typed-project-no"]')).not.toBeNull()
+  })
+
+  it('RQ-CONTENT-PTR (PR-9): a content hold card says it is confirmed in the 「变更计划」 below and points there while that section shows', async () => {
+    const content = candidateHold({ id: 'hold_syn_content', kind: 'content_change', confirmable: false, notConfirmableReason: 'needs_step5', candidates: [], contentChanges: [{ recordId: 'rec_syn_1', key: SENTINEL, reason: 'plm_system_refresh', fields: { totalQuantity: { before: 1, after: 2 } } }], pairPage: { index: 0, count: 1, size: 200, next: null } })
+    const state = serverState({ holds: [content, relationshipHold()] })
+    const base = refreshRouter(state)
+    h.apiFetch.mockImplementation(async (path: string, init?: { method?: string; body?: string }) => {
+      if (path.includes('/change-plans/current')) {
+        return json(200, { ok: true, data: { refresh: { readable: true, status: 'pending_confirmation', governed: 'pilot', counts: { pendingConfirm: 2, pendingReviews: 0 }, pilot: true }, proposal: { blocked: null, holdIds: ['hold_syn_content'], holdSetFingerprint: '9'.repeat(64), planFingerprint: 'a'.repeat(64), sourceContentDigest: 'b'.repeat(64), recordCount: 1, structureHoldOpen: false, runbookHoldOpen: false, candidates: [], recordPage: { index: 0, count: 1, size: 100, next: null }, records: [] }, current: { confirmed: null, written: null }, readReceipt: null } })
+      }
+      return base(path, init)
+    })
+    app = createApp(StockPreparationRefreshQueueView as Component, { scope: SCOPE, projectNo: PROJECT })
+    app.mount(container!)
+    await flush()
+    const card = holdEl(container!, 'content_change')
+    expect(card.querySelector('[data-testid="stock-prep-refresh-content-plan-pointer"]')?.textContent).toContain('在下面的「变更计划」里统一确认')
+    expect(card.querySelector('[data-testid="stock-prep-refresh-go-change-plan"]'), 'the section is on the page').not.toBeNull()
+    // The reason reads in words (needs_step5: the change plan below), never 「上线后」.
+    expect(card.querySelector('[data-testid="stock-prep-refresh-not-confirmable"]')?.textContent).toContain('变更计划')
+    expect(card.querySelector('[data-testid="stock-prep-refresh-not-confirmable"]')?.textContent).not.toContain('上线')
+    // A non-content hold has no pointer.
+    expect(holdEl(container!, 'relationship_reconfirm').querySelector('[data-testid="stock-prep-refresh-content-plan-pointer"]')).toBeNull()
+    teardown(); setup()
+    // The plan read failed ({}): the sentence stays, the button does not (nothing to point at).
+    const root = await mountView(serverState({ holds: [content] }))
+    const failed = holdEl(root, 'content_change')
+    expect(failed.querySelector('[data-testid="stock-prep-refresh-content-plan-pointer"]')).not.toBeNull()
+    expect(failed.querySelector('[data-testid="stock-prep-refresh-go-change-plan"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-refresh-change-plan-state"]')).not.toBeNull()
+  })
+
+  it('RQ-REVIEW-RENDER (PR-9): 0 holds + a pending review is the review_pending rendering, never 无待处理', async () => {
+    const state = serverState({ holds: [], status: 'change_pending_review' })
+    const base = refreshRouter(state)
+    h.apiFetch.mockImplementation(async (path: string, init?: { method?: string; body?: string }) => {
+      const response = await base(path, init)
+      if (!path.includes('/refresh/holds')) return response
+      const payload = await response.json() as { data: { refresh: { counts: Record<string, number> } } }
+      payload.data.refresh.counts.pendingReviews = 1
+      return json(200, payload)
+    })
+    app = createApp(StockPreparationRefreshQueueView as Component, { scope: SCOPE, projectNo: PROJECT })
+    app.mount(container!)
+    await flush()
+    expect(container!.querySelector('[data-refresh-rendering]')?.getAttribute('data-refresh-rendering')).toBe('review_pending')
+    expect(container!.querySelector('[data-testid="stock-prep-refresh-state"]')?.textContent).toContain('等您复核')
+    expect(container!.querySelector('[data-testid="stock-prep-refresh-state"]')?.textContent).not.toContain('无待处理')
+  })
+
   it('RQ-WORDS (PR-7b, N2 / N8): every hold kind the server opens reads in words, every non-confirmable one says why, and no raw token sits in the text', async () => {
     const pairing = nodeRequire(`${PLUGIN_LIB}stock-preparation-continuation-pairing.cjs`) as { HOLD_KINDS: readonly string[]; NOT_CONFIRMABLE_REASONS: readonly string[]; SHAPE_TOKENS: readonly string[] }
     const store = nodeRequire(`${PLUGIN_LIB}stock-preparation-continuation-store.cjs`) as { EVIDENCE_HISTORY_STATUSES: readonly string[] }
@@ -1064,6 +1134,26 @@ describe('PB-RS — 项目备料页 and the refresh stanza', () => {
     expect(root.querySelector('[data-testid="stock-prep-project-board-error"]')?.textContent).toContain('另一张备料表')
   })
 
+  // PR-9 (R-77 ⑥): a written change awaiting review sends a PULLER to 「拉取待确认」 (banner link + 「去复核」); the floor
+  // gets the banner and the sentence, no link and no action (R-11).
+  it('PB-RS-11 (PR-9): change_pending_review — the banner links a puller to 拉取待确认 and the next step says 去复核; the floor gets neither', async () => {
+    const review = stanza('change_pending_review', { counts: { pendingConfirm: 0, confirmable: 0, openExecutions: 0, pendingReviews: 1, continuations: 0 } })
+    let root = await mountBoard({ board: boardWith(review) })
+    expect(root.querySelector('[data-testid="stock-prep-project-board-refresh-banner"]')?.getAttribute('data-refresh-status')).toBe('change_pending_review')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-refresh-open-queue"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-next-step"]')?.getAttribute('data-next-step')).toBe('refresh')
+    const action = root.querySelector('[data-testid="stock-prep-project-board-next-step-action"]') as HTMLElement
+    expect(action?.textContent).toContain('去复核')
+    await click(action)
+    expect(emitted.filter((entry) => entry.event === 'navigate-stage').pop()?.args).toEqual(['refresh-queue'])
+    teardown(); setup()
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    root = await mountBoard({ board: boardWith(review) })
+    expect(root.querySelector('[data-testid="stock-prep-project-board-refresh-banner"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-refresh-open-queue"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-next-step-action"]')).toBeNull()
+  })
+
   it('PB-RS-10: the board emits its values-free stanza for the rail count', async () => {
     await mountBoard({ board: boardWith(stanza('pending_confirmation')) })
     const last = emitted.filter((entry) => entry.event === 'refresh-changed').pop()
@@ -1129,6 +1219,61 @@ describe('SP — the sync panel learns the batch refresh', () => {
     await flush(2)
     await runPanel(root)
     expect(root.querySelector('[data-testid="stock-prep-project-sync-open-refresh-queue"]')).toBeNull()
+  })
+
+  it('SP-REV-1 (PR-9): a review-pending run — verdict review_pending, the PULL-only 去复核 link, never the ledger link; 「核对」 says the review is pending, never 「核对通过」', async () => {
+    const reviewPlan = { status: 'review_pending', canApply: false, dryRunToken: null, counts: { add: 0, update: 1, skip: 2, inactive: 0, manual_confirm: 2 }, refreshReview: { pending: true, pendingReviews: 1, blocksMint: true } }
+    const api = panelApi({ dryRun: vi.fn().mockResolvedValue(reviewPlan) })
+    let root = mountPanel({ api, canOpenRefreshQueue: true })
+    await flush(2)
+    await runPanel(root)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-verdict"]')?.getAttribute('data-verdict')).toBe('review_pending')
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-open-queue"]'), 'never the ledger queue link').toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-open-refresh-queue"]'), 'not the suspended link').toBeNull()
+    const link = root.querySelector('[data-testid="stock-prep-project-sync-open-refresh-review"]') as HTMLElement
+    expect(link?.textContent).toContain('复核')
+    expect(link?.textContent).toContain('(1)')
+    await click(link)
+    expect(emitted.filter((entry) => entry.event === 'navigate-stage').pop()?.args).toEqual(['refresh-queue'])
+    expect(api.apply).not.toHaveBeenCalled()
+    teardown(); setup()
+    root = mountPanel({ api: panelApi({ dryRun: vi.fn().mockResolvedValue(reviewPlan) }), canOpenRefreshQueue: false })
+    await flush(2)
+    await runPanel(root)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-open-refresh-review"]'), 'PULL only').toBeNull()
+    teardown(); setup()
+    // 「核对」 meeting review_pending: the review is pending — never 「核对通过」, never a failed check.
+    const check = panelApi({ dryRun: vi.fn().mockResolvedValue(reviewPlan) })
+    root = mountPanel({ api: check, refreshStatus: 'executed_pending_settlement', refreshSettled: false })
+    await flush(2)
+    await click(root.querySelector('[data-testid="stock-prep-project-sync-check"]') as HTMLElement)
+    const line = root.querySelector('[data-testid="stock-prep-project-sync-check-result"]') as HTMLElement
+    expect(line.getAttribute('data-check')).toBe('review_pending')
+    expect(line.textContent).toContain('等待复核')
+    expect(line.textContent).toContain('复核不代替核对')
+    expect(line.textContent).not.toContain('核对通过')
+    expect(line.textContent).not.toContain('没有完成')
+    // Review fix (R-77 ⑨): after the review a 核对 is only MAYBE still needed — when the board shows 「已执行待核对」.
+    expect(line.textContent).toContain('已执行待核对')
+    expect(line.textContent).not.toMatch(/复核后还要核对一次|再点一次「核对」/)
+    expect(check.apply).not.toHaveBeenCalled()
+  })
+
+  it('SP-LABEL-EN (PR-9): the English 「核对」 sentence never carries a raw status token; an unknown one reads "not recognised"', async () => {
+    h.locale = 'en-US'
+    const api = panelApi()
+    const root = mountPanel({ api, refreshStatus: 'executed_pending_settlement', refreshSettled: false })
+    await flush(2)
+    await click(root.querySelector('[data-testid="stock-prep-project-sync-check"]') as HTMLElement)
+    const line = () => root.querySelector('[data-testid="stock-prep-project-sync-check-result"]') as HTMLElement
+    panelProps.refreshStatus = 'change_pending_review'
+    await flush(2)
+    expect(line().textContent).toContain('change awaiting review')
+    expect(line().textContent).not.toContain('change_pending_review')
+    panelProps.refreshStatus = 'status_from_a_newer_server'
+    await flush(2)
+    expect(line().textContent).toContain('not recognised')
+    expect(line().textContent).not.toContain('status_from_a_newer_server')
   })
 
   it('SP-REC-1: awaiting recovery names the platform admin, not the source', async () => {
