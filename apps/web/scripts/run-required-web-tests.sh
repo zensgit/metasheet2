@@ -1762,6 +1762,7 @@ exec npx vitest run \
   multitable-api-token-manager \
   multitable-attachment-editor \
   multitable-attachment-list \
+  multitable-automation-integration-preview \
   multitable-automation-manager \
   multitable-automation-manager-roundtrip \
   multitable-automation-rule-editor \

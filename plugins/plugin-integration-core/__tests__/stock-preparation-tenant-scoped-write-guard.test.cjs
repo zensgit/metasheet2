@@ -26,6 +26,8 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
+// R-69 1b-i: a delegating route handler's chain lives in the governed entry it calls; see the module.
+const { governedEntrySourceFor } = require('./support/governed-entry-source.cjs')
 
 const ROUTES_SRC = fs.readFileSync(
   path.join(__dirname, '..', 'lib', 'http-routes.cjs'),
@@ -54,11 +56,14 @@ function handlerBody(src, name) {
   assert.notEqual(start, -1, `handler ${name} not found in http-routes.cjs`)
   const end = src.indexOf('\n    },', start)
   assert.notEqual(end, -1, `handler ${name} has no closing brace`)
+  // R-69 1b-i: a handler that delegates to a request-free governed entry is read together with that
+  // entry (its chain moved there verbatim); '' for every other handler.
+  const governed = governedEntrySourceFor(src, name)
   // Strip line comments so a security guard reasons about CODE, not prose: a comment that NAMES the
   // forbidden pattern (e.g. explaining why resolveTenantId is unsafe) must not trip an absence check,
   // and a comment must never satisfy a presence check either. (No handler body here has `//` outside a
   // comment.)
-  return src.slice(start, end).replace(/\/\/[^\n]*/g, '')
+  return (src.slice(start, end) + governed).replace(/\/\/[^\n]*/g, '')
 }
 
 let passed = 0
