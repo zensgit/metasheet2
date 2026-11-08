@@ -15,6 +15,9 @@
 //          refused; absent / archived answer ready:false; OFF ⇒ FLAT answer, switchOn:false, no ledger read; ON ⇒ the
 //          status; no `fld_` and no pullBatch key in any answer; the handler is registered values-free
 //   SR-02  the board: OFF ⇒ exactly the frozen keys (no pullBatch); ON ⇒ the stanza; a ledger failure is fail-soft
+//   SR-03  the tenancy wall (finding N13): a registry row of the caller's tenant whose sheet belongs to ANOTHER tenant's
+//          staging project is refused 409 TABLE_ACTION_TARGET_TENANT_MISMATCH — switch on AND off — with zero ledger
+//          statements, zero records reads and no band read; the caller's own sheet still answers 200
 //
 // Every value is synthetic.
 
@@ -349,6 +352,43 @@ test('SR-02 the board: OFF answers exactly the frozen keys (no pullBatch); ON ad
     assert.equal(soft.statusCode, 200, 'the board never fails for the stanza')
     assert.deepEqual(soft.body.data.pullBatch, { enabled: true, ready: false, latest: null, batchCount: null, paused: 'ledger_unreadable' })
   } finally { on.restore() }
+})
+
+test('SR-03 the tenancy wall: a project the registry resolves onto another tenant\'s sheet is refused 409 before any ledger or records read', async () => {
+  const OTHER = 'tenant-syn-pbs-other'
+  for (const switchValue of ['true', undefined]) {
+    const h = mount()
+    try {
+      // The OTHER tenant's sheet, provisioned in ITS staging project; then the caller's registry row is pointed at it
+      // (sheet and object both the other tenant's), so neither ownership nor the derived-id fallback attributes it here.
+      const foreign = h.seedRegistryRow(PROJECT, { tenant: OTHER })
+      const registry = h.registryRows()
+      const planted = registry.find((r) => r.tenant_id === OTHER && r.project_no === PROJECT)
+      planted.tenant_id = TENANT
+      assert.notEqual(foreign.objectId, h.projectObjectId(PROJECT), 'the planted object is not the caller\'s derived one')
+      h.db.log.length = 0
+      h.records.calls.length = 0
+      h.provisioning.calls.length = 0
+      const res = await withSwitch(switchValue, () => getStatus(h))
+      assert.equal(res.statusCode, 409, `switch ${switchValue}: ${JSON.stringify(res.body)}`)
+      assert.equal(res.body.error.code, 'TABLE_ACTION_TARGET_TENANT_MISMATCH')
+      assert.deepEqual({ ...res.body.error.details }, { objectId: foreign.objectId })
+      assert.ok(h.provisioning.calls.some((c) => c[0] === 'isSheetOwnedByProject' && c[1] === foreign.sheetId && c[2] === h.staging), 'the wall ran on the resolved sheet against the caller\'s staging project')
+      assert.deepEqual(h.db.log, [], 'zero pull-batch ledger statements')
+      assert.deepEqual(h.records.calls, [], 'zero records reads')
+      // The overlay's own field binding, then the wall — and nothing after it (no band, view or layout read).
+      assert.deepEqual(h.provisioning.calls.map((c) => c[0]), ['resolveFieldIds', 'isSheetOwnedByProject'], 'the wall is the last host call')
+      assert.equal(JSON.stringify(res.body).includes(OTHER), false, 'values-free: no tenant named')
+      assert.equal(JSON.stringify(res.body).includes(foreign.sheetId), false, 'values-free: no sheet id named')
+    } finally { h.restore() }
+  }
+  // Control: the caller's OWN registered sheet passes the same wall.
+  const own = mount()
+  try {
+    seedReady(own)
+    const res = await withSwitch('true', () => getStatus(own))
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+  } finally { own.restore() }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-pull-batch-status.test.cjs', tests)
