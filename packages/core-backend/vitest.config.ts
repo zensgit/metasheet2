@@ -403,6 +403,11 @@ export default defineConfig({
       // directory-deprovision-provider-scope-ci-wiring.test.mjs).
       'tests/integration/directory-deprovision-effect-provider-schema.db.test.ts',
       'tests/integration/directory-deprovision-provider-evidence.db.test.ts',
+      // Delivery worker deferral and lease headroom against real Postgres (requeue CAS, attempt
+      // restore, two-hour window, re-claimed rows never sent twice). DATABASE_URL-gated; excluded
+      // here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval
+      // real-DB step in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/attendance-notification-defer.db.test.ts',
       // D21 authorization version protocol (slice Y5a): the trigger coverage matrix (raw SQL + FK
       // cascade writers), the two-connection barrier cases and the holder-vs-writer deadlock
       // mapping need real PostgreSQL. DATABASE_URL-gated; excluded here so the no-DB job cannot
