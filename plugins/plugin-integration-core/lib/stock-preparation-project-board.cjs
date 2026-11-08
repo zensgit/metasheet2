@@ -199,6 +199,10 @@ const STOCK_PREPARATION_PROJECT_BOARD_KEYS = Object.freeze([
   'ledgerReady',
 ])
 
+// 批次标识 BI-1b (design §8.7; P-7; register R-65): the keys the board answers ONLY when the route hands the optional
+// reader (the pull-batch switch is on). Off => exactly STOCK_PREPARATION_PROJECT_BOARD_KEYS, byte-identical.
+const STOCK_PREPARATION_PROJECT_BOARD_OPTIONAL_KEYS = Object.freeze(['pullBatch'])
+
 /**
  * The closed `mode` set for the audit row. Two values, and the miss is one of them: a board read that
  * found nothing still HAPPENED, and the trail records that it did without recording what was asked
@@ -268,6 +272,9 @@ async function readOperatorProjectBoard({
   projectNo,
   boundTarget,
   audit,
+  // 批次标识 BI-1b: the pull-batch stanza reader (values-free, fail-soft) — passed by the route only while the switch is
+  // on. Absent => no `pullBatch` key.
+  readPullBatchStanza = null,
 } = {}) {
   if (!scope || !optionalString(scope.tenantId)) {
     throw new StockPreparationProjectBoardError(
@@ -413,12 +420,24 @@ async function readOperatorProjectBoard({
     directoryReady: directory.directoryReady,
     ledgerReady: directory.ledgerReady,
   }
+  // 批次标识 BI-1b (G10): fail-soft — the board never fails for the stanza.
+  if (typeof readPullBatchStanza === 'function') board.pullBatch = await readPullBatchStanzaSoftly(readPullBatchStanza, { projectNo: wanted, boundTarget })
 
   return {
     board,
     mode: STOCK_PREPARATION_PROJECT_BOARD_MODES[0],
     projectCount: directory.projectCount,
   }
+}
+
+async function readPullBatchStanzaSoftly(reader, input) {
+  try {
+    const stanza = await reader(input)
+    if (stanza && typeof stanza === 'object') return stanza
+  } catch {
+    // fall through to the fail-soft answer
+  }
+  return Object.freeze({ enabled: true, ready: false, latest: null, batchCount: null, paused: 'ledger_unreadable' })
 }
 
 module.exports = {
@@ -428,6 +447,7 @@ module.exports = {
   STOCK_PREPARATION_PROJECT_BOARD_AUDIT_ACTION,
   STOCK_PREPARATION_PROJECT_BOARD_KEYS,
   STOCK_PREPARATION_PROJECT_BOARD_MODES,
+  STOCK_PREPARATION_PROJECT_BOARD_OPTIONAL_KEYS,
   StockPreparationOperatorDirectoryError,
   StockPreparationProjectBoardError,
   readOperatorProjectBoard,

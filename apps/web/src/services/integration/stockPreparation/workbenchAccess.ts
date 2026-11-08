@@ -390,6 +390,15 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
     control: 'stock-prep-project-manual-rows-set',
   }),
+  // 批次标识 BI-1b (R-65) — byte-equal to the plugin manifest's pull-batch status row. `control: null`: no control renders
+  // this ADMIN read yet (BI-3 / BI-7 give it one), so F-04 does not pair it.
+  Object.freeze({
+    capability: 'projectTarget.pullBatchRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
+    control: null,
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,

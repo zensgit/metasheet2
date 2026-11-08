@@ -136,6 +136,10 @@ const {
   persistManualRowsLastPull,
   summarizeManualSupplement,
 } = require('./stock-preparation-manual-rows.cjs')
+// 批次标识 BI-1b (design §4.4, §6.1; register R-65): the reader's band strip (pure module) and the small lane's
+// evaluation (the lanes helper; it requires nothing of this module — the canonical row order is injected).
+const { normalizePullBatchReaderBand, stripPullBatchBand } = require('./stock-preparation-pull-batch.cjs')
+const pullBatchLanes = require('./stock-preparation-pull-batch-lanes.cjs')
 
 const PLM_STOCK_PREPARATION_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const TABLE_ACTION_KIND = 'parameterized_table_action'
@@ -772,11 +776,15 @@ function assertStockPreparationTargetReady(input = {}) {
  * the object id and nothing else (the original stays on `cause` for the server log), the same
  * posture the source side takes for an unreachable source database (SOURCE_UNAVAILABLE, #5586).
  */
-async function assertTargetFieldsExist(action, targetFieldExistence) {
-  if (!isPlainObject(targetFieldExistence)) return
+async function assertTargetFieldsExist(action, targetFieldExistence, { optionalFieldIds = [] } = {}) {
+  // 批次标识 BI-1b (design §6.1 step 2): OPTIONAL ids (the pull-batch band) ride the same round trip and NEVER refuse —
+  // appended only when non-empty, so every call without them is byte-identical. The probe answers null on every early
+  // return and `{ fieldExistenceMode, optional: { [id]: physical | null } }` once a verdict exists.
+  const optionalIds = Array.isArray(optionalFieldIds) ? optionalFieldIds.filter((id) => typeof id === 'string' && id) : []
+  if (!isPlainObject(targetFieldExistence)) return null
   const provisioning = targetFieldExistence.provisioning
   const projectId = optionalString(targetFieldExistence.projectId)
-  if (!provisioning || !projectId) return
+  if (!provisioning || !projectId) return null
   // The DB read, the compute-only fallback `resolveFieldExistence` degrades through, and the
   // derivation that names the sheet the read is about: the contract the shared probe calls into,
   // and what every real host has exposed since the provisioning surface existed.
@@ -784,7 +792,7 @@ async function assertTargetFieldsExist(action, targetFieldExistence) {
     typeof provisioning.resolveExistingObjectFieldIds !== 'function'
     || typeof provisioning.resolveFieldIds !== 'function'
     || typeof provisioning.getObjectSheetId !== 'function'
-  ) return
+  ) return null
   const objectId = action.target.objectId
   const extensionFieldIds = Array.isArray(action.extensionFieldIds) ? action.extensionFieldIds : []
   let verdict
@@ -817,12 +825,13 @@ async function assertTargetFieldsExist(action, targetFieldExistence) {
       throw new Error('provisioning.getObjectSheetId must answer a string sheet id synchronously')
     }
     const judgedSheetId = optionalString(derivedSheetId)
-    if (!judgedSheetId || judgedSheetId !== action.target.sheetId) return
+    if (!judgedSheetId || judgedSheetId !== action.target.sheetId) return null
+    const probedFieldIds = templateLogicalFieldIds(action.template).concat(extensionFieldIds)
     verdict = await resolveFieldExistence({
       provisioning,
       projectId,
       objectId,
-      fieldIds: templateLogicalFieldIds(action.template).concat(extensionFieldIds),
+      fieldIds: optionalIds.length > 0 ? probedFieldIds.concat(optionalIds) : probedFieldIds,
     })
   } catch (error) {
     const unavailable = new StockPreparationTableActionError(
@@ -834,9 +843,14 @@ async function assertTargetFieldsExist(action, targetFieldExistence) {
     unavailable.cause = error
     throw unavailable
   }
-  if (verdict.fieldExistenceMode !== 'db') return
+  const resolvedIds = isPlainObject(verdict.resolved) ? verdict.resolved : {}
+  const answer = Object.freeze({
+    fieldExistenceMode: verdict.fieldExistenceMode,
+    optional: Object.freeze(Object.fromEntries(optionalIds.map((id) => [id, typeof resolvedIds[id] === 'string' && resolvedIds[id] ? resolvedIds[id] : null]))),
+  })
+  if (verdict.fieldExistenceMode !== 'db') return answer
   const missingFields = missingLogicalFields(action.template, verdict.resolved, extensionFieldIds)
-  if (missingFields.length === 0) return
+  if (missingFields.length === 0) return answer
   throw new StockPreparationTableActionError(
     422,
     'TARGET_SCHEMA_INCOMPLETE',
@@ -1128,6 +1142,9 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
   const api = ensureRecordsApi(recordsApi)
   const limit = positiveInteger(options.limit, 'existingRows.limit', DEFAULT_EXISTING_ROWS_PAGE_LIMIT)
   const maxPages = positiveInteger(options.maxPages, 'existingRows.maxPages', DEFAULT_EXISTING_ROWS_MAX_PAGES)
+  // 批次标识 BI-1b (design §4.4): the server-held band (PHYSICAL ids), validated before the first page. Absent => the
+  // rows and the parked-prefix Symbol are byte-identical (no strip, no Symbol).
+  const pullBatchBand = normalizePullBatchReaderBand(options.pullBatchBand, { fieldIdMap: target.fieldIdMap })
   const rows = []
   // 人工补充行 B1 (ADR §5.1): EVERY row whose key starts with `manual:` leaves planning here, page by page — the M′
   // rows as manual rows, the rest counted as unbound prefix rows. Neither enters the array the planner, the
@@ -1151,6 +1168,8 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
     }
     for (const record of pageRows) {
       const row = unmapRecordFields(record, target.fieldIdMap)
+      // 批次标识 BI-1b: BEFORE the prefix classification, so a parked manual row carries the Symbol too (BI-2 reads it).
+      if (pullBatchBand) stripPullBatchBand(row, record, pullBatchBand)
       const prefixKind = manualPrefixKindOf(target, record, row)
       if (prefixKind) {
         prefixRows.add(prefixKind, row, isPlainObject(record) && isPlainObject(record.data) ? record.id : null)
@@ -1615,6 +1634,12 @@ function canonicalHashOrder(value, identityOf) {
       return 0
     })
     .map((entry) => entry.item)
+}
+
+// 批次标识 BI-1b (design §3.7): the canonical order the pull-batch source digest hashes the expansion rows in — the
+// same order buildSourceContentRevision uses, injected into the portable digest on BOTH lanes (cross-lane join).
+function pullBatchCanonicalRows(rows) {
+  return canonicalHashOrder(rows, expandedRowHashIdentity)
 }
 
 // X4-c: THE PLANNER'S OWN DIAGNOSTIC ARRAYS, which are hashed WHOLE and are themselves built by
@@ -2209,13 +2234,14 @@ async function assertB2aReadHardeningBeforeExpansion({ b2aTrialRegistration, b2a
 // which is merged and the plan recomputed once. A confirmed decision therefore
 // downgrades a hold ONLY when its stored fingerprint matches today's input —
 // any stale confirmation leaves the hold standing.
-async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping, confirmationDecisionResolver, b2aTrialRegistration, b2aClaimStore, b2aSourceObjects, b2aNow, targetFieldExistence }) {
+async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping, confirmationDecisionResolver, b2aTrialRegistration, b2aClaimStore, b2aSourceObjects, b2aNow, targetFieldExistence, pullBatchLane = null }) {
   assertExtFieldMappingAgreesWithAction(action, extFieldMapping)
   // 目标表字段存在性 — BEFORE the B2a contract, before the first source row, before any plan. A target
   // whose template/ext columns are gone refuses here (422 TARGET_SCHEMA_INCOMPLETE), so no source read,
   // no records read and no plan ever happens on a schema the writer could not address. Every entry
   // point that plans (dry-run, reconcile, mvp-persist, apply) comes through this one line.
-  await assertTargetFieldsExist(action, targetFieldExistence)
+  // 批次标识 BI-1b: while the switch is on, the two band ids ride the same round trip as OPTIONAL ids (never refusing).
+  const pullBatch = pullBatchLanes.pullBatchProbeStanza(pullBatchLane, await assertTargetFieldsExist(action, targetFieldExistence, pullBatchLanes.pullBatchProbeOptions(pullBatchLane)))
   // R-06, BEFORE the first source row. A drifted schema refuses here, which is before `expansion`,
   // before `plan`, before `revision` and before any evidence exists to be produced.
   const b2aSchemaContract = await assertB2aReadHardeningBeforeExpansion({
@@ -2281,9 +2307,11 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
       hasGlobalErrors,
       extFieldMapping,
       b2aSchemaContract,
+      // 批次标识 BI-1b: the probe stanza rides this early return too (ON only; RESULT only, never hashed or answered).
+      ...(pullBatch ? { pullBatch } : {}),
     }
   }
-  const existingRows = await readExistingStockPreparationRows(recordsApi, action.target, parameters.projectNo)
+  const existingRows = await readExistingStockPreparationRows(recordsApi, action.target, parameters.projectNo, { pullBatchBand: pullBatchLanes.readerBandOf(pullBatchLane) })
   // #5860: one sheet = one project. BEFORE the plan (dry-run) and, because apply recomputes this very
   // dry-run before its first write, BEFORE any write on the apply path. Sits after the project-scoped
   // read so the first records read stays the project read every caller and test already pins.
@@ -2370,6 +2398,9 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     // 人工补充行 B1: on the RESULT only — never on `plan`, never hashed (on main beside PR-3a's `governance` / `refresh`).
     // Present only when the read took a prefix row out (rowCount or unboundKeyCount > 0).
     ...(manualSupplement ? { manualSupplement } : {}),
+    // 批次标识 BI-1b (design §6.1 step 2): `{ fieldIds, mode, present }` while the switch is on — on the RESULT only
+    // (precedent: `governance` / `refresh` below): never on `plan`, never hashed, never serialized by any caller.
+    ...(pullBatch ? { pullBatch } : {}),
   }
 }
 
@@ -2454,6 +2485,8 @@ function hasHardApplyBlockingRowErrors(expansion) {
 async function dryRunStockPreparationAction(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
+  // 批次标识 BI-1b: the route's server-held lane input (band + switch + ledger), validated before any IO.
+  const pullBatchLane = pullBatchLanes.normalizePullBatchLaneInput(input.pullBatch)
   // B2a: BEFORE the source is read. Dormant unless INTEGRATION_CORE_B2A_REGISTRY_PATH is set.
   // R-02: the ONE object list — resolved by the route, unioned with the plan — that the guard
   // matches and the schema contract pins. Ahead of the guard, so its fail-closed leg spends no claim.
@@ -2504,6 +2537,8 @@ async function dryRunStockPreparationAction(input = {}) {
     // R-02: the list the guard above matched, unchanged — the contract pins and re-checks it.
     b2aSourceObjects,
     b2aNow: input.now,
+    // 批次标识 BI-1b: the reader strip (always) and, while the switch is on, the band probe fold.
+    pullBatchLane,
   })
   let dryRunToken = null
   if (dryRun.canApply) {
@@ -2514,6 +2549,8 @@ async function dryRunStockPreparationAction(input = {}) {
       conflictPolicyReview: runOnlyReview,
     })
   }
+  // 批次标识 BI-1b (P-2): ON only, AFTER the token — whether the coming apply would stamp; fail-soft, never refuses.
+  const pullBatchPreview = await pullBatchLanes.previewSmallPullBatch({ lane: pullBatchLane, dryRun, action, parameters })
   // W3a. Computed ONLY when the caller explicitly asked and the route's operator-scope gate let the
   // flag through (http-routes.cjs `tableActionDryRun`) — see the module header. Note the position:
   // AFTER the token was minted from `dryRun.revision`, so it is structurally impossible for this to
@@ -2567,6 +2604,8 @@ async function dryRunStockPreparationAction(input = {}) {
     // 人工补充行 B1 (ADR §5.1): counts and record handles only (never a cell), beside `evidence` and never inside it;
     // absent for a sheet without a `manual:` prefix row, so every such response is byte-identical.
     ...(dryRun.manualSupplement ? { manualSupplement: cloneJson(dryRun.manualSupplement) } : {}),
+    // 批次标识 BI-1b: { preview, wouldStamp, reason, gapRows? } while the switch is on; absent otherwise (byte-identical).
+    ...(pullBatchPreview ? { pullBatch: pullBatchPreview } : {}),
     // W3a — THE VALUE-BEARING KEY, and the only one. Top-level and AFTER `evidence`, never inside
     // it: `evidence` is what gets stored, compared and shipped to an audit row, and this must not
     // ride along into any of that. Conditional in the same style as the two stanzas above, on BOTH
@@ -2603,6 +2642,8 @@ async function prepareStockPreparationConfirmationDecisions(input = {}) {
     installedFieldProperties: input.installedFieldProperties,
     extFieldMapping: input.extFieldMapping,
     targetFieldExistence: input.targetFieldExistence,
+    // 批次标识 BI-1b: the reader strip only (this lane hashes rows; no probe fold, no ledger IO, no stanza).
+    pullBatchLane: pullBatchLanes.readerOnlyLaneOf(input.pullBatch),
   })
   if (dryRun.expansion.status === 'not_found') {
     throw new StockPreparationTableActionError(404, 'CONFIRMATION_DECISION_SOURCE_PROJECT_NOT_FOUND', 'source project was not found')
@@ -2672,6 +2713,8 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
     // R-02: the list the guard above matched, unchanged — the contract pins and re-checks it.
     b2aSourceObjects,
     b2aNow: input.now,
+    // 批次标识 BI-1b: the reader strip only (the archive revision hashes rows; no probe fold, no ledger IO, no stanza).
+    pullBatchLane: pullBatchLanes.readerOnlyLaneOf(input.pullBatch),
   })
   if (dryRun.expansion.status === 'not_found') {
     throw new StockPreparationTableActionError(404, 'STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND', 'source project was not found')
@@ -2893,6 +2936,8 @@ async function applyStockPreparationAction(input = {}) {
     projectSheetGate: input.projectSheetGate,
   })
   const parameters = normalizeActionParameters(input.parameters)
+  // 批次标识 BI-1b: the route's server-held lane input (band + switch + ledger; R line: no holder), validated before any IO.
+  const pullBatchLane = pullBatchLanes.normalizePullBatchLaneInput(input.pullBatch)
   // B2a: BEFORE the token is consumed and long before the re-expansion. Ahead of the token consume
   // on purpose — a refusal must not burn a single-use dry-run token, or an operator who is simply
   // outside their registered scope would also lose the artifact that proves what they planned.
@@ -2969,6 +3014,8 @@ async function applyStockPreparationAction(input = {}) {
     // R-02: the list the guard above matched, unchanged — the contract pins and re-checks it.
     b2aSourceObjects,
     b2aNow: input.now,
+    // 批次标识 BI-1b: the reader strip (always) and, while the switch is on, the band probe fold.
+    pullBatchLane,
   })
   if (tokenRecord.revision !== dryRun.revision) {
     throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH', 'dryRunToken does not match the current dry-run revision')
@@ -2987,18 +3034,36 @@ async function applyStockPreparationAction(input = {}) {
   // No-op on the sandbox path (mode!=='production'); rejects before any write on the production path.
   const cleanRowCount = (dryRun.plan.counts[DECISIONS.ADD] || 0) + (dryRun.plan.counts[DECISIONS.UPDATE] || 0)
   assertProductionCleanRowsWithinBound(applyGate, cleanRowCount)
-  const applyResult = await applyStockPreparationPlan({
-    permission: input.permission,
-    plan: dryRun.plan,
-    target: action.target,
-    template: action.template,
-    // Same projection the plan was built from, so the writer's human wall rejects the
-    // pack's `ext_` human columns BY NAME rather than by their absence from the template.
-    installedFieldProperties: input.installedFieldProperties,
-    // C4 apply: the writer already maps every payload key through the operator-configured
-    // target.fieldIdMap, so the scoped API must NOT translate a second time (#4160).
-    recordsApi: await createTargetScopedRecordsApi(input.recordsApi, action.target, { fieldIdTranslation: 'pre_mapped' }),
-  })
+  // 批次标识 BI-1b (design §6.1, P-1): the ONE evaluation of this run — after every refusal above, BEFORE the first
+  // write (409 INSTALL_IN_PROGRESS, 503 STORE_FAILED refuse with nothing written). Switch off => null: zero ledger IO,
+  // byte-identical writer call and answer. R line (survey D6): no execution ledger and no lease — the run id is this
+  // request's B2a run id (`table-action-apply:<uuid>`, so the link is `small:table-action-apply:<uuid>`), and no fence.
+  const pullBatchRun = await pullBatchLanes.prepareSmallApplyPullBatch({ lane: pullBatchLane, dryRun, action, parameters, runId: input.b2aRunId, canonicalRows: pullBatchCanonicalRows, writeFence: null, logger: input.logger })
+  // C4 apply: the writer already maps every payload key through the operator-configured
+  // target.fieldIdMap, so the scoped API must NOT translate a second time (#4160).
+  const scopedRecordsApi = await createTargetScopedRecordsApi(input.recordsApi, action.target, { fieldIdTranslation: 'pre_mapped' })
+  let applyResult
+  try {
+    applyResult = await applyStockPreparationPlan({
+      permission: input.permission,
+      plan: dryRun.plan,
+      target: action.target,
+      template: action.template,
+      // Same projection the plan was built from, so the writer's human wall rejects the
+      // pack's `ext_` human columns BY NAME rather than by their absence from the template.
+      installedFieldProperties: input.installedFieldProperties,
+      recordsApi: scopedRecordsApi,
+      // 批次标识 BI-1b (design §3.4): the create leg's side input (R line: no execution ledger, so the link carries no
+      // exec_ id — stampFor(null)). Absent => byte-identical writer call.
+      ...(pullBatchRun && pullBatchRun.evaluation.ready ? { pullBatchStamp: pullBatchRun.stampFor(null) } : {}),
+    })
+  } catch (error) {
+    if (pullBatchRun) await pullBatchRun.finishFailed()
+    throw error
+  }
+  // 批次标识 BI-1b (design §3.6): the link is finished by value (best effort, never the answer), before the stop
+  // rethrow below.
+  if (pullBatchRun) await pullBatchRun.finish(applyResult)
   // The run was STOPPED (R line: only the pull-batch allocation stop, BI-1b): an ERROR, carrying the partial counts and
   // the decision index it stopped at — never a plausible `partial` success.
   if (applyResult.status === 'aborted') throw applyRunStopError(applyResult)
@@ -3015,6 +3080,8 @@ async function applyStockPreparationAction(input = {}) {
     // (`stockPreparationSourceContentDigest`) and strips this key from the response.
     sourceContentRevision: dryRun.sourceContentRevision,
     apply: summarizeApplyResultForEvidence(applyResult),
+    // 批次标识 BI-1b (design §6.1 step 6): beside apply, never inside evidence; while the switch is on only.
+    ...(pullBatchRun ? { pullBatch: pullBatchRun.answer(applyResult) } : {}),
     // 人工补充行 B1 (ADR §5.1): the in-lease recompute's stanza (counts + record handles), absent without a prefix row.
     ...(dryRun.manualSupplement ? { manualSupplement: cloneJson(dryRun.manualSupplement) } : {}),
     evidence: {
@@ -3078,6 +3145,10 @@ module.exports = {
     buildArchiveRevision,
     buildRevision,
     buildSourceContentRevision,
+    // 批次标识 BI-1b: the canonical row order of the pull-batch digest (the large lane hashes with it too).
+    canonicalHashOrder,
+    expandedRowHashIdentity,
+    pullBatchCanonicalRows,
     confirmationDecisionEvidence,
     hasHardApplyBlockingRowErrors,
     mergeTableScopeConflictPolicyReviews,

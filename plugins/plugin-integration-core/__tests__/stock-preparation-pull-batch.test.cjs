@@ -13,6 +13,7 @@
 //   PB-V  the verifier's round-1 killing assertions (MF4), one per design rule no other test pinned
 //   PB-K  the configuration vocabulary (R-65 C2): defaults = the 10-27 design, four closed keys, fixed facts, locks
 //   PB-P  portability and not-wired pins over the file TEXT (MF5), closed vocabularies
+//   PB-A  the portable writer helpers (BI-1b review MF-5): the allocation answer must carry a LIVE label
 //
 // Synthetic values only (S-01, P-07, C, X, A, B).
 
@@ -1078,19 +1079,31 @@ test('PB-P1 PORTABILITY (S6 C-1, design §12.2): the pure core contains exactly 
   assert.equal(/\bimport\s*\(|^\s*import\s/m.test(source), false, 'no dynamic import( and no import statement')
 })
 
-// BI-1a ledger PR (the store PR this pin named): #6801's text-level pin, widened by exactly the ledger. Besides the core,
-// only the two DORMANT files — the ledger store and the template band constants — name stock-preparation-pull-batch in
-// any form, and NOTHING in the runtime but the store itself names the store, so no request reaches the ledger yet.
-// BI-1b (the lanes) replaces this pin.
-test('PB-P2 NOT WIRED (BI-1a ledger): only the dormant ledger store and the template band name stock-preparation-pull-batch, in any form; no runtime file names the store', () => {
+// BI-1b (the lanes; register R-65) replaced the BI-1a "not wired" pin with the WIRED set, exactly: the pure module is
+// named by the lanes helper, the status read, the store, the template band, the reader (table actions), the writer,
+// the large lane (its stored-plan shape), pilot readiness (v3), the routes and index. The ledger STORE is named only by
+// index (which builds it) and by the lanes helper (its execution-ref pattern): every request reaches the ledger through
+// the routes' lane input, which hands it over only while the pull-batch switch is on.
+test('PB-P2 WIRED (BI-1b): exactly these runtime files name stock-preparation-pull-batch, in any form; only index and the lanes helper name the store', () => {
   const runtime = ['index.cjs', ...fs.readdirSync(LIB).filter((name) => name.endsWith('.cjs')).map((name) => `lib/${name}`)]
     .filter((file) => file !== 'lib/stock-preparation-pull-batch.cjs')
   assert.ok(runtime.length > 100, 'the scan sees the plugin runtime')
   const textOf = (file) => fs.readFileSync(path.join(PLUGIN, file), 'utf8')
   const wired = runtime.filter((file) => textOf(file).includes('stock-preparation-pull-batch'))
-  assert.deepEqual(wired, ['lib/stock-preparation-pull-batch-store.cjs', 'lib/stock-preparation-templates.cjs'])
+  assert.deepEqual(wired, [
+    'index.cjs',
+    'lib/http-routes.cjs',
+    'lib/stock-preparation-apply-writer.cjs',
+    'lib/stock-preparation-large-bom-jobs.cjs',
+    // R line (R83): pilot readiness is not on this line (survey D9), so it does not name the pull batch.
+    'lib/stock-preparation-pull-batch-lanes.cjs',
+    'lib/stock-preparation-pull-batch-status.cjs',
+    'lib/stock-preparation-pull-batch-store.cjs',
+    'lib/stock-preparation-table-actions.cjs',
+    'lib/stock-preparation-templates.cjs',
+  ])
   const storeUsers = runtime.filter((file) => file !== 'lib/stock-preparation-pull-batch-store.cjs' && textOf(file).includes('stock-preparation-pull-batch-store'))
-  assert.deepEqual(storeUsers, [], 'the ledger store has no caller yet')
+  assert.deepEqual(storeUsers, ['index.cjs', 'lib/stock-preparation-pull-batch-lanes.cjs'], 'the ledger store is built by index and read only through the lanes')
 })
 
 test('PB-P3 the error codes are closed, code-shaped, unique and carry their HTTP status; the vocabularies are frozen', () => {
@@ -1108,6 +1121,21 @@ test('PB-P3 the error codes are closed, code-shaped, unique and carry their HTTP
   assert.deepEqual([...PB.PULL_BATCH_LABEL_KINDS], ['live', 'inferred', 'unknown', 'manual', 'blank'])
   assert.deepEqual([...PB.FIRST_PULL_BATCH_RULES], ['material', 'predecessor_suffix'])
   assert.ok(PB.PULL_BATCH_CLOSED_REASONS.includes('recovery_verified'), 'S6 C-3 token')
+})
+
+test('PB-A1 (BI-1b review MF-5) assertAllocatedBatch: the ledger allocation must answer a LIVE label — manual, unknown, blank, inferred (both locales, both formats) or a non-string label is 500 STAMP_INVALID naming the label', () => {
+  const answer = (label) => ({ batchId: 'batch_syn_a1', batchNo: 2, label, joined: false })
+  for (const label of ['第2批（2026-11-08）', '第2批', 'Batch 2 (2026-11-08)', 'Batch 2']) {
+    assert.deepEqual({ ...PB.assertAllocatedBatch(answer(label)) }, answer(label), `calibration: ${label} is live`)
+  }
+  for (const label of ['人工补充', 'not a batch label', '', '   ', '第2批（推定，2026-11-08）', '第2批（推定）', 'Batch 2 (inferred, 2026-11-08)', 'Batch 2 (inferred)', 7, null]) {
+    assert.notEqual(PB.parsePullBatchLabel(typeof label === 'string' ? label : '').kind, 'live', `calibration: ${JSON.stringify(label)} is not live`)
+    assert.throws(
+      () => PB.assertAllocatedBatch(answer(label)),
+      (error) => error.code === 'STOCK_PREP_PULL_BATCH_STAMP_INVALID' && error.status === 500 && error.details.field === 'label',
+      JSON.stringify(label),
+    )
+  }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-pull-batch.test.cjs', tests)

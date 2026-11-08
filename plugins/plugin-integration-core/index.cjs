@@ -26,6 +26,7 @@ const { createStockPreparationSourceBindingStore } = require('./lib/stock-prepar
 const { createStockPreparationHandoffStore } = require('./lib/stock-preparation-handoff-store.cjs')
 const { createStockPreparationProjectTargetStore } = require('./lib/stock-preparation-project-target-store.cjs')
 const { createConfirmationDecisionReconcileLease } = require('./lib/stock-preparation-confirmation-decisions.cjs')
+const { createStockPreparationPullBatchStore } = require('./lib/stock-preparation-pull-batch-store.cjs')
 const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
   createStockPreparationPackInstallStore,
@@ -90,6 +91,7 @@ let stockPreparationHandoffStore = null
 let stockPreparationProjectTargetStore = null
 let stockPreparationPackInstallStore = null
 let stockPreparationConfirmationDecisionLease = null
+let stockPreparationPullBatchStore = null
 let b2aOperationClaim = null
 let readSourceCompositionConfigStore = null
 let bridgeAgentChecklistStore = null
@@ -358,6 +360,9 @@ module.exports = {
     // HG v1.2 PR-A: DB-backed single-active-reconciler lease (migration 077) for the
     // confirmation-decision ledger. The reconcile route fails closed without it.
     stockPreparationConfirmationDecisionLease = createConfirmationDecisionReconcileLease({ db })
+    // 批次标识 BI-1b (migration 105; register R-65): the pull-batch ledger (首次批次 / 本次拉取). The routes hand it to a
+    // lane only while the pull-batch switch is exactly 'true' (read per request); off, nothing ever touches it.
+    stockPreparationPullBatchStore = createStockPreparationPullBatchStore({ db })
     // HG v1.2 PR-C: DB-enforced one-shot source-read operation claim (migration 078). Built here so
     // the B2a guard's `sourceReadOperationLimit: 1` is a PRIMARY KEY, not a read-then-write over the
     // plugin kv store — whose `set` is an unconditional upsert and cannot decide a race between two
@@ -545,6 +550,7 @@ module.exports = {
         stockPreparationProjectTargetStore,
         stockPreparationPackInstallStore,
         stockPreparationConfirmationDecisionLease,
+        stockPreparationPullBatchStore,
         b2aOperationClaim,
         readSourceCompositionConfigStore,
         bridgeAgentChecklistStore,
@@ -690,6 +696,7 @@ module.exports = {
     erpFeedbackWriter = null
     pipelineRunner = null
     stagingInstaller = null
+    stockPreparationPullBatchStore = null
     stockPreparationSqlServerRuntime = null
     stockPreparationRuntimeDatabase = null
     activeContext = null

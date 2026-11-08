@@ -375,6 +375,8 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   // the read also joins M-12 below.
   'projectTarget.manualRowsRead': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
   'projectTarget.manualRowsSet': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, policy: 'disabled' } }),
+  // 批次标识 BI-1b (R-65): the pull-batch status read.
+  'projectTarget.pullBatchRead': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
   // S3 (R-37): the project-fields pair and the overview refresh — OPERATE, and past the gate they land
   // on the same switch-off 404 (gate first, switch second, body third). The PUT carries one whitelisted
   // key so a switch-ON mount (M-12) is a real 200 rather than a 422 about an empty patch.
@@ -435,6 +437,7 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'gate',
     'projectTarget.manualRowsRead': 'gate',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -463,6 +466,7 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'gate',
     'projectTarget.manualRowsRead': 'gate',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -491,6 +495,7 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'gate',
     'projectTarget.manualRowsRead': 'gate',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -519,6 +524,7 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'gate',
     'projectTarget.manualRowsRead': 'gate',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -547,6 +553,7 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'gate',
     'projectTarget.manualRowsRead': 'gate',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -575,6 +582,7 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'gate',
     'projectTarget.manualRowsRead': 'gate',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -603,6 +611,7 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'pass',
     'projectTarget.manualRowsRead': 'pass',
     'projectTarget.manualRowsSet': 'pass',
+    'projectTarget.pullBatchRead': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -631,6 +640,7 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'pass',
     'projectTarget.manualRowsRead': 'pass',
     'projectTarget.manualRowsSet': 'pass',
+    'projectTarget.pullBatchRead': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -663,6 +673,7 @@ const MATRIX = Object.freeze({
     // 人工补充行 B4 fix round 1 (OQ4): the 拉取人员 READS the switch and the last pull's reminder; only the SET is ADMIN.
     'projectTarget.manualRowsRead': 'pass',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -691,6 +702,7 @@ const MATRIX = Object.freeze({
     'projectTarget.restore': 'gate',
     'projectTarget.manualRowsRead': 'gate',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -1286,8 +1298,11 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
       // property through the host's provisioning port, read back) — manifest member projectTarget.manualRowsSet, its
       // control on the project sync panel. Its READ is the PULL tier (below).
       'stockPreparationProjectManualRowsSet',
+      // 批次标识 BI-1b (R-65): READING one project sheet's pull-batch status (columns, ledger, row classes) — manifest
+      // member projectTarget.pullBatchRead (control: null until BI-3 / BI-7 render it).
+      'stockPreparationProjectPullBatchGet',
     ],
-    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler, the four members handlers and the manual-rows switch SET',
+    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler, the four members handlers, the manual-rows switch SET and the pull-batch status read',
   )
   // STOCK_PREP_PULL joined the set with the S1 project-sheet CREATE, the named R-11 exception (R-35),
   // and S4 (R-38) added exactly two more — ARCHIVE and RESTORE, which the owner gave to the 拉取人员
@@ -1688,6 +1703,8 @@ const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
   // so the door adds nothing to them.
   'projectTarget.manualRowsRead',
   'projectTarget.manualRowsSet',
+  // 批次标识 BI-1b (R-65): the pull-batch status read resolves the host-vouched operator scope too.
+  'projectTarget.pullBatchRead',
   // S5b (R-39): three of the four touch no tenant at all (roles and memberships are platform-global and the
   // host port scopes visibility by the delegation scope); the project-sheet add resolves the host-vouched
   // operator scope like the project-target routes above. None runs a shared tenant helper.

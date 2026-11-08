@@ -345,6 +345,17 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     control: 'stock-prep-project-manual-rows-set',
   }),
   Object.freeze({
+    // 批次标识 BI-1b (design §8.7; register R-65): the pull-batch STATUS read of one project sheet — whether its two batch
+    // columns are present / locked / visible, its ledger state and its values-free row classes. ADMIN (the install it
+    // reports on is an owner-gated production write). `control: null` is deliberate: no web control renders this read yet
+    // (BI-3 / BI-7 give it one — the handoff precedent above), so presence cannot equal grant for F-04.
+    capability: 'projectTarget.pullBatchRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
+    control: null,
+  }),
+  Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
     method: 'POST',

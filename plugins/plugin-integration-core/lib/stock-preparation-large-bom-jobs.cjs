@@ -28,6 +28,8 @@ const {
   countAttemptedHostWrites,
   summarizeApplyResultForEvidence,
 } = require('./stock-preparation-apply-writer.cjs')
+// 批次标识 BI-1b (design §6.4; register R-65): the stored pull-batch plan's shape and the job's values-free run summary.
+const { mergeLargePullBatchRun, normalizeStoredPullBatchPlan } = require('./stock-preparation-pull-batch-lanes.cjs')
 
 const LARGE_BOM_BACKGROUND_EXPANSION_STATUSES = Object.freeze([
   'queued',
@@ -49,6 +51,10 @@ const LARGE_BOM_CHECKPOINT_APPLY_STATUSES = Object.freeze([
   'cancelled',
   'expired',
 ])
+// R line (R83): main's constant from #6515 (pre-enable hardening F-3), which BI-1b's terminal finish reads. The
+// checkpoint-apply statuses after which a job can never write again. `runLargeBomCheckpointApplyJobChunk` returns
+// `succeeded` / `partial` as they are and refuses `cancelled` / `expired`; every OTHER status is OPEN.
+const LARGE_BOM_CHECKPOINT_APPLY_TERMINAL_STATUSES = Object.freeze(['succeeded', 'partial', 'cancelled', 'expired'])
 
 const BACKGROUND_PROGRESS_FIELDS = Object.freeze([
   'rowsExpanded',
@@ -1205,6 +1211,10 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
     ...(input.installedFieldProperties === undefined || input.installedFieldProperties === null
       ? {}
       : { installedFieldProperties: cloneJson(input.installedFieldProperties) }),
+    // 批次标识 BI-1b (design §6.4): the expansion's pull-batch plan rides into the apply job (a conditional key: a job
+    // planned while the sheet did not stamp carries none, byte-identical to the pre-BI-1b job). Every chunk stamps from
+    // THIS copy, never from a live read, exactly like the ownership band above.
+    ...(isPlainObject(sourceJob.pullBatchPlan) ? { pullBatchPlan: cloneJson(sourceJob.pullBatchPlan) } : {}),
     totalDecisions: Array.isArray(plan.decisions) ? plan.decisions.length : 0,
     checkpoint: {
       nextDecisionIndex: 0,
@@ -1320,12 +1330,19 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
     }
     const chunkSize = normalizeChunkSize(input.maxDecisionsPerChunk)
     const recordsApi = requireCheckpointRecordsApi(input.recordsApi)
+    // 批次标识 BI-1b (design §6.4): the route's pull-batch gate, BEFORE the job turns `running`, on every chunk
+    // (resumes included): 409 INSTALL_IN_PROGRESS / JOB_REPLAN_REQUIRED and 503 leave the job untouched. No gate (a
+    // direct lib caller) / switch off => null: the chunk is byte-identical. R line: no lease, so it is not "inside the
+    // lease" as on main; the job is still untouched on every refusal.
+    const pullBatchRun = typeof input.pullBatchGate === 'function' ? await input.pullBatchGate({ job: cloneJson(job) }) : null
     const start = nextDecisionIndex(job)
     const decisions = plan.decisions
     if (start >= decisions.length) {
       job.status = terminalApplyStatus(job.counts)
       job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
       await storage.set(key, job)
+      // 批次标识 BI-1b (design §3.6): the link is finished ONCE, at the job's terminal status, with the job's total.
+      if (pullBatchRun && pullBatchRun.stamp) await pullBatchRun.finish({ writerStatus: job.status === 'succeeded' ? 'succeeded' : 'partial', createdRowCount: Number.isSafeInteger(job.pullBatchStampedRowCount) ? job.pullBatchStampedRowCount : 0 })
       return cloneJson(job)
     }
 
@@ -1357,10 +1374,20 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
         ? job.installedFieldProperties
         : input.installedFieldProperties,
       recordsApi,
+      // 批次标识 BI-1b: the create leg's side input, keyed large:<apply job id> (absent => byte-identical writer call).
+      ...(pullBatchRun && pullBatchRun.stamp ? { pullBatchStamp: pullBatchRun.stamp } : {}),
     })
 
     job.counts = mergeCounts(job.counts, applyResult.counts)
     mergeApplyEvidence(job, applyResult)
+    // 批次标识 BI-1b: conditional job keys (ON only, values-free, never in a public projection): the running total of
+    // CONFIRMED stamped creates — what the link records BY VALUE at the terminal status — and the run summary.
+    if (pullBatchRun) {
+      if (pullBatchRun.stamp && isPlainObject(applyResult.pullBatch) && Number.isSafeInteger(applyResult.pullBatch.stampedRowCount)) {
+        job.pullBatchStampedRowCount = (Number.isSafeInteger(job.pullBatchStampedRowCount) ? job.pullBatchStampedRowCount : 0) + applyResult.pullBatch.stampedRowCount
+      }
+      job.pullBatchRun = mergeLargePullBatchRun(job.pullBatchRun, pullBatchRun, applyResult)
+    }
     if (applyResult.status === 'aborted') {
       // STOPPED mid-chunk (R line: only the pull-batch allocation stop, BI-1b): decisions [start, start + k) ran, k did
       // not. The checkpoint records exactly that, the job is `failed` (resumable from start + k), and the stop's code
@@ -1402,6 +1429,10 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
     job.status = end >= decisions.length ? terminalApplyStatus(job.counts) : 'paused'
     job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
     await storage.set(key, job)
+    // 批次标识 BI-1b (design §3.6): finished ONCE, at the terminal status, with the job's total (best effort).
+    if (pullBatchRun && pullBatchRun.stamp && LARGE_BOM_CHECKPOINT_APPLY_TERMINAL_STATUSES.includes(job.status)) {
+      await pullBatchRun.finish({ writerStatus: job.status === 'succeeded' ? 'succeeded' : 'partial', createdRowCount: Number.isSafeInteger(job.pullBatchStampedRowCount) ? job.pullBatchStampedRowCount : 0 })
+    }
     return cloneJson(job)
   } finally {
     release()
@@ -1456,6 +1487,12 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
     carryPolicy: job.actionSnapshot && job.actionSnapshot.carryPolicy,
   })
   const revision = largeBomPlanRevision({ job, plan, existingRows, conflictPolicyReview })
+  // 批次标识 BI-1b (design §6.4, P-3): the route's pull-batch planner, called with the plan and the artifact rows AFTER the
+  // revision (never hashed) and BEFORE the job is touched; its answer is the job's SIBLING pullBatchPlan, kept out of
+  // every public projection (the evidence summaries are allow-lists). Absent / null => no key.
+  const pullBatchPlan = typeof input.pullBatchPlanFor === 'function'
+    ? normalizeStoredPullBatchPlan(await input.pullBatchPlanFor({ plan, artifactRows: expandedRows }))
+    : null
   job.planRevision = revision
   job.planArtifact = {
     revision,
@@ -1465,6 +1502,9 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
     plannedAt: plan.plannedAt,
   }
   job.planEvidence = summarizeConflictPlanForEvidence(plan)
+  // 批次标识 BI-1b: replaced on every plan (a plan made without the planner carries none).
+  if (pullBatchPlan) job.pullBatchPlan = pullBatchPlan
+  else delete job.pullBatchPlan
   job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
   await storage.set(key, job)
   return cloneJson(job)

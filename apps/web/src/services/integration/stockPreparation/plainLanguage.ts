@@ -588,6 +588,123 @@ export function stockPrepSourceVerdictPlain(verdict: string): StockPrepPlainText
  * — nothing here can break by ADDING a field to an object literal.
  */
 export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  // 批次标识 BI-1b (design §15; register R-65): ONE entry per PULL_BATCH_ERROR_CODES code (the pure module's map; RS-COPY
+  // reads it live). BI-7 adds only codes of its own. A run stop after earlier writes is `partial`, so no line here claims
+  // that nothing at all was written unless the refusal comes before every write.
+  STOCK_PREP_PULL_BATCH_STORE_FAILED: Object.freeze({
+    zh: '批次记录暂时读写不了,这次拉取在新建行之前停了下来。',
+    en: 'The batch record could not be read or written, so this pull stopped before creating rows.',
+    zhNext: '稍后再试一次;如果一直如此,请联系系统管理员检查批次记录(数据库)。',
+    enNext: 'Try again shortly; if it persists, ask the system administrator to check the batch record (database).',
+  }),
+  STOCK_PREP_PULL_BATCH_CONFLICT: Object.freeze({
+    zh: '批次记录刚被另一次操作改动,这次拉取停了下来。',
+    en: 'The batch record was just changed by another operation, so this pull stopped.',
+    zhNext: '请重新试算后再写入。',
+    enNext: 'Preview again, then write.',
+  }),
+  STOCK_PREP_PULL_BATCH_NOT_READY: Object.freeze({
+    zh: '这张表的批次历史还没准备好,这次没有记入批次。',
+    en: 'This sheet’s batch history is not ready yet, so this pull was not recorded as a batch.',
+    zhNext: '请备料主管理员先完成批次列的安装。',
+    enNext: 'Ask the stock-prep admin to finish installing the batch columns first.',
+  }),
+  STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS: Object.freeze({
+    zh: '这张表正在安装批次列,安装完成前不能拉取;这次没有写入。',
+    en: 'The batch columns of this sheet are being installed; pulls wait until it finishes. Nothing was written.',
+    zhNext: '请等安装完成后再拉取;如果长时间未完成,请联系备料主管理员。',
+    enNext: 'Pull again after the install finishes; if it takes long, ask the stock-prep admin.',
+  }),
+  STOCK_PREP_PULL_BATCH_EXECUTION_CLOSED: Object.freeze({
+    zh: '这次拉取对应的批次已经结束,不能再接着写。',
+    en: 'The batch this run opened has already closed, so it cannot continue.',
+    zhNext: '请重新试算(大BOM请重新展开)后再写入。',
+    enNext: 'Preview again (expand again, for a large BOM), then write.',
+  }),
+  STOCK_PREP_PULL_BATCH_JOB_REPLAN_REQUIRED: Object.freeze({
+    zh: '这个大BOM任务是在批次列安装之前规划的,不能直接写入。',
+    en: 'This large-BOM job was planned before the batch columns were installed, so it cannot be written as is.',
+    zhNext: '请重新展开并重新规划后再批准。',
+    enNext: 'Expand and plan again, then approve.',
+  }),
+  STOCK_PREP_PULL_BATCH_STAMP_INVALID: Object.freeze({
+    zh: '批次标记的内部数据不完整,这次拉取停了下来。',
+    en: 'The internal batch-stamp data was incomplete, so this pull stopped.',
+    zhNext: '请联系系统管理员(这是程序问题)。',
+    enNext: 'Ask the system administrator (this is a program defect).',
+  }),
+  STOCK_PREP_PULL_BATCH_DISABLED: Object.freeze({
+    zh: '批次标识功能还没有开启。',
+    en: 'The pull-batch feature is not turned on.',
+    zhNext: '如需使用,请联系系统管理员。',
+    enNext: 'Ask the system administrator if you need it.',
+  }),
+  STOCK_PREP_PULL_BATCH_INSTALL_REQUEST_INVALID: Object.freeze({
+    zh: '安装批次列的请求不完整或格式不对;什么都没有改动。',
+    en: 'The batch-column install request is incomplete or malformed; nothing was changed.',
+    zhNext: '请按页面提示重新填写后再提交。',
+    enNext: 'Fill it in again as the page asks, then submit.',
+  }),
+  STOCK_PREP_PULL_BATCH_INSTALL_CONFIRM_MISMATCH: Object.freeze({
+    zh: '确认填写的内容与这次安装不一致;什么都没有改动。',
+    en: 'The confirmation does not match this install; nothing was changed.',
+    zhNext: '请重新核对项目号和预览,再确认一次。',
+    enNext: 'Check the project number and the preview again, then confirm.',
+  }),
+  STOCK_PREP_PULL_BATCH_INSTALL_OBJECT_REFUSED: Object.freeze({
+    zh: '这张表不能安装批次列;什么都没有改动。',
+    en: 'Batch columns cannot be installed on this sheet; nothing was changed.',
+    zhNext: '请确认选的是项目备料表;如有疑问请联系备料主管理员。',
+    enNext: 'Make sure this is the project stock-prep sheet; ask the stock-prep admin if unsure.',
+  }),
+  STOCK_PREP_PULL_BATCH_INSTALL_ROWS_TOO_LARGE: Object.freeze({
+    zh: '这张表的行数太多,不能一次安装批次列;什么都没有改动。',
+    en: 'This sheet has too many rows to install the batch columns in one go; nothing was changed.',
+    zhNext: '请联系系统管理员安排分步处理。',
+    enNext: 'Ask the system administrator to arrange a stepwise install.',
+  }),
+  STOCK_PREP_PULL_BATCH_PLM_LOCK_REQUIRED: Object.freeze({
+    zh: '这张表的PLM列还没有锁定,不能安装批次列;什么都没有改动。',
+    en: 'The PLM columns of this sheet are not locked yet, so batch columns cannot be installed; nothing was changed.',
+    zhNext: '请先完成PLM列锁定,再安装批次列。',
+    enNext: 'Lock the PLM columns first, then install the batch columns.',
+  }),
+  STOCK_PREP_PULL_BATCH_PLAN_CHANGED: Object.freeze({
+    zh: '预览之后表上的数据变了,这份安装计划不再有效。',
+    en: 'The sheet changed after the preview, so this install plan is no longer valid.',
+    zhNext: '请重新预览后再确认。',
+    enNext: 'Preview again, then confirm.',
+  }),
+  STOCK_PREP_PULL_BATCH_PLAN_CONFLICT: Object.freeze({
+    zh: '这份安装计划和已保存的计划不一致。',
+    en: 'This install plan does not match the plan already saved.',
+    zhNext: '请重新预览;如有疑问请联系备料主管理员。',
+    enNext: 'Preview again; ask the stock-prep admin if unsure.',
+  }),
+  STOCK_PREP_PULL_BATCH_HISTORY_COUNT_MISMATCH: Object.freeze({
+    zh: '填写的历史拉取次数与推算结果不一致;什么都没有改动。',
+    en: 'The historical pull count entered does not match the inferred history; nothing was changed.',
+    zhNext: '请核对实际拉取过几次后重新填写。',
+    enNext: 'Check how many times this project was actually pulled, then enter it again.',
+  }),
+  STOCK_PREP_PULL_BATCH_PLACEMENT_REQUIRED: Object.freeze({
+    zh: '还没有选择批次列放在表的哪一侧;什么都没有改动。',
+    en: 'The side of the sheet for the batch columns has not been chosen; nothing was changed.',
+    zhNext: '请选择放在左侧或右侧后再安装。',
+    enNext: 'Choose left or right, then install.',
+  }),
+  STOCK_PREP_PULL_BATCH_CONFIG_INVALID: Object.freeze({
+    zh: '批次设置里有不认识的选项;什么都没有改动。',
+    en: 'The batch settings contain an option that is not recognised; nothing was changed.',
+    zhNext: '请在设置页重新选择后保存。',
+    enNext: 'Choose again on the settings page, then save.',
+  }),
+  STOCK_PREP_PULL_BATCH_CONFIG_LOCKED: Object.freeze({
+    zh: '这项批次设置已经锁定,不能再改;什么都没有改动。',
+    en: 'This batch setting is locked and cannot be changed; nothing was changed.',
+    zhNext: '已写入的批次标签依赖它;如确需调整,请联系备料主管理员。',
+    enNext: 'Labels already written depend on it; ask the stock-prep admin if it really must change.',
+  }),
   /**
    * 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; R-68) — the per-sheet switch's own refusals
    * (projectManualRows.ts STOCK_PREP_MANUAL_ROWS_ERROR_CODES lists them; StockPreparationProjectTargetManualRows.spec.ts

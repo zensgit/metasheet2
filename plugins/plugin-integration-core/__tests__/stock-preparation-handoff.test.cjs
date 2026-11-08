@@ -3061,8 +3061,10 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // is (5)'s missing-component list, so its poll proves the scope exactly as (5) does.
   // 人工补充行 B4 (R-68) added TWO — the per-sheet switch's GET and POST (section D, items 21–22): the registry row whose
   // key column carries the switch, and the staging project the provisioning port is addressed to, are the proven tenant's.
-  assert.equal(callSites, 24, 'G9: twenty-four call sites — if this changes, the header list must too')
-  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'tableActionDryRunJobGet', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets', 'repairProjectSheetContractOptions', 'stockPreparationProjectManualRowsGet', 'stockPreparationProjectManualRowsSet']) {
+  // 批次标识 BI-1b (R-65) added ONE — the pull-batch status GET (section D, item 23 on this line): the sheet it reads and
+  // the staging project it reads it through are the proven tenant's.
+  assert.equal(callSites, 25, 'G9: twenty-five call sites — if this changes, the header list must too')
+  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'tableActionDryRunJobGet', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets', 'repairProjectSheetContractOptions', 'stockPreparationProjectManualRowsGet', 'stockPreparationProjectManualRowsSet', 'stockPreparationProjectPullBatchGet']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
   // ...and the entry that went with the deleted call site is GONE from the header. Dropping a name

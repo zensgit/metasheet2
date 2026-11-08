@@ -1074,6 +1074,112 @@ function resolvePullBatchHistoryCount({ plan, historyMode, confirmHistoricalBatc
   })
 }
 
+// ── the writer's side input (design §3.4; BI-1b) — portable, so the R-line writer validates the same shape ──────
+
+/**
+ * The writer's `pullBatchStamp` side input, validated BEFORE any IO. `undefined` / `null` => null (the writer is
+ * byte-identical). Otherwise a frozen `{ fieldIds: { pullBatch, firstPullBatch }, firstPullBatchByKey, allocate }`:
+ *   fieldIds             the band's PHYSICAL ids — two distinct non-blank strings, never a key or a value of the
+ *                        target's `fieldIdMap` (a band id mapped onto a template column would overwrite that column);
+ *   firstPullBatchByKey  a Map: idempotency key (non-blank string) -> 首次批次 label (non-blank string) | null ("this
+ *                        batch"); server-held, never answered;
+ *   allocate             the lazily called ledger allocation (an async function).
+ * Anything else is 500 STAMP_INVALID { field } — a caller defect, never a skipped stamp.
+ */
+function normalizePullBatchStamp(value, { fieldIdMap } = {}) {
+  if (value === undefined || value === null) return null
+  if (!isPlainObject(value)) throw stampInvalid('pullBatchStamp', 'the pull-batch stamp must be an object')
+  const ids = value.fieldIds
+  if (!isPlainObject(ids) || !nonBlankString(ids.pullBatch) || !nonBlankString(ids.firstPullBatch) || ids.pullBatch === ids.firstPullBatch) {
+    throw stampInvalid('fieldIds', 'the pull-batch stamp needs two distinct physical band ids')
+  }
+  const map = isPlainObject(fieldIdMap) ? fieldIdMap : {}
+  const taken = new Set([...Object.keys(map), ...Object.values(map)])
+  if (taken.has(ids.pullBatch) || taken.has(ids.firstPullBatch)) {
+    throw stampInvalid('fieldIds', 'a pull-batch band id must not be a template field of the target')
+  }
+  if (!(value.firstPullBatchByKey instanceof Map)) throw stampInvalid('firstPullBatchByKey', 'the 首次批次 carry must be a Map')
+  for (const [key, label] of value.firstPullBatchByKey) {
+    if (!nonBlankString(key)) throw stampInvalid('firstPullBatchByKey', 'a 首次批次 carry key must be a non-blank string')
+    if (label !== null && !nonBlankString(label)) throw stampInvalid('firstPullBatchByKey', 'a 首次批次 carry label must be null or a non-blank string')
+  }
+  if (typeof value.allocate !== 'function') throw stampInvalid('allocate', 'the pull-batch stamp needs its allocation function')
+  return Object.freeze({
+    fieldIds: Object.freeze({ pullBatch: ids.pullBatch, firstPullBatch: ids.firstPullBatch }),
+    firstPullBatchByKey: value.firstPullBatchByKey,
+    allocate: value.allocate,
+  })
+}
+
+/**
+ * The ledger's allocation answer, checked before a single cell is written: `{ batchId, batchNo, label, joined }`
+ * with a positive batch number and a label the grammar reads as `live`. Anything else is 500 STAMP_INVALID — the
+ * writer never stamps a cell it cannot read back as this run's batch.
+ */
+function assertAllocatedBatch(answer) {
+  if (!isPlainObject(answer)) throw stampInvalid('allocation', 'the pull-batch allocation must answer an object')
+  if (!nonBlankString(answer.batchId)) throw stampInvalid('batchId', 'the pull-batch allocation must answer a batch id')
+  if (!Number.isSafeInteger(answer.batchNo) || answer.batchNo < 1) throw stampInvalid('batchNo', 'the pull-batch allocation must answer a positive batch number')
+  if (typeof answer.label !== 'string' || parsePullBatchLabel(answer.label).kind !== 'live') {
+    throw stampInvalid('label', 'the pull-batch allocation must answer a live batch label')
+  }
+  if (typeof answer.joined !== 'boolean') throw stampInvalid('joined', 'the pull-batch allocation must say whether it joined a batch')
+  return Object.freeze({ batchId: answer.batchId, batchNo: answer.batchNo, label: answer.label, joined: answer.joined })
+}
+
+// ── the reader's strip (design §4.4; BI-1b) — portable, so the R-line reader strips the same way ──────────────────
+
+/**
+ * The reader's `pullBatchBand` option, validated ONCE before the first page. `undefined` / `null` => null (the reader is
+ * byte-identical: no strip, no Symbol). Otherwise a frozen `{ fieldIds: { pullBatch, firstPullBatch } }` — the band's
+ * PHYSICAL ids, two distinct non-blank strings, neither equal to a value of the target's `fieldIdMap` (a band id mapped
+ * onto a template column would delete that column's cell from every row). Anything else is 500 STAMP_INVALID
+ * `{ field: 'pullBatchBand' }` — a caller defect; the routes derive the band so that no request can reach it.
+ */
+function normalizePullBatchReaderBand(value, { fieldIdMap } = {}) {
+  if (value === undefined || value === null) return null
+  const ids = isPlainObject(value) ? value.fieldIds : null
+  if (!isPlainObject(ids) || !nonBlankString(ids.pullBatch) || !nonBlankString(ids.firstPullBatch) || ids.pullBatch === ids.firstPullBatch) {
+    throw stampInvalid('pullBatchBand', 'the reader band needs two distinct physical band ids')
+  }
+  const mapped = new Set(Object.values(isPlainObject(fieldIdMap) ? fieldIdMap : {}))
+  if (mapped.has(ids.pullBatch) || mapped.has(ids.firstPullBatch)) {
+    throw stampInvalid('pullBatchBand', 'a reader band id must not be a mapped template column of the target')
+  }
+  return Object.freeze({ fieldIds: Object.freeze({ pullBatch: ids.pullBatch, firstPullBatch: ids.firstPullBatch }) })
+}
+
+function bandCellOf(row, physical, logical) {
+  if (Object.prototype.hasOwnProperty.call(row, physical)) return row[physical]
+  if (Object.prototype.hasOwnProperty.call(row, logical)) return row[logical]
+  return undefined
+}
+
+/**
+ * The strip (design §4.4): BOTH band cells leave the unmapped reader row — the physical key, and defensively the logical
+ * key (mapFieldName's raw-id fallback, design F9) — onto `EXISTING_ROW_PULL_BATCH`, so stableStringify / JSON / Object.keys
+ * never see them and every digest over reader rows is the digest of a band-less sheet. The Symbol is ENUMERABLE (the
+ * RECORD_REF / CREATED_BY precedent: spreads keep it). `createdAt` / `locked` come from the record ENVELOPE (never from
+ * `data`, so a cell cannot forge them). Mutates and answers `row`. `band` is a normalized reader band.
+ */
+function stripPullBatchBand(row, record, band) {
+  if (!row || typeof row !== 'object' || !band) return row
+  const { pullBatch: pullBatchId, firstPullBatch: firstPullBatchId } = band.fieldIds
+  const pullBatch = cellText(bandCellOf(row, pullBatchId, PULL_BATCH_BAND_FIELD_IDS.pullBatch))
+  const firstPullBatch = cellText(bandCellOf(row, firstPullBatchId, PULL_BATCH_BAND_FIELD_IDS.firstPullBatch))
+  for (const key of [pullBatchId, firstPullBatchId, PULL_BATCH_BAND_FIELD_IDS.pullBatch, PULL_BATCH_BAND_FIELD_IDS.firstPullBatch]) {
+    delete row[key]
+  }
+  const envelope = record && typeof record === 'object' && isPlainObject(record.data) ? record : null
+  row[EXISTING_ROW_PULL_BATCH] = Object.freeze({
+    pullBatch,
+    firstPullBatch,
+    createdAt: envelope && typeof envelope.createdAt === 'string' ? envelope.createdAt : null,
+    locked: Boolean(envelope && envelope.locked === true),
+  })
+  return row
+}
+
 /** Live numbering (design §3.5 step 4, Q-BI-11): max(max non-void batch_no, history_batch_count) + 1. */
 function nextLivePullBatchNo({ maxBatchNo, historyBatchCount } = {}) {
   const max = maxBatchNo === undefined || maxBatchNo === null ? 0 : maxBatchNo
@@ -1111,6 +1217,7 @@ module.exports = {
   PULL_BATCH_SOURCE_DIGEST_SCHEME,
   PULL_BATCH_UNKNOWN_LABELS,
   StockPreparationPullBatchError,
+  assertAllocatedBatch,
   buildFirstPullBatchByKey,
   countPullBatchGapRows,
   formatPullBatchLabel,
@@ -1119,6 +1226,8 @@ module.exports = {
   nextLivePullBatchNo,
   normalizePartId,
   normalizePullBatchConfig,
+  normalizePullBatchReaderBand,
+  normalizePullBatchStamp,
   parsePullBatchLabel,
   planPullBatchHistory,
   pullBatchHistoryMembership,
@@ -1128,6 +1237,7 @@ module.exports = {
   refusedPullBatchConfigEdits,
   resolvePullBatchHistoryCount,
   rowPullBatchFacts,
+  stripPullBatchBand,
   __internals: {
     EXISTING_ROW_CREATED_BY_KEY,
     canonicalJson,

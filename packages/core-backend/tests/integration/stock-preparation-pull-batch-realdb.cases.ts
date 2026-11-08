@@ -4,7 +4,9 @@
  * (plugins/plugin-integration-core/lib/stock-preparation-pull-batch-store.cjs) through the REAL scoped db helper
  * (lib/db.cjs). R line (R83 on onprem-r82): the sheet write lock is not on this line, so main's holder-assert case
  * BI-R14 (a zombie allocate after a lease takeover, LEASE_LOST) is not here; the store's `holderWithin` hook stays
- * unused on this line (the lanes pass none). Every other case is main's.
+ * unused on this line (the lanes pass none). Every other case is main's. ADDED (R line; critic R83-extension correction 3):
+ * main's BI-1b real-stack stamping cases BI-R1 / R2 / R5 / R-C4 live in the project-write-lock real-DB cases on main (absent
+ * here); their R-line copies are the second describe block below, on a lock-free real stack.
  *
  * This is a CASES MODULE, not a test file: `defineStockPreparationPullBatchRealDbCases()` registers its `describe`
  * block and is called from the already-wired stock-prep real-DB host
@@ -35,7 +37,10 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, test } from 'vitest'
 
+import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
+import type { LoadedPlugin } from '../../src/core/plugin-loader'
+import type { PluginContext } from '../../src/types/plugin'
 
 const require = createRequire(import.meta.url)
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
@@ -44,6 +49,18 @@ const PLUGIN_LIB = path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib')
 const { createDb } = require(path.join(PLUGIN_LIB, 'db.cjs')) as any
 const storeLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-store.cjs')) as any
 const pureLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch.cjs')) as any
+// R line (R83): the BI-1b stamping cases below drive the real routes over a real project sheet (lock-free stack).
+const tableActionsLib = require(path.join(PLUGIN_LIB, 'stock-preparation-table-actions.cjs')) as any
+const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
+const { ensureStockPreparationSandboxTarget } = require(path.join(PLUGIN_LIB, 'stock-preparation-target-provisioning.cjs')) as any
+const { syncStockPreparationContractOptionsForObject } = require(path.join(PLUGIN_LIB, 'stock-preparation-option-sync.cjs')) as any
+const projectTargetStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-project-target-store.cjs')) as any
+const projectTargetsLib = require(path.join(PLUGIN_LIB, 'stock-preparation-project-targets.cjs')) as any
+const ownBaseLib = require(path.join(PLUGIN_LIB, 'stock-preparation-own-base.cjs')) as any
+const auditStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-audit-store.cjs')) as any
+const httpRoutesLib = require(path.join(PLUGIN_LIB, 'http-routes.cjs')) as any
+const accessLib = require(path.join(PLUGIN_LIB, 'stock-preparation-workbench-access.cjs')) as any
+const harnessLib = require(path.join(REPO_ROOT, 'plugins/plugin-integration-core/__tests__/support/stock-preparation-project-sheet-harness.cjs')) as any
 
 const { createStockPreparationPullBatchStore, PULL_BATCH_TABLES, SETTINGS_VERSION_CONFLICT_CODE } = storeLib
 const { PULL_BATCH_ERROR_CODES } = pureLib
@@ -388,5 +405,285 @@ export function defineStockPreparationPullBatchRealDbCases(): void {
       await seedSheet(guarded, { status: 'installing', lockedAt: new Date().toISOString(), plan })
       await expectSqlState(q(`UPDATE ${PULL_BATCH_TABLES.sheet} SET settings_locked_at = NULL WHERE sheet_id = $1`, [guarded]), '23514', C('sheet_lock_check'))
     })
+  })
+
+  // 批次标识 BI-1b on the R LINE (R83 on onprem-r82; critic R83-extension correction 3) — the small lane's stamping on the
+  // REAL stack: the real host (MetaSheetServer plugin context), the real provisioning and records, the real routes, the
+  // real ledger store over migration 105, a registered project sheet. On main these cases (BI-R1 / R2 / R5 / R-C4) ride
+  // the project-write-lock real-DB stack, which is not on this line; here they ride a lock-free stack built the way the
+  // R-line manual-rows real-DB cases build theirs. The case bodies are main's, on this line's source shapes:
+  //   BI-R1  OWN-1: batch 1 (S-001 + its subtree) then batch 2 (P-001 ⊃ S-001, plus N-001): the batch-1 rows keep
+  //          第1批 / 第1批 (swept inactive, never re-stamped), the copies carry 首次 第1批 / 本次 第2批, P-001 and N-001
+  //          第2批 / 第2批; two closed batches, the link counts set by value (4 and 6)
+  //   BI-R2  A03: a third identical pull opens no batch and no link; the band cells of every row are unchanged
+  //   BI-R5  U05: the status route before and after the band; a ledger whose statements fail => the apply is 503
+  //          STORE_FAILED with zero created rows on an installed sheet; a not-installed sheet's pull is unaffected
+  //   BI-R-C4 a creator-NULL row the automation / form way (a non-JSON key, no RUN stamp) neither pauses stamping nor is
+  //          labelled
+  // (The second pull orders P-001 and N-001 only, so it does not depend on main-only root selection.)
+  describeIfDatabase('批次标识 BI-1b pull-batch stamping on the R line (real Postgres, real ledger, real host, no lock)', () => {
+    const TOKEN = `${process.pid}_${Date.now().toString(36)}`
+    const PULL_SWITCH = 'STOCK_PREP_PULL_BATCH_ENABLED'
+    const SHEETS_SWITCH = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'
+    const LABEL1 = /^第1批（\d{4}-\d{2}-\d{2}）$/
+    const LABEL2 = /^第2批（\d{4}-\d{2}-\d{2}）$/
+    const ACTION_ID = tableActionsLib.PLM_STOCK_PREPARATION_ACTION_ID
+    const tenants: string[] = []
+    const sheets: string[] = []
+    const kvPrefixes: string[] = []
+    afterAll(async () => {
+      for (const sheetId of sheets) {
+        for (const sql of ['DELETE FROM meta_record_revisions WHERE sheet_id = $1', 'DELETE FROM meta_records WHERE sheet_id = $1', 'DELETE FROM meta_views WHERE sheet_id = $1', 'DELETE FROM meta_fields WHERE sheet_id = $1', 'DELETE FROM meta_sheets WHERE id = $1']) {
+          await q(sql, [sheetId]).catch(() => {})
+        }
+      }
+      for (const tenantId of tenants) {
+        for (const table of ['integration_stock_prep_pull_batch_execution', 'integration_stock_prep_pull_batch', 'integration_stock_prep_pull_batch_sheet', 'integration_stock_prep_audit', 'integration_stock_prep_project_target']) {
+          await q(`DELETE FROM ${table} WHERE tenant_id = $1`, [tenantId]).catch(() => {})
+        }
+      }
+      for (const prefix of kvPrefixes) await q(`DELETE FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE $1`, [`${prefix}%`]).catch(() => {})
+    })
+
+    function hostPluginContext(): PluginContext {
+      const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+      const loaded: LoadedPlugin = {
+        manifest: { name: 'plugin-integration-core', version: 'pull-batch-rline-realdb' },
+        plugin: { activate: async () => {} },
+        path: 'realdb://stock-preparation-pull-batch-rline',
+        loadedAt: new Date(),
+      }
+      return (server as unknown as { createPluginContext: (plugin: LoadedPlugin) => PluginContext }).createPluginContext(loaded)
+    }
+    function routeResponse() {
+      const res: any = { statusCode: 200, body: null, headers: {} }
+      res.status = (code: number) => { res.statusCode = code; return res }
+      res.json = (payload: unknown) => { res.body = payload; return res }
+      res.setHeader = (name: string, value: unknown) => { res.headers[name] = value; return res }
+      res.send = (payload: unknown) => { res.body = payload; return res }
+      res.end = () => res
+      return res
+    }
+    // The OWN-1 source (main's continuation fixtures' S/P story, values-free).
+    const part = (id: string, code: string, name: string) => ({ OBJ_ID: id, IdentityNo: code, IdentityName: name, Material: 'M-STEEL', SysVer: 'V1' })
+    const PARTS = [part('P-001', 'D100-01', 'Assembly'), part('S-001', 'D100-01-03', 'SubAssembly'), part('PART-A', 'C200-1', 'Bracket'), part('PART-B', 'C200-2', 'Plate'), part('PART-C', 'C200-3', 'Pin'), part('N-001', 'E300-1', 'Loose')]
+    const S_BOMS: Record<string, Array<{ part: string; usage: number }>> = { 'S-001': [{ part: 'PART-A', usage: 2 }, { part: 'PART-B', usage: 3 }], 'PART-A': [{ part: 'PART-C', usage: 4 }] }
+    function sourceOf(projectNo: string, orders: Array<{ part: string; qty: number }>, boms: Record<string, Array<{ part: string; usage: number }>>) {
+      const heads: any[] = []
+      const lines: any[] = []
+      for (const [parentId, children] of Object.entries(boms)) {
+        heads.push({ part_id: parentId, bom_id: `BOM-${parentId}`, SysVer: 'V1', bom_able: true })
+        children.forEach((child, index) => lines.push({ bom_pid: `BOM-${parentId}`, part_id: child.part, Bom_ExAttr1: String(child.usage), sort_id: String(index + 1) }))
+      }
+      return {
+        DN_PDM_PathExAttrInfo: [{ FileCode: projectNo, Parent_OBJ_ID: `${projectNo}-PATH` }],
+        DN_PDM_PathInfo: [{ OBJ_ID: `${projectNo}-PATH` }],
+        DN_PDM_OrderHeadInfo: [{ OBJ_ID: `${projectNo}-ORDER-1`, path_id: `${projectNo}-PATH` }],
+        DN_PDM_OrderDetailInfo: orders.map((order, index) => ({ order_id: `${projectNo}-ORDER-1`, part_id: order.part, quantity: String(order.qty), sort_id: String((index + 1) * 10) })),
+        DN_PDM_PartLibraryInfo: PARTS.map((entry) => ({ ...entry })),
+        DN_PDM_BomHeadInfo: heads,
+        DN_PDM_BomDetailsInfo: lines,
+      }
+    }
+    const firstPullSource = (projectNo: string) => sourceOf(projectNo, [{ part: 'S-001', qty: 10 }], { ...S_BOMS })
+    const secondPullSource = (projectNo: string) => sourceOf(projectNo, [{ part: 'P-001', qty: 5 }, { part: 'N-001', qty: 1 }], { 'P-001': [{ part: 'S-001', usage: 2 }], ...S_BOMS })
+
+    async function withSwitches<T>(fn: () => Promise<T>): Promise<T> {
+      const before = { pull: process.env[PULL_SWITCH], sheets: process.env[SHEETS_SWITCH] }
+      process.env[PULL_SWITCH] = 'true'
+      process.env[SHEETS_SWITCH] = 'true'
+      try {
+        return await fn()
+      } finally {
+        if (before.pull === undefined) delete process.env[PULL_SWITCH]; else process.env[PULL_SWITCH] = before.pull
+        if (before.sheets === undefined) delete process.env[SHEETS_SWITCH]; else process.env[SHEETS_SWITCH] = before.sheets
+      }
+    }
+
+    async function stampingStack(label: string, { band = true, failingLedger = false }: { band?: boolean; failingLedger?: boolean } = {}) {
+      const tenantId = `tenant_bi1b_rl_${label}_${TOKEN}`
+      tenants.push(tenantId)
+      const projectNo = `SYN-BI1B-${label.toUpperCase()}`
+      const projectId = `${tenantId}:integration-core`
+      const objectId: string = ownBaseLib.deriveStockPreparationProjectSheetObjectId(tenantId, projectNo)
+      const pluginContext = hostPluginContext()
+      const multitable: any = pluginContext.api.multitable
+      const ensured = await ensureStockPreparationSandboxTarget({ context: { api: { multitable } }, projectId, permission: 'admin', objectId })
+      expect(ensured.ready).toBe(true)
+      await syncStockPreparationContractOptionsForObject({ provisioning: multitable.provisioning, projectId, objectId })
+      await projectTargetsLib.markProjectSheetPlmSystemColumns({ provisioning: multitable.provisioning, projectId, objectId })
+      const sheetId: string = ensured.target.sheetId
+      sheets.push(sheetId)
+      const envObjectId = `plm_stock_preparation_sandbox_bi1b_env_${label}_${TOKEN}`
+      const envEnsured = await ensureStockPreparationSandboxTarget({ context: { api: { multitable } }, projectId, permission: 'admin', objectId: envObjectId })
+      expect(envEnsured.ready).toBe(true)
+      sheets.push(envEnsured.target.sheetId)
+      const db = createDb({ database: pluginContext.api.database })
+      const registry = projectTargetStoreLib.createStockPreparationProjectTargetStore({ db })
+      await registry.create({ tenantId, projectNo, sheetId, objectId, createdBy: 'syn' })
+      const physical = (fieldId: string) => multitable.provisioning.getFieldId(projectId, objectId, fieldId)
+      const ledgerDb = createDb({ database: pluginContext.api.database })
+      // A ledger whose statements fail (the 105 tables behind a refusing handle) — never a DROP on the shared database (P-10).
+      const refusing = failingLedger
+        ? { ...ledgerDb, select: async () => { throw Object.assign(new Error('refused'), { code: '42501' }) }, selectOne: async () => { throw Object.assign(new Error('refused'), { code: '42501' }) } }
+        : ledgerDb
+      const pullBatchStore = createStockPreparationPullBatchStore({ db: refusing })
+      if (band) {
+        const added = await multitable.provisioning.ensureMissingObjectFields({
+          projectId,
+          objectId,
+          fields: templatesLib.pullBatchBandFieldDescriptors({ locale: 'zh-CN', placement: 'left' }).map((descriptor: any) => ({ ...descriptor, property: { ...descriptor.property } })),
+        })
+        expect([...added.addedFieldIds].sort()).toEqual([physical('firstPullBatch'), physical('pullBatch')].sort())
+        const seed = createStockPreparationPullBatchStore({ db: ledgerDb })
+        await ledgerDb.transaction((trx: any) => seed.createSheetRowWithin(trx, { tenantId, sheetId, projectNo, historyStatus: 'born_empty', labelLocale: 'zh-CN', settings: { firstPullBatchRule: 'material', labelFormat: 'ordinal_date' } }))
+      }
+      const state: any = { data: firstPullSource(projectNo) }
+      const sourceAdapter = {
+        async read(input: any = {}) {
+          const rows = Array.isArray(state.data[input.object]) ? state.data[input.object] : []
+          const found = rows.filter((row: any) => Object.entries(input.filters || {}).every(([field, expected]) => row[field] === expected))
+          return { records: found.map((row: any) => ({ ...row })), done: true, nextCursor: null }
+        },
+      }
+      const routes = new Map<string, any>()
+      kvPrefixes.push('integration:table-action:dry-run-token:')
+      const routeContext = {
+        api: {
+          http: { addRoute: (method: string, routePath: string, handler: any) => routes.set(`${method.toUpperCase()} ${routePath}`, handler) },
+          multitable,
+          database: pluginContext.api.database,
+        },
+        storage: pluginContext.storage,
+        config: {
+          stockPreparationTableActions: [{ actionId: ACTION_ID, source: { externalSystemId: `plm_bi1b_${label}_${TOKEN}`, kind: 'data-source:sql-readonly' }, target: envEnsured.target }],
+          stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [envObjectId] },
+        },
+      }
+      const base = harnessLib.baseServices(sourceAdapter)
+      const services: any = {
+        ...base,
+        externalSystemRegistry: { ...base.externalSystemRegistry, async listExternalSystems() { return [] } },
+        pipelineRegistry: { ...base.pipelineRegistry, async listPipelines() { return [] } },
+        stockPreparationProjectTargetStore: registry,
+        stockPreparationAuditStore: auditStoreLib.createStockPreparationAuditStore({ db }),
+        tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
+        stockPreparationPullBatchStore: pullBatchStore,
+      }
+      httpRoutesLib.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
+      const users = {
+        puller: { id: `u_bi1b_pull_${label}`, tenantId, permissions: [accessLib.STOCK_PREP_READ, accessLib.STOCK_PREP_OPERATE, accessLib.STOCK_PREP_PULL] },
+        admin: { id: `u_bi1b_admin_${label}`, tenantId, permissions: [accessLib.STOCK_PREP_ADMIN] },
+      }
+      const call = async (user: any, method: string, routePath: string, req: Record<string, any> = {}) => {
+        const handler = routes.get(`${method} ${routePath}`)
+        if (!handler) throw new Error(`route ${method} ${routePath} is not registered`)
+        const res = routeResponse()
+        await handler({ user, body: req.body || {}, query: req.query || {}, params: req.params || {} }, res)
+        return res
+      }
+      const rows = async () => (await q('SELECT id, data, created_by FROM meta_records WHERE sheet_id = $1 ORDER BY id', [sheetId])).rows
+      const cells = async () => (await rows()).map((row: any) => ({
+        part: row.data[physical('componentSourceId')],
+        path: row.data[physical('path')],
+        active: row.data[physical('active')],
+        first: row.data[physical('firstPullBatch')] ?? null,
+        current: row.data[physical('pullBatch')] ?? null,
+      }))
+      const ledger = async () => ({
+        batches: (await q('SELECT batch_no, status, closed_reason, label FROM integration_stock_prep_pull_batch WHERE tenant_id = $1 ORDER BY batch_no', [tenantId])).rows,
+        links: (await q('SELECT execution_ref, lane, writer_status, created_row_count FROM integration_stock_prep_pull_batch_execution WHERE tenant_id = $1 ORDER BY joined_at, id', [tenantId])).rows,
+      })
+      const dryRun = () => call(users.puller, 'POST', '/api/integration/table-actions/:actionId/dry-run', { body: { parameters: { projectNo } }, params: { actionId: ACTION_ID } })
+      const apply = (token: string) => call(users.puller, 'POST', '/api/integration/table-actions/:actionId/apply', { body: { parameters: { projectNo }, confirm: { dryRunToken: token, acceptManualConfirmHold: true } }, params: { actionId: ACTION_ID } })
+      const status = () => call(users.admin, 'GET', '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch', { params: { projectNo }, query: {} })
+      const pull = async () => {
+        const dry = await dryRun()
+        expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+        const applied = await apply(dry.body.data.dryRunToken)
+        return { dry, applied }
+      }
+      return { tenantId, projectNo, sheetId, multitable, physical, state, rows, cells, ledger, dryRun, apply, status, pull, secondPullSource: () => secondPullSource(projectNo), firstPullSource: () => firstPullSource(projectNo) }
+    }
+
+    test('BI-R1 / BI-R2 (R line) OWN-1 on the real stack: batch 1, then batch 2 (P-001 ⊃ S-001) — exactly the owner\'s rows; a third identical pull opens nothing', async () => {
+      const k = await stampingStack('r1')
+      await withSwitches(async () => {
+        const first = await k.pull()
+        expect(first.dry.body.data.pullBatch).toEqual({ preview: true, wouldStamp: true, reason: null })
+        expect(first.applied.statusCode, JSON.stringify(first.applied.body)).toBe(200)
+        expect(first.applied.body.data.pullBatch).toMatchObject({ stamped: true, batchNo: 1, joined: false, createdRowCount: 4 })
+        const afterOne = await k.cells()
+        expect(afterOne).toHaveLength(4)
+        for (const row of afterOne) {
+          expect(row.first, JSON.stringify(row)).toMatch(LABEL1)
+          expect(row.current, JSON.stringify(row)).toMatch(LABEL1)
+        }
+        k.state.data = k.secondPullSource()
+        const second = await k.pull()
+        expect(second.applied.statusCode, JSON.stringify(second.applied.body)).toBe(200)
+        expect(second.applied.body.data.pullBatch).toMatchObject({ stamped: true, batchNo: 2, joined: false, createdRowCount: 6 })
+        const afterTwo = await k.cells()
+        const old = afterTwo.filter((row: any) => row.active === false)
+        const fresh = afterTwo.filter((row: any) => row.active !== false)
+        expect(old.map((row: any) => row.part).sort()).toEqual(['PART-A', 'PART-B', 'PART-C', 'S-001'])
+        for (const row of old) expect([row.first, row.current].every((value: string) => LABEL1.test(value)), JSON.stringify(row)).toBe(true)
+        const byPart = new Map(fresh.map((row: any) => [row.part, row]))
+        expect([...byPart.keys()].sort()).toEqual(['N-001', 'P-001', 'PART-A', 'PART-B', 'PART-C', 'S-001'])
+        for (const partId of ['P-001', 'N-001']) {
+          expect(byPart.get(partId).first, partId).toMatch(LABEL2)
+          expect(byPart.get(partId).current, partId).toMatch(LABEL2)
+        }
+        for (const partId of ['S-001', 'PART-A', 'PART-B', 'PART-C']) {
+          expect(byPart.get(partId).first, `${partId}: 首次 = the batch it first appeared in`).toMatch(LABEL1)
+          expect(byPart.get(partId).current, `${partId}: 本次 = the batch that created this row`).toMatch(LABEL2)
+        }
+        const ledgerTwo = await k.ledger()
+        expect(ledgerTwo.batches.map((row: any) => [row.batch_no, row.status, row.closed_reason])).toEqual([[1, 'closed', 'execution_succeeded'], [2, 'closed', 'execution_succeeded']])
+        expect(ledgerTwo.links.map((row: any) => [row.lane, row.writer_status, row.created_row_count])).toEqual([['small_apply', 'succeeded', 4], ['small_apply', 'succeeded', 6]])
+        for (const link of ledgerTwo.links) expect(link.execution_ref).toMatch(/^small:table-action-apply:/)
+        // BI-R2 (A03): the same pull again — nothing to create, so no batch and no link; every band cell unchanged.
+        const third = await k.pull()
+        expect(third.applied.body.data.pullBatch).toEqual({ stamped: false, reason: 'no_creates' })
+        expect(await k.ledger()).toEqual(ledgerTwo)
+        expect(await k.cells()).toEqual(afterTwo)
+      })
+    }, 180000)
+
+    test('BI-R5 / BI-R-C4 (R line) U05 status before and after the band; a failing ledger is 503 STORE_FAILED with nothing created; a not-installed sheet is unaffected; a creator-NULL automation-like row never pauses stamping', async () => {
+      const bare = await stampingStack('r5a', { band: false })
+      await withSwitches(async () => {
+        const status = await bare.status()
+        expect(status.statusCode, JSON.stringify(status.body)).toBe(200)
+        expect(status.body.data.columns).toMatchObject({ mode: 'db', pullBatch: false, firstPullBatch: false })
+        expect(status.body.data.reasons).toContain('not_installed')
+        expect(JSON.stringify(status.body)).not.toContain('fld_')
+        const { applied } = await bare.pull()
+        expect(applied.statusCode, JSON.stringify(applied.body)).toBe(200)
+        expect(applied.body.data.pullBatch).toEqual({ stamped: false, reason: 'not_installed' })
+      })
+      const failing = await stampingStack('r5b', { failingLedger: true })
+      await withSwitches(async () => {
+        const dry = await failing.dryRun()
+        expect(dry.body.data.pullBatch).toEqual({ preview: true, wouldStamp: false, reason: 'ledger_unreadable' })
+        const refused = await failing.apply(dry.body.data.dryRunToken)
+        expect(refused.statusCode, JSON.stringify(refused.body)).toBe(503)
+        expect(refused.body.error.code).toBe('STOCK_PREP_PULL_BATCH_STORE_FAILED')
+        expect(await failing.rows()).toHaveLength(0)
+      })
+      const c4 = await stampingStack('r5c')
+      await c4.multitable.records.createRecord({ sheetId: c4.sheetId, data: { [c4.physical('projectNo')]: c4.projectNo, [c4.physical('idempotencyKey')]: `auto-${TOKEN}`, [c4.physical('componentSourceId')]: 'AUTO-1', [c4.physical('active')]: true } })
+      await withSwitches(async () => {
+        const status = await c4.status()
+        expect(status.body.data.ready, JSON.stringify(status.body.data)).toBe(true)
+        expect(status.body.data.rows).toMatchObject({ gap: 0, nonPlugin: 1, machine: 0 })
+        const { applied } = await c4.pull()
+        expect(applied.statusCode, JSON.stringify(applied.body)).toBe(200)
+        expect(applied.body.data.pullBatch).toMatchObject({ stamped: true, batchNo: 1 })
+        const auto = (await c4.cells()).find((row: any) => row.part === 'AUTO-1')
+        expect(auto, 'the automation-like row is still there').toBeTruthy()
+        expect([auto.first, auto.current]).toEqual([null, null])
+      })
+    }, 180000)
   })
 }

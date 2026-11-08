@@ -379,6 +379,11 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   // the provisioning port is addressed to INLINE, from the scope with no request projectId (the inline set below).
   'stockPreparationProjectManualRowsGet',
   'stockPreparationProjectManualRowsSet',
+  // 批次标识 BI-1b (register R-65). The pull-batch status READ answers the caller's OWN tenant's project sheet state
+  // (values-free, but WHOSE sheet is decided by the scope). It derives its staging project in the shared status-deps
+  // helper (`pullBatchStatusDepsFor`, from the scope's tenant with no request projectId), not inline, so it is not in
+  // the inline-staging set below.
+  'stockPreparationProjectPullBatchGet',
   'stockPreparationProjectOverviewRefresh',
   'stockPreparationProjectOverviewEnsure',
   // S5b (R-39) 「成员与权限」. Adding project sheets to a custom role is a WRITE (a G1 grant per sheet) and
