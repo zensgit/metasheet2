@@ -154,8 +154,11 @@ const PROJECT_WRITE_BUMP_BACKOFF_MS = 10
 //   * `change_plan_confirm` (batch-refresh step 5 PR-8, design §9.4 / §10.3 (1)): the change-plan confirm bumps the
 //     same way, inside its own transaction — every token planned before the confirm is superseded when it commits;
 //     the controlled update then runs under an ordinary `small_preview` token minted after it.
-const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable'])
-const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm'])
+//   * `pull_batch_install` (批次标识 BI-2, register R-65): the owner-gated per-sheet install holds the lease (purpose) for
+//     its whole run — band, views, landing, the persisted plan, the cell writes and the resolve — and BUMPS after its
+//     release (reason), so every token / approved job planned before the install is superseded.
+const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable', 'pull_batch_install'])
+const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm', 'pull_batch_install'])
 
 const PROJECT_WRITE_ERROR_CODES = Object.freeze({
   WRITE_LOCKED: 'STOCK_PREP_PROJECT_WRITE_LOCKED',

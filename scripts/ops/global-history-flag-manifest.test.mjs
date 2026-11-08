@@ -1018,6 +1018,10 @@ test('stock-prep pull-batch switch (批次标识 BI-1b, R-65): boolean, exact tr
   assert.match(spec.purpose, /OFF: zero ledger IO/)
   assert.match(spec.purpose, /no pull answer carries a pullBatch key/)
   assert.match(spec.purpose, /owner gate O-BI-7/)
+  // BI-2 (R-65): the per-sheet install and the born-ready create leg ride the same switch.
+  assert.match(spec.purpose, /per-sheet install/)
+  assert.match(spec.purpose, /born ready/)
+  assert.match(spec.purpose, /409 STOCK_PREP_PULL_BATCH_DISABLED before any IO/)
 })
 
 // ── Automation runtime flags (AGENTS.md: every env flag is registered; iPaaS follow-up 2026-11-03) ──
