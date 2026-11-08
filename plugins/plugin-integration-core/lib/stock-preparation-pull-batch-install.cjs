@@ -1041,7 +1041,8 @@ function requireLedgerDeps(deps) {
 
 function nextStatusOf({ envelope, model, labelling, sheet }) {
   if (envelope.run === 'first_install') return envelope.K === 0 && model.evidence.length === 0 ? 'born_empty' : 'backfilled'
-  const previous = envelope.previousHistoryStatus || (sheet && sheet.historyPlan && sheet.historyPlan.previousHistoryStatus)
+  // A re-run reads the status its Txn A recorded; a fresh gap pass reads the in-lease row's own resolved status.
+  const previous = envelope.previousHistoryStatus || (sheet && (sheet.historyStatus === 'born_empty' || sheet.historyStatus === 'backfilled') ? sheet.historyStatus : null)
   const touched = labelling.runRows.length > 0 || envelope.K > 0
   return !touched && (previous === 'born_empty' || previous === 'backfilled') ? previous : 'backfilled'
 }

@@ -795,4 +795,17 @@ test('IN-26 the portability pins hold by TEXT: one require (the pure module), an
   assert.equal(source.includes('PULL_BATCH_ENABLED'), false)
 })
 
+test('IN-27 a gap pass whose only work is a blank manual row on a born_empty sheet fills 人工补充 and stays born_empty (no evidence row, K = 0)', async () => {
+  const world = createWorld({
+    records: [record('rec_m1', { createdAt: '2026-10-25T01:00:00.000Z', part: 'M', key: 'manual:v1:rec_m1', createdBy: 'u_person' })],
+    bandPresent: true,
+    sheetRow: { status: 'born_empty', placement: 'left', landing: 'promote_prep_fill', lockedAt: null },
+  })
+  const preview = await dryRun(world)
+  assert.deepEqual([preview.run, preview.plan.K], ['gap_pass', 0])
+  const done = await install(world)
+  assert.deepEqual([done.resolved, done.historyStatus, done.written.manualRows], [true, 'born_empty', 1])
+  assert.deepEqual(world.cells('rec_m1'), [MANUAL, MANUAL])
+})
+
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-pull-batch-install.test.cjs', tests)
