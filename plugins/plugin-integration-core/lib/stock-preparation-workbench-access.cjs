@@ -374,6 +374,33 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
     control: null,
   }),
+  // 批次标识 BI-7 (design §5.5 / §11; register R-65; rulings C2 / C6 / C8) — THE PULL-BATCH SETTINGS of 数据来源与体检:
+  // the read (tenant default, fixed facts, every registered sheet's captured values and locks), the tenant-default
+  // write and one captured sheet's rule / format write (typed confirmation). All ADMIN. Their controls live on the
+  // settings panel of 数据来源与体检 (StockPreparationPullBatchSettingsPanel.vue) and render only after the read answered
+  // 200; all three routes are 404 while either the pull-batch or the project-sheets switch is off, so the panel is
+  // invisible then (C6). The web suite asserts the alignment in PBS-ALIGN.
+  Object.freeze({
+    capability: 'pullBatch.settingsRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    control: 'stock-prep-pull-batch-settings-status',
+  }),
+  Object.freeze({
+    capability: 'pullBatch.settingsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    control: 'stock-prep-pull-batch-settings-set',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.pullBatchSettingsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch/settings',
+    control: 'stock-prep-project-pull-batch-settings-set',
+  }),
   // 备料分批拉取第一期 step 4 PR-4 (design §13; register R-59) — THE PULLER'S CONFIRMATION SURFACE over a
   // governed project: the private hold page, the evidence behind a hold, a relationship's detail, and the
   // three decisions (confirm / 「暂不处理」 / end). All six are the PULL tier (D-14: the puller confirms;

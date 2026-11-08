@@ -315,6 +315,13 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   // apps/web/tests/StockPreparationProjectTargetManualRows.spec.ts (MR-ALIGN).
   'stock-prep-project-manual-rows-status',
   'stock-prep-project-manual-rows-set',
+  // 批次标识 BI-7 (R-65): the pull-batch settings panel's status root, its 「保存默认值」 and the per-sheet edit live on
+  // 数据来源与体检 (StockPreparationPullBatchSettingsPanel.vue), ADMIN tier, rendered only once the server's settings read
+  // answered 200 (404 while a switch is off, ruling C6). Their alignment, both directions, per actor, is asserted there in
+  // apps/web/tests/StockPreparationPullBatchSettingsPanel.spec.ts (PBS-ALIGN).
+  'stock-prep-pull-batch-settings-status',
+  'stock-prep-pull-batch-settings-set',
+  'stock-prep-project-pull-batch-settings-set',
   // S3 (R-37): the project-level fields form and its 「保存」 live on 项目备料页's sheet-state line, the
   // 「刷新项目总览」 button on 今天要处理's project-sheets line — OPERATE, each rendered only once the
   // server answered with the switch on. Their alignment, both directions, per actor, is asserted on
