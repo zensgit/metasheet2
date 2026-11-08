@@ -2,8 +2,9 @@
 //   - POST /issue-confirm-writeback: the generic 404 while the switch is OFF (no port call), the closed body, the closed
 //     values-free reply projection;
 //   - the owner runtime: the write-back binding members come together or not at all, the enabled bit, DISABLED before
-//     any proof, the live proof BEFORE the capability is even created, the closed run input, and the send port gets the
-//     host re-check only from a binding that carries the capability;
+//     any proof, the live proof BEFORE the capability is even created, the closed run input, the send port's original
+//     closed options from every binding, and the post-ACK write-back as a tracked run of its own AFTER submit returned
+//     (D5 a; result first, a failing or hanging hook never changes or delays the result, stop() drains it);
 //   - the D13 a role rule (pure) and the re-check's refusal of a foreign scope before any transaction.
 // The real-PG proofs are tests/integration/stock-preparation-yida-issue-confirm-writeback-realdb.test.ts.
 import { EventEmitter } from 'node:events'
@@ -178,15 +179,160 @@ describe('owner runtime: the write-back members', () => {
     await expect(f.runtime.issueConfirmWriteback(actor, input as never)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
     expect([f.calls.transaction, f.calls.create]).toEqual([0, 0])
   })
-  it('submit hands the send port the host re-check ONLY when the binding carries the capability', async () => {
-    const plain = runtimeFixture()
-    await plain.runtime.createPluginCapability().activate(plain.base as never)
-    await expect(plain.runtime.submit(actor, { grantId: 'g', submissionId: 's' })).rejects.toBeTruthy()
-    expect(plain.calls.sendOptions).toEqual([['authority', 'context', 'fetch', 'readEnablement', 'timeoutMs']])
-    const armed = runtimeFixture()
-    await armed.runtime.createPluginCapability().activate({ ...armed.base, ...armed.writeback } as never)
-    await expect(armed.runtime.submit(actor, { grantId: 'g', submissionId: 's' })).rejects.toBeTruthy()
-    expect(armed.calls.sendOptions).toEqual([['authority', 'context', 'fetch', 'issueConfirmRecheck', 'readEnablement', 'timeoutMs']])
+  it('the send port gets the original closed options from every binding: the post-ACK write-back is the host runtime\'s own run', async () => {
+    for (const armed of [false, true]) {
+      const f = runtimeFixture()
+      await f.runtime.createPluginCapability().activate((armed ? { ...f.base, ...f.writeback } : f.base) as never)
+      await expect(f.runtime.submit(actor, { grantId: 'g', submissionId: 's' })).rejects.toBeTruthy()
+      expect(f.calls.sendOptions).toEqual([['authority', 'context', 'fetch', 'readEnablement', 'timeoutMs']])
+      // A failed send never schedules a write-back.
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect([f.calls.create, f.calls.recheck]).toEqual([0, 0])
+    }
+  })
+})
+
+// ── Y9 r1 M2 ruling (design baseline v2.3 D5 a / §7.3): the post-ACK hook runs AFTER submit returned ────────────────
+const GRANT = 'synthetic-wb-grant'
+function sendResponse(options: { reused?: boolean; status?: string; ledgerId?: string } = {}) {
+  const status = options.status ?? 'acknowledged'
+  const approval = Object.freeze({ grantId: GRANT, operationId: 'synthetic-wb-op', rowKey: 'synthetic-wb-row', targetRef: 'synthetic-wb-target',
+    approvedAt: 1, expiresAt: 2, maxAttempts: 1, remainingAttempts: 0, status: 'admitted', revoked: false,
+    admissionId: 'synthetic-wb-admission', ledgerId: LEDGER, canSend: false, externalWriteAttempted: false })
+  return { approval, delivery: { id: options.ledgerId ?? LEDGER, status, durable: true }, reused: options.reused ?? false, status,
+    externalWriteAttempted: !options.reused, businessVerified: false, durable: true }
+}
+type Deferred = { promise: Promise<void>; release(): void }
+function deferred(): Deferred {
+  let release!: () => void
+  const promise = new Promise<void>(resolve => { release = resolve })
+  return { promise, release }
+}
+const pause = (ms: number) => new Promise<'PAUSED'>(resolve => setTimeout(() => resolve('PAUSED'), ms))
+function hookFixture(options: { run?: (input: unknown) => Promise<unknown>; response?: () => unknown; capability?: boolean } = {}) {
+  const calls = { runs: [] as unknown[], contexts: [] as unknown[], warnings: [] as string[], settledAtRunStart: [] as boolean[], sends: 0 }
+  const state = { sendSettled: false }
+  const runtime = createYidaOwnerRuntime({
+    database: { async transaction() { throw new Error('SYNTHETIC_DATABASE_UNAVAILABLE') } },
+    security: { async encrypt() { throw new Error('NO') }, async decrypt() { throw new Error('NO') } },
+    fetch: (() => { throw new Error('NO_NETWORK') }) as unknown as typeof fetch,
+    readEnablement: () => 'true',
+    issueConfirmRecheck: async () => true,
+    warn: code => { calls.warnings.push(code) },
+  })
+  const primitives = Object.fromEntries(PRIMITIVE_KEYS.map(key => [key, () => { throw new Error('NO_PRIMITIVE_IO') }]))
+  const binding = {
+    createPrimitives: () => primitives,
+    createSendPort: () => ({ async submit() { calls.sends++; return options.response ? options.response() : sendResponse() } }),
+    ...(options.capability === false ? {} : {
+      createIssueConfirmWriteback: (input: { context: unknown }) => {
+        calls.contexts.push(input.context)
+        return { run: (request: unknown) => {
+          calls.settledAtRunStart.push(state.sendSettled)
+          calls.runs.push(request)
+          return options.run ? options.run(request) : Promise.resolve({ enabled: true, results: [] })
+        } }
+      },
+      issueConfirmWritebackEnabled: () => true,
+    }),
+  }
+  async function send() {
+    const pending = runtime.submit(actor, { grantId: GRANT, submissionId: 'synthetic-wb-submission' })
+    pending.then(() => { state.sendSettled = true }, () => { state.sendSettled = true })
+    return pending
+  }
+  return { runtime, binding, calls, send }
+}
+async function until(predicate: () => boolean, ms = 2000) {
+  const deadline = Date.now() + ms
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('SYNTHETIC_WAIT_TIMEOUT')
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+}
+
+describe('owner runtime: the post-ACK write-back is a tracked run AFTER submit returned (D5 a)', () => {
+  it('result first: the send resolves while the hook is still parked, and the hook starts only after the send settled', async () => {
+    const gate = deferred()
+    const f = hookFixture({ run: async () => { await gate.promise; return { enabled: true, results: [] } } })
+    await f.runtime.createPluginCapability().activate(f.binding as never)
+    const outcome = await Promise.race([f.send(), pause(1000)])
+    expect(outcome).not.toBe('PAUSED')
+    expect((outcome as { status: string }).status).toBe('acknowledged')
+    await until(() => f.calls.runs.length === 1)
+    // The hook began strictly after the send's promise had settled; it is still parked now.
+    expect(f.calls.settledAtRunStart).toEqual([true])
+    expect(f.calls.runs).toEqual([{ ledgerIds: [LEDGER] }])
+    expect(f.calls.contexts).toEqual([actor])
+    // Released before stop(), the run completes on its own: no warning. (Released only after stop() began, its
+    // post-run checkpoint answers CANCELLED — the hanging-hook case below.)
+    gate.release()
+    await pause(30)
+    await f.runtime.stop()
+    expect(f.calls.warnings).toEqual([])
+  })
+  it('a failing hook (throw or rejection) neither changes nor delays the send result; one fixed values-free warning', async () => {
+    const plain = hookFixture({ capability: false })
+    await plain.runtime.createPluginCapability().activate(plain.binding as never)
+    const expected = await plain.send()
+    for (const run of [
+      () => { throw new Error('SYNTHETIC_HOOK_THROW DEMO-P1') },
+      () => Promise.reject(new Error('SYNTHETIC_HOOK_REJECT DEMO-P1')),
+      () => Promise.resolve({ enabled: true, results: [{ ledgerId: LEDGER, kind: 'outcome', outcome: 'written', recorded: true, projectNo: 'DEMO-P1' }] }),
+    ]) {
+      const f = hookFixture({ run })
+      await f.runtime.createPluginCapability().activate(f.binding as never)
+      const result = await Promise.race([f.send(), pause(1000)])
+      expect(result).toEqual(expected)
+      await until(() => f.calls.warnings.length === 1)
+      expect(f.calls.warnings).toEqual(['YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED'])
+      await f.runtime.stop()
+    }
+  })
+  it('a hanging hook delays nothing but stop(): stop() waits for the in-flight hook within the barrier, then resolves', async () => {
+    const gate = deferred()
+    const f = hookFixture({ run: async () => { await gate.promise; return { enabled: true, results: [] } } })
+    await f.runtime.createPluginCapability().activate(f.binding as never)
+    expect((await Promise.race([f.send(), pause(1000)]) as { status: string }).status).toBe('acknowledged')
+    // A second send is not held up by the first one's parked hook either.
+    expect((await Promise.race([f.send(), pause(1000)]) as { status: string }).status).toBe('acknowledged')
+    await until(() => f.calls.runs.length === 2)
+    let stopped = false
+    const stopping = f.runtime.stop().then(() => { stopped = true })
+    expect(await Promise.race([stopping.then(() => 'STOPPED'), pause(100)])).toBe('PAUSED')
+    expect(stopped).toBe(false)
+    gate.release()
+    await stopping
+    expect(stopped).toBe(true)
+  })
+  it.each([
+    ['a reused submit (history only)', { reused: true }],
+    ['outcome_unknown', { status: 'outcome_unknown' }],
+    ['prepared', { status: 'prepared' }],
+    ['not_sent', { status: 'not_sent' }],
+    ['a delivery row that is not this grant\'s ledger row', { ledgerId: '66666666-6666-4666-8666-666666666666' }],
+  ])('%s never schedules a write-back', async (_name, response) => {
+    const f = hookFixture({ response: () => sendResponse(response) })
+    await f.runtime.createPluginCapability().activate(f.binding as never)
+    await f.send()
+    await pause(30)
+    expect([f.calls.runs.length, f.calls.contexts.length]).toEqual([0, 0])
+    await f.runtime.stop()
+  })
+  it('a binding without the capability never schedules; a send cancelled by stop() schedules nothing', async () => {
+    const plain = hookFixture({ capability: false })
+    await plain.runtime.createPluginCapability().activate(plain.binding as never)
+    await plain.send()
+    await pause(30)
+    expect(plain.calls.warnings).toEqual([])
+    const f = hookFixture()
+    await f.runtime.createPluginCapability().activate(f.binding as never)
+    const sent = f.runtime.submit(actor, { grantId: GRANT, submissionId: 'synthetic-wb-submission' })
+    const stopping = f.runtime.stop()
+    await expect(sent).rejects.toBeTruthy()
+    await stopping
+    await pause(30)
+    expect([f.calls.sends, f.calls.runs.length, f.calls.warnings.length]).toEqual([0, 0, 0])
   })
 })
 

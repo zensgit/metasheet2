@@ -192,7 +192,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     return value
   }
   type World = { runtime: Runtime; fake: FetchDouble; env: Record<string, string | undefined>; targetRef: string
-    crashHookOnce: boolean; capability: Capability; stop(): Promise<void> }
+    crashHookOnce: boolean; capability: Capability; runs: Promise<Result>[]; warnings: string[]; stop(): Promise<void> }
   let world: World | undefined
   async function compose(options: { crashHookOnce?: boolean; env?: Record<string, string | undefined> } = {}): Promise<World> {
     const db = createDb({ database: pluginDatabase })
@@ -205,26 +205,34 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
       multitable: () => ({ records: hostRecords(), provisioning: { resolveFieldIds: async ({ projectId, objectId, fieldIds }: Row) =>
         resolveFieldIds(String(projectId), String(objectId), fieldIds as string[]) } }) })
     const state = { crashed: false }
-    // Crash test (a): the write-back executor the hook reaches throws on its FIRST call (the crash point after the send
-    // settled and before the write-back), every later call is the real one.
-    const wrapped: Capability = options.crashHookOnce ? {
+    // Every write-back run (the post-ACK run the host schedules after submit returned, and the recovery entry's) is
+    // recorded so a test can wait for the detached post-ACK run to settle before it asserts (D5 a: the send result no
+    // longer waits for it). Crash test (a): with crashHookOnce, the FIRST run (the post-ACK one — the crash point after
+    // the send settled and before the write-back) throws; every later call is the real one.
+    const wrapped: Capability = {
       enabled: () => capability.enabled(),
       create: (input: unknown) => {
         const real = capability.create(input)
-        return { run: async (request?: unknown) => {
-          if (!state.crashed) { state.crashed = true; throw new Error('SYNTHETIC_CRASH_BEFORE_WRITEBACK') }
-          return real.run(request)
+        return { run: (request?: unknown) => {
+          const pending = (async () => {
+            if (options.crashHookOnce && !state.crashed) { state.crashed = true; throw new Error('SYNTHETIC_CRASH_BEFORE_WRITEBACK') }
+            return real.run(request)
+          })()
+          runs.push(pending)
+          return pending
         } }
       },
-    } : capability
+    }
+    const runs: Promise<Result>[] = []
     const fake = http()
+    const warnings: string[] = []
     const runtime = createRuntime({ database: hostDatabase, security, fetch: fake.fetch, readEnablement: () => 'true',
-      reauthorizeSourceBinding: reauthorizer(), timeoutMs: 10000 })
+      reauthorizeSourceBinding: reauthorizer(), timeoutMs: 10000, warn: (code: string) => { warnings.push(code) } })
     // index.cjs hands the binding a frozen, bound security pair (own data properties only).
     const bound = Object.freeze({ encrypt: security.encrypt.bind(security), decrypt: security.decrypt.bind(security) })
     const binding = createBinding({ db, security: bound, issueConfirmWriteback: wrapped })
     const handle = await runtime.createPluginCapability().activate(binding)
-    world = { runtime, fake, env, targetRef: '', crashHookOnce: Boolean(options.crashHookOnce), capability,
+    world = { runtime, fake, env, targetRef: '', crashHookOnce: Boolean(options.crashHookOnce), capability, runs, warnings,
       async stop() { await handle.stop(); await runtime.stop() } }
     return world
   }
@@ -294,11 +302,25 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     }
     return made
   }
-  async function sendOne(input: unknown, submissionId = 'synthetic-submission') {
+  // D5 a: an acknowledged send answers BEFORE its post-ACK write-back starts; by default sendOne then waits for that
+  // detached run to start and settle, so the assertions that follow see its effects (settle: false leaves it running).
+  async function sendOne(input: unknown, submissionId = 'synthetic-submission', options: { settle?: boolean } = {}) {
     const made = await draft(input)
     const grant = await world!.runtime.approve(actor, { operationId: made.operationId, rowKey: made.rows[0].rowKey, confirmationId: 'synthetic-confirmation' })
+    const started = world!.runs.length
     const result = await world!.runtime.submit(actor, { grantId: grant.grantId, submissionId })
+    if (options.settle !== false && result.status === 'acknowledged' && result.reused === false) await settleAfterAck(started)
     return { made, grant, result, request: { grantId: grant.grantId, submissionId } }
+  }
+  async function settleAfterAck(started: number) {
+    const deadline = Date.now() + 8000
+    while (world!.runs.length <= started) {
+      if (Date.now() > deadline) throw new Error('SYNTHETIC_POST_ACK_RUN_NEVER_STARTED')
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    await Promise.allSettled(world!.runs)
+    // The host run retires after the plugin run settled (its own checkpoint and dependency drain).
+    await new Promise(resolve => setTimeout(resolve, 20))
   }
   const ledgerRow = async (id: string) => (await tableRows(LEDGER)).find(row => row.id === id)!
   const auditsOf = async (id: string) => (await tableRows(LEDGER_AUDIT)).filter(row => row.ledger_id === id).map(row => String(row.event)).sort()
@@ -431,8 +453,9 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     await compose({ crashHookOnce: true })
     const before = await cell()
     const { grant, result, request } = await sendOne(boundInput(0))
-    // The hook's executor threw: the send's answer is still the acknowledged one.
+    // The hook's executor threw: the send's answer is still the acknowledged one; the host logged one fixed code.
     expect([result.status, result.reused, result.durable]).toEqual(['acknowledged', false, true])
+    expect(world!.warnings).toEqual(['YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED'])
     const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
     expect((await ledgerRow(ledgerId)).status).toBe('acknowledged')
     expect(await auditsOf(ledgerId)).toEqual(['acknowledgement', 'claim', 'prepare'])
@@ -631,6 +654,70 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'permission_revoked']])
     expect(patches).toEqual([])
     expect((await cell()).date).toBe(null)
+  })
+
+  it('retryable (B.4): while another holder (purpose small_apply) holds the sheet write lease, the write-back is retryable STOCK_PREP_PROJECT_WRITE_LOCKED — no patch, NO trace row; after release a retry writes the date once', async () => {
+    await compose({ crashHookOnce: true })
+    const before = await cell()
+    const { grant, result } = await sendOne(boundInput(0))
+    const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
+    const lock = createWriteLock({ db: createDb({ database: pluginDatabase }) }) as {
+      scopeKeyFor(sheetId: string): string
+      withProjectWriteLease(scopeKey: string, options: Row, fn: () => Promise<unknown>): Promise<unknown>
+    }
+    let busy: Result | undefined
+    await lock.withProjectWriteLease(lock.scopeKeyFor(sheetId()), { purpose: 'small_apply', runId: randomUUID(), tenantId: TENANT }, async () => {
+      busy = await world!.runtime.issueConfirmWriteback(actor, {})
+    })
+    expect(busy!.results.map(entry => [entry.ledgerId, entry.kind, entry.code])).toEqual([[ledgerId, 'retryable', 'STOCK_PREP_PROJECT_WRITE_LOCKED']])
+    expect(patches).toEqual([])
+    expect(await tableRows(TRACE)).toEqual([])
+    expect([(await cell()).date, (await cell()).version]).toEqual([null, before.version])
+    // The holder released: a retry writes the date once, with one written trace; a further retry has nothing to do.
+    expect(outcomeOf(await world!.runtime.issueConfirmWriteback(actor, {}))).toEqual(['written'])
+    const after = await cell()
+    expect([after.date, after.version]).toEqual([businessDay(await ackAt(ledgerId)), before.version + 1])
+    expect(after.data[fld().warehouseConfirmation]).toBe(HUMAN_NOTE)
+    expect(patches).toHaveLength(1)
+    expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
+    expect((await world!.runtime.issueConfirmWriteback(actor, {})).results).toEqual([])
+    expect(patches).toHaveLength(1)
+    expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
+  })
+
+  it('D5 a on real PostgreSQL: the send answers while its post-ACK write-back is parked; stop() waits for that in-flight run within the barrier; the stopped run writes nothing and recovery fills the date once', async () => {
+    await compose()
+    // Park the post-ACK run at its first sheet-lease statement (the send itself never touches the lease table).
+    const parked = { ...latch(), pattern: new RegExp(`\\b${LOCK}\\b`) }
+    gateOnce = parked
+    const { grant, result } = await sendOne(boundInput(0), 'synthetic-submission', { settle: false })
+    const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
+    expect([result.status, result.reused, result.durable]).toEqual(['acknowledged', false, true])
+    await waitFor(parked)
+    expect((await cell()).date).toBe(null)
+    expect(await tableRows(TRACE)).toEqual([])
+    let stopped = false
+    const stopping = world!.stop().then(() => { stopped = true })
+    await new Promise(resolve => setTimeout(resolve, 300))
+    expect(stopped).toBe(false)
+    parked.release()
+    await stopping
+    expect(stopped).toBe(true)
+    await Promise.allSettled(world!.runs)
+    // Cancelled by the stop barrier: no patch, no trace (retryable inserts none), the lease is free again.
+    expect(patches).toEqual([])
+    expect(await tableRows(TRACE)).toEqual([])
+    expect((await cell()).date).toBe(null)
+    expect((await tableRows(LOCK)).map(row => row.lease_id ?? null)).toEqual([null])
+    // The next process: the owner recovery entry fills the acknowledgement audit's day once.
+    const targetRef = world!.targetRef
+    world = undefined
+    await compose({ env: { INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS: targetRef } })
+    world!.targetRef = targetRef
+    expect(outcomeOf(await world!.runtime.issueConfirmWriteback(actor, {}))).toEqual(['written'])
+    expect((await cell()).date).toBe(businessDay(await ackAt(ledgerId)))
+    expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
+    expect(world!.fake.form).toBe(0)
   })
 
   it('the trace table is append-only on real PostgreSQL: UPDATE, DELETE and TRUNCATE are refused, the row stays', async () => {

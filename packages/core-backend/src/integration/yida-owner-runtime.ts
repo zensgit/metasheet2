@@ -20,8 +20,6 @@ export type YidaOwnerRuntimeBinding = Readonly<{
   createSendPort(options: Readonly<{
     context: YidaOwnerActor; authority: Authority; fetch: typeof fetch
     readEnablement: () => unknown; timeoutMs: number
-    // Y9: present only when the binding carries the write-back capability (it arms the post-ACK hook).
-    issueConfirmRecheck?: IssueConfirmRecheckPort
   }>): { submit: Send; inspect?(input: unknown): Promise<unknown> }
   // YiDa 发料确认日期回写 (design baseline v2.3 §7.3, slice Y9): optional, both or neither.
   createIssueConfirmWriteback?(options: Readonly<{ context: YidaOwnerActor; recheck: IssueConfirmRecheckPort }>): { run(input: unknown): Promise<unknown> }
@@ -47,6 +45,9 @@ export type YidaOwnerRuntimeDependencies = {
   // Y9 (design baseline v2.3 §7.3, D13 a): the write-back's live re-check, run on the run-scoped database. Defaults to the
   // real host check (yida-issue-confirm-writeback-authority.ts); a unit suite may substitute it. Never a request input.
   issueConfirmRecheck?: YidaIssueConfirmRecheck
+  // Y9: where a failed post-ACK write-back run is reported — one fixed, values-free code, never an id or a message.
+  // index.ts hands the server log (outside any request context); absent = silent. A throwing sink is ignored.
+  warn?: (code: string) => void
 }
 export type YidaOwnerIssueConfirmWritebackInput = Readonly<{ ledgerIds?: readonly string[]; limit?: number }>
 export type YidaOwnerPrepareDraftInput = Readonly<{ config: unknown; rowsText: string; allocation?: unknown; targetRef?: string; sourceBinding?: unknown }>
@@ -81,6 +82,8 @@ const WRITEBACK_RESULT_KINDS = new Set(['skip', 'retryable', 'outcome'])
 const WRITEBACK_MAX_BATCH = 100
 const CODE = /^[A-Z][A-Z0-9_]{0,95}$/
 const DAY = /^\d{4}-\d{2}-\d{2}$/
+// Y9 (D5 a): the only text a failed post-ACK write-back run ever logs.
+export const YIDA_ISSUE_CONFIRM_HOOK_FAILED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED'
 
 export class YidaOwnerRuntimeError extends Error {
   readonly code: string
@@ -177,6 +180,15 @@ function submitView(value: unknown, grantId: string): Readonly<Row> {
   // material or additional dependency field cannot escape this boundary.
   return Object.freeze({ ...raw, approval: metadata(raw.approval, grantId, false), delivery })
 }
+// Y9 (D5 a): the ledger row a closed submit view arms the post-ACK write-back for — only a durable acknowledged CREATE of
+// THIS grant's ledger row by a runner of THIS call; never prepared / dispatching / not_sent / outcome_unknown /
+// state_unconfirmed, never a reused submit (history only). Anything else: undefined.
+function acknowledgedLedgerId(view: Readonly<Row>): string | undefined {
+  const delivery = view.delivery as Readonly<Row> | null, approval = view.approval as Readonly<Row>
+  if (view.reused !== false || view.status !== 'acknowledged' || view.durable !== true || delivery === null
+    || delivery.status !== 'acknowledged' || typeof delivery.id !== 'string' || delivery.id !== approval.ledgerId) return undefined
+  return delivery.id
+}
 // Y9: the write-back run's values-free projection — ledger ids, closed kinds, fixed codes / reasons / outcomes, the
 // written day and its zone. Anything else (a project number, a key, a message) cannot cross this boundary.
 function writebackView(value: unknown): Readonly<Row> {
@@ -237,9 +249,12 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
   const readUnboundTestTargetRefs = dependencies.readUnboundTestTargetRefs ?? (() => undefined)
   const reauthorizeSourceBinding = dependencies.reauthorizeSourceBinding
   const issueConfirmRecheck = dependencies.issueConfirmRecheck ?? yidaIssueConfirmLiveRecheck
+  const warnSink = dependencies.warn ?? (() => {})
+  const warn = (code: string) => { try { warnSink(code) } catch { /* reporting never fails anything */ } }
   const timeoutMs = dependencies.timeoutMs ?? 10000
   if (typeof fetcher !== 'function' || typeof readEnablement !== 'function' || typeof readMultiTarget !== 'function'
     || typeof readUnboundTestTargetRefs !== 'function' || typeof issueConfirmRecheck !== 'function' || types.isProxy(issueConfirmRecheck)
+    || typeof warnSink !== 'function'
     || (reauthorizeSourceBinding !== undefined && (typeof reauthorizeSourceBinding !== 'function' || types.isProxy(reauthorizeSourceBinding)))
     || !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 60000) fail('INPUT')
   // Exact literal, never coerced; a throwing or async switch is OFF.
@@ -371,6 +386,21 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
       try { closeError(error) } catch (closed) { return rejected<T>(closed) }
     }
   }
+  // Y9 (D5 a): the post-ACK write-back of ONE acknowledged ledger row, a tracked run of the active registration. It needs
+  // neither the send switch nor the send authority: like the recovery entry it creates the plugin's bound write-back with
+  // the host live re-check on ITS OWN run database (so a stop() checkpoint cancels it and drain waits for it), and the
+  // plugin core reads INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED first. Its outcome is the module's trace / no-trace;
+  // a rejection is logged as one fixed values-free code and never reaches anyone.
+  function issueConfirmAfterAcknowledged(owner: YidaOwnerActor, ledgerId: string): void {
+    const pending = execute(owner, {}, false, async (_authority, state, fixed, _checkpoint, _signal, _tracked, database) => {
+      if (!state.createIssueConfirmWriteback) return undefined
+      const writeback = record(state.createIssueConfirmWriteback(Object.freeze({ context: fixed,
+        recheck: (request: unknown) => issueConfirmRecheck(database, fixed, request) })), ['run'])
+      if (typeof writeback.run !== 'function' || types.isProxy(writeback.run)) fail('UNAVAILABLE')
+      return writebackView(await (writeback.run as (input: unknown) => Promise<unknown>)({ ledgerIds: [ledgerId] }))
+    })
+    Promise.prototype.then.call(pending, undefined, () => warn(YIDA_ISSUE_CONFIRM_HOOK_FAILED))
+  }
   function input<T>(capture: () => T, invoke: (captured: T) => Promise<unknown>): Promise<unknown> {
     try { return invoke(capture()) }
     catch (error) {
@@ -463,27 +493,42 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
       return input(() => {
         const parsed = record(supplied, ['grantId', 'submissionId'])
         return { grantId: id(parsed.grantId), submissionId: id(parsed.submissionId) }
-      }, parsed => execute(context, options, true, async (authority, state, fixed, checkpoint, signal, tracked, database) => {
-        // Gate 6 (R-71 ⑦.1, c4): checkpoint BEFORE the request only. A Response that has already
-        // been received is a fact about the remote system; re-checking after it resolved would turn
-        // a received 2xx into outcome_unknown when the switch flipped or the host closed mid-flight.
-        // The dependency is still tracked so drain waits for it, and the pre-output checkpoint
-        // below still refuses to expose the result while OFF/closed (the ledger is the record).
-        const boundFetch: typeof fetch = async (request, init) => { checkpoint(); return tracked(fetcher(request, init)) }
-        // Y9: a binding with the write-back capability also gets the live re-check (on THIS run's database, so drain
-        // waits for it), which arms its best-effort post-ACK hook. Never offered to a binding without the capability.
-        const recheck = state.createIssueConfirmWriteback
-          ? { issueConfirmRecheck: (request: unknown) => issueConfirmRecheck(database, fixed, request) } : {}
-        const port = record(state.createSendPort(Object.freeze({ context: fixed, authority, fetch: boundFetch, readEnablement, timeoutMs,
-          ...recheck })),
-          ['submit', 'inspect'], ['submit'])
-        if (typeof port.submit !== 'function' || types.isProxy(port.submit)) fail('UNAVAILABLE')
-        const submit = port.submit as Send
-        checkpoint()
-        const response = await submit(parsed, { signal })
-        checkpoint()
-        return submitView(response, parsed.grantId)
-      }))
+      }, parsed => {
+        let received: { actor: YidaOwnerActor; response: unknown } | undefined
+        const sent = execute(context, options, true, async (authority, state, fixed, checkpoint, signal, tracked) => {
+          // Gate 6 (R-71 ⑦.1, c4): checkpoint BEFORE the request only. A Response that has already
+          // been received is a fact about the remote system; re-checking after it resolved would turn
+          // a received 2xx into outcome_unknown when the switch flipped or the host closed mid-flight.
+          // The dependency is still tracked so drain waits for it, and the pre-output checkpoint
+          // below still refuses to expose the result while OFF/closed (the ledger is the record).
+          const boundFetch: typeof fetch = async (request, init) => { checkpoint(); return tracked(fetcher(request, init)) }
+          const port = record(state.createSendPort(Object.freeze({ context: fixed, authority, fetch: boundFetch, readEnablement, timeoutMs })),
+            ['submit', 'inspect'], ['submit'])
+          if (typeof port.submit !== 'function' || types.isProxy(port.submit)) fail('UNAVAILABLE')
+          const submit = port.submit as Send
+          checkpoint()
+          const response = await submit(parsed, { signal })
+          // Y9: kept for the after-submit step only (a binding with the write-back capability); read nowhere else.
+          if (state.createIssueConfirmWriteback) received = { actor: fixed, response }
+          checkpoint()
+          return submitView(response, parsed.grantId)
+        })
+        // Y9 — design baseline v2.3 D5 a / §7.3: the post-ACK write-back runs AFTER submit has returned its result. It is
+        // scheduled only once the send's own run has settled (its result is final and its dependencies drained), as a
+        // run of its own in this registration, so deactivate / stop drain it like any run; the send result never waits
+        // for it and never reflects its outcome. A refused schedule (host closing, run cap) or a failed run leaves the
+        // date to the owner recovery entry (POST /issue-confirm-writeback), whose day is the acknowledgement audit's.
+        // Scheduled on either settlement: the acknowledgement is durable even when the send run's own exit refuses to
+        // expose it (the send switch flipped OFF after the receipt); a closed host refuses the schedule by itself.
+        const afterSubmit = () => {
+          if (received === undefined) return
+          let ledgerId: string | undefined
+          try { ledgerId = acknowledgedLedgerId(submitView(received.response, parsed.grantId)) } catch { return }
+          if (ledgerId !== undefined) issueConfirmAfterAcknowledged(received.actor, ledgerId)
+        }
+        Promise.prototype.then.call(sent, afterSubmit, afterSubmit)
+        return sent
+      })
     },
     // Values-free display bit for a response the caller already authorized
     // (owner + live admin). Same exact-literal source as enabled(); never

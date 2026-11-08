@@ -5,9 +5,10 @@
 //
 // Design baseline v2.3 §7.3 and the frozen ⑦.4 plan §2.2 / §3 (R-71 ④ Q5). Slice Y9a: the decision, the
 // executor with injected dependencies, the trace store and the two switches. Slice Y9 wires it: the real
-// ports are lib/yida-issue-confirm-writeback-ports.cjs (assembled in index.cjs), the runtime factory hands
-// the capability to the host runtime, the send port calls it best-effort after an acknowledged CREATE, and
-// the owner recovery entry is POST /api/integration/yida-owner/issue-confirm-writeback.
+// ports are lib/yida-issue-confirm-writeback-ports.mjs (assembled in index.cjs), the runtime factory hands
+// the capability to the host runtime, the host owner runtime runs it as a tracked run of its own AFTER an
+// acknowledged CREATE's submit has returned (D5 a; stop() drains it), and the owner recovery entry is
+// POST /api/integration/yida-owner-send/issue-confirm-writeback.
 //
 // TWO INDEPENDENT STATE MACHINES (§7.3).
 //   * The delivery ledger (prepared → dispatching → acknowledged / outcome_unknown; prepared → not_sent)

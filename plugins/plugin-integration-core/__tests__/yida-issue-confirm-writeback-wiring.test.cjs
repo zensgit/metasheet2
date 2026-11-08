@@ -2,7 +2,7 @@
 
 // YiDa 发料确认日期回写 — the WIRING of the Y9a core (slice Y9; design baseline v2.3 §7.3, frozen ⑦.4 plan §2.2).
 // Unit level, no PostgreSQL: the ports module (ledger reader, row source, registry, sheets), the runtime-factory
-// capability, the send-port hook's closed input and its never-on-replay rule, the import closure (the write-back can
+// capability, the send port's unchanged closed input (the post-ACK run is the host runtime's), the import closure (the write-back can
 // never reach a runner, a form transport or a token client), and the Y9a r2 MEDIUM with a HOST-FAITHFUL records port
 // (an absent expectedVersion is an unconditional write, exactly packages/core-backend/src/multitable/records.ts).
 // The real-PG versions (crash tests (a)/(b), selectors, flag matrix, append-only) are in
@@ -245,36 +245,31 @@ test('factory: with the capability the binding gains exactly two members; withou
   }
   const send = { context: actor, authority: { async admitForExecution() {}, takeExecution() {}, async observe() {} },
     fetch: () => { throw new Error('NO_NETWORK') }, readEnablement: () => 'false', timeoutMs: 10000 }
-  // Without the capability the host's re-check key is not part of the closed send options.
-  assert.throws(() => plain.createSendPort({ ...send, issueConfirmRecheck: async () => true }), (error) => error.code === 'YIDA_OWNER_RUNTIME_INPUT')
-  assert.deepEqual(Object.keys(binding.createSendPort({ ...send, issueConfirmRecheck: async () => true })).sort(), ['inspect', 'submit'])
-  // A capability whose create() throws (or answers a malformed run) leaves the send port intact (no hook).
+  // D5 a (Y9 r1 M2 ruling): the post-ACK write-back is the HOST runtime's own tracked run after submit returned, so the
+  // send port is the original with or without the capability — no re-check key, no hook key, for any binding.
+  for (const target of [plain, binding]) {
+    assert.deepEqual(Object.keys(target.createSendPort(send)).sort(), ['inspect', 'submit'])
+    assert.throws(() => target.createSendPort({ ...send, issueConfirmRecheck: async () => true }), (error) => error.code === 'YIDA_OWNER_RUNTIME_INPUT')
+  }
+  // A capability whose create() throws: the bound write-back is refused (the host logs and leaves it to recovery);
+  // the binding and its send port are unaffected.
   const broken = create({ db, security, issueConfirmWriteback: { enabled: () => { throw new Error('X') }, create() { throw new Error('BROKEN') } } })
   assert.equal(broken.issueConfirmWritebackEnabled(), false)
-  assert.deepEqual(Object.keys(broken.createSendPort({ ...send, issueConfirmRecheck: async () => true })).sort(), ['inspect', 'submit'])
+  assert.throws(() => broken.createIssueConfirmWriteback({ context: actor, recheck: async () => true }), (error) => error.code === 'YIDA_OWNER_RUNTIME_UNAVAILABLE')
+  assert.deepEqual(Object.keys(broken.createSendPort(send)).sort(), ['inspect', 'submit'])
   assert.ok(created >= 1)
 })
 
-test('send port: the hook is closed input, and a REUSED submit (history only, no runner) never calls it', async () => {
+test('send port: no write-back member at all — the hook key is not part of its closed options (D5 a: the host runs it after submit)', async () => {
   const { createYidaOwnerSendPort } = await sendPortPromise
   const scope = { tenantId: TENANT, workspaceId: null, ownerId: OWNER, actorId: OWNER }
-  const approval = Object.freeze({ grantId: 'grant-syn', operationId: 'op-syn', rowKey: 'row-syn', targetRef: TARGET, approvedAt: 1, expiresAt: 2,
-    maxAttempts: 1, remainingAttempts: 0, status: 'admitted', revoked: false, admissionId: 'adm-syn', ledgerId: 'ledger-syn',
-    canSend: false, externalWriteAttempted: false })
-  let hook = 0, takes = 0
   const options = { db: {}, context: scope, fetch: () => { throw new Error('NO_NETWORK') }, readEnablement: () => 'true',
-    authority: {
-      async admitForExecution() { return { approval: Object.freeze({ ...approval, reused: true }), permit: null } },
-      takeExecution() { takes += 1; throw new Error('NO_RUNNER') },
-      async observe() { return { approval, delivery: { id: 'ledger-syn', status: 'acknowledged', durable: true } } },
-    },
-    issueConfirmWriteback: { async run() { hook += 1; return { enabled: true, results: [] } } } }
-  const result = await createYidaOwnerSendPort(options).submit({ grantId: 'grant-syn', submissionId: 'sub-syn' })
-  assert.deepEqual([result.status, result.reused], ['acknowledged', true])
-  assert.deepEqual([hook, takes], [0, 0])
-  for (const value of [null, 1, {}, { run: 'x' }, new Proxy({ async run() {} }, {})]) {
-    assert.throws(() => createYidaOwnerSendPort({ ...options, issueConfirmWriteback: value }), (error) => error.code === 'YIDA_OWNER_SEND_INPUT')
-  }
+    authority: { async admitForExecution() {}, takeExecution() {}, async observe() {} } }
+  assert.deepEqual(Object.keys(createYidaOwnerSendPort(options)).sort(), ['inspect', 'submit'])
+  assert.throws(() => createYidaOwnerSendPort({ ...options, issueConfirmWriteback: { async run() {} } }), (error) => error.code === 'YIDA_OWNER_SEND_INPUT')
+  // The source has no write-back reference left (the whole post-ACK path lives in the host runtime).
+  const source = fs.readFileSync(path.join(LIB, 'yida-owner-send-port.mjs'), 'utf8')
+  assert.equal(/issueConfirm|writeback/i.test(source), false)
 })
 
 // ── Y9a review r2 MEDIUM: the module must refuse a records-port row without `version` ────────────────────────────
