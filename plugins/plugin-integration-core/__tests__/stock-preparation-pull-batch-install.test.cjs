@@ -646,7 +646,8 @@ test('IN-17 (M-2B-4 / M-2B-22) abort: a first install with no label written rele
   fresh.log.length = 0
   const released = await IN.runPullBatchInstallRequest(fresh.deps(), { mode: 'abort', confirmProjectNo: PROJECT, approvalRef: 'R-65' })
   assert.deepEqual(released, { mode: 'abort', historyStatus: 'pending', firstInstall: true, settingsReleased: true })
-  assert.ok(fresh.log.indexOf('lease.acquire') < fresh.log.indexOf('host.queryRecords'), 'abort reads under the lease')
+  const acquiredAt = fresh.log.indexOf('lease.acquire')
+  assert.ok(acquiredAt !== -1 && acquiredAt < fresh.log.indexOf('host.queryRecords'), 'abort takes the lease, then reads under it')
   const firstOnly = createWorld({ records: c09() })
   const p2 = await dryRun(firstOnly)
   let done = 0
