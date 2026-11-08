@@ -233,7 +233,7 @@ check('C-06 (R1) the three snapshot-driven large-BOM routes refuse a stale job t
       const at = body.search(new RegExp(`assertLargeBomJobTargetMatchesProjectTarget\\(\\s*${escaped},`))
       assert.notEqual(at, -1, `${handler}: checks ${target} against the registry`)
       // ...before the field probe, the existing-row / foreign-row reads and the write gate.
-      for (const io of ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'readExistingStockPreparationRows(', 'assertStockPrepApplyAllowed(', 'createLargeBomCheckpointApplyJob(', 'runLargeBomCheckpointApplyJobChunk(']) {
+      for (const io of ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'readExistingStockPreparationRows(', 'assertStockPrepApplyAllowed(', 'createLargeBomCheckpointApplyJob(', 'runLargeBomCheckpointApplyJobChunk(', 'prepareLargePlanPullBatch(', 'assertLargeApprovePullBatch(']) {
         const ioAt = body.indexOf(io)
         if (ioAt !== -1) assert.ok(at < ioAt, `${handler}: the staleness check on ${target} precedes ${io}`)
       }

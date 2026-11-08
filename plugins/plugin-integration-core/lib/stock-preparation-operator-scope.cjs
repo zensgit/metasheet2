@@ -216,6 +216,12 @@
 //           record handles); the POST is a WRITE — one field property of that sheet's key column, through the host's
 //           provisioning port in the staging project derived from this scope with no request projectId. A
 //           header-fillable tenant here would read or flip another tenant's project switch.
+//       34. GET  …/projects/:projectNo/target/pull-batch  `stockPreparationProjectPullBatchGet`
+//           批次标识 BI-1b (design §8.7; register R-65), ADMIN. A values-free READ of the proven tenant's project
+//           sheet: whether its two batch columns are present / locked / visible, its pull-batch ledger state and its
+//           row classes (counts). The staging project it reads through is derived (in the shared status-deps helper)
+//           from this scope with no request projectId. A header-fillable tenant here would read another tenant's
+//           sheet state.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins

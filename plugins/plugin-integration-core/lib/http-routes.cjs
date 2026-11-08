@@ -273,6 +273,12 @@ const ROUTES = [
   //                  manual_rows_allowed / manual_rows_disabled.
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows', 'stockPreparationProjectManualRowsGet'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows', 'stockPreparationProjectManualRowsSet'],
+  // 批次标识 BI-1b (design §8.7; register R-65) — THE PULL-BATCH STATUS of one project sheet: whether the two columns
+  // 首次批次 / 本次拉取 are present (db mode), locked and visible in the fill / to-fill views, the ledger state and the
+  // values-free row classes. stock-prep:admin; 404 DISABLED after the gate while the project-sheets switch is off. Reads
+  // only, no audit (the pilot read precedent). The answer is FLAT (`switchOn`, `columns`, … — no `pullBatch` key, P-6);
+  // with the pull-batch switch off it answers from host reads only (no ledger read, no rows read).
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch', 'stockPreparationProjectPullBatchGet'],
   // S3 (ADR §5; register R-37) — the O2(a) PROJECT-LEVEL COLUMNS and the PROJECT OVERVIEW (Q5). All
   // four 404 DISABLED after the gate while the switch is off. The GET / PATCH (OPERATE, as the ADR
   // writes them) are the ONLY surfaces that carry the three free texts (负责人 / 备注 / 计划完成) — the
@@ -554,6 +560,10 @@ const {
   writeBindingFromGeneration,
   writeObservationFromGeneration,
 } = require('./stock-preparation-project-write-lock.cjs')
+// 批次标识 (pull batch) BI-1b (register R-65): the lanes helper (switch, band, evaluations) and the status read. NOT the
+// mvp archive's batch identity below — a different concept (design §3.1).
+const pullBatchLanes = require('./stock-preparation-pull-batch-lanes.cjs')
+const pullBatchStatus = require('./stock-preparation-pull-batch-status.cjs')
 // 备料 batch identity — "物料创建日期(精确到小时)区分同一项目不同批次的物料". Pure and opt-in; see
 // stock-preparation-batch-identity.cjs for why the content-revision digest stays the default.
 const {
@@ -2331,6 +2341,8 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   // the switch library's refusals (typed status + code) answer as themselves, an untyped escape the fixed 500.
   'stockPreparationProjectManualRowsGet',
   'stockPreparationProjectManualRowsSet',
+  // 批次标识 BI-1b (R-65): the pull-batch status — modes, booleans, closed reason tokens, counts, a batch number and label.
+  'stockPreparationProjectPullBatchGet',
   // Batch-refresh step 4 PR-4 (R-59): the six refresh decision routes — their typed refusals (the store's, the
   // lock's, the lanes' and the decision library's) answer as themselves; an untyped escape answers the fixed 500.
   'stockPreparationRefreshHolds',
@@ -4837,6 +4849,8 @@ function requireStockPreparationAudit() {
   // the lane, before any source read — and never silently plans the pre-step-4 way (P3-G2).
   const stockPreparationRefreshGovernance = services.stockPreparationRefreshGovernance || null
   const stockPreparationContinuationStore = services.stockPreparationContinuationStore || null
+  // 批次标识 BI-1b (migration 105; register R-65): the pull-batch ledger store, read only while the pull-batch switch is on.
+  const stockPreparationPullBatchStore = services.stockPreparationPullBatchStore || null
   // Batch-refresh step 4 PR-6: the governed-sheet probe the C6 multitable write-source is built with (index.cjs
   // builds it from the same stores). Absent => the write-source applies its not-wired rule (namespace objects 501).
   const stockPreparationGovernedSheetProbe = services.stockPreparationGovernedSheetProbe || null
@@ -4915,7 +4929,7 @@ function requireStockPreparationAudit() {
         targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
         target: action.target,
       })
-      return tableActionInternals.readExistingStockPreparationRows(getMultitableRecordsApi(), action.target, projectNo)
+      return tableActionInternals.readExistingStockPreparationRows(getMultitableRecordsApi(), action.target, projectNo, { pullBatchBand: pullBatchBandFor(scope.tenantId, action.target) })
     }
     return Object.freeze({
       scope: Object.freeze({ tenantId: scope.tenantId, sheetId: action.target.sheetId, projectNo }),
@@ -5198,6 +5212,9 @@ function requireStockPreparationAudit() {
       // scans the large-BOM job store (the same `context.storage` every large route writes) for this sheet;
       // O-8 reads the pack-install ledger and the host strictly.
       readExistingStockPreparationRows: tableActionInternals.readExistingStockPreparationRows,
+      // 批次标识 BI-1b (readiness v3): the reader band (O-6's read strips like every other) and ONE status read.
+      pullBatchBand: pullBatchBandFor(tenantId, action.target),
+      readPullBatchStatus: () => pullBatchStatus.readPullBatchReadinessStatus(pullBatchStatusDepsFor({ tenantId, projectNo, target: action.target })),
       lock: stockPreparationProjectWriteLock,
       writeScope,
       countOpenLargeJobs: () => countOpenLargeBomCheckpointApplyJobsForSheet({ storage: context.storage, sheetId: action.target.sheetId }),
@@ -6083,6 +6100,61 @@ function requireStockPreparationAudit() {
     const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
     if (!provisioning) return undefined
     return { provisioning, projectId: resolveIntegrationStagingProjectId(tenantId, undefined) }
+  }
+
+  // 批次标识 BI-1b (design §4.4, §6.1, §7.1; register R-65) — THE PULL-BATCH LANE INPUT, server-held, built per request.
+  //   band          the two PHYSICAL band ids the install would create (the host's pure getFieldId derivation), whatever
+  //                 the switch says: every reader strips both cells onto a Symbol (hash-neutral). NEVER throws: a host
+  //                 without provisioning / getFieldId has no band (critic M1) — never a 503 while the switch is off.
+  //   enabled       the pull-batch switch, read HERE per request (the lanes helper is its one reader).
+  //   store         the ledger, only while the switch is on (off => zero ledger IO by construction).
+  //   holderWithin  inside a lease only: the lock's in-transaction holder assert, run FIRST in every ledger transaction
+  //                 the run makes (S6 C-6), so a frozen writer woken after a takeover can neither open nor close a batch.
+  function pullBatchBandFor(tenantId, target) {
+    let projectId
+    try {
+      projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+    } catch {
+      return undefined
+    }
+    return pullBatchLanes.derivePullBatchBand({ provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning, projectId, target })
+  }
+  function pullBatchHolderWithinFor(guard) {
+    const lock = stockPreparationProjectWriteLock
+    if (!guard || typeof guard.hostWriteFence !== 'function' || !lock || typeof lock.assertHolderWithin !== 'function') return null
+    return (trx) => lock.assertHolderWithin(trx, guard.scopeKey, { leaseId: guard.hostWriteFence().leaseId, fencingEpoch: guard.fencingEpoch, reason: 'pull_batch' })
+  }
+  // The status read's server-held inputs (the ADMIN status route, readiness v3, the board stanza): host reads, the band
+  // for the reader strip, and the ledger only while the switch is on (off => no ledger read, no rows read).
+  function pullBatchStatusDepsFor({ tenantId, projectNo, target, enabled = pullBatchLanes.stockPrepPullBatchEnabled() }) {
+    return {
+      enabled,
+      provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
+      projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+      objectId: target && target.objectId,
+      tenantId,
+      sheetId: target && target.sheetId,
+      projectNo,
+      store: enabled ? stockPreparationPullBatchStore : null,
+      recordsApi: getMultitableRecordsApi(),
+      target,
+      readExistingStockPreparationRows: tableActionInternals.readExistingStockPreparationRows,
+      band: pullBatchBandFor(tenantId, target),
+    }
+  }
+  // The chunk's lane, re-bound INSIDE its lease (same switch reading as the probe fold before the lease).
+  function pullBatchLaneInLease(lane, guard) {
+    return Object.freeze({ ...lane, holderWithin: lane.enabled ? pullBatchHolderWithinFor(guard) : null })
+  }
+  function pullBatchContextFor(tenantId, target, { guard } = {}) {
+    const enabled = pullBatchLanes.stockPrepPullBatchEnabled()
+    return Object.freeze({
+      band: pullBatchBandFor(tenantId, target),
+      enabled,
+      store: enabled ? stockPreparationPullBatchStore : null,
+      tenantId,
+      holderWithin: enabled ? pullBatchHolderWithinFor(guard) : null,
+    })
   }
 
   // FRESHNESS-DIVERGENCE NOTICE for the large-BOM job family.
@@ -8068,6 +8140,8 @@ function requireStockPreparationAudit() {
             // Batch-refresh step 4 PR-3a: the governance handle, UNCONDITIONALLY (an unwired service is 501 at
             // consult time, before any source read), bound to this lane's own tenant.
             refreshGovernance: refreshGovernanceFor(dryRunTenantId),
+            // 批次标识 BI-1b: the reader strip and, while the pull-batch switch is on, the band probe and the preview.
+            pullBatch: pullBatchContextFor(dryRunTenantId, action.target),
             // The source->`ext_` mapping, from server config. null when unconfigured, which
             // `computeDryRun` treats as absent — no `ext_` key is produced and the plan is what it was.
             // Configured: the SAME object the apply route passes, so both routes expand the same rows
@@ -8330,6 +8404,8 @@ function requireStockPreparationAudit() {
         // PR-3a: the governance handle (this lane's own tenant); a governed, complete computation reconciles its
         // holds inside the lib, before the audit intent and the ledger write below.
         refreshGovernance: refreshGovernanceFor(tenantId),
+        // 批次标识 BI-1b: the reader strip only (this lane hashes rows).
+        pullBatch: pullBatchContextFor(tenantId, action.target),
       })
       // The audit table's action vocabulary is migration-frozen (9 actions). Decision-candidate
       // generation is a generation run with a fixed operation subtype, not a new action. Audit the
@@ -8442,6 +8518,8 @@ function requireStockPreparationAudit() {
         // PR-3a (TD-22): the governance handle ONLY — a governed project gets the dry-run's strict band and
         // mapping through it; a not-governed archive is planned exactly as before.
         refreshGovernance: refreshGovernanceFor(tenantId),
+        // 批次标识 BI-1b: the reader strip only (the archive revision hashes rows).
+        pullBatch: pullBatchContextFor(tenantId, action.target),
         // B2a. `tenantId` here is the authenticated-user tenant this route already resolved and
         // already scoped the adapter load with — never a query/body carrier.
         b2aTrialRegistry,
@@ -8646,6 +8724,8 @@ function requireStockPreparationAudit() {
               now: Date.now(),
               // I1: the guard of the lease held around this call — one holder CAS before every write.
               projectWriteGuard,
+              // 批次标识 BI-1b: band + switch + ledger + THIS lease's holder assert (built inside the lease callback).
+              pullBatch: pullBatchContextFor(applyTenantId, action.target, { guard: projectWriteGuard }),
             })
           } catch (error) {
             applyFailure = error
@@ -8886,17 +8966,23 @@ function requireStockPreparationAudit() {
       const planGovernance = await consultLargeLane({ tenantId: routeScope.tenantId, projectNo: job.parameters && job.parameters.projectNo, sheetId: action.target.sheetId }, 'large_plan')
       // 目标表字段存在性探针, before the existing-row read below: a deleted column would otherwise
       // come back `undefined` and plan as lineage_mismatch (or not at all on the ADD branch).
-      await tableActionInternals.assertTargetFieldsExist(action, targetFieldExistenceForTenant(routeScope.tenantId))
+      // 批次标识 BI-1b: the reader strip (always) and, while the pull-batch switch is on, the band ids as OPTIONAL probe ids.
+      const planPullBatchLane = pullBatchContextFor(routeScope.tenantId, action.target)
+      const planPullBatchProbe = pullBatchLanes.pullBatchProbeStanza(planPullBatchLane, await tableActionInternals.assertTargetFieldsExist(action, targetFieldExistenceForTenant(routeScope.tenantId), pullBatchLanes.pullBatchProbeOptions(planPullBatchLane)))
       const projectNo = job.parameters && job.parameters.projectNo
       const existingRows = await tableActionInternals.readExistingStockPreparationRows(
         getMultitableRecordsApi(),
         action.target,
         projectNo,
+        { pullBatchBand: planPullBatchLane.band },
       )
       // #5860 one sheet = one project: the large-BOM lane never plans through `computeDryRun`, so the
       // table-level foreign-project guard is called here the same way the existence probe above is —
       // after the project-scoped read, before the plan. 409 TARGET_SHEET_FOREIGN_PROJECT, values-free.
       await tableActionInternals.assertTargetSheetHoldsNoForeignActiveRows(getMultitableRecordsApi(), action.target, projectNo)
+      // 批次标识 BI-1b (design §6.4): ON only — one preview evaluation over THIS request's Symbol-bearing rows; the job's
+      // sibling pullBatchPlan is built by the planner after the revision. Fail-soft (a preview).
+      const planPullBatch = await pullBatchLanes.prepareLargePlanPullBatch({ lane: planPullBatchLane, probe: planPullBatchProbe, sheetId: action.target.sheetId, projectNo, existingRows, keyField: action.target.keyField, actionId: action.actionId, canonicalRows: tableActionInternals.pullBatchCanonicalRows })
       const diagnostics = duplicateExpandedKeyDiagnosticsForRows(
         job.artifact && Array.isArray(job.artifact.rows) ? job.artifact.rows : [],
       )
@@ -8954,8 +9040,10 @@ function requireStockPreparationAudit() {
         // clean-row bound is not moved by the pack-aware band` in
         // __tests__/stock-preparation-large-bom-installed-fields-wiring.test.cjs.
         installedFieldProperties: await resolveInstalledFieldProperties(req, action),
+        // 批次标识 BI-1b: present only while the switch is on and the sheet stamps (or pauses on gap rows).
+        ...(planPullBatch && planPullBatch.pullBatchPlanFor ? { pullBatchPlanFor: planPullBatch.pullBatchPlanFor } : {}),
       })
-      return sendOk(res, largeBomJobResponse(publicBackgroundExpansionJob(planned)))
+      return sendOk(res, pullBatchLanes.withPullBatchStanza(largeBomJobResponse(publicBackgroundExpansionJob(planned)), planPullBatch && planPullBatch.preview))
     },
 
     async tableActionLargeBomApplyJobStart(req, res) {
@@ -9011,7 +9099,9 @@ function requireStockPreparationAudit() {
       await consultLargeLane({ tenantId: routeScope.tenantId, projectNo: expansionJob.parameters && expansionJob.parameters.projectNo, sheetId: snapshotAction.target.sheetId }, 'large_approve')
       // 目标表字段存在性探针 at approval: a column deleted after the plan is refused here, before a
       // checkpoint job that would write to it exists.
-      await tableActionInternals.assertTargetFieldsExist(snapshotAction, targetFieldExistenceForTenant(routeScope.tenantId))
+      // 批次标识 BI-1b: while the pull-batch switch is on, the band ids ride this probe as OPTIONAL ids (never refusing).
+      const approvePullBatchLane = pullBatchContextFor(routeScope.tenantId, snapshotAction.target)
+      const approvePullBatchProbe = pullBatchLanes.pullBatchProbeStanza(approvePullBatchLane, await tableActionInternals.assertTargetFieldsExist(snapshotAction, targetFieldExistenceForTenant(routeScope.tenantId), pullBatchLanes.pullBatchProbeOptions(approvePullBatchLane)))
       // #5860 at approval as well: a foreign project's active rows that landed between plan and
       // approval refuse here, before a checkpoint job that would write next to them exists.
       await tableActionInternals.assertTargetSheetHoldsNoForeignActiveRows(
@@ -9019,6 +9109,9 @@ function requireStockPreparationAudit() {
         snapshotAction.target,
         expansionJob.parameters && expansionJob.parameters.projectNo,
       )
+      // 批次标识 BI-1b (P-4): BEFORE the binder's bump and before any checkpoint job exists — installing 409; a resolved
+      // sheet refuses an expansion planned without its pull-batch plan (409 JOB_REPLAN_REQUIRED). Off => nothing.
+      await pullBatchLanes.assertLargeApprovePullBatch({ lane: approvePullBatchLane, probe: approvePullBatchProbe, sheetId: snapshotAction.target.sheetId, projectNo: expansionJob.parameters && expansionJob.parameters.projectNo, expansionJob })
       // Batch-refresh phase 0 step 1 — PLAN GENERATION: approving supersedes every earlier plan of this
       // write scope (the snapshot's target sheet, R-52). The bump expects the row exactly as the expansion
       // observed it (token AND epoch), so a live writer — whose acquire moved the epoch — is answered 409
@@ -9122,10 +9215,14 @@ function requireStockPreparationAudit() {
       // lease by the lib (`largeLanePilotCheck` below), before the binding compare and before `running`.
       const chunkPilotInput = { tenantId: routeScope.tenantId, projectNo: runExpansionJob.parameters && runExpansionJob.parameters.projectNo, sheetId: pendingJob.target && pendingJob.target.sheetId }
       await assertLargeLaneAllowedForPilot(chunkPilotInput, 'large_apply_chunk')
-      await tableActionInternals.assertTargetFieldsExist(
+      // 批次标识 BI-1b: while the pull-batch switch is on, the band ids ride this per-chunk probe (never refusing); the
+      // ledger read happens in the chunk's gate, inside the lease.
+      const chunkPullBatchLane = pullBatchContextFor(routeScope.tenantId, pendingJob.target)
+      const chunkPullBatchProbe = pullBatchLanes.pullBatchProbeStanza(chunkPullBatchLane, await tableActionInternals.assertTargetFieldsExist(
         runSnapshotAction,
         targetFieldExistenceForTenant(routeScope.tenantId),
-      )
+        pullBatchLanes.pullBatchProbeOptions(chunkPullBatchLane),
+      ))
       // #5860 per chunk as well. RUN is also the resume path of a failed/paused job, so another
       // project's rows can land between START and a later chunk; a chunk that would write next to
       // them refuses here (409, values-free), before the apply gate and before the chunk write — the
@@ -9186,9 +9283,11 @@ function requireStockPreparationAudit() {
         recordsApi: scopedRecordsApi,
         largeLanePilotCheck: ({ target }) => assertLargeLaneAllowedForPilot({ ...chunkPilotInput, sheetId: target && target.sheetId }, 'large_apply_chunk'),
         refreshGovernanceGate: ({ target }) => consultLargeLane({ ...chunkPilotInput, sheetId: target && target.sheetId }, 'large_apply_chunk'),
+        // 批次标识 BI-1b (design §6.4): inside the lease, before `running` (see largeChunkPullBatchGate).
+        pullBatchGate: ({ job: chunkJob }) => pullBatchLanes.largeChunkPullBatchGate({ lane: pullBatchLaneInLease(chunkPullBatchLane, projectWriteGuard), probe: chunkPullBatchProbe, job: chunkJob, projectNo: chunkPilotInput.projectNo, writeFence: projectWriteGuard, logger: routeLogger }),
         projectWriteGuard,
       }))
-      return sendOk(res, largeBomJobResponse(publicCheckpointApplyJob(job)))
+      return sendOk(res, pullBatchLanes.withPullBatchStanza(largeBomJobResponse(publicCheckpointApplyJob(job)), pullBatchLanes.largeChunkAnswerOf(chunkPullBatchLane, job)))
     },
 
     async tableActionLargeBomExpansionJobCancel(req, res) {
@@ -11286,6 +11385,47 @@ function requireStockPreparationAudit() {
       })
     },
 
+    // 批次标识 BI-1b (design §8.7; register R-65) — THE PULL-BATCH STATUS (its own handler; P-6). Guard chain = the pilot
+    // GET: stock-prep:admin -> the project-sheets switch (404, zero IO) -> the closed query keys -> the project number ->
+    // the host-vouched scope (a tenantless platform admin is refused) -> the registry row (ABSENT / ARCHIVED answer 200
+    // with `ready: false`) -> the READ target walled to the tenant -> reads only. Echoes only the caller's own projectNo.
+    async stockPreparationProjectPullBatchGet(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireProjectSheetsEnabled()
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_PROJECT_TARGET_QUERY_KEYS,
+        'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+      )
+      const projectNo = firstString(requestParams(req).projectNo)
+      if (!projectNo || !isValidStockPrepProjectNo(projectNo)) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID', 'projectNo is required and must be a plain project number', { field: 'projectNo' })
+      }
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      const enabled = pullBatchLanes.stockPrepPullBatchEnabled()
+      const store = requireStockPreparationProjectPilot()
+      const row = await readStockPreparationProjectPilotRow(store, { tenantId, projectNo })
+      if (!row || row.status !== 'active') {
+        return sendOk(res, { projectNo, status: row ? row.status : 'absent', switchOn: enabled, ready: false, reasons: [] })
+      }
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+        tenantId,
+        workspaceId: firstString(input.workspaceId),
+        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+        projectNo,
+        targetPurpose: 'read',
+      }))
+      await assertResolvedProjectTargetTenancy(action, tenantId)
+      const status = await pullBatchStatus.readPullBatchStatus(pullBatchStatusDepsFor({ tenantId, projectNo, target: action.target, enabled }))
+      return sendOk(res, { projectNo, status: 'active', ...status })
+    },
+
     // ENABLE — set-once (NO unset: R-53 ②; a mistaken enable is an owner-approved runbook UPDATE, see
     // migration 101). THE SEQUENCE, pinned by the pilot route suite:
     //   1. gate (stock-prep:admin) → switch (404, zero IO) → body (`{ confirmProjectNo }` must repeat the
@@ -12630,7 +12770,7 @@ function requireStockPreparationAudit() {
             // ...THEN the settlement's own projection: the planner's reader, the strict pack band (TD-22) and the
             // ONE shared digest — never the export's own column projection (design §9.2). A host-side machine
             // write landing between the two reads moves this digest away from the settlement (409).
-            const existingRows = await tableActionInternals.readExistingStockPreparationRows(exportRecordsApi, action.target, projectNo)
+            const existingRows = await tableActionInternals.readExistingStockPreparationRows(exportRecordsApi, action.target, projectNo, { pullBatchBand: pullBatchBandFor(tenantId, action.target) })
             const planningInputs = planningInputsOrRefuse(await refreshHandle.planningInputs(action))
             const machineFieldIds = machineBandFieldIds({ template: action.template, installedFieldProperties: planningInputs.installedFieldProperties })
             return { exportResult, sheetMachineDigest: sheetMachineDigest(existingRows, { machineFieldIds }) }
@@ -13522,6 +13662,8 @@ function requireStockPreparationAudit() {
           // PR-5: the `refresh` stanza (the derived state, values-free) and the open-hold union count.
           readRefreshState: refreshStateReaderOrNull(scope.tenantId),
           refreshHoldCounts: await openHoldCountsFor(scope.tenantId),
+          // 批次标识 BI-1b (P-7): the fail-soft pull-batch stanza, ON only (off => no key, byte-identical board).
+          ...(pullBatchLanes.stockPrepPullBatchEnabled() ? { readPullBatchStanza: ({ projectNo: stanzaProjectNo, boundTarget: stanzaTarget }) => pullBatchStatus.readPullBatchBoardStanza(pullBatchStatusDepsFor({ tenantId: scope.tenantId, projectNo: stanzaProjectNo, target: stanzaTarget, enabled: true })) } : {}),
         })
       } catch (error) {
         // A MISS IS STILL A READ, and it is audited as one — values-free, so the trail cannot become
