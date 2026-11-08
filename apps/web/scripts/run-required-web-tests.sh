@@ -1512,6 +1512,14 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # them. Each token matches exactly one file under apps/web/tests (checked by listing the directory),
 # and a substring-collision check in BOTH directions over all 553 manifest tokens found none.
 # The manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
+# 批次标识 BI-7 (register R-65, 2026-11-08): ONE token added, `StockPreparationPullBatchSettingsPanel` — the NEW spec
+# (apps/web/tests/StockPreparationPullBatchSettingsPanel.spec.ts) for 数据来源与体检's pull-batch settings panel: the
+# vocabulary pinned live against the plugin's pure module and ledger store, the switch-off invisibility (any 404
+# renders nothing, ruling C6), the tenant default save, the per-sheet captured values / locks and their typed-confirm
+# edit, the scope / session straddle, the manifest alignment and the copy. Inserted at its alphabetical position
+# between `StockPreparationProjectWorkspaceView` and `StockPreparationRail`; it matches exactly one spec file, and a
+# substring check in BOTH directions finds no token that contains it or is contained by it (its neighbours diverge
+# right after `StockPreparationP` / `StockPreparation`). The manifest was regenerated with the same command.
 exec npx vitest run \
   adminPageContentSearch.spec.ts \
   amountAutoSum \
@@ -1970,6 +1978,7 @@ exec npx vitest run \
   StockPreparationProjectSyncPanel.spec.ts \
   StockPreparationProjectTarget \
   StockPreparationProjectWorkspaceView \
+  StockPreparationPullBatchSettingsPanel \
   StockPreparationRail \
   StockPreparationRouteFailedPlain \
   StockPreparationScenarioBAcceptance \

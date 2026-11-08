@@ -785,12 +785,15 @@ describe('StockPreparationWorkspace shell', () => {
 
   it('opens the install tab and badges it as a manifest read plus an idempotent ensure', async () => {
     h.permissions = ['integration:admin', 'stock-prep:read', 'stock-prep:admin']
-    h.apiFetch.mockImplementation(async () => new Response(JSON.stringify({
-      id: 'stock-preparation',
-      displayName: 'BOM备料',
-      permissions: [],
-      objects: [],
-    }), { status: 200 }))
+    // 批次标识 BI-7 (R-65): the install tab's pull-batch settings read answers the realistic switch-off 404 (C6).
+    h.apiFetch.mockImplementation(async (url: string) => (String(url).includes('/pull-batch/settings')
+      ? new Response(JSON.stringify({ ok: false, error: { code: 'STOCK_PREP_PULL_BATCH_SETTINGS_DISABLED' } }), { status: 404 })
+      : new Response(JSON.stringify({
+        id: 'stock-preparation',
+        displayName: 'BOM备料',
+        permissions: [],
+        objects: [],
+      }), { status: 200 })))
 
     const root = await mountShell()
     // P1-1: 9 -> 12. The queue, the whole 【部署与接入】 group (开始使用 / 安装 · 体检 / 记录与排查),

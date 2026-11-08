@@ -705,6 +705,32 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '已写入的批次标签依赖它;如确需调整,请联系备料主管理员。',
     enNext: 'Labels already written depend on it; ask the stock-prep admin if it really must change.',
   }),
+  // 批次标识 BI-7 (R-65): the settings routes' OWN codes — the two route-level ones and the store's two settings codes
+  // (not in PULL_BATCH_ERROR_CODES, so BI-1b's block above does not carry them). One entry per code (critic M1).
+  STOCK_PREP_PULL_BATCH_SETTINGS_DISABLED: Object.freeze({
+    zh: '批次标识设置在这台服务器上没有开启。',
+    en: 'The pull-batch settings are not turned on on this server.',
+    zhNext: '如需使用,请联系系统管理员。',
+    enNext: 'Ask the system administrator if you need them.',
+  }),
+  STOCK_PREP_PULL_BATCH_STORE_UNAVAILABLE: Object.freeze({
+    zh: '批次记录在这台服务器上不可用,批次设置读不出来也改不了;什么都没有改动。',
+    en: 'The batch record is not available on this server, so the batch settings cannot be read or changed; nothing was changed.',
+    zhNext: '请联系系统管理员检查部署。',
+    enNext: 'Ask the system administrator to check the deployment.',
+  }),
+  STOCK_PREP_PULL_BATCH_SETTINGS_VERSION_CONFLICT: Object.freeze({
+    zh: '批次设置刚被别人改过,这次没有保存。',
+    en: 'The batch settings were just changed by someone else, so this was not saved.',
+    zhNext: '请刷新后再改。',
+    enNext: 'Reload, then change them again.',
+  }),
+  STOCK_PREP_PULL_BATCH_SETTINGS_NOT_CAPTURED: Object.freeze({
+    zh: '这张表还没有记下批次设置,不能单独修改;什么都没有改动。',
+    en: 'This sheet has not recorded its batch settings yet, so they cannot be changed here; nothing was changed.',
+    zhNext: '请改默认值,安装批次列或新建表时会采用。',
+    enNext: 'Change the default instead; the sheet takes it when its batch columns are installed or it is created.',
+  }),
   /**
    * 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; R-68) — the per-sheet switch's own refusals
    * (projectManualRows.ts STOCK_PREP_MANUAL_ROWS_ERROR_CODES lists them; StockPreparationProjectTargetManualRows.spec.ts
@@ -2670,6 +2696,16 @@ export const STOCK_PREP_AUDIT_ACTION_MODE_PLAIN: Record<string, Record<string, S
       zh: '为一个项目的备料表关闭了「允许人工补充行」',
       en: "Turned off manual supplementary rows on a project's stock-preparation sheet",
     }),
+    // 批次标识 BI-7 (R-65; ruling C8): the pull-batch settings write under the same 088 action with the store's two
+    // closed modes (stock-preparation-pull-batch-store.cjs PULL_BATCH_STORE_AUDIT.modes).
+    pull_batch_settings_tenant_updated: Object.freeze({
+      zh: '改了批次标识的默认设置',
+      en: 'Changed the pull-batch default settings',
+    }),
+    pull_batch_settings_sheet_updated: Object.freeze({
+      zh: '改了一个项目表的批次标识设置',
+      en: "Changed one project sheet's pull-batch settings",
+    }),
   }),
 })
 
@@ -3285,3 +3321,165 @@ export const STOCK_PREP_OPS_TARGET_READINESS_UNREADABLE: StockPrepPlainText = Ob
   zh: '表就绪度这一半没读到',
   en: 'the table-readiness half could not be read',
 })
+
+// ---------------------------------------------------------------------------
+// 批次标识 BI-7 — THE PULL-BATCH SETTINGS PANEL of 数据来源与体检 (design §5.5 / §7.1 / §10.3 / §11; rulings C2 / C6 /
+// C10; register R-65)
+// ---------------------------------------------------------------------------
+//
+// Every sentence StockPreparationPullBatchSettingsPanel.vue says, keyed by front-end ids (nothing server-side emits
+// them). The rule-help sentences (按物料 / 按位置, with C10's history caveat for 按位置) are NOT here: they come from the
+// server's answer (`help`, the pure module's PULL_BATCH_SETTINGS_HELP), so the two can never disagree. VALUES-FREE:
+// a version number and a time are put in by the builders below; nothing else is interpolated.
+
+export const STOCK_PREP_PULL_BATCH_SETTINGS_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  title: Object.freeze({ zh: '批次标识设置', en: 'Pull-batch settings' }),
+  intro: Object.freeze({
+    zh: '这里决定新建或安装批次列的项目表怎样标「首次批次」和「本次拉取」。默认值就是 10-27 方案。只有备料主管理员能改,每次修改都记审计。',
+    en: 'This decides how project sheets that are created, or get their batch columns installed, label 首次批次 (first batch) and 本次拉取 (this pull). The defaults are the 10-27 design. Only the stock-prep admin can change them, and every change is audited.',
+  }),
+  source_built_in: Object.freeze({ zh: '当前:系统默认(10-27 方案)', en: 'Current: the system default (the 10-27 design)' }),
+  default_mark: Object.freeze({ zh: '(默认)', en: ' (default)' }),
+  rule_disclaimer: Object.freeze({
+    zh: '首次批次不表示这一行已经备过料。',
+    en: 'A first batch does not mean the row has already been prepared.',
+  }),
+  help_labelFormat: Object.freeze({
+    zh: '本表一有批次标签,格式就锁定;已写的标签不会改写。',
+    en: 'Once a sheet carries a batch label its format is locked; labels already written are never rewritten.',
+  }),
+  help_landing: Object.freeze({
+    zh: '安装批次列时执行一次,执行后锁定:系统不会撤回默认视图。',
+    en: 'Applied once when the batch columns are installed, then locked: the system never reverts the default view.',
+  }),
+  help_placement: Object.freeze({
+    zh: '列位置在两列建好后锁定,系统不会再挪列。若放最左会让某些视图失去冻结列,安装时仍须逐表明确选择位置;这里的默认值不能代替那次选择。',
+    en: 'The position is locked once the two columns exist; the system never moves them again. If placing them first would cost some views their frozen columns, the install still asks for an explicit choice per sheet; this default never stands in for that choice.',
+  }),
+  save: Object.freeze({ zh: '保存默认值', en: 'Save the defaults' }),
+  save_scope: Object.freeze({
+    zh: '改默认值只影响之后新建或安装的项目表;已经记下设置的表不变。',
+    en: 'Changing the defaults affects only project sheets created or installed afterwards; sheets that already recorded their settings keep them.',
+  }),
+  version_conflict: Object.freeze({ zh: '设置刚被别人改过,请刷新后再改。', en: 'The settings were just changed by someone else; reload, then change them again.' }),
+  read_refused: Object.freeze({
+    zh: '批次设置暂时读不出来,请稍后再试或联系管理员。',
+    en: 'The batch settings cannot be read right now; try again later or ask an administrator.',
+  }),
+  fixed_title: Object.freeze({ zh: '不可配置', en: 'Not configurable' }),
+  fixed_pullBatchMeaning: Object.freeze({
+    zh: '本次拉取 = 建立这一行的那次拉取(不是最近一次拉取)',
+    en: '本次拉取 (this pull) = the pull that created the row (not the latest pull)',
+  }),
+  fixed_formalExport: Object.freeze({ zh: '正式导出不含这两列', en: 'The formal export never carries these two columns' }),
+  fixed_trashedRowsAreEvidence: Object.freeze({ zh: '回收站里的行不算「出现过」', en: 'Rows in the recycle bin never count as having appeared' }),
+  fixed_firstPullBatchColumn: Object.freeze({ zh: '首次批次列总是显示', en: 'The 首次批次 column is always shown' }),
+  sheets_title: Object.freeze({ zh: '各项目表采用的值', en: 'The values each project sheet uses' }),
+  sheets_empty: Object.freeze({ zh: '还没有登记的项目表。', en: 'No project sheet is registered yet.' }),
+  col_projectNo: Object.freeze({ zh: '项目号', en: 'Project' }),
+  col_rule: Object.freeze({ zh: '首次判定', en: 'First-batch rule' }),
+  col_format: Object.freeze({ zh: '格式', en: 'Format' }),
+  col_locale: Object.freeze({ zh: '语言', en: 'Language' }),
+  col_placement: Object.freeze({ zh: '列位置', en: 'Position' }),
+  col_landing: Object.freeze({ zh: '默认视图', en: 'Default view' }),
+  col_state: Object.freeze({ zh: '状态', en: 'State' }),
+  locale_zh: Object.freeze({ zh: '中文', en: '中文' }),
+  locale_en: Object.freeze({ zh: 'English', en: 'English' }),
+  not_captured: Object.freeze({ zh: '安装时采用', en: 'Taken at install' }),
+  not_captured_hint: Object.freeze({
+    zh: '这张表还没有记下设置,安装批次列或新建时会采用当时的默认值',
+    en: 'This sheet has not recorded its settings yet; it takes the defaults of the moment its batch columns are installed or it is created',
+  }),
+  unlocked: Object.freeze({ zh: '未锁定:本表还没有批次,可改', en: 'Not locked: this sheet has no batch yet, so it can change' }),
+  locked: Object.freeze({
+    zh: '已锁定:本表已有批次标签,改了会让一张表混用两种含义',
+    en: 'Locked: this sheet already carries batch labels; changing would mix two meanings in one sheet',
+  }),
+  not_applied: Object.freeze({ zh: '尚未应用(安装时按默认值)', en: 'Not applied yet (the install uses the default)' }),
+  applied: Object.freeze({ zh: '已应用,已锁定', en: 'Applied, locked' }),
+  archived: Object.freeze({ zh: '已归档', en: 'Archived' }),
+  sheet_edit: Object.freeze({ zh: '修改本表设置', en: 'Change this sheet' }),
+  sheet_save: Object.freeze({ zh: '保存本表设置', en: 'Save this sheet' }),
+  cancel: Object.freeze({ zh: '取消', en: 'Cancel' }),
+  sheet_mismatch: Object.freeze({ zh: '输入的项目号不一致,什么都没有发送。', en: 'The project number does not match; nothing was sent.' }),
+  sheet_not_captured: Object.freeze({
+    zh: '这张表还没有记下设置;请改默认值,安装时会采用。',
+    en: 'This sheet has not recorded its settings yet; change the default instead, and the install takes it.',
+  }),
+  sheet_saved: Object.freeze({ zh: '本表设置已保存。', en: 'This sheet\'s settings were saved.' }),
+  unchanged: Object.freeze({ zh: '没有变化,什么都没有改动。', en: 'Nothing changed; nothing was written.' }),
+  not_permitted: Object.freeze({ zh: '只有备料主管理员能改批次设置。', en: 'Only the stock-prep admin can change the batch settings.' }),
+  footer: Object.freeze({ zh: '改默认值只影响之后新建或安装的项目表', en: 'Changing the defaults affects only project sheets created or installed afterwards' }),
+})
+
+export function stockPrepPullBatchSettingsPlain(id: string): StockPrepPlainEntry {
+  return lookup(STOCK_PREP_PULL_BATCH_SETTINGS_PLAIN, id) ?? { zh: id, en: id }
+}
+
+/** The four settings' labels (the server's closed keys). */
+export const STOCK_PREP_PULL_BATCH_SETTING_KEY_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  firstPullBatchRule: Object.freeze({ zh: '首次批次判定', en: 'How the first batch is decided' }),
+  labelFormat: Object.freeze({ zh: '批次格式', en: 'Batch label format' }),
+  landing: Object.freeze({ zh: '打开表时的默认视图', en: 'The default view when the sheet opens' }),
+  placement: Object.freeze({ zh: '两列位置', en: 'Position of the two columns' }),
+})
+
+/** Each closed value's words (and, for the format, an example label). */
+export const STOCK_PREP_PULL_BATCH_SETTING_VALUE_PLAIN: Record<string, Record<string, StockPrepPlainText>> = Object.freeze({
+  firstPullBatchRule: Object.freeze({
+    material: Object.freeze({ zh: '按物料', en: 'By material' }),
+    predecessor_suffix: Object.freeze({ zh: '按位置', en: 'By position' }),
+  }),
+  labelFormat: Object.freeze({
+    // The example is the literal label the ledger formats (full-width brackets, as formatPullBatchLabel writes them).
+    ordinal_date: Object.freeze({ zh: '第N批(日期),例如「第2批（2026-11-07）」', en: '第N批 with the date, e.g. 「第2批（2026-11-07）」' }),
+    ordinal: Object.freeze({ zh: '第N批,例如「第2批」', en: '第N批 only, e.g. 「第2批」' }),
+  }),
+  landing: Object.freeze({
+    promote_prep_fill: Object.freeze({ zh: '改成备料填写视图', en: 'Switch to the prep-fill view' }),
+    keep_current: Object.freeze({ zh: '保持现场现在的默认视图', en: 'Keep the default view the site uses now' }),
+  }),
+  placement: Object.freeze({
+    left: Object.freeze({ zh: '最左', en: 'First (left)' }),
+    right: Object.freeze({ zh: '最右', en: 'Last (right)' }),
+  }),
+})
+
+export function stockPrepPullBatchSettingValuePlain(key: string, value: string | null | undefined): StockPrepPlainText {
+  const byKey = lookup(STOCK_PREP_PULL_BATCH_SETTING_VALUE_PLAIN, key)
+  return (byKey ? lookup(byKey, value) : null) ?? { zh: String(value ?? '—'), en: String(value ?? '—') }
+}
+
+/** 「当前:本租户设置(第 N 版)」. */
+export function stockPrepPullBatchTenantSourceText(version: number): StockPrepPlainText {
+  return { zh: `当前:本租户设置(第 ${version} 版)`, en: `Current: this tenant's settings (version ${version})` }
+}
+
+/** 「已保存(第 N 版)」. */
+export function stockPrepPullBatchSavedText(version: number): StockPrepPlainText {
+  return { zh: `已保存(第 ${version} 版)`, en: `Saved (version ${version})` }
+}
+
+/** 「请输入项目号 {projectNo} 以确认」 — the project number is the one the row shows (admin-visible). */
+export function stockPrepPullBatchConfirmPrompt(projectNo: string): StockPrepPlainText {
+  return { zh: `请输入项目号 ${projectNo} 以确认`, en: `Type the project number ${projectNo} to confirm` }
+}
+
+/** 「锁定于 {time}」 in the reader's local time (年-月-日 时:分); null when the stamp is not a time. */
+export function stockPrepPullBatchLockedAtText(iso: string | null): StockPrepPlainText | null {
+  if (!iso) return null
+  const parsed = new Date(iso)
+  if (Number.isNaN(parsed.getTime())) return null
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const at = `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
+  return { zh: `锁定于 ${at}`, en: `Locked at ${at}` }
+}
+
+/** 「这张表刚有了批次标签,{keys in words} 已锁定,不能再改。」 */
+export function stockPrepPullBatchLockedKeysText(keys: readonly string[]): StockPrepPlainText {
+  const words = keys.map((key) => lookup(STOCK_PREP_PULL_BATCH_SETTING_KEY_PLAIN, key) ?? { zh: key, en: key })
+  return {
+    zh: `这张表刚有了批次标签,${words.map((word) => `「${word.zh}」`).join('、')} 已锁定,不能再改。`,
+    en: `This sheet has just received batch labels; ${words.map((word) => word.en).join(', ')} ${words.length === 1 ? 'is' : 'are'} locked and can no longer change.`,
+  }
+}

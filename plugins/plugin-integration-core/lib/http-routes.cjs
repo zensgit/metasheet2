@@ -268,6 +268,21 @@ const ROUTES = [
   // only, no audit (the pilot read precedent). The answer is FLAT (`switchOn`, `columns`, … — no `pullBatch` key, P-6);
   // with the pull-batch switch off it answers from host reads only (no ledger read, no rows read).
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch', 'stockPreparationProjectPullBatchGet'],
+  // 批次标识 BI-7 (design §5.5 / §7.1 / §11; register R-65; rulings C2 / C6 / C8 / C10) — THE PULL-BATCH SETTINGS of
+  // 数据来源与体检. All three stock-prep:admin; all three 404 STOCK_PREP_PULL_BATCH_SETTINGS_DISABLED after the gate and
+  // before any IO unless BOTH the pull-batch switch and the project-sheets switch are exactly 'true' (C6: an off
+  // feature is invisible); the tenant from the host-vouched operator scope (never a header).
+  //   GET  pull-batch/settings   — the tenant default (built-in = the 10-27 design), the fixed facts, the vocabulary and
+  //                  every registered project sheet's CAPTURED values with their locks. Reads only, no audit.
+  //   POST pull-batch/settings   — the tenant default, closed body `{ expectedVersion, <settings> }`, compare-and-set;
+  //                  a sheet that already captured its values never moves.
+  //   POST projects/:projectNo/target/pull-batch/settings — one captured sheet's rule / format, closed body
+  //                  `{ confirmProjectNo, expectedVersion, firstPullBatchRule?, labelFormat? }`; refused 409 CONFIG_LOCKED
+  //                  once the sheet carries a batch label. Both POSTs audit under 088's `project_fields_update` with the
+  //                  store's two closed modes, INSIDE the store's transaction; a no-op writes nothing.
+  ['GET', '/api/integration/stock-preparation/pull-batch/settings', 'stockPreparationPullBatchSettingsGet'],
+  ['POST', '/api/integration/stock-preparation/pull-batch/settings', 'stockPreparationPullBatchSettingsSet'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch/settings', 'stockPreparationProjectPullBatchSettingsSet'],
   // S3 (ADR §5; register R-37) — the O2(a) PROJECT-LEVEL COLUMNS and the PROJECT OVERVIEW (Q5). All
   // four 404 DISABLED after the gate while the switch is off. The GET / PATCH (OPERATE, as the ADR
   // writes them) are the ONLY surfaces that carry the three free texts (负责人 / 备注 / 计划完成) — the
@@ -518,6 +533,8 @@ const {
 // mvp archive's batch identity below — a different concept (design §3.1).
 const pullBatchLanes = require('./stock-preparation-pull-batch-lanes.cjs')
 const pullBatchStatus = require('./stock-preparation-pull-batch-status.cjs')
+// 批次标识 BI-7 (register R-65): the settings routes' helper (bodies, answers, the in-transaction audit adapter).
+const pullBatchSettings = require('./stock-preparation-pull-batch-settings.cjs')
 // 备料 batch identity — "物料创建日期(精确到小时)区分同一项目不同批次的物料". Pure and opt-in; see
 // stock-preparation-batch-identity.cjs for why the content-revision digest stays the default.
 const {
@@ -2249,6 +2266,11 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   'stockPreparationProjectManualRowsSet',
   // 批次标识 BI-1b (R-65): the pull-batch status — modes, booleans, closed reason tokens, counts, a batch number and label.
   'stockPreparationProjectPullBatchGet',
+  // 批次标识 BI-7 (R-65): the pull-batch settings — closed tokens, booleans, versions, ISO times, sheet handles and the
+  // tenant's own project numbers (admin); the store's and the helper's typed refusals answer as themselves.
+  'stockPreparationPullBatchSettingsGet',
+  'stockPreparationPullBatchSettingsSet',
+  'stockPreparationProjectPullBatchSettingsSet',
   'stockPreparationAuditList',
   'stockPreparationSourceBindingGet',
   'stockPreparationSourceBindingSet',
@@ -5628,6 +5650,15 @@ function requireStockPreparationAudit() {
       store: enabled ? stockPreparationPullBatchStore : null,
       tenantId,
       holderWithin: null,
+    })
+  }
+
+  // 批次标识 BI-7 (ruling C6): the settings routes exist only while BOTH switches are exactly 'true', each read PER
+  // REQUEST by its one reader (the lanes helper / the project-targets module). Off => 404 SETTINGS_DISABLED, zero IO.
+  function requireStockPreparationPullBatchSettingsEnabled() {
+    pullBatchSettings.assertPullBatchSettingsEnabled({
+      pullBatchEnabled: pullBatchLanes.stockPrepPullBatchEnabled(),
+      projectSheetsEnabled: stockPreparationProjectSheetsEnabled(process.env),
     })
   }
 
@@ -10626,6 +10657,126 @@ function requireStockPreparationAudit() {
       await assertResolvedProjectTargetTenancy(action, tenantId)
       const status = await pullBatchStatus.readPullBatchStatus(pullBatchStatusDepsFor({ tenantId, projectNo, target: action.target, enabled }))
       return sendOk(res, { projectNo, status: 'active', ...status })
+    },
+
+    // ── 批次标识 BI-7 — THE PULL-BATCH SETTINGS (design §5.5 / §7.1 / §11; rulings C2 / C6 / C8 / C10 / C12; register
+    // R-65). Three handlers of their own; the bodies, answers and the audit adapter live in
+    // lib/stock-preparation-pull-batch-settings.cjs. Every one: stock-prep:admin -> both switches (404 SETTINGS_DISABLED,
+    // zero IO) -> … -> the host-vouched operator scope (a tenantless platform admin is refused) -> the ledger store.
+    //
+    // GET: the query allowlist, the ledger store (501 unwired), the registry, the scope; then three reads (the tenant
+    // default, the tenant's captured sheet rows, the registry) and no audit row.
+    async stockPreparationPullBatchSettingsGet(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireStockPreparationPullBatchSettingsEnabled()
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_PROJECT_TARGET_QUERY_KEYS,
+        'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+      )
+      const ledger = pullBatchSettings.requirePullBatchSettingsStore(stockPreparationPullBatchStore)
+      const projectTargets = requireStockPreparationProjectTargets()
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      const tenant = await ledger.readTenantSettings({ tenantId })
+      const ledgerRows = await ledger.listSheetSettings({ tenantId })
+      const registryRows = await projectTargets.list({ tenantId })
+      return sendOk(res, pullBatchSettings.pullBatchSettingsAnswer({ tenant, ledgerRows, registryRows }))
+    },
+
+    // POST (the tenant default): the audit store with its in-transaction append (501 without one), the ledger store
+    // (501), the closed body (pure: 400 CONFIG_INVALID naming the field), the scope, the 088 vocabulary probe; a no-op
+    // (same version, same values) answers written:false with no write and no audit; otherwise the store's
+    // compare-and-set write with its audit row on the same transaction (409 SETTINGS_VERSION_CONFLICT on a stale read).
+    async stockPreparationPullBatchSettingsSet(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireStockPreparationPullBatchSettingsEnabled()
+      const audit = requireStockPreparationAudit()
+      if (typeof audit.appendWithin !== 'function') {
+        throw new HttpRouteError(501, 'AUDIT_STORE_UNAVAILABLE', 'stock-preparation audit store cannot write inside the pull-batch settings transaction; the settings are not changed without their audit row')
+      }
+      const ledger = pullBatchSettings.requirePullBatchSettingsStore(stockPreparationPullBatchStore)
+      const { expectedVersion, patch } = pullBatchSettings.parseTenantSettingsRequest(requestBody(req))
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      await requireStockPreparationAuditVocabulary(audit, pullBatchSettings.PULL_BATCH_SETTINGS_AUDIT.settingsAction, pullBatchSettings.PULL_BATCH_SETTINGS_AUDIT.settingsMigration, tenantId)
+      const current = await ledger.readTenantSettings({ tenantId })
+      if (pullBatchSettings.tenantSettingsEditIsNoop(current, expectedVersion, patch)) {
+        return sendOk(res, { tenant: pullBatchSettings.publicTenantSettings(current), written: false, changedKeys: [] })
+      }
+      const auditWithin = pullBatchSettings.pullBatchSettingsAuditWithin({ audit, tenantId, actor: user.id || user.email })
+      const written = await ledger.writeTenantSettings({ tenantId, expectedVersion, patch, auditWithin })
+      pullBatchSettings.assertSettingsAudited(auditWithin)
+      return sendOk(res, {
+        tenant: pullBatchSettings.publicTenantSettings(written),
+        written: true,
+        changedKeys: pullBatchSettings.changedSettingKeys(current.settings, patch),
+      })
+    },
+
+    // POST (one captured sheet): the audit store (501), the ledger store (501), the path's project number and the closed
+    // body with its typed confirmation (pure: 400 CONFIRM_MISMATCH / CONFIG_INVALID; landing / placement are refused —
+    // install-time values), the scope, the registry (501 without its lock), the 088 vocabulary probe, ABSENT / ARCHIVED
+    // (409); then UNDER the registry's per-tenant row lock (an archive committing meanwhile is the same 409) the sheet's
+    // ledger row is read (the no-op check) and the store's edit runs: no ledger row 409 SETTINGS_NOT_CAPTURED, a sheet
+    // that carries a batch label 409 CONFIG_LOCKED { locked }, a stale read 409 SETTINGS_VERSION_CONFLICT; the audit row
+    // (project_id = the path's project number, never in the detail) commits with the edit.
+    async stockPreparationProjectPullBatchSettingsSet(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireStockPreparationPullBatchSettingsEnabled()
+      const audit = requireStockPreparationAudit()
+      if (typeof audit.appendWithin !== 'function') {
+        throw new HttpRouteError(501, 'AUDIT_STORE_UNAVAILABLE', 'stock-preparation audit store cannot write inside the pull-batch settings transaction; the settings are not changed without their audit row')
+      }
+      const ledger = pullBatchSettings.requirePullBatchSettingsStore(stockPreparationPullBatchStore)
+      const projectNo = stockPreparationProjectFieldsProjectNo(req)
+      const { expectedVersion, patch } = pullBatchSettings.parseSheetSettingsRequest(requestBody(req), projectNo)
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      const projectTargets = requireStockPreparationProjectTargets()
+      if (typeof projectTargets.withActiveRowLocked !== 'function') {
+        throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot re-check a registered sheet under its lock here')
+      }
+      await requireStockPreparationAuditVocabulary(audit, pullBatchSettings.PULL_BATCH_SETTINGS_AUDIT.settingsAction, pullBatchSettings.PULL_BATCH_SETTINGS_AUDIT.settingsMigration, tenantId)
+      const archivedRefusal = () => new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'this project\'s stock-preparation sheet is archived; restore it before changing its pull-batch settings', { field: 'projectNo' })
+      const registered = await projectTargets.get({ tenantId, projectNo })
+      if (!registered) {
+        throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'this project has no registered stock-preparation sheet in your tenant', { field: 'projectNo' })
+      }
+      if (registered.status !== 'active') throw archivedRefusal()
+      const auditWithin = pullBatchSettings.pullBatchSettingsAuditWithin({ audit, tenantId, actor: user.id || user.email, projectNo })
+      let outcome
+      try {
+        outcome = await projectTargets.withActiveRowLocked({ tenantId, projectNo }, async (locked) => {
+          const state = await ledger.readSheetState({ tenantId, sheetId: locked.sheetId, projectNo })
+          if (pullBatchSettings.sheetSettingsEditIsNoop(state.sheet, expectedVersion, patch)) {
+            return { row: locked, sheet: pullBatchSettings.ledgerRowOfSheetState(state.sheet), written: false }
+          }
+          const sheet = await ledger.setSheetSettings({ tenantId, sheetId: locked.sheetId, projectNo, expectedVersion, patch, auditWithin })
+          return { row: locked, sheet, written: true }
+        })
+      } catch (error) {
+        // An archive that committed after the read above: the lock's re-read refuses it — in this route's words.
+        if (error && error.code === 'STOCK_PREPARATION_PROJECT_ARCHIVED') throw archivedRefusal()
+        throw error
+      }
+      if (outcome.written) pullBatchSettings.assertSettingsAudited(auditWithin)
+      return sendOk(res, { sheet: pullBatchSettings.pullBatchSheetAnswer(outcome.sheet, outcome.row), written: outcome.written })
     },
 
     // ── 人工补充行 B4 — THE PER-SHEET SWITCH 「允许人工补充行」 (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3 / §8
