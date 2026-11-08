@@ -277,11 +277,6 @@ function compile(input, versions, persistent = false) {
           : config.fieldMap.find(field => field.source === keyField)
         return { target: entry.target, type: entry.type, empty: config.emptyKeyFields.includes(keyField) }
       }).sort((left, right) => compareCodePoints(left.target, right.target)),
-      // D2 (R-88): a 'uuid-32' material-code form is part of the key definition, so it is sealed with the slot
-      // at initialization and a later draft declaring another form is KEY_DEFINITION_CONFLICT: one identity
-      // never gets two codes. The default 'uuid-36' (declared or not) adds nothing, so every stored
-      // key_definition_digest and golden is unchanged.
-      ...(config.materialCodeForm === 'uuid-32' ? { materialCodeForm: 'uuid-32' } : {}),
     }
     const keyDefinitionDigest = hashCanonical(keyDefinition)
     // A bound row adds its two digests and its per-row binding (§7.2); an unbound row's spec is byte-identical

@@ -194,22 +194,22 @@ describe('YiDa initialization HTTP contract — no IO fake host port', () => {
 
 // YD (owner 2026-11-07, R-88: an open question gets a configurable default). The route's closed bodies for the new options.
 describe('YD configurable defaults at the HTTP boundary — no IO fake host port', () => {
-  it('Q4 / D2: the initialization body takes the optional quantityRounding and materialCodeForm; the plugin owns their values', async () => {
+  it('Q4 / D2: the initialization body takes the optional quantityRounding (the plugin owns its values) and never a config-level materialCodeForm', async () => {
     const f = port(), request = input()
     const split = { mode: 'equal_decimal_exact', projects: ['SYN-P1', 'SYN-P2'], projectField: 'projectNo', quantityField: 'quantity' }
-    for (const draft of [
-      { ...request.draft, allocation: { ...split, quantityRounding: 'legacy-1dp' } },
-      { ...request.draft, config: { ...request.draft.config, materialCodeForm: 'uuid-32' } },
-    ]) expect((await dispatch('POST', { ...request, draft }, f.value)).status).toBe(201)
-    expect(f.calls).toHaveLength(2)
+    expect((await dispatch('POST', { ...request, draft: { ...request.draft, allocation: { ...split, quantityRounding: 'legacy-1dp' } } }, f.value)).status).toBe(201)
+    expect(f.calls).toHaveLength(1)
     expect((f.calls[0].input as { draft: { allocation: unknown } }).draft.allocation).toEqual({ ...split, quantityRounding: 'legacy-1dp' })
-    // Still closed: quantityRounding never rides on original, and no other key is admitted next to either option.
+    // Still closed: quantityRounding never rides on original, and no other key is admitted next to it. D2 (reworked after
+    // verify-YD-r1 F1): the material-code form is a preset-part option of a v3 generated entry, sealed by the generated-
+    // layout signature; the v2 initialization has no generated entry, so its body never takes a form (400, no port call).
     for (const draft of [
       { ...request.draft, allocation: { mode: 'original', quantityRounding: 'exact' } },
       { ...request.draft, allocation: { ...split, quantityRounding: 'exact', rounding: 'x' } },
-      { ...request.draft, config: { ...request.draft.config, materialCodeForm: 'uuid-32', codeForm: 'uuid-32' } },
+      { ...request.draft, config: { ...request.draft.config, materialCodeForm: 'uuid-32' } },
+      { ...request.draft, config: { ...request.draft.config, materialCodeForm: 'uuid-36' } },
     ]) expect((await dispatch('POST', { ...request, draft }, f.value)).status).toBe(400)
-    expect(f.calls).toHaveLength(2)
+    expect(f.calls).toHaveLength(1)
   })
 
   // D17 b: INTEGRATION_YIDA_SHEET_SOURCE_ENABLED (the owner runtime's exact boolean). The harness wires no sheet-source

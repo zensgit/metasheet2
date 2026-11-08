@@ -1856,4 +1856,46 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     } finally { await owner.query(`SET search_path TO ${ident(schema)}, public`) }
     expect(await sealRows()).toEqual([])
   })
+
+  // ---- YD D2 (owner 2026-11-07, R-88; reworked after verify-YD-r1 F1): the material-code form under the P1 seal ----
+  // The form is an option of the material-code-v1 preset part only (no config-level form, never in the key definition),
+  // and yidaGeneratedLayout copies preset parts whole, so the one sealed layout of a target also fixes its form: a later
+  // draft with another form on a sealed target answers GENERATED_LAYOUT_CONFLICT. A declared 'uuid-36' is normalized to
+  // the absent option (today's bytes), so it is the default layout, not a third one.
+  it.each(['uuid-32', 'default'] as const)('D2 form under the P1 seal (%s first): the first approval seals the target with its form; a later draft with the other form is refused at approval with nothing written; the same form keeps working', async sealedForm => {
+    await boundFixture()
+    const preset = (form: 'uuid-32' | 'uuid-36' | 'default') => [form === 'default' ? IDENTITY.preset : { ...IDENTITY.preset, form }]
+    const otherForms = sealedForm === 'uuid-32' ? (['default', 'uuid-36'] as const) : (['uuid-32'] as const)
+    const a = generatedRow(0, preset(sealedForm))
+    const code = generatedCodeOf(a)
+    expect(code).toMatch(sealedForm === 'uuid-32' ? /^WLBH-[0-9A-F]{32}$/ : /^WLBH-[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/)
+    // A declared uuid-36 is the default layout byte for byte; uuid-32 is another layout.
+    expect(layoutDigestOf(generatedRow(0, preset('uuid-36')))).toBe(layoutDigestOf(generatedRow(0, preset('default'))))
+    expect(layoutDigestOf(generatedRow(0, preset('uuid-32')))).not.toBe(layoutDigestOf(generatedRow(0, preset('default'))))
+    const requestA = await draftOf(first, a, `synthetic-d2-${sealedForm}-a`)
+    const granted = await first.service.approve(requestA)
+    expect((await first.service.admit({ grantId: granted.grantId, submissionId: `synthetic-d2-${sealedForm}-a-submission` })).status).toBe('admitted')
+    const sealed = await sealRows()
+    expect(sealed.length).toBe(1)
+    expect(sealed[0].layout_digest).toBe(layoutDigestOf(a))
+    for (const [index, other] of otherForms.entries()) {
+      const b = generatedRow(1, preset(other))
+      expect(layoutDigestOf(b)).not.toBe(layoutDigestOf(a))
+      const requestB = await draftOf(second, b, `synthetic-d2-${sealedForm}-b${index}`)
+      const before = await evidence()
+      second.statements.length = 0
+      await rejected(second.service.approve(requestB), 'GENERATED_LAYOUT_CONFLICT')
+      expect(await evidence()).toEqual(before)
+      expect(second.statements.filter(statement => /^INSERT INTO "?integration_/i.test(statement.trim()))).toEqual([])
+      expect(await sealRows()).toEqual(sealed)
+    }
+    // The sealed form keeps working on another record of the same target.
+    const c = generatedRow(2, preset(sealedForm === 'uuid-32' ? 'uuid-32' : 'uuid-36'))
+    expect(layoutDigestOf(c)).toBe(layoutDigestOf(a))
+    const requestC = await draftOf(first, c, `synthetic-d2-${sealedForm}-c`)
+    const grantedC = await first.service.approve(requestC)
+    expect((await first.service.admit({ grantId: grantedC.grantId, submissionId: `synthetic-d2-${sealedForm}-c-submission` })).status).toBe('admitted')
+    expect(await sealRows()).toEqual(sealed)
+    expect((await tableRows(LEDGER)).length).toBe(2)
+  })
 })

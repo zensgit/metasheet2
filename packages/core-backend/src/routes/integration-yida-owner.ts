@@ -222,8 +222,7 @@ function initializationInput(value: unknown) {
   if (Buffer.byteLength(JSON.stringify(material), 'utf8') > 16 * 1024) fail()
   const candidate = record(parsed.draft, ['config', 'rowsText', 'allocation'])
   if (typeof candidate.rowsText !== 'string' || Buffer.byteLength(candidate.rowsText, 'utf8') > 128 * 1024) fail()
-  // D2 (R-88): the optional materialCodeForm is the slot's sealed material-code form; the plugin owns its values.
-  const config = record(candidate.config, ['version', 'kind', 'target', 'intent', 'businessKey', 'fieldMap', 'fieldCatalog', 'emptyKeyFields'], ['instanceIdField', 'materialCodeForm'])
+  const config = record(candidate.config, ['version', 'kind', 'target', 'intent', 'businessKey', 'fieldMap', 'fieldCatalog', 'emptyKeyFields'], ['instanceIdField'])
   if (config.version !== 2 || config.kind !== 'yida-form-protocol-static' || config.intent !== 'create') fail()
   record(config.target, ['appType', 'formUuid'])
   if (!Array.isArray(config.businessKey) || !Array.isArray(config.fieldMap) || !Array.isArray(config.fieldCatalog) || !Array.isArray(config.emptyKeyFields)) fail()
