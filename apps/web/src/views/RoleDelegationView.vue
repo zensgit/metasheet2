@@ -2,16 +2,17 @@
   <section class="delegation-page">
     <header class="delegation-page__header">
       <div>
-        <h1>角色委派</h1>
-        <p>插件管理员只能分配自己负责命名空间下、且位于授权部门或成员集范围内的成员；平台管理员可作为兜底入口使用。</p>
+        <h1>管理范围</h1>
+        <p data-testid="scope-explanation">部门范围包含该部门及其下级。成员集是共享成员组。同一命名空间内，部门范围与共享成员组取并集；不同命名空间不合并。平台管理员配置管理范围；委派管理员只能给允许的成员分配允许的角色。插件使用准入不是管理委派的前提。</p>
       </div>
       <div class="delegation-page__actions">
-        <router-link class="delegation-page__link" to="/admin/users">用户管理</router-link>
+        <router-link class="delegation-page__link" to="/admin/users">成员与授权</router-link>
         <input
           v-model.trim="search"
           class="delegation-page__input"
           type="search"
           placeholder="搜索邮箱、姓名或用户 ID"
+          aria-label="搜索邮箱、姓名或用户 ID"
           @keyup.enter="void loadUsers()"
         />
         <button class="delegation-page__button" type="button" :disabled="loading" @click="void loadUsers()">
@@ -110,7 +111,7 @@
 
           <div class="delegation-page__section">
             <h3>插件使用准入</h3>
-            <p class="delegation-page__hint">这里控制成员是否可进入对应插件命名空间。钉钉登录是平台准入，和插件使用是两层不同的开关。</p>
+            <p class="delegation-page__hint">这里控制成员是否可进入对应插件命名空间。角色和开通状态同时满足，插件才可用。钉钉登录是平台准入，和插件使用是两层不同的开关。插件使用准入不是管理委派成员的前提。</p>
             <div v-if="selectedAccess.namespaceAdmissions?.length > 0" class="delegation-page__role-list">
               <article v-for="admission in selectedAccess.namespaceAdmissions || []" :key="admission.namespace" class="delegation-page__role-card delegation-page__role-card--namespace">
                 <strong>{{ admission.namespace }}</strong>
@@ -128,10 +129,10 @@
                 </div>
                 <p>只有角色和开通状态同时满足，插件才算真正可用。</p>
                 <div class="delegation-page__role-actions">
-                  <button class="delegation-page__button" type="button" :disabled="busy || admission.enabled" @click="void updateNamespaceAdmission(admission, true)">
+                  <button class="delegation-page__button" type="button" :disabled="busy || !memberWritesReady || admission.enabled" @click="void updateNamespaceAdmission(admission, true)">
                     开通插件使用
                   </button>
-                  <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="busy || !admission.enabled" @click="void updateNamespaceAdmission(admission, false)">
+                  <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="busy || !memberWritesReady || !admission.enabled" @click="void updateNamespaceAdmission(admission, false)">
                     关闭插件使用
                   </button>
                 </div>
@@ -154,10 +155,10 @@
               <select v-model="selectedRoleId" class="delegation-page__input" data-testid="delegation-assign-role">
                 <option value="">请选择要分配的角色</option>
                 <option v-for="role in selectedAccess.roleCatalog" :key="role.id" :value="role.id">
-                  {{ role.name }} ({{ role.id }})
+                  {{ roleTitle(role) }} ({{ role.id }})
                 </option>
               </select>
-              <button class="delegation-page__button" type="button" :disabled="busy || !selectedRoleId" @click="void updateRole('assign')">
+              <button class="delegation-page__button" type="button" :disabled="busy || !memberWritesReady || !selectedRoleId" @click="void updateRole('assign')">
                 分配角色
               </button>
             </div>
@@ -168,7 +169,7 @@
                   {{ revocableRoleLabel(roleId) }}
                 </option>
               </select>
-              <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="busy || !selectedRevokeRoleId" @click="void updateRole('unassign')">
+              <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="busy || !memberWritesReady || !selectedRevokeRoleId" @click="void updateRole('unassign')">
                 撤销角色
               </button>
             </div>
@@ -178,16 +179,16 @@
             <h3>可委派角色目录</h3>
             <div class="delegation-page__role-list">
               <article v-for="role in selectedAccess.roleCatalog" :key="role.id" class="delegation-page__role-card">
-                <strong>{{ role.name }}</strong>
-                <span>{{ role.id }}</span>
-                <p>{{ role.permissions.join(', ') || '无权限映射' }}</p>
+                <strong>{{ roleTitle(role) }}</strong>
+                <span class="delegation-page__code">{{ role.id }}</span>
+                <p class="delegation-page__code">{{ role.permissions.join(', ') || '无权限映射' }}</p>
               </article>
             </div>
           </div>
 
           <div v-if="summary?.isPlatformAdmin" class="delegation-page__section">
             <h3>平台成员集</h3>
-            <p class="delegation-page__hint">平台管理员可维护一组固定成员，再将该成员集直接分配给插件管理员命名空间或组织范围模板。</p>
+            <p class="delegation-page__hint">平台管理员可维护一组共享成员组，再将该成员集直接分配给插件管理员命名空间或组织范围模板。</p>
             <div class="delegation-page__role-actions">
               <input
                 v-model.trim="memberGroupName"
@@ -225,7 +226,7 @@
               <button
                 class="delegation-page__button"
                 type="button"
-                :disabled="groupBusy || !hasSelectedMemberGroup || !selectedUserId"
+                :disabled="groupBusy || !memberWritesReady || !hasSelectedMemberGroup || !selectedUserId"
                 @click="void updateUserMemberGroup('assign')"
               >
                 将当前成员加入成员集
@@ -275,7 +276,7 @@
 
           <div v-if="summary?.isPlatformAdmin && selectedScopeConfig" class="delegation-page__section">
             <h3>插件管理员范围配置</h3>
-            <p class="delegation-page__hint">平台管理员可为持有 `xxx_admin` 角色的成员分配可管理的钉钉部门范围或平台成员集。</p>
+            <p class="delegation-page__hint">平台管理员配置管理范围。部门范围包含该部门及其下级。成员集是共享成员组。同一命名空间内，部门范围与共享成员组取并集。委派管理员只能给允许的成员分配允许的角色。</p>
             <div v-if="selectedScopeConfig.adminNamespaces.length === 0" class="delegation-page__empty">
               该成员尚未持有任何插件管理员角色。
             </div>
@@ -305,7 +306,7 @@
                     {{ department.integrationName }} / {{ department.departmentFullPath || department.departmentName }}
                   </option>
                 </select>
-                <button class="delegation-page__button" type="button" :disabled="scopeBusy || !selectedScopeNamespace || !selectedDepartmentId" @click="void updateScope('assign')">
+                <button class="delegation-page__button" type="button" :disabled="scopeBusy || !memberWritesReady || !selectedScopeNamespace || !selectedDepartmentId" @click="void updateScope('assign')">
                   添加部门范围
                 </button>
               </div>
@@ -316,7 +317,7 @@
                     {{ group.name }} ({{ group.memberCount }})
                   </option>
                 </select>
-                <button class="delegation-page__button" type="button" :disabled="scopeBusy || !selectedScopeNamespace || !selectedAudienceGroupId" @click="void updateScopeGroup('assign')">
+                <button class="delegation-page__button" type="button" :disabled="scopeBusy || !memberWritesReady || !selectedScopeNamespace || !selectedAudienceGroupId" @click="void updateScopeGroup('assign')">
                   添加成员集范围
                 </button>
               </div>
@@ -328,7 +329,7 @@
                   <button
                     class="delegation-page__button delegation-page__button--danger"
                     type="button"
-                    :disabled="scopeBusy"
+                    :disabled="scopeBusy || !memberWritesReady"
                     @click="void updateScope('unassign', scope)"
                   >
                     移除部门范围
@@ -343,7 +344,7 @@
                   <button
                     class="delegation-page__button delegation-page__button--danger"
                     type="button"
-                    :disabled="scopeBusy"
+                    :disabled="scopeBusy || !memberWritesReady"
                     @click="void updateScopeGroup('unassign', group)"
                   >
                     移除成员集范围
@@ -399,7 +400,7 @@
               <button
                 class="delegation-page__button"
                 type="button"
-                :disabled="scopeBusy || !selectedTemplateId || !selectedScopeNamespace || !selectedScopeConfig?.adminNamespaces.length"
+                :disabled="scopeBusy || !memberWritesReady || !selectedTemplateId || !selectedScopeNamespace || !selectedScopeConfig?.adminNamespaces.length"
                 @click="void applyTemplate()"
               >
                 覆盖应用到当前命名空间
@@ -481,6 +482,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { apiFetch } from '../utils/api'
+import { presentRoleTitle } from './builtinCatalogPresentation'
 
 type ManagedUser = {
   id: string
@@ -655,9 +657,40 @@ const hasSelectedMemberGroup = computed(() => (
   && memberGroups.value.some((group) => group.id === selectedMemberGroupId.value)
 ))
 
+const memberWritesReady = computed(() => {
+  const userId = selectedUserId.value
+  if (!userId || selectedAccess.value?.user.id !== userId) return false
+  if (summary.value?.isPlatformAdmin && selectedScopeConfig.value?.user.id !== userId) return false
+  return true
+})
+
 function setStatus(message: string, tone: 'info' | 'error' = 'info') {
   status.value = message
   statusTone.value = tone
+}
+
+function readLocationUserId(): string {
+  if (typeof window === 'undefined') return ''
+  return new URL(window.location.href).searchParams.get('userId')?.trim() || ''
+}
+
+let delegationAccessGeneration = 0
+const initialPinnedUserId = readLocationUserId()
+let pinnedUserPending = initialPinnedUserId.length > 0
+
+function roleTitle(role: { id: string; name: string }): string {
+  return presentRoleTitle(role)
+}
+
+function delegationReadStillCurrent(generation: number, userId: string): boolean {
+  return generation === delegationAccessGeneration && selectedUserId.value === userId
+}
+
+function readSubjectMatches(payload: Record<string, unknown>, userId: string): boolean {
+  const data = payload.data
+  if (!data || typeof data !== 'object') return false
+  const user = (data as { user?: { id?: unknown } }).user
+  return typeof user?.id === 'string' && user.id === userId
 }
 
 async function readJson(response: Response): Promise<Record<string, unknown>> {
@@ -915,6 +948,18 @@ async function loadUsers(): Promise<void> {
 
     const data = payload.data as { items?: ManagedUser[] } | undefined
     users.value = Array.isArray(data?.items) ? data.items : []
+    if (pinnedUserPending) {
+      const pinned = initialPinnedUserId
+      pinnedUserPending = false
+      await selectUser(pinned)
+      return
+    }
+    // An explicitly linked member is independent of the paginated search results.
+    // Refresh its access instead of silently replacing it with the first listed user.
+    if (selectedUserId.value && selectedUserId.value === initialPinnedUserId) {
+      await selectUser(selectedUserId.value)
+      return
+    }
     const selectedStillExists = users.value.some((user) => user.id === selectedUserId.value)
     if (selectedUserId.value && !selectedStillExists) {
       selectedUserId.value = ''
@@ -936,25 +981,34 @@ async function loadUsers(): Promise<void> {
 }
 
 async function selectUser(userId: string): Promise<void> {
-  selectedUserId.value = userId
+  const generation = ++delegationAccessGeneration
+  selectedAccess.value = null
+  selectedScopeConfig.value = null
   selectedRoleId.value = ''
   selectedRevokeRoleId.value = ''
   selectedDepartmentId.value = ''
   selectedAudienceGroupId.value = ''
+  selectedUserId.value = userId
   try {
     const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(userId)}/access`)
     const payload = await readJson(response)
+    if (!delegationReadStillCurrent(generation, userId)) return
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载成员委派权限失败'))
+    }
+    if (!readSubjectMatches(payload, userId)) {
+      setStatus('加载成员委派权限失败', 'error')
+      return
     }
 
     selectedAccess.value = payload.data as DelegatedUserAccess
     if (summary.value?.isPlatformAdmin) {
       await loadScopeConfig(userId)
-    } else {
+    } else if (delegationReadStillCurrent(generation, userId)) {
       selectedScopeConfig.value = null
     }
   } catch (error) {
+    if (!delegationReadStillCurrent(generation, userId)) return
     selectedAccess.value = null
     selectedScopeConfig.value = null
     setStatus(error instanceof Error ? error.message : '加载成员委派权限失败', 'error')
@@ -962,10 +1016,11 @@ async function selectUser(userId: string): Promise<void> {
 }
 
 async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: boolean): Promise<void> {
-  if (!selectedUserId.value) return
+  const targetUserId = selectedUserId.value
+  if (!targetUserId || !memberWritesReady.value) return
   busy.value = true
   try {
-    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(selectedUserId.value)}/namespaces/${encodeURIComponent(admission.namespace)}/admission`, {
+    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/namespaces/${encodeURIComponent(admission.namespace)}/admission`, {
       method: 'PATCH',
       body: JSON.stringify({ enabled }),
     })
@@ -973,6 +1028,7 @@ async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: 
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存插件使用准入失败'))
     }
+    if (selectedUserId.value !== targetUserId || selectedAccess.value?.user.id !== targetUserId) return
 
     const data = payload.data as Record<string, unknown> | undefined
     if (data?.namespaceAdmissions !== undefined && selectedAccess.value) {
@@ -992,7 +1048,7 @@ async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: 
             }).filter((item) => item.namespace)
           : selectedAccess.value.namespaceAdmissions,
       }
-    } else if (selectedUserId.value) {
+    } else if (selectedUserId.value === targetUserId) {
       await selectUser(selectedUserId.value)
     }
     setStatus(enabled ? `已开通 ${admission.namespace} 插件使用` : `已关闭 ${admission.namespace} 插件使用`)
@@ -1005,11 +1061,18 @@ async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: 
 
 async function loadScopeConfig(userId: string): Promise<void> {
   if (!summary.value?.isPlatformAdmin) return
+  const generation = delegationAccessGeneration
 
   const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(userId)}/scopes`)
   const payload = await readJson(response)
+  if (!delegationReadStillCurrent(generation, userId)) return
   if (!response.ok || payload.ok !== true) {
     throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载管理员范围失败'))
+  }
+  if (!delegationReadStillCurrent(generation, userId)) return
+  if (!readSubjectMatches(payload, userId)) {
+    setStatus('加载管理员范围失败', 'error')
+    return
   }
 
   selectedScopeConfig.value = payload.data as DelegatedAdminScopeConfig
@@ -1021,16 +1084,17 @@ async function loadScopeConfig(userId: string): Promise<void> {
 /** A revocable role id, named from the assignable catalog when it is there (it may not be). */
 function revocableRoleLabel(roleId: string): string {
   const role = selectedAccess.value?.roleCatalog.find((candidate) => candidate.id === roleId)
-  return role ? `${role.name} (${role.id})` : roleId
+  return role ? `${roleTitle(role)} (${role.id})` : roleId
 }
 
 async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
   // Assign picks from the assignable catalog, revoke from the server's revocable list.
   const roleId = action === 'assign' ? selectedRoleId.value : selectedRevokeRoleId.value
-  if (!selectedUserId.value || !roleId) return
+  const targetUserId = selectedUserId.value
+  if (!targetUserId || !roleId || !memberWritesReady.value) return
   busy.value = true
   try {
-    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(selectedUserId.value)}/roles/${action}`, {
+    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/roles/${action}`, {
       method: 'POST',
       body: JSON.stringify({ roleId }),
     })
@@ -1038,14 +1102,20 @@ async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存委派角色失败'))
     }
+    if (selectedUserId.value !== targetUserId) return
+    if (!readSubjectMatches(payload, targetUserId)) {
+      setStatus('保存委派角色失败', 'error')
+      return
+    }
 
     selectedAccess.value = payload.data as DelegatedUserAccess
     if (!selectedAccess.value.delegableRoles.includes(selectedRevokeRoleId.value)) {
       selectedRevokeRoleId.value = ''
     }
     if (summary.value?.isPlatformAdmin) {
-      await loadScopeConfig(selectedUserId.value)
+      await loadScopeConfig(targetUserId)
     }
+    if (selectedUserId.value !== targetUserId) return
     setStatus(action === 'assign' ? '角色已分配' : '角色已撤销')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '保存委派角色失败', 'error')
@@ -1055,20 +1125,25 @@ async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
 }
 
 async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignment): Promise<void> {
-  if (!summary.value?.isPlatformAdmin || !selectedUserId.value) return
+  const targetUserId = selectedUserId.value
+  if (!summary.value?.isPlatformAdmin || !targetUserId || !memberWritesReady.value) return
   const namespace = action === 'assign' ? selectedScopeNamespace.value : scope?.namespace || ''
   const directoryDepartmentId = action === 'assign' ? selectedDepartmentId.value : scope?.directoryDepartmentId || ''
   if (!namespace || !directoryDepartmentId) return
 
   scopeBusy.value = true
   try {
-    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(selectedUserId.value)}/scopes/${action}`, {
+    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/scopes/${action}`, {
       method: 'POST',
       body: JSON.stringify({ namespace, directoryDepartmentId }),
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存管理员范围失败'))
+    }
+    if (selectedUserId.value !== targetUserId || !readSubjectMatches(payload, targetUserId)) {
+      setStatus('保存管理员范围失败', 'error')
+      return
     }
 
     selectedScopeConfig.value = payload.data as DelegatedAdminScopeConfig
@@ -1087,20 +1162,25 @@ async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignmen
 }
 
 async function updateScopeGroup(action: 'assign' | 'unassign', assignment?: GroupAssignment): Promise<void> {
-  if (!summary.value?.isPlatformAdmin || !selectedUserId.value) return
+  const targetUserId = selectedUserId.value
+  if (!summary.value?.isPlatformAdmin || !targetUserId || !memberWritesReady.value) return
   const namespace = action === 'assign' ? selectedScopeNamespace.value : assignment?.namespace || ''
   const groupId = action === 'assign' ? selectedAudienceGroupId.value : assignment?.groupId || ''
   if (!namespace || !groupId) return
 
   scopeBusy.value = true
   try {
-    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(selectedUserId.value)}/scope-groups/${action}`, {
+    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/scope-groups/${action}`, {
       method: 'POST',
       body: JSON.stringify({ namespace, groupId }),
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存成员集范围失败'))
+    }
+    if (selectedUserId.value !== targetUserId || !readSubjectMatches(payload, targetUserId)) {
+      setStatus('保存成员集范围失败', 'error')
+      return
     }
     selectedScopeConfig.value = payload.data as DelegatedAdminScopeConfig
     if (action === 'assign') {
@@ -1119,7 +1199,9 @@ async function updateScopeGroup(action: 'assign' | 'unassign', assignment?: Grou
 
 async function updateUserMemberGroup(action: 'assign' | 'unassign', userIdOverride?: string): Promise<void> {
   const targetUserId = userIdOverride || selectedUserId.value
+  const writesSelectedMember = !userIdOverride || userIdOverride === selectedUserId.value
   if (!summary.value?.isPlatformAdmin || !targetUserId || !selectedMemberGroupId.value || !hasSelectedMemberGroup.value) return
+  if (writesSelectedMember && !memberWritesReady.value) return
   groupBusy.value = true
   try {
     const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/member-groups/${action}`, {
@@ -1130,7 +1212,12 @@ async function updateUserMemberGroup(action: 'assign' | 'unassign', userIdOverri
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存成员集成员失败'))
     }
-    if (selectedAccess.value && selectedUserId.value === targetUserId) {
+    if (
+      writesSelectedMember
+      && selectedAccess.value
+      && selectedUserId.value === targetUserId
+      && readSubjectMatches(payload, targetUserId)
+    ) {
       selectedAccess.value = {
         ...selectedAccess.value,
         user: (payload.data as { user: ManagedUser }).user,
@@ -1151,10 +1238,11 @@ async function updateUserMemberGroup(action: 'assign' | 'unassign', userIdOverri
 }
 
 async function applyTemplate(): Promise<void> {
-  if (!summary.value?.isPlatformAdmin || !selectedUserId.value || !selectedScopeNamespace.value || !selectedTemplateId.value) return
+  const targetUserId = selectedUserId.value
+  if (!summary.value?.isPlatformAdmin || !targetUserId || !memberWritesReady.value || !selectedScopeNamespace.value || !selectedTemplateId.value) return
   scopeBusy.value = true
   try {
-    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(selectedUserId.value)}/scope-templates/apply`, {
+    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/scope-templates/apply`, {
       method: 'POST',
       body: JSON.stringify({
         namespace: selectedScopeNamespace.value,
@@ -1165,6 +1253,10 @@ async function applyTemplate(): Promise<void> {
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '应用范围模板失败'))
+    }
+    if (selectedUserId.value !== targetUserId || !readSubjectMatches(payload, targetUserId)) {
+      setStatus('应用范围模板失败', 'error')
+      return
     }
 
     selectedScopeConfig.value = payload.data as DelegatedAdminScopeConfig
@@ -1330,11 +1422,24 @@ onMounted(async () => {
 .delegation-page__chip {
   display: inline-flex;
   align-items: center;
+  max-width: 100%;
   border-radius: 999px;
   background: #f3f4f6;
   color: #111827;
   padding: 4px 10px;
   font-size: 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.delegation-page__code,
+.delegation-page__role-card span,
+.delegation-page__role-card p,
+.delegation-page__scope-card span,
+.delegation-page__scope-card p {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .delegation-page__chip--success {
@@ -1377,6 +1482,24 @@ onMounted(async () => {
   .delegation-page__header {
     display: grid;
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 480px) {
+  .delegation-page__header,
+  .delegation-page__actions {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+  }
+
+  .delegation-page__actions > .delegation-page__input,
+  .delegation-page__actions > .delegation-page__button,
+  .delegation-page__actions > .delegation-page__link {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
   }
 }
 </style>

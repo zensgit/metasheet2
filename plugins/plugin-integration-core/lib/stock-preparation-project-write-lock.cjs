@@ -871,6 +871,47 @@ function createStockPreparationProjectWriteLock({
     return generationFromRow(scopeKey, updated[0])
   }
 
+  // 批次标识 BI-1a (design §3.5 step 0; step-6 contract S6 C-6; register R-65) — THE HOLDER ASSERT INSIDE A PLUGIN-DB
+  // TRANSACTION. A ledger mutation made under a lease (the pull-batch allocation / finish / install abort, and step
+  // 6's close) runs this FIRST in its own transaction: the lock row is taken FOR UPDATE and the caller's lease id and
+  // fencing epoch must still be the row's, else 409 LEASE_LOST (`fence: true`, `partial: false`) and the caller rolls
+  // back. It reads and locks, never writes (I1-I5 unchanged), so a takeover's UPDATE queues behind it and the
+  // transaction commits only while the caller still holds the lease. The generation token is not compared: a plan
+  // that moved is the fenced host write's refusal (PLAN_SUPERSEDED), not this one's. Its wait is bounded first
+  // (`setLocalLockTimeout`, which stays in force for the rest of the transaction): 55P03 — the holder's own fenced
+  // write holds the row FOR SHARE — answers 409 WRITE_LOCKED `holder_in_write`; any other failure 503 STORE_FAILED.
+  // The handle must be the scoped helper's transaction handle (setLocalLockTimeout / selectOneForUpdate), refused 500
+  // UNAVAILABLE otherwise. No caller yet (BI-1b wires it).
+  async function assertHolderWithin(trx, scopeKey, { leaseId, fencingEpoch, reason } = {}) {
+    if (!trx || typeof trx.setLocalLockTimeout !== 'function' || typeof trx.selectOneForUpdate !== 'function') {
+      throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the in-transaction holder assert needs the scoped db transaction handle', { reason: 'transaction_handle' })
+    }
+    if (!nonEmptyString(scopeKey) || !nonEmptyString(leaseId) || !Number.isSafeInteger(fencingEpoch) || fencingEpoch < 0) {
+      throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 'the in-transaction holder assert needs a write scope, a lease id and a fencing epoch', { reason: 'scope_incomplete' })
+    }
+    try {
+      await trx.setLocalLockTimeout(rowLockWait)
+    } catch (error) {
+      throw storeFailed('holder_within', error)
+    }
+    let row
+    try {
+      row = await trx.selectOneForUpdate(PROJECT_WRITE_LOCK_TABLE, { scope_key: scopeKey })
+    } catch (error) {
+      if (isLockNotAvailable(error)) throw writeLocked(null, nowMs(), { reason: 'holder_in_write', retryAfterMs: rowLockWait })
+      throw storeFailed('holder_within', error)
+    }
+    if (!row || row.lease_id !== leaseId || integerOf(row.fencing_epoch) !== fencingEpoch) {
+      throw new StockPreparationProjectWriteLockError(
+        409,
+        PROJECT_WRITE_ERROR_CODES.LEASE_LOST,
+        'this run no longer holds the sheet write lease (it lapsed and was taken over); nothing more was recorded',
+        { reason: nonEmptyString(reason) || 'holder_assert_lost', partial: false },
+        { fence: true },
+      )
+    }
+  }
+
   function generationFromRow(scopeKey, row) {
     return Object.freeze({
       scopeKey,
@@ -1200,6 +1241,7 @@ function createStockPreparationProjectWriteLock({
     assertNoLiveWriter,
     bumpGeneration,
     bumpGenerationWithin,
+    assertHolderWithin,
     observeGeneration,
     readGeneration,
     acquire,
