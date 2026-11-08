@@ -3190,6 +3190,8 @@ export class MultitableApiClient implements CommentsApiClient {
     offset?: number
     includeLinkSummaries?: boolean
     search?: string
+    /** 备料 「查看子件」 / 「查看所有使用位置」: the grid's transient viewer filter (JSON), ANDed server-side for this read only. */
+    viewerFilter?: string
   }): Promise<MetaViewData> {
     const res = await this.fetch(`/api/multitable/view${qs(params as Record<string, string | number | boolean | undefined>)}`)
     return this.parseJson(res)
@@ -3198,7 +3200,7 @@ export class MultitableApiClient implements CommentsApiClient {
   // Footer aggregation (#4-3b-1): server aggregates over the full filtered set. On 413 (too large)
   // parseJson throws a MultitableApiError with code 'AGGREGATE_TOO_LARGE' — caller handles, never
   // falls back to local aggregation.
-  async aggregateView(params: { sheetId: string; viewId?: string; search?: string; statsFields?: string[] }): Promise<ViewAggregateResult> {
+  async aggregateView(params: { sheetId: string; viewId?: string; search?: string; viewerFilter?: string; statsFields?: string[] }): Promise<ViewAggregateResult> {
     const { sheetId, statsFields, ...rest } = params
     // A5: request full-column numeric min/max/count for the given fields (conditional-formatting scale).
     // Joined CSV → the server omits `stats` entirely when this is absent (byte-identical footer shape).

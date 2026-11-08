@@ -82,6 +82,11 @@ export type AutomationLabelKey =
   | 'log.reason.backwriteTargetRecordMissing'
   | 'log.reason.dingtalkLinkHint'
   | 'log.reason.dingtalkLegacyNotLinked'
+  // Delivery-result truthfulness: a send_email step that made NO send (development simulation, transport
+  // disabled, no email recipient) is a skipped step whose values-free reason token reads as a sentence.
+  | 'log.reason.emailTransportSimulated'
+  | 'log.reason.emailTransportDisabled'
+  | 'log.reason.emailNoRecipients'
   | 'support.copyPacket'
   | 'support.downloadJson'
   | 'support.clipboardUnavailable'
@@ -488,6 +493,9 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'log.reason.backwriteTargetRecordMissing',
   'log.reason.dingtalkLinkHint',
   'log.reason.dingtalkLegacyNotLinked',
+  'log.reason.emailTransportSimulated',
+  'log.reason.emailTransportDisabled',
+  'log.reason.emailNoRecipients',
   'support.copyPacket',
   'support.downloadJson',
   'support.clipboardUnavailable',
@@ -893,6 +901,20 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'log.reason.dingtalkLegacyNotLinked': {
     en: 'Some recipients were not linked to DingTalk (older record; the users are not listed).',
     zh: '有收件人未绑定钉钉（旧记录，未列出具体用户）。',
+  },
+  // Delivery-result truthfulness (automation-executor send_email, reason tokens from
+  // notification-delivery-outcome.ts): the step made NO send, so it is skipped — not success, not a failure.
+  'log.reason.emailTransportSimulated': {
+    en: 'Email not sent: the email transport is in simulation mode (development); nothing was delivered.',
+    zh: '邮件未发送：邮件通道处于模拟模式（开发环境），未实际投递。',
+  },
+  'log.reason.emailTransportDisabled': {
+    en: 'Email not sent: the email transport is disabled.',
+    zh: '邮件未发送：邮件通道已禁用。',
+  },
+  'log.reason.emailNoRecipients': {
+    en: 'Email not sent: no email recipient to deliver to.',
+    zh: '邮件未发送：没有可投递的邮件收件人。',
   },
   'support.copyPacket': { en: 'Copy redacted packet', zh: '复制脱敏包' },
   'support.downloadJson': { en: 'Download JSON', zh: '下载 JSON' },
@@ -1499,6 +1521,20 @@ export function automationStatusLabel(status: AutomationStatus | UnknownAutomati
 /** The backend's values-free "trigger record is gone" code (automation-executor.ts TARGET_RECORD_MISSING_SKIP_REASON). */
 const TARGET_RECORD_MISSING_REASON = 'target_record_missing'
 
+/**
+ * The backend's values-free send_email "nothing was sent" step output (automation-executor.ts legacy and
+ * two-phase paths, tokens from notification-delivery-outcome.ts SEND_EMAIL_OUTCOME_REASONS): the step is
+ * `skipped` and carries `{ outcome: 'not_sent', reason: <token>, notificationStatus: <channel status> }`.
+ * The three marker keys are rendered as one sentence and dropped from the JSON; ids and counts stay raw.
+ */
+const SEND_EMAIL_NOT_SENT_OUTCOME = 'not_sent'
+const SEND_EMAIL_NOT_SENT_REASON_KEYS: Readonly<Record<string, AutomationLabelKey>> = {
+  email_transport_simulated: 'log.reason.emailTransportSimulated',
+  email_transport_disabled: 'log.reason.emailTransportDisabled',
+  email_no_recipients: 'log.reason.emailNoRecipients',
+}
+const SEND_EMAIL_NOT_SENT_STRIP = ['outcome', 'reason', 'notificationStatus']
+
 export interface AutomationStepOutputView {
   /** Localised sentence for a recognised values-free reason code in the step output, else null. */
   reason: string | null
@@ -1515,6 +1551,9 @@ export interface AutomationStepOutputView {
  *   { reason: 'target_record_missing' }             → skipped same-base delete of a vanished trigger record
  *   { backwriteSkipped: 'target_record_missing' }   → same-base approval-result writeback found its record gone
  * A cross-base `backwriteSkipped` carries an error sentence, not this code, and is left raw on purpose.
+ * Delivery-result truthfulness adds the send_email "nothing was sent" markers (see SEND_EMAIL_NOT_SENT_REASON_KEYS):
+ *   { outcome: 'not_sent', reason: 'email_transport_simulated' | 'email_transport_disabled' | 'email_no_recipients',
+ *     notificationStatus } → one sentence; those three keys are dropped, notificationId / recipientCount stay raw.
  */
 export function automationStepOutputView(output: unknown, isZh: boolean): AutomationStepOutputView {
   if (!output || typeof output !== 'object' || Array.isArray(output)) return { reason: null, output }
@@ -1534,7 +1573,13 @@ export function automationStepOutputView(output: unknown, isZh: boolean): Automa
   }
   let key: AutomationLabelKey | null = null
   let strip: string[] = []
-  if (record.reason === TARGET_RECORD_MISSING_REASON) {
+  const notSentKey = record.outcome === SEND_EMAIL_NOT_SENT_OUTCOME && typeof record.reason === 'string'
+    ? SEND_EMAIL_NOT_SENT_REASON_KEYS[record.reason] ?? null
+    : null
+  if (notSentKey) {
+    key = notSentKey
+    strip = SEND_EMAIL_NOT_SENT_STRIP
+  } else if (record.reason === TARGET_RECORD_MISSING_REASON) {
     if (record.noop === true) {
       key = 'log.reason.targetRecordMissingNoop'
       strip = ['reason', 'noop']

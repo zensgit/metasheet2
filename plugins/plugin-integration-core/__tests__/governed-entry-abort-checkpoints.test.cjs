@@ -21,6 +21,12 @@
 //        runner input) answers the status and body captured on the pre-1b-i base, byte for byte.
 //   G-06 THE PRINCIPAL CONTEXT: the fields it carries are exactly the request fields http-routes.cjs reads.
 //   G-07 VALID_TRIGGERS gained `automation` (word only).
+//   G-08 ONE CHAIN, TWO CALLERS for the pull-batch lane (批次标识 BI-1b, merged from main 2026-11-08): the HTTP
+//        route and the governed entry hand the lib the SAME server-held lane (`pullBatch: pullBatchContextFor(...)`,
+//        ported into `governedStockPrepPull` by the merge). Switch ON, band installed, real ledger: both answer the
+//        same preview stanza (ready => wouldStamp; installing => the reason) over the same probe input (band ids as
+//        optional ids) and the same ledger reads; the whole payload is the same answer. OFF: neither carries the key
+//        and the ledger is never touched.
 
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -39,6 +45,12 @@ const { STOCK_PREP_OPERATE, STOCK_PREP_PULL, STOCK_PREP_READ } = require(path.jo
 const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 const harness = require('./support/stock-preparation-project-sheet-harness.cjs')
 const { runFailClosedSuite } = require('./support/fail-closed-suite-runner.cjs')
+// G-08: the pull-batch lane's fixtures — the lanes suite's mount recipe (band installed on the seeded sheet, the REAL
+// ledger store over the migration-105 fake, the lock's lease row bridged into the ledger transaction).
+const pbKit = require('./support/stock-preparation-pull-batch-kit.cjs')
+const lockKit = require('./support/stock-preparation-project-write-lock-kit.cjs')
+const { createStockPreparationPullBatchStore } = require(path.join(LIB, 'stock-preparation-pull-batch-store.cjs'))
+const { pullBatchBandFieldDescriptors } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 
 const TENANT = 'tenant-r69-governed'
 const OTHER_TENANT = 'tenant-r69-governed-foreign'
@@ -254,6 +266,75 @@ async function collectRouteSnapshots() {
 
 // Captured by running `collectRouteSnapshots` on the pre-1b-i base (origin/main a8ab73bee), unchanged.
 const EXPECTED_ROUTE_SNAPSHOTS = require('./fixtures/governed-entry-route-snapshots.json')
+
+// ── G-08 fixtures (the pull-batch lane) ───────────────────────────────────────────────────────────
+
+const PULL_BATCH_SWITCH = 'STOCK_PREP_PULL_BATCH_ENABLED'
+
+/** The pull-batch switch is read per request by the lanes helper; set for ONE test and restored. */
+async function withPullBatchSwitch(value, fn) {
+  const original = process.env[PULL_BATCH_SWITCH]
+  if (value === undefined) delete process.env[PULL_BATCH_SWITCH]
+  else process.env[PULL_BATCH_SWITCH] = value
+  try {
+    return await fn()
+  } finally {
+    if (original === undefined) delete process.env[PULL_BATCH_SWITCH]
+    else process.env[PULL_BATCH_SWITCH] = original
+  }
+}
+
+/**
+ * The stock-prep stack with the band installed on the seeded project sheet and the REAL ledger store (the lanes
+ * suite's `mount({ ledger: 'real', band: true })`), plus a handler set over the same services so the governed entry
+ * and the HTTP route run over one host. `sheet` is the ledger's `_sheet` row state: `born_empty` (resolved) or
+ * `installing`.
+ */
+function mountPullBatchStockPrep({ sheet }) {
+  const clock = pbKit.createClock('2026-11-08T01:00:00.000Z')
+  const ledgerDb = pbKit.createFakePullBatchDb({ clock })
+  const lockEnv = lockKit.createInMemoryProjectWriteLock()
+  // ONE database in production: the holder assert reads the lease row inside the ledger's transaction.
+  const bridged = {
+    ...ledgerDb,
+    async transaction(callback) {
+      return ledgerDb.transaction((trx) => callback({
+        ...trx,
+        async selectOneForUpdate(table, where) { return table === pbKit.T.lock ? lockEnv.db.selectOne(table, where) : trx.selectOneForUpdate(table, where) },
+      }))
+    },
+  }
+  let n = 0
+  const store = createStockPreparationPullBatchStore({ db: bridged, now: clock.now, idGenerator: (kind) => `${kind}_g08_${(n += 1)}` })
+  const h = harness.mountProjectSheetRoutes({
+    tenantId: TENANT,
+    projectNo: PROJECT,
+    switchOn: true,
+    logger: silentLogger,
+    serviceExtras: { stockPreparationProjectWriteLock: lockEnv.lock, stockPreparationPullBatchStore: store },
+  })
+  const seeded = h.seedRegistryRow(PROJECT)
+  const object = h.provisioning.objects.get(`${h.staging}/${seeded.objectId}`)
+  for (const descriptor of pullBatchBandFieldDescriptors({ locale: 'zh-CN', placement: 'left' })) {
+    object.fields.set(descriptor.id, { name: descriptor.name, type: descriptor.type, property: JSON.parse(JSON.stringify(descriptor.property)), order: descriptor.order })
+  }
+  ledgerDb.seed(pbKit.T.sheet, pbKit.sheetRow({ tenantId: TENANT, sheetId: seeded.sheetId, projectNo: PROJECT, status: sheet }))
+  ledgerDb.log.length = 0
+  h.handlers = httpRoutes.createHandlers(h.services, { context: h.context, logger: silentLogger })
+  return { ...h, ledgerDb }
+}
+
+/** Two dry-run answers over one unchanged sheet differ only by the random token and the PLM read phase's wall clock. */
+function withoutRandomDryRunKeys(data) {
+  const { dryRunToken, plmReadPhase, ...rest } = data
+  return {
+    ...rest,
+    dryRunToken: typeof dryRunToken,
+    plmReadPhase: plmReadPhase && typeof plmReadPhase === 'object' ? { ...plmReadPhase, wallMs: typeof plmReadPhase.wallMs } : plmReadPhase,
+  }
+}
+
+const probeCallsOf = (h) => h.provisioning.calls.filter(([verb]) => verb === 'resolveExistingObjectFieldIds').map((entry) => entry.slice(1))
 
 // ── tests ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -481,6 +562,61 @@ const tests = [
 
   ['G-07 VALID_TRIGGERS gained automation (word only)', () => {
     assert.deepEqual([...pipelines.__internals.VALID_TRIGGERS].sort(), ['api', 'automation', 'cron', 'manual', 'replay'])
+  }],
+
+  ['G-08 one chain, two callers — the pull-batch lane (BI-1b): switch ON, the governed entry and the HTTP route answer the same preview stanza over the same probe input and ledger reads (ready and installing); OFF, neither carries the key and the ledger is untouched', async () => {
+    const body = { parameters: { projectNo: PROJECT } }
+    const httpDryRun = (h) => harness.call(h.routes, 'POST', DRY_RUN_PATH, { user: PULLER, params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID }, body, query: { tenantId: TENANT } })
+    const governedDryRun = (h) => h.handlers.governedEntries.runGovernedStockPrepPull(pullerContext(), { actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+
+    for (const [sheet, expected] of [
+      ['born_empty', { preview: true, wouldStamp: true, reason: null }],
+      // The status I5's port maps to held(pull_batch_installing): the governed dry run answers it exactly as HTTP does.
+      ['installing', { preview: true, wouldStamp: false, reason: 'installing' }],
+    ]) {
+      const h = mountPullBatchStockPrep({ sheet })
+      try {
+        await withPullBatchSwitch('true', async () => {
+          const http = await httpDryRun(h)
+          assert.equal(http.statusCode, 200, JSON.stringify(http.body))
+          const httpLedger = h.ledgerDb.log.splice(0)
+          const httpProbes = probeCallsOf(h)
+          h.provisioning.calls.length = 0
+          const governed = await governedDryRun(h)
+          const governedLedger = h.ledgerDb.log.splice(0)
+          const governedProbes = probeCallsOf(h)
+          h.provisioning.calls.length = 0
+
+          assert.deepEqual(http.body.data.pullBatch, expected, `${sheet}: the HTTP route's preview stanza`)
+          assert.deepEqual(governed.pullBatch, expected, `${sheet}: the governed entry hands the lib the same lane (the ported pullBatch key)`)
+          assert.deepEqual(withoutRandomDryRunKeys(governed), withoutRandomDryRunKeys(http.body.data), `${sheet}: the whole payload is the same answer`)
+          // Calibration first (the band ids ride the probe as optional ids), then parity.
+          assert.ok(httpProbes.length >= 1, 'calibration: the field-existence probe ran')
+          assert.ok(httpProbes[0][1].includes('pullBatch') && httpProbes[0][1].includes('firstPullBatch'), 'calibration: the probe carries both band ids')
+          assert.deepEqual(governedProbes, httpProbes, `${sheet}: the same probe input on both paths`)
+          assert.ok(httpLedger.length >= 1, 'calibration: the ON preview reads the ledger')
+          assert.deepEqual(governedLedger, httpLedger, `${sheet}: the same ledger reads on both paths`)
+        })
+      } finally {
+        h.restore()
+      }
+    }
+
+    // OFF (the default): neither caller carries the key, and the ledger is never touched by either.
+    const off = mountPullBatchStockPrep({ sheet: 'born_empty' })
+    try {
+      await withPullBatchSwitch(undefined, async () => {
+        const http = await httpDryRun(off)
+        assert.equal(http.statusCode, 200, JSON.stringify(http.body))
+        const governed = await governedDryRun(off)
+        assert.equal(Object.prototype.hasOwnProperty.call(http.body.data, 'pullBatch'), false, 'OFF: no key on the HTTP answer')
+        assert.equal(Object.prototype.hasOwnProperty.call(governed, 'pullBatch'), false, 'OFF: no key on the governed answer')
+        assert.deepEqual(off.ledgerDb.log, [], 'OFF: zero ledger IO on either path')
+        assert.deepEqual(withoutRandomDryRunKeys(governed), withoutRandomDryRunKeys(http.body.data), 'OFF: the same answer')
+      })
+    } finally {
+      off.restore()
+    }
   }],
 ]
 
