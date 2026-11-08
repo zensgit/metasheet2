@@ -18,6 +18,7 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import type { LoadedPlugin } from '../../src/core/plugin-loader'
 import type { PluginContext } from '../../src/types/plugin'
 import { defineStockPreparationManualRowsRealDbCases } from './stock-preparation-manual-rows-realdb.cases'
+import { defineStockPreparationPullBatchRealDbCases } from './stock-preparation-pull-batch-realdb.cases'
 import { defineStockPreparationPullBatchSiteProbeRealDbCases } from './stock-preparation-pull-batch-site-probe-realdb.cases'
 import { defineMultitablePluginViewLandingRealDbCases } from './multitable-plugin-view-landing-realdb.cases'
 import { defineStockPreparationPullBatchBandRealDbCases } from './stock-preparation-pull-batch-band-realdb.cases'
@@ -501,6 +502,9 @@ describeIfDatabase('stock-preparation P4 one-shot repair (real DB)', () => {
 // 人工补充行 B1 (ADR adr-stock-prep-manual-rows-20261030 §8 「B1 插件」 1 / 10): the pull never touches a `manual:` row, the
 // export carries 来源, and the R-60 boundary holds (real PG, MR-RD-*).
 defineStockPreparationManualRowsRealDbCases()
+// 批次标识 BI-1a (register R-65): migration 105 and the pull-batch ledger store on real PG — CHECK vocabulary, allocation
+// races, the settings lock and its C7 release (BI-R*; R line: no zombie-holder case, the write lock is main-only).
+defineStockPreparationPullBatchRealDbCases()
 // Pull batch BI-6a (O-BI-9): the read-only site probe pack runs on real PG on synthetic sheets (BI-PROBE-RD-01/02).
 defineStockPreparationPullBatchSiteProbeRealDbCases()
 // 批次标识 BI-5: the plugin view landing promotion and the values-free sheet layout read on real PG (BI5-RD-*).

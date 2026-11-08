@@ -75,6 +75,8 @@ const {
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
   STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
+  // 批次标识 (BI-1a, R-65; design Q-BI-13): the two band ids join the `ext_` collision catalog (only there).
+  STOCK_PREPARATION_PULL_BATCH_FIELD_IDS,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
 const {
@@ -274,7 +276,7 @@ function normalizeActionExtensionFieldIds(input, template) {
       field: 'extensionFieldIds',
     })
   }
-  const templateIds = template.fields.map((field) => field.id)
+  const templateIds = template.fields.map((field) => field.id).concat(STOCK_PREPARATION_PULL_BATCH_FIELD_IDS)
   const seen = new Set()
   const out = []
   for (let index = 0; index < input.length; index += 1) {
