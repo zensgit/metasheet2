@@ -688,6 +688,8 @@ test('RC-11 a committed add is audited even when the option sync (422) or the PL
 // ── RC-12 ────────────────────────────────────────────────────────────────────────────────────────────
 
 const PLM_DROPPED = DROPPED.filter((id) => OWNERSHIP.get(id) === 'plm_system')
+// Derived, not a literal: a later template column (Y8) changes the count, not these assertions.
+const PLM_COLUMN_COUNT = TEMPLATE_IDS.filter((id) => OWNERSHIP.get(id) === 'plm_system').length
 const HUMAN_DROPPED = DROPPED.filter((id) => OWNERSHIP.get(id) !== 'plm_system')
 
 /** Wrap the transaction-bound additive write so a suite sees exactly the descriptors the INSERT receives. */
@@ -712,12 +714,12 @@ test('RC-12 the INSERT of a re-added plm_system column carries the lock (a human
     const byId = new Map(inserted[0].map((field) => [field.id, field]))
     for (const id of PLM_DROPPED) assert.equal(byId.get(id).property[HUMAN_WRITE_LOCK_PROPERTY_KEY], 'plm_system', `the INSERT of ${id} carries the lock`)
     for (const id of HUMAN_DROPPED) assert.equal(Object.prototype.hasOwnProperty.call(byId.get(id).property || {}, HUMAN_WRITE_LOCK_PROPERTY_KEY), false, `the INSERT of the human column ${id} carries no lock`)
-    assert.deepEqual(plain(res.body.data.plmColumnLock), { marked: 0, alreadyMarked: 20, missing: 0 }, 'the lock step found every added PLM column already marked')
+    assert.deepEqual(plain(res.body.data.plmColumnLock), { marked: 0, alreadyMarked: PLM_COLUMN_COUNT, missing: 0 }, 'the lock step found every added PLM column already marked')
     const lockPatches = h.provisioning.calls.filter((call) => call[0] === 'patchObjectFieldProperty' && PLM_DROPPED.includes(call[2]) && call[2] !== DECISION_FIELD)
     assert.deepEqual(lockPatches, [], 'no lock patch on an added PLM column')
     const appended = h.auditAppends[h.auditAppends.length - 1]
     assert.equal(appended.detail.plmLockMarkedFieldCount, 0, 'no double count of a column the INSERT already locked')
-    assert.equal(appended.detail.plmLockAlreadyMarkedFieldCount, 20)
+    assert.equal(appended.detail.plmLockAlreadyMarkedFieldCount, PLM_COLUMN_COUNT)
   } finally { h.restore() }
 
   // The failure case: the option sync after the add fails (422). The added PLM columns are still locked.
@@ -736,7 +738,7 @@ test('RC-12 the INSERT of a re-added plm_system column carries the lock (a human
     for (const id of HUMAN_DROPPED) assert.equal(objectOf(f, objectId).fields.get(id).property[HUMAN_WRITE_LOCK_PROPERTY_KEY], undefined, `${id} stays editable`)
     const dry = await repair(f, { projectNo: PROJECT, dryRun: true })
     assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
-    assert.deepEqual(plain(dry.body.data.plmColumnLock), { checked: true, alreadyMarked: 20, unmarked: 0, missing: 0 }, 'the dry-run after the failed call: unmarked 0')
+    assert.deepEqual(plain(dry.body.data.plmColumnLock), { checked: true, alreadyMarked: PLM_COLUMN_COUNT, unmarked: 0, missing: 0 }, 'the dry-run after the failed call: unmarked 0')
   } finally { f.restore() }
 })
 
@@ -828,7 +830,7 @@ const ordersOf = (object) => new Map([...object.fields].map(([id, field]) => [id
 const gridOrder = (object) => [...object.fields].sort(([a, fa], [b, fb]) => (fa.order - fb.order) || (a < b ? -1 : a > b ? 1 : 0)).map(([id]) => id)
 
 test('RC-14 right-side band, an ext_ column and a person-created column: the re-added columns land strictly after every existing column, no order collides, nothing existing moves; a second run moves nothing', async () => {
-  assert.ok(TAIL.every((id) => HUMAN_PRESERVED_FIELD_IDS.includes(id)), 'the template tail is repairable (whitelisted human columns)')
+  assert.ok(TAIL.every((id) => OWNERSHIP.get(id) === 'plm_system' || HUMAN_PRESERVED_FIELD_IDS.includes(id)), 'the template tail is repairable (plm_system or whitelisted human columns)')
   const h = mount()
   try {
     const { objectId, object } = await agedSheet(h, PROJECT, TAIL)

@@ -4732,7 +4732,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
           const templateOrder: string[] = templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => field.id)
           const tail = templateOrder.slice(-2)
-          for (const id of tail) expect(templatesLib.HUMAN_PRESERVED_FIELD_IDS).toContain(id)
+          // Repairable: plm_system, or a human column the whitelist names (whatever the template's tail is today).
+          const tailOwnership = new Map<string, string>(templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => [field.id, field.ownership]))
+          for (const id of tail) expect(tailOwnership.get(id) === 'plm_system' || templatesLib.HUMAN_PRESERVED_FIELD_IDS.includes(id), `${id} is repairable`).toBe(true)
           const st = await s3aStack('s33', { pilot: false })
           const REPAIR_PATH = '/api/integration/stock-preparation/options/sync'
           const before = process.env[SWITCH]
