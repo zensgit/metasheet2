@@ -48,6 +48,15 @@
 //   RC-13a-d NOT ON THE OTHER PATHS (Y7 review MEDIUM-1, negative): the shared reconcile helper called WITHOUT the flag,
 //         the canonical repair verb, the descriptor builder the ops script uses, and the deployment (MVP) repair
 //         insert no humanWriteLock at all.
+//   RC-14 AFTER EVERY EXISTING COLUMN (Y7 review MEDIUM-2): on a sheet whose last template columns are missing and
+//         which carries an ext_ column, a RIGHT-side pull-batch band and a person-created column, the re-added
+//         columns land strictly after every existing column (max + 1 + i, template order), no order collides, no
+//         existing order moves; a second run adds nothing and moves nothing.
+//   RC-15 LEFT-SIDE BAND (Y7 review MEDIUM-2): band at −2 / −1 keeps its place, the re-added columns go after the
+//         current max.
+//   RC-16 OLDER HOST / BAD READ (Y7 review MEDIUM-2): a repair transaction without readObjectMaxFieldOrder → 503 with
+//         nothing written and no audit row (a nothing-missing run still answers 200); a non-integer max → 500,
+//         nothing written.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -114,11 +123,11 @@ function snapshotObject(object) {
  * write, so a suite can play a concurrent writer or a misbehaving host; a throw from the callback restores every
  * object the fake host holds, like a rolled-back transaction.
  */
-function mount({ switchOn = true, txPort = true, readPort = true, harness = projectSheet } = {}) {
+function mount({ switchOn = true, txPort = true, readPort = true, maxOrderPort = true, harness = projectSheet } = {}) {
   const h = harness.mountProjectSheetRoutes({ tenantId: TENANT, projectNo: PROJECT, switchOn, fieldReads: readPort })
   h.harness = harness
   const p = h.provisioning
-  h.tx = { ensure: null, count: 0 }
+  h.tx = { ensure: null, count: 0, maxOrder: null }
   if (txPort) {
     p.runObjectFieldsRepairTransaction = async (fn) => {
       p.calls.push(['runObjectFieldsRepairTransaction'])
@@ -129,6 +138,17 @@ function mount({ switchOn = true, txPort = true, readPort = true, harness = proj
         resolveExistingObjectFieldIds: (input) => p.resolveExistingObjectFieldIds(input),
         readObjectFieldsContent: (input) => p.readObjectFieldsContent(input),
         ensureMissingObjectFields: (input) => (h.tx.ensure ? h.tx.ensure(input) : p.ensureMissingObjectFields(input)),
+        // Y7 review MEDIUM-2: the largest order over EVERY field of the object (the real host: MAX("order") over
+        // meta_fields of the sheet). `h.tx.maxOrder` (when set) replaces it, to play a misbehaving host.
+        ...(maxOrderPort ? {
+          readObjectMaxFieldOrder: async ({ projectId, objectId }) => {
+            p.calls.push(['readObjectMaxFieldOrder', objectId])
+            if (h.tx.maxOrder) return h.tx.maxOrder({ projectId, objectId })
+            const object = p.objects.get(`${projectId}/${objectId}`)
+            const orders = object ? [...object.fields.values()].map((field) => field.order) : []
+            return orders.length ? Math.max(...orders) : null
+          },
+        } : {}),
       }
       try {
         return await fn(surface)
@@ -786,6 +806,113 @@ test('RC-13d no PLM lock off the project path: the deployment (MVP) repair re-ad
   await repairStockPreparationMvpTargets({ context: deployment.context, projectId: STAGING, permission: 'admin', objectIds: [mvp.objectId] })
   assert.deepEqual(deployment.inserted.map((field) => field.id), mvpPlm)
   for (const field of deployment.inserted) assert.equal(hasLock(field), false, `the deployment repair inserts ${field.id} unlocked`)
+})
+
+// ── RC-14 / RC-15 / RC-16 ────────────────────────────────────────────────────────────────────────────
+
+const { pullBatchBandFieldDescriptors } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
+// The template's LAST two columns: exactly where a right-side band of a sheet without them sits.
+const TAIL = TEMPLATE_IDS.slice(-2)
+const EXT_COLUMN = 'ext_site_note'
+const PERSON_COLUMN = 'fld_person_created_7f3a'
+
+/** Put a column straight into the fake host's object, at an explicit order (a pack, a band, a person did it). */
+function plant(object, id, order, property = {}) {
+  object.fields.set(id, { name: id, type: 'string', property: plain(property), order })
+}
+const ordersOf = (object) => new Map([...object.fields].map(([id, field]) => [id, field.order]))
+/** The grid's order: (order, id), loaders.ts. */
+const gridOrder = (object) => [...object.fields].sort(([a, fa], [b, fb]) => (fa.order - fb.order) || (a < b ? -1 : a > b ? 1 : 0)).map(([id]) => id)
+
+test('RC-14 right-side band, an ext_ column and a person-created column: the re-added columns land strictly after every existing column, no order collides, nothing existing moves; a second run moves nothing', async () => {
+  assert.ok(TAIL.every((id) => HUMAN_PRESERVED_FIELD_IDS.includes(id)), 'the template tail is repairable (whitelisted human columns)')
+  const h = mount()
+  try {
+    const { objectId, object } = await agedSheet(h, PROJECT, TAIL)
+    const maxTemplate = Math.max(...[...object.fields.values()].map((field) => field.order))
+    // The tail was dropped, so a pack's ext_ column and then a right-side band go right after the known columns —
+    // exactly the orders the template tail would take by its index.
+    plant(object, EXT_COLUMN, maxTemplate + 1)
+    for (const band of pullBatchBandFieldDescriptors({ locale: 'zh-CN', placement: 'right', maxExistingOrder: maxTemplate + 1 })) plant(object, band.id, band.order, band.property)
+    plant(object, PERSON_COLUMN, maxTemplate + 4)
+    const templateIndex = TAIL.map((id) => TEMPLATE_IDS.indexOf(id))
+    const existingOrders = [...object.fields.values()].map((field) => field.order)
+    assert.ok(templateIndex.every((order) => existingOrders.includes(order)), 'precondition: the template-index orders are already taken (the collision this test exists for)')
+    const before = ordersOf(object)
+    const maxBefore = Math.max(...before.values())
+    const res = await repair(h, { projectNo: PROJECT, addMissingColumns: true })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.deepEqual(plain(res.body.data.columns.addedFieldIds), TAIL)
+    const after = objectOf(h, objectId)
+    assert.deepEqual(TAIL.map((id) => after.fields.get(id).order), TAIL.map((_id, index) => maxBefore + 1 + index), 'the re-added columns are max + 1 + i, in template order')
+    for (const [id, order] of before) assert.equal(after.fields.get(id).order, order, `${id} keeps its order`)
+    const orders = [...after.fields.values()].map((field) => field.order)
+    assert.equal(new Set(orders).size, orders.length, 'no two columns share an order')
+    assert.deepEqual(gridOrder(after).slice(-TAIL.length), TAIL, 'the grid shows the re-added columns after the band, the ext_ and the person column')
+    assert.ok(h.provisioning.calls.findIndex((call) => call[0] === 'readObjectMaxFieldOrder') < h.provisioning.calls.findIndex((call) => call[0] === 'ensureMissingObjectFields'), 'the max is read before the INSERT, inside the transaction')
+
+    const settled = snapshotObject(after)
+    h.provisioning.calls.length = 0
+    const again = await repair(h, { projectNo: PROJECT, addMissingColumns: true })
+    assert.equal(again.statusCode, 200, JSON.stringify(again.body))
+    assert.equal(again.body.data.columns.added, 0)
+    assert.deepEqual(ensureCalls(h), [], 'the second run writes no column')
+    assert.equal(snapshotObject(objectOf(h, objectId)), settled, 'the second run moves no order')
+  } finally { h.restore() }
+})
+
+test('RC-15 left-side band (−2 / −1): it keeps its place and the re-added columns go after the current max', async () => {
+  const h = mount()
+  try {
+    const { objectId, object } = await agedSheet(h, PROJECT, TAIL)
+    for (const band of pullBatchBandFieldDescriptors({ locale: 'zh-CN', placement: 'left' })) plant(object, band.id, band.order, band.property)
+    const before = ordersOf(object)
+    const gridBefore = gridOrder(object)
+    const maxBefore = Math.max(...before.values())
+    const res = await repair(h, { projectNo: PROJECT, addMissingColumns: true })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    const after = objectOf(h, objectId)
+    for (const [id, order] of before) assert.equal(after.fields.get(id).order, order, `${id} keeps its order`)
+    assert.deepEqual(TAIL.map((id) => after.fields.get(id).order), TAIL.map((_id, index) => maxBefore + 1 + index))
+    assert.deepEqual(gridOrder(after), [...gridBefore, ...TAIL], 'the band stays leftmost; the existing layout is unchanged; the re-added columns are appended')
+  } finally { h.restore() }
+})
+
+test('RC-16 a repair transaction without readObjectMaxFieldOrder is 503 with nothing written (a nothing-missing run still 200); a non-integer max is 500 with nothing written', async () => {
+  const old = mount({ maxOrderPort: false })
+  try {
+    const { objectId, object } = await agedSheet(old)
+    const before = snapshotObject(object)
+    const auditBefore = old.auditAppends.length
+    const res = await repair(old, { projectNo: PROJECT, addMissingColumns: true })
+    assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'TEMPLATE_COLUMN_REPAIR_API_UNAVAILABLE')
+    assert.deepEqual(ensureCalls(old), [], 'no column write')
+    assert.equal(snapshotObject(objectOf(old, objectId)), before)
+    assert.equal(old.auditAppends.length, auditBefore, 'no audit row')
+  } finally { old.restore() }
+
+  const settledOld = mount({ maxOrderPort: false })
+  try {
+    await agedSheet(settledOld, PROJECT, [])
+    const res = await repair(settledOld, { projectNo: PROJECT, addMissingColumns: true })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(res.body.data.columns.added, 0, 'nothing missing needs no max read')
+  } finally { settledOld.restore() }
+
+  for (const bad of [1.5, '31', Number.NaN]) {
+    const h = mount()
+    try {
+      const { objectId, object } = await agedSheet(h)
+      h.tx.maxOrder = async () => bad
+      const before = snapshotObject(object)
+      const res = await repair(h, { projectNo: PROJECT, addMissingColumns: true })
+      assert.equal(res.statusCode, 500, `${String(bad)}: ${JSON.stringify(res.body)}`)
+      assert.equal(res.body.error.code, 'TEMPLATE_COLUMN_REPAIR_ORDER_UNREADABLE')
+      assert.deepEqual(ensureCalls(h), [])
+      assert.equal(snapshotObject(objectOf(h, objectId)), before)
+    } finally { h.restore() }
+  }
 })
 
 runFailClosedSuite('stock-preparation-project-sheet-repair-columns.test.cjs', tests)

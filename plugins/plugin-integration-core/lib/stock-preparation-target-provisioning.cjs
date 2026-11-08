@@ -1257,6 +1257,16 @@ const PLM_SYSTEM_HUMAN_WRITE_LOCK_VALUE = 'plm_system'
 // it human-writable while the pull already treats the sheet as ready. Human columns never get it. The default
 // is NO lock: the canonical and deployment repair paths have no PLM-lock semantics and never pass the flag.
 //
+// THE ADDED COLUMNS GO AFTER EVERY EXISTING ONE (Y7 review MEDIUM-2). A template-index `order` collides with
+// whatever already sits there — a right-side pull-batch band is created at (largest known order) + 1 / + 2
+// (pull-batch-install.cjs `ensureBandColumns`), so a re-added last template column tied with it on
+// (order, id) and the grid interleaved them. Inside the SAME repair transaction, after the ownership checks,
+// the helper reads the largest `order` over EVERY field row of the sheet (the tx's `readObjectMaxFieldOrder`:
+// template, `ext_`, band, person-created columns alike; the host takes the canonical writer fence first) and
+// gives the i-th missing column (template order) `max + 1 + i`. No existing column is touched (the
+// before/after byte compare below still covers `order`); a left-side band (−2 / −1) keeps its place. A host
+// whose repair transaction lacks the read is refused 503 before any write (fail closed, nothing added).
+//
 // REPORT FIRST. `apply: false` (the default) only READS — the non-transactional existence read — and
 // answers what an apply would add, which missing columns an apply would refuse, and how many are
 // already present. It never calls a write method. `apply: true` is the owner-gated field-creating
@@ -1333,11 +1343,28 @@ async function reconcileFrozenTemplateColumnsOnObject({ provisioning, projectId,
     const existingIds = fieldIds.filter((id) => !missingIds.includes(id))
     const beforeContent = await tx.readObjectFieldsContent({ projectId: project, objectId: object, fieldIds: existingIds })
     const lockPlm = lockPlmSystemColumns === true
+    if (typeof tx.readObjectMaxFieldOrder !== 'function') {
+      throw new StockPreparationTargetProvisioningError(
+        503,
+        'TEMPLATE_COLUMN_REPAIR_API_UNAVAILABLE',
+        'appending the missing template columns after every existing column requires the repair transaction\'s readObjectMaxFieldOrder; nothing was added',
+        { requiredMethods: ['runObjectFieldsRepairTransaction.readObjectMaxFieldOrder'] },
+      )
+    }
+    const maxOrder = await tx.readObjectMaxFieldOrder({ projectId: project, objectId: object })
+    if (maxOrder !== null && !Number.isSafeInteger(maxOrder)) {
+      throw new StockPreparationTargetProvisioningError(500, 'TEMPLATE_COLUMN_REPAIR_ORDER_UNREADABLE', 'the sheet\'s largest field order could not be read as an integer; nothing was added', { objectId: object })
+    }
+    const firstOrder = (maxOrder === null ? -1 : maxOrder) + 1
     const missingDescriptors = descriptor.fields
       .filter((field) => missingIds.includes(field.id))
-      .map((field) => (lockPlm && ownershipById.get(field.id) === 'plm_system'
-        ? { ...field, property: { ...(field.property || {}), [PLM_SYSTEM_HUMAN_WRITE_LOCK_KEY]: PLM_SYSTEM_HUMAN_WRITE_LOCK_VALUE } }
-        : field))
+      .map((field, index) => ({
+        ...field,
+        order: firstOrder + index,
+        ...(lockPlm && ownershipById.get(field.id) === 'plm_system'
+          ? { property: { ...(field.property || {}), [PLM_SYSTEM_HUMAN_WRITE_LOCK_KEY]: PLM_SYSTEM_HUMAN_WRITE_LOCK_VALUE } }
+          : {}),
+      }))
     const writeResult = await tx.ensureMissingObjectFields({ projectId: project, objectId: object, fields: missingDescriptors })
     const skipped = writeResult && Array.isArray(writeResult.skippedExistingFieldIds) ? writeResult.skippedExistingFieldIds : []
     if (skipped.length) {
