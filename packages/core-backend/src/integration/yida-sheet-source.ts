@@ -286,11 +286,18 @@ export type YidaSourceReauthorizationDependencies = Readonly<{
  *   - `request-cache-admin-and-codes` (checks 2–4): admin-ness and codes are the D21 helper's locked facts only;
  *   - `session-replication-role-replica`: this session's `session_replication_role` must be 'origin' (another
  *     session's replica window is operational: the send switch stays off during a restore rehearsal);
- *   - `triggers-not-installed`: the helper's posture check refuses before any lock is taken.
+ *   - `triggers-not-installed`: the helper's posture check refuses before any lock is taken;
+ *   - `field-property-jsonb-string-encoding` (check 3): operational, like the replica window — raw SQL writes
+ *     `meta_fields.property` as a JSON object, never as a JSON string (the registry entry's handling; every TypeScript
+ *     field writer stores an object or bumps the sheet version row first). Check 3 reads the fields through the
+ *     readers' own derivation (`loadFields` → `normalizeJson`), so a column ALREADY stored as a string is judged the way
+ *     the readers see it; only a CONCURRENT raw string-encoded hide escapes the version row, which is the operational
+ *     rule's case (closed for good by a one-time normalization of the legacy strings, not in this slice).
  * A registry entry outside this list is a writer nobody brought into the protocol: the source is refused.
  */
 export const YIDA_SOURCE_REAUTHORIZATION_HANDLED_GAPS: ReadonlySet<string> = new Set([
   'stock-prep-project-registry', 'request-cache-admin-and-codes', 'session-replication-role-replica', 'triggers-not-installed',
+  'field-property-jsonb-string-encoding',
 ])
 const REAUTHORIZATION_CODES = new Set<unknown>(['INPUT', 'REGISTRY', 'SHEET', 'FIELD', 'RECORD', 'CONFLICT', 'PROTOCOL'])
 const REAUTHORIZED: YidaSourceReauthorizationVerdict = Object.freeze({ authorized: true as const })

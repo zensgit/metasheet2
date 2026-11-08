@@ -956,15 +956,18 @@ const withTemplate = (bound, template, salt = 0) => ({ ...bound,
   rowsText: JSON.stringify(JSON.parse(bound.rowsText).map(row => ({ ...row, ext_size: row.ext_size + salt }))),
   config: { ...bound.config, fieldMap: bound.config.fieldMap.map(entry => entry.transform === 'generated' ? { ...entry, template } : entry) } })
 
-test('P1 seal: no SQL without a generated entry; the first generated selection seals the target layout (digest = canonical layout sha256, this operation, the event); the same layout matches, a reordered hash is the same layout, another layout is the frozen conflict verdict with nothing written', async () => {
+test('P1 seal: without a generated entry the seal row is read and nothing is written on an unsealed target; the first generated selection seals the target layout (digest = canonical layout sha256, this operation, the event); the same layout matches, a reordered hash is the same layout, another layout — and a selection without a generated entry — is the frozen conflict verdict with nothing written', async () => {
   const f = await fixture(), [, , planner] = await modules
-  // v2 (no generated entry): admissible, not sealed, zero SQL.
+  // v2 (no generated entry) on an UNSEALED target: admissible, not sealed; exactly one SELECT … FOR UPDATE of the seal
+  // row (the null signature must be compared with a seal that may exist), no write.
   const plain = await f.port.resolveSelectionInTransaction(f.trx, f.selection())
   f.calls.length = 0
   const untouched = await f.port.sealGeneratedLayoutInTransaction(f.trx, plain, { event: 'approve' })
   assert.deepEqual(untouched, { admissible: true, sealed: false })
   assert.equal(Object.isFrozen(untouched), true)
-  assert.deepEqual(f.calls, []); assert.deepEqual(f.state[LAYOUT], [])
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.calls[0].startsWith(`SELECT * FROM "${LAYOUT}"`) && f.calls[0].endsWith('FOR UPDATE'), true)
+  assert.deepEqual(f.state[LAYOUT], [])
   // The first generated selection: the row is locked FOR UPDATE, absent, written with this target, scope, operation and event.
   const { bound } = generatedSource(f)
   const selected = await generatedSelection(f, bound)
@@ -976,6 +979,15 @@ test('P1 seal: no SQL without a generated entry; the first generated selection s
   assert.deepEqual([sealed.target_ref, sealed.tenant_id, sealed.workspace_id, sealed.owner_id, sealed.operation_id, sealed.event, sealed.actor_id],
     [selected.targetRef, context.tenantId, null, context.ownerId, selected.operationId, 'approve', context.ownerId])
   assert.equal(sealed.layout_digest, oracleLayoutDigest(planner, bound.config))
+  // The same plain selection on the now SEALED target (verifier r1 of the P1 fix): null is another signature — the frozen
+  // conflict verdict, nothing written (a cell mapped directly onto the sealed code target could otherwise carry another
+  // identity's generated code).
+  f.calls.length = 0
+  const refusedPlain = await f.port.sealGeneratedLayoutInTransaction(f.trx, plain, { event: 'admit' })
+  assert.deepEqual(refusedPlain, { admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' })
+  assert.equal(Object.isFrozen(refusedPlain), true)
+  assert.equal(f.calls.some(sql => sql.startsWith('INSERT')), false)
+  assert.deepEqual(f.state[LAYOUT], [sealed])
   // Another draft of the same layout (another operation, the admission event): matches, nothing written.
   const again = await generatedSelection(f, withTemplate(bound, GENERATED_ENTRY.template, 1))
   assert.deepEqual(await f.port.sealGeneratedLayoutInTransaction(f.trx, again, { event: 'admit' }), { admissible: true, sealed: false })

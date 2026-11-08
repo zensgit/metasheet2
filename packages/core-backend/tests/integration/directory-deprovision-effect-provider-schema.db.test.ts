@@ -89,15 +89,6 @@ describeDb('deprovision effect provider witness (real DB, isolated schema)', () 
         updated_at timestamptz NOT NULL DEFAULT NOW()
       )
     `.execute(db)
-    // D21 (Y5a): the writer's lockCandidateUser bumps the subject authorization version row before the
-    // users FOR UPDATE; the isolated schema carries the table in its migrated shape (zzzz20261106110500).
-    await sql`
-      CREATE TABLE subject_authorization_versions (
-        subject_id text PRIMARY KEY,
-        version bigint NOT NULL DEFAULT 1,
-        updated_at timestamptz NOT NULL DEFAULT now()
-      )
-    `.execute(db)
     await sql`
       CREATE TABLE user_orgs (
         user_id text NOT NULL REFERENCES users(id),
@@ -145,6 +136,16 @@ describeDb('deprovision effect provider witness (real DB, isolated schema)', () 
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         integration_id uuid NOT NULL REFERENCES directory_integrations(id),
         status text NOT NULL DEFAULT 'success'
+      )
+    `.execute(db)
+    // D21 (Y5a): the subject authorization version row the deprovision writer bumps as its first protocol statement
+    // (lockCandidateUser, src/directory/deprovision-ledger.ts; table from zzzz20261106110500, no triggers in this
+    // private schema).
+    await sql`
+      CREATE TABLE subject_authorization_versions (
+        subject_id text PRIMARY KEY,
+        version bigint NOT NULL DEFAULT 1,
+        updated_at timestamptz NOT NULL DEFAULT NOW()
       )
     `.execute(db)
     await weakLedgerUp(db)

@@ -5,8 +5,9 @@
  *       same statements a psql script, a data migration or a plugin raw query would issue), including
  *       two FK CASCADES (permissions → user_permissions, platform_member_groups → members), the
  *       meta_sheets / users column-conditional triggers (an unrelated column edit does not bump), the
- *       meta_fields visibility derivation (options edits do not bump) and the perf statement (an
- *       ordinary meta_records write bumps NOTHING);
+ *       meta_fields visibility derivation (options edits do not bump), the perf statement (an
+ *       ordinary meta_records write bumps NOTHING) and the one encoding the trigger does not read (M-10:
+ *       a legacy jsonb-STRING property, listed in the hard-condition registry);
  *   B — two-connection barriers with a real admission holder: a writer blocks until the holder
  *       commits; a revoke committed first is visible to the next holder; joining a deny-carrying
  *       member group blocks through the subject row; a bound-record write blocks through the record
@@ -32,6 +33,7 @@ import {
 } from '../../src/db/migrations/zzzz20261106110500_add_authorization_version_rows'
 import { lockUsersForAccessGraphWrite } from '../../src/directory/access-graph-mutex'
 import {
+  AUTHORIZATION_PROTOCOL_GAPS,
   AUTHORIZATION_VERSION_TRIGGERS,
   AuthorizationVersionProtocolError,
   SHEET_PERMISSION_VERSIONS_TABLE,
@@ -42,6 +44,8 @@ import {
   lockAuthorizationVersionsForAdmission,
   verifyAuthorizationVersionTriggerPosture,
 } from '../../src/multitable/authz-version-protocol'
+import { loadFieldsForSheet } from '../../src/multitable/loaders'
+import { isFieldPermissionHidden } from '../../src/multitable/permission-derivation'
 import { defineAuthzVersionFieldRowOrderRealDbCases } from './authz-version-field-row-order-realdb.cases'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -219,6 +223,30 @@ describeIfDatabase.sequential('D21 authorization version protocol (real PostgreS
       expect(await setProperty('{"visible": false, "format": "x"}')).toBe(0)
       expect(await setProperty('{"visible": true}')).toBe(1)
       expect(await sheetDelta(`UPDATE meta_fields SET name = 'renamed' WHERE id = $1`, [FIELD])).toBe(0)
+    })
+
+    it('M-10 the legacy jsonb-STRING property encoding is outside the trigger, and the registry lists it: a raw string-encoded hide bumps nothing while the readers read it hidden (verifier r1 F4)', async () => {
+      // The readers' own derivation (loadFieldsForSheet -> serializeFieldRow -> normalizeJson), as Y5's check 3 reads it.
+      const readersSeeHidden = async (): Promise<boolean | 'absent'> => {
+        const fields = await loadFieldsForSheet((sql: string, params?: unknown[]) => q(sql, params ?? []), SHEET)
+        const field = fields.find((entry) => entry.id === FIELD)
+        return field ? isFieldPermissionHidden(field) : 'absent'
+      }
+      await q(`UPDATE meta_fields SET property = '{"options": []}'::jsonb WHERE id = $1`, [FIELD])
+      expect(await readersSeeHidden()).toBe(false)
+      // `property -> 'hidden'` is NULL for a jsonb string: the trigger sees no flag change, the readers parse a hide.
+      expect(await sheetDelta(`UPDATE meta_fields SET property = to_jsonb($2::text) WHERE id = $1`, [FIELD, JSON.stringify({ hidden: true })])).toBe(0)
+      expect((await q(`SELECT jsonb_typeof(property) AS kind FROM meta_fields WHERE id = $1`, [FIELD])).rows[0].kind).toBe('string')
+      expect(await readersSeeHidden()).toBe(true)
+      expect(
+        AUTHORIZATION_PROTOCOL_GAPS.find((gap) => gap.id === 'field-property-jsonb-string-encoding')?.checks,
+        'while the trigger cannot see this encoding, the hard-condition registry must list it (check 3)',
+      ).toEqual([3])
+      // Back to an object: still no flag change for the trigger. Control: the same hide as an OBJECT bumps, both ways.
+      expect(await sheetDelta(`UPDATE meta_fields SET property = '{"options": []}'::jsonb WHERE id = $1`, [FIELD])).toBe(0)
+      expect(await sheetDelta(`UPDATE meta_fields SET property = '{"options": [], "hidden": true}'::jsonb WHERE id = $1`, [FIELD])).toBe(1)
+      expect(await readersSeeHidden()).toBe(true)
+      expect(await sheetDelta(`UPDATE meta_fields SET property = '{"options": []}'::jsonb WHERE id = $1`, [FIELD])).toBe(1)
     })
 
     it('M-06 PERF: an ordinary record write bumps nothing — no sheet row, no subject row, no new version row', async () => {

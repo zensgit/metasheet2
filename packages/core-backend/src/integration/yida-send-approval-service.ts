@@ -363,8 +363,11 @@ function createApprovalInternals({ database, security, context, primitives, mult
   }
   // P1 (external review 2026-11-08): the target's generated layout is sealed once, by the first approval or admission
   // that uses a generated entry, and every later selection with another layout signature is refused — on this trx, after
-  // the D20 / identity / D21 checks and before the first write (the grant row, the ledger row). The primitive answers a
-  // frozen plain verdict; only its exact conflict code becomes GENERATED_LAYOUT_CONFLICT, anything else is UNAVAILABLE.
+  // the D20 / identity / D21 checks and before the first write (the grant row, the ledger row). A selection without a
+  // generated entry (v2, or v3 with none) has the null signature: refused on a sealed target, admissible and sealing
+  // nothing on an unsealed one (verifier r1 of the P1 fix). Every selection here is intent 'create' (the primitives
+  // refuse any other intent before this point), so no 'update' draft is ever judged. The primitive answers a frozen
+  // plain verdict; only its exact conflict code becomes GENERATED_LAYOUT_CONFLICT, anything else is UNAVAILABLE.
   async function sealGeneratedLayout(trx: Queryable, selected: YidaSendAuthoritySelection, event: 'approve' | 'admit') {
     let verdict: unknown
     try { verdict = await primitives.sealGeneratedLayoutInTransaction(trx, selected, { event }) } catch { fail('UNAVAILABLE') }

@@ -24,6 +24,13 @@ const {
 } = require('./stock-preparation-project-write-lock.cjs')
 // 人工补充行 B1 (ADR adr-stock-prep-manual-rows-20261030 §5.2): the reserved `manual:` namespace.
 const { isManualPrefixKey } = require('./stock-preparation-manual-rows.cjs')
+// 批次标识 BI-1b (design §3.4; register R-65): the writer's side input and the allocation's answer contract (pure module).
+const {
+  PULL_BATCH_ERROR_CODES,
+  StockPreparationPullBatchError,
+  assertAllocatedBatch,
+  normalizePullBatchStamp,
+} = require('./stock-preparation-pull-batch.cjs')
 
 const APPLY_PERMISSIONS = Object.freeze(['write', 'admin'])
 // The ONE decision a key in the reserved namespace refuses (ADR §5.2): an ADD. Its per-decision code.
@@ -641,7 +648,21 @@ async function callFencedRecordsApi(operation, writeFence, callback) {
   }
 }
 
-async function applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index }) {
+// 批次标识 BI-1b (design §3.4, G2): a failed allocation STOPS THE RUN (`error.stopsRun`, the PR-8 flag and loop break),
+// never a per-row failure that lets the loop continue into the next create. INACTIVE decisions are emitted after every
+// ADD, so a stop at the first create runs none of them: batch-1 rows are never set 有效=否 without their copies. A typed
+// refusal keeps its own status and code (409 INSTALL_IN_PROGRESS / CONFLICT / EXECUTION_CLOSED / NOT_READY / LEASE_LOST,
+// 503 STORE_FAILED); anything untyped is the ledger's 503. `partial` is decided by the caller (rows an earlier decision
+// of this run wrote).
+function pullBatchAllocationStop(error) {
+  const typed = error && Number.isInteger(error.status) && error.status >= 400 && typeof error.code === 'string'
+    ? error
+    : new StockPreparationPullBatchError(PULL_BATCH_ERROR_CODES.STORE_FAILED, 'the pull-batch ledger could not open or join this pull\'s batch; nothing more was written', { operation: 'allocate', partial: false })
+  typed.stopsRun = true
+  return typed
+}
+
+async function applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index, pullBatch }) {
   const key = decisionKey(decision, target)
   // 人工补充行 B1 (ADR §5.2): an ADD never mints a key in the reserved `manual:` namespace (a PLM key starts with `{`,
   // so only a defect or a forged plan gets here). Refused HERE, right after the key is taken and before any lookup or
@@ -674,14 +695,20 @@ async function applyAddDecision({ recordsApi, target, decision, humanFields, tem
     return { status: 'updated', recordId }
   }
 
+  // 批次标识 BI-1b (design §3.4; E10 §4.5): the CREATE leg alone stamps — the patch leg above writes NEITHER band cell.
+  // The batch is allocated (lazily, once per run) after the lookup found no row and BEFORE the fence CAS and the host
+  // write, so no row can carry a label whose ledger row and execution link are not already committed. The two cells
+  // join the payload AFTER the logical->physical mapping, under their physical ids (never through target.fieldIdMap).
+  const pullBatchCells = pullBatch ? await pullBatch.cellsFor(key) : null
   await fenceBeforeWrite(writeFence, { index, decision: decision.decision, operation: 'createRecord' })
   const created = await callFencedRecordsApi('createRecord', writeFence, () => recordsApi.createRecord({
     sheetId: target.sheetId,
-    data: mapRecordFields(record, target.fieldIdMap),
+    data: pullBatchCells ? { ...mapRecordFields(record, target.fieldIdMap), ...pullBatchCells } : mapRecordFields(record, target.fieldIdMap),
     ...hostFenceInput(writeFence),
   }))
   const recordId = created && created.id
   rememberWrittenRow(keyIndex, key, recordId)
+  if (pullBatchCells) pullBatch.stamped += 1
   return { status: 'created', recordId }
 }
 
@@ -1044,6 +1071,8 @@ async function applyStockPreparationPlan(input = {}) {
   // PR-8: optional; validated before any IO (a malformed map is a caller defect, never a skipped fence).
   const expectedRecords = normalizeExpectedRecords(input.expectedRecords)
   const templateFields = fieldMapForTemplate(template)
+  // 批次标识 BI-1b: the optional side input, validated BEFORE any IO (500 STAMP_INVALID). Absent => byte-identical.
+  const pullBatch = pullBatchRunOf(input.pullBatchStamp, { plan, target, writeFence: input.writeFence && typeof input.writeFence.beforeWrite === 'function' ? input.writeFence : null })
   const counts = {
     created: 0,
     updated: 0,
@@ -1098,7 +1127,7 @@ async function applyStockPreparationPlan(input = {}) {
           continue
         }
         if (decision.decision === DECISIONS.ADD) {
-          const applied = await applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index })
+          const applied = await applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index, pullBatch })
           incrementCounts(counts, decision.decision, applied.status)
           results.push({ index, decision: decision.decision, idempotencyKey: decisionKey(decision, target), ...applied })
           continue
@@ -1229,7 +1258,72 @@ async function applyStockPreparationPlan(input = {}) {
     // Present ONLY on a fenced stop, so an unfenced (or uninterrupted) run's result is byte-identical.
     // `error` is the fence's own typed error: the caller rethrows it with the partial counts attached.
     ...(abort ? { abort: { index: abort.index, code: abort.error.code, error: abort.error } } : {}),
+    // 批次标识 BI-1b: present ONLY when the caller handed a stamp — whether this run allocated a batch, and how many of its
+    // creates were CONFIRMED carrying the label (the link's count, set by value at finish). Values-free.
+    ...(pullBatch ? { pullBatch: pullBatch.summary() } : {}),
   }
+}
+
+/**
+ * 批次标识 BI-1b (design §3.4): the per-run stamping state. null without a stamp. Every ADD decision the plan can key
+ * must have its 首次批次 entry (null = "this batch"): a map built from another plan is a defect, refused before the
+ * first write (500 STAMP_INVALID) rather than guessed per row; a decision without a usable key fails in the loop as
+ * today. `ensure()` is memoized (the first create allocates or joins; every later create reuses the answer) and runs
+ * the allocation INSIDE the guard's host-write bracket (P-5: the ledger transaction's holder assert holds the lease
+ * row FOR UPDATE; the heartbeat must not queue behind it — the N6 rule).
+ */
+function pullBatchRunOf(value, { plan, target, writeFence }) {
+  const stamp = normalizePullBatchStamp(value, { fieldIdMap: target.fieldIdMap })
+  if (!stamp) return null
+  for (const entry of plan.decisions) {
+    if (!entry || entry.decision !== DECISIONS.ADD) continue
+    let addKey = null
+    try {
+      addKey = decisionKey(entry, target)
+    } catch {
+      continue
+    }
+    if (!stamp.firstPullBatchByKey.has(addKey)) {
+      throw new StockPreparationPullBatchError(PULL_BATCH_ERROR_CODES.STAMP_INVALID, 'the pull-batch stamp does not cover every ADD of this plan; nothing was written', { field: 'pullBatchStamp.firstPullBatchByKey', partial: false })
+    }
+  }
+  let allocation = null
+  const run = {
+    stamped: 0,
+    async ensure() {
+      if (allocation) return allocation
+      let answer
+      try {
+        answer = await (writeFence && typeof writeFence.withHostWrite === 'function' ? writeFence.withHostWrite(() => stamp.allocate()) : stamp.allocate())
+      } catch (error) {
+        throw pullBatchAllocationStop(error)
+      }
+      try {
+        allocation = assertAllocatedBatch(answer)
+      } catch (error) {
+        throw pullBatchAllocationStop(error)
+      }
+      return allocation
+    },
+    async cellsFor(key) {
+      const batch = await run.ensure()
+      const first = stamp.firstPullBatchByKey.get(key)
+      return {
+        [stamp.fieldIds.pullBatch]: batch.label,
+        [stamp.fieldIds.firstPullBatch]: first === undefined || first === null ? batch.label : first,
+      }
+    },
+    summary() {
+      return Object.freeze({
+        allocated: Boolean(allocation),
+        batchNo: allocation ? allocation.batchNo : null,
+        label: allocation ? allocation.label : null,
+        joined: Boolean(allocation && allocation.joined === true),
+        stampedRowCount: run.stamped,
+      })
+    },
+  }
+  return run
 }
 
 // Review round 2 (F1): how many HOST WRITES this run issued — confirmed ones (`written`) plus every row
@@ -1278,6 +1372,7 @@ module.exports = {
     assertNoHumanFields,
     assertNoMachineWritebackFields,
     assertWrittenBandExcludesMachineWriteback,
+    pullBatchAllocationStop,
     isRecordVersionConflict,
     logicalRowOf,
     normalizeExpectedRecords,

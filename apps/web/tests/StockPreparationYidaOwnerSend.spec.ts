@@ -597,7 +597,7 @@ describe('StockPreparationYidaOwnerSendPanel explicit owner controls', () => {
     fetchSpy.mockResolvedValueOnce(error('YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT', 409))
     await click('approve')
     expect(q('error').textContent).toBe('YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT')
-    expect(q('generated-layout-conflict').textContent).toBe('该目标的编码模板布局已在首次授权时封存，本草稿的模板布局与之不同；未授权、未发送。请改回已封存的模板，或由管理员另建目标。')
+    expect(q('generated-layout-conflict').textContent).toBe('该目标的编码模板布局已在首次授权时封存，本草稿的模板布局与之不同（或不含编码模板）；未授权、未发送。请改回已封存的模板，或由管理员另建目标。')
     expect(absent('grant')).toBe(true)
     expect(absent('submit')).toBe(true)
     expect(absent('identity-reserved')).toBe(true)

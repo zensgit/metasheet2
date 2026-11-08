@@ -18,10 +18,12 @@ import {
   canonicalSheetFenceKey,
   SheetWriterBlockedError,
 } from '../../src/multitable/canonical-sheet-fence'
-import { SHEET_PERMISSION_VERSIONS_BUMP_SQL } from '../../src/multitable/authz-version-protocol'
+import { SHEET_PERMISSION_VERSIONS_BUMP_SQL, SHEET_ROW_KEY_SHARE_SQL } from '../../src/multitable/authz-version-protocol'
 
 /** The D21 explicit sheet-version bump, whitespace-normalized the way the fake records statements. */
 const SHEET_VERSION_BUMP = SHEET_PERMISSION_VERSIONS_BUMP_SQL.replace(/\s+/g, ' ').trim()
+/** The sheet-row KEY SHARE an ensureFields overwrite takes right before that bump (one line already). */
+const SHEET_ROW_KEY_SHARE = SHEET_ROW_KEY_SHARE_SQL.replace(/\s+/g, ' ').trim()
 
 const WRITER_FENCE_ENV = 'MULTITABLE_ENABLE_WRITER_FENCE'
 const SHEET_ID = 'sheet_dh1_provisioning'
@@ -351,16 +353,22 @@ describe('D21 field-row writer rule: the sheet version row before the first fiel
       const firstFieldStatement = seen.findIndex(({ sql }) => /\bmeta_fields\b/.test(sql))
       expect(firstUpsertIndex).toBeGreaterThan(bumpIndex)
       expect(firstFieldStatement).toBeGreaterThan(bumpIndex)
+      // …and BEHIND the sheet row (verifier r1 F1): meta_sheets FOR KEY SHARE right before the bump, so the KEY SHARE the
+      // INSERT of a new field takes through its FK is never first requested after the version row
+      expect(seen.filter(({ sql }) => sql === SHEET_ROW_KEY_SHARE).map(({ params }) => params)).toEqual([[SHEET_ID]])
+      expect(seen.findIndex(({ sql }) => sql === SHEET_ROW_KEY_SHARE)).toBe(bumpIndex - 1)
+      expect(seen.slice(0, bumpIndex).some(({ sql }) => /\bmeta_fields\b/.test(sql))).toBe(false)
     })
   }
 
   for (const overwriteMode of ['refuse', 'preserve'] as const) {
-    it(`ensureFields in '${overwriteMode}' mode never rewrites a differing property, so it takes no version row`, async () => {
+    it(`ensureFields in '${overwriteMode}' mode takes no version row and no sheet-row lock (it rewrites an existing field only with the property its pre-read found equal)`, async () => {
       __resetRecoveryWriterStateColumnProbe()
       const { query, seen } = createFenceQuery({ sheetId: SHEET_ID })
       await ensureFields({ query, sheetId: SHEET_ID, overwriteMode, fields: [{ id: 'field_d21_c', name: 'C', type: 'string' }] })
       expect(seen.some(({ sql }) => sql.startsWith('INSERT INTO meta_fields'))).toBe(true)
       expect(bumps(seen)).toEqual([])
+      expect(seen.filter(({ sql }) => sql === SHEET_ROW_KEY_SHARE)).toEqual([])
     })
   }
 

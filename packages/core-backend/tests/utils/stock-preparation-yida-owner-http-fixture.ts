@@ -104,7 +104,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   const sql: string[] = [], tokenPayloads: Data[] = [], formPayloads: Data[] = []
   const sessions: Record<string, string> = {}, tokens: Record<string, string> = {}
   let enablement: unknown = 'false', tokenCommitted = false, validRequests = true, formOutcome: 'ack' | 'unknown' | 'unparsed' = 'ack'
-  let multiTargetEnablement: unknown = 'false', multiTargetUp = '', receiptUnparsedUp = '', sourceBindingUp = '', sheet = defaultSheet()
+  let multiTargetEnablement: unknown = 'false', multiTargetUp = '', receiptUnparsedUp = '', sourceBindingUp = '', generatedLayoutUp = '', sheet = defaultSheet()
   // D20: the raw INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS value as the runtime reads it per call (absent = no listed target).
   let unboundTestTargetRefs: unknown
   // D21 (slice Y5): this lane's sheet source is synthetic (the schema has no meta_* tables, permission tables or version
@@ -353,6 +353,11 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     // Source binding (design baseline v2.3 §7.2): the two digest columns and the identity fence, as production migrates them.
     sourceBindingUp = (await load('packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts'))
       .YIDA_SOURCE_BINDING_UP_SQL as string
+    // P1 fix r1 (2026-11-08): the generated-layout seal table, as production migrates it (zzzz20261108120000; it references
+    // 093 / 094). The send authority reads the target's seal row for EVERY approval and admission — v2 included — so a
+    // schema without it answers 503 UNAVAILABLE to every approval; these lanes send v2 drafts and never seal.
+    generatedLayoutUp = (await load('packages/core-backend/src/db/migrations/zzzz20261108120000_create_integration_yida_generated_layout.ts'))
+      .YIDA_GENERATED_LAYOUT_UP_SQL as string
     const route = await load('packages/core-backend/src/routes/integration-yida-owner.ts')
     createRouter = route.createIntegrationYidaOwnerRouter as typeof createRouter
     noStore = route.yidaOwnerNoStoreMiddleware as RequestHandler; jsonOnly = route.yidaOwnerJsonOnlyMiddleware as RequestHandler
@@ -365,7 +370,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     '094_create_integration_yida_approved_target.sql', '095_create_integration_yida_send_approvals.sql',
     ...(options.initialization ? ['096_create_integration_yida_initialization.sql'] : [])]
     .map(name => readFileSync(path.join(root, 'packages/core-backend/migrations', name), 'utf8')).join('\n')
-    + '\n' + receiptUnparsedUp + '\n' + sourceBindingUp
+    + '\n' + receiptUnparsedUp + '\n' + sourceBindingUp + '\n' + generatedLayoutUp
     + (options.multiTarget ? '\n' + multiTargetUp : '')
   return {
     sql, tokens, sessions, tokenPayloads, formPayloads, rows, proof, http, tokenFor, startRuntime, closeRuntime, cleanup,

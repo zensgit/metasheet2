@@ -157,7 +157,8 @@ Notes:
   directory_integration_capability_history holds any row, and
   zzzz20261108120000_create_integration_yida_generated_layout.ts refuses
   while integration_yida_generated_layout holds any row (a sealed
-  generated-code layout is evidence for every code sent under it).`)
+  generated-code layout is evidence for every GENERATED code sent under
+  that target from the seal onward).`)
 }
 
 async function main(): Promise<void> {
