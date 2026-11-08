@@ -8,7 +8,7 @@ import {
 } from './ensureFieldsOverwriteMode'
 import { assertRichLongTextToggleAllowed, mapFieldType, sanitizeFieldProperty } from './field-codecs'
 import { fenceWriterEntry } from './canonical-sheet-fence'
-import { bumpSheetPermissionVersions } from './authz-version-protocol'
+import { bumpSheetPermissionVersionBehindSheetRow, bumpSheetPermissionVersions } from './authz-version-protocol'
 import { isSystemSheetKind, STOCK_PREP_OVERVIEW_SHEET_KIND } from './system-sheet-predicate'
 import {
   SheetSystemKindConflictError,
@@ -590,10 +590,17 @@ export async function ensureFields(
   // D21 field-row writer rule (authz-version-protocol.ts): in 'overwrite' / 'observe' mode the upsert below rewrites
   // an EXISTING field's property (ON CONFLICT DO UPDATE locks that row, then the meta_fields visibility trigger may take
   // the sheet version row), one field after another. Whether any of them trips the trigger depends on the stored rows,
-  // so the sheet version row is taken once, unconditionally, before the first field row. 'refuse' / 'preserve' never
-  // rewrite a differing property (a diff throws or keeps the row), so they take no version row.
+  // so the sheet version row is taken once, unconditionally, before the first field row — and BEHIND the sheet row: the
+  // INSERT of a NEW field takes FOR KEY SHARE on the meta_sheets row (FK meta_fields.sheet_id), and taken after the
+  // version row that KEY SHARE waits on a grant route holding meta_sheets FOR UPDATE that wants the version row next
+  // (a 40P01 cycle, verifier r1 F1). So: meta_sheets KEY SHARE -> version row -> field rows.
+  // 'refuse' / 'preserve' take no version row: they rewrite an existing field only with the property their pre-read
+  // found equal. That pre-read is unlocked, so a visibility change committed between it and the upsert is written over
+  // under the field-row lock, and the trigger then takes the version row after that lock (a writer-vs-writer race of
+  // the P0-S guard, older than D21; fenced writers serialize on the fence). Never a false ALLOW: the trigger still takes
+  // the version row before that write commits, and the admission holder locks no field row.
   if (fields.length > 0 && (overwriteMode === 'overwrite' || overwriteMode === 'observe')) {
-    await bumpSheetPermissionVersions(input.query, [input.sheetId])
+    await bumpSheetPermissionVersionBehindSheetRow(input.query, input.sheetId)
   }
   for (const [index, field] of fields.entries()) {
     const order = typeof field.order === 'number' ? field.order : index

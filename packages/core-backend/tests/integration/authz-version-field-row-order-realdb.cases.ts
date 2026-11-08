@@ -26,15 +26,28 @@
  *   FO-F3  a PATCH that cannot trip the trigger (the shared column drag, a rename) never touches the version row: it
  *          finishes while a holder holds that row FOR SHARE;
  *   FO-W1  two canonical writers on one field (PATCH held after its bump, then a config revert of the same field): the
- *          revert parks on the VERSION ROW, not on the field row; both end typed (200 / 409), no 40P01.
+ *          revert parks on the VERSION ROW, not on the field row; both end typed (200 / 409), no 40P01;
+ *   FO-F4  PATCH /fields hiding a field WITHOUT a reorder: the version row is held at the late re-read, the first
+ *          field-row lock of such a PATCH (FO-F1 always reorders: verifier r1 F7);
+ *   FO-X1  writer vs writer (verifier r1 F1): an ensureFields overwrite that ADDS a field vs PUT field-permissions held
+ *          after its `meta_sheets … FOR UPDATE` — the overwrite parks on the sheet row's KEY SHARE BEFORE its bump (the
+ *          version row stays free), the grant commits, the overwrite follows; no 40P01 (writer fence off and on);
+ *   FO-X2  … the same for a PATCH that hides a field and converts it to autoNumber (its sequence row is an FK child);
+ *   FO-R1  the field retype convert of a legacy jsonb-STRING `{hidden:true}` column (verifier r1 F2) vs a holder that
+ *          binds a live record: the convert holds the version row before its row locks, so the holder waits at the
+ *          version row instead of closing a 40P01 cycle on the bound record; FO-R2 … the same for the undo.
  *
  * Witnessed reds (PR body): moving each path's bump after its field-row lock reds its order witness (the probe finds the
  * version row free) and its holder barrier (the parked writer holds the field row); removing the lossy bump (the
- * trigger-only order) reds FO-L2 with a 40P01 on the holder; making the PATCH bump unconditional reds FO-F3.
+ * trigger-only order) reds FO-L2 with a 40P01 on the holder; making the PATCH bump unconditional reds FO-F3; a plain
+ * bump (no sheet-row KEY SHARE) in ensureFields / PATCH reds FO-X1 / FO-X2; removing the convert's / undo's bump reds
+ * FO-R1 / FO-R2.
  *
  * A CASES MODULE, registered from the already-wired real-DB file tests/integration/authz-version-protocol.db.test.ts
  * (excluded from the no-DB runner, run whole-file in the approval real-DB step) — do NOT list a standalone file. The
- * writer fence is pinned OFF (its advisory lock is outside the holder's set and serializes the writers by itself).
+ * writer fence is pinned OFF (its advisory lock is outside the holder's set and serializes the writers by itself),
+ * except where a case turns it on for its own run: FO-X1's second variant (the grant route takes no fence, so the fence
+ * cannot break that cycle) and FO-R1 / FO-R2 (the retype convert refuses to run without it).
  * Values-free: every id is synthetic and per-run.
  */
 import express from 'express'
@@ -46,12 +59,18 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import {
   SHEET_PERMISSION_VERSIONS_BUMP_SQL,
   SHEET_PERMISSION_VERSIONS_TABLE,
+  SHEET_ROW_KEY_SHARE_SQL,
+  SUBJECT_AUTHORIZATION_VERSIONS_TABLE,
   bumpSheetPermissionVersions,
   fieldVisibilityTriggerWouldFire,
   lockAuthorizationVersionsForAdmission,
 } from '../../src/multitable/authz-version-protocol'
 import { isWriterFenceEnabled } from '../../src/multitable/canonical-sheet-fence'
 import { FIELD_CONFIG_SNAPSHOT_LOCKED_SQL } from '../../src/multitable/config-restore'
+import { normalizeJson } from '../../src/multitable/field-codecs'
+import { FIELD_RETYPE_CONVERT_CONFIRM } from '../../src/multitable/field-retype-convert'
+import { FIELD_RETYPE_UNDO_CONFIRM, __resetFieldRetypeConversionsTableProbe } from '../../src/multitable/field-retype-convert-execute'
+import { FIELD_RETYPE_CONVERT_CELL_COLUMNS } from '../../src/multitable/field-retype-convert-preview'
 import { PATCH_FIELD_LOCKED_REREAD_SQL } from '../../src/multitable/field-row-write-guard'
 import { isFieldPermissionHidden } from '../../src/multitable/permission-derivation'
 import {
@@ -61,8 +80,9 @@ import {
   getObjectSheetId,
   patchObjectFieldProperty,
 } from '../../src/multitable/provisioning'
+import { SHEET_ROW_LOCK_LIVENESS_SQL } from '../../src/multitable/sheet-liveness'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
-import { holdAfter, raceParkedOrSettled, rawClient, tracked, useWriterFencePinnedOff } from '../utils/field-row-race-harness'
+import { holdAfter, raceParkedOrSettled, rawClient, tracked, useWriterFencePinnedOff, withWriterFenceOn } from '../utils/field-row-race-harness'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -75,6 +95,10 @@ const LOSSY_FIELD_ROW_LOCKED_SQL = 'SELECT id, sheet_id, type FROM meta_fields W
 const LOSSY_CELLS_LOCKED_SQL = 'SELECT id, data FROM meta_records WHERE sheet_id = $1 AND data ? $2 ORDER BY id FOR UPDATE'
 // PATCH /fields' sibling shift when the field moves right (routes/univer-meta.ts), the first field-row lock of a reorder.
 const PATCH_SHIFT_LEFT_SQL = 'UPDATE meta_fields SET "order" = "order" - 1 WHERE sheet_id = $1 AND "order" > $2 AND "order" <= $3 AND id <> $4 RETURNING id, "order"'
+// The retype convert's and undo's lock of every live row (field-retype-convert-execute.ts lockLiveRows), taken after the
+// field row: the hold point of FO-R1 / FO-R2. Built from the exported cell columns, so a drift leaves the hold unreached.
+const CONVERT_LIVE_ROWS_LOCKED_SQL = `SELECT id, version, data, ${FIELD_RETYPE_CONVERT_CELL_COLUMNS} FROM meta_records WHERE sheet_id = $1 FOR UPDATE`
+const CONVERT_FLAG = 'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT'
 
 type Response = { status: number; body: { ok?: boolean; error?: { code?: string }; data?: Record<string, unknown> } }
 
@@ -96,12 +120,19 @@ export function defineAuthzVersionFieldRowOrderRealDbCases(): void {
     const HOLDER_ACTOR = `u_fro_holder_${TOKEN}`
     const TENANT = `t_fro_${TOKEN}`
     const ADMIN = { id: `u_fro_admin_${TOKEN}`, roles: ['admin'], perms: [] as string[] }
+    // A real database user: the subject of the field-permission grant (FO-X*) and the actor of the retype convert /
+    // undo (FO-R*), which re-read their caller's authority from the database inside the transaction.
+    const DB_ACTOR = `u_fro_actor_${TOKEN}`
+    const DB_ACTOR_PERMS = ['multitable:read', 'multitable:write', 'multitable:manage-schema']
     const fld = (tag: string) => `fld_fro_${tag}_${TOKEN}`
     const ALL_SHEETS = [SHEET, LOSSY_SHEET, OBJECT_SHEET]
+    /** Sheets a case creates for itself (the retype convert needs a fresh column per case). */
+    const EXTRA_SHEETS: string[] = []
     useWriterFencePinnedOff()
     const pinned = usePinnedServer()
     const http = () => request(pinned.url())
     const flags: Record<string, string | undefined> = {}
+    let currentUser: Record<string, unknown> = ADMIN
 
     const seedField = (sheetId: string, id: string, type: string, property: unknown, order: number) =>
       q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [id, sheetId, `F ${id.slice(4, 16)}`, type, JSON.stringify(property), order])
@@ -165,10 +196,13 @@ export function defineAuthzVersionFieldRowOrderRealDbCases(): void {
         client,
         pid,
         lock: () => lockAuthorizationVersionsForAdmission(client, { sheetIds: [sheetId], actorId: HOLDER_ACTOR, tenantId: TENANT, recordId: recordId ?? null }),
-        /** The field-level decision input, read in the holder's transaction AFTER its locks. */
+        /**
+         * The field-level decision input, read in the holder's transaction AFTER its locks, the way the readers derive
+         * it (serializeFieldRow: normalizeJson, so a legacy jsonb-STRING property is parsed, not read as no flags).
+         */
         async seesHidden(fieldId: string): Promise<boolean> {
           const { rows } = await client.query('SELECT property FROM meta_fields WHERE id = $1', [fieldId])
-          return isFieldPermissionHidden({ property: (rows[0]?.property ?? {}) as Record<string, unknown> })
+          return isFieldPermissionHidden({ property: normalizeJson(rows[0]?.property) })
         },
         async end(how: 'COMMIT' | 'ROLLBACK') {
           try { await client.query(how) } finally { client.release() }
@@ -214,11 +248,12 @@ export function defineAuthzVersionFieldRowOrderRealDbCases(): void {
     }
 
     beforeAll(async () => {
-      for (const flag of [RETYPE_REVERT_FLAG, LOSSY_REVERT_FLAG]) flags[flag] = process.env[flag]
+      for (const flag of [RETYPE_REVERT_FLAG, LOSSY_REVERT_FLAG, CONVERT_FLAG]) flags[flag] = process.env[flag]
+      __resetFieldRetypeConversionsTableProbe()
       const app = express()
       app.use(express.json())
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      app.use((req, _res, next) => { ;(req as any).user = ADMIN; next() })
+      app.use((req, _res, next) => { ;(req as any).user = currentUser; next() })
       app.use('/api/multitable', univerMetaRouter())
       pinned.setApp(app)
       await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'FRO Base'])
@@ -227,6 +262,15 @@ export function defineAuthzVersionFieldRowOrderRealDbCases(): void {
         // A committed version row, so a NOWAIT probe can never read an uncommitted insert as "free".
         await bumpSheetPermissionVersions((sql, params) => q(sql, params), [sheetId])
       }
+      for (const code of DB_ACTOR_PERMS) {
+        await q(`INSERT INTO permissions (code, name, description) VALUES ($1, $1, 'FRO test') ON CONFLICT (code) DO NOTHING`, [code])
+      }
+      await q(
+        `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+         VALUES ($1, $2, $1, 'x', 'user', '[]'::jsonb, TRUE, FALSE)`,
+        [DB_ACTOR, `${DB_ACTOR}@example.test`],
+      )
+      for (const code of DB_ACTOR_PERMS) await q('INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, $2)', [DB_ACTOR, code])
     })
 
     afterAll(async () => {
@@ -234,16 +278,22 @@ export function defineAuthzVersionFieldRowOrderRealDbCases(): void {
         if (value === undefined) delete process.env[flag]
         else process.env[flag] = value
       }
-      for (const sheetId of ALL_SHEETS) {
+      for (const sheetId of [...ALL_SHEETS, ...EXTRA_SHEETS]) {
+        await q('DELETE FROM field_permissions WHERE sheet_id = $1', [sheetId]).catch(() => {})
+        await q('DELETE FROM meta_field_retype_conversions WHERE sheet_id = $1', [sheetId]).catch(() => {})
         await q('DELETE FROM meta_field_value_tombstones WHERE sheet_id = $1', [sheetId]).catch(() => {})
         await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [sheetId]).catch(() => {})
         await q('DELETE FROM meta_config_revisions WHERE sheet_id = $1', [sheetId]).catch(() => {})
+        await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [sheetId]).catch(() => {})
         await q('DELETE FROM meta_records WHERE sheet_id = $1', [sheetId]).catch(() => {})
         await q('DELETE FROM meta_fields WHERE sheet_id = $1', [sheetId]).catch(() => {})
         await q('DELETE FROM meta_sheets WHERE id = $1', [sheetId]).catch(() => {})
         await q(`DELETE FROM ${SHEET_PERMISSION_VERSIONS_TABLE} WHERE sheet_id = $1`, [sheetId]).catch(() => {})
       }
       await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
+      await q('DELETE FROM user_permissions WHERE user_id = $1', [DB_ACTOR]).catch(() => {})
+      await q('DELETE FROM users WHERE id = $1', [DB_ACTOR]).catch(() => {})
+      await q(`DELETE FROM ${SUBJECT_AUTHORIZATION_VERSIONS_TABLE} WHERE subject_id = ANY($1::text[])`, [[DB_ACTOR, HOLDER_ACTOR]]).catch(() => {})
     })
 
     test('FO-T1 parity: fieldVisibilityTriggerWouldFire answers exactly what the installed trigger does', async () => {
@@ -510,6 +560,28 @@ export function defineAuthzVersionFieldRowOrderRealDbCases(): void {
         }
       })
 
+      test('FO-F4 hiding a field WITHOUT a reorder: the version row is already held at the late re-read, the first field-row lock of such a PATCH', async () => {
+        // FO-F1 checks the late re-read only after its sibling-shift check, and every PATCH there reorders (verifier r1
+        // F7): here the locked re-read is the first field-row lock, so a bump that waited for a reorder reds this case.
+        expect(isWriterFenceEnabled()).toBe(false)
+        const id = fld('f4')
+        await seedField(SHEET, id, 'string', {}, 53)
+        const hold = holdAfter(PATCH_FIELD_LOCKED_REREAD_SQL)
+        let patching: ReturnType<typeof tracked> | null = null
+        try {
+          patching = tracked(() => patchField(id, { property: { hidden: true } }))
+          await hold.reached()
+          expect(await fieldRowProbe(id), 'FO-F4: the late re-read holds the field row').toBe('held')
+          expect(await versionRowProbe(SHEET), 'FO-F4: the version row is held at the late re-read').toBe('held')
+          hold.release()
+          expectOk(await patching.promise)
+          expect(await propertyOf(id)).toMatchObject({ hidden: true })
+        } finally {
+          hold.restore()
+          if (patching) await patching.promise.catch(() => {})
+        }
+      })
+
       test('FO-F2 hiding a field vs an admission holder: serialized on the version row, never a false ALLOW', async () => {
         expect(isWriterFenceEnabled()).toBe(false)
         const id = fld('f2')
@@ -573,6 +645,207 @@ export function defineAuthzVersionFieldRowOrderRealDbCases(): void {
           if (patching) await patching.promise.catch(() => {})
           if (reverting) await reverting.promise.catch(() => {})
         }
+      })
+    })
+
+    const waitingQueryOf = async (pid: number): Promise<string> =>
+      String(((await q('SELECT query FROM pg_stat_activity WHERE pid = $1', [pid])).rows[0] as { query?: string } | undefined)?.query ?? '')
+    const errorTag = (error: unknown): string =>
+      `${String((error as { code?: unknown } | null)?.code)}/${String((error as { sqlState?: unknown } | null)?.sqlState)}`
+
+    describe('writer vs writer: the sheet row before the version row (verifier r1 F1)', () => {
+      /** An `ensureFields` overwrite in the plugin port's shape: one pool transaction around the function. */
+      const ensureOverwrite = (sheetId: string, fields: Array<{ id: string; name: string; type: string; order: number }>) =>
+        poolManager.get().transaction(async ({ query }) => ensureFields({
+          query: async (sql, params) => {
+            const res = await query(sql, params) as { rows?: unknown[]; rowCount?: number | null }
+            return { rows: Array.isArray(res.rows) ? res.rows : [], rowCount: typeof res.rowCount === 'number' ? res.rowCount : undefined }
+          },
+          sheetId,
+          overwriteMode: 'overwrite',
+          fields: fields as never,
+        }))
+
+      /**
+       * The field-permission grant route (PUT …/field-permissions/:fieldId/user/:subjectId) is held right after its
+       * `meta_sheets … FOR UPDATE`, with the sheet version row next on its list; then `write` starts — a field-row writer
+       * that bumps and then inserts an FK child of meta_sheets (that insert takes FOR KEY SHARE on the sheet row by
+       * itself). The writer must park on the sheet row's KEY SHARE BEFORE its bump: the version row stays free while it
+       * waits, the grant takes it and commits, the writer follows — no 40P01. With the bump first, the writer held the
+       * version row, parked on the FK's KEY SHARE behind the grant, and the grant then waited on the version row (a cycle).
+       */
+      async function grantVsSheetRowWriter(grantField: string, write: () => PromiseLike<string>) {
+        const hold = holdAfter(SHEET_ROW_LOCK_LIVENESS_SQL)
+        let granting: ReturnType<typeof tracked> | null = null
+        let writing: { promise: Promise<string>; settled: () => boolean } | null = null
+        try {
+          granting = tracked(() => http().put(`/api/multitable/sheets/${SHEET}/field-permissions/${grantField}/user/${DB_ACTOR}`).send({ visible: false }))
+          const grantPid = await hold.reached()
+          writing = tracked(write)
+          const parked = await raceParkedOrSettled({ blockerPid: grantPid, queryText: SHEET_ROW_KEY_SHARE_SQL, settled: writing.settled, timeoutMs: 5000 })
+          const versionRowWhileParked = await versionRowProbe(SHEET)
+          hold.release()
+          const granted = (await granting.promise) as Response
+          const written = await writing.promise.catch((error: unknown) => errorTag(error))
+          return { parkedOnSheetRowKeyShare: parked, versionRowWhileParked, grant: granted.status, writer: written }
+        } finally {
+          hold.restore()
+          if (granting) await granting.promise.catch(() => {})
+          if (writing) await writing.promise.catch(() => {})
+          await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
+        }
+      }
+
+      for (const fence of ['off', 'on'] as const) {
+        test(`FO-X1 an ensureFields overwrite that ADDS a field vs PUT field-permissions on the same sheet (fence ${fence}): the overwrite waits on the sheet row, never a 40P01`, async () => {
+          const existing = fld(`x1${fence}a`)
+          const added = fld(`x1${fence}b`)
+          await seedField(SHEET, existing, 'string', {}, fence === 'off' ? 90 : 92)
+          const name = String(((await q('SELECT name FROM meta_fields WHERE id = $1', [existing])).rows[0] as { name: string }).name)
+          const run = () => grantVsSheetRowWriter(existing, () => ensureOverwrite(SHEET, [
+            { id: existing, name, type: 'string', order: fence === 'off' ? 90 : 92 },
+            { id: added, name: 'F x1 added', type: 'string', order: fence === 'off' ? 91 : 93 },
+          ]).then(() => 'ok'))
+          const outcome = fence === 'on' ? await withWriterFenceOn(run) : await run()
+          const addedExists = (await q('SELECT 1 FROM meta_fields WHERE id = $1', [added])).rows.length === 1
+          expect({ ...outcome, addedExists }, `FO-X1 (fence ${fence}): the overwrite parks on the sheet row before its bump; both writers finish`).toEqual({
+            parkedOnSheetRowKeyShare: 'parked', versionRowWhileParked: 'free', grant: 200, writer: 'ok', addedExists: true,
+          })
+        })
+      }
+
+      test('FO-X2 a PATCH /fields that hides a field AND converts it to autoNumber vs PUT field-permissions (the twin: the auto-number sequence row is an FK child of meta_sheets)', async () => {
+        expect(isWriterFenceEnabled()).toBe(false)
+        const grantField = fld('x2g')
+        const id = fld('x2')
+        await seedField(SHEET, grantField, 'string', {}, 95)
+        await seedField(SHEET, id, 'string', {}, 96)
+        const outcome = await grantVsSheetRowWriter(grantField, () => patchField(id, { type: 'autoNumber', property: { hidden: true } })
+          .then((res: Response) => (res.status === 200 ? 'ok' : `${res.status}/${String(res.body?.error?.code)}`)))
+        const stored = (await q('SELECT type, property FROM meta_fields WHERE id = $1', [id])).rows[0] as { type: string; property: Record<string, unknown> }
+        const sequence = (await q('SELECT 1 FROM meta_field_auto_number_sequences WHERE field_id = $1', [id])).rows.length
+        expect({ ...outcome, type: stored.type, hidden: stored.property?.hidden === true, sequence }, 'FO-X2: the PATCH parks on the sheet row before its bump; both writers finish').toEqual({
+          parkedOnSheetRowKeyShare: 'parked', versionRowWhileParked: 'free', grant: 200, writer: 'ok', type: 'autoNumber', hidden: true, sequence: 1,
+        })
+      })
+    })
+
+    describe('field retype convert and its undo vs an admission holder (verifier r1 F2)', () => {
+      /** A fresh, unmanaged sheet whose one text column stores the LEGACY jsonb-STRING encoding of `{ hidden: true }`. */
+      async function legacyStringColumn(tag: string) {
+        const sheetId = `sheet_fro_${tag}_${TOKEN}`
+        EXTRA_SHEETS.push(sheetId)
+        await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [sheetId, BASE, 'FRO Convert'])
+        await bumpSheetPermissionVersions((sql, params) => q(sql, params), [sheetId])
+        const id = fld(tag)
+        // seedField JSON-encodes once more: the column stores a jsonb STRING (record-duplicate-guard.ts:66 still reads it)
+        await seedField(sheetId, id, 'string', JSON.stringify({ hidden: true }), 1)
+        const records = [`rec_fro_${tag}_1_${TOKEN}`, `rec_fro_${tag}_2_${TOKEN}`]
+        await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [records[0], sheetId, JSON.stringify({ [id]: 'ALPHA' }), DB_ACTOR])
+        await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [records[1], sheetId, JSON.stringify({ [id]: 'BETA' }), DB_ACTOR])
+        expect((await q('SELECT jsonb_typeof(property) AS t FROM meta_fields WHERE id = $1', [id])).rows[0].t).toBe('string')
+        return { sheetId, id, records }
+      }
+      /** The conversion's preconditions: its flag, the writer fence it refuses to run without, a real database actor. */
+      async function asConverter<T>(run: () => Promise<T>): Promise<T> {
+        process.env[CONVERT_FLAG] = 'true'
+        currentUser = { id: DB_ACTOR, roles: ['member'], perms: DB_ACTOR_PERMS, permissions: DB_ACTOR_PERMS }
+        try {
+          return await withWriterFenceOn(run)
+        } finally {
+          currentUser = ADMIN
+          if (flags[CONVERT_FLAG] === undefined) delete process.env[CONVERT_FLAG]
+          else process.env[CONVERT_FLAG] = flags[CONVERT_FLAG]
+        }
+      }
+      const retypePreview = (fieldId: string) => http().post(`/api/multitable/fields/${fieldId}/retype-preview`).send({ targetType: 'select' })
+      const retypeExecute = (fieldId: string, previewToken: string) =>
+        http().post(`/api/multitable/fields/${fieldId}/retype-execute`).send({ previewToken, confirm: FIELD_RETYPE_CONVERT_CONFIRM })
+      const retypeUndo = (fieldId: string, convertRevisionId: string) =>
+        http().post(`/api/multitable/fields/${fieldId}/retype-undo`).send({ convertRevisionId, confirm: FIELD_RETYPE_UNDO_CONFIRM })
+      async function previewToken(fieldId: string): Promise<string> {
+        const pv = await retypePreview(fieldId) as Response
+        expect(pv.status, JSON.stringify(pv.body).slice(0, 300)).toBe(200)
+        expect(pv.body.data?.verdict).toBe('ok')
+        return String(pv.body.data?.previewToken)
+      }
+
+      /**
+       * A whole-column writer (`write`: the convert or the undo) is held right after it locked every live row FOR UPDATE —
+       * it already holds the field row — and an admission holder that binds one of those records starts. The writer
+       * must already hold the sheet version row (bumped before its first row lock), so the holder waits at the version
+       * row, its FIRST lock. With the trigger-only order the holder took the version row FOR SHARE, waited on the bound
+       * record the writer holds, and the writer's field UPDATE (a legacy string property flips the trigger's flags)
+       * then waited on the version row: 40P01.
+       */
+      async function wholeColumnWriterVsHolder(sheetId: string, fieldId: string, recordId: string, write: () => PromiseLike<unknown>) {
+        const startVersion = await sheetVersion(sheetId)
+        const hold = holdAfter(CONVERT_LIVE_ROWS_LOCKED_SQL)
+        let writing: ReturnType<typeof tracked> | null = null
+        let holder: Awaited<ReturnType<typeof openHolder>> | null = null
+        let ended = false
+        try {
+          writing = tracked(write)
+          const writerPid = await hold.reached()
+          const atHold = { fieldRow: await fieldRowProbe(fieldId), versionRow: await versionRowProbe(sheetId) }
+          holder = await openHolder(sheetId, recordId)
+          const opened = holder
+          const locking = tracked(() => opened.lock())
+          const parked = await raceParkedOrSettled({ blockerPid: writerPid, settled: locking.settled, timeoutMs: 5000 })
+          const waitsAt = await waitingQueryOf(holder.pid)
+          hold.release()
+          const written = (await writing.promise) as Response
+          const lockOutcome = await locking.promise.then(() => 'locked', errorTag)
+          const holderSeesHidden = lockOutcome === 'locked' ? await holder.seesHidden(fieldId) : 'n/a'
+          await holder.end(lockOutcome === 'locked' ? 'COMMIT' : 'ROLLBACK')
+          ended = true
+          return {
+            atHold,
+            holderParkedBehindWriter: parked,
+            holderWaitsAt: waitsAt.includes(SHEET_PERMISSION_VERSIONS_TABLE) ? 'version row' : waitsAt.includes('meta_records') ? 'bound record' : waitsAt.slice(0, 60),
+            writer: written.status === 200 ? 'ok' : `${written.status}/${String(written.body?.error?.code)}`,
+            lockOutcome,
+            holderSeesHidden,
+            versionMoved: (await sheetVersion(sheetId)) > startVersion,
+          }
+        } finally {
+          hold.restore()
+          if (writing) await writing.promise.catch(() => {})
+          if (!ended && holder) await holder.end('ROLLBACK').catch(() => undefined)
+        }
+      }
+      const SERIALIZED = {
+        atHold: { fieldRow: 'held', versionRow: 'held' },
+        holderParkedBehindWriter: 'parked',
+        holderWaitsAt: 'version row',
+        writer: 'ok',
+        lockOutcome: 'locked',
+        holderSeesHidden: true,
+        versionMoved: true,
+      }
+
+      test('FO-R1 the retype convert of a legacy jsonb-STRING {hidden:true} column vs a holder binding a live record: the holder waits at the version row, no 40P01', async () => {
+        const { sheetId, id, records } = await legacyStringColumn('r1')
+        const outcome = await asConverter(async () => {
+          const token = await previewToken(id)
+          return wholeColumnWriterVsHolder(sheetId, id, records[1]!, () => retypeExecute(id, token))
+        })
+        expect(outcome, 'FO-R1: the convert holds the version row before its row locks; the holder serializes behind it').toEqual(SERIALIZED)
+        const stored = (await q('SELECT type, jsonb_typeof(property) AS kind, property FROM meta_fields WHERE id = $1', [id])).rows[0] as { type: string; kind: string; property: Record<string, unknown> }
+        expect([stored.type, stored.kind, stored.property.hidden], 'the conversion parsed the string and kept hidden').toEqual(['select', 'object', true])
+      })
+
+      test('FO-R2 the undo, which writes the stored jsonb STRING back over the converted object, vs a holder binding a live record: the holder waits at the version row, no 40P01', async () => {
+        const { sheetId, id, records } = await legacyStringColumn('r2')
+        const outcome = await asConverter(async () => {
+          const executed = await retypeExecute(id, await previewToken(id)) as Response
+          expect(executed.status, JSON.stringify(executed.body).slice(0, 300)).toBe(200)
+          const convertRevisionId = String(executed.body.data?.convertRevisionId)
+          return wholeColumnWriterVsHolder(sheetId, id, records[0]!, () => retypeUndo(id, convertRevisionId))
+        })
+        expect(outcome, 'FO-R2: the undo holds the version row before its row locks; the holder serializes behind it').toEqual(SERIALIZED)
+        const stored = (await q('SELECT type, jsonb_typeof(property) AS kind FROM meta_fields WHERE id = $1', [id])).rows[0] as { type: string; kind: string }
+        expect([stored.type, stored.kind], 'the undo restored the stored string as it was').toEqual(['string', 'string'])
       })
     })
   })

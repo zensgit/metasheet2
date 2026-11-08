@@ -147,6 +147,16 @@ describeDb('deprovision effect provider witness (real DB, isolated schema)', () 
         status text NOT NULL DEFAULT 'success'
       )
     `.execute(db)
+    // D21 (Y5a): the subject authorization version row the deprovision writer bumps as its first protocol statement
+    // (lockCandidateUser, src/directory/deprovision-ledger.ts; table from zzzz20261106110500, no triggers in this
+    // private schema).
+    await sql`
+      CREATE TABLE subject_authorization_versions (
+        subject_id text PRIMARY KEY,
+        version bigint NOT NULL DEFAULT 1,
+        updated_at timestamptz NOT NULL DEFAULT NOW()
+      )
+    `.execute(db)
     await weakLedgerUp(db)
     await hardenedLedgerUp(db)
     await grantRowCreatedUp(db)

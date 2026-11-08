@@ -287,7 +287,7 @@ import {
   type SheetLiveness,
 } from '../multitable/sheet-liveness'
 import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
-import { bumpSheetPermissionVersions, fieldVisibilityTriggerWouldFire } from '../multitable/authz-version-protocol'
+import { bumpSheetPermissionVersionBehindSheetRow, bumpSheetPermissionVersions, fieldVisibilityTriggerWouldFire } from '../multitable/authz-version-protocol'
 import {
   isTombstoneCaptureEnabled,
   countFieldDeleteCaptureRows,
@@ -14865,7 +14865,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // that writes: the locked re-read must equal `validated` or the attempt retries on fresh data, and
         // `writeProperty` differs from `nextProperty` only in the human write lock, manual-rows and pull-batch band keys. A PATCH that
         // cannot trip it (order, name, options) takes no version row, so the shared column drag never queues on it.
-        if (fieldVisibilityTriggerWouldFire(validated.property, nextProperty)) await bumpSheetPermissionVersions(query, [sheetId])
+        // The bump goes BEHIND the sheet row (meta_sheets FOR KEY SHARE first): a conversion to autoNumber inserts the
+        // auto-number sequence row below, an FK child of meta_sheets, and that implicit KEY SHARE taken after the version
+        // row would wait on a grant route holding meta_sheets FOR UPDATE that wants the version row next (40P01).
+        if (fieldVisibilityTriggerWouldFire(validated.property, nextProperty)) await bumpSheetPermissionVersionBehindSheetRow(query, sheetId)
         const desiredOrder = parsed.data.order
         const configBatchId = randomUUID() // T9-R1: one batchId per request — the updated field + any shifted fields share it
 
