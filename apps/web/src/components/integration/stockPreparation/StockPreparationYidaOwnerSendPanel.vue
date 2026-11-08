@@ -32,7 +32,7 @@
     <p v-if="errorCode === 'YIDA_SEND_APPROVAL_LIMIT'" data-testid="sp-yida-owner-limit">内容超过单次发送的大小上限（派生映射 v3 的常量与复制也计入）；这次请求没有保存、授权或发送任何内容。请减少字段或缩短常量后重新预演。</p>
     <p v-if="errorCode === 'YIDA_SEND_APPROVAL_IDENTITY_RESERVED'" data-testid="sp-yida-owner-identity-reserved">此物料行在该目标已经创建过，不再新建；请到宜搭核对。</p>
     <p v-if="errorCode === 'YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT'" data-testid="sp-yida-owner-generated-layout-conflict">该目标的编码模板布局已在首次授权时封存，本草稿的模板布局与之不同（或不含编码模板）；这次请求没有保存草稿、授权或发送任何内容。请改回已封存的模板，或由管理员另建目标。</p>
-    <p v-if="errorCode === 'YIDA_SEND_APPROVAL_SOURCE_UNBOUND'" data-testid="sp-yida-owner-source-unbound">此映射含编码模板，只能用服务端从已登记项目表格读取的行创建草稿；粘贴的行没有来源绑定。未保存草稿，原样再试仍会被拒绝。请改用“从表格”读取已登记的项目表格。</p>
+    <p v-if="errorCode === 'YIDA_SEND_APPROVAL_SOURCE_UNBOUND'" data-testid="sp-yida-owner-source-unbound">此映射含编码模板，只能用服务端从已登记项目表格读取的行创建草稿；粘贴的行，以及从未登记为项目表格的表格读取的行，都没有来源绑定。未保存草稿，原样再试仍会被拒绝。请改用“从表格”读取已登记的项目表格。</p>
     <p v-if="errorCode === 'YIDA_SEND_APPROVAL_SOURCE_PROJECT_MISMATCH'" data-testid="sp-yida-owner-source-project-mismatch">表格中有行的项目号与该表格登记的项目不一致，生成的编码会对应到别的项目。未保存草稿，原样再试仍会被拒绝。请在表格中改正这些行的项目号后重新读取。</p>
     <p v-if="errorCode === 'YIDA_SEND_APPROVAL_SOURCE_KEY_MISMATCH'" data-testid="sp-yida-owner-source-key-mismatch">编码模板读到的行标识与服务端读取的行键不一致。未保存草稿，原样再试仍会被拒绝。请检查表格的行键列与模板的行标识后重新读取。</p>
     <p v-if="errorCode === 'YIDA_SEND_APPROVAL_SOURCE_KEY_FIELD_MISMATCH'" data-testid="sp-yida-owner-source-key-field-mismatch">编码模板的行标识没有指向表格的行键列（另一列即使内容相同也不行）。未保存草稿，原样再试仍会被拒绝。请把模板的行标识改为行键列对应的字段后重新预演。</p>
