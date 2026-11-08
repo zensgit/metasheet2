@@ -363,6 +363,17 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
     control: 'stock-prep-project-manual-rows-set',
   }),
+  Object.freeze({
+    // 批次标识 BI-1b (design §8.7; register R-65): the pull-batch STATUS read of one project sheet — whether its two batch
+    // columns are present / locked / visible, its ledger state and its values-free row classes. ADMIN (the install it
+    // reports on is an owner-gated production write). `control: null` is deliberate: no web control renders this read yet
+    // (BI-3 / BI-7 give it one — the handoff precedent above), so presence cannot equal grant for F-04.
+    capability: 'projectTarget.pullBatchRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
+    control: null,
+  }),
   // 备料分批拉取第一期 step 4 PR-4 (design §13; register R-59) — THE PULLER'S CONFIRMATION SURFACE over a
   // governed project: the private hold page, the evidence behind a hold, a relationship's detail, and the
   // three decisions (confirm / 「暂不处理」 / end). All six are the PULL tier (D-14: the puller confirms;

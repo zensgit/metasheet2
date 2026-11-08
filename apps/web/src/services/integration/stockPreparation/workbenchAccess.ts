@@ -408,6 +408,15 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
     control: 'stock-prep-project-manual-rows-set',
   }),
+  // 批次标识 BI-1b (R-65) — byte-equal to the plugin manifest's pull-batch status row. `control: null`: no control renders
+  // this ADMIN read yet (BI-3 / BI-7 give it one), so F-04 does not pair it.
+  Object.freeze({
+    capability: 'projectTarget.pullBatchRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
+    control: null,
+  }),
   // 备料分批拉取第一期 step 4 PR-4 (R-59) — byte-equal to the plugin manifest's six refresh rows: the puller's
   // private hold page, the evidence behind a hold, a relationship's detail, confirm / 「暂不处理」 / end. All
   // PULL tier. PR-7 (R-62) assigned their control ids: they live on 「拉取待确认」
