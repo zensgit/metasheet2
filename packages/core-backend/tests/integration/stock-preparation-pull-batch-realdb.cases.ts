@@ -7,7 +7,7 @@
  * unused on this line (the lanes pass none). Every other case is main's. ADDED (R line; critic R83-extension correction 3):
  * main's BI-1b real-stack stamping cases BI-R1 / R2 / R5 / R-C4 live in the project-write-lock real-DB cases on main (absent
  * here); their R-line copies are the second describe block below, on a lock-free real stack. ADDED (R line, R83 part 2):
- * main's BI-2 install cases BI-R6 / R8 / R9 / R10 / R11 / R12 / R13 / R14 (also in main's project-write-lock real-DB
+ * main's BI-2 install cases BI-R6 / R8 / R9 / R10 / R11 / R12 / R13 / R18 (also in main's project-write-lock real-DB
  * cases) are in that same second block, lock-free, with the R-line-only BI-R-RL / BI-R11b and the G5 archive pin in BI-R10.
  *
  * This is a CASES MODULE, not a test file: `defineStockPreparationPullBatchRealDbCases()` registers its `describe`
@@ -804,7 +804,8 @@ export function defineStockPreparationPullBatchRealDbCases(): void {
     //          scheduled pull skips); a first install aborted with no label written releases the settings lock (C7)
     //   BI-R11 born ready over an unreadable ledger: the create answers the legacy shape (ledger_unreadable), a pull
     //          afterwards is unaffected; BI-R11b born ready over a readable ledger on the R-line create route
-    //   BI-R14 (P2-18) an extension re-run in another history mode than the persisted run is refused before any cell write
+    //   BI-R18 (P2-18) an extension re-run in another history mode than the persisted run is refused before any cell write
+    //          (BI-R14 is the pull-batch file's zombie allocate on main, not on this line)
     const INSTALL_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch'
     const CREATE_PATH = '/api/integration/stock-preparation/projects/:projectNo/target'
     const MVP_PERSIST_SWITCH = 'MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED'
@@ -1050,8 +1051,8 @@ export function defineStockPreparationPullBatchRealDbCases(): void {
     // while the switch is off, then an INFERRED re-run carrying the extension digest. The real route refuses the mode
     // change 409 PLAN_CHANGED history_mode_changed BEFORE any cell write (as the plain continue path does); the dry-run
     // names the persisted mode, and the re-run in that mode installs the extension and resolves.
-    test('BI-R14 (P2-18) an extension re-run in another history mode than the persisted run is refused before any cell write on real PG; the persisted mode resolves', async () => {
-      const k = await installStack('i14')
+    test('BI-R18 (P2-18) an extension re-run in another history mode than the persisted run is refused before any cell write on real PG; the persisted mode resolves', async () => {
+      const k = await installStack('i18')
       k.state.data = k.firstPullSource()
       await k.offPull()
       const dry = await k.post({ mode: 'dry_run', historyMode: 'unknown' })
