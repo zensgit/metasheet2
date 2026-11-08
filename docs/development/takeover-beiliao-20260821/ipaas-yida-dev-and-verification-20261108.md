@@ -47,8 +47,8 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
 | Y5 | 绑定 B2：审批与准入事务内重新鉴权 | #6796 | `4acddf0ca` | Opus max PASS r1（40）→ 补测试增量 PASS（37）→ 随 Y5a 适配 PASS |
 | Y6a | generated 封闭部件模板核心 | #6777 | `9e95092a9` | Fable max PASS r1（44） |
 | Y6 | generated 接线、SOURCE_UNBOUND、真库 A9/A10、目标级布局封存（P1） | #6797 | `690777448` | Opus max r1 FIX_FIRST → Opus max PASS r2（57）；外部审阅 P1 → 修复后 Fable max r1 FIX_FIRST → Fable max PASS r2（15 个变异 / 20 次红） |
-| Y7 | 修复路由补缺列加补锁 | #6768 | `c59deedc6` | Opus high PASS r2；备料线单独审 FIX_FIRST（HIGH 合 main 后重复导入致加载失败；M1 补回的 PLM 列插入时不带锁；M2 补列 order 与右侧批次列交错）→ 修复 → Fable max 两视角 PASS（33 个变异，真库含 p4 全文件 158/158）、CI 绿 → 备料线 delta 复审中 |
-| Y8 | 模板加 issueConfirmDate / projectSpecModel | #6778 | `a7fae7d1f` | Opus high PASS r1（19，含真库）；备料线审 FIX_FIRST（MF1）→ 修复 → 通过；收 VY8D-01 为 S3B-07；跟进 Y7 修复轮（合 Y7 `c59deedc6` + main `d166f9be4`，RC-18 改查 INSERT 带锁、新增 RC-20 右侧批次列），CI 绿 → 备料线 delta 复审中 |
+| Y7 | 修复路由补缺列加补锁 | #6768 | `c59deedc6` | Opus high PASS r2；备料线单独审 FIX_FIRST（HIGH 合 main 后重复导入致加载失败；M1 补回的 PLM 列插入时不带锁；M2 补列 order 与右侧批次列交错）→ 修复 → Fable max 两视角 PASS（33 个变异，真库含 p4 全文件 158/158）、CI 绿 → 备料线 delta 复审 **OK_TO_READY**（Opus max 实跑） |
+| Y8 | 模板加 issueConfirmDate / projectSpecModel | #6778 | `4bab323c5` | Opus high PASS r1（19，含真库）；备料线审 FIX_FIRST（MF1）→ 修复 → 通过；收 VY8D-01 为 S3B-07；跟进 Y7 修复轮（合 Y7 `c59deedc6` + main `d166f9be4`，RC-18 改查 INSERT 带锁、新增 RC-20 右侧批次列），CI 绿 → 备料线 delta 复审 FIX_FIRST（只一条文档 MEDIUM：BI-6b 安装窗口手册仍写「补列不归这个路由、停下报开发机」）→ `4bab323c5` 改手册 → 备料线复核 **OK**（无阻塞项） |
 | Y9a | 发料确认日期回写核心 | #6776 | `c6a0e52dd` | Fable max r1 FIX_FIRST → PASS r2（60） |
 | Y9 | 回写接线 + 真库崩溃测试 | #6812 | `eacd5d3c3` | PASS r1（25）→ 跟进增量 PASS（18） |
 | Y10 | 切换对账（每项目只读、证据分离、绝不伪造 ACK） | #6785 | `a076f01ce` | Fable max PASS r1 → 补齐 4 MEDIUM 后 PASS r2（21） |
@@ -121,7 +121,7 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
 ## 6. 需要 owner 的事项
 
 ### 6.1 批准类（不在开发授权内）
-1. **合并与转正式**：上表全部 Draft PR，顺序见 §4。iPaaS 链在 R-69 裁定前不合并；Y3 在首次测试表单发送成功前保持 Draft（R-70 ③）；Y7 #6768 的备料线单独审为 FIX_FIRST，已修复并经两视角独立核验；Y7 与 Y8 #6778 转正式前须等备料线对修复 delta 的复审结论。
+1. **合并与转正式**：上表全部 Draft PR，顺序见 §4。iPaaS 链在 R-69 裁定前不合并；Y3 在首次测试表单发送成功前保持 Draft（R-70 ③）；Y7 #6768 的备料线单独审为 FIX_FIRST，已修复并经两视角独立核验，备料线 delta 复审为 OK_TO_READY；Y8 #6778 的文档 MEDIUM 已改，备料线复核 OK；两个 PR 备料线都已无阻塞项，标 ready 与合并由 owner 决定。**合入 Y7 / Y8 前先通知备料线**（两者改了 main 上的安装窗口手册，备料线要在 R 线手册同步记一笔）。**Y7 修复轮在 core-backend 加了宿主只读接口 `readObjectMaxFieldOrder`：Y7 不能再作为只换插件的补丁单独挑入 R 线，要随完整构建一起发**（插件与宿主版本不一致时，补列在任何写入前答 503，失败关闭）。
 2. **开关**（默认全关，精确 `'true'` 才开）：
    - 宜搭：`INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS`、`INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED` / `_TARGET_REFS`、`INTEGRATION_YIDA_RECONCILE_READ_ENABLED`、`INTEGRATION_YIDA_SHEET_SOURCE_ENABLED`；
    - 自动化：`INTEGRATION_AUTOMATION_RUN_*`（I3–I5）；
@@ -201,4 +201,4 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
 
 ## 更新记录
 - 2026-11-08：定稿。全部切片开发完并通过独立核验；YE、I 链合 main 两项已补入。
-- 2026-11-08（晚）：备料线单独审 Y7 = FIX_FIRST（1 HIGH、2 MEDIUM）→ 修复（Y7 `c59deedc6`、Y8 `a7fae7d1f`）→ Fable max 两视角 PASS、两个 PR CI 绿 → 备料线 delta 复审中；登记 R-89。
+- 2026-11-08（晚）：备料线单独审 Y7 = FIX_FIRST（1 HIGH、2 MEDIUM）→ 修复（Y7 `c59deedc6`、Y8 `a7fae7d1f`）→ Fable max 两视角 PASS、两个 PR CI 绿 → 备料线 delta 复审：Y7 OK_TO_READY；Y8 一条文档 MEDIUM（安装窗口手册与附录 C 对齐补列步骤）→ `4bab323c5` → 备料线复核 OK；登记 R-89。
