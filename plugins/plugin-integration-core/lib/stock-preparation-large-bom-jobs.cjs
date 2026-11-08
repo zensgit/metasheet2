@@ -22,7 +22,10 @@ const {
   summarizeConflictPlanForEvidence,
 } = require('./stock-preparation-conflict-planner.cjs')
 const {
+  // R line (R83): the stopped-run rethrow (main rethrows the write lock's error class, not on this line).
+  StockPreparationApplyRunStopError,
   applyStockPreparationPlan,
+  countAttemptedHostWrites,
   summarizeApplyResultForEvidence,
 } = require('./stock-preparation-apply-writer.cjs')
 
@@ -1358,6 +1361,40 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
 
     job.counts = mergeCounts(job.counts, applyResult.counts)
     mergeApplyEvidence(job, applyResult)
+    if (applyResult.status === 'aborted') {
+      // STOPPED mid-chunk (R line: only the pull-batch allocation stop, BI-1b): decisions [start, start + k) ran, k did
+      // not. The checkpoint records exactly that, the job is `failed` (resumable from start + k), and the stop's code
+      // joins the values-free evidence. Without this branch the checkpoint would move to `end` and decisions
+      // [start + k, end) would be skipped silently.
+      const stoppedAt = start + applyResult.abort.index
+      job.checkpoint = {
+        nextDecisionIndex: stoppedAt,
+        completedChunks: completedChunks(job),
+      }
+      job.evidence = {
+        ...job.evidence,
+        errorCodes: mergeTokenList(job.evidence && job.evidence.errorCodes, [applyResult.abort.code]),
+      }
+      job.status = 'failed'
+      job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
+      await storage.set(key, job)
+      const source = applyResult.abort.error
+      throw new StockPreparationApplyRunStopError(
+        source && Number.isInteger(source.status) ? source.status : 409,
+        applyResult.abort.code,
+        source && source.message ? source.message : 'the large-BOM chunk stopped before finishing',
+        {
+          ...(source && isPlainObject(source.details) ? source.details : {}),
+          // Rows may have landed whenever a host write was attempted (review round 2), not only when one
+          // was confirmed.
+          partial: countAttemptedHostWrites(applyResult) > 0,
+          written: Number(applyResult.written || 0),
+          attemptedWrites: countAttemptedHostWrites(applyResult),
+          counts: { ...applyResult.counts },
+          abortedAtDecisionIndex: stoppedAt,
+        },
+      )
+    }
     job.checkpoint = {
       nextDecisionIndex: end,
       completedChunks: completedChunks(job) + 1,

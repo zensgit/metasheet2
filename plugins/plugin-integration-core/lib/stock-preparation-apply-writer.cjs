@@ -705,7 +705,9 @@ function summarizeApplyErrors(errors = []) {
     .sort((left, right) => left.code.localeCompare(right.code))
 }
 
-function applyStatus(counts, written) {
+function applyStatus(counts, written, aborted) {
+  // A stopped run is its own outcome: the run did NOT get through its plan, whatever the counts say.
+  if (aborted) return 'aborted'
   if (counts.failed > 0) return written > 0 ? 'partial' : 'failed'
   if (counts.held > 0) return written > 0 ? 'partial' : 'held'
   return 'succeeded'
@@ -743,6 +745,9 @@ async function applyStockPreparationPlan(input = {}) {
   }
   const results = []
   const errors = []
+  // R line (R83; main's run-stop from #6501 / PR-8 without the lease fence): `abort` is set when a decision's error
+  // carries `stopsRun === true` (the pull-batch allocation stop, BI-1b) and stops the loop. Nothing else sets it.
+  let abort = null
 
   // W8-4 (L1): ONE apply run = ONE metadata scope. This function is called once per chunk (the
   // large-BOM route advances exactly one chunk per HTTP request) and once per small-BOM apply, so
@@ -789,6 +794,13 @@ async function applyStockPreparationPlan(input = {}) {
           decision: decision.decision,
         })
       } catch (error) {
+        // RUN STOP (main's PR-8 / BI-1b rule; R line without the lease fence): an error that `stopsRun` stops the run.
+        // Nothing of decision `index` landed (the stop is raised before its host write) and every decision before it
+        // is in `results`. It is not counted `failed`: the caller rethrows it with the partial outcome.
+        if (error && error.stopsRun === true) {
+          abort = { index, error }
+          break
+        }
         // W9: a failed write may still have LANDED. `createRecord`/`patchRecord` wrap a committed
         // transaction, so a connection or pool error raised AFTER the COMMIT surfaces here while
         // the row is already in the table — and only the success paths keep the index in step
@@ -847,19 +859,21 @@ async function applyStockPreparationPlan(input = {}) {
   // past every decision in this chunk — a green lie that silently drops rows. The in-repo
   // implementation always invokes it, so this is unreachable today and costs one comparison;
   // it exists so that a future host cannot make skipping rows look like success.
-  if (results.length !== plan.decisions.length) {
+  // A stopped run ran exactly the decisions before the abort index.
+  const expectedResults = abort ? abort.index : plan.decisions.length
+  if (results.length !== expectedResults) {
     throw new StockPreparationApplyWriterError(
       'metadata scope returned without running every decision',
       {
         code: 'metadata_scope_incomplete',
-        expected: plan.decisions.length,
+        expected: expectedResults,
         actual: results.length,
       },
     )
   }
 
   const written = counts.created + counts.updated + counts.inactive
-  const status = applyStatus(counts, written)
+  const status = applyStatus(counts, written, Boolean(abort))
   return {
     ok: counts.failed === 0 && counts.held === 0,
     status,
@@ -873,6 +887,35 @@ async function applyStockPreparationPlan(input = {}) {
     counts,
     results,
     errors,
+    // Present ONLY on a stopped run, so an uninterrupted run's result is byte-identical.
+    // `error` is the stop's own typed error: the caller rethrows it with the partial counts attached.
+    ...(abort ? { abort: { index: abort.index, code: abort.error.code, error: abort.error } } : {}),
+  }
+}
+
+// Review round 2 (F1, #6501): how many HOST WRITES this run issued — confirmed ones (`written`) plus every row
+// that failed INSIDE a createRecord / patchRecord call. A host write that raised may still have LANDED
+// (an error after the COMMIT, see the W9 note in the loop), so "rows may have landed" is "a host write
+// was attempted", never "a write was confirmed". Failures before the host call (the human wall, a
+// lookup, a missing target row) are not attempts.
+function countAttemptedHostWrites(result = {}) {
+  const written = Number(result.written || 0)
+  const errors = Array.isArray(result.errors) ? result.errors : []
+  const failedHostCalls = errors.filter((entry) => entry && (entry.operation === 'createRecord' || entry.operation === 'patchRecord')).length
+  return written + failedHostCalls
+}
+
+// R line (R83): the typed error both callers rethrow for a stopped run. Main rethrows the project write lock's error
+// class (`StockPreparationProjectWriteLockError`), which is not on this line; this one carries the SAME shape — the
+// stop's own status and code (never re-derived from the code) and its details plus the partial outcome — so the
+// route answers what main answers.
+class StockPreparationApplyRunStopError extends Error {
+  constructor(status, code, message, details = {}) {
+    super(message)
+    this.name = 'StockPreparationApplyRunStopError'
+    this.status = status
+    this.code = code
+    this.details = details
   }
 }
 
@@ -896,8 +939,10 @@ module.exports = {
   // 人工补充行 B1: the per-decision code of an ADD refused for a `manual:` key.
   APPLY_MANUAL_KEY_RESERVED,
   StockPreparationApplyWriterError,
+  StockPreparationApplyRunStopError,
   applyStockPreparationPlan,
   summarizeApplyResultForEvidence,
+  countAttemptedHostWrites,
   __internals: {
     assertNoHumanFields,
     batchKeyLookupDisabled,

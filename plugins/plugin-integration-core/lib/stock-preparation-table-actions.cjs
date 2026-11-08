@@ -79,6 +79,7 @@ const {
 } = require('./stock-preparation-templates.cjs')
 const {
   applyStockPreparationPlan,
+  countAttemptedHostWrites,
   summarizeApplyResultForEvidence,
   // ONE definition of logical->physical translation, not two. This file used to
   // carry its own byte-identical copy of `mapFieldName`, and the `pre_mapped`
@@ -86,6 +87,8 @@ const {
   // makes that agreement structural instead of a comment. It also means the
   // writer's refusal to fall back on an unmapped `ext_` id applies here too.
   __internals: { mapFieldName },
+  // R line (R83): the stopped-run rethrow (main rethrows the write lock's error class, not on this line).
+  StockPreparationApplyRunStopError,
 } = require('./stock-preparation-apply-writer.cjs')
 const {
   assertExtensionFieldIdValid,
@@ -2851,6 +2854,27 @@ function assertProductionCleanRowsWithinBound(gateResult, cleanRowCount) {
   }
 }
 
+// R line (R83): main's `projectWriteAbortError` (#6501) without the write lock — the stop's own status and code, its
+// details plus `partial` (a host write was attempted), `written`, `attemptedWrites`, `counts`, `abortedAtDecisionIndex`.
+function applyRunStopError(applyResult) {
+  const source = applyResult.abort && applyResult.abort.error
+  const counts = isPlainObject(applyResult.counts) ? { ...applyResult.counts } : {}
+  const written = Number(applyResult.written || 0)
+  const attemptedWrites = countAttemptedHostWrites(applyResult)
+  const details = {
+    ...(source && isPlainObject(source.details) ? source.details : {}),
+    partial: attemptedWrites > 0,
+    written,
+    attemptedWrites,
+    counts,
+    abortedAtDecisionIndex: applyResult.abort.index,
+  }
+  const status = source && Number.isInteger(source.status) ? source.status : 409
+  const code = source && typeof source.code === 'string' ? source.code : 'STOCK_PREP_APPLY_RUN_STOPPED'
+  const message = source && source.message ? source.message : 'the apply run stopped before finishing its plan'
+  return new StockPreparationApplyRunStopError(status, code, message, details)
+}
+
 async function applyStockPreparationAction(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
   // FOS-4b-3-prod P2: shared apply gate FIRST — fail-closed before any token consume, dry-run, or write.
@@ -2973,6 +2997,9 @@ async function applyStockPreparationAction(input = {}) {
     // target.fieldIdMap, so the scoped API must NOT translate a second time (#4160).
     recordsApi: await createTargetScopedRecordsApi(input.recordsApi, action.target, { fieldIdTranslation: 'pre_mapped' }),
   })
+  // The run was STOPPED (R line: only the pull-batch allocation stop, BI-1b): an ERROR, carrying the partial counts and
+  // the decision index it stopped at — never a plausible `partial` success.
+  if (applyResult.status === 'aborted') throw applyRunStopError(applyResult)
   // 人工补充行 B1 (ADR §5.3): the run finished, so this recompute's reminder is the latest — persisted best effort,
   // after every write and never instead of the answer. (R line: no project write lease and no execution ledger, so
   // it is written after the unleased apply; on main it is written inside the lease.)

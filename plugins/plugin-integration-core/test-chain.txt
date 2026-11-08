@@ -128,6 +128,7 @@ node __tests__/stock-preparation-carry-hardening.test.cjs
 node __tests__/stock-preparation-carry-target-binding.test.cjs
 node __tests__/stock-preparation-suggestion-operators.test.cjs
 node __tests__/stock-preparation-apply-writer.test.cjs
+node __tests__/stock-preparation-apply-run-stop-rline.test.cjs
 node __tests__/stock-preparation-table-actions.test.cjs
 node __tests__/stock-preparation-target-field-existence-probe.test.cjs
 node __tests__/stock-preparation-synthetic-sql-fixture.test.cjs

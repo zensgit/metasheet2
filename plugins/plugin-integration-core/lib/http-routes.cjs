@@ -8064,9 +8064,13 @@ function requireStockPreparationAudit() {
           now: Date.now(),
         })
       } catch (error) {
-        await stampProjectPullOutcome(action, applyTenantId, { outcome: 'refused', code: error && error.code })
+        // A run STOPPED after some rows landed (`details.partial`, #6501) is a failed pull, not a refusal: rows are on
+        // the sheet, so it is stamped `failed` and the overview row is recounted. Everything else that threw wrote
+        // nothing and keeps its `refused` stamp.
+        const partial = Boolean(error && error.details && error.details.partial === true)
+        await stampProjectPullOutcome(action, applyTenantId, { outcome: partial ? 'failed' : 'refused', code: error && error.code })
         // S3 fix round 1 (R5): the project's overview row follows its outcome; best-effort, never the answer.
-        if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(applyTenantId, action.projectTarget.projectNo)
+        if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(applyTenantId, action.projectTarget.projectNo, partial ? { recount: true } : undefined)
         throw error
       }
       // G1 field defect (R67): `applied` only when no row failed; otherwise `failed` + the dominant row code.
