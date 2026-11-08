@@ -408,6 +408,48 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
     control: 'stock-prep-project-manual-rows-set',
   }),
+  // 批次标识 BI-1b (R-65) — byte-equal to the plugin manifest's pull-batch status row. `control: null`: no control renders
+  // this ADMIN read yet (BI-3 / BI-7 give it one), so F-04 does not pair it.
+  Object.freeze({
+    capability: 'projectTarget.pullBatchRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
+    control: null,
+  }),
+  // 批次标识 BI-7 (R-65) — byte-equal to the plugin manifest's three pull-batch settings rows (ADMIN). Their controls
+  // live on 数据来源与体检's settings panel and render only after the read answered 200 (404 while a switch is off, C6);
+  // alignment asserted in apps/web/tests/StockPreparationPullBatchSettingsPanel.spec.ts (PBS-ALIGN).
+  Object.freeze({
+    capability: 'pullBatch.settingsRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    control: 'stock-prep-pull-batch-settings-status',
+  }),
+  Object.freeze({
+    capability: 'pullBatch.settingsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    control: 'stock-prep-pull-batch-settings-set',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.pullBatchSettingsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch/settings',
+    control: 'stock-prep-project-pull-batch-settings-set',
+  }),
+  // 批次标识 BI-2 (R-65) — byte-equal to the plugin manifest's install row. `control: null`: there is no web install control
+  // (design §7.2), so F-04 does not pair it.
+  Object.freeze({
+    capability: 'projectTarget.pullBatchInstall',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
+    control: null,
+  }),
   // 备料分批拉取第一期 step 4 PR-4 (R-59) — byte-equal to the plugin manifest's six refresh rows: the puller's
   // private hold page, the evidence behind a hold, a relationship's detail, confirm / 「暂不处理」 / end. All
   // PULL tier. PR-7 (R-62) assigned their control ids: they live on 「拉取待确认」

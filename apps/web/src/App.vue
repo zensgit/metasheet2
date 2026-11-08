@@ -69,9 +69,19 @@
             >
               {{ item.label }}
             </router-link>
-            <router-link v-if="canManageUsers" to="/admin/users" class="nav-link">{{ navLabels.users }}</router-link>
-            <router-link v-if="canManageUsers" to="/admin/roles" class="nav-link">{{ navLabels.roles }}</router-link>
-            <router-link v-if="canManageUsers" to="/admin/permissions" class="nav-link">{{ navLabels.permissions }}</router-link>
+            <span
+              v-if="canManageUsers"
+              class="nav-org"
+              data-testid="nav-org-permissions"
+              role="group"
+              :aria-label="navLabels.organizationPermissions"
+            >
+              <span class="nav-org__label">{{ navLabels.organizationPermissions }}</span>
+              <router-link to="/admin/users" class="nav-link">{{ navLabels.membersAuthorization }}</router-link>
+              <router-link to="/admin/roles" class="nav-link">{{ navLabels.roles }}</router-link>
+              <router-link to="/admin/role-delegation" class="nav-link">{{ navLabels.managementScope }}</router-link>
+              <router-link to="/admin/permissions" class="nav-link">{{ navLabels.permissionSources }}</router-link>
+            </span>
             <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
             <router-link v-if="canManageUsers" to="/admin/automation-executions" class="nav-link">{{ navLabels.automationRuns }}</router-link>
             <router-link v-if="canManageUsers" to="/approvals/metrics" class="nav-link">{{ navLabels.approvalMetrics }}</router-link>
@@ -224,9 +234,11 @@ const navLabels = computed(() => {
       // B-2: the nav entry point into the cross-source todo center page (/todo).
       todoCenter: '待办中心',
       apps: '应用',
-      users: '用户',
+      organizationPermissions: '组织与权限',
+      membersAuthorization: '成员与授权',
       roles: '角色',
-      permissions: '权限',
+      managementScope: '管理范围',
+      permissionSources: '权限来源与例外',
       adminAudit: '管理审计',
       automationRuns: '自动化运行',
       approvalMetrics: '审批 SLA',
@@ -255,9 +267,11 @@ const navLabels = computed(() => {
     approvalTodo: 'Pending approvals',
     todoCenter: 'Todo Center',
     apps: 'Apps',
-    users: 'Users',
+    organizationPermissions: 'Organization and permissions',
+    membersAuthorization: 'Members and authorization',
     roles: 'Roles',
-    permissions: 'Permissions',
+    managementScope: 'Management scope',
+    permissionSources: 'Permission sources and exceptions',
     adminAudit: 'Admin Audit',
     automationRuns: 'Automation Runs',
     approvalMetrics: 'Approval SLA',
@@ -435,6 +449,26 @@ html, body {
   flex: 0 0 auto;
 }
 
+.nav-org {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 2px;
+  max-width: 100%;
+  margin: 0 4px;
+  padding: 2px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.nav-org__label {
+  padding: 0 8px;
+  color: #64748b;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .nav-links::-webkit-scrollbar {
   display: none;
 }
@@ -562,6 +596,10 @@ html, body {
 
   .nav-link {
     padding: 8px 12px;
+  }
+
+  .nav-org {
+    flex-wrap: wrap;
   }
 }
 

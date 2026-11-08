@@ -1535,6 +1535,22 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # them. Each token matches exactly one file under apps/web/tests (checked by listing the directory),
 # and a substring-collision check in BOTH directions over all 553 manifest tokens found none.
 # The manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
+# 批次标识 BI-3 (2026-11-08; register R-65): ONE token inserted at its case-insensitive sorted position —
+# `StockPreparationPullBatchLines`, the new pure spec for the pull-batch lines on 项目备料页 and the sync panel
+# (apps/web/tests/StockPreparationPullBatchLines.spec.ts: parse, copy, the live server-list tripwire and the mirror over
+# the real server builders). It sits after `StockPreparationProjectWorkspaceView` and before `StockPreparationRail`
+# (and before BI-7's `StockPreparationPullBatchSettingsPanel`, which neither prefixes nor extends it). It matches
+# exactly one file under apps/web/tests, and a substring-collision check in BOTH directions over every manifest token
+# found none. The board / sync / target / large-BOM cases this PR adds ride the specs already registered here. The
+# manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
+# 批次标识 BI-7 (register R-65, 2026-11-08): ONE token added, `StockPreparationPullBatchSettingsPanel` — the NEW spec
+# (apps/web/tests/StockPreparationPullBatchSettingsPanel.spec.ts) for 数据来源与体检's pull-batch settings panel: the
+# vocabulary pinned live against the plugin's pure module and ledger store, the switch-off invisibility (any 404
+# renders nothing, ruling C6), the tenant default save, the per-sheet captured values / locks and their typed-confirm
+# edit, the scope / session straddle, the manifest alignment and the copy. Inserted at its alphabetical position
+# between `StockPreparationProjectWorkspaceView` and `StockPreparationRail`; it matches exactly one spec file, and a
+# substring check in BOTH directions finds no token that contains it or is contained by it (its neighbours diverge
+# right after `StockPreparationP` / `StockPreparation`). The manifest was regenerated with the same command.
 exec npx vitest run \
   adminPageContentSearch.spec.ts \
   adminUserBatch \
@@ -1998,6 +2014,8 @@ exec npx vitest run \
   StockPreparationProjectSyncPanel.spec.ts \
   StockPreparationProjectTarget \
   StockPreparationProjectWorkspaceView \
+  StockPreparationPullBatchLines \
+  StockPreparationPullBatchSettingsPanel \
   StockPreparationRail \
   StockPreparationRefreshChangePlan \
   StockPreparationRefreshQueue \
