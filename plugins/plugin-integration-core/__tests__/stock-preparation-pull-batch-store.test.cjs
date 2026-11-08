@@ -691,4 +691,189 @@ test('ST-E1 every store failure is a typed 503 STORE_FAILED with its operation �
   assert.throws(() => createStockPreparationPullBatchStore({ db: {} }), /scoped db helper/)
 })
 
+// ── ST-I: the per-sheet install's five transactions (BI-2; register R-65) ────────────────────────────────────
+
+const ENVELOPE = pure.planPullBatchFirstInstall({
+  rows: [
+    { recordId: 'rec_a', createdAt: '2026-10-20T01:00:01.000Z', decision: 'inactive', plannedAt: '2026-10-20T02:30:00.000Z', active: false, partId: 'S-01', path: '["S-01"]' },
+    { recordId: 'rec_b', createdAt: '2026-10-20T02:30:01.000Z', decision: 'add', plannedAt: '2026-10-20T02:30:00.000Z', active: true, partId: 'S-01', path: '["P-07","S-01"]' },
+  ],
+  coveredUntil: '2026-10-21T00:00:00.000Z',
+  locale: 'zh-CN',
+})
+const CAPTURE = Object.freeze({ firstPullBatchRule: 'material', labelFormat: 'ordinal_date' })
+const begin = (store, extra = {}) => store.beginInstall({
+  ...SCOPE,
+  expect: { historyStatus: null, version: null },
+  plan: ENVELOPE,
+  planDigest: ENVELOPE.digest,
+  labelLocale: 'zh-CN',
+  capture: CAPTURE,
+  bandPlacement: 'left',
+  landingMode: 'promote_prep_fill',
+  historyMode: 'inferred',
+  approvalRef: 'R-65',
+  installedBy: 'u_admin',
+  ...extra,
+})
+
+test('ST-I1 beginInstall on an ABSENT row: the tenant default read within is the capture; inserted installing with the lock, the envelope + historyMode, the applied placement / landing; audited; a moved tenant default => PLAN_CHANGED settings_changed, nothing written', async () => {
+  const { db, store } = setup({ status: null })
+  const seen = []
+  const row = await begin(store, { auditWithin: async (trx, entry) => { seen.push([trx === db.lastTransactionHandle, entry]) }, auditDetail: { K: 2, run: 'first_install' } })
+  assert.deepEqual([row.historyStatus, row.bandPlacement, row.landingMode, row.historyPlanDigest, row.approvalRef, row.historyMode, row.version], ['installing', 'left', 'promote_prep_fill', ENVELOPE.digest, 'R-65', null, 1])
+  assert.equal(row.settingsLockedAt, AT, 'locked in the same transaction (105 sheet_lock_check)')
+  assert.equal(row.historyPlan.historyMode, 'inferred')
+  assert.equal(row.historyPlan.previousHistoryStatus, undefined, 'a first install has no previous status')
+  assert.deepEqual(seen.map(([sameTrx, entry]) => [sameTrx, entry.mode, entry.subjectId, entry.projectNo, { ...entry.detail }]), [[true, 'pull_batch_install_started', SHEET, PROJECT, { K: 2, run: 'first_install', version: 1 }]])
+  const moved = setup({ status: null })
+  moved.db.seed(kit.T.settings, { tenant_id: TENANT, first_pull_batch_rule: 'predecessor_suffix', label_format: 'ordinal_date', landing_mode: 'promote_prep_fill', band_placement: 'left', version: 1 })
+  const before = snapshot(moved.db)
+  const error = await rejects(begin(moved.store), PULL_BATCH_ERROR_CODES.PLAN_CHANGED, 'tenant moved')
+  assert.equal(error.details.reason, 'settings_changed')
+  assert.equal(snapshot(moved.db), before, 'nothing written')
+})
+
+test('ST-I2 beginInstall on a PRESENT row: expect mismatch => CONFLICT install_moved; captured rule / format / locale mismatch => PLAN_CHANGED; an applied placement that differs => CONFIG_LOCKED; a resolved row records previousHistoryStatus, keeps history_mode, and COALESCEs the lock (critic C15)', async () => {
+  const pending = setup({ status: 'pending', placement: null })
+  await rejects(begin(pending.store, { expect: { historyStatus: 'pending', version: 3 } }), PULL_BATCH_ERROR_CODES.CONFLICT, 'version moved')
+  await rejects(begin(pending.store, { expect: { historyStatus: null, version: null } }), PULL_BATCH_ERROR_CODES.CONFLICT, 'present but expected absent')
+  await rejects(begin(pending.store, { expect: { historyStatus: 'pending', version: 0 }, capture: { ...CAPTURE, labelFormat: 'ordinal' } }), PULL_BATCH_ERROR_CODES.PLAN_CHANGED, 'format moved')
+  await rejects(begin(pending.store, { expect: { historyStatus: 'pending', version: 0 }, labelLocale: 'en' }), PULL_BATCH_ERROR_CODES.PLAN_CHANGED, 'locale moved')
+  const started = await begin(pending.store, { expect: { historyStatus: 'pending', version: 0 } })
+  assert.deepEqual([started.historyStatus, started.version, started.settingsLockedAt], ['installing', 1, AT])
+  const placed = setup({ status: 'pending', placement: 'right' })
+  const locked = await rejects(begin(placed.store, { expect: { historyStatus: 'pending', version: 0 } }), PULL_BATCH_ERROR_CODES.CONFIG_LOCKED, 'placement applied')
+  assert.deepEqual(locked.details.locked, ['placement'])
+  const landed = setup({ status: 'pending', placement: null, landing: 'keep_current' })
+  assert.deepEqual((await rejects(begin(landed.store, { expect: { historyStatus: 'pending', version: 0 } }), PULL_BATCH_ERROR_CODES.CONFIG_LOCKED, 'landing applied')).details.locked, ['landing'])
+  const born = setup({ status: 'born_empty', placement: 'left', lockedAt: null })
+  const gap = await begin(born.store, { expect: { historyStatus: 'born_empty', version: 0 } })
+  assert.equal(gap.historyPlan.previousHistoryStatus, 'born_empty')
+  assert.equal(gap.historyMode, 'inferred', 'the history_mode COLUMN is untouched (P2-18)')
+  assert.equal(gap.settingsLockedAt, AT, 'a gap pass on a born_empty sheet sets the lock (COALESCE)')
+  const aborted = await born.store.abortInstall({ ...SCOPE, labelsOnSheet: new Set() })
+  assert.deepEqual([aborted.historyStatus, aborted.settingsReleased], ['born_empty', false])
+  assert.equal(sheet(born.db).settings_locked_at, AT, 'an abort back to born_empty keeps the lock (C7)')
+  const earlier = '2026-10-01T00:00:00.000Z'
+  const backfilled = setup({ status: 'backfilled', lockedAt: earlier })
+  const second = await begin(backfilled.store, { expect: { historyStatus: 'backfilled', version: 0 } })
+  assert.equal(second.settingsLockedAt, earlier, 'COALESCE never moves the first lock time')
+})
+
+test('ST-I3 (M-BI-22 shape) holder FIRST in every install transaction: a refusal writes nothing and keeps its code; the audit throw rolls the write back', async () => {
+  const lost = Object.assign(new Error('lost'), { status: 409, code: 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST' })
+  const refuse = async () => { throw lost }
+  const absent = setup({ status: null })
+  const before = snapshot(absent.db)
+  await rejects(begin(absent.store, { holderWithin: refuse }), 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST', 'begin')
+  assert.equal(snapshot(absent.db), before)
+  assert.deepEqual(absent.db.statements('trx.'), [], 'the holder ran before any ledger statement')
+  await rejects(begin(absent.store, { auditWithin: async () => { throw Object.assign(new Error('a'), { status: 422, code: 'AUDIT_DETAIL_INVALID' }) } }), 'AUDIT_DETAIL_INVALID', 'audit')
+  assert.equal(snapshot(absent.db), before, 'rolled back with its audit row')
+  await begin(absent.store)
+  for (const call of [
+    () => absent.store.continueInstall({ ...SCOPE, planDigest: ENVELOPE.digest, historyMode: 'inferred', approvalRef: 'R-65', holderWithin: refuse }),
+    () => absent.store.extendInstall({ ...SCOPE, fromDigest: ENVELOPE.digest, plan: ENVELOPE, planDigest: ENVELOPE.digest, approvalRef: 'R-65', holderWithin: refuse }),
+    () => absent.store.resolveInstall({ ...SCOPE, planDigest: ENVELOPE.digest, inferredBatches: [], historyMode: 'inferred', historyBatchCount: 2, nextStatus: 'backfilled', holderWithin: refuse }),
+  ]) {
+    const mid = snapshot(absent.db)
+    await rejects(call(), 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST', 'holder')
+    assert.equal(snapshot(absent.db), mid)
+  }
+})
+
+test('ST-I4 continueInstall / extendInstall CAS the persisted digest; a re-run in another history mode => PLAN_CHANGED history_mode_changed; the extension carries the run facts over', async () => {
+  const { db, store } = setup({ status: null })
+  await begin(store, { historyMode: 'unknown' })
+  const other = 'f'.repeat(64)
+  assert.equal((await rejects(store.continueInstall({ ...SCOPE, planDigest: other, historyMode: 'unknown', approvalRef: 'R-65' }), PULL_BATCH_ERROR_CODES.PLAN_CHANGED, 'digest')).details.reason, 'persisted_plan_differs')
+  assert.equal((await rejects(store.continueInstall({ ...SCOPE, planDigest: ENVELOPE.digest, historyMode: 'inferred', approvalRef: 'R-65' }), PULL_BATCH_ERROR_CODES.PLAN_CHANGED, 'mode')).details.reason, 'history_mode_changed')
+  const continued = await store.continueInstall({ ...SCOPE, planDigest: ENVELOPE.digest, historyMode: 'unknown', approvalRef: 'O-BI-1.S-01' })
+  assert.deepEqual([continued.approvalRef, continued.version], ['O-BI-1.S-01', 2])
+  const extended = { ...ENVELOPE, K: 3, digest: 'e'.repeat(64) }
+  await rejects(store.extendInstall({ ...SCOPE, fromDigest: other, plan: extended, planDigest: extended.digest, approvalRef: 'R-65' }), PULL_BATCH_ERROR_CODES.PLAN_CHANGED, 'from digest')
+  const row = await store.extendInstall({ ...SCOPE, fromDigest: ENVELOPE.digest, plan: extended, planDigest: extended.digest, approvalRef: 'R-65' })
+  assert.deepEqual([row.historyPlanDigest, row.historyPlan.K, row.historyPlan.historyMode], [extended.digest, 3, 'unknown'])
+  assert.equal(sheet(db).history_status, 'installing')
+})
+
+test('ST-I5 resolveInstall inserts the inferred batches the CHECKs accept (closed / backfill_inferred / backfill / no digest / evidence), is idempotent on a re-run, refuses a different batch at a number; the row resolves with mode, count and audit', async () => {
+  const { db, store } = setup({ status: null })
+  await begin(store)
+  const inferred = pure.pullBatchInstallInferredBatches(ENVELOPE)
+  const seen = []
+  const answer = await store.resolveInstall({ ...SCOPE, planDigest: ENVELOPE.digest, inferredBatches: inferred, historyMode: 'inferred', historyBatchCount: 2, nextStatus: 'backfilled', resolvedBy: 'u_admin', auditWithin: async (trx, entry) => { seen.push(entry) }, auditDetail: { K: 2 } })
+  assert.deepEqual([answer.insertedBatches, answer.keptBatches, answer.sheet.historyStatus, answer.sheet.historyMode, answer.sheet.historyBatchCount], [2, 0, 'backfilled', 'inferred', 2])
+  const rows = db.rows(kit.T.batch).sort((a, b) => a.batch_no - b.batch_no)
+  assert.deepEqual(rows.map((row) => [row.batch_no, row.origin, row.status, row.closed_reason, row.source_digest, row.evidence, row.label]), inferred.map((batch) => [batch.batchNo, 'backfill_inferred', 'closed', 'backfill', null, batch.evidence, batch.label]))
+  assert.equal(seen[0].mode, 'pull_batch_installed')
+  // A re-run over an already-inserted batch (a crash between the inserts and the row update is rolled back as one; this
+  // drives the idempotent branch directly): the same label is kept, another is a conflict.
+  const again = setup({ status: null })
+  await begin(again.store)
+  again.db.seed(kit.T.batch, { id: 'pbat_pre', tenant_id: TENANT, sheet_id: SHEET, project_no: PROJECT, batch_no: 1, origin: 'backfill_inferred', status: 'closed', label: inferred[0].label, display_day: inferred[0].displayDay, source_digest: null, evidence: inferred[0].evidence, opened_at: inferred[0].openedAt, closed_at: inferred[0].closedAt, closed_reason: 'backfill' })
+  const kept = await again.store.resolveInstall({ ...SCOPE, planDigest: ENVELOPE.digest, inferredBatches: inferred, historyMode: 'inferred', historyBatchCount: 2, nextStatus: 'backfilled' })
+  assert.deepEqual([kept.insertedBatches, kept.keptBatches], [1, 1])
+  const clash = setup({ status: null })
+  await begin(clash.store)
+  clash.db.seed(kit.T.batch, { id: 'pbat_live', tenant_id: TENANT, sheet_id: SHEET, project_no: PROJECT, batch_no: 1, origin: 'live', status: 'closed', label: label(1), display_day: DAY, source_digest: D1, evidence: null, closed_at: AT, closed_reason: 'execution_succeeded' })
+  const before = snapshot(clash.db)
+  assert.equal((await rejects(clash.store.resolveInstall({ ...SCOPE, planDigest: ENVELOPE.digest, inferredBatches: inferred, historyMode: 'inferred', historyBatchCount: 2, nextStatus: 'backfilled' }), PULL_BATCH_ERROR_CODES.CONFLICT, 'clash')).details.reason, 'inferred_batch_mismatch')
+  assert.equal(snapshot(clash.db), before, 'nothing written')
+  // Unknown mode on a gap pass over an inferred sheet resolves unknown; a gap pass over an unknown sheet stays unknown.
+  const gap = setup({ status: 'backfilled', historyBatchCount: 3 })
+  gap.db.tables.get(kit.T.sheet).forEach((row) => { row.history_mode = 'unknown' })
+  await begin(gap.store, { expect: { historyStatus: 'backfilled', version: 0 } })
+  const resolved = await gap.store.resolveInstall({ ...SCOPE, planDigest: ENVELOPE.digest, inferredBatches: [], historyMode: 'inferred', historyBatchCount: 5, nextStatus: 'backfilled' })
+  assert.deepEqual([resolved.sheet.historyMode, resolved.sheet.historyBatchCount], ['unknown', 5])
+})
+
+test('ST-I6 bornReady: absent => born_empty with the applied placement / landing, audited; present => no write, no audit; a 23505 race => created false, reason race', async () => {
+  const { db, store } = setup({ status: null })
+  const seen = []
+  const answer = await store.bornReady({ ...SCOPE, labelLocale: 'zh-CN', capture: CAPTURE, bandPlacement: 'right', landingMode: 'keep_current', resolvedBy: 'u_admin', auditWithin: async (trx, entry) => { seen.push(entry) }, auditDetail: { landingPromoted: false } })
+  assert.deepEqual({ ...answer }, { created: true, historyStatus: 'born_empty', reason: null })
+  const row = sheet(db)
+  assert.deepEqual([row.history_status, row.band_placement, row.landing_mode, row.settings_locked_at, row.history_batch_count], ['born_empty', 'right', 'keep_current', null, 0])
+  assert.deepEqual([seen[0].mode, { ...seen[0].detail }], ['pull_batch_born_ready', { landingPromoted: false, version: 0 }])
+  const again = await store.bornReady({ ...SCOPE, labelLocale: 'zh-CN', capture: CAPTURE, auditWithin: async (trx, entry) => { seen.push(entry) } })
+  assert.deepEqual([again.created, again.historyStatus], [false, 'born_empty'])
+  assert.equal(seen.length, 1, 'no second audit row')
+  const race = setup({ status: null })
+  race.db.faults.insertOne = (args) => (args.table === kit.T.sheet ? kit.sqlError('23505', 'dup') : null)
+  assert.deepEqual({ ...(await race.store.bornReady({ ...SCOPE, labelLocale: 'zh-CN', capture: CAPTURE })) }, { created: false, historyStatus: null, reason: 'race' })
+})
+
+test('ST-I7 createSheetRowWithin: applied placement / landing are validated; absent they stay NULL (every existing caller byte-identical)', async () => {
+  const { db, store } = setup({ status: null })
+  await db.transaction(async (trx) => store.createSheetRowWithin(trx, { ...SCOPE, historyStatus: 'pending', labelLocale: 'zh-CN', settings: CAPTURE }))
+  assert.deepEqual([sheet(db).band_placement, sheet(db).landing_mode], [null, null])
+  const other = setup({ status: null })
+  await rejects(other.db.transaction(async (trx) => other.store.createSheetRowWithin(trx, { ...SCOPE, historyStatus: 'born_empty', labelLocale: 'zh-CN', settings: CAPTURE, bandPlacement: 'middle' })), PULL_BATCH_ERROR_CODES.STAMP_INVALID, 'placement')
+  await rejects(other.db.transaction(async (trx) => other.store.createSheetRowWithin(trx, { ...SCOPE, historyStatus: 'born_empty', labelLocale: 'zh-CN', settings: CAPTURE, landingMode: 'promote' })), PULL_BATCH_ERROR_CODES.STAMP_INVALID, 'landing')
+})
+
+test('ST-I8 the pins: the audit vocabulary (every mode) and the returned surface (a dropped method goes red)', () => {
+  assert.deepEqual(JSON.parse(JSON.stringify(PULL_BATCH_STORE_AUDIT)), {
+    settingsAction: 'project_fields_update',
+    settingsMigration: '088',
+    installAction: 'project_target_create',
+    modes: {
+      tenantSettingsUpdated: 'pull_batch_settings_tenant_updated',
+      sheetSettingsUpdated: 'pull_batch_settings_sheet_updated',
+      installAborted: 'pull_batch_install_aborted',
+      installStarted: 'pull_batch_install_started',
+      installed: 'pull_batch_installed',
+      bornReady: 'pull_batch_born_ready',
+    },
+  })
+  const { store } = setup({ status: null })
+  assert.deepEqual(Object.keys(store), [
+    'probeReadable', 'readSheetState', 'allocate', 'finish', 'readBatchLink', 'batchWithin', 'listBatches', 'readTenantSettings',
+    'readTenantSettingsWithin', 'writeTenantSettings', 'setSheetSettings', 'listSheetSettings', 'createSheetRowWithin', 'abortInstall',
+    'bornReady', 'beginInstall', 'continueInstall', 'extendInstall', 'resolveInstall',
+  ])
+})
+
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-pull-batch-store.test.cjs', tests)
