@@ -2,14 +2,14 @@
 
 > 目标（owner 2026-11-06 /goal）：把类 n8n 的受控 iPaaS 和宜搭标准化对接开发完；开发文档已冻结为设计基线 v2.3；规划开发计划与模型、effort；完成后给出开发及验证 MD。
 > 交付形态：全部为 **Draft PR**（以 main 为基）。合并、转正式、部署、打开开关、真实客户数据与真实发送都不在开发授权内，列在 §6。
-> 依据：冻结基线 v2.3（入库副本 `docs/development/takeover-beiliao-20260821/ipaas-yida-dev-baseline-v2.3-20261106.md`，正文 sha256 `5657c16a…31ec1`）与 owner 补充裁定（同目录 `ipaas-yida-dev-baseline-addendum-20261106.md`），见 #6775。登记册行 R-72–R-88 同在 #6775。
+> 依据：冻结基线 v2.3（入库副本 `docs/development/takeover-beiliao-20260821/ipaas-yida-dev-baseline-v2.3-20261106.md`，正文 sha256 `5657c16a…31ec1`）与 owner 补充裁定（同目录 `ipaas-yida-dev-baseline-addendum-20261106.md`），见 #6775。登记册行 R-72–R-89 同在 #6775。
 > 写于 2026-11-08（UTC）。本文所有 head、CI 数字取自写作时的 GitHub 状态；入库副本见 #6775 的 `docs/development/takeover-beiliao-20260821/ipaas-yida-dev-and-verification-20261108.md`。
 
 ## 0. 一页结论
 
 - **宜搭线全部开发完**：Y0–Y10、Y5a、Y6a、Y9a、YD、YE、YT 一 / 二段都已开发并通过独立核验。
 - **iPaaS 线（R-69 链）全部开发完**：I1–I5 通过独立核验。R-69 仍未裁定，整条链只做试算、默认关闭、裁定前不合并。
-- **文档**：D0 #6775（基线与补充裁定入库、R-69 ADR v4、登记册 R-72–R-88）。
+- **文档**：D0 #6775（基线与补充裁定入库、R-69 ADR v4、登记册 R-72–R-89）。
 - **验证方式**：每片实现后由独立核验代理在自己的工作区重跑测试、亲手做变异并看到变红、按 sha256 逐字节还原，真库用 WSL PostgreSQL 14 一次性库（用完删除）。保证类切片两轮封顶；备料线负责的 Y7/Y8 另经备料会话独立审阅；Y6 另经外部审阅（owner 转贴）发现并修复了跨模板同码问题 P1。
 - **两件最值得 owner 知道的事**：
   1. Y6 P1：每份模板各自合法，仍可能在同一目标上让不同身份拼出同一编码。现改为「目标级生成布局在首次使用时封存」，两轮核验通过。仍有一处已声明的残余：首次 generated 审批之前用直接映射发出的编码，见 §6.2。
@@ -47,8 +47,8 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
 | Y5 | 绑定 B2：审批与准入事务内重新鉴权 | #6796 | `4acddf0ca` | Opus max PASS r1（40）→ 补测试增量 PASS（37）→ 随 Y5a 适配 PASS |
 | Y6a | generated 封闭部件模板核心 | #6777 | `9e95092a9` | Fable max PASS r1（44） |
 | Y6 | generated 接线、SOURCE_UNBOUND、真库 A9/A10、目标级布局封存（P1） | #6797 | `690777448` | Opus max r1 FIX_FIRST → Opus max PASS r2（57）；外部审阅 P1 → 修复后 Fable max r1 FIX_FIRST → Fable max PASS r2（15 个变异 / 20 次红） |
-| Y7 | 修复路由补缺列加补锁 | #6768 | `ba1576ca3` | Opus high PASS r2；备料线目前只把它当作 Y8 的底座看过，转正式前须由备料线单独明确审 |
-| Y8 | 模板加 issueConfirmDate / projectSpecModel | #6778 | `5cf4586a4` | Opus high PASS r1（19，含真库）；备料线审 FIX_FIRST（MF1）→ 修复 → 通过；收 VY8D-01 为 S3B-07 |
+| Y7 | 修复路由补缺列加补锁 | #6768 | `c59deedc6` | Opus high PASS r2；备料线单独审 FIX_FIRST（HIGH 合 main 后重复导入致加载失败；M1 补回的 PLM 列插入时不带锁；M2 补列 order 与右侧批次列交错）→ 修复 → Fable max 两视角 PASS（33 个变异，真库含 p4 全文件 158/158）、CI 绿 → 备料线 delta 复审中 |
+| Y8 | 模板加 issueConfirmDate / projectSpecModel | #6778 | `a7fae7d1f` | Opus high PASS r1（19，含真库）；备料线审 FIX_FIRST（MF1）→ 修复 → 通过；收 VY8D-01 为 S3B-07；跟进 Y7 修复轮（合 Y7 `c59deedc6` + main `d166f9be4`，RC-18 改查 INSERT 带锁、新增 RC-20 右侧批次列），CI 绿 → 备料线 delta 复审中 |
 | Y9a | 发料确认日期回写核心 | #6776 | `c6a0e52dd` | Fable max r1 FIX_FIRST → PASS r2（60） |
 | Y9 | 回写接线 + 真库崩溃测试 | #6812 | `eacd5d3c3` | PASS r1（25）→ 跟进增量 PASS（18） |
 | Y10 | 切换对账（每项目只读、证据分离、绝不伪造 ACK） | #6785 | `a076f01ce` | Fable max PASS r1 → 补齐 4 MEDIUM 后 PASS r2（21） |
@@ -72,7 +72,7 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
 
 | 片 | 内容 | PR | head | 审核 |
 | --- | --- | --- | --- | --- |
-| D0 | 基线 v2.3 与补充裁定入库、首发手册凭据措辞、R-69 ADR v4、登记册 R-72–R-88、本报告 | #6775 | `88d86313f` | 协调者审（正文 sha256 一致、无代码、values-free）；备料线只读核过登记册编号与行文；下一个空号 R-89 |
+| D0 | 基线 v2.3 与补充裁定入库、首发手册凭据措辞、R-69 ADR v4、登记册 R-72–R-89、本报告 | #6775 | 见 PR 当前 head | 协调者审（正文 sha256 一致、无代码、values-free）；备料线只读核过登记册编号与行文；下一个空号 R-90 |
 
 ## 3. 关键修复与发现（按发现时间）
 
@@ -91,6 +91,7 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
 - 所有 PR 以 main 为基，说明顶部写明栈与自身 diff 范围。父 PR squash 合并后，子 PR **合 main，不 rebase**。
 - **合并时已知的冲突与解法**（都已和备料线约定）：
   - Y7 × I2：两边都重钉 `s6a-package-provenance-pins.json` 的 pluginHttpRoutes，后合的一方重算钉子并重跑插件测试链。
+  - **Y7 × #6818（已在 main）**：#6818 在 `http-routes.cjs` 模块作用域已导入 `readProjectSheetPlmSystemColumnLock`，自动合并会让它声明两次、整个文件加载失败（merge-tree 只报钉子冲突，看不出来）。Y7 已在 `1f23c410a` 合 main 并删掉重复项；**任何带旧 Y7（`ba1576ca3`）的分支——目前是 Y9 #6812——下次合 Y8 或 main 后必须先 `node --check lib/http-routes.cjs` 再跑测试**，钉子按合并后的 LF 字节重算。
   - **iPaaS 链 × 备料 BI-1b（#6814 已进 main）**：
     - `computeDryRun` 签名取并集（`governedEntry = null, pullBatchLane = null`）；
     - I2 把备料路由重构成受治理入口，BI-1b 在原处理器里加了一两行调用（逐处理器列在 #6814 正文里），合并时把这些调用机械地搬进受治理入口；
@@ -101,7 +102,7 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
 
 ## 5. 按 T 层默认前进的决策（owner 24 小时内可否决）
 
-完整行文见登记册 R-78–R-86（#6775）。另有几项写在各 PR 说明里，摘要如下：
+完整行文见登记册 R-78–R-86、R-89（#6775）。另有几项写在各 PR 说明里，摘要如下：
 
 - R-78：Y4-05 取 (a)；D20 暂用通用 CONFLICT（YE 起改专用码）。
 - R-79：D21 覆盖由数据库触发器兜底 + TS 显式递增。
@@ -111,6 +112,7 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
 - R-83 / R-84：R-69 1b-ii / 1c 的默认值（每项目意向 + 租约；canApply 与分决策计数；skipped 默认告警、held 静默；not_found / review_pending 映射）。
 - R-85：Y10 对账行保留 intent=create；R1–R9 推荐值；abandon 只限运行所属 owner。
 - R-86：hash 名排序成对布局；G1 一侧变长；rowIdOf 指向绑定键字段；目标级布局封存。
+- R-89（Y7 修复轮，号码由备料线分配）：项目表修复补回的列一律追加到最右，order = 表上所有列的最大 order + 1 + i；叠加在 #6818 的 right 放置规则之上；已装好的表不迁移。
 - **PR 说明里的其他 T 层默认值**：
   - Y9：回写运行不读发送开关（ACK 刚好在开关关闭前到达的仍补写日期），也不做 proveDraftTarget 直证；
   - YD：两个 preset 可各自选形式，声明 uuid-36 等同缺省；
@@ -119,7 +121,7 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
 ## 6. 需要 owner 的事项
 
 ### 6.1 批准类（不在开发授权内）
-1. **合并与转正式**：上表全部 Draft PR，顺序见 §4。iPaaS 链在 R-69 裁定前不合并；Y3 在首次测试表单发送成功前保持 Draft（R-70 ③）；Y7 #6768 转正式前须由备料线单独明确审（备料线已对 Y8 #6778 给出明确结论）。
+1. **合并与转正式**：上表全部 Draft PR，顺序见 §4。iPaaS 链在 R-69 裁定前不合并；Y3 在首次测试表单发送成功前保持 Draft（R-70 ③）；Y7 #6768 的备料线单独审为 FIX_FIRST，已修复并经两视角独立核验；Y7 与 Y8 #6778 转正式前须等备料线对修复 delta 的复审结论。
 2. **开关**（默认全关，精确 `'true'` 才开）：
    - 宜搭：`INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS`、`INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED` / `_TARGET_REFS`、`INTEGRATION_YIDA_RECONCILE_READ_ENABLED`、`INTEGRATION_YIDA_SHEET_SOURCE_ENABLED`；
    - 自动化：`INTEGRATION_AUTOMATION_RUN_*`（I3–I5）；
@@ -176,7 +178,7 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
   - 核验代理不信 PR 说明，在自己新建的 detached 工作区（`wt-verify-<片>-tk*-r<轮>`）里重跑基线测试；
   - 逐个对被保护的代码做变异，亲眼看到对应测试变红，再按 sha256 逐字节还原；
   - 并发保证用两条真实连接加屏障来证，不靠 sleep。
-- **备料线审阅**：Y7 / Y8 由备料会话（「备料应用插件」）独立审阅；R82 存活变异由备料线 R82 核验实跑定性；登记册 R-78–R-88 由备料线只读核过。
+- **备料线审阅**：Y7 / Y8 由备料会话（「备料应用插件」）独立审阅；R82 存活变异由备料线 R82 核验实跑定性；登记册 R-78–R-88 由备料线只读核过，R-89 号码由备料线分配；Y7 修复轮由备料线 delta 复审。
 - **外部审阅**：Y6 P1 由 owner 转贴的外部审阅发现，修复后两轮核验通过。
 - **证据位置**：
   - 每片的核验报告在协调会话 scratchpad 的 `dev-program-20261106/verify-<片>-r<轮>/review.md`（本机临时目录，不入库）；
@@ -194,7 +196,9 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
 - **本机环境**：
   - 这几处只在 Windows 本机失败，CI 是裁判：`yida-owner-runtime.test.ts` 在 CRLF 工作区会 OOM（LF 副本通过）；开关清单测试 14 在 Windows 上有一处 CRLF 假红；两个浏览器车道文件需要 CI 的网络隔离。
   - 本轮新记的两个偶发失败（重跑一次失败作业即绿，已记入 memory）：考勤 w4c3c 锁等待、恢复启动 RECOVERY_LOCAL_CUSTODY_STORE_REFUSED。
+- **Y7 修复轮遗留（LOW，不阻断）**：写栅栏开关默认关时，补列与并发新建字段可能 order 重号（只影响排列，真库复现过）；修复前的内容快照在拿栅栏之前读，中途插列会失败关闭、可重试；`MVP_REPAIR_TX_METHODS` 是写死清单，部署表路径以后若复用补列逻辑会 503；新的作用域包装没有「入参只读一次」的见证（相邻方法同样没有）；拉取预览 ready 不代表选项同步已落地（锁已在）；部署表运维补列脚本仍按模板序号、不加锁（部署表按设计不加锁）。本机 BI-R6 / BI-R9 失败是 Windows node 与 WSL PG 时钟差约 5 秒所致，main 上同样失败，CI 通过。
 - **可选的 Fable 复核清单**（Fable 额度用完期间改用 Opus max 核验的片）：Y5（r1 与补测试增量）、Y5L r1、Y6 P1 之前的 r1 / r2、YT 二段、I5 各轮。
 
 ## 更新记录
 - 2026-11-08：定稿。全部切片开发完并通过独立核验；YE、I 链合 main 两项已补入。
+- 2026-11-08（晚）：备料线单独审 Y7 = FIX_FIRST（1 HIGH、2 MEDIUM）→ 修复（Y7 `c59deedc6`、Y8 `a7fae7d1f`）→ Fable max 两视角 PASS、两个 PR CI 绿 → 备料线 delta 复审中；登记 R-89。
