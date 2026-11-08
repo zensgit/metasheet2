@@ -1288,9 +1288,11 @@ test('PB-P1 PORTABILITY (S6 C-1, design §12.2): the pure core contains exactly 
 // BI-1b (the lanes; register R-65) replaced the BI-1a "not wired" pin with the WIRED set, exactly: the pure module is
 // named by the lanes helper, the status read, the store, the template band, the reader (table actions), the writer,
 // the large lane (its stored-plan shape), pilot readiness (v3), the routes and index. The ledger STORE is named only by
-// index (which builds it) and by the lanes helper (its execution-ref pattern): every request reaches the ledger through
+// index (which builds it), by the lanes helper (its execution-ref pattern) and — for its constants only — by the BI-7
+// settings helper; BI-2 adds the install library to the wired set (it reaches the ledger only through injected deps).
+// Every request reaches the ledger through
 // the routes' lane input, which hands it over only while the pull-batch switch is on.
-test('PB-P2 WIRED (BI-1b): exactly these runtime files name stock-preparation-pull-batch, in any form; only index and the lanes helper name the store', () => {
+test('PB-P2 WIRED (BI-1b): exactly these runtime files name stock-preparation-pull-batch, in any form (BI-2 adds the install library, BI-7 the settings helper); only index, the lanes helper and the settings helper name the store', () => {
   const runtime = ['index.cjs', ...fs.readdirSync(LIB).filter((name) => name.endsWith('.cjs')).map((name) => `lib/${name}`)]
     .filter((file) => file !== 'lib/stock-preparation-pull-batch.cjs')
   assert.ok(runtime.length > 100, 'the scan sees the plugin runtime')
@@ -1305,13 +1307,17 @@ test('PB-P2 WIRED (BI-1b): exactly these runtime files name stock-preparation-pu
     // BI-2 (R-65): the per-sheet install library (portable; it reaches the ledger only through its injected deps).
     'lib/stock-preparation-pull-batch-install.cjs',
     'lib/stock-preparation-pull-batch-lanes.cjs',
+    // 批次标识 BI-7 (R-65): the settings routes' helper — bodies, answers and the in-transaction audit adapter.
+    'lib/stock-preparation-pull-batch-settings.cjs',
     'lib/stock-preparation-pull-batch-status.cjs',
     'lib/stock-preparation-pull-batch-store.cjs',
     'lib/stock-preparation-table-actions.cjs',
     'lib/stock-preparation-templates.cjs',
   ])
   const storeUsers = runtime.filter((file) => file !== 'lib/stock-preparation-pull-batch-store.cjs' && textOf(file).includes('stock-preparation-pull-batch-store'))
-  assert.deepEqual(storeUsers, ['index.cjs', 'lib/stock-preparation-pull-batch-lanes.cjs'], 'the ledger store is built by index and read only through the lanes')
+  // BI-7: the settings helper requires the store for its CONSTANTS only (the setting keys and the audit action / modes,
+  // one spelling); the store INSTANCE still reaches the routes only as the service index.cjs builds.
+  assert.deepEqual(storeUsers, ['index.cjs', 'lib/stock-preparation-pull-batch-lanes.cjs', 'lib/stock-preparation-pull-batch-settings.cjs'], 'the ledger store is built by index and read only through the lanes and the settings helper')
 })
 
 test('PB-P3 the error codes are closed, code-shaped, unique and carry their HTTP status; the vocabularies are frozen', () => {

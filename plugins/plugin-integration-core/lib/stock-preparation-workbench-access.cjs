@@ -374,6 +374,33 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
     control: null,
   }),
+  // 批次标识 BI-7 (design §5.5 / §11; register R-65; rulings C2 / C6 / C8) — THE PULL-BATCH SETTINGS of 数据来源与体检:
+  // the read (tenant default, fixed facts, every registered sheet's captured values and locks), the tenant-default
+  // write and one captured sheet's rule / format write (typed confirmation). All ADMIN. Their controls live on the
+  // settings panel of 数据来源与体检 (StockPreparationPullBatchSettingsPanel.vue) and render only after the read answered
+  // 200; all three routes are 404 while either the pull-batch or the project-sheets switch is off, so the panel is
+  // invisible then (C6). The web suite asserts the alignment in PBS-ALIGN.
+  Object.freeze({
+    capability: 'pullBatch.settingsRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    control: 'stock-prep-pull-batch-settings-status',
+  }),
+  Object.freeze({
+    capability: 'pullBatch.settingsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    control: 'stock-prep-pull-batch-settings-set',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.pullBatchSettingsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch/settings',
+    control: 'stock-prep-project-pull-batch-settings-set',
+  }),
   Object.freeze({
     // 批次标识 BI-2 (design §8.1; register R-65) — THE PER-SHEET INSTALL (dry_run / install / abort). ADMIN: an install is an
     // owner-gated production write (gate ② per sheet). `control: null` is deliberate: there is no web install control

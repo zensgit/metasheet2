@@ -393,6 +393,14 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   // helper (`pullBatchStatusDepsFor`, from the scope's tenant with no request projectId), not inline, so it is not in
   // the inline-staging set below.
   'stockPreparationProjectPullBatchGet',
+  // 批次标识 BI-7 (register R-65). The three pull-batch SETTINGS routes: the READ answers the caller's OWN tenant's
+  // default and its registered sheets' captured values (with their project numbers, admin), and the two POSTs are
+  // WRITES to that tenant's settings row / to one of its sheets' ledger rows — keyed by the tenant this scope proves:
+  // a header-fillable tenant here would read or change another tenant's settings. None derives a staging project
+  // (they touch no sheet, only the plugin ledger), so none is in the inline-staging set below.
+  'stockPreparationPullBatchSettingsGet',
+  'stockPreparationPullBatchSettingsSet',
+  'stockPreparationProjectPullBatchSettingsSet',
   // 批次标识 BI-2 (register R-65). The per-sheet install WRITES the caller's OWN tenant's project sheet (owner gate ② per
   // sheet). It derives its staging project in its deps helper (`pullBatchInstallDepsFor`, from the scope's tenant with no
   // request projectId), not inline, so it is not in the inline-staging set below.

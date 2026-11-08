@@ -222,7 +222,15 @@
 //           row classes (counts). The staging project it reads through is derived (in the shared status-deps helper)
 //           from this scope with no request projectId. A header-fillable tenant here would read another tenant's
 //           sheet state.
-//       35. POST …/projects/:projectNo/target/pull-batch  `stockPreparationProjectPullBatchInstall`
+//       35. GET  …/pull-batch/settings                                  `stockPreparationPullBatchSettingsGet`
+//       36. POST …/pull-batch/settings                                  `stockPreparationPullBatchSettingsSet`
+//       37. POST …/projects/:projectNo/target/pull-batch/settings       `stockPreparationProjectPullBatchSettingsSet`
+//           批次标识 BI-7 (design §5.5 / §11; register R-65), ADMIN. The GET reads the proven tenant's pull-batch
+//           settings: its tenant default and its registered sheets' captured values (with their project numbers,
+//           admin-visible); the two POSTs are WRITES to that tenant's settings row and to one of its sheets' ledger
+//           rows. Plugin ledger only — no staging project, no host call. A header-fillable tenant here would read or
+//           change another tenant's settings.
+//       38. POST …/projects/:projectNo/target/pull-batch  `stockPreparationProjectPullBatchInstall`
 //           批次标识 BI-2 (design §8.1-§8.6; register R-65), ADMIN. The per-sheet install (dry_run / install / abort): a
 //           WRITE of the proven tenant's project sheet — the band columns, the plugin views, the landing, the persisted
 //           plan and the fill-blank backfill — through the staging project derived (in its deps helper) from this scope

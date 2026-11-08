@@ -417,6 +417,30 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
     control: null,
   }),
+  // 批次标识 BI-7 (R-65) — byte-equal to the plugin manifest's three pull-batch settings rows (ADMIN). Their controls
+  // live on 数据来源与体检's settings panel and render only after the read answered 200 (404 while a switch is off, C6);
+  // alignment asserted in apps/web/tests/StockPreparationPullBatchSettingsPanel.spec.ts (PBS-ALIGN).
+  Object.freeze({
+    capability: 'pullBatch.settingsRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    control: 'stock-prep-pull-batch-settings-status',
+  }),
+  Object.freeze({
+    capability: 'pullBatch.settingsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    control: 'stock-prep-pull-batch-settings-set',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.pullBatchSettingsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch/settings',
+    control: 'stock-prep-project-pull-batch-settings-set',
+  }),
   // 批次标识 BI-2 (R-65) — byte-equal to the plugin manifest's install row. `control: null`: there is no web install control
   // (design §7.2), so F-04 does not pair it.
   Object.freeze({
