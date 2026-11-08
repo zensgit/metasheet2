@@ -109,8 +109,9 @@ function assertParallelWorkflow(doc) {
       if (suite === 'unit' && step.name === 'Run scripts/ops/__tests__ node:test suites') {
         // Batch-refresh step 5 PR-9 (register R-77 ⑧): the two scheduled-pull subtests for `review_pending` move the
         // EXACT ops subtest count 138 -> 140. Only that number changed; the frozen original command is otherwise
-        // preserved byte-for-byte.
-        const reviewed = '\nEXPECTED_OPS_TESTS_COUNT=140\n'
+        // preserved byte-for-byte. 批次标识 BI-2 (register R-65): the two scheduled-pull install-skip subtests and the eight
+        // install-client subtests move it 140 -> 150.
+        const reviewed = '\nEXPECTED_OPS_TESTS_COUNT=150\n'
         assert.equal(step.run.split(reviewed).length - 1, 1, 'The scripts/ops subtest count must be the reviewed exact count, once')
         step.run = step.run.replace(reviewed, '\nEXPECTED_OPS_TESTS_COUNT=138\n')
       }

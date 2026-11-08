@@ -396,6 +396,8 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   'pullBatch.settingsRead': () => ({ query: {} }),
   'pullBatch.settingsSet': () => ({ body: { expectedVersion: 0, firstPullBatchRule: 'material' } }),
   'projectTarget.pullBatchSettingsSet': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, expectedVersion: 0, firstPullBatchRule: 'material' } }),
+  // 批次标识 BI-2 (R-65): the install's harmless mode — a dry-run (the gate is what the matrix proves).
+  'projectTarget.pullBatchInstall': () => ({ params: { projectNo: PROJECT_NO }, body: { mode: 'dry_run', confirmProjectNo: PROJECT_NO } }),
   // PR-4 (R-59): the six refresh routes. Well-formed shapes, so a 'pass' cell reaches the route's own answer
   // (an unconfigured action / no such hold on this bare mount) and never a 400 that could mask the gate.
   'refresh.holds': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
@@ -475,6 +477,7 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsRead': 'gate',
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -518,6 +521,7 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsRead': 'gate',
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -561,6 +565,7 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsRead': 'gate',
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -604,6 +609,7 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsRead': 'gate',
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -647,6 +653,7 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsRead': 'gate',
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -690,6 +697,7 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsRead': 'gate',
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -733,6 +741,7 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsRead': 'pass',
     'pullBatch.settingsSet': 'pass',
     'projectTarget.pullBatchSettingsSet': 'pass',
+    'projectTarget.pullBatchInstall': 'pass',
     'refresh.holds': 'pass',
     'refresh.evidence': 'pass',
     'refresh.keep': 'pass',
@@ -776,6 +785,7 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsRead': 'pass',
     'pullBatch.settingsSet': 'pass',
     'projectTarget.pullBatchSettingsSet': 'pass',
+    'projectTarget.pullBatchInstall': 'pass',
     'refresh.holds': 'pass',
     'refresh.evidence': 'pass',
     'refresh.keep': 'pass',
@@ -823,6 +833,7 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsRead': 'gate',
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'pass',
     'refresh.evidence': 'pass',
     'refresh.keep': 'pass',
@@ -866,6 +877,7 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsRead': 'gate',
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -1490,6 +1502,9 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
       // 批次标识 BI-1b (R-65): READING one project sheet's pull-batch status (columns, ledger, row classes) — manifest
       // member projectTarget.pullBatchRead (control: null until BI-3 / BI-7 render it).
       'stockPreparationProjectPullBatchGet',
+      // 批次标识 BI-2 (R-65): the per-sheet pull-batch INSTALL (dry_run / install / abort; owner gate ② per sheet) — manifest
+      // member projectTarget.pullBatchInstall (control: null — no web install control, design §7.2).
+      'stockPreparationProjectPullBatchInstall',
       // 批次标识 BI-7 (R-65; ruling C6): the pull-batch SETTINGS — one captured sheet's rule / format write (typed
       // confirmation; refused once the sheet carries a batch label), the settings read (the tenant default and every
       // registered sheet's captured values) and the tenant-default write. Manifest members
@@ -1499,7 +1514,7 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
       'stockPreparationPullBatchSettingsGet',
       'stockPreparationPullBatchSettingsSet',
     ],
-    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler, the four members handlers, the manual-rows switch SET, the two pilot handlers, the pull-batch status read and the three pull-batch settings handlers',
+    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler, the four members handlers, the manual-rows switch SET, the two pilot handlers, the pull-batch status read, the pull-batch install and the three pull-batch settings handlers',
   )
   // STOCK_PREP_PULL joined the set with the S1 project-sheet CREATE, the named R-11 exception (R-35),
   // and S4 (R-38) added exactly two more — ARCHIVE and RESTORE, which the owner gave to the 拉取人员
@@ -1938,6 +1953,8 @@ const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
   'pullBatch.settingsRead',
   'pullBatch.settingsSet',
   'projectTarget.pullBatchSettingsSet',
+  // 批次标识 BI-2 (R-65): the per-sheet install resolves the host-vouched operator scope too.
+  'projectTarget.pullBatchInstall',
   // S5b (R-39): three of the four touch no tenant at all (roles and memberships are platform-global and the
   // host port scopes visibility by the delegation scope); the project-sheet add resolves the host-vouched
   // operator scope like the project-target routes above. None runs a shared tenant helper.
