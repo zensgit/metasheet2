@@ -30,6 +30,10 @@ import { sql, type Kysely } from 'kysely'
  * for them): sends before a target's first generated approval are invisible to the seal, so the guarantee holds from
  * that approval onward.
  *
+ * UPGRADE ORDER. Apply this migration before the build that carries the seal step takes approvals: the send authority
+ * reads this table for EVERY approval and admission (v2 included), so without it every approval fails closed
+ * (YIDA_SEND_APPROVAL_UNAVAILABLE) until the table exists.
+ *
  * CORRECTING A SEALED LAYOUT. There is no operator path and none is planned: the row is INSERT-only, a reused or
  * re-confirmed slot keeps its target_ref (and so its seal), and a second target for the same app/form is refused by the
  * locator check. A layout mistake is corrected by a NEW target (another form), or by an owner-approved privileged purge
