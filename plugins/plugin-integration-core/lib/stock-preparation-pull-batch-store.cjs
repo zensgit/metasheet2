@@ -1242,7 +1242,9 @@ function createStockPreparationPullBatchStore({ db, idGenerator, now } = {}) {
         if (expect.historyStatus === null ? Boolean(sheet) : (!sheet || sheet.history_status !== expect.historyStatus || intOrNull(sheet.version) !== expect.version)) {
           throw conflict('install_moved')
         }
+        // A resumed aborted plan is installing again: its `aborted` flag never survives into the new run.
         const plan = { ...input.plan, historyMode }
+        delete plan.aborted
         const common = {
           history_status: 'installing',
           history_plan: plan,
@@ -1365,6 +1367,7 @@ function createStockPreparationPullBatchStore({ db, idGenerator, now } = {}) {
         const persisted = jsonOrNull(sheet.history_plan)
         if (!isPlainObject(persisted)) throw planChanged('persisted_plan_differs')
         const plan = { ...input.plan, historyMode: persisted.historyMode }
+        delete plan.aborted
         if (persisted.previousHistoryStatus !== undefined) plan.previousHistoryStatus = persisted.previousHistoryStatus
         else delete plan.previousHistoryStatus
         const version = intOrNull(sheet.version) || 0
