@@ -14,19 +14,24 @@
 | 2 | 跑现场探查（BI-6a），可以加跑只读 `dry_run`（C14.1） | O-BI-9 | 否 |
 | 3 | 首次批次规则：**已裁定为规则 A（按物料）**，见 owner 文本 O-BI-2 | O-BI-2 | 否 |
 | 4 | 翻开关，**随即**设好租户默认值（C6） | O-BI-7 | 只写设置 |
-| 5 | 逐表装机窗口：补锁 → 停拉取 → `dry_run` → 问客户历史拉取次数 → `install` → 核对 → 恢复拉取 | O-BI-1（每张表一份） | 是 |
+| 5 | 逐表装机窗口：(a) 批复前只读 `dry_run` + 问客户历史拉取次数 → (b) 填写并发出 O-BI-1 → (c) 「同意」之后：补锁 → 停拉取、停自动化 → 窗口内重跑 `dry_run`（摘要必须等于批复里的）→ (d) `install` → 核对 → 恢复 | (a) C14.1 / O-BI-9；(c)(d) O-BI-1（每张表一份） | (a)(b) 否；(c)(d) 是 |
 | 6 | 以后某张表出现补缺行时，走补缺（gap pass），同样是一个窗口 | O-BI-1 | 是 |
 
-第 3 步之前没有任何表会被打标签（§7.3：开关翻之前一行都不盖）。
+第 4 步（翻开关）之前没有任何表会被打标签（§7.3：开关翻之前一行都不盖）。从第 4 步起，**新建的项目表一诞生就带着两列**（design §9），所以即使一次装机都没做，§8 的回退底线也可能已经越过。
 
-## 1. 前置条件（任何一条不成立，就不开窗口）
+第 5 步里，补锁（`options/sync`）、暂停拉取、暂停自动化都是**写入**，由这张表刚拿到的 O-BI-1 覆盖，必须在「同意」之后做。它们不是开窗口的前提。
+
+## 1. 前置条件与批复覆盖的写入
+
+第 1–3 条是开窗口的前提，任何一条不成立，就不开窗口。第 4–6 条是这张表 O-BI-1 批复**覆盖的写入**：批复前只读出要做什么（§5 第 1 步的只读 dry_run 和探查），写进批复；拿到「同意」之后、窗口内 dry_run 之前才做（顺序见 §5）。
+
 
 1. **R83 已装，开关是关的，owner 已接受它为回退底线。** `app.env` 里没有 `STOCK_PREP_PULL_BATCH_ENABLED` 这一行（探查 `SITE_ENV key=STOCK_PREP_PULL_BATCH_ENABLED app_env_lines=0`）。装包时 `RunMigrations 1`，迁移 105 已跑。回退底线见 §8。
 2. **现场探查已跑完，结果已读过。** `probe.log` 最后一行 `PROBE_RESULT … status=complete`，`site-env.log` 最后一行 `SITE_ENV_RESULT status=complete keys=5`。按探查手册 §4 做出一份逐表的装机前置清单，内容包括：补锁、视图、列位置、暂停清单、历史拉取次数的两种口径。客户反映的那个项目必须是 `kind=project`。如果它只在 env 表或复制表上，就停下来，先让 owner 决定。
 3. **项目表开关是精确的 `true`**（`MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED`）。否则装机路由一律 404。
-4. **PLM 列先补锁。** 探查显示 `plm_lock=none` 或 `partial`，或者 dry_run 的 `plmLock.unmarked > 0` / `plmLock.missing > 0` 时，装机会被拒（409 `STOCK_PREP_PULL_BATCH_PLM_LOCK_REQUIRED`）。补锁走已有的修复路由：`POST /api/integration/stock-preparation/options/sync`，请求体 `{"projectNo": "<项目号>"}`（修复腿会给这张表的 `plm_system` 列标上人工只读）。它和装机写在**同一份** O-BI-1 批复里。后果要写进批复：补锁以后这张表失去「新建记录」（R70 行为），要等人工补充行随第一个 main 系的包到达才恢复。`plmLock.missing > 0`（表上缺模板 PLM 列）要先补列，补列不是这个路由的事，要先停下报开发机。
-5. **定时拉取已暂停，拉取人员已被告知窗口内不要拉。** 暂停每日计划任务（`scripts/ops/stock-preparation-scheduled-pull.mjs` 所在的那条任务），并在群里通知拉取人员。BI-2 之后，定时拉取遇到正在装机的表，会记成 `skipped_pull_batch_installing`（不算失败）。这只是兜底，不能代替暂停。
-6. **批量回填前的暂停清单。** 探查报出的 `automation_rules>0`、`webhooks_active>0`、`writer_pipelines_active>0`，以及按建行来源统计的 `_automation>0` / `_public_form>0`，逐条列出来，在窗口开始前暂停，窗口结束后恢复（设计 §8.9）。回填走插件记录路径，本身不触发订阅者。暂停是为了防止窗口内有别的写入方在这张表上建行。
+4. **PLM 列补锁（批复后做）。** 探查显示 `plm_lock=none` 或 `partial`，或者 dry_run 的 `plmLock.unmarked > 0` / `plmLock.missing > 0` 时，装机会被拒（409 `STOCK_PREP_PULL_BATCH_PLM_LOCK_REQUIRED`）。补锁走已有的修复路由：`POST /api/integration/stock-preparation/options/sync`，请求体 `{"projectNo": "<项目号>"}`（修复腿会给这张表的 `plm_system` 列标上人工只读）。它和装机写在**同一份** O-BI-1 批复里，拿到「同意」之后才调用。后果要写进批复：补锁以后，这张表普通的「新建记录」入口被隐藏（R70 行为）；大家改用「+ 新增人工补充行」加行，前提是这张表的「允许人工补充行」是允许，默认就是允许（R-68）。窗口里用 `GET /api/integration/stock-preparation/projects/<项目号>/target/manual-rows` 核对这个开关：`policy` 是 `allowed`（`policySource` 为 `default` 或 `set`）。如果是 `disabled`，批复里要写明补锁后这张表不能再加行。`plmLock.missing > 0`（表上缺模板 PLM 列）要先补列，补列不是这个路由的事，要先停下报开发机。
+5. **暂停定时拉取，告诉拉取人员窗口内不要拉（批复后做）。** 暂停每日计划任务（`scripts/ops/stock-preparation-scheduled-pull.mjs` 所在的那条任务），并在群里通知拉取人员。BI-2 之后，定时拉取遇到正在装机的表，会记成 `skipped_pull_batch_installing`（不算失败）。这只是兜底，不能代替暂停。
+6. **批量回填前的暂停清单。** 探查报出的 `automation_rules>0`、`webhooks_active>0`、`writer_pipelines_active>0`，以及按建行来源统计的 `_automation>0` / `_public_form>0`，逐条列出来写进批复，拿到「同意」之后、窗口内 dry_run 之前暂停，窗口结束后恢复（设计 §8.9）。回填走插件记录路径，本身不触发订阅者。暂停是为了防止窗口内有别的写入方在这张表上建行。
 
 ## 2. 现场只读 dry_run 的授权口径（C14.1）
 
@@ -70,11 +75,22 @@ Invoke-RestMethod -Method Post -Uri "$env:MS_API/api/integration/stock-preparati
 
 ## 5. 逐表顺序（一张表一个窗口）
 
-### 第 1 步　dry_run（窗口内，开关已开、默认值已设、补锁已做、拉取已停）
+### 第 1 步　批复前的只读 dry_run（开关已开、默认值已设；还没补锁、没停拉取）
 
-`{"mode":"dry_run","confirmProjectNo":"<项目号>"}`。可选 `gapMinutes`（1–1440，默认 30）。
+`{"mode":"dry_run","confirmProjectNo":"<项目号>"}`。可选 `gapMinutes`（1–1440，默认 30）。用了就记下这个值 G，后面每一次 dry_run 和 install 都带同一个 G。
 
-### 第 2 步　读应答（只按序号与计数说话）
+- 它只读，属于 C14.1 / O-BI-9 的授权（§2），不需要 O-BI-1。
+- 这时补锁还没做，`plmLock.unmarked` / `missing` 就是批复里要写的数，`refusals` 里出现 `plm_lock_required` 是正常的。
+- 用它的计数、布局、`requires`、`planDigest` 和第 3 步客户报的次数，填好 O-BI-1，交给 owner。
+
+### 第 1b 步　「同意」之后：补锁、暂停，再跑一次窗口内 dry_run
+
+1. 补锁（§1 第 4 条，`POST …/options/sync`）。
+2. 暂停定时拉取，通知拉取人员；暂停 §1 第 6 条列出的自动化规则、webhook 和管道。
+3. 再跑一次 dry_run，带同一个 G。这时必须 `plmLock.unmarked = 0`、`missing = 0`，`refusals` 里除了 `placement_required` 以外什么都没有。
+4. 它的 `planDigest` 必须**等于批复里的那个**。不相等（批复后又有人拉了、改了设置等），就不装：看清变了什么，按新的 dry_run 重新填 O-BI-1，重新批复。
+
+### 第 2 步　读应答（只按序号与计数说话；第 1 步和第 1b 步都照这张表读）
 
 | 字段 | 含义 | 要做的 |
 |---|---|---|
@@ -89,19 +105,21 @@ Invoke-RestMethod -Method Post -Uri "$env:MS_API/api/integration/stock-preparati
 | `layout` | `firstView`（今天打开表落在哪个视图）、`viewsWithFrozenColumns`、`viewsLosingFrozen`（放最左会失去冻结列的视图数）、`personalOrderOverrides`（用个人列序的配置数）、`trashedRecordCount` | `viewsLosingFrozen > 0` 时批复里要选位置 |
 | `columns` | 两列是否已在（`pullBatch` / `firstPullBatch`）、`locked`、`placementApplied` | 首装时一般都是假 |
 | `views` | `fill` / `todo` 是否存在；`rewrite` 列出要重写的插件视图，`resetsConfig: true` 表示那个视图的其它配置会被重置 | 有 `rewrite` 时写进批复 |
-| `plmLock` | `fieldCount`、`marked`、`unmarked`、`missing`、`readBeforeWrite` | 必须是 `unmarked = 0`、`missing = 0` |
+| `plmLock` | `fieldCount`、`marked`、`unmarked`、`missing`、`readBeforeWrite` | 第 1 步：数字写进批复；第 1b 步：必须是 `unmarked = 0`、`missing = 0` |
 | `settings` | 这张表将采用的规则、格式、语言、落地视图、位置，以及来源（`captured` 已捕获 / `tenant` 租户默认 / `built_in` 内置）；规则为按位置时 `notes` 带 `rule_f_today_active_state`（C10） | 规则应为 `material`（O-BI-2） |
 | `requires` | 装机要带的东西：`planDigest`、`confirmHistoricalBatchCount.inferred`（= K）/ `unknownMin`（0）、`historyMode`（续跑时是已持久化的那个模式）、`placement`（`required` / `optional` / `fixed`）、`landing`（`optional` / `fixed`） | 照它填请求 |
 | `fixedPoints` | `matching`（已有值且与计划一致）、`conflicting`（与计划冲突）、`toWrite`、`manualToWrite` | `conflicting > 0` 就停下报开发机 |
 | `refusals` | 封闭词：`disabled`、`band_unavailable`、`plm_lock_required`、`placement_required`、`config_locked`、`plan_conflict`、`layout_unavailable`、`landing_unavailable`、`extension_degenerate`、`nothing_to_install` | 除了要在请求里补上的 `placement_required`，其余任何一个都不装 |
 | `planDigest` / `extension` | 计划摘要；`extension` 表示续跑时计划之后又有新行，它给出扩展后的 K 与摘要 | 装机时原样带上（续跑带 `extension.planDigest`） |
 
-### 第 3 步　问客户这张表历史上拉过几次（attested count）
+### 第 3 步　问客户这张表历史上拉过几次（attested count，在发 O-BI-1 之前）
+
+这一步和第 1 步一起，在批复**之前**做：次数和模式要写进 O-BI-1。
 
 - 要问的是：「这个项目的备料表，过去一共拉取过几次、每次都新增了行？」答的人是客户或 owner 本人。**谁答的、什么时候答的记在私有记录里**，对外只写「已核实，等于 K」或「不等于 K」。
 - 对照：dry_run 的 `plan.K`，以及探查的 `add_stamp_clusters` / `created_at_gap_clusters`。
 - 等于 K：用 `historyMode: 'inferred'`（默认），`confirmHistoricalBatchCount = K`。
-- 不等于 K：在**第一笔写入之前**处理。可以换一个 `gapMinutes` 重新 dry_run（只有按时间间隔切的地方会动，锚点不会拆开），对上了就用新的摘要。对不上就改用 `historyMode: 'unknown'`：每一条被覆盖的机器行两格都写「历史批次未知」，不写推定批次，第一个实时批次是 `第{客户报的次数+1}批`。
+- 不等于 K：在**第一笔写入之前**处理。可以换一个 `gapMinutes` 重新 dry_run（只有按时间间隔切的地方会动，锚点不会拆开），对上了就用新的摘要，并把新的 G 记下来，第 1b 步和第 4 步都带这个 G。对不上就改用 `historyMode: 'unknown'`：每一条被覆盖的机器行两格都写「历史批次未知」，不写推定批次，第一个实时批次是 `第{客户报的次数+1}批`。
 - `plan.degenerate` 为真时，只有 K 恰好等于客户报的次数才能用 `inferred`，否则只能用 `unknown`。
 
 ### 第 4 步　装机（带齐全部确认项）
@@ -111,8 +129,10 @@ Invoke-RestMethod -Method Post -Uri "$env:MS_API/api/integration/stock-preparati
 ```json
 { "mode": "install", "confirmProjectNo": "<项目号>", "approvalRef": "<O-BI-1 批复编号>",
   "planDigest": "<dry_run 给的 64 位十六进制>", "confirmHistoricalBatchCount": 0,
-  "historyMode": "inferred", "placement": "left", "landing": "promote_prep_fill" }
+  "historyMode": "inferred", "placement": "left", "landing": "promote_prep_fill", "gapMinutes": 60 }
 ```
+
+- **dry_run 用了 `gapMinutes` 时，install 必须带同一个 `gapMinutes`**（脚本 `--gap-minutes`）。首装和补缺时，install 会按请求里的 `gapMinutes` 重新算计划，不带就按默认 30 算；`gapMinutes` 在摘要里，算出来的摘要就和 dry_run 的不一样，结果是 409 `…_PLAN_CHANGED`。dry_run 没带 `gapMinutes` 时，install 也不带（上例的 60 只是示意）。
 
 - `approvalRef` 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._:-]{2,63}$`。**不能有 `/` 和 `#`**：引用 #6079 的评论写成 `6079:<评论 id>`，不能写 `6079#<评论 id>`。登记行写成 `R-65`，逐表批复写成 `O-BI-1.S-01` 这种形式。
 - `placement`：dry_run 的 `requires.placement` 是 `required` 时必须给，`left` 表示接受 n 个视图失去冻结列，`right` 表示放到最后一列之后。已应用过的位置不能改（409 `…_CONFIG_LOCKED`）。
@@ -130,7 +150,7 @@ Invoke-RestMethod -Method Post -Uri "$env:MS_API/api/integration/stock-preparati
 | `reason: 'write_budget'` + `remaining` | 这次写满额度了 | 同一请求再 POST（脚本自动做） |
 | `reason: 'rows_after_plan'` + `count` | 计划之后又有新行（窗口内有人拉了） | 重新 dry_run，用 `extension.planDigest`（K 变了就重新确认次数）再 install |
 | `reason: 'rows_unlabelled'` + `count` | 还有没写上的空格（被人同时编辑） | 原样再 install |
-| 409 `…_PLAN_CHANGED` | 摘要和当前计划不一致 | 重新 dry_run，看清变了什么，必要时重新批复 |
+| 409 `…_PLAN_CHANGED` | 摘要和当前计划不一致 | 先查 install 是否带了和 dry_run 同一个 `gapMinutes`；否则重新 dry_run，看清变了什么，必要时重新批复 |
 | 409 `…_HISTORY_COUNT_MISMATCH` | 次数和 K 对不上 | 回第 3 步 |
 | 409 `…_PLAN_CONFLICT` | 已有标签与计划不一致 | 停，报开发机 |
 | 409 `…_PLACEMENT_REQUIRED` / `…_PLM_LOCK_REQUIRED` | 见第 2 步 | 补上后再来 |
@@ -144,7 +164,7 @@ Invoke-RestMethod -Method Post -Uri "$env:MS_API/api/integration/stock-preparati
 
 ### 第 6 步　恢复拉取
 
-恢复定时拉取任务，通知拉取人员可以拉了，恢复 §1 第 6 条暂停的规则和管道。下一次有新增物料的拉取会记为 `第{max(K, 历史次数)+1}批`。窗口到状态路由答 `ready: true` 或执行了 `abort` 时关闭（design §12.5）。
+恢复定时拉取任务，通知拉取人员可以拉了，恢复 §1 第 6 条暂停的规则和管道。下一次有新增物料的拉取会记为：`inferred` 模式 `第{K+1}批`；`unknown` 模式 `第{客户确认的次数+1}批`，与 K 无关（不写推定账本行，`history_batch_count` 等于确认次数，design §8.5）；补缺之后接在 `base + 确认次数` 之后。窗口到状态路由答 `ready: true` 或执行了 `abort` 时关闭（design §12.5）。
 
 ## 6. 中止（abort）与 C7 锁的释放
 
