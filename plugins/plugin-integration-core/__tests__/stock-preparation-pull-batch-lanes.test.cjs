@@ -606,6 +606,35 @@ test('LN-16 cross-lane join: a large job whose batch stays open is JOINED by a s
   } finally { h.restore() }
 })
 
+test('LN-16b large lane, an allocation failure is a RUN STOP: the chunk answers 503 STORE_FAILED, the job is failed (resumable) with nothing created and no batch; the resume stamps under large:<apply job id>', async () => {
+  const h = mount()
+  try {
+    await withSwitch('true', async () => {
+      const large = await largeFlow(h, { run: false })
+      assert.equal(large.approved.statusCode, 202, JSON.stringify(large.approved.body))
+      const applyJobId = large.approved.body.data.jobId
+      const keyOf = [...h.context.storage.keys()].find((key) => key.includes(applyJobId))
+      h.ledgerDb.faults.insertOne = () => Object.assign(new Error('permission denied'), { code: '42501' })
+      const stopped = await call(h, 'POST', `${JOBS}/:jobId/apply-jobs/:applyJobId/run`, { params: { jobId: large.jobId, applyJobId } })
+      delete h.ledgerDb.faults.insertOne
+      assert.equal(stopped.statusCode, 503, JSON.stringify(stopped.body))
+      assert.equal(stopped.body.error.code, PULL_BATCH_ERROR_CODES.STORE_FAILED)
+      const job = await h.context.storage.get(keyOf)
+      assert.equal(job.status, 'failed', 'resumable')
+      assert.ok(job.evidence.errorCodes.includes(PULL_BATCH_ERROR_CODES.STORE_FAILED))
+      assert.equal(job.checkpoint.nextDecisionIndex, 0, 'stopped at the first create')
+      assert.equal(hostWrites(h).length, 0, 'nothing created')
+      assert.equal(h.ledgerDb.rows(pbKit.T.batch).length, 0, 'the allocation rolled back')
+      const resumed = await call(h, 'POST', `${JOBS}/:jobId/apply-jobs/:applyJobId/run`, { params: { jobId: large.jobId, applyJobId } })
+      assert.equal(resumed.statusCode, 200, JSON.stringify(resumed.body))
+      assert.equal(resumed.body.data.pullBatch.stamped, true)
+      const [link] = h.ledgerDb.rows(pbKit.T.execution)
+      assert.equal(link.execution_ref, `large:${applyJobId}`)
+      assert.equal(link.created_row_count, 1)
+    })
+  } finally { h.restore() }
+})
+
 test('LN-17 source order: P-1 (after the clean-row bound, before beginExecution); the stamp after the execution exists; the chunk gate before running; the approve check before the bump', () => {
   const code = (file) => fs.readFileSync(path.join(LIB, file), 'utf8').replace(/\r\n/g, '\n')
   const ta = code('stock-preparation-table-actions.cjs')
