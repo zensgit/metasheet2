@@ -82,6 +82,9 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
   let sendBudget: { YIDA_SEND_REQUEST_MAX_BYTES: number; encodeYidaFormRequestBody(data: unknown, systemToken: string, userId: string): string
     assessYidaSendBudget(input: { snapshot: Row; data: Row }): { withinBudget: boolean } }
   let plan: (input: { config: unknown; rows: unknown[] }) => { rows: Array<{ status: string; payload: Row; protocolPreview: { data: Row } }> }
+  // P1 (2026-11-08): the planner's canonical generated-layout signature (the seal's digest input) and the seal migration SQL.
+  let layoutOf: (config: unknown) => unknown
+  let generatedLayoutUp = '', generatedLayoutDown = ''
   let createAdditionalWriter: (options: { security: HostSecurity; context: Context }) => (trx: unknown, input: unknown) => Promise<{ targetRef: string; slot: number }>
   // D21 (slice Y5): the host's in-transaction re-authorization and the access-graph mutex (the RA4 lock-order writer).
   let reauthorize: YidaSourceBindingReauthorizer
@@ -260,6 +263,16 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
       await owner.query('COMMIT')
     } catch (error) { await owner.query('ROLLBACK'); throw error }
   }
+  // Deliberate privileged removal of every row (guard disabled, re-enabled in the same transaction); never ordinary DML.
+  async function purge(table: string, trigger: string) {
+    await owner.query('BEGIN')
+    try {
+      await owner.query(`ALTER TABLE ${ident(table)} DISABLE TRIGGER ${ident(trigger)}`)
+      await owner.query(`DELETE FROM ${ident(table)}`)
+      await owner.query(`ALTER TABLE ${ident(table)} ENABLE TRIGGER ${ident(trigger)}`)
+      await owner.query('COMMIT')
+    } catch (error) { await owner.query('ROLLBACK'); throw error }
+  }
   async function failInsert(table: string) {
     await owner.query(`CREATE FUNCTION synthetic_fail_insert() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN RAISE EXCEPTION 'SYNTHETIC_INSERT_FAILURE'; END $$`)
@@ -285,7 +298,9 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     createService = (await import(pathToFileURL(path.join(integration, 'yida-send-approval-service.ts')).href)).createYidaSendApprovalService
     assertActor = (await import(pathToFileURL(path.join(integration, 'automation-live-authority.ts')).href)).assertAutomationIntegrationActor
     sendBudget = requireCjs(path.join(lib, 'yida-send-budget.cjs'))
-    plan = (await importNative(pathToFileURL(path.join(lib, 'yida-static-plan.mjs')).href)).buildYidaStaticPlan
+    const planner = await importNative(pathToFileURL(path.join(lib, 'yida-static-plan.mjs')).href)
+    plan = planner.buildYidaStaticPlan
+    layoutOf = planner.yidaGeneratedLayout
     createAdditionalWriter = (await importNative(pathToFileURL(path.join(lib, 'yida-approved-target-store.mjs')).href)).createInternalYidaAdditionalTargetTransactionWriter
     reauthorize = (await import(pathToFileURL(path.join(integration, 'yida-source-reauthorization-host.ts')).href)).createYidaSourceBindingReauthorizer()
     lockUsers = (await import(pathToFileURL(path.join(root, 'packages/core-backend/src/directory/access-graph-mutex.ts')).href)).lockUsersForAccessGraphWrite
@@ -300,10 +315,15 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     const sourceBindingUp = ((await import(pathToFileURL(path.join(root,
       'packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts')).href)) as
       { YIDA_SOURCE_BINDING_UP_SQL: string }).YIDA_SOURCE_BINDING_UP_SQL
+    // P1 (2026-11-08): the generated-layout seal, exactly what zzzz20261108120000 up() executes (it references 093 / 094).
+    const layoutMigration = (await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261108120000_create_integration_yida_generated_layout.ts')).href)) as
+      { YIDA_GENERATED_LAYOUT_UP_SQL: string; YIDA_GENERATED_LAYOUT_DOWN_SQL: string }
+    generatedLayoutUp = layoutMigration.YIDA_GENERATED_LAYOUT_UP_SQL; generatedLayoutDown = layoutMigration.YIDA_GENERATED_LAYOUT_DOWN_SQL
     ddl = ['090_create_integration_yida_delivery_ledger.sql', '091_create_integration_yida_create_fence.sql',
       '092_create_integration_yida_credential_materials.sql', '093_create_integration_yida_draft_plans.sql',
       '094_create_integration_yida_approved_target.sql'].map(name => readFileSync(path.join(migrations, name), 'utf8')).join('\n') + '\n' + approvalDdl
-      + '\n' + sourceBindingUp + '\n' + readFileSync(path.join(migrations, '087_create_integration_stock_prep_project_target.sql'), 'utf8')
+      + '\n' + sourceBindingUp + '\n' + generatedLayoutUp + '\n' + readFileSync(path.join(migrations, '087_create_integration_stock_prep_project_target.sql'), 'utf8')
     savedEnv = envKeys.map(key => [key, process.env[key]])
     process.env.NODE_ENV = 'production'
     process.env.ENCRYPTION_KEY = randomBytes(32).toString('hex')
@@ -1684,5 +1704,156 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     expect(await evidence()).toEqual(approved)
     await sql.unhide(parent)
     expect((await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-v3g-submission' })).status).toBe('admitted')
+  })
+
+  // ---- P1 (external review 2026-11-08; migration zzzz20261108120000): one sealed generated layout per target ----
+  // Per-template validation (G1, field parts on one side) cannot see two templates: A = [identity, field] with the field
+  // cell holding P_B and B = [field, identity] with the field cell holding P_A give two identities one code, P_A + P_B,
+  // and neither ledger fence compares a code (the seven-key and identity digests both differ). The send authority
+  // therefore seals the target's generated layout at the first approval (or admission) that uses a generated entry
+  // and refuses every later selection whose canonical layout signature differs.
+  const LAYOUT = 'integration_yida_generated_layout', LAYOUT_GUARD = 'trg_yida_generated_layout_immutable'
+  const IDENTITY: Record<'hash' | 'preset', Row> = {
+    hash: { hash: ['project', 'line', 'parent'], form: 'uuid-36' },
+    preset: { preset: 'material-code-v1', rowIdOf: 'line', projectOf: 'project' },
+  }
+  const sealRows = () => tableRows(LAYOUT)
+  const generatedCodeOf = (value: Input) => String(plan({ config: value.config, rows: JSON.parse(value.rowsText) as Row[] }).rows[0].payload.code)
+  // Independent oracle of the seal's digest: the planner's canonical signature through canonical JSON and sha256.
+  const layoutDigestOf = (value: Input) => createHash('sha256').update(canonical(layoutOf(value.config)), 'utf8').digest('hex')
+  // A v3 bound row of public record `index` (same locator and key definition as the slot-1 target): `note` is a direct
+  // non-key text target (the seeded `note` column, alias partNote) that serves as the decoration cell; `code` is generated.
+  function generatedRow(index: number, template: Row[], partNote = 'synthetic note'): Input & { sourceBinding: Row } {
+    const value = v3BoundRow(index)
+    const config = value.config as unknown as { fieldCatalog: Row[]; fieldMap: Row[] }
+    config.fieldCatalog.push({ id: 'note', control: 'text', required: false }, { id: 'code', control: 'text', required: false })
+    config.fieldMap.push({ transform: 'direct', source: 'partNote', target: 'note', type: 'string', required: false },
+      { transform: 'generated', template, target: 'code', type: 'string', required: false })
+    const rows = JSON.parse(value.rowsText) as Row[]
+    rows[0].partNote = partNote
+    value.rowsText = JSON.stringify(rows)
+    return value
+  }
+  // The counterexample on records 0 (identity part P_A) and 1 (P_B). Both templates satisfy G1; both codes read P_A + P_B.
+  function counterexample(kind: 'hash' | 'preset') {
+    const identity = IDENTITY[kind]
+    const partA = generatedCodeOf(generatedRow(0, [identity])), partB = generatedCodeOf(generatedRow(1, [identity]))
+    return { partA, partB, a: generatedRow(0, [identity, { field: 'note' }], partB), b: generatedRow(1, [{ field: 'note' }, identity], partA) }
+  }
+
+  it.each(['hash', 'preset'] as const)('P1 regression (%s): two legal templates with opposite layouts give two identities one code; the first approval seals the target\'s layout, the second is refused at approval with nothing written; the same layout and a draft without generated entries keep working', async kind => {
+    await boundFixture()
+    const { a, b, partA, partB } = counterexample(kind)
+    expect(partA).not.toBe(partB)
+    expect([generatedCodeOf(a), generatedCodeOf(b)]).toEqual([partA + partB, partA + partB])
+    // Both drafts enter the draft store: one target, one key definition, two identities, two seven-key tuples.
+    const requestA = await draftOf(first, a, 'synthetic-p1-a'), requestB = await draftOf(second, b, 'synthetic-p1-b')
+    const members = await tableRows(MEMBERS)
+    const memberA = members.find(row => row.operation_id === requestA.operationId)!, memberB = members.find(row => row.operation_id === requestB.operationId)!
+    expect(memberA.business_key_digest).not.toBe(memberB.business_key_digest)
+    expect(memberA.creation_identity_digest).not.toBe(memberB.creation_identity_digest)
+    const granted = await first.service.approve(requestA)
+    expect((await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-p1-a-submission' })).status).toBe('admitted')
+    // The opposite layout is refused at approval: no grant, no audit, no ledger row, no seal write (the only INSERTs a
+    // refused approval issues are the two idempotent D21 version-row ensures).
+    const before = await evidence()
+    second.statements.length = 0
+    await rejected(second.service.approve(requestB), 'GENERATED_LAYOUT_CONFLICT')
+    expect(await evidence()).toEqual(before)
+    expect(second.statements.filter(statement => /^INSERT INTO "?integration_/i.test(statement.trim()))).toEqual([])
+    // The first approval sealed exactly one row for this target: A's layout, event approve, A's operation.
+    const sealed = await sealRows()
+    expect(sealed.length).toBe(1)
+    expect([sealed[0].target_ref, sealed[0].event, sealed[0].operation_id, sealed[0].actor_id]).toEqual([granted.targetRef, 'approve', requestA.operationId, context().ownerId])
+    expect(sealed[0].layout_digest).toBe(layoutDigestOf(a))
+    expect(layoutDigestOf(b)).not.toBe(layoutDigestOf(a))
+    // The sealed layout keeps working: a third record under A's template is approved and admitted; still one seal row.
+    const c = generatedRow(2, [IDENTITY[kind], { field: 'note' }])
+    expect(layoutDigestOf(c)).toBe(layoutDigestOf(a))
+    const requestC = await draftOf(first, c, 'synthetic-p1-c')
+    const grantedC = await first.service.approve(requestC)
+    expect((await first.service.admit({ grantId: grantedC.grantId, submissionId: 'synthetic-p1-c-submission' })).status).toBe('admitted')
+    expect(await sealRows()).toEqual(sealed)
+    // A draft without a generated entry (the v2 bound row of record 1, whose identity is still free) is untouched: approved
+    // and admitted with no read or write of the seal table.
+    second.statements.length = 0
+    const plainRequest = await draftOf(second, boundRow(1, 7), 'synthetic-p1-plain')
+    const plainGrant = await second.service.approve(plainRequest)
+    expect((await second.service.admit({ grantId: plainGrant.grantId, submissionId: 'synthetic-p1-plain-submission' })).status).toBe('admitted')
+    expect(second.statements.some(statement => statement.includes(LAYOUT))).toBe(false)
+    expect(await sealRows()).toEqual(sealed)
+    expect((await tableRows(LEDGER)).length).toBe(3)
+  })
+
+  it.each(['hash', 'preset'] as const)('P1 race (%s): two first approvals with opposite layouts on two connections — the second visibly waits on PG for the first commit, exactly one seals and the other is refused', async kind => {
+    await boundFixture()
+    const { a, b } = counterexample(kind)
+    const requestA = await draftOf(first, a, 'synthetic-p1-race-a'), requestB = await draftOf(second, b, 'synthetic-p1-race-b')
+    const gate = first.gateInsert(APPROVAL), left = outcome(first.service.approve(requestA))
+    let right: ReturnType<typeof outcome> | undefined
+    try { await reached(gate); right = outcome(second.service.approve(requestB)); await blocked(second, first) }
+    finally { gate.release() }
+    expect(await left).toEqual({ ok: true })
+    expect(await right!).toEqual({ ok: false, code: 'YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT' })
+    const sealed = await sealRows()
+    expect(sealed.length).toBe(1)
+    expect(sealed[0].layout_digest).toBe(layoutDigestOf(a))
+    expect((await tableRows(APPROVAL)).length).toBe(1)
+    expect(second.statements.indexOf('ROLLBACK')).toBeGreaterThan(-1)
+  })
+
+  it('P1 race (one layout): two first approvals with the SAME layout on two connections are both approved and leave one seal row', async () => {
+    await boundFixture()
+    const a = generatedRow(0, [IDENTITY.hash, { field: 'note' }]), a2 = generatedRow(1, [IDENTITY.hash, { field: 'note' }])
+    const requestA = await draftOf(first, a, 'synthetic-p1-same-a'), requestA2 = await draftOf(second, a2, 'synthetic-p1-same-a2')
+    const gate = first.gateInsert(APPROVAL), left = outcome(first.service.approve(requestA))
+    let right: ReturnType<typeof outcome> | undefined
+    try { await reached(gate); right = outcome(second.service.approve(requestA2)); await blocked(second, first) }
+    finally { gate.release() }
+    expect([await left, await right!]).toEqual([{ ok: true }, { ok: true }])
+    expect((await sealRows()).length).toBe(1)
+    expect((await tableRows(APPROVAL)).length).toBe(2)
+  })
+
+  it('P1 at admission: a grant whose target seal no longer matches (privileged corruption) is refused at admission with nothing written; with the seal row removed the admission itself seals (event admit)', async () => {
+    await boundFixture()
+    const { a } = counterexample('preset')
+    const requestA = await draftOf(first, a, 'synthetic-p1-admit-a')
+    const granted = await first.service.approve(requestA)
+    const sealed = await sealRows()
+    await corrupt(LAYOUT, LAYOUT_GUARD, 'layout_digest', 'f'.repeat(64))
+    const before = await evidence()
+    await rejected(first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-p1-admit-s' }), 'GENERATED_LAYOUT_CONFLICT')
+    expect(await evidence()).toEqual(before)
+    expect((await tableRows(LEDGER)).length).toBe(0)
+    await purge(LAYOUT, LAYOUT_GUARD)
+    expect(await sealRows()).toEqual([])
+    expect((await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-p1-admit-s' })).status).toBe('admitted')
+    const resealed = await sealRows()
+    expect(resealed.length).toBe(1)
+    expect([resealed[0].event, resealed[0].layout_digest, resealed[0].operation_id]).toEqual(['admit', sealed[0].layout_digest, requestA.operationId])
+  })
+
+  it('P1 seal table: ordinary UPDATE / DELETE / TRUNCATE are refused; zzzz20261108120000 down refuses while a seal exists, drops the table without one, and up replays idempotently', async () => {
+    await boundFixture()
+    const requestA = await draftOf(first, counterexample('hash').a, 'synthetic-p1-imm')
+    await first.service.approve(requestA)
+    const sealed = await sealRows()
+    for (const [statement, params] of [[`UPDATE ${ident(LAYOUT)} SET layout_digest = $1`, ['f'.repeat(64)]], [`DELETE FROM ${ident(LAYOUT)}`, []], [`TRUNCATE ${ident(LAYOUT)}`, []]] as const) {
+      await expect(owner.query(statement, [...params])).rejects.toMatchObject({ code: 'P0001', message: 'YIDA_GENERATED_LAYOUT_IMMUTABLE' })
+    }
+    expect(await sealRows()).toEqual(sealed)
+    // The migration's own existence probe and DROP must see ONLY the private schema (never the migrated public copy).
+    await owner.query(`SET search_path TO ${ident(schema)}`)
+    try {
+      await expect(owner.query(generatedLayoutDown)).rejects.toMatchObject({ code: '55000', message: 'YIDA_GENERATED_LAYOUT_ROWS_PRESENT' })
+      expect(await sealRows()).toEqual(sealed)
+      await purge(LAYOUT, LAYOUT_GUARD)
+      await owner.query(generatedLayoutDown)
+      expect((await owner.query('SELECT to_regclass($1) AS present', [LAYOUT])).rows[0].present).toBeNull()
+      await owner.query(generatedLayoutDown) // replay: already down, nothing to refuse or drop
+      await owner.query(generatedLayoutUp); await owner.query(generatedLayoutUp) // replay: idempotent
+    } finally { await owner.query(`SET search_path TO ${ident(schema)}, public`) }
+    expect(await sealRows()).toEqual([])
   })
 })

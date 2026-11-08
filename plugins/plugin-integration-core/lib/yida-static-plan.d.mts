@@ -201,6 +201,17 @@ export function yidaTransformSourceColumns(config: unknown): readonly string[]
 export function transformDependencies(entry: unknown, config?: unknown): readonly string[]
 /** The source columns one generated entry of a valid v3 config reads (field parts, hash members, preset inputs), sorted. Throws YIDA_STATIC_CONFIG_INVALID otherwise. */
 export function generatedTemplateDependencies(entry: unknown, config: unknown): readonly string[]
+/**
+ * P1 (2026-11-08): the canonical, values-free generated layout of a v3 config — every generated entry's target and whole
+ * template (hash members sorted), entries sorted by target — which the send authority seals once per approved target.
+ * null for a v1 / v2 config or a v3 config without a generated entry; throws YIDA_STATIC_CONFIG_INVALID otherwise.
+ */
+export interface YidaGeneratedLayout {
+  version: 1
+  kind: 'yida-generated-layout'
+  entries: ReadonlyArray<{ target: string; template: readonly YidaGeneratedTemplatePart[] }>
+}
+export function yidaGeneratedLayout(config: unknown): YidaGeneratedLayout | null
 /** Explicit configs require unique decoded JSON keys and raw decimal fidelity; v1 keeps its finite Number domain. Omitted config retains legacy parsing. */
 export function parseYidaStaticRows(text: string, config?: YidaStaticConfig): YidaStaticRow[]
 export function buildYidaStaticPlan(input: { config: unknown; rows: unknown }): YidaStaticPlan

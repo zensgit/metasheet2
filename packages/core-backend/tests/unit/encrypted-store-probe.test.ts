@@ -272,6 +272,8 @@ async function yidaWriterFixtures(): Promise<Record<string, string>> {
         executionPayloadDigest(value, grant) { return crypto.createHash('sha256').update(JSON.stringify({ value, grant })).digest('hex') },
         // Gate 4: the approval service requires the send-budget primitive; this synthetic row is within it.
         sendBudget() { return Object.freeze({ withinBudget: true }) },
+        // P1 generated-layout seal: this v2 probe row carries no generated entry, so the real primitive would answer this too.
+        async sealGeneratedLayoutInTransaction() { return Object.freeze({ admissible: true, sealed: false }) },
         async prepareInTransaction() { throw new Error('YiDa fixture: no admission or sending') },
       },
     })

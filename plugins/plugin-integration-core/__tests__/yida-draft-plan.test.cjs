@@ -942,16 +942,16 @@ test('generated: a bound row whose preset rowIdOf cell is not the key value of i
   const keyed = await generatedInput({ rows: lineOf('SYN-LINE-5', 'DEMO-DRW-9') })
   const compiled = compileYidaSendDraft(keyed.bound)
   assert.equal(codesOf(compiled)[0], oracleMaterialCode(compiled.rowSpecs[0].sourceBinding.keyValue, compiled.rowSpecs[0].sourceBinding.projectNo))
-  // The rule is on values: an off-key column holding exactly the key value mints WLBH(identity) and is accepted.
+  // Until 2026-11-08 the rule was on values alone and an off-key column holding exactly the key value was accepted; the
+  // structural rule (rowIdOf must NAME the bound key field; the dedicated test below) now refuses it as well.
   const equalCell = await generatedInput({ config: offKey, rows: (rows) => [{ ...rows[0], componentCode: rows[0].idempotencyKey }] })
-  const accepted = compileYidaSendDraft(equalCell.bound)
-  assert.equal(codesOf(accepted)[0], oracleMaterialCode(accepted.rowSpecs[0].sourceBinding.keyValue, 'DEMO-P1'))
+  expectError(compileYidaSendDraft, YidaDraftPlanError, equalCell.bound, 'YIDA_DRAFT_PLAN')
   // Verifier r2 M1: the hook covers every planned row, every preset of every generated entry, and compares verbatim.
   // (K5) Two bound rows: row 0's off-key cell equals its key value, only row 1's does not → the draft is refused.
   const rowTwoOff = await generatedInput({ config: offKey, rows: (rows) => [{ ...rows[0], componentCode: rows[0].idempotencyKey }, { ...rows[1] }] })
   expectError(compileYidaSendDraft, YidaDraftPlanError, rowTwoOff.bound, 'YIDA_DRAFT_PLAN')
   const rowTwoOn = await generatedInput({ config: offKey, rows: (rows) => rows.map((entry) => ({ ...entry, componentCode: entry.idempotencyKey })) })
-  assert.equal(compileYidaSendDraft(rowTwoOn.bound).rowSpecs.length, 2)
+  expectError(compileYidaSendDraft, YidaDraftPlanError, rowTwoOn.bound, 'YIDA_DRAFT_PLAN') // every cell equal, the column still not the bound key field
   // (K3) Two generated entries: the first is the default (key column), the SECOND one's preset reads the drawing number.
   const secondEntry = (rowIdOf) => (layout) => {
     layout.fieldCatalog.push({ id: 'secondCodeText', control: 'text', required: false })
@@ -1210,4 +1210,26 @@ test('D2 one form per config: a root and a preset that disagree, or an unknown p
   assert.equal(validateYidaStaticConfig(twoPresets).normalized.materialCodeForm, 'uuid-32')
   const { unbound } = await generatedInput()
   expectError(compileYidaSendDraft, YidaDraftPlanError, { ...unbound, config: rootForm('uuid-36', presetForm('uuid-32'))(example()) }, 'YIDA_DRAFT_CONFIG')
+})
+
+test('generated (rowIdOf names the bound key field; hardening 2026-11-08): a preset whose rowIdOf is another column that merely holds the key value is refused (SOURCE_KEY_FIELD_MISMATCH → PLAN); the same column bound AS the key field compiles; the local recompute is untouched', async () => {
+  const { compileYidaSendDraft, YidaDraftPlanError } = await modulePromise
+  const { compileYidaLocalDraft } = await compilerPromise
+  // rowIdOf = drawingNo (source componentCode) while the binding's key field is the idempotency key; every row's drawing
+  // number is set to its key value, so the per-row VALUE hook passes and only the structural rule can refuse.
+  const offKey = (layout) => { layout.fieldMap.at(-1).template = [{ preset: 'material-code-v1', rowIdOf: 'drawingNo', projectOf: 'project' }]; return layout }
+  const sameValue = (rows) => rows.map((entry) => ({ ...entry, componentCode: entry.idempotencyKey }))
+  const { unbound, bound, rows } = await generatedInput({ config: offKey, rows: sameValue })
+  for (const [index, entry] of rows.entries()) assert.equal(entry.componentCode, bound.sourceBinding.records[index].keyValue)
+  expectError(compileYidaSendDraft, YidaDraftPlanError, bound, 'YIDA_DRAFT_PLAN')
+  assert.equal(compileYidaLocalDraft(unbound).plan.rows.length, 2)
+  // The same template with drawingNo's column bound AS the key field (keyFieldId fld_componentCode, key values = the drawing
+  // numbers): rowIdOf names the bound key field, the value hook holds, the draft compiles and mints WLBH(drawing number, project).
+  const rebound = { ...bound, sourceBinding: { ...bound.sourceBinding, keyFieldId: 'fld_componentCode',
+    records: bound.sourceBinding.records.map((record, index) => ({ ...record, keyValue: rows[index].componentCode })) } }
+  const compiled = compileYidaSendDraft(rebound)
+  assert.deepEqual(codesOf(compiled), rows.map((entry) => oracleMaterialCode(entry.componentCode, 'DEMO-P1')))
+  // The shipped template (rowIdOf = sourceLineId, the idempotency key's target) satisfies the rule as before.
+  const shipped = await generatedInput()
+  assert.equal(compileYidaSendDraft(shipped.bound).rowSpecs.length, 2)
 })

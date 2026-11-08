@@ -278,9 +278,13 @@ const MAX_SEPARATOR_LENGTH = 16
 // Rule G1: exactly one identity part, a hash over every business-key target or the preset (whose
 // projectOf is a key target), so one code carries one key tuple (hash) or one (rowIdOf, projectOf)
 // pair (preset); literal and field parts are decoration. Field parts are the only parts of variable
-// length, so they may stand on one side of the identity part only (ruling G1 shift, 2026-11-07): the
-// identity part then sits at a fixed offset from one end and two equal codes carry equal identity parts.
-// Literals may stand on both sides. The planner alone does not tie a preset to the
+// length, so they may stand on one side of the identity part only (ruling G1 shift, 2026-11-07): within ONE
+// template the identity part then sits at a fixed offset from one end. That holds per template only: two legal
+// templates of one target, [identity, field] with the field cell P_B and [field, identity] with the field cell
+// P_A, give two identities one code P_A + P_B (external review P1, 2026-11-08). So the send authority seals ONE
+// generated layout per approved target (yidaGeneratedLayout below is its signature; the seal lives in
+// yida-send-authority-primitives.mjs, migration zzzz20261108120000), and only under one sealed layout do two equal
+// codes carry equal identity parts. Literals may stand on both sides. The planner alone does not tie a preset to the
 // creation identity: the persisted compile (yida-draft-compiler.mjs) refuses a bound row whose rowIdOf or
 // projectOf cell is not its binding's key value or project. A blank part is always refused; inside a hash a
 // blank emptyKeyFields member counts as ''. Hash members and preset inputs are string-typed direct
@@ -577,6 +581,25 @@ export function yidaTransformSourceColumns(input) {
     for (const column of transformDependencies(entry, validation.normalized)) columns.add(column)
   }
   return Object.freeze([...columns].sort(byCodePoint))
+}
+
+// P1 (external review 2026-11-08): the canonical, values-free GENERATED LAYOUT of a v3 config, the signature the send
+// authority seals once per approved target (yida-send-authority-primitives.mjs, migration zzzz20261108120000). It names
+// every generated entry's target and its whole template: part kinds in listed order, literal values, field targets, hash
+// member targets (sorted: ruling L1 made the listed order irrelevant to a code) and form, the preset id and EVERY preset
+// option (a whole-part copy, so an option added later, such as the D2 form, enters the signature by construction).
+// Entries sort by target. No cell value, code, credential or identifier of a record enters it. null for a v1 / v2 config
+// and for a v3 config without a generated entry; YIDA_STATIC_CONFIG_INVALID for an invalid config. Frozen.
+export function yidaGeneratedLayout(input) {
+  const validation = validateYidaStaticConfig(input)
+  if (!validation.valid) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+  const normalized = validation.normalized
+  if (normalized.version !== 3) return null
+  const entries = normalized.fieldMap.filter((entry) => entry.transform === 'generated')
+    .map((entry) => Object.freeze({ target: entry.target, template: Object.freeze(entry.template.map((part) => Object.freeze(
+      hasPart(part, 'hash') ? { ...part, hash: Object.freeze([...part.hash].sort(byCodePoint)) } : { ...part }))) }))
+    .sort((left, right) => byCodePoint(left.target, right.target))
+  return entries.length === 0 ? null : Object.freeze({ version: 1, kind: 'yida-generated-layout', entries: Object.freeze(entries) })
 }
 
 function sanitizeRows(input) {
