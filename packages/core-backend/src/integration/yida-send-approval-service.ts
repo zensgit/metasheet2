@@ -14,8 +14,13 @@ type Row = Record<string, unknown>
 // IDENTITY_RESERVED (design baseline v2.3 §3.3, D16 a): the row's logical creation identity (key value +
 // project number, the material code's inputs) already has a ledger row under this target; refused at approval,
 // before any grant, so the operator sees it early. The partial unique index on the ledger is the final guarantee.
+// GENERATED_LAYOUT_CONFLICT (external review P1, 2026-11-08; migration zzzz20261108120000): the target's generated layout
+// was sealed by an earlier approval / admission and this selection's layout signature differs (another template shape on
+// the same target could give another identity the same code). Refused at approval and at admission, before any write.
 type ErrorCode = 'INPUT' | 'NOT_FOUND' | 'CONFLICT' | 'EXPIRED' | 'REVOKED' | 'CANCELLED' | 'UNAVAILABLE' | 'LIMIT' | 'IDENTITY_RESERVED'
-const CODES = new Set<unknown>(['INPUT', 'NOT_FOUND', 'CONFLICT', 'EXPIRED', 'REVOKED', 'CANCELLED', 'UNAVAILABLE', 'LIMIT', 'IDENTITY_RESERVED'])
+  | 'GENERATED_LAYOUT_CONFLICT'
+const CODES = new Set<unknown>(['INPUT', 'NOT_FOUND', 'CONFLICT', 'EXPIRED', 'REVOKED', 'CANCELLED', 'UNAVAILABLE', 'LIMIT', 'IDENTITY_RESERVED',
+  'GENERATED_LAYOUT_CONFLICT'])
 const ownErrors = new WeakMap<object, ErrorCode>()
 const MAX_TTL = 900000
 const MAX_PLAIN = 16 * 1024 * 1024
@@ -184,6 +189,10 @@ export type YidaSendAuthorityPrimitives = {
   executionPayloadDigest(selection: YidaSendAuthoritySelection, input: { grantRef: string; expiresAt: number; actorId: string }): string | Promise<string>
   // Gate 4: synchronous, one frozen boolean. Anything else (a promise, a Proxy, an accessor) is refused.
   sendBudget(selection: YidaSendAuthoritySelection, input: { grantRef: string; expiresAt: number; actorId: string }): Readonly<{ withinBudget: boolean }>
+  // P1 (2026-11-08): seal-or-match the target's generated layout on this trx, inside approve() / persistAdmission(), after
+  // the host's own checks and before its first write. A frozen plain verdict: { admissible: true, sealed } or
+  // { admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' }; this service maps it to its own fixed codes.
+  sealGeneratedLayoutInTransaction(trx: Queryable, selection: YidaSendAuthoritySelection, input: { event: 'approve' | 'admit' }): Promise<unknown>
   prepareInTransaction(trx: Queryable, input: {
     tenantId: string; workspaceId: null; ownerId: string; operationId: string; rowKey: string
     targetRef: string; targetRevision: string; planRevision: string; credentialRef: string
@@ -256,7 +265,7 @@ function createApprovalInternals({ database, security, context, primitives, mult
   if (rawContext.workspaceId !== null) fail('INPUT')
   if (!database || typeof database.transaction !== 'function' || !security || typeof security.encrypt !== 'function'
     || typeof security.decrypt !== 'function' || !primitives
-    || ['resolveSelectionInTransaction', 'executionPayloadDigest', 'sendBudget', 'prepareInTransaction']
+    || ['resolveSelectionInTransaction', 'executionPayloadDigest', 'sendBudget', 'sealGeneratedLayoutInTransaction', 'prepareInTransaction']
       .some(key => typeof primitives[key as keyof YidaSendAuthorityPrimitives] !== 'function')) fail('UNAVAILABLE')
 
   // D21 phase 1 (approve / admit only): the actor's subject authorization version row FOR SHARE BEFORE the
@@ -350,6 +359,30 @@ function createApprovalInternals({ database, security, context, primitives, mult
       || !Object.hasOwn(descriptors.code, 'value')) fail('UNAVAILABLE')
     // The check that refused (registry, table, field, record) or a lock conflict: the operator re-checks and retries.
     if (['REGISTRY', 'SHEET', 'FIELD', 'RECORD', 'CONFLICT'].includes(descriptors.code.value as string)) fail('CONFLICT')
+    fail('UNAVAILABLE')
+  }
+  // P1 (external review 2026-11-08): the target's generated layout is sealed once, by the first approval or admission
+  // that uses a generated entry, and every later selection with another layout signature is refused — on this trx, after
+  // the D20 / identity / D21 checks and before the first write (the grant row, the ledger row). The primitive answers a
+  // frozen plain verdict; only its exact conflict code becomes GENERATED_LAYOUT_CONFLICT, anything else is UNAVAILABLE.
+  async function sealGeneratedLayout(trx: Queryable, selected: YidaSendAuthoritySelection, event: 'approve' | 'admit') {
+    let verdict: unknown
+    try { verdict = await primitives.sealGeneratedLayoutInTransaction(trx, selected, { event }) } catch { fail('UNAVAILABLE') }
+    assertGeneratedLayoutVerdict(verdict)
+  }
+  function assertGeneratedLayoutVerdict(verdict: unknown) {
+    if (!verdict || typeof verdict !== 'object' || types.isProxy(verdict) || Array.isArray(verdict) || !Object.isFrozen(verdict)) fail('UNAVAILABLE')
+    const proto = Object.getPrototypeOf(verdict)
+    if (proto !== Object.prototype && proto !== null) fail('UNAVAILABLE')
+    const descriptors = Object.getOwnPropertyDescriptors(verdict), keys = Reflect.ownKeys(descriptors)
+    if (keys.some(key => typeof key !== 'string') || keys.length !== 2 || !Object.hasOwn(descriptors, 'admissible')
+      || !Object.hasOwn(descriptors.admissible, 'value')) fail('UNAVAILABLE')
+    if (descriptors.admissible.value === true) {
+      if (!Object.hasOwn(descriptors, 'sealed') || !Object.hasOwn(descriptors.sealed, 'value') || typeof descriptors.sealed.value !== 'boolean') fail('UNAVAILABLE')
+      return
+    }
+    if (descriptors.admissible.value !== false || !Object.hasOwn(descriptors, 'code') || !Object.hasOwn(descriptors.code, 'value')) fail('UNAVAILABLE')
+    if (descriptors.code.value === 'GENERATED_LAYOUT_CONFLICT') fail('GENERATED_LAYOUT_CONFLICT')
     fail('UNAVAILABLE')
   }
   // Y2: an operation (draft) is compiled for exactly one target's app/form. Under a named target it
@@ -518,6 +551,8 @@ function createApprovalInternals({ database, security, context, primitives, mult
       assertBindingRequired(selected, targetRef, slot)
       await assertIdentityFree(trx, selected, targetRef)
       await reauthorize(trx, selected)
+      // P1: the first approval with a generated entry seals the target's generated layout; another layout is refused here.
+      await sealGeneratedLayout(trx, selected, 'approve')
       const row: Row = { grant_id: grantId, confirmation_id: confirmationId, tenant_id: fixed.tenantId, workspace_id: null,
         owner_id: fixed.actorId, target_ref: targetRef, operation_id: operationId, row_key: rowKey, target_revision: selected.targetRevision,
         plan_revision: selected.planRevision, plan_digest: selected.planDigest, credential_ref: selected.credentialRef,
@@ -583,6 +618,8 @@ function createApprovalInternals({ database, security, context, primitives, mult
         || selected.creationIdentityDigest !== optionalDigest(row.creation_identity_digest)) fail('CONFLICT')
       // D21: the four checks, inside THIS transaction, before the ledger row (the admission's first write).
       await reauthorize(trx, selected)
+      // P1: the sealed generated layout again at admission (sealed here if no approval sealed it yet).
+      await sealGeneratedLayout(trx, selected, 'admit')
       const prepared = await primitives.prepareInTransaction(trx, { tenantId: fixed.tenantId, workspaceId: null,
         ownerId: fixed.actorId, operationId: selected.operationId, rowKey: selected.rowKey, targetRef,
         targetRevision: selected.targetRevision, planRevision: selected.planRevision, credentialRef: selected.credentialRef,

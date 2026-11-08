@@ -692,4 +692,26 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     expect(second.uniqueErrors).toEqual([FENCE])
     expect(await evidence()).toEqual(before)
   })
+
+  // ---- P1 (external review 2026-11-08), pinned at the FENCE level: this stays true after the fix. The red→green regression
+  // lives in stock-preparation-yida-send-approvals-realdb.test.ts (the seal is in the send authority, not in a fence). ----
+  it.each(['preset', 'hash'] as const)('P1 pin (fence level, %s): two legal templates with opposite layouts and crafted decoration cells give two identities one code; both reservations commit and no fence objects — the fences compare digests, never codes', async kind => {
+    const identity = kind === 'preset' ? PRESET : KEY_HASH
+    // Record B carries another key value and (for the hash) another drawing number: two identities, two seven-key tuples.
+    const lineA: Row = {}, lineB: Row = { idempotencyKey: 'SYN-LINE-5', componentCode: 'DEMO-DRW-5' }
+    const code = (compiled: Compiled) => String(compiled.plan.rows[0].payload.materialCodeText)
+    const partA = code(await generatedDraft([identity], lineA)), partB = code(await generatedDraft([identity], lineB))
+    expect(partA).not.toBe(partB)
+    // The decoration cell is blankType (target materialTypeText, a non-key text): A = [identity, field] with the cell P_B,
+    // B = [field, identity] with the cell P_A. Both templates satisfy G1; both codes read P_A + P_B.
+    const a = await generatedDraft([identity, { field: 'materialTypeText' }], { ...lineA, blankType: partB })
+    const b = await generatedDraft([{ field: 'materialTypeText' }, identity], { ...lineB, blankType: partA })
+    expect([code(a), code(b)]).toEqual([partA + partB, partA + partB])
+    expect(b.rowSpecs[0].creationIdentityDigest).not.toBe(a.rowSpecs[0].creationIdentityDigest)
+    expect(b.rowSpecs[0].businessKeyDigest).not.toBe(a.rowSpecs[0].businessKeyDigest)
+    await setState('acknowledged', reservation(a, {}))
+    expect((await second.store.prepare(reservation(b, { operationId: 'synthetic-operation-p1b', rowKey: 'synthetic-row-p1b' }))).reused).toBe(false)
+    expect(second.uniqueErrors).toEqual([])
+    expect((await rows(LEDGER)).length).toBe(2)
+  })
 })

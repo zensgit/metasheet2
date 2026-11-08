@@ -9,7 +9,7 @@ import sendBudgetModule from './yida-send-budget.cjs'
 import { createInternalYidaApprovedTargetTransactionReader } from './yida-approved-target-store.mjs'
 import { createInternalYidaDraftTransactionReader, createInternalYidaDraftTransactionWriter } from './yida-draft-plan-store.mjs'
 import { compileYidaSendDraft } from './yida-draft-plan.mjs'
-import { buildYidaStaticPlan, parseYidaStaticRows, yidaTransformSourceColumns } from './yida-static-plan.mjs'
+import { buildYidaStaticPlan, parseYidaStaticRows, yidaGeneratedLayout, yidaTransformSourceColumns } from './yida-static-plan.mjs'
 import { expandYidaProjectAllocationRows } from './stock-preparation-yida-allocation.mjs'
 
 // Host-private composition, never a plugin API/route/authority callback. The
@@ -26,6 +26,12 @@ const ROW_BINDING = ['sheetId', 'recordId', 'keyFieldId', 'keyValue', 'projectNo
 const DRAFT_INPUT = ['config', 'rowsText', 'allocation']
 // The project-sheet registry (migration 087): one active row per (tenant, project number) names the sheet.
 const PROJECT_REGISTRY = 'integration_stock_prep_project_target'
+// P1 (external review 2026-11-08; migration zzzz20261108120000): one sealed generated layout per approved target.
+const GENERATED_LAYOUT = 'integration_yida_generated_layout'
+const GENERATED_LAYOUT_EVENTS = new Set(['approve', 'admit'])
+const GENERATED_LAYOUT_PKEY = 'integration_yida_generated_layout_pkey'
+const LAYOUT_CONFLICT = Object.freeze({ admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' })
+const layoutAdmissible = sealed => Object.freeze({ admissible: true, sealed })
 const DIGEST_RE = /^[0-9a-f]{64}$/
 const ERROR_CODES = new Set(['INPUT', 'UNAVAILABLE', 'NOT_FOUND', 'CONFLICT'])
 const ownErrors = new WeakMap()
@@ -73,6 +79,18 @@ function crud(trx) {
   return database.createDb({ database: { query: async (sql, params) => rows(await trx.query(sql, params)) } })
 }
 const same = (left, right) => stableCanonicalStringify(left) === stableCanonicalStringify(right)
+// The seal's digest: sha256 of the planner's canonical generated layout (null without a generated entry).
+function generatedLayoutDigest(config) {
+  const layout = yidaGeneratedLayout(config)
+  return layout === null ? null : createHash('sha256').update(stableCanonicalStringify(layout), 'utf8').digest('hex')
+}
+function layoutRace(error) {
+  if (!error || typeof error !== 'object' || types.isProxy(error)) return false
+  // PG's own data fields identify the one INSERT race on the seal's primary key (two first uses without the
+  // approved-target row lock the host transaction always holds); nothing else of the rejection is inspected.
+  return Object.getOwnPropertyDescriptor(error, 'code')?.value === '23505'
+    && Object.getOwnPropertyDescriptor(error, 'constraint')?.value === GENERATED_LAYOUT_PKEY
+}
 // Y2 multi-target: the host passes `targetRef` ONLY while its multi-target switch reads exact 'true'.
 // Absent, every primitive keeps the original closed input and the permanent slot-1 read unchanged.
 const hasTarget = input => Boolean(input) && typeof input === 'object' && !types.isProxy(input)
@@ -313,6 +331,45 @@ function createPrimitives(options) {
       return Object.freeze({ record: Object.freeze(prepared.record), reused: prepared.reused })
     } catch (error) { closed(error) }
   }
+  // P1 (external review 2026-11-08): seal-or-match the target's GENERATED LAYOUT inside the host's approval or admission
+  // transaction, after its own checks and before its first write. Rule G1 holds per template, so two legal templates of
+  // one target ([identity, field] with the field cell P_B and [field, identity] with the field cell P_A) give two
+  // identities one code P_A + P_B, and neither ledger fence compares a code. The first selection with a generated entry
+  // therefore seals the target's canonical layout signature (yidaGeneratedLayout: targets, part kinds and order,
+  // literals, field / hash member targets, hash form, preset id and options) in integration_yida_generated_layout;
+  // every later selection of that target with another signature is refused. Under one sealed layout the identity part
+  // sits at one fixed offset for every code of the target, so equal codes carry equal identity parts, which the two
+  // fences refuse. Race-safe: the host transaction already holds the approved-target row FOR UPDATE (the slot lock), so
+  // two concurrent first uses serialize there and the second sees the committed seal; the seal row's primary key is the
+  // belt behind it. A selection without a generated entry issues no SQL here. Answers a frozen verdict the host maps to
+  // its own code: { admissible: true, sealed } or { admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' }. The host's
+  // transaction rolls back a refused verdict, so a seal written here never outlives a refused approval or admission.
+  async function sealGeneratedLayoutInTransaction(trx, selection, input) {
+    try {
+      if (!selections.has(selection)) fail('INPUT')
+      const { event } = record(input, ['event'])
+      if (!GENERATED_LAYOUT_EVENTS.has(event)) fail('INPUT')
+      const layoutDigest = generatedLayoutDigest(selection.config)
+      if (layoutDigest === null) return layoutAdmissible(false)
+      const db = crud(trx)
+      const existing = await db.selectOneForUpdate(GENERATED_LAYOUT, { target_ref: selection.targetRef })
+      if (existing) {
+        if (existing.target_ref !== selection.targetRef || existing.tenant_id !== fixed.tenantId || existing.workspace_id !== null
+          || existing.owner_id !== fixed.ownerId || typeof existing.layout_digest !== 'string' || !DIGEST_RE.test(existing.layout_digest)) fail('UNAVAILABLE')
+        return existing.layout_digest === layoutDigest ? layoutAdmissible(false) : LAYOUT_CONFLICT
+      }
+      const row = { target_ref: selection.targetRef, tenant_id: fixed.tenantId, workspace_id: null, owner_id: fixed.ownerId,
+        layout_digest: layoutDigest, operation_id: selection.operationId, event, actor_id: fixed.ownerId }
+      let inserted
+      try { inserted = rows(await db.insertOne(GENERATED_LAYOUT, row))[0] ?? null }
+      catch (error) {
+        if (layoutRace(error)) return LAYOUT_CONFLICT
+        throw error
+      }
+      if (!inserted || Object.entries(row).some(([key, value]) => inserted[key] !== value)) fail('UNAVAILABLE')
+      return layoutAdmissible(true)
+    } catch (error) { closed(error) }
+  }
   async function loadExecutionMaterialInTransaction(trx, input) {
     try {
       const { parsed: requested, targetRef } = targeted(input, ['credentialRef', 'credentialGeneration'])
@@ -367,7 +424,8 @@ function createPrimitives(options) {
     } catch (error) { closed(error) }
   }
   return Object.freeze({ prepareDraftInTransaction, previewInTransaction, resolveSelectionInTransaction,
-    executionPayloadDigest, sendBudget, draftSendBudget, prepareInTransaction, loadExecutionMaterialInTransaction })
+    executionPayloadDigest, sendBudget, draftSendBudget, sealGeneratedLayoutInTransaction, prepareInTransaction,
+    loadExecutionMaterialInTransaction })
 }
 
 export function createYidaSendAuthorityPrimitives(options) {

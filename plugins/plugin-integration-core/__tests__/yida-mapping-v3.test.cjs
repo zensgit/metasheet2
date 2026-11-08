@@ -684,3 +684,46 @@ test('generatedTemplateDependencies: the source columns one generated entry read
   assert.throws(() => generatedTemplateDependencies(null, layout), code)
   assert.throws(() => generatedTemplateDependencies(entry, generatedConfig([{ hash: ['project'], form: 'uuid-32' }])), code)
 })
+
+test('P1 generated layout signature (2026-11-08): null without a generated entry; whole parts in listed order, hash members sorted, entries by target, frozen; member order is no difference, part order, literals, field targets, the form and every preset option are; invalid input throws', async () => {
+  const { yidaGeneratedLayout, createYidaProtocolExample, createYidaTransformExample, validateYidaStaticConfig } = await plannerPromise
+  assert.equal(yidaGeneratedLayout(createYidaProtocolExample().config), null)
+  const plain = generatedConfig()
+  plain.fieldMap = plain.fieldMap.filter((entry) => entry.transform !== 'generated')
+  plain.fieldCatalog = plain.fieldCatalog.filter((item) => item.id !== 'code')
+  assert.equal(validateYidaStaticConfig(plain).valid, true)
+  assert.equal(yidaGeneratedLayout(plain), null)
+  const layout = yidaGeneratedLayout(generatedConfig([{ literal: 'A-' }, { hash: ['parent', 'line', 'project'], form: 'uuid-32' }, { field: 'drawing' }]))
+  assert.deepEqual(layout, { version: 1, kind: 'yida-generated-layout',
+    entries: [{ target: 'code', template: [{ literal: 'A-' }, { hash: ['line', 'parent', 'project'], form: 'uuid-32' }, { field: 'drawing' }] }] })
+  assert.equal([layout, layout.entries, layout.entries[0], layout.entries[0].template, layout.entries[0].template[1], layout.entries[0].template[1].hash]
+    .every((value) => Object.isFrozen(value)), true)
+  const text = (value) => JSON.stringify(yidaGeneratedLayout(value))
+  // Member order is not a layout difference (ruling L1); the normalized config gives the same signature as the raw one.
+  assert.equal(text(generatedConfig([{ literal: 'A-' }, { hash: ['project', 'line', 'parent'], form: 'uuid-32' }, { field: 'drawing' }])), JSON.stringify(layout))
+  assert.equal(text(validateYidaStaticConfig(generatedConfig([{ literal: 'A-' }, { hash: ['project', 'line', 'parent'], form: 'uuid-32' }, { field: 'drawing' }])).normalized), JSON.stringify(layout))
+  const different = {
+    'part order (the P1 counterexample: field before the identity part)': [{ field: 'drawing' }, { hash: ['parent', 'line', 'project'], form: 'uuid-32' }, { literal: 'A-' }],
+    'literal value': [{ literal: 'B-' }, { hash: ['parent', 'line', 'project'], form: 'uuid-32' }, { field: 'drawing' }],
+    'hash form': [{ literal: 'A-' }, { hash: ['parent', 'line', 'project'], form: 'uuid-36' }, { field: 'drawing' }],
+    'field target': [{ literal: 'A-' }, { hash: ['parent', 'line', 'project'], form: 'uuid-32' }, { field: 'qty' }],
+    'hash member set': [{ literal: 'A-' }, { hash: ['parent', 'line', 'project', 'drawing'], form: 'uuid-32' }, { field: 'drawing' }],
+    'identity kind': [{ literal: 'A-' }, { preset: 'material-code-v1', rowIdOf: 'line', projectOf: 'project' }, { field: 'drawing' }],
+  }
+  for (const [name, template] of Object.entries(different)) assert.notEqual(text(generatedConfig(template)), JSON.stringify(layout), name)
+  // A preset part is copied whole, so every option is part of the signature (rowIdOf here; a later option such as the D2 form
+  // enters the same way without a change here).
+  assert.notEqual(text(generatedConfig([{ preset: 'material-code-v1', rowIdOf: 'drawing', projectOf: 'project' }])),
+    text(generatedConfig([{ preset: 'material-code-v1', rowIdOf: 'line', projectOf: 'project' }])))
+  // Two generated entries: sorted by target whatever the fieldMap order.
+  const two = generatedConfig([KEY_HASH])
+  two.fieldCatalog.push({ id: 'alt', control: 'text', required: false })
+  two.fieldMap.push({ transform: 'generated', template: [{ literal: 'Z' }, KEY_HASH], target: 'alt', type: 'string', required: false })
+  assert.deepEqual(yidaGeneratedLayout(two).entries.map((entry) => entry.target), ['alt', 'code'])
+  // The shipped v3 example seals its one preset entry; invalid or non-v3 input is refused or null, never a partial signature.
+  assert.deepEqual(yidaGeneratedLayout(createYidaTransformExample().config).entries, [{ target: 'materialCodeText',
+    template: [{ preset: 'material-code-v1', rowIdOf: 'sourceLineId', projectOf: 'project' }] }])
+  for (const bad of [{ version: 3 }, null, generatedConfig([{ literal: 'only' }]), 'text']) {
+    assert.throws(() => yidaGeneratedLayout(bad), { code: 'YIDA_STATIC_CONFIG_INVALID' })
+  }
+})
