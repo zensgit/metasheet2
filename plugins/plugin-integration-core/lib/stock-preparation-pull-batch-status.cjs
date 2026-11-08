@@ -261,7 +261,10 @@ async function readPullBatchStatus(deps = {}) {
     if (rows === null) reasons.push('rows_unreadable')
     else if (rows.gap > 0) reasons.push('history_gap')
   }
-  if (!views.readable || !views.fill || !views.todo || views.bandHiddenIn.length > 0) reasons.push('band_hidden_in_view')
+  // LIVE (S6 C-9): the band hidden in a plugin view that EXISTS (its hidden list, physical or logical id, or the field
+  // property's hidden rule). An absent view hides nothing (its existence is views_present's check); views the host cannot
+  // read are unknown, so they block.
+  if (!views.readable || views.bandHiddenIn.length > 0) reasons.push('band_hidden_in_view')
   if (layout && layout.firstView !== null && layout.firstView !== 'fill') reasons.push('landing_not_fill')
   if (rows && rows.person > 0) reasons.push('person_rows_present')
   if (rows && rows.locked > 0) reasons.push('locked_rows_present')
@@ -324,8 +327,7 @@ function pullBatchReadinessChecks(status) {
     pull_batch_enabled: s.switchOn === true,
     pull_batch_columns_present: present,
     pull_batch_columns_locked: present && columns.locked === 2,
-    pull_batch_columns_visible: present && views.readable === true && views.fill === true && views.todo === true
-      && Array.isArray(views.bandHiddenIn) && views.bandHiddenIn.length === 0,
+    pull_batch_columns_visible: present && views.readable === true && Array.isArray(views.bandHiddenIn) && views.bandHiddenIn.length === 0,
     pull_batch_ledger_readable: ledger.readable === true,
     pull_batch_history_resolved: ledger.readable === true && RESOLVED_HISTORY_STATUSES.includes(ledger.historyStatus) && rows !== null && rows.gap === 0,
   })

@@ -138,7 +138,7 @@ test('SS-03 every blocking reason on its own; the advisory reasons never decide 
     ['rows_unreadable', { readRows: async () => { throw new Error('too large') } }],
     ['band_hidden_in_view', { provisioning: provisioningFake({ views: { 'prep-fill': [BAND.fieldIds.pullBatch], 'prep-todo': [] } }) }],
     ['band_hidden_in_view', { provisioning: provisioningFake({ views: { 'prep-fill': [], 'prep-todo': ['firstPullBatch'] } }) }],
-    ['band_hidden_in_view', { provisioning: provisioningFake({ views: { 'prep-fill': [] } }) }],
+    ['band_hidden_in_view', { provisioning: { ...provisioningFake(), async findObjectView() { throw new Error('host down') } } }],
     // critic M13: the web's property rule hides the field in every view.
     ['band_hidden_in_view', { provisioning: provisioningFake({ property: { ...pullBatchBandProperty('zh-CN'), hidden: true } }) }],
     ['band_hidden_in_view', { provisioning: provisioningFake({ property: { ...pullBatchBandProperty('zh-CN'), visible: false } }) }],
@@ -148,6 +148,10 @@ test('SS-03 every blocking reason on its own; the advisory reasons never decide 
     assert.ok(status.reasons.includes(reason), `${reason}: ${JSON.stringify(status.reasons)}`)
     assert.equal(status.ready, false, reason)
   }
+  // An ABSENT plugin view hides nothing (its existence is readiness's views_present check).
+  const absentTodo = await SS.readPullBatchStatus(deps({ provisioning: provisioningFake({ views: { 'prep-fill': [] } }) }))
+  assert.equal(absentTodo.reasons.includes('band_hidden_in_view'), false)
+  assert.equal(absentTodo.views.todo, false)
   for (const [reason, patch] of [
     ['person_rows_present', { rows: [row(), row({ part: 'P2', creator: 'u_person' })] }],
     ['locked_rows_present', { rows: [row({ locked: true })] }],
