@@ -1741,7 +1741,7 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     return { partA, partB, a: generatedRow(0, [identity, { field: 'note' }], partB), b: generatedRow(1, [{ field: 'note' }, identity], partA) }
   }
 
-  it.each(['hash', 'preset'] as const)('P1 regression (%s): two legal templates with opposite layouts give two identities one code; the first approval seals the target\'s layout, the second is refused at approval with nothing written; the same layout and a draft without generated entries keep working', async kind => {
+  it.each(['hash', 'preset'] as const)('P1 regression (%s): two legal templates with opposite layouts give two identities one code; the first approval seals the target\'s layout, the second is refused at approval with nothing written; the same layout keeps working and a draft without a generated entry is refused on the sealed target too', async kind => {
     await boundFixture()
     const { a, b, partA, partB } = counterexample(kind)
     expect(partA).not.toBe(partB)
@@ -1774,15 +1774,90 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     const grantedC = await first.service.approve(requestC)
     expect((await first.service.admit({ grantId: grantedC.grantId, submissionId: 'synthetic-p1-c-submission' })).status).toBe('admitted')
     expect(await sealRows()).toEqual(sealed)
-    // A draft without a generated entry (the v2 bound row of record 1, whose identity is still free) is untouched: approved
-    // and admitted with no read or write of the seal table.
-    second.statements.length = 0
+    // A draft without a generated entry (the v2 bound row of record 1, whose identity is still free) is refused on the
+    // SEALED target as well (verifier r1 of the P1 fix: null is another signature; the direct-code cases below show why):
+    // the seal row is read, no grant, nothing written, the seal unchanged.
     const plainRequest = await draftOf(second, boundRow(1, 7), 'synthetic-p1-plain')
-    const plainGrant = await second.service.approve(plainRequest)
-    expect((await second.service.admit({ grantId: plainGrant.grantId, submissionId: 'synthetic-p1-plain-submission' })).status).toBe('admitted')
-    expect(second.statements.some(statement => statement.includes(LAYOUT))).toBe(false)
+    const plainBefore = await evidence()
+    second.statements.length = 0
+    await rejected(second.service.approve(plainRequest), 'GENERATED_LAYOUT_CONFLICT')
+    expect(await evidence()).toEqual(plainBefore)
+    expect(second.statements.some(statement => statement.includes(LAYOUT) && /FOR UPDATE\s*$/.test(statement))).toBe(true)
+    expect(second.statements.filter(statement => /^INSERT INTO "?integration_/i.test(statement.trim()))).toEqual([])
     expect(await sealRows()).toEqual(sealed)
-    expect((await tableRows(LEDGER)).length).toBe(3)
+    expect((await tableRows(LEDGER)).length).toBe(2)
+  })
+
+  // Verifier r1 of the P1 fix (2026-11-08): a draft WITHOUT a generated entry (its signature is null) must be refused on a
+  // sealed target as well. Otherwise record 1's draft can map the sealed `code` target DIRECTLY from a bound column whose
+  // cell holds record 0's generated code — same code, two identities (two seven-key tuples, two creation identities), one
+  // target — and neither ledger fence compares a code. Both null-layout shapes: v3 without a generated entry, and v2.
+  type NullLayout = 'v3-without-generated' | 'v2'
+  function directCodeRow(kind: NullLayout, index: number, code: string): Input & { sourceBinding: Row } {
+    const value = kind === 'v2' ? boundRow(index, 7) : v3BoundRow(index)
+    const config = value.config as unknown as { fieldCatalog: Row[]; fieldMap: Row[] }
+    config.fieldCatalog.push({ id: 'code', control: 'text', required: false })
+    config.fieldMap.push(kind === 'v2' ? { source: 'partNote', target: 'code', type: 'string', required: false }
+      : { transform: 'direct', source: 'partNote', target: 'code', type: 'string', required: false })
+    if (kind === 'v2') (value.sourceBinding.fieldBindings as Row).partNote = ids().fld('note')
+    const rows = JSON.parse(value.rowsText) as Row[]
+    rows[0].partNote = code
+    value.rowsText = JSON.stringify(rows)
+    expect(layoutOf(value.config)).toBeNull()
+    return value
+  }
+  it.each([['v3-without-generated', 'preset'], ['v2', 'hash']] as const)('P1 null layout (%s, target sealed by a %s template): record 1\'s draft whose `code` target is a DIRECT mapping of a bound cell holding record 0\'s generated code is refused at approval with nothing written (same code, two identities, one target)', async (kind, identity) => {
+    await boundFixture()
+    const a = generatedRow(0, [IDENTITY[identity]]), codeA = generatedCodeOf(a)
+    const requestA = await draftOf(first, a, `synthetic-p1-null-${kind}-a`)
+    const granted = await first.service.approve(requestA)
+    expect((await first.service.admit({ grantId: granted.grantId, submissionId: `synthetic-p1-null-${kind}-a-s` })).status).toBe('admitted')
+    const sealed = await sealRows()
+    expect(sealed.length).toBe(1)
+    const b = directCodeRow(kind, 1, codeA)
+    expect(generatedCodeOf(b)).toBe(codeA) // record 1's planned payload carries record 0's code verbatim
+    const requestB = await draftOf(second, b, `synthetic-p1-null-${kind}-b`)
+    const members = await tableRows(MEMBERS)
+    const memberA = members.find(row => row.operation_id === requestA.operationId)!, memberB = members.find(row => row.operation_id === requestB.operationId)!
+    expect(memberA.business_key_digest).not.toBe(memberB.business_key_digest)
+    expect(memberA.creation_identity_digest).not.toBe(memberB.creation_identity_digest)
+    const before = await evidence()
+    second.statements.length = 0
+    await rejected(second.service.approve(requestB), 'GENERATED_LAYOUT_CONFLICT')
+    expect(await evidence()).toEqual(before)
+    expect(second.statements.some(statement => statement.includes(LAYOUT) && /FOR UPDATE\s*$/.test(statement))).toBe(true)
+    expect(second.statements.filter(statement => /^INSERT INTO "?integration_/i.test(statement.trim()))).toEqual([])
+    expect(await sealRows()).toEqual(sealed)
+    expect((await tableRows(LEDGER)).length).toBe(1)
+  })
+
+  it('P1 null layout before and after the seal: v2 bound drafts approved and admitted BEFORE the first generated approval are invisible to the seal (the residual: the guarantee holds from the first generated approval onward); a v2 grant approved before the seal is refused at its admission once the generated draft has sealed the target, nothing written, the grant still approved', async () => {
+    await boundFixture()
+    // Record 1 (v2) before any seal: approved and admitted; no seal row (a target is sealed by generated entries only).
+    const early = await draftOf(second, boundRow(1, 7), 'synthetic-p1-early')
+    const earlyGrant = await second.service.approve(early)
+    expect((await second.service.admit({ grantId: earlyGrant.grantId, submissionId: 'synthetic-p1-early-s' })).status).toBe('admitted')
+    expect(await sealRows()).toEqual([])
+    // Record 2 (v2): approved before the seal, not yet admitted.
+    const parked = await draftOf(second, boundRow(2, 7), 'synthetic-p1-parked')
+    const parkedGrant = await second.service.approve(parked)
+    expect(await sealRows()).toEqual([])
+    // Record 0 (generated): seals the target at its approval, admitted.
+    const requestA = await draftOf(first, generatedRow(0, [IDENTITY.hash]), 'synthetic-p1-late-a')
+    const granted = await first.service.approve(requestA)
+    const sealed = await sealRows()
+    expect([sealed.length, sealed[0].event, sealed[0].operation_id]).toEqual([1, 'approve', requestA.operationId])
+    expect((await first.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-p1-late-a-s' })).status).toBe('admitted')
+    // The parked v2 grant: refused at admission (the check runs there too), nothing written; it keeps its attempt but
+    // cannot be admitted while the seal stands.
+    const before = await evidence()
+    second.statements.length = 0
+    await rejected(second.service.admit({ grantId: parkedGrant.grantId, submissionId: 'synthetic-p1-parked-s' }), 'GENERATED_LAYOUT_CONFLICT')
+    expect(await evidence()).toEqual(before)
+    expect(second.statements.filter(statement => /^INSERT INTO "?integration_/i.test(statement.trim()))).toEqual([])
+    expect(await sealRows()).toEqual(sealed)
+    expect((await tableRows(LEDGER)).length).toBe(2)
+    expect((await second.service.inspect({ grantId: parkedGrant.grantId })).status).toBe('approved')
   })
 
   it.each(['hash', 'preset'] as const)('P1 race (%s): two first approvals with opposite layouts on two connections — the second visibly waits on PG for the first commit, exactly one seals and the other is refused', async kind => {

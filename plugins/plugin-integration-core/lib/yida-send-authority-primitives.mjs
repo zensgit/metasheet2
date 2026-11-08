@@ -341,8 +341,14 @@ function createPrimitives(options) {
   // sits at one fixed offset for every code of the target, so equal codes carry equal identity parts, which the two
   // fences refuse. Race-safe: the host transaction already holds the approved-target row FOR UPDATE (the slot lock), so
   // two concurrent first uses serialize there and the second sees the committed seal; the seal row's primary key is the
-  // belt behind it. A selection without a generated entry issues no SQL here. Answers a frozen verdict the host maps to
-  // its own code: { admissible: true, sealed } or { admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' }. The host's
+  // belt behind it. A selection WITHOUT a generated entry (a v2 layout, or a v3 config with none: its signature is null)
+  // reads the seal row too (verifier r1 of the P1 fix, 2026-11-08): on a SEALED target it is refused — null is another
+  // signature, and a cell mapped directly onto the sealed code target could otherwise carry another identity's generated
+  // code (same code, two identities, one target; the guarantee would hold for generated codes only) — while on an
+  // unsealed target it is admissible and writes nothing: a target is sealed by generated entries only, so sends before
+  // the first generated approval stay invisible to the seal (the guarantee holds from that approval onward). Every
+  // selection here is intent 'create' (reconstructRows refuses any other intent). Answers a frozen verdict the host maps
+  // to its own code: { admissible: true, sealed } or { admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' }. The host's
   // transaction rolls back a refused verdict, so a seal written here never outlives a refused approval or admission.
   async function sealGeneratedLayoutInTransaction(trx, selection, input) {
     try {
@@ -350,14 +356,16 @@ function createPrimitives(options) {
       const { event } = record(input, ['event'])
       if (!GENERATED_LAYOUT_EVENTS.has(event)) fail('INPUT')
       const layoutDigest = generatedLayoutDigest(selection.config)
-      if (layoutDigest === null) return layoutAdmissible(false)
       const db = crud(trx)
       const existing = await db.selectOneForUpdate(GENERATED_LAYOUT, { target_ref: selection.targetRef })
       if (existing) {
         if (existing.target_ref !== selection.targetRef || existing.tenant_id !== fixed.tenantId || existing.workspace_id !== null
           || existing.owner_id !== fixed.ownerId || typeof existing.layout_digest !== 'string' || !DIGEST_RE.test(existing.layout_digest)) fail('UNAVAILABLE')
-        return existing.layout_digest === layoutDigest ? layoutAdmissible(false) : LAYOUT_CONFLICT
+        // The null signature never matches a seal: a selection without a generated entry is refused on a sealed target.
+        return layoutDigest !== null && existing.layout_digest === layoutDigest ? layoutAdmissible(false) : LAYOUT_CONFLICT
       }
+      // Unsealed target, no generated entry: admissible, nothing written (the seal is for generated layouts only).
+      if (layoutDigest === null) return layoutAdmissible(false)
       const row = { target_ref: selection.targetRef, tenant_id: fixed.tenantId, workspace_id: null, owner_id: fixed.ownerId,
         layout_digest: layoutDigest, operation_id: selection.operationId, event, actor_id: fixed.ownerId }
       let inserted
