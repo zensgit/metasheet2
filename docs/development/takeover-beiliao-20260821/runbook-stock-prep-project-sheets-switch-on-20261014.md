@@ -708,7 +708,7 @@ END $$;
 | 大 BOM「开始」「运行」 | 照常 202 / 200（不经这两道门；随后的「计划」才停在探针上） |
 | 按项目导出 Excel | 照常 200（导出按项目表解析，是固定列投影，不走字段存在探针） |
 | 归档 / 恢复 | 照常 200（只改登记行，不碰表的列和行） |
-| 试点就绪（GET …/target/pilot） | `target_fields_present` 为假，直到补列并上锁 |
+| 试点就绪（GET …/target/pilot） | `target_fields_present` 为假，直到补列（补列时两列插入就带锁，同一步完成） |
 
 开关**关着**（只有部署表）：
 
@@ -719,7 +719,7 @@ END $$;
 
 两个 422 都可恢复，什么都没写，不需要回退。
 
-**顺序（第 2 步每个部署做一次，开关开着、关着都要做；第 3–5 步每个已登记的项目各做一遍，管理员会话，与 PR-3 的修复路由同一权限）：**
+**顺序（第 2 步每个部署做一次，开关开着、关着都要做；第 3–5 步每个已登记的项目各做一遍，用平台管理员（`role:admin`）或 `integration:admin` 的会话：修复路由的门是 `requireAccess(req, 'admin')`（`plugins/plugin-integration-core/lib/http-routes.cjs:10057`），只放行这两个码（`:1394-1395`）；只有 `stock-prep:admin` 的会话在每种模式下都答 403，什么都不调（`stock-preparation-project-sheet-repair-columns.test.cjs` RC-17））：**
 
 1. 装新版本（含 PR-3 修复路由能补列 + PR-4 两列）。
 2. **重新导出 env 绑定（改生产 `app.env`，是 owner 批准的步骤，要写进上机单）。** 做法照 `222-deploy-window-runbook-20260901.md:108`（#5447 加部门列之后就是这样做的）与 `:195-205`（两半都换、整体替换、不手工拼接）：
@@ -731,11 +731,11 @@ END $$;
    4. 按 §2.4 的加键路径重启：先把 `app.env` 导入当前会话，再 `pm2 restart metasheet-backend --update-env`，带 §2.4 的门。
    5. 核对：调一次只读的 `GET /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/large-bom/expansion-jobs/<任意作业号>`（开关开着、关着都走 env 动作；绑定门在读作业之前），或开关关着时对部署表做一次 dry-run。**不再**答 422 `fieldMapMode: 'explicit'` 就对了：作业号不存在时答 `LARGE_BOM_JOB_NOT_FOUND`；表还缺列时答 422 `fieldExistenceMode: 'db'`（第 3–4 步清）。注意「不再答 explicit 的 422」不等于绑定不再是显式映射——重新导出的那份仍是显式映射，只是完整了。
 3. 报告：`POST /api/integration/stock-preparation/options/sync`，请求体 `{"projectNo": "<项目号>", "dryRun": true}`。什么都不写；看 `columns.wouldAddFieldIds`，期望正好是 `["issueConfirmDate", "projectSpecModel"]`（更早建的表可能还缺别的列，照单补）。
-4. 核对后补列：同一路径，请求体 `{"projectNo": "<项目号>", "addMissingColumns": true}`。一次宿主事务加列、同一次调用给新列上 PLM 锁；已有列逐字节不变，行不动；审计行记加了几列。再调一次加 0 列（幂等）。
+4. 核对后补列：同一路径，请求体 `{"projectNo": "<项目号>", "addMissingColumns": true}`。一次宿主事务加列；两列都是 `plm_system`，锁在建列的那条 INSERT 上（插入时就带 `humanWriteLock = 'plm_system'`），不靠之后的选项同步或加锁步骤，后面的步骤失败也不会让它们变成人可写（RC-18）。两列在模板里的位置是 33 / 34，但在已有的表上补列是接在表当前最后一列之后：第 i 列的 `order` = 表上所有列（模板列、`ext_` 列、批次列、人建的列）的最大 `order` + 1 + i（R-89）；表右侧已有批次列时，两列落在批次列之后（例如没有 `ext_` 列时是 35 / 36），不是 33 / 34（RC-20）。已有列逐字节不变（`order` 也不动），行不动；审计行记加了几列。再调一次加 0 列（幂等）。
 5. 再拉取：dry-run 回 200，apply 写出的行不带这两列；大 BOM 批准 / 分块执行回到正常（第 2 步已做）。
 
 部署表（env 绑定的那张，非项目表）不走修复路由，用上机脚本 `scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs`（先不带 `--execute` 看计划，再 `--execute`）；它按模板现算缺哪些列，自动包括这两列。**它只补列，清不掉绑定门的 422**：部署表补到 35 列之后，dry-run 与导出仍答 422 `fieldMapMode: 'explicit'`，直到第 2 步做完。部署表上的列对人不锁（与其它 PLM 列相同）。
 
 漏了第 2 步：大 BOM 批准 / 分块执行 / 作业 GET / 取消（开关开着），或部署表的一切拉取与导出（开关关着），停在 422 `fieldMapMode: 'explicit'`；漏了第 3–4 步：该项目的拉取停在 422 `fieldExistenceMode: 'db'`。都什么都没写，补上即可。
 
-证据：`stock-preparation-project-sheet-repair-columns.test.cjs` RC-12（422 → 一次补列 → 拉取写出的行不带两列）、RC-13（补列前导出、归档 / 恢复照常，拉取 422 只点名这两列）——这两条只覆盖字段存在探针（项目表、开关开着）。绑定门那一半由 備料 线评审在真库上执行确认（临时用例，未提交）：开关开着时，未重新导出则批准 / 分块执行 / 作业 GET 在补列前后都答 422 `fieldMapMode: 'explicit'`，重新导出后批准 202、分块执行 200；开关关着时，部署表的 dry-run / 导出 / 大 BOM 开始答 422 `fieldMapMode: 'explicit'`，上机脚本补列后不变，重新导出后 200。
+证据：`stock-preparation-project-sheet-repair-columns.test.cjs` RC-18（422 → 一次补列，插入时带锁 → 拉取写出的行不带两列）、RC-19（补列前导出、归档 / 恢复照常，拉取 422 只点名这两列）、RC-20（右侧已有批次列时两列接在最后，不与批次列同 `order`）——这三条只覆盖字段存在探针（项目表、开关开着）。（合并 #6768 之前 RC-18 / RC-19 叫 RC-12 / RC-13；这两个编号现在是 #6768 自己的用例。）绑定门那一半由 備料 线评审在真库上执行确认（临时用例，未提交）：开关开着时，未重新导出则批准 / 分块执行 / 作业 GET 在补列前后都答 422 `fieldMapMode: 'explicit'`，重新导出后批准 202、分块执行 200；开关关着时，部署表的 dry-run / 导出 / 大 BOM 开始答 422 `fieldMapMode: 'explicit'`，上机脚本补列后不变，重新导出后 200。开关关着的那一半（部署表 35 列齐、绑定还是 33 列的显式映射）现已提交为真库用例 S3B-07（`packages/core-backend/tests/integration/stock-preparation-project-write-lock-realdb.cases.ts`，由 `stock-preparation-p4-repair-once-realdb.test.ts` 运行）。
