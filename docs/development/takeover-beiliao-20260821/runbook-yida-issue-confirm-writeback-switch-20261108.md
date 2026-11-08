@@ -13,6 +13,6 @@
 
 ## 打开之后
 
-- 回写在发送**返回结果之后**单独运行（D5 a）：发送结果不等它、也不反映它的结果；它失败或被关停打断时，只在服务器日志留一条固定码 `YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED`，不写任何东西。
-- 漏掉的日期由 owner 的补写入口补上：`POST /api/integration/yida-owner-send/issue-confirm-writeback`（`packages/core-backend/src/routes/integration-yida-owner.ts:473`），写入的是确认审计那一天的本地日期，不是补写当天。
+- 回写在发送**返回结果之后**单独运行（D5 a）：发送结果不等它、也不反映它的结果；它失败或被关停打断时，发送结果不变，服务器日志只留一条固定码 `YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED`（不含任何编号或内容）；可重试的行不留痕，由下面的补写入口补上。
+- 漏掉的日期由 owner 的补写入口补上：`POST /api/integration/yida-owner-send/issue-confirm-writeback`（`packages/core-backend/src/routes/integration-yida-owner.ts:476`），写入的是确认审计那一天的本地日期，不是补写当天。
 - 关回：把开关改回 `false` 并重启后端；已写入的日期与留痕保持不变。
