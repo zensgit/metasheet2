@@ -309,6 +309,10 @@ databaseSuite('SA05 permanent human-attested target — actual PG and no online 
     await rejected(second.target.register({ ...requested, operationId: other.operationId }), 'YIDA_APPROVED_TARGET_CONFLICT')
     const changedKey = input(); changedKey.config.businessKey = changedKey.config.businessKey.filter(key => key !== 'componentName')
     await expect(outcome(second.draft.createDraft(changedKey))).resolves.toEqual({ ok: false, code: 'YIDA_DRAFT_KEY_DEFINITION_CONFLICT' })
+    // D2 (R-88): the slot sealed the default material-code form at initialization; a draft declaring uuid-32 for the
+    // same locator is another key definition and can never reach this target (one identity, one code).
+    const otherForm = input(); Object.assign(otherForm.config, { materialCodeForm: 'uuid-32' })
+    await expect(outcome(second.draft.createDraft(otherForm))).resolves.toEqual({ ok: false, code: 'YIDA_DRAFT_KEY_DEFINITION_CONFLICT' })
     const replacement = await second.material.create({ material: material() })
     await rejected(second.target.register({ ...requested, credentialRef: replacement.credentialRef }), 'YIDA_APPROVED_TARGET_CONFLICT')
     await rejected(second.target.register({ ...requested, attestation: { ...attestation(), organizationId: 'synthetic-other' } }), 'YIDA_APPROVED_TARGET_CONFLICT')

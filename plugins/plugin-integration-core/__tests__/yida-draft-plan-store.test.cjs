@@ -606,3 +606,28 @@ test('R-71 ⑦.3: changing the sealed mapping version fails the recompile check 
     await rejected(f.store.inspect({ operationId: made.operationId }), 'UNAVAILABLE')
   }
 })
+
+// D2 (owner 2026-11-07, R-88): the material-code form is sealed with the target's key definition by the first draft of a
+// locator (the initialization draft of a slot), so a later draft declaring another form can never reach the same target:
+// one identity never gets two codes. The default (absent or 'uuid-36') is today's key definition, byte for byte.
+test('D2 seal: a target first sealed with the default form refuses a uuid-32 draft, and one sealed uuid-32 refuses the default (KEY_DEFINITION_CONFLICT)', async () => {
+  const withForm = (input, form) => ({ ...input, config: { ...input.config, materialCodeForm: form } })
+  const sealedDefault = await fixture(), input = await example()
+  const made = await sealedDefault.store.createDraft(input), before = sealedDefault.snapshot()
+  await rejected(sealedDefault.store.createDraft(withForm(input, 'uuid-32')), 'KEY_DEFINITION_CONFLICT')
+  assert.equal(JSON.stringify(sealedDefault.snapshot()) === JSON.stringify(before), true)
+  // An explicit uuid-36 is the same key definition: the same target and the same operation are reused.
+  const explicit = await sealedDefault.store.createDraft(withForm(input, 'uuid-36'))
+  assert.equal(explicit.targetRef, made.targetRef)
+  assert.equal(explicit.operationId, made.operationId)
+  assert.equal(sealedDefault.snapshot()[TARGET].length, 1)
+
+  const sealed32 = await fixture()
+  const first = await sealed32.store.createDraft(withForm(input, 'uuid-32')), sealedState = sealed32.snapshot()
+  assert.notEqual(sealedState[TARGET][0].key_definition_digest, before[TARGET][0].key_definition_digest)
+  for (const later of [input, withForm(input, 'uuid-36')]) await rejected(sealed32.store.createDraft(later), 'KEY_DEFINITION_CONFLICT')
+  assert.equal(JSON.stringify(sealed32.snapshot()) === JSON.stringify(sealedState), true)
+  const again = await sealed32.store.createDraft(withForm(input, 'uuid-32'))
+  assert.equal(again.targetRef, first.targetRef)
+  assert.equal(again.operationId, first.operationId)
+})

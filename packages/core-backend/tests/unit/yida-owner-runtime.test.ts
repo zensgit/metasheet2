@@ -26,6 +26,7 @@ type FakeAuthority = {
   preview(input: unknown): Promise<unknown>
   approvals: { approve(input: unknown): Promise<unknown>; revoke(input: unknown): Promise<unknown> }
   observe(input: unknown): Promise<unknown>
+  proveDraftTarget(input: unknown): Promise<unknown>
 }
 type Factory = (deps: CoreDependencies) => FakeAuthority
 const nativeRequire = createRequire(import.meta.url)
@@ -54,6 +55,7 @@ function fakeAuthority(): FakeAuthority {
     preview: vi.fn(async () => selected),
     approvals: { approve: vi.fn(async () => approval), revoke: vi.fn(async () => approval) },
     observe: vi.fn(async () => Object.freeze({ approval, delivery: null })),
+    proveDraftTarget: vi.fn(async () => Object.freeze({ proven: true })),
   }
 }
 function loadRuntime(factory: Factory, source = originalSource, ownCoreErrors = new WeakMap<object, string>()): RuntimeModule {
@@ -74,6 +76,8 @@ function fixture(options: {
   factory?: Factory; database?: YidaOwnerRuntimeDependencies['database']
   security?: YidaOwnerRuntimeDependencies['security']; result?: unknown
   readMultiTarget?: () => unknown
+  // D17 b (R-88): INTEGRATION_YIDA_SHEET_SOURCE_ENABLED as the runtime reads it; handed over only when present.
+  readSheetSource?: () => unknown
   // D21 (slice Y5): the host's in-transaction re-authorizer; handed to the runtime only when the option is present.
   reauthorizeSourceBinding?: unknown
 } = {}) {
@@ -87,6 +91,7 @@ function fixture(options: {
   const readEnablement = vi.fn(options.readEnablement ?? (() => Object.hasOwn(options, 'enablement') ? options.enablement : 'true'))
   const runtime = module.createYidaOwnerRuntime({ database, security, fetch: fetcher, readEnablement,
     ...(options.readMultiTarget ? { readMultiTargetEnablement: options.readMultiTarget } : {}),
+    ...(options.readSheetSource ? { readSheetSourceEnablement: options.readSheetSource } : {}),
     ...(Object.hasOwn(options, 'reauthorizeSourceBinding')
       ? { reauthorizeSourceBinding: options.reauthorizeSourceBinding as YidaOwnerRuntimeDependencies['reauthorizeSourceBinding'] } : {}) })
   const submit = vi.fn(async () => options.result ?? delivered)
@@ -107,9 +112,9 @@ async function active(options: Parameters<typeof fixture>[0] = {}) {
 const boundDraft = Object.freeze({ config: {}, rowsText: '[]', sourceBinding: Object.freeze({ sheetId: 'synthetic-sheet' }) })
 const MULTI_TARGET_OFF: ReadonlyArray<[string, (() => unknown) | undefined]> = [['absent', undefined], ["'false'", () => 'false'],
   ["'TRUE'", () => 'TRUE'], ['boolean true', () => true], ['throwing', () => { throw new Error('synthetic-private-switch') }]]
-async function sourceBindingRefusedWhileOff(source = originalSource) {
+async function sourceBindingRefusedWhileOff(source = originalSource, readSheetSource?: () => unknown) {
   for (const [name, readMultiTarget] of MULTI_TARGET_OFF) {
-    const f = await active({ source, readMultiTarget })
+    const f = await active({ source, readMultiTarget, readSheetSource })
     try {
       await expect(f.runtime.prepareDraft(actor, boundDraft), name).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
       expect(f.authority.prepareDraft, name).not.toHaveBeenCalled()
@@ -118,6 +123,51 @@ async function sourceBindingRefusedWhileOff(source = originalSource) {
     } finally { await f.runtime.stop() }
   }
 }
+
+// D17 b (owner 2026-11-07, R-88): INTEGRATION_YIDA_SHEET_SOURCE_ENABLED. With multi-target OFF, a binding (and the
+// owner proof the route runs before its sheet read) is admitted only while this switch reads exactly 'true'.
+const SHEET_SOURCE_OFF: ReadonlyArray<[string, (() => unknown) | undefined]> = [['absent', undefined], ["'false'", () => 'false'],
+  ["'TRUE'", () => 'TRUE'], ["' true'", () => ' true'], ["'true '", () => 'true '], ['boolean true', () => true], ["'1'", () => '1'],
+  ['throwing', () => { throw new Error('synthetic-private-switch') }]]
+async function sheetSourceRefusedWhileOff(source = originalSource) {
+  for (const [name, readSheetSource] of SHEET_SOURCE_OFF) {
+    const f = await active({ source, readMultiTarget: () => 'false', readSheetSource })
+    try {
+      expect(f.runtime.sheetSourceEnabled(), name).toBe(false)
+      await expect(f.runtime.prepareDraft(actor, boundDraft), name).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+      await expect(f.runtime.proveDraftOwner(actor, {}), name).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+      expect(f.authority.prepareDraft, name).not.toHaveBeenCalled()
+      expect(f.authority.proveDraftTarget, name).not.toHaveBeenCalled()
+      expect(f.coreFactory, name).not.toHaveBeenCalled()
+      expect(f.database.transaction, name).not.toHaveBeenCalled()
+    } finally { await f.runtime.stop() }
+  }
+}
+// The run's authority is told about the sheet source only while the switch reads exactly 'true'.
+async function sheetSourceAuthorityBit(source = originalSource) {
+  const { sourceBinding: _binding, ...pasted } = boundDraft
+  for (const [name, readSheetSource, expected] of [['off', () => 'false', false], ['on', () => 'true', true]] as const) {
+    const f = await active({ source, readMultiTarget: () => 'false', readSheetSource })
+    try {
+      await f.runtime.prepareDraft(actor, pasted)
+      const deps = f.coreFactory.mock.calls[0][0] as unknown as Record<string, unknown>
+      expect(Object.hasOwn(deps, 'sheetSource'), name).toBe(expected)
+      if (expected) expect(deps.sheetSource, name).toBe(true)
+      expect(Object.hasOwn(deps, 'multiTarget'), name).toBe(false)
+    } finally { await f.runtime.stop() }
+  }
+}
+// Sheet source without multi-target is slot 1 only: a targetRef stays refused on the draft and on the owner proof.
+async function sheetSourceKeepsSlotOne(source = originalSource) {
+  const f = await active({ source, readMultiTarget: () => 'false', readSheetSource: () => 'true' })
+  try {
+    await expect(f.runtime.prepareDraft(actor, { ...boundDraft, targetRef: TARGET_REF_FIXTURE })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+    await expect(f.runtime.proveDraftOwner(actor, { targetRef: TARGET_REF_FIXTURE })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+    expect(f.authority.prepareDraft).not.toHaveBeenCalled()
+    expect(f.authority.proveDraftTarget).not.toHaveBeenCalled()
+  } finally { await f.runtime.stop() }
+}
+const TARGET_REF_FIXTURE = '00000000-0000-4000-8000-0000000000aa'
 
 const networkSpies: ReturnType<typeof vi.spyOn>[] = []
 beforeAll(() => {
@@ -551,6 +601,31 @@ describe('Yida owner runtime control paths (NOT positive authority proof)', () =
     } finally { await off.runtime.stop() }
   })
 
+  it('D17 b: with multi-target OFF, a sourceBinding and the owner proof need the sheet-source switch to read exactly true', async () => {
+    await sheetSourceRefusedWhileOff()
+    // The Y6 pin still holds with the new reader absent (above: sourceBindingRefusedWhileOff, no sheet-source reader).
+    await sourceBindingRefusedWhileOff(originalSource, () => 'false')
+    // Positive control: switch exactly 'true' -> the same bound input reaches the authority unchanged; the owner proof
+    // runs (no targetRef); the shape bit reads true; the authority gets sheetSource and never multiTarget.
+    const on = await active({ readMultiTarget: () => 'false', readSheetSource: () => 'true' })
+    try {
+      expect(on.runtime.sheetSourceEnabled()).toBe(true)
+      expect(on.runtime.multiTargetEnabled()).toBe(false)
+      await expect(on.runtime.prepareDraft(actor, boundDraft)).resolves.toEqual({ operationId: 'synthetic-operation' })
+      expect(on.authority.prepareDraft.mock.calls[0][0]).toEqual(boundDraft)
+      await expect(on.runtime.proveDraftOwner(actor, {})).resolves.toEqual({ proven: true })
+      expect(on.authority.proveDraftTarget.mock.calls[0][0]).toEqual({})
+    } finally { await on.runtime.stop() }
+    await sheetSourceAuthorityBit()
+    await sheetSourceKeepsSlotOne()
+    // With multi-target ON the switch changes nothing: a targetRef is still accepted whatever it reads.
+    const multi = await active({ readMultiTarget: () => 'true', readSheetSource: () => 'false' })
+    try {
+      await expect(multi.runtime.proveDraftOwner(actor, { targetRef: TARGET_REF_FIXTURE })).resolves.toEqual({ proven: true })
+      await expect(multi.runtime.prepareDraft(actor, boundDraft)).resolves.toEqual({ operationId: 'synthetic-operation' })
+    } finally { await multi.runtime.stop() }
+  })
+
   it('projects a closed submit view and rejects execution authority/material additions', async () => {
     for (const key of ['permit', 'handle', 'credential', 'material', 'token', 'config']) {
       const f = await active({ result: { ...delivered, [key]: 'synthetic-private' } })
@@ -847,8 +922,19 @@ describe('in-memory guard mutation probes (no repository writes)', () => {
         try { await expect(f.runtime.submit(actor, submission)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_UNAVAILABLE' }) }
         finally { await f.runtime.stop() }
       } },
-      { name: 'draft/source-binding-switch-gated', from: "if (Object.hasOwn(parsed, 'sourceBinding') && !multiTargetOn()) fail('INPUT')", to: '',
+      { name: 'draft/source-binding-switch-gated', from: "if (Object.hasOwn(parsed, 'sourceBinding') && !sourceBindingOn()) fail('INPUT')", to: '',
         test: source => sourceBindingRefusedWhileOff(source) },
+      // D17 b (R-88): the sheet-source switch is its own exact literal; a folded or trimmed read must not admit a binding.
+      { name: 'draft/sheet-source-exact-literal', from: "try { flag = readSheetSource() } catch { return false }\n    const on = flag === 'true'",
+        to: "try { flag = readSheetSource() } catch { return false }\n    const on = String(flag).trim().toLowerCase() === 'true'",
+        test: source => sheetSourceRefusedWhileOff(source) },
+      { name: 'draft/source-binding-needs-a-switch', from: 'const sourceBindingOn = (): boolean => multiTargetOn() || sheetSourceOn()', to: 'const sourceBindingOn = (): boolean => true',
+        test: source => sheetSourceRefusedWhileOff(source) },
+      { name: 'authority/sheet-source-only-when-on', from: "...(sheetSourceOn() ? { sheetSource: true } : {}),", to: 'sheetSource: true,',
+        test: source => sheetSourceAuthorityBit(source) },
+      { name: 'prove/target-needs-multi-target', from: "if (Object.hasOwn(parsed, 'targetRef') && !multiTargetOn()) fail('INPUT')\n        return Object.hasOwn(parsed, 'targetRef') ? { targetRef: id(parsed.targetRef) } : {}",
+        to: "return Object.hasOwn(parsed, 'targetRef') ? { targetRef: id(parsed.targetRef) } : {}",
+        test: source => sheetSourceKeepsSlotOne(source) },
       { name: 'errors/own-runtime-brand', from: 'if (own) fail(own)', to: '', test: async source => {
         const f = await active({ source, enablement: 'false' })
         try { await expect(f.runtime.preview(actor, selected)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' }) }

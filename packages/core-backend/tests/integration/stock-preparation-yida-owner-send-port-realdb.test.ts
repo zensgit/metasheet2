@@ -73,7 +73,7 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
   let schema = '', ddl = ''
   let createDb: (options: { database: Database }) => unknown
   let createAuthority: (options: { database: { transaction<T>(callback: (trx: Queryable) => Promise<T>): Promise<T> }
-    security: HostSecurity; context: { actorId: string; tenantId: string; workspaceId: null }; primitives: unknown }) => Authority
+    security: HostSecurity; context: { actorId: string; tenantId: string; workspaceId: null }; primitives: unknown; sheetSource?: true }) => Authority
   let createPrimitives: (options: { security: HostSecurity; context: Context }) => unknown
   let createPort: (options: { db: unknown; context: Row; authority: Authority; fetch: FetchDouble['fetch']
     readEnablement?: () => unknown; timeoutMs?: number }) => Port
@@ -193,7 +193,7 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     doubles.push(value); return value
   }
   // Gate 4: `budget` overrides only the send-budget verdict (null = the real primitive verdict).
-  async function session(scope = context(), budget?: { within: boolean | null; calls: number }): Promise<Session> {
+  async function session(scope = context(), budget?: { within: boolean | null; calls: number }, switches: { sheetSource?: true } = {}): Promise<Session> {
     const client = await pool.connect()
     await client.query(`SET search_path TO ${ident(schema)}`)
     await client.query("SET statement_timeout='10s'")
@@ -236,7 +236,7 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
       return budget.within === null ? verdict : Object.freeze({ withinBudget: budget.within })
     } } : real
     const authority = createAuthority({ database, security, context: { actorId: scope.ownerId, tenantId: scope.tenantId, workspaceId: null },
-      primitives })
+      primitives, ...switches })
     const value: Session = { client, pid, db, authority, statements, draft: createDraft(config), target: createTarget(config),
       material: createMaterial(config), ledger: createLedger({ db }),
       port(fake, enablement = () => 'true', timeoutMs = 10000) {
@@ -864,5 +864,27 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     const within = await first.authority.prepareDraft(liftV3(input(), constants(2)))
     expect(within.reused).toBe(false)
     expect(await draftCounts()).toEqual([before[0], before[1] + 1, before[2] + 1, before[3] + 1])
+  })
+  // D17 b (owner 2026-11-07, R-88): INTEGRATION_YIDA_SHEET_SOURCE_ENABLED. Without multi-target, the run's authority takes the
+  // host's sheet-source binding only when the runtime told it the switch is on (sheetSource: true); the bound draft lands on
+  // slot 1 with both binding digests. Off (today's coupling, D17 a) the same input is refused at the closed key set.
+  it('D17 b: the single-target authority drafts a bound slot-1 draft only with the sheet-source bit; without it the binding key is refused', async () => {
+    await slot()
+    const value = input()
+    const bound = { ...value, sourceBinding: { sheetId: 'synthetic-sheet', keyFieldId: 'fld_line',
+      fieldBindings: { projectNo: 'fld_project', lineId: 'fld_line', parentCode: 'fld_parent', quantity: 'fld_qty', description: 'fld_description' },
+      records: [{ recordId: 'synthetic-record-1', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }] } }
+    const before = await draftCounts()
+    await rejected(first.authority.prepareDraft(bound), 'YIDA_SEND_APPROVAL_INPUT')
+    expect(await draftCounts()).toEqual(before)
+    const switched = await session(context(), undefined, { sheetSource: true })
+    const drafted = await switched.authority.prepareDraft(bound)
+    expect(drafted.reused).toBe(false)
+    const members = (await tableRows('integration_yida_draft_rows')).filter(row => row.operation_id === drafted.operationId)
+    expect(members).toHaveLength(1)
+    expect(/^[0-9a-f]{64}$/.test(String(members[0].source_record_digest)) && /^[0-9a-f]{64}$/.test(String(members[0].creation_identity_digest))).toBe(true)
+    // The same slot as the unbound initialization draft, and still never a targetRef without multi-target.
+    expect(drafted.targetRef).toBe((await tableRows('integration_yida_draft_targets'))[0].target_ref)
+    await rejected(switched.authority.prepareDraft({ ...bound, targetRef: drafted.targetRef }), 'YIDA_SEND_APPROVAL_INPUT')
   })
 })

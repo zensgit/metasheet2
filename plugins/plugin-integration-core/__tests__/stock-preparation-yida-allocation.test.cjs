@@ -535,3 +535,85 @@ test('A5 generated after allocation: one code per split row, original equals a s
   assert.deepEqual(validateYidaProjectAllocationRules(example.config, rules), rules)
   assert.deepEqual(validateYidaProjectAllocationRules(hashed, rules), rules)
 })
+
+// ---- Q4 (owner 2026-11-07, R-88: an open question gets a configurable default): allocation.quantityRounding ----
+// 'exact' (default) keeps today's exact even split; 'legacy-1dp' is the legacy rule (each share rounded half-up to one
+// decimal), which changes totals. Absent must stay byte-identical: the pinned preview below was captured on the
+// pre-change head (b6dc5f4d2 + main merge d59a15525) before quantityRounding existed.
+const Q4_DEFAULT_PREVIEW_SHA256 = '907b701c3877715e5bdf0a1303d8e29e571ebc64c1add9f8758baed7d62e5d9f'
+async function q4DecimalInput(patch = {}) {
+  const { createYidaTransformExample } = await plannerPromise
+  const example = createYidaTransformExample()
+  const rows = example.rows.map((row, index) => ({ ...row, totalQuantity: index === 0 ? 0.5 : 1.25 }))
+  return { config: example.config, rowsText: JSON.stringify(rows),
+    allocation: { mode: 'equal_decimal_exact', projectField: 'projectNo', quantityField: 'totalQuantity', projects: ['DEMO-P1', 'DEMO-P2'], ...patch } }
+}
+const q4Sha = (value) => require('node:crypto').createHash('sha256').update(JSON.stringify(value)).digest('hex')
+
+test('Q4 default: absent quantityRounding is byte-identical to the pre-change preview, and explicit exact is the same rule', async () => {
+  const { buildYidaProjectAllocationPreview, expandYidaProjectAllocationRows } = await modulePromise
+  const absent = buildYidaProjectAllocationPreview(await q4DecimalInput())
+  assert.equal(q4Sha(absent), Q4_DEFAULT_PREVIEW_SHA256)
+  assert.deepEqual(absent.analysis.map((entry) => [entry.perProjectQuantity, entry.allocatedTotal, entry.difference]), [[0.25, 0.5, 0], [0.625, 1.25, 0]])
+  const exact = buildYidaProjectAllocationPreview(await q4DecimalInput({ quantityRounding: 'exact' }))
+  assert.equal(q4Sha(exact), Q4_DEFAULT_PREVIEW_SHA256)
+  assert.deepEqual(expandYidaProjectAllocationRows(await q4DecimalInput({ quantityRounding: 'exact' })),
+    expandYidaProjectAllocationRows(await q4DecimalInput()))
+  // Exact still refuses what it cannot split: 1/3 has no finite decimal share.
+  const refused = buildYidaProjectAllocationPreview({ config: layoutA(), rowsText: JSON.stringify([rowA(1)]),
+    allocation: settings({ mode: 'equal_decimal_exact', quantityRounding: 'exact' }) })
+  assert.deepEqual(refused.issues, [{ index: 0, code: 'QUANTITY_NOT_DIVISIBLE' }])
+  assert.equal(refused.plan, null)
+})
+
+test('Q4 legacy-1dp: shares rounded half-up to one decimal in integer arithmetic, the changed total and its difference reported', async () => {
+  const { buildYidaProjectAllocationPreview, expandYidaProjectAllocationRows } = await modulePromise
+  for (const [source, projects, each, allocatedTotal, difference] of [
+    [1, ['P-1', 'P-2', 'P-3'], 0.3, 0.9, -0.1], // exact refuses 1/3; legacy keeps one decimal
+    [1.25, ['P-1', 'P-2'], 0.6, 1.2, -0.05], // 0.625 -> 0.6
+    [0.1, ['P-1', 'P-2'], 0.1, 0.2, 0.1], // 0.05 -> 0.1: half rounds up
+    [0.3, ['P-1', 'P-2', 'P-3', 'P-4'], 0.1, 0.4, 0.1], // 0.075 -> 0.1
+    [0.25, ['P-1'], 0.3, 0.3, 0.05], // even one project: the legacy rule always keeps one decimal
+    [6, ['P-1', 'P-2', 'P-3'], 2, 6, 0], // an exact one-decimal share keeps the total
+    [0, ['P-1', 'P-2'], 0, 0, 0],
+  ]) {
+    const input = { config: layoutA(), rowsText: JSON.stringify([rowA(source)]),
+      allocation: settings({ mode: 'equal_decimal_exact', projects, quantityRounding: 'legacy-1dp' }) }
+    const result = buildYidaProjectAllocationPreview(input)
+    assert.deepEqual(result.issues, [], String(source))
+    assert.deepEqual(result.plan.rows.map((item) => item.payload.qty), projects.map(() => each), String(source))
+    assert.deepEqual([result.analysis[0].perProjectQuantity, result.analysis[0].allocatedTotal, result.analysis[0].difference],
+      [each, allocatedTotal, difference], String(source))
+    assert.equal(result.analysis[0].sourceTotal, source)
+    assert.deepEqual(expandYidaProjectAllocationRows(input).map((row) => row.quantity), projects.map(() => each))
+  }
+  // A positive quantity whose share rounds to 0 is refused: a split never silently drops a quantity.
+  const vanishing = buildYidaProjectAllocationPreview({ config: layoutA(), rowsText: JSON.stringify([rowA(0.04)]),
+    allocation: settings({ mode: 'equal_decimal_exact', projects: ['P-1', 'P-2'], quantityRounding: 'legacy-1dp' }) })
+  assert.deepEqual(vanishing.issues, [{ index: 0, code: 'QUANTITY_PRECISION' }])
+  assert.equal(vanishing.plan, null)
+  // The default decimal preview under legacy differs exactly where the shares were not one-decimal.
+  const legacy = buildYidaProjectAllocationPreview(await q4DecimalInput({ quantityRounding: 'legacy-1dp' }))
+  assert.deepEqual(legacy.analysis.map((entry) => [entry.perProjectQuantity, entry.allocatedTotal, entry.difference]), [[0.3, 0.6, 0.1], [0.6, 1.2, -0.05]])
+  assert.notEqual(q4Sha(legacy), Q4_DEFAULT_PREVIEW_SHA256)
+})
+
+test('Q4 closed values: legacy-1dp is decimal-mode only, any other value or type is SETTINGS_INVALID, on the preview and the rule check alike', async () => {
+  const { buildYidaProjectAllocationPreview: build, validateYidaProjectAllocationRules, YidaAllocationError } = await modulePromise
+  const base = { config: layoutA(), rowsText: JSON.stringify([rowA()]) }
+  const rules = { mode: 'equal_integer', projectField: 'projectNo', quantityField: 'quantity' }
+  for (const bad of [{ quantityRounding: 'legacy-1dp' }, { quantityRounding: 'round' }, { quantityRounding: 'EXACT' },
+    { quantityRounding: '' }, { quantityRounding: null }, { quantityRounding: true }, { quantityRounding: 1 },
+    { mode: 'equal_decimal_exact', quantityRounding: 'legacy-2dp' }, { mode: 'equal_decimal_exact', quantityRounding: ' legacy-1dp' }]) {
+    expectError(() => build({ ...base, allocation: settings(bad) }), 'YIDA_ALLOCATION_SETTINGS_INVALID', YidaAllocationError)
+    expectError(() => validateYidaProjectAllocationRules(layoutA(), { ...rules, ...bad }), 'YIDA_ALLOCATION_SETTINGS_INVALID', YidaAllocationError)
+  }
+  // Present values are kept verbatim by the rule check (templates); absent stays absent.
+  assert.deepEqual(validateYidaProjectAllocationRules(layoutA(), rules), rules)
+  assert.deepEqual(validateYidaProjectAllocationRules(layoutA(), { ...rules, quantityRounding: 'exact' }), { ...rules, quantityRounding: 'exact' })
+  assert.deepEqual(validateYidaProjectAllocationRules(layoutA(), { ...rules, mode: 'equal_decimal_exact', quantityRounding: 'legacy-1dp' }),
+    { ...rules, mode: 'equal_decimal_exact', quantityRounding: 'legacy-1dp' })
+  // An unknown key is still refused next to the optional one.
+  expectError(() => build({ ...base, allocation: { ...settings({ quantityRounding: 'exact' }), endpoint: 'x' } }),
+    'YIDA_ALLOCATION_SETTINGS_INVALID', YidaAllocationError)
+})

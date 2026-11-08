@@ -1049,3 +1049,165 @@ test('generated SR1: a rebuilt bound draft keeps the code bytes and the source r
   assert.equal(reordered.planDigest, first.planDigest)
   assert.deepEqual(reordered.rowSpecs, first.rowSpecs)
 })
+
+// ---- YD (owner 2026-11-07, R-88: an open question gets a configurable default; the default is today's behaviour) ----
+// Pre-change goldens, captured on b6dc5f4d2 + main merge d59a15525 before the options existed (local, never-persisted
+// compile of the v3 example split two ways with decimal quantities 0.5 / 1.25).
+const YD_V3_DECIMAL_GOLDEN = {
+  planDigest: 'b167c893df12da6f944c534944e8bcb43bb60002955023617b576d30af8d950a',
+  keyDefinitionDigest: 'd320bf2a69eeff33b75ad11af51a50f8000d62d2dc0965bf16d35ef283a96f26',
+}
+async function ydDecimalInput(patch = {}) {
+  const { createYidaTransformExample } = await plannerPromise
+  const example = createYidaTransformExample()
+  const rows = example.rows.map((entry, index) => ({ ...entry, totalQuantity: index === 0 ? 0.5 : 1.25 }))
+  return { config: example.config, rowsText: JSON.stringify(rows),
+    allocation: { mode: 'equal_decimal_exact', projectField: 'projectNo', quantityField: 'totalQuantity', projects: ['DEMO-P1', 'DEMO-P2'], ...patch } }
+}
+
+test('Q4 plan digest: absent and explicit exact are the pre-change digest; legacy-1dp is its own digest even when every share is exact', async () => {
+  const { compileYidaDraft, compileYidaSendDraft, YidaDraftPlanError } = await modulePromise
+  const { compileYidaLocalDraft } = await compilerPromise
+  for (const patch of [{}, { quantityRounding: 'exact' }]) {
+    const compiled = compileYidaLocalDraft(await ydDecimalInput(patch))
+    assert.equal(compiled.planDigest, YD_V3_DECIMAL_GOLDEN.planDigest)
+    assert.equal(compiled.keyDefinitionDigest, YD_V3_DECIMAL_GOLDEN.keyDefinitionDigest)
+  }
+  // The literal v2 material golden through both persisted entries with an explicit 'exact'.
+  const { material } = await goldenInputs()
+  const explicit = { ...material, allocation: { ...material.allocation, quantityRounding: 'exact' } }
+  for (const compile of [compileYidaDraft, compileYidaSendDraft]) {
+    const compiled = compile(explicit)
+    assert.equal(compiled.planDigest, V2_GOLDEN.material.planDigest)
+    assert.equal(compiled.keyDefinitionDigest, V2_GOLDEN.material.keyDefinitionDigest)
+  }
+  // 4 / 2 and 6 / 2: the legacy shares equal the exact ones, the rows are the same bytes, the plan digest is not.
+  const decimal = { ...material, allocation: { ...material.allocation, mode: 'equal_decimal_exact' } }
+  const exact = compileYidaSendDraft(decimal)
+  const legacy = compileYidaSendDraft({ ...decimal, allocation: { ...decimal.allocation, quantityRounding: 'legacy-1dp' } })
+  assert.deepEqual(legacy.plan, exact.plan)
+  assert.deepEqual(legacy.rowSpecs, exact.rowSpecs)
+  assert.notEqual(legacy.planDigest, exact.planDigest)
+  assert.equal(legacy.keyDefinitionDigest, exact.keyDefinitionDigest)
+  // A legacy share that is not exact changes the rows (and the plan digest) too.
+  const rounded = compileYidaLocalDraft(await ydDecimalInput({ quantityRounding: 'legacy-1dp' }))
+  assert.deepEqual(rounded.plan.rows.map((row) => row.payload.totalQty), [0.3, 0.3, 0.6, 0.6])
+  assert.notEqual(rounded.planDigest, YD_V3_DECIMAL_GOLDEN.planDigest)
+  // The compiler's closed allocation shape: the optional key, never on original, never another key.
+  expectError(compileYidaSendDraft, YidaDraftPlanError, { ...material, allocation: { mode: 'original', quantityRounding: 'exact' } }, 'YIDA_DRAFT_INPUT')
+  expectError(compileYidaSendDraft, YidaDraftPlanError, { ...decimal, allocation: { ...decimal.allocation, quantityRounding: 'legacy-1dp', note: 'x' } }, 'YIDA_DRAFT_INPUT')
+  // The allocation module owns the values: legacy-1dp on an integer split is refused (PLAN).
+  expectError(compileYidaSendDraft, YidaDraftPlanError, { ...material, allocation: { ...material.allocation, quantityRounding: 'legacy-1dp' } }, 'YIDA_DRAFT_PLAN')
+})
+
+// D2: the material-code form. 'uuid-36' (default) is Y2's code byte for byte; 'uuid-32' drops the UUID's hyphens after
+// the WLBH- prefix. The form is part of the key definition only when 'uuid-32', so it is sealed with the slot.
+const uuid32 = (code) => 'WLBH-' + code.slice(5).replaceAll('-', '')
+const presetForm = (form) => (layout) => {
+  layout.fieldMap.find((entry) => entry.transform === 'generated').template[0].form = form
+  return layout
+}
+const rootForm = (form, inner = (layout) => layout) => (layout) => ({ ...inner(layout), materialCodeForm: form })
+
+test('D2 default: absent, root uuid-36, preset uuid-36 or both compile byte-identically, the 41-character Y2 code and the golden key definition', async () => {
+  const { compileYidaSendDraft } = await modulePromise
+  const { compileYidaLocalDraft } = await compilerPromise
+  const base = await generatedInput()
+  const absent = compileYidaSendDraft(base.bound)
+  assert.equal(absent.keyDefinitionDigest, V2_GOLDEN.material.keyDefinitionDigest)
+  assert.deepEqual(Object.keys(absent.keyDefinition).sort(), ['algorithm', 'fields'])
+  assert.equal(Object.hasOwn(absent.source.config, 'materialCodeForm'), false)
+  for (const [index, code] of codesOf(absent).entries()) {
+    assert.equal(code, oracleMaterialCode(base.rows[index].idempotencyKey, 'DEMO-P1'))
+    assert.equal(code.length, 41)
+  }
+  for (const patch of [rootForm('uuid-36'), presetForm('uuid-36'), rootForm('uuid-36', presetForm('uuid-36'))]) {
+    const declared = compileYidaSendDraft((await generatedInput({ config: patch })).bound)
+    assert.equal(declared.planDigest, absent.planDigest)
+    assert.equal(declared.keyDefinitionDigest, absent.keyDefinitionDigest)
+    assert.deepEqual(declared.plan, absent.plan)
+    assert.deepEqual(declared.rowSpecs, absent.rowSpecs)
+    assert.equal(declared.source.config.materialCodeForm, 'uuid-36')
+  }
+  // The split local compile keeps its pre-change digest too.
+  assert.equal(compileYidaLocalDraft(await ydDecimalInput()).keyDefinitionDigest, YD_V3_DECIMAL_GOLDEN.keyDefinitionDigest)
+})
+
+test('D2 uuid-32: the 37-character code is the Y2 code without the UUID hyphens, from the root, the preset or both; the form is in the key definition', async () => {
+  const { compileYidaSendDraft } = await modulePromise
+  const base = await generatedInput()
+  const defaults = compileYidaSendDraft(base.bound)
+  const results = []
+  for (const patch of [presetForm('uuid-32'), rootForm('uuid-32'), rootForm('uuid-32', presetForm('uuid-32'))]) {
+    const compiled = compileYidaSendDraft((await generatedInput({ config: patch })).bound)
+    for (const [index, code] of codesOf(compiled).entries()) {
+      assert.equal(code, uuid32(oracleMaterialCode(base.rows[index].idempotencyKey, 'DEMO-P1')))
+      assert.match(code, /^WLBH-[0-9A-F]{32}$/)
+      assert.equal(code.length, 37)
+    }
+    assert.deepEqual(compiled.keyDefinition, { ...defaults.keyDefinition, materialCodeForm: 'uuid-32' })
+    assert.notEqual(compiled.keyDefinitionDigest, defaults.keyDefinitionDigest)
+    assert.notEqual(compiled.planDigest, defaults.planDigest)
+    assert.equal(compiled.source.config.materialCodeForm, 'uuid-32')
+    results.push(compiled)
+  }
+  // Wherever it is declared, one form gives one draft: same plan, same digests.
+  for (const other of results.slice(1)) {
+    assert.equal(other.planDigest, results[0].planDigest)
+    assert.equal(other.keyDefinitionDigest, results[0].keyDefinitionDigest)
+  }
+  // A split gets one code per split row in the chosen form as well.
+  const split = compileYidaSendDraft((await generatedInput({ config: presetForm('uuid-32'),
+    allocation: { mode: 'equal_integer', projectField: 'projectNo', quantityField: 'totalQuantity', projects: ['DEMO-P1', 'DEMO-P2'] } })).bound)
+  assert.equal(codesOf(split).length, 4)
+  assert.equal(new Set(codesOf(split)).size, 4)
+  for (const code of codesOf(split)) assert.match(code, /^WLBH-[0-9A-F]{32}$/)
+})
+
+test('D2 initialization seal: a v2 initialization draft declares uuid-32 at the root and gets exactly the key definition a v3 uuid-32 draft has', async () => {
+  const { compileYidaDraft, compileYidaSendDraft, YidaDraftPlanError } = await modulePromise
+  const { material } = await goldenInputs()
+  // Default and explicit uuid-36: the literal v2 goldens are unchanged (an L4-sealed slot keeps its digests).
+  for (const config of [material.config, { ...material.config, materialCodeForm: 'uuid-36' }]) {
+    const compiled = compileYidaDraft({ ...material, config })
+    assert.equal(compiled.planDigest, V2_GOLDEN.material.planDigest)
+    assert.equal(compiled.keyDefinitionDigest, V2_GOLDEN.material.keyDefinitionDigest)
+  }
+  const sealed = compileYidaDraft({ ...material, config: { ...material.config, materialCodeForm: 'uuid-32' } })
+  const v3 = compileYidaSendDraft((await generatedInput({ config: presetForm('uuid-32') })).bound)
+  assert.equal(sealed.keyDefinitionDigest, v3.keyDefinitionDigest)
+  assert.deepEqual(sealed.keyDefinition, v3.keyDefinition)
+  // The v2 rows themselves are unchanged (v2 has no generated value); only the key definition carries the form.
+  assert.deepEqual(sealed.rowSpecs, compileYidaDraft(material).rowSpecs)
+  assert.notEqual(sealed.planDigest, V2_GOLDEN.material.planDigest)
+  for (const bad of ['uuid-16', 'UUID-32', '', null, 32, true]) {
+    expectError(compileYidaDraft, YidaDraftPlanError, { ...material, config: { ...material.config, materialCodeForm: bad } }, 'YIDA_DRAFT_CONFIG')
+  }
+})
+
+test('D2 one form per config: a root and a preset that disagree, or an unknown preset form, are CONFIG_MATERIAL_CODE_FORM_INVALID / FIELD_MAP', async () => {
+  const { validateYidaStaticConfig, createYidaTransformExample } = await plannerPromise
+  const { compileYidaSendDraft, YidaDraftPlanError } = await modulePromise
+  const issueOf = (config) => validateYidaStaticConfig(config).issues
+  const example = () => structuredClone(createYidaTransformExample().config)
+  assert.deepEqual(issueOf(rootForm('uuid-36', presetForm('uuid-32'))(example())), [{ code: 'CONFIG_MATERIAL_CODE_FORM_INVALID', field: 'materialCodeForm' }])
+  assert.deepEqual(issueOf(rootForm('uuid-32', presetForm('uuid-36'))(example())), [{ code: 'CONFIG_MATERIAL_CODE_FORM_INVALID', field: 'materialCodeForm' }])
+  assert.deepEqual(issueOf(rootForm('uuid-16')(example())), [{ code: 'CONFIG_MATERIAL_CODE_FORM_INVALID', field: 'materialCodeForm' }])
+  // A preset part's form is closed like a hash part's: an unknown form is an invalid part.
+  assert.deepEqual(issueOf(presetForm('uuid-16')(example())), [{ code: 'CONFIG_FIELD_MAP_INVALID', field: 'fieldMap' }])
+  // Two preset parts naming two forms in one config are refused as well (one identity, one code).
+  const twoPresets = example()
+  const generated = twoPresets.fieldMap.find((entry) => entry.transform === 'generated')
+  twoPresets.fieldMap.push({ ...structuredClone(generated), target: 'materialCodeAlt' })
+  twoPresets.fieldCatalog.push({ id: 'materialCodeAlt', control: 'text', required: false })
+  generated.template[0].form = 'uuid-32'
+  twoPresets.fieldMap.at(-1).template[0].form = 'uuid-36'
+  assert.deepEqual(issueOf(twoPresets), [{ code: 'CONFIG_MATERIAL_CODE_FORM_INVALID', field: 'materialCodeForm' }])
+  // A preset part without a form follows the config's one declared form; both presets then mint uuid-32 codes.
+  delete twoPresets.fieldMap.at(-1).template[0].form
+  assert.equal(validateYidaStaticConfig(twoPresets).normalized.materialCodeForm, 'uuid-32')
+  twoPresets.fieldMap.at(-1).template[0].form = 'uuid-32'
+  assert.equal(validateYidaStaticConfig(twoPresets).normalized.materialCodeForm, 'uuid-32')
+  const { unbound } = await generatedInput()
+  expectError(compileYidaSendDraft, YidaDraftPlanError, { ...unbound, config: rootForm('uuid-36', presetForm('uuid-32'))(example()) }, 'YIDA_DRAFT_CONFIG')
+})

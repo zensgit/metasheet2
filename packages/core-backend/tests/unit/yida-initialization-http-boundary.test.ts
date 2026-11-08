@@ -191,3 +191,63 @@ describe('YiDa initialization HTTP contract — no IO fake host port', () => {
     }
   })
 })
+
+// YD (owner 2026-11-07, R-88: an open question gets a configurable default). The route's closed bodies for the new options.
+describe('YD configurable defaults at the HTTP boundary — no IO fake host port', () => {
+  it('Q4 / D2: the initialization body takes the optional quantityRounding and materialCodeForm; the plugin owns their values', async () => {
+    const f = port(), request = input()
+    const split = { mode: 'equal_decimal_exact', projects: ['SYN-P1', 'SYN-P2'], projectField: 'projectNo', quantityField: 'quantity' }
+    for (const draft of [
+      { ...request.draft, allocation: { ...split, quantityRounding: 'legacy-1dp' } },
+      { ...request.draft, config: { ...request.draft.config, materialCodeForm: 'uuid-32' } },
+    ]) expect((await dispatch('POST', { ...request, draft }, f.value)).status).toBe(201)
+    expect(f.calls).toHaveLength(2)
+    expect((f.calls[0].input as { draft: { allocation: unknown } }).draft.allocation).toEqual({ ...split, quantityRounding: 'legacy-1dp' })
+    // Still closed: quantityRounding never rides on original, and no other key is admitted next to either option.
+    for (const draft of [
+      { ...request.draft, allocation: { mode: 'original', quantityRounding: 'exact' } },
+      { ...request.draft, allocation: { ...split, quantityRounding: 'exact', rounding: 'x' } },
+      { ...request.draft, config: { ...request.draft.config, materialCodeForm: 'uuid-32', codeForm: 'uuid-32' } },
+    ]) expect((await dispatch('POST', { ...request, draft }, f.value)).status).toBe(400)
+    expect(f.calls).toHaveLength(2)
+  })
+
+  // D17 b: INTEGRATION_YIDA_SHEET_SOURCE_ENABLED (the owner runtime's exact boolean). The harness wires no sheet-source
+  // dependencies, so a body the route ADMITS onto the sheet path answers 503 there; a refused body is 400 first.
+  const sheetBody = { config: draftInput().config, allocation: { mode: 'original' },
+    source: { kind: 'sheet', sheetId: 'synthetic-sheet', projectNo: 'SYN-P1' } }
+  const ownerPort = (multi: unknown, sheet: unknown) => {
+    const calls: unknown[] = []
+    const value = {
+      sendEnabled: () => true, multiTargetEnabled: () => multi, sheetSourceEnabled: () => sheet,
+      async prepareDraft(_owner: unknown, request: unknown) { calls.push(request); return initialized().draft },
+      async proveDraftOwner() { return { proven: true } },
+    } as unknown as YidaOwnerHttpPort
+    return { value, calls }
+  }
+  const drafts = (body: unknown, owner: YidaOwnerHttpPort) => dispatch('POST', body, port().value, { url: '/drafts', owner })
+
+  it('D17 b: with multi-target OFF the sheet source is admitted only while the switch bit is exactly true, never with a targetRef', async () => {
+    for (const sheet of [false, undefined, 'true', 1]) {
+      const f = ownerPort(false, sheet)
+      expect((await drafts(sheetBody, f.value)).status, String(sheet)).toBe(400)
+      // The original pasted body is unchanged while OFF.
+      expect((await drafts({ ...draftInput() }, f.value)).status, String(sheet)).toBe(201)
+      expect(f.calls).toEqual([{ ...draftInput() }])
+    }
+    const on = ownerPort(false, true)
+    expect(await drafts(sheetBody, on.value)).toEqual({ status: 503, result: { ok: false, error: { code: 'YIDA_OWNER_HTTP_UNAVAILABLE' } } })
+    expect((await drafts({ ...sheetBody, targetRef }, on.value)).status).toBe(400)
+    expect((await drafts({ ...draftInput(), source: sheetBody.source }, on.value)).status).toBe(400)
+    // Pasted rows on the switch-ON body: forwarded without a targetRef or a binding.
+    expect((await drafts({ ...draftInput() }, on.value)).status).toBe(201)
+    expect(on.calls).toEqual([{ ...draftInput() }])
+    // A throwing bit is OFF.
+    const throwing = { ...ownerPort(false, true).value, sheetSourceEnabled: () => { throw new Error('PRIVATE_SWITCH_CANARY') } } as unknown as YidaOwnerHttpPort
+    expect((await drafts(sheetBody, throwing)).status).toBe(400)
+    // Multi-target ON is unchanged by the bit: a targetRef is admitted onto the sheet path.
+    for (const sheet of [false, true]) {
+      expect((await drafts({ ...sheetBody, targetRef }, ownerPort(true, sheet).value)).status).toBe(503)
+    }
+  })
+})
