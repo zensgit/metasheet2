@@ -4041,7 +4041,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             expect(answer.body.data).toMatchObject({ resolved: true, historyStatus: 'backfilled', historyBatchCount: 2, firstLiveBatchNo: 3, generationBumped: true })
             expect(JSON.stringify(answer.body).includes(k.st.projectNo)).toBe(false)
             const rows = await k.cells()
-            const old = rows.filter((row: any) => row.active === false)
+            const old = rows.filter((row: any) => row.active === false && row.id !== person.id)
             const fresh = rows.filter((row: any) => row.active !== false && row.id !== person.id)
             expect(old.length).toBe(4)
             for (const row of old) {
@@ -4117,12 +4117,13 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               const applied = await k.pull()
               expect(applied.body.data.pullBatch).toMatchObject({ stamped: true, batchNo: 1 })
             })
-            const liveBefore = (await k.cells()).filter((row: any) => row.current !== null)
-            expect(liveBefore).toHaveLength(4)
             await withPull(false, async () => {
               k.st.state.data = CF.secondPullSource()
               await k.pull()
             })
+            // The live batch's rows as the off-period pull left them (swept inactive, never re-stamped).
+            const liveBefore = (await k.cells()).filter((row: any) => row.current !== null)
+            expect(liveBefore).toHaveLength(4)
             // BI-R-WL: while an install holds the sheet, the real dry-run precheck names the holder's purpose.
             await k.st.lock.withProjectWriteLease(k.st.key, { purpose: 'pull_batch_install', runId: `pull-batch-install:wl-${TOKEN}`, tenantId: k.st.tenantId }, async () => {
               const held = await k.st.dryRun()
