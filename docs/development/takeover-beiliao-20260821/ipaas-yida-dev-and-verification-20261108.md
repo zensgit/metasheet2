@@ -43,11 +43,11 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
 | Y2 | 物料编码纯生成器 | #6766 | `3a7d92a7f` | Opus high PASS r2 |
 | Y3 | v3 进入持久化发送 | #6770 | `29a1c13ef` | Fable max PASS r1 |
 | Y4 | 绑定 B1：创建身份围栏、源记录绑定、执行摘要 v2、D20 | #6779 | `d2a66c47b` | Fable max r1 FIX_FIRST → PASS r2（20） |
-| Y5a | D21 授权版本协议（触发器兜底 + 显式递增 + 加锁辅助） | #6786 | `335bed8f3` | Fable max PASS r1；#6792 后锁顺序适配 Opus max r1 FIX_FIRST → PASS r2（30） |
+| Y5a | D21 授权版本协议（触发器兜底 + 显式递增 + 加锁辅助） | #6786 | `335bed8f3` | Fable max PASS r1；#6792 后锁顺序适配：Opus max r1 FIX_FIRST → Fable max PASS r2（30） |
 | Y5 | 绑定 B2：审批与准入事务内重新鉴权 | #6796 | `4acddf0ca` | Opus max PASS r1（40）→ 补测试增量 PASS（37）→ 随 Y5a 适配 PASS |
 | Y6a | generated 封闭部件模板核心 | #6777 | `9e95092a9` | Fable max PASS r1（44） |
-| Y6 | generated 接线、SOURCE_UNBOUND、真库 A9/A10、目标级布局封存（P1） | #6797 | `690777448` | Opus max r1 FIX_FIRST → PASS r2（57）；外部审阅 P1 → 修复 r1 FIX_FIRST → PASS r2（15 个变异 / 20 次红） |
-| Y7 | 修复路由补缺列加补锁 | #6768 | `ba1576ca3` | Opus high PASS r2；备料线审 |
+| Y6 | generated 接线、SOURCE_UNBOUND、真库 A9/A10、目标级布局封存（P1） | #6797 | `690777448` | Opus max r1 FIX_FIRST → Opus max PASS r2（57）；外部审阅 P1 → 修复后 Fable max r1 FIX_FIRST → Fable max PASS r2（15 个变异 / 20 次红） |
+| Y7 | 修复路由补缺列加补锁 | #6768 | `ba1576ca3` | Opus high PASS r2；备料线目前只把它当作 Y8 的底座看过，转正式前须由备料线单独明确审 |
 | Y8 | 模板加 issueConfirmDate / projectSpecModel | #6778 | `5cf4586a4` | Opus high PASS r1（19，含真库）；备料线审 FIX_FIRST（MF1）→ 修复 → 通过；收 VY8D-01 为 S3B-07 |
 | Y9a | 发料确认日期回写核心 | #6776 | `c6a0e52dd` | Fable max r1 FIX_FIRST → PASS r2（60） |
 | Y9 | 回写接线 + 真库崩溃测试 | #6812 | `eacd5d3c3` | PASS r1（25）→ 跟进增量 PASS（18） |
@@ -119,7 +119,7 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
 ## 6. 需要 owner 的事项
 
 ### 6.1 批准类（不在开发授权内）
-1. **合并与转正式**：上表全部 Draft PR，顺序见 §4。iPaaS 链在 R-69 裁定前不合并；Y3 在首次测试表单发送成功前保持 Draft（R-70 ③）。
+1. **合并与转正式**：上表全部 Draft PR，顺序见 §4。iPaaS 链在 R-69 裁定前不合并；Y3 在首次测试表单发送成功前保持 Draft（R-70 ③）；Y7 #6768 转正式前须由备料线单独明确审（备料线已对 Y8 #6778 给出明确结论）。
 2. **开关**（默认全关，精确 `'true'` 才开）：
    - 宜搭：`INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS`、`INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED` / `_TARGET_REFS`、`INTEGRATION_YIDA_RECONCILE_READ_ENABLED`、`INTEGRATION_YIDA_SHEET_SOURCE_ENABLED`；
    - 自动化：`INTEGRATION_AUTOMATION_RUN_*`（I3–I5）；
@@ -182,6 +182,7 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
   - 每片的核验报告在协调会话 scratchpad 的 `dev-program-20261106/verify-<片>-r<轮>/review.md`（本机临时目录，不入库）；
   - 各 PR 说明里都有见红变异表与本地 / CI 运行记录；
   - 开发账本是同目录的 `STATE.md`，代理规则与全部协调裁定在 `AGENT-RULES.md`。
+  - 以上证据（各轮 review.md、账本、规则、承接清单、原协调会话的冻结基线与补充裁定）已另存一份到本机 `E:/Projects/_program-evidence/ipaas-yida-20261106/`，不随会话临时目录清理。
 
 ## 10. 已知限制与后续
 
@@ -193,7 +194,7 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
 - **本机环境**：
   - 这几处只在 Windows 本机失败，CI 是裁判：`yida-owner-runtime.test.ts` 在 CRLF 工作区会 OOM（LF 副本通过）；开关清单测试 14 在 Windows 上有一处 CRLF 假红；两个浏览器车道文件需要 CI 的网络隔离。
   - 本轮新记的两个偶发失败（重跑一次失败作业即绿，已记入 memory）：考勤 w4c3c 锁等待、恢复启动 RECOVERY_LOCAL_CUSTODY_STORE_REFUSED。
-- **可选的 Fable 复核清单**（Fable 额度用完期间改用 Opus max 核验的片）：Y5（r1 与补测试）、Y5L、Y6 r1 / r2、YT 二段、I5 各轮。
+- **可选的 Fable 复核清单**（Fable 额度用完期间改用 Opus max 核验的片）：Y5（r1 与补测试增量）、Y5L r1、Y6 P1 之前的 r1 / r2、YT 二段、I5 各轮。
 
 ## 更新记录
 - 2026-11-08：定稿。全部切片开发完并通过独立核验；YE、I 链合 main 两项已补入。
