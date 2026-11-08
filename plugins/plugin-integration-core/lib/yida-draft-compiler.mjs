@@ -29,7 +29,11 @@ const MAX_KEY_VALUE_LENGTH = 4096
 //   SOURCE_KEY_MISMATCH      - a bound row whose preset rowIdOf cell is not the key value its binding names (the
 //                              key the server read): a preset reading another column could give one code to two
 //                              identities (one component under two parents), and no fence would refuse the second.
-const ROW_PROBLEM = Object.freeze({ SOURCE_UNBOUND: 'PLAN', SOURCE_PROJECT_MISMATCH: 'PLAN', SOURCE_KEY_MISMATCH: 'PLAN' })
+//   SOURCE_KEY_FIELD_MISMATCH - a bound draft whose preset rowIdOf does not NAME the bound key field (the direct target
+//                              whose source column the binding maps to keyFieldId): a column that merely holds the key's
+//                              value today may hold another value tomorrow (external review 2026-11-08, hardening).
+const ROW_PROBLEM = Object.freeze({ SOURCE_UNBOUND: 'PLAN', SOURCE_PROJECT_MISMATCH: 'PLAN', SOURCE_KEY_MISMATCH: 'PLAN',
+  SOURCE_KEY_FIELD_MISMATCH: 'PLAN' })
 
 export class YidaDraftPlanError extends Error {
   constructor(kind = 'INPUT') {
@@ -166,7 +170,9 @@ function parseSourceBinding(value, sourceRows) {
   // every record carries that project, so in `original` mode every row's identity project is the sheet's.
   // A binding whose records name different projects is not something the sheet source can produce.
   if (new Set(records.map(record => record.projectNo)).size !== 1) fail('INPUT')
-  return { sheetId, keyFieldId, fieldBindings, records }
+  // keyAlias is the planner column the key field is bound to (unique: field ids are unique per binding); the preset
+  // hook below compares rowIdOf's source column with it. It never enters a row spec or a digest.
+  return { sheetId, keyFieldId, keyAlias, fieldBindings, records }
 }
 
 // Which real field ids each target field depends on: direct sources, copy primaries, concat parts, through
@@ -245,6 +251,12 @@ function compile(input, versions, persistent = false) {
     // target; the hook below ties both to the row's creation identity).
     const presetParts = config.fieldMap.filter(entry => entry.transform === 'generated')
       .flatMap(entry => entry.template.filter(part => Object.hasOwn(part, 'preset')))
+    // Structural half of 「同码必同身份」 (hardening, 2026-11-08): on a bound draft every preset's rowIdOf must NAME the bound
+    // key field — the direct target whose source column the binding maps to keyFieldId — not merely a column that holds
+    // the same value in these rows (the per-row value hook below stays as the second check). Per draft: the template and
+    // the binding are draft-wide. G1 already makes rowIdOf a string direct target, so the primary exists.
+    if (binding && presetParts.some(part => config.fieldMap.find(entry => entry.transform === 'direct' && entry.target === part.rowIdOf)?.source
+      !== binding.keyAlias)) fail(ROW_PROBLEM.SOURCE_KEY_FIELD_MISMATCH)
     const source = { config, rowsText: owned.rowsText, allocation, ...(hasBinding ? { sourceBinding: owned.sourceBinding } : {}) }
     const locator = config.target
     const locatorDigest = hashCanonical({ version: 1, kind: 'yida-local-locator', ...locator })
@@ -266,7 +278,9 @@ function compile(input, versions, persistent = false) {
       const bound = binding ? bindRow(binding, origins[row.index], fieldDependencies) : null
       // 「同码必同身份」: a bound row's material code is minted from its own rowIdOf and projectOf cells, and its creation
       // identity is (keyValue, projectNo) of its binding. Both cells must be exactly those two values, so the preset
-      // code is WLBH(identity) and one code always means one identity:
+      // code is WLBH(identity) and — under the ONE generated layout the send authority seals per target (external review
+      // P1, 2026-11-08: two templates of one target can place decoration around the identity part so that two identities
+      // share one code) — one code always means one identity:
       //   - projectOf = the identity project (the registry's project in original mode, the allocated one in a split);
       //     otherwise one identity could carry another project's code;
       //   - rowIdOf = the key value the server read; otherwise a preset reading another column (e.g. a drawing number

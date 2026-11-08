@@ -592,6 +592,26 @@ describe('StockPreparationYidaOwnerSendPanel explicit owner controls', () => {
     expect(absent('submit')).toBe(true)
   })
 
+  it('generated-layout seal (P1): an approval refused with 409 YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT shows the fixed code and its copy, no grant, no submit', async () => {
+    await preview(); await acknowledge()
+    fetchSpy.mockResolvedValueOnce(error('YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT', 409))
+    await click('approve')
+    expect(q('error').textContent).toBe('YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT')
+    expect(q('generated-layout-conflict').textContent).toBe('该目标的编码模板布局已在首次授权时封存，本草稿的模板布局与之不同；未授权、未发送。请改回已封存的模板，或由管理员另建目标。')
+    expect(absent('grant')).toBe(true)
+    expect(absent('submit')).toBe(true)
+    expect(absent('identity-reserved')).toBe(true)
+    expect(absent('limit')).toBe(true)
+    expect(submissionPosts()).toBe(0)
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+    // The same code on any other status is not this refusal: the client calls the reply invalid.
+    fetchSpy.mockResolvedValueOnce(error('YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT', 503))
+    await click('approve')
+    expect(q('error').textContent).toBe('YIDA_OWNER_RESPONSE_INVALID')
+    expect(absent('generated-layout-conflict')).toBe(true)
+    expect(absent('submit')).toBe(true)
+  })
+
   it('the frozen notice names the grant id and the durable record; the uncertain hint needs a submission and an error', async () => {
     await save(); await selectRow()
     fetchSpy.mockResolvedValueOnce(error('YIDA_OWNER_RUNTIME_UNAVAILABLE', 503))

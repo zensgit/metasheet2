@@ -48,6 +48,9 @@ const statuses: Readonly<Record<string, number>> = Object.freeze({
   // Identity fence (design baseline v2.3 §3.3, D16): this material row's logical creation identity (key value +
   // project) was already created under this target; nothing new is created. Refused at approval, before a grant.
   YIDA_SEND_APPROVAL_IDENTITY_RESERVED: 409,
+  // Generated-layout seal (external review P1, 2026-11-08): this target's generated template layout was sealed by an
+  // earlier approval and this draft's layout differs; refused at approval and at admission, nothing new is created.
+  YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT: 409,
   YIDA_CONNECTION_TEST_INPUT: 400, YIDA_CONNECTION_TEST_DISABLED: 403, YIDA_CONNECTION_TEST_DENIED: 403,
   YIDA_CONNECTION_TEST_CONFLICT: 409, YIDA_CONNECTION_TEST_CANCELLED: 409, YIDA_CONNECTION_TEST_THROTTLED: 429,
   YIDA_CONNECTION_TEST_INACTIVE: 503, YIDA_CONNECTION_TEST_UNAVAILABLE: 503,

@@ -292,6 +292,8 @@ describe('yida-send-approval-service: D21 wiring of approve()', () => {
       },
       executionPayloadDigest(value, grant) { return sha({ value, grant }) },
       sendBudget() { return Object.freeze({ withinBudget: true }) },
+      // P1 generated-layout seal: these fixture rows carry no generated entry, so the real primitive would answer this too.
+      async sealGeneratedLayoutInTransaction() { return Object.freeze({ admissible: true, sealed: false }) },
       async prepareInTransaction() { throw new Error('synthetic fixture: no admission here') },
     }
     const reauthorizeSourceBinding = options.omit ? undefined : (async (trx: unknown, who: unknown, bound: unknown) => {
