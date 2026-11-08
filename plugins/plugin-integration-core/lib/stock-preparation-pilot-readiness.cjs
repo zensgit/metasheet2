@@ -18,8 +18,9 @@
 // surface that is absent, a read that degrades to "computed" instead of "from the database" all read
 // as NOT ok. Nothing here writes.
 //
-// THE LIST (PILOT_READINESS_VERSION 2 — version 1 was the first fifteen; the pre-enable hardening of step-4
-// design §23.4 F-3 / F-5 added the three marked ★, which only ever refuse more):
+// THE LIST (PILOT_READINESS_VERSION 3 — version 1 was the first fifteen; the pre-enable hardening of step-4
+// design §23.4 F-3 / F-5 added the three marked ★; 批次标识 BI-1b (design §8.7, S6 C-9; register R-65) added the six
+// marked ◆ in version 3, which only ever refuse more):
 //   registry_row_active            the registry row exists, is active and names this sheet / objectId
 //   sheet_present                  the host finds the sheet for (staging project, objectId) and it IS this sheet
 //   target_fields_present          every template column resolves on the sheet, from the database (not computed)
@@ -56,6 +57,14 @@
 //                                  continuation is confirmed would leave it evidence_incomplete with no confirm)
 //   no_generic_writer_names_sheet  no external-system object config and no pipeline's erp-feedback option
 //                                  names this sheet or objectId (and both registries answered) ← step 4 PR-6
+// ◆ pull_batch_enabled             the pull-batch switch is on for this request
+// ◆ pull_batch_columns_present     both band columns (首次批次 / 本次拉取) resolve on THIS sheet from the database
+// ◆ pull_batch_columns_locked      both carry the band marker and humanWriteLock 'plm_system'
+// ◆ pull_batch_columns_visible     LIVE: both plugin views exist and neither hides a band column (by its view hidden
+//                                  list, physical or logical id, or by the field property's hidden rule)
+// ◆ pull_batch_ledger_readable     the pull-batch ledger answers for this sheet (migration 105)
+// ◆ pull_batch_history_resolved    the sheet's batch history is resolved (born_empty / backfilled) and no gap row
+//                                  exists. The six read ONE status (deps.readPullBatchStatus), once per evaluation.
 //   continuation_support_version   the plugin build recognises continuations    ← flipped by the LAST PR of the
 //                                  D-22 set (PR-3a, PR-3b, PR-4, PR-5, PR-6, PR-8, step 6); still 0 after PR-3b
 // ---------------------------------------------------------------------------------------------------
@@ -76,10 +85,12 @@ const {
 // pull suspension, the large-lane refusal — plus PR-4, PR-5, PR-6, PR-8 and step 6) flips it to REQUIRED,
 // never ahead. PR-3a and PR-3b leave it 0, so readiness still refuses every enable by construction (D-22).
 const continuationSupport = require('./stock-preparation-continuation-support.cjs')
+// 批次标识 BI-1b: the six v3 facts, off ONE status read per evaluation.
+const { PULL_BATCH_READINESS_CHECK_IDS, pullBatchReadinessChecks } = require('./stock-preparation-pull-batch-status.cjs')
 // O-6: the continuation core's own "active" / "root" predicates (see no_two_copy_component above).
 const { __internals: { isActiveRow, isRootRow } } = require('./stock-preparation-continuation-pairing.cjs')
 
-const PILOT_READINESS_VERSION = 2
+const PILOT_READINESS_VERSION = 3
 const REQUIRED_CONTINUATION_SUPPORT_VERSION = 1
 
 // The step-4 stores whose readability readiness probes (step-4 design §4.1 / §4.2). PR-2 names them;
@@ -117,6 +128,8 @@ const PILOT_READINESS_CHECK_IDS = Object.freeze([
   'spec_read_plan_slot',
   'pack_columns_installed',
   'no_generic_writer_names_sheet',
+  // 批次标识 BI-1b (P-8): immediately before the D-22 marker, which stays last.
+  ...PULL_BATCH_READINESS_CHECK_IDS,
   'continuation_support_version',
 ])
 
@@ -271,7 +284,8 @@ const CHECKS = Object.freeze({
   async no_two_copy_component(deps) {
     // The project-scoped read the planner itself plans from (same page bounds; past them it throws ⇒ false).
     if (typeof deps.readExistingStockPreparationRows !== 'function' || !deps.recordsApi || !deps.target || !nonEmptyString(deps.projectNo)) return false
-    const rows = await deps.readExistingStockPreparationRows(deps.recordsApi, deps.target, deps.projectNo)
+    // 批次标识 BI-1b (design §4.4): the server-held band, so a band-bearing sheet reads exactly like a band-less one.
+    const rows = await deps.readExistingStockPreparationRows(deps.recordsApi, deps.target, deps.projectNo, ...(deps.pullBatchBand ? [{ pullBatchBand: deps.pullBatchBand }] : []))
     if (!Array.isArray(rows)) return false
     return countTwoCopyComponents(rows) === 0
   },
@@ -337,6 +351,10 @@ const CHECKS = Object.freeze({
     if (!targets || targets.complete !== true) return false
     return !targets.sheetIds.has(deps.sheetId) && !targets.objectIds.has(deps.objectId)
   },
+  ...Object.fromEntries(PULL_BATCH_READINESS_CHECK_IDS.map((id) => [id, async (deps) => {
+    if (typeof deps.pullBatchStatusOnce !== 'function') return false
+    return pullBatchReadinessChecks(await deps.pullBatchStatusOnce())[id] === true
+  }])),
   continuation_support_version() {
     const version = continuationSupport.CONTINUATION_SUPPORT_VERSION
     return Number.isInteger(version) && version >= REQUIRED_CONTINUATION_SUPPORT_VERSION
@@ -352,10 +370,23 @@ const CHECKS = Object.freeze({
  */
 async function evaluatePilotReadiness(deps = {}) {
   const checks = []
+  // 批次标识 BI-1b: ONE pull-batch status per evaluation (memoized; a throw is `ok: false` for each of the six).
+  let pullBatchStatus = null
+  const evaluationDeps = {
+    ...deps,
+    pullBatchStatusOnce: () => {
+      if (!pullBatchStatus) {
+        pullBatchStatus = typeof deps.readPullBatchStatus === 'function'
+          ? Promise.resolve().then(() => deps.readPullBatchStatus())
+          : Promise.reject(new Error('pull-batch status not wired'))
+      }
+      return pullBatchStatus
+    },
+  }
   for (const id of PILOT_READINESS_CHECK_IDS) {
     let ok = false
     try {
-      ok = (await CHECKS[id](deps)) === true
+      ok = (await CHECKS[id](evaluationDeps)) === true
     } catch (error) {
       ok = false
     }

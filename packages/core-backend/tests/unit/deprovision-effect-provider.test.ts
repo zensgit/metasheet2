@@ -67,7 +67,8 @@ const FROZEN_LEGACY_INSERT = `INSERT INTO directory_deprovision_effects (
 type Recorded = { sql: string; params: unknown[] | undefined }
 
 function statementShape(sql: string): string {
-  // D21 (Y5a): the access-graph mutex bumps the subject authorization version row before the users FOR UPDATE.
+  // D21 (Y5a): lockCandidateUser bumps the subject authorization version row as its first statement, before the
+  // users FOR UPDATE (zzzz20261106110500); a lock-taking upsert that returns no row.
   if (/^\s*INSERT INTO subject_authorization_versions\b/.test(sql)) return 'bump_subject_version'
   if (/^\s*SELECT id FROM users WHERE id = \$1::text\s+FOR UPDATE/.test(sql)) return 'lock_user'
   if (/FROM users candidate_user/.test(sql)) return 'read_state'
@@ -96,7 +97,7 @@ function writerClient(options: {
       recorded.push({ sql, params })
       switch (statementShape(sql)) {
         case 'bump_subject_version':
-          return { rows: [], rowCount: 1 }
+          return { rows: [] }
         case 'lock_user':
           return { rows: [{ id: String(params?.[0]) }] }
         case 'read_state':
@@ -288,6 +289,7 @@ describe('provider-column probe', () => {
 
 describe('statement sequence', () => {
   const WRITE_SEQUENCE_BEFORE_COLUMN = [
+    // D21 (Y5a): the subject version row first, then the users row lock.
     'bump_subject_version',
     'lock_user',
     'read_state',
@@ -330,14 +332,14 @@ function recordedClient(answer: (shape: string, params: unknown[] | undefined) =
     query: vi.fn(async (sql: string, params?: unknown[]) => {
       recorded.push({ sql, params })
       const shape = evidenceShape(sql)
-      if (shape === 'bump_subject_version') return { rows: [], rowCount: 1 }
+      // D21 (Y5a): the restore / compensation transactions bump the subject version row before their users lock.
+      if (shape === 'bump_subject_version') return { rows: [] }
       return answer(shape, params)
     }),
   }
 }
 
 function evidenceShape(sql: string): string {
-  // D21 (Y5a): the access-graph mutex bumps the subject authorization version row before the users FOR UPDATE.
   if (/^\s*INSERT INTO subject_authorization_versions\b/.test(sql)) return 'bump_subject_version'
   if (/^\s*SELECT local_user_id\s+FROM directory_deprovision_events/.test(sql)) return 'event_owner'
   if (/FROM users\s+WHERE id = \$1::text\s+FOR UPDATE/.test(sql)) return 'lock_user'

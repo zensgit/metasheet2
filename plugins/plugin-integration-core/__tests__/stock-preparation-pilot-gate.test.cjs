@@ -265,6 +265,22 @@ test('G-07 (L03) the dry run calls pilotLaneGuard only on a capped expansion, be
 
 const TEMPLATE = normalizeStockPreparationTemplate(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
 
+// 批次标识 BI-1b (readiness v3, register R-65): a READY pull-batch status, the shape stock-preparation-pull-batch-status.cjs
+// answers. The six v3 checks read their booleans off ONE `deps.readPullBatchStatus()` per evaluation, so the v2 rows of
+// R-02 / R-03 below keep their expected sets; each v3 id gets its own mutation of this status.
+const READY_PULL_BATCH_STATUS = Object.freeze({
+  switchOn: true,
+  columns: { mode: 'db', pullBatch: true, firstPullBatch: true, locked: 2 },
+  placement: 'left',
+  views: { readable: true, fill: true, todo: true, bandHiddenIn: [], layout: null },
+  ledger: { readable: true, historyStatus: 'born_empty', historyMode: 'inferred', historyBatchCount: 0, batchCount: 0, openBatchNo: null, captured: null },
+  rows: { total: 0, machine: 0, labelled: 0, gap: 0, unknown: 0, person: 0, manual: 0, unboundPrefix: 0, nonPlugin: 0, locked: 0 },
+  trashedRecordCount: null,
+  ready: true,
+  reasons: [],
+})
+const pullBatchStatusWith = (patch) => async () => ({ ...READY_PULL_BATCH_STATUS, ...patch })
+
 function readyDeps(overrides = {}) {
   const fields = new Map(TEMPLATE.fields.map((field) => [field.id, { property: {} }]))
   for (const id of PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS) fields.get(id).property.humanWriteLock = 'plm_system'
@@ -303,6 +319,8 @@ function readyDeps(overrides = {}) {
     countOpenLargeJobs: async () => ({ open: 0, unattributed: 0, scanned: 0 }),
     packInstallStore: { async listInstalledFieldIds() { return { fieldIds: [], packIds: [] } } },
     customerPackDeclaration: readiness.CUSTOMER_PACK_NOT_APPLICABLE,
+    // Version 3 (批次标识 BI-1b): one READY pull-batch status.
+    readPullBatchStatus: async () => READY_PULL_BATCH_STATUS,
     ...overrides,
   }
 }
@@ -338,12 +356,15 @@ async function withContinuationSupport(version, fn) {
 
 test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the version are pinned; the answer is values-free', async () => {
   // Version 2 (pre-enable hardening, step-4 design §23.4 F-3 / F-5): three checks added, none removed or renamed.
-  assert.equal(readiness.PILOT_READINESS_VERSION, 2)
+  // Version 3 (批次标识 BI-1b, R-65 P-8): the six pull_batch_* checks, immediately before the D-22 marker (still last).
+  assert.equal(readiness.PILOT_READINESS_VERSION, 3)
   assert.equal(continuationSupport.CONTINUATION_SUPPORT_VERSION, 0, 'the build marker ships at 0 (the last PR of the D-22 set flips it; PR-3a / PR-3b keep it 0)')
   assert.deepEqual(readiness.PILOT_READINESS_CHECK_IDS, [
     'registry_row_active', 'sheet_present', 'target_fields_present', 'plm_column_lock', 'contract_option_sets', 'views_present',
     'single_project_on_sheet', 'no_two_copy_component', 'write_lock_store_readable', 'write_lock_free', 'no_open_large_job', 'export_closure_port',
-    'continuation_store_readable', 'refresh_state_store_readable', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'continuation_support_version',
+    'continuation_store_readable', 'refresh_state_store_readable', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet',
+    'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved',
+    'continuation_support_version',
   ])
   // The web clamps a failing id to /^[a-z][a-z0-9_]{0,63}$/ (projectTarget.ts): every id survives it.
   assert.ok(readiness.PILOT_READINESS_CHECK_IDS.every((id) => /^[a-z][a-z0-9_]{0,63}$/.test(id)))
@@ -351,7 +372,7 @@ test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the
   const answer = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps()))
   assert.equal(answer.ready, true, JSON.stringify(answer.failing))
   assert.deepEqual([...answer.failing], [])
-  assert.equal(answer.version, 2)
+  assert.equal(answer.version, 3)
   assert.deepEqual(answer.checks.map((check) => check.id), [...readiness.PILOT_READINESS_CHECK_IDS])
   assert.ok(answer.checks.every((check) => check.ok === true))
   const text = JSON.stringify(answer)
@@ -411,6 +432,19 @@ test('R-02 every check fails closed on its own: one mutation per id ⇒ exactly 
     ['pack_columns_installed (no ledger store)', () => ({ packInstallStore: null }), ['pack_columns_installed']],
     ['pack_columns_installed (the ledger answers no lists)', () => ({ packInstallStore: { async listInstalledFieldIds() { return {} } } }), ['pack_columns_installed']],
     ['pack_columns_installed (declared, the host cannot read fields)', (d) => { const { deps } = packDeps({ declared: ['ext_synA'], ledger: ['ext_synA'] }); const { readObjectFieldsContent: _r, ...rest } = deps.provisioning; return { ...deps, provisioning: rest } }, ['pack_columns_installed']],
+    // ── version 3 (批次标识 BI-1b): one mutation of the ONE status per id ──
+    ['pull_batch_enabled (the switch is off)', () => ({ readPullBatchStatus: pullBatchStatusWith({ switchOn: false }) }), ['pull_batch_enabled']],
+    ['pull_batch_columns_present (computed only)', () => ({ readPullBatchStatus: pullBatchStatusWith({ columns: { mode: 'computed', pullBatch: true, firstPullBatch: true, locked: 2 } }) }), ['pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible']],
+    ['pull_batch_columns_present (one column)', () => ({ readPullBatchStatus: pullBatchStatusWith({ columns: { mode: 'db', pullBatch: true, firstPullBatch: false, locked: 1 } }) }), ['pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible']],
+    ['pull_batch_columns_locked (one column unmarked)', () => ({ readPullBatchStatus: pullBatchStatusWith({ columns: { mode: 'db', pullBatch: true, firstPullBatch: true, locked: 1 } }) }), ['pull_batch_columns_locked']],
+    ['pull_batch_columns_visible (hidden in the fill view)', () => ({ readPullBatchStatus: pullBatchStatusWith({ views: { readable: true, fill: true, todo: true, bandHiddenIn: ['fill'], layout: null } }) }), ['pull_batch_columns_visible']],
+    ['pull_batch_columns_visible (the views cannot be read)', () => ({ readPullBatchStatus: pullBatchStatusWith({ views: { readable: false, fill: false, todo: false, bandHiddenIn: [], layout: null } }) }), ['pull_batch_columns_visible']],
+    ['pull_batch_ledger_readable (the ledger does not answer)', () => ({ readPullBatchStatus: pullBatchStatusWith({ ledger: { ...READY_PULL_BATCH_STATUS.ledger, readable: false, historyStatus: null } }) }), ['pull_batch_ledger_readable', 'pull_batch_history_resolved']],
+    ['pull_batch_history_resolved (pending)', () => ({ readPullBatchStatus: pullBatchStatusWith({ ledger: { ...READY_PULL_BATCH_STATUS.ledger, historyStatus: 'pending' } }) }), ['pull_batch_history_resolved']],
+    ['pull_batch_history_resolved (installing)', () => ({ readPullBatchStatus: pullBatchStatusWith({ ledger: { ...READY_PULL_BATCH_STATUS.ledger, historyStatus: 'installing' } }) }), ['pull_batch_history_resolved']],
+    ['pull_batch_history_resolved (a gap row)', () => ({ readPullBatchStatus: pullBatchStatusWith({ rows: { ...READY_PULL_BATCH_STATUS.rows, gap: 1 } }) }), ['pull_batch_history_resolved']],
+    ['pull_batch_history_resolved (rows unreadable)', () => ({ readPullBatchStatus: pullBatchStatusWith({ rows: null }) }), ['pull_batch_history_resolved']],
+    ['every pull_batch_* check (no status read wired)', () => ({ readPullBatchStatus: undefined }), ['pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved']],
   ]
   for (const [label, mutate, expected] of table) {
     const deps = readyDeps()
@@ -489,9 +523,13 @@ test('R-03 a throwing probe is ok:false, never a thrown readiness; the evaluator
     readExistingStockPreparationRows: async () => { throw new Error(`records down ${SHEET}`) },
     countOpenLargeJobs: async () => { throw new Error('job store down') },
     packInstallStore: { async listInstalledFieldIds() { throw new Error(`ledger down ${SHEET}`) } },
+    // 批次标识 BI-1b: the ONE status read throws ⇒ each of the six is ok:false, read once.
+    readPullBatchStatus: async () => { pullBatchStatusCalls += 1; throw new Error(`pull-batch down ${SHEET}`) },
   })
+  let pullBatchStatusCalls = 0
   const answer = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(deps))
-  assert.deepEqual([...answer.failing], ['sheet_present', 'single_project_on_sheet', 'no_two_copy_component', 'no_open_large_job', 'continuation_store_readable', 'refresh_state_store_readable', 'pack_columns_installed', 'no_generic_writer_names_sheet'])
+  assert.deepEqual([...answer.failing], ['sheet_present', 'single_project_on_sheet', 'no_two_copy_component', 'no_open_large_job', 'continuation_store_readable', 'refresh_state_store_readable', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved'])
+  assert.equal(pullBatchStatusCalls, 1, 'the six v3 checks share ONE status read per evaluation')
   assert.ok(!JSON.stringify(answer).includes(SHEET), 'a thrown message never travels into the answer')
   const empty = await readiness.evaluatePilotReadiness({})
   assert.equal(empty.ready, false)

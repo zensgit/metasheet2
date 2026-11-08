@@ -299,6 +299,12 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     ddl += '\n' + ((await import(pathToFileURL(path.join(root,
       'packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts')).href)) as
       { YIDA_SOURCE_BINDING_UP_SQL: string }).YIDA_SOURCE_BINDING_UP_SQL
+    // P1 fix r1 (2026-11-08): the generated-layout seal table, exactly what zzzz20261108120000 up() executes (it references
+    // 093 / 094). Since fix r1 the send authority reads the target's seal row for EVERY selection — v2 included — so an
+    // approval in a schema without it fails closed (UNAVAILABLE); this file sends v2 drafts only and never seals.
+    ddl += '\n' + ((await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261108120000_create_integration_yida_generated_layout.ts')).href)) as
+      { YIDA_GENERATED_LAYOUT_UP_SQL: string }).YIDA_GENERATED_LAYOUT_UP_SQL
     savedEnv = envKeys.map(key => [key, process.env[key]])
     process.env.NODE_ENV = 'production'; process.env.ENCRYPTION_KEY = randomBytes(32).toString('hex'); process.env.ENCRYPTION_SALT = randomBytes(32).toString('hex')
     const { PluginRuntimeSecurityService } = await import(pathToFileURL(path.join(root,

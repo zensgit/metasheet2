@@ -216,6 +216,20 @@
 //           record handles); the POST is a WRITE — one field property of that sheet's key column, through the host's
 //           provisioning port in the staging project derived from this scope with no request projectId. A
 //           header-fillable tenant here would read or flip another tenant's project switch.
+//       34. GET  …/projects/:projectNo/target/pull-batch  `stockPreparationProjectPullBatchGet`
+//           批次标识 BI-1b (design §8.7; register R-65), ADMIN. A values-free READ of the proven tenant's project
+//           sheet: whether its two batch columns are present / locked / visible, its pull-batch ledger state and its
+//           row classes (counts). The staging project it reads through is derived (in the shared status-deps helper)
+//           from this scope with no request projectId. A header-fillable tenant here would read another tenant's
+//           sheet state.
+//       35. GET  …/pull-batch/settings                                  `stockPreparationPullBatchSettingsGet`
+//       36. POST …/pull-batch/settings                                  `stockPreparationPullBatchSettingsSet`
+//       37. POST …/projects/:projectNo/target/pull-batch/settings       `stockPreparationProjectPullBatchSettingsSet`
+//           批次标识 BI-7 (design §5.5 / §11; register R-65), ADMIN. The GET reads the proven tenant's pull-batch
+//           settings: its tenant default and its registered sheets' captured values (with their project numbers,
+//           admin-visible); the two POSTs are WRITES to that tenant's settings row and to one of its sheets' ledger
+//           rows. Plugin ledger only — no staging project, no host call. A header-fillable tenant here would read or
+//           change another tenant's settings.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins
