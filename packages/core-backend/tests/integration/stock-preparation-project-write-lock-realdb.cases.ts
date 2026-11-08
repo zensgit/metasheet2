@@ -3949,14 +3949,17 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               }
             }
           })
+          // The pull-batch switch on / off; the project-sheets switch on throughout (the install route answers 404 without it).
           async function withPull<T>(on: boolean, fn: () => Promise<T>): Promise<T> {
-            const before = process.env[PULL_SWITCH]
+            const before = { pull: process.env[PULL_SWITCH], sheets: process.env[SWITCH] }
             if (on) process.env[PULL_SWITCH] = 'true'
             else delete process.env[PULL_SWITCH]
+            process.env[SWITCH] = 'true'
             try {
               return await fn()
             } finally {
-              if (before === undefined) delete process.env[PULL_SWITCH]; else process.env[PULL_SWITCH] = before
+              if (before.pull === undefined) delete process.env[PULL_SWITCH]; else process.env[PULL_SWITCH] = before.pull
+              if (before.sheets === undefined) delete process.env[SWITCH]; else process.env[SWITCH] = before.sheets
             }
           }
           async function installStack(label: string, { born = false, failingLedger = false, register = true }: { born?: boolean; failingLedger?: boolean; register?: boolean } = {}) {
