@@ -60,6 +60,67 @@ async function setup() {
   return { grid, client, sheetId, viewId, patchRecords, patchFetch }
 }
 
+// A cell patch joins the undo history only once it succeeds (after its await): an undo or redo while one
+// is in flight would step over it and replay an earlier, unrelated edit to the server instead.
+describe('useMultitableGrid undo/redo while a cell patch is in flight', () => {
+  beforeEach(() => useLocale().setLocale('en'))
+
+  it('does nothing until the patch settles; then undo reverts that very patch', async () => {
+    const { grid, patchFetch, patchRecords } = await setup()
+    // mid-history: both an undo and a redo are available while the patch is in flight
+    expect(grid.canUndo.value).toBe(true)
+    expect(grid.canRedo.value).toBe(true)
+    const pending = deferred<Response>()
+    patchFetch.mockReturnValueOnce(pending.promise)
+    const commit = grid.patchCell('r2', 'f1', 'renamed', 8)
+    await grid.undo()
+    await grid.redo()
+    expect(patchRecords).toHaveBeenCalledTimes(1)
+    expect(grid.historyIndex.value).toBe(0)
+    pending.resolve(response({ ...success, updated: [{ recordId: 'r2', version: 9 }] }))
+    await commit
+    expect(grid.editHistory.value.at(-1)).toMatchObject({ recordId: 'r2', fieldId: 'f1', newValue: 'renamed' })
+    await grid.undo()
+    expect(patchRecords).toHaveBeenCalledTimes(2)
+    expect(patchRecords.mock.calls[1][0].changes).toEqual([expect.objectContaining({ recordId: 'r2', fieldId: 'f1', value: 'old too' })])
+  })
+
+  it('two undos in a row still both run (an undo\'s own replay does not block the next one)', async () => {
+    const { grid, patchRecords } = await setup()
+    grid.historyIndex.value = 1
+    const first = grid.undo()
+    const second = grid.undo()
+    await Promise.all([first, second])
+    expect(patchRecords).toHaveBeenCalledTimes(2)
+    expect(grid.historyIndex.value).toBe(-1)
+  })
+
+  it('a patch the server refused, or one that never reached it, releases the guard: undo runs again', async () => {
+    for (const failure of ['refused (422)', 'network error'] as const) {
+      const { grid, patchFetch, patchRecords } = await setup()
+      if (failure === 'network error') patchFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      else patchFetch.mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'bad' } }), { status: 422 }))
+      expect(await grid.patchCell('r2', 'f1', 'x', 8), failure).not.toBeNull()
+      expect(patchRecords).toHaveBeenCalledTimes(1)
+      await grid.undo()
+      expect(patchRecords, failure).toHaveBeenCalledTimes(2)
+      expect(patchRecords.mock.calls[1][0].changes).toEqual([expect.objectContaining({ recordId: 'r1', fieldId: 'f1', value: 'older' })])
+    }
+  })
+
+  it('a local refusal (the row cannot be edited; nothing is sent) never holds the guard: undo and redo still run', async () => {
+    const { grid, patchRecords } = await setup()
+    // only r2 is refused (refusing every row would stop the undo of r1 for another reason)
+    grid.rowActionOverrides.value = { r2: { canEdit: false, canDelete: false, canComment: true } }
+    expect(await grid.patchCell('r2', 'f1', 'x', 8)).toBeNull()
+    expect(patchRecords).toHaveBeenCalledTimes(0)
+    await grid.undo()
+    expect(patchRecords).toHaveBeenCalledTimes(1)
+    await grid.redo()
+    expect(patchRecords).toHaveBeenCalledTimes(2)
+  })
+})
+
 describe('useMultitableGrid patchRange', () => {
   beforeEach(() => useLocale().setLocale('en'))
 

@@ -30,6 +30,7 @@ const { createStockPreparationProjectWriteLock } = require('./lib/stock-preparat
 const { createStockPreparationContinuationStore } = require('./lib/stock-preparation-continuation-store.cjs')
 const { createStockPreparationRefreshGovernance } = require('./lib/stock-preparation-refresh-governance.cjs')
 const { createStockPreparationGovernedSheetProbe } = require('./lib/stock-preparation-governed-sheet-probe.cjs')
+const { createStockPreparationPullBatchStore } = require('./lib/stock-preparation-pull-batch-store.cjs')
 const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
   createStockPreparationPackInstallStore,
@@ -98,6 +99,7 @@ let stockPreparationProjectWriteLock = null
 let stockPreparationContinuationStore = null
 let stockPreparationRefreshGovernance = null
 let stockPreparationGovernedSheetProbe = null
+let stockPreparationPullBatchStore = null
 let b2aOperationClaim = null
 let readSourceCompositionConfigStore = null
 let bridgeAgentChecklistStore = null
@@ -393,6 +395,9 @@ module.exports = {
       continuationStore: stockPreparationContinuationStore,
       projectTargetStore: stockPreparationProjectTargetStore,
     })
+    // 批次标识 BI-1b (migration 105; register R-65): the pull-batch ledger (首次批次 / 本次拉取). The routes hand it to a
+    // lane only while the pull-batch switch is exactly 'true' (read per request); off, nothing ever touches it.
+    stockPreparationPullBatchStore = createStockPreparationPullBatchStore({ db })
     // HG v1.2 PR-C: DB-enforced one-shot source-read operation claim (migration 078). Built here so
     // the B2a guard's `sourceReadOperationLimit: 1` is a PRIMARY KEY, not a read-then-write over the
     // plugin kv store — whose `set` is an unconditional upsert and cannot decide a race between two
@@ -586,6 +591,7 @@ module.exports = {
         stockPreparationContinuationStore,
         stockPreparationRefreshGovernance,
         stockPreparationGovernedSheetProbe,
+        stockPreparationPullBatchStore,
         b2aOperationClaim,
         readSourceCompositionConfigStore,
         bridgeAgentChecklistStore,
@@ -753,6 +759,7 @@ module.exports = {
     pipelineRunner = null
     stagingInstaller = null
     stockPreparationGovernedSheetProbe = null
+    stockPreparationPullBatchStore = null
     stockPreparationSqlServerRuntime = null
     stockPreparationRuntimeDatabase = null
     activeContext = null

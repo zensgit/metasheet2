@@ -64,8 +64,15 @@ export const SYN_DRY_RUN_JOB_ID = 'syn-dry-run-job-0001'
  *                   suspended — the board's `refresh` stanza says pending_confirmation with two open holds, and
  *                   「拉取待确认」 lists them (one candidate over two pair pages, one relationship to re-confirm).
  *                   Every other world's board answers `not_governed` (the real server shape since PR-5).
+ *   governedChangePlan —— 备料分批拉取第一期 step 5 PR-9: project A is a governed pilot with ONE open content change
+ *                   (`content_change`); 「拉取待确认」's 「变更计划」 proposes it as one plan, and the confirm resolves it.
+ *   governedReview —— PR-9: project A has NO hold and one WRITTEN change awaiting its review (two record pages of one
+ *                   row each, confirmed by this actor); after the review the board says 已执行待核对 (the 「核对」 step).
+ *   pullBatch    —— 批次标识 BI-3 (R-65): `ready`, with the pull-batch switch ON — project A's board carries the
+ *                   `pullBatch` stanza (ready, latest 第2批（2026-11-08）, 2 batches, captured rule 按物料). Every other
+ *                   world's board sends NO `pullBatch` key (the switch-off shape), so their DOM is unchanged.
  */
-export type StockPrepScenario = 'fresh' | 'ready' | 'readerOnly' | 'defaults500' | 'noProjects' | 'governed'
+export type StockPrepScenario = 'fresh' | 'ready' | 'readerOnly' | 'defaults500' | 'noProjects' | 'governed' | 'governedChangePlan' | 'governedReview' | 'pullBatch'
 
 export interface StockPrepRouteOptions {
   /**
@@ -347,6 +354,11 @@ function synBoard(projectNo: string, state: ScenarioState): Record<string, unkno
     // PR-7: the real server shape since PR-5 — `readProjectRefreshState`'s own values-free object. Every world is
     // `not_governed` (the board renders exactly as before) except the governed project of the `governed` world.
     refresh: synRefreshStanza(projectNo, state),
+    // 批次标识 BI-3: the board stanza exists ONLY while the switch is on (`readPullBatchBoardStanza`, status.cjs) — here
+    // only in the `pullBatch` world, on its one project. Synthetic label; the rule key is S-1's.
+    ...(state.pullBatchProjectNo === projectNo
+      ? { pullBatch: { enabled: true, ready: true, latest: { label: '第2批（2026-11-08）', batchNo: 2 }, batchCount: 2, paused: null, firstPullBatchRule: 'material' } }
+      : {}),
   }
 }
 
@@ -355,6 +367,12 @@ function synRefreshStanza(projectNo: string, state: ScenarioState): Record<strin
   const counts = (pending: number) => ({ pendingConfirm: pending, confirmable: pending, openExecutions: 0, pendingReviews: 0, continuations: 1 })
   if (state.governedProjectNo !== projectNo) {
     return { readable: true, status: 'not_governed', statusLabel: '未启用', governed: 'none', exportAllowed: true, settled: false, counts: { pendingConfirm: 0, confirmable: 0, openExecutions: 0, pendingReviews: 0, continuations: 0 } }
+  }
+  // PR-9: a written change awaiting its review; after the review the project is written-not-checked (复核 ≠ 核对).
+  if (state.reviewPlan) {
+    return state.reviewDone
+      ? { readable: true, status: 'executed_pending_settlement', statusLabel: '已执行待核对', governed: 'pilot', exportAllowed: false, settled: false, counts: { pendingConfirm: 0, confirmable: 0, openExecutions: 0, pendingReviews: 0, continuations: 0 } }
+      : { readable: true, status: 'change_pending_review', statusLabel: '变更待复核', governed: 'pilot', exportAllowed: false, settled: false, counts: { pendingConfirm: 0, confirmable: 0, openExecutions: 0, pendingReviews: 1, continuations: 0 } }
   }
   const open = state.refreshHolds.length
   return open > 0
@@ -421,6 +439,143 @@ function synRelationshipHold(): Record<string, unknown> {
   }
 }
 
+/** PR-9: one machine-column content change (decisions.cjs `holdPayload`'s content_change branch; values SYN-* only). */
+function synContentHold(): Record<string, unknown> {
+  return {
+    id: 'syn-hold-content-0001',
+    kind: 'content_change',
+    status: 'open',
+    confirmable: false,
+    notConfirmableReason: 'needs_step5',
+    shapeToken: null,
+    runbookOnly: false,
+    continuationId: null,
+    fingerprint: '2'.repeat(64),
+    comparisonFingerprint: null,
+    evidenceFingerprint: null,
+    pairingFingerprint: null,
+    openedAt: '2026-11-06T00:00:00.000Z',
+    lastSeenAt: '2026-11-06T00:00:00.000Z',
+    history: 'history_unknown',
+    candidates: [],
+    verification: null,
+    contentChanges: [{ recordId: 'syn-record-0001', recordVersion: 3, key: 'SYN-KEY-0001', reason: 'plm_system_refresh', fields: { totalQuantity: { before: 4, after: 6 } }, inContinuation: null, humanColumnsPresent: { procurementReply: true } }],
+    detail: null,
+    pairPage: { index: 0, count: 1, size: 200, next: null },
+  }
+}
+
+const SYN_HOLD_SET = '9'.repeat(64)
+const SYN_PLAN_FINGERPRINT = '3'.repeat(64)
+const SYN_SOURCE_DIGEST = '4'.repeat(64)
+const SYN_WRITTEN_DIGEST = '5'.repeat(64)
+const SYN_RECEIPT_ID = '0123456789abcdef0123456789abcdef'
+/** The fixture's own record page size for the written plan (two pages of one row), so page 2 must be walked. */
+const SYN_REVIEW_PAGE_SIZE = 1
+
+/** PR-9: the governed world's synthetic written plan (decisions.cjs `planView`, key for key). */
+function synReviewPlanHeader(): Record<string, unknown> {
+  return {
+    id: 'syn-change-plan-0001',
+    status: 'written',
+    recordCount: 2,
+    writeRecordCount: 2,
+    planFingerprint: SYN_PLAN_FINGERPRINT,
+    reviewBaselineDigest: null,
+    absorbedChangePlanIds: [],
+    confirmedAt: '2026-11-06T00:00:00.000Z',
+    confirmedBySelf: true,
+    writtenAt: '2026-11-06T00:10:00.000Z',
+    writtenContentDigest: SYN_WRITTEN_DIGEST,
+  }
+}
+
+function synReviewRecords(): Array<Record<string, unknown>> {
+  return [1, 2].map((index) => ({
+    recordId: `syn-record-000${index}`,
+    key: `SYN-KEY-000${index}`,
+    root: index === 1,
+    inContinuation: null,
+    present: true,
+    humanColumnsPresent: { procurementReply: index === 1, notes: false },
+    fields: { totalQuantity: { baseline: 4, before: 4, after: 6, reviewOnly: false, current: 6 } },
+  }))
+}
+
+/** PR-9: the ONE receipt the page threads — the holds' pair pages and the written plan's record pages. */
+function synReceipt(projectNo: string, state: ScenarioState): Record<string, unknown> | null {
+  if (state.governedProjectNo !== projectNo) return null
+  const holds: Record<string, unknown> = {}
+  for (const hold of state.refreshHolds) {
+    const count = (hold.pairPage as { count: number }).count
+    const served = state.refreshServed[String(hold.id)] ?? []
+    holds[String(hold.id)] = { pageCount: count, pagesServed: served.slice().sort(), complete: served.length >= count }
+  }
+  if (state.reviewPlan && !state.reviewDone) {
+    const count = Math.ceil(synReviewRecords().length / SYN_REVIEW_PAGE_SIZE)
+    holds['syn-change-plan-0001'] = { pageCount: count, pagesServed: state.reviewServed.slice().sort(), complete: state.reviewServed.length >= count }
+  }
+  return { id: SYN_RECEIPT_ID, expiresAt: '2026-11-07T00:00:00.000Z', holds }
+}
+
+function synPage<T>(list: T[], cursor: number, size: number): { slice: T[]; page: { index: number; count: number; size: number; next: number | null } } {
+  const count = Math.max(1, Math.ceil(list.length / size))
+  return { slice: cursor < count ? list.slice(cursor * size, cursor * size + size) : [], page: { index: cursor, count, size, next: cursor + 1 < count ? cursor + 1 : null } }
+}
+
+/**
+ * PR-9: `GET …/refresh/change-plans/current` (decisions.cjs `readChangePlanCurrent`, key for key). EVERY world answers
+ * it — a project the world does not govern gets the empty proposal and no receipt — so no world can leave it unmocked.
+ */
+function synChangePlanPage(projectNo: string, url: URL, state: ScenarioState): Record<string, unknown> {
+  const governed = state.governedProjectNo === projectNo
+  const stanza = synRefreshStanza(projectNo, state)
+  const refresh = { readable: true, status: stanza.status, governed: stanza.governed, counts: stanza.counts, pilot: governed, holdSetFingerprint: governed ? SYN_HOLD_SET : null, decisionVersion: 1 }
+  const cursor = Number(url.searchParams.get('recordCursor') ?? 0)
+  const contentHolds = governed ? state.refreshHolds.filter((hold) => hold.kind === 'content_change') : []
+  const proposalRecords = contentHolds.map((hold) => {
+    const change = (hold.contentChanges as Array<Record<string, unknown>>)[0]
+    return { recordId: change.recordId, key: change.key, root: true, inContinuation: null, fields: change.fields, present: true, humanColumnsPresent: { procurementReply: true, notes: false } }
+  })
+  const proposalPage = synPage(proposalRecords, cursor, 100)
+  const proposal = {
+    blocked: contentHolds.length > 0 ? null : 'no_content_hold',
+    holdIds: contentHolds.map((hold) => String(hold.id)).sort(),
+    holdSetFingerprint: governed ? SYN_HOLD_SET : null,
+    planFingerprint: contentHolds.length > 0 ? SYN_PLAN_FINGERPRINT : null,
+    sourceContentDigest: governed ? SYN_SOURCE_DIGEST : null,
+    recordCount: proposalRecords.length,
+    structureHoldOpen: false,
+    runbookHoldOpen: false,
+    candidates: [],
+    recordPage: proposalPage.page,
+    records: proposalPage.slice,
+  }
+  let written: Record<string, unknown> | null = null
+  if (governed && state.reviewPlan && !state.reviewDone) {
+    const writtenPage = synPage(synReviewRecords(), cursor, SYN_REVIEW_PAGE_SIZE)
+    if (cursor < writtenPage.page.count) state.reviewServed = Array.from(new Set([...state.reviewServed, cursor]))
+    written = { ...synReviewPlanHeader(), currentContentDigest: SYN_WRITTEN_DIGEST, contentMatchesWrite: true, recordPage: writtenPage.page, records: writtenPage.slice }
+  }
+  const confirmed = governed && state.changePlanConfirmed
+    ? { ...synReviewPlanHeader(), id: 'syn-change-plan-0002', status: 'confirmed', writtenAt: null, writtenContentDigest: null, recordPage: synPage([], cursor, 100).page, records: [] }
+    : null
+  return { refresh, proposal, current: { confirmed, written }, readReceipt: written ? synReceipt(projectNo, state) : null }
+}
+
+/** PR-9: a body must name only the server's closed keys (http-routes.cjs `VALID_STOCK_PREPARATION_REFRESH_CHANGE_*`). */
+const SYN_CHANGE_PLAN_CONFIRM_KEYS = ['tenantId', 'confirmProjectNo', 'holdIds', 'holdSetFingerprint', 'planFingerprint', 'sourceContentDigest', 'readReceipt', 'candidates']
+const SYN_CHANGE_REVIEW_KEYS = ['tenantId', 'confirmProjectNo', 'changePlanId', 'contentDigest', 'conclusion', 'notes', 'readReceipt']
+
+function synBodyProblem(body: Record<string, unknown>, allowed: string[], expected: Record<string, unknown>): string | null {
+  const extra = Object.keys(body).filter((key) => !allowed.includes(key))
+  if (extra.length > 0) return `unexpected key(s): ${extra.join(', ')}`
+  for (const [key, value] of Object.entries(expected)) {
+    if (JSON.stringify(body[key]) !== JSON.stringify(value)) return `${key} does not echo the page`
+  }
+  return null
+}
+
 /** PR-7: `GET …/refresh/holds` — page 1 (every hold's pair page 0) or one hold's pair page; the receipt accumulates. */
 function synHoldsPage(projectNo: string, url: URL, state: ScenarioState): Record<string, unknown> {
   const governed = state.governedProjectNo === projectNo
@@ -436,19 +591,14 @@ function synHoldsPage(projectNo: string, url: URL, state: ScenarioState): Record
   } else {
     for (const hold of holds) state.refreshServed[String(hold.id)] = Array.from(new Set([...(state.refreshServed[String(hold.id)] ?? []), 0]))
   }
-  const receiptHolds: Record<string, unknown> = {}
-  for (const hold of governed ? state.refreshHolds : []) {
-    const count = (hold.pairPage as { count: number }).count
-    const served = state.refreshServed[String(hold.id)] ?? []
-    receiptHolds[String(hold.id)] = { pageCount: count, pagesServed: served.slice().sort(), complete: served.length >= count }
-  }
   const stanza = synRefreshStanza(projectNo, state)
   return {
     refresh: { readable: true, status: stanza.status, governed: stanza.governed, counts: stanza.counts, pilot: governed },
-    holdSetFingerprint: governed ? '9'.repeat(64) : null,
+    holdSetFingerprint: governed ? SYN_HOLD_SET : null,
     decisionVersion: 1,
     page: { holds, next: null, limit: 20, pairLimit: 200 },
-    readReceipt: governed ? { id: '0123456789abcdef0123456789abcdef', expiresAt: '2026-10-27T00:00:00.000Z', holds: receiptHolds } : null,
+    // PR-9: the same receipt id the change-plan page threads (holds + the written plan's record pages).
+    readReceipt: synReceipt(projectNo, state),
   }
 }
 
@@ -619,6 +769,15 @@ interface ScenarioState {
   refreshHolds: Array<Record<string, unknown>>
   /** PR-7: pair pages served per hold (the read receipt the holds route issues). */
   refreshServed: Record<string, number[]>
+  /** PR-9: the governed project has a written change awaiting review (governedReview), and whether it was reviewed. */
+  reviewPlan: boolean
+  reviewDone: boolean
+  /** PR-9: the written plan's record pages served (the receipt's pseudo-hold entry). */
+  reviewServed: number[]
+  /** PR-9: a change plan was confirmed (governedChangePlan, after the confirm). */
+  changePlanConfirmed: boolean
+  /** 批次标识 BI-3: the project whose board carries the pull-batch stanza (pullBatch world only; null = switch off). */
+  pullBatchProjectNo: string | null
 }
 
 function createScenarioState(scenario: StockPrepScenario, options: StockPrepRouteOptions): ScenarioState {
@@ -639,6 +798,11 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
     governedProjectNo: null,
     refreshHolds: [],
     refreshServed: {},
+    reviewPlan: false,
+    reviewDone: false,
+    reviewServed: [],
+    changePlanConfirmed: false,
+    pullBatchProjectNo: null,
   }
 
   if (scenario === 'fresh') {
@@ -686,6 +850,19 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
     return { ...base, projects: [], queueRows: [] }
   }
 
+  if (scenario === 'governedChangePlan' || scenario === 'governedReview') {
+    return {
+      ...base,
+      projects: [
+        synProjectRow({ projectNo: SYN_PROJECT_A, projectName: SYN_PROJECT_A_NAME, pendingDecisionCount: scenario === 'governedChangePlan' ? 1 : 0, heldLineCount: 0, readyLineCount: 1240 }),
+      ],
+      queueRows: [],
+      governedProjectNo: SYN_PROJECT_A,
+      refreshHolds: scenario === 'governedChangePlan' ? [synContentHold()] : [],
+      reviewPlan: scenario === 'governedReview',
+    }
+  }
+
   if (scenario === 'governed') {
     return {
       ...base,
@@ -698,9 +875,10 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
     }
   }
 
-  // ready
+  // ready (and pullBatch: the same world with the pull-batch switch on for project A)
   return {
     ...base,
+    pullBatchProjectNo: scenario === 'pullBatch' ? SYN_PROJECT_A : null,
     projects: [
       synProjectRow({ projectNo: SYN_PROJECT_A, projectName: SYN_PROJECT_A_NAME, pendingDecisionCount: 3, heldLineCount: 0, readyLineCount: 1240 }),
       synProjectRow({ projectNo: SYN_PROJECT_B, projectName: SYN_PROJECT_B_NAME, pendingDecisionCount: 0, heldLineCount: 7, readyLineCount: 860 }),
@@ -917,6 +1095,14 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
     respond: ({ route }) => json(route, 404, refusal('STOCK_PREP_MEMBERS_PAGE_DISABLED')),
   },
   {
+    // 批次标识 BI-7 (R-65; ruling C6): 数据来源与体检's pull-batch settings panel reads its settings once on first render
+    // (stock-prep:admin). The acceptance deployment keeps STOCK_PREP_PULL_BATCH_ENABLED OFF, so the server answers the
+    // switch-off refusal with zero IO and the panel renders nothing. Its two POSTs never fire with the panel invisible.
+    method: 'GET',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    respond: ({ route }) => json(route, 404, refusal('STOCK_PREP_PULL_BATCH_SETTINGS_DISABLED')),
+  },
+  {
     method: 'GET',
     path: '/api/integration/stock-preparation/prep-lines/export',
     respond: ({ route }) => route.fulfill({
@@ -960,7 +1146,8 @@ const PROJECT_TARGET_PATTERN = /^\/api\/integration\/stock-preparation\/projects
 const PROJECT_FIELDS_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/target\/project-fields$/
 const BOARD_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/board$/
 /** PR-7: the puller's six routes under `…/projects/:projectNo/refresh/…` (PR-4). */
-const REFRESH_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/refresh\/(holds|holds\/([^/]+)\/(evidence|keep)|continuations\/confirm|continuations\/([^/]+)(\/end)?)$/
+// PR-9: plus the change plan's three (`change-plans/current`, `change-plans/confirm`, `change-reviews/complete`).
+const REFRESH_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/refresh\/(holds|holds\/([^/]+)\/(evidence|keep)|change-plans\/current|change-plans\/confirm|change-reviews\/complete|continuations\/confirm|continuations\/([^/]+)(\/end)?)$/
 const TABLE_ACTION_PATTERN = /^\/api\/integration\/table-actions\/([^/]+)\/(.+)$/
 
 function resolveResponder(method: string, path: string): Responder | null {
@@ -982,6 +1169,37 @@ function resolveResponder(method: string, path: string): Responder | null {
     const tail = match[2]
     if (method === 'GET' && tail === 'holds') {
       return ({ route, url, state }) => json(route, 200, envelope(synHoldsPage(projectNo, url, state)))
+    }
+    // PR-9: the change plan — read in every world; the confirm and the review check their bodies against the page.
+    if (method === 'GET' && tail === 'change-plans/current') {
+      return ({ route, url, state }) => json(route, 200, envelope(synChangePlanPage(projectNo, url, state)))
+    }
+    if (method === 'POST' && tail === 'change-plans/confirm') {
+      return async ({ route, state }) => {
+        const body = JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>
+        const holdIds = state.refreshHolds.filter((hold) => hold.kind === 'content_change').map((hold) => String(hold.id)).sort()
+        const problem = synBodyProblem(body, SYN_CHANGE_PLAN_CONFIRM_KEYS, { confirmProjectNo: projectNo, holdIds, holdSetFingerprint: SYN_HOLD_SET, planFingerprint: SYN_PLAN_FINGERPRINT, sourceContentDigest: SYN_SOURCE_DIGEST, readReceipt: SYN_RECEIPT_ID })
+        if (problem) {
+          await json(route, 400, refusal('STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID'))
+          return
+        }
+        state.refreshHolds = state.refreshHolds.filter((hold) => hold.kind !== 'content_change')
+        state.changePlanConfirmed = true
+        await json(route, 201, envelope({ changePlanId: 'syn-change-plan-0002', recordCount: 1, holdCount: holdIds.length, continuationIds: [], decisionVersion: 2, generation: 2, state: 'confirmed_pending_execution', nextStep: 'preview_again' }))
+      }
+    }
+    if (method === 'POST' && tail === 'change-reviews/complete') {
+      return async ({ route, state }) => {
+        const body = JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>
+        const problem = synBodyProblem(body, SYN_CHANGE_REVIEW_KEYS, { confirmProjectNo: projectNo, changePlanId: 'syn-change-plan-0001', contentDigest: SYN_WRITTEN_DIGEST, readReceipt: SYN_RECEIPT_ID })
+        const pagesRead = state.reviewServed.length >= Math.ceil(synReviewRecords().length / SYN_REVIEW_PAGE_SIZE)
+        if (problem || !pagesRead || !['handled', 'handled_with_notes'].includes(String(body.conclusion))) {
+          await json(route, problem ? 400 : 409, refusal(problem ? 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID' : 'STOCK_PREP_CHANGE_REVIEW_READ_RECEIPT_INCOMPLETE', problem ? undefined : 'pages_missing'))
+          return
+        }
+        state.reviewDone = true
+        await json(route, 200, envelope({ changePlanId: 'syn-change-plan-0001', status: 'reviewed', recordCount: 2, reviewedContentDigest: SYN_WRITTEN_DIGEST, decisionVersion: 3, nextStep: 'preview_again' }))
+      }
     }
     if (method === 'GET' && match[4] === 'evidence') {
       return ({ route }) => json(route, 200, envelope({ holdId: match[3], kind: 'continuation_candidate', status: 'open', current: { observations: [{ role: 'old_root', componentSourceId: 'SYN-PART-0001' }], completeness: { status: 'complete' } }, history: { status: 'history_unknown' }, next: null }))

@@ -382,6 +382,38 @@ export default defineConfig({
       // skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
       // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
       'tests/integration/directory-sync-membership-local-account-gate.db.test.ts',
+      // One-time action proofs against real Postgres: schema, constraints and the transition trigger,
+      // the guarded down/up round trip, issuance and consumption bindings, invalidation, and
+      // concurrency on read-committed and repeatable-read-default pools. DATABASE_URL-gated; excluded
+      // here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval
+      // real-DB step in plugin-tests.yml (both points asserted by
+      // tests/unit/security-action-proof-inert.test.ts).
+      'tests/integration/security-action-proof.db.test.ts',
+      // Directory sync characterization against real PostgreSQL (mocked provider client, real
+      // reconcile). DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and
+      // wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml (pinned by
+      // plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/directory-adapter-golden-parity.db.test.ts',
+      // Directory integration capability tables against real PostgreSQL: structure and constraints,
+      // update and append-only guards, the guarded down(), the table-existence probe on an open
+      // transaction, and the login scope unique index. DATABASE_URL-gated; excluded here so the no-DB
+      // job cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
+      // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
+      // tests/unit/directory-integration-capabilities-wiring.test.ts).
+      'tests/integration/directory-integration-capabilities.db.test.ts',
+      // Deprovision effect provider witness: the provider column migration (isolated schema:
+      // triggers, CHECK, replay, down, lock bound) and restore / compensation / writer against the
+      // migrated schema. DATABASE_URL-gated with the EXPECT_DB sentinel; excluded here so the
+      // no-DB job cannot skip-green them, and wired as WHOLE FILES into the approval real-DB step
+      // in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
+      // directory-deprovision-provider-scope-ci-wiring.test.mjs).
+      'tests/integration/directory-deprovision-effect-provider-schema.db.test.ts',
+      'tests/integration/directory-deprovision-provider-evidence.db.test.ts',
+      // Delivery worker deferral and lease headroom against real Postgres (requeue CAS, attempt
+      // restore, two-hour window, re-claimed rows never sent twice). DATABASE_URL-gated; excluded
+      // here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval
+      // real-DB step in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/attendance-notification-defer.db.test.ts',
       // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
       // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
       // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
@@ -1436,6 +1468,11 @@ export default defineConfig({
       // tables): real Postgres only — excluded HERE so it cannot skip-green, whole-file wired into
       // `Run multitable real-DB integration` in plugin-tests.yml. Two-point wiring.
       'tests/integration/multitable-automation-run-integration-job-realdb.test.ts',
+      // Delivery-result truthfulness: the real EmailNotificationChannel driven through the executor's two-phase
+      // send_email path against the REAL outbound-intent ledger + AutomationLogService.getStats — real Postgres
+      // only (EXPECT_DB sentinel throws at import without it), excluded HERE so it cannot skip-green in the
+      // no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/notification-delivery-result.db.test.ts',
       // FWB-1 slice ③ write_approval_form_values same-txn composition — real-DB. Two-point wiring.
       'tests/integration/multitable-fwb-write-action-realdb.test.ts',
       // FWB activation — production write_approval_form_values wiring (save gate + real trigger chain +
