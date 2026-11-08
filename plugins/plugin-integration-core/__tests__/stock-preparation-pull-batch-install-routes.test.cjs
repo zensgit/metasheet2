@@ -16,6 +16,9 @@
 //   IR-8   the create route: OFF => no pullBatchBand key and no band / ledger IO (byte-identical); ON => the stanza, the
 //          `_sheet` row born_empty, the birth BEFORE the registry row; a birth failure never fails the create
 //   IR-9   ON end to end, R line: dry-run -> install with no lease -> resolved; unfenced patches, no bump; values-free
+//   IR-RL-WALL (R line) the WRITE target is walled to the tenant: a registry row naming a sheet that is neither the tenant
+//          staging project's nor the id derived for the project answers 409 TABLE_ACTION_TARGET_TENANT_MISMATCH for
+//          dry_run and install alike, before any records read, ledger statement or band write
 //
 // Synthetic values only.
 
@@ -246,6 +249,26 @@ test('IR-5 / IR-6 the typed project number; the tenant scope; absent / archived 
     const res = await withSwitch('true', () => post(moved, dryRunBody()))
     assert.equal(res.statusCode, 409, JSON.stringify(res.body))
   } finally { moved.restore() }
+})
+
+test('IR-RL-WALL (R line) a registry row naming a foreign sheet: dry_run and install answer 409 TABLE_ACTION_TARGET_TENANT_MISMATCH before any records read, ledger statement or band write', async () => {
+  const h = mount()
+  try {
+    seedSheet(h)
+    h.registryRows()[0].sheet_id = 'sheet_planted_elsewhere'
+    for (const body of [dryRunBody(), { mode: 'install', confirmProjectNo: PROJECT, approvalRef: 'R-65', planDigest: 'a'.repeat(64), confirmHistoricalBatchCount: 2 }]) {
+      h.records.calls.length = 0
+      h.db.log.length = 0
+      h.provisioning.calls.length = 0
+      const res = await withSwitch('true', () => post(h, body))
+      assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+      assert.equal(res.body.error.code, 'TABLE_ACTION_TARGET_TENANT_MISMATCH', body.mode)
+      assert.deepEqual(h.records.calls, [], `${body.mode}: no records read`)
+      assert.equal(h.db.log.length, 0, `${body.mode}: no ledger statement`)
+      assert.equal(h.provisioning.calls.some(([name]) => /runObjectFieldsRepairTransaction|ensureView|promoteObjectViewToFirst|patchObjectFieldProperty/.test(name)), false, `${body.mode}: no host write`)
+      assert.equal(JSON.stringify(res.body).includes('sheet_planted_elsewhere'), false)
+    }
+  } finally { h.restore() }
 })
 
 test('IR-7 install without the in-transaction audit append => 501 before any write; the vocabulary probe precedes every write', async () => {
