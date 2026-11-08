@@ -125,6 +125,9 @@
       </template>
       <template v-else>
         <p class="sp-sync__target-line" data-testid="stock-prep-project-sync-target-prompt-preview">{{ promptPreviewText }}</p>
+        <!-- 批次标识 BI-3 (P-4): whether the create path's write will be recorded as a pull batch. Absent while the switch
+             is off (no preview), when nothing is added, and for a sheet without the band (not_installed). -->
+        <p v-if="pullBatchPromptText" class="sp-sync__target-line" data-testid="stock-prep-project-sync-target-prompt-pull-batch">{{ pullBatchPromptText }}</p>
         <div class="sp-sync__target-actions">
           <button
             type="button"
@@ -272,6 +275,16 @@
          server, bounded, values-free. Absent on the old (switch-off) path and when it could not count. -->
     <p v-if="report && afterRowsText" class="sp-sync__counts" data-testid="stock-prep-project-sync-target-rows">
       {{ afterRowsText }}
+    </p>
+    <!-- 批次标识 BI-3 (§4.3): how this run's write was recorded (记为 / 并入 / 没有新增 / 未标记：原因), from the apply's own
+         answer. Absent while the switch is off (no key), for not_installed (P-2: the board says 未启用) and before a write. -->
+    <p
+      v-if="report && pullBatchOutcomeText"
+      class="sp-sync__counts"
+      data-testid="stock-prep-project-sync-pull-batch"
+      :data-pull-batch="report.pullBatch?.outcome?.kind"
+    >
+      {{ pullBatchOutcomeText }}
     </p>
     <!-- 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3; R-68): the per-sheet switch and the last pull's
          reminder live in their own component; this panel hands it the project (on the board, always the board's —
@@ -476,7 +489,13 @@
             data-testid="stock-prep-project-sync-step-not-yours"
           >{{ bi(notYoursPosture.zh, notYoursPosture.en) }}</span>
           <template v-if="row.result">
-            <small class="sp-sync__reason" data-testid="stock-prep-project-sync-step-reason">{{ reasonText(row.result) }}</small>
+            <!-- 批次标识 BI-3 (critic C-5): a write refused or stopped on a STOCK_PREP_PULL_BATCH_* code reads that code's own
+                 plain sentence here (never WRITE_FAILED's 「数据没有变化」 after rows may have landed). -->
+            <small class="sp-sync__reason" data-testid="stock-prep-project-sync-step-reason"><span
+              v-if="stockPrepPullBatchStepPlain(row.result)"
+              data-testid="stock-prep-project-sync-pull-batch-refusal"
+              :data-pull-batch-code="row.result.detail.code"
+            >{{ reasonText(row.result) }}</span><template v-else>{{ reasonText(row.result) }}</template></small>
             <small v-if="reasonNext(row.result)" class="sp-sync__next-line" data-testid="stock-prep-project-sync-step-next">
               {{ reasonNext(row.result) }}
             </small>
@@ -615,6 +634,11 @@ import { createStockPrepProjectSyncRunGuard, type StockPrepProjectSyncRunTicket 
 import { downloadCsvFile, escapeTsvCell } from '../../../services/integration/stockPreparation/stockPrepCsv'
 import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
 import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
+import {
+  stockPrepPullBatchOutcomeLine,
+  stockPrepPullBatchPreviewLine,
+  stockPrepPullBatchStepPlain,
+} from '../../../services/integration/stockPreparation/pullBatch'
 
 const props = withDefaults(
   defineProps<{
@@ -882,6 +906,18 @@ const promptPreviewText = computed<string>(() => {
   if (!request || request.kind !== 'write') return ''
   const text = stockPrepProjectTargetWritePreviewText(request.planned)
   return bi(text.zh, text.en)
+})
+/** 批次标识 BI-3 (§4.4, P-4): the create path's write prompt says whether the write will be recorded as a pull batch. */
+const pullBatchPromptText = computed<string>(() => {
+  const request = targetPrompt.value?.request
+  if (!request || request.kind !== 'write') return ''
+  const line = stockPrepPullBatchPreviewLine(request.pullBatch ?? null, request.planned.add)
+  return line ? bi(line.zh, line.en) : ''
+})
+/** 批次标识 BI-3 (§4.3): how this run's write was recorded; '' (no element) for none / not_installed / disabled. */
+const pullBatchOutcomeText = computed<string>(() => {
+  const line = stockPrepPullBatchOutcomeLine(report.value?.pullBatch?.outcome ?? null)
+  return line ? bi(line.zh, line.en) : ''
 })
 
 const targetNoticeText = computed<StockPrepPlainEntry>(() => {
@@ -1248,6 +1284,9 @@ function stepIcon(status: StockPreparationProjectSyncStepStatus): string {
 }
 
 function reasonText(result: StockPreparationProjectSyncStepResult): string {
+  // 批次标识 BI-3 (critic C-5): a pull-batch refusal / run stop reads its own code first (`null` for every other step).
+  const pullBatch = stockPrepPullBatchStepPlain(result)
+  if (pullBatch) return bi(pullBatch.zh, pullBatch.en)
   const plain = stockPrepSyncReasonPlain(result.reason)
   // Fails soft, like every other lookup in plainLanguage.ts: a reason added later renders as its own
   // code rather than blanking the line.
@@ -1255,6 +1294,8 @@ function reasonText(result: StockPreparationProjectSyncStepResult): string {
 }
 
 function reasonNext(result: StockPreparationProjectSyncStepResult): string {
+  const pullBatch = stockPrepPullBatchStepPlain(result)
+  if (pullBatch) return bi(pullBatch.zhNext ?? '', pullBatch.enNext ?? '')
   const plain = stockPrepSyncReasonPlain(result.reason)
   if (!plain) return ''
   return bi(plain.zhNext ?? '', plain.enNext ?? '')

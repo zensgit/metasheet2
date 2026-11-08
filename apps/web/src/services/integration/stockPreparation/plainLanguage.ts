@@ -1157,8 +1157,29 @@ export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainEntry = Object.freeze({
   enNext: 'Try again shortly; if it keeps happening, give an administrator the code below.',
 })
 
-export function stockPrepErrorPlain(code: string): StockPrepPlainEntry {
-  return lookup(STOCK_PREP_ERROR_PLAIN, code) ?? STOCK_PREP_ERROR_GENERIC
+/**
+ * `<code>/<details.reason>` readings, picked before the code's own entry. R line (R83): main's table carries only the
+ * 批次标识 entry here (the export-gate / refresh readings are main-only); this also closes part 1's residual (the
+ * settings_changed copy).
+ */
+export const STOCK_PREP_ERROR_REASON_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  // 批次标识 BI-1b (R-65): the per-sheet batch rule changed between this run's read and its first new row.
+  'STOCK_PREP_PULL_BATCH_CONFLICT/settings_changed': Object.freeze({
+    zh: '这张表的「首次批次」规则刚被修改,这次拉取停了下来。',
+    en: 'The 首次批次 rule of this sheet was just changed, so this pull stopped.',
+    zhNext: '请重新试算,按新规则再写入。',
+    enNext: 'Preview again and write under the new rule.',
+  }),
+})
+
+/**
+ * A code's plain entry; with the server's `details.reason` token, picks a finer reading from STOCK_PREP_ERROR_REASON_PLAIN
+ * first; every existing one-argument caller reads exactly what it read.
+ */
+export function stockPrepErrorPlain(code: string, reason?: string | null): StockPrepPlainEntry {
+  return (reason ? lookup(STOCK_PREP_ERROR_REASON_PLAIN, `${code}/${reason}`) : null)
+    ?? lookup(STOCK_PREP_ERROR_PLAIN, code)
+    ?? STOCK_PREP_ERROR_GENERIC
 }
 
 /**
@@ -2490,6 +2511,13 @@ export const STOCK_PREP_SYNC_VERDICT_PLAIN: Record<string, StockPrepPlainEntry> 
     en: 'Nothing was written — you chose not to after the preview, and nothing in the table changed.',
     zhNext: '备料表已经建好、还没拉过;需要时再按一次「从PLM拉取数据」。',
     enNext: 'The sheet exists and has not been pulled yet; press 从PLM拉取数据 again whenever you are ready.',
+  }),
+  // R line (main #6584 B1, for BI-3 P-5): a pull-batch run stop after rows may have landed.
+  interrupted: Object.freeze({
+    zh: '写入没有完成 —— 中途停了下来,可能已经写进了一部分行,表里的数据可能已经变了。',
+    en: 'The write did not finish — it stopped part-way, some rows may already have landed, and the table may have changed.',
+    zhNext: '已写进去的行不会重复写。请重新同步(重新试算);下面每一步都写了停在哪里。',
+    enNext: 'Rows that landed will not be written twice. Sync again (preview again); each step below says where it stopped.',
   }),
   blocked: Object.freeze({
     zh: '这次没有导入成功,数据没有变化。',

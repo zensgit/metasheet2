@@ -44,6 +44,7 @@ import {
   clampErrorCode,
   clampToken,
 } from './projectSync'
+import { parseStockPrepPullBatchOutcome, type StockPrepPullBatchOutcome } from './pullBatch'
 import { apiFetch } from '../../../utils/api'
 import { buildQueryString, type IntegrationApiEnvelope, type IntegrationScope } from '../workbench'
 
@@ -108,6 +109,11 @@ export interface StockPreparationLargeBomPullState {
   errorCode: string | null
   /** True once the checkpoint apply reaches `succeeded` or `partial` — rows are in the sheet. */
   imported: boolean
+  /**
+   * 批次标识 BI-3 (P-6): the LAST chunk answer's `pullBatch` (the job's running total), clamped; `null` while none was
+   * answered — on every job while the switch is off (the server sends no key).
+   */
+  pullBatch: StockPrepPullBatchOutcome | null
 }
 
 function initialState(): StockPreparationLargeBomPullState {
@@ -122,6 +128,7 @@ function initialState(): StockPreparationLargeBomPullState {
     manualConfirmCount: 0,
     errorCode: null,
     imported: false,
+    pullBatch: null,
   }
 }
 
@@ -180,6 +187,8 @@ export interface StockPreparationLargeBomApplyJob {
   jobId?: string
   status?: string
   counts?: Record<string, number>
+  /** 批次标识 BI-3: a chunk run's `largeChunkAnswerOf` (ON only). Untyped at the boundary: `parseStockPrepPullBatchOutcome`. */
+  pullBatch?: unknown
 }
 
 export interface StockPreparationLargeBomJobApi {
@@ -338,7 +347,11 @@ export async function runStockPreparationLargeBomPull(
       return fail(error)
     }
     const nextStatus = clampToken(applyJob.status, STOCK_PREPARATION_LARGE_BOM_APPLY_STATUSES)
-    emit({ applyStatus: nextStatus, applyCounts: largeBomApplyCountsOf(applyJob.counts) })
+    emit({
+      applyStatus: nextStatus,
+      applyCounts: largeBomApplyCountsOf(applyJob.counts),
+      pullBatch: parseStockPrepPullBatchOutcome(applyJob.pullBatch) ?? state.pullBatch,
+    })
     if (!APPLY_NON_TERMINAL.has(nextStatus)) break
     if (isCancelled()) return state
     await wait(intervalMs)

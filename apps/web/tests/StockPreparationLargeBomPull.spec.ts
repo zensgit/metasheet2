@@ -270,3 +270,44 @@ describe('大 BOM 后台通道 — the pure helpers', () => {
     expect(largeBomApplyCountsOf(undefined)).toEqual({ created: 0, updated: 0, inactive: 0, skipped: 0, held: 0, failed: 0 })
   })
 })
+
+// ---- 批次标识 BI-3 (R-65; P-6): the large lane keeps the LAST chunk answer's pullBatch -----------------------------
+describe('大 BOM 后台通道 — 批次标识 (BI-3)', () => {
+  const chunk = (status: string, pullBatch?: unknown) => applyJob({
+    status,
+    counts: { created: 40, updated: 0, inactive: 0, skipped: 0, held: 0, failed: 0 },
+    ...(pullBatch === undefined ? {} : { pullBatch }),
+  })
+
+  it('LARGE-PB: the state takes the last chunk answer; a chunk without one keeps the previous; absent everywhere ⇒ null', async () => {
+    const first = { stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: false, createdRowCount: 40 }
+    const second = { stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: true, createdRowCount: 80 }
+    const api = makeApi({
+      runApplyChunk: vi.fn()
+        .mockResolvedValueOnce(chunk('running', first))
+        .mockResolvedValueOnce(chunk('running'))
+        .mockResolvedValueOnce(chunk('succeeded', second)),
+    })
+    const seen: Array<unknown> = []
+    const state = await runStockPreparationLargeBomPull(api, PROJECT_NO, { wait: instantWait(), onUpdate: (next) => seen.push(next.pullBatch) })
+    expect(state.phase).toBe('done')
+    expect(state.pullBatch).toEqual({ kind: 'stamped', label: '第2批（2026-11-08）', batchNo: 2, joined: true, createdRowCount: 80 })
+    expect(seen).toContainEqual({ kind: 'stamped', label: '第2批（2026-11-08）', batchNo: 2, joined: false, createdRowCount: 40 })
+
+    const off = await runStockPreparationLargeBomPull(makeApi(), PROJECT_NO, { wait: instantWait() })
+    expect(off.pullBatch, 'switch off: the server sends no key').toBeNull()
+  })
+
+  // Review fix M-W13: kills the mutant that drops the '?? state.pullBatch' fallback in the apply loop.
+  it('LARGE-PB-KEEP: the last chunk answers no pullBatch => the state keeps the earlier chunk answer', async () => {
+    const first = { stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: false, createdRowCount: 40 }
+    const api = makeApi({
+      runApplyChunk: vi.fn()
+        .mockResolvedValueOnce(chunk('running', first))
+        .mockResolvedValueOnce(chunk('succeeded')),
+    })
+    const state = await runStockPreparationLargeBomPull(api, PROJECT_NO, { wait: instantWait() })
+    expect(state.phase).toBe('done')
+    expect(state.pullBatch).toEqual({ kind: 'stamped', label: '第2批（2026-11-08）', batchNo: 2, joined: false, createdRowCount: 40 })
+  })
+})

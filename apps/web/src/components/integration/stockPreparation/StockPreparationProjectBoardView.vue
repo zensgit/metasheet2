@@ -415,6 +415,28 @@
             <dd>{{ lastExportText }}</dd>
           </div>
         </dl>
+        <!-- 批次标识 BI-3 (design §11, §5.5; R-65): the latest pull batch, or why batches are paused — a status line, no
+             control (P-7) — and ONCE under it what 首次批次 / 本次拉取 mean on THIS sheet, following its CAPTURED rule.
+             ABSENT (no element) while the switch is off: the server sends no `pullBatch` key, so the page is the DOM it
+             was (C6). The label is the ledger's own, rendered verbatim. -->
+        <p
+          v-if="pullBatchBoard && pullBatchLine"
+          class="sp-board__pull-batch"
+          data-testid="stock-prep-project-board-pull-batch"
+          :data-pull-batch-state="pullBatchBoard.state"
+          role="status"
+        >
+          {{ bi(pullBatchLine.zh, pullBatchLine.en) }}
+          <span v-if="pullBatchLine.zhNext" class="sp-board__hint">{{ bi(pullBatchLine.zhNext, pullBatchLine.enNext ?? '') }}</span>
+        </p>
+        <p
+          v-if="pullBatchBoard && pullBatchMeaning.length > 0"
+          class="sp-board__hint"
+          data-testid="stock-prep-project-board-pull-batch-meaning"
+          :data-pull-batch-rule="pullBatchBoard.rule ?? 'none'"
+        >
+          <span v-for="(sentence, idx) in pullBatchMeaning" :key="idx" class="sp-board__pull-batch-sentence">{{ bi(sentence.zh, sentence.en) }}</span>
+        </p>
         <!-- THE ADMINISTRATOR'S ARCHIVE, said to be exactly that. These numbers come from the MVP
              snapshot tables, which mvp-persist writes and mvp-persist is platform-admin — so on an
              operator's own run they are legitimately absent, and a bare 「0 次」 above the fold read
@@ -757,6 +779,12 @@ import {
   canRunStockPrepProjectSync,
   grantedStockPrepCapabilities,
 } from '../../../services/integration/stockPreparation/workbenchAccess'
+import {
+  parseStockPrepPullBatchBoardStanza,
+  stockPrepPullBatchBoardLine,
+  stockPrepPullBatchMeaning,
+  type StockPrepPullBatchBoard,
+} from '../../../services/integration/stockPreparation/pullBatch'
 import { useAuth } from '../../../composables/useAuth'
 import {
   operatorNextStep,
@@ -1395,6 +1423,15 @@ const posture = computed<StockPrepPosture>(() => stockPrepPosture({
   missingComponentsCount: missingComponentsCount.value,
   pulledRowCount: board.value?.pulledRowCount ?? 0,
 }))
+/**
+ * 批次标识 BI-3 — the board's pull-batch stanza, parsed once; `null` (nothing renders) when the server sends none, which
+ * is every board while the switch is off (C6).
+ */
+const pullBatchBoard = computed<StockPrepPullBatchBoard | null>(() => parseStockPrepPullBatchBoardStanza(board.value?.pullBatch))
+const pullBatchLine = computed<StockPrepPlainEntry | null>(() => (pullBatchBoard.value ? stockPrepPullBatchBoardLine(pullBatchBoard.value) : null))
+const pullBatchMeaning = computed<StockPrepPlainText[]>(() => (
+  pullBatchBoard.value ? stockPrepPullBatchMeaning(pullBatchBoard.value.rule, pullBatchBoard.value.state) : []
+))
 
 /**
  * P0-3: the "下一步" bar's input — every field already lives on this page or the composed panel; see
@@ -2537,6 +2574,28 @@ onMounted(async () => {
 /* Subordinate by design: the archive is somebody else's numbers, not the answer to 「拉过了吗?」. */
 .sp-board__archive {
   margin: var(--ms-space-3) 0 0;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+/* 批次标识 BI-3: one status line and, under it, the two or three meaning sentences — each on its own line. */
+.sp-board__pull-batch {
+  margin: var(--ms-space-3) 0 0;
+  color: var(--ms-text-1);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.sp-board__pull-batch .sp-board__hint {
+  margin-left: var(--ms-space-2);
+  color: var(--ms-text-3);
+  font-size: 12px;
+}
+
+.sp-board__pull-batch-sentence {
+  display: block;
+  margin: var(--ms-space-1) 0 0;
   color: var(--ms-text-3);
   font-size: 12px;
   line-height: 1.7;

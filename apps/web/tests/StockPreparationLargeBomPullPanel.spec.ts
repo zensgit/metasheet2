@@ -251,3 +251,79 @@ describe('StockPreparationLargeBomPullPanel', () => {
     expect(status.textContent).toContain('multitable')
   })
 })
+
+// ---- 批次标识 BI-3 (R-65; P-6, critic C-3): the large panel's done line --------------------------------------------
+describe('StockPreparationLargeBomPullPanel — 批次标识 (BI-3)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    h.locale = 'zh-CN'
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function runWith(chunks: StockPreparationLargeBomApplyJob[]): Promise<HTMLElement> {
+    const runApplyChunk = vi.fn()
+    for (const answer of chunks) runApplyChunk.mockResolvedValueOnce(answer)
+    app = createApp(StockPreparationLargeBomPullPanel as Component, { projectNo: PROJECT_NO, wait: instantWait(), api: doneApi({ runApplyChunk }) })
+    app.mount(container!)
+    await flushUi(16)
+    return container!
+  }
+
+  const counts = { created: 90, updated: 10, inactive: 0, skipped: 0, held: 0, failed: 0 }
+
+  it('LARGE-PB: a fresh two-chunk pull (chunk 2 answers joined) reads 记为, never 并入', async () => {
+    const root = await runWith([
+      applyJob({ status: 'running', counts, pullBatch: { stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: false, createdRowCount: 50 } }),
+      applyJob({ status: 'succeeded', counts, pullBatch: { stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: true, createdRowCount: 90 } }),
+    ])
+    const line = root.querySelector('[data-testid="stock-prep-large-bom-pull-batch"]')
+    expect(line?.textContent?.trim()).toBe('本次新增 90 行，记为 第2批（2026-11-08）')
+    expect(root.textContent ?? '').not.toContain('并入')
+  })
+
+  it('LARGE-PB: no_creates says so; not_installed and absent say nothing', async () => {
+    let root = await runWith([applyJob({ status: 'succeeded', counts, pullBatch: { stamped: false, reason: 'no_creates' } })])
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull-batch"]')?.textContent?.trim()).toBe('本次没有新增物料，不产生新的拉取批次')
+    app?.unmount()
+    container!.innerHTML = ''
+    root = await runWith([applyJob({ status: 'succeeded', counts, pullBatch: { stamped: false, reason: 'not_installed' } })])
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull-batch"]')).toBeNull()
+    app?.unmount()
+    container!.innerHTML = ''
+    root = await runWith([applyJob({ status: 'succeeded', counts })])
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]')?.getAttribute('data-phase')).toBe('done')
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull-batch"]')).toBeNull()
+  })
+
+  // Review fix M-W14: kills the mutant that drops the "state.phase === 'done'" guard on the batch line.
+  it('LARGE-PB-MIDRUN: no batch line while chunks are still being written; the line appears once done', async () => {
+    let release: (answer: StockPreparationLargeBomApplyJob) => void = () => {}
+    const pending = new Promise<StockPreparationLargeBomApplyJob>((resolve) => { release = resolve })
+    const runApplyChunk = vi.fn()
+      .mockResolvedValueOnce(applyJob({ status: 'running', counts, pullBatch: { stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: false, createdRowCount: 50 } }))
+      .mockImplementationOnce(() => pending)
+    app = createApp(StockPreparationLargeBomPullPanel as Component, { projectNo: PROJECT_NO, wait: instantWait(), api: doneApi({ runApplyChunk }) })
+    app.mount(container!)
+    await flushUi(16)
+    const root = container!
+    expect(runApplyChunk).toHaveBeenCalledTimes(2)
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]')?.getAttribute('data-phase')).not.toBe('done')
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull-batch"]'), 'no batch line before done').toBeNull()
+
+    release(applyJob({ status: 'succeeded', counts, pullBatch: { stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: true, createdRowCount: 90 } }))
+    await flushUi(16)
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]')?.getAttribute('data-phase')).toBe('done')
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull-batch"]')?.textContent?.trim()).toBe('本次新增 90 行，记为 第2批（2026-11-08）')
+  })
+})

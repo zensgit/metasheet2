@@ -55,6 +55,13 @@
 // OPERATOR TYPED, which the panel echoes back to them and which never comes from a response.
 import { apiFetch } from '../../../utils/api'
 import { buildQueryString, type IntegrationApiEnvelope, type IntegrationScope } from '../workbench'
+import {
+  parseStockPrepPullBatchOutcome,
+  parseStockPrepPullBatchPreview,
+  STOCK_PREP_PULL_BATCH_ERROR_PREFIX,
+  type StockPrepPullBatchOutcome,
+  type StockPrepPullBatchPreview,
+} from './pullBatch'
 
 /** The frozen table action this entry drives. Server-side default too; sent explicitly for clarity. */
 export const STOCK_PREPARATION_PULL_BOM_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
@@ -445,6 +452,10 @@ export type StockPreparationProjectSyncVerdict =
   | 'held'
   // S2: the operator declined the write after the preview. Not `blocked` — nothing refused anything.
   | 'not_written'
+  // R line (R83; main #6584 PR-8 review fix B1, ported for 批次标识 BI-3 P-5): the write STOPPED after a host write was
+  // attempted — rows may already be in the sheet. Never `blocked`, whose headline is 「数据没有变化」. On this line only a
+  // STOCK_PREP_PULL_BATCH_* run stop reporting `details.partial: true` reaches it (see applyStepMayHaveLanded).
+  | 'interrupted'
   | 'blocked'
   | 'not_run'
 
@@ -481,6 +492,12 @@ export interface StockPreparationProjectSyncReport {
   /** True when no step FAILed. A run of OK + SKIP passes — held is not broken. */
   pass: boolean
   failedStepId: StockPreparationProjectSyncStepId | null
+  /**
+   * 批次标识 BI-3 (R-65): how this run's write was / would be recorded as a pull batch — the dry run's preview and the
+   * apply's answer, both clamped (pullBatch.ts). The KEY IS ABSENT unless one of the two is there, i.e. on every run
+   * while the switch is off (C6: the server sends no `pullBatch` key), so every pre-existing report is unchanged.
+   */
+  pullBatch?: { preview: StockPrepPullBatchPreview | null; outcome: StockPrepPullBatchOutcome | null }
 }
 
 // ---------------------------------------------------------------------------
@@ -666,6 +683,17 @@ export function classifyPlanStep(
   return result(index, 'dry-run', 'ok', 'PLAN_READY', base)
 }
 
+/**
+ * R line (R83; main #6584 PR-8 review fix B1, the sliver 批次标识 BI-3 P-5 needs): an apply FAILURE after which rows MAY
+ * be in the sheet — "rows may have landed" only on a positive `details.partial: true`, which the step detail carries as
+ * `partial: 1`. On this line only a STOCK_PREP_PULL_BATCH_* refusal / run stop records `partial` (main's lock and
+ * change-plan readings are not on this line).
+ */
+export function applyStepMayHaveLanded(step: StockPreparationProjectSyncStepResult | null | undefined): boolean {
+  if (!step || step.id !== 'apply' || step.status !== 'fail') return false
+  return Boolean(step.detail) && step.detail.partial === 1
+}
+
 /** The tally + the verdict. See `imported` on the report for why step 4 is excluded from it. */
 export function summarizeProjectSync(
   steps: StockPreparationProjectSyncStepResult[],
@@ -676,6 +704,8 @@ export function summarizeProjectSync(
     written: StockPreparationProjectSyncReport['written']
     missingComponents: StockPreparationProjectSyncReport['missingComponents']
     missingComponentsUnavailableReason: StockPreparationProjectSyncReport['missingComponentsUnavailableReason']
+    /** 批次标识 BI-3: the run's pull-batch preview / outcome; absent = none (every run while the switch is off). */
+    pullBatch?: StockPreparationProjectSyncReport['pullBatch']
   },
 ): StockPreparationProjectSyncReport {
   const failed = steps.find((step) => step.status === 'fail') ?? null
@@ -691,6 +721,8 @@ export function summarizeProjectSync(
   else if (write?.reason === 'WRITE_PARTIAL') verdict = 'partial'
   else if (write?.reason === 'WRITE_HELD_FOR_CONFIRMATION') verdict = 'held'
   else if (write?.reason === 'WRITE_NOT_CONFIRMED') verdict = 'not_written'
+  // R line (BI-3 P-5): a write that stopped after rows may have landed never reads 「数据没有变化」.
+  else if (applyStepMayHaveLanded(write)) verdict = 'interrupted'
   else if (steps.length > 0) verdict = 'blocked'
 
   return {
@@ -709,6 +741,7 @@ export function summarizeProjectSync(
     missingComponentsUnavailableReason: context.missingComponentsUnavailableReason,
     pass: failed === null,
     failedStepId: failed ? failed.id : null,
+    ...(context.pullBatch ? { pullBatch: context.pullBatch } : {}),
   }
 }
 
@@ -735,6 +768,12 @@ export interface StockPreparationProjectSyncPlan {
    * exercise the report's handling of it without going through the retry.
    */
   missingComponentsUnavailableReason?: StockPreparationMissingComponentsUnavailableReason
+  /**
+   * 批次标识 BI-3: the values-free pull-batch preview (`{ preview, wouldStamp, reason, gapRows? }`, server
+   * stock-preparation-pull-batch-lanes.cjs `previewStanzaOf`), present only while the switch is on. Untyped at the
+   * boundary: read through `parseStockPrepPullBatchPreview`.
+   */
+  pullBatch?: unknown
 }
 
 export interface StockPreparationProjectSyncApplyResult {
@@ -754,6 +793,12 @@ export interface StockPreparationProjectSyncApplyResult {
    * `sourceContentDigestOf`.
    */
   sourceContentDigest?: unknown
+  /**
+   * 批次标识 BI-3: how the write was recorded (`{ stamped, label, batchNo, joined, createdRowCount }` or
+   * `{ stamped: false, reason, gapRows? }`), present only while the switch is on. Untyped at the boundary: read through
+   * `parseStockPrepPullBatchOutcome`.
+   */
+  pullBatch?: unknown
 }
 
 /** The digest's one wire shape; anything else is treated as absent, never forwarded. */
@@ -866,13 +911,19 @@ export class StockPreparationProjectSyncCallError extends Error {
 
   detailReason: string | null
 
+  /**
+   * The server's `details.partial`, TRI-STATE: `true` = a host write was attempted, so rows may have landed; `false` =
+   * none was; `null` = not reported. R line (R83): read only for a STOCK_PREP_PULL_BATCH_* refusal / run stop (BI-3 P-5).
+   */
+  detailPartial: boolean | null
+
   /** True when the transport succeeded and the payload was not this API's envelope. */
   malformed: boolean
 
   constructor(
     status: number,
     route: string,
-    options: { code?: string | null; malformed?: boolean; detailTarget?: string | null; detailReason?: string | null } = {},
+    options: { code?: string | null; malformed?: boolean; detailTarget?: string | null; detailReason?: string | null; detailPartial?: unknown } = {},
   ) {
     super(`stock-preparation project sync call failed (${route} -> ${status})`)
     this.name = 'StockPreparationProjectSyncCallError'
@@ -880,6 +931,7 @@ export class StockPreparationProjectSyncCallError extends Error {
     this.code = options.code ?? null
     this.detailTarget = clampErrorDetailToken(options.detailTarget)
     this.detailReason = clampErrorDetailToken(options.detailReason)
+    this.detailPartial = options.detailPartial === true ? true : (options.detailPartial === false ? false : null)
     this.malformed = options.malformed === true
   }
 }
@@ -1067,7 +1119,14 @@ function missingComponentsFallbackReason(error: unknown): StockPreparationMissin
  * attempted. Without the hook the run is exactly what it always was — every existing caller passes none.
  */
 export interface StockPreparationProjectSyncHooks {
-  confirmWrite?: (planned: NonNullable<StockPreparationProjectSyncReport['planned']>) => Promise<boolean> | boolean
+  /**
+   * 批次标识 BI-3 (planner decision P-4): the second argument carries the dry run's pull-batch preview (`null` when the
+   * plan had none), so the create path's write prompt can say whether the write will be recorded as a batch.
+   */
+  confirmWrite?: (
+    planned: NonNullable<StockPreparationProjectSyncReport['planned']>,
+    context?: { pullBatch: StockPrepPullBatchPreview | null },
+  ) => Promise<boolean> | boolean
   /**
    * S2 fix round 1: the run is on a PROJECT SHEET (the project-sheet flow sets it). Only then does a
    * refusal code that both sheet kinds can answer (`TARGET_SCHEMA_INCOMPLETE`) read in its
@@ -1098,6 +1157,9 @@ export async function runStockPreparationProjectSync(
   let written: StockPreparationProjectSyncReport['written'] = null
   let missingComponents: StockPreparationProjectSyncReport['missingComponents'] = null
   let missingComponentsUnavailableReason: StockPreparationProjectSyncReport['missingComponentsUnavailableReason'] = null
+  // 批次标识 BI-3: the plan's preview and the apply's answer (both null on every run while the switch is off).
+  let pullBatchPreview: StockPrepPullBatchPreview | null = null
+  let pullBatchOutcome: StockPrepPullBatchOutcome | null = null
 
   function record(step: StockPreparationProjectSyncStepResult): StockPreparationProjectSyncStepResult {
     steps.push(step)
@@ -1113,6 +1175,7 @@ export async function runStockPreparationProjectSync(
       written,
       missingComponents,
       missingComponentsUnavailableReason,
+      ...(pullBatchPreview || pullBatchOutcome ? { pullBatch: { preview: pullBatchPreview, outcome: pullBatchOutcome } } : {}),
     })
   }
 
@@ -1129,6 +1192,7 @@ export async function runStockPreparationProjectSync(
     // use it. `missingComponents` is `null` in that branch by construction (the retried request never
     // asked for the key), so this reason is the ONLY signal the panel has for WHY.
     missingComponentsUnavailableReason = missingComponentsUnavailableReasonOf(plan?.missingComponentsUnavailableReason)
+    pullBatchPreview = parseStockPrepPullBatchPreview(plan?.pullBatch)
     planStep = record(classifyPlanStep(1, plan))
   } catch (error) {
     planStep = record(classifyPlanStep(1, null, {
@@ -1195,7 +1259,7 @@ export async function runStockPreparationProjectSync(
   // S2: the preview's yes/no, asked only now — the plan exists and would write. See the hook's type.
   if (hooks.confirmWrite) {
     const shown = planned ?? plannedCountsOf(undefined)
-    const go = await hooks.confirmWrite(shown)
+    const go = await hooks.confirmWrite(shown, { pullBatch: pullBatchPreview })
     if (go !== true) {
       record(result(3, 'apply', 'skip', 'WRITE_NOT_CONFIRMED', { add: shown.add, update: shown.update, inactive: shown.inactive }))
       record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_NOT_ATTEMPTED', {}))
@@ -1213,6 +1277,7 @@ export async function runStockPreparationProjectSync(
   let sourceContentDigest: string | null = null
   try {
     const applied = await api.apply(projectNo, token)
+    pullBatchOutcome = parseStockPrepPullBatchOutcome(applied?.pullBatch)
     sourceScopeDigest = sourceScopeDigestOf(applied?.sourceScopeDigest)
     sourceContentDigest = sourceContentDigestOf(applied?.sourceContentDigest)
     written = writtenCountsOf(applied?.apply?.counts)
@@ -1248,11 +1313,26 @@ export async function runStockPreparationProjectSync(
     const detail: Record<string, string | number> = { status: statusOf(error) }
     const code = codeOf(error)
     if (code) detail.code = code
+    // 批次标识 BI-3 (planner decision P-5): a pull-batch refusal or run stop (`STOCK_PREP_PULL_BATCH_*`, design §6.1) keeps
+    // the reason WRITE_FAILED but carries the tri-state `partial` and reason token, so a stop after rows landed reads
+    // `interrupted` (never 「数据没有变化」) and `CONFLICT/settings_changed` reaches its own plain entry. R line: no lock or
+    // refresh classification precedes it (both main-only).
+    const pullBatchStop = typeof code === 'string' && code.startsWith(STOCK_PREP_PULL_BATCH_ERROR_PREFIX)
+    if (pullBatchStop && error instanceof StockPreparationProjectSyncCallError) {
+      if (error.detailReason) detail.reason = error.detailReason
+      if (error.detailPartial !== null) detail.partial = error.detailPartial ? 1 : 0
+    }
     record(result(3, 'apply', 'fail', 'WRITE_FAILED', detail))
   }
 
   // ---- 4. 批次存档 ---------------------------------------------------------
   if (!writeOk) {
+    // R line (main #6584 B1, for BI-3 P-5): after a stop that may have put rows in the sheet, NOT_ATTEMPTED's
+    // 「这次没有写入数据」 would be false — the archive is skipped as an incomplete write instead.
+    if (applyStepMayHaveLanded(steps.find((step) => step.id === 'apply'))) {
+      record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_WRITE_INCOMPLETE', {}))
+      return done()
+    }
     record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_NOT_ATTEMPTED', {}))
     return done()
   }
@@ -1335,13 +1415,15 @@ async function readEnvelope<T>(response: Response | undefined, route: string): P
       ? (envelope.error as { details?: unknown }).details
       : undefined
     const detailRecord = details && typeof details === 'object' && !Array.isArray(details)
-      ? details as { target?: unknown; reason?: unknown }
+      ? details as { target?: unknown; reason?: unknown; partial?: unknown }
       : {}
     throw new StockPreparationProjectSyncCallError(status, route, {
       code: clampErrorCode(envelope?.error?.code),
       // Clamped to lower_snake tokens inside the constructor; anything else is dropped.
       detailTarget: typeof detailRecord.target === 'string' ? detailRecord.target : null,
       detailReason: typeof detailRecord.reason === 'string' ? detailRecord.reason : null,
+      // The tri-state `details.partial` (only the literal booleans; anything else is "not reported").
+      detailPartial: detailRecord.partial,
     })
   }
   if (!envelope || envelope.ok !== true) {

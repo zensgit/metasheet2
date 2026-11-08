@@ -523,6 +523,7 @@ StockPreparationProjectSync.spec.ts
 StockPreparationProjectSyncPanel.spec.ts
 StockPreparationProjectTarget
 StockPreparationProjectWorkspaceView
+StockPreparationPullBatchLines
 StockPreparationPullBatchSettingsPanel
 StockPreparationRail
 StockPreparationRouteFailedPlain

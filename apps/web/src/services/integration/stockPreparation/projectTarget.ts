@@ -62,6 +62,7 @@ import {
   type StockPreparationProjectSyncHooks,
   type StockPreparationProjectSyncReport,
 } from './projectSync'
+import type { StockPrepPullBatchPreview } from './pullBatch'
 
 // ---------------------------------------------------------------------------
 // vocabulary
@@ -790,7 +791,8 @@ export async function probeStockPreparationProjectTarget(
 export type StockPrepProjectTargetConfirmRequest =
   | { kind: 'create' }
   | { kind: 'repull'; rowCount: number | null; activeRowCount: number | null; rowCountBounded: boolean | null }
-  | { kind: 'write'; planned: NonNullable<StockPreparationProjectSyncReport['planned']> }
+  // 批次标识 BI-3 (P-4): the dry run's pull-batch preview, for the write prompt's one batch line (`null` / absent: none).
+  | { kind: 'write'; planned: NonNullable<StockPreparationProjectSyncReport['planned']>; pullBatch?: StockPrepPullBatchPreview | null }
 
 export type StockPrepProjectPullOutcome =
   /** The four-step run happened. `mode` says on which path; `after` is the re-read sheet (counts). */
@@ -870,7 +872,7 @@ export async function runStockPreparationProjectPull(
       }
       // EXISTS: a colleague's create won the race — it is this project's one sheet; carry on.
     }
-    const report = await deps.runSync({ projectSheet: true, confirmWrite: (planned) => deps.confirm({ kind: 'write', planned }) })
+    const report = await deps.runSync({ projectSheet: true, confirmWrite: (planned, ctx) => deps.confirm({ kind: 'write', planned, pullBatch: ctx?.pullBatch ?? null }) })
     return { kind: 'synced', mode: 'created', createdSheet, report, after: await rereadCounts(api, projectNo) }
   }
 
