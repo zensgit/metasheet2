@@ -18,6 +18,12 @@ import {
   canonicalSheetFenceKey,
   SheetWriterBlockedError,
 } from '../../src/multitable/canonical-sheet-fence'
+import { SHEET_PERMISSION_VERSIONS_BUMP_SQL, SHEET_ROW_KEY_SHARE_SQL } from '../../src/multitable/authz-version-protocol'
+
+/** The D21 explicit sheet-version bump, whitespace-normalized the way the fake records statements. */
+const SHEET_VERSION_BUMP = SHEET_PERMISSION_VERSIONS_BUMP_SQL.replace(/\s+/g, ' ').trim()
+/** The sheet-row KEY SHARE an ensureFields overwrite takes right before that bump (one line already). */
+const SHEET_ROW_KEY_SHARE = SHEET_ROW_KEY_SHARE_SQL.replace(/\s+/g, ' ').trim()
 
 const WRITER_FENCE_ENV = 'MULTITABLE_ENABLE_WRITER_FENCE'
 const SHEET_ID = 'sheet_dh1_provisioning'
@@ -39,6 +45,7 @@ function createFenceQuery(options: {
 
     if (normalized.includes('FROM information_schema.columns')) return { rows: [{}] }
     if (normalized.includes('pg_advisory_xact_lock')) return { rows: [] }
+    if (normalized === SHEET_VERSION_BUMP) return { rows: [], rowCount: 1 }
     if (normalized === 'SELECT recovery_writer_state FROM meta_sheets WHERE id = $1') {
       return { rows: [{ recovery_writer_state: options.blocked ? 'archiving' : null }] }
     }
@@ -258,16 +265,18 @@ describe('patchObjectFieldProperty reads the field row under the row lock', () =
     )
   })
 
-  it('statement order with the fence on: fence → the locked read → UPDATE meta_fields SET property; one read only', async () => {
+  it('statement order with the fence on: fence → the sheet version row (D21) → the locked read → UPDATE meta_fields SET property; one read only', async () => {
     process.env[WRITER_FENCE_ENV] = 'true'
     __resetRecoveryWriterStateColumnProbe()
     const { query, seen } = createFenceQuery({ sheetId: OBJECT_SHEET_ID, fieldId: physicalFieldId })
     await run(query)
     const fenceIndex = seen.findIndex(({ sql }) => sql.includes('pg_advisory_xact_lock'))
+    const bumpIndex = seen.findIndex(({ sql }) => sql === SHEET_VERSION_BUMP)
     const readIndex = seen.findIndex(({ sql }) => sql === PATCH_OBJECT_FIELD_PROPERTY_READ_SQL)
     const updateIndex = seen.findIndex(({ sql }) => sql.startsWith('UPDATE meta_fields SET property = $3::jsonb'))
     expect(fenceIndex).toBeGreaterThanOrEqual(0)
-    expect(readIndex).toBeGreaterThan(fenceIndex)
+    expect(bumpIndex).toBeGreaterThan(fenceIndex)
+    expect(readIndex).toBeGreaterThan(bumpIndex)
     expect(updateIndex).toBeGreaterThan(readIndex)
     expect(seen[readIndex]?.params).toEqual([OBJECT_SHEET_ID, physicalFieldId])
     expect(seen.filter(({ sql }) => sql.includes('FROM meta_fields'))).toHaveLength(1)
@@ -278,5 +287,96 @@ describe('patchObjectFieldProperty reads the field row under the row lock', () =
     const { query, seen } = createFenceQuery({ sheetId: OBJECT_SHEET_ID, fieldId: physicalFieldId })
     await run(query)
     expect(seen.map(({ sql }) => sql).filter((sql) => sql.includes('FROM meta_fields'))).toEqual([PATCH_OBJECT_FIELD_PROPERTY_READ_SQL])
+  })
+})
+
+// D21 field-row writer rule (authz-version-protocol.ts, the #6792 follow-up): a field writer whose write can trip the
+// meta_fields visibility trigger takes the sheet version row BEFORE its first field-row lock, never through the trigger
+// after it. The real-Postgres order witnesses and holder barriers are FO-P1…FO-P3 in
+// tests/integration/authz-version-field-row-order-realdb.cases.ts.
+describe('D21 field-row writer rule: the sheet version row before the first field-row lock', () => {
+  afterEach(() => {
+    delete process.env[WRITER_FENCE_ENV]
+    __resetRecoveryWriterStateColumnProbe()
+  })
+  const physicalFieldId = getObjectFieldId(PROJECT_ID, OBJECT_ID, 'status')
+  const patch = (query: MultitableProvisioningQueryFn, propertyPatch: Record<string, unknown>) => patchObjectFieldProperty({
+    query, projectId: PROJECT_ID, objectId: OBJECT_ID, fieldId: 'status', propertyPatch,
+  })
+  const bumps = (seen: SeenStatement[]) => seen.filter(({ sql }) => sql === SHEET_VERSION_BUMP)
+
+  for (const fence of ['on', 'off'] as const) {
+    it(`patchObjectFieldProperty bumps its sheet's version row exactly once, before the locked read, whatever the patch (fence ${fence})`, async () => {
+      if (fence === 'on') process.env[WRITER_FENCE_ENV] = 'true'
+      __resetRecoveryWriterStateColumnProbe()
+      // A patch with no visibility key, and one that hides the field: the stored row (read only under the lock)
+      // decides whether the trigger fires, so the bump is unconditional.
+      for (const propertyPatch of [{ color: 'green' }, { hidden: true }]) {
+        const { query, seen } = createFenceQuery({ sheetId: OBJECT_SHEET_ID, fieldId: physicalFieldId })
+        await patch(query, propertyPatch)
+        expect(bumps(seen).map(({ params }) => params)).toEqual([[[OBJECT_SHEET_ID]]])
+        const bumpIndex = seen.findIndex(({ sql }) => sql === SHEET_VERSION_BUMP)
+        const firstFieldRowIndex = seen.findIndex(({ sql }) => /\bmeta_fields\b/.test(sql))
+        expect(firstFieldRowIndex).toBeGreaterThan(bumpIndex)
+        expect(seen[firstFieldRowIndex]?.sql).toBe(PATCH_OBJECT_FIELD_PROPERTY_READ_SQL)
+        const fenceIndex = seen.findIndex(({ sql }) => sql.includes('pg_advisory_xact_lock'))
+        if (fence === 'on') expect(bumpIndex).toBeGreaterThan(fenceIndex)
+        else expect(fenceIndex).toBe(-1)
+      }
+    })
+  }
+
+  it('patchObjectFieldProperty refused by an archiving owner takes no version row (the fence check precedes the bump)', async () => {
+    process.env[WRITER_FENCE_ENV] = 'true'
+    __resetRecoveryWriterStateColumnProbe()
+    const { query, seen } = createFenceQuery({ sheetId: OBJECT_SHEET_ID, fieldId: physicalFieldId, blocked: true })
+    await expect(patch(query, { hidden: true })).rejects.toBeInstanceOf(SheetWriterBlockedError)
+    expect(bumps(seen)).toEqual([])
+  })
+
+  for (const overwriteMode of ['overwrite', 'observe'] as const) {
+    it(`ensureFields in '${overwriteMode}' mode (it can rewrite an existing property) bumps once, before the first field-row write`, async () => {
+      __resetRecoveryWriterStateColumnProbe()
+      const { query, seen } = createFenceQuery({ sheetId: SHEET_ID })
+      await ensureFields({
+        query,
+        sheetId: SHEET_ID,
+        overwriteMode,
+        fields: [
+          { id: 'field_d21_a', name: 'A', type: 'string' },
+          { id: 'field_d21_b', name: 'B', type: 'string' },
+        ],
+      })
+      expect(bumps(seen).map(({ params }) => params)).toEqual([[[SHEET_ID]]])
+      const bumpIndex = seen.findIndex(({ sql }) => sql === SHEET_VERSION_BUMP)
+      const firstUpsertIndex = seen.findIndex(({ sql }) => sql.startsWith('INSERT INTO meta_fields'))
+      const firstFieldStatement = seen.findIndex(({ sql }) => /\bmeta_fields\b/.test(sql))
+      expect(firstUpsertIndex).toBeGreaterThan(bumpIndex)
+      expect(firstFieldStatement).toBeGreaterThan(bumpIndex)
+      // …and BEHIND the sheet row (verifier r1 F1): meta_sheets FOR KEY SHARE right before the bump, so the KEY SHARE the
+      // INSERT of a new field takes through its FK is never first requested after the version row
+      expect(seen.filter(({ sql }) => sql === SHEET_ROW_KEY_SHARE).map(({ params }) => params)).toEqual([[SHEET_ID]])
+      expect(seen.findIndex(({ sql }) => sql === SHEET_ROW_KEY_SHARE)).toBe(bumpIndex - 1)
+      expect(seen.slice(0, bumpIndex).some(({ sql }) => /\bmeta_fields\b/.test(sql))).toBe(false)
+    })
+  }
+
+  for (const overwriteMode of ['refuse', 'preserve'] as const) {
+    it(`ensureFields in '${overwriteMode}' mode takes no version row and no sheet-row lock (it rewrites an existing field only with the property its pre-read found equal)`, async () => {
+      __resetRecoveryWriterStateColumnProbe()
+      const { query, seen } = createFenceQuery({ sheetId: SHEET_ID })
+      await ensureFields({ query, sheetId: SHEET_ID, overwriteMode, fields: [{ id: 'field_d21_c', name: 'C', type: 'string' }] })
+      expect(seen.some(({ sql }) => sql.startsWith('INSERT INTO meta_fields'))).toBe(true)
+      expect(bumps(seen)).toEqual([])
+      expect(seen.filter(({ sql }) => sql === SHEET_ROW_KEY_SHARE)).toEqual([])
+    })
+  }
+
+  it('ensureFields with no fields issues nothing at all (no fence, no version row)', async () => {
+    process.env[WRITER_FENCE_ENV] = 'true'
+    __resetRecoveryWriterStateColumnProbe()
+    const { query, seen } = createFenceQuery({ sheetId: SHEET_ID })
+    await ensureFields({ query, sheetId: SHEET_ID, overwriteMode: 'overwrite', fields: [] })
+    expect(seen).toEqual([])
   })
 })

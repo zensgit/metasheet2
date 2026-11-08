@@ -62,6 +62,7 @@ import { pool, query as dbQuery, transaction } from '../db/pg'
 import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { resolveSheetCapabilities } from '../multitable/permission-service'
 import { SheetNotLiveError, assertSheetLiveForUpdate } from '../multitable/sheet-liveness'
+import { bumpSheetPermissionVersions } from '../multitable/authz-version-protocol'
 import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
 import {
   STOCK_PREP_OVERVIEW_GRANT_REFUSAL,
@@ -188,6 +189,8 @@ export function spreadsheetPermissionsRouter(): Router {
       try {
         await transaction(async ({ query }) => {
           await assertSheetLiveForUpdate(query, req.params.id)
+          // D21 (Y5a): sheet permission version row before the grant row.
+          await bumpSheetPermissionVersions(query, [req.params.id])
           await query(
             `INSERT INTO spreadsheet_permissions(sheet_id, user_id, subject_type, subject_id, perm_code)
              VALUES ($1, $2, 'user', $2, $3)
@@ -249,6 +252,8 @@ export function spreadsheetPermissionsRouter(): Router {
       try {
         await transaction(async ({ query }) => {
           await assertSheetLiveForUpdate(query, req.params.id)
+          // D21 (Y5a): sheet permission version row before the revoke.
+          await bumpSheetPermissionVersions(query, [req.params.id])
           await query(
             `DELETE FROM spreadsheet_permissions
              WHERE sheet_id = $1
