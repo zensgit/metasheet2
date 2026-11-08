@@ -131,7 +131,14 @@ describe('auth invite routes', () => {
     pgMocks.transaction.mockClear()
     pgMocks.transaction.mockImplementation(
       async (handler: (client: { query: typeof pgMocks.query }) => Promise<unknown>) =>
-        handler({ query: pgMocks.query }),
+        // D21 (Y5a): the access-graph mutex now bumps the subject authorization version row before
+        // `users FOR UPDATE`; answer that protocol statement inline so the positional once-chains
+        // below keep scripting the invite acceptance's own statements.
+        handler({
+          query: ((sql: string, params?: unknown[]) => /INSERT INTO subject_authorization_versions/.test(String(sql))
+            ? Promise.resolve({ rows: [], rowCount: 1 })
+            : pgMocks.query(sql, params)) as typeof pgMocks.query,
+        }),
     )
     bcryptMocks.hash.mockReset()
     bcryptMocks.compare.mockReset()

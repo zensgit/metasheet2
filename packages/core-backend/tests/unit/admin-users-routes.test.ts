@@ -10,6 +10,8 @@ const state = vi.hoisted(() => ({
 
 const pgMocks = vi.hoisted(() => ({
   query: vi.fn(),
+  /** Every statement the routes issued (pool and transaction), in order — D21 version bumps included. */
+  statements: [] as string[],
 }))
 
 const rbacMocks = vi.hoisted(() => ({
@@ -73,15 +75,30 @@ vi.mock('../../src/auth/user-activate', () => ({
     value === 'temp_password' || value === 'sso' || value === 'admin_no_password',
 }))
 
-vi.mock('../../src/db/pg', () => ({
-  query: pgMocks.query,
-  // W4-PRE-1: POST /api/admin/users now wraps its write sequence in transaction() (the
-  // user_orgs atomicity requirement, §3.3). The handler's client.query is backed by the SAME
-  // pgMocks.query mock so every existing test's call-order/count scripting (mockResolvedValueOnce
-  // chains) is unaffected — transaction() is transparent here, not a second mock surface.
-  transaction: vi.fn(async (handler: (client: { query: typeof pgMocks.query }) => Promise<unknown>) =>
-    handler({ query: pgMocks.query })),
-}))
+vi.mock('../../src/db/pg', () => {
+  // D21 (Y5a): the routes — and the access-graph mutex / role assignment they call — now issue a
+  // subject authorization version bump in front of their users / user_roles / member-group writes.
+  // That statement is answered INLINE (a protocol upsert carries no route state), so the positional
+  // once-chains below keep scripting the route's own statements; the bump is still recorded in
+  // pgMocks.statements, where the order assertions that care about it look.
+  const isAuthzVersionBump = (sql: unknown) => /INSERT INTO (?:subject_authorization|sheet_permission)_versions/.test(String(sql))
+  const query = (sql: string, params?: unknown[]) => {
+    pgMocks.statements.push(String(sql))
+    if (isAuthzVersionBump(sql)) {
+      return Promise.resolve({ rows: [], rowCount: Array.isArray(params?.[0]) ? (params[0] as unknown[]).length : 1 })
+    }
+    return pgMocks.query(sql, params)
+  }
+  return {
+    query,
+    // W4-PRE-1: POST /api/admin/users now wraps its write sequence in transaction() (the
+    // user_orgs atomicity requirement, §3.3). The handler's client.query is backed by the SAME
+    // pgMocks.query mock so every existing test's call-order/count scripting (mockResolvedValueOnce
+    // chains) is unaffected — transaction() is transparent here, not a second mock surface.
+    transaction: vi.fn(async (handler: (client: { query: typeof query }) => Promise<unknown>) =>
+      handler({ query })),
+  }
+})
 
 // Alias full-writer hooks: default stubs keep existing create/profile once-chains green.
 // Dedicated load-bearing coverage lives in login-alias-writers*.test.ts (do not weaken those).
@@ -257,6 +274,7 @@ describe('admin-users routes', () => {
       role: 'user',
     }
     pgMocks.query.mockReset()
+    pgMocks.statements.length = 0
     pgMocks.query.mockResolvedValue({ rows: [] })
     loginAliasWriterMocks.claimNonEmptyLoginAliasesOrThrow.mockReset()
     loginAliasWriterMocks.claimNonEmptyLoginAliasesOrThrow.mockResolvedValue([])
@@ -2447,6 +2465,12 @@ describe('admin-users routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
+    // D21 (Y5a): the membership write runs in one transaction whose first statement bumps the
+    // user's subject authorization version row, immediately before the member INSERT.
+    const bumpAt = pgMocks.statements.findIndex((statement) => statement.includes('INSERT INTO subject_authorization_versions'))
+    const memberAt = pgMocks.statements.findIndex((statement) => statement.includes('INSERT INTO platform_member_group_members'))
+    expect(bumpAt).toBeGreaterThanOrEqual(0)
+    expect(memberAt).toBe(bumpAt + 1)
     expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
       resourceType: 'platform-member-group',
       resourceId: 'group-1:user-1',

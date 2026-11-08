@@ -287,6 +287,10 @@ describeDatabase('SA05C1 single-row delivery composition — real PG, synthetic 
       'packages/core-backend/src/db/migrations/zzzz20261105033000_add_integration_yida_delivery_audit_receipt_unparsed.ts')).href) as
       { YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL: string }
     migrationSql += '\n' + receiptUnparsed.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL
+    // Source binding (design baseline v2.3 §7.2): the ledger part of zzzz20261106110300, exactly what its up() executes.
+    migrationSql += '\n' + ((await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts')).href)) as
+      { YIDA_SOURCE_BINDING_LEDGER_UP_SQL: string }).YIDA_SOURCE_BINDING_LEDGER_UP_SQL
     materialMigrationSql = readFileSync(path.join(root, 'packages/core-backend/migrations/092_create_integration_yida_credential_materials.sql'), 'utf8')
     savedEnv = envKeys.map(key => [key, process.env[key]])
     process.env.NODE_ENV = 'production'
@@ -348,11 +352,14 @@ describeDatabase('SA05C1 single-row delivery composition — real PG, synthetic 
     const planned = buildPlan({ config: h.snapshot.config, rows: [h.snapshot.row] }).rows[0]
     expect(body.formDataJson === canonical(planned.payload)).toBe(true)
     const ledger = (await rows())[0]
-    expect(ledger.payload_digest === hash(canonical({ version: 1, grantRef: h.snapshot.grantRef,
+    // Execution digest version 2 (design baseline v2.3 §7.2): an unbound snapshot carries both binding digests as null.
+    expect(ledger.payload_digest === hash(canonical({ version: 2, grantRef: h.snapshot.grantRef,
       expiresAt: h.snapshot.expiresAt, actorId: h.snapshot.actorId, targetRef: h.snapshot.targetRef,
       targetRevision: h.snapshot.targetRevision, planRevision: h.snapshot.planRevision, intent: 'create', data,
-      formUuid: (h.snapshot.config as { target: { formUuid: string } }).target.formUuid }))).toBe(true)
+      formUuid: (h.snapshot.config as { target: { formUuid: string } }).target.formUuid,
+      sourceRecordDigest: null, creationIdentityDigest: null }))).toBe(true)
     expect(ledger.business_key_digest === hash(planned.localBusinessKey)).toBe(true)
+    expect([ledger.source_record_digest, ledger.creation_identity_digest]).toEqual([null, null])
     expect((await rows(AUDIT)).map((row) => row.event)).toEqual(['prepare', 'claim', 'acknowledgement'])
     for (let index = 0; index < first.statements.length; index++) {
       if (first.statements[index] === 'BEGIN') expect(first.statements[index + 1]).toBe('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')

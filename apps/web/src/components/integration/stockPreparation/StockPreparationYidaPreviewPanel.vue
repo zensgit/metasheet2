@@ -108,7 +108,7 @@
     </section>
     <section class="sp-yida-preview__owner-entry" data-testid="sp-yida-owner-entry">
       <p>独立本地初始化可在发送开关 OFF 下使用；只由服务器预指定 owner 管理永久单槽，不交换令牌或授权发送。</p>
-      <!-- Always rendered; greyed with the one missing condition until a clean v2 create preview exists. -->
+      <!-- Always rendered; greyed with the one missing condition until a clean v2 or v3 create preview exists. -->
       <button v-if="!initializationOpen" type="button" data-testid="sp-yida-initialization-open" :disabled="ownerSendLocked || !persistentInput" @click="initializationOpen = true">打开本地初始化（不发送）</button>
       <p v-if="!initializationOpen && initializationBlockedReason" data-testid="sp-yida-initialization-blocked">暂不能打开：{{ initializationBlockedReason }}</p>
       <template v-if="persistentInput">
@@ -346,7 +346,9 @@ function importRuleTemplate(): void {
 function allocationSettings(): { mode: Exclude<AllocationMode, 'original'>; projects: string[]; projectField: string; quantityField: string } { return { mode: allocationMode.value as Exclude<AllocationMode, 'original'>, projects: allocationProjectsText.value.split(/\r?\n/), projectField: allocationProjectField.value, quantityField: allocationQuantityField.value } }
 function capturePersistentInput(config: YidaStaticConfig): void {
   const current = plan.value
-  if (config.version !== 2 || config.intent !== 'create' || !current || current.evidence.invalid !== 0
+  // R-71 ⑦.3: a clean v2 or v3 create preview. Initialization still takes v2 only (its panel says why);
+  // a v3 draft can go only to the owner send path of an already initialized target.
+  if ((config.version !== 2 && config.version !== 3) || config.intent !== 'create' || !current || current.evidence.invalid !== 0
     || current.evidence.duplicateKeyCount !== 0 || current.rows.length === 0
     || current.rows.some(row => row.status !== 'planned_create') || (allocationPreview.value?.issues.length ?? 0) !== 0) return
   // No transport or storage here. The server recompiles and returns its own
@@ -394,8 +396,7 @@ const stepGuide = computed(() => {
 })
 const initializationBlockedReason = computed(() => {
   if (persistentInput.value) return ownerSendLocked.value ? '单行确认请求进行中，完成后才能打开。' : ''
-  if (previewMode.value === 'transforms') return '派生映射 v3 目前只做本地预演和规则草稿；本地初始化仍只接受 v2 合同，v3 进入初始化须 owner 另批。'
-  if (previewMode.value !== 'protocol') return '预演合同须选「表单字段目录与协议 v2（仅本地）」；字段映射 v1 不支持本地初始化。'
+  if (previewMode.value === 'mapping') return '预演合同须选「表单字段目录与协议 v2（仅本地）」或「字段目录与派生映射 v3（仅本地）」；字段映射 v1 不支持本地初始化。'
   if (intent.value !== 'create') return '意图须为「计划创建」；计划更新不能本地初始化。'
   // An allocation rejection leaves no plan at all, so it is checked before the not-run case.
   if ((allocationPreview.value?.issues.length ?? 0) !== 0) return '项目数量分配有拒因（见分配分析）；须先消除。'

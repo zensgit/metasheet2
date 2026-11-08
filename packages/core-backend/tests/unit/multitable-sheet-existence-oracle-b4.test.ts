@@ -70,6 +70,7 @@ import {
   loadSheetLiveness,
 } from '../../src/multitable/sheet-liveness'
 import { sendForbidden, sendSheetNotLive } from '../../src/multitable/sheet-refusals'
+import { bumpSheetPermissionVersions } from '../../src/multitable/authz-version-protocol'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 import { acquireRecordLinkRowAuthLockOnQuery } from '../../src/services/approval-record-link-row-auth-lock'
 import {
@@ -116,6 +117,13 @@ const RECORD_LINK_LOCK_PRELUDE: readonly string[] = [
   "SELECT sheet_id FROM spreadsheet_permissions WHERE sheet_id = $1 AND ( (subject_type = 'user' AND subject_id = $2)"
   + " OR (subject_type = 'role' AND subject_id = ANY($3::text[]))"
   + " OR (subject_type = 'member-group' AND subject_id = ANY($4::text[])) ) FOR SHARE",
+  // D21 (Y5a): the sheet permission version row is write-locked AFTER the shared phases 1–4 (the
+  // meta_sheets FOR SHARE above comes first, as every sheet-layer writer's meta_sheets lock does)
+  // and BEFORE phase 5's exclusive record locks, so this writer and an admission holder (version
+  // row FOR SHARE → … → record FOR SHARE) acquire the rows they share in the same order.
+  'INSERT INTO sheet_permission_versions AS v (sheet_id, version, updated_at) SELECT s.sheet_id, 1, now()'
+  + ' FROM unnest($1::text[]) WITH ORDINALITY AS s(sheet_id, ord) ORDER BY s.ord'
+  + ' ON CONFLICT (sheet_id) DO UPDATE SET version = v.version + 1, updated_at = now()',
   'SELECT pg_advisory_xact_lock(hashtext($1))',
   'SAVEPOINT record_link_row_auth_perms',
   'SELECT id FROM record_permissions WHERE sheet_id = $1 AND record_id = $2 FOR UPDATE',
@@ -134,7 +142,7 @@ const PROJECTION_FENCE_SQL = 'SELECT id FROM meta_sheets WHERE id = ANY($1::text
  * prelude's own shape and they read no record content (`SELECT id … FOR UPDATE` returns ids the
  * caller already supplied). Listed explicitly so the exemption cannot widen silently.
  */
-const LOCK_OR_TXN_CONTROL = /\bFOR UPDATE\b|\bFOR SHARE\b|\bpg_advisory_xact_lock\b|^SAVEPOINT\b|^RELEASE\b|^ROLLBACK TO\b/
+const LOCK_OR_TXN_CONTROL = /\bFOR UPDATE\b|\bFOR SHARE\b|\bpg_advisory_xact_lock\b|^SAVEPOINT\b|^RELEASE\b|^ROLLBACK TO\b|^INSERT INTO sheet_permission_versions\b/
 /** Anything that reaches record content or mutates state. */
 const RECORD_DATA_OR_WRITE = /^(?:INSERT|UPDATE|DELETE)\b|\bFROM meta_records\b|\bFROM record_permissions\b|\bINTO record_permissions\b/
 
@@ -227,6 +235,8 @@ function createFake(opts: FakeOpts): Fake {
     if (q.startsWith('SELECT DISTINCT s.id')) return { rows: [] }
 
     // ── lock prelude ────────────────────────────────────────────────────────
+    // D21 sheet permission version bump: a lock-taking upsert on the version table, no record content.
+    if (q.startsWith('INSERT INTO sheet_permission_versions')) return { rows: [], rowCount: 1 }
     if (q === 'SELECT role_id FROM user_roles WHERE user_id = $1 FOR SHARE') return { rows: [] }
     if (q === 'SELECT permission_code FROM user_permissions WHERE user_id = $1 FOR SHARE') return { rows: [] }
     if (q === 'SELECT id FROM users WHERE id = $1 FOR SHARE') return { rows: [{ id: params[0] }] }
@@ -341,9 +351,10 @@ async function callsAnsweredDifferently(
   return differing
 }
 
-/** The real prelude, as the two production helpers issue it. */
+/** The real prelude, as the two production helpers and the D21 bump issue it (routes order: phases 1–4, bump, phase 5). */
 const runPrelude = async (query: Fake['query']) => {
   await lockRecordLinkAuthorityRowsOnQuery(query, { userId: ACTOR_ID, baseId: '', sheetId: SHEET_ID })
+  await bumpSheetPermissionVersions(query, [SHEET_ID])
   await acquireRecordLinkRowAuthLockOnQuery(query, SHEET_ID, RECORD_ID)
 }
 

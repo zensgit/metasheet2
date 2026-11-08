@@ -378,6 +378,58 @@ export function validateYidaStaticConfig(input) {
   return root?.version?.value === 2 ? validateProtocolConfig(root) : validateV1Config(input)
 }
 
+// R-71 ⑦.3: the closed v3 transform names, and for each one the row columns it reads. This is the
+// ONE answer to "which columns does a v3 mapping read": the send path projects a selected row onto
+// it (so unmapped source columns never enter a grant, a snapshot or the budget), and the owner panel
+// lists it. A copy reads its direct primary's column, which that direct entry already declares.
+// Adding a transform to TRANSFORM_ENTRY_KEYS without a reader here makes every v3 config refused
+// below, and the transform-name tripwire test fails.
+export const YIDA_TRANSFORM_NAMES = Object.freeze([...TRANSFORM_ENTRY_KEYS.keys()])
+// Per transform kind, the row columns ONE entry's value depends on (design baseline v2.3 §7.2 and the
+// 2026-11-06 addendum: shared by the v3 row projection (⑦.3), the per-row `fieldDependencies` of a source
+// binding (Y4) and the admission re-authorization (Y5)). A copy depends on its direct primary's column, so
+// it needs the normalized config; the other kinds read only the entry. Y6 adds `generated` here.
+const TRANSFORM_DEPENDENCIES = new Map([
+  ['direct', (entry) => [entry.source]],
+  ['copy', (entry, config) => [primaryEntry(config, entry.copyOf).source]],
+  ['constant', () => []],
+  ['concat', (entry) => entry.parts.filter((part) => Object.prototype.hasOwnProperty.call(part, 'source'))
+    .map((part) => part.source)],
+])
+const byCodePoint = (left, right) => (left < right ? -1 : left > right ? 1 : 0)
+
+/**
+ * The source columns one normalized field-map entry reads, sorted and de-duplicated (frozen). A v2 (or v1)
+ * entry has no `transform` and binds exactly its `source`. `config` is the normalized config the entry
+ * belongs to; only `copy` consults it. An entry of an unknown transform throws YIDA_STATIC_CONFIG_INVALID.
+ */
+export function transformDependencies(entry, config) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+  if (!Object.prototype.hasOwnProperty.call(entry, 'transform')) {
+    if (typeof entry.source !== 'string' || !validIdentifier(entry.source)) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+    return Object.freeze([entry.source])
+  }
+  const reader = TRANSFORM_DEPENDENCIES.get(entry.transform)
+  if (!reader) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+  if (entry.transform === 'copy' && (!config || !Array.isArray(config.fieldMap) || !primaryEntry(config, entry.copyOf))) {
+    throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+  }
+  const columns = reader(entry, config)
+  if (columns.some((column) => typeof column !== 'string' || !validIdentifier(column))) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+  return Object.freeze([...new Set(columns)].sort(byCodePoint))
+}
+
+export function yidaTransformSourceColumns(input) {
+  const validation = validateYidaStaticConfig(input)
+  if (!validation.valid || validation.normalized.version !== 3) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+  const columns = new Set()
+  for (const entry of validation.normalized.fieldMap) {
+    if (!TRANSFORM_DEPENDENCIES.has(entry.transform)) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+    for (const column of transformDependencies(entry, validation.normalized)) columns.add(column)
+  }
+  return Object.freeze([...columns].sort(byCodePoint))
+}
+
 function sanitizeRows(input) {
   if (!Array.isArray(input)) throw new YidaStaticPlanError('YIDA_STATIC_ROWS_INVALID')
   if (Object.getOwnPropertyDescriptor(input, 'length')?.value > MAX_ROWS) {

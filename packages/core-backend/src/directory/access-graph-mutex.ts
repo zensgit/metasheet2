@@ -6,7 +6,15 @@
  * keep one global lock order. A successful access-graph override invalidates
  * open deprovision evidence and advances the same user's generation in the
  * caller's transaction.
+ *
+ * D21 (slice Y5a): the FIRST statement bumps the D21 subject authorization version row of every
+ * locked user, sorted, BEFORE the `users … FOR UPDATE` rows are taken. An admission transaction
+ * locks `subject_authorization_versions` FOR SHARE and only then `users` FOR SHARE (the
+ * live-authority order); a writer that took `users` first and bumped the subject row later (through
+ * a membership trigger) would form the one holder-vs-writer cycle the protocol forbids. Doing it here
+ * makes "every caller bumps first" true by construction for all 14 writer files.
  */
+import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
 
 export type AccessGraphTransactionClient = {
   query: (
@@ -42,6 +50,9 @@ export async function lockUsersForAccessGraphWrite(
 ): Promise<Map<string, LockedAccessGraphUser>> {
   const normalizedUserIds = normalizeUserIds(userIds)
   const lockedUsers = new Map<string, LockedAccessGraphUser>()
+
+  // D21: subject version rows first (sorted, one statement), then the users rows.
+  await bumpSubjectAuthorizationVersions(client, normalizedUserIds)
 
   for (const userId of normalizedUserIds) {
     const result = await client.query(

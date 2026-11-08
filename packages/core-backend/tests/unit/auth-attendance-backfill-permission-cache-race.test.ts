@@ -46,6 +46,7 @@ const fakeDb = vi.hoisted(() => {
     | 'admissions'
     | 'subject-lock'
     | 'attendance-admission'
+    | 'authz-version-bump'
     | 'role-insert'
   type Rows = Array<Record<string, unknown>>
   type Result = { rows: Rows; rowCount: number }
@@ -89,6 +90,8 @@ const fakeDb = vi.hoisted(() => {
     if (text.startsWith('INSERT INTO user_roles (user_id, role_id)') && text.includes('ON CONFLICT DO NOTHING RETURNING user_id')) {
       return 'role-insert'
     }
+    // D21 (Y5a): the subject authorization version bump assignUserRoles issues right before the insert.
+    if (text.startsWith('INSERT INTO subject_authorization_versions')) return 'authz-version-bump'
     return null
   }
 
@@ -152,6 +155,9 @@ const fakeDb = vi.hoisted(() => {
         const row = ownSubject ? subject.admissions.get(String(params[1])) : undefined
         return result(row ? [{ enabled: row.enabled, source: row.source }] : [])
       }
+      case 'authz-version-bump':
+        // A protocol upsert: it locks the version row and returns nothing the caller reads.
+        return result([])
       case 'role-insert': {
         // `INSERT ... SELECT unnest($1::text[]), $2 ON CONFLICT DO NOTHING RETURNING user_id`: only rows that
         // were actually inserted come back, and the driver's rowCount counts exactly those.
