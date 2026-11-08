@@ -1,3 +1,4 @@
+/* eslint-disable vue/one-component-per-file -- Tests mount isolated apps with local component stubs. */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
 import { existsSync } from 'node:fs'
@@ -95,9 +96,9 @@ describe('platform shell navigation', () => {
     document.body.appendChild(container)
 
     app = createApp(App as Component)
-    app.component('router-view', { render: () => h('div') })
-    app.component('router-link', {
-      props: ['to'],
+    app.component('RouterView', { render: () => h('div') })
+    app.component('RouterLink', {
+      props: { to: { type: [String, Object], default: '' } },
       render() {
         return h('a', { href: this.$props.to }, this.$slots.default ? this.$slots.default() : [])
       },
@@ -189,9 +190,9 @@ describe('platform shell navigation', () => {
     document.body.appendChild(container)
 
     app = createApp(App as Component)
-    app.component('router-view', { render: () => h('div') })
-    app.component('router-link', {
-      props: ['to'],
+    app.component('RouterView', { render: () => h('div') })
+    app.component('RouterLink', {
+      props: { to: { type: [String, Object], default: '' } },
       render() {
         return h('a', { href: this.$props.to }, this.$slots.default ? this.$slots.default() : [])
       },
@@ -216,6 +217,9 @@ describe('platform shell navigation', () => {
     expect(links.some((link) => link.href === '/gallery')).toBe(false)
     expect(links.some((link) => link.href === '/form')).toBe(false)
     expect(links.some((link) => link.href === '/admin/users')).toBe(false)
+    expect(links.some((link) => link.href === '/admin/role-delegation')).toBe(false)
+    expect(links.some((link) => link.href === '/admin/permissions')).toBe(false)
+    expect(container?.textContent).not.toContain('组织与权限')
     expect(links.some((link) => link.href === '/approvals')).toBe(false)
     // A3 runs view is admin-only (canManageUsers === snapshot.isAdmin) — hidden here.
     expect(links.some((link) => link.href === '/admin/automation-executions')).toBe(false)
@@ -265,9 +269,9 @@ describe('platform shell navigation', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(App as Component)
-    app.component('router-view', { render: () => h('div') })
-    app.component('router-link', {
-      props: ['to'],
+    app.component('RouterView', { render: () => h('div') })
+    app.component('RouterLink', {
+      props: { to: { type: [String, Object], default: '' } },
       render() {
         return h('a', { href: this.$props.to }, this.$slots.default ? this.$slots.default() : [])
       },
@@ -326,9 +330,9 @@ describe('platform shell navigation', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(App as Component)
-    app.component('router-view', { render: () => h('div') })
-    app.component('router-link', {
-      props: ['to'],
+    app.component('RouterView', { render: () => h('div') })
+    app.component('RouterLink', {
+      props: { to: { type: [String, Object], default: '' } },
       render() {
         return h('a', { href: this.$props.to }, this.$slots.default ? this.$slots.default() : [])
       },
@@ -343,6 +347,93 @@ describe('platform shell navigation', () => {
     expect(links).toEqual(expect.arrayContaining([
       expect.objectContaining({ href: '/admin/automation-executions', text: '自动化运行' }),
     ]))
+  })
+
+  it.each([true, false])('organization navigation follows the platform admin snapshot (%s)', async (isAdmin) => {
+    vi.doMock('vue-router', () => ({
+      useRoute: () => ({ path: '/grid', fullPath: '/grid', meta: { requiresAuth: true } }),
+    }))
+    vi.doMock('../src/composables/usePlugins', () => ({
+      usePlugins: () => ({ navItems: ref([]), fetchPlugins: vi.fn().mockResolvedValue(undefined) }),
+    }))
+    vi.doMock('../src/stores/featureFlags', () => ({
+      useFeatureFlags: () => ({
+        resolveHomePath: () => '/home',
+        loadProductFeatures: vi.fn().mockResolvedValue(undefined),
+        isAttendanceFocused: () => false,
+        isPlmWorkbenchFocused: () => false,
+        hasFeature: () => false,
+      }),
+    }))
+    vi.doMock('../src/composables/useLocale', () => ({
+      useLocale: () => ({ locale: ref('zh-CN'), isZh: ref(true), setLocale: vi.fn() }),
+    }))
+    vi.doMock('../src/composables/useAuth', () => ({
+      useAuth: () => ({
+        clearToken: vi.fn(),
+        getAccessSnapshot: () => ({
+          email: 'admin@test.local',
+          roles: isAdmin ? ['admin'] : [],
+          permissions: isAdmin ? ['*:*'] : [],
+          isAdmin,
+        }),
+        getToken: () => 'session-token',
+        hasPermission: () => isAdmin,
+      }),
+    }))
+    vi.doMock('../src/utils/api', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/utils/api')>()
+      return { ...actual, getApiBase: () => 'http://example.test' }
+    })
+
+    const { default: App } = await import('../src/App.vue')
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(App as Component)
+    app.component('RouterView', { render: () => h('div') })
+    app.component('RouterLink', {
+      props: { to: { type: [String, Object], default: '' } },
+      render() {
+        return h('a', { href: this.$props.to }, this.$slots.default ? this.$slots.default() : [])
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    const group = container.querySelector('[data-testid="nav-org-permissions"]')
+    if (!isAdmin) {
+      expect(group).toBeNull()
+      expect(container.querySelector('a[href="/admin/users"]')).toBeNull()
+      expect(container.querySelector('a[href="/admin/role-delegation"]')).toBeNull()
+      return
+    }
+    expect(group?.getAttribute('aria-label')).toBe('组织与权限')
+    const links = Array.from(group?.querySelectorAll('a') || []).map((node) => ({
+      href: node.getAttribute('href'),
+      text: node.textContent?.trim(),
+    }))
+    expect(links).toEqual([
+      { href: '/admin/users', text: '成员与授权' },
+      { href: '/admin/roles', text: '角色' },
+      { href: '/admin/role-delegation', text: '管理范围' },
+      { href: '/admin/permissions', text: '权限来源与例外' },
+    ])
+    const audit = Array.from(container.querySelectorAll('a')).find((node) => node.getAttribute('href') === '/admin/audit')
+    expect(audit?.textContent?.trim()).toBe('管理审计')
+    expect(group?.contains(audit || null)).toBe(false)
+
+    const appSource = await readFile(resolveWebFile('src/App.vue'), 'utf8')
+    const routes = await readFile(resolveWebFile('src/router/appRoutes.ts'), 'utf8')
+    const delegation = routes.slice(routes.indexOf("path: '/admin/role-delegation'"), routes.indexOf("path: '/admin/directory'"))
+    expect(delegation).toContain("title: 'Management Scope'")
+    expect(delegation).toContain("titleZh: '管理范围'")
+    expect(delegation).toContain('requiresAuth: true')
+    expect(delegation).not.toContain('requiresAdmin')
+    expect(delegation).not.toContain('permissions:')
+    expect(routes).toContain("path: '/admin/users'")
+    expect(routes).toContain('requiresAdmin: true')
+    expect(appSource).toContain('v-if="canManageUsers"')
+    expect(appSource).not.toContain('role-delegation:')
   })
 
   it('keeps platform shell nav labels from wrapping vertically on desktop', async () => {

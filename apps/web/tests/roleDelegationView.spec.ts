@@ -1,3 +1,4 @@
+/* eslint-disable vue/one-component-per-file -- Tests mount isolated apps with local component stubs. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import RoleDelegationView from '../src/views/RoleDelegationView.vue'
@@ -246,6 +247,7 @@ describe('RoleDelegationView', () => {
   let callLog: string[] = []
 
   beforeEach(() => {
+    window.history.replaceState({}, '', '/')
     apiFetchMock.mockReset()
     callLog = []
     apiFetchMock.mockImplementation(createApiImplementation(callLog))
@@ -258,12 +260,13 @@ describe('RoleDelegationView', () => {
     if (container) container.remove()
     app = null
     container = null
+    window.history.replaceState({}, '', '/')
   })
 
   async function mountView(): Promise<void> {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', {
-      props: ['to'],
+      props: { to: { type: [String, Object], default: '' } },
       template: '<a><slot /></a>',
     })
     app.mount(container!)
@@ -366,7 +369,7 @@ describe('RoleDelegationView', () => {
     })
 
     app = createApp(RoleDelegationView)
-    app.component('RouterLink', { props: ['to'], template: '<a><slot /></a>' })
+    app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
     await waitForCondition(() => Boolean(container?.querySelector('select[data-testid="delegation-revoke-role"] option[value="plugin_elearning_viewer"]')))
 
@@ -420,5 +423,534 @@ describe('RoleDelegationView', () => {
 
     expect(container?.textContent).toContain('已开通 crm 插件使用')
     expect(container?.textContent).toContain('当前实际可用')
+  })
+
+  it('explains management scope without treating plugin admission as a delegate prerequisite', async () => {
+    await mountView()
+    const explanation = container?.querySelector('[data-testid="scope-explanation"]')?.textContent || ''
+    expect(explanation).toContain('部门范围包含该部门及其下级')
+    expect(explanation).toContain('共享成员组')
+    expect(explanation).toContain('同一命名空间内')
+    expect(explanation).toContain('取并集')
+    expect(explanation).toContain('平台管理员配置管理范围')
+    expect(explanation).toContain('只能给允许的成员分配允许的角色')
+    expect(explanation).toContain('插件使用准入不是管理委派的前提')
+    expect(container?.textContent).not.toContain('必须开通插件')
+    expect(container?.textContent).not.toContain('没有新的范围类型')
+    expect(container?.textContent).not.toContain('私有圈定')
+    expect(container?.textContent).not.toContain('单个成员 ID')
+    expect(container?.textContent).not.toContain('中文名只用于阅读')
+
+  })
+
+  it('consumes the requested userId and ignores a stale access response', async () => {
+    window.history.replaceState({}, '', '/admin/role-delegation?userId=user-2&source=members#scope')
+    let releaseUser2: (() => void) | undefined
+    const user2Gate = new Promise<void>((resolve) => {
+      releaseUser2 = resolve
+    })
+    const accessFor = (id: string, name: string, email: string) => ({
+      actorId: 'admin-1',
+      isPlatformAdmin: true,
+      delegableNamespaces: [],
+      roleCatalog: [],
+      scopeAssignments: [],
+      groupAssignments: [],
+      user: { id, email, name, role: 'user', is_active: true },
+      roles: [],
+      memberGroups: [],
+      delegableRoles: [],
+      namespaceAdmissions: [],
+    })
+    apiFetchMock.mockReset()
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({
+          ok: true,
+          data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], roleCatalog: [], scopeAssignments: [], groupAssignments: [] },
+        })
+      }
+      if (
+        pathname === '/api/admin/role-delegation/departments'
+        || pathname === '/api/admin/role-delegation/member-groups'
+        || pathname === '/api/admin/role-delegation/scope-templates'
+      ) {
+        return createJsonResponse({ ok: true, data: { items: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+              { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+            ],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-2/access') {
+        await user2Gate
+        return createJsonResponse({ ok: true, data: accessFor('user-2', 'Bravo', 'bravo@example.com') })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({ ok: true, data: accessFor('user-1', 'Alpha', 'alpha@example.com') })
+      }
+      if (pathname.endsWith('/scopes')) {
+        const id = pathname.includes('user-2') ? 'user-2' : 'user-1'
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1',
+            user: { id, email: `${id}@example.com`, name: id, role: 'user', is_active: true },
+            adminNamespaces: [],
+            scopeAssignments: [],
+            groupAssignments: [],
+          },
+        })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+
+    app = createApp(RoleDelegationView)
+    app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
+    app.mount(container!)
+    await waitForCondition(() => callLog.some((url) => url.includes('/api/admin/role-delegation/users/user-2/access')))
+    expect(callLog.some((url) => url.includes('/api/admin/role-delegation/users/user-1/access'))).toBe(false)
+
+    const alpha = Array.from(container!.querySelectorAll('.delegation-page__user')).find((button) => button.textContent?.includes('Alpha'))
+    expect(alpha).toBeTruthy()
+    ;(alpha as HTMLButtonElement).click()
+    await waitForCondition(() => (container?.querySelector('.delegation-page__panel--detail h2')?.textContent || '').includes('Alpha'))
+    releaseUser2?.()
+    await flushUi(8)
+
+    expect(container?.querySelector('.delegation-page__panel--detail h2')?.textContent).toContain('Alpha')
+    expect(container?.querySelector('.delegation-page__panel--detail')?.textContent).not.toContain('Bravo')
+    expect(container?.querySelector('.delegation-page__user--active')?.textContent).toContain('Alpha')
+    expect(window.location.search).toContain('userId=user-2')
+    expect(window.location.search).toContain('source=members')
+    expect(window.location.hash).toBe('#scope')
+  })
+
+  it.each([false, true])('refresh keeps an outside-list linked member even when its read fails (%s)', async (failRefresh) => {
+    const location = '/admin/role-delegation?userId=user-41&source=members#scope'
+    window.history.replaceState({}, '', location)
+    const baseApi = createApiImplementation(callLog)
+    let targetReads = 0
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const path = String(input)
+      if (path === '/api/admin/role-delegation/users/user-41/access') {
+        callLog.push(path)
+        targetReads += 1
+        if (failRefresh && targetReads === 2) {
+          return createJsonResponse({ ok: false, error: { message: 'Target unavailable' } }, 403)
+        }
+        return createJsonResponse({ ok: true, data: {
+          user: { id: 'user-41', name: 'Linked member', email: 'linked@example.invalid', role: 'user', is_active: true },
+          roles: [], memberGroups: [], delegableRoles: [], roleCatalog: [], namespaceAdmissions: [],
+        } })
+      }
+      if (path === '/api/admin/role-delegation/users/user-41/scopes') {
+        callLog.push(path)
+        return createJsonResponse({ ok: true, data: {
+          user: { id: 'user-41' }, adminNamespaces: [], scopeAssignments: [], groupAssignments: [],
+        } })
+      }
+      return baseApi(input)
+    })
+    app = createApp(RoleDelegationView)
+    app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
+    app.mount(container!)
+    await waitForCondition(() => callLog.includes('/api/admin/role-delegation/users/user-41/scopes'))
+    await flushUi()
+    expect(container!.querySelector('.delegation-page__detail-head')?.textContent).toContain('Linked member')
+    expect(container!.querySelector('.delegation-page__user')?.textContent).toContain('Alpha')
+
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => targetReads === 2)
+    await flushUi()
+    expect(callLog).not.toContain('/api/admin/role-delegation/users/user-1/access')
+    expect(window.location.pathname + window.location.search + window.location.hash).toBe(location)
+    if (failRefresh) {
+      expect(container!.querySelector('.delegation-page__detail-head')).toBeNull()
+      expect(container!.querySelector('[data-testid="delegation-assign-role"]')).toBeNull()
+      expect(container!.textContent).toContain('Target unavailable')
+      findButtonByText(container!, '查询').click()
+      await waitForCondition(() => targetReads === 3)
+      await flushUi()
+    }
+    expect(container!.querySelector('.delegation-page__detail-head')?.textContent).toContain('Linked member')
+    expect(apiFetchMock.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
+  })
+
+  it('clears the previous member and blocks assignment while the next access read is delayed', async () => {
+    let releaseBravo: (() => void) | undefined
+    const bravoGate = new Promise<void>((resolve) => {
+      releaseBravo = resolve
+    })
+    const catalog = [{ id: 'crm_admin', name: 'CRM 管理员', permissions: ['crm:admin'] }]
+    const accessFor = (id: string, name: string, email: string) => ({
+      actorId: 'admin-1',
+      isPlatformAdmin: true,
+      delegableNamespaces: ['crm'],
+      roleCatalog: catalog,
+      scopeAssignments: [],
+      groupAssignments: [],
+      user: { id, email, name, role: 'user', is_active: true },
+      roles: [],
+      memberGroups: [],
+      delegableRoles: [],
+      namespaceAdmissions: [],
+    })
+    const scopesFor = (id: string) => ({
+      actorId: 'admin-1',
+      user: { id, email: `${id}@example.com`, name: id, role: 'user', is_active: true },
+      adminNamespaces: ['crm'],
+      scopeAssignments: [],
+      groupAssignments: [],
+    })
+    apiFetchMock.mockReset()
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({
+          ok: true,
+          data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: ['crm'], roleCatalog: catalog, scopeAssignments: [], groupAssignments: [] },
+        })
+      }
+      if (
+        pathname === '/api/admin/role-delegation/departments'
+        || pathname === '/api/admin/role-delegation/member-groups'
+        || pathname === '/api/admin/role-delegation/scope-templates'
+      ) {
+        return createJsonResponse({ ok: true, data: { items: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+              { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+            ],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({ ok: true, data: accessFor('user-1', 'Alpha', 'alpha@example.com') })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
+        return createJsonResponse({ ok: true, data: scopesFor('user-1') })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-2/access') {
+        await bravoGate
+        return createJsonResponse({ ok: true, data: accessFor('user-2', 'Bravo', 'bravo@example.com') })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-2/scopes') {
+        return createJsonResponse({ ok: true, data: scopesFor('user-2') })
+      }
+      if (pathname.includes('/roles/') && init?.method === 'POST') {
+        return createJsonResponse({ ok: true, data: accessFor('user-2', 'Bravo', 'bravo@example.com') })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+
+    app = createApp(RoleDelegationView)
+    app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
+    app.mount(container!)
+    await waitForCondition(() => (container?.querySelector('.delegation-page__panel--detail h2')?.textContent || '').includes('Alpha'))
+    await waitForCondition(() => callLog.some((url) => url.includes('/users/user-1/scopes')))
+    await flushUi()
+
+    const bravo = Array.from(container!.querySelectorAll('.delegation-page__user')).find((button) => button.textContent?.includes('bravo@example.com'))
+    expect(bravo).toBeTruthy()
+    ;(bravo as HTMLButtonElement).click()
+    await flushUi()
+
+    const detail = container!.querySelector('.delegation-page__panel--detail')
+    expect(detail?.querySelector('h2')).toBeNull()
+    expect(detail?.textContent).toContain('请选择一个成员')
+    expect(detail?.textContent).not.toContain('Alpha')
+    expect(detail?.textContent).not.toContain('alpha@example.com')
+    expect(detail?.querySelector('[data-testid="delegation-assign-role"]')).toBeNull()
+    expect(container?.querySelector('.delegation-page__user--active')?.textContent).toContain('bravo@example.com')
+    expect(callLog.some((url) => url.includes('/roles/assign'))).toBe(false)
+
+    releaseBravo?.()
+    await waitForCondition(() => (
+      (container?.querySelector('.delegation-page__panel--detail h2')?.textContent || '').includes('Bravo')
+      && callLog.some((url) => url.includes('/users/user-2/scopes'))
+    ))
+    await flushUi()
+    expect(container?.querySelector('.delegation-page__panel--detail')?.textContent).not.toContain('Alpha')
+    const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
+    assignSelect.value = 'crm_admin'
+    assignSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(findButtonByText(container!, '分配角色').disabled).toBe(false)
+  })
+
+  it('keeps assignment disabled until the matching scope read finishes', async () => {
+    let releaseScopes: (() => void) | undefined
+    const scopeGate = new Promise<void>((resolve) => {
+      releaseScopes = resolve
+    })
+    const catalog = [{ id: 'crm_admin', name: 'CRM 管理员', permissions: ['crm:admin'] }]
+    apiFetchMock.mockReset()
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({
+          ok: true,
+          data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: ['crm'], roleCatalog: catalog, scopeAssignments: [], groupAssignments: [] },
+        })
+      }
+      if (
+        pathname === '/api/admin/role-delegation/departments'
+        || pathname === '/api/admin/role-delegation/member-groups'
+        || pathname === '/api/admin/role-delegation/scope-templates'
+      ) {
+        return createJsonResponse({ ok: true, data: { items: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({
+          ok: true,
+          data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1',
+            isPlatformAdmin: true,
+            delegableNamespaces: ['crm'],
+            roleCatalog: catalog,
+            scopeAssignments: [],
+            groupAssignments: [],
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            roles: [],
+            memberGroups: [],
+            delegableRoles: [],
+            namespaceAdmissions: [],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
+        await scopeGate
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1',
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            adminNamespaces: ['crm'],
+            scopeAssignments: [],
+            groupAssignments: [],
+          },
+        })
+      }
+      if (pathname.includes('/roles/') && init?.method === 'POST') {
+        throw new Error('role write while scopes were pending')
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+
+    app = createApp(RoleDelegationView)
+    app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
+    app.mount(container!)
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
+    const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
+    assignSelect.value = 'crm_admin'
+    assignSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    const assignButton = findButtonByText(container!, '分配角色')
+    expect(assignButton.disabled).toBe(true)
+    assignButton.click()
+    await flushUi()
+    expect(callLog.some((url) => url.includes('/roles/assign'))).toBe(false)
+
+    releaseScopes?.()
+    await waitForCondition(() => callLog.some((url) => url.includes('/users/user-1/scopes')))
+    await flushUi()
+    expect(assignButton.disabled).toBe(false)
+  })
+
+  it('ignores access and scope payloads for a different member', async () => {
+    const catalog = [{ id: 'crm_admin', name: 'CRM 管理员', permissions: ['crm:admin'] }]
+    apiFetchMock.mockReset()
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({
+          ok: true,
+          data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: ['crm'], roleCatalog: catalog, scopeAssignments: [], groupAssignments: [] },
+        })
+      }
+      if (
+        pathname === '/api/admin/role-delegation/departments'
+        || pathname === '/api/admin/role-delegation/member-groups'
+        || pathname === '/api/admin/role-delegation/scope-templates'
+      ) {
+        return createJsonResponse({ ok: true, data: { items: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({
+          ok: true,
+          data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1',
+            isPlatformAdmin: true,
+            delegableNamespaces: ['crm'],
+            roleCatalog: catalog,
+            scopeAssignments: [],
+            groupAssignments: [],
+            user: { id: 'user-foreign', email: 'foreign@example.invalid', name: '外来成员', role: 'user', is_active: true },
+            roles: ['crm_admin'],
+            memberGroups: [],
+            delegableRoles: ['crm_admin'],
+            namespaceAdmissions: [],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1',
+            user: { id: 'user-foreign', email: 'foreign@example.invalid', name: '外来成员', role: 'user', is_active: true },
+            adminNamespaces: ['crm'],
+            scopeAssignments: [{
+              id: 'scope-foreign',
+              namespace: 'crm',
+              directoryDepartmentId: 'dept-foreign',
+              integrationId: 'ding',
+              integrationName: '外来集成',
+              provider: 'dingtalk',
+              corpId: null,
+              externalDepartmentId: 'ext-foreign',
+              departmentName: '外来部门',
+              departmentFullPath: '外来部门路径',
+              departmentActive: true,
+            }],
+            groupAssignments: [],
+          },
+        })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+
+    app = createApp(RoleDelegationView)
+    app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
+    app.mount(container!)
+    await waitForCondition(() => callLog.some((url) => url.includes('/users/user-1/access')))
+    await flushUi()
+    const detail = container!.querySelector('.delegation-page__panel--detail')
+    expect(detail?.textContent).toContain('请选择一个成员')
+    expect(detail?.textContent).not.toContain('外来成员')
+    expect(detail?.textContent).not.toContain('foreign@example.invalid')
+    expect(detail?.querySelector('[data-testid="delegation-assign-role"]')).toBeNull()
+    expect(callLog.some((url) => url.includes('/users/user-1/scopes'))).toBe(false)
+    expect(container?.textContent).toContain('加载成员委派权限失败')
+
+    if (app) app.unmount()
+    app = null
+    callLog = []
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({
+          ok: true,
+          data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: ['crm'], roleCatalog: catalog, scopeAssignments: [], groupAssignments: [] },
+        })
+      }
+      if (
+        pathname === '/api/admin/role-delegation/departments'
+        || pathname === '/api/admin/role-delegation/member-groups'
+        || pathname === '/api/admin/role-delegation/scope-templates'
+      ) {
+        return createJsonResponse({ ok: true, data: { items: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({
+          ok: true,
+          data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1',
+            isPlatformAdmin: true,
+            delegableNamespaces: ['crm'],
+            roleCatalog: catalog,
+            scopeAssignments: [],
+            groupAssignments: [],
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            roles: [],
+            memberGroups: [],
+            delegableRoles: [],
+            namespaceAdmissions: [],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1',
+            user: { id: 'user-foreign', email: 'foreign@example.invalid', name: '外来成员', role: 'user', is_active: true },
+            adminNamespaces: ['crm'],
+            scopeAssignments: [{
+              id: 'scope-foreign',
+              namespace: 'crm',
+              directoryDepartmentId: 'dept-foreign',
+              integrationId: 'ding',
+              integrationName: '外来集成',
+              provider: 'dingtalk',
+              corpId: null,
+              externalDepartmentId: 'ext-foreign',
+              departmentName: '外来部门',
+              departmentFullPath: '外来部门路径',
+              departmentActive: true,
+            }],
+            groupAssignments: [],
+          },
+        })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+
+    app = createApp(RoleDelegationView)
+    app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
+    app.mount(container!)
+    await waitForCondition(() => callLog.some((url) => url.includes('/users/user-1/scopes')))
+    await flushUi()
+    expect(container?.querySelector('.delegation-page__panel--detail h2')?.textContent).toContain('Alpha')
+    expect(container?.textContent).not.toContain('外来部门路径')
+    expect(container?.textContent).not.toContain('外来成员')
+    expect(container?.textContent).toContain('加载管理员范围失败')
+    const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
+    expect(assignSelect).toBeTruthy()
+    assignSelect.value = 'crm_admin'
+    assignSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(findButtonByText(container!, '分配角色').disabled).toBe(true)
   })
 })

@@ -2665,6 +2665,7 @@ jobs:
             tests/integration/directory-integration-capabilities.db.test.ts \
             tests/integration/directory-deprovision-effect-provider-schema.db.test.ts \
             tests/integration/directory-deprovision-provider-evidence.db.test.ts \
+            tests/integration/attendance-notification-defer.db.test.ts \
             tests/integration/authz-version-protocol.db.test.ts \
             tests/integration/directory-source-freeze-lock-correctness.db.test.ts \
             tests/integration/invite-accept-concurrency-rollback.db.test.ts \
