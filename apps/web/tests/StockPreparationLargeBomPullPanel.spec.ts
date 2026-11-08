@@ -358,4 +358,25 @@ describe('StockPreparationLargeBomPullPanel — 批次标识 (BI-3)', () => {
     expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]')?.getAttribute('data-phase')).toBe('done')
     expect(root.querySelector('[data-testid="stock-prep-large-bom-pull-batch"]')).toBeNull()
   })
+
+  // Review fix M-W14: kills the mutant that drops the "state.phase === 'done'" guard on the batch line.
+  it('LARGE-PB-MIDRUN: no batch line while chunks are still being written; the line appears once done', async () => {
+    let release: (answer: StockPreparationLargeBomApplyJob) => void = () => {}
+    const pending = new Promise<StockPreparationLargeBomApplyJob>((resolve) => { release = resolve })
+    const runApplyChunk = vi.fn()
+      .mockResolvedValueOnce(applyJob({ status: 'running', counts, pullBatch: { stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: false, createdRowCount: 50 } }))
+      .mockImplementationOnce(() => pending)
+    app = createApp(StockPreparationLargeBomPullPanel as Component, { projectNo: PROJECT_NO, wait: instantWait(), api: doneApi({ runApplyChunk }) })
+    app.mount(container!)
+    await flushUi(16)
+    const root = container!
+    expect(runApplyChunk).toHaveBeenCalledTimes(2)
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]')?.getAttribute('data-phase')).not.toBe('done')
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull-batch"]'), 'no batch line before done').toBeNull()
+
+    release(applyJob({ status: 'succeeded', counts, pullBatch: { stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: true, createdRowCount: 90 } }))
+    await flushUi(16)
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]')?.getAttribute('data-phase')).toBe('done')
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull-batch"]')?.textContent?.trim()).toBe('本次新增 90 行，记为 第2批（2026-11-08）')
+  })
 })
