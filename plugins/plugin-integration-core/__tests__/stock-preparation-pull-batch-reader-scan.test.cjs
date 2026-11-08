@@ -139,8 +139,9 @@ test('RS-1 every occurrence of the reader is reviewed; every CALL passes the ser
   assert.deepEqual(found, {
     // the change-plan / review read (R2), the large plan (R4), the export gate (R5): calls with the band; readiness
     // deps and the status deps hand the reader on by reference (their consumers pass the band, below).
-    // (each deps line spells the name twice: the key and the value)
-    'lib/http-routes.cjs': sorted(['call:band', 'call:band', 'call:band', 'ref:deps', 'ref:deps', 'ref:deps', 'ref:deps']),
+    // (each deps line spells the name twice: the key and the value). 批次标识 BI-2 (R-65): the install deps and the birth deps
+    // each read the project's rows with the band (two more calls).
+    'lib/http-routes.cjs': sorted(['call:band', 'call:band', 'call:band', 'call:band', 'call:band', 'ref:deps', 'ref:deps', 'ref:deps', 'ref:deps']),
     // readiness's O-6 read (R3).
     'lib/stock-preparation-pilot-readiness.cjs': sorted(['call:band', 'ref:typeof']),
     // the status / board / readiness v3 rows read (R6).

@@ -1067,6 +1067,230 @@ test('PB-K5 R-65 C10: the settings help text names rule F\'s history caveat (tod
   assert.equal(/S-01|P-07|PRJ|\d{4}-\d{2}-\d{2}/.test(JSON.stringify(help)), false, 'values-free copy')
 })
 
+// ── PB-I: the per-sheet install's pure helpers (BI-2; register R-65) ───────────────────────────────────────────
+
+const AS = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
+const firstInstall = (rows, extra = {}) => PB.planPullBatchFirstInstall({ rows, coveredUntil: COVERED, locale: 'zh-CN', ...extra })
+const assignmentsOf = (args) => PB.pullBatchHistoryAssignments({ ledgerBatches: [], priorRows: [], ...args })
+const plainMap = (map) => Object.fromEntries([...map.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+
+test('PB-I1 P2-1: the approvalRef shape — register rows and comment refs pass, every accepted value passes the audit store\'s string gate; #, /, short, long and a leading dash are refused', () => {
+  const pattern = PB.PULL_BATCH_APPROVAL_REF_PATTERN
+  for (const ok of ['R-65', 'O-BI-1.S-01', '6079:1234567890', 'abc', 'A'.repeat(64)]) {
+    assert.ok(pattern.test(ok), ok)
+    assert.ok(AS.__internals.SAFE_STRING_PATTERN.test(ok), `${ok} is audit-safe`)
+  }
+  for (const bad of ['#6079', 'R-65/x', 'ab', 'A'.repeat(65), '-R65', ' R-65', 'R 65', '']) assert.equal(pattern.test(bad), false, JSON.stringify(bad))
+})
+
+test('PB-I2 the install digest ignores exactly the undigested run facts (and each segment\'s clock) and moves with every other key', () => {
+  const envelope = firstInstall(C09_ROWS)
+  assert.equal(envelope.digest, PB.pullBatchInstallPlanDigest(envelope))
+  assert.notEqual(envelope.digest, PB.pullBatchHistoryPlanDigest(envelope), 'not the planner\'s own digest (critic C13)')
+  assert.deepEqual([...PB.PULL_BATCH_INSTALL_PLAN_UNDIGESTED_KEYS], ['digest', 'coveredUntil', 'previousHistoryStatus', 'historyMode', 'aborted'])
+  const same = { ...envelope, digest: 'x', coveredUntil: '2030-01-01T00:00:00.000Z', previousHistoryStatus: 'backfilled', historyMode: 'unknown', aborted: true, segments: envelope.segments.map((segment) => ({ ...segment, coveredUntil: '2031-01-01T00:00:00.000Z' })) }
+  assert.equal(PB.pullBatchInstallPlanDigest(same), envelope.digest)
+  for (const [label, changed] of [
+    ['run', { ...envelope, run: 'gap_pass' }],
+    ['segments K', { ...envelope, segments: [{ ...envelope.segments[0], K: 9 }] }],
+    ['gapPass', { ...envelope, gapPass: { rows: ['x'], joins: [], interleaved: [], newestOpenedAt: null } }],
+    ['clusters', { ...envelope, clusters: envelope.clusters.slice(1) }],
+    ['gapMinutes', { ...envelope, gapMinutes: 31 }],
+  ]) assert.notEqual(PB.pullBatchInstallPlanDigest(changed), envelope.digest, label)
+  assert.equal(firstInstall(C09_ROWS, { coveredUntil: '2026-10-21T05:00:00.000Z' }).digest, envelope.digest, 'the read clock never moves it')
+  assert.equal(Object.isFrozen(envelope), true)
+})
+
+test('PB-I3 P2-3 THE CONTRACT: pullBatchHistoryAssignments over the persisted envelope deepEquals the planner\'s assignments — C09, both rules, and a 5000-trial seeded sweep (degenerate, exceptions, unplaced); the indexed membership equals pullBatchHistoryMembership', () => {
+  for (const rule of RULES) {
+    const planned = plan({ rows: C09_ROWS, config: ruleConfig(rule) })
+    const envelope = firstInstall(C09_ROWS, { config: ruleConfig(rule) })
+    assert.deepEqual(plainMap(assignmentsOf({ plan: envelope, rows: C09_ROWS })), plainMap(planned.assignments), rule)
+  }
+  let seed = 20261108
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    return seed / 2147483648
+  }
+  const pick = (list) => list[Math.floor(rand() * list.length)]
+  const baseMs = Date.parse('2026-10-20T00:00:00.000Z')
+  const stats = { trials: 0, degenerate: 0, exceptions: 0, unplaced: 0, mismatched: 0, membership: 0 }
+  for (let trial = 0; trial < 5000; trial += 1) {
+    const anchors = []
+    for (let i = 0, n = Math.floor(rand() * 4); i < n; i += 1) anchors.push(baseMs + Math.floor(rand() * 6 * 3600) * 1000)
+    const rows = []
+    const copyLike = rand() < 0.25
+    for (let i = 0, n = 1 + Math.floor(rand() * 9); i < n; i += 1) {
+      const isAnchored = anchors.length > 0 && rand() < 0.6
+      const p = isAnchored ? pick(anchors) : null
+      let c
+      if (copyLike) c = baseMs + 3600 * 1000 + Math.floor(rand() * 1500)
+      else if (isAnchored) c = p - 4900 + Math.floor(rand() * 4900) + (rand() < 0.4 ? Math.floor(rand() * 3 * 3600 * 1000) : 0)
+      else c = baseMs + Math.floor(rand() * 7 * 3600) * 1000 + Math.floor(rand() * 1000)
+      const tokens = pick([['X'], ['A', 'X'], ['B', 'A', 'X'], ['Y'], ['A', 'Y']])
+      rows.push(hrow(`r${i}`, rand() < 0.05 ? null : new Date(c).toISOString(), { decision: isAnchored ? 'add' : pick(['inactive', 'update']), plannedAt: isAnchored ? new Date(p).toISOString() : null, active: rand() < 0.6, partId: tokens[tokens.length - 1], pathTokens: tokens }))
+    }
+    const config = ruleConfig(pick(RULES))
+    const planned = plan({ rows, coveredUntil: '2026-10-22T00:00:00.000Z', config })
+    const envelope = firstInstall(rows, { coveredUntil: '2026-10-22T00:00:00.000Z', config })
+    stats.trials += 1
+    if (planned.plan.degenerate) stats.degenerate += 1
+    if (planned.plan.exceptions.length) stats.exceptions += 1
+    if (planned.plan.unplacedRows) stats.unplaced += 1
+    if (!util.isDeepStrictEqual(plainMap(assignmentsOf({ plan: envelope, rows })), plainMap(planned.assignments))) stats.mismatched += 1
+    const index = PB.__internals.membershipIndexOf(envelope)
+    for (const entry of rows) {
+      const createdMs = PB.__internals.timeMsOf(entry.createdAt)
+      if (index(entry.recordId, createdMs) !== PB.pullBatchHistoryMembership(envelope, entry)) stats.membership += 1
+    }
+  }
+  assert.ok(stats.degenerate > 0 && stats.exceptions > 0 && stats.unplaced > 0, `the sweep reaches every shape: ${JSON.stringify(stats)}`)
+  assert.equal(stats.mismatched, 0, JSON.stringify(stats))
+  assert.equal(stats.membership, 0, JSON.stringify(stats))
+})
+
+test('PB-I4 M-2B-19: a re-run never reads a RUN stamp — rows whose decision / plannedAt were rewritten after planning get the same labels', () => {
+  const envelope = firstInstall(C09_ROWS)
+  const rewritten = C09_ROWS.map((entry) => ({ ...entry, decision: 'update', plannedAt: '2026-10-20T09:00:00.000Z' }))
+  assert.deepEqual(plainMap(assignmentsOf({ plan: envelope, rows: rewritten })), plainMap(assignmentsOf({ plan: envelope, rows: C09_ROWS })))
+})
+
+const LIVE_P = '2026-10-23T01:00:00.000Z'
+const GAP_LEDGER = [
+  { batchNo: 1, label: L(1), openedAt: '2026-10-20T01:00:00.000Z', status: 'closed' },
+  { batchNo: 2, label: L(2, '2026-10-23'), openedAt: LIVE_P, status: 'closed' },
+]
+const priorRow = (id, createdAt, { pullBatch, firstPullBatch, decision = 'add', plannedAt = LIVE_P, active = true, partId = id.replace(/_.*$/, ''), pathTokens } = {}) => ({
+  ...hrow(id, createdAt, { decision, plannedAt, active, partId, pathTokens }), pullBatch, firstPullBatch,
+})
+const gapPass = (args) => PB.planPullBatchGapPass({ ledgerBatches: GAP_LEDGER, historyBatchCount: 0, coveredUntil: '2026-10-26T00:00:00.000Z', locale: 'zh-CN', ...args })
+
+test('PB-I5 the gap pass (design §8.6): exact join on an EQUAL plan time to ONE live label; ±1 ms or two labels ⇒ no join; interleaved older rows ⇒ 历史批次未知; the rest after base = max(batch_no, count); GAP-C09 carries 首次', () => {
+  const prior = [
+    priorRow('S-01_b1', '2026-10-20T01:00:01.000Z', { pullBatch: L(1), firstPullBatch: L(1), plannedAt: '2026-10-20T01:00:00.000Z', active: false }),
+    priorRow('Z_live', '2026-10-23T01:00:01.000Z', { pullBatch: L(2, '2026-10-23'), firstPullBatch: L(2, '2026-10-23') }),
+  ]
+  const gapRows = [
+    hrow('Q_join', '2026-10-23T03:00:00.000Z', { decision: 'add', plannedAt: LIVE_P }),
+    hrow('Q_ms', '2026-10-23T03:00:00.500Z', { decision: 'add', plannedAt: '2026-10-23T01:00:00.001Z' }),
+    hrow('S-01_old', '2026-10-22T00:00:00.000Z', { decision: 'add', plannedAt: '2026-10-22T00:00:00.000Z' }),
+    hrow('S-01_copy', '2026-10-25T02:00:01.000Z', { decision: 'add', plannedAt: '2026-10-25T02:00:00.000Z', pathTokens: ['P-07', 'S-01'] }),
+    hrow('P-07_new', '2026-10-25T02:00:02.000Z', { decision: 'add', plannedAt: '2026-10-25T02:00:00.000Z' }),
+  ]
+  for (const rule of RULES) {
+    const envelope = gapPass({ gapRows, priorRows: prior, config: ruleConfig(rule) })
+    assert.equal(envelope.run, 'gap_pass')
+    assert.equal(envelope.base, 2, 'base = max non-void batch_no')
+    assert.deepEqual(envelope.gapPass.joins, [{ recordId: 'Q_join', label: L(2, '2026-10-23') }], 'equal plan time only (±1 ms never joins)')
+    assert.deepEqual(envelope.gapPass.interleaved, [{ recordId: 'S-01_old' }], 'older than the newest batch, unjoined')
+    assert.deepEqual(envelope.gapPass.rows, ['P-07_new', 'Q_join', 'Q_ms', 'S-01_copy', 'S-01_old'], 'R persisted, sorted')
+    assert.equal(envelope.gapPass.newestOpenedAt, LIVE_P)
+    const got = assignmentsOf({ plan: envelope, rows: gapRows, priorRows: prior, ledgerBatches: GAP_LEDGER })
+    assert.equal(got.get('Q_join').pullBatch, L(2, '2026-10-23'), 'the join carries the LIVE label unmarked')
+    assert.equal(got.get('S-01_old').pullBatch, UNKNOWN)
+    assert.match(got.get('Q_ms').pullBatch, /^第3批（推定，/, 'clusters are numbered after base')
+    assert.match(got.get('P-07_new').pullBatch, /^第4批（推定，/)
+    assert.equal(got.get('S-01_copy').firstPullBatch, rule === 'material' ? L(1) : L(1), `GAP-C09: the copy carries 第1批 [${rule}]`)
+    assert.equal(got.get('P-07_new').firstPullBatch, got.get('P-07_new').pullBatch, 'a new material is this batch')
+    assert.equal(got.size, gapRows.length, 'every R row and nothing else')
+  }
+  const twoLabels = gapPass({ gapRows: [gapRows[0]], priorRows: [...prior, priorRow('Y_other', '2026-10-23T01:00:02.000Z', { pullBatch: L(3, '2026-10-23'), firstPullBatch: L(3, '2026-10-23') })] })
+  assert.deepEqual(twoLabels.gapPass.joins, [], 'two live labels for one plan time: no join')
+  const inferredPrior = gapPass({ gapRows: [gapRows[0]], priorRows: [priorRow('Z_inf', '2026-10-23T01:00:01.000Z', { pullBatch: I(2), firstPullBatch: I(2) })] })
+  assert.deepEqual(inferredPrior.gapPass.joins, [], 'a 推定 label never joins (M-2B-9)')
+  assert.equal(gapPass({ gapRows: [], priorRows: prior, historyBatchCount: 7 }).base, 7, 'base = max(batch_no, history_batch_count)')
+})
+
+// Review round 1 (BI-2 verification, H4d): the exact join counts only `add` prior rows. A prior row stamped at the SAME
+// plan time with a live 本次 but decision 'update' was created by an EARLIER batch (本次 = its creation batch); a gap row
+// added at that plan time must not join that label.
+test('PB-I5b (review H4d) no exact join onto the live label of a non-add (update) prior row at the same plan time', () => {
+  const p = '2026-10-22T01:00:00.000Z'
+  const envelope = PB.planPullBatchGapPass({
+    gapRows: [{ recordId: 'rec_gap', createdAt: '2026-10-22T01:00:05.000Z', decision: 'add', plannedAt: p, active: true, partId: 'N-01', path: ['N-01'] }],
+    priorRows: [{ recordId: 'rec_upd', createdAt: '2026-10-20T01:00:01.000Z', decision: 'update', plannedAt: p, active: true, partId: 'S-01', path: ['S-01'], pullBatch: L(1), firstPullBatch: L(1) }],
+    ledgerBatches: [{ batchNo: 1, label: L(1), status: 'closed', openedAt: '2026-10-20T01:00:00.000Z' }],
+    historyBatchCount: 0,
+    coveredUntil: '2026-10-22T01:00:05.000Z',
+    locale: 'zh-CN',
+    config: PB.DEFAULT_PULL_BATCH_CONFIG,
+  })
+  assert.deepEqual(envelope.gapPass.joins, [], JSON.stringify(envelope.gapPass))
+})
+
+test('PB-I6 critic C1: a gap pass labels R only — a labelled prior row inside a gap-cluster interval is never in R and never gets an assignment; its cells feed 首次', () => {
+  const prior = [priorRow('X_live', '2026-10-25T02:00:01.500Z', { pullBatch: L(2, '2026-10-23'), firstPullBatch: L(2, '2026-10-23') })]
+  const gapRows = [
+    hrow('X_a', '2026-10-25T02:00:01.000Z', { decision: 'update' }),
+    hrow('X_b', '2026-10-25T02:00:02.000Z', { decision: 'update' }),
+  ]
+  const envelope = gapPass({ gapRows, priorRows: prior, ledgerBatches: GAP_LEDGER.slice(0, 1) })
+  assert.equal(envelope.K, 1)
+  const allRows = [...gapRows, prior[0]]
+  assert.deepEqual([...PB.pullBatchInstallRunSet({ plan: envelope, rows: allRows })].sort(), ['X_a', 'X_b'], 'the live row inside the cluster interval is not in R')
+  const got = assignmentsOf({ plan: envelope, rows: gapRows, priorRows: prior, ledgerBatches: GAP_LEDGER.slice(0, 1) })
+  assert.equal(got.has('X_live'), false)
+  assert.equal(got.get('X_a').firstPullBatch, L(2, '2026-10-23'), 'the prior cell decides 首次 (material)')
+})
+
+test('PB-I7 P2-10 extension: planned after base + K with the pool after every segment; the flattened plan reproduces both segments; R covers the new rows; a degenerate side is refused extension_degenerate', () => {
+  for (const rule of RULES) {
+    const config = ruleConfig(rule)
+    const persisted = firstInstall(C09_ROWS, { config })
+    const newRows = [
+      hrow('S-01_ext', '2026-10-21T03:00:01.000Z', { decision: 'add', plannedAt: '2026-10-21T03:00:00.000Z', pathTokens: ['Q', 'S-01'] }),
+      hrow('N_ext', '2026-10-21T03:00:02.000Z', { decision: 'add', plannedAt: '2026-10-21T03:00:00.000Z' }),
+    ]
+    const extended = PB.extendPullBatchHistoryPlan({ persisted, runRows: C09_ROWS, newRows, priorRows: [], coveredUntil: '2026-10-21T04:00:00.000Z', ledgerBatches: [] })
+    assert.equal(extended.K, persisted.K + 1)
+    assert.deepEqual(extended.segments.map((segment) => [segment.base, segment.K]), [[0, 2], [2, 1]])
+    assert.equal(extended.coveredUntil, '2026-10-21T04:00:00.000Z')
+    assert.equal(extended.clusters[2].k, 3)
+    assert.notEqual(extended.digest, persisted.digest)
+    const all = [...C09_ROWS, ...newRows]
+    assert.deepEqual([...PB.pullBatchInstallRunSet({ plan: extended, rows: all })].sort(), all.map((entry) => entry.recordId).sort())
+    const got = assignmentsOf({ plan: extended, rows: all })
+    const base = assignmentsOf({ plan: persisted, rows: C09_ROWS })
+    for (const entry of C09_ROWS) assert.deepEqual(got.get(entry.recordId), base.get(entry.recordId), `${rule}: segment 0 unchanged`)
+    assert.equal(got.get('S-01_ext').pullBatch, extended.clusters[2].label)
+    assert.equal(got.get('S-01_ext').firstPullBatch, persisted.clusters[0].label, `${rule}: 首次 over the base segment's decided rows`)
+    assert.deepEqual([...PB.pullBatchInstallRunSet({ plan: persisted, rows: all })].sort(), C09_ROWS.map((entry) => entry.recordId).sort(), 'before the extension the new rows are uncovered')
+  }
+  const degenerateRows = [
+    hrow('a', '2026-10-20T01:00:00.000Z', { decision: 'add', plannedAt: '2026-10-19T01:00:00.000Z' }),
+    hrow('b', '2026-10-20T01:00:00.100Z', { decision: 'add', plannedAt: '2026-10-18T01:00:00.000Z' }),
+  ]
+  const degenerate = firstInstall(degenerateRows)
+  assert.equal(degenerate.degenerate, true)
+  assert.throws(() => PB.extendPullBatchHistoryPlan({ persisted: degenerate, runRows: degenerateRows, newRows: [hrow('c', '2026-10-21T03:00:00.000Z')], coveredUntil: '2026-10-21T04:00:00.000Z' }), (error) => error.code === PULL_BATCH_ERROR_CODES.PLAN_CHANGED && error.details.reason === 'extension_degenerate')
+})
+
+test('PB-I8 critic C12 choice (b): under rule F a set 首次 cell of an R row is kept (and feeds the pool); under rule A keepFirst is ignored', () => {
+  const envelopeF = firstInstall(C09_ROWS, { config: ruleConfig('predecessor_suffix') })
+  const keep = new Map([['S-01_new', '第9批（推定，2026-10-01）']])
+  const kept = assignmentsOf({ plan: envelopeF, rows: C09_ROWS, keepFirst: keep })
+  assert.equal(kept.get('S-01_new').firstPullBatch, '第9批（推定，2026-10-01）')
+  const envelopeA = firstInstall(C09_ROWS)
+  assert.deepEqual(plainMap(assignmentsOf({ plan: envelopeA, rows: C09_ROWS, keepFirst: keep })), plainMap(assignmentsOf({ plan: envelopeA, rows: C09_ROWS })))
+})
+
+test('PB-I9 the resolve inputs: one inferred batch per cluster (closed / backfill shape inputs), the plan labels = every cluster label + 历史批次未知 in both locales; a malformed envelope is 500', () => {
+  const envelope = firstInstall(C09_ROWS)
+  const batches = PB.pullBatchInstallInferredBatches(envelope)
+  assert.deepEqual(batches.map((batch) => [batch.batchNo, batch.label, batch.evidence]), envelope.clusters.map((cluster) => [cluster.k, cluster.label, cluster.evidence]))
+  assert.equal(batches[0].openedAt, envelope.clusters[0].startAt)
+  assert.equal(batches[0].displayDay, PB.pullBatchLabelDay(envelope.clusters[0].startAt))
+  const labels = PB.pullBatchInstallPlanLabels(envelope)
+  assert.ok(labels.has(envelope.clusters[0].label) && labels.has(UNKNOWN) && labels.has('Unknown historical batch'))
+  for (const bad of [null, {}, { ...envelope, run: 'other' }, { ...envelope, segments: [] }, { ...envelope, run: 'gap_pass' }]) {
+    assert.throws(() => PB.pullBatchHistoryAssignments({ plan: bad, rows: [] }), codeIs(PULL_BATCH_ERROR_CODES.STAMP_INVALID))
+  }
+})
+
+test('PB-I10 critic C2: the record-ref key is the planner\'s own Symbol (spelled by its registry key; no require)', () => {
+  assert.equal(PB.EXISTING_ROW_RECORD_REF, planner.EXISTING_ROW_RECORD_REF)
+})
+
 // ── PB-P ───────────────────────────────────────────────────────────────────────────────────────────
 
 // MF5: both pins read the TEXT, whatever the require form (a quoted literal, path.join(__dirname, …), a
@@ -1081,9 +1305,11 @@ test('PB-P1 PORTABILITY (S6 C-1, design §12.2): the pure core contains exactly 
 // BI-1b (the lanes; register R-65) replaced the BI-1a "not wired" pin with the WIRED set, exactly: the pure module is
 // named by the lanes helper, the status read, the store, the template band, the reader (table actions), the writer,
 // the large lane (its stored-plan shape), pilot readiness (v3), the routes and index. The ledger STORE is named only by
-// index (which builds it) and by the lanes helper (its execution-ref pattern): every request reaches the ledger through
+// index (which builds it), by the lanes helper (its execution-ref pattern) and — for its constants only — by the BI-7
+// settings helper; BI-2 adds the install library to the wired set (it reaches the ledger only through injected deps).
+// Every request reaches the ledger through
 // the routes' lane input, which hands it over only while the pull-batch switch is on.
-test('PB-P2 WIRED (BI-1b): exactly these runtime files name stock-preparation-pull-batch, in any form; only index and the lanes helper name the store', () => {
+test('PB-P2 WIRED (BI-1b): exactly these runtime files name stock-preparation-pull-batch, in any form (BI-2 adds the install library, BI-7 the settings helper); only index, the lanes helper and the settings helper name the store', () => {
   const runtime = ['index.cjs', ...fs.readdirSync(LIB).filter((name) => name.endsWith('.cjs')).map((name) => `lib/${name}`)]
     .filter((file) => file !== 'lib/stock-preparation-pull-batch.cjs')
   assert.ok(runtime.length > 100, 'the scan sees the plugin runtime')
@@ -1095,6 +1321,8 @@ test('PB-P2 WIRED (BI-1b): exactly these runtime files name stock-preparation-pu
     'lib/stock-preparation-apply-writer.cjs',
     'lib/stock-preparation-large-bom-jobs.cjs',
     'lib/stock-preparation-pilot-readiness.cjs',
+    // BI-2 (R-65): the per-sheet install library (portable; it reaches the ledger only through its injected deps).
+    'lib/stock-preparation-pull-batch-install.cjs',
     'lib/stock-preparation-pull-batch-lanes.cjs',
     // 批次标识 BI-7 (R-65): the settings routes' helper — bodies, answers and the in-transaction audit adapter.
     'lib/stock-preparation-pull-batch-settings.cjs',
