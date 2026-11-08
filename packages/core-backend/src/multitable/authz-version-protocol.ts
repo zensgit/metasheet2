@@ -42,8 +42,19 @@
  *     ({@link fieldVisibilityTriggerWouldFire}, PATCH /fields: the unlocked read it validated against vs
  *     the property it will write), or unconditionally where that test would itself need the locked row
  *     (a config revert that writes `property`, the plugin property port's merge patch, an `ensureFields`
- *     overwrite). Writes that cannot trip it (a PATCH of order, name, type or options only, a name /
+ *     overwrite, the field retype convert and its undo — a legacy jsonb-STRING property is parsed into
+ *     an object by the convert and written back raw by the undo, so either write can flip the trigger's
+ *     flags). Writes that cannot trip it (a PATCH of order, name, type or options only, a name /
  *     order revert) never take the version row, so a shared column drag never queues on it.
+ *     The sheet row comes BEFORE the version row here too (the sheet-layer order above): a field-row
+ *     writer that holds no `meta_sheets` lock of its own and can take one after its bump — an FK child
+ *     insert takes `FOR KEY SHARE` on the sheet row: the new field of an `ensureFields` overwrite, the
+ *     auto-number sequence row of a PATCH /fields that converts to autoNumber — takes that KEY SHARE
+ *     BEFORE the bump ({@link bumpSheetPermissionVersionBehindSheetRow}); taken after it, it waits on a
+ *     grant / configuration route that holds `meta_sheets … FOR UPDATE` and wants the version row next
+ *     (a 40P01 cycle between two writers). The port, both config-revert branches and the retype convert
+ *     and undo insert no FK child of `meta_sheets` and update no `meta_sheets` row after their bump, so
+ *     they keep the plain bump: fence → [meta_sheets KEY SHARE] → sheet version row → field rows.
  *   A writer that skips the explicit bump (raw SQL, a data migration, an FK cascade, a plugin raw
  *   query) is still covered by the triggers but acquires the version row LAST: against an in-flight
  *   holder, or against another raw writer that touches the same rows in another order, PostgreSQL
@@ -266,6 +277,36 @@ export async function bumpSheetPermissionVersions(
 }
 
 /**
+ * The sheet-row lock of {@link bumpSheetPermissionVersionBehindSheetRow}. `FOR KEY SHARE` is exactly the lock an FK child
+ * insert takes on the parent row by itself (`meta_fields.sheet_id`, `meta_field_auto_number_sequences.sheet_id`, …), so
+ * it adds no conflict that writer did not already have: it conflicts with `FOR UPDATE` (the grant / configuration
+ * routes' `assertSheetLiveForUpdate`), a sheet DELETE and a key UPDATE, never with an ordinary `meta_sheets` UPDATE
+ * (`FOR NO KEY UPDATE`) or a `FOR SHARE` reader; the admission holder never locks `meta_sheets`. Exported so real-DB
+ * probes can match a writer parked on it by text.
+ */
+export const SHEET_ROW_KEY_SHARE_SQL = 'SELECT id FROM meta_sheets WHERE id = $1 FOR KEY SHARE'
+
+/**
+ * Explicit Layer-1 bump for a FIELD-ROW writer that holds no `meta_sheets` row lock of its own and can take one after
+ * the bump (the field-row writer rule above): the sheet row `FOR KEY SHARE` first, then the version row — two
+ * statements, same order every time, so the writer acquires the two rows in the sheet-layer order meta_sheets →
+ * version row that the grant / configuration routes use (`meta_sheets … FOR UPDATE` → bump). Without it the writer's
+ * FK child insert takes the KEY SHARE AFTER the version row and closes a 40P01 cycle with such a route (verifier r1 F1:
+ * an `ensureFields` overwrite that adds a field vs PUT field-permissions). One sheet; no statement for a blank id.
+ */
+export async function bumpSheetPermissionVersionBehindSheetRow(
+  queryable: AuthorizationVersionQueryable,
+  sheetId: string,
+): Promise<string[]> {
+  const ids = canonicalAuthorizationIds([sheetId])
+  if (ids.length === 0) return ids
+  const query = queryFnOf(queryable)
+  await query(SHEET_ROW_KEY_SHARE_SQL, [ids[0]])
+  await query(SHEET_PERMISSION_VERSIONS_BUMP_SQL, [ids])
+  return ids
+}
+
+/**
  * Explicit Layer-2 bump: takes the write lock of every listed user's version row, ascending, in ONE
  * statement. Multi-user membership writers (role un/assignment, member-group projection, directory
  * admissions) call it before their DML so concurrent writers acquire the rows in one global order.
@@ -285,7 +326,8 @@ export async function bumpSubjectAuthorizationVersions(
  * `property.hidden = true` and `property.visible = false`.
  */
 function visibilityFlagsOf(property: unknown): { hidden: boolean; visibleFalse: boolean } {
-  // `property -> 'hidden'` is NULL for a non-object jsonb value (array, string, number, null): neither flag.
+  // `property -> 'hidden'` is NULL for a non-object jsonb value (array, string, number, null): neither flag. The readers
+  // parse a jsonb STRING (normalizeJson); the trigger does not — registry entry `field-property-jsonb-string-encoding`.
   if (!property || typeof property !== 'object' || Array.isArray(property)) return { hidden: false, visibleFalse: false }
   const record = property as Record<string, unknown>
   return { hidden: record.hidden === true, visibleFalse: record.visible === false }
@@ -606,6 +648,13 @@ export const AUTHORIZATION_PROTOCOL_GAPS: readonly AuthorizationProtocolGap[] = 
     kind: 'bypass-window' as const,
     input: 'A database where zzzz20261106110500 has not run, or where a trigger was disabled, has writers outside the protocol (autocommit routes, ops scripts, migrations, cascades, plugin raw queries).',
     handling: 'lockAuthorizationVersionsForAdmission() verifies the posture first and throws AUTHZ_VERSION_PROTOCOL_UNAVAILABLE: admission refuses.',
+  }),
+  Object.freeze({
+    id: 'field-property-jsonb-string-encoding',
+    checks: Object.freeze([3] as const),
+    kind: 'bypass-window' as const,
+    input: 'A meta_fields.property stored as a jsonb STRING (the legacy encoding record-duplicate-guard.ts and field-retype-convert-preview.ts still read) is parsed by the readers (normalizeJson: check 3 sees its hidden / visible keys) but not by the field-visibility trigger (property -> \'hidden\' is NULL for a string). A raw-SQL write that stores such a string carrying hidden: true over a visible field hides it with no version bump and commits without waiting for an in-flight holder. Every TypeScript writer that rewrites an existing field writes an object, or bumps explicitly first where it can write a stored string back (the property config revert, the retype undo).',
+    handling: 'Operational, like the replica window: raw SQL writes meta_fields.property as a JSON object, never as a JSON string. A one-time normalization of the legacy string properties to objects (not in this slice) closes the gap; until it has run, the entry stays listed.',
   }),
 ])
 

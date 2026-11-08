@@ -41,9 +41,11 @@ import {
   AuthorizationVersionProtocolError,
   LIVE_AUTHORITY_LOCK_ORDER,
   SHEET_PERMISSION_VERSIONS_BUMP_SQL,
+  SHEET_ROW_KEY_SHARE_SQL,
   SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL,
   authorizationProtocolGapsFor,
   bumpAuthorizationVersions,
+  bumpSheetPermissionVersionBehindSheetRow,
   bumpSheetPermissionVersions,
   bumpSubjectAuthorizationVersions,
   canonicalAuthorizationIds,
@@ -52,6 +54,8 @@ import {
   lockAuthorizationVersionsForAdmission,
   verifyAuthorizationVersionTriggerPosture,
 } from '../../src/multitable/authz-version-protocol'
+import { normalizeJson } from '../../src/multitable/field-codecs'
+import { isFieldPermissionHidden } from '../../src/multitable/permission-derivation'
 
 const ROOT = path.resolve(__dirname, '..', '..', '..', '..')
 const BACKEND = path.join(ROOT, 'packages', 'core-backend')
@@ -256,6 +260,24 @@ describe('B — the explicit bump helpers', () => {
       [SHEET_PERMISSION_VERSIONS_TABLE, ['s-a', 's-b']],
       [SUBJECT_AUTHORIZATION_VERSIONS_TABLE, ['u-a', 'u-b']],
     ])
+  })
+
+  it('B-05 the bump behind the sheet row: meta_sheets FOR KEY SHARE first, then the version row — two statements, one sheet; nothing for a blank id', async () => {
+    const statements: Array<{ sql: string; params: unknown[] }> = []
+    const query = async (sql: string, params: unknown[] = []) => { statements.push({ sql, params }); return { rows: [] } }
+    expect(await bumpSheetPermissionVersionBehindSheetRow(query, ' s-1 ')).toEqual(['s-1'])
+    expect(await bumpSheetPermissionVersionBehindSheetRow({ query }, 's-2')).toEqual(['s-2'])
+    expect(statements).toEqual([
+      { sql: SHEET_ROW_KEY_SHARE_SQL, params: ['s-1'] },
+      { sql: SHEET_PERMISSION_VERSIONS_BUMP_SQL, params: [['s-1']] },
+      { sql: SHEET_ROW_KEY_SHARE_SQL, params: ['s-2'] },
+      { sql: SHEET_PERMISSION_VERSIONS_BUMP_SQL, params: [['s-2']] },
+    ])
+    // the lock an FK child insert takes on its own — no stronger (it must not queue behind ordinary meta_sheets UPDATEs)
+    expect(collapse(SHEET_ROW_KEY_SHARE_SQL)).toBe('SELECT id FROM meta_sheets WHERE id = $1 FOR KEY SHARE')
+    statements.length = 0
+    expect(await bumpSheetPermissionVersionBehindSheetRow(query, '  ')).toEqual([])
+    expect(statements).toEqual([])
   })
 })
 
@@ -573,17 +595,40 @@ describe('F — the field-row writer rule (sheet version row before the first me
     const lossyBump = univer.lastIndexOf('if (configRevertCanTripFieldVisibility(rev)) await bumpSheetPermissionVersions(query, [sheetId])', lossyRead)
     expect(lossyBump).toBeGreaterThan(univer.lastIndexOf('await fenceWriterEntry(query, sheetId)', lossyRead))
     expect(univer.match(/if \(configRevertCanTripFieldVisibility\(rev\)\) await bumpSheetPermissionVersions\(query, \[sheetId\]\)/g)).toHaveLength(2)
-    // PATCH /fields: the conditional bump precedes the sibling shift and the late locked re-read
-    const patchBump = at(univer, 'if (fieldVisibilityTriggerWouldFire(validated.property, nextProperty)) await bumpSheetPermissionVersions(query, [sheetId])')
+    // PATCH /fields: the conditional bump precedes the sibling shift and the late locked re-read, and goes BEHIND the
+    // sheet row (a conversion to autoNumber inserts an FK child of meta_sheets after it: verifier r1 F1, the twin)
+    const patchBump = at(univer, 'if (fieldVisibilityTriggerWouldFire(validated.property, nextProperty)) await bumpSheetPermissionVersionBehindSheetRow(query, sheetId)')
     expect(at(univer, 'UPDATE meta_fields SET "order" = "order" + 1', patchBump)).toBeGreaterThan(patchBump)
     expect(at(univer, 'await query(PATCH_FIELD_LOCKED_REREAD_SQL, [fieldId])', patchBump)).toBeGreaterThan(patchBump)
+    expect(at(univer, 'await backfillAutoNumberField(query, sheetId, fieldId, nextProperty, { overwrite: true })', patchBump)).toBeGreaterThan(patchBump)
     expect(univer.lastIndexOf('await fenceWriterEntry(query, preflightSheetId)', patchBump)).toBeGreaterThan(0)
-    // the plugin property port and an overwriting ensureFields
+    expect(univer.match(/fieldVisibilityTriggerWouldFire\(/g)).toHaveLength(1)
+    // the plugin property port (no FK child insert after its bump: the plain bump) and an overwriting ensureFields
+    // (its INSERT of a new field takes FOR KEY SHARE on the sheet row: the bump goes behind the sheet row, verifier r1 F1)
     const provisioning = readLf(path.join(SRC, 'multitable', 'provisioning.ts'))
     const portBump = at(provisioning, 'await bumpSheetPermissionVersions(input.query, [sheetId])\n  const existing = await input.query(PATCH_OBJECT_FIELD_PROPERTY_READ_SQL')
     expect(provisioning.lastIndexOf('await fenceWriterEntry(input.query, sheetId)', portBump)).toBeGreaterThan(0)
-    const ensureBump = at(provisioning, "if (fields.length > 0 && (overwriteMode === 'overwrite' || overwriteMode === 'observe')) {")
+    const ensureBump = at(provisioning, "if (fields.length > 0 && (overwriteMode === 'overwrite' || overwriteMode === 'observe')) {\n    await bumpSheetPermissionVersionBehindSheetRow(input.query, input.sheetId)\n  }")
     expect(at(provisioning, 'for (const [index, field] of fields.entries()) {', ensureBump)).toBeGreaterThan(ensureBump)
+    expect(provisioning.lastIndexOf('if (fields.length > 0) await fenceWriterEntry(input.query, input.sheetId)', ensureBump)).toBeGreaterThan(0)
+    // the field retype convert and its undo (verifier r1 F2): the plain bump after the fence and the in-transaction gate,
+    // before each function's first row lock — the field row FOR UPDATE (convert), the job row FOR UPDATE (undo)
+    const convert = readLf(path.join(SRC, 'multitable', 'field-retype-convert-execute.ts'))
+    const convertBumps = Array.from(convert.matchAll(/await bumpSheetPermissionVersions\(query, \[sheetId\]\)/g)).map((match) => match.index!)
+    expect(convertBumps).toHaveLength(2)
+    const executeAt = at(convert, 'export async function executeFieldRetypeConvert(')
+    const undoAt = at(convert, 'export async function undoFieldRetypeConvert(')
+    for (const [label, start, bump, firstLock] of [
+      ['execute', executeAt, convertBumps[0]!, at(convert, `'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1 FOR UPDATE'`, executeAt)],
+      ['undo', undoAt, convertBumps[1]!, at(convert, 'FROM meta_field_retype_conversions\n      WHERE convert_revision_id = $1::uuid AND field_id = $2 AND sheet_id = $3\n      FOR UPDATE', undoAt)],
+    ] as const) {
+      expect([label, bump > at(convert, 'await enterFence(query, sheetId)', start)]).toEqual([label, true])
+      expect([label, bump > at(convert, 'if (gate) return { ok: false, gate }', start)]).toEqual([label, true])
+      expect([label, bump < firstLock]).toEqual([label, true])
+      expect([label, convert.slice(start, bump).includes('FOR UPDATE\'') || /FOR UPDATE`/.test(convert.slice(start, bump))]).toEqual([label, false])
+    }
+    expect(convertBumps[0]!).toBeLessThan(undoAt)
+    expect(convertBumps[1]!).toBeGreaterThan(undoAt)
   })
 })
 
@@ -677,6 +722,7 @@ describe('R — the hard-condition registry', () => {
       'request-cache-admin-and-codes',
       'session-replication-role-replica',
       'triggers-not-installed',
+      'field-property-jsonb-string-encoding',
     ])
     for (const gap of AUTHORIZATION_PROTOCOL_GAPS) {
       expect(Object.isFrozen(gap)).toBe(true)
@@ -686,9 +732,28 @@ describe('R — the hard-condition registry', () => {
       expect(gap.input + gap.handling).not.toMatch(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|password|appKey|authorityCode/i)
     }
     expect(authorizationProtocolGapsFor([1]).map((gap) => gap.id)).toEqual(['stock-prep-project-registry'])
-    expect(authorizationProtocolGapsFor([3]).map((gap) => gap.id)).toEqual(['request-cache-admin-and-codes', 'session-replication-role-replica', 'triggers-not-installed'])
+    expect(authorizationProtocolGapsFor([3]).map((gap) => gap.id)).toEqual(['request-cache-admin-and-codes', 'session-replication-role-replica', 'triggers-not-installed', 'field-property-jsonb-string-encoding'])
+    expect(authorizationProtocolGapsFor([4]).map((gap) => gap.id)).toEqual(['request-cache-admin-and-codes', 'session-replication-role-replica', 'triggers-not-installed'])
     expect(authorizationProtocolGapsFor([]).map((gap) => gap.id)).toEqual([])
     expect(AUTHORIZATION_PROTOCOL_GAPS.find((gap) => gap.id === 'request-cache-admin-and-codes')?.kind).toBe('forbidden-input')
+  })
+
+  it('R-02 the legacy jsonb-STRING property encoding is listed while the trigger and the readers disagree on it (verifier r1 F4; the real-DB premise is G-01)', () => {
+    const gap = AUTHORIZATION_PROTOCOL_GAPS.find((entry) => entry.id === 'field-property-jsonb-string-encoding')
+    expect(gap).toBeDefined()
+    expect(gap!.checks).toEqual([3])
+    expect(gap!.kind).toBe('bypass-window')
+    // the premise, at unit level: the trigger's own test reads no flag from a string-encoded property …
+    const hiddenAsString = JSON.stringify({ hidden: true })
+    expect(fieldVisibilityTriggerWouldFire({}, hiddenAsString)).toBe(false)
+    expect(fieldVisibilityTriggerWouldFire(JSON.stringify({}), hiddenAsString)).toBe(false)
+    // … while the readers' derivation parses it (normalizeJson → hidden)
+    expect(isFieldPermissionHidden({ property: normalizeJson(hiddenAsString) })).toBe(true)
+    expect(isFieldPermissionHidden({ property: normalizeJson({}) })).toBe(false)
+    // the handling names the operational rule and the closing normalization, values-free
+    expect(gap!.handling).toMatch(/raw SQL writes meta_fields\.property as a JSON object/)
+    expect(gap!.handling).toMatch(/normalization/)
+    expect(gap!.input).toMatch(/property -> 'hidden' is NULL for a string/)
   })
 })
 

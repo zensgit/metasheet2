@@ -31,6 +31,7 @@ import {
   fieldRowChangedSince,
   snapshotFieldRowForRecheck,
 } from '../../src/multitable/field-row-write-guard'
+import { SHEET_ROW_KEY_SHARE_SQL } from '../../src/multitable/authz-version-protocol'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const SHEET_ID = 'sheet_frwg_1'
@@ -366,15 +367,20 @@ describe('PATCH /fields/:fieldId and the sheet version row (route, mocked pool)'
     expect(reread).toBeGreaterThan(shift)
     // nothing locks a field row before the version row
     expect(sqls.slice(0, bump).filter(ROW_LOCKING_FIELD_STATEMENT)).toEqual([])
+    // the bump goes BEHIND the sheet row: meta_sheets FOR KEY SHARE right before it (an autoNumber conversion inserts an
+    // FK child of meta_sheets after the bump — verifier r1 F1's twin; the real-DB witness is FO-X2)
+    expect(sqls.filter((s) => s === SHEET_ROW_KEY_SHARE_SQL)).toHaveLength(1)
+    expect(sqls.indexOf(SHEET_ROW_KEY_SHARE_SQL)).toBe(bump - 1)
   })
 
-  it('D-2 the shared column drag (order only), a rename and an options edit never take the version row', async () => {
+  it('D-2 the shared column drag (order only), a rename and an options edit never take the version row (nor the sheet row)', async () => {
     const drag = await run({ ...baseRow(), order: 0 }, { order: 2 }, [{ id: 'fld_sib_1', order: 0 }])
     expect(drag.bumps).toEqual([])
     const rename = await run(baseRow(), { name: 'Renamed' })
     expect(rename.bumps).toEqual([])
     const options = await run({ ...baseRow(), type: 'select', property: { options: [{ value: 'a' }] } }, { property: { options: [{ value: 'b' }] } })
     expect(options.bumps).toEqual([])
+    for (const { sqls } of [drag, rename, options]) expect(sqls.filter((s) => s === SHEET_ROW_KEY_SHARE_SQL)).toEqual([])
   })
 
   it('D-3 the trigger\'s own test, not the derivation: adding visible:false to a hidden field, unhiding, and un-setting visible:false each bump', async () => {
