@@ -485,6 +485,65 @@ test('review_pending is recorded as skipped_review_pending and NEVER applied, ev
   assert.ok(!applyLeg.result.stdout.includes(SENTINEL), 'nothing but the count leaves the refusal details')
 })
 
+// 批次标识 BI-2 (register R-65; P2-8): a project sheet whose batch columns are being installed (an owner-approved window) is
+// a SKIP, never an error and never applied: the dry-run precheck's WRITE_LOCKED held by the install, the preview stanza
+// `installing` (a lease-less install), and the apply's 409 INSTALL_IN_PROGRESS / install-held WRITE_LOCKED. Only the closed
+// holder purpose and the stanza's reason are read.
+test('SP-1 (M-2B-6) a sheet being installed is recorded skipped_pull_batch_installing — at the preview (WRITE_LOCKED held by the install, or the stanza) and at the apply — never applied, exit 0, counted', async () => {
+  const SENTINEL = 'syn_install_sentinel_never_printed'
+  const held = await withMockFetch(
+    () => ({ status: 409, json: { ok: false, error: { code: 'STOCK_PREP_PROJECT_WRITE_LOCKED', message: 'locked', details: { holderPurpose: 'pull_batch_install', retryAfterMs: 1000, [SENTINEL]: SENTINEL } } } }),
+    () => runMain(['--apply'], BASE_ENV),
+  )
+  assert.equal(held.result.code, 0, `${held.result.stdout}\n${held.result.stderr}`)
+  assert.equal(held.requests.length, 1)
+  const heldLines = jsonLines(held.result.stdout)
+  assert.deepEqual([heldLines[0].action, heldLines[0].phase, heldLines[0].failed], ['skipped_pull_batch_installing', 'preview', undefined])
+  assert.equal(heldLines[1].summary.skippedPullBatchInstalling, 1)
+  assert.equal(heldLines[1].summary.failed, 0)
+  assert.ok(!held.result.stdout.includes(SENTINEL))
+  const stanza = await withMockFetch(
+    (record) => {
+      if (record.url.includes('/dry-run')) return { json: { ok: true, data: { status: 'ready', canApply: true, dryRunToken: 'tok_pb', revision: 'rev_1', counts: {}, pullBatch: { preview: true, wouldStamp: false, reason: 'installing', [SENTINEL]: SENTINEL } } } }
+      return { status: 500, json: { ok: false, error: { code: 'SHOULD_NOT_BE_CALLED' } } }
+    },
+    () => runMain(['--apply'], BASE_ENV),
+  )
+  assert.equal(stanza.result.code, 0)
+  assert.equal(stanza.requests.length, 1, 'never applied')
+  assert.equal(jsonLines(stanza.result.stdout)[0].action, 'skipped_pull_batch_installing')
+  assert.ok(!stanza.result.stdout.includes(SENTINEL))
+  for (const refusal of [
+    { code: 'STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS', details: { partial: false } },
+    { code: 'STOCK_PREP_PROJECT_WRITE_LOCKED', details: { holderPurpose: 'pull_batch_install' } },
+  ]) {
+    const applyLeg = await withMockFetch(
+      (record) => {
+        if (record.url.includes('/dry-run')) return { json: { ok: true, data: { status: 'ready', canApply: true, dryRunToken: 'tok_pb', revision: 'rev_1', counts: {} } } }
+        return { status: 409, json: { ok: false, error: { code: refusal.code, message: 'refused', details: refusal.details } } }
+      },
+      () => runMain(['--apply'], BASE_ENV),
+    )
+    assert.equal(applyLeg.result.code, 0, refusal.code)
+    const lines = jsonLines(applyLeg.result.stdout)
+    assert.deepEqual([lines[0].action, lines[0].phase], ['skipped_pull_batch_installing', 'apply'], refusal.code)
+    assert.equal(lines[1].summary.skippedPullBatchInstalling, 1)
+  }
+})
+
+test('SP-2 (M-2B-7) any OTHER WRITE_LOCKED stays an error (a small apply holding the sheet is not an install window)', async () => {
+  for (const details of [{ holderPurpose: 'small_apply' }, {}, null]) {
+    const other = await withMockFetch(
+      () => ({ status: 409, json: { ok: false, error: { code: 'STOCK_PREP_PROJECT_WRITE_LOCKED', message: 'locked', ...(details ? { details } : {}) } } }),
+      () => runMain(['--apply'], BASE_ENV),
+    )
+    assert.notEqual(other.result.code, 0, JSON.stringify(details))
+    const lines = jsonLines(other.result.stdout)
+    assert.deepEqual([lines[0].action, lines[0].failed], ['error', true])
+    assert.equal(lines[1].summary.skippedPullBatchInstalling, 0)
+  }
+})
+
 // PR-9 (R-77 ⑧): every dry-run status the server can answer has a NAMED branch here. The literals are scanned out of the
 // plugin source (they are not exported) — every literal `dryRunStatus` and `withReviewStatus` return, plus the preview
 // answer's `recovery_pending` — so a new server status reds HERE by construction, instead of reaching the generic

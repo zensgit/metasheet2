@@ -156,7 +156,8 @@ Flags:
 Exit code is non-zero if any project's dry-run (or apply) failed outright — never for a project that
 was simply skipped as manual_confirm_required, suspended (a governed project's pull waits for a
 拉取人员 to decide its holds on the 拉取待确认 page — at the preview or, if a hold opened in between,
-at the apply), review_pending (a written content change awaits its review by a 拉取人员 on the
+at the apply), pull_batch_installing (批次标识: the project sheet's batch columns are being installed in an
+owner-approved window — at the preview or at the apply), review_pending (a written content change awaits its review by a 拉取人员 on the
 拉取待确认 page — at the preview or at the apply), large_bom_bounded, not_found, (without --apply)
 ready-but-not-applied, or — with
 per-project sheets enabled on the server — project_sheet_absent (no 拉取人员 has created that
@@ -486,7 +487,13 @@ function errorCodeOf(envelope) {
     : null
 }
 
-/** An error envelope's `details` object, or null. Read only by `holdCountOf` and `applyStopFactsOf` below. */
+// 批次标识 BI-2 (P2-8): the closed facts the install skip reads — the lock holder's purpose, nothing else.
+const PULL_BATCH_INSTALLING_NOTE = 'the batch columns of this project sheet are being installed (an owner-approved window); nothing was applied'
+function isPullBatchInstallHolder(details) {
+  return Boolean(details) && typeof details === 'object' && details.holderPurpose === 'pull_batch_install'
+}
+
+/** An error envelope's `details` object, or null. Read only by `holdCountOf`, `applyStopFactsOf` and the install skip. */
 function errorDetailsOf(envelope) {
   const details = envelope && envelope.json && envelope.json.error ? envelope.json.error.details : null
   return details && typeof details === 'object' && !Array.isArray(details) ? details : null
@@ -585,6 +592,12 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
     if (refusal === 'STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED') {
       return { ...record, action: 'error', error: refusal, note: 'the pilot project exceeds the small-lane cap and the large lane is refused for pilot projects; the owner must decide — nothing was written', failed: true, durationMs: Date.now() - startedAt }
     }
+    // 批次标识 BI-2 (register R-65; P2-8): the sheet's batch columns are being installed — the install holds the sheet
+    // write lease, so the dry-run precheck answers WRITE_LOCKED naming the holder's purpose. An owner-approved window,
+    // not a fault: skipped, never applied, exit code unaffected. Any OTHER WRITE_LOCKED stays an error.
+    if (refusal === 'STOCK_PREP_PROJECT_WRITE_LOCKED' && isPullBatchInstallHolder(errorDetailsOf(dryRun))) {
+      return { ...record, action: 'skipped_pull_batch_installing', phase: 'preview', note: PULL_BATCH_INSTALLING_NOTE, durationMs: Date.now() - startedAt }
+    }
     // Its sibling: the pilot marker could not be read (503) — fail closed, by name.
     if (refusal === 'STOCK_PREP_PILOT_STATE_UNREADABLE') {
       return { ...record, action: 'error', error: refusal, note: 'the pilot state of this project could not be read; the pull did not continue', failed: true, durationMs: Date.now() - startedAt }
@@ -651,6 +664,12 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
   }
 
   // status === 'ready'
+  // 批次标识 BI-2 (P2-8): the preview's pull-batch stanza says the sheet is being installed (a crashed install past its
+  // lease, or a host without a lease) — the apply would be refused 409; skipped here, never applied. Only the closed
+  // reason is read off the stanza.
+  if (data.pullBatch && typeof data.pullBatch === 'object' && data.pullBatch.reason === 'installing') {
+    return { ...record, action: 'skipped_pull_batch_installing', phase: 'preview', note: PULL_BATCH_INSTALLING_NOTE, durationMs: Date.now() - startedAt }
+  }
   if (!applyFlag) {
     return { ...record, action: 'skipped_dry_run_only', durationMs: Date.now() - startedAt }
   }
@@ -685,6 +704,11 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
     }
     // PR-9 (R-77 ⑧): a written change began awaiting its review between the preview and the apply — the server refuses
     // 409 STOCK_PREP_REFRESH_REVIEW_PENDING before any write (`partial: false` by construction): the same skip.
+    // 批次标识 BI-2 (P2-8): the install began between the preview and the apply — refused before any write (409
+    // INSTALL_IN_PROGRESS, or WRITE_LOCKED held by the install): the same skip.
+    if (code === 'STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS' || (code === 'STOCK_PREP_PROJECT_WRITE_LOCKED' && isPullBatchInstallHolder(errorDetailsOf(apply)))) {
+      return { ...record, action: 'skipped_pull_batch_installing', phase: 'apply', note: PULL_BATCH_INSTALLING_NOTE, durationMs: Date.now() - startedAt }
+    }
     if (code === 'STOCK_PREP_REFRESH_REVIEW_PENDING') {
       return { ...record, action: 'skipped_review_pending', phase: 'apply', pendingReviews: pendingReviewsOf(errorDetailsOf(apply)), note: 'a written content change began awaiting its review between the preview and the apply; nothing was written', durationMs: Date.now() - startedAt }
     }
@@ -712,6 +736,7 @@ export function summarize(results, applyFlag) {
     skippedManualConfirmRequired: count('skipped_manual_confirm_required'),
     skippedSuspended: count('skipped_suspended'),
     skippedReviewPending: count('skipped_review_pending'),
+    skippedPullBatchInstalling: count('skipped_pull_batch_installing'),
     skippedLargeBomBounded: count('skipped_large_bom_bounded'),
     skippedNotFound: count('skipped_not_found'),
     skippedDryRunOnly: count('skipped_dry_run_only'),
