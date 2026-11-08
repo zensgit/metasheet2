@@ -15,6 +15,9 @@
 //          refused; absent / archived answer ready:false; OFF ⇒ FLAT answer, switchOn:false, no ledger read; ON ⇒ the
 //          status; no `fld_` and no pullBatch key in any answer; the handler is registered values-free
 //   SR-02  the board: OFF ⇒ exactly the frozen keys (no pullBatch); ON ⇒ the stanza; a ledger failure is fail-soft
+//   SR-03  (R line, verifier N13) the read is walled to the tenant: a registry row naming a sheet that is neither the
+//          tenant staging project's nor the id derived for the project answers 409 TABLE_ACTION_TARGET_TENANT_MISMATCH,
+//          switch off and on, before any ledger or records read (removing assertResolvedProjectTargetTenancy reds it)
 //
 // Every value is synthetic.
 
@@ -326,6 +329,23 @@ test('SR-01 the status route: gate, switch, scope, absent / archived, OFF (flat,
     assert.deepEqual(disabled.tenantDirectoryCalls, [], 'not even the scope lookup')
   } finally { disabled.restore() }
   assert.equal(process.env[PROJECT_SHEETS_ENABLED_ENV], undefined, 'the harness restored the env')
+})
+
+test('SR-03 (R line, N13) the status read is walled to the tenant: a registry row naming a foreign sheet answers 409 TABLE_ACTION_TARGET_TENANT_MISMATCH before any ledger or records read, switch off and on', async () => {
+  for (const value of [undefined, 'true']) {
+    const h = mount({ ledger: 'untouchable' })
+    try {
+      seedReady(h)
+      // The registry row now names a sheet the tenant staging project does not own and whose id is not the derived one.
+      h.registryRows()[0].sheet_id = 'sheet_planted_elsewhere'
+      h.records.calls.length = 0
+      const res = await withSwitch(value, () => getStatus(h))
+      assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+      assert.equal(res.body.error.code, 'TABLE_ACTION_TARGET_TENANT_MISMATCH')
+      assert.deepEqual(h.records.calls, [], 'no records read of a foreign sheet')
+      assert.equal(JSON.stringify(res.body).includes('sheet_planted_elsewhere'), false, 'the foreign sheet id is never echoed')
+    } finally { h.restore() }
+  }
 })
 
 test('SR-02 the board: OFF answers exactly the frozen keys (no pullBatch); ON adds the stanza; a ledger failure is fail-soft', async () => {
