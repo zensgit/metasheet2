@@ -13,7 +13,8 @@
 //         missing store would answer; below ADMIN the gate refuses first
 //   SR-02 THE TIERS: anonymous, a bare login, read-only, the floor, the puller and the two orphans are refused at the
 //         gate with zero IO; stock-prep:admin and the platform admin pass; a tenantless platform admin, a contradicted
-//         carried tenant and a steering query are refused by the operator scope before any ledger read
+//         carried tenant and a steering query are refused by the operator scope before any ledger read; a GET query key outside
+//         the closed allowlist (a project number) is 400 naming the key with zero IO
 //   SR-03 GET: no tenant row => built_in / version 0 / builtIn = the 10-27 design; vocabulary, fixed facts, locks, the
 //         sheet keys and the help copy (C10's rule-F caveat) are the modules' own; one row per REGISTERED sheet with its
 //         captured values (null = 「安装时采用」), locks and `may.set` (active ∧ captured ∧ unlocked only); a ledger row
@@ -26,7 +27,9 @@
 //         version 409 SETTINGS_VERSION_CONFLICT with nothing written; the no-op 200 written:false with no write / audit
 //   SR-06 ATOMICITY (C8): a failing audit insert rolls the setting back (the answer is the error, the row is unchanged);
 //         an audit store without appendWithin is 501 before any statement; a database whose action CHECK lacks 088's
-//         action is 503 before the write
+//         action is 503 before the write; a store that commits without handing over its audit row is 500
+//         AUDIT_STORE_UNAVAILABLE on both writes (the belt; the write stays committed); the audit adapter refuses an
+//         entry of a foreign mode before appendWithin
 //   SR-07 THE PER-SHEET EDIT: the pure refusals (confirm mismatch, landing / placement, an invalid path number) with zero
 //         IO; ABSENT / ARCHIVED 409 with no ledger statement; a registered sheet with no ledger row 409 NOT_CAPTURED;
 //         the success (version + 1, ONE audit row with project_id = the path number, subject_id = the registry sheet,
@@ -132,7 +135,8 @@ function resetEnv() {
 /**
  * One mount: the route stack (project-sheets switch per `projectSheets`), the pull-batch switch per `pullBatch`, the
  * REAL ledger store (unless `store: false`) and the REAL audit store patched IN PLACE into the service object the routes
- * captured at mount (the harness's documented seam) — both on one kit db.
+ * captured at mount (the harness's documented seam) — both on one kit db. `wrapStore(ledger)` hands the routes another
+ * store object built over the real one (the real store is frozen, so a test cannot patch it in place).
  */
 function mount(options = {}) {
   // An explicit `undefined` means "unset" (a default parameter would turn it into 'true').
@@ -148,7 +152,7 @@ function mount(options = {}) {
     tenantId: TENANT,
     projectNo: PROJECT,
     switchOn: true,
-    serviceExtras: store ? { stockPreparationPullBatchStore: ledger } : {},
+    serviceExtras: store ? { stockPreparationPullBatchStore: typeof options.wrapStore === 'function' ? options.wrapStore(ledger) : ledger } : {},
   })
   let a = 0
   const audit = AUDIT.createStockPreparationAuditStore({ db, idGenerator: () => `aud_syn_${(a += 1)}` })
@@ -318,6 +322,14 @@ test('SR-02 the tiers: below ADMIN refused at the gate with zero IO; both admins
     assert.deepEqual(h.ledgerDb.log, [], 'a scope refusal costs no ledger statement')
     assert.deepEqual(h.db.calls, [], 'a scope refusal costs no registry statement')
     assert.deepEqual(auditRows(h), [])
+    // The GET's query is a closed allowlist: a key outside it (a project number among them — the GET is tenant-wide)
+    // is 400 naming the key, before the store, the registry or the scope lookup.
+    clearLogs(h)
+    const steered = seen('SR-02 GET closed query', await readSettings(h, WORKBENCH_ADMIN, { query: { tenantId: TENANT, projectNo: PROJECT } }))
+    assert.equal(steered.statusCode, 400, JSON.stringify(steered.body))
+    assert.equal(steered.body.error.code, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID')
+    assert.equal(steered.body.error.details.field, 'projectNo')
+    assertNoIo(h, 'GET with a key outside the query allowlist')
   } finally { h.restore() }
 })
 
@@ -541,6 +553,58 @@ test('SR-06 atomicity (C8): a failing audit insert rolls the setting back; no ap
       assert.equal(ledgerSheet(h, sheetId).version, 0)
       assert.deepEqual(auditRows(h), [])
     } finally { h.restore() }
+  }
+  {
+    // THE AUDITED BELT: a store that commits its write WITHOUT handing over its in-transaction audit row (a store
+    // regression; here a wrapper that drops `auditWithin`) => 500 AUDIT_STORE_UNAVAILABLE on both writes. The belt
+    // reports the defect loudly; it cannot roll back what the store already committed.
+    const h = mount({
+      wrapStore: (ledger) => Object.freeze({
+        ...ledger,
+        writeTenantSettings: (input) => ledger.writeTenantSettings({ ...input, auditWithin: null }),
+        setSheetSettings: (input) => ledger.setSheetSettings({ ...input, auditWithin: null }),
+      }),
+    })
+    try {
+      const { sheetId } = h.seedRegistryRow(PROJECT)
+      seedLedger(h, { sheetId })
+      const tenantRes = seen('SR-06 belt tenant', await setTenant(h, WORKBENCH_ADMIN, { expectedVersion: 0, labelFormat: 'ordinal' }))
+      assert.equal(tenantRes.statusCode, 500, JSON.stringify(tenantRes.body))
+      assert.equal(tenantRes.body.error.code, SETTINGS.AUDIT_STORE_UNAVAILABLE_CODE)
+      assert.equal(tenantRes.body.error.code, 'AUDIT_STORE_UNAVAILABLE')
+      const sheetRes = seen('SR-06 belt sheet', await setSheet(h, WORKBENCH_ADMIN, { confirmProjectNo: PROJECT, expectedVersion: 0, labelFormat: 'ordinal' }))
+      assert.equal(sheetRes.statusCode, 500, JSON.stringify(sheetRes.body))
+      assert.equal(sheetRes.body.error.code, 'AUDIT_STORE_UNAVAILABLE')
+      assert.deepEqual(auditRows(h), [], 'the store skipped its audit row')
+      const settingsRows = h.ledgerDb.rows(kit.T.settings)
+      assert.equal(settingsRows.length, 1)
+      assert.equal(settingsRows[0].label_format, 'ordinal', 'the tenant write committed: the belt reports, it cannot roll back')
+      assert.equal(settingsRows[0].version, 1)
+      assert.equal(ledgerSheet(h, sheetId).label_format, 'ordinal', 'the sheet edit committed too')
+      assert.equal(ledgerSheet(h, sheetId).version, 1)
+    } finally { h.restore() }
+  }
+  {
+    // THE ADAPTER'S MODE CHECK: an entry of a mode that does not belong to this write is refused BEFORE appendWithin.
+    const modes = ST.PULL_BATCH_STORE_AUDIT.modes
+    const appended = []
+    const audit = { appendWithin: async (_trx, entry) => { appended.push(entry) } }
+    const refused = (error) => Boolean(error) && error.status === 500 && error.code === SETTINGS.AUDIT_STORE_UNAVAILABLE_CODE
+    const tenantAdapter = SETTINGS.pullBatchSettingsAuditWithin({ audit, tenantId: TENANT, actor: WORKBENCH_ADMIN.id })
+    await assert.rejects(tenantAdapter({}, { mode: modes.sheetSettingsUpdated, subjectId: 'sheet_syn', detail: { version: 1 } }), refused, 'the tenant adapter refuses the sheet mode')
+    await assert.rejects(tenantAdapter({}, { mode: modes.installAborted, subjectId: 'sheet_syn', detail: { version: 1 } }), refused, 'the tenant adapter refuses the abort mode')
+    const sheetAdapter = SETTINGS.pullBatchSettingsAuditWithin({ audit, tenantId: TENANT, actor: WORKBENCH_ADMIN.id, projectNo: PROJECT })
+    await assert.rejects(sheetAdapter({}, { mode: modes.tenantSettingsUpdated, subjectId: null, detail: { version: 1 } }), refused, 'the sheet adapter refuses the tenant mode')
+    await assert.rejects(sheetAdapter({}, { mode: modes.installAborted, subjectId: 'sheet_syn', detail: { version: 1 } }), refused, 'the sheet adapter refuses the abort mode')
+    assert.deepEqual(appended, [], 'appendWithin is never called for a foreign mode')
+    assert.equal(tenantAdapter.appended, false)
+    assert.equal(sheetAdapter.appended, false)
+    // Control: each adapter's own mode passes through and marks the adapter.
+    await tenantAdapter({}, { mode: modes.tenantSettingsUpdated, subjectId: null, detail: { version: 1 } })
+    await sheetAdapter({}, { mode: modes.sheetSettingsUpdated, subjectId: 'sheet_syn', detail: { version: 1 } })
+    assert.deepEqual(appended.map((entry) => [entry.mode, entry.projectId]), [[modes.tenantSettingsUpdated, null], [modes.sheetSettingsUpdated, PROJECT]])
+    assert.equal(tenantAdapter.appended, true)
+    assert.equal(sheetAdapter.appended, true)
   }
 })
 
