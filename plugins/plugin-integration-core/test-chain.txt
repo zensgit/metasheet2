@@ -151,6 +151,11 @@ node __tests__/customer-dictionary-leak-guard.test.cjs
 node __tests__/source-vendor-presets.test.cjs
 node __tests__/stock-preparation-carry-policy.test.cjs
 node __tests__/stock-preparation-pull-batch.test.cjs
+node __tests__/stock-preparation-pull-batch-store.test.cjs
+node __tests__/stock-preparation-pull-batch-portability.test.cjs
+node __tests__/stock-preparation-pull-batch-band.test.cjs
+node __tests__/stock-preparation-pull-batch-vocabulary-migration.test.cjs
+node __tests__/stock-preparation-project-write-lock-holder-within.test.cjs
 node __tests__/stock-preparation-carry-plan-wiring.test.cjs
 node __tests__/stock-preparation-carry-ledger.test.cjs
 node __tests__/stock-preparation-carry-confirm.test.cjs

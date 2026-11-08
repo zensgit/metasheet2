@@ -21,6 +21,7 @@ import { defineStockPreparationProjectWriteLockRealDbCases } from './stock-prepa
 import { defineStockPreparationGenericWriterGovernanceRealDbCases } from './stock-preparation-generic-writer-governance-realdb.cases'
 import { defineStockPreparationManualRowsRealDbCases } from './stock-preparation-manual-rows-realdb.cases'
 import { defineStockPreparationSheetCensusRealDbCases } from './stock-preparation-sheet-census-realdb.cases'
+import { defineStockPreparationPullBatchRealDbCases } from './stock-preparation-pull-batch-realdb.cases'
 import { defineStockPreparationPullBatchSiteProbeRealDbCases } from './stock-preparation-pull-batch-site-probe-realdb.cases'
 import { defineMultitablePluginViewLandingRealDbCases } from './multitable-plugin-view-landing-realdb.cases'
 import { defineStockPreparationPullBatchBandRealDbCases } from './stock-preparation-pull-batch-band-realdb.cases'
@@ -512,6 +513,9 @@ defineStockPreparationGenericWriterGovernanceRealDbCases()
 defineStockPreparationManualRowsRealDbCases()
 // Batch-refresh step 6d-1a (S6-0): the R-line doubled-sheet census pack runs on real PG with parity to the pure module (S9D-02/03).
 defineStockPreparationSheetCensusRealDbCases()
+// 批次标识 BI-1a (register R-65): migration 105 and the pull-batch ledger store on real PG — CHECK vocabulary, allocation
+// races, the zombie holder after a takeover, the settings lock and its C7 release (BI-R*).
+defineStockPreparationPullBatchRealDbCases()
 // Pull batch BI-6a (O-BI-9): the read-only site probe pack runs on real PG on synthetic sheets (BI-PROBE-RD-01/02).
 defineStockPreparationPullBatchSiteProbeRealDbCases()
 // 批次标识 BI-5: the plugin view landing promotion and the values-free sheet layout read on real PG (BI5-RD-*).
