@@ -2,7 +2,8 @@
 
 // YiDa 发料确认日期回写 core (slice Y9a; design baseline v2.3 §7.3, frozen ⑦.4 plan §2.2 / §3).
 // Module-level tests with doubles: no PostgreSQL, no multitable host, no DingTalk / YiDa. The real-PG
-// versions of the crash tests (and the send-port hook, the owner route, the runtime wiring) are slice Y9.
+// versions of the crash tests (and the post-ACK hook in the host owner runtime, the owner route, the runtime
+// wiring) are slice Y9.
 //
 // The doubles model exactly what the module relies on:
 //   * the trace table: PRIMARY KEY (ledger_id) — a plain INSERT of a taken key throws 23505, the

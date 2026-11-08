@@ -601,7 +601,7 @@ function yidaOwnerRuntimeWarn(code: string): void {
 }
 
 // Host-owned RC transaction; never the plugin's row-only wrapper or request ALS.
-const yidaOwnerTransaction:YidaOwnerRuntimeDependencies['database']['transaction'] = work =>
+const yidaOwnerTransaction: YidaOwnerRuntimeDependencies['database']['transaction'] = work =>
   poolManager.get().transaction(async ({ query }) => {
     await query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     const transaction: TransactionalQueryable = {

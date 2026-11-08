@@ -1,8 +1,8 @@
 // YiDa 发料确认日期回写 — the WIRING on a real PostgreSQL (design baseline v2.3 §7.3 and B.4, frozen ⑦.4 plan §2.2;
 // slice Y9 on top of the Y9a core). Everything below is the production composition, driven in-process:
 //   host owner runtime (yida-owner-runtime.ts) + the REAL plugin runtime factory, send port, runner, token client and form
-//   transport + the real core authority with the real D21 re-authorization + the Y9 wiring (the post-ACK hook in the send
-//   port, the owner recovery entry, the plugin ports of yida-issue-confirm-writeback-ports.mjs, the host live re-check)
+//   transport + the real core authority with the real D21 re-authorization + the Y9 wiring (the post-ACK hook in the host
+//   owner runtime, the owner recovery entry, the plugin ports of yida-issue-confirm-writeback-ports.mjs, the host live re-check)
 //   + the real plugin stores (draft, target, material, delivery ledger, project registry, sheet write lease, trace)
 //   + the host's own multitable records functions (queryRecords / patchRecord + the plugin write fence), wired exactly as
 //   packages/core-backend/src/index.ts wires `records` for a plugin (plugin-scope's ownership wall is not part of it).

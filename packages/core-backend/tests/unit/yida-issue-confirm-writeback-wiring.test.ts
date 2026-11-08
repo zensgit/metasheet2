@@ -211,21 +211,25 @@ function deferred(): Deferred {
   return { promise, release }
 }
 const pause = (ms: number) => new Promise<'PAUSED'>(resolve => setTimeout(() => resolve('PAUSED'), ms))
-function hookFixture(options: { run?: (input: unknown) => Promise<unknown>; response?: () => unknown; capability?: boolean } = {}) {
+function hookFixture(options: { run?: (input: unknown) => Promise<unknown>; response?: () => unknown; capability?: boolean; offAfterReceipt?: boolean } = {}) {
   const calls = { runs: [] as unknown[], contexts: [] as unknown[], warnings: [] as string[], settledAtRunStart: [] as boolean[], sends: 0 }
-  const state = { sendSettled: false }
+  const state = { sendSettled: false, enablement: 'true' }
   const runtime = createYidaOwnerRuntime({
     database: { async transaction() { throw new Error('SYNTHETIC_DATABASE_UNAVAILABLE') } },
     security: { async encrypt() { throw new Error('NO') }, async decrypt() { throw new Error('NO') } },
     fetch: (() => { throw new Error('NO_NETWORK') }) as unknown as typeof fetch,
-    readEnablement: () => 'true',
+    readEnablement: () => state.enablement,
     issueConfirmRecheck: async () => true,
     warn: code => { calls.warnings.push(code) },
   })
   const primitives = Object.fromEntries(PRIMITIVE_KEYS.map(key => [key, () => { throw new Error('NO_PRIMITIVE_IO') }]))
   const binding = {
     createPrimitives: () => primitives,
-    createSendPort: () => ({ async submit() { calls.sends++; return options.response ? options.response() : sendResponse() } }),
+    createSendPort: () => ({ async submit() {
+      calls.sends++
+      if (options.offAfterReceipt) state.enablement = 'false'
+      return options.response ? options.response() : sendResponse()
+    } }),
     ...(options.capability === false ? {} : {
       createIssueConfirmWriteback: (input: { context: unknown }) => {
         calls.contexts.push(input.context)
@@ -243,7 +247,7 @@ function hookFixture(options: { run?: (input: unknown) => Promise<unknown>; resp
     pending.then(() => { state.sendSettled = true }, () => { state.sendSettled = true })
     return pending
   }
-  return { runtime, binding, calls, send }
+  return { runtime, binding, calls, send, state }
 }
 async function until(predicate: () => boolean, ms = 2000) {
   const deadline = Date.now() + ms
@@ -290,6 +294,20 @@ describe('owner runtime: the post-ACK write-back is a tracked run AFTER submit r
       expect(f.calls.warnings).toEqual(['YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED'])
       await f.runtime.stop()
     }
+  })
+  it('scheduled on either settlement, independent of the send switch: OFF after the receipt rejects the send, the run still runs once', async () => {
+    // T-level default (Y9 r2 L-e): the acknowledgement is durable even when the send run's exit refuses to expose it.
+    // The switch flips OFF after the receipt and stays OFF while the post-ACK run is scheduled and runs.
+    const f = hookFixture({ offAfterReceipt: true })
+    await f.runtime.createPluginCapability().activate(f.binding as never)
+    await expect(f.send()).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' })
+    await until(() => f.calls.runs.length === 1)
+    expect(f.calls.settledAtRunStart).toEqual([true])
+    expect(f.calls.runs).toEqual([{ ledgerIds: [LEDGER] }])
+    await pause(30)
+    expect([f.calls.runs.length, f.calls.warnings]).toEqual([1, []])
+    expect(f.state.enablement).toBe('false')
+    await f.runtime.stop()
   })
   it('a hanging hook delays nothing but stop(): stop() waits for the in-flight hook within the barrier, then resolves', async () => {
     const gate = deferred()
